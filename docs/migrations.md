@@ -268,7 +268,10 @@ SQLite runs without Docker. PostgreSQL and MySQL use Atlas dev-database Docker
 URLs, so Docker must be available when generating those migrations.
 
 Apply/status convert the configured GORM DSN into an Atlas `--url` for the
-same three drivers.
+same three drivers. Libpq keyword/value DSNs with a slash-prefixed `host`
+become a unix-socket URI (`postgres://user@/dbname?host=/path/to/sockets`);
+IPv6 hosts are bracketed (`[::1]:5432`). SQLite `file:///abs/path` maps to
+`sqlite:///abs/path` (three slashes), not four.
 
 ## Model Registration
 

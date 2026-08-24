@@ -27,6 +27,9 @@ version.
 
 ### Fixed
 
+- `AtlasURL` now converts Postgres unix-socket and IPv6 libpq DSNs, and
+  SQLite `file:///abs` URIs, into Atlas `--url` values that parse
+  ([#135](https://github.com/gombit-dev/gombit/issues/135)).
 - **Scaffolded apps now build with no manual steps.** `gombit new` wrote
   `require github.com/gombit-dev/gombit v0.0.0` — a version that
   has never existed on the module proxy — so `go build ./...` in a fresh tree

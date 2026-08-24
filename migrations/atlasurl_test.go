@@ -22,6 +22,22 @@ func TestAtlasURL(t *testing.T) {
 			want: "sqlite://gombit.db?cache=shared&_fk=1",
 		},
 		{
+			name: "sqlite file absolute uri",
+			cfg: config.DatabaseConfig{
+				Driver: config.DatabaseDriverSQLite,
+				DSN:    "file:///tmp/gombit.db",
+			},
+			want: "sqlite:///tmp/gombit.db",
+		},
+		{
+			name: "sqlite file absolute uri with query",
+			cfg: config.DatabaseConfig{
+				Driver: config.DatabaseDriverSQLite,
+				DSN:    "file:///tmp/gombit.db?cache=shared&_fk=1",
+			},
+			want: "sqlite:///tmp/gombit.db?cache=shared&_fk=1",
+		},
+		{
 			name: "sqlite already atlas",
 			cfg: config.DatabaseConfig{
 				Driver: config.DatabaseDriverSQLite,
@@ -44,6 +60,22 @@ func TestAtlasURL(t *testing.T) {
 				DSN:    "host=localhost user=gombit password=secret dbname=app sslmode=disable", // #nosec G101 -- fake local test DSN.
 			},
 			want: "postgres://gombit:secret@localhost:5432/app?sslmode=disable", // #nosec G101 -- fake local test DSN.
+		},
+		{
+			name: "postgres unix socket",
+			cfg: config.DatabaseConfig{
+				Driver: config.DatabaseDriverPostgres,
+				DSN:    "host=/var/run/postgresql user=gombit dbname=app",
+			},
+			want: "postgres://gombit@/app?host=%2Fvar%2Frun%2Fpostgresql&port=5432",
+		},
+		{
+			name: "postgres ipv6",
+			cfg: config.DatabaseConfig{
+				Driver: config.DatabaseDriverPostgres,
+				DSN:    "host=::1 user=gombit dbname=app sslmode=disable",
+			},
+			want: "postgres://gombit@[::1]:5432/app?sslmode=disable",
 		},
 		{
 			name: "mysql tcp",

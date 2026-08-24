@@ -2,6 +2,7 @@ package migrations
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"regexp"
 	"strings"
@@ -30,14 +31,22 @@ func AtlasURL(cfg config.DatabaseConfig) (string, error) {
 }
 
 func sqliteAtlasURL(dsn string) (string, error) {
-	switch {
-	case strings.HasPrefix(dsn, "sqlite://"):
+	if strings.HasPrefix(dsn, "sqlite://") {
 		return dsn, nil
-	case strings.HasPrefix(dsn, "file:"):
-		rest := strings.TrimPrefix(dsn, "file:")
-		return "sqlite://" + rest, nil
+	}
+	path, query, hasQuery := strings.Cut(dsn, "?")
+	suffix := ""
+	if hasQuery {
+		suffix = "?" + query
+	}
+	switch {
+	case strings.HasPrefix(path, "file:///"):
+		// file:///tmp/app.db → sqlite:///tmp/app.db (three slashes, #135).
+		return "sqlite://" + strings.TrimPrefix(path, "file://") + suffix, nil
+	case strings.HasPrefix(path, "file:"):
+		return "sqlite://" + strings.TrimPrefix(path, "file:") + suffix, nil
 	default:
-		return "sqlite://" + dsn, nil
+		return "sqlite://" + path + suffix, nil
 	}
 }
 
@@ -76,18 +85,6 @@ func postgresKeyValueURL(dsn string) (string, error) {
 		return "", fmt.Errorf("migrations: postgres DSN missing dbname")
 	}
 
-	u := &url.URL{
-		Scheme: "postgres",
-		Host:   host + ":" + port,
-		Path:   "/" + dbname,
-	}
-	if user != "" {
-		if password != "" {
-			u.User = url.UserPassword(user, password)
-		} else {
-			u.User = url.User(user)
-		}
-	}
 	query := url.Values{}
 	for key, value := range values {
 		switch key {
@@ -97,8 +94,39 @@ func postgresKeyValueURL(dsn string) (string, error) {
 			query.Set(key, value)
 		}
 	}
+
+	u := &url.URL{
+		Scheme: "postgres",
+		Path:   "/" + dbname,
+	}
+	if user != "" {
+		if password != "" {
+			u.User = url.UserPassword(user, password)
+		} else {
+			u.User = url.User(user)
+		}
+	}
+	if isPostgresUnixSocket(host) {
+		// libpq URI form: empty host, socket directory in the host query
+		// parameter (postgres://user@/dbname?host=/var/run/postgresql).
+		query.Set("host", host)
+		query.Set("port", port)
+	} else {
+		u.Host = net.JoinHostPort(unbracketHost(host), port)
+	}
 	u.RawQuery = query.Encode()
 	return u.String(), nil
+}
+
+func isPostgresUnixSocket(host string) bool {
+	return strings.HasPrefix(host, "/")
+}
+
+func unbracketHost(host string) string {
+	if len(host) >= 2 && host[0] == '[' && host[len(host)-1] == ']' {
+		return host[1 : len(host)-1]
+	}
+	return host
 }
 
 func mysqlAtlasURL(dsn string) (string, error) {
