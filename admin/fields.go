@@ -88,8 +88,9 @@ func FieldsFrom(model any) ([]Field, error) {
 			Name: relationFieldName(rel.Field),
 			Type: TypeRelation,
 			Related: &Relation{
-				Kind: RelManyToMany,
-				Slug: rel.FieldSchema.Table,
+				Kind:       RelManyToMany,
+				Slug:       rel.FieldSchema.Table,
+				LabelField: labelFieldFor(rel.FieldSchema),
 			},
 		})
 	}

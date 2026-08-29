@@ -1,12 +1,33 @@
-# Admin example (ADMIN-1 through ADMIN-3)
+# Admin example (ADMIN-1 through ADMIN-3, relationships #223)
 
 Minimal `framework.App` with `Config.Auth.Mode = config.AuthModeCookie`,
-SQLite, and an explicit `admin.Register` of a small `widget.Widget` model.
-`framework.New` mounts empty admin Huma routes and the framework-owned
-SPA under `/admin/` in cookie mode; this example registers one model from
-the feature package. JWT-only apps do not get these routes.
+SQLite, and `admin.Register` of a `widget.Widget` model plus its relation
+targets (`warehouse.Warehouse`, `part.Part`). `framework.New` mounts empty
+admin Huma routes and the framework-owned SPA under `/admin/` in cookie mode;
+this example registers three models from their feature packages. JWT-only apps
+do not get these routes.
 
-See [`docs/admin.md`](../../docs/admin.md) and
+## Relationships (#223)
+
+`Widget` carries all three relation kinds, and its `RegisterAdmin` leaves
+`Fields` empty so `admin.FieldsFrom` derives them from the GORM model — no
+per-field wiring:
+
+- **belongs_to** — `WarehouseID` + `Warehouse` derive to a `warehouse_id`
+  picker backed by the `warehouses` list, labelled by `name`.
+- **many_to_many** — `Warehouses []warehouse.Warehouse`
+  (`many2many:widget_warehouses`) derives to a multi-select; a write syncs the
+  join table in the same transaction as the row.
+- **has_many** — `Parts []part.Part` derives to a **read-only** view of the
+  children's ids (`Part` carries the `widget_id` back-reference). A write to it
+  is rejected.
+
+`Part.widget_id` is a plain integer, not a picker: `Part` cannot hold a
+`Widget` association without an import cycle, which is the same constraint
+`gombit make resource ... has_many:Part` documents.
+
+See [`docs/admin.md`](../../docs/admin.md),
+[`docs/cli.md`](../../docs/cli.md) (relation grammar), and
 [ADR-013](../../docs/adr/013-runtime-generic-admin.md).
 
 ## Run

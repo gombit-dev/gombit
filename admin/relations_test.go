@@ -661,4 +661,9 @@ func TestManyToManyAutoDerivation(t *testing.T) {
 	if found.Related.Slug != "warehouses" {
 		t.Fatalf("warehouses slug = %q, want warehouses (related table)", found.Related.Slug)
 	}
+	// The multi-select needs a human label, like belongs_to and has_many — not a
+	// blank that renders raw ids.
+	if found.Related.LabelField != "name" {
+		t.Fatalf("warehouses label_field = %q, want name (auto-derived, consistent with belongs_to/has_many)", found.Related.LabelField)
+	}
 }
