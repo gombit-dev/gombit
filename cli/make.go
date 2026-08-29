@@ -64,9 +64,13 @@ Relations use name:kind:Target, where Target is a model in internal/<target>/:
                                   child (Part) must carry the RentalID FK.
   warehouses:many_to_many:Warehouse  join table + Warehouses association.
 
-The generated CRUD handler stays thin: belongs_to is exposed as its FK; a
-many_to_many / has_many is generated on the model (and picked up by the admin's
-relation widgets), not in the REST handler.
+The generated CRUD handler stays thin: belongs_to is exposed as its FK;
+many_to_many / has_many are generated on the model, not in the REST handler.
+The admin picks them up — many_to_many is editable through a relation widget,
+has_many is shown read-only. A belongs_to may target the resource itself
+(a self-referential FK, e.g. a tree parent); a self-referential
+has_many / many_to_many is rejected (it needs join/foreign keys the generator
+does not emit).
 
 Examples:
 

@@ -369,10 +369,18 @@ added (portable across SQLite/PostgreSQL/MySQL).
 `internal/<target>/` (imported as `target.Target`). `belongs_to` generates the
 foreign key (`EngineID uint`) plus the association and exposes `engine_id` in
 the REST DTO; `has_many` and `many_to_many` generate the association on the model
-(the join table for m2m) and are edited through the admin's relation widgets, not
-the thin REST handler. A `has_many` child model must carry the parent foreign
-key itself (e.g. `RentalID`); the generator does not edit the child (that would
-be an import cycle).
+(the join table for m2m), not in the thin REST handler. In the admin,
+`many_to_many` is editable through a relation widget and `has_many` is shown
+read-only. A `has_many` child model must carry the parent foreign key itself
+(e.g. `RentalID`); the generator does not edit the child (that would be an
+import cycle).
+
+A `belongs_to` may target the resource itself — a self-referential foreign key,
+e.g. `parent:belongs_to:Category` on `Category`, which renders the local pointer
+type (`Parent *Category`, avoiding an invalid recursive struct) and imports
+nothing. A self-referential `has_many` /
+`many_to_many` is rejected at parse time: it needs explicit join / foreign keys
+this generator does not emit.
 
 Example:
 

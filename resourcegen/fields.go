@@ -33,8 +33,10 @@ type Field struct {
 
 // parseRelationField builds a belongs_to / has_many / many_to_many field from
 // its target model. The target is a PascalCase model living in
-// internal/<target>/ (imported as <target>.<Target>).
-func parseRelationField(name, jsonName, goName string, kind FieldType, target string) (Field, error) {
+// internal/<target>/ (imported as <target>.<Target>), or the resource itself
+// for a self-referential belongs_to. resourcePkg is the package being
+// generated, used to detect same-package targets.
+func parseRelationField(name, jsonName, goName string, kind FieldType, target, resourcePkg string) (Field, error) {
 	target = strings.TrimSpace(target)
 	if target == "" {
 		return Field{}, fmt.Errorf("resourcegen: relation field %q is missing a target model", name)
@@ -50,6 +52,13 @@ func parseRelationField(name, jsonName, goName string, kind FieldType, target st
 	if _, kw := goKeywords[targetPkg]; kw {
 		return Field{}, fmt.Errorf("resourcegen: relation target %q maps to Go keyword %q", target, targetPkg)
 	}
+	// A same-package target is legal only for belongs_to (a self-referential FK,
+	// e.g. a tree parent). has_many / many_to_many onto the same model need
+	// explicit join / foreign keys that this generator does not emit, so refuse
+	// rather than write Go that fails to migrate.
+	if targetPkg == resourcePkg && kind != FieldBelongsTo {
+		return Field{}, fmt.Errorf("resourcegen: %s relation %q cannot target the resource itself (self-referential %s needs explicit join/foreign keys; only belongs_to self-references are supported)", strings.ToLower(string(kind)), name, strings.ToLower(string(kind)))
+	}
 	f := Field{
 		Name:      name,
 		JSONName:  jsonName,
@@ -58,13 +67,39 @@ func parseRelationField(name, jsonName, goName string, kind FieldType, target st
 		Target:    targetType,
 		TargetPkg: targetPkg,
 	}
+	// A self-referential belongs_to uses the local type name and imports nothing;
+	// a cross-package target is qualified as <pkg>.<Type>.
+	selfRef := targetPkg == resourcePkg
+	qualified := targetPkg + "." + targetType
+	if selfRef {
+		qualified = targetType
+	}
 	switch kind {
 	case FieldBelongsTo:
-		f.GoType = targetPkg + "." + targetType // the association struct field
+		// A self-referential association must be a pointer: an embedded value of
+		// the same struct is an invalid recursive type. A cross-package target is
+		// a distinct struct, so it stays a value.
+		if selfRef {
+			f.GoType = "*" + qualified
+		} else {
+			f.GoType = qualified
+		}
 	case FieldHasMany, FieldManyToMany:
-		f.GoType = "[]" + targetPkg + "." + targetType
+		f.GoType = "[]" + qualified
 	}
 	return f, nil
+}
+
+// reservedJSONKeys returns the lowercased JSON identifiers this field claims in
+// the generated output, used for duplicate detection. A belongs_to occupies both
+// its own name (the association Go field) and its synthesized foreign key
+// (<name>_id), so both must be reserved — otherwise engine:belongs_to:Engine
+// plus engine_id:uint would emit the EngineID field twice.
+func (f Field) reservedJSONKeys() []string {
+	if f.Type == FieldBelongsTo {
+		return []string{f.JSONName, f.fkJSONName()}
+	}
+	return []string{f.JSONName}
 }
 
 // fkGoName / fkJSONName are the foreign-key field names for a belongs_to (the
@@ -110,7 +145,8 @@ func (f Field) joinTable(resourcePkg string) string { return resourcePkg + "_" +
 
 // dtoFields projects the fields as they appear in the generated handler DTO and
 // frontend: belongs_to becomes its uint foreign key; many_to_many / has_many are
-// dropped (model-only, edited through the admin).
+// dropped from the REST DTO (model-only — many_to_many is edited and has_many is
+// shown read-only through the admin).
 func dtoFields(fields []Field) []Field {
 	out := make([]Field, 0, len(fields))
 	for _, f := range fields {
@@ -144,7 +180,8 @@ func (f Field) isRelation() bool {
 
 // inDTO reports whether the field appears in the generated handler DTO. The thin
 // generated CRUD exposes belongs_to as its foreign key; many_to_many / has_many
-// are model-only (edited through the admin), not in the REST DTO.
+// are model-only — not in the REST DTO — with many_to_many edited and has_many
+// shown read-only through the admin.
 func (f Field) inDTO() bool {
 	return !f.isRelation() || f.Type == FieldBelongsTo
 }
@@ -184,25 +221,30 @@ var supportedTypes = []FieldType{
 // decimalGoType is the fully qualified generated Go type for a decimal field.
 const decimalGoType = "types.Decimal"
 
-func parseFields(specs []string) ([]Field, error) {
+func parseFields(specs []string, resourcePkg string) ([]Field, error) {
 	seen := make(map[string]struct{}, len(specs))
 	fields := make([]Field, 0, len(specs))
 	for _, spec := range specs {
-		field, err := parseField(spec)
+		field, err := parseField(spec, resourcePkg)
 		if err != nil {
 			return nil, err
 		}
-		key := strings.ToLower(field.JSONName)
-		if _, ok := seen[key]; ok {
-			return nil, fmt.Errorf("resourcegen: duplicate field %q", field.JSONName)
+		// Duplicate detection covers every JSON identifier the field emits, not
+		// just its grammar token: a belongs_to also claims its <name>_id foreign
+		// key (see reservedJSONKeys).
+		for _, key := range field.reservedJSONKeys() {
+			key = strings.ToLower(key)
+			if _, ok := seen[key]; ok {
+				return nil, fmt.Errorf("resourcegen: duplicate field %q", key)
+			}
+			seen[key] = struct{}{}
 		}
-		seen[key] = struct{}{}
 		fields = append(fields, field)
 	}
 	return fields, nil
 }
 
-func parseField(spec string) (Field, error) {
+func parseField(spec, resourcePkg string) (Field, error) {
 	spec = strings.TrimSpace(spec)
 	if spec == "" {
 		return Field{}, fmt.Errorf("resourcegen: empty field spec")
@@ -235,7 +277,7 @@ func parseField(spec string) (Field, error) {
 		if len(parts) != 3 {
 			return Field{}, fmt.Errorf("resourcegen: relation field %q must be name:%s:Target", spec, strings.ToLower(typeToken))
 		}
-		return parseRelationField(name, jsonName, goName, FieldType(strings.ToLower(typeToken)), parts[2])
+		return parseRelationField(name, jsonName, goName, FieldType(strings.ToLower(typeToken)), parts[2], resourcePkg)
 	}
 
 	field := Field{

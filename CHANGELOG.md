@@ -18,8 +18,12 @@ version.
   `name:many_to_many:Target` generate the foreign key / association on the model
   (and the `many2many:` join table), importing the target feature-package. The
   thin CRUD handler exposes `belongs_to` as its foreign key (`engine_id`);
-  `has_many` / `many_to_many` are model-only and edited through the admin's
-  relation widgets. A `has_many` child must carry the parent foreign key itself.
+  `has_many` / `many_to_many` are model-only — in the admin, `many_to_many` is
+  editable and `has_many` is shown read-only. A `has_many` child must carry the
+  parent foreign key itself. A `belongs_to` may be self-referential (a tree
+  parent), rendering the local type with no self-import; a self-referential
+  `has_many` / `many_to_many` is rejected, as is a `belongs_to` whose synthesized
+  `<name>_id` foreign key collides with another field.
 - Admin read-only `has_many` view
   ([#223](https://github.com/gombit-dev/gombit/issues/223)): a `has_many`
   association now auto-derives to a read-only relation field — list/detail

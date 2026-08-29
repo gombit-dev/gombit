@@ -37,7 +37,7 @@ func Generate(ctx context.Context, opts Options) error {
 	if err := checkHTTPPathConflict(opts.WorkDir, name); err != nil {
 		return err
 	}
-	fields, err := parseFields(opts.Fields)
+	fields, err := parseFields(opts.Fields, name.Package)
 	if err != nil {
 		return err
 	}
