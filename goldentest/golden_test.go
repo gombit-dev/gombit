@@ -216,6 +216,43 @@ func TestMakeResourceScalarTypesCompiles(t *testing.T) {
 	})
 }
 
+// TestMakeResourceRelationsCompiles exercises the #222(b) relation grammar end
+// to end: it generates the target models, then a resource with belongs_to /
+// has_many / many_to_many fields, and compiles the app (the generated model
+// imports the target feature-packages and references their types).
+func TestMakeResourceRelationsCompiles(t *testing.T) {
+	appDir := scaffoldDemo(t)
+	gen := func(name string, fields ...string) {
+		t.Helper()
+		stdout := new(bytes.Buffer)
+		if err := resourcegen.Generate(context.Background(), resourcegen.Options{
+			WorkDir:  appDir,
+			Name:     name,
+			Fields:   fields,
+			AtlasBin: missingAtlas,
+			Stdout:   stdout,
+			Stderr:   io.Discard,
+		}); err != nil {
+			t.Fatalf("gombit make resource %s: %v\nstdout=%s", name, err, stdout.String())
+		}
+	}
+	// Target models first, so the relation imports resolve.
+	gen("Engine", "name:string:required")
+	gen("Warehouse", "name:string:required")
+	// The has_many child carries the back-reference FK as a plain column (no
+	// import, so no cycle): rental_id -> RentalID, which GORM's has_many uses.
+	gen("Part", "name:string:required", "rental_id:uint")
+	gen("Rental",
+		"price:decimal:required",
+		"engine:belongs_to:Engine",
+		"parts:has_many:Part",
+		"warehouses:many_to_many:Warehouse",
+	)
+	t.Run("compile", func(t *testing.T) {
+		compileBackend(t, appDir)
+	})
+}
+
 func TestMakeCommandGolden(t *testing.T) {
 	appDir := scaffoldDemo(t)
 	stdout := new(bytes.Buffer)

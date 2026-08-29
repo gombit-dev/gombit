@@ -24,6 +24,129 @@ type Field struct {
 	// Precision/Scale set the decimal(p,s) column for FieldDecimal.
 	Precision int
 	Scale     int
+
+	// Target is the related model type (PascalCase) for a relation field, e.g.
+	// "Engine". TargetPkg is its feature-package name (snake), e.g. "engine".
+	Target    string
+	TargetPkg string
+}
+
+// parseRelationField builds a belongs_to / has_many / many_to_many field from
+// its target model. The target is a PascalCase model living in
+// internal/<target>/ (imported as <target>.<Target>).
+func parseRelationField(name, jsonName, goName string, kind FieldType, target string) (Field, error) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return Field{}, fmt.Errorf("resourcegen: relation field %q is missing a target model", name)
+	}
+	targetType := toPascal(target)
+	if !isExportedIdent(targetType) {
+		return Field{}, fmt.Errorf("resourcegen: relation target %q is not a valid exported Go type", target)
+	}
+	targetPkg := toSnake(targetType)
+	if _, reserved := reservedPackages[targetPkg]; reserved {
+		return Field{}, fmt.Errorf("resourcegen: relation target %q maps to reserved package %q", target, targetPkg)
+	}
+	if _, kw := goKeywords[targetPkg]; kw {
+		return Field{}, fmt.Errorf("resourcegen: relation target %q maps to Go keyword %q", target, targetPkg)
+	}
+	f := Field{
+		Name:      name,
+		JSONName:  jsonName,
+		GoName:    goName,
+		Type:      kind,
+		Target:    targetType,
+		TargetPkg: targetPkg,
+	}
+	switch kind {
+	case FieldBelongsTo:
+		f.GoType = targetPkg + "." + targetType // the association struct field
+	case FieldHasMany, FieldManyToMany:
+		f.GoType = "[]" + targetPkg + "." + targetType
+	}
+	return f, nil
+}
+
+// fkGoName / fkJSONName are the foreign-key field names for a belongs_to (the
+// association is GoName, the FK is GoName+ID).
+func (f Field) fkGoName() string   { return f.GoName + "ID" }
+func (f Field) fkJSONName() string { return f.JSONName + "_id" }
+
+// dtoGoName / dtoGoType / dtoJSONName name the field as it appears in the
+// generated handler DTO. A belongs_to is exposed as its uint foreign key; other
+// fields keep their own names. (m2m / has_many are excluded from the DTO via
+// inDTO and never reach these.)
+func (f Field) dtoGoName() string {
+	if f.Type == FieldBelongsTo {
+		return f.fkGoName()
+	}
+	return f.GoName
+}
+
+func (f Field) dtoGoType() string {
+	if f.Type == FieldBelongsTo {
+		return "uint"
+	}
+	return f.GoType
+}
+
+func (f Field) dtoJSONName() string {
+	if f.Type == FieldBelongsTo {
+		return f.fkJSONName()
+	}
+	return f.JSONName
+}
+
+// dtoHumaTags is the Huma struct tag for the DTO create-input field.
+func (f Field) dtoHumaTags() string {
+	if f.Type == FieldBelongsTo {
+		return fmt.Sprintf(`json:"%s" minimum:"0" doc:"%s"`, f.fkJSONName(), f.fkGoName())
+	}
+	return f.humaTags()
+}
+
+// joinTable is the many2many join-table name for a relation on resourcePkg.
+func (f Field) joinTable(resourcePkg string) string { return resourcePkg + "_" + f.JSONName }
+
+// dtoFields projects the fields as they appear in the generated handler DTO and
+// frontend: belongs_to becomes its uint foreign key; many_to_many / has_many are
+// dropped (model-only, edited through the admin).
+func dtoFields(fields []Field) []Field {
+	out := make([]Field, 0, len(fields))
+	for _, f := range fields {
+		if !f.inDTO() {
+			continue
+		}
+		if f.Type == FieldBelongsTo {
+			out = append(out, Field{
+				Name:     f.fkJSONName(),
+				JSONName: f.fkJSONName(),
+				GoName:   f.fkGoName(),
+				Type:     FieldUint,
+				GoType:   "uint",
+			})
+			continue
+		}
+		out = append(out, f)
+	}
+	return out
+}
+
+// isRelation reports whether the field is a belongs_to / has_many / many_to_many.
+func (f Field) isRelation() bool {
+	switch f.Type {
+	case FieldBelongsTo, FieldHasMany, FieldManyToMany:
+		return true
+	default:
+		return false
+	}
+}
+
+// inDTO reports whether the field appears in the generated handler DTO. The thin
+// generated CRUD exposes belongs_to as its foreign key; many_to_many / has_many
+// are model-only (edited through the admin), not in the REST DTO.
+func (f Field) inDTO() bool {
+	return !f.isRelation() || f.Type == FieldBelongsTo
 }
 
 // FieldType is a supported scalar in the v0.1 subset.
@@ -39,6 +162,10 @@ const (
 	FieldDecimal FieldType = "decimal"
 	FieldTime    FieldType = "time"
 	FieldEnum    FieldType = "enum"
+
+	FieldBelongsTo  FieldType = "belongs_to"
+	FieldHasMany    FieldType = "has_many"
+	FieldManyToMany FieldType = "many_to_many"
 )
 
 // defaultDecimalPrecision / defaultDecimalScale back a bare `decimal` field.
@@ -99,6 +226,16 @@ func parseField(spec string) (Field, error) {
 	}
 	if _, reserved := reservedFields[jsonName]; reserved {
 		return Field{}, fmt.Errorf("resourcegen: field %q conflicts with gorm.Model", jsonName)
+	}
+
+	// Relations (name:kind:Target) use parts[2] as the target model, not
+	// modifiers.
+	switch FieldType(strings.ToLower(typeToken)) {
+	case FieldBelongsTo, FieldHasMany, FieldManyToMany:
+		if len(parts) != 3 {
+			return Field{}, fmt.Errorf("resourcegen: relation field %q must be name:%s:Target", spec, strings.ToLower(typeToken))
+		}
+		return parseRelationField(name, jsonName, goName, FieldType(strings.ToLower(typeToken)), parts[2])
 	}
 
 	field := Field{
@@ -309,10 +446,6 @@ func (f Field) humaTags() string {
 	}
 	parts = append(parts, fmt.Sprintf(`doc:"%s"`, f.GoName))
 	return strings.Join(parts, " ")
-}
-
-func (f Field) jsonTag() string {
-	return fmt.Sprintf(`json:"%s"`, f.JSONName)
 }
 
 // enumColumnSize sizes the varchar column to hold the longest allowed value,

@@ -138,6 +138,47 @@ func TestParseFieldsDuplicate(t *testing.T) {
 	}
 }
 
+func TestParseRelationFields(t *testing.T) {
+	t.Parallel()
+	fields, err := parseFields([]string{
+		"engine:belongs_to:Engine",
+		"parts:has_many:Part",
+		"warehouses:many_to_many:Warehouse",
+	})
+	if err != nil {
+		t.Fatalf("parseFields: %v", err)
+	}
+	want := []struct {
+		name, kind, target, pkg, goType string
+	}{
+		{"engine", string(FieldBelongsTo), "Engine", "engine", "engine.Engine"},
+		{"parts", string(FieldHasMany), "Part", "part", "[]part.Part"},
+		{"warehouses", string(FieldManyToMany), "Warehouse", "warehouse", "[]warehouse.Warehouse"},
+	}
+	for i, w := range want {
+		f := fields[i]
+		if string(f.Type) != w.kind || f.Target != w.target || f.TargetPkg != w.pkg || f.GoType != w.goType {
+			t.Fatalf("field[%d] = %+v, want kind=%s target=%s pkg=%s goType=%s", i, f, w.kind, w.target, w.pkg, w.goType)
+		}
+	}
+	// belongs_to is in the DTO (as its FK); the collection relations are not.
+	if !fields[0].inDTO() || fields[1].inDTO() || fields[2].inDTO() {
+		t.Fatalf("inDTO = %v/%v/%v, want true/false/false", fields[0].inDTO(), fields[1].inDTO(), fields[2].inDTO())
+	}
+	if fields[0].fkGoName() != "EngineID" || fields[0].fkJSONName() != "engine_id" {
+		t.Fatalf("belongs_to FK names = %s/%s, want EngineID/engine_id", fields[0].fkGoName(), fields[0].fkJSONName())
+	}
+}
+
+func TestParseRelationErrors(t *testing.T) {
+	t.Parallel()
+	for _, spec := range []string{"engine:belongs_to", "warehouses:many_to_many:"} {
+		if _, err := parseFields([]string{spec}); err == nil {
+			t.Fatalf("parseFields(%q) error = nil, want a missing-target error", spec)
+		}
+	}
+}
+
 func TestParseEnumFieldDetails(t *testing.T) {
 	t.Parallel()
 	// Enum values are case-sensitive and preserve declared order.

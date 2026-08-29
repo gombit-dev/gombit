@@ -3,6 +3,7 @@ package resourcegen
 import (
 	"fmt"
 	"go/format"
+	"sort"
 	"strings"
 )
 
@@ -69,9 +70,13 @@ func renderFeatureFiles(ctx renderContext) ([]fileSpec, error) {
 		})
 	}
 
+	// The generated frontend (thin CRUD) sees only the DTO fields: belongs_to as
+	// its uint FK, m2m / has_many dropped (edited through the admin).
+	tsxCtx := ctx
+	tsxCtx.Fields = dtoFields(ctx.Fields)
 	files = append(files,
-		fileSpec{relPath: fmt.Sprintf("frontend/src/%s/list.tsx", ctx.Resource.Package), content: []byte(renderListTSX(ctx))},
-		fileSpec{relPath: fmt.Sprintf("frontend/src/%s/form.tsx", ctx.Resource.Package), content: []byte(renderFormTSX(ctx))},
+		fileSpec{relPath: fmt.Sprintf("frontend/src/%s/list.tsx", ctx.Resource.Package), content: []byte(renderListTSX(tsxCtx))},
+		fileSpec{relPath: fmt.Sprintf("frontend/src/%s/form.tsx", ctx.Resource.Package), content: []byte(renderFormTSX(tsxCtx))},
 	)
 	return files, nil
 }
@@ -150,6 +155,7 @@ func renderModel(ctx renderContext) string {
 	if fieldsUse(ctx.Fields, FieldDecimal) {
 		third = append(third, gombitTypesImport)
 	}
+	third = append(third, targetImports(ctx)...)
 	b.WriteString(importBlock(std, third))
 	b.WriteString("// ")
 	b.WriteString(ctx.Resource.TypeName)
@@ -158,19 +164,51 @@ func renderModel(ctx renderContext) string {
 	b.WriteString(ctx.Resource.TypeName)
 	b.WriteString(" struct {\n\tgorm.Model\n")
 	for _, field := range ctx.Fields {
-		b.WriteByte('\t')
-		b.WriteString(field.GoName)
-		b.WriteByte(' ')
-		b.WriteString(field.GoType)
-		if tag := field.gormTag(); tag != "" {
-			b.WriteString(" `gorm:\"")
-			b.WriteString(tag)
-			b.WriteString("\"`")
-		}
-		b.WriteByte('\n')
+		b.WriteString(modelFieldLines(field, ctx.Resource.Package))
 	}
 	b.WriteString("}\n")
 	return b.String()
+}
+
+// targetImports returns the distinct feature-package import paths for the
+// relation fields' target models (internal/<target>).
+func targetImports(ctx renderContext) []string {
+	seen := map[string]struct{}{}
+	var out []string
+	for _, f := range ctx.Fields {
+		if !f.isRelation() {
+			continue
+		}
+		imp := ctx.Module + "/internal/" + f.TargetPkg
+		if _, ok := seen[imp]; ok {
+			continue
+		}
+		seen[imp] = struct{}{}
+		out = append(out, imp)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// modelFieldLines renders the struct field line(s) for one model field. A
+// belongs_to emits the foreign key plus the association; has_many / m2m emit the
+// association slice (m2m carries the join-table tag).
+func modelFieldLines(f Field, resourcePkg string) string {
+	switch f.Type {
+	case FieldBelongsTo:
+		return "\t" + f.fkGoName() + " uint `gorm:\"index\"`\n" +
+			"\t" + f.GoName + " " + f.GoType + "\n"
+	case FieldHasMany:
+		return "\t" + f.GoName + " " + f.GoType + "\n"
+	case FieldManyToMany:
+		return "\t" + f.GoName + " " + f.GoType + " `gorm:\"many2many:" + f.joinTable(resourcePkg) + ";\"`\n"
+	default:
+		line := "\t" + f.GoName + " " + f.GoType
+		if tag := f.gormTag(); tag != "" {
+			line += " `gorm:\"" + tag + "\"`"
+		}
+		return line + "\n"
+	}
 }
 
 func renderHandler(ctx renderContext) string {
@@ -202,7 +240,10 @@ func renderHandler(ctx renderContext) string {
 	b.WriteString("type " + data + " struct {\n")
 	b.WriteString("\tID uint `json:\"id\" example:\"1\" doc:\"" + typ + " identifier\"`\n")
 	for _, field := range ctx.Fields {
-		b.WriteString("\t" + field.GoName + " " + field.GoType + " `" + field.jsonTag() + " doc:\"" + field.GoName + "\"`\n")
+		if !field.inDTO() {
+			continue
+		}
+		b.WriteString("\t" + field.dtoGoName() + " " + field.dtoGoType() + " `json:\"" + field.dtoJSONName() + "\" doc:\"" + field.dtoGoName() + "\"`\n")
 	}
 	b.WriteString("}\n\n")
 	listOut := "list" + ctx.Resource.Tag + "Output"
@@ -218,7 +259,10 @@ func renderHandler(ctx renderContext) string {
 	b.WriteString("\tBody contract.Data[" + data + "]\n}\n\n")
 	b.WriteString("type create" + typ + "Input struct {\n\tBody struct {\n")
 	for _, field := range ctx.Fields {
-		b.WriteString("\t\t" + field.GoName + " " + field.GoType + " `" + field.humaTags() + "`\n")
+		if !field.inDTO() {
+			continue
+		}
+		b.WriteString("\t\t" + field.dtoGoName() + " " + field.dtoGoType() + " `" + field.dtoHumaTags() + "`\n")
 	}
 	b.WriteString("\t}\n}\n\n")
 	b.WriteString("type create" + typ + "Output struct {\n")
@@ -260,7 +304,10 @@ func renderHandler(ctx renderContext) string {
 	b.WriteString("func (h *Handler) create(ctx context.Context, input *create" + typ + "Input) (*create" + typ + "Output, error) {\n")
 	b.WriteString("\trow := " + typ + "{\n")
 	for _, field := range ctx.Fields {
-		b.WriteString("\t\t" + field.GoName + ": input.Body." + field.GoName + ",\n")
+		if !field.inDTO() {
+			continue
+		}
+		b.WriteString("\t\t" + field.dtoGoName() + ": input.Body." + field.dtoGoName() + ",\n")
 	}
 	b.WriteString("\t}\n")
 	b.WriteString("\tif err := h.DB.WithContext(ctx).Create(&row).Error; err != nil {\n")
@@ -273,7 +320,10 @@ func renderHandler(ctx renderContext) string {
 	b.WriteString("func to" + typ + "Data(row " + typ + ") " + data + " {\n")
 	b.WriteString("\treturn " + data + "{ID: row.ID")
 	for _, field := range ctx.Fields {
-		b.WriteString(", " + field.GoName + ": row." + field.GoName)
+		if !field.inDTO() {
+			continue
+		}
+		b.WriteString(", " + field.dtoGoName() + ": row." + field.dtoGoName())
 	}
 	b.WriteString("}\n}\n")
 	return b.String()
