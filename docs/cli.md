@@ -375,12 +375,12 @@ read-only. A `has_many` child model must carry the parent foreign key itself
 (e.g. `RentalID`); the generator does not edit the child (that would be an
 import cycle).
 
-A `belongs_to` may target the resource itself — a self-referential foreign key,
-e.g. `parent:belongs_to:Category` on `Category`, which renders the local pointer
-type (`Parent *Category`, avoiding an invalid recursive struct) and imports
-nothing. A self-referential `has_many` /
-`many_to_many` is rejected at parse time: it needs explicit join / foreign keys
-this generator does not emit.
+Self-referential relations (a target equal to the resource itself, e.g.
+`parent:belongs_to:Category` on `Category`) are not supported yet and are
+rejected at parse time: a self-referential `belongs_to` needs a nullable foreign
+key so a tree root stores `NULL` rather than `0` (which references no row and
+fails the self-FK), and `has_many` / `many_to_many` onto the same model need
+explicit join keys. Point relations at a different feature-package for now.
 
 Example:
 

@@ -248,10 +248,6 @@ func TestMakeResourceRelationsCompiles(t *testing.T) {
 		"parts:has_many:Part",
 		"warehouses:many_to_many:Warehouse",
 	)
-	// A self-referential belongs_to (tree parent) must render the local type and
-	// import nothing — a self-import would not compile. This case is invisible to
-	// a test that only generates *other* target packages first (#222 review).
-	gen("Category", "name:string:required", "parent:belongs_to:Category")
 	t.Run("compile", func(t *testing.T) {
 		compileBackend(t, appDir)
 	})

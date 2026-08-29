@@ -171,13 +171,12 @@ func renderModel(ctx renderContext) string {
 }
 
 // targetImports returns the distinct feature-package import paths for the
-// relation fields' target models (internal/<target>). A self-referential
-// belongs_to targets the resource's own package and imports nothing.
+// relation fields' target models (internal/<target>).
 func targetImports(ctx renderContext) []string {
 	seen := map[string]struct{}{}
 	var out []string
 	for _, f := range ctx.Fields {
-		if !f.isRelation() || f.TargetPkg == ctx.Resource.Package {
+		if !f.isRelation() {
 			continue
 		}
 		imp := ctx.Module + "/internal/" + f.TargetPkg

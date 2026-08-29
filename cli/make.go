@@ -67,10 +67,9 @@ Relations use name:kind:Target, where Target is a model in internal/<target>/:
 The generated CRUD handler stays thin: belongs_to is exposed as its FK;
 many_to_many / has_many are generated on the model, not in the REST handler.
 The admin picks them up — many_to_many is editable through a relation widget,
-has_many is shown read-only. A belongs_to may target the resource itself
-(a self-referential FK, e.g. a tree parent); a self-referential
-has_many / many_to_many is rejected (it needs join/foreign keys the generator
-does not emit).
+has_many is shown read-only. Self-referential relations (a target equal to the
+resource itself) are not supported yet and are rejected: they need a nullable
+foreign key / explicit join keys. Point relations at a different package.
 
 Examples:
 

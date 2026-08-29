@@ -164,34 +164,3 @@ func TestRenderRelations(t *testing.T) {
 		t.Fatalf("handler DTO must not carry m2m/has_many fields:\n%s", handler)
 	}
 }
-
-// TestRenderSelfBelongsTo checks a self-referential belongs_to (a tree parent)
-// renders the local type and imports nothing — no `category.Category` and no
-// self-import inside package category, which would not compile (#222 review).
-func TestRenderSelfBelongsTo(t *testing.T) {
-	fields, err := parseFields([]string{"parent:belongs_to:Category"}, "category")
-	if err != nil {
-		t.Fatalf("parseFields: %v", err)
-	}
-	name, err := parseResourceName("Category")
-	if err != nil {
-		t.Fatalf("parseResourceName: %v", err)
-	}
-	ctx := newRenderContext("github.com/example/demo", name, fields, "/api/v1", "minimal", false, false)
-	collapse := func(s string) string { return strings.Join(strings.Fields(s), " ") }
-	model := collapse(string(mustFormatGo(renderModel(ctx))))
-	if strings.Contains(model, "format error") {
-		t.Fatalf("model did not gofmt-parse:\n%s", model)
-	}
-	if strings.Contains(model, "internal/category") {
-		t.Fatalf("self belongs_to must not emit a self-import:\n%s", model)
-	}
-	for _, want := range []string{"ParentID uint", "Parent *Category"} {
-		if !strings.Contains(model, want) {
-			t.Fatalf("model missing %q:\n%s", want, model)
-		}
-	}
-	if strings.Contains(model, "category.Category") {
-		t.Fatalf("self belongs_to must use the local type, not category.Category:\n%s", model)
-	}
-}

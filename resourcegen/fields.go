@@ -52,12 +52,13 @@ func parseRelationField(name, jsonName, goName string, kind FieldType, target, r
 	if _, kw := goKeywords[targetPkg]; kw {
 		return Field{}, fmt.Errorf("resourcegen: relation target %q maps to Go keyword %q", target, targetPkg)
 	}
-	// A same-package target is legal only for belongs_to (a self-referential FK,
-	// e.g. a tree parent). has_many / many_to_many onto the same model need
-	// explicit join / foreign keys that this generator does not emit, so refuse
-	// rather than write Go that fails to migrate.
-	if targetPkg == resourcePkg && kind != FieldBelongsTo {
-		return Field{}, fmt.Errorf("resourcegen: %s relation %q cannot target the resource itself (self-referential %s needs explicit join/foreign keys; only belongs_to self-references are supported)", strings.ToLower(string(kind)), name, strings.ToLower(string(kind)))
+	// Self-referential relations are not supported in this milestone. A
+	// belongs_to onto the same model would need a nullable (*uint) foreign key so
+	// a tree root stores NULL rather than 0 (0 references no row and fails the
+	// self-FK); has_many / many_to_many need explicit join / foreign keys. Rather
+	// than emit output that cannot insert a root or migrate, reject it here.
+	if targetPkg == resourcePkg {
+		return Field{}, fmt.Errorf("resourcegen: %s relation %q cannot target the resource itself (self-referential relations are not supported yet; they need a nullable foreign key / explicit join keys)", strings.ToLower(string(kind)), name)
 	}
 	f := Field{
 		Name:      name,
@@ -67,23 +68,12 @@ func parseRelationField(name, jsonName, goName string, kind FieldType, target, r
 		Target:    targetType,
 		TargetPkg: targetPkg,
 	}
-	// A self-referential belongs_to uses the local type name and imports nothing;
-	// a cross-package target is qualified as <pkg>.<Type>.
-	selfRef := targetPkg == resourcePkg
+	// The target is always a distinct feature-package (same-package targets are
+	// rejected above), qualified as <pkg>.<Type>.
 	qualified := targetPkg + "." + targetType
-	if selfRef {
-		qualified = targetType
-	}
 	switch kind {
 	case FieldBelongsTo:
-		// A self-referential association must be a pointer: an embedded value of
-		// the same struct is an invalid recursive type. A cross-package target is
-		// a distinct struct, so it stays a value.
-		if selfRef {
-			f.GoType = "*" + qualified
-		} else {
-			f.GoType = qualified
-		}
+		f.GoType = qualified // the association struct field
 	case FieldHasMany, FieldManyToMany:
 		f.GoType = "[]" + qualified
 	}

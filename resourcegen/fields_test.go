@@ -181,32 +181,25 @@ func TestParseRelationErrors(t *testing.T) {
 
 func TestParseRelationSamePackage(t *testing.T) {
 	t.Parallel()
-	// A self-referential belongs_to (tree parent) uses the local type and imports
-	// nothing — it must not emit `category.Category` inside package category.
-	fields, err := parseFields([]string{"parent:belongs_to:Category"}, "category")
-	if err != nil {
-		t.Fatalf("parseFields: %v", err)
+	// Self-referential relations are rejected: a belongs_to onto the same model
+	// would need a nullable FK (a uint root stores 0, which fails the self-FK),
+	// and has_many / many_to_many need explicit join keys. All three are refused.
+	for _, spec := range []string{
+		"parent:belongs_to:Category",
+		"children:has_many:Category",
+		"related:many_to_many:Category",
+	} {
+		if _, err := parseFields([]string{spec}, "category"); err == nil {
+			t.Fatalf("parseFields(%q) in its own package error = nil, want a self-reference rejection", spec)
+		}
 	}
-	if fields[0].GoType != "*Category" {
-		t.Fatalf("self belongs_to GoType = %q, want local *Category (pointer, no self-import)", fields[0].GoType)
-	}
-	if fields[0].TargetPkg != "category" {
-		t.Fatalf("TargetPkg = %q, want category", fields[0].TargetPkg)
-	}
-	// A cross-package belongs_to stays qualified.
+	// The same target from a different package is fine and stays qualified.
 	other, err := parseFields([]string{"parent:belongs_to:Category"}, "product")
 	if err != nil {
 		t.Fatalf("parseFields cross-pkg: %v", err)
 	}
 	if other[0].GoType != "category.Category" {
 		t.Fatalf("cross-pkg belongs_to GoType = %q, want category.Category", other[0].GoType)
-	}
-	// has_many / many_to_many onto the same model are refused (they would need
-	// join/foreign keys this generator does not emit).
-	for _, spec := range []string{"children:has_many:Category", "related:many_to_many:Category"} {
-		if _, err := parseFields([]string{spec}, "category"); err == nil {
-			t.Fatalf("parseFields(%q) in its own package error = nil, want a self-reference rejection", spec)
-		}
 	}
 }
 
