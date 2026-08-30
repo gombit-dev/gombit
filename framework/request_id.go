@@ -100,8 +100,12 @@ func GetRequestIDFromContext(ctx context.Context) string {
 // have an error path to handle.
 func randomBytes16() [16]byte {
 	var b [16]byte
-	binary.LittleEndian.PutUint64(b[0:8], rand.Uint64())
-	binary.LittleEndian.PutUint64(b[8:16], rand.Uint64())
+	for i := 0; i < len(b); i += 8 {
+		// G404 is intentional here: see this function's doc comment. Correlation
+		// IDs are not secrets, and a CSPRNG's syscall + global lock is exactly
+		// the cost issue #240 removes.
+		binary.LittleEndian.PutUint64(b[i:i+8], rand.Uint64()) //nolint:gosec // G404: non-secret correlation IDs (issue #240)
+	}
 	return b
 }
 
