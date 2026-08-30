@@ -2,7 +2,6 @@ package framework
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/hex"
 	"fmt"
 	"net/http"
@@ -264,10 +263,7 @@ func traceIDFromTraceparent(value string) string {
 }
 
 func newTraceID() string {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return ""
-	}
+	b := randomBytes16()
 	if b == [16]byte{} {
 		b[15] = 1
 	}

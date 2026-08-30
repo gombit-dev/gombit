@@ -2,8 +2,9 @@ package framework
 
 import (
 	"context"
-	"crypto/rand"
+	"encoding/binary"
 	"encoding/hex"
+	"math/rand/v2"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -89,11 +90,23 @@ func GetRequestIDFromContext(ctx context.Context) string {
 	return meta.requestID
 }
 
-func newRequestID() string {
+// randomBytes16 fills a 16-byte array with non-cryptographic randomness from
+// math/rand/v2, whose top-level generator is per-P and lock-free — unlike
+// crypto/rand's globally locked reader, which also incurs a getrandom syscall.
+// Request and trace IDs are opaque correlation tokens, not secrets, so they do
+// not need a CSPRNG; paying crypto/rand's syscall + global lock on every
+// request was a measurable hot-path CPU and cross-core contention cost
+// (issue #240). Unlike crypto/rand.Read this cannot fail, so callers no longer
+// have an error path to handle.
+func randomBytes16() [16]byte {
 	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return ""
-	}
+	binary.LittleEndian.PutUint64(b[0:8], rand.Uint64())
+	binary.LittleEndian.PutUint64(b[8:16], rand.Uint64())
+	return b
+}
+
+func newRequestID() string {
+	b := randomBytes16()
 
 	b[6] = (b[6] & 0x0f) | 0x40
 	b[8] = (b[8] & 0x3f) | 0x80
