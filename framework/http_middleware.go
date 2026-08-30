@@ -34,7 +34,21 @@ func requestTimeoutMiddleware(timeout time.Duration) gin.HandlerFunc {
 	}
 
 	return func(c *gin.Context) {
-		ctx, cancel := context.WithTimeout(c.Request.Context(), timeout)
+		ctx := c.Request.Context()
+		// If the request already carries a deadline at or before the one we
+		// would impose, wrapping it again only allocates a second timer and a
+		// shallow Request copy that can never take effect first — context
+		// always honors the earliest deadline, which is the existing one. Skip
+		// the wrap in that case (issue #242). When no deadline (or a later one)
+		// is present — the common case — the context.WithTimeout timer is
+		// intrinsic to propagating cancellation to handlers and DB calls, so it
+		// stays.
+		if deadline, ok := ctx.Deadline(); ok && !deadline.After(time.Now().Add(timeout)) {
+			c.Next()
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
 		c.Request = c.Request.WithContext(ctx)
 		c.Next()
