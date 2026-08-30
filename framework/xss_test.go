@@ -270,6 +270,67 @@ func TestSanitizeJSONBodyPreservesComparisonText(t *testing.T) {
 	}
 }
 
+// TestSanitizeJSONBodyFastPathDoesNotBypassEscapedTags is the safety lock for
+// the issue #241 fast path. A tag delivered through "\uXXXX" escapes contains a
+// backslash in the raw bytes, so it must NOT take the no-'<'/'>'/'\\' fast path
+// — it must be decoded and stripped like a literal tag. If the fast-path guard
+// ever drops its backslash check, this test fails instead of silently opening
+// an XSS bypass.
+func TestSanitizeJSONBodyFastPathDoesNotBypassEscapedTags(t *testing.T) {
+	t.Parallel()
+
+	// No literal '<' or '>' anywhere; the tag is entirely \uXXXX-escaped.
+	raw := []byte(`{"comment":"<script>alert(1)</script>"}`)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(raw))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	sanitizeJSONBody(c)
+
+	got, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	var payload map[string]string
+	if err := json.Unmarshal(got, &payload); err != nil {
+		t.Fatalf("unmarshal sanitized body: %v (%s)", err, got)
+	}
+	if strings.ContainsAny(payload["comment"], "<>") {
+		t.Fatalf("comment = %q still contains tag markup — escaped-tag XSS bypass", payload["comment"])
+	}
+	// script element body is discarded by stripHTML (strict mode).
+	if payload["comment"] != "" {
+		t.Fatalf("comment = %q, want empty (script body discarded)", payload["comment"])
+	}
+}
+
+// TestSanitizeJSONBodyCleanBodyPassesThroughVerbatim locks the fast path's
+// other half: a body with no markup reaches the handler byte-for-byte, with no
+// JSON re-encoding (issue #241). The Content-Length header the client sent is
+// left untouched because the bytes are unchanged.
+func TestSanitizeJSONBodyCleanBodyPassesThroughVerbatim(t *testing.T) {
+	t.Parallel()
+
+	// Deliberately non-normalized: spaces after colons, '&' in a value. If the
+	// body were decoded and re-marshaled, these bytes would change.
+	raw := []byte(`{"name": "Ada Lovelace", "note": "tea & cake"}`)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(raw))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	sanitizeJSONBody(c)
+
+	got, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if !bytes.Equal(got, raw) {
+		t.Fatalf("body = %q, want verbatim %q (clean body must not be re-encoded)", got, raw)
+	}
+}
+
 func TestXSSMiddlewareRawBodyPathSkipsSanitization(t *testing.T) {
 	// A body that json re-encoding would change (< / & escaped, <b> stripped).
 	const raw = `{"tag":"v1","body":"<b>notes</b> a < b & c"}`

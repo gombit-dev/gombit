@@ -143,6 +143,19 @@ func sanitizeJSONBody(c *gin.Context) {
 		return
 	}
 
+	// Fast path (issue #241): an HTML tag can only reach a decoded JSON string
+	// as a literal '<'/'>' or as a "\uXXXX" escape, and every JSON escape needs
+	// a backslash. A body containing none of '<', '>', or '\' therefore cannot
+	// carry a tag in any string value or key, so sanitization is a guaranteed
+	// no-op. Skip the decode + re-encode round trip entirely and hand the
+	// original bytes to the handler unchanged. This is the common case for API
+	// traffic. The escaped-bypass reasoning is locked by
+	// TestSanitizeJSONBodyFastPathDoesNotBypassEscapedTags.
+	if bytes.IndexByte(raw, '<') < 0 && bytes.IndexByte(raw, '>') < 0 && bytes.IndexByte(raw, '\\') < 0 {
+		c.Request.Body = io.NopCloser(bytes.NewReader(raw))
+		return
+	}
+
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
 	var payload any
@@ -152,7 +165,15 @@ func sanitizeJSONBody(c *gin.Context) {
 		return
 	}
 
-	sanitizeJSONValue(payload, "")
+	// Only re-encode when a value actually changed. When sanitization stripped
+	// nothing (the body reached here only because of a backslash or an
+	// angle-bracket that turned out not to form a complete tag), the original
+	// bytes go through untouched — no json.Marshal, and no JSON normalization
+	// of a body we did not modify.
+	if !sanitizeJSONValue(payload, "") {
+		c.Request.Body = io.NopCloser(bytes.NewReader(raw))
+		return
+	}
 	cleaned, err := json.Marshal(payload)
 	if err != nil {
 		c.Request.Body = io.NopCloser(bytes.NewReader(raw))
@@ -174,7 +195,12 @@ func isJSONContentType(contentType string) bool {
 	return strings.EqualFold(mediaType, "application/json")
 }
 
-func sanitizeJSONValue(value any, fieldName string) {
+// sanitizeJSONValue strips HTML from every string in value in place and reports
+// whether it changed anything. The changed flag lets the caller skip a
+// json.Marshal re-encode when the body carried no strippable markup (issue
+// #241).
+func sanitizeJSONValue(value any, fieldName string) bool {
+	changed := false
 	switch typed := value.(type) {
 	case map[string]any:
 		for key, child := range typed {
@@ -183,9 +209,14 @@ func sanitizeJSONValue(value any, fieldName string) {
 			}
 			switch childValue := child.(type) {
 			case string:
-				typed[key] = stripHTML(childValue)
+				if cleaned := stripHTML(childValue); cleaned != childValue {
+					typed[key] = cleaned
+					changed = true
+				}
 			default:
-				sanitizeJSONValue(child, key)
+				if sanitizeJSONValue(child, key) {
+					changed = true
+				}
 			}
 		}
 	case []any:
@@ -195,12 +226,18 @@ func sanitizeJSONValue(value any, fieldName string) {
 				if fieldName == xssPasswordField {
 					continue
 				}
-				typed[i] = stripHTML(childValue)
+				if cleaned := stripHTML(childValue); cleaned != childValue {
+					typed[i] = cleaned
+					changed = true
+				}
 			default:
-				sanitizeJSONValue(child, fieldName)
+				if sanitizeJSONValue(child, fieldName) {
+					changed = true
+				}
 			}
 		}
 	}
+	return changed
 }
 
 // stripHTML removes HTML tags and discards content inside dangerous elements.
