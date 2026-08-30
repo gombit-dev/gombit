@@ -52,6 +52,28 @@ Two families of measurement:
    (≥20 restarts, median/p95), idle memory, memory + CPU under the same load,
    and image size. `make benchmark-footprint`.
 
+### Cross-core scaling (parallel microbench)
+
+`BenchmarkFrameworkTaxParallel` (issue #243) drives the plaintext and
+valid-POST scenarios through the same four in-process handlers as the
+abstraction-cost microbench, but concurrently via `b.RunParallel`. Its purpose
+is orthogonal to the single-goroutine `BenchmarkFrameworkTax`: it exposes
+**per-request serialization** — a shared lock on the hot path — that a
+single-goroutine benchmark cannot see. Run one row across core counts and read
+whether its per-op time falls with more cores:
+
+```
+go test ./benchmarks/micro/... -bench=BenchmarkFrameworkTaxParallel -benchmem -cpu=1,2,4,8,16
+```
+
+A row whose ns/op drops roughly in proportion to `-cpu` scales; a row whose
+ns/op flattens as cores are added is contention-bound (every request is
+funnelling through a shared lock). This is the measurement that surfaced the
+metrics-middleware mutex in #239 — invisible to the single-goroutine numbers,
+obvious here. It is a **diagnostic**, not part of the published README snapshot:
+the numbers are host- and scheduler-sensitive, so read them as a scaling *shape*
+on your own machine, not as an absolute to compare across hosts.
+
 ### Canonical protocol vs. a particular snapshot
 
 The sweep above is the **canonical protocol**: the parameters a run must use to
