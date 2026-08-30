@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -106,11 +107,25 @@ func securityHeadersMiddleware(includeHSTS bool) gin.HandlerFunc {
 	}
 }
 
+// httpMetrics accumulates request metrics without locking the request path.
+// The per-request writers (addActive, observe) use atomics only, so the
+// metrics middleware no longer serializes concurrent requests on a single
+// process-global mutex (issue #239). The label set — method × route × status —
+// is bounded (normalizeMetricsMethod caps method cardinality, FullPath caps
+// route), so the sync.Map holding the per-series counters reaches a steady
+// state after warmup and the hot path settles into a lock-free Load.
 type httpMetrics struct {
-	mu       sync.Mutex
-	active   int64
-	requests map[metricsKey]int64
-	latency  map[metricsKey]time.Duration
+	active   atomic.Int64
+	counters sync.Map // metricsKey -> *metricCounter
+}
+
+// metricCounter holds the two accumulators for a single metrics series. Both
+// are updated with atomic adds and take no lock. latency is stored as int64
+// nanoseconds (time.Duration's underlying unit) so render can convert it back
+// with time.Duration(ns).Seconds() exactly as before.
+type metricCounter struct {
+	requests atomic.Int64
+	latency  atomic.Int64
 }
 
 type metricsKey struct {
@@ -151,10 +166,10 @@ func normalizeMetricsMethod(method string) string {
 }
 
 func newHTTPMetrics() *httpMetrics {
-	return &httpMetrics{
-		requests: make(map[metricsKey]int64),
-		latency:  make(map[metricsKey]time.Duration),
-	}
+	// The zero value is ready: atomic.Int64 starts at 0 and sync.Map needs no
+	// initialization. Counters are created lazily by observe on first sight of
+	// a series.
+	return &httpMetrics{}
 }
 
 func metricsMiddleware(metrics *httpMetrics) gin.HandlerFunc {
@@ -178,16 +193,37 @@ func metricsMiddleware(metrics *httpMetrics) gin.HandlerFunc {
 }
 
 func (m *httpMetrics) addActive(delta int64) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.active += delta
+	m.active.Add(delta)
 }
 
 func (m *httpMetrics) observe(key metricsKey, duration time.Duration) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.requests[key]++
-	m.latency[key] += duration
+	counter := m.counterFor(key)
+	counter.requests.Add(1)
+	counter.latency.Add(int64(duration))
+}
+
+// counterFor returns the per-series counter for key, creating it on first use.
+// The common case (series already seen) is a lock-free sync.Map.Load; only the
+// first request for a never-before-seen series takes the LoadOrStore slow path,
+// and the bounded label set means that stops happening after warmup.
+func (m *httpMetrics) counterFor(key metricsKey) *metricCounter {
+	if existing, ok := m.counters.Load(key); ok {
+		return existing.(*metricCounter)
+	}
+	actual, _ := m.counters.LoadOrStore(key, &metricCounter{})
+	return actual.(*metricCounter)
+}
+
+// series returns the number of distinct metrics series recorded so far. It
+// backs the cardinality-bounding tests, which previously read len() on the
+// underlying map directly.
+func (m *httpMetrics) series() int {
+	count := 0
+	m.counters.Range(func(_, _ any) bool {
+		count++
+		return true
+	})
+	return count
 }
 
 func (m *httpMetrics) handler(c *gin.Context) {
@@ -195,17 +231,16 @@ func (m *httpMetrics) handler(c *gin.Context) {
 }
 
 func (m *httpMetrics) render() string {
-	m.mu.Lock()
-	active := m.active
-	requests := make(map[metricsKey]int64, len(m.requests))
-	latency := make(map[metricsKey]time.Duration, len(m.latency))
-	for key, value := range m.requests {
-		requests[key] = value
-	}
-	for key, value := range m.latency {
-		latency[key] = value
-	}
-	m.mu.Unlock()
+	active := m.active.Load()
+	requests := make(map[metricsKey]int64)
+	latency := make(map[metricsKey]time.Duration)
+	m.counters.Range(func(k, v any) bool {
+		key := k.(metricsKey)
+		counter := v.(*metricCounter)
+		requests[key] = counter.requests.Load()
+		latency[key] = time.Duration(counter.latency.Load())
+		return true
+	})
 
 	keys := make([]metricsKey, 0, len(requests))
 	for key := range requests {

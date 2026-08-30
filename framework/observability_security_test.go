@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -395,7 +396,7 @@ func TestMetricsMiddlewareBoundsMethodLabelCardinality(t *testing.T) {
 		engine.ServeHTTP(httptest.NewRecorder(), req)
 	}
 
-	if got := len(metrics.requests); got != 1 {
+	if got := metrics.series(); got != 1 {
 		t.Fatalf("distinct metric series after 1000 arbitrary methods = %d, want 1 (bounded)", got)
 	}
 
@@ -428,6 +429,45 @@ func TestMetricsMiddlewareKeepsStandardMethodLabels(t *testing.T) {
 	}
 	if strings.Contains(body, `method="other"`) {
 		t.Fatalf("metrics body = %q, want no \"other\" bucket for standard methods", body)
+	}
+}
+
+// TestMetricsMiddlewareConcurrentCountsAreExact drives the metrics middleware
+// from many goroutines at once and asserts every request is counted exactly
+// once. It guards the lock-free hot path (issue #239): atomic accumulation must
+// lose no increments under contention, and the active gauge must return to zero
+// once all requests drain. Run with -race to also catch any unsynchronized
+// access to the counters.
+func TestMetricsMiddlewareConcurrentCountsAreExact(t *testing.T) {
+	metrics := newHTTPMetrics()
+	engine := gin.New()
+	engine.Use(metricsMiddleware(metrics))
+	engine.GET("/thing", func(c *gin.Context) { c.Status(http.StatusOK) })
+
+	const goroutines = 32
+	const perGoroutine = 500
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for range goroutines {
+		go func() {
+			defer wg.Done()
+			for range perGoroutine {
+				engine.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/thing", nil))
+			}
+		}()
+	}
+	wg.Wait()
+
+	wantTotal := int64(goroutines * perGoroutine)
+	counter := metrics.counterFor(metricsKey{method: http.MethodGet, route: "/thing", status: http.StatusOK})
+	if got := counter.requests.Load(); got != wantTotal {
+		t.Fatalf("recorded request count = %d, want %d (lost increments under contention)", got, wantTotal)
+	}
+	if got := metrics.active.Load(); got != 0 {
+		t.Fatalf("active gauge after drain = %d, want 0", got)
+	}
+	if got := metrics.series(); got != 1 {
+		t.Fatalf("distinct series = %d, want 1", got)
 	}
 }
 
