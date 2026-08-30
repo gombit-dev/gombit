@@ -149,9 +149,10 @@ func sanitizeJSONBody(c *gin.Context) {
 	// carry a tag in any string value or key, so sanitization is a guaranteed
 	// no-op. Skip the decode + re-encode round trip entirely and hand the
 	// original bytes to the handler unchanged. This is the common case for API
-	// traffic. The escaped-bypass reasoning is locked by
+	// traffic. ContainsAny scans the (up to 8 MiB) body once; the escaped-bypass
+	// reasoning — why '\' must be in the set — is locked by
 	// TestSanitizeJSONBodyFastPathDoesNotBypassEscapedTags.
-	if bytes.IndexByte(raw, '<') < 0 && bytes.IndexByte(raw, '>') < 0 && bytes.IndexByte(raw, '\\') < 0 {
+	if !bytes.ContainsAny(raw, "<>\\") {
 		c.Request.Body = io.NopCloser(bytes.NewReader(raw))
 		return
 	}
