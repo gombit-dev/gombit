@@ -38,7 +38,12 @@ func RunParallelBenchmark(b *testing.B, stack Stack) {
 				response := httptest.NewRecorder()
 				stack.Handler.ServeHTTP(response, request)
 				if response.Code != http.StatusOK {
-					b.Fatalf("plaintext status = %d, want %d; body: %s", response.Code, http.StatusOK, response.Body.String())
+					// Errorf, not Fatalf: this runs in a RunParallel worker
+					// goroutine, and testing.Fatal/FailNow are only safe from the
+					// benchmark's own goroutine. Errorf marks the failure
+					// concurrency-safely; return stops this worker.
+					b.Errorf("plaintext status = %d, want %d; body: %s", response.Code, http.StatusOK, response.Body.String())
+					return
 				}
 			}
 		})
@@ -55,7 +60,10 @@ func RunParallelBenchmark(b *testing.B, stack Stack) {
 				response := httptest.NewRecorder()
 				stack.Handler.ServeHTTP(response, request)
 				if !statusOKOrCreated(response.Code) {
-					b.Fatalf("valid-post status = %d; body: %s", response.Code, response.Body.String())
+					// Errorf, not Fatalf: called from a RunParallel worker
+					// goroutine (see the plaintext site above).
+					b.Errorf("valid-post status = %d; body: %s", response.Code, response.Body.String())
+					return
 				}
 			}
 		})
