@@ -13,8 +13,11 @@ do not get these routes.
 `Fields` empty so `admin.FieldsFrom` derives them from the GORM model — no
 per-field wiring:
 
-- **belongs_to** — `WarehouseID` + `Warehouse` derive to a `warehouse_id`
-  picker backed by the `warehouses` list, labelled by `name`.
+- **belongs_to** — `WarehouseID` (a `*uint`, so genuinely optional) +
+  `Warehouse` derive to a `warehouse_id` picker backed by the `warehouses` list,
+  labelled by `name`. Leaving it unset stores `NULL`; the create still
+  succeeds (a non-nullable `uint` FK would reject "no warehouse" under foreign
+  key enforcement).
 - **many_to_many** — `Warehouses []warehouse.Warehouse`
   (`many2many:widget_warehouses`) derives to a multi-select; a write syncs the
   join table in the same transaction as the row.

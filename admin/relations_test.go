@@ -582,6 +582,83 @@ func TestBelongsToLabelIsFieldName(t *testing.T) {
 	t.Fatalf("derived fields %v missing warehouse_id", fields)
 }
 
+type optBelongsEngine struct {
+	ID          uint         `gorm:"primaryKey" json:"id"`
+	Name        string       `json:"name"`
+	WarehouseID *uint        `gorm:"index" json:"warehouse_id"`
+	Warehouse   relWarehouse `json:"-"`
+}
+
+func (optBelongsEngine) TableName() string { return "opt_belongs_engines" }
+
+// TestBelongsToOptionalNullable verifies that a belongs_to backed by a nullable
+// (*uint) foreign key is genuinely optional: FieldsFrom marks it not-required,
+// a create omitting it succeeds and reads back null (not rejected by the FK),
+// and a create naming a real target sets it. This is the contract the admin
+// advertises (belongs_to required=false); a non-nullable uint FK would reject
+// "no parent" under foreign key enforcement. See #223 / the #238 review.
+func TestBelongsToOptionalNullable(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	app := newCookieApp(t)
+	if err := app.DB().AutoMigrate(&relWarehouse{}, &optBelongsEngine{}); err != nil {
+		t.Fatalf("AutoMigrate: %v", err)
+	}
+	if err := admin.Register(app, relWarehouse{}, admin.Options{Slug: "warehouses"}); err != nil {
+		t.Fatalf("Register warehouse: %v", err)
+	}
+	if err := admin.Register(app, optBelongsEngine{}, admin.Options{Slug: "engines"}); err != nil {
+		t.Fatalf("Register engine: %v", err)
+	}
+
+	// Derivation marks the nullable FK optional.
+	fields, err := admin.FieldsFrom(optBelongsEngine{})
+	if err != nil {
+		t.Fatalf("FieldsFrom: %v", err)
+	}
+	var fk *admin.Field
+	for i := range fields {
+		if fields[i].Name == "warehouse_id" {
+			fk = &fields[i]
+		}
+	}
+	if fk == nil || fk.Related == nil || fk.Related.Kind != admin.RelBelongsTo {
+		t.Fatalf("warehouse_id = %+v, want belongs_to relation", fk)
+	}
+	if fk.Required {
+		t.Fatalf("nullable belongs_to FK must not be Required")
+	}
+
+	jar := loginSuperuser(t, app)
+
+	// Create with no warehouse: must succeed and read back null.
+	create := doRequest(app, jar, http.MethodPost, "/api/v1/admin/resources/engines", `{"name":"Loose"}`)
+	if create.Code != http.StatusOK {
+		t.Fatalf("create without FK status = %d; body: %s (optional belongs_to must accept none)", create.Code, create.Body.String())
+	}
+	var created rowEnvelope
+	if err := json.Unmarshal(create.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode create: %v", err)
+	}
+	if v, ok := created.Data["warehouse_id"]; !ok || v != nil {
+		t.Fatalf("warehouse_id = %#v, want null on a create that omits it", created.Data["warehouse_id"])
+	}
+
+	// Create naming a real warehouse: FK round-trips.
+	w := createWarehouse(t, app, jar, "North")
+	set := doRequest(app, jar, http.MethodPost, "/api/v1/admin/resources/engines",
+		fmt.Sprintf(`{"name":"Bolt","warehouse_id":%d}`, w))
+	if set.Code != http.StatusOK {
+		t.Fatalf("create with FK status = %d; body: %s", set.Code, set.Body.String())
+	}
+	var withFK rowEnvelope
+	if err := json.Unmarshal(set.Body.Bytes(), &withFK); err != nil {
+		t.Fatalf("decode create-with-fk: %v", err)
+	}
+	if got := asInt(withFK.Data["warehouse_id"]); got != w {
+		t.Fatalf("warehouse_id = %d, want %d", got, w)
+	}
+}
+
 // TestBelongsToAutoDerivationRoundTrip exercises the full picker contract: both
 // models are registered with auto-derived fields (empty Fields), the belongs_to
 // FK is written through the derived relation field, and it reads back — plus the

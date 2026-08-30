@@ -16,8 +16,12 @@ type Widget struct {
 	Name string `json:"name"`
 	SKU  string `json:"sku"`
 
-	// belongs_to: the widget's primary warehouse (FK + association).
-	WarehouseID uint                `gorm:"index" json:"warehouse_id"`
+	// belongs_to: the widget's primary warehouse (FK + association). The FK is a
+	// *uint so it is genuinely optional: a widget with no warehouse stores NULL
+	// rather than 0, which a non-nullable uint could not represent under foreign
+	// key enforcement (the admin advertises belongs_to as optional, so the create
+	// must actually accept "none").
+	WarehouseID *uint               `gorm:"index" json:"warehouse_id"`
 	Warehouse   warehouse.Warehouse `json:"-"`
 
 	// many_to_many: every warehouse this widget is stocked at (join table). The

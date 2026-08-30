@@ -118,9 +118,9 @@ func runRelationsDriver(t *testing.T, driver config.DatabaseDriver, dsn string) 
 	// registered after openAdminDriver's cleanup, so it runs first (LIFO).
 	t.Cleanup(func() {
 		_ = db.Migrator().DropTable("engine_warehouses")
-		_ = db.Migrator().DropTable(&hmPart{}, &relEngine{}, &belongsEngine{}, &hmMachine{}, &relWarehouse{})
+		_ = db.Migrator().DropTable(&hmPart{}, &relEngine{}, &optBelongsEngine{}, &hmMachine{}, &relWarehouse{})
 	})
-	if err := db.AutoMigrate(&relWarehouse{}, &relEngine{}, &belongsEngine{}, &hmMachine{}, &hmPart{}); err != nil {
+	if err := db.AutoMigrate(&relWarehouse{}, &relEngine{}, &optBelongsEngine{}, &hmMachine{}, &hmPart{}); err != nil {
 		t.Fatalf("AutoMigrate relations: %v", err)
 	}
 	app := newCookieAppWithDB(t, db)
@@ -137,7 +137,7 @@ func runRelationsDriver(t *testing.T, driver config.DatabaseDriver, dsn string) 
 			Kind: admin.RelManyToMany, Slug: "warehouses", LabelField: "name",
 		}},
 	}})
-	mustRegister(belongsEngine{}, admin.Options{Slug: "belongs-engines"})
+	mustRegister(optBelongsEngine{}, admin.Options{Slug: "belongs-engines"})
 	mustRegister(hmMachine{}, admin.Options{Slug: "machines"})
 	jar := loginSuperuser(t, app)
 
@@ -204,9 +204,25 @@ func assertManyToManyRoundTrip(t *testing.T, app *framework.App, jar *cookieJar)
 }
 
 // assertBelongsToRoundTrip writes a belongs_to FK through the derived relation
-// field and reads it back.
+// field and reads it back, and checks that an omitted (nullable) FK is accepted
+// and stored as null — the case where DB foreign-key enforcement differs and a
+// non-nullable uint FK would reject "no parent".
 func assertBelongsToRoundTrip(t *testing.T, app *framework.App, jar *cookieJar) {
 	t.Helper()
+
+	// Optional belongs_to: omitting the FK must succeed and read back null.
+	none := doRequest(app, jar, http.MethodPost, "/api/v1/admin/resources/belongs-engines", `{"name":"Loose"}`)
+	if none.Code != http.StatusOK {
+		t.Fatalf("create without FK status = %d; body: %s (optional belongs_to must accept none under FK enforcement)", none.Code, none.Body.String())
+	}
+	var noneEnv rowEnvelope
+	if err := json.Unmarshal(none.Body.Bytes(), &noneEnv); err != nil {
+		t.Fatalf("decode create-without-fk: %v", err)
+	}
+	if v, ok := noneEnv.Data["warehouse_id"]; !ok || v != nil {
+		t.Fatalf("warehouse_id = %#v, want null when omitted", noneEnv.Data["warehouse_id"])
+	}
+
 	w := createWarehouse(t, app, jar, "Depot")
 	create := doRequest(app, jar, http.MethodPost, "/api/v1/admin/resources/belongs-engines",
 		fmt.Sprintf(`{"name":"I4","warehouse_id":%d}`, w))

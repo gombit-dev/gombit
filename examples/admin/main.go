@@ -36,8 +36,9 @@ func main() {
 		_ = db.Close()
 		log.Fatal(err)
 	}
-	// Register relation targets before Widget so its belongs_to / many_to_many
-	// pickers resolve against registered slugs.
+	// Register every model. Order is not significant: the belongs_to /
+	// many_to_many pickers resolve against the target slug at request time (the
+	// SPA calls the target's list endpoint), not at Register time.
 	for _, register := range []func(*framework.App) error{
 		warehouse.RegisterAdmin,
 		part.RegisterAdmin,
