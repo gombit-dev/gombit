@@ -485,7 +485,7 @@ func applySearch(q *gorm.DB, m *registered, term string) (*gorm.DB, error) {
 			continue
 		}
 		ors = append(ors, clause.Expr{
-			SQL:  quoteIdent(q, col) + " LIKE ? ESCAPE ?",
+			SQL:  "LOWER(" + quoteIdent(q, col) + ") LIKE LOWER(?) ESCAPE ?",
 			Vars: []any{pattern, `\`},
 		})
 	}

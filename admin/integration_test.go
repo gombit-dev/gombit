@@ -60,6 +60,23 @@ func runResourceDriver(t *testing.T, driver config.DatabaseDriver, dsn string) {
 	if list.Code != http.StatusOK {
 		t.Fatalf("list status = %d; body: %s", list.Code, list.Body.String())
 	}
+
+	// Search must be ASCII case-insensitive on every driver, matching
+	// SQLite's default behavior — Postgres's plain LIKE is case-sensitive,
+	// which was issue #200. (ASCII only: SQLite's LOWER() doesn't fold
+	// non-ASCII case, so this doesn't prove Unicode parity with Postgres/
+	// MySQL's locale-aware LOWER().)
+	caseInsensitive := doRequest(app, jar, http.MethodGet, "/api/v1/admin/resources/widgets?search=bolt", "")
+	if caseInsensitive.Code != http.StatusOK {
+		t.Fatalf("case-insensitive search status = %d; body: %s", caseInsensitive.Code, caseInsensitive.Body.String())
+	}
+	var foundLower listEnvelope
+	if err := json.Unmarshal(caseInsensitive.Body.Bytes(), &foundLower); err != nil {
+		t.Fatalf("decode case-insensitive search: %v", err)
+	}
+	if foundLower.Meta == nil || foundLower.Meta.Total != 1 || len(foundLower.Data) != 1 || foundLower.Data[0]["name"] != "Bolt" {
+		t.Fatalf("case-insensitive search = %+v", foundLower)
+	}
 	del := doRequest(app, jar, http.MethodDelete, "/api/v1/admin/resources/widgets/"+id, "")
 	if del.Code != http.StatusOK {
 		t.Fatalf("delete status = %d; body: %s", del.Code, del.Body.String())

@@ -250,7 +250,10 @@ List query parameters:
 
 - `page`, `per_page` (default page 1, per_page 20, max 100; same
   `contract.ClampPage` as generated list handlers)
-- `search` (OR `LIKE` across `Options.Search`)
+- `search` (OR `LIKE` across `Options.Search`, ASCII case-insensitive on
+  every supported driver — SQLite's built-in `LOWER()` folds ASCII only, so
+  full Unicode case-folding parity with Django's `icontains` is not
+  guaranteed for accented/non-Latin search terms)
 - `ordering` (a field from `Options.Ordering`; prefix `-` for DESC)
 - one query key per `Options.Filter` field
 

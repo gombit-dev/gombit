@@ -515,6 +515,19 @@ func TestResourceListPaginationSearchOrderFilter(t *testing.T) {
 		t.Fatalf("search = %+v", found)
 	}
 
+	// Search is ASCII case-insensitive regardless of driver collation — see
+	// issue #200. (Not a full Django icontains equivalent: SQLite's LOWER()
+	// only folds ASCII, so Unicode case-folding parity across drivers isn't
+	// guaranteed for accented/non-Latin terms.)
+	caseInsensitive := doRequest(app, jar, http.MethodGet, "/api/v1/admin/resources/widgets?search=beta", "")
+	var foundLower listEnvelope
+	if err := json.Unmarshal(caseInsensitive.Body.Bytes(), &foundLower); err != nil {
+		t.Fatalf("decode case-insensitive search: %v", err)
+	}
+	if foundLower.Meta == nil || foundLower.Meta.Total != 1 || len(foundLower.Data) != 1 || foundLower.Data[0]["name"] != "Beta" {
+		t.Fatalf("case-insensitive search = %+v", foundLower)
+	}
+
 	ordered := doRequest(app, jar, http.MethodGet, "/api/v1/admin/resources/widgets?ordering=-price", "")
 	var ranked listEnvelope
 	if err := json.Unmarshal(ordered.Body.Bytes(), &ranked); err != nil {
