@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -42,6 +43,61 @@ func TestEmbeddedFrontendServesIndexAndAssets(t *testing.T) {
 	}
 	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "javascript") && !strings.Contains(ct, "ecmascript") {
 		t.Fatalf("GET /assets/app.js Content-Type = %q, want javascript", ct)
+	}
+}
+
+// TestEmbeddedFrontendHeadMatchesGet is the regression test for #251: HEAD
+// on the SPA fallback (root and any unmatched client-side route) must
+// behave like GET minus the body, not 404. It also covers /index.html
+// directly: that path returned 200 for HEAD even before this fix (the
+// bug report's own repro only checked status via curl -I), but serveIndexHTML
+// still wrote the full body on a HEAD request — a body-suppression gap
+// curl -I can't see (libcurl silently discards a HEAD response body), only
+// caught here because serveEmbed drives the handler directly against a
+// ResponseRecorder, which — unlike a real net/http.Server — never
+// suppresses a HEAD body on its own.
+func TestEmbeddedFrontendHeadMatchesGet(t *testing.T) {
+	app := newTestApp(t, WithEmbeddedFrontend(spaFixtureFS()))
+
+	for _, path := range []string{"/", "/index.html", "/login", "/products/new"} {
+		get := serveEmbed(t, app, http.MethodGet, path, nil)
+		if get.Code != http.StatusOK {
+			t.Fatalf("GET %s status = %d, want %d; body=%s", path, get.Code, http.StatusOK, get.Body.String())
+		}
+		wantLength := strconv.Itoa(get.Body.Len())
+
+		rec := serveEmbed(t, app, http.MethodHead, path, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("HEAD %s status = %d, want %d; body=%s", path, rec.Code, http.StatusOK, rec.Body.String())
+		}
+		if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/html") {
+			t.Fatalf("HEAD %s Content-Type = %q, want text/html", path, ct)
+		}
+		if got := rec.Body.String(); got != "" {
+			t.Fatalf("HEAD %s body = %q, want empty", path, got)
+		}
+		// RFC 9110: a HEAD response must carry the Content-Length the
+		// equivalent GET would send, even though the body itself is omitted.
+		if got := rec.Header().Get("Content-Length"); got != wantLength {
+			t.Fatalf("HEAD %s Content-Length = %q, want %q (GET body length)", path, got, wantLength)
+		}
+	}
+
+	get := serveEmbed(t, app, http.MethodGet, "/assets/app.js", nil)
+	if get.Code != http.StatusOK {
+		t.Fatalf("GET /assets/app.js status = %d, want %d; body=%s", get.Code, http.StatusOK, get.Body.String())
+	}
+	wantLength := strconv.Itoa(get.Body.Len())
+
+	rec := serveEmbed(t, app, http.MethodHead, "/assets/app.js", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("HEAD /assets/app.js status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if got := rec.Body.String(); got != "" {
+		t.Fatalf("HEAD /assets/app.js body = %q, want empty", got)
+	}
+	if got := rec.Header().Get("Content-Length"); got != wantLength {
+		t.Fatalf("HEAD /assets/app.js Content-Length = %q, want %q (GET body length)", got, wantLength)
 	}
 }
 

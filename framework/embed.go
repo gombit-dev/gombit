@@ -69,10 +69,9 @@ func embeddedFrontendHandler(fsys fs.FS, apiPrefix string) gin.HandlerFunc {
 			}
 		}
 
-		if c.Request.Method != http.MethodGet {
-			c.AbortWithStatus(http.StatusNotFound)
-			return
-		}
+		// SPA fallback: only GET and HEAD reach this handler at all (the
+		// guard above), and serveIndexHTML writes via writeBytes, which
+		// already skips the body for HEAD — so no method check belongs here.
 		serveIndexHTML(c, fsys, apiPrefix)
 	}
 }
@@ -139,7 +138,7 @@ func serveEmbeddedFile(c *gin.Context, fsys fs.FS, name string) bool {
 	if err != nil {
 		return false
 	}
-	c.Data(http.StatusOK, contentTypeFor(name), data)
+	writeBytes(c, contentTypeFor(name), data)
 	return true
 }
 
@@ -151,7 +150,7 @@ func serveIndexHTML(c *gin.Context, fsys fs.FS, apiPrefix string) {
 	}
 	data = injectAPIPrefixHTML(data, apiPrefix)
 	applySPAContentSecurityPolicy(c)
-	c.Data(http.StatusOK, "text/html; charset=utf-8", data)
+	writeBytes(c, "text/html; charset=utf-8", data)
 }
 
 func contentTypeFor(name string) string {
