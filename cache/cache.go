@@ -53,7 +53,9 @@ func Open(cfg config.CacheConfig) (*Store, error) {
 
 	switch driver := Driver(cfg.Driver); driver {
 	case DriverMemory:
-		impl = NewMemory()
+		mem := NewMemory(WithJanitor(memoryJanitorInterval))
+		impl = mem
+		closeFn = mem.Close
 	case DriverRedis:
 		var err error
 		client, err = NewRedisClient(cfg.Redis)

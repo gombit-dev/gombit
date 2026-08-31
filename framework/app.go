@@ -171,7 +171,11 @@ func WithConfig(cfg config.Config) Option {
 	}
 }
 
-// WithCache attaches an application-owned cache implementation to the app.
+// WithCache attaches a cache implementation the caller opened. Unlike the
+// cache App opens for itself via cache.Open (closed automatically on
+// shutdown), App does not call Close on a cache attached this way — the
+// caller keeps ownership and is responsible for closing it, including
+// stopping a cache.Memory janitor goroutine started with cache.WithJanitor.
 func WithCache(c cache.Cache) Option {
 	return func(app *App) error {
 		if c == nil {

@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -181,6 +182,152 @@ func TestOpenMemoryDriverFromConfig(t *testing.T) {
 	}
 	if !found || got != "value" {
 		t.Fatalf("Get() = (%t, %q), want (true, value)", found, got)
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close() error = %v, want nil", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("second Close() error = %v, want nil", err)
+	}
+}
+
+// TestMemorySweepExpiredRemovesUnreadKeys is the regression test for #199:
+// a key that is set and never read again (rate limits, one-time tokens,
+// nonces) must still be reclaimed once expired. Deterministic — no
+// goroutine, no real sleep — via the same fake-clock pattern
+// TestMemoryExpiresValues uses, calling sweepExpired directly.
+func TestMemorySweepExpiredRemovesUnreadKeys(t *testing.T) {
+	ctx := context.Background()
+	c := NewMemory()
+	now := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
+	c.now = func() time.Time { return now }
+
+	if err := c.Set(ctx, "expiring:1", "value", time.Second); err != nil {
+		t.Fatalf("Set(expiring:1) error = %v, want nil", err)
+	}
+	if err := c.Set(ctx, "expiring:2", "value", time.Second); err != nil {
+		t.Fatalf("Set(expiring:2) error = %v, want nil", err)
+	}
+	if err := c.Set(ctx, "keeps", "value", time.Minute); err != nil {
+		t.Fatalf("Set(keeps) error = %v, want nil", err)
+	}
+	if err := c.Set(ctx, "forever", "value", 0); err != nil {
+		t.Fatalf("Set(forever) error = %v, want nil", err)
+	}
+
+	now = now.Add(time.Second)
+	c.sweepExpired()
+
+	c.mu.RLock()
+	remaining := len(c.items)
+	_, expiring1 := c.items["expiring:1"]
+	_, expiring2 := c.items["expiring:2"]
+	_, keeps := c.items["keeps"]
+	_, forever := c.items["forever"]
+	c.mu.RUnlock()
+
+	if expiring1 || expiring2 {
+		t.Fatalf("sweepExpired() left expired keys behind; items = %d", remaining)
+	}
+	if !keeps || !forever {
+		t.Fatalf("sweepExpired() removed a non-expired key; keeps=%t forever=%t", keeps, forever)
+	}
+	if remaining != 2 {
+		t.Fatalf("len(items) after sweep = %d, want 2", remaining)
+	}
+}
+
+// TestMemorySweepExpiredBatchesLargeMaps proves sweepExpired never holds
+// the write lock for a whole large map in one acquisition: with a batch
+// size of 10 and 25 keys, it must take multiple sweepBatch calls (3, not
+// 1), so no single lock hold is proportional to the full map size — the
+// fix for the lock-contention finding on #199's own high-cardinality
+// scenario. Deterministic: only counts batches and checks final contents,
+// no timing or concurrency involved.
+func TestMemorySweepExpiredBatchesLargeMaps(t *testing.T) {
+	ctx := context.Background()
+	c := NewMemory()
+	c.sweepBatchSize = 10
+	now := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
+	c.now = func() time.Time { return now }
+
+	const total = 25
+	for i := range total {
+		key := fmt.Sprintf("rate:%d", i)
+		if err := c.Set(ctx, key, "1", time.Second); err != nil {
+			t.Fatalf("Set(%s) error = %v, want nil", key, err)
+		}
+	}
+	// One key survives the sweep so batching (not just an emptied map) is
+	// what's under test.
+	if err := c.Set(ctx, "keeps", "value", time.Minute); err != nil {
+		t.Fatalf("Set(keeps) error = %v, want nil", err)
+	}
+
+	now = now.Add(time.Second)
+	batches := c.sweepExpired()
+
+	if batches != 3 {
+		t.Fatalf("sweepExpired() batches = %d, want 3 (25 expired keys + 1 kept key, batch size 10)", batches)
+	}
+	c.mu.RLock()
+	remaining := len(c.items)
+	_, keeps := c.items["keeps"]
+	c.mu.RUnlock()
+	if remaining != 1 || !keeps {
+		t.Fatalf("items after sweep = %d (keeps=%t), want 1 (keeps=true)", remaining, keeps)
+	}
+}
+
+// TestMemoryJanitorReclaimsExpiredKeys proves the background goroutine
+// started by WithJanitor is actually wired to sweepExpired and that Close
+// stops it (and is idempotent). The sweep logic itself is already covered
+// deterministically above; this only exercises the real-timing wiring, with
+// a bounded poll instead of a fixed sleep.
+func TestMemoryJanitorReclaimsExpiredKeys(t *testing.T) {
+	ctx := context.Background()
+	c := NewMemory(WithJanitor(5 * time.Millisecond))
+	t.Cleanup(func() { _ = c.Close() })
+
+	if err := c.Set(ctx, "rate:client", "1", 10*time.Millisecond); err != nil {
+		t.Fatalf("Set() error = %v, want nil", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		c.mu.RLock()
+		_, ok := c.items["rate:client"]
+		c.mu.RUnlock()
+		if !ok {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	c.mu.RLock()
+	_, stillThere := c.items["rate:client"]
+	c.mu.RUnlock()
+	if stillThere {
+		t.Fatal("janitor did not reclaim the expired key within the deadline")
+	}
+
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close() error = %v, want nil", err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("second Close() error = %v, want nil", err)
+	}
+}
+
+// TestMemoryNoJanitorCloseIsNoop confirms NewMemory() with no option never
+// starts a goroutine and Close is still safe to call on it, so the ~10
+// existing direct NewMemory() call sites in this file and namespace_test.go
+// stay unaffected by #199's fix.
+func TestMemoryNoJanitorCloseIsNoop(t *testing.T) {
+	c := NewMemory()
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close() error = %v, want nil", err)
 	}
 }
 
