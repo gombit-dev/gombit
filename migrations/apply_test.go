@@ -250,6 +250,59 @@ func TestMigrateRecordsOnlyVersionsPresentInAtlas(t *testing.T) {
 	}
 }
 
+// Note: a happy-path multi-statement SQLite test is intentionally not here.
+// mattn/go-sqlite3 already executes a multi-statement string sequentially in
+// one Exec, and Rollback runs inside a transaction on SQLite, so such a test
+// would pass identically before and after the statement-splitting fix for
+// #249 and prove nothing. The real regression coverage for that fix is
+// TestMigrateRollbackStatusMySQL (migrations/integration_test.go, requires a
+// live MySQL DSN) and the statement-numbering check below.
+
+func TestRollbackMidStatementFailureNamesStatementNumber(t *testing.T) {
+	workDir := t.TempDir()
+	migrationDir := filepath.Join(workDir, "database", "migrations")
+	if err := os.MkdirAll(migrationDir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	writeFile(t, filepath.Join(migrationDir, "20260101000000_create_widgets.sql"),
+		"CREATE TABLE widgets (id INTEGER PRIMARY KEY);")
+	writeFile(t, filepath.Join(migrationDir, "downs", "20260101000000_create_widgets.down.sql"),
+		"DROP TABLE widgets;\nTHIS IS NOT VALID SQL;")
+
+	dsn := "file:" + filepath.Join(workDir, "app.db") + "?cache=shared&_fk=1"
+	cfg := config.DatabaseConfig{Driver: config.DatabaseDriverSQLite, DSN: dsn}
+	opts := ApplyOptions{
+		WorkDir:      workDir,
+		MigrationDir: migrationDir,
+		Database:     cfg,
+		Stdout:       io.Discard,
+		runner:       &applyFakeAtlas{t: t},
+	}
+	if err := Migrate(context.Background(), opts); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	err := Rollback(context.Background(), opts)
+	if err == nil {
+		t.Fatal("Rollback() error = nil, want second-statement failure")
+	}
+	if !strings.Contains(err.Error(), "execute statement 2 of") {
+		t.Fatalf("Rollback() error = %q, want it to name the failing statement", err)
+	}
+	if !strings.Contains(err.Error(), "framework_migrations unchanged") {
+		t.Fatalf("Rollback() error = %q, want unchanged revisions guidance", err)
+	}
+
+	db, err := database.Open(cfg)
+	if err != nil {
+		t.Fatalf("database.Open() error = %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	if !db.Migrator().HasTable("widgets") {
+		t.Fatal("expected widgets table to remain: rollback runs in a transaction on SQLite, so the successful first statement must be rolled back too")
+	}
+}
+
 func TestRollbackMidBatchFailureAbortsTransaction(t *testing.T) {
 	workDir := t.TempDir()
 	migrationDir := filepath.Join(workDir, "database", "migrations")

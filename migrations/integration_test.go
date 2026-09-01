@@ -34,7 +34,8 @@ func TestMigrateRollbackStatusPostgres(t *testing.T) {
 CREATE TABLE IF NOT EXISTS widgets (
   id BIGSERIAL PRIMARY KEY,
   name TEXT NOT NULL
-);`, `DROP TABLE IF EXISTS widgets;`)
+);`,
+		"ALTER TABLE widgets DROP COLUMN name;\nDROP TABLE IF EXISTS widgets;")
 }
 
 func TestMigrateRollbackStatusMySQL(t *testing.T) {
@@ -48,7 +49,8 @@ func TestMigrateRollbackStatusMySQL(t *testing.T) {
 CREATE TABLE IF NOT EXISTS widgets (
   id BIGINT AUTO_INCREMENT PRIMARY KEY,
   name VARCHAR(255) NOT NULL
-);`, `DROP TABLE IF EXISTS widgets;`)
+);`,
+		"ALTER TABLE widgets DROP COLUMN name;\nDROP TABLE IF EXISTS widgets;")
 }
 
 func TestSeedResetPostgres(t *testing.T) {
