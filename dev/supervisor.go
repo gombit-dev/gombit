@@ -19,7 +19,12 @@ type ProcSpec struct {
 	Args []string
 }
 
-func runProcesses(ctx context.Context, specs []ProcSpec, stdout, stderr io.Writer, command CommandFunc, wait time.Duration) error {
+// onCmdReady, when non-nil, is called synchronously right after a spec's
+// Env/Dir/Stdout/Stderr are assigned to its *exec.Cmd, before Start. It is
+// nil on every real `gombit dev` invocation; tests use it to observe a
+// child's final Env without racing runProcesses's unsynchronized field
+// writes (see dev/run_test.go TestRunChildEnvReplacesParentHTTPAddr).
+func runProcesses(ctx context.Context, specs []ProcSpec, stdout, stderr io.Writer, command CommandFunc, wait time.Duration, onCmdReady func(*exec.Cmd)) error {
 	if command == nil {
 		command = exec.Command
 	}
@@ -50,6 +55,9 @@ func runProcesses(ctx context.Context, specs []ProcSpec, stdout, stderr io.Write
 		}
 		if cmd.Stderr == nil {
 			cmd.Stderr = stderr
+		}
+		if onCmdReady != nil {
+			onCmdReady(cmd)
 		}
 		prepareProcessGroup(cmd)
 		if err := cmd.Start(); err != nil {

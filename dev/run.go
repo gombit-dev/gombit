@@ -114,7 +114,7 @@ func Run(ctx context.Context, opts Options) error {
 		_ = watchOpenAPI(runCtx, opts, services.Backend+"/openapi.json")
 	}()
 
-	err = runProcesses(runCtx, procs, opts.Stdout, opts.Stderr, opts.Command, opts.ShutdownWait)
+	err = runProcesses(runCtx, procs, opts.Stdout, opts.Stderr, opts.Command, opts.ShutdownWait, opts.onCmdReady)
 	cancel()
 	<-watchDone
 	if err != nil {

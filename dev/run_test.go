@@ -54,8 +54,8 @@ func TestRunPrintsServiceTableAndShutsDown(t *testing.T) {
 	}
 
 	workDir := writeDevApp(t)
-	stdout := new(bytes.Buffer)
-	stderr := new(bytes.Buffer)
+	stdout := &syncBuffer{}
+	stderr := &syncBuffer{}
 	var started atomic.Int32
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -150,7 +150,7 @@ func TestRunProcessesShutdownOnCancel(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- runProcesses(ctx, specs, ioDiscard{}, ioDiscard{}, command, 2*time.Second)
+		errCh <- runProcesses(ctx, specs, ioDiscard{}, ioDiscard{}, command, 2*time.Second, nil)
 	}()
 
 	waitStarts(t, startedCh, 2)
@@ -172,6 +172,29 @@ type ioDiscard struct{}
 
 func (ioDiscard) Write(p []byte) (int, error) {
 	return len(p), nil
+}
+
+// syncBuffer is a bytes.Buffer safe for concurrent Write/String. Real
+// `gombit dev` always shares its Stdout/Stderr *os.File across child
+// processes (os/exec wires those directly, no in-process copy goroutine),
+// but a mocked test process makes os/exec spin up a copy goroutine per
+// child, so an in-memory sink shared across children (and read from the
+// test goroutine while they run) needs its own locking.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 func writeDevApp(t *testing.T) string {
@@ -210,37 +233,23 @@ func waitStarts(t *testing.T, startedCh <-chan struct{}, n int) {
 	}
 }
 
-// waitChildEnvAssigned waits until n captured cmds have a non-empty Env.
-// opts.Command signals startedCh before runOne/runProcesses assigns cmd.Env,
-// so reading Env immediately after waitStarts can observe a nil overlay.
-func waitChildEnvAssigned(t *testing.T, mu *sync.Mutex, cmds *[]*exec.Cmd, n int) []*exec.Cmd {
+// waitCmdsReady receives n cmds sent by runProcesses's onCmdReady hook, which
+// fires after cmd.Env is assigned — so each receive has a real happens-before
+// edge to that write (Go memory model: a send happens before the
+// corresponding receive completes), unlike polling cmd.Env directly.
+func waitCmdsReady(t *testing.T, readyCh <-chan *exec.Cmd, n int) []*exec.Cmd {
 	t.Helper()
 	deadline := time.After(3 * time.Second)
-	ticker := time.NewTicker(5 * time.Millisecond)
-	defer ticker.Stop()
-	var captured []*exec.Cmd
-	for {
-		mu.Lock()
-		captured = append([]*exec.Cmd(nil), *cmds...)
-		ready := len(captured) >= n
-		if ready {
-			for _, cmd := range captured {
-				if len(cmd.Env) == 0 {
-					ready = false
-					break
-				}
-			}
-		}
-		mu.Unlock()
-		if ready {
-			return captured
-		}
+	captured := make([]*exec.Cmd, 0, n)
+	for i := 0; i < n; i++ {
 		select {
+		case cmd := <-readyCh:
+			captured = append(captured, cmd)
 		case <-deadline:
-			t.Fatalf("timed out waiting for child Env overlay (got %d cmds)", len(captured))
-		case <-ticker.C:
+			t.Fatalf("timed out waiting for %d child cmds to be ready (got %d)", n, i)
 		}
 	}
+	return captured
 }
 
 func TestPlanBackendPrefersAir(t *testing.T) {
@@ -494,10 +503,12 @@ func TestRunChildEnvReplacesParentHTTPAddr(t *testing.T) {
 	t.Setenv("VITE_API_URL", "http://localhost:8080/api/v1")
 
 	workDir := writeDevApp(t)
-	stdout := new(bytes.Buffer)
-	var mu sync.Mutex
-	var cmds []*exec.Cmd
-	startedCh := make(chan struct{}, 2)
+	// readyCh (not startedCh+polling) is the synchronization point: onCmdReady
+	// fires after runProcesses assigns cmd.Env, so the channel receive below
+	// has a real happens-before edge to that write. Reading cmd.Env off a
+	// racily-polled slice (the previous approach) trips -race even though the
+	// values eventually observed are correct.
+	readyCh := make(chan *exec.Cmd, 2)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
@@ -507,7 +518,7 @@ func TestRunChildEnvReplacesParentHTTPAddr(t *testing.T) {
 		FrontendPort: 15174,
 		PollInterval: 50 * time.Millisecond,
 		ShutdownWait: 2 * time.Second,
-		Stdout:       stdout,
+		Stdout:       ioDiscard{},
 		Stderr:       ioDiscard{},
 		LookPath: func(file string) (string, error) {
 			switch file {
@@ -518,16 +529,12 @@ func TestRunChildEnvReplacesParentHTTPAddr(t *testing.T) {
 			}
 		},
 		Command: func(name string, args ...string) *exec.Cmd {
-			cmd := exec.Command("sh", "-c", "echo ready; trap 'exit 0' TERM; sleep 60")
-			mu.Lock()
-			cmds = append(cmds, cmd)
-			mu.Unlock()
-			startedCh <- struct{}{}
-			return cmd
+			return exec.Command("sh", "-c", "echo ready; trap 'exit 0' TERM; sleep 60")
 		},
 		HTTPGet: func(ctx context.Context, rawURL string) ([]byte, error) {
 			return nil, errors.New("backend not ready")
 		},
+		onCmdReady: func(cmd *exec.Cmd) { readyCh <- cmd },
 	}
 
 	errCh := make(chan error, 1)
@@ -535,8 +542,7 @@ func TestRunChildEnvReplacesParentHTTPAddr(t *testing.T) {
 		errCh <- Run(ctx, opts)
 	}()
 
-	waitStarts(t, startedCh, 2)
-	captured := waitChildEnvAssigned(t, &mu, &cmds, 2)
+	captured := waitCmdsReady(t, readyCh, 2)
 	for _, cmd := range captured {
 		if values := envKeyValues(cmd.Env, "GOMBIT_HTTP_ADDR"); len(values) != 1 || values[0] != ":9090" {
 			t.Fatalf("child Env GOMBIT_HTTP_ADDR = %v, want single :9090", values)

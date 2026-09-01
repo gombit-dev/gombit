@@ -60,6 +60,9 @@ type Options struct {
 	// AdminURL is printed in the service table when non-empty (cookie-mode
 	// apps that mount the framework admin SPA). JWT apps leave this empty.
 	AdminURL string
+	// onCmdReady is an in-package test seam; see runProcesses. Always nil
+	// outside dev's own tests.
+	onCmdReady func(*exec.Cmd)
 }
 
 func (opts *Options) normalize() error {
