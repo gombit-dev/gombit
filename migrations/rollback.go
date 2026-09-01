@@ -13,13 +13,17 @@ import (
 )
 
 // Rollback rolls back the latest framework_migrations batch using companion down SQL.
+// Each down file is split into individual statements (like Seed) and executed
+// one Exec per statement, so a down file is no longer required to be a single
+// SQL statement on MySQL.
 //
 // On SQLite and PostgreSQL, down SQL and revision deletes run in one transaction
 // so a mid-batch failure leaves neither schema nor revision ledgers partially
 // updated. MySQL DDL often auto-commits, so a mid-batch failure can leave the
-// schema partially rolled back while revision rows remain; the error message
-// lists completed downs and revision rows are not deleted until every down
-// succeeds.
+// schema partially rolled back while revision rows remain — including inside a
+// single down file, if an earlier statement in it already committed before a
+// later one failed; the error message names the failing statement and file,
+// and revision rows are not deleted until every down succeeds.
 func Rollback(ctx context.Context, opts ApplyOptions) error {
 	if ctx == nil {
 		return errors.New("migrations: nil context")
@@ -100,8 +104,17 @@ func Rollback(ctx context.Context, opts ApplyOptions) error {
 		if sqlText == "" {
 			return rollbackFail(tx, useTx, versions, file.DownPath, errors.New("empty down migration"), "execute")
 		}
-		if err := execDB.Exec(sqlText).Error; err != nil {
-			return rollbackFail(tx, useTx, versions, file.DownPath, err, "execute")
+		// Split like Seed does: go-sql-driver/mysql rejects a multi-statement
+		// string in one Exec unless the DSN opts in with multiStatements=true,
+		// which no gombit-generated or documented MySQL DSN does.
+		stmts := splitSQLStatements(sqlText)
+		if len(stmts) == 0 {
+			return rollbackFail(tx, useTx, versions, file.DownPath, errors.New("down migration has no executable statements"), "execute")
+		}
+		for i, stmt := range stmts {
+			if err := execDB.Exec(stmt).Error; err != nil {
+				return rollbackFail(tx, useTx, versions, file.DownPath, err, fmt.Sprintf("execute statement %d of", i+1))
+			}
 		}
 		versions = append(versions, file.Version)
 	}
