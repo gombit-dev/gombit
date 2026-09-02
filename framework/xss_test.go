@@ -27,7 +27,60 @@ func TestStripHTML(t *testing.T) {
 		{name: "script discarded", in: `<script>alert(1)</script>hi`, want: "hi"},
 		{name: "bold stripped", in: `<b>hi</b>`, want: "hi"},
 		{name: "img stripped", in: `x<img src=x onerror=alert(0)>y`, want: "xy"},
-		{name: "unclosed script fail-closed", in: `<script src=x>alert(1)`, want: ""},
+		{name: "unclosed script keeps trailing text", in: `<script src=x>alert(1)`, want: "alert(1)"},
+		{name: "unclosed script keeps surrounding text", in: `hi<script>bye`, want: "hibye"},
+		{name: "unclosed textarea after closed script", in: `<script>a</script>b<textarea>c`, want: "bc"},
+		// The inner <textarea> finds its own matching close tag inside the
+		// buffered raw text, so re-tokenizing discards its content exactly
+		// like the top-level pass would — properly closed dangerous content
+		// stays hidden even when it is nested inside a wrapper that never
+		// closes at all.
+		{name: "nested skip: inner closes, its content is still discarded", in: `<script><textarea>x</textarea>y`, want: "y"},
+		{name: "nested skip, outer closes, all content discarded", in: `<script><textarea>x</textarea>y</script>z`, want: "z"},
+		{name: "doubled unclosed skip of same tag", in: `<script><script>x`, want: "x"},
+		{name: "stray end tag closes the real open, extra one is a no-op", in: `<textarea>a</textarea></textarea>b`, want: "b"},
+		{name: "self-closing skip tag does not enter skip mode", in: `<script/>after`, want: "after"},
+		{name: "empty closed skip element", in: `<script></script>`, want: ""},
+		// script/style/textarea/noscript/iframe are HTML "raw text" elements:
+		// golang.org/x/net/html scans them for a literal closing tag and, when
+		// the wrapper never closes, hands back everything up to EOF as one
+		// opaque, never-tokenized TextToken — so a payload smuggled inside an
+		// unclosed wrapper must be stripped again on the way out, not trusted
+		// as already-safe plain text. Here the inner <script> also finds its
+		// own close tag, so (like the case above) its content is discarded —
+		// no live tag AND no leftover script body reach the output.
+		{name: "unclosed wrapper: inner script that does close is still fully discarded", in: `<textarea><script>alert(1)</script>`, want: ""},
+		// Neither wrapper closes this time, so there is no "properly closed
+		// dangerous content" to discard — the plain text at the very center
+		// is legitimately safe and must survive, with no tag syntax at all
+		// (not even a partial "<script>") leaking out around it.
+		{name: "doubly unclosed wrapper still recovers the innermost plain text", in: `<textarea><script>alert(1)`, want: "alert(1)"},
+		{name: "unclosed wrapper cannot smuggle a live img onerror tag", in: `<noscript>x<img src=x onerror=alert(1)>y`, want: "xy"},
+		// A quoted attribute value may itself contain a literal ">". A regexp
+		// strip that isn't quote-aware ends its match at that inner ">" and
+		// leaks the rest of the tag (including the closing ">") as text — the
+		// classic tag-stripper bypass. stripHTML must re-tokenize with the
+		// real (quote-aware) HTML tokenizer, not a regexp, so the whole <img>
+		// start tag is recognized and dropped instead of partially surviving.
+		{name: "unclosed wrapper: quoted attribute containing > does not defeat the strip", in: `<noscript><img src=x onerror="if(1>0){alert(document.cookie)}">`, want: ""},
+		// object/embed are ordinary elements, not HTML "raw text" elements
+		// like script/style/textarea/noscript/iframe, so — unlike those —
+		// they can genuinely nest within a single tokenizer pass. A single
+		// shared skipDepth counter is not enough to get this right: the
+		// inner </object> must discard its own "x" independently of whether
+		// the outer <object> ever closes, so a nested-but-properly-closed
+		// dangerous element cannot smuggle its content out just because an
+		// ancestor happens to stay open.
+		{name: "nested object, inner closes, outer closes: all discarded", in: `<object><object>x</object>y</object>z`, want: "z"},
+		{name: "nested object, inner closes, outer never closes: inner content still discarded", in: `<object><object>x</object>y`, want: "y"},
+		// Each unclosed raw-text wrapper forces one more re-tokenizing round
+		// on a string that is only one tag shorter, so re-tokenizing without
+		// a bound would be quadratic in a chain this deep. Past
+		// maxUnclosedSkipRecursion (4), stripHTML falls back to discarding
+		// the remainder rather than recursing further — verified fast in
+		// isolation; asserted here only for correctness of the fallback.
+		{name: "unclosed chain within the recursion budget still recovers text", in: `<script><script><script><script>x`, want: "x"},
+		{name: "unclosed chain past the recursion budget falls back to discard", in: `<script><script><script><script><script><script>x`, want: ""},
 		{name: "nested markup", in: `<div><b>a</b><i>b</i></div>`, want: "ab"},
 		// Incomplete "<"+letter is not a tag (golang.org/x/net/html would
 		// otherwise eat the rest of the string: "a<b" → "a").

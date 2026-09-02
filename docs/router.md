@@ -91,8 +91,9 @@ Other behavior notes:
   [`framework.WithRawBodyPaths`](auth-cookie.md#exempting-non-browser-endpoints-webhooks):
   they skip sanitization entirely (and the 8MiB cap below), so the body reaches
   the handler byte-for-byte, and they are CSRF-exempt too.
-- Unclosed dangerous elements (for example a truncated `<script>...`) discard
-  the remainder of the string (fail-closed).
+- Unclosed dangerous elements (for example a truncated `<script>...`) strip
+  the tag itself but keep the following text as plain text; only content
+  inside a *properly closed* dangerous element is discarded.
 - Incomplete angle brackets that are not a complete HTML tag (no closing
   `>`, e.g. a product name `a<b`) are left unchanged. The HTML tokenizer
   would otherwise treat `"<"+letter` as a start tag and silently shorten

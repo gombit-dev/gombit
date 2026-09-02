@@ -246,10 +246,56 @@ func sanitizeJSONValue(value any, fieldName string) bool {
 // contain "<" / ">" but no complete tag (no closing ">", e.g. "a<b") are
 // also returned unchanged so comparison text is not truncated.
 //
-// An unclosed skip element (for example `<script src=x>...`) discards the
-// remainder of the string — fail-closed for truncated markup. Self-closing
+// An unclosed skip element (for example `<script src=x>...`) strips the tag
+// itself but keeps the following text (issue #201). Text seen while
+// skipDepth > 0 is buffered into skipBuf rather than dropped. skipStarts is
+// a stack of checkpoints into skipBuf, one per currently-open skip element:
+// pushed with the length of skipBuf at the moment that element opened,
+// popped and truncated back to on its matching close. That discards exactly
+// the content opened-and-closed by that one element, however deep it is
+// nested inside other still-open skip elements — a single shared skipDepth
+// counter is not enough, since script/style/textarea/noscript/iframe are
+// HTML "raw text" elements (see below) and can never really nest, but
+// object/embed are ordinary elements and can: for `<object><object>x
+// </object>y`, the inner </object> must discard "x" on its own, without
+// waiting for (or depending on) the outer <object> ever closing too.
+//
+// Whatever remains in skipBuf when the tokenizer runs out of input
+// (skipDepth still > 0 at ErrorToken, nothing left open ever closed) is
+// flushed to the output — re-tokenized from scratch, see below. Self-closing
 // skip tags do not enter skip mode.
+//
+// Re-tokenizing applies the same skip logic again, so a nested dangerous
+// element that finds its own closing tag inside the buffer is still
+// discarded — only text that is not inside any closed dangerous element,
+// anywhere in the chain of unclosed wrappers, survives to the output.
+//
+// The flush re-tokenizes rather than emitting the buffer verbatim, and it
+// must do so with the real tokenizer, not a regexp: script/style/textarea/
+// noscript/iframe are HTML "raw text" elements, so golang.org/x/net/html
+// scans them for a literal closing tag and, finding none, hands back
+// everything up to EOF as one opaque, never-tokenized TextToken — it can
+// still contain complete, attribute-quoted tags that were never parsed. A
+// naive regexp strip (completeHTMLTag) does not track quoting, so a `>`
+// inside a quoted attribute value (`onerror="if(1>0){...}"`) ends the match
+// early and leaks the rest of the tag as text — a classic tag-stripper
+// bypass. Re-tokenizing lets the real HTML tokenizer parse the attribute
+// correctly instead.
+//
+// maxUnclosedSkipRecursion bounds that re-tokenizing to a fixed number of
+// rounds so a pathological chain of unclosed raw-text tags
+// (`<script><script>...`) cannot force unbounded recursive re-tokenizing of
+// a string shrinking by one tag per round — that would be quadratic in
+// input size. Past the cap, the remaining tail reverts to the pre-#201
+// fail-closed default (discarded) instead of being trusted as plain text;
+// legitimate content practically never nests this deep.
 func stripHTML(s string) string {
+	return stripHTMLUnclosed(s, maxUnclosedSkipRecursion)
+}
+
+const maxUnclosedSkipRecursion = 4
+
+func stripHTMLUnclosed(s string, budget int) string {
 	if !strings.ContainsAny(s, "<>") {
 		return s
 	}
@@ -259,20 +305,28 @@ func stripHTML(s string) string {
 
 	var b strings.Builder
 	b.Grow(len(s))
+	var skipBuf []byte
+	var skipStarts []int
 	tokenizer := html.NewTokenizer(strings.NewReader(s))
 	skipDepth := 0
 	for {
 		switch tokenizer.Next() {
 		case html.ErrorToken:
+			if skipDepth > 0 && budget > 0 {
+				b.WriteString(stripHTMLUnclosed(string(skipBuf), budget-1))
+			}
 			return b.String()
 		case html.TextToken:
 			if skipDepth == 0 {
 				b.Write(tokenizer.Text())
+			} else {
+				skipBuf = append(skipBuf, tokenizer.Text()...)
 			}
 		case html.StartTagToken:
 			name, _ := tokenizer.TagName()
 			if _, skip := xssSkipElementContent[string(name)]; skip {
 				skipDepth++
+				skipStarts = append(skipStarts, len(skipBuf))
 			}
 		case html.SelfClosingTagToken:
 			// Self-closing skip tags have no body; do not raise skipDepth.
@@ -280,6 +334,9 @@ func stripHTML(s string) string {
 			name, _ := tokenizer.TagName()
 			if _, skip := xssSkipElementContent[string(name)]; skip && skipDepth > 0 {
 				skipDepth--
+				start := skipStarts[len(skipStarts)-1]
+				skipStarts = skipStarts[:len(skipStarts)-1]
+				skipBuf = skipBuf[:start]
 			}
 		}
 	}
