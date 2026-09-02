@@ -349,3 +349,64 @@ func TestParseResourceName(t *testing.T) {
 		t.Fatalf("product error = %v, want reserved package product", err)
 	}
 }
+
+// TestParseResourceNameRejectsNonASCII covers issue #217: a resource name
+// becomes both a Go package name and an import path segment
+// (internal/<pkg>). Go package names may be Unicode, but Go import paths may
+// not, so a name like "Café" used to pass parseResourceName, get every file
+// written and main.go/database.go edited, and only fail deep inside
+// makemigrations — after which the tree no longer compiled and every later
+// `make resource` was wedged on the same invalid model. The fix rejects any
+// non-ASCII rune here, before anything is written, the same way Go keywords
+// and reserved packages already are.
+func TestParseResourceNameRejectsNonASCII(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		in      string
+		wantErr string
+	}{
+		// Exact message on this one case pins the actionable guidance
+		// ("only ASCII letters, digits...") so a future edit can't quietly
+		// regress it back to a bare "invalid character" with no next step.
+		{name: "accented letter", in: "Café", wantErr: `resource name "Café" contains invalid character "é" (only ASCII letters, digits, "_", and "-" are allowed)`},
+		{name: "non-Latin script", in: "Pokémon", wantErr: "invalid character"},
+		{name: "entirely non-Latin", in: "日本語", wantErr: "invalid character"},
+		// Unicode digits satisfy unicode.IsDigit but are not valid in a Go
+		// import path any more than accented letters are.
+		{name: "full-width digit", in: "Order１", wantErr: "invalid character"},
+		{name: "arabic-indic digit", in: "Order١", wantErr: "invalid character"},
+		// A combining mark rides on the preceding ASCII letter and is
+		// invisible in a casual read of the name ("café" via NFD instead of
+		// NFC), but it is still a distinct, non-ASCII rune the loop must
+		// catch on its own, not something toPascal/toSnake silently drops.
+		{name: "combining diacritic (NFD)", in: "Café", wantErr: "invalid character"},
+		// Non-letter, non-digit non-ASCII (emoji) was already rejected
+		// before #217 (not unicode.IsLetter/IsDigit) — kept as a regression
+		// guard now that the character check was rewritten.
+		{name: "emoji", in: "Widget🎉", wantErr: "invalid character"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := parseResourceName(tt.in)
+			if err == nil {
+				t.Fatalf("parseResourceName(%q) succeeded, want error containing %q", tt.in, tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("parseResourceName(%q) error = %q, want it to contain %q", tt.in, err, tt.wantErr)
+			}
+		})
+	}
+
+	// Regression guard: legitimate ASCII names (including ones that happen
+	// to be common real-world nouns like "Order") must keep working — #217
+	// found no evidence that these break generation (Atlas quotes every
+	// identifier it emits), so this fix must not reject them.
+	for _, ok := range []string{"Widget", "part-2", "part_2", "Order", "Status"} {
+		if _, err := parseResourceName(ok); err != nil {
+			t.Fatalf("parseResourceName(%q) = %v, want success", ok, err)
+		}
+	}
+}

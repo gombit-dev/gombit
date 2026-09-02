@@ -51,8 +51,8 @@ func parseResourceName(raw string) (ResourceName, error) {
 		if unicode.IsSpace(r) {
 			return ResourceName{}, fmt.Errorf("resourcegen: resource name %q must not contain whitespace", raw)
 		}
-		if !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' && r != '-' {
-			return ResourceName{}, fmt.Errorf("resourcegen: resource name %q contains invalid character %q", raw, string(r))
+		if !isASCIILetterOrDigit(r) && r != '_' && r != '-' {
+			return ResourceName{}, fmt.Errorf("resourcegen: resource name %q contains invalid character %q (only ASCII letters, digits, \"_\", and \"-\" are allowed)", raw, string(r))
 		}
 	}
 	first, _ := utf8.DecodeRuneInString(strings.TrimLeft(raw, "_-"))
@@ -156,6 +156,19 @@ func pluralizeSnake(snake string) string {
 		return "s"
 	}
 	return inflection.Plural(snake)
+}
+
+// isASCIILetterOrDigit reports whether r is an ASCII letter or digit.
+// Unlike unicode.IsLetter/IsDigit, this rejects non-ASCII letters and digits
+// ("é", full-width "１"): a resource name becomes both a Go package name and
+// an import path segment (internal/<pkg>), and while Go package names may be
+// Unicode, Go import paths may not. Accepting a rune here that later fails
+// import-path validation lets `make resource` write the whole feature tree,
+// edit main.go and database.go, and only fail deep inside makemigrations —
+// after which the tree no longer compiles and every later `make resource`
+// is wedged on the same invalid model (issue #217).
+func isASCIILetterOrDigit(r rune) bool {
+	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
 }
 
 func isGoIdent(name string) bool {
