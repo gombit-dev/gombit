@@ -81,6 +81,26 @@ func TestListQueryHelpersMySQL(t *testing.T) {
 	}))
 }
 
+func TestAggregateHelpersPostgres(t *testing.T) {
+	if *postgresDSN == "" {
+		t.Skip("set -database.postgres-dsn to run Postgres integration tests")
+	}
+	assertAggregateHelpers(t, openIntegrationDB(t, config.DatabaseConfig{
+		Driver: config.DatabaseDriverPostgres,
+		DSN:    *postgresDSN,
+	}))
+}
+
+func TestAggregateHelpersMySQL(t *testing.T) {
+	if *mysqlDSN == "" {
+		t.Skip("set -database.mysql-dsn to run MySQL integration tests")
+	}
+	assertAggregateHelpers(t, openIntegrationDB(t, config.DatabaseConfig{
+		Driver: config.DatabaseDriverMySQL,
+		DSN:    *mysqlDSN,
+	}))
+}
+
 type integrationFKCategory struct {
 	ID uint `gorm:"primaryKey"`
 }

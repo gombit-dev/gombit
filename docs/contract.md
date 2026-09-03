@@ -110,6 +110,60 @@ primitives live in `database` (`FilterEq`, `Search`, `Ordering` / `ParseOrdering
 and are the same behavior — and now the same code — the admin data plane applies.
 Filter values are exact-match to start; ranges/operators come later.
 
+### List query: numeric aggregates
+
+A numeric field marked `aggregatable` (issue #272) opts into server-side
+`SUM`/`AVG`/`MIN`/`MAX` over the list. The dashboard "total invoiced this month"
+card is the motivating consumer: client-side aggregation is unsafe once a list is
+paginated or filtered, so the sum is computed on the server over the whole
+matching set.
+
+| Modifier       | Query parameter                                    | Types                        |
+| -------------- | -------------------------------------------------- | ---------------------------- |
+| `aggregatable` | `?aggregate=<func>:<field>[,<func>:<field>...]`    | int, int64, uint, decimal    |
+
+`<func>` is one of `sum`, `avg`, `min`, `max`. Aggregates are computed over the
+**same filtered and searched set as the list, before pagination**, so they
+reflect every matching row — not one page:
+
+```bash
+gombit make resource Invoice \
+  total:decimal:required,aggregatable \
+  quantity:int:aggregatable,filterable \
+  status:enum(draft,paid):filterable \
+  customer:belongs_to:Customer
+```
+
+```
+GET /api/v1/invoices?status=paid&aggregate=sum:total,avg:total,max:total
+```
+
+The values land in `meta.aggregates`, keyed `"<func>:<field>"`, as exact decimal
+strings (the same canonical string encoding as a `decimal` field — trailing
+zeros trimmed, so the value is identical across SQLite/Postgres/MySQL and money
+totals never round through float):
+
+```json
+{
+  "data": [ /* one page of paid invoices */ ],
+  "meta": {
+    "page": 1,
+    "per_page": 20,
+    "total": 42,
+    "aggregates": { "sum:total": "15230.5", "avg:total": "362.63", "max:total": "1999" }
+  }
+}
+```
+
+When no `?aggregate=` is requested, `meta.aggregates` is omitted and the envelope
+is byte-identical to a `PageMeta` response. An unknown function, an undeclared
+(or non-`aggregatable`) field, or a malformed pair returns a D10
+`validation_error` (422) on `aggregate`. An aggregate over an empty matching set
+is `0`. The shared primitive lives in `database` (`ParseAggregates`,
+`Aggregate`), and the meta type is `contract.ListMeta` (`PageMeta` plus the
+optional `aggregates` map). Only `sum`/`avg`/`min`/`max` are supported to start;
+grouping and per-bucket aggregates come later.
+
 ## Request DTOs
 
 Go structs are the source of truth. Prefer Huma tags — not a separate

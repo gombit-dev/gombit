@@ -246,6 +246,28 @@ func sortColumns(fields []Field) []string {
 	return out
 }
 
+// aggregateFields returns the fields ?aggregate= may compute SUM/AVG/MIN/MAX
+// over, in declared order (issue #272).
+func aggregateFields(fields []Field) []Field {
+	out := make([]Field, 0, len(fields))
+	for _, f := range fields {
+		if f.Aggregatable {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// aggregateColumns returns the DB column names for the given aggregatable
+// fields, in order — used for the ?aggregate= param doc string.
+func aggregateColumns(fields []Field) []string {
+	out := make([]string, 0, len(fields))
+	for _, f := range fields {
+		out = append(out, f.aggregateColumn())
+	}
+	return out
+}
+
 func renderHandler(ctx renderContext) string {
 	var b strings.Builder
 	pkg := ctx.Resource.Package
@@ -281,13 +303,22 @@ func renderHandler(ctx renderContext) string {
 		b.WriteString("\t" + field.dtoGoName() + " " + field.dtoGoType() + " `json:\"" + field.dtoJSONName() + "\" doc:\"" + field.dtoGoName() + "\"`\n")
 	}
 	b.WriteString("}\n\n")
-	listOut := "list" + ctx.Resource.Tag + "Output"
-	listIn := "list" + ctx.Resource.Tag + "Input"
-	b.WriteString("type " + listOut + " struct {\n")
-	b.WriteString("\tBody contract.DataMeta[[]" + data + ", contract.PageMeta]\n}\n\n")
 	filters := filterFields(ctx.Fields)
 	searchCols := searchColumns(ctx.Fields)
 	sortCols := sortColumns(ctx.Fields)
+	aggFields := aggregateFields(ctx.Fields)
+	// A resource with aggregatable fields returns aggregates in meta, so its list
+	// meta is contract.ListMeta (PageMeta + optional aggregates); otherwise the
+	// plain contract.PageMeta is unchanged, keeping a no-modifier resource's
+	// output byte-identical.
+	metaType := "contract.PageMeta"
+	if len(aggFields) > 0 {
+		metaType = "contract.ListMeta"
+	}
+	listOut := "list" + ctx.Resource.Tag + "Output"
+	listIn := "list" + ctx.Resource.Tag + "Input"
+	b.WriteString("type " + listOut + " struct {\n")
+	b.WriteString("\tBody contract.DataMeta[[]" + data + ", " + metaType + "]\n}\n\n")
 	b.WriteString("type " + listIn + " struct {\n")
 	b.WriteString("\tPage    int `query:\"page\" doc:\"1-based page\"`\n")
 	b.WriteString("\tPerPage int `query:\"per_page\" doc:\"Page size\"`\n")
@@ -296,6 +327,9 @@ func renderHandler(ctx renderContext) string {
 	}
 	if len(sortCols) > 0 {
 		b.WriteString("\tOrdering string `query:\"ordering\" doc:\"Field to order by; prefix with - for DESC (allowed: " + strings.Join(sortCols, ", ") + ")\"`\n")
+	}
+	if len(aggFields) > 0 {
+		b.WriteString("\tAggregate string `query:\"aggregate\" doc:\"Comma-separated <func>:<field> aggregates over the filtered set, e.g. sum:" + aggFields[0].aggregateColumn() + " (funcs: sum, avg, min, max; fields: " + strings.Join(aggregateColumns(aggFields), ", ") + ")\"`\n")
 	}
 	for _, f := range filters {
 		b.WriteString("\t" + f.filterInputField() + " string `" + f.filterQueryTag() + "`\n")
@@ -339,6 +373,21 @@ func renderHandler(ctx renderContext) string {
 	b.WriteString("\tif err := q.Session(&gorm.Session{}).Count(&total).Error; err != nil {\n")
 	b.WriteString("\t\treturn nil, contract.WithContext(ctx, contract.Internal(\"list " + ctx.Resource.PluralSnake + "\"))\n")
 	b.WriteString("\t}\n")
+	if len(aggFields) > 0 {
+		// Aggregates run over the same filtered/searched query as the count,
+		// before pagination — so meta.aggregates covers the whole matching set,
+		// not one page (issue #272). ParseAggregates declares err (aggs is new,
+		// so := is always valid); mark it declared so a later Ordering reuses it.
+		b.WriteString("\taggs, err := database.ParseAggregates(ctx, input.Aggregate, map[string]database.AggregateColumn{\n")
+		for _, f := range aggFields {
+			b.WriteString("\t\t\"" + f.aggregateColumn() + "\": {Column: \"" + f.aggregateColumn() + "\"},\n")
+		}
+		b.WriteString("\t})\n")
+		b.WriteString("\tif err != nil {\n\t\treturn nil, err\n\t}\n")
+		b.WriteString("\taggregates, err := database.Aggregate(ctx, q.Session(&gorm.Session{}), aggs)\n")
+		b.WriteString("\tif err != nil {\n\t\treturn nil, err\n\t}\n")
+		errDeclared = true
+	}
 	if len(sortCols) > 0 {
 		// Declared ordering replaces the fixed Order("id"), which stays the
 		// fallback when ?ordering= is absent so the default page order is
@@ -364,9 +413,13 @@ func renderHandler(ctx renderContext) string {
 	b.WriteString("\titems := make([]" + data + ", 0, len(rows))\n")
 	b.WriteString("\tfor _, row := range rows {\n\t\titems = append(items, to" + typ + "Data(row))\n\t}\n")
 	b.WriteString("\treturn &" + listOut + "{\n")
-	b.WriteString("\t\tBody: contract.DataMeta[[]" + data + ", contract.PageMeta]{\n")
+	b.WriteString("\t\tBody: contract.DataMeta[[]" + data + ", " + metaType + "]{\n")
 	b.WriteString("\t\t\tData: items,\n")
-	b.WriteString("\t\t\tMeta: &contract.PageMeta{Page: page, PerPage: perPage, Total: total},\n")
+	if len(aggFields) > 0 {
+		b.WriteString("\t\t\tMeta: &" + metaType + "{Page: page, PerPage: perPage, Total: total, Aggregates: aggregates},\n")
+	} else {
+		b.WriteString("\t\t\tMeta: &" + metaType + "{Page: page, PerPage: perPage, Total: total},\n")
+	}
 	b.WriteString("\t\t},\n")
 	b.WriteString("\t}, nil\n}\n\n")
 

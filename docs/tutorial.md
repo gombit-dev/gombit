@@ -213,11 +213,13 @@ modify internal/task/task.go
 ```
 
 The field grammar is
-`name:type[:required][,unique][,index][,filterable][,sortable][,searchable]`,
+`name:type[:required][,unique][,index][,filterable][,sortable][,searchable][,aggregatable]`,
 over `string`, `text`, `int`, `int64`, `bool`, and `uint`. The
 `filterable` / `sortable` / `searchable` modifiers opt a field into the list
 handler's declared query surface — see the
-[list query](contract.md#list-query-filter--sort--search) section.
+[list query](contract.md#list-query-filter--sort--search) section. A numeric
+field can also be `aggregatable` for server-side `?aggregate=sum:<field>` totals
+in `meta.aggregates` — see [numeric aggregates](contract.md#list-query-numeric-aggregates).
 
 Two properties of every Gombit generator matter here:
 

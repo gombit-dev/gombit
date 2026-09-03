@@ -287,6 +287,38 @@ func TestMakeResourceListQueryCompiles(t *testing.T) {
 	})
 }
 
+// TestMakeResourceAggregatesCompiles exercises the #272 aggregatable grammar end
+// to end: a resource declaring aggregatable numeric fields (int + decimal), mixed
+// with filter/search/sort, must generate a list handler that compiles against the
+// framework's database.Aggregate / contract.ListMeta surface.
+func TestMakeResourceAggregatesCompiles(t *testing.T) {
+	appDir := scaffoldDemo(t)
+	gen := func(name string, fields ...string) {
+		t.Helper()
+		stdout := new(bytes.Buffer)
+		if err := resourcegen.Generate(context.Background(), resourcegen.Options{
+			WorkDir:  appDir,
+			Name:     name,
+			Fields:   fields,
+			AtlasBin: missingAtlas,
+			Stdout:   stdout,
+			Stderr:   io.Discard,
+		}); err != nil {
+			t.Fatalf("gombit make resource %s: %v\nstdout=%s", name, err, stdout.String())
+		}
+	}
+	gen("Customer", "name:string:required")
+	gen("Invoice",
+		"total:decimal:required,aggregatable",
+		"quantity:int:aggregatable,filterable,sortable",
+		"status:enum(draft,paid):filterable",
+		"customer:belongs_to:Customer",
+	)
+	t.Run("compile", func(t *testing.T) {
+		compileBackend(t, appDir)
+	})
+}
+
 func TestMakeCommandGolden(t *testing.T) {
 	appDir := scaffoldDemo(t)
 	stdout := new(bytes.Buffer)

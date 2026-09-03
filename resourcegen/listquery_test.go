@@ -152,7 +152,7 @@ func TestRenderHandlerNoListQuery(t *testing.T) {
 	if !strings.Contains(src, `q.Order("id").Offset(`) {
 		t.Fatalf("handler without sort must keep fixed Order(\"id\"):\n%s", src)
 	}
-	for _, unwanted := range []string{`query:"search"`, `query:"ordering"`, `database.Ordering`, `database.Search`, `database.FilterEq`} {
+	for _, unwanted := range []string{`query:"search"`, `query:"ordering"`, `query:"aggregate"`, `database.Ordering`, `database.Search`, `database.FilterEq`, `database.Aggregate`, `contract.ListMeta`} {
 		if strings.Contains(src, unwanted) {
 			t.Fatalf("handler without modifiers must not contain %q:\n%s", unwanted, src)
 		}

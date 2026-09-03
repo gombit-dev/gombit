@@ -46,7 +46,7 @@ regex), next to product.Register(app). AutoMigrate is updated the same way.
 
 Field grammar (design §27 subset):
 
-  name:type[:required][,unique][,index][,filterable][,sortable][,searchable]
+  name:type[:required][,unique][,index][,filterable][,sortable][,searchable][,aggregatable]
 
 Supported types: string, text, int, int64, bool, uint, decimal, time, enum,
 belongs_to, has_many, many_to_many.
@@ -69,6 +69,10 @@ admin data plane so the two contracts stay in sync:
                      stays the default when ?ordering= is absent.
   searchable         case-insensitive ?search=<term> LIKE across searchable
                      text fields. Types: string, text, enum.
+  aggregatable       server-side ?aggregate=<func>:<field> (func: sum, avg,
+                     min, max), computed over the filtered set before
+                     pagination and returned in meta.aggregates. Types: int,
+                     int64, uint, decimal.
 
 Relations use name:kind:Target, where Target is a model in internal/<target>/:
 
@@ -90,6 +94,8 @@ Examples:
   gombit make resource Widget name:string:required price:int
   gombit make resource Article title:string:required,searchable,sortable \
     status:enum(draft,published):filterable author:belongs_to:Author
+  gombit make resource Invoice total:decimal:required,aggregatable \
+    quantity:int:aggregatable,filterable customer:belongs_to:Customer
   gombit make resource Rental price:decimal:required starts_at:time \
     status:enum(requested,confirmed,active,returned,cancelled) \
     engine:belongs_to:Engine warehouses:many_to_many:Warehouse

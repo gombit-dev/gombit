@@ -28,13 +28,14 @@ var reservedFields = map[string]struct{}{
 }
 
 // reservedQueryFields are the query keys the generated list handler owns for its
-// declared list-query surface (#260): pagination plus the admin-aligned search /
-// ordering params. A resource field claiming one of these would be emitted as a
-// second list-input struct field with a duplicate `query` tag (e.g. a
-// filterable `page`), so the name is rejected at parse time — the same upfront
-// treatment reservedFields gives gorm.Model columns.
+// declared list-query surface: pagination plus the admin-aligned search /
+// ordering params (#260) and the aggregate param (#272). A resource field
+// claiming one of these would be emitted as a second list-input struct field
+// with a duplicate `query` tag (e.g. a filterable `page`), so the name is
+// rejected at parse time — the same upfront treatment reservedFields gives
+// gorm.Model columns.
 var reservedQueryFields = map[string]struct{}{
-	"page": {}, "per_page": {}, "search": {}, "ordering": {},
+	"page": {}, "per_page": {}, "search": {}, "ordering": {}, "aggregate": {},
 }
 
 // ResourceName is the derived identifiers for one generated feature-package.

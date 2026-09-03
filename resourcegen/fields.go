@@ -29,6 +29,13 @@ type Field struct {
 	Sortable   bool
 	Searchable bool
 
+	// Aggregatable opts this numeric field into the generated list handler's
+	// server-side aggregate surface (issue #272): ?aggregate=sum:<field>,
+	// avg:<field>,min:<field>,max:<field>, computed over the same filtered and
+	// searched set as the list, before pagination. Only numeric columns (int,
+	// int64, uint, decimal) may opt in (see typeAllowsAggregate).
+	Aggregatable bool
+
 	// EnumValues holds the allowed values for FieldEnum, in declared order.
 	EnumValues []string
 	// Precision/Scale set the decimal(p,s) column for FieldDecimal.
@@ -270,7 +277,7 @@ func parseField(spec, resourcePkg string) (Field, error) {
 		return Field{}, fmt.Errorf("resourcegen: field %q conflicts with gorm.Model", jsonName)
 	}
 	if _, reserved := reservedQueryFields[jsonName]; reserved {
-		return Field{}, fmt.Errorf("resourcegen: field %q is reserved for the list-query params (page, per_page, search, ordering); rename it", jsonName)
+		return Field{}, fmt.Errorf("resourcegen: field %q is reserved for the list-query params (page, per_page, search, ordering, aggregate); rename it", jsonName)
 	}
 
 	// Relations (name:kind:Target) use parts[2] as the target model, not
@@ -438,10 +445,12 @@ func applyModifiers(field *Field, raw string) error {
 			field.Sortable = true
 		case mod == "searchable":
 			field.Searchable = true
+		case mod == "aggregatable":
+			field.Aggregatable = true
 		case strings.HasPrefix(mod, "default="), strings.HasPrefix(mod, "min="), strings.HasPrefix(mod, "max="), strings.HasPrefix(mod, "references="):
-			return fmt.Errorf("resourcegen: modifier %q is not supported in this milestone (supported: required, unique, index, nullable, filterable, sortable, searchable)", mod)
+			return fmt.Errorf("resourcegen: modifier %q is not supported in this milestone (supported: required, unique, index, nullable, filterable, sortable, searchable, aggregatable)", mod)
 		default:
-			return fmt.Errorf("resourcegen: unknown modifier %q (supported: required, unique, index, nullable, filterable, sortable, searchable)", mod)
+			return fmt.Errorf("resourcegen: unknown modifier %q (supported: required, unique, index, nullable, filterable, sortable, searchable, aggregatable)", mod)
 		}
 	}
 	if field.Required && field.Nullable {
@@ -455,6 +464,9 @@ func applyModifiers(field *Field, raw string) error {
 	}
 	if field.Sortable && !field.typeAllowsSort() {
 		return fmt.Errorf("resourcegen: field %q is %s and cannot be sortable", field.JSONName, field.Type)
+	}
+	if field.Aggregatable && !field.typeAllowsAggregate() {
+		return fmt.Errorf("resourcegen: field %q is %s and cannot be aggregatable (supported: int, int64, uint, decimal)", field.JSONName, field.Type)
 	}
 	return nil
 }
@@ -494,6 +506,19 @@ func (f Field) typeAllowsSort() bool {
 	}
 }
 
+// typeAllowsAggregate reports whether SUM/AVG/MIN/MAX can be applied to this
+// field's column. Only the numeric scalars qualify (issue #272): int, int64,
+// uint, decimal. Booleans, text, time, enum and relations are excluded — a SUM
+// over them is meaningless or driver-dependent.
+func (f Field) typeAllowsAggregate() bool {
+	switch f.Type {
+	case FieldInt, FieldInt64, FieldUint, FieldDecimal:
+		return true
+	default:
+		return false
+	}
+}
+
 // isFilterable reports whether the generated list handler exposes an exact-match
 // filter for this field. belongs_to foreign keys are filterable by default so
 // the has_many detail-list case (GET /children?<parent>_id=<id>, issue #260 /
@@ -502,13 +527,15 @@ func (f Field) isFilterable() bool {
 	return f.Filterable || f.Type == FieldBelongsTo
 }
 
-// filterColumn / searchColumn / sortColumn are the DB column names the list
-// query references. For our naming they equal the DTO JSON name (toSnake of the
-// Go field), which is what GORM's default naming strategy derives for the model
-// column — belongs_to resolves to its <name>_id foreign key.
-func (f Field) filterColumn() string { return f.dtoJSONName() }
-func (f Field) searchColumn() string { return f.JSONName }
-func (f Field) sortColumn() string   { return f.dtoJSONName() }
+// filterColumn / searchColumn / sortColumn / aggregateColumn are the DB column
+// names the list query references. For our naming they equal the DTO JSON name
+// (toSnake of the Go field), which is what GORM's default naming strategy
+// derives for the model column — belongs_to resolves to its <name>_id foreign
+// key. aggregateColumn is only used for numeric scalars, never a relation.
+func (f Field) filterColumn() string    { return f.dtoJSONName() }
+func (f Field) searchColumn() string    { return f.JSONName }
+func (f Field) sortColumn() string      { return f.dtoJSONName() }
+func (f Field) aggregateColumn() string { return f.dtoJSONName() }
 
 // filterInputField names the field on the generated list-input struct. Filters
 // are string query params (Huma has no optional/pointer query params, so empty
