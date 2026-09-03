@@ -57,16 +57,18 @@ belongs_to, has_many, many_to_many.
   enum(a,b,c)        string column validated against the listed values.
 
 List-query modifiers opt a field into the generated list handler's declared
-query surface (safe, indexable subset):
+query surface (safe, indexable subset). The query spelling matches Gombit's
+admin data plane so the two contracts stay in sync:
 
   filterable         exact-match ?<field>=<value> query param.
                      Types: string, int, int64, uint, bool, enum. A belongs_to
                      foreign key is filterable by default (GET /children?
                      <parent>_id=<id>) with no modifier needed.
-  sortable           ?sort=<field>&order=asc|desc (replaces the fixed id order;
-                     id stays the default when ?sort= is absent).
-  searchable         case-insensitive ?q=<term> LIKE across searchable text
-                     fields. Types: string, text, enum.
+  sortable           ?ordering=<field> (prefix with - for DESC, e.g.
+                     ?ordering=-created_at). Replaces the fixed id order; id
+                     stays the default when ?ordering= is absent.
+  searchable         case-insensitive ?search=<term> LIKE across searchable
+                     text fields. Types: string, text, enum.
 
 Relations use name:kind:Target, where Target is a model in internal/<target>/:
 

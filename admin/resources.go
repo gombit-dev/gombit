@@ -470,29 +470,16 @@ func applyWrite(ctx context.Context, m *registered, inst any, body map[string]an
 }
 
 func applySearch(q *gorm.DB, m *registered, term string) (*gorm.DB, error) {
-	term = strings.TrimSpace(term)
-	if term == "" {
-		return q, nil
-	}
-	if len(m.meta.Search) == 0 {
-		return q, nil
-	}
-	pattern := "%" + escapeLike(term) + "%"
-	ors := make([]clause.Expression, 0, len(m.meta.Search))
+	// Resolve the registered search field names to columns, then delegate the
+	// LIKE building to the shared database.Search so the admin and the generated
+	// list handler cannot drift on search behavior.
+	cols := make([]string, 0, len(m.meta.Search))
 	for _, name := range m.meta.Search {
-		col, ok := m.columnFor(name)
-		if !ok {
-			continue
+		if col, ok := m.columnFor(name); ok {
+			cols = append(cols, col)
 		}
-		ors = append(ors, clause.Expr{
-			SQL:  "LOWER(" + quoteIdent(q, col) + ") LIKE LOWER(?) ESCAPE ?",
-			Vars: []any{pattern, `\`},
-		})
 	}
-	if len(ors) == 0 {
-		return q, nil
-	}
-	return q.Where(clause.Or(ors...)), nil
+	return database.Search(q, cols, term), nil
 }
 
 func applyFilters(ctx context.Context, q *gorm.DB, m *registered, values interface{ Get(string) string }) (*gorm.DB, error) {
@@ -520,15 +507,13 @@ func applyFilters(ctx context.Context, q *gorm.DB, m *registered, values interfa
 }
 
 func applyOrdering(q *gorm.DB, m *registered, ordering string) (*gorm.DB, error) {
-	ordering = strings.TrimSpace(ordering)
-	if ordering == "" {
+	// Share the `?ordering=<field>` / `-<field>` spelling with the generated list
+	// handler via database.ParseOrdering; the admin keeps its own field-name
+	// allowlist + column resolution (registry-driven, so names differ from
+	// columns).
+	name, desc := database.ParseOrdering(ordering)
+	if name == "" {
 		return q, nil
-	}
-	desc := false
-	name := ordering
-	if strings.HasPrefix(name, "-") {
-		desc = true
-		name = strings.TrimPrefix(name, "-")
 	}
 	allowed := false
 	for _, n := range m.meta.Ordering {
@@ -545,10 +530,4 @@ func applyOrdering(q *gorm.DB, m *registered, ordering string) (*gorm.DB, error)
 		return nil, errors.New("ordering is not allowed for this field")
 	}
 	return q.Order(clause.OrderByColumn{Column: clause.Column{Name: col}, Desc: desc}), nil
-}
-
-func quoteIdent(db *gorm.DB, name string) string {
-	var b strings.Builder
-	db.QuoteTo(&b, name)
-	return b.String()
 }

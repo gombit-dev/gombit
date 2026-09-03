@@ -91,20 +91,31 @@ func Search(q *gorm.DB, columns []string, term string) *gorm.DB {
 	return q.Where(clause.Or(ors...))
 }
 
-// SortBy applies `ORDER BY sort [ASC|DESC]`, validated against the allowed set.
+// ParseOrdering splits a Django-style `?ordering=` token into its field name and
+// direction: a leading '-' means descending, e.g. "-created_at" → ("created_at",
+// true). The admin data plane and generated list handlers share this spelling so
+// the two contracts cannot drift.
+func ParseOrdering(ordering string) (field string, desc bool) {
+	field = strings.TrimSpace(ordering)
+	if strings.HasPrefix(field, "-") {
+		return strings.TrimSpace(strings.TrimPrefix(field, "-")), true
+	}
+	return field, false
+}
+
+// Ordering applies `ORDER BY` for a Django-style `?ordering=` value (optional
+// leading '-' for DESC), validated against the allowed columns:
 //
-//   - sort empty: order by fallback (the stable default, e.g. "id") when
+//   - empty ordering: order by fallback (the stable default, e.g. "id") when
 //     fallback is non-empty; otherwise no ORDER BY is added.
-//   - sort present but not in allowed: a 422 validation error on "sort".
-//   - order is "" or "asc" (ascending) or "desc"; anything else is a 422 on
-//     "order".
+//   - ordering field not in allowed: a 422 validation error on "ordering".
 //
 // allowed and fallback are generator-controlled (a resource's declared sortable
-// columns); sort and order are user input, matched by exact string equality so
-// only a declared column can reach the query.
-func SortBy(ctx context.Context, q *gorm.DB, sort, order string, allowed []string, fallback string) (*gorm.DB, error) {
-	sort = strings.TrimSpace(sort)
-	if sort == "" {
+// columns); ordering is user input, matched by exact string equality so only a
+// declared column can reach the query.
+func Ordering(ctx context.Context, q *gorm.DB, ordering string, allowed []string, fallback string) (*gorm.DB, error) {
+	field, desc := ParseOrdering(ordering)
+	if field == "" {
 		if fallback != "" {
 			q = q.Order(clause.OrderByColumn{Column: clause.Column{Name: fallback}})
 		}
@@ -112,7 +123,7 @@ func SortBy(ctx context.Context, q *gorm.DB, sort, order string, allowed []strin
 	}
 	permitted := false
 	for _, a := range allowed {
-		if a == sort {
+		if a == field {
 			permitted = true
 			break
 		}
@@ -120,22 +131,10 @@ func SortBy(ctx context.Context, q *gorm.DB, sort, order string, allowed []strin
 	if !permitted {
 		return nil, contract.WithContext(ctx, contract.Validation(
 			"The request contains invalid fields.",
-			map[string][]string{"sort": {"sorting is not allowed for this field"}},
+			map[string][]string{"ordering": {"ordering is not allowed for this field"}},
 		))
 	}
-	var desc bool
-	switch strings.ToLower(strings.TrimSpace(order)) {
-	case "", "asc":
-		desc = false
-	case "desc":
-		desc = true
-	default:
-		return nil, contract.WithContext(ctx, contract.Validation(
-			"The request contains invalid fields.",
-			map[string][]string{"order": {"must be asc or desc"}},
-		))
-	}
-	return q.Order(clause.OrderByColumn{Column: clause.Column{Name: sort}, Desc: desc}), nil
+	return q.Order(clause.OrderByColumn{Column: clause.Column{Name: field}, Desc: desc}), nil
 }
 
 // escapeLike escapes the LIKE metacharacters so a search term matches literally

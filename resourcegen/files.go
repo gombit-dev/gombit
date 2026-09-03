@@ -292,11 +292,10 @@ func renderHandler(ctx renderContext) string {
 	b.WriteString("\tPage    int `query:\"page\" doc:\"1-based page\"`\n")
 	b.WriteString("\tPerPage int `query:\"per_page\" doc:\"Page size\"`\n")
 	if len(searchCols) > 0 {
-		b.WriteString("\tQ string `query:\"q\" doc:\"Search term matched across searchable fields\"`\n")
+		b.WriteString("\tSearch string `query:\"search\" doc:\"Search term matched across searchable fields\"`\n")
 	}
 	if len(sortCols) > 0 {
-		b.WriteString("\tSort  string `query:\"sort\" enum:\"" + strings.Join(sortCols, ",") + "\" doc:\"Field to sort by\"`\n")
-		b.WriteString("\tOrder string `query:\"order\" enum:\"asc,desc\" doc:\"Sort direction (default asc)\"`\n")
+		b.WriteString("\tOrdering string `query:\"ordering\" doc:\"Field to order by; prefix with - for DESC (allowed: " + strings.Join(sortCols, ", ") + ")\"`\n")
 	}
 	for _, f := range filters {
 		b.WriteString("\t" + f.filterInputField() + " string `" + f.filterQueryTag() + "`\n")
@@ -334,21 +333,24 @@ func renderHandler(ctx renderContext) string {
 		b.WriteString("\tif err != nil {\n\t\treturn nil, err\n\t}\n")
 	}
 	if len(searchCols) > 0 {
-		b.WriteString("\tq = database.Search(q, []string{\"" + strings.Join(searchCols, "\", \"") + "\"}, input.Q)\n")
+		b.WriteString("\tq = database.Search(q, []string{\"" + strings.Join(searchCols, "\", \"") + "\"}, input.Search)\n")
 	}
 	b.WriteString("\tvar total int64\n")
 	b.WriteString("\tif err := q.Session(&gorm.Session{}).Count(&total).Error; err != nil {\n")
 	b.WriteString("\t\treturn nil, contract.WithContext(ctx, contract.Internal(\"list " + ctx.Resource.PluralSnake + "\"))\n")
 	b.WriteString("\t}\n")
 	if len(sortCols) > 0 {
-		// Declared sort replaces the fixed Order("id"), which stays the fallback
-		// when ?sort= is absent so the default page order is unchanged.
+		// Declared ordering replaces the fixed Order("id"), which stays the
+		// fallback when ?ordering= is absent so the default page order is
+		// unchanged. Same `?ordering=<field>` / `-<field>` spelling as the admin
+		// data plane.
+		// Ordering is the last consumer of the function-scope err, so this branch
+		// only reads errDeclared (never needs to set it).
 		assign := "="
 		if !errDeclared {
 			assign = ":="
-			errDeclared = true
 		}
-		b.WriteString("\tq, err " + assign + " database.SortBy(ctx, q, input.Sort, input.Order, []string{\"" + strings.Join(sortCols, "\", \"") + "\"}, \"id\")\n")
+		b.WriteString("\tq, err " + assign + " database.Ordering(ctx, q, input.Ordering, []string{\"" + strings.Join(sortCols, "\", \"") + "\"}, \"id\")\n")
 		b.WriteString("\tif err != nil {\n\t\treturn nil, err\n\t}\n")
 	}
 	b.WriteString("\tvar rows []" + typ + "\n")

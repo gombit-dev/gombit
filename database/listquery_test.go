@@ -89,14 +89,14 @@ func assertListQueryHelpers(t *testing.T, db *DB) {
 		}
 	})
 
-	t.Run("SortBy", func(t *testing.T) {
+	t.Run("Ordering", func(t *testing.T) {
 		ctx := context.Background()
 		allowed := []string{"views"}
-		firstView := func(order string) int {
+		firstView := func(ordering string) int {
 			t.Helper()
-			q, err := SortBy(ctx, db.Model(&lqItem{}), "views", order, allowed, "id")
+			q, err := Ordering(ctx, db.Model(&lqItem{}), ordering, allowed, "id")
 			if err != nil {
-				t.Fatalf("SortBy(order=%q) error = %v", order, err)
+				t.Fatalf("Ordering(%q) error = %v", ordering, err)
 			}
 			var rows []lqItem
 			if err := q.Find(&rows).Error; err != nil {
@@ -104,19 +104,16 @@ func assertListQueryHelpers(t *testing.T, db *DB) {
 			}
 			return rows[0].Views
 		}
-		if got := firstView("asc"); got != 10 {
-			t.Fatalf("asc first Views = %d, want 10", got)
+		if got := firstView("views"); got != 10 {
+			t.Fatalf("ascending 'views' first Views = %d, want 10", got)
 		}
-		if got := firstView("desc"); got != 30 {
-			t.Fatalf("desc first Views = %d, want 30", got)
+		if got := firstView("-views"); got != 30 {
+			t.Fatalf("descending '-views' first Views = %d, want 30", got)
 		}
-		if got := firstView(""); got != 10 {
-			t.Fatalf("default first Views = %d, want 10 (asc)", got)
-		}
-		// Fallback ordering when sort is empty.
-		q, err := SortBy(ctx, db.Model(&lqItem{}), "", "", allowed, "id")
+		// Fallback ordering when ordering is empty.
+		q, err := Ordering(ctx, db.Model(&lqItem{}), "", allowed, "id")
 		if err != nil {
-			t.Fatalf("fallback SortBy error = %v", err)
+			t.Fatalf("fallback Ordering error = %v", err)
 		}
 		var rows []lqItem
 		if err := q.Find(&rows).Error; err != nil {
@@ -127,12 +124,12 @@ func assertListQueryHelpers(t *testing.T, db *DB) {
 		}
 	})
 
-	t.Run("SortByRejectsUndeclared", func(t *testing.T) {
+	t.Run("OrderingRejectsUndeclared", func(t *testing.T) {
 		ctx := context.Background()
-		_, err := SortBy(ctx, db.Model(&lqItem{}), "author_id", "asc", []string{"views"}, "id")
-		assertValidationField(t, err, "sort")
-		_, err = SortBy(ctx, db.Model(&lqItem{}), "views", "sideways", []string{"views"}, "id")
-		assertValidationField(t, err, "order")
+		_, err := Ordering(ctx, db.Model(&lqItem{}), "author_id", []string{"views"}, "id")
+		assertValidationField(t, err, "ordering")
+		_, err = Ordering(ctx, db.Model(&lqItem{}), "-author_id", []string{"views"}, "id")
+		assertValidationField(t, err, "ordering")
 	})
 }
 
@@ -189,9 +186,8 @@ type ctItem struct {
 type ctListInput struct {
 	Page     int    `query:"page" doc:"1-based page"`
 	PerPage  int    `query:"per_page" doc:"Page size"`
-	Q        string `query:"q" doc:"Search"`
-	Sort     string `query:"sort" enum:"title" doc:"Sort field"`
-	Order    string `query:"order" enum:"asc,desc" doc:"Sort direction"`
+	Search   string `query:"search" doc:"Search"`
+	Ordering string `query:"ordering" doc:"Order field; - prefix for DESC"`
 	Done     string `query:"done" enum:"true,false" doc:"Filter by Done"`
 	AuthorID string `query:"author_id" doc:"Filter by AuthorID"`
 }
@@ -228,12 +224,12 @@ func TestGeneratedListContractRuntime(t *testing.T) {
 		if err != nil {
 			return nil, err
 		}
-		q = Search(q, []string{"title"}, in.Q)
+		q = Search(q, []string{"title"}, in.Search)
 		var total int64
 		if err := q.Session(&gorm.Session{}).Count(&total).Error; err != nil {
 			return nil, contract.WithContext(ctx, contract.Internal("count"))
 		}
-		q, err = SortBy(ctx, q, in.Sort, in.Order, []string{"title"}, "id")
+		q, err = Ordering(ctx, q, in.Ordering, []string{"title"}, "id")
 		if err != nil {
 			return nil, err
 		}
@@ -255,21 +251,21 @@ func TestGeneratedListContractRuntime(t *testing.T) {
 	if got := decodeList(t, api.Get("/items?done=true")); got.total() != 2 {
 		t.Fatalf("done=true total=%d, want 2", got.total())
 	}
-	// Search: q=al -> Alpha only.
-	if got := decodeList(t, api.Get("/items?q=al")); got.total() != 1 || got.Data[0].Title != "Alpha" {
-		t.Fatalf("q=al = %+v", got.Data)
+	// Search: search=al -> Alpha only.
+	if got := decodeList(t, api.Get("/items?search=al")); got.total() != 1 || got.Data[0].Title != "Alpha" {
+		t.Fatalf("search=al = %+v", got.Data)
 	}
-	// Sort desc by title -> Zulu first.
-	if got := decodeList(t, api.Get("/items?sort=title&order=desc")); got.Data[0].Title != "Zulu" {
-		t.Fatalf("sort desc first = %q, want Zulu", got.Data[0].Title)
+	// Order desc by title (-title) -> Zulu first.
+	if got := decodeList(t, api.Get("/items?ordering=-title")); got.Data[0].Title != "Zulu" {
+		t.Fatalf("ordering=-title first = %q, want Zulu", got.Data[0].Title)
 	}
-	// Default order (no ?sort) is by id -> first inserted (Zulu) first.
+	// Default order (no ?ordering) is by id -> first inserted (Zulu) first.
 	if got := decodeList(t, api.Get("/items")); got.Data[0].Title != "Zulu" {
 		t.Fatalf("default first = %q, want Zulu (id order)", got.Data[0].Title)
 	}
-	// Undeclared sort field -> 422.
-	if resp := api.Get("/items?sort=author_id"); resp.Code != 422 {
-		t.Fatalf("sort=author_id code = %d, want 422; body=%s", resp.Code, resp.Body.String())
+	// Undeclared ordering field -> 422.
+	if resp := api.Get("/items?ordering=author_id"); resp.Code != 422 {
+		t.Fatalf("ordering=author_id code = %d, want 422; body=%s", resp.Code, resp.Body.String())
 	}
 	// Bad filter value -> 422.
 	if resp := api.Get("/items?author_id=nope"); resp.Code != 422 {

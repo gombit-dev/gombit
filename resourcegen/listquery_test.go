@@ -87,17 +87,16 @@ func TestRenderHandlerListQuery(t *testing.T) {
 		t.Fatalf("generated handler does not format:\n%s", src)
 	}
 	wantContains := []string{
-		`query:"q" doc:"Search term`,
-		`query:"sort" enum:"title,views"`,
-		`query:"order" enum:"asc,desc"`,
+		`query:"search" doc:"Search term`,
+		`query:"ordering" doc:"Field to order by; prefix with - for DESC (allowed: title, views)"`,
 		`query:"views" doc:"Filter by Views (exact match)"`,
 		`query:"published" enum:"true,false" doc:"Filter by Published (exact match)"`,
 		`query:"author_id" doc:"Filter by AuthorID (exact match)"`,
 		`database.FilterEq(ctx, q, "views", database.FilterInt, input.Views)`,
 		`database.FilterEq(ctx, q, "published", database.FilterBool, input.Published)`,
 		`database.FilterEq(ctx, q, "author_id", database.FilterUint, input.AuthorID)`,
-		`database.Search(q, []string{"title", "body"}, input.Q)`,
-		`database.SortBy(ctx, q, input.Sort, input.Order, []string{"title", "views"}, "id")`,
+		`database.Search(q, []string{"title", "body"}, input.Search)`,
+		`database.Ordering(ctx, q, input.Ordering, []string{"title", "views"}, "id")`,
 	}
 	for _, want := range wantContains {
 		if !strings.Contains(src, want) {
@@ -127,7 +126,7 @@ func TestRenderHandlerNoListQuery(t *testing.T) {
 	if !strings.Contains(src, `q.Order("id").Offset(`) {
 		t.Fatalf("handler without sort must keep fixed Order(\"id\"):\n%s", src)
 	}
-	for _, unwanted := range []string{`query:"q"`, `query:"sort"`, `database.SortBy`, `database.Search`, `database.FilterEq`} {
+	for _, unwanted := range []string{`query:"search"`, `query:"ordering"`, `database.Ordering`, `database.Search`, `database.FilterEq`} {
 		if strings.Contains(src, unwanted) {
 			t.Fatalf("handler without modifiers must not contain %q:\n%s", unwanted, src)
 		}
