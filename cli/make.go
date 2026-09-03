@@ -65,7 +65,7 @@ admin data plane so the two contracts stay in sync:
                      foreign key is filterable by default (GET /children?
                      <parent>_id=<id>) with no modifier needed.
   sortable           ?ordering=<field> (prefix with - for DESC, e.g.
-                     ?ordering=-created_at). Replaces the fixed id order; id
+                     ?ordering=-title). Replaces the fixed id order; id
                      stays the default when ?ordering= is absent.
   searchable         case-insensitive ?search=<term> LIKE across searchable
                      text fields. Types: string, text, enum.

@@ -224,7 +224,7 @@ func filterFields(fields []Field) []Field {
 	return out
 }
 
-// searchColumns returns the DB columns ?q= searches, in declared order.
+// searchColumns returns the DB columns ?search= searches, in declared order.
 func searchColumns(fields []Field) []string {
 	var out []string
 	for _, f := range fields {
@@ -235,7 +235,7 @@ func searchColumns(fields []Field) []string {
 	return out
 }
 
-// sortColumns returns the DB columns ?sort= may order by, in declared order.
+// sortColumns returns the DB columns ?ordering= may order by, in declared order.
 func sortColumns(fields []Field) []string {
 	var out []string
 	for _, f := range fields {

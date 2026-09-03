@@ -21,8 +21,9 @@ type Field struct {
 
 	// Filterable / Sortable / Searchable opt this field into the generated list
 	// handler's declared query surface (issue #260): exact-match ?<field>=,
-	// ?sort=<field>&order=, and ?q= respectively. belongs_to fields are
-	// filterable by default (see filterable) so the has_many detail-list case —
+	// ?ordering=<field> (- prefix for DESC), and ?search= respectively — the same
+	// spelling as the admin data plane. belongs_to fields are filterable by
+	// default (see isFilterable) so the has_many detail-list case —
 	// GET /children?<parent>_id=<id> — works without extra declaration.
 	Filterable bool
 	Sortable   bool
@@ -268,6 +269,9 @@ func parseField(spec, resourcePkg string) (Field, error) {
 	if _, reserved := reservedFields[jsonName]; reserved {
 		return Field{}, fmt.Errorf("resourcegen: field %q conflicts with gorm.Model", jsonName)
 	}
+	if _, reserved := reservedQueryFields[jsonName]; reserved {
+		return Field{}, fmt.Errorf("resourcegen: field %q is reserved for the list-query params (page, per_page, search, ordering); rename it", jsonName)
+	}
 
 	// Relations (name:kind:Target) use parts[2] as the target model, not
 	// modifiers.
@@ -468,7 +472,7 @@ func (f Field) typeAllowsFilter() bool {
 	}
 }
 
-// typeAllowsSearch reports whether the field is a text-like column ?q= can LIKE.
+// typeAllowsSearch reports whether the field is a text-like column ?search= can LIKE.
 func (f Field) typeAllowsSearch() bool {
 	switch f.Type {
 	case FieldString, FieldText, FieldEnum:

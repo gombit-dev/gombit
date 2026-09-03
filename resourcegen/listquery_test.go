@@ -50,6 +50,32 @@ func TestListQueryModifierTypeErrors(t *testing.T) {
 	}
 }
 
+// TestReservedQueryFieldNamesRejected guards the collision the generated list
+// input would otherwise hit: a field named after a list-query param (page,
+// per_page, search, ordering) becomes a duplicate struct field with a duplicate
+// `query` tag — gofmt accepts it, go build does not. parseFields must refuse it
+// upfront, with or without a modifier.
+func TestReservedQueryFieldNamesRejected(t *testing.T) {
+	t.Parallel()
+	specs := []string{
+		"page:int:filterable",
+		"page:int",
+		"per_page:int:filterable",
+		"search:string:filterable",
+		"ordering:string:filterable",
+		"search:string",
+		"ordering:string:sortable",
+	}
+	for _, spec := range specs {
+		t.Run(spec, func(t *testing.T) {
+			t.Parallel()
+			if _, err := parseFields([]string{spec}, "post"); err == nil || !strings.Contains(err.Error(), "reserved for the list-query params") {
+				t.Fatalf("parseFields(%q) error = %v, want reserved-name rejection", spec, err)
+			}
+		})
+	}
+}
+
 // TestBelongsToFilterableByDefault documents that a belongs_to foreign key is a
 // filter without any modifier — the has_many detail-list contract (#260).
 func TestBelongsToFilterableByDefault(t *testing.T) {
