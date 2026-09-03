@@ -91,14 +91,21 @@ Other behavior notes:
   [`framework.WithRawBodyPaths`](auth-cookie.md#exempting-non-browser-endpoints-webhooks):
   they skip sanitization entirely (and the 8MiB cap below), so the body reaches
   the handler byte-for-byte, and they are CSRF-exempt too.
-- Unclosed dangerous elements (for example a truncated `<script>...`) strip
-  the tag itself but keep the following text as plain text; only content
-  inside a *properly closed* dangerous element is discarded.
-- Incomplete angle brackets that are not a complete HTML tag (no closing
-  `>`, e.g. a product name `a<b`) are left unchanged. The HTML tokenizer
-  would otherwise treat `"<"+letter` as a start tag and silently shorten
-  the string. Complete tags (`<b>hi</b>`, `<script>…</script>`) are still
-  stripped.
+- Unclosed dangerous elements (for example a truncated `<script>…`) strip the
+  tag itself but keep the text that follows; only the content of a *properly
+  closed* dangerous element is discarded. That recovered text is re-parsed, so
+  tags smuggled inside the unclosed element are stripped too and never reach
+  handlers.
+- Incomplete angle brackets that are not a complete HTML tag (no closing `>`,
+  e.g. a product name `a<b`) are left unchanged — the HTML tokenizer would
+  otherwise treat `"<"+letter` as a start tag and silently shorten the string.
+  This applies to the submitted value itself, not to text recovered from
+  inside an unclosed dangerous element. That text is unparsed markup rather
+  than something the user typed, so it is re-parsed in full: every `"<"` +
+  letter through the next `>` is treated as a tag and removed, which can drop
+  more than a stray bracket — `<script>if (a<b && c>d) return` yields
+  `if (ad) return`. Complete tags (`<b>hi</b>`, `<script>…</script>`) are
+  always stripped.
 - JSON sanitizer buffering is capped at 8MiB. Larger JSON bodies abort with
   HTTP 413 and a D10 error envelope (`payload_too_large`) and never reach
   handlers. `http.Server.ReadTimeout` matches `GOMBIT_HTTP_REQUEST_TIMEOUT`
