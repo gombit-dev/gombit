@@ -212,8 +212,12 @@ create internal/task/routes.go
 modify internal/task/task.go
 ```
 
-The field grammar is `name:type[:required][,unique][,index]`, over `string`,
-`text`, `int`, `int64`, `bool`, and `uint`.
+The field grammar is
+`name:type[:required][,unique][,index][,filterable][,sortable][,searchable]`,
+over `string`, `text`, `int`, `int64`, `bool`, and `uint`. The
+`filterable` / `sortable` / `searchable` modifiers opt a field into the list
+handler's declared query surface — see the
+[list query](contract.md#list-query-filter--sort--search) section.
 
 Two properties of every Gombit generator matter here:
 

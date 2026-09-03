@@ -19,6 +19,15 @@ type Field struct {
 	Index    bool
 	Nullable bool
 
+	// Filterable / Sortable / Searchable opt this field into the generated list
+	// handler's declared query surface (issue #260): exact-match ?<field>=,
+	// ?sort=<field>&order=, and ?q= respectively. belongs_to fields are
+	// filterable by default (see filterable) so the has_many detail-list case —
+	// GET /children?<parent>_id=<id> — works without extra declaration.
+	Filterable bool
+	Sortable   bool
+	Searchable bool
+
 	// EnumValues holds the allowed values for FieldEnum, in declared order.
 	EnumValues []string
 	// Precision/Scale set the decimal(p,s) column for FieldDecimal.
@@ -419,16 +428,119 @@ func applyModifiers(field *Field, raw string) error {
 			field.Index = true
 		case mod == "nullable":
 			field.Nullable = true
+		case mod == "filterable":
+			field.Filterable = true
+		case mod == "sortable":
+			field.Sortable = true
+		case mod == "searchable":
+			field.Searchable = true
 		case strings.HasPrefix(mod, "default="), strings.HasPrefix(mod, "min="), strings.HasPrefix(mod, "max="), strings.HasPrefix(mod, "references="):
-			return fmt.Errorf("resourcegen: modifier %q is not supported in this milestone (supported: required, unique, index, nullable)", mod)
+			return fmt.Errorf("resourcegen: modifier %q is not supported in this milestone (supported: required, unique, index, nullable, filterable, sortable, searchable)", mod)
 		default:
-			return fmt.Errorf("resourcegen: unknown modifier %q (supported: required, unique, index, nullable)", mod)
+			return fmt.Errorf("resourcegen: unknown modifier %q (supported: required, unique, index, nullable, filterable, sortable, searchable)", mod)
 		}
 	}
 	if field.Required && field.Nullable {
 		return fmt.Errorf("resourcegen: field %q cannot be both required and nullable", field.JSONName)
 	}
+	if field.Filterable && !field.typeAllowsFilter() {
+		return fmt.Errorf("resourcegen: field %q is %s and cannot be filterable (supported: string, int, int64, uint, bool, enum, belongs_to)", field.JSONName, field.Type)
+	}
+	if field.Searchable && !field.typeAllowsSearch() {
+		return fmt.Errorf("resourcegen: field %q is %s and cannot be searchable (supported: string, text, enum)", field.JSONName, field.Type)
+	}
+	if field.Sortable && !field.typeAllowsSort() {
+		return fmt.Errorf("resourcegen: field %q is %s and cannot be sortable", field.JSONName, field.Type)
+	}
 	return nil
+}
+
+// typeAllowsFilter reports whether an exact-match filter query param can be
+// generated for this field's type. Exact-match on decimal/time is fiddly to
+// coerce and rarely useful (ranges come later, #260), and text columns are for
+// search, not equality; both are excluded.
+func (f Field) typeAllowsFilter() bool {
+	switch f.Type {
+	case FieldString, FieldInt, FieldInt64, FieldUint, FieldBool, FieldEnum, FieldBelongsTo:
+		return true
+	default:
+		return false
+	}
+}
+
+// typeAllowsSearch reports whether the field is a text-like column ?q= can LIKE.
+func (f Field) typeAllowsSearch() bool {
+	switch f.Type {
+	case FieldString, FieldText, FieldEnum:
+		return true
+	default:
+		return false
+	}
+}
+
+// typeAllowsSort reports whether the field maps to a single orderable column.
+// Every scalar and the belongs_to foreign key qualifies; has_many / many_to_many
+// (multi-row associations) do not.
+func (f Field) typeAllowsSort() bool {
+	switch f.Type {
+	case FieldHasMany, FieldManyToMany:
+		return false
+	default:
+		return true
+	}
+}
+
+// isFilterable reports whether the generated list handler exposes an exact-match
+// filter for this field. belongs_to foreign keys are filterable by default so
+// the has_many detail-list case (GET /children?<parent>_id=<id>, issue #260 /
+// Forge #53) needs no extra declaration; every other field opts in.
+func (f Field) isFilterable() bool {
+	return f.Filterable || f.Type == FieldBelongsTo
+}
+
+// filterColumn / searchColumn / sortColumn are the DB column names the list
+// query references. For our naming they equal the DTO JSON name (toSnake of the
+// Go field), which is what GORM's default naming strategy derives for the model
+// column — belongs_to resolves to its <name>_id foreign key.
+func (f Field) filterColumn() string { return f.dtoJSONName() }
+func (f Field) searchColumn() string { return f.JSONName }
+func (f Field) sortColumn() string   { return f.dtoJSONName() }
+
+// filterInputField names the field on the generated list-input struct. Filters
+// are string query params (Huma has no optional/pointer query params, so empty
+// string is the "absent" signal); the value is coerced server-side by kind.
+func (f Field) filterInputField() string { return f.dtoGoName() }
+
+// filterKindExpr is the database.FilterKind the generated handler passes to
+// database.FilterEq so it coerces the raw filter string to the column's type.
+func (f Field) filterKindExpr() string {
+	switch f.Type {
+	case FieldInt:
+		return "database.FilterInt"
+	case FieldInt64:
+		return "database.FilterInt64"
+	case FieldUint, FieldBelongsTo:
+		return "database.FilterUint"
+	case FieldBool:
+		return "database.FilterBool"
+	default: // FieldString, FieldEnum
+		return "database.FilterString"
+	}
+}
+
+// filterQueryTag builds the Huma struct tag for a filter query param: the query
+// name, an enum constraint for bool (true/false) and enum columns so Huma
+// rejects bad values before the handler, and a doc string.
+func (f Field) filterQueryTag() string {
+	tag := `query:"` + f.filterColumn() + `"`
+	switch f.Type {
+	case FieldEnum:
+		tag += ` enum:"` + strings.Join(f.EnumValues, ",") + `"`
+	case FieldBool:
+		tag += ` enum:"true,false"`
+	}
+	tag += ` doc:"Filter by ` + f.filterInputField() + ` (exact match)"`
+	return tag
 }
 
 func (f Field) gormTag() string {

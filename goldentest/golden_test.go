@@ -253,6 +253,40 @@ func TestMakeResourceRelationsCompiles(t *testing.T) {
 	})
 }
 
+// TestMakeResourceListQueryCompiles exercises the #260 declared list-query
+// grammar end to end: a resource declaring searchable / sortable / filterable
+// fields plus a belongs_to (filterable by default) must generate a handler that
+// compiles against the framework's database list-query helpers.
+func TestMakeResourceListQueryCompiles(t *testing.T) {
+	appDir := scaffoldDemo(t)
+	gen := func(name string, fields ...string) {
+		t.Helper()
+		stdout := new(bytes.Buffer)
+		if err := resourcegen.Generate(context.Background(), resourcegen.Options{
+			WorkDir:  appDir,
+			Name:     name,
+			Fields:   fields,
+			AtlasBin: missingAtlas,
+			Stdout:   stdout,
+			Stderr:   io.Discard,
+		}); err != nil {
+			t.Fatalf("gombit make resource %s: %v\nstdout=%s", name, err, stdout.String())
+		}
+	}
+	gen("Author", "name:string:required")
+	gen("Article",
+		"title:string:required,searchable,sortable",
+		"body:text:searchable",
+		"views:int:filterable,sortable",
+		"published:bool:filterable",
+		"status:enum(draft,published):filterable,sortable",
+		"author:belongs_to:Author",
+	)
+	t.Run("compile", func(t *testing.T) {
+		compileBackend(t, appDir)
+	})
+}
+
 func TestMakeCommandGolden(t *testing.T) {
 	appDir := scaffoldDemo(t)
 	stdout := new(bytes.Buffer)

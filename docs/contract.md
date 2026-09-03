@@ -75,6 +75,39 @@ Body: contract.DataMeta[[]Widget, contract.PageMeta]{
 }
 ```
 
+### List query: filter / sort / search
+
+Beyond pagination, `gombit make resource` opts declared fields into a list-query
+surface (issue #260). Declaration keeps the surface a safe, indexable subset —
+a field is queryable only when it opts in, mirroring how list columns are a
+declared subset. Add modifiers to the field grammar:
+
+| Modifier     | Query parameter                     | Types                                         |
+| ------------ | ----------------------------------- | --------------------------------------------- |
+| `filterable` | `?<field>=<value>` (exact match)    | string, int, int64, uint, bool, enum          |
+| `sortable`   | `?sort=<field>&order=asc\|desc`     | any scalar (and belongs_to FK)                |
+| `searchable` | `?q=<term>` (case-insensitive LIKE) | string, text, enum                            |
+
+A `belongs_to` foreign key is **filterable by default** — no modifier needed —
+so a detail page can list a record's `has_many` children with
+`GET /api/v1/invoices?customer_id=<id>`.
+
+```bash
+gombit make resource Article \
+  title:string:required,searchable,sortable \
+  body:text:searchable \
+  status:enum(draft,published):filterable,sortable \
+  author:belongs_to:Author
+```
+
+The generated handler applies filters and `?q=` before the `COUNT`, so
+`meta.total` reflects the filtered set; `?sort=` replaces the fixed `id` order
+(`id` stays the default when `?sort=` is absent) and is validated against the
+declared sortable set. An undeclared sort field or a bad `order` returns a D10
+`validation_error` (422). The shared primitives live in `database` (`FilterEq`,
+`Search`, `SortBy`) and are the same behavior the admin data plane applies.
+Filter values are exact-match to start; ranges/operators come later.
+
 ## Request DTOs
 
 Go structs are the source of truth. Prefer Huma tags — not a separate

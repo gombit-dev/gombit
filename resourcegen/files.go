@@ -211,6 +211,41 @@ func modelFieldLines(f Field, resourcePkg string) string {
 	}
 }
 
+// filterFields returns the fields the generated list handler exposes as
+// exact-match query filters, in declared order (belongs_to FKs are included by
+// default; see Field.isFilterable).
+func filterFields(fields []Field) []Field {
+	out := make([]Field, 0, len(fields))
+	for _, f := range fields {
+		if f.isFilterable() {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// searchColumns returns the DB columns ?q= searches, in declared order.
+func searchColumns(fields []Field) []string {
+	var out []string
+	for _, f := range fields {
+		if f.Searchable {
+			out = append(out, f.searchColumn())
+		}
+	}
+	return out
+}
+
+// sortColumns returns the DB columns ?sort= may order by, in declared order.
+func sortColumns(fields []Field) []string {
+	var out []string
+	for _, f := range fields {
+		if f.Sortable {
+			out = append(out, f.sortColumn())
+		}
+	}
+	return out
+}
+
 func renderHandler(ctx renderContext) string {
 	var b strings.Builder
 	pkg := ctx.Resource.Package
@@ -250,9 +285,23 @@ func renderHandler(ctx renderContext) string {
 	listIn := "list" + ctx.Resource.Tag + "Input"
 	b.WriteString("type " + listOut + " struct {\n")
 	b.WriteString("\tBody contract.DataMeta[[]" + data + ", contract.PageMeta]\n}\n\n")
+	filters := filterFields(ctx.Fields)
+	searchCols := searchColumns(ctx.Fields)
+	sortCols := sortColumns(ctx.Fields)
 	b.WriteString("type " + listIn + " struct {\n")
 	b.WriteString("\tPage    int `query:\"page\" doc:\"1-based page\"`\n")
-	b.WriteString("\tPerPage int `query:\"per_page\" doc:\"Page size\"`\n}\n\n")
+	b.WriteString("\tPerPage int `query:\"per_page\" doc:\"Page size\"`\n")
+	if len(searchCols) > 0 {
+		b.WriteString("\tQ string `query:\"q\" doc:\"Search term matched across searchable fields\"`\n")
+	}
+	if len(sortCols) > 0 {
+		b.WriteString("\tSort  string `query:\"sort\" enum:\"" + strings.Join(sortCols, ",") + "\" doc:\"Field to sort by\"`\n")
+		b.WriteString("\tOrder string `query:\"order\" enum:\"asc,desc\" doc:\"Sort direction (default asc)\"`\n")
+	}
+	for _, f := range filters {
+		b.WriteString("\t" + f.filterInputField() + " string `" + f.filterQueryTag() + "`\n")
+	}
+	b.WriteString("}\n\n")
 	b.WriteString("type get" + typ + "Input struct {\n")
 	b.WriteString("\tID string `path:\"id\" doc:\"" + typ + " identifier\"`\n}\n\n")
 	b.WriteString("type get" + typ + "Output struct {\n")
@@ -271,12 +320,43 @@ func renderHandler(ctx renderContext) string {
 	b.WriteString("func (h *Handler) list(ctx context.Context, input *" + listIn + ") (*" + listOut + ", error) {\n")
 	b.WriteString("\tpage, perPage := contract.ClampPage(input.Page, input.PerPage)\n")
 	b.WriteString("\tq := h.DB.WithContext(ctx).Model(&" + typ + "{})\n")
+	// Declared filters and search narrow the set before the count, so meta.total
+	// reflects the filtered collection, not the whole table. errDeclared tracks
+	// whether the function-scope err exists yet so the first assignment uses :=.
+	errDeclared := false
+	for _, f := range filters {
+		assign := "="
+		if !errDeclared {
+			assign = ":="
+			errDeclared = true
+		}
+		b.WriteString("\tq, err " + assign + " database.FilterEq(ctx, q, \"" + f.filterColumn() + "\", " + f.filterKindExpr() + ", input." + f.filterInputField() + ")\n")
+		b.WriteString("\tif err != nil {\n\t\treturn nil, err\n\t}\n")
+	}
+	if len(searchCols) > 0 {
+		b.WriteString("\tq = database.Search(q, []string{\"" + strings.Join(searchCols, "\", \"") + "\"}, input.Q)\n")
+	}
 	b.WriteString("\tvar total int64\n")
 	b.WriteString("\tif err := q.Session(&gorm.Session{}).Count(&total).Error; err != nil {\n")
 	b.WriteString("\t\treturn nil, contract.WithContext(ctx, contract.Internal(\"list " + ctx.Resource.PluralSnake + "\"))\n")
 	b.WriteString("\t}\n")
+	if len(sortCols) > 0 {
+		// Declared sort replaces the fixed Order("id"), which stays the fallback
+		// when ?sort= is absent so the default page order is unchanged.
+		assign := "="
+		if !errDeclared {
+			assign = ":="
+			errDeclared = true
+		}
+		b.WriteString("\tq, err " + assign + " database.SortBy(ctx, q, input.Sort, input.Order, []string{\"" + strings.Join(sortCols, "\", \"") + "\"}, \"id\")\n")
+		b.WriteString("\tif err != nil {\n\t\treturn nil, err\n\t}\n")
+	}
 	b.WriteString("\tvar rows []" + typ + "\n")
-	b.WriteString("\tif err := q.Order(\"id\").Offset(contract.PageOffset(page, perPage)).Limit(perPage).Find(&rows).Error; err != nil {\n")
+	if len(sortCols) > 0 {
+		b.WriteString("\tif err := q.Offset(contract.PageOffset(page, perPage)).Limit(perPage).Find(&rows).Error; err != nil {\n")
+	} else {
+		b.WriteString("\tif err := q.Order(\"id\").Offset(contract.PageOffset(page, perPage)).Limit(perPage).Find(&rows).Error; err != nil {\n")
+	}
 	b.WriteString("\t\treturn nil, contract.WithContext(ctx, contract.Internal(\"list " + ctx.Resource.PluralSnake + "\"))\n")
 	b.WriteString("\t}\n")
 	b.WriteString("\titems := make([]" + data + ", 0, len(rows))\n")

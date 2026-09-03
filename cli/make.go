@@ -46,7 +46,7 @@ regex), next to product.Register(app). AutoMigrate is updated the same way.
 
 Field grammar (design §27 subset):
 
-  name:type[:required][,unique][,index]
+  name:type[:required][,unique][,index][,filterable][,sortable][,searchable]
 
 Supported types: string, text, int, int64, bool, uint, decimal, time, enum,
 belongs_to, has_many, many_to_many.
@@ -55,6 +55,18 @@ belongs_to, has_many, many_to_many.
   decimal(p,s)       pin precision/scale, e.g. decimal(10,2).
   time               time.Time (RFC3339 in JSON).
   enum(a,b,c)        string column validated against the listed values.
+
+List-query modifiers opt a field into the generated list handler's declared
+query surface (safe, indexable subset):
+
+  filterable         exact-match ?<field>=<value> query param.
+                     Types: string, int, int64, uint, bool, enum. A belongs_to
+                     foreign key is filterable by default (GET /children?
+                     <parent>_id=<id>) with no modifier needed.
+  sortable           ?sort=<field>&order=asc|desc (replaces the fixed id order;
+                     id stays the default when ?sort= is absent).
+  searchable         case-insensitive ?q=<term> LIKE across searchable text
+                     fields. Types: string, text, enum.
 
 Relations use name:kind:Target, where Target is a model in internal/<target>/:
 
@@ -74,6 +86,8 @@ foreign key / explicit join keys. Point relations at a different package.
 Examples:
 
   gombit make resource Widget name:string:required price:int
+  gombit make resource Article title:string:required,searchable,sortable \
+    status:enum(draft,published):filterable author:belongs_to:Author
   gombit make resource Rental price:decimal:required starts_at:time \
     status:enum(requested,confirmed,active,returned,cancelled) \
     engine:belongs_to:Engine warehouses:many_to_many:Warehouse

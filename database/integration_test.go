@@ -61,6 +61,26 @@ func TestMapPersistErrorMySQLConstraintViolations(t *testing.T) {
 	testForeignKeyAndNotNullViolations(t, db)
 }
 
+func TestListQueryHelpersPostgres(t *testing.T) {
+	if *postgresDSN == "" {
+		t.Skip("set -database.postgres-dsn to run Postgres integration tests")
+	}
+	assertListQueryHelpers(t, openIntegrationDB(t, config.DatabaseConfig{
+		Driver: config.DatabaseDriverPostgres,
+		DSN:    *postgresDSN,
+	}))
+}
+
+func TestListQueryHelpersMySQL(t *testing.T) {
+	if *mysqlDSN == "" {
+		t.Skip("set -database.mysql-dsn to run MySQL integration tests")
+	}
+	assertListQueryHelpers(t, openIntegrationDB(t, config.DatabaseConfig{
+		Driver: config.DatabaseDriverMySQL,
+		DSN:    *mysqlDSN,
+	}))
+}
+
 type integrationFKCategory struct {
 	ID uint `gorm:"primaryKey"`
 }
