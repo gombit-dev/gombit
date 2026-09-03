@@ -134,11 +134,16 @@ func assertAggregateHelpers(t *testing.T, db *DB) {
 
 	// DecimalPrecision pins the per-driver contract the docs promise (rather than
 	// only the evenly-dividing integer cases above): a fractional decimal SUM and
-	// a non-integer AVG. Postgres/MySQL compute these in fixed point (exact);
-	// SQLite computes them in IEEE float, so the returned string differs slightly
-	// between drivers — the assertion compares the decimal value within a
-	// tolerance rather than a fixed string, which is exactly the contract
-	// (exact on PG/MySQL, float-approximate on SQLite, AVG approximate anywhere).
+	// a non-integer AVG over a decimal(19,4) column.
+	//
+	//   - decimal SUM is exact on Postgres/MySQL (fixed point), so those drivers
+	//     assert the exact string "30.31"; SQLite computes it in float, so it
+	//     asserts the value within tolerance. Asserting the string on SQLite, or
+	//     only asserting the value on PG/MySQL, would not lock "exact on PG/MySQL"
+	//     — a PG path that scanned SUM through float would still pass a value
+	//     check.
+	//   - AVG is fractional and rounded to each driver's numeric scale, so it is
+	//     an approximation on every driver: value within tolerance, everywhere.
 	t.Run("DecimalPrecision", func(t *testing.T) {
 		seedAggregateMoney(t, db)
 		moneyAllowed := map[string]AggregateColumn{"amount": {Column: "amount"}}
@@ -151,7 +156,12 @@ func assertAggregateHelpers(t *testing.T, db *DB) {
 			t.Fatalf("Aggregate: %v", err)
 		}
 		// 10.10 + 20.20 + 0.01 = 30.31; avg = 10.1033...
-		wantApprox(t, out, "sum:amount", 30.31, 1e-6)
+		switch db.Driver() {
+		case DriverPostgres, DriverMySQL:
+			wantString(t, out, "sum:amount", "30.31") // exact fixed-point SUM
+		default: // SQLite: float-approximate
+			wantApprox(t, out, "sum:amount", 30.31, 1e-6)
+		}
 		wantApprox(t, out, "avg:amount", 30.31/3, 1e-3)
 	})
 }

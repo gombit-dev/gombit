@@ -76,8 +76,10 @@ aggregates:
   aggregatable       server-side ?aggregate=<func>:<field> (func: sum, avg,
                      min, max), computed over the filtered set before
                      pagination and returned in meta.aggregates. Types: int,
-                     int64, uint, decimal. Exact on Postgres/MySQL; SQLite
-                     computes AVG and fractional decimal SUM in float.
+                     int64, uint, decimal. Integer aggregates and decimal sum
+                     are exact on Postgres/MySQL; SQLite computes avg and
+                     fractional decimal sum in float. avg is an approximation
+                     on any driver.
 
 Relations use name:kind:Target, where Target is a model in internal/<target>/:
 
