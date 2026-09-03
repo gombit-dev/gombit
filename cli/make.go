@@ -69,10 +69,15 @@ admin data plane so the two contracts stay in sync:
                      stays the default when ?ordering= is absent.
   searchable         case-insensitive ?search=<term> LIKE across searchable
                      text fields. Types: string, text, enum.
+
+The generated list handler (not the admin data plane) also supports numeric
+aggregates:
+
   aggregatable       server-side ?aggregate=<func>:<field> (func: sum, avg,
                      min, max), computed over the filtered set before
                      pagination and returned in meta.aggregates. Types: int,
-                     int64, uint, decimal.
+                     int64, uint, decimal. Exact on Postgres/MySQL; SQLite
+                     computes AVG and fractional decimal SUM in float.
 
 Relations use name:kind:Target, where Target is a model in internal/<target>/:
 

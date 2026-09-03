@@ -41,8 +41,11 @@ type PageMeta struct {
 // set as the list, before pagination.
 //
 // Aggregates is keyed "<func>:<field>" (e.g. "sum:total") with types.Decimal
-// values — exact JSON strings, so money totals never round through float. When
-// no ?aggregate= is requested the map is nil and omitempty drops it, so the
+// values — canonical decimal strings. Precision follows the driver: exact for a
+// decimal SUM and all integer aggregates on Postgres/MySQL (and integer SUM/MIN/
+// MAX on SQLite); SQLite computes AVG and fractional decimal SUM in float, so
+// those may round. See the database package's Aggregate and docs/contract.md.
+// When no ?aggregate= is requested the map is nil and omitempty drops it, so the
 // response is byte-identical to a PageMeta envelope.
 type ListMeta struct {
 	Page       int                      `json:"page"`

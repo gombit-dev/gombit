@@ -117,10 +117,17 @@ func ParseAggregates(ctx context.Context, raw string, allowed map[string]Aggrega
 // ("<func>:<field>"). All aggregates are evaluated in a single SELECT with no
 // GROUP BY, so the query returns exactly one row and runs before pagination.
 //
-// Values come back as types.Decimal (exact, JSON-string) regardless of driver
-// or column type, so money totals never round through float. A NULL result — an
-// aggregate over an empty matching set (SUM/AVG/MIN/MAX all yield NULL) —
-// becomes decimal zero, so a card renders 0 rather than null.
+// Values are the database's own aggregate, encoded as a types.Decimal (a
+// canonical JSON string). Precision therefore follows the driver: Postgres and
+// MySQL compute SUM/AVG/MIN/MAX over numeric/decimal in fixed point, so a
+// decimal SUM (and integer aggregates on every driver) is exact; SQLite has no
+// native fixed-point aggregate and computes AVG — and SUM of a fractional
+// decimal column — in IEEE double, so those may carry float rounding and can
+// differ from Postgres/MySQL for the same data. AVG is fractional by nature
+// (rounded to each driver's default scale) and is an approximation everywhere.
+// See docs/contract.md "List query: numeric aggregates" for the per-driver
+// contract. A NULL result — an aggregate over an empty matching set (SUM/AVG/
+// MIN/MAX all yield NULL) — becomes decimal zero, so a card renders 0 not null.
 //
 // An empty specs list is a no-op (nil map, no query). Column names in specs are
 // generator-controlled; nothing here is derived from user input.
@@ -158,11 +165,14 @@ func Aggregate(ctx context.Context, q *gorm.DB, specs []AggregateSpec) (map[stri
 }
 
 // toDecimal normalizes a driver-scanned aggregate value into a types.Decimal.
-// Drivers return aggregate results with different Go types: SQLite yields int64
-// or float64, Postgres yields int64 for SUM(int) and []byte/string for numeric
-// AVG, MySQL yields []byte for its decimal results. A NULL result (nil) becomes
-// decimal zero. AVG is inherently fractional, so a float64 is converted through
-// its shortest exact decimal representation.
+// Drivers return aggregate results with different Go types: Postgres yields int64
+// for SUM(int) and a numeric string/[]byte for fixed-point AVG/decimal SUM,
+// MySQL yields []byte for its decimal results — both exact. SQLite yields int64
+// for integer aggregates but float64 for AVG and for SUM of a fractional decimal
+// column, because it has no fixed-point aggregate; that float64 is encoded via
+// its shortest round-tripping decimal string, so the value is faithful to what
+// SQLite computed (float rounding included) rather than silently reshaped. A
+// NULL result (nil) becomes decimal zero.
 func toDecimal(v any) (types.Decimal, error) {
 	switch val := v.(type) {
 	case nil:

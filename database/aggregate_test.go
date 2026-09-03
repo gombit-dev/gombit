@@ -20,6 +20,14 @@ type aggItem struct {
 	Amount   int
 }
 
+// aggMoney carries a fixed-point decimal column so the precision contract can be
+// exercised: a fractional decimal SUM and a non-integer AVG, the two cases the
+// integer-only aggItem cannot reach.
+type aggMoney struct {
+	ID     uint          `gorm:"primaryKey"`
+	Amount types.Decimal `gorm:"type:decimal(19,4)"`
+}
+
 // TestAggregateHelpersSQLite exercises ParseAggregates / Aggregate on SQLite.
 // The same assertions run against Postgres and MySQL from the integration suite
 // (TestAggregateHelpers{Postgres,MySQL}), so the SQLite+PG+MySQL matrix the
@@ -123,6 +131,67 @@ func assertAggregateHelpers(t *testing.T, db *DB) {
 			t.Fatalf("len(specs) = %d, want 1 (deduped)", len(specs))
 		}
 	})
+
+	// DecimalPrecision pins the per-driver contract the docs promise (rather than
+	// only the evenly-dividing integer cases above): a fractional decimal SUM and
+	// a non-integer AVG. Postgres/MySQL compute these in fixed point (exact);
+	// SQLite computes them in IEEE float, so the returned string differs slightly
+	// between drivers — the assertion compares the decimal value within a
+	// tolerance rather than a fixed string, which is exactly the contract
+	// (exact on PG/MySQL, float-approximate on SQLite, AVG approximate anywhere).
+	t.Run("DecimalPrecision", func(t *testing.T) {
+		seedAggregateMoney(t, db)
+		moneyAllowed := map[string]AggregateColumn{"amount": {Column: "amount"}}
+		specs, err := ParseAggregates(ctx, "sum:amount,avg:amount", moneyAllowed)
+		if err != nil {
+			t.Fatalf("ParseAggregates: %v", err)
+		}
+		out, err := Aggregate(ctx, db.Model(&aggMoney{}), specs)
+		if err != nil {
+			t.Fatalf("Aggregate: %v", err)
+		}
+		// 10.10 + 20.20 + 0.01 = 30.31; avg = 10.1033...
+		wantApprox(t, out, "sum:amount", 30.31, 1e-6)
+		wantApprox(t, out, "avg:amount", 30.31/3, 1e-3)
+	})
+}
+
+// wantApprox parses an aggregate's decimal string and asserts it is within eps of
+// want. Aggregate values are exact on Postgres/MySQL but float-approximate on
+// SQLite (and AVG is approximate everywhere), so the string is not identical
+// across drivers; the numeric value is.
+func wantApprox(t *testing.T, out map[string]types.Decimal, key string, want, eps float64) {
+	t.Helper()
+	v, ok := out[key]
+	if !ok {
+		t.Fatalf("aggregate %q missing from %v", key, out)
+	}
+	got, _ := v.Float64()
+	if diff := got - want; diff < -eps || diff > eps {
+		t.Fatalf("aggregate %q = %s (%.10f), want ~%.10f (±%g)", key, v.String(), got, want, eps)
+	}
+}
+
+func seedAggregateMoney(t *testing.T, db *DB) {
+	t.Helper()
+	if err := db.AutoMigrate(&aggMoney{}); err != nil {
+		t.Fatalf("AutoMigrate(aggMoney) error = %v", err)
+	}
+	if err := db.Where("1 = 1").Delete(&aggMoney{}).Error; err != nil {
+		t.Fatalf("reset money table: %v", err)
+	}
+	amounts := []string{"10.10", "20.20", "0.01"}
+	rows := make([]aggMoney, len(amounts))
+	for i, s := range amounts {
+		d, err := types.NewDecimalFromString(s)
+		if err != nil {
+			t.Fatalf("decimal %q: %v", s, err)
+		}
+		rows[i] = aggMoney{Amount: d}
+	}
+	if err := db.Create(&rows).Error; err != nil {
+		t.Fatalf("seed money: %v", err)
+	}
 }
 
 func wantString(t *testing.T, out map[string]types.Decimal, key, want string) {
@@ -241,6 +310,12 @@ func TestGeneratedAggregateContractRuntime(t *testing.T) {
 	got = decodeAgg(t, api.Get("/items?author_id=1&aggregate=sum:amount"))
 	if got.agg(t, "sum:amount") != "30" {
 		t.Fatalf("filtered sum = %q, want 30", got.agg(t, "sum:amount"))
+	}
+	// Pagination must not shrink the aggregate: one row per page, but sum:amount is
+	// still computed over all three matching rows (60), not the single page row.
+	got = decodeAgg(t, api.Get("/items?page=1&per_page=1&aggregate=sum:amount"))
+	if got.agg(t, "sum:amount") != "60" || len(got.Data) != 1 {
+		t.Fatalf("paginated aggregate = %v, data len = %d; want sum 60 over 1 page row", got.Meta["aggregates"], len(got.Data))
 	}
 	// Bad aggregate spec -> 422.
 	if resp := api.Get("/items?aggregate=median:amount"); resp.Code != 422 {

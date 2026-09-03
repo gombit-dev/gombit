@@ -138,10 +138,8 @@ gombit make resource Invoice \
 GET /api/v1/invoices?status=paid&aggregate=sum:total,avg:total,max:total
 ```
 
-The values land in `meta.aggregates`, keyed `"<func>:<field>"`, as exact decimal
-strings (the same canonical string encoding as a `decimal` field — trailing
-zeros trimmed, so the value is identical across SQLite/Postgres/MySQL and money
-totals never round through float):
+The values land in `meta.aggregates`, keyed `"<func>:<field>"`, as decimal
+strings (the same canonical `decimal`-field encoding — trailing zeros trimmed):
 
 ```json
 {
@@ -154,6 +152,23 @@ totals never round through float):
   }
 }
 ```
+
+**Precision is per driver.** The value is the database's own aggregate, encoded
+as a string:
+
+- **Postgres and MySQL** compute `SUM`/`AVG`/`MIN`/`MAX` over `numeric`/`decimal`
+  in fixed-point, so a decimal `SUM` (and integer aggregates on every driver) is
+  **exact**. This is the configuration a production money card should run on.
+- **SQLite** — the framework's dev default — has no native fixed-point aggregate:
+  it computes `AVG`, and `SUM` of a fractional `decimal` column, in IEEE double.
+  So `avg:total` and a fractional `sum:total` may carry float rounding on SQLite
+  (e.g. `10.10 + 20.20 + 0.01` can serialize as `30.309999999999995`), and the
+  string can differ from Postgres/MySQL for the same data. Integer `SUM`/`MIN`/
+  `MAX`, and `MIN`/`MAX` of a decimal column, stay exact on SQLite.
+
+For an exact money total, aggregate on Postgres/MySQL. `AVG` is fractional by
+nature and is rounded to each driver's default numeric scale — treat it as an
+approximation, not an exact value, everywhere.
 
 When no `?aggregate=` is requested, `meta.aggregates` is omitted and the envelope
 is byte-identical to a `PageMeta` response. An unknown function, an undeclared
