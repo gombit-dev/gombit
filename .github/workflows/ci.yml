@@ -9,6 +9,19 @@ on:
 permissions:
   contents: read
 
+# GOTOOLCHAIN=local: never let `go` reach out for a different toolchain than
+# actions/setup-go already installed. GOPROXY with `|` (not `,`) falls back to
+# `direct` on ANY proxy/network failure, not just 404/410 — proxy.golang.org
+# intermittently drops connections mid-fetch (issue #208) and the default
+# `,`-joined GOPROXY doesn't fail over for that. ATLAS_VERSION pins the Atlas
+# CLI installed below in one place so CI never silently picks up a canary
+# build (the unpinned installer defaults to "latest", which has resolved to a
+# canary here before).
+env:
+  GOTOOLCHAIN: local
+  GOPROXY: https://proxy.golang.org|direct
+  ATLAS_VERSION: "v1.3.0"
+
 # Pipeline: lint → build → test → (database ∥ migrations ∥ conformance ∥ contract-drift ∥ benchmark-report-drift)
 jobs:
   lint:
@@ -51,6 +64,29 @@ jobs:
       - name: Build examples
         run: go build ./examples/...
 
+  ci-scripts:
+    name: CI script tests
+    # Mirrors the benchmark-scripts job below: hermetic bash tests (stubs
+    # `go`/`sleep`, no real network or waiting) for the scripts/ helpers
+    # every migration/conformance job below relies on — catches a regression
+    # in the retry/backoff logic before any of those jobs actually depend on
+    # it, not folded into `build` so the two script-test surfaces (top-level
+    # scripts/, benchmarks/scripts/) stay in one place each.
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run CI script tests
+        run: bash scripts/ci-prefetch-go-modules_test.sh
+
   test:
     name: Test
     needs: build
@@ -79,7 +115,16 @@ jobs:
       - name: Warm npx openapi-typescript cache
         run: npx --yes openapi-typescript@7.13.0 --help >/dev/null
 
+      # This package's test suite includes a real `go run` of the generated
+      # Atlas GORM loader (TestMakeMigrationsGeneratedLoaderUsesRealGormschema),
+      # which needs ariga.io/atlas-provider-gorm's full module graph resolved
+      # ahead of time (issue #208).
+      - name: Pre-fetch Go modules
+        run: bash scripts/ci-prefetch-go-modules.sh
+
       - name: Run tests
+        env:
+          GOPROXY: "off"
         run: go test ./...
 
   contract-drift:
@@ -276,7 +321,9 @@ jobs:
             -c 'CREATE DATABASE gombit_bench_gombit;'
 
       - name: Install Atlas CLI
-        run: curl -sSf https://atlasgo.sh | sh -s -- --community
+        run: |
+          curl -sSf https://atlasgo.sh | sh -s -- --community
+          atlas version
 
       - name: Apply gombit benchmark app migration
         working-directory: benchmarks/apps/gombit
@@ -460,11 +507,19 @@ jobs:
           cache: true
 
       - name: Install Atlas Community Edition
-        run: curl -sSf https://atlasgo.sh | sh -s -- --community
+        run: |
+          curl -sSf https://atlasgo.sh | sh -s -- --community
+          atlas version
+
+      # `go test ./migrations` includes the same generated-loader path as the
+      # `test` job's TestMakeMigrationsGeneratedLoaderUsesRealGormschema.
+      - name: Pre-fetch Go modules
+        run: bash scripts/ci-prefetch-go-modules.sh
 
       - name: Run migration unit and Atlas smoke tests
         env:
           ATLAS_BINARY: atlas
+          GOPROXY: "off"
         run: go test ./migrations ./cmd/gombit
 
   migrations-postgres:
@@ -495,7 +550,12 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Pre-fetch Go modules
+        run: bash scripts/ci-prefetch-go-modules.sh
+
       - name: Run Postgres migration integration tests
+        env:
+          GOPROXY: "off"
         run: >-
           go test -tags integration ./migrations
           -migrations.postgres-dsn
@@ -530,7 +590,12 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Pre-fetch Go modules
+        run: bash scripts/ci-prefetch-go-modules.sh
+
       - name: Run MySQL migration integration tests
+        env:
+          GOPROXY: "off"
         run: >-
           go test -tags integration ./migrations
           -migrations.mysql-dsn
@@ -551,11 +616,19 @@ jobs:
           cache: true
 
       - name: Install Atlas Community Edition
-        run: curl -sSf https://atlasgo.sh | sh -s -- --community
+        run: |
+          curl -sSf https://atlasgo.sh | sh -s -- --community
+          atlas version
+
+      # harness.prepareSchema() runs the same generated-loader path as the
+      # `test` job's TestMakeMigrationsGeneratedLoaderUsesRealGormschema.
+      - name: Pre-fetch Go modules
+        run: bash scripts/ci-prefetch-go-modules.sh
 
       - name: Run SQLite conformance suite
         env:
           ATLAS_BINARY: atlas
+          GOPROXY: "off"
         run: >-
           go test -tags conformance ./database/conformance
           -conformance.driver sqlite
@@ -590,11 +663,17 @@ jobs:
           cache: true
 
       - name: Install Atlas Community Edition
-        run: curl -sSf https://atlasgo.sh | sh -s -- --community
+        run: |
+          curl -sSf https://atlasgo.sh | sh -s -- --community
+          atlas version
+
+      - name: Pre-fetch Go modules
+        run: bash scripts/ci-prefetch-go-modules.sh
 
       - name: Run Postgres conformance suite
         env:
           ATLAS_BINARY: atlas
+          GOPROXY: "off"
         run: >-
           go test -tags conformance ./database/conformance
           -conformance.driver postgres
@@ -632,11 +711,17 @@ jobs:
           cache: true
 
       - name: Install Atlas Community Edition
-        run: curl -sSf https://atlasgo.sh | sh -s -- --community
+        run: |
+          curl -sSf https://atlasgo.sh | sh -s -- --community
+          atlas version
+
+      - name: Pre-fetch Go modules
+        run: bash scripts/ci-prefetch-go-modules.sh
 
       - name: Run MySQL conformance suite
         env:
           ATLAS_BINARY: atlas
+          GOPROXY: "off"
         run: >-
           go test -tags conformance ./database/conformance
           -conformance.driver mysql
