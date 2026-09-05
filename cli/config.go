@@ -61,6 +61,7 @@ func writeConfigShow(w io.Writer, cfg config.Config) error {
 		{"API.Prefix", cfg.API.Prefix},
 		{"API.DocsEnabled", strconv.FormatBool(cfg.API.DocsEnabled)},
 		{"Database.Driver", string(cfg.Database.Driver)},
+		{"Database.Required", strconv.FormatBool(cfg.Database.Required)},
 		{"Database.DSN", cfg.Database.DSN},
 		{"Database.MaxOpenConns", strconv.Itoa(cfg.Database.MaxOpenConns)},
 		{"Database.MaxIdleConns", strconv.Itoa(cfg.Database.MaxIdleConns)},

@@ -47,7 +47,7 @@ type appContractJSON struct {
 }
 
 func TestRunContractAppEmitsProjectedJSON(t *testing.T) {
-	cfg := config.Default()
+	cfg := config.Default() // Database.Required defaults to true
 	cfg.HTTP.Addr = ":8080"
 	cfg.Database.Driver = config.DatabaseDriverPostgres
 	stubLoadConfig(t, cfg)
@@ -77,18 +77,16 @@ func TestRunContractAppEmitsProjectedJSON(t *testing.T) {
 	if got.Database.Driver != "postgres" {
 		t.Errorf("database.driver = %q, want postgres", got.Database.Driver)
 	}
-	// Auth disabled → framework does not require a database to boot.
-	if got.Database.Required {
-		t.Error("database.required = true, want false when auth is disabled")
+	if !got.Database.Required {
+		t.Error("database.required = false, want true (the default) — a postgres app needs a datastore")
 	}
 }
 
-func TestRunContractAppRequiredWhenAuthEnabled(t *testing.T) {
+func TestRunContractAppRequiredReflectsConfig(t *testing.T) {
+	// database.required is a declared config value, not a proxy for auth: an app
+	// that opts out reports false even with a driver configured.
 	cfg := config.Default()
-	cfg.Auth.JWTSecret = "a-sufficiently-long-development-jwt-secret"
-	if !cfg.Auth.Enabled() {
-		t.Fatal("precondition: auth should be enabled with a JWT secret set")
-	}
+	cfg.Database.Required = false
 	stubLoadConfig(t, cfg)
 	dir := writeGoMod(t, "module x\nrequire github.com/gombit-dev/gombit v0.5.0\n")
 
@@ -100,8 +98,8 @@ func TestRunContractAppRequiredWhenAuthEnabled(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	if !got.Database.Required {
-		t.Error("database.required = false, want true when auth is enabled")
+	if got.Database.Required {
+		t.Error("database.required = true, want false when the app declares it does not need a database")
 	}
 }
 

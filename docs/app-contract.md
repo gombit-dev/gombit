@@ -33,7 +33,10 @@ gombit contract app --dir ./path/to/project
 
 Gombit projects the contract from configuration the app already declares — it
 never guesses by scanning files, directory names, or README text (build plan
-§10, principle 6.2):
+§10, principle 6.2). `--dir` selects one project directory that **both** the
+config (`.env`) and `go.mod` are read from, so a monorepo cannot mix one app's
+`go.mod` with another's config (process `GOMBIT_*` env still applies, as it
+would at runtime):
 
 | Field | Source |
 | --- | --- |
@@ -43,7 +46,7 @@ never guesses by scanning files, directory names, or README text (build plan
 | `runtime.http_port` | The port of `config.HTTP.Addr` (`gombit.yaml` / `GOMBIT_HTTP_ADDR`). |
 | `runtime.health` | The fixed `/livez` + `/readyz` probes (HOST-2, [health.md](health.md)). |
 | `database.driver` | `config.Database.Driver`. |
-| `database.required` | `true` when the framework refuses to start without a database for this configuration — currently when **auth is enabled** (a Gombit app with auth requires a database). The `driver` is reported either way; a host may still provision a database for an app that uses one without auth. |
+| `database.required` | The declared `config.Database.Required` (`GOMBIT_DATABASE_REQUIRED`, default `true`) — whether a host must provision a database for this app. It is a real config value, not a proxy for auth; an app that needs no database sets it `false`. |
 | `migrations.path` | The versioned-migrations directory (`database/migrations`). |
 
 ## Failure is loud

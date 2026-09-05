@@ -126,6 +126,7 @@ func TestLoadFromEnv(t *testing.T) {
 		},
 		Database: DatabaseConfig{
 			Driver:          DatabaseDriverPostgres,
+			Required:        true,
 			DSN:             "host=localhost user=gombit dbname=app sslmode=disable",
 			MaxOpenConns:    20,
 			MaxIdleConns:    4,
@@ -288,8 +289,9 @@ func TestLoadUsesProcessEnvironment(t *testing.T) {
 			DocsEnabled: false,
 		},
 		Database: DatabaseConfig{
-			Driver: DatabaseDriverMySQL,
-			DSN:    "gombit@tcp(localhost:3306)/app?parseTime=true",
+			Driver:   DatabaseDriverMySQL,
+			Required: true,
+			DSN:      "gombit@tcp(localhost:3306)/app?parseTime=true",
 		},
 		Cache: CacheConfig{
 			Driver:    CacheDriverMemory,
@@ -849,6 +851,20 @@ func TestLoadFromEnvReturnsParseErrors(t *testing.T) {
 	}
 	if len(fieldErrors) != 4 {
 		t.Fatalf("LoadFromEnv() field error count = %d, want 4", len(fieldErrors))
+	}
+}
+
+func TestDatabaseRequiredDefaultsTrueAndOverrides(t *testing.T) {
+	if !Default().Database.Required {
+		t.Fatal("Default().Database.Required = false, want true")
+	}
+
+	cfg, err := LoadFromEnv(mapLookup(map[string]string{envDatabaseRequired: "false"}))
+	if err != nil {
+		t.Fatalf("LoadFromEnv() error = %v", err)
+	}
+	if cfg.Database.Required {
+		t.Error("Database.Required = true with GOMBIT_DATABASE_REQUIRED=false, want false")
 	}
 }
 

@@ -29,13 +29,23 @@ func TestFrameworkVersionFromModfile(t *testing.T) {
 			want:    "v0.0.0-20260818193315-9abb3c6ecc8c",
 			ok:      true,
 		},
-		"local replace is unresolved": {
+		"local path replace is unresolved": {
 			content: "module x\n\nrequire github.com/gombit-dev/gombit v0.5.0\n\nreplace github.com/gombit-dev/gombit => ../gombit\n",
 			wantErr: ErrFrameworkVersionUnresolved,
 		},
-		"block replace is unresolved": {
+		"block local replace is unresolved": {
 			content: "module x\nrequire github.com/gombit-dev/gombit v0.5.0\nreplace (\n\tgithub.com/gombit-dev/gombit => ../gombit\n)\n",
 			wantErr: ErrFrameworkVersionUnresolved,
+		},
+		"version-to-version replace is resolvable": {
+			content: "module x\nrequire github.com/gombit-dev/gombit v0.5.0\nreplace github.com/gombit-dev/gombit v0.5.0 => github.com/gombit-dev/gombit v0.5.1\n",
+			want:    "v0.5.1",
+			ok:      true,
+		},
+		"fork replace with version is resolvable": {
+			content: "module x\nrequire github.com/gombit-dev/gombit v0.5.0\nreplace github.com/gombit-dev/gombit => github.com/fork/gombit v0.6.0\n",
+			want:    "v0.6.0",
+			ok:      true,
 		},
 		"missing framework require": {
 			content: "module x\n\nrequire github.com/gin-gonic/gin v1.10.0\n",

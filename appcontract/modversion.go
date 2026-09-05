@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -14,9 +15,16 @@ const FrameworkModulePath = "github.com/gombit-dev/gombit"
 
 // ErrFrameworkVersionUnresolved is returned when go.mod names the framework but
 // its version cannot be reported as a resolvable module version — a local
-// replace directive (a framework dev checkout) being the common case. A host
-// cannot pin such a build, so this is surfaced rather than guessed.
-var ErrFrameworkVersionUnresolved = errors.New("appcontract: framework version is unresolved (replaced or local)")
+// filesystem replace directive (a framework dev checkout) being the common
+// case. A host cannot pin such a build, so this is surfaced rather than guessed.
+// A version-to-version replace (e.g. to a published fork) IS resolvable and its
+// target version is reported instead.
+var ErrFrameworkVersionUnresolved = errors.New("appcontract: framework version is unresolved (replaced with a local path)")
+
+// semverPattern matches a canonical module version, including Go
+// pseudo-versions. Mirrors scaffold.semverPattern; build metadata is excluded.
+var semverPattern = regexp.MustCompile(
+	`^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?$`)
 
 // FrameworkVersion reads the version of the Gombit framework the app in workDir
 // builds against, straight from its go.mod require directive. It deliberately
@@ -36,19 +44,22 @@ func FrameworkVersion(workDir string) (string, error) {
 	return frameworkVersionFromModfile(string(data))
 }
 
-// frameworkVersionFromModfile extracts the framework require version from go.mod
-// content. Split out for testing without touching the filesystem.
+// frameworkVersionFromModfile extracts the framework version from go.mod
+// content. A replace of the framework module wins over the require: a
+// version-to-version replace reports its target version; a local filesystem
+// replace is unresolvable. Split out for testing without touching the
+// filesystem.
 func frameworkVersionFromModfile(content string) (string, error) {
-	version := ""
-	replaced := false
+	requireVer := ""
+	replaceVer := ""
+	replacedLocal := false
 
 	inRequireBlock := false
 	inReplaceBlock := false
 
 	scanner := bufio.NewScanner(strings.NewReader(content))
 	for scanner.Scan() {
-		line := stripComment(scanner.Text())
-		trimmed := strings.TrimSpace(line)
+		trimmed := strings.TrimSpace(stripComment(scanner.Text()))
 		if trimmed == "" {
 			continue
 		}
@@ -60,41 +71,40 @@ func frameworkVersionFromModfile(content string) (string, error) {
 				continue
 			}
 			if v, ok := requireVersion(trimmed); ok {
-				version = v
+				requireVer = v
 			}
 		case inReplaceBlock:
 			if trimmed == ")" {
 				inReplaceBlock = false
 				continue
 			}
-			if isFrameworkReplace(trimmed) {
-				replaced = true
-			}
+			applyReplace(trimmed, &replaceVer, &replacedLocal)
 		case strings.HasPrefix(trimmed, "require ("):
 			inRequireBlock = true
 		case strings.HasPrefix(trimmed, "replace ("):
 			inReplaceBlock = true
 		case strings.HasPrefix(trimmed, "require "):
-			if v, ok := requireVersion(strings.TrimSpace(strings.TrimPrefix(trimmed, "require"))); ok {
-				version = v
+			if v, ok := requireVersion(strings.TrimSpace(trimmed[len("require"):])); ok {
+				requireVer = v
 			}
 		case strings.HasPrefix(trimmed, "replace "):
-			if isFrameworkReplace(strings.TrimSpace(strings.TrimPrefix(trimmed, "replace"))) {
-				replaced = true
-			}
+			applyReplace(strings.TrimSpace(trimmed[len("replace"):]), &replaceVer, &replacedLocal)
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		return "", fmt.Errorf("appcontract: scan go.mod: %w", err)
 	}
 
-	if replaced {
+	switch {
+	case replacedLocal:
 		return "", ErrFrameworkVersionUnresolved
-	}
-	if version == "" {
+	case replaceVer != "":
+		return replaceVer, nil
+	case requireVer != "":
+		return requireVer, nil
+	default:
 		return "", fmt.Errorf("appcontract: go.mod does not require %s", FrameworkModulePath)
 	}
-	return version, nil
 }
 
 // requireVersion returns the version if entry is a require line for the
@@ -107,11 +117,27 @@ func requireVersion(entry string) (string, bool) {
 	return "", false
 }
 
-// isFrameworkReplace reports whether entry replaces the framework module, e.g.
-// "github.com/gombit-dev/gombit => ../gombit".
-func isFrameworkReplace(entry string) bool {
-	fields := strings.Fields(entry)
-	return len(fields) >= 1 && fields[0] == FrameworkModulePath
+// applyReplace records the effect of a replace directive on the framework
+// module. A version-to-version replace (right-hand side ends in a module
+// version) sets ver; a local filesystem replace (no version) sets local.
+func applyReplace(entry string, ver *string, local *bool) {
+	lhs, rhs, ok := strings.Cut(entry, "=>")
+	if !ok {
+		return
+	}
+	if fields := strings.Fields(lhs); len(fields) == 0 || fields[0] != FrameworkModulePath {
+		return
+	}
+	rhsFields := strings.Fields(rhs)
+	if len(rhsFields) == 0 {
+		*local = true
+		return
+	}
+	if last := rhsFields[len(rhsFields)-1]; semverPattern.MatchString(last) {
+		*ver = last
+		return
+	}
+	*local = true
 }
 
 // stripComment removes a trailing // comment (e.g. "// indirect") outside of
