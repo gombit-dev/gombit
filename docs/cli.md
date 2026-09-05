@@ -486,7 +486,7 @@ gombit db rollback
 gombit db status
 gombit db seed
 gombit db reset [--force]
-gombit db verify [--write] [--json]
+gombit db verify [--write] [--json] [--strict]
 ```
 
 See [migrations.md](migrations.md) for Atlas behavior and

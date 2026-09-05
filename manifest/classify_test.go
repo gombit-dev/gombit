@@ -63,9 +63,37 @@ func TestClassifySingleStatements(t *testing.T) {
 			`DELETE FROM "customers" WHERE "legacy" = true;`,
 			Operation{Kind: OpOther, Safety: SafetyDataLoss},
 		},
+		"mysql multi-table delete is data loss": {
+			"DELETE c FROM `customers` c JOIN `orders` o ON c.id = o.cid;",
+			Operation{Kind: OpOther, Safety: SafetyDataLoss},
+		},
+		"update is data loss (conservative)": {
+			`UPDATE "customers" SET "status" = 'x';`,
+			Operation{Kind: OpOther, Safety: SafetyDataLoss},
+		},
+		"truncate is data loss": {
+			`TRUNCATE "customers";`,
+			Operation{Kind: OpOther, Safety: SafetyDataLoss},
+		},
+		"drop schema cascade is data loss": {
+			`DROP SCHEMA "legacy" CASCADE;`,
+			Operation{Kind: OpOther, Safety: SafetyDataLoss},
+		},
+		"drop database is data loss": {
+			`DROP DATABASE "app";`,
+			Operation{Kind: OpOther, Safety: SafetyDataLoss},
+		},
 		"insert is safe other": {
 			`INSERT INTO "customers" ("name") VALUES ('a');`,
 			Operation{Kind: OpOther, Safety: SafetyNonDestructive},
+		},
+		"create view is safe other": {
+			`CREATE VIEW "active" AS SELECT * FROM "customers";`,
+			Operation{Kind: OpOther, Safety: SafetyNonDestructive},
+		},
+		"unrecognized statement is data loss (fail-safe)": {
+			`SOMETHING WEIRD HERE;`,
+			Operation{Kind: OpOther, Safety: SafetyDataLoss},
 		},
 	}
 	for name, tc := range tests {
@@ -111,18 +139,28 @@ ALTER TABLE ` + "`new_customers`" + ` RENAME TO ` + "`customers`" + `;`
 	}
 }
 
-func TestClassifyMixedAlterFlagsDataLoss(t *testing.T) {
-	// A migration that adds one column and drops another must surface the drop.
-	sql := `ALTER TABLE "customers" ADD COLUMN "note" text NOT NULL DEFAULT '';
-ALTER TABLE "customers" DROP COLUMN "legacy_code";`
-	ops := Classify(sql)
-	var sawDrop bool
-	for _, op := range ops {
-		if op.Kind == OpDropColumn && op.Safety == SafetyDataLoss {
-			sawDrop = true
-		}
+func TestClassifyMultiActionAlterInOneStatementFlagsDrop(t *testing.T) {
+	// A single ALTER that adds one column and drops another must surface the
+	// drop, even though the ADD comes first.
+	ops := Classify(`ALTER TABLE "customers" ADD COLUMN "note" text, DROP COLUMN "legacy_code";`)
+	if len(ops) != 1 {
+		t.Fatalf("Classify() = %d ops, want 1: %+v", len(ops), ops)
 	}
-	if !sawDrop {
-		t.Fatalf("Classify() did not flag the drop_column: %+v", ops)
+	if ops[0].Kind != OpDropColumn || ops[0].Safety != SafetyDataLoss {
+		t.Fatalf("Classify() = %+v, want drop_column/data_loss", ops[0])
+	}
+}
+
+func TestClassifyMysqlMultiActionAlterBareDrop(t *testing.T) {
+	ops := Classify("ALTER TABLE `customers` ADD `note` text, DROP `legacy_code`;")
+	if len(ops) != 1 || ops[0].Kind != OpDropColumn || ops[0].Safety != SafetyDataLoss {
+		t.Fatalf("Classify() = %+v, want drop_column/data_loss", ops)
+	}
+}
+
+func TestClassifyAlterDropConstraintIsNotDataLoss(t *testing.T) {
+	ops := Classify(`ALTER TABLE "customers" DROP CONSTRAINT "fk_owner";`)
+	if len(ops) != 1 || ops[0].Safety != SafetyNonDestructive {
+		t.Fatalf("Classify() = %+v, want non_destructive", ops)
 	}
 }

@@ -29,7 +29,7 @@ func TestRunVerifyClassifiesDataLoss(t *testing.T) {
 	})
 
 	var out, errOut bytes.Buffer
-	if err := runVerify(&out, &errOut, dir, false, false); err != nil {
+	if err := runVerify(&out, &errOut, verifyOptions{dir: dir}); err != nil {
 		t.Fatalf("runVerify() error = %v", err)
 	}
 	got := out.String()
@@ -47,7 +47,7 @@ func TestRunVerifyWriteThenVerifyPasses(t *testing.T) {
 	})
 
 	var out, errOut bytes.Buffer
-	if err := runVerify(&out, &errOut, dir, true, false); err != nil {
+	if err := runVerify(&out, &errOut, verifyOptions{dir: dir, write: true}); err != nil {
 		t.Fatalf("runVerify(--write) error = %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "0001_drop_legacy.manifest.json")); err != nil {
@@ -55,7 +55,7 @@ func TestRunVerifyWriteThenVerifyPasses(t *testing.T) {
 	}
 	out.Reset()
 	errOut.Reset()
-	if err := runVerify(&out, &errOut, dir, false, false); err != nil {
+	if err := runVerify(&out, &errOut, verifyOptions{dir: dir}); err != nil {
 		t.Fatalf("runVerify() after --write error = %v; stderr=%s", err, errOut.String())
 	}
 }
@@ -65,7 +65,7 @@ func TestRunVerifyFailsOnTamperedSQL(t *testing.T) {
 		"0001_add_note.sql": `ALTER TABLE "users" ADD COLUMN "note" text;`,
 	})
 	var out, errOut bytes.Buffer
-	if err := runVerify(&out, &errOut, dir, true, false); err != nil {
+	if err := runVerify(&out, &errOut, verifyOptions{dir: dir, write: true}); err != nil {
 		t.Fatalf("runVerify(--write) error = %v", err)
 	}
 	// Change the SQL after the manifest was written.
@@ -76,7 +76,7 @@ func TestRunVerifyFailsOnTamperedSQL(t *testing.T) {
 
 	out.Reset()
 	errOut.Reset()
-	err := runVerify(&out, &errOut, dir, false, false)
+	err := runVerify(&out, &errOut, verifyOptions{dir: dir})
 	if err == nil {
 		t.Fatal("runVerify() error = nil, want failure for tampered SQL")
 	}
@@ -104,7 +104,7 @@ func TestRunVerifyFailsOnForgedManifest(t *testing.T) {
 	}
 
 	var out, errOut bytes.Buffer
-	err := runVerify(&out, &errOut, dir, false, false)
+	err := runVerify(&out, &errOut, verifyOptions{dir: dir})
 	if err == nil {
 		t.Fatal("runVerify() error = nil, want failure for forged manifest")
 	}
@@ -113,12 +113,46 @@ func TestRunVerifyFailsOnForgedManifest(t *testing.T) {
 	}
 }
 
+func TestRunVerifyStrictFailsOnDataLoss(t *testing.T) {
+	dir := migrationsDir(t, map[string]string{
+		"0001_create_users.sql": `CREATE TABLE "users" ("id" bigserial NOT NULL);`,
+		"0002_drop_legacy.sql":  `ALTER TABLE "users" DROP COLUMN "legacy";`,
+	})
+
+	// Non-strict: a correctly classified data-loss migration is not a failure.
+	var out, errOut bytes.Buffer
+	if err := runVerify(&out, &errOut, verifyOptions{dir: dir}); err != nil {
+		t.Fatalf("runVerify() non-strict error = %v, want nil", err)
+	}
+
+	// Strict: the host-gating exit code trips on the data-loss migration.
+	out.Reset()
+	errOut.Reset()
+	err := runVerify(&out, &errOut, verifyOptions{dir: dir, strict: true})
+	if err == nil {
+		t.Fatal("runVerify(--strict) error = nil, want failure for data-loss migration")
+	}
+	if !strings.Contains(errOut.String(), "0002_drop_legacy") {
+		t.Errorf("stderr = %q, want the data-loss migration named", errOut.String())
+	}
+}
+
+func TestRunVerifyStrictPassesWhenAllSafe(t *testing.T) {
+	dir := migrationsDir(t, map[string]string{
+		"0001_create_users.sql": `CREATE TABLE "users" ("id" bigserial NOT NULL);`,
+	})
+	var out, errOut bytes.Buffer
+	if err := runVerify(&out, &errOut, verifyOptions{dir: dir, strict: true}); err != nil {
+		t.Fatalf("runVerify(--strict) error = %v, want nil for all-safe migrations", err)
+	}
+}
+
 func TestRunVerifyJSON(t *testing.T) {
 	dir := migrationsDir(t, map[string]string{
 		"0001_drop_legacy.sql": `ALTER TABLE "users" DROP COLUMN "legacy";`,
 	})
 	var out, errOut bytes.Buffer
-	if err := runVerify(&out, &errOut, dir, false, true); err != nil {
+	if err := runVerify(&out, &errOut, verifyOptions{dir: dir, asJSON: true}); err != nil {
 		t.Fatalf("runVerify(--json) error = %v", err)
 	}
 	var manifests []manifest.SafetyManifest

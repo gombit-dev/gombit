@@ -26,35 +26,50 @@ delete/truncate) and therefore require confirmation before a host applies them.
   --json   print the classification of every migration as JSON (for a host)
 
 Without --write, an existing manifest is verified against its SQL: a hash
-mismatch (SQL changed after review) or a mis-declared safety fails. Gombit
-classifies and verifies; the approval gate itself is the host's policy.`,
+mismatch (SQL changed after review) or a mis-declared safety fails. --strict
+additionally exits non-zero when any migration requires confirmation, so a host
+or CI can gate on the exit code. Gombit classifies and verifies; the approval
+gate itself is the host's policy.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 0 {
 				return fmt.Errorf("gombit db verify: unexpected argument %q", args[0])
 			}
-			dir, err := cmd.Flags().GetString("dir")
-			if err != nil {
+			opts := verifyOptions{}
+			var err error
+			if opts.dir, err = cmd.Flags().GetString("dir"); err != nil {
 				return err
 			}
-			write, err := cmd.Flags().GetBool("write")
-			if err != nil {
+			if opts.write, err = cmd.Flags().GetBool("write"); err != nil {
 				return err
 			}
-			asJSON, err := cmd.Flags().GetBool("json")
-			if err != nil {
+			if opts.asJSON, err = cmd.Flags().GetBool("json"); err != nil {
 				return err
 			}
-			return runVerify(stdout, stderr, dir, write, asJSON)
+			if opts.strict, err = cmd.Flags().GetBool("strict"); err != nil {
+				return err
+			}
+			return runVerify(stdout, stderr, opts)
 		},
 	})
 	cmd.Flags().String("dir", "database/migrations", "migration directory")
 	cmd.Flags().Bool("write", false, "generate/overwrite a manifest beside each migration")
 	cmd.Flags().Bool("json", false, "print each migration's classification as JSON")
+	cmd.Flags().Bool("strict", false, "exit non-zero if any migration requires confirmation (for host/CI gating)")
 	return cmd
 }
 
-func runVerify(stdout io.Writer, stderr io.Writer, dir string, write bool, asJSON bool) error {
+type verifyOptions struct {
+	dir    string
+	write  bool
+	asJSON bool
+	strict bool
+}
+
+func runVerify(stdout io.Writer, stderr io.Writer, opts verifyOptions) error {
+	dir := opts.dir
+	write := opts.write
+	asJSON := opts.asJSON
 	files, err := migrations.ListMigrationFiles(dir)
 	if err != nil {
 		return fmt.Errorf("gombit db verify: %w", err)
@@ -109,6 +124,21 @@ func runVerify(stdout io.Writer, stderr io.Writer, dir string, write bool, asJSO
 			_, _ = fmt.Fprintf(stderr, "verification failed: %s\n", f)
 		}
 		return fmt.Errorf("gombit db verify: %d migration(s) failed verification", len(failures))
+	}
+
+	if opts.strict {
+		var needConfirm []string
+		for _, m := range results {
+			if m.RequiresConfirmation {
+				needConfirm = append(needConfirm, m.Migration.Version+"_"+m.Migration.Name)
+			}
+		}
+		if len(needConfirm) > 0 {
+			for _, n := range needConfirm {
+				_, _ = fmt.Fprintf(stderr, "requires confirmation (data loss): %s\n", n)
+			}
+			return fmt.Errorf("gombit db verify: %d migration(s) require confirmation", len(needConfirm))
+		}
 	}
 	return nil
 }
