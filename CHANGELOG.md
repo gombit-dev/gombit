@@ -12,6 +12,14 @@ version.
 
 ### Added
 
+- Application contract (HOST-1,
+  [#282](https://github.com/gombit-dev/gombit/issues/282); ADR-015):
+  `gombit contract app` emits a stable, versioned, machine-readable description
+  of an app — framework version, build command/artifact, runtime port + health
+  paths, database driver/requirement, migrations path — for a deployment host to
+  consume. Every field is projected from declared config and `go.mod`, never
+  inferred from the source tree; a missing or locally-replaced framework version
+  fails loudly. See [docs/app-contract.md](docs/app-contract.md).
 - Runtime health contract (HOST-2,
   [#283](https://github.com/gombit-dev/gombit/issues/283); ADR-015): `/livez`
   and `/readyz` are now a documented, stable host contract

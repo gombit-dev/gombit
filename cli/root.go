@@ -64,6 +64,7 @@ func NewRoot(stdout io.Writer, stderr io.Writer) *Command {
 	root.AddCommand(newMakeCommand(stdout, stderr))
 	root.AddCommand(newDBCommand(stdout, stderr))
 	root.AddCommand(newOpenAPICommand(stdout, stderr))
+	root.AddCommand(newContractCommand(stdout, stderr))
 	root.AddCommand(newClientCommand(stdout, stderr))
 	root.AddCommand(newRoutesCommand(stdout, stderr))
 	root.AddCommand(newDoctorCommand(stdout))

@@ -35,6 +35,7 @@ New here? [Install](installation.md), then work through the
 | Doc | What it covers |
 | --- | --- |
 | [contract.md](contract.md) | Huma DTO and validation conventions, the D10 response envelope |
+| [app-contract.md](app-contract.md) | The machine-readable application contract for deployment hosts (`gombit contract app`) |
 | [openapi.md](openapi.md) | OpenAPI 3.1 emission and the `/docs` UI |
 | [client.md](client.md) | TypeScript client generation and the contract drift check |
 

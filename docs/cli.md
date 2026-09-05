@@ -27,6 +27,7 @@ go run ./cmd/gombit --help
 | `gombit make command` | Scaffold a Cobra management command (AST-safe) | M4-7 |
 | `gombit db …` | Atlas-backed migrations | M2, migrated onto Cobra in M4-1 |
 | `gombit openapi generate` | Write the live OpenAPI 3.1 document | M3-3 |
+| `gombit contract app` | Emit the machine-readable application contract | HOST-1 |
 | `gombit client generate` / `check` | TypeScript client + drift | M3-4, M3-5 |
 | `gombit routes` | Print HTTP routes | M4-4 |
 | `gombit doctor` | Environment and config checks | M4-4 |
@@ -633,3 +634,12 @@ See [installation.md](installation.md) and [releasing.md](releasing.md).
 ## `gombit openapi` and `gombit client`
 
 See [openapi.md](openapi.md) and [client.md](client.md).
+
+## `gombit contract app`
+
+Emits the machine-readable **application contract** (HOST-1) — how a deployment
+host builds, health-checks, and migrates the app, projected from declared
+config and `go.mod`, never inferred from the source tree. Writes JSON to stdout
+or `--out`; `--dir` selects the project directory. Fails loudly when the
+framework version is missing or replaced by a local checkout. See
+[app-contract.md](app-contract.md).
