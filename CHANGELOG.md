@@ -12,6 +12,12 @@ version.
 
 ### Added
 
+- Runtime health contract (HOST-2,
+  [#283](https://github.com/gombit-dev/gombit/issues/283); ADR-015): `/livez`
+  and `/readyz` are now a documented, stable host contract
+  ([docs/health.md](docs/health.md)). `framework.WithShutdownDrainDelay` keeps
+  the server accepting after `/readyz` starts returning 503 on shutdown, so a
+  host can deregister the instance before connections are refused.
 - `gombit make resource` relation fields
   ([#222](https://github.com/gombit-dev/gombit/issues/222) part b):
   `name:belongs_to:Target`, `name:has_many:Target`, and
@@ -242,6 +248,12 @@ version.
 
 ### Changed
 
+- **Breaking (probe contract):** `GET /readyz` now reflects real readiness
+  (HOST-2, [#283](https://github.com/gombit-dev/gombit/issues/283)). Its success
+  body is `{"data":{"status":"ready"}}` — `data.status` changed from `"ok"` to
+  `"ready"` — and it now returns `503` with a D10 `not_ready` envelope while
+  draining or when an attached datastore is unreachable. Previously it always
+  returned `200 {"data":{"status":"ok"}}`. `/livez` is unchanged.
 - README rewritten: badges, positioning, feature list, quickstart, architecture
   diagram, and a comparison table, with the doc link list moved to
   `docs/README.md`.

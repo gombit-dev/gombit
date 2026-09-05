@@ -17,6 +17,7 @@ New here? [Install](installation.md), then work through the
 | --- | --- |
 | [config.md](config.md) | Typed `config.Config`, environment variables, redaction |
 | [lifecycle.md](lifecycle.md) | `framework.App`, `OnStart` / `OnStop` hooks, graceful shutdown |
+| [health.md](health.md) | The `/livez` + `/readyz` health probes and the host readiness contract |
 | [router.md](router.md) | Application-owned route registration and the raw `*gin.Engine` escape hatch |
 | [logging.md](logging.md) | Runtime logging |
 | [cache.md](cache.md) | Cache runtime (memory, Redis, noop) |
@@ -71,6 +72,7 @@ New here? [Install](installation.md), then work through the
 | [012](adr/012-migrations-atlas-gorm-provider.md) | Migrations wrap Atlas + `atlas-provider-gorm` |
 | [013](adr/013-runtime-generic-admin.md) | The admin is a runtime surface over an explicit registry |
 | [014](adr/014-cli-cobra.md) | Cobra is the CLI framework |
+| [015](adr/015-host-deployment-contracts.md) | Host/deployment contracts: application contract, health convention, migration safety manifest |
 
 ## Contributing
 

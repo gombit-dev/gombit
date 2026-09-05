@@ -60,11 +60,13 @@ steps that need their own runtime surfaces.
 | 8. HTTP server construction | Owned in M1-2 through `framework.Run` and `RunContext`. |
 | 9. middleware installation | Recovery is owned in M1-2. Route-registration composition (independently-registered route groups, each with optional group-scoped middleware) is owned in M1-3 — see [`docs/router.md`](router.md). Request ID, trace context, metrics, security headers, request timeout, and trusted-proxy configuration are owned in M1-7. XSS HTML-tag sanitization of request input is owned in M1-8 (fundamental first-party default on the runtime stack; not covered by security headers alone). CORS, rate limiting, and auth remain separate issues. |
 | 10. module registration | Owned in M1-3 — applications register feature routes directly against `app.Router()`; see [`docs/router.md`](router.md). |
-| 11. readiness/liveness endpoints | Basic raw Gin probes are owned in M1-2; DB/cache-aware readiness is deferred to M1-4/M1-5. |
+| 11. readiness/liveness endpoints | `GET /livez` (liveness) and `GET /readyz` (readiness) are raw Gin probes owned in M1-2. HOST-2 (ADR-015) makes `/readyz` datastore-aware — `503` while draining or when an attached database is unreachable, `200` otherwise — as the stable host health contract. See [`docs/health.md`](health.md). |
 | 12. frontend static asset mounting when embedded | Owned in M5-5 through `framework.WithEmbeddedFrontend` (application SPA) and ADMIN-2 through explicit `/admin` Gin routes over `internal/adminui` embed. Application SPA fallback is installed only when the FS has `index.html`; the `gombit new` placeholder embed (`.keep` only) is a no-op so `go run ./cmd/server` works without a Vite `dist`. Admin `/admin/` is cookie-mode only. See [`docs/build.md`](build.md) and [`docs/admin.md`](admin.md). |
 | 13. signal handling | Owned in M1-2 through `framework.Run`. |
 | 14. graceful shutdown | Owned in M1-2 through bounded `http.Server.Shutdown`; on timeout, `server.Close()` drops remaining connections so `Run`/`RunContext` can return with `Serve` stopped. |
 | 15. dependency cleanup | Owned in M1-2 through `OnStop`; concrete DB/cache/log sink cleanup lands with those features. |
 
-The current probes are raw Gin routes with D10-style success bodies. They must
-remain outside generated OpenAPI when Huma is mounted in later contract work.
+The probes are raw Gin routes with D10-style bodies and remain outside
+generated OpenAPI when Huma is mounted. `/readyz` is datastore-aware
+(HOST-2 / ADR-015); the full contract — bodies, status codes, and how a host
+consumes them — is in [`docs/health.md`](health.md).

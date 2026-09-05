@@ -474,7 +474,10 @@ func TestMetricsMiddlewareConcurrentCountsAreExact(t *testing.T) {
 func TestReadyzAndLivezUseEnvelope(t *testing.T) {
 	app := newTestApp(t)
 
-	for _, path := range []string{"/livez", "/readyz"} {
+	// /livez reports "ok" (liveness); /readyz reports "ready" (readiness) — with
+	// no datastore attached the test app is ready (HOST-2 / ADR-015).
+	cases := map[string]string{"/livez": "ok", "/readyz": "ready"}
+	for path, wantStatus := range cases {
 		t.Run(path, func(t *testing.T) {
 			rec := httptest.NewRecorder()
 			app.Router().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
@@ -489,8 +492,8 @@ func TestReadyzAndLivezUseEnvelope(t *testing.T) {
 			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 				t.Fatalf("unmarshal %s response body: %v", path, err)
 			}
-			if body.Data.Status != "ok" {
-				t.Fatalf("GET %s data.status = %q, want ok", path, body.Data.Status)
+			if body.Data.Status != wantStatus {
+				t.Fatalf("GET %s data.status = %q, want %q", path, body.Data.Status, wantStatus)
 			}
 		})
 	}

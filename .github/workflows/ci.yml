@@ -249,6 +249,9 @@ jobs:
           go test -tags integration ./admin \
             -admin.postgres-dsn \
             'postgres://gombit:gombit@127.0.0.1:5432/gombit?sslmode=disable'
+          go test -tags integration ./framework \
+            -framework.postgres-dsn \
+            'postgres://gombit:gombit@127.0.0.1:5432/gombit?sslmode=disable'
 
       # Separate database from the auth/database/admin tests above: gin-gorm's
       # User model maps to a "users" table, same as auth.User, and the two
@@ -443,6 +446,9 @@ jobs:
             'gombit:gombit@tcp(127.0.0.1:3306)/gombit?parseTime=true'
           go test -tags integration ./admin \
             -admin.mysql-dsn \
+            'gombit:gombit@tcp(127.0.0.1:3306)/gombit?parseTime=true'
+          go test -tags integration ./framework \
+            -framework.mysql-dsn \
             'gombit:gombit@tcp(127.0.0.1:3306)/gombit?parseTime=true'
 
   migrations-sqlite:
