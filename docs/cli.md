@@ -26,6 +26,7 @@ go run ./cmd/gombit --help
 | `gombit make resource` | Generate a feature-package resource (AST-safe) | M4-3 |
 | `gombit make command` | Scaffold a Cobra management command (AST-safe) | M4-7 |
 | `gombit db …` | Atlas-backed migrations | M2, migrated onto Cobra in M4-1 |
+| `gombit db verify` | Classify + verify migration safety manifests | HOST-3 |
 | `gombit openapi generate` | Write the live OpenAPI 3.1 document | M3-3 |
 | `gombit contract app` | Emit the machine-readable application contract | HOST-1 |
 | `gombit client generate` / `check` | TypeScript client + drift | M3-4, M3-5 |
@@ -485,9 +486,13 @@ gombit db rollback
 gombit db status
 gombit db seed
 gombit db reset [--force]
+gombit db verify [--write] [--json]
 ```
 
-See [migrations.md](migrations.md) for Atlas behavior.
+See [migrations.md](migrations.md) for Atlas behavior and
+[migration-safety.md](migration-safety.md) for `gombit db verify` — the
+migration safety manifest and verifier a deployment host uses to gate
+destructive migrations (HOST-3).
 
 ## `gombit routes`
 

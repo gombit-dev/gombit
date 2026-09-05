@@ -12,6 +12,17 @@ version.
 
 ### Added
 
+- Migration safety manifest + verifier (HOST-3,
+  [#284](https://github.com/gombit-dev/gombit/issues/284); ADR-015):
+  `gombit db verify` classifies each migration's SQL into a closed operation set,
+  flags data-loss operations (drop column/table, destructive alter,
+  delete/truncate) as `requires_confirmation`, and (`--write`) emits a
+  `<version>_<name>.manifest.json` bound to the SQL by `sql_sha256`. Verifying an
+  existing manifest fails on a hash mismatch (SQL changed after review) or a
+  mis-declared safety — a host re-derives the classification and never trusts the
+  declared field (§31). Gombit classifies and verifies; the approval gate is the
+  host's policy. New importable `manifest` package. See
+  [docs/migration-safety.md](docs/migration-safety.md).
 - Application contract (HOST-1,
   [#282](https://github.com/gombit-dev/gombit/issues/282); ADR-015):
   `gombit contract app` emits a stable, versioned, machine-readable description
