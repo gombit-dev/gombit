@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -59,6 +60,11 @@ type App struct {
 	mu     sync.RWMutex
 	server *http.Server
 	addr   string
+
+	// draining is set when graceful shutdown begins so /readyz reports 503
+	// and a host deregisters the instance before in-flight requests finish
+	// (HOST-2 / ADR-015).
+	draining atomic.Bool
 }
 
 type namedMiddleware struct {
@@ -108,7 +114,7 @@ func New(options ...Option) (*App, error) {
 		})
 	}
 	if app.router == nil {
-		router, err := newRouter(app.cfg, app.csrfExemptPaths, app.rawBodyPaths)
+		router, err := newRouter(app.cfg, app.csrfExemptPaths, app.rawBodyPaths, app.handleReadyz)
 		if err != nil {
 			return nil, err
 		}
@@ -482,6 +488,10 @@ func (a *App) runStartHooks(ctx context.Context) error {
 }
 
 func (a *App) shutdown() error {
+	// Flip readiness to 503 before draining so a host deregisters the instance
+	// while in-flight requests finish (HOST-2 / ADR-015).
+	a.draining.Store(true)
+
 	a.mu.RLock()
 	server := a.server
 	timeout := a.shutdownTimeout
@@ -546,7 +556,7 @@ func syncLogger(logger *zap.Logger) error {
 	return nil
 }
 
-func newRouter(cfg config.Config, csrfExemptPaths, rawBodyPaths []string) (*gin.Engine, error) {
+func newRouter(cfg config.Config, csrfExemptPaths, rawBodyPaths []string, readyz gin.HandlerFunc) (*gin.Engine, error) {
 	router := gin.New()
 	enableMethodNotAllowed(router)
 	if err := configureTrustedProxies(router, cfg.HTTP.TrustedProxies); err != nil {
@@ -555,6 +565,9 @@ func newRouter(cfg config.Config, csrfExemptPaths, rawBodyPaths []string) (*gin.
 
 	metrics := newHTTPMetrics()
 	router.Use(middlewareHandlers(runtimeMiddlewareStack(cfg, metrics, csrfExemptPaths, rawBodyPaths))...)
+	// Operational probes (HOST-2 / ADR-015). Raw Gin, out of OpenAPI — like
+	// /metrics and the admin SPA. /livez is liveness (process up); /readyz is
+	// readiness (safe to receive traffic). Hosts gate traffic on /readyz.
 	router.GET("/livez", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"data": gin.H{
@@ -562,15 +575,64 @@ func newRouter(cfg config.Config, csrfExemptPaths, rawBodyPaths []string) (*gin.
 			},
 		})
 	})
-	router.GET("/readyz", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{
-			"data": gin.H{
-				"status": "ok",
-			},
-		})
-	})
+	router.GET("/readyz", readyz)
 	router.GET("/metrics", metrics.handler)
 	return router, nil
+}
+
+// readinessTimeout bounds the datastore probe so a hung datastore cannot hang
+// the /readyz handler (and, with it, a host's traffic-gating decision).
+const readinessTimeout = 2 * time.Second
+
+// handleReadyz serves the /readyz readiness probe (HOST-2 / ADR-015). It
+// reports 200 only when the app is not shutting down and the configured
+// datastore is reachable; otherwise 503 with a D10 not_ready envelope. Start
+// hooks need no flag here: RunContext serves only after they succeed, so any
+// request reaching this handler is already past startup.
+func (a *App) handleReadyz(c *gin.Context) {
+	if err := a.readiness(c.Request.Context()); err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": gin.H{
+				"code":       "not_ready",
+				"message":    err.Error(),
+				"request_id": GetRequestID(c),
+			},
+		})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"data": gin.H{
+			"status": "ready",
+		},
+	})
+}
+
+// readiness returns nil when the app is ready to receive traffic, or a reason
+// error when it is not. Readiness is: not draining, and (when a database is
+// attached) the database answers a ping within readinessTimeout.
+func (a *App) readiness(ctx context.Context) error {
+	if a.draining.Load() {
+		return errors.New("shutting down")
+	}
+
+	a.mu.RLock()
+	db := a.db
+	a.mu.RUnlock()
+
+	if db == nil || db.DB == nil {
+		return nil
+	}
+
+	sqlDB, err := db.SQLDB()
+	if err != nil {
+		return fmt.Errorf("database unavailable: %w", err)
+	}
+	pingCtx, cancel := context.WithTimeout(ctx, readinessTimeout)
+	defer cancel()
+	if err := sqlDB.PingContext(pingCtx); err != nil {
+		return fmt.Errorf("database unreachable: %w", err)
+	}
+	return nil
 }
 
 func configureHTTPMode(cfg config.Config) {
