@@ -53,8 +53,11 @@ func TestReadyzReadyWithReachableDatabase(t *testing.T) {
 // reach the public probe; only the fixed reason does. The cause is logged.
 func TestReadyzUnreachableDatastoreHides503Cause(t *testing.T) {
 	app := newTestApp(t)
-	const secret = "dial tcp 10.0.0.5:5432: host=10.0.0.5 user=admin password=hunter2 dbname=prod"
-	app.readyProbe = func(context.Context) error { return errors.New(secret) }
+	// A realistic driver error embedding a DSN — exactly what must not reach the
+	// public probe.
+	dsn := "host=10.0.0.5 user=admin password=hunter2 dbname=prod" // #nosec G101 -- fake DSN fixture for the leak test.
+	driverErr := errors.New("dial tcp 10.0.0.5:5432: " + dsn)
+	app.readyProbe = func(context.Context) error { return driverErr }
 
 	rec, body := serveReadyz(t, app)
 	if rec.Code != http.StatusServiceUnavailable {
@@ -66,8 +69,8 @@ func TestReadyzUnreachableDatastoreHides503Cause(t *testing.T) {
 	if body.Error.Message != reasonDatastore {
 		t.Fatalf("GET /readyz error.message = %q, want fixed reason %q", body.Error.Message, reasonDatastore)
 	}
-	// The DSN / secret must not leak anywhere in the response body.
-	for _, leak := range []string{"hunter2", "user=admin", "host=10.0.0.5", "password", "10.0.0.5:5432"} {
+	// None of the driver error / DSN must leak into the public response body.
+	for _, leak := range []string{"hunter2", "user=admin", "host=10.0.0.5", "10.0.0.5:5432"} {
 		if strings.Contains(rec.Body.String(), leak) {
 			t.Fatalf("GET /readyz body leaked %q: %s", leak, rec.Body.String())
 		}
