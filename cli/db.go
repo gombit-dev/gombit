@@ -27,6 +27,7 @@ func newDBCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
 	cmd.AddCommand(newMigrateCommand(stdout, stderr))
 	cmd.AddCommand(newRollbackCommand(stdout, stderr))
 	cmd.AddCommand(newStatusCommand(stdout, stderr))
+	cmd.AddCommand(newVerifyCommand(stdout, stderr))
 	cmd.AddCommand(newSeedCommand(stdout, stderr))
 	cmd.AddCommand(newResetCommand(stdout, stderr))
 	return cmd

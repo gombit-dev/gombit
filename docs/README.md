@@ -28,6 +28,7 @@ New here? [Install](installation.md), then work through the
 | --- | --- |
 | [database.md](database.md) | GORM setup and the SQLite / PostgreSQL / MySQL support matrix |
 | [migrations.md](migrations.md) | Atlas-backed `gombit db` migrations, revisions, rollback |
+| [migration-safety.md](migration-safety.md) | Migration safety manifests + the `gombit db verify` verifier for deployment hosts |
 | [validation.md](validation.md) | Model `Validate` hooks (API + admin), `app.Tx`, and optimistic locking |
 
 ## Contract
