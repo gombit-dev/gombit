@@ -13,9 +13,9 @@ import (
 
 func stubLoadConfig(t *testing.T, cfg config.Config) {
 	t.Helper()
-	prev := LoadConfig
-	t.Cleanup(func() { LoadConfig = prev })
-	LoadConfig = func() (config.Config, error) { return cfg, nil }
+	prev := LoadConfigFromDir
+	t.Cleanup(func() { LoadConfigFromDir = prev })
+	LoadConfigFromDir = func(string) (config.Config, error) { return cfg, nil }
 }
 
 func writeGoMod(t *testing.T, content string) string {

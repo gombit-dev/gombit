@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 
 	"github.com/gombit-dev/gombit/appcontract"
 	"github.com/spf13/cobra"
@@ -62,30 +61,15 @@ the source tree. --dir selects the project directory that both the config
 }
 
 func runContractApp(stdout io.Writer, dir string, out string) error {
-	// Resolve the output path before changing directory so a relative --out
-	// stays relative to the caller's cwd, not the project dir.
-	if out != "" {
-		abs, err := filepath.Abs(out)
-		if err != nil {
-			return fmt.Errorf("gombit contract app: resolve --out: %w", err)
-		}
-		out = abs
-	}
-
 	// Read config (.env) and go.mod from the same project directory so the
-	// contract cannot mix one app's go.mod with another's config.
-	restore, err := chdir(dir)
-	if err != nil {
-		return fmt.Errorf("gombit contract app: %w", err)
-	}
-	defer restore()
-
-	cfg, err := LoadConfig()
+	// contract cannot mix one app's go.mod with another's config — without
+	// mutating the process (no chdir), which would race parallel callers.
+	cfg, err := LoadConfigFromDir(dir)
 	if err != nil {
 		return err
 	}
 
-	version, err := appcontract.FrameworkVersion(".")
+	version, err := appcontract.FrameworkVersion(dir)
 	if err != nil {
 		if errors.Is(err, appcontract.ErrFrameworkVersionUnresolved) {
 			return fmt.Errorf("gombit contract app: %w; a host cannot pin a replaced/local "+
@@ -119,22 +103,6 @@ func runContractApp(stdout io.Writer, dir string, out string) error {
 	}
 	_, err = fmt.Fprintf(stdout, "wrote application contract to %s\n", out)
 	return err
-}
-
-// chdir changes into dir and returns a function that restores the previous
-// working directory. A "" or "." dir is a no-op so the caller stays in cwd.
-func chdir(dir string) (func(), error) {
-	if dir == "" || dir == "." {
-		return func() {}, nil
-	}
-	prev, err := os.Getwd()
-	if err != nil {
-		return nil, err
-	}
-	if err := os.Chdir(dir); err != nil {
-		return nil, err
-	}
-	return func() { _ = os.Chdir(prev) }, nil
 }
 
 func contractUsage(stderr io.Writer) {

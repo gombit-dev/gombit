@@ -31,10 +31,11 @@ var semverPattern = regexp.MustCompile(
 // parses the *declared* dependency rather than running the go toolchain, so it
 // is offline and deterministic.
 //
-// A replace directive targeting the framework module makes the version
-// unresolvable for a host; that returns ErrFrameworkVersionUnresolved. A go.mod
-// that does not require the framework at all is an error — it is not a Gombit
-// app.
+// A replace of the framework module wins over the require: a version-to-version
+// replace (or a published fork with a version) reports its target version,
+// while a local filesystem replace is unresolvable for a host and returns
+// ErrFrameworkVersionUnresolved. A go.mod that does not require the framework at
+// all is an error — it is not a Gombit app.
 func FrameworkVersion(workDir string) (string, error) {
 	path := filepath.Join(workDir, "go.mod")
 	data, err := os.ReadFile(path) // #nosec G304 -- go.mod at a caller-provided project dir

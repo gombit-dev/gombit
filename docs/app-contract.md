@@ -24,7 +24,7 @@ gombit contract app --dir ./path/to/project
     "http_port": 8080,
     "health": { "live": "/livez", "ready": "/readyz" }
   },
-  "database": { "required": false, "driver": "sqlite" },
+  "database": { "required": true, "driver": "sqlite" },
   "migrations": { "path": "database/migrations" }
 }
 ```
