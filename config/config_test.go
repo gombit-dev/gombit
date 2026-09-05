@@ -2,6 +2,8 @@ package config
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -126,6 +128,7 @@ func TestLoadFromEnv(t *testing.T) {
 		},
 		Database: DatabaseConfig{
 			Driver:          DatabaseDriverPostgres,
+			Required:        true,
 			DSN:             "host=localhost user=gombit dbname=app sslmode=disable",
 			MaxOpenConns:    20,
 			MaxIdleConns:    4,
@@ -288,8 +291,9 @@ func TestLoadUsesProcessEnvironment(t *testing.T) {
 			DocsEnabled: false,
 		},
 		Database: DatabaseConfig{
-			Driver: DatabaseDriverMySQL,
-			DSN:    "gombit@tcp(localhost:3306)/app?parseTime=true",
+			Driver:   DatabaseDriverMySQL,
+			Required: true,
+			DSN:      "gombit@tcp(localhost:3306)/app?parseTime=true",
 		},
 		Cache: CacheConfig{
 			Driver:    CacheDriverMemory,
@@ -849,6 +853,60 @@ func TestLoadFromEnvReturnsParseErrors(t *testing.T) {
 	}
 	if len(fieldErrors) != 4 {
 		t.Fatalf("LoadFromEnv() field error count = %d, want 4", len(fieldErrors))
+	}
+}
+
+func TestDatabaseRequiredDefaultsTrueAndOverrides(t *testing.T) {
+	if !Default().Database.Required {
+		t.Fatal("Default().Database.Required = false, want true")
+	}
+
+	cfg, err := LoadFromEnv(mapLookup(map[string]string{envDatabaseRequired: "false"}))
+	if err != nil {
+		t.Fatalf("LoadFromEnv() error = %v", err)
+	}
+	if cfg.Database.Required {
+		t.Error("Database.Required = true with GOMBIT_DATABASE_REQUIRED=false, want false")
+	}
+}
+
+func TestLoadFromDirReadsDotEnvWithoutMutatingProcess(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".env"),
+		[]byte("GOMBIT_HTTP_ADDR=:9999\nGOMBIT_DATABASE_REQUIRED=false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadFromDir(dir)
+	if err != nil {
+		t.Fatalf("LoadFromDir() error = %v", err)
+	}
+	if cfg.HTTP.Addr != ":9999" {
+		t.Errorf("HTTP.Addr = %q, want :9999 (from dir/.env)", cfg.HTTP.Addr)
+	}
+	if cfg.Database.Required {
+		t.Error("Database.Required = true, want false (from dir/.env)")
+	}
+
+	// The dir's .env must not leak into the process environment.
+	if _, set := os.LookupEnv("GOMBIT_HTTP_ADDR"); set {
+		t.Error("LoadFromDir set GOMBIT_HTTP_ADDR in the process environment")
+	}
+}
+
+func TestLoadFromDirProcessEnvWins(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("GOMBIT_HTTP_ADDR=:1111\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOMBIT_HTTP_ADDR", ":2222")
+
+	cfg, err := LoadFromDir(dir)
+	if err != nil {
+		t.Fatalf("LoadFromDir() error = %v", err)
+	}
+	if cfg.HTTP.Addr != ":2222" {
+		t.Errorf("HTTP.Addr = %q, want :2222 (process env wins over dir/.env)", cfg.HTTP.Addr)
 	}
 }
 

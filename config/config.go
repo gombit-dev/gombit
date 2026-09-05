@@ -18,6 +18,7 @@ const (
 	envAPIPrefix               = "GOMBIT_API_PREFIX"
 	envDocsEnabled             = "GOMBIT_DOCS_ENABLED"
 	envDatabaseDriver          = "GOMBIT_DATABASE_DRIVER"
+	envDatabaseRequired        = "GOMBIT_DATABASE_REQUIRED"
 	envDatabaseDSN             = "GOMBIT_DATABASE_DSN"
 	envDatabaseMaxOpenConns    = "GOMBIT_DATABASE_MAX_OPEN_CONNS"
 	envDatabaseMaxIdleConns    = "GOMBIT_DATABASE_MAX_IDLE_CONNS"
@@ -121,7 +122,13 @@ const (
 
 // DatabaseConfig contains SQL database configuration consumed by database.Open.
 type DatabaseConfig struct {
-	Driver          DatabaseDriver
+	Driver DatabaseDriver
+	// Required declares whether the application needs a database to function —
+	// the signal a deployment host uses to decide whether to provision one
+	// (surfaced in the HOST-1 application contract). Defaults to true because a
+	// Gombit app is database-backed by default; set it false for an app that
+	// runs without one. It does not itself force a database at startup.
+	Required        bool
 	DSN             string
 	MaxOpenConns    int
 	MaxIdleConns    int
@@ -307,8 +314,9 @@ func DefaultFor(env Environment) Config {
 			DocsEnabled: DefaultDocsEnabled(env),
 		},
 		Database: DatabaseConfig{
-			Driver: DatabaseDriverSQLite,
-			DSN:    "file:gombit.db?cache=shared&_fk=1",
+			Driver:   DatabaseDriverSQLite,
+			Required: true,
+			DSN:      "file:gombit.db?cache=shared&_fk=1",
 		},
 		Cache: CacheConfig{
 			Driver:    CacheDriverMemory,
@@ -385,6 +393,7 @@ func LoadFromEnv(lookup EnvLookup) (Config, error) {
 		&errs,
 	)
 	applyDatabaseDriver(lookup, envDatabaseDriver, &cfg.Database.Driver)
+	applyBool(lookup, envDatabaseRequired, "Database.Required", &cfg.Database.Required, &errs)
 	applyString(lookup, envDatabaseDSN, &cfg.Database.DSN)
 	applyInt(lookup, envDatabaseMaxOpenConns, "Database.MaxOpenConns", &cfg.Database.MaxOpenConns, &errs)
 	applyInt(lookup, envDatabaseMaxIdleConns, "Database.MaxIdleConns", &cfg.Database.MaxIdleConns, &errs)

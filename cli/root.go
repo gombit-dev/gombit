@@ -19,6 +19,11 @@ type Command = cobra.Command
 // dev. Tests may replace it.
 var LoadConfig = config.Load
 
+// LoadConfigFromDir loads configuration for a specific project directory
+// without mutating the process (see config.LoadFromDir). Used by
+// gombit contract app --dir. A test var so commands can stub it.
+var LoadConfigFromDir = config.LoadFromDir
+
 // AddCommand attaches cmds to root via Cobra AddCommand. This is the only
 // supported registration path for app-owned management commands.
 func AddCommand(root *Command, cmds ...*Command) {
@@ -64,6 +69,7 @@ func NewRoot(stdout io.Writer, stderr io.Writer) *Command {
 	root.AddCommand(newMakeCommand(stdout, stderr))
 	root.AddCommand(newDBCommand(stdout, stderr))
 	root.AddCommand(newOpenAPICommand(stdout, stderr))
+	root.AddCommand(newContractCommand(stdout, stderr))
 	root.AddCommand(newClientCommand(stdout, stderr))
 	root.AddCommand(newRoutesCommand(stdout, stderr))
 	root.AddCommand(newDoctorCommand(stdout))

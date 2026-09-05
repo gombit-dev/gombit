@@ -46,6 +46,7 @@ recognizes:
 | `GOMBIT_API_PREFIX` | `Config.API.Prefix` | `/api/v1` |
 | `GOMBIT_DOCS_ENABLED` | `Config.API.DocsEnabled` | `true` (off in production when unset) |
 | `GOMBIT_DATABASE_DRIVER` | `Config.Database.Driver` | `sqlite` |
+| `GOMBIT_DATABASE_REQUIRED` | `Config.Database.Required` | `true` |
 | `GOMBIT_DATABASE_DSN` | `Config.Database.DSN` | `file:gombit.db?cache=shared&_fk=1` |
 | `GOMBIT_DATABASE_MAX_OPEN_CONNS` | `Config.Database.MaxOpenConns` | `0` |
 | `GOMBIT_DATABASE_MAX_IDLE_CONNS` | `Config.Database.MaxIdleConns` | `0` |
