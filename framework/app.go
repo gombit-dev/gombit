@@ -40,22 +40,23 @@ type Option func(*App) error
 
 // App owns Gombit's runtime lifecycle and HTTP router.
 type App struct {
-	cfg              config.Config
-	cfgSet           bool
-	cache            cache.Cache
-	cacheStore       *cache.Store
-	cacheOwned       bool
-	redis            *redis.Client
-	db               *database.DB
-	logger           *zap.Logger
-	router           *gin.Engine
-	api              huma.API
-	startHooks       []Hook
-	stopHooks        []Hook
-	shutdownTimeout  time.Duration
-	embeddedFrontend fs.FS
-	csrfExemptPaths  []string
-	rawBodyPaths     []string
+	cfg                config.Config
+	cfgSet             bool
+	cache              cache.Cache
+	cacheStore         *cache.Store
+	cacheOwned         bool
+	redis              *redis.Client
+	db                 *database.DB
+	logger             *zap.Logger
+	router             *gin.Engine
+	api                huma.API
+	startHooks         []Hook
+	stopHooks          []Hook
+	shutdownTimeout    time.Duration
+	shutdownDrainDelay time.Duration
+	embeddedFrontend   fs.FS
+	csrfExemptPaths    []string
+	rawBodyPaths       []string
 
 	mu     sync.RWMutex
 	server *http.Server
@@ -65,6 +66,11 @@ type App struct {
 	// and a host deregisters the instance before in-flight requests finish
 	// (HOST-2 / ADR-015).
 	draining atomic.Bool
+
+	// readyProbe checks the configured datastore for /readyz. nil when no
+	// datastore is attached (readiness then depends only on draining).
+	// Defaults to pingDatabase; overridable in tests.
+	readyProbe func(context.Context) error
 }
 
 type namedMiddleware struct {
@@ -159,6 +165,13 @@ func New(options ...Option) (*App, error) {
 	}
 	mountEmbeddedFrontend(app.router, app.embeddedFrontend, app.cfg.API.Prefix)
 
+	// A /readyz datastore probe exists only when a database is attached
+	// (HOST-2 / ADR-015). Apps with no datastore are ready on the drain flag
+	// alone.
+	if app.readyProbe == nil && app.db != nil && app.db.DB != nil {
+		app.readyProbe = app.pingDatabase
+	}
+
 	return app, nil
 }
 
@@ -237,6 +250,25 @@ func WithRouter(router *gin.Engine) Option {
 			return errors.New("framework: nil router")
 		}
 		app.router = router
+		return nil
+	}
+}
+
+// WithShutdownDrainDelay sets a delay between the start of graceful shutdown —
+// when /readyz begins returning 503 (HOST-2 / ADR-015) — and the moment the
+// HTTP listener stops accepting connections. During the delay the server keeps
+// serving, so a host that gates traffic on /readyz observes the 503 and
+// deregisters the instance before any request is connection-refused. Without a
+// delay (the default, 0) the flag still sheds in-flight and keep-alive pollers
+// during the shutdown grace period, but a host opening a fresh probe connection
+// after shutdown begins sees connection-refused rather than a 503. Set this to
+// a host's readiness poll interval (a few seconds) for a clean drain.
+func WithShutdownDrainDelay(delay time.Duration) Option {
+	return func(app *App) error {
+		if delay < 0 {
+			return errors.New("framework: shutdown drain delay must not be negative")
+		}
+		app.shutdownDrainDelay = delay
 		return nil
 	}
 }
@@ -495,7 +527,15 @@ func (a *App) shutdown() error {
 	a.mu.RLock()
 	server := a.server
 	timeout := a.shutdownTimeout
+	drainDelay := a.shutdownDrainDelay
 	a.mu.RUnlock()
+
+	// Keep serving for the drain delay so a host polling /readyz sees the 503
+	// and stops routing before the listener closes.
+	if drainDelay > 0 {
+		timer := time.NewTimer(drainDelay)
+		<-timer.C
+	}
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -581,20 +621,30 @@ func newRouter(cfg config.Config, csrfExemptPaths, rawBodyPaths []string, readyz
 }
 
 // readinessTimeout bounds the datastore probe so a hung datastore cannot hang
-// the /readyz handler (and, with it, a host's traffic-gating decision).
-const readinessTimeout = 2 * time.Second
+// the /readyz handler (and, with it, a host's traffic-gating decision). A var,
+// not a const, so tests can shrink it.
+var readinessTimeout = 2 * time.Second
+
+// Stable, non-sensitive reasons surfaced on the public /readyz probe. The
+// underlying cause (which may embed a DSN — user=, host=, database=) is logged,
+// never returned to the caller.
+const (
+	reasonDraining  = "shutting down"
+	reasonDatastore = "datastore unavailable"
+)
 
 // handleReadyz serves the /readyz readiness probe (HOST-2 / ADR-015). It
 // reports 200 only when the app is not shutting down and the configured
-// datastore is reachable; otherwise 503 with a D10 not_ready envelope. Start
-// hooks need no flag here: RunContext serves only after they succeed, so any
-// request reaching this handler is already past startup.
+// datastore is reachable; otherwise 503 with a D10 not_ready envelope whose
+// message is a fixed reason (never the raw datastore error). Start hooks need
+// no flag here: RunContext serves only after they succeed, so any request
+// reaching this handler is already past startup.
 func (a *App) handleReadyz(c *gin.Context) {
-	if err := a.readiness(c.Request.Context()); err != nil {
+	if reason, ok := a.readiness(c.Request.Context()); !ok {
 		c.JSON(http.StatusServiceUnavailable, gin.H{
 			"error": gin.H{
 				"code":       "not_ready",
-				"message":    err.Error(),
+				"message":    reason,
 				"request_id": GetRequestID(c),
 			},
 		})
@@ -607,32 +657,48 @@ func (a *App) handleReadyz(c *gin.Context) {
 	})
 }
 
-// readiness returns nil when the app is ready to receive traffic, or a reason
-// error when it is not. Readiness is: not draining, and (when a database is
-// attached) the database answers a ping within readinessTimeout.
-func (a *App) readiness(ctx context.Context) error {
+// readiness reports whether the app can receive traffic, with a stable reason
+// when it cannot. Readiness is: not draining, and (when a datastore is
+// attached) the datastore probe succeeds within readinessTimeout. The probe's
+// error is logged, not returned, so a DSN never reaches the public probe.
+func (a *App) readiness(ctx context.Context) (reason string, ok bool) {
 	if a.draining.Load() {
-		return errors.New("shutting down")
+		return reasonDraining, false
 	}
 
 	a.mu.RLock()
-	db := a.db
+	probe := a.readyProbe
 	a.mu.RUnlock()
 
+	if probe == nil {
+		return "", true
+	}
+
+	probeCtx, cancel := context.WithTimeout(ctx, readinessTimeout)
+	defer cancel()
+	if err := probe(probeCtx); err != nil {
+		if a.logger != nil {
+			a.logger.Warn("readiness: datastore probe failed", zap.Error(err))
+		}
+		return reasonDatastore, false
+	}
+	return "", true
+}
+
+// pingDatabase is the default datastore readiness probe: a bounded ping of the
+// attached database's connection pool.
+func (a *App) pingDatabase(ctx context.Context) error {
+	a.mu.RLock()
+	db := a.db
+	a.mu.RUnlock()
 	if db == nil || db.DB == nil {
 		return nil
 	}
-
 	sqlDB, err := db.SQLDB()
 	if err != nil {
-		return fmt.Errorf("database unavailable: %w", err)
+		return err
 	}
-	pingCtx, cancel := context.WithTimeout(ctx, readinessTimeout)
-	defer cancel()
-	if err := sqlDB.PingContext(pingCtx); err != nil {
-		return fmt.Errorf("database unreachable: %w", err)
-	}
-	return nil
+	return sqlDB.PingContext(ctx)
 }
 
 func configureHTTPMode(cfg config.Config) {

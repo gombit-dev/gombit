@@ -137,8 +137,15 @@ makes readiness meaningful.
   which cannot gate traffic — HOST-2 fixes that. Start hooks (`OnStart`) need no
   separate readiness flag: `RunContext` begins serving only *after* start hooks
   succeed, so a request that reaches `/readyz` is already past startup. On
-  graceful shutdown the probe flips to `503` first, so a host deregisters the
-  instance before in-flight requests drain.
+  graceful shutdown the probe flips to `503` first; an optional
+  `WithShutdownDrainDelay` keeps the server accepting for that window so a host
+  polling `/readyz` observes the `503` and deregisters the instance *before* the
+  listener closes. With no delay (the default) the flag still sheds in-flight and
+  keep-alive pollers during the shutdown grace period, but a fresh probe
+  connection opened after shutdown begins is connection-refused rather than
+  `503`. The reason string is a **fixed** value (`shutting down` /
+  `datastore unavailable`), never the raw datastore error — a connection error
+  can embed the DSN and `/readyz` is unauthenticated; the cause is logged.
 - **Reconciliation with DESIGN.md §24.** Cloud's design floats `/healthz` as a
   *possible* convention and explicitly leaves room for "separate future
   readiness/liveness semantics." Gombit has already chosen the k8s-style

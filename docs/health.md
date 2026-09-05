@@ -50,8 +50,11 @@ Not ready:
 An instance is **ready** when both hold:
 
 1. **Not shutting down.** On graceful shutdown the probe flips to `503`
-   *before* connections drain, so a host stops routing new requests to the
-   instance while in-flight ones finish.
+   *before* the listener closes. Pair it with `framework.WithShutdownDrainDelay`
+   (set to the host's readiness poll interval) so the server keeps accepting for
+   that window and a host observes the `503` and deregisters the instance before
+   any request is connection-refused. With no delay (the default) the flag still
+   sheds in-flight and keep-alive pollers during the shutdown grace period.
 2. **The configured datastore is reachable.** When a database is attached
    (`framework.WithDatabase`), readiness pings it with a short timeout
    (2s). An app with no database attached is ready on criterion 1 alone.
@@ -60,16 +63,22 @@ Start hooks (`OnStart`) need no separate check: [`RunContext`](lifecycle.md)
 begins serving **only after** every start hook succeeds, so any request that
 reaches `/readyz` is already past startup.
 
-The readiness ping is bounded so a hung datastore cannot hang the probe — and
-with it, the host's traffic decision.
+The readiness ping is bounded (2s) so a hung datastore cannot hang the probe —
+and with it, the host's traffic decision.
+
+`message` is a **fixed reason** (`shutting down` or `datastore unavailable`),
+never the raw datastore error: a connection error can embed the DSN
+(`user=`, `host=`, `password=`), and `/readyz` is unauthenticated. The
+underlying cause is logged at warn level, not returned.
 
 ## Why liveness and readiness are separate
 
 A host acts on them differently:
 
 - **`/livez` fails** → the process is broken; **restart** it.
-- **`/readyz` fails** → the process is fine but not ready (starting,
-  datastore blip, draining); **stop sending traffic**, do not restart.
+- **`/readyz` fails** → the process is fine but not ready (datastore blip,
+  draining); **stop sending traffic**, do not restart. Before the server
+  accepts connections at all, a probe gets connection-refused, not a 503.
 
 Collapsing them into one endpoint forces a host to either restart on a
 transient dependency hiccup or route traffic to an instance that cannot serve
