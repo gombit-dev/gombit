@@ -35,6 +35,14 @@ type requestMetaKey struct{}
 // extra context.WithValue and Request.WithContext allocation per request for
 // no behavioral difference (the two IDs are independent and both must land
 // before the metrics/handler stages either way).
+// RequestContextMiddleware assigns the request and trace correlation IDs
+// (honoring an inbound X-Request-Id and W3C traceparent when present), exposes
+// them on the response headers and the Gin context, and propagates both
+// through the request context under a single key. See requestContextMiddleware.
+func RequestContextMiddleware() gin.HandlerFunc {
+	return requestContextMiddleware()
+}
+
 func requestContextMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		requestID := strings.TrimSpace(c.GetHeader(RequestIDHeader))

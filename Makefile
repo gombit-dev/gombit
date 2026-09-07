@@ -33,7 +33,7 @@ OUT_DIR ?= benchmarks/results/latest
 # applied verdict per app (via inspect-limits).
 INTENDED_LIMITS ?= intended (applied only under benchmark-crud-all): app $(APP_CPUS)cpu/$(APP_MEMORY); postgres $(POSTGRES_CPUS)cpu/$(POSTGRES_MEMORY)
 
-.PHONY: help benchmark benchmark-smoke benchmark-crud benchmark-crud-all benchmark-micro benchmark-footprint benchmark-summary benchmark-metadata benchmark-report benchmark-report-check
+.PHONY: help benchmark benchmark-smoke benchmark-crud benchmark-crud-all benchmark-micro benchmark-micro-ablation benchmark-footprint benchmark-summary benchmark-metadata benchmark-report benchmark-report-check
 
 ## help: list the benchmark targets (the default goal — a bare `make` prints
 ## this, never a multi-hour run). Full docs: benchmarks/README.md.
@@ -106,6 +106,26 @@ benchmark-micro:
 			|| { echo "$$out" >&2; echo "benchmark-micro: $$s failed" >&2; exit 1; }; \
 		printf "%s\n" "$$out" | go run ./benchmarks/scripts/microbench -stack $$s -out "$(OUT_DIR)/microbench.json"; \
 	done'
+
+## benchmark-micro-ablation: run the Gombit per-layer middleware ablation
+## benchmark (benchmarks/micro/gombit/ablation_bench_test.go) — progressively
+## stacking recovery -> request_context -> metrics -> security_headers -> xss ->
+## csrf -> request_timeout — and merge its rows into OUT_DIR/microbench.json
+## under the "gombit-ablation/<layer>" stacks. This is a diagnostic that
+## isolates each middleware layer's incremental ns/op/B/op/allocs/op cost, not
+## part of the published framework-tax ladder (which stays net/http -> gin ->
+## huma -> gombit); run it standalone to see where in Gombit's stack the
+## framework-tax delta actually comes from.
+##
+##   make benchmark-micro-ablation
+##   go test ./benchmarks/micro/gombit -bench=BenchmarkAblation -benchmem -count=10   # without persisting
+benchmark-micro-ablation:
+	@mkdir -p "$(OUT_DIR)"
+	bash -c 'set -euo pipefail; \
+		echo "benchmark-micro-ablation: gombit"; \
+		out="$$(go test ./benchmarks/micro/gombit -bench=BenchmarkAblation -benchmem -run="^$$" -count=$(MICRO_COUNT))" \
+			|| { echo "$$out" >&2; echo "benchmark-micro-ablation: failed" >&2; exit 1; }; \
+		printf "%s\n" "$$out" | go run ./benchmarks/scripts/microbench -stack gombit-ablation -out "$(OUT_DIR)/microbench.json"'
 
 ## benchmark-report: regenerate the derived Markdown from OUT_DIR — the root
 ## README's `## Performance` block and summary.md. Markdown is generated, never

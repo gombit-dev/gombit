@@ -28,8 +28,20 @@ import (
 // SchemaVersion is bumped on any breaking change to the row shape (issue §9).
 const SchemaVersion = 1
 
-// benchPrefix is the sub-benchmark name the scenarios live under.
-const benchPrefix = "BenchmarkFrameworkTax/"
+// frameworkTaxPrefix is the sub-benchmark name the four-row framework-tax
+// scenarios live under: BenchmarkFrameworkTax/<scenario>. Every row for one
+// `go test` process shares the -stack argument passed to ParseBenchOutput.
+const frameworkTaxPrefix = "BenchmarkFrameworkTax/"
+
+// ablationPrefix is the sub-benchmark name the Gombit per-layer middleware
+// ablation benchmark (benchmarks/micro/gombit/ablation_bench_test.go) lives
+// under: BenchmarkAblation/gombit-ablation/<layer>/<scenario>. Unlike
+// BenchmarkFrameworkTax, a single `go test -bench=BenchmarkAblation` process
+// reports many stacks at once (one per progressively-stacked layer), so the
+// stack is parsed out of the benchmark name itself (everything between the
+// prefix and the final "/<scenario>") rather than taken from the -stack
+// argument.
+const ablationPrefix = "BenchmarkAblation/"
 
 // Scenarios is the full set every stack must report; a run missing any of these
 // is incomplete and rejected rather than published as a partial row set.
@@ -88,31 +100,54 @@ func (r Row) CoVNsPerOp() float64 {
 	return math.Sqrt(ss/float64(n-1)) / mean
 }
 
-// ParseBenchOutput reads `go test -bench` text output for one stack and returns
-// a row per BenchmarkFrameworkTax/<scenario>, accumulating every iteration's
-// ns/op into NsPerOp. Non-benchmark lines are ignored. It errors unless every
-// scenario in Scenarios is present (a panic mid-run yields fewer scenarios,
-// which must fail rather than publish a partial stack).
+// ParseBenchOutput reads `go test -bench` text output and returns a row per
+// (stack, scenario) pair found, accumulating every iteration's ns/op into
+// NsPerOp. Non-benchmark lines are ignored. Two benchmark name shapes are
+// recognized:
+//
+//   - BenchmarkFrameworkTax/<scenario> — the four-row framework-tax matrix
+//     (net/http, gin, huma, gombit). Every line in one `go test` process
+//     belongs to the single stack passed as the stack argument, so that
+//     argument names the row directly.
+//   - BenchmarkAblation/gombit-ablation/<layer>/<scenario> — the Gombit
+//     per-layer middleware ablation benchmark
+//     (benchmarks/micro/gombit/ablation_bench_test.go). A single `go test`
+//     process reports many stacks at once (one per progressively-stacked
+//     layer), so each line's stack ("gombit-ablation/<layer>") is parsed out
+//     of the benchmark name itself rather than taken from the stack argument.
+//
+// It errors unless every discovered stack reports every scenario in Scenarios
+// (a panic mid-run yields fewer scenarios, which must fail rather than
+// publish a partial stack), and unless at least one recognized benchmark line
+// was found at all.
 func ParseBenchOutput(stack string, r io.Reader) ([]Row, error) {
 	if stack == "" {
 		return nil, fmt.Errorf("stack is required")
 	}
-	byScenario := map[string]*Row{}
+	byStack := map[string]map[string]*Row{}
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
 	for sc.Scan() {
 		fields := strings.Fields(sc.Text())
-		if len(fields) < 2 || !strings.HasPrefix(fields[0], benchPrefix) {
+		if len(fields) < 2 {
 			continue
 		}
-		scenario := stripProcs(strings.TrimPrefix(fields[0], benchPrefix))
+		rowStack, scenario, ok := parseBenchName(stack, fields[0])
+		if !ok {
+			continue
+		}
 		ns, bytesPer, allocs, ok := parseMetrics(fields)
 		if !ok {
 			continue
 		}
+		byScenario := byStack[rowStack]
+		if byScenario == nil {
+			byScenario = map[string]*Row{}
+			byStack[rowStack] = byScenario
+		}
 		row := byScenario[scenario]
 		if row == nil {
-			row = &Row{SchemaVersion: SchemaVersion, Stack: stack, Scenario: scenario}
+			row = &Row{SchemaVersion: SchemaVersion, Stack: rowStack, Scenario: scenario}
 			byScenario[scenario] = row
 		}
 		row.NsPerOp = append(row.NsPerOp, ns)
@@ -122,17 +157,49 @@ func ParseBenchOutput(stack string, r io.Reader) ([]Row, error) {
 	if err := sc.Err(); err != nil {
 		return nil, fmt.Errorf("read bench output: %w", err)
 	}
-	for _, want := range Scenarios {
-		if byScenario[want] == nil {
-			return nil, fmt.Errorf("stack %q is missing the %q scenario (incomplete run — %d of %d scenarios present)",
-				stack, want, len(byScenario), len(Scenarios))
+	if len(byStack) == 0 {
+		return nil, fmt.Errorf("no BenchmarkFrameworkTax or BenchmarkAblation rows found for stack %q", stack)
+	}
+	stacks := make([]string, 0, len(byStack))
+	for s := range byStack {
+		stacks = append(stacks, s)
+	}
+	sort.Strings(stacks)
+	var rows []Row
+	for _, st := range stacks {
+		byScenario := byStack[st]
+		for _, want := range Scenarios {
+			if byScenario[want] == nil {
+				return nil, fmt.Errorf("stack %q is missing the %q scenario (incomplete run — %d of %d scenarios present)",
+					st, want, len(byScenario), len(Scenarios))
+			}
+		}
+		for _, s := range Scenarios {
+			rows = append(rows, *byScenario[s])
 		}
 	}
-	rows := make([]Row, 0, len(byScenario))
-	for _, s := range Scenarios {
-		rows = append(rows, *byScenario[s])
-	}
 	return rows, nil
+}
+
+// parseBenchName recognizes the two benchmark name shapes ParseBenchOutput
+// understands (see its doc comment) and returns the row's stack and scenario.
+// ok is false for any other line (including the top-level "BenchmarkAblation"
+// and "BenchmarkFrameworkTax" lines Go itself never emits metrics for, and
+// any unrelated benchmark).
+func parseBenchName(stack, name string) (rowStack, scenario string, ok bool) {
+	switch {
+	case strings.HasPrefix(name, ablationPrefix):
+		rest := stripProcs(strings.TrimPrefix(name, ablationPrefix))
+		i := strings.LastIndex(rest, "/")
+		if i < 0 {
+			return "", "", false
+		}
+		return rest[:i], rest[i+1:], true
+	case strings.HasPrefix(name, frameworkTaxPrefix):
+		return stack, stripProcs(strings.TrimPrefix(name, frameworkTaxPrefix)), true
+	default:
+		return "", "", false
+	}
 }
 
 // stripProcs removes the trailing -<GOMAXPROCS> Go appends to a benchmark name,
