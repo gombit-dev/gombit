@@ -101,10 +101,24 @@ var (
 	referrerPolicyValue     = []string{"strict-origin-when-cross-origin"}
 	hstsHeaderValue         = []string{"max-age=315360000; includeSubDomains"}
 	contentTypeOptionsValue = []string{"nosniff"}
-	downloadOptionsValue    = []string{"noopen"}
 	frameOptionsValue       = []string{"DENY"}
 )
 
+// securityHeadersMiddleware sets the framework's fixed set of security
+// headers on every response (API and HTML/SPA alike). X-Download-Options
+// ("noopen") is IE8-only guidance for the long-retired IE8 downloads
+// behavior; no supported browser honors it, so it is not set at all rather
+// than carried forward as dead weight on every response (issue #267). Every
+// other header here is still meaningful in current browsers:
+//   - Content-Security-Policy and X-Frame-Options are the load-bearing
+//     clickjacking/injection defenses.
+//   - Referrer-Policy and X-Content-Type-Options are cheap, still-honored
+//     hardening with no compatibility downside.
+//
+// HTML responses (the embedded SPA) override Content-Security-Policy via
+// applySPAContentSecurityPolicy (see embed.go) to allow the styling the SPA
+// needs; JSON API responses keep the strict default-src 'self' policy set
+// here. See docs/security.md for the full per-response-type header table.
 func securityHeadersMiddleware(includeHSTS bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		header := c.Writer.Header()
@@ -114,7 +128,6 @@ func securityHeadersMiddleware(includeHSTS bool) gin.HandlerFunc {
 			header["Strict-Transport-Security"] = hstsHeaderValue
 		}
 		header["X-Content-Type-Options"] = contentTypeOptionsValue
-		header["X-Download-Options"] = downloadOptionsValue
 		header["X-Frame-Options"] = frameOptionsValue
 		c.Next()
 	}

@@ -130,7 +130,6 @@ func TestDefaultRouterAddsSecurityHeaders(t *testing.T) {
 		"Content-Security-Policy": "default-src 'self'",
 		"Referrer-Policy":         "strict-origin-when-cross-origin",
 		"X-Content-Type-Options":  "nosniff",
-		"X-Download-Options":      "noopen",
 		"X-Frame-Options":         "DENY",
 	}
 	for header, value := range want {
@@ -143,6 +142,11 @@ func TestDefaultRouterAddsSecurityHeaders(t *testing.T) {
 	}
 	if got := rec.Header().Get("X-XSS-Protection"); got != "" {
 		t.Fatalf("X-XSS-Protection = %q, want empty deprecated header", got)
+	}
+	// X-Download-Options is IE8-only guidance; no supported browser honors
+	// it, so the framework intentionally does not set it (issue #267).
+	if got := rec.Header().Get("X-Download-Options"); got != "" {
+		t.Fatalf("X-Download-Options = %q, want empty deprecated header", got)
 	}
 }
 
