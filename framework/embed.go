@@ -102,15 +102,35 @@ func isReservedFrontendPath(urlPath, apiPrefix string) bool {
 	return false
 }
 
-// spaContentSecurityPolicy overwrites the global default-src 'self' header
-// when serving SPA index.html so --ui mui + --embed can load Roboto and
-// Emotion-injected <style> tags. script-src stays 'self' (hashed Vite
-// modules; no unsafe-inline scripts). JSON API and probe responses keep
-// the global policy.
+// spaContentSecurityPolicy is the Content-Security-Policy for HTML documents
+// the framework serves through its own handlers — the embedded SPA index.html
+// and the admin SPA. It is looser than the API default (which is
+// default-src 'none'; frame-ancestors 'none') so --ui mui + --embed can load
+// Roboto and Emotion-injected <style> tags. script-src stays 'self' (hashed
+// Vite modules; no unsafe-inline scripts). JSON API and probe responses keep
+// the strict API policy set in securityHeadersMiddleware.
 const spaContentSecurityPolicy = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'"
 
-func applySPAContentSecurityPolicy(c *gin.Context) {
-	c.Header("Content-Security-Policy", spaContentSecurityPolicy)
+var spaContentSecurityPolicyValue = []string{spaContentSecurityPolicy}
+
+// applyBrowserSecurityHeaders promotes a response from the API/JSON security
+// baseline (set by securityHeadersMiddleware) to the full browser policy that
+// an HTML document rendered in a browser needs (issue #267 / PERF-9): the
+// looser SPA Content-Security-Policy, plus Referrer-Policy and the legacy
+// X-Frame-Options: DENY for user agents that do not honor frame-ancestors.
+// X-Content-Type-Options and Strict-Transport-Security are already set by the
+// middleware and carry through unchanged.
+//
+// It replaces map entries (never writing through the shared read-only slices),
+// so the shared-value contract in securityHeadersMiddleware still holds. This
+// is not on the JSON hot path, so the map growth it may cause past the 8-header
+// threshold is acceptable here — the allocation budget in issue #267 is about
+// the default API response, not HTML documents.
+func applyBrowserSecurityHeaders(c *gin.Context) {
+	header := c.Writer.Header()
+	header["Content-Security-Policy"] = spaContentSecurityPolicyValue
+	header["Referrer-Policy"] = referrerPolicyValue
+	header["X-Frame-Options"] = frameOptionsValue
 }
 
 func serveEmbeddedFile(c *gin.Context, fsys fs.FS, name string) bool {
@@ -126,7 +146,7 @@ func serveEmbeddedFile(c *gin.Context, fsys fs.FS, name string) bool {
 	}
 
 	if name == "index.html" {
-		applySPAContentSecurityPolicy(c)
+		applyBrowserSecurityHeaders(c)
 	}
 
 	if rs, ok := f.(io.ReadSeeker); ok {
@@ -149,7 +169,7 @@ func serveIndexHTML(c *gin.Context, fsys fs.FS, apiPrefix string) {
 		return
 	}
 	data = injectAPIPrefixHTML(data, apiPrefix)
-	applySPAContentSecurityPolicy(c)
+	applyBrowserSecurityHeaders(c)
 	writeBytes(c, "text/html; charset=utf-8", data)
 }
 

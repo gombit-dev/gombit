@@ -147,8 +147,8 @@ func TestAdminMetaIsJSONNotHTML(t *testing.T) {
 		t.Fatalf("Content-Type = %q, want json", rec.Header().Get("Content-Type"))
 	}
 	apiCSP := rec.Header().Get("Content-Security-Policy")
-	if apiCSP != "default-src 'self'" {
-		t.Fatalf("API CSP = %q, want default-src 'self' (not SPA CSP)", apiCSP)
+	if apiCSP != "default-src 'none'; frame-ancestors 'none'" {
+		t.Fatalf("API CSP = %q, want the API policy default-src 'none'; frame-ancestors 'none' (not SPA CSP)", apiCSP)
 	}
 }
 
@@ -163,8 +163,8 @@ func TestAdminSPALeavesProbesAndDocs(t *testing.T) {
 	if strings.Contains(rec.Body.String(), "<div id=\"root\">") {
 		t.Fatal("GET /readyz served admin index.html")
 	}
-	if rec.Header().Get("Content-Security-Policy") != "default-src 'self'" {
-		t.Fatalf("GET /readyz CSP = %q", rec.Header().Get("Content-Security-Policy"))
+	if rec.Header().Get("Content-Security-Policy") != "default-src 'none'; frame-ancestors 'none'" {
+		t.Fatalf("GET /readyz CSP = %q, want the API policy default-src 'none'; frame-ancestors 'none'", rec.Header().Get("Content-Security-Policy"))
 	}
 
 	rec = doRequest(app, nil, http.MethodGet, "/docs", "")

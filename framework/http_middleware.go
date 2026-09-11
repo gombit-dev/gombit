@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gombit-dev/gombit/contract"
 )
 
 // TraceparentHeader is the W3C trace context header.
@@ -80,8 +81,8 @@ func GetTraceIDFromContext(ctx context.Context) string {
 // Security-header values are request-invariant. Rather than allocate a fresh
 // []string per header on every response (what http.Header.Set does), the
 // middleware assigns these shared, read-only backing slices directly into the
-// response header map (keys are already in canonical MIME form). That saves
-// six allocations per response on the hot path.
+// response header map (keys are already in canonical MIME form). That saves an
+// allocation per header on the hot path.
 //
 // http.Header is a mutable map of mutable slices, so sharing is safe only
 // under its documented mutation APIs, and that constraint is load-bearing:
@@ -94,43 +95,76 @@ func GetTraceIDFromContext(ctx context.Context) string {
 // Header.Values(k)[0] = ... or append(h[k][:0], ...) — writes straight through
 // to the process-global value, corrupting it for every other request and
 // racing with them. Override a security header with Set (as
-// applySPAContentSecurityPolicy does), never an in-place slice write.
+// applyBrowserSecurityHeaders does), never an in-place slice write.
 // TestSecurityHeaderSharedValueContract locks all three paths.
 var (
-	cspHeaderValue          = []string{"default-src 'self'"}
-	referrerPolicyValue     = []string{"strict-origin-when-cross-origin"}
-	hstsHeaderValue         = []string{"max-age=315360000; includeSubDomains"}
-	contentTypeOptionsValue = []string{"nosniff"}
-	frameOptionsValue       = []string{"DENY"}
+	// apiContentSecurityPolicy is the JSON/API default (issue #267 / PERF-9):
+	// the OWASP REST minimum. default-src 'none' forbids the response from
+	// loading or executing anything (a JSON body needs no resources), and
+	// frame-ancestors 'none' is the modern anti-clickjacking directive that
+	// subsumes X-Frame-Options: DENY — so an API response needs neither
+	// X-Frame-Options nor Referrer-Policy, keeping it well under the 8-header
+	// swiss-map threshold that used to cost the layer ~5 allocs/op.
+	apiContentSecurityPolicyValue = []string{"default-src 'none'; frame-ancestors 'none'"}
+	// browserContentSecurityPolicy is the policy for HTML documents the
+	// framework itself serves but whose handler cannot set its own headers —
+	// today only Huma's interactive docs at /docs. It matches the pre-#267
+	// full browser policy so nothing about the docs page regresses.
+	browserContentSecurityPolicyValue = []string{"default-src 'self'"}
+	referrerPolicyValue               = []string{"strict-origin-when-cross-origin"}
+	hstsHeaderValue                   = []string{"max-age=315360000; includeSubDomains"}
+	contentTypeOptionsValue           = []string{"nosniff"}
+	frameOptionsValue                 = []string{"DENY"}
 )
 
-// securityHeadersMiddleware sets the framework's fixed set of security
-// headers on every response (API and HTML/SPA alike). X-Download-Options
-// ("noopen") is IE8-only guidance for the long-retired IE8 downloads
-// behavior; no supported browser honors it, so it is not set at all rather
-// than carried forward as dead weight on every response (issue #267). Every
-// other header here is still meaningful in current browsers:
-//   - Content-Security-Policy and X-Frame-Options are the load-bearing
-//     clickjacking/injection defenses.
-//   - Referrer-Policy and X-Content-Type-Options are cheap, still-honored
-//     hardening with no compatibility downside.
+// securityHeadersMiddleware sets the framework's baseline security headers on
+// every response, scoped by response kind (issue #267 / PERF-9). See
+// docs/security.md for the full per-response-kind header table.
 //
-// HTML responses (the embedded SPA) override Content-Security-Policy via
-// applySPAContentSecurityPolicy (see embed.go) to allow the styling the SPA
-// needs; JSON API responses keep the strict default-src 'self' policy set
-// here. See docs/security.md for the full per-response-type header table.
+// X-Content-Type-Options and (in production) Strict-Transport-Security apply
+// to every response. The Content-Security-Policy differs by kind:
+//
+//   - API/JSON (the default, and the hot path): default-src 'none';
+//     frame-ancestors 'none'. Nothing else — this holds the common JSON
+//     response with correlation IDs and Content-Type at <= 6 headers, one
+//     under the swiss-map 8-slot group boundary, so the layer allocates
+//     nothing (the map and net/http's WriteHeader Header.Clone no longer grow).
+//   - Interactive docs (/docs): the full browser policy, applied here by path
+//     because Huma owns that handler. Huma's docs renderer sets its own
+//     Content-Security-Policy (it must allow the Swagger UI assets), so it
+//     overrides the CSP set here; what this branch contributes that Huma does
+//     not is Referrer-Policy and the legacy X-Frame-Options: DENY.
+//
+// HTML documents the framework serves through its own handlers — the admin SPA
+// and the embedded frontend — start from the API baseline set here and then
+// override to the browser policy via applyBrowserSecurityHeaders (see embed.go
+// and adminui.go), which is where the richer SPA CSP, Referrer-Policy, and
+// X-Frame-Options are added. X-Download-Options ("noopen") is IE8-only and set
+// nowhere: no supported browser honors it (issue #267).
 func securityHeadersMiddleware(includeHSTS bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		header := c.Writer.Header()
-		header["Content-Security-Policy"] = cspHeaderValue
-		header["Referrer-Policy"] = referrerPolicyValue
+		header["X-Content-Type-Options"] = contentTypeOptionsValue
 		if includeHSTS {
 			header["Strict-Transport-Security"] = hstsHeaderValue
 		}
-		header["X-Content-Type-Options"] = contentTypeOptionsValue
-		header["X-Frame-Options"] = frameOptionsValue
+		if isDocsPath(c.Request.URL.Path) {
+			header["Content-Security-Policy"] = browserContentSecurityPolicyValue
+			header["Referrer-Policy"] = referrerPolicyValue
+			header["X-Frame-Options"] = frameOptionsValue
+		} else {
+			header["Content-Security-Policy"] = apiContentSecurityPolicyValue
+		}
 		c.Next()
 	}
+}
+
+// isDocsPath reports whether urlPath is Huma's interactive docs UI. Docs is an
+// HTML document served by Huma (contract.DocsPath, root-mounted), so its
+// response kind is decided here by path rather than by an override in a
+// framework handler.
+func isDocsPath(urlPath string) bool {
+	return urlPath == contract.DocsPath || strings.HasPrefix(urlPath, contract.DocsPath+"/")
 }
 
 // httpMetrics accumulates request metrics without locking the request path.

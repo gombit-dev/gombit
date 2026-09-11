@@ -238,8 +238,8 @@ func TestEmbeddedFrontendIndexUsesSPACSP(t *testing.T) {
 		t.Fatalf("GET /readyz status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 	readyCSP := rec.Header().Get("Content-Security-Policy")
-	if readyCSP != "default-src 'self'" {
-		t.Fatalf("GET /readyz CSP = %q, want default-src 'self'", readyCSP)
+	if readyCSP != "default-src 'none'; frame-ancestors 'none'" {
+		t.Fatalf("GET /readyz CSP = %q, want the API policy default-src 'none'; frame-ancestors 'none'", readyCSP)
 	}
 	if strings.Contains(readyCSP, "fonts.googleapis.com") {
 		t.Fatalf("GET /readyz CSP = %q, must not get SPA font hosts", readyCSP)

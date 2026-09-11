@@ -90,7 +90,7 @@ func serveAdminIndexHTML(c *gin.Context, fsys fs.FS, apiPrefix string) {
 		return
 	}
 	data = injectAPIPrefixHTML(data, apiPrefix)
-	applySPAContentSecurityPolicy(c)
+	applyBrowserSecurityHeaders(c)
 	writeBytes(c, "text/html; charset=utf-8", data)
 }
 

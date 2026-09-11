@@ -73,11 +73,14 @@ only mounts in cookie mode. See [admin.md](admin.md).
 
 ## SPA Content-Security-Policy
 
-Global middleware sets `Content-Security-Policy: default-src 'self'` on every
-response. When the embedded frontend serves `index.html` (GET `/` and SPA
-fallback), that header is overwritten so `--ui mui` + `--embed` can load
-Roboto and Emotion-injected `<style>` tags:
+The security-headers middleware scopes its policy by response kind (see
+[security.md](security.md)). JSON API responses, probes, and `/metrics` get the
+strict API policy `default-src 'none'; frame-ancestors 'none'`. When the
+embedded frontend serves `index.html` (GET `/` and SPA fallback), the response
+is promoted to the browser policy so `--ui mui` + `--embed` can load Roboto and
+Emotion-injected `<style>` tags:
 
+- `default-src 'self'` — same-origin baseline for the document
 - `script-src 'self'` — Vite production JS is hashed same-origin modules
   (no `'unsafe-inline'` scripts)
 - `style-src 'self' 'unsafe-inline' https://fonts.googleapis.com` — Emotion
@@ -86,8 +89,9 @@ Roboto and Emotion-injected `<style>` tags:
 - `connect-src 'self'` — same-origin API
 - `img-src 'self' data:`
 
-JSON API, probes, and `/metrics` keep `default-src 'self'`. `/docs` (when
-enabled) keeps Huma's Swagger UI policy.
+plus `Referrer-Policy` and `X-Frame-Options: DENY`. `/docs` (when enabled)
+keeps Huma's own Swagger UI CSP and additionally gets the browser hardening
+headers. See [security.md](security.md) for the full per-response-kind table.
 
 ## Scaffold hook
 
