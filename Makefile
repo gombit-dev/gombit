@@ -97,6 +97,9 @@ MICRO_COUNT ?= 10
 ## Huma -> Gombit) and persist ns/op / B/op / allocs/op to OUT_DIR/microbench.json
 ## for the report. Each stack is its own `go test` process (a framework.App
 ## constructor mutates a process global), piped through the microbench parser.
+## Takes ~40s of pure Go, no Docker — which is exactly why it must be able to
+## refresh on its own, without re-running the hours-long CRUD sweep it shares
+## metadata.json with (issue #266).
 benchmark-micro:
 	@mkdir -p "$(OUT_DIR)"
 	@rm -f "$(OUT_DIR)/microbench.json"
@@ -106,6 +109,11 @@ benchmark-micro:
 			|| { echo "$$out" >&2; echo "benchmark-micro: $$s failed" >&2; exit 1; }; \
 		printf "%s\n" "$$out" | go run ./benchmarks/scripts/microbench -stack $$s -out "$(OUT_DIR)/microbench.json"; \
 	done'
+	@# Record WHICH commit, host and toolchain produced these rows. The four
+	@# rungs are only comparable against each other when they share a toolchain
+	@# (the stdlib-only net/http rung has itself moved by 3 allocs/op across Go
+	@# releases), so the report must be able to caption this table on its own.
+	go run ./benchmarks/scripts/collect-host-info -group microbench -out "$(OUT_DIR)/metadata.json"
 
 ## benchmark-report: regenerate the derived Markdown from OUT_DIR — the root
 ## README's `## Performance` block and summary.md. Markdown is generated, never

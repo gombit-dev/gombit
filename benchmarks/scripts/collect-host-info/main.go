@@ -5,6 +5,21 @@
 // as flags by the orchestrator that knows them.
 //
 //	go run ./benchmarks/scripts/collect-host-info -out benchmarks/results/latest/metadata.json
+//
+// With -group it switches to stamp mode: it records the current commit, host
+// and toolchain as that measurement group's provenance in an existing
+// metadata.json and changes nothing else. That is what lets a target which
+// produces only one of the three groups — `make benchmark-micro`,
+// `make benchmark-footprint` — say when and where its own numbers came from
+// without restamping the hours-long CRUD sweep it shares the file with
+// (issue #266):
+//
+//	go run ./benchmarks/scripts/collect-host-info -group microbench \
+//	  -out benchmarks/results/latest/metadata.json
+//
+// Either way, per-group provenance already on disk survives: this command
+// measures nothing itself, so it never deletes the record of measurements other
+// targets did run.
 package main
 
 import (
@@ -20,6 +35,7 @@ import (
 
 func main() {
 	out := flag.String("out", "", "output file for metadata.json (default: stdout)")
+	group := flag.String("group", "", "stamp this measurement group's provenance into an existing -out file, leaving every other field untouched ("+strings.Join(metadata.KnownGroups, "|")+")")
 	postgres := flag.String("postgres-version", "", "PostgreSQL version under test")
 	benchmarkTool := flag.String("benchmark-tool", "", "load generator name+version, e.g. 'k6 0.55.0'")
 	resourceLimits := flag.String("resource-limits", "", "documented resource limits for this run")
@@ -30,6 +46,19 @@ func main() {
 	frameworkVersions := flag.String("framework-versions", "", "comma-separated framework=version pairs, e.g. 'gombit=v0.1.0,gin-gorm=v1.11.0'")
 	runtimeVersions := flag.String("runtime-versions", "", "comma-separated runtime=version pairs, e.g. 'go=1.26.0,node=24'")
 	flag.Parse()
+
+	// Fail closed on an unknown group: a typo'd -group would otherwise write a
+	// phantom entry no reader looks at, leaving the table it meant to stamp
+	// silently on the stale top-level fallback — the exact failure mode
+	// per-group provenance exists to end.
+	if *group != "" {
+		if !metadata.ValidGroup(*group) {
+			fatalf("-group %q: must be one of %s", *group, strings.Join(metadata.KnownGroups, ", "))
+		}
+		if *out == "" {
+			fatalf("-group requires -out: stamping a group means updating an existing metadata.json in place")
+		}
+	}
 
 	concurrencyLevels, err := parseIntList(*concurrency)
 	if err != nil {
@@ -45,6 +74,7 @@ func main() {
 	}
 
 	m := metadata.Collect(context.Background(), metadata.Options{
+		Group:             *group,
 		PostgresVersion:   *postgres,
 		FrameworkVersions: frameworks,
 		RuntimeVersions:   runtimes,
@@ -56,9 +86,84 @@ func main() {
 		Trials:            *trials,
 	})
 
+	// Whichever path runs, what is already on disk survives it: a group stamp
+	// changes only its own group, and a whole-snapshot rewrite still carries
+	// every group's provenance forward.
+	switch {
+	case *group != "":
+		m, err = stampGroup(*out, *group, m)
+	case *out != "":
+		m, err = carryGroups(*out, m)
+	}
+	if err != nil {
+		fatalf("%v", err)
+	}
+
 	if err := write(*out, m); err != nil {
 		fatalf("%v", err)
 	}
+}
+
+// stampGroup reduces a full collection to just its group entry, applied on top
+// of the snapshot already at path. Everything else in that file — the top-level
+// block, the CRUD run parameters, the other groups — is preserved verbatim, so
+// a cheap single-group refresh cannot re-caption measurements it did not run.
+func stampGroup(path, group string, collected metadata.Metadata) (metadata.Metadata, error) {
+	existing, err := readSnapshot(path)
+	if err != nil {
+		return metadata.Metadata{}, err
+	}
+	return metadata.StampGroup(existing, group, collected.Provenance()), nil
+}
+
+// carryGroups preserves the per-group provenance already on disk across a
+// whole-snapshot rewrite (the no -group path, `make benchmark-metadata`).
+//
+// collect-host-info measures nothing itself, so it has no standing to delete
+// the record of measurements other targets did run. Dropping Groups here would
+// not merely lose data: the report's fallback treats a group with no entry as
+// "this snapshot predates per-group provenance, so the top-level block IS its
+// provenance", which is only exact when one run produced everything. After a
+// wipe that premise is false but the fallback still fires, re-captioning all
+// three tables with the host and commit of a collection that measured nothing
+// (issue #266).
+//
+// It deliberately preserves ONLY Groups. This target's existing behavior of
+// replacing the version maps and limit verdicts is untouched here — changing
+// that is a separate question from the provenance invariant.
+func carryGroups(path string, collected metadata.Metadata) (metadata.Metadata, error) {
+	existing, err := readSnapshot(path)
+	if err != nil {
+		return metadata.Metadata{}, err
+	}
+	for name, prov := range existing.Groups {
+		collected = metadata.StampGroup(collected, name, prov)
+	}
+	return collected, nil
+}
+
+// readSnapshot returns the metadata.json already at path.
+//
+// A missing file is not an error: the first target to run in a fresh OUT_DIR
+// starts a new record. A file that exists but does not parse IS an error —
+// silently replacing a corrupt snapshot would discard whatever hours-long run
+// produced it.
+func readSnapshot(path string) (metadata.Metadata, error) {
+	// path is the operator-supplied -out flag, not untrusted input — G304 does
+	// not apply.
+	f, err := os.Open(path) //nolint:gosec
+	if err != nil {
+		if os.IsNotExist(err) {
+			return metadata.Metadata{SchemaVersion: metadata.SchemaVersion}, nil
+		}
+		return metadata.Metadata{}, fmt.Errorf("read %s: %w", path, err)
+	}
+	defer func() { _ = f.Close() }()
+	existing, err := metadata.ReadJSON(f)
+	if err != nil {
+		return metadata.Metadata{}, fmt.Errorf("read %s: %w", path, err)
+	}
+	return existing, nil
 }
 
 func fatalf(format string, args ...any) {

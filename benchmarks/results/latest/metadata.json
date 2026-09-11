@@ -48,5 +48,19 @@
     500,
     1000
   ],
-  "trials": 5
+  "trials": 5,
+  "groups": {
+    "microbench": {
+      "timestamp": "2026-09-08T22:00:14Z",
+      "git_commit": "7884607771117dea93eef8d8f3fb155a672d40f3",
+      "git_dirty": false,
+      "os": "linux",
+      "kernel": "7.1.1-76070101-generic",
+      "arch": "amd64",
+      "cpu_model": "11th Gen Intel(R) Core(TM) i5-11400H @ 2.70GHz",
+      "logical_cpus": 12,
+      "ram_bytes": 8087678976,
+      "go_version": "go1.26.1"
+    }
+  }
 }

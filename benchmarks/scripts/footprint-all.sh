@@ -263,6 +263,13 @@ main() {
   for app in $APPS; do
     measure_container "$app"
   done
+  # Record which commit and host produced these rows. Footprint is a separate
+  # measurement group from the CRUD sweep and the microbenchmark, so it stamps
+  # its own provenance and leaves the rest of metadata.json untouched — a
+  # snapshot-wide commit would vouch for numbers that never ran at it
+  # (issue #266).
+  mkdir -p "$(dirname "$OUT")"
+  go run ./benchmarks/scripts/collect-host-info -group footprint -out "$(dirname "$OUT")/metadata.json"
   echo "footprint: done. Rows in $OUT (and .csv)."
 }
 

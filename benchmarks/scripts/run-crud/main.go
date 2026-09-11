@@ -20,7 +20,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -156,6 +155,10 @@ func run(cfg runConfig, k6run k6Runner) error {
 	}
 
 	meta := metadata.Collect(context.Background(), metadata.Options{
+		// This is the CRUD sweep's own provenance: the commit and host the
+		// containerized load test ran at, which the microbenchmark and footprint
+		// groups sharing metadata.json are free to differ from (issue #266).
+		Group:             metadata.GroupCRUD,
 		PostgresVersion:   cfg.postgresVersion,
 		FrameworkVersions: map[string]string{cfg.framework: cfg.frameworkVersion},
 		RuntimeVersions:   map[string]string{cfg.runtimeName: cfg.runtimeVersion},
@@ -287,40 +290,21 @@ func readResults(path string) ([]result.Result, error) {
 	return result.ReadJSON(f)
 }
 
+// mergedMetadata folds this run's metadata into whatever an earlier app's run
+// already wrote, preserving every app's contribution (metadata.Merge documents
+// the per-field rules). An unreadable or corrupt file is treated as "no prior
+// snapshot": this run's own record still gets written.
 func mergedMetadata(path string, meta metadata.Metadata) metadata.Metadata {
-	data, err := os.ReadFile(path) //nolint:gosec // path composed from the operator-supplied out-dir
+	f, err := os.Open(path) //nolint:gosec // path composed from the operator-supplied out-dir
 	if err != nil {
 		return meta
 	}
-	var existing metadata.Metadata
-	if err := json.Unmarshal(data, &existing); err != nil {
+	defer func() { _ = f.Close() }()
+	existing, err := metadata.ReadJSON(f)
+	if err != nil {
 		return meta
 	}
-	meta.FrameworkVersions = union(existing.FrameworkVersions, meta.FrameworkVersions)
-	meta.RuntimeVersions = union(existing.RuntimeVersions, meta.RuntimeVersions)
-	// Preserve every app's applied-limit verdict, not just the last writer's.
-	meta.ResourceLimitsByFramework = union(existing.ResourceLimitsByFramework, meta.ResourceLimitsByFramework)
-	// Postgres is the same container across apps. Empty means "this run did not
-	// re-verify" (the standalone benchmark-crud default) — keep any prior verdict.
-	// A non-empty value, INCLUDING an explicit "unknown …" from run-crud-all when
-	// it looked but could not classify, is authoritative for this run and
-	// overwrites — so a stale enforced/partial never sticks across a re-run whose
-	// check failed.
-	if meta.PostgresResourceLimits == "" {
-		meta.PostgresResourceLimits = existing.PostgresResourceLimits
-	}
-	return meta
-}
-
-func union(a, b map[string]string) map[string]string {
-	out := map[string]string{}
-	for k, v := range a {
-		out[k] = v
-	}
-	for k, v := range b {
-		out[k] = v
-	}
-	return out
+	return metadata.Merge(existing, meta)
 }
 
 func writeFile(path string, encode func(*os.File) error) error {
