@@ -8,7 +8,7 @@
 # benchmarks/compose.yml builds it with `context: ..` for exactly this reason.
 # A Dockerfile-scoped .dockerignore next to this file keeps node_modules/vendor/
 # .git out of the context.
-FROM golang:1.25.7-alpine AS build
+FROM golang:1.26.0-alpine AS build
 WORKDIR /src
 # Cache modules before copying the tree so source edits don't re-download.
 COPY go.mod go.sum ./

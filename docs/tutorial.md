@@ -5,7 +5,7 @@ generated TypeScript client, a React page, cookie login, and the same model
 running in the admin. That's the whole v0.1 loop.
 
 **Time:** about 45 minutes.
-**Prerequisites:** [installation.md](installation.md) — Go 1.25+, Node 22+,
+**Prerequisites:** [installation.md](installation.md) — Go 1.26+, Node 22+,
 Atlas, and a C toolchain (SQLite is cgo-only).
 
 Every chapter ends with a **✅ Checkpoint** telling you what "it worked" looks

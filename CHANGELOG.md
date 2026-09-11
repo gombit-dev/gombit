@@ -285,6 +285,15 @@ version.
   relied on `X-Frame-Options`/`Referrer-Policy` or the old `default-src 'self'`
   CSP on JSON responses, note the new API policy. See
   [docs/security.md](docs/security.md).
+- **Breaking (minimum Go):** the framework now requires **Go 1.26** (`go.mod`
+  `go 1.26.0`), raised by `golang.org/x/crypto` v0.56.0
+  ([#294](https://github.com/gombit-dev/gombit/pull/294)). Scaffolded apps
+  (`gombit new`) now pin `go 1.26.0`, and the badges/prerequisites in the README,
+  installation guide, and tutorial move to Go 1.26+. Migration URL generation
+  gained a fix required by the newer toolchain: an in-memory SQLite DSN
+  (`:memory:`) now maps to Atlas's canonical `sqlite://file?mode=memory&…` dev
+  URL instead of `sqlite://:memory:?…`, whose empty-host `:memory:` authority
+  `net/url` (and therefore Atlas) rejects as an invalid port on Go 1.26+.
 - **Breaking (probe contract):** `GET /readyz` now reflects real readiness
   (HOST-2, [#283](https://github.com/gombit-dev/gombit/issues/283)). Its success
   body is `{"data":{"status":"ready"}}` — `data.status` changed from `"ok"` to

@@ -28,7 +28,7 @@ func main() {
 	concurrency := flag.String("concurrency", "", "comma-separated concurrency levels, e.g. '1,10,100'")
 	trials := flag.Int("trials", 0, "number of trials per concurrency level")
 	frameworkVersions := flag.String("framework-versions", "", "comma-separated framework=version pairs, e.g. 'gombit=v0.1.0,gin-gorm=v1.11.0'")
-	runtimeVersions := flag.String("runtime-versions", "", "comma-separated runtime=version pairs, e.g. 'go=1.25.7,node=24'")
+	runtimeVersions := flag.String("runtime-versions", "", "comma-separated runtime=version pairs, e.g. 'go=1.26.0,node=24'")
 	flag.Parse()
 
 	concurrencyLevels, err := parseIntList(*concurrency)

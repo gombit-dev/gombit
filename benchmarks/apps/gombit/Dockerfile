@@ -20,7 +20,7 @@
 # that would fail on alpine).
 ARG ATLAS_IMAGE=arigaio/atlas:0.36.0-alpine
 
-FROM golang:1.25.7-alpine AS build
+FROM golang:1.26.0-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download

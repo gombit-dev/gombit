@@ -1,6 +1,6 @@
 module github.com/gombit-dev/gombit
 
-go 1.25.7
+go 1.26.0
 
 require (
 	ariga.io/atlas-provider-gorm v0.6.1
@@ -16,7 +16,7 @@ require (
 	github.com/shopspring/decimal v1.4.0
 	github.com/spf13/cobra v1.10.2
 	go.uber.org/zap v1.28.0
-	golang.org/x/crypto v0.55.0
+	golang.org/x/crypto v0.56.0
 	golang.org/x/net v0.58.0
 	golang.org/x/term v0.45.0
 	gorm.io/driver/mysql v1.6.0

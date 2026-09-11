@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/gombit-dev/gombit/actions/workflows/ci.yml/badge.svg)](https://github.com/gombit-dev/gombit/actions/workflows/ci.yml)
 [![Release](https://github.com/gombit-dev/gombit/actions/workflows/release.yml/badge.svg)](https://github.com/gombit-dev/gombit/actions/workflows/release.yml)
-[![Go 1.25+](https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go)](https://go.dev/dl/)
+[![Go 1.26+](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go)](https://go.dev/dl/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Go Reference](https://pkg.go.dev/badge/github.com/gombit-dev/gombit.svg)](https://pkg.go.dev/github.com/gombit-dev/gombit)
 
@@ -58,7 +58,7 @@ tested and first-class.
 
 ## Quick start
 
-**Prerequisites:** Go 1.25+, Node 22+, and a C toolchain (SQLite is cgo-only).
+**Prerequisites:** Go 1.26+, Node 22+, and a C toolchain (SQLite is cgo-only).
 Migrations also need [Atlas](https://atlasgo.io/):
 `curl -sSf https://atlasgo.sh | sh -s -- --community`. Full details in
 [installation.md](docs/installation.md).

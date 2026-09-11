@@ -11,7 +11,7 @@ change reviewed, and the bar a change has to clear.
 
 | Tool | Version | Needed for |
 | --- | --- | --- |
-| Go | 1.25+ (`go.mod` is authoritative) | everything |
+| Go | 1.26+ (`go.mod` is authoritative) | everything |
 | A C toolchain | gcc/clang, or Xcode CLT on macOS | SQLite (`mattn/go-sqlite3` is cgo-only) |
 | Node.js | 22+ | frontend, admin UI, TypeScript client generation |
 | Atlas | Community Edition, pinned by CI | `gombit db makemigrations` / `migrate` and the migration tests |
