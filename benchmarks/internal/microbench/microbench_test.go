@@ -82,6 +82,90 @@ func TestParseBenchOutputUnsuffixedHyphenatedNames(t *testing.T) {
 	}
 }
 
+// ablationOutput returns `go test -bench` text for the in-package ablation
+// benchmark (framework/ablation_bench_test.go): BenchmarkAblation/<stack>/<scenario>,
+// one line per (stack, scenario), with the -<GOMAXPROCS> suffix Go appends.
+func ablationOutput(stacks []string) string {
+	var b strings.Builder
+	b.WriteString("goos: linux\npkg: github.com/gombit-dev/gombit/framework\n")
+	for _, stack := range stacks {
+		for _, s := range Scenarios {
+			b.WriteString("BenchmarkAblation/" + stack + "/" + s + "-16   100   1500 ns/op   256 B/op   4 allocs/op\n")
+		}
+	}
+	b.WriteString("PASS\nok\tgithub.com/gombit-dev/gombit/framework\t3.2s\n")
+	return b.String()
+}
+
+// The ablation benchmark reports many stacks from one process; each row's stack
+// is parsed out of the benchmark name (BenchmarkAblation/<stack>/<scenario>),
+// not taken from the -stack argument the way the framework-tax rows are.
+func TestParseBenchOutputAblationMultipleStacks(t *testing.T) {
+	stacks := []string{"gombit-ablation/baseline", "gombit-ablation/recovery", "gombit-ablation/full-app"}
+	rows, err := ParseBenchOutput("gombit-ablation", strings.NewReader(ablationOutput(stacks)))
+	if err != nil {
+		t.Fatalf("ParseBenchOutput: %v", err)
+	}
+	if len(rows) != len(stacks)*len(Scenarios) {
+		t.Fatalf("rows = %d, want %d (%d stacks × %d scenarios)", len(rows), len(stacks)*len(Scenarios), len(stacks), len(Scenarios))
+	}
+	byStack := map[string]map[string]bool{}
+	for _, r := range rows {
+		if r.SchemaVersion != SchemaVersion {
+			t.Errorf("row %+v: schema version = %d, want %d", r, r.SchemaVersion, SchemaVersion)
+		}
+		if byStack[r.Stack] == nil {
+			byStack[r.Stack] = map[string]bool{}
+		}
+		byStack[r.Stack][r.Scenario] = true
+	}
+	for _, want := range stacks {
+		if got := byStack[want]; len(got) != len(Scenarios) {
+			t.Errorf("stack %q covered %d scenarios, want %d (%v)", want, len(got), len(Scenarios), got)
+		}
+	}
+	// The -stack argument ("gombit-ablation") must not leak in as a row stack;
+	// every stack is the parsed "gombit-ablation/<row>".
+	if _, leaked := byStack["gombit-ablation"]; leaked {
+		t.Error(`row stack "gombit-ablation" leaked from the -stack argument; must be parsed from the name`)
+	}
+}
+
+// A per-stack completeness check: if any ablation stack is missing a scenario
+// (e.g. a panic mid-row), the whole run is rejected rather than published
+// partial — the same guarantee the framework-tax path has.
+func TestParseBenchOutputAblationRejectsIncompleteStack(t *testing.T) {
+	full := ablationOutput([]string{"gombit-ablation/baseline"})
+	// Drop the last scenario line from an otherwise-complete second stack.
+	partial := full + "BenchmarkAblation/gombit-ablation/recovery/plaintext-16   100   1500 ns/op   256 B/op   4 allocs/op\n"
+	if _, err := ParseBenchOutput("gombit-ablation", strings.NewReader(partial)); err == nil {
+		t.Error("an ablation stack missing scenarios must be rejected, not published partial")
+	}
+}
+
+// Lines that are neither BenchmarkFrameworkTax/… nor BenchmarkAblation/<stack>/<scenario>
+// are ignored: the parallel variant (BenchmarkAblationSolo/…, which does not
+// match the "BenchmarkAblation/" prefix), unrelated benchmarks, and the
+// top-level BenchmarkAblation line Go emits no metrics for.
+func TestParseBenchOutputAblationIgnoresUnrelatedLines(t *testing.T) {
+	out := ablationOutput([]string{"gombit-ablation/baseline"}) +
+		"BenchmarkAblationSolo/gombit-ablation/baseline/plaintext-16   100   1500 ns/op   256 B/op   4 allocs/op\n" +
+		"BenchmarkSomethingElse/foo-16   100   10 ns/op   0 B/op   0 allocs/op\n" +
+		"BenchmarkAblation-16   1   0 ns/op   0 B/op   0 allocs/op\n"
+	rows, err := ParseBenchOutput("gombit-ablation", strings.NewReader(out))
+	if err != nil {
+		t.Fatalf("ParseBenchOutput: %v", err)
+	}
+	if len(rows) != len(Scenarios) {
+		t.Fatalf("rows = %d, want %d — only the one real ablation stack should be parsed", len(rows), len(Scenarios))
+	}
+	for _, r := range rows {
+		if r.Stack != "gombit-ablation/baseline" {
+			t.Errorf("unexpected stack %q parsed from unrelated lines", r.Stack)
+		}
+	}
+}
+
 func TestStripProcs(t *testing.T) {
 	// A trailing -<digits> is dropped (the GOMAXPROCS suffix); a hyphen followed
 	// by non-digits is part of the scenario name and kept.

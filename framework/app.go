@@ -254,19 +254,6 @@ func WithRouter(router *gin.Engine) Option {
 	}
 }
 
-// WithAPI sets the Huma API instance used for route registration. Use this when
-// you've built a custom router and want to attach a Huma API to it for testing
-// or ablation benchmarking; normal applications should not use this.
-func WithAPI(api huma.API) Option {
-	return func(app *App) error {
-		if api == nil {
-			return errors.New("framework: nil api")
-		}
-		app.api = api
-		return nil
-	}
-}
-
 // WithShutdownDrainDelay sets a delay between the start of graceful shutdown —
 // when /readyz begins returning 503 (HOST-2 / ADR-015) — and the moment the
 // HTTP listener stops accepting connections. During the delay the server keeps
@@ -725,33 +712,6 @@ func configureTrustedProxies(engine *gin.Engine, proxies []string) error {
 		return fmt.Errorf("framework: trusted proxies: %w", err)
 	}
 	return nil
-}
-
-// MiddlewareLayer is one named entry of the runtime middleware stack: the
-// stable layer name and the handler App installs for it. It is the element
-// type returned by RuntimeMiddlewareLayers.
-type MiddlewareLayer struct {
-	Name    string
-	Handler gin.HandlerFunc
-}
-
-// RuntimeMiddlewareLayers returns the ordered middleware layers App installs
-// for cfg — the exact set, order, and conditionals of runtimeMiddlewareStack
-// (including the CSRF layer, which is present only when cfg selects cookie
-// auth). It exists so out-of-package diagnostic tooling — specifically the
-// per-layer ablation benchmark in benchmarks/micro/gombit — can stack
-// prefixes of the genuine runtime stack instead of maintaining a private copy
-// of it that silently drifts when a layer is added, removed, or reordered
-// here. Each call builds fresh handlers over a private metrics accumulator;
-// normal applications should not use this — they get the stack automatically
-// from framework.New.
-func RuntimeMiddlewareLayers(cfg config.Config, csrfExemptPaths, rawBodyPaths []string) []MiddlewareLayer {
-	stack := runtimeMiddlewareStack(cfg, newHTTPMetrics(), csrfExemptPaths, rawBodyPaths)
-	layers := make([]MiddlewareLayer, len(stack))
-	for i, mw := range stack {
-		layers[i] = MiddlewareLayer{Name: mw.name, Handler: mw.handler}
-	}
-	return layers
 }
 
 func runtimeMiddlewareStack(cfg config.Config, metrics *httpMetrics, csrfExemptPaths, rawBodyPaths []string) []namedMiddleware {

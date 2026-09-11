@@ -74,6 +74,61 @@ obvious here. It is a **diagnostic**, not part of the published README snapshot:
 the numbers are host- and scheduler-sensitive, so read them as a scaling *shape*
 on your own machine, not as an absolute to compare across hosts.
 
+### Per-layer ablation (issue #265 / PERF-7)
+
+The framework-tax matrix reports four rows (net/http → Gin → Huma → Gombit) but
+nothing in between, so a regression or a win *inside* the Gombit runtime cannot
+be attributed to a layer. `BenchmarkAblation` (in
+[`framework/ablation_bench_test.go`](../../framework/ablation_bench_test.go),
+in-package because the middleware constructors are unexported) fills that gap.
+It builds the runtime stack one middleware at a time and reports a ladder of
+stacks under `gombit-ablation/<row>` in `microbench.json`:
+
+```
+baseline → recovery → request_context → metrics → security_headers → xss → request_timeout → full-app
+```
+
+- **`baseline`** is bare Huma+Gin with **no** Gombit middleware, built with
+  `contract.HumaConfigFor` — deliberately *not* `huma.DefaultConfig` (the
+  `benchmarks/micro/huma` matrix row uses that, and it keeps a schema-link
+  transformer Gombit disables, costing ≈3 allocs Gombit does not). Using the
+  same Huma config as the layers makes `recovery`'s delta a like-for-like
+  measurement rather than a mix of middleware cost and config difference.
+- Each middle row adds exactly one layer of `runtimeMiddlewareStack`, in install
+  order, for the production config (so CSRF — cookie-mode only — is absent).
+- **`full-app`** is a real `framework.App`. `TestAblationFullAppMatchesRuntimeStack`
+  asserts its allocs/op equals the last layer's, so the reconstructed ladder is
+  proven to match the genuine application and a middleware added to
+  `runtimeMiddlewareStack` cannot silently escape measurement.
+
+**Read a layer's cost as the delta between its row and the row immediately
+above it.** The rows are cumulative, so the allocs/op the ablation attributes to
+`security_headers`, for example, is `gombit-ablation/security_headers` minus
+`gombit-ablation/metrics` (the row before it). The total framework tax over bare
+Huma+Gin is `full-app` minus `baseline`.
+
+```sh
+make benchmark-micro-ablation   # persists the gombit-ablation/* stacks
+# or, without persisting:
+go test ./framework -run='^$' -bench='^BenchmarkAblation$' -benchmem -count=10
+```
+
+Two harness facts are load-bearing when reading these deltas:
+
+- **`httptest.NewRecorder` contributes 3 allocs/op to every row.** It is a
+  constant, so it cancels out of any delta between two rows — never attribute it
+  to a layer. It does inflate each row's absolute allocs/op above what a real
+  network server would show.
+- **`Header.Clone` is *not* a harness artifact.** `net/http` performs the same
+  clone on `WriteHeader`, so a layer that pushes the response past a header-count
+  threshold (Go's 8-slot swiss-map group) pays real map-growth allocations that a
+  production server pays too. Header-count effects seen in the ladder are genuine
+  framework cost, not measurement noise. (This is exactly the effect PERF-9 /
+  #267 tuned in `security_headers`.)
+
+`BenchmarkAblationSolo` is the parallel-scaling variant of the same ladder (see
+Cross-core scaling above); its rows are not persisted.
+
 ### Canonical protocol vs. a particular snapshot
 
 The sweep above is the **canonical protocol**: the parameters a run must use to

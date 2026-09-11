@@ -108,25 +108,24 @@ benchmark-micro:
 	done'
 
 ## benchmark-micro-ablation: run the Gombit per-layer middleware ablation
-## benchmark (benchmarks/micro/gombit/ablation_bench_test.go) — progressively
-## stacking the runtime middleware layers (recovery -> request_context ->
-## metrics -> security_headers -> xss -> request_timeout for the production
-## config; the CSRF layer is included only under cookie auth) — and merge its
-## rows into OUT_DIR/microbench.json under the "gombit-ablation/<layer>"
-## stacks. The layer set comes straight from the real runtime stack
-## (framework.RuntimeMiddlewareLayers), so every row measures a layer that
-## actually runs. This is a diagnostic that isolates each layer's incremental
-## ns/op/B/op/allocs/op cost, not part of the published framework-tax ladder
-## (which stays net/http -> gin -> huma -> gombit); run it standalone to see
-## where in Gombit's stack the framework-tax delta actually comes from.
+## benchmark (framework/ablation_bench_test.go, in-package so it can build the
+## unexported runtime stack one middleware at a time) and merge its rows into
+## OUT_DIR/microbench.json under the "gombit-ablation/<row>" stacks. The ladder
+## is baseline (bare Huma+Gin) -> recovery -> request_context -> metrics ->
+## security_headers -> xss -> request_timeout (production config; CSRF is
+## cookie-mode only) -> full-app (a real framework.App). Each layer's
+## incremental ns/op/B/op/allocs/op is the delta between consecutive rows; see
+## benchmarks/docs/methodology.md. This is a diagnostic, not part of the
+## published framework-tax ladder (which stays net/http -> gin -> huma ->
+## gombit); run it standalone to see where the framework-tax delta comes from.
 ##
 ##   make benchmark-micro-ablation
-##   go test ./benchmarks/micro/gombit -bench='^BenchmarkAblation$' -benchmem -count=10   # without persisting
+##   go test ./framework -run='^$' -bench='^BenchmarkAblation$' -benchmem -count=10   # without persisting
 benchmark-micro-ablation:
 	@mkdir -p "$(OUT_DIR)"
 	bash -c 'set -euo pipefail; \
 		echo "benchmark-micro-ablation: gombit"; \
-		out="$$(go test ./benchmarks/micro/gombit -bench=^BenchmarkAblation$$ -benchmem -run="^$$" -count=$(MICRO_COUNT))" \
+		out="$$(go test ./framework -bench=^BenchmarkAblation$$ -benchmem -run="^$$" -count=$(MICRO_COUNT))" \
 			|| { echo "$$out" >&2; echo "benchmark-micro-ablation: failed" >&2; exit 1; }; \
 		printf "%s\n" "$$out" | go run ./benchmarks/scripts/microbench -stack gombit-ablation -out "$(OUT_DIR)/microbench.json"'
 
