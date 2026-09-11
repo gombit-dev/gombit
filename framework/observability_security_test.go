@@ -358,6 +358,31 @@ func TestDisabledDocsPathGetsAPIPolicy(t *testing.T) {
 	}
 }
 
+// TestEnabledDocsUnknownPathGetsAPIPolicy is the second adversarial case (issue
+// #267 review): Huma registers the docs UI at exactly /docs, not the /docs/
+// subtree, so even with docs enabled a request like /docs/not-a-route is served
+// by no handler (404) and must get the strict API policy — the classification
+// follows the registered route, not a broad URL prefix. Only the exact /docs
+// document is HTML (TestBrowserResponseKindsCarryFullPolicy covers that).
+func TestEnabledDocsUnknownPathGetsAPIPolicy(t *testing.T) {
+	app := newTestApp(t) // test env: /docs enabled
+
+	rec := httptest.NewRecorder()
+	app.Router().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/docs/not-a-route", nil))
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("GET /docs/not-a-route: status = %d, want %d (no handler under the docs subtree)", rec.Code, http.StatusNotFound)
+	}
+	if got := rec.Header().Get("Content-Security-Policy"); got != "default-src 'none'; frame-ancestors 'none'" {
+		t.Errorf("GET /docs/not-a-route CSP = %q, want the API policy (unknown path is not the /docs document)", got)
+	}
+	for _, browserOnly := range []string{"Referrer-Policy", "X-Frame-Options"} {
+		if got := rec.Header().Get(browserOnly); got != "" {
+			t.Errorf("GET /docs/not-a-route %s = %q, want empty — an unknown /docs descendant is not an HTML response", browserOnly, got)
+		}
+	}
+}
+
 // TestSecurityHeaderSharedValueContract locks the invariant behind the
 // allocation optimization in securityHeadersMiddleware: the header values are
 // shared, read-only package-level slices assigned straight into each

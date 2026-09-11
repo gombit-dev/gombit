@@ -19,11 +19,13 @@ so they get different policies (issue
 ¹ `max-age=315360000; includeSubDomains`, set only when
 `Environment == production`.
 
-² Only when docs are enabled (`API.DocsEnabled`, off by default in production).
-The `/docs` column applies to the response the docs handler actually serves; the
-classification is gated on `DocsEnabled`, so with docs disabled there is no
-`/docs` handler and a `/docs` request is an ordinary not-found **API** response
-that gets the API policy, not the browser headers.
+² Only the **exact** `/docs` route, and only when docs are enabled
+(`API.DocsEnabled`, off by default in production). Huma registers the docs UI at
+that one path, not the `/docs/` subtree, so an unknown descendant like
+`/docs/not-a-route` — a 404 served by no handler — is an ordinary **API**
+response and gets the API policy, as does any `/docs` request when docs are
+disabled. Classification follows the route that is actually served, never a URL
+prefix.
 
 The **SPA policy** (embedded frontend `index.html` and the admin SPA) is:
 

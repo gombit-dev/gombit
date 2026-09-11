@@ -163,14 +163,15 @@ func securityHeadersMiddleware(includeHSTS, docsEnabled bool) gin.HandlerFunc {
 	}
 }
 
-// isDocsPath reports whether urlPath is Huma's interactive docs UI. Docs is an
-// HTML document served by Huma (contract.DocsPath, root-mounted), so — when it
-// is enabled — its response kind is decided here by path rather than by an
-// override in a framework handler. The caller gates this on docsEnabled: a
-// /docs path with docs disabled has no docs handler behind it and is not an
-// HTML response.
+// isDocsPath reports whether urlPath is Huma's interactive docs UI. Huma
+// registers exactly one route, contract.DocsPath ("/docs") — not the "/docs/"
+// subtree — so only that exact path is an HTML document. A descendant like
+// /docs/not-a-route is served by no handler (404) and is an ordinary API
+// response, not HTML; matching the whole prefix would hand those 404s the
+// browser policy. The caller additionally gates this on docsEnabled: with docs
+// disabled the route is not registered at all.
 func isDocsPath(urlPath string) bool {
-	return urlPath == contract.DocsPath || strings.HasPrefix(urlPath, contract.DocsPath+"/")
+	return urlPath == contract.DocsPath
 }
 
 // httpMetrics accumulates request metrics without locking the request path.
