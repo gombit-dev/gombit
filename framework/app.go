@@ -727,6 +727,33 @@ func configureTrustedProxies(engine *gin.Engine, proxies []string) error {
 	return nil
 }
 
+// MiddlewareLayer is one named entry of the runtime middleware stack: the
+// stable layer name and the handler App installs for it. It is the element
+// type returned by RuntimeMiddlewareLayers.
+type MiddlewareLayer struct {
+	Name    string
+	Handler gin.HandlerFunc
+}
+
+// RuntimeMiddlewareLayers returns the ordered middleware layers App installs
+// for cfg — the exact set, order, and conditionals of runtimeMiddlewareStack
+// (including the CSRF layer, which is present only when cfg selects cookie
+// auth). It exists so out-of-package diagnostic tooling — specifically the
+// per-layer ablation benchmark in benchmarks/micro/gombit — can stack
+// prefixes of the genuine runtime stack instead of maintaining a private copy
+// of it that silently drifts when a layer is added, removed, or reordered
+// here. Each call builds fresh handlers over a private metrics accumulator;
+// normal applications should not use this — they get the stack automatically
+// from framework.New.
+func RuntimeMiddlewareLayers(cfg config.Config, csrfExemptPaths, rawBodyPaths []string) []MiddlewareLayer {
+	stack := runtimeMiddlewareStack(cfg, newHTTPMetrics(), csrfExemptPaths, rawBodyPaths)
+	layers := make([]MiddlewareLayer, len(stack))
+	for i, mw := range stack {
+		layers[i] = MiddlewareLayer{Name: mw.name, Handler: mw.handler}
+	}
+	return layers
+}
+
 func runtimeMiddlewareStack(cfg config.Config, metrics *httpMetrics, csrfExemptPaths, rawBodyPaths []string) []namedMiddleware {
 	stack := []namedMiddleware{
 		{name: "recovery", handler: gin.Recovery()},

@@ -18,11 +18,11 @@
 package gombit
 
 import (
+	"fmt"
 	"net/http"
 
 	"github.com/danielgtaylor/huma/v2/adapters/humagin"
 	"github.com/gin-gonic/gin"
-	"github.com/gombit-dev/gombit/auth"
 	"github.com/gombit-dev/gombit/benchmarks/micro/scenario"
 	"github.com/gombit-dev/gombit/config"
 	"github.com/gombit-dev/gombit/contract"
@@ -43,19 +43,45 @@ func NewApp() *framework.App {
 	return app
 }
 
-// NewAppWithAblation returns a framework.App configured with a progressively
-// stacked subset of middleware layers, allowing per-layer ablation benchmarking.
-// Layers must be a subset of the full middleware stack (recovery, request_context,
-// metrics, security_headers, xss, csrf, request_timeout) in that order.
-// This function replicates framework.New's initialization but allows selective
-// middleware enabling/disabling by building only the specified layers.
-func NewAppWithAblation(layers []string) *framework.App {
-	cfg := config.DefaultFor(config.EnvironmentProduction)
+// ablationConfig is the config the ablation benchmark runs under: the same
+// production defaults NewApp uses, so the max-ablation stack is measuring the
+// production runtime stack, not a differently-configured one. The set of
+// layers a config actually installs — see framework.RuntimeMiddlewareLayers —
+// depends on the config (CSRF, for instance, is installed only under cookie
+// auth), so the ablation must ablate whatever THIS config resolves to rather
+// than a hard-coded wish list.
+func ablationConfig() config.Config {
+	return config.DefaultFor(config.EnvironmentProduction)
+}
 
-	// Build a custom router with only the requested middleware layers, without
-	// creating a full framework.App first. This avoids initializing the full
-	// middleware stack only to discard it.
-	router := buildCustomRouter(cfg, layers)
+// ablationMiddlewareLayers returns the real runtime middleware layers for the
+// ablation config, in install order, straight from the framework. The
+// benchmark ablates prefixes of THIS slice, so the layers, their order, and
+// their conditionals always track framework.runtimeMiddlewareStack: add,
+// remove, or reorder a layer there and the ablation follows with no edit
+// here. Because these are the layers actually installed for the config, every
+// row the benchmark emits measures a layer that genuinely runs — there is no
+// phantom row for a layer the config leaves out.
+func ablationMiddlewareLayers() []framework.MiddlewareLayer {
+	return framework.RuntimeMiddlewareLayers(ablationConfig(), nil, nil)
+}
+
+// NewAppWithAblation returns a framework.App whose router carries only the
+// first n layers of the real runtime middleware stack (see
+// ablationMiddlewareLayers), progressively stacked, for per-layer ablation
+// benchmarking. n ranges over 0..len(ablationMiddlewareLayers()); n equal to
+// the full length reconstructs the production stack.
+func NewAppWithAblation(n int) *framework.App {
+	cfg := ablationConfig()
+	layers := ablationMiddlewareLayers()
+	if n < 0 || n > len(layers) {
+		panic(fmt.Sprintf("benchmarks/micro/gombit: ablation prefix %d out of range [0,%d]", n, len(layers)))
+	}
+
+	// Build a custom router carrying only the requested prefix of the real
+	// stack, without creating a full framework.App first — that would install
+	// the whole stack only to discard it.
+	router := buildCustomRouter(layers[:n])
 
 	// Install the contract (sets up the global huma.NewError replacement) if
 	// not already done. This is idempotent: contract.Install only installs once
@@ -85,15 +111,11 @@ func NewAppWithAblation(layers []string) *framework.App {
 	return app
 }
 
-func buildCustomRouter(cfg config.Config, layers []string) *gin.Engine {
+func buildCustomRouter(layers []framework.MiddlewareLayer) *gin.Engine {
 	router := gin.New()
 
-	// Build middleware stack based on requested layers
-	stack := buildAblationMiddlewareStack(cfg, layers)
-
-	// Apply middleware
-	for _, mw := range stack {
-		router.Use(mw.handler)
+	for _, layer := range layers {
+		router.Use(layer.Handler)
 	}
 
 	// Add operational probes (same as newRouter in framework/app.go)
@@ -113,70 +135,4 @@ func buildCustomRouter(cfg config.Config, layers []string) *gin.Engine {
 	})
 
 	return router
-}
-
-// namedMiddleware mirrors the one in framework/app.go for ablation building
-type namedMiddleware struct {
-	name    string
-	handler gin.HandlerFunc
-}
-
-// buildAblationMiddlewareStack builds a middleware stack containing only the
-// requested layers, progressively stacked. This allows benchmarking the cost
-// of each layer by running with fewer layers and measuring the delta.
-// Layers must be valid names from the full middleware stack; unknown layers
-// are silently skipped.
-func buildAblationMiddlewareStack(cfg config.Config, layers []string) []namedMiddleware {
-	layerSet := make(map[string]bool)
-	for _, layer := range layers {
-		layerSet[layer] = true
-	}
-
-	var stack []namedMiddleware
-
-	// Build middleware layers in the same order as runtimeMiddlewareStack
-	// in framework/app.go, but only include requested layers.
-
-	if layerSet["recovery"] {
-		stack = append(stack, namedMiddleware{name: "recovery", handler: gin.Recovery()})
-	}
-
-	if layerSet["request_context"] {
-		stack = append(stack, namedMiddleware{name: "request_context", handler: framework.RequestContextMiddleware()})
-	}
-
-	if layerSet["metrics"] {
-		// Metrics middleware needs httpMetrics; create a simple one for this router
-		// Note: we can't use the global metrics from framework since we're building
-		// a standalone router. Each ablation benchmark gets its own metrics instance.
-		metrics := framework.NewHTTPMetrics()
-		stack = append(stack, namedMiddleware{name: "metrics", handler: framework.MetricsMiddleware(metrics)})
-	}
-
-	if layerSet["security_headers"] {
-		isProd := cfg.Environment == config.EnvironmentProduction
-		stack = append(stack, namedMiddleware{
-			name:    "security_headers",
-			handler: framework.SecurityHeadersMiddleware(isProd),
-		})
-	}
-
-	if layerSet["xss"] {
-		stack = append(stack, namedMiddleware{name: "xss", handler: framework.XSSMiddleware()})
-	}
-
-	if layerSet["csrf"] {
-		// CSRF is only enabled when auth is enabled and in cookie mode
-		if cfg.Auth.Enabled() && cfg.Auth.EffectiveMode() == config.AuthModeCookie {
-			// For ablation, we skip exempt paths since this is a benchmark.
-			// auth.CSRFMiddleware is already exported for this use case.
-			stack = append(stack, namedMiddleware{name: "csrf", handler: auth.CSRFMiddleware(cfg)})
-		}
-	}
-
-	if layerSet["request_timeout"] {
-		stack = append(stack, namedMiddleware{name: "request_timeout", handler: framework.RequestTimeoutMiddleware(cfg.HTTP.RequestTimeout)})
-	}
-
-	return stack
 }

@@ -26,14 +26,6 @@ const traceIDGinKey = "trace_id"
 
 var traceparentPattern = regexp.MustCompile(`^[0-9a-f]{2}-([0-9a-f]{32})-[0-9a-f]{16}-[0-9a-f]{2}$`)
 
-// RequestTimeoutMiddleware enforces a per-request deadline. When timeout is
-// positive and the request already carries no deadline (or a later one), it
-// wraps the context with context.WithTimeout. When timeout is zero or
-// negative, the middleware is a pass-through. See requestTimeoutMiddleware.
-func RequestTimeoutMiddleware(timeout time.Duration) gin.HandlerFunc {
-	return requestTimeoutMiddleware(timeout)
-}
-
 func requestTimeoutMiddleware(timeout time.Duration) gin.HandlerFunc {
 	if timeout <= 0 {
 		return func(c *gin.Context) {
@@ -113,13 +105,6 @@ var (
 	frameOptionsValue       = []string{"DENY"}
 )
 
-// SecurityHeadersMiddleware applies security headers (CSP, HSTS, X-Frame-Options,
-// etc.) to every response. When includeHSTS is true, the Strict-Transport-Security
-// header is added (typical for production). See securityHeadersMiddleware.
-func SecurityHeadersMiddleware(includeHSTS bool) gin.HandlerFunc {
-	return securityHeadersMiddleware(includeHSTS)
-}
-
 func securityHeadersMiddleware(includeHSTS bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		header := c.Writer.Header()
@@ -193,24 +178,11 @@ func normalizeMetricsMethod(method string) string {
 	return metricsMethodOther
 }
 
-// NewHTTPMetrics creates a new HTTP metrics accumulator. The zero value is ready
-// to use; this constructor exists for symmetry with other public constructors.
-// See newHTTPMetrics.
-func NewHTTPMetrics() *httpMetrics {
-	return newHTTPMetrics()
-}
-
 func newHTTPMetrics() *httpMetrics {
 	// The zero value is ready: atomic.Int64 starts at 0 and sync.Map needs no
 	// initialization. Counters are created lazily by observe on first sight of
 	// a series.
 	return &httpMetrics{}
-}
-
-// MetricsMiddleware wraps the request metrics accumulator to observe every request's
-// method, route, status code, and latency. See metricsMiddleware.
-func MetricsMiddleware(metrics *httpMetrics) gin.HandlerFunc {
-	return metricsMiddleware(metrics)
 }
 
 func metricsMiddleware(metrics *httpMetrics) gin.HandlerFunc {

@@ -43,12 +43,6 @@ var xssSkipElementContent = map[string]struct{}{
 // unchanged; complete tags still go through stripHTML.
 var completeHTMLTag = regexp.MustCompile(`(?i)<\s*/?[a-z][a-z0-9:-]*(?:\s[^>]*)?\s*/?>`)
 
-// XSSMiddleware sanitizes HTML tags from request input before handlers run.
-// See xssMiddleware.
-func XSSMiddleware(exemptPaths ...string) gin.HandlerFunc {
-	return xssMiddleware(exemptPaths...)
-}
-
 // xssMiddleware sanitizes HTML tags from request input before handlers run.
 // JSON string values (POST/PUT/PATCH) and GET query values are stripped to
 // plain text via golang.org/x/net/html. The exact key "password" is left

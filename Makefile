@@ -109,21 +109,24 @@ benchmark-micro:
 
 ## benchmark-micro-ablation: run the Gombit per-layer middleware ablation
 ## benchmark (benchmarks/micro/gombit/ablation_bench_test.go) — progressively
-## stacking recovery -> request_context -> metrics -> security_headers -> xss ->
-## csrf -> request_timeout — and merge its rows into OUT_DIR/microbench.json
-## under the "gombit-ablation/<layer>" stacks. This is a diagnostic that
-## isolates each middleware layer's incremental ns/op/B/op/allocs/op cost, not
-## part of the published framework-tax ladder (which stays net/http -> gin ->
-## huma -> gombit); run it standalone to see where in Gombit's stack the
-## framework-tax delta actually comes from.
+## stacking the runtime middleware layers (recovery -> request_context ->
+## metrics -> security_headers -> xss -> request_timeout for the production
+## config; the CSRF layer is included only under cookie auth) — and merge its
+## rows into OUT_DIR/microbench.json under the "gombit-ablation/<layer>"
+## stacks. The layer set comes straight from the real runtime stack
+## (framework.RuntimeMiddlewareLayers), so every row measures a layer that
+## actually runs. This is a diagnostic that isolates each layer's incremental
+## ns/op/B/op/allocs/op cost, not part of the published framework-tax ladder
+## (which stays net/http -> gin -> huma -> gombit); run it standalone to see
+## where in Gombit's stack the framework-tax delta actually comes from.
 ##
 ##   make benchmark-micro-ablation
-##   go test ./benchmarks/micro/gombit -bench=BenchmarkAblation -benchmem -count=10   # without persisting
+##   go test ./benchmarks/micro/gombit -bench='^BenchmarkAblation$' -benchmem -count=10   # without persisting
 benchmark-micro-ablation:
 	@mkdir -p "$(OUT_DIR)"
 	bash -c 'set -euo pipefail; \
 		echo "benchmark-micro-ablation: gombit"; \
-		out="$$(go test ./benchmarks/micro/gombit -bench=BenchmarkAblation -benchmem -run="^$$" -count=$(MICRO_COUNT))" \
+		out="$$(go test ./benchmarks/micro/gombit -bench=^BenchmarkAblation$$ -benchmem -run="^$$" -count=$(MICRO_COUNT))" \
 			|| { echo "$$out" >&2; echo "benchmark-micro-ablation: failed" >&2; exit 1; }; \
 		printf "%s\n" "$$out" | go run ./benchmarks/scripts/microbench -stack gombit-ablation -out "$(OUT_DIR)/microbench.json"'
 

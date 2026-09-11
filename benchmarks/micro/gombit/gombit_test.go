@@ -1,6 +1,7 @@
 package gombit
 
 import (
+	"net/http"
 	"testing"
 
 	"github.com/gombit-dev/gombit/benchmarks/micro/scenario"
@@ -34,33 +35,70 @@ func BenchmarkFrameworkTaxParallel(b *testing.B) {
 	scenario.RunParallelBenchmark(b, stack())
 }
 
-// TestAblationStackCoverageMatchesFullApp verifies that the full framework.App's
-// middleware stack is completely covered by the ablation layers. This ensures
-// that the last ablation sub-benchmark (request_timeout) exercise all
-// middleware that framework.New installs by default, so comparing it against
-// the full app's allocs/op catches middleware-stack drift.
+// coverageScenario is one of the five framework-tax request shapes, named so
+// the coverage test can report which one drifted.
+type coverageScenario struct {
+	name   string
+	method string
+	path   string
+	body   string
+}
+
+var coverageScenarios = []coverageScenario{
+	{"plaintext", http.MethodGet, "/plaintext", ""},
+	{"json", http.MethodGet, "/json", ""},
+	{"path-param", http.MethodGet, "/users/user-42", ""},
+	{"valid-post", http.MethodPost, "/users", scenario.ValidCreateUserBody},
+	{"invalid-post", http.MethodPost, "/users", scenario.InvalidCreateUserBody},
+}
+
+// allocTolerance is the per-scenario allocs/op difference the coverage test
+// permits between the full app and the max-ablation app. It is well below one
+// middleware layer's worth of allocations (each runtime layer that touches the
+// request adds several) but absorbs incidental noise from the two routers
+// being constructed by slightly different code paths (framework.newRouter vs
+// buildCustomRouter).
+const allocTolerance = 2.0
+
+// TestAblationStackCoverageMatchesFullApp asserts that the max-ablation app
+// (all real runtime layers) is allocation-equivalent to the full framework.App
+// on every scenario, and therefore that the ablation is measuring the genuine
+// runtime stack rather than a subset of it.
 //
-// The test runs both the full app and the max-ablation app through the five
-// benchmark scenarios and logs the per-scenario alloc counts for comparison.
-// If the counts diverge significantly (e.g., the full app allocates
-// substantially more than the last ablation row), it indicates a new middleware
-// layer has been added to runtimeMiddlewareStack without being included in
-// ablationLayers, or that a layer's middleware implementation has changed.
+// Both apps draw their middleware from runtimeMiddlewareStack — the full app
+// via framework.New, the ablation app via framework.RuntimeMiddlewareLayers —
+// so their per-request allocs/op must match. If a layer is added to the
+// runtime stack but the ablation seam or the router reconstruction stops
+// mirroring it (or a layer's cost silently disappears), one side allocates
+// measurably more and this test fails. That is the drift scenario.Assert alone
+// cannot catch: it checks only status codes and JSON shape, which adding or
+// removing a middleware layer does not change for these payloads.
 func TestAblationStackCoverageMatchesFullApp(t *testing.T) {
-	// Run the full app through all five scenarios
 	fullApp := NewApp()
-	fullStack := scenario.Stack{Name: "gombit-full", Handler: fullApp.Router(), Envelope: true}
+	maxAblationApp := NewAppWithAblation(len(ablationMiddlewareLayers()))
 
-	// Run the max-ablation app (all layers) through the same scenarios
-	maxAblationApp := NewAppWithAblation(ablationLayers)
-	ablationStack := scenario.Stack{Name: "gombit-ablation-full", Handler: maxAblationApp.Router(), Envelope: true}
+	// Correctness first: both stacks must still implement every scenario, or an
+	// allocs/op comparison between them is meaningless.
+	scenario.Assert(t, scenario.Stack{Name: "gombit-full", Handler: fullApp.Router(), Envelope: true})
+	scenario.Assert(t, scenario.Stack{Name: "gombit-ablation-full", Handler: maxAblationApp.Router(), Envelope: true})
 
-	// Test both to verify they work
-	scenario.Assert(t, fullStack)
-	scenario.Assert(t, ablationStack)
+	for _, sc := range coverageScenarios {
+		full := allocsPerRequest(fullApp.Router(), sc)
+		ablation := allocsPerRequest(maxAblationApp.Router(), sc)
+		if diff := full - ablation; diff < -allocTolerance || diff > allocTolerance {
+			t.Errorf("%s: full app allocs/op=%.1f, max-ablation allocs/op=%.1f (diff %.1f > tolerance %.1f) — "+
+				"the max-ablation stack no longer mirrors runtimeMiddlewareStack",
+				sc.name, full, ablation, diff, allocTolerance)
+		}
+	}
+}
 
-	// Both should pass; if they don't, the middleware stack has changed in a way
-	// that breaks the benchmark scenarios. The benchmark harness (RunBenchmark)
-	// will provide alloc counts for detailed comparison.
-	t.Logf("Full app and ablation stack both pass scenarios.Assert; middleware coverage appears OK")
+// allocsPerRequest measures the average allocations a single scenario request
+// makes through handler. The per-request request/recorder construction inside
+// scenario.Do allocates identically for both handlers, so it cancels out of
+// the full-vs-ablation comparison, leaving the middleware-attributable delta.
+func allocsPerRequest(handler http.Handler, sc coverageScenario) float64 {
+	return testing.AllocsPerRun(200, func() {
+		scenario.Do(handler, sc.method, sc.path, sc.body)
+	})
 }

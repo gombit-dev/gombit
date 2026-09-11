@@ -38,9 +38,6 @@ const csrfTokenBytes = 32
 // authenticate themselves by other means (e.g. HMAC signature verification).
 // Safe methods still bootstrap the cookie on those paths. See
 // framework.WithCSRFExemptPaths and docs/auth-cookie.md.
-//
-// This is exported for testing and ablation benchmarking; most code should use
-// framework.New which configures it automatically.
 func CSRFMiddleware(cfg config.Config, exemptPaths ...string) gin.HandlerFunc {
 	secret := []byte(cfg.Auth.JWTSecret)
 	authCfg := cfg.Auth
