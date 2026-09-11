@@ -606,7 +606,7 @@ gombit --version
 gombit:   v0.1.0
 commit:   9abb3c6ecc8c1bf93419aa43c4d4f1ae3de97a2b
 built:    2026-08-18T19:33:15Z
-go:       go1.25.7
+go:       go1.26.0
 platform: linux/amd64
 ```
 

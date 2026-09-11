@@ -72,7 +72,7 @@ req() {
 
 # base_tag APP LANG — the base image tag from the app's Dockerfile `FROM
 # <lang>:<tag>` line, with any -slim/-alpine/-fpm suffix stripped (3.12-slim ->
-# 3.12, 1.25.7-alpine -> 1.25.7).
+# 3.12, 1.26.0-alpine -> 1.26.0).
 base_tag() {
   local tag
   tag="$(sed -nE "s/^FROM ${2}:([^ ]+).*/\1/p" "benchmarks/apps/${1}/Dockerfile" | head -1)"

@@ -13,7 +13,7 @@ Install the `gombit` CLI, then verify it with `gombit doctor`.
 
 | Tool | Version | Required for |
 | --- | --- | --- |
-| [Go](https://go.dev/dl/) | 1.25+ | building the CLI and your application |
+| [Go](https://go.dev/dl/) | 1.26+ | building the CLI and your application |
 | A C toolchain | gcc/clang | **SQLite only** — see below |
 | [Node.js](https://nodejs.org/) | 22+ | `gombit dev`, the frontend, and TypeScript client generation |
 | [Atlas](https://atlasgo.io/) | Community Edition | `gombit db makemigrations` and `gombit db migrate` |
@@ -140,7 +140,7 @@ A release archive (Option 2) is stamped with build metadata:
 gombit:   v0.1.0
 commit:   9abb3c6ecc8c1bf93419aa43c4d4f1ae3de97a2b
 built:    2026-08-18T19:33:15Z
-go:       go1.25.7
+go:       go1.26.0
 platform: linux/amd64
 ```
 
@@ -157,7 +157,7 @@ gombit doctor
 
 ```text
 STATUS  CHECK       DETAIL
-ok      go          go version go1.25.7 linux/amd64
+ok      go          go version go1.26.0 linux/amd64
 ok      node        v22.13.1
 ok      config      valid (development)
 ok      database    sqlite reachable
@@ -252,7 +252,7 @@ GOMBIT_HTTP_ADDR=0.0.0.0:8080 gombit dev
 **`gombit: command not found`** — `$(go env GOPATH)/bin` is not on your `PATH`.
 See [Option 1](#option-1--go-install).
 
-**`go: module ... requires go >= 1.25`** — your Go toolchain is older than
+**`go: module ... requires go >= 1.26`** — your Go toolchain is older than
 `go.mod`. Upgrade from [go.dev/dl](https://go.dev/dl/); the version in your
 distribution's package manager is often well behind.
 

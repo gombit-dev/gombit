@@ -7,7 +7,7 @@
 // implementation replaces only its own row.
 //
 //	go run ./benchmarks/scripts/footprint \
-//	  -framework gombit -framework-version v0.1.3 -runtime go -runtime-version go1.25.7 \
+//	  -framework gombit -framework-version v0.1.3 -runtime go -runtime-version go1.26.0 \
 //	  -variant container -cold-start-ms 210,235,228 \
 //	  -idle-rss-bytes 18000000 -loaded-rss-bytes 42000000 -cpu-percent 165 \
 //	  -image-size-bytes 30000000 -out benchmarks/results/latest/footprint.json

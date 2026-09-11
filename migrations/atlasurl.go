@@ -37,6 +37,10 @@ func sqliteAtlasURL(dsn string) (string, error) {
 	if strings.HasPrefix(dsn, "file:") {
 		return sqliteFileURIToAtlas(dsn)
 	}
+	// Bare mattn/go-sqlite3 in-memory DSN (":memory:" / ":memory:?params").
+	if rest, ok := memoryDSNParams(dsn); ok {
+		return sqliteMemoryAtlasURL(rest), nil
+	}
 	return "sqlite://" + dsn, nil
 }
 
@@ -52,10 +56,45 @@ func sqliteFileURIToAtlas(dsn string) (string, error) {
 	if path == "" {
 		path = u.Path
 	}
+	// A ":memory:" target cannot be carried through as the URL authority:
+	// "sqlite://:memory:" has an empty host with a ":memory:" port, which
+	// net/url rejects as an invalid port on Go 1.26+ — and Atlas, which parses
+	// its --url with net/url too, rejects it identically. Emit Atlas's
+	// canonical, well-formed in-memory dev URL (sqlite://file?mode=memory)
+	// instead. See migrations/atlasurl_test.go and Atlas's --dev-url docs.
+	if path == ":memory:" {
+		return sqliteMemoryAtlasURL(u.RawQuery), nil
+	}
 	if u.RawQuery == "" {
 		return "sqlite://" + path, nil
 	}
 	return "sqlite://" + path + "?" + u.RawQuery, nil
+}
+
+// memoryDSNParams reports whether dsn is a bare ":memory:" DSN and returns any
+// query string after it (without the "?"). ":memory:?cache=shared" -> "cache=shared".
+func memoryDSNParams(dsn string) (params string, ok bool) {
+	const memory = ":memory:"
+	if dsn == memory {
+		return "", true
+	}
+	if rest, found := strings.CutPrefix(dsn, memory+"?"); found {
+		return rest, true
+	}
+	return "", false
+}
+
+// sqliteMemoryAtlasURL builds Atlas's canonical in-memory SQLite dev URL,
+// sqlite://file?mode=memory[&extra], from any extra query parameters carried by
+// the source DSN. mode=memory is prepended so the resulting URL is well-formed
+// (host "file", no empty-host:port authority) and understood by Atlas as an
+// in-memory database.
+func sqliteMemoryAtlasURL(extraQuery string) string {
+	query := "mode=memory"
+	if extraQuery != "" {
+		query += "&" + extraQuery
+	}
+	return "sqlite://file?" + query
 }
 
 func postgresAtlasURL(dsn string) (string, error) {
