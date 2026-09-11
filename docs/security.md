@@ -8,7 +8,7 @@ so they get different policies (issue
 
 ## Per-response-kind headers
 
-| Header | API / JSON (default) | HTML: SPA & admin | HTML: `/docs` |
+| Header | API / JSON (default) | HTML: SPA & admin | HTML: `/docs`² |
 | --- | --- | --- | --- |
 | `Content-Security-Policy` | `default-src 'none'; frame-ancestors 'none'` | SPA policy (see below) | Huma's Swagger UI policy |
 | `X-Content-Type-Options` | `nosniff` | `nosniff` | `nosniff` |
@@ -18,6 +18,12 @@ so they get different policies (issue
 
 ¹ `max-age=315360000; includeSubDomains`, set only when
 `Environment == production`.
+
+² Only when docs are enabled (`API.DocsEnabled`, off by default in production).
+The `/docs` column applies to the response the docs handler actually serves; the
+classification is gated on `DocsEnabled`, so with docs disabled there is no
+`/docs` handler and a `/docs` request is an ordinary not-found **API** response
+that gets the API policy, not the browser headers.
 
 The **SPA policy** (embedded frontend `index.html` and the admin SPA) is:
 

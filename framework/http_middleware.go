@@ -129,11 +129,15 @@ var (
 //     response with correlation IDs and Content-Type at <= 6 headers, one
 //     under the swiss-map 8-slot group boundary, so the layer allocates
 //     nothing (the map and net/http's WriteHeader Header.Clone no longer grow).
-//   - Interactive docs (/docs): the full browser policy, applied here by path
-//     because Huma owns that handler. Huma's docs renderer sets its own
-//     Content-Security-Policy (it must allow the Swagger UI assets), so it
-//     overrides the CSP set here; what this branch contributes that Huma does
-//     not is Referrer-Policy and the legacy X-Frame-Options: DENY.
+//   - Interactive docs (/docs), only when docs are enabled: the full browser
+//     policy, applied here by path because Huma owns that handler. Huma's docs
+//     renderer sets its own Content-Security-Policy (it must allow the Swagger
+//     UI assets), so it overrides the CSP set here; what this branch
+//     contributes that Huma does not is Referrer-Policy and the legacy
+//     X-Frame-Options: DENY. When docs are disabled (the production default)
+//     no /docs route exists, so a /docs request is an ordinary API/not-found
+//     response and gets the API policy — the classification follows the
+//     response that will actually be served, not the URL alone.
 //
 // HTML documents the framework serves through its own handlers — the admin SPA
 // and the embedded frontend — start from the API baseline set here and then
@@ -141,14 +145,14 @@ var (
 // and adminui.go), which is where the richer SPA CSP, Referrer-Policy, and
 // X-Frame-Options are added. X-Download-Options ("noopen") is IE8-only and set
 // nowhere: no supported browser honors it (issue #267).
-func securityHeadersMiddleware(includeHSTS bool) gin.HandlerFunc {
+func securityHeadersMiddleware(includeHSTS, docsEnabled bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		header := c.Writer.Header()
 		header["X-Content-Type-Options"] = contentTypeOptionsValue
 		if includeHSTS {
 			header["Strict-Transport-Security"] = hstsHeaderValue
 		}
-		if isDocsPath(c.Request.URL.Path) {
+		if docsEnabled && isDocsPath(c.Request.URL.Path) {
 			header["Content-Security-Policy"] = browserContentSecurityPolicyValue
 			header["Referrer-Policy"] = referrerPolicyValue
 			header["X-Frame-Options"] = frameOptionsValue
@@ -160,9 +164,11 @@ func securityHeadersMiddleware(includeHSTS bool) gin.HandlerFunc {
 }
 
 // isDocsPath reports whether urlPath is Huma's interactive docs UI. Docs is an
-// HTML document served by Huma (contract.DocsPath, root-mounted), so its
-// response kind is decided here by path rather than by an override in a
-// framework handler.
+// HTML document served by Huma (contract.DocsPath, root-mounted), so — when it
+// is enabled — its response kind is decided here by path rather than by an
+// override in a framework handler. The caller gates this on docsEnabled: a
+// /docs path with docs disabled has no docs handler behind it and is not an
+// HTML response.
 func isDocsPath(urlPath string) bool {
 	return urlPath == contract.DocsPath || strings.HasPrefix(urlPath, contract.DocsPath+"/")
 }

@@ -218,7 +218,7 @@ func TestSecurityHeadersLayerAllocatesNothing(t *testing.T) {
 		router.Use(requestContextMiddleware())
 		router.Use(metricsMiddleware(newHTTPMetrics()))
 		if withSecurity {
-			router.Use(securityHeadersMiddleware(true)) // includeHSTS: production
+			router.Use(securityHeadersMiddleware(true, false)) // includeHSTS: production; docs disabled
 		}
 		router.GET("/json", func(c *gin.Context) {
 			c.JSON(http.StatusOK, gin.H{"data": gin.H{"ok": true}})
@@ -282,7 +282,7 @@ func TestBrowserResponseKindsCarryFullPolicy(t *testing.T) {
 		// database; exercise the same composition it runs under — the security
 		// middleware plus the admin handler — directly instead.
 		router := gin.New()
-		router.Use(securityHeadersMiddleware(false))
+		router.Use(securityHeadersMiddleware(false, false))
 		mountAdminSPA(router, adminFixtureFS(), "/api/v1")
 
 		rec := httptest.NewRecorder()
@@ -321,6 +321,40 @@ func TestBrowserResponseKindsCarryFullPolicy(t *testing.T) {
 func adminFixtureFS() fstest.MapFS {
 	return fstest.MapFS{
 		"index.html": {Data: []byte("<!doctype html><div id=\"root\">admin</div>")},
+	}
+}
+
+// TestDisabledDocsPathGetsAPIPolicy is the adversarial case for the docs
+// classification (issue #267 review): with docs disabled (the production
+// default) there is no /docs handler, so a /docs request is an ordinary
+// not-found API response and must get the strict API policy — not the
+// HTML-only Referrer-Policy/X-Frame-Options it would get if classification
+// keyed on the URL prefix alone. The security-headers layer must not promote a
+// response to HTML for a route that does not exist in this configuration.
+func TestDisabledDocsPathGetsAPIPolicy(t *testing.T) {
+	previous := gin.Mode()
+	t.Cleanup(func() { gin.SetMode(previous) })
+
+	cfg := config.DefaultFor(config.EnvironmentProduction) // DocsEnabled=false
+	cfg.HTTP.Addr = "127.0.0.1:0"
+	app := newTestApp(t, WithConfig(cfg))
+
+	for _, path := range []string{"/docs", "/docs/index.html"} {
+		rec := httptest.NewRecorder()
+		app.Router().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+
+		// No docs route exists, so this is a not-found API response.
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("GET %s with docs disabled: status = %d, want %d", path, rec.Code, http.StatusNotFound)
+		}
+		if got := rec.Header().Get("Content-Security-Policy"); got != "default-src 'none'; frame-ancestors 'none'" {
+			t.Errorf("GET %s CSP = %q, want the API policy (docs disabled → not an HTML response)", path, got)
+		}
+		for _, browserOnly := range []string{"Referrer-Policy", "X-Frame-Options"} {
+			if got := rec.Header().Get(browserOnly); got != "" {
+				t.Errorf("GET %s %s = %q, want empty — a disabled-docs path is not an HTML response", path, browserOnly, got)
+			}
+		}
 	}
 }
 

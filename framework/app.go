@@ -721,7 +721,7 @@ func runtimeMiddlewareStack(cfg config.Config, metrics *httpMetrics, csrfExemptP
 		{name: "metrics", handler: metricsMiddleware(metrics)},
 		{
 			name:    "security_headers",
-			handler: securityHeadersMiddleware(cfg.Environment == config.EnvironmentProduction),
+			handler: securityHeadersMiddleware(cfg.Environment == config.EnvironmentProduction, cfg.API.DocsEnabled),
 		},
 		// Raw-body paths (webhooks) skip input sanitization so their body reaches
 		// the handler unmodified for signature verification (WithRawBodyPaths).
