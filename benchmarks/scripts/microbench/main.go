@@ -1,8 +1,12 @@
-// Command microbench parses `go test -bench=BenchmarkFrameworkTax` output for
-// one stack (read from stdin) and merges the rows into OUT/microbench.json,
-// replacing that stack as a whole (so a re-run can't leave a stale scenario).
-// `make benchmark-micro` pipes each stack's `go test` output through it, so the
-// four runs accumulate into one file the report reads.
+// Command microbench parses `go test -bench` output (read from stdin) and
+// merges the rows into OUT/microbench.json, replacing the -stack *namespace* as
+// a whole so a re-run can't leave a stale scenario — or, for the ablation, a
+// stale layer. `make benchmark-micro` pipes each framework-tax stack's output
+// through it (namespace = the leaf stack, e.g. `gin`); `make
+// benchmark-micro-ablation` pipes the whole ablation ladder through it with
+// namespace `gombit-ablation`, which owns every `gombit-ablation/<row>` stack —
+// so a layer removed from the runtime stack is dropped from the JSON on the
+// next run rather than orphaned.
 //
 //	go test ./benchmarks/micro/gin -bench=BenchmarkFrameworkTax -benchmem -run='^$' \
 //	  | go run ./benchmarks/scripts/microbench -stack gin -out benchmarks/results/latest/microbench.json
@@ -25,7 +29,7 @@ func main() {
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("microbench", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	stack := fs.String("stack", "", "the stack whose `go test -bench` output is on stdin (nethttp|gin|huma|gombit)")
+	stack := fs.String("stack", "", "the stack namespace whose `go test -bench` output is on stdin (nethttp|gin|huma|gombit, or gombit-ablation for the ablation ladder); replaced as a whole")
 	out := fs.String("out", "benchmarks/results/latest/microbench.json", "output microbench.json")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -50,7 +54,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "microbench: %v\n", err)
 		return 1
 	}
-	merged := microbench.Merge(existing, rows)
+	merged := microbench.MergeStack(existing, rows, *stack)
 
 	if err := os.MkdirAll(filepath.Dir(*out), 0o755); err != nil { //nolint:gosec // operator-supplied out dir
 		_, _ = fmt.Fprintf(stderr, "microbench: %v\n", err)

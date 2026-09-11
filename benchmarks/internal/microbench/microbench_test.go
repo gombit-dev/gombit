@@ -221,6 +221,59 @@ func TestMergeReplacesWholeStack(t *testing.T) {
 	}
 }
 
+// The ablation ladder is dynamic: it is derived from runtimeMiddlewareStack, so
+// a layer can be removed or renamed between runs. MergeStack must replace the
+// whole gombit-ablation/ namespace, or an obsolete layer's row survives forever
+// in the authoritative JSON beside the fresh ladder.
+func TestMergeStackReplacesAblationNamespace(t *testing.T) {
+	existing := []Row{
+		{Stack: "gombit-ablation/baseline", Scenario: "plaintext", NsPerOp: []float64{100}},
+		{Stack: "gombit-ablation/xss", Scenario: "plaintext", NsPerOp: []float64{200}}, // a layer since removed/renamed
+		{Stack: "gombit", Scenario: "plaintext", NsPerOp: []float64{300}},              // unrelated framework-tax stack
+	}
+	// A rerun of the ladder no longer contains an xss layer.
+	incoming := []Row{
+		{Stack: "gombit-ablation/baseline", Scenario: "plaintext", NsPerOp: []float64{111}},
+		{Stack: "gombit-ablation/request_context", Scenario: "plaintext", NsPerOp: []float64{222}},
+	}
+	merged := MergeStack(existing, incoming, "gombit-ablation")
+
+	stacks := map[string]bool{}
+	for _, r := range merged {
+		stacks[r.Stack] = true
+	}
+	if stacks["gombit-ablation/xss"] {
+		t.Error("obsolete gombit-ablation/xss survived a rerun; the namespace must be replaced as a whole")
+	}
+	if !stacks["gombit-ablation/request_context"] {
+		t.Error("fresh gombit-ablation/request_context row missing after merge")
+	}
+	if !stacks["gombit"] {
+		t.Error("unrelated framework-tax stack gombit must be preserved")
+	}
+}
+
+// A sibling namespace that shares a prefix must not be swept: clearing "gombit"
+// must leave "gombit-ablation/..." intact, and vice versa (the "/" boundary).
+func TestMergeStackDoesNotCrossNamespaceBoundary(t *testing.T) {
+	existing := []Row{
+		{Stack: "gombit", Scenario: "plaintext", NsPerOp: []float64{1}},
+		{Stack: "gombit-ablation/baseline", Scenario: "plaintext", NsPerOp: []float64{2}},
+	}
+	// Rerun only the framework-tax "gombit" leaf.
+	merged := MergeStack(existing, []Row{{Stack: "gombit", Scenario: "plaintext", NsPerOp: []float64{9}}}, "gombit")
+
+	var kept bool
+	for _, r := range merged {
+		if r.Stack == "gombit-ablation/baseline" {
+			kept = true
+		}
+	}
+	if !kept {
+		t.Error(`clearing namespace "gombit" wrongly swept "gombit-ablation/baseline" (prefix, not a namespace member)`)
+	}
+}
+
 func TestCoVNsPerOp(t *testing.T) {
 	// A tight series is low-CoV; a wide (non-stationary) one is high.
 	tight := Row{NsPerOp: []float64{1000, 1010, 990, 1005}}

@@ -261,6 +261,34 @@ func Merge(existing, incoming []Row) []Row {
 	return out
 }
 
+// MergeStack replaces a whole stack *namespace* with incoming and appends it,
+// preserving unrelated stacks. It clears every existing row whose stack is
+// exactly namespace or lies under it (namespace + "/..."), then adds incoming.
+//
+// This is what a single benchmark run persists through: a framework-tax run
+// (namespace "gin") owns exactly one stack, while an ablation run (namespace
+// "gombit-ablation") owns a whole dynamic ladder of `gombit-ablation/<row>`
+// stacks derived from the runtime middleware stack. Plain Merge only drops the
+// exact stacks present in this run's output, so a layer removed or renamed
+// between runs would leave its `gombit-ablation/<old>` row orphaned in the
+// authoritative JSON forever. Clearing the namespace makes the persisted
+// ladder track the runtime-derived one. The "/" boundary keeps sibling
+// namespaces safe: clearing "gombit" never touches "gombit-ablation/xss", and
+// clearing "gombit-ablation" never touches "gombit".
+func MergeStack(existing, incoming []Row, namespace string) []Row {
+	prefix := namespace + "/"
+	out := make([]Row, 0, len(existing)+len(incoming))
+	for _, r := range existing {
+		if r.Stack == namespace || strings.HasPrefix(r.Stack, prefix) {
+			continue
+		}
+		out = append(out, r)
+	}
+	out = append(out, incoming...)
+	sortRows(out)
+	return out
+}
+
 func sortRows(rows []Row) {
 	scenIdx := map[string]int{}
 	for i, s := range Scenarios {
