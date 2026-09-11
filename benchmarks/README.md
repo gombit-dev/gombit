@@ -234,7 +234,7 @@ calls per app):
 ```sh
 # start + seed the app per its own README, e.g. benchmarks/apps/gin-gorm, then:
 make benchmark-crud FRAMEWORK=gin-gorm FRAMEWORK_VERSION=v1.12.0 \
-  RUNTIME=go RUNTIME_VERSION=go1.25.7 \
+  RUNTIME=go RUNTIME_VERSION=go1.26.0 \
   TARGET_URL='http://127.0.0.1:8081/api/projects?page=1&limit=20'
 ```
 

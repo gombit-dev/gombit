@@ -73,7 +73,7 @@ case "$1 ${2:-}" in
 #!/usr/bin/env bash
 echo "$*" >> "$GOMBIT_LOG"
 mkdir -p demo
-printf 'module github.com/example/demo\n\ngo 1.25.7\n\nrequire github.com/gombit-dev/gombit v0.0.0\n' > demo/go.mod
+printf 'module github.com/example/demo\n\ngo 1.26.0\n\nrequire github.com/gombit-dev/gombit v0.0.0\n' > demo/go.mod
 GOMBIT
   chmod +x "$3"
   exit 0

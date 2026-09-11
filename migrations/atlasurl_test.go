@@ -47,12 +47,24 @@ func TestAtlasURL(t *testing.T) {
 			want: "sqlite:///tmp/gombit.db",
 		},
 		{
+			// A ":memory:" target maps to Atlas's canonical in-memory dev URL
+			// (sqlite://file?mode=memory&...), not "sqlite://:memory:?..." —
+			// the latter's empty-host:":memory:" authority is an invalid port
+			// that net/url (and thus Atlas) rejects on Go 1.26+.
 			name: "sqlite file memory uri",
 			cfg: config.DatabaseConfig{
 				Driver: config.DatabaseDriverSQLite,
 				DSN:    "file::memory:?cache=shared&_fk=1",
 			},
-			want: "sqlite://:memory:?cache=shared&_fk=1",
+			want: "sqlite://file?mode=memory&cache=shared&_fk=1",
+		},
+		{
+			name: "sqlite bare memory dsn",
+			cfg: config.DatabaseConfig{
+				Driver: config.DatabaseDriverSQLite,
+				DSN:    ":memory:?cache=shared&_fk=1",
+			},
+			want: "sqlite://file?mode=memory&cache=shared&_fk=1",
 		},
 		{
 			name: "sqlite already atlas",
