@@ -3,6 +3,7 @@ package admin_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"go/parser"
 	"go/token"
@@ -21,6 +22,7 @@ import (
 	"github.com/gombit-dev/gombit/contract"
 	"github.com/gombit-dev/gombit/framework"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 type rowEnvelope struct {
@@ -763,6 +765,128 @@ func TestResourceDeleteForeignKeyViolationIsConflict(t *testing.T) {
 	// foreign key on create/update would produce, and not a 500.
 	rec := doRequest(app, jar, http.MethodDelete, fmt.Sprintf("/api/v1/admin/resources/del-categories/%d", category.ID), "")
 	assertError(t, rec, http.StatusConflict, "conflict")
+}
+
+// TestResourceDeleteSoftDeleteBlockedWhenReferenced is the #220 regression:
+// with gorm.Model soft-delete, deleting a referenced parent never triggers the
+// database's ON DELETE RESTRICT (no physical DELETE happens), which would leave
+// a live child pointing at an API-404 parent. The admin must enforce RESTRICT at
+// the application layer: a 409 while referenced, success once the child is gone.
+func TestResourceDeleteSoftDeleteBlockedWhenReferenced(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	type SoftParent struct {
+		gorm.Model
+		Name string `json:"name"`
+	}
+	type SoftChild struct {
+		gorm.Model
+		ParentID uint       `json:"parent_id"`
+		Parent   SoftParent `gorm:"constraint:OnDelete:RESTRICT;" json:"-"`
+	}
+	app := newCookieApp(t)
+	if err := app.DB().AutoMigrate(&SoftParent{}, &SoftChild{}); err != nil {
+		t.Fatalf("AutoMigrate: %v", err)
+	}
+	parent := SoftParent{Name: "p"}
+	if err := app.DB().Create(&parent).Error; err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	child := SoftChild{ParentID: parent.ID}
+	if err := app.DB().Create(&child).Error; err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	for _, reg := range []struct {
+		model any
+		slug  string
+		field string
+	}{
+		{SoftParent{}, "soft-parents", "name"},
+		{SoftChild{}, "soft-children", "parent_id"},
+	} {
+		if err := admin.Register(app, reg.model, admin.Options{
+			Slug: reg.slug,
+			Fields: []admin.Field{
+				{Name: "id", Type: admin.TypeInteger, ReadOnly: true},
+				{Name: reg.field, Type: admin.TypeString},
+			},
+		}); err != nil {
+			t.Fatalf("Register %s: %v", reg.slug, err)
+		}
+	}
+	jar := loginSuperuser(t, app)
+
+	// Referenced: deleting the parent is a 409, and the parent survives.
+	rec := doRequest(app, jar, http.MethodDelete, fmt.Sprintf("/api/v1/admin/resources/soft-parents/%d", parent.ID), "")
+	assertError(t, rec, http.StatusConflict, "conflict")
+	var still SoftParent
+	if err := app.DB().First(&still, parent.ID).Error; err != nil {
+		t.Fatalf("parent must survive a blocked delete, got: %v", err)
+	}
+
+	// Remove the child, then the parent deletes cleanly and is soft-deleted.
+	delChild := doRequest(app, jar, http.MethodDelete, fmt.Sprintf("/api/v1/admin/resources/soft-children/%d", child.ID), "")
+	if delChild.Code != http.StatusOK {
+		t.Fatalf("delete child status = %d; body: %s", delChild.Code, delChild.Body.String())
+	}
+	delParent := doRequest(app, jar, http.MethodDelete, fmt.Sprintf("/api/v1/admin/resources/soft-parents/%d", parent.ID), "")
+	if delParent.Code != http.StatusOK {
+		t.Fatalf("delete parent after child removed status = %d; body: %s", delParent.Code, delParent.Body.String())
+	}
+	if err := app.DB().First(&SoftParent{}, parent.ID).Error; !errors.Is(err, gorm.ErrRecordNotFound) {
+		t.Fatalf("parent must be soft-deleted after successful delete, got: %v", err)
+	}
+}
+
+// TestResourceDeleteSelfReferentialRespectsLiveChildren covers #220's self-
+// referential repro (Engine.ParentEngineID): a parent with a live child is
+// blocked, but the self-reference of a row to itself must never block its own
+// deletion.
+func TestResourceDeleteSelfReferentialRespectsLiveChildren(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	type Engine struct {
+		gorm.Model
+		Name           string  `json:"name"`
+		ParentEngineID *uint    `json:"parent_engine_id"`
+		ParentEngine   *Engine `gorm:"foreignKey:ParentEngineID" json:"-"`
+	}
+	app := newCookieApp(t)
+	if err := app.DB().AutoMigrate(&Engine{}); err != nil {
+		t.Fatalf("AutoMigrate: %v", err)
+	}
+	parent := Engine{Name: "tower"}
+	if err := app.DB().Create(&parent).Error; err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	child := Engine{Name: "child", ParentEngineID: &parent.ID}
+	if err := app.DB().Create(&child).Error; err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	if err := admin.Register(app, Engine{}, admin.Options{
+		Slug: "engines",
+		Fields: []admin.Field{
+			{Name: "id", Type: admin.TypeInteger, ReadOnly: true},
+			{Name: "name", Type: admin.TypeString},
+			{Name: "parent_engine_id", Type: admin.TypeInteger},
+		},
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	jar := loginSuperuser(t, app)
+
+	// The parent is referenced by the child: blocked.
+	rec := doRequest(app, jar, http.MethodDelete, fmt.Sprintf("/api/v1/admin/resources/engines/%d", parent.ID), "")
+	assertError(t, rec, http.StatusConflict, "conflict")
+
+	// The child references only the parent (and nothing references the child),
+	// so deleting the child succeeds despite the self-referential FK.
+	delChild := doRequest(app, jar, http.MethodDelete, fmt.Sprintf("/api/v1/admin/resources/engines/%d", child.ID), "")
+	if delChild.Code != http.StatusOK {
+		t.Fatalf("delete child status = %d; body: %s", delChild.Code, delChild.Body.String())
+	}
+	delParent := doRequest(app, jar, http.MethodDelete, fmt.Sprintf("/api/v1/admin/resources/engines/%d", parent.ID), "")
+	if delParent.Code != http.StatusOK {
+		t.Fatalf("delete parent after child removed status = %d; body: %s", delParent.Code, delParent.Body.String())
+	}
 }
 
 func TestJWTModeDoesNotMountAdmin(t *testing.T) {

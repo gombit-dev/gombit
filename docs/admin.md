@@ -246,6 +246,19 @@ registered). Raw `*gin.Engine` is **not** used for these endpoints. It
 **is** used for `/admin/` static files and SPA fallback, which must not
 appear in OpenAPI.
 
+**Deleting referenced records (referential integrity).** Models that embed
+`gorm.Model` are **soft-deleted** (GORM sets `deleted_at`; no physical `DELETE`
+runs), so the database's own `ON DELETE RESTRICT`/`NO ACTION` foreign keys never
+fire — a soft delete would otherwise leave a live child row pointing at a parent
+the API now reports as 404. The admin therefore enforces `RESTRICT` in the
+application layer: before deleting, it scans every **registered** model for a
+`belongs_to` foreign key targeting the row and returns `409 conflict`
+(`resource is still referenced by other records`) when any live (non-soft-deleted)
+row still references it — mirroring the 409 a hard-deleted model gets from the
+database constraint. A foreign key declared with an explicit
+`constraint:OnDelete:CASCADE` (or `SET NULL`) is respected and not blocked.
+Referencing models that are **not** registered on the admin are not scanned.
+
 List query parameters:
 
 - `page`, `per_page` (default page 1, per_page 20, max 100; same
