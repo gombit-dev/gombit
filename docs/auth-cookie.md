@@ -76,14 +76,16 @@ app — including feature routes added later via `app.Router()` — not just
   {"error": {"code": "authorization", "message": "csrf token missing or invalid", "request_id": "..."}}
   ```
 
-`GET /auth/csrf` is the bootstrap endpoint: it **always mints a new** signed
-cookie+body pair (it does not reuse an existing `gombit_csrf` cookie). The
-SPA must not overlap these calls — overlapping responses desync the HttpOnly
-cookie from the in-memory `X-CSRF-Token` and login then 403s. The generated
-client serializes that (see [Generated frontend](#generated-frontend)). The
-token is mirrored in both the `Set-Cookie` header and the JSON body
-(`{"data": {"csrf_token": "..."}}`) so the SPA does not need to parse
-`document.cookie` itself.
+`GET /auth/csrf` is the bootstrap endpoint: it **reuses a still-valid signed
+`gombit_csrf` cookie** and only mints a fresh token when the request carries no
+cookie or a forged/invalid one. Re-setting the same value also refreshes the
+cookie's `Max-Age`. This is deliberate (#250): double-submit needs a *shared*
+signed value, not a per-call-unique one. Minting on every call would rotate the
+cookie shared by all tabs, so a second tab's bootstrap would invalidate the
+token the first tab holds and permanently 403 its writes. The token is mirrored
+in both the `Set-Cookie` header and the JSON body (`{"data": {"csrf_token":
+"..."}}`); the SPA reads it from the JS-readable cookie at request time (see
+[Generated frontend](#generated-frontend)).
 
 ### Exempting non-browser endpoints (webhooks)
 
@@ -133,7 +135,7 @@ differs: tokens travel in cookies, not JSON.
 
 | Method | Path | Auth | Notes |
 | --- | --- | --- | --- |
-| `GET` | `/auth/csrf` | Public, safe (CSRF-exempt) | Always issues a **new** CSRF cookie+body pair; body mirrors it as `csrf_token`. |
+| `GET` | `/auth/csrf` | Public, safe (CSRF-exempt) | Reuses a valid `gombit_csrf` cookie (refreshing its `Max-Age`); mints a new one only if missing/invalid. Body mirrors the value as `csrf_token`. |
 | `POST` | `/auth/register` | Public, CSRF-protected | Same as Bearer mode: creates a user, never sets `IsSuperuser`. |
 | `POST` | `/auth/login` | Public, CSRF-protected | Body `{email, password}`. On success, sets `gombit_access` + `gombit_refresh` cookies; body is the public user, not tokens. |
 | `POST` | `/auth/refresh` | Cookie (`gombit_refresh`), CSRF-protected | No request body; reads the refresh cookie. Rotates both session cookies. |
@@ -160,25 +162,27 @@ production JWT-secret-strength check.
 ## Generated frontend
 
 `frontend/src/auth/session.ts` (cookie variant) tracks only a boolean
-"authenticated" flag and the in-memory CSRF token — never the session
+"authenticated" flag and an in-memory CSRF mirror — never the session
 tokens themselves, which the browser holds as HttpOnly cookies this code
 cannot read. `frontend/src/api/client.ts` attaches `X-CSRF-Token` on unsafe
-requests and retries once after a silent `/auth/refresh` on 401. CSRF and
-refresh `fetch()` URLs go through `apiPath()` so they follow
-`GOMBIT_API_PREFIX`. Typed openapi-fetch calls keep `/api/v1/...` path
-keys; `rewriteAPIRequest` maps them to the live prefix. The retry
-rebuilds the request from buffered body bytes so POST/PATCH JSON survives
-that refresh (buffering is gated on method; Firefox does not implement
-the Request.body getter). `RequireAuth` confirms a session by calling
-`GET /me` (it cannot check an in-memory token, unlike Bearer mode).
-`LoginPage` warms the token with `bootstrapCSRF()` on mount and **awaits**
-it before `POST /auth/login` and `POST /auth/register`. `AppProviders` also
-fires `bootstrapCSRF()` so a hard reload on a gated route still has an
-in-memory `X-CSRF-Token` before POST/PATCH/DELETE. Unsafe client requests
-and silent refresh await that in-flight pair. Concurrent callers
-share one in-flight promise (`csrfInFlight`); if a token is already in
-memory the call is a no-op so React StrictMode remounts do not mint a
-second pair. `clearSession` drops the in-memory CSRF token. See the templates under
+requests by reading the JS-readable `gombit_csrf` cookie **at request time**
+(the in-memory value is only a fallback), so a cookie rotated or re-minted by
+another tab or after expiry is always matched. It retries once after a silent
+`/auth/refresh` on 401, and **once after re-bootstrapping CSRF on a 403** —
+clearing the stale mirror, forcing a fresh `GET /auth/csrf`, and replaying the
+request. CSRF and refresh `fetch()` URLs go through `apiPath()` so they follow
+`GOMBIT_API_PREFIX`. Typed openapi-fetch calls keep `/api/v1/...` path keys;
+`rewriteAPIRequest` maps them to the live prefix. Both retries rebuild the
+request from buffered body bytes so POST/PATCH JSON survives (buffering is gated
+on method; Firefox does not implement the Request.body getter). `RequireAuth`
+confirms a session by calling `GET /me`. `LoginPage` warms the cookie with
+`bootstrapCSRF()` on mount and **awaits** it before `POST /auth/login` and
+`POST /auth/register`. `AppProviders` also fires `bootstrapCSRF()` so a hard
+reload on a gated route has a `gombit_csrf` cookie before POST/PATCH/DELETE.
+Concurrent callers share one in-flight promise (`csrfInFlight`); `bootstrapCSRF`
+is a no-op when the cookie is already present (so concurrent tabs converge on
+the one shared cookie), and `force=true` re-fetches for 403 recovery. See the
+templates under
 [`scaffold/templates/frontend/src`](../scaffold/templates/frontend/src) for
 the exact `{{if eq .Auth "cookie"}}` branches.
 

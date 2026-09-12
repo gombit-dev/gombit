@@ -107,6 +107,78 @@ func fetchCSRF(t *testing.T, app *framework.App) *cookieJar {
 	return jar
 }
 
+func csrfBodyToken(t *testing.T, rec *httptest.ResponseRecorder) string {
+	t.Helper()
+	var env struct {
+		Data struct {
+			CSRFToken string `json:"csrf_token"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode csrf body: %v; body: %s", err, rec.Body.String())
+	}
+	return env.Data.CSRFToken
+}
+
+// TestCSRFBootstrapReusesValidCookie pins the #250 server fix: a re-bootstrap of
+// GET /auth/csrf that already carries a valid signed cookie must REUSE that
+// token, not rotate it. Rotation is what lets a second tab's bootstrap
+// invalidate the token every other tab holds, permanently breaking their writes.
+func TestCSRFBootstrapReusesValidCookie(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	app := newCookieAuthApp(t)
+
+	jar := fetchCSRF(t, app)
+	first := jar.value(auth.CSRFCookieName)
+	if first == "" {
+		t.Fatal("first bootstrap set no csrf cookie")
+	}
+
+	rec := doRequest(app, jar, http.MethodGet, "/api/v1/auth/csrf", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("re-bootstrap status = %d; body: %s", rec.Code, rec.Body.String())
+	}
+	if got := jar.value(auth.CSRFCookieName); got != first {
+		t.Fatalf("csrf cookie rotated on re-bootstrap: %q -> %q", first, got)
+	}
+	if tok := csrfBodyToken(t, rec); tok != first {
+		t.Fatalf("csrf body token = %q, want reused cookie value %q", tok, first)
+	}
+
+	// The reused token still authorizes a write (it matches the shared cookie).
+	registerCookieUser(t, app, jar, "csrf-reuse@example.com", testPassword)
+	if rec := loginCookieUser(t, app, jar, "csrf-reuse@example.com", testPassword); rec.Code != http.StatusOK {
+		t.Fatalf("login with reused csrf token status = %d; body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestCSRFBootstrapReplacesInvalidCookie verifies a forged/unsigned cookie is not
+// trusted: the server mints a fresh signed token rather than echoing the bogus one.
+func TestCSRFBootstrapReplacesInvalidCookie(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	app := newCookieAuthApp(t)
+
+	jar := newCookieJar()
+	jar.cookies[auth.CSRFCookieName] = &http.Cookie{Name: auth.CSRFCookieName, Value: "forged-not-signed"}
+
+	rec := doRequest(app, jar, http.MethodGet, "/api/v1/auth/csrf", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("bootstrap status = %d; body: %s", rec.Code, rec.Body.String())
+	}
+	got := jar.value(auth.CSRFCookieName)
+	if got == "" || got == "forged-not-signed" {
+		t.Fatalf("invalid cookie not replaced: got %q", got)
+	}
+	if tok := csrfBodyToken(t, rec); tok != got {
+		t.Fatalf("body token %q != minted cookie %q", tok, got)
+	}
+
+	registerCookieUser(t, app, jar, "csrf-fresh@example.com", testPassword)
+	if rec := loginCookieUser(t, app, jar, "csrf-fresh@example.com", testPassword); rec.Code != http.StatusOK {
+		t.Fatalf("login after fresh mint status = %d; body: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func registerCookieUser(t *testing.T, app *framework.App, jar *cookieJar, email, password string) {
 	t.Helper()
 	body, err := json.Marshal(map[string]string{"email": email, "password": password})

@@ -117,6 +117,89 @@ describe("admin client silent refresh", () => {
   });
 });
 
+describe("admin client CSRF cookie handling (#250)", () => {
+  afterEach(() => {
+    clearSession();
+    vi.unstubAllGlobals(); // also restores any stubbed `document`
+  });
+
+  it("reads the token from document.cookie and skips bootstrap when the cookie is present", async () => {
+    // This file runs under the node environment (no DOM); stub the JS-readable
+    // cookie the SPA would read at request time.
+    vi.stubGlobal("document", { cookie: "gombit_csrf=cookie-tok", querySelector: () => null });
+    let csrfHits = 0;
+    let sentToken: string | null = null;
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = String(input);
+      if (url.includes("/auth/csrf")) {
+        csrfHits += 1;
+        return jsonResponse(200, { data: { csrf_token: "should-not-be-used" } });
+      }
+      if (url.includes("/admin/resources/widgets")) {
+        sentToken = header(init, "X-CSRF-Token");
+        return jsonResponse(200, { data: { id: 1 } });
+      }
+      return jsonResponse(404, { error: { code: "not_found", message: url } });
+    });
+
+    const client = createAdminClient();
+    await client.create("widgets", { name: "x" });
+    expect(sentToken).toBe("cookie-tok");
+    expect(csrfHits).toBe(0); // cookie already present -> no bootstrap fetch, no rotation
+  });
+
+  it("re-bootstraps CSRF and retries once on a 403 from an unsafe request", async () => {
+    let createHits = 0;
+    let csrfHits = 0;
+    const sentTokens: Array<string | null> = [];
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = String(input);
+      if (url.includes("/auth/csrf")) {
+        csrfHits += 1;
+        return jsonResponse(200, { data: { csrf_token: `csrf-${csrfHits}` } });
+      }
+      if (url.includes("/admin/resources/widgets")) {
+        createHits += 1;
+        sentTokens.push(header(init, "X-CSRF-Token"));
+        if (createHits === 1) {
+          return jsonResponse(403, {
+            error: { code: "authorization_error", message: "csrf token missing or invalid" },
+          });
+        }
+        return jsonResponse(200, { data: { id: 1 } });
+      }
+      return jsonResponse(404, { error: { code: "not_found", message: url } });
+    });
+
+    const client = createAdminClient();
+    const env = await client.create("widgets", { name: "x" });
+    expect(env.data).toEqual({ id: 1 });
+    expect(createHits).toBe(2); // original + one retry
+    expect(csrfHits).toBeGreaterThanOrEqual(2); // initial bootstrap + forced re-bootstrap after 403
+    // The retry carried the freshly bootstrapped token, not the stale one.
+    expect(sentTokens[0]).not.toEqual(sentTokens[1]);
+  });
+
+  it("does not retry a 403 on a safe method", async () => {
+    let listHits = 0;
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL): Promise<Response> => {
+      const url = String(input);
+      if (url.includes("/auth/csrf")) {
+        return jsonResponse(200, { data: { csrf_token: "csrf-1" } });
+      }
+      if (url.includes("/admin/resources/widgets")) {
+        listHits += 1;
+        return jsonResponse(403, { error: { code: "authorization_error", message: "forbidden" } });
+      }
+      return jsonResponse(404, { error: { code: "not_found", message: url } });
+    });
+
+    const client = createAdminClient();
+    await expect(client.list("widgets")).rejects.toThrow();
+    expect(listHits).toBe(1); // GET is not retried on 403
+  });
+});
+
 describe("admin client resource IDs", () => {
   afterEach(() => {
     clearSession();
