@@ -158,17 +158,19 @@ func TestAblationFullAppMatchesRuntimeStack(t *testing.T) {
 		{"valid-post", http.MethodPost, "/users", scenario.ValidCreateUserBody},
 		{"invalid-post", http.MethodPost, "/users", scenario.InvalidCreateUserBody},
 	}
-	// A whole middleware layer is several allocs; this absorbs incidental noise
-	// from the two routers being built by slightly different code paths
-	// (newRouter vs the reconstruction) while still catching a dropped layer.
-	const tolerance = 2.0
+	// Exact equality, not a tolerance: the contract is that the reconstructed
+	// terminal ladder and the real framework.App allocate *identically* per
+	// scenario. testing.AllocsPerRun is deterministic (it fixes GOMAXPROCS and
+	// averages a fixed run count over integer alloc counts), so any nonzero
+	// difference is a real divergence — a router-shell or middleware change that
+	// made the ablation stop representing the app — not noise to be absorbed.
 	for _, r := range reqs {
 		reconstructed := testing.AllocsPerRun(200, func() { scenario.Do(lastLayer, r.method, r.path, r.body) })
 		application := testing.AllocsPerRun(200, func() { scenario.Do(full, r.method, r.path, r.body) })
-		if diff := application - reconstructed; diff < -tolerance || diff > tolerance {
-			t.Errorf("%s: full-app allocs/op=%.1f, last-layer allocs/op=%.1f (diff %.1f > tolerance %.1f) — "+
-				"the ablation's reconstructed stack no longer matches framework.App",
-				r.name, application, reconstructed, diff, tolerance)
+		if application != reconstructed {
+			t.Errorf("%s: full-app allocs/op=%.1f, last-layer allocs/op=%.1f — "+
+				"the ablation's reconstructed stack must allocate identically to framework.App",
+				r.name, application, reconstructed)
 		}
 	}
 }
