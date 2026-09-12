@@ -56,6 +56,7 @@ func renderFeatureFiles(ctx renderContext) ([]fileSpec, error) {
 		{relPath: fmt.Sprintf("internal/%s/%s.go", ctx.Resource.Package, ctx.Resource.FileBase), content: mustFormatGo(renderModel(ctx))},
 		{relPath: fmt.Sprintf("internal/%s/handler.go", ctx.Resource.Package), content: mustFormatGo(renderHandler(ctx))},
 		{relPath: fmt.Sprintf("internal/%s/routes.go", ctx.Resource.Package), content: mustFormatGo(renderRoutes(ctx))},
+		{relPath: fmt.Sprintf("internal/%s/%s_drift_test.go", ctx.Resource.Package, ctx.Resource.FileBase), content: mustFormatGo(renderDriftTest(ctx))},
 	}
 	if ctx.Service {
 		files = append(files, fileSpec{
@@ -79,6 +80,47 @@ func renderFeatureFiles(ctx renderContext) ([]fileSpec, error) {
 		fileSpec{relPath: fmt.Sprintf("frontend/src/%s/form.tsx", ctx.Resource.Package), content: []byte(renderFormTSX(tsxCtx))},
 	)
 	return files, nil
+}
+
+// renderDriftTest generates the model/handler create-contract drift guard
+// (#218). Generated handlers are human-owned, so the generator cannot follow the
+// model when it gains a column later; this test fails when a persistence-required
+// column has no known source (create DTO, DB default, auto-managed, nullable, or
+// the editable server-managed list), moving the failure from production to
+// `go test`.
+func renderDriftTest(ctx renderContext) string {
+	typ := ctx.Resource.TypeName
+	pkg := ctx.Resource.Package
+	managedVar := unexported(typ) + "ServerManagedColumns"
+	createInput := "create" + typ + "Input"
+
+	var b strings.Builder
+	b.WriteString(goBanner())
+	b.WriteString("package " + pkg + "\n\n")
+	b.WriteString(importBlock([]string{"testing"}, []string{"github.com/gombit-dev/gombit/resourcecheck"}))
+	b.WriteString("// " + managedVar + " lists NOT NULL columns the create handler fills\n")
+	b.WriteString("// server-side (e.g. from the auth context or a hook) instead of from the\n")
+	b.WriteString("// request body. Add a column here when you set it in code; the drift test\n")
+	b.WriteString("// then treats it as a known source.\n")
+	b.WriteString("var " + managedVar + " = []string{}\n\n")
+	b.WriteString("// Test" + typ + "CreateContractCoversRequiredColumns guards against the " + typ + "\n")
+	b.WriteString("// schema and the generated create contract drifting into an invalid state\n")
+	b.WriteString("// (#218): a NOT NULL column with no database default that is neither writable\n")
+	b.WriteString("// via " + createInput + " nor server-managed would be silently zero-filled on\n")
+	b.WriteString("// create. When this fails after you add a column to " + typ + ", either add the\n")
+	b.WriteString("// field to " + createInput + " (and its write path in the handler), set it\n")
+	b.WriteString("// server-side and list its column in " + managedVar + ", or make the column\n")
+	b.WriteString("// nullable.\n")
+	b.WriteString("func Test" + typ + "CreateContractCoversRequiredColumns(t *testing.T) {\n")
+	b.WriteString("\tdrift, err := resourcecheck.MissingCreateColumns(&" + typ + "{}, " + createInput + "{}.Body, " + managedVar + ")\n")
+	b.WriteString("\tif err != nil {\n")
+	b.WriteString("\t\tt.Fatalf(\"inspect " + typ + " schema: %v\", err)\n")
+	b.WriteString("\t}\n")
+	b.WriteString("\tfor _, column := range drift {\n")
+	b.WriteString("\t\tt.Errorf(\"model/handler drift: " + typ + ".%s is NOT NULL with no default but is not writable via " + createInput + " and not server-managed\", column)\n")
+	b.WriteString("\t}\n")
+	b.WriteString("}\n")
+	return b.String()
 }
 
 func mustFormatGo(src string) []byte {
