@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gombit-dev/gombit/contract"
 )
 
 // TraceparentHeader is the W3C trace context header.
@@ -80,8 +81,8 @@ func GetTraceIDFromContext(ctx context.Context) string {
 // Security-header values are request-invariant. Rather than allocate a fresh
 // []string per header on every response (what http.Header.Set does), the
 // middleware assigns these shared, read-only backing slices directly into the
-// response header map (keys are already in canonical MIME form). That saves
-// six allocations per response on the hot path.
+// response header map (keys are already in canonical MIME form). That saves an
+// allocation per header on the hot path.
 //
 // http.Header is a mutable map of mutable slices, so sharing is safe only
 // under its documented mutation APIs, and that constraint is load-bearing:
@@ -94,30 +95,83 @@ func GetTraceIDFromContext(ctx context.Context) string {
 // Header.Values(k)[0] = ... or append(h[k][:0], ...) — writes straight through
 // to the process-global value, corrupting it for every other request and
 // racing with them. Override a security header with Set (as
-// applySPAContentSecurityPolicy does), never an in-place slice write.
+// applyBrowserSecurityHeaders does), never an in-place slice write.
 // TestSecurityHeaderSharedValueContract locks all three paths.
 var (
-	cspHeaderValue          = []string{"default-src 'self'"}
-	referrerPolicyValue     = []string{"strict-origin-when-cross-origin"}
-	hstsHeaderValue         = []string{"max-age=315360000; includeSubDomains"}
-	contentTypeOptionsValue = []string{"nosniff"}
-	downloadOptionsValue    = []string{"noopen"}
-	frameOptionsValue       = []string{"DENY"}
+	// apiContentSecurityPolicy is the JSON/API default (issue #267 / PERF-9):
+	// the OWASP REST minimum. default-src 'none' forbids the response from
+	// loading or executing anything (a JSON body needs no resources), and
+	// frame-ancestors 'none' is the modern anti-clickjacking directive that
+	// subsumes X-Frame-Options: DENY — so an API response needs neither
+	// X-Frame-Options nor Referrer-Policy, keeping it well under the 8-header
+	// swiss-map threshold that used to cost the layer ~5 allocs/op.
+	apiContentSecurityPolicyValue = []string{"default-src 'none'; frame-ancestors 'none'"}
+	// browserContentSecurityPolicy is the policy for HTML documents the
+	// framework itself serves but whose handler cannot set its own headers —
+	// today only Huma's interactive docs at /docs. It matches the pre-#267
+	// full browser policy so nothing about the docs page regresses.
+	browserContentSecurityPolicyValue = []string{"default-src 'self'"}
+	referrerPolicyValue               = []string{"strict-origin-when-cross-origin"}
+	hstsHeaderValue                   = []string{"max-age=315360000; includeSubDomains"}
+	contentTypeOptionsValue           = []string{"nosniff"}
+	frameOptionsValue                 = []string{"DENY"}
 )
 
-func securityHeadersMiddleware(includeHSTS bool) gin.HandlerFunc {
+// securityHeadersMiddleware sets the framework's baseline security headers on
+// every response, scoped by response kind (issue #267 / PERF-9). See
+// docs/security.md for the full per-response-kind header table.
+//
+// X-Content-Type-Options and (in production) Strict-Transport-Security apply
+// to every response. The Content-Security-Policy differs by kind:
+//
+//   - API/JSON (the default, and the hot path): default-src 'none';
+//     frame-ancestors 'none'. Nothing else — this holds the common JSON
+//     response with correlation IDs and Content-Type at <= 6 headers, one
+//     under the swiss-map 8-slot group boundary, so the layer allocates
+//     nothing (the map and net/http's WriteHeader Header.Clone no longer grow).
+//   - Interactive docs (/docs), only when docs are enabled: the full browser
+//     policy, applied here by path because Huma owns that handler. Huma's docs
+//     renderer sets its own Content-Security-Policy (it must allow the Swagger
+//     UI assets), so it overrides the CSP set here; what this branch
+//     contributes that Huma does not is Referrer-Policy and the legacy
+//     X-Frame-Options: DENY. When docs are disabled (the production default)
+//     no /docs route exists, so a /docs request is an ordinary API/not-found
+//     response and gets the API policy — the classification follows the
+//     response that will actually be served, not the URL alone.
+//
+// HTML documents the framework serves through its own handlers — the admin SPA
+// and the embedded frontend — start from the API baseline set here and then
+// override to the browser policy via applyBrowserSecurityHeaders (see embed.go
+// and adminui.go), which is where the richer SPA CSP, Referrer-Policy, and
+// X-Frame-Options are added. X-Download-Options ("noopen") is IE8-only and set
+// nowhere: no supported browser honors it (issue #267).
+func securityHeadersMiddleware(includeHSTS, docsEnabled bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		header := c.Writer.Header()
-		header["Content-Security-Policy"] = cspHeaderValue
-		header["Referrer-Policy"] = referrerPolicyValue
+		header["X-Content-Type-Options"] = contentTypeOptionsValue
 		if includeHSTS {
 			header["Strict-Transport-Security"] = hstsHeaderValue
 		}
-		header["X-Content-Type-Options"] = contentTypeOptionsValue
-		header["X-Download-Options"] = downloadOptionsValue
-		header["X-Frame-Options"] = frameOptionsValue
+		if docsEnabled && isDocsPath(c.Request.URL.Path) {
+			header["Content-Security-Policy"] = browserContentSecurityPolicyValue
+			header["Referrer-Policy"] = referrerPolicyValue
+			header["X-Frame-Options"] = frameOptionsValue
+		} else {
+			header["Content-Security-Policy"] = apiContentSecurityPolicyValue
+		}
 		c.Next()
 	}
+}
+
+// isDocsPath reports whether urlPath is Huma's interactive docs UI. Huma
+// registers exactly one route, contract.DocsPath ("/docs") — not the "/docs/"
+// subtree — so only that exact path is an HTML document. A descendant like
+// /docs/not-a-route is served by no handler (404) and is an ordinary API
+// response, not HTML; matching the whole prefix would hand those 404s the
+// browser policy. The caller additionally gates this on docsEnabled: with docs
+// disabled the route is not registered at all.
+func isDocsPath(urlPath string) bool {
+	return urlPath == contract.DocsPath
 }
 
 // httpMetrics accumulates request metrics without locking the request path.

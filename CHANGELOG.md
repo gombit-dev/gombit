@@ -270,6 +270,21 @@ version.
 
 ### Changed
 
+- **Security headers are now scoped by response kind** (PERF-9,
+  [#267](https://github.com/gombit-dev/gombit/issues/267)). JSON/API responses
+  get the strict, minimal policy `Content-Security-Policy: default-src 'none';
+  frame-ancestors 'none'` plus `X-Content-Type-Options` (and HSTS in
+  production) — no `X-Frame-Options` or `Referrer-Policy`, since
+  `frame-ancestors 'none'` already subsumes the former and a `default-src
+  'none'` document needs neither. HTML responses (the embedded SPA, the admin
+  SPA, and Huma's `/docs`) keep the full browser policy including
+  `Referrer-Policy` and `X-Frame-Options: DENY`. This holds the common API
+  response under Go's 8-header swiss-map threshold, removing ~5 allocs/op of
+  header-map growth from every API response. The dead IE8-only
+  `X-Download-Options: noopen` header is no longer set on any response. If you
+  relied on `X-Frame-Options`/`Referrer-Policy` or the old `default-src 'self'`
+  CSP on JSON responses, note the new API policy. See
+  [docs/security.md](docs/security.md).
 - **Breaking (minimum Go):** the framework now requires **Go 1.26** (`go.mod`
   `go 1.26.0`), raised by `golang.org/x/crypto` v0.56.0
   ([#294](https://github.com/gombit-dev/gombit/pull/294)). Scaffolded apps
