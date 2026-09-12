@@ -159,7 +159,7 @@ func TestCSRFBootstrapReplacesInvalidCookie(t *testing.T) {
 	app := newCookieAuthApp(t)
 
 	jar := newCookieJar()
-	jar.cookies[auth.CSRFCookieName] = &http.Cookie{Name: auth.CSRFCookieName, Value: "forged-not-signed"}
+	jar.cookies[auth.CSRFCookieName] = &http.Cookie{Name: auth.CSRFCookieName, Value: "forged-not-signed"} //nolint:gosec // G124: test fixture seeds a name/value cookie to exercise the forged-cookie path.
 
 	rec := doRequest(app, jar, http.MethodGet, "/api/v1/auth/csrf", "")
 	if rec.Code != http.StatusOK {
