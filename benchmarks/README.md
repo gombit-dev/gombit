@@ -323,6 +323,30 @@ Every row's `TestScenarios` checks the same four scenarios (plaintext, JSON,
 path parameter, validated POST) structurally before it's trusted for
 benchmarking — see [micro/scenario/assert.go](micro/scenario/assert.go).
 
+## Per-layer ablation
+
+The four-row matrix shows the framework tax as one lump. The **ablation**
+attributes it to individual Gombit middleware layers, reporting a cumulative
+ladder — `baseline` (bare Huma+Gin) → each `runtimeMiddlewareStack` layer →
+`full-app` (a real `framework.App`) — under the `gombit-ablation/<row>` stacks
+in `microbench.json`. Each layer's incremental cost is the delta between
+consecutive rows.
+
+```sh
+make benchmark-micro-ablation    # runs the ladder + merges into microbench.json
+# or, without persisting:
+go test ./framework -run='^$' -bench='^BenchmarkAblation$' -benchmem -count=10
+```
+
+It lives in [../framework/ablation_bench_test.go](../framework/ablation_bench_test.go),
+in `package framework` rather than under `micro/`, because it builds the runtime
+stack one **unexported** middleware at a time (issue #265). `TestAblationFullApp-
+MatchesRuntimeStack` asserts the reconstructed full ladder allocates identically
+to a real `framework.App`, so no runtime layer can escape the ablation. How to
+read the deltas — and the two harness facts that matter (`httptest.NewRecorder`'s
+3 constant allocs/op cancel in deltas; `Header.Clone` is real server behavior) —
+is in [docs/methodology.md](docs/methodology.md#per-layer-ablation-issue-265--perf-7).
+
 ## Relationship to the M0-2 spike
 
 This matrix supersedes `internal/contractspike`'s two-stack M0-2 spike

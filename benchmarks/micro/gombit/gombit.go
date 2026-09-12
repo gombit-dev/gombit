@@ -15,6 +15,11 @@
 // contract.Install's doc comment). Since `go test` runs one process per
 // package, keeping this row in its own package is what makes that safe
 // rather than order-dependent.
+//
+// The per-layer ablation of this stack lives in package framework
+// (framework/ablation_bench_test.go), not here: it builds the runtime stack
+// one unexported middleware at a time, which is only reachable from inside the
+// package (issue #265).
 package gombit
 
 import (
