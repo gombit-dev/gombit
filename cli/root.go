@@ -145,6 +145,8 @@ func dbUsage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "  status [--dir database/migrations] [--atlas-bin atlas]")
 	_, _ = fmt.Fprintln(w, "  seed [--seeds database/seeds]")
 	_, _ = fmt.Fprintln(w, "  reset [--dir database/migrations] [--seeds database/seeds] [--atlas-bin atlas] [--force]")
+	_, _ = fmt.Fprintln(w, "  hash [--dir database/migrations] [--atlas-bin atlas]")
+	_, _ = fmt.Fprintln(w, "  lint [--dir database/migrations] [--dev-url URL] [--latest N] [--atlas-bin atlas]")
 }
 
 func openapiUsage(w io.Writer) {

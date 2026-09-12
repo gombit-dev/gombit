@@ -487,7 +487,20 @@ gombit db status
 gombit db seed
 gombit db reset [--force]
 gombit db verify [--write] [--json] [--strict]
+gombit db lint [--dev-url URL] [--latest N]
+gombit db hash
 ```
+
+`gombit db lint` wraps `atlas migrate lint` to surface **destructive or
+non-appliable** changes — e.g. a field rename (which Atlas emits as a drop + add,
+rebuilding the table) that would drop data or fail `NOT NULL` on apply. It uses an
+in-memory SQLite dev database by default; pass `--dev-url` for postgres/mysql
+(e.g. `docker://postgres/16/dev?search_path=public`), and `--latest N` to analyze
+more than the most recent migration. `makemigrations` prints a reminder to run it.
+
+`gombit db hash` wraps `atlas migrate hash` to recompute the directory checksum
+(`atlas.sum`) after a migration is hand-edited (e.g. to backfill a renamed
+column), so recovery from a checksum mismatch never needs the raw Atlas CLI.
 
 See [migrations.md](migrations.md) for Atlas behavior and
 [migration-safety.md](migration-safety.md) for `gombit db verify` — the
