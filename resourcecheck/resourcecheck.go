@@ -148,128 +148,161 @@ func intersectKeys(sets []map[string]bool) map[string]bool {
 	return out
 }
 
-// CreatePersistsConstructor reports whether the handler's create method persists
-// the value returned by ctorName UNCHANGED, closing the gap between "the
-// constructor returns these fields" and "these fields are what GORM persists".
+// CreatePersistsConstructor reports whether receiverType's createFuncName method
+// persists the value returned by ctorName, modified ONLY by assignments to
+// explicitly declared server-managed columns, and by nothing else — closing the
+// gap between "the constructor returns these fields" and "these fields are what
+// GORM persists".
 //
-// Syntactic presence of a constructor assignment and a Create call is not
-// enough: the assignment must actually REACH the persistence call at runtime.
-// The check therefore validates the method's flat top-level statement sequence
-// (the shape `gombit make resource` generates), establishing ordering and
-// dominance conservatively rather than merely finding both spellings somewhere
-// in the syntax tree. All of the following must hold, or it returns false with a
-// detail explaining why:
+// Syntactic presence of a constructor assignment and a Create call is not enough:
+// the assignment must REACH the persistence call at runtime. Because the
+// generated create method is a fixed, flat statement sequence, the check
+// validates an allowlist of the permitted uses of the persisted variable rather
+// than attempting general value-flow analysis. All of the following must hold, or
+// it returns false with a detail explaining why:
 //
-//   - Exactly one `…Create(x)` call exists in the whole method, its argument is a
-//     plain variable (`&row` or `row`), and that call sits inside a single
-//     top-level statement (not nested in a closure).
-//   - That variable is assigned exactly once in the whole method; the assignment
-//     is a top-level statement of the form `row := ctorName(...)` /
-//     `row = ctorName(...)` and is never field-mutated (`row.X = …`) anywhere.
-//   - The constructor assignment's top-level position precedes the Create call's
-//     top-level position (dominance on the generated straight-line body).
+//   - The method belongs to receiverType (e.g. *Handler); a same-named method on
+//     another type is not the registered handler and cannot certify it.
+//   - Exactly one persistence call `<recv>.….Create(x)` exists, rooted at the
+//     method receiver (so an unrelated `.Create` cannot masquerade as GORM's),
+//     its argument a plain `&row`/`row`, reached by a single top-level statement.
+//   - row is assigned exactly once, a top-level `row := ctorName(...)` that
+//     strictly precedes the Create (ordering + dominance on the flat body).
+//   - The ONLY other pre-Create uses of row are assignments `row.F = …` whose
+//     column F is in serverManagedColumns. Every other use before Create — a
+//     non-managed field assignment, an `x++`, a method call `row.M()` that may
+//     take &row implicitly, taking `&row` anywhere but the Create argument, or a
+//     read — is rejected. Uses after Create (response mapping) are free.
 //
-// Anything else — building the value inline, mutating it, reassigning it,
-// assigning it under a conditional or inside a closure, writing it after Create,
-// or no Create at all — makes the persisted value diverge from what
-// ConstructorCreateFields inspected, so the guard (which treats false as a
-// failure) rejects it: the create path must route straight through the
-// constructor for the guarantee to hold.
-func CreatePersistsConstructor(handlerSrc []byte, createFuncName, ctorName string) (bool, string, error) {
+// serverManagedColumns holds DB column names (e.g. "tenant_id"); a row field is
+// matched to it with GORM's default naming strategy. Listing a column permits the
+// assignment but does not prove it runs (a BeforeCreate hook is a valid source);
+// the list is the human's explicit assertion, and MissingCreateColumns still
+// treats it as a known source. Anything the allowlist cannot account for fails
+// closed, surfacing as drift to resolve explicitly rather than a silent gap.
+func CreatePersistsConstructor(handlerSrc []byte, receiverType, createFuncName, ctorName string, serverManagedColumns []string) (bool, string, error) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "handler.go", handlerSrc, 0)
 	if err != nil {
 		return false, "", fmt.Errorf("resourcecheck: parse handler: %w", err)
 	}
+
+	// Find createFuncName declared on the expected receiver. A decoy method of the
+	// same name on another type (which the router never calls) must not certify
+	// the real handler, so the receiver is matched explicitly.
 	var fn *ast.FuncDecl
 	for _, decl := range file.Decls {
 		d, ok := decl.(*ast.FuncDecl)
-		if ok && d.Name != nil && d.Name.Name == createFuncName && d.Body != nil {
-			fn = d
-			break
+		if !ok || d.Name == nil || d.Name.Name != createFuncName || d.Body == nil {
+			continue
 		}
+		if receiverTypeName(d) != receiverType {
+			continue
+		}
+		if fn != nil {
+			return false, "multiple " + receiverType + "." + createFuncName + " methods found", nil
+		}
+		fn = d
 	}
 	if fn == nil {
-		return false, "no " + createFuncName + " method with a body was found", nil
+		return false, "no " + receiverType + "." + createFuncName + " method with a body was found", nil
+	}
+	recvVar := receiverVarName(fn)
+	if recvVar == "" {
+		return false, receiverType + "." + createFuncName + " has no named receiver", nil
 	}
 
-	// Exactly one `…Create(x)` call must exist anywhere in the method (a second,
-	// possibly hidden, Create would make "the persisted value" ambiguous).
-	creates := collectCreateCalls(fn.Body)
-	if len(creates) != 1 {
-		return false, fmt.Sprintf("expected exactly one DB.Create(...) call in %s, found %d", createFuncName, len(creates)), nil
-	}
-	createArg := identName(creates[0].Args[0])
-	if createArg == "" {
-		return false, "the DB.Create(...) argument is not a plain &row/row variable", nil
-	}
-
-	// Aliasing: the address of the persisted variable may be taken ONLY as the
-	// Create argument. Any other `&row` could hand an alias to code that mutates
-	// the row before it is persisted (`p := &row; p.X = …`), which this AST check
-	// cannot follow — so it fails closed.
-	createAddr := creates[0].Args[0]
-	aliasLeak := false
+	// Exactly one persistence call, rooted at the receiver: `<recvVar>.….Create(x)`.
+	var createCall *ast.CallExpr
+	createCount := 0
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
-		u, ok := n.(*ast.UnaryExpr)
-		if !ok || u.Op != token.AND || u == createAddr {
-			return true
-		}
-		if id, ok := u.X.(*ast.Ident); ok && id.Name == createArg {
-			aliasLeak = true
-		}
-		return true
-	})
-	if aliasLeak {
-		return false, "the address of " + createArg + " is taken outside the Create call; an alias could mutate the persisted value", nil
-	}
-
-	// The persisted variable must be assigned exactly once, and never
-	// field-mutated, across the WHOLE method (descending into closures/dead code
-	// so a hidden write still disqualifies it).
-	assignCount := 0
-	var ctorAssign *ast.AssignStmt
-	mutated := false
-	ast.Inspect(fn.Body, func(n ast.Node) bool {
-		as, ok := n.(*ast.AssignStmt)
+		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
 		}
-		for i, lhs := range as.Lhs {
-			switch target := lhs.(type) {
-			case *ast.Ident:
-				if target.Name == createArg {
-					assignCount++
-					if i < len(as.Rhs) && isCallTo(as.Rhs[i], ctorName) {
-						ctorAssign = as
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel == nil || sel.Sel.Name != "Create" || len(call.Args) != 1 {
+			return true
+		}
+		if rootIdentName(sel.X) != recvVar {
+			return true // some other object's .Create, not the handler's DB
+		}
+		createCall = call
+		createCount++
+		return true
+	})
+	if createCount != 1 {
+		return false, fmt.Sprintf("expected exactly one %s.….Create(&row) call in %s, found %d", recvVar, createFuncName, createCount), nil
+	}
+
+	createAddr := createCall.Args[0]
+	createArg := identName(createAddr)
+	createArgIdent := argIdent(createAddr)
+	if createArg == "" || createArgIdent == nil {
+		return false, "the Create(...) argument is not a plain &row/row variable", nil
+	}
+
+	ns := schema.NamingStrategy{}
+	managed := toSet(serverManagedColumns)
+
+	// Walk assignments and increments touching row. row itself must be assigned
+	// exactly once (from the constructor); row.F may be assigned only when column
+	// F is server-managed; increments of row/row.F are never allowed.
+	assignCount := 0
+	var ctorAssign *ast.AssignStmt
+	var ctorLHSIdent *ast.Ident
+	permittedFieldIdents := map[*ast.Ident]bool{}
+	reason := ""
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if reason != "" {
+			return false
+		}
+		switch s := n.(type) {
+		case *ast.IncDecStmt:
+			if touchesVar(s.X, createArg) {
+				reason = createArg + " is incremented/decremented; the persisted value must come from " + ctorName
+			}
+		case *ast.AssignStmt:
+			for i, lhs := range s.Lhs {
+				switch target := lhs.(type) {
+				case *ast.Ident:
+					if target.Name == createArg {
+						assignCount++
+						if i < len(s.Rhs) && isCallTo(s.Rhs[i], ctorName) {
+							ctorAssign = s
+							ctorLHSIdent = target
+						}
 					}
-				}
-			case *ast.SelectorExpr:
-				if x, ok := target.X.(*ast.Ident); ok && x.Name == createArg {
-					mutated = true // row.Field = … changes the persisted value
+				case *ast.SelectorExpr:
+					if x, ok := target.X.(*ast.Ident); ok && x.Name == createArg {
+						col := ns.ColumnName("", target.Sel.Name)
+						if managed[col] {
+							permittedFieldIdents[x] = true
+						} else {
+							reason = createArg + "." + target.Sel.Name + " is assigned but column " + col + " is not server-managed; set it in " + ctorName + " or declare it server-managed"
+						}
+					}
 				}
 			}
 		}
 		return true
 	})
-	if mutated {
-		return false, createArg + " is field-mutated before Create; route the create solely through " + ctorName, nil
+	if reason != "" {
+		return false, reason, nil
 	}
 	if assignCount != 1 || ctorAssign == nil {
 		return false, createArg + " must be assigned exactly once, from " + ctorName + "(...)", nil
 	}
 
-	// Ordering + dominance on the generated straight-line body: the constructor
-	// assignment and the Create call must each be a TOP-LEVEL statement, with the
-	// assignment strictly before the Create. A constructor assignment nested in a
-	// conditional, loop, or closure (non-dominating) leaves ctorIdx == -1 and is
-	// rejected, as does a Create that runs before the assignment.
+	// Ordering + dominance on the flat generated body: the constructor assignment
+	// and the Create call must each be a TOP-LEVEL statement, assignment first. A
+	// constructor assignment nested in a branch/loop/closure leaves ctorIdx == -1.
 	ctorIdx, createIdx := -1, -1
 	for i, stmt := range fn.Body.List {
 		if stmt == ctorAssign {
 			ctorIdx = i
 		}
-		if topLevelStmtHasCreateCall(stmt) {
+		if stmtReachesNode(stmt, createCall) {
 			createIdx = i
 		}
 	}
@@ -282,46 +315,118 @@ func CreatePersistsConstructor(handlerSrc []byte, createFuncName, ctorName strin
 	if ctorIdx >= createIdx {
 		return false, createArg + " is assigned from " + ctorName + " only at or after the Create call; the constructor result never reaches persistence", nil
 	}
+
+	// Allowlist every use of row before the Create call: it must be the
+	// constructor assignment's LHS, a permitted server-managed field assignment's
+	// receiver, or the &row handed to Create. Anything else before Create — a
+	// method call `row.clearTenant()` that implicitly takes &row, a stray `&row`,
+	// an unexpected read — is rejected. Uses after Create are post-persist reads.
+	stray := ""
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if stray != "" {
+			return false
+		}
+		id, ok := n.(*ast.Ident)
+		if !ok || id.Name != createArg {
+			return true
+		}
+		if id == ctorLHSIdent || id == createArgIdent || permittedFieldIdents[id] {
+			return true
+		}
+		if id.Pos() > createCall.End() {
+			return true // post-persist read (e.g. response mapping)
+		}
+		stray = "an unrecognized use of " + createArg + " appears before Create (e.g. a method call, read, or indirect mutation); the generated grammar permits only construction, server-managed field assignments, and Create(&" + createArg + ")"
+		return false
+	})
+	if stray != "" {
+		return false, stray, nil
+	}
 	return true, "", nil
 }
 
-// collectCreateCalls returns every `<expr>.Create(<one arg>)` call under n,
-// descending into nested blocks and closures so a second, hidden Create is still
-// counted.
-func collectCreateCalls(n ast.Node) []*ast.CallExpr {
-	var out []*ast.CallExpr
-	ast.Inspect(n, func(node ast.Node) bool {
-		call, ok := node.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if ok && sel.Sel != nil && sel.Sel.Name == "Create" && len(call.Args) == 1 {
-			out = append(out, call)
-		}
-		return true
-	})
-	return out
+// receiverTypeName returns fn's receiver type name without a leading pointer
+// (e.g. "Handler" for `(h *Handler)`), or "" if fn has no single-type receiver.
+func receiverTypeName(fn *ast.FuncDecl) string {
+	if fn.Recv == nil || len(fn.Recv.List) != 1 {
+		return ""
+	}
+	t := fn.Recv.List[0].Type
+	if star, ok := t.(*ast.StarExpr); ok {
+		t = star.X
+	}
+	if id, ok := t.(*ast.Ident); ok {
+		return id.Name
+	}
+	return ""
 }
 
-// topLevelStmtHasCreateCall reports whether a single top-level statement reaches
-// a `…Create(...)` call without crossing a function-literal boundary. It is how
-// dominance is established: a Create inside a closure is NOT reached by the
-// enclosing top-level statement, so it does not count.
-func topLevelStmtHasCreateCall(stmt ast.Stmt) bool {
+// receiverVarName returns fn's receiver variable name (the "h" in `(h *Handler)`).
+func receiverVarName(fn *ast.FuncDecl) string {
+	if fn.Recv == nil || len(fn.Recv.List) != 1 || len(fn.Recv.List[0].Names) != 1 {
+		return ""
+	}
+	return fn.Recv.List[0].Names[0].Name
+}
+
+// rootIdentName walks a selector/call chain to its leftmost identifier
+// (`h.DB.WithContext(ctx).Create` → "h"), or "" if it is not ident-rooted.
+func rootIdentName(expr ast.Expr) string {
+	for {
+		switch e := expr.(type) {
+		case *ast.Ident:
+			return e.Name
+		case *ast.SelectorExpr:
+			expr = e.X
+		case *ast.CallExpr:
+			expr = e.Fun
+		case *ast.ParenExpr:
+			expr = e.X
+		case *ast.IndexExpr:
+			expr = e.X
+		default:
+			return ""
+		}
+	}
+}
+
+// argIdent returns the identifier inside `&x` or a bare `x`, else nil.
+func argIdent(expr ast.Expr) *ast.Ident {
+	if u, ok := expr.(*ast.UnaryExpr); ok {
+		expr = u.X
+	}
+	if id, ok := expr.(*ast.Ident); ok {
+		return id
+	}
+	return nil
+}
+
+// touchesVar reports whether expr is `name` or `name.Field` (an inc/dec target
+// that would mutate the variable).
+func touchesVar(expr ast.Expr, name string) bool {
+	switch e := expr.(type) {
+	case *ast.Ident:
+		return e.Name == name
+	case *ast.SelectorExpr:
+		x, ok := e.X.(*ast.Ident)
+		return ok && x.Name == name
+	}
+	return false
+}
+
+// stmtReachesNode reports whether target appears within stmt without crossing a
+// function-literal boundary (so a Create inside a closure is not "reached" by the
+// enclosing top-level statement).
+func stmtReachesNode(stmt ast.Stmt, target ast.Node) bool {
 	found := false
 	ast.Inspect(stmt, func(n ast.Node) bool {
 		if found {
 			return false
 		}
-		if _, ok := n.(*ast.FuncLit); ok {
-			return false // do not descend into closures
+		if _, ok := n.(*ast.FuncLit); ok && n != target {
+			return false
 		}
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel != nil && sel.Sel.Name == "Create" && len(call.Args) == 1 {
+		if n == target {
 			found = true
 			return false
 		}

@@ -203,9 +203,9 @@ func buildBookForCreate(input *createBookInput) Book {
 	}
 }
 
-func createPersists(t *testing.T, src string) (bool, string) {
+func createPersists(t *testing.T, src string, serverManaged ...string) (bool, string) {
 	t.Helper()
-	ok, detail, err := resourcecheck.CreatePersistsConstructor([]byte(src), "create", "buildBookForCreate")
+	ok, detail, err := resourcecheck.CreatePersistsConstructor([]byte(src), "Handler", "create", "buildBookForCreate", serverManaged)
 	if err != nil {
 		t.Fatalf("CreatePersistsConstructor: %v", err)
 	}
@@ -272,7 +272,7 @@ func (h *Handler) create(ctx context.Context, input *createBookInput) error { re
 	if ok, _ := createPersists(t, src); ok {
 		t.Fatal("want persists=false when there is no Create call")
 	}
-	if ok, _, err := resourcecheck.CreatePersistsConstructor([]byte("package book\n"), "create", "buildBookForCreate"); err != nil || ok {
+	if ok, _, err := resourcecheck.CreatePersistsConstructor([]byte("package book\n"), "Handler", "create", "buildBookForCreate", nil); err != nil || ok {
 		t.Fatalf("want persists=false when the create method is absent; ok=%v err=%v", ok, err)
 	}
 }
@@ -334,6 +334,103 @@ func (h *Handler) create(ctx context.Context, input *createBookInput) error {
 }`
 	if ok, _ := createPersists(t, src); ok {
 		t.Fatal("want persists=false when a second Create call is present")
+	}
+}
+
+// Finding 2: receiver pinning. A decoy create on another type is declared first
+// with a valid shape; the registered Handler.create bypasses the constructor.
+// The checker must judge Handler.create, not the decoy.
+func TestCreatePersistsConstructorPinsReceiver(t *testing.T) {
+	src := `package book
+func (p *Probe) create(ctx context.Context, input *createBookInput) error {
+	row := buildBookForCreate(input)
+	return p.DB.WithContext(ctx).Create(&row).Error
+}
+func (h *Handler) create(ctx context.Context, input *createBookInput) error {
+	row := Book{Title: input.Body.Title}
+	return h.DB.WithContext(ctx).Create(&row).Error
+}`
+	if ok, _ := createPersists(t, src); ok {
+		t.Fatal("want persists=false: Handler.create (not the decoy) bypasses the constructor")
+	}
+}
+
+func TestCreatePersistsConstructorRequiresExpectedReceiver(t *testing.T) {
+	src := `package book
+func (p *Probe) create(ctx context.Context, input *createBookInput) error {
+	row := buildBookForCreate(input)
+	return p.DB.WithContext(ctx).Create(&row).Error
+}`
+	if ok, _ := createPersists(t, src); ok {
+		t.Fatal("want persists=false when no Handler.create exists")
+	}
+}
+
+// Finding 2: the persistence call must be rooted at the handler receiver, so an
+// unrelated object's .Create cannot masquerade as the GORM write.
+func TestCreatePersistsConstructorRejectsNonReceiverCreate(t *testing.T) {
+	src := `package book
+func (h *Handler) create(ctx context.Context, input *createBookInput) error {
+	row := buildBookForCreate(input)
+	return other.WithContext(ctx).Create(&row).Error
+}`
+	if ok, _ := createPersists(t, src); ok {
+		t.Fatal("want persists=false when Create is not rooted at the handler receiver")
+	}
+}
+
+// Finding 1: a pointer-receiver method call implicitly takes &row and can mutate
+// it, with no &row syntax and no assignment node. The allowlist still rejects it.
+func TestCreatePersistsConstructorRejectsPointerReceiverMethod(t *testing.T) {
+	src := `package book
+func (h *Handler) create(ctx context.Context, input *createBookInput) error {
+	row := buildBookForCreate(input)
+	row.clearTenant()
+	return h.DB.WithContext(ctx).Create(&row).Error
+}`
+	if ok, _ := createPersists(t, src); ok {
+		t.Fatal("want persists=false when a method is invoked on row before Create")
+	}
+}
+
+// Finding 1: `row.Field++` is an *ast.IncDecStmt, not an AssignStmt.
+func TestCreatePersistsConstructorRejectsIncDec(t *testing.T) {
+	src := `package book
+func (h *Handler) create(ctx context.Context, input *createBookInput) error {
+	row := buildBookForCreate(input)
+	row.Views++
+	return h.DB.WithContext(ctx).Create(&row).Error
+}`
+	if ok, _ := createPersists(t, src); ok {
+		t.Fatal("want persists=false when a field of row is incremented before Create")
+	}
+}
+
+// Finding 3: assigning a declared server-managed column after construction is the
+// documented, supported flow and must be permitted.
+func TestCreatePersistsConstructorPermitsServerManagedAssignment(t *testing.T) {
+	src := `package book
+func (h *Handler) create(ctx context.Context, input *createBookInput) error {
+	row := buildBookForCreate(input)
+	row.TenantID = tenantFrom(ctx)
+	return h.DB.WithContext(ctx).Create(&row).Error
+}`
+	if ok, detail := createPersists(t, src, "tenant_id"); !ok {
+		t.Fatalf("want persists=true when the mutated column is server-managed; detail=%q", detail)
+	}
+}
+
+// Finding 3: assigning a column that is NOT declared server-managed is still a
+// silent divergence and must be rejected.
+func TestCreatePersistsConstructorRejectsUndeclaredServerManagedAssignment(t *testing.T) {
+	src := `package book
+func (h *Handler) create(ctx context.Context, input *createBookInput) error {
+	row := buildBookForCreate(input)
+	row.OwnerID = userFrom(ctx)
+	return h.DB.WithContext(ctx).Create(&row).Error
+}`
+	if ok, _ := createPersists(t, src, "tenant_id"); ok {
+		t.Fatal("want persists=false when assigning a field whose column is not server-managed")
 	}
 }
 

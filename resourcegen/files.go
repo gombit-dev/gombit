@@ -141,7 +141,7 @@ func renderDriftTest(ctx renderContext) string {
 	b.WriteString("\t}\n")
 	b.WriteString("\t// The guard is sound only if create persists build" + typ + "ForCreate's result\n")
 	b.WriteString("\t// unchanged; reject a handler that bypasses or mutates it (#218).\n")
-	b.WriteString("\tif ok, detail, perr := resourcecheck.CreatePersistsConstructor(src, \"create\", \"build" + typ + "ForCreate\"); perr != nil {\n")
+	b.WriteString("\tif ok, detail, perr := resourcecheck.CreatePersistsConstructor(src, \"Handler\", \"create\", \"build" + typ + "ForCreate\", " + managedVar + "); perr != nil {\n")
 	b.WriteString("\t\tt.Fatalf(\"inspect " + typ + " create handler: %v\", perr)\n")
 	b.WriteString("\t} else if !ok {\n")
 	b.WriteString("\t\tt.Fatalf(\"the create handler must persist build" + typ + "ForCreate's result unchanged: %s\", detail)\n")
