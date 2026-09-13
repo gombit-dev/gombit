@@ -761,10 +761,10 @@ func assertSPAHonorsRuntimeAPIPrefix(t *testing.T, dest, auth string) {
 	}
 }
 
-// TestGenerateCookieCSRFBootstrapIsSerialized is the #107 regression: GET
-// /auth/csrf always mints a new cookie+body pair, so overlapping bootstrap
-// calls (React StrictMode remounts, or login before the mount effect
-// finishes) desync the HttpOnly cookie from the in-memory X-CSRF-Token.
+// TestGenerateCookieCSRFBootstrapIsSerialized is the #107 regression (bootstrap
+// is serialized behind csrfInFlight and skips when a cookie already exists) plus
+// the #250 fix (the no-op keys off the JS-readable gombit_csrf cookie, and a 403
+// on an unsafe request re-bootstraps and retries once).
 func TestGenerateCookieCSRFBootstrapIsSerialized(t *testing.T) {
 	workDir := t.TempDir()
 	err := Generate(context.Background(), Options{
@@ -781,11 +781,14 @@ func TestGenerateCookieCSRFBootstrapIsSerialized(t *testing.T) {
 	if !strings.Contains(client, "csrfInFlight") {
 		t.Fatal("cookie client.ts missing csrfInFlight lock")
 	}
-	if !strings.Contains(client, "if (getCSRFToken())") {
-		t.Fatal("cookie client.ts missing skip-if-token-exists no-op")
+	if !strings.Contains(client, "if (!force && readCSRFCookie())") {
+		t.Fatal("cookie client.ts must skip bootstrap when the gombit_csrf cookie is already present (#250)")
 	}
 	if !strings.Contains(client, "if (csrfInFlight)") {
 		t.Fatal("cookie client.ts missing in-flight promise reuse")
+	}
+	if !strings.Contains(client, "response.status === 403") {
+		t.Fatal("cookie client.ts missing 403 CSRF recovery retry (#250)")
 	}
 
 	login := readFile(t, filepath.Join(workDir, "shop", "frontend", "src", "pages", "LoginPage.tsx"))

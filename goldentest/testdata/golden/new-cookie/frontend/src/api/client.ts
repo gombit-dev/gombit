@@ -20,9 +20,11 @@ export { apiPath, apiPrefix, DEFAULT_API_PREFIX, rewriteAPIRequest } from "./api
  * Wire the generated openapi-fetch client for cookie-mode session auth
  * (M5-3). Session cookies (HttpOnly) and the CSRF cookie are managed by the
  * browser on same-origin requests; this wiring adds the X-CSRF-Token
- * double-submit header on state-changing requests and retries once after a
- * silent cookie refresh on 401. The retry rebuilds fetch() from buffered
- * body bytes so POST/PATCH JSON survives that refresh. See docs/auth-cookie.md.
+ * double-submit header (read from the gombit_csrf cookie at request time) on
+ * state-changing requests, retries once after a silent cookie refresh on 401,
+ * and retries once after re-bootstrapping CSRF on a 403. The retry rebuilds
+ * fetch() from buffered body bytes so POST/PATCH JSON survives. See
+ * docs/auth-cookie.md.
  *
  * The CSRF bootstrap and refresh calls below use fetch directly instead of
  * the typed client: they are session infrastructure, not part of the
@@ -41,7 +43,10 @@ export function createAppClient(): ApiClient {
       request = rewriteAPIRequest(request);
       if (isUnsafeMethod(request.method)) {
         await bootstrapCSRF();
-        const token = getCSRFToken();
+        // Read at request time from the JS-readable gombit_csrf cookie (the
+        // authoritative double-submit value) so a cookie rotated/re-minted by
+        // another tab or after expiry is always matched (#250).
+        const token = currentCSRFToken();
         if (token) {
           request.headers.set("X-CSRF-Token", token);
         }
@@ -60,11 +65,23 @@ export function createAppClient(): ApiClient {
     refreshInFlight = (async () => {
       try {
         await bootstrapCSRF();
-        const response = await fetch(baseUrl + apiPath("/auth/refresh"), {
+        let response = await fetch(baseUrl + apiPath("/auth/refresh"), {
           method: "POST",
           credentials: "same-origin",
           headers: csrfRequestHeaders(),
         });
+        if (response.status === 403) {
+          // /auth/refresh is itself CSRF-protected: a stale/rotated cookie 403s
+          // it. Force a fresh CSRF pair and retry the refresh once before giving
+          // up, so a bad cookie can't strand a still-valid session (#250).
+          setCSRFToken(undefined);
+          await bootstrapCSRF(true);
+          response = await fetch(baseUrl + apiPath("/auth/refresh"), {
+            method: "POST",
+            credentials: "same-origin",
+            headers: csrfRequestHeaders(),
+          });
+        }
         if (!response.ok) {
           throw new Error(`refresh failed: ${response.status}`);
         }
@@ -86,19 +103,42 @@ export function createAppClient(): ApiClient {
       return request;
     },
     async onResponse({ request, response }) {
-      if (response.status !== 401 || isAuthURL(request.url)) {
-        return response;
+      // Bounded recovery: a CSRF 403 (rotated/expired cookie) and a session 401
+      // (expired access cookie) can each occur — and consecutively on the same
+      // write, e.g. a 403 whose recovered retry then 401s. Recover each kind at
+      // most once, in either order, re-evaluating after each retry and rebuilding
+      // the request from the buffered body. CSRF recovery runs for auth endpoints
+      // too (they are CSRF-protected); the auth-URL exclusion applies only to the
+      // 401 refresh loop (#250).
+      const replay = () => {
+        const headers = new Headers(request.headers);
+        const token = currentCSRFToken();
+        if (token) {
+          headers.set("X-CSRF-Token", token);
+        }
+        return fetch(request.url, retryInit(request, headers, retryBodies.get(request)));
+      };
+      let csrfRetried = false;
+      let authRetried = false;
+      for (let i = 0; i < 2; i++) {
+        if (response.status === 403 && isUnsafeMethod(request.method) && !csrfRetried) {
+          csrfRetried = true;
+          setCSRFToken(undefined);
+          await bootstrapCSRF(true);
+          response = await replay();
+          continue;
+        }
+        if (response.status === 401 && !isAuthURL(request.url) && !authRetried) {
+          authRetried = true;
+          if (!(await refreshSession())) {
+            break;
+          }
+          response = await replay();
+          continue;
+        }
+        break;
       }
-      const ok = await refreshSession();
-      if (!ok) {
-        return response;
-      }
-      const headers = new Headers(request.headers);
-      const token = getCSRFToken();
-      if (token) {
-        headers.set("X-CSRF-Token", token);
-      }
-      return fetch(request.url, retryInit(request, headers, retryBodies.get(request)));
+      return response;
     },
   });
   return client;
@@ -107,16 +147,16 @@ export function createAppClient(): ApiClient {
 let csrfInFlight: Promise<void> | null = null;
 
 /**
- * Fetches a CSRF cookie/token pair. Concurrent callers share one in-flight
- * promise (GET /auth/csrf always mints a new pair; overlapping responses
- * desync the cookie from the in-memory X-CSRF-Token). If a token is already
- * in memory, this is a no-op so React StrictMode remounts do not mint a
- * second pair. After clearSession the token is gone and the next call
- * bootstraps again. Unsafe requests and silent refresh await this
- * before POST so a reload cannot race GET /auth/csrf.
+ * Ensures a CSRF cookie exists and mirrors its token in memory. Keys off the
+ * JS-readable gombit_csrf cookie, not the in-memory token: if the cookie is
+ * already present this is a no-op, so concurrent tabs converge on the one
+ * shared cookie. GET /auth/csrf reuses a valid cookie server-side (#250), so
+ * overlapping bootstraps no longer rotate it. Pass force=true to re-fetch even
+ * when a cookie is present (403 recovery). Concurrent callers share one
+ * in-flight promise; unsafe requests and silent refresh await this before POST.
  */
-export function bootstrapCSRF(): Promise<void> {
-  if (getCSRFToken()) {
+export function bootstrapCSRF(force = false): Promise<void> {
+  if (!force && readCSRFCookie()) {
     return Promise.resolve();
   }
   if (csrfInFlight) {
@@ -142,8 +182,37 @@ export function bootstrapCSRF(): Promise<void> {
   return csrfInFlight;
 }
 
+/**
+ * Reads the JS-readable gombit_csrf cookie — the authoritative double-submit
+ * value. The cookie is deliberately not HttpOnly so the SPA can echo it.
+ */
+function readCSRFCookie(): string {
+  if (typeof document === "undefined") {
+    return "";
+  }
+  const match = document.cookie.match(/(?:^|;\s*)gombit_csrf=([^;]*)/);
+  if (!match) {
+    return "";
+  }
+  // The server token is hex + "." (no encoding), but a malformed cookie such as
+  // "gombit_csrf=%" would make decodeURIComponent throw a URIError before any
+  // request is sent — stranding the tab before the server can replace the bad
+  // cookie. Decode best-effort; fall back to the raw value so it still reaches
+  // the server (which rejects it, triggering 403 recovery) instead of crashing.
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return match[1];
+  }
+}
+
+/** Current CSRF token: the live cookie wins over the in-memory mirror. */
+function currentCSRFToken(): string {
+  return readCSRFCookie() || getCSRFToken() || "";
+}
+
 function csrfRequestHeaders(): HeadersInit {
-  const token = getCSRFToken();
+  const token = currentCSRFToken();
   return token ? { "X-CSRF-Token": token } : {};
 }
 

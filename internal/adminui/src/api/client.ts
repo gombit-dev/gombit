@@ -57,8 +57,10 @@ function apiPath(path: string): string {
 
 /**
  * Thin same-origin fetch wrapper around D10 `{data, meta, error}`.
- * Cookie session + CSRF double-submit (X-CSRF-Token) on unsafe methods.
- * Concurrent 401s share one refreshInFlight promise. CSRF stays in memory.
+ * Cookie session + CSRF double-submit (X-CSRF-Token) on unsafe methods. The
+ * token is read from the JS-readable gombit_csrf cookie at request time.
+ * Concurrent 401s share one refreshInFlight promise; a 401 silent-refreshes and
+ * a 403 re-bootstraps CSRF, each retrying the request once.
  */
 export function createAdminClient() {
   const baseUrl = apiOrigin();
@@ -73,11 +75,23 @@ export function createAdminClient() {
         // POST /auth/refresh is CSRF-protected. AppProviders fire-and-forget
         // bootstrapCSRF; a 401 on GET /me can race that GET /auth/csrf.
         await bootstrapCSRF();
-        const response = await fetch(baseUrl + apiPath("/auth/refresh"), {
+        let response = await fetch(baseUrl + apiPath("/auth/refresh"), {
           method: "POST",
           credentials: "same-origin",
           headers: csrfRequestHeaders(),
         });
+        if (response.status === 403) {
+          // /auth/refresh is itself CSRF-protected: a stale/rotated cookie 403s
+          // it. Force a fresh CSRF pair and retry the refresh once so a bad
+          // cookie can't strand a still-valid session (#250).
+          setCSRFToken(undefined);
+          await bootstrapCSRF(true);
+          response = await fetch(baseUrl + apiPath("/auth/refresh"), {
+            method: "POST",
+            credentials: "same-origin",
+            headers: csrfRequestHeaders(),
+          });
+        }
         if (!response.ok) {
           throw new Error(`refresh failed: ${response.status}`);
         }
@@ -99,13 +113,16 @@ export function createAdminClient() {
     options?: { body?: unknown; query?: Record<string, string | number | undefined> },
   ): Promise<Envelope<T, M>> {
     const url = buildURL(baseUrl, path, options?.query);
-    const init = (csrf?: string): RequestInit => {
+    const init = (): RequestInit => {
       const headers = new Headers();
       if (options?.body !== undefined) {
         headers.set("Content-Type", "application/json");
       }
       if (isUnsafeMethod(method)) {
-        const token = csrf ?? getCSRFToken();
+        // Read the token at request time from the JS-readable gombit_csrf
+        // cookie (the authoritative double-submit value), so a cookie rotated
+        // or re-minted by another tab / after expiry is always matched (#250).
+        const token = currentCSRFToken();
         if (token) {
           headers.set("X-CSRF-Token", token);
         }
@@ -122,12 +139,32 @@ export function createAdminClient() {
       await bootstrapCSRF();
     }
 
+    // Bounded recovery: a CSRF 403 (rotated/expired cookie) and a session 401
+    // (expired access cookie) can each occur — and can occur consecutively on
+    // the same write, e.g. a 403 whose recovered retry then 401s. Recover each
+    // kind at most once, in either order, re-evaluating after every retry and
+    // rebuilding the request (init() re-reads the live cookie). The auth-path
+    // exclusion applies only to the 401 refresh loop, not to CSRF recovery (#250).
     let response = await fetch(url, init());
-    if (response.status === 401 && !isAuthPath(path)) {
-      const ok = await refreshSession();
-      if (ok) {
+    let csrfRetried = false;
+    let authRetried = false;
+    for (let i = 0; i < 2; i++) {
+      if (response.status === 403 && isUnsafeMethod(method) && !csrfRetried) {
+        csrfRetried = true;
+        setCSRFToken(undefined);
+        await bootstrapCSRF(true);
         response = await fetch(url, init());
+        continue;
       }
+      if (response.status === 401 && !isAuthPath(path) && !authRetried) {
+        authRetried = true;
+        if (!(await refreshSession())) {
+          break;
+        }
+        response = await fetch(url, init());
+        continue;
+      }
+      break;
     }
 
     const parsed: unknown = await readJSON(response);
@@ -183,16 +220,17 @@ export function useApiClient(): AdminClient {
 let csrfInFlight: Promise<void> | null = null;
 
 /**
- * Fetches a CSRF cookie/token pair. Concurrent callers share one in-flight
- * promise (GET /auth/csrf always mints a new pair; overlapping responses
- * desync the cookie from the in-memory X-CSRF-Token). If a token is already
- * in memory, this is a no-op so React StrictMode remounts do not mint a
- * second pair. After clearSession the token is gone and the next call
- * bootstraps again. Unsafe requests and silent refresh await this
- * before POST so a 401 cannot race GET /auth/csrf.
+ * Ensures a CSRF cookie exists and mirrors its token in memory. Keys off the
+ * JS-readable gombit_csrf cookie, not the in-memory token: if the cookie is
+ * already present this is a no-op (a second tab's bootstrap must not matter),
+ * so concurrent tabs converge on the one shared cookie. GET /auth/csrf reuses a
+ * valid cookie server-side (#250), so overlapping bootstraps no longer rotate
+ * it. Pass force=true to re-fetch even when a cookie is present (403 recovery).
+ * Concurrent callers share one in-flight promise. Unsafe requests and silent
+ * refresh await this before POST so a 401 cannot race GET /auth/csrf.
  */
-export function bootstrapCSRF(): Promise<void> {
-  if (getCSRFToken()) {
+export function bootstrapCSRF(force = false): Promise<void> {
+  if (!force && readCSRFCookie()) {
     return Promise.resolve();
   }
   if (csrfInFlight) {
@@ -217,8 +255,37 @@ export function bootstrapCSRF(): Promise<void> {
   return csrfInFlight;
 }
 
+/**
+ * Reads the JS-readable gombit_csrf cookie — the authoritative double-submit
+ * value. The cookie is deliberately not HttpOnly so the SPA can echo it.
+ */
+function readCSRFCookie(): string {
+  if (typeof document === "undefined") {
+    return "";
+  }
+  const match = document.cookie.match(/(?:^|;\s*)gombit_csrf=([^;]*)/);
+  if (!match) {
+    return "";
+  }
+  // The server token is hex + "." (no encoding), but a malformed cookie such as
+  // "gombit_csrf=%" would make decodeURIComponent throw a URIError before any
+  // request is sent — stranding the tab before the server can replace the bad
+  // cookie. Decode best-effort; fall back to the raw value so it still reaches
+  // the server (which rejects it, triggering 403 recovery) instead of crashing.
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return match[1];
+  }
+}
+
+/** Current CSRF token: the live cookie wins over the in-memory mirror. */
+function currentCSRFToken(): string {
+  return readCSRFCookie() || getCSRFToken() || "";
+}
+
 function csrfRequestHeaders(): HeadersInit {
-  const token = getCSRFToken();
+  const token = currentCSRFToken();
   return token ? { "X-CSRF-Token": token } : {};
 }
 

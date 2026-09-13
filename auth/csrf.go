@@ -151,13 +151,33 @@ type csrfOutput struct {
 	Body      contract.Data[csrfResult]
 }
 
+// csrfInput carries the caller's existing gombit_csrf cookie, if any, so the
+// bootstrap endpoint can reuse a still-valid token instead of rotating. The
+// cookie is ambient (not a documented request parameter); it is read here only
+// to make reuse possible.
+type csrfInput struct {
+	Existing http.Cookie `cookie:"gombit_csrf"`
+}
+
 // issueCSRFToken mounts GET /auth/csrf: the bootstrap endpoint an SPA calls
-// once (e.g. on app load) so the first mutating request — including
-// /auth/login — has a CSRF cookie to double-submit against.
-func (s *Service) issueCSRFToken(ctx context.Context, _ *struct{}) (*csrfOutput, error) {
-	value, err := newCSRFTokenValue(s.secret)
-	if err != nil {
-		return nil, contract.WithContext(ctx, contract.Internal("generate csrf token"))
+// (e.g. on app load) so the first mutating request — including /auth/login —
+// has a CSRF cookie to double-submit against.
+//
+// It REUSES a still-valid signed cookie rather than minting a fresh token on
+// every call (#250): the double-submit defense needs a shared signed value, not
+// a per-call-unique one, and rotating on each bootstrap invalidates the token
+// every other tab already holds — permanently breaking writes in those tabs.
+// Re-setting the same value also refreshes the cookie's Max-Age, so a long-lived
+// tab's CSRF cookie does not silently expire out from under it. Only a missing or
+// invalid (unsigned/forged) cookie triggers a fresh mint.
+func (s *Service) issueCSRFToken(ctx context.Context, in *csrfInput) (*csrfOutput, error) {
+	value := strings.TrimSpace(in.Existing.Value)
+	if !validCSRFTokenValue(s.secret, value) {
+		fresh, err := newCSRFTokenValue(s.secret)
+		if err != nil {
+			return nil, contract.WithContext(ctx, contract.Internal("generate csrf token"))
+		}
+		value = fresh
 	}
 	return &csrfOutput{
 		SetCookie: []http.Cookie{csrfCookie(value, s.cfg)},

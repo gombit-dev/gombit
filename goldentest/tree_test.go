@@ -168,8 +168,11 @@ func assertCookieFrontendInvariants(t *testing.T, files fileMap) {
 	if !strings.Contains(client, "csrfInFlight") {
 		t.Error("cookie-mode client.ts missing csrfInFlight lock")
 	}
-	if !strings.Contains(client, "if (getCSRFToken())") {
-		t.Error("cookie-mode client.ts missing skip-if-token-exists no-op")
+	if !strings.Contains(client, "if (!force && readCSRFCookie())") {
+		t.Error("cookie-mode client.ts must skip bootstrap when the gombit_csrf cookie is already present (#250)")
+	}
+	if !strings.Contains(client, "response.status === 403") {
+		t.Error("cookie-mode client.ts missing 403 CSRF recovery retry (#250)")
 	}
 	providers := string(files["frontend/src/app/providers.tsx"])
 	if !strings.Contains(providers, "void bootstrapCSRF()") {
