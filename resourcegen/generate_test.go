@@ -748,3 +748,48 @@ func TestGenerateNumberFieldEmptyIsZero(t *testing.T) {
 		t.Fatalf("form.tsx missing setValueAs empty→0 for qty:\n%s", formTS)
 	}
 }
+
+// TestGenerateSeedFileCollisionFails covers #218 finding 4: a seed-once path
+// already occupied by an unrelated file (no seed vars) must fail generation
+// rather than silently skip the write and leave the drift test referencing
+// undefined identifiers.
+func TestGenerateSeedFileCollisionFails(t *testing.T) {
+	workDir := t.TempDir()
+	if err := scaffold.Generate(context.Background(), scaffold.Options{
+		Name:     "demo",
+		Database: "sqlite",
+		WorkDir:  workDir,
+		Stdout:   ioDiscard{},
+	}); err != nil {
+		t.Fatalf("scaffold: %v", err)
+	}
+	appDir := filepath.Join(workDir, "demo")
+
+	bookDir := filepath.Join(appDir, "internal", "book")
+	if err := os.MkdirAll(bookDir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// Unrelated pre-existing file at the seed path — declares none of the vars.
+	if err := os.WriteFile(filepath.Join(bookDir, "book_contract.go"),
+		[]byte("package book\n\nfunc Unrelated() {}\n"), 0o600); err != nil {
+		t.Fatalf("write collision file: %v", err)
+	}
+
+	err := Generate(context.Background(), Options{
+		WorkDir:   appDir,
+		Name:      "Book",
+		Fields:    []string{"title:string:required"},
+		Stdout:    ioDiscard{},
+		skipAtlas: true,
+	})
+	if err == nil {
+		t.Fatal("want a collision error when book_contract.go exists without the seed vars")
+	}
+	if !strings.Contains(err.Error(), "collides") {
+		t.Fatalf("error = %v, want a collision message", err)
+	}
+	// Nothing should have been written on collision.
+	if _, statErr := os.Stat(filepath.Join(bookDir, "book.go")); statErr == nil {
+		t.Fatal("generation wrote files despite the seed collision")
+	}
+}

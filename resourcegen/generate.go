@@ -5,7 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"go/ast"
 	"go/format"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"sort"
@@ -157,7 +160,13 @@ func planWrites(opts Options, files []fileSpec) ([]plannedFile, error) {
 		}
 		exists := err == nil
 		if exists && file.seedOnce {
-			// Seeded once; never overwrite (human-owned after first write).
+			// Seeded once; never overwrite (human-owned after first write). But an
+			// unrelated file that merely collides on this path would leave the
+			// generated drift test referencing undefined identifiers, so require it
+			// to actually declare the seed's vars before trusting it.
+			if err := checkSeedProvenance(display, existing, file.content); err != nil {
+				return nil, err
+			}
 			continue
 		}
 		if exists && bytes.Equal(existing, file.content) {
@@ -181,6 +190,60 @@ func planWrites(opts Options, files []fileSpec) ([]plannedFile, error) {
 		})
 	}
 	return planned, nil
+}
+
+// checkSeedProvenance verifies a pre-existing seed-once file declares the
+// top-level vars the generated seed content provides. A file that does not — an
+// unrelated file that happens to share the path — is a collision: skipping the
+// write silently would leave the generated drift test referencing undefined
+// identifiers and the app uncompilable, so fail before planning any writes.
+func checkSeedProvenance(display string, existing, content []byte) error {
+	want, err := topLevelVarNames(content)
+	if err != nil {
+		return fmt.Errorf("resourcegen: parse generated seed for %s: %w", display, err)
+	}
+	have, err := topLevelVarNames(existing)
+	if err != nil {
+		return fmt.Errorf("resourcegen: %s already exists but is not parseable Go; move or remove it: %w", display, err)
+	}
+	var missing []string
+	for name := range want {
+		if !have[name] {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		return fmt.Errorf("resourcegen: %s already exists but does not declare %s; it collides with a generated seed file — rename or remove it", display, strings.Join(missing, ", "))
+	}
+	return nil
+}
+
+// topLevelVarNames returns the names bound by package-level `var` declarations.
+func topLevelVarNames(src []byte) (map[string]bool, error) {
+	file, err := parser.ParseFile(token.NewFileSet(), "seed.go", src, 0)
+	if err != nil {
+		return nil, err
+	}
+	names := map[string]bool{}
+	for _, decl := range file.Decls {
+		gd, ok := decl.(*ast.GenDecl)
+		if !ok || gd.Tok != token.VAR {
+			continue
+		}
+		for _, spec := range gd.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for _, n := range vs.Names {
+				if n.Name != "_" {
+					names[n.Name] = true
+				}
+			}
+		}
+	}
+	return names, nil
 }
 
 func checkOverwrite(display string, existing []byte, file fileSpec, force bool) error {

@@ -236,14 +236,90 @@ func TestValidateCreateGrammarHappyPath(t *testing.T) {
 	}
 }
 
-// The simple `return h.DB.….Create(&row).Error` shape is also accepted.
-func TestValidateCreateGrammarAcceptsReturnCreate(t *testing.T) {
+// The grammar is exact: even a bare `return h.DB.….Create(&row).Error` (no
+// checked-error if) is not what the generator emits, so it is rejected.
+func TestValidateCreateGrammarRejectsBareReturnCreate(t *testing.T) {
 	src := withCtor(`func (h *Handler) create(ctx context.Context, input *createBookInput) error {
 	row := buildBookForCreate(ctx, input)
 	return h.DB.WithContext(ctx).Create(&row).Error
 }`)
+	if ok, _ := grammarOK(t, src); ok {
+		t.Fatal("want rejected: the exact grammar requires the checked-error if, not a bare return")
+	}
+}
+
+// Finding 1 (this round): a Create guarded by a business conditional leaves a
+// runtime path that returns success without persisting. Rejected.
+func TestValidateCreateGrammarRejectsConditionalCreate(t *testing.T) {
+	src := withCtor(`func (h *Handler) create(ctx context.Context, input *createBookInput) error {
+	row := buildBookForCreate(ctx, input)
+	if input.Body.Title != "" {
+		return h.DB.WithContext(ctx).Create(&row).Error
+	}
+	return nil
+}`)
+	if ok, _ := grammarOK(t, src); ok {
+		t.Fatal("want rejected: one path returns success without persisting")
+	}
+}
+
+// Finding 1 (this round): the Create runs but its error is ignored, so the only
+// write can fail while the handler reports success. Rejected.
+func TestValidateCreateGrammarRejectsUncheckedCreate(t *testing.T) {
+	src := withCtor(`func (h *Handler) create(ctx context.Context, input *createBookInput) error {
+	row := buildBookForCreate(ctx, input)
+	h.DB.WithContext(ctx).Create(&row)
+	return nil
+}`)
+	if ok, _ := grammarOK(t, src); ok {
+		t.Fatal("want rejected: the Create error is not checked")
+	}
+}
+
+// Finding 2 (this round): `h.Audit.DB.….Create` writes through a nested database,
+// not the handler's own h.DB. Rejected — .DB appearing somewhere in the chain is
+// not the receiver's direct DB field.
+func TestValidateCreateGrammarRejectsNestedDBCreate(t *testing.T) {
+	src := withCtor(`func (h *Handler) create(ctx context.Context, input *createBookInput) error {
+	row := buildBookForCreate(ctx, input)
+	if err := h.Audit.DB.WithContext(ctx).Create(&row).Error; err != nil {
+		return err
+	}
+	return nil
+}`)
+	if ok, _ := grammarOK(t, src); ok {
+		t.Fatal("want rejected: Create must be through the receiver's own DB field, not h.Audit.DB")
+	}
+}
+
+// Finding 3 (this round): a same-named constructor METHOD decoy is declared
+// before the package function. The validator must judge the package function
+// (which the unqualified call resolves to), and it omits TenantID.
+func TestValidateCreateGrammarIgnoresConstructorMethodDecoy(t *testing.T) {
+	src := `package book
+func (p *Probe) buildBookForCreate(ctx context.Context, input *createBookInput) Book {
+	return Book{Title: input.Body.Title, TenantID: input.Body.TenantID}
+}
+func buildBookForCreate(ctx context.Context, input *createBookInput) Book {
+	return Book{Title: input.Body.Title}
+}
+func (h *Handler) create(ctx context.Context, input *createBookInput) (*createBookOutput, error) {
+	row := buildBookForCreate(ctx, input)
+	if err := h.DB.WithContext(ctx).Create(&row).Error; err != nil {
+		return nil, err
+	}
+	return nil, nil
+}`
 	if ok, detail := grammarOK(t, src); !ok {
-		t.Fatalf("want ok; detail=%q", detail)
+		t.Fatalf("want ok (the package constructor is valid); detail=%q", detail)
+	}
+	// The field collector must certify only the package function's fields.
+	got, err := resourcecheck.ConstructorCreateFields([]byte(src), "buildBookForCreate", "Book")
+	if err != nil {
+		t.Fatalf("ConstructorCreateFields: %v", err)
+	}
+	if !reflect.DeepEqual(got, []string{"Title"}) {
+		t.Fatalf("assigned = %v, want [Title] (the method decoy's TenantID must not be certified)", got)
 	}
 }
 

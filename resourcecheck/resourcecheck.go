@@ -84,19 +84,13 @@ func MissingCreateColumns(model any, assignedGoFields []string, serverManaged []
 // closed, surfacing every required column as drift to resolve explicitly rather
 // than a silent gap.
 func ConstructorCreateFields(handlerSrc []byte, funcName, typeName string) ([]string, error) {
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "handler.go", handlerSrc, 0)
+	file, err := parseHandler(handlerSrc)
 	if err != nil {
-		return nil, fmt.Errorf("resourcecheck: parse handler: %w", err)
+		return nil, err
 	}
-	var fn *ast.FuncDecl
-	for _, decl := range file.Decls {
-		d, ok := decl.(*ast.FuncDecl)
-		if ok && d.Name != nil && d.Name.Name == funcName && d.Body != nil {
-			fn = d
-			break
-		}
-	}
+	// Only the package-level function (Recv == nil) — the one an unqualified
+	// call resolves to — is inspected; a same-named method decoy is ignored.
+	fn := packageFunc(file, funcName)
 	if fn == nil {
 		return nil, nil
 	}
@@ -182,8 +176,8 @@ func ValidateCreateGrammar(handlerSrc []byte, receiverType, createMethod, ctorNa
 		return false, detail, nil
 	}
 
-	// The create method must be declared on the expected receiver (a same-named
-	// method on another type is not the registered handler).
+	// Exactly one create method, on the expected receiver (a same-named method on
+	// another type is not the registered handler).
 	var fn *ast.FuncDecl
 	for _, decl := range file.Decls {
 		d, ok := decl.(*ast.FuncDecl)
@@ -206,137 +200,58 @@ func ValidateCreateGrammar(handlerSrc []byte, receiverType, createMethod, ctorNa
 		return false, "unsupported create-handler shape: " + createMethod + " has no named receiver", nil
 	}
 
-	// Exactly one persistence call `<recv>.….DB.….Create(&row)`: rooted at the
-	// receiver AND passing through its .DB field, so `h.Audit.Create` or a bare
-	// `.Create` on some other object cannot masquerade as the GORM write.
-	var createCall *ast.CallExpr
-	createCount := 0
-	ast.Inspect(fn.Body, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok || sel.Sel == nil || sel.Sel.Name != "Create" || len(call.Args) != 1 {
-			return true
-		}
-		if rootIdentName(sel.X) != recvVar || !chainSelects(sel.X, "DB") {
-			return true
-		}
-		createCall = call
-		createCount++
-		return true
-	})
-	if createCount != 1 {
-		return false, fmt.Sprintf("unsupported create-handler shape: expected exactly one %s.DB.….Create(&row) call, found %d", recvVar, createCount), nil
-	}
-	if enclosedInDisallowed(fn.Body, createCall) {
-		return false, "unsupported create-handler shape: the Create call is inside a defer/go/loop/closure, so it is not the straight-line persistence", nil
+	// The body must be EXACTLY the three generated statements, in order:
+	//
+	//	row := <ctorName>(ctx, input)
+	//	if err := <recv>.DB.….Create(&row).Error; err != nil { … }
+	//	return …
+	//
+	// Recognizing the whole program — rather than searching a permissive AST for a
+	// compatible Create somewhere — is what makes this fail closed: a conditional
+	// or unchecked Create, an early return, a reorder, or any extra statement
+	// (a mutation, a second Create) changes the statement list and is rejected.
+	shapeErr := "unsupported create-handler shape: the create method must be exactly `row := " +
+		ctorName + "(ctx, input)`, then `if err := " + recvVar +
+		".DB.….Create(&row).Error; err != nil { … }`, then a single return"
+	body := fn.Body.List
+	if len(body) != 3 {
+		return false, shapeErr, nil
 	}
 
-	createAddr := createCall.Args[0]
-	createArg := identName(createAddr)
-	createArgIdent := argIdent(createAddr)
-	if createArg == "" || createArgIdent == nil {
-		return false, "unsupported create-handler shape: the Create argument is not a plain &row variable", nil
+	// Statement 1: row := <ctorName>(...).
+	assign, ok := body[0].(*ast.AssignStmt)
+	if !ok || assign.Tok != token.DEFINE || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 {
+		return false, shapeErr, nil
+	}
+	rowIdent, ok := assign.Lhs[0].(*ast.Ident)
+	if !ok || !isCallTo(assign.Rhs[0], ctorName) {
+		return false, shapeErr, nil
+	}
+	row := rowIdent.Name
+
+	// Statement 2: the checked-error Create through the receiver's own DB field.
+	ifStmt, ok := body[1].(*ast.IfStmt)
+	if !ok || !isCheckedDBCreate(ifStmt, recvVar, row) {
+		return false, shapeErr, nil
 	}
 
-	// row is assigned exactly once, from ctorName, and never field-mutated or
-	// incremented (server values belong inside the constructor literal).
-	assignCount := 0
-	var ctorAssign *ast.AssignStmt
-	var ctorLHSIdent *ast.Ident
-	mutated := ""
-	ast.Inspect(fn.Body, func(n ast.Node) bool {
-		if mutated != "" {
-			return false
-		}
-		switch s := n.(type) {
-		case *ast.IncDecStmt:
-			if touchesVar(s.X, createArg) {
-				mutated = createArg + " is incremented/decremented"
-			}
-		case *ast.AssignStmt:
-			for i, lhs := range s.Lhs {
-				switch target := lhs.(type) {
-				case *ast.Ident:
-					if target.Name == createArg {
-						assignCount++
-						if i < len(s.Rhs) && isCallTo(s.Rhs[i], ctorName) {
-							ctorAssign = s
-							ctorLHSIdent = target
-						}
-					}
-				case *ast.SelectorExpr:
-					if x, ok := target.X.(*ast.Ident); ok && x.Name == createArg {
-						mutated = createArg + "." + target.Sel.Name + " is assigned after construction"
-					}
-				}
-			}
-		}
-		return true
-	})
-	if mutated != "" {
-		return false, "unsupported create-handler shape: " + mutated + "; set server-derived values inside " + ctorName, nil
-	}
-	if assignCount != 1 || ctorAssign == nil {
-		return false, "unsupported create-handler shape: " + createArg + " must be assigned exactly once from " + ctorName + "(...)", nil
-	}
-
-	// Ordering + dominance: the constructor assignment and the Create call must
-	// each be a TOP-LEVEL statement, assignment strictly first.
-	ctorIdx, createIdx := -1, -1
-	for i, stmt := range fn.Body.List {
-		if stmt == ctorAssign {
-			ctorIdx = i
-		}
-		if stmtReachesNode(stmt, createCall) {
-			createIdx = i
-		}
-	}
-	if ctorIdx < 0 || createIdx < 0 || ctorIdx >= createIdx {
-		return false, "unsupported create-handler shape: " + ctorName + "(...) must be a top-level statement before the Create call", nil
-	}
-
-	// Allowlist every use of row before Create: only the constructor assignment's
-	// LHS and the &row Create argument. Any other pre-Create use — a method call
-	// (which may take &row implicitly), a stray &row, a read — is rejected. Uses
-	// after Create (response mapping) are post-persist reads and are free.
-	stray := ""
-	ast.Inspect(fn.Body, func(n ast.Node) bool {
-		if stray != "" {
-			return false
-		}
-		id, ok := n.(*ast.Ident)
-		if !ok || id.Name != createArg {
-			return true
-		}
-		if id == ctorLHSIdent || id == createArgIdent || id.Pos() > createCall.End() {
-			return true
-		}
-		stray = "unsupported create-handler shape: " + createArg + " is used before Create in a way that could mutate it (a method call, alias, or read)"
-		return false
-	})
-	if stray != "" {
-		return false, stray, nil
+	// Statement 3: a return (the response). row is not mutable here — a single
+	// ReturnStmt cannot reassign it, and any mutating statement would have made
+	// the body longer than three.
+	if _, ok := body[2].(*ast.ReturnStmt); !ok {
+		return false, shapeErr, nil
 	}
 	return true, "", nil
 }
 
-// validateConstructor requires ctorName to be a single unconditional
-// `return <typeName>{...}` — no branches, locals, or alternate returns — so the
-// value it produces is exactly the literal ConstructorCreateFields inspects.
+// validateConstructor requires ctorName to be a single package-level function
+// (not a method — Recv == nil) whose only statement is `return <typeName>{...}`.
+// Requiring Recv == nil closes a decoy where a same-named method is inspected
+// while the handler's unqualified call resolves to the package function.
 func validateConstructor(file *ast.File, ctorName, typeName string) (bool, string) {
-	var fn *ast.FuncDecl
-	for _, decl := range file.Decls {
-		d, ok := decl.(*ast.FuncDecl)
-		if ok && d.Name != nil && d.Name.Name == ctorName && d.Body != nil {
-			fn = d
-			break
-		}
-	}
+	fn := packageFunc(file, ctorName)
 	if fn == nil {
-		return false, "unsupported constructor shape: no " + ctorName + " function"
+		return false, "unsupported constructor shape: no package-level " + ctorName + " function"
 	}
 	if len(fn.Body.List) != 1 {
 		return false, "unsupported constructor shape: " + ctorName + " must be a single `return " + typeName + "{...}` statement"
@@ -355,21 +270,90 @@ func validateConstructor(file *ast.File, ctorName, typeName string) (bool, strin
 	return true, ""
 }
 
-// chainSelects reports whether the selector/call chain rooted at expr passes
-// through a `.field` selector (e.g. "DB" in `h.DB.WithContext(ctx)`).
-func chainSelects(expr ast.Expr, field string) bool {
+// packageFunc returns the single package-level function (Recv == nil) named name,
+// or nil if there is none or more than one (an ambiguity fails closed).
+func packageFunc(file *ast.File, name string) *ast.FuncDecl {
+	var found *ast.FuncDecl
+	for _, decl := range file.Decls {
+		d, ok := decl.(*ast.FuncDecl)
+		if !ok || d.Recv != nil || d.Name == nil || d.Name.Name != name || d.Body == nil {
+			continue
+		}
+		if found != nil {
+			return nil
+		}
+		found = d
+	}
+	return found
+}
+
+// isCheckedDBCreate reports whether ifStmt is exactly
+// `if err := <recv>.DB.….Create(&row).Error; err != nil { … }`: the persisted
+// error is checked, the call is GORM's Create on the receiver's own DB field, and
+// its argument is &row. This is what ties "the write happened and was checked" to
+// the row the constructor built.
+func isCheckedDBCreate(ifStmt *ast.IfStmt, recvVar, row string) bool {
+	init, ok := ifStmt.Init.(*ast.AssignStmt)
+	if !ok || init.Tok != token.DEFINE || len(init.Lhs) != 1 || len(init.Rhs) != 1 {
+		return false
+	}
+	errIdent, ok := init.Lhs[0].(*ast.Ident)
+	if !ok {
+		return false
+	}
+	// RHS: <chain>.Create(&row).Error
+	dotError, ok := init.Rhs[0].(*ast.SelectorExpr)
+	if !ok || dotError.Sel == nil || dotError.Sel.Name != "Error" {
+		return false
+	}
+	createCall, ok := dotError.X.(*ast.CallExpr)
+	if !ok || len(createCall.Args) != 1 {
+		return false
+	}
+	createSel, ok := createCall.Fun.(*ast.SelectorExpr)
+	if !ok || createSel.Sel == nil || createSel.Sel.Name != "Create" {
+		return false
+	}
+	if !baseIsReceiverField(createSel.X, recvVar, "DB") {
+		return false
+	}
+	amp, ok := createCall.Args[0].(*ast.UnaryExpr)
+	if !ok || amp.Op != token.AND {
+		return false
+	}
+	if id, ok := amp.X.(*ast.Ident); !ok || id.Name != row {
+		return false
+	}
+	// Cond: err != nil (in either operand order).
+	cond, ok := ifStmt.Cond.(*ast.BinaryExpr)
+	if !ok || cond.Op != token.NEQ {
+		return false
+	}
+	errVsNil := (isIdent(cond.X, errIdent.Name) && isNilIdent(cond.Y)) ||
+		(isIdent(cond.Y, errIdent.Name) && isNilIdent(cond.X))
+	if !errVsNil {
+		return false
+	}
+	// The error branch must return (not fall through and persist nothing).
+	return ifStmt.Body != nil && blockReturns(ifStmt.Body)
+}
+
+// baseIsReceiverField reports whether the selector/call chain's base is exactly
+// `<recv>.<field>` — the innermost selector applies field directly to the
+// receiver identifier. So `h.DB.…` matches but `h.Audit.DB.…` does not.
+func baseIsReceiverField(expr ast.Expr, recv, field string) bool {
 	for {
 		switch e := expr.(type) {
-		case *ast.SelectorExpr:
-			if e.Sel != nil && e.Sel.Name == field {
-				return true
-			}
-			expr = e.X
 		case *ast.CallExpr:
 			expr = e.Fun
 		case *ast.ParenExpr:
 			expr = e.X
 		case *ast.IndexExpr:
+			expr = e.X
+		case *ast.SelectorExpr:
+			if id, ok := e.X.(*ast.Ident); ok {
+				return id.Name == recv && e.Sel != nil && e.Sel.Name == field
+			}
 			expr = e.X
 		default:
 			return false
@@ -377,41 +361,24 @@ func chainSelects(expr ast.Expr, field string) bool {
 	}
 }
 
-// enclosedInDisallowed reports whether target sits inside a defer, go, loop, or
-// function literal within root — positions where lexical order is not runtime
-// order, or the call may run zero or many times.
-func enclosedInDisallowed(root, target ast.Node) bool {
-	banned := false
-	ast.Inspect(root, func(n ast.Node) bool {
-		if banned {
-			return false
+// blockReturns reports whether a block's own statements include a return.
+func blockReturns(block *ast.BlockStmt) bool {
+	for _, stmt := range block.List {
+		if _, ok := stmt.(*ast.ReturnStmt); ok {
+			return true
 		}
-		switch n.(type) {
-		case *ast.DeferStmt, *ast.GoStmt, *ast.ForStmt, *ast.RangeStmt, *ast.FuncLit:
-			if containsNode(n, target) {
-				banned = true
-				return false
-			}
-		}
-		return true
-	})
-	return banned
+	}
+	return false
 }
 
-// containsNode reports whether target appears anywhere within root.
-func containsNode(root, target ast.Node) bool {
-	found := false
-	ast.Inspect(root, func(n ast.Node) bool {
-		if found {
-			return false
-		}
-		if n == target {
-			found = true
-			return false
-		}
-		return true
-	})
-	return found
+func isIdent(expr ast.Expr, name string) bool {
+	id, ok := expr.(*ast.Ident)
+	return ok && id.Name == name
+}
+
+func isNilIdent(expr ast.Expr) bool {
+	id, ok := expr.(*ast.Ident)
+	return ok && id.Name == "nil"
 }
 
 // receiverTypeName returns fn's receiver type name without a leading pointer
@@ -436,83 +403,6 @@ func receiverVarName(fn *ast.FuncDecl) string {
 		return ""
 	}
 	return fn.Recv.List[0].Names[0].Name
-}
-
-// rootIdentName walks a selector/call chain to its leftmost identifier
-// (`h.DB.WithContext(ctx).Create` → "h"), or "" if it is not ident-rooted.
-func rootIdentName(expr ast.Expr) string {
-	for {
-		switch e := expr.(type) {
-		case *ast.Ident:
-			return e.Name
-		case *ast.SelectorExpr:
-			expr = e.X
-		case *ast.CallExpr:
-			expr = e.Fun
-		case *ast.ParenExpr:
-			expr = e.X
-		case *ast.IndexExpr:
-			expr = e.X
-		default:
-			return ""
-		}
-	}
-}
-
-// argIdent returns the identifier inside `&x` or a bare `x`, else nil.
-func argIdent(expr ast.Expr) *ast.Ident {
-	if u, ok := expr.(*ast.UnaryExpr); ok {
-		expr = u.X
-	}
-	if id, ok := expr.(*ast.Ident); ok {
-		return id
-	}
-	return nil
-}
-
-// touchesVar reports whether expr is `name` or `name.Field` (an inc/dec target
-// that would mutate the variable).
-func touchesVar(expr ast.Expr, name string) bool {
-	switch e := expr.(type) {
-	case *ast.Ident:
-		return e.Name == name
-	case *ast.SelectorExpr:
-		x, ok := e.X.(*ast.Ident)
-		return ok && x.Name == name
-	}
-	return false
-}
-
-// stmtReachesNode reports whether target appears within stmt without crossing a
-// function-literal boundary (so a Create inside a closure is not "reached" by the
-// enclosing top-level statement).
-func stmtReachesNode(stmt ast.Stmt, target ast.Node) bool {
-	found := false
-	ast.Inspect(stmt, func(n ast.Node) bool {
-		if found {
-			return false
-		}
-		if _, ok := n.(*ast.FuncLit); ok && n != target {
-			return false
-		}
-		if n == target {
-			found = true
-			return false
-		}
-		return true
-	})
-	return found
-}
-
-// identName returns the identifier name of `x` or `&x`, else "".
-func identName(expr ast.Expr) string {
-	if u, ok := expr.(*ast.UnaryExpr); ok {
-		expr = u.X
-	}
-	if id, ok := expr.(*ast.Ident); ok {
-		return id.Name
-	}
-	return ""
 }
 
 // isCallTo reports whether expr is a call to the function named funcName.
