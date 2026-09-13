@@ -189,10 +189,9 @@ func MakeMigrations(ctx context.Context, opts Options) error {
 	}
 	// A diff that renames a field shows up as a drop + add, which Atlas turns
 	// into a table rebuild that can lose data or fail to apply to a non-empty
-	// table. Point at the tooling that surfaces/repairs that (#219) rather than
-	// letting it fail silently mid-apply.
-	_, _ = fmt.Fprintln(opts.Stdout, "Run 'gombit db lint' to check the new migration for destructive or non-appliable changes.")
-	_, _ = fmt.Fprintln(opts.Stdout, "If you hand-edit a migration, run 'gombit db hash' to refresh atlas.sum before 'gombit db migrate'.")
+	// table. Review the generated SQL; if you hand-edit it, `gombit db hash`
+	// refreshes atlas.sum so the migration still applies (#219).
+	_, _ = fmt.Fprintln(opts.Stdout, "Review the generated migration before applying. If you hand-edit it, run 'gombit db hash' to refresh atlas.sum before 'gombit db migrate'.")
 	return nil
 }
 

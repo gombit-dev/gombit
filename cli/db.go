@@ -31,7 +31,6 @@ func newDBCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
 	cmd.AddCommand(newSeedCommand(stdout, stderr))
 	cmd.AddCommand(newResetCommand(stdout, stderr))
 	cmd.AddCommand(newHashCommand(stdout, stderr))
-	cmd.AddCommand(newLintCommand(stdout, stderr))
 	return cmd
 }
 
@@ -62,55 +61,6 @@ func newHashCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
 		},
 	})
 	bindApplyFlags(cmd)
-	return cmd
-}
-
-func newLintCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
-	cmd := silence(&cobra.Command{
-		Use:   "lint",
-		Short: "Analyze recent migrations for destructive or non-appliable changes (atlas migrate lint)",
-		Args:  cobra.ArbitraryArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) != 0 {
-				return fmt.Errorf("gombit db lint: unexpected argument %q", args[0])
-			}
-			cfg, err := LoadConfig()
-			if err != nil {
-				return err
-			}
-			migrationDir, err := cmd.Flags().GetString("dir")
-			if err != nil {
-				return err
-			}
-			atlasBin, err := cmd.Flags().GetString("atlas-bin")
-			if err != nil {
-				return err
-			}
-			devURL, err := cmd.Flags().GetString("dev-url")
-			if err != nil {
-				return err
-			}
-			latest, err := cmd.Flags().GetInt("latest")
-			if err != nil {
-				return err
-			}
-			return migrations.Lint(cmd.Context(), migrations.LintOptions{
-				ApplyOptions: migrations.ApplyOptions{
-					WorkDir:      ".",
-					MigrationDir: migrationDir,
-					AtlasBinary:  atlasBin,
-					Database:     cfg.Database,
-					Stdout:       stdout,
-					Stderr:       stderr,
-				},
-				DevURL: devURL,
-				Latest: latest,
-			})
-		},
-	})
-	bindApplyFlags(cmd)
-	cmd.Flags().String("dev-url", "", "Atlas dev database URL (defaults to in-memory SQLite for the sqlite driver; required for postgres/mysql)")
-	cmd.Flags().Int("latest", 1, "number of most-recent migrations to analyze")
 	return cmd
 }
 
