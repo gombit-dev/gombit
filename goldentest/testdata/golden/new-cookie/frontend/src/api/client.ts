@@ -65,11 +65,23 @@ export function createAppClient(): ApiClient {
     refreshInFlight = (async () => {
       try {
         await bootstrapCSRF();
-        const response = await fetch(baseUrl + apiPath("/auth/refresh"), {
+        let response = await fetch(baseUrl + apiPath("/auth/refresh"), {
           method: "POST",
           credentials: "same-origin",
           headers: csrfRequestHeaders(),
         });
+        if (response.status === 403) {
+          // /auth/refresh is itself CSRF-protected: a stale/rotated cookie 403s
+          // it. Force a fresh CSRF pair and retry the refresh once before giving
+          // up, so a bad cookie can't strand a still-valid session (#250).
+          setCSRFToken(undefined);
+          await bootstrapCSRF(true);
+          response = await fetch(baseUrl + apiPath("/auth/refresh"), {
+            method: "POST",
+            credentials: "same-origin",
+            headers: csrfRequestHeaders(),
+          });
+        }
         if (!response.ok) {
           throw new Error(`refresh failed: ${response.status}`);
         }
@@ -91,14 +103,12 @@ export function createAppClient(): ApiClient {
       return request;
     },
     async onResponse({ request, response }) {
-      if (
-        response.status === 403 &&
-        isUnsafeMethod(request.method) &&
-        !isAuthURL(request.url)
-      ) {
+      if (response.status === 403 && isUnsafeMethod(request.method)) {
         // A CSRF 403 means our cookie was rotated/expired out from under us.
         // Drop the stale in-memory mirror, force a fresh bootstrap, and retry
-        // once — mirroring the 401 silent-refresh path (#250).
+        // once — mirroring the 401 silent-refresh path (#250). This runs for
+        // auth endpoints too (login/register/logout are CSRF-protected): the
+        // auth-URL exclusion applies only to 401 refresh, not CSRF recovery.
         setCSRFToken(undefined);
         await bootstrapCSRF(true);
         const headers = new Headers(request.headers);
@@ -173,7 +183,19 @@ function readCSRFCookie(): string {
     return "";
   }
   const match = document.cookie.match(/(?:^|;\s*)gombit_csrf=([^;]*)/);
-  return match ? decodeURIComponent(match[1]) : "";
+  if (!match) {
+    return "";
+  }
+  // The server token is hex + "." (no encoding), but a malformed cookie such as
+  // "gombit_csrf=%" would make decodeURIComponent throw a URIError before any
+  // request is sent — stranding the tab before the server can replace the bad
+  // cookie. Decode best-effort; fall back to the raw value so it still reaches
+  // the server (which rejects it, triggering 403 recovery) instead of crashing.
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return match[1];
+  }
 }
 
 /** Current CSRF token: the live cookie wins over the in-memory mirror. */

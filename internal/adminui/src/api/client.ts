@@ -75,11 +75,23 @@ export function createAdminClient() {
         // POST /auth/refresh is CSRF-protected. AppProviders fire-and-forget
         // bootstrapCSRF; a 401 on GET /me can race that GET /auth/csrf.
         await bootstrapCSRF();
-        const response = await fetch(baseUrl + apiPath("/auth/refresh"), {
+        let response = await fetch(baseUrl + apiPath("/auth/refresh"), {
           method: "POST",
           credentials: "same-origin",
           headers: csrfRequestHeaders(),
         });
+        if (response.status === 403) {
+          // /auth/refresh is itself CSRF-protected: a stale/rotated cookie 403s
+          // it. Force a fresh CSRF pair and retry the refresh once so a bad
+          // cookie can't strand a still-valid session (#250).
+          setCSRFToken(undefined);
+          await bootstrapCSRF(true);
+          response = await fetch(baseUrl + apiPath("/auth/refresh"), {
+            method: "POST",
+            credentials: "same-origin",
+            headers: csrfRequestHeaders(),
+          });
+        }
         if (!response.ok) {
           throw new Error(`refresh failed: ${response.status}`);
         }
@@ -239,7 +251,19 @@ function readCSRFCookie(): string {
     return "";
   }
   const match = document.cookie.match(/(?:^|;\s*)gombit_csrf=([^;]*)/);
-  return match ? decodeURIComponent(match[1]) : "";
+  if (!match) {
+    return "";
+  }
+  // The server token is hex + "." (no encoding), but a malformed cookie such as
+  // "gombit_csrf=%" would make decodeURIComponent throw a URIError before any
+  // request is sent — stranding the tab before the server can replace the bad
+  // cookie. Decode best-effort; fall back to the raw value so it still reaches
+  // the server (which rejects it, triggering 403 recovery) instead of crashing.
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return match[1];
+  }
 }
 
 /** Current CSRF token: the live cookie wins over the in-memory mirror. */

@@ -198,6 +198,96 @@ describe("admin client CSRF cookie handling (#250)", () => {
     await expect(client.list("widgets")).rejects.toThrow();
     expect(listHits).toBe(1); // GET is not retried on 403
   });
+
+  it("does not crash on a malformed gombit_csrf cookie and recovers via the server", async () => {
+    // "gombit_csrf=%" would make decodeURIComponent throw before any request.
+    const doc = { cookie: "gombit_csrf=%", querySelector: () => null };
+    vi.stubGlobal("document", doc);
+    let createHits = 0;
+    const sentTokens: Array<string | null> = [];
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = String(input);
+      if (url.includes("/auth/csrf")) {
+        doc.cookie = "gombit_csrf=fresh-tok"; // server Set-Cookie replaces the bad value
+        return jsonResponse(200, { data: { csrf_token: "fresh-tok" } });
+      }
+      if (url.includes("/admin/resources/widgets")) {
+        createHits += 1;
+        sentTokens.push(header(init, "X-CSRF-Token"));
+        if (createHits === 1) {
+          return jsonResponse(403, { error: { code: "authorization_error", message: "csrf" } });
+        }
+        return jsonResponse(200, { data: { id: 1 } });
+      }
+      return jsonResponse(404, { error: { code: "not_found", message: url } });
+    });
+
+    const client = createAdminClient();
+    const env = await client.create("widgets", { name: "x" }); // must not throw URIError
+    expect(env.data).toEqual({ id: 1 });
+    expect(sentTokens[0]).toBe("%"); // malformed value still reached the server (no crash)
+    expect(sentTokens[1]).toBe("fresh-tok"); // retry used the server-replaced cookie
+  });
+
+  it("recovers a CSRF 403 on an auth endpoint (login) and retries once", async () => {
+    const doc = { cookie: "gombit_csrf=stale", querySelector: () => null };
+    vi.stubGlobal("document", doc);
+    let loginHits = 0;
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = String(input);
+      if (url.includes("/auth/csrf")) {
+        doc.cookie = "gombit_csrf=good";
+        return jsonResponse(200, { data: { csrf_token: "good" } });
+      }
+      if (url.includes("/auth/login")) {
+        loginHits += 1;
+        if (header(init, "X-CSRF-Token") !== "good") {
+          return jsonResponse(403, { error: { code: "authorization_error", message: "csrf" } });
+        }
+        return jsonResponse(200, { data: { id: 1, email: "a@b.c" } });
+      }
+      return jsonResponse(404, { error: { code: "not_found", message: url } });
+    });
+
+    const client = createAdminClient();
+    const env = await client.login("a@b.c", "secret");
+    expect(env.data.email).toBe("a@b.c");
+    expect(loginHits).toBe(2); // stale 403 on the auth endpoint + retry after recovery
+  });
+
+  it("retries /auth/refresh once when a stale CSRF cookie 403s it", async () => {
+    const doc = { cookie: "gombit_csrf=stale", querySelector: () => null };
+    vi.stubGlobal("document", doc);
+    let meHits = 0;
+    let refreshHits = 0;
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = String(input);
+      if (url.includes("/auth/csrf")) {
+        doc.cookie = "gombit_csrf=good";
+        return jsonResponse(200, { data: { csrf_token: "good" } });
+      }
+      if (url.includes("/auth/refresh")) {
+        refreshHits += 1;
+        if (header(init, "X-CSRF-Token") !== "good") {
+          return jsonResponse(403, { error: { code: "authorization_error", message: "csrf" } });
+        }
+        return jsonResponse(200, { data: { ok: true } });
+      }
+      if (url.includes("/me")) {
+        meHits += 1;
+        if (meHits === 1) {
+          return jsonResponse(401, { error: { code: "authentication", message: "unauthorized" } });
+        }
+        return jsonResponse(200, { data: { id: 1, email: "a@b.c" } });
+      }
+      return jsonResponse(404, { error: { code: "not_found", message: url } });
+    });
+
+    const client = createAdminClient();
+    const env = await client.me();
+    expect(env.data.email).toBe("a@b.c");
+    expect(refreshHits).toBe(2); // stale 403 on refresh + retry after forced bootstrap
+  });
 });
 
 describe("admin client resource IDs", () => {
