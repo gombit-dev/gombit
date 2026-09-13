@@ -270,7 +270,17 @@ func (h *handlers) deleteResource(ctx context.Context, input *itemInput) (*delet
 	if err != nil {
 		return nil, contract.WithContext(ctx, contract.Internal("admin database is not attached"))
 	}
-	if err := db.WithContext(ctx).Delete(inst).Error; err != nil {
+	// Hard delete so the database's real foreign keys enforce referential
+	// integrity atomically (#220). gorm.Model makes the default Delete a SOFT
+	// delete — it sets deleted_at with no physical DELETE — so ON DELETE
+	// RESTRICT/NO ACTION never fires and a referenced parent could be "deleted"
+	// while a live child keeps pointing at an API-404 row. Unscoped issues a real
+	// DELETE, so the database enforces RESTRICT in one statement (a referenced row
+	// errors, mapped to 409 by MapDeleteError) and actually executes a declared
+	// CASCADE / SET NULL. There is no app-layer pre-scan to race: the invariant is
+	// the database constraint itself. The admin never exposed soft-delete recovery
+	// (no restore path), so this removes no feature.
+	if err := db.WithContext(ctx).Unscoped().Delete(inst).Error; err != nil {
 		return nil, database.MapDeleteError(ctx, err, "resource is still referenced by other records", "delete resource")
 	}
 	return &deleteOutput{Body: contract.Data[deleteResult]{Data: deleteResult{OK: true}}}, nil
