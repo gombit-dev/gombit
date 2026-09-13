@@ -288,6 +288,43 @@ describe("admin client CSRF cookie handling (#250)", () => {
     expect(env.data.email).toBe("a@b.c");
     expect(refreshHits).toBe(2); // stale 403 on refresh + retry after forced bootstrap
   });
+
+  it("recovers a CSRF 403 and then a session 401 on the same write (each once)", async () => {
+    const doc = { cookie: "gombit_csrf=stale", querySelector: () => null };
+    vi.stubGlobal("document", doc);
+    let createHits = 0;
+    let refreshHits = 0;
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = String(input);
+      if (url.includes("/auth/csrf")) {
+        doc.cookie = "gombit_csrf=good";
+        return jsonResponse(200, { data: { csrf_token: "good" } });
+      }
+      if (url.includes("/auth/refresh")) {
+        refreshHits += 1;
+        return jsonResponse(200, { data: { ok: true } });
+      }
+      if (url.includes("/admin/resources/widgets")) {
+        createHits += 1;
+        if (createHits === 1) {
+          // stale CSRF cookie
+          return jsonResponse(403, { error: { code: "authorization_error", message: "csrf" } });
+        }
+        if (createHits === 2) {
+          // CSRF fixed, but the session expired in the meantime
+          return jsonResponse(401, { error: { code: "authentication", message: "expired" } });
+        }
+        return jsonResponse(200, { data: { id: 1, token: header(init, "X-CSRF-Token") } });
+      }
+      return jsonResponse(404, { error: { code: "not_found", message: url } });
+    });
+
+    const client = createAdminClient();
+    const env = await client.create("widgets", { name: "x" });
+    expect(env.data).toEqual({ id: 1, token: "good" });
+    expect(createHits).toBe(3); // 403 -> CSRF-recover -> 401 -> refresh -> 200
+    expect(refreshHits).toBe(1); // session recovered exactly once
+  });
 });
 
 describe("admin client resource IDs", () => {

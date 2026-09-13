@@ -103,34 +103,42 @@ export function createAppClient(): ApiClient {
       return request;
     },
     async onResponse({ request, response }) {
-      if (response.status === 403 && isUnsafeMethod(request.method)) {
-        // A CSRF 403 means our cookie was rotated/expired out from under us.
-        // Drop the stale in-memory mirror, force a fresh bootstrap, and retry
-        // once — mirroring the 401 silent-refresh path (#250). This runs for
-        // auth endpoints too (login/register/logout are CSRF-protected): the
-        // auth-URL exclusion applies only to 401 refresh, not CSRF recovery.
-        setCSRFToken(undefined);
-        await bootstrapCSRF(true);
+      // Bounded recovery: a CSRF 403 (rotated/expired cookie) and a session 401
+      // (expired access cookie) can each occur — and consecutively on the same
+      // write, e.g. a 403 whose recovered retry then 401s. Recover each kind at
+      // most once, in either order, re-evaluating after each retry and rebuilding
+      // the request from the buffered body. CSRF recovery runs for auth endpoints
+      // too (they are CSRF-protected); the auth-URL exclusion applies only to the
+      // 401 refresh loop (#250).
+      const replay = () => {
         const headers = new Headers(request.headers);
         const token = currentCSRFToken();
         if (token) {
           headers.set("X-CSRF-Token", token);
         }
         return fetch(request.url, retryInit(request, headers, retryBodies.get(request)));
+      };
+      let csrfRetried = false;
+      let authRetried = false;
+      for (let i = 0; i < 2; i++) {
+        if (response.status === 403 && isUnsafeMethod(request.method) && !csrfRetried) {
+          csrfRetried = true;
+          setCSRFToken(undefined);
+          await bootstrapCSRF(true);
+          response = await replay();
+          continue;
+        }
+        if (response.status === 401 && !isAuthURL(request.url) && !authRetried) {
+          authRetried = true;
+          if (!(await refreshSession())) {
+            break;
+          }
+          response = await replay();
+          continue;
+        }
+        break;
       }
-      if (response.status !== 401 || isAuthURL(request.url)) {
-        return response;
-      }
-      const ok = await refreshSession();
-      if (!ok) {
-        return response;
-      }
-      const headers = new Headers(request.headers);
-      const token = currentCSRFToken();
-      if (token) {
-        headers.set("X-CSRF-Token", token);
-      }
-      return fetch(request.url, retryInit(request, headers, retryBodies.get(request)));
+      return response;
     },
   });
   return client;

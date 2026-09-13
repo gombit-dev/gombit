@@ -139,19 +139,32 @@ export function createAdminClient() {
       await bootstrapCSRF();
     }
 
+    // Bounded recovery: a CSRF 403 (rotated/expired cookie) and a session 401
+    // (expired access cookie) can each occur — and can occur consecutively on
+    // the same write, e.g. a 403 whose recovered retry then 401s. Recover each
+    // kind at most once, in either order, re-evaluating after every retry and
+    // rebuilding the request (init() re-reads the live cookie). The auth-path
+    // exclusion applies only to the 401 refresh loop, not to CSRF recovery (#250).
     let response = await fetch(url, init());
-    if (response.status === 401 && !isAuthPath(path)) {
-      const ok = await refreshSession();
-      if (ok) {
+    let csrfRetried = false;
+    let authRetried = false;
+    for (let i = 0; i < 2; i++) {
+      if (response.status === 403 && isUnsafeMethod(method) && !csrfRetried) {
+        csrfRetried = true;
+        setCSRFToken(undefined);
+        await bootstrapCSRF(true);
         response = await fetch(url, init());
+        continue;
       }
-    } else if (response.status === 403 && isUnsafeMethod(method)) {
-      // A CSRF 403 means our cookie was rotated/expired out from under us.
-      // Drop the stale in-memory mirror, force a fresh bootstrap, and retry
-      // once — mirroring the 401 silent-refresh path (#250).
-      setCSRFToken(undefined);
-      await bootstrapCSRF(true);
-      response = await fetch(url, init());
+      if (response.status === 401 && !isAuthPath(path) && !authRetried) {
+        authRetried = true;
+        if (!(await refreshSession())) {
+          break;
+        }
+        response = await fetch(url, init());
+        continue;
+      }
+      break;
     }
 
     const parsed: unknown = await readJSON(response);
