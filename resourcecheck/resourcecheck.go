@@ -723,7 +723,7 @@ func jsonName(f reflect.StructField) string {
 func derefType(t reflect.Type) reflect.Type {
 	for t != nil {
 		switch t.Kind() {
-		case reflect.Ptr, reflect.Slice, reflect.Array:
+		case reflect.Pointer, reflect.Slice, reflect.Array:
 			t = t.Elem()
 		default:
 			return t
