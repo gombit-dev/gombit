@@ -139,9 +139,9 @@ func renderDriftTest(ctx renderContext) string {
 	b.WriteString("\tif err != nil {\n")
 	b.WriteString("\t\tt.Fatalf(\"read handler.go: %v\", err)\n")
 	b.WriteString("\t}\n")
-	b.WriteString("\tassigned, err := resourcecheck.AssignedCreateFields(src, \"" + typ + "\")\n")
+	b.WriteString("\tassigned, err := resourcecheck.ConstructorCreateFields(src, \"build" + typ + "ForCreate\", \"" + typ + "\")\n")
 	b.WriteString("\tif err != nil {\n")
-	b.WriteString("\t\tt.Fatalf(\"parse " + typ + " create handler: %v\", err)\n")
+	b.WriteString("\t\tt.Fatalf(\"parse " + typ + " create constructor: %v\", err)\n")
 	b.WriteString("\t}\n")
 	b.WriteString("\tdrift, err := resourcecheck.MissingCreateColumns(&" + typ + "{}, assigned, " + managedVar + ")\n")
 	b.WriteString("\tif err != nil {\n")
@@ -509,15 +509,22 @@ func renderHandler(ctx renderContext) string {
 	b.WriteString("\t\tBody: contract.Data[" + data + "]{Data: to" + typ + "Data(row)},\n")
 	b.WriteString("\t}, nil\n}\n\n")
 
-	b.WriteString("func (h *Handler) create(ctx context.Context, input *create" + typ + "Input) (*create" + typ + "Output, error) {\n")
-	b.WriteString("\trow := " + typ + "{\n")
+	// The create model is built in a dedicated constructor whose single returned
+	// literal is the value persisted by Create. The drift guard
+	// (<file>_drift_test.go, #218) parses exactly this returned literal, so keep
+	// every persistence-required column assigned here.
+	b.WriteString("// build" + typ + "ForCreate maps a create request to the " + typ + " that is persisted.\n")
+	b.WriteString("func build" + typ + "ForCreate(input *create" + typ + "Input) " + typ + " {\n")
+	b.WriteString("\treturn " + typ + "{\n")
 	for _, field := range ctx.Fields {
 		if !field.inDTO() {
 			continue
 		}
 		b.WriteString("\t\t" + field.dtoGoName() + ": input.Body." + field.dtoGoName() + ",\n")
 	}
-	b.WriteString("\t}\n")
+	b.WriteString("\t}\n}\n\n")
+	b.WriteString("func (h *Handler) create(ctx context.Context, input *create" + typ + "Input) (*create" + typ + "Output, error) {\n")
+	b.WriteString("\trow := build" + typ + "ForCreate(input)\n")
 	b.WriteString("\tif err := h.DB.WithContext(ctx).Create(&row).Error; err != nil {\n")
 	b.WriteString("\t\treturn nil, database.MapPersistError(ctx, err, \"resource already exists\", \"create " + singular + "\")\n")
 	b.WriteString("\t}\n")

@@ -20,9 +20,9 @@ func TestBookCreateContractCoversRequiredColumns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read handler.go: %v", err)
 	}
-	assigned, err := resourcecheck.AssignedCreateFields(src, "Book")
+	assigned, err := resourcecheck.ConstructorCreateFields(src, "buildBookForCreate", "Book")
 	if err != nil {
-		t.Fatalf("parse Book create handler: %v", err)
+		t.Fatalf("parse Book create constructor: %v", err)
 	}
 	drift, err := resourcecheck.MissingCreateColumns(&Book{}, assigned, bookServerManagedColumns)
 	if err != nil {

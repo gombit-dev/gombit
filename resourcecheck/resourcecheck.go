@@ -31,7 +31,7 @@ import (
 // satisfied — and so omitted from the result — when it is either:
 //
 //   - assigned by the handler's create constructor (its Go field name is in
-//     assignedGoFields, from AssignedCreateFields); or
+//     assignedGoFields, from ConstructorCreateFields); or
 //   - explicitly server-managed (its column is listed in serverManaged, e.g. a
 //     tenant or owner id set from the auth context).
 //
@@ -64,15 +64,18 @@ func MissingCreateColumns(model any, assignedGoFields []string, serverManaged []
 	return missing, nil
 }
 
-// AssignedCreateFields parses a generated feature-package handler source and
-// returns the model struct fields the create handler assigns — the keys of every
-// `<typeName>{ ... }` composite literal inside the `create` method. This observes
-// the real write path, so a field present in the request DTO but never assigned
-// to the model is NOT reported as covered. It understands the generated
-// composite-literal construction; a hand-refactor that assigns fields by other
-// means is treated conservatively (its fields look unassigned, which surfaces as
-// drift to resolve explicitly rather than a silent gap).
-func AssignedCreateFields(handlerSrc []byte, typeName string) ([]string, error) {
+// ConstructorCreateFields parses a generated feature-package handler source and
+// returns the model struct fields the create constructor actually persists — the
+// keys of the `<typeName>{ ... }` composite literal RETURNED by the function
+// named funcName (e.g. buildWidgetForCreate), which the handler passes straight
+// to GORM's Create. Because only the returned value is inspected — not every
+// literal syntactically present under the function — a decoy or temporary
+// `<typeName>{...}` that is never returned does not falsely certify a field, and
+// a literal in some other function is ignored. A hand-refactor that builds the
+// returned value by other means (a named local, a helper) is treated
+// conservatively: its fields look unassigned, surfacing as drift to resolve
+// explicitly rather than a silent gap.
+func ConstructorCreateFields(handlerSrc []byte, funcName, typeName string) ([]string, error) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "handler.go", handlerSrc, 0)
 	if err != nil {
@@ -81,26 +84,16 @@ func AssignedCreateFields(handlerSrc []byte, typeName string) ([]string, error) 
 	set := map[string]bool{}
 	for _, decl := range file.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
-		if !ok || fn.Name == nil || fn.Name.Name != "create" || fn.Body == nil {
+		if !ok || fn.Name == nil || fn.Name.Name != funcName || fn.Body == nil {
 			continue
 		}
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
-			cl, ok := n.(*ast.CompositeLit)
+			ret, ok := n.(*ast.ReturnStmt)
 			if !ok {
 				return true
 			}
-			id, ok := cl.Type.(*ast.Ident)
-			if !ok || id.Name != typeName {
-				return true
-			}
-			for _, elt := range cl.Elts {
-				kv, ok := elt.(*ast.KeyValueExpr)
-				if !ok {
-					continue
-				}
-				if key, ok := kv.Key.(*ast.Ident); ok {
-					set[key.Name] = true
-				}
+			for _, res := range ret.Results {
+				collectLiteralKeys(res, typeName, set)
 			}
 			return true
 		})
@@ -111,6 +104,29 @@ func AssignedCreateFields(handlerSrc []byte, typeName string) ([]string, error) 
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+// collectLiteralKeys records the keyed field names of a returned
+// `<typeName>{ ... }` (or `&<typeName>{ ... }`) composite literal.
+func collectLiteralKeys(expr ast.Expr, typeName string, set map[string]bool) {
+	if u, ok := expr.(*ast.UnaryExpr); ok {
+		expr = u.X
+	}
+	cl, ok := expr.(*ast.CompositeLit)
+	if !ok {
+		return
+	}
+	id, ok := cl.Type.(*ast.Ident)
+	if !ok || id.Name != typeName {
+		return
+	}
+	for _, elt := range cl.Elts {
+		if kv, ok := elt.(*ast.KeyValueExpr); ok {
+			if key, ok := kv.Key.(*ast.Ident); ok {
+				set[key.Name] = true
+			}
+		}
+	}
 }
 
 // requiresCreateValue reports whether a column must be given a value on create:

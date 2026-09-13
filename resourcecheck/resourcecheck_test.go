@@ -108,66 +108,84 @@ func TestInvalidModelErrors(t *testing.T) {
 	}
 }
 
-// AssignedCreateFields reads the fields the generated create constructor assigns.
-func TestAssignedCreateFieldsParsesCreateConstructor(t *testing.T) {
+// ConstructorCreateFields reads the fields the named constructor RETURNS.
+func TestConstructorCreateFieldsParsesReturnedLiteral(t *testing.T) {
 	src := []byte(`package book
 
-type Handler struct{}
-
-func (h *Handler) create(ctx any, input *createBookInput) error {
-	row := Book{
+func buildBookForCreate(input *createBookInput) Book {
+	return Book{
 		Title:      input.Body.Title,
 		CategoryID: input.Body.CategoryID,
 	}
-	_ = row
-	return nil
 }
 
-func (h *Handler) list() { _ = Book{Ignored: 1} }
+func (h *Handler) create() Book { return buildBookForCreate(nil) }
+func otherThing() Book          { return Book{Ignored: 1} }
 `)
-	got, err := resourcecheck.AssignedCreateFields(src, "Book")
+	got, err := resourcecheck.ConstructorCreateFields(src, "buildBookForCreate", "Book")
 	if err != nil {
-		t.Fatalf("AssignedCreateFields: %v", err)
+		t.Fatalf("ConstructorCreateFields: %v", err)
 	}
 	if !reflect.DeepEqual(got, []string{"CategoryID", "Title"}) {
-		t.Fatalf("assigned = %v, want [CategoryID Title] (only create's Book{...}, not list's)", got)
+		t.Fatalf("assigned = %v, want [CategoryID Title]", got)
 	}
 }
 
-func TestAssignedCreateFieldsEmptyWhenNoConstructor(t *testing.T) {
-	src := []byte("package book\n\nfunc (h *Handler) create() {}\n")
-	got, err := resourcecheck.AssignedCreateFields(src, "Book")
+// The review's decoy attack: a temporary `Book{...}` that is never returned must
+// not certify a field the persisted value omits.
+func TestConstructorCreateFieldsIgnoresDecoyLiterals(t *testing.T) {
+	src := []byte(`package book
+
+func buildBookForCreate(input *createBookInput) Book {
+	_ = Book{TenantID: input.Body.TenantID} // decoy: validated but not persisted
+	return Book{Title: input.Body.Title}
+}
+`)
+	got, err := resourcecheck.ConstructorCreateFields(src, "buildBookForCreate", "Book")
 	if err != nil {
-		t.Fatalf("AssignedCreateFields: %v", err)
+		t.Fatalf("ConstructorCreateFields: %v", err)
+	}
+	if !reflect.DeepEqual(got, []string{"Title"}) {
+		t.Fatalf("assigned = %v, want [Title] (decoy TenantID literal is not returned)", got)
+	}
+}
+
+func TestConstructorCreateFieldsEmptyWhenNoReturnedLiteral(t *testing.T) {
+	// A constructor that returns a named local (not an inline literal) is treated
+	// conservatively: no fields are certified.
+	src := []byte("package book\n\nfunc buildBookForCreate() Book { b := Book{Title: x}; return b }\n")
+	got, err := resourcecheck.ConstructorCreateFields(src, "buildBookForCreate", "Book")
+	if err != nil {
+		t.Fatalf("ConstructorCreateFields: %v", err)
 	}
 	if len(got) != 0 {
-		t.Fatalf("assigned = %v, want none", got)
+		t.Fatalf("assigned = %v, want none (returned value is not an inline literal)", got)
 	}
 }
 
-// End to end: an assigned field clears the drift the same column shows when the
-// handler's create constructor omits it.
-func TestAssignedFieldsFeedMissingColumns(t *testing.T) {
+// End to end, including the decoy: the decoy'd TenantID is still reported as
+// drift because only the RETURNED literal counts.
+func TestConstructorFieldsFeedMissingColumns(t *testing.T) {
 	type widget struct {
 		ID       uint   `gorm:"primaryKey"`
 		TenantID uint   `gorm:"not null"`
 		Name     string `gorm:"not null"`
 	}
-	assignsBoth := []byte("package w\nfunc (h *Handler) create() { _ = widget{Name: x, TenantID: y} }\n")
-	fields, err := resourcecheck.AssignedCreateFields(assignsBoth, "widget")
+	both := []byte("package w\nfunc buildWidgetForCreate(in any) widget { return widget{Name: x, TenantID: y} }\n")
+	fields, err := resourcecheck.ConstructorCreateFields(both, "buildWidgetForCreate", "widget")
 	if err != nil {
-		t.Fatalf("AssignedCreateFields: %v", err)
+		t.Fatalf("ConstructorCreateFields: %v", err)
 	}
 	if got := missing(t, &widget{}, fields, nil); len(got) != 0 {
-		t.Fatalf("missing = %v, want none when both assigned", got)
+		t.Fatalf("missing = %v, want none when both returned", got)
 	}
 
-	assignsName := []byte("package w\nfunc (h *Handler) create() { _ = widget{Name: x} }\n")
-	fields, err = resourcecheck.AssignedCreateFields(assignsName, "widget")
+	decoy := []byte("package w\nfunc buildWidgetForCreate(in any) widget { _ = widget{TenantID: y}; return widget{Name: x} }\n")
+	fields, err = resourcecheck.ConstructorCreateFields(decoy, "buildWidgetForCreate", "widget")
 	if err != nil {
-		t.Fatalf("AssignedCreateFields: %v", err)
+		t.Fatalf("ConstructorCreateFields: %v", err)
 	}
 	if got := missing(t, &widget{}, fields, nil); !reflect.DeepEqual(got, []string{"tenant_id"}) {
-		t.Fatalf("missing = %v, want [tenant_id] when TenantID not assigned", got)
+		t.Fatalf("missing = %v, want [tenant_id] (decoy TenantID must not certify)", got)
 	}
 }
