@@ -237,6 +237,66 @@ func (h *Handler) create(ctx context.Context, input *createBookInput) error { re
 	}
 }
 
+// Review's ordering attack: the constructor assignment exists, but it runs
+// AFTER Create, which already persisted the zero value. Syntactic presence is
+// not dataflow — must be rejected.
+func TestCreatePersistsConstructorRejectsAssignAfterCreate(t *testing.T) {
+	src := `package book
+func (h *Handler) create(ctx context.Context, input *createBookInput) error {
+	var row Book
+	_ = h.DB.WithContext(ctx).Create(&row).Error
+	row = buildBookForCreate(input)
+	return nil
+}`
+	if ok, _ := createPersists(t, src); ok {
+		t.Fatal("want persists=false when the constructor assignment runs after Create")
+	}
+}
+
+// Review's conditional attack: the constructor assignment only happens on one
+// branch, so the other path persists a zero value. A non-dominating assignment
+// must be rejected.
+func TestCreatePersistsConstructorRejectsConditionalAssign(t *testing.T) {
+	src := `package book
+func (h *Handler) create(ctx context.Context, input *createBookInput) error {
+	var row Book
+	if input.Body.Title != "" {
+		row = buildBookForCreate(input)
+	}
+	return h.DB.WithContext(ctx).Create(&row).Error
+}`
+	if ok, _ := createPersists(t, src); ok {
+		t.Fatal("want persists=false when the constructor assignment is under a conditional")
+	}
+}
+
+// Review's closure/dead-code concern: an assignment buried in a function literal
+// does not dominate Create on the enclosing path.
+func TestCreatePersistsConstructorRejectsAssignInClosure(t *testing.T) {
+	src := `package book
+func (h *Handler) create(ctx context.Context, input *createBookInput) error {
+	var row Book
+	func() { row = buildBookForCreate(input) }()
+	return h.DB.WithContext(ctx).Create(&row).Error
+}`
+	if ok, _ := createPersists(t, src); ok {
+		t.Fatal("want persists=false when the constructor assignment is inside a closure")
+	}
+}
+
+// Two Create calls make "the persisted value" ambiguous — reject conservatively.
+func TestCreatePersistsConstructorRejectsSecondCreate(t *testing.T) {
+	src := `package book
+func (h *Handler) create(ctx context.Context, input *createBookInput) error {
+	row := buildBookForCreate(input)
+	_ = h.DB.WithContext(ctx).Create(&Book{}).Error
+	return h.DB.WithContext(ctx).Create(&row).Error
+}`
+	if ok, _ := createPersists(t, src); ok {
+		t.Fatal("want persists=false when a second Create call is present")
+	}
+}
+
 // End to end, including the decoy: the decoy'd TenantID is still reported as
 // drift because only the RETURNED literal counts.
 func TestConstructorFieldsFeedMissingColumns(t *testing.T) {
