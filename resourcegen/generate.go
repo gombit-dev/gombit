@@ -192,38 +192,43 @@ func planWrites(opts Options, files []fileSpec) ([]plannedFile, error) {
 	return planned, nil
 }
 
-// checkSeedProvenance verifies a pre-existing seed-once file declares the
-// top-level vars the generated seed content provides. A file that does not — an
-// unrelated file that happens to share the path — is a collision: skipping the
-// write silently would leave the generated drift test referencing undefined
-// identifiers and the app uncompilable, so fail before planning any writes.
+// checkSeedProvenance verifies a pre-existing seed-once file is actually a
+// compatible seed file — same package, and declaring each seed var as a usable
+// `[]string` — before trusting it. A file that merely shares the path (unrelated
+// code, wrong package, or the names bound to `int`) would leave the generated
+// drift test referencing missing or mistyped identifiers and the app
+// uncompilable, so fail before planning any writes rather than skipping silently.
 func checkSeedProvenance(display string, existing, content []byte) error {
-	want, err := topLevelVarNames(content)
+	wantPkg, want, err := parseSeedFile(content)
 	if err != nil {
 		return fmt.Errorf("resourcegen: parse generated seed for %s: %w", display, err)
 	}
-	have, err := topLevelVarNames(existing)
+	havePkg, have, err := parseSeedFile(existing)
 	if err != nil {
 		return fmt.Errorf("resourcegen: %s already exists but is not parseable Go; move or remove it: %w", display, err)
 	}
-	var missing []string
+	if havePkg != wantPkg {
+		return fmt.Errorf("resourcegen: %s already exists in package %q, not %q; it collides with a generated seed file — rename or remove it", display, havePkg, wantPkg)
+	}
+	var bad []string
 	for name := range want {
-		if !have[name] {
-			missing = append(missing, name)
+		if !have[name] { // missing, or declared as something other than []string
+			bad = append(bad, name)
 		}
 	}
-	if len(missing) > 0 {
-		sort.Strings(missing)
-		return fmt.Errorf("resourcegen: %s already exists but does not declare %s; it collides with a generated seed file — rename or remove it", display, strings.Join(missing, ", "))
+	if len(bad) > 0 {
+		sort.Strings(bad)
+		return fmt.Errorf("resourcegen: %s already exists but does not declare %s as []string; it collides with a generated seed file — rename or remove it", display, strings.Join(bad, ", "))
 	}
 	return nil
 }
 
-// topLevelVarNames returns the names bound by package-level `var` declarations.
-func topLevelVarNames(src []byte) (map[string]bool, error) {
+// parseSeedFile returns a file's package name and the set of package-level vars
+// it declares as `[]string` (by explicit type or a `[]string{...}` initializer).
+func parseSeedFile(src []byte) (string, map[string]bool, error) {
 	file, err := parser.ParseFile(token.NewFileSet(), "seed.go", src, 0)
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
 	names := map[string]bool{}
 	for _, decl := range file.Decls {
@@ -236,14 +241,33 @@ func topLevelVarNames(src []byte) (map[string]bool, error) {
 			if !ok {
 				continue
 			}
-			for _, n := range vs.Names {
-				if n.Name != "_" {
+			for i, n := range vs.Names {
+				if n.Name == "_" {
+					continue
+				}
+				if isStringSliceType(vs.Type) || (i < len(vs.Values) && isStringSliceLiteral(vs.Values[i])) {
 					names[n.Name] = true
 				}
 			}
 		}
 	}
-	return names, nil
+	return file.Name.Name, names, nil
+}
+
+// isStringSliceType reports whether t is the type expression `[]string`.
+func isStringSliceType(t ast.Expr) bool {
+	arr, ok := t.(*ast.ArrayType)
+	if !ok || arr.Len != nil {
+		return false
+	}
+	elt, ok := arr.Elt.(*ast.Ident)
+	return ok && elt.Name == "string"
+}
+
+// isStringSliceLiteral reports whether v is a `[]string{...}` composite literal.
+func isStringSliceLiteral(v ast.Expr) bool {
+	cl, ok := v.(*ast.CompositeLit)
+	return ok && cl.Type != nil && isStringSliceType(cl.Type)
 }
 
 func checkOverwrite(display string, existing []byte, file fileSpec, force bool) error {

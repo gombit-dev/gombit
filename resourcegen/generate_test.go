@@ -793,3 +793,60 @@ func TestGenerateSeedFileCollisionFails(t *testing.T) {
 		t.Fatal("generation wrote files despite the seed collision")
 	}
 }
+
+// TestGenerateSeedFileWrongPackageFails: a colliding file in a different package
+// must fail generation (#218 finding 3).
+func TestGenerateSeedFileWrongPackageFails(t *testing.T) {
+	appDir := scaffoldForCollision(t)
+	writeCollision(t, appDir, "package unrelated\n\nvar bookServerManagedColumns = []string{}\nvar bookWriteOmittedColumns = []string{}\nvar bookReadOmittedColumns = []string{}\n")
+	err := generateBook(appDir)
+	if err == nil || !strings.Contains(err.Error(), "package") {
+		t.Fatalf("want a wrong-package collision error, got %v", err)
+	}
+}
+
+// TestGenerateSeedFileWrongTypeFails: a colliding file that declares the names as
+// non-[]string values must fail generation (#218 finding 3).
+func TestGenerateSeedFileWrongTypeFails(t *testing.T) {
+	appDir := scaffoldForCollision(t)
+	writeCollision(t, appDir, "package book\n\nvar bookServerManagedColumns = 0\nvar bookWriteOmittedColumns = 0\nvar bookReadOmittedColumns = 0\n")
+	err := generateBook(appDir)
+	if err == nil || !strings.Contains(err.Error(), "[]string") {
+		t.Fatalf("want a wrong-type collision error, got %v", err)
+	}
+}
+
+func scaffoldForCollision(t *testing.T) string {
+	t.Helper()
+	workDir := t.TempDir()
+	if err := scaffold.Generate(context.Background(), scaffold.Options{
+		Name:     "demo",
+		Database: "sqlite",
+		WorkDir:  workDir,
+		Stdout:   ioDiscard{},
+	}); err != nil {
+		t.Fatalf("scaffold: %v", err)
+	}
+	appDir := filepath.Join(workDir, "demo")
+	if err := os.MkdirAll(filepath.Join(appDir, "internal", "book"), 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	return appDir
+}
+
+func writeCollision(t *testing.T, appDir, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(appDir, "internal", "book", "book_contract.go"), []byte(content), 0o600); err != nil {
+		t.Fatalf("write collision file: %v", err)
+	}
+}
+
+func generateBook(appDir string) error {
+	return Generate(context.Background(), Options{
+		WorkDir:   appDir,
+		Name:      "Book",
+		Fields:    []string{"title:string:required"},
+		Stdout:    ioDiscard{},
+		skipAtlas: true,
+	})
+}

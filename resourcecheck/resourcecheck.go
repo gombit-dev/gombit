@@ -229,9 +229,11 @@ func ValidateCreateGrammar(handlerSrc []byte, receiverType, createMethod, ctorNa
 	}
 	row := rowIdent.Name
 
-	// Statement 2: the checked-error Create through the receiver's own DB field.
+	// Statement 2: the checked-error Create, exactly
+	// `if err := <recv>.DB.WithContext(<ctx>).Create(&row).Error; err != nil { return …err… }`.
+	ctxName := firstParamName(fn)
 	ifStmt, ok := body[1].(*ast.IfStmt)
-	if !ok || !isCheckedDBCreate(ifStmt, recvVar, row) {
+	if ctxName == "" || !ok || !isCheckedDBCreate(ifStmt, recvVar, ctxName, row) {
 		return false, shapeErr, nil
 	}
 
@@ -287,12 +289,22 @@ func packageFunc(file *ast.File, name string) *ast.FuncDecl {
 	return found
 }
 
-// isCheckedDBCreate reports whether ifStmt is exactly
-// `if err := <recv>.DB.….Create(&row).Error; err != nil { … }`: the persisted
-// error is checked, the call is GORM's Create on the receiver's own DB field, and
-// its argument is &row. This is what ties "the write happened and was checked" to
-// the row the constructor built.
-func isCheckedDBCreate(ifStmt *ast.IfStmt, recvVar, row string) bool {
+// isCheckedDBCreate reports whether ifStmt is EXACTLY the generated checked
+// persistence statement:
+//
+//	if err := <recv>.DB.WithContext(<ctx>).Create(&row).Error; err != nil {
+//		return …err…
+//	}
+//
+// The chain is pinned to `<recv>.DB.WithContext(<ctx>)` with no intervening call,
+// so `h.DB.Session(&gorm.Session{DryRun:true})` (a successful non-write) does not
+// match; there must be no `else` (so it cannot delete the row on the success
+// path); and the error branch must return the error (so `return nil, nil` cannot
+// report success when Create failed).
+func isCheckedDBCreate(ifStmt *ast.IfStmt, recvVar, ctxName, row string) bool {
+	if ifStmt.Else != nil {
+		return false
+	}
 	init, ok := ifStmt.Init.(*ast.AssignStmt)
 	if !ok || init.Tok != token.DEFINE || len(init.Lhs) != 1 || len(init.Rhs) != 1 {
 		return false
@@ -301,7 +313,7 @@ func isCheckedDBCreate(ifStmt *ast.IfStmt, recvVar, row string) bool {
 	if !ok {
 		return false
 	}
-	// RHS: <chain>.Create(&row).Error
+	// RHS: <recv>.DB.WithContext(<ctx>).Create(&row).Error
 	dotError, ok := init.Rhs[0].(*ast.SelectorExpr)
 	if !ok || dotError.Sel == nil || dotError.Sel.Name != "Error" {
 		return false
@@ -314,7 +326,7 @@ func isCheckedDBCreate(ifStmt *ast.IfStmt, recvVar, row string) bool {
 	if !ok || createSel.Sel == nil || createSel.Sel.Name != "Create" {
 		return false
 	}
-	if !baseIsReceiverField(createSel.X, recvVar, "DB") {
+	if !isReceiverDBWithContext(createSel.X, recvVar, ctxName) {
 		return false
 	}
 	amp, ok := createCall.Args[0].(*ast.UnaryExpr)
@@ -334,41 +346,49 @@ func isCheckedDBCreate(ifStmt *ast.IfStmt, recvVar, row string) bool {
 	if !errVsNil {
 		return false
 	}
-	// The error branch must return (not fall through and persist nothing).
-	return ifStmt.Body != nil && blockReturns(ifStmt.Body)
+	// The error branch must be a single return that references err (not a bare
+	// `return nil, nil` that reports success when Create failed).
+	if ifStmt.Body == nil || len(ifStmt.Body.List) != 1 {
+		return false
+	}
+	ret, ok := ifStmt.Body.List[0].(*ast.ReturnStmt)
+	return ok && exprsReference(ret.Results, errIdent.Name)
 }
 
-// baseIsReceiverField reports whether the selector/call chain's base is exactly
-// `<recv>.<field>` — the innermost selector applies field directly to the
-// receiver identifier. So `h.DB.…` matches but `h.Audit.DB.…` does not.
-func baseIsReceiverField(expr ast.Expr, recv, field string) bool {
-	for {
-		switch e := expr.(type) {
-		case *ast.CallExpr:
-			expr = e.Fun
-		case *ast.ParenExpr:
-			expr = e.X
-		case *ast.IndexExpr:
-			expr = e.X
-		case *ast.SelectorExpr:
-			if id, ok := e.X.(*ast.Ident); ok {
-				return id.Name == recv && e.Sel != nil && e.Sel.Name == field
+// isReceiverDBWithContext reports whether expr is exactly
+// `<recv>.DB.WithContext(<ctx>)`, with no intervening session/scope call.
+func isReceiverDBWithContext(expr ast.Expr, recvVar, ctxName string) bool {
+	withCtx, ok := expr.(*ast.CallExpr)
+	if !ok || len(withCtx.Args) != 1 {
+		return false
+	}
+	if id, ok := withCtx.Args[0].(*ast.Ident); !ok || id.Name != ctxName {
+		return false
+	}
+	wcSel, ok := withCtx.Fun.(*ast.SelectorExpr)
+	if !ok || wcSel.Sel == nil || wcSel.Sel.Name != "WithContext" {
+		return false
+	}
+	dbSel, ok := wcSel.X.(*ast.SelectorExpr)
+	if !ok || dbSel.Sel == nil || dbSel.Sel.Name != "DB" {
+		return false
+	}
+	id, ok := dbSel.X.(*ast.Ident)
+	return ok && id.Name == recvVar
+}
+
+// exprsReference reports whether name appears as an identifier anywhere in exprs.
+func exprsReference(exprs []ast.Expr, name string) bool {
+	found := false
+	for _, e := range exprs {
+		ast.Inspect(e, func(n ast.Node) bool {
+			if id, ok := n.(*ast.Ident); ok && id.Name == name {
+				found = true
 			}
-			expr = e.X
-		default:
-			return false
-		}
+			return !found
+		})
 	}
-}
-
-// blockReturns reports whether a block's own statements include a return.
-func blockReturns(block *ast.BlockStmt) bool {
-	for _, stmt := range block.List {
-		if _, ok := stmt.(*ast.ReturnStmt); ok {
-			return true
-		}
-	}
-	return false
+	return found
 }
 
 func isIdent(expr ast.Expr, name string) bool {
@@ -403,6 +423,18 @@ func receiverVarName(fn *ast.FuncDecl) string {
 		return ""
 	}
 	return fn.Recv.List[0].Names[0].Name
+}
+
+// firstParamName returns the name of fn's first parameter (the "ctx"), or "".
+func firstParamName(fn *ast.FuncDecl) string {
+	if fn.Type == nil || fn.Type.Params == nil || len(fn.Type.Params.List) == 0 {
+		return ""
+	}
+	names := fn.Type.Params.List[0].Names
+	if len(names) == 0 {
+		return ""
+	}
+	return names[0].Name
 }
 
 // isCallTo reports whether expr is a call to the function named funcName.

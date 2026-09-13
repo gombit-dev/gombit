@@ -292,6 +292,52 @@ func TestValidateCreateGrammarRejectsNestedDBCreate(t *testing.T) {
 	}
 }
 
+// Finding 2 (round 8): a DryRun session returns without inserting — a successful
+// non-write. The pinned h.DB.WithContext(ctx) chain rejects the intervening call.
+func TestValidateCreateGrammarRejectsDryRunCreate(t *testing.T) {
+	src := withCtor(`func (h *Handler) create(ctx context.Context, input *createBookInput) (*createBookOutput, error) {
+	row := buildBookForCreate(ctx, input)
+	if err := h.DB.Session(&gorm.Session{DryRun: true}).Create(&row).Error; err != nil {
+		return nil, err
+	}
+	return nil, nil
+}`)
+	if ok, _ := grammarOK(t, src); ok {
+		t.Fatal("want rejected: a DryRun session is a successful non-write")
+	}
+}
+
+// Finding 2 (round 8): an else branch can undo the successful create.
+func TestValidateCreateGrammarRejectsElseBranch(t *testing.T) {
+	src := withCtor(`func (h *Handler) create(ctx context.Context, input *createBookInput) (*createBookOutput, error) {
+	row := buildBookForCreate(ctx, input)
+	if err := h.DB.WithContext(ctx).Create(&row).Error; err != nil {
+		return nil, err
+	} else {
+		h.DB.Delete(&row)
+	}
+	return nil, nil
+}`)
+	if ok, _ := grammarOK(t, src); ok {
+		t.Fatal("want rejected: an else branch may delete the created row")
+	}
+}
+
+// Finding 2 (round 8): the error branch reports success (return nil, nil) instead
+// of returning the persistence error.
+func TestValidateCreateGrammarRejectsErrorBranchWithoutErr(t *testing.T) {
+	src := withCtor(`func (h *Handler) create(ctx context.Context, input *createBookInput) (*createBookOutput, error) {
+	row := buildBookForCreate(ctx, input)
+	if err := h.DB.WithContext(ctx).Create(&row).Error; err != nil {
+		return nil, nil
+	}
+	return nil, nil
+}`)
+	if ok, _ := grammarOK(t, src); ok {
+		t.Fatal("want rejected: the error branch does not return the persistence error")
+	}
+}
+
 // Finding 3 (this round): a same-named constructor METHOD decoy is declared
 // before the package function. The validator must judge the package function
 // (which the unqualified call resolves to), and it omits TenantID.
