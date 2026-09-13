@@ -65,45 +65,87 @@ func MissingCreateColumns(model any, assignedGoFields []string, serverManaged []
 }
 
 // ConstructorCreateFields parses a generated feature-package handler source and
-// returns the model struct fields the create constructor actually persists — the
-// keys of the `<typeName>{ ... }` composite literal RETURNED by the function
-// named funcName (e.g. buildWidgetForCreate), which the handler passes straight
-// to GORM's Create. Because only the returned value is inspected — not every
-// literal syntactically present under the function — a decoy or temporary
-// `<typeName>{...}` that is never returned does not falsely certify a field, and
-// a literal in some other function is ignored. A hand-refactor that builds the
-// returned value by other means (a named local, a helper) is treated
-// conservatively: its fields look unassigned, surfacing as drift to resolve
-// explicitly rather than a silent gap.
+// returns the model struct fields the create constructor is GUARANTEED to
+// persist — the keys common to every `<typeName>{ ... }` composite literal
+// RETURNED by the function named funcName (e.g. buildWidgetForCreate), which the
+// handler passes straight to GORM's Create.
+//
+// Because only returned values are inspected — not every literal syntactically
+// present under the function — a decoy or temporary `<typeName>{...}` that is
+// never returned does not falsely certify a field, and a literal in some other
+// function (or in a nested closure, whose returns are not the ctor's) is ignored.
+//
+// When the constructor has several return paths, the result is their
+// INTERSECTION, not their union: a field set on only one branch is NOT certified,
+// because another path would persist its zero value. Any return path that is not
+// an inline `<typeName>{...}` literal (a named local, a helper call) contributes
+// the empty set, which empties the intersection — so such a hand-refactor fails
+// closed, surfacing every required column as drift to resolve explicitly rather
+// than a silent gap.
 func ConstructorCreateFields(handlerSrc []byte, funcName, typeName string) ([]string, error) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "handler.go", handlerSrc, 0)
 	if err != nil {
 		return nil, fmt.Errorf("resourcecheck: parse handler: %w", err)
 	}
-	set := map[string]bool{}
+	var fn *ast.FuncDecl
 	for _, decl := range file.Decls {
-		fn, ok := decl.(*ast.FuncDecl)
-		if !ok || fn.Name == nil || fn.Name.Name != funcName || fn.Body == nil {
-			continue
+		d, ok := decl.(*ast.FuncDecl)
+		if ok && d.Name != nil && d.Name.Name == funcName && d.Body != nil {
+			fn = d
+			break
 		}
-		ast.Inspect(fn.Body, func(n ast.Node) bool {
-			ret, ok := n.(*ast.ReturnStmt)
-			if !ok {
-				return true
-			}
-			for _, res := range ret.Results {
-				collectLiteralKeys(res, typeName, set)
-			}
-			return true
-		})
 	}
+	if fn == nil {
+		return nil, nil
+	}
+
+	// One key-set per return path, skipping nested function literals (their
+	// returns belong to the closure, not the constructor).
+	var perReturn []map[string]bool
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if _, ok := n.(*ast.FuncLit); ok {
+			return false
+		}
+		ret, ok := n.(*ast.ReturnStmt)
+		if !ok {
+			return true
+		}
+		keys := map[string]bool{}
+		for _, res := range ret.Results {
+			collectLiteralKeys(res, typeName, keys)
+		}
+		perReturn = append(perReturn, keys)
+		return true
+	})
+
+	set := intersectKeys(perReturn)
 	out := make([]string, 0, len(set))
 	for k := range set {
 		out = append(out, k)
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+// intersectKeys returns the keys present in every set. With no sets it returns
+// an empty map (nothing certified), which fails closed.
+func intersectKeys(sets []map[string]bool) map[string]bool {
+	out := map[string]bool{}
+	if len(sets) == 0 {
+		return out
+	}
+	for k := range sets[0] {
+		out[k] = true
+	}
+	for _, s := range sets[1:] {
+		for k := range out {
+			if !s[k] {
+				delete(out, k)
+			}
+		}
+	}
+	return out
 }
 
 // CreatePersistsConstructor reports whether the handler's create method persists
@@ -160,6 +202,26 @@ func CreatePersistsConstructor(handlerSrc []byte, createFuncName, ctorName strin
 	createArg := identName(creates[0].Args[0])
 	if createArg == "" {
 		return false, "the DB.Create(...) argument is not a plain &row/row variable", nil
+	}
+
+	// Aliasing: the address of the persisted variable may be taken ONLY as the
+	// Create argument. Any other `&row` could hand an alias to code that mutates
+	// the row before it is persisted (`p := &row; p.X = …`), which this AST check
+	// cannot follow — so it fails closed.
+	createAddr := creates[0].Args[0]
+	aliasLeak := false
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		u, ok := n.(*ast.UnaryExpr)
+		if !ok || u.Op != token.AND || u == createAddr {
+			return true
+		}
+		if id, ok := u.X.(*ast.Ident); ok && id.Name == createArg {
+			aliasLeak = true
+		}
+		return true
+	})
+	if aliasLeak {
+		return false, "the address of " + createArg + " is taken outside the Create call; an alias could mutate the persisted value", nil
 	}
 
 	// The persisted variable must be assigned exactly once, and never

@@ -163,6 +163,46 @@ func TestConstructorCreateFieldsEmptyWhenNoReturnedLiteral(t *testing.T) {
 	}
 }
 
+// Review's multiple-return attack: a field set on only one return branch must
+// not be certified, because the other path persists its zero value. The result
+// is the intersection of the return paths, not their union.
+func TestConstructorCreateFieldsIntersectsMultipleReturns(t *testing.T) {
+	src := []byte(`package book
+func buildBookForCreate(input *createBookInput) Book {
+	if input.Body.CategoryID == 0 {
+		return Book{Title: input.Body.Title}
+	}
+	return Book{Title: input.Body.Title, CategoryID: input.Body.CategoryID}
+}`)
+	got, err := resourcecheck.ConstructorCreateFields(src, "buildBookForCreate", "Book")
+	if err != nil {
+		t.Fatalf("ConstructorCreateFields: %v", err)
+	}
+	if !reflect.DeepEqual(got, []string{"Title"}) {
+		t.Fatalf("assigned = %v, want [Title] (CategoryID is set on only one branch)", got)
+	}
+}
+
+// A return path that is not an inline literal (a named local) empties the
+// intersection: nothing is certified, so every required column fails closed.
+func TestConstructorCreateFieldsNonLiteralReturnFailsClosed(t *testing.T) {
+	src := []byte(`package book
+func buildBookForCreate(input *createBookInput) Book {
+	if input.Body.Title == "" {
+		b := Book{Title: "untitled"}
+		return b
+	}
+	return Book{Title: input.Body.Title}
+}`)
+	got, err := resourcecheck.ConstructorCreateFields(src, "buildBookForCreate", "Book")
+	if err != nil {
+		t.Fatalf("ConstructorCreateFields: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("assigned = %v, want none (a non-literal return path fails closed)", got)
+	}
+}
+
 func createPersists(t *testing.T, src string) (bool, string) {
 	t.Helper()
 	ok, detail, err := resourcecheck.CreatePersistsConstructor([]byte(src), "create", "buildBookForCreate")
@@ -294,6 +334,36 @@ func (h *Handler) create(ctx context.Context, input *createBookInput) error {
 }`
 	if ok, _ := createPersists(t, src); ok {
 		t.Fatal("want persists=false when a second Create call is present")
+	}
+}
+
+// Review's aliasing attack: mutate the persisted row through a pointer alias
+// before Create. The direct `row.X =` check misses `p.X =`, so the guard instead
+// fails closed on any `&row` taken outside the Create call.
+func TestCreatePersistsConstructorRejectsPointerAlias(t *testing.T) {
+	src := `package book
+func (h *Handler) create(ctx context.Context, input *createBookInput) error {
+	row := buildBookForCreate(input)
+	p := &row
+	p.Title = ""
+	return h.DB.WithContext(ctx).Create(&row).Error
+}`
+	if ok, _ := createPersists(t, src); ok {
+		t.Fatal("want persists=false when an alias to the persisted row is created")
+	}
+}
+
+// Passing &row to a helper that could mutate it is indirect mutation the AST
+// cannot follow — fail closed.
+func TestCreatePersistsConstructorRejectsAddressPassedToHelper(t *testing.T) {
+	src := `package book
+func (h *Handler) create(ctx context.Context, input *createBookInput) error {
+	row := buildBookForCreate(input)
+	normalize(&row)
+	return h.DB.WithContext(ctx).Create(&row).Error
+}`
+	if ok, _ := createPersists(t, src); ok {
+		t.Fatal("want persists=false when &row is handed to another function before Create")
 	}
 }
 
