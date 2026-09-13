@@ -130,8 +130,16 @@ than hand-owned and later inspected.
   `<snake>_contract.go` opt-out lists.
 - A new per-PR CI gate (`gombit generate --check`) is required; generated files
   are committed and must stay fresh.
-- Generated apps in the wild are not a concern (pre-v0.1; `gombit new` writes
-  them on demand), so the migration cost is low.
+- **This is a breaking change** for the generated-resource source layout and
+  customization model, and it must be documented as one — not treated as
+  non-breaking because users "can regenerate." HTTP contracts are preserved where
+  possible, but generated CRUD handlers are no longer human-owned customization
+  points: customization moves to explicit hooks/services. Regeneration can
+  *overwrite* the old boundary, so anyone who customized a generated handler
+  needs an **actual migration path** (move edits into hooks/services), not a
+  "re-run the generator" hand-wave. Only the in-repo cost is small, because
+  `gombit new`/`make resource` write apps on demand rather than committing them
+  here; that says nothing about downstream users who already customized handlers.
 - This is a `post-v0.1` epic (#352), larger than one PR: this ADR + field-policy
   design + generator rework + `generate --check` + hooks + removal of the
   human-owned-handler path. Agents should not resurrect an inspection-based drift
