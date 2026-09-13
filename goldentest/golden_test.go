@@ -560,3 +560,48 @@ func writeFile(t *testing.T, path, content string) {
 		t.Fatalf("write %s: %v", path, err)
 	}
 }
+
+// TestMakeResourceDriftGuardCatchesConstructorBypass is the #218 end-to-end
+// adversarial check: the generated create-contract drift test must FAIL when the
+// handler stops persisting the constructor's result — not only when a column is
+// omitted from the constructor. It scaffolds the committed make-resource tree,
+// confirms the unchanged guard passes, then bypasses buildBookForCreate in the
+// human-owned handler and confirms `go test` now fails.
+func TestMakeResourceDriftGuardCatchesConstructorBypass(t *testing.T) {
+	appDir := filepath.Join(t.TempDir(), "app")
+	copyTree(t, goldenDir("make-resource"), appDir)
+	appendLocalReplace(t, appDir)
+
+	tidy := exec.Command("go", "mod", "tidy")
+	tidy.Dir = appDir
+	if out, err := tidy.CombinedOutput(); err != nil {
+		t.Fatalf("go mod tidy: %v\n%s", err, out)
+	}
+
+	bookTest := exec.Command("go", "test", "./internal/book/")
+	bookTest.Dir = appDir
+	if out, err := bookTest.CombinedOutput(); err != nil {
+		t.Fatalf("unchanged drift guard should pass: %v\n%s", err, out)
+	}
+
+	handlerPath := filepath.Join(appDir, "internal", "book", "handler.go")
+	src, err := os.ReadFile(handlerPath) // #nosec G304 -- temp copy of generated tree
+	if err != nil {
+		t.Fatalf("read handler.go: %v", err)
+	}
+	// Bypass the constructor: build the model inline (and omit Title), so the
+	// persisted value diverges from buildBookForCreate's returned literal.
+	tampered := bytes.Replace(src, []byte("row := buildBookForCreate(input)"), []byte("row := Book{}"), 1)
+	if bytes.Equal(tampered, src) {
+		t.Fatal("tamper target not found in generated handler")
+	}
+	if err := os.WriteFile(handlerPath, tampered, 0o644); err != nil { //nolint:gosec // temp copy
+		t.Fatalf("write handler.go: %v", err)
+	}
+
+	tampered2 := exec.Command("go", "test", "./internal/book/")
+	tampered2.Dir = appDir
+	if out, err := tampered2.CombinedOutput(); err == nil {
+		t.Fatalf("drift guard must FAIL when the handler bypasses the constructor, but it passed:\n%s", out)
+	}
+}

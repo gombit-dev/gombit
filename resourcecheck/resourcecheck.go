@@ -106,6 +106,113 @@ func ConstructorCreateFields(handlerSrc []byte, funcName, typeName string) ([]st
 	return out, nil
 }
 
+// CreatePersistsConstructor reports whether the handler's create method persists
+// the value returned by ctorName UNCHANGED, closing the gap between "the
+// constructor returns these fields" and "these fields are what GORM persists".
+// It requires that createFuncName contains a `DB…Create(&row)` call where row was
+// assigned exactly from `ctorName(...)` and is neither reassigned nor
+// field-mutated anywhere in the method. Anything else — building the persisted
+// value inline (`row := Type{...}`), mutating it (`row.X = …`), reassigning it,
+// or no Create at all — makes the persisted value diverge from what
+// ConstructorCreateFields inspected, so it returns false (conservative) with a
+// detail explaining why. The drift guard treats false as a failure: the create
+// path must route through the constructor for the guarantee to hold.
+func CreatePersistsConstructor(handlerSrc []byte, createFuncName, ctorName string) (bool, string, error) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "handler.go", handlerSrc, 0)
+	if err != nil {
+		return false, "", fmt.Errorf("resourcecheck: parse handler: %w", err)
+	}
+	var fn *ast.FuncDecl
+	for _, decl := range file.Decls {
+		d, ok := decl.(*ast.FuncDecl)
+		if ok && d.Name != nil && d.Name.Name == createFuncName && d.Body != nil {
+			fn = d
+			break
+		}
+	}
+	if fn == nil {
+		return false, "no " + createFuncName + " method with a body was found", nil
+	}
+
+	// Find the variable passed to a `…Create(&row)` (or `…Create(row)`) call.
+	var createArg string
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel == nil || sel.Sel.Name != "Create" || len(call.Args) != 1 {
+			return true
+		}
+		if name := identName(call.Args[0]); name != "" {
+			createArg = name
+		}
+		return true
+	})
+	if createArg == "" {
+		return false, "no DB.Create(&row) call with a local variable argument was found in " + createFuncName, nil
+	}
+
+	// Inspect every assignment touching createArg: it must be assigned exactly
+	// once, from ctorName(...), and never field-mutated or reassigned.
+	ctorAssigned := false
+	disconnected := false
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		as, ok := n.(*ast.AssignStmt)
+		if !ok {
+			return true
+		}
+		for i, lhs := range as.Lhs {
+			switch target := lhs.(type) {
+			case *ast.Ident:
+				if target.Name != createArg {
+					continue
+				}
+				if i < len(as.Rhs) && isCallTo(as.Rhs[i], ctorName) {
+					ctorAssigned = true
+				} else {
+					disconnected = true // assigned from something other than the constructor
+				}
+			case *ast.SelectorExpr:
+				if x, ok := target.X.(*ast.Ident); ok && x.Name == createArg {
+					disconnected = true // row.Field = … mutates the persisted value
+				}
+			}
+		}
+		return true
+	})
+	if !ctorAssigned {
+		return false, createArg + " passed to Create is not assigned from " + ctorName + "(...)", nil
+	}
+	if disconnected {
+		return false, createArg + " is reassigned or field-mutated before Create; route the create solely through " + ctorName, nil
+	}
+	return true, "", nil
+}
+
+// identName returns the identifier name of `x` or `&x`, else "".
+func identName(expr ast.Expr) string {
+	if u, ok := expr.(*ast.UnaryExpr); ok {
+		expr = u.X
+	}
+	if id, ok := expr.(*ast.Ident); ok {
+		return id.Name
+	}
+	return ""
+}
+
+// isCallTo reports whether expr is a call to the function named funcName.
+func isCallTo(expr ast.Expr, funcName string) bool {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	id, ok := call.Fun.(*ast.Ident)
+	return ok && id.Name == funcName
+}
+
 // collectLiteralKeys records the keyed field names of a returned
 // `<typeName>{ ... }` (or `&<typeName>{ ... }`) composite literal.
 func collectLiteralKeys(expr ast.Expr, typeName string, set map[string]bool) {

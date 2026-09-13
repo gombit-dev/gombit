@@ -163,6 +163,80 @@ func TestConstructorCreateFieldsEmptyWhenNoReturnedLiteral(t *testing.T) {
 	}
 }
 
+func createPersists(t *testing.T, src string) (bool, string) {
+	t.Helper()
+	ok, detail, err := resourcecheck.CreatePersistsConstructor([]byte(src), "create", "buildBookForCreate")
+	if err != nil {
+		t.Fatalf("CreatePersistsConstructor: %v", err)
+	}
+	return ok, detail
+}
+
+// The generated create method routes the persisted value through the constructor.
+func TestCreatePersistsConstructorHappyPath(t *testing.T) {
+	src := `package book
+func (h *Handler) create(ctx context.Context, input *createBookInput) (*createBookOutput, error) {
+	row := buildBookForCreate(input)
+	if err := h.DB.WithContext(ctx).Create(&row).Error; err != nil {
+		return nil, err
+	}
+	return nil, nil
+}`
+	if ok, detail := createPersists(t, src); !ok {
+		t.Fatalf("want persists=true; detail=%q", detail)
+	}
+}
+
+// Review's failure A: the handler builds the persisted value inline, bypassing
+// the constructor. The constructor may still return TenantID, but it is not what
+// gets persisted — must be rejected.
+func TestCreatePersistsConstructorRejectsBypass(t *testing.T) {
+	src := `package book
+func (h *Handler) create(ctx context.Context, input *createBookInput) error {
+	row := Book{Title: input.Body.Title}
+	return h.DB.WithContext(ctx).Create(&row).Error
+}`
+	if ok, _ := createPersists(t, src); ok {
+		t.Fatal("want persists=false when create builds the value inline (bypassing the constructor)")
+	}
+}
+
+// Review's failure B: the handler mutates the constructor result before Create.
+func TestCreatePersistsConstructorRejectsMutation(t *testing.T) {
+	src := `package book
+func (h *Handler) create(ctx context.Context, input *createBookInput) error {
+	row := buildBookForCreate(input)
+	row.TenantID = 0
+	return h.DB.WithContext(ctx).Create(&row).Error
+}`
+	if ok, _ := createPersists(t, src); ok {
+		t.Fatal("want persists=false when the constructor result is mutated before Create")
+	}
+}
+
+func TestCreatePersistsConstructorRejectsReassign(t *testing.T) {
+	src := `package book
+func (h *Handler) create(ctx context.Context, input *createBookInput) error {
+	row := buildBookForCreate(input)
+	row = Book{}
+	return h.DB.WithContext(ctx).Create(&row).Error
+}`
+	if ok, _ := createPersists(t, src); ok {
+		t.Fatal("want persists=false when the persisted variable is reassigned")
+	}
+}
+
+func TestCreatePersistsConstructorRejectsMissingCreate(t *testing.T) {
+	src := `package book
+func (h *Handler) create(ctx context.Context, input *createBookInput) error { return nil }`
+	if ok, _ := createPersists(t, src); ok {
+		t.Fatal("want persists=false when there is no Create call")
+	}
+	if ok, _, err := resourcecheck.CreatePersistsConstructor([]byte("package book\n"), "create", "buildBookForCreate"); err != nil || ok {
+		t.Fatalf("want persists=false when the create method is absent; ok=%v err=%v", ok, err)
+	}
+}
+
 // End to end, including the decoy: the decoy'd TenantID is still reported as
 // drift because only the RETURNED literal counts.
 func TestConstructorFieldsFeedMissingColumns(t *testing.T) {

@@ -20,6 +20,13 @@ func TestBookCreateContractCoversRequiredColumns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read handler.go: %v", err)
 	}
+	// The guard is sound only if create persists buildBookForCreate's result
+	// unchanged; reject a handler that bypasses or mutates it (#218).
+	if ok, detail, perr := resourcecheck.CreatePersistsConstructor(src, "create", "buildBookForCreate"); perr != nil {
+		t.Fatalf("inspect Book create handler: %v", perr)
+	} else if !ok {
+		t.Fatalf("the create handler must persist buildBookForCreate's result unchanged: %s", detail)
+	}
 	assigned, err := resourcecheck.ConstructorCreateFields(src, "buildBookForCreate", "Book")
 	if err != nil {
 		t.Fatalf("parse Book create constructor: %v", err)
