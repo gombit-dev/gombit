@@ -479,6 +479,194 @@ func collectLiteralKeys(expr ast.Expr, typeName string, set map[string]bool) {
 	}
 }
 
+// ModelContractDrift compares a model's content columns against the generated
+// create request DTO and the response DTO, detecting the broader model↔handler
+// divergence #218 is about (not just the silent zero-fill of required columns).
+//
+// A content column is any persisted column that is not auto-managed (primary
+// key, auto create/update timestamp, soft-delete) — including NULLABLE and
+// DATABASE-DEFAULTED columns, which MissingCreateColumns deliberately skips.
+//
+//   - writeDrift: content columns a client cannot set, because they are absent
+//     from the create request DTO (createGoFields) and are neither server-managed
+//     nor write-exempt. Adding such a column to the model without updating the
+//     handler's create DTO is exactly the "422 unexpected property" divergence in
+//     #218: the client cannot supply the field the model now expects.
+//   - readDrift: content columns never surfaced, because they are absent from the
+//     response DTO (responseGoFields) and are not read-exempt.
+//
+// createGoFields/responseGoFields are Go field names (parsed from the handler's
+// DTO structs); serverManagedCols/writeExemptCols/readExemptCols are DB column
+// names (the human-owned opt-out lists). Returned drift is DB column names,
+// sorted. The write/read exempt lists are the explicit opt-outs for intentional
+// omissions, so an encapsulated field fails closed only until a human declares it.
+func ModelContractDrift(model any, createGoFields, responseGoFields, serverManagedCols, writeExemptCols, readExemptCols []string) (writeDrift, readDrift []string, err error) {
+	sch, perr := schema.Parse(model, &sync.Map{}, schema.NamingStrategy{})
+	if perr != nil {
+		return nil, nil, fmt.Errorf("resourcecheck: parse model schema: %w", perr)
+	}
+	createGo := toSet(createGoFields)
+	responseGo := toSet(responseGoFields)
+	serverDB := toSet(serverManagedCols)
+	writeDB := toSet(writeExemptCols)
+	readDB := toSet(readExemptCols)
+
+	for _, f := range sch.Fields {
+		if !isContentField(f) {
+			continue
+		}
+		if !createGo[f.Name] && !serverDB[f.DBName] && !writeDB[f.DBName] {
+			writeDrift = append(writeDrift, f.DBName)
+		}
+		if !responseGo[f.Name] && !readDB[f.DBName] {
+			readDrift = append(readDrift, f.DBName)
+		}
+	}
+	sort.Strings(writeDrift)
+	sort.Strings(readDrift)
+	return writeDrift, readDrift, nil
+}
+
+// isContentField reports whether a column is part of the resource's editable/
+// visible surface — everything except the framework-managed primary key, auto
+// timestamps, and soft-delete. Unlike requiresCreateValue it keeps nullable and
+// database-defaulted columns, since those still belong in the API contract.
+func isContentField(f *schema.Field) bool {
+	if f == nil {
+		return false
+	}
+	if f.PrimaryKey || f.AutoIncrement {
+		return false
+	}
+	if f.AutoCreateTime != 0 || f.AutoUpdateTime != 0 {
+		return false
+	}
+	if f.Name == "DeletedAt" {
+		return false
+	}
+	return true
+}
+
+// DTOFieldNames returns the Go field names declared by the named struct type
+// (e.g. the response DTO "bookData"), or nil if no such struct is found.
+func DTOFieldNames(handlerSrc []byte, typeName string) ([]string, error) {
+	file, err := parseHandler(handlerSrc)
+	if err != nil {
+		return nil, err
+	}
+	st := findStructType(file, typeName)
+	if st == nil {
+		return nil, nil
+	}
+	return structFieldNames(st), nil
+}
+
+// RequestBodyFieldNames returns the Go field names of the `Body` field of the
+// named request-input type (e.g. "createBookInput"). Body may be an inline struct
+// literal or a named struct type; either is resolved to its fields.
+func RequestBodyFieldNames(handlerSrc []byte, inputTypeName string) ([]string, error) {
+	file, err := parseHandler(handlerSrc)
+	if err != nil {
+		return nil, err
+	}
+	st := findStructType(file, inputTypeName)
+	if st == nil {
+		return nil, nil
+	}
+	var bodyType ast.Expr
+	for _, field := range st.Fields.List {
+		for _, nm := range field.Names {
+			if nm.Name == "Body" {
+				bodyType = field.Type
+			}
+		}
+	}
+	if bodyType == nil {
+		return nil, nil
+	}
+	return fieldNamesOfType(file, bodyType), nil
+}
+
+func parseHandler(handlerSrc []byte) (*ast.File, error) {
+	file, err := parser.ParseFile(token.NewFileSet(), "handler.go", handlerSrc, 0)
+	if err != nil {
+		return nil, fmt.Errorf("resourcecheck: parse handler: %w", err)
+	}
+	return file, nil
+}
+
+// findStructType returns the struct type declared as `type <name> struct {…}`.
+func findStructType(file *ast.File, name string) *ast.StructType {
+	for _, decl := range file.Decls {
+		gd, ok := decl.(*ast.GenDecl)
+		if !ok || gd.Tok != token.TYPE {
+			continue
+		}
+		for _, spec := range gd.Specs {
+			ts, ok := spec.(*ast.TypeSpec)
+			if !ok || ts.Name == nil || ts.Name.Name != name {
+				continue
+			}
+			if st, ok := ts.Type.(*ast.StructType); ok {
+				return st
+			}
+		}
+	}
+	return nil
+}
+
+// fieldNamesOfType resolves an inline struct, a named struct type, or a pointer
+// to either, to its declared field names.
+func fieldNamesOfType(file *ast.File, t ast.Expr) []string {
+	switch ft := t.(type) {
+	case *ast.StructType:
+		return structFieldNames(ft)
+	case *ast.StarExpr:
+		return fieldNamesOfType(file, ft.X)
+	case *ast.Ident:
+		if st := findStructType(file, ft.Name); st != nil {
+			return structFieldNames(st)
+		}
+	}
+	return nil
+}
+
+// structFieldNames returns the declared Go field names of a struct type, sorted.
+// Named fields contribute their name; an embedded field contributes its type name.
+func structFieldNames(st *ast.StructType) []string {
+	var out []string
+	for _, field := range st.Fields.List {
+		if len(field.Names) == 0 {
+			if name := embeddedName(field.Type); name != "" {
+				out = append(out, name)
+			}
+			continue
+		}
+		for _, nm := range field.Names {
+			if nm.Name != "_" {
+				out = append(out, nm.Name)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// embeddedName returns the type name of an embedded field (`T`, `*T`, `pkg.T`).
+func embeddedName(t ast.Expr) string {
+	switch e := t.(type) {
+	case *ast.Ident:
+		return e.Name
+	case *ast.StarExpr:
+		return embeddedName(e.X)
+	case *ast.SelectorExpr:
+		if e.Sel != nil {
+			return e.Sel.Name
+		}
+	}
+	return ""
+}
+
 // requiresCreateValue reports whether a column must be given a value on create:
 // NOT NULL, no DB default, and not something the database or GORM fills itself.
 func requiresCreateValue(f *schema.Field) bool {

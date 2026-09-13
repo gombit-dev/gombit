@@ -605,3 +605,54 @@ func TestMakeResourceDriftGuardCatchesConstructorBypass(t *testing.T) {
 		t.Fatalf("drift guard must FAIL when the handler bypasses the constructor, but it passed:\n%s", out)
 	}
 }
+
+// TestMakeResourceDriftGuardCatchesModelDTODrift is the #218 end-to-end check for
+// the broader model↔DTO divergence: adding a (nullable) model field the frozen
+// handler DTOs do not expose must fail the generated contract test — a client
+// could not set it (422) and it would never be returned. It scaffolds the tree,
+// confirms it passes, then adds a column to the model alone and confirms `go
+// test` now fails on both input and response drift.
+func TestMakeResourceDriftGuardCatchesModelDTODrift(t *testing.T) {
+	appDir := filepath.Join(t.TempDir(), "app")
+	copyTree(t, goldenDir("make-resource"), appDir)
+	appendLocalReplace(t, appDir)
+
+	tidy := exec.Command("go", "mod", "tidy")
+	tidy.Dir = appDir
+	if out, err := tidy.CombinedOutput(); err != nil {
+		t.Fatalf("go mod tidy: %v\n%s", err, out)
+	}
+
+	bookTest := exec.Command("go", "test", "./internal/book/")
+	bookTest.Dir = appDir
+	if out, err := bookTest.CombinedOutput(); err != nil {
+		t.Fatalf("unchanged drift guard should pass: %v\n%s", err, out)
+	}
+
+	// Add a nullable column to the model only — the handler's create DTO and
+	// response DTO still do not mention it.
+	modelPath := filepath.Join(appDir, "internal", "book", "book.go")
+	src, err := os.ReadFile(modelPath) // #nosec G304 -- temp copy of generated tree
+	if err != nil {
+		t.Fatalf("read book.go: %v", err)
+	}
+	added := bytes.Replace(src,
+		[]byte("Title string `gorm:\"size:255;not null\"`"),
+		[]byte("Title string `gorm:\"size:255;not null\"`\n\tSummary *string"), 1)
+	if bytes.Equal(added, src) {
+		t.Fatal("model field anchor not found in generated book.go")
+	}
+	if err := os.WriteFile(modelPath, added, 0o644); err != nil { //nolint:gosec // temp copy
+		t.Fatalf("write book.go: %v", err)
+	}
+
+	drift := exec.Command("go", "test", "./internal/book/")
+	drift.Dir = appDir
+	out, err := drift.CombinedOutput()
+	if err == nil {
+		t.Fatalf("drift guard must FAIL when the model gains a field the DTOs omit, but it passed:\n%s", out)
+	}
+	if !bytes.Contains(out, []byte("input drift")) || !bytes.Contains(out, []byte("response drift")) {
+		t.Fatalf("expected input and response drift to be reported; got:\n%s", out)
+	}
+}

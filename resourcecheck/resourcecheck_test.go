@@ -490,3 +490,93 @@ func TestConstructorFieldsFeedMissingColumns(t *testing.T) {
 		t.Fatalf("missing = %v, want [tenant_id] (decoy TenantID must not certify)", got)
 	}
 }
+
+// --- #218 finding 4: full model↔DTO drift ---
+
+func TestDTOFieldNames(t *testing.T) {
+	src := []byte("package book\ntype bookData struct {\n\tID uint\n\tTitle string\n}\n")
+	got, err := resourcecheck.DTOFieldNames(src, "bookData")
+	if err != nil {
+		t.Fatalf("DTOFieldNames: %v", err)
+	}
+	if !reflect.DeepEqual(got, []string{"ID", "Title"}) {
+		t.Fatalf("got %v, want [ID Title]", got)
+	}
+}
+
+func TestRequestBodyFieldNamesInlineStruct(t *testing.T) {
+	src := []byte("package book\ntype createBookInput struct {\n\tBody struct {\n\t\tTitle string\n\t\tCategoryID uint\n\t}\n}\n")
+	got, err := resourcecheck.RequestBodyFieldNames(src, "createBookInput")
+	if err != nil {
+		t.Fatalf("RequestBodyFieldNames: %v", err)
+	}
+	if !reflect.DeepEqual(got, []string{"CategoryID", "Title"}) {
+		t.Fatalf("got %v, want [CategoryID Title]", got)
+	}
+}
+
+// Finding 4: a nullable/defaulted model field absent from the DTOs is drift —
+// settable via the create request (write) and surfaced in the response (read) —
+// the class MissingCreateColumns deliberately skips. Server-managed columns are
+// not input drift.
+func TestModelContractDriftFlagsMissingDTOFields(t *testing.T) {
+	type widget struct {
+		ID       uint   `gorm:"primaryKey"`
+		Name     string `gorm:"not null"`
+		Note     *string
+		TenantID uint `gorm:"not null"`
+	}
+	write, read, err := resourcecheck.ModelContractDrift(
+		&widget{},
+		[]string{"Name"},       // create DTO exposes only Name
+		[]string{"ID", "Name"}, // response DTO exposes ID, Name
+		[]string{"tenant_id"},  // tenant_id server-managed
+		nil, nil,
+	)
+	if err != nil {
+		t.Fatalf("ModelContractDrift: %v", err)
+	}
+	if !reflect.DeepEqual(write, []string{"note"}) {
+		t.Fatalf("writeDrift = %v, want [note] (tenant_id is server-managed, not input drift)", write)
+	}
+	if !reflect.DeepEqual(read, []string{"note", "tenant_id"}) {
+		t.Fatalf("readDrift = %v, want [note tenant_id]", read)
+	}
+}
+
+func TestModelContractDriftRespectsExemptions(t *testing.T) {
+	type widget struct {
+		ID   uint   `gorm:"primaryKey"`
+		Name string `gorm:"not null"`
+		Note *string
+	}
+	write, read, err := resourcecheck.ModelContractDrift(
+		&widget{},
+		[]string{"Name"},
+		[]string{"ID", "Name"},
+		nil,
+		[]string{"note"}, // intentionally not settable
+		[]string{"note"}, // intentionally not surfaced
+	)
+	if err != nil {
+		t.Fatalf("ModelContractDrift: %v", err)
+	}
+	if len(write) != 0 || len(read) != 0 {
+		t.Fatalf("want no drift with Note exempt; write=%v read=%v", write, read)
+	}
+}
+
+func TestModelContractDriftIgnoresAutoManaged(t *testing.T) {
+	type post struct {
+		gorm.Model
+		Title string `gorm:"not null"`
+	}
+	// gorm.Model's ID/timestamps/DeletedAt are not content fields; only Title is.
+	write, read, err := resourcecheck.ModelContractDrift(&post{}, []string{"Title"}, []string{"Title"}, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("ModelContractDrift: %v", err)
+	}
+	if len(write) != 0 || len(read) != 0 {
+		t.Fatalf("want no drift; write=%v read=%v", write, read)
+	}
+}

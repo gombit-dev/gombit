@@ -8,20 +8,19 @@ import (
 	"github.com/gombit-dev/gombit/resourcecheck"
 )
 
-// TestBookCreateContractCoversRequiredColumns guards against the Book
-// schema and the generated create path drifting into an invalid state (#218):
-// a NOT NULL column with no database default that the create handler does not
-// assign — and that is not server-managed — would be silently zero-filled on
-// create. When this fails after you add a column to Book, either assign the
-// field in the create handler, set it server-side and list its column in
-// bookServerManagedColumns (book_server_managed.go), or make the column nullable.
-func TestBookCreateContractCoversRequiredColumns(t *testing.T) {
+// TestBookContractMatchesModel guards against the Book schema and the
+// generated API contract drifting apart (#218): a column the create handler
+// cannot supply would be silently zero-filled, and a model field missing from
+// the request/response DTOs would be rejected on input or never returned. When
+// this fails after you change Book, update the create constructor or DTOs,
+// or declare the column in the opt-out lists in book_contract.go.
+func TestBookContractMatchesModel(t *testing.T) {
 	src, err := os.ReadFile("handler.go")
 	if err != nil {
 		t.Fatalf("read handler.go: %v", err)
 	}
-	// The guard is sound only if create persists buildBookForCreate's result
-	// unchanged; reject a handler that bypasses or mutates it (#218).
+	// (1) The required-column guard is sound only if create persists
+	// buildBookForCreate's result, modified only by server-managed columns (#218).
 	if ok, detail, perr := resourcecheck.CreatePersistsConstructor(src, "Handler", "create", "buildBookForCreate", bookServerManagedColumns); perr != nil {
 		t.Fatalf("inspect Book create handler: %v", perr)
 	} else if !ok {
@@ -31,11 +30,32 @@ func TestBookCreateContractCoversRequiredColumns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse Book create constructor: %v", err)
 	}
-	drift, err := resourcecheck.MissingCreateColumns(&Book{}, assigned, bookServerManagedColumns)
+	// (2) Every persistence-required column has a known create-value source.
+	missing, err := resourcecheck.MissingCreateColumns(&Book{}, assigned, bookServerManagedColumns)
 	if err != nil {
 		t.Fatalf("inspect Book schema: %v", err)
 	}
-	for _, column := range drift {
-		t.Errorf("model/handler drift: Book.%s is NOT NULL with no default but the create handler does not assign it and it is not in bookServerManagedColumns", column)
+	for _, column := range missing {
+		t.Errorf("create drift: Book.%s is NOT NULL with no default but is neither assigned by the create constructor nor in bookServerManagedColumns", column)
+	}
+	// (3) Every content column is settable via the request DTO and surfaced in
+	// the response DTO, unless explicitly opted out.
+	createFields, err := resourcecheck.RequestBodyFieldNames(src, "createBookInput")
+	if err != nil {
+		t.Fatalf("parse Book request DTO: %v", err)
+	}
+	responseFields, err := resourcecheck.DTOFieldNames(src, "bookData")
+	if err != nil {
+		t.Fatalf("parse Book response DTO: %v", err)
+	}
+	writeDrift, readDrift, err := resourcecheck.ModelContractDrift(&Book{}, createFields, responseFields, bookServerManagedColumns, bookWriteOmittedColumns, bookReadOmittedColumns)
+	if err != nil {
+		t.Fatalf("compare Book model with DTOs: %v", err)
+	}
+	for _, column := range writeDrift {
+		t.Errorf("input drift: Book.%s is not settable via the create request; add it to createBookInput.Body, or list its column in bookServerManagedColumns / bookWriteOmittedColumns", column)
+	}
+	for _, column := range readDrift {
+		t.Errorf("response drift: Book.%s is never surfaced; add it to bookData, or list its column in bookReadOmittedColumns", column)
 	}
 }

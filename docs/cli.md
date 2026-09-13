@@ -336,19 +336,36 @@ rewrites them to the live `GOMBIT_API_PREFIX` (same as the product pages).
 After generating routes, run `gombit client generate` or `gombit dev` so
 `frontend/src/api/generated` includes the new paths.
 
-The generated handler is a **human-owned contract**: its create mapping is a
-snapshot of the fields given here, and the generator never rewrites it when the
-model later gains a column. `<snake>_drift_test.go` keeps the persistence schema
-and that mapping from diverging silently ([#218](https://github.com/gombit-dev/gombit/issues/218)):
-it parses the handler's **actual create constructor** (the `<Type>{...}`
-assignments, not just the request DTO) and `go test` fails when a **NOT NULL**
-column with no database default is not assigned there, not server-managed, and
-not auto-managed or nullable — otherwise a create would silently zero-fill it.
-When it fails after you add a column, either assign the field in the create
-handler, set it server-side and add the column to `<type>ServerManagedColumns` in
-the **human-owned** `<snake>_server_managed.go` (seeded once, never regenerated —
-e.g. a tenant/owner id from the auth context), or make the column nullable. Only
-the create side is checked; a response DTO may intentionally omit fields.
+The generated handler is a **human-owned contract**: its create mapping and DTOs
+are a snapshot of the fields given here, and the generator never rewrites them
+when the model later gains a column. `<snake>_drift_test.go` keeps the model and
+that contract from diverging silently ([#218](https://github.com/gombit-dev/gombit/issues/218)),
+failing `go test` on three divergences:
+
+1. **Create persists the constructor.** It parses the handler's **actual create
+   constructor** (the `build<Type>ForCreate` return literal) and verifies the
+   `create` method persists that value unchanged — rejecting a handler that
+   bypasses, mutates, or reorders it — so the checks below describe what is
+   really written. Assignments to declared server-managed columns are allowed.
+2. **Required columns have a source.** A **NOT NULL** column with no database
+   default that the constructor does not assign, and that is not server-managed,
+   would be silently zero-filled — so it is reported.
+3. **Model ↔ DTO.** Every **content** column (everything but the primary key,
+   auto timestamps, and soft-delete — including nullable and defaulted columns)
+   must be settable through the create request DTO and surfaced in the response
+   DTO. A model field missing from the request DTO is the `422 unexpected
+   property` class #218 is about; one missing from the response is never
+   returned.
+
+The opt-outs live in the **human-owned** `<snake>_contract.go` (seeded once,
+never regenerated, even with `--force`), each holding DB column names:
+`<type>ServerManagedColumns` (NOT NULL columns set server-side — e.g. a
+tenant/owner id from the auth context or a hook — treated as a known create
+source and not input drift), `<type>WriteOmittedColumns` (columns intentionally
+not settable via the create body), and `<type>ReadOmittedColumns` (columns
+intentionally not surfaced in responses). When the test fails after you change
+the model, update the constructor or DTOs, or list the column in the matching
+opt-out.
 
 ### Field grammar
 
