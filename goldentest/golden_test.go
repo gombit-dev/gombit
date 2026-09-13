@@ -591,7 +591,7 @@ func TestMakeResourceDriftGuardCatchesConstructorBypass(t *testing.T) {
 	}
 	// Bypass the constructor: build the model inline (and omit Title), so the
 	// persisted value diverges from buildBookForCreate's returned literal.
-	tampered := bytes.Replace(src, []byte("row := buildBookForCreate(input)"), []byte("row := Book{}"), 1)
+	tampered := bytes.Replace(src, []byte("row := buildBookForCreate(ctx, input)"), []byte("row := Book{}"), 1)
 	if bytes.Equal(tampered, src) {
 		t.Fatal("tamper target not found in generated handler")
 	}
@@ -654,5 +654,70 @@ func TestMakeResourceDriftGuardCatchesModelDTODrift(t *testing.T) {
 	}
 	if !bytes.Contains(out, []byte("input drift")) || !bytes.Contains(out, []byte("response drift")) {
 		t.Fatalf("expected input and response drift to be reported; got:\n%s", out)
+	}
+}
+
+// zeroFillRegressionTest exercises the generated create handler against real
+// SQLite: submit a Title and assert it is persisted, so the original #218
+// zero-fill (a required column not reaching the row) would fail loudly.
+const zeroFillRegressionTest = `package book
+
+import (
+	"context"
+	"path/filepath"
+	"testing"
+
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
+)
+
+func TestCreatePersistsTitleZeroFillRegression(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "test.db")), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(&Book{}); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	h := &Handler{DB: db}
+	in := &createBookInput{}
+	in.Body.Title = "Dune"
+	if _, err := h.create(context.Background(), in); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	var got Book
+	if err := db.First(&got).Error; err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got.Title != "Dune" {
+		t.Fatalf("Title = %q, want \"Dune\" (#218 zero-fill regression)", got.Title)
+	}
+}
+`
+
+// TestMakeResourceCreatePersistsRowEndToEnd is the behavioral #218 regression:
+// it scaffolds the tree, injects a SQLite test that drives the real create
+// handler, and asserts the submitted value is persisted. This complements the
+// static grammar/required-column guard with an actual round-trip, without making
+// generic runtime fixtures the invariant mechanism.
+func TestMakeResourceCreatePersistsRowEndToEnd(t *testing.T) {
+	appDir := filepath.Join(t.TempDir(), "app")
+	copyTree(t, goldenDir("make-resource"), appDir)
+	appendLocalReplace(t, appDir)
+
+	if err := os.WriteFile(filepath.Join(appDir, "internal", "book", "zerofill_test.go"), []byte(zeroFillRegressionTest), 0o644); err != nil { //nolint:gosec // temp copy
+		t.Fatalf("write regression test: %v", err)
+	}
+
+	tidy := exec.Command("go", "mod", "tidy")
+	tidy.Dir = appDir
+	if out, err := tidy.CombinedOutput(); err != nil {
+		t.Fatalf("go mod tidy: %v\n%s", err, out)
+	}
+
+	run := exec.Command("go", "test", "-run", "TestCreatePersistsTitleZeroFillRegression", "./internal/book/")
+	run.Dir = appDir
+	if out, err := run.CombinedOutput(); err != nil {
+		t.Fatalf("generated create handler must persist the submitted Title end-to-end: %v\n%s", err, out)
 	}
 }

@@ -1,10 +1,12 @@
 package resourcecheck_test
 
 import (
+	"context"
 	"reflect"
 	"testing"
 	"time"
 
+	"github.com/gombit-dev/gombit/contract"
 	"github.com/gombit-dev/gombit/resourcecheck"
 	"gorm.io/gorm"
 )
@@ -203,264 +205,266 @@ func buildBookForCreate(input *createBookInput) Book {
 	}
 }
 
-func createPersists(t *testing.T, src string, serverManaged ...string) (bool, string) {
+// goodCtor is the canonical context-aware constructor: a single unconditional
+// return literal. withCtor composes a book package from it plus a create method.
+const goodCtor = "func buildBookForCreate(ctx context.Context, input *createBookInput) Book {\n\treturn Book{Title: input.Body.Title}\n}\n"
+
+func withCtor(method string) string {
+	return "package book\n" + goodCtor + method
+}
+
+func grammarOK(t *testing.T, src string) (bool, string) {
 	t.Helper()
-	ok, detail, err := resourcecheck.CreatePersistsConstructor([]byte(src), "Handler", "create", "buildBookForCreate", serverManaged)
+	ok, detail, err := resourcecheck.ValidateCreateGrammar([]byte(src), "Handler", "create", "buildBookForCreate", "Book")
 	if err != nil {
-		t.Fatalf("CreatePersistsConstructor: %v", err)
+		t.Fatalf("ValidateCreateGrammar: %v", err)
 	}
 	return ok, detail
 }
 
-// The generated create method routes the persisted value through the constructor.
-func TestCreatePersistsConstructorHappyPath(t *testing.T) {
-	src := `package book
-func (h *Handler) create(ctx context.Context, input *createBookInput) (*createBookOutput, error) {
-	row := buildBookForCreate(input)
+// The canonical generated create shape is accepted.
+func TestValidateCreateGrammarHappyPath(t *testing.T) {
+	src := withCtor(`func (h *Handler) create(ctx context.Context, input *createBookInput) (*createBookOutput, error) {
+	row := buildBookForCreate(ctx, input)
 	if err := h.DB.WithContext(ctx).Create(&row).Error; err != nil {
 		return nil, err
 	}
-	return nil, nil
-}`
-	if ok, detail := createPersists(t, src); !ok {
-		t.Fatalf("want persists=true; detail=%q", detail)
+	return createBookOutput{}, nil
+}`)
+	if ok, detail := grammarOK(t, src); !ok {
+		t.Fatalf("want ok; detail=%q", detail)
 	}
 }
 
-// Review's failure A: the handler builds the persisted value inline, bypassing
-// the constructor. The constructor may still return TenantID, but it is not what
-// gets persisted — must be rejected.
-func TestCreatePersistsConstructorRejectsBypass(t *testing.T) {
-	src := `package book
-func (h *Handler) create(ctx context.Context, input *createBookInput) error {
+// The simple `return h.DB.….Create(&row).Error` shape is also accepted.
+func TestValidateCreateGrammarAcceptsReturnCreate(t *testing.T) {
+	src := withCtor(`func (h *Handler) create(ctx context.Context, input *createBookInput) error {
+	row := buildBookForCreate(ctx, input)
+	return h.DB.WithContext(ctx).Create(&row).Error
+}`)
+	if ok, detail := grammarOK(t, src); !ok {
+		t.Fatalf("want ok; detail=%q", detail)
+	}
+}
+
+// Building the value inline bypasses the constructor.
+func TestValidateCreateGrammarRejectsBypass(t *testing.T) {
+	src := withCtor(`func (h *Handler) create(ctx context.Context, input *createBookInput) error {
 	row := Book{Title: input.Body.Title}
 	return h.DB.WithContext(ctx).Create(&row).Error
-}`
-	if ok, _ := createPersists(t, src); ok {
-		t.Fatal("want persists=false when create builds the value inline (bypassing the constructor)")
+}`)
+	if ok, _ := grammarOK(t, src); ok {
+		t.Fatal("want rejected when create builds the value inline")
 	}
 }
 
-// Review's failure B: the handler mutates the constructor result before Create.
-func TestCreatePersistsConstructorRejectsMutation(t *testing.T) {
-	src := `package book
-func (h *Handler) create(ctx context.Context, input *createBookInput) error {
-	row := buildBookForCreate(input)
-	row.TenantID = 0
-	return h.DB.WithContext(ctx).Create(&row).Error
-}`
-	if ok, _ := createPersists(t, src); ok {
-		t.Fatal("want persists=false when the constructor result is mutated before Create")
-	}
-}
-
-func TestCreatePersistsConstructorRejectsReassign(t *testing.T) {
-	src := `package book
-func (h *Handler) create(ctx context.Context, input *createBookInput) error {
-	row := buildBookForCreate(input)
-	row = Book{}
-	return h.DB.WithContext(ctx).Create(&row).Error
-}`
-	if ok, _ := createPersists(t, src); ok {
-		t.Fatal("want persists=false when the persisted variable is reassigned")
-	}
-}
-
-func TestCreatePersistsConstructorRejectsMissingCreate(t *testing.T) {
-	src := `package book
-func (h *Handler) create(ctx context.Context, input *createBookInput) error { return nil }`
-	if ok, _ := createPersists(t, src); ok {
-		t.Fatal("want persists=false when there is no Create call")
-	}
-	if ok, _, err := resourcecheck.CreatePersistsConstructor([]byte("package book\n"), "Handler", "create", "buildBookForCreate", nil); err != nil || ok {
-		t.Fatalf("want persists=false when the create method is absent; ok=%v err=%v", ok, err)
-	}
-}
-
-// Review's ordering attack: the constructor assignment exists, but it runs
-// AFTER Create, which already persisted the zero value. Syntactic presence is
-// not dataflow — must be rejected.
-func TestCreatePersistsConstructorRejectsAssignAfterCreate(t *testing.T) {
-	src := `package book
-func (h *Handler) create(ctx context.Context, input *createBookInput) error {
-	var row Book
-	_ = h.DB.WithContext(ctx).Create(&row).Error
-	row = buildBookForCreate(input)
-	return nil
-}`
-	if ok, _ := createPersists(t, src); ok {
-		t.Fatal("want persists=false when the constructor assignment runs after Create")
-	}
-}
-
-// Review's conditional attack: the constructor assignment only happens on one
-// branch, so the other path persists a zero value. A non-dominating assignment
-// must be rejected.
-func TestCreatePersistsConstructorRejectsConditionalAssign(t *testing.T) {
-	src := `package book
-func (h *Handler) create(ctx context.Context, input *createBookInput) error {
-	var row Book
-	if input.Body.Title != "" {
-		row = buildBookForCreate(input)
-	}
-	return h.DB.WithContext(ctx).Create(&row).Error
-}`
-	if ok, _ := createPersists(t, src); ok {
-		t.Fatal("want persists=false when the constructor assignment is under a conditional")
-	}
-}
-
-// Review's closure/dead-code concern: an assignment buried in a function literal
-// does not dominate Create on the enclosing path.
-func TestCreatePersistsConstructorRejectsAssignInClosure(t *testing.T) {
-	src := `package book
-func (h *Handler) create(ctx context.Context, input *createBookInput) error {
-	var row Book
-	func() { row = buildBookForCreate(input) }()
-	return h.DB.WithContext(ctx).Create(&row).Error
-}`
-	if ok, _ := createPersists(t, src); ok {
-		t.Fatal("want persists=false when the constructor assignment is inside a closure")
-	}
-}
-
-// Two Create calls make "the persisted value" ambiguous — reject conservatively.
-func TestCreatePersistsConstructorRejectsSecondCreate(t *testing.T) {
-	src := `package book
-func (h *Handler) create(ctx context.Context, input *createBookInput) error {
-	row := buildBookForCreate(input)
-	_ = h.DB.WithContext(ctx).Create(&Book{}).Error
-	return h.DB.WithContext(ctx).Create(&row).Error
-}`
-	if ok, _ := createPersists(t, src); ok {
-		t.Fatal("want persists=false when a second Create call is present")
-	}
-}
-
-// Finding 2: receiver pinning. A decoy create on another type is declared first
-// with a valid shape; the registered Handler.create bypasses the constructor.
-// The checker must judge Handler.create, not the decoy.
-func TestCreatePersistsConstructorPinsReceiver(t *testing.T) {
-	src := `package book
-func (p *Probe) create(ctx context.Context, input *createBookInput) error {
-	row := buildBookForCreate(input)
-	return p.DB.WithContext(ctx).Create(&row).Error
-}
-func (h *Handler) create(ctx context.Context, input *createBookInput) error {
-	row := Book{Title: input.Body.Title}
-	return h.DB.WithContext(ctx).Create(&row).Error
-}`
-	if ok, _ := createPersists(t, src); ok {
-		t.Fatal("want persists=false: Handler.create (not the decoy) bypasses the constructor")
-	}
-}
-
-func TestCreatePersistsConstructorRequiresExpectedReceiver(t *testing.T) {
-	src := `package book
-func (p *Probe) create(ctx context.Context, input *createBookInput) error {
-	row := buildBookForCreate(input)
-	return p.DB.WithContext(ctx).Create(&row).Error
-}`
-	if ok, _ := createPersists(t, src); ok {
-		t.Fatal("want persists=false when no Handler.create exists")
-	}
-}
-
-// Finding 2: the persistence call must be rooted at the handler receiver, so an
-// unrelated object's .Create cannot masquerade as the GORM write.
-func TestCreatePersistsConstructorRejectsNonReceiverCreate(t *testing.T) {
-	src := `package book
-func (h *Handler) create(ctx context.Context, input *createBookInput) error {
-	row := buildBookForCreate(input)
-	return other.WithContext(ctx).Create(&row).Error
-}`
-	if ok, _ := createPersists(t, src); ok {
-		t.Fatal("want persists=false when Create is not rooted at the handler receiver")
-	}
-}
-
-// Finding 1: a pointer-receiver method call implicitly takes &row and can mutate
-// it, with no &row syntax and no assignment node. The allowlist still rejects it.
-func TestCreatePersistsConstructorRejectsPointerReceiverMethod(t *testing.T) {
-	src := `package book
-func (h *Handler) create(ctx context.Context, input *createBookInput) error {
-	row := buildBookForCreate(input)
-	row.clearTenant()
-	return h.DB.WithContext(ctx).Create(&row).Error
-}`
-	if ok, _ := createPersists(t, src); ok {
-		t.Fatal("want persists=false when a method is invoked on row before Create")
-	}
-}
-
-// Finding 1: `row.Field++` is an *ast.IncDecStmt, not an AssignStmt.
-func TestCreatePersistsConstructorRejectsIncDec(t *testing.T) {
-	src := `package book
-func (h *Handler) create(ctx context.Context, input *createBookInput) error {
-	row := buildBookForCreate(input)
-	row.Views++
-	return h.DB.WithContext(ctx).Create(&row).Error
-}`
-	if ok, _ := createPersists(t, src); ok {
-		t.Fatal("want persists=false when a field of row is incremented before Create")
-	}
-}
-
-// Finding 3: assigning a declared server-managed column after construction is the
-// documented, supported flow and must be permitted.
-func TestCreatePersistsConstructorPermitsServerManagedAssignment(t *testing.T) {
-	src := `package book
-func (h *Handler) create(ctx context.Context, input *createBookInput) error {
-	row := buildBookForCreate(input)
+// No post-construction mutation is permitted — server values belong in the ctor.
+func TestValidateCreateGrammarRejectsPostConstructAssignment(t *testing.T) {
+	src := withCtor(`func (h *Handler) create(ctx context.Context, input *createBookInput) error {
+	row := buildBookForCreate(ctx, input)
 	row.TenantID = tenantFrom(ctx)
 	return h.DB.WithContext(ctx).Create(&row).Error
-}`
-	if ok, detail := createPersists(t, src, "tenant_id"); !ok {
-		t.Fatalf("want persists=true when the mutated column is server-managed; detail=%q", detail)
+}`)
+	if ok, _ := grammarOK(t, src); ok {
+		t.Fatal("want rejected when row is mutated after construction")
 	}
 }
 
-// Finding 3: assigning a column that is NOT declared server-managed is still a
-// silent divergence and must be rejected.
-func TestCreatePersistsConstructorRejectsUndeclaredServerManagedAssignment(t *testing.T) {
-	src := `package book
-func (h *Handler) create(ctx context.Context, input *createBookInput) error {
-	row := buildBookForCreate(input)
-	row.OwnerID = userFrom(ctx)
+func TestValidateCreateGrammarRejectsReassign(t *testing.T) {
+	src := withCtor(`func (h *Handler) create(ctx context.Context, input *createBookInput) error {
+	row := buildBookForCreate(ctx, input)
+	row = Book{}
 	return h.DB.WithContext(ctx).Create(&row).Error
-}`
-	if ok, _ := createPersists(t, src, "tenant_id"); ok {
-		t.Fatal("want persists=false when assigning a field whose column is not server-managed")
+}`)
+	if ok, _ := grammarOK(t, src); ok {
+		t.Fatal("want rejected when the persisted variable is reassigned")
 	}
 }
 
-// Review's aliasing attack: mutate the persisted row through a pointer alias
-// before Create. The direct `row.X =` check misses `p.X =`, so the guard instead
-// fails closed on any `&row` taken outside the Create call.
-func TestCreatePersistsConstructorRejectsPointerAlias(t *testing.T) {
-	src := `package book
+func TestValidateCreateGrammarRejectsMissingCreate(t *testing.T) {
+	src := withCtor(`func (h *Handler) create(ctx context.Context, input *createBookInput) error { return nil }`)
+	if ok, _ := grammarOK(t, src); ok {
+		t.Fatal("want rejected when there is no Create call")
+	}
+}
+
+// The constructor assignment runs AFTER Create; source order is not runtime order.
+func TestValidateCreateGrammarRejectsAssignAfterCreate(t *testing.T) {
+	src := withCtor(`func (h *Handler) create(ctx context.Context, input *createBookInput) error {
+	var row Book
+	_ = h.DB.WithContext(ctx).Create(&row).Error
+	row = buildBookForCreate(ctx, input)
+	return nil
+}`)
+	if ok, _ := grammarOK(t, src); ok {
+		t.Fatal("want rejected when the constructor assignment runs after Create")
+	}
+}
+
+func TestValidateCreateGrammarRejectsConditionalAssign(t *testing.T) {
+	src := withCtor(`func (h *Handler) create(ctx context.Context, input *createBookInput) error {
+	var row Book
+	if input.Body.Title != "" {
+		row = buildBookForCreate(ctx, input)
+	}
+	return h.DB.WithContext(ctx).Create(&row).Error
+}`)
+	if ok, _ := grammarOK(t, src); ok {
+		t.Fatal("want rejected when the constructor assignment is under a conditional")
+	}
+}
+
+func TestValidateCreateGrammarRejectsAssignInClosure(t *testing.T) {
+	src := withCtor(`func (h *Handler) create(ctx context.Context, input *createBookInput) error {
+	var row Book
+	func() { row = buildBookForCreate(ctx, input) }()
+	return h.DB.WithContext(ctx).Create(&row).Error
+}`)
+	if ok, _ := grammarOK(t, src); ok {
+		t.Fatal("want rejected when the constructor assignment is inside a closure")
+	}
+}
+
+func TestValidateCreateGrammarRejectsSecondCreate(t *testing.T) {
+	src := withCtor(`func (h *Handler) create(ctx context.Context, input *createBookInput) error {
+	row := buildBookForCreate(ctx, input)
+	_ = h.DB.WithContext(ctx).Create(&Book{}).Error
+	return h.DB.WithContext(ctx).Create(&row).Error
+}`)
+	if ok, _ := grammarOK(t, src); ok {
+		t.Fatal("want rejected when a second h.DB.Create call is present")
+	}
+}
+
+// Finding 4 (this round): a deferred Create runs on return, so a later
+// `row.clearTenant()` mutates the value first. Source position is not runtime
+// order — reject defer/go Create.
+func TestValidateCreateGrammarRejectsDeferCreate(t *testing.T) {
+	src := withCtor(`func (h *Handler) create(ctx context.Context, input *createBookInput) error {
+	row := buildBookForCreate(ctx, input)
+	defer h.DB.WithContext(ctx).Create(&row)
+	row.clearTenant()
+	return nil
+}`)
+	if ok, _ := grammarOK(t, src); ok {
+		t.Fatal("want rejected when the Create is deferred")
+	}
+}
+
+// Finding 3 (this round): the only Create is on h.Audit, not h.DB, so it is not
+// the GORM persistence call. Reject: the real write is not through DB.
+func TestValidateCreateGrammarRejectsNonDBCreate(t *testing.T) {
+	src := withCtor(`func (h *Handler) create(ctx context.Context, input *createBookInput) error {
+	row := buildBookForCreate(ctx, input)
+	return h.Audit.WithContext(ctx).Create(&row).Error
+}`)
+	if ok, _ := grammarOK(t, src); ok {
+		t.Fatal("want rejected when Create is not rooted through h.DB")
+	}
+}
+
+// Receiver pinning: a decoy create on another type is declared first with a valid
+// shape; the checker judges Handler.create (which bypasses), not the decoy.
+func TestValidateCreateGrammarPinsReceiver(t *testing.T) {
+	src := withCtor(`func (p *Probe) create(ctx context.Context, input *createBookInput) error {
+	row := buildBookForCreate(ctx, input)
+	return p.DB.WithContext(ctx).Create(&row).Error
+}
 func (h *Handler) create(ctx context.Context, input *createBookInput) error {
-	row := buildBookForCreate(input)
+	row := Book{Title: input.Body.Title}
+	return h.DB.WithContext(ctx).Create(&row).Error
+}`)
+	if ok, _ := grammarOK(t, src); ok {
+		t.Fatal("want rejected: Handler.create (not the decoy) bypasses the constructor")
+	}
+}
+
+func TestValidateCreateGrammarRequiresExpectedReceiver(t *testing.T) {
+	src := withCtor(`func (p *Probe) create(ctx context.Context, input *createBookInput) error {
+	row := buildBookForCreate(ctx, input)
+	return p.DB.WithContext(ctx).Create(&row).Error
+}`)
+	if ok, _ := grammarOK(t, src); ok {
+		t.Fatal("want rejected when no Handler.create exists")
+	}
+}
+
+// Implicit mutation: a pointer-receiver method call takes &row implicitly.
+func TestValidateCreateGrammarRejectsPointerReceiverMethod(t *testing.T) {
+	src := withCtor(`func (h *Handler) create(ctx context.Context, input *createBookInput) error {
+	row := buildBookForCreate(ctx, input)
+	row.clearTenant()
+	return h.DB.WithContext(ctx).Create(&row).Error
+}`)
+	if ok, _ := grammarOK(t, src); ok {
+		t.Fatal("want rejected when a method is invoked on row before Create")
+	}
+}
+
+func TestValidateCreateGrammarRejectsIncDec(t *testing.T) {
+	src := withCtor(`func (h *Handler) create(ctx context.Context, input *createBookInput) error {
+	row := buildBookForCreate(ctx, input)
+	row.Views++
+	return h.DB.WithContext(ctx).Create(&row).Error
+}`)
+	if ok, _ := grammarOK(t, src); ok {
+		t.Fatal("want rejected when a field of row is incremented before Create")
+	}
+}
+
+func TestValidateCreateGrammarRejectsPointerAlias(t *testing.T) {
+	src := withCtor(`func (h *Handler) create(ctx context.Context, input *createBookInput) error {
+	row := buildBookForCreate(ctx, input)
 	p := &row
 	p.Title = ""
 	return h.DB.WithContext(ctx).Create(&row).Error
-}`
-	if ok, _ := createPersists(t, src); ok {
-		t.Fatal("want persists=false when an alias to the persisted row is created")
+}`)
+	if ok, _ := grammarOK(t, src); ok {
+		t.Fatal("want rejected when an alias to the persisted row is created")
 	}
 }
 
-// Passing &row to a helper that could mutate it is indirect mutation the AST
-// cannot follow — fail closed.
-func TestCreatePersistsConstructorRejectsAddressPassedToHelper(t *testing.T) {
-	src := `package book
-func (h *Handler) create(ctx context.Context, input *createBookInput) error {
-	row := buildBookForCreate(input)
+func TestValidateCreateGrammarRejectsAddressPassedToHelper(t *testing.T) {
+	src := withCtor(`func (h *Handler) create(ctx context.Context, input *createBookInput) error {
+	row := buildBookForCreate(ctx, input)
 	normalize(&row)
 	return h.DB.WithContext(ctx).Create(&row).Error
+}`)
+	if ok, _ := grammarOK(t, src); ok {
+		t.Fatal("want rejected when &row is handed to another function before Create")
+	}
+}
+
+// The constructor itself must be a single unconditional return literal.
+func TestValidateCreateGrammarRejectsBranchingConstructor(t *testing.T) {
+	src := `package book
+func buildBookForCreate(ctx context.Context, input *createBookInput) Book {
+	if input.Body.Title == "" {
+		return Book{Title: "untitled"}
+	}
+	return Book{Title: input.Body.Title}
+}
+func (h *Handler) create(ctx context.Context, input *createBookInput) error {
+	row := buildBookForCreate(ctx, input)
+	return h.DB.WithContext(ctx).Create(&row).Error
 }`
-	if ok, _ := createPersists(t, src); ok {
-		t.Fatal("want persists=false when &row is handed to another function before Create")
+	if ok, _ := grammarOK(t, src); ok {
+		t.Fatal("want rejected when the constructor branches instead of a single return literal")
+	}
+}
+
+func TestValidateCreateGrammarRejectsNonLiteralConstructor(t *testing.T) {
+	src := `package book
+func buildBookForCreate(ctx context.Context, input *createBookInput) Book {
+	b := Book{Title: input.Body.Title}
+	return b
+}
+func (h *Handler) create(ctx context.Context, input *createBookInput) error {
+	row := buildBookForCreate(ctx, input)
+	return h.DB.WithContext(ctx).Create(&row).Error
+}`
+	if ok, _ := grammarOK(t, src); ok {
+		t.Fatal("want rejected when the constructor returns a named local, not a literal")
 	}
 }
 
@@ -491,92 +495,148 @@ func TestConstructorFieldsFeedMissingColumns(t *testing.T) {
 	}
 }
 
-// --- #218 finding 4: full model↔DTO drift ---
+// --- #218 finding 4: model↔wire-contract drift ---
 
-func TestDTOFieldNames(t *testing.T) {
-	src := []byte("package book\ntype bookData struct {\n\tID uint\n\tTitle string\n}\n")
-	got, err := resourcecheck.DTOFieldNames(src, "bookData")
-	if err != nil {
-		t.Fatalf("DTOFieldNames: %v", err)
-	}
-	if !reflect.DeepEqual(got, []string{"ID", "Title"}) {
-		t.Fatalf("got %v, want [ID Title]", got)
+// wireBook and its DTOs mirror the generated shapes. The response DTO wraps the
+// payload in the D10 contract.Data envelope, exactly like generated code.
+type wireBook struct {
+	gorm.Model
+	Title string `gorm:"not null"`
+	Note  *string
+}
+
+type createWireBookInput struct {
+	Body struct {
+		Title string `json:"title"`
 	}
 }
 
-func TestRequestBodyFieldNamesInlineStruct(t *testing.T) {
-	src := []byte("package book\ntype createBookInput struct {\n\tBody struct {\n\t\tTitle string\n\t\tCategoryID uint\n\t}\n}\n")
-	got, err := resourcecheck.RequestBodyFieldNames(src, "createBookInput")
-	if err != nil {
-		t.Fatalf("RequestBodyFieldNames: %v", err)
-	}
-	if !reflect.DeepEqual(got, []string{"CategoryID", "Title"}) {
-		t.Fatalf("got %v, want [CategoryID Title]", got)
-	}
+type wireBookData struct {
+	ID    uint   `json:"id"`
+	Title string `json:"title"`
 }
 
-// Finding 4: a nullable/defaulted model field absent from the DTOs is drift —
-// settable via the create request (write) and surfaced in the response (read) —
-// the class MissingCreateColumns deliberately skips. Server-managed columns are
-// not input drift.
-func TestModelContractDriftFlagsMissingDTOFields(t *testing.T) {
-	type widget struct {
-		ID       uint   `gorm:"primaryKey"`
-		Name     string `gorm:"not null"`
-		Note     *string
-		TenantID uint `gorm:"not null"`
-	}
-	write, read, err := resourcecheck.ModelContractDrift(
-		&widget{},
-		[]string{"Name"},       // create DTO exposes only Name
-		[]string{"ID", "Name"}, // response DTO exposes ID, Name
-		[]string{"tenant_id"},  // tenant_id server-managed
-		nil, nil,
-	)
+type wireBookOutput struct {
+	Body contract.Data[wireBookData]
+}
+
+type wireHandler struct{}
+
+func (*wireHandler) create(ctx context.Context, input *createWireBookInput) (*wireBookOutput, error) {
+	return nil, nil
+}
+func (*wireHandler) get(ctx context.Context, input *createWireBookInput) (*wireBookOutput, error) {
+	return nil, nil
+}
+
+// A content column (nullable Note) exposed by neither the request nor the
+// response wire contract is write- and read-drift. Title is exposed on both.
+func TestModelWireDriftFlagsMissingWireFields(t *testing.T) {
+	h := &wireHandler{}
+	write, read, err := resourcecheck.ModelWireDrift(&wireBook{}, h.create, h.get, nil, nil, nil)
 	if err != nil {
-		t.Fatalf("ModelContractDrift: %v", err)
+		t.Fatalf("ModelWireDrift: %v", err)
 	}
 	if !reflect.DeepEqual(write, []string{"note"}) {
-		t.Fatalf("writeDrift = %v, want [note] (tenant_id is server-managed, not input drift)", write)
+		t.Fatalf("writeDrift = %v, want [note]", write)
 	}
-	if !reflect.DeepEqual(read, []string{"note", "tenant_id"}) {
-		t.Fatalf("readDrift = %v, want [note tenant_id]", read)
-	}
-}
-
-func TestModelContractDriftRespectsExemptions(t *testing.T) {
-	type widget struct {
-		ID   uint   `gorm:"primaryKey"`
-		Name string `gorm:"not null"`
-		Note *string
-	}
-	write, read, err := resourcecheck.ModelContractDrift(
-		&widget{},
-		[]string{"Name"},
-		[]string{"ID", "Name"},
-		nil,
-		[]string{"note"}, // intentionally not settable
-		[]string{"note"}, // intentionally not surfaced
-	)
-	if err != nil {
-		t.Fatalf("ModelContractDrift: %v", err)
-	}
-	if len(write) != 0 || len(read) != 0 {
-		t.Fatalf("want no drift with Note exempt; write=%v read=%v", write, read)
+	if !reflect.DeepEqual(read, []string{"note"}) {
+		t.Fatalf("readDrift = %v, want [note]", read)
 	}
 }
 
-func TestModelContractDriftIgnoresAutoManaged(t *testing.T) {
-	type post struct {
-		gorm.Model
-		Title string `gorm:"not null"`
-	}
-	// gorm.Model's ID/timestamps/DeletedAt are not content fields; only Title is.
-	write, read, err := resourcecheck.ModelContractDrift(&post{}, []string{"Title"}, []string{"Title"}, nil, nil, nil)
+func TestModelWireDriftRespectsExemptions(t *testing.T) {
+	h := &wireHandler{}
+	write, read, err := resourcecheck.ModelWireDrift(&wireBook{}, h.create, h.get, nil, []string{"note"}, []string{"note"})
 	if err != nil {
-		t.Fatalf("ModelContractDrift: %v", err)
+		t.Fatalf("ModelWireDrift: %v", err)
 	}
 	if len(write) != 0 || len(read) != 0 {
-		t.Fatalf("want no drift; write=%v read=%v", write, read)
+		t.Fatalf("want no drift with note exempt; write=%v read=%v", write, read)
+	}
+}
+
+// json:"-" hides a field from the wire even though the Go field exists, so a
+// model column covered only by such a field is still drift.
+type dashInput struct {
+	Body struct {
+		Title string `json:"title"`
+		Note  string `json:"-"`
+	}
+}
+type dashOutput struct {
+	Body contract.Data[struct {
+		ID    uint   `json:"id"`
+		Title string `json:"title"`
+		Note  string `json:"-"`
+	}]
+}
+type dashHandler struct{}
+
+func (*dashHandler) create(ctx context.Context, input *dashInput) (*dashOutput, error) {
+	return nil, nil
+}
+func (*dashHandler) get(ctx context.Context, input *dashInput) (*dashOutput, error) { return nil, nil }
+
+func TestModelWireDriftHonorsJSONDash(t *testing.T) {
+	h := &dashHandler{}
+	write, read, err := resourcecheck.ModelWireDrift(&wireBook{}, h.create, h.get, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("ModelWireDrift: %v", err)
+	}
+	// Note is present as a Go field but json:"-", so it is not on the wire.
+	if !reflect.DeepEqual(write, []string{"note"}) {
+		t.Fatalf("writeDrift = %v, want [note] (json:\"-\" is not on the wire)", write)
+	}
+	if !reflect.DeepEqual(read, []string{"note"}) {
+		t.Fatalf("readDrift = %v, want [note]", read)
+	}
+}
+
+// Association/relationship fields carry no DB column and must not be reported as
+// drift (they are not scalar content columns).
+type wireCategory struct {
+	gorm.Model
+	Name string `gorm:"not null"`
+}
+type wireItem struct {
+	gorm.Model
+	Name       string `gorm:"not null"`
+	CategoryID uint
+	Category   wireCategory // belongs_to association object (no column)
+}
+type wireItemInput struct {
+	Body struct {
+		Name       string `json:"name"`
+		CategoryID uint   `json:"category_id"`
+	}
+}
+type wireItemData struct {
+	ID         uint   `json:"id"`
+	Name       string `json:"name"`
+	CategoryID uint   `json:"category_id"`
+}
+type wireItemOutput struct {
+	Body contract.Data[wireItemData]
+}
+type itemHandler struct{}
+
+func (*itemHandler) create(ctx context.Context, input *wireItemInput) (*wireItemOutput, error) {
+	return nil, nil
+}
+func (*itemHandler) get(ctx context.Context, input *wireItemInput) (*wireItemOutput, error) {
+	return nil, nil
+}
+
+func TestModelWireDriftIgnoresAssociationsAndAutoManaged(t *testing.T) {
+	h := &itemHandler{}
+	// The DTOs expose name and category_id; the Category association and
+	// gorm.Model fields are not columns. Expect no drift and, crucially, no "".
+	write, read, err := resourcecheck.ModelWireDrift(&wireItem{}, h.create, h.get, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("ModelWireDrift: %v", err)
+	}
+	if len(write) != 0 || len(read) != 0 {
+		t.Fatalf("want no drift (association is not a content column); write=%v read=%v", write, read)
 	}
 }

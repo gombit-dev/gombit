@@ -17,6 +17,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -148,71 +149,66 @@ func intersectKeys(sets []map[string]bool) map[string]bool {
 	return out
 }
 
-// CreatePersistsConstructor reports whether receiverType's createFuncName method
-// persists the value returned by ctorName, modified ONLY by assignments to
-// explicitly declared server-managed columns, and by nothing else — closing the
-// gap between "the constructor returns these fields" and "these fields are what
-// GORM persists".
+// ValidateCreateGrammar is a fail-closed validator of the ONE canonical create
+// grammar that `gombit make resource` emits — deliberately NOT a dataflow or
+// alias analysis. It accepts only a create method structurally equivalent to:
 //
-// Syntactic presence of a constructor assignment and a Create call is not enough:
-// the assignment must REACH the persistence call at runtime. Because the
-// generated create method is a fixed, flat statement sequence, the check
-// validates an allowlist of the permitted uses of the persisted variable rather
-// than attempting general value-flow analysis. All of the following must hold, or
-// it returns false with a detail explaining why:
+//	func (h *Handler) create(ctx context.Context, input *createXInput) (*createXOutput, error) {
+//		row := buildXForCreate(ctx, input)
+//		if err := h.DB.WithContext(ctx).Create(&row).Error; err != nil { ... }
+//		return ..., nil
+//	}
 //
-//   - The method belongs to receiverType (e.g. *Handler); a same-named method on
-//     another type is not the registered handler and cannot certify it.
-//   - Exactly one persistence call `<recv>.….Create(x)` exists, rooted at the
-//     method receiver (so an unrelated `.Create` cannot masquerade as GORM's),
-//     its argument a plain `&row`/`row`, reached by a single top-level statement.
-//   - row is assigned exactly once, a top-level `row := ctorName(...)` that
-//     strictly precedes the Create (ordering + dominance on the flat body).
-//   - The ONLY other pre-Create uses of row are assignments `row.F = …` whose
-//     column F is in serverManagedColumns. Every other use before Create — a
-//     non-managed field assignment, an `x++`, a method call `row.M()` that may
-//     take &row implicitly, taking `&row` anywhere but the Create argument, or a
-//     read — is rejected. Uses after Create (response mapping) are free.
+// where buildXForCreate is a single unconditional `return X{...}` literal.
+// Because the constructor is context-aware, every persisted value — including
+// server-derived columns like a tenant id — is set INSIDE that literal, so the
+// value GORM writes is exactly the literal the required-column and contract
+// checks inspect. No post-construction mutation of row is permitted.
 //
-// serverManagedColumns holds DB column names (e.g. "tenant_id"); a row field is
-// matched to it with GORM's default naming strategy. Listing a column permits the
-// assignment but does not prove it runs (a BeforeCreate hook is a valid source);
-// the list is the human's explicit assertion, and MissingCreateColumns still
-// treats it as a known source. Anything the allowlist cannot account for fails
-// closed, surfacing as drift to resolve explicitly rather than a silent gap.
-func CreatePersistsConstructor(handlerSrc []byte, receiverType, createFuncName, ctorName string, serverManagedColumns []string) (bool, string, error) {
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "handler.go", handlerSrc, 0)
+// Anything outside this shape — a branch or loop, an alias or `&row` elsewhere, a
+// `defer`/`go` Create, a pointer-receiver method call on row, `row.F =`/`row.F++`,
+// an extra or non-`h.DB` Create, a reordering — makes those static checks unsound,
+// so it is rejected with "unsupported create-handler shape: …". The generated
+// handler is human-owned: if you must diverge, the test tells you the guarantee
+// no longer holds rather than pretending to have proved your refactor safe.
+func ValidateCreateGrammar(handlerSrc []byte, receiverType, createMethod, ctorName, typeName string) (bool, string, error) {
+	file, err := parseHandler(handlerSrc)
 	if err != nil {
-		return false, "", fmt.Errorf("resourcecheck: parse handler: %w", err)
+		return false, "", err
 	}
 
-	// Find createFuncName declared on the expected receiver. A decoy method of the
-	// same name on another type (which the router never calls) must not certify
-	// the real handler, so the receiver is matched explicitly.
+	// The constructor must be a single unconditional `return <typeName>{...}`.
+	if ok, detail := validateConstructor(file, ctorName, typeName); !ok {
+		return false, detail, nil
+	}
+
+	// The create method must be declared on the expected receiver (a same-named
+	// method on another type is not the registered handler).
 	var fn *ast.FuncDecl
 	for _, decl := range file.Decls {
 		d, ok := decl.(*ast.FuncDecl)
-		if !ok || d.Name == nil || d.Name.Name != createFuncName || d.Body == nil {
+		if !ok || d.Name == nil || d.Name.Name != createMethod || d.Body == nil {
 			continue
 		}
 		if receiverTypeName(d) != receiverType {
 			continue
 		}
 		if fn != nil {
-			return false, "multiple " + receiverType + "." + createFuncName + " methods found", nil
+			return false, "unsupported create-handler shape: multiple " + receiverType + "." + createMethod + " methods", nil
 		}
 		fn = d
 	}
 	if fn == nil {
-		return false, "no " + receiverType + "." + createFuncName + " method with a body was found", nil
+		return false, "unsupported create-handler shape: no " + receiverType + "." + createMethod + " method", nil
 	}
 	recvVar := receiverVarName(fn)
 	if recvVar == "" {
-		return false, receiverType + "." + createFuncName + " has no named receiver", nil
+		return false, "unsupported create-handler shape: " + createMethod + " has no named receiver", nil
 	}
 
-	// Exactly one persistence call, rooted at the receiver: `<recvVar>.….Create(x)`.
+	// Exactly one persistence call `<recv>.….DB.….Create(&row)`: rooted at the
+	// receiver AND passing through its .DB field, so `h.Audit.Create` or a bare
+	// `.Create` on some other object cannot masquerade as the GORM write.
 	var createCall *ast.CallExpr
 	createCount := 0
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
@@ -224,43 +220,41 @@ func CreatePersistsConstructor(handlerSrc []byte, receiverType, createFuncName, 
 		if !ok || sel.Sel == nil || sel.Sel.Name != "Create" || len(call.Args) != 1 {
 			return true
 		}
-		if rootIdentName(sel.X) != recvVar {
-			return true // some other object's .Create, not the handler's DB
+		if rootIdentName(sel.X) != recvVar || !chainSelects(sel.X, "DB") {
+			return true
 		}
 		createCall = call
 		createCount++
 		return true
 	})
 	if createCount != 1 {
-		return false, fmt.Sprintf("expected exactly one %s.….Create(&row) call in %s, found %d", recvVar, createFuncName, createCount), nil
+		return false, fmt.Sprintf("unsupported create-handler shape: expected exactly one %s.DB.….Create(&row) call, found %d", recvVar, createCount), nil
+	}
+	if enclosedInDisallowed(fn.Body, createCall) {
+		return false, "unsupported create-handler shape: the Create call is inside a defer/go/loop/closure, so it is not the straight-line persistence", nil
 	}
 
 	createAddr := createCall.Args[0]
 	createArg := identName(createAddr)
 	createArgIdent := argIdent(createAddr)
 	if createArg == "" || createArgIdent == nil {
-		return false, "the Create(...) argument is not a plain &row/row variable", nil
+		return false, "unsupported create-handler shape: the Create argument is not a plain &row variable", nil
 	}
 
-	ns := schema.NamingStrategy{}
-	managed := toSet(serverManagedColumns)
-
-	// Walk assignments and increments touching row. row itself must be assigned
-	// exactly once (from the constructor); row.F may be assigned only when column
-	// F is server-managed; increments of row/row.F are never allowed.
+	// row is assigned exactly once, from ctorName, and never field-mutated or
+	// incremented (server values belong inside the constructor literal).
 	assignCount := 0
 	var ctorAssign *ast.AssignStmt
 	var ctorLHSIdent *ast.Ident
-	permittedFieldIdents := map[*ast.Ident]bool{}
-	reason := ""
+	mutated := ""
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
-		if reason != "" {
+		if mutated != "" {
 			return false
 		}
 		switch s := n.(type) {
 		case *ast.IncDecStmt:
 			if touchesVar(s.X, createArg) {
-				reason = createArg + " is incremented/decremented; the persisted value must come from " + ctorName
+				mutated = createArg + " is incremented/decremented"
 			}
 		case *ast.AssignStmt:
 			for i, lhs := range s.Lhs {
@@ -275,28 +269,22 @@ func CreatePersistsConstructor(handlerSrc []byte, receiverType, createFuncName, 
 					}
 				case *ast.SelectorExpr:
 					if x, ok := target.X.(*ast.Ident); ok && x.Name == createArg {
-						col := ns.ColumnName("", target.Sel.Name)
-						if managed[col] {
-							permittedFieldIdents[x] = true
-						} else {
-							reason = createArg + "." + target.Sel.Name + " is assigned but column " + col + " is not server-managed; set it in " + ctorName + " or declare it server-managed"
-						}
+						mutated = createArg + "." + target.Sel.Name + " is assigned after construction"
 					}
 				}
 			}
 		}
 		return true
 	})
-	if reason != "" {
-		return false, reason, nil
+	if mutated != "" {
+		return false, "unsupported create-handler shape: " + mutated + "; set server-derived values inside " + ctorName, nil
 	}
 	if assignCount != 1 || ctorAssign == nil {
-		return false, createArg + " must be assigned exactly once, from " + ctorName + "(...)", nil
+		return false, "unsupported create-handler shape: " + createArg + " must be assigned exactly once from " + ctorName + "(...)", nil
 	}
 
-	// Ordering + dominance on the flat generated body: the constructor assignment
-	// and the Create call must each be a TOP-LEVEL statement, assignment first. A
-	// constructor assignment nested in a branch/loop/closure leaves ctorIdx == -1.
+	// Ordering + dominance: the constructor assignment and the Create call must
+	// each be a TOP-LEVEL statement, assignment strictly first.
 	ctorIdx, createIdx := -1, -1
 	for i, stmt := range fn.Body.List {
 		if stmt == ctorAssign {
@@ -306,21 +294,14 @@ func CreatePersistsConstructor(handlerSrc []byte, receiverType, createFuncName, 
 			createIdx = i
 		}
 	}
-	if ctorIdx < 0 {
-		return false, "the " + ctorName + "(...) assignment is not a top-level statement (it must dominate Create, not sit under a branch/loop/closure)", nil
-	}
-	if createIdx < 0 {
-		return false, "the Create call is not reached by a top-level statement (it must not be buried in a closure)", nil
-	}
-	if ctorIdx >= createIdx {
-		return false, createArg + " is assigned from " + ctorName + " only at or after the Create call; the constructor result never reaches persistence", nil
+	if ctorIdx < 0 || createIdx < 0 || ctorIdx >= createIdx {
+		return false, "unsupported create-handler shape: " + ctorName + "(...) must be a top-level statement before the Create call", nil
 	}
 
-	// Allowlist every use of row before the Create call: it must be the
-	// constructor assignment's LHS, a permitted server-managed field assignment's
-	// receiver, or the &row handed to Create. Anything else before Create — a
-	// method call `row.clearTenant()` that implicitly takes &row, a stray `&row`,
-	// an unexpected read — is rejected. Uses after Create are post-persist reads.
+	// Allowlist every use of row before Create: only the constructor assignment's
+	// LHS and the &row Create argument. Any other pre-Create use — a method call
+	// (which may take &row implicitly), a stray &row, a read — is rejected. Uses
+	// after Create (response mapping) are post-persist reads and are free.
 	stray := ""
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
 		if stray != "" {
@@ -330,19 +311,107 @@ func CreatePersistsConstructor(handlerSrc []byte, receiverType, createFuncName, 
 		if !ok || id.Name != createArg {
 			return true
 		}
-		if id == ctorLHSIdent || id == createArgIdent || permittedFieldIdents[id] {
+		if id == ctorLHSIdent || id == createArgIdent || id.Pos() > createCall.End() {
 			return true
 		}
-		if id.Pos() > createCall.End() {
-			return true // post-persist read (e.g. response mapping)
-		}
-		stray = "an unrecognized use of " + createArg + " appears before Create (e.g. a method call, read, or indirect mutation); the generated grammar permits only construction, server-managed field assignments, and Create(&" + createArg + ")"
+		stray = "unsupported create-handler shape: " + createArg + " is used before Create in a way that could mutate it (a method call, alias, or read)"
 		return false
 	})
 	if stray != "" {
 		return false, stray, nil
 	}
 	return true, "", nil
+}
+
+// validateConstructor requires ctorName to be a single unconditional
+// `return <typeName>{...}` — no branches, locals, or alternate returns — so the
+// value it produces is exactly the literal ConstructorCreateFields inspects.
+func validateConstructor(file *ast.File, ctorName, typeName string) (bool, string) {
+	var fn *ast.FuncDecl
+	for _, decl := range file.Decls {
+		d, ok := decl.(*ast.FuncDecl)
+		if ok && d.Name != nil && d.Name.Name == ctorName && d.Body != nil {
+			fn = d
+			break
+		}
+	}
+	if fn == nil {
+		return false, "unsupported constructor shape: no " + ctorName + " function"
+	}
+	if len(fn.Body.List) != 1 {
+		return false, "unsupported constructor shape: " + ctorName + " must be a single `return " + typeName + "{...}` statement"
+	}
+	ret, ok := fn.Body.List[0].(*ast.ReturnStmt)
+	if !ok || len(ret.Results) != 1 {
+		return false, "unsupported constructor shape: " + ctorName + " must return exactly one value"
+	}
+	cl, ok := ret.Results[0].(*ast.CompositeLit)
+	if !ok {
+		return false, "unsupported constructor shape: " + ctorName + " must return a " + typeName + "{...} literal directly"
+	}
+	if id, ok := cl.Type.(*ast.Ident); !ok || id.Name != typeName {
+		return false, "unsupported constructor shape: " + ctorName + " must return a " + typeName + "{...} literal"
+	}
+	return true, ""
+}
+
+// chainSelects reports whether the selector/call chain rooted at expr passes
+// through a `.field` selector (e.g. "DB" in `h.DB.WithContext(ctx)`).
+func chainSelects(expr ast.Expr, field string) bool {
+	for {
+		switch e := expr.(type) {
+		case *ast.SelectorExpr:
+			if e.Sel != nil && e.Sel.Name == field {
+				return true
+			}
+			expr = e.X
+		case *ast.CallExpr:
+			expr = e.Fun
+		case *ast.ParenExpr:
+			expr = e.X
+		case *ast.IndexExpr:
+			expr = e.X
+		default:
+			return false
+		}
+	}
+}
+
+// enclosedInDisallowed reports whether target sits inside a defer, go, loop, or
+// function literal within root — positions where lexical order is not runtime
+// order, or the call may run zero or many times.
+func enclosedInDisallowed(root, target ast.Node) bool {
+	banned := false
+	ast.Inspect(root, func(n ast.Node) bool {
+		if banned {
+			return false
+		}
+		switch n.(type) {
+		case *ast.DeferStmt, *ast.GoStmt, *ast.ForStmt, *ast.RangeStmt, *ast.FuncLit:
+			if containsNode(n, target) {
+				banned = true
+				return false
+			}
+		}
+		return true
+	})
+	return banned
+}
+
+// containsNode reports whether target appears anywhere within root.
+func containsNode(root, target ast.Node) bool {
+	found := false
+	ast.Inspect(root, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		if n == target {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
 }
 
 // receiverTypeName returns fn's receiver type name without a leading pointer
@@ -479,34 +548,40 @@ func collectLiteralKeys(expr ast.Expr, typeName string, set map[string]bool) {
 	}
 }
 
-// ModelContractDrift compares a model's content columns against the generated
-// create request DTO and the response DTO, detecting the broader model↔handler
-// divergence #218 is about (not just the silent zero-fill of required columns).
+// ModelWireDrift compares a model's DB-backed content columns against the JSON
+// property names the handler's create request and read response ACTUALLY expose —
+// the real wire contract, detecting the broader model↔handler divergence #218 is
+// about (not just the silent zero-fill of required columns).
 //
-// A content column is any persisted column that is not auto-managed (primary
-// key, auto create/update timestamp, soft-delete) — including NULLABLE and
-// DATABASE-DEFAULTED columns, which MissingCreateColumns deliberately skips.
+// createHandler and responseHandler are the Huma handler funcs the routes
+// register (pass h.create and h.get). Their request/response Go types are read by
+// reflection, so a stale, renamed, or swapped DTO is caught — the check follows
+// the types the handler really uses, not a conventionally named declaration. JSON
+// tags are honored exactly as Huma serializes them: `json:"-"` is excluded, a
+// renamed tag uses the wire name, embedded structs are flattened, and the D10
+// `{"data": …}` envelope is unwrapped for the response.
 //
-//   - writeDrift: content columns a client cannot set, because they are absent
-//     from the create request DTO (createGoFields) and are neither server-managed
-//     nor write-exempt. Adding such a column to the model without updating the
-//     handler's create DTO is exactly the "422 unexpected property" divergence in
-//     #218: the client cannot supply the field the model now expects.
-//   - readDrift: content columns never surfaced, because they are absent from the
-//     response DTO (responseGoFields) and are not read-exempt.
+// A content column is any DB-backed column (non-empty column name — so GORM
+// relationship/association fields are excluded) that is not auto-managed (primary
+// key, auto timestamps, soft-delete), INCLUDING nullable and database-defaulted
+// columns that MissingCreateColumns skips.
 //
-// createGoFields/responseGoFields are Go field names (parsed from the handler's
-// DTO structs); serverManagedCols/writeExemptCols/readExemptCols are DB column
-// names (the human-owned opt-out lists). Returned drift is DB column names,
-// sorted. The write/read exempt lists are the explicit opt-outs for intentional
-// omissions, so an encapsulated field fails closed only until a human declares it.
-func ModelContractDrift(model any, createGoFields, responseGoFields, serverManagedCols, writeExemptCols, readExemptCols []string) (writeDrift, readDrift []string, err error) {
+//   - writeDrift: content columns absent from the create request body and neither
+//     server-managed nor write-exempt — the "422 unexpected property" class: a
+//     client cannot supply the field the model now expects.
+//   - readDrift: content columns absent from the response and not read-exempt.
+//
+// serverManagedCols/writeExemptCols/readExemptCols are DB column names (the
+// human-owned opt-out lists), compared against the model's own Field.DBName so one
+// column name is authoritative across every check. Returned drift is DB column
+// names, sorted.
+func ModelWireDrift(model, createHandler, responseHandler any, serverManagedCols, writeExemptCols, readExemptCols []string) (writeDrift, readDrift []string, err error) {
 	sch, perr := schema.Parse(model, &sync.Map{}, schema.NamingStrategy{})
 	if perr != nil {
 		return nil, nil, fmt.Errorf("resourcecheck: parse model schema: %w", perr)
 	}
-	createGo := toSet(createGoFields)
-	responseGo := toSet(responseGoFields)
+	reqProps := toSet(requestWireProps(createHandler))
+	respProps := toSet(responseWireProps(responseHandler))
 	serverDB := toSet(serverManagedCols)
 	writeDB := toSet(writeExemptCols)
 	readDB := toSet(readExemptCols)
@@ -515,10 +590,10 @@ func ModelContractDrift(model any, createGoFields, responseGoFields, serverManag
 		if !isContentField(f) {
 			continue
 		}
-		if !createGo[f.Name] && !serverDB[f.DBName] && !writeDB[f.DBName] {
+		if !reqProps[f.DBName] && !serverDB[f.DBName] && !writeDB[f.DBName] {
 			writeDrift = append(writeDrift, f.DBName)
 		}
-		if !responseGo[f.Name] && !readDB[f.DBName] {
+		if !respProps[f.DBName] && !readDB[f.DBName] {
 			readDrift = append(readDrift, f.DBName)
 		}
 	}
@@ -528,11 +603,12 @@ func ModelContractDrift(model any, createGoFields, responseGoFields, serverManag
 }
 
 // isContentField reports whether a column is part of the resource's editable/
-// visible surface — everything except the framework-managed primary key, auto
-// timestamps, and soft-delete. Unlike requiresCreateValue it keeps nullable and
-// database-defaulted columns, since those still belong in the API contract.
+// visible surface — a DB-backed column (relationship/association fields carry no
+// column name and are excluded) that is not the framework-managed primary key,
+// an auto timestamp, or soft-delete. Unlike requiresCreateValue it keeps nullable
+// and database-defaulted columns, which still belong in the API contract.
 func isContentField(f *schema.Field) bool {
-	if f == nil {
+	if f == nil || f.DBName == "" {
 		return false
 	}
 	if f.PrimaryKey || f.AutoIncrement {
@@ -547,44 +623,113 @@ func isContentField(f *schema.Field) bool {
 	return true
 }
 
-// DTOFieldNames returns the Go field names declared by the named struct type
-// (e.g. the response DTO "bookData"), or nil if no such struct is found.
-func DTOFieldNames(handlerSrc []byte, typeName string) ([]string, error) {
-	file, err := parseHandler(handlerSrc)
-	if err != nil {
-		return nil, err
+// requestWireProps returns the JSON property names of a Huma handler's request
+// body — reflect over the handler func's last input (`*createXInput`), its `Body`
+// field, honoring json tags.
+func requestWireProps(handler any) []string {
+	ft := reflect.TypeOf(handler)
+	if ft == nil || ft.Kind() != reflect.Func || ft.NumIn() == 0 {
+		return nil
 	}
-	st := findStructType(file, typeName)
-	if st == nil {
-		return nil, nil
-	}
-	return structFieldNames(st), nil
+	return bodyWireProps(ft.In(ft.NumIn()-1), false)
 }
 
-// RequestBodyFieldNames returns the Go field names of the `Body` field of the
-// named request-input type (e.g. "createBookInput"). Body may be an inline struct
-// literal or a named struct type; either is resolved to its fields.
-func RequestBodyFieldNames(handlerSrc []byte, inputTypeName string) ([]string, error) {
-	file, err := parseHandler(handlerSrc)
-	if err != nil {
-		return nil, err
+// responseWireProps returns the JSON property names of a Huma handler's response
+// body — reflect over the handler func's first output (`*getXOutput`), its `Body`
+// field, then unwrap the D10 `{"data": …}` envelope.
+func responseWireProps(handler any) []string {
+	ft := reflect.TypeOf(handler)
+	if ft == nil || ft.Kind() != reflect.Func || ft.NumOut() == 0 {
+		return nil
 	}
-	st := findStructType(file, inputTypeName)
-	if st == nil {
-		return nil, nil
+	return bodyWireProps(ft.Out(0), true)
+}
+
+// bodyWireProps resolves a Huma input/output wrapper type to the JSON property
+// names of its `Body`, optionally unwrapping the D10 data envelope.
+func bodyWireProps(t reflect.Type, unwrapData bool) []string {
+	t = derefType(t)
+	if t.Kind() != reflect.Struct {
+		return nil
 	}
-	var bodyType ast.Expr
-	for _, field := range st.Fields.List {
-		for _, nm := range field.Names {
-			if nm.Name == "Body" {
-				bodyType = field.Type
+	body, ok := t.FieldByName("Body")
+	if !ok {
+		return nil
+	}
+	bt := derefType(body.Type)
+	if unwrapData && bt.Kind() == reflect.Struct {
+		// The D10 envelope carries the payload under json:"data"; drill into it.
+		for i := 0; i < bt.NumField(); i++ {
+			if jsonName(bt.Field(i)) == "data" {
+				bt = derefType(bt.Field(i).Type)
+				break
 			}
 		}
 	}
-	if bodyType == nil {
-		return nil, nil
+	return jsonPropNames(bt)
+}
+
+// jsonPropNames returns the JSON property names of a struct type, honoring tags
+// (json:"-" excluded), flattening embedded structs, sorted and de-duplicated.
+func jsonPropNames(t reflect.Type) []string {
+	t = derefType(t)
+	if t.Kind() != reflect.Struct {
+		return nil
 	}
-	return fieldNamesOfType(file, bodyType), nil
+	seen := map[string]bool{}
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if f.PkgPath != "" { // unexported
+			continue
+		}
+		name := jsonName(f)
+		if name == "-" {
+			continue
+		}
+		if f.Anonymous && name == "" {
+			for _, n := range jsonPropNames(f.Type) {
+				seen[n] = true
+			}
+			continue
+		}
+		if name == "" {
+			name = f.Name
+		}
+		seen[name] = true
+	}
+	out := make([]string, 0, len(seen))
+	for n := range seen {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// jsonName returns a struct field's JSON name from its tag: "-" when omitted, ""
+// when there is no explicit name (untagged, or a bare `json:",omitempty"`).
+func jsonName(f reflect.StructField) string {
+	tag, ok := f.Tag.Lookup("json")
+	if !ok {
+		return ""
+	}
+	if tag == "-" {
+		return "-"
+	}
+	name, _, _ := strings.Cut(tag, ",")
+	return name
+}
+
+// derefType unwraps pointer, slice, and array types to their element type.
+func derefType(t reflect.Type) reflect.Type {
+	for t != nil {
+		switch t.Kind() {
+		case reflect.Ptr, reflect.Slice, reflect.Array:
+			t = t.Elem()
+		default:
+			return t
+		}
+	}
+	return t
 }
 
 func parseHandler(handlerSrc []byte) (*ast.File, error) {
@@ -593,78 +738,6 @@ func parseHandler(handlerSrc []byte) (*ast.File, error) {
 		return nil, fmt.Errorf("resourcecheck: parse handler: %w", err)
 	}
 	return file, nil
-}
-
-// findStructType returns the struct type declared as `type <name> struct {…}`.
-func findStructType(file *ast.File, name string) *ast.StructType {
-	for _, decl := range file.Decls {
-		gd, ok := decl.(*ast.GenDecl)
-		if !ok || gd.Tok != token.TYPE {
-			continue
-		}
-		for _, spec := range gd.Specs {
-			ts, ok := spec.(*ast.TypeSpec)
-			if !ok || ts.Name == nil || ts.Name.Name != name {
-				continue
-			}
-			if st, ok := ts.Type.(*ast.StructType); ok {
-				return st
-			}
-		}
-	}
-	return nil
-}
-
-// fieldNamesOfType resolves an inline struct, a named struct type, or a pointer
-// to either, to its declared field names.
-func fieldNamesOfType(file *ast.File, t ast.Expr) []string {
-	switch ft := t.(type) {
-	case *ast.StructType:
-		return structFieldNames(ft)
-	case *ast.StarExpr:
-		return fieldNamesOfType(file, ft.X)
-	case *ast.Ident:
-		if st := findStructType(file, ft.Name); st != nil {
-			return structFieldNames(st)
-		}
-	}
-	return nil
-}
-
-// structFieldNames returns the declared Go field names of a struct type, sorted.
-// Named fields contribute their name; an embedded field contributes its type name.
-func structFieldNames(st *ast.StructType) []string {
-	var out []string
-	for _, field := range st.Fields.List {
-		if len(field.Names) == 0 {
-			if name := embeddedName(field.Type); name != "" {
-				out = append(out, name)
-			}
-			continue
-		}
-		for _, nm := range field.Names {
-			if nm.Name != "_" {
-				out = append(out, nm.Name)
-			}
-		}
-	}
-	sort.Strings(out)
-	return out
-}
-
-// embeddedName returns the type name of an embedded field (`T`, `*T`, `pkg.T`).
-func embeddedName(t ast.Expr) string {
-	switch e := t.(type) {
-	case *ast.Ident:
-		return e.Name
-	case *ast.StarExpr:
-		return embeddedName(e.X)
-	case *ast.SelectorExpr:
-		if e.Sel != nil {
-			return e.Sel.Name
-		}
-	}
-	return ""
 }
 
 // requiresCreateValue reports whether a column must be given a value on create:

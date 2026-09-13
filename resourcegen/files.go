@@ -126,11 +126,11 @@ func renderContractOptOuts(ctx renderContext) string {
 // renderDriftTest generates the model↔handler contract drift guard (#218).
 // Generated handlers are human-owned, so the generator cannot follow the model
 // when it gains a column later. The test moves three divergences from production
-// to `go test`: (1) the create handler must persist the constructor's result
-// (modified only by declared server-managed columns); (2) every
-// persistence-required column must have a known create-value source (else silent
-// zero-fill); (3) every content column must be settable through the create
-// request DTO and surfaced in the response DTO, unless explicitly opted out —
+// to `go test`: (1) the create handler must match the canonical generated
+// grammar, so the static checks below describe what is really persisted; (2)
+// every persistence-required column must have a known create-value source (else
+// silent zero-fill); (3) every DB-backed content column must be exposed by the
+// create request and read response wire contract, unless explicitly opted out —
 // the "422 unexpected property" / response-omission class in #218.
 func renderDriftTest(ctx renderContext) string {
 	typ := ctx.Resource.TypeName
@@ -139,8 +139,6 @@ func renderDriftTest(ctx renderContext) string {
 	managedVar := base + "ServerManagedColumns"
 	writeVar := base + "WriteOmittedColumns"
 	readVar := base + "ReadOmittedColumns"
-	data := ctx.DataType
-	inputType := "create" + typ + "Input"
 
 	var b strings.Builder
 	b.WriteString(goBanner())
@@ -149,20 +147,21 @@ func renderDriftTest(ctx renderContext) string {
 	b.WriteString("// Test" + typ + "ContractMatchesModel guards against the " + typ + " schema and the\n")
 	b.WriteString("// generated API contract drifting apart (#218): a column the create handler\n")
 	b.WriteString("// cannot supply would be silently zero-filled, and a model field missing from\n")
-	b.WriteString("// the request/response DTOs would be rejected on input or never returned. When\n")
-	b.WriteString("// this fails after you change " + typ + ", update the create constructor or DTOs,\n")
-	b.WriteString("// or declare the column in the opt-out lists in " + ctx.Resource.FileBase + "_contract.go.\n")
+	b.WriteString("// the request/response wire contract would be rejected on input or never\n")
+	b.WriteString("// returned. When this fails after you change " + typ + ", update the constructor or\n")
+	b.WriteString("// DTOs, or declare the column in the opt-out lists in " + ctx.Resource.FileBase + "_contract.go.\n")
 	b.WriteString("func Test" + typ + "ContractMatchesModel(t *testing.T) {\n")
 	b.WriteString("\tsrc, err := os.ReadFile(\"handler.go\")\n")
 	b.WriteString("\tif err != nil {\n")
 	b.WriteString("\t\tt.Fatalf(\"read handler.go: %v\", err)\n")
 	b.WriteString("\t}\n")
-	b.WriteString("\t// (1) The required-column guard is sound only if create persists\n")
-	b.WriteString("\t// build" + typ + "ForCreate's result, modified only by server-managed columns (#218).\n")
-	b.WriteString("\tif ok, detail, perr := resourcecheck.CreatePersistsConstructor(src, \"Handler\", \"create\", \"build" + typ + "ForCreate\", " + managedVar + "); perr != nil {\n")
+	b.WriteString("\t// (1) The static checks below are sound only if the create handler matches\n")
+	b.WriteString("\t// the canonical generated grammar (row := build" + typ + "ForCreate(ctx, input);\n")
+	b.WriteString("\t// h.DB.….Create(&row)); a refactor outside it is reported, not assumed safe.\n")
+	b.WriteString("\tif ok, detail, perr := resourcecheck.ValidateCreateGrammar(src, \"Handler\", \"create\", \"build" + typ + "ForCreate\", \"" + typ + "\"); perr != nil {\n")
 	b.WriteString("\t\tt.Fatalf(\"inspect " + typ + " create handler: %v\", perr)\n")
 	b.WriteString("\t} else if !ok {\n")
-	b.WriteString("\t\tt.Fatalf(\"the create handler must persist build" + typ + "ForCreate's result unchanged: %s\", detail)\n")
+	b.WriteString("\t\tt.Fatalf(\"%s\", detail)\n")
 	b.WriteString("\t}\n")
 	b.WriteString("\tassigned, err := resourcecheck.ConstructorCreateFields(src, \"build" + typ + "ForCreate\", \"" + typ + "\")\n")
 	b.WriteString("\tif err != nil {\n")
@@ -176,25 +175,19 @@ func renderDriftTest(ctx renderContext) string {
 	b.WriteString("\tfor _, column := range missing {\n")
 	b.WriteString("\t\tt.Errorf(\"create drift: " + typ + ".%s is NOT NULL with no default but is neither assigned by the create constructor nor in " + managedVar + "\", column)\n")
 	b.WriteString("\t}\n")
-	b.WriteString("\t// (3) Every content column is settable via the request DTO and surfaced in\n")
-	b.WriteString("\t// the response DTO, unless explicitly opted out.\n")
-	b.WriteString("\tcreateFields, err := resourcecheck.RequestBodyFieldNames(src, \"" + inputType + "\")\n")
+	b.WriteString("\t// (3) Every DB-backed content column is exposed by the create request and\n")
+	b.WriteString("\t// read response wire contract (the actual DTO types h.create/h.get use),\n")
+	b.WriteString("\t// unless explicitly opted out.\n")
+	b.WriteString("\th := &Handler{}\n")
+	b.WriteString("\twriteDrift, readDrift, err := resourcecheck.ModelWireDrift(&" + typ + "{}, h.create, h.get, " + managedVar + ", " + writeVar + ", " + readVar + ")\n")
 	b.WriteString("\tif err != nil {\n")
-	b.WriteString("\t\tt.Fatalf(\"parse " + typ + " request DTO: %v\", err)\n")
-	b.WriteString("\t}\n")
-	b.WriteString("\tresponseFields, err := resourcecheck.DTOFieldNames(src, \"" + data + "\")\n")
-	b.WriteString("\tif err != nil {\n")
-	b.WriteString("\t\tt.Fatalf(\"parse " + typ + " response DTO: %v\", err)\n")
-	b.WriteString("\t}\n")
-	b.WriteString("\twriteDrift, readDrift, err := resourcecheck.ModelContractDrift(&" + typ + "{}, createFields, responseFields, " + managedVar + ", " + writeVar + ", " + readVar + ")\n")
-	b.WriteString("\tif err != nil {\n")
-	b.WriteString("\t\tt.Fatalf(\"compare " + typ + " model with DTOs: %v\", err)\n")
+	b.WriteString("\t\tt.Fatalf(\"compare " + typ + " model with wire contract: %v\", err)\n")
 	b.WriteString("\t}\n")
 	b.WriteString("\tfor _, column := range writeDrift {\n")
-	b.WriteString("\t\tt.Errorf(\"input drift: " + typ + ".%s is not settable via the create request; add it to " + inputType + ".Body, or list its column in " + managedVar + " / " + writeVar + "\", column)\n")
+	b.WriteString("\t\tt.Errorf(\"input drift: " + typ + ".%s is not settable via the create request; add it to the create request body, or list its column in " + managedVar + " / " + writeVar + "\", column)\n")
 	b.WriteString("\t}\n")
 	b.WriteString("\tfor _, column := range readDrift {\n")
-	b.WriteString("\t\tt.Errorf(\"response drift: " + typ + ".%s is never surfaced; add it to " + data + ", or list its column in " + readVar + "\", column)\n")
+	b.WriteString("\t\tt.Errorf(\"response drift: " + typ + ".%s is never surfaced; add it to the response DTO, or list its column in " + readVar + "\", column)\n")
 	b.WriteString("\t}\n")
 	b.WriteString("}\n")
 	return b.String()
@@ -555,12 +548,16 @@ func renderHandler(ctx renderContext) string {
 	b.WriteString("\t\tBody: contract.Data[" + data + "]{Data: to" + typ + "Data(row)},\n")
 	b.WriteString("\t}, nil\n}\n\n")
 
-	// The create model is built in a dedicated constructor whose single returned
-	// literal is the value persisted by Create. The drift guard
-	// (<file>_drift_test.go, #218) parses exactly this returned literal, so keep
-	// every persistence-required column assigned here.
+	// The create model is built in a dedicated context-aware constructor whose
+	// single returned literal IS the value persisted by Create. The drift guard
+	// (<file>_drift_test.go, #218) requires exactly this shape and parses the
+	// literal, so keep every persisted column assigned here — including any
+	// server-derived value (e.g. a tenant id from ctx), which belongs inside this
+	// literal rather than a post-construction `row.X = …`.
 	b.WriteString("// build" + typ + "ForCreate maps a create request to the " + typ + " that is persisted.\n")
-	b.WriteString("func build" + typ + "ForCreate(input *create" + typ + "Input) " + typ + " {\n")
+	b.WriteString("// ctx is available for server-derived columns (e.g. a tenant id); the base\n")
+	b.WriteString("// mapping does not use it. Keep this a single `return " + typ + "{...}` literal.\n")
+	b.WriteString("func build" + typ + "ForCreate(ctx context.Context, input *create" + typ + "Input) " + typ + " {\n")
 	b.WriteString("\treturn " + typ + "{\n")
 	for _, field := range ctx.Fields {
 		if !field.inDTO() {
@@ -570,7 +567,7 @@ func renderHandler(ctx renderContext) string {
 	}
 	b.WriteString("\t}\n}\n\n")
 	b.WriteString("func (h *Handler) create(ctx context.Context, input *create" + typ + "Input) (*create" + typ + "Output, error) {\n")
-	b.WriteString("\trow := build" + typ + "ForCreate(input)\n")
+	b.WriteString("\trow := build" + typ + "ForCreate(ctx, input)\n")
 	b.WriteString("\tif err := h.DB.WithContext(ctx).Create(&row).Error; err != nil {\n")
 	b.WriteString("\t\treturn nil, database.MapPersistError(ctx, err, \"resource already exists\", \"create " + singular + "\")\n")
 	b.WriteString("\t}\n")

@@ -304,7 +304,7 @@ This writes a feature-package under `internal/<snake>/`:
 | `<snake>.go` | GORM model (`gorm.Model` + fields) |
 | `handler.go` | Thin Huma list/get/create over GORM (D10 envelope; list honors `page`/`per_page`; get/create map missing rows to `not_found` and unique violations to `conflict`) |
 | `routes.go` | `Register(app *framework.App)` |
-| `<snake>_drift_test.go` | Model↔create-contract drift guard (#218) |
+| `<snake>_drift_test.go` | Model↔contract drift guard (#218) |
 | `service.go` | Only with `--service` (pass-through) |
 | `repo.go` | Only with `--repo` (pass-through) |
 
@@ -342,30 +342,38 @@ when the model later gains a column. `<snake>_drift_test.go` keeps the model and
 that contract from diverging silently ([#218](https://github.com/gombit-dev/gombit/issues/218)),
 failing `go test` on three divergences:
 
-1. **Create persists the constructor.** It parses the handler's **actual create
-   constructor** (the `build<Type>ForCreate` return literal) and verifies the
-   `create` method persists that value unchanged — rejecting a handler that
-   bypasses, mutates, or reorders it — so the checks below describe what is
-   really written. Assignments to declared server-managed columns are allowed.
+1. **Canonical create grammar.** It validates that the `create` method matches
+   the one shape the generator emits — `row := build<Type>ForCreate(ctx, input)`
+   then `h.DB.…​.Create(&row)` — with `build<Type>ForCreate` a single
+   unconditional `return <Type>{…}` literal. This is a fail-closed **grammar
+   validator, not a dataflow analysis**: any refactor outside that shape (a
+   branch, alias, `defer`/`go` Create, method call or assignment on `row`, an
+   extra or non-`DB` Create) is reported as an *unsupported create-handler
+   shape* rather than assumed safe — so the checks below soundly describe what
+   is persisted. Server-derived values go **inside** the constructor literal
+   (it receives `ctx`), never as a post-construction `row.X = …`.
 2. **Required columns have a source.** A **NOT NULL** column with no database
-   default that the constructor does not assign, and that is not server-managed,
-   would be silently zero-filled — so it is reported.
-3. **Model ↔ DTO.** Every **content** column (everything but the primary key,
-   auto timestamps, and soft-delete — including nullable and defaulted columns)
-   must be settable through the create request DTO and surfaced in the response
-   DTO. A model field missing from the request DTO is the `422 unexpected
-   property` class #218 is about; one missing from the response is never
-   returned.
+   default that the constructor literal does not assign, and that is not
+   server-managed, would be silently zero-filled — so it is reported.
+3. **Model ↔ wire contract.** Every **content** column (every DB-backed column
+   except the primary key, auto timestamps, and soft-delete — including nullable
+   and defaulted columns; relationship/association fields are not columns) must
+   appear in the create request and read response **wire contract**. The check
+   reflects over the actual DTO types `create`/`get` register and reads their
+   JSON tags (so `json:"-"`, renames, and embedding are honored, and a stale or
+   swapped DTO is caught). A column missing from the request is the `422
+   unexpected property` class #218 is about; one missing from the response is
+   never returned.
 
 The opt-outs live in the **human-owned** `<snake>_contract.go` (seeded once,
 never regenerated, even with `--force`), each holding DB column names:
-`<type>ServerManagedColumns` (NOT NULL columns set server-side — e.g. a
-tenant/owner id from the auth context or a hook — treated as a known create
-source and not input drift), `<type>WriteOmittedColumns` (columns intentionally
-not settable via the create body), and `<type>ReadOmittedColumns` (columns
-intentionally not surfaced in responses). When the test fails after you change
-the model, update the constructor or DTOs, or list the column in the matching
-opt-out.
+`<type>ServerManagedColumns` (NOT NULL columns set server-side inside the
+constructor from `ctx` — e.g. a tenant/owner id — or by a hook; treated as a
+known create source and not input drift), `<type>WriteOmittedColumns` (columns
+intentionally not settable via the create body), and `<type>ReadOmittedColumns`
+(columns intentionally not surfaced in responses). When the test fails after you
+change the model, update the constructor or DTOs, or list the column in the
+matching opt-out.
 
 ### Field grammar
 

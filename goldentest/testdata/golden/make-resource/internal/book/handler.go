@@ -85,14 +85,16 @@ func (h *Handler) get(ctx context.Context, input *getBookInput) (*getBookOutput,
 }
 
 // buildBookForCreate maps a create request to the Book that is persisted.
-func buildBookForCreate(input *createBookInput) Book {
+// ctx is available for server-derived columns (e.g. a tenant id); the base
+// mapping does not use it. Keep this a single `return Book{...}` literal.
+func buildBookForCreate(ctx context.Context, input *createBookInput) Book {
 	return Book{
 		Title: input.Body.Title,
 	}
 }
 
 func (h *Handler) create(ctx context.Context, input *createBookInput) (*createBookOutput, error) {
-	row := buildBookForCreate(input)
+	row := buildBookForCreate(ctx, input)
 	if err := h.DB.WithContext(ctx).Create(&row).Error; err != nil {
 		return nil, database.MapPersistError(ctx, err, "resource already exists", "create book")
 	}

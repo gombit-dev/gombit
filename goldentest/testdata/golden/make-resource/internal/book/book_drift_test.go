@@ -11,20 +11,21 @@ import (
 // TestBookContractMatchesModel guards against the Book schema and the
 // generated API contract drifting apart (#218): a column the create handler
 // cannot supply would be silently zero-filled, and a model field missing from
-// the request/response DTOs would be rejected on input or never returned. When
-// this fails after you change Book, update the create constructor or DTOs,
-// or declare the column in the opt-out lists in book_contract.go.
+// the request/response wire contract would be rejected on input or never
+// returned. When this fails after you change Book, update the constructor or
+// DTOs, or declare the column in the opt-out lists in book_contract.go.
 func TestBookContractMatchesModel(t *testing.T) {
 	src, err := os.ReadFile("handler.go")
 	if err != nil {
 		t.Fatalf("read handler.go: %v", err)
 	}
-	// (1) The required-column guard is sound only if create persists
-	// buildBookForCreate's result, modified only by server-managed columns (#218).
-	if ok, detail, perr := resourcecheck.CreatePersistsConstructor(src, "Handler", "create", "buildBookForCreate", bookServerManagedColumns); perr != nil {
+	// (1) The static checks below are sound only if the create handler matches
+	// the canonical generated grammar (row := buildBookForCreate(ctx, input);
+	// h.DB.….Create(&row)); a refactor outside it is reported, not assumed safe.
+	if ok, detail, perr := resourcecheck.ValidateCreateGrammar(src, "Handler", "create", "buildBookForCreate", "Book"); perr != nil {
 		t.Fatalf("inspect Book create handler: %v", perr)
 	} else if !ok {
-		t.Fatalf("the create handler must persist buildBookForCreate's result unchanged: %s", detail)
+		t.Fatalf("%s", detail)
 	}
 	assigned, err := resourcecheck.ConstructorCreateFields(src, "buildBookForCreate", "Book")
 	if err != nil {
@@ -38,24 +39,18 @@ func TestBookContractMatchesModel(t *testing.T) {
 	for _, column := range missing {
 		t.Errorf("create drift: Book.%s is NOT NULL with no default but is neither assigned by the create constructor nor in bookServerManagedColumns", column)
 	}
-	// (3) Every content column is settable via the request DTO and surfaced in
-	// the response DTO, unless explicitly opted out.
-	createFields, err := resourcecheck.RequestBodyFieldNames(src, "createBookInput")
+	// (3) Every DB-backed content column is exposed by the create request and
+	// read response wire contract (the actual DTO types h.create/h.get use),
+	// unless explicitly opted out.
+	h := &Handler{}
+	writeDrift, readDrift, err := resourcecheck.ModelWireDrift(&Book{}, h.create, h.get, bookServerManagedColumns, bookWriteOmittedColumns, bookReadOmittedColumns)
 	if err != nil {
-		t.Fatalf("parse Book request DTO: %v", err)
-	}
-	responseFields, err := resourcecheck.DTOFieldNames(src, "bookData")
-	if err != nil {
-		t.Fatalf("parse Book response DTO: %v", err)
-	}
-	writeDrift, readDrift, err := resourcecheck.ModelContractDrift(&Book{}, createFields, responseFields, bookServerManagedColumns, bookWriteOmittedColumns, bookReadOmittedColumns)
-	if err != nil {
-		t.Fatalf("compare Book model with DTOs: %v", err)
+		t.Fatalf("compare Book model with wire contract: %v", err)
 	}
 	for _, column := range writeDrift {
-		t.Errorf("input drift: Book.%s is not settable via the create request; add it to createBookInput.Body, or list its column in bookServerManagedColumns / bookWriteOmittedColumns", column)
+		t.Errorf("input drift: Book.%s is not settable via the create request; add it to the create request body, or list its column in bookServerManagedColumns / bookWriteOmittedColumns", column)
 	}
 	for _, column := range readDrift {
-		t.Errorf("response drift: Book.%s is never surfaced; add it to bookData, or list its column in bookReadOmittedColumns", column)
+		t.Errorf("response drift: Book.%s is never surfaced; add it to the response DTO, or list its column in bookReadOmittedColumns", column)
 	}
 }
