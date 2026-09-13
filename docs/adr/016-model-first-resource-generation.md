@@ -51,15 +51,29 @@ implementation detail to be settled while building the epic
 ([#352](https://github.com/gombit-dev/gombit/issues/352)); it must not be
 fossilized here.
 
-- **Single source of truth.** The GORM model plus explicit **field-policy
-  metadata** is authoritative. Policy is *declared*, not inferred from code, and
-  captures, per field: DB-backed?, in the request (writable)?, in the response
-  (readable)?, create source (from request vs. set server-side), API-hidden.
+- **Single source of truth, one owner per fact.** The GORM model plus explicit
+  **API field-policy metadata** is authoritative, and policy must not duplicate
+  facts the schema already owns:
+
+  ```
+  GORM schema owns:   DB-backed / relationship / primary key / column name / nullability / default
+  Gombit policy owns: writable?  readable?  create source = request | server  API-hidden?
+  ```
+
+  Policy is *declared*, not inferred from code. Persistence facts are read from
+  the GORM schema, never re-stated in policy (re-stating them would recreate the
+  original multiple-representations problem).
 
 - **Everything else is derived and generator-owned.** From the model + policy
-  the generator produces the request/response DTOs, the model↔DTO mappers, the
-  CRUD handler/plumbing, and the OpenAPI contract (with the TypeScript client
-  downstream of OpenAPI as today). These land as regenerable `*.gen.go` files.
+  the generator produces the request/response DTOs, the model↔DTO mappers, and
+  the CRUD handler/plumbing, landing as regenerable `*.gen.go` files. OpenAPI is
+  **not** a separate representation Gombit maintains: the generated Huma DTOs and
+  handlers are the inputs Huma emits OpenAPI from, with the TypeScript client
+  downstream of that, exactly as today:
+
+  ```
+  GORM model + policy → generated Huma DTOs + handlers → Huma → OpenAPI → TS client
+  ```
 
 - **Ownership boundary.** `*.gen.go` is generator-owned and is **not a
   customization surface**. Human code is the model (with policy) and a
@@ -76,17 +90,20 @@ fossilized here.
   if err := db.WithContext(ctx).Create(&row).Error; err != nil { return err }
   ```
 
-  A tenant/owner id is set inside `BeforeCreate`, not by mutating plumbing. A
-  developer may replace the whole generated CRUD implementation, but that is an
-  explicit opt-out of the generated guarantees, not a silent edit the framework
-  still reasons about.
+  A tenant/owner id is set inside `BeforeCreate`, not by mutating plumbing.
+  (A mode that lets a resource opt out of generated CRUD entirely — the
+  generator emits no plumbing for it and the developer owns the implementation,
+  forgoing the generated guarantees — is possible future work, out of scope for
+  this ADR.)
 
 - **Drift becomes staleness, checked by regeneration — not inspection.**
   `gombit generate --check` regenerates to a scratch filesystem and byte-compares
   against the committed `*.gen.go`; a per-PR CI gate fails on any difference.
-  Because the artifacts are derived, they cannot semantically disagree with the
-  model; the only failure is "a generated file was edited or not regenerated,"
-  which a byte comparison catches with no AST reasoning.
+  Because the artifacts are derived, they cannot *independently* drift through
+  human edits: `generate --check` detects stale or modified generated output with
+  no AST reasoning. It proves freshness/determinism, **not** semantic correctness
+  — a generator bug can still emit wrong DTOs or mappings, so generator
+  correctness stays enforced by the generator's own test suite.
 
 Two boundaries are non-negotiable acceptance criteria for the implementation:
 
