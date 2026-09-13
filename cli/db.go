@@ -30,6 +30,37 @@ func newDBCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
 	cmd.AddCommand(newVerifyCommand(stdout, stderr))
 	cmd.AddCommand(newSeedCommand(stdout, stderr))
 	cmd.AddCommand(newResetCommand(stdout, stderr))
+	cmd.AddCommand(newHashCommand(stdout, stderr))
+	return cmd
+}
+
+func newHashCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
+	cmd := silence(&cobra.Command{
+		Use:   "hash",
+		Short: "Recompute the migration directory checksum (atlas.sum) after a manual edit",
+		Args:  cobra.ArbitraryArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) != 0 {
+				return fmt.Errorf("gombit db hash: unexpected argument %q", args[0])
+			}
+			migrationDir, err := cmd.Flags().GetString("dir")
+			if err != nil {
+				return err
+			}
+			atlasBin, err := cmd.Flags().GetString("atlas-bin")
+			if err != nil {
+				return err
+			}
+			return migrations.Hash(cmd.Context(), migrations.ApplyOptions{
+				WorkDir:      ".",
+				MigrationDir: migrationDir,
+				AtlasBinary:  atlasBin,
+				Stdout:       stdout,
+				Stderr:       stderr,
+			})
+		},
+	})
+	bindApplyFlags(cmd)
 	return cmd
 }
 

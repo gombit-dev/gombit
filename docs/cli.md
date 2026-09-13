@@ -487,7 +487,18 @@ gombit db status
 gombit db seed
 gombit db reset [--force]
 gombit db verify [--write] [--json] [--strict]
+gombit db hash
 ```
+
+`gombit db hash` wraps `atlas migrate hash` to recompute the directory checksum
+(`atlas.sum`) after a migration is hand-edited (e.g. to backfill a renamed
+column), so recovery from a checksum mismatch never needs the raw Atlas CLI.
+`atlas migrate hash` is part of Atlas Community Edition ([ADR-012](adr/012-migrations-atlas-gorm-provider.md)).
+
+> Surfacing destructive/non-appliable changes (`atlas migrate lint`) is **not**
+> wrapped here: ADR-012 places `atlas migrate lint` outside the v0.1 Community
+> Edition dependency surface. Migration-safety analysis and the field-rename
+> affordance are tracked in [#299](https://github.com/gombit-dev/gombit/issues/299).
 
 See [migrations.md](migrations.md) for Atlas behavior and
 [migration-safety.md](migration-safety.md) for `gombit db verify` — the
