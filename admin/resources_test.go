@@ -767,11 +767,6 @@ func TestResourceDeleteForeignKeyViolationIsConflict(t *testing.T) {
 	assertError(t, rec, http.StatusConflict, "conflict")
 }
 
-// TestResourceDeleteSoftDeleteBlockedWhenReferenced is the #220 regression:
-// with gorm.Model soft-delete, deleting a referenced parent never triggers the
-// database's ON DELETE RESTRICT (no physical DELETE happens), which would leave
-// a live child pointing at an API-404 parent. The admin must enforce RESTRICT at
-// the application layer: a 409 while referenced, success once the child is gone.
 // TestResourceDeleteHardDeleteEnforcesRestrict pins the #220 fix: the admin
 // delete is a hard delete, so the database's real ON DELETE RESTRICT fires
 // atomically — a referenced parent is a 409 (not a soft delete that leaves a
