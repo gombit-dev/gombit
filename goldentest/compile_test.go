@@ -71,6 +71,13 @@ func compileBackend(t *testing.T, appDir string) {
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("go build ./...: %v\n%s", err, out)
 	}
+	// go build skips _test.go; vet compiles them, so generated tests (e.g. the
+	// resource create-contract drift guard, #218) are type-checked here too.
+	vet := exec.Command("go", "vet", "./...")
+	vet.Dir = copyDir
+	if out, err := vet.CombinedOutput(); err != nil {
+		t.Fatalf("go vet ./...: %v\n%s", err, out)
+	}
 }
 
 func appendLocalReplace(t *testing.T, appDir string) {

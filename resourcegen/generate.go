@@ -156,6 +156,10 @@ func planWrites(opts Options, files []fileSpec) ([]plannedFile, error) {
 			return nil, fmt.Errorf("resourcegen: read %s: %w", display, err)
 		}
 		exists := err == nil
+		if exists && file.seedOnce {
+			// Seeded once; never overwrite (human-owned after first write).
+			continue
+		}
 		if exists && bytes.Equal(existing, file.content) {
 			continue
 		}

@@ -84,10 +84,15 @@ func (h *Handler) get(ctx context.Context, input *getBookInput) (*getBookOutput,
 	}, nil
 }
 
-func (h *Handler) create(ctx context.Context, input *createBookInput) (*createBookOutput, error) {
-	row := Book{
+// buildBookForCreate maps a create request to the Book that is persisted.
+func buildBookForCreate(input *createBookInput) Book {
+	return Book{
 		Title: input.Body.Title,
 	}
+}
+
+func (h *Handler) create(ctx context.Context, input *createBookInput) (*createBookOutput, error) {
+	row := buildBookForCreate(input)
 	if err := h.DB.WithContext(ctx).Create(&row).Error; err != nil {
 		return nil, database.MapPersistError(ctx, err, "resource already exists", "create book")
 	}

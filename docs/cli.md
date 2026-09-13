@@ -304,6 +304,7 @@ This writes a feature-package under `internal/<snake>/`:
 | `<snake>.go` | GORM model (`gorm.Model` + fields) |
 | `handler.go` | Thin Huma list/get/create over GORM (D10 envelope; list honors `page`/`per_page`; get/create map missing rows to `not_found` and unique violations to `conflict`) |
 | `routes.go` | `Register(app *framework.App)` |
+| `<snake>_drift_test.go` | Model↔create-contract drift guard (#218) |
 | `service.go` | Only with `--service` (pass-through) |
 | `repo.go` | Only with `--repo` (pass-through) |
 
@@ -334,6 +335,20 @@ rewrites them to the live `GOMBIT_API_PREFIX` (same as the product pages).
 
 After generating routes, run `gombit client generate` or `gombit dev` so
 `frontend/src/api/generated` includes the new paths.
+
+The generated handler is a **human-owned contract**: its create mapping is a
+snapshot of the fields given here, and the generator never rewrites it when the
+model later gains a column. `<snake>_drift_test.go` keeps the persistence schema
+and that mapping from diverging silently ([#218](https://github.com/gombit-dev/gombit/issues/218)):
+it parses the handler's **actual create constructor** (the `<Type>{...}`
+assignments, not just the request DTO) and `go test` fails when a **NOT NULL**
+column with no database default is not assigned there, not server-managed, and
+not auto-managed or nullable — otherwise a create would silently zero-fill it.
+When it fails after you add a column, either assign the field in the create
+handler, set it server-side and add the column to `<type>ServerManagedColumns` in
+the **human-owned** `<snake>_server_managed.go` (seeded once, never regenerated —
+e.g. a tenant/owner id from the auth context), or make the column nullable. Only
+the create side is checked; a response DTO may intentionally omit fields.
 
 ### Field grammar
 
