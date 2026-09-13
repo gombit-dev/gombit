@@ -772,26 +772,31 @@ func TestResourceDeleteForeignKeyViolationIsConflict(t *testing.T) {
 // database's ON DELETE RESTRICT (no physical DELETE happens), which would leave
 // a live child pointing at an API-404 parent. The admin must enforce RESTRICT at
 // the application layer: a 409 while referenced, success once the child is gone.
-func TestResourceDeleteSoftDeleteBlockedWhenReferenced(t *testing.T) {
+// TestResourceDeleteHardDeleteEnforcesRestrict pins the #220 fix: the admin
+// delete is a hard delete, so the database's real ON DELETE RESTRICT fires
+// atomically — a referenced parent is a 409 (not a soft delete that leaves a
+// live child pointing at an API-404 row), and once the child is gone the parent
+// is physically deleted.
+func TestResourceDeleteHardDeleteEnforcesRestrict(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	type SoftParent struct {
+	type RParent struct {
 		gorm.Model
 		Name string `json:"name"`
 	}
-	type SoftChild struct {
+	type RChild struct {
 		gorm.Model
-		ParentID uint       `json:"parent_id"`
-		Parent   SoftParent `gorm:"constraint:OnDelete:RESTRICT;" json:"-"`
+		ParentID uint    `json:"parent_id"`
+		Parent   RParent `gorm:"constraint:OnDelete:RESTRICT;" json:"-"`
 	}
 	app := newCookieApp(t)
-	if err := app.DB().AutoMigrate(&SoftParent{}, &SoftChild{}); err != nil {
+	if err := app.DB().AutoMigrate(&RParent{}, &RChild{}); err != nil {
 		t.Fatalf("AutoMigrate: %v", err)
 	}
-	parent := SoftParent{Name: "p"}
+	parent := RParent{Name: "p"}
 	if err := app.DB().Create(&parent).Error; err != nil {
 		t.Fatalf("create parent: %v", err)
 	}
-	child := SoftChild{ParentID: parent.ID}
+	child := RChild{ParentID: parent.ID}
 	if err := app.DB().Create(&child).Error; err != nil {
 		t.Fatalf("create child: %v", err)
 	}
@@ -800,8 +805,8 @@ func TestResourceDeleteSoftDeleteBlockedWhenReferenced(t *testing.T) {
 		slug  string
 		field string
 	}{
-		{SoftParent{}, "soft-parents", "name"},
-		{SoftChild{}, "soft-children", "parent_id"},
+		{RParent{}, "r-parents", "name"},
+		{RChild{}, "r-children", "parent_id"},
 	} {
 		if err := admin.Register(app, reg.model, admin.Options{
 			Slug: reg.slug,
@@ -815,32 +820,128 @@ func TestResourceDeleteSoftDeleteBlockedWhenReferenced(t *testing.T) {
 	}
 	jar := loginSuperuser(t, app)
 
-	// Referenced: deleting the parent is a 409, and the parent survives.
-	rec := doRequest(app, jar, http.MethodDelete, fmt.Sprintf("/api/v1/admin/resources/soft-parents/%d", parent.ID), "")
+	// Referenced: the database RESTRICT makes the delete a 409, and the parent
+	// survives untouched (the failed DELETE changed nothing).
+	rec := doRequest(app, jar, http.MethodDelete, fmt.Sprintf("/api/v1/admin/resources/r-parents/%d", parent.ID), "")
 	assertError(t, rec, http.StatusConflict, "conflict")
-	var still SoftParent
+	var still RParent
 	if err := app.DB().First(&still, parent.ID).Error; err != nil {
 		t.Fatalf("parent must survive a blocked delete, got: %v", err)
 	}
 
-	// Remove the child, then the parent deletes cleanly and is soft-deleted.
-	delChild := doRequest(app, jar, http.MethodDelete, fmt.Sprintf("/api/v1/admin/resources/soft-children/%d", child.ID), "")
+	// Remove the child, then the parent deletes and is PHYSICALLY gone — a hard
+	// delete, so even Unscoped cannot find it (no dangling soft-deleted row).
+	delChild := doRequest(app, jar, http.MethodDelete, fmt.Sprintf("/api/v1/admin/resources/r-children/%d", child.ID), "")
 	if delChild.Code != http.StatusOK {
 		t.Fatalf("delete child status = %d; body: %s", delChild.Code, delChild.Body.String())
 	}
-	delParent := doRequest(app, jar, http.MethodDelete, fmt.Sprintf("/api/v1/admin/resources/soft-parents/%d", parent.ID), "")
+	delParent := doRequest(app, jar, http.MethodDelete, fmt.Sprintf("/api/v1/admin/resources/r-parents/%d", parent.ID), "")
 	if delParent.Code != http.StatusOK {
 		t.Fatalf("delete parent after child removed status = %d; body: %s", delParent.Code, delParent.Body.String())
 	}
-	if err := app.DB().First(&SoftParent{}, parent.ID).Error; !errors.Is(err, gorm.ErrRecordNotFound) {
-		t.Fatalf("parent must be soft-deleted after successful delete, got: %v", err)
+	if err := app.DB().Unscoped().First(&RParent{}, parent.ID).Error; !errors.Is(err, gorm.ErrRecordNotFound) {
+		t.Fatalf("parent must be physically deleted (hard delete), got: %v", err)
+	}
+}
+
+// TestResourceDeleteCascadeRemovesChildren verifies that a declared
+// ON DELETE CASCADE actually executes under the admin delete (the review's
+// finding that "respecting" CASCADE by skipping did nothing): deleting the
+// parent removes the child at the database.
+func TestResourceDeleteCascadeRemovesChildren(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	type CParent struct {
+		gorm.Model
+		Name string `json:"name"`
+	}
+	type CChild struct {
+		gorm.Model
+		ParentID uint    `json:"parent_id"`
+		Parent   CParent `gorm:"constraint:OnDelete:CASCADE;" json:"-"`
+	}
+	app := newCookieApp(t)
+	if err := app.DB().AutoMigrate(&CParent{}, &CChild{}); err != nil {
+		t.Fatalf("AutoMigrate: %v", err)
+	}
+	parent := CParent{Name: "p"}
+	if err := app.DB().Create(&parent).Error; err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	if err := app.DB().Create(&CChild{ParentID: parent.ID}).Error; err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	if err := admin.Register(app, CParent{}, admin.Options{
+		Slug:   "c-parents",
+		Fields: []admin.Field{{Name: "id", Type: admin.TypeInteger, ReadOnly: true}, {Name: "name", Type: admin.TypeString}},
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	jar := loginSuperuser(t, app)
+
+	rec := doRequest(app, jar, http.MethodDelete, fmt.Sprintf("/api/v1/admin/resources/c-parents/%d", parent.ID), "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("cascade delete status = %d; body: %s", rec.Code, rec.Body.String())
+	}
+	var remaining int64
+	if err := app.DB().Unscoped().Model(&CChild{}).Count(&remaining).Error; err != nil {
+		t.Fatalf("count children: %v", err)
+	}
+	if remaining != 0 {
+		t.Fatalf("CASCADE did not remove the child: %d remain", remaining)
+	}
+}
+
+// TestResourceDeleteSetNullClearsChildFK verifies a declared ON DELETE SET NULL
+// actually nulls the child's FK under the admin delete, rather than leaving it
+// pointing at a deleted parent.
+func TestResourceDeleteSetNullClearsChildFK(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	type NParent struct {
+		gorm.Model
+		Name string `json:"name"`
+	}
+	type NChild struct {
+		gorm.Model
+		ParentID *uint    `json:"parent_id"` // nullable so SET NULL is legal
+		Parent   *NParent `gorm:"constraint:OnDelete:SET NULL;" json:"-"`
+	}
+	app := newCookieApp(t)
+	if err := app.DB().AutoMigrate(&NParent{}, &NChild{}); err != nil {
+		t.Fatalf("AutoMigrate: %v", err)
+	}
+	parent := NParent{Name: "p"}
+	if err := app.DB().Create(&parent).Error; err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	child := NChild{ParentID: &parent.ID}
+	if err := app.DB().Create(&child).Error; err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	if err := admin.Register(app, NParent{}, admin.Options{
+		Slug:   "n-parents",
+		Fields: []admin.Field{{Name: "id", Type: admin.TypeInteger, ReadOnly: true}, {Name: "name", Type: admin.TypeString}},
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	jar := loginSuperuser(t, app)
+
+	rec := doRequest(app, jar, http.MethodDelete, fmt.Sprintf("/api/v1/admin/resources/n-parents/%d", parent.ID), "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("set-null delete status = %d; body: %s", rec.Code, rec.Body.String())
+	}
+	var reloaded NChild
+	if err := app.DB().First(&reloaded, child.ID).Error; err != nil {
+		t.Fatalf("reload child: %v", err)
+	}
+	if reloaded.ParentID != nil {
+		t.Fatalf("SET NULL did not clear the child FK: %v", *reloaded.ParentID)
 	}
 }
 
 // TestResourceDeleteSelfReferentialRespectsLiveChildren covers #220's self-
 // referential repro (Engine.ParentEngineID): a parent with a live child is
-// blocked, but the self-reference of a row to itself must never block its own
-// deletion.
+// blocked by the database RESTRICT, but a row referencing only its (soon-gone)
+// parent deletes fine.
 func TestResourceDeleteSelfReferentialRespectsLiveChildren(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	type Engine struct {

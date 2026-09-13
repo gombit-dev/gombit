@@ -270,65 +270,20 @@ func (h *handlers) deleteResource(ctx context.Context, input *itemInput) (*delet
 	if err != nil {
 		return nil, contract.WithContext(ctx, contract.Internal("admin database is not attached"))
 	}
-	pk, err := coercePathID(input.ID, m.pkType)
-	if err != nil {
-		return nil, contract.WithContext(ctx, contract.NotFound("unknown resource"))
-	}
-	if err := h.blockIfReferenced(ctx, db, m, pk); err != nil {
-		return nil, err
-	}
-	if err := db.WithContext(ctx).Delete(inst).Error; err != nil {
+	// Hard delete so the database's real foreign keys enforce referential
+	// integrity atomically (#220). gorm.Model makes the default Delete a SOFT
+	// delete — it sets deleted_at with no physical DELETE — so ON DELETE
+	// RESTRICT/NO ACTION never fires and a referenced parent could be "deleted"
+	// while a live child keeps pointing at an API-404 row. Unscoped issues a real
+	// DELETE, so the database enforces RESTRICT in one statement (a referenced row
+	// errors, mapped to 409 by MapDeleteError) and actually executes a declared
+	// CASCADE / SET NULL. There is no app-layer pre-scan to race: the invariant is
+	// the database constraint itself. The admin never exposed soft-delete recovery
+	// (no restore path), so this removes no feature.
+	if err := db.WithContext(ctx).Unscoped().Delete(inst).Error; err != nil {
 		return nil, database.MapDeleteError(ctx, err, "resource is still referenced by other records", "delete resource")
 	}
 	return &deleteOutput{Body: contract.Data[deleteResult]{Data: deleteResult{OK: true}}}, nil
-}
-
-// blockIfReferenced enforces ON DELETE RESTRICT at the application layer for the
-// generic admin delete. GORM soft-deletes (gorm.Model.DeletedAt) set deleted_at
-// without a physical DELETE, so the database's real foreign keys never fire and a
-// referenced parent could be "deleted" while live children keep pointing at an
-// API-404 row (#220). Before deleting, it scans every registered model for a
-// belongs_to FK targeting this model and rejects with the same 409 the
-// hard-delete path returns when any live (non-soft-deleted) row still references
-// the target. An explicit ON DELETE CASCADE / SET NULL is respected (not blocked)
-// — the author opted into that behavior.
-func (h *handlers) blockIfReferenced(ctx context.Context, db *gorm.DB, target *registered, pk any) error {
-	targetSch, err := parseSchema(target.newInstance())
-	if err != nil {
-		return contract.WithContext(ctx, contract.Internal("inspect model schema"))
-	}
-	for _, other := range h.reg.all() {
-		otherSch, err := parseSchema(other.newInstance())
-		if err != nil {
-			continue
-		}
-		for fkCol, rel := range belongsToByFK(otherSch) {
-			if rel.FieldSchema == nil || rel.FieldSchema.Table != targetSch.Table {
-				continue
-			}
-			if c := rel.ParseConstraint(); c != nil {
-				switch strings.ToUpper(strings.TrimSpace(c.OnDelete)) {
-				case "CASCADE", "SET NULL", "SET DEFAULT":
-					continue
-				}
-			}
-			q := db.WithContext(ctx).Model(other.newInstance()).
-				Where(clause.Eq{Column: clause.Column{Name: fkCol}, Value: pk})
-			if otherSch.Table == targetSch.Table {
-				// Self-referential FK: a row's reference to itself must not block
-				// its own deletion; only other rows count.
-				q = q.Where(clause.Neq{Column: clause.Column{Name: other.pkColumn}, Value: pk})
-			}
-			var n int64
-			if err := q.Count(&n).Error; err != nil {
-				return contract.WithContext(ctx, contract.Internal("check referencing records"))
-			}
-			if n > 0 {
-				return contract.WithContext(ctx, contract.Conflict("resource is still referenced by other records"))
-			}
-		}
-	}
-	return nil
 }
 
 func (h *handlers) modelForAction(

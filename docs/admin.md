@@ -246,18 +246,23 @@ registered). Raw `*gin.Engine` is **not** used for these endpoints. It
 **is** used for `/admin/` static files and SPA fallback, which must not
 appear in OpenAPI.
 
-**Deleting referenced records (referential integrity).** Models that embed
-`gorm.Model` are **soft-deleted** (GORM sets `deleted_at`; no physical `DELETE`
-runs), so the database's own `ON DELETE RESTRICT`/`NO ACTION` foreign keys never
-fire — a soft delete would otherwise leave a live child row pointing at a parent
-the API now reports as 404. The admin therefore enforces `RESTRICT` in the
-application layer: before deleting, it scans every **registered** model for a
-`belongs_to` foreign key targeting the row and returns `409 conflict`
-(`resource is still referenced by other records`) when any live (non-soft-deleted)
-row still references it — mirroring the 409 a hard-deleted model gets from the
-database constraint. A foreign key declared with an explicit
-`constraint:OnDelete:CASCADE` (or `SET NULL`) is respected and not blocked.
-Referencing models that are **not** registered on the admin are not scanned.
+**Deleting referenced records (referential integrity).** The admin data plane
+**hard-deletes** (`Unscoped`), so the database's own foreign keys enforce
+referential integrity in one statement (#220). A model embedding `gorm.Model`
+would otherwise be *soft*-deleted — `deleted_at` is set with no physical
+`DELETE` — and the database's `ON DELETE RESTRICT`/`NO ACTION` constraints would
+never fire, leaving a live child row pointing at a parent the API now reports as
+404. A real `DELETE` means:
+
+- `RESTRICT`/`NO ACTION`: deleting a referenced row fails atomically and returns
+  `409 conflict` (`resource is still referenced by other records`) — no
+  time-of-check/time-of-use race, because the constraint *is* the check.
+- `ON DELETE CASCADE` / `SET NULL`: actually execute at the database (children
+  removed / child FKs nulled), rather than being silently skipped.
+
+Because the delete is physical, the admin does not keep soft-deleted rows around
+(it has never exposed a restore/trash path). This is the framework-owned admin
+surface; generated per-resource handlers are thin and user-owned.
 
 List query parameters:
 
