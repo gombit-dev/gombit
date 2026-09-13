@@ -1,19 +1,22 @@
 // Package resourcecheck guards against a generated resource's persistence schema
-// and its generated API create-contract drifting silently into an invalid state
-// (#218). `gombit make resource` generates a Huma handler whose create DTO is a
-// snapshot of the fields given at generation time; because generated handlers are
-// human-owned contracts, the generator cannot rewrite them when the model later
-// gains a column. Left unchecked, a NOT NULL column the DTO doesn't know about is
-// silently zero-filled on create (or the field is rejected as "unexpected
-// property"), and nothing catches it until production.
+// and its generated API create path drifting silently into an invalid state
+// (#218). `gombit make resource` generates a Huma handler whose create mapping is
+// a snapshot of the fields given at generation time; because generated handlers
+// are human-owned, the generator cannot rewrite them when the model later gains a
+// column. Left unchecked, a NOT NULL column the handler doesn't assign is
+// silently zero-filled on create, and nothing catches it until production.
 //
-// MissingCreateColumns is the invariant the generated `*_drift_test.go` asserts:
-// every persistence-required column must have a known source.
+// The invariant the generated `*_drift_test.go` asserts is tied to the handler's
+// ACTUAL write path — the fields assigned in the create constructor — not merely
+// to the request DTO's declared fields. A field can appear in the DTO yet never
+// be assigned to the model; that is exactly the silent zero-fill #218 is about.
 package resourcecheck
 
 import (
 	"fmt"
-	"reflect"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"sort"
 	"strings"
 	"sync"
@@ -21,32 +24,30 @@ import (
 	"gorm.io/gorm/schema"
 )
 
-// MissingCreateColumns reports the persistence-required columns of model that
-// have no known source on create. A required column is one that is NOT NULL with
-// no database default and is not auto-managed (primary key, auto-increment, auto
-// create/update timestamp, or soft-delete). Such a column is satisfied — and so
-// omitted from the result — when it is any of:
+// MissingCreateColumns reports the persistence-required columns of model that the
+// create handler does not actually write. A required column is one that is
+// NOT NULL with no database default and is not auto-managed (primary key,
+// auto-increment, auto create/update timestamp, or soft-delete). Such a column is
+// satisfied — and so omitted from the result — when it is either:
 //
-//   - writable through the create DTO (its json field name appears in createBody);
+//   - assigned by the handler's create constructor (its Go field name is in
+//     assignedGoFields, from AssignedCreateFields); or
 //   - explicitly server-managed (its column is listed in serverManaged, e.g. a
-//     tenant or owner id the handler sets from the auth context);
+//     tenant or owner id set from the auth context).
 //
-// and it is never required in the first place when the column is nullable, has a
-// DB default, or is auto-managed. Anything left over is model/handler drift.
+// model is a pointer to the GORM model (e.g. &Widget{}); assignedGoFields are the
+// struct fields the create handler assigns; serverManaged lists columns filled
+// server-side. The returned column names are sorted.
 //
-// model is a pointer to the GORM model (e.g. &Widget{}); createBody is the create
-// input's Body struct value (e.g. createWidgetInput{}.Body); serverManaged lists
-// the columns the handler fills server-side. The returned column names are sorted.
-//
-// Only the create side is checked: a response DTO legitimately omits fields
-// (intentional encapsulation), but a create DTO that cannot supply a
+// Only the create side is checked: a response DTO may legitimately omit fields
+// (intentional encapsulation), but a create path that cannot supply a
 // persistence-required column violates a schema invariant.
-func MissingCreateColumns(model any, createBody any, serverManaged []string) ([]string, error) {
+func MissingCreateColumns(model any, assignedGoFields []string, serverManaged []string) ([]string, error) {
 	sch, err := schema.Parse(model, &sync.Map{}, schema.NamingStrategy{})
 	if err != nil {
 		return nil, fmt.Errorf("resourcecheck: parse model schema: %w", err)
 	}
-	dto := jsonFieldNames(reflect.TypeOf(createBody))
+	assigned := toSet(assignedGoFields)
 	managed := toSet(serverManaged)
 
 	var missing []string
@@ -54,13 +55,62 @@ func MissingCreateColumns(model any, createBody any, serverManaged []string) ([]
 		if !requiresCreateValue(f) {
 			continue
 		}
-		if dto[schemaJSONName(f)] || managed[f.DBName] {
+		if assigned[f.Name] || managed[f.DBName] {
 			continue
 		}
 		missing = append(missing, f.DBName)
 	}
 	sort.Strings(missing)
 	return missing, nil
+}
+
+// AssignedCreateFields parses a generated feature-package handler source and
+// returns the model struct fields the create handler assigns — the keys of every
+// `<typeName>{ ... }` composite literal inside the `create` method. This observes
+// the real write path, so a field present in the request DTO but never assigned
+// to the model is NOT reported as covered. It understands the generated
+// composite-literal construction; a hand-refactor that assigns fields by other
+// means is treated conservatively (its fields look unassigned, which surfaces as
+// drift to resolve explicitly rather than a silent gap).
+func AssignedCreateFields(handlerSrc []byte, typeName string) ([]string, error) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "handler.go", handlerSrc, 0)
+	if err != nil {
+		return nil, fmt.Errorf("resourcecheck: parse handler: %w", err)
+	}
+	set := map[string]bool{}
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Name == nil || fn.Name.Name != "create" || fn.Body == nil {
+			continue
+		}
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			cl, ok := n.(*ast.CompositeLit)
+			if !ok {
+				return true
+			}
+			id, ok := cl.Type.(*ast.Ident)
+			if !ok || id.Name != typeName {
+				return true
+			}
+			for _, elt := range cl.Elts {
+				kv, ok := elt.(*ast.KeyValueExpr)
+				if !ok {
+					continue
+				}
+				if key, ok := kv.Key.(*ast.Ident); ok {
+					set[key.Name] = true
+				}
+			}
+			return true
+		})
+	}
+	out := make([]string, 0, len(set))
+	for k := range set {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 // requiresCreateValue reports whether a column must be given a value on create:
@@ -80,37 +130,6 @@ func requiresCreateValue(f *schema.Field) bool {
 		return false
 	}
 	return true
-}
-
-// schemaJSONName is the json field name a column is exposed under — matching how
-// the generated create DTO names it — from the struct field's json tag, falling
-// back to the GORM column name.
-func schemaJSONName(f *schema.Field) string {
-	if tag := f.StructField.Tag.Get("json"); tag != "" {
-		if name, _, _ := strings.Cut(tag, ","); name != "" && name != "-" {
-			return name
-		}
-	}
-	return f.DBName
-}
-
-// jsonFieldNames collects the json field names of a struct type (the create
-// DTO's Body). A non-struct type yields an empty set.
-func jsonFieldNames(t reflect.Type) map[string]bool {
-	out := map[string]bool{}
-	for t != nil && t.Kind() == reflect.Pointer {
-		t = t.Elem()
-	}
-	if t == nil || t.Kind() != reflect.Struct {
-		return out
-	}
-	for i := 0; i < t.NumField(); i++ {
-		name, _, _ := strings.Cut(t.Field(i).Tag.Get("json"), ",")
-		if name != "" && name != "-" {
-			out[name] = true
-		}
-	}
-	return out
 }
 
 func toSet(values []string) map[string]bool {

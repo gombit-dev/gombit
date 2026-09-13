@@ -2,31 +2,33 @@
 package book
 
 import (
+	"os"
 	"testing"
 
 	"github.com/gombit-dev/gombit/resourcecheck"
 )
 
-// bookServerManagedColumns lists NOT NULL columns the create handler fills
-// server-side (e.g. from the auth context or a hook) instead of from the
-// request body. Add a column here when you set it in code; the drift test
-// then treats it as a known source.
-var bookServerManagedColumns = []string{}
-
 // TestBookCreateContractCoversRequiredColumns guards against the Book
-// schema and the generated create contract drifting into an invalid state
-// (#218): a NOT NULL column with no database default that is neither writable
-// via createBookInput nor server-managed would be silently zero-filled on
-// create. When this fails after you add a column to Book, either add the
-// field to createBookInput (and its write path in the handler), set it
-// server-side and list its column in bookServerManagedColumns, or make the column
-// nullable.
+// schema and the generated create path drifting into an invalid state (#218):
+// a NOT NULL column with no database default that the create handler does not
+// assign — and that is not server-managed — would be silently zero-filled on
+// create. When this fails after you add a column to Book, either assign the
+// field in the create handler, set it server-side and list its column in
+// bookServerManagedColumns (book_server_managed.go), or make the column nullable.
 func TestBookCreateContractCoversRequiredColumns(t *testing.T) {
-	drift, err := resourcecheck.MissingCreateColumns(&Book{}, createBookInput{}.Body, bookServerManagedColumns)
+	src, err := os.ReadFile("handler.go")
+	if err != nil {
+		t.Fatalf("read handler.go: %v", err)
+	}
+	assigned, err := resourcecheck.AssignedCreateFields(src, "Book")
+	if err != nil {
+		t.Fatalf("parse Book create handler: %v", err)
+	}
+	drift, err := resourcecheck.MissingCreateColumns(&Book{}, assigned, bookServerManagedColumns)
 	if err != nil {
 		t.Fatalf("inspect Book schema: %v", err)
 	}
 	for _, column := range drift {
-		t.Errorf("model/handler drift: Book.%s is NOT NULL with no default but is not writable via createBookInput and not server-managed", column)
+		t.Errorf("model/handler drift: Book.%s is NOT NULL with no default but the create handler does not assign it and it is not in bookServerManagedColumns", column)
 	}
 }

@@ -336,18 +336,19 @@ rewrites them to the live `GOMBIT_API_PREFIX` (same as the product pages).
 After generating routes, run `gombit client generate` or `gombit dev` so
 `frontend/src/api/generated` includes the new paths.
 
-The generated handler is a **human-owned contract**: its create/response DTO is a
+The generated handler is a **human-owned contract**: its create mapping is a
 snapshot of the fields given here, and the generator never rewrites it when the
 model later gains a column. `<snake>_drift_test.go` keeps the persistence schema
-and that contract from diverging silently ([#218](https://github.com/gombit-dev/gombit/issues/218)):
-`go test` fails when a **NOT NULL** column with no database default is neither
-writable through `create<Type>Input` nor listed as server-managed (and isn't
-auto-managed or nullable) — otherwise a create would silently zero-fill it. When
-it fails after you add a column, either add the field to the handler's input (and
-its write path), set it server-side and add the column to
-`<type>ServerManagedColumns` in that test (e.g. a tenant/owner id from the auth
-context), or make the column nullable. Only the create side is checked; a response
-DTO may intentionally omit fields.
+and that mapping from diverging silently ([#218](https://github.com/gombit-dev/gombit/issues/218)):
+it parses the handler's **actual create constructor** (the `<Type>{...}`
+assignments, not just the request DTO) and `go test` fails when a **NOT NULL**
+column with no database default is not assigned there, not server-managed, and
+not auto-managed or nullable — otherwise a create would silently zero-fill it.
+When it fails after you add a column, either assign the field in the create
+handler, set it server-side and add the column to `<type>ServerManagedColumns` in
+the **human-owned** `<snake>_server_managed.go` (seeded once, never regenerated —
+e.g. a tenant/owner id from the auth context), or make the column nullable. Only
+the create side is checked; a response DTO may intentionally omit fields.
 
 ### Field grammar
 

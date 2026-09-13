@@ -11,6 +11,11 @@ type fileSpec struct {
 	relPath string
 	content []byte
 	owned   bool // AST-edited user file; additive, not banner-gated
+	// seedOnce files are written once and never regenerated: if the file already
+	// exists it is left untouched, even with --force. Used for human-owned
+	// configuration the generator seeds but must not reset (e.g. the drift
+	// test's server-managed column list, #218).
+	seedOnce bool
 }
 
 type renderContext struct {
@@ -57,6 +62,10 @@ func renderFeatureFiles(ctx renderContext) ([]fileSpec, error) {
 		{relPath: fmt.Sprintf("internal/%s/handler.go", ctx.Resource.Package), content: mustFormatGo(renderHandler(ctx))},
 		{relPath: fmt.Sprintf("internal/%s/routes.go", ctx.Resource.Package), content: mustFormatGo(renderRoutes(ctx))},
 		{relPath: fmt.Sprintf("internal/%s/%s_drift_test.go", ctx.Resource.Package, ctx.Resource.FileBase), content: mustFormatGo(renderDriftTest(ctx))},
+		// Human-owned, seeded once: the editable server-managed column list the
+		// drift test consumes. Not banner-gated and never regenerated, so edits
+		// survive `make resource --force` (#218 review).
+		{relPath: fmt.Sprintf("internal/%s/%s_server_managed.go", ctx.Resource.Package, ctx.Resource.FileBase), content: mustFormatGo(renderServerManaged(ctx)), seedOnce: true},
 	}
 	if ctx.Service {
 		files = append(files, fileSpec{
@@ -82,42 +91,64 @@ func renderFeatureFiles(ctx renderContext) ([]fileSpec, error) {
 	return files, nil
 }
 
+// renderServerManaged generates the human-owned, seeded-once file holding the
+// editable server-managed column list the drift test consumes (#218). It carries
+// no DO-NOT-EDIT banner and is never regenerated, so edits survive.
+func renderServerManaged(ctx renderContext) string {
+	typ := ctx.Resource.TypeName
+	managedVar := unexported(typ) + "ServerManagedColumns"
+
+	var b strings.Builder
+	b.WriteString("package " + ctx.Resource.Package + "\n\n")
+	b.WriteString("// " + managedVar + " lists NOT NULL columns the create handler fills\n")
+	b.WriteString("// server-side (e.g. from the auth context or a hook) rather than from the\n")
+	b.WriteString("// request body. Add a column here when you set it in code; the drift test in\n")
+	b.WriteString("// " + ctx.Resource.FileBase + "_drift_test.go then treats it as a known source.\n")
+	b.WriteString("//\n")
+	b.WriteString("// This file is yours to edit — `gombit make resource` writes it once and never\n")
+	b.WriteString("// regenerates it (even with --force).\n")
+	b.WriteString("var " + managedVar + " = []string{}\n")
+	return b.String()
+}
+
 // renderDriftTest generates the model/handler create-contract drift guard
 // (#218). Generated handlers are human-owned, so the generator cannot follow the
 // model when it gains a column later; this test fails when a persistence-required
-// column has no known source (create DTO, DB default, auto-managed, nullable, or
-// the editable server-managed list), moving the failure from production to
-// `go test`.
+// column is not actually assigned by the create handler's constructor and is not
+// server-managed (nor DB-defaulted / auto-managed / nullable) — moving the
+// failure from production to `go test`. It inspects the handler's real write path
+// (the Type{...} assignments), not merely the request DTO's declared fields.
 func renderDriftTest(ctx renderContext) string {
 	typ := ctx.Resource.TypeName
 	pkg := ctx.Resource.Package
 	managedVar := unexported(typ) + "ServerManagedColumns"
-	createInput := "create" + typ + "Input"
 
 	var b strings.Builder
 	b.WriteString(goBanner())
 	b.WriteString("package " + pkg + "\n\n")
-	b.WriteString(importBlock([]string{"testing"}, []string{"github.com/gombit-dev/gombit/resourcecheck"}))
-	b.WriteString("// " + managedVar + " lists NOT NULL columns the create handler fills\n")
-	b.WriteString("// server-side (e.g. from the auth context or a hook) instead of from the\n")
-	b.WriteString("// request body. Add a column here when you set it in code; the drift test\n")
-	b.WriteString("// then treats it as a known source.\n")
-	b.WriteString("var " + managedVar + " = []string{}\n\n")
+	b.WriteString(importBlock([]string{"os", "testing"}, []string{"github.com/gombit-dev/gombit/resourcecheck"}))
 	b.WriteString("// Test" + typ + "CreateContractCoversRequiredColumns guards against the " + typ + "\n")
-	b.WriteString("// schema and the generated create contract drifting into an invalid state\n")
-	b.WriteString("// (#218): a NOT NULL column with no database default that is neither writable\n")
-	b.WriteString("// via " + createInput + " nor server-managed would be silently zero-filled on\n")
-	b.WriteString("// create. When this fails after you add a column to " + typ + ", either add the\n")
-	b.WriteString("// field to " + createInput + " (and its write path in the handler), set it\n")
-	b.WriteString("// server-side and list its column in " + managedVar + ", or make the column\n")
-	b.WriteString("// nullable.\n")
+	b.WriteString("// schema and the generated create path drifting into an invalid state (#218):\n")
+	b.WriteString("// a NOT NULL column with no database default that the create handler does not\n")
+	b.WriteString("// assign — and that is not server-managed — would be silently zero-filled on\n")
+	b.WriteString("// create. When this fails after you add a column to " + typ + ", either assign the\n")
+	b.WriteString("// field in the create handler, set it server-side and list its column in\n")
+	b.WriteString("// " + managedVar + " (" + ctx.Resource.FileBase + "_server_managed.go), or make the column nullable.\n")
 	b.WriteString("func Test" + typ + "CreateContractCoversRequiredColumns(t *testing.T) {\n")
-	b.WriteString("\tdrift, err := resourcecheck.MissingCreateColumns(&" + typ + "{}, " + createInput + "{}.Body, " + managedVar + ")\n")
+	b.WriteString("\tsrc, err := os.ReadFile(\"handler.go\")\n")
+	b.WriteString("\tif err != nil {\n")
+	b.WriteString("\t\tt.Fatalf(\"read handler.go: %v\", err)\n")
+	b.WriteString("\t}\n")
+	b.WriteString("\tassigned, err := resourcecheck.AssignedCreateFields(src, \"" + typ + "\")\n")
+	b.WriteString("\tif err != nil {\n")
+	b.WriteString("\t\tt.Fatalf(\"parse " + typ + " create handler: %v\", err)\n")
+	b.WriteString("\t}\n")
+	b.WriteString("\tdrift, err := resourcecheck.MissingCreateColumns(&" + typ + "{}, assigned, " + managedVar + ")\n")
 	b.WriteString("\tif err != nil {\n")
 	b.WriteString("\t\tt.Fatalf(\"inspect " + typ + " schema: %v\", err)\n")
 	b.WriteString("\t}\n")
 	b.WriteString("\tfor _, column := range drift {\n")
-	b.WriteString("\t\tt.Errorf(\"model/handler drift: " + typ + ".%s is NOT NULL with no default but is not writable via " + createInput + " and not server-managed\", column)\n")
+	b.WriteString("\t\tt.Errorf(\"model/handler drift: " + typ + ".%s is NOT NULL with no default but the create handler does not assign it and it is not in " + managedVar + "\", column)\n")
 	b.WriteString("\t}\n")
 	b.WriteString("}\n")
 	return b.String()
