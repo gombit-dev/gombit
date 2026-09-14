@@ -1,6 +1,7 @@
 package resourcepolicy_test
 
 import (
+	"database/sql/driver"
 	"path/filepath"
 	"reflect"
 	"sync"
@@ -229,6 +230,45 @@ func TestEmbeddedContainerPolicyFailsClosed(t *testing.T) {
 		}
 		if _, err := resourcepolicy.ResolvedFromModel(&m{}); err == nil {
 			t.Fatal("gombit policy on an anonymous embedded container must fail closed")
+		}
+	})
+}
+
+// money is a scalar struct type (Valuer/Scanner) GORM persists as one column.
+type money struct{ Cents int64 }
+
+func (money) Value() (driver.Value, error) { return nil, nil }
+func (*money) Scan(any) error              { return nil }
+
+// GORM keeps scalar struct types (time.Time, a Valuer/Scanner) as columns even
+// when embedded anonymously — they are NOT flattened containers, so a policy on
+// them is valid and must not be rejected. The guard follows GORM's parsed result,
+// not a type guess.
+func TestAnonymousScalarStructIsColumnNotContainer(t *testing.T) {
+	t.Run("time.Time", func(t *testing.T) {
+		type m struct {
+			ID        uint `gorm:"primaryKey"`
+			time.Time `gombit:"read"`
+		}
+		resolved, err := resourcepolicy.ResolvedFromModel(&m{})
+		if err != nil {
+			t.Fatalf("anonymous time.Time is a column, must not be rejected as a container: %v", err)
+		}
+		if r, ok := resolvedByColumn(t, resolved)["time"]; !ok || !r.InResponse || r.InRequest {
+			t.Fatalf("time should be a read-only column, got %+v ok=%v", r, ok)
+		}
+	})
+	t.Run("Valuer/Scanner", func(t *testing.T) {
+		type m struct {
+			ID    uint  `gorm:"primaryKey"`
+			Price money `gombit:"read"`
+		}
+		resolved, err := resourcepolicy.ResolvedFromModel(&m{})
+		if err != nil {
+			t.Fatalf("a Valuer/Scanner struct is a scalar column, must not be rejected as a container: %v", err)
+		}
+		if r, ok := resolvedByColumn(t, resolved)["price"]; !ok || !r.InResponse {
+			t.Fatalf("price should be a read column; got %+v ok=%v", r, ok)
 		}
 	})
 }
