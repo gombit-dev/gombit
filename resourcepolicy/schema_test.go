@@ -99,6 +99,84 @@ func TestResolvedFromModelRejectsContradiction(t *testing.T) {
 	}
 }
 
+// Association target types for the relationship tests.
+type relAuthor struct {
+	ID uint `gorm:"primaryKey"`
+}
+type relProfile struct {
+	ID     uint `gorm:"primaryKey"`
+	BookID uint
+}
+type relChapter struct {
+	ID     uint `gorm:"primaryKey"`
+	BookID uint
+}
+type relTag struct {
+	ID uint `gorm:"primaryKey"`
+}
+
+// A gombit policy on a relationship field must fail closed (it lives outside
+// DBNames, so it would otherwise be silently discarded). Untagged associations
+// are fine and only their FK column (if any) is emitted.
+func TestRelationshipPolicyFailsClosed(t *testing.T) {
+	t.Run("belongs-to", func(t *testing.T) {
+		type Book struct {
+			ID       uint `gorm:"primaryKey"`
+			AuthorID uint
+			Author   relAuthor `gombit:"read"`
+		}
+		if _, err := resourcepolicy.ResolvedFromModel(&Book{}); err == nil {
+			t.Fatal("tagged belongs-to must fail closed")
+		}
+	})
+	t.Run("has-one", func(t *testing.T) {
+		type Book struct {
+			ID      uint       `gorm:"primaryKey"`
+			Profile relProfile `gombit:"read"`
+		}
+		if _, err := resourcepolicy.ResolvedFromModel(&Book{}); err == nil {
+			t.Fatal("tagged has-one must fail closed")
+		}
+	})
+	t.Run("has-many", func(t *testing.T) {
+		type Book struct {
+			ID       uint         `gorm:"primaryKey"`
+			Chapters []relChapter `gombit:"read"`
+		}
+		if _, err := resourcepolicy.ResolvedFromModel(&Book{}); err == nil {
+			t.Fatal("tagged has-many must fail closed")
+		}
+	})
+	t.Run("many2many", func(t *testing.T) {
+		type Book struct {
+			ID   uint     `gorm:"primaryKey"`
+			Tags []relTag `gorm:"many2many:book_tags" gombit:"read"`
+		}
+		if _, err := resourcepolicy.ResolvedFromModel(&Book{}); err == nil {
+			t.Fatal("tagged many2many must fail closed")
+		}
+	})
+	t.Run("untagged association: FK column emitted, association not", func(t *testing.T) {
+		type Book struct {
+			ID       uint `gorm:"primaryKey"`
+			AuthorID uint
+			Author   relAuthor // untagged belongs-to
+		}
+		resolved, err := resourcepolicy.ResolvedFromModel(&Book{})
+		if err != nil {
+			t.Fatalf("untagged association should resolve: %v", err)
+		}
+		if _, ok := resolvedByColumn(t, resolved)["author_id"]; !ok {
+			t.Fatal("belongs-to FK column author_id should be emitted")
+		}
+		for _, r := range resolved {
+			if r.Column == "" {
+				t.Fatalf("no column-less field should be emitted, got %+v", r)
+			}
+		}
+	})
+}
+
 // Soft-delete is detected by the gorm.DeletedAt TYPE (via IndirectFieldType), not
 // the field name — a renamed column, value or pointer, is still hidden.
 func TestFactsFromSchemaSoftDeleteByType(t *testing.T) {
@@ -135,9 +213,9 @@ func TestFromSchemaCollapsesDuplicateColumn(t *testing.T) {
 		A  string `gorm:"column:x"`
 		B  string `gorm:"column:x"`
 	}
-	resolved, err := resourcepolicy.ResolveAll(resourcepolicy.FromSchema(parse(t, &m{})))
+	resolved, err := resourcepolicy.ResolvedFromModel(&m{})
 	if err != nil {
-		t.Fatalf("ResolveAll: %v", err)
+		t.Fatalf("ResolvedFromModel: %v", err)
 	}
 	xCount := 0
 	for _, c := range resourcepolicy.RequestColumns(resolved) {
@@ -159,9 +237,9 @@ func TestFromSchemaCarriesPolicyTags(t *testing.T) {
 		TenantID uint   `gorm:"not null" gombit:"read,server"`
 		Secret   string `gombit:"-"`
 	}
-	resolved, err := resourcepolicy.ResolveAll(resourcepolicy.FromSchema(parse(t, &m{})))
+	resolved, err := resourcepolicy.ResolvedFromModel(&m{})
 	if err != nil {
-		t.Fatalf("ResolveAll: %v", err)
+		t.Fatalf("ResolvedFromModel: %v", err)
 	}
 	byCol := resolvedByColumn(t, resolved)
 	if s := byCol["secret"]; s.InRequest || s.InResponse {

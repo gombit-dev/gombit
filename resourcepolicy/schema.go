@@ -3,6 +3,7 @@ package resourcepolicy
 import (
 	"fmt"
 	"reflect"
+	"sort"
 	"sync"
 
 	"gorm.io/gorm"
@@ -33,10 +34,31 @@ func FactsFromSchema(f *schema.Field) FieldFacts {
 // FromSchema maps a parsed GORM schema to resolver input over its EFFECTIVE
 // persisted columns — ordered sch.DBNames → sch.FieldsByDBName — so a
 // duplicate-column or shadowed field is included once, each carrying its own
-// `gombit` tag. Relationship/association fields have no column and so are not
-// persisted columns and not included (a belongs-to FK column is). Feed the result
-// to ResolveAll (or use ResolvedFromModel).
-func FromSchema(sch *schema.Schema) []Field {
+// `gombit` tag. A belongs-to FK column is a persisted column and is included; the
+// association object/slice fields (belongs-to/has-one/has-many/many2many) are
+// not columns and are NOT emitted.
+//
+// Selection and validation are separate: association fields live outside DBNames,
+// so a `gombit` policy on one would never reach Resolve. FromSchema therefore
+// VALIDATES every relationship field first (a relationship cannot carry API
+// policy — the same rule Resolve enforces) and fails closed on a tagged one,
+// rather than silently discarding the policy, before emitting the persisted set.
+func FromSchema(sch *schema.Schema) ([]Field, error) {
+	// Validate relationship fields (deterministic order for stable errors).
+	rels := make([]*schema.Field, 0, len(sch.Relationships.Relations))
+	for _, rel := range sch.Relationships.Relations {
+		if rel.Field != nil {
+			rels = append(rels, rel.Field)
+		}
+	}
+	sort.Slice(rels, func(i, j int) bool { return rels[i].Name < rels[j].Name })
+	for _, f := range rels {
+		if _, err := Resolve(FactsFromSchema(f), f.Tag.Get("gombit")); err != nil {
+			return nil, err
+		}
+	}
+
+	// Emit the effective persisted columns only.
 	out := make([]Field, 0, len(sch.DBNames))
 	for _, name := range sch.DBNames {
 		f := sch.FieldsByDBName[name]
@@ -45,17 +67,18 @@ func FromSchema(sch *schema.Schema) []Field {
 		}
 		out = append(out, Field{FieldFacts: FactsFromSchema(f), Tag: f.Tag.Get("gombit")})
 	}
-	return out
+	return out, nil
 }
 
 // FromModel parses a GORM model (a pointer to a value, e.g. &Book{}) and returns
-// the resolver input for its effective persisted columns (see FromSchema).
+// the resolver input for its effective persisted columns, after validating that
+// no relationship field carries a gombit policy (see FromSchema).
 func FromModel(model any) ([]Field, error) {
 	sch, err := schema.Parse(model, &sync.Map{}, schema.NamingStrategy{})
 	if err != nil {
 		return nil, fmt.Errorf("resourcepolicy: parse model schema: %w", err)
 	}
-	return FromSchema(sch), nil
+	return FromSchema(sch)
 }
 
 // ResolvedFromModel parses a model and resolves the API policy for each of its
