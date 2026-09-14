@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gombit-dev/gombit/resourcepolicy"
 	"gorm.io/driver/sqlite"
@@ -274,32 +275,57 @@ func TestSchemaDerivedPermissions(t *testing.T) {
 	wantErr(t, writeOnly, "read", "`->:false` column is not readable")
 }
 
-// The resolver's rejection of a NOT NULL, non-creatable, no-default column must
-// match runtime: GORM omits it from INSERT and the database rejects every create.
-func TestNonCreatableRequiredMatchesRuntime(t *testing.T) {
-	type widget struct {
-		ID   uint   `gorm:"primaryKey"`
-		Code string `gorm:"not null;<-:update"` // NOT NULL, not creatable, no default
-	}
-	sch, err := schema.Parse(&widget{}, &sync.Map{}, schema.NamingStrategy{})
+// assertUnsatisfiable proves resolver ⟺ runtime for a model whose named field
+// can never receive a valid create value: the resolver rejects it statically, and
+// a real GORM+SQLite create hits the NOT NULL constraint.
+func assertUnsatisfiable(t *testing.T, model any, fieldName string, createInstance any) {
+	t.Helper()
+	sch, err := schema.Parse(model, &sync.Map{}, schema.NamingStrategy{})
 	if err != nil {
 		t.Fatalf("schema.Parse: %v", err)
 	}
-	// Static: the resolver rejects this unsatisfiable model state.
-	if _, err := resourcepolicy.Resolve(factsOf(t, sch, "Code"), ""); err == nil {
-		t.Fatal("resolver must reject a NOT NULL non-creatable column with no default")
+	if _, err := resourcepolicy.Resolve(factsOf(t, sch, fieldName), ""); err == nil {
+		t.Fatalf("resolver must reject %s (no valid create value)", fieldName)
 	}
-	// Runtime: GORM + SQLite confirms the create is impossible.
 	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "t.db")), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&widget{}); err != nil {
+	if err := db.AutoMigrate(model); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	if err := db.Create(&widget{Code: "x"}).Error; err == nil {
-		t.Fatal("expected GORM create to fail the NOT NULL constraint for a non-creatable required column")
+	if err := db.Create(createInstance).Error; err == nil {
+		t.Fatalf("expected GORM create to fail the NOT NULL constraint for %s", fieldName)
 	}
+}
+
+// Columns that can never get a valid value on create must be rejected — and the
+// resolver's rejection must match what GORM+SQLite actually do. managed() must
+// not waive requiredness: an auto-time field GORM won't write, and a NOT NULL
+// soft-delete, both reach INSERT without a value.
+func TestUnsatisfiableRequiredColumnsMatchRuntime(t *testing.T) {
+	t.Run("not null, non-creatable (<-:update)", func(t *testing.T) {
+		type widget struct {
+			ID   uint   `gorm:"primaryKey"`
+			Code string `gorm:"not null;<-:update"`
+		}
+		assertUnsatisfiable(t, &widget{}, "Code", &widget{Code: "x"})
+	})
+	t.Run("not null auto-time GORM won't write", func(t *testing.T) {
+		type widget struct {
+			ID        uint      `gorm:"primaryKey"`
+			CreatedAt time.Time `gorm:"not null;autoCreateTime;<-:update"`
+		}
+		assertUnsatisfiable(t, &widget{}, "CreatedAt", &widget{})
+	})
+	t.Run("not null soft-delete", func(t *testing.T) {
+		type widget struct {
+			ID        uint           `gorm:"primaryKey"`
+			Name      string         `gorm:"not null"`
+			DeletedAt gorm.DeletedAt `gorm:"not null"`
+		}
+		assertUnsatisfiable(t, &widget{}, "DeletedAt", &widget{Name: "x"})
+	})
 }
 
 // --- embedded-name collision: GORM flattens two fields to the same Go name ---
