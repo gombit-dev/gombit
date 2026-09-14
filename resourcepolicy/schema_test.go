@@ -204,6 +204,50 @@ func TestShadowedColumnPolicyFailsClosed(t *testing.T) {
 	}
 }
 
+// AuditFields is an embeddable container used by the embedded-policy tests.
+type AuditFields struct {
+	Note string
+}
+
+// A gombit policy on an embedded container is discarded by GORM's flattening
+// (it drops the container's non-gorm tags), so it must fail closed — named
+// (gorm:"embedded") or anonymous.
+func TestEmbeddedContainerPolicyFailsClosed(t *testing.T) {
+	t.Run("named gorm:embedded", func(t *testing.T) {
+		type m struct {
+			ID    uint        `gorm:"primaryKey"`
+			Audit AuditFields `gorm:"embedded" gombit:"read"`
+		}
+		if _, err := resourcepolicy.ResolvedFromModel(&m{}); err == nil {
+			t.Fatal("gombit policy on a named embedded container must fail closed")
+		}
+	})
+	t.Run("anonymous embed", func(t *testing.T) {
+		type m struct {
+			ID          uint `gorm:"primaryKey"`
+			AuditFields `gombit:"read"`
+		}
+		if _, err := resourcepolicy.ResolvedFromModel(&m{}); err == nil {
+			t.Fatal("gombit policy on an anonymous embedded container must fail closed")
+		}
+	})
+}
+
+// An untagged embedded container is fine: its child columns are emitted normally.
+func TestUntaggedEmbeddedContainerIsFine(t *testing.T) {
+	type m struct {
+		ID    uint        `gorm:"primaryKey"`
+		Audit AuditFields `gorm:"embedded"`
+	}
+	resolved, err := resourcepolicy.ResolvedFromModel(&m{})
+	if err != nil {
+		t.Fatalf("untagged embedded container should resolve: %v", err)
+	}
+	if _, ok := resolvedByColumn(t, resolved)["note"]; !ok {
+		t.Fatal("embedded child column note should be emitted")
+	}
+}
+
 // Soft-delete is detected by the gorm.DeletedAt TYPE (via IndirectFieldType), not
 // the field name — a renamed column, value or pointer, is still hidden.
 func TestFactsFromSchemaSoftDeleteByType(t *testing.T) {

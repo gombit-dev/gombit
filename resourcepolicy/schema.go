@@ -46,6 +46,14 @@ func FactsFromSchema(f *schema.Field) FieldFacts {
 // same-named embedded fields. A policy that cannot be honored fails closed. Then
 // it emits the effective persisted columns.
 func FromSchema(sch *schema.Schema) ([]Field, error) {
+	// GORM flattens embedded-container fields into their children and discards the
+	// container's non-gorm tags, so a gombit policy on the container never reaches
+	// sch.Fields. Detect it from the Go struct (sch.ModelType) and fail closed —
+	// container policy is unsupported (which child would it apply to?).
+	if err := validateNoEmbeddedContainerPolicy(sch.ModelType); err != nil {
+		return nil, err
+	}
+
 	for _, f := range sch.Fields {
 		if f.Tag.Get("gombit") == "" {
 			continue // no explicit policy
@@ -73,6 +81,59 @@ func FromSchema(sch *schema.Schema) ([]Field, error) {
 		out = append(out, Field{FieldFacts: FactsFromSchema(f), Tag: f.Tag.Get("gombit")})
 	}
 	return out, nil
+}
+
+// validateNoEmbeddedContainerPolicy walks the model struct and rejects a gombit
+// tag placed on an embedded-container field (an anonymous embed like gorm.Model,
+// or a named field tagged gorm:"embedded"/embeddedPrefix). GORM flattens such a
+// container into its children without carrying its non-gorm tags, so the policy
+// cannot be honored; it must fail closed rather than vanish. It recurses through
+// containers so a nested container's policy is caught too.
+func validateNoEmbeddedContainerPolicy(t reflect.Type) error {
+	for t != nil && t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	if t == nil || t.Kind() != reflect.Struct {
+		return nil
+	}
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if f.PkgPath != "" && !f.Anonymous { // unexported, non-embedded
+			continue
+		}
+		if !isEmbeddedContainer(f) {
+			continue
+		}
+		if f.Tag.Get("gombit") != "" {
+			return fmt.Errorf("resourcepolicy: field %q is an embedded container; a gombit policy on the container is not supported (GORM flattens it) — tag the individual fields instead", f.Name)
+		}
+		if err := validateNoEmbeddedContainerPolicy(f.Type); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// isEmbeddedContainer reports whether f is a struct GORM flattens: an anonymous
+// embed, or a named field tagged gorm:"embedded"/embeddedPrefix. A scalar struct
+// column (time.Time, gorm.DeletedAt, a Valuer/Scanner type) is neither.
+func isEmbeddedContainer(f reflect.StructField) bool {
+	ft := f.Type
+	for ft.Kind() == reflect.Ptr {
+		ft = ft.Elem()
+	}
+	if ft.Kind() != reflect.Struct {
+		return false
+	}
+	if f.Anonymous {
+		return true
+	}
+	settings := schema.ParseTagSetting(f.Tag.Get("gorm"), ";")
+	if _, ok := settings["EMBEDDED"]; ok {
+		return true
+	}
+	_, ok := settings["EMBEDDEDPREFIX"]
+	return ok
 }
 
 // FromModel parses a GORM model (a pointer to a value, e.g. &Book{}) and returns
