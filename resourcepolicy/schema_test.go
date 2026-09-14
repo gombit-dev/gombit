@@ -177,6 +177,33 @@ func TestRelationshipPolicyFailsClosed(t *testing.T) {
 	})
 }
 
+// A gombit policy on a GORM-ignored field (`gorm:"-"`) is in neither DBNames nor
+// Relations, but it IS in sch.Fields — so it must be validated and fail closed,
+// not silently ignored.
+func TestIgnoredFieldPolicyFailsClosed(t *testing.T) {
+	type m struct {
+		ID     uint   `gorm:"primaryKey"`
+		Hidden string `gorm:"-" gombit:"write"`
+	}
+	if _, err := resourcepolicy.ResolvedFromModel(&m{}); err == nil {
+		t.Fatal(`a gombit policy on a gorm:"-" ignored field must fail closed`)
+	}
+}
+
+// A gombit policy on a field shadowed by another field mapped to the same column
+// can never be honored (only the effective field is emitted) — fail closed rather
+// than drop it.
+func TestShadowedColumnPolicyFailsClosed(t *testing.T) {
+	type m struct {
+		ID uint   `gorm:"primaryKey"`
+		A  string `gorm:"column:x"`
+		B  string `gorm:"column:x" gombit:"read"`
+	}
+	if _, err := resourcepolicy.ResolvedFromModel(&m{}); err == nil {
+		t.Fatal("a gombit policy on a shadowed duplicate-column field must fail closed")
+	}
+}
+
 // Soft-delete is detected by the gorm.DeletedAt TYPE (via IndirectFieldType), not
 // the field name — a renamed column, value or pointer, is still hidden.
 func TestFactsFromSchemaSoftDeleteByType(t *testing.T) {

@@ -3,7 +3,6 @@ package resourcepolicy
 import (
 	"fmt"
 	"reflect"
-	"sort"
 	"sync"
 
 	"gorm.io/gorm"
@@ -38,24 +37,30 @@ func FactsFromSchema(f *schema.Field) FieldFacts {
 // association object/slice fields (belongs-to/has-one/has-many/many2many) are
 // not columns and are NOT emitted.
 //
-// Selection and validation are separate: association fields live outside DBNames,
-// so a `gombit` policy on one would never reach Resolve. FromSchema therefore
-// VALIDATES every relationship field first (a relationship cannot carry API
-// policy — the same rule Resolve enforces) and fails closed on a tagged one,
-// rather than silently discarding the policy, before emitting the persisted set.
+// Selection and validation are separate. An explicit `gombit` policy on a field
+// that is not an effective persisted column (a relationship, a `gorm:"-"` ignored
+// field, or a column shadowed by another field) would otherwise be silently
+// dropped — it lives outside the emitted set. FromSchema therefore validates
+// EVERY policy-bearing field from GORM's authoritative per-field set (sch.Fields),
+// keyed by field identity, not a name-keyed secondary index that collapses
+// same-named embedded fields. A policy that cannot be honored fails closed. Then
+// it emits the effective persisted columns.
 func FromSchema(sch *schema.Schema) ([]Field, error) {
-	// Validate relationship fields (deterministic order for stable errors).
-	rels := make([]*schema.Field, 0, len(sch.Relationships.Relations))
-	for _, rel := range sch.Relationships.Relations {
-		if rel.Field != nil {
-			rels = append(rels, rel.Field)
+	for _, f := range sch.Fields {
+		if f.Tag.Get("gombit") == "" {
+			continue // no explicit policy
 		}
-	}
-	sort.Slice(rels, func(i, j int) bool { return rels[i].Name < rels[j].Name })
-	for _, f := range rels {
+		if f.DBName != "" && sch.FieldsByDBName[f.DBName] == f {
+			continue // the effective persisted column: validated when its Field is resolved
+		}
+		// A tagged field that is not the effective persisted column. If it has no
+		// column (relationship or `gorm:"-"`), Resolve rejects the tag with the
+		// right message; if it has a column but is shadowed, its policy can never
+		// be honored, so reject it explicitly.
 		if _, err := Resolve(FactsFromSchema(f), f.Tag.Get("gombit")); err != nil {
 			return nil, err
 		}
+		return nil, fmt.Errorf("resourcepolicy: field %q carries a gombit policy but is shadowed by another field mapped to column %q; only the effective field may define policy", f.Name, f.DBName)
 	}
 
 	// Emit the effective persisted columns only.
