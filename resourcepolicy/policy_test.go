@@ -31,7 +31,6 @@ func factsOf(t *testing.T, sch *schema.Schema, goName string) resourcepolicy.Fie
 		SoftDelete:    f.Name == "DeletedAt",
 		NotNull:       f.NotNull,
 		HasDefault:    f.HasDefaultValue,
-		DefaultValue:  f.DefaultValue,
 		Creatable:     f.Creatable,
 		Readable:      f.Readable,
 	}
@@ -124,25 +123,17 @@ func TestRequiredHiddenIsRejected(t *testing.T) {
 	wantErr(t, f, "-", "required column hidden with no source")
 }
 
-func TestRequiredWithDefaultIsAllowed(t *testing.T) {
+// A `default:` clause defers to the database: this layer does not require an API
+// source for it (and does not evaluate whether the default's SQL is non-null —
+// the DB enforces NOT NULL and fails loudly if it isn't).
+func TestRequiredWithDefaultDefersToDatabase(t *testing.T) {
 	f := content("Status", "status")
 	f.NotNull = true
 	f.HasDefault = true
-	f.DefaultValue = "'pending'"
 	r := resolve(t, f, "read")
 	if r.CreateSource != resourcepolicy.CreateSourceNone || !r.InResponse {
 		t.Fatalf("got %+v, want response-only, no create source (DB default)", r)
 	}
-}
-
-// A `default:null` clause does not satisfy NOT NULL, so it must not exempt a
-// required, non-source column from the create-value check.
-func TestRequiredWithNullDefaultIsRejected(t *testing.T) {
-	f := content("Status", "status")
-	f.NotNull = true
-	f.HasDefault = true
-	f.DefaultValue = "null"
-	wantErr(t, f, "read", "a NULL default does not satisfy NOT NULL")
 }
 
 // --- primary keys: manual vs auto-generated ---
@@ -337,13 +328,6 @@ func TestUnsatisfiableRequiredColumnsMatchRuntime(t *testing.T) {
 			DeletedAt gorm.DeletedAt `gorm:"not null"`
 		}
 		assertUnsatisfiable(t, &widget{}, "DeletedAt", &widget{Name: "x"})
-	})
-	t.Run("not null with a NULL default, non-creatable", func(t *testing.T) {
-		type widget struct {
-			ID   uint   `gorm:"primaryKey"`
-			Code string `gorm:"not null;default:null;<-:update"`
-		}
-		assertUnsatisfiable(t, &widget{}, "Code", &widget{Code: "x"})
 	})
 }
 
