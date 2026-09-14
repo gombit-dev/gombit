@@ -1,13 +1,39 @@
 package resourcepolicy_test
 
 import (
+	"path/filepath"
 	"reflect"
 	"sync"
 	"testing"
 
 	"github.com/gombit-dev/gombit/resourcepolicy"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 	"gorm.io/gorm/schema"
 )
+
+// factsOf maps a parsed GORM field to FieldFacts — the mapping slice 2 will use
+// to feed real schema facts into the resolver.
+func factsOf(t *testing.T, sch *schema.Schema, goName string) resourcepolicy.FieldFacts {
+	t.Helper()
+	f := sch.FieldsByName[goName]
+	if f == nil {
+		t.Fatalf("field %q not found in schema", goName)
+	}
+	return resourcepolicy.FieldFacts{
+		GoName:        f.Name,
+		Column:        f.DBName,
+		DBBacked:      f.DBName != "",
+		PrimaryKey:    f.PrimaryKey,
+		AutoIncrement: f.AutoIncrement,
+		AutoTime:      f.AutoCreateTime != 0 || f.AutoUpdateTime != 0,
+		SoftDelete:    f.Name == "DeletedAt",
+		NotNull:       f.NotNull,
+		HasDefault:    f.HasDefaultValue,
+		Creatable:     f.Creatable,
+		Readable:      f.Readable,
+	}
+}
 
 // content is a normal (creatable, readable, nullable, non-key) content column
 // unless the caller sets more.
@@ -165,12 +191,11 @@ func TestRelationshipHasNoPolicy(t *testing.T) {
 
 // --- GORM create/read permissions (`->`, `<-`) must be honored ---
 
-// A non-creatable column (`gorm:"->"`) defaults to response-only: GORM omits it
-// from INSERT, so an empty tag must not resolve it to a create source.
-func TestNonCreatableDefaultsResponseOnly(t *testing.T) {
+// A non-creatable, nullable column (`gorm:"->"`) defaults to response-only: GORM
+// omits it from INSERT, and being nullable it needs no create value.
+func TestNonCreatableNullableDefaultsResponseOnly(t *testing.T) {
 	f := content("Computed", "computed")
-	f.Creatable = false
-	f.NotNull = true // NOT NULL, but GORM/DB fills it — no create-source demand on us
+	f.Creatable = false // read-only/computed; nullable, so create need not supply it
 	r := resolve(t, f, "")
 	if r.InRequest || r.CreateSource != resourcepolicy.CreateSourceNone {
 		t.Fatalf("got %+v, want no request/create source (non-creatable)", r)
@@ -180,6 +205,16 @@ func TestNonCreatableDefaultsResponseOnly(t *testing.T) {
 	}
 	wantErr(t, f, "write", "cannot write a non-creatable column")
 	wantErr(t, f, "server", "server value would be discarded on a non-creatable column")
+}
+
+// A NOT NULL non-creatable column with no default/auto-generation is
+// unsatisfiable: GORM omits it from INSERT and nothing supplies it, so every
+// create hits the NOT NULL constraint. Reject the model statically.
+func TestNonCreatableRequiredIsRejected(t *testing.T) {
+	f := content("Code", "code")
+	f.Creatable = false
+	f.NotNull = true // no default, not auto-generated
+	wantErr(t, f, "", "non-creatable required column with no default is unsatisfiable")
 }
 
 // A non-readable column (`gorm:"->:false;<-:create"`) defaults to request-only:
@@ -210,25 +245,7 @@ func TestSchemaDerivedPermissions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("schema.Parse: %v", err)
 	}
-	facts := func(goName string) resourcepolicy.FieldFacts {
-		f := sch.FieldsByName[goName]
-		if f == nil {
-			t.Fatalf("field %q not found in schema", goName)
-		}
-		return resourcepolicy.FieldFacts{
-			GoName:        f.Name,
-			Column:        f.DBName,
-			DBBacked:      f.DBName != "",
-			PrimaryKey:    f.PrimaryKey,
-			AutoIncrement: f.AutoIncrement,
-			AutoTime:      f.AutoCreateTime != 0 || f.AutoUpdateTime != 0,
-			SoftDelete:    f.Name == "DeletedAt",
-			NotNull:       f.NotNull,
-			HasDefault:    f.HasDefaultValue,
-			Creatable:     f.Creatable,
-			Readable:      f.Readable,
-		}
-	}
+	facts := func(goName string) resourcepolicy.FieldFacts { return factsOf(t, sch, goName) }
 
 	computed := facts("Computed")
 	if computed.Creatable || !computed.Readable {
@@ -255,6 +272,34 @@ func TestSchemaDerivedPermissions(t *testing.T) {
 		t.Fatalf("WriteOnly resolved = %+v, want request-only", r)
 	}
 	wantErr(t, writeOnly, "read", "`->:false` column is not readable")
+}
+
+// The resolver's rejection of a NOT NULL, non-creatable, no-default column must
+// match runtime: GORM omits it from INSERT and the database rejects every create.
+func TestNonCreatableRequiredMatchesRuntime(t *testing.T) {
+	type widget struct {
+		ID   uint   `gorm:"primaryKey"`
+		Code string `gorm:"not null;<-:update"` // NOT NULL, not creatable, no default
+	}
+	sch, err := schema.Parse(&widget{}, &sync.Map{}, schema.NamingStrategy{})
+	if err != nil {
+		t.Fatalf("schema.Parse: %v", err)
+	}
+	// Static: the resolver rejects this unsatisfiable model state.
+	if _, err := resourcepolicy.Resolve(factsOf(t, sch, "Code"), ""); err == nil {
+		t.Fatal("resolver must reject a NOT NULL non-creatable column with no default")
+	}
+	// Runtime: GORM + SQLite confirms the create is impossible.
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "t.db")), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(&widget{}); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if err := db.Create(&widget{Code: "x"}).Error; err == nil {
+		t.Fatal("expected GORM create to fail the NOT NULL constraint for a non-creatable required column")
+	}
 }
 
 // --- embedded-name collision: GORM flattens two fields to the same Go name ---
