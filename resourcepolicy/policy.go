@@ -21,8 +21,8 @@
 // `gombit` tag defaults by kind: a regular content column and a manual primary
 // key are read+write from the request; an auto-increment key and auto timestamps
 // are read-only; soft-delete is hidden. Resolve rejects a required column (NOT
-// NULL / primary key, no DB default, not auto-generated) that ends up with no
-// create source — the silent zero-fill #352 exists to eliminate.
+// NULL / primary key, no usable non-null DB default, not DB-generated) that ends
+// up with no create source — the silent zero-fill #352 exists to eliminate.
 //
 // Persistence facts are supplied by the caller (slice 2 reads them from the
 // model); this slice is pure and side-effect free.
@@ -43,11 +43,12 @@ type FieldFacts struct {
 	Column        string // DB column name, e.g. "title"; empty for a relationship/association field
 	DBBacked      bool   // maps to a database column (false for has_many/many2many/belongs-to object fields)
 	PrimaryKey    bool
-	AutoIncrement bool // database-generated key (serial/identity)
-	AutoTime      bool // auto create/update timestamp (autoCreateTime/autoUpdateTime)
-	SoftDelete    bool // gorm.DeletedAt
-	NotNull       bool // NOT NULL constraint
-	HasDefault    bool // has a database default value
+	AutoIncrement bool   // database-generated key (serial/identity)
+	AutoTime      bool   // auto create/update timestamp (autoCreateTime/autoUpdateTime)
+	SoftDelete    bool   // gorm.DeletedAt
+	NotNull       bool   // NOT NULL constraint
+	HasDefault    bool   // a `default:` clause is present
+	DefaultValue  string // the default expression (GORM's Field.DefaultValue); "null" is a known non-satisfying default for a NOT NULL column
 
 	// Creatable / Readable mirror GORM's per-field permissions (schema.Field
 	// Creatable/Readable, driven by the `->`/`<-` permission tags), independent of
@@ -78,17 +79,26 @@ func (f FieldFacts) dbSuppliesCreateValue() bool {
 	return f.AutoIncrement || (f.AutoTime && f.Creatable)
 }
 
+// hasUsableDefault reports whether the column's DB default actually supplies a
+// value that satisfies NOT NULL. A `default:` clause exists (HasDefault) is not
+// enough — an explicit `default:null` provides no value, so GORM still emits
+// DEFAULT VALUES and the constraint fails. Any non-"null" default is treated as
+// usable (including an empty-string default).
+func (f FieldFacts) hasUsableDefault() bool {
+	return f.HasDefault && !strings.EqualFold(strings.TrimSpace(f.DefaultValue), "null")
+}
+
 // requiresCreateValue reports whether the column must be given a value at create
 // time or the INSERT is impossible / silently zero-filled: NOT NULL (a primary
-// key is implicitly so), no database default, and not supplied by the DB/GORM.
-// It is INDEPENDENT of Creatable — Creatable governs whether GORM writes a value
-// the API provides, not whether one exists. A required column that neither the DB
-// supplies nor the API can source is unsatisfiable; Resolve reports how.
+// key is implicitly so), no usable database default, and not supplied by the
+// DB/GORM. It is INDEPENDENT of Creatable — Creatable governs whether GORM writes
+// a value the API provides, not whether one exists. A required column that neither
+// the DB supplies nor the API can source is unsatisfiable; Resolve reports how.
 func (f FieldFacts) requiresCreateValue() bool {
 	if !f.DBBacked {
 		return false
 	}
-	return (f.NotNull || f.PrimaryKey) && !f.HasDefault && !f.dbSuppliesCreateValue()
+	return (f.NotNull || f.PrimaryKey) && !f.hasUsableDefault() && !f.dbSuppliesCreateValue()
 }
 
 // CreateSource is where a persisted field's create value comes from.
