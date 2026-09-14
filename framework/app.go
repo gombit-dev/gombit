@@ -717,7 +717,10 @@ func configureTrustedProxies(engine *gin.Engine, proxies []string) error {
 func runtimeMiddlewareStack(cfg config.Config, metrics *httpMetrics, csrfExemptPaths, rawBodyPaths []string) []namedMiddleware {
 	stack := []namedMiddleware{
 		{name: "recovery", handler: gin.Recovery()},
-		{name: "request_context", handler: requestContextMiddleware()},
+		// request_context also imposes the per-handler timeout (issue #268): the
+		// two IDs and the deadline ride one Request.WithContext, and the former
+		// standalone request_timeout layer is gone.
+		{name: "request_context", handler: requestContextMiddleware(cfg.HTTP.RequestTimeout)},
 		{name: "metrics", handler: metricsMiddleware(metrics)},
 		{
 			name:    "security_headers",
@@ -736,7 +739,6 @@ func runtimeMiddlewareStack(cfg config.Config, metrics *httpMetrics, csrfExemptP
 		csrfExempt := append(append([]string{}, csrfExemptPaths...), rawBodyPaths...)
 		stack = append(stack, namedMiddleware{name: "csrf", handler: auth.CSRFMiddleware(cfg, csrfExempt...)})
 	}
-	stack = append(stack, namedMiddleware{name: "request_timeout", handler: requestTimeoutMiddleware(cfg.HTTP.RequestTimeout)})
 	return stack
 }
 

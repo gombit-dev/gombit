@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"math/rand/v2"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -13,72 +14,108 @@ import (
 // RequestIDHeader is the HTTP header carrying a stable per-request ID.
 const RequestIDHeader = "X-Request-Id"
 
-const requestIDGinKey = "request_id"
+// requestIDLen is the canonical UUIDv4 textual length (8-4-4-4-12).
+const requestIDLen = 36
 
 // requestMeta carries the per-request correlation IDs propagated through the
-// request context by requestContextMiddleware. Keeping both under one context
-// key costs a single context.WithValue and a single Request.WithContext per
-// request; the previously separate request_id and trace_context middlewares
-// each ran their own pair.
+// request context by requestContextMiddleware, plus the [2]string backing array
+// the response correlation headers alias.
+//
+// One heap allocation (this struct) now holds everything the layer needs: both
+// IDs, the two response-header slices (sub-slices of hdr), and — because a
+// *requestMeta boxes into an interface word for free — the context value. That
+// collapses what used to be two boxed Gin Keys entries, two http.Header.Set
+// slices, and a separately boxed value into a single allocation (issue #268).
+//
+// hdr's slices are handed to the response header map read-only, exactly like
+// the shared security-header values: header[RequestIDHeader] = hdr[0:1:1] and
+// header[TraceIDHeader] = hdr[1:2:2] each have len == cap == 1. Cap 1 is
+// load-bearing — http.Header.Add must reallocate rather than write the appended
+// value into the adjacent array slot, which would otherwise corrupt the *other*
+// correlation header (both alias the same array). Set/Del replace the map
+// entry. Callers MUST NOT write through these slices in place.
+// TestRequestCorrelationHeaderSharedArrayContract locks this, mirroring
+// TestSecurityHeaderSharedValueContract.
 type requestMeta struct {
 	requestID string
 	traceID   string
+	hdr       [2]string
 }
 
 type requestMetaKey struct{}
 
 // requestContextMiddleware assigns the request and trace correlation IDs
 // (honoring an inbound X-Request-Id and W3C traceparent when present), exposes
-// them on the response headers and the Gin context, and propagates both
-// through the request context under a single key. It replaces the previously
-// separate request_id and trace_context middlewares: splitting them cost an
-// extra context.WithValue and Request.WithContext allocation per request for
-// no behavioral difference (the two IDs are independent and both must land
-// before the metrics/handler stages either way).
-func requestContextMiddleware() gin.HandlerFunc {
+// them on the response headers and through the request context under a single
+// key, and — when timeout > 0 — imposes the per-handler deadline in the same
+// pass.
+//
+// Folding the former request_timeout layer in here means one
+// Request.WithContext for the context value and the deadline together, not two
+// (issue #268). The middleware no longer writes to Gin's Keys map either:
+// GetRequestID/GetTraceID read the same context value the *FromContext
+// accessors do, so the two c.Set calls (a lazily-allocated map plus two boxed
+// strings) are gone.
+func requestContextMiddleware(timeout time.Duration) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		requestID := strings.TrimSpace(c.GetHeader(RequestIDHeader))
-		if requestID == "" {
-			requestID = newRequestID()
+		traceID := traceIDFromTraceparent(c.GetHeader(TraceparentHeader))
+
+		meta := &requestMeta{}
+		if requestID == "" && traceID == "" {
+			// Common path: both IDs are generated. Encode them into one stack
+			// buffer and take a single string(); two sub-slices of that string
+			// become the IDs, so the pair costs one allocation instead of two.
+			var buf [requestIDLen + traceIDLen]byte
+			encodeRequestID(buf[:requestIDLen])
+			encodeTraceID(buf[requestIDLen:])
+			s := string(buf[:])
+			requestID = s[:requestIDLen]
+			traceID = s[requestIDLen:]
+		} else {
+			// Rare path: an inbound X-Request-Id or traceparent is honored and the
+			// missing side (if any) generated on its own. Two strings here is fine
+			// — it is not the hot path.
+			if requestID == "" {
+				requestID = newRequestID()
+			}
+			if traceID == "" {
+				traceID = newTraceID()
+			}
 		}
 		if requestID == "" {
 			requestID = "unknown"
-		}
-
-		traceID := traceIDFromTraceparent(c.GetHeader(TraceparentHeader))
-		if traceID == "" {
-			traceID = newTraceID()
 		}
 		if traceID == "" {
 			traceID = "unknown"
 		}
 
-		c.Set(requestIDGinKey, requestID)
-		c.Set(traceIDGinKey, traceID)
-		c.Header(RequestIDHeader, requestID)
-		c.Header(TraceIDHeader, traceID)
-		c.Request = c.Request.WithContext(
-			context.WithValue(c.Request.Context(), requestMetaKey{}, requestMeta{
-				requestID: requestID,
-				traceID:   traceID,
-			}),
-		)
+		meta.requestID = requestID
+		meta.traceID = traceID
+		meta.hdr[0] = requestID
+		meta.hdr[1] = traceID
+
+		header := c.Writer.Header()
+		header[RequestIDHeader] = meta.hdr[0:1:1]
+		header[TraceIDHeader] = meta.hdr[1:2:2]
+
+		ctx := context.WithValue(c.Request.Context(), requestMetaKey{}, meta)
+		ctx, cancel := applyTimeout(ctx, timeout)
+		defer cancel()
+		c.Request = c.Request.WithContext(ctx)
 
 		c.Next()
 	}
 }
 
-// GetRequestID returns the request ID stored in the Gin context.
+// GetRequestID returns the request ID for the current request. It reads the
+// value requestContextMiddleware propagated through the request context, so it
+// agrees with GetRequestIDFromContext by construction.
 func GetRequestID(c *gin.Context) string {
-	if c == nil {
+	if c == nil || c.Request == nil {
 		return ""
 	}
-	value, ok := c.Get(requestIDGinKey)
-	if !ok {
-		return ""
-	}
-	requestID, _ := value.(string)
-	return requestID
+	return GetRequestIDFromContext(c.Request.Context())
 }
 
 // GetRequestIDFromContext reads the request ID from a request context.
@@ -86,7 +123,10 @@ func GetRequestIDFromContext(ctx context.Context) string {
 	if ctx == nil {
 		return ""
 	}
-	meta, _ := ctx.Value(requestMetaKey{}).(requestMeta)
+	meta, _ := ctx.Value(requestMetaKey{}).(*requestMeta)
+	if meta == nil {
+		return ""
+	}
 	return meta.requestID
 }
 
@@ -109,21 +149,28 @@ func randomBytes16() [16]byte {
 	return b
 }
 
-func newRequestID() string {
+// encodeRequestID writes a UUIDv4 textual form into dst, which must be
+// requestIDLen bytes long. It writes in place so the caller can share one
+// backing buffer with encodeTraceID (issue #268).
+func encodeRequestID(dst []byte) {
 	b := randomBytes16()
 
 	b[6] = (b[6] & 0x0f) | 0x40
 	b[8] = (b[8] & 0x3f) | 0x80
 
-	buf := make([]byte, 36)
-	hex.Encode(buf[0:8], b[0:4])
-	buf[8] = '-'
-	hex.Encode(buf[9:13], b[4:6])
-	buf[13] = '-'
-	hex.Encode(buf[14:18], b[6:8])
-	buf[18] = '-'
-	hex.Encode(buf[19:23], b[8:10])
-	buf[23] = '-'
-	hex.Encode(buf[24:36], b[10:16])
-	return string(buf)
+	hex.Encode(dst[0:8], b[0:4])
+	dst[8] = '-'
+	hex.Encode(dst[9:13], b[4:6])
+	dst[13] = '-'
+	hex.Encode(dst[14:18], b[6:8])
+	dst[18] = '-'
+	hex.Encode(dst[19:23], b[8:10])
+	dst[23] = '-'
+	hex.Encode(dst[24:36], b[10:16])
+}
+
+func newRequestID() string {
+	var buf [requestIDLen]byte
+	encodeRequestID(buf[:])
+	return string(buf[:])
 }

@@ -32,7 +32,6 @@ func TestDefaultRuntimeMiddlewareOrder(t *testing.T) {
 		"metrics",
 		"security_headers",
 		"xss",
-		"request_timeout",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("runtime middleware order = %v, want %v", got, want)
@@ -215,7 +214,10 @@ func TestSecurityHeadersLayerAllocatesNothing(t *testing.T) {
 
 	build := func(withSecurity bool) http.Handler {
 		router := gin.New()
-		router.Use(requestContextMiddleware())
+		// Timeout 0: request_context is present in both arms so its cost cancels
+		// out of the with/without-security delta; a no-op timeout keeps the row
+		// deterministic (no context.WithTimeout timer in the measurement).
+		router.Use(requestContextMiddleware(0))
 		router.Use(metricsMiddleware(newHTTPMetrics()))
 		if withSecurity {
 			router.Use(securityHeadersMiddleware(true, false)) // includeHSTS: production; docs disabled
@@ -897,6 +899,43 @@ func TestDefaultRouterLeavesPasswordFieldUnsanitized(t *testing.T) {
 	}
 	if body["note"] != "hi" {
 		t.Fatalf("note = %q, want %q", body["note"], "hi")
+	}
+}
+
+// TestRequestCorrelationHeaderSharedArrayContract is the correlation-header
+// mirror of TestSecurityHeaderSharedValueContract (issue #268).
+// requestContextMiddleware aliases one per-request [2]string array for both
+// correlation headers: X-Request-Id -> hdr[0:1:1], X-Trace-Id -> hdr[1:2:2].
+// Cap 1 is load-bearing. If the X-Request-Id slice had spare capacity,
+// http.Header.Add would append the new value into hdr[1] — the *trace* header's
+// backing slot — instead of reallocating, silently corrupting X-Trace-Id. This
+// proves Add stays request-local and does not write through into the sibling
+// header.
+func TestRequestCorrelationHeaderSharedArrayContract(t *testing.T) {
+	app := newTestApp(t)
+	app.Router().GET("/add-request-id", func(c *gin.Context) {
+		c.Writer.Header().Add(RequestIDHeader, "extra")
+		c.Status(http.StatusOK)
+	})
+
+	rec := httptest.NewRecorder()
+	app.Router().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/add-request-id", nil))
+
+	reqIDs := rec.Header().Values(RequestIDHeader)
+	if len(reqIDs) != 2 || reqIDs[1] != "extra" {
+		t.Fatalf("%s values = %v, want [<id> extra]", RequestIDHeader, reqIDs)
+	}
+	if !uuidV4Pattern.MatchString(reqIDs[0]) {
+		t.Fatalf("%s[0] = %q, want a UUIDv4 request ID", RequestIDHeader, reqIDs[0])
+	}
+	// Load-bearing: appending to X-Request-Id must not have written "extra"
+	// through into the trace header's shared backing slot.
+	traceID := rec.Header().Get(TraceIDHeader)
+	if traceID == "extra" {
+		t.Fatalf("Add on %s wrote through into the %s backing array", RequestIDHeader, TraceIDHeader)
+	}
+	if !traceIDPattern.MatchString(traceID) {
+		t.Fatalf("%s = %q, want an intact 32-hex trace ID", TraceIDHeader, traceID)
 	}
 }
 

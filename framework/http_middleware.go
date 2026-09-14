@@ -23,50 +23,40 @@ const TraceparentHeader = "Traceparent"
 // TraceIDHeader exposes the active trace ID for logs, diagnostics, and tests.
 const TraceIDHeader = "X-Trace-Id"
 
-const traceIDGinKey = "trace_id"
+// traceIDLen is the W3C trace-id textual length: 16 bytes as lowercase hex.
+const traceIDLen = 32
 
 var traceparentPattern = regexp.MustCompile(`^[0-9a-f]{2}-([0-9a-f]{32})-[0-9a-f]{16}-[0-9a-f]{2}$`)
 
-func requestTimeoutMiddleware(timeout time.Duration) gin.HandlerFunc {
+// applyTimeout returns ctx bounded by a timeout deadline, along with a cancel to
+// run when the request completes. It is a no-op in two cases, returning ctx
+// unchanged and a cancel that is safe to call:
+//
+//   - a non-positive timeout — the per-handler deadline is disabled;
+//   - a context that already carries a deadline at or before the one we would
+//     impose — wrapping it again only allocates a second timer and timerCtx that
+//     can never fire first, since context honors the earliest deadline (#242).
+//
+// requestContextMiddleware calls this so the per-handler deadline shares that
+// middleware's single Request.WithContext instead of a second layer's (#268).
+func applyTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
 	if timeout <= 0 {
-		return func(c *gin.Context) {
-			c.Next()
-		}
+		return ctx, func() {}
 	}
-
-	return func(c *gin.Context) {
-		ctx := c.Request.Context()
-		// If the request already carries a deadline at or before the one we
-		// would impose, wrapping it again only allocates a second timer and a
-		// shallow Request copy that can never take effect first — context
-		// always honors the earliest deadline, which is the existing one. Skip
-		// the wrap in that case (issue #242). When no deadline (or a later one)
-		// is present — the common case — the context.WithTimeout timer is
-		// intrinsic to propagating cancellation to handlers and DB calls, so it
-		// stays.
-		if deadline, ok := ctx.Deadline(); ok && !deadline.After(time.Now().Add(timeout)) {
-			c.Next()
-			return
-		}
-
-		ctx, cancel := context.WithTimeout(ctx, timeout)
-		defer cancel()
-		c.Request = c.Request.WithContext(ctx)
-		c.Next()
+	if deadline, ok := ctx.Deadline(); ok && !deadline.After(time.Now().Add(timeout)) {
+		return ctx, func() {}
 	}
+	return context.WithTimeout(ctx, timeout)
 }
 
-// GetTraceID returns the trace ID stored in the Gin context.
+// GetTraceID returns the trace ID for the current request. It reads the value
+// requestContextMiddleware propagated through the request context, so it agrees
+// with GetTraceIDFromContext by construction.
 func GetTraceID(c *gin.Context) string {
-	if c == nil {
+	if c == nil || c.Request == nil {
 		return ""
 	}
-	value, ok := c.Get(traceIDGinKey)
-	if !ok {
-		return ""
-	}
-	traceID, _ := value.(string)
-	return traceID
+	return GetTraceIDFromContext(c.Request.Context())
 }
 
 // GetTraceIDFromContext reads the trace ID from a request context.
@@ -74,7 +64,10 @@ func GetTraceIDFromContext(ctx context.Context) string {
 	if ctx == nil {
 		return ""
 	}
-	meta, _ := ctx.Value(requestMetaKey{}).(requestMeta)
+	meta, _ := ctx.Value(requestMetaKey{}).(*requestMeta)
+	if meta == nil {
+		return ""
+	}
 	return meta.traceID
 }
 
@@ -355,7 +348,13 @@ func (m *httpMetrics) render() string {
 }
 
 func traceIDFromTraceparent(value string) string {
-	match := traceparentPattern.FindStringSubmatch(strings.ToLower(strings.TrimSpace(value)))
+	// The empty header is the common case (no inbound trace context), so skip
+	// the regexp entirely for it (issue #268, CPU only).
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	match := traceparentPattern.FindStringSubmatch(strings.ToLower(value))
 	if len(match) != 2 {
 		return ""
 	}
@@ -365,12 +364,19 @@ func traceIDFromTraceparent(value string) string {
 	return match[1]
 }
 
-func newTraceID() string {
+// encodeTraceID writes a W3C trace-id textual form into dst, which must be
+// traceIDLen bytes long. It writes in place so the caller can share one backing
+// buffer with encodeRequestID (issue #268).
+func encodeTraceID(dst []byte) {
 	b := randomBytes16()
 	if b == [16]byte{} {
 		b[15] = 1
 	}
-	buf := make([]byte, 32)
-	hex.Encode(buf, b[:])
-	return string(buf)
+	hex.Encode(dst, b[:])
+}
+
+func newTraceID() string {
+	var buf [traceIDLen]byte
+	encodeTraceID(buf[:])
+	return string(buf[:])
 }
