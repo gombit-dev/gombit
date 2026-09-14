@@ -2,14 +2,17 @@ package resourcepolicy_test
 
 import (
 	"reflect"
+	"sync"
 	"testing"
 
 	"github.com/gombit-dev/gombit/resourcepolicy"
+	"gorm.io/gorm/schema"
 )
 
-// content is a nullable, non-key content column unless the caller sets more.
+// content is a normal (creatable, readable, nullable, non-key) content column
+// unless the caller sets more.
 func content(name, col string) resourcepolicy.FieldFacts {
-	return resourcepolicy.FieldFacts{GoName: name, Column: col, DBBacked: true}
+	return resourcepolicy.FieldFacts{GoName: name, Column: col, DBBacked: true, Creatable: true, Readable: true}
 }
 
 func resolve(t *testing.T, f resourcepolicy.FieldFacts, tag string) resourcepolicy.Resolved {
@@ -81,22 +84,18 @@ func TestUnknownToken(t *testing.T) { wantErr(t, content("X", "x"), "reed", "unk
 
 // --- required-column create-source validation (#352) ---
 
-// A required (NOT NULL, no default) column made read-only has no create source
-// and would be silently zero-filled — rejected.
 func TestRequiredReadOnlyIsRejected(t *testing.T) {
 	f := content("Title", "title")
 	f.NotNull = true
 	wantErr(t, f, "read", "required column with no create source")
 }
 
-// A required column hidden with no server source is likewise rejected.
 func TestRequiredHiddenIsRejected(t *testing.T) {
 	f := content("Title", "title")
 	f.NotNull = true
 	wantErr(t, f, "-", "required column hidden with no source")
 }
 
-// A NOT NULL column WITH a database default may be omitted from create.
 func TestRequiredWithDefaultIsAllowed(t *testing.T) {
 	f := content("Status", "status")
 	f.NotNull = true
@@ -109,27 +108,27 @@ func TestRequiredWithDefaultIsAllowed(t *testing.T) {
 
 // --- primary keys: manual vs auto-generated ---
 
-// A manual (non-auto) primary key needs a create value; the client may supply it.
+func manualKey() resourcepolicy.FieldFacts {
+	return resourcepolicy.FieldFacts{GoName: "ID", Column: "id", DBBacked: true, PrimaryKey: true, NotNull: true, Creatable: true, Readable: true}
+}
+
 func TestManualKeyDefaultsWritable(t *testing.T) {
-	pk := resourcepolicy.FieldFacts{GoName: "ID", Column: "id", DBBacked: true, PrimaryKey: true, NotNull: true}
-	r := resolve(t, pk, "")
+	r := resolve(t, manualKey(), "")
 	if !r.InRequest || r.CreateSource != resourcepolicy.CreateSourceRequest {
 		t.Fatalf("got %+v, want writable manual key sourced from request", r)
 	}
 }
 
-// A manual key may instead be set server-side (e.g. a UUID minted in a hook).
 func TestManualKeyServerManaged(t *testing.T) {
-	pk := resourcepolicy.FieldFacts{GoName: "ID", Column: "id", DBBacked: true, PrimaryKey: true, NotNull: true}
-	r := resolve(t, pk, "read,server")
+	r := resolve(t, manualKey(), "read,server")
 	if r.InRequest || r.CreateSource != resourcepolicy.CreateSourceServer {
 		t.Fatalf("got %+v, want server-sourced manual key", r)
 	}
 }
 
-// An auto-increment key is DB-generated: read-only, never writable.
 func TestAutoIncrementKeyIsReadOnly(t *testing.T) {
-	pk := resourcepolicy.FieldFacts{GoName: "ID", Column: "id", DBBacked: true, PrimaryKey: true, AutoIncrement: true, NotNull: true}
+	pk := manualKey()
+	pk.AutoIncrement = true
 	r := resolve(t, pk, "")
 	if r.InRequest || !r.InResponse {
 		t.Fatalf("got %+v, want response-only auto key", r)
@@ -138,14 +137,18 @@ func TestAutoIncrementKeyIsReadOnly(t *testing.T) {
 }
 
 func TestTimestampsDefaultReadOnly(t *testing.T) {
-	r := resolve(t, resourcepolicy.FieldFacts{GoName: "CreatedAt", Column: "created_at", DBBacked: true, AutoTime: true}, "")
+	f := content("CreatedAt", "created_at")
+	f.AutoTime = true
+	r := resolve(t, f, "")
 	if r.InRequest || !r.InResponse {
 		t.Fatalf("got %+v, want response-only timestamp", r)
 	}
 }
 
 func TestSoftDeleteDefaultsHidden(t *testing.T) {
-	r := resolve(t, resourcepolicy.FieldFacts{GoName: "DeletedAt", Column: "deleted_at", DBBacked: true, SoftDelete: true}, "")
+	f := content("DeletedAt", "deleted_at")
+	f.SoftDelete = true
+	r := resolve(t, f, "")
 	if r.InRequest || r.InResponse {
 		t.Fatalf("got %+v, want hidden soft-delete", r)
 	}
@@ -160,14 +163,106 @@ func TestRelationshipHasNoPolicy(t *testing.T) {
 	wantErr(t, rel, "read", "tagging a relationship with API policy")
 }
 
+// --- GORM create/read permissions (`->`, `<-`) must be honored ---
+
+// A non-creatable column (`gorm:"->"`) defaults to response-only: GORM omits it
+// from INSERT, so an empty tag must not resolve it to a create source.
+func TestNonCreatableDefaultsResponseOnly(t *testing.T) {
+	f := content("Computed", "computed")
+	f.Creatable = false
+	f.NotNull = true // NOT NULL, but GORM/DB fills it — no create-source demand on us
+	r := resolve(t, f, "")
+	if r.InRequest || r.CreateSource != resourcepolicy.CreateSourceNone {
+		t.Fatalf("got %+v, want no request/create source (non-creatable)", r)
+	}
+	if !r.InResponse {
+		t.Fatalf("got %+v, want response (readable)", r)
+	}
+	wantErr(t, f, "write", "cannot write a non-creatable column")
+	wantErr(t, f, "server", "server value would be discarded on a non-creatable column")
+}
+
+// A non-readable column (`gorm:"->:false;<-:create"`) defaults to request-only:
+// GORM skips it on SELECT, so it cannot be surfaced in the response.
+func TestNonReadableDefaultsRequestOnly(t *testing.T) {
+	f := content("Secret", "secret")
+	f.Readable = false
+	r := resolve(t, f, "")
+	if r.InResponse {
+		t.Fatalf("got %+v, want not in response (non-readable)", r)
+	}
+	if !r.InRequest || r.CreateSource != resourcepolicy.CreateSourceRequest {
+		t.Fatalf("got %+v, want request-only", r)
+	}
+	wantErr(t, f, "read", "cannot read a non-readable column")
+}
+
+// Built from a real gorm/schema.Parse so the facts this resolver consumes match
+// GORM's actual permission semantics (what slices 2–4 will feed in).
+func TestSchemaDerivedPermissions(t *testing.T) {
+	type permModel struct {
+		ID        uint   `gorm:"primaryKey"`
+		Computed  string `gorm:"->"`                 // read-only: not creatable
+		UpdOnly   string `gorm:"<-:update"`          // writable on update only: not creatable
+		WriteOnly string `gorm:"->:false;<-:create"` // create-only: not readable
+	}
+	sch, err := schema.Parse(&permModel{}, &sync.Map{}, schema.NamingStrategy{})
+	if err != nil {
+		t.Fatalf("schema.Parse: %v", err)
+	}
+	facts := func(goName string) resourcepolicy.FieldFacts {
+		f := sch.FieldsByName[goName]
+		if f == nil {
+			t.Fatalf("field %q not found in schema", goName)
+		}
+		return resourcepolicy.FieldFacts{
+			GoName:        f.Name,
+			Column:        f.DBName,
+			DBBacked:      f.DBName != "",
+			PrimaryKey:    f.PrimaryKey,
+			AutoIncrement: f.AutoIncrement,
+			AutoTime:      f.AutoCreateTime != 0 || f.AutoUpdateTime != 0,
+			SoftDelete:    f.Name == "DeletedAt",
+			NotNull:       f.NotNull,
+			HasDefault:    f.HasDefaultValue,
+			Creatable:     f.Creatable,
+			Readable:      f.Readable,
+		}
+	}
+
+	computed := facts("Computed")
+	if computed.Creatable || !computed.Readable {
+		t.Fatalf("Computed facts = %+v, want read-only (Creatable=false, Readable=true)", computed)
+	}
+	if r := resolve(t, computed, ""); r.InRequest || !r.InResponse {
+		t.Fatalf("Computed resolved = %+v, want response-only", r)
+	}
+	wantErr(t, computed, "write", "`->` column is not creatable")
+
+	upd := facts("UpdOnly")
+	if upd.Creatable {
+		t.Fatalf("UpdOnly facts = %+v, want Creatable=false", upd)
+	}
+	if r := resolve(t, upd, ""); r.InRequest {
+		t.Fatalf("UpdOnly resolved = %+v, want not in create request", r)
+	}
+
+	writeOnly := facts("WriteOnly")
+	if !writeOnly.Creatable || writeOnly.Readable {
+		t.Fatalf("WriteOnly facts = %+v, want create-only (Creatable=true, Readable=false)", writeOnly)
+	}
+	if r := resolve(t, writeOnly, ""); r.InResponse || !r.InRequest {
+		t.Fatalf("WriteOnly resolved = %+v, want request-only", r)
+	}
+	wantErr(t, writeOnly, "read", "`->:false` column is not readable")
+}
+
 // --- embedded-name collision: GORM flattens two fields to the same Go name ---
 
-// ResolveAll must key policy by each field's own facts+tag, not by Go name, so
-// two flattened "Code" fields with different columns and tags stay distinct.
 func TestResolveAllPreservesEmbeddedNameCollision(t *testing.T) {
 	fields := []resourcepolicy.Field{
-		{FieldFacts: resourcepolicy.FieldFacts{GoName: "Code", Column: "public_code", DBBacked: true}, Tag: "read"},
-		{FieldFacts: resourcepolicy.FieldFacts{GoName: "Code", Column: "secret_code", DBBacked: true}, Tag: "-"},
+		{FieldFacts: content("Code", "public_code"), Tag: "read"},
+		{FieldFacts: content("Code", "secret_code"), Tag: "-"},
 	}
 	resolved, err := resourcepolicy.ResolveAll(fields)
 	if err != nil {
@@ -182,10 +277,14 @@ func TestResolveAllPreservesEmbeddedNameCollision(t *testing.T) {
 }
 
 func TestResolveAllColumnSurfaces(t *testing.T) {
+	autoID := manualKey()
+	autoID.AutoIncrement = true
+	tenant := content("TenantID", "tenant_id")
+	tenant.NotNull = true
 	fields := []resourcepolicy.Field{
-		{FieldFacts: resourcepolicy.FieldFacts{GoName: "ID", Column: "id", DBBacked: true, PrimaryKey: true, AutoIncrement: true, NotNull: true}},
+		{FieldFacts: autoID},
 		{FieldFacts: content("Title", "title"), Tag: ""},
-		{FieldFacts: func() resourcepolicy.FieldFacts { f := content("TenantID", "tenant_id"); f.NotNull = true; return f }(), Tag: "read,server"},
+		{FieldFacts: tenant, Tag: "read,server"},
 		{FieldFacts: content("Internal", "internal"), Tag: "-"},
 		{FieldFacts: resourcepolicy.FieldFacts{GoName: "Category", DBBacked: false}},
 	}
