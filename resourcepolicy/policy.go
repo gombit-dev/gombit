@@ -41,9 +41,12 @@ import (
 // facts are kept independent (not collapsed) because create-source correctness
 // depends on their exact combination.
 type FieldFacts struct {
-	GoName        string // Go field name, e.g. "Title"
-	Column        string // DB column name, e.g. "title"; empty for a relationship/association field
-	DBBacked      bool   // maps to a database column (false for has_many/many2many/belongs-to object fields)
+	GoName string // Go field name, e.g. "Title"
+	// Column is the DB column name (e.g. "title"). It is EMPTY exactly for a
+	// relationship/association field (has_many / many2many / belongs-to object) —
+	// there is no separate "DBBacked" flag to disagree with it; db-backedness is
+	// derived from Column != "" so an included field always has a column.
+	Column        string
 	PrimaryKey    bool
 	AutoIncrement bool // database-generated key (serial/identity)
 	AutoTime      bool // auto create/update timestamp (autoCreateTime/autoUpdateTime)
@@ -60,6 +63,13 @@ type FieldFacts struct {
 	// `gorm:"->:false;<-:create"` column is Readable=false.
 	Creatable bool
 	Readable  bool
+}
+
+// dbBacked reports whether the field maps to a database column. It is derived
+// from Column (empty ⇒ a relationship/association field), so a DB-only fact can
+// never contradict a "not a column" flag.
+func (f FieldFacts) dbBacked() bool {
+	return f.Column != ""
 }
 
 // managed reports whether GORM owns the column's lifecycle, so it is never
@@ -98,7 +108,7 @@ func (f FieldFacts) dbSuppliesCreateValue() bool {
 // that neither the DB supplies nor the API can source is unsatisfiable; Resolve
 // reports how.
 func (f FieldFacts) requiresCreateValue() bool {
-	if !f.DBBacked {
+	if !f.dbBacked() {
 		return false
 	}
 	return (f.NotNull || f.PrimaryKey) && !f.HasDefault && !f.dbSuppliesCreateValue()
@@ -174,7 +184,11 @@ func parsePolicyTag(tag string) (policyTag, error) {
 		case "-":
 			p.hidden = true
 		case "":
-			// tolerate a stray empty token from a trailing comma
+			// Reject every empty token — leading, interior, trailing, or a lone ",".
+			// A stray comma must not silently become an alternate spelling (e.g.
+			// `gombit:","` resolving to fully hidden); a typo in the authoritative
+			// grammar should fail loudly, not quietly change the API contract.
+			return p, fmt.Errorf("resourcepolicy: empty token in gombit tag %q (no leading, interior, trailing, or lone commas)", tag)
 		default:
 			return p, fmt.Errorf("resourcepolicy: unknown gombit policy token %q (want read, write, server, or -)", strings.TrimSpace(tok))
 		}
@@ -206,7 +220,7 @@ func Resolve(facts FieldFacts, gombitTag string) (Resolved, error) {
 	// A relationship/association field is not a scalar wire column; it is not part
 	// of the derived request/response DTOs (belongs-to exposes its FK column, which
 	// is itself DB-backed and handled as a normal field).
-	if !facts.DBBacked {
+	if !facts.dbBacked() {
 		if tag.present {
 			return Resolved{}, fmt.Errorf("resourcepolicy: field %q is not a database column (relationship); it cannot carry a gombit API policy", facts.GoName)
 		}

@@ -24,7 +24,6 @@ func factsOf(t *testing.T, sch *schema.Schema, goName string) resourcepolicy.Fie
 	return resourcepolicy.FieldFacts{
 		GoName:        f.Name,
 		Column:        f.DBName,
-		DBBacked:      f.DBName != "",
 		PrimaryKey:    f.PrimaryKey,
 		AutoIncrement: f.AutoIncrement,
 		AutoTime:      f.AutoCreateTime != 0 || f.AutoUpdateTime != 0,
@@ -39,7 +38,7 @@ func factsOf(t *testing.T, sch *schema.Schema, goName string) resourcepolicy.Fie
 // content is a normal (creatable, readable, nullable, non-key) content column
 // unless the caller sets more.
 func content(name, col string) resourcepolicy.FieldFacts {
-	return resourcepolicy.FieldFacts{GoName: name, Column: col, DBBacked: true, Creatable: true, Readable: true}
+	return resourcepolicy.FieldFacts{GoName: name, Column: col, Creatable: true, Readable: true}
 }
 
 func resolve(t *testing.T, f resourcepolicy.FieldFacts, tag string) resourcepolicy.Resolved {
@@ -109,6 +108,37 @@ func TestHiddenReadConflict(t *testing.T) { wantErr(t, content("X", "x"), "read,
 
 func TestUnknownToken(t *testing.T) { wantErr(t, content("X", "x"), "reed", "unknown token") }
 
+// A stray comma must not silently become an alternate spelling: every empty token
+// (leading, interior, trailing, or a lone ",") is rejected.
+func TestEmptyTokensRejected(t *testing.T) {
+	for _, tag := range []string{",", "read,,write", ",read", "read,", " , "} {
+		wantErr(t, content("Note", "note"), tag, "empty token in gombit tag "+tag)
+	}
+}
+
+// A field with no column is a relationship; it can never be resolved as an
+// included (request/response) field, so the column helpers never silently drop an
+// included field. This closes the DBBacked-vs-Column malformed state.
+func TestNoColumnCannotBeIncluded(t *testing.T) {
+	r := resolve(t, resourcepolicy.FieldFacts{GoName: "Ghost", Creatable: true, Readable: true}, "")
+	if r.InRequest || r.InResponse || r.CreateSource != resourcepolicy.CreateSourceNone {
+		t.Fatalf("got %+v, want a column-less field excluded from the API", r)
+	}
+	// And every included field the resolver produces has a column.
+	resolved, err := resourcepolicy.ResolveAll([]resourcepolicy.Field{
+		{FieldFacts: content("Title", "title")},
+		{FieldFacts: resourcepolicy.FieldFacts{GoName: "Ghost", Creatable: true, Readable: true}},
+	})
+	if err != nil {
+		t.Fatalf("ResolveAll: %v", err)
+	}
+	for _, rf := range resolved {
+		if (rf.InRequest || rf.InResponse) && rf.Column == "" {
+			t.Fatalf("included field %q has no column", rf.GoName)
+		}
+	}
+}
+
 // --- required-column create-source validation (#352) ---
 
 func TestRequiredReadOnlyIsRejected(t *testing.T) {
@@ -139,7 +169,7 @@ func TestRequiredWithDefaultDefersToDatabase(t *testing.T) {
 // --- primary keys: manual vs auto-generated ---
 
 func manualKey() resourcepolicy.FieldFacts {
-	return resourcepolicy.FieldFacts{GoName: "ID", Column: "id", DBBacked: true, PrimaryKey: true, NotNull: true, Creatable: true, Readable: true}
+	return resourcepolicy.FieldFacts{GoName: "ID", Column: "id", PrimaryKey: true, NotNull: true, Creatable: true, Readable: true}
 }
 
 func TestManualKeyDefaultsWritable(t *testing.T) {
@@ -185,7 +215,7 @@ func TestSoftDeleteDefaultsHidden(t *testing.T) {
 }
 
 func TestRelationshipHasNoPolicy(t *testing.T) {
-	rel := resourcepolicy.FieldFacts{GoName: "Category", DBBacked: false}
+	rel := resourcepolicy.FieldFacts{GoName: "Category"}
 	r := resolve(t, rel, "")
 	if r.InRequest || r.InResponse {
 		t.Fatalf("got %+v, want relationship excluded from DTOs", r)
@@ -360,7 +390,7 @@ func TestResolveAllColumnSurfaces(t *testing.T) {
 		{FieldFacts: content("Title", "title"), Tag: ""},
 		{FieldFacts: tenant, Tag: "read,server"},
 		{FieldFacts: content("Internal", "internal"), Tag: "-"},
-		{FieldFacts: resourcepolicy.FieldFacts{GoName: "Category", DBBacked: false}},
+		{FieldFacts: resourcepolicy.FieldFacts{GoName: "Category"}},
 	}
 	resolved, err := resourcepolicy.ResolveAll(fields)
 	if err != nil {
