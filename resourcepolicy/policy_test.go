@@ -39,11 +39,14 @@ func factsOf(f *schema.Field) resourcepolicy.FieldFacts {
 
 // canonicalFields maps a schema to resolver input the way slice 2 should: over
 // GORM's effective persisted columns (ordered sch.DBNames → sch.FieldsByDBName),
-// so a duplicate-column or shadowed field is resolved once, not twice.
+// so a duplicate-column or shadowed field is resolved once, not twice — and it
+// carries each selected field's own `gombit` tag through to the resolver (the
+// policy must not vanish between selection and resolution).
 func canonicalFields(sch *schema.Schema) []resourcepolicy.Field {
 	out := make([]resourcepolicy.Field, 0, len(sch.DBNames))
 	for _, name := range sch.DBNames {
-		out = append(out, resourcepolicy.Field{FieldFacts: factsOf(sch.FieldsByDBName[name])})
+		f := sch.FieldsByDBName[name]
+		out = append(out, resourcepolicy.Field{FieldFacts: factsOf(f), Tag: f.Tag.Get("gombit")})
 	}
 	return out
 }
@@ -331,6 +334,39 @@ func TestCanonicalFieldsCollapseDuplicateColumn(t *testing.T) {
 	}
 	if xCount != 1 {
 		t.Fatalf("column x resolved %d times, want 1 (effective-field enumeration)", xCount)
+	}
+}
+
+// The adapter must carry each field's gombit tag through to the resolver:
+// distinct policies (hidden, server-managed) must survive canonicalFields, not
+// collapse to kind defaults.
+func TestCanonicalFieldsCarryPolicyTags(t *testing.T) {
+	type m struct {
+		ID       uint   `gorm:"primaryKey"`
+		Title    string // untagged content → read+write
+		TenantID uint   `gorm:"not null" gombit:"read,server"`
+		Secret   string `gombit:"-"`
+	}
+	sch, err := schema.Parse(&m{}, &sync.Map{}, schema.NamingStrategy{})
+	if err != nil {
+		t.Fatalf("schema.Parse: %v", err)
+	}
+	resolved, err := resourcepolicy.ResolveAll(canonicalFields(sch))
+	if err != nil {
+		t.Fatalf("ResolveAll: %v", err)
+	}
+	byCol := map[string]resourcepolicy.Resolved{}
+	for _, r := range resolved {
+		byCol[r.Column] = r
+	}
+	if s := byCol["secret"]; s.InRequest || s.InResponse {
+		t.Fatalf(`gombit:"-" must survive the adapter; got %+v`, s)
+	}
+	if tn := byCol["tenant_id"]; tn.InRequest || !tn.InResponse || tn.CreateSource != resourcepolicy.CreateSourceServer {
+		t.Fatalf(`gombit:"read,server" must survive the adapter; got %+v`, tn)
+	}
+	if ti := byCol["title"]; !ti.InRequest || !ti.InResponse {
+		t.Fatalf("untagged Title should be read+write; got %+v", ti)
 	}
 }
 
