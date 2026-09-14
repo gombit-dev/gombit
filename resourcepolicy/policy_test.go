@@ -13,26 +13,37 @@ import (
 	"gorm.io/gorm/schema"
 )
 
-// factsOf maps a parsed GORM field to FieldFacts — the mapping slice 2 will use
-// to feed real schema facts into the resolver.
-func factsOf(t *testing.T, sch *schema.Schema, goName string) resourcepolicy.FieldFacts {
-	t.Helper()
-	f := sch.FieldsByName[goName]
-	if f == nil {
-		t.Fatalf("field %q not found in schema", goName)
-	}
+// factsOf maps a parsed GORM *schema.Field to FieldFacts. It is a lossless,
+// name-independent projection — soft-delete is detected by the gorm.DeletedAt
+// TYPE (how GORM attaches its query/delete clauses), not by the Go field name, so
+// a `RemovedAt gorm.DeletedAt` field is handled correctly. Slice 2 can iterate
+// sch.Fields and reuse this mapping as-is.
+func factsOf(f *schema.Field) resourcepolicy.FieldFacts {
 	return resourcepolicy.FieldFacts{
 		GoName:        f.Name,
 		Column:        f.DBName,
 		PrimaryKey:    f.PrimaryKey,
 		AutoIncrement: f.AutoIncrement,
 		AutoTime:      f.AutoCreateTime != 0 || f.AutoUpdateTime != 0,
-		SoftDelete:    f.Name == "DeletedAt",
+		SoftDelete:    f.FieldType == reflect.TypeOf(gorm.DeletedAt{}),
 		NotNull:       f.NotNull,
 		HasDefault:    f.HasDefaultValue,
 		Creatable:     f.Creatable,
 		Readable:      f.Readable,
 	}
+}
+
+// field selects a parsed field by Go name for a test model (whose names are
+// unique). The mapping itself, factsOf, never keys by name.
+func field(t *testing.T, sch *schema.Schema, goName string) *schema.Field {
+	t.Helper()
+	for _, f := range sch.Fields {
+		if f.Name == goName {
+			return f
+		}
+	}
+	t.Fatalf("field %q not found in schema", goName)
+	return nil
 }
 
 // content is a normal (creatable, readable, nullable, non-key) content column
@@ -97,6 +108,32 @@ func TestReadOnlyNullableIsAllowed(t *testing.T) {
 	r := resolve(t, content("Slug", "slug"), "read") // nullable, so no create source needed
 	if r.InRequest || !r.InResponse || r.CreateSource != resourcepolicy.CreateSourceNone {
 		t.Fatalf("got %+v, want response-only", r)
+	}
+}
+
+// read/write/server are independent directions. `write` alone (a password) is
+// request-only, NOT in the response — an `InResponse = tag.read || tag.write`
+// implementation would fail this.
+func TestWriteOnlyTag(t *testing.T) {
+	r := resolve(t, content("Password", "password"), "write")
+	if !r.InRequest || r.InResponse {
+		t.Fatalf("got %+v, want request-only (write-only field)", r)
+	}
+	if r.CreateSource != resourcepolicy.CreateSourceRequest {
+		t.Fatalf("create source = %s, want request", r.CreateSource)
+	}
+}
+
+// Bare `server` (hook-set, not returned) is neither in the request nor response.
+func TestBareServerTag(t *testing.T) {
+	f := content("AuditToken", "audit_token")
+	f.NotNull = true
+	r := resolve(t, f, "server")
+	if r.InRequest || r.InResponse {
+		t.Fatalf("got %+v, want not in request or response", r)
+	}
+	if r.CreateSource != resourcepolicy.CreateSourceServer {
+		t.Fatalf("create source = %s, want server", r.CreateSource)
 	}
 }
 
@@ -214,6 +251,26 @@ func TestSoftDeleteDefaultsHidden(t *testing.T) {
 	}
 }
 
+// Soft-delete is detected by the gorm.DeletedAt TYPE, not the field name, so a
+// renamed soft-delete column is still hidden (not defaulted onto the request).
+func TestSoftDeleteDetectedByType(t *testing.T) {
+	type m struct {
+		ID        uint `gorm:"primaryKey"`
+		RemovedAt gorm.DeletedAt
+	}
+	sch, err := schema.Parse(&m{}, &sync.Map{}, schema.NamingStrategy{})
+	if err != nil {
+		t.Fatalf("schema.Parse: %v", err)
+	}
+	f := factsOf(field(t, sch, "RemovedAt"))
+	if !f.SoftDelete {
+		t.Fatalf("RemovedAt gorm.DeletedAt should map to SoftDelete=true, got %+v", f)
+	}
+	if r := resolve(t, f, ""); r.InRequest {
+		t.Fatalf("renamed soft-delete column must not default onto the create request, got %+v", r)
+	}
+}
+
 func TestRelationshipHasNoPolicy(t *testing.T) {
 	rel := resourcepolicy.FieldFacts{GoName: "Category"}
 	r := resolve(t, rel, "")
@@ -279,7 +336,7 @@ func TestSchemaDerivedPermissions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("schema.Parse: %v", err)
 	}
-	facts := func(goName string) resourcepolicy.FieldFacts { return factsOf(t, sch, goName) }
+	facts := func(goName string) resourcepolicy.FieldFacts { return factsOf(field(t, sch, goName)) }
 
 	computed := facts("Computed")
 	if computed.Creatable || !computed.Readable {
@@ -317,7 +374,7 @@ func assertUnsatisfiable(t *testing.T, model any, fieldName string, createInstan
 	if err != nil {
 		t.Fatalf("schema.Parse: %v", err)
 	}
-	if _, err := resourcepolicy.Resolve(factsOf(t, sch, fieldName), ""); err == nil {
+	if _, err := resourcepolicy.Resolve(factsOf(field(t, sch, fieldName)), ""); err == nil {
 		t.Fatalf("resolver must reject %s (no valid create value)", fieldName)
 	}
 	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "t.db")), &gorm.Config{})
