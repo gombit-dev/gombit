@@ -90,7 +90,7 @@ func FromSchema(sch *schema.Schema) ([]Field, error) {
 // cannot be honored; it must fail closed rather than vanish. It recurses through
 // containers so a nested container's policy is caught too.
 func validateNoEmbeddedContainerPolicy(t reflect.Type) error {
-	for t != nil && t.Kind() == reflect.Ptr {
+	for t != nil && t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 	if t == nil || t.Kind() != reflect.Struct {
@@ -119,7 +119,7 @@ func validateNoEmbeddedContainerPolicy(t reflect.Type) error {
 // column (time.Time, gorm.DeletedAt, a Valuer/Scanner type) is neither.
 func isEmbeddedContainer(f reflect.StructField) bool {
 	ft := f.Type
-	for ft.Kind() == reflect.Ptr {
+	for ft.Kind() == reflect.Pointer {
 		ft = ft.Elem()
 	}
 	if ft.Kind() != reflect.Struct {
