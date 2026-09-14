@@ -13,11 +13,15 @@ import (
 	"gorm.io/gorm/schema"
 )
 
-// factsOf maps a parsed GORM *schema.Field to FieldFacts. It is a lossless,
-// name-independent projection — soft-delete is detected by the gorm.DeletedAt
-// TYPE (how GORM attaches its query/delete clauses), not by the Go field name, so
-// a `RemovedAt gorm.DeletedAt` field is handled correctly. Slice 2 can iterate
-// sch.Fields and reuse this mapping as-is.
+// factsOf maps a parsed GORM *schema.Field to FieldFacts — a lossless,
+// name-independent projection. Soft-delete is detected by the gorm.DeletedAt TYPE
+// via IndirectFieldType (GORM dispatches its clauses on reflect.New of the
+// indirect type), so both `gorm.DeletedAt` and `*gorm.DeletedAt` are recognized.
+//
+// Slice 2 should enumerate GORM's EFFECTIVE persisted columns — iterate
+// sch.DBNames and take sch.FieldsByDBName[name] (see canonicalFields) — NOT raw
+// sch.Fields, which retains duplicate-column/shadowed fields GORM does not
+// persist. Relationships (no column) are handled separately via sch.Relationships.
 func factsOf(f *schema.Field) resourcepolicy.FieldFacts {
 	return resourcepolicy.FieldFacts{
 		GoName:        f.Name,
@@ -25,7 +29,7 @@ func factsOf(f *schema.Field) resourcepolicy.FieldFacts {
 		PrimaryKey:    f.PrimaryKey,
 		AutoIncrement: f.AutoIncrement,
 		AutoTime:      f.AutoCreateTime != 0 || f.AutoUpdateTime != 0,
-		SoftDelete:    f.FieldType == reflect.TypeOf(gorm.DeletedAt{}),
+		SoftDelete:    f.IndirectFieldType == reflect.TypeOf(gorm.DeletedAt{}),
 		NotNull:       f.NotNull,
 		HasDefault:    f.HasDefaultValue,
 		Creatable:     f.Creatable,
@@ -33,8 +37,19 @@ func factsOf(f *schema.Field) resourcepolicy.FieldFacts {
 	}
 }
 
-// field selects a parsed field by Go name for a test model (whose names are
-// unique). The mapping itself, factsOf, never keys by name.
+// canonicalFields maps a schema to resolver input the way slice 2 should: over
+// GORM's effective persisted columns (ordered sch.DBNames → sch.FieldsByDBName),
+// so a duplicate-column or shadowed field is resolved once, not twice.
+func canonicalFields(sch *schema.Schema) []resourcepolicy.Field {
+	out := make([]resourcepolicy.Field, 0, len(sch.DBNames))
+	for _, name := range sch.DBNames {
+		out = append(out, resourcepolicy.Field{FieldFacts: factsOf(sch.FieldsByDBName[name])})
+	}
+	return out
+}
+
+// field selects a parsed field by Go name for a collision-free test model. The
+// mapping (factsOf) never keys by name; enumeration uses canonicalFields.
 func field(t *testing.T, sch *schema.Schema, goName string) *schema.Field {
 	t.Helper()
 	for _, f := range sch.Fields {
@@ -268,6 +283,54 @@ func TestSoftDeleteDetectedByType(t *testing.T) {
 	}
 	if r := resolve(t, f, ""); r.InRequest {
 		t.Fatalf("renamed soft-delete column must not default onto the create request, got %+v", r)
+	}
+}
+
+// A pointer soft-delete field is dispatched by GORM via the indirect type, so it
+// must also be detected (FieldType is *gorm.DeletedAt; IndirectFieldType is not).
+func TestPointerSoftDeleteDetected(t *testing.T) {
+	type m struct {
+		ID        uint `gorm:"primaryKey"`
+		RemovedAt *gorm.DeletedAt
+	}
+	sch, err := schema.Parse(&m{}, &sync.Map{}, schema.NamingStrategy{})
+	if err != nil {
+		t.Fatalf("schema.Parse: %v", err)
+	}
+	f := factsOf(field(t, sch, "RemovedAt"))
+	if !f.SoftDelete {
+		t.Fatalf("*gorm.DeletedAt should map to SoftDelete=true, got %+v", f)
+	}
+	if r := resolve(t, f, ""); r.InRequest {
+		t.Fatalf("pointer soft-delete column must not default onto the create request, got %+v", r)
+	}
+}
+
+// Two Go fields mapped to the same column appear twice in sch.Fields but once in
+// GORM's effective set (DBNames/FieldsByDBName). canonicalFields must resolve the
+// column once — proving slice 2 should enumerate the effective set, not sch.Fields.
+func TestCanonicalFieldsCollapseDuplicateColumn(t *testing.T) {
+	type m struct {
+		ID uint   `gorm:"primaryKey"`
+		A  string `gorm:"column:x"`
+		B  string `gorm:"column:x"`
+	}
+	sch, err := schema.Parse(&m{}, &sync.Map{}, schema.NamingStrategy{})
+	if err != nil {
+		t.Fatalf("schema.Parse: %v", err)
+	}
+	resolved, err := resourcepolicy.ResolveAll(canonicalFields(sch))
+	if err != nil {
+		t.Fatalf("ResolveAll: %v", err)
+	}
+	xCount := 0
+	for _, c := range resourcepolicy.RequestColumns(resolved) {
+		if c == "x" {
+			xCount++
+		}
+	}
+	if xCount != 1 {
+		t.Fatalf("column x resolved %d times, want 1 (effective-field enumeration)", xCount)
 	}
 }
 
