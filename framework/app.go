@@ -32,6 +32,15 @@ import (
 
 const defaultShutdownTimeout = 10 * time.Second
 
+// defaultHTTPServerTimeout is the connection-level read/write/idle timeout the
+// http.Server falls back to when the per-handler request timeout is disabled
+// (HTTP.RequestTimeout <= 0, the default since issue #270 / PERF-12). The
+// per-handler context deadline is opt-in, but the connection-level safety net
+// against slow or stuck sockets is not — a disabled per-handler deadline must
+// not mean an unbounded ReadTimeout/WriteTimeout/IdleTimeout. When
+// RequestTimeout is set, it still drives all three, unchanged.
+const defaultHTTPServerTimeout = 60 * time.Second
+
 // Hook is an application lifecycle callback.
 type Hook func(context.Context) error
 
@@ -452,12 +461,21 @@ func RunContext(ctx context.Context, app *App) error {
 		return fmt.Errorf("framework: listen: %w", err)
 	}
 
+	// The per-handler context deadline (HTTP.RequestTimeout) is opt-in and off by
+	// default (issue #270), but the connection-level timeouts are a safety net
+	// that must stay on. When RequestTimeout is set it still drives all three;
+	// when it is disabled they fall back to defaultHTTPServerTimeout rather than 0
+	// (unbounded).
+	serverTimeout := app.Config().HTTP.RequestTimeout
+	if serverTimeout <= 0 {
+		serverTimeout = defaultHTTPServerTimeout
+	}
 	server := &http.Server{
 		Handler:           app.Router(),
 		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       app.Config().HTTP.RequestTimeout,
-		WriteTimeout:      app.Config().HTTP.RequestTimeout,
-		IdleTimeout:       app.Config().HTTP.RequestTimeout,
+		ReadTimeout:       serverTimeout,
+		WriteTimeout:      serverTimeout,
+		IdleTimeout:       serverTimeout,
 	}
 	app.setServer(server, listener.Addr().String())
 
@@ -739,6 +757,13 @@ func runtimeMiddlewareStack(cfg config.Config, metrics *httpMetrics, csrfExemptP
 		csrfExempt := append(append([]string{}, csrfExemptPaths...), rawBodyPaths...)
 		stack = append(stack, namedMiddleware{name: "csrf", handler: auth.CSRFMiddleware(cfg, csrfExempt...)})
 	}
+	// The per-handler timeout is opt-in (issue #270 / PERF-12): HTTP.RequestTimeout
+	// defaults to 0. There is no separate request_timeout layer to omit — #268
+	// folded the deadline into request_context, and applyTimeout is a true no-op
+	// when the timeout is <= 0 (no timerCtx, no timer), so a disabled deadline
+	// costs nothing on the request path. The http.Server read/write/idle timeouts
+	// remain the connection-level safety net (see RunContext);
+	// docs/adr/017-request-timeout-opt-in.md.
 	return stack
 }
 

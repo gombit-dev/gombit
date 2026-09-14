@@ -270,6 +270,21 @@ version.
 
 ### Changed
 
+- **The per-handler request timeout is now opt-in** (PERF-12,
+  [#270](https://github.com/gombit-dev/gombit/issues/270); ADR-017).
+  `HTTP.RequestTimeout` now defaults to `0`, which disables the cooperative
+  per-handler context deadline and omits its middleware layer from the stack
+  entirely (≈4 allocs/op saved on every request). **Breaking for apps that
+  relied on the implicit 60s default:** without setting
+  `GOMBIT_HTTP_REQUEST_TIMEOUT` a long-running DB query is no longer cancelled
+  and a slow handler keeps running after the connection's `WriteTimeout`. Set
+  `GOMBIT_HTTP_REQUEST_TIMEOUT` to any positive duration to restore it;
+  `gombit new` scaffolds `60s` explicitly, so new projects keep the deadline.
+  The `http.Server` `ReadTimeout`/`WriteTimeout`/`IdleTimeout` remain a
+  connection-level safety net regardless — when the per-handler deadline is
+  disabled they fall back to `60s` instead of becoming unbounded, so this is not
+  a DoS regression. (A value of `0` no longer zeroes the server timeouts.) See
+  [docs/adr/017-request-timeout-opt-in.md](docs/adr/017-request-timeout-opt-in.md).
 - **Security headers are now scoped by response kind** (PERF-9,
   [#267](https://github.com/gombit-dev/gombit/issues/267)). JSON/API responses
   get the strict, minimal policy `Content-Security-Policy: default-src 'none';

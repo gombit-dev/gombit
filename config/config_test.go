@@ -22,8 +22,8 @@ func TestDefault(t *testing.T) {
 	if got.HTTP.Addr != ":8080" {
 		t.Fatalf("HTTP.Addr = %q, want %q", got.HTTP.Addr, ":8080")
 	}
-	if got.HTTP.RequestTimeout != 60*time.Second {
-		t.Fatalf("HTTP.RequestTimeout = %v, want 60s", got.HTTP.RequestTimeout)
+	if got.HTTP.RequestTimeout != 0 {
+		t.Fatalf("HTTP.RequestTimeout = %v, want 0 (per-handler deadline is opt-in, issue #270)", got.HTTP.RequestTimeout)
 	}
 	if got.API.Prefix != "/api/v1" {
 		t.Fatalf("API.Prefix = %q, want %q", got.API.Prefix, "/api/v1")
@@ -284,7 +284,7 @@ func TestLoadUsesProcessEnvironment(t *testing.T) {
 		Environment: EnvironmentProduction,
 		HTTP: HTTPConfig{
 			Addr:           ":9090",
-			RequestTimeout: 60 * time.Second,
+			RequestTimeout: 0,
 		},
 		API: APIConfig{
 			Prefix:      "/api",

@@ -26,6 +26,11 @@ func TestDefaultRuntimeMiddlewareOrder(t *testing.T) {
 		got = append(got, middleware.name)
 	}
 
+	// There is no standalone request_timeout layer: #268 folded the per-handler
+	// deadline into request_context. The opt-in nature of the timeout (issue
+	// #270) is a config default (0) plus applyTimeout's no-op path, covered by
+	// TestRequestContextMiddlewareDisabledTimeoutImposesNoDeadline and
+	// TestRequestContextDisabledTimeoutAllocationBudget.
 	want := []string{
 		"recovery",
 		"request_context",
@@ -561,6 +566,49 @@ func TestRunContextConfiguresServerTimeouts(t *testing.T) {
 	}
 	if server.IdleTimeout != cfg.HTTP.RequestTimeout {
 		t.Fatalf("server.IdleTimeout = %v, want %v", server.IdleTimeout, cfg.HTTP.RequestTimeout)
+	}
+}
+
+// TestRunContextServerTimeoutFallbackWhenRequestTimeoutDisabled locks the #270 /
+// PERF-12 safety net: with the per-handler deadline disabled (RequestTimeout 0,
+// the default), the connection-level read/write/idle timeouts must fall back to
+// defaultHTTPServerTimeout rather than 0 (unbounded). The per-handler middleware
+// is off; the server safety net stays on.
+func TestRunContextServerTimeoutFallbackWhenRequestTimeoutDisabled(t *testing.T) {
+	cfg := config.Default()
+	cfg.Environment = config.EnvironmentTest
+	cfg.HTTP.Addr = "127.0.0.1:0"
+	cfg.HTTP.RequestTimeout = 0
+	app := newTestApp(t, WithConfig(cfg))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- RunContext(ctx, app)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		if err := waitRun(done); err != nil {
+			t.Fatalf("RunContext() error = %v, want nil", err)
+		}
+	})
+
+	waitForHTTP(t, app, "/livez")
+
+	app.mu.RLock()
+	server := app.server
+	app.mu.RUnlock()
+	if server == nil {
+		t.Fatal("server = nil, want configured HTTP server")
+	}
+	for name, got := range map[string]time.Duration{
+		"ReadTimeout":  server.ReadTimeout,
+		"WriteTimeout": server.WriteTimeout,
+		"IdleTimeout":  server.IdleTimeout,
+	} {
+		if got != defaultHTTPServerTimeout {
+			t.Fatalf("server.%s = %v with the per-handler timeout disabled, want fallback %v", name, got, defaultHTTPServerTimeout)
+		}
 	}
 }
 

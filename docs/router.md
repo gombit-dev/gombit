@@ -55,11 +55,23 @@ Recovery
   -> request metrics
   -> security headers
   -> XSS HTML-tag sanitization (request input)
-  -> request timeout
+  -> request timeout (only when GOMBIT_HTTP_REQUEST_TIMEOUT > 0)
   -> Bearer JWT middleware on protected Huma operations (`GET /me`)
   -> feature group middleware (if any)
     -> feature handler
 ```
+
+The **request timeout is opt-in** (issue #270 / PERF-12). The framework default
+is `0`, which disables the per-handler deadline and omits the layer from the
+stack entirely — a disabled deadline costs nothing on the request path. Set
+`GOMBIT_HTTP_REQUEST_TIMEOUT` (scaffolded apps set `60s`) to install it; the
+deadline then propagates into the request context and any DB/cache call that
+honors it. The `http.Server` `ReadHeaderTimeout`/`ReadTimeout`/`WriteTimeout`/
+`IdleTimeout` remain the connection-level safety net either way. Trade-off: with
+the per-handler deadline off, a slow handler keeps running after `WriteTimeout`
+closes the connection, and a long-running DB query is not cancelled unless the
+app enables the timeout or sets its own deadline. See
+`docs/adr/017-request-timeout-opt-in.md`.
 
 XSS sanitization is a fundamental security default (M1-8): response headers
 alone are not enough. The runtime strips HTML tags from JSON string fields

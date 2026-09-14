@@ -94,6 +94,13 @@ type Config struct {
 type HTTPConfig struct {
 	Addr           string
 	TrustedProxies []string
+	// RequestTimeout is the per-handler deadline propagated into the request
+	// context (and thus into DB/cache calls that honor it). It is opt-in: the
+	// default is 0, which disables it and omits the layer from the middleware
+	// stack entirely (issue #270 / PERF-12). The http.Server read/write/idle
+	// timeouts remain the connection-level safety net regardless. Scaffolded
+	// apps set GOMBIT_HTTP_REQUEST_TIMEOUT explicitly so new projects keep a
+	// per-handler deadline. A negative value is rejected by Validate.
 	RequestTimeout time.Duration
 }
 
@@ -306,8 +313,11 @@ func DefaultFor(env Environment) Config {
 		AppName:     "Gombit",
 		Environment: env,
 		HTTP: HTTPConfig{
-			Addr:           ":8080",
-			RequestTimeout: 60 * time.Second,
+			Addr: ":8080",
+			// Opt-in per-handler deadline (issue #270 / PERF-12): 0 disables it and
+			// omits the request_timeout layer from the stack. Scaffolded apps set
+			// GOMBIT_HTTP_REQUEST_TIMEOUT explicitly to keep today's behavior.
+			RequestTimeout: 0,
 		},
 		API: APIConfig{
 			Prefix:      "/api/v1",

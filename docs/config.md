@@ -14,7 +14,7 @@ shape with environment-derived `/docs` and cache namespace. Mutating
 - app name: `Gombit`
 - environment: `development`
 - HTTP address: `:8080`
-- HTTP request timeout: `60s`
+- HTTP request timeout: `0` (per-handler deadline disabled by default; opt-in via `GOMBIT_HTTP_REQUEST_TIMEOUT`)
 - API prefix: `/api/v1`
 - interactive API docs: enabled (`/docs`)
 - database driver: `sqlite`
@@ -42,7 +42,7 @@ recognizes:
 | `GOMBIT_ENV` | `Config.Environment` | `development` |
 | `GOMBIT_HTTP_ADDR` | `Config.HTTP.Addr` | `:8080` |
 | `GOMBIT_HTTP_TRUSTED_PROXIES` | `Config.HTTP.TrustedProxies` | unset |
-| `GOMBIT_HTTP_REQUEST_TIMEOUT` | `Config.HTTP.RequestTimeout` | `60s` |
+| `GOMBIT_HTTP_REQUEST_TIMEOUT` | `Config.HTTP.RequestTimeout` | `0` (disabled; opt-in) |
 | `GOMBIT_API_PREFIX` | `Config.API.Prefix` | `/api/v1` |
 | `GOMBIT_DOCS_ENABLED` | `Config.API.DocsEnabled` | `true` (off in production when unset) |
 | `GOMBIT_DATABASE_DRIVER` | `Config.Database.Driver` | `sqlite` |
@@ -91,8 +91,13 @@ to Gin's trusted-proxy configuration. When unset, forwarded-client IP headers
 are ignored. Production config rejects values that trust all proxies, such as
 `0.0.0.0/0`.
 `GOMBIT_HTTP_REQUEST_TIMEOUT` uses Go duration syntax such as `30s` or `2m`.
-The value sets the cooperative per-request context deadline and the
-`http.Server` read/write/idle timeouts; `0` disables all four.
+It is opt-in (issue #270 / PERF-12): the default `0` disables the cooperative
+per-handler context deadline and omits its middleware layer entirely. When set
+to a positive value it installs that deadline and also drives the `http.Server`
+read/write/idle timeouts. Those connection-level timeouts are a safety net that
+stays on regardless — with the per-handler deadline disabled they fall back to
+`60s` rather than becoming unbounded. Scaffolded apps set `60s` explicitly, so
+`gombit new` projects keep a per-handler deadline out of the box.
 `GOMBIT_DATABASE_CONN_MAX_LIFETIME` uses Go duration syntax such as `30m` or
 `1h`.
 Redis timeout values use the same Go duration syntax.
