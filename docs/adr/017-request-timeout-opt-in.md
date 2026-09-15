@@ -42,10 +42,12 @@ Adopt **option A of #270: the per-handler timeout is opt-in.**
 
 1. **Default `HTTP.RequestTimeout = 0`.** Zero disables the per-handler context
    deadline.
-2. **Omit the layer, don't pass through.** `runtimeMiddlewareStack` appends the
-   `request_timeout` middleware only when `RequestTimeout > 0`. A disabled
-   deadline costs nothing on the request path and produces no ablation row — not
-   a no-op handler that still sits in the chain.
+2. **A disabled deadline costs nothing on the request path.** #268 folded the
+   per-handler deadline into the `request_context` middleware (via `applyTimeout`),
+   so there is no separate `request_timeout` layer to install or omit. When
+   `RequestTimeout <= 0`, `applyTimeout` is a true no-op — no `timerCtx`, no
+   timer, no extra `Request.WithContext` — so the disabled default adds nothing
+   to the stack and produces no ablation cost.
 3. **Decouple the connection-level safety net.** The `http.Server`
    `ReadTimeout`/`WriteTimeout`/`IdleTimeout` fall back to
    `defaultHTTPServerTimeout` (60s) when `RequestTimeout <= 0`, so disabling the

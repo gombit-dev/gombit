@@ -50,20 +50,21 @@ group-scoped middleware. Order is:
 
 ```text
 Recovery
-  -> request ID
-  -> trace context
+  -> request context (request ID + W3C trace context, and — when
+     GOMBIT_HTTP_REQUEST_TIMEOUT > 0 — the per-handler deadline; #268)
   -> request metrics
   -> security headers
   -> XSS HTML-tag sanitization (request input)
-  -> request timeout (only when GOMBIT_HTTP_REQUEST_TIMEOUT > 0)
   -> Bearer JWT middleware on protected Huma operations (`GET /me`)
   -> feature group middleware (if any)
     -> feature handler
 ```
 
 The **request timeout is opt-in** (issue #270 / PERF-12). The framework default
-is `0`, which disables the per-handler deadline and omits the layer from the
-stack entirely — a disabled deadline costs nothing on the request path. Set
+is `0`, which disables the per-handler deadline. The deadline lives inside the
+`request_context` middleware (#268 folded it in — there is no separate timeout
+layer), and that middleware does no timeout work when the value is `0`: no
+timer, nothing added on the request path. Set
 `GOMBIT_HTTP_REQUEST_TIMEOUT` (scaffolded apps set `60s`) to install it; the
 deadline then propagates into the request context and any DB/cache call that
 honors it. The `http.Server` `ReadHeaderTimeout`/`ReadTimeout`/`WriteTimeout`/
