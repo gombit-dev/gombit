@@ -54,7 +54,7 @@ Recovery
      GOMBIT_HTTP_REQUEST_TIMEOUT > 0 — the per-handler deadline; #268)
   -> request metrics
   -> security headers
-  -> request body size limit (JSON POST/PUT/PATCH; 413 over 8MiB, always on)
+  -> request body size limit (JSON POST/PUT/PATCH; 413 over 8MiB; default router)
   -> XSS HTML-tag sanitization (request input; only when GOMBIT_SECURITY_SANITIZE_INPUT=true)
   -> Bearer JWT middleware on protected Huma operations (`GET /me`)
   -> feature group middleware (if any)
@@ -137,9 +137,11 @@ Other behavior notes (they describe the opt-in layer):
   more than a stray bracket — `<script>if (a<b && c>d) return` yields
   `if (ad) return`. Complete tags (`<b>hi</b>`, `<script>…</script>`) are
   always stripped.
-- JSON request bodies are capped at 8MiB by the always-on **request body size
-  limit** layer (`request_body_limit`), independent of whether sanitization is
-  enabled. A larger JSON `POST`/`PUT`/`PATCH` body aborts with HTTP 413 and a
+- JSON request bodies are capped at 8MiB by the **request body size limit**
+  layer (`request_body_limit`), part of the default runtime stack (a
+  custom-router app via `WithRouter` owns its own — see below), independent of
+  whether sanitization is enabled. A larger JSON `POST`/`PUT`/`PATCH` body
+  aborts with HTTP 413 and a
   D10 error envelope (`payload_too_large`) **before any handler runs** — on
   every route, including a raw `app.Router()` handler that calls
   `ShouldBindJSON`. A declared over-cap `Content-Length` is refused without a
@@ -193,9 +195,16 @@ changing the route contract. Trusted proxies are configured through
 headers and uses the direct TCP peer.
 
 `framework.WithRouter` is the custom-router escape hatch. When an application
-passes its own `*gin.Engine`, Gombit applies trusted-proxy configuration only;
-the application owns recovery, request ID, trace context, metrics, security
-headers, XSS HTML sanitization, and timeout middleware for that router.
+passes its own `*gin.Engine`, Gombit applies trusted-proxy configuration only:
+the entire default runtime stack above is **not** installed. The application
+owns recovery, the request context (request ID + trace context + the optional
+per-handler timeout), metrics, security headers, **the request body size
+limit**, and the optional input sanitizer for that router. In particular, the
+8MiB JSON body-size bound is a property of the default runtime stack, not of
+every Gombit app — a custom-router app that wants it must install its own
+equivalent. `framework/router_test.go`'s
+`TestCustomRouterOmitsRuntimeBodyLimit` locks that boundary so the security
+documentation cannot drift.
 
 `framework/router_test.go`'s `TestDefaultRouterMountsOnlyFrameworkEndpoints`
 and `TestApplicationOwnedRouteRegistrationComposesIndependently` cover this;

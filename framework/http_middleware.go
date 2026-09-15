@@ -35,9 +35,9 @@ var traceparentPattern = regexp.MustCompile(`^[0-9a-f]{2}-([0-9a-f]{32})-[0-9a-f
 // calls ShouldBindJSON — to allocate. This size bound used to live incidentally
 // inside the input sanitizer's buffering; issue #271 / PERF-13 made
 // sanitization opt-in, so the bound now stands on its own in
-// requestBodyLimitMiddleware and protects every app whether or not sanitization
-// is enabled. A first-class, per-route configurable body-size middleware
-// remains future work (docs/router.md); this is the fixed default cap.
+// requestBodyLimitMiddleware, in the default runtime stack, whether or not
+// sanitization is enabled. A first-class, per-route configurable body-size
+// middleware remains future work (docs/router.md); this is the fixed default cap.
 const maxRequestBodyBytes int64 = 8 << 20
 
 // requestBodyLimitMiddleware rejects an oversized JSON request body with a D10
@@ -45,9 +45,14 @@ const maxRequestBodyBytes int64 = 8 << 20
 // It never decodes or re-encodes the body — size enforcement is independent of
 // the opt-in input sanitizer (issue #271 / PERF-13), so an app gets the bound
 // without opting into input rewriting. It applies to every JSON POST/PUT/PATCH
-// route, including raw app.Router() handlers and WithRawBodyPaths webhooks:
-// bounding the read does not alter the accepted bytes, so a signature still
-// verifies over the exact body the handler reads.
+// route on the framework's default router, including raw app.Router() handlers
+// and WithRawBodyPaths webhooks: bounding the read does not alter the accepted
+// bytes, so a signature still verifies over the exact body the handler reads.
+//
+// This layer lives in runtimeMiddlewareStack, which framework.New installs only
+// on the router it builds. An application that supplies its own router with
+// framework.WithRouter owns its entire middleware stack — this limit, and the
+// rest of the runtime stack, are not installed for it. See docs/router.md.
 //
 // Scope: this bounds JSON bodies only (Content-Type application/json). A
 // non-JSON body — a multipart upload, text/plain, or a request with no
@@ -106,19 +111,25 @@ func requestBodyLimitMiddleware() gin.HandlerFunc {
 		buf, err := io.ReadAll(io.LimitReader(c.Request.Body, maxRequestBodyBytes+1))
 		_ = c.Request.Body.Close()
 		if err != nil {
-			// A read failure on the stream: hand the handler/Huma an empty body so
-			// it emits its own validation error rather than a broken read.
-			c.Request.Body = io.NopCloser(bytes.NewReader(nil))
-			c.Next()
+			// The middleware consumed (part of) the stream and it failed mid-read
+			// — a truncated or broken request body. Having taken the read, the
+			// middleware owns the failure: abort with a stable D10 client error
+			// before any handler runs, rather than fabricating an empty body and
+			// letting a handler treat a broken request as a valid empty one (a raw
+			// handler that does not validate would otherwise answer 2xx).
+			abortWithErrorEnvelope(c, contract.Validation("The request body could not be read.", nil))
 			return
 		}
 		if int64(len(buf)) > maxRequestBodyBytes {
-			c.Request.Body = io.NopCloser(bytes.NewReader(nil))
 			abortWithErrorEnvelope(c, contract.PayloadTooLarge("JSON body exceeds the 8MiB limit"))
 			return
 		}
+		// The body is fully buffered now, so the request is a fixed-length one:
+		// set ContentLength and clear the chunked Transfer-Encoding so the handler
+		// does not observe the impossible ContentLength>=0 + chunked framing.
 		c.Request.Body = io.NopCloser(bytes.NewReader(buf))
 		c.Request.ContentLength = int64(len(buf))
+		c.Request.TransferEncoding = nil
 		c.Next()
 	}
 }

@@ -4,14 +4,45 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/gin-gonic/gin"
 )
+
+// TestCustomRouterOmitsRuntimeBodyLimit locks the WithRouter boundary (issue
+// #271 review): framework.New installs the runtime middleware stack only on the
+// router it builds, so a custom router gets no request_body_limit (nor any other
+// runtime layer). The 8MiB JSON body-size bound is a property of the default
+// stack, not of every Gombit app — this keeps the security docs from drifting to
+// "every app / every route".
+func TestCustomRouterOmitsRuntimeBodyLimit(t *testing.T) {
+	app := newTestApp(t, WithRouter(gin.New()))
+
+	handlerRan := false
+	app.Router().POST("/echo", func(c *gin.Context) {
+		handlerRan = true
+		_, _ = io.ReadAll(c.Request.Body)
+		c.Status(http.StatusNoContent)
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/echo", strings.NewReader(oversizedJSONBody()))
+	req.Header.Set("Content-Type", "application/json")
+	app.Router().ServeHTTP(rec, req)
+
+	if !handlerRan {
+		t.Fatal("custom-router handler did not run; expected no framework body-size limit under WithRouter")
+	}
+	if rec.Code == http.StatusRequestEntityTooLarge {
+		t.Fatal("custom router enforced the runtime body-size limit; WithRouter apps own their own middleware")
+	}
+}
 
 func TestDefaultRouterMountsOnlyFrameworkEndpoints(t *testing.T) {
 	app := newTestApp(t)

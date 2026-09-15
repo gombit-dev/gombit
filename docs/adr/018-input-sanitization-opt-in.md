@@ -50,13 +50,19 @@ explicit, narrower opt-ins.**
 2. **The request-size bound is separated, not removed.** The old sanitizer
    incidentally capped JSON bodies at 8 MiB (it buffered the body to strip it).
    That bound is a memory-safety concern, not a sanitization one, so it now
-   lives in its own always-on `request_body_limit` middleware. An oversized JSON
-   `POST`/`PUT`/`PATCH` is rejected with a D10 413 **before any handler runs**,
-   on every route — including raw `app.Router()` handlers that call
-   `ShouldBindJSON`. A declared over-cap `Content-Length` is refused without a
-   read; a chunked body (`Content-Length` unknown) is read up to the cap + 1 to
-   decide before dispatch and, if within the cap, restored byte-for-byte for the
-   handler. An at/under-cap known-length body is wrapped in
+   lives in its own `request_body_limit` middleware in the default runtime
+   stack. An oversized JSON `POST`/`PUT`/`PATCH` is rejected with a D10 413
+   **before any handler runs**, on every route the default router serves —
+   including raw `app.Router()` handlers that call `ShouldBindJSON`. (A
+   custom-router app via `framework.WithRouter` owns its whole middleware stack,
+   this layer included, exactly as it already owns recovery/security-headers/etc.
+   — the bound is a property of the default stack, not of every Gombit app.) A
+   declared over-cap `Content-Length` is refused without a read; a chunked body
+   (`Content-Length` unknown) is read up to the cap + 1 to decide before
+   dispatch and, if within the cap, restored for the handler with `ContentLength`
+   set and the chunked `Transfer-Encoding` cleared (no impossible framing); a
+   mid-read stream failure aborts with a D10 client error rather than
+   dispatching a fabricated empty body. An at/under-cap known-length body is wrapped in
    `http.MaxBytesReader` so a lying small `Content-Length` cannot make a handler
    read past the cap. It never decodes or re-encodes the body, so an app gets the
    bound without opting into input rewriting. The bound is **JSON-scoped** — it

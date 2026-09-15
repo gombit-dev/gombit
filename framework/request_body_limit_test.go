@@ -267,6 +267,101 @@ func TestRequestBodyLimitBoundsLyingContentLength(t *testing.T) {
 	}
 }
 
+// errAfterReader yields data, then fails with err — a truncated/broken request
+// stream (e.g. a connection reset mid-body), which surfaces as a non-EOF read
+// error rather than a clean end.
+type errAfterReader struct {
+	data []byte
+	err  error
+	pos  int
+}
+
+func (r *errAfterReader) Read(p []byte) (int, error) {
+	if r.pos < len(r.data) {
+		n := copy(p, r.data[r.pos:])
+		r.pos += n
+		return n, nil
+	}
+	return 0, r.err
+}
+
+// TestRequestBodyLimitAbortsOnStreamReadFailure is the #358-review guard: once
+// the middleware takes the read on the unknown-length path, it owns the failure.
+// A stream that fails mid-body must abort with a stable D10 client error before
+// dispatch, not fabricate an empty body and let a non-validating handler answer
+// 2xx.
+func TestRequestBodyLimitAbortsOnStreamReadFailure(t *testing.T) {
+	app := newTestApp(t)
+
+	handlerRan := false
+	app.Router().POST("/echo", func(c *gin.Context) {
+		handlerRan = true
+		_, _ = io.ReadAll(c.Request.Body)
+		c.Status(http.StatusNoContent)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/echo", &errAfterReader{data: []byte(`{"partial":`), err: io.ErrUnexpectedEOF})
+	req.Header.Set("Content-Type", "application/json")
+	req.ContentLength = -1 // unknown length → the buffering path owns the read
+	rec := httptest.NewRecorder()
+	app.Router().ServeHTTP(rec, req)
+
+	if handlerRan {
+		t.Fatal("handler ran on a broken request stream; the middleware must own the read failure and abort")
+	}
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422 (D10 client error on a broken stream); body: %s", rec.Code, rec.Body.String())
+	}
+	var env contract.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode error envelope: %v; body: %s", err, rec.Body.String())
+	}
+	if env.Body.Code != contract.CodeValidationError {
+		t.Fatalf("code = %q, want %q", env.Body.Code, contract.CodeValidationError)
+	}
+}
+
+// TestRequestBodyLimitNormalizesChunkedFraming is the #358-review guard against
+// impossible framing: after the middleware buffers a within-cap chunked body it
+// must present a coherent fixed-length request — a non-negative ContentLength
+// and no leftover chunked Transfer-Encoding. Models a real chunked request by
+// setting both fields, not just ContentLength == -1.
+func TestRequestBodyLimitNormalizesChunkedFraming(t *testing.T) {
+	app := newTestApp(t)
+
+	var gotCL int64
+	var gotTE []string
+	var gotBody string
+	app.Router().POST("/echo", func(c *gin.Context) {
+		gotCL = c.Request.ContentLength
+		gotTE = c.Request.TransferEncoding
+		b, _ := io.ReadAll(c.Request.Body)
+		gotBody = string(b)
+		c.Status(http.StatusOK)
+	})
+
+	const payload = `{"ok":true}`
+	req := httptest.NewRequest(http.MethodPost, "/echo", strings.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	req.ContentLength = -1
+	req.TransferEncoding = []string{"chunked"}
+	rec := httptest.NewRecorder()
+	app.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	if gotCL < 0 {
+		t.Fatalf("handler saw ContentLength=%d, want a non-negative fixed length after buffering", gotCL)
+	}
+	if len(gotTE) != 0 {
+		t.Fatalf("handler saw TransferEncoding=%v, want it cleared (no ContentLength>=0 + chunked contradiction)", gotTE)
+	}
+	if gotBody != payload {
+		t.Fatalf("handler read %q, want the body restored byte-for-byte %q", gotBody, payload)
+	}
+}
+
 // TestRequestBodyLimitIgnoresNonJSON documents the JSON-only scope (parity with
 // the sanitizer's old cap, which only bounded JSON bodies): a large non-JSON
 // body is not gated here.
