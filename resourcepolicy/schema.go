@@ -6,16 +6,17 @@ import (
 	"strings"
 	"sync"
 
+	"gorm.io/gorm"
 	"gorm.io/gorm/schema"
 )
 
 // FactsFromSchema is the lossless projection of a parsed GORM field into
-// FieldFacts. Soft-delete is detected BEHAVIORALLY, the way GORM dispatches it —
-// the field's type implements the soft-delete clause interfaces (query + delete)
-// on reflect.New(IndirectFieldType) — so gorm.DeletedAt, *gorm.DeletedAt, and any
-// wrapper embedding it are all recognized, not just one concrete type. Create/read
-// capability comes from GORM's own Creatable/Readable (the `->`/`<-` permission
-// tags); nothing is re-derived by hand.
+// FieldFacts. Soft-delete is detected BEHAVIORALLY, the way GORM dispatches it:
+// the field's own DeleteClauses actually emit GORM's soft-delete clause (see
+// isSoftDeleteField) — so gorm.DeletedAt, *gorm.DeletedAt, and any wrapper
+// embedding it are recognized, while a generic clause provider that hard-deletes
+// is not. Create/read capability comes from GORM's own Creatable/Readable (the
+// `->`/`<-` permission tags); nothing is re-derived by hand.
 func FactsFromSchema(f *schema.Field) FieldFacts {
 	return FieldFacts{
 		GoName:        f.Name,
@@ -31,19 +32,28 @@ func FactsFromSchema(f *schema.Field) FieldFacts {
 	}
 }
 
-// isSoftDeleteField reports whether GORM treats the field as a soft-delete marker:
-// its type implements both the query and delete clause interfaces GORM asserts
-// during schema parsing (scope out deleted rows, turn DELETE into an UPDATE). This
-// is the same behavioral dispatch GORM uses — matching gorm.DeletedAt and any type
-// embedding it — rather than an exact concrete-type comparison.
+// isSoftDeleteField reports whether GORM treats the field as a soft-delete marker.
+// Implementing the delete-clause interface is not enough — that is a generic
+// callback hook any type may use to contribute arbitrary clauses. What makes a
+// field soft-delete is that its DeleteClauses actually rewrite DELETE into an
+// UPDATE, which GORM represents with the concrete gorm.SoftDeleteDeleteClause. So
+// invoke the field's own DeleteClauses (the same call GORM makes at delete time)
+// and look for that clause — matching gorm.DeletedAt and any embedding wrapper,
+// while a type returning ordinary clauses (a hard delete) is correctly excluded.
 func isSoftDeleteField(f *schema.Field) bool {
 	if f.IndirectFieldType == nil {
 		return false
 	}
-	v := reflect.New(f.IndirectFieldType).Interface()
-	_, query := v.(schema.QueryClausesInterface)
-	_, del := v.(schema.DeleteClausesInterface)
-	return query && del
+	dc, ok := reflect.New(f.IndirectFieldType).Interface().(schema.DeleteClausesInterface)
+	if !ok {
+		return false
+	}
+	for _, c := range dc.DeleteClauses(f) {
+		if _, ok := c.(gorm.SoftDeleteDeleteClause); ok {
+			return true
+		}
+	}
+	return false
 }
 
 // FromSchema maps a parsed GORM schema to resolver input over its EFFECTIVE

@@ -11,6 +11,7 @@ import (
 	"github.com/gombit-dev/gombit/resourcepolicy"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"gorm.io/gorm/schema"
 )
 
@@ -495,5 +496,57 @@ func TestSoftDeleteDetectedBehaviorally(t *testing.T) {
 	db.Unscoped().Model(&Row{}).Count(&all) // unscoped still sees the row
 	if visible != 0 || all != 1 {
 		t.Fatalf("wrapper is not soft-deleting as GORM does: visible=%d all=%d", visible, all)
+	}
+}
+
+// clauseful implements the query/delete clause interfaces generically (ordinary
+// clauses, no soft-delete), so it must NOT be classified as a soft-delete marker.
+type clauseful string
+
+func (clauseful) QueryClauses(*schema.Field) []clause.Interface {
+	return []clause.Interface{clause.Where{}}
+}
+func (clauseful) DeleteClauses(*schema.Field) []clause.Interface {
+	return []clause.Interface{clause.Where{}}
+}
+
+// The opposite direction: implementing the clause interfaces is not soft-delete.
+// A generic clause provider is ordinary content and GORM HARD-deletes it.
+func TestGenericClauseProviderIsNotSoftDelete(t *testing.T) {
+	type Row struct {
+		ID   uint `gorm:"primaryKey"`
+		Note clauseful
+	}
+	f := resourcepolicy.FactsFromSchema(field(t, parse(t, &Row{}), "Note"))
+	if f.SoftDelete {
+		t.Fatalf("a generic clause provider must not be classified soft-delete, got %+v", f)
+	}
+	resolved, err := resourcepolicy.ResolvedFromModel(&Row{})
+	if err != nil {
+		t.Fatalf("ResolvedFromModel: %v", err)
+	}
+	if r, ok := resolvedByColumn(t, resolved)["note"]; !ok || !r.InRequest || !r.InResponse {
+		t.Fatalf("note should be ordinary read+write content, got %+v ok=%v", r, ok)
+	}
+
+	// Runtime: GORM hard-deletes it (absent even unscoped).
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "t.db")), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(&Row{}); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	row := Row{Note: "x"}
+	if err := db.Create(&row).Error; err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := db.Delete(&row).Error; err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	var all int64
+	db.Unscoped().Model(&Row{}).Count(&all)
+	if all != 0 {
+		t.Fatalf("a generic clause provider should hard-delete (unscoped count 0), got %d", all)
 	}
 }
