@@ -244,6 +244,40 @@ func TestSecurityHeadersLayerAllocatesNothing(t *testing.T) {
 	}
 }
 
+// TestRequestContextDisabledTimeoutAllocationBudget guards issue #268's target
+// of "request_context <= 4 allocs/op with the timeout disabled". Enabled, the
+// layer is ~8 allocs/op (the extra ~4 are the context.WithTimeout timerCtx +
+// timer); with the deadline off it must stay at or under 4 — the single string
+// for both IDs, the one *requestMeta, one context.WithValue, and one
+// Request.WithContext (the header slices alias the meta array, adding none). The
+// ablation only measures the enabled path (production config), so this locks the
+// disabled path the ablation never exercises.
+func TestRequestContextDisabledTimeoutAllocationBudget(t *testing.T) {
+	previous := gin.Mode()
+	t.Cleanup(func() { gin.SetMode(previous) })
+	gin.SetMode(gin.ReleaseMode)
+
+	build := func(withRequestContext bool) http.Handler {
+		router := gin.New()
+		if withRequestContext {
+			router.Use(requestContextMiddleware(0)) // per-handler deadline disabled
+		}
+		router.GET("/plaintext", func(c *gin.Context) { c.String(http.StatusOK, "ok") })
+		return router
+	}
+	allocs := func(handler http.Handler) float64 {
+		return testing.AllocsPerRun(200, func() {
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/plaintext", nil))
+		})
+	}
+
+	delta := allocs(build(true)) - allocs(build(false))
+	if delta > 4 {
+		t.Fatalf("request_context (timeout disabled) adds %.0f allocs/op over baseline, want <= 4 (issue #268)", delta)
+	}
+}
+
 // TestBrowserResponseKindsCarryFullPolicy pins the HTML/browser response kinds
 // (issue #267 / PERF-9): the embedded SPA, the admin SPA, and Huma's
 // interactive docs each keep the full browser policy — a browser-appropriate
