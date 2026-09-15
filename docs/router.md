@@ -120,10 +120,13 @@ Other behavior notes:
   always stripped.
 - JSON sanitizer buffering is capped at 8MiB. Larger JSON bodies abort with
   HTTP 413 and a D10 error envelope (`payload_too_large`) and never reach
-  handlers. `http.Server.ReadTimeout` matches `GOMBIT_HTTP_REQUEST_TIMEOUT`
-  (`0` disables it). The request-timeout middleware is a context deadline; it
-  does not abort `Body.Read`. The connection read deadline and the sanitizer
-  cap are the brakes on a slow or never-ending JSON body (#137).
+  handlers. The `http.Server` `ReadTimeout`/`WriteTimeout`/`IdleTimeout` are a
+  connection-level safety net that is always on: they take
+  `GOMBIT_HTTP_REQUEST_TIMEOUT` when it is set, and fall back to a 60s default
+  when the per-handler deadline is disabled (issue #270). The opt-in
+  request-timeout middleware is a context deadline; it does not abort
+  `Body.Read`. The connection read deadline and the sanitizer cap are the brakes
+  on a slow or never-ending JSON body (#137).
 
 Canonical design order (draft §13.3) also includes CORS, body-size limit, rate
 limiting, and auth context. Those remain deferred; when a first-class body-size
