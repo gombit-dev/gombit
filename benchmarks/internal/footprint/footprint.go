@@ -67,6 +67,16 @@ type Footprint struct {
 // Key identifies a row for merge/replace: one implementation per variant.
 func (f Footprint) Key() string { return f.Framework + "\x00" + f.Variant }
 
+// ProvenanceUnit is this row's key in metadata.json's per-unit provenance: the
+// same (framework, variant) pair Key() merges on, in a form readable in JSON.
+//
+// It must stay the merge key. Keying provenance on the framework alone would
+// let a re-measured embedded binary relabel the container row it never touched —
+// the row-merge-vs-table-provenance mismatch issue #266 exists to eliminate.
+// Both the writer (scripts/footprint) and the reader (internal/report) derive
+// the unit here so they cannot drift apart.
+func (f Footprint) ProvenanceUnit() string { return f.Framework + ":" + f.Variant }
+
 // ComputeColdStart returns the median, p95, and count of a set of cold-start
 // samples (milliseconds). An empty set is a zero distribution.
 func ComputeColdStart(samplesMs []float64) ColdStart {

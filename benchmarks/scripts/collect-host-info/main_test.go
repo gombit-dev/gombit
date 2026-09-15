@@ -1,6 +1,156 @@
 package main
 
-import "testing"
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/gombit-dev/gombit/benchmarks/internal/metadata"
+)
+
+// The whole-snapshot rewrite must carry every unit's provenance forward.
+// Dropping it would silently re-point every README caption at this collection's
+// host via the report's legacy fallback — and this command measured nothing
+// (issue #266).
+func TestCarryGroupsPreservesUnitProvenanceAcrossAWholeSnapshotRewrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "metadata.json")
+	existing := metadata.Metadata{SchemaVersion: metadata.SchemaVersion}
+	existing = metadata.StampUnit(existing, metadata.GroupMicrobench, "gin",
+		metadata.Provenance{GitCommit: "aaaa1111", CPUModel: "Micro Host"})
+	existing = metadata.StampUnit(existing, metadata.GroupCRUD, "rails",
+		metadata.Provenance{GitCommit: "bbbb2222", CPUModel: "CRUD Host"})
+	writeFixture(t, path, existing)
+
+	collected := metadata.Metadata{
+		SchemaVersion: metadata.SchemaVersion,
+		GitCommit:     "cccc3333",
+		CPUModel:      "Metadata-only Host",
+		Groups:        map[string]map[string]metadata.Provenance{},
+	}
+	got, err := carryGroups(path, collected)
+	if err != nil {
+		t.Fatalf("carryGroups: %v", err)
+	}
+
+	if got.Groups[metadata.GroupMicrobench]["gin"].GitCommit != "aaaa1111" ||
+		got.Groups[metadata.GroupCRUD]["rails"].GitCommit != "bbbb2222" {
+		t.Errorf("unit provenance was destroyed by a whole-snapshot rewrite: %+v", got.Groups)
+	}
+	// This collection's own fields still win — it is a rewrite, not a merge.
+	if got.GitCommit != "cccc3333" || got.CPUModel != "Metadata-only Host" {
+		t.Errorf("the collection's own top-level block should be written: %+v", got)
+	}
+}
+
+// `make benchmark-metadata` rewrites the top-level block with a collection that
+// measured nothing. Carrying Groups is not enough on its own: a unit with no
+// entry must not then pick up this collection's commit and host. Starts from the
+// committed snapshot and the shapes it has had, since a fixture with every unit
+// pre-stamped cannot exercise that path (issue #266).
+func TestWholeSnapshotRewriteNeverReattributesARow(t *testing.T) {
+	committed, err := os.ReadFile(filepath.Join("..", "..", "results", "latest", "metadata.json"))
+	if err != nil {
+		t.Fatalf("read committed snapshot: %v", err)
+	}
+	var snapshot metadata.Metadata
+	if err := json.Unmarshal(committed, &snapshot); err != nil {
+		t.Fatalf("parse committed snapshot: %v", err)
+	}
+	microOnly := snapshot
+	microOnly.Groups = map[string]map[string]metadata.Provenance{
+		metadata.GroupMicrobench: snapshot.Groups[metadata.GroupMicrobench],
+	}
+	legacy := snapshot
+	legacy.Groups = nil
+
+	for name, before := range map[string]metadata.Metadata{
+		"committed snapshot":        snapshot,
+		"microbench units only":     microOnly,
+		"legacy snapshot, no units": legacy,
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "metadata.json")
+			writeFixture(t, path, before)
+			collected := metadata.Metadata{
+				SchemaVersion: metadata.SchemaVersion,
+				GitCommit:     "cccc3333cccc",
+				CPUModel:      "Metadata-only Host",
+				Groups:        map[string]map[string]metadata.Provenance{},
+			}
+			after, err := carryGroups(path, collected)
+			if err != nil {
+				t.Fatalf("carryGroups: %v", err)
+			}
+			for _, u := range allUnits() {
+				was := before.UnitProvenance(u.group, u.unit)
+				now := after.UnitProvenance(u.group, u.unit)
+				if now.Empty() || sameProvenance(was, now) {
+					continue
+				}
+				t.Errorf("%s/%s was re-attributed by a collection that measured nothing: %s at %s -> %s at %s",
+					u.group, u.unit, was.GitCommit, was.CPUModel, now.GitCommit, now.CPUModel)
+			}
+		})
+	}
+}
+
+type unitRef struct{ group, unit string }
+
+// allUnits is every unit the published README tables caption.
+func allUnits() []unitRef {
+	var units []unitRef
+	for _, s := range []string{"nethttp", "gin", "huma", "gombit"} {
+		units = append(units, unitRef{metadata.GroupMicrobench, s})
+	}
+	for _, fw := range []string{"django", "gin-gorm", "gombit", "laravel", "nestjs", "rails"} {
+		units = append(units, unitRef{metadata.GroupCRUD, fw}, unitRef{metadata.GroupFootprint, fw + ":container"})
+	}
+	return units
+}
+
+func sameProvenance(a, b metadata.Provenance) bool {
+	return a.ComparableTo(b) && a.Timestamp == b.Timestamp
+}
+
+// A fresh OUT_DIR has nothing to carry; the rewrite must succeed rather than
+// fail on the missing file.
+func TestCarryGroupsOnMissingFileIsNotAnError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "metadata.json")
+	got, err := carryGroups(path, metadata.Metadata{GitCommit: "cccc3333"})
+	if err != nil {
+		t.Fatalf("carryGroups on a missing file: %v", err)
+	}
+	if len(got.Groups) != 0 {
+		t.Errorf("Groups = %v, want empty", got.Groups)
+	}
+}
+
+// A corrupt snapshot must fail loudly. Silently replacing it would discard
+// whatever hours-long run produced the file.
+func TestCarryGroupsRefusesACorruptSnapshot(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "metadata.json")
+	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := carryGroups(path, metadata.Metadata{}); err == nil {
+		t.Error("carryGroups on a corrupt file = nil error; want a failure, not a silent overwrite")
+	}
+}
+
+func writeFixture(t *testing.T, path string, m metadata.Metadata) {
+	t.Helper()
+	f, err := os.Create(path) //nolint:gosec // test-owned temp path
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := metadata.WriteJSON(f, m); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestParseIntListRejectsInvalidToken(t *testing.T) {
 	// A malformed token is an error, not a silently dropped element — the

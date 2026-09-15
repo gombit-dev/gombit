@@ -20,7 +20,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -176,6 +175,12 @@ func run(cfg runConfig, k6run k6Runner) error {
 		Concurrency:               cfg.concurrency,
 		Trials:                    cfg.trials,
 	})
+	// This app's own provenance, filed under this app alone. run-crud replaces
+	// one framework's rows and preserves the others, and APPS= subsetting is a
+	// supported run, so stamping the whole crud group here would caption every
+	// other app's rows with a commit they never ran at (issue #266, round 2).
+	meta = metadata.StampUnit(meta, metadata.GroupCRUD, cfg.framework, meta.Provenance())
+
 	if err := writeOutputs(cfg.outDir, cfg.framework, rows, meta); err != nil {
 		return err
 	}
@@ -238,7 +243,12 @@ func writeOutputs(outDir, framework string, newRows []result.Result, meta metada
 	if err != nil {
 		return err
 	}
-	meta = mergedMetadata(filepath.Join(outDir, "metadata.json"), meta)
+	// Read before writing anything, so an unreadable snapshot fails the run with
+	// results.json untouched.
+	meta, err = mergedMetadata(filepath.Join(outDir, "metadata.json"), meta)
+	if err != nil {
+		return err
+	}
 
 	if err := writeFile(filepath.Join(outDir, "results.json"), func(f *os.File) error {
 		return result.WriteJSON(f, rows)
@@ -287,40 +297,18 @@ func readResults(path string) ([]result.Result, error) {
 	return result.ReadJSON(f)
 }
 
-func mergedMetadata(path string, meta metadata.Metadata) metadata.Metadata {
-	data, err := os.ReadFile(path) //nolint:gosec // path composed from the operator-supplied out-dir
+// mergedMetadata folds this run's metadata into whatever an earlier app's run
+// already wrote, preserving every app's contribution (metadata.Merge documents
+// the per-field rules). A missing file starts the record; an unreadable or
+// corrupt one is an error. Treating it as "no prior snapshot" would overwrite
+// every other app's versions and limit verdicts and every unit's provenance —
+// the microbench and footprint groups included — with this one app's record.
+func mergedMetadata(path string, meta metadata.Metadata) (metadata.Metadata, error) {
+	existing, err := metadata.ReadFile(path)
 	if err != nil {
-		return meta
+		return metadata.Metadata{}, err
 	}
-	var existing metadata.Metadata
-	if err := json.Unmarshal(data, &existing); err != nil {
-		return meta
-	}
-	meta.FrameworkVersions = union(existing.FrameworkVersions, meta.FrameworkVersions)
-	meta.RuntimeVersions = union(existing.RuntimeVersions, meta.RuntimeVersions)
-	// Preserve every app's applied-limit verdict, not just the last writer's.
-	meta.ResourceLimitsByFramework = union(existing.ResourceLimitsByFramework, meta.ResourceLimitsByFramework)
-	// Postgres is the same container across apps. Empty means "this run did not
-	// re-verify" (the standalone benchmark-crud default) — keep any prior verdict.
-	// A non-empty value, INCLUDING an explicit "unknown …" from run-crud-all when
-	// it looked but could not classify, is authoritative for this run and
-	// overwrites — so a stale enforced/partial never sticks across a re-run whose
-	// check failed.
-	if meta.PostgresResourceLimits == "" {
-		meta.PostgresResourceLimits = existing.PostgresResourceLimits
-	}
-	return meta
-}
-
-func union(a, b map[string]string) map[string]string {
-	out := map[string]string{}
-	for k, v := range a {
-		out[k] = v
-	}
-	for k, v := range b {
-		out[k] = v
-	}
-	return out
+	return metadata.Merge(existing, meta), nil
 }
 
 func writeFile(path string, encode func(*os.File) error) error {

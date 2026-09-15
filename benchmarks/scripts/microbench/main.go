@@ -13,12 +13,14 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 
+	"github.com/gombit-dev/gombit/benchmarks/internal/metadata"
 	"github.com/gombit-dev/gombit/benchmarks/internal/microbench"
 )
 
@@ -54,6 +56,13 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "microbench: %v\n", err)
 		return 1
 	}
+	// Fail before touching microbench.json if the snapshot's metadata.json cannot
+	// be read: the stamp below would fail after the rows were already merged,
+	// leaving them beside the previous run's provenance for this stack.
+	if _, err := metadata.ReadFile(metadata.SiblingPath(*out)); err != nil {
+		_, _ = fmt.Fprintf(stderr, "microbench: %v\n", err)
+		return 1
+	}
 	merged := microbench.MergeStack(existing, rows, *stack)
 
 	if err := os.MkdirAll(filepath.Dir(*out), 0o755); err != nil { //nolint:gosec // operator-supplied out dir
@@ -74,8 +83,27 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "microbench: %v\n", err)
 		return 1
 	}
+	// Stamp THIS stack namespace's provenance, and only this one. MergeStack
+	// replaces the -stack namespace whole and leaves the others alone, so
+	// provenance moves at the same granularity: a ladder-wide stamp would caption
+	// three untouched stacks with a commit they never ran at (issue #266, review
+	// round 2). For the ablation the unit is the namespace `gombit-ablation`,
+	// which owns every `gombit-ablation/<row>` stack exactly as the merge does.
+	if err := metadata.StampUnitFile(
+		metadata.SiblingPath(*out), metadata.GroupMicrobench, *stack, collectProvenance(),
+	); err != nil {
+		_, _ = fmt.Fprintf(stderr, "microbench: %v\n", err)
+		return 1
+	}
+
 	_, _ = fmt.Fprintf(stdout, "microbench: merged %d %s rows into %s\n", len(rows), *stack, *out)
 	return 0
+}
+
+// collectProvenance records the source state and machine this row set was
+// measured on, via the same discovery the whole-snapshot collector uses.
+func collectProvenance() metadata.Provenance {
+	return metadata.Collect(context.Background(), metadata.Options{}).Provenance()
 }
 
 func readExisting(path string) ([]microbench.Row, error) {

@@ -201,6 +201,93 @@ published table always carries the conditions it was produced under — and the
 report labels it a reduced or unpublishable run when those conditions fall short
 of the canonical protocol or a clean tree.
 
+### Provenance is recorded per measurement group
+
+`results/latest/` looks like one artifact but holds three independently produced
+groups, and they cost wildly different amounts to produce:
+
+| group | target | cost |
+| --- | --- | --- |
+| `microbench` (framework tax) | `make benchmark-micro` | minutes, pure Go, no Docker |
+| `crud` (PostgreSQL CRUD read) | `make benchmark-crud-all` | hours: 6 containers × the full sweep |
+| `footprint` (operational footprint) | `make benchmark-footprint` | minutes, Docker |
+
+Provenance is recorded per **unit**, not per group. A unit is the merge key of
+that group's data file — the thing a single run can replace on its own:
+
+| group | unit | recorded by |
+| --- | --- | --- |
+| `microbench` | stack namespace (`nethttp`/`gin`/`huma`/`gombit`, `gombit-ablation`) | `scripts/microbench` |
+| `crud` | framework | `scripts/run-crud` |
+| `footprint` | framework + variant | `scripts/footprint` |
+
+**The program that writes the row writes the provenance.** All three of these
+files merge row-wise, and subset runs are supported (`APPS="gin-gorm gombit"`),
+so a group-wide stamp would let a run that replaced ONE row relabel a whole
+table: six footprint rows measured at commit A, then
+`APPS=gombit make benchmark-footprint` at B, would caption five untouched rows
+as B. Keying provenance to the same unit the data merges on makes that state
+unrepresentable rather than merely detectable.
+
+The report derives each table's caption from the units that table actually
+publishes. When they agree it collapses to one line; when they disagree it
+refuses to make a table-wide claim and states each unit instead — the same shape
+the per-app resource-limit verdicts use, for the same reason.
+
+A single snapshot-wide commit could not describe the three groups either: a cheap
+microbenchmark refresh would have to claim the hours-long CRUD sweep ran at the
+new commit, or publish its own fresh numbers under the old one.
+
+The Go toolchain is part of a group's provenance because it moves the numbers on
+its own. The framework-tax ladder's `net/http` rung is stdlib plus the harness —
+no Gombit code can affect it — and it has still shifted by 3 allocs/op between
+toolchain releases with no source change. **Never splice a refreshed row onto
+stale baseline rows:** the four rungs are only comparable when they were produced
+by one run, on one host, under one toolchain.
+
+A snapshot that records no unit at all predates this and is read with its
+top-level block as every unit's provenance, which for a single-run snapshot is
+exact — such a snapshot still renders one caption per table, exactly as before.
+That fallback is **all or nothing**. Once any unit is recorded, a unit without an
+entry is captioned as *unrecorded*, never with the top-level block: that block is
+rewritten by producers that did not measure the unit (next section), so borrowing
+it would re-caption untouched rows with someone else's commit and host. `make
+benchmark-metadata` measures nothing, so on a snapshot that records no unit it
+keeps the existing top-level block rather than replacing the only provenance those
+rows have.
+
+The footprint unit is the row's full merge key, `framework:variant`
+(`gombit:container`, `gombit:embedded`), because that is what `footprint.Merge`
+keys on. Measuring the embedded single binary therefore cannot relabel the
+container row the README publishes.
+
+#### Reading `metadata.json`: `groups` is authoritative, the top level is not
+
+`groups.<group>.<unit>` is the answer to "when, where and at which commit was
+*this row* measured". The flat top-level fields (`git_commit`, `timestamp`,
+`cpu_model`, `go_version`, …) describe whichever collection last rewrote the
+whole record, and they are **not a caption for any table**:
+
+- `make benchmark-micro` and `make benchmark-footprint` stamp only the units they
+  measured and leave the top-level fields alone, so afterwards the top-level
+  `git_commit` is *older* than those units' entries.
+- `make benchmark-crud-all` rewrites the top-level fields on every app it runs —
+  including an `APPS=gombit` subset of one app — so afterwards the top-level
+  `git_commit` can be *newer* than five of the six CRUD rows, and than every
+  footprint and microbench row.
+- `make benchmark-metadata` rewrites them with a collection that measured nothing.
+
+Both directions are expected; neither is stale bookkeeping to "fix" by editing the
+top level.
+
+The practical rule: **read `groups.<group>.<unit>` for a row's provenance; read
+the top level only for the shared run parameters** (database, resource limits, sweep
+protocol, load generator), and as every row's provenance only in a snapshot that
+records no unit at all.
+
+The shape is additive, so `schema_version` stays `1`: a reader that predates
+`groups` still sees exactly the flat fields it always saw.
+
 ## How not to interpret these results
 
 - **This is not a language or framework leaderboard.** The apps differ in
@@ -216,9 +303,11 @@ of the canonical protocol or a clean tree.
   load generator competes with the app for the same cores. High-concurrency
   rows measure "app + k6 sharing 2 vCPU", which is deliberately conservative but
   not the same as "app alone on 2 vCPU".
-- **It is one machine, one run.** A single snapshot on one host. The committed
-  `metadata.json` names that host; numbers from different hardware are not
-  comparable. Re-run on your own hardware before drawing operational
+- **It is one machine per table, and the tables are separate runs.** Each table
+  is a single snapshot on one host; the committed `metadata.json` names that host
+  per measurement group and the README caption repeats it under each table.
+  Numbers from different hardware — including from a *different table here* — are
+  not comparable. Re-run on your own hardware before drawing operational
   conclusions.
 - **Memory is the container working set**, from `docker stats` (cgroup usage
   minus reclaimable cache) — a deployment-footprint proxy for RSS, not a precise

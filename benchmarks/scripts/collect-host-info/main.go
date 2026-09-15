@@ -5,6 +5,11 @@
 // as flags by the orchestrator that knows them.
 //
 //	go run ./benchmarks/scripts/collect-host-info -out benchmarks/results/latest/metadata.json
+//
+// It measures nothing itself, so it never files a per-unit provenance entry and
+// never deletes one: per-unit provenance is written by the producers that write
+// the rows (scripts/microbench, scripts/footprint, scripts/run-crud), and this
+// command carries whatever they recorded across its whole-snapshot rewrite.
 package main
 
 import (
@@ -56,9 +61,48 @@ func main() {
 		Trials:            *trials,
 	})
 
+	if *out != "" {
+		if m, err = carryGroups(*out, m); err != nil {
+			fatalf("%v", err)
+		}
+	}
+
 	if err := write(*out, m); err != nil {
 		fatalf("%v", err)
 	}
+}
+
+// carryGroups preserves the per-unit provenance already on disk across a
+// whole-snapshot rewrite (`make benchmark-metadata`).
+//
+// collect-host-info measures nothing itself, so it has no standing to delete or
+// replace the record of measurements other producers did run (issue #266):
+//
+//   - Every unit's entry in Groups is carried forward unchanged.
+//   - If the snapshot on disk records no unit at all, it predates per-unit
+//     provenance and its top-level block IS every row's provenance (see
+//     metadata.Metadata.UnitProvenance). That block is carried forward too:
+//     replacing it would re-caption every table with the commit and host of
+//     this collection. Once any unit is recorded, the top-level block describes
+//     no row, and this collection's own block is written as before.
+//
+// Nothing else is preserved. This target's existing behavior of replacing the
+// version maps, limit verdicts and run parameters is untouched here — changing
+// that is a separate question from the provenance invariant.
+func carryGroups(path string, collected metadata.Metadata) (metadata.Metadata, error) {
+	existing, err := metadata.ReadFile(path)
+	if err != nil {
+		return metadata.Metadata{}, err
+	}
+	if !existing.RecordsUnits() && !existing.Provenance().Empty() {
+		collected = collected.WithProvenance(existing.Provenance())
+	}
+	for group, units := range existing.Groups {
+		for unit, prov := range units {
+			collected = metadata.StampUnit(collected, group, unit, prov)
+		}
+	}
+	return collected, nil
 }
 
 func fatalf(format string, args ...any) {

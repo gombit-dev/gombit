@@ -8,6 +8,18 @@
 *.out
 /bin/
 /dist/
+# `go build ./benchmarks/scripts/<cmd>` writes the executable into the CWD, so a
+# single-package build at the repo root leaves a stray binary named after the
+# command. Anchored to the root so the SOURCE dirs (benchmarks/scripts/footprint/,
+# benchmarks/scripts/microbench/, ...) stay tracked.
+/footprint
+/microbench
+/collect-host-info
+/inspect-limits
+/k6load
+/report
+/run-crud
+/summarize
 # Do not ignore /build/: the `gombit build --embed` implementation lives in
 # package build at the module root. Generated apps write binaries to bin/.
 

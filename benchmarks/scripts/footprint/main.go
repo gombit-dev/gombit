@@ -14,6 +14,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -23,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/gombit-dev/gombit/benchmarks/internal/footprint"
+	"github.com/gombit-dev/gombit/benchmarks/internal/metadata"
 )
 
 func main() {
@@ -75,10 +77,35 @@ func run(args []string, stdout, stderr io.Writer) int {
 		BinarySizeBytes:     *binSize,
 	}
 
+	// Fail before touching footprint.json if the snapshot's metadata.json cannot
+	// be read: the stamp below would fail after the row was already merged,
+	// leaving it beside the previous run's provenance for this unit.
+	if _, err := metadata.ReadFile(metadata.SiblingPath(*out)); err != nil {
+		_, _ = fmt.Fprintf(stderr, "footprint: %v\n", err)
+		return 1
+	}
+
 	if err := mergeIntoFiles(*out, row); err != nil {
 		_, _ = fmt.Fprintf(stderr, "footprint: %v\n", err)
 		return 1
 	}
+
+	// Stamp THIS framework's provenance, and only this one. mergeIntoFiles
+	// replaces a single (framework, variant) row and preserves the rest, and
+	// `APPS=gombit make benchmark-footprint` is a supported subset run — so a
+	// table-wide stamp here would caption five untouched rows with a commit they
+	// never ran at (issue #266, review round 2).
+	//
+	// The unit is the row's full merge key (framework:variant), so measuring the
+	// embedded binary can never relabel the container row it did not touch.
+	if err := metadata.StampUnitFile(
+		metadata.SiblingPath(*out), metadata.GroupFootprint, row.ProvenanceUnit(),
+		metadata.Collect(context.Background(), metadata.Options{}).Provenance(),
+	); err != nil {
+		_, _ = fmt.Fprintf(stderr, "footprint: %v\n", err)
+		return 1
+	}
+
 	_, _ = fmt.Fprintf(stdout, "footprint: recorded %s/%s (cold-start median %.0fms over %d runs, idle %d B) into %s\n",
 		row.Framework, row.Variant, row.ColdStart.MedianMs, row.ColdStart.Runs, row.IdleRSSBytes, *out)
 	return 0

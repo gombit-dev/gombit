@@ -64,24 +64,169 @@ func TestMergedMetadataPostgresSentinelDistinguishesNotProvidedFromVerifiedUnkno
 	writeMetadataJSON(t, path, metadata.Metadata{PostgresResourceLimits: prior})
 
 	// Empty ("not provided", e.g. standalone benchmark-crud) keeps the prior verdict.
-	got := mergedMetadata(path, metadata.Metadata{PostgresResourceLimits: ""})
+	got, err := mergedMetadata(path, metadata.Metadata{PostgresResourceLimits: ""})
+	if err != nil {
+		t.Fatalf("mergedMetadata: %v", err)
+	}
 	if got.PostgresResourceLimits != prior {
 		t.Errorf(`empty postgres verdict should keep the prior one; got %q, want %q`, got.PostgresResourceLimits, prior)
 	}
 
 	// A verified-unknown re-run overwrites the stale verdict (does not inherit it).
 	unknown := "unknown (inspect-limits failed)"
-	got = mergedMetadata(path, metadata.Metadata{PostgresResourceLimits: unknown})
+	if got, err = mergedMetadata(path, metadata.Metadata{PostgresResourceLimits: unknown}); err != nil {
+		t.Fatalf("mergedMetadata: %v", err)
+	}
 	if got.PostgresResourceLimits != unknown {
 		t.Errorf("verified-unknown should overwrite the stale verdict; got %q, want %q", got.PostgresResourceLimits, unknown)
 	}
 
 	// A fresh real verdict overwrites too (the ordinary re-verify case).
 	fresh := "partial: memory unset"
-	got = mergedMetadata(path, metadata.Metadata{PostgresResourceLimits: fresh})
+	if got, err = mergedMetadata(path, metadata.Metadata{PostgresResourceLimits: fresh}); err != nil {
+		t.Fatalf("mergedMetadata: %v", err)
+	}
 	if got.PostgresResourceLimits != fresh {
 		t.Errorf("a fresh verdict should overwrite; got %q, want %q", got.PostgresResourceLimits, fresh)
 	}
+}
+
+// A corrupt metadata.json must fail the run with results.json untouched. It used
+// to be treated as "no prior snapshot" and overwritten with this one app's
+// record, erasing every other app's versions and limit verdicts and every unit's
+// provenance, the microbench and footprint groups included.
+func TestRunFailsWithoutWritingWhenMetadataIsCorrupt(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "metadata.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ok, err := os.ReadFile(filepath.Join("..", "..", "internal", "k6", "testdata", "summary_ok.json")) //nolint:gosec // fixed testdata golden path
+	if err != nil {
+		t.Fatalf("read golden: %v", err)
+	}
+	k6run := func(_ int, _ string, summaryPath string) error {
+		if summaryPath == "" {
+			return nil
+		}
+		return os.WriteFile(summaryPath, ok, 0o600) //nolint:gosec // summaryPath is under t.TempDir()
+	}
+	cfg := runConfig{
+		targetURL: "http://unused", framework: "gombit",
+		concurrency: []int{10}, duration: "1s", warmup: "1s", trials: 1, outDir: dir,
+	}
+	if err := run(cfg, k6run); err == nil {
+		t.Fatal("run() = nil, want an error for a corrupt metadata.json")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "results.json")); !os.IsNotExist(err) {
+		t.Errorf("results.json was written despite the metadata failure (stat err: %v)", err)
+	}
+	if data, _ := os.ReadFile(filepath.Join(dir, "metadata.json")); string(data) != "{not json" { //nolint:gosec // test-owned temp path
+		t.Errorf("the corrupt metadata.json was overwritten: %q", data)
+	}
+}
+
+// `APPS=gombit make benchmark-crud-all` is one run-crud invocation into an
+// existing snapshot, and it rewrites the whole top-level block. That rewrite must
+// not re-attribute a single row it did not measure — not a sibling CRUD app, and
+// not a footprint or microbench row in another group. The only move allowed for
+// another unit is from recorded to unrecorded (a legacy snapshot losing its
+// one-run fallback), never to a different recorded provenance.
+//
+// It starts from the committed snapshot and from the shapes that snapshot has
+// had, because every earlier test pre-stamped all units first and so never
+// exercised the fallback the real file relied on (issue #266).
+func TestSubsetRunNeverReattributesRowsItDidNotMeasure(t *testing.T) {
+	committed, err := os.ReadFile(filepath.Join("..", "..", "results", "latest", "metadata.json"))
+	if err != nil {
+		t.Fatalf("read committed snapshot: %v", err)
+	}
+	var snapshot metadata.Metadata
+	if err := json.Unmarshal(committed, &snapshot); err != nil {
+		t.Fatalf("parse committed snapshot: %v", err)
+	}
+	microOnly := snapshot
+	microOnly.Groups = map[string]map[string]metadata.Provenance{
+		metadata.GroupMicrobench: snapshot.Groups[metadata.GroupMicrobench],
+	}
+	legacy := snapshot
+	legacy.Groups = nil
+
+	ok, err := os.ReadFile(filepath.Join("..", "..", "internal", "k6", "testdata", "summary_ok.json")) //nolint:gosec // fixed testdata golden path
+	if err != nil {
+		t.Fatalf("read golden: %v", err)
+	}
+	k6run := func(_ int, _ string, summaryPath string) error {
+		if summaryPath == "" {
+			return nil
+		}
+		return os.WriteFile(summaryPath, ok, 0o600) //nolint:gosec // summaryPath is under t.TempDir()
+	}
+
+	for name, before := range map[string]metadata.Metadata{
+		"committed snapshot":        snapshot,
+		"microbench units only":     microOnly,
+		"legacy snapshot, no units": legacy,
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeMetadataJSON(t, filepath.Join(dir, "metadata.json"), before)
+			cfg := runConfig{
+				targetURL: "http://unused", framework: "gombit", frameworkVersion: "vB",
+				concurrency: []int{10}, duration: "1s", warmup: "1s", trials: 1, outDir: dir,
+			}
+			if err := run(cfg, k6run); err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			after := readMetadataJSON(t, filepath.Join(dir, "metadata.json"))
+
+			if after.UnitProvenance(metadata.GroupCRUD, "gombit").Empty() {
+				t.Error("the measured app must record its own provenance")
+			}
+			for _, u := range allUnits() {
+				if u.group == metadata.GroupCRUD && u.unit == "gombit" {
+					continue
+				}
+				was := before.UnitProvenance(u.group, u.unit)
+				now := after.UnitProvenance(u.group, u.unit)
+				if now.Empty() || sameProvenance(was, now) {
+					continue
+				}
+				t.Errorf("%s/%s was re-attributed by a run that did not measure it: %s at %s -> %s at %s",
+					u.group, u.unit, was.GitCommit, was.CPUModel, now.GitCommit, now.CPUModel)
+			}
+		})
+	}
+}
+
+type unitRef struct{ group, unit string }
+
+// allUnits is every unit the published README tables caption.
+func allUnits() []unitRef {
+	var units []unitRef
+	for _, s := range []string{"nethttp", "gin", "huma", "gombit"} {
+		units = append(units, unitRef{metadata.GroupMicrobench, s})
+	}
+	for _, fw := range []string{"django", "gin-gorm", "gombit", "laravel", "nestjs", "rails"} {
+		units = append(units, unitRef{metadata.GroupCRUD, fw}, unitRef{metadata.GroupFootprint, fw + ":container"})
+	}
+	return units
+}
+
+func sameProvenance(a, b metadata.Provenance) bool {
+	return a.ComparableTo(b) && a.Timestamp == b.Timestamp
+}
+
+func readMetadataJSON(t *testing.T, path string) metadata.Metadata {
+	t.Helper()
+	data, err := os.ReadFile(path) //nolint:gosec // test-owned temp path
+	if err != nil {
+		t.Fatalf("read metadata: %v", err)
+	}
+	var m metadata.Metadata
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("parse metadata: %v", err)
+	}
+	return m
 }
 
 func writeMetadataJSON(t *testing.T, path string, meta metadata.Metadata) {
