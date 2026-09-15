@@ -60,6 +60,26 @@ func normalizeNil(s []string) []string {
 	return s
 }
 
+// namedStringSlice is a defined slice type: its identity (and any JSON/DB
+// behavior it carries) must be preserved, not decomposed into []string.
+type namedStringSlice []string
+
+// A named type is rendered by its qualified name whatever its underlying kind —
+// a defined slice must not collapse to its underlying []string, which would drop
+// the type's own marshaling and make the mapper assign the wrong representation.
+func TestRenderGoTypePreservesNamedComposites(t *testing.T) {
+	expr, imports, err := renderGoType(reflect.TypeOf(namedStringSlice{}))
+	if err != nil {
+		t.Fatalf("renderGoType(namedStringSlice): %v", err)
+	}
+	if expr != "resourcegen.namedStringSlice" {
+		t.Fatalf("expr = %q, want qualified named type resourcegen.namedStringSlice", expr)
+	}
+	if !reflect.DeepEqual(imports, []string{"github.com/gombit-dev/gombit/resourcegen"}) {
+		t.Fatalf("imports = %v, want the defining package", imports)
+	}
+}
+
 // --- policy split: which columns land in which DTO ---
 
 func TestBuildModelResourceSplitsByPolicy(t *testing.T) {

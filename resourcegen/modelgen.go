@@ -126,6 +126,23 @@ func buildModelResource(pkg, typeName string, model any) (modelResource, error) 
 // on a type it cannot render deterministically rather than emit code that will
 // not compile.
 func renderGoType(t reflect.Type) (expr string, imports []string, err error) {
+	// A named (defined) type is rendered by its qualified name whatever its
+	// underlying kind — so a Valuer like types.Decimal, a defined scalar
+	// (type Status string), or a defined slice keeps its own identity and its
+	// JSON/DB behavior, rather than being decomposed into its underlying type.
+	// This check precedes the Kind switch, which handles only unnamed composites.
+	if pkgPath := t.PkgPath(); pkgPath != "" {
+		name := t.Name() // a type with a package path is named
+		base := pkgBase(pkgPath)
+		if !isGoIdent(base) {
+			// reflect exposes the import path, not the package's declared name; when
+			// the path's last segment is not a usable identifier (e.g. gopkg.in/x.v2)
+			// we cannot emit a correct qualifier. Fail closed rather than emit code
+			// that will not compile.
+			return "", nil, fmt.Errorf("resourcegen: cannot derive a package qualifier for %q (path segment %q is not a Go identifier); this column type is not supported yet", t.String(), base)
+		}
+		return base + "." + name, []string{pkgPath}, nil
+	}
 	switch t.Kind() {
 	case reflect.Pointer:
 		inner, imps, err := renderGoType(t.Elem())
@@ -143,14 +160,8 @@ func renderGoType(t reflect.Type) (expr string, imports []string, err error) {
 		}
 		return "[]" + inner, imps, nil
 	}
-	if pkgPath := t.PkgPath(); pkgPath != "" {
-		name := t.Name()
-		if name == "" {
-			return "", nil, fmt.Errorf("resourcegen: cannot render unnamed type %s as a DTO field", t.String())
-		}
-		return pkgBase(pkgPath) + "." + name, []string{pkgPath}, nil
-	}
-	// A predeclared type (string, int, uint, bool, float64, ...) has no package.
+	// A predeclared type (string, int, uint, bool, float64, ...) is named but has
+	// no package path.
 	if t.Name() != "" {
 		return t.Name(), nil, nil
 	}
