@@ -6,16 +6,16 @@ import (
 	"strings"
 	"sync"
 
-	"gorm.io/gorm"
 	"gorm.io/gorm/schema"
 )
 
 // FactsFromSchema is the lossless projection of a parsed GORM field into
-// FieldFacts. Soft-delete is detected by the gorm.DeletedAt TYPE via
-// IndirectFieldType (GORM dispatches its query/delete clauses on
-// reflect.New(IndirectFieldType), so both `gorm.DeletedAt` and `*gorm.DeletedAt`
-// are recognized); create/read capability comes from GORM's own Creatable/
-// Readable (the `->`/`<-` permission tags); nothing is re-derived by hand.
+// FieldFacts. Soft-delete is detected BEHAVIORALLY, the way GORM dispatches it —
+// the field's type implements the soft-delete clause interfaces (query + delete)
+// on reflect.New(IndirectFieldType) — so gorm.DeletedAt, *gorm.DeletedAt, and any
+// wrapper embedding it are all recognized, not just one concrete type. Create/read
+// capability comes from GORM's own Creatable/Readable (the `->`/`<-` permission
+// tags); nothing is re-derived by hand.
 func FactsFromSchema(f *schema.Field) FieldFacts {
 	return FieldFacts{
 		GoName:        f.Name,
@@ -23,12 +23,27 @@ func FactsFromSchema(f *schema.Field) FieldFacts {
 		PrimaryKey:    f.PrimaryKey,
 		AutoIncrement: f.AutoIncrement,
 		AutoTime:      f.AutoCreateTime != 0 || f.AutoUpdateTime != 0,
-		SoftDelete:    f.IndirectFieldType == reflect.TypeOf(gorm.DeletedAt{}),
+		SoftDelete:    isSoftDeleteField(f),
 		NotNull:       f.NotNull,
 		HasDefault:    f.HasDefaultValue,
 		Creatable:     f.Creatable,
 		Readable:      f.Readable,
 	}
+}
+
+// isSoftDeleteField reports whether GORM treats the field as a soft-delete marker:
+// its type implements both the query and delete clause interfaces GORM asserts
+// during schema parsing (scope out deleted rows, turn DELETE into an UPDATE). This
+// is the same behavioral dispatch GORM uses — matching gorm.DeletedAt and any type
+// embedding it — rather than an exact concrete-type comparison.
+func isSoftDeleteField(f *schema.Field) bool {
+	if f.IndirectFieldType == nil {
+		return false
+	}
+	v := reflect.New(f.IndirectFieldType).Interface()
+	_, query := v.(schema.QueryClausesInterface)
+	_, del := v.(schema.DeleteClausesInterface)
+	return query && del
 }
 
 // FromSchema maps a parsed GORM schema to resolver input over its EFFECTIVE

@@ -448,3 +448,52 @@ func TestUnsatisfiableRequiredColumnsMatchRuntime(t *testing.T) {
 		assertUnsatisfiable(t, &widget{}, "DeletedAt", &widget{Name: "x"})
 	})
 }
+
+// WrappedDeleted embeds gorm.DeletedAt, inheriting its soft-delete clause methods
+// without being the exact gorm.DeletedAt type.
+type WrappedDeleted struct{ gorm.DeletedAt }
+
+// GORM dispatches soft-delete behaviorally, so a wrapper embedding gorm.DeletedAt
+// IS a soft-delete marker at runtime. The adapter must classify it as soft-delete
+// (hidden), not expose it as ordinary content — verified against SQLite end to end.
+func TestSoftDeleteDetectedBehaviorally(t *testing.T) {
+	type Row struct {
+		ID        uint `gorm:"primaryKey"`
+		Name      string
+		RemovedAt WrappedDeleted
+	}
+	// Static: the wrapper is classified as soft-delete and hidden by default.
+	f := resourcepolicy.FactsFromSchema(field(t, parse(t, &Row{}), "RemovedAt"))
+	if !f.SoftDelete {
+		t.Fatalf("WrappedDeleted{gorm.DeletedAt} should map to SoftDelete=true, got %+v", f)
+	}
+	resolved, err := resourcepolicy.ResolvedFromModel(&Row{})
+	if err != nil {
+		t.Fatalf("ResolvedFromModel: %v", err)
+	}
+	if r, ok := resolvedByColumn(t, resolved)["removed_at"]; ok && (r.InRequest || r.InResponse) {
+		t.Fatalf("removed_at should be hidden (soft-delete marker), got %+v", r)
+	}
+
+	// Runtime: GORM + SQLite performs a real soft delete for the wrapper.
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "t.db")), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(&Row{}); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	row := Row{Name: "x"}
+	if err := db.Create(&row).Error; err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := db.Delete(&row).Error; err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	var visible, all int64
+	db.Model(&Row{}).Count(&visible)        // default scope hides soft-deleted rows
+	db.Unscoped().Model(&Row{}).Count(&all) // unscoped still sees the row
+	if visible != 0 || all != 1 {
+		t.Fatalf("wrapper is not soft-deleting as GORM does: visible=%d all=%d", visible, all)
+	}
+}
