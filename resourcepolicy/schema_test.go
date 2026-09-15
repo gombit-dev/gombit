@@ -298,7 +298,7 @@ func TestFactsFromSchemaSoftDeleteByType(t *testing.T) {
 			RemovedAt gorm.DeletedAt
 		}
 		sch := parse(t, &m{})
-		f := resourcepolicy.FactsFromSchema(sch, field(t, sch, "RemovedAt"))
+		f := resourcepolicy.FactsFromSchema(field(t, sch, "RemovedAt"))
 		if !f.SoftDelete {
 			t.Fatalf("RemovedAt gorm.DeletedAt should map to SoftDelete=true, got %+v", f)
 		}
@@ -312,7 +312,7 @@ func TestFactsFromSchemaSoftDeleteByType(t *testing.T) {
 			RemovedAt *gorm.DeletedAt
 		}
 		sch := parse(t, &m{})
-		f := resourcepolicy.FactsFromSchema(sch, field(t, sch, "RemovedAt"))
+		f := resourcepolicy.FactsFromSchema(field(t, sch, "RemovedAt"))
 		if !f.SoftDelete {
 			t.Fatalf("*gorm.DeletedAt should map to SoftDelete=true, got %+v", f)
 		}
@@ -377,7 +377,7 @@ func TestSchemaDerivedPermissions(t *testing.T) {
 	}
 	sch := parse(t, &permModel{})
 	facts := func(goName string) resourcepolicy.FieldFacts {
-		return resourcepolicy.FactsFromSchema(sch, field(t, sch, goName))
+		return resourcepolicy.FactsFromSchema(field(t, sch, goName))
 	}
 
 	computed := facts("Computed")
@@ -411,7 +411,7 @@ func TestSchemaDerivedPermissions(t *testing.T) {
 func assertUnsatisfiable(t *testing.T, model any, fieldName string, createInstance any) {
 	t.Helper()
 	sch := parse(t, model)
-	if _, err := resourcepolicy.Resolve(resourcepolicy.FactsFromSchema(sch, field(t, sch, fieldName)), ""); err == nil {
+	if _, err := resourcepolicy.Resolve(resourcepolicy.FactsFromSchema(field(t, sch, fieldName)), ""); err == nil {
 		t.Fatalf("resolver must reject %s (no valid create value)", fieldName)
 	}
 	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "t.db")), &gorm.Config{})
@@ -468,7 +468,7 @@ func TestSoftDeleteDetectedBehaviorally(t *testing.T) {
 	}
 	// Static: the wrapper is classified as soft-delete and hidden by default.
 	sch := parse(t, &Row{})
-	f := resourcepolicy.FactsFromSchema(sch, field(t, sch, "RemovedAt"))
+	f := resourcepolicy.FactsFromSchema(field(t, sch, "RemovedAt"))
 	if !f.SoftDelete {
 		t.Fatalf("WrappedDeleted{gorm.DeletedAt} should map to SoftDelete=true, got %+v", f)
 	}
@@ -526,7 +526,7 @@ func TestSoftDeletePointerClauseForm(t *testing.T) {
 	}
 	// Static: classified as soft-delete and hidden by default.
 	sch := parse(t, &Row{})
-	f := resourcepolicy.FactsFromSchema(sch, field(t, sch, "RemovedAt"))
+	f := resourcepolicy.FactsFromSchema(field(t, sch, "RemovedAt"))
 	if !f.SoftDelete {
 		t.Fatalf("a *gorm.SoftDeleteDeleteClause wrapper should map to SoftDelete=true, got %+v", f)
 	}
@@ -580,7 +580,7 @@ func TestGenericClauseProviderIsNotSoftDelete(t *testing.T) {
 		Note clauseful
 	}
 	sch := parse(t, &Row{})
-	f := resourcepolicy.FactsFromSchema(sch, field(t, sch, "Note"))
+	f := resourcepolicy.FactsFromSchema(field(t, sch, "Note"))
 	if f.SoftDelete {
 		t.Fatalf("a generic clause provider must not be classified soft-delete, got %+v", f)
 	}

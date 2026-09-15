@@ -11,15 +11,20 @@ import (
 )
 
 // FactsFromSchema is the lossless projection of a parsed GORM field into
-// FieldFacts. Soft-delete is read from the clauses schema.Parse already stored on
-// the schema (see softDeleteFields) — GORM's authoritative parsed result — so
-// gorm.DeletedAt, *gorm.DeletedAt, and any wrapper whose DeleteClauses rewrite
-// DELETE into an UPDATE are recognized, in either the value or pointer clause
-// form, while a generic clause provider that hard-deletes is not. Create/read
-// capability comes from GORM's own Creatable/Readable (the `->`/`<-` permission
-// tags); nothing is re-derived by hand.
-func FactsFromSchema(sch *schema.Schema, f *schema.Field) FieldFacts {
-	return factsFromSchema(f, softDeleteFields(sch)[f])
+// FieldFacts. Soft-delete is read from the clauses schema.Parse stored on the
+// field's own owning schema (f.Schema, which GORM sets during parse) — its
+// authoritative parsed result — so gorm.DeletedAt, *gorm.DeletedAt, and any
+// wrapper whose DeleteClauses rewrite DELETE into an UPDATE are recognized, in
+// either the value or pointer clause form, while a generic clause provider that
+// hard-deletes is not. Create/read capability comes from GORM's own
+// Creatable/Readable (the `->`/`<-` permission tags); nothing is re-derived by
+// hand. The field carries its own owner, so callers pass only the field.
+func FactsFromSchema(f *schema.Field) FieldFacts {
+	softDelete := false
+	if f.Schema != nil {
+		softDelete = softDeleteFields(f.Schema)[f]
+	}
+	return factsFromSchema(f, softDelete)
 }
 
 // factsFromSchema builds the projection given the field's precomputed soft-delete
