@@ -735,3 +735,28 @@ jobs:
           -conformance.dsn
           'gombit:gombit@tcp(127.0.0.1:3306)/gombit?parseTime=true'
           -count=1
+# Informational, not a gate (mirrors gombit-docs' CI). The vulnerabilities
+  # govulncheck surfaces are overwhelmingly in the pinned Go standard library
+  # (fixed by a toolchain patch bump, not by any application change here);
+  # hard-gating on them would keep CI red through no fault of a PR. Bumping the
+  # Go toolchain to clear stdlib advisories is tracked separately.
+  govulncheck:
+    name: govulncheck (informational)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Dependency vulnerabilities (govulncheck)
+        continue-on-error: true
+        env:
+          GOTOOLCHAIN: auto
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          "$(go env GOPATH)/bin/govulncheck" ./...
