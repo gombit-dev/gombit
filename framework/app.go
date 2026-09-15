@@ -749,9 +749,10 @@ func runtimeMiddlewareStack(cfg config.Config, metrics *httpMetrics, csrfExemptP
 		// request can force — including on raw app.Router() routes that call
 		// ShouldBindJSON. This is separate from sanitization: the bound used to
 		// live incidentally inside the input sanitizer, which #271 made opt-in, so
-		// it now stands on its own and protects every app. WithRawBodyPaths are
-		// exempt (a signature-verifying webhook keeps its exact bytes), as before.
-		{name: "request_body_limit", handler: requestBodyLimitMiddleware(rawBodyPaths...)},
+		// it now stands on its own and protects every app. It applies to raw-body
+		// webhooks too — bounding the read does not alter accepted bytes, so a
+		// signature still verifies over the exact body the handler reads.
+		{name: "request_body_limit", handler: requestBodyLimitMiddleware()},
 	}
 	// Input sanitization is opt-in (issue #271 / PERF-13). The default pipeline
 	// does not rewrite request input: XSS is an output-encoding concern — the

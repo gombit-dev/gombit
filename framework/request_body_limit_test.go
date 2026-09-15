@@ -126,34 +126,113 @@ func TestRequestBodyLimitAllowsBodyUnderCap(t *testing.T) {
 	}
 }
 
-// TestRequestBodyLimitExemptsRawBodyPaths locks the parity decision: a
-// WithRawBodyPaths path keeps its exact bytes and is not subject to the size
-// gate (as it was before #271 — the sanitizer, and thus its cap, skipped these
-// paths entirely so a webhook signature verifies over the original body).
-func TestRequestBodyLimitExemptsRawBodyPaths(t *testing.T) {
+// TestRequestBodyLimitAppliesToRawBodyPaths locks the #271 review decision: the
+// size gate is NOT bypassed for WithRawBodyPaths. Bounding the read does not
+// alter accepted bytes, so a webhook still gets its exact body for signature
+// verification — but it no longer gets an unlimited body. An oversized webhook
+// body is rejected with a 413 before the handler runs; a within-cap one reaches
+// the handler byte-for-byte.
+func TestRequestBodyLimitAppliesToRawBodyPaths(t *testing.T) {
 	cfg := config.Default()
 	cfg.Environment = config.EnvironmentTest
 	cfg.HTTP.Addr = "127.0.0.1:0"
 	app := newTestApp(t, WithConfig(cfg), WithRawBodyPaths("/webhooks/github"))
 
-	var gotLen int
+	handlerRan := false
+	var gotBody string
 	app.Router().POST("/webhooks/github", func(c *gin.Context) {
+		handlerRan = true
 		b, _ := io.ReadAll(c.Request.Body)
-		gotLen = len(b)
+		gotBody = string(b)
 		c.Status(http.StatusOK)
 	})
 
-	body := oversizedJSONBody()
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/webhooks/github", strings.NewReader(body))
+	// Oversized: rejected before the handler runs, even on a raw-body path.
+	oversized := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/github", strings.NewReader(oversizedJSONBody()))
 	req.Header.Set("Content-Type", "application/json")
+	app.Router().ServeHTTP(oversized, req)
+	if oversized.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized raw-body status = %d, want 413 (raw paths are no longer exempt); body: %s", oversized.Code, oversized.Body.String())
+	}
+	if handlerRan {
+		t.Fatal("webhook handler ran on an oversized body — the size gate must reject before dispatch")
+	}
+
+	// Within cap: reaches the handler byte-for-byte, so a signature still verifies.
+	const signed = `{"event":"push","ref":"refs/heads/main"}`
+	ok := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodPost, "/webhooks/github", strings.NewReader(signed))
+	req2.Header.Set("Content-Type", "application/json")
+	app.Router().ServeHTTP(ok, req2)
+	if ok.Code != http.StatusOK {
+		t.Fatalf("within-cap raw-body status = %d, want 200; body: %s", ok.Code, ok.Body.String())
+	}
+	if gotBody != signed {
+		t.Fatalf("handler read %q, want the body byte-for-byte %q", gotBody, signed)
+	}
+}
+
+// TestRequestBodyLimitRejectsOversizedChunkedJSON is the #271-review regression
+// guard for chunked transfer (ContentLength == -1): with no declared length the
+// gate must still reject an oversized body with a D10 413 before the handler
+// runs, not merely bound the read and let the handler ignore a read error.
+func TestRequestBodyLimitRejectsOversizedChunkedJSON(t *testing.T) {
+	app := newTestApp(t)
+
+	handlerRan := false
+	app.Router().POST("/echo", func(c *gin.Context) {
+		handlerRan = true
+		b, _ := io.ReadAll(c.Request.Body)
+		c.JSON(http.StatusOK, gin.H{"len": len(b)})
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/echo", strings.NewReader(oversizedJSONBody()))
+	req.Header.Set("Content-Type", "application/json")
+	req.ContentLength = -1 // simulate chunked transfer: length unknown up front
+	app.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("chunked oversized status = %d, want 413; body: %s", rec.Code, rec.Body.String())
+	}
+	if handlerRan {
+		t.Fatal("handler ran on an oversized chunked body — the gate must reject before dispatch")
+	}
+	var env contract.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode error envelope: %v; body: %s", err, rec.Body.String())
+	}
+	if env.Body.Code != contract.CodePayloadTooLarge {
+		t.Fatalf("code = %q, want %q (D10 413)", env.Body.Code, contract.CodePayloadTooLarge)
+	}
+}
+
+// TestRequestBodyLimitRestoresChunkedBodyUnderCap confirms the unknown-length
+// path restores a within-cap body byte-for-byte for the handler after the gate
+// buffered it to check the size.
+func TestRequestBodyLimitRestoresChunkedBodyUnderCap(t *testing.T) {
+	app := newTestApp(t)
+
+	var gotBody string
+	app.Router().POST("/echo", func(c *gin.Context) {
+		b, _ := io.ReadAll(c.Request.Body)
+		gotBody = string(b)
+		c.Status(http.StatusOK)
+	})
+
+	const payload = `{"comment":"<b>hi</b> a < b"}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/echo", strings.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	req.ContentLength = -1
 	app.Router().ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (raw-body path is exempt from the size gate); body: %s", rec.Code, rec.Body.String())
+		t.Fatalf("chunked under-cap status = %d, want 200; body: %s", rec.Code, rec.Body.String())
 	}
-	if gotLen != len(body) {
-		t.Fatalf("handler read %d bytes, want the full %d — a raw-body path must reach the handler unmodified", gotLen, len(body))
+	if gotBody != payload {
+		t.Fatalf("handler read %q, want the body restored byte-for-byte %q", gotBody, payload)
 	}
 }
 

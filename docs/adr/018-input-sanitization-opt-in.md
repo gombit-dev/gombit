@@ -50,12 +50,20 @@ explicit, narrower opt-ins.**
 2. **The request-size bound is separated, not removed.** The old sanitizer
    incidentally capped JSON bodies at 8 MiB (it buffered the body to strip it).
    That bound is a memory-safety concern, not a sanitization one, so it now
-   lives in its own always-on `request_body_limit` middleware: an oversized JSON
-   `POST`/`PUT`/`PATCH` is rejected with a D10 413 before any handler runs
-   (including a raw `app.Router()` handler that calls `ShouldBindJSON`), and a
-   streamed body is bounded by `http.MaxBytesReader`. It never decodes or
-   mutates the body, so an app gets the bound without opting into input
-   rewriting. `WithRawBodyPaths` stay exempt, exactly as under the old sanitizer.
+   lives in its own always-on `request_body_limit` middleware. An oversized JSON
+   `POST`/`PUT`/`PATCH` is rejected with a D10 413 **before any handler runs**,
+   on every route — including raw `app.Router()` handlers that call
+   `ShouldBindJSON`. A declared over-cap `Content-Length` is refused without a
+   read; a chunked body (`Content-Length` unknown) is read up to the cap + 1 to
+   decide before dispatch and, if within the cap, restored byte-for-byte for the
+   handler. It never decodes or re-encodes the body, so an app gets the bound
+   without opting into input rewriting. **`WithRawBodyPaths` do not bypass it**
+   (a review-driven change from the first cut): bounding the read does not alter
+   accepted bytes, so a webhook still verifies its signature over the exact body
+   it reads, and the most attacker-exposed routes are not left unbounded. A
+   future app that genuinely needs a larger cap gets an explicit body-limit
+   configuration, not an unlimited-body switch smuggled through an input-fidelity
+   option.
 3. **Per-app opt-in:** `Security.SanitizeInput`
    (`GOMBIT_SECURITY_SANITIZE_INPUT`, default `false`) installs today's
    middleware unchanged, including its `password`-key exemption, the #201

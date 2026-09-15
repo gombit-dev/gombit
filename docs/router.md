@@ -118,8 +118,10 @@ Other behavior notes (they describe the opt-in layer):
   which a webhook can't, since it verifies a signature over the *original*
   bytes. Mark such paths with
   [`framework.WithRawBodyPaths`](auth-cookie.md#exempting-non-browser-endpoints-webhooks):
-  they skip sanitization entirely (and the 8MiB cap below), so the body reaches
-  the handler byte-for-byte, and they are CSRF-exempt too.
+  they skip sanitization entirely, so the body reaches the handler
+  byte-for-byte, and they are CSRF-exempt too. (They are **not** exempt from the
+  8MiB body-size limit below — bounding the read does not alter the bytes, so a
+  signature still verifies.)
 - Unclosed dangerous elements (for example a truncated `<script>…`) strip the
   tag itself but keep the text that follows; only the content of a *properly
   closed* dangerous element is discarded. That recovered text is re-parsed, so
@@ -138,10 +140,13 @@ Other behavior notes (they describe the opt-in layer):
 - JSON request bodies are capped at 8MiB by the always-on **request body size
   limit** layer (`request_body_limit`), independent of whether sanitization is
   enabled. A larger JSON `POST`/`PUT`/`PATCH` body aborts with HTTP 413 and a
-  D10 error envelope (`payload_too_large`) before any handler runs — including a
-  raw `app.Router()` handler that calls `ShouldBindJSON` — and a streamed body
-  is bounded mid-read by `http.MaxBytesReader`. `WithRawBodyPaths` are exempt
-  (a signature-verifying webhook keeps its exact bytes). The `http.Server`
+  D10 error envelope (`payload_too_large`) **before any handler runs** — on
+  every route, including a raw `app.Router()` handler that calls
+  `ShouldBindJSON`. A declared over-cap `Content-Length` is refused without a
+  read; a chunked body (unknown length) is read up to the cap + 1 to decide
+  before dispatch and, if within the cap, restored byte-for-byte. It never
+  decodes or re-encodes the body, so `WithRawBodyPaths` webhooks get the bound
+  too and still verify a signature over their exact bytes. The `http.Server`
   read/write/idle timeouts are a separate, time-based safety net (they take
   `GOMBIT_HTTP_REQUEST_TIMEOUT` when set and fall back to 60s otherwise);
   a context deadline does not abort `Body.Read`, so the size cap and the

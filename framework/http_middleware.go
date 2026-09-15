@@ -1,9 +1,11 @@
 package framework
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"net/http"
 	"regexp"
 	"sort"
@@ -38,25 +40,16 @@ var traceparentPattern = regexp.MustCompile(`^[0-9a-f]{2}-([0-9a-f]{32})-[0-9a-f
 // remains future work (docs/router.md); this is the fixed default cap.
 const maxRequestBodyBytes int64 = 8 << 20
 
-// requestBodyLimitMiddleware rejects an oversized JSON request body before any
-// handler runs, and bounds a streamed body mid-read. It never decodes or
-// mutates the body — size enforcement is independent of the opt-in input
-// sanitizer (issue #271 / PERF-13), so an app gets the memory bound without
-// opting into input rewriting. It covers the same requests the sanitizer's old
-// buffering cap did — JSON POST/PUT/PATCH — with WithRawBodyPaths exempt so a
-// signature-verifying webhook keeps its exact bytes, exactly as before.
-func requestBodyLimitMiddleware(exemptPaths ...string) gin.HandlerFunc {
-	exempt := make(map[string]struct{}, len(exemptPaths))
-	for _, path := range exemptPaths {
-		if path = strings.TrimSpace(path); path != "" {
-			exempt[path] = struct{}{}
-		}
-	}
+// requestBodyLimitMiddleware rejects an oversized JSON request body with a D10
+// 413 before any handler runs. It never decodes or re-encodes the body — size
+// enforcement is independent of the opt-in input sanitizer (issue #271 /
+// PERF-13), so an app gets the memory bound without opting into input
+// rewriting. It applies to every JSON POST/PUT/PATCH route, including raw
+// app.Router() handlers and WithRawBodyPaths webhooks: bounding the read does
+// not alter the accepted bytes, so a signature still verifies over the exact
+// body the handler reads.
+func requestBodyLimitMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if _, ok := exempt[c.Request.URL.Path]; ok {
-			c.Next()
-			return
-		}
 		switch c.Request.Method {
 		case http.MethodPost, http.MethodPut, http.MethodPatch:
 		default:
@@ -71,18 +64,42 @@ func requestBodyLimitMiddleware(exemptPaths ...string) gin.HandlerFunc {
 			c.Next()
 			return
 		}
-		// A client-declared length over the cap is rejected before the handler
-		// reads a byte — the common path, since Content-Length is set on ordinary
-		// requests.
-		if c.Request.ContentLength > maxRequestBodyBytes {
+
+		// Known length (the common path): net/http already bounds the delivered
+		// body to ContentLength, so an over-cap declared length is rejected
+		// without reading a byte, and a body at or under the cap needs no
+		// buffering — it passes through untouched.
+		if c.Request.ContentLength >= 0 {
+			if c.Request.ContentLength > maxRequestBodyBytes {
+				abortWithErrorEnvelope(c, contract.PayloadTooLarge("JSON body exceeds the 8MiB limit"))
+				return
+			}
+			c.Next()
+			return
+		}
+
+		// Unknown length (chunked transfer, ContentLength == -1): the declared
+		// check cannot fire, so read up to the cap + 1 to decide before dispatch.
+		// A body within the cap is restored byte-for-byte for the handler; an
+		// oversized one is rejected with a D10 413 before c.Next(), so the
+		// framework owns the response instead of leaving the handler to notice a
+		// read error it may ignore.
+		buf, err := io.ReadAll(io.LimitReader(c.Request.Body, maxRequestBodyBytes+1))
+		_ = c.Request.Body.Close()
+		if err != nil {
+			// A read failure on the stream: hand the handler/Huma an empty body so
+			// it emits its own validation error rather than a broken read.
+			c.Request.Body = io.NopCloser(bytes.NewReader(nil))
+			c.Next()
+			return
+		}
+		if int64(len(buf)) > maxRequestBodyBytes {
+			c.Request.Body = io.NopCloser(bytes.NewReader(nil))
 			abortWithErrorEnvelope(c, contract.PayloadTooLarge("JSON body exceeds the 8MiB limit"))
 			return
 		}
-		// A chunked or misdeclared body (ContentLength < 0, or a lying length) is
-		// bounded during read instead: MaxBytesReader errors past the cap, so a
-		// handler's ShouldBindJSON / Huma's decode fails rather than allocating
-		// without limit.
-		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxRequestBodyBytes)
+		c.Request.Body = io.NopCloser(bytes.NewReader(buf))
+		c.Request.ContentLength = int64(len(buf))
 		c.Next()
 	}
 }
