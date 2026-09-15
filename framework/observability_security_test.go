@@ -26,20 +26,46 @@ func TestDefaultRuntimeMiddlewareOrder(t *testing.T) {
 		got = append(got, middleware.name)
 	}
 
-	// There is no standalone request_timeout layer: #268 folded the per-handler
-	// deadline into request_context. The opt-in nature of the timeout (issue
-	// #270) is a config default (0) plus applyTimeout's no-op path, covered by
-	// TestRequestContextMiddlewareDisabledTimeoutImposesNoDeadline and
-	// TestRequestContextDisabledTimeoutAllocationBudget.
+	// No standalone request_timeout layer (#268 folded the deadline into
+	// request_context; its opt-in nature — issue #270 — is a config default of 0
+	// plus applyTimeout's no-op path). No xss layer either: config.Default()
+	// leaves Security.SanitizeInput false, so sanitization is opt-in (issue
+	// #271). request_body_limit is always on — the size bound is independent of
+	// sanitization. TestSanitizeInputOptInInstallsXSSLayer covers the xss
+	// on/off cases.
 	want := []string{
 		"recovery",
 		"request_context",
 		"metrics",
 		"security_headers",
-		"xss",
+		"request_body_limit",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("runtime middleware order = %v, want %v", got, want)
+	}
+}
+
+// TestSanitizeInputOptInInstallsXSSLayer locks issue #271 / PERF-13: the input
+// sanitizer is installed only when Security.SanitizeInput is set, and is absent
+// from the default stack.
+func TestSanitizeInputOptInInstallsXSSLayer(t *testing.T) {
+	hasXSS := func(cfg config.Config) bool {
+		for _, mw := range runtimeMiddlewareStack(cfg, newHTTPMetrics(), nil, nil) {
+			if mw.name == "xss" {
+				return true
+			}
+		}
+		return false
+	}
+
+	if hasXSS(config.Default()) {
+		t.Error("xss layer installed by default; want it opt-in (Security.SanitizeInput)")
+	}
+
+	on := config.Default()
+	on.Security.SanitizeInput = true
+	if !hasXSS(on) {
+		t.Error("xss layer missing with Security.SanitizeInput enabled")
 	}
 }
 
@@ -876,53 +902,89 @@ func TestRunContextServesMetricsWithRuntimeMiddleware(t *testing.T) {
 	}
 }
 
-func TestDefaultRouterSanitizesXSSInJSONBody(t *testing.T) {
+// sanitizeInputApp builds a test App with input sanitization opted in
+// (Security.SanitizeInput), the non-default path after issue #271 / PERF-13.
+func sanitizeInputApp(t *testing.T) *App {
+	t.Helper()
+	cfg := config.Default()
+	cfg.Environment = config.EnvironmentTest
+	cfg.HTTP.Addr = "127.0.0.1:0"
+	cfg.Security.SanitizeInput = true
+	return newTestApp(t, WithConfig(cfg))
+}
+
+// TestDefaultRouterDoesNotSanitizeInput locks the #271 / PERF-13 default: a
+// default App does not rewrite request input, so the string *values* in both a
+// JSON body and a query reach the handler unchanged. It asserts value
+// preservation (decoded field values), not byte-for-byte identity — the
+// response envelope re-encodes JSON. XSS is handled on output (React JSX text
+// escaping; a JSON response is not an HTML sink), and stripping on ingress would
+// corrupt faithful values like `x < y` or a stored `<b>bold</b>`.
+func TestDefaultRouterDoesNotSanitizeInput(t *testing.T) {
 	app := newTestApp(t)
-	app.Router().POST("/comment", func(c *gin.Context) {
-		var body struct {
-			Comment string `json:"comment"`
-		}
+	app.Router().POST("/echo", func(c *gin.Context) {
+		var body map[string]any
 		if err := c.ShouldBindJSON(&body); err != nil {
 			t.Fatalf("bind JSON: %v", err)
 		}
-		c.JSON(http.StatusOK, gin.H{"comment": body.Comment})
+		c.JSON(http.StatusOK, body)
+	})
+	app.Router().GET("/search", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"q": c.Query("q")})
 	})
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(
 		http.MethodPost,
-		"/comment",
-		strings.NewReader(`{"comment":"<script>alert(1)</script>hi"}`),
+		"/echo",
+		strings.NewReader(`{"description":"x < y","note":"<b>bold</b>","comment":"<script>alert(1)</script>hi"}`),
 	)
-	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	req.Header.Set("Content-Type", "application/json")
 	app.Router().ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
-		t.Fatalf("POST /comment status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
+		t.Fatalf("POST /echo status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 	var body map[string]string
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("unmarshal response: %v; body: %s", err, rec.Body.String())
 	}
-	if body["comment"] != "hi" {
-		t.Fatalf("comment = %q, want %q", body["comment"], "hi")
+	for field, want := range map[string]string{
+		"description": "x < y",
+		"note":        "<b>bold</b>",
+		"comment":     "<script>alert(1)</script>hi",
+	} {
+		if body[field] != want {
+			t.Fatalf("%s = %q, want unmodified %q — default App must not sanitize input", field, body[field], want)
+		}
+	}
+
+	qrec := httptest.NewRecorder()
+	app.Router().ServeHTTP(qrec, httptest.NewRequest(http.MethodGet, "/search?q=<script>x</script>hi", nil))
+	var qbody map[string]string
+	if err := json.Unmarshal(qrec.Body.Bytes(), &qbody); err != nil {
+		t.Fatalf("unmarshal query response: %v; body: %s", err, qrec.Body.String())
+	}
+	if qbody["q"] != "<script>x</script>hi" {
+		t.Fatalf("q = %q, want unmodified query value", qbody["q"])
 	}
 }
 
-func TestDefaultRouterLeavesPasswordFieldUnsanitized(t *testing.T) {
-	app := newTestApp(t)
+// TestSanitizeInputOptInSanitizesJSONBody proves the opt-in path (issue #271)
+// restores today's ingress behavior: JSON string values are stripped to plain
+// text, and the exact key "password" is exempt.
+func TestSanitizeInputOptInSanitizesJSONBody(t *testing.T) {
+	app := sanitizeInputApp(t)
 	app.Router().POST("/login", func(c *gin.Context) {
 		var body struct {
+			Comment  string `json:"comment"`
 			Password string `json:"password"`
 			Note     string `json:"note"`
 		}
 		if err := c.ShouldBindJSON(&body); err != nil {
 			t.Fatalf("bind JSON: %v", err)
 		}
-		c.JSON(http.StatusOK, gin.H{
-			"password": body.Password,
-			"note":     body.Note,
-		})
+		c.JSON(http.StatusOK, gin.H{"comment": body.Comment, "password": body.Password, "note": body.Note})
 	})
 
 	const rawMarkup = `<b>secret</b>`
@@ -930,9 +992,9 @@ func TestDefaultRouterLeavesPasswordFieldUnsanitized(t *testing.T) {
 	req := httptest.NewRequest(
 		http.MethodPost,
 		"/login",
-		strings.NewReader(`{"password":"`+rawMarkup+`","note":"<i>hi</i>"}`),
+		strings.NewReader(`{"comment":"<script>alert(1)</script>hi","password":"`+rawMarkup+`","note":"<i>hi</i>"}`),
 	)
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", "application/json; charset=utf-8")
 	app.Router().ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
@@ -942,11 +1004,14 @@ func TestDefaultRouterLeavesPasswordFieldUnsanitized(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("unmarshal response: %v; body: %s", err, rec.Body.String())
 	}
-	if body["password"] != rawMarkup {
-		t.Fatalf("password = %q, want unsanitized %q", body["password"], rawMarkup)
+	if body["comment"] != "hi" {
+		t.Fatalf("comment = %q, want sanitized %q", body["comment"], "hi")
 	}
 	if body["note"] != "hi" {
-		t.Fatalf("note = %q, want %q", body["note"], "hi")
+		t.Fatalf("note = %q, want sanitized %q", body["note"], "hi")
+	}
+	if body["password"] != rawMarkup {
+		t.Fatalf("password = %q, want the password field left unsanitized %q", body["password"], rawMarkup)
 	}
 }
 
@@ -987,15 +1052,16 @@ func TestRequestCorrelationHeaderSharedArrayContract(t *testing.T) {
 	}
 }
 
-func TestDefaultRouterSanitizesXSSInQuery(t *testing.T) {
-	app := newTestApp(t)
+// TestSanitizeInputOptInSanitizesQuery is the query-value half of the opt-in
+// path.
+func TestSanitizeInputOptInSanitizesQuery(t *testing.T) {
+	app := sanitizeInputApp(t)
 	app.Router().GET("/search", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"q": c.Query("q")})
 	})
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/search?q=<script>x</script>hi", nil)
-	app.Router().ServeHTTP(rec, req)
+	app.Router().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/search?q=<script>x</script>hi", nil))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /search status = %d, want %d; body: %s", rec.Code, http.StatusOK, rec.Body.String())
@@ -1005,6 +1071,17 @@ func TestDefaultRouterSanitizesXSSInQuery(t *testing.T) {
 		t.Fatalf("unmarshal response: %v; body: %s", err, rec.Body.String())
 	}
 	if body["q"] != "hi" {
-		t.Fatalf("q = %q, want %q", body["q"], "hi")
+		t.Fatalf("q = %q, want sanitized %q", body["q"], "hi")
+	}
+}
+
+// TestSanitizeHTMLExported locks the exported field-level helper (issue #271):
+// it strips markup like the middleware, and leaves comparison text alone.
+func TestSanitizeHTMLExported(t *testing.T) {
+	if got := SanitizeHTML("<script>alert(1)</script>hi"); got != "hi" {
+		t.Fatalf("SanitizeHTML(script) = %q, want %q", got, "hi")
+	}
+	if got := SanitizeHTML("x < y"); got != "x < y" {
+		t.Fatalf("SanitizeHTML(comparison) = %q, want it unchanged", got)
 	}
 }

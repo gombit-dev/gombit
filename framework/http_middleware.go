@@ -1,9 +1,11 @@
 package framework
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"net/http"
 	"regexp"
 	"sort"
@@ -27,6 +29,110 @@ const TraceIDHeader = "X-Trace-Id"
 const traceIDLen = 32
 
 var traceparentPattern = regexp.MustCompile(`^[0-9a-f]{2}-([0-9a-f]{32})-[0-9a-f]{16}-[0-9a-f]{2}$`)
+
+// maxRequestBodyBytes bounds a JSON request body (8 MiB). It caps the memory a
+// single request can force the framework — or a raw app.Router() handler that
+// calls ShouldBindJSON — to allocate. This size bound used to live incidentally
+// inside the input sanitizer's buffering; issue #271 / PERF-13 made
+// sanitization opt-in, so the bound now stands on its own in
+// requestBodyLimitMiddleware, in the default runtime stack, whether or not
+// sanitization is enabled. A first-class, per-route configurable body-size
+// middleware remains future work (docs/router.md); this is the fixed default cap.
+const maxRequestBodyBytes int64 = 8 << 20
+
+// requestBodyLimitMiddleware rejects an oversized JSON request body with a D10
+// 413 before any handler runs, bounding the memory a single request can force.
+// It never decodes or re-encodes the body — size enforcement is independent of
+// the opt-in input sanitizer (issue #271 / PERF-13), so an app gets the bound
+// without opting into input rewriting. It applies to every JSON POST/PUT/PATCH
+// route on the framework's default router, including raw app.Router() handlers
+// and WithRawBodyPaths webhooks: bounding the read does not alter the accepted
+// bytes, so a signature still verifies over the exact body the handler reads.
+//
+// This layer lives in runtimeMiddlewareStack, which framework.New installs only
+// on the router it builds. An application that supplies its own router with
+// framework.WithRouter owns its entire middleware stack — this limit, and the
+// rest of the runtime stack, are not installed for it. See docs/router.md.
+//
+// Scope: this bounds JSON bodies only (Content-Type application/json). A
+// non-JSON body — a multipart upload, text/plain, or a request with no
+// Content-Type — is NOT size-limited here; a raw handler that reads such a body
+// owns its own bound. Bounding every content type by default would break
+// legitimate large uploads, so a first-class, per-route configurable body-size
+// middleware is deferred (docs/router.md, build plan §13.3); this is the fixed
+// JSON default cap.
+//
+// Two paths, both enforcing the cap through this layer rather than trusting the
+// caller: a known Content-Length is checked directly and the accepted body is
+// then wrapped in http.MaxBytesReader (cheap, no buffering) so a lying small
+// length still cannot make a handler read past the cap; a chunked body (unknown
+// length) is buffered up to the cap+1 to decide before dispatch. Do NOT
+// "optimize" the chunked buffering away — it is what makes the pre-dispatch 413
+// deterministic on the streamed path.
+func requestBodyLimitMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		switch c.Request.Method {
+		case http.MethodPost, http.MethodPut, http.MethodPatch:
+		default:
+			c.Next()
+			return
+		}
+		if c.Request.Body == nil || c.Request.Body == http.NoBody {
+			c.Next()
+			return
+		}
+		if !isJSONContentType(c.Request.Header.Get("Content-Type")) {
+			c.Next()
+			return
+		}
+
+		// Known length (the common path): an over-cap declared length is rejected
+		// without reading a byte. An at/under-cap body needs no buffering, but it
+		// is wrapped in MaxBytesReader so the bound is enforced by this layer — a
+		// lying small Content-Length cannot make a handler read past the cap. For
+		// a well-behaved request (delivered bytes <= declared length <= cap) the
+		// wrapper never fires, so this stays allocation-cheap.
+		if c.Request.ContentLength >= 0 {
+			if c.Request.ContentLength > maxRequestBodyBytes {
+				abortWithErrorEnvelope(c, contract.PayloadTooLarge("JSON body exceeds the 8MiB limit"))
+				return
+			}
+			c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxRequestBodyBytes)
+			c.Next()
+			return
+		}
+
+		// Unknown length (chunked transfer, ContentLength == -1): the declared
+		// check cannot fire, so read up to the cap + 1 to decide before dispatch.
+		// A body within the cap is restored byte-for-byte for the handler; an
+		// oversized one is rejected with a D10 413 before c.Next(), so the
+		// framework owns the response instead of leaving the handler to notice a
+		// read error it may ignore.
+		buf, err := io.ReadAll(io.LimitReader(c.Request.Body, maxRequestBodyBytes+1))
+		_ = c.Request.Body.Close()
+		if err != nil {
+			// The middleware consumed (part of) the stream and it failed mid-read
+			// — a truncated or broken request body. Having taken the read, the
+			// middleware owns the failure: abort with a stable D10 client error
+			// before any handler runs, rather than fabricating an empty body and
+			// letting a handler treat a broken request as a valid empty one (a raw
+			// handler that does not validate would otherwise answer 2xx).
+			abortWithErrorEnvelope(c, contract.Validation("The request body could not be read.", nil))
+			return
+		}
+		if int64(len(buf)) > maxRequestBodyBytes {
+			abortWithErrorEnvelope(c, contract.PayloadTooLarge("JSON body exceeds the 8MiB limit"))
+			return
+		}
+		// The body is fully buffered now, so the request is a fixed-length one:
+		// set ContentLength and clear the chunked Transfer-Encoding so the handler
+		// does not observe the impossible ContentLength>=0 + chunked framing.
+		c.Request.Body = io.NopCloser(bytes.NewReader(buf))
+		c.Request.ContentLength = int64(len(buf))
+		c.Request.TransferEncoding = nil
+		c.Next()
+	}
+}
 
 // applyTimeout returns ctx bounded by a timeout deadline, along with a cancel to
 // run when the request completes. It is a no-op in two cases, returning ctx

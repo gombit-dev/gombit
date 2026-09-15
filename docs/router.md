@@ -54,7 +54,8 @@ Recovery
      GOMBIT_HTTP_REQUEST_TIMEOUT > 0 — the per-handler deadline; #268)
   -> request metrics
   -> security headers
-  -> XSS HTML-tag sanitization (request input)
+  -> request body size limit (JSON POST/PUT/PATCH; 413 over 8MiB; default router)
+  -> XSS HTML-tag sanitization (request input; only when GOMBIT_SECURITY_SANITIZE_INPUT=true)
   -> Bearer JWT middleware on protected Huma operations (`GET /me`)
   -> feature group middleware (if any)
     -> feature handler
@@ -74,21 +75,36 @@ closes the connection, and a long-running DB query is not cancelled unless the
 app enables the timeout or sets its own deadline. See
 `docs/adr/017-request-timeout-opt-in.md`.
 
-XSS sanitization is a fundamental security default (M1-8): response headers
-alone are not enough. The runtime strips HTML tags from JSON string fields
-(POST/PUT/PATCH) and GET query values using a first-party sanitizer built on
-`golang.org/x/net/html`.
+**Input sanitization is opt-in** (issue
+[#271](https://github.com/gombit-dev/gombit/issues/271) / PERF-13). By default a
+Gombit app **does not** rewrite request input, so the values in
+`{"description":"x < y"}` or a literal `<b>bold</b>` reach handlers intact. XSS
+is an output-encoding concern, and the controls Gombit ships are on output — the
+React frontend escapes text (JSX), the framework admin is a React SPA that
+renders values as text (there is no server-rendered `html/template` admin path),
+a JSON response is not an HTML sink, and the response CSP is a backstop.
+Stripping markup on ingress instead corrupts those values, besides costing
+allocations on every write request. See
+[security.md § Input sanitization](security.md#input-sanitization-opt-in) for
+the posture and [ADR-018](adr/018-input-sanitization-opt-in.md).
+
+Set `Security.SanitizeInput` (`GOMBIT_SECURITY_SANITIZE_INPUT=true`) to install
+the sanitizer. It strips HTML tags from JSON string fields (POST/PUT/PATCH) and
+GET query values using a first-party sanitizer built on `golang.org/x/net/html`.
+For a single field, call `framework.SanitizeHTML(s)` from a handler instead of
+turning the whole pipeline back on. The rest of this section describes the
+behavior of that opt-in layer.
 
 **Why first-party (not the template wrapper):** the template's
-`pkg/middleware/xss.go` is a thin wrapper around
-`gin-gonic-xss-middleware` (Bluemonday). M1-8 keeps the *behavior*
-(strip HTML tags from request input before handlers) but does not take that
-Gin wrapper or Bluemonday as a dependency — both were rejected for hygiene
-(stale/unmaintained surface). The framework owns a small sanitizer on
-`golang.org/x/net/html`, which was already in the module graph. This is an
-intentional, documented divergence from extract-preserve for that one package.
+`pkg/middleware/xss.go` is a thin wrapper around `gin-gonic-xss-middleware`
+(Bluemonday). The framework keeps the *behavior* (strip HTML tags from request
+input) but does not take that Gin wrapper or Bluemonday as a dependency — both
+were rejected for hygiene (stale/unmaintained surface). The framework owns a
+small sanitizer on `golang.org/x/net/html`, which was already in the module
+graph. This is an intentional, documented divergence from extract-preserve for
+that one package.
 
-Other behavior notes:
+Other behavior notes (they describe the opt-in layer):
 
 - The `password` exemption is an **exact, case-sensitive** JSON/query key
   match (`password` only). `Password` and other casings are still sanitized.
@@ -102,8 +118,10 @@ Other behavior notes:
   which a webhook can't, since it verifies a signature over the *original*
   bytes. Mark such paths with
   [`framework.WithRawBodyPaths`](auth-cookie.md#exempting-non-browser-endpoints-webhooks):
-  they skip sanitization entirely (and the 8MiB cap below), so the body reaches
-  the handler byte-for-byte, and they are CSRF-exempt too.
+  they skip sanitization entirely, so the body reaches the handler
+  byte-for-byte, and they are CSRF-exempt too. (They are **not** exempt from the
+  8MiB body-size limit below — bounding the read does not alter the bytes, so a
+  signature still verifies.)
 - Unclosed dangerous elements (for example a truncated `<script>…`) strip the
   tag itself but keep the text that follows; only the content of a *properly
   closed* dangerous element is discarded. That recovered text is re-parsed, so
@@ -119,20 +137,33 @@ Other behavior notes:
   more than a stray bracket — `<script>if (a<b && c>d) return` yields
   `if (ad) return`. Complete tags (`<b>hi</b>`, `<script>…</script>`) are
   always stripped.
-- JSON sanitizer buffering is capped at 8MiB. Larger JSON bodies abort with
-  HTTP 413 and a D10 error envelope (`payload_too_large`) and never reach
-  handlers. The `http.Server` `ReadTimeout`/`WriteTimeout`/`IdleTimeout` are a
-  connection-level safety net that is always on: they take
-  `GOMBIT_HTTP_REQUEST_TIMEOUT` when it is set, and fall back to a 60s default
-  when the per-handler deadline is disabled (issue #270). The opt-in
-  request-timeout middleware is a context deadline; it does not abort
-  `Body.Read`. The connection read deadline and the sanitizer cap are the brakes
-  on a slow or never-ending JSON body (#137).
+- JSON request bodies are capped at 8MiB by the **request body size limit**
+  layer (`request_body_limit`), part of the default runtime stack (a
+  custom-router app via `WithRouter` owns its own — see below), independent of
+  whether sanitization is enabled. A larger JSON `POST`/`PUT`/`PATCH` body
+  aborts with HTTP 413 and a
+  D10 error envelope (`payload_too_large`) **before any handler runs** — on
+  every route, including a raw `app.Router()` handler that calls
+  `ShouldBindJSON`. A declared over-cap `Content-Length` is refused without a
+  read; a chunked body (unknown length) is read up to the cap + 1 to decide
+  before dispatch and, if within the cap, restored byte-for-byte. It never
+  decodes or re-encodes the body, so `WithRawBodyPaths` webhooks get the bound
+  too and still verify a signature over their exact bytes. **Scope: JSON bodies
+  only.** A non-JSON body (a multipart upload, `text/plain`, or a request with
+  no `Content-Type`) is not size-limited by this layer — a raw handler that
+  reads such a body owns its own bound; bounding every content type by default
+  would break legitimate large uploads. The general per-route body-size
+  middleware is deferred (see below). The `http.Server`
+  read/write/idle timeouts are a separate, time-based safety net (they take
+  `GOMBIT_HTTP_REQUEST_TIMEOUT` when set and fall back to 60s otherwise);
+  a context deadline does not abort `Body.Read`, so the size cap and the
+  connection read deadline are the brakes on a slow or never-ending JSON
+  body (#137).
 
-Canonical design order (draft §13.3) also includes CORS, body-size limit, rate
-limiting, and auth context. Those remain deferred; when a first-class body-size
-middleware lands it still inserts immediately before XSS. The 8MiB XSS cap is
-only a bound on sanitizer buffering, not that middleware.
+Canonical design order (draft §13.3) also includes CORS, rate limiting, and
+auth context; those remain deferred. The request body size limit above is the
+fixed 8MiB default cap — a first-class, per-route configurable body-size
+middleware is still future work, and would slot in at the same position.
 
 Request IDs use the `X-Request-Id` header. If the caller provides one, the
 runtime preserves it; otherwise it generates one and stores it on both Gin's
@@ -164,9 +195,16 @@ changing the route contract. Trusted proxies are configured through
 headers and uses the direct TCP peer.
 
 `framework.WithRouter` is the custom-router escape hatch. When an application
-passes its own `*gin.Engine`, Gombit applies trusted-proxy configuration only;
-the application owns recovery, request ID, trace context, metrics, security
-headers, XSS HTML sanitization, and timeout middleware for that router.
+passes its own `*gin.Engine`, Gombit applies trusted-proxy configuration only:
+the entire default runtime stack above is **not** installed. The application
+owns recovery, the request context (request ID + trace context + the optional
+per-handler timeout), metrics, security headers, **the request body size
+limit**, and the optional input sanitizer for that router. In particular, the
+8MiB JSON body-size bound is a property of the default runtime stack, not of
+every Gombit app — a custom-router app that wants it must install its own
+equivalent. `framework/router_test.go`'s
+`TestCustomRouterOmitsRuntimeBodyLimit` locks that boundary so the security
+documentation cannot drift.
 
 `framework/router_test.go`'s `TestDefaultRouterMountsOnlyFrameworkEndpoints`
 and `TestApplicationOwnedRouteRegistrationComposesIndependently` cover this;

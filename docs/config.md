@@ -70,6 +70,7 @@ recognizes:
 | `GOMBIT_AUTH_MODE` | `Config.Auth.Mode` | `jwt` |
 | `GOMBIT_COOKIE_SECURE` | `Config.Auth.CookieSecure` | `true` |
 | `GOMBIT_COOKIE_SAMESITE` | `Config.Auth.CookieSameSite` | `lax` |
+| `GOMBIT_SECURITY_SANITIZE_INPUT` | `Config.Security.SanitizeInput` | `false` (opt-in) |
 
 `GOMBIT_API_PREFIX` is a live setting (D8). Go routes, Huma, and the admin
 SPA honor it. The generated application SPA honors it when the prefix is
@@ -107,6 +108,11 @@ Redis timeout values use the same Go duration syntax.
 `GOMBIT_DOCS_ENABLED` accepts boolean values (`true`/`false`, `1`/`0`,
 `yes`/`no`, `on`/`off`). When unset, docs stay on in `development` and `test`
 and turn off in `production`. `/openapi.json` is always served.
+`GOMBIT_SECURITY_SANITIZE_INPUT` accepts boolean values and defaults to
+`false`: the framework does not rewrite request input (issue #271 / PERF-13).
+XSS is handled on output; set it to `true` to install the legacy ingress HTML
+sanitizer, or call `framework.SanitizeHTML` per field. See
+[security.md](security.md#input-sanitization-opt-in).
 `GOMBIT_LOG_LEVEL` accepts `debug`, `info`, `warn`, and `error`.
 `GOMBIT_LOG_SINK` accepts `stderr`, `stdout`, and `mongo`; Mongo logging is an
 external module hook, not a runtime dependency.

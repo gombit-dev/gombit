@@ -84,3 +84,55 @@ own handler is supported through the standard `http.Header` mutation APIs — us
 through the slice `Header.Values(key)` returns: those backing slices are shared
 process-globals, and an in-place write corrupts the value for every other
 in-flight request. `TestSecurityHeaderSharedValueContract` locks this contract.
+
+## Input sanitization (opt-in)
+
+Gombit does **not** sanitize request input by default (issue
+[#271](https://github.com/gombit-dev/gombit/issues/271) / PERF-13; ADR-018). The
+default middleware no longer mutates JSON string or query **values**, so
+`{"description":"x < y"}` and `{"note":"<b>bold</b>"}` reach handlers with their
+values intact. (This is value fidelity, not byte-for-byte fidelity: the response
+envelope re-encodes JSON, so whitespace, key order, and number spelling may
+differ. A handler that needs the exact original bytes — a webhook verifying a
+signature — reads the raw body via
+[`framework.WithRawBodyPaths`](auth-cookie.md#exempting-non-browser-endpoints-webhooks).)
+
+This is deliberate. **XSS is an output-encoding problem, not an input problem.**
+The defense is escaping data at the point it is rendered — and the controls
+Gombit actually ships are all on output:
+
+- The generated React frontend escapes text by default (JSX interpolation), and
+  the framework admin is a React SPA that renders values as React text, never as
+  HTML — there is no server-rendered `html/template` admin path.
+- A JSON API response is not an HTML sink: a browser does not execute markup in
+  an `application/json` body.
+- The response `Content-Security-Policy` (see above) is a backstop that blocks
+  inline script execution even on the framework's own HTML pages.
+
+Stripping HTML tags on ingress is the wrong layer: it silently mutates data the
+application may need to store faithfully (a code snippet, a math expression like
+`a < b`, legitimate markup a downstream consumer renders in a safe context), it
+gives a false sense of safety (it does not encode for the *output* context that
+actually matters), and it costs allocations on every write request. The default
+posture leaves your data intact and puts the XSS defense where it belongs.
+
+**When to enable ingress stripping.** If your app renders stored values into an
+HTML context you do not control — or you want defense-in-depth for a specific
+untrusted field — you have two opt-ins:
+
+- **Per app:** set `Security.SanitizeInput` (`GOMBIT_SECURITY_SANITIZE_INPUT=true`).
+  This installs the legacy sanitizer middleware: JSON string values
+  (POST/PUT/PATCH) and GET query values are stripped to plain text before
+  handlers run, the exact key `password` is exempt, and
+  [`framework.WithRawBodyPaths`](auth-cookie.md#exempting-non-browser-endpoints-webhooks)
+  paths (webhooks that verify a signature over the raw body) are skipped
+  entirely. See [router.md](router.md#middleware-ordering) for the layer's exact
+  behavior.
+- **Per field:** call `framework.SanitizeHTML(s string) string` from a handler.
+  It applies the same stripping to one value without turning the whole request
+  pipeline back on — the right tool when only one field is untrusted.
+
+Enabling `Security.SanitizeInput` changes behavior: request input is rewritten,
+and JSON bodies are re-encoded (key order and whitespace may change), which is
+why signature-verifying webhook paths must be marked raw. It does not change
+anything on the **output** side — that was never sanitization's job.

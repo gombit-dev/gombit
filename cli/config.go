@@ -86,6 +86,7 @@ func writeConfigShow(w io.Writer, cfg config.Config) error {
 		{"Auth.Mode", string(cfg.Auth.EffectiveMode())},
 		{"Auth.CookieSecure", strconv.FormatBool(cfg.Auth.CookieSecure)},
 		{"Auth.CookieSameSite", string(cfg.Auth.EffectiveCookieSameSite())},
+		{"Security.SanitizeInput", strconv.FormatBool(cfg.Security.SanitizeInput)},
 	}
 
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)

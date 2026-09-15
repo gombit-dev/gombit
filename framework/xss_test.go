@@ -257,7 +257,7 @@ func TestSanitizeJSONBodyRejectsOversized(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
-	body := bytes.Repeat([]byte("x"), int(maxJSONBodyBytes)+1)
+	body := bytes.Repeat([]byte("x"), int(maxRequestBodyBytes)+1)
 	c.Request = httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(body))
 	c.Request.Header.Set("Content-Type", "application/json")
 

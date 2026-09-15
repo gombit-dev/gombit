@@ -449,6 +449,10 @@ func TestRawBodyPathThroughNew(t *testing.T) {
 	cfg.HTTP.Addr = "127.0.0.1:0"
 	cfg.Auth.JWTSecret = testJWTSecret
 	cfg.Auth.Mode = config.AuthModeCookie
+	// Input sanitization is opt-in (issue #271); enable it here so this test
+	// genuinely exercises the raw-body bypass — otherwise the default pipeline
+	// has no sanitizer to skip and the assertion would hold vacuously.
+	cfg.Security.SanitizeInput = true
 
 	app, err := framework.New(
 		framework.WithConfig(cfg),

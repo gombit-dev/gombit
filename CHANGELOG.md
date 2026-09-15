@@ -287,6 +287,27 @@ version.
   disabled they fall back to `60s` instead of becoming unbounded, so this is not
   a DoS regression. (A value of `0` no longer zeroes the server timeouts.) See
   [docs/adr/017-request-timeout-opt-in.md](docs/adr/017-request-timeout-opt-in.md).
+- **Request-input HTML sanitization is now opt-in** (PERF-13,
+  [#271](https://github.com/gombit-dev/gombit/issues/271); ADR-018). The default
+  `framework.App` no longer strips HTML from request input — it does not read,
+  decode, or rewrite the body/query for sanitization, saving ~4–5 allocs/op on
+  every write request. XSS is handled where it belongs, on **output** (React JSX
+  text escaping in the generated frontend and the React admin SPA; a JSON
+  response is not an HTML sink; the response CSP is a backstop). The default
+  middleware no longer mutates request **values**, so `{"description":"x < y"}`
+  and `{"note":"<b>bold</b>"}` reach handlers intact (value fidelity, not
+  byte-for-byte — the response envelope re-encodes JSON; a handler needing the
+  exact bytes reads the raw body via `WithRawBodyPaths`). The 8MiB JSON
+  body-size bound the sanitizer used to provide incidentally is preserved as a
+  separate, always-on `request_body_limit` layer, so raw Gin routes keep their
+  413-before-handler memory bound whether or not sanitization is enabled.
+  **Breaking for apps that relied on ingress stripping:** set
+  `Security.SanitizeInput` (`GOMBIT_SECURITY_SANITIZE_INPUT=true`) to restore
+  the legacy middleware unchanged (including the `password` exemption and
+  `WithRawBodyPaths` handling), or call the newly exported
+  `framework.SanitizeHTML(s)` to strip a single field from a handler. See
+  [docs/security.md](docs/security.md#input-sanitization-opt-in) and
+  [docs/adr/018-input-sanitization-opt-in.md](docs/adr/018-input-sanitization-opt-in.md).
 - **Security headers are now scoped by response kind** (PERF-9,
   [#267](https://github.com/gombit-dev/gombit/issues/267)). JSON/API responses
   get the strict, minimal policy `Content-Security-Policy: default-src 'none';

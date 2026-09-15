@@ -251,6 +251,21 @@ func TestLoadFromEnvUsesDefaultsWhenUnset(t *testing.T) {
 	}
 }
 
+func TestLoadFromEnvEnablesInputSanitization(t *testing.T) {
+	if got := Default().Security.SanitizeInput; got {
+		t.Fatalf("default Security.SanitizeInput = %v, want false (opt-in, issue #271)", got)
+	}
+	got, err := LoadFromEnv(mapLookup(map[string]string{
+		envSecuritySanitizeInput: " true ",
+	}))
+	if err != nil {
+		t.Fatalf("LoadFromEnv() error = %v, want nil", err)
+	}
+	if !got.Security.SanitizeInput {
+		t.Fatalf("Security.SanitizeInput = %v, want true", got.Security.SanitizeInput)
+	}
+}
+
 func TestLoadFromEnvAllowsDisabledHTTPRequestTimeout(t *testing.T) {
 	got, err := LoadFromEnv(mapLookup(map[string]string{
 		envHTTPRequestTimeout: "0",
