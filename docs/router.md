@@ -146,7 +146,12 @@ Other behavior notes (they describe the opt-in layer):
   read; a chunked body (unknown length) is read up to the cap + 1 to decide
   before dispatch and, if within the cap, restored byte-for-byte. It never
   decodes or re-encodes the body, so `WithRawBodyPaths` webhooks get the bound
-  too and still verify a signature over their exact bytes. The `http.Server`
+  too and still verify a signature over their exact bytes. **Scope: JSON bodies
+  only.** A non-JSON body (a multipart upload, `text/plain`, or a request with
+  no `Content-Type`) is not size-limited by this layer — a raw handler that
+  reads such a body owns its own bound; bounding every content type by default
+  would break legitimate large uploads. The general per-route body-size
+  middleware is deferred (see below). The `http.Server`
   read/write/idle timeouts are a separate, time-based safety net (they take
   `GOMBIT_HTTP_REQUEST_TIMEOUT` when set and fall back to 60s otherwise);
   a context deadline does not abort `Body.Read`, so the size cap and the

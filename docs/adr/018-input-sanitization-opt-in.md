@@ -56,8 +56,15 @@ explicit, narrower opt-ins.**
    `ShouldBindJSON`. A declared over-cap `Content-Length` is refused without a
    read; a chunked body (`Content-Length` unknown) is read up to the cap + 1 to
    decide before dispatch and, if within the cap, restored byte-for-byte for the
-   handler. It never decodes or re-encodes the body, so an app gets the bound
-   without opting into input rewriting. **`WithRawBodyPaths` do not bypass it**
+   handler. An at/under-cap known-length body is wrapped in
+   `http.MaxBytesReader` so a lying small `Content-Length` cannot make a handler
+   read past the cap. It never decodes or re-encodes the body, so an app gets the
+   bound without opting into input rewriting. The bound is **JSON-scoped** — it
+   matches the sanitizer's old scope: a non-JSON body (multipart upload,
+   `text/plain`, no `Content-Type`) is not size-limited here, since bounding every
+   content type by default would break legitimate large uploads; a general,
+   configurable per-route body-size middleware is deferred. **`WithRawBodyPaths`
+   do not bypass it**
    (a review-driven change from the first cut): bounding the read does not alter
    accepted bytes, so a webhook still verifies its signature over the exact body
    it reads, and the most attacker-exposed routes are not left unbounded. A

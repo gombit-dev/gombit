@@ -236,6 +236,37 @@ func TestRequestBodyLimitRestoresChunkedBodyUnderCap(t *testing.T) {
 	}
 }
 
+// TestRequestBodyLimitBoundsLyingContentLength locks the known-length hardening:
+// even when a client declares a small Content-Length but streams a body larger
+// than the cap, the MaxBytesReader wrap this layer installs stops the handler
+// from reading past the cap — the bound is enforced by the layer, not trusted
+// from the declared length.
+func TestRequestBodyLimitBoundsLyingContentLength(t *testing.T) {
+	app := newTestApp(t)
+
+	var readLen int
+	var readErr error
+	app.Router().POST("/echo", func(c *gin.Context) {
+		b, err := io.ReadAll(c.Request.Body)
+		readLen = len(b)
+		readErr = err
+		c.Status(http.StatusOK)
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/echo", strings.NewReader(oversizedJSONBody()))
+	req.Header.Set("Content-Type", "application/json")
+	req.ContentLength = 16 // lie: declare a tiny length while delivering an oversized body
+	app.Router().ServeHTTP(rec, req)
+
+	if readErr == nil {
+		t.Fatal("handler read a body with a lying small Content-Length without hitting the size bound")
+	}
+	if int64(readLen) > maxRequestBodyBytes {
+		t.Fatalf("handler read %d bytes, past the %d cap, despite the size limit", readLen, maxRequestBodyBytes)
+	}
+}
+
 // TestRequestBodyLimitIgnoresNonJSON documents the JSON-only scope (parity with
 // the sanitizer's old cap, which only bounded JSON bodies): a large non-JSON
 // body is not gated here.

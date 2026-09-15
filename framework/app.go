@@ -747,11 +747,13 @@ func runtimeMiddlewareStack(cfg config.Config, metrics *httpMetrics, csrfExemptP
 		// Request-body size limit (always on): an oversized JSON body is rejected
 		// with a D10 413 before any handler runs, bounding the memory a single
 		// request can force — including on raw app.Router() routes that call
-		// ShouldBindJSON. This is separate from sanitization: the bound used to
-		// live incidentally inside the input sanitizer, which #271 made opt-in, so
-		// it now stands on its own and protects every app. It applies to raw-body
-		// webhooks too — bounding the read does not alter accepted bytes, so a
-		// signature still verifies over the exact body the handler reads.
+		// ShouldBindJSON, and on raw-body webhooks (bounding the read does not
+		// alter accepted bytes, so a signature still verifies). This is separate
+		// from sanitization: the bound used to live incidentally inside the input
+		// sanitizer, which #271 made opt-in, so it now stands on its own. It
+		// bounds JSON bodies only; non-JSON bodies (uploads, text/plain) are not
+		// size-limited here — a general body-size middleware is deferred. See
+		// requestBodyLimitMiddleware.
 		{name: "request_body_limit", handler: requestBodyLimitMiddleware()},
 	}
 	// Input sanitization is opt-in (issue #271 / PERF-13). The default pipeline

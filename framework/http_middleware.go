@@ -41,13 +41,29 @@ var traceparentPattern = regexp.MustCompile(`^[0-9a-f]{2}-([0-9a-f]{32})-[0-9a-f
 const maxRequestBodyBytes int64 = 8 << 20
 
 // requestBodyLimitMiddleware rejects an oversized JSON request body with a D10
-// 413 before any handler runs. It never decodes or re-encodes the body — size
-// enforcement is independent of the opt-in input sanitizer (issue #271 /
-// PERF-13), so an app gets the memory bound without opting into input
-// rewriting. It applies to every JSON POST/PUT/PATCH route, including raw
-// app.Router() handlers and WithRawBodyPaths webhooks: bounding the read does
-// not alter the accepted bytes, so a signature still verifies over the exact
-// body the handler reads.
+// 413 before any handler runs, bounding the memory a single request can force.
+// It never decodes or re-encodes the body — size enforcement is independent of
+// the opt-in input sanitizer (issue #271 / PERF-13), so an app gets the bound
+// without opting into input rewriting. It applies to every JSON POST/PUT/PATCH
+// route, including raw app.Router() handlers and WithRawBodyPaths webhooks:
+// bounding the read does not alter the accepted bytes, so a signature still
+// verifies over the exact body the handler reads.
+//
+// Scope: this bounds JSON bodies only (Content-Type application/json). A
+// non-JSON body — a multipart upload, text/plain, or a request with no
+// Content-Type — is NOT size-limited here; a raw handler that reads such a body
+// owns its own bound. Bounding every content type by default would break
+// legitimate large uploads, so a first-class, per-route configurable body-size
+// middleware is deferred (docs/router.md, build plan §13.3); this is the fixed
+// JSON default cap.
+//
+// Two paths, both enforcing the cap through this layer rather than trusting the
+// caller: a known Content-Length is checked directly and the accepted body is
+// then wrapped in http.MaxBytesReader (cheap, no buffering) so a lying small
+// length still cannot make a handler read past the cap; a chunked body (unknown
+// length) is buffered up to the cap+1 to decide before dispatch. Do NOT
+// "optimize" the chunked buffering away — it is what makes the pre-dispatch 413
+// deterministic on the streamed path.
 func requestBodyLimitMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		switch c.Request.Method {
@@ -65,15 +81,18 @@ func requestBodyLimitMiddleware() gin.HandlerFunc {
 			return
 		}
 
-		// Known length (the common path): net/http already bounds the delivered
-		// body to ContentLength, so an over-cap declared length is rejected
-		// without reading a byte, and a body at or under the cap needs no
-		// buffering — it passes through untouched.
+		// Known length (the common path): an over-cap declared length is rejected
+		// without reading a byte. An at/under-cap body needs no buffering, but it
+		// is wrapped in MaxBytesReader so the bound is enforced by this layer — a
+		// lying small Content-Length cannot make a handler read past the cap. For
+		// a well-behaved request (delivered bytes <= declared length <= cap) the
+		// wrapper never fires, so this stays allocation-cheap.
 		if c.Request.ContentLength >= 0 {
 			if c.Request.ContentLength > maxRequestBodyBytes {
 				abortWithErrorEnvelope(c, contract.PayloadTooLarge("JSON body exceeds the 8MiB limit"))
 				return
 			}
+			c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxRequestBodyBytes)
 			c.Next()
 			return
 		}
