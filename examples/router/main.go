@@ -24,8 +24,13 @@ func registerPingRoutes(router *gin.Engine) {
 }
 
 // registerEchoRoutes stands in for a second, independent feature package.
-// The default XSS middleware strips HTML tags from JSON string fields before
-// this handler runs, so the echoed comment is the sanitized value.
+// The framework does not sanitize request input by default (issue #271 /
+// PERF-13): XSS is an output-encoding concern, so this handler receives the
+// comment exactly as sent — `<b>hi</b>` echoes back as `<b>hi</b>`. An app that
+// wants ingress stripping sets Security.SanitizeInput
+// (GOMBIT_SECURITY_SANITIZE_INPUT=true) or calls framework.SanitizeHTML on a
+// specific field. A JSON body over 8MiB is still rejected with a 413 by the
+// always-on request-body-size limit before this handler runs.
 func registerEchoRoutes(router *gin.Engine) {
 	echo := router.Group("/echo")
 	echo.POST("", func(c *gin.Context) {

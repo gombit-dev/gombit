@@ -744,9 +744,28 @@ func runtimeMiddlewareStack(cfg config.Config, metrics *httpMetrics, csrfExemptP
 			name:    "security_headers",
 			handler: securityHeadersMiddleware(cfg.Environment == config.EnvironmentProduction, cfg.API.DocsEnabled),
 		},
-		// Raw-body paths (webhooks) skip input sanitization so their body reaches
-		// the handler unmodified for signature verification (WithRawBodyPaths).
-		{name: "xss", handler: xssMiddleware(rawBodyPaths...)},
+		// Request-body size limit (always on): an oversized JSON body is rejected
+		// with a D10 413 before any handler runs, bounding the memory a single
+		// request can force — including on raw app.Router() routes that call
+		// ShouldBindJSON. This is separate from sanitization: the bound used to
+		// live incidentally inside the input sanitizer, which #271 made opt-in, so
+		// it now stands on its own and protects every app. WithRawBodyPaths are
+		// exempt (a signature-verifying webhook keeps its exact bytes), as before.
+		{name: "request_body_limit", handler: requestBodyLimitMiddleware(rawBodyPaths...)},
+	}
+	// Input sanitization is opt-in (issue #271 / PERF-13). The default pipeline
+	// does not rewrite request input: XSS is an output-encoding concern — the
+	// generated React frontend escapes text (JSX), the framework admin SPA
+	// renders values as React text (not HTML), a JSON API response is not an
+	// HTML sink, and the response CSP is a backstop. Stripping markup on ingress
+	// corrupts faithful values like {"description":"x < y"} while costing
+	// allocations on every write request. Apps that want ingress
+	// stripping set Security.SanitizeInput (GOMBIT_SECURITY_SANITIZE_INPUT);
+	// WithRawBodyPaths still exempts webhook/signature paths. For a single field,
+	// call framework.SanitizeHTML from the handler instead. See
+	// docs/adr/018-input-sanitization-opt-in.md.
+	if cfg.Security.SanitizeInput {
+		stack = append(stack, namedMiddleware{name: "xss", handler: xssMiddleware(rawBodyPaths...)})
 	}
 	// CSRF must run as global Gin middleware, not just on the auth Huma
 	// routes: it covers every state-changing request (M5-3), including

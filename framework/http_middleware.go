@@ -28,6 +28,65 @@ const traceIDLen = 32
 
 var traceparentPattern = regexp.MustCompile(`^[0-9a-f]{2}-([0-9a-f]{32})-[0-9a-f]{16}-[0-9a-f]{2}$`)
 
+// maxRequestBodyBytes bounds a JSON request body (8 MiB). It caps the memory a
+// single request can force the framework — or a raw app.Router() handler that
+// calls ShouldBindJSON — to allocate. This size bound used to live incidentally
+// inside the input sanitizer's buffering; issue #271 / PERF-13 made
+// sanitization opt-in, so the bound now stands on its own in
+// requestBodyLimitMiddleware and protects every app whether or not sanitization
+// is enabled. A first-class, per-route configurable body-size middleware
+// remains future work (docs/router.md); this is the fixed default cap.
+const maxRequestBodyBytes int64 = 8 << 20
+
+// requestBodyLimitMiddleware rejects an oversized JSON request body before any
+// handler runs, and bounds a streamed body mid-read. It never decodes or
+// mutates the body — size enforcement is independent of the opt-in input
+// sanitizer (issue #271 / PERF-13), so an app gets the memory bound without
+// opting into input rewriting. It covers the same requests the sanitizer's old
+// buffering cap did — JSON POST/PUT/PATCH — with WithRawBodyPaths exempt so a
+// signature-verifying webhook keeps its exact bytes, exactly as before.
+func requestBodyLimitMiddleware(exemptPaths ...string) gin.HandlerFunc {
+	exempt := make(map[string]struct{}, len(exemptPaths))
+	for _, path := range exemptPaths {
+		if path = strings.TrimSpace(path); path != "" {
+			exempt[path] = struct{}{}
+		}
+	}
+	return func(c *gin.Context) {
+		if _, ok := exempt[c.Request.URL.Path]; ok {
+			c.Next()
+			return
+		}
+		switch c.Request.Method {
+		case http.MethodPost, http.MethodPut, http.MethodPatch:
+		default:
+			c.Next()
+			return
+		}
+		if c.Request.Body == nil || c.Request.Body == http.NoBody {
+			c.Next()
+			return
+		}
+		if !isJSONContentType(c.Request.Header.Get("Content-Type")) {
+			c.Next()
+			return
+		}
+		// A client-declared length over the cap is rejected before the handler
+		// reads a byte — the common path, since Content-Length is set on ordinary
+		// requests.
+		if c.Request.ContentLength > maxRequestBodyBytes {
+			abortWithErrorEnvelope(c, contract.PayloadTooLarge("JSON body exceeds the 8MiB limit"))
+			return
+		}
+		// A chunked or misdeclared body (ContentLength < 0, or a lying length) is
+		// bounded during read instead: MaxBytesReader errors past the cap, so a
+		// handler's ShouldBindJSON / Huma's decode fails rather than allocating
+		// without limit.
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxRequestBodyBytes)
+		c.Next()
+	}
+}
+
 // applyTimeout returns ctx bounded by a timeout deadline, along with a cancel to
 // run when the request completes. It is a no-op in two cases, returning ctx
 // unchanged and a cancel that is safe to call:

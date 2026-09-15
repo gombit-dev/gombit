@@ -42,6 +42,7 @@ const (
 	envAuthMode                = "GOMBIT_AUTH_MODE"
 	envCookieSecure            = "GOMBIT_COOKIE_SECURE"
 	envCookieSameSite          = "GOMBIT_COOKIE_SAMESITE"
+	envSecuritySanitizeInput   = "GOMBIT_SECURITY_SANITIZE_INPUT"
 )
 
 const (
@@ -88,6 +89,25 @@ type Config struct {
 	Cache       CacheConfig
 	Logging     LoggingConfig
 	Auth        AuthConfig
+	Security    SecurityConfig
+}
+
+// SecurityConfig contains opt-in application security toggles.
+type SecurityConfig struct {
+	// SanitizeInput installs the request-input HTML sanitizer (issue #271 /
+	// PERF-13). It is off by default: the framework does not rewrite request
+	// input. XSS is an output-encoding concern — the generated React frontend
+	// escapes text (JSX), the framework admin SPA renders values as React text
+	// (not HTML), a JSON API response is not an HTML sink, and the response CSP
+	// is a backstop — and stripping markup on ingress corrupts faithful values
+	// (a comment of `x < y`, a stored `<b>bold</b>`) as well as costing
+	// allocations on every write request.
+	// Enable it (GOMBIT_SECURITY_SANITIZE_INPUT=true) to restore the legacy
+	// behavior: JSON string values and query values are stripped to plain text
+	// before handlers run, with WithRawBodyPaths still exempting webhook paths.
+	// For field-level stripping without turning the whole pipeline back on,
+	// call framework.SanitizeHTML from a handler instead.
+	SanitizeInput bool
 }
 
 // HTTPConfig contains HTTP server configuration.
@@ -347,6 +367,9 @@ func DefaultFor(env Environment) Config {
 			Sink:  LogSinkStderr,
 		},
 		Auth: defaultAuthConfig(),
+		// Input sanitization is opt-in (issue #271 / PERF-13); the default App
+		// does not rewrite request input. Zero value documented for clarity.
+		Security: SecurityConfig{SanitizeInput: false},
 	}
 }
 
@@ -441,6 +464,7 @@ func LoadFromEnv(lookup EnvLookup) (Config, error) {
 	applyAuthMode(lookup, envAuthMode, &cfg.Auth.Mode)
 	applyBool(lookup, envCookieSecure, "Auth.CookieSecure", &cfg.Auth.CookieSecure, &errs)
 	applyCookieSameSite(lookup, envCookieSameSite, &cfg.Auth.CookieSameSite)
+	applyBool(lookup, envSecuritySanitizeInput, "Security.SanitizeInput", &cfg.Security.SanitizeInput, &errs)
 	if docsEnabledSet {
 		applyBool(lookup, envDocsEnabled, "API.DocsEnabled", &cfg.API.DocsEnabled, &errs)
 	} else {

@@ -19,11 +19,6 @@ import (
 // case-sensitive). Keys like "Password" or nested paths still get stripped.
 const xssPasswordField = "password"
 
-// maxJSONBodyBytes caps XSS JSON body buffering (issue #137). A first-class
-// body-size middleware is still deferred (docs/router.md); this keeps
-// sanitizeJSONBody from io.ReadAll-ing an attacker-controlled stream.
-const maxJSONBodyBytes int64 = 8 << 20
-
 // Elements whose text content must not reach handlers (matched to HTML
 // sanitizer "strict" expectations: tags stripped, dangerous element bodies
 // discarded).
@@ -42,6 +37,21 @@ var xssSkipElementContent = map[string]struct{}{
 // truncates comparison text like "a<b". Incomplete angle brackets are left
 // unchanged; complete tags still go through stripHTML.
 var completeHTMLTag = regexp.MustCompile(`(?i)<\s*/?[a-z][a-z0-9:-]*(?:\s[^>]*)?\s*/?>`)
+
+// SanitizeHTML strips HTML tags from s and discards the content of dangerous
+// elements (script, style, iframe, object, embed, noscript, textarea),
+// returning plain text. It is the per-value function the optional input
+// sanitizer applies, exported (issue #271 / PERF-13) so an app can strip a
+// specific field from a handler without re-enabling ingress sanitization for
+// the whole request pipeline (Security.SanitizeInput).
+//
+// A string with no HTML tag is returned unchanged, and so is one that holds a
+// bare "<"/">" without forming a complete tag ("a<b") — see the stripHTML doc
+// for the #118 comparison-text handling. Sanitization is an output-encoding
+// backstop, not a substitute for escaping on output.
+func SanitizeHTML(s string) string {
+	return stripHTML(s)
+}
 
 // xssMiddleware sanitizes HTML tags from request input before handlers run.
 // JSON string values (POST/PUT/PATCH) and GET query values are stripped to
@@ -78,7 +88,7 @@ func xssMiddleware(exemptPaths ...string) gin.HandlerFunc {
 	}
 }
 
-func writeXSSError(c *gin.Context, env *contract.ErrorEnvelope) {
+func abortWithErrorEnvelope(c *gin.Context, env *contract.ErrorEnvelope) {
 	env = contract.WithContext(c.Request.Context(), env)
 	if env == nil {
 		c.AbortWithStatus(http.StatusInternalServerError)
@@ -124,7 +134,7 @@ func sanitizeJSONBody(c *gin.Context) {
 		return
 	}
 
-	limited := io.LimitReader(c.Request.Body, maxJSONBodyBytes+1)
+	limited := io.LimitReader(c.Request.Body, maxRequestBodyBytes+1)
 	raw, err := io.ReadAll(limited)
 	_ = c.Request.Body.Close()
 	if err != nil {
@@ -133,9 +143,9 @@ func sanitizeJSONBody(c *gin.Context) {
 		c.Request.Body = io.NopCloser(bytes.NewReader(nil))
 		return
 	}
-	if int64(len(raw)) > maxJSONBodyBytes {
+	if int64(len(raw)) > maxRequestBodyBytes {
 		c.Request.Body = io.NopCloser(bytes.NewReader(nil))
-		writeXSSError(c, contract.PayloadTooLarge("JSON body exceeds the 8MiB sanitizer buffer"))
+		abortWithErrorEnvelope(c, contract.PayloadTooLarge("JSON body exceeds the 8MiB sanitizer buffer"))
 		return
 	}
 	if len(bytes.TrimSpace(raw)) == 0 {

@@ -74,3 +74,17 @@ func TestWriteConfigShowIncludesAuthCookieFields(t *testing.T) {
 		}
 	}
 }
+
+func TestWriteConfigShowIncludesSecurityField(t *testing.T) {
+	cfg := config.Default()
+	cfg.Security.SanitizeInput = true
+
+	var buf bytes.Buffer
+	if err := writeConfigShow(&buf, cfg.Redacted()); err != nil {
+		t.Fatalf("writeConfigShow() error = %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "Security.SanitizeInput") || !strings.Contains(out, "true") {
+		t.Fatalf("config show output missing Security.SanitizeInput=true:\n%s", out)
+	}
+}
