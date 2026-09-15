@@ -96,11 +96,14 @@ type HTTPConfig struct {
 	TrustedProxies []string
 	// RequestTimeout is the per-handler deadline propagated into the request
 	// context (and thus into DB/cache calls that honor it). It is opt-in: the
-	// default is 0, which disables it and omits the layer from the middleware
-	// stack entirely (issue #270 / PERF-12). The http.Server read/write/idle
-	// timeouts remain the connection-level safety net regardless. Scaffolded
-	// apps set GOMBIT_HTTP_REQUEST_TIMEOUT explicitly so new projects keep a
-	// per-handler deadline. A negative value is rejected by Validate.
+	// default is 0, which imposes no deadline (issue #270 / PERF-12). The
+	// deadline is applied inside the request_context middleware, which always
+	// runs; when this is 0 only the deadline setup is skipped, and that skip is
+	// a true no-op (no timer, no extra context) so it costs nothing on the
+	// request path. The http.Server read/write/idle timeouts remain the
+	// connection-level safety net regardless. Scaffolded apps set
+	// GOMBIT_HTTP_REQUEST_TIMEOUT explicitly so new projects keep a per-handler
+	// deadline. A negative value is rejected by Validate.
 	RequestTimeout time.Duration
 }
 
@@ -314,8 +317,9 @@ func DefaultFor(env Environment) Config {
 		Environment: env,
 		HTTP: HTTPConfig{
 			Addr: ":8080",
-			// Opt-in per-handler deadline (issue #270 / PERF-12): 0 disables it and
-			// omits the request_timeout layer from the stack. Scaffolded apps set
+			// Opt-in per-handler deadline (issue #270 / PERF-12): 0 imposes no
+			// deadline. The request_context middleware still runs; it just skips
+			// deadline setup, a no-op. Scaffolded apps set
 			// GOMBIT_HTTP_REQUEST_TIMEOUT explicitly to keep today's behavior.
 			RequestTimeout: 0,
 		},

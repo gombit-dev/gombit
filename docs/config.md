@@ -91,8 +91,11 @@ to Gin's trusted-proxy configuration. When unset, forwarded-client IP headers
 are ignored. Production config rejects values that trust all proxies, such as
 `0.0.0.0/0`.
 `GOMBIT_HTTP_REQUEST_TIMEOUT` uses Go duration syntax such as `30s` or `2m`.
-It is opt-in (issue #270 / PERF-12): the default `0` disables the cooperative
-per-handler context deadline and omits its middleware layer entirely. When set
+It is opt-in (issue #270 / PERF-12): the default `0` imposes no cooperative
+per-handler context deadline. The deadline is applied inside the
+`request_context` middleware, which always runs; a `0` value only skips the
+deadline setup (a no-op — no timer, nothing added on the request path), so
+there is no separate timeout layer to install or omit. When set
 to a positive value it installs that deadline and also drives the `http.Server`
 read/write/idle timeouts. Those connection-level timeouts are a safety net that
 stays on regardless — with the per-handler deadline disabled they fall back to

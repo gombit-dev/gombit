@@ -272,9 +272,11 @@ version.
 
 - **The per-handler request timeout is now opt-in** (PERF-12,
   [#270](https://github.com/gombit-dev/gombit/issues/270); ADR-017).
-  `HTTP.RequestTimeout` now defaults to `0`, which disables the cooperative
-  per-handler context deadline and omits its middleware layer from the stack
-  entirely (≈4 allocs/op saved on every request). **Breaking for apps that
+  `HTTP.RequestTimeout` now defaults to `0`, which imposes no cooperative
+  per-handler context deadline. The deadline lives in the `request_context`
+  middleware (#268 folded it in — there is no separate timeout layer), which
+  always runs; a `0` value only skips the deadline setup, a no-op that adds
+  nothing to the request path (≈4 allocs/op saved on every request). **Breaking for apps that
   relied on the implicit 60s default:** without setting
   `GOMBIT_HTTP_REQUEST_TIMEOUT` a long-running DB query is no longer cancelled
   and a slow handler keeps running after the connection's `WriteTimeout`. Set
