@@ -1,0 +1,200 @@
+package resourcegen
+
+import (
+	"fmt"
+	"strings"
+)
+
+// This file is the model-first CRUD handler + hooks engine for ADR-016 (issue
+// #352), slice 4. It consumes the modelResource that modelgen.go derives and
+// emits two files per resource:
+//
+//   - a generator-owned handler (renderModelHandler): the Huma input/output
+//     wrappers, a Handler over GORM, and the list/get/create operations. It is
+//     DO-NOT-EDIT — regeneration owns it.
+//   - a human-owned hooks file (renderModelHooks): a default no-op implementation
+//     of the resource's hooks interface, generated ONCE and then owned by the
+//     developer. This is where server-managed columns are set (ADR-016 moves them
+//     off an opt-out list and onto an explicit BeforeCreate hook).
+//
+// The handler owns the invariant create sequence — build the model from the
+// request DTO, run the BeforeCreate hook, persist — so a server-derived value
+// (tenant, owner) enters through the hook, never by editing generated plumbing.
+// The hooks interface is per-resource and typed (BeforeCreate takes *Model and
+// the create body), so the seam is compiler-checked, not a map of callbacks.
+//
+// Slice 4 is the pure emitter: nothing calls it yet. Wiring it into
+// `gombit make resource` (replacing the human-owned handler.go) and the
+// `gombit generate --check` drift gate is slice 5.
+
+// hooksInterfaceType / defaultHooksType name the per-resource hooks interface
+// (BookHooks) and the human-owned concrete type (Hooks) that implements it. The
+// interface is generator-owned; the concrete type lives in the human-owned file
+// and is what Register wires in, so editing BeforeCreate is the supported
+// customization path.
+func (r modelResource) hooksInterfaceType() string { return r.TypeName + "Hooks" }
+func (r modelResource) defaultHooksType() string   { return "Hooks" }
+
+// renderModelHandler emits the generator-owned CRUD handler for one resource: the
+// hooks interface, the Handler over GORM, the Huma input/output wrappers, the
+// list/get/create operations, and Register. The DTOs and mappers it references
+// (bookData, bookCreateBody, toBookData, bookFromCreateBody) come from the
+// model-first DTO file in the same package (renderModelDTOs).
+func renderModelHandler(r modelResource) (string, error) {
+	name, err := parseResourceName(r.TypeName)
+	if err != nil {
+		return "", fmt.Errorf("resourcegen: derive resource names for %q: %w", r.TypeName, err)
+	}
+
+	typ := r.TypeName
+	data := r.dataType()
+	body := r.createBodyType()
+	hooks := r.hooksInterfaceType()
+	singular := strings.ToLower(typ)
+	listOut := "list" + name.Tag + "Output"
+	listIn := "list" + name.Tag + "Input"
+
+	var b strings.Builder
+	b.WriteString(goBanner())
+	b.WriteString("package " + r.Package + "\n\n")
+	b.WriteString(importBlock(
+		[]string{"context", "net/http", "strconv"},
+		[]string{
+			"github.com/danielgtaylor/huma/v2",
+			"github.com/gombit-dev/gombit/contract",
+			"github.com/gombit-dev/gombit/database",
+			"github.com/gombit-dev/gombit/framework",
+			"gorm.io/gorm",
+		},
+	))
+
+	// Hooks interface: the resource's customization points. BeforeCreate receives
+	// the model built from the request and the request body itself, so a hook can
+	// set server-managed columns or derive values before the row is persisted.
+	b.WriteString("// " + hooks + " are the customization points for the generated " + typ + " handler.\n")
+	b.WriteString("// The generated handler owns the invariant CRUD sequence and calls these; set\n")
+	b.WriteString("// server-managed columns (tenant, owner, …) in BeforeCreate rather than editing\n")
+	b.WriteString("// generated plumbing.\n")
+	b.WriteString("type " + hooks + " interface {\n")
+	b.WriteString("\tBeforeCreate(ctx context.Context, row *" + typ + ", body " + body + ") error\n")
+	b.WriteString("}\n\n")
+
+	b.WriteString("// Handler serves " + typ + " HTTP operations over GORM. Register wires DB and Hooks.\n")
+	b.WriteString("type Handler struct {\n")
+	b.WriteString("\tDB    *gorm.DB\n")
+	b.WriteString("\tHooks " + hooks + "\n")
+	b.WriteString("}\n\n")
+
+	// Huma I/O wrappers (ADR-011: the request/response body nests under Body).
+	b.WriteString("type " + listOut + " struct {\n")
+	b.WriteString("\tBody contract.DataMeta[[]" + data + ", contract.PageMeta]\n}\n\n")
+	b.WriteString("type " + listIn + " struct {\n")
+	b.WriteString("\tPage    int `query:\"page\" doc:\"1-based page\"`\n")
+	b.WriteString("\tPerPage int `query:\"per_page\" doc:\"Page size\"`\n}\n\n")
+	b.WriteString("type get" + typ + "Input struct {\n")
+	b.WriteString("\tID string `path:\"id\" doc:\"" + typ + " identifier\"`\n}\n\n")
+	b.WriteString("type get" + typ + "Output struct {\n")
+	b.WriteString("\tBody contract.Data[" + data + "]\n}\n\n")
+	b.WriteString("type create" + typ + "Input struct {\n")
+	b.WriteString("\tBody " + body + "\n}\n\n")
+	b.WriteString("type create" + typ + "Output struct {\n")
+	b.WriteString("\tBody contract.Data[" + data + "]\n}\n\n")
+
+	// list: paginated read. Filters/search/sort/aggregate are a separate query
+	// surface, not part of this slice.
+	b.WriteString("func (h *Handler) list(ctx context.Context, input *" + listIn + ") (*" + listOut + ", error) {\n")
+	b.WriteString("\tpage, perPage := contract.ClampPage(input.Page, input.PerPage)\n")
+	b.WriteString("\tq := h.DB.WithContext(ctx).Model(&" + typ + "{})\n")
+	b.WriteString("\tvar total int64\n")
+	b.WriteString("\tif err := q.Session(&gorm.Session{}).Count(&total).Error; err != nil {\n")
+	b.WriteString("\t\treturn nil, contract.WithContext(ctx, contract.Internal(\"list " + name.PluralSnake + "\"))\n")
+	b.WriteString("\t}\n")
+	b.WriteString("\tvar rows []" + typ + "\n")
+	b.WriteString("\tif err := q.Order(\"id\").Offset(contract.PageOffset(page, perPage)).Limit(perPage).Find(&rows).Error; err != nil {\n")
+	b.WriteString("\t\treturn nil, contract.WithContext(ctx, contract.Internal(\"list " + name.PluralSnake + "\"))\n")
+	b.WriteString("\t}\n")
+	b.WriteString("\titems := make([]" + data + ", 0, len(rows))\n")
+	b.WriteString("\tfor _, row := range rows {\n\t\titems = append(items, to" + typ + "Data(row))\n\t}\n")
+	b.WriteString("\treturn &" + listOut + "{\n")
+	b.WriteString("\t\tBody: contract.DataMeta[[]" + data + ", contract.PageMeta]{\n")
+	b.WriteString("\t\t\tData: items,\n")
+	b.WriteString("\t\t\tMeta: &contract.PageMeta{Page: page, PerPage: perPage, Total: total},\n")
+	b.WriteString("\t\t},\n\t}, nil\n}\n\n")
+
+	// get: load one by id.
+	b.WriteString("func (h *Handler) get(ctx context.Context, input *get" + typ + "Input) (*get" + typ + "Output, error) {\n")
+	b.WriteString("\tid, err := strconv.ParseUint(input.ID, 10, 64)\n")
+	b.WriteString("\tif err != nil {\n")
+	b.WriteString("\t\treturn nil, contract.WithContext(ctx, contract.NotFound(\"" + singular + " not found\"))\n")
+	b.WriteString("\t}\n")
+	b.WriteString("\tvar row " + typ + "\n")
+	b.WriteString("\tif err := h.DB.WithContext(ctx).First(&row, uint(id)).Error; err != nil {\n")
+	b.WriteString("\t\treturn nil, database.MapLoadError(ctx, err, \"" + singular + " not found\", \"load " + singular + "\")\n")
+	b.WriteString("\t}\n")
+	b.WriteString("\treturn &get" + typ + "Output{Body: contract.Data[" + data + "]{Data: to" + typ + "Data(row)}}, nil\n}\n\n")
+
+	// create: the invariant sequence — build from the request, run the hook, then
+	// persist. bookFromCreateBody sets only request columns; server-managed columns
+	// are the hook's responsibility, so they are never zero-filled silently.
+	b.WriteString("func (h *Handler) create(ctx context.Context, input *create" + typ + "Input) (*create" + typ + "Output, error) {\n")
+	b.WriteString("\trow := " + unexported(typ) + "FromCreateBody(input.Body)\n")
+	b.WriteString("\tif h.Hooks != nil {\n")
+	b.WriteString("\t\tif err := h.Hooks.BeforeCreate(ctx, &row, input.Body); err != nil {\n")
+	b.WriteString("\t\t\treturn nil, err\n\t\t}\n")
+	b.WriteString("\t}\n")
+	b.WriteString("\tif err := h.DB.WithContext(ctx).Create(&row).Error; err != nil {\n")
+	b.WriteString("\t\treturn nil, database.MapPersistError(ctx, err, \"resource already exists\", \"create " + singular + "\")\n")
+	b.WriteString("\t}\n")
+	b.WriteString("\treturn &create" + typ + "Output{Body: contract.Data[" + data + "]{Data: to" + typ + "Data(row)}}, nil\n}\n\n")
+
+	// Register mounts the routes and wires the human-owned Hooks. Gombit does not
+	// discover feature packages by reflection; main calls this explicitly.
+	b.WriteString("// Register mounts " + r.Package + " Huma routes, wiring the human-owned " + r.defaultHooksType() + ".\n")
+	b.WriteString("func Register(app *framework.App) {\n")
+	b.WriteString("\th := &Handler{DB: app.DB(), Hooks: " + r.defaultHooksType() + "{}}\n")
+	b.WriteString("\tprefix := app.Config().API.Prefix\n")
+	b.WriteString("\tapi := app.API()\n\n")
+	// Operation IDs match the legacy path: list is plural (list-books), get/create
+	// singular (get-book, create-book).
+	writeHumaOp(&b, "list-"+name.Kebab, "http.MethodGet", "prefix + \""+name.HTTPPath+"\"", "List "+strings.ToLower(name.Tag), name.Tag, "h.list")
+	writeHumaOp(&b, "get-"+name.Package, "http.MethodGet", "prefix + \""+name.HTTPPath+"/{id}\"", "Get a "+singular, name.Tag, "h.get")
+	writeHumaOp(&b, "create-"+name.Package, "http.MethodPost", "prefix + \""+name.HTTPPath+"\"", "Create a "+singular, name.Tag, "h.create")
+	b.WriteString("}\n")
+
+	return b.String(), nil
+}
+
+// writeHumaOp writes one huma.Register(...) call for an operation.
+func writeHumaOp(b *strings.Builder, opID, method, path, summary, tag, handler string) {
+	b.WriteString("\thuma.Register(api, huma.Operation{\n")
+	b.WriteString("\t\tOperationID: \"" + opID + "\",\n")
+	b.WriteString("\t\tMethod:      " + method + ",\n")
+	b.WriteString("\t\tPath:        " + path + ",\n")
+	b.WriteString("\t\tSummary:     \"" + summary + "\",\n")
+	b.WriteString("\t\tTags:        []string{\"" + tag + "\"},\n")
+	b.WriteString("\t}, " + handler + ")\n\n")
+}
+
+// renderModelHooks emits the human-owned hooks file: a default no-op
+// implementation of the resource's hooks interface. Unlike the handler, this file
+// carries NO DO-NOT-EDIT banner — it is generated once and then owned by the
+// developer, who sets server-managed columns here. (Slice 5's generator writes it
+// only when absent, never overwriting a customized copy.)
+func renderModelHooks(r modelResource) string {
+	typ := r.TypeName
+	body := r.createBodyType()
+	hooksType := r.defaultHooksType()
+
+	var b strings.Builder
+	b.WriteString("package " + r.Package + "\n\n")
+	b.WriteString("import \"context\"\n\n")
+	b.WriteString("// " + hooksType + " implements " + r.hooksInterfaceType() + ". This file is generated once and\n")
+	b.WriteString("// is yours to edit: set server-managed columns (tenant, owner, timestamps not\n")
+	b.WriteString("// handled by GORM, …) on row in BeforeCreate. Regeneration does not overwrite it.\n")
+	b.WriteString("type " + hooksType + " struct{}\n\n")
+	b.WriteString("// BeforeCreate runs after the request is mapped onto row and before it is\n")
+	b.WriteString("// persisted. The default is a no-op; add server-derived values here.\n")
+	b.WriteString("func (" + hooksType + ") BeforeCreate(ctx context.Context, row *" + typ + ", body " + body + ") error {\n")
+	b.WriteString("\treturn nil\n}\n")
+	return b.String()
+}
