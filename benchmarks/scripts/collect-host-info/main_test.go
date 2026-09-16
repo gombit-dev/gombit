@@ -104,7 +104,7 @@ func allUnits() []unitRef {
 		units = append(units, unitRef{metadata.GroupMicrobench, s})
 	}
 	for _, fw := range []string{"django", "gin-gorm", "gombit", "laravel", "nestjs", "rails"} {
-		units = append(units, unitRef{metadata.GroupCRUD, fw}, unitRef{metadata.GroupFootprint, fw + ":container"})
+		units = append(units, unitRef{metadata.GroupCRUD, fw + ":crud-list"}, unitRef{metadata.GroupFootprint, fw + ":container"})
 	}
 	return units
 }

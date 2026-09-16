@@ -249,10 +249,10 @@ make benchmark-crud FRAMEWORK=gin-gorm FRAMEWORK_VERSION=v1.12.0 \
 It warms up (a discarded run), measures `TRIALS` times at each concurrency
 level in `benchmarks/config/versions.env`, and **merges** its rows into
 `benchmarks/results/latest/{results.json,results.csv,metadata.json}` (raw k6
-summaries under `raw/`) — re-running one framework replaces that framework's
-rows while other frameworks are kept, so running each in turn accumulates all
-six. A trial that sends no traffic, has any HTTP error, or fails a content
-check (a 200 with the wrong page shape) fails the command loudly **with
+summaries under `raw/`) — re-running one framework's workload replaces those
+rows while other frameworks and workloads are kept, so running each in turn
+accumulates all six. A trial that sends no traffic, has any HTTP error, or fails
+a content check (a 200 with the wrong page shape) fails the command loudly **with
 nothing written** rather than recording a bogus row — the read workload
 against a healthy app must be error-free (`benchmarks/internal/k6`'s
 `Summary.Validate`). Standalone, `run-crud` does not start or resource-constrain

@@ -218,7 +218,7 @@ that group's data file — the thing a single run can replace on its own:
 | group | unit | recorded by |
 | --- | --- | --- |
 | `microbench` | stack namespace (`nethttp`/`gin`/`huma`/`gombit`, `gombit-ablation`) | `scripts/microbench` |
-| `crud` | framework | `scripts/run-crud` |
+| `crud` | framework + benchmark (workload) | `scripts/run-crud` |
 | `footprint` | framework + variant | `scripts/footprint` |
 
 **The program that writes the row writes the provenance.** All three of these
@@ -260,6 +260,11 @@ The footprint unit is the row's full merge key, `framework:variant`
 (`gombit:container`, `gombit:embedded`), because that is what `footprint.Merge`
 keys on. Measuring the embedded single binary therefore cannot relabel the
 container row the README publishes.
+
+The CRUD unit is likewise the row's full merge key, `framework:benchmark`
+(`gombit:crud-list`), where the benchmark is the workload script that ran
+(`workloads/<benchmark>.js`). Recording another workload for an app therefore
+neither replaces nor relabels its `crud-list` rows.
 
 #### Reading `metadata.json`: `groups` is authoritative, the top level is not
 

@@ -51,7 +51,7 @@
   "trials": 5,
   "groups": {
     "crud": {
-      "django": {
+      "django:crud-list": {
         "timestamp": "2026-08-27T21:57:34Z",
         "git_commit": "88442ae706f4e7f7f0bac7584ff5cba6c795a0d0",
         "git_dirty": false,
@@ -63,7 +63,7 @@
         "ram_bytes": 7690293248,
         "go_version": "go1.27.0"
       },
-      "gin-gorm": {
+      "gin-gorm:crud-list": {
         "timestamp": "2026-08-27T21:57:34Z",
         "git_commit": "88442ae706f4e7f7f0bac7584ff5cba6c795a0d0",
         "git_dirty": false,
@@ -75,7 +75,7 @@
         "ram_bytes": 7690293248,
         "go_version": "go1.27.0"
       },
-      "gombit": {
+      "gombit:crud-list": {
         "timestamp": "2026-08-27T21:57:34Z",
         "git_commit": "88442ae706f4e7f7f0bac7584ff5cba6c795a0d0",
         "git_dirty": false,
@@ -87,7 +87,7 @@
         "ram_bytes": 7690293248,
         "go_version": "go1.27.0"
       },
-      "laravel": {
+      "laravel:crud-list": {
         "timestamp": "2026-08-27T21:57:34Z",
         "git_commit": "88442ae706f4e7f7f0bac7584ff5cba6c795a0d0",
         "git_dirty": false,
@@ -99,7 +99,7 @@
         "ram_bytes": 7690293248,
         "go_version": "go1.27.0"
       },
-      "nestjs": {
+      "nestjs:crud-list": {
         "timestamp": "2026-08-27T21:57:34Z",
         "git_commit": "88442ae706f4e7f7f0bac7584ff5cba6c795a0d0",
         "git_dirty": false,
@@ -111,7 +111,7 @@
         "ram_bytes": 7690293248,
         "go_version": "go1.27.0"
       },
-      "rails": {
+      "rails:crud-list": {
         "timestamp": "2026-08-27T21:57:34Z",
         "git_commit": "88442ae706f4e7f7f0bac7584ff5cba6c795a0d0",
         "git_dirty": false,

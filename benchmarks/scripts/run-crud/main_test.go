@@ -19,35 +19,175 @@ func TestParseIntListRejectsInvalidToken(t *testing.T) {
 	}
 }
 
-func TestMergeRowsReplacesSameFrameworkKeepsOthers(t *testing.T) {
+// A run replaces exactly the rows it produced: the merge key is (framework,
+// benchmark). Keyed on the framework alone, re-running crud-list silently
+// deleted that app's rows for every other workload (#361).
+func TestMergeRowsReplacesOnlyTheSameFrameworkAndBenchmark(t *testing.T) {
 	existing := []result.Result{
-		{Framework: "gin-gorm", Concurrency: 10, Trial: 1},
-		{Framework: "gombit", Concurrency: 10, Trial: 1},    // other framework, kept
-		{Framework: "gin-gorm", Concurrency: 100, Trial: 1}, // old gin-gorm rows, replaced
+		{Framework: "gombit", Benchmark: "crud-list", Concurrency: 10, Trial: 1},          // replaced
+		{Framework: "gombit", Benchmark: "crud-list", Concurrency: 100, Trial: 1},         // replaced
+		{Framework: "gombit", Benchmark: "auth-jwt", Concurrency: 10, Trial: 1},           // same app, other workload: kept
+		{Framework: "gin-gorm", Benchmark: "crud-list", Concurrency: 10, Trial: 1},        // other app, same workload: kept
+		{Framework: "gin-gorm", Benchmark: "techempower-json", Concurrency: 10, Trial: 1}, // other app, other workload: kept
 	}
 	newRows := []result.Result{
-		{Framework: "gin-gorm", Concurrency: 10, Trial: 1, Requests: 42},
+		{Framework: "gombit", Benchmark: "crud-list", Concurrency: 10, Trial: 1, Requests: 42},
 	}
 
-	merged := mergeRows(existing, newRows, "gin-gorm")
+	merged := mergeRows(existing, newRows, "gombit", "crud-list")
 
-	var ginGorm, gombit int
+	count := map[string]int{}
 	for _, r := range merged {
-		switch r.Framework {
-		case "gin-gorm":
-			ginGorm++
-			if r.Requests != 42 {
-				t.Errorf("gin-gorm row not the new one: %+v", r)
-			}
-		case "gombit":
-			gombit++
+		count[r.ProvenanceUnit()]++
+		if r.ProvenanceUnit() == "gombit:crud-list" && r.Requests != 42 {
+			t.Errorf("gombit crud-list row not the new one: %+v", r)
 		}
 	}
-	if ginGorm != 1 {
-		t.Errorf("gin-gorm rows = %d, want 1 (old ones replaced)", ginGorm)
+	for unit, want := range map[string]int{
+		"gombit:crud-list":          1,
+		"gombit:auth-jwt":           1,
+		"gin-gorm:crud-list":        1,
+		"gin-gorm:techempower-json": 1,
+	} {
+		if count[unit] != want {
+			t.Errorf("%s rows = %d, want %d (merged: %+v)", unit, count[unit], want, merged)
+		}
 	}
-	if gombit != 1 {
-		t.Errorf("gombit rows = %d, want 1 (other framework kept)", gombit)
+}
+
+func TestBenchmarkNameComesFromTheWorkloadScript(t *testing.T) {
+	for in, want := range map[string]string{
+		"benchmarks/workloads/crud-list.js": "crud-list",
+		"/abs/workloads/auth-jwt.js":        "auth-jwt",
+		"techempower-json.js":               "techempower-json",
+	} {
+		if got, err := benchmarkName(in); err != nil || got != want {
+			t.Errorf("benchmarkName(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	for _, in := range []string{"", ".js", "/", "workloads/a:b.js"} {
+		if got, err := benchmarkName(in); err == nil {
+			t.Errorf("benchmarkName(%q) = %q, nil; want an error", in, got)
+		}
+	}
+}
+
+// okK6 is an injected k6 whose warm-up is a no-op and whose measured runs write
+// the clean k6 golden.
+func okK6(t *testing.T) k6Runner {
+	t.Helper()
+	ok, err := os.ReadFile(filepath.Join("..", "..", "internal", "k6", "testdata", "summary_ok.json")) //nolint:gosec // fixed testdata golden path
+	if err != nil {
+		t.Fatalf("read golden: %v", err)
+	}
+	return func(_ int, _ string, summaryPath string) error {
+		if summaryPath == "" {
+			return nil
+		}
+		return os.WriteFile(summaryPath, ok, 0o600) //nolint:gosec // summaryPath is under t.TempDir()
+	}
+}
+
+func readResultsJSON(t *testing.T, path string) []result.Result {
+	t.Helper()
+	rows, err := readResults(path)
+	if err != nil {
+		t.Fatalf("read results: %v", err)
+	}
+	return rows
+}
+
+// The issue's reproduction, through the real run(): a snapshot holding two
+// workloads for one app plus another app's row. Re-running one workload must
+// replace only its own rows, label them with the workload that ran, and leave
+// the other workload's rows AND recorded provenance untouched (#361).
+func TestRunReplacesOnlyItsOwnWorkload(t *testing.T) {
+	dir := t.TempDir()
+	clean := false
+	seed := []result.Result{
+		{Framework: "gombit", Benchmark: "crud-list", Concurrency: 10, Trial: 1, Requests: 1},
+		{Framework: "gombit", Benchmark: "auth-jwt", Concurrency: 10, Trial: 1, Requests: 2},
+		{Framework: "gin-gorm", Benchmark: "techempower-json", Concurrency: 10, Trial: 1, Requests: 3},
+	}
+	f, err := os.Create(filepath.Join(dir, "results.json")) //nolint:gosec // dir is t.TempDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := result.WriteJSON(f, seed); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+	authProv := metadata.Provenance{GitCommit: "aaaa11112222", Timestamp: "2026-09-01T00:00:00Z", GitDirty: &clean, CPUModel: "Bench Host"}
+	before := metadata.StampUnit(metadata.Metadata{}, metadata.GroupCRUD, "gombit:auth-jwt", authProv)
+	writeMetadataJSON(t, filepath.Join(dir, "metadata.json"), before)
+
+	cfg := runConfig{
+		targetURL: "http://unused", framework: "gombit", benchmark: "crud-list",
+		concurrency: []int{10}, duration: "1s", warmup: "1s", trials: 1, outDir: dir,
+	}
+	// Re-run crud-list; a second, non-default workload below proves the row
+	// label follows the workload that ran.
+	if err := run(cfg, okK6(t)); err != nil {
+		t.Fatalf("run(crud-list): %v", err)
+	}
+
+	rows := readResultsJSON(t, filepath.Join(dir, "results.json"))
+	byUnit := map[string][]result.Result{}
+	for _, r := range rows {
+		byUnit[r.ProvenanceUnit()] = append(byUnit[r.ProvenanceUnit()], r)
+	}
+	if got := byUnit["gombit:auth-jwt"]; len(got) != 1 || got[0].Requests != 2 {
+		t.Errorf("re-running crud-list must keep gombit's auth-jwt row: %+v", rows)
+	}
+	if got := byUnit["gin-gorm:techempower-json"]; len(got) != 1 || got[0].Requests != 3 {
+		t.Errorf("another app's row must be kept: %+v", rows)
+	}
+	if got := byUnit["gombit:crud-list"]; len(got) != 1 || got[0].Requests == 1 {
+		t.Errorf("gombit's crud-list row must be replaced by the new measurement: %+v", rows)
+	}
+
+	after := readMetadataJSON(t, filepath.Join(dir, "metadata.json"))
+	if after.UnitProvenance(metadata.GroupCRUD, "gombit:crud-list").Empty() {
+		t.Error("the measured workload must record its own provenance")
+	}
+	if now := after.UnitProvenance(metadata.GroupCRUD, "gombit:auth-jwt"); !sameProvenance(authProv, now) {
+		t.Errorf("recording crud-list relabelled auth-jwt's provenance: %+v -> %+v", authProv, now)
+	}
+	if _, ok := after.Groups[metadata.GroupCRUD]["gombit"]; ok {
+		t.Error("provenance must never be filed under the bare framework again")
+	}
+
+	cfg.benchmark = "techempower-json"
+	if err := run(cfg, okK6(t)); err != nil {
+		t.Fatalf("run(techempower-json): %v", err)
+	}
+	rows = readResultsJSON(t, filepath.Join(dir, "results.json"))
+	var labelled int
+	for _, r := range rows {
+		if r.Framework == "gombit" && r.Benchmark == "techempower-json" {
+			labelled++
+		}
+	}
+	if labelled != 1 || len(rows) != 4 {
+		t.Errorf("a non-default workload's rows must carry its own benchmark and add to the snapshot: %+v", rows)
+	}
+}
+
+// Without a benchmark a row can be neither merged nor attributed, so run() must
+// refuse before writing anything.
+func TestRunWithoutBenchmarkFailsAndWritesNothing(t *testing.T) {
+	dir := t.TempDir()
+	cfg := runConfig{
+		targetURL: "http://unused", framework: "gombit",
+		concurrency: []int{10}, duration: "1s", warmup: "1s", trials: 1, outDir: dir,
+	}
+	if err := run(cfg, okK6(t)); err == nil {
+		t.Fatal("run() = nil, want an error for an empty benchmark")
+	}
+	for _, name := range []string{"results.json", "metadata.json"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+			t.Errorf("%s was written despite the missing benchmark (stat err: %v)", name, err)
+		}
 	}
 }
 
@@ -111,7 +251,7 @@ func TestRunFailsWithoutWritingWhenMetadataIsCorrupt(t *testing.T) {
 		return os.WriteFile(summaryPath, ok, 0o600) //nolint:gosec // summaryPath is under t.TempDir()
 	}
 	cfg := runConfig{
-		targetURL: "http://unused", framework: "gombit",
+		targetURL: "http://unused", framework: "gombit", benchmark: "crud-list",
 		concurrency: []int{10}, duration: "1s", warmup: "1s", trials: 1, outDir: dir,
 	}
 	if err := run(cfg, k6run); err == nil {
@@ -171,7 +311,7 @@ func TestSubsetRunNeverReattributesRowsItDidNotMeasure(t *testing.T) {
 			dir := t.TempDir()
 			writeMetadataJSON(t, filepath.Join(dir, "metadata.json"), before)
 			cfg := runConfig{
-				targetURL: "http://unused", framework: "gombit", frameworkVersion: "vB",
+				targetURL: "http://unused", framework: "gombit", benchmark: "crud-list", frameworkVersion: "vB",
 				concurrency: []int{10}, duration: "1s", warmup: "1s", trials: 1, outDir: dir,
 			}
 			if err := run(cfg, k6run); err != nil {
@@ -179,11 +319,11 @@ func TestSubsetRunNeverReattributesRowsItDidNotMeasure(t *testing.T) {
 			}
 			after := readMetadataJSON(t, filepath.Join(dir, "metadata.json"))
 
-			if after.UnitProvenance(metadata.GroupCRUD, "gombit").Empty() {
+			if after.UnitProvenance(metadata.GroupCRUD, "gombit:crud-list").Empty() {
 				t.Error("the measured app must record its own provenance")
 			}
 			for _, u := range allUnits() {
-				if u.group == metadata.GroupCRUD && u.unit == "gombit" {
+				if u.group == metadata.GroupCRUD && u.unit == "gombit:crud-list" {
 					continue
 				}
 				was := before.UnitProvenance(u.group, u.unit)
@@ -207,7 +347,7 @@ func allUnits() []unitRef {
 		units = append(units, unitRef{metadata.GroupMicrobench, s})
 	}
 	for _, fw := range []string{"django", "gin-gorm", "gombit", "laravel", "nestjs", "rails"} {
-		units = append(units, unitRef{metadata.GroupCRUD, fw}, unitRef{metadata.GroupFootprint, fw + ":container"})
+		units = append(units, unitRef{metadata.GroupCRUD, fw + ":crud-list"}, unitRef{metadata.GroupFootprint, fw + ":container"})
 	}
 	return units
 }
@@ -260,7 +400,7 @@ func TestRunFailsAndWritesNothingOnValidateFailure(t *testing.T) {
 	}
 
 	cfg := runConfig{
-		targetURL: "http://unused", framework: "x",
+		targetURL: "http://unused", framework: "x", benchmark: "crud-list",
 		concurrency: []int{1}, duration: "1s", warmup: "1s", trials: 1,
 		outDir: dir,
 	}
@@ -290,7 +430,7 @@ func TestRunWritesAndAccumulatesAcrossFrameworks(t *testing.T) {
 
 	for _, fw := range []string{"gin-gorm", "gombit"} {
 		cfg := runConfig{
-			targetURL: "http://unused", framework: fw, frameworkVersion: "v" + fw,
+			targetURL: "http://unused", framework: fw, benchmark: "crud-list", frameworkVersion: "v" + fw,
 			concurrency: []int{10}, duration: "1s", warmup: "1s", trials: 1,
 			outDir: dir, k6Image: "grafana/k6:0.55.0",
 			// Distinct per-app verdicts to prove the merge preserves both,

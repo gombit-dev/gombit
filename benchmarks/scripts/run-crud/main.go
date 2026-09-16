@@ -39,6 +39,7 @@ const resourceLimitsNotApplied = "not applied (run-crud does not start or constr
 type runConfig struct {
 	targetURL              string
 	framework              string
+	benchmark              string
 	frameworkVersion       string
 	runtimeName            string
 	runtimeVersion         string
@@ -62,7 +63,7 @@ type k6Runner func(vus int, duration, summaryPath string) error
 func main() {
 	var (
 		cfg      runConfig
-		workload = flag.String("workload", "benchmarks/workloads/crud-list.js", "k6 workload script")
+		workload = flag.String("workload", "benchmarks/workloads/crud-list.js", "k6 workload script; its file name without .js is recorded as the rows' benchmark (the README CRUD table publishes crud-list)")
 		conc     = flag.String("concurrency", "1,10,100", "comma-separated concurrency levels (VUs)")
 	)
 	flag.StringVar(&cfg.k6Image, "k6-image", "grafana/k6:0.55.0", "pinned k6 image (the load generator); recorded as benchmark_tool")
@@ -94,6 +95,10 @@ func main() {
 	}
 	cfg.concurrency = levels
 
+	cfg.benchmark, err = benchmarkName(*workload)
+	if err != nil {
+		fatalf("-workload: %v", err)
+	}
 	workloadAbs, err := filepath.Abs(*workload)
 	if err != nil {
 		fatalf("resolve workload path: %v", err)
@@ -113,6 +118,9 @@ func main() {
 // nothing written — a failed implementation must not leave a partial or bogus
 // snapshot behind.
 func run(cfg runConfig, k6run k6Runner) error {
+	if cfg.benchmark == "" {
+		return fmt.Errorf("no benchmark name: rows cannot be merged or attributed without one")
+	}
 	rawDir := filepath.Join(cfg.outDir, "raw")
 	if err := os.MkdirAll(rawDir, 0o750); err != nil {
 		return fmt.Errorf("create out dir: %w", err)
@@ -124,7 +132,7 @@ func run(cfg runConfig, k6run k6Runner) error {
 		FrameworkVersion: cfg.frameworkVersion,
 		Runtime:          cfg.runtimeName,
 		RuntimeVersion:   cfg.runtimeVersion,
-		Benchmark:        "crud-list",
+		Benchmark:        cfg.benchmark,
 		Database:         "postgresql",
 	}
 
@@ -175,16 +183,18 @@ func run(cfg runConfig, k6run k6Runner) error {
 		Concurrency:               cfg.concurrency,
 		Trials:                    cfg.trials,
 	})
-	// This app's own provenance, filed under this app alone. run-crud replaces
-	// one framework's rows and preserves the others, and APPS= subsetting is a
-	// supported run, so stamping the whole crud group here would caption every
-	// other app's rows with a commit they never ran at (issue #266, round 2).
-	meta = metadata.StampUnit(meta, metadata.GroupCRUD, cfg.framework, meta.Provenance())
+	// This run's own provenance, filed under this (app, workload) alone. run-crud
+	// replaces exactly those rows and preserves the others, and APPS= subsetting
+	// is a supported run, so stamping the whole crud group here would caption
+	// every other app's rows with a commit they never ran at (issue #266, round
+	// 2), and stamping the app alone would do the same to its other workloads
+	// (#361).
+	meta = metadata.StampUnit(meta, metadata.GroupCRUD, result.ProvenanceUnit(cfg.framework, cfg.benchmark), meta.Provenance())
 
-	if err := writeOutputs(cfg.outDir, cfg.framework, rows, meta); err != nil {
+	if err := writeOutputs(cfg.outDir, cfg.framework, cfg.benchmark, rows, meta); err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "run-crud: merged %d %s rows into %s\n", len(rows), cfg.framework, cfg.outDir)
+	fmt.Fprintf(os.Stderr, "run-crud: merged %d %s %s rows into %s\n", len(rows), cfg.framework, cfg.benchmark, cfg.outDir)
 	return nil
 }
 
@@ -200,7 +210,7 @@ func dockerK6Runner(image, workloadAbs, targetURL string) k6Runner {
 			"-e", "TARGET_URL=" + targetURL,
 			"-e", "VUS=" + strconv.Itoa(vus),
 			"-e", "DURATION=" + duration,
-			"-v", workloadAbs + ":/workload/crud-list.js:ro",
+			"-v", workloadAbs + ":/workload/script.js:ro",
 		}
 		if summaryPath != "" {
 			args = append(args,
@@ -208,7 +218,7 @@ func dockerK6Runner(image, workloadAbs, targetURL string) k6Runner {
 				"-v", filepath.Dir(summaryPath)+":/out",
 			)
 		}
-		args = append(args, image, "run", "--quiet", "/workload/crud-list.js")
+		args = append(args, image, "run", "--quiet", "/workload/script.js")
 
 		cmd := exec.CommandContext(context.Background(), "docker", args...) //nolint:gosec // fixed argv, operator-supplied target only
 		cmd.Stderr = os.Stderr
@@ -234,12 +244,12 @@ func parseSummaryFile(path string) (k6.Summary, error) {
 }
 
 // writeOutputs merges this run's rows into any existing snapshot rather than
-// truncating it: re-running one framework replaces that framework's rows,
-// while running each framework in turn accumulates all six. metadata's version
-// maps are unioned the same way so a multi-framework snapshot records every
-// implementation that contributed.
-func writeOutputs(outDir, framework string, newRows []result.Result, meta metadata.Metadata) error {
-	rows, err := mergedResults(filepath.Join(outDir, "results.json"), newRows, framework)
+// truncating it: re-running one framework's workload replaces those rows,
+// while running each framework (or workload) in turn accumulates them all.
+// metadata's version maps are unioned the same way so a multi-framework
+// snapshot records every implementation that contributed.
+func writeOutputs(outDir, framework, benchmark string, newRows []result.Result, meta metadata.Metadata) error {
+	rows, err := mergedResults(filepath.Join(outDir, "results.json"), newRows, framework, benchmark)
 	if err != nil {
 		return err
 	}
@@ -265,20 +275,23 @@ func writeOutputs(outDir, framework string, newRows []result.Result, meta metada
 	})
 }
 
-func mergedResults(path string, newRows []result.Result, framework string) ([]result.Result, error) {
+func mergedResults(path string, newRows []result.Result, framework, benchmark string) ([]result.Result, error) {
 	existing, err := readResults(path)
 	if err != nil {
 		return nil, err
 	}
-	return mergeRows(existing, newRows, framework), nil
+	return mergeRows(existing, newRows, framework, benchmark), nil
 }
 
-// mergeRows drops any existing rows for framework (a re-run replaces them) and
-// appends the new ones; rows for other frameworks are kept.
-func mergeRows(existing, newRows []result.Result, framework string) []result.Result {
+// mergeRows drops any existing rows for (framework, benchmark) (a re-run
+// replaces them) and appends the new ones; rows for other frameworks, and for
+// this framework's other workloads, are kept. The key must match the provenance
+// unit run() stamps (result.ProvenanceUnit), or recording one workload would
+// relabel another's rows (#361).
+func mergeRows(existing, newRows []result.Result, framework, benchmark string) []result.Result {
 	merged := make([]result.Result, 0, len(existing)+len(newRows))
 	for _, r := range existing {
-		if r.Framework != framework {
+		if r.Framework != framework || r.Benchmark != benchmark {
 			merged = append(merged, r)
 		}
 	}
@@ -321,6 +334,22 @@ func writeFile(path string, encode func(*os.File) error) error {
 		return err
 	}
 	return f.Close()
+}
+
+// benchmarkName derives a row's benchmark from the workload script that ran:
+// benchmarks/workloads/<benchmark>.js. A row labelled with a constant instead
+// would let a different workload replace, and be published as, crud-list (#361).
+// ":" is rejected because it separates framework from benchmark in the
+// provenance unit.
+func benchmarkName(workloadPath string) (string, error) {
+	name := strings.TrimSuffix(filepath.Base(workloadPath), ".js")
+	if name == "" || name == "." || name == string(filepath.Separator) {
+		return "", fmt.Errorf("cannot derive a benchmark name from %q", workloadPath)
+	}
+	if strings.Contains(name, ":") {
+		return "", fmt.Errorf("benchmark name %q must not contain ':'", name)
+	}
+	return name, nil
 }
 
 // durationSeconds converts a k6 duration string ("30s", "1m30s") to seconds
