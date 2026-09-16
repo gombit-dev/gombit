@@ -288,6 +288,23 @@ records no unit at all.
 The shape is additive, so `schema_version` stays `1`: a reader that predates
 `groups` still sees exactly the flat fields it always saw.
 
+#### CI warns when the microbench snapshot predates the code (PERF-14 / #293)
+
+`benchmark-report-drift` verifies `README ≡ f(snapshot)`; it does **not** verify
+`snapshot ≡ f(main)`. `benchmarks/scripts/microbench-staleness.sh` (run in that
+job) closes the gap for the cheap-to-refresh microbench group: when the commit
+that last refreshed `benchmarks/results/latest/` is a strict ancestor of the last
+commit touching `framework/`, `benchmarks/micro/`, or
+`benchmarks/internal/microbench/`, it emits a `::warning::` naming the commits
+and the remedy (`make benchmark-micro benchmark-report`). It **never gates** the
+build (BENCH-1 §3) — it exits 0 in every case — and it compares commits, never
+measured values. It keys the ancestor test on the snapshot's *commit in history*
+rather than the recorded `groups.microbench.gombit.git_commit`, because this repo
+squash-merges and the recorded provenance commit is usually orphaned from `main`;
+that commit is still surfaced in the warning. `crud`/`footprint` are out of scope
+— refreshing them is hours of Docker, so a per-PR warning would be noise nobody
+can act on.
+
 ## How not to interpret these results
 
 - **This is not a language or framework leaderboard.** The apps differ in

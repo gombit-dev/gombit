@@ -170,6 +170,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          # microbench-staleness.sh (below) does `git log -1 -- <paths>`, which
+          # finds nothing under the default depth-1 clone; it needs full history
+          # (mirrors the benchmark-scripts job's fetch-depth: 0).
+          fetch-depth: 0
 
       - name: Setup Go
         uses: actions/setup-go@v7
@@ -187,6 +192,12 @@ jobs:
 
       - name: Fail on benchmark report drift
         run: git diff --exit-code -- README.md
+
+      # Warn — never gate (BENCH-1 §3) — when the committed microbench snapshot
+      # predates the framework/harness code it measures (PERF-14 / #293). Exits
+      # 0 in every case; surfaces a ::warning:: with the commits and the remedy.
+      - name: Warn on stale microbench snapshot
+        run: bash benchmarks/scripts/microbench-staleness.sh
 
   benchmark-smoke:
     name: Benchmark smoke
@@ -246,6 +257,7 @@ jobs:
           bash benchmarks/scripts/benchmark-target_test.sh
           bash benchmarks/scripts/run-crud-all_test.sh
           bash benchmarks/scripts/footprint-all_test.sh
+          bash benchmarks/scripts/microbench-staleness_test.sh
 
   database-sqlite:
     name: Database (sqlite)
