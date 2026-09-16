@@ -200,6 +200,22 @@ func isGoIdent(name string) bool {
 	return true
 }
 
+// isUsableIdent reports whether name is both a syntactically valid Go
+// identifier and not a reserved keyword. isGoIdent alone accepts "map",
+// "type", "select", and every other keyword — fine for comparisons, but not
+// for a position the compiler requires an identifier: a package clause
+// (`package map`), a package name, or an import alias (`import map "..."`)
+// all fail to parse. Anything checked against goKeywords already (the
+// resource-name package derivation above) should use this instead of
+// isGoIdent alone.
+func isUsableIdent(name string) bool {
+	if !isGoIdent(name) {
+		return false
+	}
+	_, keyword := goKeywords[name]
+	return !keyword
+}
+
 func isExportedIdent(name string) bool {
 	if !isGoIdent(name) {
 		return false

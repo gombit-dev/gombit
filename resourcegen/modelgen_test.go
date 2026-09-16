@@ -8,10 +8,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	collidepkg1box "github.com/gombit-dev/gombit/resourcegen/testdata/collidepkg1/box"
+	collidepkg2box "github.com/gombit-dev/gombit/resourcegen/testdata/collidepkg2/box"
 	"github.com/gombit-dev/gombit/types"
 	"gorm.io/gorm"
 )
@@ -69,19 +72,28 @@ func normalizeImports(s []importSpec) []importSpec {
 	return s
 }
 
-// namedStringSlice is a defined slice type: its identity (and any JSON/DB
-// behavior it carries) must be preserved, not decomposed into []string.
+// namedStringSlice is an UNEXPORTED defined slice type. Local to its own
+// package it is perfectly valid (the generated file lives there too, so no
+// qualification is needed); referenced from outside its package it cannot be
+// named at all — see TestTypeRendererRejectsUnexportedExternalType.
 type namedStringSlice []string
+
+// NamedStringSlice is the exported counterpart, used to prove the "named type
+// rendered by identity" contract on a type that CAN legally be qualified from
+// another package (issue #352 review: the previous version of this test
+// asserted `resourcegen.namedStringSlice` as correct output — an identifier no
+// other package can compile against).
+type NamedStringSlice []string
 
 // A named type — even a defined slice — is rendered by identity, not decomposed
 // into its underlying type. From another package it is qualified and imported;
 // local to the model's package it is unqualified with no import (the generated
 // file lives in that package, so importing it would be a self-import).
 func TestTypeRendererNamedComposite(t *testing.T) {
-	nss := reflect.TypeOf(namedStringSlice{})
+	nss := reflect.TypeOf(NamedStringSlice{})
 
 	extExpr, extImports := renderExternal(t, nss)
-	if extExpr != "resourcegen.namedStringSlice" {
+	if extExpr != "resourcegen.NamedStringSlice" {
 		t.Fatalf("external expr = %q, want qualified", extExpr)
 	}
 	if !reflect.DeepEqual(extImports, []importSpec{{"resourcegen", "github.com/gombit-dev/gombit/resourcegen"}}) {
@@ -89,8 +101,12 @@ func TestTypeRendererNamedComposite(t *testing.T) {
 	}
 
 	// Local to the model's package: unqualified, no import (no self-import).
+	// Exported/unexported does not matter here — nothing needs to name it from
+	// outside its own package, so the UNEXPORTED namedStringSlice is used to
+	// prove that export status only gates the external path.
+	local := reflect.TypeOf(namedStringSlice{})
 	trLocal := newTypeRenderer("github.com/gombit-dev/gombit/resourcegen", "resourcegen")
-	localExpr, err := trLocal.render(nss)
+	localExpr, err := trLocal.render(local)
 	if err != nil {
 		t.Fatalf("render local: %v", err)
 	}
@@ -102,18 +118,50 @@ func TestTypeRendererNamedComposite(t *testing.T) {
 	}
 }
 
+// render must fail closed on an unexported type referenced from outside its
+// package: alias.namedStringSlice is not an identifier any other package can
+// compile against. Reachable through a type alias to an unexported type in a
+// dependency (`type Exported = unexported`); rare, but silently emitting it
+// produced uncompilable source (issue #352 review).
+func TestTypeRendererRejectsUnexportedExternalType(t *testing.T) {
+	tr := newTypeRenderer("example.com/some/othermodel", "othermodel")
+	_, err := tr.render(reflect.TypeOf(namedStringSlice{}))
+	if err == nil {
+		t.Fatal("want an error: unexported external type cannot be qualified")
+	}
+	if !strings.Contains(err.Error(), "unexported") {
+		t.Fatalf("error should name the problem, got: %v", err)
+	}
+}
+
 // A path whose last segment is not a Go identifier (e.g. .../x.v2) still yields a
 // usable, uniquified alias rather than an invalid qualifier — and distinct paths
 // sharing a base get distinct aliases, so output stays deterministic and compiles.
 func TestTypeRendererAliasFallback(t *testing.T) {
 	tr := newTypeRenderer("example.com/model", "model")
-	a1, _ := tr.aliasFor("example.com/x.v2")
-	a2, _ := tr.aliasFor("example.com/other/x.v2")
+	a1 := tr.aliasFor("example.com/x.v2")
+	a2 := tr.aliasFor("example.com/other/x.v2")
 	if !isGoIdent(a1) || !isGoIdent(a2) {
 		t.Fatalf("aliases must be identifiers, got %q %q", a1, a2)
 	}
 	if a1 == a2 {
 		t.Fatalf("distinct paths must get distinct aliases, both %q", a1)
+	}
+}
+
+// A package-path segment that is a real Go keyword ("map", "type", "select", …)
+// is a valid identifier by isGoIdent's character-class rule but an invalid
+// import alias — "import map \"...\"" does not parse. aliasFor must fall back
+// to the synthetic name the same way it does for a non-identifier segment
+// (issue #352 review, finding 6).
+func TestTypeRendererAliasFallsBackOnKeywordSegment(t *testing.T) {
+	tr := newTypeRenderer("example.com/model", "model")
+	alias := tr.aliasFor("example.com/x/map")
+	if alias == "map" {
+		t.Fatalf("alias = %q, a Go keyword cannot be used as an import alias", alias)
+	}
+	if !isUsableIdent(alias) {
+		t.Fatalf("alias = %q, want a usable (non-keyword) identifier", alias)
 	}
 }
 
@@ -127,7 +175,7 @@ func TestBuildModelResourceSplitsByPolicy(t *testing.T) {
 		Password   string `gombit:"write"`                       // request-only
 		Internal   string `gombit:"-"`                           // hidden
 	}
-	res, err := buildModelResource(&Book{})
+	res, err := buildModelResource(&Book{}, "resourcegen")
 	if err != nil {
 		t.Fatalf("buildModelResource: %v", err)
 	}
@@ -173,12 +221,45 @@ func TestBuildModelResourceDerivesIdentity(t *testing.T) {
 		ID    uint `gorm:"primaryKey"`
 		Label string
 	}
-	res, err := buildModelResource(&Widget{})
+	res, err := buildModelResource(&Widget{}, "resourcegen")
 	if err != nil {
 		t.Fatalf("buildModelResource: %v", err)
 	}
 	if res.TypeName != "Widget" || res.dataType() != "widgetData" {
 		t.Fatalf("identity = %q/%q, want Widget/widgetData", res.TypeName, res.dataType())
+	}
+}
+
+// The destination package is taken verbatim from the caller, never guessed from
+// reflection — reflect.Type.PkgPath is an import path, not a declared package
+// name, and the two can differ (issue #352 review, finding 2). Widget's real
+// package here is "resourcegen"; the caller supplying an unrelated package
+// proves buildModelResource never derives it, and pkgBase(PkgPath()) would have
+// silently returned "resourcegen" instead.
+func TestBuildModelResourceUsesCallerSuppliedPackage(t *testing.T) {
+	type Widget struct {
+		ID uint `gorm:"primaryKey"`
+	}
+	res, err := buildModelResource(&Widget{}, "somewhereelse")
+	if err != nil {
+		t.Fatalf("buildModelResource: %v", err)
+	}
+	if res.Package != "somewhereelse" {
+		t.Fatalf("Package = %q, want the caller-supplied %q, not one derived from reflection", res.Package, "somewhereelse")
+	}
+}
+
+// An unusable destination package — not a Go identifier, or a reserved keyword
+// (a valid identifier by character class, but not a legal package clause) —
+// must fail closed rather than emit `package 1bad` or `package map`.
+func TestBuildModelResourceRejectsUnusablePackage(t *testing.T) {
+	type Widget struct {
+		ID uint `gorm:"primaryKey"`
+	}
+	for _, bad := range []string{"", "1bad", "bad-pkg", "map", "select"} {
+		if _, err := buildModelResource(&Widget{}, bad); err == nil {
+			t.Errorf("pkg %q: want an error, package clause would not compile", bad)
+		}
 	}
 }
 
@@ -189,7 +270,7 @@ func TestBuildModelResourceFailsClosed(t *testing.T) {
 		ID    uint   `gorm:"primaryKey"`
 		Title string `gorm:"not null" gombit:"read"`
 	}
-	if _, err := buildModelResource(&Bad{}); err == nil {
+	if _, err := buildModelResource(&Bad{}, "resourcegen"); err == nil {
 		t.Fatal("want an error: required read-only column has no create source")
 	}
 }
@@ -206,7 +287,7 @@ func TestBuildModelResourceRejectsDuplicateLeaf(t *testing.T) {
 		A  A    `gorm:"embedded"`
 		B  B    `gorm:"embedded"`
 	}
-	if _, err := buildModelResource(&Dup{}); err == nil {
+	if _, err := buildModelResource(&Dup{}, "resourcegen"); err == nil {
 		t.Fatal("want an error: two columns map to DTO field \"Note\"")
 	}
 }
@@ -219,9 +300,63 @@ func TestBuildModelResourceRejectsPointerEmbed(t *testing.T) {
 		ID    uint   `gorm:"primaryKey"`
 		Audit *Audit `gorm:"embedded"`
 	}
-	_, err := buildModelResource(&Doc{})
+	_, err := buildModelResource(&Doc{}, "resourcegen")
 	if err == nil {
 		t.Fatal("want an error: pointer embed would panic the mapper")
+	}
+	if !strings.Contains(err.Error(), "pointer embed") {
+		t.Fatalf("error should name the pointer embed, got: %v", err)
+	}
+}
+
+// A two-level value embed (A -> B -> leaf) must resolve cleanly: every segment
+// of the bind path is declared directly at its own level, which is exactly what
+// fieldDeclaredAt looks up (issue #352 review, finding 7 — the nested case the
+// single-level pointer-embed test above cannot exercise).
+func TestBuildModelResourceAllowsNestedValueEmbed(t *testing.T) {
+	type Leaf struct{ X string }
+	type Mid struct {
+		Leaf Leaf `gorm:"embedded"`
+	}
+	type Outer struct {
+		ID  uint `gorm:"primaryKey"`
+		Mid Mid  `gorm:"embedded"`
+	}
+	res, err := buildModelResource(&Outer{}, "resourcegen")
+	if err != nil {
+		t.Fatalf("buildModelResource: %v", err)
+	}
+	found := false
+	for _, f := range res.Fields {
+		if f.GoName == "X" {
+			found = true
+			if f.AccessPath != "Mid.Leaf.X" {
+				t.Fatalf("AccessPath = %q, want Mid.Leaf.X", f.AccessPath)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("nested value-embedded field X was not resolved")
+	}
+}
+
+// A pointer embed at the SECOND level (Outer -> Mid value-embedded -> Mid.Leaf
+// pointer-embedded) must still be rejected. reflect.Type.FieldByName's
+// promotion-aware search can find "Leaf" through a different path than the
+// literal bind-path segment being checked; fieldDeclaredAt must not repeat that
+// mistake at a non-first level (issue #352 review, finding 7).
+func TestBuildModelResourceRejectsPointerEmbedAtIntermediateLevel(t *testing.T) {
+	type Leaf struct{ X string }
+	type Mid struct {
+		Leaf *Leaf `gorm:"embedded"`
+	}
+	type Outer struct {
+		ID  uint `gorm:"primaryKey"`
+		Mid Mid  `gorm:"embedded"`
+	}
+	_, err := buildModelResource(&Outer{}, "resourcegen")
+	if err == nil {
+		t.Fatal("want an error: the second-level embed is a pointer")
 	}
 	if !strings.Contains(err.Error(), "pointer embed") {
 		t.Fatalf("error should name the pointer embed, got: %v", err)
@@ -237,7 +372,7 @@ func TestRenderModelDTOsEmbeddedAccessPaths(t *testing.T) {
 		Title string
 		Audit Audit `gorm:"embedded"`
 	}
-	res, err := buildModelResource(&Book{})
+	res, err := buildModelResource(&Book{}, "resourcegen")
 	if err != nil {
 		t.Fatalf("buildModelResource: %v", err)
 	}
@@ -259,11 +394,46 @@ func TestRenderModelDTOsEmbeddedAccessPaths(t *testing.T) {
 	assertParses(t, src)
 }
 
+// The wire (JSON) field name must follow the Go field name, not the DB column
+// name. A `gorm:"column:..."` override is a persistence decision (ADR-016:
+// column name is "GORM schema owns"); routing it into the JSON tag would
+// silently promote it to a public API decision, which ADR-016's ownership
+// table puts under "policy owns" instead (issue #352 review, finding 8).
+func TestRenderModelDTOsJSONNameFollowsGoNameNotColumn(t *testing.T) {
+	type Book struct {
+		ID    uint   `gorm:"primaryKey"`
+		Title string `gorm:"column:custom_title_column"`
+	}
+	res, err := buildModelResource(&Book{}, "resourcegen")
+	if err != nil {
+		t.Fatalf("buildModelResource: %v", err)
+	}
+	src := renderModelDTOs(res)
+
+	if !strings.Contains(src, `Title string `+"`"+`json:"title" doc:"Title"`+"`") {
+		t.Fatalf("JSON tag must derive from GoName (\"title\"), not Column (\"custom_title_column\"):\n%s", src)
+	}
+	if strings.Contains(src, "custom_title_column") {
+		t.Fatalf("the DB column override must not leak into the wire contract:\n%s", src)
+	}
+	// The mapper still reaches the field through the model's Go field, which is
+	// unaffected by the column override — the persistence side keeps working.
+	if !strings.Contains(src, "Title: row.Title") || !strings.Contains(src, "row.Title = body.Title") {
+		t.Fatalf("mappers must still bind through the Go field name:\n%s", src)
+	}
+	assertParses(t, src)
+}
+
 // --- exact output + determinism (preconditions for generate --check) ---
 
 // goldenBookDTOs is the exact formatted output for goldenBook. The package clause
 // is the model's own package (resourcegen, here the test package), since the file
-// is generated beside the model.
+// is generated beside the model. Title carries minLength:"1" in the create body
+// because it is `gorm:"not null"`: without that constraint an empty string from
+// the client passes resourcepolicy (a create source exists) and reaches the NOT
+// NULL column as valid-but-wrong data — the exact silent zero-fill issue #218
+// exists to eliminate (issue #352 review, finding 5). TenantID is NOT NULL too
+// but response-only (read,server), so it never reaches the create body at all.
 const goldenBookDTOs = `// Code generated by gombit make resource. DO NOT EDIT.
 package resourcegen
 
@@ -280,7 +450,7 @@ type bookData struct {
 
 // bookCreateBody is the request body for creating a Book.
 type bookCreateBody struct {
-	Title    string ` + "`json:\"title\" doc:\"Title\"`" + `
+	Title    string ` + "`json:\"title\" minLength:\"1\" doc:\"Title\"`" + `
 	Password string ` + "`json:\"password\" doc:\"Password\"`" + `
 }
 
@@ -316,7 +486,7 @@ func goldenBook() any {
 }
 
 func TestRenderModelDTOsGolden(t *testing.T) {
-	res, err := buildModelResource(goldenBook())
+	res, err := buildModelResource(goldenBook(), "resourcegen")
 	if err != nil {
 		t.Fatalf("buildModelResource: %v", err)
 	}
@@ -331,7 +501,7 @@ func TestRenderModelDTOsBanner(t *testing.T) {
 		ID    uint `gorm:"primaryKey"`
 		Title string
 	}
-	res, err := buildModelResource(&Book{})
+	res, err := buildModelResource(&Book{}, "resourcegen")
 	if err != nil {
 		t.Fatalf("buildModelResource: %v", err)
 	}
@@ -345,7 +515,7 @@ func TestRenderModelDTOsBanner(t *testing.T) {
 func TestRenderModelDTOsDeterministic(t *testing.T) {
 	first := ""
 	for i := 0; i < 8; i++ {
-		res, err := buildModelResource(goldenBook())
+		res, err := buildModelResource(goldenBook(), "resourcegen")
 		if err != nil {
 			t.Fatalf("buildModelResource: %v", err)
 		}
@@ -385,7 +555,7 @@ func TestGeneratedDTOsCompileAndRun(t *testing.T) {
 	if testing.Short() {
 		t.Skip("compiles and runs a temp module; skipped in -short")
 	}
-	res, err := buildModelResource(&execModel{})
+	res, err := buildModelResource(&execModel{}, "execpkg")
 	if err != nil {
 		t.Fatalf("buildModelResource: %v", err)
 	}
@@ -426,4 +596,122 @@ func writeFile(t *testing.T, path, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// execImportsModel exercises every import shape the golden/parse-only tests
+// above only render, never compile (issue #352 review, finding 4): a
+// standard-library type taken bare (time.Time), a third-party named type
+// taken aliased (types.Decimal), and two distinct import paths that share a
+// basename ("box") and must resolve to distinct, uniquified aliases. Before
+// this test, aliasFor -> importSpec.line -> renderImports for anything but a
+// bare std import produced no source any test compiled — an incorrect
+// alias/import shape (swapped alias/path, a third-party spec filed in the std
+// group, a missing uniquifier) would still have gone green.
+type execImportsModel struct {
+	ID     uint `gorm:"primaryKey"`
+	When   time.Time
+	Amount types.Decimal
+	BoxA   collidepkg1box.Box
+	BoxB   collidepkg2box.Box
+}
+
+func TestGeneratedDTOsWithImportsCompileAndRun(t *testing.T) {
+	if testing.Short() {
+		t.Skip("compiles and runs a temp module; skipped in -short")
+	}
+	res, err := buildModelResource(&execImportsModel{}, "execimportspkg")
+	if err != nil {
+		t.Fatalf("buildModelResource: %v", err)
+	}
+	dto := string(mustFormatGo(renderModelDTOs(res)))
+
+	if !strings.Contains(dto, `"time"`) {
+		t.Fatalf("expected a bare std import for time.Time:\n%s", dto)
+	}
+	if !strings.Contains(dto, `types "github.com/gombit-dev/gombit/types"`) {
+		t.Fatalf("expected an aliased third-party import for types.Decimal:\n%s", dto)
+	}
+	if !strings.Contains(dto, `box "github.com/gombit-dev/gombit/resourcegen/testdata/collidepkg1/box"`) ||
+		!strings.Contains(dto, `box1 "github.com/gombit-dev/gombit/resourcegen/testdata/collidepkg2/box"`) {
+		t.Fatalf("expected the basename collision uniquified to box/box1:\n%s", dto)
+	}
+
+	dir := t.TempDir()
+	pkgDir := filepath.Join(dir, res.Package)
+	if err := os.MkdirAll(pkgDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(dir, "go.mod"),
+		"module execimportsmod\n\ngo 1.23\n\nrequire github.com/gombit-dev/gombit v0.0.0\n\nreplace github.com/gombit-dev/gombit => "+resourcegenModuleRoot(t)+"\n")
+	// The model as the generated code expects it. Its own import aliases are
+	// independent of dto.gen.go's (each file has its own import block); what
+	// must match is the underlying type identity (import path + name).
+	writeFile(t, filepath.Join(pkgDir, "model.go"),
+		"package "+res.Package+"\n\n"+
+			"import (\n"+
+			"\t\"time\"\n\n"+
+			"\t\"github.com/gombit-dev/gombit/types\"\n"+
+			"\tcp1 \"github.com/gombit-dev/gombit/resourcegen/testdata/collidepkg1/box\"\n"+
+			"\tcp2 \"github.com/gombit-dev/gombit/resourcegen/testdata/collidepkg2/box\"\n"+
+			")\n\n"+
+			"type execImportsModel struct {\n"+
+			"\tID     uint\n"+
+			"\tWhen   time.Time\n"+
+			"\tAmount types.Decimal\n"+
+			"\tBoxA   cp1.Box\n"+
+			"\tBoxB   cp2.Box\n"+
+			"}\n")
+	writeFile(t, filepath.Join(pkgDir, "dto.gen.go"), dto)
+	// Executes both generated mappers (unexported, so this must live in the
+	// same package) with real values for every imported type, round-tripping
+	// through the response and create mappers.
+	writeFile(t, filepath.Join(pkgDir, "run_test.go"),
+		"package "+res.Package+"\n\n"+
+			"import (\n"+
+			"\t\"testing\"\n"+
+			"\t\"time\"\n\n"+
+			"\t\"github.com/gombit-dev/gombit/types\"\n"+
+			"\tcp1 \"github.com/gombit-dev/gombit/resourcegen/testdata/collidepkg1/box\"\n"+
+			"\tcp2 \"github.com/gombit-dev/gombit/resourcegen/testdata/collidepkg2/box\"\n"+
+			")\n\n"+
+			"func TestRun(t *testing.T) {\n"+
+			"\twhen := time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC)\n"+
+			"\tamount, err := types.NewDecimalFromString(\"12.34\")\n"+
+			"\tif err != nil {\n\t\tt.Fatal(err)\n\t}\n"+
+			"\trow := execImportsModel{ID: 7, When: when, Amount: amount, BoxA: cp1.Box(\"a\"), BoxB: cp2.Box(\"b\")}\n"+
+			"\td := toexecImportsModelData(row)\n"+
+			"\tif d.ID != 7 || !d.When.Equal(when) || !d.Amount.Equal(amount.Decimal) || d.BoxA != cp1.Box(\"a\") || d.BoxB != cp2.Box(\"b\") {\n"+
+			"\t\tt.Fatalf(\"response mapper: %+v\", d)\n\t}\n"+
+			"\tbuilt := execImportsModelFromCreateBody(execImportsModelCreateBody{When: when, Amount: amount, BoxA: cp1.Box(\"a\"), BoxB: cp2.Box(\"b\")})\n"+
+			"\tif !built.When.Equal(when) || !built.Amount.Equal(amount.Decimal) || built.BoxA != cp1.Box(\"a\") || built.BoxB != cp2.Box(\"b\") {\n"+
+			"\t\tt.Fatalf(\"create mapper: %+v\", built)\n\t}\n"+
+			"}\n")
+
+	tidy := exec.Command("go", "mod", "tidy")
+	tidy.Dir = dir
+	if out, err := tidy.CombinedOutput(); err != nil {
+		t.Fatalf("go mod tidy: %v\n%s", err, out)
+	}
+	cmd := exec.Command("go", "test", "./...")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("generated DTOs failed to compile/run: %v\n%s\n--- generated ---\n%s", err, out, dto)
+	}
+}
+
+// resourcegenModuleRoot is this repo's module root, for a temp module's
+// `replace` directive back to the real framework code — the same technique
+// cmd/gombit's scaffold-compile tests use (cmdModuleRoot), one directory
+// level shallower since resourcegen sits directly under the module root.
+func resourcegenModuleRoot(t *testing.T) string {
+	t.Helper()
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	root := filepath.Clean(filepath.Join(filepath.Dir(file), ".."))
+	if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
+		t.Fatalf("module root %s: %v", root, err)
+	}
+	return root
 }

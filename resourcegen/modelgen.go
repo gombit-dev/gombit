@@ -24,31 +24,44 @@ import (
 // Wiring it into `gombit make resource` (replacing the hand-owned handler) and
 // the CRUD handler + hooks is slice 4; `gombit generate --check` is slice 5.
 
-// modelResource is the model-derived shape the DTO/mapper emitter renders. Its
-// identity — the Go type name and the package the generated file belongs to — is
-// derived from the parsed model itself (sch.ModelType), never supplied
-// independently, so a modelResource cannot describe one model's fields under
-// another type's name (ADR-016's one-authoritative-representation rule).
+// modelResource is the model-derived shape the DTO/mapper emitter renders. The
+// Go type name is derived from the parsed model itself (sch.ModelType.Name()),
+// never supplied independently, so a modelResource cannot describe one model's
+// fields under another type's name (ADR-016's one-authoritative-representation
+// rule). The package clause CANNOT be derived that way: reflect.Type.PkgPath
+// returns an import path, not the package's declared name, and the two can
+// differ (a package at .../foo.v2 declaring `package foo`; a directory name
+// that does not match its package clause). buildModelResource instead takes
+// the destination package as an explicit, validated parameter — the caller
+// (slice 4) knows it, because it is the package the file is about to be
+// written into beside model.go.
 type modelResource struct {
-	Package  string       // package clause; the model's own package (file sits beside the model)
+	Package  string       // package clause; validated identifier, supplied by the caller
 	TypeName string       // the model's exported Go type, from sch.ModelType.Name()
 	Fields   []modelField // effective persisted columns that appear in a DTO, in schema order
 	imports  []importSpec // deterministic, explicit-aliased imports the DTO field types need
 }
 
 // modelField is one effective persisted column, projected for code generation.
-// GoName is the flat DTO field identifier and struct-literal key; AccessPath is
-// the model access expression (GORM's bind path joined by ".", e.g. "Model.ID" or
-// "Audit.Note"). Only value embeds reach here — a column reached through a pointer
-// embed is rejected at build time (buildModelResource), so AccessPath never
-// dereferences a possibly-nil pointer.
+// It embeds resourcepolicy.Resolved rather than re-picking a few of its fields:
+// the projection ADDS generator-specific facts (AccessPath, GoType) to the
+// authoritative policy facts, it does not SUBTRACT from them. Slice 4 needs
+// CreateSource to generate the create-hook signature (which columns the hook
+// must set) and NotNull/HasDefault/PrimaryKey to generate the same validation
+// and migration decisions the legacy path made from its own field grammar —
+// discarding those here would force slice 4 to re-parse the model and
+// re-resolve the policy from scratch, the exact duplicated derivation ADR-016
+// exists to abolish (issue #352 review).
+//
+// AccessPath is the model access expression (GORM's bind path joined by ".",
+// e.g. "Model.ID" or "Audit.Note"). Only value embeds reach here — a column
+// reached through a pointer embed is rejected at build time
+// (buildModelResource), so AccessPath never dereferences a possibly-nil
+// pointer.
 type modelField struct {
-	GoName     string
+	resourcepolicy.Resolved
 	AccessPath string
-	Column     string // DB column name; also the JSON field name
 	GoType     string // rendered Go type expression, e.g. "string", "*time.Time", "types.Decimal"
-	InRequest  bool
-	InResponse bool
 }
 
 // importSpec is one import the generated DTOs need, with the alias used to qualify
@@ -72,11 +85,22 @@ func (s importSpec) line() string {
 // buildModelResource parses a GORM model, resolves its field policy, and projects
 // the result into a modelResource. Persistence facts (column, Go type, embedding
 // path) come from GORM's parsed schema; read/write/server policy comes from
-// resourcepolicy — the two owners ADR-016 keeps separate. Identity comes from the
-// model's own type. It fails closed on a contradictory/unsatisfiable policy, a
-// same-named leaf collision in the flat DTO, an anonymous model, a column reached
-// through a pointer embed, and a field type it cannot render deterministically.
-func buildModelResource(model any) (modelResource, error) {
+// resourcepolicy — the two owners ADR-016 keeps separate. The type name comes
+// from the model's own type; the destination package comes from pkg, which the
+// caller must supply — see modelResource's doc comment for why it cannot be
+// derived from reflection. It fails closed on a contradictory/unsatisfiable
+// policy, an unusable destination package, a same-named leaf collision in the
+// flat DTO, an anonymous model, a column reached through a pointer embed, and a
+// field type it cannot render deterministically.
+//
+// pkg is validated as a usable Go identifier here (the bar every caller can
+// check). Cross-checking it against the package clause already on disk beside
+// model.go — the stronger guarantee once a real destination file exists — is
+// slice 4's job: this pure emitter never touches a filesystem.
+func buildModelResource(model any, pkg string) (modelResource, error) {
+	if !isUsableIdent(pkg) {
+		return modelResource{}, fmt.Errorf("resourcegen: destination package %q is not a usable Go identifier", pkg)
+	}
 	sch, err := schema.Parse(model, &sync.Map{}, schema.NamingStrategy{})
 	if err != nil {
 		return modelResource{}, fmt.Errorf("resourcegen: parse model schema: %w", err)
@@ -84,10 +108,6 @@ func buildModelResource(model any) (modelResource, error) {
 	typeName := sch.ModelType.Name()
 	if typeName == "" {
 		return modelResource{}, fmt.Errorf("resourcegen: cannot generate DTOs for an anonymous model type")
-	}
-	pkg := pkgBase(sch.ModelType.PkgPath())
-	if !isGoIdent(pkg) {
-		return modelResource{}, fmt.Errorf("resourcegen: model package %q (from %q) is not a usable Go identifier", pkg, sch.ModelType.PkgPath())
 	}
 
 	policyFields, err := resourcepolicy.FromSchema(sch)
@@ -129,12 +149,9 @@ func buildModelResource(model any) (modelResource, error) {
 			return modelResource{}, err
 		}
 		res.Fields = append(res.Fields, modelField{
-			GoName:     r.GoName,
+			Resolved:   r,
 			AccessPath: strings.Join(f.BindNames, "."),
-			Column:     r.Column,
 			GoType:     goType,
-			InRequest:  r.InRequest,
-			InResponse: r.InResponse,
 		})
 	}
 
@@ -149,13 +166,24 @@ func buildModelResource(model any) (modelResource, error) {
 // nil pointer. Rather than emit a mapper that panics, walk the model type along
 // the bind path and fail closed if any intermediate field is a pointer. (Value
 // embeds, including gorm.Model, are fine.)
+//
+// Invariant this relies on: bindNames is the LITERAL, level-by-level chain GORM
+// walked to reach the column — never a promoted shortcut — so at each step the
+// segment names a field declared directly on the current level. That is why the
+// lookup below scans t's own fields instead of calling reflect.Type.FieldByName:
+// FieldByName does a promotion-aware breadth-first search through embedded
+// fields (including embedded pointers) and can return a field of the same name
+// promoted from *deeper* in the type, whose Type is the leaf's — not the pointer
+// actually traversed at this level, which is exactly the fact this function
+// exists to catch (issue #352 review).
 func ensureValueOnlyPath(modelType reflect.Type, bindNames []string, column string) error {
+	// modelType is sch.ModelType, already dereferenced by schema.Parse, and every
+	// non-leaf field walked below has just been confirmed non-pointer by the
+	// previous iteration's own check — so t is a struct type at every step, never
+	// a pointer needing another deref here.
 	t := modelType
 	for _, seg := range bindNames[:len(bindNames)-1] { // the leaf is the column itself
-		for t.Kind() == reflect.Pointer {
-			t = t.Elem()
-		}
-		sf, ok := t.FieldByName(seg)
+		sf, ok := fieldDeclaredAt(t, seg)
 		if !ok {
 			return fmt.Errorf("resourcegen: cannot resolve embed segment %q for column %q", seg, column)
 		}
@@ -165,6 +193,20 @@ func ensureValueOnlyPath(modelType reflect.Type, bindNames []string, column stri
 		t = sf.Type
 	}
 	return nil
+}
+
+// fieldDeclaredAt returns the struct field named seg declared directly on t —
+// depth 0 only, never a field promoted from an embedded type. Unlike
+// reflect.Type.FieldByName (a promotion-aware breadth-first search), this
+// answers exactly "is there a field literally named seg at this level",
+// which is what a bind-path walk needs at each step (see ensureValueOnlyPath).
+func fieldDeclaredAt(t reflect.Type, seg string) (reflect.StructField, bool) {
+	for i := 0; i < t.NumField(); i++ {
+		if f := t.Field(i); f.Name == seg {
+			return f, true
+		}
+	}
+	return reflect.StructField{}, false
 }
 
 // typeRenderer renders reflect.Type field types as Go source expressions and
@@ -188,9 +230,9 @@ func newTypeRenderer(modelPkgPath, outputPkg string) *typeRenderer {
 }
 
 // render returns the Go source type expression for t, recording any import it
-// needs. It fails closed on a type it cannot render deterministically (an unnamed
-// composite other than a pointer or slice, or a package whose alias cannot be
-// derived) rather than emit code that will not compile.
+// needs. It fails closed on a type it cannot render deterministically (an
+// unnamed composite other than a pointer or slice, or a non-local named type
+// that is unexported) rather than emit code that will not compile.
 func (tr *typeRenderer) render(t reflect.Type) (string, error) {
 	// Unnamed types (pointers, and slices like []byte / []string) carry no package
 	// and are decomposed structurally. A named type — even a defined slice/map —
@@ -224,24 +266,30 @@ func (tr *typeRenderer) render(t reflect.Type) (string, error) {
 	if t.PkgPath() == tr.modelPkgPath {
 		return name, nil // local to the model's package: unqualified, no import
 	}
-	alias, err := tr.aliasFor(t.PkgPath())
-	if err != nil {
-		return "", err
+	// Outside the model's package, name is about to be qualified as alias.name —
+	// which only refers to something if name is exported. An unexported name here
+	// (reachable through a type alias to an unexported type in a dependency,
+	// `type Exported = unexported`) would render a reference no other package can
+	// compile against. name == "" (an anonymous type with a non-empty PkgPath
+	// cannot normally occur, but nothing guarantees it) is rejected the same way.
+	if !isExportedIdent(name) {
+		return "", fmt.Errorf("resourcegen: type %s.%s is unexported and cannot be referenced from outside its package", t.PkgPath(), name)
 	}
-	return alias + "." + name, nil
+	return tr.aliasFor(t.PkgPath()) + "." + name, nil
 }
 
 // aliasFor returns the import alias for a path, assigning one deterministically on
-// first use: the path's last segment when that is a Go identifier, else a
-// synthetic name, uniquified against aliases already assigned and the output
-// package name. Assignment order follows first field-encounter order, so output
-// is deterministic.
-func (tr *typeRenderer) aliasFor(path string) (string, error) {
+// first use: the path's last segment when that is a usable Go identifier (neither
+// empty nor a keyword — "map", "type", "select" are real package-path segments),
+// else a synthetic name, uniquified against aliases already assigned and the
+// output package name. Assignment order follows first field-encounter order, so
+// output is deterministic.
+func (tr *typeRenderer) aliasFor(path string) string {
 	if a, ok := tr.aliasByPath[path]; ok {
-		return a, nil
+		return a
 	}
 	base := pkgBase(path)
-	if !isGoIdent(base) {
+	if !isUsableIdent(base) {
 		base = "pkg"
 	}
 	alias := base
@@ -250,7 +298,7 @@ func (tr *typeRenderer) aliasFor(path string) (string, error) {
 	}
 	tr.aliasByPath[path] = alias
 	tr.aliasTaken[alias] = true
-	return alias, nil
+	return alias
 }
 
 // importSpecs returns the assigned imports, sorted by path for stable output.
@@ -298,6 +346,39 @@ func (r modelResource) responseFields() []modelField {
 func (r modelResource) dataType() string       { return unexported(r.TypeName) + "Data" }
 func (r modelResource) createBodyType() string { return unexported(r.TypeName) + "CreateBody" }
 
+// jsonName is the wire field name: derived from the Go field name, the same way
+// the legacy field-grammar path derives it (toSnake, fields.go). It is
+// deliberately NOT f.Column: Column is a persistence decision (ADR-016 puts it
+// under "GORM schema owns"), and a `gorm:"column:..."` override — e.g. legacy
+// database naming inside an embedded struct — must not silently become part of
+// the wire contract without that being an explicit, separate choice (issue #352
+// review).
+func (f modelField) jsonName() string { return toSnake(f.GoName) }
+
+// responseTag is the struct tag for f in the response DTO: wire name plus doc.
+func (f modelField) responseTag() string {
+	return `json:"` + f.jsonName() + `" doc:"` + f.GoName + `"`
+}
+
+// requestTag is the struct tag for f in the create request DTO: wire name,
+// an optional minLength:"1" for a NOT NULL string, and doc. Without the
+// constraint, a NOT NULL string column accepts `""` from the client — Resolved
+// says a create source exists, so resourcepolicy is satisfied, but the empty
+// string is not the data the column was declared to require: the same silent
+// zero-fill issue #218 exists to eliminate, reproduced by the DTO built to
+// prevent it (issue #352 review). The legacy field-grammar path emits this
+// constraint (fields.go, humaTags); this is the model-first path catching up,
+// not new scope — see modelField's doc comment for why NotNull survives the
+// projection to make this possible at all.
+func (f modelField) requestTag() string {
+	tag := `json:"` + f.jsonName() + `"`
+	if f.GoType == "string" && f.NotNull {
+		tag += ` minLength:"1"`
+	}
+	tag += ` doc:"` + f.GoName + `"`
+	return tag
+}
+
 // renderModelDTOs emits the generator-owned DTO/mapper source for one resource:
 // the response DTO, the create request DTO, and the model↔DTO mappers. Every
 // field, its Go type, and its presence in each DTO is derived from the model and
@@ -317,7 +398,7 @@ func renderModelDTOs(r modelResource) string {
 	b.WriteString("// " + data + " is the response body for a " + typ + ".\n")
 	b.WriteString("type " + data + " struct {\n")
 	for _, f := range r.responseFields() {
-		b.WriteString("\t" + f.GoName + " " + f.GoType + " `json:\"" + f.Column + "\" doc:\"" + f.GoName + "\"`\n")
+		b.WriteString("\t" + f.GoName + " " + f.GoType + " `" + f.responseTag() + "`\n")
 	}
 	b.WriteString("}\n\n")
 
@@ -325,7 +406,7 @@ func renderModelDTOs(r modelResource) string {
 	b.WriteString("// " + body + " is the request body for creating a " + typ + ".\n")
 	b.WriteString("type " + body + " struct {\n")
 	for _, f := range r.requestFields() {
-		b.WriteString("\t" + f.GoName + " " + f.GoType + " `json:\"" + f.Column + "\" doc:\"" + f.GoName + "\"`\n")
+		b.WriteString("\t" + f.GoName + " " + f.GoType + " `" + f.requestTag() + "`\n")
 	}
 	b.WriteString("}\n\n")
 
