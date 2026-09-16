@@ -62,23 +62,29 @@ type modelField struct {
 	resourcepolicy.Resolved
 	AccessPath string
 	GoType     string // rendered Go type expression, e.g. "string", "*time.Time", "types.Decimal"
+	// Kind is the field's own reflect.Kind. It is a type CLASSIFICATION, distinct
+	// from GoType's rendered TEXT: a defined type `type Slug string` renders as
+	// "Slug" (by identity, on purpose) but has Kind reflect.String. Kind-based
+	// decisions (e.g. minLength for a string column) must key off this, never off
+	// the GoType string, which only equals "string" for the bare predeclared type.
+	Kind reflect.Kind
 }
 
 // importSpec is one import the generated DTOs need, with the alias used to qualify
-// its types. The alias is explicit for third-party packages because reflection
-// exposes an import path, not the package's declared name — the two can differ
-// (e.g. a package at .../foo.v2 declared `package foo`), and a bare import would
-// bind the wrong identifier. Standard-library names always equal the path's last
-// segment, so those stay bare.
+// its types. Every import is written WITH its explicit alias, never bare: a bare
+// import binds the package's declared name, which reflection cannot see — it
+// exposes only the import path, whose last segment need not equal the declared
+// name (a package at .../foo.v2 declared `package foo`; an internal package whose
+// folder name differs from its `package` clause, legal under a non-domain module
+// path like `gombit new --module myapp`). The explicit alias makes the qualifier
+// used in the body (alias.Type) correct regardless. See aliasFor for how it is
+// chosen deterministically.
 type importSpec struct {
 	Alias string
 	Path  string
 }
 
 func (s importSpec) line() string {
-	if isStdImport(s.Path) && s.Alias == pkgBase(s.Path) {
-		return strconv.Quote(s.Path)
-	}
 	return s.Alias + " " + strconv.Quote(s.Path)
 }
 
@@ -152,6 +158,7 @@ func buildModelResource(model any, pkg string) (modelResource, error) {
 			Resolved:   r,
 			AccessPath: strings.Join(f.BindNames, "."),
 			GoType:     goType,
+			Kind:       f.FieldType.Kind(),
 		})
 	}
 
@@ -370,9 +377,16 @@ func (f modelField) responseTag() string {
 // constraint (fields.go, humaTags); this is the model-first path catching up,
 // not new scope — see modelField's doc comment for why NotNull survives the
 // projection to make this possible at all.
+//
+// The string test keys off f.Kind (the reflect.Kind), not the GoType text: a
+// defined string column `type Slug string` renders as "Slug" but is still
+// Kind reflect.String and still zero-fills to "", so it needs the same
+// constraint. Keying off GoType == "string" would silently skip every named
+// string type — exactly the domain types (Slug, Email, Username) a real model
+// bothers to define (issue #352 review).
 func (f modelField) requestTag() string {
 	tag := `json:"` + f.jsonName() + `"`
-	if f.GoType == "string" && f.NotNull {
+	if f.Kind == reflect.String && f.NotNull {
 		tag += ` minLength:"1"`
 	}
 	tag += ` doc:"` + f.GoName + `"`
@@ -435,42 +449,22 @@ func renderModelDTOs(r modelResource) string {
 	return b.String()
 }
 
-// renderImports renders the import declaration for the DTO field types: standard
-// library first, then third-party, each sorted by path, third-party carrying
-// explicit aliases (see importSpec). Empty groups are omitted; a lone import
-// keeps the single-line form.
+// renderImports renders the import declaration for the DTO field types: one block,
+// every import explicitly aliased (see importSpec), sorted by path (importSpecs
+// already sorts, and gofmt orders an import block by path, so the two agree and
+// output is stable). No standard-library-vs-third-party split: deciding that from
+// an import path is the very heuristic importSpec avoids, and grouping is cosmetic
+// once every import is aliased. A lone import keeps the single-line form.
 func renderImports(specs []importSpec) string {
 	if len(specs) == 0 {
 		return ""
 	}
-	var std, third []string
-	for _, s := range specs {
-		if isStdImport(s.Path) {
-			std = append(std, "\t"+s.line())
-		} else {
-			third = append(third, "\t"+s.line())
-		}
-	}
 	if len(specs) == 1 {
 		return "import " + specs[0].line() + "\n\n"
 	}
-	var groups []string
-	if len(std) > 0 {
-		groups = append(groups, strings.Join(std, "\n"))
+	lines := make([]string, 0, len(specs))
+	for _, s := range specs {
+		lines = append(lines, "\t"+s.line())
 	}
-	if len(third) > 0 {
-		groups = append(groups, strings.Join(third, "\n"))
-	}
-	return "import (\n" + strings.Join(groups, "\n\n") + "\n)\n\n"
-}
-
-// isStdImport reports whether an import path is a standard-library package: its
-// first path segment carries no dot (a domain), so "database/sql" is std and
-// "github.com/gombit-dev/gombit/types" is not.
-func isStdImport(importPath string) bool {
-	first := importPath
-	if i := strings.IndexByte(importPath, '/'); i >= 0 {
-		first = importPath[:i]
-	}
-	return !strings.Contains(first, ".")
+	return "import (\n" + strings.Join(lines, "\n") + "\n)\n\n"
 }
