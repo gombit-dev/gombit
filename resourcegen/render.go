@@ -10,6 +10,16 @@ import "fmt"
 // inside the application module, importing the app's real compiled models) calls
 // RenderResource on each model and emits the resulting artifacts to the parent.
 
+// ResourceMarkerFile marks a feature package as a model-first CRUD resource.
+// make resource writes it at bootstrap (slice 5b); gombit generate discovers
+// resources by its presence, never by treating every persisted AutoMigrate model
+// as a resource — "AutoMigrate" means "this model is persisted", not "expose a
+// generated API for it" (a join table, an audit-log or token model is persisted
+// but not a resource). It is a durable sentinel, deliberately NOT a generated
+// *.gen.go: a *.gen.go going missing must read as drift, not make the resource
+// itself vanish from discovery.
+const ResourceMarkerFile = ".gombit-resource"
+
 // Ownership classifies who owns a generated file, which decides how gombit
 // generate treats it.
 type Ownership int

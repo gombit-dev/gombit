@@ -97,7 +97,7 @@ func Generate(ctx context.Context, opts Options) error {
 		return err
 	}
 
-	models, err := appResourceModels(absWorkDir, module)
+	models, err := discoverResources(absWorkDir, module)
 	if err != nil {
 		return err
 	}
@@ -132,11 +132,29 @@ func Generate(ctx context.Context, opts Options) error {
 	return applyArtifacts(opts, absWorkDir, artifacts)
 }
 
-// appResourceModels returns the app's own resources (AutoMigrate models under
-// <module>/internal/…), sorted by import path for deterministic loader output.
-// Framework models (auth, etc., imported from the gombit module) are not app
-// resources and are skipped.
-func appResourceModels(absWorkDir, module string) ([]migrations.Model, error) {
+// discoverResources returns the app's model-first resources: the feature
+// packages under internal/ that carry the resource marker (resourcegen.
+// ResourceMarkerFile), each paired with its persisted model. Discovery is by the
+// marker, NOT by AutoMigrate membership — AutoMigrate means "persisted", which a
+// join table or audit-log model also is; only a marked package is a generated
+// CRUD resource. make resource (slice 5b) writes the marker at bootstrap; here we
+// only read it. The result is sorted by import path for deterministic loader
+// output.
+//
+// The marker identifies the package; the model type comes from the AutoMigrate
+// call. Because generated files are package-level (internal/<pkg>/dto.gen.go),
+// a marked package must resolve to EXACTLY ONE AutoMigrate model — zero (the
+// resource has no persisted model registered) or several (ambiguous target) both
+// fail closed with a diagnostic rather than guess.
+func discoverResources(absWorkDir, module string) ([]migrations.Model, error) {
+	marked, err := markedResourcePackages(absWorkDir)
+	if err != nil {
+		return nil, err
+	}
+	if len(marked) == 0 {
+		return nil, nil
+	}
+
 	dbPath := filepath.Join(absWorkDir, "internal", "platform", "database.go")
 	// #nosec G304 -- database.go inside the validated application work dir
 	src, err := os.ReadFile(dbPath)
@@ -147,11 +165,28 @@ func appResourceModels(absWorkDir, module string) ([]migrations.Model, error) {
 	if err != nil {
 		return nil, fmt.Errorf("generate: collect models: %w", err)
 	}
-	prefix := module + "/internal/"
-	out := make([]migrations.Model, 0, len(all))
-	for _, m := range all {
-		if strings.HasPrefix(m.ImportPath, prefix) {
-			out = append(out, m)
+
+	out := make([]migrations.Model, 0, len(marked))
+	for _, pkg := range marked {
+		importPath := module + "/internal/" + pkg
+		var matches []migrations.Model
+		for _, m := range all {
+			if m.ImportPath == importPath {
+				matches = append(matches, m)
+			}
+		}
+		switch len(matches) {
+		case 1:
+			out = append(out, matches[0])
+		case 0:
+			return nil, fmt.Errorf("generate: resource package internal/%s is marked (%s) but no model in it is registered with AutoMigrate; add its model to internal/platform/database.go", pkg, resourcegen.ResourceMarkerFile)
+		default:
+			names := make([]string, len(matches))
+			for i, m := range matches {
+				names[i] = m.TypeName
+			}
+			sort.Strings(names)
+			return nil, fmt.Errorf("generate: resource package internal/%s registers %d models with AutoMigrate (%s), but a resource package must have exactly one; split the extra models into their own packages", pkg, len(matches), strings.Join(names, ", "))
 		}
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -161,6 +196,33 @@ func appResourceModels(absWorkDir, module string) ([]migrations.Model, error) {
 		return out[i].TypeName < out[j].TypeName
 	})
 	return out, nil
+}
+
+// markedResourcePackages returns the names of feature packages under internal/
+// that carry the resource marker, sorted.
+func markedResourcePackages(absWorkDir string) ([]string, error) {
+	internalDir := filepath.Join(absWorkDir, "internal")
+	entries, err := os.ReadDir(internalDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("generate: read internal/: %w", err)
+	}
+	var pkgs []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		marker := filepath.Join(internalDir, e.Name(), resourcegen.ResourceMarkerFile)
+		if _, err := os.Stat(marker); err == nil {
+			pkgs = append(pkgs, e.Name())
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("generate: stat %s: %w", filepath.Join("internal", e.Name(), resourcegen.ResourceMarkerFile), err)
+		}
+	}
+	sort.Strings(pkgs)
+	return pkgs, nil
 }
 
 // ensureNoLegacyLayout refuses to run against a resource that still has the

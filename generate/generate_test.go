@@ -49,6 +49,8 @@ func newAppLayout(t *testing.T) string {
 			"func AutoMigrate(db anyDB) error {\n"+
 			"\treturn db.AutoMigrate(&auth.User{}, &book.Book{})\n"+
 			"}\n")
+	// Mark book as a model-first resource so discovery targets it.
+	writeFile(t, filepath.Join(dir, "internal", "book", resourcegen.ResourceMarkerFile), "")
 	return dir
 }
 
@@ -274,11 +276,11 @@ func TestFailsClosedOnPackageMismatch(t *testing.T) {
 	}
 }
 
-// --- model filtering --------------------------------------------------------
+// --- resource discovery (marker-based) --------------------------------------
 
-// Only app-internal models are resources; a database.go with just framework
-// models yields nothing to do and never runs the loader.
-func TestNoAppResourcesDoesNothing(t *testing.T) {
+// A no-op when nothing is marked: an app with no resource marker yields nothing
+// to do and never runs the loader, even if it has app-internal models.
+func TestNoMarkedResourcesDoesNothing(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "go.mod"), "module testapp\n\ngo 1.23\n")
 	writeFile(t, filepath.Join(dir, "cmd", "server", "main.go"), "package main\n\nfunc main() {}\n")
@@ -288,13 +290,66 @@ func TestNoAppResourcesDoesNothing(t *testing.T) {
 	runner := &fakeRunner{out: artifactsJSON(t, bookArtifacts())}
 	out, err := runGenerate(t, dir, false, false, runner)
 	if err != nil {
-		t.Fatalf("no resources should be a no-op, got: %v", err)
+		t.Fatalf("no marked resources should be a no-op, got: %v", err)
 	}
 	if runner.ran {
-		t.Fatal("loader must not run when there are no app resources")
+		t.Fatal("loader must not run when there are no marked resources")
 	}
 	if !strings.Contains(out, "no model-first resources") {
 		t.Fatalf("expected a no-op message, got: %s", out)
+	}
+}
+
+// An UNMARKED package (a persisted model in AutoMigrate with no resource marker —
+// a join table, an audit-log model) is not a resource and is skipped: AutoMigrate
+// membership alone never makes a model a generated-CRUD resource.
+func TestUnmarkedPackageIsSkipped(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "go.mod"), "module testapp\n\ngo 1.23\n")
+	writeFile(t, filepath.Join(dir, "cmd", "server", "main.go"), "package main\n\nfunc main() {}\n")
+	writeFile(t, filepath.Join(dir, "internal", "platform", "database.go"),
+		"package platform\n\nimport \"testapp/internal/audit\"\n\n"+
+			"func AutoMigrate(db anyDB) error {\n\treturn db.AutoMigrate(&audit.Entry{})\n}\n")
+	// audit is persisted but NOT marked as a resource.
+	writeFile(t, filepath.Join(dir, "internal", "audit", "entry.go"), "package audit\n\ntype Entry struct{}\n")
+	runner := &fakeRunner{out: artifactsJSON(t, bookArtifacts())}
+	if _, err := runGenerate(t, dir, false, false, runner); err != nil {
+		t.Fatalf("unmarked package should be skipped, got: %v", err)
+	}
+	if runner.ran {
+		t.Fatal("loader must not run for an unmarked package")
+	}
+}
+
+// A marked package with no AutoMigrate model fails closed: the resource has no
+// persisted model to generate from.
+func TestMarkedPackageWithNoModelFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "go.mod"), "module testapp\n\ngo 1.23\n")
+	writeFile(t, filepath.Join(dir, "cmd", "server", "main.go"), "package main\n\nfunc main() {}\n")
+	writeFile(t, filepath.Join(dir, "internal", "platform", "database.go"),
+		"package platform\n\nimport \"github.com/gombit-dev/gombit/auth\"\n\n"+
+			"func AutoMigrate(db anyDB) error {\n\treturn db.AutoMigrate(&auth.User{})\n}\n")
+	writeFile(t, filepath.Join(dir, "internal", "book", resourcegen.ResourceMarkerFile), "")
+	_, err := runGenerate(t, dir, false, false, &fakeRunner{out: artifactsJSON(t, bookArtifacts())})
+	if err == nil || !strings.Contains(err.Error(), "no model") {
+		t.Fatalf("a marked package with no AutoMigrate model must fail closed, got: %v", err)
+	}
+}
+
+// A marked package registering more than one AutoMigrate model fails closed:
+// generated files are package-level, so the resource target is ambiguous.
+func TestMarkedPackageWithMultipleModelsFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "go.mod"), "module testapp\n\ngo 1.23\n")
+	writeFile(t, filepath.Join(dir, "cmd", "server", "main.go"), "package main\n\nfunc main() {}\n")
+	writeFile(t, filepath.Join(dir, "internal", "platform", "database.go"),
+		"package platform\n\nimport \"testapp/internal/book\"\n\n"+
+			"func AutoMigrate(db anyDB) error {\n\treturn db.AutoMigrate(&book.Book{}, &book.Tag{})\n}\n")
+	writeFile(t, filepath.Join(dir, "internal", "book", resourcegen.ResourceMarkerFile), "")
+	_, err := runGenerate(t, dir, false, false, &fakeRunner{out: artifactsJSON(t, bookArtifacts())})
+	if err == nil || !strings.Contains(err.Error(), "exactly one") {
+		t.Fatalf("a marked package with multiple models must fail closed, got: %v", err)
 	}
 }
 
@@ -367,6 +422,8 @@ func TestGenerateProgramModeEndToEnd(t *testing.T) {
 			"func AutoMigrate(db anyDB) error {\n\treturn db.AutoMigrate(&book.Book{})\n}\n")
 	writeFile(t, filepath.Join(dir, "internal", "book", "book.go"),
 		"package book\n\nimport \"gorm.io/gorm\"\n\ntype Book struct {\n\tgorm.Model\n\tTitle    string `gorm:\"not null\"`\n\tTenantID uint   `gorm:\"not null\" gombit:\"read,server\"`\n}\n")
+	// Mark book as a model-first resource so generate discovers it.
+	writeFile(t, filepath.Join(dir, "internal", "book", resourcegen.ResourceMarkerFile), "")
 	// Commit exactly what RenderResource produced, so --check starts clean.
 	for _, a := range arts {
 		writeFile(t, filepath.Join(dir, filepath.FromSlash(a.Path)), string(a.Content))
