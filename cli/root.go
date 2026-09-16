@@ -67,6 +67,7 @@ func NewRoot(stdout io.Writer, stderr io.Writer) *Command {
 	root.AddCommand(newDevCommand(stdout, stderr))
 	root.AddCommand(newBuildCommand(stdout, stderr))
 	root.AddCommand(newMakeCommand(stdout, stderr))
+	root.AddCommand(newGenerateCommand(stdout, stderr))
 	root.AddCommand(newDBCommand(stdout, stderr))
 	root.AddCommand(newOpenAPICommand(stdout, stderr))
 	root.AddCommand(newContractCommand(stdout, stderr))
@@ -107,6 +108,7 @@ func rootLongHelp() string {
 		"  dev       Run the API and Vite frontend together",
 		"  build     Production build (embed is opt-in via --embed)",
 		"  make      Generate application code (resource, command)",
+		"  generate  Regenerate model-first resource files (*.gen.go); --check for drift",
 		"  db        Database migrations (makemigrations, migrate, rollback, status, seed, reset)",
 		"  openapi   Write the live OpenAPI 3.1 document",
 		"  client    Generate and check the TypeScript client",
@@ -126,6 +128,7 @@ func usage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "  build --embed     collectstatic + compile a single binary (opt-in)")
 	_, _ = fmt.Fprintln(w, "  make resource     generate a feature-package resource")
 	_, _ = fmt.Fprintln(w, "  make command      generate a management command")
+	_, _ = fmt.Fprintln(w, "  generate [--check] [--dry-run]   regenerate model-first *.gen.go from the app's models")
 	_, _ = fmt.Fprintln(w, "  db <subcommand>   see gombit db")
 	_, _ = fmt.Fprintln(w, "  openapi generate [--out openapi.json] [--url http://127.0.0.1:8080/openapi.json]")
 	_, _ = fmt.Fprintln(w, "  client generate [--spec openapi.json] [--out frontend/src/api/generated] [--dry-run] [--force]")
