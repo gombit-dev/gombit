@@ -773,3 +773,64 @@ func resourcegenModuleRoot(t *testing.T) string {
 	}
 	return root
 }
+
+// --- slice 4.5: query-capability type appropriateness ---
+
+// A query capability whose column type cannot support it fails closed at build
+// time (matching the legacy field-grammar type rules).
+func TestBuildModelResourceRejectsBadQueryTypes(t *testing.T) {
+	t.Run("aggregatable string", func(t *testing.T) {
+		type m struct {
+			ID    uint   `gorm:"primaryKey"`
+			Title string `gombit:"read,write,aggregatable"`
+		}
+		if _, err := buildModelResource(&m{}, "m"); err == nil || !strings.Contains(err.Error(), "aggregatable") {
+			t.Fatalf("aggregatable string must fail closed, got: %v", err)
+		}
+	})
+	t.Run("searchable int", func(t *testing.T) {
+		type m struct {
+			ID    uint  `gorm:"primaryKey"`
+			Count int64 `gombit:"read,write,searchable"`
+		}
+		if _, err := buildModelResource(&m{}, "m"); err == nil || !strings.Contains(err.Error(), "searchable") {
+			t.Fatalf("searchable int must fail closed, got: %v", err)
+		}
+	})
+	t.Run("filterable time", func(t *testing.T) {
+		type m struct {
+			ID   uint      `gorm:"primaryKey"`
+			When time.Time `gombit:"read,write,filterable"`
+		}
+		if _, err := buildModelResource(&m{}, "m"); err == nil || !strings.Contains(err.Error(), "filterable") {
+			t.Fatalf("filterable time must fail closed, got: %v", err)
+		}
+	})
+}
+
+// A decimal column IS aggregatable (numeric), even though its Go kind is a struct.
+func TestBuildModelResourceAllowsDecimalAggregate(t *testing.T) {
+	type m struct {
+		ID     uint          `gorm:"primaryKey"`
+		Amount types.Decimal `gombit:"read,write,aggregatable"`
+	}
+	res, err := buildModelResource(&m{}, "m")
+	if err != nil {
+		t.Fatalf("decimal must be aggregatable: %v", err)
+	}
+	if len(res.aggregateFields()) != 1 {
+		t.Fatalf("Amount should be aggregatable, got %d aggregate fields", len(res.aggregateFields()))
+	}
+}
+
+// The response-visible rule propagates through buildModelResource: a hidden field
+// with a query capability fails closed.
+func TestBuildModelResourceRejectsHiddenQueryable(t *testing.T) {
+	type m struct {
+		ID     uint   `gorm:"primaryKey"`
+		Secret string `gombit:"-,searchable"`
+	}
+	if _, err := buildModelResource(&m{}, "m"); err == nil {
+		t.Fatal("a hidden searchable field must fail closed")
+	}
+}

@@ -16,8 +16,19 @@
 //	server   the field is set server-side (a hook), not from the request (create source = server)
 //	-        the field is hidden from the API (no request, no response)
 //
+// and the list endpoint's declared query surface (all opt-in, all requiring the
+// field to be response-visible):
+//
+//	filterable    exact-match ?<field>= query param
+//	sortable      ?ordering=<field> (- prefix for DESC)
+//	searchable    matched by ?search=
+//	aggregatable  ?aggregate=sum:<field>,… (numeric columns)
+//
 // `-` may combine with `server` (hidden from the API but set by a hook); it may
-// not combine with `read`/`write`, and `write`+`server` conflict. A field with no
+// not combine with `read`/`write`, and `write`+`server` conflict. A query
+// capability requires the field to be response-visible: a hidden or write-only
+// column with a query surface leaks through result membership, counts, and
+// ordering, so Resolve rejects it. A field with no
 // `gombit` tag defaults by kind: a regular content column and a manual primary
 // key are read+write from the request; an auto-increment key and auto timestamps
 // are read-only; soft-delete is hidden. Resolve rejects a required column (NOT
@@ -145,6 +156,12 @@ type Resolved struct {
 	InRequest    bool         // settable via the create request DTO
 	InResponse   bool         // surfaced in the response DTO
 	CreateSource CreateSource // where a persisted create value comes from
+	// The list endpoint's declared query surface for this column. Each is opt-in
+	// via the gombit tag and requires the column to be response-visible.
+	Filterable   bool
+	Sortable     bool
+	Searchable   bool
+	Aggregatable bool
 }
 
 // Field pairs a field's persistence facts with its raw `gombit` tag. It keeps the
@@ -162,6 +179,13 @@ type policyTag struct {
 	write   bool
 	server  bool
 	hidden  bool
+	// Query capabilities: the list endpoint's declared query surface. They are
+	// API-policy facts (like read/write), not persistence facts, so they live on
+	// the tag; each requires the field to be response-visible (see Resolve).
+	filterable   bool
+	sortable     bool
+	searchable   bool
+	aggregatable bool
 }
 
 // parsePolicyTag parses the comma-separated `gombit` tag value. An empty tag
@@ -183,6 +207,14 @@ func parsePolicyTag(tag string) (policyTag, error) {
 			p.server = true
 		case "-":
 			p.hidden = true
+		case "filterable":
+			p.filterable = true
+		case "sortable":
+			p.sortable = true
+		case "searchable":
+			p.searchable = true
+		case "aggregatable":
+			p.aggregatable = true
 		case "":
 			// Reject every empty token — leading, interior, trailing, or a lone ",".
 			// A stray comma must not silently become an alternate spelling (e.g.
@@ -190,7 +222,7 @@ func parsePolicyTag(tag string) (policyTag, error) {
 			// grammar should fail loudly, not quietly change the API contract.
 			return p, fmt.Errorf("resourcepolicy: empty token in gombit tag %q (no leading, interior, trailing, or lone commas)", tag)
 		default:
-			return p, fmt.Errorf("resourcepolicy: unknown gombit policy token %q (want read, write, server, or -)", strings.TrimSpace(tok))
+			return p, fmt.Errorf("resourcepolicy: unknown gombit policy token %q (want read, write, server, -, filterable, sortable, searchable, or aggregatable)", strings.TrimSpace(tok))
 		}
 	}
 	if p.hidden && (p.read || p.write) {
@@ -259,6 +291,22 @@ func Resolve(facts FieldFacts, gombitTag string) (Resolved, error) {
 		if r.InRequest {
 			r.CreateSource = CreateSourceRequest
 		}
+	}
+
+	// Query capabilities are declared, never defaulted (a field is filterable/
+	// sortable/searchable/aggregatable only if its tag says so).
+	if tag.present {
+		r.Filterable = tag.filterable
+		r.Sortable = tag.sortable
+		r.Searchable = tag.searchable
+		r.Aggregatable = tag.aggregatable
+	}
+	// A queryable field must be response-visible. A hidden (or write-only) column
+	// with a query surface leaks information it never returns — through result
+	// membership, the total count, and the ordering of returned rows — so reject
+	// it rather than emit a covert query surface.
+	if (r.Filterable || r.Sortable || r.Searchable || r.Aggregatable) && !r.InResponse {
+		return Resolved{}, fmt.Errorf("resourcepolicy: column %q is queryable (filterable/sortable/searchable/aggregatable) but not response-visible; a query surface on a field the API never returns leaks it through result membership, counts, and ordering — add read or drop the query capability", facts.Column)
 	}
 
 	// A required column must receive a valid value at create time (from the DB,

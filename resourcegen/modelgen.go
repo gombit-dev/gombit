@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/gombit-dev/gombit/resourcepolicy"
+	"github.com/gombit-dev/gombit/types"
 	"gorm.io/gorm/schema"
 )
 
@@ -154,16 +155,70 @@ func buildModelResource(model any, pkg string) (modelResource, error) {
 		if err != nil {
 			return modelResource{}, err
 		}
-		res.Fields = append(res.Fields, modelField{
+		mf := modelField{
 			Resolved:   r,
 			AccessPath: strings.Join(f.BindNames, "."),
 			GoType:     goType,
 			Kind:       f.FieldType.Kind(),
-		})
+		}
+		// resourcepolicy validated the query capabilities as API policy (declared,
+		// response-visible); here, where the Go type is known, validate that the
+		// column's type can actually support the operation — the split the legacy
+		// path made from its field grammar, kept type-appropriate.
+		if err := validateQueryTypes(mf, f.FieldType); err != nil {
+			return modelResource{}, err
+		}
+		res.Fields = append(res.Fields, mf)
 	}
 
 	res.imports = tr.importSpecs()
 	return res, nil
+}
+
+// decimalType is the framework decimal, the one non-primitive numeric type that
+// is aggregatable.
+var decimalType = reflect.TypeOf(types.Decimal{})
+
+// validateQueryTypes fails closed when a column declares a query capability its Go
+// type cannot support, matching the legacy field-grammar type rules: filterable ⊂
+// {string, integer, bool}; searchable ⊂ {string}; aggregatable ⊂ numeric (integer,
+// float, or the framework decimal). Sortable has no type restriction — any
+// persisted column can be ordered.
+func validateQueryTypes(f modelField, ft reflect.Type) error {
+	if f.Filterable && !isFilterableKind(f.Kind) {
+		return fmt.Errorf("resourcegen: column %q (%s) is not filterable; a filterable column must be a string, integer, or bool", f.Column, f.GoType)
+	}
+	if f.Searchable && f.Kind != reflect.String {
+		return fmt.Errorf("resourcegen: column %q (%s) is not searchable; a searchable column must be a string", f.Column, f.GoType)
+	}
+	if f.Aggregatable && !isAggregatableType(f.Kind, ft) {
+		return fmt.Errorf("resourcegen: column %q (%s) is not aggregatable; an aggregatable column must be numeric (integer, float, or decimal)", f.Column, f.GoType)
+	}
+	return nil
+}
+
+func isFilterableKind(k reflect.Kind) bool {
+	switch k {
+	case reflect.String, reflect.Bool,
+		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return true
+	default:
+		return false
+	}
+}
+
+func isAggregatableType(k reflect.Kind, ft reflect.Type) bool {
+	switch k {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+		reflect.Float32, reflect.Float64:
+		return true
+	}
+	for ft.Kind() == reflect.Pointer {
+		ft = ft.Elem()
+	}
+	return ft == decimalType
 }
 
 // ensureValueOnlyPath rejects a column reached through a pointer embed. GORM

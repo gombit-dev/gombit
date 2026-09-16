@@ -305,3 +305,50 @@ func TestResolveAllColumnSurfaces(t *testing.T) {
 		t.Fatalf("server columns = %v, want %v", got, want)
 	}
 }
+
+// --- query capabilities (slice 4.5) ---
+
+func TestQueryCapabilitiesResolve(t *testing.T) {
+	r := resolve(t, content("Genre", "genre"), "read,write,filterable,sortable,searchable")
+	if !r.Filterable || !r.Sortable || !r.Searchable {
+		t.Fatalf("got %+v, want filterable+sortable+searchable", r)
+	}
+	if r.Aggregatable {
+		t.Fatalf("aggregatable must be off when not declared: %+v", r)
+	}
+	if !r.InResponse || !r.InRequest {
+		t.Fatalf("read,write should keep the field in both surfaces: %+v", r)
+	}
+}
+
+func TestAggregatableResolves(t *testing.T) {
+	r := resolve(t, content("Price", "price"), "read,aggregatable")
+	if !r.Aggregatable || !r.InResponse {
+		t.Fatalf("got %+v, want aggregatable + response-visible", r)
+	}
+}
+
+// Query capabilities are opt-in: an untagged field has none.
+func TestUntaggedHasNoQuerySurface(t *testing.T) {
+	r := resolve(t, content("Title", "title"), "")
+	if r.Filterable || r.Sortable || r.Searchable || r.Aggregatable {
+		t.Fatalf("untagged field must have no query surface: %+v", r)
+	}
+}
+
+// A queryable field must be response-visible: a hidden or write-only column with
+// a query surface leaks through membership/counts/ordering and must fail closed.
+func TestQueryableMustBeResponseVisible(t *testing.T) {
+	// Hidden + searchable.
+	wantErr(t, content("Secret", "secret"), "-,searchable", "hidden field cannot be searchable")
+	// Write-only (not in response) + filterable.
+	wantErr(t, content("Password", "password"), "write,filterable", "write-only field cannot be filterable")
+	// server (response-visible only if read) + sortable, without read.
+	f := content("TenantID", "tenant_id")
+	f.NotNull = true
+	wantErr(t, f, "server,sortable", "server-only (not readable) field cannot be sortable")
+}
+
+func TestUnknownQueryTokenStillRejected(t *testing.T) {
+	wantErr(t, content("X", "x"), "read,groupable", "groupable is not a known token")
+}
