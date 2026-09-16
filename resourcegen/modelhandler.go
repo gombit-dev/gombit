@@ -135,12 +135,17 @@ func renderModelHandler(r modelResource) (string, error) {
 
 	// create: the invariant sequence — build from the request, run the hook, then
 	// persist. bookFromCreateBody sets only request columns; server-managed columns
-	// are the hook's responsibility, so they are never zero-filled silently.
+	// are the hook's responsibility, so they are never zero-filled silently. A nil
+	// Hooks is a misconfigured Handler (Register always wires one), so fail closed
+	// rather than skip the hook and persist a zero-filled server column — skipping
+	// would silently reopen the exact zero-fill this design closes (#218).
 	b.WriteString("func (h *Handler) create(ctx context.Context, input *create" + typ + "Input) (*create" + typ + "Output, error) {\n")
+	b.WriteString("\tif h.Hooks == nil {\n")
+	b.WriteString("\t\treturn nil, contract.WithContext(ctx, contract.Internal(\"create " + singular + ": Handler.Hooks is not set\"))\n")
+	b.WriteString("\t}\n")
 	b.WriteString("\trow := " + unexported(typ) + "FromCreateBody(input.Body)\n")
-	b.WriteString("\tif h.Hooks != nil {\n")
-	b.WriteString("\t\tif err := h.Hooks.BeforeCreate(ctx, &row, input.Body); err != nil {\n")
-	b.WriteString("\t\t\treturn nil, err\n\t\t}\n")
+	b.WriteString("\tif err := h.Hooks.BeforeCreate(ctx, &row, input.Body); err != nil {\n")
+	b.WriteString("\t\treturn nil, err\n")
 	b.WriteString("\t}\n")
 	b.WriteString("\tif err := h.DB.WithContext(ctx).Create(&row).Error; err != nil {\n")
 	b.WriteString("\t\treturn nil, database.MapPersistError(ctx, err, \"resource already exists\", \"create " + singular + "\")\n")

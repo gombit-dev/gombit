@@ -72,6 +72,16 @@ func TestRenderModelHandlerStructure(t *testing.T) {
 	if iBuild >= iHook || iHook >= iCreate {
 		t.Fatalf("create must build -> hook -> persist, in that order (build=%d hook=%d create=%d):\n%s", iBuild, iHook, iCreate, src)
 	}
+	// The hook is mandatory: a nil Hooks fails closed BEFORE building/persisting,
+	// so a server-managed column is never silently zero-filled (#218). The guard
+	// must precede the build so no row is constructed on the misconfigured path.
+	iGuard := strings.Index(src, "if h.Hooks == nil {")
+	if iGuard < 0 || iGuard >= iBuild {
+		t.Fatalf("create must fail closed on a nil Hooks before building the row (guard=%d build=%d):\n%s", iGuard, iBuild, src)
+	}
+	if !strings.Contains(src, `contract.Internal("create handlermodel: Handler.Hooks is not set")`) {
+		t.Fatalf("nil-Hooks guard must return an internal error:\n%s", src)
+	}
 	// Register wires the human-owned default Hooks.
 	if !strings.Contains(src, "h := &Handler{DB: app.DB(), Hooks: Hooks{}}") {
 		t.Fatalf("Register must wire the human-owned Hooks{}:\n%s", src)
@@ -282,6 +292,29 @@ func TestGeneratedCRUD(t *testing.T) {
 	}
 	if len(listed.Body.Data) != 1 || listed.Body.Meta.Total != 1 {
 		t.Fatalf("list: got %d rows, total %d", len(listed.Body.Data), listed.Body.Meta.Total)
+	}
+}
+
+// A Handler with no Hooks is misconfigured: create must fail closed rather than
+// skip the hook and persist a zero-filled server column (#218). Nothing must be
+// written on that path.
+func TestCreateFailsClosedWithoutHooks(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "t.db")), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&Book{}); err != nil {
+		t.Fatal(err)
+	}
+	h := &Handler{DB: db} // Hooks left nil
+
+	if _, err := h.create(context.Background(), &createBookInput{Body: bookCreateBody{Title: "hello"}}); err == nil {
+		t.Fatal("create must return an error when Hooks is nil, not silently zero-fill the server column")
+	}
+	var count int64
+	db.Model(&Book{}).Count(&count)
+	if count != 0 {
+		t.Fatalf("create must not persist a row on the misconfigured path; found %d", count)
 	}
 }
 `
