@@ -20,6 +20,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/parser"
+	"go/token"
 	"io"
 	"os"
 	"os/exec"
@@ -110,6 +112,14 @@ func Generate(ctx context.Context, opts Options) error {
 	if err := ensureNoLegacyLayout(absWorkDir, models); err != nil {
 		return err
 	}
+	// Also fail closed if a resource directory's files declare a package name
+	// different from the directory basename we render the *.gen.go under: writing
+	// them would leave two package clauses in one directory (a build break) while
+	// reporting success. reflect gives the import path, not the declared name, so
+	// the basename is only a heuristic — verify it against what is on disk.
+	if err := ensurePackageMatchesDir(absWorkDir, models); err != nil {
+		return err
+	}
 
 	artifacts, err := loadArtifacts(ctx, opts, absWorkDir, module, models)
 	if err != nil {
@@ -166,6 +176,54 @@ func ensureNoLegacyLayout(absWorkDir string, models []migrations.Model) error {
 		}
 	}
 	return nil
+}
+
+// ensurePackageMatchesDir verifies that every existing Go file in each resource
+// directory declares the package name the generator will write its files under —
+// path.Base(importPath), the directory basename. RenderResource emits the
+// *.gen.go and hooks.go as `package <basename>`, so if a file already there (a
+// hand-renamed model, a copy into a differently named directory) declares a
+// different package, the written files would not compile alongside it. reflect
+// exposes only the import path, never the declared package name, so this on-disk
+// cross-check is the only way to catch the mismatch — and it must happen before
+// any write, so generate never leaves an app in a non-building state and reports
+// success. Test files are skipped (a foo_test / foo package split is legal).
+func ensurePackageMatchesDir(absWorkDir string, models []migrations.Model) error {
+	for _, m := range models {
+		pkg := path.Base(m.ImportPath)
+		dir := filepath.Join(absWorkDir, "internal", pkg)
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue // no directory yet; the loader will surface a missing package
+			}
+			return fmt.Errorf("generate: read internal/%s: %w", pkg, err)
+		}
+		for _, e := range entries {
+			name := e.Name()
+			if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+				continue
+			}
+			clause, err := packageClauseOf(filepath.Join(dir, name))
+			if err != nil {
+				return err
+			}
+			if clause != pkg {
+				return fmt.Errorf("generate: internal/%s/%s declares package %q, but model-first generation writes files as package %q (the directory name); rename the package to match the directory before regenerating", pkg, name, clause, pkg)
+			}
+		}
+	}
+	return nil
+}
+
+// packageClauseOf returns the declared package name of a Go file, parsing only
+// the package clause (cheap; no function bodies).
+func packageClauseOf(file string) (string, error) {
+	f, err := parser.ParseFile(token.NewFileSet(), file, nil, parser.PackageClauseOnly)
+	if err != nil {
+		return "", fmt.Errorf("generate: parse package clause of %s: %w", file, err)
+	}
+	return f.Name.Name, nil
 }
 
 // loadArtifacts writes the Program-Mode loader into a temp dir under the app,

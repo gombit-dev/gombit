@@ -81,11 +81,14 @@ func artifactsJSON(t *testing.T, arts []resourcegen.GeneratedArtifact) []byte {
 	return b
 }
 
+// bookArtifacts is canned loader output. Content is valid Go with a `package
+// book` clause (matching the directory), since Generate now parses each existing
+// file's package clause before writing.
 func bookArtifacts() []resourcegen.GeneratedArtifact {
 	return []resourcegen.GeneratedArtifact{
-		{Path: "internal/book/dto.gen.go", Content: []byte("// dto v1\n"), Ownership: resourcegen.GeneratorOwned},
-		{Path: "internal/book/handler.gen.go", Content: []byte("// handler v1\n"), Ownership: resourcegen.GeneratorOwned},
-		{Path: "internal/book/hooks.go", Content: []byte("// hooks v1\n"), Ownership: resourcegen.SeedOnce},
+		{Path: "internal/book/dto.gen.go", Content: []byte("package book\n\n// dto v1\n"), Ownership: resourcegen.GeneratorOwned},
+		{Path: "internal/book/handler.gen.go", Content: []byte("package book\n\n// handler v1\n"), Ownership: resourcegen.GeneratorOwned},
+		{Path: "internal/book/hooks.go", Content: []byte("package book\n\n// hooks v1\n"), Ownership: resourcegen.SeedOnce},
 	}
 }
 
@@ -132,7 +135,7 @@ func TestCheckFailsWhenGeneratorOwnedDiffers(t *testing.T) {
 		writeFile(t, filepath.Join(dir, filepath.FromSlash(a.Path)), string(a.Content))
 	}
 	// A stale committed handler.gen.go.
-	writeFile(t, filepath.Join(dir, "internal", "book", "handler.gen.go"), "// handler OLD\n")
+	writeFile(t, filepath.Join(dir, "internal", "book", "handler.gen.go"), "package book\n\n// handler OLD\n")
 	_, err := runGenerate(t, dir, true, false, &fakeRunner{out: artifactsJSON(t, arts)})
 	if err == nil {
 		t.Fatal("check must fail on a stale generator-owned file")
@@ -146,7 +149,7 @@ func TestCheckFailsWhenGeneratorOwnedMissing(t *testing.T) {
 	dir := newAppLayout(t)
 	arts := bookArtifacts()
 	// Only write the DTO; handler.gen.go is missing.
-	writeFile(t, filepath.Join(dir, "internal", "book", "dto.gen.go"), "// dto v1\n")
+	writeFile(t, filepath.Join(dir, "internal", "book", "dto.gen.go"), "package book\n\n// dto v1\n")
 	_, err := runGenerate(t, dir, true, false, &fakeRunner{out: artifactsJSON(t, arts)})
 	if err == nil || !strings.Contains(err.Error(), "missing") {
 		t.Fatalf("check must fail (missing) when a generator-owned file is absent, got: %v", err)
@@ -158,10 +161,10 @@ func TestCheckFailsWhenGeneratorOwnedMissing(t *testing.T) {
 func TestCheckIgnoresSeedOnceHooks(t *testing.T) {
 	dir := newAppLayout(t)
 	arts := bookArtifacts()
-	writeFile(t, filepath.Join(dir, "internal", "book", "dto.gen.go"), "// dto v1\n")
-	writeFile(t, filepath.Join(dir, "internal", "book", "handler.gen.go"), "// handler v1\n")
+	writeFile(t, filepath.Join(dir, "internal", "book", "dto.gen.go"), "package book\n\n// dto v1\n")
+	writeFile(t, filepath.Join(dir, "internal", "book", "handler.gen.go"), "package book\n\n// handler v1\n")
 	// Hooks present but heavily customized — must not count as drift.
-	writeFile(t, filepath.Join(dir, "internal", "book", "hooks.go"), "// hooks HAND EDITED\n")
+	writeFile(t, filepath.Join(dir, "internal", "book", "hooks.go"), "package book\n\n// hooks HAND EDITED\n")
 	if _, err := runGenerate(t, dir, true, false, &fakeRunner{out: artifactsJSON(t, arts)}); err != nil {
 		t.Fatalf("check must ignore the human-owned hooks file: %v", err)
 	}
@@ -175,13 +178,13 @@ func TestApplyWritesGeneratedAndSeedsHooks(t *testing.T) {
 	if _, err := runGenerate(t, dir, false, false, &fakeRunner{out: artifactsJSON(t, arts)}); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
-	if got := read(t, filepath.Join(dir, "internal", "book", "dto.gen.go")); got != "// dto v1\n" {
+	if got := read(t, filepath.Join(dir, "internal", "book", "dto.gen.go")); got != "package book\n\n// dto v1\n" {
 		t.Fatalf("dto not written: %q", got)
 	}
-	if got := read(t, filepath.Join(dir, "internal", "book", "handler.gen.go")); got != "// handler v1\n" {
+	if got := read(t, filepath.Join(dir, "internal", "book", "handler.gen.go")); got != "package book\n\n// handler v1\n" {
 		t.Fatalf("handler not written: %q", got)
 	}
-	if got := read(t, filepath.Join(dir, "internal", "book", "hooks.go")); got != "// hooks v1\n" {
+	if got := read(t, filepath.Join(dir, "internal", "book", "hooks.go")); got != "package book\n\n// hooks v1\n" {
 		t.Fatalf("hooks not seeded: %q", got)
 	}
 }
@@ -191,15 +194,15 @@ func TestApplyWritesGeneratedAndSeedsHooks(t *testing.T) {
 func TestApplyNeverOverwritesExistingHooks(t *testing.T) {
 	dir := newAppLayout(t)
 	hooksPath := filepath.Join(dir, "internal", "book", "hooks.go")
-	writeFile(t, hooksPath, "// hooks HAND EDITED\n")
+	writeFile(t, hooksPath, "package book\n\n// hooks HAND EDITED\n")
 	if _, err := runGenerate(t, dir, false, false, &fakeRunner{out: artifactsJSON(t, bookArtifacts())}); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
-	if got := read(t, hooksPath); got != "// hooks HAND EDITED\n" {
+	if got := read(t, hooksPath); got != "package book\n\n// hooks HAND EDITED\n" {
 		t.Fatalf("seed-once hooks must not be overwritten, got: %q", got)
 	}
 	// Generator-owned files ARE (re)written.
-	if got := read(t, filepath.Join(dir, "internal", "book", "dto.gen.go")); got != "// dto v1\n" {
+	if got := read(t, filepath.Join(dir, "internal", "book", "dto.gen.go")); got != "package book\n\n// dto v1\n" {
 		t.Fatalf("generator-owned dto should be written: %q", got)
 	}
 }
@@ -208,11 +211,11 @@ func TestApplyNeverOverwritesExistingHooks(t *testing.T) {
 // needed: the generator owns it).
 func TestApplyOverwritesStaleGeneratorOwned(t *testing.T) {
 	dir := newAppLayout(t)
-	writeFile(t, filepath.Join(dir, "internal", "book", "dto.gen.go"), "// dto OLD\n")
+	writeFile(t, filepath.Join(dir, "internal", "book", "dto.gen.go"), "package book\n\n// dto OLD\n")
 	if _, err := runGenerate(t, dir, false, false, &fakeRunner{out: artifactsJSON(t, bookArtifacts())}); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
-	if got := read(t, filepath.Join(dir, "internal", "book", "dto.gen.go")); got != "// dto v1\n" {
+	if got := read(t, filepath.Join(dir, "internal", "book", "dto.gen.go")); got != "package book\n\n// dto v1\n" {
 		t.Fatalf("stale generator-owned file must be overwritten: %q", got)
 	}
 }
@@ -247,6 +250,27 @@ func TestFailsClosedOnLegacyHandler(t *testing.T) {
 	// And nothing was written.
 	if _, statErr := os.Stat(filepath.Join(dir, "internal", "book", "dto.gen.go")); !os.IsNotExist(statErr) {
 		t.Fatal("nothing must be written on the legacy path")
+	}
+}
+
+// A resource directory whose files declare a package name different from the
+// directory basename must fail closed BEFORE the loader runs or anything is
+// written — otherwise generate would write `package book` files next to a
+// `package books` model and leave the app not compiling while reporting success.
+func TestFailsClosedOnPackageMismatch(t *testing.T) {
+	dir := newAppLayout(t)
+	// Directory is "book" but the model declares package "books".
+	writeFile(t, filepath.Join(dir, "internal", "book", "book.go"), "package books\n\ntype Book struct{}\n")
+	runner := &fakeRunner{out: artifactsJSON(t, bookArtifacts())}
+	_, err := runGenerate(t, dir, false, false, runner)
+	if err == nil || !strings.Contains(err.Error(), "declares package") {
+		t.Fatalf("must fail closed on a package/dir mismatch, got: %v", err)
+	}
+	if runner.ran {
+		t.Fatal("must fail BEFORE running the loader")
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "internal", "book", "dto.gen.go")); !os.IsNotExist(statErr) {
+		t.Fatal("nothing must be written on the mismatch path")
 	}
 }
 
