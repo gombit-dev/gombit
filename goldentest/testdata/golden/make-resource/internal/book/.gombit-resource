@@ -1,0 +1,2 @@
+# This file marks internal/book as a gombit model-first resource.
+# `gombit generate` regenerates its *.gen.go from the model + gombit field policy.

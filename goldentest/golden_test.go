@@ -158,7 +158,7 @@ func TestMakeResourceGolden(t *testing.T) {
 	}
 
 	t.Run("compile", func(t *testing.T) {
-		compileBackend(t, appDir)
+		generateAndCompileBackend(t, appDir)
 	})
 	t.Run("typecheck", func(t *testing.T) {
 		typecheckFrontend(t, appDir, true)
@@ -212,7 +212,7 @@ func TestMakeResourceScalarTypesCompiles(t *testing.T) {
 		t.Fatalf("gombit make resource (scalars): %v\nstdout=%s", err, stdout.String())
 	}
 	t.Run("compile", func(t *testing.T) {
-		compileBackend(t, appDir)
+		generateAndCompileBackend(t, appDir)
 	})
 }
 
@@ -249,7 +249,7 @@ func TestMakeResourceRelationsCompiles(t *testing.T) {
 		"warehouses:many_to_many:Warehouse",
 	)
 	t.Run("compile", func(t *testing.T) {
-		compileBackend(t, appDir)
+		generateAndCompileBackend(t, appDir)
 	})
 }
 
@@ -283,7 +283,7 @@ func TestMakeResourceListQueryCompiles(t *testing.T) {
 		"author:belongs_to:Author",
 	)
 	t.Run("compile", func(t *testing.T) {
-		compileBackend(t, appDir)
+		generateAndCompileBackend(t, appDir)
 	})
 }
 
@@ -315,7 +315,7 @@ func TestMakeResourceAggregatesCompiles(t *testing.T) {
 		"customer:belongs_to:Customer",
 	)
 	t.Run("compile", func(t *testing.T) {
-		compileBackend(t, appDir)
+		generateAndCompileBackend(t, appDir)
 	})
 }
 
@@ -356,7 +356,7 @@ func TestMakeCommandGolden(t *testing.T) {
 	}
 
 	t.Run("compile", func(t *testing.T) {
-		compileBackend(t, appDir)
+		generateAndCompileBackend(t, appDir)
 	})
 	t.Run("idempotent", func(t *testing.T) {
 		if err := commandgen.Generate(context.Background(), commandgen.Options{

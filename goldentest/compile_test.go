@@ -1,11 +1,15 @@
 package goldentest
 
 import (
+	"context"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/gombit-dev/gombit/generate"
 )
 
 // schemaStub is written only into a temp copy so `tsc --noEmit` can check
@@ -65,6 +69,39 @@ func compileBackend(t *testing.T, appDir string) {
 	tidy.Dir = copyDir
 	if out, err := tidy.CombinedOutput(); err != nil {
 		t.Fatalf("go mod tidy: %v\n%s", err, out)
+	}
+	build := exec.Command("go", "build", "./...")
+	build.Dir = copyDir
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("go build ./...: %v\n%s", err, out)
+	}
+}
+
+// generateAndCompileBackend proves a model-first make-resource app builds end to
+// end: it runs `gombit generate` (Program Mode) to produce the generator-owned
+// *.gen.go + seed hooks, then compiles. It works in a temp copy carrying the
+// local framework replace (the committed golden stays replace-free), the same
+// isolation compileBackend uses — plus the replace is what lets generate's loader
+// `go run` resolve this working tree's resourcegen.RenderResource. The raw scaffold
+// (model + marker, no handler) does not compile on its own, by design: generate
+// produces the CRUD plumbing.
+func generateAndCompileBackend(t *testing.T, appDir string) {
+	t.Helper()
+	copyDir := filepath.Join(t.TempDir(), "compile")
+	copyTree(t, appDir, copyDir)
+	appendLocalReplace(t, copyDir)
+
+	tidy := exec.Command("go", "mod", "tidy")
+	tidy.Dir = copyDir
+	if out, err := tidy.CombinedOutput(); err != nil {
+		t.Fatalf("go mod tidy: %v\n%s", err, out)
+	}
+	if err := generate.Generate(context.Background(), generate.Options{
+		WorkDir: copyDir,
+		Stdout:  io.Discard,
+		Stderr:  io.Discard,
+	}); err != nil {
+		t.Fatalf("gombit generate: %v", err)
 	}
 	build := exec.Command("go", "build", "./...")
 	build.Dir = copyDir

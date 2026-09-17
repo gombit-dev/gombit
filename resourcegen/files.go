@@ -52,10 +52,14 @@ func unexported(name string) string {
 }
 
 func renderFeatureFiles(ctx renderContext) ([]fileSpec, error) {
+	// Model-first (ADR-016): make resource scaffolds the human-owned model and marks
+	// the package as a resource; the generator-owned DTOs, mappers, and CRUD handler
+	// (and the seed hooks file) are produced by gombit generate, which cli/make.go
+	// runs right after this — so no human-owned handler.go / routes.go here. That
+	// human-owned CRUD plumbing, and its generators, are what this redesign retires.
 	files := []fileSpec{
 		{relPath: fmt.Sprintf("internal/%s/%s.go", ctx.Resource.Package, ctx.Resource.FileBase), content: mustFormatGo(renderModel(ctx))},
-		{relPath: fmt.Sprintf("internal/%s/handler.go", ctx.Resource.Package), content: mustFormatGo(renderHandler(ctx))},
-		{relPath: fmt.Sprintf("internal/%s/routes.go", ctx.Resource.Package), content: mustFormatGo(renderRoutes(ctx))},
+		{relPath: fmt.Sprintf("internal/%s/%s", ctx.Resource.Package, ResourceMarkerFile), content: []byte(resourceMarkerContent(ctx.Resource.Package))},
 	}
 	if ctx.Service {
 		files = append(files, fileSpec{
@@ -196,316 +200,42 @@ func targetImports(ctx renderContext) []string {
 func modelFieldLines(f Field, resourcePkg string) string {
 	switch f.Type {
 	case FieldBelongsTo:
-		return "\t" + f.fkGoName() + " uint `gorm:\"index\"`\n" +
+		// The foreign key is the persisted column: read+write content and, as in the
+		// legacy generator, filterable by default (the has_many detail-list case,
+		// GET /children?<parent>_id=<id>). The association object is not a column and
+		// carries no policy.
+		return "\t" + f.fkGoName() + " uint" + structTag("index", "read,write,filterable") + "\n" +
 			"\t" + f.GoName + " " + f.GoType + "\n"
 	case FieldHasMany:
 		return "\t" + f.GoName + " " + f.GoType + "\n"
 	case FieldManyToMany:
-		return "\t" + f.GoName + " " + f.GoType + " `gorm:\"many2many:" + f.joinTable(resourcePkg) + ";\"`\n"
+		return "\t" + f.GoName + " " + f.GoType + structTag("many2many:"+f.joinTable(resourcePkg)+";", "") + "\n"
 	default:
-		line := "\t" + f.GoName + " " + f.GoType
-		if tag := f.gormTag(); tag != "" {
-			line += " `gorm:\"" + tag + "\"`"
-		}
-		return line + "\n"
+		return "\t" + f.GoName + " " + f.GoType + structTag(f.gormTag(), f.gombitPolicy()) + "\n"
 	}
 }
 
-// filterFields returns the fields the generated list handler exposes as
-// exact-match query filters, in declared order (belongs_to FKs are included by
-// default; see Field.isFilterable).
-func filterFields(fields []Field) []Field {
-	out := make([]Field, 0, len(fields))
-	for _, f := range fields {
-		if f.isFilterable() {
-			out = append(out, f)
-		}
-	}
-	return out
+// resourceMarkerContent is the body of the .gombit-resource marker; the file's
+// presence, not its content, marks the package a model-first resource.
+func resourceMarkerContent(pkg string) string {
+	return "# This file marks internal/" + pkg + " as a gombit model-first resource.\n" +
+		"# `gombit generate` regenerates its *.gen.go from the model + gombit field policy.\n"
 }
 
-// searchColumns returns the DB columns ?search= searches, in declared order.
-func searchColumns(fields []Field) []string {
-	var out []string
-	for _, f := range fields {
-		if f.Searchable {
-			out = append(out, f.searchColumn())
-		}
+// structTag composes a field's struct tag from its gorm and gombit parts, omitting
+// an empty part (and the whole tag when both are empty).
+func structTag(gormPart, gombitPart string) string {
+	var parts []string
+	if gormPart != "" {
+		parts = append(parts, `gorm:"`+gormPart+`"`)
 	}
-	return out
-}
-
-// sortColumns returns the DB columns ?ordering= may order by, in declared order.
-func sortColumns(fields []Field) []string {
-	var out []string
-	for _, f := range fields {
-		if f.Sortable {
-			out = append(out, f.sortColumn())
-		}
+	if gombitPart != "" {
+		parts = append(parts, `gombit:"`+gombitPart+`"`)
 	}
-	return out
-}
-
-// aggregateFields returns the fields ?aggregate= may compute SUM/AVG/MIN/MAX
-// over, in declared order (issue #272).
-func aggregateFields(fields []Field) []Field {
-	out := make([]Field, 0, len(fields))
-	for _, f := range fields {
-		if f.Aggregatable {
-			out = append(out, f)
-		}
+	if len(parts) == 0 {
+		return ""
 	}
-	return out
-}
-
-// aggregateColumns returns the DB column names for the given aggregatable
-// fields, in order — used for the ?aggregate= param doc string.
-func aggregateColumns(fields []Field) []string {
-	out := make([]string, 0, len(fields))
-	for _, f := range fields {
-		out = append(out, f.aggregateColumn())
-	}
-	return out
-}
-
-func renderHandler(ctx renderContext) string {
-	var b strings.Builder
-	pkg := ctx.Resource.Package
-	typ := ctx.Resource.TypeName
-	data := ctx.DataType
-	singular := strings.ToLower(typ)
-
-	b.WriteString(goBanner())
-	b.WriteString("package ")
-	b.WriteString(pkg)
-	b.WriteString("\n\n")
-	std := []string{"context", "strconv"}
-	if fieldsUse(ctx.Fields, FieldTime) {
-		std = append(std, "time")
-	}
-	third := []string{
-		"github.com/gombit-dev/gombit/contract",
-		"github.com/gombit-dev/gombit/database",
-	}
-	if fieldsUse(ctx.Fields, FieldDecimal) {
-		third = append(third, gombitTypesImport)
-	}
-	third = append(third, "gorm.io/gorm")
-	b.WriteString(importBlock(std, third))
-	b.WriteString("// Handler serves " + pkg + " HTTP operations over GORM.\n")
-	b.WriteString("type Handler struct {\n\tDB *gorm.DB\n}\n\n")
-	b.WriteString("type " + data + " struct {\n")
-	b.WriteString("\tID uint `json:\"id\" example:\"1\" doc:\"" + typ + " identifier\"`\n")
-	for _, field := range ctx.Fields {
-		if !field.inDTO() {
-			continue
-		}
-		b.WriteString("\t" + field.dtoGoName() + " " + field.dtoGoType() + " `json:\"" + field.dtoJSONName() + "\" doc:\"" + field.dtoGoName() + "\"`\n")
-	}
-	b.WriteString("}\n\n")
-	filters := filterFields(ctx.Fields)
-	searchCols := searchColumns(ctx.Fields)
-	sortCols := sortColumns(ctx.Fields)
-	aggFields := aggregateFields(ctx.Fields)
-	// A resource with aggregatable fields returns aggregates in meta, so its list
-	// meta is contract.ListMeta (PageMeta + optional aggregates); otherwise the
-	// plain contract.PageMeta is unchanged, keeping a no-modifier resource's
-	// output byte-identical.
-	metaType := "contract.PageMeta"
-	if len(aggFields) > 0 {
-		metaType = "contract.ListMeta"
-	}
-	listOut := "list" + ctx.Resource.Tag + "Output"
-	listIn := "list" + ctx.Resource.Tag + "Input"
-	b.WriteString("type " + listOut + " struct {\n")
-	b.WriteString("\tBody contract.DataMeta[[]" + data + ", " + metaType + "]\n}\n\n")
-	b.WriteString("type " + listIn + " struct {\n")
-	b.WriteString("\tPage    int `query:\"page\" doc:\"1-based page\"`\n")
-	b.WriteString("\tPerPage int `query:\"per_page\" doc:\"Page size\"`\n")
-	if len(searchCols) > 0 {
-		b.WriteString("\tSearch string `query:\"search\" doc:\"Search term matched across searchable fields\"`\n")
-	}
-	if len(sortCols) > 0 {
-		b.WriteString("\tOrdering string `query:\"ordering\" doc:\"Field to order by; prefix with - for DESC (allowed: " + strings.Join(sortCols, ", ") + ")\"`\n")
-	}
-	if len(aggFields) > 0 {
-		b.WriteString("\tAggregate string `query:\"aggregate\" doc:\"Comma-separated <func>:<field> aggregates over the filtered set, e.g. sum:" + aggFields[0].aggregateColumn() + " (funcs: sum, avg, min, max; fields: " + strings.Join(aggregateColumns(aggFields), ", ") + ")\"`\n")
-	}
-	for _, f := range filters {
-		b.WriteString("\t" + f.filterInputField() + " string `" + f.filterQueryTag() + "`\n")
-	}
-	b.WriteString("}\n\n")
-	b.WriteString("type get" + typ + "Input struct {\n")
-	b.WriteString("\tID string `path:\"id\" doc:\"" + typ + " identifier\"`\n}\n\n")
-	b.WriteString("type get" + typ + "Output struct {\n")
-	b.WriteString("\tBody contract.Data[" + data + "]\n}\n\n")
-	b.WriteString("type create" + typ + "Input struct {\n\tBody struct {\n")
-	for _, field := range ctx.Fields {
-		if !field.inDTO() {
-			continue
-		}
-		b.WriteString("\t\t" + field.dtoGoName() + " " + field.dtoGoType() + " `" + field.dtoHumaTags() + "`\n")
-	}
-	b.WriteString("\t}\n}\n\n")
-	b.WriteString("type create" + typ + "Output struct {\n")
-	b.WriteString("\tBody contract.Data[" + data + "]\n}\n\n")
-
-	b.WriteString("func (h *Handler) list(ctx context.Context, input *" + listIn + ") (*" + listOut + ", error) {\n")
-	b.WriteString("\tpage, perPage := contract.ClampPage(input.Page, input.PerPage)\n")
-	b.WriteString("\tq := h.DB.WithContext(ctx).Model(&" + typ + "{})\n")
-	// Declared filters and search narrow the set before the count, so meta.total
-	// reflects the filtered collection, not the whole table. errDeclared tracks
-	// whether the function-scope err exists yet so the first assignment uses :=.
-	errDeclared := false
-	for _, f := range filters {
-		assign := "="
-		if !errDeclared {
-			assign = ":="
-			errDeclared = true
-		}
-		b.WriteString("\tq, err " + assign + " database.FilterEq(ctx, q, \"" + f.filterColumn() + "\", " + f.filterKindExpr() + ", input." + f.filterInputField() + ")\n")
-		b.WriteString("\tif err != nil {\n\t\treturn nil, err\n\t}\n")
-	}
-	if len(searchCols) > 0 {
-		b.WriteString("\tq = database.Search(q, []string{\"" + strings.Join(searchCols, "\", \"") + "\"}, input.Search)\n")
-	}
-	b.WriteString("\tvar total int64\n")
-	b.WriteString("\tif err := q.Session(&gorm.Session{}).Count(&total).Error; err != nil {\n")
-	b.WriteString("\t\treturn nil, contract.WithContext(ctx, contract.Internal(\"list " + ctx.Resource.PluralSnake + "\"))\n")
-	b.WriteString("\t}\n")
-	if len(aggFields) > 0 {
-		// Aggregates run over the same filtered/searched query as the count,
-		// before pagination — so meta.aggregates covers the whole matching set,
-		// not one page (issue #272). ParseAggregates declares err (aggs is new,
-		// so := is always valid); mark it declared so a later Ordering reuses it.
-		b.WriteString("\taggs, err := database.ParseAggregates(ctx, input.Aggregate, map[string]database.AggregateColumn{\n")
-		for _, f := range aggFields {
-			b.WriteString("\t\t\"" + f.aggregateColumn() + "\": {Column: \"" + f.aggregateColumn() + "\"},\n")
-		}
-		b.WriteString("\t})\n")
-		b.WriteString("\tif err != nil {\n\t\treturn nil, err\n\t}\n")
-		b.WriteString("\taggregates, err := database.Aggregate(ctx, q.Session(&gorm.Session{}), aggs)\n")
-		b.WriteString("\tif err != nil {\n\t\treturn nil, err\n\t}\n")
-		errDeclared = true
-	}
-	if len(sortCols) > 0 {
-		// Declared ordering replaces the fixed Order("id"), which stays the
-		// fallback when ?ordering= is absent so the default page order is
-		// unchanged. Same `?ordering=<field>` / `-<field>` spelling as the admin
-		// data plane.
-		// Ordering is the last consumer of the function-scope err, so this branch
-		// only reads errDeclared (never needs to set it).
-		assign := "="
-		if !errDeclared {
-			assign = ":="
-		}
-		b.WriteString("\tq, err " + assign + " database.Ordering(ctx, q, input.Ordering, []string{\"" + strings.Join(sortCols, "\", \"") + "\"}, \"id\")\n")
-		b.WriteString("\tif err != nil {\n\t\treturn nil, err\n\t}\n")
-	}
-	b.WriteString("\tvar rows []" + typ + "\n")
-	if len(sortCols) > 0 {
-		b.WriteString("\tif err := q.Offset(contract.PageOffset(page, perPage)).Limit(perPage).Find(&rows).Error; err != nil {\n")
-	} else {
-		b.WriteString("\tif err := q.Order(\"id\").Offset(contract.PageOffset(page, perPage)).Limit(perPage).Find(&rows).Error; err != nil {\n")
-	}
-	b.WriteString("\t\treturn nil, contract.WithContext(ctx, contract.Internal(\"list " + ctx.Resource.PluralSnake + "\"))\n")
-	b.WriteString("\t}\n")
-	b.WriteString("\titems := make([]" + data + ", 0, len(rows))\n")
-	b.WriteString("\tfor _, row := range rows {\n\t\titems = append(items, to" + typ + "Data(row))\n\t}\n")
-	b.WriteString("\treturn &" + listOut + "{\n")
-	b.WriteString("\t\tBody: contract.DataMeta[[]" + data + ", " + metaType + "]{\n")
-	b.WriteString("\t\t\tData: items,\n")
-	if len(aggFields) > 0 {
-		b.WriteString("\t\t\tMeta: &" + metaType + "{Page: page, PerPage: perPage, Total: total, Aggregates: aggregates},\n")
-	} else {
-		b.WriteString("\t\t\tMeta: &" + metaType + "{Page: page, PerPage: perPage, Total: total},\n")
-	}
-	b.WriteString("\t\t},\n")
-	b.WriteString("\t}, nil\n}\n\n")
-
-	b.WriteString("func (h *Handler) get(ctx context.Context, input *get" + typ + "Input) (*get" + typ + "Output, error) {\n")
-	b.WriteString("\tid, err := strconv.ParseUint(input.ID, 10, 64)\n")
-	b.WriteString("\tif err != nil {\n")
-	b.WriteString("\t\treturn nil, contract.WithContext(ctx, contract.NotFound(\"" + singular + " not found\"))\n")
-	b.WriteString("\t}\n")
-	b.WriteString("\tvar row " + typ + "\n")
-	b.WriteString("\tif err := h.DB.WithContext(ctx).First(&row, uint(id)).Error; err != nil {\n")
-	b.WriteString("\t\treturn nil, database.MapLoadError(ctx, err, \"" + singular + " not found\", \"load " + singular + "\")\n")
-	b.WriteString("\t}\n")
-	b.WriteString("\treturn &get" + typ + "Output{\n")
-	b.WriteString("\t\tBody: contract.Data[" + data + "]{Data: to" + typ + "Data(row)},\n")
-	b.WriteString("\t}, nil\n}\n\n")
-
-	b.WriteString("func (h *Handler) create(ctx context.Context, input *create" + typ + "Input) (*create" + typ + "Output, error) {\n")
-	b.WriteString("\trow := " + typ + "{\n")
-	for _, field := range ctx.Fields {
-		if !field.inDTO() {
-			continue
-		}
-		b.WriteString("\t\t" + field.dtoGoName() + ": input.Body." + field.dtoGoName() + ",\n")
-	}
-	b.WriteString("\t}\n")
-	b.WriteString("\tif err := h.DB.WithContext(ctx).Create(&row).Error; err != nil {\n")
-	b.WriteString("\t\treturn nil, database.MapPersistError(ctx, err, \"resource already exists\", \"create " + singular + "\")\n")
-	b.WriteString("\t}\n")
-	b.WriteString("\treturn &create" + typ + "Output{\n")
-	b.WriteString("\t\tBody: contract.Data[" + data + "]{Data: to" + typ + "Data(row)},\n")
-	b.WriteString("\t}, nil\n}\n\n")
-
-	b.WriteString("func to" + typ + "Data(row " + typ + ") " + data + " {\n")
-	b.WriteString("\treturn " + data + "{ID: row.ID")
-	for _, field := range ctx.Fields {
-		if !field.inDTO() {
-			continue
-		}
-		b.WriteString(", " + field.dtoGoName() + ": row." + field.dtoGoName())
-	}
-	b.WriteString("}\n}\n")
-	return b.String()
-}
-
-func renderRoutes(ctx renderContext) string {
-	var b strings.Builder
-	pkg := ctx.Resource.Package
-	typ := ctx.Resource.TypeName
-	path := ctx.Resource.HTTPPath
-	tag := ctx.Resource.Tag
-	kebab := ctx.Resource.Kebab
-
-	b.WriteString(goBanner())
-	b.WriteString("package " + pkg + "\n\n")
-	b.WriteString("import (\n\t\"net/http\"\n\n")
-	b.WriteString("\t\"github.com/danielgtaylor/huma/v2\"\n")
-	b.WriteString("\t\"github.com/gombit-dev/gombit/framework\"\n)\n\n")
-	b.WriteString("// Register mounts " + pkg + " Huma routes. Called explicitly from main; Gombit\n")
-	b.WriteString("// does not discover feature packages by reflection.\n")
-	b.WriteString("func Register(app *framework.App) {\n")
-	b.WriteString("\th := &Handler{DB: app.DB()}\n")
-	b.WriteString("\tprefix := app.Config().API.Prefix\n")
-	b.WriteString("\tapi := app.API()\n\n")
-	b.WriteString("\thuma.Register(api, huma.Operation{\n")
-	b.WriteString("\t\tOperationID: \"list-" + kebab + "\",\n")
-	b.WriteString("\t\tMethod:      http.MethodGet,\n")
-	b.WriteString("\t\tPath:        prefix + \"" + path + "\",\n")
-	b.WriteString("\t\tSummary:     \"List " + strings.ToLower(tag) + "\",\n")
-	b.WriteString("\t\tTags:        []string{\"" + tag + "\"},\n")
-	b.WriteString("\t}, h.list)\n\n")
-	b.WriteString("\thuma.Register(api, huma.Operation{\n")
-	b.WriteString("\t\tOperationID: \"get-" + pkg + "\",\n")
-	b.WriteString("\t\tMethod:      http.MethodGet,\n")
-	b.WriteString("\t\tPath:        prefix + \"" + path + "/{id}\",\n")
-	b.WriteString("\t\tSummary:     \"Get a " + strings.ToLower(typ) + "\",\n")
-	b.WriteString("\t\tTags:        []string{\"" + tag + "\"},\n")
-	b.WriteString("\t}, h.get)\n\n")
-	b.WriteString("\thuma.Register(api, huma.Operation{\n")
-	b.WriteString("\t\tOperationID: \"create-" + pkg + "\",\n")
-	b.WriteString("\t\tMethod:      http.MethodPost,\n")
-	b.WriteString("\t\tPath:        prefix + \"" + path + "\",\n")
-	b.WriteString("\t\tSummary:     \"Create a " + strings.ToLower(typ) + "\",\n")
-	b.WriteString("\t\tTags:        []string{\"" + tag + "\"},\n")
-	b.WriteString("\t}, h.create)\n")
-	b.WriteString("}\n")
-	return b.String()
+	return " `" + strings.Join(parts, " ") + "`"
 }
 
 func renderService(ctx renderContext) string {

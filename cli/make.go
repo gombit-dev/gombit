@@ -5,6 +5,7 @@ import (
 	"io"
 
 	"github.com/gombit-dev/gombit/commandgen"
+	"github.com/gombit-dev/gombit/generate"
 	"github.com/gombit-dev/gombit/resourcegen"
 	"github.com/spf13/cobra"
 )
@@ -121,6 +122,8 @@ internal/platform (not only the new resource). Otherwise the GORM model is
 still loader-ready for gombit db makemigrations.`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Phase 1: scaffold the human-owned model + resource marker and wire
+			// registration/AutoMigrate. No handler/hooks yet.
 			err := resourcegen.Generate(cmd.Context(), resourcegen.Options{
 				WorkDir: ".",
 				Name:    args[0],
@@ -133,6 +136,22 @@ still loader-ready for gombit db makemigrations.`,
 				Stderr:  stderr,
 			})
 			if err != nil {
+				return fmt.Errorf("gombit make resource: %w", err)
+			}
+			if dryRun {
+				// Nothing was written, so there is no compilable model to generate
+				// from; tell the developer the second phase that a real run performs.
+				_, _ = fmt.Fprintln(stdout, "dry-run: skipping gombit generate (would produce the *.gen.go DTOs/handler and seed hooks.go)")
+				return nil
+			}
+			// Phase 2: derive the generator-owned *.gen.go (DTOs, mappers, CRUD
+			// handler) and seed the human-owned hooks file from the model just
+			// written — the same Program-Mode path gombit generate uses.
+			if err := generate.Generate(cmd.Context(), generate.Options{
+				WorkDir: ".",
+				Stdout:  stdout,
+				Stderr:  stderr,
+			}); err != nil {
 				return fmt.Errorf("gombit make resource: %w", err)
 			}
 			return nil

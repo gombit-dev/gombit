@@ -81,31 +81,19 @@ func TestGenerateBookFeaturePackage(t *testing.T) {
 		t.Fatalf("book.Register count = %d, want 1\n%s", count, mainSrc)
 	}
 
-	handlerPath := filepath.Join(appDir, "internal", "book", "handler.go")
-	handlerSrc := readFile(t, handlerPath)
-	if !strings.Contains(handlerSrc, `contract.Internal("list books")`) {
-		t.Fatalf("handler Internal message = %q, want list books", handlerSrc)
+	// Model-first: make resource scaffolds the model and marks the package a
+	// resource; it writes no human-owned handler.go / routes.go. The generator-owned
+	// *.gen.go come from gombit generate, which the CLI runs after this scaffold
+	// step (not this resourcegen unit test); the handler contract is covered by the
+	// model-first handler tests (modelhandler_test.go).
+	if _, err := os.Stat(filepath.Join(appDir, "internal", "book", "handler.go")); !os.IsNotExist(err) {
+		t.Fatal("model-first make resource must not write a human-owned handler.go")
 	}
-	if !strings.Contains(handlerSrc, `database.MapLoadError(ctx, err, "book not found", "load book")`) {
-		t.Fatal("generated get handler does not map load errors via database.MapLoadError")
+	if _, err := os.Stat(filepath.Join(appDir, "internal", "book", "routes.go")); !os.IsNotExist(err) {
+		t.Fatal("model-first make resource must not write routes.go")
 	}
-	if !strings.Contains(handlerSrc, `database.MapPersistError(ctx, err, "resource already exists", "create book")`) {
-		t.Fatal("generated create handler does not map persist errors via database.MapPersistError")
-	}
-	if strings.Count(handlerSrc, `contract.NotFound("book not found")`) != 1 {
-		t.Fatal("generated get handler should keep parse-id as not_found and not map First() errors to 404")
-	}
-	if !strings.Contains(handlerSrc, `query:"page"`) || !strings.Contains(handlerSrc, `query:"per_page"`) {
-		t.Fatal("generated list handler missing page/per_page query params")
-	}
-	if !strings.Contains(handlerSrc, "contract.ClampPage") || !strings.Contains(handlerSrc, "contract.PageOffset") {
-		t.Fatal("generated list handler does not clamp page/per_page")
-	}
-	if !strings.Contains(handlerSrc, ".Limit(") || !strings.Contains(handlerSrc, "Count(&total)") {
-		t.Fatal("generated list handler does not LIMIT/OFFSET or count total separately")
-	}
-	if strings.Contains(handlerSrc, "PerPage: 20, Total: int64(len(items))") {
-		t.Fatal("generated list handler still advertises hardcoded per_page=20 from len(items)")
+	if _, err := os.Stat(filepath.Join(appDir, "internal", "book", ResourceMarkerFile)); err != nil {
+		t.Fatalf("make resource must write the %s resource marker: %v", ResourceMarkerFile, err)
 	}
 	if _, err := os.Stat(filepath.Join(appDir, "internal", "book", "service.go")); !os.IsNotExist(err) {
 		t.Fatal("default generate wrote service.go")
@@ -171,9 +159,9 @@ func TestGenerateBookFeaturePackage(t *testing.T) {
 		t.Fatalf("re-run duplicated book.Register: count = %d", count)
 	}
 
-	// User edit is refused without --force.
-	if err := os.WriteFile(handlerPath, []byte("package book\n\n// user edit\n"), 0o600); err != nil {
-		t.Fatalf("edit handler: %v", err)
+	// A modified generator-owned file (the model) is refused without --force.
+	if err := os.WriteFile(modelPath, []byte("package book\n\n// user edit\n"), 0o600); err != nil {
+		t.Fatalf("edit model: %v", err)
 	}
 	err = Generate(context.Background(), Options{
 		WorkDir:   appDir,
@@ -185,9 +173,9 @@ func TestGenerateBookFeaturePackage(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "--force") {
 		t.Fatalf("clobber error = %v, want --force", err)
 	}
-	got := readFile(t, handlerPath)
+	got := readFile(t, modelPath)
 	if !strings.Contains(got, "user edit") {
-		t.Fatal("user handler.go was overwritten without --force")
+		t.Fatal("user-edited model.go was overwritten without --force")
 	}
 
 	err = Generate(context.Background(), Options{
@@ -201,9 +189,9 @@ func TestGenerateBookFeaturePackage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate(--force) error = %v", err)
 	}
-	got = readFile(t, handlerPath)
+	got = readFile(t, modelPath)
 	if strings.Contains(got, "user edit") {
-		t.Fatal("--force did not replace handler.go")
+		t.Fatal("--force did not replace model.go")
 	}
 }
 
