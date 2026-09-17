@@ -126,9 +126,11 @@ func TestRunMakeCommandInResourcePackageCompiles(t *testing.T) {
 	if !strings.Contains(commandsSrc, "func RegisterCommands") {
 		t.Fatal("book commands.go missing RegisterCommands")
 	}
-	routesSrc := readFileString(t, filepath.Join(dest, "internal", "book", "routes.go"))
-	if !strings.Contains(routesSrc, "func Register(app") {
-		t.Fatal("book routes.go lost Register")
+	// Model-first: Register lives in the generator-owned handler.gen.go that
+	// `make resource` produced by running gombit generate.
+	handlerSrc := readFileString(t, filepath.Join(dest, "internal", "book", "handler.gen.go"))
+	if !strings.Contains(handlerSrc, "func Register(app") {
+		t.Fatal("book handler.gen.go lost Register")
 	}
 	mainSrc := readFileString(t, filepath.Join(dest, "cmd", "gombit", "main.go"))
 	count, err := commandgen.CountRegisterCalls([]byte(mainSrc), "book")

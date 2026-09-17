@@ -77,16 +77,17 @@ func TestRunMakeResourceBookCompiles(t *testing.T) {
 		t.Fatalf("re-run duplicated Register: %d", count)
 	}
 
-	handlerPath := filepath.Join(dest, "internal", "book", "handler.go")
-	if err := os.WriteFile(handlerPath, []byte("package book\n\n// edited by user\n"), 0o600); err != nil {
-		t.Fatalf("edit handler: %v", err)
+	// A modified generator-owned file (the model) is refused without --force, so a
+	// re-run never silently clobbers local edits.
+	if err := os.WriteFile(modelPath, []byte("package book\n\n// edited by user\n"), 0o600); err != nil {
+		t.Fatalf("edit model: %v", err)
 	}
 	err = run(context.Background(), []string{"make", "resource", "Book", "title:string:required"}, ioDiscard{}, ioDiscard{})
 	if err == nil || !strings.Contains(err.Error(), "--force") {
 		t.Fatalf("clobber error = %v, want --force", err)
 	}
-	if !strings.Contains(readFileString(t, handlerPath), "edited by user") {
-		t.Fatal("user handler.go was overwritten")
+	if !strings.Contains(readFileString(t, modelPath), "edited by user") {
+		t.Fatal("user-edited model.go was overwritten without --force")
 	}
 
 	err = run(context.Background(), []string{"make", "resource", "Book", "title:string:required", "--force"}, ioDiscard{}, ioDiscard{})
