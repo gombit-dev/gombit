@@ -1,6 +1,7 @@
 package resourcegen
 
 import (
+	"database/sql"
 	"fmt"
 	"reflect"
 	"sort"
@@ -63,11 +64,13 @@ type modelField struct {
 	resourcepolicy.Resolved
 	AccessPath string
 	GoType     string // rendered Go type expression, e.g. "string", "*time.Time", "types.Decimal"
-	// Kind is the field's own reflect.Kind. It is a type CLASSIFICATION, distinct
-	// from GoType's rendered TEXT: a defined type `type Slug string` renders as
-	// "Slug" (by identity, on purpose) but has Kind reflect.String. Kind-based
-	// decisions (e.g. minLength for a string column) must key off this, never off
-	// the GoType string, which only equals "string" for the bare predeclared type.
+	// Kind is the field's EFFECTIVE scalar reflect.Kind, with nullability unwrapped
+	// (a *string / sql.NullString column reports reflect.String) — see
+	// effectiveKind. It is a type CLASSIFICATION, distinct from GoType's rendered
+	// TEXT: a defined type `type Slug string` renders as "Slug" (by identity, on
+	// purpose) but has Kind reflect.String. Kind-based decisions (minLength for a
+	// string column, whether a column can be filtered/sorted/aggregated) must key
+	// off this, never off the GoType string or the raw (possibly pointer) kind.
 	Kind reflect.Kind
 }
 
@@ -159,7 +162,7 @@ func buildModelResource(model any, pkg string) (modelResource, error) {
 			Resolved:   r,
 			AccessPath: strings.Join(f.BindNames, "."),
 			GoType:     goType,
-			Kind:       f.FieldType.Kind(),
+			Kind:       effectiveKind(f.FieldType),
 		}
 		// resourcepolicy validated the query capabilities as API policy (declared,
 		// response-visible); here, where the Go type is known, validate that the
@@ -178,6 +181,35 @@ func buildModelResource(model any, pkg string) (modelResource, error) {
 // decimalType is the framework decimal, the one non-primitive numeric type that
 // is aggregatable.
 var decimalType = reflect.TypeOf(types.Decimal{})
+
+// sqlNullKinds maps the database/sql nullable wrappers to the scalar kind they
+// carry, so a nullable column is classified by its underlying type — not by the
+// struct wrapper — for query-capability decisions.
+var sqlNullKinds = map[reflect.Type]reflect.Kind{
+	reflect.TypeOf(sql.NullString{}):  reflect.String,
+	reflect.TypeOf(sql.NullInt64{}):   reflect.Int64,
+	reflect.TypeOf(sql.NullInt32{}):   reflect.Int32,
+	reflect.TypeOf(sql.NullInt16{}):   reflect.Int16,
+	reflect.TypeOf(sql.NullByte{}):    reflect.Uint8,
+	reflect.TypeOf(sql.NullBool{}):    reflect.Bool,
+	reflect.TypeOf(sql.NullFloat64{}): reflect.Float64,
+}
+
+// effectiveKind is the field's scalar kind for query-capability decisions with
+// nullability unwrapped once: a pointer column (*string, *int64) reports the kind
+// it points to, and a database/sql wrapper (sql.NullString, …) the kind it
+// carries. Nullability is orthogonal to whether a column can be filtered / sorted
+// / searched / aggregated (the legacy field grammar draws no such distinction),
+// so every query check must consult this, never the raw reflect.Kind.
+func effectiveKind(t reflect.Type) reflect.Kind {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if k, ok := sqlNullKinds[t]; ok {
+		return k
+	}
+	return t.Kind()
+}
 
 // validateQueryTypes fails closed when a column declares a query capability its Go
 // type cannot support, matching the legacy field-grammar type rules: filterable ⊂

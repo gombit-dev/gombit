@@ -834,3 +834,37 @@ func TestBuildModelResourceRejectsHiddenQueryable(t *testing.T) {
 		t.Fatal("a hidden searchable field must fail closed")
 	}
 }
+
+// Nullability is orthogonal to query capability: a nullable (*T or sql.Null*)
+// column is just as filterable/searchable/aggregatable as its non-nullable form,
+// classified by its underlying scalar kind (parity with the legacy grammar).
+func TestBuildModelResourceAllowsNullableQueryTypes(t *testing.T) {
+	type m struct {
+		ID    uint           `gorm:"primaryKey"`
+		Name  *string        `gombit:"read,write,filterable,searchable,sortable"`
+		Price *int64         `gombit:"read,write,filterable,aggregatable"`
+		Flag  *bool          `gombit:"read,write,filterable"`
+		Label sql.NullString `gombit:"read,write,searchable"`
+		Money *types.Decimal `gombit:"read,write,aggregatable"`
+	}
+	res, err := buildModelResource(&m{}, "m")
+	if err != nil {
+		t.Fatalf("nullable query columns must resolve: %v", err)
+	}
+	if n := len(res.filterFields()); n != 3 {
+		t.Fatalf("filterable count = %d, want 3 (name, price, flag)", n)
+	}
+	if n := len(res.aggregateFields()); n != 2 {
+		t.Fatalf("aggregatable count = %d, want 2 (price, money)", n)
+	}
+	// filterKindExpr must key off the unwrapped kind: a nullable *int64 coerces as
+	// an int64, never as a string.
+	for _, f := range res.filterFields() {
+		if f.Column == "price" && filterKindExpr(f) != "database.FilterInt64" {
+			t.Fatalf("nullable *int64 filter kind = %q, want database.FilterInt64", filterKindExpr(f))
+		}
+		if f.Column == "flag" && filterKindExpr(f) != "database.FilterBool" {
+			t.Fatalf("nullable *bool filter kind = %q, want database.FilterBool", filterKindExpr(f))
+		}
+	}
+}
