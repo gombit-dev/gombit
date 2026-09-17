@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gombit-dev/gombit/types"
 	"gorm.io/gorm"
 )
 
@@ -315,6 +316,205 @@ func TestCreateFailsClosedWithoutHooks(t *testing.T) {
 	db.Model(&Book{}).Count(&count)
 	if count != 0 {
 		t.Fatalf("create must not persist a row on the misconfigured path; found %d", count)
+	}
+}
+`
+
+// --- slice 4.5: declared list-query surface ---
+
+// queryModel declares each query capability via the gombit tag; the generated
+// handler must emit the matching query params, sort/aggregate lists, and
+// ListMeta, driven by resolved policy (not by re-reading tags in the handler).
+type queryModel struct {
+	gorm.Model
+	Title  string        `gorm:"not null" gombit:"read,write,searchable,sortable"`
+	Genre  string        `gombit:"read,write,filterable,sortable"`
+	Price  int64         `gombit:"read,write,filterable,aggregatable"`
+	Active bool          `gombit:"read,write,filterable"`
+	Amount types.Decimal `gombit:"read,write,aggregatable"`
+}
+
+func TestRenderModelHandlerQuerySurface(t *testing.T) {
+	res, err := buildModelResource(&queryModel{}, "querymodel")
+	if err != nil {
+		t.Fatalf("buildModelResource: %v", err)
+	}
+	src, err := renderModelHandler(res)
+	if err != nil {
+		t.Fatalf("renderModelHandler: %v", err)
+	}
+	assertParses(t, src)
+
+	for _, want := range []string{
+		// Aggregatable present -> ListMeta.
+		"contract.DataMeta[[]queryModelData, contract.ListMeta]",
+		// Search / ordering / aggregate param tags (alignment-independent).
+		"`query:\"search\" doc:\"Search term matched across searchable fields\"`",
+		"`query:\"ordering\" doc:\"Field to order by; prefix with - for DESC (allowed: title, genre)\"`",
+		"e.g. sum:price (funcs: sum, avg, min, max; fields: price, amount)",
+		// Filter param tags, with the bool one carrying a true/false enum.
+		"`query:\"genre\" doc:\"Filter by Genre (exact match)\"`",
+		"`query:\"price\" doc:\"Filter by Price (exact match)\"`",
+		"`query:\"active\" enum:\"true,false\" doc:\"Filter by Active (exact match)\"`",
+		// List body: filter coercion + search + aggregate + ordering.
+		"database.FilterEq(ctx, q, \"genre\", database.FilterString, input.Genre)",
+		"database.FilterEq(ctx, q, \"price\", database.FilterInt64, input.Price)",
+		"database.FilterEq(ctx, q, \"active\", database.FilterBool, input.Active)",
+		"database.Search(q, []string{\"title\"}, input.Search)",
+		"database.ParseAggregates(ctx, input.Aggregate,",
+		"database.Ordering(ctx, q, input.Ordering, []string{\"title\", \"genre\"}, \"id\")",
+		"Aggregates: aggregates",
+	} {
+		if !strings.Contains(src, want) {
+			t.Fatalf("query handler missing %q in:\n%s", want, src)
+		}
+	}
+}
+
+// With no query capabilities declared, the handler is byte-identical to the plain
+// paginated list (PageMeta, no query params) — a no-modifier resource is unchanged.
+func TestRenderModelHandlerNoQuerySurface(t *testing.T) {
+	res := buildHandlerModel(t, "handlermodel")
+	src, err := renderModelHandler(res)
+	if err != nil {
+		t.Fatalf("renderModelHandler: %v", err)
+	}
+	if !strings.Contains(src, "contract.DataMeta[[]handlerModelData, contract.PageMeta]") {
+		t.Fatalf("no-query resource should use PageMeta:\n%s", src)
+	}
+	for _, absent := range []string{"query:\"search\"", "query:\"ordering\"", "query:\"aggregate\"", "database.FilterEq"} {
+		if strings.Contains(src, absent) {
+			t.Fatalf("no-query resource must not emit %q:\n%s", absent, src)
+		}
+	}
+}
+
+// Item is the compile-run model for the query surface: searchable/sortable Name,
+// filterable Kind, filterable+aggregatable Price. Package-level so its Go type is
+// literally "Item", matching the temp module's model.go.
+type Item struct {
+	gorm.Model
+	Name  string `gorm:"not null" gombit:"read,write,searchable,sortable"`
+	Kind  string `gombit:"read,write,filterable"`
+	Price int64  `gombit:"read,write,filterable,sortable,aggregatable"`
+}
+
+// TestGeneratedQueryHandlerCompilesAndRuns generates a resource with the full
+// query surface, compiles it against the real framework, and EXECUTES filter,
+// search, ordering, and aggregate through the generated list handler on SQLite —
+// proving the ported query codegen references database.FilterEq/Search/Ordering/
+// ParseAggregates/Aggregate correctly and behaves the same as the legacy handler.
+func TestGeneratedQueryHandlerCompilesAndRuns(t *testing.T) {
+	if testing.Short() {
+		t.Skip("compiles and runs a temp module against the framework; skipped in -short")
+	}
+	res, err := buildModelResource(&Item{}, "item")
+	if err != nil {
+		t.Fatalf("buildModelResource: %v", err)
+	}
+	dto := string(mustFormatGo(renderModelDTOs(res)))
+	handler, err := renderModelHandler(res)
+	if err != nil {
+		t.Fatalf("renderModelHandler: %v", err)
+	}
+	handler = string(mustFormatGo(handler))
+	hooks := string(mustFormatGo(renderModelHooks(res)))
+
+	dir := t.TempDir()
+	pkgDir := filepath.Join(dir, "item")
+	if err := os.MkdirAll(pkgDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(dir, "go.mod"),
+		"module itemapp\n\ngo 1.23\n\nrequire github.com/gombit-dev/gombit v0.0.0\n\nreplace github.com/gombit-dev/gombit => "+resourcegenModuleRoot(t)+"\n")
+	writeFile(t, filepath.Join(pkgDir, "model.go"),
+		"package item\n\nimport \"gorm.io/gorm\"\n\ntype Item struct {\n\tgorm.Model\n\tName  string `gorm:\"not null\"`\n\tKind  string\n\tPrice int64\n}\n")
+	writeFile(t, filepath.Join(pkgDir, "dto.gen.go"), dto)
+	writeFile(t, filepath.Join(pkgDir, "handler.gen.go"), handler)
+	writeFile(t, filepath.Join(pkgDir, "hooks.go"), hooks)
+	writeFile(t, filepath.Join(pkgDir, "run_test.go"), queryRunTest)
+
+	tidy := exec.Command("go", "mod", "tidy")
+	tidy.Dir = dir
+	if out, err := tidy.CombinedOutput(); err != nil {
+		t.Fatalf("go mod tidy: %v\n%s", err, out)
+	}
+	cmd := exec.Command("go", "test", "./...")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("generated query handler failed to compile/run: %v\n%s\n--- handler ---\n%s", err, out, handler)
+	}
+}
+
+const queryRunTest = `package item
+
+import (
+	"context"
+	"path/filepath"
+	"testing"
+
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
+)
+
+func TestQuery(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "t.db")), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&Item{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range []Item{
+		{Name: "apple", Kind: "fruit", Price: 10},
+		{Name: "banana", Kind: "fruit", Price: 20},
+		{Name: "carrot", Kind: "veg", Price: 5},
+	} {
+		if err := db.Create(&it).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	h := &Handler{DB: db}
+	ctx := context.Background()
+
+	// filter: Kind=fruit -> 2 rows.
+	out, err := h.list(ctx, &listItemsInput{Page: 1, PerPage: 50, Kind: "fruit"})
+	if err != nil {
+		t.Fatalf("filter list: %v", err)
+	}
+	if out.Body.Meta.Total != 2 || len(out.Body.Data) != 2 {
+		t.Fatalf("filter Kind=fruit: total=%d rows=%d", out.Body.Meta.Total, len(out.Body.Data))
+	}
+
+	// search: "app" -> apple only.
+	s, err := h.list(ctx, &listItemsInput{Page: 1, PerPage: 50, Search: "app"})
+	if err != nil {
+		t.Fatalf("search list: %v", err)
+	}
+	if len(s.Body.Data) != 1 || s.Body.Data[0].Name != "apple" {
+		t.Fatalf("search app: %+v", s.Body.Data)
+	}
+
+	// ordering: -price -> banana (20) first.
+	o, err := h.list(ctx, &listItemsInput{Page: 1, PerPage: 50, Ordering: "-price"})
+	if err != nil {
+		t.Fatalf("ordering list: %v", err)
+	}
+	if len(o.Body.Data) != 3 || o.Body.Data[0].Name != "banana" {
+		t.Fatalf("ordering -price: %+v", o.Body.Data)
+	}
+
+	// aggregate: sum:price over Kind=fruit -> 30.
+	a, err := h.list(ctx, &listItemsInput{Page: 1, PerPage: 50, Kind: "fruit", Aggregate: "sum:price"})
+	if err != nil {
+		t.Fatalf("aggregate list: %v", err)
+	}
+	sum, ok := a.Body.Meta.Aggregates["sum:price"]
+	if !ok {
+		t.Fatalf("aggregate sum:price missing: %+v", a.Body.Meta.Aggregates)
+	}
+	if sum.String() != "30" {
+		t.Fatalf("sum:price = %s, want 30", sum.String())
 	}
 }
 `

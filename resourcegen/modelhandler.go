@@ -2,6 +2,7 @@ package resourcegen
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 )
 
@@ -85,12 +86,38 @@ func renderModelHandler(r modelResource) (string, error) {
 	b.WriteString("\tHooks " + hooks + "\n")
 	b.WriteString("}\n\n")
 
+	// The declared list-query surface, derived from resolved policy facts (never by
+	// re-reading tags here) — same wire semantics as the legacy generated handler.
+	filters := r.filterFields()
+	searchCols := r.searchColumns()
+	sortCols := r.sortColumns()
+	aggFields := r.aggregateFields()
+	// Aggregatable fields return aggregates in meta (contract.ListMeta); without
+	// them the plain contract.PageMeta keeps a no-query-surface resource identical.
+	metaType := "contract.PageMeta"
+	if len(aggFields) > 0 {
+		metaType = "contract.ListMeta"
+	}
+
 	// Huma I/O wrappers (ADR-011: the request/response body nests under Body).
 	b.WriteString("type " + listOut + " struct {\n")
-	b.WriteString("\tBody contract.DataMeta[[]" + data + ", contract.PageMeta]\n}\n\n")
+	b.WriteString("\tBody contract.DataMeta[[]" + data + ", " + metaType + "]\n}\n\n")
 	b.WriteString("type " + listIn + " struct {\n")
 	b.WriteString("\tPage    int `query:\"page\" doc:\"1-based page\"`\n")
-	b.WriteString("\tPerPage int `query:\"per_page\" doc:\"Page size\"`\n}\n\n")
+	b.WriteString("\tPerPage int `query:\"per_page\" doc:\"Page size\"`\n")
+	if len(searchCols) > 0 {
+		b.WriteString("\tSearch string `query:\"search\" doc:\"Search term matched across searchable fields\"`\n")
+	}
+	if len(sortCols) > 0 {
+		b.WriteString("\tOrdering string `query:\"ordering\" doc:\"Field to order by; prefix with - for DESC (allowed: " + strings.Join(sortCols, ", ") + ")\"`\n")
+	}
+	if len(aggFields) > 0 {
+		b.WriteString("\tAggregate string `query:\"aggregate\" doc:\"Comma-separated <func>:<field> aggregates over the filtered set, e.g. sum:" + aggFields[0].Column + " (funcs: sum, avg, min, max; fields: " + strings.Join(columnsOf(aggFields), ", ") + ")\"`\n")
+	}
+	for _, f := range filters {
+		b.WriteString("\t" + f.GoName + " string `" + filterQueryTag(f) + "`\n")
+	}
+	b.WriteString("}\n\n")
 	b.WriteString("type get" + typ + "Input struct {\n")
 	b.WriteString("\tID string `path:\"id\" doc:\"" + typ + " identifier\"`\n}\n\n")
 	b.WriteString("type get" + typ + "Output struct {\n")
@@ -100,25 +127,66 @@ func renderModelHandler(r modelResource) (string, error) {
 	b.WriteString("type create" + typ + "Output struct {\n")
 	b.WriteString("\tBody contract.Data[" + data + "]\n}\n\n")
 
-	// list: paginated read. Filters/search/sort/aggregate are a separate query
-	// surface, not part of this slice.
+	// list: paginated read with the declared filter/search/sort/aggregate surface.
+	// Filters and search narrow the set before the count, so meta.total reflects the
+	// filtered collection; aggregates run over that same set before pagination.
 	b.WriteString("func (h *Handler) list(ctx context.Context, input *" + listIn + ") (*" + listOut + ", error) {\n")
 	b.WriteString("\tpage, perPage := contract.ClampPage(input.Page, input.PerPage)\n")
 	b.WriteString("\tq := h.DB.WithContext(ctx).Model(&" + typ + "{})\n")
+	errDeclared := false
+	for _, f := range filters {
+		assign := "="
+		if !errDeclared {
+			assign = ":="
+			errDeclared = true
+		}
+		b.WriteString("\tq, err " + assign + " database.FilterEq(ctx, q, \"" + f.Column + "\", " + filterKindExpr(f) + ", input." + f.GoName + ")\n")
+		b.WriteString("\tif err != nil {\n\t\treturn nil, err\n\t}\n")
+	}
+	if len(searchCols) > 0 {
+		b.WriteString("\tq = database.Search(q, []string{\"" + strings.Join(searchCols, "\", \"") + "\"}, input.Search)\n")
+	}
 	b.WriteString("\tvar total int64\n")
 	b.WriteString("\tif err := q.Session(&gorm.Session{}).Count(&total).Error; err != nil {\n")
 	b.WriteString("\t\treturn nil, contract.WithContext(ctx, contract.Internal(\"list " + name.PluralSnake + "\"))\n")
 	b.WriteString("\t}\n")
+	if len(aggFields) > 0 {
+		b.WriteString("\taggs, err := database.ParseAggregates(ctx, input.Aggregate, map[string]database.AggregateColumn{\n")
+		for _, f := range aggFields {
+			b.WriteString("\t\t\"" + f.Column + "\": {Column: \"" + f.Column + "\"},\n")
+		}
+		b.WriteString("\t})\n")
+		b.WriteString("\tif err != nil {\n\t\treturn nil, err\n\t}\n")
+		b.WriteString("\taggregates, err := database.Aggregate(ctx, q.Session(&gorm.Session{}), aggs)\n")
+		b.WriteString("\tif err != nil {\n\t\treturn nil, err\n\t}\n")
+		errDeclared = true
+	}
+	if len(sortCols) > 0 {
+		assign := "="
+		if !errDeclared {
+			assign = ":="
+		}
+		b.WriteString("\tq, err " + assign + " database.Ordering(ctx, q, input.Ordering, []string{\"" + strings.Join(sortCols, "\", \"") + "\"}, \"id\")\n")
+		b.WriteString("\tif err != nil {\n\t\treturn nil, err\n\t}\n")
+	}
 	b.WriteString("\tvar rows []" + typ + "\n")
-	b.WriteString("\tif err := q.Order(\"id\").Offset(contract.PageOffset(page, perPage)).Limit(perPage).Find(&rows).Error; err != nil {\n")
+	if len(sortCols) > 0 {
+		b.WriteString("\tif err := q.Offset(contract.PageOffset(page, perPage)).Limit(perPage).Find(&rows).Error; err != nil {\n")
+	} else {
+		b.WriteString("\tif err := q.Order(\"id\").Offset(contract.PageOffset(page, perPage)).Limit(perPage).Find(&rows).Error; err != nil {\n")
+	}
 	b.WriteString("\t\treturn nil, contract.WithContext(ctx, contract.Internal(\"list " + name.PluralSnake + "\"))\n")
 	b.WriteString("\t}\n")
 	b.WriteString("\titems := make([]" + data + ", 0, len(rows))\n")
 	b.WriteString("\tfor _, row := range rows {\n\t\titems = append(items, to" + typ + "Data(row))\n\t}\n")
 	b.WriteString("\treturn &" + listOut + "{\n")
-	b.WriteString("\t\tBody: contract.DataMeta[[]" + data + ", contract.PageMeta]{\n")
+	b.WriteString("\t\tBody: contract.DataMeta[[]" + data + ", " + metaType + "]{\n")
 	b.WriteString("\t\t\tData: items,\n")
-	b.WriteString("\t\t\tMeta: &contract.PageMeta{Page: page, PerPage: perPage, Total: total},\n")
+	if len(aggFields) > 0 {
+		b.WriteString("\t\t\tMeta: &" + metaType + "{Page: page, PerPage: perPage, Total: total, Aggregates: aggregates},\n")
+	} else {
+		b.WriteString("\t\t\tMeta: &" + metaType + "{Page: page, PerPage: perPage, Total: total},\n")
+	}
 	b.WriteString("\t\t},\n\t}, nil\n}\n\n")
 
 	// get: load one by id.
@@ -167,6 +235,90 @@ func renderModelHandler(r modelResource) (string, error) {
 	b.WriteString("}\n")
 
 	return b.String(), nil
+}
+
+// filterFields / aggregateFields return the resource's filterable / aggregatable
+// columns in schema order (deterministic output). searchColumns / sortColumns
+// return the DB column names for the searchable / sortable fields, in schema order.
+func (r modelResource) filterFields() []modelField {
+	out := make([]modelField, 0, len(r.Fields))
+	for _, f := range r.Fields {
+		if f.Filterable {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+func (r modelResource) aggregateFields() []modelField {
+	out := make([]modelField, 0, len(r.Fields))
+	for _, f := range r.Fields {
+		if f.Aggregatable {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+func (r modelResource) searchColumns() []string {
+	var out []string
+	for _, f := range r.Fields {
+		if f.Searchable {
+			out = append(out, f.Column)
+		}
+	}
+	return out
+}
+
+func (r modelResource) sortColumns() []string {
+	var out []string
+	for _, f := range r.Fields {
+		if f.Sortable {
+			out = append(out, f.Column)
+		}
+	}
+	return out
+}
+
+func columnsOf(fs []modelField) []string {
+	out := make([]string, len(fs))
+	for i, f := range fs {
+		out[i] = f.Column
+	}
+	return out
+}
+
+// filterKindExpr maps the field's Go kind to the database.FilterKind the generated
+// list handler passes to database.FilterEq to coerce the raw string query value —
+// matching the legacy field-grammar mapping (int→FilterInt, int64→FilterInt64,
+// unsigned→FilterUint, bool→FilterBool, otherwise string).
+func filterKindExpr(f modelField) string {
+	switch f.Kind {
+	case reflect.Int:
+		return "database.FilterInt"
+	case reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return "database.FilterInt64"
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return "database.FilterUint"
+	case reflect.Bool:
+		return "database.FilterBool"
+	default: // reflect.String
+		return "database.FilterString"
+	}
+}
+
+// filterQueryTag builds the Huma struct tag for a filter query param: the query
+// name (the DB column), a true/false enum for a bool column so Huma rejects bad
+// values, and a doc string. (Unlike the legacy path, a string enum column carries
+// no enum constraint: the GORM schema stores an enum as a plain varchar, so the
+// allowed values are not recoverable from the model.)
+func filterQueryTag(f modelField) string {
+	tag := `query:"` + f.Column + `"`
+	if f.Kind == reflect.Bool {
+		tag += ` enum:"true,false"`
+	}
+	tag += ` doc:"Filter by ` + f.GoName + ` (exact match)"`
+	return tag
 }
 
 // writeHumaOp writes one huma.Register(...) call for an operation.
