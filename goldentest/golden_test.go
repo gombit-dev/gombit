@@ -203,7 +203,7 @@ func TestMakeResourceScalarTypesCompiles(t *testing.T) {
 			"price:decimal:required",
 			"deposit:decimal(10,2)",
 			"starts_at:time:required",
-			"status:enum(requested,confirmed,active,returned,cancelled)",
+			"status:string",
 		},
 		AtlasBin: missingAtlas,
 		Stdout:   stdout,
@@ -279,7 +279,7 @@ func TestMakeResourceListQueryCompiles(t *testing.T) {
 		"body:text:searchable",
 		"views:int:filterable,sortable",
 		"published:bool:filterable",
-		"status:enum(draft,published):filterable,sortable",
+		"status:string:filterable,sortable",
 		"author:belongs_to:Author",
 	)
 	t.Run("compile", func(t *testing.T) {
@@ -311,7 +311,7 @@ func TestMakeResourceAggregatesCompiles(t *testing.T) {
 	gen("Invoice",
 		"total:decimal:required,aggregatable",
 		"quantity:int:aggregatable,filterable,sortable",
-		"status:enum(draft,paid):filterable",
+		"status:string:filterable",
 		"customer:belongs_to:Customer",
 	)
 	t.Run("compile", func(t *testing.T) {

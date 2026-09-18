@@ -41,6 +41,16 @@ func Generate(ctx context.Context, opts Options) error {
 	if err != nil {
 		return err
 	}
+	// Enum values are API policy the GORM schema cannot carry (it stores an enum as
+	// a plain varchar), so the model-first generator cannot yet derive the enum
+	// constraint for the DTO/OpenAPI. Rather than silently drop it — three
+	// representations disagreeing, the exact thing ADR-016 removes — reject enum
+	// fields until a model-first enum policy exists (a later slice).
+	for _, f := range fields {
+		if f.Type == FieldEnum {
+			return fmt.Errorf("resourcegen: field %q is an enum, which the model-first generator does not support yet (enum values are not recoverable from the GORM schema); use a string field for now — a model-first enum policy is planned", f.JSONName)
+		}
+	}
 	module, err := readModulePath(opts.WorkDir)
 	if err != nil {
 		return err
@@ -127,12 +137,34 @@ func Generate(ctx context.Context, opts Options) error {
 	}
 
 	if opts.DryRun {
+		// A real run follows the scaffold above with `gombit generate`, which derives
+		// these generator-owned files from the model and seeds the human-owned hooks
+		// (the exact paths, so the preview covers the whole command, not just phase
+		// one). Generation itself runs on a non-dry-run invocation.
+		for _, art := range dryRunGeneratedFiles(ctxData.Resource.Package) {
+			if _, err := fmt.Fprintf(opts.Stdout, "%s %s (gombit generate)\n", art.action, art.path); err != nil {
+				return err
+			}
+		}
 		return nil
 	}
 	if _, err := fmt.Fprintf(opts.Stdout, "GORM model is Atlas-loader ready: %s\n", ctxData.ModelSpec); err != nil {
 		return err
 	}
 	return maybeMakeMigrations(ctx, opts, ctxData, models)
+}
+
+// dryRunGeneratedFiles lists the files `gombit generate` produces for a resource,
+// for the --dry-run preview: the generator-owned DTOs + handler (written) and the
+// seed-once hooks. It mirrors RenderResource's outputs (same paths, same
+// ownership); keep the two in sync.
+func dryRunGeneratedFiles(pkg string) []struct{ action, path string } {
+	dir := "internal/" + pkg
+	return []struct{ action, path string }{
+		{"would write", dir + "/dto.gen.go"},
+		{"would write", dir + "/handler.gen.go"},
+		{"would seed", dir + "/hooks.go"},
+	}
 }
 
 type plannedFile struct {
@@ -157,6 +189,19 @@ func planWrites(opts Options, files []fileSpec) ([]plannedFile, error) {
 		}
 		exists := err == nil
 		if exists && bytes.Equal(existing, file.content) {
+			continue
+		}
+		// A seed-once file is the developer's once scaffolded: never overwrite it
+		// on a re-run (that would clobber their edits to the authoritative model),
+		// unless --force explicitly re-scaffolds from the CLI spec. Report it as
+		// kept so the run is transparent about preserving human-owned files.
+		if exists && file.seedOnce && !opts.Force {
+			planned = append(planned, plannedFile{
+				relPath: file.relPath,
+				display: display,
+				action:  "keep",
+				write:   false,
+			})
 			continue
 		}
 		if exists {

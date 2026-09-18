@@ -77,22 +77,27 @@ func TestRunMakeResourceBookCompiles(t *testing.T) {
 		t.Fatalf("re-run duplicated Register: %d", count)
 	}
 
-	// A modified generator-owned file (the model) is refused without --force, so a
-	// re-run never silently clobbers local edits.
-	if err := os.WriteFile(modelPath, []byte("package book\n\n// edited by user\n"), 0o600); err != nil {
+	// The model is human-owned (seed-once): a valid local edit survives a re-run
+	// (no error, no clobber), and generation still succeeds from the edited model.
+	edited := readFileString(t, modelPath) + "\n// edited by user\n"
+	if err := os.WriteFile(modelPath, []byte(edited), 0o600); err != nil {
 		t.Fatalf("edit model: %v", err)
 	}
 	err = run(context.Background(), []string{"make", "resource", "Book", "title:string:required"}, ioDiscard{}, ioDiscard{})
-	if err == nil || !strings.Contains(err.Error(), "--force") {
-		t.Fatalf("clobber error = %v, want --force", err)
+	if err != nil {
+		t.Fatalf("re-run over an edited model must succeed (seed-once), got: %v", err)
 	}
 	if !strings.Contains(readFileString(t, modelPath), "edited by user") {
-		t.Fatal("user-edited model.go was overwritten without --force")
+		t.Fatal("re-run clobbered the human-owned model without --force")
 	}
 
+	// --force re-scaffolds the model from the CLI spec, discarding the local edit.
 	err = run(context.Background(), []string{"make", "resource", "Book", "title:string:required", "--force"}, ioDiscard{}, ioDiscard{})
 	if err != nil {
 		t.Fatalf("make resource --force: %v", err)
+	}
+	if strings.Contains(readFileString(t, modelPath), "edited by user") {
+		t.Fatal("--force did not re-scaffold the model")
 	}
 
 	dryStdout := new(bytes.Buffer)

@@ -139,9 +139,9 @@ still loader-ready for gombit db makemigrations.`,
 				return fmt.Errorf("gombit make resource: %w", err)
 			}
 			if dryRun {
-				// Nothing was written, so there is no compilable model to generate
-				// from; tell the developer the second phase that a real run performs.
-				_, _ = fmt.Fprintln(stdout, "dry-run: skipping gombit generate (would produce the *.gen.go DTOs/handler and seed hooks.go)")
+				// resourcegen.Generate already previewed the scaffold plus the exact
+				// files gombit generate would produce; nothing was written, so there is
+				// no compilable model to actually run generation against here.
 				return nil
 			}
 			// Phase 2: derive the generator-owned *.gen.go (DTOs, mappers, CRUD

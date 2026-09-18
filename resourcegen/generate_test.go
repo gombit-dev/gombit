@@ -51,8 +51,9 @@ func TestGenerateBookFeaturePackage(t *testing.T) {
 
 	modelPath := filepath.Join(appDir, "internal", "book", "book.go")
 	modelSrc := readFile(t, modelPath)
-	if !strings.Contains(modelSrc, GeneratedBanner) {
-		t.Fatal("model missing generated banner")
+	// The model is human-owned (ADR-016): no DO-NOT-EDIT banner.
+	if strings.Contains(modelSrc, GeneratedBanner) {
+		t.Fatal("model must not carry the generated DO-NOT-EDIT banner; it is human-owned")
 	}
 	if !strings.Contains(modelSrc, "type Book struct") {
 		t.Fatal("model missing Book type")
@@ -159,7 +160,9 @@ func TestGenerateBookFeaturePackage(t *testing.T) {
 		t.Fatalf("re-run duplicated book.Register: count = %d", count)
 	}
 
-	// A modified generator-owned file (the model) is refused without --force.
+	// The model is human-owned (seed-once): a re-run PRESERVES local edits — it
+	// does not error and does not clobber them — so editing the model and
+	// regenerating is safe (the whole point of the ownership boundary).
 	if err := os.WriteFile(modelPath, []byte("package book\n\n// user edit\n"), 0o600); err != nil {
 		t.Fatalf("edit model: %v", err)
 	}
@@ -170,14 +173,14 @@ func TestGenerateBookFeaturePackage(t *testing.T) {
 		Stdout:    ioDiscard{},
 		skipAtlas: true,
 	})
-	if err == nil || !strings.Contains(err.Error(), "--force") {
-		t.Fatalf("clobber error = %v, want --force", err)
+	if err != nil {
+		t.Fatalf("re-run over an edited model must succeed (seed-once), got: %v", err)
 	}
-	got := readFile(t, modelPath)
-	if !strings.Contains(got, "user edit") {
-		t.Fatal("user-edited model.go was overwritten without --force")
+	if got := readFile(t, modelPath); !strings.Contains(got, "user edit") {
+		t.Fatal("re-run clobbered the human-owned model without --force")
 	}
 
+	// --force re-scaffolds the model from the CLI spec, discarding local edits.
 	err = Generate(context.Background(), Options{
 		WorkDir:   appDir,
 		Name:      "Book",
@@ -189,9 +192,12 @@ func TestGenerateBookFeaturePackage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate(--force) error = %v", err)
 	}
-	got = readFile(t, modelPath)
+	got := readFile(t, modelPath)
 	if strings.Contains(got, "user edit") {
-		t.Fatal("--force did not replace model.go")
+		t.Fatal("--force did not re-scaffold model.go")
+	}
+	if !strings.Contains(got, "type Book struct") {
+		t.Fatalf("--force did not restore the scaffolded model:\n%s", got)
 	}
 }
 
@@ -223,6 +229,17 @@ func TestGenerateDryRunAndServiceRepo(t *testing.T) {
 	out := stdout.String()
 	if !strings.Contains(out, "internal/invoice/service.go") || !strings.Contains(out, "internal/invoice/repo.go") {
 		t.Fatalf("dry-run stdout = %q, want service and repo", out)
+	}
+	// The dry-run previews the WHOLE command, not just the scaffold: the exact
+	// generator-owned files gombit generate would write and the seeded hooks.
+	for _, want := range []string{
+		"internal/invoice/dto.gen.go",
+		"internal/invoice/handler.gen.go",
+		"internal/invoice/hooks.go",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("dry-run stdout = %q, want it to list %q", out, want)
+		}
 	}
 	if _, err := os.Stat(filepath.Join(appDir, "internal", "invoice")); !os.IsNotExist(err) {
 		t.Fatal("dry-run wrote invoice package")
@@ -734,5 +751,32 @@ func TestGenerateNumberFieldEmptyIsZero(t *testing.T) {
 	}
 	if !strings.Contains(formTS, `setValueAs: (value) => (value === "" ? 0 : Number(value))`) {
 		t.Fatalf("form.tsx missing setValueAs empty→0 for qty:\n%s", formTS)
+	}
+}
+
+// Enum fields are rejected by the model-first generator (enum values are not a
+// schema fact, so the DTO/OpenAPI cannot carry the constraint) — fail loud with
+// a pointer to the future model-first enum policy, never silently degrade to a
+// plain string.
+func TestGenerateRejectsEnumFields(t *testing.T) {
+	workDir := t.TempDir()
+	if err := scaffold.Generate(context.Background(), scaffold.Options{
+		Name: "demo", Database: "sqlite", WorkDir: workDir, Stdout: ioDiscard{},
+	}); err != nil {
+		t.Fatalf("scaffold: %v", err)
+	}
+	appDir := filepath.Join(workDir, "demo")
+	err := Generate(context.Background(), Options{
+		WorkDir:   appDir,
+		Name:      "Rental",
+		Fields:    []string{"status:enum(requested,confirmed,active)"},
+		Stdout:    ioDiscard{},
+		skipAtlas: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "enum") {
+		t.Fatalf("enum field must be rejected, got: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(appDir, "internal", "rental")); !os.IsNotExist(statErr) {
+		t.Fatal("nothing must be written when an enum field is rejected")
 	}
 }

@@ -11,6 +11,10 @@ type fileSpec struct {
 	relPath string
 	content []byte
 	owned   bool // AST-edited user file; additive, not banner-gated
+	// seedOnce marks a human-owned file scaffolded once and then owned by the
+	// developer (the model): written when absent, preserved on regeneration, and
+	// replaced only with --force. It carries no DO-NOT-EDIT banner.
+	seedOnce bool
 }
 
 type renderContext struct {
@@ -58,7 +62,7 @@ func renderFeatureFiles(ctx renderContext) ([]fileSpec, error) {
 	// runs right after this — so no human-owned handler.go / routes.go here. That
 	// human-owned CRUD plumbing, and its generators, are what this redesign retires.
 	files := []fileSpec{
-		{relPath: fmt.Sprintf("internal/%s/%s.go", ctx.Resource.Package, ctx.Resource.FileBase), content: mustFormatGo(renderModel(ctx))},
+		{relPath: fmt.Sprintf("internal/%s/%s.go", ctx.Resource.Package, ctx.Resource.FileBase), content: mustFormatGo(renderModel(ctx)), seedOnce: true},
 		{relPath: fmt.Sprintf("internal/%s/%s", ctx.Resource.Package, ResourceMarkerFile), content: []byte(resourceMarkerContent(ctx.Resource.Package))},
 	}
 	if ctx.Service {
@@ -146,7 +150,9 @@ const gombitTypesImport = "github.com/gombit-dev/gombit/types"
 
 func renderModel(ctx renderContext) string {
 	var b strings.Builder
-	b.WriteString(goBanner())
+	// The model is the human-owned source of truth (ADR-016): NO DO-NOT-EDIT banner
+	// (make resource scaffolds it once and preserves it), unlike the generated
+	// *.gen.go. The developer edits it; gombit generate re-derives the DTOs from it.
 	b.WriteString("package ")
 	b.WriteString(ctx.Resource.Package)
 	b.WriteString("\n\n")
@@ -163,7 +169,9 @@ func renderModel(ctx renderContext) string {
 	b.WriteString(importBlock(std, third))
 	b.WriteString("// ")
 	b.WriteString(ctx.Resource.TypeName)
-	b.WriteString(" is the feature-package GORM model.\n")
+	b.WriteString(" is the feature-package GORM model — the human-owned source of truth.\n")
+	b.WriteString("// Edit its fields and their gombit:\"...\" policy, then run `gombit generate`\n")
+	b.WriteString("// to re-derive the DTOs, mappers, and handler (*.gen.go).\n")
 	b.WriteString("type ")
 	b.WriteString(ctx.Resource.TypeName)
 	b.WriteString(" struct {\n\tgorm.Model\n")
