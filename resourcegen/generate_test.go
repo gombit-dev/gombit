@@ -780,3 +780,70 @@ func TestGenerateRejectsEnumFields(t *testing.T) {
 		t.Fatal("nothing must be written when an enum field is rejected")
 	}
 }
+
+// make resource must refuse to scaffold over a resource still on the legacy
+// human-owned handler layout: re-scaffolding would overwrite the human-edited
+// model and drop a marker beside a handler.go that gombit generate then refuses to
+// regenerate. It must fail closed BEFORE writing anything (no marker, no model),
+// and even with --force — migration is a hand step, not a bulldoze.
+func TestPlanRefusesLegacyResource(t *testing.T) {
+	workDir := t.TempDir()
+	if err := scaffold.Generate(context.Background(), scaffold.Options{
+		Name: "demo", Database: "sqlite", WorkDir: workDir, Stdout: ioDiscard{},
+	}); err != nil {
+		t.Fatalf("scaffold: %v", err)
+	}
+	appDir := filepath.Join(workDir, "demo")
+	legacyDir := filepath.Join(appDir, "internal", "book")
+	if err := os.MkdirAll(legacyDir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// A legacy resource: a human-owned handler.go beside the model, no marker.
+	if err := os.WriteFile(filepath.Join(legacyDir, "handler.go"), []byte("package book\n"), 0o600); err != nil {
+		t.Fatalf("write legacy handler: %v", err)
+	}
+
+	for _, force := range []bool{false, true} {
+		_, err := Plan(context.Background(), Options{
+			WorkDir:   appDir,
+			Name:      "Book",
+			Fields:    []string{"title:string:required"},
+			Force:     force,
+			Stdout:    ioDiscard{},
+			skipAtlas: true,
+		})
+		if err == nil || !strings.Contains(err.Error(), "legacy") {
+			t.Fatalf("force=%v: legacy resource must be refused, got: %v", force, err)
+		}
+	}
+	// Nothing was written: no marker landed beside the legacy handler.
+	if _, err := os.Stat(filepath.Join(legacyDir, ResourceMarkerFile)); !os.IsNotExist(err) {
+		t.Fatal("Plan must not write the resource marker over a legacy resource")
+	}
+}
+
+// applyWrites is transactional: a filesystem write failure partway through rolls
+// back every file already written, so a failed apply leaves the tree untouched.
+func TestApplyWritesRollsBackOnFailure(t *testing.T) {
+	dir := t.TempDir()
+	// The second write targets a path whose parent is a regular file, so os.WriteFile
+	// (via mkdir) fails — forcing a rollback of the first, already-written file.
+	blocker := filepath.Join(dir, "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write blocker: %v", err)
+	}
+	planned := []plannedFile{
+		{relPath: "a/first.txt", display: "a/first.txt", content: []byte("one"), action: "create", write: true},
+		{relPath: "blocker/nested.txt", display: "blocker/nested.txt", content: []byte("two"), action: "create", write: true},
+	}
+	err := applyWrites(Options{WorkDir: dir, Stdout: ioDiscard{}}, planned)
+	if err == nil {
+		t.Fatal("applyWrites must fail when a write cannot succeed")
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "a", "first.txt")); !os.IsNotExist(statErr) {
+		t.Fatal("rollback must remove the first file written before the failure")
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "a")); !os.IsNotExist(statErr) {
+		t.Fatal("rollback must remove the directory it created for the first file")
+	}
+}

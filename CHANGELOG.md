@@ -20,11 +20,20 @@ version.
   `dto.gen.go` + `handler.gen.go` (which owns `Register`) and seed a human-owned
   `hooks.go` — instead of a human-owned `handler.go`/`routes.go`. Customization
   moves from editing the handler to the model, its field policy, and hooks;
-  editing the `*.gen.go` is unsupported (regeneration overwrites them). HTTP
-  contracts (routes, DTO shape, list query surface, validation) are preserved.
-  Enum fields are rejected for now (enum values are not a GORM schema fact).
-  Existing apps keep compiling; convert old resources with the
-  [migration guide](docs/migration-model-first-resources.md).
+  editing the `*.gen.go` is unsupported (regeneration overwrites them). Scalar,
+  relation, and list-query HTTP contracts (routes, DTO shape, filter/sort/search/
+  aggregate surface, validation) are preserved.
+  - **Feature downgrade:** `enum(...)` fields are no longer supported (their
+    values are not recoverable from the GORM schema, so the model-first generator
+    cannot yet derive the constraint). `make resource` rejects them — use a
+    `string` for now; a model-first enum policy is planned.
+  - `make resource` is now **preflighted and atomic**: it plans both phases and
+    validates the whole operation (including compiling the pending model in a Go
+    build overlay, so the real tree is untouched) before writing anything, then
+    applies the scaffold and generated files as one transaction. It refuses to
+    re-scaffold over a resource still on the legacy handler layout.
+  - Existing apps keep compiling; convert old resources with the
+    [migration guide](docs/migration-model-first-resources.md).
 - New `gombit generate` command regenerates the model-first `*.gen.go` from the
   app's real models, with `gombit generate --check` as a drift gate.
 

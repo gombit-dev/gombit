@@ -150,17 +150,37 @@ func TestRunMakeResourceDryRunOnFreshApp(t *testing.T) {
 	if err := run(context.Background(), []string{"new", "demo", "--database", "sqlite", "--skip-tidy"}, ioDiscard{}, ioDiscard{}); err != nil {
 		t.Fatalf("new: %v", err)
 	}
-	chdir(t, filepath.Join(workDir, "demo"))
+	dest := filepath.Join(workDir, "demo")
+	appendReplace(t, dest)
+	// The overlay-backed dry-run runs Program Mode (go run) to validate the pending
+	// model, so the framework must resolve; tidy first so that go run does not have
+	// to touch go.mod/go.sum (keeping "dry-run writes nothing" honest).
+	tidy := exec.Command("go", "mod", "tidy")
+	tidy.Dir = dest
+	if out, err := tidy.CombinedOutput(); err != nil {
+		t.Fatalf("go mod tidy: %v\n%s", err, out)
+	}
+	chdir(t, dest)
 	stdout := new(bytes.Buffer)
 	err := run(context.Background(), []string{"make", "resource", "Widget", "name:string:required", "price:int", "--dry-run"}, stdout, ioDiscard{})
 	if err != nil {
 		t.Fatalf("dry-run: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(workDir, "demo", "internal", "widget")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dest, "internal", "widget")); !os.IsNotExist(err) {
 		t.Fatal("dry-run wrote widget package")
 	}
-	if !strings.Contains(stdout.String(), "internal/widget/widget.go") {
-		t.Fatalf("stdout = %q", stdout.String())
+	out := stdout.String()
+	// The dry-run derives its preview from the real plan: the scaffold plus the exact
+	// generator-owned files gombit generate produces.
+	for _, want := range []string{
+		"internal/widget/widget.go",
+		"internal/widget/dto.gen.go",
+		"internal/widget/handler.gen.go",
+		"internal/widget/hooks.go",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("dry-run stdout = %q, want %q", out, want)
+		}
 	}
 }
 

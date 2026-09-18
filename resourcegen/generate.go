@@ -15,31 +15,102 @@ import (
 	"github.com/gombit-dev/gombit/migrations"
 )
 
-// Generate writes a feature-package resource into an existing Gombit app.
+// Generate scaffolds a feature-package resource (phase 1 only): the human-owned
+// model, the .gombit-resource marker, the AST-wired registration/AutoMigrate, and
+// the frontend pages. It does NOT produce the generator-owned *.gen.go — gombit
+// generate does, from the committed model. It is the primitive the golden tests
+// and app fixtures use; the user-facing `gombit make resource` (cli/make.go)
+// composes this phase with the Program-Mode phase 2 atomically, via Plan.
 func Generate(ctx context.Context, opts Options) error {
+	plan, err := Plan(ctx, opts)
+	if err != nil {
+		return err
+	}
+	if plan.opts.DryRun {
+		// Phase-1-only preview: append the files gombit generate would produce, from
+		// the generator's own path contract (not a hand-maintained duplicate).
+		return plan.PrintPlan(nil)
+	}
+	if err := plan.Apply(nil); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(plan.opts.Stdout, "GORM model is Atlas-loader ready: %s\n", plan.spec.ModelSpec); err != nil {
+		return err
+	}
+	return plan.Migrate(ctx)
+}
+
+// Pending describes the resource a make resource run is about to scaffold, so the
+// Program-Mode phase-2 preflight can compile the model through a Go build overlay
+// without the model — or its .gombit-resource marker — existing on disk yet.
+type Pending struct {
+	ImportPath string // module/internal/<pkg>
+	TypeName   string // Book
+	Pkg        string // book
+	// Overlay maps real absolute paths to the source Program Mode compiles instead
+	// of what is on disk, so the phase-2 preflight sees the resource exactly as this
+	// run will commit it while the real tree stays untouched (nil when the committed
+	// package already matches disk). It stages the model when make resource will
+	// (re)write it, and — for a --force re-scaffold that changes the model — stubs
+	// the package's other .go files so the changed model compiles without the stale
+	// generated files this run is about to replace.
+	Overlay map[string][]byte
+}
+
+// ResourcePlan is a fully computed, not-yet-applied resource scaffold: the phase-1
+// files, the Pending model the phase-2 overlay preflight compiles, and the
+// AutoMigrate model set the post-commit migration needs. Planning writes nothing; a
+// caller applies the plan (optionally merged with the phase-2 artifacts) as one
+// transaction only after the whole operation has validated.
+type ResourcePlan struct {
+	Pending Pending
+	Models  []migrations.Model
+
+	files []fileSpec
+	spec  renderContext
+	opts  Options
+}
+
+// ModelSpec is the Atlas loader spec (import path + type) for the scaffolded model.
+func (p *ResourcePlan) ModelSpec() string { return p.spec.ModelSpec }
+
+// Plan computes a resource scaffold without writing anything. It runs every static
+// check make resource can before touching the tree — app layout, name, HTTP path
+// collision, the enum gap, and the legacy-layout guard — so a caller can preflight
+// the whole operation (including the Program-Mode phase 2) and apply the result
+// atomically.
+func Plan(ctx context.Context, opts Options) (*ResourcePlan, error) {
 	if ctx == nil {
-		return errors.New("resourcegen: nil context")
+		return nil, errors.New("resourcegen: nil context")
 	}
 	if err := ctx.Err(); err != nil {
-		return err
+		return nil, err
 	}
 	if err := opts.normalize(); err != nil {
-		return err
+		return nil, err
 	}
 	if err := opts.validateAppLayout(); err != nil {
-		return err
+		return nil, err
 	}
 
 	name, err := parseResourceName(opts.Name)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	// Refuse to scaffold over a resource still on the legacy human-owned handler
+	// layout: re-scaffolding would overwrite the human-edited model and drop a
+	// resource marker beside a handler.go that gombit generate then refuses to
+	// regenerate — a half-migration. Migrate by hand (see the migration guide), so
+	// this fires even with --force.
+	if err := ensureNotLegacyResource(opts.WorkDir, name.Package); err != nil {
+		return nil, err
 	}
 	if err := checkHTTPPathConflict(opts.WorkDir, name); err != nil {
-		return err
+		return nil, err
 	}
 	fields, err := parseFields(opts.Fields, name.Package)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// Enum values are API policy the GORM schema cannot carry (it stores an enum as
 	// a plain varchar), so the model-first generator cannot yet derive the enum
@@ -48,12 +119,12 @@ func Generate(ctx context.Context, opts Options) error {
 	// fields until a model-first enum policy exists (a later slice).
 	for _, f := range fields {
 		if f.Type == FieldEnum {
-			return fmt.Errorf("resourcegen: field %q is an enum, which the model-first generator does not support yet (enum values are not recoverable from the GORM schema); use a string field for now — a model-first enum policy is planned", f.JSONName)
+			return nil, fmt.Errorf("resourcegen: field %q is an enum, which the model-first generator does not support yet (enum values are not recoverable from the GORM schema); use a string field for now — a model-first enum policy is planned", f.JSONName)
 		}
 	}
 	module, err := readModulePath(opts.WorkDir)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	ui := readUI(opts.WorkDir)
 	// OpenAPI path keys stay /api/v1 (placeholder client / D8). The generated
@@ -63,13 +134,13 @@ func Generate(ctx context.Context, opts Options) error {
 
 	files, err := renderFeatureFiles(ctxData)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	for i := range files {
 		if strings.HasSuffix(files[i].relPath, ".go") {
 			formatted, fmtErr := format.Source(files[i].content)
 			if fmtErr != nil {
-				return fmt.Errorf("resourcegen: format %s: %w", files[i].relPath, fmtErr)
+				return nil, fmt.Errorf("resourcegen: format %s: %w", files[i].relPath, fmtErr)
 			}
 			files[i].content = formatted
 		}
@@ -86,24 +157,24 @@ func Generate(ctx context.Context, opts Options) error {
 	// #nosec G304 -- application files under the user work dir
 	mainSrc, err := os.ReadFile(mainPath)
 	if err != nil {
-		return fmt.Errorf("resourcegen: read %s: %w", serverMainRel, err)
+		return nil, fmt.Errorf("resourcegen: read %s: %w", serverMainRel, err)
 	}
 	// #nosec G304 -- application files under the user work dir
 	platformSrc, err := os.ReadFile(platformPath)
 	if err != nil {
-		return fmt.Errorf("resourcegen: read %s: %w", platformDBRel, err)
+		return nil, fmt.Errorf("resourcegen: read %s: %w", platformDBRel, err)
 	}
 	newMain, err := AddImportAndRegister(mainSrc, ctxData.ImportPath, name.Package)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	newPlatform, err := AddAutoMigrateModel(platformSrc, ctxData.ImportPath, name.Package, name.TypeName)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	models, err := CollectAutoMigrateModels(newPlatform)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	models = ensureModel(models, migrations.Model{ImportPath: ctxData.ImportPath, TypeName: name.TypeName})
 	files = append(files,
@@ -115,56 +186,168 @@ func Generate(ctx context.Context, opts Options) error {
 		return files[i].relPath < files[j].relPath
 	})
 
-	planned, err := planWrites(opts, files)
+	modelRel := fmt.Sprintf("internal/%s/%s.go", name.Package, name.FileBase)
+	modelAbsPath := filepath.Join(opts.WorkDir, filepath.FromSlash(modelRel))
+	var modelContent []byte
+	for _, f := range files {
+		if f.relPath == modelRel {
+			modelContent = f.content
+			break
+		}
+	}
+	overlay, err := stageOverlay(opts, name.Package, modelAbsPath, modelContent)
+	if err != nil {
+		return nil, err
+	}
+
+	return &ResourcePlan{
+		Pending: Pending{
+			ImportPath: ctxData.ImportPath,
+			TypeName:   name.TypeName,
+			Pkg:        name.Package,
+			Overlay:    overlay,
+		},
+		Models: models,
+		files:  files,
+		spec:   ctxData,
+		opts:   opts,
+	}, nil
+}
+
+// stageOverlay decides how the phase-2 preflight should see the resource package,
+// as a Go build overlay (real absolute path -> staged source). It matches what this
+// run will actually commit so generation renders from the right model:
+//
+//   - model absent (a fresh resource): stage the new model; nothing else exists.
+//   - model present and unchanged: no overlay — compile the package as it is on
+//     disk (already consistent).
+//   - model present, differs, no --force: no overlay — the human-owned model is
+//     kept (seed-once), so the on-disk model is the source of truth to render from.
+//   - model present, differs, --force: stage the new model and stub the package's
+//     other .go files, so the changed model compiles without the stale generated
+//     files this run is about to replace.
+func stageOverlay(opts Options, pkg, modelAbsPath string, modelContent []byte) (map[string][]byte, error) {
+	onDisk, err := os.ReadFile(modelAbsPath) // #nosec G304 -- model path under the app work dir
+	if errors.Is(err, os.ErrNotExist) {
+		return map[string][]byte{modelAbsPath: modelContent}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("resourcegen: read %s: %w", filepath.Base(modelAbsPath), err)
+	}
+	if bytes.Equal(onDisk, modelContent) || !opts.Force {
+		return nil, nil
+	}
+	overlay := map[string][]byte{modelAbsPath: modelContent}
+	dir := filepath.Dir(modelAbsPath)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("resourcegen: read internal/%s: %w", pkg, err)
+	}
+	stub := []byte("package " + pkg + "\n")
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") {
+			continue
+		}
+		p := filepath.Join(dir, e.Name())
+		if p == modelAbsPath {
+			continue
+		}
+		overlay[p] = stub
+	}
+	return overlay, nil
+}
+
+// PrintPlan writes the human-readable plan to stdout, changing nothing. With
+// artifacts nil (the phase-1-only Generate path) it appends the files gombit
+// generate would produce, from the generator's own path contract; with the real
+// phase-2 artifacts (the composed make resource path) it prints the exact merged
+// plan the command would apply.
+func (p *ResourcePlan) PrintPlan(artifacts []GeneratedArtifact) error {
+	planned, err := p.resolve(artifacts)
 	if err != nil {
 		return err
 	}
-
 	for _, item := range planned {
-		if _, err := fmt.Fprintf(opts.Stdout, "%s %s\n", item.action, item.display); err != nil {
+		if _, err := fmt.Fprintf(p.opts.Stdout, "%s %s\n", item.action, item.display); err != nil {
 			return err
 		}
-		if opts.DryRun || !item.write {
-			continue
-		}
-		full := filepath.Join(opts.WorkDir, filepath.FromSlash(item.relPath))
-		if err := os.MkdirAll(filepath.Dir(full), 0o750); err != nil {
-			return fmt.Errorf("resourcegen: mkdir %s: %w", filepath.Dir(full), err)
-		}
-		if err := os.WriteFile(full, item.content, 0o644); err != nil { //nolint:gosec // generated source is a non-secret artifact
-			return fmt.Errorf("resourcegen: write %s: %w", item.display, err)
-		}
 	}
-
-	if opts.DryRun {
-		// A real run follows the scaffold above with `gombit generate`, which derives
-		// these generator-owned files from the model and seeds the human-owned hooks
-		// (the exact paths, so the preview covers the whole command, not just phase
-		// one). Generation itself runs on a non-dry-run invocation.
-		for _, art := range dryRunGeneratedFiles(ctxData.Resource.Package) {
-			if _, err := fmt.Fprintf(opts.Stdout, "%s %s (gombit generate)\n", art.action, art.path); err != nil {
+	if artifacts == nil {
+		for _, a := range GeneratedArtifactPlan(p.Pending.Pkg) {
+			verb := "would write"
+			if a.Ownership == SeedOnce {
+				verb = "would seed"
+			}
+			if _, err := fmt.Fprintf(p.opts.Stdout, "%s %s (gombit generate)\n", verb, a.Path); err != nil {
 				return err
 			}
 		}
-		return nil
 	}
-	if _, err := fmt.Fprintf(opts.Stdout, "GORM model is Atlas-loader ready: %s\n", ctxData.ModelSpec); err != nil {
-		return err
-	}
-	return maybeMakeMigrations(ctx, opts, ctxData, models)
+	return nil
 }
 
-// dryRunGeneratedFiles lists the files `gombit generate` produces for a resource,
-// for the --dry-run preview: the generator-owned DTOs + handler (written) and the
-// seed-once hooks. It mirrors RenderResource's outputs (same paths, same
-// ownership); keep the two in sync.
-func dryRunGeneratedFiles(pkg string) []struct{ action, path string } {
-	dir := "internal/" + pkg
-	return []struct{ action, path string }{
-		{"would write", dir + "/dto.gen.go"},
-		{"would write", dir + "/handler.gen.go"},
-		{"would seed", dir + "/hooks.go"},
+// Apply writes the plan (phase-1 files plus the phase-2 artifacts) to the tree as a
+// single transaction: on any filesystem write error it rolls back every file it
+// already wrote, so a failed apply leaves the tree as it found it. It prints each
+// action as it goes.
+func (p *ResourcePlan) Apply(artifacts []GeneratedArtifact) error {
+	planned, err := p.resolve(artifacts)
+	if err != nil {
+		return err
 	}
+	return applyWrites(p.opts, planned)
+}
+
+// Migrate generates the Atlas migration for the scaffolded model. It is a
+// post-commit step, deliberately not part of the atomic apply: a migration is a
+// separate artifact, and the make resource transaction is about the source tree.
+func (p *ResourcePlan) Migrate(ctx context.Context) error {
+	return maybeMakeMigrations(ctx, p.opts, p.spec, p.Models)
+}
+
+// resolve turns the phase-1 file specs (and any phase-2 artifacts) into concrete
+// write actions against the current tree, applying the seed-once and
+// banner/overwrite rules. It reads the filesystem but never mutates it.
+func (p *ResourcePlan) resolve(artifacts []GeneratedArtifact) ([]plannedFile, error) {
+	planned, err := planWrites(p.opts, p.files)
+	if err != nil {
+		return nil, err
+	}
+	for _, art := range artifacts {
+		item, err := resolveArtifact(p.opts, art)
+		if err != nil {
+			return nil, err
+		}
+		planned = append(planned, item)
+	}
+	sort.Slice(planned, func(i, j int) bool { return planned[i].relPath < planned[j].relPath })
+	return planned, nil
+}
+
+// resolveArtifact resolves one phase-2 artifact into a write action: a
+// generator-owned file is (re)written unless byte-identical; a seed-once file is
+// written only when absent.
+func resolveArtifact(opts Options, art GeneratedArtifact) (plannedFile, error) {
+	full := filepath.Join(opts.WorkDir, filepath.FromSlash(art.Path))
+	existing, err := os.ReadFile(full) // #nosec G304 -- generator output path
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return plannedFile{}, fmt.Errorf("resourcegen: read %s: %w", art.Path, err)
+	}
+	exists := err == nil
+	if art.Ownership == SeedOnce {
+		if exists {
+			return plannedFile{relPath: art.Path, display: art.Path, action: "keep", write: false}, nil
+		}
+		return plannedFile{relPath: art.Path, display: art.Path, content: art.Content, action: "seed", write: true}, nil
+	}
+	if exists && bytes.Equal(existing, art.Content) {
+		return plannedFile{relPath: art.Path, display: art.Path, action: "keep", write: false}, nil
+	}
+	action := "create"
+	if exists {
+		action = "modify"
+	}
+	return plannedFile{relPath: art.Path, display: art.Path, content: art.Content, action: action, write: true}, nil
 }
 
 type plannedFile struct {
@@ -222,6 +405,44 @@ func planWrites(opts Options, files []fileSpec) ([]plannedFile, error) {
 		})
 	}
 	return planned, nil
+}
+
+// ensureNotLegacyResource refuses to scaffold over a resource still on the legacy
+// human-owned handler layout (internal/<pkg>/handler.go or routes.go). See Plan.
+func ensureNotLegacyResource(workDir, pkg string) error {
+	for _, base := range []string{"handler.go", "routes.go"} {
+		p := filepath.Join(workDir, "internal", pkg, base)
+		if _, err := os.Stat(p); err == nil {
+			return fmt.Errorf("resourcegen: internal/%s is a legacy (handler-owned) resource (%s present); migrate it to the model-first layout before running make resource — see docs/migration-model-first-resources.md — rather than re-scaffolding over it", pkg, base)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("resourcegen: stat internal/%s/%s: %w", pkg, base, err)
+		}
+	}
+	return nil
+}
+
+// applyWrites writes a resolved plan as one transaction: it prints each action, and
+// on the first filesystem write failure rolls back every file it already wrote so
+// the tree is left as it was found.
+func applyWrites(opts Options, planned []plannedFile) error {
+	var tx fsTx
+	for _, item := range planned {
+		if _, err := fmt.Fprintf(opts.Stdout, "%s %s\n", item.action, item.display); err != nil {
+			_ = tx.rollback()
+			return err
+		}
+		if !item.write {
+			continue
+		}
+		full := filepath.Join(opts.WorkDir, filepath.FromSlash(item.relPath))
+		if err := tx.write(full, item.content); err != nil {
+			if rbErr := tx.rollback(); rbErr != nil {
+				return fmt.Errorf("resourcegen: write %s: %w (rollback failed: %v)", item.display, err, rbErr)
+			}
+			return fmt.Errorf("resourcegen: write %s: %w", item.display, err)
+		}
+	}
+	return nil
 }
 
 func checkOverwrite(display string, existing []byte, file fileSpec, force bool) error {

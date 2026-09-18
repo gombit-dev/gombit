@@ -85,9 +85,9 @@ list columns are a declared subset. Add modifiers to the field grammar:
 
 | Modifier     | Query parameter                          | Types                                |
 | ------------ | ---------------------------------------- | ------------------------------------ |
-| `filterable` | `?<field>=<value>` (exact match)         | string, int, int64, uint, bool, enum |
+| `filterable` | `?<field>=<value>` (exact match)         | string, int, int64, uint, bool       |
 | `sortable`   | `?ordering=<field>` (`-<field>` for DESC) | any scalar (and belongs_to FK)       |
-| `searchable` | `?search=<term>` (case-insensitive LIKE) | string, text, enum                   |
+| `searchable` | `?search=<term>` (case-insensitive LIKE) | string, text                         |
 
 A `belongs_to` foreign key is **filterable by default** — no modifier needed —
 so a detail page can list a record's `has_many` children with
@@ -97,7 +97,7 @@ so a detail page can list a record's `has_many` children with
 gombit make resource Article \
   title:string:required,searchable,sortable \
   body:text:searchable \
-  status:enum(draft,published):filterable,sortable \
+  status:string:filterable,sortable \
   author:belongs_to:Author
 ```
 
@@ -130,7 +130,7 @@ reflect every matching row — not one page:
 gombit make resource Invoice \
   total:decimal:required,aggregatable \
   quantity:int:aggregatable,filterable \
-  status:enum(draft,paid):filterable \
+  status:string:filterable \
   customer:belongs_to:Customer
 ```
 

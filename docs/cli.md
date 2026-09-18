@@ -356,15 +356,15 @@ name:type[:required][,unique][,index]
 ```
 
 Supported types: `string`, `text`, `int`, `int64`, `bool`, `uint`, `decimal`,
-`time`, `enum`. Unknown types error with the supported list. `nullable` is
-accepted as the opposite of `required`.
+`time`. Unknown types error with the supported list. `nullable` is
+accepted as the opposite of `required`. Enum fields are not supported by the
+model-first generator yet (see above) and are rejected — use a `string`.
 
 | Type | Go type | Column / contract |
 | --- | --- | --- |
 | `decimal` | `types.Decimal` (wraps `shopspring/decimal`) | `decimal(19,4)`; JSON string, exact — no float rounding |
 | `decimal(p,s)` | `types.Decimal` | `decimal(p,s)`, e.g. `decimal(10,2)` |
 | `time` | `time.Time` | RFC3339 date-time in JSON |
-| `enum(a,b,c)` | `string` | sized varchar; validated against the listed values (Huma `enum` tag) |
 | `belongs_to:Target` | FK `TargetID uint` + `Target target.Target` | DTO exposes `target_id`; admin renders a picker |
 | `has_many:Target` | `[]target.Target` | model-only, read via the admin; the child must carry the parent FK |
 | `many_to_many:Target` | `[]target.Target` (`many2many:` join) | model-only, edited via the admin |
@@ -375,9 +375,7 @@ adding one of these types does not reproduce the model/DTO drift of
 [#218](https://github.com/gombit-dev/gombit/issues/218). A `time` or `decimal`
 field **without** `:required` becomes a pointer (`*time.Time` / `*types.Decimal`)
 on the model and DTO, because those value types cannot be submitted empty — the
-generated forms send `null` for a blank optional value. Enum values are
-case-sensitive and validated at the API layer; no database CHECK constraint is
-added (portable across SQLite/PostgreSQL/MySQL).
+generated forms send `null` for a blank optional value.
 
 **Relations** use `name:kind:Target`, where `Target` is a model in
 `internal/<target>/` (imported as `target.Target`). `belongs_to` generates the
@@ -402,7 +400,7 @@ Example:
 gombit make resource Rental \
   price:decimal:required \
   starts_at:time \
-  status:enum(requested,confirmed,active,returned,cancelled) \
+  status:string:filterable \
   engine:belongs_to:Engine \
   warehouses:many_to_many:Warehouse
 ```
