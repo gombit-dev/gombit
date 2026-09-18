@@ -121,7 +121,7 @@ func Generate(ctx context.Context, opts Options) error {
 		return err
 	}
 
-	artifacts, err := loadArtifacts(ctx, opts, absWorkDir, module, models)
+	artifacts, err := loadArtifacts(ctx, opts, absWorkDir, models, nil)
 	if err != nil {
 		return err
 	}
@@ -130,6 +130,27 @@ func Generate(ctx context.Context, opts Options) error {
 		return checkArtifacts(absWorkDir, artifacts)
 	}
 	return applyArtifacts(opts, absWorkDir, artifacts)
+}
+
+// PlanResource runs the Program-Mode phase-2 render for a single pending
+// (not-yet-written) resource and returns its generator-owned + seed artifacts
+// WITHOUT writing anything. The pending model is compiled through a Go build
+// overlay (pend.Overlay), so the loader sees the resource as make resource will
+// commit it while the real app tree stays untouched and local replace directives
+// keep their meaning — go run executes from the real module root. It is make
+// resource's phase-2 preflight: a model that would not compile fails here, before
+// any file is written.
+func PlanResource(ctx context.Context, opts Options, pend resourcegen.Pending) ([]resourcegen.GeneratedArtifact, error) {
+	opts.withDefaults()
+	absWorkDir, err := filepath.Abs(opts.WorkDir)
+	if err != nil {
+		return nil, fmt.Errorf("generate: resolve work dir: %w", err)
+	}
+	if err := resourcegen.ValidateAppLayout(absWorkDir); err != nil {
+		return nil, err
+	}
+	model := migrations.Model{ImportPath: pend.ImportPath, TypeName: pend.TypeName}
+	return loadArtifacts(ctx, opts, absWorkDir, []migrations.Model{model}, pend.Overlay)
 }
 
 // discoverResources returns the app's model-first resources: the feature
@@ -292,7 +313,7 @@ func packageClauseOf(file string) (string, error) {
 // `go run`s it, and decodes the artifacts it emits. The loader runs with the app
 // as its working directory so `go run` resolves the app module and its internal
 // packages.
-func loadArtifacts(ctx context.Context, opts Options, absWorkDir, module string, models []migrations.Model) ([]resourcegen.GeneratedArtifact, error) {
+func loadArtifacts(ctx context.Context, opts Options, absWorkDir string, models []migrations.Model, overlay map[string][]byte) ([]resourcegen.GeneratedArtifact, error) {
 	tmpRoot := filepath.Join(absWorkDir, ".gombit")
 	_, statErr := os.Stat(tmpRoot)
 	tmpRootExisted := statErr == nil
@@ -325,8 +346,17 @@ func loadArtifacts(ctx context.Context, opts Options, absWorkDir, module string,
 	if err != nil {
 		return nil, fmt.Errorf("generate: resolve loader path: %w", err)
 	}
+	// Stage any pending (not-yet-written) sources as a Go build overlay so the
+	// loader compiles the resource as it will be committed, without touching the
+	// real tree. Backing files live under the same temp dir and vanish with it.
+	overlayArg, err := writeOverlay(tmpDir, overlay)
+	if err != nil {
+		return nil, err
+	}
 	var stdout bytes.Buffer
-	goArgs := []string{"run", "-mod=mod", "./" + filepath.ToSlash(loaderRel)}
+	goArgs := []string{"run", "-mod=mod"}
+	goArgs = append(goArgs, overlayArg...)
+	goArgs = append(goArgs, "./"+filepath.ToSlash(loaderRel))
 	if err := opts.runner.Run(ctx, absWorkDir, "go", goArgs, &stdout, opts.Stderr); err != nil {
 		return nil, fmt.Errorf("generate: run resource loader: %w", err)
 	}
@@ -336,6 +366,45 @@ func loadArtifacts(ctx context.Context, opts Options, absWorkDir, module string,
 		return nil, fmt.Errorf("generate: decode loader output: %w", err)
 	}
 	return artifacts, nil
+}
+
+// writeOverlay materializes an overlay (real absolute path -> staged source) as
+// backing files plus the JSON manifest `go run -overlay` reads, and returns the
+// `-overlay=<path>` argument (empty when there is nothing to stage). Backing files
+// live under tmpDir, which the caller removes after the run.
+func writeOverlay(tmpDir string, overlay map[string][]byte) ([]string, error) {
+	if len(overlay) == 0 {
+		return nil, nil
+	}
+	ovDir := filepath.Join(tmpDir, "overlay")
+	if err := os.MkdirAll(ovDir, 0o750); err != nil {
+		return nil, fmt.Errorf("generate: create overlay dir: %w", err)
+	}
+	replace := make(map[string]string, len(overlay))
+	i := 0
+	// Sort the real paths so backing filenames are assigned deterministically.
+	reals := make([]string, 0, len(overlay))
+	for real := range overlay {
+		reals = append(reals, real)
+	}
+	sort.Strings(reals)
+	for _, real := range reals {
+		backing := filepath.Join(ovDir, fmt.Sprintf("stage%d.go", i))
+		i++
+		if err := os.WriteFile(backing, overlay[real], 0o600); err != nil {
+			return nil, fmt.Errorf("generate: write overlay backing file: %w", err)
+		}
+		replace[real] = backing
+	}
+	manifest, err := json.Marshal(struct{ Replace map[string]string }{Replace: replace})
+	if err != nil {
+		return nil, fmt.Errorf("generate: encode overlay manifest: %w", err)
+	}
+	ovPath := filepath.Join(tmpDir, "overlay.json")
+	if err := os.WriteFile(ovPath, manifest, 0o600); err != nil {
+		return nil, fmt.Errorf("generate: write overlay manifest: %w", err)
+	}
+	return []string{"-overlay=" + ovPath}, nil
 }
 
 // loaderSource builds the Program-Mode main: it imports resourcegen and each

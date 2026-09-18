@@ -25,6 +25,7 @@ go run ./cmd/gombit --help
 | `gombit build --embed` | Optional single-binary (collectstatic + `go:embed`) | M5-5 |
 | `gombit make resource` | Generate a feature-package resource (AST-safe) | M4-3 |
 | `gombit make command` | Scaffold a Cobra management command (AST-safe) | M4-7 |
+| `gombit generate` | Regenerate model-first resource files (`*.gen.go`); `--check` gates drift | RESGEN-1 |
 | `gombit db …` | Atlas-backed migrations | M2, migrated onto Cobra in M4-1 |
 | `gombit db verify` | Classify + verify migration safety manifests | HOST-3 |
 | `gombit openapi generate` | Write the live OpenAPI 3.1 document | M3-3 |
@@ -297,18 +298,29 @@ gombit make resource Widget --force
 `make` is a Cobra parent (`AddCommand`); `resource` is the subcommand. Root
 help lists `make`.
 
-This writes a feature-package under `internal/<snake>/`:
+`make resource` is model-first (ADR-016): it scaffolds the human-owned model,
+then runs [`gombit generate`](#gombit-generate) to derive the generator-owned
+plumbing. It writes a feature-package under `internal/<snake>/`:
 
-| File | When |
-| --- | --- |
-| `<snake>.go` | GORM model (`gorm.Model` + fields) |
-| `handler.go` | Thin Huma list/get/create over GORM (D10 envelope; list honors `page`/`per_page`; get/create map missing rows to `not_found` and unique violations to `conflict`) |
-| `routes.go` | `Register(app *framework.App)` |
-| `service.go` | Only with `--service` (pass-through) |
-| `repo.go` | Only with `--repo` (pass-through) |
+| File | Owner | When |
+| --- | --- | --- |
+| `<snake>.go` | **you** | GORM model (`gorm.Model` + fields), plus the `gombit:"..."` field policy translated from the CLI modifiers. Scaffolded once; edit it freely — re-running `make resource` never overwrites it (use `--force` to re-scaffold). No DO-NOT-EDIT banner. |
+| `.gombit-resource` | generator | Marker that makes the package a model-first resource `gombit generate` regenerates. |
+| `dto.gen.go` | generator | Request/response DTOs + model↔DTO mappers. **DO NOT EDIT** — regenerated from the model. |
+| `handler.gen.go` | generator | Huma list/get/create over GORM + `Register(app *framework.App)` (D10 envelope; list honors `page`/`per_page` and the declared filter/sort/search/aggregate surface; `not_found`/`conflict` mapping). **DO NOT EDIT.** |
+| `hooks.go` | **you** | A default no-op `BeforeCreate` hook. Set server-managed columns (tenant, owner, …) here. Seeded once, never overwritten. |
+| `service.go` | you | Only with `--service` (pass-through) |
+| `repo.go` | you | Only with `--repo` (pass-through) |
 
-Default API prefix is `/api/v1`. The handler stays thin over GORM; `--service`
-and `--repo` are C6 opt-in and are not used by the generated handler.
+Customization happens in the model, its field policy, and `hooks.go` — **never
+by editing the generated `*.gen.go`** (regeneration overwrites them). See the
+[migration guide](migration-model-first-resources.md) if you have resources
+from the old human-owned-`handler.go` layout.
+
+Default API prefix is `/api/v1`. Enum fields (`status:enum(a,b,c)`) are not yet
+supported by the model-first generator (enum values are not a GORM schema fact)
+and are rejected; use a string field for now. `--service` and `--repo` are C6
+opt-in and are not used by the generated handler.
 
 Route registration is appended in `cmd/server/main.go` via `go/ast` +
 `go/parser` + `go/format` (never regex), next to `product.Register(app)`.
@@ -344,15 +356,15 @@ name:type[:required][,unique][,index]
 ```
 
 Supported types: `string`, `text`, `int`, `int64`, `bool`, `uint`, `decimal`,
-`time`, `enum`. Unknown types error with the supported list. `nullable` is
-accepted as the opposite of `required`.
+`time`. Unknown types error with the supported list. `nullable` is
+accepted as the opposite of `required`. Enum fields are not supported by the
+model-first generator yet (see above) and are rejected — use a `string`.
 
 | Type | Go type | Column / contract |
 | --- | --- | --- |
 | `decimal` | `types.Decimal` (wraps `shopspring/decimal`) | `decimal(19,4)`; JSON string, exact — no float rounding |
 | `decimal(p,s)` | `types.Decimal` | `decimal(p,s)`, e.g. `decimal(10,2)` |
 | `time` | `time.Time` | RFC3339 date-time in JSON |
-| `enum(a,b,c)` | `string` | sized varchar; validated against the listed values (Huma `enum` tag) |
 | `belongs_to:Target` | FK `TargetID uint` + `Target target.Target` | DTO exposes `target_id`; admin renders a picker |
 | `has_many:Target` | `[]target.Target` | model-only, read via the admin; the child must carry the parent FK |
 | `many_to_many:Target` | `[]target.Target` (`many2many:` join) | model-only, edited via the admin |
@@ -363,9 +375,7 @@ adding one of these types does not reproduce the model/DTO drift of
 [#218](https://github.com/gombit-dev/gombit/issues/218). A `time` or `decimal`
 field **without** `:required` becomes a pointer (`*time.Time` / `*types.Decimal`)
 on the model and DTO, because those value types cannot be submitted empty — the
-generated forms send `null` for a blank optional value. Enum values are
-case-sensitive and validated at the API layer; no database CHECK constraint is
-added (portable across SQLite/PostgreSQL/MySQL).
+generated forms send `null` for a blank optional value.
 
 **Relations** use `name:kind:Target`, where `Target` is a model in
 `internal/<target>/` (imported as `target.Target`). `belongs_to` generates the
@@ -390,7 +400,7 @@ Example:
 gombit make resource Rental \
   price:decimal:required \
   starts_at:time \
-  status:enum(requested,confirmed,active,returned,cancelled) \
+  status:string:filterable \
   engine:belongs_to:Engine \
   warehouses:many_to_many:Warehouse
 ```
@@ -423,6 +433,35 @@ gombit db makemigrations create_books \
 ```
 
 See [migrations.md](migrations.md).
+
+## `gombit generate`
+
+Regenerate the generator-owned `*.gen.go` (DTOs, mappers, CRUD handler) for the
+application's model-first resources from their current models plus `gombit`
+field policy. Run it after editing a model — regeneration is how the DTOs,
+mappers, and handler stay in sync with the model (ADR-016). `make resource`
+runs it for you after scaffolding a new resource.
+
+```sh
+gombit generate            # rewrite the *.gen.go from the models
+gombit generate --check    # verify they are current; exit non-zero on drift (CI gate)
+gombit generate --dry-run  # print what would be written without writing
+```
+
+Run it from an application directory. It reads the app's *real compiled* models
+via a throwaway program run inside the app module (like `gombit db
+makemigrations`), so a model change is reflected exactly.
+
+- It discovers resources by the `.gombit-resource` marker `make resource` writes
+  — an `AutoMigrate`d model without that marker (a join table, an audit-log
+  model) is not a resource and is left alone.
+- The human-owned `hooks.go` is seeded when absent and then never overwritten or
+  drift-checked; only the `*.gen.go` are compared by `--check`.
+- It fails closed on a package still using the legacy human-owned `handler.go`
+  layout — [migrate it](migration-model-first-resources.md) first.
+
+`--check` is the drift gate: commit the `*.gen.go`, and a stale copy (model
+changed but not regenerated) fails the check. Regenerate with `gombit generate`.
 
 ## `gombit make command`
 

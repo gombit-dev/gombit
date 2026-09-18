@@ -24,19 +24,28 @@ repository. This copy is written against the framework module directly, so CI
 compiles it on every push. If a framework change breaks what the tutorial
 teaches, the build fails here first.
 
-The layout mirrors what the generator emits:
+It is a **hand-written, self-contained** illustration — not generator output.
+`make resource` is now model-first (the model is human-owned; the DTOs and CRUD
+handler are generated `*.gen.go` and customization lives in `hooks.go` — see
+[cli.md](../../docs/cli.md#gombit-make-resource) and the
+[migration guide](../../docs/migration-model-first-resources.md)). This example
+keeps a single hand-written handler for self-containment rather than committing
+generated `*.gen.go`:
 
 ```text
 examples/tutorial/
 ├── main.go                    # ≈ cmd/server/main.go in a generated app
 └── internal/task/
-    ├── task.go                # GORM model
-    ├── handler.go             # Huma-typed handlers, D10 envelope
-    ├── routes.go              # explicit huma.Register calls
+    ├── task.go                # GORM model (the human-owned source of truth)
+    ├── handler.go             # hand-written Huma handlers (a generated app has handler.gen.go)
+    ├── routes.go              # explicit huma.Register calls (a generated app folds this into handler.gen.go)
     └── admin.go               # admin.Register (ADR-013)
 ```
 
 Differences from a generated app, all for self-containment:
+
+- a single hand-written `handler.go`/`routes.go` instead of the model-first
+  `dto.gen.go` + `handler.gen.go` + `hooks.go`;
 
 - an in-memory SQLite DSN instead of a file, and `AutoMigrate` in an `OnStart`
   hook instead of `gombit db migrate`;

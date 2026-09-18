@@ -51,8 +51,9 @@ func TestGenerateBookFeaturePackage(t *testing.T) {
 
 	modelPath := filepath.Join(appDir, "internal", "book", "book.go")
 	modelSrc := readFile(t, modelPath)
-	if !strings.Contains(modelSrc, GeneratedBanner) {
-		t.Fatal("model missing generated banner")
+	// The model is human-owned (ADR-016): no DO-NOT-EDIT banner.
+	if strings.Contains(modelSrc, GeneratedBanner) {
+		t.Fatal("model must not carry the generated DO-NOT-EDIT banner; it is human-owned")
 	}
 	if !strings.Contains(modelSrc, "type Book struct") {
 		t.Fatal("model missing Book type")
@@ -81,31 +82,19 @@ func TestGenerateBookFeaturePackage(t *testing.T) {
 		t.Fatalf("book.Register count = %d, want 1\n%s", count, mainSrc)
 	}
 
-	handlerPath := filepath.Join(appDir, "internal", "book", "handler.go")
-	handlerSrc := readFile(t, handlerPath)
-	if !strings.Contains(handlerSrc, `contract.Internal("list books")`) {
-		t.Fatalf("handler Internal message = %q, want list books", handlerSrc)
+	// Model-first: make resource scaffolds the model and marks the package a
+	// resource; it writes no human-owned handler.go / routes.go. The generator-owned
+	// *.gen.go come from gombit generate, which the CLI runs after this scaffold
+	// step (not this resourcegen unit test); the handler contract is covered by the
+	// model-first handler tests (modelhandler_test.go).
+	if _, err := os.Stat(filepath.Join(appDir, "internal", "book", "handler.go")); !os.IsNotExist(err) {
+		t.Fatal("model-first make resource must not write a human-owned handler.go")
 	}
-	if !strings.Contains(handlerSrc, `database.MapLoadError(ctx, err, "book not found", "load book")`) {
-		t.Fatal("generated get handler does not map load errors via database.MapLoadError")
+	if _, err := os.Stat(filepath.Join(appDir, "internal", "book", "routes.go")); !os.IsNotExist(err) {
+		t.Fatal("model-first make resource must not write routes.go")
 	}
-	if !strings.Contains(handlerSrc, `database.MapPersistError(ctx, err, "resource already exists", "create book")`) {
-		t.Fatal("generated create handler does not map persist errors via database.MapPersistError")
-	}
-	if strings.Count(handlerSrc, `contract.NotFound("book not found")`) != 1 {
-		t.Fatal("generated get handler should keep parse-id as not_found and not map First() errors to 404")
-	}
-	if !strings.Contains(handlerSrc, `query:"page"`) || !strings.Contains(handlerSrc, `query:"per_page"`) {
-		t.Fatal("generated list handler missing page/per_page query params")
-	}
-	if !strings.Contains(handlerSrc, "contract.ClampPage") || !strings.Contains(handlerSrc, "contract.PageOffset") {
-		t.Fatal("generated list handler does not clamp page/per_page")
-	}
-	if !strings.Contains(handlerSrc, ".Limit(") || !strings.Contains(handlerSrc, "Count(&total)") {
-		t.Fatal("generated list handler does not LIMIT/OFFSET or count total separately")
-	}
-	if strings.Contains(handlerSrc, "PerPage: 20, Total: int64(len(items))") {
-		t.Fatal("generated list handler still advertises hardcoded per_page=20 from len(items)")
+	if _, err := os.Stat(filepath.Join(appDir, "internal", "book", ResourceMarkerFile)); err != nil {
+		t.Fatalf("make resource must write the %s resource marker: %v", ResourceMarkerFile, err)
 	}
 	if _, err := os.Stat(filepath.Join(appDir, "internal", "book", "service.go")); !os.IsNotExist(err) {
 		t.Fatal("default generate wrote service.go")
@@ -171,9 +160,11 @@ func TestGenerateBookFeaturePackage(t *testing.T) {
 		t.Fatalf("re-run duplicated book.Register: count = %d", count)
 	}
 
-	// User edit is refused without --force.
-	if err := os.WriteFile(handlerPath, []byte("package book\n\n// user edit\n"), 0o600); err != nil {
-		t.Fatalf("edit handler: %v", err)
+	// The model is human-owned (seed-once): a re-run PRESERVES local edits — it
+	// does not error and does not clobber them — so editing the model and
+	// regenerating is safe (the whole point of the ownership boundary).
+	if err := os.WriteFile(modelPath, []byte("package book\n\n// user edit\n"), 0o600); err != nil {
+		t.Fatalf("edit model: %v", err)
 	}
 	err = Generate(context.Background(), Options{
 		WorkDir:   appDir,
@@ -182,14 +173,14 @@ func TestGenerateBookFeaturePackage(t *testing.T) {
 		Stdout:    ioDiscard{},
 		skipAtlas: true,
 	})
-	if err == nil || !strings.Contains(err.Error(), "--force") {
-		t.Fatalf("clobber error = %v, want --force", err)
+	if err != nil {
+		t.Fatalf("re-run over an edited model must succeed (seed-once), got: %v", err)
 	}
-	got := readFile(t, handlerPath)
-	if !strings.Contains(got, "user edit") {
-		t.Fatal("user handler.go was overwritten without --force")
+	if got := readFile(t, modelPath); !strings.Contains(got, "user edit") {
+		t.Fatal("re-run clobbered the human-owned model without --force")
 	}
 
+	// --force re-scaffolds the model from the CLI spec, discarding local edits.
 	err = Generate(context.Background(), Options{
 		WorkDir:   appDir,
 		Name:      "Book",
@@ -201,9 +192,12 @@ func TestGenerateBookFeaturePackage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate(--force) error = %v", err)
 	}
-	got = readFile(t, handlerPath)
+	got := readFile(t, modelPath)
 	if strings.Contains(got, "user edit") {
-		t.Fatal("--force did not replace handler.go")
+		t.Fatal("--force did not re-scaffold model.go")
+	}
+	if !strings.Contains(got, "type Book struct") {
+		t.Fatalf("--force did not restore the scaffolded model:\n%s", got)
 	}
 }
 
@@ -235,6 +229,17 @@ func TestGenerateDryRunAndServiceRepo(t *testing.T) {
 	out := stdout.String()
 	if !strings.Contains(out, "internal/invoice/service.go") || !strings.Contains(out, "internal/invoice/repo.go") {
 		t.Fatalf("dry-run stdout = %q, want service and repo", out)
+	}
+	// The dry-run previews the WHOLE command, not just the scaffold: the exact
+	// generator-owned files gombit generate would write and the seeded hooks.
+	for _, want := range []string{
+		"internal/invoice/dto.gen.go",
+		"internal/invoice/handler.gen.go",
+		"internal/invoice/hooks.go",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("dry-run stdout = %q, want it to list %q", out, want)
+		}
 	}
 	if _, err := os.Stat(filepath.Join(appDir, "internal", "invoice")); !os.IsNotExist(err) {
 		t.Fatal("dry-run wrote invoice package")
@@ -746,5 +751,99 @@ func TestGenerateNumberFieldEmptyIsZero(t *testing.T) {
 	}
 	if !strings.Contains(formTS, `setValueAs: (value) => (value === "" ? 0 : Number(value))`) {
 		t.Fatalf("form.tsx missing setValueAs empty→0 for qty:\n%s", formTS)
+	}
+}
+
+// Enum fields are rejected by the model-first generator (enum values are not a
+// schema fact, so the DTO/OpenAPI cannot carry the constraint) — fail loud with
+// a pointer to the future model-first enum policy, never silently degrade to a
+// plain string.
+func TestGenerateRejectsEnumFields(t *testing.T) {
+	workDir := t.TempDir()
+	if err := scaffold.Generate(context.Background(), scaffold.Options{
+		Name: "demo", Database: "sqlite", WorkDir: workDir, Stdout: ioDiscard{},
+	}); err != nil {
+		t.Fatalf("scaffold: %v", err)
+	}
+	appDir := filepath.Join(workDir, "demo")
+	err := Generate(context.Background(), Options{
+		WorkDir:   appDir,
+		Name:      "Rental",
+		Fields:    []string{"status:enum(requested,confirmed,active)"},
+		Stdout:    ioDiscard{},
+		skipAtlas: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "enum") {
+		t.Fatalf("enum field must be rejected, got: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(appDir, "internal", "rental")); !os.IsNotExist(statErr) {
+		t.Fatal("nothing must be written when an enum field is rejected")
+	}
+}
+
+// make resource must refuse to scaffold over a resource still on the legacy
+// human-owned handler layout: re-scaffolding would overwrite the human-edited
+// model and drop a marker beside a handler.go that gombit generate then refuses to
+// regenerate. It must fail closed BEFORE writing anything (no marker, no model),
+// and even with --force — migration is a hand step, not a bulldoze.
+func TestPlanRefusesLegacyResource(t *testing.T) {
+	workDir := t.TempDir()
+	if err := scaffold.Generate(context.Background(), scaffold.Options{
+		Name: "demo", Database: "sqlite", WorkDir: workDir, Stdout: ioDiscard{},
+	}); err != nil {
+		t.Fatalf("scaffold: %v", err)
+	}
+	appDir := filepath.Join(workDir, "demo")
+	legacyDir := filepath.Join(appDir, "internal", "book")
+	if err := os.MkdirAll(legacyDir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// A legacy resource: a human-owned handler.go beside the model, no marker.
+	if err := os.WriteFile(filepath.Join(legacyDir, "handler.go"), []byte("package book\n"), 0o600); err != nil {
+		t.Fatalf("write legacy handler: %v", err)
+	}
+
+	for _, force := range []bool{false, true} {
+		_, err := Plan(context.Background(), Options{
+			WorkDir:   appDir,
+			Name:      "Book",
+			Fields:    []string{"title:string:required"},
+			Force:     force,
+			Stdout:    ioDiscard{},
+			skipAtlas: true,
+		})
+		if err == nil || !strings.Contains(err.Error(), "legacy") {
+			t.Fatalf("force=%v: legacy resource must be refused, got: %v", force, err)
+		}
+	}
+	// Nothing was written: no marker landed beside the legacy handler.
+	if _, err := os.Stat(filepath.Join(legacyDir, ResourceMarkerFile)); !os.IsNotExist(err) {
+		t.Fatal("Plan must not write the resource marker over a legacy resource")
+	}
+}
+
+// applyWrites is transactional: a filesystem write failure partway through rolls
+// back every file already written, so a failed apply leaves the tree untouched.
+func TestApplyWritesRollsBackOnFailure(t *testing.T) {
+	dir := t.TempDir()
+	// The second write targets a path whose parent is a regular file, so os.WriteFile
+	// (via mkdir) fails — forcing a rollback of the first, already-written file.
+	blocker := filepath.Join(dir, "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write blocker: %v", err)
+	}
+	planned := []plannedFile{
+		{relPath: "a/first.txt", display: "a/first.txt", content: []byte("one"), action: "create", write: true},
+		{relPath: "blocker/nested.txt", display: "blocker/nested.txt", content: []byte("two"), action: "create", write: true},
+	}
+	err := applyWrites(Options{WorkDir: dir, Stdout: ioDiscard{}}, planned)
+	if err == nil {
+		t.Fatal("applyWrites must fail when a write cannot succeed")
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "a", "first.txt")); !os.IsNotExist(statErr) {
+		t.Fatal("rollback must remove the first file written before the failure")
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "a")); !os.IsNotExist(statErr) {
+		t.Fatal("rollback must remove the directory it created for the first file")
 	}
 }

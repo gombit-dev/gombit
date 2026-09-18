@@ -9,7 +9,8 @@ New here? [Install](installation.md), then work through the
 | --- | --- |
 | [installation.md](installation.md) | Prerequisites, install paths, verification, troubleshooting |
 | [tutorial.md](tutorial.md) | Build a task app end to end — API, migration, client, React, auth, admin |
-| [cli.md](cli.md) | Every command and flag: `new`, `dev`, `build`, `make`, `db`, `openapi`, `client`, `routes`, `doctor`, `config`, `createsuperuser`, `version` |
+| [cli.md](cli.md) | Every command and flag: `new`, `dev`, `build`, `make`, `generate`, `db`, `openapi`, `client`, `routes`, `doctor`, `config`, `createsuperuser`, `version` |
+| [migration-model-first-resources.md](migration-model-first-resources.md) | Migrating resources from the old human-owned `handler.go` to the model-first, generator-owned layout (ADR-016) |
 
 ## Runtime
 

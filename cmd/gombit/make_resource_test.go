@@ -77,21 +77,27 @@ func TestRunMakeResourceBookCompiles(t *testing.T) {
 		t.Fatalf("re-run duplicated Register: %d", count)
 	}
 
-	handlerPath := filepath.Join(dest, "internal", "book", "handler.go")
-	if err := os.WriteFile(handlerPath, []byte("package book\n\n// edited by user\n"), 0o600); err != nil {
-		t.Fatalf("edit handler: %v", err)
+	// The model is human-owned (seed-once): a valid local edit survives a re-run
+	// (no error, no clobber), and generation still succeeds from the edited model.
+	edited := readFileString(t, modelPath) + "\n// edited by user\n"
+	if err := os.WriteFile(modelPath, []byte(edited), 0o600); err != nil {
+		t.Fatalf("edit model: %v", err)
 	}
 	err = run(context.Background(), []string{"make", "resource", "Book", "title:string:required"}, ioDiscard{}, ioDiscard{})
-	if err == nil || !strings.Contains(err.Error(), "--force") {
-		t.Fatalf("clobber error = %v, want --force", err)
+	if err != nil {
+		t.Fatalf("re-run over an edited model must succeed (seed-once), got: %v", err)
 	}
-	if !strings.Contains(readFileString(t, handlerPath), "edited by user") {
-		t.Fatal("user handler.go was overwritten")
+	if !strings.Contains(readFileString(t, modelPath), "edited by user") {
+		t.Fatal("re-run clobbered the human-owned model without --force")
 	}
 
+	// --force re-scaffolds the model from the CLI spec, discarding the local edit.
 	err = run(context.Background(), []string{"make", "resource", "Book", "title:string:required", "--force"}, ioDiscard{}, ioDiscard{})
 	if err != nil {
 		t.Fatalf("make resource --force: %v", err)
+	}
+	if strings.Contains(readFileString(t, modelPath), "edited by user") {
+		t.Fatal("--force did not re-scaffold the model")
 	}
 
 	dryStdout := new(bytes.Buffer)
@@ -144,17 +150,37 @@ func TestRunMakeResourceDryRunOnFreshApp(t *testing.T) {
 	if err := run(context.Background(), []string{"new", "demo", "--database", "sqlite", "--skip-tidy"}, ioDiscard{}, ioDiscard{}); err != nil {
 		t.Fatalf("new: %v", err)
 	}
-	chdir(t, filepath.Join(workDir, "demo"))
+	dest := filepath.Join(workDir, "demo")
+	appendReplace(t, dest)
+	// The overlay-backed dry-run runs Program Mode (go run) to validate the pending
+	// model, so the framework must resolve; tidy first so that go run does not have
+	// to touch go.mod/go.sum (keeping "dry-run writes nothing" honest).
+	tidy := exec.Command("go", "mod", "tidy")
+	tidy.Dir = dest
+	if out, err := tidy.CombinedOutput(); err != nil {
+		t.Fatalf("go mod tidy: %v\n%s", err, out)
+	}
+	chdir(t, dest)
 	stdout := new(bytes.Buffer)
 	err := run(context.Background(), []string{"make", "resource", "Widget", "name:string:required", "price:int", "--dry-run"}, stdout, ioDiscard{})
 	if err != nil {
 		t.Fatalf("dry-run: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(workDir, "demo", "internal", "widget")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dest, "internal", "widget")); !os.IsNotExist(err) {
 		t.Fatal("dry-run wrote widget package")
 	}
-	if !strings.Contains(stdout.String(), "internal/widget/widget.go") {
-		t.Fatalf("stdout = %q", stdout.String())
+	out := stdout.String()
+	// The dry-run derives its preview from the real plan: the scaffold plus the exact
+	// generator-owned files gombit generate produces.
+	for _, want := range []string{
+		"internal/widget/widget.go",
+		"internal/widget/dto.gen.go",
+		"internal/widget/handler.gen.go",
+		"internal/widget/hooks.go",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("dry-run stdout = %q, want %q", out, want)
+		}
 	}
 }
 
