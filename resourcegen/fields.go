@@ -114,6 +114,39 @@ func (f Field) reservedJSONKeys() []string {
 func (f Field) fkGoName() string   { return f.GoName + "ID" }
 func (f Field) fkJSONName() string { return f.JSONName + "_id" }
 
+// dtoGoName / dtoGoType / dtoJSONName name the field as it appears in the
+// generated handler DTO. A belongs_to is exposed as its uint foreign key; other
+// fields keep their own names. (m2m / has_many are excluded from the DTO via
+// inDTO and never reach these.)
+func (f Field) dtoGoName() string {
+	if f.Type == FieldBelongsTo {
+		return f.fkGoName()
+	}
+	return f.GoName
+}
+
+func (f Field) dtoGoType() string {
+	if f.Type == FieldBelongsTo {
+		return "uint"
+	}
+	return f.GoType
+}
+
+func (f Field) dtoJSONName() string {
+	if f.Type == FieldBelongsTo {
+		return f.fkJSONName()
+	}
+	return f.JSONName
+}
+
+// dtoHumaTags is the Huma struct tag for the DTO create-input field.
+func (f Field) dtoHumaTags() string {
+	if f.Type == FieldBelongsTo {
+		return fmt.Sprintf(`json:"%s" minimum:"0" doc:"%s"`, f.fkJSONName(), f.fkGoName())
+	}
+	return f.humaTags()
+}
+
 // joinTable is the many2many join-table name for a relation on resourcePkg.
 func (f Field) joinTable(resourcePkg string) string { return resourcePkg + "_" + f.JSONName }
 
@@ -486,31 +519,59 @@ func (f Field) typeAllowsAggregate() bool {
 	}
 }
 
-// gombitPolicy is the model-first `gombit` tag value for this scalar field, or ""
-// when the field is a plain content column (untagged fields default to read+write,
-// so no tag is needed). A field with any declared query capability is emitted as
-// read+write plus those capabilities — read is required because a query capability
-// must be response-visible (resourcepolicy's rule), and write keeps the field
-// settable as it was under the CLI grammar. The CLI query modifiers thus become
-// declared policy on the model, the single source of truth gombit generate reads.
-func (f Field) gombitPolicy() string {
-	var caps []string
-	if f.Filterable {
-		caps = append(caps, "filterable")
+// isFilterable reports whether the generated list handler exposes an exact-match
+// filter for this field. belongs_to foreign keys are filterable by default so
+// the has_many detail-list case (GET /children?<parent>_id=<id>, issue #260 /
+// Forge #53) needs no extra declaration; every other field opts in.
+func (f Field) isFilterable() bool {
+	return f.Filterable || f.Type == FieldBelongsTo
+}
+
+// filterColumn / searchColumn / sortColumn / aggregateColumn are the DB column
+// names the list query references. For our naming they equal the DTO JSON name
+// (toSnake of the Go field), which is what GORM's default naming strategy
+// derives for the model column — belongs_to resolves to its <name>_id foreign
+// key. aggregateColumn is only used for numeric scalars, never a relation.
+func (f Field) filterColumn() string    { return f.dtoJSONName() }
+func (f Field) searchColumn() string    { return f.JSONName }
+func (f Field) sortColumn() string      { return f.dtoJSONName() }
+func (f Field) aggregateColumn() string { return f.dtoJSONName() }
+
+// filterInputField names the field on the generated list-input struct. Filters
+// are string query params (Huma has no optional/pointer query params, so empty
+// string is the "absent" signal); the value is coerced server-side by kind.
+func (f Field) filterInputField() string { return f.dtoGoName() }
+
+// filterKindExpr is the database.FilterKind the generated handler passes to
+// database.FilterEq so it coerces the raw filter string to the column's type.
+func (f Field) filterKindExpr() string {
+	switch f.Type {
+	case FieldInt:
+		return "database.FilterInt"
+	case FieldInt64:
+		return "database.FilterInt64"
+	case FieldUint, FieldBelongsTo:
+		return "database.FilterUint"
+	case FieldBool:
+		return "database.FilterBool"
+	default: // FieldString, FieldEnum
+		return "database.FilterString"
 	}
-	if f.Sortable {
-		caps = append(caps, "sortable")
+}
+
+// filterQueryTag builds the Huma struct tag for a filter query param: the query
+// name, an enum constraint for bool (true/false) and enum columns so Huma
+// rejects bad values before the handler, and a doc string.
+func (f Field) filterQueryTag() string {
+	tag := `query:"` + f.filterColumn() + `"`
+	switch f.Type {
+	case FieldEnum:
+		tag += ` enum:"` + strings.Join(f.EnumValues, ",") + `"`
+	case FieldBool:
+		tag += ` enum:"true,false"`
 	}
-	if f.Searchable {
-		caps = append(caps, "searchable")
-	}
-	if f.Aggregatable {
-		caps = append(caps, "aggregatable")
-	}
-	if len(caps) == 0 {
-		return ""
-	}
-	return "read,write," + strings.Join(caps, ",")
+	tag += ` doc:"Filter by ` + f.filterInputField() + ` (exact match)"`
+	return tag
 }
 
 func (f Field) gormTag() string {
@@ -538,6 +599,28 @@ func (f Field) gormTag() string {
 		return ""
 	}
 	return strings.Join(parts, ";")
+}
+
+func (f Field) humaTags() string {
+	var parts []string
+	parts = append(parts, fmt.Sprintf(`json:"%s"`, f.JSONName))
+	switch f.Type {
+	case FieldString:
+		if f.Required {
+			parts = append(parts, `minLength:"1"`)
+		}
+		parts = append(parts, `maxLength:"255"`)
+	case FieldText:
+		if f.Required {
+			parts = append(parts, `minLength:"1"`)
+		}
+	case FieldUint:
+		parts = append(parts, `minimum:"0"`)
+	case FieldEnum:
+		parts = append(parts, fmt.Sprintf(`enum:"%s"`, strings.Join(f.EnumValues, ",")))
+	}
+	parts = append(parts, fmt.Sprintf(`doc:"%s"`, f.GoName))
+	return strings.Join(parts, " ")
 }
 
 // enumColumnSize sizes the varchar column to hold the longest allowed value,

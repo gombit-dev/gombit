@@ -27,12 +27,14 @@ func TestRenderNewScalarTypes(t *testing.T) {
 	// Collapse runs of whitespace so gofmt column alignment doesn't matter.
 	collapse := func(s string) string { return strings.Join(strings.Fields(s), " ") }
 	model := collapse(string(mustFormatGo(renderModel(ctx))))
-	if strings.Contains(model, "format error") {
-		t.Fatalf("model did not gofmt-parse:\n%s", model)
+	handler := collapse(string(mustFormatGo(renderHandler(ctx))))
+	for label, src := range map[string]string{"model": model, "handler": handler} {
+		if strings.Contains(src, "format error") {
+			t.Fatalf("%s did not gofmt-parse:\n%s", label, src)
+		}
 	}
 
-	// Model imports + column types. The model-first DTOs/handler derive from these
-	// same types (proven to compile in modelhandler_test's compile-and-run tests).
+	// Model imports + column types.
 	for _, want := range []string{
 		`"time"`,
 		`"github.com/gombit-dev/gombit/types"`,
@@ -43,6 +45,19 @@ func TestRenderNewScalarTypes(t *testing.T) {
 	} {
 		if !strings.Contains(model, want) {
 			t.Fatalf("model missing %q:\n%s", want, model)
+		}
+	}
+
+	// Handler DTO uses the SAME Go types as the model (no drift), imports too.
+	for _, want := range []string{
+		`"time"`,
+		`"github.com/gombit-dev/gombit/types"`,
+		"Price types.Decimal",
+		"StartsAt time.Time",
+		`enum:"requested,confirmed,active"`,
+	} {
+		if !strings.Contains(handler, want) {
+			t.Fatalf("handler missing %q:\n%s", want, handler)
 		}
 	}
 }
@@ -121,13 +136,11 @@ func TestRenderRelations(t *testing.T) {
 	ctx := newRenderContext("github.com/example/demo", name, fields, "/api/v1", "minimal", false, false)
 	collapse := func(s string) string { return strings.Join(strings.Fields(s), " ") }
 	model := collapse(string(mustFormatGo(renderModel(ctx))))
-	if strings.Contains(model, "format error") {
-		t.Fatalf("model did not gofmt-parse:\n%s", model)
+	handler := collapse(string(mustFormatGo(renderHandler(ctx))))
+	if strings.Contains(model, "format error") || strings.Contains(handler, "format error") {
+		t.Fatalf("did not gofmt-parse:\nmodel:\n%s\nhandler:\n%s", model, handler)
 	}
 
-	// The belongs_to emits its FK column (a persisted, DTO-visible field) plus the
-	// association object; has_many / many_to_many are relationships, not columns, so
-	// the model-first DTOs never surface them (resourcepolicy skips non-columns).
 	for _, want := range []string{
 		`"github.com/example/demo/internal/engine"`,
 		`"github.com/example/demo/internal/part"`,
@@ -141,5 +154,13 @@ func TestRenderRelations(t *testing.T) {
 		if !strings.Contains(model, want) {
 			t.Fatalf("model missing %q:\n%s", want, model)
 		}
+	}
+
+	// Thin handler DTO: belongs_to FK present, collection relations absent.
+	if !strings.Contains(handler, "EngineID uint") || !strings.Contains(handler, `json:"engine_id"`) {
+		t.Fatalf("handler DTO missing engine_id FK:\n%s", handler)
+	}
+	if strings.Contains(handler, "Warehouses") || strings.Contains(handler, "Parts") {
+		t.Fatalf("handler DTO must not carry m2m/has_many fields:\n%s", handler)
 	}
 }

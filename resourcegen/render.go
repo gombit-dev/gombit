@@ -1,9 +1,6 @@
 package resourcegen
 
-import (
-	"fmt"
-	"path"
-)
+import "fmt"
 
 // This file exposes the model-first generation primitive that both gombit
 // generate (regenerate / --check) and, later, make resource (bootstrap) call, so
@@ -64,33 +61,12 @@ func RenderResource(model any, pkg string) ([]GeneratedArtifact, error) {
 	if err != nil {
 		return nil, err
 	}
-	content := map[string][]byte{
-		"dto.gen.go":     mustFormatGo(renderModelDTOs(res)),
-		"handler.gen.go": mustFormatGo(handler),
-		"hooks.go":       mustFormatGo(renderModelHooks(res)),
-	}
-	// Build the artifacts from the shared path/ownership contract so the paths
-	// RenderResource emits and the ones a preview lists never diverge.
-	plan := GeneratedArtifactPlan(pkg)
-	out := make([]GeneratedArtifact, len(plan))
-	for i, a := range plan {
-		out[i] = GeneratedArtifact{Path: a.Path, Content: content[path.Base(a.Path)], Ownership: a.Ownership}
-	}
-	return out, nil
-}
-
-// GeneratedArtifactPlan is the single source of truth for the files gombit generate
-// produces for a resource package — their paths (internal/<pkg>/…) and ownership,
-// with no content. RenderResource fills these in; make resource's --dry-run lists
-// them, so a preview can never advertise a file the generator does not actually
-// emit.
-func GeneratedArtifactPlan(pkg string) []GeneratedArtifact {
 	dir := "internal/" + pkg
 	return []GeneratedArtifact{
-		{Path: dir + "/dto.gen.go", Ownership: GeneratorOwned},
-		{Path: dir + "/handler.gen.go", Ownership: GeneratorOwned},
-		{Path: dir + "/hooks.go", Ownership: SeedOnce},
-	}
+		{Path: dir + "/dto.gen.go", Content: mustFormatGo(renderModelDTOs(res)), Ownership: GeneratorOwned},
+		{Path: dir + "/handler.gen.go", Content: mustFormatGo(handler), Ownership: GeneratorOwned},
+		{Path: dir + "/hooks.go", Content: mustFormatGo(renderModelHooks(res)), Ownership: SeedOnce},
+	}, nil
 }
 
 // String names the ownership class for diagnostics.
