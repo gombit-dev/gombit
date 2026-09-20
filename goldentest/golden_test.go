@@ -158,7 +158,7 @@ func TestMakeResourceGolden(t *testing.T) {
 	}
 
 	t.Run("compile", func(t *testing.T) {
-		generateAndCompileBackend(t, appDir)
+		compileBackend(t, appDir)
 	})
 	t.Run("typecheck", func(t *testing.T) {
 		typecheckFrontend(t, appDir, true)
@@ -203,7 +203,7 @@ func TestMakeResourceScalarTypesCompiles(t *testing.T) {
 			"price:decimal:required",
 			"deposit:decimal(10,2)",
 			"starts_at:time:required",
-			"status:string",
+			"status:enum(requested,confirmed,active,returned,cancelled)",
 		},
 		AtlasBin: missingAtlas,
 		Stdout:   stdout,
@@ -212,7 +212,7 @@ func TestMakeResourceScalarTypesCompiles(t *testing.T) {
 		t.Fatalf("gombit make resource (scalars): %v\nstdout=%s", err, stdout.String())
 	}
 	t.Run("compile", func(t *testing.T) {
-		generateAndCompileBackend(t, appDir)
+		compileBackend(t, appDir)
 	})
 }
 
@@ -249,7 +249,7 @@ func TestMakeResourceRelationsCompiles(t *testing.T) {
 		"warehouses:many_to_many:Warehouse",
 	)
 	t.Run("compile", func(t *testing.T) {
-		generateAndCompileBackend(t, appDir)
+		compileBackend(t, appDir)
 	})
 }
 
@@ -279,11 +279,11 @@ func TestMakeResourceListQueryCompiles(t *testing.T) {
 		"body:text:searchable",
 		"views:int:filterable,sortable",
 		"published:bool:filterable",
-		"status:string:filterable,sortable",
+		"status:enum(draft,published):filterable,sortable",
 		"author:belongs_to:Author",
 	)
 	t.Run("compile", func(t *testing.T) {
-		generateAndCompileBackend(t, appDir)
+		compileBackend(t, appDir)
 	})
 }
 
@@ -311,11 +311,11 @@ func TestMakeResourceAggregatesCompiles(t *testing.T) {
 	gen("Invoice",
 		"total:decimal:required,aggregatable",
 		"quantity:int:aggregatable,filterable,sortable",
-		"status:string:filterable",
+		"status:enum(draft,paid):filterable",
 		"customer:belongs_to:Customer",
 	)
 	t.Run("compile", func(t *testing.T) {
-		generateAndCompileBackend(t, appDir)
+		compileBackend(t, appDir)
 	})
 }
 
@@ -356,7 +356,7 @@ func TestMakeCommandGolden(t *testing.T) {
 	}
 
 	t.Run("compile", func(t *testing.T) {
-		generateAndCompileBackend(t, appDir)
+		compileBackend(t, appDir)
 	})
 	t.Run("idempotent", func(t *testing.T) {
 		if err := commandgen.Generate(context.Background(), commandgen.Options{

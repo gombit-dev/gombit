@@ -191,12 +191,9 @@ func TestGenerateCommandInExistingResourcePackage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("make resource Book: %v", err)
 	}
-	// Model-first make resource scaffolds the model + resource marker (the
-	// generator-owned handler comes from gombit generate); this test only needs a
-	// real resource package to add a command to.
-	modelSrc := readFile(t, filepath.Join(appDir, "internal", "book", "book.go"))
-	if !strings.Contains(modelSrc, "type Book struct") {
-		t.Fatal("book model.go missing Book type")
+	routesSrc := readFile(t, filepath.Join(appDir, "internal", "book", "routes.go"))
+	if !strings.Contains(routesSrc, "func Register(app *framework.App)") {
+		t.Fatal("book routes.go lost Register")
 	}
 
 	err = Generate(context.Background(), Options{
@@ -222,11 +219,10 @@ func TestGenerateCommandInExistingResourcePackage(t *testing.T) {
 	if ctor != 1 {
 		t.Fatalf("NewGreetCommand count = %d, want 1\n%s", ctor, commandsSrc)
 	}
-	// make command adds commands.go to the resource package without disturbing the
-	// human-owned model (the resource's generated Register lives in handler.gen.go,
-	// produced by gombit generate — not exercised in this resourcegen-only test).
-	if !strings.Contains(readFile(t, filepath.Join(appDir, "internal", "book", "book.go")), "type Book struct") {
-		t.Fatal("book model.go was disturbed by make command")
+
+	routesSrc = readFile(t, filepath.Join(appDir, "internal", "book", "routes.go"))
+	if !strings.Contains(routesSrc, "func Register(app *framework.App)") {
+		t.Fatal("book routes.go Register was overwritten")
 	}
 
 	mainSrc := readFile(t, filepath.Join(appDir, "cmd", "gombit", "main.go"))

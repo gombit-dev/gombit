@@ -229,6 +229,9 @@ func TestParseEnumFieldDetails(t *testing.T) {
 	if strings.Join(f.EnumValues, ",") != strings.Join(want, ",") {
 		t.Fatalf("EnumValues = %v, want %v", f.EnumValues, want)
 	}
+	if got := f.humaTags(); !strings.Contains(got, `enum:"Draft,Published,Archived"`) {
+		t.Fatalf("humaTags = %q, want enum tag", got)
+	}
 	if got := f.gormTag(); !strings.Contains(got, "size:") {
 		t.Fatalf("gormTag = %q, want a sized varchar column", got)
 	}

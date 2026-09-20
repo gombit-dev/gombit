@@ -5,7 +5,6 @@ import (
 	"io"
 
 	"github.com/gombit-dev/gombit/commandgen"
-	"github.com/gombit-dev/gombit/generate"
 	"github.com/gombit-dev/gombit/resourcegen"
 	"github.com/spf13/cobra"
 )
@@ -49,30 +48,27 @@ Field grammar (design §27 subset):
 
   name:type[:required][,unique][,index][,filterable][,sortable][,searchable][,aggregatable]
 
-Supported types: string, text, int, int64, bool, uint, decimal, time,
+Supported types: string, text, int, int64, bool, uint, decimal, time, enum,
 belongs_to, has_many, many_to_many.
 
   decimal            money/exact numeric (types.Decimal; decimal(19,4) column).
   decimal(p,s)       pin precision/scale, e.g. decimal(10,2).
   time               time.Time (RFC3339 in JSON).
-
-Enum fields are not supported by the model-first generator yet (enum values
-are not recoverable from the GORM schema) and are rejected — use a string
-field for now.
+  enum(a,b,c)        string column validated against the listed values.
 
 List-query modifiers opt a field into the generated list handler's declared
 query surface (safe, indexable subset). The query spelling matches Gombit's
 admin data plane so the two contracts stay in sync:
 
   filterable         exact-match ?<field>=<value> query param.
-                     Types: string, int, int64, uint, bool. A belongs_to
+                     Types: string, int, int64, uint, bool, enum. A belongs_to
                      foreign key is filterable by default (GET /children?
                      <parent>_id=<id>) with no modifier needed.
   sortable           ?ordering=<field> (prefix with - for DESC, e.g.
                      ?ordering=-title). Replaces the fixed id order; id
                      stays the default when ?ordering= is absent.
   searchable         case-insensitive ?search=<term> LIKE across searchable
-                     text fields. Types: string, text.
+                     text fields. Types: string, text, enum.
 
 The generated list handler (not the admin data plane) also supports numeric
 aggregates:
@@ -104,11 +100,12 @@ Examples:
 
   gombit make resource Widget name:string:required price:int
   gombit make resource Article title:string:required,searchable,sortable \
-    status:string:filterable author:belongs_to:Author
+    status:enum(draft,published):filterable author:belongs_to:Author
   gombit make resource Invoice total:decimal:required,aggregatable \
     quantity:int:aggregatable,filterable customer:belongs_to:Customer
   gombit make resource Rental price:decimal:required starts_at:time \
-    status:string engine:belongs_to:Engine warehouses:many_to_many:Warehouse
+    status:enum(requested,confirmed,active,returned,cancelled) \
+    engine:belongs_to:Engine warehouses:many_to_many:Warehouse
   gombit make resource Invoice --service --repo --dry-run
   gombit make resource Widget --force
 
@@ -124,11 +121,7 @@ internal/platform (not only the new resource). Otherwise the GORM model is
 still loader-ready for gombit db makemigrations.`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// make resource is atomic. It plans both phases before touching the tree
-			// and applies the result as one unit, so it can never leave a
-			// half-migration (a resource marker with no generated handler, or a
-			// registration edit pointing at a Register that was never generated).
-			resOpts := resourcegen.Options{
+			err := resourcegen.Generate(cmd.Context(), resourcegen.Options{
 				WorkDir: ".",
 				Name:    args[0],
 				Fields:  args[1:],
@@ -138,54 +131,8 @@ still loader-ready for gombit db makemigrations.`,
 				Force:   force,
 				Stdout:  stdout,
 				Stderr:  stderr,
-			}
-			// Phase 1 (no writes): plan the human-owned scaffold — model, marker, AST
-			// registration/AutoMigrate, frontend. This runs every static check (app
-			// layout, name, HTTP-path collision, the enum gap, the legacy-layout
-			// guard), so the command fails closed here, before mutating anything.
-			plan, err := resourcegen.Plan(cmd.Context(), resOpts)
+			})
 			if err != nil {
-				return fmt.Errorf("gombit make resource: %w", err)
-			}
-			// Phase 2 preflight (no writes): render the generator-owned *.gen.go +
-			// seed hooks from the pending model, compiled through a Go build overlay
-			// so Program Mode validates the scaffold as if it were on disk while the
-			// real tree stays untouched. A model that would not compile fails here —
-			// still before any write.
-			genOpts := generate.Options{WorkDir: ".", Stdout: stdout, Stderr: stderr}
-			artifacts, err := generate.PlanResource(cmd.Context(), genOpts, plan.Pending)
-			if err != nil {
-				return fmt.Errorf("gombit make resource: %w", err)
-			}
-			// Phase-2 preflight, second step: compile the whole package as it will be
-			// committed — the new model + rendered *.gen.go + every preserved
-			// human-owned file (hooks, hand-written code) — so customization that no
-			// longer matches the regenerated model fails here, not after commit.
-			finalOverlay, err := plan.FinalOverlay(artifacts)
-			if err != nil {
-				return fmt.Errorf("gombit make resource: %w", err)
-			}
-			if err := generate.ValidateResource(cmd.Context(), genOpts, plan.Pending, finalOverlay); err != nil {
-				return fmt.Errorf("gombit make resource: %w", err)
-			}
-			if dryRun {
-				// Print the exact merged plan (scaffold + generated files) the command
-				// would apply. Nothing has been written.
-				if err := plan.PrintPlan(artifacts); err != nil {
-					return fmt.Errorf("gombit make resource: %w", err)
-				}
-				return nil
-			}
-			// Commit: apply the whole validated plan as one transaction (rolls back on
-			// a filesystem write error), then generate the migration as a post-commit
-			// step (a separate artifact, not part of the source-tree transaction).
-			if err := plan.Apply(artifacts); err != nil {
-				return fmt.Errorf("gombit make resource: %w", err)
-			}
-			if _, err := fmt.Fprintf(stdout, "GORM model is Atlas-loader ready: %s\n", plan.ModelSpec()); err != nil {
-				return fmt.Errorf("gombit make resource: %w", err)
-			}
-			if err := plan.Migrate(cmd.Context()); err != nil {
 				return fmt.Errorf("gombit make resource: %w", err)
 			}
 			return nil

@@ -78,21 +78,83 @@ func TestReservedQueryFieldNamesRejected(t *testing.T) {
 
 // TestBelongsToFilterableByDefault documents that a belongs_to foreign key is a
 // filter without any modifier — the has_many detail-list contract (#260).
-// A belongs_to FK is filterable by default: the generated model tags its uint
-// foreign key gombit:"read,write,filterable", so gombit generate produces the
-// ?<parent>_id= filter that the has_many detail-list case relies on. (The
-// association object carries no policy — it is not a column.)
 func TestBelongsToFilterableByDefault(t *testing.T) {
 	t.Parallel()
 	fields, err := parseFields([]string{"author:belongs_to:Author"}, "post")
 	if err != nil {
 		t.Fatalf("parseFields() error = %v", err)
 	}
-	lines := modelFieldLines(fields[0], "post")
-	if !strings.Contains(lines, "AuthorID uint `gorm:\"index\" gombit:\"read,write,filterable\"`") {
-		t.Fatalf("belongs_to FK should be filterable by default:\n%s", lines)
+	if !fields[0].isFilterable() {
+		t.Fatal("belongs_to field should be filterable by default")
 	}
-	if strings.Contains(lines, "Author author.Author `gombit:") {
-		t.Fatalf("belongs_to association must carry no gombit policy:\n%s", lines)
+	if fields[0].filterColumn() != "author_id" {
+		t.Fatalf("belongs_to filter column = %q, want author_id", fields[0].filterColumn())
+	}
+}
+
+func TestRenderHandlerListQuery(t *testing.T) {
+	t.Parallel()
+	fields, err := parseFields([]string{
+		"title:string:required,searchable,sortable",
+		"body:text:searchable",
+		"views:int:filterable,sortable",
+		"published:bool:filterable",
+		"author:belongs_to:Author",
+	}, "post")
+	if err != nil {
+		t.Fatalf("parseFields() error = %v", err)
+	}
+	name, err := parseResourceName("Post")
+	if err != nil {
+		t.Fatalf("parseResourceName() error = %v", err)
+	}
+	src := string(mustFormatGo(renderHandler(newRenderContext("example.com/demo", name, fields, "/api/v1", "minimal", false, false))))
+	if strings.Contains(src, "format error") {
+		t.Fatalf("generated handler does not format:\n%s", src)
+	}
+	wantContains := []string{
+		`query:"search" doc:"Search term`,
+		`query:"ordering" doc:"Field to order by; prefix with - for DESC (allowed: title, views)"`,
+		`query:"views" doc:"Filter by Views (exact match)"`,
+		`query:"published" enum:"true,false" doc:"Filter by Published (exact match)"`,
+		`query:"author_id" doc:"Filter by AuthorID (exact match)"`,
+		`database.FilterEq(ctx, q, "views", database.FilterInt, input.Views)`,
+		`database.FilterEq(ctx, q, "published", database.FilterBool, input.Published)`,
+		`database.FilterEq(ctx, q, "author_id", database.FilterUint, input.AuthorID)`,
+		`database.Search(q, []string{"title", "body"}, input.Search)`,
+		`database.Ordering(ctx, q, input.Ordering, []string{"title", "views"}, "id")`,
+	}
+	for _, want := range wantContains {
+		if !strings.Contains(src, want) {
+			t.Fatalf("generated handler missing %q\n%s", want, src)
+		}
+	}
+	// Body is searchable but not filterable/sortable: no filter param, no sort entry.
+	if strings.Contains(src, `query:"body"`) {
+		t.Fatalf("body must not be a filter param:\n%s", src)
+	}
+}
+
+// TestRenderHandlerNoListQuery is the regression guard that a resource declaring
+// no list-query modifiers keeps the original fixed Order("id") page and adds no
+// filter/search/sort query params.
+func TestRenderHandlerNoListQuery(t *testing.T) {
+	t.Parallel()
+	fields, err := parseFields([]string{"title:string:required"}, "post")
+	if err != nil {
+		t.Fatalf("parseFields() error = %v", err)
+	}
+	name, err := parseResourceName("Post")
+	if err != nil {
+		t.Fatalf("parseResourceName() error = %v", err)
+	}
+	src := string(mustFormatGo(renderHandler(newRenderContext("example.com/demo", name, fields, "/api/v1", "minimal", false, false))))
+	if !strings.Contains(src, `q.Order("id").Offset(`) {
+		t.Fatalf("handler without sort must keep fixed Order(\"id\"):\n%s", src)
+	}
+	for _, unwanted := range []string{`query:"search"`, `query:"ordering"`, `query:"aggregate"`, `database.Ordering`, `database.Search`, `database.FilterEq`, `database.Aggregate`, `contract.ListMeta`} {
+		if strings.Contains(src, unwanted) {
+			t.Fatalf("handler without modifiers must not contain %q:\n%s", unwanted, src)
+		}
 	}
 }
