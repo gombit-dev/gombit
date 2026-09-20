@@ -108,35 +108,39 @@ type Ownership struct {
 
 	dto := readFileString218(t, filepath.Join(copyDir, "internal", "ownership", "dto.gen.go"))
 	flat := collapseWS(dto) // collapse gofmt column alignment for substring checks
+	// Scope wire-name checks to the struct they belong to — a json tag in the
+	// response DTO must not satisfy a create-body claim (both DTOs carry the field).
 	createBody := collapseWS(sliceBetween(dto, "ownershipCreateBody struct", "}"))
+	responseData := collapseWS(sliceBetween(dto, "ownershipData struct", "}"))
 
-	// Mode 1 (new fields rejected on input): the evolved FK is in the create body
-	// with its wire name AND is copied into the row by the create mapper — accepted
-	// and persisted, not present-but-discarded (ADR-016's fourth mode).
-	for _, want := range []string{
-		"EngineID uint", `json:"engine_id"`, "row.EngineID = body.EngineID",
-	} {
-		if !strings.Contains(flat, want) {
-			t.Fatalf("create path must accept + persist the NOT NULL FK (missing %q); dto:\n%s", want, dto)
-		}
+	// Mode 1 (new fields rejected on input): the evolved FK is in the CREATE BODY
+	// with its wire name, AND the create mapper copies it into the row — accepted and
+	// persisted, not present-but-discarded (ADR-016's fourth mode). The mapper string
+	// stays file-global; it occurs only in ownershipFromCreateBody.
+	if !strings.Contains(createBody, "EngineID uint") || !strings.Contains(createBody, `json:"engine_id"`) {
+		t.Fatalf("create body must accept the NOT NULL FK as engine_id; body:\n%s", createBody)
 	}
-	// Mode 3 (silent NOT NULL zero-fill): the NOT NULL value-type column is a
-	// required (non-pointer) create field — an optional column would render as
-	// *time.Time — and is likewise copied by the create mapper, so it cannot be
+	if !strings.Contains(flat, "row.EngineID = body.EngineID") {
+		t.Fatalf("create mapper must copy the FK into the row; dto:\n%s", dto)
+	}
+	// Mode 3 (silent NOT NULL zero-fill): the NOT NULL value type is a required
+	// (non-pointer) create field with its wire name — an optional column would render
+	// as *time.Time — and is likewise copied by the create mapper, so it cannot be
 	// dropped from the request struct and then zero-filled.
-	if !strings.Contains(createBody, "StartsAt time.Time") || strings.Contains(createBody, "*time.Time") {
-		t.Fatalf("NOT NULL time column must be a required (non-pointer) create field; body:\n%s", createBody)
+	if !strings.Contains(createBody, "StartsAt time.Time") || strings.Contains(createBody, "*time.Time") || !strings.Contains(createBody, `json:"starts_at"`) {
+		t.Fatalf("NOT NULL time must be a required (non-pointer) starts_at create field; body:\n%s", createBody)
 	}
 	if !strings.Contains(flat, "row.StartsAt = body.StartsAt") {
 		t.Fatalf("create mapper must copy the NOT NULL timestamp; dto:\n%s", dto)
 	}
-	// Mode 2 (new fields never returned): they are in the response DTO with their
-	// wire names and are copied by the response mapper.
-	for _, want := range []string{
-		`json:"starts_at"`, "EngineID: row.EngineID", "StartsAt: row.StartsAt",
-	} {
+	// Mode 2 (new fields never returned): they are in the RESPONSE DTO with their
+	// wire names, and the response mapper copies them out of the row.
+	if !strings.Contains(responseData, `json:"engine_id"`) || !strings.Contains(responseData, `json:"starts_at"`) {
+		t.Fatalf("response DTO must expose engine_id + starts_at; body:\n%s", responseData)
+	}
+	for _, want := range []string{"EngineID: row.EngineID", "StartsAt: row.StartsAt"} {
 		if !strings.Contains(flat, want) {
-			t.Fatalf("response path must expose the evolved fields (missing %q); dto:\n%s", want, dto)
+			t.Fatalf("response mapper must copy the evolved fields (missing %q); dto:\n%s", want, dto)
 		}
 	}
 
