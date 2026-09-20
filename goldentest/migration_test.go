@@ -109,7 +109,10 @@ func TestMigrateLegacyResourceToModelFirst(t *testing.T) {
 	if customized == hooks {
 		t.Fatalf("could not inject BeforeCreate customization into:\n%s", hooks)
 	}
-	writeFile(t, hooksPath, customized)
+	// #nosec G703 G304 -- test writes back a file it generated, under its own temp dir
+	if err := os.WriteFile(hooksPath, []byte(customized), 0o600); err != nil {
+		t.Fatalf("write customized hook: %v", err)
+	}
 	build = exec.Command("go", "build", "./...")
 	build.Dir = copyDir
 	if out, err := build.CombinedOutput(); err != nil {
