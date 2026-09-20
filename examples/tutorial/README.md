@@ -30,9 +30,11 @@ generated `*.gen.go`, and customization lives in `hooks.go` (see
 [cli.md](../../docs/cli.md#gombit-make-resource) and the
 [migration guide](../../docs/migration-model-first-resources.md)). The committed
 `*.gen.go` are kept honest by a drift test (`TestGeneratedFilesAreFresh`) that
-re-derives them from the model and fails CI if the model changed without
-regenerating — the same guarantee `gombit generate --check` gives a standalone
-app, run in-process because this example is part of the framework module.
+re-derives them from the model with the generator's derivation core
+(`resourcegen.RenderResource`) and fails CI if the model changed without
+regenerating. It is an in-process freshness check, **not** `gombit generate
+--check` (this example is part of the framework module, not a standalone app, so
+the CLI's Program-Mode discovery/compilation can't target it).
 
 ```text
 examples/tutorial/

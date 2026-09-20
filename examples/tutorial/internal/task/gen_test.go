@@ -14,16 +14,20 @@ import (
 
 var updateGen = flag.Bool("update", false, "rewrite the committed task *.gen.go from the model")
 
-// TestGeneratedFilesAreFresh is this example's per-PR `gombit generate --check`
-// (RESGEN-1 / #352): it re-derives the generator-owned files from the Task model
-// and byte-compares them against the committed *.gen.go, so changing the model
-// without regenerating fails CI. The tutorial is part of the framework module
-// rather than a standalone gombit app, so the check runs in-process through
-// RenderResource — the same derivation the CLI uses — instead of the Program-Mode
-// `gombit generate` loader. Seed-once files (hooks.go) are human-owned and not
-// compared. Regenerate with:
+// TestGeneratedFilesAreFresh keeps this example's committed *.gen.go in sync with
+// the Task model: it re-derives the generator-owned files with the same derivation
+// core the generator uses (resourcegen.RenderResource) and byte-compares them, so
+// changing the model without regenerating fails CI. Seed-once files (hooks.go) are
+// human-owned and not compared. Regenerate with:
 //
 //	go test ./examples/tutorial/internal/task/ -update
+//
+// This is NOT `gombit generate --check`: it exercises only the derivation +
+// byte-compare, not the CLI's marker discovery, Program-Mode compilation,
+// app-layout / legacy-handler checks, or checkArtifacts. The tutorial is part of
+// the framework module, not a standalone app, so it cannot host that CLI. The
+// per-PR `gombit generate --check` gate over a real app layout (RESGEN-1 / #352)
+// is still open — this is an in-process substitute for a resource that lives here.
 func TestGeneratedFilesAreFresh(t *testing.T) {
 	arts, err := resourcegen.RenderResource(&task.Task{}, "task")
 	if err != nil {
