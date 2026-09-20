@@ -24,28 +24,30 @@ repository. This copy is written against the framework module directly, so CI
 compiles it on every push. If a framework change breaks what the tutorial
 teaches, the build fails here first.
 
-It is a **hand-written, self-contained** illustration — not generator output.
-`make resource` is now model-first (the model is human-owned; the DTOs and CRUD
-handler are generated `*.gen.go` and customization lives in `hooks.go` — see
+It uses the **model-first** layout `make resource` now emits: the model is the
+human-owned source of truth, the request/response DTOs and CRUD handler are
+generated `*.gen.go`, and customization lives in `hooks.go` (see
 [cli.md](../../docs/cli.md#gombit-make-resource) and the
-[migration guide](../../docs/migration-model-first-resources.md)). This example
-keeps a single hand-written handler for self-containment rather than committing
-generated `*.gen.go`:
+[migration guide](../../docs/migration-model-first-resources.md)). The committed
+`*.gen.go` are kept honest by a drift test (`TestGeneratedFilesAreFresh`) that
+re-derives them from the model with the generator's derivation core
+(`resourcegen.RenderResource`) and fails CI if the model changed without
+regenerating. It is an in-process freshness check, **not** `gombit generate
+--check` (this example is part of the framework module, not a standalone app, so
+the CLI's Program-Mode discovery/compilation can't target it).
 
 ```text
 examples/tutorial/
 ├── main.go                    # ≈ cmd/server/main.go in a generated app
 └── internal/task/
     ├── task.go                # GORM model (the human-owned source of truth)
-    ├── handler.go             # hand-written Huma handlers (a generated app has handler.gen.go)
-    ├── routes.go              # explicit huma.Register calls (a generated app folds this into handler.gen.go)
+    ├── dto.gen.go             # generated request/response DTOs + mappers (DO NOT EDIT)
+    ├── handler.gen.go         # generated Huma list/get/create + Register (DO NOT EDIT)
+    ├── hooks.go               # human-owned BeforeCreate hook (seeded once)
     └── admin.go               # admin.Register (ADR-013)
 ```
 
 Differences from a generated app, all for self-containment:
-
-- a single hand-written `handler.go`/`routes.go` instead of the model-first
-  `dto.gen.go` + `handler.gen.go` + `hooks.go`;
 
 - an in-memory SQLite DSN instead of a file, and `AutoMigrate` in an `OnStart`
   hook instead of `gombit db migrate`;
@@ -72,8 +74,12 @@ curl -s -b jar.txt -X POST http://127.0.0.1:8083/api/v1/tasks \
 ```
 
 ```json
-{"data":{"id":1,"title":"Write the tutorial","done":false}}
+{"data":{"id":1,"created_at":"2026-01-02T15:04:05Z","updated_at":"2026-01-02T15:04:05Z","title":"Write the tutorial","done":false}}
 ```
+
+(The model-first response DTO exposes `gorm.Model`'s `created_at`/`updated_at`,
+derived from the model — the hand-written handler this example used to carry
+omitted them.)
 
 Then read it back through the admin data plane:
 
