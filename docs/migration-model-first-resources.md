@@ -89,10 +89,16 @@ hook refers to are produced by generation:
    }
    ```
 
-   If you customized more than create (custom list filtering, extra endpoints),
-   keep those as your own hand-written file in the package alongside the generated
-   handler; they are not regenerated. Build, review the diff, and commit the
-   `*.gen.go` — a per-PR `gombit generate --check` keeps them fresh.
+   `BeforeCreate` is the **only** customization point today. The generated
+   `Register` binds its own list/get/create methods and exposes no hook for them,
+   and a neighboring Go file is not registered automatically — so a resource whose
+   old handler did more than `BeforeCreate` (custom list filtering, an overridden
+   get/create, an extra endpoint) has **no model-first extension point yet**. Keep
+   those resources on the legacy handler layout for now, rather than converting one
+   and silently losing the behavior; a supported extension boundary is planned.
+
+   Build, review the diff, and commit the `*.gen.go` — a per-PR
+   `gombit generate --check` keeps them fresh.
 
 ## Why
 

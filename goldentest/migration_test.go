@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gombit-dev/gombit/generate"
@@ -93,5 +94,25 @@ func TestMigrateLegacyResourceToModelFirst(t *testing.T) {
 	build.Dir = copyDir
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("migrated app must compile: %v\n%s", err, out)
+	}
+
+	// Prove the supported customization actually migrates (not just that files were
+	// replaced): move real BeforeCreate logic that reads the model into the seeded
+	// hooks.go — the only extension point the guide promises — and rebuild.
+	hooksPath := filepath.Join(noteDir, "hooks.go")
+	hooksRaw, err := os.ReadFile(hooksPath) // #nosec G304 -- test reads a file it just generated
+	if err != nil {
+		t.Fatalf("read seeded hooks.go: %v", err)
+	}
+	hooks := string(hooksRaw)
+	customized := strings.Replace(hooks, "\treturn nil", "\tif row.Title == \"\" {\n\t\trow.Title = \"untitled\"\n\t}\n\treturn nil", 1)
+	if customized == hooks {
+		t.Fatalf("could not inject BeforeCreate customization into:\n%s", hooks)
+	}
+	writeFile(t, hooksPath, customized)
+	build = exec.Command("go", "build", "./...")
+	build.Dir = copyDir
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("migrated app with a customized BeforeCreate hook must compile: %v\n%s", err, out)
 	}
 }

@@ -822,28 +822,42 @@ func TestPlanRefusesLegacyResource(t *testing.T) {
 	}
 }
 
-// applyWrites is transactional: a filesystem write failure partway through rolls
-// back every file already written, so a failed apply leaves the tree untouched.
+// applyWrites is transactional and each write is an atomic replace: a filesystem
+// write failure partway through rolls back every file already written, restores a
+// modified file to its original bytes, and never leaves the failing target
+// truncated.
 func TestApplyWritesRollsBackOnFailure(t *testing.T) {
 	dir := t.TempDir()
-	// The second write targets a path whose parent is a regular file, so os.WriteFile
-	// (via mkdir) fails — forcing a rollback of the first, already-written file.
-	blocker := filepath.Join(dir, "blocker")
-	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
-		t.Fatalf("write blocker: %v", err)
+	// An existing file the first write modifies — rollback must restore it.
+	keep := filepath.Join(dir, "keep.txt")
+	if err := os.WriteFile(keep, []byte("ORIGINAL"), 0o600); err != nil {
+		t.Fatalf("write keep.txt: %v", err)
+	}
+	// The final write targets an existing directory, so the atomic rename fails
+	// after earlier writes have landed — forcing a rollback. (This exercises the
+	// real write path, not just an mkdir precheck.)
+	if err := os.MkdirAll(filepath.Join(dir, "busy"), 0o750); err != nil {
+		t.Fatalf("mkdir busy: %v", err)
 	}
 	planned := []plannedFile{
-		{relPath: "a/first.txt", display: "a/first.txt", content: []byte("one"), action: "create", write: true},
-		{relPath: "blocker/nested.txt", display: "blocker/nested.txt", content: []byte("two"), action: "create", write: true},
+		{relPath: "keep.txt", display: "keep.txt", content: []byte("CHANGED"), action: "modify", write: true},
+		{relPath: "created/new.txt", display: "created/new.txt", content: []byte("new"), action: "create", write: true},
+		{relPath: "busy", display: "busy", content: []byte("boom"), action: "modify", write: true},
 	}
 	err := applyWrites(Options{WorkDir: dir, Stdout: ioDiscard{}}, planned)
 	if err == nil {
 		t.Fatal("applyWrites must fail when a write cannot succeed")
 	}
-	if _, statErr := os.Stat(filepath.Join(dir, "a", "first.txt")); !os.IsNotExist(statErr) {
-		t.Fatal("rollback must remove the first file written before the failure")
+	if got := readFile(t, keep); got != "ORIGINAL" {
+		t.Fatalf("rollback must restore the modified file to its original bytes, got %q", got)
 	}
-	if _, statErr := os.Stat(filepath.Join(dir, "a")); !os.IsNotExist(statErr) {
-		t.Fatal("rollback must remove the directory it created for the first file")
+	if _, statErr := os.Stat(filepath.Join(dir, "created", "new.txt")); !os.IsNotExist(statErr) {
+		t.Fatal("rollback must remove the file created before the failure")
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "created")); !os.IsNotExist(statErr) {
+		t.Fatal("rollback must remove the directory it created")
+	}
+	if info, statErr := os.Stat(filepath.Join(dir, "busy")); statErr != nil || !info.IsDir() {
+		t.Fatal("the failing target must be left intact (never truncated)")
 	}
 }

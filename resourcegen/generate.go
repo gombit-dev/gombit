@@ -305,6 +305,31 @@ func (p *ResourcePlan) Migrate(ctx context.Context) error {
 	return maybeMakeMigrations(ctx, p.opts, p.spec, p.Models)
 }
 
+// FinalOverlay returns a Go build overlay describing the resource package exactly
+// as this run will commit it: every .go file in internal/<pkg> the plan actually
+// writes (the model when re-scaffolded, the freshly rendered *.gen.go, a seeded
+// hooks.go), staged at its real path. Files the plan keeps (a human-owned hooks.go)
+// and any hand-written files not in the plan are intentionally absent, so a
+// compile over this overlay reads them from disk — the true committed package.
+// generate.ValidateResource compiles that package as the phase-2 preflight's second
+// step, catching preserved customization that no longer matches the regenerated
+// model.
+func (p *ResourcePlan) FinalOverlay(artifacts []GeneratedArtifact) (map[string][]byte, error) {
+	planned, err := p.resolve(artifacts)
+	if err != nil {
+		return nil, err
+	}
+	prefix := "internal/" + p.Pending.Pkg + "/"
+	overlay := map[string][]byte{}
+	for _, item := range planned {
+		if !item.write || !strings.HasPrefix(item.relPath, prefix) || !strings.HasSuffix(item.relPath, ".go") {
+			continue
+		}
+		overlay[filepath.Join(p.opts.WorkDir, filepath.FromSlash(item.relPath))] = item.content
+	}
+	return overlay, nil
+}
+
 // resolve turns the phase-1 file specs (and any phase-2 artifacts) into concrete
 // write actions against the current tree, applying the seed-once and
 // banner/overwrite rules. It reads the filesystem but never mutates it.

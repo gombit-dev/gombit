@@ -135,12 +135,30 @@ func Generate(ctx context.Context, opts Options) error {
 // PlanResource runs the Program-Mode phase-2 render for a single pending
 // (not-yet-written) resource and returns its generator-owned + seed artifacts
 // WITHOUT writing anything. The pending model is compiled through a Go build
-// overlay (pend.Overlay), so the loader sees the resource as make resource will
-// commit it while the real app tree stays untouched and local replace directives
-// keep their meaning — go run executes from the real module root. It is make
-// resource's phase-2 preflight: a model that would not compile fails here, before
-// any file is written.
+// overlay (pend.Overlay) that isolates it from the stale generated files this run
+// replaces, so the loader can reflect the new model while the real app tree stays
+// untouched and local replace directives keep their meaning — go run executes from
+// the real module root. This renders the artifacts; ValidateResource then compiles
+// the whole committed package (including preserved human-owned files) against them.
 func PlanResource(ctx context.Context, opts Options, pend resourcegen.Pending) ([]resourcegen.GeneratedArtifact, error) {
+	return renderPending(ctx, opts, pend.ImportPath, pend.TypeName, pend.Overlay)
+}
+
+// ValidateResource compiles the resource package exactly as make resource will
+// commit it — the new model, the freshly rendered *.gen.go, and every preserved
+// human-owned file (hooks and any hand-written code, read from disk) — via an
+// overlay of the final tree, WITHOUT writing anything. It is the second half of the
+// phase-2 preflight: PlanResource renders against an isolated model, but the
+// customization the commit keeps (a hooks.go that reads a model field, say) is only
+// exercised here, so a resource whose preserved code no longer matches the
+// regenerated model fails closed before any file changes. overlay stages just the
+// files this run will write; kept and hand-written files come from disk.
+func ValidateResource(ctx context.Context, opts Options, pend resourcegen.Pending, overlay map[string][]byte) error {
+	_, err := renderPending(ctx, opts, pend.ImportPath, pend.TypeName, overlay)
+	return err
+}
+
+func renderPending(ctx context.Context, opts Options, importPath, typeName string, overlay map[string][]byte) ([]resourcegen.GeneratedArtifact, error) {
 	opts.withDefaults()
 	absWorkDir, err := filepath.Abs(opts.WorkDir)
 	if err != nil {
@@ -149,8 +167,8 @@ func PlanResource(ctx context.Context, opts Options, pend resourcegen.Pending) (
 	if err := resourcegen.ValidateAppLayout(absWorkDir); err != nil {
 		return nil, err
 	}
-	model := migrations.Model{ImportPath: pend.ImportPath, TypeName: pend.TypeName}
-	return loadArtifacts(ctx, opts, absWorkDir, []migrations.Model{model}, pend.Overlay)
+	model := migrations.Model{ImportPath: importPath, TypeName: typeName}
+	return loadArtifacts(ctx, opts, absWorkDir, []migrations.Model{model}, overlay)
 }
 
 // discoverResources returns the app's model-first resources: the feature
@@ -354,7 +372,11 @@ func loadArtifacts(ctx context.Context, opts Options, absWorkDir string, models 
 		return nil, err
 	}
 	var stdout bytes.Buffer
-	goArgs := []string{"run", "-mod=mod"}
+	// No -mod flag: use the module mode the app's environment dictates (read-only by
+	// default, or workspace/vendor), so the loader never mutates go.mod/go.sum — a
+	// preflight and a --dry-run must not write. A module that is not tidy fails here
+	// rather than being silently rewritten.
+	goArgs := []string{"run"}
 	goArgs = append(goArgs, overlayArg...)
 	goArgs = append(goArgs, "./"+filepath.ToSlash(loaderRel))
 	if err := opts.runner.Run(ctx, absWorkDir, "go", goArgs, &stdout, opts.Stderr); err != nil {

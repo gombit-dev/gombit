@@ -152,12 +152,20 @@ still loader-ready for gombit db makemigrations.`,
 			// so Program Mode validates the scaffold as if it were on disk while the
 			// real tree stays untouched. A model that would not compile fails here —
 			// still before any write.
-			artifacts, err := generate.PlanResource(cmd.Context(), generate.Options{
-				WorkDir: ".",
-				Stdout:  stdout,
-				Stderr:  stderr,
-			}, plan.Pending)
+			genOpts := generate.Options{WorkDir: ".", Stdout: stdout, Stderr: stderr}
+			artifacts, err := generate.PlanResource(cmd.Context(), genOpts, plan.Pending)
 			if err != nil {
+				return fmt.Errorf("gombit make resource: %w", err)
+			}
+			// Phase-2 preflight, second step: compile the whole package as it will be
+			// committed — the new model + rendered *.gen.go + every preserved
+			// human-owned file (hooks, hand-written code) — so customization that no
+			// longer matches the regenerated model fails here, not after commit.
+			finalOverlay, err := plan.FinalOverlay(artifacts)
+			if err != nil {
+				return fmt.Errorf("gombit make resource: %w", err)
+			}
+			if err := generate.ValidateResource(cmd.Context(), genOpts, plan.Pending, finalOverlay); err != nil {
 				return fmt.Errorf("gombit make resource: %w", err)
 			}
 			if dryRun {
