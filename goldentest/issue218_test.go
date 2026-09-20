@@ -14,15 +14,30 @@ import (
 	"github.com/gombit-dev/gombit/resourcegen"
 )
 
-// TestIssue218ModelFirstResolvesDTODrift is the end-to-end regression for #218:
-// the generated handler DTO used to be frozen at generation time and hand-owned,
-// so evolving the model rejected new fields on input, dropped them from responses,
-// and silently zero-filled NOT NULL columns — with nothing to detect the
-// divergence. The model-first redesign (RESGEN-1) makes the model the source of
-// truth and derives the *.gen.go from it, and `gombit generate --check` detects
-// staleness. This test reproduces the exact #218 scenario — scaffold a resource,
-// then hand-add NOT NULL FK + time columns to the model — and asserts every
-// failure mode is now resolved.
+// TestIssue218ModelFirstResolvesDTODrift is the regression for #218: the generated
+// handler DTO used to be frozen at generation time and hand-owned, so evolving the
+// model rejected new fields on input, dropped them from responses, and silently
+// zero-filled NOT NULL columns, with nothing to detect the divergence. The
+// model-first redesign (RESGEN-1) makes the model the source of truth, derives the
+// *.gen.go from it, and gates staleness with `gombit generate --check`.
+//
+// This reproduces the exact #218 scenario (scaffold a resource, then hand-add a
+// NOT NULL FK + a NOT NULL timestamp to the model) and asserts:
+//
+//   - detectability: `gombit generate --check` (the function the CLI wraps) FAILS
+//     with "stale" on the evolved-but-not-regenerated tree, and PASSES after
+//     regeneration;
+//   - the source-level contract regeneration establishes: the evolved fields land
+//     in the request and response DTOs with their wire names AND are copied by the
+//     generated mappers (row from body on create, data from row on read) — what
+//     makes them accepted, persisted, and returned rather than present-but-discarded
+//     (ADR-016's fourth #218 mode); the NOT NULL value type is a required
+//     (non-pointer) field;
+//   - the regenerated app compiles.
+//
+// This package does not boot HTTP, so it does not observe the 422 an omitted
+// required field produces (that is Huma's behavior for a non-pointer field); it
+// locks the derivation — the model's fields flowing through the DTOs and mappers.
 func TestIssue218ModelFirstResolvesDTODrift(t *testing.T) {
 	appDir := scaffoldDemo(t)
 
@@ -83,27 +98,46 @@ type Ownership struct {
 		t.Fatalf("--check error should report stale files, got: %v", err)
 	}
 
-	// Regenerate: the DTOs are re-derived from the current model.
+	// Regenerate: the DTOs, mappers, and handler are re-derived from the current model.
 	mustGenerate(t, copyDir, false)
 
+	// The regenerated files are now fresh — the drift gate round-trips.
+	if err := generateCheck(t, copyDir); err != nil {
+		t.Fatalf("gombit generate --check must pass after regeneration, got: %v", err)
+	}
+
 	dto := readFileString218(t, filepath.Join(copyDir, "internal", "ownership", "dto.gen.go"))
-	// Collapse gofmt's column alignment so field checks are whitespace-insensitive.
+	flat := collapseWS(dto) // collapse gofmt column alignment for substring checks
 	createBody := collapseWS(sliceBetween(dto, "ownershipCreateBody struct", "}"))
-	// Failure mode 1 (new fields rejected on input) is fixed: the evolved fields are
-	// now in the create body, so a client can supply them.
-	if !strings.Contains(createBody, "EngineID uint") {
-		t.Fatalf("create body must accept the new NOT NULL FK; got:\n%s", createBody)
+
+	// Mode 1 (new fields rejected on input): the evolved FK is in the create body
+	// with its wire name AND is copied into the row by the create mapper — accepted
+	// and persisted, not present-but-discarded (ADR-016's fourth mode).
+	for _, want := range []string{
+		"EngineID uint", `json:"engine_id"`, "row.EngineID = body.EngineID",
+	} {
+		if !strings.Contains(flat, want) {
+			t.Fatalf("create path must accept + persist the NOT NULL FK (missing %q); dto:\n%s", want, dto)
+		}
 	}
-	// Failure mode 3 (silent NOT NULL zero-fill) is fixed: the NOT NULL columns are
-	// non-pointer fields, which Huma treats as required — omitting them is a 422, not
-	// a silently zero-filled row. (An optional value type would render as a pointer.)
+	// Mode 3 (silent NOT NULL zero-fill): the NOT NULL value-type column is a
+	// required (non-pointer) create field — an optional column would render as
+	// *time.Time — and is likewise copied by the create mapper, so it cannot be
+	// dropped from the request struct and then zero-filled.
 	if !strings.Contains(createBody, "StartsAt time.Time") || strings.Contains(createBody, "*time.Time") {
-		t.Fatalf("NOT NULL time column must be a required (non-pointer) create field; got:\n%s", createBody)
+		t.Fatalf("NOT NULL time column must be a required (non-pointer) create field; body:\n%s", createBody)
 	}
-	// Failure mode 2 (new fields never returned) is fixed: they are in the response.
-	data := collapseWS(sliceBetween(dto, "ownershipData struct", "}"))
-	if !strings.Contains(data, "EngineID uint") || !strings.Contains(data, "StartsAt time.Time") {
-		t.Fatalf("response DTO must expose the evolved fields; got:\n%s", data)
+	if !strings.Contains(flat, "row.StartsAt = body.StartsAt") {
+		t.Fatalf("create mapper must copy the NOT NULL timestamp; dto:\n%s", dto)
+	}
+	// Mode 2 (new fields never returned): they are in the response DTO with their
+	// wire names and are copied by the response mapper.
+	for _, want := range []string{
+		`json:"starts_at"`, "EngineID: row.EngineID", "StartsAt: row.StartsAt",
+	} {
+		if !strings.Contains(flat, want) {
+			t.Fatalf("response path must expose the evolved fields (missing %q); dto:\n%s", want, dto)
+		}
 	}
 
 	// And the regenerated app still compiles.
