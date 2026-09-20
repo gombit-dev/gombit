@@ -102,6 +102,13 @@ func TestRunMakeCommandInResourcePackageCompiles(t *testing.T) {
 	}
 	dest := filepath.Join(workDir, "demo")
 	appendReplace(t, dest)
+	// make resource's phase-2 preflight runs go in a read-only module mode, so the
+	// module must be tidy first (a fresh --skip-tidy app is not).
+	pretidy := exec.Command("go", "mod", "tidy")
+	pretidy.Dir = dest
+	if out, err := pretidy.CombinedOutput(); err != nil {
+		t.Fatalf("go mod tidy: %v\n%s", err, out)
+	}
 	chdir(t, dest)
 
 	stdout := new(bytes.Buffer)
@@ -126,9 +133,11 @@ func TestRunMakeCommandInResourcePackageCompiles(t *testing.T) {
 	if !strings.Contains(commandsSrc, "func RegisterCommands") {
 		t.Fatal("book commands.go missing RegisterCommands")
 	}
-	routesSrc := readFileString(t, filepath.Join(dest, "internal", "book", "routes.go"))
-	if !strings.Contains(routesSrc, "func Register(app") {
-		t.Fatal("book routes.go lost Register")
+	// Model-first: Register lives in the generator-owned handler.gen.go that
+	// `make resource` produced by running gombit generate.
+	handlerSrc := readFileString(t, filepath.Join(dest, "internal", "book", "handler.gen.go"))
+	if !strings.Contains(handlerSrc, "func Register(app") {
+		t.Fatal("book handler.gen.go lost Register")
 	}
 	mainSrc := readFileString(t, filepath.Join(dest, "cmd", "gombit", "main.go"))
 	count, err := commandgen.CountRegisterCalls([]byte(mainSrc), "book")
