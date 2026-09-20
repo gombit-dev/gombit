@@ -64,6 +64,11 @@ type modelField struct {
 	resourcepolicy.Resolved
 	AccessPath string
 	GoType     string // rendered Go type expression, e.g. "string", "*time.Time", "types.Decimal"
+	// Size is the column's declared size (GORM schema.Field.Size), used to derive a
+	// maxLength on a string create field. It is emitted only when > 0 (a real
+	// varchar(N)); an unset/driver-dependent size (0 or -1) yields no maxLength —
+	// we only assert a constraint the model unambiguously states.
+	Size int
 	// Kind is the field's EFFECTIVE scalar reflect.Kind, with nullability unwrapped
 	// (a *string / sql.NullString column reports reflect.String) — see
 	// effectiveKind. It is a type CLASSIFICATION, distinct from GoType's rendered
@@ -163,6 +168,7 @@ func buildModelResource(model any, pkg string) (modelResource, error) {
 			AccessPath: strings.Join(f.BindNames, "."),
 			GoType:     goType,
 			Kind:       effectiveKind(f.FieldType),
+			Size:       f.Size,
 		}
 		// resourcepolicy validated the query capabilities as API policy (declared,
 		// response-visible); here, where the Go type is known, validate that the
@@ -454,30 +460,48 @@ func (f modelField) responseTag() string {
 	return `json:"` + f.jsonName() + `" doc:"` + f.GoName + `"`
 }
 
-// requestTag is the struct tag for f in the create request DTO: wire name,
-// an optional minLength:"1" for a NOT NULL string, and doc. Without the
-// constraint, a NOT NULL string column accepts `""` from the client — Resolved
-// says a create source exists, so resourcepolicy is satisfied, but the empty
-// string is not the data the column was declared to require: the same silent
-// zero-fill issue #218 exists to eliminate, reproduced by the DTO built to
-// prevent it (issue #352 review). The legacy field-grammar path emits this
-// constraint (fields.go, humaTags); this is the model-first path catching up,
-// not new scope — see modelField's doc comment for why NotNull survives the
-// projection to make this possible at all.
+// requestTag is the struct tag for f in the create request DTO: the wire name,
+// the create-input validation the schema unambiguously implies, and doc. All
+// constraints are schema-derived (never re-parsed from the CLI grammar):
 //
-// The string test keys off f.Kind (the reflect.Kind), not the GoType text: a
-// defined string column `type Slug string` renders as "Slug" but is still
-// Kind reflect.String and still zero-fills to "", so it needs the same
-// constraint. Keying off GoType == "string" would silently skip every named
-// string type — exactly the domain types (Slug, Email, Username) a real model
-// bothers to define (issue #352 review).
+//	minLength:"1"    a NOT NULL string — else "" satisfies resourcepolicy (a create
+//	                 source exists) but is not the data the column requires (#218).
+//	maxLength:"<N>"  a string whose column has a real size (Size > 0); an
+//	                 unset/driver-dependent size asserts nothing.
+//	minimum:"0"      an unsigned integer column.
+//
+// The string checks key off f.Kind (reflect.String), not the GoType text: a
+// defined `type Slug string` renders as "Slug" yet is Kind reflect.String and
+// still zero-fills to "", so it needs the same constraint. Enum value constraints
+// are NOT emitted — the GORM schema stores an enum as a plain varchar, so the
+// allowed values are not a recoverable schema fact (a known class-B gap).
 func (f modelField) requestTag() string {
 	tag := `json:"` + f.jsonName() + `"`
-	if f.Kind == reflect.String && f.NotNull {
-		tag += ` minLength:"1"`
+	if f.Kind == reflect.String {
+		if f.NotNull {
+			tag += ` minLength:"1"`
+		}
+		if f.Size > 0 {
+			tag += ` maxLength:"` + strconv.Itoa(f.Size) + `"`
+		}
+	}
+	if isUnsignedKind(f.Kind) {
+		tag += ` minimum:"0"`
 	}
 	tag += ` doc:"` + f.GoName + `"`
 	return tag
+}
+
+// isUnsignedKind reports whether the (unwrapped) kind is an unsigned integer, so
+// the create field carries minimum:"0" — GORM stores unsigned columns as
+// non-negative, matching the legacy generator.
+func isUnsignedKind(k reflect.Kind) bool {
+	switch k {
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return true
+	default:
+		return false
+	}
 }
 
 // renderModelDTOs emits the generator-owned DTO/mapper source for one resource:

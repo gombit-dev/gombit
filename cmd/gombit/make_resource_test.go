@@ -25,6 +25,14 @@ func TestRunMakeResourceBookCompiles(t *testing.T) {
 	}
 	dest := filepath.Join(workDir, "demo")
 	appendReplace(t, dest)
+	// make resource's phase-2 preflight runs go in a read-only module mode (it must
+	// not mutate go.mod/go.sum), so the module has to be tidy first — a fresh
+	// --skip-tidy app is not.
+	tidy := exec.Command("go", "mod", "tidy")
+	tidy.Dir = dest
+	if out, err := tidy.CombinedOutput(); err != nil {
+		t.Fatalf("go mod tidy: %v\n%s", err, out)
+	}
 
 	chdir(t, dest)
 	stdout := new(bytes.Buffer)
@@ -34,11 +42,6 @@ func TestRunMakeResourceBookCompiles(t *testing.T) {
 		t.Fatalf("make resource: %v; stderr=%q stdout=%q", err, stderr.String(), stdout.String())
 	}
 
-	tidy := exec.Command("go", "mod", "tidy")
-	tidy.Dir = dest
-	if out, err := tidy.CombinedOutput(); err != nil {
-		t.Fatalf("go mod tidy: %v\n%s", err, out)
-	}
 	build := exec.Command("go", "build", "./...")
 	build.Dir = dest
 	if out, err := build.CombinedOutput(); err != nil {
@@ -77,21 +80,27 @@ func TestRunMakeResourceBookCompiles(t *testing.T) {
 		t.Fatalf("re-run duplicated Register: %d", count)
 	}
 
-	handlerPath := filepath.Join(dest, "internal", "book", "handler.go")
-	if err := os.WriteFile(handlerPath, []byte("package book\n\n// edited by user\n"), 0o600); err != nil {
-		t.Fatalf("edit handler: %v", err)
+	// The model is human-owned (seed-once): a valid local edit survives a re-run
+	// (no error, no clobber), and generation still succeeds from the edited model.
+	edited := readFileString(t, modelPath) + "\n// edited by user\n"
+	if err := os.WriteFile(modelPath, []byte(edited), 0o600); err != nil {
+		t.Fatalf("edit model: %v", err)
 	}
 	err = run(context.Background(), []string{"make", "resource", "Book", "title:string:required"}, ioDiscard{}, ioDiscard{})
-	if err == nil || !strings.Contains(err.Error(), "--force") {
-		t.Fatalf("clobber error = %v, want --force", err)
+	if err != nil {
+		t.Fatalf("re-run over an edited model must succeed (seed-once), got: %v", err)
 	}
-	if !strings.Contains(readFileString(t, handlerPath), "edited by user") {
-		t.Fatal("user handler.go was overwritten")
+	if !strings.Contains(readFileString(t, modelPath), "edited by user") {
+		t.Fatal("re-run clobbered the human-owned model without --force")
 	}
 
+	// --force re-scaffolds the model from the CLI spec, discarding the local edit.
 	err = run(context.Background(), []string{"make", "resource", "Book", "title:string:required", "--force"}, ioDiscard{}, ioDiscard{})
 	if err != nil {
 		t.Fatalf("make resource --force: %v", err)
+	}
+	if strings.Contains(readFileString(t, modelPath), "edited by user") {
+		t.Fatal("--force did not re-scaffold the model")
 	}
 
 	dryStdout := new(bytes.Buffer)
@@ -144,17 +153,102 @@ func TestRunMakeResourceDryRunOnFreshApp(t *testing.T) {
 	if err := run(context.Background(), []string{"new", "demo", "--database", "sqlite", "--skip-tidy"}, ioDiscard{}, ioDiscard{}); err != nil {
 		t.Fatalf("new: %v", err)
 	}
-	chdir(t, filepath.Join(workDir, "demo"))
+	dest := filepath.Join(workDir, "demo")
+	appendReplace(t, dest)
+	// The overlay-backed dry-run runs Program Mode (go run) to validate the pending
+	// model, so the framework must resolve; tidy first so that go run does not have
+	// to touch go.mod/go.sum (keeping "dry-run writes nothing" honest).
+	tidy := exec.Command("go", "mod", "tidy")
+	tidy.Dir = dest
+	if out, err := tidy.CombinedOutput(); err != nil {
+		t.Fatalf("go mod tidy: %v\n%s", err, out)
+	}
+	chdir(t, dest)
+	// A dry-run must not mutate module metadata either — the preflight runs go in a
+	// read-only module mode, so go.mod/go.sum are untouched.
+	goModBefore := readFileString(t, filepath.Join(dest, "go.mod"))
+	goSumBefore := readFileString(t, filepath.Join(dest, "go.sum"))
 	stdout := new(bytes.Buffer)
 	err := run(context.Background(), []string{"make", "resource", "Widget", "name:string:required", "price:int", "--dry-run"}, stdout, ioDiscard{})
 	if err != nil {
 		t.Fatalf("dry-run: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(workDir, "demo", "internal", "widget")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dest, "internal", "widget")); !os.IsNotExist(err) {
 		t.Fatal("dry-run wrote widget package")
 	}
-	if !strings.Contains(stdout.String(), "internal/widget/widget.go") {
-		t.Fatalf("stdout = %q", stdout.String())
+	if readFileString(t, filepath.Join(dest, "go.mod")) != goModBefore {
+		t.Fatal("dry-run mutated go.mod")
+	}
+	if readFileString(t, filepath.Join(dest, "go.sum")) != goSumBefore {
+		t.Fatal("dry-run mutated go.sum")
+	}
+	out := stdout.String()
+	// The dry-run derives its preview from the real plan: the scaffold plus the exact
+	// generator-owned files gombit generate produces.
+	for _, want := range []string{
+		"internal/widget/widget.go",
+		"internal/widget/dto.gen.go",
+		"internal/widget/handler.gen.go",
+		"internal/widget/hooks.go",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("dry-run stdout = %q, want %q", out, want)
+		}
+	}
+}
+
+// A --force re-scaffold that changes the model must not commit if a preserved
+// human-owned hook no longer compiles against the regenerated model. The phase-2
+// preflight compiles the whole committed package (new model + new *.gen.go + the
+// kept hook), so the mismatch fails closed before any file changes.
+func TestRunMakeResourceForceValidatesPreservedHooks(t *testing.T) {
+	workDir := t.TempDir()
+	chdir(t, workDir)
+	if err := run(context.Background(), []string{"new", "demo", "--database", "sqlite", "--skip-tidy"}, ioDiscard{}, ioDiscard{}); err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	dest := filepath.Join(workDir, "demo")
+	appendReplace(t, dest)
+	tidy := exec.Command("go", "mod", "tidy")
+	tidy.Dir = dest
+	if out, err := tidy.CombinedOutput(); err != nil {
+		t.Fatalf("go mod tidy: %v\n%s", err, out)
+	}
+	chdir(t, dest)
+
+	if err := run(context.Background(), []string{"make", "resource", "Book", "title:string:required"}, ioDiscard{}, ioDiscard{}); err != nil {
+		t.Fatalf("make resource Book: %v", err)
+	}
+	// Customize the seed-once hook to read a model field.
+	hooksPath := filepath.Join(dest, "internal", "book", "hooks.go")
+	hooks := readFileString(t, hooksPath)
+	customized := strings.Replace(hooks, "\treturn nil", "\t_ = row.Title\n\treturn nil", 1)
+	if customized == hooks {
+		t.Fatalf("could not inject hook customization into:\n%s", hooks)
+	}
+	if err := os.WriteFile(hooksPath, []byte(customized), 0o600); err != nil {
+		t.Fatalf("write customized hook: %v", err)
+	}
+	modelPath := filepath.Join(dest, "internal", "book", "book.go")
+	modelBefore := readFileString(t, modelPath)
+
+	// --force re-scaffold that drops Title (uses Name instead). The kept hook still
+	// reads row.Title, so the preflight's final-tree compile must fail.
+	stderr := new(bytes.Buffer)
+	err := run(context.Background(), []string{"make", "resource", "Book", "name:string:required", "--force"}, ioDiscard{}, stderr)
+	if err == nil {
+		t.Fatal("make resource --force must fail when a preserved hook no longer compiles against the regenerated model")
+	}
+	if got := readFileString(t, modelPath); got != modelBefore {
+		t.Fatalf("a refused preflight must not rewrite the model, got:\n%s", got)
+	}
+	if !strings.Contains(readFileString(t, hooksPath), "row.Title") {
+		t.Fatal("the customized hook must be left intact")
+	}
+	build := exec.Command("go", "build", "./...")
+	build.Dir = dest
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("app must remain buildable after the refused --force: %v\n%s", err, out)
 	}
 }
 
