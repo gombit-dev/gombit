@@ -445,8 +445,12 @@ curl -s -b jar.txt -X POST http://127.0.0.1:8080/api/v1/tasks \
 ```
 
 ```json
-{"data":{"id":1,"title":"Write the tutorial","done":false}}
+{"data":{"id":1,"created_at":"2026-01-02T15:04:05Z","updated_at":"2026-01-02T15:04:05Z","title":"Write the tutorial","done":false}}
 ```
+
+The response carries `created_at`/`updated_at`: the model-first response DTO is
+derived from the model, so `gorm.Model`'s readable timestamps come through
+automatically.
 
 Skip the token and you get a clean refusal rather than a mutation:
 
