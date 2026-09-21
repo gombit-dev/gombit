@@ -33,6 +33,12 @@ type Options struct {
 	Stdout   io.Writer
 	Stderr   io.Writer
 	AtlasBin string
+	// SkipMigrations is the explicit opt-in to scaffolding the resource and
+	// persisting the loader/registry state without generating the Atlas SQL diff.
+	// It makes the committed output independent of whether Atlas is installed, at
+	// the cost of a registry-ahead-of-SQL state the developer knowingly accepts
+	// (#300).
+	SkipMigrations bool
 
 	skipAtlas bool
 }

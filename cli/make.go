@@ -3,6 +3,8 @@ package cli
 import (
 	"fmt"
 	"io"
+	"os/exec"
+	"strings"
 
 	"github.com/gombit-dev/gombit/commandgen"
 	"github.com/gombit-dev/gombit/generate"
@@ -30,10 +32,11 @@ func newMakeCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
 
 func newMakeResourceCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
 	var (
-		service bool
-		repo    bool
-		dryRun  bool
-		force   bool
+		service        bool
+		repo           bool
+		dryRun         bool
+		force          bool
+		skipMigrations bool
 	)
 	cmd := silence(&cobra.Command{
 		Use:   "resource <Name> [field:type[:modifiers]...]",
@@ -118,26 +121,45 @@ Re-running refuses to clobber user edits unless --force is set.
 
 Frontend pages import types from frontend/src/api/generated and map D10
 error.fields into React Hook Form. Run gombit client generate or gombit
-dev after the API is up so those types exist. Atlas SQL is generated when
-the atlas binary is on PATH, using every AutoMigrate model in
-internal/platform (not only the new resource). Otherwise the GORM model is
-still loader-ready for gombit db makemigrations.`,
+dev after the API is up so those types exist. Atlas SQL is generated from
+every AutoMigrate model in internal/platform (not only the new resource), so
+the atlas binary must be on PATH. Without it, make resource fails before
+writing anything so the committed tree never depends on whether Atlas was
+installed; pass --skip-migrations to scaffold the resource and registry now
+and generate the SQL later with gombit db makemigrations.`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// make resource is atomic. It plans both phases before touching the tree
 			// and applies the result as one unit, so it can never leave a
 			// half-migration (a resource marker with no generated handler, or a
 			// registration edit pointing at a Register that was never generated).
+			//
+			// Fail closed before any write when Atlas is missing (unless the user
+			// opted out of migrations): whether Atlas happens to be on PATH must not
+			// change the committed tree. Checked here, before Plan touches anything,
+			// so the failure is atomic (#300). --dry-run writes nothing, so it does
+			// not need Atlas.
+			if !dryRun && !skipMigrations {
+				if _, err := exec.LookPath("atlas"); err != nil {
+					return fmt.Errorf(
+						"gombit make resource: Atlas is required to generate database migrations.\n\n"+
+							"Install Atlas and retry, or run:\n\n"+
+							"    gombit make resource %s --skip-migrations\n\n"+
+							"to create the resource without generating migration SQL",
+						strings.Join(args, " "))
+				}
+			}
 			resOpts := resourcegen.Options{
-				WorkDir: ".",
-				Name:    args[0],
-				Fields:  args[1:],
-				Service: service,
-				Repo:    repo,
-				DryRun:  dryRun,
-				Force:   force,
-				Stdout:  stdout,
-				Stderr:  stderr,
+				WorkDir:        ".",
+				Name:           args[0],
+				Fields:         args[1:],
+				Service:        service,
+				Repo:           repo,
+				DryRun:         dryRun,
+				Force:          force,
+				SkipMigrations: skipMigrations,
+				Stdout:         stdout,
+				Stderr:         stderr,
 			}
 			// Phase 1 (no writes): plan the human-owned scaffold — model, marker, AST
 			// registration/AutoMigrate, frontend. This runs every static check (app
@@ -195,6 +217,7 @@ still loader-ready for gombit db makemigrations.`,
 	cmd.Flags().BoolVar(&repo, "repo", false, "also write a pass-through repo.go")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print files that would be written without writing")
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite files that differ from this run")
+	cmd.Flags().BoolVar(&skipMigrations, "skip-migrations", false, "scaffold the resource and registry without generating migration SQL (does not require Atlas)")
 	return cmd
 }
 

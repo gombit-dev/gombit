@@ -311,3 +311,31 @@ func modulePathFromGoMod(t *testing.T, dir string) string {
 	t.Fatal("go.mod missing module path")
 	return ""
 }
+
+func TestRunMakeResourceFailsClosedWithoutAtlas(t *testing.T) {
+	workDir := t.TempDir()
+	chdir(t, workDir)
+	if err := run(context.Background(), []string{"new", "demo", "--database", "sqlite", "--skip-tidy"}, ioDiscard{}, ioDiscard{}); err != nil {
+		t.Fatalf("gombit new: %v", err)
+	}
+	dest := filepath.Join(workDir, "demo")
+	chdir(t, dest)
+
+	// No atlas resolvable: make resource must fail before writing anything, so the
+	// committed tree never depends on whether Atlas happened to be installed (#300).
+	// The atlas check is the first thing RunE does, before any go toolchain use, so
+	// an empty PATH still surfaces the Atlas-required error rather than a go error.
+	t.Setenv("PATH", "")
+	stderr := new(bytes.Buffer)
+	err := run(context.Background(), []string{"make", "resource", "Book", "title:string:required"}, ioDiscard{}, stderr)
+	if err == nil {
+		t.Fatal("make resource without atlas: error = nil, want an Atlas-required failure")
+	}
+	if !strings.Contains(err.Error(), "Atlas is required") || !strings.Contains(err.Error(), "--skip-migrations") {
+		t.Fatalf("error = %v, want it to require Atlas and point at --skip-migrations", err)
+	}
+	// Atomic failure: nothing scaffolded.
+	if _, statErr := os.Stat(filepath.Join(dest, "internal", "book")); !os.IsNotExist(statErr) {
+		t.Fatalf("internal/book must not be created on a fail-closed run; stat err = %v", statErr)
+	}
+}

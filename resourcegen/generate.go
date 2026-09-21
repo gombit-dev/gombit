@@ -679,6 +679,9 @@ func renderResourcesTS(resources []ResourceName) []byte {
 }
 
 func maybeMakeMigrations(ctx context.Context, opts Options, spec renderContext, models []migrations.Model) error {
+	if opts.SkipMigrations {
+		return skipMigrations(opts, spec, models, "--skip-migrations set")
+	}
 	if opts.skipAtlas {
 		return printMakemigrationsHint(opts, spec, models, "skipped in tests")
 	}
@@ -702,6 +705,26 @@ func maybeMakeMigrations(ctx context.Context, opts Options, spec renderContext, 
 		return fmt.Errorf("resourcegen: makemigrations: %w", err)
 	}
 	return nil
+}
+
+// skipMigrations persists the loader/registry state (models.json) without running
+// the Atlas SQL diff, so the tree make resource commits is identical whether or
+// not Atlas is installed — the deterministic half of #300. It is reached only via
+// the explicit --skip-migrations opt-in; the CLI otherwise fails closed when Atlas
+// is absent.
+func skipMigrations(opts Options, spec renderContext, models []migrations.Model, reason string) error {
+	migrationDir := filepath.Join(opts.WorkDir, "database", "migrations")
+	if err := os.MkdirAll(migrationDir, 0o750); err != nil {
+		return fmt.Errorf("resourcegen: create migration dir: %w", err)
+	}
+	registered, err := migrations.LoadRegistry(migrationDir)
+	if err != nil {
+		return err
+	}
+	if err := migrations.SaveRegistry(migrationDir, migrations.MergeModels(registered, models)); err != nil {
+		return err
+	}
+	return printMakemigrationsHint(opts, spec, models, reason)
 }
 
 func printMakemigrationsHint(opts Options, spec renderContext, models []migrations.Model, reason string) error {

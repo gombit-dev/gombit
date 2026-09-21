@@ -15,6 +15,56 @@ import (
 	"github.com/gombit-dev/gombit/scaffold"
 )
 
+func TestGenerateSkipMigrationsWritesRegistryWithoutSQL(t *testing.T) {
+	workDir := t.TempDir()
+	if err := scaffold.Generate(context.Background(), scaffold.Options{
+		Name:     "demo",
+		Database: "sqlite",
+		WorkDir:  workDir,
+		Stdout:   ioDiscard{},
+	}); err != nil {
+		t.Fatalf("scaffold: %v", err)
+	}
+	appDir := filepath.Join(workDir, "demo")
+
+	// Atlas unavailable: --skip-migrations must still produce a deterministic
+	// loader/registry state without it (#300, part 2).
+	previousLook := lookPath
+	lookPath = func(string) (string, error) { return "", errors.New("atlas missing") }
+	t.Cleanup(func() { lookPath = previousLook })
+
+	stdout := new(bytes.Buffer)
+	err := Generate(context.Background(), Options{
+		WorkDir:        appDir,
+		Name:           "Book",
+		Fields:         []string{"title:string:required"},
+		Stdout:         stdout,
+		SkipMigrations: true,
+	})
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+
+	migrationDir := filepath.Join(appDir, "database", "migrations")
+	registry := readFile(t, filepath.Join(migrationDir, "models.json"))
+	if !strings.Contains(registry, "/internal/book") {
+		t.Fatalf("models.json = %q, want the Book model recorded", registry)
+	}
+	// Only the registry is written; the Atlas SQL diff is deferred.
+	entries, err := os.ReadDir(migrationDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".sql") {
+			t.Fatalf("unexpected SQL migration under --skip-migrations: %s", e.Name())
+		}
+	}
+	if !strings.Contains(stdout.String(), "gombit db makemigrations") {
+		t.Fatalf("stdout = %q, want the makemigrations hint", stdout.String())
+	}
+}
+
 func TestGenerateBookFeaturePackage(t *testing.T) {
 	workDir := t.TempDir()
 	if err := scaffold.Generate(context.Background(), scaffold.Options{

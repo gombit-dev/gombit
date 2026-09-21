@@ -417,14 +417,31 @@ that file are not preserved.
 ### Migrations
 
 Gombit does not invent a migration DSL. The generated GORM model is
-Atlas-loader ready. If the `atlas` binary is on `PATH`, `make resource`
-attempts `migrations.MakeMigrations` with every `&pkg.Type{}` already
-registered in `internal/platform` AutoMigrate plus the new model, merged with
-`database/migrations/models.json` (see
-[migrations.md](migrations.md#generate-a-migration)) — so a model that isn't
-in the `AutoMigrate` list for some reason but is still tracked in the
-registry isn't dropped either. If Atlas is missing from `PATH`, SQL is
-skipped and the command prints:
+Atlas-loader ready. `make resource` runs `migrations.MakeMigrations` with every
+`&pkg.Type{}` already registered in `internal/platform` AutoMigrate plus the new
+model, merged with `database/migrations/models.json` (see
+[migrations.md](migrations.md#generate-a-migration)) — so a model that isn't in
+the `AutoMigrate` list for some reason but is still tracked in the registry
+isn't dropped either.
+
+Because that step needs the `atlas` binary, and whether Atlas happens to be on
+`PATH` must not change the committed tree, `make resource` **fails before
+writing anything** when Atlas is missing:
+
+```text
+Atlas is required to generate database migrations.
+
+Install Atlas and retry, or run:
+
+    gombit make resource Book title:string:required --skip-migrations
+
+to create the resource without generating migration SQL.
+```
+
+Pass `--skip-migrations` to scaffold the resource and persist the
+loader/registry state (`models.json`) now, deferring only the SQL diff — a
+registry-ahead-of-SQL state you opt into explicitly. Generate the SQL later,
+once Atlas is installed, with `gombit db makemigrations`:
 
 ```sh
 gombit db makemigrations create_books \
