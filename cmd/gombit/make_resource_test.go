@@ -37,7 +37,7 @@ func TestRunMakeResourceBookCompiles(t *testing.T) {
 	chdir(t, dest)
 	stdout := new(bytes.Buffer)
 	stderr := new(bytes.Buffer)
-	err = run(context.Background(), []string{"make", "resource", "Book", "title:string:required"}, stdout, stderr)
+	err = run(context.Background(), []string{"make", "resource", "Book", "title:string:required", "--skip-migrations"}, stdout, stderr)
 	if err != nil {
 		t.Fatalf("make resource: %v; stderr=%q stdout=%q", err, stderr.String(), stdout.String())
 	}
@@ -67,7 +67,7 @@ func TestRunMakeResourceBookCompiles(t *testing.T) {
 		t.Fatalf("ParseModel: %v", err)
 	}
 
-	err = run(context.Background(), []string{"make", "resource", "Book", "title:string:required"}, ioDiscard{}, ioDiscard{})
+	err = run(context.Background(), []string{"make", "resource", "Book", "title:string:required", "--skip-migrations"}, ioDiscard{}, ioDiscard{})
 	if err != nil {
 		t.Fatalf("re-run make resource: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestRunMakeResourceBookCompiles(t *testing.T) {
 	if err := os.WriteFile(modelPath, []byte(edited), 0o600); err != nil {
 		t.Fatalf("edit model: %v", err)
 	}
-	err = run(context.Background(), []string{"make", "resource", "Book", "title:string:required"}, ioDiscard{}, ioDiscard{})
+	err = run(context.Background(), []string{"make", "resource", "Book", "title:string:required", "--skip-migrations"}, ioDiscard{}, ioDiscard{})
 	if err != nil {
 		t.Fatalf("re-run over an edited model must succeed (seed-once), got: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestRunMakeResourceBookCompiles(t *testing.T) {
 	}
 
 	// --force re-scaffolds the model from the CLI spec, discarding the local edit.
-	err = run(context.Background(), []string{"make", "resource", "Book", "title:string:required", "--force"}, ioDiscard{}, ioDiscard{})
+	err = run(context.Background(), []string{"make", "resource", "Book", "title:string:required", "--force", "--skip-migrations"}, ioDiscard{}, ioDiscard{})
 	if err != nil {
 		t.Fatalf("make resource --force: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestRunMakeResourceBookCompiles(t *testing.T) {
 		t.Fatal("dry-run changed internal/")
 	}
 
-	err = run(context.Background(), []string{"make", "resource", "Invoice", "--service", "--repo"}, ioDiscard{}, ioDiscard{})
+	err = run(context.Background(), []string{"make", "resource", "Invoice", "--service", "--repo", "--skip-migrations"}, ioDiscard{}, ioDiscard{})
 	if err != nil {
 		t.Fatalf("service/repo: %v", err)
 	}
@@ -216,7 +216,7 @@ func TestRunMakeResourceForceValidatesPreservedHooks(t *testing.T) {
 	}
 	chdir(t, dest)
 
-	if err := run(context.Background(), []string{"make", "resource", "Book", "title:string:required"}, ioDiscard{}, ioDiscard{}); err != nil {
+	if err := run(context.Background(), []string{"make", "resource", "Book", "title:string:required", "--skip-migrations"}, ioDiscard{}, ioDiscard{}); err != nil {
 		t.Fatalf("make resource Book: %v", err)
 	}
 	// Customize the seed-once hook to read a model field.
@@ -235,7 +235,7 @@ func TestRunMakeResourceForceValidatesPreservedHooks(t *testing.T) {
 	// --force re-scaffold that drops Title (uses Name instead). The kept hook still
 	// reads row.Title, so the preflight's final-tree compile must fail.
 	stderr := new(bytes.Buffer)
-	err := run(context.Background(), []string{"make", "resource", "Book", "name:string:required", "--force"}, ioDiscard{}, stderr)
+	err := run(context.Background(), []string{"make", "resource", "Book", "name:string:required", "--force", "--skip-migrations"}, ioDiscard{}, stderr)
 	if err == nil {
 		t.Fatal("make resource --force must fail when a preserved hook no longer compiles against the regenerated model")
 	}
