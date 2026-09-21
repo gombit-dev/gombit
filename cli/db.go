@@ -111,6 +111,14 @@ func newMakeMigrationsCommand(stdout io.Writer, stderr io.Writer) *cobra.Command
 			if err != nil {
 				return err
 			}
+			renameValues, err := cmd.Flags().GetStringArray("rename")
+			if err != nil {
+				return err
+			}
+			renames, err := parseRenames(renameValues)
+			if err != nil {
+				return err
+			}
 			return migrations.MakeMigrations(cmd.Context(), migrations.Options{
 				WorkDir:      ".",
 				Name:         args[0],
@@ -119,6 +127,7 @@ func newMakeMigrationsCommand(stdout io.Writer, stderr io.Writer) *cobra.Command
 				AtlasBinary:  atlasBin,
 				Models:       models,
 				ForgetModels: forgetModels,
+				Renames:      renames,
 				Stdout:       stdout,
 				Stderr:       stderr,
 			})
@@ -129,7 +138,20 @@ func newMakeMigrationsCommand(stdout io.Writer, stderr io.Writer) *cobra.Command
 	cmd.Flags().String("atlas-bin", "atlas", "Atlas CLI binary path")
 	cmd.Flags().StringArray("model", nil, "GORM model import path and type, e.g. github.com/acme/app/internal/product.Product; repeat for multiple models. Merged with models already registered from earlier makemigrations runs — you don't need to repeat them.")
 	cmd.Flags().StringArray("forget-model", nil, "GORM model import path and type to stop tracking, proposing a DROP for its table; repeat for multiple models")
+	cmd.Flags().StringArray("rename", nil, "rename a column data-preservingly as table.old_column:new_column (native RENAME COLUMN, not a drop+add rebuild); repeat for multiple columns. Cannot be combined with --model/--forget-model.")
 	return cmd
+}
+
+func parseRenames(values []string) ([]migrations.Rename, error) {
+	renames := make([]migrations.Rename, 0, len(values))
+	for _, value := range values {
+		rename, err := migrations.ParseRename(value)
+		if err != nil {
+			return nil, err
+		}
+		renames = append(renames, rename)
+	}
+	return renames, nil
 }
 
 func parseModels(values []string) ([]migrations.Model, error) {
