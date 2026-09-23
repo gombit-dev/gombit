@@ -155,6 +155,83 @@ func TestMakeMigrationsRunsAtlasDiffForSupportedDrivers(t *testing.T) {
 	}
 }
 
+func TestMakeMigrationsRejectsUntrackedForgetModel(t *testing.T) {
+	workDir := t.TempDir()
+	runner := &recordingRunner{t: t}
+
+	err := MakeMigrations(context.Background(), Options{
+		WorkDir:      workDir,
+		Name:         "drop_widget",
+		Driver:       config.DatabaseDriverSQLite,
+		MigrationDir: "database/migrations",
+		AtlasBinary:  "atlas-test",
+		Models: []Model{
+			{ImportPath: "github.com/example/app/internal/product", TypeName: "Product"},
+		},
+		ForgetModels: []Model{
+			{ImportPath: "github.com/example/app/internal/widget", TypeName: "Widget"},
+		},
+		Stdout: io.Discard,
+		runner: runner,
+	})
+	if err == nil {
+		t.Fatal("MakeMigrations() error = nil, want an untracked --forget-model error")
+	}
+	if !strings.Contains(err.Error(), "not tracked") {
+		t.Fatalf("error = %v, want it to say the model is not tracked", err)
+	}
+	// A silent no-op is the exact bug (#300): the run must not reach Atlas nor
+	// leave a migration directory behind as a side effect.
+	if runner.name != "" || runner.goName != "" {
+		t.Fatalf("nothing should run for an untracked forget; ran name=%q goName=%q", runner.name, runner.goName)
+	}
+	if _, statErr := os.Stat(filepath.Join(workDir, "database/migrations")); !os.IsNotExist(statErr) {
+		t.Fatalf("migration dir must not be created on a rejected run; stat err = %v", statErr)
+	}
+}
+
+func TestMakeMigrationsForgetsTrackedModel(t *testing.T) {
+	workDir := t.TempDir()
+	migrationDir := filepath.Join(workDir, "database/migrations")
+	if err := os.MkdirAll(migrationDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveRegistry(migrationDir, []Model{
+		{ImportPath: "github.com/example/app/internal/product", TypeName: "Product"},
+		{ImportPath: "github.com/example/app/internal/widget", TypeName: "Widget"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := &recordingRunner{t: t}
+	err := MakeMigrations(context.Background(), Options{
+		WorkDir:      workDir,
+		Name:         "drop_widget",
+		Driver:       config.DatabaseDriverSQLite,
+		MigrationDir: "database/migrations",
+		AtlasBinary:  "atlas-test",
+		ForgetModels: []Model{
+			{ImportPath: "github.com/example/app/internal/widget", TypeName: "Widget"},
+		},
+		Stdout: io.Discard,
+		runner: runner,
+	})
+	if err != nil {
+		t.Fatalf("MakeMigrations() error = %v, want nil for a tracked forget", err)
+	}
+	got, err := LoadRegistry(migrationDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].TypeName != "Product" {
+		t.Fatalf("registry after forget = %#v, want only Product", got)
+	}
+	// The desired-state loader the diff runs on must drop the forgotten model.
+	if strings.Contains(runner.loader, "Widget") {
+		t.Fatalf("loader must not reference the forgotten Widget: %q", runner.loader)
+	}
+}
+
 func TestMakeMigrationsGeneratedLoaderUsesRealGormschema(t *testing.T) {
 	workDir := projectRoot(t)
 	migrationDir := t.TempDir()

@@ -112,7 +112,7 @@ func TestRunMakeCommandInResourcePackageCompiles(t *testing.T) {
 	chdir(t, dest)
 
 	stdout := new(bytes.Buffer)
-	err := run(context.Background(), []string{"make", "resource", "Book", "title:string:required"}, stdout, ioDiscard{})
+	err := run(context.Background(), []string{"make", "resource", "Book", "title:string:required", "--skip-migrations"}, stdout, ioDiscard{})
 	if err != nil {
 		t.Fatalf("make resource Book: %v; stdout=%q", err, stdout.String())
 	}

@@ -15,6 +15,60 @@ import (
 	"github.com/gombit-dev/gombit/scaffold"
 )
 
+func TestGenerateSkipMigrationsWritesRegistryWithoutSQL(t *testing.T) {
+	workDir := t.TempDir()
+	if err := scaffold.Generate(context.Background(), scaffold.Options{
+		Name:     "demo",
+		Database: "sqlite",
+		WorkDir:  workDir,
+		Stdout:   ioDiscard{},
+	}); err != nil {
+		t.Fatalf("scaffold: %v", err)
+	}
+	appDir := filepath.Join(workDir, "demo")
+
+	// Atlas unavailable: --skip-migrations must still produce a deterministic
+	// loader/registry state without it (#300, part 2).
+	previousLook := lookPath
+	lookPath = func(string) (string, error) { return "", errors.New("atlas missing") }
+	t.Cleanup(func() { lookPath = previousLook })
+
+	stdout := new(bytes.Buffer)
+	err := Generate(context.Background(), Options{
+		WorkDir:        appDir,
+		Name:           "Book",
+		Fields:         []string{"title:string:required"},
+		Stdout:         stdout,
+		SkipMigrations: true,
+	})
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+
+	migrationDir := filepath.Join(appDir, "database", "migrations")
+	registry := readFile(t, filepath.Join(migrationDir, "models.json"))
+	if !strings.Contains(registry, "/internal/book") {
+		t.Fatalf("models.json = %q, want the Book model recorded", registry)
+	}
+	// Only the registry is written; the Atlas SQL diff is deferred.
+	entries, err := os.ReadDir(migrationDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".sql") {
+			t.Fatalf("unexpected SQL migration under --skip-migrations: %s", e.Name())
+		}
+	}
+	if !strings.Contains(stdout.String(), "gombit db makemigrations") {
+		t.Fatalf("stdout = %q, want the makemigrations hint", stdout.String())
+	}
+	// The deferred command must name every AutoMigrate model, not only the new one.
+	if !strings.Contains(stdout.String(), "/internal/product.Product") || !strings.Contains(stdout.String(), "/internal/book.Book") {
+		t.Fatalf("stdout = %q, want existing product and new book models in the makemigrations hint", stdout.String())
+	}
+}
+
 func TestGenerateBookFeaturePackage(t *testing.T) {
 	workDir := t.TempDir()
 	if err := scaffold.Generate(context.Background(), scaffold.Options{
@@ -264,7 +318,11 @@ func TestGenerateDryRunAndServiceRepo(t *testing.T) {
 	}
 }
 
-func TestGenerateMissingAtlasPrintsHint(t *testing.T) {
+// TestGenerateMissingAtlasFailsClosed pins #300 at the library layer, not just the
+// CLI: a caller that goes straight to resourcegen with Atlas missing (and no
+// SkipMigrations) gets an error and an untouched tree — never a silent scaffold
+// without migrations.
+func TestGenerateMissingAtlasFailsClosed(t *testing.T) {
 	workDir := t.TempDir()
 	if err := scaffold.Generate(context.Background(), scaffold.Options{
 		Name:     "demo",
@@ -274,29 +332,72 @@ func TestGenerateMissingAtlasPrintsHint(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("scaffold: %v", err)
 	}
+	appDir := filepath.Join(workDir, "demo")
+	platformBefore := readFile(t, filepath.Join(appDir, "internal", "platform", "database.go"))
+	_, registryStatBefore := os.Stat(filepath.Join(appDir, "database", "migrations", "models.json"))
 
+	var looked []string
+	previousLook := lookPath
+	lookPath = func(name string) (string, error) {
+		looked = append(looked, name)
+		return "", errors.New("atlas missing")
+	}
+	t.Cleanup(func() { lookPath = previousLook })
+
+	err := Generate(context.Background(), Options{
+		WorkDir:  appDir,
+		Name:     "Book",
+		Fields:   []string{"title:string:required"},
+		Service:  true,
+		AtlasBin: "custom-atlas",
+		Stdout:   ioDiscard{},
+	})
+	if err == nil {
+		t.Fatal("Generate() error = nil, want a fail-closed Atlas error")
+	}
+	for _, want := range []string{"Atlas is required", `"custom-atlas"`, "gombit make resource Book title:string:required --service --skip-migrations"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want it to contain %q", err, want)
+		}
+	}
+	// Atlas is resolved from opts.AtlasBin, one place, not a hardcoded name.
+	if len(looked) != 1 || looked[0] != "custom-atlas" {
+		t.Fatalf("lookPath calls = %v, want exactly [custom-atlas]", looked)
+	}
+	// Nothing written: no feature package, AutoMigrate untouched, registry untouched.
+	if _, statErr := os.Stat(filepath.Join(appDir, "internal", "book")); !os.IsNotExist(statErr) {
+		t.Fatalf("internal/book must not exist after a fail-closed run; stat err = %v", statErr)
+	}
+	if got := readFile(t, filepath.Join(appDir, "internal", "platform", "database.go")); got != platformBefore {
+		t.Fatal("internal/platform/database.go changed on a fail-closed run")
+	}
+	if _, statErr := os.Stat(filepath.Join(appDir, "database", "migrations", "models.json")); os.IsNotExist(statErr) != os.IsNotExist(registryStatBefore) {
+		t.Fatalf("models.json presence changed on a fail-closed run; before = %v, after = %v", registryStatBefore, statErr)
+	}
+}
+
+func TestPlanDryRunDoesNotRequireAtlas(t *testing.T) {
+	workDir := t.TempDir()
+	if err := scaffold.Generate(context.Background(), scaffold.Options{
+		Name:     "demo",
+		Database: "sqlite",
+		WorkDir:  workDir,
+		Stdout:   ioDiscard{},
+	}); err != nil {
+		t.Fatalf("scaffold: %v", err)
+	}
 	previousLook := lookPath
 	lookPath = func(string) (string, error) { return "", errors.New("atlas missing") }
 	t.Cleanup(func() { lookPath = previousLook })
 
-	stdout := new(bytes.Buffer)
-	err := Generate(context.Background(), Options{
+	if _, err := Plan(context.Background(), Options{
 		WorkDir: filepath.Join(workDir, "demo"),
 		Name:    "Book",
 		Fields:  []string{"title:string:required"},
-		Stdout:  stdout,
-	})
-	if err != nil {
-		t.Fatalf("Generate() error = %v, want missing-atlas hint", err)
-	}
-	if !strings.Contains(stdout.String(), "atlas not on PATH") {
-		t.Fatalf("stdout = %q, want atlas not on PATH hint", stdout.String())
-	}
-	if !strings.Contains(stdout.String(), "--model ") || !strings.Contains(stdout.String(), "/internal/product.Product") {
-		t.Fatalf("stdout = %q, want existing product model in makemigrations hint", stdout.String())
-	}
-	if !strings.Contains(stdout.String(), "/internal/book.Book") {
-		t.Fatalf("stdout = %q, want new book model in makemigrations hint", stdout.String())
+		DryRun:  true,
+		Stdout:  ioDiscard{},
+	}); err != nil {
+		t.Fatalf("Plan(DryRun) error = %v, want nil: a dry run writes nothing and needs no Atlas", err)
 	}
 }
 
@@ -453,6 +554,13 @@ func TestGenerateUnknownType(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("scaffold: %v", err)
 	}
+	// Atlas is missing too: an invalid field is the user's input error and must be
+	// reported as such, not masked by the fail-closed Atlas check. Pinned here so
+	// the ordering is asserted on every machine, not only ones without Atlas.
+	previousLook := lookPath
+	lookPath = func(string) (string, error) { return "", errors.New("atlas missing") }
+	t.Cleanup(func() { lookPath = previousLook })
+
 	err := Generate(context.Background(), Options{
 		WorkDir: filepath.Join(workDir, "demo"),
 		Name:    "Widget",
@@ -460,7 +568,7 @@ func TestGenerateUnknownType(t *testing.T) {
 		Stdout:  ioDiscard{},
 	})
 	if err == nil || !strings.Contains(err.Error(), "unknown type") {
-		t.Fatalf("error = %v, want unknown type", err)
+		t.Fatalf("error = %v, want unknown type (reported before the missing-Atlas error)", err)
 	}
 }
 

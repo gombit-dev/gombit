@@ -1,0 +1,28 @@
+{
+  "models": [
+    {
+      "import_path": "github.com/example/demo/internal/book",
+      "type_name": "Book"
+    },
+    {
+      "import_path": "github.com/example/demo/internal/product",
+      "type_name": "Product"
+    },
+    {
+      "import_path": "github.com/gombit-dev/gombit/auth",
+      "type_name": "Group"
+    },
+    {
+      "import_path": "github.com/gombit-dev/gombit/auth",
+      "type_name": "Permission"
+    },
+    {
+      "import_path": "github.com/gombit-dev/gombit/auth",
+      "type_name": "RefreshToken"
+    },
+    {
+      "import_path": "github.com/gombit-dev/gombit/auth",
+      "type_name": "User"
+    }
+  ]
+}

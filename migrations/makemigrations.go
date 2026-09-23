@@ -115,7 +115,11 @@ func MakeMigrations(ctx context.Context, opts Options) error {
 	// forward every model an earlier makemigrations call registered, so this
 	// invocation only needs to name what's new. Without this, Atlas would
 	// see anything not repeated here as schema drift and drop it (#97).
-	allModels := SubtractModels(MergeModels(registered, opts.Models), opts.ForgetModels)
+	known := MergeModels(registered, opts.Models)
+	if err := ensureForgetModelsTracked(known, opts.ForgetModels); err != nil {
+		return err
+	}
+	allModels := SubtractModels(known, opts.ForgetModels)
 	if len(allModels) == 0 {
 		return errors.New("migrations: no models to migrate: nothing in the registry and no --model given")
 	}
@@ -241,6 +245,26 @@ func validateOptions(opts Options) error {
 	for _, model := range opts.ForgetModels {
 		if err := validateModel(model); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// ensureForgetModelsTracked rejects a --forget-model that names a model nothing
+// tracks. SubtractModels silently drops an unknown entry, so without this the run
+// is a no-op that exits 0 with no DROP — the flag looks like it did nothing. A
+// typo in the import path is the common cause (#300).
+func ensureForgetModelsTracked(tracked, forget []Model) error {
+	if len(forget) == 0 {
+		return nil
+	}
+	have := make(map[Model]bool, len(tracked))
+	for _, model := range tracked {
+		have[model] = true
+	}
+	for _, model := range forget {
+		if !have[model] {
+			return fmt.Errorf("migrations: --forget-model %s.%s is not tracked (not in the model registry); nothing to forget", model.ImportPath, model.TypeName)
 		}
 	}
 	return nil

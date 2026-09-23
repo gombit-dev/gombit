@@ -122,6 +122,14 @@ func Plan(ctx context.Context, opts Options) (*ResourcePlan, error) {
 			return nil, fmt.Errorf("resourcegen: field %q is an enum, which the model-first generator does not support yet (enum values are not recoverable from the GORM schema); use a string field for now — a model-first enum policy is planned", f.JSONName)
 		}
 	}
+	// Fail closed on a missing Atlas here, in the library, not in a caller: whether
+	// Atlas happens to be on PATH must never change what make resource commits
+	// (#300). It runs after the input checks above, so a bad name or field is
+	// reported as such rather than masked by an environment error, and before
+	// anything is written — Plan writes nothing — so the failure stays atomic.
+	if err := opts.ensureAtlas(); err != nil {
+		return nil, err
+	}
 	module, err := readModulePath(opts.WorkDir)
 	if err != nil {
 		return nil, err
@@ -679,14 +687,15 @@ func renderResourcesTS(resources []ResourceName) []byte {
 }
 
 func maybeMakeMigrations(ctx context.Context, opts Options, spec renderContext, models []migrations.Model) error {
+	if opts.SkipMigrations {
+		return skipMigrations(opts, spec, models, "--skip-migrations set")
+	}
 	if opts.skipAtlas {
 		return printMakemigrationsHint(opts, spec, models, "skipped in tests")
 	}
-	atlasPath, lookErr := lookPath(opts.AtlasBin)
-	if lookErr != nil || atlasPath == "" {
-		return printMakemigrationsHint(opts, spec, models, "atlas not on PATH")
-	}
-
+	// No "Atlas not on PATH" fallback: Plan already failed closed if Atlas was
+	// missing, and a silent skip here is what made the committed tree depend on
+	// PATH (#300). If Atlas vanished since Plan, makeMigrations errors loudly.
 	driver := readDatabaseDriver(opts.WorkDir)
 	err := makeMigrations(ctx, migrations.Options{
 		WorkDir:      opts.WorkDir,
@@ -702,6 +711,26 @@ func maybeMakeMigrations(ctx context.Context, opts Options, spec renderContext, 
 		return fmt.Errorf("resourcegen: makemigrations: %w", err)
 	}
 	return nil
+}
+
+// skipMigrations persists the loader/registry state (models.json) without running
+// the Atlas SQL diff, so the tree make resource commits is identical whether or
+// not Atlas is installed — the deterministic half of #300. It is reached only via
+// the explicit SkipMigrations opt-in; Plan otherwise fails closed when Atlas is
+// absent.
+func skipMigrations(opts Options, spec renderContext, models []migrations.Model, reason string) error {
+	migrationDir := filepath.Join(opts.WorkDir, "database", "migrations")
+	if err := os.MkdirAll(migrationDir, 0o750); err != nil {
+		return fmt.Errorf("resourcegen: create migration dir: %w", err)
+	}
+	registered, err := migrations.LoadRegistry(migrationDir)
+	if err != nil {
+		return err
+	}
+	if err := migrations.SaveRegistry(migrationDir, migrations.MergeModels(registered, models)); err != nil {
+		return err
+	}
+	return printMakemigrationsHint(opts, spec, models, reason)
 }
 
 func printMakemigrationsHint(opts Options, spec renderContext, models []migrations.Model, reason string) error {
