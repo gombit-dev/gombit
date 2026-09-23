@@ -181,12 +181,12 @@ func TestGeneratePackageFlag(t *testing.T) {
 func TestGenerateCommandInExistingResourcePackage(t *testing.T) {
 	appDir := scaffoldApp(t)
 	err := resourcegen.Generate(context.Background(), resourcegen.Options{
-		WorkDir:  appDir,
-		Name:     "Book",
-		Fields:   []string{"title:string:required"},
-		Stdout:   ioDiscard{},
-		Stderr:   ioDiscard{},
-		AtlasBin: "gombit-atlas-not-installed",
+		WorkDir:        appDir,
+		Name:           "Book",
+		Fields:         []string{"title:string:required"},
+		Stdout:         ioDiscard{},
+		Stderr:         ioDiscard{},
+		SkipMigrations: true,
 	})
 	if err != nil {
 		t.Fatalf("make resource Book: %v", err)

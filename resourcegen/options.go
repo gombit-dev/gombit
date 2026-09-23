@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const (
@@ -62,6 +63,35 @@ func (opts *Options) normalize() error {
 		opts.AtlasBin = "atlas"
 	}
 	return nil
+}
+
+// ensureAtlas fails closed when this run would generate migration SQL but the
+// Atlas binary (opts.AtlasBin) cannot be resolved. A dry run writes nothing and
+// SkipMigrations is the explicit opt-out, so neither needs Atlas. This is the
+// single place make resource resolves Atlas; there is no silent fallback that
+// scaffolds without migrations (#300).
+func (opts Options) ensureAtlas() error {
+	if opts.DryRun || opts.SkipMigrations || opts.skipAtlas {
+		return nil
+	}
+	if path, err := lookPath(opts.AtlasBin); err == nil && path != "" {
+		return nil
+	}
+	rerun := append([]string{opts.Name}, opts.Fields...)
+	for _, flag := range []struct {
+		set  bool
+		name string
+	}{{opts.Service, "--service"}, {opts.Repo, "--repo"}, {opts.Force, "--force"}} {
+		if flag.set {
+			rerun = append(rerun, flag.name)
+		}
+	}
+	return fmt.Errorf(
+		"resourcegen: Atlas is required to generate database migrations (%q not found on PATH).\n\n"+
+			"Install Atlas and retry, or run:\n\n"+
+			"    gombit make resource %s --skip-migrations\n\n"+
+			"to create the resource without generating migration SQL",
+		opts.AtlasBin, strings.Join(rerun, " "))
 }
 
 func (opts Options) validateAppLayout() error {

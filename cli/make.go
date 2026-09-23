@@ -3,8 +3,6 @@ package cli
 import (
 	"fmt"
 	"io"
-	"os/exec"
-	"strings"
 
 	"github.com/gombit-dev/gombit/commandgen"
 	"github.com/gombit-dev/gombit/generate"
@@ -133,22 +131,8 @@ and generate the SQL later with gombit db makemigrations.`,
 			// and applies the result as one unit, so it can never leave a
 			// half-migration (a resource marker with no generated handler, or a
 			// registration edit pointing at a Register that was never generated).
-			//
-			// Fail closed before any write when Atlas is missing (unless the user
-			// opted out of migrations): whether Atlas happens to be on PATH must not
-			// change the committed tree. Checked here, before Plan touches anything,
-			// so the failure is atomic (#300). --dry-run writes nothing, so it does
-			// not need Atlas.
-			if !dryRun && !skipMigrations {
-				if _, err := exec.LookPath("atlas"); err != nil {
-					return fmt.Errorf(
-						"gombit make resource: Atlas is required to generate database migrations.\n\n"+
-							"Install Atlas and retry, or run:\n\n"+
-							"    gombit make resource %s --skip-migrations\n\n"+
-							"to create the resource without generating migration SQL",
-						strings.Join(args, " "))
-				}
-			}
+			// A missing Atlas fails closed inside resourcegen.Plan (unless
+			// --skip-migrations or --dry-run), before anything is written (#300).
 			resOpts := resourcegen.Options{
 				WorkDir:        ".",
 				Name:           args[0],

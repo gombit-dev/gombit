@@ -47,12 +47,12 @@ func TestIssue218ModelFirstResolvesDTODrift(t *testing.T) {
 	// gombit generate below.
 	stdout := new(bytes.Buffer)
 	if err := resourcegen.Generate(context.Background(), resourcegen.Options{
-		WorkDir:  appDir,
-		Name:     "Ownership",
-		Fields:   []string{"note:string"},
-		AtlasBin: missingAtlas,
-		Stdout:   stdout,
-		Stderr:   io.Discard,
+		WorkDir:        appDir,
+		Name:           "Ownership",
+		Fields:         []string{"note:string"},
+		SkipMigrations: true,
+		Stdout:         stdout,
+		Stderr:         io.Discard,
 	}); err != nil {
 		t.Fatalf("make resource Ownership: %v\n%s", err, stdout.String())
 	}

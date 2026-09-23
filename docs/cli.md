@@ -45,8 +45,10 @@ generated backend (`go build` with a local `replace` in a temp copy — never
 committed), typechecks the frontend with `npx tsc --noEmit` when Node is
 on `PATH` (`t.Skip` otherwise), and checks that a second run is idempotent
 (`gombit new --force`, `make resource` without `--force`, `make command`
-without `--force`, `client generate` without `--force`). Atlas is not
-invoked, so migration filenames stay out of the trees.
+without `--force`, `client generate` without `--force`). `make resource`
+runs with `--skip-migrations`, so Atlas is not invoked and timestamped
+migration filenames stay out of the trees; the make-resource tree does include
+the deterministic `database/migrations/models.json` registry.
 
 ```sh
 go test ./goldentest
@@ -429,13 +431,13 @@ Because that step needs the `atlas` binary, and whether Atlas happens to be on
 writing anything** when Atlas is missing:
 
 ```text
-Atlas is required to generate database migrations.
+Atlas is required to generate database migrations ("atlas" not found on PATH).
 
 Install Atlas and retry, or run:
 
     gombit make resource Book title:string:required --skip-migrations
 
-to create the resource without generating migration SQL.
+to create the resource without generating migration SQL
 ```
 
 Pass `--skip-migrations` to scaffold the resource and persist the

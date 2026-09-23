@@ -92,6 +92,12 @@ func Plan(ctx context.Context, opts Options) (*ResourcePlan, error) {
 	if err := opts.validateAppLayout(); err != nil {
 		return nil, err
 	}
+	// Fail closed on a missing Atlas here, in the library, not in a caller: whether
+	// Atlas happens to be on PATH must never change what make resource commits
+	// (#300). Plan writes nothing, so failing here keeps the operation atomic.
+	if err := opts.ensureAtlas(); err != nil {
+		return nil, err
+	}
 
 	name, err := parseResourceName(opts.Name)
 	if err != nil {
@@ -685,11 +691,9 @@ func maybeMakeMigrations(ctx context.Context, opts Options, spec renderContext, 
 	if opts.skipAtlas {
 		return printMakemigrationsHint(opts, spec, models, "skipped in tests")
 	}
-	atlasPath, lookErr := lookPath(opts.AtlasBin)
-	if lookErr != nil || atlasPath == "" {
-		return printMakemigrationsHint(opts, spec, models, "atlas not on PATH")
-	}
-
+	// No "Atlas not on PATH" fallback: Plan already failed closed if Atlas was
+	// missing, and a silent skip here is what made the committed tree depend on
+	// PATH (#300). If Atlas vanished since Plan, makeMigrations errors loudly.
 	driver := readDatabaseDriver(opts.WorkDir)
 	err := makeMigrations(ctx, migrations.Options{
 		WorkDir:      opts.WorkDir,
@@ -710,8 +714,8 @@ func maybeMakeMigrations(ctx context.Context, opts Options, spec renderContext, 
 // skipMigrations persists the loader/registry state (models.json) without running
 // the Atlas SQL diff, so the tree make resource commits is identical whether or
 // not Atlas is installed — the deterministic half of #300. It is reached only via
-// the explicit --skip-migrations opt-in; the CLI otherwise fails closed when Atlas
-// is absent.
+// the explicit SkipMigrations opt-in; Plan otherwise fails closed when Atlas is
+// absent.
 func skipMigrations(opts Options, spec renderContext, models []migrations.Model, reason string) error {
 	migrationDir := filepath.Join(opts.WorkDir, "database", "migrations")
 	if err := os.MkdirAll(migrationDir, 0o750); err != nil {
