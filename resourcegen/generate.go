@@ -92,12 +92,6 @@ func Plan(ctx context.Context, opts Options) (*ResourcePlan, error) {
 	if err := opts.validateAppLayout(); err != nil {
 		return nil, err
 	}
-	// Fail closed on a missing Atlas here, in the library, not in a caller: whether
-	// Atlas happens to be on PATH must never change what make resource commits
-	// (#300). Plan writes nothing, so failing here keeps the operation atomic.
-	if err := opts.ensureAtlas(); err != nil {
-		return nil, err
-	}
 
 	name, err := parseResourceName(opts.Name)
 	if err != nil {
@@ -127,6 +121,14 @@ func Plan(ctx context.Context, opts Options) (*ResourcePlan, error) {
 		if f.Type == FieldEnum {
 			return nil, fmt.Errorf("resourcegen: field %q is an enum, which the model-first generator does not support yet (enum values are not recoverable from the GORM schema); use a string field for now — a model-first enum policy is planned", f.JSONName)
 		}
+	}
+	// Fail closed on a missing Atlas here, in the library, not in a caller: whether
+	// Atlas happens to be on PATH must never change what make resource commits
+	// (#300). It runs after the input checks above, so a bad name or field is
+	// reported as such rather than masked by an environment error, and before
+	// anything is written — Plan writes nothing — so the failure stays atomic.
+	if err := opts.ensureAtlas(); err != nil {
+		return nil, err
 	}
 	module, err := readModulePath(opts.WorkDir)
 	if err != nil {

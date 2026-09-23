@@ -554,6 +554,13 @@ func TestGenerateUnknownType(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("scaffold: %v", err)
 	}
+	// Atlas is missing too: an invalid field is the user's input error and must be
+	// reported as such, not masked by the fail-closed Atlas check. Pinned here so
+	// the ordering is asserted on every machine, not only ones without Atlas.
+	previousLook := lookPath
+	lookPath = func(string) (string, error) { return "", errors.New("atlas missing") }
+	t.Cleanup(func() { lookPath = previousLook })
+
 	err := Generate(context.Background(), Options{
 		WorkDir: filepath.Join(workDir, "demo"),
 		Name:    "Widget",
@@ -561,7 +568,7 @@ func TestGenerateUnknownType(t *testing.T) {
 		Stdout:  ioDiscard{},
 	})
 	if err == nil || !strings.Contains(err.Error(), "unknown type") {
-		t.Fatalf("error = %v, want unknown type", err)
+		t.Fatalf("error = %v, want unknown type (reported before the missing-Atlas error)", err)
 	}
 }
 
