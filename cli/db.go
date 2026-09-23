@@ -7,6 +7,7 @@ import (
 
 	"github.com/gombit-dev/gombit/config"
 	"github.com/gombit-dev/gombit/migrations"
+	"github.com/gombit-dev/gombit/resourcegen"
 	"github.com/spf13/cobra"
 )
 
@@ -111,6 +112,14 @@ func newMakeMigrationsCommand(stdout io.Writer, stderr io.Writer) *cobra.Command
 			if err != nil {
 				return err
 			}
+			// Fail closed on contradictory desired state: a --forget-model that is
+			// still an AutoMigrate argument would have its DROP silently undone by the
+			// next make resource / app start (AutoMigrate re-adds it). makemigrations
+			// must never rewrite or counteract the app's declared desired state, so
+			// refuse and tell the user to retire it there first (#300).
+			if err := ensureForgetModelsRetired(".", forgetModels); err != nil {
+				return err
+			}
 			renameValues, err := cmd.Flags().GetStringArray("rename")
 			if err != nil {
 				return err
@@ -152,6 +161,39 @@ func parseRenames(values []string) ([]migrations.Rename, error) {
 		renames = append(renames, rename)
 	}
 	return renames, nil
+}
+
+// ensureForgetModelsRetired refuses to forget a model that is still registered in
+// the app's AutoMigrate call. AutoMigrate (internal/platform/database.go) and the
+// migration registry are two declarations of desired state; forgetting a model
+// the app still auto-migrates leaves them contradictory, and the next make
+// resource / app start re-adds it — the DROP never sticks. Apps without that file
+// (a non-scaffolded layout) skip the check (#300).
+func ensureForgetModelsRetired(workDir string, forget []migrations.Model) error {
+	if len(forget) == 0 {
+		return nil
+	}
+	registered, ok, err := resourcegen.AutoMigrateModels(workDir)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+	have := make(map[migrations.Model]bool, len(registered))
+	for _, model := range registered {
+		have[model] = true
+	}
+	for _, model := range forget {
+		if have[model] {
+			return fmt.Errorf(
+				"gombit db makemigrations: cannot forget %s.%s: it is still registered in AutoMigrate (%s).\n\n"+
+					"Remove it from AutoMigrate (and any routes/resources referencing it), then rerun:\n\n"+
+					"    gombit db makemigrations <name> --forget-model %s.%s",
+				model.ImportPath, model.TypeName, resourcegen.PlatformDBRel(), model.ImportPath, model.TypeName)
+		}
+	}
+	return nil
 }
 
 func parseModels(values []string) ([]migrations.Model, error) {

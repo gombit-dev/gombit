@@ -15,11 +15,14 @@ import (
 
 func crudRow(fw string, conc, trial int, rps, p50, p95, p99 float64) result.Result {
 	return result.Result{
-		Framework: fw, Benchmark: "crud-list", Concurrency: conc, Trial: trial,
+		Framework: fw, Benchmark: crudBenchmark, Concurrency: conc, Trial: trial,
 		RequestsPerSecond: rps,
 		LatencyMs:         result.Latency{P50: p50, P95: p95, P99: p99},
 	}
 }
+
+// crudUnit is the provenance unit crudRow's rows are published under.
+func crudUnit(fw string) string { return result.ProvenanceUnit(fw, crudBenchmark) }
 
 // taxLadder is a complete four-rung headline-scenario ladder — the minimum the
 // framework-tax table will publish (a missing rung renders "incomplete"
@@ -287,7 +290,7 @@ func TestEachTableCarriesItsOwnProvenance(t *testing.T) {
 	}
 	meta.Groups = map[string]map[string]metadata.Provenance{
 		metadata.GroupMicrobench: {},
-		metadata.GroupCRUD:       {"gombit": host("2222222222222222", "2026-08-27T21:57:34Z", "CRUD CPU", "go1.25.7")},
+		metadata.GroupCRUD:       {crudUnit("gombit"): host("2222222222222222", "2026-08-27T21:57:34Z", "CRUD CPU", "go1.25.7")},
 		metadata.GroupFootprint:  {"gombit:container": host("3333333333333333", "2026-08-28T09:00:00Z", "Footprint CPU", "go1.25.7")},
 	}
 	for _, s := range stackLadder {
@@ -446,14 +449,46 @@ func TestEmbeddedVariantCannotRelabelTheContainerRow(t *testing.T) {
 	}
 }
 
+// The benchmark is part of CRUD's merge key, and results.json holds one row set
+// per (framework, workload), so recording another workload for an app must not
+// relabel the crud-list rows the README publishes (#361) — the footprint variant
+// rule above, applied to CRUD's workloads.
+func TestSecondWorkloadCannotRelabelTheCRUDTable(t *testing.T) {
+	clean := false
+	list := crudRow("gombit", 100, 1, 1000, 5, 10, 20)
+	auth := list
+	auth.Benchmark = "auth-jwt"
+	if list.ProvenanceUnit() == auth.ProvenanceUnit() {
+		t.Fatalf("two workloads must not share a provenance unit: %q", list.ProvenanceUnit())
+	}
+
+	meta := canonicalMeta()
+	meta = metadata.StampUnit(meta, metadata.GroupCRUD, list.ProvenanceUnit(),
+		metadata.Provenance{GitCommit: "aaaa11112222", Timestamp: "2026-09-01T00:00:00Z", GitDirty: &clean, CPUModel: "Bench Host"})
+	// A later run of a different workload writes different rows and a different unit.
+	meta = metadata.StampUnit(meta, metadata.GroupCRUD, auth.ProvenanceUnit(),
+		metadata.Provenance{GitCommit: "bbbb33334444", Timestamp: "2026-09-08T00:00:00Z", GitDirty: &clean, CPUModel: "Dev Host"})
+
+	out := Render([]result.Result{list, auth}, nil, nil, meta)
+	section := out[strings.Index(out, "### PostgreSQL CRUD read"):strings.Index(out, "### Operational footprint")]
+
+	// The published table is crud-list only, so it keeps the crud-list commit.
+	if !strings.Contains(section, "_Measured at `aaaa11112222`") {
+		t.Errorf("the crud-list rows must keep their own commit:\n%s", section)
+	}
+	if strings.Contains(section, "bbbb33334444") || strings.Contains(section, "Dev Host") {
+		t.Errorf("another workload's run must not caption the crud-list table:\n%s", section)
+	}
+}
+
 // The same rule, applied to CRUD — which the previous round covered with a prose
 // warning instead of code.
 func TestCrudSubsetRefreshAlsoRefusesATableWideCaption(t *testing.T) {
 	clean := false
 	meta := canonicalMeta()
-	meta = metadata.StampUnit(meta, metadata.GroupCRUD, "rails",
+	meta = metadata.StampUnit(meta, metadata.GroupCRUD, crudUnit("rails"),
 		metadata.Provenance{GitCommit: "aaaa11112222", Timestamp: "2026-09-01T00:00:00Z", GitDirty: &clean})
-	meta = metadata.StampUnit(meta, metadata.GroupCRUD, "gombit",
+	meta = metadata.StampUnit(meta, metadata.GroupCRUD, crudUnit("gombit"),
 		metadata.Provenance{GitCommit: "bbbb33334444", Timestamp: "2026-09-08T00:00:00Z", GitDirty: &clean})
 
 	out := Render([]result.Result{
@@ -465,7 +500,7 @@ func TestCrudSubsetRefreshAlsoRefusesATableWideCaption(t *testing.T) {
 	if !strings.Contains(section, "not measured together") {
 		t.Errorf("a CRUD table mixing commits must say so:\n%s", section)
 	}
-	if !strings.Contains(section, "rails at `aaaa11112222`") || !strings.Contains(section, "gombit at `bbbb33334444`") {
+	if !strings.Contains(section, "rails:crud-list at `aaaa11112222`") || !strings.Contains(section, "gombit:crud-list at `bbbb33334444`") {
 		t.Errorf("each app must be attributed to its own commit:\n%s", section)
 	}
 }
@@ -502,7 +537,7 @@ func TestRewrittenTopLevelNeverCaptionsUnrecordedRows(t *testing.T) {
 	clean := false
 	meta := canonicalMeta()
 	meta.GitCommit, meta.CPUModel = "bbbb33334444", "Subset Host"
-	meta = metadata.StampUnit(meta, metadata.GroupCRUD, "gombit",
+	meta = metadata.StampUnit(meta, metadata.GroupCRUD, crudUnit("gombit"),
 		metadata.Provenance{GitCommit: "bbbb33334444", Timestamp: "2026-09-08T00:00:00Z", GitDirty: &clean, CPUModel: "Subset Host"})
 
 	out := Render(
@@ -513,7 +548,7 @@ func TestRewrittenTopLevelNeverCaptionsUnrecordedRows(t *testing.T) {
 	crud := out[strings.Index(out, "### PostgreSQL CRUD read"):strings.Index(out, "### Operational footprint")]
 	prints := out[strings.Index(out, "### Operational footprint"):strings.Index(out, "### How these were measured")]
 
-	if !strings.Contains(crud, "not measured together") || !strings.Contains(crud, "rails at an unrecorded commit") {
+	if !strings.Contains(crud, "not measured together") || !strings.Contains(crud, "rails:crud-list at an unrecorded commit") {
 		t.Errorf("the untouched CRUD row must be reported as unrecorded, not collapsed into the subset's caption:\n%s", crud)
 	}
 	if strings.Contains(prints, "bbbb33334444") || strings.Contains(prints, "Subset Host") {
@@ -560,7 +595,7 @@ func TestDirtyUnitStampsUnpublishableAndNamesOnlyThatGroupsTarget(t *testing.T) 
 	meta := canonicalMeta()
 	dirty, clean := true, false
 	meta = metadata.StampUnit(meta, metadata.GroupMicrobench, "gin", metadata.Provenance{GitDirty: &dirty})
-	meta = metadata.StampUnit(meta, metadata.GroupCRUD, "rails", metadata.Provenance{GitDirty: &clean})
+	meta = metadata.StampUnit(meta, metadata.GroupCRUD, crudUnit("rails"), metadata.Provenance{GitDirty: &clean})
 
 	// Both units must be published for their dirt to be judged.
 	banner := bannerOf(Render([]result.Result{crudRow("rails", 100, 1, 900, 5, 10, 20)}, nil, taxLadder(), meta))

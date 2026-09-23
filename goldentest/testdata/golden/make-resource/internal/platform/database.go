@@ -17,8 +17,10 @@ func OpenDatabase(cfg config.DatabaseConfig) (*database.DB, error) {
 // AutoMigrate runs GORM AutoMigrate for runtime auth tables and
 // feature-package models so the example API can serve before Atlas
 // migrations. Auth models must stay in this call: gombit make resource
-// and gombit db makemigrations collect every AutoMigrate argument as
-// the entire desired Atlas schema.
+// collects every AutoMigrate argument as the entire desired Atlas schema.
+// gombit db makemigrations builds its desired schema from the persisted
+// migration registry instead, and refuses --forget-model for a model still
+// listed here, so the two sources never disagree.
 func AutoMigrate(db *database.DB) error {
 	return db.AutoMigrate(
 		&auth.User{},

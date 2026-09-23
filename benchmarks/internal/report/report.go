@@ -419,15 +419,17 @@ func writeCRUDTable(b *strings.Builder, results []result.Result, meta metadata.M
 			g.LatencyP50.Median, g.LatencyP95.Median, g.LatencyP99.Median)
 	}
 	b.WriteString("\n")
-	// Units are the frameworks this table publishes, not every framework in the
-	// file: run-crud replaces one app's rows at a time and APPS= subsetting is a
-	// supported run, so the caption must be derived from exactly what is rendered.
-	frameworks := make([]string, len(rows))
+	// Units are the rendered rows' own merge keys (framework:benchmark), not every
+	// framework in the file: run-crud replaces one app's workload at a time and
+	// APPS= subsetting is a supported run, so the caption must be derived from
+	// exactly what is rendered — and another workload's run for the same app must
+	// not relabel it (#361).
+	units := make([]string, len(rows))
 	for i, g := range rows {
-		frameworks[i] = g.Framework
+		units[i] = result.ProvenanceUnit(g.Framework, g.Benchmark)
 	}
-	writeProvenance(b, meta, metadata.GroupCRUD, frameworks)
-	return frameworks
+	writeProvenance(b, meta, metadata.GroupCRUD, units)
+	return units
 }
 
 // pickConcurrency returns HeadlineConcurrency if any crud-list group has it,

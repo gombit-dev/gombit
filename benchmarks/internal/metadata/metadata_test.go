@@ -429,3 +429,105 @@ func TestParseMemTotalBytes(t *testing.T) {
 		t.Errorf("parseMemTotalBytes(no MemTotal) = %d, want 0", got)
 	}
 }
+
+// The five run parameters are recorded once per snapshot, and Merge writes the
+// incoming ones whole, so the comparison is directional: an incoming zero is a
+// value, and only a recorded side that states nothing at all is absent (#361
+// review round 2).
+func TestRunParamsConflictsWith(t *testing.T) {
+	canonical := RunParams{
+		Concurrency: []int{1, 10, 100}, Trials: 5, DurationSeconds: 30, WarmupSeconds: 10,
+		BenchmarkTool: "grafana/k6:0.55.0",
+	}
+
+	if got := canonical.ConflictsWith(canonical); got != nil {
+		t.Errorf("identical parameters must not conflict, got %v", got)
+	}
+	if got := (RunParams{}).ConflictsWith(canonical); got != nil {
+		t.Errorf("a snapshot recording nothing cannot conflict, got %v", got)
+	}
+
+	// The review's case: a zero-valued incoming field is not a wildcard, because
+	// Merge would write it over rows measured with five trials.
+	zeroTrials := canonical
+	zeroTrials.Trials = 0
+	if got := canonical.ConflictsWith(zeroTrials); len(got) != 1 || got[0] != "trials 5 -> 0" {
+		t.Errorf("an incoming zero must conflict with a recorded value, got %v", got)
+	}
+
+	// A zero warm-up is a value on both sides: recorded 0 vs incoming 0 is the
+	// same protocol, recorded 10s vs incoming 0 is a different one.
+	noWarmup := canonical
+	noWarmup.WarmupSeconds = 0
+	if got := noWarmup.ConflictsWith(noWarmup); got != nil {
+		t.Errorf("a deliberate zero warm-up must match itself, got %v", got)
+	}
+	if got := canonical.ConflictsWith(noWarmup); len(got) != 1 || got[0] != "warm-up 10s -> 0s" {
+		t.Errorf("dropping the warm-up must conflict, got %v", got)
+	}
+	if got := noWarmup.ConflictsWith(canonical); len(got) != 1 || got[0] != "warm-up 0s -> 10s" {
+		t.Errorf("adding a warm-up to a zero-warm-up snapshot must conflict, got %v", got)
+	}
+
+	// Every field, in a fixed order.
+	reduced := RunParams{
+		Concurrency: []int{1}, Trials: 1, DurationSeconds: 1, WarmupSeconds: 1,
+		BenchmarkTool: "grafana/k6:0.99.0",
+	}
+	want := []string{
+		"concurrency 1/10/100 -> 1",
+		"trials 5 -> 1",
+		"duration per trial 30s -> 1s",
+		"warm-up 10s -> 1s",
+		"benchmark tool grafana/k6:0.55.0 -> grafana/k6:0.99.0",
+	}
+	got := canonical.ConflictsWith(reduced)
+	if len(got) != len(want) {
+		t.Fatalf("conflicts = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("conflict[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	// The report prints the ladder in recorded order, so a reordered list is a
+	// different statement of the protocol, not the same one.
+	reordered := canonical
+	reordered.Concurrency = []int{100, 10, 1}
+	if got := canonical.ConflictsWith(reordered); len(got) != 1 {
+		t.Errorf("a reordered concurrency list must conflict, got %v", got)
+	}
+
+	// A partial record (collect-host-info given only -trials) compares its zeros
+	// as values and fails closed.
+	partial := RunParams{Trials: 5}
+	if got := partial.ConflictsWith(canonical); len(got) != 4 {
+		t.Errorf("a partial record must conflict on every field it leaves at zero, got %v", got)
+	}
+}
+
+// Presence is judged for the whole record: any one field makes it recorded.
+func TestRunParamsRecorded(t *testing.T) {
+	if (RunParams{}).Recorded() {
+		t.Error("an empty record must not count as recorded")
+	}
+	for name, p := range map[string]RunParams{
+		"concurrency": {Concurrency: []int{1}},
+		"trials":      {Trials: 1},
+		"duration":    {DurationSeconds: 1},
+		"warm-up":     {WarmupSeconds: 1},
+		"tool":        {BenchmarkTool: "k6"},
+	} {
+		if !p.Recorded() {
+			t.Errorf("a record stating only %s must count as recorded", name)
+		}
+	}
+}
+
+func TestMetadataRunParamsReadsTheTopLevelFields(t *testing.T) {
+	m := Metadata{Concurrency: []int{10}, Trials: 2, DurationSeconds: 3, WarmupSeconds: 4, BenchmarkTool: "k6"}
+	if diffs := m.RunParams().ConflictsWith(RunParams{Concurrency: []int{10}, Trials: 2, DurationSeconds: 3, WarmupSeconds: 4, BenchmarkTool: "k6"}); diffs != nil {
+		t.Errorf("RunParams must mirror the recorded fields, got %v", diffs)
+	}
+}

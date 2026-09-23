@@ -20,7 +20,7 @@ require (
 	golang.org/x/net v0.59.0
 	golang.org/x/term v0.46.0
 	gorm.io/driver/mysql v1.6.0
-	gorm.io/driver/postgres v1.6.2
+	gorm.io/driver/postgres v1.6.3
 	gorm.io/driver/sqlite v1.6.0
 	gorm.io/gorm v1.31.2
 )

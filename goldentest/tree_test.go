@@ -23,7 +23,6 @@ const (
 	fixtureModule  = "github.com/example/demo"
 	fixtureBook    = "Book"
 	fixtureFields  = "title:string:required"
-	missingAtlas   = "gombit-golden-atlas-not-installed"
 	maxDiffPreview = 80
 )
 

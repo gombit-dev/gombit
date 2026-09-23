@@ -11,7 +11,7 @@
 # it, then stops the service so the next app is measured alone with Postgres —
 # the load generator shares the host, so only the app under test should run.
 #
-# run-crud merges by framework key, so the six iterations accumulate into
+# run-crud merges by (framework, benchmark) key, so the six iterations accumulate into
 # benchmarks/results/latest/{results.json,results.csv,metadata.json}. Regenerate
 # the human report afterwards with `make benchmark-summary`.
 #
@@ -80,8 +80,8 @@ base_tag() {
 }
 
 # app_identity APP — sets PORT FRAMEWORK FRAMEWORK_VERSION RUNTIME
-# RUNTIME_VERSION. FRAMEWORK is the compose service name (== the run-crud merge
-# key the rest of the harness uses); versions are derived from source.
+# RUNTIME_VERSION. FRAMEWORK is the compose service name (== the framework half
+# of the run-crud merge key the rest of the harness uses); versions are derived from source.
 app_identity() {
   FRAMEWORK="$1"
   case "$1" in

@@ -81,6 +81,23 @@ invocation's desired schema, so the generated migration is the intentional
 `DROP TABLE` — the only way to get one, now that the registry means a model
 is never dropped by accident just because a later call didn't repeat it.
 
+Retire in this order, or the drop won't stick. `AutoMigrate` in
+`internal/platform/database.go` is a second declaration of desired state (the
+models the app persists on start), and `gombit make resource` migrates every
+model listed there. So `makemigrations` refuses to forget a model that is still
+an `AutoMigrate` argument — otherwise the next `make resource` or app start
+would silently re-add it:
+
+1. Remove the model from the `AutoMigrate` call in
+   `internal/platform/database.go` and delete any routes/resources referencing
+   it.
+2. `gombit db makemigrations drop_legacy_widget --forget-model <import>.Widget`.
+3. `gombit db migrate`.
+
+Forgetting a model that isn't in `models.json` (a typo in the import path, or
+one already forgotten) is an error, not a silent no-op — nothing is tracked
+under that name, so there is nothing to drop.
+
 The command writes a temporary Atlas Program Mode loader under `.gombit`,
 passes all supplied model types to `gormschema.New(driver).Load(...)`, writes
 the generated SQL schema to a temporary `schema.sql`, and then runs:

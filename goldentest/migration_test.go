@@ -40,12 +40,12 @@ func TestMigrateLegacyResourceToModelFirst(t *testing.T) {
 	// what make resource used to emit before ADR-016.
 	stdout := new(bytes.Buffer)
 	if err := resourcegen.Generate(context.Background(), resourcegen.Options{
-		WorkDir:  copyDir,
-		Name:     "Note",
-		Fields:   []string{"title:string:required"},
-		AtlasBin: missingAtlas,
-		Stdout:   stdout,
-		Stderr:   io.Discard,
+		WorkDir:        copyDir,
+		Name:           "Note",
+		Fields:         []string{"title:string:required"},
+		SkipMigrations: true,
+		Stdout:         stdout,
+		Stderr:         io.Discard,
 	}); err != nil {
 		t.Fatalf("bootstrap resource: %v\n%s", err, stdout.String())
 	}

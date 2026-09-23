@@ -218,7 +218,7 @@ that group's data file — the thing a single run can replace on its own:
 | group | unit | recorded by |
 | --- | --- | --- |
 | `microbench` | stack namespace (`nethttp`/`gin`/`huma`/`gombit`, `gombit-ablation`) | `scripts/microbench` |
-| `crud` | framework | `scripts/run-crud` |
+| `crud` | framework + benchmark (workload) | `scripts/run-crud` |
 | `footprint` | framework + variant | `scripts/footprint` |
 
 **The program that writes the row writes the provenance.** All three of these
@@ -260,6 +260,41 @@ The footprint unit is the row's full merge key, `framework:variant`
 (`gombit:container`, `gombit:embedded`), because that is what `footprint.Merge`
 keys on. Measuring the embedded single binary therefore cannot relabel the
 container row the README publishes.
+
+The CRUD unit is likewise the row's full merge key, `framework:benchmark`
+(`gombit:crud-list`), where the benchmark is the workload script that ran
+(`workloads/<benchmark>.js`). Recording another workload for an app therefore
+neither replaces nor relabels its `crud-list` rows.
+
+Provenance is per unit; the sweep protocol and load generator are not. The
+top-level `concurrency`, `trials`, `duration_seconds`, `warmup_seconds` and
+`benchmark_tool` are recorded once for the whole snapshot, and the README prints
+one "Protocol" line and one reduced-snapshot banner from them. They are only
+true while every row in the file was measured under them, so `run-crud` refuses
+a run whose values differ from the recorded ones while rows it does not replace
+remain (another app's, or another workload's), and modifies nothing. A
+populated snapshot cannot be moved to a new protocol one app at a time, because
+each app's run is refused while the others' rows remain: write to a separate
+`OUT_DIR`, or remove the old snapshot and start over. A fresh `OUT_DIR`, a
+snapshot that records no parameters, and a run that replaces every row in the
+file are unaffected. `make benchmark-metadata` also writes these fields and is
+not guarded. Recording a protocol per unit, so that workloads with different
+pins can share a snapshot, is a separate change.
+
+Because the incoming values are written whole, `run-crud` compares every one of
+them as a value, never as "unstated": it rejects `-trials` below 1, an empty or
+non-positive concurrency level, a duration that is not positive, a negative
+warm-up and an empty `-k6-image` before measuring anything. A zero-second
+warm-up is accepted and recorded as a value, so it matches a snapshot recorded
+with no warm-up and conflicts with one recorded with a warm-up. On the recorded
+side, a snapshot that states none of the five fields has no protocol to
+misdescribe; one that states any of them is compared on all five.
+
+The producers do not lock `OUT_DIR`. `run-crud` checks the snapshot before the
+sweep and again on the snapshot it merges into, which catches another producer
+that finished while it was measuring, but a write that overlaps its own
+read-merge-write is not detected. Running two producers against one `OUT_DIR`
+at the same time is unsupported.
 
 #### Reading `metadata.json`: `groups` is authoritative, the top level is not
 

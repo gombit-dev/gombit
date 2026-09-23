@@ -132,12 +132,12 @@ func TestMakeResourceGolden(t *testing.T) {
 	appDir := scaffoldDemo(t)
 	stdout := new(bytes.Buffer)
 	if err := resourcegen.Generate(context.Background(), resourcegen.Options{
-		WorkDir:  appDir,
-		Name:     fixtureBook,
-		Fields:   []string{fixtureFields},
-		AtlasBin: missingAtlas,
-		Stdout:   stdout,
-		Stderr:   io.Discard,
+		WorkDir:        appDir,
+		Name:           fixtureBook,
+		Fields:         []string{fixtureFields},
+		SkipMigrations: true,
+		Stdout:         stdout,
+		Stderr:         io.Discard,
 	}); err != nil {
 		t.Fatalf("gombit make resource: %v\nstdout=%s", err, stdout.String())
 	}
@@ -165,12 +165,12 @@ func TestMakeResourceGolden(t *testing.T) {
 	})
 	t.Run("idempotent", func(t *testing.T) {
 		if err := resourcegen.Generate(context.Background(), resourcegen.Options{
-			WorkDir:  appDir,
-			Name:     fixtureBook,
-			Fields:   []string{fixtureFields},
-			AtlasBin: missingAtlas,
-			Stdout:   io.Discard,
-			Stderr:   io.Discard,
+			WorkDir:        appDir,
+			Name:           fixtureBook,
+			Fields:         []string{fixtureFields},
+			SkipMigrations: true,
+			Stdout:         io.Discard,
+			Stderr:         io.Discard,
 		}); err != nil {
 			t.Fatalf("idempotent make resource: %v", err)
 		}
@@ -205,9 +205,9 @@ func TestMakeResourceScalarTypesCompiles(t *testing.T) {
 			"starts_at:time:required",
 			"status:string",
 		},
-		AtlasBin: missingAtlas,
-		Stdout:   stdout,
-		Stderr:   io.Discard,
+		SkipMigrations: true,
+		Stdout:         stdout,
+		Stderr:         io.Discard,
 	}); err != nil {
 		t.Fatalf("gombit make resource (scalars): %v\nstdout=%s", err, stdout.String())
 	}
@@ -226,12 +226,12 @@ func TestMakeResourceRelationsCompiles(t *testing.T) {
 		t.Helper()
 		stdout := new(bytes.Buffer)
 		if err := resourcegen.Generate(context.Background(), resourcegen.Options{
-			WorkDir:  appDir,
-			Name:     name,
-			Fields:   fields,
-			AtlasBin: missingAtlas,
-			Stdout:   stdout,
-			Stderr:   io.Discard,
+			WorkDir:        appDir,
+			Name:           name,
+			Fields:         fields,
+			SkipMigrations: true,
+			Stdout:         stdout,
+			Stderr:         io.Discard,
 		}); err != nil {
 			t.Fatalf("gombit make resource %s: %v\nstdout=%s", name, err, stdout.String())
 		}
@@ -263,12 +263,12 @@ func TestMakeResourceListQueryCompiles(t *testing.T) {
 		t.Helper()
 		stdout := new(bytes.Buffer)
 		if err := resourcegen.Generate(context.Background(), resourcegen.Options{
-			WorkDir:  appDir,
-			Name:     name,
-			Fields:   fields,
-			AtlasBin: missingAtlas,
-			Stdout:   stdout,
-			Stderr:   io.Discard,
+			WorkDir:        appDir,
+			Name:           name,
+			Fields:         fields,
+			SkipMigrations: true,
+			Stdout:         stdout,
+			Stderr:         io.Discard,
 		}); err != nil {
 			t.Fatalf("gombit make resource %s: %v\nstdout=%s", name, err, stdout.String())
 		}
@@ -297,12 +297,12 @@ func TestMakeResourceAggregatesCompiles(t *testing.T) {
 		t.Helper()
 		stdout := new(bytes.Buffer)
 		if err := resourcegen.Generate(context.Background(), resourcegen.Options{
-			WorkDir:  appDir,
-			Name:     name,
-			Fields:   fields,
-			AtlasBin: missingAtlas,
-			Stdout:   stdout,
-			Stderr:   io.Discard,
+			WorkDir:        appDir,
+			Name:           name,
+			Fields:         fields,
+			SkipMigrations: true,
+			Stdout:         stdout,
+			Stderr:         io.Discard,
 		}); err != nil {
 			t.Fatalf("gombit make resource %s: %v\nstdout=%s", name, err, stdout.String())
 		}
