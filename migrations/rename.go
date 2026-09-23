@@ -87,6 +87,11 @@ func makeRenameMigration(ctx context.Context, opts Options) error {
 	if !filepath.IsAbs(migrationDir) {
 		migrationDir = filepath.Join(absWorkDir, migrationDir)
 	}
+	_, statErr := os.Stat(migrationDir)
+	dirExisted := statErr == nil
+	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+		return fmt.Errorf("migrations: inspect migration dir: %w", statErr)
+	}
 	if err := os.MkdirAll(migrationDir, 0o750); err != nil {
 		return fmt.Errorf("migrations: create migration dir: %w", err)
 	}
@@ -95,9 +100,18 @@ func makeRenameMigration(ctx context.Context, opts Options) error {
 	if err != nil {
 		return err
 	}
+	sumPath := filepath.Join(migrationDir, "atlas.sum")
+	// #nosec G304 -- atlas.sum inside the configured migration directory
+	prevSum, sumErr := os.ReadFile(sumPath)
+	sumExisted := sumErr == nil
+	if sumErr != nil && !errors.Is(sumErr, os.ErrNotExist) {
+		return fmt.Errorf("migrations: read atlas.sum: %w", sumErr)
+	}
+
 	sql := renameSQL(opts.Driver, opts.Renames)
 	filename := fmt.Sprintf("%s_%s.sql", version, opts.Name)
-	if err := os.WriteFile(filepath.Join(migrationDir, filename), []byte(sql), 0o600); err != nil {
+	migrationPath := filepath.Join(migrationDir, filename)
+	if err := os.WriteFile(migrationPath, []byte(sql), 0o600); err != nil {
 		return fmt.Errorf("migrations: write rename migration: %w", err)
 	}
 
@@ -105,12 +119,36 @@ func makeRenameMigration(ctx context.Context, opts Options) error {
 	// checksum mismatch. `atlas migrate hash` is Atlas Community Edition (ADR-012).
 	hashArgs := []string{"migrate", "hash", "--dir", "file://" + filepath.ToSlash(migrationDir)}
 	if err := opts.runner.Run(ctx, absWorkDir, opts.AtlasBinary, hashArgs, opts.Stderr, opts.Stderr); err != nil {
+		// Unlike `atlas migrate diff`, which writes the file and the sum together,
+		// this path writes the SQL itself. Leaving it unhashed would make the
+		// directory unappliable, and rerunning after installing Atlas would add a
+		// second RENAME COLUMN for the same column. Put the directory back exactly
+		// as it was so a rerun starts clean.
+		rollbackRenameMigration(migrationDir, migrationPath, sumPath, prevSum, sumExisted, dirExisted)
 		return fmt.Errorf("migrations: atlas migrate hash: %w", err)
 	}
 
 	_, _ = fmt.Fprintf(opts.Stdout, "Wrote data-preserving rename migration %s\n", filename)
 	_, _ = fmt.Fprintln(opts.Stdout, "Review it, then apply with 'gombit db migrate'.")
 	return nil
+}
+
+// rollbackRenameMigration undoes makeRenameMigration's writes after a failed
+// hash: it removes the new migration, restores atlas.sum to its prior content
+// (or removes it if the run created it), and removes the migration directory if
+// the run created it and it is now empty. Best effort: the hash error is what the
+// caller reports.
+func rollbackRenameMigration(migrationDir, migrationPath, sumPath string, prevSum []byte, sumExisted, dirExisted bool) {
+	_ = os.Remove(migrationPath)
+	if sumExisted {
+		// #nosec G703 -- sumPath is atlas.sum inside the configured migration directory
+		_ = os.WriteFile(sumPath, prevSum, 0o600)
+	} else {
+		_ = os.Remove(sumPath)
+	}
+	if !dirExisted {
+		_ = os.Remove(migrationDir)
+	}
 }
 
 // renameSQL renders one ALTER TABLE ... RENAME COLUMN statement per rename,

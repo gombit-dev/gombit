@@ -2,6 +2,7 @@ package migrations
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -286,4 +287,109 @@ func TestRenameMigrationPreservesDataSQLite(t *testing.T) {
 	if err := db.Exec("SELECT name FROM guilds").Error; err == nil {
 		t.Fatal("old column 'name' still exists; rename did not replace it")
 	}
+}
+
+// failingHashRunner simulates `atlas migrate hash` failing after partially
+// rewriting atlas.sum (the worst case), then returning a non-zero exit.
+type failingHashRunner struct{ dir string }
+
+func (r *failingHashRunner) Run(_ context.Context, _ string, _ string, _ []string, _ io.Writer, _ io.Writer) error {
+	_ = os.WriteFile(filepath.Join(r.dir, "atlas.sum"), []byte("partial garbage\n"), 0o600)
+	return errors.New("exit status 1")
+}
+
+func dirSnapshot(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := make(map[string]string, len(entries))
+	for _, e := range entries {
+		// #nosec G304 -- test file under the test temp dir
+		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		out[e.Name()] = string(data)
+	}
+	return out
+}
+
+func TestMakeMigrationsRenameHashFailureLeavesDirUnchanged(t *testing.T) {
+	workDir := t.TempDir()
+	migrationDir := filepath.Join(workDir, "database", "migrations")
+	writeFile(t, filepath.Join(migrationDir, "20260101000000_create_guilds.sql"),
+		"CREATE TABLE guilds (id INTEGER PRIMARY KEY, name TEXT NOT NULL);")
+	writeFile(t, filepath.Join(migrationDir, "atlas.sum"), "h1:original\n20260101000000_create_guilds.sql h1:abc\n")
+	before := dirSnapshot(t, migrationDir)
+
+	opts := Options{
+		WorkDir:      workDir,
+		Name:         "rename_guild_title",
+		Driver:       config.DatabaseDriverSQLite,
+		MigrationDir: "database/migrations",
+		AtlasBinary:  "atlas-test",
+		Renames:      []Rename{{Table: "guilds", OldColumn: "name", NewColumn: "title"}},
+		Stdout:       io.Discard,
+		runner:       &failingHashRunner{dir: migrationDir},
+	}
+	err := MakeMigrations(context.Background(), opts)
+	if err == nil || !strings.Contains(err.Error(), "atlas migrate hash") {
+		t.Fatalf("MakeMigrations() error = %v, want the atlas migrate hash failure", err)
+	}
+	after := dirSnapshot(t, migrationDir)
+	if len(after) != len(before) {
+		t.Fatalf("migration dir after failed hash = %v, want it unchanged from %v", keys(after), keys(before))
+	}
+	for name, content := range before {
+		if after[name] != content {
+			t.Fatalf("%s after failed hash = %q, want it restored to %q", name, after[name], content)
+		}
+	}
+
+	// Rerunning once Atlas works must produce exactly one rename migration, not
+	// a second RENAME COLUMN next to an orphaned first one.
+	opts.runner = &hashRecordingRunner{}
+	if err := MakeMigrations(context.Background(), opts); err != nil {
+		t.Fatalf("rerun MakeMigrations() error = %v", err)
+	}
+	renames := 0
+	for name := range dirSnapshot(t, migrationDir) {
+		if strings.HasSuffix(name, "_rename_guild_title.sql") {
+			renames++
+		}
+	}
+	if renames != 1 {
+		t.Fatalf("rename migrations after rerun = %d, want exactly 1", renames)
+	}
+}
+
+func TestMakeMigrationsRenameHashFailureRemovesCreatedDir(t *testing.T) {
+	workDir := t.TempDir()
+	migrationDir := filepath.Join(workDir, "database", "migrations")
+	err := MakeMigrations(context.Background(), Options{
+		WorkDir:      workDir,
+		Name:         "rename_guild_title",
+		Driver:       config.DatabaseDriverSQLite,
+		MigrationDir: "database/migrations",
+		AtlasBinary:  "atlas-test",
+		Renames:      []Rename{{Table: "guilds", OldColumn: "name", NewColumn: "title"}},
+		Stdout:       io.Discard,
+		runner:       &failingHashRunner{dir: migrationDir},
+	})
+	if err == nil {
+		t.Fatal("MakeMigrations() error = nil, want the hash failure")
+	}
+	if _, statErr := os.Stat(migrationDir); !os.IsNotExist(statErr) {
+		t.Fatalf("migration dir created by the failed run must be removed; stat err = %v", statErr)
+	}
+}
+
+func keys(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
 }
