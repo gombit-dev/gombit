@@ -7,6 +7,7 @@ package metadata
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"runtime"
@@ -451,6 +452,132 @@ func Merge(existing, incoming Metadata) Metadata {
 		incoming.PostgresResourceLimits = existing.PostgresResourceLimits
 	}
 	return incoming
+}
+
+// RunParams is the sweep protocol and load generator a snapshot records ONCE,
+// at the top level, for every row in it.
+//
+// Unlike the version maps and the per-framework limit verdicts, Merge cannot
+// union these: metadata.json holds exactly one protocol, and the report prints
+// exactly one "Protocol:" / "Load generator:" line (report.writeMethodology)
+// and judges one "reduced development snapshot" banner from it
+// (report.reducedFrom). Last-writer-wins is therefore only honest while every
+// row in the file was measured under the incoming parameters.
+//
+// That is what makes them different in kind from provenance. Provenance became
+// per unit (Groups) because a run measures one unit and must not caption the
+// others (issue #266). These cannot follow the same boundary without the report
+// growing a per-unit protocol block, so run-crud holds the invariant from the
+// producer side instead: it refuses to merge a run whose parameters differ from
+// the recorded ones while rows it does not replace remain (#361, review round 1).
+//
+// ConflictsWith is directional (see there): an incoming zero is a value, never
+// a wildcard, because Merge writes it (#361, review round 2).
+//
+// That covers run-crud only. `make benchmark-metadata` (collect-host-info)
+// also writes these fields, replaces them wholesale, and measures nothing, so
+// it can still describe existing rows under other parameters; it is not guarded.
+type RunParams struct {
+	Concurrency     []int
+	Trials          int
+	DurationSeconds float64
+	WarmupSeconds   float64
+	BenchmarkTool   string
+}
+
+// RunParams returns the run parameters recorded at the top level.
+func (m Metadata) RunParams() RunParams {
+	return RunParams{
+		Concurrency:     m.Concurrency,
+		Trials:          m.Trials,
+		DurationSeconds: m.DurationSeconds,
+		WarmupSeconds:   m.WarmupSeconds,
+		BenchmarkTool:   m.BenchmarkTool,
+	}
+}
+
+// Recorded reports whether the record states any run parameter at all. Every
+// writer of these fields (run-crud, collect-host-info) writes all five
+// together, so presence is judged for the record, not per field: a record that
+// states anything states a value for each field, zero included.
+func (p RunParams) Recorded() bool {
+	return len(p.Concurrency) > 0 || p.Trials != 0 || p.DurationSeconds != 0 ||
+		p.WarmupSeconds != 0 || p.BenchmarkTool != ""
+}
+
+// ConflictsWith describes every parameter the incoming run would change in a
+// recorded snapshot, as "<what> <recorded> -> <incoming>" in a fixed order so
+// an error message is stable. Concurrency compares as an ordered list, the way
+// the report prints it. No conflict returns nil.
+//
+// It is directional because Merge is: the incoming values are written whole,
+// so every incoming field is a value, and a zero there (a zero-second warm-up)
+// is compared like any other rather than read as "unstated". Callers must hand
+// it complete incoming parameters; run-crud validates them before measuring.
+//
+// Only the recorded side can be absent, and only as a whole: a record that
+// states nothing (a fresh OUT_DIR, a snapshot written before these fields were
+// recorded) has no protocol to misdescribe, so nothing conflicts with it. Once
+// it states anything, all five fields are compared exactly. A partial record,
+// such as `make benchmark-metadata` given only -trials, therefore conflicts on
+// its zeros; that fails closed rather than guessing what those rows ran.
+func (recorded RunParams) ConflictsWith(incoming RunParams) []string {
+	if !recorded.Recorded() {
+		return nil
+	}
+	var diffs []string
+	if !equalInts(recorded.Concurrency, incoming.Concurrency) {
+		diffs = append(diffs, fmt.Sprintf("concurrency %s -> %s",
+			intList(recorded.Concurrency), intList(incoming.Concurrency)))
+	}
+	if recorded.Trials != incoming.Trials {
+		diffs = append(diffs, fmt.Sprintf("trials %d -> %d", recorded.Trials, incoming.Trials))
+	}
+	if recorded.DurationSeconds != incoming.DurationSeconds {
+		diffs = append(diffs, fmt.Sprintf("duration per trial %s -> %s",
+			secs(recorded.DurationSeconds), secs(incoming.DurationSeconds)))
+	}
+	if recorded.WarmupSeconds != incoming.WarmupSeconds {
+		diffs = append(diffs, fmt.Sprintf("warm-up %s -> %s",
+			secs(recorded.WarmupSeconds), secs(incoming.WarmupSeconds)))
+	}
+	if recorded.BenchmarkTool != incoming.BenchmarkTool {
+		diffs = append(diffs, fmt.Sprintf("benchmark tool %s -> %s",
+			orNone(recorded.BenchmarkTool), orNone(incoming.BenchmarkTool)))
+	}
+	return diffs
+}
+
+func equalInts(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func intList(xs []int) string {
+	if len(xs) == 0 {
+		return "none"
+	}
+	parts := make([]string, len(xs))
+	for i, x := range xs {
+		parts[i] = strconv.Itoa(x)
+	}
+	return strings.Join(parts, "/")
+}
+
+func secs(s float64) string { return strconv.FormatFloat(s, 'f', -1, 64) + "s" }
+
+func orNone(s string) string {
+	if s == "" {
+		return "none"
+	}
+	return s
 }
 
 // StampUnit records prov as one unit's provenance in meta and changes nothing

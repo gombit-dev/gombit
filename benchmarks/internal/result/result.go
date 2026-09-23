@@ -49,6 +49,22 @@ type Result struct {
 	RSSBytes          int64   `json:"rss_bytes"`
 }
 
+// ProvenanceUnit is the key a CRUD row's provenance is filed under in
+// metadata.json: the same (framework, benchmark) pair scripts/run-crud merges
+// rows on, in a form readable in JSON.
+//
+// It must stay the merge key. Keying provenance on the framework alone would let
+// a run of one workload relabel another workload's rows it never touched — the
+// row-merge-vs-table-provenance mismatch issue #266 exists to eliminate (#361).
+// Both the writer (scripts/run-crud) and the reader (internal/report) derive the
+// unit here so they cannot drift apart. It takes the pair rather than a Result
+// because the reader holds summary groups, not rows.
+func ProvenanceUnit(framework, benchmark string) string { return framework + ":" + benchmark }
+
+// ProvenanceUnit is this row's provenance unit; see the package-level
+// ProvenanceUnit.
+func (r Result) ProvenanceUnit() string { return ProvenanceUnit(r.Framework, r.Benchmark) }
+
 // sortedCopy returns results ordered deterministically by (framework,
 // benchmark, concurrency, trial), so any regenerated artifact — the canonical
 // results.json as well as the derived results.csv — diffs cleanly regardless
