@@ -121,6 +121,35 @@ exits without writing a new migration.
 Migration names may contain letters, numbers, underscores, and hyphens, and
 must not start with a hyphen.
 
+## Renaming a column
+
+Renaming a model field is a dropped column plus a new column to Atlas, so a
+plain `gombit db makemigrations` emits a table rebuild whose `INSERT ... SELECT`
+copies every column **except** the renamed one — silent data loss if the new
+column is nullable, or a `NOT NULL constraint failed` mid-apply if it isn't
+(#299). A drop+add is genuinely ambiguous versus a real drop and a real add, so
+the rename has to be stated explicitly:
+
+```sh
+gombit db makemigrations rename_guild_title \
+  --driver sqlite \
+  --rename guilds.name:title
+```
+
+`--rename table.old_column:new_column` (repeatable) generates a native,
+data-preserving `ALTER TABLE ... RENAME COLUMN` — supported by SQLite (>= 3.25),
+PostgreSQL, and MySQL 8 — instead of the drop+add rebuild. The column keeps its
+rows. Rename the field in the model **first** (and run `gombit generate` so the
+`*.gen.go` matches), then run the command above; afterwards the model and the
+migration history agree, so the next `gombit db makemigrations` reports the
+directory synced.
+
+`--rename` is a focused operation: it does not diff models, so it cannot be
+combined with `--model`/`--forget-model` in the same call, and it writes only
+the rename migration. Make other schema changes in a separate run. Identifiers
+must be simple (letters, digits, underscore) — the table/column names GORM
+generates.
+
 ## Apply / Status / Rollback
 
 M2-2 adds apply, status, and rollback. These commands read the configured

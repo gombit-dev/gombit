@@ -296,3 +296,100 @@ CREATE TABLE IF NOT EXISTS atlas_schema_revisions (
 	_, _ = io.WriteString(stdout, "fake atlas apply ok\n")
 	return nil
 }
+
+func TestRenamePreservesDataPostgres(t *testing.T) {
+	if *postgresDSN == "" {
+		t.Skip("set -migrations.postgres-dsn to run Postgres migration integration tests")
+	}
+	runRenameRoundTrip(t, config.DatabaseConfig{
+		Driver: config.DatabaseDriverPostgres,
+		DSN:    *postgresDSN,
+	}, `
+CREATE TABLE IF NOT EXISTS guilds (
+  id BIGSERIAL PRIMARY KEY,
+  name TEXT NOT NULL
+);`)
+}
+
+func TestRenamePreservesDataMySQL(t *testing.T) {
+	if *mysqlDSN == "" {
+		t.Skip("set -migrations.mysql-dsn to run MySQL migration integration tests")
+	}
+	runRenameRoundTrip(t, config.DatabaseConfig{
+		Driver: config.DatabaseDriverMySQL,
+		DSN:    *mysqlDSN,
+	}, `
+CREATE TABLE IF NOT EXISTS guilds (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(255) NOT NULL
+);`)
+}
+
+// runRenameRoundTrip is the #299 regression on a real driver: create a table with
+// a row, rename the column via gombit's native RENAME COLUMN migration, apply it,
+// and assert the row survives under the new column.
+func runRenameRoundTrip(t *testing.T, cfg config.DatabaseConfig, createSQL string) {
+	t.Helper()
+
+	workDir := t.TempDir()
+	migrationDir := filepath.Join(workDir, "database", "migrations")
+	if err := os.MkdirAll(migrationDir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	writeFile(t, filepath.Join(migrationDir, "20260101000000_create_guilds.sql"), createSQL)
+
+	cleanupDriverDB(t, cfg)
+	t.Cleanup(func() { cleanupDriverDB(t, cfg) })
+
+	applyOpts := ApplyOptions{
+		WorkDir:      workDir,
+		MigrationDir: "database/migrations",
+		Database:     cfg,
+		Stdout:       io.Discard,
+		Stderr:       io.Discard,
+		runner:       &sqlApplyRunner{t: t, cfg: cfg},
+		now:          func() time.Time { return time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC) },
+	}
+
+	if err := Migrate(context.Background(), applyOpts); err != nil {
+		t.Fatalf("Migrate(create) error = %v", err)
+	}
+	db, err := database.Open(cfg)
+	if err != nil {
+		t.Fatalf("database.Open() error = %v", err)
+	}
+	if err := db.Exec("INSERT INTO guilds (name) VALUES ('Alpha')").Error; err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	_ = db.Close()
+
+	if err := MakeMigrations(context.Background(), Options{
+		WorkDir:      workDir,
+		Name:         "rename_guild_title",
+		Driver:       cfg.Driver,
+		MigrationDir: "database/migrations",
+		AtlasBinary:  "atlas-test",
+		Renames:      []Rename{{Table: "guilds", OldColumn: "name", NewColumn: "title"}},
+		Stdout:       io.Discard,
+		runner:       &hashRecordingRunner{},
+	}); err != nil {
+		t.Fatalf("MakeMigrations(rename) error = %v", err)
+	}
+
+	if err := Migrate(context.Background(), applyOpts); err != nil {
+		t.Fatalf("Migrate(rename) error = %v", err)
+	}
+
+	db, err = database.Open(cfg)
+	if err != nil {
+		t.Fatalf("database.Open() error = %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	var title string
+	if err := db.Raw("SELECT title FROM guilds").Scan(&title).Error; err != nil {
+		t.Fatalf("select title after rename: %v", err)
+	}
+	if title != "Alpha" {
+		t.Fatalf("title = %q after rename, want the row preserved as \"Alpha\" (data loss = #299)", title)
+	}
+}

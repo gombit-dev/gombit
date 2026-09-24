@@ -46,8 +46,13 @@ type Options struct {
 	// invocation's desired schema), the explicit way to let Atlas propose
 	// dropping a table that's genuinely going away.
 	ForgetModels []Model
-	Stdout       io.Writer
-	Stderr       io.Writer
+	// Renames, when non-empty, makes this a rename migration: Gombit emits a
+	// native, data-preserving RENAME COLUMN instead of the drop+add table rebuild
+	// `atlas migrate diff` would generate for a field rename. It is not combined
+	// with model/schema diffing in the same run.
+	Renames []Rename
+	Stdout  io.Writer
+	Stderr  io.Writer
 
 	runner commandRunner
 }
@@ -93,6 +98,12 @@ func MakeMigrations(ctx context.Context, opts Options) error {
 	opts.Name = strings.TrimSpace(opts.Name)
 	if err := validateOptions(opts); err != nil {
 		return err
+	}
+
+	// A rename is a focused, data-preserving operation with its own SQL path; it
+	// does not diff models, so it never runs alongside model add/drop in one call.
+	if len(opts.Renames) > 0 {
+		return makeRenameMigration(ctx, opts)
 	}
 
 	absWorkDir, err := filepath.Abs(opts.WorkDir)
@@ -193,9 +204,9 @@ func MakeMigrations(ctx context.Context, opts Options) error {
 	}
 	// A diff that renames a field shows up as a drop + add, which Atlas turns
 	// into a table rebuild that can lose data or fail to apply to a non-empty
-	// table. Review the generated SQL; if you hand-edit it, `gombit db hash`
-	// refreshes atlas.sum so the migration still applies (#219).
-	_, _ = fmt.Fprintln(opts.Stdout, "Review the generated migration before applying. If you hand-edit it, run 'gombit db hash' to refresh atlas.sum before 'gombit db migrate'.")
+	// table. For a rename, generate a data-preserving migration with
+	// `gombit db makemigrations <name> --rename table.old:new` instead (#299).
+	_, _ = fmt.Fprintln(opts.Stdout, "Review the generated migration before applying. If it drops and re-adds a column you meant to rename, regenerate it with 'gombit db makemigrations <name> --rename table.old_column:new_column' to preserve the data.")
 	return nil
 }
 
@@ -245,6 +256,18 @@ func validateOptions(opts Options) error {
 	for _, model := range opts.ForgetModels {
 		if err := validateModel(model); err != nil {
 			return err
+		}
+	}
+	if len(opts.Renames) > 0 {
+		// A rename generates SQL directly rather than diffing models, so mixing it
+		// with --model/--forget-model in one call would silently ignore them.
+		if len(opts.Models) > 0 || len(opts.ForgetModels) > 0 {
+			return errors.New("migrations: --rename cannot be combined with --model or --forget-model; generate the rename on its own")
+		}
+		for _, r := range opts.Renames {
+			if err := validateRename(r); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
