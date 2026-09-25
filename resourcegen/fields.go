@@ -742,7 +742,10 @@ func (f Field) constraints() logical.Constraints {
 // it is NUL, two-digit \xNN, and identity escapes of syntax characters).
 // \a, octal, \x{HHHH}, \s, \p, and the rest are different atoms or a syntax
 // error once the form uses the u flag. A ] that is the first member of a
-// class is a member in RE2 and closes an empty class in JavaScript.
+// class is a member in RE2 and closes an empty class in JavaScript. An
+// unescaped ] outside a class is a literal in RE2 and a syntax error in
+// unicode mode; write \]. A quantifier count may not have a leading zero:
+// RE2 treats {01} as literal text and JavaScript treats it as {1}.
 func portablePattern(pattern string) error {
 	if _, err := regexp.Compile(pattern); err != nil {
 		return err
@@ -801,7 +804,7 @@ func jsUnicodePattern(pattern string) error {
 				return err
 			}
 			i = next
-		case '}':
+		case '}', ']':
 			return patternNotShared()
 		case '(':
 			next, err := acceptGroup(r, i)
@@ -851,18 +854,18 @@ func isHex(r rune) bool {
 }
 
 func acceptQuantifier(r []rune, i int) (int, error) {
-	j := i + 1
-	start := j
-	for j < len(r) && r[j] >= '0' && r[j] <= '9' {
-		j++
+	j, err := readCount(r, i+1)
+	if err != nil {
+		return 0, err
 	}
-	if j == start {
+	if j == i+1 {
 		return 0, patternNotShared()
 	}
 	if j < len(r) && r[j] == ',' {
 		j++
-		for j < len(r) && r[j] >= '0' && r[j] <= '9' {
-			j++
+		j, err = readCount(r, j)
+		if err != nil {
+			return 0, err
 		}
 	}
 	if j >= len(r) || r[j] != '}' {
@@ -873,6 +876,22 @@ func acceptQuantifier(r []rune, i int) (int, error) {
 		return 0, patternNotShared()
 	}
 	if j < len(r) && r[j] == '?' {
+		j++
+	}
+	return j, nil
+}
+
+// readCount reads a quantifier bound. A lone 0 is zero. A leading zero on a
+// longer bound is rejected: RE2 does not treat {01} as a count.
+func readCount(r []rune, j int) (int, error) {
+	if j >= len(r) || r[j] < '0' || r[j] > '9' {
+		return j, nil
+	}
+	if r[j] == '0' && j+1 < len(r) && r[j+1] >= '0' && r[j+1] <= '9' {
+		return 0, patternNotShared()
+	}
+	j++
+	for j < len(r) && r[j] >= '0' && r[j] <= '9' {
 		j++
 	}
 	return j, nil

@@ -22,6 +22,9 @@ func TestPatternEnginesAgree(t *testing.T) {
 		{`\a`, "\a"},
 		{`[]a]`, "a"},
 		{`[]a]`, "]"},
+		{`a]`, "a"},
+		{`a{01}`, "a"},
+		{`a{00}`, "a"},
 	}
 	for _, c := range disagree {
 		if err := portablePattern(c.pattern); err == nil {
@@ -46,6 +49,9 @@ func TestPatternEnginesAgree(t *testing.T) {
 		{`^.$`, "\u2029", true},
 		{`^.$`, "\n", false},
 		{`\x41`, "A", true},
+		{`a{0}`, "hello", true},
+		{`a{10}`, "a", false},
+		{`a{0,10}`, "aa", true},
 	}
 	for _, c := range agree {
 		if err := portablePattern(c.pattern); err != nil {
