@@ -220,6 +220,11 @@ func TestParseConstraintsReject(t *testing.T) {
 		"note:text:regex=a{01}",
 		"note:text:regex=a{00}",
 		"note:text:regex=a{0,01}",
+		"note:text:regex=^+",
+		"note:text:regex=$*",
+		"note:text:regex=[\\d-9]",
+		"note:text:regex=\\B",
+		"note:text:regex=\\b",
 		"status:enum(on;off)",
 	} {
 		if _, err := parseFields([]string{spec}, "person"); err == nil {

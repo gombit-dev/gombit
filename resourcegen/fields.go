@@ -738,14 +738,18 @@ func (f Field) constraints() logical.Constraints {
 
 // portablePattern compiles the pattern as Go RE2 and rejects anything the
 // form's new RegExp(..., "u") does not share. Escapes are an allowlist
-// (\d \D \w \W, the single-character controls \n \r \t \f \v, \b \B, \0 when
-// it is NUL, two-digit \xNN, and identity escapes of syntax characters).
-// \a, octal, \x{HHHH}, \s, \p, and the rest are different atoms or a syntax
-// error once the form uses the u flag. A ] that is the first member of a
-// class is a member in RE2 and closes an empty class in JavaScript. An
-// unescaped ] outside a class is a literal in RE2 and a syntax error in
+// (\d \D \w \W, the single-character controls \n \r \t \f \v, \0 when it is
+// NUL, two-digit \xNN, and identity escapes of syntax characters). \b and \B
+// are not on it: JavaScript still finds word edges between the surrogates of
+// a non-BMP character. \a, octal, \x{HHHH}, \s, \p, and the rest are different
+// atoms or a syntax error once the form uses the u flag. A ] that is the first
+// member of a class is a member in RE2 and closes an empty class in JavaScript.
+// An unescaped ] outside a class is a literal in RE2 and a syntax error in
 // unicode mode; write \]. A quantifier count may not have a leading zero:
-// RE2 treats {01} as literal text and JavaScript treats it as {1}.
+// RE2 treats {01} as literal text and JavaScript treats it as {1}. ^ and $
+// cannot take a quantifier. A - inside a class is a range only between single
+// characters; a class escape on either side is rejected, while a hyphen that
+// is first or last stays a literal.
 func portablePattern(pattern string) error {
 	if _, err := regexp.Compile(pattern); err != nil {
 		return err
@@ -759,51 +763,46 @@ func patternNotShared() error {
 
 func jsUnicodePattern(pattern string) error {
 	r := []rune(pattern)
-	inClass := false
-	atFirst := false
+	// quantifiable is a stack so a group is one atom even when its last member
+	// is an anchor. ^+ is not quantifiable; (?:^)+ is.
+	quantifiable := []bool{false}
+	top := func() bool { return quantifiable[len(quantifiable)-1] }
+	set := func(v bool) { quantifiable[len(quantifiable)-1] = v }
 	for i := 0; i < len(r); {
-		c := r[i]
-		if c == '\\' {
-			next, err := acceptEscape(r, i, inClass)
+		switch r[i] {
+		case '\\':
+			next, err := acceptEscape(r, i, false)
 			if err != nil {
 				return err
 			}
 			i = next
-			atFirst = false
-			continue
-		}
-		if inClass {
-			if c == '[' && i+1 < len(r) && r[i+1] == ':' {
-				return patternNotShared()
-			}
-			if atFirst && c == '^' {
-				i++
-				continue
-			}
-			if atFirst && c == ']' {
-				return patternNotShared()
-			}
-			atFirst = false
-			if c == ']' {
-				inClass = false
-			}
-			i++
-			continue
-		}
-		switch c {
+			set(true)
 		case '[':
-			if i+1 < len(r) && r[i+1] == ':' {
+			next, err := acceptClass(r, i)
+			if err != nil {
+				return err
+			}
+			i = next
+			set(true)
+		case '{':
+			if !top() {
 				return patternNotShared()
 			}
-			inClass = true
-			atFirst = true
-			i++
-		case '{':
 			next, err := acceptQuantifier(r, i)
 			if err != nil {
 				return err
 			}
 			i = next
+			set(false)
+		case '*', '+', '?':
+			if !top() {
+				return patternNotShared()
+			}
+			i++
+			if i < len(r) && r[i] == '?' {
+				i++
+			}
+			set(false)
 		case '}', ']':
 			return patternNotShared()
 		case '(':
@@ -812,11 +811,93 @@ func jsUnicodePattern(pattern string) error {
 				return err
 			}
 			i = next
+			quantifiable = append(quantifiable, false)
+		case ')':
+			if len(quantifiable) == 1 {
+				return patternNotShared()
+			}
+			quantifiable = quantifiable[:len(quantifiable)-1]
+			set(true)
+			i++
+		case '^', '$', '|':
+			i++
+			set(false)
 		default:
 			i++
+			set(true)
 		}
 	}
+	if len(quantifiable) != 1 {
+		return patternNotShared()
+	}
 	return nil
+}
+
+func acceptClass(r []rune, i int) (int, error) {
+	i++
+	if i < len(r) && r[i] == ':' {
+		return 0, patternNotShared()
+	}
+	atFirst := true
+	if i < len(r) && r[i] == '^' {
+		i++
+	}
+	prev := ""
+	for i < len(r) {
+		if r[i] == ']' && atFirst {
+			return 0, patternNotShared()
+		}
+		if r[i] == ']' {
+			return i + 1, nil
+		}
+		if r[i] == '-' && prev != "" && i+1 < len(r) && r[i+1] != ']' {
+			if prev != "single" {
+				return 0, patternNotShared()
+			}
+			i++
+			kind, next, err := classMember(r, i)
+			if err != nil {
+				return 0, err
+			}
+			if kind != "single" {
+				return 0, patternNotShared()
+			}
+			i = next
+			prev = "single"
+			atFirst = false
+			continue
+		}
+		if r[i] == '[' && i+1 < len(r) && r[i+1] == ':' {
+			return 0, patternNotShared()
+		}
+		kind, next, err := classMember(r, i)
+		if err != nil {
+			return 0, err
+		}
+		i = next
+		prev = kind
+		atFirst = false
+	}
+	return 0, patternNotShared()
+}
+
+func classMember(r []rune, i int) (string, int, error) {
+	if i >= len(r) {
+		return "", 0, patternNotShared()
+	}
+	if r[i] != '\\' {
+		return "single", i + 1, nil
+	}
+	next, err := acceptEscape(r, i, true)
+	if err != nil {
+		return "", 0, err
+	}
+	switch r[i+1] {
+	case 'd', 'D', 'w', 'W':
+		return "set", next, nil
+	default:
+		return "single", next, nil
+	}
 }
 
 func acceptEscape(r []rune, i int, inClass bool) (int, error) {
@@ -825,7 +906,7 @@ func acceptEscape(r []rune, i int, inClass bool) (int, error) {
 	}
 	next := i + 2
 	switch r[i+1] {
-	case 'd', 'D', 'w', 'W', 'n', 'r', 't', 'f', 'v', 'b', 'B':
+	case 'd', 'D', 'w', 'W', 'n', 'r', 't', 'f', 'v':
 		return next, nil
 	case '0':
 		if next < len(r) && r[next] >= '0' && r[next] <= '9' {
