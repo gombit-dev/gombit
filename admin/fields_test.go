@@ -222,11 +222,24 @@ func TestMakeSetterTypesJSONRejectsNonDocuments(t *testing.T) {
 	}
 	set := makeSetter(sf.Index, TypeJSON, sf.Type)
 	inst := &row{}
-	if err := set(inst, "hello"); err == nil {
-		t.Fatal("setter stored a JSON string")
+	for _, raw := range []any{"hello", float64(42), `{"a":1}`, `[1]`, "null", true} {
+		if err := set(inst, raw); err == nil {
+			t.Fatalf("setter stored %#v", raw)
+		}
 	}
-	if err := set(inst, float64(42)); err == nil {
-		t.Fatal("setter stored a JSON number")
+	type optional struct {
+		Note types.NullJSON
+	}
+	optField, ok := reflect.TypeOf(optional{}).FieldByName("Note")
+	if !ok {
+		t.Fatal("Note missing")
+	}
+	opt := &optional{Note: types.NullJSON(`{"keep":1}`)}
+	if err := makeSetter(optField.Index, TypeJSON, optField.Type)(opt, "null"); err == nil {
+		t.Fatal("setter cleared NullJSON from the string null")
+	}
+	if string(opt.Note) != `{"keep":1}` {
+		t.Fatalf("note = %s, want the previous document", opt.Note)
 	}
 	if err := set(inst, map[string]any{"a": float64(1)}); err != nil {
 		t.Fatalf("set object: %v", err)

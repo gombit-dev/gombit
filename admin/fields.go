@@ -458,7 +458,7 @@ func unmarshalDocument(val any, src reflect.Value, dest reflect.Type) (reflect.V
 	if !ok {
 		return reflect.Value{}, nil, false
 	}
-	payload, err := asJSONBytes(val)
+	payload, err := documentPayload(val, dest)
 	if err != nil {
 		return reflect.Value{}, fmt.Errorf("cannot assign %T to %s", val, dest), true
 	}
@@ -466,6 +466,17 @@ func unmarshalDocument(val any, src reflect.Value, dest reflect.Type) (reflect.V
 		return reflect.Value{}, err, true
 	}
 	return out.Elem(), nil, true
+}
+
+// documentPayload is the JSON text UnmarshalJSON should see. types.JSON
+// must see the encoding of the Go value: a string whose characters are
+// already JSON is still a JSON string, and asJSONBytes would hand those
+// characters over as raw text. json.RawMessage keeps that raw-text shortcut.
+func documentPayload(val any, dest reflect.Type) ([]byte, error) {
+	if dest.PkgPath() == "github.com/gombit-dev/gombit/types" && (dest.Name() == "JSON" || dest.Name() == "NullJSON") {
+		return json.Marshal(val)
+	}
+	return asJSONBytes(val)
 }
 
 func asTextBytes(val any) ([]byte, error) {
