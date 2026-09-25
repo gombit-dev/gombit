@@ -175,11 +175,35 @@ func TestParseConstraintsReject(t *testing.T) {
 		"note:text:regex=\\p{L}+",
 		"count:int64:min=9007199254740993,max=9007199254740992",
 		"price:decimal:min=NaN",
+		"count:int64:max=9007199254740995",
+		"count:int64:min=9007199254740993",
+		"price:decimal:default=1e-2",
+		"price:decimal:min=1e-2",
+		"price:decimal:min=+1.5",
+		"price:decimal:min=.5",
+		"price:decimal:max=1.",
 		"status:enum(on;off)",
 	} {
 		if _, err := parseFields([]string{spec}, "person"); err == nil {
 			t.Fatalf("parseFields(%q) error = nil, want error", spec)
 		}
+	}
+}
+
+func TestBoundsMatchRequestSpelling(t *testing.T) {
+	t.Parallel()
+	fields, err := parseFields([]string{
+		"count:int64:max=9007199254740992",
+		"price:decimal:min=0.01,default=0.01",
+	}, "person")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(fields[0].gormTag(), "count <= 9007199254740992") {
+		t.Fatalf("gorm tag = %q", fields[0].gormTag())
+	}
+	if fields[1].Min != "0.01" || fields[1].Default != "0.01" {
+		t.Fatalf("price = %+v", fields[1])
 	}
 }
 

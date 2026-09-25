@@ -2,6 +2,7 @@ package resourcegen
 
 import (
 	"fmt"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"github.com/shopspring/decimal"
 
 	logical "github.com/gombit-dev/gombit/field"
+	"github.com/gombit-dev/gombit/types"
 )
 
 // Field is one parsed resource field from the CLI grammar
@@ -551,16 +553,28 @@ func checkNumber(field *Field, name, raw string) error {
 		if _, err := strconv.ParseUint(raw, 10, 64); err != nil {
 			return fmt.Errorf("resourcegen: field %q %s %q must be an unsigned integer", field.JSONName, name, raw)
 		}
-		return nil
+		return exactNumberToken(field, name, raw)
 	}
 	if field.Type == FieldDecimal {
-		if _, err := decimal.NewFromString(raw); err != nil {
-			return fmt.Errorf("resourcegen: field %q %s %q must be a finite decimal", field.JSONName, name, raw)
+		if !decimalSpelling.MatchString(raw) {
+			return fmt.Errorf("resourcegen: field %q %s %q must match the decimal schema", field.JSONName, name, raw)
 		}
 		return nil
 	}
 	if _, err := strconv.ParseInt(raw, 10, 64); err != nil {
 		return fmt.Errorf("resourcegen: field %q %s %q must be an integer", field.JSONName, name, raw)
+	}
+	return exactNumberToken(field, name, raw)
+}
+
+// exactNumberToken rejects an integer token that strconv.ParseFloat does not
+// round-trip. Huma stores minimum/maximum as float64, and the form emits the
+// same token as a JavaScript number. A bound that rounds would pass the
+// request and fail the SQL check, or the other way around.
+func exactNumberToken(field *Field, name, raw string) error {
+	f, err := strconv.ParseFloat(raw, 64)
+	if err != nil || math.IsInf(f, 0) || math.Trunc(f) != f || strconv.FormatFloat(f, 'f', -1, 64) != raw {
+		return fmt.Errorf("resourcegen: field %q %s %q is not an exact number; the request and the form compare it as a number", field.JSONName, name, raw)
 	}
 	return nil
 }
@@ -626,10 +640,11 @@ func defaultInRange(field *Field) error {
 	return nil
 }
 
-// compareNumbers reports the order of a and b using the same representation the
-// runtime uses. Integers stay integers: a float64 comparison collapses values
-// past 2^53 and would accept an empty range. Decimals use shopspring/decimal,
-// which rejects NaN and Inf before they become a SQL check.
+// compareNumbers orders a and b as integers or as decimals. checkNumber has
+// already required an integer token to round-trip through float64, which is
+// how Huma and the form compare minimum/maximum, and a decimal token to match
+// the decimal schema. This compare then agrees with that spelling: integer
+// order for integers, shopspring magnitude for decimals.
 func compareNumbers(field *Field, a, b string) (int, error) {
 	switch field.Type {
 	case FieldUint:
@@ -706,6 +721,11 @@ func portablePattern(pattern string) error {
 }
 
 var re2OnlyGroup = regexp.MustCompile(`\(\?(?:[^:=!]|$)`)
+
+// decimalSpelling is types.Decimal's schema pattern. A bound or default that
+// shopspring accepts but this pattern rejects (1e-2, +1.5, .5, 1.) would
+// initialize a form the request then rejects.
+var decimalSpelling = regexp.MustCompile(types.DecimalPattern)
 
 // typeAllowsFilter reports whether an exact-match filter query param can be
 // generated for this field's type. Exact-match on decimal/time is fiddly to

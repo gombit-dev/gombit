@@ -39,13 +39,18 @@ func NewDecimalFromString(s string) (Decimal, error) {
 	return Decimal{Decimal: d}, nil
 }
 
+// DecimalPattern is the create-body spelling of a decimal. Huma enforces it on
+// the string schema. Bounds and defaults must use the same token so the form,
+// the magnitude check, and the request accept one spelling.
+const DecimalPattern = `^-?[0-9]+(\.[0-9]+)?$`
+
 // Schema implements huma.SchemaProvider so the contract represents a Decimal as
 // a JSON string (matching its MarshalJSON), not a reflected struct.
 func (Decimal) Schema(huma.Registry) *huma.Schema {
 	return &huma.Schema{
 		Type:    huma.TypeString,
 		Format:  "decimal",
-		Pattern: `^-?[0-9]+(\.[0-9]+)?$`,
+		Pattern: DecimalPattern,
 		Examples: []any{
 			"19.99",
 		},

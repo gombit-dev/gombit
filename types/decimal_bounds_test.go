@@ -2,6 +2,12 @@ package types
 
 import "testing"
 
+func TestDecimalPatternIsTheSchema(t *testing.T) {
+	if got := (Decimal{}).Schema(nil).Pattern; got != DecimalPattern {
+		t.Fatalf("schema pattern = %q, want %q", got, DecimalPattern)
+	}
+}
+
 func TestDecimalWithin(t *testing.T) {
 	ok := MustDecimal("10")
 	if err := DecimalWithin(ok, "0", "10"); err != nil {
