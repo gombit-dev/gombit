@@ -470,8 +470,8 @@ func TestSemanticFormatReachesTheRequest(t *testing.T) {
 	if !strings.Contains(src, `Site *string`) || !strings.Contains(src, `json:"site" format:"uri" nullable:"true" maxLength:"255" doc:"Site"`) || !strings.Contains(src, "Site: row.Site") {
 		t.Fatalf("pointer column must stay a nullable pointer:\n%s", src)
 	}
-	if !strings.Contains(src, `json:"ref" format:"uri-reference" doc:"Ref"`) || strings.Contains(src, `format:"uri-reference" nullable:"true"`) {
-		t.Fatalf("uri-reference accepts empty and must not be marked nullable:\n%s", src)
+	if !strings.Contains(src, `Ref *string`) || !strings.Contains(src, `format:"uri-reference"`) {
+		t.Fatalf("uri-reference must stay a pointer string with its format:\n%s", src)
 	}
 }
 

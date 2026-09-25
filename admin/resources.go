@@ -7,6 +7,7 @@ import (
 
 	"github.com/gombit-dev/gombit/contract"
 	"github.com/gombit-dev/gombit/database"
+	"github.com/gombit-dev/gombit/field"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -517,14 +518,14 @@ func applyWrite(ctx context.Context, m *registered, inst any, body map[string]an
 
 // blankToNull is true when "" cannot be stored in this column and the Go
 // field is already a pointer, so null is the blank. The format check is
-// formatMessage, the same predicate Huma runs: email, uri, and ip reject
-// "". uri-reference does not. A non-pointer string stays "" and
-// constraintMessage rejects it when the value is illegal.
+// field.FormatRejects, Huma's validateFormat for every format that
+// function knows. A non-pointer string stays "" and constraintMessage
+// rejects it when the value is illegal.
 func (f *resolvedField) blankToNull() bool {
 	if !f.pointer || f.Type != TypeString {
 		return false
 	}
-	if formatMessage(f.Format, "") != "" {
+	if field.FormatRejects(f.Format, "") {
 		return true
 	}
 	return patternRejectsEmpty(f.Pattern)

@@ -3,9 +3,6 @@ package resourcegen
 import (
 	"fmt"
 	"math"
-	"net/mail"
-	"net/netip"
-	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -1151,23 +1148,10 @@ func (f Field) gormTag() string {
 	return strings.Join(parts, ";")
 }
 
-// formatAccepts is the Huma check for email, uri, and ip. Other formats,
-// including uri-reference, are a no-op, so "" is legal. A default is a
-// stored value, so it has to pass the same predicate the request does.
+// formatAccepts is Huma's validateFormat. A default is a stored value, so
+// it has to pass the same predicate the request does.
 func formatAccepts(format, s string) bool {
-	switch format {
-	case "email":
-		addr, err := mail.ParseAddress(s)
-		return err == nil && addr.Name == "" && addr.Address != "" && strings.TrimSpace(s) == addr.Address
-	case "uri":
-		u, err := url.Parse(s)
-		return err == nil && s != "" && u.Scheme != ""
-	case "ip":
-		_, err := netip.ParseAddr(s)
-		return err == nil
-	default:
-		return true
-	}
+	return !logical.FormatRejects(format, s)
 }
 
 // openAPIFormat is the Huma format for a semantic string. Slug is a pattern,

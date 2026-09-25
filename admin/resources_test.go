@@ -244,6 +244,40 @@ func TestAdminEmptyStringDoesNotClearOptionalNumber(t *testing.T) {
 	}
 }
 
+func TestAdminHostnameBlankIsNull(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	type Row struct {
+		ID   uint    `gorm:"primaryKey" json:"id"`
+		Host *string `json:"host" format:"hostname"`
+	}
+	app := newCookieApp(t)
+	if err := app.DB().AutoMigrate(&Row{}); err != nil {
+		t.Fatalf("AutoMigrate: %v", err)
+	}
+	if err := admin.Register(app, Row{}, admin.Options{Slug: "hosts"}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	jar := loginSuperuser(t, app)
+	rec := doRequest(app, jar, http.MethodPost, "/api/v1/admin/resources/hosts", `{"host":""}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("blank host status = %d; body: %s", rec.Code, rec.Body.String())
+	}
+	var created rowEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if created.Data["host"] != nil {
+		t.Fatalf("hostname blank = %#v", created.Data["host"])
+	}
+	var got Row
+	if err := app.DB().First(&got).Error; err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got.Host != nil {
+		t.Fatalf("stored host = %#v", got.Host)
+	}
+}
+
 func TestAdminURIReferenceBlankStaysEmpty(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	type Row struct {

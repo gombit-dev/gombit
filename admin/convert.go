@@ -4,9 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"net/mail"
-	"net/netip"
-	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -14,6 +11,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/shopspring/decimal"
+
+	"github.com/gombit-dev/gombit/field"
 )
 
 // patternRejectsEmpty reports that the pattern does not match "".
@@ -75,27 +74,22 @@ func constraintMessage(f Field, raw any) string {
 	return ""
 }
 
-// formatMessage applies the model format tag the same way Huma does for
-// email, uri, and ip. Other formats, including uri-reference, are a no-op,
-// so "" is legal. blankToNull uses formatMessage(format, "") as that check.
+// formatMessage applies the model format tag the same way Huma's
+// validateFormat does. blankToNull uses formatMessage(format, "").
 func formatMessage(format, s string) string {
-	switch format {
-	case "email":
-		addr, err := mail.ParseAddress(s)
-		if err != nil || addr.Name != "" || addr.Address == "" || strings.TrimSpace(s) != addr.Address {
-			return "must be an email address"
-		}
-	case "uri":
-		u, err := url.Parse(s)
-		if err != nil || u.Scheme == "" {
-			return "must be an absolute URI"
-		}
-	case "ip":
-		if _, err := netip.ParseAddr(s); err != nil {
-			return "must be an IP address"
-		}
+	if !field.FormatRejects(format, s) {
+		return ""
 	}
-	return ""
+	switch format {
+	case "email", "idn-email":
+		return "must be an email address"
+	case "uri", "iri":
+		return "must be an absolute URI"
+	case "ip", "ipv4", "ipv6":
+		return "must be an IP address"
+	default:
+		return "must match format " + format
+	}
 }
 
 func decimalValue(raw any) (decimal.Decimal, bool) {

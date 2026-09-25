@@ -47,10 +47,13 @@ does not change.
 An optional one is `*string` when the format or the slug pattern rejects
 `""`, the same way an optional date is. A user regex becomes a pointer only
 when it does not match `""`; `^[a-z]*$` stays `string`. A format that accepts
-`""`, such as `uri-reference`, keeps `""`. `gombit generate` copies the
-column's Go type. A plain `string` is not published as nullable, and Huma
-rejects `""` for `email`, `uri`, and `ip`. The model stores `format:"email"`,
-`format:"uri"`, `format:"ip"`, or the slug `pattern`. The form uses
+`""`, such as `uri-reference`, keeps `""`. A `*string` is nullable because
+Huma sets that from the pointer; omitting `nullable:"true"` does not reject
+null. `gombit generate` copies the column's Go type. A plain `string` is not
+a pointer, and Huma's format check rejects `""` for every format it knows
+except `uri-reference`, `iri-reference`, `uri-template`, `json-pointer`, and
+`regex`. The model stores `format:"email"`, `format:"uri"`, `format:"ip"`,
+or the slug `pattern`. The form uses
 `type="email"` and `type="url"` and submits null for a blank optional
 pointer. A slug checks `^[-a-zA-Z0-9_]+$`. Admin keeps the `string` widget
 and rejects a value that fails the same format or pattern. On a pointer
