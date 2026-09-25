@@ -87,7 +87,9 @@ list columns are a declared subset. Add modifiers to the field grammar:
 | ------------ | ---------------------------------------- | ------------------------------------ |
 | `filterable` | `?<field>=<value>` (exact match)         | string, int, int64, uint, bool       |
 | `sortable`   | `?ordering=<field>` (`-<field>` for DESC) | any scalar (and belongs_to FK)       |
-| `searchable` | `?search=<term>` (case-insensitive LIKE) | string, text                         |
+| `searchable` | `?search=<term>` (case-insensitive LIKE) | string, text, email, slug            |
+
+`url` and `ip` are exact values. They are sortable and not searchable, even though the admin wire is `string`.
 
 A `belongs_to` foreign key is **filterable by default** — no modifier needed —
 so a detail page can list a record's `has_many` children with

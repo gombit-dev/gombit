@@ -632,6 +632,33 @@ func TestSemanticStringsArePlainStrings(t *testing.T) {
 	}
 }
 
+func TestSemanticDefaultMustMatchFormat(t *testing.T) {
+	t.Parallel()
+	bad := []string{
+		"contact:email:default=not-an-email",
+		"site:url:default=example.com",
+		"handle:slug:default=has space",
+		"addr:ip:default=nope",
+	}
+	for _, spec := range bad {
+		if _, err := parseFields([]string{spec}, "person"); err == nil {
+			t.Fatalf("parseFields(%q) accepted a default the format rejects", spec)
+		}
+	}
+	fields, err := parseFields([]string{
+		"contact:email:default=ada@example.com",
+		"site:url:default=https://example.com",
+		"handle:slug:default=ada_lovelace",
+		"addr:ip:default=127.0.0.1",
+	}, "person")
+	if err != nil {
+		t.Fatalf("valid defaults: %v", err)
+	}
+	if len(fields) != 4 {
+		t.Fatalf("fields = %d", len(fields))
+	}
+}
+
 func TestSemanticStringMaxLength(t *testing.T) {
 	t.Parallel()
 	fields, err := parseFields([]string{"site:url:max_length=2048"}, "page")

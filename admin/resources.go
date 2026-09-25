@@ -448,7 +448,16 @@ func applyWrite(ctx context.Context, m *registered, inst any, body map[string]an
 			fields[name] = []string{"field is read-only"}
 			continue
 		}
+		// Format and pattern reject "". Rewrite that blank before the
+		// default, so "" and null are one value.
+		if s, ok := raw.(string); ok && s == "" && !f.Required && blankRejectsEmpty(f.Field) {
+			raw = nil
+		}
 		if raw == nil && creating && f.Default != "" {
+			if msg := constraintMessage(f.Field, f.Default); msg != "" {
+				fields[name] = []string{msg}
+				continue
+			}
 			if err := f.set(inst, f.Default); err != nil {
 				fields[name] = []string{err.Error()}
 				continue
@@ -459,12 +468,6 @@ func applyWrite(ctx context.Context, m *registered, inst any, body map[string]an
 		if raw == nil && f.Required {
 			fields[name] = []string{"is required"}
 			continue
-		}
-		// Format and pattern reject "". Only those strings become null.
-		// An optional integer, bool, decimal, date, or uuid still goes
-		// through coerceValue, which rejects "".
-		if s, ok := raw.(string); ok && s == "" && !f.Required && f.Type == TypeString && (f.Format != "" || f.Pattern != "") {
-			raw = nil
 		}
 		if msg := constraintMessage(f.Field, raw); msg != "" {
 			fields[name] = []string{msg}
@@ -489,6 +492,10 @@ func applyWrite(ctx context.Context, m *registered, inst any, body map[string]an
 				continue
 			}
 			if f.Default != "" {
+				if msg := constraintMessage(f.Field, f.Default); msg != "" {
+					fields[f.Name] = []string{msg}
+					continue
+				}
 				if err := f.set(inst, f.Default); err != nil {
 					fields[f.Name] = []string{err.Error()}
 					continue
@@ -506,6 +513,10 @@ func applyWrite(ctx context.Context, m *registered, inst any, body map[string]an
 		return contract.WithContext(ctx, contract.Validation("The request contains invalid fields.", fields))
 	}
 	return nil
+}
+
+func blankRejectsEmpty(f Field) bool {
+	return f.Type == TypeString && (f.Format != "" || f.Pattern != "")
 }
 
 func applySearch(q *gorm.DB, m *registered, term string) (*gorm.DB, error) {

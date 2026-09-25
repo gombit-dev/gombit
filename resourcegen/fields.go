@@ -3,6 +3,9 @@ package resourcegen
 import (
 	"fmt"
 	"math"
+	"net/mail"
+	"net/netip"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -266,8 +269,10 @@ func parseField(spec, resourcePkg string) (Field, error) {
 	if spec == "" {
 		return Field{}, fmt.Errorf("resourcegen: empty field spec")
 	}
-	parts := strings.Split(spec, ":")
-	if len(parts) < 2 || len(parts) > 3 {
+	// SplitN keeps a modifier value that contains colons, such as
+	// default=https://example.com.
+	parts := strings.SplitN(spec, ":", 3)
+	if len(parts) < 2 {
 		return Field{}, fmt.Errorf("resourcegen: field %q must be name:type[:modifiers]", spec)
 	}
 	name := strings.TrimSpace(parts[0])
@@ -653,6 +658,14 @@ func checkDefault(field *Field) error {
 			if !re.MatchString(field.Default) {
 				return fmt.Errorf("resourcegen: field %q default %q does not match regex", field.JSONName, field.Default)
 			}
+		}
+		if pattern := field.semanticPattern(); pattern != "" && field.Pattern == "" {
+			if !regexp.MustCompile(pattern).MatchString(field.Default) {
+				return fmt.Errorf("resourcegen: field %q default %q does not match pattern", field.JSONName, field.Default)
+			}
+		}
+		if format := field.openAPIFormat(); format != "" && !formatAccepts(format, field.Default) {
+			return fmt.Errorf("resourcegen: field %q default %q is not a valid %s", field.JSONName, field.Default, format)
 		}
 	default:
 		return fmt.Errorf("resourcegen: field %q is %s and cannot take default", field.JSONName, field.Type)
@@ -1140,6 +1153,24 @@ func (f Field) gormTag() string {
 
 // openAPIFormat is the Huma format for a semantic string. Slug is a pattern,
 // not a format. Empty for kinds that do not add one.
+// formatAccepts is the Huma check for a semantic format. A default is a
+// stored value, so it has to pass the same predicate the request does.
+func formatAccepts(format, s string) bool {
+	switch format {
+	case "email":
+		addr, err := mail.ParseAddress(s)
+		return err == nil && addr.Name == "" && addr.Address != "" && strings.TrimSpace(s) == addr.Address
+	case "uri":
+		u, err := url.Parse(s)
+		return err == nil && s != "" && u.Scheme != ""
+	case "ip":
+		_, err := netip.ParseAddr(s)
+		return err == nil
+	default:
+		return true
+	}
+}
+
 func (f Field) openAPIFormat() string {
 	switch f.Type {
 	case FieldEmail:

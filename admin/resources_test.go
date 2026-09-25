@@ -139,6 +139,46 @@ func TestAdminSemanticStringWrite(t *testing.T) {
 	}
 }
 
+func TestAdminBlankSemanticStringUsesDefault(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	type Page struct {
+		ID   uint    `gorm:"primaryKey" json:"id"`
+		Site *string `json:"site" format:"uri" validate:"default=https://example.com"`
+		Name string  `json:"name"`
+	}
+	app := newCookieApp(t)
+	if err := app.DB().AutoMigrate(&Page{}); err != nil {
+		t.Fatalf("AutoMigrate: %v", err)
+	}
+	if err := admin.Register(app, Page{}, admin.Options{Slug: "pages"}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	jar := loginSuperuser(t, app)
+	meta := doRequest(app, jar, http.MethodGet, "/api/v1/admin/meta/pages", "")
+	if strings.Contains(meta.Body.String(), `"search":["site"`) {
+		t.Fatalf("url must not be searchable: %s", meta.Body.String())
+	}
+	if !strings.Contains(meta.Body.String(), `"search":["name"]`) {
+		t.Fatalf("name must stay searchable: %s", meta.Body.String())
+	}
+	for _, body := range []string{`{"site":""}`, `{"site":null}`, `{}`} {
+		rec := doRequest(app, jar, http.MethodPost, "/api/v1/admin/resources/pages", body)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("body %s status = %d; body: %s", body, rec.Code, rec.Body.String())
+		}
+		var created rowEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if created.Data["site"] != "https://example.com" {
+			t.Fatalf("body %s site = %#v", body, created.Data["site"])
+		}
+	}
+	if err := admin.Register(app, Page{}, admin.Options{Slug: "pages-filter", Filter: []string{"site"}}); err == nil {
+		t.Fatal("filtering a url by the string wire type must be rejected")
+	}
+}
+
 func TestAdminEmptyStringDoesNotClearOptionalNumber(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	type Item struct {

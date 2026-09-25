@@ -61,6 +61,9 @@ func registerModel(host Host, model any, opts Options) error {
 	// (nil), so the admin — and the relation pickers, which search server-side —
 	// can filter by name out of the box. A caller who wants no search opts out
 	// explicitly with an empty (non-nil) slice.
+	if err := fillConstraints(opts.Fields, sch); err != nil {
+		return err
+	}
 	if opts.Search == nil {
 		opts.Search = defaultSearchFields(opts.Fields)
 	}
@@ -106,9 +109,6 @@ func registerModel(host Host, model any, opts Options) error {
 		return err
 	}
 
-	if err := fillConstraints(opts.Fields, sch); err != nil {
-		return err
-	}
 	resolved, m2mBindings, hasManyBindings, err := resolveFields(opts.Fields, sch)
 	if err != nil {
 		return err
@@ -159,7 +159,7 @@ func defaultSearchFields(fields []Field) []string {
 		if f.ReadOnly {
 			continue
 		}
-		if f.Type == TypeString || f.Type == TypeText {
+		if f.Type == TypeText || (f.Type == TypeString && field.AllowsSearch(f.queryKind(), "")) {
 			out = append(out, f.Name)
 		}
 	}
@@ -191,11 +191,30 @@ func fieldByName(fields []Field, name string) *Field {
 	return nil
 }
 
+// queryKind is the catalog kind for list policy. Email, URL, IP, and slug
+// share the string admin wire, so the format or slug pattern recovers the
+// kind. A plain string stays searchable and filterable.
+func (f Field) queryKind() field.Kind {
+	switch f.Format {
+	case "email":
+		return field.Email
+	case "uri":
+		return field.URL
+	case "ip":
+		return field.IP
+	}
+	if f.Pattern == `^[-a-zA-Z0-9_]+$` {
+		return field.Slug
+	}
+	return field.Kind(f.Type)
+}
+
 // fieldAllowsQuery reports whether an admin list option (search, filter,
 // ordering) is legal for the field's catalog kind. Relation cardinalities
-// read relationCaps; every other admin type is the kind of the same name.
+// read relationCaps. Semantic strings use the kind recovered from format
+// or the slug pattern, not the string wire type.
 func fieldAllowsQuery(kind string, f Field) bool {
-	k := field.Kind(f.Type)
+	k := f.queryKind()
 	var rel field.RelationKind
 	if f.Type == TypeRelation {
 		k = field.Relation
