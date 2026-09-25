@@ -511,6 +511,9 @@ func (f modelField) requestTag() string {
 		if f.Constraints.Pattern != "" {
 			tag += ` pattern:"` + f.Constraints.Pattern + `"`
 		}
+		if len(f.Constraints.Enum) > 0 {
+			tag += ` enum:"` + strings.Join(f.Constraints.Enum, ",") + `"`
+		}
 	}
 	if !f.isDecimal() {
 		if f.Constraints.Min != "" {

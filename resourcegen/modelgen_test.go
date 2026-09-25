@@ -548,7 +548,7 @@ func TestRequestTagReadsValidateConstraints(t *testing.T) {
 		ID     uint   `gorm:"primaryKey"`
 		Age    int    `gorm:"not null;check:age >= 0 AND age <= 150" validate:"min=0;max=150"`
 		Code   string `gorm:"size:8;not null" validate:"max_length=8;pattern=^[a-z]+$"`
-		Status string `gorm:"size:16;default:'draft'" validate:"default=draft"`
+		Status string `gorm:"size:16" validate:"enum=draft,published;default=draft"`
 		Count  uint   `validate:"min=2"`
 	}
 	res, err := buildModelResource(&Person{}, "resourcegen")
@@ -560,7 +560,7 @@ func TestRequestTagReadsValidateConstraints(t *testing.T) {
 		`json:"age" minimum:"0" maximum:"150" doc:"Age"`,
 		`json:"code" minLength:"1" maxLength:"8" pattern:"^[a-z]+$" doc:"Code"`,
 		`Status *string`,
-		`json:"status" maxLength:"16" doc:"Status"`,
+		`json:"status" maxLength:"16" enum:"draft,published" doc:"Status"`,
 		`json:"count" minimum:"2" doc:"Count"`,
 		`row.Status = "draft"`,
 	} {

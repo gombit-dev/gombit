@@ -23,10 +23,9 @@ version.
   editing the `*.gen.go` is unsupported (regeneration overwrites them). Scalar,
   relation, and list-query HTTP contracts (routes, DTO shape, filter/sort/search/
   aggregate surface, validation) are preserved.
-  - **Feature downgrade:** `enum(...)` fields are no longer supported (their
-    values are not recoverable from the GORM schema, so the model-first generator
-    cannot yet derive the constraint). `make resource` rejects them — use a
-    `string` for now; a model-first enum policy is planned.
+  - `enum(...)` values are stored on the model's `validate` tag (the GORM
+    schema only keeps a varchar) and `gombit generate` emits them as a Huma
+    `enum` on the create body.
   - `make resource` is now **preflighted and atomic**: it plans both phases and
     validates the whole operation (including compiling the pending model in a Go
     build overlay, so the real tree is untouched) before writing anything, then

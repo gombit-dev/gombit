@@ -462,7 +462,7 @@ func applyModifiers(field *Field, raw string) error {
 			if val == "" {
 				return fmt.Errorf("resourcegen: field %q regex must be a pattern", field.JSONName)
 			}
-			if _, err := regexp.Compile(val); err != nil {
+			if err := portablePattern(val); err != nil {
 				return fmt.Errorf("resourcegen: field %q regex: %w", field.JSONName, err)
 			}
 			field.Pattern = val
@@ -640,8 +640,24 @@ func (f Field) constraints() logical.Constraints {
 		MaxLength: f.MaxLength,
 		Pattern:   f.Pattern,
 		Default:   f.Default,
+		Enum:      append([]string(nil), f.EnumValues...),
 	}
 }
+
+// portablePattern accepts a pattern only when both Go's RE2 and JavaScript's
+// RegExp can compile it. Inline flags, POSIX classes, and RE2 named groups
+// compile here and throw when the generated form evaluates new RegExp.
+func portablePattern(pattern string) error {
+	if _, err := regexp.Compile(pattern); err != nil {
+		return err
+	}
+	if re2OnlyGroup.MatchString(pattern) || strings.Contains(pattern, `[:`) || strings.Contains(pattern, `\Q`) || strings.Contains(pattern, `\E`) || strings.Contains(pattern, `\A`) || strings.Contains(pattern, `\z`) || strings.Contains(pattern, `\Z`) {
+		return fmt.Errorf("pattern must be valid in both Go RE2 and JavaScript")
+	}
+	return nil
+}
+
+var re2OnlyGroup = regexp.MustCompile(`\(\?(?:[^:=!]|$)`)
 
 // typeAllowsFilter reports whether an exact-match filter query param can be
 // generated for this field's type. Exact-match on decimal/time is fiddly to

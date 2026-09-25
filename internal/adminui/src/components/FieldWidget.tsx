@@ -17,6 +17,7 @@ import { useApiClient } from "../api/client";
 import { useCatalog } from "../app/providers";
 import type { FieldMeta, Row } from "../api/types";
 import {
+  compareDecimal,
   isBelongsTo,
   isHasMany,
   isManyToMany,
@@ -427,14 +428,14 @@ function widgetRules(field: FieldMeta, readOnly: boolean) {
       if (value == null || value === "") {
         return true;
       }
-      const n = Number(value);
-      if (Number.isNaN(n)) {
+      const text = String(value).trim();
+      if (!/^-?\d+(\.\d+)?$/.test(text)) {
         return "must be a decimal";
       }
-      if (field.minimum && n < Number(field.minimum)) {
+      if (field.minimum && compareDecimal(text, field.minimum) < 0) {
         return `must be at least ${field.minimum}`;
       }
-      if (field.maximum && n > Number(field.maximum)) {
+      if (field.maximum && compareDecimal(text, field.maximum) > 0) {
         return `must be at most ${field.maximum}`;
       }
       return true;

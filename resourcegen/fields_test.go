@@ -171,6 +171,7 @@ func TestParseConstraintsReject(t *testing.T) {
 		"title:string:max_length=3,default=hello",
 		"note:text:regex=^[a-z]+$,default=Hello",
 		"when:time:default=now",
+		"note:text:regex=(?i)^[a-z]+$",
 	} {
 		if _, err := parseFields([]string{spec}, "person"); err == nil {
 			t.Fatalf("parseFields(%q) error = nil, want error", spec)

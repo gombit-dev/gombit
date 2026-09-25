@@ -252,7 +252,7 @@ function constraintError(field: FieldMeta, raw: unknown): string {
   if (field.pattern && !new RegExp(field.pattern).test(String(raw))) {
     return "does not match pattern";
   }
-  if ((field.minimum || field.maximum) && (field.type === "integer" || field.type === "float" || field.type === "decimal")) {
+  if ((field.minimum || field.maximum) && (field.type === "integer" || field.type === "float")) {
     const n = Number(raw);
     if (Number.isNaN(n)) {
       return "must be a number";
@@ -264,7 +264,51 @@ function constraintError(field: FieldMeta, raw: unknown): string {
       return `must be at most ${field.maximum}`;
     }
   }
+  if ((field.minimum || field.maximum) && field.type === "decimal") {
+    const text = String(raw).trim();
+    if (!/^-?\d+(\.\d+)?$/.test(text)) {
+      return "must be a decimal";
+    }
+    if (field.minimum && compareDecimal(text, field.minimum) < 0) {
+      return `must be at least ${field.minimum}`;
+    }
+    if (field.maximum && compareDecimal(text, field.maximum) > 0) {
+      return `must be at most ${field.maximum}`;
+    }
+  }
   return "";
+}
+
+/** compareDecimal reports the magnitude order of two decimal strings. */
+export function compareDecimal(a: string, b: string): number {
+  const norm = (raw: string) => {
+    let t = raw.trim();
+    let neg = false;
+    if (t.startsWith("-")) {
+      neg = true;
+      t = t.slice(1);
+    }
+    const parts = t.split(".");
+    const ip = (parts[0] || "0").replace(/^0+(?=\d)/, "");
+    const fp = (parts[1] || "").replace(/0+$/, "");
+    return { neg, ip, fp };
+  };
+  const left = norm(a);
+  const right = norm(b);
+  if (left.neg !== right.neg) {
+    return left.neg ? -1 : 1;
+  }
+  const sign = left.neg ? -1 : 1;
+  if (left.ip.length !== right.ip.length) {
+    return sign * (left.ip.length < right.ip.length ? -1 : 1);
+  }
+  if (left.ip !== right.ip) {
+    return sign * (left.ip < right.ip ? -1 : 1);
+  }
+  if (left.fp !== right.fp) {
+    return sign * (left.fp < right.fp ? -1 : 1);
+  }
+  return 0;
 }
 
 function isEmptyFormValue(raw: unknown): boolean {

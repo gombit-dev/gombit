@@ -409,6 +409,50 @@ func renderFormTSX(ctx renderContext) string {
 	return renderMinimalFormTSX(ctx)
 }
 
+// cmpDecimalJS compares two decimal strings by magnitude. It is emitted when a
+// form has a decimal bound so the check does not go through a JavaScript number.
+const cmpDecimalJS = `function cmpDecimal(a, b) {
+  const norm = (raw) => {
+    let t = String(raw).trim();
+    let neg = false;
+    if (t.startsWith("-")) {
+      neg = true;
+      t = t.slice(1);
+    }
+    const parts = t.split(".");
+    const ip = (parts[0] || "0").replace(/^0+(?=\d)/, "");
+    const fp = (parts[1] || "").replace(/0+$/, "");
+    return { neg, ip, fp };
+  };
+  const left = norm(a);
+  const right = norm(b);
+  if (left.neg !== right.neg) {
+    return left.neg ? -1 : 1;
+  }
+  const sign = left.neg ? -1 : 1;
+  if (left.ip.length !== right.ip.length) {
+    return sign * (left.ip.length < right.ip.length ? -1 : 1);
+  }
+  if (left.ip !== right.ip) {
+    return sign * (left.ip < right.ip ? -1 : 1);
+  }
+  if (left.fp !== right.fp) {
+    return sign * (left.fp < right.fp ? -1 : 1);
+  }
+  return 0;
+}
+
+`
+
+func formNeedsDecimalCmp(fields []Field) bool {
+	for _, f := range fields {
+		if f.Type == FieldDecimal && (f.Min != "" || f.Max != "") {
+			return true
+		}
+	}
+	return false
+}
+
 func renderMinimalFormTSX(ctx renderContext) string {
 	createPath := defaultAPIPrefix + ctx.Resource.HTTPPath
 	var b strings.Builder
@@ -420,6 +464,9 @@ func renderMinimalFormTSX(ctx renderContext) string {
 	b.WriteString("import { applyContractErrors } from \"../api/formErrors\";\n")
 	b.WriteString("import { unwrap } from \"../api/generated/client\";\n")
 	b.WriteString("import type { paths } from \"../api/generated/schema\";\n\n")
+	if formNeedsDecimalCmp(ctx.Fields) {
+		b.WriteString(cmpDecimalJS)
+	}
 	b.WriteString("const createPath = \"" + createPath + "\" as const;\n\n")
 	b.WriteString("type CreateBody =\n")
 	b.WriteString("  paths[typeof createPath][\"post\"][\"requestBody\"][\"content\"][\"application/json\"];\n\n")
@@ -517,7 +564,7 @@ func tsEnumUnion(field Field) string {
 func tsDefaultValue(field Field) string {
 	if field.Default != "" {
 		switch field.Type {
-		case FieldInt, FieldInt64, FieldUint, FieldDecimal, FieldBool:
+		case FieldInt, FieldInt64, FieldUint, FieldBool:
 			return field.Default
 		default:
 			return strconv.Quote(field.Default)
@@ -573,13 +620,12 @@ func tsDecimalRules(field Field) string {
 	}
 	b.WriteString(", validate: (value) => {\n")
 	b.WriteString("            if (value == null || value === \"\") return true;\n")
-	b.WriteString("            const n = Number(value);\n")
-	b.WriteString("            if (Number.isNaN(n)) return \"" + field.GoName + " must be a decimal\";\n")
+	b.WriteString("            if (!/^-?\\d+(\\.\\d+)?$/.test(String(value))) return \"" + field.GoName + " must be a decimal\";\n")
 	if field.Min != "" {
-		b.WriteString("            if (n < " + field.Min + ") return \"" + field.GoName + " must be at least " + field.Min + "\";\n")
+		b.WriteString("            if (cmpDecimal(value, " + strconv.Quote(field.Min) + ") < 0) return \"" + field.GoName + " must be at least " + field.Min + "\";\n")
 	}
 	if field.Max != "" {
-		b.WriteString("            if (n > " + field.Max + ") return \"" + field.GoName + " must be at most " + field.Max + "\";\n")
+		b.WriteString("            if (cmpDecimal(value, " + strconv.Quote(field.Max) + ") > 0) return \"" + field.GoName + " must be at most " + field.Max + "\";\n")
 	}
 	b.WriteString("            return true;\n")
 	b.WriteString("          }")
@@ -798,6 +844,9 @@ func renderMUIFormTSX(ctx renderContext) string {
 	b.WriteString("import { applyContractErrors } from \"../api/formErrors\";\n")
 	b.WriteString("import { unwrap } from \"../api/generated/client\";\n")
 	b.WriteString("import type { paths } from \"../api/generated/schema\";\n\n")
+	if formNeedsDecimalCmp(ctx.Fields) {
+		b.WriteString(cmpDecimalJS)
+	}
 	b.WriteString("const createPath = \"" + createPath + "\" as const;\n\n")
 	b.WriteString("type CreateBody =\n")
 	b.WriteString("  paths[typeof createPath][\"post\"][\"requestBody\"][\"content\"][\"application/json\"];\n\n")
@@ -897,11 +946,12 @@ func renderMUIFormTSX(ctx renderContext) string {
 
 func muiDecimalBound(field Field) string {
 	var lines []string
+	lines = append(lines, `if (!/^-?\d+(\.\d+)?$/.test(String(value))) return "`+field.GoName+` must be a decimal";`)
 	if field.Min != "" {
-		lines = append(lines, `if (n < `+field.Min+`) return "`+field.GoName+` must be at least `+field.Min+`";`)
+		lines = append(lines, `if (cmpDecimal(value, `+strconv.Quote(field.Min)+`) < 0) return "`+field.GoName+` must be at least `+field.Min+`";`)
 	}
 	if field.Max != "" {
-		lines = append(lines, `if (n > `+field.Max+`) return "`+field.GoName+` must be at most `+field.Max+`";`)
+		lines = append(lines, `if (cmpDecimal(value, `+strconv.Quote(field.Max)+`) > 0) return "`+field.GoName+` must be at most `+field.Max+`";`)
 	}
 	return strings.Join(lines, "\n              ")
 }
@@ -914,8 +964,6 @@ func muiRules(field Field) string {
 	if field.Type == FieldDecimal && (field.Min != "" || field.Max != "") {
 		parts = append(parts, `validate: (value) => {
               if (value == null || value === "") return true;
-              const n = Number(value);
-              if (Number.isNaN(n)) return "`+field.GoName+` must be a decimal";
               `+muiDecimalBound(field)+`
               return true;
             }`)

@@ -16,6 +16,9 @@ type Constraints struct {
 	MaxLength int
 	Pattern   string
 	Default   string
+	// Enum is the allowed values for a string column. The GORM schema stores
+	// an enum as a varchar, so this tag is how gombit generate recovers them.
+	Enum []string
 }
 
 // FormatConstraints renders c as a validate tag value. Empty c is "".
@@ -35,6 +38,9 @@ func FormatConstraints(c Constraints) string {
 	}
 	if c.Default != "" {
 		parts = append(parts, "default="+c.Default)
+	}
+	if len(c.Enum) > 0 {
+		parts = append(parts, "enum="+strings.Join(c.Enum, ","))
 	}
 	return strings.Join(parts, ";")
 }
@@ -72,6 +78,14 @@ func ParseConstraints(tag string) (Constraints, error) {
 			c.Pattern = val
 		case "default":
 			c.Default = val
+		case "enum":
+			for _, v := range strings.Split(val, ",") {
+				v = strings.TrimSpace(v)
+				if v == "" {
+					return c, fmt.Errorf("field: enum has an empty value")
+				}
+				c.Enum = append(c.Enum, v)
+			}
 		default:
 			return c, fmt.Errorf("field: unknown validate key %q", key)
 		}
