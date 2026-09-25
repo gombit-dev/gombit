@@ -563,6 +563,29 @@ func htmlNumberAttrs(field Field) string {
 	return b.String()
 }
 
+func tsDecimalRules(field Field) string {
+	var b strings.Builder
+	if field.Required {
+		b.WriteString(", required: \"" + field.GoName + " is required\"")
+	}
+	if field.Min == "" && field.Max == "" {
+		return b.String()
+	}
+	b.WriteString(", validate: (value) => {\n")
+	b.WriteString("            if (value == null || value === \"\") return true;\n")
+	b.WriteString("            const n = Number(value);\n")
+	b.WriteString("            if (Number.isNaN(n)) return \"" + field.GoName + " must be a decimal\";\n")
+	if field.Min != "" {
+		b.WriteString("            if (n < " + field.Min + ") return \"" + field.GoName + " must be at least " + field.Min + "\";\n")
+	}
+	if field.Max != "" {
+		b.WriteString("            if (n > " + field.Max + ") return \"" + field.GoName + " must be at most " + field.Max + "\";\n")
+	}
+	b.WriteString("            return true;\n")
+	b.WriteString("          }")
+	return b.String()
+}
+
 func tsTextRegister(field Field) string {
 	var parts []string
 	if field.Required {
@@ -598,11 +621,7 @@ func renderFormField(field Field) string {
 	b.WriteString("          " + field.GoName + "\n")
 	switch field.Type {
 	case FieldText:
-		b.WriteString("          <textarea {...register(\"" + field.JSONName + "\"")
-		if field.Required {
-			b.WriteString(", { required: \"" + field.GoName + " is required\" }")
-		}
-		b.WriteString(")} />\n")
+		b.WriteString("          <textarea {...register(\"" + field.JSONName + "\"" + tsTextRegister(field) + ")}" + htmlTextAttrs(field) + " />\n")
 	case FieldBool:
 		b.WriteString("          <input type=\"checkbox\" {...register(\"" + field.JSONName + "\")} />\n")
 	case FieldInt, FieldInt64, FieldUint:
@@ -626,11 +645,7 @@ func renderFormField(field Field) string {
 	case FieldDecimal:
 		// Empty becomes null so an optional (*types.Decimal) field round-trips; a
 		// non-empty value is sent as the exact decimal string.
-		b.WriteString("          <input type=\"text\" inputMode=\"decimal\" {...register(\"" + field.JSONName + "\", { setValueAs: (value) => (value === \"\" ? null : value)")
-		if field.Required {
-			b.WriteString(", required: \"" + field.GoName + " is required\"")
-		}
-		b.WriteString(" })} />\n")
+		b.WriteString("          <input type=\"text\" inputMode=\"decimal\" {...register(\"" + field.JSONName + "\", { setValueAs: (value) => (value === \"\" ? null : value)" + tsDecimalRules(field) + " })}" + htmlNumberAttrs(field) + " />\n")
 	default:
 		b.WriteString("          <input type=\"text\" {...register(\"" + field.JSONName + "\"" + tsTextRegister(field) + ")}" + htmlTextAttrs(field) + " />\n")
 	}
@@ -880,16 +895,37 @@ func renderMUIFormTSX(ctx renderContext) string {
 	return b.String()
 }
 
+func muiDecimalBound(field Field) string {
+	var lines []string
+	if field.Min != "" {
+		lines = append(lines, `if (n < `+field.Min+`) return "`+field.GoName+` must be at least `+field.Min+`";`)
+	}
+	if field.Max != "" {
+		lines = append(lines, `if (n > `+field.Max+`) return "`+field.GoName+` must be at most `+field.Max+`";`)
+	}
+	return strings.Join(lines, "\n              ")
+}
+
 func muiRules(field Field) string {
 	var parts []string
 	if field.Required && field.Type != FieldBool {
 		parts = append(parts, `required: "`+field.GoName+` is required"`)
 	}
-	if field.Min != "" {
-		parts = append(parts, `min: { value: `+field.Min+`, message: "`+field.GoName+` must be at least `+field.Min+`" }`)
-	}
-	if field.Max != "" {
-		parts = append(parts, `max: { value: `+field.Max+`, message: "`+field.GoName+` must be at most `+field.Max+`" }`)
+	if field.Type == FieldDecimal && (field.Min != "" || field.Max != "") {
+		parts = append(parts, `validate: (value) => {
+              if (value == null || value === "") return true;
+              const n = Number(value);
+              if (Number.isNaN(n)) return "`+field.GoName+` must be a decimal";
+              `+muiDecimalBound(field)+`
+              return true;
+            }`)
+	} else {
+		if field.Min != "" {
+			parts = append(parts, `min: { value: `+field.Min+`, message: "`+field.GoName+` must be at least `+field.Min+`" }`)
+		}
+		if field.Max != "" {
+			parts = append(parts, `max: { value: `+field.Max+`, message: "`+field.GoName+` must be at most `+field.Max+`" }`)
+		}
 	}
 	if field.MaxLength > 0 {
 		parts = append(parts, `maxLength: { value: `+strconv.Itoa(field.MaxLength)+`, message: "`+field.GoName+` is too long" }`)

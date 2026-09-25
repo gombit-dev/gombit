@@ -483,7 +483,12 @@ func (f modelField) responseTag() string {
 //	maxLength:"<N>"  a string whose column has a real size (Size > 0); an
 //	                 unset/driver-dependent size asserts nothing.
 //	minimum:"0"      an unsigned integer column, unless validate states an explicit min.
-//	minimum/maximum/pattern/default  copied from the model's validate tag.
+//	minimum/maximum/pattern copied from the model's validate tag for kinds whose
+//	schema Huma actually enforces. Decimal is a string schema, so its bounds are
+//	checked in Resolve via types.DecimalWithin, not with minimum/maximum.
+//	A validate default is NOT a Huma default tag: that tag replaces the zero
+//	value after validation. The create field is a pointer and the mapper
+//	applies the default only when the pointer is nil.
 //
 // The string checks key off f.Kind (reflect.String), not the GoType text: a
 // defined `type Slug string` renders as "Slug" yet is Kind reflect.String and
@@ -492,8 +497,8 @@ func (f modelField) responseTag() string {
 // allowed values are not a recoverable schema fact (a known class-B gap).
 func (f modelField) requestTag() string {
 	tag := `json:"` + f.jsonName() + `"`
-	if f.Kind == reflect.String {
-		if f.NotNull {
+	if f.Kind == reflect.String && !f.isDecimal() {
+		if f.NotNull && f.Constraints.Default == "" {
 			tag += ` minLength:"1"`
 		}
 		maxLen := f.Size
@@ -507,19 +512,57 @@ func (f modelField) requestTag() string {
 			tag += ` pattern:"` + f.Constraints.Pattern + `"`
 		}
 	}
-	if f.Constraints.Min != "" {
-		tag += ` minimum:"` + f.Constraints.Min + `"`
-	} else if isUnsignedKind(f.Kind) {
-		tag += ` minimum:"0"`
-	}
-	if f.Constraints.Max != "" {
-		tag += ` maximum:"` + f.Constraints.Max + `"`
-	}
-	if f.Constraints.Default != "" {
-		tag += ` default:"` + f.Constraints.Default + `"`
+	if !f.isDecimal() {
+		if f.Constraints.Min != "" {
+			tag += ` minimum:"` + f.Constraints.Min + `"`
+		} else if isUnsignedKind(f.Kind) {
+			tag += ` minimum:"0"`
+		}
+		if f.Constraints.Max != "" {
+			tag += ` maximum:"` + f.Constraints.Max + `"`
+		}
 	}
 	tag += ` doc:"` + f.GoName + `"`
 	return tag
+}
+
+// requestGoType is the create-body type. A field with a default is a pointer
+// so omission (nil) is distinct from an explicit zero.
+func (f modelField) requestGoType() string {
+	if f.Constraints.Default == "" || strings.HasPrefix(f.GoType, "*") {
+		return f.GoType
+	}
+	return "*" + f.GoType
+}
+
+func (f modelField) isDecimal() bool {
+	return strings.Contains(f.GoType, "types.Decimal")
+}
+
+// createAssign writes the model column from the create body. A defaulted field
+// copies the pointer when it is set and otherwise writes the default literal.
+func (f modelField) createAssign() string {
+	path := "row." + f.AccessPath
+	src := "body." + f.GoName
+	if f.Constraints.Default == "" {
+		return "\t" + path + " = " + src + "\n"
+	}
+	lit := f.defaultLiteral()
+	if strings.HasPrefix(f.GoType, "*") {
+		return "\tif " + src + " != nil {\n\t\t" + path + " = " + src + "\n\t} else {\n\t\tv := " + lit + "\n\t\t" + path + " = &v\n\t}\n"
+	}
+	return "\tif " + src + " != nil {\n\t\t" + path + " = *" + src + "\n\t} else {\n\t\t" + path + " = " + lit + "\n\t}\n"
+}
+
+func (f modelField) defaultLiteral() string {
+	switch {
+	case f.isDecimal():
+		return "types.MustDecimal(" + strconv.Quote(f.Constraints.Default) + ")"
+	case f.Kind == reflect.String:
+		return strconv.Quote(f.Constraints.Default)
+	default:
+		return f.Constraints.Default
+	}
 }
 
 // isUnsignedKind reports whether the (unwrapped) kind is an unsigned integer, so
@@ -540,14 +583,19 @@ func isUnsignedKind(k reflect.Kind) bool {
 // its policy, so the file cannot drift from the model without regeneration
 // changing it (the mechanism gombit generate --check enforces in slice 5).
 func renderModelDTOs(r modelResource) string {
-	var b strings.Builder
-	b.WriteString(goBanner())
-	b.WriteString("package " + r.Package + "\n\n")
-	b.WriteString(renderImports(r.imports))
-
 	data := r.dataType()
 	body := r.createBodyType()
 	typ := r.TypeName
+	imports := r.imports
+	if r.hasDecimalBounds() {
+		imports = append(imports, importSpec{Alias: "huma", Path: "github.com/danielgtaylor/huma/v2"})
+		sort.Slice(imports, func(i, j int) bool { return imports[i].Path < imports[j].Path })
+	}
+
+	var b strings.Builder
+	b.WriteString(goBanner())
+	b.WriteString("package " + r.Package + "\n\n")
+	b.WriteString(renderImports(imports))
 
 	// Response DTO: the columns the API returns.
 	b.WriteString("// " + data + " is the response body for a " + typ + ".\n")
@@ -561,7 +609,7 @@ func renderModelDTOs(r modelResource) string {
 	b.WriteString("// " + body + " is the request body for creating a " + typ + ".\n")
 	b.WriteString("type " + body + " struct {\n")
 	for _, f := range r.requestFields() {
-		b.WriteString("\t" + f.GoName + " " + f.GoType + " `" + f.requestTag() + "`\n")
+		b.WriteString("\t" + f.GoName + " " + f.requestGoType() + " `" + f.requestTag() + "`\n")
 	}
 	b.WriteString("}\n\n")
 
@@ -583,10 +631,55 @@ func renderModelDTOs(r modelResource) string {
 	b.WriteString("func " + unexported(typ) + "FromCreateBody(body " + body + ") " + typ + " {\n")
 	b.WriteString("\tvar row " + typ + "\n")
 	for _, f := range r.requestFields() {
-		b.WriteString("\trow." + f.AccessPath + " = body." + f.GoName + "\n")
+		b.WriteString(f.createAssign())
 	}
 	b.WriteString("\treturn row\n}\n")
+	if src := r.decimalResolve(body); src != "" {
+		b.WriteString("\n" + src)
+	}
 
+	return b.String()
+}
+
+func (r modelResource) hasDecimalBounds() bool {
+	for _, f := range r.requestFields() {
+		if f.isDecimal() && (f.Constraints.Min != "" || f.Constraints.Max != "") {
+			return true
+		}
+	}
+	return false
+}
+
+// decimalResolve emits a Huma resolver that compares decimal magnitudes. The
+// string schema cannot honor minimum/maximum, so this is the check that rejects
+// an out-of-range decimal body.
+func (r modelResource) decimalResolve(body string) string {
+	if !r.hasDecimalBounds() {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("func (b *" + body + ") Resolve(_ huma.Context) []error {\n")
+	b.WriteString("\tvar errs []error\n")
+	for _, f := range r.requestFields() {
+		if !f.isDecimal() || (f.Constraints.Min == "" && f.Constraints.Max == "") {
+			continue
+		}
+		src := "b." + f.GoName
+		value := src
+		if strings.HasPrefix(f.requestGoType(), "*") {
+			b.WriteString("\tif " + src + " != nil {\n")
+			value = "*" + src
+			b.WriteString("\t\tif err := types.DecimalWithin(" + value + ", " + strconv.Quote(f.Constraints.Min) + ", " + strconv.Quote(f.Constraints.Max) + "); err != nil {\n")
+			b.WriteString("\t\t\terrs = append(errs, &huma.ErrorDetail{Message: err.Error(), Location: \"body." + f.jsonName() + "\", Value: " + src + "})\n")
+			b.WriteString("\t\t}\n")
+			b.WriteString("\t}\n")
+			continue
+		}
+		b.WriteString("\tif err := types.DecimalWithin(" + value + ", " + strconv.Quote(f.Constraints.Min) + ", " + strconv.Quote(f.Constraints.Max) + "); err != nil {\n")
+		b.WriteString("\t\terrs = append(errs, &huma.ErrorDetail{Message: err.Error(), Location: \"body." + f.jsonName() + "\", Value: " + src + "})\n")
+		b.WriteString("\t}\n")
+	}
+	b.WriteString("\treturn errs\n}\n")
 	return b.String()
 }
 

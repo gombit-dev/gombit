@@ -153,8 +153,8 @@ func TestParseConstraints(t *testing.T) {
 	if !strings.Contains(age.gormTag(), "check:age >= 0 AND age <= 150") {
 		t.Fatalf("gorm tag = %q", age.gormTag())
 	}
-	if !strings.Contains(status.gormTag(), "default:'draft'") {
-		t.Fatalf("gorm tag = %q", status.gormTag())
+	if strings.Contains(status.gormTag(), "default:") {
+		t.Fatalf("gorm tag must not replace an explicit zero: %q", status.gormTag())
 	}
 	if !strings.Contains(code.gormTag(), "size:8") {
 		t.Fatalf("gorm tag = %q", code.gormTag())

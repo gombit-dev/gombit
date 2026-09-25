@@ -60,10 +60,11 @@ bounds and a default:
 
 | Modifier | Column types | Where it lands |
 | --- | --- | --- |
-| `min=`, `max=` | `int`, `int64`, `uint`, `decimal` | GORM `check`, request `minimum` / `maximum`, form `min` / `max`, admin meta |
+| `min=`, `max=` | `int`, `int64`, `uint` | GORM `check`, request `minimum` / `maximum`, form `min` / `max`, admin meta and the admin write |
+| `min=`, `max=` | `decimal` | GORM `check`, and a create-body check that compares decimal magnitudes. The decimal schema is a string, so the request does not advertise `minimum` / `maximum` |
 | `max_length=` | `string` | GORM `size` (otherwise 255), request `maxLength`, form `maxLength` |
-| `regex=` | `string`, `text` | request `pattern` and the form pattern. Not a SQL check |
-| `default=` | scalars and `enum` | GORM `default`, request `default`, form initial value, admin meta |
+| `regex=` | `string`, `text` | request `pattern` and the form pattern, including `text`. Not a SQL check |
+| `default=` | scalars and `enum` | Applied when the create body or the admin create omits the field. An explicit `0`, `false`, or `""` is stored. The form and admin create start from that value |
 
 Values are case-sensitive. A CLI `regex` cannot contain a comma, because
 modifiers are comma-separated. The model stores the same facts in a `validate`

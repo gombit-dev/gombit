@@ -125,6 +125,15 @@ export function formatCell(value: unknown): string {
 }
 
 export function emptyFormValue(field: FieldMeta): unknown {
+  if (field.default !== undefined && field.default !== "") {
+    if (field.type === "boolean") {
+      return field.default === "true";
+    }
+    if (field.type === "integer" || field.type === "float") {
+      return Number(field.default);
+    }
+    return field.default;
+  }
   if (field.type === "boolean") {
     return false;
   }
@@ -181,6 +190,11 @@ export function formValuesToBody(values: Row, fields: FieldMeta[]): { body: Row;
       body[field.name] = Boolean(raw);
       continue;
     }
+    const constraint = constraintError(field, raw);
+    if (constraint) {
+      jsonErrors[field.name] = constraint;
+      continue;
+    }
     if (field.type === "decimal") {
       // Decimals are submitted as an exact string, never a JSON number: a JSON
       // body decodes numbers to float64 on the server, which cannot represent a
@@ -226,6 +240,31 @@ export function formValuesToBody(values: Row, fields: FieldMeta[]): { body: Row;
     body[field.name] = raw;
   }
   return { body, jsonErrors };
+}
+
+function constraintError(field: FieldMeta, raw: unknown): string {
+  if (isEmptyFormValue(raw)) {
+    return "";
+  }
+  if (field.max_length && String(raw).length > field.max_length) {
+    return "is too long";
+  }
+  if (field.pattern && !new RegExp(field.pattern).test(String(raw))) {
+    return "does not match pattern";
+  }
+  if ((field.minimum || field.maximum) && (field.type === "integer" || field.type === "float" || field.type === "decimal")) {
+    const n = Number(raw);
+    if (Number.isNaN(n)) {
+      return "must be a number";
+    }
+    if (field.minimum !== undefined && field.minimum !== "" && n < Number(field.minimum)) {
+      return `must be at least ${field.minimum}`;
+    }
+    if (field.maximum !== undefined && field.maximum !== "" && n > Number(field.maximum)) {
+      return `must be at most ${field.maximum}`;
+    }
+  }
+  return "";
 }
 
 function isEmptyFormValue(raw: unknown): boolean {

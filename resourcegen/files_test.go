@@ -120,7 +120,6 @@ func TestRenderConstraintFields(t *testing.T) {
 	for _, want := range []string{
 		`check:age >= 0 AND age <= 150`,
 		`validate:"min=0;max=150"`,
-		`default:'draft'`,
 		`validate:"default=draft"`,
 		`size:8`,
 		`validate:"max_length=8;pattern=^[a-z]+$"`,
@@ -141,6 +140,22 @@ func TestRenderConstraintFields(t *testing.T) {
 		if !strings.Contains(form, want) {
 			t.Fatalf("form missing %q:\n%s", want, form)
 		}
+	}
+	text, err := parseFields([]string{"note:text:regex=^[a-z]+$"}, "person")
+	if err != nil {
+		t.Fatalf("parseFields text: %v", err)
+	}
+	textForm := renderFormField(text[0])
+	if !strings.Contains(textForm, `new RegExp("^[a-z]+$")`) {
+		t.Fatalf("text form missing regex:\n%s", textForm)
+	}
+	decimal, err := parseFields([]string{"price:decimal:max=10"}, "person")
+	if err != nil {
+		t.Fatalf("parseFields decimal: %v", err)
+	}
+	decimalForm := renderFormField(decimal[0])
+	if !strings.Contains(decimalForm, "n > 10") {
+		t.Fatalf("decimal form missing magnitude check:\n%s", decimalForm)
 	}
 }
 

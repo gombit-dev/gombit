@@ -717,9 +717,9 @@ func (f Field) gormTag() string {
 	if f.Required && !f.Nullable {
 		parts = append(parts, "not null")
 	}
-	if f.Default != "" {
-		parts = append(parts, "default:"+sqlDefault(f))
-	}
+	// A parsed GORM default replaces the zero value on create, so an explicit
+	// 0 or false never reaches the column. The default is applied only when
+	// the request or admin body omits the field.
 	if check := sqlCheck(f); check != "" {
 		parts = append(parts, "check:"+check)
 	}
@@ -737,15 +737,6 @@ func (f Field) gormTag() string {
 
 // enumColumnSize sizes the varchar column to hold the longest allowed value,
 // with headroom so a later value addition rarely needs a column widen.
-func sqlDefault(f Field) string {
-	switch f.Type {
-	case FieldString, FieldText, FieldEnum:
-		return "'" + f.Default + "'"
-	default:
-		return f.Default
-	}
-}
-
 func sqlCheck(f Field) string {
 	col := f.JSONName
 	var parts []string

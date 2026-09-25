@@ -4,12 +4,74 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/shopspring/decimal"
 )
+
+// constraintMessage reports a min, max, max_length, or pattern failure for a
+// submitted value. An absent value (nil) is not a constraint failure; the
+// caller applies a default or the required check.
+func constraintMessage(f Field, raw any) string {
+	if raw == nil {
+		return ""
+	}
+	if f.MaxLength > 0 {
+		if s, ok := raw.(string); ok && len(s) > f.MaxLength {
+			return "is too long"
+		}
+	}
+	if f.Pattern != "" {
+		if s, ok := raw.(string); ok {
+			re, err := regexp.Compile(f.Pattern)
+			if err != nil || !re.MatchString(s) {
+				return "does not match pattern"
+			}
+		}
+	}
+	if f.Minimum == "" && f.Maximum == "" {
+		return ""
+	}
+	got, ok := decimalValue(raw)
+	if !ok {
+		return ""
+	}
+	if f.Minimum != "" {
+		bound, err := decimal.NewFromString(f.Minimum)
+		if err != nil || got.LessThan(bound) {
+			return "must be at least " + f.Minimum
+		}
+	}
+	if f.Maximum != "" {
+		bound, err := decimal.NewFromString(f.Maximum)
+		if err != nil || got.GreaterThan(bound) {
+			return "must be at most " + f.Maximum
+		}
+	}
+	return ""
+}
+
+func decimalValue(raw any) (decimal.Decimal, bool) {
+	switch v := raw.(type) {
+	case string:
+		d, err := decimal.NewFromString(strings.TrimSpace(v))
+		return d, err == nil
+	case float64:
+		return decimal.NewFromFloat(v), true
+	case int:
+		return decimal.NewFromInt(int64(v)), true
+	case int64:
+		return decimal.NewFromInt(v), true
+	case json.Number:
+		d, err := decimal.NewFromString(v.String())
+		return d, err == nil
+	default:
+		return decimal.Decimal{}, false
+	}
+}
 
 func coerceValue(raw any, ft FieldType) (any, error) {
 	if raw == nil {

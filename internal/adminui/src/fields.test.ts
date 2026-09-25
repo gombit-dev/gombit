@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { FieldMeta } from "./api/types";
-import { formValuesToBody, relationListQuery, relationOptions } from "./fields";
+import { emptyFormValue, formValuesToBody, relationListQuery, relationOptions } from "./fields";
 
 function field(partial: Pick<FieldMeta, "name" | "type"> & Partial<FieldMeta>): FieldMeta {
   return {
@@ -84,6 +84,25 @@ describe("formValuesToBody", () => {
     expect(jsonErrors).toEqual({ payload: "must be valid JSON" });
     expect(body).toEqual({ note: null });
     expect(body).not.toHaveProperty("payload");
+  });
+
+  it("starts from a declared default and still submits an explicit zero", () => {
+    const fields: FieldMeta[] = [
+      field({ name: "count", type: "integer", default: "1", minimum: "0" }),
+      field({ name: "active", type: "boolean", default: "true" }),
+      field({ name: "status", type: "string", default: "draft" }),
+      field({ name: "note", type: "text", pattern: "^[a-z]+$" }),
+    ];
+    expect(emptyFormValue(fields[0])).toBe(1);
+    expect(emptyFormValue(fields[1])).toBe(true);
+    expect(emptyFormValue(fields[2])).toBe("draft");
+
+    const explicit = formValuesToBody({ count: 0, active: false, status: "published", note: "hello" }, fields);
+    expect(explicit.jsonErrors).toEqual({});
+    expect(explicit.body).toEqual({ count: 0, active: false, status: "published", note: "hello" });
+
+    const bad = formValuesToBody({ count: 0, active: false, status: "published", note: "Hello" }, fields);
+    expect(bad.jsonErrors).toEqual({ note: "does not match pattern" });
   });
 
   it("does not put readonly fields in the body", () => {
