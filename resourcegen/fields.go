@@ -736,16 +736,18 @@ func (f Field) constraints() logical.Constraints {
 	}
 }
 
-// portablePattern accepts a pattern only when Go's RE2 and JavaScript's RegExp
-// match the same set. Inline flags, POSIX classes, and RE2-only groups throw
-// in the form. Unicode properties (\p, \P) and whitespace (\s, \S) compile in
-// both and do not: RE2's \s is ASCII, and new RegExp without the u flag also
-// matches Unicode spaces.
+// portablePattern compiles the pattern as Go RE2 and rejects constructs the
+// form's new RegExp does not share: inline flags, POSIX classes, RE2-only
+// groups, \Q \E \A \z \Z, Unicode properties (\p, \P), whitespace (\s, \S),
+// and the brace hex escape \x{HHHH}. Two-digit \xNN is the same byte on both
+// sides. This is that denylist, not a proof the two engines match the same
+// set. `.` stays legal: RE2's `.` is every character except `\n`, and
+// JavaScript's `.` also excludes `\r`, U+2028, and U+2029.
 func portablePattern(pattern string) error {
 	if _, err := regexp.Compile(pattern); err != nil {
 		return err
 	}
-	if re2OnlyGroup.MatchString(pattern) || strings.Contains(pattern, `[:`) || strings.Contains(pattern, `\Q`) || strings.Contains(pattern, `\E`) || strings.Contains(pattern, `\A`) || strings.Contains(pattern, `\z`) || strings.Contains(pattern, `\Z`) || strings.Contains(pattern, `\p`) || strings.Contains(pattern, `\P`) || strings.Contains(pattern, `\s`) || strings.Contains(pattern, `\S`) {
+	if re2OnlyGroup.MatchString(pattern) || strings.Contains(pattern, `[:`) || strings.Contains(pattern, `\Q`) || strings.Contains(pattern, `\E`) || strings.Contains(pattern, `\A`) || strings.Contains(pattern, `\z`) || strings.Contains(pattern, `\Z`) || strings.Contains(pattern, `\p`) || strings.Contains(pattern, `\P`) || strings.Contains(pattern, `\s`) || strings.Contains(pattern, `\S`) || strings.Contains(pattern, `\x{`) {
 		return fmt.Errorf("pattern must be valid in both Go RE2 and JavaScript")
 	}
 	return nil

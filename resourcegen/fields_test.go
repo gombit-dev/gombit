@@ -150,6 +150,13 @@ func TestParseConstraints(t *testing.T) {
 	if code.MaxLength != 8 || code.Pattern != "^[a-z]+$" {
 		t.Fatalf("code = %+v", code)
 	}
+	hex, err := parseFields([]string{"mark:string:regex=\\x41"}, "person")
+	if err != nil {
+		t.Fatalf("two-digit hex escape: %v", err)
+	}
+	if hex[0].Pattern != `\x41` {
+		t.Fatalf("pattern = %q", hex[0].Pattern)
+	}
 	if !strings.Contains(age.gormTag(), "check:age >= 0 AND age <= 150") {
 		t.Fatalf("gorm tag = %q", age.gormTag())
 	}
@@ -202,6 +209,7 @@ func TestParseConstraintsReject(t *testing.T) {
 		"price:decimal(10,2):min=0.001",
 		"note:text:regex=^\\s+$",
 		"note:text:regex=\\S+",
+		"note:text:regex=\\x{00E9}",
 		"status:enum(on;off)",
 	} {
 		if _, err := parseFields([]string{spec}, "person"); err == nil {
