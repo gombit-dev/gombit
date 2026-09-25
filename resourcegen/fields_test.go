@@ -176,6 +176,13 @@ func TestParseConstraints(t *testing.T) {
 	if short[0].Default != "é" || short[1].Default != "👍" {
 		t.Fatalf("defaults = %q %q", short[0].Default, short[1].Default)
 	}
+	plain, err := parseFields([]string{"order:int"}, "person")
+	if err != nil {
+		t.Fatalf("order without a check is a column: %v", err)
+	}
+	if plain[0].JSONName != "order" || strings.Contains(plain[0].gormTag(), "check:") {
+		t.Fatalf("order = %+v tag %q", plain[0], plain[0].gormTag())
+	}
 }
 
 func TestParseConstraintsReject(t *testing.T) {
@@ -225,6 +232,10 @@ func TestParseConstraintsReject(t *testing.T) {
 		"note:text:regex=[\\d-9]",
 		"note:text:regex=\\B",
 		"note:text:regex=\\b",
+		"order:int:min=0",
+		"group:int:max=1",
+		"select:int:min=0,max=10",
+		"order:decimal:min=0",
 		"status:enum(on;off)",
 	} {
 		if _, err := parseFields([]string{spec}, "person"); err == nil {

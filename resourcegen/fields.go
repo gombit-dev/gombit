@@ -533,6 +533,9 @@ func validateConstraints(field *Field) error {
 				return fmt.Errorf("resourcegen: field %q min %s is greater than max %s", field.JSONName, field.Min, field.Max)
 			}
 		}
+		if _, reserved := sqlCheckReserved[field.JSONName]; reserved {
+			return fmt.Errorf("resourcegen: field %q is reserved in SQLite, PostgreSQL, or MySQL, so a check constraint cannot name it", field.JSONName)
+		}
 	}
 	if field.MaxLength > 0 && field.Type != FieldString {
 		return fmt.Errorf("resourcegen: field %q is %s and cannot take max_length (supported: string)", field.JSONName, field.Type)
