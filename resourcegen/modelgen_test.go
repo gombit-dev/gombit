@@ -16,6 +16,7 @@ import (
 	collidepkg1box "github.com/gombit-dev/gombit/resourcegen/testdata/collidepkg1/box"
 	collidepkg2box "github.com/gombit-dev/gombit/resourcegen/testdata/collidepkg2/box"
 	"github.com/gombit-dev/gombit/types"
+	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
 )
 
@@ -804,6 +805,81 @@ func TestBuildModelResourceRejectsBadQueryTypes(t *testing.T) {
 		}
 		if _, err := buildModelResource(&m{}, "m"); err == nil || !strings.Contains(err.Error(), "filterable") {
 			t.Fatalf("filterable time must fail closed, got: %v", err)
+		}
+	})
+}
+
+// The CLI grammar and the model-first generator must accept or reject the same
+// column. Each path used to lock its own predicate, so a text filter could be
+// illegal in parseFields and legal in buildModelResource.
+func TestQueryPolicyAgreesAcrossGeneratorPaths(t *testing.T) {
+	t.Run("text filterable", func(t *testing.T) {
+		if _, err := parseFields([]string{"body:text:filterable"}, "posts"); err == nil || !strings.Contains(err.Error(), "filterable") {
+			t.Fatalf("parseFields text filterable = %v", err)
+		}
+		type m struct {
+			ID   uint   `gorm:"primaryKey"`
+			Body string `gorm:"type:text" gombit:"read,write,filterable"`
+		}
+		if _, err := buildModelResource(&m{}, "posts"); err == nil || !strings.Contains(err.Error(), "filterable") {
+			t.Fatalf("buildModelResource text filterable = %v", err)
+		}
+	})
+	t.Run("string filterable", func(t *testing.T) {
+		if _, err := parseFields([]string{"title:string:filterable"}, "posts"); err != nil {
+			t.Fatalf("parseFields string filterable = %v", err)
+		}
+		type m struct {
+			ID    uint   `gorm:"primaryKey"`
+			Title string `gombit:"read,write,filterable"`
+		}
+		if _, err := buildModelResource(&m{}, "posts"); err != nil {
+			t.Fatalf("buildModelResource string filterable = %v", err)
+		}
+	})
+	t.Run("int aggregatable", func(t *testing.T) {
+		if _, err := parseFields([]string{"qty:int:aggregatable"}, "posts"); err != nil {
+			t.Fatalf("parseFields int aggregatable = %v", err)
+		}
+		type m struct {
+			ID  uint `gorm:"primaryKey"`
+			Qty int  `gombit:"read,write,aggregatable"`
+		}
+		if _, err := buildModelResource(&m{}, "posts"); err != nil {
+			t.Fatalf("buildModelResource int aggregatable = %v", err)
+		}
+	})
+	t.Run("float aggregatable", func(t *testing.T) {
+		// float is not emitted by make resource yet, and the catalog says it is
+		// not aggregatable. Both paths reject the column.
+		if _, err := parseFields([]string{"score:float:aggregatable"}, "posts"); err == nil {
+			t.Fatal("parseFields float aggregatable succeeded")
+		}
+		type m struct {
+			ID    uint    `gorm:"primaryKey"`
+			Score float64 `gombit:"read,write,aggregatable"`
+		}
+		if _, err := buildModelResource(&m{}, "posts"); err == nil || !strings.Contains(err.Error(), "aggregatable") {
+			t.Fatalf("buildModelResource float aggregatable = %v", err)
+		}
+	})
+	t.Run("decimal aggregatable", func(t *testing.T) {
+		if _, err := parseFields([]string{"total:decimal:aggregatable"}, "posts"); err != nil {
+			t.Fatalf("parseFields decimal aggregatable = %v", err)
+		}
+		type framework struct {
+			ID     uint          `gorm:"primaryKey"`
+			Amount types.Decimal `gombit:"read,write,aggregatable"`
+		}
+		if _, err := buildModelResource(&framework{}, "posts"); err != nil {
+			t.Fatalf("buildModelResource types.Decimal aggregatable = %v", err)
+		}
+		type shopspring struct {
+			ID     uint            `gorm:"primaryKey"`
+			Amount decimal.Decimal `gombit:"read,write,aggregatable"`
+		}
+		if _, err := buildModelResource(&shopspring{}, "posts"); err != nil {
+			t.Fatalf("buildModelResource decimal.Decimal aggregatable = %v", err)
 		}
 	})
 }

@@ -83,6 +83,10 @@ func TestRelationTokens(t *testing.T) {
 			t.Fatalf("ParseCLI(%s) = %s %s %v", tok, k, rel, ok)
 		}
 	}
+	spec, ok := Lookup(Relation)
+	if !ok || !spec.GeneratorReady {
+		t.Fatal("relation is generated today; GeneratorReady must be set")
+	}
 	if AllowsFilter(Relation, RelBelongsTo) != true {
 		t.Fatal("belongs_to should be filterable")
 	}
@@ -144,6 +148,26 @@ func TestKindFromGoMatchesAdminInference(t *testing.T) {
 		k := KindFromGo(tc.typ, tc.dataType)
 		if k.AdminWire() != tc.wire {
 			t.Errorf("KindFromGo(%s, %q) = %s wire %q, want %q", tc.typ, tc.dataType, k, k.AdminWire(), tc.wire)
+		}
+	}
+}
+
+func TestCLITokensAreUnique(t *testing.T) {
+	t.Parallel()
+	if err := validateVocabulary(); err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, spec := range catalog {
+		n += len(spec.CLITokens)
+	}
+	if len(byCLI) != n {
+		t.Fatalf("byCLI has %d tokens, catalog declares %d", len(byCLI), n)
+	}
+	for rel := range relationCaps {
+		p, ok := byCLI[string(rel)]
+		if !ok || p.kind != Relation || p.rel != rel {
+			t.Fatalf("relationCaps %q registered as %+v", rel, p)
 		}
 	}
 }

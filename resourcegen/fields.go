@@ -269,13 +269,17 @@ func parseField(spec, resourcePkg string) (Field, error) {
 	}
 
 	// Relations (name:kind:Target) use parts[2] as the target model, not
-	// modifiers.
-	switch FieldType(strings.ToLower(typeToken)) {
-	case FieldBelongsTo, FieldHasMany, FieldManyToMany:
+	// modifiers. The token comes from ParseCLI plus relationCaps, not from a
+	// parallel list of FieldType constants.
+	if kind, rel, ok := logical.ParseCLI(typeToken); ok && rel != "" {
 		if len(parts) != 3 {
-			return Field{}, fmt.Errorf("resourcegen: relation field %q must be name:%s:Target", spec, strings.ToLower(typeToken))
+			return Field{}, fmt.Errorf("resourcegen: relation field %q must be name:%s:Target", spec, rel)
 		}
-		return parseRelationField(name, jsonName, goName, FieldType(strings.ToLower(typeToken)), parts[2], resourcePkg)
+		relSpec, _ := logical.Lookup(kind)
+		if !relSpec.GeneratorReady {
+			return Field{}, fmt.Errorf("resourcegen: type %q is in the field vocabulary but is not generated yet (see docs/fields.md)", rel)
+		}
+		return parseRelationField(name, jsonName, goName, FieldType(rel), parts[2], resourcePkg)
 	}
 
 	field := Field{
@@ -308,7 +312,10 @@ func parseField(spec, resourcePkg string) (Field, error) {
 func applyType(field *Field, token string) error {
 	base, args, hasArgs := splitTypeArgs(token)
 	kind, rel, ok := logical.ParseCLI(base)
-	if !ok || rel != "" {
+	if ok && rel != "" {
+		return fmt.Errorf("resourcegen: relation type %q must be name:%s:Target", strings.ToLower(base), rel)
+	}
+	if !ok {
 		return fmt.Errorf("resourcegen: unknown type %q (supported: %s)", token, strings.Join(logical.PreferredGeneratorTokens(), ", "))
 	}
 	spec, _ := logical.Lookup(kind)

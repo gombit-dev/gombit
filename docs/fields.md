@@ -42,6 +42,12 @@ does not change.
    an existing wire (the way `email` reuses `string`) does not.
 4. Add a row to the table above.
 
+A relation cardinality is not a new kind. Add a `RelationKind`, a `relationCaps`
+row, and that token on the `Relation` catalog entry. Resourcegen still switches
+on the cardinality when it emits the association. Filter, search, sort, and
+aggregate flags on the catalog entry are the policy both the CLI grammar and
+`gombit generate` run.
+
 Resourcegen and admin read this catalog. They do not keep their own copies of
 the overlapping names (`int` / `integer`, `bool` / `boolean`, `time` /
 `datetime`).

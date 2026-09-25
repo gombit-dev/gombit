@@ -126,6 +126,17 @@ func TestRegisterRejectsDuplicateFieldName(t *testing.T) {
 	}
 }
 
+func TestRegisterRejectsTextFilter(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	app := newCookieApp(t)
+	err := admin.Register(app, Widget{}, widgetOptions(func(o *admin.Options) {
+		o.Filter = []string{"note"}
+	}))
+	if err == nil || !strings.Contains(err.Error(), "filter") || !strings.Contains(err.Error(), "text") {
+		t.Fatalf("Register() error = %v, want text filter rejected", err)
+	}
+}
+
 func TestRegisterRejectsHasManyInQueryOptions(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	type Category struct {

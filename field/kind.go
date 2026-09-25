@@ -23,12 +23,19 @@
 //     same change. Reusing an existing AdminWire needs no SPA change.
 //  5. Extend the doc table in docs/fields.md.
 //
+// A relation cardinality is not a new Kind. Add a RelationKind, a relationCaps
+// row, and that token on the Relation catalog entry. Resourcegen still has a
+// switch arm per cardinality when it emits the association; a catalog row
+// alone does not.
+//
 // Do not add a parallel type list in resourcegen or admin. Those packages
-// project this catalog.
+// project this catalog. Capability flags on the spec are the filter, search,
+// sort, and aggregate policy both generators run.
 package field
 
 import (
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"strings"
 	"time"
@@ -127,7 +134,7 @@ var catalog = []Spec{
 	{Kind: Slug, CLITokens: []string{"slug"}, AdminWire: "string", Sortable: true},
 	{Kind: IP, CLITokens: []string{"ip"}, AdminWire: "string", Sortable: true},
 	{Kind: Enum, GoType: "string", GeneratorReady: true, CLITokens: []string{"enum"}, AdminWire: "string", Filterable: true, Searchable: true, Sortable: true},
-	{Kind: Relation, AdminWire: "relation"},
+	{Kind: Relation, GeneratorReady: true, CLITokens: []string{"belongs_to", "has_many", "many_to_many"}, AdminWire: "relation"},
 }
 
 var relationCaps = map[RelationKind]relCaps{
@@ -148,21 +155,61 @@ type parsed struct {
 }
 
 func init() {
+	if err := validateVocabulary(); err != nil {
+		panic("field: " + err.Error())
+	}
 	byKind = make(map[Kind]Spec, len(catalog))
 	byCLI = make(map[string]parsed)
 	adminWire = make(map[string]struct{})
 	for _, spec := range catalog {
 		byKind[spec.Kind] = spec
 		for _, tok := range spec.CLITokens {
-			byCLI[tok] = parsed{kind: spec.Kind}
+			p := parsed{kind: spec.Kind}
+			if spec.Kind == Relation {
+				p.rel = RelationKind(tok)
+			}
+			byCLI[tok] = p
 		}
 		if spec.AdminWire != "" {
 			adminWire[spec.AdminWire] = struct{}{}
 		}
 	}
-	for rel := range relationCaps {
-		byCLI[string(rel)] = parsed{kind: Relation, rel: rel}
+}
+
+// validateVocabulary fails when two catalog entries claim the same CLI token,
+// or when a relation token and relationCaps disagree. init panics on that
+// error so a colliding token cannot boot.
+func validateVocabulary() error {
+	seenKind := make(map[Kind]struct{}, len(catalog))
+	seenTok := make(map[string]Kind)
+	var relationTokens []string
+	for _, spec := range catalog {
+		if _, ok := seenKind[spec.Kind]; ok {
+			return fmt.Errorf("duplicate kind %q", spec.Kind)
+		}
+		seenKind[spec.Kind] = struct{}{}
+		if spec.Kind == Relation {
+			relationTokens = spec.CLITokens
+		}
+		for _, tok := range spec.CLITokens {
+			if prev, ok := seenTok[tok]; ok {
+				return fmt.Errorf("duplicate CLI token %q on %s and %s", tok, prev, spec.Kind)
+			}
+			seenTok[tok] = spec.Kind
+		}
 	}
+	for _, tok := range relationTokens {
+		if _, ok := relationCaps[RelationKind(tok)]; !ok {
+			return fmt.Errorf("relation token %q has no relationCaps entry", tok)
+		}
+	}
+	for rel := range relationCaps {
+		owner, ok := seenTok[string(rel)]
+		if !ok || owner != Relation {
+			return fmt.Errorf("relationCaps %q is not a Relation CLI token", rel)
+		}
+	}
+	return nil
 }
 
 // Kinds returns every kind in catalog order.
