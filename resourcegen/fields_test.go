@@ -159,6 +159,16 @@ func TestParseConstraints(t *testing.T) {
 	if !strings.Contains(code.gormTag(), "size:8") {
 		t.Fatalf("gorm tag = %q", code.gormTag())
 	}
+	short, err := parseFields([]string{
+		"name:string:max_length=1,default=é",
+		"emoji:string:max_length=1,default=👍",
+	}, "person")
+	if err != nil {
+		t.Fatalf("one code point fits max_length: %v", err)
+	}
+	if short[0].Default != "é" || short[1].Default != "👍" {
+		t.Fatalf("defaults = %q %q", short[0].Default, short[1].Default)
+	}
 }
 
 func TestParseConstraintsReject(t *testing.T) {
@@ -169,6 +179,7 @@ func TestParseConstraintsReject(t *testing.T) {
 		"age:uint:min=-1",
 		"status:enum(draft,published):default=archived",
 		"title:string:max_length=3,default=hello",
+		"name:string:max_length=1,default=éé",
 		"note:text:regex=^[a-z]+$,default=Hello",
 		"when:time:default=now",
 		"note:text:regex=(?i)^[a-z]+$",

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { FieldMeta } from "./api/types";
-import { emptyFormValue, formValuesToBody, relationListQuery, relationOptions } from "./fields";
+import { compareDecimal, emptyFormValue, formValuesToBody, relationListQuery, relationOptions } from "./fields";
 
 function field(partial: Pick<FieldMeta, "name" | "type"> & Partial<FieldMeta>): FieldMeta {
   return {
@@ -103,6 +103,15 @@ describe("formValuesToBody", () => {
 
     const bad = formValuesToBody({ count: 0, active: false, status: "published", note: "Hello" }, fields);
     expect(bad.jsonErrors).toEqual({ note: "does not match pattern" });
+  });
+
+  it("counts max_length in code points and treats -0 as zero", () => {
+    const fields: FieldMeta[] = [field({ name: "name", type: "string", max_length: 1 })];
+    expect(formValuesToBody({ name: "é" }, fields).jsonErrors).toEqual({});
+    expect(formValuesToBody({ name: "👍" }, fields).jsonErrors).toEqual({});
+    expect(formValuesToBody({ name: "éé" }, fields).jsonErrors).toEqual({ name: "is too long" });
+    expect(compareDecimal("0", "-0")).toBe(0);
+    expect(compareDecimal("-0.0", "0.00")).toBe(0);
   });
 
   it("does not put readonly fields in the body", () => {

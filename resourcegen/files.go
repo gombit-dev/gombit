@@ -425,6 +425,7 @@ const cmpDecimalJS = `function cmpDecimal(a, b) {
     const parts = t.split(".");
     const ip = (parts[0] || "0").replace(/^0+(?=\d)/, "");
     const fp = (parts[1] || "").replace(/0+$/, "");
+    if (ip === "0" && fp === "") neg = false;
     return { neg, ip, fp };
   };
   const left = norm(a);
@@ -678,7 +679,7 @@ func tsTextRegister(field Field) string {
 		parts = append(parts, "required: \""+field.GoName+" is required\"")
 	}
 	if field.MaxLength > 0 {
-		parts = append(parts, "maxLength: { value: "+strconv.Itoa(field.MaxLength)+", message: \""+field.GoName+" is too long\" }")
+		parts = append(parts, tsCodePointMaxLength(field))
 	}
 	if field.Pattern != "" {
 		parts = append(parts, "pattern: { value: new RegExp("+strconv.Quote(field.Pattern)+"), message: \""+field.GoName+" is invalid\" }")
@@ -689,15 +690,18 @@ func tsTextRegister(field Field) string {
 	return ", { " + strings.Join(parts, ", ") + " }"
 }
 
+func tsCodePointMaxLength(field Field) string {
+	// React Hook Form's maxLength and the HTML maxlength attribute count
+	// UTF-16 code units. Huma's maxLength counts Unicode code points.
+	n := strconv.Itoa(field.MaxLength)
+	return `validate: (value) => { if (value == null || value === "") return true; if ([...String(value)].length > ` + n + `) return "` + field.GoName + ` is too long"; return true; }`
+}
+
 func htmlTextAttrs(field Field) string {
-	// maxLength only. An HTML pattern attribute is matched as ^(?:pattern)$,
-	// while Huma and tsTextRegister's new RegExp are unanchored. Emitting the
-	// attribute would reject values the request accepts.
-	var b strings.Builder
-	if field.MaxLength > 0 {
-		b.WriteString(" maxLength={" + strconv.Itoa(field.MaxLength) + "}")
-	}
-	return b.String()
+	// No HTML maxlength or pattern. maxlength counts UTF-16 code units, and
+	// pattern is anchored. The register options enforce both the same way the
+	// request does.
+	return ""
 }
 
 func renderFormField(field Field) string {
@@ -1040,7 +1044,7 @@ func muiRules(field Field) string {
 		}
 	}
 	if field.MaxLength > 0 {
-		parts = append(parts, `maxLength: { value: `+strconv.Itoa(field.MaxLength)+`, message: "`+field.GoName+` is too long" }`)
+		parts = append(parts, tsCodePointMaxLength(field))
 	}
 	if field.Pattern != "" {
 		parts = append(parts, `pattern: { value: new RegExp(`+strconv.Quote(field.Pattern)+`), message: "`+field.GoName+` is invalid" }`)
@@ -1067,9 +1071,6 @@ func muiBoundAttrs(field Field) string {
 
 func muiTextSlot(field Field) string {
 	var bits []string
-	if field.MaxLength > 0 {
-		bits = append(bits, "maxLength: "+strconv.Itoa(field.MaxLength))
-	}
 	if len(bits) == 0 {
 		return ""
 	}

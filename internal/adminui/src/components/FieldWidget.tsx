@@ -418,7 +418,16 @@ function widgetRules(field: FieldMeta, readOnly: boolean) {
     rules.required = true;
   }
   if (field.max_length) {
-    rules.maxLength = { value: field.max_length, message: "is too long" };
+    const limit = field.max_length;
+    rules.validate = (value) => {
+      if (value == null || value === "") {
+        return true;
+      }
+      if ([...String(value)].length > limit) {
+        return "is too long";
+      }
+      return true;
+    };
   }
   if (field.pattern) {
     rules.pattern = { value: new RegExp(field.pattern), message: "does not match pattern" };
@@ -458,9 +467,6 @@ function widgetSlotProps(field: FieldMeta) {
   }
   if (field.maximum) {
     htmlInput.max = field.maximum;
-  }
-  if (field.max_length) {
-    htmlInput.maxLength = field.max_length;
   }
   if (field.type === "datetime" || field.type === "date") {
     return {

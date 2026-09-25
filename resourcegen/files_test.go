@@ -135,7 +135,7 @@ func TestRenderConstraintFields(t *testing.T) {
 		`max="150"`,
 		`min: { value: 0`,
 		`status: "draft"`,
-		`maxLength={8}`,
+		`[...String(value)].length > 8`,
 		`new RegExp("^[a-z]+$")`,
 	} {
 		if !strings.Contains(form, want) {
@@ -144,6 +144,12 @@ func TestRenderConstraintFields(t *testing.T) {
 	}
 	if strings.Contains(form, `pattern="^[a-z]+$"`) {
 		t.Fatalf("HTML pattern attribute anchors the match:\n%s", form)
+	}
+	if strings.Contains(form, `maxLength={8}`) {
+		t.Fatalf("HTML maxlength counts UTF-16 code units:\n%s", form)
+	}
+	if !strings.Contains(cmpDecimalJS, `ip === "0" && fp === ""`) {
+		t.Fatal("cmpDecimal must treat -0 as zero")
 	}
 	mui := renderMUIFormTSX(ctx)
 	if !strings.Contains(mui, `new RegExp("^[a-z]+$")`) {

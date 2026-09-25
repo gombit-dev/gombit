@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/shopspring/decimal"
 
@@ -630,7 +631,7 @@ func checkDefault(field *Field) error {
 			return err
 		}
 	case FieldString, FieldText:
-		if field.MaxLength > 0 && len(field.Default) > field.MaxLength {
+		if field.MaxLength > 0 && utf8.RuneCountInString(field.Default) > field.MaxLength {
 			return fmt.Errorf("resourcegen: field %q default is longer than max_length", field.JSONName)
 		}
 		if field.Pattern != "" {

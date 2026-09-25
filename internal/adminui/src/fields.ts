@@ -246,7 +246,7 @@ function constraintError(field: FieldMeta, raw: unknown): string {
   if (isEmptyFormValue(raw)) {
     return "";
   }
-  if (field.max_length && String(raw).length > field.max_length) {
+  if (field.max_length && [...String(raw)].length > field.max_length) {
     return "is too long";
   }
   if (field.pattern && !new RegExp(field.pattern).test(String(raw))) {
@@ -291,6 +291,7 @@ export function compareDecimal(a: string, b: string): number {
     const parts = t.split(".");
     const ip = (parts[0] || "0").replace(/^0+(?=\d)/, "");
     const fp = (parts[1] || "").replace(/0+$/, "");
+    if (ip === "0" && fp === "") neg = false;
     return { neg, ip, fp };
   };
   const left = norm(a);

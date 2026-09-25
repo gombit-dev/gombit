@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/shopspring/decimal"
 )
@@ -20,7 +21,7 @@ func constraintMessage(f Field, raw any) string {
 		return ""
 	}
 	if f.MaxLength > 0 {
-		if s, ok := raw.(string); ok && len(s) > f.MaxLength {
+		if s, ok := raw.(string); ok && utf8.RuneCountInString(s) > f.MaxLength {
 			return "is too long"
 		}
 	}
