@@ -66,12 +66,13 @@ func TestTimeTokenIsDateTime(t *testing.T) {
 		t.Fatal("ParseCLI(blob) succeeded")
 	}
 	k, _, ok = ParseCLI("float")
-	if !ok || k != Float {
-		t.Fatalf("ParseCLI(float) = %s %v", k, ok)
+	k64, _, ok64 := ParseCLI("float64")
+	if !ok || !ok64 || k != Float || k64 != Float {
+		t.Fatalf("ParseCLI float/float64 = %s %v / %s %v", k, ok, k64, ok64)
 	}
 	spec, _ := Lookup(Float)
-	if spec.GeneratorReady {
-		t.Fatal("float is generator-ready; MODEL-2 owns emission")
+	if !spec.GeneratorReady || spec.GoType != "float64" {
+		t.Fatalf("float spec = %+v", spec)
 	}
 }
 
@@ -143,6 +144,7 @@ func TestKindFromGoMatchesAdminInference(t *testing.T) {
 		{reflect.TypeOf(uuid.UUID{}), "", "uuid"},
 		{reflect.TypeOf(decimal.Decimal{}), "", "decimal"},
 		{reflect.TypeOf(types.Decimal{}), "", "decimal"},
+		{reflect.TypeOf(types.Date{}), "", "date"},
 	}
 	for _, tc := range cases {
 		k := KindFromGo(tc.typ, tc.dataType)

@@ -143,3 +143,50 @@ func TestRenderRelations(t *testing.T) {
 		}
 	}
 }
+
+func TestRenderScalarGaps(t *testing.T) {
+	fields, err := parseFields([]string{
+		"score:float:sortable",
+		"born:date:required",
+		"token:uuid:required",
+		"meta:json",
+		"at:datetime:required",
+	}, "reading")
+	if err != nil {
+		t.Fatalf("parseFields: %v", err)
+	}
+	name, err := parseResourceName("Reading")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := newRenderContext("github.com/example/demo", name, fields, "/api/v1", "minimal", false, false)
+	model := string(mustFormatGo(renderModel(ctx)))
+	for _, want := range []string{
+		"Score float64",
+		"types.Date",
+		"type:date;not null",
+		"uuid.UUID",
+		"type:char(36);not null",
+		"json.RawMessage",
+		"type:text",
+		"time.Time",
+		`gorm:"not null"`,
+		`"encoding/json"`,
+		`"github.com/google/uuid"`,
+	} {
+		if !strings.Contains(model, want) {
+			t.Fatalf("model missing %q:\n%s", want, model)
+		}
+	}
+	form := renderFormTSX(ctx)
+	for _, want := range []string{
+		`type="date"`,
+		`type="datetime-local"`,
+		`type="number"`,
+		`JSON.parse`,
+	} {
+		if !strings.Contains(form, want) {
+			t.Fatalf("form missing %q:\n%s", want, form)
+		}
+	}
+}

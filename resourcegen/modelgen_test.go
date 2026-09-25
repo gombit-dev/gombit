@@ -2,6 +2,7 @@ package resourcegen
 
 import (
 	"database/sql"
+	"encoding/json"
 	"go/parser"
 	"go/token"
 	"os"
@@ -16,6 +17,7 @@ import (
 	collidepkg1box "github.com/gombit-dev/gombit/resourcegen/testdata/collidepkg1/box"
 	collidepkg2box "github.com/gombit-dev/gombit/resourcegen/testdata/collidepkg2/box"
 	"github.com/gombit-dev/gombit/types"
+	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
 )
@@ -882,6 +884,34 @@ func TestQueryPolicyAgreesAcrossGeneratorPaths(t *testing.T) {
 			t.Fatalf("buildModelResource decimal.Decimal aggregatable = %v", err)
 		}
 	})
+}
+
+func TestBuildModelResourceScalarGaps(t *testing.T) {
+	type m struct {
+		ID    uint            `gorm:"primaryKey"`
+		Score float64         `gombit:"read,write,sortable"`
+		Born  types.Date      `gorm:"type:date" gombit:"read,write,sortable"`
+		Token uuid.UUID       `gorm:"type:char(36)" gombit:"read,write,sortable"`
+		Meta  json.RawMessage `gorm:"type:text" gombit:"read,write"`
+		At    time.Time       `gombit:"read,write,sortable"`
+	}
+	res, err := buildModelResource(&m{}, "m")
+	if err != nil {
+		t.Fatalf("buildModelResource: %v", err)
+	}
+	src := string(mustFormatGo(renderModelDTOs(res)))
+	for _, want := range []string{
+		"Score float64",
+		"types.Date",
+		"uuid.UUID",
+		`format:"uuid"`,
+		"json.RawMessage",
+		"time.Time",
+	} {
+		if !strings.Contains(src, want) {
+			t.Fatalf("dto missing %q:\n%s", want, src)
+		}
+	}
 }
 
 // A decimal column IS aggregatable (numeric), even though its Go kind is a struct.

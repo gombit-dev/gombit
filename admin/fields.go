@@ -16,6 +16,7 @@ import (
 	"gorm.io/gorm/schema"
 
 	"github.com/gombit-dev/gombit/field"
+	"github.com/gombit-dev/gombit/types"
 )
 
 // FieldsFrom derives a default []Field from model at registration time.
@@ -330,8 +331,11 @@ func makeGetter(index []int, ft FieldType) func(any) any {
 		}
 		val := field.Interface()
 		if ft == TypeDate {
-			if t, ok := val.(time.Time); ok {
-				return t.Format("2006-01-02")
+			switch t := val.(type) {
+			case time.Time:
+				return t.Format(time.DateOnly)
+			case types.Date:
+				return t.String()
 			}
 		}
 		return val

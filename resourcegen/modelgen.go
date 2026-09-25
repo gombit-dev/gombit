@@ -463,7 +463,19 @@ func (f modelField) jsonName() string { return toSnake(f.GoName) }
 
 // responseTag is the struct tag for f in the response DTO: wire name plus doc.
 func (f modelField) responseTag() string {
-	return `json:"` + f.jsonName() + `" doc:"` + f.GoName + `"`
+	return `json:"` + f.jsonName() + `"` + formatAttr(f.GoType) + ` doc:"` + f.GoName + `"`
+}
+
+// formatAttr is the OpenAPI format huma does not infer from the Go type.
+// time.Time, types.Date, json.RawMessage, and float64 already describe
+// themselves. uuid.UUID is only a string unless the field says format uuid.
+func formatAttr(goType string) string {
+	base := strings.TrimPrefix(goType, "*")
+	pkg, name, ok := strings.Cut(base, ".")
+	if ok && name == "UUID" && strings.HasPrefix(pkg, "uuid") {
+		return ` format:"uuid"`
+	}
+	return ""
 }
 
 // requestTag is the struct tag for f in the create request DTO: the wire name,
@@ -482,7 +494,7 @@ func (f modelField) responseTag() string {
 // are NOT emitted — the GORM schema stores an enum as a plain varchar, so the
 // allowed values are not a recoverable schema fact (a known class-B gap).
 func (f modelField) requestTag() string {
-	tag := `json:"` + f.jsonName() + `"`
+	tag := `json:"` + f.jsonName() + `"` + formatAttr(f.GoType)
 	if f.Kind == reflect.String {
 		if f.NotNull {
 			tag += ` minLength:"1"`

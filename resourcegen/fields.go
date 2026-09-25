@@ -177,6 +177,10 @@ const (
 	FieldUint    FieldType = FieldType(logical.Unsigned)
 	FieldDecimal FieldType = FieldType(logical.Decimal)
 	FieldTime    FieldType = FieldType(logical.DateTime)
+	FieldDate    FieldType = FieldType(logical.Date)
+	FieldFloat   FieldType = FieldType(logical.Float)
+	FieldUUID    FieldType = FieldType(logical.UUID)
+	FieldJSON    FieldType = FieldType(logical.JSON)
 	FieldEnum    FieldType = FieldType(logical.Enum)
 
 	FieldBelongsTo  FieldType = FieldType(logical.RelBelongsTo)
@@ -295,12 +299,11 @@ func parseField(spec, resourcePkg string) (Field, error) {
 			return Field{}, err
 		}
 	}
-	// time.Time / types.Decimal are value types Huma cannot leave empty: an
-	// optional field submits JSON null, and a non-pointer time/decimal rejects
-	// null (and empty string). Optional (non-required) time/decimal fields
-	// therefore become pointers on both the model and the DTO so an empty value
-	// round-trips. See #222 review.
-	if !field.Required && (field.Type == FieldTime || field.Type == FieldDecimal) {
+	// time.Time, types.Date, types.Decimal, and uuid.UUID are value types Huma
+	// cannot leave empty: an optional field submits JSON null, and a non-pointer
+	// value rejects null. Optional fields therefore become pointers on both the
+	// model and the DTO so an empty value round-trips.
+	if !field.Required && (field.Type == FieldTime || field.Type == FieldDecimal || field.Type == FieldDate || field.Type == FieldUUID) {
 		field.GoType = "*" + field.GoType
 	}
 	return field, nil
@@ -520,6 +523,16 @@ func (f Field) gormTag() string {
 		parts = append(parts, "size:"+strconv.Itoa(enumColumnSize(f.EnumValues)))
 	case FieldDecimal:
 		parts = append(parts, fmt.Sprintf("type:decimal(%d,%d)", f.Precision, f.Scale))
+	case FieldUUID:
+		// char(36) is the portable UUID column: SQLite, PostgreSQL, and MySQL
+		// all store the canonical 36-character text form.
+		parts = append(parts, "type:char(36)")
+	case FieldJSON:
+		// Text holds the JSON document on every supported driver. Postgres and
+		// MySQL accept a native JSON type; SQLite does not.
+		parts = append(parts, "type:text")
+	case FieldDate:
+		parts = append(parts, "type:date")
 	}
 	if f.Required && !f.Nullable {
 		parts = append(parts, "not null")

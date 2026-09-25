@@ -158,12 +158,18 @@ func renderModel(ctx renderContext) string {
 	b.WriteString("\n\n")
 
 	var std, third []string
+	if fieldsUse(ctx.Fields, FieldJSON) {
+		std = append(std, "encoding/json")
+	}
 	if fieldsUse(ctx.Fields, FieldTime) {
 		std = append(std, "time")
 	}
 	third = append(third, "gorm.io/gorm")
-	if fieldsUse(ctx.Fields, FieldDecimal) {
+	if fieldsUse(ctx.Fields, FieldDecimal) || fieldsUse(ctx.Fields, FieldDate) {
 		third = append(third, gombitTypesImport)
+	}
+	if fieldsUse(ctx.Fields, FieldUUID) {
+		third = append(third, "github.com/google/uuid")
 	}
 	third = append(third, targetImports(ctx)...)
 	b.WriteString(importBlock(std, third))
@@ -489,8 +495,10 @@ func tsFormType(field Field) string {
 	switch field.Type {
 	case FieldBool:
 		return "boolean"
-	case FieldInt, FieldInt64, FieldUint:
+	case FieldInt, FieldInt64, FieldUint, FieldFloat:
 		return "number"
+	case FieldJSON:
+		return "unknown"
 	case FieldEnum:
 		return tsEnumUnion(field)
 	default:
@@ -512,8 +520,10 @@ func tsDefaultValue(field Field) string {
 	switch field.Type {
 	case FieldBool:
 		return "false"
-	case FieldInt, FieldInt64, FieldUint:
+	case FieldInt, FieldInt64, FieldUint, FieldFloat:
 		return "0"
+	case FieldJSON:
+		return "null"
 	case FieldEnum:
 		if len(field.EnumValues) > 0 {
 			return `"` + field.EnumValues[0] + `"`
@@ -538,8 +548,16 @@ func renderFormField(field Field) string {
 		b.WriteString(")} />\n")
 	case FieldBool:
 		b.WriteString("          <input type=\"checkbox\" {...register(\"" + field.JSONName + "\")} />\n")
-	case FieldInt, FieldInt64, FieldUint:
+	case FieldInt, FieldInt64, FieldUint, FieldFloat:
 		b.WriteString("          <input type=\"number\" {...register(\"" + field.JSONName + "\", { setValueAs: (value) => (value === \"\" ? 0 : Number(value)) })} />\n")
+	case FieldDate:
+		b.WriteString("          <input type=\"date\" {...register(\"" + field.JSONName + "\"")
+		if field.Required {
+			b.WriteString(", { required: \"" + field.GoName + " is required\" }")
+		}
+		b.WriteString(")} />\n")
+	case FieldJSON:
+		b.WriteString("          <textarea {...register(\"" + field.JSONName + "\", { setValueAs: (value) => { if (value === \"\") return null; try { return JSON.parse(value); } catch { return value; } } })} />\n")
 	case FieldEnum:
 		b.WriteString("          <select {...register(\"" + field.JSONName + "\")}>\n")
 		for _, v := range field.EnumValues {
@@ -853,7 +871,7 @@ func renderMUIFormField(field Field) string {
 		b.WriteString("                helperText={fieldState.error?.message}\n")
 		b.WriteString("                disabled={isSubmitting}\n")
 		b.WriteString("              />\n")
-	case FieldInt, FieldInt64, FieldUint:
+	case FieldInt, FieldInt64, FieldUint, FieldFloat:
 		b.WriteString("              <TextField\n")
 		b.WriteString("                {...field}\n")
 		b.WriteString("                type=\"number\"\n")
@@ -881,6 +899,35 @@ func renderMUIFormField(field Field) string {
 			b.WriteString("                <MenuItem value=\"" + v + "\">" + v + "</MenuItem>\n")
 		}
 		b.WriteString("              </TextField>\n")
+	case FieldDate:
+		b.WriteString("              <TextField\n")
+		b.WriteString("                {...field}\n")
+		b.WriteString("                value={field.value ?? \"\"}\n")
+		b.WriteString("                type=\"date\"\n")
+		b.WriteString("                label=\"" + field.GoName + "\"\n")
+		b.WriteString("                fullWidth\n")
+		b.WriteString("                slotProps={{ inputLabel: { shrink: true } }}\n")
+		b.WriteString("                error={!!fieldState.error}\n")
+		b.WriteString("                helperText={fieldState.error?.message}\n")
+		b.WriteString("                disabled={isSubmitting}\n")
+		b.WriteString("              />\n")
+	case FieldJSON:
+		b.WriteString("              <TextField\n")
+		b.WriteString("                {...field}\n")
+		b.WriteString("                value={field.value == null ? \"\" : (typeof field.value === \"string\" ? field.value : JSON.stringify(field.value))}\n")
+		b.WriteString("                label=\"" + field.GoName + "\"\n")
+		b.WriteString("                fullWidth\n")
+		b.WriteString("                multiline\n")
+		b.WriteString("                minRows={3}\n")
+		b.WriteString("                error={!!fieldState.error}\n")
+		b.WriteString("                helperText={fieldState.error?.message}\n")
+		b.WriteString("                disabled={isSubmitting}\n")
+		b.WriteString("                onChange={(event) => {\n")
+		b.WriteString("                  const raw = event.target.value;\n")
+		b.WriteString("                  if (raw === \"\") { field.onChange(null); return; }\n")
+		b.WriteString("                  try { field.onChange(JSON.parse(raw)); } catch { field.onChange(raw); }\n")
+		b.WriteString("                }}\n")
+		b.WriteString("              />\n")
 	case FieldTime:
 		// Store the raw datetime-local (local wall time) so the picker shows what
 		// the user chose; onSubmit converts it to RFC3339 UTC. Storing UTC ISO

@@ -419,6 +419,14 @@ func TestCanonicalCLIAliases(t *testing.T) {
 		{"n:unsigned:required", Field{JSONName: "n", GoName: "N", Type: FieldUint, GoType: "uint", Required: true}},
 		{"paid:boolean", Field{JSONName: "paid", GoName: "Paid", Type: FieldBool, GoType: "bool"}},
 		{"at:datetime:required", Field{JSONName: "at", GoName: "At", Type: FieldTime, GoType: "time.Time", Required: true}},
+		{"at:time", Field{JSONName: "at", GoName: "At", Type: FieldTime, GoType: "*time.Time"}},
+		{"n:float", Field{JSONName: "n", GoName: "N", Type: FieldFloat, GoType: "float64"}},
+		{"n:float64", Field{JSONName: "n", GoName: "N", Type: FieldFloat, GoType: "float64"}},
+		{"born:date:required", Field{JSONName: "born", GoName: "Born", Type: FieldDate, GoType: "types.Date", Required: true}},
+		{"born:date", Field{JSONName: "born", GoName: "Born", Type: FieldDate, GoType: "*types.Date"}},
+		{"token:uuid:required", Field{JSONName: "token", GoName: "Token", Type: FieldUUID, GoType: "uuid.UUID", Required: true}},
+		{"token:uuid", Field{JSONName: "token", GoName: "Token", Type: FieldUUID, GoType: "*uuid.UUID"}},
+		{"meta:json", Field{JSONName: "meta", GoName: "Meta", Type: FieldJSON, GoType: "json.RawMessage"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.spec, func(t *testing.T) {
@@ -437,8 +445,8 @@ func TestCanonicalCLIAliases(t *testing.T) {
 		})
 	}
 
-	_, err := parseFields([]string{"n:float"}, "widget")
+	_, err := parseFields([]string{"n:duration"}, "widget")
 	if err == nil || !strings.Contains(err.Error(), "not generated yet") {
-		t.Fatalf("float error = %v, want not generated yet", err)
+		t.Fatalf("duration error = %v, want not generated yet", err)
 	}
 }
