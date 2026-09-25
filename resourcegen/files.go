@@ -158,14 +158,11 @@ func renderModel(ctx renderContext) string {
 	b.WriteString("\n\n")
 
 	var std, third []string
-	if fieldsUse(ctx.Fields, FieldJSON) {
-		std = append(std, "encoding/json")
-	}
 	if fieldsUse(ctx.Fields, FieldTime) {
 		std = append(std, "time")
 	}
 	third = append(third, "gorm.io/gorm")
-	if fieldsUse(ctx.Fields, FieldDecimal) || fieldsUse(ctx.Fields, FieldDate) {
+	if fieldsUse(ctx.Fields, FieldDecimal) || fieldsUse(ctx.Fields, FieldDate) || fieldsUse(ctx.Fields, FieldJSON) {
 		third = append(third, gombitTypesImport)
 	}
 	if fieldsUse(ctx.Fields, FieldUUID) {
@@ -550,14 +547,23 @@ func renderFormField(field Field) string {
 		b.WriteString("          <input type=\"checkbox\" {...register(\"" + field.JSONName + "\")} />\n")
 	case FieldInt, FieldInt64, FieldUint, FieldFloat:
 		b.WriteString("          <input type=\"number\" {...register(\"" + field.JSONName + "\", { setValueAs: (value) => (value === \"\" ? 0 : Number(value)) })} />\n")
-	case FieldDate:
-		b.WriteString("          <input type=\"date\" {...register(\"" + field.JSONName + "\"")
-		if field.Required {
-			b.WriteString(", { required: \"" + field.GoName + " is required\" }")
+	case FieldDate, FieldUUID:
+		// Empty is null. Format date/uuid rejects "".
+		inputType := "text"
+		if field.Type == FieldDate {
+			inputType = "date"
 		}
-		b.WriteString(")} />\n")
+		b.WriteString("          <input type=\"" + inputType + "\" {...register(\"" + field.JSONName + "\", { setValueAs: (value) => (value === \"\" ? null : value)")
+		if field.Required {
+			b.WriteString(", required: \"" + field.GoName + " is required\"")
+		}
+		b.WriteString(" })} />\n")
 	case FieldJSON:
-		b.WriteString("          <textarea {...register(\"" + field.JSONName + "\", { setValueAs: (value) => { if (value === \"\") return null; try { return JSON.parse(value); } catch { return value; } } })} />\n")
+		b.WriteString("          <textarea {...register(\"" + field.JSONName + "\", { setValueAs: (value) => { if (value === \"\") return null; let parsed; try { parsed = JSON.parse(value); } catch { throw new Error(\"must be JSON\"); } if (parsed === null || typeof parsed !== \"object\") throw new Error(\"must be a JSON object or array\"); return parsed; }")
+		if field.Required {
+			b.WriteString(", required: \"" + field.GoName + " is required\"")
+		}
+		b.WriteString(" })} />\n")
 	case FieldEnum:
 		b.WriteString("          <select {...register(\"" + field.JSONName + "\")}>\n")
 		for _, v := range field.EnumValues {
@@ -757,6 +763,9 @@ func renderMUIFormTSX(ctx renderContext) string {
 	b.WriteString("    control,\n")
 	b.WriteString("    handleSubmit,\n")
 	b.WriteString("    setError,\n")
+	if fieldsUse(ctx.Fields, FieldJSON) {
+		b.WriteString("    clearErrors,\n")
+	}
 	b.WriteString("    formState: { isSubmitting },\n")
 	b.WriteString("  } = useForm<FormValues>({\n")
 	b.WriteString("    defaultValues: {")
@@ -768,19 +777,19 @@ func renderMUIFormTSX(ctx renderContext) string {
 	}
 	b.WriteString(" },\n")
 	b.WriteString("  });\n\n")
-	var timeNames, decimalNames []string
+	var timeNames, emptyNullNames []string
 	for _, field := range ctx.Fields {
 		switch field.Type {
 		case FieldTime:
 			timeNames = append(timeNames, field.JSONName)
-		case FieldDecimal:
-			decimalNames = append(decimalNames, field.JSONName)
+		case FieldDecimal, FieldDate, FieldUUID:
+			emptyNullNames = append(emptyNullNames, field.JSONName)
 		}
 	}
 	b.WriteString("  async function onSubmit(values: FormValues) {\n")
 	b.WriteString("    setStatus(\"\");\n")
 	bodyExpr := "values as CreateBody"
-	if len(timeNames) > 0 || len(decimalNames) > 0 {
+	if len(timeNames) > 0 || len(emptyNullNames) > 0 {
 		b.WriteString("    const body: Record<string, unknown> = { ...values };\n")
 		if len(timeNames) > 0 {
 			// Local datetime-local -> RFC3339 UTC; empty -> null (optional field).
@@ -789,9 +798,10 @@ func renderMUIFormTSX(ctx renderContext) string {
 			b.WriteString("      body[key] = v == null || v === \"\" ? null : new Date(String(v)).toISOString();\n")
 			b.WriteString("    });\n")
 		}
-		if len(decimalNames) > 0 {
-			// Empty decimal string -> null (optional *types.Decimal).
-			b.WriteString("    " + tsStringArray(decimalNames) + ".forEach((key) => {\n")
+		if len(emptyNullNames) > 0 {
+			// Empty date, uuid, and decimal strings are null. Format validation
+			// rejects "" for date and uuid.
+			b.WriteString("    " + tsStringArray(emptyNullNames) + ".forEach((key) => {\n")
 			b.WriteString("      if (body[key] == null || body[key] === \"\") body[key] = null;\n")
 			b.WriteString("    });\n")
 		}
@@ -899,17 +909,27 @@ func renderMUIFormField(field Field) string {
 			b.WriteString("                <MenuItem value=\"" + v + "\">" + v + "</MenuItem>\n")
 		}
 		b.WriteString("              </TextField>\n")
-	case FieldDate:
+	case FieldDate, FieldUUID:
+		inputType := "text"
+		if field.Type == FieldDate {
+			inputType = "date"
+		}
 		b.WriteString("              <TextField\n")
 		b.WriteString("                {...field}\n")
 		b.WriteString("                value={field.value ?? \"\"}\n")
-		b.WriteString("                type=\"date\"\n")
+		b.WriteString("                type=\"" + inputType + "\"\n")
 		b.WriteString("                label=\"" + field.GoName + "\"\n")
 		b.WriteString("                fullWidth\n")
-		b.WriteString("                slotProps={{ inputLabel: { shrink: true } }}\n")
+		if field.Type == FieldDate {
+			b.WriteString("                slotProps={{ inputLabel: { shrink: true } }}\n")
+		}
 		b.WriteString("                error={!!fieldState.error}\n")
 		b.WriteString("                helperText={fieldState.error?.message}\n")
 		b.WriteString("                disabled={isSubmitting}\n")
+		b.WriteString("                onChange={(event) => {\n")
+		b.WriteString("                  const raw = event.target.value;\n")
+		b.WriteString("                  field.onChange(raw === \"\" ? null : raw);\n")
+		b.WriteString("                }}\n")
 		b.WriteString("              />\n")
 	case FieldJSON:
 		b.WriteString("              <TextField\n")
@@ -920,12 +940,22 @@ func renderMUIFormField(field Field) string {
 		b.WriteString("                multiline\n")
 		b.WriteString("                minRows={3}\n")
 		b.WriteString("                error={!!fieldState.error}\n")
-		b.WriteString("                helperText={fieldState.error?.message}\n")
+		b.WriteString("                helperText={fieldState.error?.message ?? \"JSON object or array\"}\n")
 		b.WriteString("                disabled={isSubmitting}\n")
 		b.WriteString("                onChange={(event) => {\n")
 		b.WriteString("                  const raw = event.target.value;\n")
-		b.WriteString("                  if (raw === \"\") { field.onChange(null); return; }\n")
-		b.WriteString("                  try { field.onChange(JSON.parse(raw)); } catch { field.onChange(raw); }\n")
+		b.WriteString("                  if (raw === \"\") { clearErrors(\"" + field.JSONName + "\"); field.onChange(null); return; }\n")
+		b.WriteString("                  try {\n")
+		b.WriteString("                    const parsed = JSON.parse(raw);\n")
+		b.WriteString("                    if (parsed === null || typeof parsed !== \"object\") {\n")
+		b.WriteString("                      setError(\"" + field.JSONName + "\", { type: \"validate\", message: \"must be a JSON object or array\" });\n")
+		b.WriteString("                      return;\n")
+		b.WriteString("                    }\n")
+		b.WriteString("                    clearErrors(\"" + field.JSONName + "\");\n")
+		b.WriteString("                    field.onChange(parsed);\n")
+		b.WriteString("                  } catch {\n")
+		b.WriteString("                    setError(\"" + field.JSONName + "\", { type: \"validate\", message: \"must be JSON\" });\n")
+		b.WriteString("                  }\n")
 		b.WriteString("                }}\n")
 		b.WriteString("              />\n")
 	case FieldTime:

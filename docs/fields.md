@@ -19,7 +19,7 @@ projections of that kind, not separate lists.
 | `time` | no | | | clock time, not the `time` token |
 | `duration` | no | `duration` | | |
 | `uuid` | yes | `uuid` | `uuid` | `uuid.UUID` |
-| `json` | yes | `json` | `json` | `json.RawMessage` |
+| `json` | yes | `json` | `json` | `types.JSON` (required), `types.NullJSON` (optional) |
 | `email`, `url`, `slug`, `ip` | no | same as the kind | `string` | |
 | `enum` | yes | `enum(a,b)` | `string` | `string` |
 | `relation` | yes | `belongs_to`, `has_many`, `many_to_many` | `relation` | |
@@ -30,8 +30,11 @@ compatibility alias. `date` is a calendar date (`types.Date`, JSON
 stay in the vocabulary without a generator token until a later issue.
 
 `uuid` is stored as `char(36)` so SQLite, PostgreSQL, and MySQL share one
-column type. `json` is stored as text holding a JSON document. `float` is
-`float64` (sortable, not aggregatable).
+column type. `json` is text holding a JSON object or array. A required column
+is `types.JSON`, whose contract rejects null. An optional column is
+`types.NullJSON`, which also accepts null. `float` is `float64` (sortable,
+not aggregatable). Optional `date` and `uuid` are pointers; their OpenAPI
+schema is nullable and a blank form submits null.
 
 `integer64` and `unsigned` share the admin `integer` widget. The meta payload
 does not change.

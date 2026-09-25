@@ -463,19 +463,35 @@ func (f modelField) jsonName() string { return toSnake(f.GoName) }
 
 // responseTag is the struct tag for f in the response DTO: wire name plus doc.
 func (f modelField) responseTag() string {
-	return `json:"` + f.jsonName() + `"` + formatAttr(f.GoType) + ` doc:"` + f.GoName + `"`
+	return `json:"` + f.jsonName() + `"` + schemaAttr(f.GoType) + ` doc:"` + f.GoName + `"`
 }
 
-// formatAttr is the OpenAPI format huma does not infer from the Go type.
-// time.Time, types.Date, json.RawMessage, and float64 already describe
-// themselves. uuid.UUID is only a string unless the field says format uuid.
-func formatAttr(goType string) string {
+// schemaAttr is the OpenAPI format and nullability huma does not infer.
+// time.Time already becomes a nullable string when it is a pointer. uuid.UUID
+// is an array, so Huma drops the pointer before it can set Nullable; the tag
+// has to say nullable. types.Date is a TextUnmarshaler struct, so a pointer
+// would be nullable once Schema() is not in the way, and the tag repeats that
+// so the published schema matches the column. JSON nullability is the Go type
+// (types.JSON rejects null, types.NullJSON allows it): Huma checks anyOf
+// before the nullable tag, so a tag cannot punch a null hole through that schema.
+func schemaAttr(goType string) string {
 	base := strings.TrimPrefix(goType, "*")
+	pointer := strings.HasPrefix(goType, "*")
 	pkg, name, ok := strings.Cut(base, ".")
-	if ok && name == "UUID" && strings.HasPrefix(pkg, "uuid") {
-		return ` format:"uuid"`
+	var b strings.Builder
+	switch {
+	case ok && name == "UUID" && strings.HasPrefix(pkg, "uuid"):
+		b.WriteString(` format:"uuid"`)
+		if pointer {
+			b.WriteString(` nullable:"true"`)
+		}
+	case ok && name == "Date" && (pkg == "types" || strings.HasPrefix(pkg, "types")):
+		b.WriteString(` format:"date"`)
+		if pointer {
+			b.WriteString(` nullable:"true"`)
+		}
 	}
-	return ""
+	return b.String()
 }
 
 // requestTag is the struct tag for f in the create request DTO: the wire name,
@@ -494,7 +510,7 @@ func formatAttr(goType string) string {
 // are NOT emitted — the GORM schema stores an enum as a plain varchar, so the
 // allowed values are not a recoverable schema fact (a known class-B gap).
 func (f modelField) requestTag() string {
-	tag := `json:"` + f.jsonName() + `"` + formatAttr(f.GoType)
+	tag := `json:"` + f.jsonName() + `"` + schemaAttr(f.GoType)
 	if f.Kind == reflect.String {
 		if f.NotNull {
 			tag += ` minLength:"1"`

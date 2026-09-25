@@ -299,12 +299,20 @@ func parseField(spec, resourcePkg string) (Field, error) {
 			return Field{}, err
 		}
 	}
-	// time.Time, types.Date, types.Decimal, and uuid.UUID are value types Huma
-	// cannot leave empty: an optional field submits JSON null, and a non-pointer
-	// value rejects null. Optional fields therefore become pointers on both the
-	// model and the DTO so an empty value round-trips.
+	// Optional time.Time becomes a pointer because that is the case Huma treats
+	// as a nullable string. Date, decimal, and uuid are also pointers so a
+	// blank value is SQL NULL and JSON null on the model. OpenAPI nullability
+	// for date and uuid is the DTO tag (nullable:"true"), not the pointer:
+	// Date has no SchemaProvider, and uuid.UUID is an array Huma unwraps
+	// before it records the pointer.
 	if !field.Required && (field.Type == FieldTime || field.Type == FieldDecimal || field.Type == FieldDate || field.Type == FieldUUID) {
 		field.GoType = "*" + field.GoType
+	}
+	// Optional JSON is a different type, not a pointer. types.JSON.Schema is
+	// anyOf object|array, and Huma rejects null in anyOf before it honors a
+	// nullable tag or a pointer. types.NullJSON is that schema plus null.
+	if field.Type == FieldJSON && !field.Required {
+		field.GoType = "types.NullJSON"
 	}
 	return field, nil
 }

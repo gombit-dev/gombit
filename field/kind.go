@@ -128,7 +128,7 @@ var catalog = []Spec{
 	{Kind: TimeOfDay, Sortable: true},
 	{Kind: Duration, CLITokens: []string{"duration"}, Sortable: true},
 	{Kind: UUID, GoType: "uuid.UUID", GeneratorReady: true, CLITokens: []string{"uuid"}, AdminWire: "uuid", Sortable: true},
-	{Kind: JSON, GoType: "json.RawMessage", GeneratorReady: true, CLITokens: []string{"json"}, AdminWire: "json"},
+	{Kind: JSON, GoType: "types.JSON", GeneratorReady: true, CLITokens: []string{"json"}, AdminWire: "json"},
 	{Kind: Email, CLITokens: []string{"email"}, AdminWire: "string", Sortable: true},
 	{Kind: URL, CLITokens: []string{"url"}, AdminWire: "string", Sortable: true},
 	{Kind: Slug, CLITokens: []string{"slug"}, AdminWire: "string", Sortable: true},
@@ -330,6 +330,8 @@ var (
 	goDecimal  = reflect.TypeOf(decimal.Decimal{})
 	goTypesDec = reflect.TypeOf(types.Decimal{})
 	goDate     = reflect.TypeOf(types.Date{})
+	goJSON     = reflect.TypeOf(types.JSON(nil))
+	goNullJSON = reflect.TypeOf(types.NullJSON(nil))
 )
 
 // KindFromGo infers a kind from a Go field type. dataType is the GORM data
@@ -348,7 +350,7 @@ func KindFromGo(t reflect.Type, dataType string) Kind {
 		return DateTime
 	case goDate:
 		return Date
-	case goRawJSON:
+	case goRawJSON, goJSON, goNullJSON:
 		return JSON
 	case goUUID:
 		return UUID

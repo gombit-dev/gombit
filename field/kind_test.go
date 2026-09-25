@@ -145,6 +145,8 @@ func TestKindFromGoMatchesAdminInference(t *testing.T) {
 		{reflect.TypeOf(decimal.Decimal{}), "", "decimal"},
 		{reflect.TypeOf(types.Decimal{}), "", "decimal"},
 		{reflect.TypeOf(types.Date{}), "", "date"},
+		{reflect.TypeOf(types.JSON(nil)), "", "json"},
+		{reflect.TypeOf(types.NullJSON(nil)), "", "json"},
 	}
 	for _, tc := range cases {
 		k := KindFromGo(tc.typ, tc.dataType)

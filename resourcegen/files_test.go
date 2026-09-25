@@ -167,11 +167,11 @@ func TestRenderScalarGaps(t *testing.T) {
 		"type:date;not null",
 		"uuid.UUID",
 		"type:char(36);not null",
-		"json.RawMessage",
+		"types.NullJSON",
 		"type:text",
 		"time.Time",
 		`gorm:"not null"`,
-		`"encoding/json"`,
+		`"github.com/gombit-dev/gombit/types"`,
 		`"github.com/google/uuid"`,
 	} {
 		if !strings.Contains(model, want) {
@@ -183,10 +183,24 @@ func TestRenderScalarGaps(t *testing.T) {
 		`type="date"`,
 		`type="datetime-local"`,
 		`type="number"`,
-		`JSON.parse`,
+		`value === "" ? null`,
+		`throw new Error("must be JSON")`,
+		`must be a JSON object or array`,
 	} {
 		if !strings.Contains(form, want) {
 			t.Fatalf("form missing %q:\n%s", want, form)
+		}
+	}
+	muiCtx := newRenderContext("github.com/example/demo", name, fields, "/api/v1", "mui", false, false)
+	mui := renderFormTSX(muiCtx)
+	for _, want := range []string{
+		`type="date"`,
+		`raw === "" ? null : raw`,
+		`must be a JSON object or array`,
+		`setError`,
+	} {
+		if !strings.Contains(mui, want) {
+			t.Fatalf("mui form missing %q:\n%s", want, mui)
 		}
 	}
 }

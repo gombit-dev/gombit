@@ -426,7 +426,7 @@ func TestCanonicalCLIAliases(t *testing.T) {
 		{"born:date", Field{JSONName: "born", GoName: "Born", Type: FieldDate, GoType: "*types.Date"}},
 		{"token:uuid:required", Field{JSONName: "token", GoName: "Token", Type: FieldUUID, GoType: "uuid.UUID", Required: true}},
 		{"token:uuid", Field{JSONName: "token", GoName: "Token", Type: FieldUUID, GoType: "*uuid.UUID"}},
-		{"meta:json", Field{JSONName: "meta", GoName: "Meta", Type: FieldJSON, GoType: "json.RawMessage"}},
+		{"meta:json", Field{JSONName: "meta", GoName: "Meta", Type: FieldJSON, GoType: "types.NullJSON"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.spec, func(t *testing.T) {

@@ -6,15 +6,14 @@ import (
 	"fmt"
 	"strings"
 	"time"
-
-	"github.com/danielgtaylor/huma/v2"
 )
 
 // Date is a calendar date. It is not a timestamp and not a time of day.
 //
 // JSON and text are "YYYY-MM-DD". GORM's default column type is "date"
-// (Postgres DATE, MySQL DATE, SQLite TEXT affinity). A zero Date is JSON null
-// and a SQL NULL.
+// (Postgres DATE, MySQL DATE, SQLite TEXT affinity). A zero Date is the
+// string "0001-01-01" in JSON and SQL NULL in the database. JSON null is a
+// nil *Date.
 type Date struct {
 	t time.Time
 }
@@ -47,12 +46,15 @@ func (d Date) IsZero() bool { return d.t.IsZero() }
 // Time returns the date as UTC midnight.
 func (d Date) Time() time.Time { return d.t }
 
-// MarshalJSON encodes a zero Date as null and any other date as "YYYY-MM-DD".
+// MarshalJSON encodes the date as "YYYY-MM-DD", including the zero date.
+// JSON null is a nil *Date, not a zero value: a non-pointer field stays a
+// string so a non-nullable Huma schema is not contradicted.
 func (d Date) MarshalJSON() ([]byte, error) {
-	if d.t.IsZero() {
-		return []byte("null"), nil
+	s := d.String()
+	if s == "" {
+		s = "0001-01-01"
 	}
-	return json.Marshal(d.String())
+	return json.Marshal(s)
 }
 
 // UnmarshalJSON accepts null, "YYYY-MM-DD", or an RFC3339 timestamp (the date
@@ -123,13 +125,3 @@ func (d *Date) Scan(src any) error {
 // GormDataType tells GORM the column family when a model field omits an
 // explicit type tag. Generated models also set gorm:"type:date".
 func (Date) GormDataType() string { return "date" }
-
-// Schema implements huma.SchemaProvider so the contract is a string with
-// format "date", not a reflected struct.
-func (Date) Schema(huma.Registry) *huma.Schema {
-	return &huma.Schema{
-		Type:     huma.TypeString,
-		Format:   "date",
-		Examples: []any{"2026-01-02"},
-	}
-}
