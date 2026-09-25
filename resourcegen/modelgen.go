@@ -494,10 +494,13 @@ func (f modelField) schemaExtras() string {
 	if f.Pattern != "" && f.Constraints.Pattern == "" && !strings.Contains(s, `pattern:"`) {
 		s += ` pattern:"` + f.Pattern + `"`
 	}
-	// A *string is already nullable: Huma sets Nullable from the pointer,
-	// and an absent nullable tag does not clear it. The tag is repeated
-	// when "" is illegal. A format that accepts "", such as uri-reference,
-	// still accepts JSON null; the stored blank is "".
+	// Huma sets Nullable from a *string pointer. omitempty clears that
+	// unless nullable:"true" is also set. requestTag adds omitempty when
+	// a default is set, so a pointer whose format rejects "" repeats the
+	// tag and stays nullable. A format that accepts "", such as
+	// uri-reference, with a default is omitempty and not nullable: JSON
+	// null is rejected and "" is stored. A *string with no omitempty stays
+	// nullable whether or not this tag is present.
 	if strings.HasPrefix(f.GoType, "*") && f.rejectsEmpty() && !strings.Contains(s, `nullable:"true"`) {
 		s += ` nullable:"true"`
 	}
@@ -558,6 +561,8 @@ func schemaAttr(goType string) string {
 //	value after validation. The create field is a pointer with json omitempty
 //	so a missing key is legal and stays nil. The mapper applies the default
 //	only when that pointer is nil. An explicit zero is a non-nil pointer.
+//	A format or pattern that rejects "" fails in Huma before the mapper, so
+//	the create body does not treat "" as omitted. Null and omission do.
 //
 // The string checks key off f.Kind (reflect.String), not the GoType text: a
 // defined `type Slug string` renders as "Slug" yet is Kind reflect.String and
