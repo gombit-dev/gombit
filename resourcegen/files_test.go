@@ -184,23 +184,31 @@ func TestRenderScalarGaps(t *testing.T) {
 		`type="datetime-local"`,
 		`type="number"`,
 		`value === "" ? null`,
-		`throw new Error("must be JSON")`,
-		`must be a JSON object or array`,
+		`validate: (value)`,
+		`return "must be JSON"`,
+		`body[key] = JSON.parse(String(raw))`,
 	} {
 		if !strings.Contains(form, want) {
 			t.Fatalf("form missing %q:\n%s", want, form)
 		}
+	}
+	if strings.Contains(form, `throw new Error`) {
+		t.Fatalf("form throws while the user is still typing:\n%s", form)
 	}
 	muiCtx := newRenderContext("github.com/example/demo", name, fields, "/api/v1", "mui", false, false)
 	mui := renderFormTSX(muiCtx)
 	for _, want := range []string{
 		`type="date"`,
 		`raw === "" ? null : raw`,
-		`must be a JSON object or array`,
-		`setError`,
+		`field.onChange(event.target.value)`,
+		`validate: (value)`,
+		`body[key] = JSON.parse(String(raw))`,
 	} {
 		if !strings.Contains(mui, want) {
 			t.Fatalf("mui form missing %q:\n%s", want, mui)
 		}
+	}
+	if strings.Contains(mui, `JSON.parse(raw)`) || strings.Contains(mui, `throw new Error`) {
+		t.Fatalf("mui form parses or throws from the change handler:\n%s", mui)
 	}
 }

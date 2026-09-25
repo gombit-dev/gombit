@@ -449,8 +449,14 @@ func renderMinimalFormTSX(ctx renderContext) string {
 	b.WriteString("  });\n\n")
 	b.WriteString("  async function onSubmit(values: FormValues) {\n")
 	b.WriteString("    setStatus(\"\");\n")
+	bodyExpr := "values as CreateBody"
+	if jsonNames := jsonFieldNames(ctx.Fields); len(jsonNames) > 0 {
+		b.WriteString("    const body: Record<string, unknown> = { ...values };\n")
+		b.WriteString(tsParseJSONFields(jsonNames))
+		bodyExpr = "body as CreateBody"
+	}
 	b.WriteString("    try {\n")
-	b.WriteString("      await unwrap(await client.POST(createPath, { body: values as CreateBody }));\n")
+	b.WriteString("      await unwrap(await client.POST(createPath, { body: " + bodyExpr + " }));\n")
 	b.WriteString("      navigate(\"/" + ctx.Resource.Kebab + "\");\n")
 	b.WriteString("    } catch (err: unknown) {\n")
 	b.WriteString("      if (!applyContractErrors(setError, err)) {\n")
@@ -480,6 +486,33 @@ func renderMinimalFormTSX(ctx renderContext) string {
 }
 
 // tsStringArray renders a TS array literal of double-quoted strings.
+func jsonFieldNames(fields []Field) []string {
+	var names []string
+	for _, field := range fields {
+		if field.Type == FieldJSON {
+			names = append(names, field.JSONName)
+		}
+	}
+	return names
+}
+
+// tsJSONValidate keeps the textarea string and returns a message when it is
+// not a JSON object or array. Empty is valid here; required handles blank
+// required fields, and onSubmit turns a blank optional field into null.
+func tsJSONValidate() string {
+	return `validate: (value) => { if (value == null || value === "") return true; try { const parsed = JSON.parse(String(value)); if (parsed === null || typeof parsed !== "object") return "must be a JSON object or array"; return true; } catch { return "must be JSON"; } }`
+}
+
+func tsParseJSONFields(names []string) string {
+	var b strings.Builder
+	b.WriteString("    " + tsStringArray(names) + ".forEach((key) => {\n")
+	b.WriteString("      const raw = body[key];\n")
+	b.WriteString("      if (raw == null || raw === \"\") { body[key] = null; return; }\n")
+	b.WriteString("      body[key] = JSON.parse(String(raw));\n")
+	b.WriteString("    });\n")
+	return b.String()
+}
+
 func tsStringArray(names []string) string {
 	quoted := make([]string, 0, len(names))
 	for _, n := range names {
@@ -495,7 +528,7 @@ func tsFormType(field Field) string {
 	case FieldInt, FieldInt64, FieldUint, FieldFloat:
 		return "number"
 	case FieldJSON:
-		return "unknown"
+		return "string"
 	case FieldEnum:
 		return tsEnumUnion(field)
 	default:
@@ -520,7 +553,7 @@ func tsDefaultValue(field Field) string {
 	case FieldInt, FieldInt64, FieldUint, FieldFloat:
 		return "0"
 	case FieldJSON:
-		return "null"
+		return `""`
 	case FieldEnum:
 		if len(field.EnumValues) > 0 {
 			return `"` + field.EnumValues[0] + `"`
@@ -559,7 +592,9 @@ func renderFormField(field Field) string {
 		}
 		b.WriteString(" })} />\n")
 	case FieldJSON:
-		b.WriteString("          <textarea {...register(\"" + field.JSONName + "\", { setValueAs: (value) => { if (value === \"\") return null; let parsed; try { parsed = JSON.parse(value); } catch { throw new Error(\"must be JSON\"); } if (parsed === null || typeof parsed !== \"object\") throw new Error(\"must be a JSON object or array\"); return parsed; }")
+		// The textarea keeps the raw text. validate reports a parse error
+		// without discarding keystrokes. onSubmit parses once.
+		b.WriteString("          <textarea {...register(\"" + field.JSONName + "\", { " + tsJSONValidate())
 		if field.Required {
 			b.WriteString(", required: \"" + field.GoName + " is required\"")
 		}
@@ -763,9 +798,6 @@ func renderMUIFormTSX(ctx renderContext) string {
 	b.WriteString("    control,\n")
 	b.WriteString("    handleSubmit,\n")
 	b.WriteString("    setError,\n")
-	if fieldsUse(ctx.Fields, FieldJSON) {
-		b.WriteString("    clearErrors,\n")
-	}
 	b.WriteString("    formState: { isSubmitting },\n")
 	b.WriteString("  } = useForm<FormValues>({\n")
 	b.WriteString("    defaultValues: {")
@@ -778,6 +810,7 @@ func renderMUIFormTSX(ctx renderContext) string {
 	b.WriteString(" },\n")
 	b.WriteString("  });\n\n")
 	var timeNames, emptyNullNames []string
+	jsonNames := jsonFieldNames(ctx.Fields)
 	for _, field := range ctx.Fields {
 		switch field.Type {
 		case FieldTime:
@@ -789,7 +822,7 @@ func renderMUIFormTSX(ctx renderContext) string {
 	b.WriteString("  async function onSubmit(values: FormValues) {\n")
 	b.WriteString("    setStatus(\"\");\n")
 	bodyExpr := "values as CreateBody"
-	if len(timeNames) > 0 || len(emptyNullNames) > 0 {
+	if len(timeNames) > 0 || len(emptyNullNames) > 0 || len(jsonNames) > 0 {
 		b.WriteString("    const body: Record<string, unknown> = { ...values };\n")
 		if len(timeNames) > 0 {
 			// Local datetime-local -> RFC3339 UTC; empty -> null (optional field).
@@ -804,6 +837,9 @@ func renderMUIFormTSX(ctx renderContext) string {
 			b.WriteString("    " + tsStringArray(emptyNullNames) + ".forEach((key) => {\n")
 			b.WriteString("      if (body[key] == null || body[key] === \"\") body[key] = null;\n")
 			b.WriteString("    });\n")
+		}
+		if len(jsonNames) > 0 {
+			b.WriteString(tsParseJSONFields(jsonNames))
 		}
 		bodyExpr = "body as CreateBody"
 	}
@@ -847,9 +883,16 @@ func renderMUIFormTSX(ctx renderContext) string {
 
 func renderMUIFormField(field Field) string {
 	var b strings.Builder
-	rules := ""
+	var ruleParts []string
 	if field.Required && field.Type != FieldBool {
-		rules = " rules={{ required: \"" + field.GoName + " is required\" }}"
+		ruleParts = append(ruleParts, `required: "`+field.GoName+` is required"`)
+	}
+	if field.Type == FieldJSON {
+		ruleParts = append(ruleParts, tsJSONValidate())
+	}
+	rules := ""
+	if len(ruleParts) > 0 {
+		rules = " rules={{ " + strings.Join(ruleParts, ", ") + " }}"
 	}
 	b.WriteString("          <Controller\n")
 	b.WriteString("            name=\"" + field.JSONName + "\"\n")
@@ -932,9 +975,11 @@ func renderMUIFormField(field Field) string {
 		b.WriteString("                }}\n")
 		b.WriteString("              />\n")
 	case FieldJSON:
+		// Keep the keystrokes. validate reports a document that is not an
+		// object or array, and onSubmit parses the string once.
 		b.WriteString("              <TextField\n")
 		b.WriteString("                {...field}\n")
-		b.WriteString("                value={field.value == null ? \"\" : (typeof field.value === \"string\" ? field.value : JSON.stringify(field.value))}\n")
+		b.WriteString("                value={field.value ?? \"\"}\n")
 		b.WriteString("                label=\"" + field.GoName + "\"\n")
 		b.WriteString("                fullWidth\n")
 		b.WriteString("                multiline\n")
@@ -943,19 +988,7 @@ func renderMUIFormField(field Field) string {
 		b.WriteString("                helperText={fieldState.error?.message ?? \"JSON object or array\"}\n")
 		b.WriteString("                disabled={isSubmitting}\n")
 		b.WriteString("                onChange={(event) => {\n")
-		b.WriteString("                  const raw = event.target.value;\n")
-		b.WriteString("                  if (raw === \"\") { clearErrors(\"" + field.JSONName + "\"); field.onChange(null); return; }\n")
-		b.WriteString("                  try {\n")
-		b.WriteString("                    const parsed = JSON.parse(raw);\n")
-		b.WriteString("                    if (parsed === null || typeof parsed !== \"object\") {\n")
-		b.WriteString("                      setError(\"" + field.JSONName + "\", { type: \"validate\", message: \"must be a JSON object or array\" });\n")
-		b.WriteString("                      return;\n")
-		b.WriteString("                    }\n")
-		b.WriteString("                    clearErrors(\"" + field.JSONName + "\");\n")
-		b.WriteString("                    field.onChange(parsed);\n")
-		b.WriteString("                  } catch {\n")
-		b.WriteString("                    setError(\"" + field.JSONName + "\", { type: \"validate\", message: \"must be JSON\" });\n")
-		b.WriteString("                  }\n")
+		b.WriteString("                  field.onChange(event.target.value);\n")
 		b.WriteString("                }}\n")
 		b.WriteString("              />\n")
 	case FieldTime:

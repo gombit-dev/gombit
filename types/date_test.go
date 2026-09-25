@@ -32,13 +32,11 @@ func TestDateJSONRoundTrip(t *testing.T) {
 	if got.String() != "2026-03-04" {
 		t.Fatalf("round trip = %s", got)
 	}
-	var zero Date
-	b, err = json.Marshal(zero)
-	if err != nil {
-		t.Fatal(err)
+	if _, err := json.Marshal(Date{}); err == nil {
+		t.Fatal("zero date marshaled")
 	}
-	if string(b) != `"0001-01-01"` {
-		t.Fatalf("zero marshal = %s", b)
+	if _, err := (Date{}).Value(); err == nil {
+		t.Fatal("zero date produced a driver value")
 	}
 	var cleared Date
 	if err := json.Unmarshal([]byte("null"), &cleared); err != nil {
@@ -74,7 +72,8 @@ func TestDateScanTime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if v != "2026-03-04" {
+	gotTime, ok := v.(time.Time)
+	if !ok || !gotTime.Equal(time.Date(2026, 3, 4, 0, 0, 0, 0, time.UTC)) {
 		t.Fatalf("value = %#v", v)
 	}
 }

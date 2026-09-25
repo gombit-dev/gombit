@@ -11,9 +11,10 @@ import (
 // Date is a calendar date. It is not a timestamp and not a time of day.
 //
 // JSON and text are "YYYY-MM-DD". GORM's default column type is "date"
-// (Postgres DATE, MySQL DATE, SQLite TEXT affinity). A zero Date is the
-// string "0001-01-01" in JSON and SQL NULL in the database. JSON null is a
-// nil *Date.
+// (Postgres DATE, MySQL DATE, SQLite TEXT affinity). Value returns that
+// calendar day as UTC midnight so PostgreSQL can encode it as a binary date.
+// The zero Date is not a stored value: Value and MarshalJSON reject it.
+// JSON null is a nil *Date.
 type Date struct {
 	t time.Time
 }
@@ -46,15 +47,14 @@ func (d Date) IsZero() bool { return d.t.IsZero() }
 // Time returns the date as UTC midnight.
 func (d Date) Time() time.Time { return d.t }
 
-// MarshalJSON encodes the date as "YYYY-MM-DD", including the zero date.
-// JSON null is a nil *Date, not a zero value: a non-pointer field stays a
-// string so a non-nullable Huma schema is not contradicted.
+// MarshalJSON encodes the date as "YYYY-MM-DD". The zero date has no JSON
+// form: "0001-01-01" is that zero value, and publishing it would round-trip
+// through Value as an error. JSON null is a nil *Date.
 func (d Date) MarshalJSON() ([]byte, error) {
-	s := d.String()
-	if s == "" {
-		s = "0001-01-01"
+	if d.t.IsZero() {
+		return nil, fmt.Errorf("types: zero date has no JSON form")
 	}
-	return json.Marshal(s)
+	return json.Marshal(d.String())
 }
 
 // UnmarshalJSON accepts null, "YYYY-MM-DD", or an RFC3339 timestamp (the date
@@ -95,12 +95,15 @@ func (d *Date) UnmarshalText(b []byte) error {
 	return fmt.Errorf("types: date %q must be YYYY-MM-DD", s)
 }
 
-// Value implements driver.Valuer. A zero Date is SQL NULL.
+// Value implements driver.Valuer. The stored value is UTC midnight on the
+// calendar day, which is what PostgreSQL's binary date codec accepts.
+// A zero Date is not SQL NULL: NULL is a nil *Date, and the zero value is
+// refused so a required column does not silently insert NULL.
 func (d Date) Value() (driver.Value, error) {
 	if d.t.IsZero() {
-		return nil, nil
+		return nil, fmt.Errorf("types: zero date is not a stored value")
 	}
-	return d.String(), nil
+	return d.Time(), nil
 }
 
 // Scan implements sql.Scanner. Drivers return a time.Time, a date string, or
