@@ -494,19 +494,22 @@ func (f modelField) schemaExtras() string {
 	if f.Pattern != "" && f.Constraints.Pattern == "" && !strings.Contains(s, `pattern:"`) {
 		s += ` pattern:"` + f.Pattern + `"`
 	}
-	// Nullability is the Go type. A plain string stays a string, and Huma
-	// rejects "". A pointer is the column make resource emits for an optional
-	// email, URL, slug, or IP, so the published schema allows null.
+	// Nullability is the Go type. A plain string stays a string. A pointer
+	// whose format or pattern rejects "" is the column make resource emits
+	// for an optional email, URL, slug, or IP, so the published schema
+	// allows null. A format that accepts "", such as uri-reference, does not.
 	if strings.HasPrefix(f.GoType, "*") && f.rejectsEmpty() && !strings.Contains(s, `nullable:"true"`) {
 		s += ` nullable:"true"`
 	}
 	return s
 }
 
-// rejectsEmpty reports that "" is not a legal value of this column. A
+// rejectsEmpty reports that "" is not a legal value of this column. The
+// format check is formatAccepts, the same predicate Huma runs: email, uri,
+// and ip reject "". uri-reference and an unrecognized format do not. A
 // pattern that matches "" does not.
 func (f modelField) rejectsEmpty() bool {
-	if f.Format != "" {
+	if !formatAccepts(f.Format, "") {
 		return true
 	}
 	return patternRejectsEmpty(f.Pattern) || patternRejectsEmpty(f.Constraints.Pattern)

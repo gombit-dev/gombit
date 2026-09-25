@@ -37,6 +37,9 @@ func TestFormatMessageMatchesHuma(t *testing.T) {
 	if got := constraintMessage(Field{Format: "ip"}, "nope"); got == "" {
 		t.Fatal("bad ip accepted")
 	}
+	if got := constraintMessage(Field{Format: "uri-reference"}, ""); got != "" {
+		t.Fatalf("uri-reference blank: %q", got)
+	}
 	if got := constraintMessage(Field{Pattern: `^[-a-zA-Z0-9_]+$`}, "ada_lovelace"); got != "" {
 		t.Fatalf("slug: %q", got)
 	}

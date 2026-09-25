@@ -1151,9 +1151,8 @@ func (f Field) gormTag() string {
 	return strings.Join(parts, ";")
 }
 
-// openAPIFormat is the Huma format for a semantic string. Slug is a pattern,
-// not a format. Empty for kinds that do not add one.
-// formatAccepts is the Huma check for a semantic format. A default is a
+// formatAccepts is the Huma check for email, uri, and ip. Other formats,
+// including uri-reference, are a no-op, so "" is legal. A default is a
 // stored value, so it has to pass the same predicate the request does.
 func formatAccepts(format, s string) bool {
 	switch format {
@@ -1171,6 +1170,8 @@ func formatAccepts(format, s string) bool {
 	}
 }
 
+// openAPIFormat is the Huma format for a semantic string. Slug is a pattern,
+// not a format. Empty for kinds that do not add one.
 func (f Field) openAPIFormat() string {
 	switch f.Type {
 	case FieldEmail:

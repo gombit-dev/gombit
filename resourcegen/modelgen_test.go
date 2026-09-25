@@ -445,6 +445,7 @@ func TestSemanticFormatReachesTheRequest(t *testing.T) {
 		Handle  string    `gorm:"size:255" pattern:"^[-a-zA-Z0-9_]+$"`
 		Inbox   emailAddr `gorm:"size:255" format:"email"`
 		Site    *string   `gorm:"size:255" format:"uri"`
+		Ref     *string   `format:"uri-reference"`
 	}
 	res, err := buildModelResource(&Person{}, "resourcegen")
 	if err != nil {
@@ -468,6 +469,9 @@ func TestSemanticFormatReachesTheRequest(t *testing.T) {
 	}
 	if !strings.Contains(src, `Site *string`) || !strings.Contains(src, `json:"site" format:"uri" nullable:"true" maxLength:"255" doc:"Site"`) || !strings.Contains(src, "Site: row.Site") {
 		t.Fatalf("pointer column must stay a nullable pointer:\n%s", src)
+	}
+	if !strings.Contains(src, `json:"ref" format:"uri-reference" doc:"Ref"`) || strings.Contains(src, `format:"uri-reference" nullable:"true"`) {
+		t.Fatalf("uri-reference accepts empty and must not be marked nullable:\n%s", src)
 	}
 }
 

@@ -244,6 +244,40 @@ func TestAdminEmptyStringDoesNotClearOptionalNumber(t *testing.T) {
 	}
 }
 
+func TestAdminURIReferenceBlankStaysEmpty(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	type Row struct {
+		ID  uint    `gorm:"primaryKey" json:"id"`
+		Ref *string `json:"ref" format:"uri-reference"`
+	}
+	app := newCookieApp(t)
+	if err := app.DB().AutoMigrate(&Row{}); err != nil {
+		t.Fatalf("AutoMigrate: %v", err)
+	}
+	if err := admin.Register(app, Row{}, admin.Options{Slug: "refs"}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	jar := loginSuperuser(t, app)
+	rec := doRequest(app, jar, http.MethodPost, "/api/v1/admin/resources/refs", `{"ref":""}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("blank ref status = %d; body: %s", rec.Code, rec.Body.String())
+	}
+	var created rowEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if created.Data["ref"] != "" {
+		t.Fatalf("uri-reference blank = %#v", created.Data["ref"])
+	}
+	var got Row
+	if err := app.DB().First(&got).Error; err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got.Ref == nil || *got.Ref != "" {
+		t.Fatalf("stored ref = %#v", got.Ref)
+	}
+}
+
 func TestAdminNonPointerPatternRejectsEmpty(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	type Item struct {
