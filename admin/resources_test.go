@@ -179,6 +179,31 @@ func TestAdminBlankSemanticStringUsesDefault(t *testing.T) {
 	}
 }
 
+func TestAdminSlugAlphabetRegexStaysAString(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	type Row struct {
+		ID     uint   `gorm:"primaryKey" json:"id"`
+		Token  string `json:"token" validate:"pattern=^[-a-zA-Z0-9_]+$"`
+		Handle string `json:"handle" pattern:"^[-a-zA-Z0-9_]+$"`
+	}
+	app := newCookieApp(t)
+	if err := app.DB().AutoMigrate(&Row{}); err != nil {
+		t.Fatalf("AutoMigrate: %v", err)
+	}
+	if err := admin.Register(app, Row{}, admin.Options{
+		Slug:   "tokens",
+		Filter: []string{"token"},
+	}); err != nil {
+		t.Fatalf("user regex must stay filterable: %v", err)
+	}
+	if err := admin.Register(app, Row{}, admin.Options{
+		Slug:   "handles",
+		Filter: []string{"handle"},
+	}); err == nil || !strings.Contains(err.Error(), "slug") {
+		t.Fatalf("struct-tag slug filter error = %v", err)
+	}
+}
+
 func TestAdminEmptyStringDoesNotClearOptionalNumber(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	type Item struct {

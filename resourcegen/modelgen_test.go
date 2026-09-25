@@ -1163,6 +1163,42 @@ func TestQueryPolicyAgreesAcrossGeneratorPaths(t *testing.T) {
 			t.Fatalf("buildModelResource text filterable = %v", err)
 		}
 	})
+	t.Run("url searchable", func(t *testing.T) {
+		if _, err := parseFields([]string{"site:url:searchable"}, "posts"); err == nil || !strings.Contains(err.Error(), "searchable") {
+			t.Fatalf("parseFields url searchable = %v", err)
+		}
+		type m struct {
+			ID   uint   `gorm:"primaryKey"`
+			Site string `gorm:"size:255" format:"uri" gombit:"read,write,searchable"`
+		}
+		if _, err := buildModelResource(&m{}, "posts"); err == nil || !strings.Contains(err.Error(), "searchable") {
+			t.Fatalf("buildModelResource url searchable = %v", err)
+		}
+	})
+	t.Run("email filterable", func(t *testing.T) {
+		if _, err := parseFields([]string{"contact:email:filterable"}, "posts"); err == nil || !strings.Contains(err.Error(), "filterable") {
+			t.Fatalf("parseFields email filterable = %v", err)
+		}
+		type m struct {
+			ID      uint   `gorm:"primaryKey"`
+			Contact string `gorm:"size:255" format:"email" gombit:"read,write,filterable"`
+		}
+		if _, err := buildModelResource(&m{}, "posts"); err == nil || !strings.Contains(err.Error(), "filterable") {
+			t.Fatalf("buildModelResource email filterable = %v", err)
+		}
+	})
+	t.Run("string regex matching the slug alphabet stays filterable", func(t *testing.T) {
+		if _, err := parseFields([]string{`token:string:filterable,regex=^[-a-zA-Z0-9_]+$`}, "posts"); err != nil {
+			t.Fatalf("parseFields string regex filterable = %v", err)
+		}
+		type m struct {
+			ID    uint   `gorm:"primaryKey"`
+			Token string `gorm:"size:255" validate:"pattern=^[-a-zA-Z0-9_]+$" gombit:"read,write,filterable"`
+		}
+		if _, err := buildModelResource(&m{}, "posts"); err != nil {
+			t.Fatalf("buildModelResource string regex filterable = %v", err)
+		}
+	})
 	t.Run("string filterable", func(t *testing.T) {
 		if _, err := parseFields([]string{"title:string:filterable"}, "posts"); err != nil {
 			t.Fatalf("parseFields string filterable = %v", err)

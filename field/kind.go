@@ -334,6 +334,25 @@ var (
 	goNullJSON = reflect.TypeOf(types.NullJSON(nil))
 )
 
+// SemanticKind recovers email, url, ip, or slug from model tags. format is
+// the format struct tag. tagPattern is the pattern struct tag make resource
+// writes for a slug. validatePattern is a user regex and is not a kind: a
+// string whose regex happens to be the slug alphabet stays a string.
+func SemanticKind(format, tagPattern, _ string) (Kind, bool) {
+	switch format {
+	case "email":
+		return Email, true
+	case "uri":
+		return URL, true
+	case "ip":
+		return IP, true
+	}
+	if tagPattern == `^[-a-zA-Z0-9_]+$` {
+		return Slug, true
+	}
+	return "", false
+}
+
 // KindFromGo infers a kind from a Go field type. dataType is the GORM data
 // type name (used to tell string columns from text columns). Pointers are
 // unwrapped. This is the registration-time inference the admin uses; the

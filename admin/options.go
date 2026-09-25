@@ -84,7 +84,11 @@ type Field struct {
 	Maximum   string `json:"maximum,omitempty"`
 	MaxLength int    `json:"max_length,omitempty"`
 	Pattern   string `json:"pattern,omitempty"`
-	Default   string `json:"default,omitempty"`
+	// TagPattern is the pattern struct tag, kept apart from a validate
+	// regex. make resource writes the slug alphabet here. A user regex
+	// does not change the catalog kind.
+	TagPattern string `json:"-"`
+	Default    string `json:"default,omitempty"`
 	// Format is the OpenAPI format from the model tag (email, uri, ip).
 	// The admin wire stays string; writes reject a value that fails it.
 	Format string `json:"format,omitempty"`

@@ -195,16 +195,8 @@ func fieldByName(fields []Field, name string) *Field {
 // share the string admin wire, so the format or slug pattern recovers the
 // kind. A plain string stays searchable and filterable.
 func (f Field) queryKind() field.Kind {
-	switch f.Format {
-	case "email":
-		return field.Email
-	case "uri":
-		return field.URL
-	case "ip":
-		return field.IP
-	}
-	if f.Pattern == `^[-a-zA-Z0-9_]+$` {
-		return field.Slug
+	if k, ok := field.SemanticKind(f.Format, f.TagPattern, f.Pattern); ok {
+		return k
 	}
 	return field.Kind(f.Type)
 }
@@ -269,7 +261,7 @@ func validateFieldRefs(opts Options, implicit map[string]implicitColumn) error {
 		for _, name := range names {
 			if known[name] {
 				if f := fieldByName(opts.Fields, name); f != nil && !fieldAllowsQuery(kind, *f) {
-					detail := string(f.Type)
+					detail := string(f.queryKind())
 					if f.Type == TypeRelation && f.Related != nil && f.Related.Kind != "" {
 						detail = f.Related.Kind
 					}
@@ -360,11 +352,14 @@ func fillConstraints(fields []Field, sch *schema.Schema) error {
 		if f.MaxLength == 0 {
 			f.MaxLength = c.MaxLength
 		}
+		if f.TagPattern == "" {
+			f.TagPattern = sf.Tag.Get("pattern")
+		}
 		if f.Pattern == "" {
 			f.Pattern = c.Pattern
 		}
 		if f.Pattern == "" {
-			f.Pattern = sf.Tag.Get("pattern")
+			f.Pattern = f.TagPattern
 		}
 		if f.Format == "" {
 			f.Format = sf.Tag.Get("format")

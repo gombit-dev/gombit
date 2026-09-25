@@ -228,10 +228,15 @@ func effectiveKind(t reflect.Type) reflect.Kind {
 
 // validateQueryTypes fails closed when a column declares a query capability its
 // logical kind does not allow. The decision is field.KindFromGo plus Allows*,
-// the same flags parseFields enforces, so a text filter or a float aggregate
-// cannot be legal on one generator path and rejected on the other.
+// then field.SemanticKind when the model tags say email, url, ip, or slug.
+// A user regex is not a kind. The same flags parseFields enforces, so a text
+// filter or a searchable URL cannot be legal on one generator path and
+// rejected on the other.
 func validateQueryTypes(f modelField, ft reflect.Type, dataType string) error {
 	k := queryKind(ft, dataType)
+	if sk, ok := field.SemanticKind(f.Format, f.Pattern, f.Constraints.Pattern); ok {
+		k = sk
+	}
 	if f.Filterable && !field.AllowsFilter(k, "") {
 		return fmt.Errorf("resourcegen: column %q (%s) is not filterable", f.Column, f.GoType)
 	}
