@@ -16,6 +16,7 @@ import (
 	"gorm.io/gorm/schema"
 
 	"github.com/gombit-dev/gombit/field"
+	"github.com/gombit-dev/gombit/types"
 )
 
 // FieldsFrom derives a default []Field from model at registration time.
@@ -330,8 +331,11 @@ func makeGetter(index []int, ft FieldType) func(any) any {
 		}
 		val := field.Interface()
 		if ft == TypeDate {
-			if t, ok := val.(time.Time); ok {
-				return t.Format("2006-01-02")
+			switch t := val.(type) {
+			case time.Time:
+				return t.Format(time.DateOnly)
+			case types.Date:
+				return t.String()
 			}
 		}
 		return val
@@ -384,6 +388,12 @@ func convertTo(val any, dest reflect.Type) (reflect.Value, error) {
 	if src.Type().AssignableTo(dest) {
 		return src, nil
 	}
+	// A named []byte that unmarshals JSON (types.JSON) is convertible from a
+	// string and is a byte slice, so the shortcuts below would store the raw
+	// characters and skip UnmarshalJSON. The document rules have to run first.
+	if out, err, ok := unmarshalDocument(val, src, dest); ok {
+		return out, err
+	}
 	if src.Type().ConvertibleTo(dest) {
 		return src.Convert(dest), nil
 	}
@@ -433,6 +443,40 @@ func convertTo(val any, dest reflect.Type) (reflect.Value, error) {
 		return out.Elem(), nil
 	}
 	return reflect.Value{}, fmt.Errorf("cannot assign %T to %s", val, dest)
+}
+
+// unmarshalDocument applies json.Unmarshaler when the destination would
+// otherwise be built by ConvertibleTo or by copying JSON bytes into a
+// []byte. Other destinations keep the text and struct paths below.
+func unmarshalDocument(val any, src reflect.Value, dest reflect.Type) (reflect.Value, error, bool) {
+	byteSlice := dest.Kind() == reflect.Slice && dest.Elem().Kind() == reflect.Uint8
+	if !byteSlice && !src.Type().ConvertibleTo(dest) {
+		return reflect.Value{}, nil, false
+	}
+	out := reflect.New(dest)
+	ju, ok := out.Interface().(json.Unmarshaler)
+	if !ok {
+		return reflect.Value{}, nil, false
+	}
+	payload, err := documentPayload(val, dest)
+	if err != nil {
+		return reflect.Value{}, fmt.Errorf("cannot assign %T to %s", val, dest), true
+	}
+	if err := ju.UnmarshalJSON(payload); err != nil {
+		return reflect.Value{}, err, true
+	}
+	return out.Elem(), nil, true
+}
+
+// documentPayload is the JSON text UnmarshalJSON should see. types.JSON
+// must see the encoding of the Go value: a string whose characters are
+// already JSON is still a JSON string, and asJSONBytes would hand those
+// characters over as raw text. json.RawMessage keeps that raw-text shortcut.
+func documentPayload(val any, dest reflect.Type) ([]byte, error) {
+	if dest.PkgPath() == "github.com/gombit-dev/gombit/types" && (dest.Name() == "JSON" || dest.Name() == "NullJSON") {
+		return json.Marshal(val)
+	}
+	return asJSONBytes(val)
 }
 
 func asTextBytes(val any) ([]byte, error) {

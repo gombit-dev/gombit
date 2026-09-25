@@ -143,3 +143,72 @@ func TestRenderRelations(t *testing.T) {
 		}
 	}
 }
+
+func TestRenderScalarGaps(t *testing.T) {
+	fields, err := parseFields([]string{
+		"score:float:sortable",
+		"born:date:required",
+		"token:uuid:required",
+		"meta:json",
+		"at:datetime:required",
+	}, "reading")
+	if err != nil {
+		t.Fatalf("parseFields: %v", err)
+	}
+	name, err := parseResourceName("Reading")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := newRenderContext("github.com/example/demo", name, fields, "/api/v1", "minimal", false, false)
+	model := string(mustFormatGo(renderModel(ctx)))
+	for _, want := range []string{
+		"Score float64",
+		"types.Date",
+		"type:date;not null",
+		"uuid.UUID",
+		"type:char(36);not null",
+		"types.NullJSON",
+		"type:text",
+		"time.Time",
+		`gorm:"not null"`,
+		`"github.com/gombit-dev/gombit/types"`,
+		`"github.com/google/uuid"`,
+	} {
+		if !strings.Contains(model, want) {
+			t.Fatalf("model missing %q:\n%s", want, model)
+		}
+	}
+	form := renderFormTSX(ctx)
+	for _, want := range []string{
+		`type="date"`,
+		`type="datetime-local"`,
+		`type="number"`,
+		`value === "" ? null`,
+		`validate: (value)`,
+		`return "must be JSON"`,
+		`body[key] = JSON.parse(String(raw))`,
+	} {
+		if !strings.Contains(form, want) {
+			t.Fatalf("form missing %q:\n%s", want, form)
+		}
+	}
+	if strings.Contains(form, `throw new Error`) {
+		t.Fatalf("form throws while the user is still typing:\n%s", form)
+	}
+	muiCtx := newRenderContext("github.com/example/demo", name, fields, "/api/v1", "mui", false, false)
+	mui := renderFormTSX(muiCtx)
+	for _, want := range []string{
+		`type="date"`,
+		`raw === "" ? null : raw`,
+		`field.onChange(event.target.value)`,
+		`validate: (value)`,
+		`body[key] = JSON.parse(String(raw))`,
+	} {
+		if !strings.Contains(mui, want) {
+			t.Fatalf("mui form missing %q:\n%s", want, mui)
+		}
+	}
+	if strings.Contains(mui, `JSON.parse(raw)`) || strings.Contains(mui, `throw new Error`) {
+		t.Fatalf("mui form parses or throws from the change handler:\n%s", mui)
+	}
+}

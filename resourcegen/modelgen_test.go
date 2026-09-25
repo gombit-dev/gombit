@@ -16,6 +16,7 @@ import (
 	collidepkg1box "github.com/gombit-dev/gombit/resourcegen/testdata/collidepkg1/box"
 	collidepkg2box "github.com/gombit-dev/gombit/resourcegen/testdata/collidepkg2/box"
 	"github.com/gombit-dev/gombit/types"
+	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
 )
@@ -882,6 +883,53 @@ func TestQueryPolicyAgreesAcrossGeneratorPaths(t *testing.T) {
 			t.Fatalf("buildModelResource decimal.Decimal aggregatable = %v", err)
 		}
 	})
+}
+
+func TestBuildModelResourceScalarGaps(t *testing.T) {
+	type m struct {
+		ID    uint           `gorm:"primaryKey"`
+		Score float64        `gombit:"read,write,sortable"`
+		Born  *types.Date    `gorm:"type:date" gombit:"read,write,sortable"`
+		Due   types.Date     `gorm:"type:date;not null" gombit:"read,write,sortable"`
+		Token *uuid.UUID     `gorm:"type:char(36)" gombit:"read,write,sortable"`
+		Meta  types.NullJSON `gorm:"type:text" gombit:"read,write"`
+		Body  types.JSON     `gorm:"type:text;not null" gombit:"read,write"`
+		At    time.Time      `gombit:"read,write,sortable"`
+	}
+	res, err := buildModelResource(&m{}, "m")
+	if err != nil {
+		t.Fatalf("buildModelResource: %v", err)
+	}
+	src := string(mustFormatGo(renderModelDTOs(res)))
+	for _, want := range []string{
+		"Score float64",
+		"*types.Date",
+		`format:"date" nullable:"true"`,
+		`format:"date"`,
+		"*uuid.UUID",
+		`format:"uuid" nullable:"true"`,
+		"types.NullJSON",
+		"types.JSON",
+		"time.Time",
+	} {
+		if !strings.Contains(src, want) {
+			t.Fatalf("dto missing %q:\n%s", want, src)
+		}
+	}
+	for _, line := range strings.Split(src, "\n") {
+		if !strings.Contains(line, "json:") {
+			continue
+		}
+		if strings.Contains(line, "Due ") && strings.Contains(line, `nullable:"true"`) {
+			t.Fatalf("required date is nullable:\n%s", line)
+		}
+		if strings.Contains(line, "Due ") && !strings.Contains(line, `format:"date"`) {
+			t.Fatalf("required date missing format:\n%s", line)
+		}
+		if strings.Contains(line, "Body ") && strings.Contains(line, `nullable:"true"`) {
+			t.Fatalf("required JSON is nullable:\n%s", line)
+		}
+	}
 }
 
 // A decimal column IS aggregatable (numeric), even though its Go kind is a struct.

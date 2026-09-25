@@ -120,15 +120,15 @@ var catalog = []Spec{
 	{Kind: Integer, GoType: "int", GeneratorReady: true, CLITokens: []string{"int", "integer"}, AdminWire: "integer", Filterable: true, Sortable: true, Aggregatable: true},
 	{Kind: Integer64, GoType: "int64", GeneratorReady: true, CLITokens: []string{"int64", "integer64"}, AdminWire: "integer", Filterable: true, Sortable: true, Aggregatable: true},
 	{Kind: Unsigned, GoType: "uint", GeneratorReady: true, CLITokens: []string{"uint", "unsigned"}, AdminWire: "integer", Filterable: true, Sortable: true, Aggregatable: true},
-	{Kind: Float, CLITokens: []string{"float"}, AdminWire: "float", Sortable: true},
+	{Kind: Float, GoType: "float64", GeneratorReady: true, CLITokens: []string{"float", "float64"}, AdminWire: "float", Sortable: true},
 	{Kind: Decimal, GoType: "types.Decimal", GeneratorReady: true, CLITokens: []string{"decimal"}, AdminWire: "decimal", Sortable: true, Aggregatable: true},
 	{Kind: Boolean, GoType: "bool", GeneratorReady: true, CLITokens: []string{"bool", "boolean"}, AdminWire: "boolean", Filterable: true, Sortable: true},
-	{Kind: Date, CLITokens: []string{"date"}, AdminWire: "date", Sortable: true},
+	{Kind: Date, GoType: "types.Date", GeneratorReady: true, CLITokens: []string{"date"}, AdminWire: "date", Sortable: true},
 	{Kind: DateTime, GoType: "time.Time", GeneratorReady: true, CLITokens: []string{"time", "datetime"}, AdminWire: "datetime", Sortable: true},
 	{Kind: TimeOfDay, Sortable: true},
 	{Kind: Duration, CLITokens: []string{"duration"}, Sortable: true},
-	{Kind: UUID, CLITokens: []string{"uuid"}, AdminWire: "uuid", Sortable: true},
-	{Kind: JSON, CLITokens: []string{"json"}, AdminWire: "json"},
+	{Kind: UUID, GoType: "uuid.UUID", GeneratorReady: true, CLITokens: []string{"uuid"}, AdminWire: "uuid", Sortable: true},
+	{Kind: JSON, GoType: "types.JSON", GeneratorReady: true, CLITokens: []string{"json"}, AdminWire: "json"},
 	{Kind: Email, CLITokens: []string{"email"}, AdminWire: "string", Sortable: true},
 	{Kind: URL, CLITokens: []string{"url"}, AdminWire: "string", Sortable: true},
 	{Kind: Slug, CLITokens: []string{"slug"}, AdminWire: "string", Sortable: true},
@@ -329,6 +329,9 @@ var (
 	goUUID     = reflect.TypeOf(uuid.UUID{})
 	goDecimal  = reflect.TypeOf(decimal.Decimal{})
 	goTypesDec = reflect.TypeOf(types.Decimal{})
+	goDate     = reflect.TypeOf(types.Date{})
+	goJSON     = reflect.TypeOf(types.JSON(nil))
+	goNullJSON = reflect.TypeOf(types.NullJSON(nil))
 )
 
 // KindFromGo infers a kind from a Go field type. dataType is the GORM data
@@ -345,7 +348,9 @@ func KindFromGo(t reflect.Type, dataType string) Kind {
 	switch t {
 	case goTime:
 		return DateTime
-	case goRawJSON:
+	case goDate:
+		return Date
+	case goRawJSON, goJSON, goNullJSON:
 		return JSON
 	case goUUID:
 		return UUID

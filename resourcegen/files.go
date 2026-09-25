@@ -162,8 +162,11 @@ func renderModel(ctx renderContext) string {
 		std = append(std, "time")
 	}
 	third = append(third, "gorm.io/gorm")
-	if fieldsUse(ctx.Fields, FieldDecimal) {
+	if fieldsUse(ctx.Fields, FieldDecimal) || fieldsUse(ctx.Fields, FieldDate) || fieldsUse(ctx.Fields, FieldJSON) {
 		third = append(third, gombitTypesImport)
+	}
+	if fieldsUse(ctx.Fields, FieldUUID) {
+		third = append(third, "github.com/google/uuid")
 	}
 	third = append(third, targetImports(ctx)...)
 	b.WriteString(importBlock(std, third))
@@ -446,8 +449,14 @@ func renderMinimalFormTSX(ctx renderContext) string {
 	b.WriteString("  });\n\n")
 	b.WriteString("  async function onSubmit(values: FormValues) {\n")
 	b.WriteString("    setStatus(\"\");\n")
+	bodyExpr := "values as CreateBody"
+	if jsonNames := jsonFieldNames(ctx.Fields); len(jsonNames) > 0 {
+		b.WriteString("    const body: Record<string, unknown> = { ...values };\n")
+		b.WriteString(tsParseJSONFields(jsonNames))
+		bodyExpr = "body as CreateBody"
+	}
 	b.WriteString("    try {\n")
-	b.WriteString("      await unwrap(await client.POST(createPath, { body: values as CreateBody }));\n")
+	b.WriteString("      await unwrap(await client.POST(createPath, { body: " + bodyExpr + " }));\n")
 	b.WriteString("      navigate(\"/" + ctx.Resource.Kebab + "\");\n")
 	b.WriteString("    } catch (err: unknown) {\n")
 	b.WriteString("      if (!applyContractErrors(setError, err)) {\n")
@@ -477,6 +486,33 @@ func renderMinimalFormTSX(ctx renderContext) string {
 }
 
 // tsStringArray renders a TS array literal of double-quoted strings.
+func jsonFieldNames(fields []Field) []string {
+	var names []string
+	for _, field := range fields {
+		if field.Type == FieldJSON {
+			names = append(names, field.JSONName)
+		}
+	}
+	return names
+}
+
+// tsJSONValidate keeps the textarea string and returns a message when it is
+// not a JSON object or array. Empty is valid here; required handles blank
+// required fields, and onSubmit turns a blank optional field into null.
+func tsJSONValidate() string {
+	return `validate: (value) => { if (value == null || value === "") return true; try { const parsed = JSON.parse(String(value)); if (parsed === null || typeof parsed !== "object") return "must be a JSON object or array"; return true; } catch { return "must be JSON"; } }`
+}
+
+func tsParseJSONFields(names []string) string {
+	var b strings.Builder
+	b.WriteString("    " + tsStringArray(names) + ".forEach((key) => {\n")
+	b.WriteString("      const raw = body[key];\n")
+	b.WriteString("      if (raw == null || raw === \"\") { body[key] = null; return; }\n")
+	b.WriteString("      body[key] = JSON.parse(String(raw));\n")
+	b.WriteString("    });\n")
+	return b.String()
+}
+
 func tsStringArray(names []string) string {
 	quoted := make([]string, 0, len(names))
 	for _, n := range names {
@@ -489,8 +525,10 @@ func tsFormType(field Field) string {
 	switch field.Type {
 	case FieldBool:
 		return "boolean"
-	case FieldInt, FieldInt64, FieldUint:
+	case FieldInt, FieldInt64, FieldUint, FieldFloat:
 		return "number"
+	case FieldJSON:
+		return "string"
 	case FieldEnum:
 		return tsEnumUnion(field)
 	default:
@@ -512,8 +550,10 @@ func tsDefaultValue(field Field) string {
 	switch field.Type {
 	case FieldBool:
 		return "false"
-	case FieldInt, FieldInt64, FieldUint:
+	case FieldInt, FieldInt64, FieldUint, FieldFloat:
 		return "0"
+	case FieldJSON:
+		return `""`
 	case FieldEnum:
 		if len(field.EnumValues) > 0 {
 			return `"` + field.EnumValues[0] + `"`
@@ -538,8 +578,27 @@ func renderFormField(field Field) string {
 		b.WriteString(")} />\n")
 	case FieldBool:
 		b.WriteString("          <input type=\"checkbox\" {...register(\"" + field.JSONName + "\")} />\n")
-	case FieldInt, FieldInt64, FieldUint:
+	case FieldInt, FieldInt64, FieldUint, FieldFloat:
 		b.WriteString("          <input type=\"number\" {...register(\"" + field.JSONName + "\", { setValueAs: (value) => (value === \"\" ? 0 : Number(value)) })} />\n")
+	case FieldDate, FieldUUID:
+		// Empty is null. Format date/uuid rejects "".
+		inputType := "text"
+		if field.Type == FieldDate {
+			inputType = "date"
+		}
+		b.WriteString("          <input type=\"" + inputType + "\" {...register(\"" + field.JSONName + "\", { setValueAs: (value) => (value === \"\" ? null : value)")
+		if field.Required {
+			b.WriteString(", required: \"" + field.GoName + " is required\"")
+		}
+		b.WriteString(" })} />\n")
+	case FieldJSON:
+		// The textarea keeps the raw text. validate reports a parse error
+		// without discarding keystrokes. onSubmit parses once.
+		b.WriteString("          <textarea {...register(\"" + field.JSONName + "\", { " + tsJSONValidate())
+		if field.Required {
+			b.WriteString(", required: \"" + field.GoName + " is required\"")
+		}
+		b.WriteString(" })} />\n")
 	case FieldEnum:
 		b.WriteString("          <select {...register(\"" + field.JSONName + "\")}>\n")
 		for _, v := range field.EnumValues {
@@ -750,19 +809,20 @@ func renderMUIFormTSX(ctx renderContext) string {
 	}
 	b.WriteString(" },\n")
 	b.WriteString("  });\n\n")
-	var timeNames, decimalNames []string
+	var timeNames, emptyNullNames []string
+	jsonNames := jsonFieldNames(ctx.Fields)
 	for _, field := range ctx.Fields {
 		switch field.Type {
 		case FieldTime:
 			timeNames = append(timeNames, field.JSONName)
-		case FieldDecimal:
-			decimalNames = append(decimalNames, field.JSONName)
+		case FieldDecimal, FieldDate, FieldUUID:
+			emptyNullNames = append(emptyNullNames, field.JSONName)
 		}
 	}
 	b.WriteString("  async function onSubmit(values: FormValues) {\n")
 	b.WriteString("    setStatus(\"\");\n")
 	bodyExpr := "values as CreateBody"
-	if len(timeNames) > 0 || len(decimalNames) > 0 {
+	if len(timeNames) > 0 || len(emptyNullNames) > 0 || len(jsonNames) > 0 {
 		b.WriteString("    const body: Record<string, unknown> = { ...values };\n")
 		if len(timeNames) > 0 {
 			// Local datetime-local -> RFC3339 UTC; empty -> null (optional field).
@@ -771,11 +831,15 @@ func renderMUIFormTSX(ctx renderContext) string {
 			b.WriteString("      body[key] = v == null || v === \"\" ? null : new Date(String(v)).toISOString();\n")
 			b.WriteString("    });\n")
 		}
-		if len(decimalNames) > 0 {
-			// Empty decimal string -> null (optional *types.Decimal).
-			b.WriteString("    " + tsStringArray(decimalNames) + ".forEach((key) => {\n")
+		if len(emptyNullNames) > 0 {
+			// Empty date, uuid, and decimal strings are null. Format validation
+			// rejects "" for date and uuid.
+			b.WriteString("    " + tsStringArray(emptyNullNames) + ".forEach((key) => {\n")
 			b.WriteString("      if (body[key] == null || body[key] === \"\") body[key] = null;\n")
 			b.WriteString("    });\n")
+		}
+		if len(jsonNames) > 0 {
+			b.WriteString(tsParseJSONFields(jsonNames))
 		}
 		bodyExpr = "body as CreateBody"
 	}
@@ -819,9 +883,16 @@ func renderMUIFormTSX(ctx renderContext) string {
 
 func renderMUIFormField(field Field) string {
 	var b strings.Builder
-	rules := ""
+	var ruleParts []string
 	if field.Required && field.Type != FieldBool {
-		rules = " rules={{ required: \"" + field.GoName + " is required\" }}"
+		ruleParts = append(ruleParts, `required: "`+field.GoName+` is required"`)
+	}
+	if field.Type == FieldJSON {
+		ruleParts = append(ruleParts, tsJSONValidate())
+	}
+	rules := ""
+	if len(ruleParts) > 0 {
+		rules = " rules={{ " + strings.Join(ruleParts, ", ") + " }}"
 	}
 	b.WriteString("          <Controller\n")
 	b.WriteString("            name=\"" + field.JSONName + "\"\n")
@@ -853,7 +924,7 @@ func renderMUIFormField(field Field) string {
 		b.WriteString("                helperText={fieldState.error?.message}\n")
 		b.WriteString("                disabled={isSubmitting}\n")
 		b.WriteString("              />\n")
-	case FieldInt, FieldInt64, FieldUint:
+	case FieldInt, FieldInt64, FieldUint, FieldFloat:
 		b.WriteString("              <TextField\n")
 		b.WriteString("                {...field}\n")
 		b.WriteString("                type=\"number\"\n")
@@ -881,6 +952,45 @@ func renderMUIFormField(field Field) string {
 			b.WriteString("                <MenuItem value=\"" + v + "\">" + v + "</MenuItem>\n")
 		}
 		b.WriteString("              </TextField>\n")
+	case FieldDate, FieldUUID:
+		inputType := "text"
+		if field.Type == FieldDate {
+			inputType = "date"
+		}
+		b.WriteString("              <TextField\n")
+		b.WriteString("                {...field}\n")
+		b.WriteString("                value={field.value ?? \"\"}\n")
+		b.WriteString("                type=\"" + inputType + "\"\n")
+		b.WriteString("                label=\"" + field.GoName + "\"\n")
+		b.WriteString("                fullWidth\n")
+		if field.Type == FieldDate {
+			b.WriteString("                slotProps={{ inputLabel: { shrink: true } }}\n")
+		}
+		b.WriteString("                error={!!fieldState.error}\n")
+		b.WriteString("                helperText={fieldState.error?.message}\n")
+		b.WriteString("                disabled={isSubmitting}\n")
+		b.WriteString("                onChange={(event) => {\n")
+		b.WriteString("                  const raw = event.target.value;\n")
+		b.WriteString("                  field.onChange(raw === \"\" ? null : raw);\n")
+		b.WriteString("                }}\n")
+		b.WriteString("              />\n")
+	case FieldJSON:
+		// Keep the keystrokes. validate reports a document that is not an
+		// object or array, and onSubmit parses the string once.
+		b.WriteString("              <TextField\n")
+		b.WriteString("                {...field}\n")
+		b.WriteString("                value={field.value ?? \"\"}\n")
+		b.WriteString("                label=\"" + field.GoName + "\"\n")
+		b.WriteString("                fullWidth\n")
+		b.WriteString("                multiline\n")
+		b.WriteString("                minRows={3}\n")
+		b.WriteString("                error={!!fieldState.error}\n")
+		b.WriteString("                helperText={fieldState.error?.message ?? \"JSON object or array\"}\n")
+		b.WriteString("                disabled={isSubmitting}\n")
+		b.WriteString("                onChange={(event) => {\n")
+		b.WriteString("                  field.onChange(event.target.value);\n")
+		b.WriteString("                }}\n")
+		b.WriteString("              />\n")
 	case FieldTime:
 		// Store the raw datetime-local (local wall time) so the picker shows what
 		// the user chose; onSubmit converts it to RFC3339 UTC. Storing UTC ISO

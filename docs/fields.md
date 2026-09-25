@@ -11,23 +11,30 @@ projections of that kind, not separate lists.
 | `integer` | yes | `int`, `integer` | `integer` | `int` |
 | `integer64` | yes | `int64`, `integer64` | `integer` | `int64` |
 | `unsigned` | yes | `uint`, `unsigned` | `integer` | `uint` |
-| `float` | no | `float` | `float` | |
+| `float` | yes | `float`, `float64` | `float` | `float64` |
 | `decimal` | yes | `decimal` | `decimal` | `types.Decimal` |
 | `boolean` | yes | `bool`, `boolean` | `boolean` | `bool` |
-| `date` | no | `date` | `date` | |
+| `date` | yes | `date` | `date` | `types.Date` |
 | `datetime` | yes | `time`, `datetime` | `datetime` | `time.Time` |
 | `time` | no | | | clock time, not the `time` token |
 | `duration` | no | `duration` | | |
-| `uuid` | no | `uuid` | `uuid` | |
-| `json` | no | `json` | `json` | |
+| `uuid` | yes | `uuid` | `uuid` | `uuid.UUID` |
+| `json` | yes | `json` | `json` | `types.JSON` (required), `types.NullJSON` (optional) |
 | `email`, `url`, `slug`, `ip` | no | same as the kind | `string` | |
 | `enum` | yes | `enum(a,b)` | `string` | `string` |
 | `relation` | yes | `belongs_to`, `has_many`, `many_to_many` | `relation` | |
 
-`time` on the command line is a **datetime** (`time.Time`). The clock-time
-kind exists in the vocabulary so a later issue can add it without a second
-type list. Admin introspection already stores `float`, `date`, `uuid`, and
-`json`; the generator does not emit those kinds yet.
+`time` on the command line is a **datetime** (`time.Time`), kept as a
+compatibility alias. `date` is a calendar date (`types.Date`, JSON
+`YYYY-MM-DD`). `datetime` is a timestamp. The clock-time kind and `duration`
+stay in the vocabulary without a generator token until a later issue.
+
+`uuid` is stored as `char(36)` so SQLite, PostgreSQL, and MySQL share one
+column type. `json` is text holding a JSON object or array. A required column
+is `types.JSON`, whose contract rejects null. An optional column is
+`types.NullJSON`, which also accepts null. `float` is `float64` (sortable,
+not aggregatable). Optional `date` and `uuid` are pointers; their OpenAPI
+schema is nullable and a blank form submits null.
 
 `integer64` and `unsigned` share the admin `integer` widget. The meta payload
 does not change.
