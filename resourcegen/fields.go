@@ -567,14 +567,19 @@ func checkNumber(field *Field, name, raw string) error {
 	return exactNumberToken(field, name, raw)
 }
 
-// exactNumberToken rejects an integer token that strconv.ParseFloat does not
-// round-trip. Huma stores minimum/maximum as float64, and the form emits the
-// same token as a JavaScript number. A bound that rounds would pass the
-// request and fail the SQL check, or the other way around.
+// maxExactInteger is the last integer where a float64 comparison and an integer
+// comparison accept the same values. 2^53 round-trips, but the next integer
+// collapses onto it: Huma's maximum check sees the float and the struct keeps
+// the int, so the CHECK then fails as a 500.
+const maxExactInteger = 1<<53 - 1
+
+// exactNumberToken rejects an integer token the request and the form cannot
+// enforce as the same integer the SQL check uses. The token must round-trip
+// through ParseFloat, and it must sit inside ±(2^53−1).
 func exactNumberToken(field *Field, name, raw string) error {
 	f, err := strconv.ParseFloat(raw, 64)
-	if err != nil || math.IsInf(f, 0) || math.Trunc(f) != f || strconv.FormatFloat(f, 'f', -1, 64) != raw {
-		return fmt.Errorf("resourcegen: field %q %s %q is not an exact number; the request and the form compare it as a number", field.JSONName, name, raw)
+	if err != nil || math.IsInf(f, 0) || math.Trunc(f) != f || strconv.FormatFloat(f, 'f', -1, 64) != raw || f > maxExactInteger || f < -maxExactInteger {
+		return fmt.Errorf("resourcegen: field %q %s %q must be an integer in ±(2^53-1); the request and the form compare it as a number", field.JSONName, name, raw)
 	}
 	return nil
 }
@@ -641,10 +646,9 @@ func defaultInRange(field *Field) error {
 }
 
 // compareNumbers orders a and b as integers or as decimals. checkNumber has
-// already required an integer token to round-trip through float64, which is
-// how Huma and the form compare minimum/maximum, and a decimal token to match
-// the decimal schema. This compare then agrees with that spelling: integer
-// order for integers, shopspring magnitude for decimals.
+// already required an integer token to lie inside ±(2^53−1), where Huma's
+// float64 minimum/maximum and the SQL check accept the same integers, and a
+// decimal token to match the decimal schema.
 func compareNumbers(field *Field, a, b string) (int, error) {
 	switch field.Type {
 	case FieldUint:

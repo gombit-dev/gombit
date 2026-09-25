@@ -176,6 +176,9 @@ func TestParseConstraintsReject(t *testing.T) {
 		"count:int64:min=9007199254740993,max=9007199254740992",
 		"price:decimal:min=NaN",
 		"count:int64:max=9007199254740995",
+		"count:int64:max=9007199254740992",
+		"count:int64:max=18014398509481984",
+		"count:int64:min=-9007199254740992",
 		"count:int64:min=9007199254740993",
 		"price:decimal:default=1e-2",
 		"price:decimal:min=1e-2",
@@ -192,14 +195,16 @@ func TestParseConstraintsReject(t *testing.T) {
 
 func TestBoundsMatchRequestSpelling(t *testing.T) {
 	t.Parallel()
+	// 9007199254740991 is 2^53-1, the last integer a number comparison and the
+	// SQL check accept together. 2^53 round-trips and is still rejected.
 	fields, err := parseFields([]string{
-		"count:int64:max=9007199254740992",
+		"count:int64:max=9007199254740991",
 		"price:decimal:min=0.01,default=0.01",
 	}, "person")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(fields[0].gormTag(), "count <= 9007199254740992") {
+	if !strings.Contains(fields[0].gormTag(), "count <= 9007199254740991") {
 		t.Fatalf("gorm tag = %q", fields[0].gormTag())
 	}
 	if fields[1].Min != "0.01" || fields[1].Default != "0.01" {

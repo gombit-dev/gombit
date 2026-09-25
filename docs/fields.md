@@ -60,7 +60,7 @@ bounds and a default:
 
 | Modifier | Column types | Where it lands |
 | --- | --- | --- |
-| `min=`, `max=` | `int`, `int64`, `uint` | GORM `check`, request `minimum` / `maximum`, form `min` / `max`, admin meta and the admin write. The token must round-trip as a number: the request and the form compare it as a float, and the SQL check uses that same spelling |
+| `min=`, `max=` | `int`, `int64`, `uint` | GORM `check`, request `minimum` / `maximum`, form `min` / `max`, admin meta and the admin write. The token must be an integer in ±(2^53−1). The request and the form compare it as a number, and past that range a number comparison accepts integers the SQL check rejects |
 | `min=`, `max=` | `decimal` | GORM `check`, and a create-body check that compares decimal magnitudes. The token must match the decimal schema (`^-?[0-9]+(\.[0-9]+)?$`). The request does not advertise `minimum` / `maximum` |
 | `max_length=` | `string` | GORM `size` (otherwise 255), request `maxLength`, form `maxLength` |
 | `regex=` | `string`, `text` | unanchored request `pattern` and the form's `new RegExp` check, including `text`. The pattern must compile in Go RE2 and in JavaScript and must not use a construct whose match set differs (`\p`, `\P`, inline flags, POSIX classes). The form does not set an HTML `pattern` attribute, because that attribute anchors the match. Not a SQL check |
