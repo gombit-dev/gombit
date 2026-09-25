@@ -5,6 +5,8 @@
 package types
 
 import (
+	"fmt"
+
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/shopspring/decimal"
 )
@@ -37,17 +39,58 @@ func NewDecimalFromString(s string) (Decimal, error) {
 	return Decimal{Decimal: d}, nil
 }
 
+// DecimalPattern is the create-body spelling of a decimal. Huma enforces it on
+// the string schema. Bounds and defaults must use the same token so the form,
+// the magnitude check, and the request accept one spelling.
+const DecimalPattern = `^-?[0-9]+(\.[0-9]+)?$`
+
 // Schema implements huma.SchemaProvider so the contract represents a Decimal as
 // a JSON string (matching its MarshalJSON), not a reflected struct.
 func (Decimal) Schema(huma.Registry) *huma.Schema {
 	return &huma.Schema{
 		Type:    huma.TypeString,
 		Format:  "decimal",
-		Pattern: `^-?[0-9]+(\.[0-9]+)?$`,
+		Pattern: DecimalPattern,
 		Examples: []any{
 			"19.99",
 		},
 	}
+}
+
+// MustDecimal parses s and panics if it is not a decimal. Generated mappers use
+// it for a default the generator already validated.
+func MustDecimal(s string) Decimal {
+	d, err := NewDecimalFromString(s)
+	if err != nil {
+		panic(err)
+	}
+	return d
+}
+
+// DecimalWithin reports whether d is inside the optional bounds. Empty min or
+// max is unbounded on that side. Bounds are decimal magnitudes: Huma's
+// minimum/maximum apply only to number and integer schemas, and Decimal's
+// schema is a string.
+func DecimalWithin(d Decimal, min, max string) error {
+	if min != "" {
+		bound, err := decimal.NewFromString(min)
+		if err != nil {
+			return fmt.Errorf("min %q: %w", min, err)
+		}
+		if d.LessThan(bound) {
+			return fmt.Errorf("must be at least %s", min)
+		}
+	}
+	if max != "" {
+		bound, err := decimal.NewFromString(max)
+		if err != nil {
+			return fmt.Errorf("max %q: %w", max, err)
+		}
+		if d.GreaterThan(bound) {
+			return fmt.Errorf("must be at most %s", max)
+		}
+	}
+	return nil
 }
 
 // GormDataType tells GORM the default column family when a model field omits an

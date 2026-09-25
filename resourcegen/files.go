@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	logical "github.com/gombit-dev/gombit/field"
 )
 
 type fileSpec struct {
@@ -216,12 +218,12 @@ func modelFieldLines(f Field, resourcePkg string) string {
 		// legacy generator, filterable by default (the has_many detail-list case,
 		// GET /children?<parent>_id=<id>). The association object is not a column and
 		// carries no policy.
-		return "\t" + f.fkGoName() + " uint" + structTag("index", "read,write,filterable") + "\n" +
+		return "\t" + f.fkGoName() + " uint" + structTag("index", "read,write,filterable", "") + "\n" +
 			"\t" + f.GoName + " " + f.GoType + "\n"
 	case FieldHasMany:
 		return "\t" + f.GoName + " " + f.GoType + "\n"
 	case FieldManyToMany:
-		return "\t" + f.GoName + " " + f.GoType + structTag("many2many:"+f.joinTable(resourcePkg)+";", "") + "\n"
+		return "\t" + f.GoName + " " + f.GoType + structTag("many2many:"+f.joinTable(resourcePkg)+";", "", "") + "\n"
 	default:
 		return "\t" + f.GoName + " " + f.GoType + modelStructTag(f) + "\n"
 	}
@@ -234,10 +236,10 @@ func resourceMarkerContent(pkg string) string {
 		"# `gombit generate` regenerates its *.gen.go from the model + gombit field policy.\n"
 }
 
-// structTag composes a field's struct tag from its gorm and gombit parts, omitting
-// an empty part (and the whole tag when both are empty).
+// modelStructTag is the model field tag: gorm, gombit policy, validate
+// constraints, and the semantic format or slug pattern.
 func modelStructTag(f Field) string {
-	base := structTag(f.gormTag(), f.gombitPolicy())
+	base := structTag(f.gormTag(), f.gombitPolicy(), logical.FormatConstraints(f.constraints()))
 	var extras []string
 	if format := f.openAPIFormat(); format != "" {
 		extras = append(extras, `format:"`+format+`"`)
@@ -256,13 +258,18 @@ func modelStructTag(f Field) string {
 	return " `" + inner + " " + extra + "`"
 }
 
-func structTag(gormPart, gombitPart string) string {
+// structTag composes a field's struct tag from its gorm, gombit, and validate
+// parts, omitting an empty part (and the whole tag when all are empty).
+func structTag(gormPart, gombitPart, validatePart string) string {
 	var parts []string
 	if gormPart != "" {
 		parts = append(parts, `gorm:"`+gormPart+`"`)
 	}
 	if gombitPart != "" {
 		parts = append(parts, `gombit:"`+gombitPart+`"`)
+	}
+	if validatePart != "" {
+		parts = append(parts, `validate:"`+validatePart+`"`)
 	}
 	if len(parts) == 0 {
 		return ""
@@ -427,6 +434,51 @@ func renderFormTSX(ctx renderContext) string {
 	return renderMinimalFormTSX(ctx)
 }
 
+// cmpDecimalJS compares two decimal strings by magnitude. It is emitted when a
+// form has a decimal bound so the check does not go through a JavaScript number.
+const cmpDecimalJS = `function cmpDecimal(a, b) {
+  const norm = (raw) => {
+    let t = String(raw).trim();
+    let neg = false;
+    if (t.startsWith("-")) {
+      neg = true;
+      t = t.slice(1);
+    }
+    const parts = t.split(".");
+    const ip = (parts[0] || "0").replace(/^0+(?=\d)/, "");
+    const fp = (parts[1] || "").replace(/0+$/, "");
+    if (ip === "0" && fp === "") neg = false;
+    return { neg, ip, fp };
+  };
+  const left = norm(a);
+  const right = norm(b);
+  if (left.neg !== right.neg) {
+    return left.neg ? -1 : 1;
+  }
+  const sign = left.neg ? -1 : 1;
+  if (left.ip.length !== right.ip.length) {
+    return sign * (left.ip.length < right.ip.length ? -1 : 1);
+  }
+  if (left.ip !== right.ip) {
+    return sign * (left.ip < right.ip ? -1 : 1);
+  }
+  if (left.fp !== right.fp) {
+    return sign * (left.fp < right.fp ? -1 : 1);
+  }
+  return 0;
+}
+
+`
+
+func formNeedsDecimalCmp(fields []Field) bool {
+	for _, f := range fields {
+		if f.Type == FieldDecimal && (f.Min != "" || f.Max != "") {
+			return true
+		}
+	}
+	return false
+}
+
 func renderMinimalFormTSX(ctx renderContext) string {
 	createPath := defaultAPIPrefix + ctx.Resource.HTTPPath
 	var b strings.Builder
@@ -438,6 +490,9 @@ func renderMinimalFormTSX(ctx renderContext) string {
 	b.WriteString("import { applyContractErrors } from \"../api/formErrors\";\n")
 	b.WriteString("import { unwrap } from \"../api/generated/client\";\n")
 	b.WriteString("import type { paths } from \"../api/generated/schema\";\n\n")
+	if formNeedsDecimalCmp(ctx.Fields) {
+		b.WriteString(cmpDecimalJS)
+	}
 	b.WriteString("const createPath = \"" + createPath + "\" as const;\n\n")
 	b.WriteString("type CreateBody =\n")
 	b.WriteString("  paths[typeof createPath][\"post\"][\"requestBody\"][\"content\"][\"application/json\"];\n\n")
@@ -568,6 +623,14 @@ func tsEnumUnion(field Field) string {
 }
 
 func tsDefaultValue(field Field) string {
+	if field.Default != "" {
+		switch field.Type {
+		case FieldInt, FieldInt64, FieldUint, FieldBool:
+			return field.Default
+		default:
+			return strconv.Quote(field.Default)
+		}
+	}
 	switch field.Type {
 	case FieldBool:
 		return "false"
@@ -585,6 +648,84 @@ func tsDefaultValue(field Field) string {
 	}
 }
 
+func tsNumberRules(field Field) string {
+	var parts []string
+	if field.Min != "" {
+		parts = append(parts, "min: { value: "+field.Min+", message: \""+field.GoName+" must be at least "+field.Min+"\" }")
+	}
+	if field.Max != "" {
+		parts = append(parts, "max: { value: "+field.Max+", message: \""+field.GoName+" must be at most "+field.Max+"\" }")
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return ", " + strings.Join(parts, ", ")
+}
+
+func htmlNumberAttrs(field Field) string {
+	var b strings.Builder
+	if field.Min != "" {
+		b.WriteString(" min=\"" + field.Min + "\"")
+	}
+	if field.Max != "" {
+		b.WriteString(" max=\"" + field.Max + "\"")
+	}
+	return b.String()
+}
+
+func tsDecimalRules(field Field) string {
+	var b strings.Builder
+	if field.Required {
+		b.WriteString(", required: \"" + field.GoName + " is required\"")
+	}
+	if field.Min == "" && field.Max == "" {
+		return b.String()
+	}
+	b.WriteString(", validate: (value) => {\n")
+	b.WriteString("            if (value == null || value === \"\") return true;\n")
+	b.WriteString("            if (!/^-?\\d+(\\.\\d+)?$/.test(String(value))) return \"" + field.GoName + " must be a decimal\";\n")
+	if field.Min != "" {
+		b.WriteString("            if (cmpDecimal(value, " + strconv.Quote(field.Min) + ") < 0) return \"" + field.GoName + " must be at least " + field.Min + "\";\n")
+	}
+	if field.Max != "" {
+		b.WriteString("            if (cmpDecimal(value, " + strconv.Quote(field.Max) + ") > 0) return \"" + field.GoName + " must be at most " + field.Max + "\";\n")
+	}
+	b.WriteString("            return true;\n")
+	b.WriteString("          }")
+	return b.String()
+}
+
+func tsTextRegister(field Field) string {
+	var parts []string
+	if field.Required {
+		parts = append(parts, "required: \""+field.GoName+" is required\"")
+	}
+	if field.MaxLength > 0 {
+		parts = append(parts, tsCodePointMaxLength(field))
+	}
+	if pattern := field.formPattern(); pattern != "" {
+		parts = append(parts, "pattern: { value: new RegExp("+strconv.Quote(jsFormPattern(pattern))+`, "u"), message: "`+field.GoName+` is invalid" }`)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return ", { " + strings.Join(parts, ", ") + " }"
+}
+
+func tsCodePointMaxLength(field Field) string {
+	// React Hook Form's maxLength and the HTML maxlength attribute count
+	// UTF-16 code units. Huma's maxLength counts Unicode code points.
+	n := strconv.Itoa(field.MaxLength)
+	return `validate: (value) => { if (value == null || value === "") return true; if ([...String(value)].length > ` + n + `) return "` + field.GoName + ` is too long"; return true; }`
+}
+
+func htmlTextAttrs(field Field) string {
+	// No HTML maxlength or pattern. maxlength counts UTF-16 code units, and
+	// pattern is anchored. The register options enforce both the same way the
+	// request does.
+	return ""
+}
+
 func renderFormField(field Field) string {
 	ident := jsIdent(field.JSONName)
 	var b strings.Builder
@@ -592,15 +733,11 @@ func renderFormField(field Field) string {
 	b.WriteString("          " + field.GoName + "\n")
 	switch field.Type {
 	case FieldText:
-		b.WriteString("          <textarea {...register(\"" + field.JSONName + "\"")
-		if field.Required {
-			b.WriteString(", { required: \"" + field.GoName + " is required\" }")
-		}
-		b.WriteString(")} />\n")
+		b.WriteString("          <textarea {...register(\"" + field.JSONName + "\"" + tsTextRegister(field) + ")}" + htmlTextAttrs(field) + " />\n")
 	case FieldBool:
 		b.WriteString("          <input type=\"checkbox\" {...register(\"" + field.JSONName + "\")} />\n")
 	case FieldInt, FieldInt64, FieldUint, FieldFloat:
-		b.WriteString("          <input type=\"number\" {...register(\"" + field.JSONName + "\", { setValueAs: (value) => (value === \"\" ? 0 : Number(value)) })} />\n")
+		b.WriteString("          <input type=\"number\" {...register(\"" + field.JSONName + "\", { setValueAs: (value) => (value === \"\" ? 0 : Number(value))" + tsNumberRules(field) + " })}" + htmlNumberAttrs(field) + " />\n")
 	case FieldDate, FieldUUID:
 		// Empty is null. Format date/uuid rejects "".
 		inputType := "text"
@@ -639,11 +776,7 @@ func renderFormField(field Field) string {
 	case FieldDecimal:
 		// Empty becomes null so an optional (*types.Decimal) field round-trips; a
 		// non-empty value is sent as the exact decimal string.
-		b.WriteString("          <input type=\"text\" inputMode=\"decimal\" {...register(\"" + field.JSONName + "\", { setValueAs: (value) => (value === \"\" ? null : value)")
-		if field.Required {
-			b.WriteString(", required: \"" + field.GoName + " is required\"")
-		}
-		b.WriteString(" })} />\n")
+		b.WriteString("          <input type=\"text\" inputMode=\"decimal\" {...register(\"" + field.JSONName + "\", { setValueAs: (value) => (value === \"\" ? null : value)" + tsDecimalRules(field) + " })}" + htmlNumberAttrs(field) + " />\n")
 	default:
 		inputType := "text"
 		switch field.Type {
@@ -652,18 +785,7 @@ func renderFormField(field Field) string {
 		case FieldURL:
 			inputType = "url"
 		}
-		b.WriteString("          <input type=\"" + inputType + "\" {...register(\"" + field.JSONName + "\"")
-		var opts []string
-		if field.Required {
-			opts = append(opts, "required: \""+field.GoName+" is required\"")
-		}
-		if pattern := field.semanticPattern(); pattern != "" {
-			opts = append(opts, "pattern: { value: new RegExp("+strconv.Quote(pattern)+"), message: \""+field.GoName+" is invalid\" }")
-		}
-		if len(opts) > 0 {
-			b.WriteString(", { " + strings.Join(opts, ", ") + " }")
-		}
-		b.WriteString(")} />\n")
+		b.WriteString("          <input type=\"" + inputType + "\" {...register(\"" + field.JSONName + "\"" + tsTextRegister(field) + ")}" + htmlTextAttrs(field) + " />\n")
 	}
 	b.WriteString("        </label>\n")
 	b.WriteString("        {errors." + ident + "?.message ? <p>{errors." + ident + ".message}</p> : null}\n")
@@ -814,6 +936,9 @@ func renderMUIFormTSX(ctx renderContext) string {
 	b.WriteString("import { applyContractErrors } from \"../api/formErrors\";\n")
 	b.WriteString("import { unwrap } from \"../api/generated/client\";\n")
 	b.WriteString("import type { paths } from \"../api/generated/schema\";\n\n")
+	if formNeedsDecimalCmp(ctx.Fields) {
+		b.WriteString(cmpDecimalJS)
+	}
 	b.WriteString("const createPath = \"" + createPath + "\" as const;\n\n")
 	b.WriteString("type CreateBody =\n")
 	b.WriteString("  paths[typeof createPath][\"post\"][\"requestBody\"][\"content\"][\"application/json\"];\n\n")
@@ -916,22 +1041,74 @@ func renderMUIFormTSX(ctx renderContext) string {
 	return b.String()
 }
 
-func renderMUIFormField(field Field) string {
-	var b strings.Builder
-	var ruleParts []string
+func muiDecimalBound(field Field) string {
+	var lines []string
+	lines = append(lines, `if (!/^-?\d+(\.\d+)?$/.test(String(value))) return "`+field.GoName+` must be a decimal";`)
+	if field.Min != "" {
+		lines = append(lines, `if (cmpDecimal(value, `+strconv.Quote(field.Min)+`) < 0) return "`+field.GoName+` must be at least `+field.Min+`";`)
+	}
+	if field.Max != "" {
+		lines = append(lines, `if (cmpDecimal(value, `+strconv.Quote(field.Max)+`) > 0) return "`+field.GoName+` must be at most `+field.Max+`";`)
+	}
+	return strings.Join(lines, "\n              ")
+}
+
+func muiRules(field Field) string {
+	var parts []string
 	if field.Required && field.Type != FieldBool {
-		ruleParts = append(ruleParts, `required: "`+field.GoName+` is required"`)
+		parts = append(parts, `required: "`+field.GoName+` is required"`)
+	}
+	if field.Type == FieldDecimal && (field.Min != "" || field.Max != "") {
+		parts = append(parts, `validate: (value) => {
+              if (value == null || value === "") return true;
+              `+muiDecimalBound(field)+`
+              return true;
+            }`)
+	} else {
+		if field.Min != "" {
+			parts = append(parts, `min: { value: `+field.Min+`, message: "`+field.GoName+` must be at least `+field.Min+`" }`)
+		}
+		if field.Max != "" {
+			parts = append(parts, `max: { value: `+field.Max+`, message: "`+field.GoName+` must be at most `+field.Max+`" }`)
+		}
+	}
+	if field.MaxLength > 0 {
+		parts = append(parts, tsCodePointMaxLength(field))
+	}
+	if pattern := field.formPattern(); pattern != "" {
+		parts = append(parts, `pattern: { value: new RegExp(`+strconv.Quote(jsFormPattern(pattern))+`, "u"), message: "`+field.GoName+` is invalid" }`)
 	}
 	if field.Type == FieldJSON {
-		ruleParts = append(ruleParts, tsJSONValidate())
+		parts = append(parts, tsJSONValidate())
 	}
-	if pattern := field.semanticPattern(); pattern != "" {
-		ruleParts = append(ruleParts, `pattern: { value: new RegExp(`+strconv.Quote(pattern)+`), message: "`+field.GoName+` is invalid" }`)
+	if len(parts) == 0 {
+		return ""
 	}
-	rules := ""
-	if len(ruleParts) > 0 {
-		rules = " rules={{ " + strings.Join(ruleParts, ", ") + " }}"
+	return " rules={{ " + strings.Join(parts, ", ") + " }}"
+}
+
+func muiBoundAttrs(field Field) string {
+	var b strings.Builder
+	if field.Min != "" {
+		b.WriteString(", min: " + field.Min)
 	}
+	if field.Max != "" {
+		b.WriteString(", max: " + field.Max)
+	}
+	return b.String()
+}
+
+func muiTextSlot(field Field) string {
+	var bits []string
+	if len(bits) == 0 {
+		return ""
+	}
+	return "                slotProps={{ htmlInput: { " + strings.Join(bits, ", ") + " } }}\n"
+}
+
+func renderMUIFormField(field Field) string {
+	var b strings.Builder
+	rules := muiRules(field)
 	b.WriteString("          <Controller\n")
 	b.WriteString("            name=\"" + field.JSONName + "\"\n")
 	b.WriteString("            control={control}\n")
@@ -958,6 +1135,9 @@ func renderMUIFormField(field Field) string {
 		b.WriteString("                fullWidth\n")
 		b.WriteString("                multiline\n")
 		b.WriteString("                minRows={3}\n")
+		if extra := muiTextSlot(field); extra != "" {
+			b.WriteString(extra)
+		}
 		b.WriteString("                error={!!fieldState.error}\n")
 		b.WriteString("                helperText={fieldState.error?.message}\n")
 		b.WriteString("                disabled={isSubmitting}\n")
@@ -971,6 +1151,18 @@ func renderMUIFormField(field Field) string {
 		b.WriteString("                error={!!fieldState.error}\n")
 		b.WriteString("                helperText={fieldState.error?.message}\n")
 		b.WriteString("                disabled={isSubmitting}\n")
+		if field.Min != "" || field.Max != "" {
+			b.WriteString("                slotProps={{ htmlInput: { ")
+			var bits []string
+			if field.Min != "" {
+				bits = append(bits, "min: "+field.Min)
+			}
+			if field.Max != "" {
+				bits = append(bits, "max: "+field.Max)
+			}
+			b.WriteString(strings.Join(bits, ", "))
+			b.WriteString(" } }}\n")
+		}
 		b.WriteString("                onChange={(event) => {\n")
 		b.WriteString("                  const raw = event.target.value;\n")
 		b.WriteString("                  field.onChange(raw === \"\" ? 0 : Number(raw));\n")
@@ -1052,7 +1244,7 @@ func renderMUIFormField(field Field) string {
 		b.WriteString("                value={field.value ?? \"\"}\n")
 		b.WriteString("                label=\"" + field.GoName + "\"\n")
 		b.WriteString("                fullWidth\n")
-		b.WriteString("                slotProps={{ htmlInput: { inputMode: \"decimal\" } }}\n")
+		b.WriteString("                slotProps={{ htmlInput: { inputMode: \"decimal\"" + muiBoundAttrs(field) + " } }}\n")
 		b.WriteString("                error={!!fieldState.error}\n")
 		b.WriteString("                helperText={fieldState.error?.message}\n")
 		b.WriteString("                disabled={isSubmitting}\n")
@@ -1073,6 +1265,9 @@ func renderMUIFormField(field Field) string {
 		b.WriteString("                error={!!fieldState.error}\n")
 		b.WriteString("                helperText={fieldState.error?.message}\n")
 		b.WriteString("                disabled={isSubmitting}\n")
+		if extra := muiTextSlot(field); extra != "" {
+			b.WriteString(extra)
+		}
 		b.WriteString("              />\n")
 	}
 	b.WriteString("            )}\n")

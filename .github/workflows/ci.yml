@@ -318,6 +318,9 @@ jobs:
           go test -tags integration ./framework \
             -framework.postgres-dsn \
             'postgres://gombit:gombit@127.0.0.1:5432/gombit?sslmode=disable'
+          go test -tags integration ./resourcegen \
+            -resourcegen.postgres-dsn \
+            'postgres://gombit:gombit@127.0.0.1:5432/gombit?sslmode=disable'
           go test -tags integration ./types \
             -types.postgres-dsn \
             'postgres://gombit:gombit@127.0.0.1:5432/gombit?sslmode=disable'
@@ -518,6 +521,9 @@ jobs:
             'gombit:gombit@tcp(127.0.0.1:3306)/gombit?parseTime=true'
           go test -tags integration ./framework \
             -framework.mysql-dsn \
+            'gombit:gombit@tcp(127.0.0.1:3306)/gombit?parseTime=true'
+          go test -tags integration ./resourcegen \
+            -resourcegen.mysql-dsn \
             'gombit:gombit@tcp(127.0.0.1:3306)/gombit?parseTime=true'
 
   migrations-sqlite:

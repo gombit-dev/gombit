@@ -49,11 +49,16 @@ type Capabilities struct {
 
 // FieldMeta is the introspection shape of a field (no Column).
 type FieldMeta struct {
-	Name     string    `json:"name"`
-	Type     FieldType `json:"type"`
-	Required bool      `json:"required"`
-	ReadOnly bool      `json:"readonly"`
-	Related  *Relation `json:"related,omitempty"`
+	Name      string    `json:"name"`
+	Type      FieldType `json:"type"`
+	Required  bool      `json:"required"`
+	ReadOnly  bool      `json:"readonly"`
+	Related   *Relation `json:"related,omitempty"`
+	Minimum   string    `json:"minimum,omitempty"`
+	Maximum   string    `json:"maximum,omitempty"`
+	MaxLength int       `json:"max_length,omitempty"`
+	Pattern   string    `json:"pattern,omitempty"`
+	Default   string    `json:"default,omitempty"`
 }
 
 type catalogOutput struct {
@@ -77,11 +82,16 @@ func modelMetaFrom(opts Options, pk string) ModelMeta {
 			rel = &copyRel
 		}
 		fields = append(fields, FieldMeta{
-			Name:     f.Name,
-			Type:     f.Type,
-			Required: f.Required,
-			ReadOnly: f.ReadOnly || (f.Type == TypeRelation && f.Related != nil && f.Related.Kind == RelHasMany),
-			Related:  rel,
+			Name:      f.Name,
+			Type:      f.Type,
+			Required:  f.Required,
+			ReadOnly:  f.ReadOnly || (f.Type == TypeRelation && f.Related != nil && f.Related.Kind == RelHasMany),
+			Related:   rel,
+			Minimum:   f.Minimum,
+			Maximum:   f.Maximum,
+			MaxLength: f.MaxLength,
+			Pattern:   f.Pattern,
+			Default:   f.Default,
 		})
 	}
 	return ModelMeta{

@@ -27,6 +27,29 @@ var reservedFields = map[string]struct{}{
 	"id": {}, "created_at": {}, "updated_at": {}, "deleted_at": {},
 }
 
+// sqlCheckReserved are identifiers that SQLite, PostgreSQL, or MySQL will not
+// accept unquoted inside a CHECK expression. GORM inserts the check as raw
+// SQL. Backticks parse on SQLite and MySQL and fail on PostgreSQL; double
+// quotes parse on SQLite and PostgreSQL and are string literals on MySQL
+// without ANSI_QUOTES. A bounded column with one of these names is rejected
+// before migrate. The same name without min or max is still a column.
+var sqlCheckReserved = map[string]struct{}{
+	"add": {}, "all": {}, "alter": {}, "and": {}, "as": {}, "asc": {},
+	"between": {}, "by": {}, "case": {}, "cast": {}, "check": {}, "collate": {},
+	"column": {}, "constraint": {}, "create": {}, "cross": {}, "current_date": {},
+	"current_time": {}, "current_timestamp": {}, "current_user": {}, "default": {},
+	"delete": {}, "desc": {}, "distinct": {}, "drop": {}, "else": {}, "end": {},
+	"except": {}, "exists": {}, "false": {}, "fetch": {}, "for": {}, "foreign": {},
+	"from": {}, "full": {}, "grant": {}, "group": {}, "having": {}, "in": {},
+	"index": {}, "inner": {}, "insert": {}, "intersect": {}, "into": {}, "is": {},
+	"join": {}, "key": {}, "leading": {}, "left": {}, "like": {}, "limit": {},
+	"not": {}, "null": {}, "offset": {}, "on": {}, "or": {}, "order": {},
+	"outer": {}, "primary": {}, "references": {}, "right": {}, "select": {},
+	"set": {}, "table": {}, "then": {}, "to": {}, "trailing": {}, "true": {},
+	"union": {}, "unique": {}, "update": {}, "user": {}, "using": {}, "values": {},
+	"when": {}, "where": {}, "window": {}, "with": {},
+}
+
 // reservedQueryFields are the query keys the generated list handler owns for its
 // declared list-query surface: pagination plus the admin-aligned search /
 // ordering params (#260) and the aggregate param (#272). A resource field

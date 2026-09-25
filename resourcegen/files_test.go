@@ -47,8 +47,6 @@ func TestRenderNewScalarTypes(t *testing.T) {
 	}
 }
 
-// TestRenderMinimalFormNewTypes checks the generated minimal React form renders
-// a select for enum, a datetime-local input for time, and a decimal text input.
 func TestRenderSemanticStringInputs(t *testing.T) {
 	fields, err := parseFields([]string{"contact:email:required", "site:url", "handle:slug", "addr:ip"}, "person")
 	if err != nil {
@@ -60,18 +58,20 @@ func TestRenderSemanticStringInputs(t *testing.T) {
 		`type="email"`,
 		`type="url"`,
 		`type="text"`,
-		`new RegExp("^[-a-zA-Z0-9_]+$")`,
+		`new RegExp("^[-a-zA-Z0-9_]+$", "u")`,
 	} {
 		if !strings.Contains(form, want) {
 			t.Fatalf("form missing %q:\n%s", want, form)
 		}
 	}
 	mui := renderMUIFormTSX(newRenderContext("github.com/example/demo", name, fields, "/api/v1", "mui", false, false))
-	if !strings.Contains(mui, `type="email"`) || !strings.Contains(mui, `new RegExp("^[-a-zA-Z0-9_]+$")`) {
+	if !strings.Contains(mui, `type="email"`) || !strings.Contains(mui, `new RegExp("^[-a-zA-Z0-9_]+$", "u")`) {
 		t.Fatalf("MUI form missing semantic widgets:\n%s", mui)
 	}
 }
 
+// TestRenderMinimalFormNewTypes checks the generated minimal React form renders
+// a select for enum, a datetime-local input for time, and a decimal text input.
 func TestRenderMinimalFormNewTypes(t *testing.T) {
 	fields, err := parseFields([]string{
 		"price:decimal:required",
@@ -122,6 +122,80 @@ func TestRenderMUIFormNewTypes(t *testing.T) {
 		if !strings.Contains(form, want) {
 			t.Fatalf("MUI form missing %q:\n%s", want, form)
 		}
+	}
+}
+
+func TestRenderConstraintFields(t *testing.T) {
+	fields, err := parseFields([]string{
+		"age:int:required,min=0,max=150",
+		"status:enum(draft,published):default=draft",
+		"code:string:max_length=8,regex=^[a-z]+$",
+	}, "person")
+	if err != nil {
+		t.Fatalf("parseFields: %v", err)
+	}
+	name, err := parseResourceName("Person")
+	if err != nil {
+		t.Fatalf("parseResourceName: %v", err)
+	}
+	ctx := newRenderContext("github.com/example/demo", name, fields, "/api/v1", "minimal", false, false)
+	model := string(mustFormatGo(renderModel(ctx)))
+	for _, want := range []string{
+		`check:age >= 0 AND age <= 150`,
+		`validate:"min=0;max=150"`,
+		`default=draft`,
+		`enum=draft,published`,
+		`size:8`,
+		`validate:"max_length=8;pattern=^[a-z]+$"`,
+	} {
+		if !strings.Contains(model, want) {
+			t.Fatalf("model missing %q:\n%s", want, model)
+		}
+	}
+	form := renderFormTSX(ctx)
+	for _, want := range []string{
+		`min="0"`,
+		`max="150"`,
+		`min: { value: 0`,
+		`status: "draft"`,
+		`[...String(value)].length > 8`,
+		`new RegExp("^[a-z]+$", "u")`,
+	} {
+		if !strings.Contains(form, want) {
+			t.Fatalf("form missing %q:\n%s", want, form)
+		}
+	}
+	if strings.Contains(form, `pattern="^[a-z]+$"`) {
+		t.Fatalf("HTML pattern attribute anchors the match:\n%s", form)
+	}
+	if strings.Contains(form, `maxLength={8}`) {
+		t.Fatalf("HTML maxlength counts UTF-16 code units:\n%s", form)
+	}
+	if !strings.Contains(cmpDecimalJS, `ip === "0" && fp === ""`) {
+		t.Fatal("cmpDecimal must treat -0 as zero")
+	}
+	mui := renderMUIFormTSX(ctx)
+	if !strings.Contains(mui, `new RegExp("^[a-z]+$", "u")`) {
+		t.Fatalf("MUI form missing unanchored regex:\n%s", mui)
+	}
+	if strings.Contains(mui, `pattern: "^[a-z]+$"`) {
+		t.Fatalf("MUI htmlInput pattern anchors the match:\n%s", mui)
+	}
+	text, err := parseFields([]string{"note:text:regex=^[a-z]+$"}, "person")
+	if err != nil {
+		t.Fatalf("parseFields text: %v", err)
+	}
+	textForm := renderFormField(text[0])
+	if !strings.Contains(textForm, `new RegExp("^[a-z]+$", "u")`) {
+		t.Fatalf("text form missing regex:\n%s", textForm)
+	}
+	decimal, err := parseFields([]string{"price:decimal:max=10"}, "person")
+	if err != nil {
+		t.Fatalf("parseFields decimal: %v", err)
+	}
+	decimalForm := renderFormField(decimal[0])
+	if !strings.Contains(decimalForm, `cmpDecimal(value, "10")`) {
+		t.Fatalf("decimal form missing magnitude check:\n%s", decimalForm)
 	}
 }
 

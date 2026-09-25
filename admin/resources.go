@@ -448,8 +448,20 @@ func applyWrite(ctx context.Context, m *registered, inst any, body map[string]an
 			fields[name] = []string{"field is read-only"}
 			continue
 		}
+		if raw == nil && creating && f.Default != "" {
+			if err := f.set(inst, f.Default); err != nil {
+				fields[name] = []string{err.Error()}
+				continue
+			}
+			seen[name] = struct{}{}
+			continue
+		}
 		if raw == nil && f.Required {
 			fields[name] = []string{"is required"}
+			continue
+		}
+		if msg := constraintMessage(f.Field, raw); msg != "" {
+			fields[name] = []string{msg}
 			continue
 		}
 		if err := f.set(inst, raw); err != nil {
@@ -461,13 +473,24 @@ func applyWrite(ctx context.Context, m *registered, inst any, body map[string]an
 	if creating {
 		for i := range m.fields {
 			f := &m.fields[i]
-			if !f.Required || f.ReadOnly {
+			if f.ReadOnly {
 				continue
 			}
 			if _, ok := seen[f.Name]; ok {
 				continue
 			}
 			if _, ok := fields[f.Name]; ok {
+				continue
+			}
+			if f.Default != "" {
+				if err := f.set(inst, f.Default); err != nil {
+					fields[f.Name] = []string{err.Error()}
+					continue
+				}
+				seen[f.Name] = struct{}{}
+				continue
+			}
+			if !f.Required {
 				continue
 			}
 			fields[f.Name] = []string{"is required"}

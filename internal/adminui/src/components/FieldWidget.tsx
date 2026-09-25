@@ -17,6 +17,8 @@ import { useApiClient } from "../api/client";
 import { useCatalog } from "../app/providers";
 import type { FieldMeta, Row } from "../api/types";
 import {
+  compareDecimal,
+  formPattern,
   isBelongsTo,
   isHasMany,
   isManyToMany,
@@ -93,7 +95,7 @@ export function FieldWidget({ field, control, disabled }: Props) {
     <Controller
       name={field.name}
       control={control}
-      rules={{ required: field.required && !readOnly }}
+      rules={widgetRules(field, readOnly)}
       render={({ field: rhf, fieldState }) => (
         <TextField
           {...rhf}
@@ -106,11 +108,7 @@ export function FieldWidget({ field, control, disabled }: Props) {
           error={!!fieldState.error}
           helperText={fieldState.error?.message ?? helperText(field)}
           disabled={readOnly}
-          slotProps={
-            field.type === "datetime" || field.type === "date"
-              ? { inputLabel: { shrink: true } }
-              : undefined
-          }
+          slotProps={widgetSlotProps(field)}
         />
       )}
     />
@@ -406,6 +404,81 @@ function HasManyView({ field, ids }: { field: FieldMeta; ids: RelId[] }) {
       </Box>
     </FormControl>
   );
+}
+
+function widgetRules(field: FieldMeta, readOnly: boolean) {
+  const rules: {
+    required?: boolean;
+    maxLength?: { value: number; message: string };
+    pattern?: { value: RegExp; message: string };
+    min?: { value: number; message: string };
+    max?: { value: number; message: string };
+    validate?: (value: unknown) => true | string;
+  } = {};
+  if (field.required && !readOnly) {
+    rules.required = true;
+  }
+  if (field.max_length) {
+    const limit = field.max_length;
+    rules.validate = (value) => {
+      if (value == null || value === "") {
+        return true;
+      }
+      if ([...String(value)].length > limit) {
+        return "is too long";
+      }
+      return true;
+    };
+  }
+  if (field.pattern) {
+    rules.pattern = { value: new RegExp(formPattern(field.pattern), "u"), message: "does not match pattern" };
+  }
+  if (field.type === "decimal" && (field.minimum || field.maximum)) {
+    rules.validate = (value) => {
+      if (value == null || value === "") {
+        return true;
+      }
+      const text = String(value).trim();
+      if (!/^-?\d+(\.\d+)?$/.test(text)) {
+        return "must be a decimal";
+      }
+      if (field.minimum && compareDecimal(text, field.minimum) < 0) {
+        return `must be at least ${field.minimum}`;
+      }
+      if (field.maximum && compareDecimal(text, field.maximum) > 0) {
+        return `must be at most ${field.maximum}`;
+      }
+      return true;
+    };
+  } else {
+    if (field.minimum) {
+      rules.min = { value: Number(field.minimum), message: `must be at least ${field.minimum}` };
+    }
+    if (field.maximum) {
+      rules.max = { value: Number(field.maximum), message: `must be at most ${field.maximum}` };
+    }
+  }
+  return rules;
+}
+
+function widgetSlotProps(field: FieldMeta) {
+  const htmlInput: Record<string, string | number> = {};
+  if (field.minimum) {
+    htmlInput.min = field.minimum;
+  }
+  if (field.maximum) {
+    htmlInput.max = field.maximum;
+  }
+  if (field.type === "datetime" || field.type === "date") {
+    return {
+      inputLabel: { shrink: true },
+      ...(Object.keys(htmlInput).length > 0 ? { htmlInput } : {}),
+    };
+  }
+  if (Object.keys(htmlInput).length === 0) {
+    return undefined;
+  }
+  return { htmlInput };
 }
 
 function fieldLabel(field: FieldMeta): string {

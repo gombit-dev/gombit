@@ -25,6 +25,11 @@ export type FieldMeta = {
   required: boolean;
   readonly: boolean;
   related?: RelationMeta;
+  minimum?: string;
+  maximum?: string;
+  max_length?: number;
+  pattern?: string;
+  default?: string;
 };
 
 export type Actions = {

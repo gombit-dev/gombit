@@ -2,10 +2,16 @@ package resourcegen
 
 import (
 	"fmt"
+	"math"
+	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
+
+	"github.com/shopspring/decimal"
 
 	logical "github.com/gombit-dev/gombit/field"
+	"github.com/gombit-dev/gombit/types"
 )
 
 // Field is one parsed resource field from the CLI grammar
@@ -43,6 +49,14 @@ type Field struct {
 	// Precision/Scale set the decimal(p,s) column for FieldDecimal.
 	Precision int
 	Scale     int
+
+	// Declarative constraints (MODEL-3). Empty strings and a zero MaxLength
+	// mean unset. Default is the raw token, without SQL quotes.
+	Min       string
+	Max       string
+	MaxLength int
+	Pattern   string
+	Default   string
 
 	// Target is the related model type (PascalCase) for a relation field, e.g.
 	// "Engine". TargetPkg is its feature-package name (snake), e.g. "engine".
@@ -409,7 +423,7 @@ func parseEnumValues(args string) ([]string, error) {
 		// Values land in a Go struct tag and a TS union literal; keep them to
 		// a safe, unambiguous character set.
 		for _, r := range v {
-			if r == '"' || r == '`' || r == '\\' {
+			if r == '"' || r == '`' || r == '\\' || r == ';' {
 				return nil, fmt.Errorf("resourcegen: enum value %q contains an unsupported character", v)
 			}
 		}
@@ -423,33 +437,63 @@ func parseEnumValues(args string) ([]string, error) {
 }
 
 func applyModifiers(field *Field, raw string) error {
+	const supported = "required, unique, index, nullable, filterable, sortable, searchable, aggregatable, default=, min=, max=, max_length=, regex="
 	for _, part := range strings.Split(raw, ",") {
-		mod := strings.ToLower(strings.TrimSpace(part))
+		mod := strings.TrimSpace(part)
 		if mod == "" {
 			continue
 		}
+		key, val, hasVal := strings.Cut(mod, "=")
+		key = strings.ToLower(strings.TrimSpace(key))
+		val = strings.TrimSpace(val)
 		switch {
-		case mod == "required":
+		case key == "required" && !hasVal:
 			field.Required = true
-		case mod == "unique":
+		case key == "unique" && !hasVal:
 			field.Unique = true
-		case mod == "index":
+		case key == "index" && !hasVal:
 			field.Index = true
-		case mod == "nullable":
+		case key == "nullable" && !hasVal:
 			field.Nullable = true
-		case mod == "filterable":
+		case key == "filterable" && !hasVal:
 			field.Filterable = true
-		case mod == "sortable":
+		case key == "sortable" && !hasVal:
 			field.Sortable = true
-		case mod == "searchable":
+		case key == "searchable" && !hasVal:
 			field.Searchable = true
-		case mod == "aggregatable":
+		case key == "aggregatable" && !hasVal:
 			field.Aggregatable = true
-		case strings.HasPrefix(mod, "default="), strings.HasPrefix(mod, "min="), strings.HasPrefix(mod, "max="), strings.HasPrefix(mod, "references="):
-			return fmt.Errorf("resourcegen: modifier %q is not supported in this milestone (supported: required, unique, index, nullable, filterable, sortable, searchable, aggregatable)", mod)
+		case key == "default" && hasVal:
+			if val == "" {
+				return fmt.Errorf("resourcegen: field %q default must be a value", field.JSONName)
+			}
+			field.Default = val
+		case key == "min" && hasVal:
+			field.Min = val
+		case key == "max" && hasVal:
+			field.Max = val
+		case key == "max_length" && hasVal:
+			n, err := strconv.Atoi(val)
+			if err != nil || n <= 0 {
+				return fmt.Errorf("resourcegen: field %q max_length %q must be a positive integer", field.JSONName, val)
+			}
+			field.MaxLength = n
+		case key == "regex" && hasVal:
+			if val == "" {
+				return fmt.Errorf("resourcegen: field %q regex must be a pattern", field.JSONName)
+			}
+			if err := portablePattern(val); err != nil {
+				return fmt.Errorf("resourcegen: field %q regex: %w", field.JSONName, err)
+			}
+			field.Pattern = val
+		case key == "references":
+			return fmt.Errorf("resourcegen: modifier %q is not supported in this milestone (supported: %s)", mod, supported)
 		default:
-			return fmt.Errorf("resourcegen: unknown modifier %q (supported: required, unique, index, nullable, filterable, sortable, searchable, aggregatable)", mod)
+			return fmt.Errorf("resourcegen: unknown modifier %q (supported: %s)", mod, supported)
 		}
+	}
+	if err := validateConstraints(field); err != nil {
+		return err
 	}
 	if field.Required && field.Nullable {
 		return fmt.Errorf("resourcegen: field %q cannot be both required and nullable", field.JSONName)
@@ -468,6 +512,525 @@ func applyModifiers(field *Field, raw string) error {
 	}
 	return nil
 }
+
+func validateConstraints(field *Field) error {
+	if field.Min != "" || field.Max != "" {
+		if !constraintNumeric(field.Type) {
+			return fmt.Errorf("resourcegen: field %q is %s and cannot take min or max (supported: int, int64, uint, decimal)", field.JSONName, field.Type)
+		}
+		if field.Min != "" {
+			if err := checkNumber(field, "min", field.Min); err != nil {
+				return err
+			}
+		}
+		if field.Max != "" {
+			if err := checkNumber(field, "max", field.Max); err != nil {
+				return err
+			}
+		}
+		if field.Min != "" && field.Max != "" {
+			cmp, err := compareNumbers(field, field.Min, field.Max)
+			if err != nil {
+				return err
+			}
+			if cmp > 0 {
+				return fmt.Errorf("resourcegen: field %q min %s is greater than max %s", field.JSONName, field.Min, field.Max)
+			}
+		}
+		if _, reserved := sqlCheckReserved[field.JSONName]; reserved {
+			return fmt.Errorf("resourcegen: field %q is reserved in SQLite, PostgreSQL, or MySQL, so a check constraint cannot name it", field.JSONName)
+		}
+	}
+	if field.MaxLength > 0 && field.Type != FieldString {
+		return fmt.Errorf("resourcegen: field %q is %s and cannot take max_length (supported: string)", field.JSONName, field.Type)
+	}
+	if field.Pattern != "" && field.Type != FieldString && field.Type != FieldText {
+		return fmt.Errorf("resourcegen: field %q is %s and cannot take regex (supported: string, text)", field.JSONName, field.Type)
+	}
+	if strings.ContainsAny(field.Default, "`;\"") || strings.ContainsAny(field.Pattern, "`;\"") {
+		return fmt.Errorf("resourcegen: field %q default and regex cannot contain quotes, backticks, or semicolons", field.JSONName)
+	}
+	if field.Default != "" {
+		if err := checkDefault(field); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func constraintNumeric(t FieldType) bool {
+	switch t {
+	case FieldInt, FieldInt64, FieldUint, FieldDecimal:
+		return true
+	default:
+		return false
+	}
+}
+
+func checkNumber(field *Field, name, raw string) error {
+	if field.Type == FieldUint {
+		if _, err := strconv.ParseUint(raw, 10, 64); err != nil {
+			return fmt.Errorf("resourcegen: field %q %s %q must be an unsigned integer", field.JSONName, name, raw)
+		}
+		return exactNumberToken(field, name, raw)
+	}
+	if field.Type == FieldDecimal {
+		if !decimalSpelling.MatchString(raw) {
+			return fmt.Errorf("resourcegen: field %q %s %q must match the decimal schema", field.JSONName, name, raw)
+		}
+		return decimalFitsColumn(field, name, raw)
+	}
+	if _, err := strconv.ParseInt(raw, 10, 64); err != nil {
+		return fmt.Errorf("resourcegen: field %q %s %q must be an integer", field.JSONName, name, raw)
+	}
+	return exactNumberToken(field, name, raw)
+}
+
+// decimalFitsColumn rejects a token decimal(p,s) would round or overflow.
+// The create body compares the exact string, then PostgreSQL and MySQL round
+// the assignment to Scale before the CHECK, which turns an accepted body into
+// a 500.
+func decimalFitsColumn(field *Field, name, raw string) error {
+	body := strings.TrimPrefix(raw, "-")
+	whole, frac, _ := strings.Cut(body, ".")
+	whole = strings.TrimLeft(whole, "0")
+	if len(whole) > field.Precision-field.Scale || len(frac) > field.Scale {
+		return fmt.Errorf("resourcegen: field %q %s %q does not fit decimal(%d,%d)", field.JSONName, name, raw, field.Precision, field.Scale)
+	}
+	return nil
+}
+
+// maxExactInteger is the last integer where a float64 comparison and an integer
+// comparison accept the same values. 2^53 round-trips, but the next integer
+// collapses onto it: Huma's maximum check sees the float and the struct keeps
+// the int, so the CHECK then fails as a 500.
+const maxExactInteger = 1<<53 - 1
+
+// exactNumberToken rejects an integer token the request and the form cannot
+// enforce as the same integer the SQL check uses. The token must round-trip
+// through ParseFloat, and it must sit inside ±(2^53−1).
+func exactNumberToken(field *Field, name, raw string) error {
+	f, err := strconv.ParseFloat(raw, 64)
+	if err != nil || math.IsInf(f, 0) || math.Trunc(f) != f || strconv.FormatFloat(f, 'f', -1, 64) != raw || f > maxExactInteger || f < -maxExactInteger {
+		return fmt.Errorf("resourcegen: field %q %s %q must be an integer in ±(2^53-1); the request and the form compare it as a number", field.JSONName, name, raw)
+	}
+	return nil
+}
+
+func checkDefault(field *Field) error {
+	switch field.Type {
+	case FieldEnum:
+		for _, v := range field.EnumValues {
+			if v == field.Default {
+				return nil
+			}
+		}
+		return fmt.Errorf("resourcegen: field %q default %q is not an enum value", field.JSONName, field.Default)
+	case FieldBool:
+		if field.Default != "true" && field.Default != "false" {
+			return fmt.Errorf("resourcegen: field %q default %q must be true or false", field.JSONName, field.Default)
+		}
+	case FieldInt, FieldInt64, FieldUint, FieldDecimal:
+		if err := checkNumber(field, "default", field.Default); err != nil {
+			return err
+		}
+		if err := defaultInRange(field); err != nil {
+			return err
+		}
+	case FieldString, FieldText:
+		if field.MaxLength > 0 && utf8.RuneCountInString(field.Default) > field.MaxLength {
+			return fmt.Errorf("resourcegen: field %q default is longer than max_length", field.JSONName)
+		}
+		if field.Pattern != "" {
+			re, err := regexp.Compile(field.Pattern)
+			if err != nil {
+				return err
+			}
+			if !re.MatchString(field.Default) {
+				return fmt.Errorf("resourcegen: field %q default %q does not match regex", field.JSONName, field.Default)
+			}
+		}
+	default:
+		return fmt.Errorf("resourcegen: field %q is %s and cannot take default", field.JSONName, field.Type)
+	}
+	return nil
+}
+
+func defaultInRange(field *Field) error {
+	if field.Min != "" {
+		cmp, err := compareNumbers(field, field.Default, field.Min)
+		if err != nil {
+			return err
+		}
+		if cmp < 0 {
+			return fmt.Errorf("resourcegen: field %q default %s is below min %s", field.JSONName, field.Default, field.Min)
+		}
+	}
+	if field.Max != "" {
+		cmp, err := compareNumbers(field, field.Default, field.Max)
+		if err != nil {
+			return err
+		}
+		if cmp > 0 {
+			return fmt.Errorf("resourcegen: field %q default %s is above max %s", field.JSONName, field.Default, field.Max)
+		}
+	}
+	return nil
+}
+
+// compareNumbers orders a and b as integers or as decimals. checkNumber has
+// already required an integer token to lie inside ±(2^53−1), where Huma's
+// float64 minimum/maximum and the SQL check accept the same integers, and a
+// decimal token to match the decimal schema.
+func compareNumbers(field *Field, a, b string) (int, error) {
+	switch field.Type {
+	case FieldUint:
+		av, err := strconv.ParseUint(a, 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("resourcegen: field %q value %q must be an unsigned integer", field.JSONName, a)
+		}
+		bv, err := strconv.ParseUint(b, 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("resourcegen: field %q value %q must be an unsigned integer", field.JSONName, b)
+		}
+		switch {
+		case av < bv:
+			return -1, nil
+		case av > bv:
+			return 1, nil
+		default:
+			return 0, nil
+		}
+	case FieldDecimal:
+		ad, err := decimal.NewFromString(a)
+		if err != nil {
+			return 0, fmt.Errorf("resourcegen: field %q value %q must be a finite decimal", field.JSONName, a)
+		}
+		bd, err := decimal.NewFromString(b)
+		if err != nil {
+			return 0, fmt.Errorf("resourcegen: field %q value %q must be a finite decimal", field.JSONName, b)
+		}
+		return ad.Cmp(bd), nil
+	default:
+		av, err := strconv.ParseInt(a, 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("resourcegen: field %q value %q must be an integer", field.JSONName, a)
+		}
+		bv, err := strconv.ParseInt(b, 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("resourcegen: field %q value %q must be an integer", field.JSONName, b)
+		}
+		switch {
+		case av < bv:
+			return -1, nil
+		case av > bv:
+			return 1, nil
+		default:
+			return 0, nil
+		}
+	}
+}
+
+// constraints is the validate-tag form of the declarative options.
+func (f Field) constraints() logical.Constraints {
+	return logical.Constraints{
+		Min:       f.Min,
+		Max:       f.Max,
+		MaxLength: f.MaxLength,
+		Pattern:   f.Pattern,
+		Default:   f.Default,
+		Enum:      append([]string(nil), f.EnumValues...),
+	}
+}
+
+// portablePattern compiles the pattern as Go RE2 and rejects anything the
+// form's new RegExp(..., "u") does not share. Escapes are an allowlist
+// (\d \D \w \W, the single-character controls \n \r \t \f \v, \0 when it is
+// NUL, two-digit \xNN, and identity escapes of syntax characters). \b and \B
+// are not on it: JavaScript still finds word edges between the surrogates of
+// a non-BMP character. \a, octal, \x{HHHH}, \s, \p, and the rest are different
+// atoms or a syntax error once the form uses the u flag. A ] that is the first
+// member of a class is a member in RE2 and closes an empty class in JavaScript.
+// An unescaped ] outside a class is a literal in RE2 and a syntax error in
+// unicode mode; write \]. A quantifier count may not have a leading zero:
+// RE2 treats {01} as literal text and JavaScript treats it as {1}. ^ and $
+// cannot take a quantifier. A - inside a class is a range only between single
+// characters; a class escape on either side is rejected, while a hyphen that
+// is first or last stays a literal.
+func portablePattern(pattern string) error {
+	if _, err := regexp.Compile(pattern); err != nil {
+		return err
+	}
+	return jsUnicodePattern(pattern)
+}
+
+func patternNotShared() error {
+	return fmt.Errorf("pattern must be valid in both Go RE2 and JavaScript")
+}
+
+func jsUnicodePattern(pattern string) error {
+	r := []rune(pattern)
+	// quantifiable is a stack so a group is one atom even when its last member
+	// is an anchor. ^+ is not quantifiable; (?:^)+ is.
+	quantifiable := []bool{false}
+	top := func() bool { return quantifiable[len(quantifiable)-1] }
+	set := func(v bool) { quantifiable[len(quantifiable)-1] = v }
+	for i := 0; i < len(r); {
+		switch r[i] {
+		case '\\':
+			next, err := acceptEscape(r, i, false)
+			if err != nil {
+				return err
+			}
+			i = next
+			set(true)
+		case '[':
+			next, err := acceptClass(r, i)
+			if err != nil {
+				return err
+			}
+			i = next
+			set(true)
+		case '{':
+			if !top() {
+				return patternNotShared()
+			}
+			next, err := acceptQuantifier(r, i)
+			if err != nil {
+				return err
+			}
+			i = next
+			set(false)
+		case '*', '+', '?':
+			if !top() {
+				return patternNotShared()
+			}
+			i++
+			if i < len(r) && r[i] == '?' {
+				i++
+			}
+			set(false)
+		case '}', ']':
+			return patternNotShared()
+		case '(':
+			next, err := acceptGroup(r, i)
+			if err != nil {
+				return err
+			}
+			i = next
+			quantifiable = append(quantifiable, false)
+		case ')':
+			if len(quantifiable) == 1 {
+				return patternNotShared()
+			}
+			quantifiable = quantifiable[:len(quantifiable)-1]
+			set(true)
+			i++
+		case '^', '$', '|':
+			i++
+			set(false)
+		default:
+			i++
+			set(true)
+		}
+	}
+	if len(quantifiable) != 1 {
+		return patternNotShared()
+	}
+	return nil
+}
+
+func acceptClass(r []rune, i int) (int, error) {
+	i++
+	if i < len(r) && r[i] == ':' {
+		return 0, patternNotShared()
+	}
+	atFirst := true
+	if i < len(r) && r[i] == '^' {
+		i++
+	}
+	prev := ""
+	for i < len(r) {
+		if r[i] == ']' && atFirst {
+			return 0, patternNotShared()
+		}
+		if r[i] == ']' {
+			return i + 1, nil
+		}
+		if r[i] == '-' && prev != "" && i+1 < len(r) && r[i+1] != ']' {
+			if prev != "single" {
+				return 0, patternNotShared()
+			}
+			i++
+			kind, next, err := classMember(r, i)
+			if err != nil {
+				return 0, err
+			}
+			if kind != "single" {
+				return 0, patternNotShared()
+			}
+			i = next
+			prev = "single"
+			atFirst = false
+			continue
+		}
+		if r[i] == '[' && i+1 < len(r) && r[i+1] == ':' {
+			return 0, patternNotShared()
+		}
+		kind, next, err := classMember(r, i)
+		if err != nil {
+			return 0, err
+		}
+		i = next
+		prev = kind
+		atFirst = false
+	}
+	return 0, patternNotShared()
+}
+
+func classMember(r []rune, i int) (string, int, error) {
+	if i >= len(r) {
+		return "", 0, patternNotShared()
+	}
+	if r[i] != '\\' {
+		return "single", i + 1, nil
+	}
+	next, err := acceptEscape(r, i, true)
+	if err != nil {
+		return "", 0, err
+	}
+	switch r[i+1] {
+	case 'd', 'D', 'w', 'W':
+		return "set", next, nil
+	default:
+		return "single", next, nil
+	}
+}
+
+func acceptEscape(r []rune, i int, inClass bool) (int, error) {
+	if i+1 >= len(r) {
+		return 0, patternNotShared()
+	}
+	next := i + 2
+	switch r[i+1] {
+	case 'd', 'D', 'w', 'W', 'n', 'r', 't', 'f', 'v':
+		return next, nil
+	case '0':
+		if next < len(r) && r[next] >= '0' && r[next] <= '9' {
+			return 0, patternNotShared()
+		}
+		return next, nil
+	case 'x':
+		if next+1 >= len(r) || !isHex(r[next]) || !isHex(r[next+1]) {
+			return 0, patternNotShared()
+		}
+		return next + 2, nil
+	case '^', '$', '\\', '.', '*', '+', '?', '(', ')', '[', ']', '{', '}', '|':
+		return next, nil
+	case '-':
+		if inClass {
+			return next, nil
+		}
+		return 0, patternNotShared()
+	default:
+		return 0, patternNotShared()
+	}
+}
+
+func isHex(r rune) bool {
+	return (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')
+}
+
+func acceptQuantifier(r []rune, i int) (int, error) {
+	j, err := readCount(r, i+1)
+	if err != nil {
+		return 0, err
+	}
+	if j == i+1 {
+		return 0, patternNotShared()
+	}
+	if j < len(r) && r[j] == ',' {
+		j++
+		j, err = readCount(r, j)
+		if err != nil {
+			return 0, err
+		}
+	}
+	if j >= len(r) || r[j] != '}' {
+		return 0, patternNotShared()
+	}
+	j++
+	if j < len(r) && r[j] == '+' {
+		return 0, patternNotShared()
+	}
+	if j < len(r) && r[j] == '?' {
+		j++
+	}
+	return j, nil
+}
+
+// readCount reads a quantifier bound. A lone 0 is zero. A leading zero on a
+// longer bound is rejected: RE2 does not treat {01} as a count.
+func readCount(r []rune, j int) (int, error) {
+	if j >= len(r) || r[j] < '0' || r[j] > '9' {
+		return j, nil
+	}
+	if r[j] == '0' && j+1 < len(r) && r[j+1] >= '0' && r[j+1] <= '9' {
+		return 0, patternNotShared()
+	}
+	j++
+	for j < len(r) && r[j] >= '0' && r[j] <= '9' {
+		j++
+	}
+	return j, nil
+}
+
+func acceptGroup(r []rune, i int) (int, error) {
+	if i+1 < len(r) && r[i+1] == '?' {
+		if i+2 >= len(r) || r[i+2] != ':' {
+			return 0, patternNotShared()
+		}
+		return i + 3, nil
+	}
+	return i + 1, nil
+}
+
+// jsFormPattern is the pattern the form and the admin widget compile with the
+// u flag. `.` outside a class becomes `[^\n]`, which is RE2's `.`: one code
+// point, every character except newline. JavaScript's `.` also excludes `\r`,
+// U+2028, and U+2029, and without u it is one UTF-16 code unit.
+func jsFormPattern(pattern string) string {
+	r := []rune(pattern)
+	var b strings.Builder
+	inClass := false
+	for i := 0; i < len(r); i++ {
+		c := r[i]
+		if c == '\\' {
+			b.WriteRune(c)
+			if i+1 < len(r) {
+				i++
+				b.WriteRune(r[i])
+			}
+			continue
+		}
+		if c == '[' {
+			inClass = true
+		} else if inClass && c == ']' {
+			inClass = false
+		}
+		if c == '.' && !inClass {
+			b.WriteString(`[^\n]`)
+			continue
+		}
+		b.WriteRune(c)
+	}
+	return b.String()
+}
+
+// decimalSpelling is types.Decimal's schema pattern. A bound or default that
+// shopspring accepts but this pattern rejects (1e-2, +1.5, .5, 1.) would
+// initialize a form the request then rejects.
+var decimalSpelling = regexp.MustCompile(types.DecimalPattern)
 
 // typeAllowsFilter reports whether an exact-match filter query param can be
 // generated for this field's type. Exact-match on decimal/time is fiddly to
@@ -528,7 +1091,11 @@ func (f Field) gormTag() string {
 	var parts []string
 	switch f.Type {
 	case FieldString, FieldEmail, FieldURL, FieldSlug, FieldIP:
-		parts = append(parts, "size:255")
+		size := 255
+		if f.MaxLength > 0 {
+			size = f.MaxLength
+		}
+		parts = append(parts, "size:"+strconv.Itoa(size))
 	case FieldText:
 		parts = append(parts, "type:text")
 	case FieldEnum:
@@ -548,6 +1115,12 @@ func (f Field) gormTag() string {
 	}
 	if f.Required && !f.Nullable {
 		parts = append(parts, "not null")
+	}
+	// A parsed GORM default replaces the zero value on create, so an explicit
+	// 0 or false never reaches the column. The default is applied only when
+	// the request or admin body omits the field.
+	if check := sqlCheck(f); check != "" {
+		parts = append(parts, "check:"+check)
 	}
 	switch {
 	case f.Unique:
@@ -586,8 +1159,29 @@ func (f Field) semanticPattern() string {
 	return ""
 }
 
+// formPattern is the pattern the form enforces. An explicit regex wins; a
+// slug with none uses the built-in alphabet.
+func (f Field) formPattern() string {
+	if f.Pattern != "" {
+		return f.Pattern
+	}
+	return f.semanticPattern()
+}
+
 // enumColumnSize sizes the varchar column to hold the longest allowed value,
 // with headroom so a later value addition rarely needs a column widen.
+func sqlCheck(f Field) string {
+	col := f.JSONName
+	var parts []string
+	if f.Min != "" {
+		parts = append(parts, col+" >= "+f.Min)
+	}
+	if f.Max != "" {
+		parts = append(parts, col+" <= "+f.Max)
+	}
+	return strings.Join(parts, " AND ")
+}
+
 func enumColumnSize(values []string) int {
 	longest := 0
 	for _, v := range values {

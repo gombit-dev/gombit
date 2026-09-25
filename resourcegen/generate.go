@@ -76,7 +76,7 @@ func (p *ResourcePlan) ModelSpec() string { return p.spec.ModelSpec }
 
 // Plan computes a resource scaffold without writing anything. It runs every static
 // check make resource can before touching the tree — app layout, name, HTTP path
-// collision, the enum gap, and the legacy-layout guard — so a caller can preflight
+// collision, and the legacy-layout guard — so a caller can preflight
 // the whole operation (including the Program-Mode phase 2) and apply the result
 // atomically.
 func Plan(ctx context.Context, opts Options) (*ResourcePlan, error) {
@@ -111,16 +111,6 @@ func Plan(ctx context.Context, opts Options) (*ResourcePlan, error) {
 	fields, err := parseFields(opts.Fields, name.Package)
 	if err != nil {
 		return nil, err
-	}
-	// Enum values are API policy the GORM schema cannot carry (it stores an enum as
-	// a plain varchar), so the model-first generator cannot yet derive the enum
-	// constraint for the DTO/OpenAPI. Rather than silently drop it — three
-	// representations disagreeing, the exact thing ADR-016 removes — reject enum
-	// fields until a model-first enum policy exists (a later slice).
-	for _, f := range fields {
-		if f.Type == FieldEnum {
-			return nil, fmt.Errorf("resourcegen: field %q is an enum, which the model-first generator does not support yet (enum values are not recoverable from the GORM schema); use a string field for now — a model-first enum policy is planned", f.JSONName)
-		}
 	}
 	// Fail closed on a missing Atlas here, in the library, not in a caller: whether
 	// Atlas happens to be on PATH must never change what make resource commits
