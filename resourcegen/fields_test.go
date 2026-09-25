@@ -587,3 +587,106 @@ func TestCanonicalCLIAliases(t *testing.T) {
 		t.Fatalf("duration error = %v, want not generated yet", err)
 	}
 }
+
+func TestPatternThatMatchesEmptyStaysAString(t *testing.T) {
+	t.Parallel()
+	open, err := parseFields([]string{`code:string:regex=^[a-z]*$`}, "person")
+	if err != nil {
+		t.Fatalf("parseFields: %v", err)
+	}
+	if open[0].GoType != "string" {
+		t.Fatalf("pattern that matches empty GoType = %s, want string", open[0].GoType)
+	}
+	closed, err := parseFields([]string{`code:string:regex=^[a-z]+$`}, "person")
+	if err != nil {
+		t.Fatalf("parseFields: %v", err)
+	}
+	if closed[0].GoType != "*string" {
+		t.Fatalf("pattern that rejects empty GoType = %s, want *string", closed[0].GoType)
+	}
+}
+
+func TestSemanticStringsArePlainStrings(t *testing.T) {
+	t.Parallel()
+	fields, err := parseFields([]string{
+		"contact:email:required",
+		"site:url",
+		"handle:slug",
+		"addr:ip",
+	}, "person")
+	if err != nil {
+		t.Fatalf("parseFields: %v", err)
+	}
+	want := []struct {
+		format  string
+		pattern string
+	}{
+		{format: "email"},
+		{format: "uri"},
+		{pattern: `^[-a-zA-Z0-9_]+$`},
+		{format: "ip"},
+	}
+	for i, f := range fields {
+		wantType := "string"
+		if !f.Required {
+			wantType = "*string"
+		}
+		if f.GoType != wantType {
+			t.Fatalf("%s GoType = %s, want %s", f.JSONName, f.GoType, wantType)
+		}
+		if !strings.Contains(f.gormTag(), "size:255") {
+			t.Fatalf("%s gorm tag = %q", f.JSONName, f.gormTag())
+		}
+		if f.openAPIFormat() != want[i].format || f.semanticPattern() != want[i].pattern {
+			t.Fatalf("%s format %q pattern %q", f.JSONName, f.openAPIFormat(), f.semanticPattern())
+		}
+		tag := modelStructTag(f)
+		if want[i].format != "" && !strings.Contains(tag, `format:"`+want[i].format+`"`) {
+			t.Fatalf("%s tag = %s", f.JSONName, tag)
+		}
+		if want[i].pattern != "" && !strings.Contains(tag, `pattern:"`+want[i].pattern+`"`) {
+			t.Fatalf("%s tag = %s", f.JSONName, tag)
+		}
+	}
+}
+
+func TestSemanticDefaultMustMatchFormat(t *testing.T) {
+	t.Parallel()
+	bad := []string{
+		"contact:email:default=not-an-email",
+		"site:url:default=example.com",
+		"handle:slug:default=has space",
+		"addr:ip:default=nope",
+	}
+	for _, spec := range bad {
+		if _, err := parseFields([]string{spec}, "person"); err == nil {
+			t.Fatalf("parseFields(%q) accepted a default the format rejects", spec)
+		}
+	}
+	fields, err := parseFields([]string{
+		"contact:email:default=ada@example.com",
+		"site:url:default=https://example.com",
+		"handle:slug:default=ada_lovelace",
+		"addr:ip:default=127.0.0.1",
+	}, "person")
+	if err != nil {
+		t.Fatalf("valid defaults: %v", err)
+	}
+	if len(fields) != 4 {
+		t.Fatalf("fields = %d", len(fields))
+	}
+}
+
+func TestSemanticStringMaxLength(t *testing.T) {
+	t.Parallel()
+	fields, err := parseFields([]string{"site:url:max_length=2048"}, "page")
+	if err != nil {
+		t.Fatalf("parseFields: %v", err)
+	}
+	if fields[0].MaxLength != 2048 || !strings.Contains(fields[0].gormTag(), "size:2048") {
+		t.Fatalf("url max_length = %+v tag %q", fields[0].MaxLength, fields[0].gormTag())
+	}
+	if _, err := parseFields([]string{"n:int:max_length=4"}, "page"); err == nil || !strings.Contains(err.Error(), "cannot take max_length") {
+		t.Fatalf("int max_length error = %v", err)
+	}
+}

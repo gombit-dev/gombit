@@ -91,6 +91,274 @@ func TestAdminCreateKeepsExplicitZero(t *testing.T) {
 	}
 }
 
+func TestAdminSemanticStringWrite(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	type Person struct {
+		ID     uint    `gorm:"primaryKey" json:"id"`
+		Work   string  `gorm:"not null" json:"work" format:"email"`
+		Site   *string `json:"site" format:"uri"`
+		Handle *string `json:"handle" pattern:"^[-a-zA-Z0-9_]+$"`
+		Addr   *string `json:"addr" format:"ip"`
+	}
+	app := newCookieApp(t)
+	if err := app.DB().AutoMigrate(&Person{}); err != nil {
+		t.Fatalf("AutoMigrate: %v", err)
+	}
+	if err := admin.Register(app, Person{}, admin.Options{
+		Slug: "people",
+		Fields: []admin.Field{
+			{Name: "id", Type: admin.TypeInteger, ReadOnly: true},
+			{Name: "work", Type: admin.TypeString, Required: true},
+			{Name: "site", Type: admin.TypeString},
+			{Name: "handle", Type: admin.TypeString},
+			{Name: "addr", Type: admin.TypeString},
+		},
+		List: []string{"work"},
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	jar := loginSuperuser(t, app)
+	bad := doRequest(app, jar, http.MethodPost, "/api/v1/admin/resources/people", `{"work":"not-an-email"}`)
+	if bad.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("bad email status = %d; body: %s", bad.Code, bad.Body.String())
+	}
+	blank := doRequest(app, jar, http.MethodPost, "/api/v1/admin/resources/people", `{"work":"ada@example.com","site":"","handle":"","addr":""}`)
+	if blank.Code != http.StatusOK {
+		t.Fatalf("blank optional status = %d; body: %s", blank.Code, blank.Body.String())
+	}
+	var created rowEnvelope
+	if err := json.Unmarshal(blank.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if created.Data["site"] != nil || created.Data["handle"] != nil || created.Data["addr"] != nil {
+		t.Fatalf("blank optionals stored as values: %#v", created.Data)
+	}
+	badSlug := doRequest(app, jar, http.MethodPost, "/api/v1/admin/resources/people", `{"work":"ada@example.com","handle":"has space"}`)
+	if badSlug.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("bad slug status = %d; body: %s", badSlug.Code, badSlug.Body.String())
+	}
+}
+
+func TestAdminBlankSemanticStringUsesDefault(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	type Page struct {
+		ID   uint    `gorm:"primaryKey" json:"id"`
+		Site *string `json:"site" format:"uri" validate:"default=https://example.com"`
+		Name string  `json:"name"`
+	}
+	app := newCookieApp(t)
+	if err := app.DB().AutoMigrate(&Page{}); err != nil {
+		t.Fatalf("AutoMigrate: %v", err)
+	}
+	if err := admin.Register(app, Page{}, admin.Options{Slug: "pages"}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	jar := loginSuperuser(t, app)
+	meta := doRequest(app, jar, http.MethodGet, "/api/v1/admin/meta/pages", "")
+	if strings.Contains(meta.Body.String(), `"search":["site"`) {
+		t.Fatalf("url must not be searchable: %s", meta.Body.String())
+	}
+	if !strings.Contains(meta.Body.String(), `"search":["name"]`) {
+		t.Fatalf("name must stay searchable: %s", meta.Body.String())
+	}
+	for _, body := range []string{`{"site":""}`, `{"site":null}`, `{}`} {
+		rec := doRequest(app, jar, http.MethodPost, "/api/v1/admin/resources/pages", body)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("body %s status = %d; body: %s", body, rec.Code, rec.Body.String())
+		}
+		var created rowEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if created.Data["site"] != "https://example.com" {
+			t.Fatalf("body %s site = %#v", body, created.Data["site"])
+		}
+	}
+	if err := admin.Register(app, Page{}, admin.Options{Slug: "pages-filter", Filter: []string{"site"}}); err == nil {
+		t.Fatal("filtering a url by the string wire type must be rejected")
+	}
+}
+
+func TestAdminSlugAlphabetRegexStaysAString(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	type Row struct {
+		ID     uint   `gorm:"primaryKey" json:"id"`
+		Token  string `json:"token" validate:"pattern=^[-a-zA-Z0-9_]+$"`
+		Handle string `json:"handle" pattern:"^[-a-zA-Z0-9_]+$"`
+	}
+	app := newCookieApp(t)
+	if err := app.DB().AutoMigrate(&Row{}); err != nil {
+		t.Fatalf("AutoMigrate: %v", err)
+	}
+	if err := admin.Register(app, Row{}, admin.Options{
+		Slug:   "tokens",
+		Filter: []string{"token"},
+	}); err != nil {
+		t.Fatalf("user regex must stay filterable: %v", err)
+	}
+	if err := admin.Register(app, Row{}, admin.Options{
+		Slug:   "handles",
+		Filter: []string{"handle"},
+	}); err == nil || !strings.Contains(err.Error(), "slug") {
+		t.Fatalf("struct-tag slug filter error = %v", err)
+	}
+}
+
+func TestAdminEmptyStringDoesNotClearOptionalNumber(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	type Item struct {
+		ID   uint   `gorm:"primaryKey" json:"id"`
+		Qty  *int   `json:"qty"`
+		Note string `json:"note"`
+	}
+	app := newCookieApp(t)
+	if err := app.DB().AutoMigrate(&Item{}); err != nil {
+		t.Fatalf("AutoMigrate: %v", err)
+	}
+	if err := admin.Register(app, Item{}, admin.Options{
+		Slug: "items",
+		Fields: []admin.Field{
+			{Name: "id", Type: admin.TypeInteger, ReadOnly: true},
+			{Name: "qty", Type: admin.TypeInteger},
+			{Name: "note", Type: admin.TypeString},
+		},
+		List: []string{"note"},
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	jar := loginSuperuser(t, app)
+	blankQty := doRequest(app, jar, http.MethodPost, "/api/v1/admin/resources/items", `{"qty":""}`)
+	if blankQty.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("blank qty status = %d; body: %s", blankQty.Code, blankQty.Body.String())
+	}
+	note := doRequest(app, jar, http.MethodPost, "/api/v1/admin/resources/items", `{"note":""}`)
+	if note.Code != http.StatusOK {
+		t.Fatalf("blank note status = %d; body: %s", note.Code, note.Body.String())
+	}
+	var created rowEnvelope
+	if err := json.Unmarshal(note.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if created.Data["note"] != "" || created.Data["qty"] != nil {
+		t.Fatalf("plain string blank = %#v", created.Data)
+	}
+}
+
+func TestAdminHostnameBlankIsNull(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	type Row struct {
+		ID   uint    `gorm:"primaryKey" json:"id"`
+		Host *string `json:"host" format:"hostname"`
+	}
+	app := newCookieApp(t)
+	if err := app.DB().AutoMigrate(&Row{}); err != nil {
+		t.Fatalf("AutoMigrate: %v", err)
+	}
+	if err := admin.Register(app, Row{}, admin.Options{Slug: "hosts"}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	jar := loginSuperuser(t, app)
+	rec := doRequest(app, jar, http.MethodPost, "/api/v1/admin/resources/hosts", `{"host":""}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("blank host status = %d; body: %s", rec.Code, rec.Body.String())
+	}
+	var created rowEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if created.Data["host"] != nil {
+		t.Fatalf("hostname blank = %#v", created.Data["host"])
+	}
+	var got Row
+	if err := app.DB().First(&got).Error; err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got.Host != nil {
+		t.Fatalf("stored host = %#v", got.Host)
+	}
+}
+
+func TestAdminURIReferenceBlankStaysEmpty(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	type Row struct {
+		ID  uint    `gorm:"primaryKey" json:"id"`
+		Ref *string `json:"ref" format:"uri-reference"`
+	}
+	app := newCookieApp(t)
+	if err := app.DB().AutoMigrate(&Row{}); err != nil {
+		t.Fatalf("AutoMigrate: %v", err)
+	}
+	if err := admin.Register(app, Row{}, admin.Options{Slug: "refs"}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	jar := loginSuperuser(t, app)
+	rec := doRequest(app, jar, http.MethodPost, "/api/v1/admin/resources/refs", `{"ref":""}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("blank ref status = %d; body: %s", rec.Code, rec.Body.String())
+	}
+	var created rowEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if created.Data["ref"] != "" {
+		t.Fatalf("uri-reference blank = %#v", created.Data["ref"])
+	}
+	var got Row
+	if err := app.DB().First(&got).Error; err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got.Ref == nil || *got.Ref != "" {
+		t.Fatalf("stored ref = %#v", got.Ref)
+	}
+}
+
+func TestAdminNonPointerPatternRejectsEmpty(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	type Item struct {
+		ID   uint    `gorm:"primaryKey" json:"id"`
+		Code string  `json:"code" validate:"pattern=^[a-z]+$"`
+		Site *string `json:"site" format:"uri"`
+	}
+	app := newCookieApp(t)
+	if err := app.DB().AutoMigrate(&Item{}); err != nil {
+		t.Fatalf("AutoMigrate: %v", err)
+	}
+	if err := admin.Register(app, Item{}, admin.Options{
+		Slug: "codes",
+		Fields: []admin.Field{
+			{Name: "id", Type: admin.TypeInteger, ReadOnly: true},
+			{Name: "code", Type: admin.TypeString, Pattern: "^[a-z]+$"},
+			{Name: "site", Type: admin.TypeString, Format: "uri"},
+		},
+		List: []string{"code"},
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	jar := loginSuperuser(t, app)
+	blank := doRequest(app, jar, http.MethodPost, "/api/v1/admin/resources/codes", `{"code":""}`)
+	if blank.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("blank code status = %d; body: %s", blank.Code, blank.Body.String())
+	}
+	site := doRequest(app, jar, http.MethodPost, "/api/v1/admin/resources/codes", `{"code":"ab","site":""}`)
+	if site.Code != http.StatusOK {
+		t.Fatalf("blank site status = %d; body: %s", site.Code, site.Body.String())
+	}
+	var created rowEnvelope
+	if err := json.Unmarshal(site.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if created.Data["code"] != "ab" || created.Data["site"] != nil {
+		t.Fatalf("pointer blank = %#v", created.Data)
+	}
+	var got Item
+	if err := app.DB().First(&got).Error; err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got.Code != "ab" || got.Site != nil {
+		t.Fatalf("stored code=%q site=%v", got.Code, got.Site)
+	}
+}
+
 func TestResourceCRUDAndAuthz(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	app := newCookieApp(t)

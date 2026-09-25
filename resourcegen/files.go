@@ -225,7 +225,7 @@ func modelFieldLines(f Field, resourcePkg string) string {
 	case FieldManyToMany:
 		return "\t" + f.GoName + " " + f.GoType + structTag("many2many:"+f.joinTable(resourcePkg)+";", "", "") + "\n"
 	default:
-		return "\t" + f.GoName + " " + f.GoType + structTag(f.gormTag(), f.gombitPolicy(), logical.FormatConstraints(f.constraints())) + "\n"
+		return "\t" + f.GoName + " " + f.GoType + modelStructTag(f) + "\n"
 	}
 }
 
@@ -234,6 +234,28 @@ func modelFieldLines(f Field, resourcePkg string) string {
 func resourceMarkerContent(pkg string) string {
 	return "# This file marks internal/" + pkg + " as a gombit model-first resource.\n" +
 		"# `gombit generate` regenerates its *.gen.go from the model + gombit field policy.\n"
+}
+
+// modelStructTag is the model field tag: gorm, gombit policy, validate
+// constraints, and the semantic format or slug pattern.
+func modelStructTag(f Field) string {
+	base := structTag(f.gormTag(), f.gombitPolicy(), logical.FormatConstraints(f.constraints()))
+	var extras []string
+	if format := f.openAPIFormat(); format != "" {
+		extras = append(extras, `format:"`+format+`"`)
+	}
+	if pattern := f.semanticPattern(); pattern != "" {
+		extras = append(extras, `pattern:"`+pattern+`"`)
+	}
+	if len(extras) == 0 {
+		return base
+	}
+	extra := strings.Join(extras, " ")
+	if base == "" {
+		return " `" + extra + "`"
+	}
+	inner := strings.TrimSuffix(strings.TrimPrefix(base, " `"), "`")
+	return " `" + inner + " " + extra + "`"
 }
 
 // structTag composes a field's struct tag from its gorm, gombit, and validate
@@ -675,14 +697,17 @@ func tsDecimalRules(field Field) string {
 
 func tsTextRegister(field Field) string {
 	var parts []string
+	if field.blankIsNull() {
+		parts = append(parts, `setValueAs: (value) => (value === "" ? null : value)`)
+	}
 	if field.Required {
 		parts = append(parts, "required: \""+field.GoName+" is required\"")
 	}
 	if field.MaxLength > 0 {
 		parts = append(parts, tsCodePointMaxLength(field))
 	}
-	if field.Pattern != "" {
-		parts = append(parts, "pattern: { value: new RegExp("+strconv.Quote(jsFormPattern(field.Pattern))+`, "u"), message: "`+field.GoName+` is invalid" }`)
+	if pattern := field.formPattern(); pattern != "" {
+		parts = append(parts, "pattern: { value: new RegExp("+strconv.Quote(jsFormPattern(pattern))+`, "u"), message: "`+field.GoName+` is invalid" }`)
 	}
 	if len(parts) == 0 {
 		return ""
@@ -756,7 +781,14 @@ func renderFormField(field Field) string {
 		// non-empty value is sent as the exact decimal string.
 		b.WriteString("          <input type=\"text\" inputMode=\"decimal\" {...register(\"" + field.JSONName + "\", { setValueAs: (value) => (value === \"\" ? null : value)" + tsDecimalRules(field) + " })}" + htmlNumberAttrs(field) + " />\n")
 	default:
-		b.WriteString("          <input type=\"text\" {...register(\"" + field.JSONName + "\"" + tsTextRegister(field) + ")}" + htmlTextAttrs(field) + " />\n")
+		inputType := "text"
+		switch field.Type {
+		case FieldEmail:
+			inputType = "email"
+		case FieldURL:
+			inputType = "url"
+		}
+		b.WriteString("          <input type=\"" + inputType + "\" {...register(\"" + field.JSONName + "\"" + tsTextRegister(field) + ")}" + htmlTextAttrs(field) + " />\n")
 	}
 	b.WriteString("        </label>\n")
 	b.WriteString("        {errors." + ident + "?.message ? <p>{errors." + ident + ".message}</p> : null}\n")
@@ -948,6 +980,10 @@ func renderMUIFormTSX(ctx renderContext) string {
 			timeNames = append(timeNames, field.JSONName)
 		case FieldDecimal, FieldDate, FieldUUID:
 			emptyNullNames = append(emptyNullNames, field.JSONName)
+		default:
+			if field.blankIsNull() {
+				emptyNullNames = append(emptyNullNames, field.JSONName)
+			}
 		}
 	}
 	b.WriteString("  async function onSubmit(values: FormValues) {\n")
@@ -1046,8 +1082,8 @@ func muiRules(field Field) string {
 	if field.MaxLength > 0 {
 		parts = append(parts, tsCodePointMaxLength(field))
 	}
-	if field.Pattern != "" {
-		parts = append(parts, `pattern: { value: new RegExp(`+strconv.Quote(jsFormPattern(field.Pattern))+`, "u"), message: "`+field.GoName+` is invalid" }`)
+	if pattern := field.formPattern(); pattern != "" {
+		parts = append(parts, `pattern: { value: new RegExp(`+strconv.Quote(jsFormPattern(pattern))+`, "u"), message: "`+field.GoName+` is invalid" }`)
 	}
 	if field.Type == FieldJSON {
 		parts = append(parts, tsJSONValidate())
@@ -1221,8 +1257,16 @@ func renderMUIFormField(field Field) string {
 		b.WriteString("                disabled={isSubmitting}\n")
 		b.WriteString("              />\n")
 	default:
+		inputType := "text"
+		switch field.Type {
+		case FieldEmail:
+			inputType = "email"
+		case FieldURL:
+			inputType = "url"
+		}
 		b.WriteString("              <TextField\n")
 		b.WriteString("                {...field}\n")
+		b.WriteString("                type=\"" + inputType + "\"\n")
 		b.WriteString("                label=\"" + field.GoName + "\"\n")
 		b.WriteString("                fullWidth\n")
 		b.WriteString("                error={!!fieldState.error}\n")

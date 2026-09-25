@@ -70,6 +70,11 @@ type modelField struct {
 	// varchar(N)); an unset/driver-dependent size (0 or -1) yields no maxLength —
 	// we only assert a constraint the model unambiguously states.
 	Size int
+	// Format and Pattern are copied from the model struct tags (`format`,
+	// `pattern`). make resource writes them for email, url, ip, and slug.
+	// Huma enforces format on the request; pattern is the slug alphabet.
+	Format  string
+	Pattern string
 	// Constraints is the model's validate tag: min, max, pattern, default, and
 	// max_length. Empty means the model states no extra constraint.
 	Constraints field.Constraints
@@ -177,6 +182,8 @@ func buildModelResource(model any, pkg string) (modelResource, error) {
 			GoType:      goType,
 			Kind:        effectiveKind(f.FieldType),
 			Size:        f.Size,
+			Format:      f.Tag.Get("format"),
+			Pattern:     f.Tag.Get("pattern"),
 			Constraints: constraints,
 		}
 		// resourcepolicy validated the query capabilities as API policy (declared,
@@ -221,10 +228,15 @@ func effectiveKind(t reflect.Type) reflect.Kind {
 
 // validateQueryTypes fails closed when a column declares a query capability its
 // logical kind does not allow. The decision is field.KindFromGo plus Allows*,
-// the same flags parseFields enforces, so a text filter or a float aggregate
-// cannot be legal on one generator path and rejected on the other.
+// then field.SemanticKind when the model tags say email, url, ip, or slug.
+// A user regex is not a kind. The same flags parseFields enforces, so a text
+// filter or a searchable URL cannot be legal on one generator path and
+// rejected on the other.
 func validateQueryTypes(f modelField, ft reflect.Type, dataType string) error {
 	k := queryKind(ft, dataType)
+	if sk, ok := field.SemanticKind(f.Format, f.Pattern, f.Constraints.Pattern); ok {
+		k = sk
+	}
 	if f.Filterable && !field.AllowsFilter(k, "") {
 		return fmt.Errorf("resourcegen: column %q (%s) is not filterable", f.Column, f.GoType)
 	}
@@ -471,7 +483,38 @@ func (f modelField) jsonName() string { return toSnake(f.GoName) }
 
 // responseTag is the struct tag for f in the response DTO: wire name plus doc.
 func (f modelField) responseTag() string {
-	return `json:"` + f.jsonName() + `"` + schemaAttr(f.GoType) + ` doc:"` + f.GoName + `"`
+	return `json:"` + f.jsonName() + `"` + f.schemaExtras() + ` doc:"` + f.GoName + `"`
+}
+
+func (f modelField) schemaExtras() string {
+	s := schemaAttr(f.GoType)
+	if f.Format != "" && !strings.Contains(s, `format:"`) {
+		s += ` format:"` + f.Format + `"`
+	}
+	if f.Pattern != "" && f.Constraints.Pattern == "" && !strings.Contains(s, `pattern:"`) {
+		s += ` pattern:"` + f.Pattern + `"`
+	}
+	// Huma sets Nullable from a *string pointer. omitempty clears that
+	// unless nullable:"true" is also set. requestTag adds omitempty when
+	// a default is set, so a pointer whose format rejects "" repeats the
+	// tag and stays nullable. A format that accepts "", such as
+	// uri-reference, with a default is omitempty and not nullable: JSON
+	// null is rejected and "" is stored. A *string with no omitempty stays
+	// nullable whether or not this tag is present.
+	if strings.HasPrefix(f.GoType, "*") && f.rejectsEmpty() && !strings.Contains(s, `nullable:"true"`) {
+		s += ` nullable:"true"`
+	}
+	return s
+}
+
+// rejectsEmpty reports that "" is not a legal value of this column. The
+// format check is field.FormatRejects, Huma's validateFormat for every
+// format that function knows. A pattern that matches "" does not.
+func (f modelField) rejectsEmpty() bool {
+	if field.FormatRejects(f.Format, "") {
+		return true
+	}
+	return patternRejectsEmpty(f.Pattern) || patternRejectsEmpty(f.Constraints.Pattern)
 }
 
 // schemaAttr is the OpenAPI format and nullability huma does not infer.
@@ -518,6 +561,8 @@ func schemaAttr(goType string) string {
 //	value after validation. The create field is a pointer with json omitempty
 //	so a missing key is legal and stays nil. The mapper applies the default
 //	only when that pointer is nil. An explicit zero is a non-nil pointer.
+//	A format or pattern that rejects "" fails in Huma before the mapper, so
+//	the create body does not treat "" as omitted. Null and omission do.
 //
 // The string checks key off f.Kind (reflect.String), not the GoType text: a
 // defined `type Slug string` renders as "Slug" yet is Kind reflect.String and
@@ -529,7 +574,7 @@ func (f modelField) requestTag() string {
 	if f.Constraints.Default != "" {
 		name += ",omitempty"
 	}
-	tag := `json:"` + name + `"` + schemaAttr(f.GoType)
+	tag := `json:"` + name + `"` + f.schemaExtras()
 	if f.Kind == reflect.String && !f.isDecimal() {
 		if f.NotNull && f.Constraints.Default == "" {
 			tag += ` minLength:"1"`
@@ -565,10 +610,10 @@ func (f modelField) requestTag() string {
 // requestGoType is the create-body type. A field with a default is a pointer
 // so omission (nil) is distinct from an explicit zero.
 func (f modelField) requestGoType() string {
-	if f.Constraints.Default == "" || strings.HasPrefix(f.GoType, "*") {
-		return f.GoType
+	if f.Constraints.Default != "" && !strings.HasPrefix(f.GoType, "*") {
+		return "*" + f.GoType
 	}
-	return "*" + f.GoType
+	return f.GoType
 }
 
 func (f modelField) isDecimal() bool {

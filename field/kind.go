@@ -129,10 +129,10 @@ var catalog = []Spec{
 	{Kind: Duration, CLITokens: []string{"duration"}, Sortable: true},
 	{Kind: UUID, GoType: "uuid.UUID", GeneratorReady: true, CLITokens: []string{"uuid"}, AdminWire: "uuid", Sortable: true},
 	{Kind: JSON, GoType: "types.JSON", GeneratorReady: true, CLITokens: []string{"json"}, AdminWire: "json"},
-	{Kind: Email, CLITokens: []string{"email"}, AdminWire: "string", Sortable: true},
-	{Kind: URL, CLITokens: []string{"url"}, AdminWire: "string", Sortable: true},
-	{Kind: Slug, CLITokens: []string{"slug"}, AdminWire: "string", Sortable: true},
-	{Kind: IP, CLITokens: []string{"ip"}, AdminWire: "string", Sortable: true},
+	{Kind: Email, GoType: "string", GeneratorReady: true, CLITokens: []string{"email"}, AdminWire: "string", Sortable: true, Searchable: true},
+	{Kind: URL, GoType: "string", GeneratorReady: true, CLITokens: []string{"url"}, AdminWire: "string", Sortable: true},
+	{Kind: Slug, GoType: "string", GeneratorReady: true, CLITokens: []string{"slug"}, AdminWire: "string", Sortable: true, Searchable: true},
+	{Kind: IP, GoType: "string", GeneratorReady: true, CLITokens: []string{"ip"}, AdminWire: "string", Sortable: true},
 	{Kind: Enum, GoType: "string", GeneratorReady: true, CLITokens: []string{"enum"}, AdminWire: "string", Filterable: true, Searchable: true, Sortable: true},
 	{Kind: Relation, GeneratorReady: true, CLITokens: []string{"belongs_to", "has_many", "many_to_many"}, AdminWire: "relation"},
 }
@@ -333,6 +333,25 @@ var (
 	goJSON     = reflect.TypeOf(types.JSON(nil))
 	goNullJSON = reflect.TypeOf(types.NullJSON(nil))
 )
+
+// SemanticKind recovers email, url, ip, or slug from model tags. format is
+// the format struct tag. tagPattern is the pattern struct tag make resource
+// writes for a slug. validatePattern is a user regex and is not a kind: a
+// string whose regex happens to be the slug alphabet stays a string.
+func SemanticKind(format, tagPattern, _ string) (Kind, bool) {
+	switch format {
+	case "email":
+		return Email, true
+	case "uri":
+		return URL, true
+	case "ip":
+		return IP, true
+	}
+	if tagPattern == `^[-a-zA-Z0-9_]+$` {
+		return Slug, true
+	}
+	return "", false
+}
 
 // KindFromGo infers a kind from a Go field type. dataType is the GORM data
 // type name (used to tell string columns from text columns). Pointers are

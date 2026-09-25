@@ -195,6 +195,10 @@ const (
 	FieldFloat   FieldType = FieldType(logical.Float)
 	FieldUUID    FieldType = FieldType(logical.UUID)
 	FieldJSON    FieldType = FieldType(logical.JSON)
+	FieldEmail   FieldType = FieldType(logical.Email)
+	FieldURL     FieldType = FieldType(logical.URL)
+	FieldSlug    FieldType = FieldType(logical.Slug)
+	FieldIP      FieldType = FieldType(logical.IP)
 	FieldEnum    FieldType = FieldType(logical.Enum)
 
 	FieldBelongsTo  FieldType = FieldType(logical.RelBelongsTo)
@@ -262,8 +266,10 @@ func parseField(spec, resourcePkg string) (Field, error) {
 	if spec == "" {
 		return Field{}, fmt.Errorf("resourcegen: empty field spec")
 	}
-	parts := strings.Split(spec, ":")
-	if len(parts) < 2 || len(parts) > 3 {
+	// SplitN keeps a modifier value that contains colons, such as
+	// default=https://example.com.
+	parts := strings.SplitN(spec, ":", 3)
+	if len(parts) < 2 {
 		return Field{}, fmt.Errorf("resourcegen: field %q must be name:type[:modifiers]", spec)
 	}
 	name := strings.TrimSpace(parts[0])
@@ -319,7 +325,11 @@ func parseField(spec, resourcePkg string) (Field, error) {
 	// for date and uuid is the DTO tag (nullable:"true"), not the pointer:
 	// Date has no SchemaProvider, and uuid.UUID is an array Huma unwraps
 	// before it records the pointer.
-	if !field.Required && (field.Type == FieldTime || field.Type == FieldDecimal || field.Type == FieldDate || field.Type == FieldUUID) {
+	// Optional time, date, decimal, and uuid are pointers so a blank is SQL
+	// NULL. Email, url, slug, and ip are the same: format and pattern reject
+	// "", so the blank has to be null. A string or text regex has the same
+	// shape, and shares this path.
+	if !field.Required && field.blankIsNull() {
 		field.GoType = "*" + field.GoType
 	}
 	// Optional JSON is a different type, not a pointer. types.JSON.Schema is
@@ -498,7 +508,7 @@ func applyModifiers(field *Field, raw string) error {
 		return fmt.Errorf("resourcegen: field %q is %s and cannot be filterable (supported: string, int, int64, uint, bool, enum, belongs_to)", field.JSONName, field.Type)
 	}
 	if field.Searchable && !field.typeAllowsSearch() {
-		return fmt.Errorf("resourcegen: field %q is %s and cannot be searchable (supported: string, text, enum)", field.JSONName, field.Type)
+		return fmt.Errorf("resourcegen: field %q is %s and cannot be searchable (supported: string, text, enum, email, slug)", field.JSONName, field.Type)
 	}
 	if field.Sortable && !field.typeAllowsSort() {
 		return fmt.Errorf("resourcegen: field %q is %s and cannot be sortable", field.JSONName, field.Type)
@@ -537,8 +547,8 @@ func validateConstraints(field *Field) error {
 			return fmt.Errorf("resourcegen: field %q is reserved in SQLite, PostgreSQL, or MySQL, so a check constraint cannot name it", field.JSONName)
 		}
 	}
-	if field.MaxLength > 0 && field.Type != FieldString {
-		return fmt.Errorf("resourcegen: field %q is %s and cannot take max_length (supported: string)", field.JSONName, field.Type)
+	if field.MaxLength > 0 && !field.takesMaxLength() {
+		return fmt.Errorf("resourcegen: field %q is %s and cannot take max_length (supported: string, email, url, slug, ip)", field.JSONName, field.Type)
 	}
 	if field.Pattern != "" && field.Type != FieldString && field.Type != FieldText {
 		return fmt.Errorf("resourcegen: field %q is %s and cannot take regex (supported: string, text)", field.JSONName, field.Type)
@@ -633,7 +643,7 @@ func checkDefault(field *Field) error {
 		if err := defaultInRange(field); err != nil {
 			return err
 		}
-	case FieldString, FieldText:
+	case FieldString, FieldText, FieldEmail, FieldURL, FieldSlug, FieldIP:
 		if field.MaxLength > 0 && utf8.RuneCountInString(field.Default) > field.MaxLength {
 			return fmt.Errorf("resourcegen: field %q default is longer than max_length", field.JSONName)
 		}
@@ -645,6 +655,14 @@ func checkDefault(field *Field) error {
 			if !re.MatchString(field.Default) {
 				return fmt.Errorf("resourcegen: field %q default %q does not match regex", field.JSONName, field.Default)
 			}
+		}
+		if pattern := field.semanticPattern(); pattern != "" && field.Pattern == "" {
+			if !regexp.MustCompile(pattern).MatchString(field.Default) {
+				return fmt.Errorf("resourcegen: field %q default %q does not match pattern", field.JSONName, field.Default)
+			}
+		}
+		if format := field.openAPIFormat(); format != "" && !formatAccepts(format, field.Default) {
+			return fmt.Errorf("resourcegen: field %q default %q is not a valid %s", field.JSONName, field.Default, format)
 		}
 	default:
 		return fmt.Errorf("resourcegen: field %q is %s and cannot take default", field.JSONName, field.Type)
@@ -1086,7 +1104,7 @@ func (f Field) gombitPolicy() string {
 func (f Field) gormTag() string {
 	var parts []string
 	switch f.Type {
-	case FieldString:
+	case FieldString, FieldEmail, FieldURL, FieldSlug, FieldIP:
 		size := 255
 		if f.MaxLength > 0 {
 			size = f.MaxLength
@@ -1128,6 +1146,88 @@ func (f Field) gormTag() string {
 		return ""
 	}
 	return strings.Join(parts, ";")
+}
+
+// formatAccepts is Huma's validateFormat. A default is a stored value, so
+// it has to pass the same predicate the request does.
+func formatAccepts(format, s string) bool {
+	return !logical.FormatRejects(format, s)
+}
+
+// openAPIFormat is the Huma format for a semantic string. Slug is a pattern,
+// not a format. Empty for kinds that do not add one.
+func (f Field) openAPIFormat() string {
+	switch f.Type {
+	case FieldEmail:
+		return "email"
+	case FieldURL:
+		return "uri"
+	case FieldIP:
+		return "ip"
+	default:
+		return ""
+	}
+}
+
+// semanticPattern is the built-in pattern for a kind whose meaning is a
+// shape rather than an OpenAPI format. Django's slug alphabet: letters,
+// digits, hyphens, and underscores.
+func (f Field) semanticPattern() string {
+	if f.Type == FieldSlug {
+		return `^[-a-zA-Z0-9_]+$`
+	}
+	return ""
+}
+
+// formPattern is the pattern the form enforces. An explicit regex wins; a
+// slug with none uses the built-in alphabet.
+func (f Field) formPattern() string {
+	if f.Pattern != "" {
+		return f.Pattern
+	}
+	return f.semanticPattern()
+}
+
+func (f Field) takesMaxLength() bool {
+	switch f.Type {
+	case FieldString, FieldEmail, FieldURL, FieldSlug, FieldIP:
+		return true
+	default:
+		return false
+	}
+}
+
+// patternRejectsEmpty reports that the pattern does not match "". A
+// pattern that cannot be compiled is treated as rejecting empty; the
+// parser has already required a portable pattern before this runs.
+func patternRejectsEmpty(pattern string) bool {
+	if pattern == "" {
+		return false
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return true
+	}
+	return !re.MatchString("")
+}
+
+// blankIsNull reports that an empty input must be JSON null. Email, URL,
+// slug, and IP reject "", and a user regex does too only when it does not
+// match "". A pattern such as ^[a-z]*$ stays a plain string. A required
+// field stays a plain string so "" still fails. URL and IP are sortable
+// exact values, not search text; email and slug stay searchable.
+func (f Field) blankIsNull() bool {
+	if f.Required {
+		return false
+	}
+	switch f.Type {
+	case FieldTime, FieldDecimal, FieldDate, FieldUUID, FieldEmail, FieldURL, FieldSlug, FieldIP:
+		return true
+	case FieldString, FieldText:
+		return patternRejectsEmpty(f.Pattern)
+	default:
+		return false
+	}
 }
 
 // enumColumnSize sizes the varchar column to hold the longest allowed value,

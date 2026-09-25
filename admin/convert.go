@@ -11,7 +11,21 @@ import (
 	"unicode/utf8"
 
 	"github.com/shopspring/decimal"
+
+	"github.com/gombit-dev/gombit/field"
 )
+
+// patternRejectsEmpty reports that the pattern does not match "".
+func patternRejectsEmpty(pattern string) bool {
+	if pattern == "" {
+		return false
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return true
+	}
+	return !re.MatchString("")
+}
 
 // constraintMessage reports a min, max, max_length, or pattern failure for a
 // submitted value. An absent value (nil) is not a constraint failure; the
@@ -23,6 +37,11 @@ func constraintMessage(f Field, raw any) string {
 	if f.MaxLength > 0 {
 		if s, ok := raw.(string); ok && utf8.RuneCountInString(s) > f.MaxLength {
 			return "is too long"
+		}
+	}
+	if s, ok := raw.(string); ok {
+		if msg := formatMessage(f.Format, s); msg != "" {
+			return msg
 		}
 	}
 	if f.Pattern != "" {
@@ -53,6 +72,24 @@ func constraintMessage(f Field, raw any) string {
 		}
 	}
 	return ""
+}
+
+// formatMessage applies the model format tag the same way Huma's
+// validateFormat does. blankToNull uses formatMessage(format, "").
+func formatMessage(format, s string) string {
+	if !field.FormatRejects(format, s) {
+		return ""
+	}
+	switch format {
+	case "email", "idn-email":
+		return "must be an email address"
+	case "uri", "iri":
+		return "must be an absolute URI"
+	case "ip", "ipv4", "ipv6":
+		return "must be an IP address"
+	default:
+		return "must match format " + format
+	}
 }
 
 func decimalValue(raw any) (decimal.Decimal, bool) {

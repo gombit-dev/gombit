@@ -7,6 +7,7 @@ import (
 
 	"github.com/gombit-dev/gombit/contract"
 	"github.com/gombit-dev/gombit/database"
+	"github.com/gombit-dev/gombit/field"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -448,7 +449,16 @@ func applyWrite(ctx context.Context, m *registered, inst any, body map[string]an
 			fields[name] = []string{"field is read-only"}
 			continue
 		}
+		// A pointer column stores null for a blank the format or pattern
+		// rejects. A plain string keeps "" and fails that check below.
+		if s, ok := raw.(string); ok && s == "" && !f.Required && f.blankToNull() {
+			raw = nil
+		}
 		if raw == nil && creating && f.Default != "" {
+			if msg := constraintMessage(f.Field, f.Default); msg != "" {
+				fields[name] = []string{msg}
+				continue
+			}
 			if err := f.set(inst, f.Default); err != nil {
 				fields[name] = []string{err.Error()}
 				continue
@@ -483,6 +493,10 @@ func applyWrite(ctx context.Context, m *registered, inst any, body map[string]an
 				continue
 			}
 			if f.Default != "" {
+				if msg := constraintMessage(f.Field, f.Default); msg != "" {
+					fields[f.Name] = []string{msg}
+					continue
+				}
 				if err := f.set(inst, f.Default); err != nil {
 					fields[f.Name] = []string{err.Error()}
 					continue
@@ -500,6 +514,21 @@ func applyWrite(ctx context.Context, m *registered, inst any, body map[string]an
 		return contract.WithContext(ctx, contract.Validation("The request contains invalid fields.", fields))
 	}
 	return nil
+}
+
+// blankToNull is true when "" cannot be stored in this column and the Go
+// field is already a pointer, so null is the blank. The format check is
+// field.FormatRejects, Huma's validateFormat for every format that
+// function knows. A non-pointer string stays "" and constraintMessage
+// rejects it when the value is illegal.
+func (f *resolvedField) blankToNull() bool {
+	if !f.pointer || f.Type != TypeString {
+		return false
+	}
+	if field.FormatRejects(f.Format, "") {
+		return true
+	}
+	return patternRejectsEmpty(f.Pattern)
 }
 
 func applySearch(q *gorm.DB, m *registered, term string) (*gorm.DB, error) {

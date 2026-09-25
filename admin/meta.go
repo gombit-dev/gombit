@@ -59,6 +59,7 @@ type FieldMeta struct {
 	MaxLength int       `json:"max_length,omitempty"`
 	Pattern   string    `json:"pattern,omitempty"`
 	Default   string    `json:"default,omitempty"`
+	Format    string    `json:"format,omitempty"`
 }
 
 type catalogOutput struct {
@@ -92,6 +93,7 @@ func modelMetaFrom(opts Options, pk string) ModelMeta {
 			MaxLength: f.MaxLength,
 			Pattern:   f.Pattern,
 			Default:   f.Default,
+			Format:    f.Format,
 		})
 	}
 	return ModelMeta{

@@ -2,6 +2,7 @@ package admin
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 
 	"github.com/gombit-dev/gombit/config"
@@ -61,6 +62,9 @@ func registerModel(host Host, model any, opts Options) error {
 	// (nil), so the admin — and the relation pickers, which search server-side —
 	// can filter by name out of the box. A caller who wants no search opts out
 	// explicitly with an empty (non-nil) slice.
+	if err := fillConstraints(opts.Fields, sch); err != nil {
+		return err
+	}
 	if opts.Search == nil {
 		opts.Search = defaultSearchFields(opts.Fields)
 	}
@@ -106,9 +110,6 @@ func registerModel(host Host, model any, opts Options) error {
 		return err
 	}
 
-	if err := fillConstraints(opts.Fields, sch); err != nil {
-		return err
-	}
 	resolved, m2mBindings, hasManyBindings, err := resolveFields(opts.Fields, sch)
 	if err != nil {
 		return err
@@ -159,7 +160,7 @@ func defaultSearchFields(fields []Field) []string {
 		if f.ReadOnly {
 			continue
 		}
-		if f.Type == TypeString || f.Type == TypeText {
+		if f.Type == TypeText || (f.Type == TypeString && field.AllowsSearch(f.queryKind(), "")) {
 			out = append(out, f.Name)
 		}
 	}
@@ -191,11 +192,22 @@ func fieldByName(fields []Field, name string) *Field {
 	return nil
 }
 
+// queryKind is the catalog kind for list policy. Email, URL, IP, and slug
+// share the string admin wire, so the format or slug pattern recovers the
+// kind. A plain string stays searchable and filterable.
+func (f Field) queryKind() field.Kind {
+	if k, ok := field.SemanticKind(f.Format, f.TagPattern, f.Pattern); ok {
+		return k
+	}
+	return field.Kind(f.Type)
+}
+
 // fieldAllowsQuery reports whether an admin list option (search, filter,
 // ordering) is legal for the field's catalog kind. Relation cardinalities
-// read relationCaps; every other admin type is the kind of the same name.
+// read relationCaps. Semantic strings use the kind recovered from format
+// or the slug pattern, not the string wire type.
 func fieldAllowsQuery(kind string, f Field) bool {
-	k := field.Kind(f.Type)
+	k := f.queryKind()
 	var rel field.RelationKind
 	if f.Type == TypeRelation {
 		k = field.Relation
@@ -250,7 +262,7 @@ func validateFieldRefs(opts Options, implicit map[string]implicitColumn) error {
 		for _, name := range names {
 			if known[name] {
 				if f := fieldByName(opts.Fields, name); f != nil && !fieldAllowsQuery(kind, *f) {
-					detail := string(f.Type)
+					detail := string(f.queryKind())
 					if f.Type == TypeRelation && f.Related != nil && f.Related.Kind != "" {
 						detail = f.Related.Kind
 					}
@@ -341,8 +353,17 @@ func fillConstraints(fields []Field, sch *schema.Schema) error {
 		if f.MaxLength == 0 {
 			f.MaxLength = c.MaxLength
 		}
+		if f.TagPattern == "" {
+			f.TagPattern = sf.Tag.Get("pattern")
+		}
 		if f.Pattern == "" {
 			f.Pattern = c.Pattern
+		}
+		if f.Pattern == "" {
+			f.Pattern = f.TagPattern
+		}
+		if f.Format == "" {
+			f.Format = sf.Tag.Get("format")
 		}
 		if f.Default == "" {
 			f.Default = c.Default
@@ -416,10 +437,11 @@ func resolveFields(fields []Field, sch *schema.Schema) ([]resolvedField, []*m2mB
 			column = sf.DBName
 		}
 		out = append(out, resolvedField{
-			Field:  copyRel,
-			column: column,
-			get:    makeGetter(sf.StructField.Index, f.Type),
-			set:    makeSetter(sf.StructField.Index, f.Type, sf.FieldType),
+			Field:   copyRel,
+			column:  column,
+			pointer: sf.FieldType.Kind() == reflect.Pointer,
+			get:     makeGetter(sf.StructField.Index, f.Type),
+			set:     makeSetter(sf.StructField.Index, f.Type, sf.FieldType),
 		})
 	}
 	return out, bindings, hasMany, nil

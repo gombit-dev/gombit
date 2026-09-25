@@ -20,7 +20,10 @@ projections of that kind, not separate lists.
 | `duration` | no | `duration` | | |
 | `uuid` | yes | `uuid` | `uuid` | `uuid.UUID` |
 | `json` | yes | `json` | `json` | `types.JSON` (required), `types.NullJSON` (optional) |
-| `email`, `url`, `slug`, `ip` | no | same as the kind | `string` | |
+| `email` | yes | `email` | `string` | `string`, OpenAPI `format: email` |
+| `url` | yes | `url` | `string` | `string`, OpenAPI `format: uri` |
+| `slug` | yes | `slug` | `string` | `string`, pattern `^[-a-zA-Z0-9_]+$` |
+| `ip` | yes | `ip` | `string` | `string`, OpenAPI `format: ip` |
 | `enum` | yes | `enum(a,b)` | `string` | `string` |
 | `relation` | yes | `belongs_to`, `has_many`, `many_to_many` | `relation` | |
 
@@ -38,6 +41,34 @@ schema is nullable and a blank form submits null.
 
 `integer64` and `unsigned` share the admin `integer` widget. The meta payload
 does not change.
+
+`email`, `url`, `slug`, and `ip` are Go `string` columns (`varchar(255)`, or
+`max_length` when that constraint is set). A required field stays `string`.
+An optional one is `*string` when the format or the slug pattern rejects
+`""`, the same way an optional date is. A user regex becomes a pointer only
+when it does not match `""`; `^[a-z]*$` stays `string`. A format that accepts
+`""`, such as `uri-reference`, keeps `""`. A `*string` with no `omitempty`
+stays nullable, because Huma sets that from the pointer. A `*string` with
+`omitempty` and no `nullable:"true"` does not: Huma clears nullability.
+`gombit generate` adds `omitempty` when a default is set, and adds
+`nullable:"true"` when `""` is illegal, so email, URL, slug, and IP stay
+nullable. A `uri-reference` with a default is `omitempty` and not nullable:
+JSON null is rejected and `""` is stored. `gombit generate` copies the
+column's Go type. A plain `string` is not a pointer, and Huma's format check
+rejects `""` for every format it knows except `uri-reference`,
+`iri-reference`, `uri-template`, `json-pointer`, and `regex`. The model
+stores `format:"email"`, `format:"uri"`, `format:"ip"`, or the slug
+`pattern`. The form uses `type="email"` and `type="url"` and submits null
+for a blank optional pointer. A slug checks `^[-a-zA-Z0-9_]+$`. Admin keeps
+the `string` widget and rejects a value that fails the same format or
+pattern. The generated create body rejects `""` when the format or pattern
+does. Null and an omitted field apply the default. The form submits null, so
+a blank input hits that default. Admin rewrites `""` to null on a pointer
+column whose format or pattern rejects it, then uses the same default on
+create. A later PATCH of `""` stores null, because the default applies only
+on create. On a plain string, `""` is rejected when the format or pattern
+rejects it. Email and slug are searchable. URL and IP are exact values, so
+they are sortable and not searchable.
 
 ## Adding a kind
 
@@ -69,9 +100,9 @@ bounds and a default:
 | --- | --- | --- |
 | `min=`, `max=` | `int`, `int64`, `uint` | GORM `check`, request `minimum` / `maximum`, form `min` / `max`, admin meta and the admin write. The token must be an integer in ±(2^53−1). The request and the form compare it as a number, and past that range a number comparison accepts integers the SQL check rejects. The column name cannot be reserved in SQLite, PostgreSQL, or MySQL (`order`, `group`, `select`): the check is unquoted, and no one quote character is valid SQL on all three |
 | `min=`, `max=` | `decimal` | GORM `check`, and a create-body check that compares decimal magnitudes. The token must match the decimal schema (`^-?[0-9]+(\.[0-9]+)?$`) and fit the column: fractional digits ≤ scale, integer digits ≤ precision−scale. A bare `decimal` is `decimal(19,4)`. The request does not advertise `minimum` / `maximum`. The same reserved-name rule as an integer check applies |
-| `max_length=` | `string` | GORM `size` (otherwise 255), request `maxLength`, the form, and the admin write. Each one counts Unicode code points |
+| `max_length=` | `string`, `email`, `url`, `slug`, `ip` | GORM `size` (otherwise 255), request `maxLength`, the form, and the admin write. Each one counts Unicode code points |
 | `regex=` | `string`, `text` | unanchored request `pattern` and the form's `new RegExp(..., "u")` check, including `text`. The pattern must compile in Go RE2. Escapes are an allowlist (`\d` `\D` `\w` `\W`, `\n` `\r` `\t` `\f` `\v`, `\0` for NUL, two-digit `\xNN`, and escaped syntax characters). `\b` and `\B` are rejected: JavaScript finds a word edge between the two surrogates of a non-BMP character. `\a`, octal, `\x{HHHH}`, `\s`, `\p`, inline flags, and POSIX classes are rejected. A `]` that opens a class is rejected, because RE2 treats it as a member and JavaScript closes an empty class. An unescaped `]` outside a class is rejected (`\]` is the literal). A quantifier may not have a leading zero (`{01}`, `{00}`), and it may not follow `^` or `$`. A `-` inside a class is a range only between single characters; `\d` or `\w` on either side is rejected. A hyphen that is first or last stays a literal. The form rewrites `.` to `[^\n]` under the `u` flag, so both sides match one code point and every character except newline. The form does not set an HTML `pattern` attribute, because that attribute anchors the match. Not a SQL check |
-| `default=` | scalars and `enum` | Applied when the create body or the admin create omits the field. An explicit `0`, `false`, or `""` is stored. A decimal default is a string matching the decimal schema and the column precision and scale. The form and admin create start from that value. Enum values are stored on the model's `validate` tag so `gombit generate` can emit them |
+| `default=` | scalars and `enum` | Applied when the create body omits the field or sends null, and when the admin create omits the field or sends null. The generated request rejects `""` before the mapper when the format or pattern rejects it; that body does not treat `""` as omitted. Admin rewrites `""` to null on a pointer string whose format or pattern rejects it, then applies the default. An explicit `0`, `false`, or a legal `""` is stored. A decimal default is a string matching the decimal schema and the column precision and scale. The form submits null for a blank optional pointer, and admin create starts from the default. Enum values are stored on the model's `validate` tag so `gombit generate` can emit them |
 
 Values are case-sensitive. A CLI `regex` cannot contain a comma, because
 modifiers are comma-separated. The model stores the same facts in a `validate`
