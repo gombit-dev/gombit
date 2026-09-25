@@ -102,6 +102,48 @@ func TestRenderMUIFormNewTypes(t *testing.T) {
 	}
 }
 
+func TestRenderConstraintFields(t *testing.T) {
+	fields, err := parseFields([]string{
+		"age:int:required,min=0,max=150",
+		"status:enum(draft,published):default=draft",
+		"code:string:max_length=8,regex=^[a-z]+$",
+	}, "person")
+	if err != nil {
+		t.Fatalf("parseFields: %v", err)
+	}
+	name, err := parseResourceName("Person")
+	if err != nil {
+		t.Fatalf("parseResourceName: %v", err)
+	}
+	ctx := newRenderContext("github.com/example/demo", name, fields, "/api/v1", "minimal", false, false)
+	model := string(mustFormatGo(renderModel(ctx)))
+	for _, want := range []string{
+		`check:age >= 0 AND age <= 150`,
+		`validate:"min=0;max=150"`,
+		`default:'draft'`,
+		`validate:"default=draft"`,
+		`size:8`,
+		`validate:"max_length=8;pattern=^[a-z]+$"`,
+	} {
+		if !strings.Contains(model, want) {
+			t.Fatalf("model missing %q:\n%s", want, model)
+		}
+	}
+	form := renderFormTSX(ctx)
+	for _, want := range []string{
+		`min="0"`,
+		`max="150"`,
+		`min: { value: 0`,
+		`status: "draft"`,
+		`maxLength={8}`,
+		`new RegExp("^[a-z]+$")`,
+	} {
+		if !strings.Contains(form, want) {
+			t.Fatalf("form missing %q:\n%s", want, form)
+		}
+	}
+}
+
 // TestRenderRelations checks the generated model has the FK + associations +
 // target imports, and the thin handler DTO exposes belongs_to as its FK but
 // omits many_to_many / has_many (#222 part b).

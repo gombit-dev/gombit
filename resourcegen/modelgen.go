@@ -70,6 +70,9 @@ type modelField struct {
 	// varchar(N)); an unset/driver-dependent size (0 or -1) yields no maxLength —
 	// we only assert a constraint the model unambiguously states.
 	Size int
+	// Constraints is the model's validate tag: min, max, pattern, default, and
+	// max_length. Empty means the model states no extra constraint.
+	Constraints field.Constraints
 	// Kind is the field's EFFECTIVE scalar reflect.Kind, with nullability unwrapped
 	// (a *string / sql.NullString column reports reflect.String) — see
 	// effectiveKind. It is a type CLASSIFICATION, distinct from GoType's rendered
@@ -164,12 +167,17 @@ func buildModelResource(model any, pkg string) (modelResource, error) {
 		if err != nil {
 			return modelResource{}, err
 		}
+		constraints, err := field.ParseConstraints(f.Tag.Get("validate"))
+		if err != nil {
+			return modelResource{}, fmt.Errorf("resourcegen: column %q: %w", r.Column, err)
+		}
 		mf := modelField{
-			Resolved:   r,
-			AccessPath: strings.Join(f.BindNames, "."),
-			GoType:     goType,
-			Kind:       effectiveKind(f.FieldType),
-			Size:       f.Size,
+			Resolved:    r,
+			AccessPath:  strings.Join(f.BindNames, "."),
+			GoType:      goType,
+			Kind:        effectiveKind(f.FieldType),
+			Size:        f.Size,
+			Constraints: constraints,
 		}
 		// resourcepolicy validated the query capabilities as API policy (declared,
 		// response-visible). Whether the column's type supports the operation is
@@ -474,7 +482,8 @@ func (f modelField) responseTag() string {
 //	                 source exists) but is not the data the column requires (#218).
 //	maxLength:"<N>"  a string whose column has a real size (Size > 0); an
 //	                 unset/driver-dependent size asserts nothing.
-//	minimum:"0"      an unsigned integer column.
+//	minimum:"0"      an unsigned integer column, unless validate states an explicit min.
+//	minimum/maximum/pattern/default  copied from the model's validate tag.
 //
 // The string checks key off f.Kind (reflect.String), not the GoType text: a
 // defined `type Slug string` renders as "Slug" yet is Kind reflect.String and
@@ -487,12 +496,27 @@ func (f modelField) requestTag() string {
 		if f.NotNull {
 			tag += ` minLength:"1"`
 		}
-		if f.Size > 0 {
-			tag += ` maxLength:"` + strconv.Itoa(f.Size) + `"`
+		maxLen := f.Size
+		if f.Constraints.MaxLength > 0 {
+			maxLen = f.Constraints.MaxLength
+		}
+		if maxLen > 0 {
+			tag += ` maxLength:"` + strconv.Itoa(maxLen) + `"`
+		}
+		if f.Constraints.Pattern != "" {
+			tag += ` pattern:"` + f.Constraints.Pattern + `"`
 		}
 	}
-	if isUnsignedKind(f.Kind) {
+	if f.Constraints.Min != "" {
+		tag += ` minimum:"` + f.Constraints.Min + `"`
+	} else if isUnsignedKind(f.Kind) {
 		tag += ` minimum:"0"`
+	}
+	if f.Constraints.Max != "" {
+		tag += ` maximum:"` + f.Constraints.Max + `"`
+	}
+	if f.Constraints.Default != "" {
+		tag += ` default:"` + f.Constraints.Default + `"`
 	}
 	tag += ` doc:"` + f.GoName + `"`
 	return tag

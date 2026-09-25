@@ -51,3 +51,26 @@ aggregate flags on the catalog entry are the policy both the CLI grammar and
 Resourcegen and admin read this catalog. They do not keep their own copies of
 the overlapping names (`int` / `integer`, `bool` / `boolean`, `time` /
 `datetime`).
+
+## Constraints
+
+Modifiers after the type keep their meaning: `required`, `nullable`, `unique`,
+`index`, `filterable`, `sortable`, `searchable`, `aggregatable`. These add
+bounds and a default:
+
+| Modifier | Column types | Where it lands |
+| --- | --- | --- |
+| `min=`, `max=` | `int`, `int64`, `uint`, `decimal` | GORM `check`, request `minimum` / `maximum`, form `min` / `max`, admin meta |
+| `max_length=` | `string` | GORM `size` (otherwise 255), request `maxLength`, form `maxLength` |
+| `regex=` | `string`, `text` | request `pattern` and the form pattern. Not a SQL check |
+| `default=` | scalars and `enum` | GORM `default`, request `default`, form initial value, admin meta |
+
+Values are case-sensitive. A CLI `regex` cannot contain a comma, because
+modifiers are comma-separated. The model stores the same facts in a `validate`
+tag separated by semicolons (`min=0;max=150`), which `gombit generate` and
+admin meta read. `references=` stays unsupported.
+
+```
+age:int:required,min=0,max=150
+status:enum(draft,published):default=draft
+```

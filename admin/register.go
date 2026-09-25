@@ -106,6 +106,9 @@ func registerModel(host Host, model any, opts Options) error {
 		return err
 	}
 
+	if err := fillConstraints(opts.Fields, sch); err != nil {
+		return err
+	}
 	resolved, m2mBindings, hasManyBindings, err := resolveFields(opts.Fields, sch)
 	if err != nil {
 		return err
@@ -309,6 +312,41 @@ func validateQueryableColumns(opts Options, resolved []resolvedField) error {
 	}
 	if err := check("ordering", opts.Ordering); err != nil {
 		return err
+	}
+	return nil
+}
+
+// fillConstraints copies an empty constraint from the model's validate tag.
+// A value the registrar already set is left alone.
+func fillConstraints(fields []Field, sch *schema.Schema) error {
+	for i := range fields {
+		f := &fields[i]
+		if f.Type == TypeRelation {
+			continue
+		}
+		sf := matchSchemaField(sch, *f)
+		if sf == nil {
+			continue
+		}
+		c, err := field.ParseConstraints(sf.Tag.Get("validate"))
+		if err != nil {
+			return fmt.Errorf("admin: field %q: %w", f.Name, err)
+		}
+		if f.Minimum == "" {
+			f.Minimum = c.Min
+		}
+		if f.Maximum == "" {
+			f.Maximum = c.Max
+		}
+		if f.MaxLength == 0 {
+			f.MaxLength = c.MaxLength
+		}
+		if f.Pattern == "" {
+			f.Pattern = c.Pattern
+		}
+		if f.Default == "" {
+			f.Default = c.Default
+		}
 	}
 	return nil
 }

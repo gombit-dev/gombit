@@ -130,6 +130,54 @@ func TestParseFields(t *testing.T) {
 	}
 }
 
+func TestParseConstraints(t *testing.T) {
+	t.Parallel()
+	fields, err := parseFields([]string{
+		"age:int:required,min=0,max=150",
+		"status:enum(draft,published):default=draft",
+		"code:string:max_length=8,regex=^[a-z]+$",
+	}, "person")
+	if err != nil {
+		t.Fatalf("parseFields: %v", err)
+	}
+	age, status, code := fields[0], fields[1], fields[2]
+	if age.Min != "0" || age.Max != "150" || !age.Required {
+		t.Fatalf("age = %+v", age)
+	}
+	if status.Default != "draft" || len(status.EnumValues) != 2 {
+		t.Fatalf("status = %+v", status)
+	}
+	if code.MaxLength != 8 || code.Pattern != "^[a-z]+$" {
+		t.Fatalf("code = %+v", code)
+	}
+	if !strings.Contains(age.gormTag(), "check:age >= 0 AND age <= 150") {
+		t.Fatalf("gorm tag = %q", age.gormTag())
+	}
+	if !strings.Contains(status.gormTag(), "default:'draft'") {
+		t.Fatalf("gorm tag = %q", status.gormTag())
+	}
+	if !strings.Contains(code.gormTag(), "size:8") {
+		t.Fatalf("gorm tag = %q", code.gormTag())
+	}
+}
+
+func TestParseConstraintsReject(t *testing.T) {
+	t.Parallel()
+	for _, spec := range []string{
+		"name:string:min=1",
+		"age:int:min=10,max=1",
+		"age:uint:min=-1",
+		"status:enum(draft,published):default=archived",
+		"title:string:max_length=3,default=hello",
+		"note:text:regex=^[a-z]+$,default=Hello",
+		"when:time:default=now",
+	} {
+		if _, err := parseFields([]string{spec}, "person"); err == nil {
+			t.Fatalf("parseFields(%q) error = nil, want error", spec)
+		}
+	}
+}
+
 func TestParseFieldsDuplicate(t *testing.T) {
 	t.Parallel()
 	_, err := parseFields([]string{"title:string", "title:int"}, "widget")

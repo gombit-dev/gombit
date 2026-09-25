@@ -543,6 +543,31 @@ func goldenBook() any {
 	return &Book{}
 }
 
+func TestRequestTagReadsValidateConstraints(t *testing.T) {
+	type Person struct {
+		ID     uint   `gorm:"primaryKey"`
+		Age    int    `gorm:"not null;check:age >= 0 AND age <= 150" validate:"min=0;max=150"`
+		Code   string `gorm:"size:8;not null" validate:"max_length=8;pattern=^[a-z]+$"`
+		Status string `gorm:"size:16;default:'draft'" validate:"default=draft"`
+		Count  uint   `validate:"min=2"`
+	}
+	res, err := buildModelResource(&Person{}, "resourcegen")
+	if err != nil {
+		t.Fatalf("buildModelResource: %v", err)
+	}
+	src := renderModelDTOs(res)
+	for _, want := range []string{
+		`json:"age" minimum:"0" maximum:"150" doc:"Age"`,
+		`json:"code" minLength:"1" maxLength:"8" pattern:"^[a-z]+$" doc:"Code"`,
+		`json:"status" maxLength:"16" default:"draft" doc:"Status"`,
+		`json:"count" minimum:"2" doc:"Count"`,
+	} {
+		if !strings.Contains(src, want) {
+			t.Fatalf("DTOs missing %q:\n%s", want, src)
+		}
+	}
+}
+
 func TestRenderModelDTOsGolden(t *testing.T) {
 	res, err := buildModelResource(goldenBook(), "resourcegen")
 	if err != nil {

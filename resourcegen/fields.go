@@ -2,6 +2,7 @@ package resourcegen
 
 import (
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -43,6 +44,14 @@ type Field struct {
 	// Precision/Scale set the decimal(p,s) column for FieldDecimal.
 	Precision int
 	Scale     int
+
+	// Declarative constraints (MODEL-3). Empty strings and a zero MaxLength
+	// mean unset. Default is the raw token, without SQL quotes.
+	Min       string
+	Max       string
+	MaxLength int
+	Pattern   string
+	Default   string
 
 	// Target is the related model type (PascalCase) for a relation field, e.g.
 	// "Engine". TargetPkg is its feature-package name (snake), e.g. "engine".
@@ -408,33 +417,63 @@ func parseEnumValues(args string) ([]string, error) {
 }
 
 func applyModifiers(field *Field, raw string) error {
+	const supported = "required, unique, index, nullable, filterable, sortable, searchable, aggregatable, default=, min=, max=, max_length=, regex="
 	for _, part := range strings.Split(raw, ",") {
-		mod := strings.ToLower(strings.TrimSpace(part))
+		mod := strings.TrimSpace(part)
 		if mod == "" {
 			continue
 		}
+		key, val, hasVal := strings.Cut(mod, "=")
+		key = strings.ToLower(strings.TrimSpace(key))
+		val = strings.TrimSpace(val)
 		switch {
-		case mod == "required":
+		case key == "required" && !hasVal:
 			field.Required = true
-		case mod == "unique":
+		case key == "unique" && !hasVal:
 			field.Unique = true
-		case mod == "index":
+		case key == "index" && !hasVal:
 			field.Index = true
-		case mod == "nullable":
+		case key == "nullable" && !hasVal:
 			field.Nullable = true
-		case mod == "filterable":
+		case key == "filterable" && !hasVal:
 			field.Filterable = true
-		case mod == "sortable":
+		case key == "sortable" && !hasVal:
 			field.Sortable = true
-		case mod == "searchable":
+		case key == "searchable" && !hasVal:
 			field.Searchable = true
-		case mod == "aggregatable":
+		case key == "aggregatable" && !hasVal:
 			field.Aggregatable = true
-		case strings.HasPrefix(mod, "default="), strings.HasPrefix(mod, "min="), strings.HasPrefix(mod, "max="), strings.HasPrefix(mod, "references="):
-			return fmt.Errorf("resourcegen: modifier %q is not supported in this milestone (supported: required, unique, index, nullable, filterable, sortable, searchable, aggregatable)", mod)
+		case key == "default" && hasVal:
+			if val == "" {
+				return fmt.Errorf("resourcegen: field %q default must be a value", field.JSONName)
+			}
+			field.Default = val
+		case key == "min" && hasVal:
+			field.Min = val
+		case key == "max" && hasVal:
+			field.Max = val
+		case key == "max_length" && hasVal:
+			n, err := strconv.Atoi(val)
+			if err != nil || n <= 0 {
+				return fmt.Errorf("resourcegen: field %q max_length %q must be a positive integer", field.JSONName, val)
+			}
+			field.MaxLength = n
+		case key == "regex" && hasVal:
+			if val == "" {
+				return fmt.Errorf("resourcegen: field %q regex must be a pattern", field.JSONName)
+			}
+			if _, err := regexp.Compile(val); err != nil {
+				return fmt.Errorf("resourcegen: field %q regex: %w", field.JSONName, err)
+			}
+			field.Pattern = val
+		case key == "references":
+			return fmt.Errorf("resourcegen: modifier %q is not supported in this milestone (supported: %s)", mod, supported)
 		default:
-			return fmt.Errorf("resourcegen: unknown modifier %q (supported: required, unique, index, nullable, filterable, sortable, searchable, aggregatable)", mod)
+			return fmt.Errorf("resourcegen: unknown modifier %q (supported: %s)", mod, supported)
 		}
+	}
+	if err := validateConstraints(field); err != nil {
+		return err
 	}
 	if field.Required && field.Nullable {
 		return fmt.Errorf("resourcegen: field %q cannot be both required and nullable", field.JSONName)
@@ -452,6 +491,156 @@ func applyModifiers(field *Field, raw string) error {
 		return fmt.Errorf("resourcegen: field %q is %s and cannot be aggregatable (supported: int, int64, uint, decimal)", field.JSONName, field.Type)
 	}
 	return nil
+}
+
+func validateConstraints(field *Field) error {
+	if field.Min != "" || field.Max != "" {
+		if !constraintNumeric(field.Type) {
+			return fmt.Errorf("resourcegen: field %q is %s and cannot take min or max (supported: int, int64, uint, decimal)", field.JSONName, field.Type)
+		}
+		if field.Min != "" {
+			if err := checkNumber(field, "min", field.Min); err != nil {
+				return err
+			}
+		}
+		if field.Max != "" {
+			if err := checkNumber(field, "max", field.Max); err != nil {
+				return err
+			}
+		}
+		if field.Min != "" && field.Max != "" {
+			min, err := strconv.ParseFloat(field.Min, 64)
+			if err != nil {
+				return fmt.Errorf("resourcegen: field %q min: %w", field.JSONName, err)
+			}
+			max, err := strconv.ParseFloat(field.Max, 64)
+			if err != nil {
+				return fmt.Errorf("resourcegen: field %q max: %w", field.JSONName, err)
+			}
+			if min > max {
+				return fmt.Errorf("resourcegen: field %q min %s is greater than max %s", field.JSONName, field.Min, field.Max)
+			}
+		}
+	}
+	if field.MaxLength > 0 && field.Type != FieldString {
+		return fmt.Errorf("resourcegen: field %q is %s and cannot take max_length (supported: string)", field.JSONName, field.Type)
+	}
+	if field.Pattern != "" && field.Type != FieldString && field.Type != FieldText {
+		return fmt.Errorf("resourcegen: field %q is %s and cannot take regex (supported: string, text)", field.JSONName, field.Type)
+	}
+	if strings.ContainsAny(field.Default, "`;\"") || strings.ContainsAny(field.Pattern, "`;\"") {
+		return fmt.Errorf("resourcegen: field %q default and regex cannot contain quotes, backticks, or semicolons", field.JSONName)
+	}
+	if field.Default != "" {
+		if err := checkDefault(field); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func constraintNumeric(t FieldType) bool {
+	switch t {
+	case FieldInt, FieldInt64, FieldUint, FieldDecimal:
+		return true
+	default:
+		return false
+	}
+}
+
+func checkNumber(field *Field, name, raw string) error {
+	if field.Type == FieldUint {
+		if _, err := strconv.ParseUint(raw, 10, 64); err != nil {
+			return fmt.Errorf("resourcegen: field %q %s %q must be an unsigned integer", field.JSONName, name, raw)
+		}
+		return nil
+	}
+	if field.Type == FieldDecimal {
+		if _, err := strconv.ParseFloat(raw, 64); err != nil {
+			return fmt.Errorf("resourcegen: field %q %s %q must be a number", field.JSONName, name, raw)
+		}
+		return nil
+	}
+	if _, err := strconv.ParseInt(raw, 10, 64); err != nil {
+		return fmt.Errorf("resourcegen: field %q %s %q must be an integer", field.JSONName, name, raw)
+	}
+	return nil
+}
+
+func checkDefault(field *Field) error {
+	switch field.Type {
+	case FieldEnum:
+		for _, v := range field.EnumValues {
+			if v == field.Default {
+				return nil
+			}
+		}
+		return fmt.Errorf("resourcegen: field %q default %q is not an enum value", field.JSONName, field.Default)
+	case FieldBool:
+		if field.Default != "true" && field.Default != "false" {
+			return fmt.Errorf("resourcegen: field %q default %q must be true or false", field.JSONName, field.Default)
+		}
+	case FieldInt, FieldInt64, FieldUint, FieldDecimal:
+		if err := checkNumber(field, "default", field.Default); err != nil {
+			return err
+		}
+		if err := defaultInRange(field); err != nil {
+			return err
+		}
+	case FieldString, FieldText:
+		if field.MaxLength > 0 && len(field.Default) > field.MaxLength {
+			return fmt.Errorf("resourcegen: field %q default is longer than max_length", field.JSONName)
+		}
+		if field.Pattern != "" {
+			re, err := regexp.Compile(field.Pattern)
+			if err != nil {
+				return err
+			}
+			if !re.MatchString(field.Default) {
+				return fmt.Errorf("resourcegen: field %q default %q does not match regex", field.JSONName, field.Default)
+			}
+		}
+	default:
+		return fmt.Errorf("resourcegen: field %q is %s and cannot take default", field.JSONName, field.Type)
+	}
+	return nil
+}
+
+func defaultInRange(field *Field) error {
+	d, err := strconv.ParseFloat(field.Default, 64)
+	if err != nil {
+		return fmt.Errorf("resourcegen: field %q default: %w", field.JSONName, err)
+	}
+	if field.Min != "" {
+		min, err := strconv.ParseFloat(field.Min, 64)
+		if err != nil {
+			return fmt.Errorf("resourcegen: field %q min: %w", field.JSONName, err)
+		}
+		if d < min {
+			return fmt.Errorf("resourcegen: field %q default %s is below min %s", field.JSONName, field.Default, field.Min)
+		}
+	}
+	if field.Max != "" {
+		max, err := strconv.ParseFloat(field.Max, 64)
+		if err != nil {
+			return fmt.Errorf("resourcegen: field %q max: %w", field.JSONName, err)
+		}
+		if d > max {
+			return fmt.Errorf("resourcegen: field %q default %s is above max %s", field.JSONName, field.Default, field.Max)
+		}
+	}
+	return nil
+}
+
+// constraints is the validate-tag form of the declarative options.
+func (f Field) constraints() logical.Constraints {
+	return logical.Constraints{
+		Min:       f.Min,
+		Max:       f.Max,
+		MaxLength: f.MaxLength,
+		Pattern:   f.Pattern,
+		Default:   f.Default,
+	}
 }
 
 // typeAllowsFilter reports whether an exact-match filter query param can be
@@ -513,7 +702,11 @@ func (f Field) gormTag() string {
 	var parts []string
 	switch f.Type {
 	case FieldString:
-		parts = append(parts, "size:255")
+		size := 255
+		if f.MaxLength > 0 {
+			size = f.MaxLength
+		}
+		parts = append(parts, "size:"+strconv.Itoa(size))
 	case FieldText:
 		parts = append(parts, "type:text")
 	case FieldEnum:
@@ -523,6 +716,12 @@ func (f Field) gormTag() string {
 	}
 	if f.Required && !f.Nullable {
 		parts = append(parts, "not null")
+	}
+	if f.Default != "" {
+		parts = append(parts, "default:"+sqlDefault(f))
+	}
+	if check := sqlCheck(f); check != "" {
+		parts = append(parts, "check:"+check)
 	}
 	switch {
 	case f.Unique:
@@ -538,6 +737,27 @@ func (f Field) gormTag() string {
 
 // enumColumnSize sizes the varchar column to hold the longest allowed value,
 // with headroom so a later value addition rarely needs a column widen.
+func sqlDefault(f Field) string {
+	switch f.Type {
+	case FieldString, FieldText, FieldEnum:
+		return "'" + f.Default + "'"
+	default:
+		return f.Default
+	}
+}
+
+func sqlCheck(f Field) string {
+	col := f.JSONName
+	var parts []string
+	if f.Min != "" {
+		parts = append(parts, col+" >= "+f.Min)
+	}
+	if f.Max != "" {
+		parts = append(parts, col+" <= "+f.Max)
+	}
+	return strings.Join(parts, " AND ")
+}
+
 func enumColumnSize(values []string) int {
 	longest := 0
 	for _, v := range values {

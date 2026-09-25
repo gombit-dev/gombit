@@ -4,7 +4,10 @@ import (
 	"fmt"
 	"go/format"
 	"sort"
+	"strconv"
 	"strings"
+
+	logical "github.com/gombit-dev/gombit/field"
 )
 
 type fileSpec struct {
@@ -212,14 +215,14 @@ func modelFieldLines(f Field, resourcePkg string) string {
 		// legacy generator, filterable by default (the has_many detail-list case,
 		// GET /children?<parent>_id=<id>). The association object is not a column and
 		// carries no policy.
-		return "\t" + f.fkGoName() + " uint" + structTag("index", "read,write,filterable") + "\n" +
+		return "\t" + f.fkGoName() + " uint" + structTag("index", "read,write,filterable", "") + "\n" +
 			"\t" + f.GoName + " " + f.GoType + "\n"
 	case FieldHasMany:
 		return "\t" + f.GoName + " " + f.GoType + "\n"
 	case FieldManyToMany:
-		return "\t" + f.GoName + " " + f.GoType + structTag("many2many:"+f.joinTable(resourcePkg)+";", "") + "\n"
+		return "\t" + f.GoName + " " + f.GoType + structTag("many2many:"+f.joinTable(resourcePkg)+";", "", "") + "\n"
 	default:
-		return "\t" + f.GoName + " " + f.GoType + structTag(f.gormTag(), f.gombitPolicy()) + "\n"
+		return "\t" + f.GoName + " " + f.GoType + structTag(f.gormTag(), f.gombitPolicy(), logical.FormatConstraints(f.constraints())) + "\n"
 	}
 }
 
@@ -230,15 +233,18 @@ func resourceMarkerContent(pkg string) string {
 		"# `gombit generate` regenerates its *.gen.go from the model + gombit field policy.\n"
 }
 
-// structTag composes a field's struct tag from its gorm and gombit parts, omitting
-// an empty part (and the whole tag when both are empty).
-func structTag(gormPart, gombitPart string) string {
+// structTag composes a field's struct tag from its gorm, gombit, and validate
+// parts, omitting an empty part (and the whole tag when all are empty).
+func structTag(gormPart, gombitPart, validatePart string) string {
 	var parts []string
 	if gormPart != "" {
 		parts = append(parts, `gorm:"`+gormPart+`"`)
 	}
 	if gombitPart != "" {
 		parts = append(parts, `gombit:"`+gombitPart+`"`)
+	}
+	if validatePart != "" {
+		parts = append(parts, `validate:"`+validatePart+`"`)
 	}
 	if len(parts) == 0 {
 		return ""
@@ -509,6 +515,14 @@ func tsEnumUnion(field Field) string {
 }
 
 func tsDefaultValue(field Field) string {
+	if field.Default != "" {
+		switch field.Type {
+		case FieldInt, FieldInt64, FieldUint, FieldDecimal, FieldBool:
+			return field.Default
+		default:
+			return strconv.Quote(field.Default)
+		}
+	}
 	switch field.Type {
 	case FieldBool:
 		return "false"
@@ -522,6 +536,59 @@ func tsDefaultValue(field Field) string {
 	default:
 		return `""`
 	}
+}
+
+func tsNumberRules(field Field) string {
+	var parts []string
+	if field.Min != "" {
+		parts = append(parts, "min: { value: "+field.Min+", message: \""+field.GoName+" must be at least "+field.Min+"\" }")
+	}
+	if field.Max != "" {
+		parts = append(parts, "max: { value: "+field.Max+", message: \""+field.GoName+" must be at most "+field.Max+"\" }")
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return ", " + strings.Join(parts, ", ")
+}
+
+func htmlNumberAttrs(field Field) string {
+	var b strings.Builder
+	if field.Min != "" {
+		b.WriteString(" min=\"" + field.Min + "\"")
+	}
+	if field.Max != "" {
+		b.WriteString(" max=\"" + field.Max + "\"")
+	}
+	return b.String()
+}
+
+func tsTextRegister(field Field) string {
+	var parts []string
+	if field.Required {
+		parts = append(parts, "required: \""+field.GoName+" is required\"")
+	}
+	if field.MaxLength > 0 {
+		parts = append(parts, "maxLength: { value: "+strconv.Itoa(field.MaxLength)+", message: \""+field.GoName+" is too long\" }")
+	}
+	if field.Pattern != "" {
+		parts = append(parts, "pattern: { value: new RegExp("+strconv.Quote(field.Pattern)+"), message: \""+field.GoName+" is invalid\" }")
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return ", { " + strings.Join(parts, ", ") + " }"
+}
+
+func htmlTextAttrs(field Field) string {
+	var b strings.Builder
+	if field.MaxLength > 0 {
+		b.WriteString(" maxLength={" + strconv.Itoa(field.MaxLength) + "}")
+	}
+	if field.Pattern != "" {
+		b.WriteString(" pattern=" + strconv.Quote(field.Pattern))
+	}
+	return b.String()
 }
 
 func renderFormField(field Field) string {
@@ -539,7 +606,7 @@ func renderFormField(field Field) string {
 	case FieldBool:
 		b.WriteString("          <input type=\"checkbox\" {...register(\"" + field.JSONName + "\")} />\n")
 	case FieldInt, FieldInt64, FieldUint:
-		b.WriteString("          <input type=\"number\" {...register(\"" + field.JSONName + "\", { setValueAs: (value) => (value === \"\" ? 0 : Number(value)) })} />\n")
+		b.WriteString("          <input type=\"number\" {...register(\"" + field.JSONName + "\", { setValueAs: (value) => (value === \"\" ? 0 : Number(value))" + tsNumberRules(field) + " })}" + htmlNumberAttrs(field) + " />\n")
 	case FieldEnum:
 		b.WriteString("          <select {...register(\"" + field.JSONName + "\")}>\n")
 		for _, v := range field.EnumValues {
@@ -565,11 +632,7 @@ func renderFormField(field Field) string {
 		}
 		b.WriteString(" })} />\n")
 	default:
-		b.WriteString("          <input type=\"text\" {...register(\"" + field.JSONName + "\"")
-		if field.Required {
-			b.WriteString(", { required: \"" + field.GoName + " is required\" }")
-		}
-		b.WriteString(")} />\n")
+		b.WriteString("          <input type=\"text\" {...register(\"" + field.JSONName + "\"" + tsTextRegister(field) + ")}" + htmlTextAttrs(field) + " />\n")
 	}
 	b.WriteString("        </label>\n")
 	b.WriteString("        {errors." + ident + "?.message ? <p>{errors." + ident + ".message}</p> : null}\n")
@@ -817,12 +880,57 @@ func renderMUIFormTSX(ctx renderContext) string {
 	return b.String()
 }
 
+func muiRules(field Field) string {
+	var parts []string
+	if field.Required && field.Type != FieldBool {
+		parts = append(parts, `required: "`+field.GoName+` is required"`)
+	}
+	if field.Min != "" {
+		parts = append(parts, `min: { value: `+field.Min+`, message: "`+field.GoName+` must be at least `+field.Min+`" }`)
+	}
+	if field.Max != "" {
+		parts = append(parts, `max: { value: `+field.Max+`, message: "`+field.GoName+` must be at most `+field.Max+`" }`)
+	}
+	if field.MaxLength > 0 {
+		parts = append(parts, `maxLength: { value: `+strconv.Itoa(field.MaxLength)+`, message: "`+field.GoName+` is too long" }`)
+	}
+	if field.Pattern != "" {
+		parts = append(parts, `pattern: { value: new RegExp(`+strconv.Quote(field.Pattern)+`), message: "`+field.GoName+` is invalid" }`)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " rules={{ " + strings.Join(parts, ", ") + " }}"
+}
+
+func muiBoundAttrs(field Field) string {
+	var b strings.Builder
+	if field.Min != "" {
+		b.WriteString(", min: " + field.Min)
+	}
+	if field.Max != "" {
+		b.WriteString(", max: " + field.Max)
+	}
+	return b.String()
+}
+
+func muiTextSlot(field Field) string {
+	var bits []string
+	if field.MaxLength > 0 {
+		bits = append(bits, "maxLength: "+strconv.Itoa(field.MaxLength))
+	}
+	if field.Pattern != "" {
+		bits = append(bits, "pattern: "+strconv.Quote(field.Pattern))
+	}
+	if len(bits) == 0 {
+		return ""
+	}
+	return "                slotProps={{ htmlInput: { " + strings.Join(bits, ", ") + " } }}\n"
+}
+
 func renderMUIFormField(field Field) string {
 	var b strings.Builder
-	rules := ""
-	if field.Required && field.Type != FieldBool {
-		rules = " rules={{ required: \"" + field.GoName + " is required\" }}"
-	}
+	rules := muiRules(field)
 	b.WriteString("          <Controller\n")
 	b.WriteString("            name=\"" + field.JSONName + "\"\n")
 	b.WriteString("            control={control}\n")
@@ -849,6 +957,9 @@ func renderMUIFormField(field Field) string {
 		b.WriteString("                fullWidth\n")
 		b.WriteString("                multiline\n")
 		b.WriteString("                minRows={3}\n")
+		if extra := muiTextSlot(field); extra != "" {
+			b.WriteString(extra)
+		}
 		b.WriteString("                error={!!fieldState.error}\n")
 		b.WriteString("                helperText={fieldState.error?.message}\n")
 		b.WriteString("                disabled={isSubmitting}\n")
@@ -862,6 +973,18 @@ func renderMUIFormField(field Field) string {
 		b.WriteString("                error={!!fieldState.error}\n")
 		b.WriteString("                helperText={fieldState.error?.message}\n")
 		b.WriteString("                disabled={isSubmitting}\n")
+		if field.Min != "" || field.Max != "" {
+			b.WriteString("                slotProps={{ htmlInput: { ")
+			var bits []string
+			if field.Min != "" {
+				bits = append(bits, "min: "+field.Min)
+			}
+			if field.Max != "" {
+				bits = append(bits, "max: "+field.Max)
+			}
+			b.WriteString(strings.Join(bits, ", "))
+			b.WriteString(" } }}\n")
+		}
 		b.WriteString("                onChange={(event) => {\n")
 		b.WriteString("                  const raw = event.target.value;\n")
 		b.WriteString("                  field.onChange(raw === \"\" ? 0 : Number(raw));\n")
@@ -904,7 +1027,7 @@ func renderMUIFormField(field Field) string {
 		b.WriteString("                value={field.value ?? \"\"}\n")
 		b.WriteString("                label=\"" + field.GoName + "\"\n")
 		b.WriteString("                fullWidth\n")
-		b.WriteString("                slotProps={{ htmlInput: { inputMode: \"decimal\" } }}\n")
+		b.WriteString("                slotProps={{ htmlInput: { inputMode: \"decimal\"" + muiBoundAttrs(field) + " } }}\n")
 		b.WriteString("                error={!!fieldState.error}\n")
 		b.WriteString("                helperText={fieldState.error?.message}\n")
 		b.WriteString("                disabled={isSubmitting}\n")
@@ -917,6 +1040,9 @@ func renderMUIFormField(field Field) string {
 		b.WriteString("                error={!!fieldState.error}\n")
 		b.WriteString("                helperText={fieldState.error?.message}\n")
 		b.WriteString("                disabled={isSubmitting}\n")
+		if extra := muiTextSlot(field); extra != "" {
+			b.WriteString(extra)
+		}
 		b.WriteString("              />\n")
 	}
 	b.WriteString("            )}\n")
