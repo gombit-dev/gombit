@@ -407,3 +407,38 @@ func TestParseResourceNameRejectsNonASCII(t *testing.T) {
 		}
 	}
 }
+
+func TestCanonicalCLIAliases(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		spec string
+		want Field
+	}{
+		{"n:integer", Field{JSONName: "n", GoName: "N", Type: FieldInt, GoType: "int"}},
+		{"n:integer64", Field{JSONName: "n", GoName: "N", Type: FieldInt64, GoType: "int64"}},
+		{"n:unsigned:required", Field{JSONName: "n", GoName: "N", Type: FieldUint, GoType: "uint", Required: true}},
+		{"paid:boolean", Field{JSONName: "paid", GoName: "Paid", Type: FieldBool, GoType: "bool"}},
+		{"at:datetime:required", Field{JSONName: "at", GoName: "At", Type: FieldTime, GoType: "time.Time", Required: true}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.spec, func(t *testing.T) {
+			t.Parallel()
+			got, err := parseFields([]string{tc.spec}, "widget")
+			if err != nil {
+				t.Fatalf("parseFields(%q) error = %v", tc.spec, err)
+			}
+			if len(got) != 1 {
+				t.Fatalf("parseFields(%q) fields = %d, want 1", tc.spec, len(got))
+			}
+			g := got[0]
+			if g.JSONName != tc.want.JSONName || g.GoName != tc.want.GoName || g.Type != tc.want.Type || g.GoType != tc.want.GoType || g.Required != tc.want.Required {
+				t.Fatalf("parseFields(%q) = %+v, want %+v", tc.spec, g, tc.want)
+			}
+		})
+	}
+
+	_, err := parseFields([]string{"n:float"}, "widget")
+	if err == nil || !strings.Contains(err.Error(), "not generated yet") {
+		t.Fatalf("float error = %v, want not generated yet", err)
+	}
+}

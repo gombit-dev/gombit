@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	logical "github.com/gombit-dev/gombit/field"
 )
 
 // Field is one parsed resource field from the CLI grammar
@@ -160,23 +162,26 @@ func (f Field) inDTO() bool {
 	return !f.isRelation() || f.Type == FieldBelongsTo
 }
 
-// FieldType is a supported scalar in the v0.1 subset.
+// FieldType is the generator's projection of a logical field kind. Scalar
+// values are field.Kind strings. Relation values are field.RelationKind
+// strings. Both sets are defined in package field; these constants exist so
+// call sites can switch on them.
 type FieldType string
 
 const (
-	FieldString  FieldType = "string"
-	FieldText    FieldType = "text"
-	FieldInt     FieldType = "int"
-	FieldInt64   FieldType = "int64"
-	FieldBool    FieldType = "bool"
-	FieldUint    FieldType = "uint"
-	FieldDecimal FieldType = "decimal"
-	FieldTime    FieldType = "time"
-	FieldEnum    FieldType = "enum"
+	FieldString  FieldType = FieldType(logical.String)
+	FieldText    FieldType = FieldType(logical.Text)
+	FieldInt     FieldType = FieldType(logical.Integer)
+	FieldInt64   FieldType = FieldType(logical.Integer64)
+	FieldBool    FieldType = FieldType(logical.Boolean)
+	FieldUint    FieldType = FieldType(logical.Unsigned)
+	FieldDecimal FieldType = FieldType(logical.Decimal)
+	FieldTime    FieldType = FieldType(logical.DateTime)
+	FieldEnum    FieldType = FieldType(logical.Enum)
 
-	FieldBelongsTo  FieldType = "belongs_to"
-	FieldHasMany    FieldType = "has_many"
-	FieldManyToMany FieldType = "many_to_many"
+	FieldBelongsTo  FieldType = FieldType(logical.RelBelongsTo)
+	FieldHasMany    FieldType = FieldType(logical.RelHasMany)
+	FieldManyToMany FieldType = FieldType(logical.RelManyToMany)
 )
 
 // defaultDecimalPrecision / defaultDecimalScale back a bare `decimal` field.
@@ -187,13 +192,29 @@ const (
 	defaultDecimalScale     = 4
 )
 
-var supportedTypes = []FieldType{
-	FieldString, FieldText, FieldInt, FieldInt64, FieldBool, FieldUint,
-	FieldDecimal, FieldTime, FieldEnum,
+// logicalKind / relationKind project a parsed field back onto the shared
+// vocabulary. Relation field types are relation kinds, not scalar kinds.
+func (f Field) logicalKind() logical.Kind {
+	switch f.Type {
+	case FieldBelongsTo, FieldHasMany, FieldManyToMany:
+		return logical.Relation
+	default:
+		return logical.Kind(f.Type)
+	}
 }
 
-// decimalGoType is the fully qualified generated Go type for a decimal field.
-const decimalGoType = "types.Decimal"
+func (f Field) relationKind() logical.RelationKind {
+	switch f.Type {
+	case FieldBelongsTo:
+		return logical.RelBelongsTo
+	case FieldHasMany:
+		return logical.RelHasMany
+	case FieldManyToMany:
+		return logical.RelManyToMany
+	default:
+		return ""
+	}
+}
 
 func parseFields(specs []string, resourcePkg string) ([]Field, error) {
 	seen := make(map[string]struct{}, len(specs))
@@ -286,23 +307,18 @@ func parseField(spec, resourcePkg string) (Field, error) {
 // type-specific data (enum values, decimal precision/scale).
 func applyType(field *Field, token string) error {
 	base, args, hasArgs := splitTypeArgs(token)
-	switch strings.ToLower(base) {
-	case "string":
-		field.Type, field.GoType = FieldString, "string"
-	case "text":
-		field.Type, field.GoType = FieldText, "string"
-	case "int":
-		field.Type, field.GoType = FieldInt, "int"
-	case "int64":
-		field.Type, field.GoType = FieldInt64, "int64"
-	case "bool":
-		field.Type, field.GoType = FieldBool, "bool"
-	case "uint":
-		field.Type, field.GoType = FieldUint, "uint"
-	case "time":
-		field.Type, field.GoType = FieldTime, "time.Time"
-	case "decimal":
-		field.Type, field.GoType = FieldDecimal, decimalGoType
+	kind, rel, ok := logical.ParseCLI(base)
+	if !ok || rel != "" {
+		return fmt.Errorf("resourcegen: unknown type %q (supported: %s)", token, strings.Join(logical.PreferredGeneratorTokens(), ", "))
+	}
+	spec, _ := logical.Lookup(kind)
+	if !spec.GeneratorReady {
+		return fmt.Errorf("resourcegen: type %q is in the field vocabulary but is not generated yet (see docs/fields.md)", strings.ToLower(base))
+	}
+	field.Type = FieldType(kind)
+	field.GoType = spec.GoType
+	switch kind {
+	case logical.Decimal:
 		field.Precision, field.Scale = defaultDecimalPrecision, defaultDecimalScale
 		if hasArgs {
 			p, s, err := parseDecimalArgs(args)
@@ -311,7 +327,7 @@ func applyType(field *Field, token string) error {
 			}
 			field.Precision, field.Scale = p, s
 		}
-	case "enum":
+	case logical.Enum:
 		if !hasArgs {
 			return fmt.Errorf("resourcegen: enum field %q needs values, e.g. status:enum(draft,published)", field.JSONName)
 		}
@@ -319,16 +335,9 @@ func applyType(field *Field, token string) error {
 		if err != nil {
 			return err
 		}
-		field.Type, field.GoType = FieldEnum, "string"
 		field.EnumValues = values
-	default:
-		names := make([]string, 0, len(supportedTypes))
-		for _, item := range supportedTypes {
-			names = append(names, string(item))
-		}
-		return fmt.Errorf("resourcegen: unknown type %q (supported: %s)", token, strings.Join(names, ", "))
 	}
-	if hasArgs && field.Type != FieldDecimal && field.Type != FieldEnum {
+	if hasArgs && kind != logical.Decimal && kind != logical.Enum {
 		return fmt.Errorf("resourcegen: type %q does not take arguments", base)
 	}
 	return nil
@@ -443,34 +452,19 @@ func applyModifiers(field *Field, raw string) error {
 // coerce and rarely useful (ranges come later, #260), and text columns are for
 // search, not equality; both are excluded.
 func (f Field) typeAllowsFilter() bool {
-	switch f.Type {
-	case FieldString, FieldInt, FieldInt64, FieldUint, FieldBool, FieldEnum, FieldBelongsTo:
-		return true
-	default:
-		return false
-	}
+	return logical.AllowsFilter(f.logicalKind(), f.relationKind())
 }
 
 // typeAllowsSearch reports whether the field is a text-like column ?search= can LIKE.
 func (f Field) typeAllowsSearch() bool {
-	switch f.Type {
-	case FieldString, FieldText, FieldEnum:
-		return true
-	default:
-		return false
-	}
+	return logical.AllowsSearch(f.logicalKind(), f.relationKind())
 }
 
 // typeAllowsSort reports whether the field maps to a single orderable column.
 // Every scalar and the belongs_to foreign key qualifies; has_many / many_to_many
 // (multi-row associations) do not.
 func (f Field) typeAllowsSort() bool {
-	switch f.Type {
-	case FieldHasMany, FieldManyToMany:
-		return false
-	default:
-		return true
-	}
+	return logical.AllowsSort(f.logicalKind(), f.relationKind())
 }
 
 // typeAllowsAggregate reports whether SUM/AVG/MIN/MAX can be applied to this
@@ -478,12 +472,7 @@ func (f Field) typeAllowsSort() bool {
 // uint, decimal. Booleans, text, time, enum and relations are excluded — a SUM
 // over them is meaningless or driver-dependent.
 func (f Field) typeAllowsAggregate() bool {
-	switch f.Type {
-	case FieldInt, FieldInt64, FieldUint, FieldDecimal:
-		return true
-	default:
-		return false
-	}
+	return logical.AllowsAggregate(f.logicalKind(), f.relationKind())
 }
 
 // gombitPolicy is the model-first `gombit` tag value for this scalar field, or ""

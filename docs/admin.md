@@ -193,7 +193,8 @@ arbitrary Go types.
   stored keys, including custom keys, and echo them in meta.
 
 Closed field types: `string`, `text`, `integer`, `float`, `decimal`,
-`boolean`, `datetime`, `date`, `uuid`, `json`, `relation`.
+`boolean`, `datetime`, `date`, `uuid`, `json`, `relation`. These strings are
+the admin projection of the shared vocabulary in [fields.md](fields.md).
 
 Relation `kind` is `belongs_to`, `has_many`, or `many_to_many`. **`belongs_to`**
 is stored as the foreign key on create/update; auto-derivation (`FieldsFrom`)

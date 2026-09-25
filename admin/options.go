@@ -1,26 +1,29 @@
 package admin
 
-// Closed field-type set for v1 (ADR-013). ADMIN-1 may add members with a
-// docs bump; do not invent a parallel type system.
+import "github.com/gombit-dev/gombit/field"
+
+// Admin meta type strings. These are the admin projection of field.Kind
+// (see docs/fields.md). Do not add a wire string that package field does
+// not already list.
 const (
-	TypeString   FieldType = "string"
-	TypeText     FieldType = "text"
-	TypeInteger  FieldType = "integer"
-	TypeFloat    FieldType = "float"
-	TypeDecimal  FieldType = "decimal"
-	TypeBoolean  FieldType = "boolean"
-	TypeDateTime FieldType = "datetime"
-	TypeDate     FieldType = "date"
-	TypeUUID     FieldType = "uuid"
-	TypeJSON     FieldType = "json"
-	TypeRelation FieldType = "relation"
+	TypeString   FieldType = FieldType(field.String)
+	TypeText     FieldType = FieldType(field.Text)
+	TypeInteger  FieldType = FieldType(field.Integer)
+	TypeFloat    FieldType = FieldType(field.Float)
+	TypeDecimal  FieldType = FieldType(field.Decimal)
+	TypeBoolean  FieldType = FieldType(field.Boolean)
+	TypeDateTime FieldType = FieldType(field.DateTime)
+	TypeDate     FieldType = FieldType(field.Date)
+	TypeUUID     FieldType = FieldType(field.UUID)
+	TypeJSON     FieldType = FieldType(field.JSON)
+	TypeRelation FieldType = FieldType(field.Relation)
 )
 
-// Relation kinds for v1.
+// Relation kinds for v1. Defined in package field.
 const (
-	RelBelongsTo  = "belongs_to"
-	RelHasMany    = "has_many"
-	RelManyToMany = "many_to_many"
+	RelBelongsTo  = string(field.RelBelongsTo)
+	RelHasMany    = string(field.RelHasMany)
+	RelManyToMany = string(field.RelManyToMany)
 )
 
 // Implicit timestamp names allowed in List and Ordering even when omitted
@@ -122,13 +125,7 @@ func defaultActions() Actions {
 }
 
 func validFieldType(t FieldType) bool {
-	switch t {
-	case TypeString, TypeText, TypeInteger, TypeFloat, TypeDecimal,
-		TypeBoolean, TypeDateTime, TypeDate, TypeUUID, TypeJSON, TypeRelation:
-		return true
-	default:
-		return false
-	}
+	return field.IsAdminWire(string(t))
 }
 
 func implicitTimestamp(name string) bool {

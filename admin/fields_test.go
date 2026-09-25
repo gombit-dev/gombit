@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 
+	"github.com/gombit-dev/gombit/field"
 	"github.com/gombit-dev/gombit/types"
 )
 
@@ -318,5 +319,32 @@ func TestDetectVersionFieldSkipsPointer(t *testing.T) {
 	}
 	if detectVersionField(schStr) != nil {
 		t.Fatal("non-integer version column must be ignored")
+	}
+}
+
+func TestAdminWireSetMatchesVocabulary(t *testing.T) {
+	t.Parallel()
+	wires := field.AdminWires()
+	if len(wires) == 0 {
+		t.Fatal("vocabulary has no admin wires")
+	}
+	seen := map[string]struct{}{}
+	for _, w := range wires {
+		if !validFieldType(FieldType(w)) {
+			t.Fatalf("admin rejects vocabulary wire %q", w)
+		}
+		seen[w] = struct{}{}
+	}
+	for _, declared := range []FieldType{
+		TypeString, TypeText, TypeInteger, TypeFloat, TypeDecimal, TypeBoolean,
+		TypeDateTime, TypeDate, TypeUUID, TypeJSON, TypeRelation,
+	} {
+		if _, ok := seen[string(declared)]; !ok {
+			t.Fatalf("admin type %q is not in the vocabulary admin wires", declared)
+		}
+		delete(seen, string(declared))
+	}
+	if len(seen) != 0 {
+		t.Fatalf("vocabulary admin wires with no admin constant: %v", seen)
 	}
 }
