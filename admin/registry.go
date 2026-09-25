@@ -3,8 +3,8 @@ package admin
 import (
 	"sync"
 
-	"github.com/gombit-dev/gombit/config"
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/gombit-dev/gombit/config"
 	"gorm.io/gorm"
 )
 
@@ -80,9 +80,10 @@ type versionField struct {
 
 type resolvedField struct {
 	Field
-	column string
-	get    func(inst any) any
-	set    func(inst any, raw any) error
+	column  string
+	pointer bool
+	get     func(inst any) any
+	set     func(inst any, raw any) error
 }
 
 // implicitColumn is a GORM timestamp allowed in List/Ordering without a Field.

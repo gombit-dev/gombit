@@ -44,14 +44,18 @@ does not change.
 
 `email`, `url`, `slug`, and `ip` are Go `string` columns (`varchar(255)`, or
 `max_length` when that constraint is set). A required field stays `string`.
-An optional one is `*string`: format and pattern reject `""`, so a blank is
-null, the same way an optional date is. The model stores `format:"email"`,
-`format:"uri"`, `format:"ip"`, or the slug `pattern`. `gombit generate`
-copies that onto the request, where Huma checks it. The form uses
-`type="email"` and `type="url"` and submits null for a blank optional value.
-A slug checks `^[-a-zA-Z0-9_]+$`. Admin keeps the `string` widget and rejects
-a value that fails the same format or pattern. Email and slug are searchable.
-URL and IP are exact values, so they are sortable and not searchable.
+An optional one is `*string`: format and the slug pattern reject `""`, so a
+blank is null, the same way an optional date is. A user regex becomes a
+pointer only when it does not match `""`; `^[a-z]*$` stays `string`.
+`gombit generate` copies the column's Go type. A plain `string` is not
+published as nullable, and Huma rejects `""`. The model stores
+`format:"email"`, `format:"uri"`, `format:"ip"`, or the slug `pattern`.
+The form uses `type="email"` and `type="url"` and submits null for a blank
+optional pointer. A slug checks `^[-a-zA-Z0-9_]+$`. Admin keeps the `string`
+widget and rejects a value that fails the same format or pattern. On a
+pointer column, `""` is stored as null. On a plain string, `""` is rejected
+when the pattern does not match it. Email and slug are searchable. URL and
+IP are exact values, so they are sortable and not searchable.
 
 ## Adding a kind
 

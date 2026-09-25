@@ -16,6 +16,18 @@ import (
 	"github.com/shopspring/decimal"
 )
 
+// patternRejectsEmpty reports that the pattern does not match "".
+func patternRejectsEmpty(pattern string) bool {
+	if pattern == "" {
+		return false
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return true
+	}
+	return !re.MatchString("")
+}
+
 // constraintMessage reports a min, max, max_length, or pattern failure for a
 // submitted value. An absent value (nil) is not a constraint failure; the
 // caller applies a default or the required check.

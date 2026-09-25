@@ -244,6 +244,53 @@ func TestAdminEmptyStringDoesNotClearOptionalNumber(t *testing.T) {
 	}
 }
 
+func TestAdminNonPointerPatternRejectsEmpty(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	type Item struct {
+		ID   uint    `gorm:"primaryKey" json:"id"`
+		Code string  `json:"code" validate:"pattern=^[a-z]+$"`
+		Site *string `json:"site" format:"uri"`
+	}
+	app := newCookieApp(t)
+	if err := app.DB().AutoMigrate(&Item{}); err != nil {
+		t.Fatalf("AutoMigrate: %v", err)
+	}
+	if err := admin.Register(app, Item{}, admin.Options{
+		Slug: "codes",
+		Fields: []admin.Field{
+			{Name: "id", Type: admin.TypeInteger, ReadOnly: true},
+			{Name: "code", Type: admin.TypeString, Pattern: "^[a-z]+$"},
+			{Name: "site", Type: admin.TypeString, Format: "uri"},
+		},
+		List: []string{"code"},
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	jar := loginSuperuser(t, app)
+	blank := doRequest(app, jar, http.MethodPost, "/api/v1/admin/resources/codes", `{"code":""}`)
+	if blank.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("blank code status = %d; body: %s", blank.Code, blank.Body.String())
+	}
+	site := doRequest(app, jar, http.MethodPost, "/api/v1/admin/resources/codes", `{"code":"ab","site":""}`)
+	if site.Code != http.StatusOK {
+		t.Fatalf("blank site status = %d; body: %s", site.Code, site.Body.String())
+	}
+	var created rowEnvelope
+	if err := json.Unmarshal(site.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if created.Data["code"] != "ab" || created.Data["site"] != nil {
+		t.Fatalf("pointer blank = %#v", created.Data)
+	}
+	var got Item
+	if err := app.DB().First(&got).Error; err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got.Code != "ab" || got.Site != nil {
+		t.Fatalf("stored code=%q site=%v", got.Code, got.Site)
+	}
+}
+
 func TestResourceCRUDAndAuthz(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	app := newCookieApp(t)

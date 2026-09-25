@@ -588,6 +588,24 @@ func TestCanonicalCLIAliases(t *testing.T) {
 	}
 }
 
+func TestPatternThatMatchesEmptyStaysAString(t *testing.T) {
+	t.Parallel()
+	open, err := parseFields([]string{`code:string:regex=^[a-z]*$`}, "person")
+	if err != nil {
+		t.Fatalf("parseFields: %v", err)
+	}
+	if open[0].GoType != "string" {
+		t.Fatalf("pattern that matches empty GoType = %s, want string", open[0].GoType)
+	}
+	closed, err := parseFields([]string{`code:string:regex=^[a-z]+$`}, "person")
+	if err != nil {
+		t.Fatalf("parseFields: %v", err)
+	}
+	if closed[0].GoType != "*string" {
+		t.Fatalf("pattern that rejects empty GoType = %s, want *string", closed[0].GoType)
+	}
+}
+
 func TestSemanticStringsArePlainStrings(t *testing.T) {
 	t.Parallel()
 	fields, err := parseFields([]string{

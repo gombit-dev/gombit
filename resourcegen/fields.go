@@ -1212,10 +1212,25 @@ func (f Field) takesMaxLength() bool {
 	}
 }
 
-// blankIsNull reports that an empty input must be JSON null. Format and
-// pattern reject "", and a required field stays a plain string so "" still
-// fails. URL and IP are sortable exact values, not search text; email and
-// slug stay searchable.
+// patternRejectsEmpty reports that the pattern does not match "". A
+// pattern that cannot be compiled is treated as rejecting empty; the
+// parser has already required a portable pattern before this runs.
+func patternRejectsEmpty(pattern string) bool {
+	if pattern == "" {
+		return false
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return true
+	}
+	return !re.MatchString("")
+}
+
+// blankIsNull reports that an empty input must be JSON null. Email, URL,
+// slug, and IP reject "", and a user regex does too only when it does not
+// match "". A pattern such as ^[a-z]*$ stays a plain string. A required
+// field stays a plain string so "" still fails. URL and IP are sortable
+// exact values, not search text; email and slug stay searchable.
 func (f Field) blankIsNull() bool {
 	if f.Required {
 		return false
@@ -1224,7 +1239,7 @@ func (f Field) blankIsNull() bool {
 	case FieldTime, FieldDecimal, FieldDate, FieldUUID, FieldEmail, FieldURL, FieldSlug, FieldIP:
 		return true
 	case FieldString, FieldText:
-		return f.Pattern != ""
+		return patternRejectsEmpty(f.Pattern)
 	default:
 		return false
 	}

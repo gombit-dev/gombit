@@ -2,6 +2,7 @@ package admin
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 
 	"github.com/gombit-dev/gombit/config"
@@ -436,10 +437,11 @@ func resolveFields(fields []Field, sch *schema.Schema) ([]resolvedField, []*m2mB
 			column = sf.DBName
 		}
 		out = append(out, resolvedField{
-			Field:  copyRel,
-			column: column,
-			get:    makeGetter(sf.StructField.Index, f.Type),
-			set:    makeSetter(sf.StructField.Index, f.Type, sf.FieldType),
+			Field:   copyRel,
+			column:  column,
+			pointer: sf.FieldType.Kind() == reflect.Pointer,
+			get:     makeGetter(sf.StructField.Index, f.Type),
+			set:     makeSetter(sf.StructField.Index, f.Type, sf.FieldType),
 		})
 	}
 	return out, bindings, hasMany, nil

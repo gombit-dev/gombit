@@ -448,9 +448,9 @@ func applyWrite(ctx context.Context, m *registered, inst any, body map[string]an
 			fields[name] = []string{"field is read-only"}
 			continue
 		}
-		// Format and pattern reject "". Rewrite that blank before the
-		// default, so "" and null are one value.
-		if s, ok := raw.(string); ok && s == "" && !f.Required && blankRejectsEmpty(f.Field) {
+		// A pointer column stores null for a blank the format or pattern
+		// rejects. A plain string keeps "" and fails that check below.
+		if s, ok := raw.(string); ok && s == "" && !f.Required && f.blankToNull() {
 			raw = nil
 		}
 		if raw == nil && creating && f.Default != "" {
@@ -515,8 +515,17 @@ func applyWrite(ctx context.Context, m *registered, inst any, body map[string]an
 	return nil
 }
 
-func blankRejectsEmpty(f Field) bool {
-	return f.Type == TypeString && (f.Format != "" || f.Pattern != "")
+// blankToNull is true when "" cannot be stored in this column and the Go
+// field is already a pointer, so null is the blank. A non-pointer string
+// stays "" and constraintMessage rejects it.
+func (f *resolvedField) blankToNull() bool {
+	if !f.pointer || f.Type != TypeString {
+		return false
+	}
+	if f.Format != "" {
+		return true
+	}
+	return patternRejectsEmpty(f.Pattern)
 }
 
 func applySearch(q *gorm.DB, m *registered, term string) (*gorm.DB, error) {

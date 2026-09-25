@@ -438,10 +438,13 @@ type slugType string
 // skip every named string type — the Slug/Email/Username a real model defines
 // (issue #352 review, finding 1).
 func TestSemanticFormatReachesTheRequest(t *testing.T) {
+	type emailAddr string
 	type Person struct {
-		ID      uint   `gorm:"primaryKey"`
-		Contact string `gorm:"not null;size:255" format:"email"`
-		Handle  string `gorm:"size:255" pattern:"^[-a-zA-Z0-9_]+$"`
+		ID      uint      `gorm:"primaryKey"`
+		Contact string    `gorm:"not null;size:255" format:"email"`
+		Handle  string    `gorm:"size:255" pattern:"^[-a-zA-Z0-9_]+$"`
+		Inbox   emailAddr `gorm:"size:255" format:"email"`
+		Site    *string   `gorm:"size:255" format:"uri"`
 	}
 	res, err := buildModelResource(&Person{}, "resourcegen")
 	if err != nil {
@@ -451,11 +454,20 @@ func TestSemanticFormatReachesTheRequest(t *testing.T) {
 	if !strings.Contains(src, `json:"contact" format:"email" minLength:"1" maxLength:"255" doc:"Contact"`) {
 		t.Fatalf("email format missing:\n%s", src)
 	}
-	if !strings.Contains(src, `Handle *string`) || !strings.Contains(src, `json:"handle" pattern:"^[-a-zA-Z0-9_]+$" nullable:"true" maxLength:"255" doc:"Handle"`) {
-		t.Fatalf("optional slug must be a nullable pointer:\n%s", src)
+	if strings.Contains(src, `Handle *string`) || strings.Contains(src, "nilIfBlank") || strings.Contains(src, `*emailAddr`) {
+		t.Fatalf("a plain string stays a string:\n%s", src)
 	}
-	if !strings.Contains(src, "nilIfBlank(row.Handle)") {
-		t.Fatalf("blank slug must project as null:\n%s", src)
+	if !strings.Contains(src, `Handle string `+"`"+`json:"handle" pattern:"^[-a-zA-Z0-9_]+$" maxLength:"255" doc:"Handle"`) {
+		t.Fatalf("plain slug pattern missing:\n%s", src)
+	}
+	if !strings.Contains(src, "Inbox emailAddr ") || !strings.Contains(src, `json:"inbox" format:"email" maxLength:"255" doc:"Inbox"`) {
+		t.Fatalf("named string must keep its type:\n%s", src)
+	}
+	if strings.Contains(src, `json:"inbox" format:"email" nullable:"true"`) {
+		t.Fatalf("named string must not be nullable:\n%s", src)
+	}
+	if !strings.Contains(src, `Site *string`) || !strings.Contains(src, `json:"site" format:"uri" nullable:"true" maxLength:"255" doc:"Site"`) || !strings.Contains(src, "Site: row.Site") {
+		t.Fatalf("pointer column must stay a nullable pointer:\n%s", src)
 	}
 }
 
@@ -464,17 +476,21 @@ func TestSemanticBlankAndBadValue(t *testing.T) {
 		t.Skip("compiles and runs a temp module; skipped in -short")
 	}
 	type Person struct {
-		ID     uint   `gorm:"primaryKey"`
-		Work   string `gorm:"not null;size:255" format:"email"`
-		Site   string `gorm:"size:255" format:"uri"`
-		Handle string `gorm:"size:255" pattern:"^[-a-zA-Z0-9_]+$"`
-		Addr   string `gorm:"size:255" format:"ip"`
+		ID     uint    `gorm:"primaryKey"`
+		Work   string  `gorm:"not null;size:255" format:"email"`
+		Site   *string `gorm:"size:255" format:"uri"`
+		Handle *string `gorm:"size:255" pattern:"^[-a-zA-Z0-9_]+$"`
+		Addr   *string `gorm:"size:255" format:"ip"`
+		Code   string  `gorm:"size:255" pattern:"^[a-z]+$"`
 	}
 	res, err := buildModelResource(&Person{}, "personpkg")
 	if err != nil {
 		t.Fatalf("buildModelResource: %v", err)
 	}
 	dto := string(mustFormatGo(renderModelDTOs(res)))
+	if strings.Contains(dto, "nilIfBlank") || !strings.Contains(dto, "*string `json:\"site\"") {
+		t.Fatalf("optional semantic columns must stay pointers:\n%s", dto)
+	}
 	dir := t.TempDir()
 	pkgDir := filepath.Join(dir, res.Package)
 	if err := os.MkdirAll(pkgDir, 0o750); err != nil {
@@ -487,9 +503,10 @@ func TestSemanticBlankAndBadValue(t *testing.T) {
 type Person struct {
 	ID     uint `+"`gorm:\"primaryKey\"`"+`
 	Work   string
-	Site   string
-	Handle string
-	Addr   string
+	Site   *string
+	Handle *string
+	Addr   *string
+	Code   string
 }
 `)
 	writeFile(t, filepath.Join(pkgDir, "dto.gen.go"), dto)
@@ -539,6 +556,9 @@ func TestRun(t *testing.T) {
 		if err := db.First(&got, row.ID).Error; err != nil {
 			return nil, err
 		}
+		if in.Body.Site == nil && (got.Site != nil || got.Handle != nil || got.Addr != nil) {
+			t.Fatalf("null stored as site=%v handle=%v addr=%v", got.Site, got.Handle, got.Addr)
+		}
 		out := toPersonData(got)
 		return &struct{ Body personData }{Body: out}, nil
 	})
@@ -552,24 +572,27 @@ func TestRun(t *testing.T) {
 		_ = json.Unmarshal(rec.Body.Bytes(), &body)
 		return rec.Code, body
 	}
-	code, body := post(`+"`{\"work\":\"ada@example.com\",\"site\":null,\"handle\":null,\"addr\":null}`"+`)
-	if code != http.StatusOK || body["site"] != nil || body["handle"] != nil || body["addr"] != nil || body["work"] != "ada@example.com" {
+	code, body := post(`+"`{\"work\":\"ada@example.com\",\"site\":null,\"handle\":null,\"addr\":null,\"code\":\"ab\"}`"+`)
+	if code != http.StatusOK || body["site"] != nil || body["handle"] != nil || body["addr"] != nil || body["work"] != "ada@example.com" || body["code"] != "ab" {
 		t.Fatalf("blank optional: status %d body %#v", code, body)
 	}
-	if code, body = post(`+"`{\"work\":\"not-an-email\",\"site\":null,\"handle\":null,\"addr\":null}`"+`); code != http.StatusUnprocessableEntity {
+	if code, body = post(`+"`{\"work\":\"ada@example.com\",\"site\":null,\"handle\":null,\"addr\":null,\"code\":\"\"}`"+`); code != http.StatusUnprocessableEntity {
+		t.Fatalf("blank plain pattern: status %d body %#v", code, body)
+	}
+	if code, body = post(`+"`{\"work\":\"not-an-email\",\"site\":null,\"handle\":null,\"addr\":null,\"code\":\"ab\"}`"+`); code != http.StatusUnprocessableEntity {
 		t.Fatalf("bad email: status %d body %#v", code, body)
 	}
-	if code, body = post(`+"`{\"work\":\"ada@example.com\",\"site\":\"example.com\",\"handle\":null,\"addr\":null}`"+`); code != http.StatusUnprocessableEntity {
+	if code, body = post(`+"`{\"work\":\"ada@example.com\",\"site\":\"example.com\",\"handle\":null,\"addr\":null,\"code\":\"ab\"}`"+`); code != http.StatusUnprocessableEntity {
 		t.Fatalf("bad url: status %d body %#v", code, body)
 	}
-	if code, body = post(`+"`{\"work\":\"ada@example.com\",\"site\":null,\"handle\":\"has space\",\"addr\":null}`"+`); code != http.StatusUnprocessableEntity {
+	if code, body = post(`+"`{\"work\":\"ada@example.com\",\"site\":null,\"handle\":\"has space\",\"addr\":null,\"code\":\"ab\"}`"+`); code != http.StatusUnprocessableEntity {
 		t.Fatalf("bad slug: status %d body %#v", code, body)
 	}
-	if code, body = post(`+"`{\"work\":\"ada@example.com\",\"site\":null,\"handle\":null,\"addr\":\"nope\"}`"+`); code != http.StatusUnprocessableEntity {
+	if code, body = post(`+"`{\"work\":\"ada@example.com\",\"site\":null,\"handle\":null,\"addr\":\"nope\",\"code\":\"ab\"}`"+`); code != http.StatusUnprocessableEntity {
 		t.Fatalf("bad ip: status %d body %#v", code, body)
 	}
-	code, body = post(`+"`{\"work\":\"ada@example.com\",\"site\":\"https://example.com\",\"handle\":\"ada\",\"addr\":\"127.0.0.1\"}`"+`)
-	if code != http.StatusOK || body["site"] != "https://example.com" || body["handle"] != "ada" || body["addr"] != "127.0.0.1" {
+	code, body = post(`+"`{\"work\":\"ada@example.com\",\"site\":\"https://example.com\",\"handle\":\"ada\",\"addr\":\"127.0.0.1\",\"code\":\"ab\"}`"+`)
+	if code != http.StatusOK || body["site"] != "https://example.com" || body["handle"] != "ada" || body["addr"] != "127.0.0.1" || body["code"] != "ab" {
 		t.Fatalf("good values: status %d body %#v", code, body)
 	}
 }
