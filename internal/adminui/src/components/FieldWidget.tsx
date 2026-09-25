@@ -462,9 +462,6 @@ function widgetSlotProps(field: FieldMeta) {
   if (field.max_length) {
     htmlInput.maxLength = field.max_length;
   }
-  if (field.pattern) {
-    htmlInput.pattern = field.pattern;
-  }
   if (field.type === "datetime" || field.type === "date") {
     return {
       inputLabel: { shrink: true },

@@ -560,7 +560,7 @@ func TestRequestTagReadsValidateConstraints(t *testing.T) {
 		`json:"age" minimum:"0" maximum:"150" doc:"Age"`,
 		`json:"code" minLength:"1" maxLength:"8" pattern:"^[a-z]+$" doc:"Code"`,
 		`Status *string`,
-		`json:"status" maxLength:"16" enum:"draft,published" doc:"Status"`,
+		`json:"status,omitempty" maxLength:"16" enum:"draft,published" doc:"Status"`,
 		`json:"count" minimum:"2" doc:"Count"`,
 		`row.Status = "draft"`,
 	} {
@@ -591,6 +591,9 @@ func TestGeneratedDefaultsKeepExplicitZero(t *testing.T) {
 	if strings.Contains(dto, `default:"`) {
 		t.Fatalf("Huma default tag rewrites zeros:\n%s", dto)
 	}
+	if !strings.Contains(dto, `json:"count,omitempty"`) || !strings.Contains(dto, `json:"active,omitempty"`) {
+		t.Fatalf("defaulted create fields must be omitempty so a missing key is legal:\n%s", dto)
+	}
 	if strings.Contains(dto, `minimum:"10"`) || strings.Contains(dto, `maximum:"10"`) {
 		t.Fatalf("decimal bounds must not be minimum/maximum on a string schema:\n%s", dto)
 	}
@@ -617,9 +620,18 @@ type Person struct {
 	writeFile(t, filepath.Join(pkgDir, "run_test.go"), `package personpkg
 
 import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/danielgtaylor/huma/v2"
+	"github.com/danielgtaylor/huma/v2/adapters/humagin"
+	"github.com/gin-gonic/gin"
+	"github.com/gombit-dev/gombit/contract"
 	"github.com/gombit-dev/gombit/types"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -657,6 +669,48 @@ func TestRun(t *testing.T) {
 	omitted := personFromCreateBody(personCreateBody{Price: types.MustDecimal("1")})
 	if omitted.Count != 1 || omitted.Active != true {
 		t.Fatalf("omitted fields did not take the default: %+v", omitted)
+	}
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	api := humagin.New(router, contract.HumaConfig("person", "0.0.0"))
+	type input struct {
+		Body personCreateBody
+	}
+	type created struct {
+		Count  int  `+"`json:\"count\"`"+`
+		Active bool `+"`json:\"active\"`"+`
+	}
+	huma.Register(api, huma.Operation{
+		OperationID: "create-person",
+		Method:      http.MethodPost,
+		Path:        "/people",
+	}, func(_ context.Context, in *input) (*struct{ Body created }, error) {
+		row := personFromCreateBody(in.Body)
+		if err := db.Create(&row).Error; err != nil {
+			return nil, err
+		}
+		return &struct{ Body created }{Body: created{Count: row.Count, Active: row.Active}}, nil
+	})
+	post := func(raw string) (int, string, created) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/people", strings.NewReader(raw))
+		req.Header.Set("Content-Type", "application/json")
+		router.ServeHTTP(rec, req)
+		var got created
+		if rec.Code == http.StatusOK {
+			if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+				t.Fatalf("decode %s: %v body %s", raw, err, rec.Body.String())
+			}
+		}
+		return rec.Code, rec.Body.String(), got
+	}
+	if code, body, got := post(`+"`{\"price\":\"1\"}`"+`); code != http.StatusOK || got.Count != 1 || got.Active != true {
+		t.Fatalf("omitted default over HTTP: status %d body %s parsed %+v", code, body, got)
+	}
+	if code, body, got := post(`+"`{\"count\":0,\"active\":false,\"price\":\"1\"}`"+`); code != http.StatusOK || got.Count != 0 || got.Active != false {
+		t.Fatalf("explicit zero over HTTP: status %d body %s parsed %+v", code, body, got)
 	}
 
 	over := personCreateBody{Price: types.MustDecimal("999")}

@@ -172,6 +172,10 @@ func TestParseConstraintsReject(t *testing.T) {
 		"note:text:regex=^[a-z]+$,default=Hello",
 		"when:time:default=now",
 		"note:text:regex=(?i)^[a-z]+$",
+		"note:text:regex=\\p{L}+",
+		"count:int64:min=9007199254740993,max=9007199254740992",
+		"price:decimal:min=NaN",
+		"status:enum(on;off)",
 	} {
 		if _, err := parseFields([]string{spec}, "person"); err == nil {
 			t.Fatalf("parseFields(%q) error = nil, want error", spec)

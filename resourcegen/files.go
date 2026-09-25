@@ -650,12 +650,12 @@ func tsTextRegister(field Field) string {
 }
 
 func htmlTextAttrs(field Field) string {
+	// maxLength only. An HTML pattern attribute is matched as ^(?:pattern)$,
+	// while Huma and tsTextRegister's new RegExp are unanchored. Emitting the
+	// attribute would reject values the request accepts.
 	var b strings.Builder
 	if field.MaxLength > 0 {
 		b.WriteString(" maxLength={" + strconv.Itoa(field.MaxLength) + "}")
-	}
-	if field.Pattern != "" {
-		b.WriteString(" pattern=" + strconv.Quote(field.Pattern))
 	}
 	return b.String()
 }
@@ -1002,9 +1002,6 @@ func muiTextSlot(field Field) string {
 	var bits []string
 	if field.MaxLength > 0 {
 		bits = append(bits, "maxLength: "+strconv.Itoa(field.MaxLength))
-	}
-	if field.Pattern != "" {
-		bits = append(bits, "pattern: "+strconv.Quote(field.Pattern))
 	}
 	if len(bits) == 0 {
 		return ""

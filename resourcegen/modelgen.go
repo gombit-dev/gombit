@@ -487,16 +487,21 @@ func (f modelField) responseTag() string {
 //	schema Huma actually enforces. Decimal is a string schema, so its bounds are
 //	checked in Resolve via types.DecimalWithin, not with minimum/maximum.
 //	A validate default is NOT a Huma default tag: that tag replaces the zero
-//	value after validation. The create field is a pointer and the mapper
-//	applies the default only when the pointer is nil.
+//	value after validation. The create field is a pointer with json omitempty
+//	so a missing key is legal and stays nil. The mapper applies the default
+//	only when that pointer is nil. An explicit zero is a non-nil pointer.
 //
 // The string checks key off f.Kind (reflect.String), not the GoType text: a
 // defined `type Slug string` renders as "Slug" yet is Kind reflect.String and
-// still zero-fills to "", so it needs the same constraint. Enum value constraints
-// are NOT emitted — the GORM schema stores an enum as a plain varchar, so the
-// allowed values are not a recoverable schema fact (a known class-B gap).
+// still zero-fills to "", so it needs the same constraint. Enum values come
+// from the validate tag — the GORM schema stores an enum as a varchar — and
+// are emitted here. Filter query params do not repeat that enum.
 func (f modelField) requestTag() string {
-	tag := `json:"` + f.jsonName() + `"`
+	name := f.jsonName()
+	if f.Constraints.Default != "" {
+		name += ",omitempty"
+	}
+	tag := `json:"` + name + `"`
 	if f.Kind == reflect.String && !f.isDecimal() {
 		if f.NotNull && f.Constraints.Default == "" {
 			tag += ` minLength:"1"`

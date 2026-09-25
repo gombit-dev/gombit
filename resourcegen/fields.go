@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/shopspring/decimal"
+
 	logical "github.com/gombit-dev/gombit/field"
 )
 
@@ -403,7 +405,7 @@ func parseEnumValues(args string) ([]string, error) {
 		// Values land in a Go struct tag and a TS union literal; keep them to
 		// a safe, unambiguous character set.
 		for _, r := range v {
-			if r == '"' || r == '`' || r == '\\' {
+			if r == '"' || r == '`' || r == '\\' || r == ';' {
 				return nil, fmt.Errorf("resourcegen: enum value %q contains an unsupported character", v)
 			}
 		}
@@ -509,15 +511,11 @@ func validateConstraints(field *Field) error {
 			}
 		}
 		if field.Min != "" && field.Max != "" {
-			min, err := strconv.ParseFloat(field.Min, 64)
+			cmp, err := compareNumbers(field, field.Min, field.Max)
 			if err != nil {
-				return fmt.Errorf("resourcegen: field %q min: %w", field.JSONName, err)
+				return err
 			}
-			max, err := strconv.ParseFloat(field.Max, 64)
-			if err != nil {
-				return fmt.Errorf("resourcegen: field %q max: %w", field.JSONName, err)
-			}
-			if min > max {
+			if cmp > 0 {
 				return fmt.Errorf("resourcegen: field %q min %s is greater than max %s", field.JSONName, field.Min, field.Max)
 			}
 		}
@@ -556,8 +554,8 @@ func checkNumber(field *Field, name, raw string) error {
 		return nil
 	}
 	if field.Type == FieldDecimal {
-		if _, err := strconv.ParseFloat(raw, 64); err != nil {
-			return fmt.Errorf("resourcegen: field %q %s %q must be a number", field.JSONName, name, raw)
+		if _, err := decimal.NewFromString(raw); err != nil {
+			return fmt.Errorf("resourcegen: field %q %s %q must be a finite decimal", field.JSONName, name, raw)
 		}
 		return nil
 	}
@@ -607,29 +605,78 @@ func checkDefault(field *Field) error {
 }
 
 func defaultInRange(field *Field) error {
-	d, err := strconv.ParseFloat(field.Default, 64)
-	if err != nil {
-		return fmt.Errorf("resourcegen: field %q default: %w", field.JSONName, err)
-	}
 	if field.Min != "" {
-		min, err := strconv.ParseFloat(field.Min, 64)
+		cmp, err := compareNumbers(field, field.Default, field.Min)
 		if err != nil {
-			return fmt.Errorf("resourcegen: field %q min: %w", field.JSONName, err)
+			return err
 		}
-		if d < min {
+		if cmp < 0 {
 			return fmt.Errorf("resourcegen: field %q default %s is below min %s", field.JSONName, field.Default, field.Min)
 		}
 	}
 	if field.Max != "" {
-		max, err := strconv.ParseFloat(field.Max, 64)
+		cmp, err := compareNumbers(field, field.Default, field.Max)
 		if err != nil {
-			return fmt.Errorf("resourcegen: field %q max: %w", field.JSONName, err)
+			return err
 		}
-		if d > max {
+		if cmp > 0 {
 			return fmt.Errorf("resourcegen: field %q default %s is above max %s", field.JSONName, field.Default, field.Max)
 		}
 	}
 	return nil
+}
+
+// compareNumbers reports the order of a and b using the same representation the
+// runtime uses. Integers stay integers: a float64 comparison collapses values
+// past 2^53 and would accept an empty range. Decimals use shopspring/decimal,
+// which rejects NaN and Inf before they become a SQL check.
+func compareNumbers(field *Field, a, b string) (int, error) {
+	switch field.Type {
+	case FieldUint:
+		av, err := strconv.ParseUint(a, 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("resourcegen: field %q value %q must be an unsigned integer", field.JSONName, a)
+		}
+		bv, err := strconv.ParseUint(b, 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("resourcegen: field %q value %q must be an unsigned integer", field.JSONName, b)
+		}
+		switch {
+		case av < bv:
+			return -1, nil
+		case av > bv:
+			return 1, nil
+		default:
+			return 0, nil
+		}
+	case FieldDecimal:
+		ad, err := decimal.NewFromString(a)
+		if err != nil {
+			return 0, fmt.Errorf("resourcegen: field %q value %q must be a finite decimal", field.JSONName, a)
+		}
+		bd, err := decimal.NewFromString(b)
+		if err != nil {
+			return 0, fmt.Errorf("resourcegen: field %q value %q must be a finite decimal", field.JSONName, b)
+		}
+		return ad.Cmp(bd), nil
+	default:
+		av, err := strconv.ParseInt(a, 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("resourcegen: field %q value %q must be an integer", field.JSONName, a)
+		}
+		bv, err := strconv.ParseInt(b, 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("resourcegen: field %q value %q must be an integer", field.JSONName, b)
+		}
+		switch {
+		case av < bv:
+			return -1, nil
+		case av > bv:
+			return 1, nil
+		default:
+			return 0, nil
+		}
+	}
 }
 
 // constraints is the validate-tag form of the declarative options.
@@ -644,14 +691,15 @@ func (f Field) constraints() logical.Constraints {
 	}
 }
 
-// portablePattern accepts a pattern only when both Go's RE2 and JavaScript's
-// RegExp can compile it. Inline flags, POSIX classes, and RE2 named groups
-// compile here and throw when the generated form evaluates new RegExp.
+// portablePattern accepts a pattern only when Go's RE2 and JavaScript's RegExp
+// match the same set. Inline flags, POSIX classes, and RE2-only groups throw
+// in the form. Unicode properties (\p, \P) compile in both and do not: RE2
+// matches letters, and new RegExp without the u flag matches the literal p{L}.
 func portablePattern(pattern string) error {
 	if _, err := regexp.Compile(pattern); err != nil {
 		return err
 	}
-	if re2OnlyGroup.MatchString(pattern) || strings.Contains(pattern, `[:`) || strings.Contains(pattern, `\Q`) || strings.Contains(pattern, `\E`) || strings.Contains(pattern, `\A`) || strings.Contains(pattern, `\z`) || strings.Contains(pattern, `\Z`) {
+	if re2OnlyGroup.MatchString(pattern) || strings.Contains(pattern, `[:`) || strings.Contains(pattern, `\Q`) || strings.Contains(pattern, `\E`) || strings.Contains(pattern, `\A`) || strings.Contains(pattern, `\z`) || strings.Contains(pattern, `\Z`) || strings.Contains(pattern, `\p`) || strings.Contains(pattern, `\P`) {
 		return fmt.Errorf("pattern must be valid in both Go RE2 and JavaScript")
 	}
 	return nil

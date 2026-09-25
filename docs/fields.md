@@ -63,7 +63,7 @@ bounds and a default:
 | `min=`, `max=` | `int`, `int64`, `uint` | GORM `check`, request `minimum` / `maximum`, form `min` / `max`, admin meta and the admin write |
 | `min=`, `max=` | `decimal` | GORM `check`, and a create-body check that compares decimal magnitudes. The decimal schema is a string, so the request does not advertise `minimum` / `maximum` |
 | `max_length=` | `string` | GORM `size` (otherwise 255), request `maxLength`, form `maxLength` |
-| `regex=` | `string`, `text` | request `pattern` and the form pattern, including `text`. The pattern must compile in Go RE2 and in JavaScript. Not a SQL check |
+| `regex=` | `string`, `text` | unanchored request `pattern` and the form's `new RegExp` check, including `text`. The pattern must compile in Go RE2 and in JavaScript and must not use a construct whose match set differs (`\p`, `\P`, inline flags, POSIX classes). The form does not set an HTML `pattern` attribute, because that attribute anchors the match. Not a SQL check |
 | `default=` | scalars and `enum` | Applied when the create body or the admin create omits the field. An explicit `0`, `false`, or `""` is stored. A decimal default is a string, matching the decimal schema. The form and admin create start from that value. Enum values are stored on the model's `validate` tag so `gombit generate` can emit them |
 
 Values are case-sensitive. A CLI `regex` cannot contain a comma, because
