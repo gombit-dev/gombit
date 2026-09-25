@@ -682,7 +682,7 @@ func tsTextRegister(field Field) string {
 		parts = append(parts, tsCodePointMaxLength(field))
 	}
 	if field.Pattern != "" {
-		parts = append(parts, "pattern: { value: new RegExp("+strconv.Quote(field.Pattern)+"), message: \""+field.GoName+" is invalid\" }")
+		parts = append(parts, "pattern: { value: new RegExp("+strconv.Quote(jsFormPattern(field.Pattern))+`, "u"), message: "`+field.GoName+` is invalid" }`)
 	}
 	if len(parts) == 0 {
 		return ""
@@ -1047,7 +1047,7 @@ func muiRules(field Field) string {
 		parts = append(parts, tsCodePointMaxLength(field))
 	}
 	if field.Pattern != "" {
-		parts = append(parts, `pattern: { value: new RegExp(`+strconv.Quote(field.Pattern)+`), message: "`+field.GoName+` is invalid" }`)
+		parts = append(parts, `pattern: { value: new RegExp(`+strconv.Quote(jsFormPattern(field.Pattern))+`, "u"), message: "`+field.GoName+` is invalid" }`)
 	}
 	if field.Type == FieldJSON {
 		parts = append(parts, tsJSONValidate())

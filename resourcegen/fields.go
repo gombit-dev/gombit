@@ -736,24 +736,189 @@ func (f Field) constraints() logical.Constraints {
 	}
 }
 
-// portablePattern compiles the pattern as Go RE2 and rejects constructs the
-// form's new RegExp does not share: inline flags, POSIX classes, RE2-only
-// groups, \Q \E \A \z \Z, Unicode properties (\p, \P), whitespace (\s, \S),
-// and the brace hex escape \x{HHHH}. Two-digit \xNN is the same byte on both
-// sides. This is that denylist, not a proof the two engines match the same
-// set. `.` stays legal: RE2's `.` is every character except `\n`, and
-// JavaScript's `.` also excludes `\r`, U+2028, and U+2029.
+// portablePattern compiles the pattern as Go RE2 and rejects anything the
+// form's new RegExp(..., "u") does not share. Escapes are an allowlist
+// (\d \D \w \W, the single-character controls \n \r \t \f \v, \b \B, \0 when
+// it is NUL, two-digit \xNN, and identity escapes of syntax characters).
+// \a, octal, \x{HHHH}, \s, \p, and the rest are different atoms or a syntax
+// error once the form uses the u flag. A ] that is the first member of a
+// class is a member in RE2 and closes an empty class in JavaScript.
 func portablePattern(pattern string) error {
 	if _, err := regexp.Compile(pattern); err != nil {
 		return err
 	}
-	if re2OnlyGroup.MatchString(pattern) || strings.Contains(pattern, `[:`) || strings.Contains(pattern, `\Q`) || strings.Contains(pattern, `\E`) || strings.Contains(pattern, `\A`) || strings.Contains(pattern, `\z`) || strings.Contains(pattern, `\Z`) || strings.Contains(pattern, `\p`) || strings.Contains(pattern, `\P`) || strings.Contains(pattern, `\s`) || strings.Contains(pattern, `\S`) || strings.Contains(pattern, `\x{`) {
-		return fmt.Errorf("pattern must be valid in both Go RE2 and JavaScript")
+	return jsUnicodePattern(pattern)
+}
+
+func patternNotShared() error {
+	return fmt.Errorf("pattern must be valid in both Go RE2 and JavaScript")
+}
+
+func jsUnicodePattern(pattern string) error {
+	r := []rune(pattern)
+	inClass := false
+	atFirst := false
+	for i := 0; i < len(r); {
+		c := r[i]
+		if c == '\\' {
+			next, err := acceptEscape(r, i, inClass)
+			if err != nil {
+				return err
+			}
+			i = next
+			atFirst = false
+			continue
+		}
+		if inClass {
+			if c == '[' && i+1 < len(r) && r[i+1] == ':' {
+				return patternNotShared()
+			}
+			if atFirst && c == '^' {
+				i++
+				continue
+			}
+			if atFirst && c == ']' {
+				return patternNotShared()
+			}
+			atFirst = false
+			if c == ']' {
+				inClass = false
+			}
+			i++
+			continue
+		}
+		switch c {
+		case '[':
+			if i+1 < len(r) && r[i+1] == ':' {
+				return patternNotShared()
+			}
+			inClass = true
+			atFirst = true
+			i++
+		case '{':
+			next, err := acceptQuantifier(r, i)
+			if err != nil {
+				return err
+			}
+			i = next
+		case '}':
+			return patternNotShared()
+		case '(':
+			next, err := acceptGroup(r, i)
+			if err != nil {
+				return err
+			}
+			i = next
+		default:
+			i++
+		}
 	}
 	return nil
 }
 
-var re2OnlyGroup = regexp.MustCompile(`\(\?(?:[^:=!]|$)`)
+func acceptEscape(r []rune, i int, inClass bool) (int, error) {
+	if i+1 >= len(r) {
+		return 0, patternNotShared()
+	}
+	next := i + 2
+	switch r[i+1] {
+	case 'd', 'D', 'w', 'W', 'n', 'r', 't', 'f', 'v', 'b', 'B':
+		return next, nil
+	case '0':
+		if next < len(r) && r[next] >= '0' && r[next] <= '9' {
+			return 0, patternNotShared()
+		}
+		return next, nil
+	case 'x':
+		if next+1 >= len(r) || !isHex(r[next]) || !isHex(r[next+1]) {
+			return 0, patternNotShared()
+		}
+		return next + 2, nil
+	case '^', '$', '\\', '.', '*', '+', '?', '(', ')', '[', ']', '{', '}', '|':
+		return next, nil
+	case '-':
+		if inClass {
+			return next, nil
+		}
+		return 0, patternNotShared()
+	default:
+		return 0, patternNotShared()
+	}
+}
+
+func isHex(r rune) bool {
+	return (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')
+}
+
+func acceptQuantifier(r []rune, i int) (int, error) {
+	j := i + 1
+	start := j
+	for j < len(r) && r[j] >= '0' && r[j] <= '9' {
+		j++
+	}
+	if j == start {
+		return 0, patternNotShared()
+	}
+	if j < len(r) && r[j] == ',' {
+		j++
+		for j < len(r) && r[j] >= '0' && r[j] <= '9' {
+			j++
+		}
+	}
+	if j >= len(r) || r[j] != '}' {
+		return 0, patternNotShared()
+	}
+	j++
+	if j < len(r) && r[j] == '+' {
+		return 0, patternNotShared()
+	}
+	if j < len(r) && r[j] == '?' {
+		j++
+	}
+	return j, nil
+}
+
+func acceptGroup(r []rune, i int) (int, error) {
+	if i+1 < len(r) && r[i+1] == '?' {
+		if i+2 >= len(r) || r[i+2] != ':' {
+			return 0, patternNotShared()
+		}
+		return i + 3, nil
+	}
+	return i + 1, nil
+}
+
+// jsFormPattern is the pattern the form and the admin widget compile with the
+// u flag. `.` outside a class becomes `[^\n]`, which is RE2's `.`: one code
+// point, every character except newline. JavaScript's `.` also excludes `\r`,
+// U+2028, and U+2029, and without u it is one UTF-16 code unit.
+func jsFormPattern(pattern string) string {
+	r := []rune(pattern)
+	var b strings.Builder
+	inClass := false
+	for i := 0; i < len(r); i++ {
+		c := r[i]
+		if c == '\\' {
+			b.WriteRune(c)
+			if i+1 < len(r) {
+				i++
+				b.WriteRune(r[i])
+			}
+			continue
+		}
+		if c == '[' {
+			inClass = true
+		} else if inClass && c == ']' {
+			inClass = false
+		}
+		if c == '.' && !inClass {
+			b.WriteString(`[^\n]`)
+			continue
+		}
+		b.WriteRune(c)
+	}
+	return b.String()
+}
 
 // decimalSpelling is types.Decimal's schema pattern. A bound or default that
 // shopspring accepts but this pattern rejects (1e-2, +1.5, .5, 1.) would

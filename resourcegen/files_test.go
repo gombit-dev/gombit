@@ -136,7 +136,7 @@ func TestRenderConstraintFields(t *testing.T) {
 		`min: { value: 0`,
 		`status: "draft"`,
 		`[...String(value)].length > 8`,
-		`new RegExp("^[a-z]+$")`,
+		`new RegExp("^[a-z]+$", "u")`,
 	} {
 		if !strings.Contains(form, want) {
 			t.Fatalf("form missing %q:\n%s", want, form)
@@ -152,7 +152,7 @@ func TestRenderConstraintFields(t *testing.T) {
 		t.Fatal("cmpDecimal must treat -0 as zero")
 	}
 	mui := renderMUIFormTSX(ctx)
-	if !strings.Contains(mui, `new RegExp("^[a-z]+$")`) {
+	if !strings.Contains(mui, `new RegExp("^[a-z]+$", "u")`) {
 		t.Fatalf("MUI form missing unanchored regex:\n%s", mui)
 	}
 	if strings.Contains(mui, `pattern: "^[a-z]+$"`) {
@@ -163,7 +163,7 @@ func TestRenderConstraintFields(t *testing.T) {
 		t.Fatalf("parseFields text: %v", err)
 	}
 	textForm := renderFormField(text[0])
-	if !strings.Contains(textForm, `new RegExp("^[a-z]+$")`) {
+	if !strings.Contains(textForm, `new RegExp("^[a-z]+$", "u")`) {
 		t.Fatalf("text form missing regex:\n%s", textForm)
 	}
 	decimal, err := parseFields([]string{"price:decimal:max=10"}, "person")

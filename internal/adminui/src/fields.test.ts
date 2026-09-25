@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { FieldMeta } from "./api/types";
-import { compareDecimal, emptyFormValue, formValuesToBody, relationListQuery, relationOptions } from "./fields";
+import { compareDecimal, emptyFormValue, formPattern, formValuesToBody, relationListQuery, relationOptions } from "./fields";
 
 function field(partial: Pick<FieldMeta, "name" | "type"> & Partial<FieldMeta>): FieldMeta {
   return {
@@ -103,6 +103,20 @@ describe("formValuesToBody", () => {
 
     const bad = formValuesToBody({ count: 0, active: false, status: "published", note: "Hello" }, fields);
     expect(bad.jsonErrors).toEqual({ note: "does not match pattern" });
+  });
+
+  it("matches one code point for dot, the same set as the request", () => {
+    expect(formPattern(".")).toBe("[^\\n]");
+    expect(formPattern("\\.")).toBe("\\.");
+    expect(formPattern("[.]")).toBe("[.]");
+    const one = new RegExp(formPattern("^.$"), "u");
+    expect(one.test("😀")).toBe(true);
+    expect(one.test("\r")).toBe(true);
+    expect(one.test("\n")).toBe(false);
+    expect(new RegExp(formPattern("^.{2}$"), "u").test("😀")).toBe(false);
+    const fields: FieldMeta[] = [field({ name: "note", type: "text", pattern: "^.$" })];
+    expect(formValuesToBody({ note: "😀" }, fields).jsonErrors).toEqual({});
+    expect(formValuesToBody({ note: "\n" }, fields).jsonErrors).toEqual({ note: "does not match pattern" });
   });
 
   it("counts max_length in code points and treats -0 as zero", () => {

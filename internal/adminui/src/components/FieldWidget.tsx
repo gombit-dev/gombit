@@ -18,6 +18,7 @@ import { useCatalog } from "../app/providers";
 import type { FieldMeta, Row } from "../api/types";
 import {
   compareDecimal,
+  formPattern,
   isBelongsTo,
   isHasMany,
   isManyToMany,
@@ -430,7 +431,7 @@ function widgetRules(field: FieldMeta, readOnly: boolean) {
     };
   }
   if (field.pattern) {
-    rules.pattern = { value: new RegExp(field.pattern), message: "does not match pattern" };
+    rules.pattern = { value: new RegExp(formPattern(field.pattern), "u"), message: "does not match pattern" };
   }
   if (field.type === "decimal" && (field.minimum || field.maximum)) {
     rules.validate = (value) => {

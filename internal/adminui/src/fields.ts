@@ -242,6 +242,35 @@ export function formValuesToBody(values: Row, fields: FieldMeta[]): { body: Row;
   return { body, jsonErrors };
 }
 
+// formPattern is the pattern compiled with the u flag. `.` outside a class is
+// `[^\n]`, matching RE2: one code point, every character except newline.
+export function formPattern(pattern: string): string {
+  let out = "";
+  let inClass = false;
+  for (let i = 0; i < pattern.length; i++) {
+    const c = pattern[i];
+    if (c === "\\") {
+      out += c;
+      if (i + 1 < pattern.length) {
+        i++;
+        out += pattern[i];
+      }
+      continue;
+    }
+    if (c === "[") {
+      inClass = true;
+    } else if (inClass && c === "]") {
+      inClass = false;
+    }
+    if (c === "." && !inClass) {
+      out += "[^\\n]";
+      continue;
+    }
+    out += c;
+  }
+  return out;
+}
+
 function constraintError(field: FieldMeta, raw: unknown): string {
   if (isEmptyFormValue(raw)) {
     return "";
@@ -249,7 +278,7 @@ function constraintError(field: FieldMeta, raw: unknown): string {
   if (field.max_length && [...String(raw)].length > field.max_length) {
     return "is too long";
   }
-  if (field.pattern && !new RegExp(field.pattern).test(String(raw))) {
+  if (field.pattern && !new RegExp(formPattern(field.pattern), "u").test(String(raw))) {
     return "does not match pattern";
   }
   if ((field.minimum || field.maximum) && (field.type === "integer" || field.type === "float")) {
