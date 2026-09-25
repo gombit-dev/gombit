@@ -321,6 +321,9 @@ jobs:
           go test -tags integration ./resourcegen \
             -resourcegen.postgres-dsn \
             'postgres://gombit:gombit@127.0.0.1:5432/gombit?sslmode=disable'
+          go test -tags integration ./types \
+            -types.postgres-dsn \
+            'postgres://gombit:gombit@127.0.0.1:5432/gombit?sslmode=disable'
 
       # Separate database from the auth/database/admin tests above: gin-gorm's
       # User model maps to a "users" table, same as auth.User, and the two

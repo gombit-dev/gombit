@@ -471,7 +471,35 @@ func (f modelField) jsonName() string { return toSnake(f.GoName) }
 
 // responseTag is the struct tag for f in the response DTO: wire name plus doc.
 func (f modelField) responseTag() string {
-	return `json:"` + f.jsonName() + `" doc:"` + f.GoName + `"`
+	return `json:"` + f.jsonName() + `"` + schemaAttr(f.GoType) + ` doc:"` + f.GoName + `"`
+}
+
+// schemaAttr is the OpenAPI format and nullability huma does not infer.
+// time.Time already becomes a nullable string when it is a pointer. uuid.UUID
+// is an array, so Huma drops the pointer before it can set Nullable; the tag
+// has to say nullable. types.Date is a TextUnmarshaler struct, so a pointer
+// would be nullable once Schema() is not in the way, and the tag repeats that
+// so the published schema matches the column. JSON nullability is the Go type
+// (types.JSON rejects null, types.NullJSON allows it): Huma checks anyOf
+// before the nullable tag, so a tag cannot punch a null hole through that schema.
+func schemaAttr(goType string) string {
+	base := strings.TrimPrefix(goType, "*")
+	pointer := strings.HasPrefix(goType, "*")
+	pkg, name, ok := strings.Cut(base, ".")
+	var b strings.Builder
+	switch {
+	case ok && name == "UUID" && strings.HasPrefix(pkg, "uuid"):
+		b.WriteString(` format:"uuid"`)
+		if pointer {
+			b.WriteString(` nullable:"true"`)
+		}
+	case ok && name == "Date" && (pkg == "types" || strings.HasPrefix(pkg, "types")):
+		b.WriteString(` format:"date"`)
+		if pointer {
+			b.WriteString(` nullable:"true"`)
+		}
+	}
+	return b.String()
 }
 
 // requestTag is the struct tag for f in the create request DTO: the wire name,
@@ -501,7 +529,7 @@ func (f modelField) requestTag() string {
 	if f.Constraints.Default != "" {
 		name += ",omitempty"
 	}
-	tag := `json:"` + name + `"`
+	tag := `json:"` + name + `"` + schemaAttr(f.GoType)
 	if f.Kind == reflect.String && !f.isDecimal() {
 		if f.NotNull && f.Constraints.Default == "" {
 			tag += ` minLength:"1"`
