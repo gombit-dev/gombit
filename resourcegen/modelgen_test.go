@@ -544,6 +544,194 @@ func goldenBook() any {
 	return &Book{}
 }
 
+func TestRequestTagReadsValidateConstraints(t *testing.T) {
+	type Person struct {
+		ID     uint   `gorm:"primaryKey"`
+		Age    int    `gorm:"not null;check:age >= 0 AND age <= 150" validate:"min=0;max=150"`
+		Code   string `gorm:"size:8;not null" validate:"max_length=8;pattern=^[a-z]+$"`
+		Status string `gorm:"size:16" validate:"enum=draft,published;default=draft"`
+		Count  uint   `validate:"min=2"`
+	}
+	res, err := buildModelResource(&Person{}, "resourcegen")
+	if err != nil {
+		t.Fatalf("buildModelResource: %v", err)
+	}
+	src := renderModelDTOs(res)
+	for _, want := range []string{
+		`json:"age" minimum:"0" maximum:"150" doc:"Age"`,
+		`json:"code" minLength:"1" maxLength:"8" pattern:"^[a-z]+$" doc:"Code"`,
+		`Status *string`,
+		`json:"status,omitempty" maxLength:"16" enum:"draft,published" doc:"Status"`,
+		`json:"count" minimum:"2" doc:"Count"`,
+		`row.Status = "draft"`,
+	} {
+		if !strings.Contains(src, want) {
+			t.Fatalf("DTOs missing %q:\n%s", want, src)
+		}
+	}
+	if strings.Contains(src, `default:"draft"`) {
+		t.Fatalf("request tag must not use Huma default:\n%s", src)
+	}
+}
+
+func TestGeneratedDefaultsKeepExplicitZero(t *testing.T) {
+	if testing.Short() {
+		t.Skip("compiles and runs a temp module; skipped in -short")
+	}
+	type Person struct {
+		ID     uint          `gorm:"primaryKey"`
+		Count  int           `validate:"min=0;default=1"`
+		Active bool          `validate:"default=true"`
+		Price  types.Decimal `validate:"max=10"`
+	}
+	res, err := buildModelResource(&Person{}, "personpkg")
+	if err != nil {
+		t.Fatalf("buildModelResource: %v", err)
+	}
+	dto := string(mustFormatGo(renderModelDTOs(res)))
+	if strings.Contains(dto, `default:"`) {
+		t.Fatalf("Huma default tag rewrites zeros:\n%s", dto)
+	}
+	if !strings.Contains(dto, `json:"count,omitempty"`) || !strings.Contains(dto, `json:"active,omitempty"`) {
+		t.Fatalf("defaulted create fields must be omitempty so a missing key is legal:\n%s", dto)
+	}
+	if strings.Contains(dto, `minimum:"10"`) || strings.Contains(dto, `maximum:"10"`) {
+		t.Fatalf("decimal bounds must not be minimum/maximum on a string schema:\n%s", dto)
+	}
+
+	dir := t.TempDir()
+	pkgDir := filepath.Join(dir, res.Package)
+	if err := os.MkdirAll(pkgDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(dir, "go.mod"),
+		"module personmod\n\ngo 1.23\n\nrequire github.com/gombit-dev/gombit v0.0.0\n\nreplace github.com/gombit-dev/gombit => "+resourcegenModuleRoot(t)+"\n")
+	writeFile(t, filepath.Join(pkgDir, "model.go"), `package personpkg
+
+import "github.com/gombit-dev/gombit/types"
+
+type Person struct {
+	ID     uint `+"`gorm:\"primaryKey\"`"+`
+	Count  int
+	Active bool
+	Price  types.Decimal
+}
+`)
+	writeFile(t, filepath.Join(pkgDir, "dto.gen.go"), dto)
+	writeFile(t, filepath.Join(pkgDir, "run_test.go"), `package personpkg
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/danielgtaylor/huma/v2"
+	"github.com/danielgtaylor/huma/v2/adapters/humagin"
+	"github.com/gin-gonic/gin"
+	"github.com/gombit-dev/gombit/contract"
+	"github.com/gombit-dev/gombit/types"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
+)
+
+func TestRun(t *testing.T) {
+	zero := 0
+	active := false
+	explicit := personFromCreateBody(personCreateBody{
+		Count:  &zero,
+		Active: &active,
+		Price:  types.MustDecimal("1"),
+	})
+	if explicit.Count != 0 || explicit.Active != false {
+		t.Fatalf("explicit zero rewritten before save: %+v", explicit)
+	}
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "t.db")), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&Person{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&explicit).Error; err != nil {
+		t.Fatal(err)
+	}
+	var got Person
+	if err := db.First(&got, explicit.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if got.Count != 0 || got.Active != false {
+		t.Fatalf("explicit zero rewritten on insert: %+v", got)
+	}
+
+	omitted := personFromCreateBody(personCreateBody{Price: types.MustDecimal("1")})
+	if omitted.Count != 1 || omitted.Active != true {
+		t.Fatalf("omitted fields did not take the default: %+v", omitted)
+	}
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	api := humagin.New(router, contract.HumaConfig("person", "0.0.0"))
+	type input struct {
+		Body personCreateBody
+	}
+	type created struct {
+		Count  int  `+"`json:\"count\"`"+`
+		Active bool `+"`json:\"active\"`"+`
+	}
+	huma.Register(api, huma.Operation{
+		OperationID: "create-person",
+		Method:      http.MethodPost,
+		Path:        "/people",
+	}, func(_ context.Context, in *input) (*struct{ Body created }, error) {
+		row := personFromCreateBody(in.Body)
+		if err := db.Create(&row).Error; err != nil {
+			return nil, err
+		}
+		return &struct{ Body created }{Body: created{Count: row.Count, Active: row.Active}}, nil
+	})
+	post := func(raw string) (int, string, created) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/people", strings.NewReader(raw))
+		req.Header.Set("Content-Type", "application/json")
+		router.ServeHTTP(rec, req)
+		var got created
+		if rec.Code == http.StatusOK {
+			if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+				t.Fatalf("decode %s: %v body %s", raw, err, rec.Body.String())
+			}
+		}
+		return rec.Code, rec.Body.String(), got
+	}
+	if code, body, got := post(`+"`{\"price\":\"1\"}`"+`); code != http.StatusOK || got.Count != 1 || got.Active != true {
+		t.Fatalf("omitted default over HTTP: status %d body %s parsed %+v", code, body, got)
+	}
+	if code, body, got := post(`+"`{\"count\":0,\"active\":false,\"price\":\"1\"}`"+`); code != http.StatusOK || got.Count != 0 || got.Active != false {
+		t.Fatalf("explicit zero over HTTP: status %d body %s parsed %+v", code, body, got)
+	}
+
+	over := personCreateBody{Price: types.MustDecimal("999")}
+	if errs := over.Resolve(nil); len(errs) == 0 {
+		t.Fatal("decimal 999 with max 10 must fail Resolve")
+	}
+}
+`)
+	tidy := exec.Command("go", "mod", "tidy")
+	tidy.Dir = dir
+	if out, err := tidy.CombinedOutput(); err != nil {
+		t.Fatalf("go mod tidy: %v\n%s\n--- generated ---\n%s", err, out, dto)
+	}
+	cmd := exec.Command("go", "test", "./...")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("generated defaults failed: %v\n%s\n--- generated ---\n%s", err, out, dto)
+	}
+}
+
 func TestRenderModelDTOsGolden(t *testing.T) {
 	res, err := buildModelResource(goldenBook(), "resourcegen")
 	if err != nil {

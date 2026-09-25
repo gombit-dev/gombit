@@ -862,11 +862,9 @@ func TestGenerateNumberFieldEmptyIsZero(t *testing.T) {
 	}
 }
 
-// Enum fields are rejected by the model-first generator (enum values are not a
-// schema fact, so the DTO/OpenAPI cannot carry the constraint) — fail loud with
-// a pointer to the future model-first enum policy, never silently degrade to a
-// plain string.
-func TestGenerateRejectsEnumFields(t *testing.T) {
+// Enum values travel on the validate tag, which is what gombit generate reads
+// back. make resource must write that tag and the form default, not refuse the spec.
+func TestGenerateEnumDefault(t *testing.T) {
 	workDir := t.TempDir()
 	if err := scaffold.Generate(context.Background(), scaffold.Options{
 		Name: "demo", Database: "sqlite", WorkDir: workDir, Stdout: ioDiscard{},
@@ -876,16 +874,21 @@ func TestGenerateRejectsEnumFields(t *testing.T) {
 	appDir := filepath.Join(workDir, "demo")
 	err := Generate(context.Background(), Options{
 		WorkDir:   appDir,
-		Name:      "Rental",
-		Fields:    []string{"status:enum(requested,confirmed,active)"},
+		Name:      "Person",
+		Fields:    []string{"age:int:required,min=0,max=150", "status:enum(draft,published):default=draft"},
 		Stdout:    ioDiscard{},
 		skipAtlas: true,
 	})
-	if err == nil || !strings.Contains(err.Error(), "enum") {
-		t.Fatalf("enum field must be rejected, got: %v", err)
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
 	}
-	if _, statErr := os.Stat(filepath.Join(appDir, "internal", "rental")); !os.IsNotExist(statErr) {
-		t.Fatal("nothing must be written when an enum field is rejected")
+	model := readFile(t, filepath.Join(appDir, "internal", "person", "person.go"))
+	if !strings.Contains(model, `enum=draft,published`) || !strings.Contains(model, `default=draft`) {
+		t.Fatalf("model did not keep the enum default:\n%s", model)
+	}
+	form := readFile(t, filepath.Join(appDir, "frontend", "src", "person", "form.tsx"))
+	if !strings.Contains(form, `status: "draft"`) {
+		t.Fatalf("form did not start the enum at its default:\n%s", form)
 	}
 }
 

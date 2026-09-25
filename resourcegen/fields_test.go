@@ -130,6 +130,143 @@ func TestParseFields(t *testing.T) {
 	}
 }
 
+func TestParseConstraints(t *testing.T) {
+	t.Parallel()
+	fields, err := parseFields([]string{
+		"age:int:required,min=0,max=150",
+		"status:enum(draft,published):default=draft",
+		"code:string:max_length=8,regex=^[a-z]+$",
+	}, "person")
+	if err != nil {
+		t.Fatalf("parseFields: %v", err)
+	}
+	age, status, code := fields[0], fields[1], fields[2]
+	if age.Min != "0" || age.Max != "150" || !age.Required {
+		t.Fatalf("age = %+v", age)
+	}
+	if status.Default != "draft" || len(status.EnumValues) != 2 {
+		t.Fatalf("status = %+v", status)
+	}
+	if code.MaxLength != 8 || code.Pattern != "^[a-z]+$" {
+		t.Fatalf("code = %+v", code)
+	}
+	hex, err := parseFields([]string{"mark:string:regex=\\x41"}, "person")
+	if err != nil {
+		t.Fatalf("two-digit hex escape: %v", err)
+	}
+	if hex[0].Pattern != `\x41` {
+		t.Fatalf("pattern = %q", hex[0].Pattern)
+	}
+	if !strings.Contains(age.gormTag(), "check:age >= 0 AND age <= 150") {
+		t.Fatalf("gorm tag = %q", age.gormTag())
+	}
+	if strings.Contains(status.gormTag(), "default:") {
+		t.Fatalf("gorm tag must not replace an explicit zero: %q", status.gormTag())
+	}
+	if !strings.Contains(code.gormTag(), "size:8") {
+		t.Fatalf("gorm tag = %q", code.gormTag())
+	}
+	short, err := parseFields([]string{
+		"name:string:max_length=1,default=é",
+		"emoji:string:max_length=1,default=👍",
+	}, "person")
+	if err != nil {
+		t.Fatalf("one code point fits max_length: %v", err)
+	}
+	if short[0].Default != "é" || short[1].Default != "👍" {
+		t.Fatalf("defaults = %q %q", short[0].Default, short[1].Default)
+	}
+	plain, err := parseFields([]string{"order:int"}, "person")
+	if err != nil {
+		t.Fatalf("order without a check is a column: %v", err)
+	}
+	if plain[0].JSONName != "order" || strings.Contains(plain[0].gormTag(), "check:") {
+		t.Fatalf("order = %+v tag %q", plain[0], plain[0].gormTag())
+	}
+}
+
+func TestParseConstraintsReject(t *testing.T) {
+	t.Parallel()
+	for _, spec := range []string{
+		"name:string:min=1",
+		"age:int:min=10,max=1",
+		"age:uint:min=-1",
+		"status:enum(draft,published):default=archived",
+		"title:string:max_length=3,default=hello",
+		"name:string:max_length=1,default=éé",
+		"note:text:regex=^[a-z]+$,default=Hello",
+		"when:time:default=now",
+		"note:text:regex=(?i)^[a-z]+$",
+		"note:text:regex=\\p{L}+",
+		"count:int64:min=9007199254740993,max=9007199254740992",
+		"price:decimal:min=NaN",
+		"count:int64:max=9007199254740995",
+		"count:int64:max=9007199254740992",
+		"count:int64:max=18014398509481984",
+		"count:int64:min=-9007199254740992",
+		"count:int64:min=9007199254740993",
+		"price:decimal:default=1e-2",
+		"price:decimal:min=1e-2",
+		"price:decimal:min=+1.5",
+		"price:decimal:min=.5",
+		"price:decimal:max=1.",
+		"price:decimal:min=0.00001,default=0.00001",
+		"price:decimal:max=0.99999",
+		"price:decimal:min=1000000000000000",
+		"price:decimal(10,2):min=0.001",
+		"note:text:regex=^\\s+$",
+		"note:text:regex=\\S+",
+		"note:text:regex=\\x{00E9}",
+		"note:text:regex=\\a",
+		"note:text:regex=[]a]",
+		"note:text:regex=\\141",
+		"note:text:regex=a{",
+		"note:text:regex=}",
+		"note:text:regex=[[:alpha:]]",
+		"note:text:regex=a]",
+		"note:text:regex=a{01}",
+		"note:text:regex=a{00}",
+		"note:text:regex=a{0,01}",
+		"note:text:regex=^+",
+		"note:text:regex=$*",
+		"note:text:regex=[\\d-9]",
+		"note:text:regex=\\B",
+		"note:text:regex=\\b",
+		"order:int:min=0",
+		"group:int:max=1",
+		"select:int:min=0,max=10",
+		"order:decimal:min=0",
+		"status:enum(on;off)",
+	} {
+		if _, err := parseFields([]string{spec}, "person"); err == nil {
+			t.Fatalf("parseFields(%q) error = nil, want error", spec)
+		}
+	}
+}
+
+func TestBoundsMatchRequestSpelling(t *testing.T) {
+	t.Parallel()
+	// 9007199254740991 is 2^53-1, the last integer a number comparison and the
+	// SQL check accept together. 2^53 round-trips and is still rejected.
+	fields, err := parseFields([]string{
+		"count:int64:max=9007199254740991",
+		"price:decimal:min=0.0001,default=0.0001",
+		"rate:decimal(10,2):max=12345678.99",
+	}, "person")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(fields[0].gormTag(), "count <= 9007199254740991") {
+		t.Fatalf("gorm tag = %q", fields[0].gormTag())
+	}
+	if fields[1].Min != "0.0001" || fields[1].Default != "0.0001" {
+		t.Fatalf("price = %+v", fields[1])
+	}
+	if fields[2].Max != "12345678.99" || fields[2].Precision != 10 || fields[2].Scale != 2 {
+		t.Fatalf("rate = %+v", fields[2])
+	}
+}
+
 func TestParseFieldsDuplicate(t *testing.T) {
 	t.Parallel()
 	_, err := parseFields([]string{"title:string", "title:int"}, "widget")

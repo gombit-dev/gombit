@@ -55,8 +55,8 @@ hook refers to are produced by generation:
    - `filterable` / `sortable` / `searchable` / `aggregatable` — the list-query
      surface (each requires the field to be readable).
 
-   A field marked `enum(...)` under the old CLI grammar has no model-first
-   representation yet; use a plain `string` column for now.
+   A field marked `enum(...)` keeps its values in a `validate:"enum=a,b"` tag.
+   `gombit generate` reads that tag and emits the Huma `enum` on the create body.
 
 2. **Mark the package and remove the old plumbing.** Add the marker and delete the
    human-owned handler/routes so the generated ones can take over. (`main.go` still

@@ -78,6 +78,13 @@ type Field struct {
 	Required bool      `json:"required"`
 	ReadOnly bool      `json:"readonly"`
 	Related  *Relation `json:"related,omitempty"`
+	// Constraints copied from the model's validate tag when the registrar
+	// leaves them empty. Strings so a decimal bound survives JSON.
+	Minimum   string `json:"minimum,omitempty"`
+	Maximum   string `json:"maximum,omitempty"`
+	MaxLength int    `json:"max_length,omitempty"`
+	Pattern   string `json:"pattern,omitempty"`
+	Default   string `json:"default,omitempty"`
 	// Column is the GORM/SQL column name. Empty means Name == JSON key ==
 	// column (the v1 default). Not emitted in meta.
 	Column string `json:"-"`

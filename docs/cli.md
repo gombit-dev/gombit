@@ -319,9 +319,9 @@ by editing the generated `*.gen.go`** (regeneration overwrites them). See the
 [migration guide](migration-model-first-resources.md) if you have resources
 from the old human-owned-`handler.go` layout.
 
-Default API prefix is `/api/v1`. Enum fields (`status:enum(a,b,c)`) are not yet
-supported by the model-first generator (enum values are not a GORM schema fact)
-and are rejected; use a string field for now. `--service` and `--repo` are C6
+Default API prefix is `/api/v1`. Enum fields (`status:enum(a,b,c)`) keep their
+values on the model's `validate` tag, and `gombit generate` emits that list as
+a Huma `enum` on the create body. `--service` and `--repo` are C6
 opt-in and are not used by the generated handler.
 
 Route registration is appended in `cmd/server/main.go` via `go/ast` +

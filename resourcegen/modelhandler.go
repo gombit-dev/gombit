@@ -309,9 +309,9 @@ func filterKindExpr(f modelField) string {
 
 // filterQueryTag builds the Huma struct tag for a filter query param: the query
 // name (the DB column), a true/false enum for a bool column so Huma rejects bad
-// values, and a doc string. (Unlike the legacy path, a string enum column carries
-// no enum constraint: the GORM schema stores an enum as a plain varchar, so the
-// allowed values are not recoverable from the model.)
+// values, and a doc string. A string enum's allowed values live on the model's
+// validate tag and are emitted on the create body; this filter param does not
+// repeat them.
 func filterQueryTag(f modelField) string {
 	tag := `query:"` + f.Column + `"`
 	if f.Kind == reflect.Bool {

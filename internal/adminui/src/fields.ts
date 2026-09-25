@@ -125,6 +125,15 @@ export function formatCell(value: unknown): string {
 }
 
 export function emptyFormValue(field: FieldMeta): unknown {
+  if (field.default !== undefined && field.default !== "") {
+    if (field.type === "boolean") {
+      return field.default === "true";
+    }
+    if (field.type === "integer" || field.type === "float") {
+      return Number(field.default);
+    }
+    return field.default;
+  }
   if (field.type === "boolean") {
     return false;
   }
@@ -181,6 +190,11 @@ export function formValuesToBody(values: Row, fields: FieldMeta[]): { body: Row;
       body[field.name] = Boolean(raw);
       continue;
     }
+    const constraint = constraintError(field, raw);
+    if (constraint) {
+      jsonErrors[field.name] = constraint;
+      continue;
+    }
     if (field.type === "decimal") {
       // Decimals are submitted as an exact string, never a JSON number: a JSON
       // body decodes numbers to float64 on the server, which cannot represent a
@@ -226,6 +240,105 @@ export function formValuesToBody(values: Row, fields: FieldMeta[]): { body: Row;
     body[field.name] = raw;
   }
   return { body, jsonErrors };
+}
+
+// formPattern is the pattern compiled with the u flag. `.` outside a class is
+// `[^\n]`, matching RE2: one code point, every character except newline.
+export function formPattern(pattern: string): string {
+  let out = "";
+  let inClass = false;
+  for (let i = 0; i < pattern.length; i++) {
+    const c = pattern[i];
+    if (c === "\\") {
+      out += c;
+      if (i + 1 < pattern.length) {
+        i++;
+        out += pattern[i];
+      }
+      continue;
+    }
+    if (c === "[") {
+      inClass = true;
+    } else if (inClass && c === "]") {
+      inClass = false;
+    }
+    if (c === "." && !inClass) {
+      out += "[^\\n]";
+      continue;
+    }
+    out += c;
+  }
+  return out;
+}
+
+function constraintError(field: FieldMeta, raw: unknown): string {
+  if (isEmptyFormValue(raw)) {
+    return "";
+  }
+  if (field.max_length && [...String(raw)].length > field.max_length) {
+    return "is too long";
+  }
+  if (field.pattern && !new RegExp(formPattern(field.pattern), "u").test(String(raw))) {
+    return "does not match pattern";
+  }
+  if ((field.minimum || field.maximum) && (field.type === "integer" || field.type === "float")) {
+    const n = Number(raw);
+    if (Number.isNaN(n)) {
+      return "must be a number";
+    }
+    if (field.minimum !== undefined && field.minimum !== "" && n < Number(field.minimum)) {
+      return `must be at least ${field.minimum}`;
+    }
+    if (field.maximum !== undefined && field.maximum !== "" && n > Number(field.maximum)) {
+      return `must be at most ${field.maximum}`;
+    }
+  }
+  if ((field.minimum || field.maximum) && field.type === "decimal") {
+    const text = String(raw).trim();
+    if (!/^-?\d+(\.\d+)?$/.test(text)) {
+      return "must be a decimal";
+    }
+    if (field.minimum && compareDecimal(text, field.minimum) < 0) {
+      return `must be at least ${field.minimum}`;
+    }
+    if (field.maximum && compareDecimal(text, field.maximum) > 0) {
+      return `must be at most ${field.maximum}`;
+    }
+  }
+  return "";
+}
+
+/** compareDecimal reports the magnitude order of two decimal strings. */
+export function compareDecimal(a: string, b: string): number {
+  const norm = (raw: string) => {
+    let t = raw.trim();
+    let neg = false;
+    if (t.startsWith("-")) {
+      neg = true;
+      t = t.slice(1);
+    }
+    const parts = t.split(".");
+    const ip = (parts[0] || "0").replace(/^0+(?=\d)/, "");
+    const fp = (parts[1] || "").replace(/0+$/, "");
+    if (ip === "0" && fp === "") neg = false;
+    return { neg, ip, fp };
+  };
+  const left = norm(a);
+  const right = norm(b);
+  if (left.neg !== right.neg) {
+    return left.neg ? -1 : 1;
+  }
+  const sign = left.neg ? -1 : 1;
+  if (left.ip.length !== right.ip.length) {
+    return sign * (left.ip.length < right.ip.length ? -1 : 1);
+  }
+  if (left.ip !== right.ip) {
+    return sign * (left.ip < right.ip ? -1 : 1);
+  }
+  if (left.fp !== right.fp) {
+    return sign * (left.fp < right.fp ? -1 : 1);
+  }
+  return 0;
 }
 
 function isEmptyFormValue(raw: unknown): boolean {

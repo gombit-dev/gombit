@@ -9,11 +9,11 @@ import (
 
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/gombit-dev/gombit/admin"
 	"github.com/gombit-dev/gombit/auth"
 	"github.com/gombit-dev/gombit/config"
 	"github.com/gombit-dev/gombit/framework"
-	"github.com/gin-gonic/gin"
 	"github.com/pb33f/libopenapi"
 	openapivalidator "github.com/pb33f/libopenapi-validator"
 	"go.uber.org/zap"
@@ -158,6 +158,57 @@ func TestMetaRelationHasManyIsReadOnly(t *testing.T) {
 	}
 	if !rel.ReadOnly {
 		t.Fatal("has_many field should be readonly in meta")
+	}
+}
+
+func TestMetaReadsValidateConstraints(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	type Person struct {
+		ID     uint   `gorm:"primaryKey" json:"id"`
+		Age    int    `json:"age" validate:"min=0;max=150"`
+		Status string `json:"status" validate:"default=draft"`
+		Code   string `json:"code" validate:"max_length=8;pattern=^[a-z]+$"`
+	}
+	app := newCookieApp(t)
+	if err := app.DB().AutoMigrate(&Person{}); err != nil {
+		t.Fatalf("AutoMigrate: %v", err)
+	}
+	if err := admin.Register(app, Person{}, admin.Options{
+		Slug: "people",
+		Fields: []admin.Field{
+			{Name: "id", Type: admin.TypeInteger, ReadOnly: true},
+			{Name: "age", Type: admin.TypeInteger, Required: true},
+			{Name: "status", Type: admin.TypeString},
+			{Name: "code", Type: admin.TypeString},
+		},
+		List: []string{"status"},
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	jar := loginSuperuser(t, app)
+	rec := doRequest(app, jar, http.MethodGet, "/api/v1/admin/meta/people", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; body: %s", rec.Code, rec.Body.String())
+	}
+	var env modelEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	byName := map[string]admin.FieldMeta{}
+	for _, f := range env.Data.Fields {
+		byName[f.Name] = f
+	}
+	if byName["age"].Minimum != "0" || byName["age"].Maximum != "150" {
+		t.Fatalf("age = %+v", byName["age"])
+	}
+	if byName["status"].Default != "draft" {
+		t.Fatalf("status = %+v", byName["status"])
+	}
+	if byName["code"].MaxLength != 8 || byName["code"].Pattern != "^[a-z]+$" {
+		t.Fatalf("code = %+v", byName["code"])
+	}
+	if strings.Contains(rec.Body.String(), `"minimum":""`) {
+		t.Fatalf("empty constraints must be omitted: %s", rec.Body.String())
 	}
 }
 

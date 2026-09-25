@@ -21,6 +21,7 @@ import (
 	"github.com/gombit-dev/gombit/auth"
 	"github.com/gombit-dev/gombit/contract"
 	"github.com/gombit-dev/gombit/framework"
+	"github.com/gombit-dev/gombit/types"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -32,6 +33,62 @@ type rowEnvelope struct {
 type listEnvelope struct {
 	Data []map[string]any   `json:"data"`
 	Meta *contract.PageMeta `json:"meta"`
+}
+
+func TestAdminCreateKeepsExplicitZero(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	type Person struct {
+		ID     uint          `gorm:"primaryKey" json:"id"`
+		Count  int           `json:"count" validate:"min=0;default=1"`
+		Active bool          `json:"active" validate:"default=true"`
+		Price  types.Decimal `json:"price" validate:"max=10"`
+	}
+	app := newCookieApp(t)
+	if err := app.DB().AutoMigrate(&Person{}); err != nil {
+		t.Fatalf("AutoMigrate: %v", err)
+	}
+	if err := admin.Register(app, Person{}, admin.Options{
+		Slug: "people",
+		Fields: []admin.Field{
+			{Name: "id", Type: admin.TypeInteger, ReadOnly: true},
+			{Name: "count", Type: admin.TypeInteger},
+			{Name: "active", Type: admin.TypeBoolean},
+			{Name: "price", Type: admin.TypeDecimal},
+		},
+		List: []string{"count"},
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	jar := loginSuperuser(t, app)
+
+	explicit := doRequest(app, jar, http.MethodPost, "/api/v1/admin/resources/people", `{"count":0,"active":false,"price":"1"}`)
+	if explicit.Code != http.StatusOK {
+		t.Fatalf("explicit status = %d; body: %s", explicit.Code, explicit.Body.String())
+	}
+	var created rowEnvelope
+	if err := json.Unmarshal(explicit.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if created.Data["count"] != float64(0) || created.Data["active"] != false {
+		t.Fatalf("explicit zero was rewritten: %#v", created.Data)
+	}
+
+	omitted := doRequest(app, jar, http.MethodPost, "/api/v1/admin/resources/people", `{"price":"1"}`)
+	if omitted.Code != http.StatusOK {
+		t.Fatalf("omitted status = %d; body: %s", omitted.Code, omitted.Body.String())
+	}
+	var filled rowEnvelope
+	if err := json.Unmarshal(omitted.Body.Bytes(), &filled); err != nil {
+		t.Fatalf("decode omitted: %v", err)
+	}
+	if filled.Data["count"] != float64(1) || filled.Data["active"] != true {
+		t.Fatalf("omitted fields did not take the default: %#v", filled.Data)
+	}
+
+	over := doRequest(app, jar, http.MethodPost, "/api/v1/admin/resources/people", `{"price":"11"}`)
+	if over.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("over max status = %d; body: %s", over.Code, over.Body.String())
+	}
 }
 
 func TestResourceCRUDAndAuthz(t *testing.T) {
@@ -942,7 +999,7 @@ func TestResourceDeleteSelfReferentialRespectsLiveChildren(t *testing.T) {
 	type Engine struct {
 		gorm.Model
 		Name           string  `json:"name"`
-		ParentEngineID *uint    `json:"parent_engine_id"`
+		ParentEngineID *uint   `json:"parent_engine_id"`
 		ParentEngine   *Engine `gorm:"foreignKey:ParentEngineID" json:"-"`
 	}
 	app := newCookieApp(t)
