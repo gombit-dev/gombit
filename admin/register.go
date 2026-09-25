@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/gombit-dev/gombit/config"
+	"github.com/gombit-dev/gombit/field"
 	"gorm.io/gorm/schema"
 )
 
@@ -187,6 +188,30 @@ func fieldByName(fields []Field, name string) *Field {
 	return nil
 }
 
+// fieldAllowsQuery reports whether an admin list option (search, filter,
+// ordering) is legal for the field's catalog kind. Relation cardinalities
+// read relationCaps; every other admin type is the kind of the same name.
+func fieldAllowsQuery(kind string, f Field) bool {
+	k := field.Kind(f.Type)
+	var rel field.RelationKind
+	if f.Type == TypeRelation {
+		k = field.Relation
+		if f.Related != nil {
+			rel = field.RelationKind(f.Related.Kind)
+		}
+	}
+	switch kind {
+	case "search":
+		return field.AllowsSearch(k, rel)
+	case "filter":
+		return field.AllowsFilter(k, rel)
+	case "ordering":
+		return field.AllowsSort(k, rel)
+	default:
+		return true
+	}
+}
+
 func validateFieldRefs(opts Options, implicit map[string]implicitColumn) error {
 	known := map[string]bool{}
 	for _, f := range opts.Fields {
@@ -221,6 +246,13 @@ func validateFieldRefs(opts Options, implicit map[string]implicitColumn) error {
 	check := func(kind string, names []string, allowImplicit bool) error {
 		for _, name := range names {
 			if known[name] {
+				if f := fieldByName(opts.Fields, name); f != nil && !fieldAllowsQuery(kind, *f) {
+					detail := string(f.Type)
+					if f.Type == TypeRelation && f.Related != nil && f.Related.Kind != "" {
+						detail = f.Related.Kind
+					}
+					return fmt.Errorf("admin: %s %q is %s and cannot be used for %s", kind, name, detail, kind)
+				}
 				continue
 			}
 			if allowImplicit && implicitTimestamp(name) {

@@ -8,9 +8,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/gombit-dev/gombit/field"
 	"github.com/gombit-dev/gombit/resourcepolicy"
-	"github.com/gombit-dev/gombit/types"
 	"gorm.io/gorm/schema"
 )
 
@@ -73,9 +74,9 @@ type modelField struct {
 	// (a *string / sql.NullString column reports reflect.String) — see
 	// effectiveKind. It is a type CLASSIFICATION, distinct from GoType's rendered
 	// TEXT: a defined type `type Slug string` renders as "Slug" (by identity, on
-	// purpose) but has Kind reflect.String. Kind-based decisions (minLength for a
-	// string column, whether a column can be filtered/sorted/aggregated) must key
-	// off this, never off the GoType string or the raw (possibly pointer) kind.
+	// purpose) but has Kind reflect.String. Rendering decisions (minLength for a
+	// string column, filter coercion) key off this. Query capability does not:
+	// filter, search, sort, and aggregate read field.KindFromGo plus field.Allows*.
 	Kind reflect.Kind
 }
 
@@ -171,10 +172,9 @@ func buildModelResource(model any, pkg string) (modelResource, error) {
 			Size:       f.Size,
 		}
 		// resourcepolicy validated the query capabilities as API policy (declared,
-		// response-visible); here, where the Go type is known, validate that the
-		// column's type can actually support the operation — the split the legacy
-		// path made from its field grammar, kept type-appropriate.
-		if err := validateQueryTypes(mf, f.FieldType); err != nil {
+		// response-visible). Whether the column's type supports the operation is
+		// the field catalog: KindFromGo plus Allows*.
+		if err := validateQueryTypes(mf, f.FieldType, string(f.DataType)); err != nil {
 			return modelResource{}, err
 		}
 		res.Fields = append(res.Fields, mf)
@@ -184,13 +184,9 @@ func buildModelResource(model any, pkg string) (modelResource, error) {
 	return res, nil
 }
 
-// decimalType is the framework decimal, the one non-primitive numeric type that
-// is aggregatable.
-var decimalType = reflect.TypeOf(types.Decimal{})
-
 // sqlNullKinds maps the database/sql nullable wrappers to the scalar kind they
 // carry, so a nullable column is classified by its underlying type — not by the
-// struct wrapper — for query-capability decisions.
+// struct wrapper — for rendering decisions (filter coercion, string length).
 var sqlNullKinds = map[reflect.Type]reflect.Kind{
 	reflect.TypeOf(sql.NullString{}):  reflect.String,
 	reflect.TypeOf(sql.NullInt64{}):   reflect.Int64,
@@ -201,12 +197,10 @@ var sqlNullKinds = map[reflect.Type]reflect.Kind{
 	reflect.TypeOf(sql.NullFloat64{}): reflect.Float64,
 }
 
-// effectiveKind is the field's scalar kind for query-capability decisions with
-// nullability unwrapped once: a pointer column (*string, *int64) reports the kind
-// it points to, and a database/sql wrapper (sql.NullString, …) the kind it
-// carries. Nullability is orthogonal to whether a column can be filtered / sorted
-// / searched / aggregated (the legacy field grammar draws no such distinction),
-// so every query check must consult this, never the raw reflect.Kind.
+// effectiveKind is the field's scalar kind with nullability unwrapped once: a
+// pointer column (*string, *int64) reports the kind it points to, and a
+// database/sql wrapper (sql.NullString, …) the kind it carries. Rendering keys
+// off this. Query capability uses queryKind instead.
 func effectiveKind(t reflect.Type) reflect.Kind {
 	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
@@ -217,46 +211,58 @@ func effectiveKind(t reflect.Type) reflect.Kind {
 	return t.Kind()
 }
 
-// validateQueryTypes fails closed when a column declares a query capability its Go
-// type cannot support, matching the legacy field-grammar type rules: filterable ⊂
-// {string, integer, bool}; searchable ⊂ {string}; aggregatable ⊂ numeric (integer,
-// float, or the framework decimal). Sortable has no type restriction — any
-// persisted column can be ordered.
-func validateQueryTypes(f modelField, ft reflect.Type) error {
-	if f.Filterable && !isFilterableKind(f.Kind) {
-		return fmt.Errorf("resourcegen: column %q (%s) is not filterable; a filterable column must be a string, integer, or bool", f.Column, f.GoType)
+// validateQueryTypes fails closed when a column declares a query capability its
+// logical kind does not allow. The decision is field.KindFromGo plus Allows*,
+// the same flags parseFields enforces, so a text filter or a float aggregate
+// cannot be legal on one generator path and rejected on the other.
+func validateQueryTypes(f modelField, ft reflect.Type, dataType string) error {
+	k := queryKind(ft, dataType)
+	if f.Filterable && !field.AllowsFilter(k, "") {
+		return fmt.Errorf("resourcegen: column %q (%s) is not filterable", f.Column, f.GoType)
 	}
-	if f.Searchable && f.Kind != reflect.String {
-		return fmt.Errorf("resourcegen: column %q (%s) is not searchable; a searchable column must be a string", f.Column, f.GoType)
+	if f.Searchable && !field.AllowsSearch(k, "") {
+		return fmt.Errorf("resourcegen: column %q (%s) is not searchable", f.Column, f.GoType)
 	}
-	if f.Aggregatable && !isAggregatableType(f.Kind, ft) {
-		return fmt.Errorf("resourcegen: column %q (%s) is not aggregatable; an aggregatable column must be numeric (integer, float, or decimal)", f.Column, f.GoType)
+	if f.Sortable && !field.AllowsSort(k, "") {
+		return fmt.Errorf("resourcegen: column %q (%s) is not sortable", f.Column, f.GoType)
+	}
+	if f.Aggregatable && !field.AllowsAggregate(k, "") {
+		return fmt.Errorf("resourcegen: column %q (%s) is not aggregatable", f.Column, f.GoType)
 	}
 	return nil
 }
 
-func isFilterableKind(k reflect.Kind) bool {
-	switch k {
-	case reflect.String, reflect.Bool,
-		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
-		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		return true
-	default:
-		return false
-	}
-}
-
-func isAggregatableType(k reflect.Kind, ft reflect.Type) bool {
-	switch k {
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
-		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
-		reflect.Float32, reflect.Float64:
-		return true
+// queryKind is the catalog kind for a model column. Pointers and database/sql
+// null wrappers are unwrapped first: nullability is orthogonal to capability.
+// dataType is the GORM data type, so a string column tagged type:text is Text
+// rather than String.
+func queryKind(ft reflect.Type, dataType string) field.Kind {
+	if ft == nil {
+		return field.KindFromGo(nil, dataType)
 	}
 	for ft.Kind() == reflect.Pointer {
 		ft = ft.Elem()
 	}
-	return ft == decimalType
+	switch ft {
+	case reflect.TypeOf(sql.NullString{}):
+		return field.KindFromGo(reflect.TypeOf(""), dataType)
+	case reflect.TypeOf(sql.NullInt64{}):
+		return field.KindFromGo(reflect.TypeOf(int64(0)), dataType)
+	case reflect.TypeOf(sql.NullInt32{}):
+		return field.KindFromGo(reflect.TypeOf(int32(0)), dataType)
+	case reflect.TypeOf(sql.NullInt16{}):
+		return field.KindFromGo(reflect.TypeOf(int16(0)), dataType)
+	case reflect.TypeOf(sql.NullByte{}):
+		return field.KindFromGo(reflect.TypeOf(byte(0)), dataType)
+	case reflect.TypeOf(sql.NullBool{}):
+		return field.KindFromGo(reflect.TypeOf(false), dataType)
+	case reflect.TypeOf(sql.NullFloat64{}):
+		return field.KindFromGo(reflect.TypeOf(float64(0)), dataType)
+	case reflect.TypeOf(sql.NullTime{}):
+		return field.KindFromGo(reflect.TypeOf(time.Time{}), dataType)
+	default:
+		return field.KindFromGo(ft, dataType)
+	}
 }
 
 // ensureValueOnlyPath rejects a column reached through a pointer embed. GORM

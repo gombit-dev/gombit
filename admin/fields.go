@@ -12,12 +12,10 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/google/uuid"
-	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
 	"gorm.io/gorm/schema"
 
-	"github.com/gombit-dev/gombit/types"
+	"github.com/gombit-dev/gombit/field"
 )
 
 // FieldsFrom derives a default []Field from model at registration time.
@@ -149,38 +147,7 @@ func jsonFieldName(sf *schema.Field) string {
 }
 
 func inferFieldType(sf *schema.Field) FieldType {
-	t := sf.FieldType
-	for t.Kind() == reflect.Pointer {
-		t = t.Elem()
-	}
-	switch t {
-	case reflect.TypeOf(time.Time{}):
-		return TypeDateTime
-	case reflect.TypeOf(json.RawMessage{}):
-		return TypeJSON
-	case reflect.TypeOf(uuid.UUID{}):
-		return TypeUUID
-	case reflect.TypeOf(decimal.Decimal{}), reflect.TypeOf(types.Decimal{}):
-		return TypeDecimal
-	}
-	switch t.Kind() {
-	case reflect.String:
-		if strings.Contains(strings.ToLower(string(sf.DataType)), "text") {
-			return TypeText
-		}
-		return TypeString
-	case reflect.Bool:
-		return TypeBoolean
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
-		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		return TypeInteger
-	case reflect.Float32, reflect.Float64:
-		return TypeFloat
-	case reflect.Struct, reflect.Map, reflect.Slice, reflect.Array:
-		return TypeJSON
-	default:
-		return TypeString
-	}
+	return FieldType(field.KindFromGo(sf.FieldType, string(sf.DataType)).AdminWire())
 }
 
 // belongsToByFK maps each belongs_to foreign-key column (on this schema) to its

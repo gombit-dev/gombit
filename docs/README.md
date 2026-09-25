@@ -32,6 +32,7 @@ New here? [Install](installation.md), then work through the
 | [migrations.md](migrations.md) | Atlas-backed `gombit db` migrations, revisions, rollback |
 | [migration-safety.md](migration-safety.md) | Migration safety manifests + the `gombit db verify` verifier for deployment hosts |
 | [validation.md](validation.md) | Model `Validate` hooks (API + admin), `app.Tx`, and optimistic locking |
+| [fields.md](fields.md) | The shared logical field vocabulary and how to add a kind |
 
 ## Contract
 
