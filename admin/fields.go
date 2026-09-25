@@ -59,7 +59,7 @@ func FieldsFrom(model any) ([]Field, error) {
 				ReadOnly: readOnly,
 				Column:   sf.DBName,
 				Related: &Relation{
-					Kind:       RelBelongsTo,
+					Kind:       relationKindForFK(sf),
 					Slug:       rel.FieldSchema.Table,
 					LabelField: labelFieldFor(rel.FieldSchema),
 				},
@@ -153,6 +153,20 @@ func inferFieldType(sf *schema.Field) FieldType {
 
 // belongsToByFK maps each belongs_to foreign-key column (on this schema) to its
 // relationship, so FieldsFrom can render the FK as a picker.
+// relationKindForFK is one_to_one when the foreign key is unique, and
+// belongs_to otherwise. Django's OneToOneField is that unique foreign key.
+func relationKindForFK(sf *schema.Field) string {
+	if sf == nil {
+		return RelBelongsTo
+	}
+	// uniqueIndex is recorded on the field only after ParseIndexes. The tag
+	// is already in TagSettings, which is what make resource emits.
+	if sf.Unique || sf.UniqueIndex != "" || sf.TagSettings["UNIQUEINDEX"] != "" {
+		return RelOneToOne
+	}
+	return RelBelongsTo
+}
+
 func belongsToByFK(sch *schema.Schema) map[string]*schema.Relationship {
 	out := map[string]*schema.Relationship{}
 	for _, rel := range sch.Relationships.BelongsTo {

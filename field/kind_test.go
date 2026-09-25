@@ -84,7 +84,7 @@ func TestTimeTokenIsDateTime(t *testing.T) {
 
 func TestRelationTokens(t *testing.T) {
 	t.Parallel()
-	for _, tok := range []RelationKind{RelBelongsTo, RelHasMany, RelManyToMany} {
+	for _, tok := range []RelationKind{RelBelongsTo, RelHasMany, RelManyToMany, RelOneToOne} {
 		k, rel, ok := ParseCLI(string(tok))
 		if !ok || k != Relation || rel != tok {
 			t.Fatalf("ParseCLI(%s) = %s %s %v", tok, k, rel, ok)

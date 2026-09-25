@@ -194,7 +194,7 @@ func targetImports(ctx renderContext) []string {
 	seen := map[string]struct{}{}
 	var out []string
 	for _, f := range ctx.Fields {
-		if !f.isRelation() {
+		if !f.isRelation() || f.Self {
 			continue
 		}
 		imp := ctx.Module + "/internal/" + f.TargetPkg
@@ -213,13 +213,25 @@ func targetImports(ctx renderContext) []string {
 // association slice (m2m carries the join-table tag).
 func modelFieldLines(f Field, resourcePkg string) string {
 	switch f.Type {
-	case FieldBelongsTo:
-		// The foreign key is the persisted column: read+write content and, as in the
-		// legacy generator, filterable by default (the has_many detail-list case,
-		// GET /children?<parent>_id=<id>). The association object is not a column and
-		// carries no policy.
-		return "\t" + f.fkGoName() + " uint" + structTag("index", "read,write,filterable", "") + "\n" +
-			"\t" + f.GoName + " " + f.GoType + "\n"
+	case FieldBelongsTo, FieldOneToOne:
+		// The foreign key is the persisted column: read+write content and
+		// filterable by default. one_to_one is that key with a unique index.
+		// A nullable key is *uint so a blank is SQL NULL. The association
+		// carries the delete rule; restrict is the default.
+		fkType := "uint"
+		fkGorm := "index"
+		if f.Nullable {
+			fkType = "*uint"
+		}
+		if f.Type == FieldOneToOne {
+			fkGorm = "uniqueIndex"
+		}
+		onDelete := f.OnDelete
+		if onDelete == "" {
+			onDelete = "RESTRICT"
+		}
+		return "\t" + f.fkGoName() + " " + fkType + structTag(fkGorm, "read,write,filterable", "") + "\n" +
+			"\t" + f.GoName + " " + f.GoType + structTag("constraint:OnUpdate:CASCADE,OnDelete:"+onDelete+";", "", "") + "\n"
 	case FieldHasMany:
 		return "\t" + f.GoName + " " + f.GoType + "\n"
 	case FieldManyToMany:
@@ -740,7 +752,11 @@ func renderFormField(field Field) string {
 	case FieldBool:
 		b.WriteString("          <input type=\"checkbox\" {...register(\"" + field.JSONName + "\")} />\n")
 	case FieldInt, FieldInt64, FieldUint, FieldFloat:
-		b.WriteString("          <input type=\"number\" {...register(\"" + field.JSONName + "\", { setValueAs: (value) => (value === \"\" ? 0 : Number(value))" + tsNumberRules(field) + " })}" + htmlNumberAttrs(field) + " />\n")
+		blank := "0"
+		if field.Nullable {
+			blank = "null"
+		}
+		b.WriteString("          <input type=\"number\" {...register(\"" + field.JSONName + "\", { setValueAs: (value) => (value === \"\" ? " + blank + " : Number(value))" + tsNumberRules(field) + " })}" + htmlNumberAttrs(field) + " />\n")
 	case FieldDate, FieldUUID:
 		// Empty is null. Format date/uuid rejects "".
 		inputType := "text"

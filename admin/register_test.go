@@ -206,6 +206,30 @@ func TestFieldsFromUsesJSONNames(t *testing.T) {
 	}
 }
 
+func TestFieldsFromOneToOneIsUniqueFK(t *testing.T) {
+	type User struct {
+		ID        uint   `gorm:"primaryKey" json:"id"`
+		ProfileID uint   `gorm:"uniqueIndex" json:"profile_id"`
+		Profile   Widget `json:"-"`
+		ParentID  *uint  `json:"parent_id"`
+		Parent    *User  `json:"-"`
+	}
+	fields, err := admin.FieldsFrom(User{})
+	if err != nil {
+		t.Fatalf("FieldsFrom: %v", err)
+	}
+	byName := map[string]admin.Field{}
+	for _, f := range fields {
+		byName[f.Name] = f
+	}
+	if byName["profile_id"].Related == nil || byName["profile_id"].Related.Kind != admin.RelOneToOne {
+		t.Fatalf("profile_id = %+v", byName["profile_id"].Related)
+	}
+	if byName["parent_id"].Related == nil || byName["parent_id"].Related.Kind != admin.RelBelongsTo {
+		t.Fatalf("parent_id = %+v", byName["parent_id"].Related)
+	}
+}
+
 func TestFieldsFromInfersUUIDAndJSON(t *testing.T) {
 	type Token struct {
 		ID      uuid.UUID       `gorm:"type:uuid;primaryKey" json:"id"`
