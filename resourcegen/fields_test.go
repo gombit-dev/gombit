@@ -450,3 +450,43 @@ func TestCanonicalCLIAliases(t *testing.T) {
 		t.Fatalf("duration error = %v, want not generated yet", err)
 	}
 }
+
+func TestSemanticStringsArePlainStrings(t *testing.T) {
+	t.Parallel()
+	fields, err := parseFields([]string{
+		"contact:email:required",
+		"site:url",
+		"handle:slug",
+		"addr:ip",
+	}, "person")
+	if err != nil {
+		t.Fatalf("parseFields: %v", err)
+	}
+	want := []struct {
+		format  string
+		pattern string
+	}{
+		{format: "email"},
+		{format: "uri"},
+		{pattern: `^[-a-zA-Z0-9_]+$`},
+		{format: "ip"},
+	}
+	for i, f := range fields {
+		if f.GoType != "string" {
+			t.Fatalf("%s GoType = %s", f.JSONName, f.GoType)
+		}
+		if !strings.Contains(f.gormTag(), "size:255") {
+			t.Fatalf("%s gorm tag = %q", f.JSONName, f.gormTag())
+		}
+		if f.openAPIFormat() != want[i].format || f.semanticPattern() != want[i].pattern {
+			t.Fatalf("%s format %q pattern %q", f.JSONName, f.openAPIFormat(), f.semanticPattern())
+		}
+		tag := modelStructTag(f)
+		if want[i].format != "" && !strings.Contains(tag, `format:"`+want[i].format+`"`) {
+			t.Fatalf("%s tag = %s", f.JSONName, tag)
+		}
+		if want[i].pattern != "" && !strings.Contains(tag, `pattern:"`+want[i].pattern+`"`) {
+			t.Fatalf("%s tag = %s", f.JSONName, tag)
+		}
+	}
+}

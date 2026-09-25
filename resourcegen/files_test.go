@@ -49,6 +49,29 @@ func TestRenderNewScalarTypes(t *testing.T) {
 
 // TestRenderMinimalFormNewTypes checks the generated minimal React form renders
 // a select for enum, a datetime-local input for time, and a decimal text input.
+func TestRenderSemanticStringInputs(t *testing.T) {
+	fields, err := parseFields([]string{"contact:email:required", "site:url", "handle:slug", "addr:ip"}, "person")
+	if err != nil {
+		t.Fatalf("parseFields: %v", err)
+	}
+	name, _ := parseResourceName("Person")
+	form := renderFormTSX(newRenderContext("github.com/example/demo", name, fields, "/api/v1", "minimal", false, false))
+	for _, want := range []string{
+		`type="email"`,
+		`type="url"`,
+		`type="text"`,
+		`new RegExp("^[-a-zA-Z0-9_]+$")`,
+	} {
+		if !strings.Contains(form, want) {
+			t.Fatalf("form missing %q:\n%s", want, form)
+		}
+	}
+	mui := renderMUIFormTSX(newRenderContext("github.com/example/demo", name, fields, "/api/v1", "mui", false, false))
+	if !strings.Contains(mui, `type="email"`) || !strings.Contains(mui, `new RegExp("^[-a-zA-Z0-9_]+$")`) {
+		t.Fatalf("MUI form missing semantic widgets:\n%s", mui)
+	}
+}
+
 func TestRenderMinimalFormNewTypes(t *testing.T) {
 	fields, err := parseFields([]string{
 		"price:decimal:required",

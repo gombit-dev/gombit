@@ -70,6 +70,11 @@ type modelField struct {
 	// varchar(N)); an unset/driver-dependent size (0 or -1) yields no maxLength —
 	// we only assert a constraint the model unambiguously states.
 	Size int
+	// Format and Pattern are copied from the model struct tags (`format`,
+	// `pattern`). make resource writes them for email, url, ip, and slug.
+	// Huma enforces format on the request; pattern is the slug alphabet.
+	Format  string
+	Pattern string
 	// Kind is the field's EFFECTIVE scalar reflect.Kind, with nullability unwrapped
 	// (a *string / sql.NullString column reports reflect.String) — see
 	// effectiveKind. It is a type CLASSIFICATION, distinct from GoType's rendered
@@ -170,6 +175,8 @@ func buildModelResource(model any, pkg string) (modelResource, error) {
 			GoType:     goType,
 			Kind:       effectiveKind(f.FieldType),
 			Size:       f.Size,
+			Format:     f.Tag.Get("format"),
+			Pattern:    f.Tag.Get("pattern"),
 		}
 		// resourcepolicy validated the query capabilities as API policy (declared,
 		// response-visible). Whether the column's type supports the operation is
@@ -463,7 +470,18 @@ func (f modelField) jsonName() string { return toSnake(f.GoName) }
 
 // responseTag is the struct tag for f in the response DTO: wire name plus doc.
 func (f modelField) responseTag() string {
-	return `json:"` + f.jsonName() + `"` + schemaAttr(f.GoType) + ` doc:"` + f.GoName + `"`
+	return `json:"` + f.jsonName() + `"` + f.schemaExtras() + ` doc:"` + f.GoName + `"`
+}
+
+func (f modelField) schemaExtras() string {
+	s := schemaAttr(f.GoType)
+	if f.Format != "" && !strings.Contains(s, `format:"`) {
+		s += ` format:"` + f.Format + `"`
+	}
+	if f.Pattern != "" && !strings.Contains(s, `pattern:"`) {
+		s += ` pattern:"` + f.Pattern + `"`
+	}
+	return s
 }
 
 // schemaAttr is the OpenAPI format and nullability huma does not infer.
@@ -510,7 +528,7 @@ func schemaAttr(goType string) string {
 // are NOT emitted — the GORM schema stores an enum as a plain varchar, so the
 // allowed values are not a recoverable schema fact (a known class-B gap).
 func (f modelField) requestTag() string {
-	tag := `json:"` + f.jsonName() + `"` + schemaAttr(f.GoType)
+	tag := `json:"` + f.jsonName() + `"` + f.schemaExtras()
 	if f.Kind == reflect.String {
 		if f.NotNull {
 			tag += ` minLength:"1"`

@@ -20,7 +20,10 @@ projections of that kind, not separate lists.
 | `duration` | no | `duration` | | |
 | `uuid` | yes | `uuid` | `uuid` | `uuid.UUID` |
 | `json` | yes | `json` | `json` | `types.JSON` (required), `types.NullJSON` (optional) |
-| `email`, `url`, `slug`, `ip` | no | same as the kind | `string` | |
+| `email` | yes | `email` | `string` | `string`, OpenAPI `format: email` |
+| `url` | yes | `url` | `string` | `string`, OpenAPI `format: uri` |
+| `slug` | yes | `slug` | `string` | `string`, pattern `^[-a-zA-Z0-9_]+$` |
+| `ip` | yes | `ip` | `string` | `string`, OpenAPI `format: ip` |
 | `enum` | yes | `enum(a,b)` | `string` | `string` |
 | `relation` | yes | `belongs_to`, `has_many`, `many_to_many` | `relation` | |
 
@@ -38,6 +41,12 @@ schema is nullable and a blank form submits null.
 
 `integer64` and `unsigned` share the admin `integer` widget. The meta payload
 does not change.
+
+`email`, `url`, `slug`, and `ip` are Go `string` columns (`varchar(255)`).
+The model stores `format:"email"`, `format:"uri"`, `format:"ip"`, or the slug
+`pattern`. `gombit generate` copies that onto the request, where Huma checks
+it. The form uses `type="email"` and `type="url"`; a slug checks the same
+pattern. Admin keeps the `string` widget.
 
 ## Adding a kind
 

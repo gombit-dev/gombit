@@ -74,6 +74,12 @@ func TestTimeTokenIsDateTime(t *testing.T) {
 	if !spec.GeneratorReady || spec.GoType != "float64" {
 		t.Fatalf("float spec = %+v", spec)
 	}
+	for _, kind := range []Kind{Email, URL, Slug, IP} {
+		spec, ok := Lookup(kind)
+		if !ok || !spec.GeneratorReady || spec.GoType != "string" || spec.AdminWire != "string" {
+			t.Fatalf("%s spec = %+v", kind, spec)
+		}
+	}
 }
 
 func TestRelationTokens(t *testing.T) {

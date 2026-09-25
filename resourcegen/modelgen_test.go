@@ -437,6 +437,25 @@ type slugType string
 // same, so it must get the same constraint. Keying off GoType == "string" would
 // skip every named string type — the Slug/Email/Username a real model defines
 // (issue #352 review, finding 1).
+func TestSemanticFormatReachesTheRequest(t *testing.T) {
+	type Person struct {
+		ID      uint   `gorm:"primaryKey"`
+		Contact string `gorm:"not null;size:255" format:"email"`
+		Handle  string `gorm:"size:255" pattern:"^[-a-zA-Z0-9_]+$"`
+	}
+	res, err := buildModelResource(&Person{}, "resourcegen")
+	if err != nil {
+		t.Fatalf("buildModelResource: %v", err)
+	}
+	src := renderModelDTOs(res)
+	if !strings.Contains(src, `json:"contact" format:"email" minLength:"1" maxLength:"255" doc:"Contact"`) {
+		t.Fatalf("email format missing:\n%s", src)
+	}
+	if !strings.Contains(src, `json:"handle" pattern:"^[-a-zA-Z0-9_]+$" maxLength:"255" doc:"Handle"`) {
+		t.Fatalf("slug pattern missing:\n%s", src)
+	}
+}
+
 func TestRequestTagMinLengthKeysOnKindNotText(t *testing.T) {
 	type Article struct {
 		ID    uint     `gorm:"primaryKey"`

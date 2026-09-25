@@ -181,6 +181,10 @@ const (
 	FieldFloat   FieldType = FieldType(logical.Float)
 	FieldUUID    FieldType = FieldType(logical.UUID)
 	FieldJSON    FieldType = FieldType(logical.JSON)
+	FieldEmail   FieldType = FieldType(logical.Email)
+	FieldURL     FieldType = FieldType(logical.URL)
+	FieldSlug    FieldType = FieldType(logical.Slug)
+	FieldIP      FieldType = FieldType(logical.IP)
 	FieldEnum    FieldType = FieldType(logical.Enum)
 
 	FieldBelongsTo  FieldType = FieldType(logical.RelBelongsTo)
@@ -523,7 +527,7 @@ func (f Field) gombitPolicy() string {
 func (f Field) gormTag() string {
 	var parts []string
 	switch f.Type {
-	case FieldString:
+	case FieldString, FieldEmail, FieldURL, FieldSlug, FieldIP:
 		parts = append(parts, "size:255")
 	case FieldText:
 		parts = append(parts, "type:text")
@@ -555,6 +559,31 @@ func (f Field) gormTag() string {
 		return ""
 	}
 	return strings.Join(parts, ";")
+}
+
+// openAPIFormat is the Huma format for a semantic string. Slug is a pattern,
+// not a format. Empty for kinds that do not add one.
+func (f Field) openAPIFormat() string {
+	switch f.Type {
+	case FieldEmail:
+		return "email"
+	case FieldURL:
+		return "uri"
+	case FieldIP:
+		return "ip"
+	default:
+		return ""
+	}
+}
+
+// semanticPattern is the built-in pattern for a kind whose meaning is a
+// shape rather than an OpenAPI format. Django's slug alphabet: letters,
+// digits, hyphens, and underscores.
+func (f Field) semanticPattern() string {
+	if f.Type == FieldSlug {
+		return `^[-a-zA-Z0-9_]+$`
+	}
+	return ""
 }
 
 // enumColumnSize sizes the varchar column to hold the longest allowed value,
