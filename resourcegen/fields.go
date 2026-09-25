@@ -545,8 +545,8 @@ func validateConstraints(field *Field) error {
 			return fmt.Errorf("resourcegen: field %q is reserved in SQLite, PostgreSQL, or MySQL, so a check constraint cannot name it", field.JSONName)
 		}
 	}
-	if field.MaxLength > 0 && field.Type != FieldString {
-		return fmt.Errorf("resourcegen: field %q is %s and cannot take max_length (supported: string)", field.JSONName, field.Type)
+	if field.MaxLength > 0 && !field.takesMaxLength() {
+		return fmt.Errorf("resourcegen: field %q is %s and cannot take max_length (supported: string, email, url, slug, ip)", field.JSONName, field.Type)
 	}
 	if field.Pattern != "" && field.Type != FieldString && field.Type != FieldText {
 		return fmt.Errorf("resourcegen: field %q is %s and cannot take regex (supported: string, text)", field.JSONName, field.Type)
@@ -641,7 +641,7 @@ func checkDefault(field *Field) error {
 		if err := defaultInRange(field); err != nil {
 			return err
 		}
-	case FieldString, FieldText:
+	case FieldString, FieldText, FieldEmail, FieldURL, FieldSlug, FieldIP:
 		if field.MaxLength > 0 && utf8.RuneCountInString(field.Default) > field.MaxLength {
 			return fmt.Errorf("resourcegen: field %q default is longer than max_length", field.JSONName)
 		}
@@ -1170,6 +1170,15 @@ func (f Field) formPattern() string {
 		return f.Pattern
 	}
 	return f.semanticPattern()
+}
+
+func (f Field) takesMaxLength() bool {
+	switch f.Type {
+	case FieldString, FieldEmail, FieldURL, FieldSlug, FieldIP:
+		return true
+	default:
+		return false
+	}
 }
 
 // blankIsNull reports that an empty input must be JSON null. Format and

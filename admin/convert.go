@@ -63,8 +63,9 @@ func constraintMessage(f Field, raw any) string {
 	return ""
 }
 
-// formatMessage applies the model format tag the same way Huma does. Empty
-// is not a format failure; the caller treats a blank optional value as null.
+// formatMessage applies the model format tag the same way Huma does.
+// An empty string fails, same as a bad address. The caller turns "" into
+// null only for an optional string that has a format or pattern.
 func formatMessage(format, s string) string {
 	switch format {
 	case "email":

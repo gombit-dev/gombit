@@ -139,6 +139,46 @@ func TestAdminSemanticStringWrite(t *testing.T) {
 	}
 }
 
+func TestAdminEmptyStringDoesNotClearOptionalNumber(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	type Item struct {
+		ID   uint   `gorm:"primaryKey" json:"id"`
+		Qty  *int   `json:"qty"`
+		Note string `json:"note"`
+	}
+	app := newCookieApp(t)
+	if err := app.DB().AutoMigrate(&Item{}); err != nil {
+		t.Fatalf("AutoMigrate: %v", err)
+	}
+	if err := admin.Register(app, Item{}, admin.Options{
+		Slug: "items",
+		Fields: []admin.Field{
+			{Name: "id", Type: admin.TypeInteger, ReadOnly: true},
+			{Name: "qty", Type: admin.TypeInteger},
+			{Name: "note", Type: admin.TypeString},
+		},
+		List: []string{"note"},
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	jar := loginSuperuser(t, app)
+	blankQty := doRequest(app, jar, http.MethodPost, "/api/v1/admin/resources/items", `{"qty":""}`)
+	if blankQty.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("blank qty status = %d; body: %s", blankQty.Code, blankQty.Body.String())
+	}
+	note := doRequest(app, jar, http.MethodPost, "/api/v1/admin/resources/items", `{"note":""}`)
+	if note.Code != http.StatusOK {
+		t.Fatalf("blank note status = %d; body: %s", note.Code, note.Body.String())
+	}
+	var created rowEnvelope
+	if err := json.Unmarshal(note.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if created.Data["note"] != "" || created.Data["qty"] != nil {
+		t.Fatalf("plain string blank = %#v", created.Data)
+	}
+}
+
 func TestResourceCRUDAndAuthz(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	app := newCookieApp(t)

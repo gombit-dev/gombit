@@ -460,7 +460,10 @@ func applyWrite(ctx context.Context, m *registered, inst any, body map[string]an
 			fields[name] = []string{"is required"}
 			continue
 		}
-		if s, ok := raw.(string); ok && s == "" && !f.Required {
+		// Format and pattern reject "". Only those strings become null.
+		// An optional integer, bool, decimal, date, or uuid still goes
+		// through coerceValue, which rejects "".
+		if s, ok := raw.(string); ok && s == "" && !f.Required && f.Type == TypeString && (f.Format != "" || f.Pattern != "") {
 			raw = nil
 		}
 		if msg := constraintMessage(f.Field, raw); msg != "" {

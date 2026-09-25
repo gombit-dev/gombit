@@ -631,3 +631,17 @@ func TestSemanticStringsArePlainStrings(t *testing.T) {
 		}
 	}
 }
+
+func TestSemanticStringMaxLength(t *testing.T) {
+	t.Parallel()
+	fields, err := parseFields([]string{"site:url:max_length=2048"}, "page")
+	if err != nil {
+		t.Fatalf("parseFields: %v", err)
+	}
+	if fields[0].MaxLength != 2048 || !strings.Contains(fields[0].gormTag(), "size:2048") {
+		t.Fatalf("url max_length = %+v tag %q", fields[0].MaxLength, fields[0].gormTag())
+	}
+	if _, err := parseFields([]string{"n:int:max_length=4"}, "page"); err == nil || !strings.Contains(err.Error(), "cannot take max_length") {
+		t.Fatalf("int max_length error = %v", err)
+	}
+}
