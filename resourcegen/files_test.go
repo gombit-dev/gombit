@@ -59,13 +59,14 @@ func TestRenderSemanticStringInputs(t *testing.T) {
 		`type="url"`,
 		`type="text"`,
 		`new RegExp("^[-a-zA-Z0-9_]+$", "u")`,
+		`value === "" ? null : value`,
 	} {
 		if !strings.Contains(form, want) {
 			t.Fatalf("form missing %q:\n%s", want, form)
 		}
 	}
 	mui := renderMUIFormTSX(newRenderContext("github.com/example/demo", name, fields, "/api/v1", "mui", false, false))
-	if !strings.Contains(mui, `type="email"`) || !strings.Contains(mui, `new RegExp("^[-a-zA-Z0-9_]+$", "u")`) {
+	if !strings.Contains(mui, `type="email"`) || !strings.Contains(mui, `new RegExp("^[-a-zA-Z0-9_]+$", "u")`) || !strings.Contains(mui, `["site", "handle", "addr"]`) {
 		t.Fatalf("MUI form missing semantic widgets:\n%s", mui)
 	}
 }

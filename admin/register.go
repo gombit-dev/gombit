@@ -344,6 +344,12 @@ func fillConstraints(fields []Field, sch *schema.Schema) error {
 		if f.Pattern == "" {
 			f.Pattern = c.Pattern
 		}
+		if f.Pattern == "" {
+			f.Pattern = sf.Tag.Get("pattern")
+		}
+		if f.Format == "" {
+			f.Format = sf.Tag.Get("format")
+		}
 		if f.Default == "" {
 			f.Default = c.Default
 		}

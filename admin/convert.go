@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"net/mail"
+	"net/netip"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -23,6 +26,11 @@ func constraintMessage(f Field, raw any) string {
 	if f.MaxLength > 0 {
 		if s, ok := raw.(string); ok && utf8.RuneCountInString(s) > f.MaxLength {
 			return "is too long"
+		}
+	}
+	if s, ok := raw.(string); ok {
+		if msg := formatMessage(f.Format, s); msg != "" {
+			return msg
 		}
 	}
 	if f.Pattern != "" {
@@ -50,6 +58,28 @@ func constraintMessage(f Field, raw any) string {
 		bound, err := decimal.NewFromString(f.Maximum)
 		if err != nil || got.GreaterThan(bound) {
 			return "must be at most " + f.Maximum
+		}
+	}
+	return ""
+}
+
+// formatMessage applies the model format tag the same way Huma does. Empty
+// is not a format failure; the caller treats a blank optional value as null.
+func formatMessage(format, s string) string {
+	switch format {
+	case "email":
+		addr, err := mail.ParseAddress(s)
+		if err != nil || addr.Name != "" || addr.Address == "" || strings.TrimSpace(s) != addr.Address {
+			return "must be an email address"
+		}
+	case "uri":
+		u, err := url.Parse(s)
+		if err != nil || u.Scheme == "" {
+			return "must be an absolute URI"
+		}
+	case "ip":
+		if _, err := netip.ParseAddr(s); err != nil {
+			return "must be an IP address"
 		}
 	}
 	return ""

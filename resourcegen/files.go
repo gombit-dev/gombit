@@ -697,6 +697,9 @@ func tsDecimalRules(field Field) string {
 
 func tsTextRegister(field Field) string {
 	var parts []string
+	if field.blankIsNull() {
+		parts = append(parts, `setValueAs: (value) => (value === "" ? null : value)`)
+	}
 	if field.Required {
 		parts = append(parts, "required: \""+field.GoName+" is required\"")
 	}
@@ -977,6 +980,10 @@ func renderMUIFormTSX(ctx renderContext) string {
 			timeNames = append(timeNames, field.JSONName)
 		case FieldDecimal, FieldDate, FieldUUID:
 			emptyNullNames = append(emptyNullNames, field.JSONName)
+		default:
+			if field.blankIsNull() {
+				emptyNullNames = append(emptyNullNames, field.JSONName)
+			}
 		}
 	}
 	b.WriteString("  async function onSubmit(values: FormValues) {\n")

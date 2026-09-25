@@ -30,6 +30,7 @@ export type FieldMeta = {
   max_length?: number;
   pattern?: string;
   default?: string;
+  format?: string;
 };
 
 export type Actions = {

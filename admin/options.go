@@ -85,6 +85,9 @@ type Field struct {
 	MaxLength int    `json:"max_length,omitempty"`
 	Pattern   string `json:"pattern,omitempty"`
 	Default   string `json:"default,omitempty"`
+	// Format is the OpenAPI format from the model tag (email, uri, ip).
+	// The admin wire stays string; writes reject a value that fails it.
+	Format string `json:"format,omitempty"`
 	// Column is the GORM/SQL column name. Empty means Name == JSON key ==
 	// column (the v1 default). Not emitted in meta.
 	Column string `json:"-"`

@@ -42,11 +42,16 @@ schema is nullable and a blank form submits null.
 `integer64` and `unsigned` share the admin `integer` widget. The meta payload
 does not change.
 
-`email`, `url`, `slug`, and `ip` are Go `string` columns (`varchar(255)`).
-The model stores `format:"email"`, `format:"uri"`, `format:"ip"`, or the slug
-`pattern`. `gombit generate` copies that onto the request, where Huma checks
-it. The form uses `type="email"` and `type="url"`; a slug checks the same
-pattern. Admin keeps the `string` widget.
+`email`, `url`, `slug`, and `ip` are Go `string` columns (`varchar(255)`, or
+`max_length` when that constraint is set). A required field stays `string`.
+An optional one is `*string`: format and pattern reject `""`, so a blank is
+null, the same way an optional date is. The model stores `format:"email"`,
+`format:"uri"`, `format:"ip"`, or the slug `pattern`. `gombit generate`
+copies that onto the request, where Huma checks it. The form uses
+`type="email"` and `type="url"` and submits null for a blank optional value.
+A slug checks `^[-a-zA-Z0-9_]+$`. Admin keeps the `string` widget and rejects
+a value that fails the same format or pattern. Email and slug are searchable.
+URL and IP are exact values, so they are sortable and not searchable.
 
 ## Adding a kind
 

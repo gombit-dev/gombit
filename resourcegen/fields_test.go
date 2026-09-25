@@ -609,8 +609,12 @@ func TestSemanticStringsArePlainStrings(t *testing.T) {
 		{format: "ip"},
 	}
 	for i, f := range fields {
-		if f.GoType != "string" {
-			t.Fatalf("%s GoType = %s", f.JSONName, f.GoType)
+		wantType := "string"
+		if !f.Required {
+			wantType = "*string"
+		}
+		if f.GoType != wantType {
+			t.Fatalf("%s GoType = %s, want %s", f.JSONName, f.GoType, wantType)
 		}
 		if !strings.Contains(f.gormTag(), "size:255") {
 			t.Fatalf("%s gorm tag = %q", f.JSONName, f.gormTag())

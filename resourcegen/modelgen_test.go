@@ -451,8 +451,138 @@ func TestSemanticFormatReachesTheRequest(t *testing.T) {
 	if !strings.Contains(src, `json:"contact" format:"email" minLength:"1" maxLength:"255" doc:"Contact"`) {
 		t.Fatalf("email format missing:\n%s", src)
 	}
-	if !strings.Contains(src, `json:"handle" pattern:"^[-a-zA-Z0-9_]+$" maxLength:"255" doc:"Handle"`) {
-		t.Fatalf("slug pattern missing:\n%s", src)
+	if !strings.Contains(src, `Handle *string`) || !strings.Contains(src, `json:"handle" pattern:"^[-a-zA-Z0-9_]+$" nullable:"true" maxLength:"255" doc:"Handle"`) {
+		t.Fatalf("optional slug must be a nullable pointer:\n%s", src)
+	}
+	if !strings.Contains(src, "nilIfBlank(row.Handle)") {
+		t.Fatalf("blank slug must project as null:\n%s", src)
+	}
+}
+
+func TestSemanticBlankAndBadValue(t *testing.T) {
+	if testing.Short() {
+		t.Skip("compiles and runs a temp module; skipped in -short")
+	}
+	type Person struct {
+		ID     uint   `gorm:"primaryKey"`
+		Work   string `gorm:"not null;size:255" format:"email"`
+		Site   string `gorm:"size:255" format:"uri"`
+		Handle string `gorm:"size:255" pattern:"^[-a-zA-Z0-9_]+$"`
+		Addr   string `gorm:"size:255" format:"ip"`
+	}
+	res, err := buildModelResource(&Person{}, "personpkg")
+	if err != nil {
+		t.Fatalf("buildModelResource: %v", err)
+	}
+	dto := string(mustFormatGo(renderModelDTOs(res)))
+	dir := t.TempDir()
+	pkgDir := filepath.Join(dir, res.Package)
+	if err := os.MkdirAll(pkgDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(dir, "go.mod"),
+		"module personmod\n\ngo 1.23\n\nrequire github.com/gombit-dev/gombit v0.0.0\n\nreplace github.com/gombit-dev/gombit => "+resourcegenModuleRoot(t)+"\n")
+	writeFile(t, filepath.Join(pkgDir, "model.go"), `package personpkg
+
+type Person struct {
+	ID     uint `+"`gorm:\"primaryKey\"`"+`
+	Work   string
+	Site   string
+	Handle string
+	Addr   string
+}
+`)
+	writeFile(t, filepath.Join(pkgDir, "dto.gen.go"), dto)
+	writeFile(t, filepath.Join(pkgDir, "run_test.go"), `package personpkg
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/danielgtaylor/huma/v2"
+	"github.com/danielgtaylor/huma/v2/adapters/humagin"
+	"github.com/gin-gonic/gin"
+	"github.com/gombit-dev/gombit/contract"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
+)
+
+func TestRun(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "t.db")), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&Person{}); err != nil {
+		t.Fatal(err)
+	}
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	api := humagin.New(router, contract.HumaConfig("person", "0.0.0"))
+	type input struct {
+		Body personCreateBody
+	}
+	huma.Register(api, huma.Operation{
+		OperationID: "create-person",
+		Method:      http.MethodPost,
+		Path:        "/people",
+	}, func(_ context.Context, in *input) (*struct{ Body personData }, error) {
+		row := personFromCreateBody(in.Body)
+		if err := db.Create(&row).Error; err != nil {
+			return nil, err
+		}
+		var got Person
+		if err := db.First(&got, row.ID).Error; err != nil {
+			return nil, err
+		}
+		out := toPersonData(got)
+		return &struct{ Body personData }{Body: out}, nil
+	})
+	post := func(raw string) (int, map[string]any) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/people", strings.NewReader(raw))
+		req.Header.Set("Content-Type", "application/json")
+		router.ServeHTTP(rec, req)
+		var body map[string]any
+		_ = json.Unmarshal(rec.Body.Bytes(), &body)
+		return rec.Code, body
+	}
+	code, body := post(`+"`{\"work\":\"ada@example.com\",\"site\":null,\"handle\":null,\"addr\":null}`"+`)
+	if code != http.StatusOK || body["site"] != nil || body["handle"] != nil || body["addr"] != nil || body["work"] != "ada@example.com" {
+		t.Fatalf("blank optional: status %d body %#v", code, body)
+	}
+	if code, body = post(`+"`{\"work\":\"not-an-email\",\"site\":null,\"handle\":null,\"addr\":null}`"+`); code != http.StatusUnprocessableEntity {
+		t.Fatalf("bad email: status %d body %#v", code, body)
+	}
+	if code, body = post(`+"`{\"work\":\"ada@example.com\",\"site\":\"example.com\",\"handle\":null,\"addr\":null}`"+`); code != http.StatusUnprocessableEntity {
+		t.Fatalf("bad url: status %d body %#v", code, body)
+	}
+	if code, body = post(`+"`{\"work\":\"ada@example.com\",\"site\":null,\"handle\":\"has space\",\"addr\":null}`"+`); code != http.StatusUnprocessableEntity {
+		t.Fatalf("bad slug: status %d body %#v", code, body)
+	}
+	if code, body = post(`+"`{\"work\":\"ada@example.com\",\"site\":null,\"handle\":null,\"addr\":\"nope\"}`"+`); code != http.StatusUnprocessableEntity {
+		t.Fatalf("bad ip: status %d body %#v", code, body)
+	}
+	code, body = post(`+"`{\"work\":\"ada@example.com\",\"site\":\"https://example.com\",\"handle\":\"ada\",\"addr\":\"127.0.0.1\"}`"+`)
+	if code != http.StatusOK || body["site"] != "https://example.com" || body["handle"] != "ada" || body["addr"] != "127.0.0.1" {
+		t.Fatalf("good values: status %d body %#v", code, body)
+	}
+}
+`)
+	tidy := exec.Command("go", "mod", "tidy")
+	tidy.Dir = dir
+	if out, err := tidy.CombinedOutput(); err != nil {
+		t.Fatalf("go mod tidy: %v\n%s", err, out)
+	}
+	cmd := exec.Command("go", "test", "./...")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("semantic round trip failed: %v\n%s\n--- generated ---\n%s", err, out, dto)
 	}
 }
 

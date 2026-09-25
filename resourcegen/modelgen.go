@@ -482,14 +482,37 @@ func (f modelField) responseTag() string {
 }
 
 func (f modelField) schemaExtras() string {
-	s := schemaAttr(f.GoType)
+	s := schemaAttr(f.wireGoType())
 	if f.Format != "" && !strings.Contains(s, `format:"`) {
 		s += ` format:"` + f.Format + `"`
 	}
 	if f.Pattern != "" && f.Constraints.Pattern == "" && !strings.Contains(s, `pattern:"`) {
 		s += ` pattern:"` + f.Pattern + `"`
 	}
+	if f.semanticBlankIsNull() && !strings.Contains(s, `nullable:"true"`) {
+		s += ` nullable:"true"`
+	}
 	return s
+}
+
+// semanticBlankIsNull is an optional string whose format or pattern rejects
+// "". The wire value is *string so null is the blank. A default already
+// distinguishes omission from a value, so it stays on that path.
+func (f modelField) semanticBlankIsNull() bool {
+	if f.NotNull || f.Constraints.Default != "" || f.Kind != reflect.String || f.isDecimal() {
+		return false
+	}
+	return f.Format != "" || f.Pattern != "" || f.Constraints.Pattern != ""
+}
+
+// wireGoType is the DTO type. An optional semantic string is *string even
+// when the model column is a plain string, so the published schema does not
+// require the zero value to match the format.
+func (f modelField) wireGoType() string {
+	if f.semanticBlankIsNull() && !strings.HasPrefix(f.GoType, "*") {
+		return "*" + f.GoType
+	}
+	return f.GoType
 }
 
 // schemaAttr is the OpenAPI format and nullability huma does not infer.
@@ -583,10 +606,11 @@ func (f modelField) requestTag() string {
 // requestGoType is the create-body type. A field with a default is a pointer
 // so omission (nil) is distinct from an explicit zero.
 func (f modelField) requestGoType() string {
-	if f.Constraints.Default == "" || strings.HasPrefix(f.GoType, "*") {
-		return f.GoType
+	t := f.wireGoType()
+	if f.Constraints.Default != "" && !strings.HasPrefix(t, "*") {
+		return "*" + t
 	}
-	return "*" + f.GoType
+	return t
 }
 
 func (f modelField) isDecimal() bool {
@@ -599,6 +623,9 @@ func (f modelField) createAssign() string {
 	path := "row." + f.AccessPath
 	src := "body." + f.GoName
 	if f.Constraints.Default == "" {
+		if f.semanticBlankIsNull() && !strings.HasPrefix(f.GoType, "*") {
+			return "\tif " + src + " != nil {\n\t\t" + path + " = *" + src + "\n\t} else {\n\t\t" + path + " = \"\"\n\t}\n"
+		}
 		return "\t" + path + " = " + src + "\n"
 	}
 	lit := f.defaultLiteral()
@@ -655,7 +682,7 @@ func renderModelDTOs(r modelResource) string {
 	b.WriteString("// " + data + " is the response body for a " + typ + ".\n")
 	b.WriteString("type " + data + " struct {\n")
 	for _, f := range r.responseFields() {
-		b.WriteString("\t" + f.GoName + " " + f.GoType + " `" + f.responseTag() + "`\n")
+		b.WriteString("\t" + f.GoName + " " + f.wireGoType() + " `" + f.responseTag() + "`\n")
 	}
 	b.WriteString("}\n\n")
 
@@ -672,7 +699,13 @@ func renderModelDTOs(r modelResource) string {
 	b.WriteString("// to" + typ + "Data projects a " + typ + " into its response DTO.\n")
 	b.WriteString("func to" + typ + "Data(row " + typ + ") " + data + " {\n")
 	b.WriteString("\treturn " + data + "{\n")
+	blankNull := false
 	for _, f := range r.responseFields() {
+		if f.semanticBlankIsNull() && !strings.HasPrefix(f.GoType, "*") {
+			blankNull = true
+			b.WriteString("\t\t" + f.GoName + ": nilIfBlank(row." + f.AccessPath + "),\n")
+			continue
+		}
 		b.WriteString("\t\t" + f.GoName + ": row." + f.AccessPath + ",\n")
 	}
 	b.WriteString("\t}\n}\n\n")
@@ -690,6 +723,9 @@ func renderModelDTOs(r modelResource) string {
 	b.WriteString("\treturn row\n}\n")
 	if src := r.decimalResolve(body); src != "" {
 		b.WriteString("\n" + src)
+	}
+	if blankNull {
+		b.WriteString("\nfunc nilIfBlank(v string) *string {\n\tif v == \"\" {\n\t\treturn nil\n\t}\n\treturn &v\n}\n")
 	}
 
 	return b.String()

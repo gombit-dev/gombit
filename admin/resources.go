@@ -460,6 +460,9 @@ func applyWrite(ctx context.Context, m *registered, inst any, body map[string]an
 			fields[name] = []string{"is required"}
 			continue
 		}
+		if s, ok := raw.(string); ok && s == "" && !f.Required {
+			raw = nil
+		}
 		if msg := constraintMessage(f.Field, raw); msg != "" {
 			fields[name] = []string{msg}
 			continue

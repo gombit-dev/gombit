@@ -91,6 +91,54 @@ func TestAdminCreateKeepsExplicitZero(t *testing.T) {
 	}
 }
 
+func TestAdminSemanticStringWrite(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	type Person struct {
+		ID     uint    `gorm:"primaryKey" json:"id"`
+		Work   string  `gorm:"not null" json:"work" format:"email"`
+		Site   *string `json:"site" format:"uri"`
+		Handle *string `json:"handle" pattern:"^[-a-zA-Z0-9_]+$"`
+		Addr   *string `json:"addr" format:"ip"`
+	}
+	app := newCookieApp(t)
+	if err := app.DB().AutoMigrate(&Person{}); err != nil {
+		t.Fatalf("AutoMigrate: %v", err)
+	}
+	if err := admin.Register(app, Person{}, admin.Options{
+		Slug: "people",
+		Fields: []admin.Field{
+			{Name: "id", Type: admin.TypeInteger, ReadOnly: true},
+			{Name: "work", Type: admin.TypeString, Required: true},
+			{Name: "site", Type: admin.TypeString},
+			{Name: "handle", Type: admin.TypeString},
+			{Name: "addr", Type: admin.TypeString},
+		},
+		List: []string{"work"},
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	jar := loginSuperuser(t, app)
+	bad := doRequest(app, jar, http.MethodPost, "/api/v1/admin/resources/people", `{"work":"not-an-email"}`)
+	if bad.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("bad email status = %d; body: %s", bad.Code, bad.Body.String())
+	}
+	blank := doRequest(app, jar, http.MethodPost, "/api/v1/admin/resources/people", `{"work":"ada@example.com","site":"","handle":"","addr":""}`)
+	if blank.Code != http.StatusOK {
+		t.Fatalf("blank optional status = %d; body: %s", blank.Code, blank.Body.String())
+	}
+	var created rowEnvelope
+	if err := json.Unmarshal(blank.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if created.Data["site"] != nil || created.Data["handle"] != nil || created.Data["addr"] != nil {
+		t.Fatalf("blank optionals stored as values: %#v", created.Data)
+	}
+	badSlug := doRequest(app, jar, http.MethodPost, "/api/v1/admin/resources/people", `{"work":"ada@example.com","handle":"has space"}`)
+	if badSlug.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("bad slug status = %d; body: %s", badSlug.Code, badSlug.Body.String())
+	}
+}
+
 func TestResourceCRUDAndAuthz(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	app := newCookieApp(t)

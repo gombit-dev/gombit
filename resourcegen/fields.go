@@ -323,7 +323,11 @@ func parseField(spec, resourcePkg string) (Field, error) {
 	// for date and uuid is the DTO tag (nullable:"true"), not the pointer:
 	// Date has no SchemaProvider, and uuid.UUID is an array Huma unwraps
 	// before it records the pointer.
-	if !field.Required && (field.Type == FieldTime || field.Type == FieldDecimal || field.Type == FieldDate || field.Type == FieldUUID) {
+	// Optional time, date, decimal, and uuid are pointers so a blank is SQL
+	// NULL. Email, url, slug, and ip are the same: format and pattern reject
+	// "", so the blank has to be null. A string or text regex has the same
+	// shape, and shares this path.
+	if !field.Required && field.blankIsNull() {
 		field.GoType = "*" + field.GoType
 	}
 	// Optional JSON is a different type, not a pointer. types.JSON.Schema is
@@ -502,7 +506,7 @@ func applyModifiers(field *Field, raw string) error {
 		return fmt.Errorf("resourcegen: field %q is %s and cannot be filterable (supported: string, int, int64, uint, bool, enum, belongs_to)", field.JSONName, field.Type)
 	}
 	if field.Searchable && !field.typeAllowsSearch() {
-		return fmt.Errorf("resourcegen: field %q is %s and cannot be searchable (supported: string, text, enum)", field.JSONName, field.Type)
+		return fmt.Errorf("resourcegen: field %q is %s and cannot be searchable (supported: string, text, enum, email, slug)", field.JSONName, field.Type)
 	}
 	if field.Sortable && !field.typeAllowsSort() {
 		return fmt.Errorf("resourcegen: field %q is %s and cannot be sortable", field.JSONName, field.Type)
@@ -1166,6 +1170,24 @@ func (f Field) formPattern() string {
 		return f.Pattern
 	}
 	return f.semanticPattern()
+}
+
+// blankIsNull reports that an empty input must be JSON null. Format and
+// pattern reject "", and a required field stays a plain string so "" still
+// fails. URL and IP are sortable exact values, not search text; email and
+// slug stay searchable.
+func (f Field) blankIsNull() bool {
+	if f.Required {
+		return false
+	}
+	switch f.Type {
+	case FieldTime, FieldDecimal, FieldDate, FieldUUID, FieldEmail, FieldURL, FieldSlug, FieldIP:
+		return true
+	case FieldString, FieldText:
+		return f.Pattern != ""
+	default:
+		return false
+	}
 }
 
 // enumColumnSize sizes the varchar column to hold the longest allowed value,
