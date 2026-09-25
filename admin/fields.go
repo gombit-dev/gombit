@@ -388,6 +388,12 @@ func convertTo(val any, dest reflect.Type) (reflect.Value, error) {
 	if src.Type().AssignableTo(dest) {
 		return src, nil
 	}
+	// A named []byte that unmarshals JSON (types.JSON) is convertible from a
+	// string and is a byte slice, so the shortcuts below would store the raw
+	// characters and skip UnmarshalJSON. The document rules have to run first.
+	if out, err, ok := unmarshalDocument(val, src, dest); ok {
+		return out, err
+	}
 	if src.Type().ConvertibleTo(dest) {
 		return src.Convert(dest), nil
 	}
@@ -437,6 +443,29 @@ func convertTo(val any, dest reflect.Type) (reflect.Value, error) {
 		return out.Elem(), nil
 	}
 	return reflect.Value{}, fmt.Errorf("cannot assign %T to %s", val, dest)
+}
+
+// unmarshalDocument applies json.Unmarshaler when the destination would
+// otherwise be built by ConvertibleTo or by copying JSON bytes into a
+// []byte. Other destinations keep the text and struct paths below.
+func unmarshalDocument(val any, src reflect.Value, dest reflect.Type) (reflect.Value, error, bool) {
+	byteSlice := dest.Kind() == reflect.Slice && dest.Elem().Kind() == reflect.Uint8
+	if !byteSlice && !src.Type().ConvertibleTo(dest) {
+		return reflect.Value{}, nil, false
+	}
+	out := reflect.New(dest)
+	ju, ok := out.Interface().(json.Unmarshaler)
+	if !ok {
+		return reflect.Value{}, nil, false
+	}
+	payload, err := asJSONBytes(val)
+	if err != nil {
+		return reflect.Value{}, fmt.Errorf("cannot assign %T to %s", val, dest), true
+	}
+	if err := ju.UnmarshalJSON(payload); err != nil {
+		return reflect.Value{}, err, true
+	}
+	return out.Elem(), nil, true
 }
 
 func asTextBytes(val any) ([]byte, error) {

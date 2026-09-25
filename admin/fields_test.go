@@ -8,6 +8,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 
 	"github.com/gombit-dev/gombit/field"
 	"github.com/gombit-dev/gombit/types"
@@ -199,6 +201,60 @@ func TestConvertToJSONAndUUID(t *testing.T) {
 			t.Fatalf("uuid = %s, want %s", id, s)
 		}
 	})
+}
+
+func TestMakeSetterTypesJSONRejectsNonDocuments(t *testing.T) {
+	t.Parallel()
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	type row struct {
+		ID   uint
+		Note types.JSON `gorm:"type:text"`
+	}
+	if err := db.AutoMigrate(&row{}); err != nil {
+		t.Fatal(err)
+	}
+	sf, ok := reflect.TypeOf(row{}).FieldByName("Note")
+	if !ok {
+		t.Fatal("Note missing")
+	}
+	set := makeSetter(sf.Index, TypeJSON, sf.Type)
+	inst := &row{}
+	if err := set(inst, "hello"); err == nil {
+		t.Fatal("setter stored a JSON string")
+	}
+	if err := set(inst, float64(42)); err == nil {
+		t.Fatal("setter stored a JSON number")
+	}
+	if err := set(inst, map[string]any{"a": float64(1)}); err != nil {
+		t.Fatalf("set object: %v", err)
+	}
+	if err := db.Create(inst).Error; err != nil {
+		t.Fatal(err)
+	}
+	var got row
+	if err := db.First(&got, inst.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if string(got.Note) != `{"a":1}` {
+		t.Fatalf("note = %s", got.Note)
+	}
+	list := &row{}
+	if err := set(list, []any{float64(1), "x"}); err != nil {
+		t.Fatalf("set array: %v", err)
+	}
+	if err := db.Create(list).Error; err != nil {
+		t.Fatal(err)
+	}
+	var gotList row
+	if err := db.First(&gotList, list.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if string(gotList.Note) != `[1,"x"]` {
+		t.Fatalf("note = %s", gotList.Note)
+	}
 }
 
 func TestMakeSetterJSONObjectAndUUID(t *testing.T) {
