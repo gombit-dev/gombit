@@ -185,6 +185,12 @@ func TestParseConstraintsReject(t *testing.T) {
 		"price:decimal:min=+1.5",
 		"price:decimal:min=.5",
 		"price:decimal:max=1.",
+		"price:decimal:min=0.00001,default=0.00001",
+		"price:decimal:max=0.99999",
+		"price:decimal:min=1000000000000000",
+		"price:decimal(10,2):min=0.001",
+		"note:text:regex=^\\s+$",
+		"note:text:regex=\\S+",
 		"status:enum(on;off)",
 	} {
 		if _, err := parseFields([]string{spec}, "person"); err == nil {
@@ -199,7 +205,8 @@ func TestBoundsMatchRequestSpelling(t *testing.T) {
 	// SQL check accept together. 2^53 round-trips and is still rejected.
 	fields, err := parseFields([]string{
 		"count:int64:max=9007199254740991",
-		"price:decimal:min=0.01,default=0.01",
+		"price:decimal:min=0.0001,default=0.0001",
+		"rate:decimal(10,2):max=12345678.99",
 	}, "person")
 	if err != nil {
 		t.Fatal(err)
@@ -207,8 +214,11 @@ func TestBoundsMatchRequestSpelling(t *testing.T) {
 	if !strings.Contains(fields[0].gormTag(), "count <= 9007199254740991") {
 		t.Fatalf("gorm tag = %q", fields[0].gormTag())
 	}
-	if fields[1].Min != "0.01" || fields[1].Default != "0.01" {
+	if fields[1].Min != "0.0001" || fields[1].Default != "0.0001" {
 		t.Fatalf("price = %+v", fields[1])
+	}
+	if fields[2].Max != "12345678.99" || fields[2].Precision != 10 || fields[2].Scale != 2 {
+		t.Fatalf("rate = %+v", fields[2])
 	}
 }
 

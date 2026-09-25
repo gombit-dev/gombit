@@ -559,12 +559,26 @@ func checkNumber(field *Field, name, raw string) error {
 		if !decimalSpelling.MatchString(raw) {
 			return fmt.Errorf("resourcegen: field %q %s %q must match the decimal schema", field.JSONName, name, raw)
 		}
-		return nil
+		return decimalFitsColumn(field, name, raw)
 	}
 	if _, err := strconv.ParseInt(raw, 10, 64); err != nil {
 		return fmt.Errorf("resourcegen: field %q %s %q must be an integer", field.JSONName, name, raw)
 	}
 	return exactNumberToken(field, name, raw)
+}
+
+// decimalFitsColumn rejects a token decimal(p,s) would round or overflow.
+// The create body compares the exact string, then PostgreSQL and MySQL round
+// the assignment to Scale before the CHECK, which turns an accepted body into
+// a 500.
+func decimalFitsColumn(field *Field, name, raw string) error {
+	body := strings.TrimPrefix(raw, "-")
+	whole, frac, _ := strings.Cut(body, ".")
+	whole = strings.TrimLeft(whole, "0")
+	if len(whole) > field.Precision-field.Scale || len(frac) > field.Scale {
+		return fmt.Errorf("resourcegen: field %q %s %q does not fit decimal(%d,%d)", field.JSONName, name, raw, field.Precision, field.Scale)
+	}
+	return nil
 }
 
 // maxExactInteger is the last integer where a float64 comparison and an integer
@@ -712,13 +726,14 @@ func (f Field) constraints() logical.Constraints {
 
 // portablePattern accepts a pattern only when Go's RE2 and JavaScript's RegExp
 // match the same set. Inline flags, POSIX classes, and RE2-only groups throw
-// in the form. Unicode properties (\p, \P) compile in both and do not: RE2
-// matches letters, and new RegExp without the u flag matches the literal p{L}.
+// in the form. Unicode properties (\p, \P) and whitespace (\s, \S) compile in
+// both and do not: RE2's \s is ASCII, and new RegExp without the u flag also
+// matches Unicode spaces.
 func portablePattern(pattern string) error {
 	if _, err := regexp.Compile(pattern); err != nil {
 		return err
 	}
-	if re2OnlyGroup.MatchString(pattern) || strings.Contains(pattern, `[:`) || strings.Contains(pattern, `\Q`) || strings.Contains(pattern, `\E`) || strings.Contains(pattern, `\A`) || strings.Contains(pattern, `\z`) || strings.Contains(pattern, `\Z`) || strings.Contains(pattern, `\p`) || strings.Contains(pattern, `\P`) {
+	if re2OnlyGroup.MatchString(pattern) || strings.Contains(pattern, `[:`) || strings.Contains(pattern, `\Q`) || strings.Contains(pattern, `\E`) || strings.Contains(pattern, `\A`) || strings.Contains(pattern, `\z`) || strings.Contains(pattern, `\Z`) || strings.Contains(pattern, `\p`) || strings.Contains(pattern, `\P`) || strings.Contains(pattern, `\s`) || strings.Contains(pattern, `\S`) {
 		return fmt.Errorf("pattern must be valid in both Go RE2 and JavaScript")
 	}
 	return nil
