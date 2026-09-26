@@ -187,7 +187,8 @@ arbitrary Go types.
   `gombit:"-"` is omitted, a response-only or `server` column is
   read-only, and `gombit:"write"` is accepted on create but left out of
   row JSON. A NOT NULL `server` column fails create instead of being
-  stored as the zero value. When the model declares that policy and
+  stored as the zero value, including `server` and `-,server`, which stay
+  out of the field list. When the model declares that policy and
   `Filter`, `Ordering`, or `Search` were left unset, those lists follow
   the tag (`filterable`, `sortable`, `searchable`) rather than every
   text column.

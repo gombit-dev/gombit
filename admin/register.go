@@ -123,20 +123,25 @@ func registerModel(host Host, model any, opts Options) error {
 	if err := validateQueryableColumns(opts, resolved); err != nil {
 		return err
 	}
+	serverRequired, err := serverCreateNames(sch, opts.Fields)
+	if err != nil {
+		return err
+	}
 
 	m := &registered{
-		meta:        modelMetaFrom(opts, pkName),
-		actions:     opts.Actions,
-		pkColumn:    pkColumn,
-		pkType:      pkType,
-		newInstance: makeNewInstance(elem),
-		newSlice:    makeNewSlice(elem),
-		forEach:     makeForEach(elem),
-		fields:      resolved,
-		fieldByName: map[string]*resolvedField{},
-		implicit:    implicit,
-		m2m:         m2mBindings,
-		hasMany:     hasManyBindings,
+		meta:           modelMetaFrom(opts, pkName),
+		actions:        opts.Actions,
+		pkColumn:       pkColumn,
+		pkType:         pkType,
+		newInstance:    makeNewInstance(elem),
+		newSlice:       makeNewSlice(elem),
+		forEach:        makeForEach(elem),
+		fields:         resolved,
+		fieldByName:    map[string]*resolvedField{},
+		implicit:       implicit,
+		m2m:            m2mBindings,
+		hasMany:        hasManyBindings,
+		serverRequired: serverRequired,
 	}
 	for i := range m.fields {
 		m.fieldByName[m.fields[i].Name] = &m.fields[i]
@@ -158,8 +163,6 @@ func registerModel(host Host, model any, opts Options) error {
 	return reg.add(m)
 }
 
-// defaultSearchFields returns the writable string/text field names of a model,
-// the sensible default Search set for a purely auto-registered model.
 // alignQuerySurface copies filter, ordering, and search from the gombit tag
 // when Fields were derived and the caller left those lists unset. A model
 // with no gombit tag keeps the previous defaults. An explicit list is kept.
@@ -224,6 +227,8 @@ func policyNames(byCol map[string]resourcepolicy.Resolved, nameOf map[string]str
 	return out
 }
 
+// defaultSearchFields returns the writable string/text field names of a model,
+// the sensible default Search set for a purely auto-registered model.
 func defaultSearchFields(fields []Field) []string {
 	var out []string
 	for _, f := range fields {

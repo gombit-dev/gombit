@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -64,23 +65,23 @@ func FieldsFrom(model any) ([]Field, error) {
 		if !ok || sch.FieldsByDBName[sf.DBName] != sf {
 			continue
 		}
-		// Hidden on the public contract (gombit:"-" and soft-delete).
+		// Hidden on the public contract (gombit:"-", gombit:"server", and
+		// soft-delete). Create obligations for those columns are recorded
+		// separately so a required server value is not stored as zero.
 		if !pol.InRequest && !pol.InResponse {
 			continue
 		}
 		readOnly := !pol.InRequest
 		required := pol.InRequest && sf.NotNull && !sf.HasDefaultValue && sf.FieldType.Kind() != reflect.Pointer
 		writeOnly := pol.InRequest && !pol.InResponse
-		serverRequired := serverMustSupply(pol)
 		if rel, ok := belongsToFK[sf.DBName]; ok {
 			fields = append(fields, Field{
-				Name:           name,
-				Type:           TypeRelation,
-				Required:       required,
-				ReadOnly:       readOnly,
-				WriteOnly:      writeOnly,
-				ServerRequired: serverRequired,
-				Column:         sf.DBName,
+				Name:      name,
+				Type:      TypeRelation,
+				Required:  required,
+				ReadOnly:  readOnly,
+				WriteOnly: writeOnly,
+				Column:    sf.DBName,
 				Related: &Relation{
 					Kind:       relationKindForFK(sf),
 					Slug:       rel.FieldSchema.Table,
@@ -90,13 +91,12 @@ func FieldsFrom(model any) ([]Field, error) {
 			continue
 		}
 		fields = append(fields, Field{
-			Name:           name,
-			Type:           inferFieldType(sf),
-			Required:       required,
-			ReadOnly:       readOnly,
-			WriteOnly:      writeOnly,
-			ServerRequired: serverRequired,
-			Column:         sf.DBName,
+			Name:      name,
+			Type:      inferFieldType(sf),
+			Required:  required,
+			ReadOnly:  readOnly,
+			WriteOnly: writeOnly,
+			Column:    sf.DBName,
 		})
 	}
 	// Many-to-many associations are not in sch.Fields (they have no column), so
@@ -156,15 +156,37 @@ func columnPolicy(sch *schema.Schema) (map[string]resourcepolicy.Resolved, error
 	return out, nil
 }
 
-// serverMustSupply is resourcepolicy's required-column rule for a hook-owned
-// field: NOT NULL (or primary key), no default, and nothing the database writes
-// on insert. Admin create must fail instead of storing the Go zero value.
-func serverMustSupply(r resourcepolicy.Resolved) bool {
-	if r.CreateSource != resourcepolicy.CreateSourceServer || r.Column == "" {
-		return false
+// serverCreateNames lists columns whose create value must come from a hook.
+// Hidden columns stay out of the admin field list, but create still has to
+// fail for them: the resolved policy is the source, not the fields that
+// survived the visibility filter. Names prefer the admin field name when
+// the column is visible.
+func serverCreateNames(sch *schema.Schema, fields []Field) ([]string, error) {
+	byCol, err := columnPolicy(sch)
+	if err != nil {
+		return nil, err
 	}
-	dbSupplies := r.AutoIncrement || (r.AutoTime && r.Creatable)
-	return (r.NotNull || r.PrimaryKey) && !r.HasDefault && !dbSupplies
+	nameOf := make(map[string]string, len(fields))
+	for _, f := range fields {
+		col := f.Column
+		if col == "" {
+			col = f.Name
+		}
+		nameOf[col] = f.Name
+	}
+	var out []string
+	for col, r := range byCol {
+		if r.CreateSource != resourcepolicy.CreateSourceServer || !r.NeedsCreateValue() {
+			continue
+		}
+		if name, ok := nameOf[col]; ok {
+			out = append(out, name)
+		} else {
+			out = append(out, col)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 func parseSchema(model any) (*schema.Schema, error) {

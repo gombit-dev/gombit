@@ -449,10 +449,14 @@ func applyWrite(ctx context.Context, m *registered, inst any, body map[string]an
 			fields[name] = []string{"field is read-only"}
 			continue
 		}
-		// A write-only column is absent from the row payload, so an edit form
-		// submits null when the operator left it blank. That means "leave the
-		// stored value", not "clear it".
-		if f.WriteOnly && !f.Required && (raw == nil || raw == "") {
+		// Write-only values are omitted from the row, so a blank update is
+		// "leave the stored value". Required applies on create only: an edit
+		// must be able to change another column without resubmitting the secret,
+		// and "" must not clear it.
+		if f.WriteOnly && (raw == nil || raw == "") {
+			if creating && f.Required {
+				fields[name] = []string{"is required"}
+			}
 			continue
 		}
 		// A pointer column stores null for a blank the format or pattern
@@ -490,9 +494,6 @@ func applyWrite(ctx context.Context, m *registered, inst any, body map[string]an
 		for i := range m.fields {
 			f := &m.fields[i]
 			if f.ReadOnly {
-				if f.ServerRequired {
-					fields[f.Name] = []string{"is set by the server and cannot be stored empty"}
-				}
 				continue
 			}
 			if _, ok := seen[f.Name]; ok {
@@ -517,6 +518,12 @@ func applyWrite(ctx context.Context, m *registered, inst any, body map[string]an
 				continue
 			}
 			fields[f.Name] = []string{"is required"}
+		}
+		for _, name := range m.serverRequired {
+			if _, ok := fields[name]; ok {
+				continue
+			}
+			fields[name] = []string{"is set by the server and cannot be stored empty"}
 		}
 	}
 	if len(fields) > 0 {

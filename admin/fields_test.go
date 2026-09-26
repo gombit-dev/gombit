@@ -428,7 +428,9 @@ func TestFieldsFromFollowsResourcePolicy(t *testing.T) {
 		Title    string `gorm:"not null"`
 		Secret   string `gombit:"-"`
 		TenantID uint   `gorm:"not null" gombit:"read,server"`
-		Password string `gombit:"write"`
+		OwnerID  uint   `gorm:"not null" gombit:"server"`
+		AuditID  uint   `gorm:"not null" gombit:"-,server"`
+		Password string `gorm:"not null" gombit:"write"`
 		Status   string `gorm:"size:32" gombit:"read,write,filterable,sortable,searchable"`
 	}
 	fields, err := FieldsFrom(&book{})
@@ -438,8 +440,8 @@ func TestFieldsFromFollowsResourcePolicy(t *testing.T) {
 	byName := map[string]Field{}
 	for _, f := range fields {
 		byName[f.Name] = f
-		if f.Name == "secret" {
-			t.Fatal("hidden column was derived")
+		if f.Name == "secret" || f.Name == "owner_id" || f.Name == "audit_id" {
+			t.Fatalf("hidden column %s was derived", f.Name)
 		}
 	}
 	title := byName["title"]
@@ -447,22 +449,67 @@ func TestFieldsFromFollowsResourcePolicy(t *testing.T) {
 		t.Fatalf("title = %+v", title)
 	}
 	tenant := byName["tenant_id"]
-	if !tenant.ReadOnly || !tenant.ServerRequired || tenant.Required {
+	if !tenant.ReadOnly || tenant.Required || tenant.WriteOnly {
 		t.Fatalf("tenant_id = %+v", tenant)
 	}
 	password := byName["password"]
-	if password.ReadOnly || !password.WriteOnly {
+	if password.ReadOnly || !password.WriteOnly || !password.Required {
 		t.Fatalf("password = %+v", password)
 	}
 	if _, ok := byName["deleted_at"]; ok {
 		t.Fatal("soft-delete column was derived")
 	}
+	meta := modelMetaFrom(Options{Slug: "books", Fields: []Field{password}}, "id")
+	if len(meta.Fields) != 1 || !meta.Fields[0].WriteOnly {
+		t.Fatalf("meta = %+v", meta.Fields)
+	}
 
-	m := &registered{fields: []resolvedField{{Field: tenant}}}
+	sch, err := parseSchema(&book{})
+	if err != nil {
+		t.Fatalf("parseSchema: %v", err)
+	}
+	names, err := serverCreateNames(sch, fields)
+	if err != nil {
+		t.Fatalf("serverCreateNames: %v", err)
+	}
+	if strings.Join(names, ",") != "audit_id,owner_id,tenant_id" {
+		t.Fatalf("server create names = %v", names)
+	}
+	m := &registered{serverRequired: names}
 	err = applyWrite(context.Background(), m, &book{}, nil, true)
 	var env *contract.ErrorEnvelope
-	if !errors.As(err, &env) || len(env.Body.Fields["tenant_id"]) == 0 || !strings.Contains(env.Body.Fields["tenant_id"][0], "set by the server") {
+	if !errors.As(err, &env) {
 		t.Fatalf("create error = %#v", err)
+	}
+	for _, name := range names {
+		if len(env.Body.Fields[name]) == 0 || !strings.Contains(env.Body.Fields[name][0], "set by the server") {
+			t.Fatalf("create fields = %#v", env.Body.Fields)
+		}
+	}
+
+	set := false
+	pw := resolvedField{Field: password, set: func(any, any) error {
+		set = true
+		return nil
+	}}
+	writer := &registered{fields: []resolvedField{pw}}
+	writer.fieldByName = map[string]*resolvedField{"password": &writer.fields[0]}
+	for _, raw := range []any{nil, ""} {
+		set = false
+		if err := applyWrite(context.Background(), writer, &book{}, map[string]any{"password": raw}, false); err != nil {
+			t.Fatalf("update %v: %v", raw, err)
+		}
+		if set {
+			t.Fatalf("update %v stored a write-only blank", raw)
+		}
+	}
+	set = false
+	if err := applyWrite(context.Background(), writer, &book{}, map[string]any{"password": "s3cret"}, false); err != nil || !set {
+		t.Fatalf("update new value: err=%v set=%v", err, set)
+	}
+	err = applyWrite(context.Background(), writer, &book{}, map[string]any{"password": ""}, true)
+	if !errors.As(err, &env) || len(env.Body.Fields["password"]) == 0 {
+		t.Fatalf("create blank password = %#v", err)
 	}
 
 	row := (&registered{fields: []resolvedField{
