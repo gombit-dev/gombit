@@ -108,7 +108,13 @@ func Plan(ctx context.Context, opts Options) (*ResourcePlan, error) {
 	if err := checkHTTPPathConflict(opts.WorkDir, name); err != nil {
 		return nil, err
 	}
-	fields, err := parseFields(opts.Fields, name.Package)
+	id, err := parseIDStrategy(opts.ID)
+	if err != nil {
+		return nil, err
+	}
+	fields, err := parseFieldsWithID(opts.Fields, name.Package, func(pkg, typeName string) (string, error) {
+		return lookupTargetPK(opts.WorkDir, pkg, typeName)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -129,6 +135,7 @@ func Plan(ctx context.Context, opts Options) (*ResourcePlan, error) {
 	// SPA rewrites that prefix to the live GOMBIT_API_PREFIX at request time,
 	// so make-resource pages must not bake gombit.yaml api_prefix.
 	ctxData := newRenderContext(module, name, fields, defaultAPIPrefix, ui, opts.Service, opts.Repo)
+	ctxData.IDStrategy = id
 
 	files, err := renderFeatureFiles(ctxData)
 	if err != nil {

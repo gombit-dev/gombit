@@ -62,6 +62,9 @@ type Field struct {
 	// "Engine". TargetPkg is its feature-package name (snake), e.g. "engine".
 	Target    string
 	TargetPkg string
+	// FKGoType is the belongs_to foreign-key Go type. Empty means uint.
+	// uuid.UUID matches a target whose primary key is a UUID.
+	FKGoType string
 }
 
 // parseRelationField builds a belongs_to / has_many / many_to_many field from
@@ -69,7 +72,7 @@ type Field struct {
 // internal/<target>/ (imported as <target>.<Target>), or the resource itself
 // for a self-referential belongs_to. resourcePkg is the package being
 // generated, used to detect same-package targets.
-func parseRelationField(name, jsonName, goName string, kind FieldType, target, resourcePkg string) (Field, error) {
+func parseRelationField(name, jsonName, goName string, kind FieldType, target, resourcePkg string, lookup pkLookup) (Field, error) {
 	target = strings.TrimSpace(target)
 	if target == "" {
 		return Field{}, fmt.Errorf("resourcegen: relation field %q is missing a target model", name)
@@ -100,6 +103,16 @@ func parseRelationField(name, jsonName, goName string, kind FieldType, target, r
 		Type:      kind,
 		Target:    targetType,
 		TargetPkg: targetPkg,
+		FKGoType:  "uint",
+	}
+	if kind == FieldBelongsTo && lookup != nil {
+		got, err := lookup(targetPkg, targetType)
+		if err != nil {
+			return Field{}, err
+		}
+		if got != "" {
+			f.FKGoType = got
+		}
 	}
 	// The target is always a distinct feature-package (same-package targets are
 	// rejected above), qualified as <pkg>.<Type>.
@@ -130,6 +143,20 @@ func (f Field) reservedJSONKeys() []string {
 func (f Field) fkGoName() string   { return f.GoName + "ID" }
 func (f Field) fkJSONName() string { return f.JSONName + "_id" }
 
+func (f Field) fkColumnGoType() string {
+	if f.FKGoType == "" {
+		return "uint"
+	}
+	return f.FKGoType
+}
+
+func (f Field) fkDTOType() FieldType {
+	if f.FKGoType == "uuid.UUID" {
+		return FieldUUID
+	}
+	return FieldUint
+}
+
 // joinTable is the many2many join-table name for a relation on resourcePkg.
 func (f Field) joinTable(resourcePkg string) string { return resourcePkg + "_" + f.JSONName }
 
@@ -148,8 +175,9 @@ func dtoFields(fields []Field) []Field {
 				Name:     f.fkJSONName(),
 				JSONName: f.fkJSONName(),
 				GoName:   f.fkGoName(),
-				Type:     FieldUint,
-				GoType:   "uint",
+				Type:     f.fkDTOType(),
+				GoType:   f.fkColumnGoType(),
+				Required: f.fkDTOType() == FieldUUID,
 			})
 			continue
 		}
@@ -239,10 +267,14 @@ func (f Field) relationKind() logical.RelationKind {
 }
 
 func parseFields(specs []string, resourcePkg string) ([]Field, error) {
+	return parseFieldsWithID(specs, resourcePkg, nil)
+}
+
+func parseFieldsWithID(specs []string, resourcePkg string, lookup pkLookup) ([]Field, error) {
 	seen := make(map[string]struct{}, len(specs))
 	fields := make([]Field, 0, len(specs))
 	for _, spec := range specs {
-		field, err := parseField(spec, resourcePkg)
+		field, err := parseField(spec, resourcePkg, lookup)
 		if err != nil {
 			return nil, err
 		}
@@ -261,7 +293,7 @@ func parseFields(specs []string, resourcePkg string) ([]Field, error) {
 	return fields, nil
 }
 
-func parseField(spec, resourcePkg string) (Field, error) {
+func parseField(spec, resourcePkg string, lookup pkLookup) (Field, error) {
 	spec = strings.TrimSpace(spec)
 	if spec == "" {
 		return Field{}, fmt.Errorf("resourcegen: empty field spec")
@@ -303,7 +335,7 @@ func parseField(spec, resourcePkg string) (Field, error) {
 		if !relSpec.GeneratorReady {
 			return Field{}, fmt.Errorf("resourcegen: type %q is in the field vocabulary but is not generated yet (see docs/fields.md)", rel)
 		}
-		return parseRelationField(name, jsonName, goName, FieldType(rel), parts[2], resourcePkg)
+		return parseRelationField(name, jsonName, goName, FieldType(rel), parts[2], resourcePkg, lookup)
 	}
 
 	field := Field{

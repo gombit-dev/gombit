@@ -31,6 +31,7 @@ type renderContext struct {
 	Service    bool
 	Repo       bool
 	DataType   string
+	IDStrategy idStrategy
 }
 
 func newRenderContext(module string, name ResourceName, fields []Field, apiPrefix, ui string, service, repo bool) renderContext {
@@ -161,14 +162,14 @@ func renderModel(ctx renderContext) string {
 	b.WriteString("\n\n")
 
 	var std, third []string
-	if fieldsUse(ctx.Fields, FieldTime) {
+	if fieldsUse(ctx.Fields, FieldTime) || ctx.IDStrategy == idUUID {
 		std = append(std, "time")
 	}
 	third = append(third, "gorm.io/gorm")
 	if fieldsUse(ctx.Fields, FieldDecimal) || fieldsUse(ctx.Fields, FieldDate) || fieldsUse(ctx.Fields, FieldJSON) {
 		third = append(third, gombitTypesImport)
 	}
-	if fieldsUse(ctx.Fields, FieldUUID) {
+	if fieldsUse(ctx.Fields, FieldUUID) || ctx.IDStrategy == idUUID || fieldsUseFK(ctx.Fields, "uuid.UUID") {
 		third = append(third, "github.com/google/uuid")
 	}
 	third = append(third, targetImports(ctx)...)
@@ -180,12 +181,37 @@ func renderModel(ctx renderContext) string {
 	b.WriteString("// to re-derive the DTOs, mappers, and handler (*.gen.go).\n")
 	b.WriteString("type ")
 	b.WriteString(ctx.Resource.TypeName)
-	b.WriteString(" struct {\n\tgorm.Model\n")
+	b.WriteString(" struct {\n")
+	if ctx.IDStrategy == idUUID {
+		b.WriteString("\tID        uuid.UUID      `gorm:\"type:char(36);primaryKey\" json:\"id\" gombit:\"read,server\"`\n")
+		b.WriteString("\tCreatedAt time.Time\n")
+		b.WriteString("\tUpdatedAt time.Time\n")
+		b.WriteString("\tDeletedAt gorm.DeletedAt `gorm:\"index\"`\n")
+	} else {
+		b.WriteString("\tgorm.Model\n")
+	}
 	for _, field := range ctx.Fields {
 		b.WriteString(modelFieldLines(field, ctx.Resource.Package))
 	}
 	b.WriteString("}\n")
+	if ctx.IDStrategy == idUUID {
+		b.WriteString("\nfunc (m *" + ctx.Resource.TypeName + ") BeforeCreate(*gorm.DB) error {\n")
+		b.WriteString("\tif m.ID == uuid.Nil {\n")
+		b.WriteString("\t\tm.ID = uuid.New()\n")
+		b.WriteString("\t}\n")
+		b.WriteString("\treturn nil\n")
+		b.WriteString("}\n")
+	}
 	return b.String()
+}
+
+func fieldsUseFK(fields []Field, goType string) bool {
+	for _, f := range fields {
+		if f.FKGoType == goType {
+			return true
+		}
+	}
+	return false
 }
 
 // targetImports returns the distinct feature-package import paths for the
@@ -215,10 +241,16 @@ func modelFieldLines(f Field, resourcePkg string) string {
 	switch f.Type {
 	case FieldBelongsTo:
 		// The foreign key is the persisted column: read+write content and, as in the
-		// legacy generator, filterable by default (the has_many detail-list case,
-		// GET /children?<parent>_id=<id>). The association object is not a column and
-		// carries no policy.
-		return "\t" + f.fkGoName() + " uint" + structTag("index", "read,write,filterable", "") + "\n" +
+		// legacy generator, filterable by default when it is a uint (the has_many
+		// detail-list case, GET /children?<parent>_id=<id>). A uuid foreign key is
+		// sortable, not filterable. The association object is not a column.
+		fkGorm := "index"
+		policy := "read,write,filterable"
+		if f.FKGoType == "uuid.UUID" {
+			fkGorm = "type:char(36);index"
+			policy = "read,write,sortable"
+		}
+		return "\t" + f.fkGoName() + " " + f.fkColumnGoType() + structTag(fkGorm, policy, "") + "\n" +
 			"\t" + f.GoName + " " + f.GoType + "\n"
 	case FieldHasMany:
 		return "\t" + f.GoName + " " + f.GoType + "\n"

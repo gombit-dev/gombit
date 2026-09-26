@@ -35,6 +35,7 @@ func newMakeResourceCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
 		dryRun         bool
 		force          bool
 		skipMigrations bool
+		idStrategy     string
 	)
 	cmd := silence(&cobra.Command{
 		Use:   "resource <Name> [field:type[:modifiers]...]",
@@ -101,6 +102,12 @@ has_many is shown read-only. Self-referential relations (a target equal to the
 resource itself) are not supported yet and are rejected: they need a nullable
 foreign key / explicit join keys. Point relations at a different package.
 
+--id chooses the primary key: uint (the default, gorm.Model) or uuid (an
+application-assigned uuid.UUID plus CreatedAt, UpdatedAt, and DeletedAt).
+Composite primary keys are rejected. A belongs_to foreign key uses the
+target model's primary key when that model is already on disk, and uint
+otherwise.
+
 Examples:
 
   gombit make resource Widget name:string:required price:int
@@ -112,6 +119,7 @@ Examples:
     status:string engine:belongs_to:Engine warehouses:many_to_many:Warehouse
   gombit make resource Invoice --service --repo --dry-run
   gombit make resource Widget --force
+  gombit make resource Session --id uuid
 
 --service / --repo are opt-in pass-through files (C6). Default is a thin
 handler over GORM. --dry-run prints the file list without writing.
@@ -137,6 +145,7 @@ and generate the SQL later with gombit db makemigrations.`,
 				WorkDir:        ".",
 				Name:           args[0],
 				Fields:         args[1:],
+				ID:             idStrategy,
 				Service:        service,
 				Repo:           repo,
 				DryRun:         dryRun,
@@ -202,6 +211,7 @@ and generate the SQL later with gombit db makemigrations.`,
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print files that would be written without writing")
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite files that differ from this run")
 	cmd.Flags().BoolVar(&skipMigrations, "skip-migrations", false, "scaffold the resource and registry without generating migration SQL (does not require Atlas)")
+	cmd.Flags().StringVar(&idStrategy, "id", "uint", "primary key strategy: uint (default, gorm.Model) or uuid")
 	return cmd
 }
 

@@ -295,7 +295,16 @@ From an application directory (the output of `gombit new`):
 gombit make resource Widget name:string:required price:int
 gombit make resource Invoice --service --repo --dry-run
 gombit make resource Widget --force
+gombit make resource Session --id uuid
 ```
+
+`--id` chooses the primary key. `uint` (the default) embeds `gorm.Model`.
+`uuid` scaffolds an application-assigned `uuid.UUID` primary key (`char(36)`,
+portable across SQLite, PostgreSQL, and MySQL) plus `CreatedAt`, `UpdatedAt`,
+and `DeletedAt`. The model sets the id in `BeforeCreate` when it is still
+`uuid.Nil`. Composite primary keys are rejected. A `belongs_to` foreign key
+uses the target model's primary key when that model is already on disk, and
+`uint` when it is not.
 
 `make` is a Cobra parent (`AddCommand`); `resource` is the subcommand. Root
 help lists `make`.
