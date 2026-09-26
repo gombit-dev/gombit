@@ -291,6 +291,26 @@ func TestFieldsFromInfersUUIDAndJSON(t *testing.T) {
 	if id.Type != admin.TypeUUID {
 		t.Fatalf("id type = %q, want %q", id.Type, admin.TypeUUID)
 	}
+	if !id.ReadOnly {
+		t.Fatal("manual primary key must stay read-only")
+	}
+	type Named struct {
+		ID   string `gorm:"primaryKey" json:"id"`
+		Name string `json:"name"`
+	}
+	named, err := admin.FieldsFrom(Named{})
+	if err != nil {
+		t.Fatalf("FieldsFrom string pk: %v", err)
+	}
+	var stringPK admin.Field
+	for _, f := range named {
+		if f.Name == "id" {
+			stringPK = f
+		}
+	}
+	if stringPK.Name != "id" || !stringPK.ReadOnly {
+		t.Fatalf("string primary key = %+v, want read-only id", stringPK)
+	}
 	payload, ok := byName["payload"]
 	if !ok {
 		t.Fatalf("FieldsFrom missing payload; fields=%v", fields)

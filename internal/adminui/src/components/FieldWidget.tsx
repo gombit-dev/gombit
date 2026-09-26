@@ -8,6 +8,7 @@ import {
   Chip,
   FormControl,
   FormControlLabel,
+  FormHelperText,
   FormLabel,
   InputLabel,
   MenuItem,
@@ -75,8 +76,8 @@ export function FieldWidget({ field, control, disabled }: Props) {
       <Controller
         name={field.name}
         control={control}
-        render={({ field: rhf }) => (
-          <FormControl fullWidth disabled={readOnly}>
+        render={({ field: rhf, fieldState }) => (
+          <FormControl fullWidth disabled={readOnly} error={!!fieldState.error}>
             <InputLabel id={`${field.name}-writeonly-bool`}>{label}</InputLabel>
             <Select
               labelId={`${field.name}-writeonly-bool`}
@@ -91,6 +92,7 @@ export function FieldWidget({ field, control, disabled }: Props) {
               <MenuItem value="true">Yes</MenuItem>
               <MenuItem value="false">No</MenuItem>
             </Select>
+            {fieldState.error ? <FormHelperText>{fieldState.error.message}</FormHelperText> : null}
           </FormControl>
         )}
       />

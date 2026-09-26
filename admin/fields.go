@@ -71,7 +71,11 @@ func FieldsFrom(model any) ([]Field, error) {
 		if !pol.InRequest && !pol.InResponse {
 			continue
 		}
-		readOnly := !pol.InRequest
+		// A primary key stays read-only even when policy leaves it in the
+		// request. A manual uuid or string key is not auto-increment, so
+		// Resolve defaults it to InRequest; editing that value and Save
+		// inserts a second row.
+		readOnly := sf.PrimaryKey || !pol.InRequest
 		required := pol.InRequest && sf.NotNull && !sf.HasDefaultValue && sf.FieldType.Kind() != reflect.Pointer
 		writeOnly := pol.InRequest && !pol.InResponse
 		if rel, ok := belongsToFK[sf.DBName]; ok {
