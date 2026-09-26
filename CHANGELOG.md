@@ -26,9 +26,13 @@ version.
   stored as nanoseconds) fields, and enum labels:
   `enum(draft=Draft,published=Published)` keeps the stored value separate from the
   form and admin label ([#398](https://github.com/gombit-dev/gombit/pull/398)).
-- Field constraints `default=`, `min=` / `max=`, `max_length=`, and `regex=`,
-  carried from the model into the SQL column, request validation, generated
-  forms, and admin meta ([#394](https://github.com/gombit-dev/gombit/pull/394)).
+- Field constraints `default=`, `min=` / `max=`, `max_length=`, and `regex=`
+  ([#394](https://github.com/gombit-dev/gombit/pull/394)). Each lands in a
+  different place (see [docs/fields.md](docs/fields.md#constraints)): `min=` /
+  `max=` become a SQL `CHECK` plus request and form bounds; `max_length=` sets
+  the column size and request `maxLength`; `regex=` is a request `pattern` and a
+  form check, not a SQL check; `default=` is applied when a create body omits
+  the field or sends null, not as a column `DEFAULT`.
 - `one_to_one` relations (a unique foreign key), `nullable` and
   `on_delete=restrict|cascade|set_null` on `belongs_to` / `one_to_one`, and
   self-referential relations when the foreign key is nullable ([#396](https://github.com/gombit-dev/gombit/pull/396)).
@@ -232,8 +236,9 @@ version.
 ### Added
 
 - Declared server-side list filtering, sorting, and search on generated list
-  handlers via the `filter`, `sort`, and `search` field modifiers (`?<field>=`,
-  `?ordering=`, `?search=`), using the admin data plane's query spelling. A
+  handlers via the `filterable`, `sortable`, and `searchable` field modifiers,
+  queried as `?<field>=`, `?ordering=`, and `?search=` (the admin data plane's
+  query spelling). A
   `belongs_to` foreign key is filterable by default ([#263](https://github.com/gombit-dev/gombit/pull/263)).
 
 ### Fixed
