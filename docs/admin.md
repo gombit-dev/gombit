@@ -179,7 +179,9 @@ arbitrary Go types.
   (use that when the Go exported name or GORM column differs).
 - **`Options.PK`** is the JSON/field name of the primary key. Empty means
   derive the GORM primary key **at Register** and store it. The PK field
-  must appear in `Fields`.
+  must appear in `Fields`. An auto-increment primary key is read-only.
+  A manual primary key is required on create and cannot be changed on
+  update.
 - **Empty `Fields`** derives a default from the struct once, inside
   `Register`, via `admin.FieldsFrom(T)`. That helper may use `reflect`
   **only at registration time**. Do not call it from request handlers.

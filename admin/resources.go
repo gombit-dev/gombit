@@ -3,6 +3,7 @@ package admin
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/gombit-dev/gombit/contract"
@@ -449,6 +450,24 @@ func applyWrite(ctx context.Context, m *registered, inst any, body map[string]an
 			fields[name] = []string{"field is read-only"}
 			continue
 		}
+		// A manual primary key is writable on create. On update the loaded
+		// row already has the key; a different value would make Save insert
+		// a second row. The same value is left as loaded.
+		if !creating && m.meta.PK != "" && name == m.meta.PK {
+			same, err := sameAsStored(f, inst, raw)
+			if err != nil {
+				fields[name] = []string{err.Error()}
+				continue
+			}
+			if !same {
+				fields[name] = []string{"cannot be changed"}
+			}
+			continue
+		}
+		if creating && m.meta.PK != "" && name == m.meta.PK && f.Required && blankRaw(raw) {
+			fields[name] = []string{"is required"}
+			continue
+		}
 		// Write-only values are omitted from the row, so a blank update is
 		// "leave the stored value". Required applies on create only: an edit
 		// must be able to change another column without resubmitting the secret,
@@ -533,6 +552,34 @@ func applyWrite(ctx context.Context, m *registered, inst any, body map[string]an
 		return contract.WithContext(ctx, contract.Validation("The request contains invalid fields.", fields))
 	}
 	return nil
+}
+
+func blankRaw(raw any) bool {
+	if raw == nil {
+		return true
+	}
+	s, ok := raw.(string)
+	return ok && s == ""
+}
+
+// sameAsStored reports whether raw is the value already on inst. UUID text
+// is compared case-insensitively because the stored form is canonical
+// lowercase. Other types compare the coerced text exactly, so a string
+// primary key keeps its case.
+func sameAsStored(f *resolvedField, inst any, raw any) (bool, error) {
+	if f == nil || f.get == nil {
+		return false, nil
+	}
+	coerced, err := coerceValue(raw, f.Type)
+	if err != nil {
+		return false, err
+	}
+	current := fmt.Sprint(f.get(inst))
+	next := fmt.Sprint(coerced)
+	if f.Type == TypeUUID {
+		return strings.EqualFold(current, next), nil
+	}
+	return current == next, nil
 }
 
 // blankToNull is true when "" cannot be stored in this column and the Go

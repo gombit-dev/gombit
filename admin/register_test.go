@@ -291,8 +291,8 @@ func TestFieldsFromInfersUUIDAndJSON(t *testing.T) {
 	if id.Type != admin.TypeUUID {
 		t.Fatalf("id type = %q, want %q", id.Type, admin.TypeUUID)
 	}
-	if !id.ReadOnly {
-		t.Fatal("manual primary key must stay read-only")
+	if id.ReadOnly || !id.Required {
+		t.Fatalf("uuid primary key = %+v, want writable and required", id)
 	}
 	type Named struct {
 		ID   string `gorm:"primaryKey" json:"id"`
@@ -308,8 +308,8 @@ func TestFieldsFromInfersUUIDAndJSON(t *testing.T) {
 			stringPK = f
 		}
 	}
-	if stringPK.Name != "id" || !stringPK.ReadOnly {
-		t.Fatalf("string primary key = %+v, want read-only id", stringPK)
+	if stringPK.Name != "id" || stringPK.ReadOnly || !stringPK.Required {
+		t.Fatalf("string primary key = %+v, want writable required id", stringPK)
 	}
 	payload, ok := byName["payload"]
 	if !ok {

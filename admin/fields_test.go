@@ -547,3 +547,55 @@ func TestFieldsFromRejectsUnsatisfiablePolicy(t *testing.T) {
 		t.Fatal("read-only NOT NULL column was accepted")
 	}
 }
+
+func TestManualPrimaryKeyCreateAndUpdate(t *testing.T) {
+	const id = "11111111-1111-1111-1111-111111111111"
+	stored := any(nil)
+	key := resolvedField{
+		Field: Field{Name: "id", Type: TypeUUID, Required: true},
+		get:   func(any) any { return uuid.MustParse(id) },
+		set: func(_ any, raw any) error {
+			stored = raw
+			return nil
+		},
+	}
+	m := &registered{meta: ModelMeta{PK: "id"}, fields: []resolvedField{key}}
+	m.fieldByName = map[string]*resolvedField{"id": &m.fields[0]}
+
+	if err := applyWrite(context.Background(), m, &struct{}{}, map[string]any{"id": id}, true); err != nil || stored != id {
+		t.Fatalf("create: err=%v stored=%#v", err, stored)
+	}
+	for _, body := range []map[string]any{{"id": nil}, {"id": ""}, {}} {
+		err := applyWrite(context.Background(), m, &struct{}{}, body, true)
+		var env *contract.ErrorEnvelope
+		if !errors.As(err, &env) || !strings.Contains(strings.Join(env.Body.Fields["id"], " "), "is required") {
+			t.Fatalf("create %#v = %#v", body, err)
+		}
+	}
+	stored = nil
+	if err := applyWrite(context.Background(), m, &struct{}{}, map[string]any{"id": strings.ToUpper(id)}, false); err != nil || stored != nil {
+		t.Fatalf("same key update: err=%v stored=%#v", err, stored)
+	}
+	stored = nil
+	err := applyWrite(context.Background(), m, &struct{}{}, map[string]any{"id": "22222222-2222-2222-2222-222222222222"}, false)
+	var env *contract.ErrorEnvelope
+	if !errors.As(err, &env) || !strings.Contains(strings.Join(env.Body.Fields["id"], " "), "cannot be changed") || stored != nil {
+		t.Fatalf("changed key = %#v stored=%#v", err, stored)
+	}
+
+	label := resolvedField{
+		Field: Field{Name: "id", Type: TypeString, Required: true},
+		get:   func(any) any { return "alpha" },
+		set: func(_ any, raw any) error {
+			stored = raw
+			return nil
+		},
+	}
+	text := &registered{meta: ModelMeta{PK: "id"}, fields: []resolvedField{label}}
+	text.fieldByName = map[string]*resolvedField{"id": &text.fields[0]}
+	stored = nil
+	err = applyWrite(context.Background(), text, &struct{}{}, map[string]any{"id": ""}, true)
+	if !errors.As(err, &env) || !strings.Contains(strings.Join(env.Body.Fields["id"], " "), "is required") || stored != nil {
+		t.Fatalf("blank string key = %#v stored=%#v", err, stored)
+	}
+}

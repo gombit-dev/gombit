@@ -28,9 +28,10 @@ import (
 // snake_case of the exported field name. Type is inferred from the Go type.
 // Read, write, and hidden follow resourcepolicy — the same gombit tag the
 // generated API uses — so a column cannot be secret on the public contract
-// and editable here. Primary keys and GORM timestamps stay read-only.
-// GORM created_at / updated_at are included when the policy leaves them
-// on the response.
+// and editable here. An auto-increment primary key and GORM timestamps stay
+// read-only. A manual primary key stays in the create request and is
+// required; update rejects a different key. GORM created_at / updated_at
+// are included when the policy leaves them on the response.
 func FieldsFrom(model any) ([]Field, error) {
 	sch, err := parseSchema(model)
 	if err != nil {
@@ -71,12 +72,14 @@ func FieldsFrom(model any) ([]Field, error) {
 		if !pol.InRequest && !pol.InResponse {
 			continue
 		}
-		// A primary key stays read-only even when policy leaves it in the
-		// request. A manual uuid or string key is not auto-increment, so
-		// Resolve defaults it to InRequest; editing that value and Save
-		// inserts a second row.
-		readOnly := sf.PrimaryKey || !pol.InRequest
-		required := pol.InRequest && sf.NotNull && !sf.HasDefaultValue && sf.FieldType.Kind() != reflect.Pointer
+		// Auto-increment keys are out of the request, so they stay read-only
+		// and the database fills them. A manual primary key is in the
+		// request: create accepts it, and update rejects a different value
+		// so Save cannot insert a second row. Required follows
+		// NeedsCreateValue, which treats a primary key with no default as
+		// required even when GORM did not mark it NOT NULL.
+		readOnly := !pol.InRequest
+		required := pol.InRequest && pol.NeedsCreateValue() && sf.FieldType.Kind() != reflect.Pointer
 		writeOnly := pol.InRequest && !pol.InResponse
 		if rel, ok := belongsToFK[sf.DBName]; ok {
 			fields = append(fields, Field{
