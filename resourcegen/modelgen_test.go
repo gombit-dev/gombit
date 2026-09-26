@@ -1316,8 +1316,8 @@ func TestBuildModelResourceScalarGaps(t *testing.T) {
 		"types.JSON",
 		"time.Time",
 		"*types.TimeOfDay",
-		`format:"time" nullable:"true"`,
-		`format:"time"`,
+		`pattern:"^([01][0-9]|2[0-3]):[0-5][0-9]`,
+		`nullable:"true"`,
 		"*types.Duration",
 		`format:"duration" nullable:"true"`,
 		"types.MustDuration(\"30m\")",
@@ -1338,6 +1338,9 @@ func TestBuildModelResourceScalarGaps(t *testing.T) {
 		}
 		if strings.Contains(line, "Shift ") && strings.Contains(line, `nullable:"true"`) {
 			t.Fatalf("required time of day is nullable:\n%s", line)
+		}
+		if strings.Contains(line, "Span ") && strings.Contains(line, "omitempty") && !strings.Contains(line, `nullable:"true"`) {
+			t.Fatalf("defaulted duration does not accept null:\n%s", line)
 		}
 		if strings.Contains(line, "Body ") && strings.Contains(line, `nullable:"true"`) {
 			t.Fatalf("required JSON is nullable:\n%s", line)

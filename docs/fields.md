@@ -31,9 +31,11 @@ projections of that kind, not separate lists.
 compatibility alias. `date` is a calendar date (`types.Date`, JSON
 `YYYY-MM-DD`). `datetime` is a timestamp. `time_of_day` is a clock
 (`types.TimeOfDay`, JSON `HH:MM:SS`) stored as `char(8)` so SQLite,
-PostgreSQL, and MySQL share one sortable text form. `HH:MM` is accepted
-and stored with seconds. A time that carries a numeric offset keeps the
-clock digits and drops the offset. `duration` is a Go duration string
+PostgreSQL, and MySQL share one sortable text form. The request pattern,
+the admin write, and `types.TimeOfDay` accept the same spellings: `HH:MM`,
+`HH:MM:SS`, and a clock with a numeric offset (`15:04:05+07:00`). All three
+are stored as `HH:MM:SS`. This is not OpenAPI format `time`, which rejects
+`HH:MM`. `duration` is a Go duration string
 (`1h30m`, `300ms`, `0s`) stored as a signed bigint of nanoseconds, which
 sorts the same way on every supported driver. Zero duration is `0s`.
 Midnight is `00:00:00`. An optional field of either kind is a pointer, and

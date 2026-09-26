@@ -124,7 +124,12 @@ export function formatCell(value: unknown, field?: FieldMeta): string {
   }
   const text = String(value);
   const label = field?.choices?.find((choice) => choice.value === text)?.label;
-  return label ?? text;
+  if (label && label !== text) {
+    // The label is the display. The stored value stays visible because
+    // list filters compare that token, not the label.
+    return `${label} (${text})`;
+  }
+  return text;
 }
 
 export function emptyFormValue(field: FieldMeta): unknown {

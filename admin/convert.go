@@ -81,21 +81,17 @@ func constraintMessage(f Field, raw any) string {
 }
 
 func choiceMessage(f Field, s string) string {
-	if len(f.Choices) == 0 || s == "" {
+	if len(f.Choices) == 0 {
 		return ""
 	}
-	labels := make([]string, 0, len(f.Choices))
-	for _, c := range f.Choices {
+	values := make([]string, len(f.Choices))
+	for i, c := range f.Choices {
 		if c.Value == s {
 			return ""
 		}
-		if c.Label != "" {
-			labels = append(labels, c.Label)
-		} else {
-			labels = append(labels, c.Value)
-		}
+		values[i] = c.Value
 	}
-	return "must be one of " + strings.Join(labels, ", ")
+	return "must be one of " + strings.Join(values, ", ")
 }
 
 // formatMessage applies the model format tag the same way Huma's

@@ -722,9 +722,13 @@ func checkDefault(field *Field) error {
 			}
 		}
 		return fmt.Errorf("resourcegen: field %q default %q is not an enum value", field.JSONName, field.Default)
-	case FieldDuration, FieldTimeOfDay:
-		if !formatAccepts(field.openAPIFormat(), field.Default) {
-			return fmt.Errorf("resourcegen: field %q default %q is not a valid %s", field.JSONName, field.Default, field.openAPIFormat())
+	case FieldDuration:
+		if !formatAccepts("duration", field.Default) {
+			return fmt.Errorf("resourcegen: field %q default %q is not a valid duration", field.JSONName, field.Default)
+		}
+	case FieldTimeOfDay:
+		if _, err := types.ParseTimeOfDay(field.Default); err != nil {
+			return fmt.Errorf("resourcegen: field %q default %q is not a time of day", field.JSONName, field.Default)
 		}
 	case FieldBool:
 		if field.Default != "true" && field.Default != "false" {
@@ -1267,8 +1271,6 @@ func (f Field) openAPIFormat() string {
 		return "uri"
 	case FieldIP:
 		return "ip"
-	case FieldTimeOfDay:
-		return "time"
 	case FieldDuration:
 		return "duration"
 	default:
@@ -1280,10 +1282,15 @@ func (f Field) openAPIFormat() string {
 // shape rather than an OpenAPI format. Django's slug alphabet: letters,
 // digits, hyphens, and underscores.
 func (f Field) semanticPattern() string {
-	if f.Type == FieldSlug {
+	switch f.Type {
+	case FieldSlug:
 		return `^[-a-zA-Z0-9_]+$`
+	case FieldTimeOfDay:
+		// Not Huma format "time": that format rejects HH:MM, and the type accepts it.
+		return types.TimeOfDayPattern
+	default:
+		return ""
 	}
-	return ""
 }
 
 // formPattern is the pattern the form enforces. An explicit regex wins; a

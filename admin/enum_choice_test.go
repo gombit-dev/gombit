@@ -10,7 +10,7 @@ func TestEnumLabelsReachAdminMeta(t *testing.T) {
 	type row struct {
 		ID     int
 		Status string          `json:"status" validate:"enum=draft,published;label=Draft,Published"`
-		Opens  types.TimeOfDay `json:"opens" format:"time"`
+		Opens  types.TimeOfDay `json:"opens" pattern:"^([01][0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9](Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])?)?$"`
 		Length types.Duration  `json:"length" format:"duration"`
 	}
 	sch, err := parseSchema(row{})
@@ -28,8 +28,14 @@ func TestEnumLabelsReachAdminMeta(t *testing.T) {
 	if len(fields[0].Choices) != 2 || fields[0].Choices[0].Value != "draft" || fields[0].Choices[0].Label != "Draft" || fields[0].Choices[1].Label != "Published" {
 		t.Fatalf("choices = %+v", fields[0].Choices)
 	}
-	if fields[1].Type != TypeTime || fields[1].Format != "time" {
+	if fields[1].Type != TypeTime || fields[1].Pattern == "" {
 		t.Fatalf("opens = %+v", fields[1])
+	}
+	if msg := constraintMessage(fields[1], "09:05"); msg != "" {
+		t.Fatalf("HH:MM rejected before coerce: %q", msg)
+	}
+	if msg := constraintMessage(fields[1], "nope"); msg == "" {
+		t.Fatal("a non-clock passed the admin pattern")
 	}
 	if fields[2].Type != TypeDuration || fields[2].Format != "duration" {
 		t.Fatalf("length = %+v", fields[2])
@@ -38,8 +44,14 @@ func TestEnumLabelsReachAdminMeta(t *testing.T) {
 	if meta.Fields[0].Choices[1].Label != "Published" {
 		t.Fatalf("meta choices = %+v", meta.Fields[0].Choices)
 	}
-	if msg := constraintMessage(fields[0], "nope"); msg != "must be one of Draft, Published" {
+	if msg := constraintMessage(fields[0], "nope"); msg != "must be one of draft, published" {
 		t.Fatalf("constraint = %q", msg)
+	}
+	if msg := constraintMessage(fields[0], "Draft"); msg != "must be one of draft, published" {
+		t.Fatalf("label was accepted or the error names labels: %q", msg)
+	}
+	if msg := constraintMessage(fields[0], ""); msg != "must be one of draft, published" {
+		t.Fatalf("blank enum = %q", msg)
 	}
 	if msg := constraintMessage(fields[0], "draft"); msg != "" {
 		t.Fatalf("stored value rejected: %q", msg)

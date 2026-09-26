@@ -421,7 +421,7 @@ func TestRenderDurationTimeOfDayAndEnumLabel(t *testing.T) {
 	for _, want := range []string{
 		"*types.TimeOfDay",
 		"type:char(8)",
-		`format:"time"`,
+		`pattern:"^([01][0-9]|2[0-3]):[0-5][0-9]`,
 		"*types.Duration",
 		"type:bigint",
 		`format:"duration"`,

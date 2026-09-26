@@ -4,9 +4,19 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 )
+
+// TimeOfDayPattern is the one clock grammar. Huma's format "time" accepts
+// HH:MM:SS and a numeric offset, and rejects HH:MM. This pattern accepts
+// all three, which is what UnmarshalText parses and stores as HH:MM:SS.
+// The generator, the admin write, and the type all use it. Format "time"
+// is not that grammar.
+const TimeOfDayPattern = `^([01][0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9](Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])?)?$`
+
+var timeOfDayPattern = regexp.MustCompile(TimeOfDayPattern)
 
 // TimeOfDay is a clock time with no date and no zone. JSON and text are
 // "HH:MM:SS". "HH:MM" and a time with a numeric offset ("15:04:05+07:00",
@@ -69,21 +79,26 @@ func (t TimeOfDay) MarshalText() ([]byte, error) {
 }
 
 // UnmarshalText implements encoding.TextUnmarshaler. An empty string is
-// rejected: midnight is "00:00:00", and "" is not that clock.
+// rejected: midnight is "00:00:00", and "" is not that clock. The accepted
+// spellings are TimeOfDayPattern, the same pattern the request and the
+// admin write enforce.
 func (t *TimeOfDay) UnmarshalText(b []byte) error {
 	s := strings.TrimSpace(string(b))
-	if s == "" {
-		return fmt.Errorf("types: time of day is empty")
+	if !timeOfDayPattern.MatchString(s) {
+		return fmt.Errorf("types: time of day %q must be HH:MM or HH:MM:SS", strings.TrimSpace(string(b)))
 	}
-	if len(s) == len("15:04") {
-		s += ":00"
-	}
-	parsed, err := time.Parse(time.TimeOnly, s)
-	if err != nil {
+	var parsed time.Time
+	var err error
+	if strings.ContainsAny(s, "Z+-") {
 		parsed, err = time.Parse("15:04:05Z07:00", s)
+	} else {
+		if len(s) == len("15:04") {
+			s += ":00"
+		}
+		parsed, err = time.Parse(time.TimeOnly, s)
 	}
 	if err != nil {
-		return fmt.Errorf("types: time of day %q must be HH:MM:SS", strings.TrimSpace(string(b)))
+		return fmt.Errorf("types: time of day %q must be HH:MM or HH:MM:SS", strings.TrimSpace(string(b)))
 	}
 	t.hour, t.minute, t.second = parsed.Hour(), parsed.Minute(), parsed.Second()
 	return nil

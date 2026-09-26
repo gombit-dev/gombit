@@ -259,7 +259,7 @@ describe("clock and enum labels", () => {
     ];
     const { body } = formValuesToBody({ opens: "09:05", status: "draft" }, fields);
     expect(body.opens).toBe("09:05:00");
-    expect(formatCell("draft", fields[1])).toBe("Draft");
-    expect(formatCell("published", fields[1])).toBe("Published");
+    expect(formatCell("draft", fields[1])).toBe("Draft (draft)");
+    expect(formatCell("published", fields[1])).toBe("Published (published)");
   });
 });

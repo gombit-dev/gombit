@@ -3,6 +3,8 @@ package resourcegen
 import (
 	"strings"
 	"testing"
+
+	"github.com/gombit-dev/gombit/types"
 )
 
 func TestParseFields(t *testing.T) {
@@ -746,5 +748,22 @@ func TestSemanticStringMaxLength(t *testing.T) {
 	}
 	if _, err := parseFields([]string{"n:int:max_length=4"}, "page"); err == nil || !strings.Contains(err.Error(), "cannot take max_length") {
 		t.Fatalf("int max_length error = %v", err)
+	}
+}
+
+func TestTimeOfDayDefaultUsesTheTypeGrammar(t *testing.T) {
+	t.Parallel()
+	fields, err := parseFields([]string{"opens:time_of_day:default=09:05", "length:duration:required,default=30m"}, "shift")
+	if err != nil {
+		t.Fatalf("parseFields: %v", err)
+	}
+	if fields[0].Default != "09:05" || !strings.Contains(modelStructTag(fields[0]), types.TimeOfDayPattern) {
+		t.Fatalf("opens = %+v tag %s", fields[0], modelStructTag(fields[0]))
+	}
+	if !fields[1].Required || fields[1].Default != "30m" {
+		t.Fatalf("length = %+v", fields[1])
+	}
+	if _, err := parseFields([]string{"opens:time_of_day:default=nope"}, "shift"); err == nil {
+		t.Fatal("default=nope was accepted")
 	}
 }

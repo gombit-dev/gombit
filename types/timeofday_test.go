@@ -102,20 +102,27 @@ func TestTimeOfDayGORMRoundTrip(t *testing.T) {
 func TestTimeOfDaySchemaRejectsBlank(t *testing.T) {
 	reg := huma.NewMapRegistry("#/components/schemas/", huma.DefaultSchemaNamer)
 	type body struct {
-		Opens *TimeOfDay `json:"opens" format:"time" nullable:"true"`
-		Shift TimeOfDay  `json:"shift" format:"time"`
+		Opens *TimeOfDay `json:"opens" pattern:"^([01][0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9](Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])?)?$" nullable:"true"`
+		Shift TimeOfDay  `json:"shift" pattern:"^([01][0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9](Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])?)?$"`
 	}
 	s := reg.Schema(reflect.TypeOf(body{}), false, "Body")
 	opens := s.Properties["opens"]
-	if opens.Format != "time" || !opens.Nullable {
-		t.Fatalf("opens schema = type %q format %q nullable %v", opens.Type, opens.Format, opens.Nullable)
+	if opens.Pattern != TimeOfDayPattern || !opens.Nullable {
+		t.Fatalf("opens schema = type %q pattern %q nullable %v", opens.Type, opens.Pattern, opens.Nullable)
 	}
 	res := huma.ValidateResult{}
 	huma.Validate(reg, s, &huma.PathBuffer{}, huma.ModeWriteToServer, map[string]any{
-		"opens": nil, "shift": "15:04:05",
+		"opens": "09:05", "shift": "15:04:05",
 	}, &res)
 	if len(res.Errors) != 0 {
-		t.Fatalf("null optional time: %v", res.Errors)
+		t.Fatalf("HH:MM and HH:MM:SS: %v", res.Errors)
+	}
+	res = huma.ValidateResult{}
+	huma.Validate(reg, s, &huma.PathBuffer{}, huma.ModeWriteToServer, map[string]any{
+		"opens": nil, "shift": "15:04:05+07:00",
+	}, &res)
+	if len(res.Errors) != 0 {
+		t.Fatalf("null optional and offset clock: %v", res.Errors)
 	}
 	res = huma.ValidateResult{}
 	huma.Validate(reg, s, &huma.PathBuffer{}, huma.ModeWriteToServer, map[string]any{
