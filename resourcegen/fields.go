@@ -69,6 +69,9 @@ type Field struct {
 	TargetPkg string
 	OnDelete  string
 	Self      bool
+	// FKGoType is the belongs_to / one_to_one foreign-key Go type. Empty
+	// means uint. uuid.UUID matches a target whose primary key is a UUID.
+	FKGoType string
 }
 
 // parseRelationField builds a belongs_to / has_many / many_to_many / one_to_one
@@ -77,7 +80,8 @@ type Field struct {
 // for a nullable self-referential belongs_to or one_to_one. Modifiers after
 // the target are comma-separated: nullable and on_delete=restrict|cascade|set_null.
 // resourcePkg is the package being generated, used to detect same-package targets.
-func parseRelationField(name, jsonName, goName string, kind FieldType, rawTarget, resourcePkg string) (Field, error) {
+// lookup reports the target primary key when the model is already on disk.
+func parseRelationField(name, jsonName, goName string, kind FieldType, rawTarget, resourcePkg string, lookup pkLookup) (Field, error) {
 	target, modRaw, _ := strings.Cut(rawTarget, ",")
 	target = strings.TrimSpace(target)
 	if target == "" {
@@ -103,6 +107,7 @@ func parseRelationField(name, jsonName, goName string, kind FieldType, rawTarget
 		TargetPkg: targetPkg,
 		OnDelete:  "RESTRICT",
 		Self:      targetPkg == resourcePkg,
+		FKGoType:  "uint",
 	}
 	if strings.TrimSpace(modRaw) != "" {
 		if err := applyRelationModifiers(&f, modRaw); err != nil {
@@ -112,19 +117,28 @@ func parseRelationField(name, jsonName, goName string, kind FieldType, rawTarget
 	if f.OnDelete == "SET NULL" && !f.Nullable {
 		return Field{}, fmt.Errorf("resourcegen: %s relation %q on_delete=set_null requires nullable", strings.ToLower(string(kind)), name)
 	}
-	// A self-referential belongs_to or one_to_one needs a nullable (*uint)
-	// foreign key so a tree root stores NULL rather than 0. has_many and
+	// A self-referential belongs_to or one_to_one needs a nullable foreign
+	// key so a tree root stores NULL rather than the zero id. has_many and
 	// many_to_many onto the same model still need explicit join keys.
 	if f.Self && (kind == FieldHasMany || kind == FieldManyToMany) {
 		return Field{}, fmt.Errorf("resourcegen: %s relation %q cannot target the resource itself (self-referential has_many and many_to_many need explicit join keys)", strings.ToLower(string(kind)), name)
 	}
 	if f.Self && !f.Nullable {
-		return Field{}, fmt.Errorf("resourcegen: %s relation %q cannot target the resource itself without nullable (a tree root must store NULL, not 0)", strings.ToLower(string(kind)), name)
+		return Field{}, fmt.Errorf("resourcegen: %s relation %q cannot target the resource itself without nullable (a tree root must store NULL, not the zero id)", strings.ToLower(string(kind)), name)
+	}
+	if (kind == FieldBelongsTo || kind == FieldOneToOne) && lookup != nil {
+		got, err := lookup(targetPkg, targetType)
+		if err != nil {
+			return Field{}, err
+		}
+		if got != "" {
+			f.FKGoType = got
+		}
 	}
 	qualified := targetPkg + "." + targetType
 	if f.Self {
 		// A struct cannot contain a field of its own type. The association
-		// is a pointer; the foreign key *uint is the nullable column.
+		// is a pointer; the foreign key is the nullable column.
 		qualified = "*" + targetType
 	}
 	switch kind {
@@ -189,6 +203,20 @@ func (f Field) reservedJSONKeys() []string {
 func (f Field) fkGoName() string   { return f.GoName + "ID" }
 func (f Field) fkJSONName() string { return f.JSONName + "_id" }
 
+func (f Field) fkColumnGoType() string {
+	if f.FKGoType == "" {
+		return "uint"
+	}
+	return f.FKGoType
+}
+
+func (f Field) fkDTOType() FieldType {
+	if f.FKGoType == "uuid.UUID" {
+		return FieldUUID
+	}
+	return FieldUint
+}
+
 // joinTable is the many2many join-table name for a relation on resourcePkg.
 func (f Field) joinTable(resourcePkg string) string { return resourcePkg + "_" + f.JSONName }
 
@@ -203,15 +231,15 @@ func dtoFields(fields []Field) []Field {
 			continue
 		}
 		if f.Type == FieldBelongsTo || f.Type == FieldOneToOne {
-			goType := "uint"
+			goType := f.fkColumnGoType()
 			if f.Nullable {
-				goType = "*uint"
+				goType = "*" + goType
 			}
 			out = append(out, Field{
 				Name:     f.fkJSONName(),
 				JSONName: f.fkJSONName(),
 				GoName:   f.fkGoName(),
-				Type:     FieldUint,
+				Type:     f.fkDTOType(),
 				GoType:   goType,
 				Nullable: f.Nullable,
 			})
@@ -308,10 +336,14 @@ func (f Field) relationKind() logical.RelationKind {
 }
 
 func parseFields(specs []string, resourcePkg string) ([]Field, error) {
+	return parseFieldsWithID(specs, resourcePkg, nil)
+}
+
+func parseFieldsWithID(specs []string, resourcePkg string, lookup pkLookup) ([]Field, error) {
 	seen := make(map[string]struct{}, len(specs))
 	fields := make([]Field, 0, len(specs))
 	for _, spec := range specs {
-		field, err := parseField(spec, resourcePkg)
+		field, err := parseField(spec, resourcePkg, lookup)
 		if err != nil {
 			return nil, err
 		}
@@ -330,7 +362,7 @@ func parseFields(specs []string, resourcePkg string) ([]Field, error) {
 	return fields, nil
 }
 
-func parseField(spec, resourcePkg string) (Field, error) {
+func parseField(spec, resourcePkg string, lookup pkLookup) (Field, error) {
 	spec = strings.TrimSpace(spec)
 	if spec == "" {
 		return Field{}, fmt.Errorf("resourcegen: empty field spec")
@@ -372,7 +404,7 @@ func parseField(spec, resourcePkg string) (Field, error) {
 		if !relSpec.GeneratorReady {
 			return Field{}, fmt.Errorf("resourcegen: type %q is in the field vocabulary but is not generated yet (see docs/fields.md)", rel)
 		}
-		return parseRelationField(name, jsonName, goName, FieldType(rel), parts[2], resourcePkg)
+		return parseRelationField(name, jsonName, goName, FieldType(rel), parts[2], resourcePkg, lookup)
 	}
 
 	field := Field{
@@ -596,7 +628,7 @@ func applyModifiers(field *Field, raw string) error {
 		return fmt.Errorf("resourcegen: field %q cannot be both required and nullable", field.JSONName)
 	}
 	if field.Filterable && !field.typeAllowsFilter() {
-		return fmt.Errorf("resourcegen: field %q is %s and cannot be filterable (supported: string, int, int64, uint, bool, enum, belongs_to)", field.JSONName, field.Type)
+		return fmt.Errorf("resourcegen: field %q is %s and cannot be filterable (supported: string, int, int64, uint, bool, uuid, enum, belongs_to)", field.JSONName, field.Type)
 	}
 	if field.Searchable && !field.typeAllowsSearch() {
 		return fmt.Errorf("resourcegen: field %q is %s and cannot be searchable (supported: string, text, enum, email, slug)", field.JSONName, field.Type)
@@ -1353,6 +1385,16 @@ func (f Field) blankIsNull() bool {
 	default:
 		return false
 	}
+}
+
+// submitsNilUUID reports a non-pointer uuid.UUID that is not required. A
+// belongs_to / one_to_one UUID foreign key is that shape. The create body
+// requires the property (no omitempty, format uuid), so a blank input must
+// send the nil UUID string, the same way a uint foreign key sends 0. JSON
+// null is rejected because the column is not a pointer. Optional scalar
+// UUIDs are *uuid.UUID and still submit null.
+func (f Field) submitsNilUUID() bool {
+	return f.Type == FieldUUID && !f.Required && !strings.HasPrefix(f.GoType, "*")
 }
 
 // enumColumnSize sizes the varchar column to hold the longest allowed value,

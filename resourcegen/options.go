@@ -24,9 +24,11 @@ const (
 
 // Options configures resource generation inside an existing application.
 type Options struct {
-	WorkDir  string
-	Name     string
-	Fields   []string
+	WorkDir string
+	Name    string
+	Fields  []string
+	// ID is the primary key strategy: uint (default, gorm.Model) or uuid.
+	ID       string
 	Service  bool
 	Repo     bool
 	DryRun   bool
@@ -85,6 +87,9 @@ func (opts Options) ensureAtlas() error {
 		if flag.set {
 			rerun = append(rerun, flag.name)
 		}
+	}
+	if id := strings.TrimSpace(opts.ID); id != "" && !strings.EqualFold(id, "uint") && !strings.EqualFold(id, "integer") {
+		rerun = append(rerun, "--id", id)
 	}
 	return fmt.Errorf(
 		"resourcegen: Atlas is required to generate database migrations (%q not found on PATH).\n\n"+

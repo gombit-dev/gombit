@@ -972,3 +972,13 @@ func TestApplyWritesRollsBackOnFailure(t *testing.T) {
 		t.Fatal("the failing target must be left intact (never truncated)")
 	}
 }
+
+func TestEnsureAtlasKeepsIDFlag(t *testing.T) {
+	previousLook := lookPath
+	lookPath = func(string) (string, error) { return "", errors.New("atlas missing") }
+	t.Cleanup(func() { lookPath = previousLook })
+	err := Options{Name: "Session", ID: "uuid", AtlasBin: "atlas"}.ensureAtlas()
+	if err == nil || !strings.Contains(err.Error(), "gombit make resource Session --id uuid --skip-migrations") {
+		t.Fatalf("error = %v", err)
+	}
+}

@@ -134,6 +134,9 @@ func buildModelResource(model any, pkg string) (modelResource, error) {
 	if typeName == "" {
 		return modelResource{}, fmt.Errorf("resourcegen: cannot generate DTOs for an anonymous model type")
 	}
+	if len(sch.PrimaryFields) > 1 {
+		return modelResource{}, fmt.Errorf("resourcegen: %s has a composite primary key, which is not supported", typeName)
+	}
 
 	policyFields, err := resourcepolicy.FromSchema(sch)
 	if err != nil {

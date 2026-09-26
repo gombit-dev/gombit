@@ -46,6 +46,11 @@ func renderModelHandler(r modelResource) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resourcegen: derive resource names for %q: %w", r.TypeName, err)
 	}
+	pk, err := r.primaryKey()
+	if err != nil {
+		return "", err
+	}
+	uuidPK := pk.GoType == "uuid.UUID"
 
 	typ := r.TypeName
 	data := r.dataType()
@@ -58,16 +63,20 @@ func renderModelHandler(r modelResource) (string, error) {
 	var b strings.Builder
 	b.WriteString(goBanner())
 	b.WriteString("package " + r.Package + "\n\n")
-	b.WriteString(importBlock(
-		[]string{"context", "net/http", "strconv"},
-		[]string{
-			"github.com/danielgtaylor/huma/v2",
-			"github.com/gombit-dev/gombit/contract",
-			"github.com/gombit-dev/gombit/database",
-			"github.com/gombit-dev/gombit/framework",
-			"gorm.io/gorm",
-		},
-	))
+	stdImports := []string{"context", "net/http"}
+	thirdImports := []string{
+		"github.com/danielgtaylor/huma/v2",
+		"github.com/gombit-dev/gombit/contract",
+		"github.com/gombit-dev/gombit/database",
+		"github.com/gombit-dev/gombit/framework",
+	}
+	if uuidPK {
+		thirdImports = append(thirdImports, "github.com/google/uuid")
+	} else {
+		stdImports = append(stdImports, "strconv")
+	}
+	thirdImports = append(thirdImports, "gorm.io/gorm")
+	b.WriteString(importBlock(stdImports, thirdImports))
 
 	// Hooks interface: the resource's customization points. BeforeCreate receives
 	// the model built from the request and the request body itself, so a hook can
@@ -119,7 +128,11 @@ func renderModelHandler(r modelResource) (string, error) {
 	}
 	b.WriteString("}\n\n")
 	b.WriteString("type get" + typ + "Input struct {\n")
-	b.WriteString("\tID string `path:\"id\" doc:\"" + typ + " identifier\"`\n}\n\n")
+	if uuidPK {
+		b.WriteString("\tID string `path:\"id\" format:\"uuid\" doc:\"" + typ + " identifier\"`\n}\n\n")
+	} else {
+		b.WriteString("\tID string `path:\"id\" doc:\"" + typ + " identifier\"`\n}\n\n")
+	}
 	b.WriteString("type get" + typ + "Output struct {\n")
 	b.WriteString("\tBody contract.Data[" + data + "]\n}\n\n")
 	b.WriteString("type create" + typ + "Input struct {\n")
@@ -191,12 +204,20 @@ func renderModelHandler(r modelResource) (string, error) {
 
 	// get: load one by id.
 	b.WriteString("func (h *Handler) get(ctx context.Context, input *get" + typ + "Input) (*get" + typ + "Output, error) {\n")
-	b.WriteString("\tid, err := strconv.ParseUint(input.ID, 10, 64)\n")
+	if uuidPK {
+		b.WriteString("\tid, err := uuid.Parse(input.ID)\n")
+	} else {
+		b.WriteString("\tid, err := strconv.ParseUint(input.ID, 10, 64)\n")
+	}
 	b.WriteString("\tif err != nil {\n")
 	b.WriteString("\t\treturn nil, contract.WithContext(ctx, contract.NotFound(\"" + singular + " not found\"))\n")
 	b.WriteString("\t}\n")
 	b.WriteString("\tvar row " + typ + "\n")
-	b.WriteString("\tif err := h.DB.WithContext(ctx).First(&row, uint(id)).Error; err != nil {\n")
+	if uuidPK {
+		b.WriteString("\tif err := h.DB.WithContext(ctx).First(&row, \"" + pk.Column + " = ?\", id).Error; err != nil {\n")
+	} else {
+		b.WriteString("\tif err := h.DB.WithContext(ctx).First(&row, uint(id)).Error; err != nil {\n")
+	}
 	b.WriteString("\t\treturn nil, database.MapLoadError(ctx, err, \"" + singular + " not found\", \"load " + singular + "\")\n")
 	b.WriteString("\t}\n")
 	b.WriteString("\treturn &get" + typ + "Output{Body: contract.Data[" + data + "]{Data: to" + typ + "Data(row)}}, nil\n}\n\n")
@@ -240,6 +261,27 @@ func renderModelHandler(r modelResource) (string, error) {
 // filterFields / aggregateFields return the resource's filterable / aggregatable
 // columns in schema order (deterministic output). searchColumns / sortColumns
 // return the DB column names for the searchable / sortable fields, in schema order.
+func (r modelResource) primaryKey() (modelField, error) {
+	var keys []modelField
+	for _, f := range r.Fields {
+		if f.PrimaryKey {
+			keys = append(keys, f)
+		}
+	}
+	if len(keys) == 0 {
+		return modelField{}, fmt.Errorf("resourcegen: %s has no primary key", r.TypeName)
+	}
+	if len(keys) > 1 {
+		return modelField{}, fmt.Errorf("resourcegen: %s has a composite primary key, which is not supported", r.TypeName)
+	}
+	switch keys[0].GoType {
+	case "uint", "uuid.UUID":
+		return keys[0], nil
+	default:
+		return modelField{}, fmt.Errorf("resourcegen: %s primary key type %s is not supported (supported: uint, uuid.UUID)", r.TypeName, keys[0].GoType)
+	}
+}
+
 func (r modelResource) filterFields() []modelField {
 	out := make([]modelField, 0, len(r.Fields))
 	for _, f := range r.Fields {
@@ -291,8 +333,12 @@ func columnsOf(fs []modelField) []string {
 // filterKindExpr maps the field's Go kind to the database.FilterKind the generated
 // list handler passes to database.FilterEq to coerce the raw string query value —
 // matching the legacy field-grammar mapping (int→FilterInt, int64→FilterInt64,
-// unsigned→FilterUint, bool→FilterBool, otherwise string).
+// unsigned→FilterUint, bool→FilterBool, uuid→FilterUUID, otherwise string).
+// FilterUUID parses with uuid.Parse and binds the canonical lowercase text.
 func filterKindExpr(f modelField) string {
+	if strings.TrimPrefix(f.GoType, "*") == "uuid.UUID" {
+		return "database.FilterUUID"
+	}
 	switch f.Kind {
 	case reflect.Int:
 		return "database.FilterInt"

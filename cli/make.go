@@ -35,6 +35,7 @@ func newMakeResourceCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
 		dryRun         bool
 		force          bool
 		skipMigrations bool
+		idStrategy     string
 	)
 	cmd := silence(&cobra.Command{
 		Use:   "resource <Name> [field:type[:modifiers]...]",
@@ -69,7 +70,7 @@ query surface (safe, indexable subset). The query spelling matches Gombit's
 admin data plane so the two contracts stay in sync:
 
   filterable         exact-match ?<field>=<value> query param.
-                     Types: string, int, int64, uint, bool. A belongs_to
+                     Types: string, int, int64, uint, bool, uuid. A belongs_to
                      foreign key is filterable by default (GET /children?
                      <parent>_id=<id>) with no modifier needed.
   sortable           ?ordering=<field> (prefix with - for DESC, e.g.
@@ -93,7 +94,7 @@ Relations use name:kind:Target, where Target is a model in internal/<target>/:
 
   engine:belongs_to:Engine        FK (EngineID) + Engine association; the API
                                   DTO exposes engine_id. nullable makes the FK
-                                  *uint. on_delete is restrict (default),
+                                  a pointer. on_delete is restrict (default),
                                   cascade, or set_null.
   profile:one_to_one:Profile      same as belongs_to, with a unique foreign key.
   parts:has_many:Part             Parts []part.Part; read via the admin. The
@@ -110,6 +111,14 @@ a pointer so a tree root stores NULL. has_many and many_to_many onto the same
 model are rejected: they need explicit join keys. nullable and on_delete on
 those two kinds are rejected, because the foreign key lives on the other model.
 
+--id chooses the primary key: uint (the default, gorm.Model) or uuid (an
+application-assigned uuid.UUID plus CreatedAt, UpdatedAt, and DeletedAt).
+Composite primary keys are rejected. A belongs_to or one_to_one foreign key
+uses the target model's primary key when that model is already on disk, and
+uint when it is not. A self relation uses this resource's --id. A model on
+disk whose key is not uint or uuid.UUID is rejected. The foreign key stays
+filterable (GET /children?<fk>=<id>) for both.
+
 Examples:
 
   gombit make resource Widget name:string:required price:int
@@ -121,6 +130,7 @@ Examples:
     status:string engine:belongs_to:Engine warehouses:many_to_many:Warehouse
   gombit make resource Invoice --service --repo --dry-run
   gombit make resource Widget --force
+  gombit make resource Session --id uuid
 
 --service / --repo are opt-in pass-through files (C6). Default is a thin
 handler over GORM. --dry-run prints the file list without writing.
@@ -146,6 +156,7 @@ and generate the SQL later with gombit db makemigrations.`,
 				WorkDir:        ".",
 				Name:           args[0],
 				Fields:         args[1:],
+				ID:             idStrategy,
 				Service:        service,
 				Repo:           repo,
 				DryRun:         dryRun,
@@ -211,6 +222,7 @@ and generate the SQL later with gombit db makemigrations.`,
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print files that would be written without writing")
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite files that differ from this run")
 	cmd.Flags().BoolVar(&skipMigrations, "skip-migrations", false, "scaffold the resource and registry without generating migration SQL (does not require Atlas)")
+	cmd.Flags().StringVar(&idStrategy, "id", "uint", "primary key strategy: uint (default, gorm.Model) or uuid")
 	return cmd
 }
 
