@@ -1,8 +1,11 @@
 // Package schemaplan classifies the schema change a migration would make
-// before it is written (SCHEMA-2, #309). It evaluates the HCL that
-// `atlas schema inspect` prints for the migration directory and for the
-// models, diffs the two with Atlas's own differ, and ranks every change by what
-// it can do to existing rows. Nothing is parsed out of migration SQL.
+// before it is written (SCHEMA-2, #309), and lints the migrations already
+// written (SCHEMA-4, #311). It evaluates the HCL that `atlas schema inspect`
+// prints, diffs two states with Atlas's own differ, and ranks every change by
+// what it can do to existing rows. The plan uses only that diff. Lint also
+// reads each migration's statements, with the fail-safe HOST-3 classifier
+// (manifest.Classify), for data loss the diff cannot show, and its declared
+// renames.
 //
 // It is a separate package so the Atlas SQL libraries stay out of package
 // migrations, which generated apps' loaders compile.

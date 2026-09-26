@@ -74,6 +74,12 @@ func TestValidateDirMapsAtlasErrors(t *testing.T) {
 	if !errors.As(err, &rerr) || !strings.Contains(rerr.Detail, "20260101000000") {
 		t.Fatalf("ValidateDir() = %v, want a ReplayError naming the version", err)
 	}
+	// A replayed statement that mentions "checksum" is still a replay error.
+	named := &scriptedRunner{out: "Error: sql/migrate: executing statement \"ALTER TABLE files ADD COLUMN checksum text NOT NULL\" from version \"20260103000000\": Cannot add a NOT NULL column with default value NULL\n", err: errors.New("exit status 1")}
+	err = ValidateDir(context.Background(), DirOptions{WorkDir: dir, Driver: config.DatabaseDriverSQLite, MigrationDir: dir, runner: named})
+	if !errors.As(err, &rerr) {
+		t.Fatalf("ValidateDir() = %v, want a ReplayError, not a checksum error", err)
+	}
 }
 
 func TestInspectDirAtPinsTheVersion(t *testing.T) {

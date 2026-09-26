@@ -86,6 +86,8 @@ type PlanStep struct {
 	// exactly, if exactly one does. Build turns them into the hint.
 	createdInPlan []string
 	renameTo      string
+	// from is the old name of a table a rename_table step renames.
+	from string
 }
 
 // NeedsAcknowledgement reports whether the step is destructive or unsafe and

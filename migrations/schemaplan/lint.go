@@ -13,6 +13,7 @@ import (
 	"ariga.io/atlas/sql/schema"
 
 	"github.com/gombit-dev/gombit/config"
+	"github.com/gombit-dev/gombit/manifest"
 	"github.com/gombit-dev/gombit/migrations"
 )
 
@@ -20,6 +21,11 @@ import (
 const (
 	StepRenameTable  = "rename_table"
 	StepRenameColumn = "rename_column"
+	// Statement-level findings: SQL the migration runs whose effect on rows
+	// the before/after schema diff cannot show.
+	StepDataChange      = "data_change"
+	StepAlterColumn     = "alter_column"
+	StepUnclassifiedSQL = "unclassified_sql"
 )
 
 // DeclaredRename is a rename a migration states in SQL: a table rename when
@@ -42,7 +48,7 @@ var (
 // states, in statement order. Comments are ignored.
 func DeclaredRenames(sql string) []DeclaredRename {
 	var out []DeclaredRename
-	for _, stmt := range statements(sql) {
+	for _, stmt := range manifest.Statements(sql) {
 		switch {
 		case reRenameColumn.MatchString(stmt):
 			m := reRenameColumn.FindStringSubmatch(stmt)
@@ -53,25 +59,6 @@ func DeclaredRenames(sql string) []DeclaredRename {
 		case reRenameTableCmd.MatchString(stmt):
 			m := reRenameTableCmd.FindStringSubmatch(stmt)
 			out = append(out, DeclaredRename{Table: unquote(m[1]), To: unquote(m[2])})
-		}
-	}
-	return out
-}
-
-// statements strips `--` comments and splits on ';'.
-func statements(sql string) []string {
-	var b strings.Builder
-	for _, line := range strings.Split(sql, "\n") {
-		if i := strings.Index(line, "--"); i >= 0 {
-			line = line[:i]
-		}
-		b.WriteString(line)
-		b.WriteByte('\n')
-	}
-	var out []string
-	for _, s := range strings.Split(b.String(), ";") {
-		if s = strings.TrimSpace(s); s != "" {
-			out = append(out, s)
 		}
 	}
 	return out
@@ -105,7 +92,9 @@ func BuildWithRenames(in migrations.Inspection, renames []DeclaredRename) (Schem
 			continue // the diff will show whatever really happened
 		}
 		if r.Column == "" {
-			renameSteps = append(renameSteps, newStep(StepRenameTable, SeveritySafe, r.To, "", fmt.Sprintf("Renames table %s to %s. The rows stay.", r.Table, r.To)))
+			step := newStep(StepRenameTable, SeveritySafe, r.To, "", fmt.Sprintf("Renames table %s to %s. The rows stay.", r.Table, r.To))
+			step.from = r.Table
+			renameSteps = append(renameSteps, step)
 			t.Name = r.To
 			continue
 		}
@@ -137,16 +126,106 @@ func findTable(r *schema.Realm, name string) *schema.Table {
 	return nil
 }
 
+var (
+	reDataChangeTable = regexp.MustCompile(`(?is)^\s*(?:DELETE\s+FROM|UPDATE|TRUNCATE(?:\s+TABLE)?|MERGE\s+INTO|REPLACE\s+INTO)\s+` + ident)
+	reRebuildCopy     = regexp.MustCompile(`(?is)^\s*INSERT\s+INTO\s+` + ident + `.*\bSELECT\b.*\bFROM\s+` + ident + `\s*$`)
+)
+
+// withStatementFindings adds what the migration's own SQL does to rows that
+// the before/after diff cannot see. The HOST-3 statement classifier
+// (manifest.Classify) is fail-safe: DELETE, UPDATE, TRUNCATE, DROP TABLE,
+// ALTER COLUMN, and anything it does not recognize are data loss. A statement
+// the diff already explains (a drop_column step for the same column, a step
+// on an altered column, Atlas's own SQLite rebuild) adds nothing; any other
+// becomes a destructive or unsafe step the migration has to acknowledge. A
+// declared rename is only safe if the migration does not also drop the table.
+func withStatementFindings(steps []PlanStep, sql string) []PlanStep {
+	stmts := manifest.Statements(sql)
+	ops := manifest.Classify(sql)
+	have := map[string]bool{}
+	columnTouched := map[string]bool{}
+	for _, s := range steps {
+		have[s.ID] = true
+		if s.Name != "" {
+			columnTouched[s.Table+"."+s.Name] = true
+		}
+	}
+	// Atlas's SQLite rebuild: INSERT INTO new_X (...) SELECT ... FROM X, then
+	// DROP TABLE X and ALTER TABLE new_X RENAME TO X. The drop is the copy's
+	// second half, and the diff classifies what the copy keeps.
+	rebuilt := map[string]bool{}
+	for _, stmt := range stmts {
+		if m := reRebuildCopy.FindStringSubmatch(stmt); m != nil && unquote(m[1]) == "new_"+unquote(m[2]) {
+			rebuilt[unquote(m[2])] = true
+		}
+	}
+
+	dropped := map[string]bool{}
+	var found []PlanStep
+	add := func(s PlanStep) {
+		if !have[s.ID] {
+			have[s.ID] = true
+			found = append(found, s)
+		}
+	}
+	for i, op := range ops {
+		if op.Safety != manifest.SafetyDataLoss || i >= len(stmts) {
+			continue
+		}
+		switch op.Kind {
+		case manifest.OpDropTable:
+			if rebuilt[op.Resource] {
+				continue
+			}
+			dropped[op.Resource] = true
+			add(newStep(StepDropTable, SeverityDestructive, op.Resource, "", fmt.Sprintf("The migration runs DROP TABLE %s and every row in it goes, even if a table of that name exists afterwards.", op.Resource)))
+		case manifest.OpDropColumn:
+			add(newStep(StepDropColumn, SeverityDestructive, op.Resource, op.Column, fmt.Sprintf("The migration drops column %s.%s and the data in it.", op.Resource, op.Column)))
+		case manifest.OpAlterColumn:
+			if columnTouched[op.Resource+"."+op.Column] {
+				continue // the diff classifies this column's change
+			}
+			add(newStep(StepAlterColumn, SeverityUnsafe, op.Resource, op.Column, fmt.Sprintf("The migration alters column %s.%s in a way the schema before and after does not show (for example a type change with USING that rewrites values).", op.Resource, op.Column)))
+		default:
+			if m := reDataChangeTable.FindStringSubmatch(stmts[i]); m != nil {
+				table := unquote(m[1])
+				add(newStep(StepDataChange, SeverityDestructive, table, "", fmt.Sprintf("The migration deletes or rewrites rows in %s (%s).", table, firstWords(stmts[i]))))
+				continue
+			}
+			add(newStep(StepUnclassifiedSQL, SeverityDestructive, fmt.Sprintf("statement_%d", i+1), "", fmt.Sprintf("Gombit cannot classify statement %d (%s), so it is treated as destructive.", i+1, firstWords(stmts[i]))))
+		}
+	}
+
+	// A declared rename whose table the migration drops keeps nothing.
+	out := steps[:0:0]
+	for _, s := range steps {
+		if s.Code == StepRenameTable && (dropped[s.Table] || dropped[s.from]) {
+			continue
+		}
+		out = append(out, s)
+	}
+	return append(out, found...)
+}
+
+func firstWords(stmt string) string {
+	stmt = strings.Join(strings.Fields(stmt), " ")
+	if len(stmt) > 60 {
+		stmt = stmt[:57] + "..."
+	}
+	return stmt
+}
+
 // LintOptions configures Lint.
 type LintOptions struct {
 	WorkDir      string
 	Driver       config.DatabaseDriver
 	MigrationDir string
 	AtlasBinary  string
-	// Latest is how many of the newest migrations to classify; All classifies
-	// every one. The integrity check always covers the whole directory.
+	// Latest, when positive, classifies only the N newest migrations (a local
+	// shortcut on slow dev databases). Zero classifies every migration, which
+	// is what CI should run. The integrity check always covers the whole
+	// directory.
 	Latest int
-	All    bool
 	Stderr io.Writer
 }
 
@@ -229,11 +308,8 @@ func Lint(ctx context.Context, opts LintOptions) (LintReport, error) {
 		return report, nil
 	}
 
-	start := len(files) - 1
-	switch {
-	case opts.All:
-		start = 0
-	case opts.Latest > 1:
+	start := 0
+	if opts.Latest > 0 {
 		start = max(len(files)-opts.Latest, 0)
 	}
 	states := map[string][]byte{}
@@ -270,6 +346,7 @@ func Lint(ctx context.Context, opts LintOptions) (LintReport, error) {
 		if err != nil {
 			return report, fmt.Errorf("schemaplan: %s: %w", f.Name, err)
 		}
+		plan.Steps = withStatementFindings(plan.Steps, string(sql))
 		plan.Acknowledge(migrations.AllowDirectives(string(sql)))
 		report.Migrations = append(report.Migrations, MigrationLint{Version: f.Version, Name: f.Name, File: filepath.Base(f.UpPath), Steps: plan.Steps})
 	}

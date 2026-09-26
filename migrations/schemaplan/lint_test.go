@@ -156,7 +156,11 @@ func TestLintAndRepairAtlasCLISQLiteWhenAvailable(t *testing.T) {
 	if !slices.Contains(migrations.AllowDirectives(string(generated)), "drop_column:products.legacy") {
 		t.Fatalf("generated migration has no directive:\n%s", generated)
 	}
-	if r := lint(1); r.Failed() {
+	// The drop is an Atlas SQLite rebuild (copy into new_products, DROP
+	// TABLE products, rename back): the statement-level DROP TABLE is the
+	// copy's second half, not data loss, so the directive for the column drop
+	// is all it needs.
+	if r := lint(0); r.Failed() {
 		t.Fatalf("lint of the acknowledged migration failed: %+v", r)
 	}
 
@@ -164,7 +168,7 @@ func TestLintAndRepairAtlasCLISQLiteWhenAvailable(t *testing.T) {
 	f, _ := os.OpenFile(files[len(files)-1].UpPath, os.O_APPEND|os.O_WRONLY, 0o600)
 	_, _ = f.WriteString("-- reviewed\n")
 	_ = f.Close()
-	r := lint(1)
+	r := lint(0)
 	if !strings.Contains(r.Integrity, "gombit db repair") || strings.Contains(r.Integrity, "atlas migrate") {
 		t.Fatalf("integrity = %q, want the gombit recovery and no raw Atlas command", r.Integrity)
 	}
@@ -179,7 +183,7 @@ func TestLintAndRepairAtlasCLISQLiteWhenAvailable(t *testing.T) {
 	// until it carries one.
 	drop := write("drop_price", "ALTER TABLE `products` DROP COLUMN `price`;\n")
 	hash()
-	r = lint(1)
+	r = lint(0)
 	pending := r.Unacknowledged()
 	if len(pending) != 1 || pending[0].Step.ID != "drop_column:products.price" {
 		t.Fatalf("Unacknowledged() = %+v, want the hand-written drop", pending)
@@ -188,21 +192,90 @@ func TestLintAndRepairAtlasCLISQLiteWhenAvailable(t *testing.T) {
 		t.Fatal(err)
 	}
 	hash()
-	if r := lint(1); r.Failed() {
+	if r := lint(0); r.Failed() {
 		t.Fatalf("lint with the directive failed: %+v", r)
 	}
 
 	// 4. A declared table rename lints as safe, not as a drop.
 	write("rename_products", "ALTER TABLE `products` RENAME TO `items`;\n")
 	hash()
-	r = lint(1)
+	r = lint(0)
 	if r.Failed() {
 		t.Fatalf("lint of a declared rename failed: %+v", r)
 	}
-	if s := stepsByID(r.Migrations[0].Steps)["rename_table:items"]; s.Severity != SeveritySafe {
-		t.Fatalf("rename migration steps = %v, want rename_table:items safe", stepIDs(r.Migrations[0].Steps))
+	last := r.Migrations[len(r.Migrations)-1]
+	if s := stepsByID(last.Steps)["rename_table:items"]; s.Severity != SeveritySafe {
+		t.Fatalf("rename migration steps = %v, want rename_table:items safe", stepIDs(last.Steps))
 	}
-	if r := lint(99); len(r.Migrations) != 4 {
-		t.Fatalf("--latest 99 classified %d migrations, want all 4", len(r.Migrations))
+	if len(r.Migrations) != 4 {
+		t.Fatalf("the default classified %d migrations, want all 4", len(r.Migrations))
+	}
+
+	// 5. Data loss the before/after schema cannot show still needs a
+	// directive: each of these leaves the same shape behind.
+	for _, tc := range []struct {
+		name, sql, id string
+	}{
+		{"delete_rows", "DELETE FROM `items`;\n", "data_change:items"},
+		{"recreate_items", "DROP TABLE `items`;\nCREATE TABLE `items` (`id` integer NULL PRIMARY KEY AUTOINCREMENT, `created_at` datetime NULL, `updated_at` datetime NULL, `deleted_at` datetime NULL, `name` varchar(120) NOT NULL);\nCREATE INDEX `idx_products_deleted_at` ON `items` (`deleted_at`);\n", "drop_table:items"},
+		{"rename_then_recreate", "ALTER TABLE `items` RENAME TO `goods`;\nDROP TABLE `goods`;\nCREATE TABLE `goods` (`id` integer NULL PRIMARY KEY AUTOINCREMENT, `created_at` datetime NULL, `updated_at` datetime NULL, `deleted_at` datetime NULL, `name` varchar(120) NOT NULL);\nCREATE INDEX `idx_products_deleted_at` ON `goods` (`deleted_at`);\n", "drop_table:goods"},
+	} {
+		path := write(tc.name, tc.sql)
+		hash()
+		r := lint(1)
+		steps := stepsByID(r.Migrations[0].Steps)
+		if s, ok := steps[tc.id]; !ok || !s.NeedsAcknowledgement() {
+			t.Fatalf("%s: steps = %v, want an unacknowledged %s", tc.name, stepIDs(r.Migrations[0].Steps), tc.id)
+		}
+		if _, ok := steps["rename_table:goods"]; ok {
+			t.Fatalf("%s: a rename whose table is then dropped was reported as safe", tc.name)
+		}
+		if err := os.WriteFile(path, []byte("-- gombit:allow "+tc.id+"\n"+tc.sql), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		hash()
+		if r := lint(1); r.Failed() {
+			t.Fatalf("%s with its directive failed: %+v", tc.name, r)
+		}
+	}
+}
+
+// TestLintDefaultCoversEveryMigration: a safe migration after an
+// unacknowledged destructive one must not hide it from the default run.
+func TestLintDefaultCoversEveryMigrationAtlasCLISQLiteWhenAvailable(t *testing.T) {
+	atlasBin := os.Getenv("ATLAS_BINARY")
+	if atlasBin == "" {
+		var err error
+		if atlasBin, err = exec.LookPath("atlas"); err != nil {
+			t.Skip("Atlas CLI not found; set ATLAS_BINARY to run the real SQLite lint test")
+		}
+	}
+	dir := t.TempDir()
+	for name, sql := range map[string]string{
+		"20260101000000_create_products.sql": "CREATE TABLE products (id integer PRIMARY KEY, price integer NOT NULL);\n",
+		"20260102000000_drop_price.sql":      "ALTER TABLE products DROP COLUMN price;\n",
+		"20260103000000_add_note.sql":        "ALTER TABLE products ADD COLUMN note text;\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(sql), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx := context.Background()
+	if err := migrations.Hash(ctx, migrations.ApplyOptions{WorkDir: dir, MigrationDir: dir, AtlasBinary: atlasBin, Stdout: io.Discard, Stderr: io.Discard}); err != nil {
+		t.Fatal(err)
+	}
+	run := func(latest int) LintReport {
+		r, err := Lint(ctx, LintOptions{WorkDir: dir, Driver: config.DatabaseDriverSQLite, MigrationDir: dir, AtlasBinary: atlasBin, Latest: latest, Stderr: io.Discard})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	r := run(0)
+	if !r.Failed() || len(r.Unacknowledged()) != 1 || r.Unacknowledged()[0].File != "20260102000000_drop_price.sql" {
+		t.Fatalf("default lint = %+v, want the older drop reported", r.Unacknowledged())
+	}
+	if r := run(1); r.Failed() {
+		t.Fatalf("--latest 1 classifies only add_note and should pass: %+v", r)
 	}
 }

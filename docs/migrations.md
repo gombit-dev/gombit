@@ -302,9 +302,9 @@ the table renames), so `gombit db rollback` can undo it.
 application database:
 
 ```sh
-gombit db lint              # the newest migration
-gombit db lint --latest 3   # the three newest
-gombit db lint --all --json
+gombit db lint               # every migration: what CI should run
+gombit db lint --json
+gombit db lint --latest 1    # only the newest, a local shortcut
 ```
 
 - **Integrity.** `atlas.sum` matches every file, and the migrations apply to
@@ -312,10 +312,16 @@ gombit db lint --all --json
   mismatch names the changed files and the fix, `gombit db repair`.
 - **Layout.** Every `*.sql` file is an up migration; a down file outside
   `downs/` is reported with where it belongs.
-- **Safety.** Each checked migration is classified like
-  [`gombit db plan`](#planning-a-change), from the schema before and after it.
-  A destructive or unsafe step passes only when the migration carries a line
-  for it:
+- **Safety.** Every migration is classified like
+  [`gombit db plan`](#planning-a-change), from the schema before and after it,
+  and from its own statements with the fail-safe
+  [statement classifier](migration-safety.md): `DELETE`, `UPDATE`,
+  `TRUNCATE`, a `DROP TABLE` the schema does not show (a table dropped and
+  re-created), an `ALTER COLUMN` with no visible change, and SQL Gombit cannot
+  classify are all destructive or unsafe. A statement the schema diff already
+  explains (the column drop it reports, Atlas's own SQLite table rebuild) does
+  not count twice. A destructive or unsafe step passes only when the migration
+  carries a line for it:
 
   ```sql
   -- gombit:allow drop_column:products.price
@@ -326,11 +332,13 @@ gombit db lint --all --json
   these lines itself for the steps `--allow` or `--forget-model` acknowledged.
   Renames the migration states (`ALTER TABLE ... RENAME TO`,
   `RENAME COLUMN`, MySQL `RENAME TABLE`) count as safe `rename_table` /
-  `rename_column` steps, and anything else the migration changes is still
-  classified.
+  `rename_column` steps, unless the migration also drops that table, and
+  anything else the migration changes is still classified.
 
-`gombit db lint` exits non-zero on any problem, so CI can run it on every pull
-request. It does not wrap `atlas migrate lint`, which ADR-012 keeps outside the
+`gombit db lint` checks every migration by default and exits non-zero on any
+problem, so CI can run it on every pull request. `--latest N` classifies only
+the N newest, which saves dev-database starts locally but can miss an older
+unacknowledged migration, so don't use it in CI. It does not wrap `atlas migrate lint`, which ADR-012 keeps outside the
 Community Edition dependency surface.
 
 After an intentional hand edit to a migration (a backfill, a
