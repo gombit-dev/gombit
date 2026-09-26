@@ -59,7 +59,7 @@ go install github.com/gombit-dev/gombit/cmd/gombit@latest
 Pin a version instead of tracking `@latest`:
 
 ```bash
-go install github.com/gombit-dev/gombit/cmd/gombit@v0.1.0
+go install github.com/gombit-dev/gombit/cmd/gombit@v0.3.0
 ```
 
 The binary lands in `$(go env GOBIN)`, or `$(go env GOPATH)/bin` when `GOBIN`
@@ -73,7 +73,7 @@ Add that line to `~/.bashrc`, `~/.zshrc`, or your shell's equivalent to make it
 permanent.
 
 Binaries installed this way carry no ldflags, so `gombit version` reads the
-module version recorded by Go — `@v0.1.0` reports `v0.1.0`, while `@latest` on
+module version recorded by Go — `@v0.3.0` reports `v0.3.0`, while `@latest` on
 an untagged commit may report a pseudo-version.
 
 ### Option 2 — release archive
@@ -83,7 +83,8 @@ Archives are published for `linux/amd64`, `linux/arm64`, `darwin/amd64`,
 `darwin/arm64`, and `windows/amd64`.
 
 ```bash
-VERSION=v0.1.0
+# Latest release; set VERSION=v0.3.0 (for example) to pin one instead.
+VERSION=$(basename "$(curl -fsSLo /dev/null -w '%{url_effective}' https://github.com/gombit-dev/gombit/releases/latest)")
 OS=linux      # or darwin
 ARCH=amd64    # or arm64
 
@@ -103,7 +104,8 @@ On macOS `sha256sum` may not exist; use `shasum -a 256 -c SHA256SUMS.txt
 Windows (PowerShell):
 
 ```powershell
-$Version = "v0.1.0"
+# Latest release; set $Version = "v0.3.0" (for example) to pin one instead.
+$Version = (Invoke-RestMethod https://api.github.com/repos/gombit-dev/gombit/releases/latest).tag_name
 Invoke-WebRequest -Uri "https://github.com/gombit-dev/gombit/releases/download/$Version/gombit-$Version-windows-amd64.zip" -OutFile gombit.zip
 Expand-Archive gombit.zip -DestinationPath "$env:LOCALAPPDATA\gombit"
 $env:PATH += ";$env:LOCALAPPDATA\gombit"
@@ -137,9 +139,9 @@ gombit version
 A release archive (Option 2) is stamped with build metadata:
 
 ```text
-gombit:   v0.1.0
-commit:   9abb3c6ecc8c1bf93419aa43c4d4f1ae3de97a2b
-built:    2026-08-18T19:33:15Z
+gombit:   v0.3.0
+commit:   aeffafcfbdad43e7be3f896f5506406567e661bc
+built:    2026-09-26T08:27:27Z
 go:       go1.26.0
 platform: linux/amd64
 ```
@@ -250,7 +252,7 @@ GOMBIT_HTTP_ADDR=0.0.0.0:8080 gombit dev
 ## Troubleshooting
 
 **`gombit: command not found`** — `$(go env GOPATH)/bin` is not on your `PATH`.
-See [Option 1](#option-1--go-install).
+See [Option 1](#option-1--go-install-recommended).
 
 **`go: module ... requires go >= 1.26`** — your Go toolchain is older than
 `go.mod`. Upgrade from [go.dev/dl](https://go.dev/dl/); the version in your
@@ -283,7 +285,7 @@ The framework module version used by *your application* is independent of the
 CLI, and is upgraded in the app:
 
 ```bash
-go get github.com/gombit-dev/gombit@v0.1.0
+go get github.com/gombit-dev/gombit@v0.3.0
 go mod tidy
 ```
 

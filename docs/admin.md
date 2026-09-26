@@ -87,8 +87,8 @@ overlapping field names do not leak onto the next model or row. Edit
 requires a GET of the current row (`actions.detail` + `can.view`); if
 detail is disabled, the edit screen is hidden rather than PATCHing empty
 boolean defaults (`false`) over stored `true` values.
-Field widgets cover the closed field types; `belongs_to` is a single-select
-picker (storing the foreign key); `has_many` is a read-only list of the related
+Field widgets cover the closed field types; `belongs_to` and `one_to_one` are a
+single-select picker (storing the foreign key); `has_many` is a read-only list of the related
 children; `many_to_many` is a
 multi-select. The relation pickers are searchable Autocompletes backed by the
 related model's list endpoint, showing its label field. When the related model
@@ -177,6 +177,13 @@ arbitrary Go types.
 - **`Field.Name`** is the JSON object key in meta and in data-plane rows.
   For v1, `Name` is also the GORM/SQL column unless `Field.Column` is set
   (use that when the Go exported name or GORM column differs).
+- **Constraints** — `minimum`, `maximum`, `max_length`, `pattern`, `default`,
+  `format`, and `choices` — appear in meta when set, and admin writes enforce
+  them. A field the registrar leaves empty copies them from the model:
+  `minimum`, `maximum`, `max_length`, `pattern`, and `default` from its
+  `validate` tag, `choices` (each enum's stored value and label) from that tag's
+  `enum=` and `label=` keys, and `format` from the separate `format` struct tag
+  (`format:"email"`), not from `validate`.
 - **`Options.PK`** is the JSON/field name of the primary key. Empty means
   derive the GORM primary key **at Register** and store it. The PK field
   must appear in `Fields`.
@@ -193,7 +200,7 @@ arbitrary Go types.
   stored keys, including custom keys, and echo them in meta.
 
 Closed field types: `string`, `text`, `integer`, `float`, `decimal`,
-`boolean`, `datetime`, `date`, `uuid`, `json`, `relation`. These strings are
+`boolean`, `datetime`, `date`, `time`, `duration`, `uuid`, `json`, `relation`. These strings are
 the admin projection of the shared vocabulary in [fields.md](fields.md).
 
 Relation `kind` is `belongs_to`, `one_to_one`, `has_many`, or `many_to_many`.
