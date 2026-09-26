@@ -12,6 +12,7 @@ import (
 
 	"github.com/gombit-dev/gombit/field"
 	"github.com/gombit-dev/gombit/resourcepolicy"
+	"github.com/gombit-dev/gombit/types"
 	"gorm.io/gorm/schema"
 )
 
@@ -497,14 +498,14 @@ func (f modelField) schemaExtras() string {
 	if f.Pattern != "" && f.Constraints.Pattern == "" && !strings.Contains(s, `pattern:"`) {
 		s += ` pattern:"` + f.Pattern + `"`
 	}
-	// Huma sets Nullable from a *string pointer. omitempty clears that
-	// unless nullable:"true" is also set. requestTag adds omitempty when
-	// a default is set, so a pointer whose format rejects "" repeats the
-	// tag and stays nullable. A format that accepts "", such as
-	// uri-reference, with a default is omitempty and not nullable: JSON
-	// null is rejected and "" is stored. A *string with no omitempty stays
-	// nullable whether or not this tag is present.
-	if strings.HasPrefix(f.GoType, "*") && f.rejectsEmpty() && !strings.Contains(s, `nullable:"true"`) {
+	// Huma sets Nullable from a pointer. omitempty clears that unless
+	// nullable:"true" is also set. requestTag adds omitempty when a
+	// default is set, and requestGoType wraps a non-pointer so omission
+	// stays nil. That pointer has to stay nullable, or JSON null never
+	// reaches the mapper and the default does not apply. A format that
+	// accepts "", such as uri-reference, stays omitempty and not nullable:
+	// JSON null is rejected and "" is stored.
+	if strings.HasPrefix(f.requestGoType(), "*") && f.rejectsEmpty() && !strings.Contains(s, `nullable:"true"`) {
 		s += ` nullable:"true"`
 	}
 	return s
@@ -515,6 +516,12 @@ func (f modelField) schemaExtras() string {
 // format that function knows. A pattern that matches "" does not.
 func (f modelField) rejectsEmpty() bool {
 	if field.FormatRejects(f.Format, "") {
+		return true
+	}
+	// A clock and a duration reject "" in UnmarshalText. The create body
+	// uses a pattern for the clock (Huma format "time" does not) and
+	// format "duration" for the span. Either way "" is not a stored value.
+	if strings.Contains(f.GoType, "types.TimeOfDay") || strings.Contains(f.GoType, "types.Duration") {
 		return true
 	}
 	return patternRejectsEmpty(f.Pattern) || patternRejectsEmpty(f.Constraints.Pattern)
@@ -541,6 +548,17 @@ func schemaAttr(goType string) string {
 		}
 	case ok && name == "Date" && (pkg == "types" || strings.HasPrefix(pkg, "types")):
 		b.WriteString(` format:"date"`)
+		if pointer {
+			b.WriteString(` nullable:"true"`)
+		}
+	case ok && name == "TimeOfDay" && (pkg == "types" || strings.HasPrefix(pkg, "types")):
+		// format "time" rejects HH:MM. The pattern is the grammar the type parses.
+		b.WriteString(` pattern:"` + types.TimeOfDayPattern + `"`)
+		if pointer {
+			b.WriteString(` nullable:"true"`)
+		}
+	case ok && name == "Duration" && (pkg == "types" || strings.HasPrefix(pkg, "types")):
+		b.WriteString(` format:"duration"`)
 		if pointer {
 			b.WriteString(` nullable:"true"`)
 		}
@@ -642,6 +660,10 @@ func (f modelField) defaultLiteral() string {
 	switch {
 	case f.isDecimal():
 		return "types.MustDecimal(" + strconv.Quote(f.Constraints.Default) + ")"
+	case strings.Contains(f.GoType, "types.TimeOfDay"):
+		return "types.MustTimeOfDay(" + strconv.Quote(f.Constraints.Default) + ")"
+	case strings.Contains(f.GoType, "types.Duration"):
+		return "types.MustDuration(" + strconv.Quote(f.Constraints.Default) + ")"
 	case f.Kind == reflect.String:
 		return strconv.Quote(f.Constraints.Default)
 	default:

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { FieldMeta } from "./api/types";
-import { compareDecimal, emptyFormValue, formPattern, formValuesToBody, relationListQuery, relationOptions } from "./fields";
+import { compareDecimal, emptyFormValue, formPattern, formValuesToBody, formatCell, relationListQuery, relationOptions } from "./fields";
 
 function field(partial: Pick<FieldMeta, "name" | "type"> & Partial<FieldMeta>): FieldMeta {
   return {
@@ -241,5 +241,25 @@ describe("many_to_many fields", () => {
   it("drops only null / undefined / empty entries", () => {
     const { body } = formValuesToBody({ warehouses: ["4", "", null, 5] }, [rel()]);
     expect(body.warehouses).toEqual([4, 5]);
+  });
+});
+
+describe("clock and enum labels", () => {
+  it("pads a short clock and shows the enum label", () => {
+    const fields: FieldMeta[] = [
+      field({ name: "opens", type: "time" }),
+      field({
+        name: "status",
+        type: "string",
+        choices: [
+          { value: "draft", label: "Draft" },
+          { value: "published", label: "Published" },
+        ],
+      }),
+    ];
+    const { body } = formValuesToBody({ opens: "09:05", status: "draft" }, fields);
+    expect(body.opens).toBe("09:05:00");
+    expect(formatCell("draft", fields[1])).toBe("Draft (draft)");
+    expect(formatCell("published", fields[1])).toBe("Published (published)");
   });
 });

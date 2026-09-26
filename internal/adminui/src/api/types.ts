@@ -7,6 +7,8 @@ export type FieldType =
   | "boolean"
   | "datetime"
   | "date"
+  | "time"
+  | "duration"
   | "uuid"
   | "json"
   | "relation";
@@ -31,6 +33,7 @@ export type FieldMeta = {
   pattern?: string;
   default?: string;
   format?: string;
+  choices?: { value: string; label: string }[];
 };
 
 export type Actions = {

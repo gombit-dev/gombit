@@ -117,7 +117,7 @@ func TestAdminWiresAreTheHistoricalSet(t *testing.T) {
 		}
 		got[w] = struct{}{}
 	}
-	want := []string{"string", "text", "integer", "float", "decimal", "boolean", "datetime", "date", "uuid", "json", "relation"}
+	want := []string{"string", "text", "integer", "float", "decimal", "boolean", "datetime", "date", "time", "duration", "uuid", "json", "relation"}
 	if len(got) != len(want) {
 		t.Fatalf("admin wires = %v, want %v", AdminWires(), want)
 	}
@@ -131,6 +131,18 @@ func TestAdminWiresAreTheHistoricalSet(t *testing.T) {
 	}
 	if DateTime.AdminWire() != "datetime" {
 		t.Fatal("datetime admin wire drifted")
+	}
+	for _, kind := range []Kind{TimeOfDay, Duration} {
+		spec, ok := Lookup(kind)
+		if !ok || !spec.GeneratorReady || spec.GoType == "" || spec.AdminWire == "" {
+			t.Fatalf("%s spec = %+v", kind, spec)
+		}
+	}
+	if k, _, ok := ParseCLI("time_of_day"); !ok || k != TimeOfDay {
+		t.Fatalf("ParseCLI(time_of_day) = %s %v", k, ok)
+	}
+	if k, _, ok := ParseCLI("duration"); !ok || k != Duration {
+		t.Fatalf("ParseCLI(duration) = %s %v", k, ok)
 	}
 }
 
@@ -154,6 +166,8 @@ func TestKindFromGoMatchesAdminInference(t *testing.T) {
 		{reflect.TypeOf(decimal.Decimal{}), "", "decimal"},
 		{reflect.TypeOf(types.Decimal{}), "", "decimal"},
 		{reflect.TypeOf(types.Date{}), "", "date"},
+		{reflect.TypeOf(types.TimeOfDay{}), "", "time"},
+		{reflect.TypeOf(types.Duration{}), "", "duration"},
 		{reflect.TypeOf(types.JSON(nil)), "", "json"},
 		{reflect.TypeOf(types.NullJSON(nil)), "", "json"},
 	}

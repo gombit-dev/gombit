@@ -1287,14 +1287,18 @@ func TestQueryPolicyAgreesAcrossGeneratorPaths(t *testing.T) {
 
 func TestBuildModelResourceScalarGaps(t *testing.T) {
 	type m struct {
-		ID    uint           `gorm:"primaryKey"`
-		Score float64        `gombit:"read,write,sortable"`
-		Born  *types.Date    `gorm:"type:date" gombit:"read,write,sortable"`
-		Due   types.Date     `gorm:"type:date;not null" gombit:"read,write,sortable"`
-		Token *uuid.UUID     `gorm:"type:char(36)" gombit:"read,write,sortable"`
-		Meta  types.NullJSON `gorm:"type:text" gombit:"read,write"`
-		Body  types.JSON     `gorm:"type:text;not null" gombit:"read,write"`
-		At    time.Time      `gombit:"read,write,sortable"`
+		ID     uint             `gorm:"primaryKey"`
+		Score  float64          `gombit:"read,write,sortable"`
+		Born   *types.Date      `gorm:"type:date" gombit:"read,write,sortable"`
+		Due    types.Date       `gorm:"type:date;not null" gombit:"read,write,sortable"`
+		Token  *uuid.UUID       `gorm:"type:char(36)" gombit:"read,write,sortable"`
+		Meta   types.NullJSON   `gorm:"type:text" gombit:"read,write"`
+		Body   types.JSON       `gorm:"type:text;not null" gombit:"read,write"`
+		At     time.Time        `gombit:"read,write,sortable"`
+		Opens  *types.TimeOfDay `gorm:"type:char(8)" gombit:"read,write,sortable"`
+		Shift  types.TimeOfDay  `gorm:"type:char(8);not null" gombit:"read,write,sortable"`
+		Length *types.Duration  `gorm:"type:bigint" gombit:"read,write,sortable"`
+		Span   types.Duration   `gorm:"type:bigint;not null" validate:"default=30m" gombit:"read,write,sortable"`
 	}
 	res, err := buildModelResource(&m{}, "m")
 	if err != nil {
@@ -1302,7 +1306,7 @@ func TestBuildModelResourceScalarGaps(t *testing.T) {
 	}
 	src := string(mustFormatGo(renderModelDTOs(res)))
 	for _, want := range []string{
-		"Score float64",
+		`json:"score"`,
 		"*types.Date",
 		`format:"date" nullable:"true"`,
 		`format:"date"`,
@@ -1311,6 +1315,12 @@ func TestBuildModelResourceScalarGaps(t *testing.T) {
 		"types.NullJSON",
 		"types.JSON",
 		"time.Time",
+		"*types.TimeOfDay",
+		`pattern:"^([01][0-9]|2[0-3]):[0-5][0-9]`,
+		`nullable:"true"`,
+		"*types.Duration",
+		`format:"duration" nullable:"true"`,
+		"types.MustDuration(\"30m\")",
 	} {
 		if !strings.Contains(src, want) {
 			t.Fatalf("dto missing %q:\n%s", want, src)
@@ -1325,6 +1335,12 @@ func TestBuildModelResourceScalarGaps(t *testing.T) {
 		}
 		if strings.Contains(line, "Due ") && !strings.Contains(line, `format:"date"`) {
 			t.Fatalf("required date missing format:\n%s", line)
+		}
+		if strings.Contains(line, "Shift ") && strings.Contains(line, `nullable:"true"`) {
+			t.Fatalf("required time of day is nullable:\n%s", line)
+		}
+		if strings.Contains(line, "Span ") && strings.Contains(line, "omitempty") && !strings.Contains(line, `nullable:"true"`) {
+			t.Fatalf("defaulted duration does not accept null:\n%s", line)
 		}
 		if strings.Contains(line, "Body ") && strings.Contains(line, `nullable:"true"`) {
 			t.Fatalf("required JSON is nullable:\n%s", line)

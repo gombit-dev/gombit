@@ -10,6 +10,7 @@ import {
   FormControlLabel,
   FormLabel,
   TextField,
+  MenuItem,
   Typography,
 } from "@mui/material";
 
@@ -83,6 +84,35 @@ export function FieldWidget({ field, control, disabled }: Props) {
             }
             label={label}
           />
+        )}
+      />
+    );
+  }
+
+  if (field.choices && field.choices.length > 0) {
+    return (
+      <Controller
+        name={field.name}
+        control={control}
+        rules={widgetRules(field, readOnly)}
+        render={({ field: rhf, fieldState }) => (
+          <TextField
+            {...rhf}
+            select
+            value={rhf.value ?? ""}
+            label={label}
+            fullWidth
+            error={!!fieldState.error}
+            helperText={fieldState.error?.message}
+            disabled={readOnly}
+          >
+            {!field.required ? <MenuItem value="">None</MenuItem> : null}
+            {field.choices?.map((choice) => (
+              <MenuItem key={choice.value} value={choice.value}>
+                {choice.label}
+              </MenuItem>
+            ))}
+          </TextField>
         )}
       />
     );
@@ -469,7 +499,10 @@ function widgetSlotProps(field: FieldMeta) {
   if (field.maximum) {
     htmlInput.max = field.maximum;
   }
-  if (field.type === "datetime" || field.type === "date") {
+  if (field.type === "time") {
+    htmlInput.step = 1;
+  }
+  if (field.type === "datetime" || field.type === "date" || field.type === "time") {
     return {
       inputLabel: { shrink: true },
       ...(Object.keys(htmlInput).length > 0 ? { htmlInput } : {}),
@@ -502,6 +535,8 @@ function inputTypeFor(field: FieldMeta): string {
       return "datetime-local";
     case "date":
       return "date";
+    case "time":
+      return "time";
     default:
       return "text";
   }
@@ -510,6 +545,9 @@ function inputTypeFor(field: FieldMeta): string {
 function helperText(field: FieldMeta): string | undefined {
   if (field.type === "json") {
     return "JSON object or array";
+  }
+  if (field.type === "duration") {
+    return "Go duration, for example 1h30m";
   }
   if (isBelongsTo(field) && field.related) {
     return `Foreign key for ${field.related.slug}`;

@@ -16,9 +16,12 @@ type Constraints struct {
 	MaxLength int
 	Pattern   string
 	Default   string
-	// Enum is the allowed values for a string column. The GORM schema stores
-	// an enum as a varchar, so this tag is how gombit generate recovers them.
-	Enum []string
+	// Enum is the allowed stored values for a string column. The GORM schema
+	// stores an enum as a varchar, so this tag is how gombit generate recovers
+	// them. Label is the display text for each value, in the same order.
+	// Empty means each label equals its stored value.
+	Enum  []string
+	Label []string
 }
 
 // FormatConstraints renders c as a validate tag value. Empty c is "".
@@ -42,7 +45,26 @@ func FormatConstraints(c Constraints) string {
 	if len(c.Enum) > 0 {
 		parts = append(parts, "enum="+strings.Join(c.Enum, ","))
 	}
+	if labelsDiffer(c.Enum, c.Label) {
+		parts = append(parts, "label="+strings.Join(c.Label, ","))
+	}
 	return strings.Join(parts, ";")
+}
+
+// labelsDiffer reports that the display text is not the stored value.
+func labelsDiffer(values, labels []string) bool {
+	if len(labels) == 0 {
+		return false
+	}
+	if len(labels) != len(values) {
+		return true
+	}
+	for i := range values {
+		if labels[i] != values[i] {
+			return true
+		}
+	}
+	return false
 }
 
 // ParseConstraints parses a validate tag value. An empty tag is an empty
@@ -86,9 +108,20 @@ func ParseConstraints(tag string) (Constraints, error) {
 				}
 				c.Enum = append(c.Enum, v)
 			}
+		case "label":
+			for _, v := range strings.Split(val, ",") {
+				v = strings.TrimSpace(v)
+				if v == "" {
+					return c, fmt.Errorf("field: label has an empty value")
+				}
+				c.Label = append(c.Label, v)
+			}
 		default:
 			return c, fmt.Errorf("field: unknown validate key %q", key)
 		}
+	}
+	if len(c.Label) > 0 && len(c.Label) != len(c.Enum) {
+		return c, fmt.Errorf("field: label count %d does not match enum count %d", len(c.Label), len(c.Enum))
 	}
 	return c, nil
 }

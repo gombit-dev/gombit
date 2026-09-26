@@ -16,21 +16,30 @@ projections of that kind, not separate lists.
 | `boolean` | yes | `bool`, `boolean` | `boolean` | `bool` |
 | `date` | yes | `date` | `date` | `types.Date` |
 | `datetime` | yes | `time`, `datetime` | `datetime` | `time.Time` |
-| `time` | no | | | clock time, not the `time` token |
-| `duration` | no | `duration` | | |
+| `time` | yes | `time_of_day` | `time` | `types.TimeOfDay`, JSON `HH:MM:SS` |
+| `duration` | yes | `duration` | `duration` | `types.Duration`, JSON Go duration (`1h30m0s`), column bigint nanoseconds |
 | `uuid` | yes | `uuid` | `uuid` | `uuid.UUID` |
 | `json` | yes | `json` | `json` | `types.JSON` (required), `types.NullJSON` (optional) |
 | `email` | yes | `email` | `string` | `string`, OpenAPI `format: email` |
 | `url` | yes | `url` | `string` | `string`, OpenAPI `format: uri` |
 | `slug` | yes | `slug` | `string` | `string`, pattern `^[-a-zA-Z0-9_]+$` |
 | `ip` | yes | `ip` | `string` | `string`, OpenAPI `format: ip` |
-| `enum` | yes | `enum(a,b)` | `string` | `string` |
+| `enum` | yes | `enum(a,b)` or `enum(draft=Draft)` | `string` | `string`; the label is display-only |
 | `relation` | yes | `belongs_to`, `has_many`, `many_to_many`, `one_to_one` | `relation` | |
 
 `time` on the command line is a **datetime** (`time.Time`), kept as a
 compatibility alias. `date` is a calendar date (`types.Date`, JSON
-`YYYY-MM-DD`). `datetime` is a timestamp. The clock-time kind and `duration`
-stay in the vocabulary without a generator token until a later issue.
+`YYYY-MM-DD`). `datetime` is a timestamp. `time_of_day` is a clock
+(`types.TimeOfDay`, JSON `HH:MM:SS`) stored as `char(8)` so SQLite,
+PostgreSQL, and MySQL share one sortable text form. The request pattern,
+the admin write, and `types.TimeOfDay` accept the same spellings: `HH:MM`,
+`HH:MM:SS`, and a clock with a numeric offset (`15:04:05+07:00`). All three
+are stored as `HH:MM:SS`. This is not OpenAPI format `time`, which rejects
+`HH:MM`. `duration` is a Go duration string
+(`1h30m`, `300ms`, `0s`) stored as a signed bigint of nanoseconds, which
+sorts the same way on every supported driver. Zero duration is `0s`.
+Midnight is `00:00:00`. An optional field of either kind is a pointer, and
+a blank form submits null, because both formats reject `""`.
 
 `uuid` is stored as `char(36)` so SQLite, PostgreSQL, and MySQL share one
 column type. `json` is text holding a JSON object or array. A required column
@@ -102,7 +111,7 @@ bounds and a default:
 | `min=`, `max=` | `decimal` | GORM `check`, and a create-body check that compares decimal magnitudes. The token must match the decimal schema (`^-?[0-9]+(\.[0-9]+)?$`) and fit the column: fractional digits ≤ scale, integer digits ≤ precision−scale. A bare `decimal` is `decimal(19,4)`. The request does not advertise `minimum` / `maximum`. The same reserved-name rule as an integer check applies |
 | `max_length=` | `string`, `email`, `url`, `slug`, `ip` | GORM `size` (otherwise 255), request `maxLength`, the form, and the admin write. Each one counts Unicode code points |
 | `regex=` | `string`, `text` | unanchored request `pattern` and the form's `new RegExp(..., "u")` check, including `text`. The pattern must compile in Go RE2. Escapes are an allowlist (`\d` `\D` `\w` `\W`, `\n` `\r` `\t` `\f` `\v`, `\0` for NUL, two-digit `\xNN`, and escaped syntax characters). `\b` and `\B` are rejected: JavaScript finds a word edge between the two surrogates of a non-BMP character. `\a`, octal, `\x{HHHH}`, `\s`, `\p`, inline flags, and POSIX classes are rejected. A `]` that opens a class is rejected, because RE2 treats it as a member and JavaScript closes an empty class. An unescaped `]` outside a class is rejected (`\]` is the literal). A quantifier may not have a leading zero (`{01}`, `{00}`), and it may not follow `^` or `$`. A `-` inside a class is a range only between single characters; `\d` or `\w` on either side is rejected. A hyphen that is first or last stays a literal. The form rewrites `.` to `[^\n]` under the `u` flag, so both sides match one code point and every character except newline. The form does not set an HTML `pattern` attribute, because that attribute anchors the match. Not a SQL check |
-| `default=` | scalars and `enum` | Applied when the create body omits the field or sends null, and when the admin create omits the field or sends null. The generated request rejects `""` before the mapper when the format or pattern rejects it; that body does not treat `""` as omitted. Admin rewrites `""` to null on a pointer string whose format or pattern rejects it, then applies the default. An explicit `0`, `false`, or a legal `""` is stored. A decimal default is a string matching the decimal schema and the column precision and scale. The form submits null for a blank optional pointer, and admin create starts from the default. Enum values are stored on the model's `validate` tag so `gombit generate` can emit them |
+| `default=` | scalars and `enum` | Applied when the create body omits the field or sends null, and when the admin create omits the field or sends null. The generated request rejects `""` before the mapper when the format or pattern rejects it; that body does not treat `""` as omitted. Admin rewrites `""` to null on a pointer string whose format or pattern rejects it, then applies the default. An explicit `0`, `false`, or a legal `""` is stored. A decimal default is a string matching the decimal schema and the column precision and scale. A duration default is a Go duration (`30m`). A time-of-day default is `HH:MM:SS`. The form submits null for a blank optional pointer, and admin create starts from the default. Enum values are stored on the model's `validate` tag so `gombit generate` can emit them. A label that differs from the stored value is a parallel `label=` list |
 
 Values are case-sensitive. A CLI `regex` cannot contain a comma, because
 modifiers are comma-separated. The model stores the same facts in a `validate`
@@ -111,5 +120,16 @@ admin meta read. `references=` stays unsupported.
 
 ```
 age:int:required,min=0,max=150
-status:enum(draft,published):default=draft
+status:enum(draft=Draft,published=Published):default=draft
+length:duration:default=30m
+opens:time_of_day
 ```
+
+`enum(draft,published)` still stores each token as both the value and the
+label. `enum(draft=Draft,published=Published)` stores `draft` and shows
+`Draft`. The label cannot contain a comma. A stored value or a label
+cannot contain `{` or `}`, because the generated form writes the label as
+JSX text. The create body and the list
+filter use the stored value. The generated form and the admin select show
+the label. The model's `validate` tag keeps `enum=draft,published` and,
+when a label differs, `label=Draft,Published`.

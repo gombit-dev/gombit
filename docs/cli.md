@@ -332,10 +332,11 @@ by editing the generated `*.gen.go`** (regeneration overwrites them). See the
 [migration guide](migration-model-first-resources.md) if you have resources
 from the old human-owned-`handler.go` layout.
 
-Default API prefix is `/api/v1`. Enum fields (`status:enum(a,b,c)`) keep their
-values on the model's `validate` tag, and `gombit generate` emits that list as
-a Huma `enum` on the create body. `--service` and `--repo` are C6
-opt-in and are not used by the generated handler.
+Default API prefix is `/api/v1`. Enum fields (`status:enum(draft=Draft,published=Published)`)
+keep the stored values on the model's `validate` tag and the display labels
+in `label=` when they differ. `gombit generate` emits the stored values as
+a Huma `enum` on the create body. The form and the admin show the label.
+`--service` and `--repo` are C6 opt-in and are not used by the generated handler.
 
 Route registration is appended in `cmd/server/main.go` via `go/ast` +
 `go/parser` + `go/format` (never regex), next to `product.Register(app)`.
@@ -373,15 +374,19 @@ name:type[:required][,unique][,index]
 ```
 
 Supported types: `string`, `text`, `int`, `int64`, `bool`, `uint`, `decimal`,
-`time`. Unknown types error with the supported list. `nullable` is
-accepted as the opposite of `required`. Enum fields are not supported by the
-model-first generator yet (see above) and are rejected — use a `string`.
+`time`, `time_of_day`, `duration`, and `enum(value)` or `enum(value=Label)`.
+Unknown types error with the supported list. `nullable` is accepted as the
+opposite of `required`. `time` is a datetime. `time_of_day` is a clock
+(`HH:MM:SS`). `duration` is a Go duration stored as nanoseconds.
 
 | Type | Go type | Column / contract |
 | --- | --- | --- |
 | `decimal` | `types.Decimal` (wraps `shopspring/decimal`) | `decimal(19,4)`; JSON string, exact — no float rounding |
 | `decimal(p,s)` | `types.Decimal` | `decimal(p,s)`, e.g. `decimal(10,2)` |
 | `time` | `time.Time` | RFC3339 date-time in JSON |
+| `time_of_day` | `types.TimeOfDay` | `char(8)` clock. `HH:MM`, `HH:MM:SS`, and `15:04:05+07:00` are one pattern, stored as `HH:MM:SS`. Optional is a pointer; a blank submits null |
+| `duration` | `types.Duration` | bigint nanoseconds; JSON is a Go duration (`1h30m0s`). Optional is a pointer |
+| `enum(draft=Draft)` | `string` | stored value `draft`, display label `Draft`. The API enum is the stored value |
 | `belongs_to:Target` | FK `TargetID` + `Target target.Target` | DTO exposes `target_id`; admin renders a picker. The FK type is the target primary key (`uint` or `uuid.UUID`). `nullable` makes the FK a pointer. `on_delete` is `restrict` (the default), `cascade`, or `set_null` |
 | `one_to_one:Target` | unique FK `TargetID` + `Target target.Target` | same wire as `belongs_to`; the foreign key is unique |
 | `has_many:Target` | `[]target.Target` | model-only, read via the admin; the child must carry the parent FK |
@@ -391,7 +396,8 @@ model-first generator yet (see above) and are rejected — use a `string`.
 flows through the model, the handler DTO, the OpenAPI/TS contract, and GORM,
 adding one of these types does not reproduce the model/DTO drift of
 [#218](https://github.com/gombit-dev/gombit/issues/218). A `time` or `decimal`
-field **without** `:required` becomes a pointer (`*time.Time` / `*types.Decimal`)
+field **without** `:required` becomes a pointer (`*time.Time` / `*types.Decimal` /
+`*types.TimeOfDay` / `*types.Duration`)
 on the model and DTO, because those value types cannot be submitted empty — the
 generated forms send `null` for a blank optional value.
 

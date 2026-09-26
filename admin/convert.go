@@ -13,6 +13,7 @@ import (
 	"github.com/shopspring/decimal"
 
 	"github.com/gombit-dev/gombit/field"
+	"github.com/gombit-dev/gombit/types"
 )
 
 // patternRejectsEmpty reports that the pattern does not match "".
@@ -52,6 +53,11 @@ func constraintMessage(f Field, raw any) string {
 			}
 		}
 	}
+	if s, ok := raw.(string); ok {
+		if msg := choiceMessage(f, s); msg != "" {
+			return msg
+		}
+	}
 	if f.Minimum == "" && f.Maximum == "" {
 		return ""
 	}
@@ -72,6 +78,20 @@ func constraintMessage(f Field, raw any) string {
 		}
 	}
 	return ""
+}
+
+func choiceMessage(f Field, s string) string {
+	if len(f.Choices) == 0 {
+		return ""
+	}
+	values := make([]string, len(f.Choices))
+	for i, c := range f.Choices {
+		if c.Value == s {
+			return ""
+		}
+		values[i] = c.Value
+	}
+	return "must be one of " + strings.Join(values, ", ")
 }
 
 // formatMessage applies the model format tag the same way Huma's
@@ -139,6 +159,26 @@ func coerceValue(raw any, ft FieldType) (any, error) {
 		return asDateTime(raw)
 	case TypeDate:
 		return asDate(raw)
+	case TypeTime:
+		s, err := asString(raw)
+		if err != nil {
+			return nil, err
+		}
+		clock, err := types.ParseTimeOfDay(s)
+		if err != nil {
+			return nil, fmt.Errorf("must be a time of day (HH:MM:SS)")
+		}
+		return clock.String(), nil
+	case TypeDuration:
+		s, err := asString(raw)
+		if err != nil {
+			return nil, err
+		}
+		span, err := types.ParseDuration(s)
+		if err != nil {
+			return nil, fmt.Errorf("must be a duration (for example 1h30m)")
+		}
+		return span.String(), nil
 	case TypeJSON:
 		return raw, nil
 	case TypeRelation:

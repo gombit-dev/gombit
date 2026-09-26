@@ -3,6 +3,8 @@ package resourcegen
 import (
 	"strings"
 	"testing"
+
+	"github.com/gombit-dev/gombit/types"
 )
 
 func TestParseFields(t *testing.T) {
@@ -410,6 +412,27 @@ func TestParseEnumFieldDetails(t *testing.T) {
 	if got := f.gormTag(); !strings.Contains(got, "size:") {
 		t.Fatalf("gormTag = %q, want a sized varchar column", got)
 	}
+	if strings.Join(f.EnumLabels, ",") != strings.Join(want, ",") {
+		t.Fatalf("EnumLabels = %v, want the stored values", f.EnumLabels)
+	}
+	labeled, err := parseFields([]string{"status:enum(draft=Draft,published=Published):default=draft"}, "widget")
+	if err != nil {
+		t.Fatalf("labeled enum: %v", err)
+	}
+	status := labeled[0]
+	if strings.Join(status.EnumValues, ",") != "draft,published" || strings.Join(status.EnumLabels, ",") != "Draft,Published" {
+		t.Fatalf("labeled = values %v labels %v", status.EnumValues, status.EnumLabels)
+	}
+	tag := modelStructTag(status)
+	if !strings.Contains(tag, "enum=draft,published") || !strings.Contains(tag, "label=Draft,Published") || !strings.Contains(tag, "default=draft") {
+		t.Fatalf("validate tag = %s", tag)
+	}
+	if _, err := parseFields([]string{"status:enum(draft=Draft):default=Published"}, "widget"); err == nil {
+		t.Fatal("default used the label instead of the stored value")
+	}
+	if _, err := parseFields([]string{"status:enum(draft=Draft{1})"}, "widget"); err == nil {
+		t.Fatal("enum label Draft{1} was accepted")
+	}
 }
 
 func TestParseDecimalPrecision(t *testing.T) {
@@ -602,6 +625,10 @@ func TestCanonicalCLIAliases(t *testing.T) {
 		{"n:float64", Field{JSONName: "n", GoName: "N", Type: FieldFloat, GoType: "float64"}},
 		{"born:date:required", Field{JSONName: "born", GoName: "Born", Type: FieldDate, GoType: "types.Date", Required: true}},
 		{"born:date", Field{JSONName: "born", GoName: "Born", Type: FieldDate, GoType: "*types.Date"}},
+		{"opens:time_of_day:required", Field{JSONName: "opens", GoName: "Opens", Type: FieldTimeOfDay, GoType: "types.TimeOfDay", Required: true}},
+		{"opens:time_of_day", Field{JSONName: "opens", GoName: "Opens", Type: FieldTimeOfDay, GoType: "*types.TimeOfDay"}},
+		{"length:duration:required", Field{JSONName: "length", GoName: "Length", Type: FieldDuration, GoType: "types.Duration", Required: true}},
+		{"length:duration", Field{JSONName: "length", GoName: "Length", Type: FieldDuration, GoType: "*types.Duration"}},
 		{"token:uuid:required", Field{JSONName: "token", GoName: "Token", Type: FieldUUID, GoType: "uuid.UUID", Required: true}},
 		{"token:uuid", Field{JSONName: "token", GoName: "Token", Type: FieldUUID, GoType: "*uuid.UUID"}},
 		{"meta:json", Field{JSONName: "meta", GoName: "Meta", Type: FieldJSON, GoType: "types.NullJSON"}},
@@ -621,11 +648,6 @@ func TestCanonicalCLIAliases(t *testing.T) {
 				t.Fatalf("parseFields(%q) = %+v, want %+v", tc.spec, g, tc.want)
 			}
 		})
-	}
-
-	_, err := parseFields([]string{"n:duration"}, "widget")
-	if err == nil || !strings.Contains(err.Error(), "not generated yet") {
-		t.Fatalf("duration error = %v, want not generated yet", err)
 	}
 }
 
@@ -729,5 +751,22 @@ func TestSemanticStringMaxLength(t *testing.T) {
 	}
 	if _, err := parseFields([]string{"n:int:max_length=4"}, "page"); err == nil || !strings.Contains(err.Error(), "cannot take max_length") {
 		t.Fatalf("int max_length error = %v", err)
+	}
+}
+
+func TestTimeOfDayDefaultUsesTheTypeGrammar(t *testing.T) {
+	t.Parallel()
+	fields, err := parseFields([]string{"opens:time_of_day:default=09:05", "length:duration:required,default=30m"}, "shift")
+	if err != nil {
+		t.Fatalf("parseFields: %v", err)
+	}
+	if fields[0].Default != "09:05" || !strings.Contains(modelStructTag(fields[0]), types.TimeOfDayPattern) {
+		t.Fatalf("opens = %+v tag %s", fields[0], modelStructTag(fields[0]))
+	}
+	if !fields[1].Required || fields[1].Default != "30m" {
+		t.Fatalf("length = %+v", fields[1])
+	}
+	if _, err := parseFields([]string{"opens:time_of_day:default=nope"}, "shift"); err == nil {
+		t.Fatal("default=nope was accepted")
 	}
 }

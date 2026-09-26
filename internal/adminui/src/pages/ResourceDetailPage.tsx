@@ -156,7 +156,9 @@ export function ResourceDetailPage() {
             {names.map((name) => (
               <TableRow key={name}>
                 <TableCell width="30%">{name}</TableCell>
-                <TableCell>{formatCell(row[name])}</TableCell>
+                <TableCell>
+                  {formatCell(row[name], model.fields.find((field) => field.name === name))}
+                </TableCell>
               </TableRow>
             ))}
           </TableBody>

@@ -166,7 +166,7 @@ func renderModel(ctx renderContext) string {
 		std = append(std, "time")
 	}
 	third = append(third, "gorm.io/gorm")
-	if fieldsUse(ctx.Fields, FieldDecimal) || fieldsUse(ctx.Fields, FieldDate) || fieldsUse(ctx.Fields, FieldJSON) {
+	if fieldsUse(ctx.Fields, FieldDecimal) || fieldsUse(ctx.Fields, FieldDate) || fieldsUse(ctx.Fields, FieldJSON) || fieldsUse(ctx.Fields, FieldTimeOfDay) || fieldsUse(ctx.Fields, FieldDuration) {
 		third = append(third, gombitTypesImport)
 	}
 	if fieldsUse(ctx.Fields, FieldUUID) || ctx.IDStrategy == idUUID || fieldsUseFK(ctx.Fields, "uuid.UUID") {
@@ -863,6 +863,19 @@ func renderFormField(field Field) string {
 			b.WriteString(", required: \"" + field.GoName + " is required\"")
 		}
 		b.WriteString(" })} />\n")
+	case FieldTimeOfDay:
+		// type=time may omit seconds. The create body format is HH:MM:SS.
+		b.WriteString("          <input type=\"time\" step=\"1\" {...register(\"" + field.JSONName + "\", { setValueAs: (value) => { if (value === \"\" || value == null) return null; const s = String(value); return s.length === 5 ? s + \":00\" : s; }")
+		if field.Required {
+			b.WriteString(", required: \"" + field.GoName + " is required\"")
+		}
+		b.WriteString(" })} />\n")
+	case FieldDuration:
+		b.WriteString("          <input type=\"text\" {...register(\"" + field.JSONName + "\", { setValueAs: (value) => (value === \"\" ? null : value)")
+		if field.Required {
+			b.WriteString(", required: \"" + field.GoName + " is required\"")
+		}
+		b.WriteString(" })} />\n")
 	case FieldJSON:
 		// The textarea keeps the raw text. validate reports a parse error
 		// without discarding keystrokes. onSubmit parses once.
@@ -873,8 +886,8 @@ func renderFormField(field Field) string {
 		b.WriteString(" })} />\n")
 	case FieldEnum:
 		b.WriteString("          <select {...register(\"" + field.JSONName + "\")}>\n")
-		for _, v := range field.EnumValues {
-			b.WriteString("            <option value=\"" + v + "\">" + v + "</option>\n")
+		for i, v := range field.EnumValues {
+			b.WriteString("            <option value=\"" + v + "\">" + field.enumLabel(i) + "</option>\n")
 		}
 		b.WriteString("          </select>\n")
 	case FieldTime:
@@ -1083,13 +1096,15 @@ func renderMUIFormTSX(ctx renderContext) string {
 	}
 	b.WriteString(" },\n")
 	b.WriteString("  });\n\n")
-	var timeNames, emptyNullNames []string
+	var timeNames, timeOfDayNames, emptyNullNames []string
 	jsonNames := jsonFieldNames(ctx.Fields)
 	nilUUIDNames := nilUUIDFieldNames(ctx.Fields)
 	for _, field := range ctx.Fields {
 		switch field.Type {
 		case FieldTime:
 			timeNames = append(timeNames, field.JSONName)
+		case FieldTimeOfDay:
+			timeOfDayNames = append(timeOfDayNames, field.JSONName)
 		case FieldDecimal, FieldDate, FieldUUID:
 			if !field.submitsNilUUID() {
 				emptyNullNames = append(emptyNullNames, field.JSONName)
@@ -1103,13 +1118,22 @@ func renderMUIFormTSX(ctx renderContext) string {
 	b.WriteString("  async function onSubmit(values: FormValues) {\n")
 	b.WriteString("    setStatus(\"\");\n")
 	bodyExpr := "values as CreateBody"
-	if len(timeNames) > 0 || len(emptyNullNames) > 0 || len(jsonNames) > 0 || len(nilUUIDNames) > 0 {
+	if len(timeNames) > 0 || len(timeOfDayNames) > 0 || len(emptyNullNames) > 0 || len(jsonNames) > 0 || len(nilUUIDNames) > 0 {
 		b.WriteString("    const body: Record<string, unknown> = { ...values };\n")
 		if len(timeNames) > 0 {
 			// Local datetime-local -> RFC3339 UTC; empty -> null (optional field).
 			b.WriteString("    " + tsStringArray(timeNames) + ".forEach((key) => {\n")
 			b.WriteString("      const v = body[key];\n")
 			b.WriteString("      body[key] = v == null || v === \"\" ? null : new Date(String(v)).toISOString();\n")
+			b.WriteString("    });\n")
+		}
+		if len(timeOfDayNames) > 0 {
+			// A time input may submit HH:MM. The request format is HH:MM:SS.
+			b.WriteString("    " + tsStringArray(timeOfDayNames) + ".forEach((key) => {\n")
+			b.WriteString("      const v = body[key];\n")
+			b.WriteString("      if (v == null || v === \"\") { body[key] = null; return; }\n")
+			b.WriteString("      const s = String(v);\n")
+			b.WriteString("      body[key] = s.length === 5 ? s + \":00\" : s;\n")
 			b.WriteString("    });\n")
 		}
 		if len(emptyNullNames) > 0 {
@@ -1314,10 +1338,32 @@ func renderMUIFormField(field Field) string {
 		b.WriteString("                helperText={fieldState.error?.message}\n")
 		b.WriteString("                disabled={isSubmitting}\n")
 		b.WriteString("              >\n")
-		for _, v := range field.EnumValues {
-			b.WriteString("                <MenuItem value=\"" + v + "\">" + v + "</MenuItem>\n")
+		for i, v := range field.EnumValues {
+			b.WriteString("                <MenuItem value=\"" + v + "\">" + field.enumLabel(i) + "</MenuItem>\n")
 		}
 		b.WriteString("              </TextField>\n")
+	case FieldTimeOfDay:
+		b.WriteString("              <TextField\n")
+		b.WriteString("                {...field}\n")
+		b.WriteString("                value={field.value ?? \"\"}\n")
+		b.WriteString("                type=\"time\"\n")
+		b.WriteString("                label=\"" + field.GoName + "\"\n")
+		b.WriteString("                fullWidth\n")
+		b.WriteString("                slotProps={{ inputLabel: { shrink: true }, htmlInput: { step: 1 } }}\n")
+		b.WriteString("                error={!!fieldState.error}\n")
+		b.WriteString("                helperText={fieldState.error?.message}\n")
+		b.WriteString("                disabled={isSubmitting}\n")
+		b.WriteString("              />\n")
+	case FieldDuration:
+		b.WriteString("              <TextField\n")
+		b.WriteString("                {...field}\n")
+		b.WriteString("                value={field.value ?? \"\"}\n")
+		b.WriteString("                label=\"" + field.GoName + "\"\n")
+		b.WriteString("                fullWidth\n")
+		b.WriteString("                error={!!fieldState.error}\n")
+		b.WriteString("                helperText={fieldState.error?.message ?? \"Go duration, for example 1h30m\"}\n")
+		b.WriteString("                disabled={isSubmitting}\n")
+		b.WriteString("              />\n")
 	case FieldDate, FieldUUID:
 		inputType := "text"
 		if field.Type == FieldDate {
