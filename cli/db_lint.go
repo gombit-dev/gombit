@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 
 	"github.com/gombit-dev/gombit/config"
 	"github.com/gombit-dev/gombit/manifest"
@@ -23,9 +24,11 @@ func newLintCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
   integrity  atlas.sum matches every migration, and the migrations apply to an
              empty dev database (Atlas Community Edition 'migrate validate')
   layout     every *.sql file is an up migration; down files live in downs/
-  safety     each checked migration is classified from the schema before and
-             after it, like 'gombit db plan': a destructive or unsafe change
-             passes only when the migration carries a line for it:
+  safety     every migration is classified from the schema before and after
+             it, like 'gombit db plan', and from its own statements (DELETE,
+             UPDATE, TRUNCATE, a DROP TABLE the schema does not show, SQL
+             Gombit cannot classify): a destructive or unsafe change passes
+             only when the migration carries a line for it:
 
                -- gombit:allow drop_column:products.name
 
@@ -34,8 +37,9 @@ generated migration lints clean; a hand-written one needs them added (then
 'gombit db repair', since the edit changes atlas.sum). Renames the migration
 states (ALTER TABLE ... RENAME TO / RENAME COLUMN) count as safe.
 
---latest N checks the N newest migrations (default 1); --all checks every one.
-The command exits non-zero on any problem, so CI can gate on it.`,
+It checks every migration by default, and exits non-zero on any problem, so CI
+can gate on it. --latest N classifies only the N newest migrations, a local
+shortcut when the dev database is slow to start; don't use it in CI.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 0 {
@@ -49,10 +53,6 @@ The command exits non-zero on any problem, so CI can gate on it.`,
 			if err != nil {
 				return err
 			}
-			all, err := cmd.Flags().GetBool("all")
-			if err != nil {
-				return err
-			}
 			asJSON, err := cmd.Flags().GetBool("json")
 			if err != nil {
 				return err
@@ -63,7 +63,6 @@ The command exits non-zero on any problem, so CI can gate on it.`,
 				MigrationDir: opts.MigrationDir,
 				AtlasBinary:  opts.AtlasBinary,
 				Latest:       latest,
-				All:          all,
 				Stderr:       stderr,
 			})
 			if err != nil {
@@ -87,8 +86,7 @@ The command exits non-zero on any problem, so CI can gate on it.`,
 		},
 	})
 	bindDirFlags(cmd)
-	cmd.Flags().Int("latest", 1, "classify the N newest migrations")
-	cmd.Flags().Bool("all", false, "classify every migration")
+	cmd.Flags().Int("latest", 0, "classify only the N newest migrations (0, the default, classifies every one; use 0 in CI)")
 	cmd.Flags().Bool("json", false, "print the report as JSON")
 	return cmd
 }
@@ -129,6 +127,21 @@ Run 'gombit db lint' afterwards to classify the edited migration.`,
 }
 
 func runRepair(cmd *cobra.Command, opts migrations.DirOptions, writeManifests bool, stdout, stderr io.Writer) error {
+	// Atlas replays only a directory whose atlas.sum matches, so the rehash
+	// comes first; if the replay then fails, the previous atlas.sum goes back,
+	// so the broken SQL is not left checksummed.
+	sumPath := filepath.Join(opts.MigrationDir, "atlas.sum")
+	prevSum, sumErr := os.ReadFile(sumPath) // #nosec G304 -- atlas.sum in the configured migration directory
+	if sumErr != nil && !errors.Is(sumErr, os.ErrNotExist) {
+		return fmt.Errorf("gombit db repair: read atlas.sum: %w", sumErr)
+	}
+	restoreSum := func() {
+		if sumErr == nil {
+			_ = os.WriteFile(sumPath, prevSum, 0o600) // #nosec G703 -- restoring the file this command rewrote
+		} else {
+			_ = os.Remove(sumPath)
+		}
+	}
 	if err := migrations.Hash(cmd.Context(), migrations.ApplyOptions{
 		WorkDir:      opts.WorkDir,
 		MigrationDir: opts.MigrationDir,
@@ -139,7 +152,8 @@ func runRepair(cmd *cobra.Command, opts migrations.DirOptions, writeManifests bo
 		return err
 	}
 	if err := migrations.ValidateDir(cmd.Context(), opts); err != nil {
-		return err
+		restoreSum()
+		return fmt.Errorf("%w (atlas.sum was left as it was; fix the migration, then run 'gombit db repair' again)", err)
 	}
 	_, _ = fmt.Fprintln(stdout, "Every migration applies to an empty database.")
 

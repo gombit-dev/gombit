@@ -14,9 +14,10 @@ version.
 
 - `gombit db lint` checks the migration directory: integrity (atlas.sum and a
   clean replay on the dev database, via Atlas Community Edition
-  `migrate validate`), layout (misplaced down files), and the safety of the
-  newest migrations (`--latest N`, `--all`), classified like `gombit db plan`
-  from the schema before and after each one. A destructive or unsafe change
+  `migrate validate`), layout (misplaced down files), and the safety of every
+  migration, classified like `gombit db plan` from the schema before and after
+  each one and from its own statements (`DELETE`, `UPDATE`, `TRUNCATE`, a
+  drop-and-recreate the schema does not show). A destructive or unsafe change
   passes only with a `-- gombit:allow <id>` line in the migration, which
   `makemigrations --allow` now writes itself; declared renames are safe. It
   exits non-zero on any problem and prints `--json` for tooling

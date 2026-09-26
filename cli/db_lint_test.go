@@ -15,7 +15,7 @@ func TestLintAndRepairHelp(t *testing.T) {
 		cmd  string
 		want []string
 	}{
-		{"lint", []string{"integrity", "-- gombit:allow", "--latest", "--all", "--json", "gombit db repair"}},
+		{"lint", []string{"integrity", "-- gombit:allow", "--latest", "every migration", "--json", "gombit db repair", "DELETE"}},
 		{"repair", []string{"rehash atlas.sum", "--write-manifests", "gombit db lint"}},
 	} {
 		stdout, stderr := new(bytes.Buffer), new(bytes.Buffer)
@@ -88,7 +88,23 @@ func TestRepairAtlasCLISQLiteWhenAvailable(t *testing.T) {
 	if out, err := run("db", "lint"); err != nil {
 		t.Fatalf("db lint after repair: err = %v, out:\n%s", err, out)
 	}
+
 	if err := runVerify(new(bytes.Buffer), new(bytes.Buffer), verifyOptions{dir: dir}); err != nil {
 		t.Fatalf("db verify after repair: %v", err)
+	}
+
+	// A broken edit: repair's replay check fails, and atlas.sum is put back,
+	// so the broken SQL is not left checksummed.
+	sum := filepath.Join(dir, "atlas.sum")
+	before, _ := os.ReadFile(sum) // #nosec G304 -- atlas.sum in the test temp app
+	if err := os.WriteFile(up, []byte("CREATE TABL widgets (id integer PRIMARY KEY);\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err = run("db", "repair")
+	if err == nil || !strings.Contains(out+err.Error(), "atlas.sum was left as it was") {
+		t.Fatalf("db repair with broken SQL: err = %v, out:\n%s", err, out)
+	}
+	if after, _ := os.ReadFile(sum); string(after) != string(before) { // #nosec G304 -- atlas.sum in the test temp app
+		t.Fatalf("atlas.sum changed after a failed repair:\n%s\nwant\n%s", after, before)
 	}
 }

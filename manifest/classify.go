@@ -164,6 +164,13 @@ func droppedColumn(body string) (string, bool) {
 	return "", false
 }
 
+// Statements splits migration SQL the way Classify reads it: comments
+// stripped, split on ';', trimmed, empty statements dropped. Classify returns
+// one Operation per element, in the same order.
+func Statements(sql string) []string {
+	return splitStatements(sql)
+}
+
 // splitStatements strips comments and splits SQL into trimmed, non-empty
 // statements on ';'.
 func splitStatements(sql string) []string {

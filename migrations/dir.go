@@ -88,7 +88,27 @@ func (e *ReplayError) Error() string {
 	return fmt.Sprintf("migrations: the migration directory does not apply to an empty database: %s", e.Detail)
 }
 
-var checksumFileRe = regexp.MustCompile(`(\S+\.sql) was (?:edited|added|removed)`)
+// checksumFileRe matches Atlas's per-file checksum diagnostic
+// ("L2: 20260101000000_init.sql was edited"), on a line of its own.
+var checksumFileRe = regexp.MustCompile(`^L\d+: (\S+\.sql) was (?:edited|added|removed)$`)
+
+// checksumDiagnostic reports Atlas's checksum failure by its own diagnostic
+// lines, not by the word "checksum", which a replayed statement can contain.
+func checksumDiagnostic(text string) (files []string, ok bool) {
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case line == "Error: checksum mismatch", strings.HasPrefix(line, "You have a checksum error in your migration directory"):
+			ok = true
+		default:
+			if m := checksumFileRe.FindStringSubmatch(line); m != nil {
+				ok = true
+				files = append(files, m[1])
+			}
+		}
+	}
+	return files, ok
+}
 
 // ValidateDir checks the migration directory's integrity with
 // `atlas migrate validate` (Atlas Community Edition): atlas.sum matches every
@@ -106,11 +126,7 @@ func ValidateDir(ctx context.Context, opts DirOptions) error {
 	args := []string{"migrate", "validate", "--dir", "file://" + filepath.ToSlash(dir), "--dev-url", devURL(opts.Driver)}
 	if err := opts.runner.Run(ctx, absWorkDir, opts.AtlasBinary, args, &out, &out); err != nil {
 		text := atlasMessage(out.String())
-		if strings.Contains(text, "checksum") {
-			var files []string
-			for _, m := range checksumFileRe.FindAllStringSubmatch(text, -1) {
-				files = append(files, m[1])
-			}
+		if files, ok := checksumDiagnostic(text); ok {
 			return &ChecksumError{Files: files}
 		}
 		if text == "" {
