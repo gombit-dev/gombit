@@ -352,7 +352,7 @@ func TestRenderScalarGaps(t *testing.T) {
 	ctx := newRenderContext("github.com/example/demo", name, fields, "/api/v1", "minimal", false, false)
 	model := string(mustFormatGo(renderModel(ctx)))
 	for _, want := range []string{
-		"Score float64",
+		"Score     float64",
 		"types.Date",
 		"type:date;not null",
 		"uuid.UUID",

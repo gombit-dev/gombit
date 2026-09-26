@@ -107,7 +107,7 @@ func MapDeleteError(ctx context.Context, err error, conflict, internal string) e
 	if err == nil {
 		return nil
 	}
-	if IsForeignKeyViolation(err) {
+	if errors.Is(err, ErrReferenced) || IsForeignKeyViolation(err) {
 		return contract.WithContext(ctx, contract.Conflict(conflict))
 	}
 	return contract.WithContext(ctx, contract.Internal(internal))

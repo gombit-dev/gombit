@@ -78,12 +78,9 @@ func (h *harness) prepareSchema() {
 		Driver:       h.cfg.Driver,
 		MigrationDir: h.migrateDir,
 		AtlasBinary:  h.atlasBin,
-		Models: []migrations.Model{{
-			ImportPath: "github.com/gombit-dev/gombit/database/conformance/models",
-			TypeName:   "Item",
-		}},
-		Stdout: io.Discard,
-		Stderr: stderr,
+		Models:       conformanceModels(),
+		Stdout:       io.Discard,
+		Stderr:       stderr,
 	})
 	if err != nil {
 		h.t.Fatalf("MakeMigrations() error = %v; stderr=%s", err, stderr.String())
@@ -106,7 +103,8 @@ func (h *harness) prepareSchema() {
 		h.t.Fatalf("mkdir downs: %v", err)
 	}
 	downPath := migrations.DownPath(h.migrateDir, version, name)
-	if err := os.WriteFile(downPath, []byte("DROP TABLE IF EXISTS items;\n"), 0o600); err != nil {
+	down := "DROP TABLE IF EXISTS restricted_children;\nDROP TABLE IF EXISTS cascaded_children;\nDROP TABLE IF EXISTS nulled_children;\nDROP TABLE IF EXISTS soft_owner_children;\nDROP TABLE IF EXISTS owners;\nDROP TABLE IF EXISTS soft_owners;\nDROP TABLE IF EXISTS items;\n"
+	if err := os.WriteFile(downPath, []byte(down), 0o600); err != nil {
 		h.t.Fatalf("write down migration: %v", err)
 	}
 
@@ -120,6 +118,16 @@ func (h *harness) prepareSchema() {
 	if !strings.Contains(stdout.String(), "Applied") {
 		h.t.Fatalf("migrate stdout = %q, want Applied", stdout.String())
 	}
+}
+
+// conformanceModels are the fixtures the suite's one migration creates: Item,
+// and the relation-deletion fixtures (#312).
+func conformanceModels() []migrations.Model {
+	var out []migrations.Model
+	for _, name := range []string{"Item", "Owner", "RestrictedChild", "CascadedChild", "NulledChild", "SoftOwner", "SoftOwnerChild"} {
+		out = append(out, migrations.Model{ImportPath: "github.com/gombit-dev/gombit/database/conformance/models", TypeName: name})
+	}
+	return out
 }
 
 func (h *harness) openDB() *database.DB {

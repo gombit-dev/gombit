@@ -12,6 +12,14 @@ version.
 
 ### Added
 
+- `database.Delete(ctx, db, value, conds...)` deletes rows physically, even for
+  a model that embeds `gorm.DeletedAt`, so the database's `ON DELETE RESTRICT`
+  / `CASCADE` / `SET NULL` is what deletion does. A refused delete wraps
+  `database.ErrReferenced`, which `MapDeleteError` maps to `409 conflict`. The
+  admin data plane deletes through it. The conformance suite covers each
+  policy on SQLite, PostgreSQL, and MySQL
+  ([ADR-019](docs/adr/019-hard-delete-semantics.md),
+  [#312](https://github.com/gombit-dev/gombit/issues/312)).
 - `gombit db makemigrations --rename-table old:new` renames a table with a
   native, data-preserving `ALTER TABLE ... RENAME TO` on SQLite, PostgreSQL,
   and MySQL. With `--forget-model` / `--model` it swaps the renamed model in the
@@ -24,7 +32,6 @@ version.
   `gombit db rollback` can undo them. `--rename` also accepts
   `table.old=table.new`
   ([#310](https://github.com/gombit-dev/gombit/issues/310)).
-
 - `gombit db plan` classifies the schema change the models imply before a
   migration is written: `destructive` (dropped table or column, narrowed type),
   `unsafe` (fails on a populated table: a NOT NULL column with no default,
@@ -37,6 +44,14 @@ version.
 
 ### Changed
 
+- **Breaking (generated models):** `gombit make resource` no longer embeds
+  `gorm.Model`. New models get an explicit `ID` (auto-increment `uint`, or the
+  `--id uuid` key), `CreatedAt`, and `UpdatedAt`, and no soft-delete
+  `DeletedAt`: Gombit deletes rows physically (ADR-019). The API contract (DTOs,
+  OpenAPI) is unchanged; regenerated mappers read `row.ID` instead of
+  `row.Model.ID`. Existing models keep compiling; see
+  [docs/database.md § Deleting rows](docs/database.md#deleting-rows) to move one
+  to hard delete ([#312](https://github.com/gombit-dev/gombit/issues/312)).
 - **Breaking (workflow):** `gombit db makemigrations` runs the same plan once a
   migration exists and refuses to write a destructive or unsafe change until
   each step is acknowledged with `--allow <id|code>`. `--forget-model`

@@ -162,10 +162,12 @@ func renderModel(ctx renderContext) string {
 	b.WriteString("\n\n")
 
 	var std, third []string
-	if fieldsUse(ctx.Fields, FieldTime) || ctx.IDStrategy == idUUID {
-		std = append(std, "time")
+	// Every model carries CreatedAt/UpdatedAt; only the UUID model's
+	// BeforeCreate hook names the gorm package.
+	std = append(std, "time")
+	if ctx.IDStrategy == idUUID {
+		third = append(third, "gorm.io/gorm")
 	}
-	third = append(third, "gorm.io/gorm")
 	if fieldsUse(ctx.Fields, FieldDecimal) || fieldsUse(ctx.Fields, FieldDate) || fieldsUse(ctx.Fields, FieldJSON) || fieldsUse(ctx.Fields, FieldTimeOfDay) || fieldsUse(ctx.Fields, FieldDuration) {
 		third = append(third, gombitTypesImport)
 	}
@@ -182,14 +184,17 @@ func renderModel(ctx renderContext) string {
 	b.WriteString("type ")
 	b.WriteString(ctx.Resource.TypeName)
 	b.WriteString(" struct {\n")
+	// No gorm.DeletedAt: Gombit deletes rows physically, so the database's
+	// ON DELETE RESTRICT / CASCADE / SET NULL is what deletion does (#312).
 	if ctx.IDStrategy == idUUID {
-		b.WriteString("\tID        uuid.UUID      `gorm:\"type:char(36);primaryKey\" json:\"id\" gombit:\"read,server\"`\n")
-		b.WriteString("\tCreatedAt time.Time\n")
-		b.WriteString("\tUpdatedAt time.Time\n")
-		b.WriteString("\tDeletedAt gorm.DeletedAt `gorm:\"index\"`\n")
+		b.WriteString("\tID        uuid.UUID `gorm:\"type:char(36);primaryKey\" json:\"id\" gombit:\"read,server\"`\n")
 	} else {
-		b.WriteString("\tgorm.Model\n")
+		// An auto-increment key is GORM-managed: untagged, it is read-only,
+		// exactly as gorm.Model's ID was.
+		b.WriteString("\tID        uint      `gorm:\"primaryKey\" json:\"id\"`\n")
 	}
+	b.WriteString("\tCreatedAt time.Time\n")
+	b.WriteString("\tUpdatedAt time.Time\n")
 	for _, field := range ctx.Fields {
 		b.WriteString(modelFieldLines(field, ctx.Resource.Package))
 	}

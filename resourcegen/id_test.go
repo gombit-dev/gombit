@@ -21,7 +21,7 @@ func TestUUIDPrimaryKeyModel(t *testing.T) {
 	ctx.IDStrategy = idUUID
 	src := renderModel(ctx)
 	for _, want := range []string{
-		`ID        uuid.UUID      ` + "`" + `gorm:"type:char(36);primaryKey" json:"id" gombit:"read,server"` + "`",
+		`ID        uuid.UUID ` + "`" + `gorm:"type:char(36);primaryKey" json:"id" gombit:"read,server"` + "`",
 		"func (m *Session) BeforeCreate(*gorm.DB) error",
 		"uuid.New()",
 	} {
@@ -29,8 +29,8 @@ func TestUUIDPrimaryKeyModel(t *testing.T) {
 			t.Fatalf("model missing %q:\n%s", want, src)
 		}
 	}
-	if strings.Contains(src, "gorm.Model") {
-		t.Fatalf("uuid model still embeds gorm.Model:\n%s", src)
+	if strings.Contains(src, "gorm.Model") || strings.Contains(src, "DeletedAt") {
+		t.Fatalf("uuid model still embeds gorm.Model or soft-deletes:\n%s", src)
 	}
 
 	root := resourcegenModuleRoot(t)
@@ -50,15 +50,29 @@ func TestUUIDPrimaryKeyModel(t *testing.T) {
 	}
 }
 
-func TestDefaultPrimaryKeyStaysGormModel(t *testing.T) {
+// TestDefaultModelHardDeletes: the default model has a uint key and
+// timestamps but no gorm.DeletedAt, so a GORM Delete is a real DELETE and the
+// database's ON DELETE policy is what deletion does (#312).
+func TestDefaultModelHardDeletes(t *testing.T) {
 	name, err := parseResourceName("Widget")
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx := newRenderContext("example.com/demo", name, nil, "/api/v1", "minimal", false, false)
 	src := renderModel(ctx)
-	if !strings.Contains(src, "gorm.Model") || strings.Contains(src, "uuid.UUID") {
-		t.Fatalf("default model:\n%s", src)
+	for _, want := range []string{
+		"ID        uint      `gorm:\"primaryKey\" json:\"id\"`",
+		"CreatedAt time.Time",
+		"UpdatedAt time.Time",
+	} {
+		if !strings.Contains(src, want) {
+			t.Fatalf("default model missing %q:\n%s", want, src)
+		}
+	}
+	for _, banned := range []string{"gorm.Model", "DeletedAt", "uuid.UUID", "gorm.io/gorm"} {
+		if strings.Contains(src, banned) {
+			t.Fatalf("default model contains %q:\n%s", banned, src)
+		}
 	}
 }
 

@@ -298,10 +298,12 @@ gombit make resource Widget --force
 gombit make resource Session --id uuid
 ```
 
-`--id` chooses the primary key. `uint` (the default) embeds `gorm.Model`.
+`--id` chooses the primary key. `uint` (the default) is an auto-increment `ID`.
 `uuid` scaffolds an application-assigned `uuid.UUID` primary key (`char(36)`,
-portable across SQLite, PostgreSQL, and MySQL) plus `CreatedAt`, `UpdatedAt`,
-and `DeletedAt`. The model sets the id in `BeforeCreate` when it is still
+portable across SQLite, PostgreSQL, and MySQL). Both come with `CreatedAt` and
+`UpdatedAt` and no soft-delete `DeletedAt`: Gombit deletes rows physically, so
+the database's `ON DELETE` policy is what deletion does
+([ADR-019](adr/019-hard-delete-semantics.md)). The model sets the id in `BeforeCreate` when it is still
 `uuid.Nil`. Composite primary keys are rejected. A `belongs_to` or
 `one_to_one` foreign key uses the target model's primary key when that model
 is already on disk, and `uint` when it is not. A self relation uses this
@@ -319,7 +321,7 @@ plumbing. It writes a feature-package under `internal/<snake>/`:
 
 | File | Owner | When |
 | --- | --- | --- |
-| `<snake>.go` | **you** | GORM model (`gorm.Model`, or a `uuid.UUID` key with `--id uuid`, + fields), plus the `gombit:"..."` field policy translated from the CLI modifiers. Scaffolded once; edit it freely — re-running `make resource` never overwrites it (use `--force` to re-scaffold). No DO-NOT-EDIT banner. |
+| `<snake>.go` | **you** | GORM model (an auto-increment `ID`, or a `uuid.UUID` key with `--id uuid`, plus `CreatedAt` / `UpdatedAt` and the fields; no soft delete), plus the `gombit:"..."` field policy translated from the CLI modifiers. Scaffolded once; edit it freely — re-running `make resource` never overwrites it (use `--force` to re-scaffold). No DO-NOT-EDIT banner. |
 | `.gombit-resource` | generator | Marker that makes the package a model-first resource `gombit generate` regenerates. |
 | `dto.gen.go` | generator | Request/response DTOs + model↔DTO mappers. **DO NOT EDIT** — regenerated from the model. |
 | `handler.gen.go` | generator | Huma list/get/create over GORM + `Register(app *framework.App)` (D10 envelope; list honors `page`/`per_page` and the declared filter/sort/search/aggregate surface; `not_found`/`conflict` mapping). **DO NOT EDIT.** |

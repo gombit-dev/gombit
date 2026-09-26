@@ -67,6 +67,49 @@ if err := db.First(&row, id).Error; err != nil {
 `IsUniqueViolation` is the shared detector used by those helpers and by
 auth registration. See [`docs/contract.md`](contract.md#application-errors-41-categories).
 
+## Deleting rows
+
+Gombit deletes rows physically: its deletion semantics are the database's
+([ADR-019](adr/019-hard-delete-semantics.md)). A relation's `on_delete` becomes
+the foreign key's `ON DELETE`, and deleting the parent does exactly that, in one
+statement the database enforces:
+
+| `on_delete` | Deleting a referenced parent |
+| --- | --- |
+| `restrict` (default) | refused; `database.ErrReferenced`, a `409 conflict` through `MapDeleteError` |
+| `cascade` | the referencing rows are deleted too |
+| `set_null` | the referencing rows keep their data with the key set to NULL |
+
+`gombit make resource` generates models without soft delete (an `ID`,
+`CreatedAt`, `UpdatedAt`, no `DeletedAt`), so GORM's own `Delete` on them is a
+real `DELETE`. `database.Delete` is the framework's delete, and the admin uses
+it:
+
+```go
+n, err := database.Delete(ctx, db, &book.Book{}, id)
+if errors.Is(err, database.ErrReferenced) {
+	// another row still references it (ON DELETE RESTRICT)
+}
+return database.MapDeleteError(ctx, err, "book is still referenced", "delete book")
+```
+
+It deletes even a model that embeds `gorm.DeletedAt` (`gorm.Model`). GORM's own
+`Delete` on such a model only sets `deleted_at`, so no foreign key fires and a
+live row keeps pointing at one the API reports as gone. There is no restore, and
+Gombit does not emulate foreign keys on soft-deleted rows.
+
+**Moving an existing `gorm.Model` resource to hard delete.** Replace the
+embedded `gorm.Model` with `` ID uint `gorm:"primaryKey" json:"id"` ``,
+`CreatedAt time.Time`, and `UpdatedAt time.Time`. First decide what happens to
+the rows that are already soft-deleted: remove them
+(`DELETE FROM books WHERE deleted_at IS NOT NULL`) or clear their
+`deleted_at` to bring them back. Then generate the migration; it drops
+`deleted_at`, a destructive step you acknowledge:
+
+```sh
+gombit db makemigrations drop_books_deleted_at --allow drop_column:books.deleted_at
+```
+
 ## Capabilities
 
 `database.Capabilities` captures driver differences that affect generated code

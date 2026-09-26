@@ -274,7 +274,8 @@ registered). Raw `*gin.Engine` is **not** used for these endpoints. It
 appear in OpenAPI.
 
 **Deleting referenced records (referential integrity).** The admin data plane
-**hard-deletes** (`Unscoped`), so the database's own foreign keys enforce
+**hard-deletes** through `database.Delete`
+([ADR-019](adr/019-hard-delete-semantics.md)), so the database's own foreign keys enforce
 referential integrity in one statement (#220). A model embedding `gorm.Model`
 would otherwise be *soft*-deleted — `deleted_at` is set with no physical
 `DELETE` — and the database's `ON DELETE RESTRICT`/`NO ACTION` constraints would

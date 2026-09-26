@@ -133,14 +133,18 @@ import "gorm.io/gorm"
 
 // Task is the feature-package GORM model.
 type Task struct {
-	gorm.Model
-	Title string `gorm:"size:255;not null"`
-	Done  bool
+	ID        uint `gorm:"primaryKey" json:"id"`
+	CreatedAt time.Time
+	UpdatedAt time.Time
+	Title     string `gorm:"size:255;not null"`
+	Done      bool
 }
 ```
 
-`gorm.Model` supplies `ID`, `CreatedAt`, `UpdatedAt`, and a soft-delete
-`DeletedAt`.
+`ID` is an auto-increment key GORM assigns, and `CreatedAt` / `UpdatedAt` are
+set on write. There is no soft-delete `DeletedAt`: deleting a task removes the
+row, and the database's foreign keys decide what that does to rows that
+reference it ([ADR-019](adr/019-hard-delete-semantics.md)).
 
 Now generate the SQL. `makemigrations` takes the model type explicitly — it
 doesn't scan your project:
@@ -451,8 +455,7 @@ curl -s -b jar.txt -X POST http://127.0.0.1:8080/api/v1/tasks \
 ```
 
 The response carries `created_at`/`updated_at`: the model-first response DTO is
-derived from the model, so `gorm.Model`'s readable timestamps come through
-automatically.
+derived from the model, so its readable timestamps come through automatically.
 
 Skip the token and you get a clean refusal rather than a mutation:
 

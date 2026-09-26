@@ -21,9 +21,9 @@ type taskCreateBody struct {
 // toTaskData projects a Task into its response DTO.
 func toTaskData(row Task) taskData {
 	return taskData{
-		ID:        row.Model.ID,
-		CreatedAt: row.Model.CreatedAt,
-		UpdatedAt: row.Model.UpdatedAt,
+		ID:        row.ID,
+		CreatedAt: row.CreatedAt,
+		UpdatedAt: row.UpdatedAt,
 		Title:     row.Title,
 		Done:      row.Done,
 	}
