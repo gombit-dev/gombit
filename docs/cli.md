@@ -397,7 +397,8 @@ A self-referential `belongs_to` or `one_to_one` is allowed when it is
 parent:belongs_to:Category,nullable,on_delete=set_null
 ```
 
-The association type is unqualified because it lives in the same package.
+The association is a pointer (`Parent *Category`). A value field of the
+enclosing struct would not compile.
 `on_delete=set_null` requires `nullable`. `has_many` and `many_to_many` onto
 the same model are still rejected: they need explicit join keys.
 

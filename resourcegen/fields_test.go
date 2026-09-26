@@ -333,11 +333,11 @@ func TestParseRelationSamePackage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("nullable self belongs_to: %v", err)
 	}
-	if self[0].GoType != "Category" || !self[0].Nullable || self[0].OnDelete != "SET NULL" || !self[0].Self {
+	if self[0].GoType != "*Category" || !self[0].Nullable || self[0].OnDelete != "SET NULL" || !self[0].Self {
 		t.Fatalf("self belongs_to = %+v", self[0])
 	}
 	lines := modelFieldLines(self[0], "category")
-	if !strings.Contains(lines, "ParentID *uint") || !strings.Contains(lines, "Parent Category") || !strings.Contains(lines, "OnDelete:SET NULL") {
+	if !strings.Contains(lines, "ParentID *uint") || !strings.Contains(lines, "Parent *Category") || !strings.Contains(lines, "OnDelete:SET NULL") {
 		t.Fatalf("self model lines:\n%s", lines)
 	}
 	// The same target from a different package is fine and stays qualified.

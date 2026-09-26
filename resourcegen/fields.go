@@ -120,7 +120,9 @@ func parseRelationField(name, jsonName, goName string, kind FieldType, rawTarget
 	}
 	qualified := targetPkg + "." + targetType
 	if f.Self {
-		qualified = targetType
+		// A struct cannot contain a field of its own type. The association
+		// is a pointer; the foreign key *uint is the nullable column.
+		qualified = "*" + targetType
 	}
 	switch kind {
 	case FieldBelongsTo, FieldOneToOne:

@@ -1,6 +1,9 @@
 package resourcegen
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -239,6 +242,61 @@ func TestRenderRelations(t *testing.T) {
 		if !strings.Contains(model, want) {
 			t.Fatalf("model missing %q:\n%s", want, model)
 		}
+	}
+}
+
+func TestSelfRelationModelCompiles(t *testing.T) {
+	fields, err := parseFields([]string{"parent:belongs_to:Category,nullable,on_delete=set_null"}, "category")
+	if err != nil {
+		t.Fatalf("parseFields: %v", err)
+	}
+	name, err := parseResourceName("Category")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := newRenderContext("example.com/demo", name, fields, "/api/v1", "minimal", false, false)
+	src := renderModel(ctx)
+	if !strings.Contains(src, "Parent *Category") || strings.Contains(src, "Parent Category `") {
+		t.Fatalf("self association must be a pointer:\n%s", src)
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "model.go"), []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/demo/internal/category\n\ngo 1.26.0\n\nrequire gorm.io/gorm v1.31.2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tidy := exec.Command("go", "mod", "tidy")
+	tidy.Dir = dir
+	if out, err := tidy.CombinedOutput(); err != nil {
+		t.Fatalf("go mod tidy: %v\n%s", err, out)
+	}
+	build := exec.Command("go", "build", ".")
+	build.Dir = dir
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("go build: %v\n%s\n%s", err, out, src)
+	}
+}
+
+func TestNullableFKFormSubmitsNull(t *testing.T) {
+	fields, err := parseFields([]string{"author:belongs_to:Author,nullable"}, "post")
+	if err != nil {
+		t.Fatalf("parseFields: %v", err)
+	}
+	name, err := parseResourceName("Post")
+	if err != nil {
+		t.Fatal(err)
+	}
+	minimal := newRenderContext("example.com/demo", name, dtoFields(fields), "/api/v1", "minimal", false, false)
+	form := renderFormTSX(minimal)
+	for _, want := range []string{"author_id: null", "number | null", `value === "" ? null : Number(value)`} {
+		if !strings.Contains(form, want) {
+			t.Fatalf("minimal form missing %q:\n%s", want, form)
+		}
+	}
+	mui := renderMUIFormTSX(newRenderContext("example.com/demo", name, dtoFields(fields), "/api/v1", "mui", false, false))
+	if !strings.Contains(mui, `raw === "" ? null : Number(raw)`) || strings.Contains(mui, "author_id: 0") {
+		t.Fatalf("MUI form still submits 0:\n%s", mui)
 	}
 }
 

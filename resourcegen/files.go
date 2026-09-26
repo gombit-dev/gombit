@@ -614,6 +614,9 @@ func tsFormType(field Field) string {
 	case FieldBool:
 		return "boolean"
 	case FieldInt, FieldInt64, FieldUint, FieldFloat:
+		if field.Nullable {
+			return "number | null"
+		}
 		return "number"
 	case FieldJSON:
 		return "string"
@@ -647,6 +650,9 @@ func tsDefaultValue(field Field) string {
 	case FieldBool:
 		return "false"
 	case FieldInt, FieldInt64, FieldUint, FieldFloat:
+		if field.Nullable {
+			return "null"
+		}
 		return "0"
 	case FieldJSON:
 		return `""`
@@ -1168,6 +1174,9 @@ func renderMUIFormField(field Field) string {
 	case FieldInt, FieldInt64, FieldUint, FieldFloat:
 		b.WriteString("              <TextField\n")
 		b.WriteString("                {...field}\n")
+		if field.Nullable {
+			b.WriteString("                value={field.value ?? \"\"}\n")
+		}
 		b.WriteString("                type=\"number\"\n")
 		b.WriteString("                label=\"" + field.GoName + "\"\n")
 		b.WriteString("                fullWidth\n")
@@ -1188,7 +1197,11 @@ func renderMUIFormField(field Field) string {
 		}
 		b.WriteString("                onChange={(event) => {\n")
 		b.WriteString("                  const raw = event.target.value;\n")
-		b.WriteString("                  field.onChange(raw === \"\" ? 0 : Number(raw));\n")
+		blank := "0"
+		if field.Nullable {
+			blank = "null"
+		}
+		b.WriteString("                  field.onChange(raw === \"\" ? " + blank + " : Number(raw));\n")
 		b.WriteString("                }}\n")
 		b.WriteString("              />\n")
 	case FieldEnum:

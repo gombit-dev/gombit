@@ -9,7 +9,8 @@ export function isManyToMany(field: FieldMeta): boolean {
 }
 
 export function isBelongsTo(field: FieldMeta): boolean {
-  return field.type === "relation" && field.related?.kind === "belongs_to";
+  const kind = field.related?.kind;
+  return field.type === "relation" && (kind === "belongs_to" || kind === "one_to_one");
 }
 
 /** RelId is a related primary key: a number (integer PK) or a string (uuid /
