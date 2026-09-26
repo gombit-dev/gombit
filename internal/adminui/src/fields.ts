@@ -108,7 +108,7 @@ export function writableFields(fields: FieldMeta[]): FieldMeta[] {
   return fields.filter(isWritable);
 }
 
-export function formatCell(value: unknown): string {
+export function formatCell(value: unknown, field?: FieldMeta): string {
   if (value === null || value === undefined) {
     return "";
   }
@@ -122,7 +122,9 @@ export function formatCell(value: unknown): string {
       return String(value);
     }
   }
-  return String(value);
+  const text = String(value);
+  const label = field?.choices?.find((choice) => choice.value === text)?.label;
+  return label ?? text;
 }
 
 export function emptyFormValue(field: FieldMeta): unknown {
@@ -238,9 +240,19 @@ export function formValuesToBody(values: Row, fields: FieldMeta[]): { body: Row;
       body[field.name] = String(raw).trim().slice(0, 10);
       continue;
     }
+    if (field.type === "time") {
+      body[field.name] = padClock(String(raw).trim());
+      continue;
+    }
     body[field.name] = raw;
   }
   return { body, jsonErrors };
+}
+
+// padClock turns an HTML time value HH:MM into HH:MM:SS. The request format
+// is the full clock.
+function padClock(value: string): string {
+  return value.length === 5 ? `${value}:00` : value;
 }
 
 // formPattern is the pattern compiled with the u flag. `.` outside a class is

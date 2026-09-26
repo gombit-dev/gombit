@@ -368,8 +368,23 @@ func fillConstraints(fields []Field, sch *schema.Schema) error {
 		if f.Default == "" {
 			f.Default = c.Default
 		}
+		if len(f.Choices) == 0 && len(c.Enum) > 0 {
+			f.Choices = choicesFromConstraints(c)
+		}
 	}
 	return nil
+}
+
+func choicesFromConstraints(c field.Constraints) []Choice {
+	out := make([]Choice, len(c.Enum))
+	for i, value := range c.Enum {
+		label := value
+		if i < len(c.Label) && c.Label[i] != "" {
+			label = c.Label[i]
+		}
+		out[i] = Choice{Value: value, Label: label}
+	}
+	return out
 }
 
 func resolveFields(fields []Field, sch *schema.Schema) ([]resolvedField, []*m2mBinding, []*relationRead, error) {

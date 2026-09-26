@@ -55,11 +55,14 @@ belongs_to, has_many, many_to_many.
 
   decimal            money/exact numeric (types.Decimal; decimal(19,4) column).
   decimal(p,s)       pin precision/scale, e.g. decimal(10,2).
-  time               time.Time (RFC3339 in JSON).
+  time               time.Time (RFC3339 in JSON). This is a datetime.
+  time_of_day        clock time (types.TimeOfDay; HH:MM:SS). Not the time token.
+  duration           Go duration (types.Duration; 1h30m). Stored as nanoseconds.
+  enum(a,b)          stored values. enum(draft=Draft) separates the stored
+                     value from the admin and form label.
 
-Enum fields are not supported by the model-first generator yet (enum values
-are not recoverable from the GORM schema) and are rejected — use a string
-field for now.
+Enum values are kept on the model's validate tag. gombit generate emits
+that list as a Huma enum of the stored values.
 
 List-query modifiers opt a field into the generated list handler's declared
 query surface (safe, indexable subset). The query spelling matches Gombit's

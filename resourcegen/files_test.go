@@ -402,3 +402,50 @@ func TestRenderScalarGaps(t *testing.T) {
 		t.Fatalf("mui form parses or throws from the change handler:\n%s", mui)
 	}
 }
+
+func TestRenderDurationTimeOfDayAndEnumLabel(t *testing.T) {
+	fields, err := parseFields([]string{
+		"opens:time_of_day",
+		"length:duration:default=30m",
+		"status:enum(draft=Draft,published=Published)",
+	}, "shift")
+	if err != nil {
+		t.Fatalf("parseFields: %v", err)
+	}
+	name, err := parseResourceName("Shift")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := newRenderContext("github.com/example/demo", name, fields, "/api/v1", "minimal", false, false)
+	model := string(mustFormatGo(renderModel(ctx)))
+	for _, want := range []string{
+		"*types.TimeOfDay",
+		"type:char(8)",
+		`format:"time"`,
+		"*types.Duration",
+		"type:bigint",
+		`format:"duration"`,
+		`validate:"default=30m"`,
+		`enum=draft,published;label=Draft,Published`,
+		`"github.com/gombit-dev/gombit/types"`,
+	} {
+		if !strings.Contains(model, want) {
+			t.Fatalf("model missing %q:\n%s", want, model)
+		}
+	}
+	form := renderFormTSX(ctx)
+	for _, want := range []string{
+		`type="time"`,
+		`s.length === 5 ? s + ":00" : s`,
+		`<option value="draft">Draft</option>`,
+		`<option value="published">Published</option>`,
+	} {
+		if !strings.Contains(form, want) {
+			t.Fatalf("form missing %q:\n%s", want, form)
+		}
+	}
+	mui := renderMUIFormTSX(newRenderContext("github.com/example/demo", name, fields, "/api/v1", "mui", false, false))
+	if !strings.Contains(mui, `type="time"`) || !strings.Contains(mui, `s.length === 5 ? s + ":00" : s`) || !strings.Contains(mui, `>Draft</MenuItem>`) {
+		t.Fatalf("mui form missing clock or label:\n%s", mui)
+	}
+}

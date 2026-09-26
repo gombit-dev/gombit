@@ -14,6 +14,8 @@ const (
 	TypeBoolean  FieldType = FieldType(field.Boolean)
 	TypeDateTime FieldType = FieldType(field.DateTime)
 	TypeDate     FieldType = FieldType(field.Date)
+	TypeTime     FieldType = FieldType(field.TimeOfDay)
+	TypeDuration FieldType = FieldType(field.Duration)
 	TypeUUID     FieldType = FieldType(field.UUID)
 	TypeJSON     FieldType = FieldType(field.JSON)
 	TypeRelation FieldType = FieldType(field.Relation)
@@ -90,12 +92,22 @@ type Field struct {
 	// does not change the catalog kind.
 	TagPattern string `json:"-"`
 	Default    string `json:"default,omitempty"`
-	// Format is the OpenAPI format from the model tag (email, uri, ip).
-	// The admin wire stays string; writes reject a value that fails it.
+	// Format is the OpenAPI format from the model tag (email, uri, ip, time,
+	// duration). The admin wire for email stays string; time and duration
+	// have their own wires. Writes reject a value that fails the format.
 	Format string `json:"format,omitempty"`
+	// Choices are the stored value and display label of an enum. Empty
+	// when the column is not an enum.
+	Choices []Choice `json:"choices,omitempty"`
 	// Column is the GORM/SQL column name. Empty means Name == JSON key ==
 	// column (the v1 default). Not emitted in meta.
 	Column string `json:"-"`
+}
+
+// Choice is one enum entry: the stored value and the label the admin shows.
+type Choice struct {
+	Value string `json:"value"`
+	Label string `json:"label"`
 }
 
 // Relation describes a belongs_to, has_many, or many_to_many field (#223).

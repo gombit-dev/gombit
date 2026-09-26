@@ -7,8 +7,8 @@
 //
 //   - CLI tokens accepted by `gombit make resource` (resourcegen). Historical
 //     tokens stay valid: `int`, `bool`, and `time` parse as integer, boolean,
-//     and datetime. `time` is a datetime alias; a clock-time kind has no CLI
-//     token until that kind is generated.
+//     and datetime. `time` is a datetime alias. Clock time is the `time_of_day`
+//     token, so existing resources keep generating time.Time.
 //   - Admin meta strings (`integer`, `boolean`, `datetime`, `relation`, …).
 //     Finer kinds share a widget when the admin UI does not distinguish them
 //     yet: integer64 and unsigned both emit `integer`.
@@ -126,8 +126,8 @@ var catalog = []Spec{
 	{Kind: Boolean, GoType: "bool", GeneratorReady: true, CLITokens: []string{"bool", "boolean"}, AdminWire: "boolean", Filterable: true, Sortable: true},
 	{Kind: Date, GoType: "types.Date", GeneratorReady: true, CLITokens: []string{"date"}, AdminWire: "date", Sortable: true},
 	{Kind: DateTime, GoType: "time.Time", GeneratorReady: true, CLITokens: []string{"time", "datetime"}, AdminWire: "datetime", Sortable: true},
-	{Kind: TimeOfDay, Sortable: true},
-	{Kind: Duration, CLITokens: []string{"duration"}, Sortable: true},
+	{Kind: TimeOfDay, GoType: "types.TimeOfDay", GeneratorReady: true, CLITokens: []string{"time_of_day"}, AdminWire: "time", Sortable: true},
+	{Kind: Duration, GoType: "types.Duration", GeneratorReady: true, CLITokens: []string{"duration"}, AdminWire: "duration", Sortable: true},
 	{Kind: UUID, GoType: "uuid.UUID", GeneratorReady: true, CLITokens: []string{"uuid"}, AdminWire: "uuid", Sortable: true},
 	{Kind: JSON, GoType: "types.JSON", GeneratorReady: true, CLITokens: []string{"json"}, AdminWire: "json"},
 	{Kind: Email, GoType: "string", GeneratorReady: true, CLITokens: []string{"email"}, AdminWire: "string", Sortable: true, Searchable: true},
@@ -332,6 +332,8 @@ var (
 	goDecimal  = reflect.TypeOf(decimal.Decimal{})
 	goTypesDec = reflect.TypeOf(types.Decimal{})
 	goDate     = reflect.TypeOf(types.Date{})
+	goClock    = reflect.TypeOf(types.TimeOfDay{})
+	goDuration = reflect.TypeOf(types.Duration{})
 	goJSON     = reflect.TypeOf(types.JSON(nil))
 	goNullJSON = reflect.TypeOf(types.NullJSON(nil))
 )
@@ -371,6 +373,10 @@ func KindFromGo(t reflect.Type, dataType string) Kind {
 		return DateTime
 	case goDate:
 		return Date
+	case goClock:
+		return TimeOfDay
+	case goDuration:
+		return Duration
 	case goRawJSON, goJSON, goNullJSON:
 		return JSON
 	case goUUID:

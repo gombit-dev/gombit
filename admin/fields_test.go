@@ -406,7 +406,7 @@ func TestAdminWireSetMatchesVocabulary(t *testing.T) {
 	}
 	for _, declared := range []FieldType{
 		TypeString, TypeText, TypeInteger, TypeFloat, TypeDecimal, TypeBoolean,
-		TypeDateTime, TypeDate, TypeUUID, TypeJSON, TypeRelation,
+		TypeDateTime, TypeDate, TypeTime, TypeDuration, TypeUUID, TypeJSON, TypeRelation,
 	} {
 		if _, ok := seen[string(declared)]; !ok {
 			t.Fatalf("admin type %q is not in the vocabulary admin wires", declared)

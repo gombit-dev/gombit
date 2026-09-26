@@ -541,6 +541,16 @@ func schemaAttr(goType string) string {
 		if pointer {
 			b.WriteString(` nullable:"true"`)
 		}
+	case ok && name == "TimeOfDay" && (pkg == "types" || strings.HasPrefix(pkg, "types")):
+		b.WriteString(` format:"time"`)
+		if pointer {
+			b.WriteString(` nullable:"true"`)
+		}
+	case ok && name == "Duration" && (pkg == "types" || strings.HasPrefix(pkg, "types")):
+		b.WriteString(` format:"duration"`)
+		if pointer {
+			b.WriteString(` nullable:"true"`)
+		}
 	}
 	return b.String()
 }
@@ -639,6 +649,10 @@ func (f modelField) defaultLiteral() string {
 	switch {
 	case f.isDecimal():
 		return "types.MustDecimal(" + strconv.Quote(f.Constraints.Default) + ")"
+	case strings.Contains(f.GoType, "types.TimeOfDay"):
+		return "types.MustTimeOfDay(" + strconv.Quote(f.Constraints.Default) + ")"
+	case strings.Contains(f.GoType, "types.Duration"):
+		return "types.MustDuration(" + strconv.Quote(f.Constraints.Default) + ")"
 	case f.Kind == reflect.String:
 		return strconv.Quote(f.Constraints.Default)
 	default:

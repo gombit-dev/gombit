@@ -250,7 +250,9 @@ export function ResourceListPage() {
                       }
                     >
                       {columns.map((column) => (
-                        <TableCell key={column}>{formatCell(row[column])}</TableCell>
+                        <TableCell key={column}>
+                          {formatCell(row[column], model.fields.find((field) => field.name === column))}
+                        </TableCell>
                       ))}
                     </TableRow>
                   );

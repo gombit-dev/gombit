@@ -60,6 +60,7 @@ type FieldMeta struct {
 	Pattern   string    `json:"pattern,omitempty"`
 	Default   string    `json:"default,omitempty"`
 	Format    string    `json:"format,omitempty"`
+	Choices   []Choice  `json:"choices,omitempty"`
 }
 
 type catalogOutput struct {
@@ -94,6 +95,7 @@ func modelMetaFrom(opts Options, pk string) ModelMeta {
 			Pattern:   f.Pattern,
 			Default:   f.Default,
 			Format:    f.Format,
+			Choices:   cloneChoices(f.Choices),
 		})
 	}
 	return ModelMeta{
@@ -116,6 +118,15 @@ func cloneStrings(in []string) []string {
 		return []string{}
 	}
 	out := make([]string, len(in))
+	copy(out, in)
+	return out
+}
+
+func cloneChoices(in []Choice) []Choice {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]Choice, len(in))
 	copy(out, in)
 	return out
 }

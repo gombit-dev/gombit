@@ -44,8 +44,11 @@ type Field struct {
 	// int64, uint, decimal) may opt in (see typeAllowsAggregate).
 	Aggregatable bool
 
-	// EnumValues holds the allowed values for FieldEnum, in declared order.
+	// EnumValues holds the allowed stored values for FieldEnum, in declared
+	// order. EnumLabels is the display text for each value. An empty label
+	// list means the label is the stored value.
 	EnumValues []string
+	EnumLabels []string
 	// Precision/Scale set the decimal(p,s) column for FieldDecimal.
 	Precision int
 	Scale     int
@@ -244,23 +247,25 @@ func (f Field) inDTO() bool {
 type FieldType string
 
 const (
-	FieldString  FieldType = FieldType(logical.String)
-	FieldText    FieldType = FieldType(logical.Text)
-	FieldInt     FieldType = FieldType(logical.Integer)
-	FieldInt64   FieldType = FieldType(logical.Integer64)
-	FieldBool    FieldType = FieldType(logical.Boolean)
-	FieldUint    FieldType = FieldType(logical.Unsigned)
-	FieldDecimal FieldType = FieldType(logical.Decimal)
-	FieldTime    FieldType = FieldType(logical.DateTime)
-	FieldDate    FieldType = FieldType(logical.Date)
-	FieldFloat   FieldType = FieldType(logical.Float)
-	FieldUUID    FieldType = FieldType(logical.UUID)
-	FieldJSON    FieldType = FieldType(logical.JSON)
-	FieldEmail   FieldType = FieldType(logical.Email)
-	FieldURL     FieldType = FieldType(logical.URL)
-	FieldSlug    FieldType = FieldType(logical.Slug)
-	FieldIP      FieldType = FieldType(logical.IP)
-	FieldEnum    FieldType = FieldType(logical.Enum)
+	FieldString    FieldType = FieldType(logical.String)
+	FieldText      FieldType = FieldType(logical.Text)
+	FieldInt       FieldType = FieldType(logical.Integer)
+	FieldInt64     FieldType = FieldType(logical.Integer64)
+	FieldBool      FieldType = FieldType(logical.Boolean)
+	FieldUint      FieldType = FieldType(logical.Unsigned)
+	FieldDecimal   FieldType = FieldType(logical.Decimal)
+	FieldTime      FieldType = FieldType(logical.DateTime)
+	FieldDate      FieldType = FieldType(logical.Date)
+	FieldTimeOfDay FieldType = FieldType(logical.TimeOfDay)
+	FieldDuration  FieldType = FieldType(logical.Duration)
+	FieldFloat     FieldType = FieldType(logical.Float)
+	FieldUUID      FieldType = FieldType(logical.UUID)
+	FieldJSON      FieldType = FieldType(logical.JSON)
+	FieldEmail     FieldType = FieldType(logical.Email)
+	FieldURL       FieldType = FieldType(logical.URL)
+	FieldSlug      FieldType = FieldType(logical.Slug)
+	FieldIP        FieldType = FieldType(logical.IP)
+	FieldEnum      FieldType = FieldType(logical.Enum)
 
 	FieldBelongsTo  FieldType = FieldType(logical.RelBelongsTo)
 	FieldHasMany    FieldType = FieldType(logical.RelHasMany)
@@ -437,11 +442,12 @@ func applyType(field *Field, token string) error {
 		if !hasArgs {
 			return fmt.Errorf("resourcegen: enum field %q needs values, e.g. status:enum(draft,published)", field.JSONName)
 		}
-		values, err := parseEnumValues(args)
+		values, labels, err := parseEnumValues(args)
 		if err != nil {
 			return err
 		}
 		field.EnumValues = values
+		field.EnumLabels = labels
 	}
 	if hasArgs && kind != logical.Decimal && kind != logical.Enum {
 		return fmt.Errorf("resourcegen: type %q does not take arguments", base)
@@ -481,29 +487,49 @@ func parseDecimalArgs(args string) (precision, scale int, err error) {
 	return p, s, nil
 }
 
-func parseEnumValues(args string) ([]string, error) {
+func parseEnumValues(args string) (values, labels []string, err error) {
 	raw := strings.Split(args, ",")
-	values := make([]string, 0, len(raw))
+	values = make([]string, 0, len(raw))
+	labels = make([]string, 0, len(raw))
 	seen := make(map[string]struct{}, len(raw))
-	for _, v := range raw {
-		v = strings.TrimSpace(v)
-		if v == "" {
-			return nil, fmt.Errorf("resourcegen: enum has an empty value")
+	for _, piece := range raw {
+		piece = strings.TrimSpace(piece)
+		if piece == "" {
+			return nil, nil, fmt.Errorf("resourcegen: enum has an empty value")
 		}
-		// Values land in a Go struct tag and a TS union literal; keep them to
-		// a safe, unambiguous character set.
-		for _, r := range v {
-			if r == '"' || r == '`' || r == '\\' || r == ';' {
-				return nil, fmt.Errorf("resourcegen: enum value %q contains an unsupported character", v)
-			}
+		value, label, hasLabel := strings.Cut(piece, "=")
+		value = strings.TrimSpace(value)
+		label = strings.TrimSpace(label)
+		if !hasLabel {
+			label = value
 		}
-		if _, dup := seen[v]; dup {
-			return nil, fmt.Errorf("resourcegen: duplicate enum value %q", v)
+		if value == "" || label == "" {
+			return nil, nil, fmt.Errorf("resourcegen: enum has an empty value")
 		}
-		seen[v] = struct{}{}
-		values = append(values, v)
+		// Values and labels land in a Go struct tag, a TS union literal, and
+		// JSX text. Keep them to a set that needs no escaping. `=` separates
+		// a stored value from its display label.
+		if !enumTokenOK(value) || !enumTokenOK(label) {
+			return nil, nil, fmt.Errorf("resourcegen: enum value %q contains an unsupported character", piece)
+		}
+		if _, dup := seen[value]; dup {
+			return nil, nil, fmt.Errorf("resourcegen: duplicate enum value %q", value)
+		}
+		seen[value] = struct{}{}
+		values = append(values, value)
+		labels = append(labels, label)
 	}
-	return values, nil
+	return values, labels, nil
+}
+
+func enumTokenOK(s string) bool {
+	for _, r := range s {
+		switch r {
+		case '"', '`', '\\', ';', '<', '>', '&', '\n', '\r':
+			return false
+		}
+	}
+	return s != ""
 }
 
 func applyModifiers(field *Field, raw string) error {
@@ -696,6 +722,10 @@ func checkDefault(field *Field) error {
 			}
 		}
 		return fmt.Errorf("resourcegen: field %q default %q is not an enum value", field.JSONName, field.Default)
+	case FieldDuration, FieldTimeOfDay:
+		if !formatAccepts(field.openAPIFormat(), field.Default) {
+			return fmt.Errorf("resourcegen: field %q default %q is not a valid %s", field.JSONName, field.Default, field.openAPIFormat())
+		}
 	case FieldBool:
 		if field.Default != "true" && field.Default != "false" {
 			return fmt.Errorf("resourcegen: field %q default %q must be true or false", field.JSONName, field.Default)
@@ -818,6 +848,7 @@ func (f Field) constraints() logical.Constraints {
 		Pattern:   f.Pattern,
 		Default:   f.Default,
 		Enum:      append([]string(nil), f.EnumValues...),
+		Label:     append([]string(nil), f.EnumLabels...),
 	}
 }
 
@@ -1190,6 +1221,14 @@ func (f Field) gormTag() string {
 		parts = append(parts, "type:text")
 	case FieldDate:
 		parts = append(parts, "type:date")
+	case FieldTimeOfDay:
+		// char(8) is the portable clock column: "HH:MM:SS" sorts the same
+		// way on SQLite, PostgreSQL, and MySQL.
+		parts = append(parts, "type:char(8)")
+	case FieldDuration:
+		// Nanoseconds in a signed bigint. A native interval type is not
+		// portable to SQLite.
+		parts = append(parts, "type:bigint")
 	}
 	if f.Required && !f.Nullable {
 		parts = append(parts, "not null")
@@ -1228,6 +1267,10 @@ func (f Field) openAPIFormat() string {
 		return "uri"
 	case FieldIP:
 		return "ip"
+	case FieldTimeOfDay:
+		return "time"
+	case FieldDuration:
+		return "duration"
 	default:
 		return ""
 	}
@@ -1295,7 +1338,7 @@ func (f Field) blankIsNull() bool {
 		return false
 	}
 	switch f.Type {
-	case FieldTime, FieldDecimal, FieldDate, FieldUUID, FieldEmail, FieldURL, FieldSlug, FieldIP:
+	case FieldTime, FieldDecimal, FieldDate, FieldUUID, FieldEmail, FieldURL, FieldSlug, FieldIP, FieldTimeOfDay, FieldDuration:
 		return true
 	case FieldString, FieldText:
 		return patternRejectsEmpty(f.Pattern)
@@ -1330,4 +1373,14 @@ func enumColumnSize(values []string) int {
 		size = 32
 	}
 	return size
+}
+
+func (f Field) enumLabel(i int) string {
+	if i < len(f.EnumLabels) && f.EnumLabels[i] != "" {
+		return f.EnumLabels[i]
+	}
+	if i < len(f.EnumValues) {
+		return f.EnumValues[i]
+	}
+	return ""
 }
