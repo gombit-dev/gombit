@@ -652,3 +652,48 @@ func TestIfnullOnANullableColumnIsNotACopy(t *testing.T) {
 		}
 	}
 }
+
+// TestAtlasRebuildShapesAreCopies uses real atlas migrate diff output and the
+// inspected states around it. Atlas leaves a generated column out of the copy
+// (SQLite computes it) and copies an expression default as
+// IFNULL(col, (<expr>)); both are the rebuild, not a dropped table.
+func TestAtlasRebuildShapesAreCopies(t *testing.T) {
+	for _, dir := range []string{"generated", "exprdefault"} {
+		t.Run(dir, func(t *testing.T) {
+			read := func(name string) string {
+				data, err := os.ReadFile(filepath.Join("testdata", "rebuild", dir, name)) // #nosec G304 -- test fixture
+				if err != nil {
+					t.Fatal(err)
+				}
+				return string(data)
+			}
+			current, desired, sql := read("current.hcl"), read("desired.hcl"), read("migration.sql")
+			steps := lintSteps(t, config.DatabaseDriverSQLite, current, desired, sql)
+			if s, ok := steps["drop_table:items"]; ok {
+				t.Fatalf("Atlas's rebuild reported as %s: %s", s.ID, s.Detail)
+			}
+			for _, s := range steps {
+				if s.NeedsAcknowledgement() {
+					t.Fatalf("steps = %v; %s needs acknowledgement for a lossless rebuild", keysOf(steps), s.ID)
+				}
+			}
+			if _, ok := steps["table_rebuild:items"]; !ok {
+				t.Fatalf("steps = %v, want table_rebuild:items", keysOf(steps))
+			}
+			// Still strict: another fill expression, or a stored column left
+			// out of the copy, is not the rebuild.
+			var broken string
+			if dir == "exprdefault" {
+				broken = strings.Replace(sql, "IFNULL(`stamped`, (datetime('now')))", "IFNULL(`stamped`, (datetime('now', '-1 day')))", 1)
+			} else {
+				broken = strings.Replace(sql, "(`id`, `name`, `price`) SELECT `id`, IFNULL(`name`, 'changed') AS `name`, `price`", "(`id`, `name`) SELECT `id`, IFNULL(`name`, 'changed') AS `name`", 1)
+			}
+			if broken == sql {
+				t.Fatal("fixture SQL did not contain the expected copy")
+			}
+			if _, ok := lintSteps(t, config.DatabaseDriverSQLite, current, desired, broken)["drop_table:items"]; !ok {
+				t.Fatal("a copy that is not Atlas's must leave the DROP TABLE standing")
+			}
+		})
+	}
+}

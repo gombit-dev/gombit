@@ -185,6 +185,9 @@ func rebuildCopySource(stmt string, desired *schema.Realm, added map[string]bool
 		return "", false
 	}
 	for _, c := range after.Columns {
+		if hasGenerated(c) {
+			continue // Atlas does not copy a generated column; SQLite computes it
+		}
 		if !copied[c.Name] && !added[source+"."+c.Name] {
 			return "", false // a surviving column the copy leaves out
 		}
@@ -207,11 +210,57 @@ func isIfnullCopy(item, col string, after *schema.Table) bool {
 	}
 	fill := strings.TrimSpace(m[2])
 	c, ok := after.Column(col)
-	if !ok || c.Type == nil || c.Type.Null || !literalDefault.MatchString(fill) {
+	if !ok || c.Type == nil || c.Type.Null {
 		return false
 	}
-	lit, ok := c.Default.(*schema.Literal)
-	return ok && literalValue(fill) == literalValue(lit.V)
+	// Atlas's defaultValue renders a literal as written (quoted unless
+	// numeric or boolean) and an expression through MayWrap.
+	switch d := c.Default.(type) {
+	case *schema.Literal:
+		return literalDefault.MatchString(fill) && literalValue(fill) == literalValue(d.V)
+	case *schema.RawExpr:
+		return stripOuterParens(fill) == stripOuterParens(d.X)
+	}
+	return false
+}
+
+func hasGenerated(c *schema.Column) bool {
+	for _, a := range c.Attrs {
+		if _, ok := a.(*schema.GeneratedExpr); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// stripOuterParens removes balanced parentheses wrapping a whole expression,
+// so Atlas's MayWrap rendering compares equal to the inspected default.
+func stripOuterParens(s string) string {
+	s = strings.TrimSpace(s)
+	for len(s) >= 2 && s[0] == '(' && s[len(s)-1] == ')' && balancedParens(s[1:len(s)-1]) {
+		s = strings.TrimSpace(s[1 : len(s)-1])
+	}
+	return s
+}
+
+// balancedParens reports whether every parenthesis in s closes in order,
+// ignoring those inside single-quoted strings.
+func balancedParens(s string) bool {
+	depth, quoted := 0, false
+	for _, r := range s {
+		switch {
+		case r == '\'':
+			quoted = !quoted
+		case quoted:
+		case r == '(':
+			depth++
+		case r == ')':
+			if depth--; depth < 0 {
+				return false
+			}
+		}
+	}
+	return depth == 0 && !quoted
 }
 
 // literalValue normalizes a literal for comparison: surrounding quotes

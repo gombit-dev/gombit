@@ -327,9 +327,11 @@ gombit db lint --latest 1    # only the newest, a local shortcut
   classify are all destructive or unsafe. A statement the schema diff already
   explains does not count twice: the column drop it reports, an `ALTER COLUMN`
   without `USING` whose change the diff classifies, and Atlas's own SQLite
-  rebuild (a copy of every surviving column into `new_<table>`, by name or as
-  Atlas's `IFNULL(col, <default>) AS col`, which Atlas writes only for a column
-  that ends up NOT NULL with that default after a default or NOT NULL change
+  rebuild (a copy of every surviving stored column into `new_<table>`
+  (generated columns are recomputed, not copied), by name or as
+  Atlas's `IFNULL(col, <default>) AS col` (a literal, or an expression in
+  parentheses), which Atlas writes only for a column that ends up NOT NULL
+  with that default after a default or NOT NULL change
   the diff classifies, then the drop and the rename back, as three contiguous
   statements, with the change that caused it in the diff). Each data-changing
   statement is its own step, `data_change:<table>.statement_<n>`, so one
