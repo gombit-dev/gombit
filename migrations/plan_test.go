@@ -75,9 +75,9 @@ func TestMakeMigrationsGateRefusalWritesNothing(t *testing.T) {
 		AtlasBinary:  "atlas-test",
 		Models:       []Model{{ImportPath: "example.com/app/internal/order", TypeName: "Order"}},
 		ForgetModels: forget,
-		Gate: func(_ context.Context, name string, in Inspection) error {
+		Gate: func(_ context.Context, name string, in Inspection) ([]string, error) {
 			gotName, got = name, in
-			return refusal
+			return nil, refusal
 		},
 		Stdout: io.Discard,
 		Stderr: io.Discard,
@@ -119,7 +119,7 @@ func TestMakeMigrationsGatePassWritesMigration(t *testing.T) {
 		Driver:       config.DatabaseDriverSQLite,
 		MigrationDir: migrationDir,
 		AtlasBinary:  "atlas-test",
-		Gate:         func(context.Context, string, Inspection) error { return nil },
+		Gate:         func(context.Context, string, Inspection) ([]string, error) { return nil, nil },
 		Stdout:       io.Discard,
 		Stderr:       io.Discard,
 		runner:       runner,
@@ -138,7 +138,7 @@ func TestMakeMigrationsGateSkippedBeforeFirstMigrationAndWhenNil(t *testing.T) {
 		seed bool
 		gate Gate
 	}{
-		{name: "first migration", seed: false, gate: func(context.Context, string, Inspection) error { return errors.New("gate must not run") }},
+		{name: "first migration", seed: false, gate: func(context.Context, string, Inspection) ([]string, error) { return nil, errors.New("gate must not run") }},
 		{name: "nil gate", seed: true, gate: nil},
 	}
 	for _, tc := range cases {
