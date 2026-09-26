@@ -15,6 +15,20 @@ This demonstrates the feature-package model path used by the temporary Atlas
 Program Mode loader. The generated migration files are written to
 `database/migrations` unless `--dir` is provided.
 
+## Plan a change
+
+After the first migration, change the model (drop a field, add a required one)
+and preview what the next migration would do before writing it:
+
+```sh
+gombit db plan --driver sqlite
+```
+
+A destructive or unsafe step (a dropped column, a NOT NULL column with no
+default) makes `plan` exit non-zero, and `makemigrations` refuses to write it
+until you pass `--allow <id>` for each step. See
+[docs/migrations.md](../../docs/migrations.md#planning-a-change).
+
 ## Apply, status, and rollback
 
 After generating an up migration, add a companion down file with the same

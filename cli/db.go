@@ -7,6 +7,7 @@ import (
 
 	"github.com/gombit-dev/gombit/config"
 	"github.com/gombit-dev/gombit/migrations"
+	"github.com/gombit-dev/gombit/migrations/schemaplan"
 	"github.com/gombit-dev/gombit/resourcegen"
 	"github.com/spf13/cobra"
 )
@@ -25,6 +26,7 @@ func newDBCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
 		},
 	})
 	cmd.AddCommand(newMakeMigrationsCommand(stdout, stderr))
+	cmd.AddCommand(newPlanCommand(stdout, stderr))
 	cmd.AddCommand(newMigrateCommand(stdout, stderr))
 	cmd.AddCommand(newRollbackCommand(stdout, stderr))
 	cmd.AddCommand(newStatusCommand(stdout, stderr))
@@ -128,6 +130,10 @@ func newMakeMigrationsCommand(stdout io.Writer, stderr io.Writer) *cobra.Command
 			if err != nil {
 				return err
 			}
+			allow, err := cmd.Flags().GetStringArray("allow")
+			if err != nil {
+				return err
+			}
 			return migrations.MakeMigrations(cmd.Context(), migrations.Options{
 				WorkDir:      ".",
 				Name:         args[0],
@@ -137,8 +143,10 @@ func newMakeMigrationsCommand(stdout io.Writer, stderr io.Writer) *cobra.Command
 				Models:       models,
 				ForgetModels: forgetModels,
 				Renames:      renames,
-				Stdout:       stdout,
-				Stderr:       stderr,
+				// Refuse a destructive or unsafe change nothing acknowledged (#309).
+				Gate:   schemaplan.Gate(allow, stderr),
+				Stdout: stdout,
+				Stderr: stderr,
 			})
 		},
 	})
@@ -148,6 +156,7 @@ func newMakeMigrationsCommand(stdout io.Writer, stderr io.Writer) *cobra.Command
 	cmd.Flags().StringArray("model", nil, "GORM model import path and type, e.g. github.com/acme/app/internal/product.Product; repeat for multiple models. Merged with models already registered from earlier makemigrations runs — you don't need to repeat them.")
 	cmd.Flags().StringArray("forget-model", nil, "GORM model import path and type to stop tracking, proposing a DROP for its table; repeat for multiple models")
 	cmd.Flags().StringArray("rename", nil, "rename a column data-preservingly as table.old_column:new_column (native RENAME COLUMN, not a drop+add rebuild); repeat for multiple columns. Cannot be combined with --model/--forget-model.")
+	cmd.Flags().StringArray("allow", nil, "acknowledge a destructive or unsafe change from 'gombit db plan' by ID (drop_column:products.name) or code (drop_column); repeat for multiple. Without it, a migration containing one is not written.")
 	return cmd
 }
 

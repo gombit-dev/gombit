@@ -6,6 +6,7 @@ import (
 
 	"github.com/gombit-dev/gombit/commandgen"
 	"github.com/gombit-dev/gombit/generate"
+	"github.com/gombit-dev/gombit/migrations/schemaplan"
 	"github.com/gombit-dev/gombit/resourcegen"
 	"github.com/spf13/cobra"
 )
@@ -162,8 +163,11 @@ and generate the SQL later with gombit db makemigrations.`,
 				DryRun:         dryRun,
 				Force:          force,
 				SkipMigrations: skipMigrations,
-				Stdout:         stdout,
-				Stderr:         stderr,
+				// The migration make resource writes gets the same plan gate as
+				// db makemigrations (#309).
+				MigrationGate: schemaplan.Gate(nil, stderr),
+				Stdout:        stdout,
+				Stderr:        stderr,
 			}
 			// Phase 1 (no writes): plan the human-owned scaffold — model, marker, AST
 			// registration/AutoMigrate, frontend. This runs every static check (app

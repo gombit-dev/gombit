@@ -14,6 +14,12 @@ gombit db verify --json     # print each migration's classification (for a host)
 gombit db verify --strict   # also exit non-zero if any migration loses data
 ```
 
+`gombit db verify` classifies migrations that are already written. To see
+what the *next* migration would do before it exists, including changes a
+statement-level reading cannot see (a NOT NULL column added to a populated
+table, a foreign key delete rule inside a SQLite table rebuild), use
+[`gombit db plan`](migrations.md#planning-a-change).
+
 ## What it classifies
 
 `gombit db verify` reads each `database/migrations/*.sql` file, strips comments,

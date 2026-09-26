@@ -456,21 +456,29 @@ func TestGeneratePassesAllAutoMigrateModels(t *testing.T) {
 	t.Cleanup(func() { lookPath = previousLook })
 
 	var got []migrations.Model
+	var gotGate migrations.Gate
 	previousMake := makeMigrations
 	makeMigrations = func(_ context.Context, opts migrations.Options) error {
 		got = append([]migrations.Model(nil), opts.Models...)
+		gotGate = opts.Gate
 		return nil
 	}
 	t.Cleanup(func() { makeMigrations = previousMake })
 
+	errGate := errors.New("gate sentinel")
 	err := Generate(context.Background(), Options{
-		WorkDir: filepath.Join(workDir, "demo"),
-		Name:    "Book",
-		Fields:  []string{"title:string:required"},
-		Stdout:  ioDiscard{},
+		WorkDir:       filepath.Join(workDir, "demo"),
+		Name:          "Book",
+		Fields:        []string{"title:string:required"},
+		MigrationGate: func(context.Context, string, migrations.Inspection) error { return errGate },
+		Stdout:        ioDiscard{},
 	})
 	if err != nil {
 		t.Fatalf("Generate() error = %v", err)
+	}
+	// The CLI's plan gate reaches the migration make resource writes (#309).
+	if gotGate == nil || !errors.Is(gotGate(context.Background(), "", migrations.Inspection{}), errGate) {
+		t.Fatal("MakeMigrations did not receive Options.MigrationGate as its Gate")
 	}
 	mod := readModulePathMust(t, filepath.Join(workDir, "demo"))
 	if !hasCollectedModel(got, "github.com/gombit-dev/gombit/auth", "User") {

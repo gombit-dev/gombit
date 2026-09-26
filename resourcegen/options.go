@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/gombit-dev/gombit/migrations"
 )
 
 const (
@@ -42,6 +44,9 @@ type Options struct {
 	// the cost of a registry-ahead-of-SQL state the developer knowingly accepts
 	// (#300).
 	SkipMigrations bool
+	// MigrationGate is passed to migrations.MakeMigrations as its Gate. The
+	// gombit CLI installs schemaplan.Gate; nil writes the migration unchecked.
+	MigrationGate migrations.Gate
 
 	skipAtlas bool
 }

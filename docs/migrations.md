@@ -111,15 +111,99 @@ to `database/migrations` by default; override that with `--dir`.
 
 `gombit db makemigrations` depends only on Atlas Community Edition features:
 the generated config points `src` at the temporary schema file and uses
-`atlas migrate diff`. It does not depend on Atlas Cloud, drift monitoring,
-external schema data sources, or migration linting.
+`atlas migrate diff`, and the [plan](#planning-a-change) uses
+`atlas schema inspect`. It does not depend on Atlas Cloud, drift monitoring,
+external schema data sources, or `atlas migrate lint`.
 
-Gombit does not add a separate `--dry-run` flag in M2-1. Atlas owns the diff
-preview behavior: if there is no model/schema change, `atlas migrate diff`
-exits without writing a new migration.
+If there is no model/schema change, `atlas migrate diff` exits without writing a
+new migration. To preview a change before anything is written, use
+[`gombit db plan`](#planning-a-change).
 
 Migration names may contain letters, numbers, underscores, and hyphens, and
 must not start with a hyphen.
+
+## Planning a change
+
+`gombit db plan` shows what the next `makemigrations` would do, without writing
+anything. It takes the same `--driver`, `--dir`, `--model`, and `--forget-model`
+flags:
+
+```sh
+gombit db plan --driver sqlite
+```
+
+```text
+Schema plan (sqlite, 4 change(s)):
+
+  DESTRUCTIVE  drop_column:products.title
+               Drops column products.title and the data in it.
+               products.name is added in the same plan. If it replaces title, keep the data with a rename instead:
+                 gombit db makemigrations <name> --rename products.title:name
+  UNSAFE       add_not_null:products.name
+               Adds NOT NULL column products.name with no default. The migration fails when products already has rows.
+               Give the column a database default (a gorm:"default:..." tag on the model field; Gombit's default= field modifier is applied by the API, not the database, so it does not change this), or add it as nullable, backfill it, and make it required in a later migration.
+  UNSAFE       add_not_null:products.price
+               Adds NOT NULL column products.price with no default. The migration fails when products already has rows.
+               Give the column a database default (a gorm:"default:..." tag on the model field; Gombit's default= field modifier is applied by the API, not the database, so it does not change this), or add it as nullable, backfill it, and make it required in a later migration.
+  REVIEW       table_rebuild:products
+               SQLite rebuilds products: it copies the rows into new_products, drops products, and renames the copy.
+
+3 destructive or unsafe change(s) need acknowledgement. Handle the data, then pass --allow for each:
+  --allow drop_column:products.title
+  --allow add_not_null:products.name
+  --allow add_not_null:products.price
+```
+
+It builds the schema the migration directory produces and the schema the models
+declare, both with `atlas schema inspect` on the dev database, and classifies
+Atlas's diff between them. Nothing is parsed out of migration SQL. Each change
+gets a severity:
+
+| Severity | Meaning | Codes |
+| --- | --- | --- |
+| `destructive` | Loses data | `drop_table`, `drop_column`, `narrow_type` (for example `bigint` to `integer`, `text` to `varchar(100)`) |
+| `unsafe` | Can fail on a table that already has rows | `add_not_null` (no default), `set_not_null`, `add_unique` (a new unique index, or a same-named one re-created with new columns), `add_foreign_key` (a new foreign key over existing columns, or a same-named one whose columns or target change), `add_check`, `change_type` with no safe direction, `change_primary_key`, `change_charset` (to anything but `utf8mb4`, or to `utf8mb4` when an index on the column can pass InnoDB's 3072-byte key limit), `change_collation` on a column in a unique key or in a foreign key whose other side keeps another collation, `change_generated`, any MySQL key a step builds (a new table, index, or foreign key, or a column change under an existing key) that can pass InnoDB's 3072-byte limit or indexes TEXT/BLOB without a prefix, `other` (a change Gombit cannot classify fails closed) |
+| `review` | Applies, but changes behavior | `change_foreign_key` (only the `ON DELETE` / `ON UPDATE` action, for example `RESTRICT` to `CASCADE`), `drop_foreign_key`, dropping a primary key, `widen_type`, `table_rebuild` (SQLite), `change_charset` to `utf8mb4` when its indexes still fit, `change_collation` on any other column |
+| `safe` | Adds structure or relaxes a rule | `add_table`, `add_column`, `add_index`, `drop_not_null`, `change_default`, `change_comment`, table charset/collation/comment options, … |
+
+A dropped column next to an added column of the same type family is reported
+with the `--rename` command that keeps the data (see
+[Renaming a column](#renaming-a-column)). A new unique index or foreign key
+over a column added in the same plan is safe only when that column is nullable
+and has no default, because every existing row then holds NULL. A default is
+written into every existing row first, so the same index can collide and the
+same foreign key can point at a missing row. SQLite type changes are `review`, not
+`destructive`: SQLite column types are affinities and the rebuild copies every
+stored value as it is.
+
+**Acknowledging a change.** A destructive or unsafe step needs an explicit
+`--allow`. It takes a step ID (`drop_column:products.title`) or a code
+(`add_not_null`, for every step with that code) and is repeatable.
+`makemigrations` refuses to write a migration that contains an unacknowledged
+step. It prints the plan and the full command that writes the same migration
+with every step acknowledged, including any `--model` and `--forget-model` the
+refused run named (a refused run saves no registry):
+
+```sh
+gombit db makemigrations reshape_products \
+  --allow drop_column:products.title \
+  --allow add_not_null
+```
+
+`--forget-model` acknowledges the drop of each forgotten model's table, because
+dropping it is what the flag asks for. It matches the table by GORM's default
+name (`LegacyWidget` → `legacy_widgets`), so a model with a custom `TableName`,
+its join tables, or any other dropped table still needs its own `--allow`. The first migration in an empty directory only creates
+tables, so `makemigrations` skips the plan there. `--rename` generates its own
+SQL and does not plan either.
+
+`gombit db plan` exits non-zero while any destructive or unsafe step is
+unacknowledged, and `--json` prints the steps for tooling. In CI, run it after
+the models change to fail the build on a destructive change nobody signed off
+on. Once the acknowledged migration is committed, the models and the migration
+directory agree and the plan is empty again. For migrations already written,
+including hand-written ones, [`gombit db verify`](migration-safety.md)
+classifies the SQL itself.
 
 ## Renaming a column
 

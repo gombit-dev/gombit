@@ -1,7 +1,6 @@
 package migrations
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -51,8 +50,11 @@ type Options struct {
 	// `atlas migrate diff` would generate for a field rename. It is not combined
 	// with model/schema diffing in the same run.
 	Renames []Rename
-	Stdout  io.Writer
-	Stderr  io.Writer
+	// Gate, when set, may refuse the migration after inspecting the change
+	// (see Gate). Nil writes whatever `atlas migrate diff` produces.
+	Gate   Gate
+	Stdout io.Writer
+	Stderr io.Writer
 
 	runner commandRunner
 }
@@ -106,84 +108,39 @@ func MakeMigrations(ctx context.Context, opts Options) error {
 		return makeRenameMigration(ctx, opts)
 	}
 
-	absWorkDir, err := filepath.Abs(opts.WorkDir)
-	if err != nil {
-		return fmt.Errorf("migrations: resolve work dir: %w", err)
-	}
-	migrationDir := opts.MigrationDir
-	if !filepath.IsAbs(migrationDir) {
-		migrationDir = filepath.Join(absWorkDir, migrationDir)
-	}
-
-	// Loaded (and the "nothing to do" case rejected) before MkdirAll, so an
-	// invocation that ends up with nothing to migrate doesn't leave behind an
-	// empty migration directory as a side effect of failing.
-	registered, err := LoadRegistry(migrationDir)
+	ws, allModels, err := prepareWorkspace(opts)
 	if err != nil {
 		return err
 	}
-	// allModels, not opts.Models, is the desired schema: it also carries
-	// forward every model an earlier makemigrations call registered, so this
-	// invocation only needs to name what's new. Without this, Atlas would
-	// see anything not repeated here as schema drift and drop it (#97).
-	known := MergeModels(registered, opts.Models)
-	if err := ensureForgetModelsTracked(known, opts.ForgetModels); err != nil {
-		return err
-	}
-	allModels := SubtractModels(known, opts.ForgetModels)
-	if len(allModels) == 0 {
-		return errors.New("migrations: no models to migrate: nothing in the registry and no --model given")
-	}
-
-	if err := os.MkdirAll(migrationDir, 0o750); err != nil {
+	defer ws.cleanup()
+	if err := os.MkdirAll(ws.migrationDir, 0o750); err != nil {
 		return fmt.Errorf("migrations: create migration dir: %w", err)
 	}
+	if err := ws.loadSchema(ctx, opts, allModels); err != nil {
+		return err
+	}
 
-	tmpRoot := filepath.Join(absWorkDir, ".gombit")
-	_, statErr := os.Stat(tmpRoot)
-	tmpRootExisted := statErr == nil
-	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
-		return fmt.Errorf("migrations: inspect temp root: %w", statErr)
-	}
-	if err := os.MkdirAll(tmpRoot, 0o750); err != nil {
-		return fmt.Errorf("migrations: create temp root: %w", err)
-	}
-	tmpDir, err := os.MkdirTemp(tmpRoot, "makemigrations-*")
-	if err != nil {
-		return fmt.Errorf("migrations: create temp dir: %w", err)
-	}
-	defer func() {
-		_ = os.RemoveAll(tmpDir)
-		if !tmpRootExisted {
-			_ = os.Remove(tmpRoot)
+	// Gate before writing. The first migration only creates tables, so there is
+	// nothing to classify; after that, the gate (schemaplan.Gate in the CLI)
+	// refuses a destructive or unsafe change nothing acknowledged (#309).
+	if opts.Gate != nil {
+		has, err := ws.hasMigrations()
+		if err != nil {
+			return err
 		}
-	}()
-
-	loaderDir := filepath.Join(tmpDir, "loader")
-	if err := os.MkdirAll(loaderDir, 0o750); err != nil {
-		return fmt.Errorf("migrations: create loader dir: %w", err)
-	}
-	if err := os.WriteFile(filepath.Join(loaderDir, "main.go"), []byte(loaderSource(opts.Driver, allModels)), 0o600); err != nil {
-		return fmt.Errorf("migrations: write loader: %w", err)
-	}
-
-	loaderRel, err := filepath.Rel(absWorkDir, loaderDir)
-	if err != nil {
-		return fmt.Errorf("migrations: resolve loader path: %w", err)
-	}
-	var schema bytes.Buffer
-	goArgs := []string{"run", "-mod=mod", "./" + filepath.ToSlash(loaderRel)}
-	if err := opts.runner.Run(ctx, absWorkDir, "go", goArgs, &schema, opts.Stderr); err != nil {
-		return fmt.Errorf("migrations: load gorm schema: %w", err)
+		if has {
+			in, err := ws.inspect(ctx, opts)
+			if err != nil {
+				return err
+			}
+			if err := opts.Gate(ctx, opts.Name, in); err != nil {
+				return err
+			}
+		}
 	}
 
-	schemaPath := filepath.Join(tmpDir, "schema.sql")
-	if err := os.WriteFile(schemaPath, schema.Bytes(), 0o600); err != nil {
-		return fmt.Errorf("migrations: write schema: %w", err)
-	}
-
-	atlasPath := filepath.Join(tmpDir, "atlas.hcl")
-	if err := os.WriteFile(atlasPath, []byte(atlasHCL(schemaPath, migrationDir, devURL(opts.Driver))), 0o600); err != nil {
+	atlasPath := filepath.Join(ws.tmpDir, "atlas.hcl")
+	if err := os.WriteFile(atlasPath, []byte(atlasHCL(ws.schemaPath, ws.migrationDir, devURL(opts.Driver))), 0o600); err != nil {
 		return fmt.Errorf("migrations: write atlas config: %w", err)
 	}
 
@@ -196,10 +153,10 @@ func MakeMigrations(ctx context.Context, opts Options) error {
 		"--config",
 		"file://" + filepath.ToSlash(atlasPath),
 	}
-	if err := opts.runner.Run(ctx, absWorkDir, opts.AtlasBinary, args, opts.Stdout, opts.Stderr); err != nil {
+	if err := opts.runner.Run(ctx, ws.absWorkDir, opts.AtlasBinary, args, opts.Stdout, opts.Stderr); err != nil {
 		return fmt.Errorf("migrations: atlas migrate diff: %w", err)
 	}
-	if err := SaveRegistry(migrationDir, allModels); err != nil {
+	if err := SaveRegistry(ws.migrationDir, allModels); err != nil {
 		return err
 	}
 	// A diff that renames a field shows up as a drop + add, which Atlas turns
@@ -239,10 +196,8 @@ func validateOptions(opts Options) error {
 	if !migrationNamePattern.MatchString(opts.Name) {
 		return errors.New("migrations: migration name must contain only letters, numbers, underscores, or hyphens and must not start with a hyphen")
 	}
-	switch opts.Driver {
-	case config.DatabaseDriverSQLite, config.DatabaseDriverPostgres, config.DatabaseDriverMySQL:
-	default:
-		return fmt.Errorf("migrations: unsupported driver %q", opts.Driver)
+	if err := validateDriver(opts.Driver); err != nil {
+		return err
 	}
 	// A migration can validly carry zero --model flags when the persisted
 	// registry already has entries (this run only picks up field changes on

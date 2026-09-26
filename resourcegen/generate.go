@@ -709,6 +709,7 @@ func maybeMakeMigrations(ctx context.Context, opts Options, spec renderContext, 
 		MigrationDir: "database/migrations",
 		AtlasBinary:  opts.AtlasBin,
 		Models:       models,
+		Gate:         opts.MigrationGate,
 		Stdout:       opts.Stdout,
 		Stderr:       opts.Stderr,
 	})
