@@ -295,7 +295,20 @@ From an application directory (the output of `gombit new`):
 gombit make resource Widget name:string:required price:int
 gombit make resource Invoice --service --repo --dry-run
 gombit make resource Widget --force
+gombit make resource Session --id uuid
 ```
+
+`--id` chooses the primary key. `uint` (the default) embeds `gorm.Model`.
+`uuid` scaffolds an application-assigned `uuid.UUID` primary key (`char(36)`,
+portable across SQLite, PostgreSQL, and MySQL) plus `CreatedAt`, `UpdatedAt`,
+and `DeletedAt`. The model sets the id in `BeforeCreate` when it is still
+`uuid.Nil`. Composite primary keys are rejected. A `belongs_to` or
+`one_to_one` foreign key uses the target model's primary key when that model
+is already on disk, and `uint` when it is not. A self relation uses this
+resource's `--id`. A model on disk whose key is not `uint` or `uuid.UUID`
+is rejected. The foreign key stays filterable, so
+`GET /children?<fk>=<id>` lists a parent's rows for a UUID key the same way
+it does for `uint`.
 
 `make` is a Cobra parent (`AddCommand`); `resource` is the subcommand. Root
 help lists `make`.
@@ -369,8 +382,8 @@ model-first generator yet (see above) and are rejected — use a `string`.
 | `decimal` | `types.Decimal` (wraps `shopspring/decimal`) | `decimal(19,4)`; JSON string, exact — no float rounding |
 | `decimal(p,s)` | `types.Decimal` | `decimal(p,s)`, e.g. `decimal(10,2)` |
 | `time` | `time.Time` | RFC3339 date-time in JSON |
-| `belongs_to:Target` | FK `TargetID uint` + `Target target.Target` | DTO exposes `target_id`; admin renders a picker. `nullable` makes the FK `*uint`. `on_delete` is `restrict` (the default), `cascade`, or `set_null` |
-| `one_to_one:Target` | unique FK `TargetID uint` + `Target target.Target` | same wire as `belongs_to`; the foreign key is unique |
+| `belongs_to:Target` | FK `TargetID` + `Target target.Target` | DTO exposes `target_id`; admin renders a picker. The FK type is the target primary key (`uint` or `uuid.UUID`). `nullable` makes the FK a pointer. `on_delete` is `restrict` (the default), `cascade`, or `set_null` |
+| `one_to_one:Target` | unique FK `TargetID` + `Target target.Target` | same wire as `belongs_to`; the foreign key is unique |
 | `has_many:Target` | `[]target.Target` | model-only, read via the admin; the child must carry the parent FK |
 | `many_to_many:Target` | `[]target.Target` (`many2many:` join) | model-only, edited via the admin |
 

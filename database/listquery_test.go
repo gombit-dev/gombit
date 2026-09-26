@@ -285,6 +285,24 @@ func (d ctDecoded) total() int {
 	return -1
 }
 
+func TestFilterEqUUIDCanonical(t *testing.T) {
+	db := openSQLite(t)
+	ctx := context.Background()
+	if _, err := FilterEq(ctx, db.Model(&lqItem{}), "id", FilterUUID, "nope"); err == nil {
+		t.Fatal("invalid uuid filter accepted")
+	}
+	q, err := FilterEq(ctx, db.Session(&gorm.Session{DryRun: true}).Model(&lqItem{}), "id", FilterUUID, "550E8400-E29B-41D4-A716-446655440000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Find(&[]lqItem{}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(q.Statement.Vars) != 1 || q.Statement.Vars[0] != "550e8400-e29b-41d4-a716-446655440000" {
+		t.Fatalf("vars = %#v", q.Statement.Vars)
+	}
+}
+
 func decodeList(t *testing.T, resp *httptest.ResponseRecorder) ctDecoded {
 	t.Helper()
 	if resp.Code != 200 {
