@@ -81,9 +81,11 @@ type PlanStep struct {
 	// Acknowledged is set by SchemaPlan.Acknowledge for a step an --allow
 	// entry (or --forget-model, for a dropped table) covers.
 	Acknowledged bool `json:"acknowledged"`
-	// renameTo is the table created in the same plan that a dropped table
-	// looks renamed to. Build turns it into the --rename-table command.
-	renameTo string
+	// createdInPlan are the tables the same plan creates; for a dropped table,
+	// any of them may be its rename. renameTo is the one that matches it
+	// exactly, if exactly one does. Build turns them into the hint.
+	createdInPlan []string
+	renameTo      string
 }
 
 // NeedsAcknowledgement reports whether the step is destructive or unsafe and
@@ -123,10 +125,11 @@ func classifyChanges(driver config.DatabaseDriver, changes []schema.Change) []Pl
 			steps = append(steps, newStep(StepAddTable, SeveritySafe, c.T.Name, "", fmt.Sprintf("Creates table %s.", c.T.Name)))
 		case *schema.DropTable:
 			step := newStep(StepDropTable, SeverityDestructive, c.T.Name, "", fmt.Sprintf("Drops table %s and every row in it.", c.T.Name))
-			if repl := tableRenameCandidate(c.T, added); repl != "" {
-				step.renameTo = repl
-				step.Hint = renameTableHint(c.T.Name, repl, "")
+			for _, t := range added {
+				step.createdInPlan = append(step.createdInPlan, t.Name)
 			}
+			step.renameTo = tableRenameCandidate(c.T, added)
+			step.Hint = renameTableHint(step, "")
 			steps = append(steps, step)
 		case *schema.ModifyTable:
 			steps = append(steps, classifyTable(driver, c)...)
@@ -941,76 +944,87 @@ func typeString(c *schema.Column) string {
 	return fmt.Sprintf("%T", c.Type.Type)
 }
 
-// renameTableHint is the command that keeps a dropped table's rows when the
-// added table replaces it. models are the --model / --forget-model flags of
-// the run, already formatted.
-func renameTableHint(oldName, newName, models string) string {
-	return fmt.Sprintf("Table %s is created in the same plan. If it replaces %s, keep the rows with a rename instead:\n  gombit db makemigrations <name> --rename-table %s:%s%s", newName, oldName, oldName, newName, models)
+// renameTableHint tells a dropped table's owner how to keep its rows when a
+// table created in the same plan replaces it. models are the --model /
+// --forget-model flags of the run, already formatted.
+func renameTableHint(s PlanStep, models string) string {
+	switch {
+	case s.renameTo != "":
+		return fmt.Sprintf("Table %s is created in the same plan with the same columns. If it replaces %s, keep the rows with a rename instead:\n  gombit db makemigrations <name> --rename-table %s:%s%s", s.renameTo, s.Table, s.Table, s.renameTo, models)
+	case len(s.createdInPlan) > 0:
+		return fmt.Sprintf("The same plan creates %s. If one of them replaces %s, keep the rows with a table rename, then --rename any column that changed name:\n  gombit db makemigrations <name> --rename-table %s:<new_table>%s\nIf %s is really going away, acknowledge the drop with --allow drop_table:%s.", strings.Join(s.createdInPlan, ", "), s.Table, s.Table, models, s.Table, s.Table)
+	}
+	return ""
 }
 
-// pairRenames finds constraints dropped and re-added under a new name with the
-// same definition: GORM derives index and foreign key names from the table, so
-// a renamed table shows its keys that way. renamedFrom maps the re-adding
-// change to the old name; renamedAway marks the matching drop.
+// pairRenames finds constraints dropped and re-added under a new name with
+// the same definition: GORM derives index and foreign key names from the
+// table, so a renamed table shows its keys that way. It pairs only an exact
+// definition (columns, order, direction, prefixes, predicate, nulls
+// handling, every attribute), because re-creating anything stricter can
+// reject rows the old one accepted; those fall through to the Add*
+// classifiers. renamedFrom maps the re-adding change to the old name;
+// renamedAway marks the matching drop.
 func pairRenames(changes []schema.Change) (renamedFrom map[schema.Change]string, renamedAway map[schema.Change]bool) {
 	renamedFrom, renamedAway = map[schema.Change]string{}, map[schema.Change]bool{}
-	drops := map[string][]schema.Change{}
+	var drops []schema.Change
 	for _, c := range changes {
-		if sig, ok := dropSignature(c); ok {
-			drops[sig] = append(drops[sig], c)
+		switch c.(type) {
+		case *schema.DropIndex, *schema.DropForeignKey, *schema.DropCheck:
+			drops = append(drops, c)
 		}
 	}
 	for _, c := range changes {
-		sig, ok := addSignature(c)
-		if !ok || len(drops[sig]) == 0 {
-			continue
+		for _, d := range drops {
+			if !renamedAway[d] && sameDefinition(d, c) {
+				renamedAway[d] = true
+				renamedFrom[c] = constraintName(d)
+				break
+			}
 		}
-		d := drops[sig][0]
-		drops[sig] = drops[sig][1:]
-		renamedAway[d] = true
-		renamedFrom[c] = constraintName(d)
 	}
 	return renamedFrom, renamedAway
 }
 
-func dropSignature(c schema.Change) (string, bool) {
-	switch c := c.(type) {
+// sameDefinition reports whether add re-creates exactly what drop removes.
+func sameDefinition(drop, add schema.Change) bool {
+	switch d := drop.(type) {
 	case *schema.DropIndex:
-		return indexSignature(c.I), true
+		a, ok := add.(*schema.AddIndex)
+		return ok && sameIndex(d.I, a.I)
 	case *schema.DropForeignKey:
-		return fkSignature(c.F), true
+		a, ok := add.(*schema.AddForeignKey)
+		return ok && fkSignature(d.F) == fkSignature(a.F)
 	case *schema.DropCheck:
-		return "check|" + c.C.Expr, true
+		a, ok := add.(*schema.AddCheck)
+		return ok && d.C.Expr == a.C.Expr && attrsEqual(d.C.Attrs, a.C.Attrs)
 	}
-	return "", false
+	return false
 }
 
-func addSignature(c schema.Change) (string, bool) {
-	switch c := c.(type) {
-	case *schema.AddIndex:
-		return indexSignature(c.I), true
-	case *schema.AddForeignKey:
-		return fkSignature(c.F), true
-	case *schema.AddCheck:
-		return "check|" + c.C.Expr, true
+func sameIndex(a, b *schema.Index) bool {
+	if a.Unique != b.Unique || len(a.Parts) != len(b.Parts) || !attrsEqual(a.Attrs, b.Attrs) {
+		return false
 	}
-	return "", false
+	for i := range a.Parts {
+		pa, pb := a.Parts[i], b.Parts[i]
+		if pa.Desc != pb.Desc || !reflect.DeepEqual(pa.X, pb.X) || !attrsEqual(pa.Attrs, pb.Attrs) {
+			return false
+		}
+		if (pa.C == nil) != (pb.C == nil) || (pa.C != nil && pa.C.Name != pb.C.Name) {
+			return false
+		}
+	}
+	return true
 }
 
-func indexSignature(i *schema.Index) string {
-	parts := make([]string, 0, len(i.Parts))
-	for _, p := range i.Parts {
-		switch {
-		case p.C != nil:
-			parts = append(parts, p.C.Name)
-		case p.X != nil:
-			parts = append(parts, fmt.Sprintf("expr:%v", p.X))
-		}
-		if p.Desc {
-			parts[len(parts)-1] += " desc"
-		}
+// attrsEqual compares attribute lists (a predicate, NULLS NOT DISTINCT, a
+// prefix length, an index type, ...) by value; nil and empty are equal.
+func attrsEqual(a, b []schema.Attr) bool {
+	if len(a) == 0 && len(b) == 0 {
+		return true
 	}
-	return fmt.Sprintf("index|%v|%s", i.Unique, strings.Join(parts, ","))
+	return reflect.DeepEqual(a, b)
 }
 
 func fkSignature(f *schema.ForeignKey) string {
@@ -1055,21 +1069,40 @@ func renameCandidates(dropped *schema.Column, added []*schema.Column) []string {
 	return out
 }
 
-// tableRenameCandidate returns a table created in the same plan that shares a
-// non-bookkeeping column with the dropped table.
+// tableRenameCandidate returns the one table created in the same plan that
+// holds every non-bookkeeping column of the dropped table with the same type.
+// It returns "" when none or more than one does, or when the dropped table has
+// only bookkeeping columns: then nothing identifies the rename.
 func tableRenameCandidate(dropped *schema.Table, added []*schema.Table) string {
 	bookkeeping := map[string]bool{"id": true, "created_at": true, "updated_at": true, "deleted_at": true}
-	for _, t := range added {
-		for _, c := range dropped.Columns {
-			if bookkeeping[c.Name] {
-				continue
-			}
-			if _, ok := t.Column(c.Name); ok {
-				return t.Name
-			}
+	var cols []*schema.Column
+	for _, c := range dropped.Columns {
+		if !bookkeeping[c.Name] {
+			cols = append(cols, c)
 		}
 	}
-	return ""
+	if len(cols) == 0 {
+		return ""
+	}
+	match := ""
+	for _, t := range added {
+		all := true
+		for _, c := range cols {
+			tc, ok := t.Column(c.Name)
+			if !ok || typeString(tc) != typeString(c) {
+				all = false
+				break
+			}
+		}
+		if !all {
+			continue
+		}
+		if match != "" {
+			return "" // ambiguous
+		}
+		match = t.Name
+	}
+	return match
 }
 
 func indexColumns(i *schema.Index) []string {

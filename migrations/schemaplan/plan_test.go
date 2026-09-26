@@ -1359,3 +1359,142 @@ func TestTableRenameSyncOnPostgresAndMySQL(t *testing.T) {
 		})
 	}
 }
+
+// TestStricterIndexUnderANewNameIsNotARename: a drop and an add pair as a
+// rename only when the definition is identical. A dropped predicate, NULLS NOT
+// DISTINCT, or a longer prefix can reject rows the old index accepted.
+func TestStricterIndexUnderANewNameIsNotARename(t *testing.T) {
+	cases := []struct {
+		name     string
+		driver   config.DatabaseDriver
+		schema   string
+		strType  string
+		from, to string
+	}{
+		{
+			name: "postgres predicate dropped", driver: config.DatabaseDriverPostgres, schema: "public", strType: "text",
+			from: "  index \"idx_users_email_active\" {\n    unique  = true\n    columns = [column.email]\n    where   = \"(deleted_at IS NULL)\"\n  }\n",
+			to:   "  index \"idx_users_email\" {\n    unique  = true\n    columns = [column.email]\n  }\n",
+		},
+		{
+			name: "sqlite predicate dropped", driver: config.DatabaseDriverSQLite, schema: "main", strType: "text",
+			from: "  index \"idx_users_email_active\" {\n    unique  = true\n    columns = [column.email]\n    where   = \"deleted_at IS NULL\"\n  }\n",
+			to:   "  index \"idx_users_email\" {\n    unique  = true\n    columns = [column.email]\n  }\n",
+		},
+		{
+			name: "postgres nulls not distinct", driver: config.DatabaseDriverPostgres, schema: "public", strType: "text",
+			from: "  index \"idx_users_email_a\" {\n    unique  = true\n    columns = [column.email]\n  }\n",
+			to:   "  index \"idx_users_email\" {\n    unique         = true\n    columns        = [column.email]\n    nulls_distinct = false\n  }\n",
+		},
+		{
+			name: "mysql prefix to the full column", driver: config.DatabaseDriverMySQL, schema: "dev", strType: "varchar(255)",
+			from: "  index \"idx_users_email_a\" {\n    unique = true\n    on {\n      column = column.email\n      prefix = 20\n    }\n  }\n",
+			to:   "  index \"idx_users_email\" {\n    unique  = true\n    columns = [column.email]\n  }\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			build := func(index string) *schema.Realm {
+				ts := "timestamp"
+				if tc.driver == config.DatabaseDriverSQLite {
+					ts = "datetime"
+				}
+				hcl := fmt.Sprintf("table \"users\" {\n  schema = schema.%s\n  column \"id\" {\n    null = false\n    type = bigint\n  }\n  column \"email\" {\n    null = true\n    type = %s\n  }\n  column \"deleted_at\" {\n    null = true\n    type = %s\n  }\n  primary_key {\n    columns = [column.id]\n  }\n%s}\nschema %q {}\n", tc.schema, tc.strType, ts, index, tc.schema)
+				r := &schema.Realm{}
+				if err := evalHCL(tc.driver, []byte(hcl), r); err != nil {
+					t.Fatalf("eval: %v\n%s", err, hcl)
+				}
+				return r
+			}
+			changes, err := differ(tc.driver).RealmDiff(build(tc.from), build(tc.to))
+			if err != nil {
+				t.Fatal(err)
+			}
+			steps := stepsByID(classifyChanges(tc.driver, changes))
+			if s, ok := steps["add_unique:users.idx_users_email"]; !ok || s.Severity != SeverityUnsafe {
+				t.Fatalf("steps = %v, want add_unique:users.idx_users_email unsafe (no rename)", steps)
+			}
+			for id := range steps {
+				if strings.HasPrefix(id, "rename_") {
+					t.Fatalf("stricter index reported as %s", id)
+				}
+			}
+		})
+	}
+}
+
+func TestCheckRenameRequiresSameAttributes(t *testing.T) {
+	tbl := schema.NewTable("items")
+	type enforced struct{ schema.Attr }
+	drop := &schema.DropCheck{C: &schema.Check{Name: "chk_old", Expr: "(qty > 0)", Attrs: []schema.Attr{&enforced{}}}}
+	add := &schema.AddCheck{C: &schema.Check{Name: "chk_new", Expr: "(qty > 0)"}}
+	steps := stepsByID(classifyTable(config.DatabaseDriverMySQL, &schema.ModifyTable{T: tbl, Changes: []schema.Change{drop, add}}))
+	if s := steps["add_check:items.chk_new"]; s.Severity != SeverityUnsafe {
+		t.Fatalf("steps = %v, want add_check unsafe when the attributes differ", steps)
+	}
+	same := &schema.DropCheck{C: &schema.Check{Name: "chk_old", Expr: "(qty > 0)"}}
+	steps = stepsByID(classifyTable(config.DatabaseDriverMySQL, &schema.ModifyTable{T: tbl, Changes: []schema.Change{same, add}}))
+	if s := steps["rename_check:items.chk_new"]; s.Severity != SeveritySafe {
+		t.Fatalf("steps = %v, want rename_check safe for an identical check", steps)
+	}
+}
+
+// TestDroppedTableRenameHeuristic: the exact --rename-table command is offered
+// only for a single table that holds every non-bookkeeping column with the
+// same type, and --forget-model acknowledges a drop only when the plan
+// creates no table at all.
+func TestDroppedTableRenameHeuristic(t *testing.T) {
+	table := func(name string, cols ...string) string {
+		var b strings.Builder
+		fmt.Fprintf(&b, "table %q {\n  schema = schema.main\n  column \"id\" {\n    null = false\n    type = integer\n  }\n", name)
+		for _, c := range cols {
+			fmt.Fprintf(&b, "  column %q {\n    null = false\n    type = text\n  }\n", c)
+		}
+		b.WriteString("  primary_key {\n    columns = [column.id]\n  }\n}\n")
+		return b.String()
+	}
+	forget := []migrations.Model{{ImportPath: "example.com/app/internal/product", TypeName: "Product"}}
+	cases := []struct {
+		name      string
+		current   string
+		desired   string
+		exact     string // the exact --rename-table target, or ""
+		generic   bool   // the hint lists the created tables
+		forgetAck bool
+	}{
+		{"one shared column is not a rename", table("products", "name", "price"), table("coupons", "name", "code"), "", true, false},
+		{"model and column renamed together", table("products", "name"), table("items", "title"), "", true, false},
+		{"two tables match", table("products", "name"), table("items", "name") + table("goods", "name"), "", true, false},
+		{"bookkeeping columns only", table("products"), table("items"), "", true, false},
+		{"exact match", table("products", "name", "price"), table("items", "name", "price", "stock"), "items", false, false},
+		{"pure retirement", table("products", "name"), "", "", false, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			plan, err := Build(migrations.Inspection{
+				Driver:       config.DatabaseDriverSQLite,
+				Current:      []byte(tc.current + "schema \"main\" {}\n"),
+				Desired:      []byte(tc.desired + "schema \"main\" {}\n"),
+				ForgetModels: forget,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			drop := stepsByID(plan.Steps)["drop_table:products"]
+			exactCmd := "--rename-table products:" + tc.exact
+			if tc.exact != "" && !strings.Contains(drop.Hint, exactCmd+" --forget-model") {
+				t.Errorf("hint = %q, want %q", drop.Hint, exactCmd)
+			}
+			if tc.exact == "" && strings.Contains(drop.Hint, "with the same columns") {
+				t.Errorf("hint = %q, want no exact rename suggestion", drop.Hint)
+			}
+			if tc.generic != strings.Contains(drop.Hint, "--rename-table products:<new_table>") {
+				t.Errorf("hint = %q, generic suggestion want %v", drop.Hint, tc.generic)
+			}
+			plan.Acknowledge(nil)
+			if got := stepsByID(plan.Steps)["drop_table:products"].Acknowledged; got != tc.forgetAck {
+				t.Errorf("--forget-model acknowledged the drop = %v, want %v", got, tc.forgetAck)
+			}
+		})
+	}
+}

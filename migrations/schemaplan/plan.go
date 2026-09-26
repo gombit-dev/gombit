@@ -53,8 +53,8 @@ func Build(in migrations.Inspection) (SchemaPlan, error) {
 	}
 	steps := append([]PlanStep{}, classifyChanges(in.Driver, changes)...)
 	for i := range steps {
-		if steps[i].renameTo != "" {
-			steps[i].Hint = renameTableHint(steps[i].Table, steps[i].renameTo, modelFlags(in))
+		if steps[i].Code == StepDropTable {
+			steps[i].Hint = renameTableHint(steps[i], modelFlags(in))
 		}
 	}
 	return SchemaPlan{
@@ -98,9 +98,10 @@ func (p *SchemaPlan) Acknowledge(allow []string) (unmatched []string) {
 			s.Acknowledged = true
 		}
 		// A forgotten model's table drop is what --forget-model asks for,
-		// unless a table created in the same plan looks like its rename: then
-		// the drop loses the rows the rename would keep, so it needs --allow.
-		if s.Code == StepDropTable && p.forgottenTables[s.Table] && s.renameTo == "" {
+		// but only when the plan creates no table: any new table may be its
+		// rename, whose rows the drop would lose, so then it needs
+		// --rename-table or an explicit --allow.
+		if s.Code == StepDropTable && p.forgottenTables[s.Table] && len(s.createdInPlan) == 0 {
 			s.Acknowledged = true
 		}
 	}
