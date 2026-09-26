@@ -196,11 +196,12 @@ Closed field types: `string`, `text`, `integer`, `float`, `decimal`,
 `boolean`, `datetime`, `date`, `uuid`, `json`, `relation`. These strings are
 the admin projection of the shared vocabulary in [fields.md](fields.md).
 
-Relation `kind` is `belongs_to`, `has_many`, or `many_to_many`. **`belongs_to`**
-is stored as the foreign key on create/update; auto-derivation (`FieldsFrom`)
-renders the FK column as a relation field (target `slug` = the related table,
-label = the field name of its `name` column when present) so the SPA shows a
-picker instead of a
+Relation `kind` is `belongs_to`, `one_to_one`, `has_many`, or `many_to_many`.
+**`belongs_to`** and **`one_to_one`** are stored as the foreign key on
+create/update. `one_to_one` is the unique foreign key. Auto-derivation
+(`FieldsFrom`) renders the FK column as a relation field (target `slug` = the
+related table, label = the field name of its `name` column when present) so
+the SPA shows a picker instead of a
 bare integer, and the picker submits the selected primary key. **`has_many` is
 read-only**: auto-derivation emits it, and when it maps to a real GORM has_many
 association the list/detail responses preload it and return the related

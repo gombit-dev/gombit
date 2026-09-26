@@ -31,6 +31,9 @@ func FieldsFrom(model any) ([]Field, error) {
 	if err != nil {
 		return nil, err
 	}
+	// UniqueIndex stays empty until indexes are parsed. one_to_one is that
+	// single-column unique index, not the raw uniqueIndex tag key.
+	sch.ParseIndexes()
 	// Foreign-key columns of belongs_to relationships become a relation field
 	// (a picker), not a bare integer input (#223).
 	belongsToFK := belongsToByFK(sch)
@@ -59,7 +62,7 @@ func FieldsFrom(model any) ([]Field, error) {
 				ReadOnly: readOnly,
 				Column:   sf.DBName,
 				Related: &Relation{
-					Kind:       RelBelongsTo,
+					Kind:       relationKindForFK(sf),
 					Slug:       rel.FieldSchema.Table,
 					LabelField: labelFieldFor(rel.FieldSchema),
 				},
@@ -149,6 +152,21 @@ func jsonFieldName(sf *schema.Field) string {
 
 func inferFieldType(sf *schema.Field) FieldType {
 	return FieldType(field.KindFromGo(sf.FieldType, string(sf.DataType)).AdminWire())
+}
+
+// relationKindForFK is one_to_one when the foreign key is a single unique
+// column, and belongs_to otherwise. Uniqueness is what GORM computed in
+// ParseIndexes: the unique tag, or a single-column unique index. A composite
+// uniqueIndex is not a unique column, and the raw UNIQUEINDEX tag key is not
+// consulted.
+func relationKindForFK(sf *schema.Field) string {
+	if sf == nil {
+		return RelBelongsTo
+	}
+	if sf.Unique || sf.UniqueIndex != "" {
+		return RelOneToOne
+	}
+	return RelBelongsTo
 }
 
 // belongsToByFK maps each belongs_to foreign-key column (on this schema) to its

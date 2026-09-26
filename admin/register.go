@@ -243,7 +243,7 @@ func validateFieldRefs(opts Options, implicit map[string]implicitColumn) error {
 			if f.Related == nil {
 				return fmt.Errorf("admin: field %q is a relation without related", f.Name)
 			}
-			if f.Related.Kind != RelBelongsTo && f.Related.Kind != RelHasMany && f.Related.Kind != RelManyToMany {
+			if f.Related.Kind != RelBelongsTo && f.Related.Kind != RelHasMany && f.Related.Kind != RelManyToMany && f.Related.Kind != RelOneToOne {
 				return fmt.Errorf("admin: field %q has unknown relation kind %q", f.Name, f.Related.Kind)
 			}
 			if strings.TrimSpace(f.Related.Slug) == "" {

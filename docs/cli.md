@@ -338,8 +338,10 @@ into generated imports.
 Frontend pages are React + TypeScript (list/table + React Hook Form create)
 under `frontend/src/<feature>/`. They import types from
 `frontend/src/api/generated` — no hand-written API DTOs — and map D10
-`error.fields` through `frontend/src/api/formErrors.ts`. Integer fields
-coerce a cleared number input to `0` (`setValueAs`), not JSON `null`. A generated
+`error.fields` through `frontend/src/api/formErrors.ts`. A non-pointer
+integer coerces a cleared number input to `0` (`setValueAs`). A pointer
+number (`*uint` and any other `*T`) submits JSON `null`, which is what that
+Go type accepts. A generated
 `frontend/src/resources.tsx` registry is the React Router registration
 point (not regex-patched `main.tsx`). When `gombit.yaml` has `ui: mui`,
 list/form pages use MUI Table and TextField instead of raw HTML. Generated
@@ -367,7 +369,8 @@ model-first generator yet (see above) and are rejected — use a `string`.
 | `decimal` | `types.Decimal` (wraps `shopspring/decimal`) | `decimal(19,4)`; JSON string, exact — no float rounding |
 | `decimal(p,s)` | `types.Decimal` | `decimal(p,s)`, e.g. `decimal(10,2)` |
 | `time` | `time.Time` | RFC3339 date-time in JSON |
-| `belongs_to:Target` | FK `TargetID uint` + `Target target.Target` | DTO exposes `target_id`; admin renders a picker |
+| `belongs_to:Target` | FK `TargetID uint` + `Target target.Target` | DTO exposes `target_id`; admin renders a picker. `nullable` makes the FK `*uint`. `on_delete` is `restrict` (the default), `cascade`, or `set_null` |
+| `one_to_one:Target` | unique FK `TargetID uint` + `Target target.Target` | same wire as `belongs_to`; the foreign key is unique |
 | `has_many:Target` | `[]target.Target` | model-only, read via the admin; the child must carry the parent FK |
 | `many_to_many:Target` | `[]target.Target` (`many2many:` join) | model-only, edited via the admin |
 
@@ -389,12 +392,17 @@ read-only. A `has_many` child model must carry the parent foreign key itself
 (e.g. `RentalID`); the generator does not edit the child (that would be an
 import cycle).
 
-Self-referential relations (a target equal to the resource itself, e.g.
-`parent:belongs_to:Category` on `Category`) are not supported yet and are
-rejected at parse time: a self-referential `belongs_to` needs a nullable foreign
-key so a tree root stores `NULL` rather than `0` (which references no row and
-fails the self-FK), and `has_many` / `many_to_many` onto the same model need
-explicit join keys. Point relations at a different feature-package for now.
+A self-referential `belongs_to` or `one_to_one` is allowed when it is
+`nullable`, so a tree root stores `NULL` rather than `0`:
+
+```sh
+parent:belongs_to:Category,nullable,on_delete=set_null
+```
+
+The association is a pointer (`Parent *Category`). A value field of the
+enclosing struct would not compile.
+`on_delete=set_null` requires `nullable`. `has_many` and `many_to_many` onto
+the same model are still rejected: they need explicit join keys.
 
 Example:
 

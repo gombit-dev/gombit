@@ -483,7 +483,7 @@ function widgetSlotProps(field: FieldMeta) {
 
 function fieldLabel(field: FieldMeta): string {
   if (field.type === "relation" && field.related) {
-    if (field.related.kind === "belongs_to") {
+    if (field.related.kind === "belongs_to" || field.related.kind === "one_to_one") {
       return `${field.name} (${field.related.slug})`;
     }
     return `${field.name} (${field.related.kind})`;
@@ -511,7 +511,7 @@ function helperText(field: FieldMeta): string | undefined {
   if (field.type === "json") {
     return "JSON object or array";
   }
-  if (field.type === "relation" && field.related?.kind === "belongs_to") {
+  if (isBelongsTo(field) && field.related) {
     return `Foreign key for ${field.related.slug}`;
   }
   if (isHasMany(field)) {

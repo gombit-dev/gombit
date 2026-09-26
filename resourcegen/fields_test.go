@@ -318,9 +318,8 @@ func TestParseRelationErrors(t *testing.T) {
 
 func TestParseRelationSamePackage(t *testing.T) {
 	t.Parallel()
-	// Self-referential relations are rejected: a belongs_to onto the same model
-	// would need a nullable FK (a uint root stores 0, which fails the self-FK),
-	// and has_many / many_to_many need explicit join keys. All three are refused.
+	// A non-nullable self belongs_to would store 0 for a tree root, which
+	// fails the self-FK. has_many and many_to_many still need join keys.
 	for _, spec := range []string{
 		"parent:belongs_to:Category",
 		"children:has_many:Category",
@@ -330,6 +329,17 @@ func TestParseRelationSamePackage(t *testing.T) {
 			t.Fatalf("parseFields(%q) in its own package error = nil, want a self-reference rejection", spec)
 		}
 	}
+	self, err := parseFields([]string{"parent:belongs_to:Category,nullable,on_delete=set_null"}, "category")
+	if err != nil {
+		t.Fatalf("nullable self belongs_to: %v", err)
+	}
+	if self[0].GoType != "*Category" || !self[0].Nullable || self[0].OnDelete != "SET NULL" || !self[0].Self {
+		t.Fatalf("self belongs_to = %+v", self[0])
+	}
+	lines := modelFieldLines(self[0], "category")
+	if !strings.Contains(lines, "ParentID *uint") || !strings.Contains(lines, "Parent *Category") || !strings.Contains(lines, "OnDelete:SET NULL") {
+		t.Fatalf("self model lines:\n%s", lines)
+	}
 	// The same target from a different package is fine and stays qualified.
 	other, err := parseFields([]string{"parent:belongs_to:Category"}, "product")
 	if err != nil {
@@ -337,6 +347,37 @@ func TestParseRelationSamePackage(t *testing.T) {
 	}
 	if other[0].GoType != "category.Category" {
 		t.Fatalf("cross-pkg belongs_to GoType = %q, want category.Category", other[0].GoType)
+	}
+}
+
+func TestOneToOneAndDeleteRule(t *testing.T) {
+	t.Parallel()
+	fields, err := parseFields([]string{
+		"profile:one_to_one:Profile",
+		"author:belongs_to:Author,nullable",
+	}, "account")
+	if err != nil {
+		t.Fatalf("parseFields: %v", err)
+	}
+	profile := modelFieldLines(fields[0], "account")
+	if !strings.Contains(profile, "ProfileID uint `gorm:\"uniqueIndex\"") || !strings.Contains(profile, "OnDelete:RESTRICT") {
+		t.Fatalf("one_to_one lines:\n%s", profile)
+	}
+	author := modelFieldLines(fields[1], "account")
+	if !strings.Contains(author, "AuthorID *uint") || !strings.Contains(author, "OnDelete:RESTRICT") {
+		t.Fatalf("nullable belongs_to lines:\n%s", author)
+	}
+	if _, err := parseFields([]string{"author:belongs_to:Author,on_delete=set_null"}, "account"); err == nil {
+		t.Fatal("set_null without nullable was accepted")
+	}
+	if _, err := parseFields([]string{"author:belongs_to:Author,on_delete=nope"}, "account"); err == nil {
+		t.Fatal("unknown on_delete was accepted")
+	}
+	if _, err := parseFields([]string{"comments:has_many:Comment,on_delete=cascade"}, "account"); err == nil {
+		t.Fatal("on_delete on has_many was accepted")
+	}
+	if _, err := parseFields([]string{"tags:many_to_many:Tag,nullable"}, "account"); err == nil {
+		t.Fatal("nullable on many_to_many was accepted")
 	}
 }
 
