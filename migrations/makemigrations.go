@@ -50,6 +50,11 @@ type Options struct {
 	// `atlas migrate diff` would generate for a field rename. It is not combined
 	// with model/schema diffing in the same run.
 	Renames []Rename
+	// TableRenames, like Renames, makes this a rename migration: Gombit emits
+	// a native ALTER TABLE ... RENAME TO, applied before the column renames.
+	// It may name the models the rename swaps (Models / ForgetModels): they
+	// update the registry, and no model diff runs.
+	TableRenames []TableRename
 	// Gate, when set, may refuse the migration after inspecting the change
 	// (see Gate). Nil writes whatever `atlas migrate diff` produces.
 	Gate   Gate
@@ -104,7 +109,7 @@ func MakeMigrations(ctx context.Context, opts Options) error {
 
 	// A rename is a focused, data-preserving operation with its own SQL path; it
 	// does not diff models, so it never runs alongside model add/drop in one call.
-	if len(opts.Renames) > 0 {
+	if len(opts.Renames) > 0 || len(opts.TableRenames) > 0 {
 		return makeRenameMigration(ctx, opts)
 	}
 
@@ -213,16 +218,16 @@ func validateOptions(opts Options) error {
 			return err
 		}
 	}
-	if len(opts.Renames) > 0 {
-		// A rename generates SQL directly rather than diffing models, so mixing it
-		// with --model/--forget-model in one call would silently ignore them.
-		if len(opts.Models) > 0 || len(opts.ForgetModels) > 0 {
-			return errors.New("migrations: --rename cannot be combined with --model or --forget-model; generate the rename on its own")
+	if len(opts.Renames) > 0 || len(opts.TableRenames) > 0 {
+		// A rename generates SQL directly rather than diffing models. A column
+		// rename keeps its model, so --model/--forget-model beside it would be
+		// silently ignored. A table rename is a model rename: the models it
+		// names swap in the registry.
+		if len(opts.TableRenames) == 0 && (len(opts.Models) > 0 || len(opts.ForgetModels) > 0) {
+			return errors.New("migrations: --rename cannot be combined with --model or --forget-model; generate the rename on its own (a table rename takes them, to swap the renamed model in the registry)")
 		}
-		for _, r := range opts.Renames {
-			if err := validateRename(r); err != nil {
-				return err
-			}
+		if err := validateRenameSet(opts.TableRenames, opts.Renames); err != nil {
+			return err
 		}
 	}
 	return nil

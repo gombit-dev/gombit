@@ -15,6 +15,7 @@ import (
 	"ariga.io/atlas/sql/schema"
 
 	"github.com/gombit-dev/gombit/config"
+	"github.com/gombit-dev/gombit/database"
 	"github.com/gombit-dev/gombit/migrations"
 )
 
@@ -431,7 +432,8 @@ func TestClassifyForeignKeys(t *testing.T) {
 		&schema.AddColumn{C: child.Columns[1]},
 		&schema.AddForeignKey{F: existing},
 		&schema.AddForeignKey{F: fresh},
-		&schema.DropForeignKey{F: schema.NewForeignKey("fk_old").AddColumns(child.Columns[0]).SetRefTable(parent).AddRefColumns(parent.Columns[0])},
+		// A different delete rule, so this is a real drop, not fk_owner renamed.
+		&schema.DropForeignKey{F: schema.NewForeignKey("fk_old").AddColumns(child.Columns[0]).SetRefTable(parent).AddRefColumns(parent.Columns[0]).SetOnDelete(schema.Cascade)},
 	}}))
 	if s := steps["add_foreign_key:items.fk_owner"]; s.Severity != SeverityUnsafe {
 		t.Errorf("FK over an existing column = %+v, want unsafe (orphans fail it)", s)
@@ -1093,5 +1095,267 @@ func TestKeyBytesIsAnUpperBound(t *testing.T) {
 		if n != tc.bytes || ok != tc.ok {
 			t.Errorf("%s: keyBytes = %d, %v; want %d, %v", tc.name, n, ok, tc.bytes, tc.ok)
 		}
+	}
+}
+
+// TestRenamedConstraintsAreSafe: GORM derives index and foreign key names from
+// the table, so after a table rename the keys come back under new names with
+// the same definition. The rows already satisfy them.
+func TestRenamedConstraintsAreSafe(t *testing.T) {
+	for _, d := range []struct {
+		driver config.DatabaseDriver
+		schema string
+		idType string
+	}{
+		{config.DatabaseDriverSQLite, "main", "integer"},
+		{config.DatabaseDriverPostgres, "public", "bigint"},
+		{config.DatabaseDriverMySQL, "dev", "bigint"},
+	} {
+		t.Run(string(d.driver), func(t *testing.T) {
+			build := func(prefix string) *schema.Realm {
+				hcl := fmt.Sprintf(`table "owners" {
+  schema = schema.%[1]s
+  column "id" {
+    null = false
+    type = %[2]s
+  }
+  primary_key {
+    columns = [column.id]
+  }
+}
+table "items" {
+  schema = schema.%[1]s
+  column "id" {
+    null = false
+    type = %[2]s
+  }
+  column "sku" {
+    null = false
+    type = varchar(64)
+  }
+  column "owner_id" {
+    null = true
+    type = %[2]s
+  }
+  primary_key {
+    columns = [column.id]
+  }
+  foreign_key "fk_%[3]s_owner" {
+    columns     = [column.owner_id]
+    ref_columns = [table.owners.column.id]
+    on_update   = NO_ACTION
+    on_delete   = RESTRICT
+  }
+  index "idx_%[3]s_sku" {
+    unique  = true
+    columns = [column.sku]
+  }
+  index "idx_%[3]s_owner_id" {
+    columns = [column.owner_id]
+  }
+}
+schema %[1]q {}
+`, d.schema, d.idType, prefix)
+				r := &schema.Realm{}
+				if err := evalHCL(d.driver, []byte(hcl), r); err != nil {
+					t.Fatalf("eval: %v", err)
+				}
+				return r
+			}
+			changes, err := differ(d.driver).RealmDiff(build("products"), build("items"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			steps := classifyChanges(d.driver, changes)
+			want := map[string]Severity{
+				"rename_index:items.idx_items_sku":        SeveritySafe,
+				"rename_index:items.idx_items_owner_id":   SeveritySafe,
+				"rename_foreign_key:items.fk_items_owner": SeveritySafe,
+			}
+			switch d.driver {
+			case config.DatabaseDriverSQLite:
+				// SQLite's differ matches foreign keys by definition, not name.
+				delete(want, "rename_foreign_key:items.fk_items_owner")
+			case config.DatabaseDriverMySQL:
+				// MySQL keeps the index that backs a foreign key, so the new
+				// name arrives as a plain (safe) index.
+				delete(want, "rename_index:items.idx_items_owner_id")
+				want["add_index:items.idx_items_owner_id"] = SeveritySafe
+			}
+			assertSteps(t, steps, want)
+		})
+	}
+}
+
+func TestDroppedTableLooksRenamed(t *testing.T) {
+	in := migrations.Inspection{
+		Driver: config.DatabaseDriverSQLite,
+		Current: []byte(`table "products" {
+  schema = schema.main
+  column "id" {
+    null = false
+    type = integer
+  }
+  column "name" {
+    null = false
+    type = text
+  }
+  primary_key {
+    columns = [column.id]
+  }
+}
+schema "main" {}
+`),
+		Desired: []byte(`table "items" {
+  schema = schema.main
+  column "id" {
+    null = false
+    type = integer
+  }
+  column "name" {
+    null = false
+    type = text
+  }
+  primary_key {
+    columns = [column.id]
+  }
+}
+schema "main" {}
+`),
+		NewModels:    []migrations.Model{{ImportPath: "example.com/app/internal/item", TypeName: "Item"}},
+		ForgetModels: []migrations.Model{{ImportPath: "example.com/app/internal/product", TypeName: "Product"}},
+	}
+	plan, err := Build(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	drop := stepsByID(plan.Steps)["drop_table:products"]
+	want := "gombit db makemigrations <name> --rename-table products:items --model example.com/app/internal/item.Item --forget-model example.com/app/internal/product.Product"
+	if !strings.Contains(drop.Hint, want) {
+		t.Fatalf("drop_table hint = %q, want %q", drop.Hint, want)
+	}
+	// Forgetting Product would acknowledge the products drop, but items looks
+	// like its rename, so dropping the rows still needs an explicit --allow.
+	plan.Acknowledge(nil)
+	if pending := plan.Unacknowledged(); len(pending) != 1 || pending[0].ID != "drop_table:products" {
+		t.Fatalf("Unacknowledged() = %v, want the likely-renamed drop", stepIDs(pending))
+	}
+}
+
+// TestTableRenameWorkflowAtlasCLISQLiteWhenAvailable runs the supported
+// model-rename workflow end to end with the real loader and Atlas: Product
+// (table products) becomes Item (table items), and a stored row survives.
+func TestTableRenameWorkflowAtlasCLISQLiteWhenAvailable(t *testing.T) {
+	atlasBin := os.Getenv("ATLAS_BINARY")
+	if atlasBin == "" {
+		var err error
+		atlasBin, err = exec.LookPath("atlas")
+		if err != nil {
+			t.Skip("Atlas CLI not found; set ATLAS_BINARY to run the real SQLite table-rename test")
+		}
+	}
+	ctx := context.Background()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Dir(filepath.Dir(wd))
+	workDir := t.TempDir()
+	migrationDir := filepath.Join(workDir, "database", "migrations")
+	product := migrations.Model{ImportPath: "github.com/gombit-dev/gombit/migrations/testmodels", TypeName: "Product"}
+	item := migrations.Model{ImportPath: "github.com/gombit-dev/gombit/migrations/testmodels", TypeName: "Item"}
+	base := migrations.Options{WorkDir: root, Driver: config.DatabaseDriverSQLite, MigrationDir: migrationDir, AtlasBinary: atlasBin, Stdout: io.Discard, Stderr: io.Discard}
+
+	// 1. The app starts with Product and a row in products.
+	opts := base
+	opts.Name, opts.Models = "create_products", []migrations.Model{product}
+	if err := migrations.MakeMigrations(ctx, opts); err != nil {
+		t.Fatalf("MakeMigrations(create_products) error = %v", err)
+	}
+	dsn := "file:" + filepath.Join(workDir, "app.db") + "?cache=shared&_fk=1"
+	apply := migrations.ApplyOptions{WorkDir: workDir, MigrationDir: migrationDir, AtlasBinary: atlasBin, Database: config.DatabaseConfig{Driver: config.DatabaseDriverSQLite, DSN: dsn}, Stdout: io.Discard, Stderr: io.Discard}
+	if err := migrations.Migrate(ctx, apply); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+	db, err := database.Open(apply.Database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	if err := db.Exec("INSERT INTO products (name, price) VALUES ('kept', 7)").Error; err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	// 2. Renamed to Item, a plain diff would drop products. --forget-model
+	// does not acknowledge that drop, and the plan names the rename.
+	in, err := migrations.Inspect(ctx, migrations.InspectOptions{WorkDir: root, Driver: config.DatabaseDriverSQLite, MigrationDir: migrationDir, AtlasBinary: atlasBin, Models: []migrations.Model{item}, ForgetModels: []migrations.Model{product}, Stderr: io.Discard})
+	if err != nil {
+		t.Fatalf("Inspect() error = %v", err)
+	}
+	plan, err := Build(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.Acknowledge(nil)
+	drop := stepsByID(plan.Steps)["drop_table:products"]
+	if drop.Acknowledged || !strings.Contains(drop.Hint, "--rename-table products:items") {
+		t.Fatalf("drop_table:products = %+v, want an unacknowledged drop with the --rename-table hint", drop)
+	}
+
+	// 3. The supported path: rename the table and swap the model.
+	opts = base
+	opts.Name, opts.TableRenames = "rename_products", []migrations.TableRename{{Old: "products", New: "items"}}
+	opts.Models, opts.ForgetModels = []migrations.Model{item}, []migrations.Model{product}
+	if err := migrations.MakeMigrations(ctx, opts); err != nil {
+		t.Fatalf("MakeMigrations(--rename-table) error = %v", err)
+	}
+	registered, err := migrations.LoadRegistry(migrationDir)
+	if err != nil || len(registered) != 1 || registered[0] != item {
+		t.Fatalf("registry = %v (%v), want only Item", registered, err)
+	}
+
+	// 4. GORM names Item's index after items; the follow-up migration renames
+	// it, which the gate lets through without --allow.
+	opts = base
+	opts.Name, opts.Gate = "sync_items", Gate(nil, io.Discard)
+	if err := migrations.MakeMigrations(ctx, opts); err != nil {
+		t.Fatalf("MakeMigrations(sync_items) error = %v, want the index rename to pass the gate", err)
+	}
+	in, err = migrations.Inspect(ctx, migrations.InspectOptions{WorkDir: root, Driver: config.DatabaseDriverSQLite, MigrationDir: migrationDir, AtlasBinary: atlasBin, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan, err = Build(in); err != nil || len(plan.Steps) != 0 {
+		t.Fatalf("plan after the rename workflow = %v (%v), want no changes", stepIDs(plan.Steps), err)
+	}
+
+	// 5. The migrations apply, and the row survives under the new table.
+	if err := migrations.Migrate(ctx, apply); err != nil {
+		t.Fatalf("Migrate() after rename error = %v", err)
+	}
+	var name string
+	var price int64
+	if err := db.Raw("SELECT name, price FROM items").Row().Scan(&name, &price); err != nil || name != "kept" || price != 7 {
+		t.Fatalf("items row = %q, %d (%v), want the products row kept", name, price, err)
+	}
+}
+
+// TestTableRenameSyncOnPostgresAndMySQL classifies real `atlas schema inspect`
+// output taken after `ALTER TABLE products RENAME TO items` on PostgreSQL 15
+// and MySQL 8, against the schema GORM declares for the renamed model. Only
+// GORM's index names differ; the sequence and primary key do not surface.
+func TestTableRenameSyncOnPostgresAndMySQL(t *testing.T) {
+	for _, d := range []config.DatabaseDriver{config.DatabaseDriverPostgres, config.DatabaseDriverMySQL} {
+		t.Run(string(d), func(t *testing.T) {
+			in := fixtureInspection(t, d, filepath.Join("rename", string(d)))
+			plan, err := Build(in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertSteps(t, plan.Steps, map[string]Severity{
+				"rename_index:items.idx_items_created_at": SeveritySafe,
+				"rename_index:items.idx_items_sku":        SeveritySafe,
+			})
+		})
 	}
 }

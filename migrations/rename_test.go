@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -71,7 +72,7 @@ func TestRenameSQLPerDriver(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(string(tt.driver), func(t *testing.T) {
-			got := renameSQL(tt.driver, renames)
+			got := renameSQL(tt.driver, nil, renames)
 			if !strings.Contains(got, tt.want) {
 				t.Fatalf("renameSQL(%s) = %q, want it to contain %q", tt.driver, got, tt.want)
 			}
@@ -86,7 +87,7 @@ func TestRenameSQLPerDriver(t *testing.T) {
 }
 
 func TestRenameSQLMultiple(t *testing.T) {
-	got := renameSQL(config.DatabaseDriverPostgres, []Rename{
+	got := renameSQL(config.DatabaseDriverPostgres, nil, []Rename{
 		{Table: "guilds", OldColumn: "name", NewColumn: "title"},
 		{Table: "members", OldColumn: "handle", NewColumn: "username"},
 	})
@@ -306,6 +307,9 @@ func dirSnapshot(t *testing.T, dir string) map[string]string {
 	}
 	out := make(map[string]string, len(entries))
 	for _, e := range entries {
+		if e.IsDir() {
+			continue // downs/: the snapshot is the files Atlas hashes
+		}
 		// #nosec G304 -- test file under the test temp dir
 		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
 		if err != nil {
@@ -392,4 +396,223 @@ func keys(m map[string]string) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+func TestParseTableRename(t *testing.T) {
+	got, err := ParseTableRename(" products : items ")
+	if err != nil || got != (TableRename{Old: "products", New: "items"}) {
+		t.Fatalf("ParseTableRename() = %+v, %v", got, err)
+	}
+	for _, bad := range []string{"products", "products:", ":items", "products:products", "prod-ucts:items", "products:it;ems"} {
+		if _, err := ParseTableRename(bad); err == nil {
+			t.Errorf("ParseTableRename(%q) = nil error, want rejection", bad)
+		}
+	}
+}
+
+func TestParseRenameEqualsForm(t *testing.T) {
+	got, err := ParseRename("products.name=products.title")
+	if err != nil || got != (Rename{Table: "products", OldColumn: "name", NewColumn: "title"}) {
+		t.Fatalf("ParseRename(=) = %+v, %v", got, err)
+	}
+	if _, err := ParseRename("products.name=items.title"); err == nil || !strings.Contains(err.Error(), "--rename-table products:items") {
+		t.Fatalf("ParseRename across tables error = %v, want the --rename-table pointer", err)
+	}
+}
+
+func TestValidateRenameSet(t *testing.T) {
+	tables := []TableRename{{Old: "products", New: "items"}}
+	if err := validateRenameSet(tables, []Rename{{Table: "items", OldColumn: "name", NewColumn: "title"}}); err != nil {
+		t.Fatalf("column rename on the new table name: %v", err)
+	}
+	if err := validateRenameSet(tables, []Rename{{Table: "products", OldColumn: "name", NewColumn: "title"}}); err == nil || !strings.Contains(err.Error(), "use its new name") {
+		t.Fatalf("column rename on the old table name error = %v, want rejection", err)
+	}
+	if err := validateRenameSet([]TableRename{{Old: "a", New: "b"}, {Old: "a", New: "c"}}, nil); err == nil {
+		t.Fatal("renaming one table twice must be rejected")
+	}
+	if err := validateRenameSet([]TableRename{{Old: "a", New: "c"}, {Old: "b", New: "c"}}, nil); err == nil {
+		t.Fatal("renaming two tables to one name must be rejected")
+	}
+}
+
+func TestRenameSQLTablesBeforeColumns(t *testing.T) {
+	got := renameSQL(config.DatabaseDriverPostgres, []TableRename{{Old: "products", New: "items"}}, []Rename{{Table: "items", OldColumn: "name", NewColumn: "title"}})
+	table := strings.Index(got, `ALTER TABLE "products" RENAME TO "items";`)
+	column := strings.Index(got, `ALTER TABLE "items" RENAME COLUMN "name" TO "title";`)
+	if table < 0 || column < 0 || table > column {
+		t.Fatalf("renameSQL() = %q, want the table rename before the column rename", got)
+	}
+	if lite := renameSQL(config.DatabaseDriverSQLite, []TableRename{{Old: "products", New: "items"}}, nil); !strings.Contains(lite, "ALTER TABLE `products` RENAME TO `items`;") {
+		t.Fatalf("renameSQL(sqlite) = %q", lite)
+	}
+}
+
+func TestMakeMigrationsTableRenameSwapsRegistry(t *testing.T) {
+	workDir := t.TempDir()
+	migrationDir := filepath.Join(workDir, "database", "migrations")
+	product := Model{ImportPath: "example.com/app/internal/product", TypeName: "Product"}
+	item := Model{ImportPath: "example.com/app/internal/item", TypeName: "Item"}
+	order := Model{ImportPath: "example.com/app/internal/order", TypeName: "Order"}
+	if err := os.MkdirAll(migrationDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveRegistry(migrationDir, []Model{product, order}); err != nil {
+		t.Fatal(err)
+	}
+	err := MakeMigrations(context.Background(), Options{
+		WorkDir:      workDir,
+		Name:         "rename_products",
+		Driver:       config.DatabaseDriverSQLite,
+		MigrationDir: "database/migrations",
+		AtlasBinary:  "atlas-test",
+		TableRenames: []TableRename{{Old: "products", New: "items"}},
+		Models:       []Model{item},
+		ForgetModels: []Model{product},
+		Stdout:       io.Discard,
+		runner:       &hashRecordingRunner{},
+	})
+	if err != nil {
+		t.Fatalf("MakeMigrations(--rename-table) error = %v", err)
+	}
+	got, err := LoadRegistry(migrationDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || !slices.Contains(got, item) || !slices.Contains(got, order) || slices.Contains(got, product) {
+		t.Fatalf("registry = %v, want Item swapped in for Product and Order kept", got)
+	}
+}
+
+func TestMakeMigrationsTableRenameRejectsUntrackedForget(t *testing.T) {
+	runner := &hashRecordingRunner{}
+	err := MakeMigrations(context.Background(), Options{
+		WorkDir:      t.TempDir(),
+		Name:         "rename_products",
+		Driver:       config.DatabaseDriverSQLite,
+		MigrationDir: "database/migrations",
+		AtlasBinary:  "atlas-test",
+		TableRenames: []TableRename{{Old: "products", New: "items"}},
+		ForgetModels: []Model{{ImportPath: "example.com/app/internal/product", TypeName: "Product"}},
+		Stdout:       io.Discard,
+		runner:       runner,
+	})
+	if err == nil || !strings.Contains(err.Error(), "not tracked") {
+		t.Fatalf("MakeMigrations() error = %v, want the untracked --forget-model rejection", err)
+	}
+	if runner.ran {
+		t.Fatal("atlas must not run when the registry swap is rejected")
+	}
+}
+
+func TestMakeMigrationsTableRenameHashFailureRestoresRegistry(t *testing.T) {
+	workDir := t.TempDir()
+	migrationDir := filepath.Join(workDir, "database", "migrations")
+	writeFile(t, filepath.Join(migrationDir, "20260101000000_create_products.sql"), "CREATE TABLE products (id INTEGER PRIMARY KEY);")
+	writeFile(t, filepath.Join(migrationDir, "atlas.sum"), "h1:original\n20260101000000_create_products.sql h1:abc\n")
+	product := Model{ImportPath: "example.com/app/internal/product", TypeName: "Product"}
+	if err := SaveRegistry(migrationDir, []Model{product}); err != nil {
+		t.Fatal(err)
+	}
+	before := dirSnapshot(t, migrationDir)
+	err := MakeMigrations(context.Background(), Options{
+		WorkDir:      workDir,
+		Name:         "rename_products",
+		Driver:       config.DatabaseDriverSQLite,
+		MigrationDir: "database/migrations",
+		AtlasBinary:  "atlas-test",
+		TableRenames: []TableRename{{Old: "products", New: "items"}},
+		Models:       []Model{{ImportPath: "example.com/app/internal/item", TypeName: "Item"}},
+		ForgetModels: []Model{product},
+		Stdout:       io.Discard,
+		runner:       &failingHashRunner{dir: migrationDir},
+	})
+	if err == nil {
+		t.Fatal("MakeMigrations() error = nil, want the hash failure")
+	}
+	after := dirSnapshot(t, migrationDir)
+	if len(after) != len(before) {
+		t.Fatalf("migration dir after failed hash = %v, want %v", keys(after), keys(before))
+	}
+	for name, content := range before {
+		if after[name] != content {
+			t.Fatalf("%s changed after a failed hash:\n%s\nwant\n%s", name, after[name], content)
+		}
+	}
+}
+
+func TestValidateRenameSetRejectsChains(t *testing.T) {
+	for _, tables := range [][]TableRename{
+		{{Old: "a", New: "b"}, {Old: "b", New: "c"}},
+		{{Old: "a", New: "b"}, {Old: "b", New: "a"}},
+	} {
+		if err := validateRenameSet(tables, nil); err == nil || !strings.Contains(err.Error(), "separate migrations") {
+			t.Errorf("validateRenameSet(%v) = %v, want the chain rejection", tables, err)
+		}
+	}
+}
+
+func TestRenameDownSQLIsTheInverse(t *testing.T) {
+	got := renameDownSQL(config.DatabaseDriverSQLite,
+		[]TableRename{{Old: "products", New: "items"}},
+		[]Rename{{Table: "items", OldColumn: "name", NewColumn: "title"}, {Table: "items", OldColumn: "cost", NewColumn: "price"}})
+	want := "ALTER TABLE `items` RENAME COLUMN `price` TO `cost`;\n" +
+		"ALTER TABLE `items` RENAME COLUMN `title` TO `name`;\n" +
+		"ALTER TABLE `items` RENAME TO `products`;\n"
+	if got != want {
+		t.Fatalf("renameDownSQL() =\n%s\nwant\n%s", got, want)
+	}
+}
+
+// TestTableRenameMigratesAndRollsBackSQLite applies a table + column rename to
+// a real SQLite database (the fake Atlas executes the SQL), then rolls it back
+// with the generated down, and checks the row survives both ways.
+func TestTableRenameMigratesAndRollsBackSQLite(t *testing.T) {
+	workDir := t.TempDir()
+	migrationDir := filepath.Join(workDir, "database", "migrations")
+	writeFile(t, filepath.Join(migrationDir, "20260101000000_create_products.sql"),
+		"CREATE TABLE products (id INTEGER PRIMARY KEY, name TEXT NOT NULL);")
+	dsn := "file:" + filepath.Join(workDir, "app.db") + "?cache=shared&_fk=1"
+	cfg := config.DatabaseConfig{Driver: config.DatabaseDriverSQLite, DSN: dsn}
+	apply := ApplyOptions{WorkDir: workDir, MigrationDir: "database/migrations", AtlasBinary: "atlas", Database: cfg, Stdout: io.Discard, Stderr: io.Discard, runner: &applyFakeAtlas{t: t}}
+	if err := Migrate(context.Background(), apply); err != nil {
+		t.Fatalf("Migrate(create) error = %v", err)
+	}
+	db, err := database.Open(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	if err := db.Exec("INSERT INTO products (name) VALUES ('Alpha')").Error; err != nil {
+		t.Fatal(err)
+	}
+
+	if err := MakeMigrations(context.Background(), Options{
+		WorkDir:      workDir,
+		Name:         "rename_products",
+		Driver:       config.DatabaseDriverSQLite,
+		MigrationDir: "database/migrations",
+		AtlasBinary:  "atlas-test",
+		TableRenames: []TableRename{{Old: "products", New: "items"}},
+		Renames:      []Rename{{Table: "items", OldColumn: "name", NewColumn: "title"}},
+		Stdout:       io.Discard,
+		runner:       &hashRecordingRunner{},
+	}); err != nil {
+		t.Fatalf("MakeMigrations(--rename-table) error = %v", err)
+	}
+	if err := Migrate(context.Background(), apply); err != nil {
+		t.Fatalf("Migrate(rename) error = %v", err)
+	}
+	var title string
+	if err := db.Raw("SELECT title FROM items").Row().Scan(&title); err != nil || title != "Alpha" {
+		t.Fatalf("items.title = %q (%v), want the row kept", title, err)
+	}
+
+	if err := Rollback(context.Background(), apply); err != nil {
+		t.Fatalf("Rollback() error = %v", err)
+	}
+	var name string
+	if err := db.Raw("SELECT name FROM products").Row().Scan(&name); err != nil || name != "Alpha" {
+		t.Fatalf("products.name after rollback = %q (%v), want the row back under the old names", name, err)
+	}
 }

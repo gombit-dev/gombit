@@ -130,6 +130,14 @@ func newMakeMigrationsCommand(stdout io.Writer, stderr io.Writer) *cobra.Command
 			if err != nil {
 				return err
 			}
+			tableRenameValues, err := cmd.Flags().GetStringArray("rename-table")
+			if err != nil {
+				return err
+			}
+			tableRenames, err := parseTableRenames(tableRenameValues)
+			if err != nil {
+				return err
+			}
 			allow, err := cmd.Flags().GetStringArray("allow")
 			if err != nil {
 				return err
@@ -143,6 +151,7 @@ func newMakeMigrationsCommand(stdout io.Writer, stderr io.Writer) *cobra.Command
 				Models:       models,
 				ForgetModels: forgetModels,
 				Renames:      renames,
+				TableRenames: tableRenames,
 				// Refuse a destructive or unsafe change nothing acknowledged (#309).
 				Gate:   schemaplan.Gate(allow, stderr),
 				Stdout: stdout,
@@ -155,9 +164,22 @@ func newMakeMigrationsCommand(stdout io.Writer, stderr io.Writer) *cobra.Command
 	cmd.Flags().String("atlas-bin", "atlas", "Atlas CLI binary path")
 	cmd.Flags().StringArray("model", nil, "GORM model import path and type, e.g. github.com/acme/app/internal/product.Product; repeat for multiple models. Merged with models already registered from earlier makemigrations runs — you don't need to repeat them.")
 	cmd.Flags().StringArray("forget-model", nil, "GORM model import path and type to stop tracking, proposing a DROP for its table; repeat for multiple models")
-	cmd.Flags().StringArray("rename", nil, "rename a column data-preservingly as table.old_column:new_column (native RENAME COLUMN, not a drop+add rebuild); repeat for multiple columns. Cannot be combined with --model/--forget-model.")
+	cmd.Flags().StringArray("rename", nil, "rename a column data-preservingly as table.old_column:new_column (or table.old_column=table.new_column; native RENAME COLUMN, not a drop+add rebuild); repeat for multiple columns. Alone it cannot be combined with --model/--forget-model.")
+	cmd.Flags().StringArray("rename-table", nil, "rename a table data-preservingly as old_table:new_table (native ALTER TABLE ... RENAME TO); repeat for multiple tables. Applies before --rename, which then names the new table. Pair it with --forget-model <old model> --model <new model> to swap a renamed model in the registry.")
 	cmd.Flags().StringArray("allow", nil, "acknowledge a destructive or unsafe change from 'gombit db plan' by ID (drop_column:products.name) or code (drop_column); repeat for multiple. Without it, a migration containing one is not written.")
 	return cmd
+}
+
+func parseTableRenames(values []string) ([]migrations.TableRename, error) {
+	renames := make([]migrations.TableRename, 0, len(values))
+	for _, value := range values {
+		rename, err := migrations.ParseTableRename(value)
+		if err != nil {
+			return nil, err
+		}
+		renames = append(renames, rename)
+	}
+	return renames, nil
 }
 
 func parseRenames(values []string) ([]migrations.Rename, error) {

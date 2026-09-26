@@ -142,3 +142,26 @@ func TestMakeMigrationsHelpDescribesForgetModel(t *testing.T) {
 		t.Fatalf("help missing note about the persisted model registry:\n%s", out)
 	}
 }
+
+func TestMakeMigrationsHelpDescribesRenameTable(t *testing.T) {
+	stdout := new(bytes.Buffer)
+	stderr := new(bytes.Buffer)
+	if err := ExecuteRoot(context.Background(), NewRoot(stdout, stderr), []string{"db", "makemigrations", "--help"}); err != nil {
+		t.Fatalf("gombit db makemigrations --help: %v", err)
+	}
+	out := stdout.String() + stderr.String()
+	for _, want := range []string{"--rename-table", "RENAME TO", "--forget-model <old model> --model <new model>"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("help missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestMakeMigrationsRejectsInvalidTableRename(t *testing.T) {
+	err := ExecuteRoot(context.Background(), NewRoot(new(bytes.Buffer), new(bytes.Buffer)), []string{
+		"db", "makemigrations", "rename_products", "--rename-table", "products",
+	})
+	if err == nil || !strings.Contains(err.Error(), "old_table:new_table") {
+		t.Fatalf("error = %v, want the table rename spec format", err)
+	}
+}

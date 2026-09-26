@@ -29,6 +29,18 @@ default) makes `plan` exit non-zero, and `makemigrations` refuses to write it
 until you pass `--allow <id>` for each step. See
 [docs/migrations.md](../../docs/migrations.md#planning-a-change).
 
+If you rename the example's `Product` model to `Item` (in a new
+`internal/item` package), `--rename-table` keeps the table's rows:
+
+```sh
+gombit db makemigrations rename_products --rename-table products:items \
+  --forget-model github.com/gombit-dev/gombit/examples/migrations/internal/product.Product \
+  --model github.com/gombit-dev/gombit/examples/migrations/internal/item.Item
+```
+
+See [Renaming a table](../../docs/migrations.md#renaming-a-table) for the full
+workflow.
+
 ## Apply, status, and rollback
 
 After generating an up migration, add a companion down file with the same
