@@ -178,9 +178,12 @@ arbitrary Go types.
   For v1, `Name` is also the GORM/SQL column unless `Field.Column` is set
   (use that when the Go exported name or GORM column differs).
 - **Constraints** — `minimum`, `maximum`, `max_length`, `pattern`, `default`,
-  `format`, and `choices` — appear in meta when set. A field the registrar
-  leaves empty copies them from the model's `validate` tag, and admin writes
-  enforce them. `choices` lists each enum's stored value and label.
+  `format`, and `choices` — appear in meta when set, and admin writes enforce
+  them. A field the registrar leaves empty copies them from the model:
+  `minimum`, `maximum`, `max_length`, `pattern`, and `default` from its
+  `validate` tag, `choices` (each enum's stored value and label) from that tag's
+  `enum=` and `label=` keys, and `format` from the separate `format` struct tag
+  (`format:"email"`), not from `validate`.
 - **`Options.PK`** is the JSON/field name of the primary key. Empty means
   derive the GORM primary key **at Register** and store it. The PK field
   must appear in `Fields`.

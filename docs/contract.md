@@ -86,14 +86,18 @@ list columns are a declared subset. Add modifiers to the field grammar:
 | Modifier     | Query parameter                          | Types                                |
 | ------------ | ---------------------------------------- | ------------------------------------ |
 | `filterable` | `?<field>=<value>` (exact match)         | string, int, int64, uint, bool, uuid, enum |
-| `sortable`   | `?ordering=<field>` (`-<field>` for DESC) | any scalar except json (and belongs_to / one_to_one FK) |
+| `sortable`   | `?ordering=<field>` (`-<field>` for DESC) | any scalar but json; also a belongs_to / one_to_one FK (see below) |
 | `searchable` | `?search=<term>` (case-insensitive LIKE) | string, text, email, slug, enum      |
 
 `url` and `ip` are exact values. They are sortable and not searchable, even though the admin wire is `string`.
 
 A `belongs_to` or `one_to_one` foreign key is **filterable by default** — no modifier needed —
 so a detail page can list a record's `has_many` children with
-`GET /api/v1/invoices?customer_id=<id>`.
+`GET /api/v1/invoices?customer_id=<id>`. It is not sortable by default: the
+generated policy is `gombit:"read,write,filterable"`, and the `make resource`
+relation grammar accepts only `nullable` and `on_delete=`. To allow
+`?ordering=customer_id`, add `sortable` to the foreign key's `gombit` tag on the
+model and run `gombit generate`.
 
 ```bash
 gombit make resource Article \
