@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"ariga.io/atlas/sql/mysql"
 	"ariga.io/atlas/sql/schema"
 
 	"github.com/gombit-dev/gombit/config"
@@ -1001,4 +1002,96 @@ func TestMySQLNarrowingAndConversionFailures(t *testing.T) {
 			t.Fatalf("parent collation change = %+v, want unsafe for the primary key only", s)
 		}
 	})
+}
+
+// TestMySQLKeyLimitOnEveryBuiltKey: InnoDB refuses a key past 3072 bytes even
+// on an empty table, so every step that builds one is unsafe when it can.
+func TestMySQLKeyLimitOnEveryBuiltKey(t *testing.T) {
+	col := func(name, typ string, null bool) string {
+		return fmt.Sprintf("  column %q {\n    null = %v\n    type = %s\n  }\n", name, null, typ)
+	}
+	table := func(name, body string) string {
+		return fmt.Sprintf("table %q {\n  schema = schema.dev\n", name) + col("id", "bigint", false) + body + "  primary_key {\n    columns = [column.id]\n  }\n}\n"
+	}
+	index := func(name string, unique bool, cols ...string) string {
+		parts := make([]string, len(cols))
+		for i, c := range cols {
+			parts[i] = "column." + c
+		}
+		return fmt.Sprintf("  index %q {\n    unique  = %v\n    columns = [%s]\n  }\n", name, unique, strings.Join(parts, ", "))
+	}
+	quad := col("a", "varchar(255)", false) + col("b", "varchar(255)", false) + col("c", "varchar(255)", false) + col("d", "varchar(255)", false)
+
+	cases := []struct {
+		name     string
+		from, to string
+		id       string
+		want     Severity
+	}{
+		{
+			name: "unique index over a new null-filled varchar(1000)",
+			from: table("products", ""),
+			to:   table("products", col("sku", "varchar(1000)", true)+index("idx_sku", true, "sku")),
+			id:   "add_unique:products.idx_sku", want: SeverityUnsafe,
+		},
+		{
+			name: "unique index over a new null-filled varchar(64)",
+			from: table("products", ""),
+			to:   table("products", col("sku", "varchar(64)", true)+index("idx_sku", true, "sku")),
+			id:   "add_unique:products.idx_sku", want: SeveritySafe,
+		},
+		{
+			name: "non-unique index over four varchar(255)",
+			from: table("products", quad),
+			to:   table("products", quad+index("idx_abcd", false, "a", "b", "c", "d")),
+			id:   "add_index:products.idx_abcd", want: SeverityUnsafe,
+		},
+		{
+			name: "new table with a key past the limit",
+			from: "",
+			to:   table("products", col("sku", "varchar(1000)", false)+index("idx_sku", true, "sku")),
+			id:   "add_table:products", want: SeverityUnsafe,
+		},
+		{
+			name: "widen next to a varbinary in the same key",
+			from: table("tokens", col("name", "varchar(100)", false)+col("token", "varbinary(2500)", false)+index("idx_token", true, "name", "token")),
+			to:   table("tokens", col("name", "varchar(200)", false)+col("token", "varbinary(2500)", false)+index("idx_token", true, "name", "token")),
+			id:   "widen_type:tokens.name", want: SeverityUnsafe,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			steps := mysqlTablesPlan(t, tc.from, tc.to)
+			got, ok := steps[tc.id]
+			if !ok || got.Severity != tc.want {
+				t.Fatalf("step %s = %+v (present %v), want %s; steps %v", tc.id, got, ok, tc.want, steps)
+			}
+		})
+	}
+}
+
+func TestKeyBytesIsAnUpperBound(t *testing.T) {
+	size := func(n int) *int { return &n }
+	c := func(typ schema.Type) *schema.Column {
+		return &schema.Column{Name: "c", Type: &schema.ColumnType{Type: typ}}
+	}
+	for _, tc := range []struct {
+		name  string
+		parts []*schema.IndexPart
+		bytes int
+		ok    bool
+	}{
+		{"varbinary counts its bytes", []*schema.IndexPart{{C: c(&schema.BinaryType{T: "varbinary", Size: size(2500)})}}, 2500, true},
+		{"varchar counts 4 bytes a character", []*schema.IndexPart{{C: c(&schema.StringType{T: "varchar", Size: 100})}}, 400, true},
+		{"prefix wins", []*schema.IndexPart{{C: c(&schema.StringType{T: "text"}), Attrs: []schema.Attr{&mysql.SubPart{Len: 10}}}}, 40, true},
+		{"blob with no prefix", []*schema.IndexPart{{C: c(&schema.BinaryType{T: "blob"})}}, 0, false},
+		{"text with no prefix", []*schema.IndexPart{{C: c(&schema.StringType{T: "text"})}}, 0, false},
+		{"json", []*schema.IndexPart{{C: c(&schema.JSONType{T: "json"})}}, 0, false},
+		{"expression", []*schema.IndexPart{{X: &schema.RawExpr{X: "lower(name)"}}}, 0, false},
+	} {
+		n, ok := keyBytes(tc.parts)
+		if n != tc.bytes || ok != tc.ok {
+			t.Errorf("%s: keyBytes = %d, %v; want %d, %v", tc.name, n, ok, tc.bytes, tc.ok)
+		}
+	}
 }

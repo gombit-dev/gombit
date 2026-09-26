@@ -108,6 +108,12 @@ func classifyChanges(driver config.DatabaseDriver, changes []schema.Change) []Pl
 	for _, c := range changes {
 		switch c := c.(type) {
 		case *schema.AddTable:
+			if driver == config.DatabaseDriverMySQL && tableKeyTooLong(c.T) {
+				step := newStep(StepAddTable, SeverityUnsafe, c.T.Name, "", fmt.Sprintf("Creates table %s, but one of its keys can exceed InnoDB's %d-byte key limit (or indexes TEXT/BLOB without a prefix), which fails CREATE TABLE.", c.T.Name, innodbKeyLimit))
+				step.Hint = keyLimitHint
+				steps = append(steps, step)
+				continue
+			}
 			steps = append(steps, newStep(StepAddTable, SeveritySafe, c.T.Name, "", fmt.Sprintf("Creates table %s.", c.T.Name)))
 		case *schema.DropTable:
 			step := newStep(StepDropTable, SeverityDestructive, c.T.Name, "", fmt.Sprintf("Drops table %s and every row in it.", c.T.Name))
@@ -171,6 +177,14 @@ func classifyTable(driver config.DatabaseDriver, m *schema.ModifyTable) []PlanSt
 		case *schema.AddIndex:
 			cols := strings.Join(indexColumns(c.I), ", ")
 			switch {
+			case driver == config.DatabaseDriverMySQL && keyTooLong(c.I.Parts):
+				code := StepAddIndex
+				if c.I.Unique {
+					code = StepAddUnique
+				}
+				step := newStep(code, SeverityUnsafe, table, c.I.Name, fmt.Sprintf("Adds index %s on %s(%s), but its key can exceed InnoDB's %d-byte limit (or indexes TEXT/BLOB without a prefix), which fails even on an empty table.", c.I.Name, table, cols, innodbKeyLimit))
+				step.Hint = keyLimitHint
+				steps = append(steps, step)
 			case c.I.Unique && onlyNullFilled(indexColumns(c.I)):
 				steps = append(steps, newStep(StepAddUnique, SeveritySafe, table, c.I.Name, fmt.Sprintf("Adds unique index %s on %s(%s). The columns are new, nullable, and have no default, so every existing row holds NULL and nothing collides.", c.I.Name, table, cols)))
 			case c.I.Unique:
@@ -191,6 +205,14 @@ func classifyTable(driver config.DatabaseDriver, m *schema.ModifyTable) []PlanSt
 			cols := strings.Join(indexColumns(c.To), ", ")
 			recreated := c.Change&^schema.ChangeComment != schema.NoChange
 			switch {
+			case recreated && driver == config.DatabaseDriverMySQL && keyTooLong(c.To.Parts):
+				code := StepAddIndex
+				if c.To.Unique {
+					code = StepAddUnique
+				}
+				step := newStep(code, SeverityUnsafe, table, c.To.Name, fmt.Sprintf("Re-creates index %s on %s(%s), but its key can exceed InnoDB's %d-byte limit (or indexes TEXT/BLOB without a prefix), which fails the migration.", c.To.Name, table, cols, innodbKeyLimit))
+				step.Hint = keyLimitHint
+				steps = append(steps, step)
 			case c.To.Unique && recreated && onlyNullFilled(indexColumns(c.To)):
 				steps = append(steps, newStep(StepAddUnique, SeveritySafe, table, c.To.Name, fmt.Sprintf("Re-creates unique index %s on %s(%s). The columns are new, nullable, and have no default, so every existing row holds NULL and nothing collides.", c.To.Name, table, cols)))
 			case c.To.Unique && recreated:
@@ -203,6 +225,12 @@ func classifyTable(driver config.DatabaseDriver, m *schema.ModifyTable) []PlanSt
 		case *schema.AddForeignKey:
 			cols := fkColumns(c.F)
 			ref := fkRef(c.F)
+			if driver == config.DatabaseDriverMySQL && keyTooLong(columnParts(c.F.Columns)) {
+				step := newStep(StepAddForeignKey, SeverityUnsafe, table, c.F.Symbol, fmt.Sprintf("Adds foreign key %s: %s(%s) references %s, but the index MySQL builds for it can exceed InnoDB's %d-byte key limit, which fails the migration.", c.F.Symbol, table, strings.Join(cols, ", "), ref, innodbKeyLimit))
+				step.Hint = keyLimitHint
+				steps = append(steps, step)
+				continue
+			}
 			if onlyNullFilled(cols) {
 				steps = append(steps, newStep(StepAddForeignKey, SeveritySafe, table, c.F.Symbol, fmt.Sprintf("Adds foreign key %s: %s(%s) references %s. The columns are new, nullable, and have no default, so every existing row holds NULL and passes.", c.F.Symbol, table, strings.Join(cols, ", "), ref)))
 				continue
@@ -218,6 +246,12 @@ func classifyTable(driver config.DatabaseDriver, m *schema.ModifyTable) []PlanSt
 			// pure ON DELETE / ON UPDATE change keeps an already-valid key.
 			if c.Change.Is(schema.ChangeColumn) || c.Change.Is(schema.ChangeRefColumn) || c.Change.Is(schema.ChangeRefTable) {
 				cols := fkColumns(c.To)
+				if driver == config.DatabaseDriverMySQL && keyTooLong(columnParts(c.To.Columns)) {
+					step := newStep(StepAddForeignKey, SeverityUnsafe, table, c.To.Symbol, fmt.Sprintf("Re-creates foreign key %s: %s, but the index MySQL builds for it can exceed InnoDB's %d-byte key limit, which fails the migration.", c.To.Symbol, describeFKChange(c), innodbKeyLimit))
+					step.Hint = keyLimitHint
+					steps = append(steps, step)
+					continue
+				}
 				if onlyNullFilled(cols) {
 					steps = append(steps, newStep(StepAddForeignKey, SeveritySafe, table, c.To.Symbol, fmt.Sprintf("Re-creates foreign key %s: %s. The columns are new, nullable, and have no default, so every existing row holds NULL and passes.", c.To.Symbol, describeFKChange(c))))
 					continue
@@ -417,61 +451,126 @@ func columnCollation(c *schema.Column) string {
 	return co.V
 }
 
+const keyLimitHint = "Shorten the columns, or index a prefix of them."
+
 // innodbKeyLimit is InnoDB's index key limit for the DYNAMIC row format, the
 // MySQL 8 default.
 const innodbKeyLimit = 3072
 
-// indexOverKeyLimit reports whether an index (or the primary key) on column
-// can exceed InnoDB's key limit once its string parts are utf8mb4.
-func indexOverKeyLimit(t *schema.Table, column string) bool {
-	check := func(parts []*schema.IndexPart) bool {
-		has, total := false, 0
-		for _, p := range parts {
-			if p.C == nil {
-				return true // an expression part: its length is unknown
-			}
-			if p.C.Name == column {
-				has = true
-			}
-			total += indexPartBytes(p)
+// A MySQL key is built for the primary key, every index, and every foreign
+// key (InnoDB indexes the referencing columns when no index covers them).
+// Each must fit innodbKeyLimit, or the statement that builds it fails, even on
+// an empty table.
+
+// keyBytes is an upper bound on a key's length in bytes. ok is false when a
+// part cannot be bounded (an expression, TEXT or BLOB with no prefix, a type
+// with no known width); callers treat that as over the limit.
+func keyBytes(parts []*schema.IndexPart) (n int, ok bool) {
+	for _, p := range parts {
+		if p.C == nil {
+			return 0, false
 		}
-		return has && total > innodbKeyLimit
+		b, ok := partBytes(p)
+		if !ok {
+			return 0, false
+		}
+		n += b
 	}
-	if t.PrimaryKey != nil && check(t.PrimaryKey.Parts) {
-		return true
+	return n, true
+}
+
+// keyTooLong reports a key MySQL may refuse to build.
+func keyTooLong(parts []*schema.IndexPart) bool {
+	n, ok := keyBytes(parts)
+	return !ok || n > innodbKeyLimit
+}
+
+func partBytes(p *schema.IndexPart) (int, bool) {
+	for _, a := range p.Attrs {
+		if sub, ok := a.(*mysql.SubPart); ok && sub.Len > 0 {
+			// A prefix counts characters on a string and bytes on a binary
+			// column; 4 bytes a unit bounds both.
+			return sub.Len * maxBytesPerChar, true
+		}
+	}
+	return columnKeyBytes(p.C)
+}
+
+// columnKeyBytes bounds one column's key length with no prefix.
+func columnKeyBytes(c *schema.Column) (int, bool) {
+	if c.Type == nil {
+		return 0, false
+	}
+	switch t := c.Type.Type.(type) {
+	case *schema.StringType:
+		if t.Size > 0 {
+			return t.Size * maxBytesPerChar, true
+		}
+	case *schema.BinaryType:
+		if t.Size != nil && *t.Size > 0 {
+			return *t.Size, true
+		}
+	case *schema.IntegerType, *schema.FloatType, *schema.TimeType:
+		return 8, true
+	case *schema.DecimalType:
+		if t.Precision > 0 {
+			return t.Precision/2 + 1, true
+		}
+		return 33, true // DECIMAL(65) is at most 30 bytes
+	case *schema.BoolType:
+		return 1, true
+	case *schema.EnumType:
+		return 2, true
+	case *schema.UUIDType:
+		return 16, true
+	}
+	return 0, false
+}
+
+func columnParts(cols []*schema.Column) []*schema.IndexPart {
+	parts := make([]*schema.IndexPart, 0, len(cols))
+	for _, c := range cols {
+		parts = append(parts, &schema.IndexPart{C: c})
+	}
+	return parts
+}
+
+// tableKeys are the keys MySQL builds for t.
+func tableKeys(t *schema.Table) [][]*schema.IndexPart {
+	var keys [][]*schema.IndexPart
+	if t.PrimaryKey != nil {
+		keys = append(keys, t.PrimaryKey.Parts)
 	}
 	for _, idx := range t.Indexes {
-		if check(idx.Parts) {
+		keys = append(keys, idx.Parts)
+	}
+	for _, fk := range t.ForeignKeys {
+		keys = append(keys, columnParts(fk.Columns))
+	}
+	return keys
+}
+
+// tableKeyTooLong reports a new table with a key MySQL may refuse to build.
+func tableKeyTooLong(t *schema.Table) bool {
+	for _, k := range tableKeys(t) {
+		if keyTooLong(k) {
 			return true
 		}
 	}
 	return false
 }
 
-// indexPartBytes is an upper bound on one index part's key length.
-func indexPartBytes(p *schema.IndexPart) int {
-	for _, a := range p.Attrs {
-		if sub, ok := a.(*mysql.SubPart); ok && sub.Len > 0 {
-			return sub.Len * maxBytesPerChar
+// indexOverKeyLimit reports whether a key on column may exceed InnoDB's
+// limit once the column takes its new type or charset. t is the desired table.
+func indexOverKeyLimit(t *schema.Table, column string) bool {
+	for _, k := range tableKeys(t) {
+		for _, p := range k {
+			if p.C != nil && p.C.Name == column && keyTooLong(k) {
+				return true
+			}
 		}
 	}
-	if p.C.Type == nil {
-		return innodbKeyLimit + 1
-	}
-	switch t := p.C.Type.Type.(type) {
-	case *schema.StringType:
-		if t.Size > 0 {
-			return t.Size * maxBytesPerChar
-		}
-		// A text column cannot be indexed without a prefix.
-		return innodbKeyLimit + 1
-	case *schema.DecimalType:
-		return t.Precision/2 + 1
-	case *schema.BoolType:
-		return 1
-	default:
-		return 8
-	}
+	return false
 }
 
 // fkCollationMismatch reports a foreign key through column c whose other side
