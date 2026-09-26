@@ -128,8 +128,46 @@ func findTable(r *schema.Realm, name string) *schema.Table {
 
 var (
 	reDataChangeTable = regexp.MustCompile(`(?is)^\s*(?:DELETE\s+FROM|UPDATE|TRUNCATE(?:\s+TABLE)?|MERGE\s+INTO|REPLACE\s+INTO)\s+` + ident)
-	reRebuildCopy     = regexp.MustCompile(`(?is)^\s*INSERT\s+INTO\s+` + ident + `.*\bSELECT\b.*\bFROM\s+` + ident + `\s*$`)
+	// Atlas's SQLite rebuild copy: INSERT INTO new_X (a, b) SELECT a, b FROM X.
+	reRebuildCopy = regexp.MustCompile(`(?is)^\s*INSERT\s+INTO\s+` + ident + `\s*\(([^)]*)\)\s*SELECT\s+(.*?)\s+FROM\s+` + ident + `\s*$`)
+	reUsing       = regexp.MustCompile(`(?is)\bUSING\b`)
 )
+
+// rebuildCopySource returns X when stmt is an Atlas-style rebuild copy into
+// new_X: a column list, and a SELECT of exactly those columns, in order, from
+// X. A SELECT of anything else (a literal, an expression) is not a copy.
+func rebuildCopySource(stmt string) (string, bool) {
+	m := reRebuildCopy.FindStringSubmatch(stmt)
+	if m == nil {
+		return "", false
+	}
+	target, source := unquote(m[1]), unquote(m[4])
+	if target != "new_"+source {
+		return "", false
+	}
+	cols, sel := splitList(m[2]), splitList(m[3])
+	if len(cols) == 0 || len(cols) != len(sel) {
+		return "", false
+	}
+	for i := range cols {
+		if !plainIdent.MatchString(sel[i]) || unquote(sel[i]) != unquote(cols[i]) {
+			return "", false
+		}
+	}
+	return source, true
+}
+
+var plainIdent = regexp.MustCompile("^[`\"]?[A-Za-z0-9_]+[`\"]?$")
+
+func splitList(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
 
 // withStatementFindings adds what the migration's own SQL does to rows that
 // the before/after diff cannot see. The HOST-3 statement classifier
@@ -143,21 +181,36 @@ func withStatementFindings(steps []PlanStep, sql string) []PlanStep {
 	stmts := manifest.Statements(sql)
 	ops := manifest.Classify(sql)
 	have := map[string]bool{}
-	columnTouched := map[string]bool{}
+	columnInDiff := map[string]bool{}
+	tableAccounted := map[string]bool{}
 	for _, s := range steps {
 		have[s.ID] = true
 		if s.Name != "" {
-			columnTouched[s.Table+"."+s.Name] = true
+			columnInDiff[s.Table+"."+s.Name] = true
+		}
+		if s.Code == StepTableRebuild || s.NeedsAcknowledgement() {
+			tableAccounted[s.Table] = true
 		}
 	}
-	// Atlas's SQLite rebuild: INSERT INTO new_X (...) SELECT ... FROM X, then
-	// DROP TABLE X and ALTER TABLE new_X RENAME TO X. The drop is the copy's
-	// second half, and the diff classifies what the copy keeps.
-	rebuilt := map[string]bool{}
-	for _, stmt := range stmts {
-		if m := reRebuildCopy.FindStringSubmatch(stmt); m != nil && unquote(m[1]) == "new_"+unquote(m[2]) {
-			rebuilt[unquote(m[2])] = true
+	// exemptDrop reports whether the DROP TABLE at index i is the middle of
+	// Atlas's SQLite rebuild of X: an exact column-for-column copy into
+	// new_X before it, the rename of new_X back to X after it, and a plan step
+	// that accounts for the rebuild. Each copy exempts one drop. An empty
+	// diff means nothing was rebuilt, so the drop stands.
+	copies := map[string]int{}
+	exemptDrop := func(i int, table string) bool {
+		c, ok := copies[table]
+		if !ok || c >= i || !tableAccounted[table] {
+			return false
 		}
+		for _, stmt := range stmts[i+1:] {
+			m := reRenameTableTo.FindStringSubmatch(stmt)
+			if m != nil && unquote(m[1]) == "new_"+table && unquote(m[2]) == table {
+				delete(copies, table)
+				return true
+			}
+		}
+		return false
 	}
 
 	dropped := map[string]bool{}
@@ -169,12 +222,18 @@ func withStatementFindings(steps []PlanStep, sql string) []PlanStep {
 		}
 	}
 	for i, op := range ops {
-		if op.Safety != manifest.SafetyDataLoss || i >= len(stmts) {
+		if i >= len(stmts) {
+			continue
+		}
+		if src, ok := rebuildCopySource(stmts[i]); ok {
+			copies[src] = i
+		}
+		if op.Safety != manifest.SafetyDataLoss {
 			continue
 		}
 		switch op.Kind {
 		case manifest.OpDropTable:
-			if rebuilt[op.Resource] {
+			if exemptDrop(i, op.Resource) {
 				continue
 			}
 			dropped[op.Resource] = true
@@ -182,10 +241,19 @@ func withStatementFindings(steps []PlanStep, sql string) []PlanStep {
 		case manifest.OpDropColumn:
 			add(newStep(StepDropColumn, SeverityDestructive, op.Resource, op.Column, fmt.Sprintf("The migration drops column %s.%s and the data in it.", op.Resource, op.Column)))
 		case manifest.OpAlterColumn:
-			if columnTouched[op.Resource+"."+op.Column] {
-				continue // the diff classifies this column's change
+			// A USING expression rewrites the stored values; the schema after
+			// it cannot say how, so it always needs an acknowledgement.
+			if reUsing.MatchString(stmts[i]) {
+				add(newStep(StepAlterColumn, SeverityDestructive, op.Resource, op.Column, fmt.Sprintf("The migration rewrites every value of %s.%s through an expression (%s); the schema before and after cannot show what it keeps.", op.Resource, op.Column, firstWords(stmts[i]))))
+				continue
 			}
-			add(newStep(StepAlterColumn, SeverityUnsafe, op.Resource, op.Column, fmt.Sprintf("The migration alters column %s.%s in a way the schema before and after does not show (for example a type change with USING that rewrites values).", op.Resource, op.Column)))
+			// Without USING the database converts values the implicit way, and
+			// the diff's step for this column (a widen, a narrow, a default)
+			// is the classification of exactly that.
+			if columnInDiff[op.Resource+"."+op.Column] {
+				continue
+			}
+			add(newStep(StepAlterColumn, SeverityUnsafe, op.Resource, op.Column, fmt.Sprintf("The migration alters column %s.%s in a way the schema before and after does not show.", op.Resource, op.Column)))
 		default:
 			if m := reDataChangeTable.FindStringSubmatch(stmts[i]); m != nil {
 				table := unquote(m[1])
