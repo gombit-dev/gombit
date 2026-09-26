@@ -507,7 +507,8 @@ func parseEnumValues(args string) (values, labels []string, err error) {
 			return nil, nil, fmt.Errorf("resourcegen: enum has an empty value")
 		}
 		// Values and labels land in a Go struct tag, a TS union literal, and
-		// JSX text. Keep them to a set that needs no escaping. `=` separates
+		// JSX text. Keep them to a set that needs no escaping. `{` and `}`
+		// would open a JSX expression in the generated form. `=` separates
 		// a stored value from its display label.
 		if !enumTokenOK(value) || !enumTokenOK(label) {
 			return nil, nil, fmt.Errorf("resourcegen: enum value %q contains an unsupported character", piece)
@@ -525,7 +526,7 @@ func parseEnumValues(args string) (values, labels []string, err error) {
 func enumTokenOK(s string) bool {
 	for _, r := range s {
 		switch r {
-		case '"', '`', '\\', ';', '<', '>', '&', '\n', '\r':
+		case '"', '`', '\\', ';', '<', '>', '&', '{', '}', '\n', '\r':
 			return false
 		}
 	}

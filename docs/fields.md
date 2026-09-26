@@ -127,7 +127,9 @@ opens:time_of_day
 
 `enum(draft,published)` still stores each token as both the value and the
 label. `enum(draft=Draft,published=Published)` stores `draft` and shows
-`Draft`. The label cannot contain a comma. The create body and the list
+`Draft`. The label cannot contain a comma. A stored value or a label
+cannot contain `{` or `}`, because the generated form writes the label as
+JSX text. The create body and the list
 filter use the stored value. The generated form and the admin select show
 the label. The model's `validate` tag keeps `enum=draft,published` and,
 when a label differs, `label=Draft,Published`.

@@ -430,6 +430,9 @@ func TestParseEnumFieldDetails(t *testing.T) {
 	if _, err := parseFields([]string{"status:enum(draft=Draft):default=Published"}, "widget"); err == nil {
 		t.Fatal("default used the label instead of the stored value")
 	}
+	if _, err := parseFields([]string{"status:enum(draft=Draft{1})"}, "widget"); err == nil {
+		t.Fatal("enum label Draft{1} was accepted")
+	}
 }
 
 func TestParseDecimalPrecision(t *testing.T) {
