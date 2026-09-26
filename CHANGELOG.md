@@ -12,6 +12,19 @@ version.
 
 ### Added
 
+- `gombit db makemigrations --rename-table old:new` renames a table with a
+  native, data-preserving `ALTER TABLE ... RENAME TO` on SQLite, PostgreSQL,
+  and MySQL. With `--forget-model` / `--model` it swaps the renamed model in the
+  registry, and `--rename` in the same run names the new table. The plan
+  suggests the exact command for a dropped table that looks renamed, and
+  `--forget-model` no longer acknowledges that drop. Indexes, foreign keys, and
+  checks re-created under GORM's new names with the same definition are safe
+  `rename_*` steps, so the follow-up migration needs no `--allow`. Rename
+  migrations (table and column) now write their inverse to `downs/`, so
+  `gombit db rollback` can undo them. `--rename` also accepts
+  `table.old=table.new`
+  ([#310](https://github.com/gombit-dev/gombit/issues/310)).
+
 - `gombit db plan` classifies the schema change the models imply before a
   migration is written: `destructive` (dropped table or column, narrowed type),
   `unsafe` (fails on a populated table: a NOT NULL column with no default,

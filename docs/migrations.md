@@ -164,7 +164,7 @@ gets a severity:
 | `destructive` | Loses data | `drop_table`, `drop_column`, `narrow_type` (for example `bigint` to `integer`, `text` to `varchar(100)`) |
 | `unsafe` | Can fail on a table that already has rows | `add_not_null` (no default), `set_not_null`, `add_unique` (a new unique index, or a same-named one re-created with new columns), `add_foreign_key` (a new foreign key over existing columns, or a same-named one whose columns or target change), `add_check`, `change_type` with no safe direction, `change_primary_key`, `change_charset` (to anything but `utf8mb4`, or to `utf8mb4` when an index on the column can pass InnoDB's 3072-byte key limit), `change_collation` on a column in a unique key or in a foreign key whose other side keeps another collation, `change_generated`, any MySQL key a step builds (a new table, index, or foreign key, or a column change under an existing key) that can pass InnoDB's 3072-byte limit or indexes TEXT/BLOB without a prefix, `other` (a change Gombit cannot classify fails closed) |
 | `review` | Applies, but changes behavior | `change_foreign_key` (only the `ON DELETE` / `ON UPDATE` action, for example `RESTRICT` to `CASCADE`), `drop_foreign_key`, dropping a primary key, `widen_type`, `table_rebuild` (SQLite), `change_charset` to `utf8mb4` when its indexes still fit, `change_collation` on any other column |
-| `safe` | Adds structure or relaxes a rule | `add_table`, `add_column`, `add_index`, `drop_not_null`, `change_default`, `change_comment`, table charset/collation/comment options, … |
+| `safe` | Adds structure or relaxes a rule | `add_table`, `add_column`, `add_index`, `drop_not_null`, `change_default`, `change_comment`, table charset/collation/comment options, `rename_index` / `rename_foreign_key` / `rename_check` (dropped and re-added under a new name with the same definition), … |
 
 A dropped column next to an added column of the same type family is reported
 with the `--rename` command that keeps the data (see
@@ -193,7 +193,10 @@ gombit db makemigrations reshape_products \
 `--forget-model` acknowledges the drop of each forgotten model's table, because
 dropping it is what the flag asks for. It matches the table by GORM's default
 name (`LegacyWidget` → `legacy_widgets`), so a model with a custom `TableName`,
-its join tables, or any other dropped table still needs its own `--allow`. The first migration in an empty directory only creates
+its join tables, or any other dropped table still needs its own `--allow`. It
+does not acknowledge a drop that looks like a rename (a table created in the
+same plan shares a column with it): that drop would lose the rows a
+[table rename](#renaming-a-table) keeps, so the plan names the rename instead. The first migration in an empty directory only creates
 tables, so `makemigrations` skips the plan there. `--rename` generates its own
 SQL and does not plan either.
 
@@ -233,6 +236,62 @@ combined with `--model`/`--forget-model` in the same call, and it writes only
 the rename migration. Make other schema changes in a separate run. Identifiers
 must be simple (letters, digits, underscore) — the table/column names GORM
 generates.
+
+## Renaming a table
+
+Renaming a model renames its table (`Product` → `products` becomes `Item` →
+`items`). To Atlas that is a dropped table plus a new one, and to the registry
+it is a model that no longer compiles. `gombit db plan` shows the drop with the
+command that keeps the rows:
+
+```sh
+gombit db plan --forget-model github.com/acme/shop/internal/product.Product \
+  --model github.com/acme/shop/internal/item.Item
+```
+
+```text
+  DESTRUCTIVE  drop_table:products
+               Drops table products and every row in it.
+               Table items is created in the same plan. If it replaces products, keep the rows with a rename instead:
+                 gombit db makemigrations <name> --rename-table products:items --model github.com/acme/shop/internal/item.Item --forget-model github.com/acme/shop/internal/product.Product
+```
+
+The supported workflow:
+
+1. Rename the model (and its package, if it moves) and update `AutoMigrate` in
+   `internal/platform/database.go` to the new type. Run `gombit generate` so the
+   `*.gen.go` match.
+2. Write the rename migration and swap the model in the registry:
+
+   ```sh
+   gombit db makemigrations rename_products \
+     --rename-table products:items \
+     --forget-model github.com/acme/shop/internal/product.Product \
+     --model github.com/acme/shop/internal/item.Item
+   ```
+
+   `--rename-table old:new` (repeatable) writes a native
+   `ALTER TABLE ... RENAME TO`, which SQLite, PostgreSQL, and MySQL all support,
+   and foreign keys in other tables follow the table. With `--rename-table`,
+   `--model` and `--forget-model` only update `models.json`; no model diff runs.
+   The registry is written after `atlas.sum` is refreshed, and a failed hash
+   restores both.
+3. Run `gombit db makemigrations sync_items`. GORM names indexes and foreign keys
+   after the table (`idx_products_deleted_at` → `idx_items_deleted_at`), so this
+   migration renames them. The plan reports each as a safe `rename_index` /
+   `rename_foreign_key`, because the definition is unchanged and the rows already
+   satisfy it, so no `--allow` is needed. Afterwards `gombit db plan` reports no
+   changes.
+4. `gombit db migrate`.
+
+`--rename-table` and `--rename` can share one run. Table renames apply first,
+so a column rename names the table's new name. Chained or swapped table renames
+(`a:b` with `b:c`, or `a:b` with `b:a`) are rejected; write them as separate
+migrations. `--rename` also accepts `table.old_column=table.new_column`.
+
+A rename migration comes with its exact inverse in
+`downs/<version>_<name>.down.sql` (the column renames undone in reverse, then
+the table renames), so `gombit db rollback` can undo it.
 
 ## Apply / Status / Rollback
 

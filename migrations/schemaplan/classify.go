@@ -60,6 +60,9 @@ const (
 	StepChangeCollation  = "change_collation"
 	StepChangeComment    = "change_comment"
 	StepChangeGenerated  = "change_generated"
+	StepRenameIndex      = "rename_index"
+	StepRenameForeignKey = "rename_foreign_key"
+	StepRenameCheck      = "rename_check"
 	StepOther            = "other"
 )
 
@@ -78,6 +81,9 @@ type PlanStep struct {
 	// Acknowledged is set by SchemaPlan.Acknowledge for a step an --allow
 	// entry (or --forget-model, for a dropped table) covers.
 	Acknowledged bool `json:"acknowledged"`
+	// renameTo is the table created in the same plan that a dropped table
+	// looks renamed to. Build turns it into the --rename-table command.
+	renameTo string
 }
 
 // NeedsAcknowledgement reports whether the step is destructive or unsafe and
@@ -118,7 +124,8 @@ func classifyChanges(driver config.DatabaseDriver, changes []schema.Change) []Pl
 		case *schema.DropTable:
 			step := newStep(StepDropTable, SeverityDestructive, c.T.Name, "", fmt.Sprintf("Drops table %s and every row in it.", c.T.Name))
 			if repl := tableRenameCandidate(c.T, added); repl != "" {
-				step.Hint = fmt.Sprintf("Table %s is created in the same plan. If it replaces %s, this still drops the rows: Gombit cannot rename a table yet, so copy the rows in a hand-written migration before this one applies.", repl, c.T.Name)
+				step.renameTo = repl
+				step.Hint = renameTableHint(c.T.Name, repl, "")
 			}
 			steps = append(steps, step)
 		case *schema.ModifyTable:
@@ -160,8 +167,17 @@ func classifyTable(driver config.DatabaseDriver, m *schema.ModifyTable) []PlanSt
 		return true
 	}
 
+	renamedFrom, renamedAway := pairRenames(m.Changes)
+
 	var steps []PlanStep
 	for _, c := range m.Changes {
+		if renamedAway[c] {
+			continue // reported as the rename on its re-added twin
+		}
+		if from, ok := renamedFrom[c]; ok {
+			steps = append(steps, renameStep(table, from, c))
+			continue
+		}
 		switch c := c.(type) {
 		case *schema.AddColumn:
 			steps = append(steps, classifyAddColumn(driver, table, c.C, alterable(m)))
@@ -923,6 +939,108 @@ func typeString(c *schema.Column) string {
 		}
 	}
 	return fmt.Sprintf("%T", c.Type.Type)
+}
+
+// renameTableHint is the command that keeps a dropped table's rows when the
+// added table replaces it. models are the --model / --forget-model flags of
+// the run, already formatted.
+func renameTableHint(oldName, newName, models string) string {
+	return fmt.Sprintf("Table %s is created in the same plan. If it replaces %s, keep the rows with a rename instead:\n  gombit db makemigrations <name> --rename-table %s:%s%s", newName, oldName, oldName, newName, models)
+}
+
+// pairRenames finds constraints dropped and re-added under a new name with the
+// same definition: GORM derives index and foreign key names from the table, so
+// a renamed table shows its keys that way. renamedFrom maps the re-adding
+// change to the old name; renamedAway marks the matching drop.
+func pairRenames(changes []schema.Change) (renamedFrom map[schema.Change]string, renamedAway map[schema.Change]bool) {
+	renamedFrom, renamedAway = map[schema.Change]string{}, map[schema.Change]bool{}
+	drops := map[string][]schema.Change{}
+	for _, c := range changes {
+		if sig, ok := dropSignature(c); ok {
+			drops[sig] = append(drops[sig], c)
+		}
+	}
+	for _, c := range changes {
+		sig, ok := addSignature(c)
+		if !ok || len(drops[sig]) == 0 {
+			continue
+		}
+		d := drops[sig][0]
+		drops[sig] = drops[sig][1:]
+		renamedAway[d] = true
+		renamedFrom[c] = constraintName(d)
+	}
+	return renamedFrom, renamedAway
+}
+
+func dropSignature(c schema.Change) (string, bool) {
+	switch c := c.(type) {
+	case *schema.DropIndex:
+		return indexSignature(c.I), true
+	case *schema.DropForeignKey:
+		return fkSignature(c.F), true
+	case *schema.DropCheck:
+		return "check|" + c.C.Expr, true
+	}
+	return "", false
+}
+
+func addSignature(c schema.Change) (string, bool) {
+	switch c := c.(type) {
+	case *schema.AddIndex:
+		return indexSignature(c.I), true
+	case *schema.AddForeignKey:
+		return fkSignature(c.F), true
+	case *schema.AddCheck:
+		return "check|" + c.C.Expr, true
+	}
+	return "", false
+}
+
+func indexSignature(i *schema.Index) string {
+	parts := make([]string, 0, len(i.Parts))
+	for _, p := range i.Parts {
+		switch {
+		case p.C != nil:
+			parts = append(parts, p.C.Name)
+		case p.X != nil:
+			parts = append(parts, fmt.Sprintf("expr:%v", p.X))
+		}
+		if p.Desc {
+			parts[len(parts)-1] += " desc"
+		}
+	}
+	return fmt.Sprintf("index|%v|%s", i.Unique, strings.Join(parts, ","))
+}
+
+func fkSignature(f *schema.ForeignKey) string {
+	return fmt.Sprintf("fk|%s|%s|%s|%s", strings.Join(fkColumns(f), ","), fkRef(f), fkAction(f.OnDelete), fkAction(f.OnUpdate))
+}
+
+func constraintName(c schema.Change) string {
+	switch c := c.(type) {
+	case *schema.DropIndex:
+		return c.I.Name
+	case *schema.DropForeignKey:
+		return c.F.Symbol
+	case *schema.DropCheck:
+		return c.C.Name
+	}
+	return ""
+}
+
+// renameStep reports a constraint re-created under a new name with the same
+// definition. The existing rows already satisfy it, so it applies.
+func renameStep(table, from string, c schema.Change) PlanStep {
+	switch c := c.(type) {
+	case *schema.AddIndex:
+		return newStep(StepRenameIndex, SeveritySafe, table, c.I.Name, fmt.Sprintf("Renames index %s to %s on %s(%s). The definition is unchanged, so the existing rows already satisfy it.", from, c.I.Name, table, strings.Join(indexColumns(c.I), ", ")))
+	case *schema.AddForeignKey:
+		return newStep(StepRenameForeignKey, SeveritySafe, table, c.F.Symbol, fmt.Sprintf("Renames foreign key %s to %s. The definition is unchanged, so the existing rows already satisfy it.", from, c.F.Symbol))
+	case *schema.AddCheck:
+		return newStep(StepRenameCheck, SeveritySafe, table, c.C.Name, fmt.Sprintf("Renames check %s to %s. The expression is unchanged, so the existing rows already satisfy it.", from, c.C.Name))
+	}
+	return unclassified(table, "", changeName(c))
 }
 
 // renameCandidates are the columns added in the same change whose type family

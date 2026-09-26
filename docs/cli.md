@@ -601,7 +601,11 @@ column, a narrowed type), `unsafe` (fails on a populated table, such as a new
 NOT NULL column with no default), `review`, or `safe`. It uses
 `atlas schema inspect` and Atlas's own diff, not `atlas migrate lint`, which
 ADR-012 keeps outside the Community Edition dependency surface. It exits
-non-zero on an unacknowledged destructive or unsafe step.
+non-zero on an unacknowledged destructive or unsafe step. `makemigrations
+--rename-table old:new` renames a table with a native `ALTER TABLE ... RENAME
+TO` and, with `--forget-model` / `--model`, swaps the renamed model in the
+registry (see
+[migrations.md § Renaming a table](migrations.md#renaming-a-table)).
 `gombit db makemigrations` runs the same plan and refuses to write such a
 migration until each step is acknowledged with `--allow <id|code>`. See
 [migrations.md § Planning a change](migrations.md#planning-a-change).
