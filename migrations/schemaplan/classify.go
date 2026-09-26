@@ -56,6 +56,10 @@ const (
 	StepDropCheck        = "drop_check"
 	StepChangePrimaryKey = "change_primary_key"
 	StepTableRebuild     = "table_rebuild"
+	StepChangeCharset    = "change_charset"
+	StepChangeCollation  = "change_collation"
+	StepChangeComment    = "change_comment"
+	StepChangeGenerated  = "change_generated"
 	StepOther            = "other"
 )
 
@@ -114,7 +118,7 @@ func classifyChanges(driver config.DatabaseDriver, changes []schema.Change) []Pl
 		case *schema.ModifyTable:
 			steps = append(steps, classifyTable(driver, c)...)
 		default:
-			steps = append(steps, newStep(StepOther, SeverityReview, changeTable(c), "", fmt.Sprintf("Unclassified schema change (%s).", changeName(c))))
+			steps = append(steps, unclassified(changeTable(c), "", changeName(c)))
 		}
 	}
 	return steps
@@ -163,7 +167,7 @@ func classifyTable(driver config.DatabaseDriver, m *schema.ModifyTable) []PlanSt
 			}
 			steps = append(steps, step)
 		case *schema.ModifyColumn:
-			steps = append(steps, classifyModifyColumn(driver, table, c)...)
+			steps = append(steps, classifyModifyColumn(driver, m.T, c)...)
 		case *schema.AddIndex:
 			cols := strings.Join(indexColumns(c.I), ", ")
 			switch {
@@ -238,8 +242,16 @@ func classifyTable(driver config.DatabaseDriver, m *schema.ModifyTable) []PlanSt
 			steps = append(steps, newStep(StepChangePrimaryKey, SeverityUnsafe, table, "", fmt.Sprintf("Changes the primary key of %s. It fails if existing rows hold duplicate or NULL key values.", table)))
 		case *schema.DropPrimaryKey:
 			steps = append(steps, newStep(StepChangePrimaryKey, SeverityReview, table, "", fmt.Sprintf("Drops the primary key of %s. The database stops enforcing unique row keys.", table)))
+		case *schema.AddAttr, *schema.DropAttr, *schema.ModifyAttr:
+			// Table options. Charset, collation, and comment set defaults for
+			// columns added later; they convert no stored value.
+			if tableOptionOnly(c) {
+				steps = append(steps, newStep(StepOther, SeveritySafe, table, "", fmt.Sprintf("Changes a table option of %s (charset, collation, or comment) for columns added later. Stored values are not converted.", table)))
+				continue
+			}
+			steps = append(steps, unclassified(table, "", changeName(c)))
 		default:
-			steps = append(steps, newStep(StepOther, SeverityReview, table, "", fmt.Sprintf("Unclassified change to %s (%s).", table, changeName(c))))
+			steps = append(steps, unclassified(table, "", changeName(c)))
 		}
 	}
 	// SQLite cannot alter most things in place. Atlas copies the rows into a new
@@ -264,7 +276,8 @@ func classifyAddColumn(driver config.DatabaseDriver, table string, c *schema.Col
 	return newStep(StepAddColumn, SeveritySafe, table, c.Name, fmt.Sprintf("Adds column %s.%s.", table, c.Name))
 }
 
-func classifyModifyColumn(driver config.DatabaseDriver, table string, m *schema.ModifyColumn) []PlanStep {
+func classifyModifyColumn(driver config.DatabaseDriver, t *schema.Table, m *schema.ModifyColumn) []PlanStep {
+	table := t.Name
 	name := m.To.Name
 	var steps []PlanStep
 	if m.Change.Is(schema.ChangeType) {
@@ -297,10 +310,121 @@ func classifyModifyColumn(driver config.DatabaseDriver, table string, m *schema.
 	if m.Change.Is(schema.ChangeDefault) {
 		steps = append(steps, newStep(StepChangeDefault, SeveritySafe, table, name, fmt.Sprintf("Changes the default of %s.%s. Existing rows keep their values.", table, name)))
 	}
-	if rest := m.Change &^ (schema.ChangeType | schema.ChangeNull | schema.ChangeDefault); rest != schema.NoChange {
-		steps = append(steps, newStep(StepOther, SeverityReview, table, name, fmt.Sprintf("Changes other attributes of %s.%s (collation, charset, comment, or generation).", table, name)))
+	if m.Change.Is(schema.ChangeCharset) {
+		from, to := columnCharset(m.From), columnCharset(m.To)
+		if strings.EqualFold(to, "utf8mb4") {
+			// utf8mb4 holds every character the other charsets can.
+			steps = append(steps, newStep(StepChangeCharset, SeverityReview, table, name, fmt.Sprintf("Converts %s.%s from charset %s to %s. Every stored character has an equivalent.", table, name, orUnset(from), to)))
+		} else {
+			step := newStep(StepChangeCharset, SeverityUnsafe, table, name, fmt.Sprintf("Converts %s.%s from charset %s to %s. A stored character with no equivalent in %s fails the migration in strict mode or is replaced.", table, name, orUnset(from), orUnset(to), orUnset(to)))
+			step.Hint = "Check the stored values for characters outside the new charset first."
+			steps = append(steps, step)
+		}
+	}
+	if m.Change.Is(schema.ChangeCollate) {
+		from, to := columnCollation(m.From), columnCollation(m.To)
+		if uniquelyIndexed(t, name) {
+			step := newStep(StepChangeCollation, SeverityUnsafe, table, name, fmt.Sprintf("Changes the collation of %s.%s from %s to %s. The column is in a unique key, which is rebuilt and fails if two stored values compare equal under the new collation.", table, name, orUnset(from), orUnset(to)))
+			step.Hint = "Check for values that differ only in case or accents before this migration applies."
+			steps = append(steps, step)
+		} else {
+			steps = append(steps, newStep(StepChangeCollation, SeverityReview, table, name, fmt.Sprintf("Changes the collation of %s.%s from %s to %s. Sorting and comparisons change.", table, name, orUnset(from), orUnset(to))))
+		}
+	}
+	if m.Change.Is(schema.ChangeComment) {
+		steps = append(steps, newStep(StepChangeComment, SeveritySafe, table, name, fmt.Sprintf("Changes the comment of %s.%s.", table, name)))
+	}
+	if m.Change.Is(schema.ChangeGenerated) {
+		steps = append(steps, newStep(StepChangeGenerated, SeverityReview, table, name, fmt.Sprintf("Changes the generated expression of %s.%s. Stored values are recomputed.", table, name)))
+	}
+	known := schema.ChangeType | schema.ChangeNull | schema.ChangeDefault | schema.ChangeCharset | schema.ChangeCollate | schema.ChangeComment | schema.ChangeGenerated
+	if m.Change&^known != schema.NoChange {
+		steps = append(steps, unclassified(table, name, "column attribute change"))
 	}
 	return steps
+}
+
+// unclassified is a change the classifier does not recognize. Like HOST-3's
+// manifest.Classify, it fails closed: the step is unsafe, so the gate stops
+// until someone reads the SQL and acknowledges it.
+func unclassified(table, name, what string) PlanStep {
+	where := table
+	if name != "" {
+		where += "." + name
+	}
+	step := newStep(StepOther, SeverityUnsafe, table, name, fmt.Sprintf("Gombit cannot classify this change to %s (%s), so it is treated as unsafe.", where, what))
+	step.Hint = "Read the SQL makemigrations would write for it before acknowledging it."
+	return step
+}
+
+// tableOptionOnly reports a table attribute change limited to charset,
+// collation, or comment.
+func tableOptionOnly(c schema.Change) bool {
+	option := func(a schema.Attr) bool {
+		switch a.(type) {
+		case *schema.Charset, *schema.Collation, *schema.Comment:
+			return true
+		}
+		return false
+	}
+	switch c := c.(type) {
+	case *schema.AddAttr:
+		return option(c.A)
+	case *schema.DropAttr:
+		return option(c.A)
+	case *schema.ModifyAttr:
+		return option(c.From) && option(c.To)
+	}
+	return false
+}
+
+func columnCharset(c *schema.Column) string {
+	var cs schema.Charset
+	for _, a := range c.Attrs {
+		if v, ok := a.(*schema.Charset); ok {
+			cs = *v
+		}
+	}
+	return cs.V
+}
+
+func columnCollation(c *schema.Column) string {
+	var co schema.Collation
+	for _, a := range c.Attrs {
+		if v, ok := a.(*schema.Collation); ok {
+			co = *v
+		}
+	}
+	return co.V
+}
+
+func orUnset(v string) string {
+	if v == "" {
+		return "(default)"
+	}
+	return v
+}
+
+// uniquelyIndexed reports whether column is part of a unique index or the
+// primary key of t.
+func uniquelyIndexed(t *schema.Table, column string) bool {
+	in := func(parts []*schema.IndexPart) bool {
+		for _, p := range parts {
+			if p.C != nil && p.C.Name == column {
+				return true
+			}
+		}
+		return false
+	}
+	if t.PrimaryKey != nil && in(t.PrimaryKey.Parts) {
+		return true
+	}
+	for _, idx := range t.Indexes {
+		if idx.Unique && in(idx.Parts) {
+			return true
+		}
+	}
+	return false
 }
 
 type typeDir int
@@ -364,7 +488,7 @@ func typeDirection(driver config.DatabaseDriver, from, to schema.Type) typeDir {
 		}
 	case *schema.FloatType:
 		if t, ok := to.(*schema.FloatType); ok {
-			fr, tr := floatBytes(f), floatBytes(t)
+			fr, tr := floatBytes(driver, f), floatBytes(driver, t)
 			if fr == 0 || tr == 0 {
 				return typeUnknown
 			}
@@ -446,17 +570,39 @@ func textRank(t string) int {
 	return 0
 }
 
-func floatBytes(t *schema.FloatType) int {
-	switch strings.ToLower(t.T) {
-	case "real", "float4":
-		return 4
-	case "double", "double precision", "float8":
-		return 8
-	case "float":
-		if t.Precision > 0 && t.Precision <= 24 {
+// floatBytes is the storage width of a floating-point type, per dialect.
+func floatBytes(driver config.DatabaseDriver, t *schema.FloatType) int {
+	name := strings.ToLower(t.T)
+	switch driver {
+	case config.DatabaseDriverMySQL:
+		// MySQL FLOAT is single precision; FLOAT(p) switches to double at
+		// p >= 24. REAL is DOUBLE unless REAL_AS_FLOAT is set.
+		switch name {
+		case "float":
+			if t.Precision >= 24 {
+				return 8
+			}
 			return 4
+		case "double", "double precision", "real":
+			return 8
 		}
+	case config.DatabaseDriverSQLite:
+		// Every SQLite floating-point value is an 8-byte REAL.
 		return 8
+	default:
+		// PostgreSQL: float(p) is real for p 1..24 and double precision for
+		// 25..53 or no p.
+		switch name {
+		case "real", "float4":
+			return 4
+		case "double precision", "float8":
+			return 8
+		case "float":
+			if t.Precision > 0 && t.Precision <= 24 {
+				return 4
+			}
+			return 8
+		}
 	}
 	return 0
 }

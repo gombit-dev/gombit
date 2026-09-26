@@ -408,16 +408,16 @@ func TestClassifyModifyColumnTypeChanges(t *testing.T) {
 	}
 	change := &schema.ModifyColumn{From: col(&schema.StringType{T: "text"}, true), To: col(&schema.IntegerType{T: "bigint"}, true), Change: schema.ChangeType}
 
-	pg := stepsByID(classifyModifyColumn(config.DatabaseDriverPostgres, "items", change))
+	pg := stepsByID(classifyModifyColumn(config.DatabaseDriverPostgres, schema.NewTable("items"), change))
 	if s := pg["change_type:items.code"]; s.Severity != SeverityUnsafe {
 		t.Errorf("postgres text -> bigint = %+v, want an unsafe change_type", s)
 	}
-	lite := stepsByID(classifyModifyColumn(config.DatabaseDriverSQLite, "items", change))
+	lite := stepsByID(classifyModifyColumn(config.DatabaseDriverSQLite, schema.NewTable("items"), change))
 	if s := lite["change_type:items.code"]; s.Severity != SeverityReview {
 		t.Errorf("sqlite text -> bigint = %+v, want a review change_type (affinity keeps values)", s)
 	}
 	shrink := &schema.ModifyColumn{From: col(&schema.StringType{T: "varchar", Size: 255}, true), To: col(&schema.StringType{T: "varchar", Size: 10}, true), Change: schema.ChangeType}
-	if s := stepsByID(classifyModifyColumn(config.DatabaseDriverSQLite, "items", shrink))["change_type:items.code"]; s.Severity != SeverityReview {
+	if s := stepsByID(classifyModifyColumn(config.DatabaseDriverSQLite, schema.NewTable("items"), shrink))["change_type:items.code"]; s.Severity != SeverityReview {
 		t.Errorf("sqlite varchar(255) -> varchar(10) = %+v, want review: SQLite does not truncate", s)
 	}
 }
@@ -771,5 +771,117 @@ func TestPrimaryKeyChanges(t *testing.T) {
 		if len(steps) != 1 || steps[0].Severity != tc.want {
 			t.Errorf("%T = %+v, want one %s step", tc.change, steps, tc.want)
 		}
+	}
+}
+
+func TestFloatWidthPerDialect(t *testing.T) {
+	p := func(v int) int { return v }
+	cases := []struct {
+		name     string
+		driver   config.DatabaseDriver
+		from, to *schema.FloatType
+		want     typeDir
+	}{
+		// GORM on MySQL: float64 is double, float32 is float.
+		{"mysql double to float", config.DatabaseDriverMySQL, &schema.FloatType{T: "double"}, &schema.FloatType{T: "float"}, typeNarrow},
+		{"mysql float to double", config.DatabaseDriverMySQL, &schema.FloatType{T: "float"}, &schema.FloatType{T: "double"}, typeWiden},
+		{"mysql float(24) is double", config.DatabaseDriverMySQL, &schema.FloatType{T: "double"}, &schema.FloatType{T: "float", Precision: p(24)}, typeWiden},
+		{"mysql float(23) is single", config.DatabaseDriverMySQL, &schema.FloatType{T: "double"}, &schema.FloatType{T: "float", Precision: p(23)}, typeNarrow},
+		{"postgres float with no p is double", config.DatabaseDriverPostgres, &schema.FloatType{T: "double precision"}, &schema.FloatType{T: "float"}, typeWiden},
+		{"postgres float(24) is real", config.DatabaseDriverPostgres, &schema.FloatType{T: "double precision"}, &schema.FloatType{T: "float", Precision: p(24)}, typeNarrow},
+	}
+	for _, tc := range cases {
+		if got := typeDirection(tc.driver, tc.from, tc.to); got != tc.want {
+			t.Errorf("%s: typeDirection = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// mysqlColumnPlan diffs a MySQL table whose one column changes from the
+// "from" attribute lines to the "to" ones, as inspected HCL.
+func mysqlColumnPlan(t *testing.T, from, to string, unique bool) map[string]PlanStep {
+	t.Helper()
+	build := func(attrs string) *schema.Realm {
+		idx := ""
+		if unique {
+			idx = "  index \"idx_value\" {\n    unique  = true\n    columns = [column.value]\n  }\n"
+		}
+		hcl := "table \"readings\" {\n  schema = schema.dev\n  column \"id\" {\n    null = false\n    type = bigint\n  }\n  column \"value\" {\n    null = false\n" + attrs + "  }\n  primary_key {\n    columns = [column.id]\n  }\n" + idx + "}\nschema \"dev\" {\n  charset = \"utf8mb4\"\n  collate = \"utf8mb4_0900_ai_ci\"\n}\n"
+		r := &schema.Realm{}
+		if err := evalHCL(config.DatabaseDriverMySQL, []byte(hcl), r); err != nil {
+			t.Fatalf("eval: %v\n%s", err, hcl)
+		}
+		return r
+	}
+	changes, err := differ(config.DatabaseDriverMySQL).RealmDiff(build(from), build(to))
+	if err != nil {
+		t.Fatal(err)
+	}
+	steps := classifyChanges(config.DatabaseDriverMySQL, changes)
+	assertNoDuplicateIDs(t, steps)
+	return stepsByID(steps)
+}
+
+func assertNoDuplicateIDs(t *testing.T, steps []PlanStep) {
+	t.Helper()
+	seen := map[string]bool{}
+	for _, s := range steps {
+		if seen[s.ID] {
+			t.Errorf("duplicate step ID %s", s.ID)
+		}
+		seen[s.ID] = true
+	}
+}
+
+func TestMySQLInspectedColumnChanges(t *testing.T) {
+	const text = "    type = varchar(64)\n"
+	cases := []struct {
+		name     string
+		from, to string
+		unique   bool
+		id       string
+		want     Severity
+	}{
+		{"float64 to float32", "    type = double\n", "    type = float\n", false, "narrow_type:readings.value", SeverityDestructive},
+		{"charset to ascii", text + "    charset = \"utf8mb4\"\n    collate = \"utf8mb4_bin\"\n", text + "    charset = \"ascii\"\n    collate = \"ascii_bin\"\n", false, "change_charset:readings.value", SeverityUnsafe},
+		{"charset to utf8mb4", text + "    charset = \"latin1\"\n    collate = \"latin1_bin\"\n", text + "    charset = \"utf8mb4\"\n    collate = \"utf8mb4_bin\"\n", false, "change_charset:readings.value", SeverityReview},
+		{"collation in a unique key", text + "    collate = \"utf8mb4_bin\"\n", text + "    collate = \"utf8mb4_0900_ai_ci\"\n", true, "change_collation:readings.value", SeverityUnsafe},
+		{"collation on a plain column", text + "    collate = \"utf8mb4_bin\"\n", text + "    collate = \"utf8mb4_0900_ai_ci\"\n", false, "change_collation:readings.value", SeverityReview},
+		{"comment only", text + "    comment = \"old\"\n", text + "    comment = \"new\"\n", false, "change_comment:readings.value", SeveritySafe},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			steps := mysqlColumnPlan(t, tc.from, tc.to, tc.unique)
+			got, ok := steps[tc.id]
+			if !ok || got.Severity != tc.want {
+				t.Fatalf("step %s = %+v (present %v), want %s; steps %v", tc.id, got, ok, tc.want, steps)
+			}
+			if tc.name == "comment only" && len(steps) != 1 {
+				t.Fatalf("comment-only change produced %v, want only change_comment", steps)
+			}
+		})
+	}
+}
+
+// unknownChange stands in for a schema change the classifier has no arm for.
+type unknownChange struct{ schema.Change }
+
+func TestUnclassifiedChangesFailClosed(t *testing.T) {
+	tbl := schema.NewTable("items")
+	steps := classifyTable(config.DatabaseDriverMySQL, &schema.ModifyTable{T: tbl, Changes: []schema.Change{
+		&schema.ModifyAttr{From: &schema.Comment{Text: "old"}, To: &schema.Comment{Text: "new"}},
+		unknownChange{},
+	}})
+	if len(steps) != 2 || steps[0].Severity != SeveritySafe || steps[1].Severity != SeverityUnsafe || steps[1].Code != StepOther {
+		t.Fatalf("steps = %+v, want a safe table option and an unsafe unclassified change", steps)
+	}
+	col := &schema.Column{Name: "n", Type: &schema.ColumnType{Type: &schema.IntegerType{T: "int"}}}
+	attr := classifyModifyColumn(config.DatabaseDriverMySQL, tbl, &schema.ModifyColumn{From: col, To: col, Change: schema.ChangeAttr})
+	if len(attr) != 1 || attr[0].Severity != SeverityUnsafe {
+		t.Fatalf("unrecognized column attribute change = %+v, want one unsafe step", attr)
+	}
+	top := classifyChanges(config.DatabaseDriverMySQL, []schema.Change{&schema.AddSchema{S: schema.New("other")}})
+	if len(top) != 1 || top[0].Severity != SeverityUnsafe {
+		t.Fatalf("unrecognized top-level change = %+v, want one unsafe step", top)
 	}
 }
