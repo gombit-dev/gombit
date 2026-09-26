@@ -14,7 +14,11 @@ gombit db verify --json     # print each migration's classification (for a host)
 gombit db verify --strict   # also exit non-zero if any migration loses data
 ```
 
-`gombit db verify` classifies migrations that are already written. To see
+`gombit db verify` classifies migrations that are already written, for a
+deployment host. For CI, [`gombit db lint`](migrations.md#linting-and-repairing-the-migration-directory)
+classifies them structurally (the schema before and after each one) and with
+this statement classifier, and fails on a destructive or unsafe change the
+migration does not acknowledge with a `-- gombit:allow` line. To see
 what the *next* migration would do before it exists, including changes a
 statement-level reading cannot see (a NOT NULL column added to a populated
 table, a foreign key delete rule inside a SQLite table rebuild), use

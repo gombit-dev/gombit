@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/gombit-dev/gombit/config"
 )
@@ -32,11 +31,16 @@ type Inspection struct {
 	ForgetModels []Model
 }
 
-// Gate decides whether MakeMigrations may write the migration named name. It
-// runs after the desired schema is loaded and before `atlas migrate diff`,
-// once the directory holds a migration; a non-nil error refuses the write.
-// schemaplan.Gate is the implementation the gombit CLI installs.
-type Gate func(ctx context.Context, name string, in Inspection) error
+// Gate decides whether MakeMigrations keeps the migration named name. It runs
+// once the directory already holds a migration, after `atlas migrate diff`
+// wrote sql; in is the schema before it and the schema the models declare. A
+// non-nil error refuses the migration: MakeMigrations removes the file and
+// restores atlas.sum. The step IDs it returns are the destructive or unsafe
+// changes the run acknowledged: MakeMigrations records each as a
+// `-- gombit:allow` line in the migration, so `gombit db lint`, which applies
+// the same classification, accepts it later. schemaplan.Gate is the
+// implementation the gombit CLI installs.
+type Gate func(ctx context.Context, name string, in Inspection, sql string) (acknowledged []string, err error)
 
 // InspectOptions configures Inspect. The model fields mean what they mean for
 // MakeMigrations: the desired schema is the persisted registry plus Models,
@@ -227,7 +231,7 @@ func (ws *workspace) inspectHCL(ctx context.Context, opts Options, url string) (
 	// Atlas prints its Community Edition notice on every run; keep stderr for
 	// the error instead of repeating the notice on each inspection.
 	if err := opts.runner.Run(ctx, ws.absWorkDir, opts.AtlasBinary, args, &out, &errOut); err != nil {
-		if msg := strings.TrimSpace(errOut.String()); msg != "" {
+		if msg := atlasMessage(errOut.String()); msg != "" {
 			return nil, fmt.Errorf("atlas schema inspect: %w: %s", err, msg)
 		}
 		return nil, fmt.Errorf("atlas schema inspect: %w", err)

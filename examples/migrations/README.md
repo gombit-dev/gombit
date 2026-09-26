@@ -29,6 +29,10 @@ default) makes `plan` exit non-zero, and `makemigrations` refuses to write it
 until you pass `--allow <id>` for each step. See
 [docs/migrations.md](../../docs/migrations.md#planning-a-change).
 
+`gombit db lint` then checks the directory in CI: integrity, layout, and that
+every destructive change carries a `-- gombit:allow` line (makemigrations writes
+them for you). After a hand edit, `gombit db repair` rehashes and re-checks it.
+
 If you rename the example's `Product` model to `Item` (in a new
 `internal/item` package), `--rename-table` keeps the table's rows:
 

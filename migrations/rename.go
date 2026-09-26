@@ -222,7 +222,10 @@ func makeRenameMigration(ctx context.Context, opts Options) error {
 	// atlas.sum must include the new file or `atlas migrate apply` refuses it as a
 	// checksum mismatch. `atlas migrate hash` is Atlas Community Edition (ADR-012).
 	hashArgs := []string{"migrate", "hash", "--dir", "file://" + filepath.ToSlash(migrationDir)}
-	if err := opts.runner.Run(ctx, absWorkDir, opts.AtlasBinary, hashArgs, opts.Stderr, opts.Stderr); err != nil {
+	hints := newHintWriter(opts.Stderr)
+	hashErr := opts.runner.Run(ctx, absWorkDir, opts.AtlasBinary, hashArgs, hints, hints)
+	hints.Flush()
+	if err := hashErr; err != nil {
 		// Unlike `atlas migrate diff`, which writes the file and the sum together,
 		// this path writes the SQL itself. Leaving it unhashed would make the
 		// directory unappliable, and rerunning after installing Atlas would add a

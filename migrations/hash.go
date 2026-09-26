@@ -28,7 +28,10 @@ func Hash(ctx context.Context, opts ApplyOptions) error {
 		return fmt.Errorf("migrations: resolve work dir: %w", err)
 	}
 	args := []string{"migrate", "hash", "--dir", "file://" + filepath.ToSlash(migrationDir)}
-	if err := opts.runner.Run(ctx, absWorkDir, opts.AtlasBinary, args, opts.Stdout, opts.Stderr); err != nil {
+	hints := newHintWriter(opts.Stderr)
+	err = opts.runner.Run(ctx, absWorkDir, opts.AtlasBinary, args, opts.Stdout, hints)
+	hints.Flush()
+	if err != nil {
 		return fmt.Errorf("migrations: atlas migrate hash: %w", err)
 	}
 	_, _ = fmt.Fprintln(opts.Stdout, "Rehashed the migration directory (atlas.sum).")

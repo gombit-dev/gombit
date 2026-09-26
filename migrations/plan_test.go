@@ -65,7 +65,8 @@ func TestMakeMigrationsGateRefusalWritesNothing(t *testing.T) {
 	runner := &planRunner{t: t}
 	forget := []Model{{ImportPath: "example.com/app/internal/product", TypeName: "Product"}}
 	var got Inspection
-	var gotName string
+	var gotName, gotSQL string
+	writeFile(t, filepath.Join(migrationDir, "atlas.sum"), "h1:seeded\n")
 	refusal := errors.New("refused")
 	err := MakeMigrations(context.Background(), Options{
 		WorkDir:      t.TempDir(),
@@ -75,9 +76,11 @@ func TestMakeMigrationsGateRefusalWritesNothing(t *testing.T) {
 		AtlasBinary:  "atlas-test",
 		Models:       []Model{{ImportPath: "example.com/app/internal/order", TypeName: "Order"}},
 		ForgetModels: forget,
-		Gate: func(_ context.Context, name string, in Inspection) error {
-			gotName, got = name, in
-			return refusal
+		Gate: func(_ context.Context, name string, in Inspection, sql string) ([]string, error) {
+			gotName, got, gotSQL = name, in, sql
+			// A failing Atlas may have rewritten atlas.sum by now.
+			_ = os.WriteFile(filepath.Join(migrationDir, "atlas.sum"), []byte("partial garbage\n"), 0o600)
+			return nil, refusal
 		},
 		Stdout: io.Discard,
 		Stderr: io.Discard,
@@ -86,8 +89,16 @@ func TestMakeMigrationsGateRefusalWritesNothing(t *testing.T) {
 	if !errors.Is(err, refusal) {
 		t.Fatalf("MakeMigrations() error = %v, want the gate's refusal", err)
 	}
-	if runner.diffed {
-		t.Fatal("atlas migrate diff ran after the gate refused")
+	// The gate reads the SQL Atlas wrote, so the diff runs; the refusal
+	// takes the migration back out and restores atlas.sum.
+	if !runner.diffed {
+		t.Fatal("atlas migrate diff did not run; the gate classifies its SQL")
+	}
+	if gotSQL != "-- fake\n\n" {
+		t.Fatalf("gate got SQL %q, want the migration Atlas wrote", gotSQL)
+	}
+	if got, _ := os.ReadFile(filepath.Join(migrationDir, "atlas.sum")); string(got) != "h1:seeded\n" { // #nosec G304 -- test file
+		t.Fatalf("atlas.sum after a refusal = %q, want it restored", got)
 	}
 	if gotName != "reshape_products" || string(got.Current) != fakeCurrentHCL || string(got.Desired) != fakeDesiredHCL || got.Driver != config.DatabaseDriverSQLite {
 		t.Fatalf("gate got name %q and %+v, want both inspected states", gotName, got)
@@ -119,7 +130,7 @@ func TestMakeMigrationsGatePassWritesMigration(t *testing.T) {
 		Driver:       config.DatabaseDriverSQLite,
 		MigrationDir: migrationDir,
 		AtlasBinary:  "atlas-test",
-		Gate:         func(context.Context, string, Inspection) error { return nil },
+		Gate:         func(context.Context, string, Inspection, string) ([]string, error) { return nil, nil },
 		Stdout:       io.Discard,
 		Stderr:       io.Discard,
 		runner:       runner,
@@ -138,7 +149,9 @@ func TestMakeMigrationsGateSkippedBeforeFirstMigrationAndWhenNil(t *testing.T) {
 		seed bool
 		gate Gate
 	}{
-		{name: "first migration", seed: false, gate: func(context.Context, string, Inspection) error { return errors.New("gate must not run") }},
+		{name: "first migration", seed: false, gate: func(context.Context, string, Inspection, string) ([]string, error) {
+			return nil, errors.New("gate must not run")
+		}},
 		{name: "nil gate", seed: true, gate: nil},
 	}
 	for _, tc := range cases {
