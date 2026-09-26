@@ -59,6 +59,24 @@ jobs:
           go mod download
           go mod verify
 
+      # The default suite shells out to Node: resourcegen typechecks with the
+      # adminui typescript binary, and client generation runs npx. Mirror the
+      # Node setup in ci.yml's test job; keep the two in sync.
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      - name: Run admin UI tests
+        working-directory: internal/adminui
+        run: npm ci && npm test
+
+      # Parallel packages all shell out to npx; a cold _npx extract races
+      # (TAR_ENTRY_ERROR / missing json-schema-traverse) and fails client
+      # generation tests.
+      - name: Warm npx openapi-typescript cache
+        run: npx --yes openapi-typescript@7.13.0 --help >/dev/null
+
       # Gate the release on the same suite CI runs on main. The database,
       # migration, and conformance matrices are integration-tagged and stay in
       # ci.yml; this is the default suite.
