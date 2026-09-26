@@ -127,7 +127,7 @@ var catalog = []Spec{
 	{Kind: DateTime, GoType: "time.Time", GeneratorReady: true, CLITokens: []string{"time", "datetime"}, AdminWire: "datetime", Sortable: true},
 	{Kind: TimeOfDay, Sortable: true},
 	{Kind: Duration, CLITokens: []string{"duration"}, Sortable: true},
-	{Kind: UUID, GoType: "uuid.UUID", GeneratorReady: true, CLITokens: []string{"uuid"}, AdminWire: "uuid", Sortable: true},
+	{Kind: UUID, GoType: "uuid.UUID", GeneratorReady: true, CLITokens: []string{"uuid"}, AdminWire: "uuid", Filterable: true, Sortable: true},
 	{Kind: JSON, GoType: "types.JSON", GeneratorReady: true, CLITokens: []string{"json"}, AdminWire: "json"},
 	{Kind: Email, GoType: "string", GeneratorReady: true, CLITokens: []string{"email"}, AdminWire: "string", Sortable: true, Searchable: true},
 	{Kind: URL, GoType: "string", GeneratorReady: true, CLITokens: []string{"url"}, AdminWire: "string", Sortable: true},

@@ -304,7 +304,10 @@ portable across SQLite, PostgreSQL, and MySQL) plus `CreatedAt`, `UpdatedAt`,
 and `DeletedAt`. The model sets the id in `BeforeCreate` when it is still
 `uuid.Nil`. Composite primary keys are rejected. A `belongs_to` foreign key
 uses the target model's primary key when that model is already on disk, and
-`uint` when it is not.
+`uint` when it is not. A model on disk whose key is not `uint` or `uuid.UUID`
+is rejected. The foreign key stays filterable, so
+`GET /children?<fk>=<id>` lists a parent's rows for a UUID key the same way
+it does for `uint`.
 
 `make` is a Cobra parent (`AddCommand`); `resource` is the subcommand. Root
 help lists `make`.

@@ -177,7 +177,6 @@ func dtoFields(fields []Field) []Field {
 				GoName:   f.fkGoName(),
 				Type:     f.fkDTOType(),
 				GoType:   f.fkColumnGoType(),
-				Required: f.fkDTOType() == FieldUUID,
 			})
 			continue
 		}
@@ -537,7 +536,7 @@ func applyModifiers(field *Field, raw string) error {
 		return fmt.Errorf("resourcegen: field %q cannot be both required and nullable", field.JSONName)
 	}
 	if field.Filterable && !field.typeAllowsFilter() {
-		return fmt.Errorf("resourcegen: field %q is %s and cannot be filterable (supported: string, int, int64, uint, bool, enum, belongs_to)", field.JSONName, field.Type)
+		return fmt.Errorf("resourcegen: field %q is %s and cannot be filterable (supported: string, int, int64, uint, bool, uuid, enum, belongs_to)", field.JSONName, field.Type)
 	}
 	if field.Searchable && !field.typeAllowsSearch() {
 		return fmt.Errorf("resourcegen: field %q is %s and cannot be searchable (supported: string, text, enum, email, slug)", field.JSONName, field.Type)
@@ -1260,6 +1259,15 @@ func (f Field) blankIsNull() bool {
 	default:
 		return false
 	}
+}
+
+// omitBlankUUID reports a non-pointer uuid.UUID that is not required. A
+// belongs_to UUID foreign key is that shape: blank omits the key so the
+// create body zero-fills uuid.Nil, the same way a uint foreign key zero-fills
+// 0. JSON null is rejected because the column is not a pointer. Optional
+// scalar UUIDs are *uuid.UUID and still submit null.
+func (f Field) omitBlankUUID() bool {
+	return f.Type == FieldUUID && !f.Required && !strings.HasPrefix(f.GoType, "*")
 }
 
 // enumColumnSize sizes the varchar column to hold the longest allowed value,

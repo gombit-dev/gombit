@@ -85,7 +85,7 @@ list columns are a declared subset. Add modifiers to the field grammar:
 
 | Modifier     | Query parameter                          | Types                                |
 | ------------ | ---------------------------------------- | ------------------------------------ |
-| `filterable` | `?<field>=<value>` (exact match)         | string, int, int64, uint, bool       |
+| `filterable` | `?<field>=<value>` (exact match)         | string, int, int64, uint, bool, uuid |
 | `sortable`   | `?ordering=<field>` (`-<field>` for DESC) | any scalar (and belongs_to FK)       |
 | `searchable` | `?search=<term>` (case-insensitive LIKE) | string, text, email, slug            |
 

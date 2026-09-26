@@ -67,7 +67,7 @@ query surface (safe, indexable subset). The query spelling matches Gombit's
 admin data plane so the two contracts stay in sync:
 
   filterable         exact-match ?<field>=<value> query param.
-                     Types: string, int, int64, uint, bool. A belongs_to
+                     Types: string, int, int64, uint, bool, uuid. A belongs_to
                      foreign key is filterable by default (GET /children?
                      <parent>_id=<id>) with no modifier needed.
   sortable           ?ordering=<field> (prefix with - for DESC, e.g.
@@ -106,7 +106,8 @@ foreign key / explicit join keys. Point relations at a different package.
 application-assigned uuid.UUID plus CreatedAt, UpdatedAt, and DeletedAt).
 Composite primary keys are rejected. A belongs_to foreign key uses the
 target model's primary key when that model is already on disk, and uint
-otherwise.
+otherwise. A model on disk whose key is not uint or uuid.UUID is rejected.
+The foreign key stays filterable (GET /children?<fk>=<id>) for both.
 
 Examples:
 

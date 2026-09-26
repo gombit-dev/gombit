@@ -240,15 +240,15 @@ func targetImports(ctx renderContext) []string {
 func modelFieldLines(f Field, resourcePkg string) string {
 	switch f.Type {
 	case FieldBelongsTo:
-		// The foreign key is the persisted column: read+write content and, as in the
-		// legacy generator, filterable by default when it is a uint (the has_many
-		// detail-list case, GET /children?<parent>_id=<id>). A uuid foreign key is
-		// sortable, not filterable. The association object is not a column.
+		// The foreign key is the persisted column: read+write content and filterable
+		// by default (the has_many detail-list case, GET /children?<parent>_id=<id>).
+		// A uuid foreign key is an exact-match filter on the canonical char(36)
+		// text, the same list contract as a uint foreign key. The association
+		// object is not a column.
 		fkGorm := "index"
 		policy := "read,write,filterable"
 		if f.FKGoType == "uuid.UUID" {
 			fkGorm = "type:char(36);index"
-			policy = "read,write,sortable"
 		}
 		return "\t" + f.fkGoName() + " " + f.fkColumnGoType() + structTag(fkGorm, policy, "") + "\n" +
 			"\t" + f.GoName + " " + f.GoType + "\n"
@@ -309,13 +309,37 @@ func structTag(gormPart, gombitPart, validatePart string) string {
 	return " `" + strings.Join(parts, " ") + "`"
 }
 
+func passThroughImports(strategy idStrategy) string {
+	if strategy == idUUID {
+		return "import (\n\t\"context\"\n\n\t\"github.com/google/uuid\"\n\t\"gorm.io/gorm\"\n)\n\n"
+	}
+	return "import (\n\t\"context\"\n\n\t\"gorm.io/gorm\"\n)\n\n"
+}
+
+// idGoType and idLookup are the primary-key type and the GORM First call that
+// loads one row by that key. A uuid is not an integer, so First must compare
+// the column instead of treating the argument as a numeric primary key.
+func idGoType(strategy idStrategy) string {
+	if strategy == idUUID {
+		return "uuid.UUID"
+	}
+	return "uint"
+}
+
+func idLookup(strategy idStrategy) string {
+	if strategy == idUUID {
+		return `First(&row, "id = ?", id)`
+	}
+	return "First(&row, id)"
+}
+
 func renderService(ctx renderContext) string {
 	typ := ctx.Resource.TypeName
 	pkg := ctx.Resource.Package
 	var b strings.Builder
 	b.WriteString(goBanner())
 	b.WriteString("package " + pkg + "\n\n")
-	b.WriteString("import (\n\t\"context\"\n\n\t\"gorm.io/gorm\"\n)\n\n")
+	b.WriteString(passThroughImports(ctx.IDStrategy))
 	b.WriteString("// Service is an opt-in pass-through over GORM (--service). The generated\n")
 	b.WriteString("// handler stays thin over GORM; this type exists so the file compiles.\n")
 	b.WriteString("type Service struct {\n\tDB *gorm.DB\n}\n\n")
@@ -324,9 +348,9 @@ func renderService(ctx renderContext) string {
 	b.WriteString("\tvar rows []" + typ + "\n")
 	b.WriteString("\terr := s.DB.WithContext(ctx).Order(\"id\").Find(&rows).Error\n")
 	b.WriteString("\treturn rows, err\n}\n\n")
-	b.WriteString("func (s *Service) Get(ctx context.Context, id uint) (" + typ + ", error) {\n")
+	b.WriteString("func (s *Service) Get(ctx context.Context, id " + idGoType(ctx.IDStrategy) + ") (" + typ + ", error) {\n")
 	b.WriteString("\tvar row " + typ + "\n")
-	b.WriteString("\terr := s.DB.WithContext(ctx).First(&row, id).Error\n")
+	b.WriteString("\terr := s.DB.WithContext(ctx)." + idLookup(ctx.IDStrategy) + ".Error\n")
 	b.WriteString("\treturn row, err\n}\n\n")
 	b.WriteString("func (s *Service) Create(ctx context.Context, row *" + typ + ") error {\n")
 	b.WriteString("\treturn s.DB.WithContext(ctx).Create(row).Error\n}\n")
@@ -339,7 +363,7 @@ func renderRepo(ctx renderContext) string {
 	var b strings.Builder
 	b.WriteString(goBanner())
 	b.WriteString("package " + pkg + "\n\n")
-	b.WriteString("import (\n\t\"context\"\n\n\t\"gorm.io/gorm\"\n)\n\n")
+	b.WriteString(passThroughImports(ctx.IDStrategy))
 	b.WriteString("// Repo is an opt-in pass-through over GORM (--repo). Prefer the runtime\n")
 	b.WriteString("// repository.New[T] helper instead of growing this file (D9).\n")
 	b.WriteString("type Repo struct {\n\tDB *gorm.DB\n}\n\n")
@@ -348,9 +372,9 @@ func renderRepo(ctx renderContext) string {
 	b.WriteString("\tvar rows []" + typ + "\n")
 	b.WriteString("\terr := r.DB.WithContext(ctx).Order(\"id\").Find(&rows).Error\n")
 	b.WriteString("\treturn rows, err\n}\n\n")
-	b.WriteString("func (r *Repo) Get(ctx context.Context, id uint) (" + typ + ", error) {\n")
+	b.WriteString("func (r *Repo) Get(ctx context.Context, id " + idGoType(ctx.IDStrategy) + ") (" + typ + ", error) {\n")
 	b.WriteString("\tvar row " + typ + "\n")
-	b.WriteString("\terr := r.DB.WithContext(ctx).First(&row, id).Error\n")
+	b.WriteString("\terr := r.DB.WithContext(ctx)." + idLookup(ctx.IDStrategy) + ".Error\n")
 	b.WriteString("\treturn row, err\n}\n\n")
 	b.WriteString("func (r *Repo) Create(ctx context.Context, row *" + typ + ") error {\n")
 	b.WriteString("\treturn r.DB.WithContext(ctx).Create(row).Error\n}\n")
@@ -558,9 +582,18 @@ func renderMinimalFormTSX(ctx renderContext) string {
 	b.WriteString("  async function onSubmit(values: FormValues) {\n")
 	b.WriteString("    setStatus(\"\");\n")
 	bodyExpr := "values as CreateBody"
-	if jsonNames := jsonFieldNames(ctx.Fields); len(jsonNames) > 0 {
+	jsonNames := jsonFieldNames(ctx.Fields)
+	omitNames := omitBlankUUIDNames(ctx.Fields)
+	if len(jsonNames) > 0 || len(omitNames) > 0 {
 		b.WriteString("    const body: Record<string, unknown> = { ...values };\n")
-		b.WriteString(tsParseJSONFields(jsonNames))
+		if len(jsonNames) > 0 {
+			b.WriteString(tsParseJSONFields(jsonNames))
+		}
+		if len(omitNames) > 0 {
+			b.WriteString("    " + tsStringArray(omitNames) + ".forEach((key) => {\n")
+			b.WriteString("      if (body[key] == null || body[key] === \"\") delete body[key];\n")
+			b.WriteString("    });\n")
+		}
 		bodyExpr = "body as CreateBody"
 	}
 	b.WriteString("    try {\n")
@@ -598,6 +631,16 @@ func jsonFieldNames(fields []Field) []string {
 	var names []string
 	for _, field := range fields {
 		if field.Type == FieldJSON {
+			names = append(names, field.JSONName)
+		}
+	}
+	return names
+}
+
+func omitBlankUUIDNames(fields []Field) []string {
+	var names []string
+	for _, field := range fields {
+		if field.omitBlankUUID() {
 			names = append(names, field.JSONName)
 		}
 	}
@@ -774,10 +817,17 @@ func renderFormField(field Field) string {
 	case FieldInt, FieldInt64, FieldUint, FieldFloat:
 		b.WriteString("          <input type=\"number\" {...register(\"" + field.JSONName + "\", { setValueAs: (value) => (value === \"\" ? 0 : Number(value))" + tsNumberRules(field) + " })}" + htmlNumberAttrs(field) + " />\n")
 	case FieldDate, FieldUUID:
-		// Empty is null. Format date/uuid rejects "".
+		// Empty is null for a pointer date or uuid, and for a required uuid.
+		// A non-pointer optional uuid (a belongs_to foreign key) is a plain
+		// text input; onSubmit drops a blank so the body omits the key instead
+		// of sending null.
 		inputType := "text"
 		if field.Type == FieldDate {
 			inputType = "date"
+		}
+		if field.omitBlankUUID() {
+			b.WriteString("          <input type=\"text\" {...register(\"" + field.JSONName + "\")} />\n")
+			break
 		}
 		b.WriteString("          <input type=\"" + inputType + "\" {...register(\"" + field.JSONName + "\", { setValueAs: (value) => (value === \"\" ? null : value)")
 		if field.Required {
@@ -1006,12 +1056,15 @@ func renderMUIFormTSX(ctx renderContext) string {
 	b.WriteString("  });\n\n")
 	var timeNames, emptyNullNames []string
 	jsonNames := jsonFieldNames(ctx.Fields)
+	omitNames := omitBlankUUIDNames(ctx.Fields)
 	for _, field := range ctx.Fields {
 		switch field.Type {
 		case FieldTime:
 			timeNames = append(timeNames, field.JSONName)
 		case FieldDecimal, FieldDate, FieldUUID:
-			emptyNullNames = append(emptyNullNames, field.JSONName)
+			if !field.omitBlankUUID() {
+				emptyNullNames = append(emptyNullNames, field.JSONName)
+			}
 		default:
 			if field.blankIsNull() {
 				emptyNullNames = append(emptyNullNames, field.JSONName)
@@ -1021,7 +1074,7 @@ func renderMUIFormTSX(ctx renderContext) string {
 	b.WriteString("  async function onSubmit(values: FormValues) {\n")
 	b.WriteString("    setStatus(\"\");\n")
 	bodyExpr := "values as CreateBody"
-	if len(timeNames) > 0 || len(emptyNullNames) > 0 || len(jsonNames) > 0 {
+	if len(timeNames) > 0 || len(emptyNullNames) > 0 || len(jsonNames) > 0 || len(omitNames) > 0 {
 		b.WriteString("    const body: Record<string, unknown> = { ...values };\n")
 		if len(timeNames) > 0 {
 			// Local datetime-local -> RFC3339 UTC; empty -> null (optional field).
@@ -1035,6 +1088,13 @@ func renderMUIFormTSX(ctx renderContext) string {
 			// rejects "" for date and uuid.
 			b.WriteString("    " + tsStringArray(emptyNullNames) + ".forEach((key) => {\n")
 			b.WriteString("      if (body[key] == null || body[key] === \"\") body[key] = null;\n")
+			b.WriteString("    });\n")
+		}
+		if len(omitNames) > 0 {
+			// A non-pointer uuid foreign key is not nullable. Drop a blank so
+			// the create body omits it and the column keeps uuid.Nil.
+			b.WriteString("    " + tsStringArray(omitNames) + ".forEach((key) => {\n")
+			b.WriteString("      if (body[key] == null || body[key] === \"\") delete body[key];\n")
 			b.WriteString("    });\n")
 		}
 		if len(jsonNames) > 0 {
@@ -1240,7 +1300,11 @@ func renderMUIFormField(field Field) string {
 		b.WriteString("                disabled={isSubmitting}\n")
 		b.WriteString("                onChange={(event) => {\n")
 		b.WriteString("                  const raw = event.target.value;\n")
-		b.WriteString("                  field.onChange(raw === \"\" ? null : raw);\n")
+		if field.omitBlankUUID() {
+			b.WriteString("                  field.onChange(raw);\n")
+		} else {
+			b.WriteString("                  field.onChange(raw === \"\" ? null : raw);\n")
+		}
 		b.WriteString("                }}\n")
 		b.WriteString("              />\n")
 	case FieldJSON:

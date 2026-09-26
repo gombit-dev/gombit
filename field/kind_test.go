@@ -94,6 +94,9 @@ func TestRelationTokens(t *testing.T) {
 	if !ok || !spec.GeneratorReady {
 		t.Fatal("relation is generated today; GeneratorReady must be set")
 	}
+	if !AllowsFilter(UUID, "") || !AllowsSort(UUID, "") || AllowsSearch(UUID, "") {
+		t.Fatal("uuid must be an exact-match filter and sortable, not searchable")
+	}
 	if AllowsFilter(Relation, RelBelongsTo) != true {
 		t.Fatal("belongs_to should be filterable")
 	}
