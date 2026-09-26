@@ -456,3 +456,63 @@ func keysOf(m map[string]PlanStep) []string {
 	}
 	return out
 }
+
+// TestRebuildWindowMustBeContiguous: the copy, the drop, and the rename back
+// are Atlas's rebuild only when nothing sits between them.
+func TestRebuildWindowMustBeContiguous(t *testing.T) {
+	items := func(def string) string {
+		return "table \"items\" {\n  schema = schema.main\n  column \"id\" {\n    null = false\n    type = integer\n  }\n" +
+			"  column \"name\" {\n    null    = false\n    type    = text\n    default = \"" + def + "\"\n  }\n" +
+			"  column \"code\" {\n    null = true\n    type = text\n  }\n  primary_key {\n    columns = [column.id]\n  }\n}\nschema \"main\" {}\n"
+	}
+	create := "CREATE TABLE `new_items` (`id` integer NOT NULL, `name` text NOT NULL DEFAULT 'changed', `code` text, PRIMARY KEY (`id`));\n"
+	copyRows := "INSERT INTO `new_items` (`id`, `name`, `code`) SELECT `id`, `name`, `code` FROM `items`;\n"
+	drop := "DROP TABLE `items`;\n"
+	rename := "ALTER TABLE `new_items` RENAME TO `items`;\n"
+	cases := []struct {
+		name        string
+		sql         string
+		dropFinding bool
+		extraID     string
+	}{
+		{"the rebuild alone", create + copyRows + drop + rename, false, ""},
+		{"INSERT OR REPLACE in the window", create + copyRows + "INSERT OR REPLACE INTO `new_items` (`id`, `name`, `code`) SELECT `id`, 'gone', `code` FROM `items`;\n" + drop + rename, true, "data_change:new_items"},
+		{"UPDATE in the window", create + copyRows + "UPDATE `new_items` SET `name` = 'gone';\n" + drop + rename, true, "data_change:new_items"},
+		{"a statement between the drop and the rename", create + copyRows + drop + "CREATE INDEX `idx_x` ON `new_items` (`code`);\n" + rename, true, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			steps := lintSteps(t, config.DatabaseDriverSQLite, items("keep"), items("changed"), tc.sql)
+			s, ok := steps["drop_table:items"]
+			if tc.dropFinding != (ok && s.NeedsAcknowledgement()) {
+				t.Fatalf("steps = %v, want drop_table:items finding = %v", keysOf(steps), tc.dropFinding)
+			}
+			if tc.extraID != "" {
+				if s, ok := steps[tc.extraID]; !ok || !s.NeedsAcknowledgement() {
+					t.Fatalf("steps = %v, want an unacknowledged %s", keysOf(steps), tc.extraID)
+				}
+			}
+		})
+	}
+}
+
+func TestUpsertIsADataChange(t *testing.T) {
+	for _, stmt := range []string{
+		"INSERT OR REPLACE INTO items (id, name) VALUES (1, 'x')",
+		"INSERT INTO items (id, name) VALUES (1, 'x') ON CONFLICT (id) DO UPDATE SET name = excluded.name",
+		"INSERT INTO `items` (`id`, `name`) VALUES (1, 'x') ON DUPLICATE KEY UPDATE `name` = VALUES(`name`)",
+	} {
+		if table, ok := upsertTable(stmt); !ok || table != "items" {
+			t.Errorf("upsertTable(%q) = %q, %v; want items", stmt, table, ok)
+		}
+	}
+	for _, stmt := range []string{
+		"INSERT INTO items (id, name) VALUES (1, 'x')",
+		"INSERT INTO `new_items` (`id`) SELECT `id` FROM `items`",
+		"INSERT INTO items (id) VALUES (1) ON CONFLICT DO NOTHING",
+	} {
+		if _, ok := upsertTable(stmt); ok {
+			t.Errorf("upsertTable(%q) matched an insert that overwrites nothing", stmt)
+		}
+	}
+}

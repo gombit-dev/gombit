@@ -316,14 +316,16 @@ gombit db lint --latest 1    # only the newest, a local shortcut
   [`gombit db plan`](#planning-a-change), from the schema before and after it,
   and from its own statements with the fail-safe
   [statement classifier](migration-safety.md): `DELETE`, `UPDATE`,
-  `TRUNCATE`, a `DROP TABLE` the schema does not show (a table dropped and
+  `TRUNCATE`, an upsert (`INSERT OR REPLACE`, `ON CONFLICT ... DO UPDATE`,
+  `ON DUPLICATE KEY UPDATE`), a `DROP TABLE` the schema does not show (a table dropped and
   re-created), an `ALTER COLUMN ... USING` expression (it rewrites every
   value), an `ALTER COLUMN` with no visible change, and SQL Gombit cannot
   classify are all destructive or unsafe. A statement the schema diff already
   explains does not count twice: the column drop it reports, an `ALTER COLUMN`
   without `USING` whose change the diff classifies, and Atlas's own SQLite
-  rebuild (an exact column copy into `new_<table>`, the drop, the rename back,
-  with the change that caused it in the diff). A destructive or unsafe step passes only when the migration
+  rebuild (a copy of every surviving column into `new_<table>`, the drop, and
+  the rename back, as three contiguous statements, with the change that caused
+  it in the diff). A destructive or unsafe step passes only when the migration
   carries a line for it:
 
   ```sql

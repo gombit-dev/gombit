@@ -138,6 +138,10 @@ var (
 	// Atlas's SQLite rebuild copy: INSERT INTO new_X (a, b) SELECT a, b FROM X.
 	reRebuildCopy = regexp.MustCompile(`(?is)^\s*INSERT\s+INTO\s+` + ident + `\s*\(([^)]*)\)\s*SELECT\s+(.*?)\s+FROM\s+` + ident + `\s*$`)
 	reUsing       = regexp.MustCompile(`(?is)\bUSING\b`)
+	// An INSERT that overwrites rows: INSERT OR REPLACE / OR UPDATE, or an
+	// upsert clause (ON CONFLICT ... DO UPDATE, ON DUPLICATE KEY UPDATE).
+	reInsertOrReplace = regexp.MustCompile(`(?is)^\s*INSERT\s+OR\s+(?:REPLACE|UPDATE)\s+INTO\s+` + ident)
+	reUpsertClause    = regexp.MustCompile(`(?is)^\s*INSERT\s+INTO\s+` + ident + `.*\b(?:ON\s+CONFLICT\b.*\bDO\s+UPDATE|ON\s+DUPLICATE\s+KEY\s+UPDATE)\b`)
 )
 
 // rebuildCopySource returns X when stmt is an Atlas-style rebuild copy into
@@ -220,25 +224,24 @@ func withStatementFindings(steps []PlanStep, sql string, desired *schema.Realm) 
 		}
 	}
 	// exemptDrop reports whether the DROP TABLE at index i is the middle of
-	// Atlas's SQLite rebuild of X: a copy into new_X before it that selects
-	// every column X still has afterwards (new ones aside), the rename of
-	// new_X back to X after it, and a plan step that accounts for the
-	// rebuild. Each copy exempts one drop. An empty diff means nothing was
-	// rebuilt, so the drop stands.
+	// Atlas's SQLite rebuild of X: three contiguous statements, the copy into
+	// new_X that selects every column X still has afterwards (new ones
+	// aside), this drop, and the rename of new_X back to X, plus a plan step
+	// that accounts for the rebuild. Nothing may sit between them: a
+	// statement in that window could replace the copied rows. An empty diff
+	// means nothing was rebuilt, so the drop stands.
 	copies := map[string]int{}
 	exemptDrop := func(i int, table string) bool {
 		c, ok := copies[table]
-		if !ok || c >= i || !tableAccounted[table] {
+		if !ok || c != i-1 || !tableAccounted[table] || i+1 >= len(stmts) {
 			return false
 		}
-		for _, stmt := range stmts[i+1:] {
-			m := reRenameTableTo.FindStringSubmatch(stmt)
-			if m != nil && unquote(m[1]) == "new_"+table && unquote(m[2]) == table {
-				delete(copies, table)
-				return true
-			}
+		m := reRenameTableTo.FindStringSubmatch(stmts[i+1])
+		if m == nil || unquote(m[1]) != "new_"+table || unquote(m[2]) != table {
+			return false
 		}
-		return false
+		delete(copies, table)
+		return true
 	}
 
 	dropped := map[string]bool{}
@@ -266,6 +269,12 @@ func withStatementFindings(steps []PlanStep, sql string, desired *schema.Realm) 
 	for i, stmt := range stmts {
 		if src, ok := rebuildCopySource(stmt, desired, added); ok {
 			copies[src] = i
+		}
+		// An upsert overwrites rows that already exist. The HOST-3 classifier
+		// reads any INSERT as additive, so lint catches it here.
+		if table, ok := upsertTable(stmt); ok {
+			add(newStep(StepDataChange, SeverityDestructive, table, "", fmt.Sprintf("The migration overwrites existing rows in %s (%s).", table, firstWords(stmt))))
+			continue
 		}
 		if m := reAlterTableBody.FindStringSubmatch(stmt); m != nil {
 			table := unquote(m[1])
@@ -383,6 +392,16 @@ func classifyAction(action string) alterAction {
 		return alterAction{kind: actionUnknownDrop}
 	}
 	return alterAction{kind: actionOther}
+}
+
+// upsertTable returns the table an overwriting INSERT writes.
+func upsertTable(stmt string) (string, bool) {
+	for _, re := range []*regexp.Regexp{reInsertOrReplace, reUpsertClause} {
+		if m := re.FindStringSubmatch(stmt); m != nil {
+			return unquote(m[1]), true
+		}
+	}
+	return "", false
 }
 
 func firstWords(stmt string) string {
