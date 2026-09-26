@@ -285,11 +285,11 @@ func TestLintDefaultCoversEveryMigrationAtlasCLISQLiteWhenAvailable(t *testing.T
 // findings.
 func lintSteps(t *testing.T, driver config.DatabaseDriver, current, desired, sql string) map[string]PlanStep {
 	t.Helper()
-	plan, err := BuildWithRenames(migrations.Inspection{Driver: driver, Current: []byte(current), Desired: []byte(desired)}, DeclaredRenames(sql))
+	plan, after, err := buildWithRenames(migrations.Inspection{Driver: driver, Current: []byte(current), Desired: []byte(desired)}, DeclaredRenames(sql))
 	if err != nil {
 		t.Fatal(err)
 	}
-	return stepsByID(withStatementFindings(plan.Steps, sql))
+	return stepsByID(withStatementFindings(plan.Steps, sql, after))
 }
 
 func pgProducts(col, typ, def string) string {
@@ -386,4 +386,73 @@ func TestRebuildExemptionIsExact(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestPartialRebuildCopyIsNotACopy: a copy into new_X that leaves out a column
+// X still has afterwards empties that column in every row.
+func TestPartialRebuildCopyIsNotACopy(t *testing.T) {
+	items := func(def string) string {
+		return "table \"items\" {\n  schema = schema.main\n  column \"id\" {\n    null = false\n    type = integer\n  }\n" +
+			"  column \"name\" {\n    null    = false\n    type    = text\n    default = \"" + def + "\"\n  }\n" +
+			"  column \"code\" {\n    null = true\n    type = text\n  }\n  primary_key {\n    columns = [column.id]\n  }\n}\nschema \"main\" {}\n"
+	}
+	sql := "CREATE TABLE `new_items` (`id` integer NOT NULL, `name` text NOT NULL DEFAULT 'changed', `code` text, PRIMARY KEY (`id`));\n" +
+		"INSERT INTO `new_items` (`id`, `name`) SELECT `id`, `name` FROM `items`;\n" +
+		"DROP TABLE `items`;\n" +
+		"ALTER TABLE `new_items` RENAME TO `items`;\n"
+	steps := lintSteps(t, config.DatabaseDriverSQLite, items("keep"), items("changed"), sql)
+	if s, ok := steps["drop_table:items"]; !ok || !s.NeedsAcknowledgement() {
+		t.Fatalf("steps = %v, want drop_table:items: the copy leaves code out", keysOf(steps))
+	}
+	full := strings.Replace(sql, "INSERT INTO `new_items` (`id`, `name`) SELECT `id`, `name` FROM `items`", "INSERT INTO `new_items` (`id`, `name`, `code`) SELECT `id`, `name`, `code` FROM `items`", 1)
+	if _, ok := lintSteps(t, config.DatabaseDriverSQLite, items("keep"), items("changed"), full)["drop_table:items"]; ok {
+		t.Fatal("a copy of every surviving column is the rebuild and must not count as a drop")
+	}
+}
+
+// TestUsingBesideDropColumn: every action of an ALTER TABLE is read, so a
+// USING rewrite is not hidden by a DROP COLUMN in the same statement, and
+// acknowledging the drop does not acknowledge the rewrite.
+func TestUsingBesideDropColumn(t *testing.T) {
+	current := "table \"products\" {\n  schema = schema.public\n  column \"id\" {\n    null = false\n    type = bigint\n  }\n  column \"name\" {\n    null = true\n    type = character_varying(255)\n  }\n  column \"legacy\" {\n    null = true\n    type = text\n  }\n  primary_key {\n    columns = [column.id]\n  }\n}\nschema \"public\" {}\n"
+	desired := pgProducts("name", "text", "")
+	for _, sql := range []string{
+		"ALTER TABLE products ALTER COLUMN name TYPE text USING left(name, 1), DROP COLUMN legacy;",
+		"ALTER TABLE products DROP COLUMN legacy, ALTER COLUMN name TYPE text USING left(name, 1);",
+	} {
+		steps := lintSteps(t, config.DatabaseDriverPostgres, current, desired, sql)
+		if s, ok := steps["alter_column:products.name"]; !ok || s.Severity != SeverityDestructive {
+			t.Fatalf("%s: steps = %v, want alter_column:products.name destructive", sql, keysOf(steps))
+		}
+		for id := range steps {
+			if strings.HasSuffix(id, ",") {
+				t.Fatalf("%s: step id %q keeps the comma", sql, id)
+			}
+		}
+		plan := SchemaPlan{}
+		for _, s := range steps {
+			plan.Steps = append(plan.Steps, s)
+		}
+		plan.Acknowledge([]string{"drop_column:products.legacy"})
+		pending := plan.Unacknowledged()
+		if len(pending) != 1 || pending[0].ID != "alter_column:products.name" {
+			t.Fatalf("%s: after acknowledging the drop, pending = %v; want the rewrite", sql, stepIDs(pending))
+		}
+	}
+}
+
+func TestSplitActions(t *testing.T) {
+	got := splitActions("ADD COLUMN c numeric(10,2) DEFAULT 1, ALTER COLUMN d TYPE text USING concat(d, ','), DROP COLUMN e")
+	want := []string{"ADD COLUMN c numeric(10,2) DEFAULT 1", "ALTER COLUMN d TYPE text USING concat(d, ',')", "DROP COLUMN e"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("splitActions() = %q, want %q", got, want)
+	}
+}
+
+func keysOf(m map[string]PlanStep) []string {
+	var out []string
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
 }
