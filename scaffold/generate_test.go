@@ -1424,3 +1424,22 @@ func TestGenerateBootstrapApplyFailureHintsInsteadOfFailing(t *testing.T) {
 		t.Fatalf("stdout = %q, want the underlying error surfaced", stdout.String())
 	}
 }
+
+// TestStarterProductHardDeletes: the Product every new app starts with has no
+// gorm.Model or soft-delete DeletedAt, so GORM's Delete is a real DELETE
+// (ADR-019).
+func TestStarterProductHardDeletes(t *testing.T) {
+	data, err := templateFS.ReadFile("templates/internal/product/product.go.tmpl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(data)
+	if strings.Contains(src, "gorm.Model") || strings.Contains(src, "gorm.DeletedAt") {
+		t.Fatalf("starter Product soft-deletes:\n%s", src)
+	}
+	for _, want := range []string{"ID        uint `gorm:\"primaryKey\" json:\"id\"`", "CreatedAt time.Time", "UpdatedAt time.Time"} {
+		if !strings.Contains(src, want) {
+			t.Fatalf("starter Product missing %q:\n%s", want, src)
+		}
+	}
+}

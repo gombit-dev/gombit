@@ -77,7 +77,7 @@ curl -s -b jar.txt -X POST http://127.0.0.1:8083/api/v1/tasks \
 {"data":{"id":1,"created_at":"2026-01-02T15:04:05Z","updated_at":"2026-01-02T15:04:05Z","title":"Write the tutorial","done":false}}
 ```
 
-(The model-first response DTO exposes `gorm.Model`'s `created_at`/`updated_at`,
+(The model-first response DTO exposes the model's `created_at`/`updated_at`,
 derived from the model — the hand-written handler this example used to carry
 omitted them.)
 

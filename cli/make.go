@@ -112,8 +112,10 @@ a pointer so a tree root stores NULL. has_many and many_to_many onto the same
 model are rejected: they need explicit join keys. nullable and on_delete on
 those two kinds are rejected, because the foreign key lives on the other model.
 
---id chooses the primary key: uint (the default, gorm.Model) or uuid (an
-application-assigned uuid.UUID plus CreatedAt, UpdatedAt, and DeletedAt).
+--id chooses the primary key: uint (the default, an auto-increment ID) or uuid
+(an application-assigned uuid.UUID). Both come with CreatedAt and UpdatedAt and
+no soft-delete DeletedAt: rows are deleted physically, so the database's ON
+DELETE policy is what deletion does (ADR-019).
 Composite primary keys are rejected. A belongs_to or one_to_one foreign key
 uses the target model's primary key when that model is already on disk, and
 uint when it is not. A self relation uses this resource's --id. A model on
@@ -226,7 +228,7 @@ and generate the SQL later with gombit db makemigrations.`,
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print files that would be written without writing")
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite files that differ from this run")
 	cmd.Flags().BoolVar(&skipMigrations, "skip-migrations", false, "scaffold the resource and registry without generating migration SQL (does not require Atlas)")
-	cmd.Flags().StringVar(&idStrategy, "id", "uint", "primary key strategy: uint (default, gorm.Model) or uuid")
+	cmd.Flags().StringVar(&idStrategy, "id", "uint", "primary key strategy: uint (default, auto-increment) or uuid")
 	return cmd
 }
 

@@ -387,7 +387,7 @@ func parseField(spec, resourcePkg string, lookup pkLookup) (Field, error) {
 		return Field{}, fmt.Errorf("resourcegen: field name %q is not a valid identifier", name)
 	}
 	if _, reserved := reservedFields[jsonName]; reserved {
-		return Field{}, fmt.Errorf("resourcegen: field %q conflicts with gorm.Model", jsonName)
+		return Field{}, fmt.Errorf("resourcegen: field %q conflicts with the model's generated id/created_at/updated_at columns (or a legacy gorm.Model deleted_at)", jsonName)
 	}
 	if _, reserved := reservedQueryFields[jsonName]; reserved {
 		return Field{}, fmt.Errorf("resourcegen: field %q is reserved for the list-query params (page, per_page, search, ordering, aggregate); rename it", jsonName)

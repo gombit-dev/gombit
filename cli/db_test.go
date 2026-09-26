@@ -165,3 +165,21 @@ func TestMakeMigrationsRejectsInvalidTableRename(t *testing.T) {
 		t.Fatalf("error = %v, want the table rename spec format", err)
 	}
 }
+
+// TestMakeResourceHelpDescribesHardDeleteModel: the help describes the model
+// make resource writes, with no gorm.Model or soft-delete DeletedAt (ADR-019).
+func TestMakeResourceHelpDescribesHardDeleteModel(t *testing.T) {
+	stdout, stderr := new(bytes.Buffer), new(bytes.Buffer)
+	if err := ExecuteRoot(context.Background(), NewRoot(stdout, stderr), []string{"make", "resource", "--help"}); err != nil {
+		t.Fatalf("gombit make resource --help: %v", err)
+	}
+	out := stdout.String() + stderr.String()
+	for _, banned := range []string{"gorm.Model", "plus CreatedAt, UpdatedAt, and DeletedAt"} {
+		if strings.Contains(out, banned) {
+			t.Fatalf("help still mentions %q:\n%s", banned, out)
+		}
+	}
+	if !strings.Contains(out, "no soft-delete DeletedAt") {
+		t.Fatalf("help does not say the model has no soft delete:\n%s", out)
+	}
+}

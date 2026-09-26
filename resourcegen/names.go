@@ -55,8 +55,8 @@ var sqlCheckReserved = map[string]struct{}{
 // ordering params (#260) and the aggregate param (#272). A resource field
 // claiming one of these would be emitted as a second list-input struct field
 // with a duplicate `query` tag (e.g. a filterable `page`), so the name is
-// rejected at parse time — the same upfront treatment reservedFields gives
-// gorm.Model columns.
+// rejected at parse time — the same upfront treatment reservedFields gives the
+// model's id and timestamp columns.
 var reservedQueryFields = map[string]struct{}{
 	"page": {}, "per_page": {}, "search": {}, "ordering": {}, "aggregate": {},
 }

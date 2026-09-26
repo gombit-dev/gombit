@@ -29,7 +29,7 @@ type Options struct {
 	WorkDir string
 	Name    string
 	Fields  []string
-	// ID is the primary key strategy: uint (default, gorm.Model) or uuid.
+	// ID is the primary key strategy: uint (default, auto-increment) or uuid.
 	ID       string
 	Service  bool
 	Repo     bool

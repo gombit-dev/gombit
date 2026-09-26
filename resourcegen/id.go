@@ -12,7 +12,10 @@ import (
 	"strings"
 )
 
-// idStrategy is the generated resource's primary key. uint is gorm.Model.
+// idStrategy is the generated resource's primary key: an auto-increment uint
+// or an application-assigned uuid.UUID, both beside CreatedAt / UpdatedAt and
+// without soft delete (ADR-019). Existing models that embed gorm.Model are
+// still read correctly.
 // uuid is an application-assigned uuid.UUID. Composite keys are rejected.
 type idStrategy string
 

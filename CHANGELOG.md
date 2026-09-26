@@ -44,8 +44,8 @@ version.
 
 ### Changed
 
-- **Breaking (generated models):** `gombit make resource` no longer embeds
-  `gorm.Model`. New models get an explicit `ID` (auto-increment `uint`, or the
+- **Breaking (generated models):** `gombit make resource`, and the starter
+  `Product` that `gombit new` scaffolds, no longer embed `gorm.Model`. New models get an explicit `ID` (auto-increment `uint`, or the
   `--id uuid` key), `CreatedAt`, and `UpdatedAt`, and no soft-delete
   `DeletedAt`: Gombit deletes rows physically (ADR-019). The API contract (DTOs,
   OpenAPI) is unchanged; regenerated mappers read `row.ID` instead of
