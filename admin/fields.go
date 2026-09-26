@@ -31,6 +31,9 @@ func FieldsFrom(model any) ([]Field, error) {
 	if err != nil {
 		return nil, err
 	}
+	// UniqueIndex stays empty until indexes are parsed. one_to_one is that
+	// single-column unique index, not the raw uniqueIndex tag key.
+	sch.ParseIndexes()
 	// Foreign-key columns of belongs_to relationships become a relation field
 	// (a picker), not a bare integer input (#223).
 	belongsToFK := belongsToByFK(sch)
@@ -151,22 +154,23 @@ func inferFieldType(sf *schema.Field) FieldType {
 	return FieldType(field.KindFromGo(sf.FieldType, string(sf.DataType)).AdminWire())
 }
 
-// belongsToByFK maps each belongs_to foreign-key column (on this schema) to its
-// relationship, so FieldsFrom can render the FK as a picker.
-// relationKindForFK is one_to_one when the foreign key is unique, and
-// belongs_to otherwise. Django's OneToOneField is that unique foreign key.
+// relationKindForFK is one_to_one when the foreign key is a single unique
+// column, and belongs_to otherwise. Uniqueness is what GORM computed in
+// ParseIndexes: the unique tag, or a single-column unique index. A composite
+// uniqueIndex is not a unique column, and the raw UNIQUEINDEX tag key is not
+// consulted.
 func relationKindForFK(sf *schema.Field) string {
 	if sf == nil {
 		return RelBelongsTo
 	}
-	// uniqueIndex is recorded on the field only after ParseIndexes. The tag
-	// is already in TagSettings, which is what make resource emits.
-	if sf.Unique || sf.UniqueIndex != "" || sf.TagSettings["UNIQUEINDEX"] != "" {
+	if sf.Unique || sf.UniqueIndex != "" {
 		return RelOneToOne
 	}
 	return RelBelongsTo
 }
 
+// belongsToByFK maps each belongs_to foreign-key column (on this schema) to its
+// relationship, so FieldsFrom can render the FK as a picker.
 func belongsToByFK(sch *schema.Schema) map[string]*schema.Relationship {
 	out := map[string]*schema.Relationship{}
 	for _, rel := range sch.Relationships.BelongsTo {

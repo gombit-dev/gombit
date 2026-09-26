@@ -228,6 +228,45 @@ func TestFieldsFromOneToOneIsUniqueFK(t *testing.T) {
 	if byName["parent_id"].Related == nil || byName["parent_id"].Related.Kind != admin.RelBelongsTo {
 		t.Fatalf("parent_id = %+v", byName["parent_id"].Related)
 	}
+
+	type Membership struct {
+		ID     uint   `gorm:"primaryKey" json:"id"`
+		UserID uint   `gorm:"uniqueIndex:idx_membership" json:"user_id"`
+		User   Widget `json:"-"`
+		OrgID  uint   `gorm:"uniqueIndex:idx_membership" json:"org_id"`
+		Org    Widget `json:"-"`
+	}
+	membership, err := admin.FieldsFrom(Membership{})
+	if err != nil {
+		t.Fatalf("FieldsFrom membership: %v", err)
+	}
+	for _, f := range membership {
+		if f.Name != "user_id" && f.Name != "org_id" {
+			continue
+		}
+		if f.Related == nil || f.Related.Kind != admin.RelBelongsTo {
+			t.Fatalf("%s composite unique index = %+v, want belongs_to", f.Name, f.Related)
+		}
+	}
+
+	type Account struct {
+		ID        uint   `gorm:"primaryKey" json:"id"`
+		ProfileID uint   `gorm:"index:idx_profile,unique" json:"profile_id"`
+		Profile   Widget `json:"-"`
+	}
+	account, err := admin.FieldsFrom(Account{})
+	if err != nil {
+		t.Fatalf("FieldsFrom account: %v", err)
+	}
+	var profile admin.Field
+	for _, f := range account {
+		if f.Name == "profile_id" {
+			profile = f
+		}
+	}
+	if profile.Related == nil || profile.Related.Kind != admin.RelOneToOne {
+		t.Fatalf("index:name,unique = %+v, want one_to_one", profile.Related)
+	}
 }
 
 func TestFieldsFromInfersUUIDAndJSON(t *testing.T) {
