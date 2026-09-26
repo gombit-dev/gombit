@@ -216,7 +216,7 @@ func TestLintAndRepairAtlasCLISQLiteWhenAvailable(t *testing.T) {
 	for _, tc := range []struct {
 		name, sql, id string
 	}{
-		{"delete_rows", "DELETE FROM `items`;\n", "data_change:items"},
+		{"delete_rows", "DELETE FROM `items`;\n", "data_change:items.statement_1"},
 		{"recreate_items", "DROP TABLE `items`;\nCREATE TABLE `items` (`id` integer NULL PRIMARY KEY AUTOINCREMENT, `created_at` datetime NULL, `updated_at` datetime NULL, `deleted_at` datetime NULL, `name` varchar(120) NOT NULL);\nCREATE INDEX `idx_products_deleted_at` ON `items` (`deleted_at`);\n", "drop_table:items"},
 		{"rename_then_recreate", "ALTER TABLE `items` RENAME TO `goods`;\nDROP TABLE `goods`;\nCREATE TABLE `goods` (`id` integer NULL PRIMARY KEY AUTOINCREMENT, `created_at` datetime NULL, `updated_at` datetime NULL, `deleted_at` datetime NULL, `name` varchar(120) NOT NULL);\nCREATE INDEX `idx_products_deleted_at` ON `goods` (`deleted_at`);\n", "drop_table:goods"},
 	} {
@@ -476,8 +476,8 @@ func TestRebuildWindowMustBeContiguous(t *testing.T) {
 		extraID     string
 	}{
 		{"the rebuild alone", create + copyRows + drop + rename, false, ""},
-		{"INSERT OR REPLACE in the window", create + copyRows + "INSERT OR REPLACE INTO `new_items` (`id`, `name`, `code`) SELECT `id`, 'gone', `code` FROM `items`;\n" + drop + rename, true, "data_change:new_items"},
-		{"UPDATE in the window", create + copyRows + "UPDATE `new_items` SET `name` = 'gone';\n" + drop + rename, true, "data_change:new_items"},
+		{"INSERT OR REPLACE in the window", create + copyRows + "INSERT OR REPLACE INTO `new_items` (`id`, `name`, `code`) SELECT `id`, 'gone', `code` FROM `items`;\n" + drop + rename, true, "data_change:new_items.statement_3"},
+		{"UPDATE in the window", create + copyRows + "UPDATE `new_items` SET `name` = 'gone';\n" + drop + rename, true, "data_change:new_items.statement_3"},
 		{"a statement between the drop and the rename", create + copyRows + drop + "CREATE INDEX `idx_x` ON `new_items` (`code`);\n" + rename, true, ""},
 	}
 	for _, tc := range cases {
@@ -514,5 +514,115 @@ func TestUpsertIsADataChange(t *testing.T) {
 		if _, ok := upsertTable(stmt); ok {
 			t.Errorf("upsertTable(%q) matched an insert that overwrites nothing", stmt)
 		}
+	}
+}
+
+// atlasIfnullRebuild is the SQL Atlas writes for a default change on a NOT
+// NULL SQLite column (captured from atlas migrate diff): the copy reads the
+// column as IFNULL(col, <default>) AS col.
+const atlasIfnullRebuild = "-- Disable the enforcement of foreign-keys constraints\n" +
+	"PRAGMA foreign_keys = off;\n" +
+	"-- Create \"new_items\" table\n" +
+	"CREATE TABLE `new_items` (`id` integer NULL, `name` text NOT NULL DEFAULT 'changed', `code` text NULL, PRIMARY KEY (`id`));\n" +
+	"-- Copy rows from old table \"items\" to new temporary table \"new_items\"\n" +
+	"INSERT INTO `new_items` (`id`, `name`, `code`) SELECT `id`, IFNULL(`name`, 'changed') AS `name`, `code` FROM `items`;\n" +
+	"-- Drop \"items\" table after copying rows\n" +
+	"DROP TABLE `items`;\n" +
+	"-- Rename temporary table \"new_items\" to \"items\"\n" +
+	"ALTER TABLE `new_items` RENAME TO `items`;\n" +
+	"-- Enable back the enforcement of foreign-keys constraints\n" +
+	"PRAGMA foreign_keys = on;\n"
+
+func TestAtlasIfnullRebuildIsACopy(t *testing.T) {
+	items := func(def string) string {
+		return "table \"items\" {\n  schema = schema.main\n  column \"id\" {\n    null = true\n    type = integer\n  }\n" +
+			"  column \"name\" {\n    null    = false\n    type    = text\n    default = \"" + def + "\"\n  }\n" +
+			"  column \"code\" {\n    null = true\n    type = text\n  }\n  primary_key {\n    columns = [column.id]\n  }\n}\nschema \"main\" {}\n"
+	}
+	steps := lintSteps(t, config.DatabaseDriverSQLite, items("keep"), items("changed"), atlasIfnullRebuild)
+	assertSteps(t, mapValues(steps), map[string]Severity{
+		"change_default:items.name": SeveritySafe,
+		"table_rebuild:items":       SeverityReview,
+	})
+	// IFNULL from another column is not Atlas's copy.
+	computed := strings.Replace(atlasIfnullRebuild, "IFNULL(`name`, 'changed') AS `name`", "IFNULL(`name`, `code`) AS `name`", 1)
+	if _, ok := lintSteps(t, config.DatabaseDriverSQLite, items("keep"), items("changed"), computed)["drop_table:items"]; !ok {
+		t.Fatal("an IFNULL that reads another column is not a copy; the drop must stand")
+	}
+}
+
+func TestUsingInALiteralIsNotARewrite(t *testing.T) {
+	steps := lintSteps(t, config.DatabaseDriverPostgres, pgProducts("name", "text", ""), pgProducts("name", "text", `"using"`),
+		"ALTER TABLE products ALTER COLUMN name SET DEFAULT 'using';")
+	for id := range steps {
+		if strings.HasPrefix(id, "alter_column:") {
+			t.Fatalf("steps = %v; a default of 'using' is not a USING clause", keysOf(steps))
+		}
+	}
+}
+
+func TestEachDataChangeIsItsOwnStep(t *testing.T) {
+	steps := lintSteps(t, config.DatabaseDriverSQLite, sqliteItems("name"), sqliteItems("name"),
+		"DELETE FROM items WHERE name = 'stale';\nUPDATE items SET name = 'wiped';\n")
+	plan := SchemaPlan{Steps: mapValues(steps)}
+	plan.Acknowledge([]string{"data_change:items.statement_1"})
+	pending := plan.Unacknowledged()
+	if len(pending) != 1 || pending[0].ID != "data_change:items.statement_2" || !strings.Contains(pending[0].Detail, "UPDATE items") {
+		t.Fatalf("pending after acknowledging the DELETE = %+v, want the UPDATE on its own", pending)
+	}
+}
+
+func mapValues(m map[string]PlanStep) []PlanStep {
+	out := make([]PlanStep, 0, len(m))
+	for _, s := range m {
+		out = append(out, s)
+	}
+	return out
+}
+
+// TestGateAndLintAgreeAtlasCLISQLiteWhenAvailable: a migration makemigrations
+// writes past the gate lints clean, because both classify the same SQL. The
+// change is a new default on a NOT NULL column, which Atlas writes as an
+// IFNULL rebuild.
+func TestGateAndLintAgreeAtlasCLISQLiteWhenAvailable(t *testing.T) {
+	atlasBin := os.Getenv("ATLAS_BINARY")
+	if atlasBin == "" {
+		var err error
+		if atlasBin, err = exec.LookPath("atlas"); err != nil {
+			t.Skip("Atlas CLI not found; set ATLAS_BINARY to run the real SQLite gate/lint parity test")
+		}
+	}
+	ctx := context.Background()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Dir(filepath.Dir(wd))
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "20260101000000_create_gadgets.sql"), []byte("CREATE TABLE `gadgets` (`id` integer NULL PRIMARY KEY AUTOINCREMENT, `created_at` datetime NULL, `updated_at` datetime NULL, `deleted_at` datetime NULL, `name` text NOT NULL DEFAULT 'keep');\nCREATE INDEX `idx_gadgets_deleted_at` ON `gadgets` (`deleted_at`);\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrations.SaveRegistry(dir, []migrations.Model{{ImportPath: "github.com/gombit-dev/gombit/migrations/testmodels", TypeName: "Gadget"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrations.Hash(ctx, migrations.ApplyOptions{WorkDir: root, MigrationDir: dir, AtlasBinary: atlasBin, Stdout: io.Discard, Stderr: io.Discard}); err != nil {
+		t.Fatal(err)
+	}
+	var stderr strings.Builder
+	err = migrations.MakeMigrations(ctx, migrations.Options{WorkDir: root, Name: "change_default", Driver: config.DatabaseDriverSQLite, MigrationDir: dir, AtlasBinary: atlasBin, Gate: Gate(nil, &stderr), Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil {
+		t.Fatalf("MakeMigrations() error = %v\n%s", err, stderr.String())
+	}
+	files, _ := migrations.ListMigrationFiles(dir)
+	generated, _ := os.ReadFile(files[len(files)-1].UpPath)
+	if !strings.Contains(string(generated), "IFNULL(`name`") {
+		t.Fatalf("expected Atlas's IFNULL rebuild, got:\n%s", generated)
+	}
+	r, err := Lint(ctx, LintOptions{WorkDir: root, Driver: config.DatabaseDriverSQLite, MigrationDir: dir, AtlasBinary: atlasBin, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Failed() {
+		t.Fatalf("lint of a migration the gate accepted failed: %+v", r.Unacknowledged())
 	}
 }

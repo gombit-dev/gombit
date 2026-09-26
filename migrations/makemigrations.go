@@ -128,7 +128,10 @@ func MakeMigrations(ctx context.Context, opts Options) error {
 	// Gate before writing. The first migration only creates tables, so there is
 	// nothing to classify; after that, the gate (schemaplan.Gate in the CLI)
 	// refuses a destructive or unsafe change nothing acknowledged (#309).
-	var acknowledged []string
+	// The gate classifies the migration Atlas writes, so the schema before
+	// it is inspected now, while the directory still lacks the new file. The
+	// first migration only creates tables, so there is nothing to gate.
+	var gateInput *Inspection
 	if opts.Gate != nil {
 		has, err := ws.hasMigrations()
 		if err != nil {
@@ -139,14 +142,17 @@ func MakeMigrations(ctx context.Context, opts Options) error {
 			if err != nil {
 				return err
 			}
-			if acknowledged, err = opts.Gate(ctx, opts.Name, in); err != nil {
-				return err
-			}
+			gateInput = &in
 		}
 	}
 	before, err := migrationFileSet(ws.migrationDir)
 	if err != nil {
 		return err
+	}
+	sumPath := filepath.Join(ws.migrationDir, "atlas.sum")
+	prevSum, sumErr := os.ReadFile(sumPath) // #nosec G304 -- atlas.sum in the configured migration directory
+	if sumErr != nil && !errors.Is(sumErr, os.ErrNotExist) {
+		return fmt.Errorf("migrations: read atlas.sum: %w", sumErr)
 	}
 
 	atlasPath := filepath.Join(ws.tmpDir, "atlas.hcl")
@@ -169,12 +175,34 @@ func MakeMigrations(ctx context.Context, opts Options) error {
 	if err != nil {
 		return fmt.Errorf("migrations: atlas migrate diff: %w", err)
 	}
-	// Persist the acknowledgement in the migration itself, so the change
-	// passes `gombit db lint` in CI without anyone repeating --allow.
 	written, err := newMigrationFiles(ws.migrationDir, before)
 	if err != nil {
 		return err
 	}
+	// Gate the SQL Atlas wrote, with the same classification `gombit db lint`
+	// applies to it later (#309, #311). A refusal takes the migration back
+	// out, and the directory is left as it was.
+	var acknowledged []string
+	if gateInput != nil && len(written) > 0 {
+		var sql strings.Builder
+		for _, f := range written {
+			data, err := os.ReadFile(f) // #nosec G304 -- a migration file Atlas just wrote in the configured directory
+			if err != nil {
+				return fmt.Errorf("migrations: read %s: %w", f, err)
+			}
+			sql.Write(data)
+			sql.WriteString("\n")
+		}
+		if acknowledged, err = opts.Gate(ctx, opts.Name, *gateInput, sql.String()); err != nil {
+			for _, f := range written {
+				_ = os.Remove(f)
+			}
+			restoreFile(sumPath, prevSum, sumErr == nil)
+			return err
+		}
+	}
+	// Persist the acknowledgement in the migration itself, so the change
+	// passes `gombit db lint` in CI without anyone repeating --allow.
 	if err := writeAllowDirectives(ctx, opts, ws.absWorkDir, ws.migrationDir, written, acknowledged); err != nil {
 		return err
 	}

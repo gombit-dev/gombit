@@ -67,6 +67,24 @@ func Build(in migrations.Inspection) (SchemaPlan, error) {
 	}, nil
 }
 
+// buildMigration classifies one migration's SQL against the schema before it
+// and the schema after it, the way Lint does, with the hints and
+// --forget-model acknowledgement of the run in.
+func buildMigration(in migrations.Inspection, sql string) (SchemaPlan, error) {
+	plan, desired, err := buildWithRenames(in, DeclaredRenames(sql))
+	if err != nil {
+		return SchemaPlan{}, err
+	}
+	plan.Steps = withStatementFindings(plan.Steps, sql, desired)
+	for i := range plan.Steps {
+		if plan.Steps[i].Code == StepDropTable {
+			plan.Steps[i].Hint = renameTableHint(plan.Steps[i], modelFlags(in))
+		}
+	}
+	plan.forgottenTables = defaultTableNames(in.ForgetModels)
+	return plan, nil
+}
+
 // modelFlags renders the --model / --forget-model flags of an inspection, so
 // a suggested command reproduces the run's model set.
 func modelFlags(in migrations.Inspection) string {
@@ -140,15 +158,19 @@ func (p SchemaPlan) Unacknowledged() []PlanStep {
 }
 
 // Gate is the migrations.Gate the gombit CLI installs on makemigrations and
-// make resource: it classifies the change and refuses a migration with a
-// destructive or unsafe step that allow does not acknowledge, printing the
-// plan to stderr.
+// make resource. It classifies the migration Atlas just wrote exactly as
+// `gombit db lint` will: the schema diff with the renames the SQL declares,
+// plus what the SQL's statements do to rows. It refuses a migration with a
+// destructive or unsafe step that allow (or --forget-model, for its table)
+// does not acknowledge, printing the plan to stderr, and returns the
+// acknowledged step IDs for the migration to record. The persisted
+// acknowledgements and lint's gate are therefore one set.
 func Gate(allow []string, stderr io.Writer) migrations.Gate {
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	return func(_ context.Context, name string, in migrations.Inspection) ([]string, error) {
-		plan, err := Build(in)
+	return func(_ context.Context, name string, in migrations.Inspection, sql string) ([]string, error) {
+		plan, err := buildMigration(in, sql)
 		if err != nil {
 			return nil, err
 		}

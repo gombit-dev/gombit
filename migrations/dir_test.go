@@ -139,7 +139,7 @@ func TestMakeMigrationsRecordsAcknowledgements(t *testing.T) {
 			Driver:       config.DatabaseDriverSQLite,
 			MigrationDir: migrationDir,
 			AtlasBinary:  "atlas-test",
-			Gate: func(context.Context, string, Inspection) ([]string, error) {
+			Gate: func(context.Context, string, Inspection, string) ([]string, error) {
 				return []string{"drop_column:products.legacy"}, nil
 			},
 			Stdout: io.Discard,

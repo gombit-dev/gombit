@@ -444,7 +444,7 @@ func gotGateCall(g migrations.Gate) ([]string, error) {
 	if g == nil {
 		return nil, nil
 	}
-	return g(context.Background(), "", migrations.Inspection{})
+	return g(context.Background(), "", migrations.Inspection{}, "")
 }
 
 func TestGeneratePassesAllAutoMigrateModels(t *testing.T) {
@@ -477,7 +477,7 @@ func TestGeneratePassesAllAutoMigrateModels(t *testing.T) {
 		WorkDir:       filepath.Join(workDir, "demo"),
 		Name:          "Book",
 		Fields:        []string{"title:string:required"},
-		MigrationGate: func(context.Context, string, migrations.Inspection) ([]string, error) { return nil, errGate },
+		MigrationGate: func(context.Context, string, migrations.Inspection, string) ([]string, error) { return nil, errGate },
 		Stdout:        ioDiscard{},
 	})
 	if err != nil {

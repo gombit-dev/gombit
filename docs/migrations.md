@@ -179,10 +179,14 @@ stored value as it is.
 **Acknowledging a change.** A destructive or unsafe step needs an explicit
 `--allow`. It takes a step ID (`drop_column:products.title`) or a code
 (`add_not_null`, for every step with that code) and is repeatable.
-`makemigrations` refuses to write a migration that contains an unacknowledged
-step. It prints the plan and the full command that writes the same migration
-with every step acknowledged, including any `--model` and `--forget-model` the
-refused run named (a refused run saves no registry):
+`makemigrations` refuses to keep a migration that contains an unacknowledged
+step. It classifies the SQL Atlas generated exactly the way
+[`gombit db lint`](#linting-and-repairing-the-migration-directory) will (the
+schema diff plus the statements), so what it records and what lint enforces
+are one set; a refused migration is removed and `atlas.sum` restored. It prints
+the plan and the full command that writes the same migration with every step
+acknowledged, including any `--model` and `--forget-model` the refused run
+named (a refused run saves no registry):
 
 ```sh
 gombit db makemigrations reshape_products \
@@ -323,9 +327,12 @@ gombit db lint --latest 1    # only the newest, a local shortcut
   classify are all destructive or unsafe. A statement the schema diff already
   explains does not count twice: the column drop it reports, an `ALTER COLUMN`
   without `USING` whose change the diff classifies, and Atlas's own SQLite
-  rebuild (a copy of every surviving column into `new_<table>`, the drop, and
-  the rename back, as three contiguous statements, with the change that caused
-  it in the diff). A destructive or unsafe step passes only when the migration
+  rebuild (a copy of every surviving column into `new_<table>`, by name or as
+  Atlas's `IFNULL(col, <default>) AS col` for a default or nullability change
+  the diff classifies, then the drop and the rename back, as three contiguous
+  statements, with the change that caused it in the diff). Each data-changing
+  statement is its own step, `data_change:<table>.statement_<n>`, so one
+  acknowledgement covers one statement. A destructive or unsafe step passes only when the migration
   carries a line for it:
 
   ```sql

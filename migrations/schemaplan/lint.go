@@ -137,7 +137,9 @@ var (
 	reDataChangeTable = regexp.MustCompile(`(?is)^\s*(?:DELETE\s+FROM|UPDATE|TRUNCATE(?:\s+TABLE)?|MERGE\s+INTO|REPLACE\s+INTO)\s+` + ident)
 	// Atlas's SQLite rebuild copy: INSERT INTO new_X (a, b) SELECT a, b FROM X.
 	reRebuildCopy = regexp.MustCompile(`(?is)^\s*INSERT\s+INTO\s+` + ident + `\s*\(([^)]*)\)\s*SELECT\s+(.*?)\s+FROM\s+` + ident + `\s*$`)
-	reUsing       = regexp.MustCompile(`(?is)\bUSING\b`)
+	// A value rewrite: a TYPE change with a USING clause, read after string
+	// literals are removed, so SET DEFAULT 'using' is not one.
+	reTypeUsing = regexp.MustCompile(`(?is)\bTYPE\b.*\bUSING\b`)
 	// An INSERT that overwrites rows: INSERT OR REPLACE / OR UPDATE, or an
 	// upsert clause (ON CONFLICT ... DO UPDATE, ON DUPLICATE KEY UPDATE).
 	reInsertOrReplace = regexp.MustCompile(`(?is)^\s*INSERT\s+OR\s+(?:REPLACE|UPDATE)\s+INTO\s+` + ident)
@@ -150,7 +152,7 @@ var (
 // adds (desired is that state; added is keyed table.column). A SELECT of
 // anything else (a literal, an expression) or one that leaves a surviving
 // column out is not a copy.
-func rebuildCopySource(stmt string, desired *schema.Realm, added map[string]bool) (string, bool) {
+func rebuildCopySource(stmt string, desired *schema.Realm, added map[string]bool, nullOrDefaultChanged func(table, column string) bool) (string, bool) {
 	m := reRebuildCopy.FindStringSubmatch(stmt)
 	if m == nil {
 		return "", false
@@ -159,16 +161,23 @@ func rebuildCopySource(stmt string, desired *schema.Realm, added map[string]bool
 	if target != "new_"+source {
 		return "", false
 	}
-	cols, sel := splitList(m[2]), splitList(m[3])
+	cols, sel := splitList(m[2]), splitActions(m[3])
 	if len(cols) == 0 || len(cols) != len(sel) {
 		return "", false
 	}
 	copied := map[string]bool{}
 	for i := range cols {
-		if !plainIdent.MatchString(sel[i]) || unquote(sel[i]) != unquote(cols[i]) {
+		col := unquote(cols[i])
+		switch {
+		case plainIdent.MatchString(sel[i]) && unquote(sel[i]) == col:
+		case isIfnullCopy(sel[i], col) && nullOrDefaultChanged(source, col):
+			// Atlas copies a NOT NULL column whose default or nullability
+			// changes as IFNULL(col, <default>) AS col: stored values stay,
+			// and a NULL becomes the default the plan already classified.
+		default:
 			return "", false
 		}
-		copied[unquote(cols[i])] = true
+		copied[col] = true
 	}
 	after := findTable(desired, source)
 	if after == nil {
@@ -183,6 +192,19 @@ func rebuildCopySource(stmt string, desired *schema.Realm, added map[string]bool
 }
 
 var plainIdent = regexp.MustCompile("^[`\"]?[A-Za-z0-9_]+[`\"]?$")
+
+var reIfnullCopy = regexp.MustCompile(`(?is)^IFNULL\(\s*` + ident + `\s*,\s*(.+)\)\s+AS\s+` + ident + `$`)
+
+// isIfnullCopy reports Atlas's copy of column col as IFNULL(col, <default>)
+// AS col, where the default is a literal.
+func isIfnullCopy(item, col string) bool {
+	m := reIfnullCopy.FindStringSubmatch(strings.TrimSpace(item))
+	return m != nil && unquote(m[1]) == col && unquote(m[3]) == col && literalDefault.MatchString(strings.TrimSpace(m[2]))
+}
+
+// literalDefault is a SQL literal: a quoted string, a number, NULL, or a
+// boolean. A default computed from another column is not a copy.
+var literalDefault = regexp.MustCompile(`(?is)^(?:'(?:[^']|'')*'|-?[0-9]+(?:\.[0-9]+)?|NULL|TRUE|FALSE)$`)
 
 func splitList(s string) []string {
 	var out []string
@@ -211,7 +233,11 @@ func withStatementFindings(steps []PlanStep, sql string, desired *schema.Realm) 
 	columnInDiff := map[string]bool{}
 	tableAccounted := map[string]bool{}
 	added := map[string]bool{}
+	nullOrDefault := map[string]bool{}
 	for _, s := range steps {
+		if s.Code == StepChangeDefault || s.Code == StepSetNotNull || s.Code == StepDropNotNull {
+			nullOrDefault[s.Table+"."+s.Name] = true
+		}
 		have[s.ID] = true
 		if s.Name != "" {
 			columnInDiff[s.Table+"."+s.Name] = true
@@ -223,6 +249,7 @@ func withStatementFindings(steps []PlanStep, sql string, desired *schema.Realm) 
 			added[s.Table+"."+s.Name] = true
 		}
 	}
+	nullOrDefaultChanged := func(table, column string) bool { return nullOrDefault[table+"."+column] }
 	// exemptDrop reports whether the DROP TABLE at index i is the middle of
 	// Atlas's SQLite rebuild of X: three contiguous statements, the copy into
 	// new_X that selects every column X still has afterwards (new ones
@@ -267,13 +294,13 @@ func withStatementFindings(steps []PlanStep, sql string, desired *schema.Realm) 
 		add(newStep(StepAlterColumn, SeverityUnsafe, table, column, fmt.Sprintf("The migration alters column %s.%s in a way the schema before and after does not show.", table, column)))
 	}
 	for i, stmt := range stmts {
-		if src, ok := rebuildCopySource(stmt, desired, added); ok {
+		if src, ok := rebuildCopySource(stmt, desired, added, nullOrDefaultChanged); ok {
 			copies[src] = i
 		}
 		// An upsert overwrites rows that already exist. The HOST-3 classifier
 		// reads any INSERT as additive, so lint catches it here.
 		if table, ok := upsertTable(stmt); ok {
-			add(newStep(StepDataChange, SeverityDestructive, table, "", fmt.Sprintf("The migration overwrites existing rows in %s (%s).", table, firstWords(stmt))))
+			add(newStep(StepDataChange, SeverityDestructive, table, fmt.Sprintf("statement_%d", i+1), fmt.Sprintf("Statement %d overwrites existing rows in %s (%s).", i+1, table, firstWords(stmt))))
 			continue
 		}
 		if m := reAlterTableBody.FindStringSubmatch(stmt); m != nil {
@@ -304,7 +331,7 @@ func withStatementFindings(steps []PlanStep, sql string, desired *schema.Realm) 
 		default:
 			if m := reDataChangeTable.FindStringSubmatch(stmt); m != nil {
 				table := unquote(m[1])
-				add(newStep(StepDataChange, SeverityDestructive, table, "", fmt.Sprintf("The migration deletes or rewrites rows in %s (%s).", table, firstWords(stmt))))
+				add(newStep(StepDataChange, SeverityDestructive, table, fmt.Sprintf("statement_%d", i+1), fmt.Sprintf("Statement %d deletes or rewrites rows in %s (%s).", i+1, table, firstWords(stmt))))
 				continue
 			}
 			add(newStep(StepUnclassifiedSQL, SeverityDestructive, fmt.Sprintf("statement_%d", i+1), "", fmt.Sprintf("Gombit cannot classify statement %d (%s), so it is treated as destructive.", i+1, firstWords(stmt))))
@@ -387,7 +414,7 @@ func classifyAction(action string) alterAction {
 		return alterAction{kind: actionDropColumn, column: unquote(reActionDrop.FindStringSubmatch(action)[1])}
 	case reActionAlter.MatchString(action) && !reActionAlterMeta.MatchString(action):
 		m := reActionAlter.FindStringSubmatch(action)
-		return alterAction{kind: actionAlterColumn, column: unquote(m[1]), rewrite: reUsing.MatchString(action)}
+		return alterAction{kind: actionAlterColumn, column: unquote(m[1]), rewrite: reTypeUsing.MatchString(stripLiterals(action))}
 	case reActionDropAny.MatchString(action):
 		return alterAction{kind: actionUnknownDrop}
 	}
@@ -402,6 +429,24 @@ func upsertTable(stmt string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// stripLiterals removes single-quoted string literals (” escapes included).
+func stripLiterals(s string) string {
+	var b strings.Builder
+	in := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case in && c == '\'' && i+1 < len(s) && s[i+1] == '\'':
+			i++
+		case c == '\'':
+			in = !in
+		case !in:
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
 }
 
 func firstWords(stmt string) string {
