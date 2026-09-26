@@ -164,7 +164,7 @@ gets a severity:
 | `destructive` | Loses data | `drop_table`, `drop_column`, `narrow_type` (for example `bigint` to `integer`, `text` to `varchar(100)`) |
 | `unsafe` | Can fail on a table that already has rows | `add_not_null` (no default), `set_not_null`, `add_unique` (a new unique index, or a same-named one re-created with new columns), `add_foreign_key` (a new foreign key over existing columns, or a same-named one whose columns or target change), `add_check`, `change_type` with no safe direction, `change_primary_key`, `change_charset` (to anything but `utf8mb4`, or to `utf8mb4` when an index on the column can pass InnoDB's 3072-byte key limit), `change_collation` on a column in a unique key or in a foreign key whose other side keeps another collation, `change_generated`, any MySQL key a step builds (a new table, index, or foreign key, or a column change under an existing key) that can pass InnoDB's 3072-byte limit or indexes TEXT/BLOB without a prefix, `other` (a change Gombit cannot classify fails closed) |
 | `review` | Applies, but changes behavior | `change_foreign_key` (only the `ON DELETE` / `ON UPDATE` action, for example `RESTRICT` to `CASCADE`), `drop_foreign_key`, dropping a primary key, `widen_type`, `table_rebuild` (SQLite), `change_charset` to `utf8mb4` when its indexes still fit, `change_collation` on any other column |
-| `safe` | Adds structure or relaxes a rule | `add_table`, `add_column`, `add_index`, `drop_not_null`, `change_default`, `change_comment`, table charset/collation/comment options, `rename_index` / `rename_foreign_key` / `rename_check` (dropped and re-added under a new name with the same definition), … |
+| `safe` | Adds structure or relaxes a rule | `add_table`, `add_column`, `add_index`, `drop_not_null`, `change_default`, `change_comment`, table charset/collation/comment options, `rename_index` / `rename_foreign_key` / `rename_check` (dropped and re-added under a new name with an identical definition: columns, order, direction, prefixes, predicate, nulls handling, every attribute; anything stricter is classified as a new constraint), … |
 
 A dropped column next to an added column of the same type family is reported
 with the `--rename` command that keeps the data (see
@@ -194,9 +194,11 @@ gombit db makemigrations reshape_products \
 dropping it is what the flag asks for. It matches the table by GORM's default
 name (`LegacyWidget` → `legacy_widgets`), so a model with a custom `TableName`,
 its join tables, or any other dropped table still needs its own `--allow`. It
-does not acknowledge a drop that looks like a rename (a table created in the
-same plan shares a column with it): that drop would lose the rows a
-[table rename](#renaming-a-table) keeps, so the plan names the rename instead. The first migration in an empty directory only creates
+acknowledges the drop only when the plan creates no table: any table created
+in the same plan may be the forgotten model renamed, and the drop would lose
+the rows a [table rename](#renaming-a-table) keeps. The plan then suggests the
+rename, with the exact command when exactly one new table holds every
+non-bookkeeping column of the dropped one with the same type. The first migration in an empty directory only creates
 tables, so `makemigrations` skips the plan there. `--rename` generates its own
 SQL and does not plan either.
 
@@ -252,7 +254,7 @@ gombit db plan --forget-model github.com/acme/shop/internal/product.Product \
 ```text
   DESTRUCTIVE  drop_table:products
                Drops table products and every row in it.
-               Table items is created in the same plan. If it replaces products, keep the rows with a rename instead:
+               Table items is created in the same plan with the same columns. If it replaces products, keep the rows with a rename instead:
                  gombit db makemigrations <name> --rename-table products:items --model github.com/acme/shop/internal/item.Item --forget-model github.com/acme/shop/internal/product.Product
 ```
 
