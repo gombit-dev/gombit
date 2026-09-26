@@ -145,7 +145,8 @@ invent another error shape.
 
 Minimal `type="number"` inputs use React Hook Form `setValueAs` so a
 cleared field becomes `0`, not `NaN` (`JSON.stringify` would emit
-`null` and Huma would 422 a non-pointer Go int). The MUI preset does
+`null` and Huma would 422 a non-pointer Go int). An optional pointer
+number (such as a nullable foreign key) submits `null` instead. The MUI preset does
 the same with `raw === "" ? 0 : Number(raw)`.
 
 ## Generated client placeholder

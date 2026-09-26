@@ -10,6 +10,51 @@ version.
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-09-26
+
+### Added
+
+- One logical field vocabulary (`package field`) shared by `gombit make resource`,
+  `gombit generate`, and the admin, so a new kind has one extension path. Existing
+  tokens (`int`, `bool`, `time`, …) and admin meta strings stay valid; `time`
+  remains a `datetime` alias. See [docs/fields.md](docs/fields.md) ([#392](https://github.com/gombit-dev/gombit/pull/392)).
+- `make resource` generates `uuid`, `json`, `date`, `float` / `float64`, and
+  `datetime` fields ([#393](https://github.com/gombit-dev/gombit/pull/393)), and `email`, `url`, `slug`, and `ip` fields that
+  stay Go `string` with an OpenAPI `format` or pattern the API validates
+  ([#395](https://github.com/gombit-dev/gombit/pull/395)).
+- `time_of_day` (`types.TimeOfDay`, `HH:MM:SS`) and `duration` (`types.Duration`,
+  stored as nanoseconds) fields, and enum labels:
+  `enum(draft=Draft,published=Published)` keeps the stored value separate from the
+  form and admin label ([#398](https://github.com/gombit-dev/gombit/pull/398)).
+- Field constraints `default=`, `min=` / `max=`, `max_length=`, and `regex=`,
+  carried from the model into the SQL column, request validation, generated
+  forms, and admin meta ([#394](https://github.com/gombit-dev/gombit/pull/394)).
+- `one_to_one` relations (a unique foreign key), `nullable` and
+  `on_delete=restrict|cascade|set_null` on `belongs_to` / `one_to_one`, and
+  self-referential relations when the foreign key is nullable ([#396](https://github.com/gombit-dev/gombit/pull/396)).
+- `gombit make resource --id uuid` scaffolds an application-assigned `uuid.UUID`
+  primary key instead of embedding `gorm.Model`; the default stays `uint`. A
+  `belongs_to` foreign key follows the target model's primary-key type
+  ([#397](https://github.com/gombit-dev/gombit/pull/397)).
+
+## [0.2.1] — 2026-09-24
+
+### Added
+
+- `gombit db makemigrations <name> --rename table.old:new` emits a native,
+  data-preserving `ALTER TABLE … RENAME COLUMN` instead of a drop + add rebuild
+  that lost the renamed column's data ([#379](https://github.com/gombit-dev/gombit/pull/379)).
+
+### Fixed
+
+- `gombit db makemigrations --forget-model` refuses a model still listed in
+  `AutoMigrate` (which would re-create it) and errors on an untracked model
+  instead of a silent no-op. `gombit make resource` fails closed before writing when Atlas is missing,
+  so its output no longer depends on `PATH`; `--skip-migrations` opts out
+  ([#378](https://github.com/gombit-dev/gombit/pull/378)).
+
+## [0.2.0] — 2026-09-20
+
 ### Changed
 
 - **Breaking (generated resource layout):** `gombit make resource` is now
@@ -35,6 +80,98 @@ version.
     [migration guide](docs/migration-model-first-resources.md).
 - New `gombit generate` command regenerates the model-first `*.gen.go` from the
   app's real models, with `gombit generate --check` as a drift gate.
+- **The per-handler request timeout is now opt-in** (PERF-12,
+  [#270](https://github.com/gombit-dev/gombit/issues/270); ADR-017).
+  `HTTP.RequestTimeout` now defaults to `0`, which imposes no cooperative
+  per-handler context deadline. The deadline lives in the `request_context`
+  middleware (#268 folded it in — there is no separate timeout layer), which
+  always runs; a `0` value only skips the deadline setup, a no-op that adds
+  nothing to the request path (≈4 allocs/op saved on every request). **Breaking for apps that
+  relied on the implicit 60s default:** without setting
+  `GOMBIT_HTTP_REQUEST_TIMEOUT` a long-running DB query is no longer cancelled
+  and a slow handler keeps running after the connection's `WriteTimeout`. Set
+  `GOMBIT_HTTP_REQUEST_TIMEOUT` to any positive duration to restore it;
+  `gombit new` scaffolds `60s` explicitly, so new projects keep the deadline.
+  The `http.Server` `ReadTimeout`/`WriteTimeout`/`IdleTimeout` remain a
+  connection-level safety net regardless — when the per-handler deadline is
+  disabled they fall back to `60s` instead of becoming unbounded, so this is not
+  a DoS regression. (A value of `0` no longer zeroes the server timeouts.) See
+  [docs/adr/017-request-timeout-opt-in.md](docs/adr/017-request-timeout-opt-in.md).
+- **Request-input HTML sanitization is now opt-in** (PERF-13,
+  [#271](https://github.com/gombit-dev/gombit/issues/271); ADR-018). The default
+  `framework.App` no longer strips HTML from request input — it does not read,
+  decode, or rewrite the body/query for sanitization, saving ~4–5 allocs/op on
+  every write request. XSS is handled where it belongs, on **output** (React JSX
+  text escaping in the generated frontend and the React admin SPA; a JSON
+  response is not an HTML sink; the response CSP is a backstop). The default
+  middleware no longer mutates request **values**, so `{"description":"x < y"}`
+  and `{"note":"<b>bold</b>"}` reach handlers intact (value fidelity, not
+  byte-for-byte — the response envelope re-encodes JSON; a handler needing the
+  exact bytes reads the raw body via `WithRawBodyPaths`). The 8MiB JSON
+  body-size bound the sanitizer used to provide incidentally is preserved as a
+  separate, always-on `request_body_limit` layer, so raw Gin routes keep their
+  413-before-handler memory bound whether or not sanitization is enabled.
+  **Breaking for apps that relied on ingress stripping:** set
+  `Security.SanitizeInput` (`GOMBIT_SECURITY_SANITIZE_INPUT=true`) to restore
+  the legacy middleware unchanged (including the `password` exemption and
+  `WithRawBodyPaths` handling), or call the newly exported
+  `framework.SanitizeHTML(s)` to strip a single field from a handler. See
+  [docs/security.md](docs/security.md#input-sanitization-opt-in) and
+  [docs/adr/018-input-sanitization-opt-in.md](docs/adr/018-input-sanitization-opt-in.md).
+
+### Fixed
+
+- Generated DTOs can no longer drift from the model they map ([#218](https://github.com/gombit-dev/gombit/issues/218)): the
+  model-first layout derives them from the model on every `gombit generate`
+  ([#372](https://github.com/gombit-dev/gombit/pull/372); regression test in [#376](https://github.com/gombit-dev/gombit/pull/376)).
+
+## [0.1.14] — 2026-09-13
+
+### Added
+
+- `gombit db hash` recomputes `atlas.sum` after a hand-edited migration, so
+  recovering from a checksum mismatch no longer needs the raw Atlas CLI
+  ([#297](https://github.com/gombit-dev/gombit/pull/297)).
+
+### Changed
+
+- **Security headers are now scoped by response kind** (PERF-9,
+  [#267](https://github.com/gombit-dev/gombit/issues/267)). JSON/API responses
+  get the strict, minimal policy `Content-Security-Policy: default-src 'none';
+  frame-ancestors 'none'` plus `X-Content-Type-Options` (and HSTS in
+  production) — no `X-Frame-Options` or `Referrer-Policy`, since
+  `frame-ancestors 'none'` already subsumes the former and a `default-src
+  'none'` document needs neither. HTML responses (the embedded SPA, the admin
+  SPA, and Huma's `/docs`) keep the full browser policy including
+  `Referrer-Policy` and `X-Frame-Options: DENY`. This holds the common API
+  response under Go's 8-header swiss-map threshold, removing ~5 allocs/op of
+  header-map growth from every API response. The dead IE8-only
+  `X-Download-Options: noopen` header is no longer set on any response. If you
+  relied on `X-Frame-Options`/`Referrer-Policy` or the old `default-src 'self'`
+  CSP on JSON responses, note the new API policy. See
+  [docs/security.md](docs/security.md).
+- **Breaking (minimum Go):** the framework now requires **Go 1.26** (`go.mod`
+  `go 1.26.0`), raised by `golang.org/x/crypto` v0.56.0
+  ([#294](https://github.com/gombit-dev/gombit/pull/294)). Scaffolded apps
+  (`gombit new`) now pin `go 1.26.0`, and the badges/prerequisites in the README,
+  installation guide, and tutorial move to Go 1.26+. Migration URL generation
+  gained a fix required by the newer toolchain: an in-memory SQLite DSN
+  (`:memory:`) now maps to Atlas's canonical `sqlite://file?mode=memory&…` dev
+  URL instead of `sqlite://:memory:?…`, whose empty-host `:memory:` authority
+  `net/url` (and therefore Atlas) rejects as an invalid port on Go 1.26+.
+- The admin data plane now hard-deletes rows so the database's foreign keys
+  enforce integrity: a `RESTRICT` reference fails as `409 conflict`, and
+  `CASCADE` / `SET NULL` actually run. Admin soft-delete was a side effect of
+  `gorm.Model`, with no restore path ([#296](https://github.com/gombit-dev/gombit/pull/296)).
+
+### Fixed
+
+- Cookie-mode CSRF no longer breaks after a second tab opens or the cookie
+  expires: `GET /auth/csrf` reuses a valid cookie, and the admin SPA and
+  generated clients read the token at request time and recover from a `403`
+  ([#295](https://github.com/gombit-dev/gombit/pull/295)).
+
+## [0.1.13] — 2026-09-05
 
 ### Added
 
@@ -66,6 +203,69 @@ version.
   ([docs/health.md](docs/health.md)). `framework.WithShutdownDrainDelay` keeps
   the server accepting after `/readyz` starts returning 503 on shutdown, so a
   host can deregister the instance before connections are refused.
+
+### Changed
+
+- **Breaking (probe contract):** `GET /readyz` now reflects real readiness
+  (HOST-2, [#283](https://github.com/gombit-dev/gombit/issues/283)). Its success
+  body is `{"data":{"status":"ready"}}` — `data.status` changed from `"ok"` to
+  `"ready"` — and it now returns `503` with a D10 `not_ready` envelope while
+  draining or when an attached datastore is unreachable. Previously it always
+  returned `200 {"data":{"status":"ok"}}`. `/livez` is unchanged.
+- Faster JSON content-type check in the XSS sanitizer ([#274](https://github.com/gombit-dev/gombit/pull/274)).
+
+## [0.1.12] — 2026-09-03
+
+### Added
+
+- Declared server-side numeric aggregates on generated list handlers: mark an
+  `int` / `int64` / `uint` / `decimal` field `aggregatable` and request
+  `?aggregate=sum:total,avg:total`; results land in `meta.aggregates`
+  ([#273](https://github.com/gombit-dev/gombit/pull/273)).
+
+### Fixed
+
+- The XSS sanitizer keeps the text after an unclosed skip tag ([#261](https://github.com/gombit-dev/gombit/pull/261)).
+
+## [0.1.11] — 2026-09-03
+
+### Added
+
+- Declared server-side list filtering, sorting, and search on generated list
+  handlers via the `filter`, `sort`, and `search` field modifiers (`?<field>=`,
+  `?ordering=`, `?search=`), using the admin data plane's query spelling. A
+  `belongs_to` foreign key is filterable by default ([#263](https://github.com/gombit-dev/gombit/pull/263)).
+
+### Fixed
+
+- `gombit db rollback` runs down files statement by statement ([#257](https://github.com/gombit-dev/gombit/pull/257)).
+- `gombit make resource` rejects non-ASCII resource names before writing
+  anything ([#262](https://github.com/gombit-dev/gombit/pull/262)).
+
+## [0.1.10] — 2026-09-01
+
+### Fixed
+
+- The memory cache reclaims expired entries that are never read again
+  ([#253](https://github.com/gombit-dev/gombit/pull/253)).
+- The embedded frontend serves `HEAD` like `GET` on SPA routes and `index.html`,
+  so `HEAD`-based health checks pass ([#254](https://github.com/gombit-dev/gombit/pull/254)).
+- Admin search is case-insensitive on SQLite, PostgreSQL, and MySQL alike
+  ([#252](https://github.com/gombit-dev/gombit/pull/252)).
+
+## [0.1.9] — 2026-08-30
+
+### Changed
+
+- Hot-path performance: lock-free metrics middleware ([#244](https://github.com/gombit-dev/gombit/pull/244)), correlation
+  IDs without `crypto/rand` ([#245](https://github.com/gombit-dev/gombit/pull/245)), no XSS decode/re-encode for bodies
+  without markup ([#246](https://github.com/gombit-dev/gombit/pull/246)), and no request-timeout re-wrap under a tighter
+  deadline ([#247](https://github.com/gombit-dev/gombit/pull/247)).
+
+## [0.1.8] — 2026-08-30
+
+### Added
+
 - `gombit make resource` relation fields
   ([#222](https://github.com/gombit-dev/gombit/issues/222) part b):
   `name:belongs_to:Target`, `name:has_many:Target`, and
@@ -94,6 +294,19 @@ version.
   a raw key. A model registered without a `Search` now defaults it to the model's
   text columns (an explicit empty `Search` opts out), so search — and the picker
   — work out of the box on the documented registration path.
+- Admin `belongs_to` picker
+  ([#223](https://github.com/gombit-dev/gombit/issues/223)): auto-derivation
+  renders a foreign-key column as a relation field (target `slug` = the related
+  table; `label_field` = the field name of its `name` column), and the SPA shows
+  a single-select picker backed by the related model's list endpoint that stores
+  the selected primary key — instead of a bare integer input. Preserves numeric
+  vs uuid/string keys; an empty selection clears an optional FK. `has_many` stays
+  read-only.
+
+## [0.1.7] — 2026-08-29
+
+### Added
+
 - `framework.WithRawBodyPaths` — mark webhook / server-to-server paths whose
   request body must reach the handler byte-for-byte, for signature verification
   (e.g. GitHub `X-Hub-Signature-256`). The XSS sanitizer, which re-encodes JSON
@@ -109,14 +322,6 @@ version.
   auto-derivation (`FieldsFrom`) emits the relation instead of dropping the
   association. The framework admin SPA renders it as a multi-select backed by
   the related model's list endpoint.
-- Admin `belongs_to` picker
-  ([#223](https://github.com/gombit-dev/gombit/issues/223)): auto-derivation
-  renders a foreign-key column as a relation field (target `slug` = the related
-  table; `label_field` = the field name of its `name` column), and the SPA shows
-  a single-select picker backed by the related model's list endpoint that stores
-  the selected primary key — instead of a bare integer input. Preserves numeric
-  vs uuid/string keys; an empty selection clears an optional FK. `has_many` stays
-  read-only.
 - `gombit make resource` field grammar now supports `decimal`, `decimal(p,s)`,
   `time`, and `enum(a,b,c)` in addition to the existing scalars. `decimal` uses
   the new framework `types.Decimal` (a `shopspring/decimal` wrapper that carries
@@ -142,25 +347,6 @@ version.
     `version` column gets a version-guarded update that returns 409 on a stale
     write instead of silently last-write-wins.
   - See [`docs/validation.md`](docs/validation.md).
-- `framework.WithCSRFExemptPaths` — opt specific request paths out of
-  cookie-mode CSRF enforcement, for non-browser endpoints (webhooks,
-  server-to-server callbacks) that cannot echo a double-submit token and
-  authenticate themselves instead (e.g. HMAC signature verification). Safe
-  methods still bootstrap the cookie; exempt handlers must verify the caller.
-  See [`docs/auth-cookie.md`](docs/auth-cookie.md)
-  ([#226](https://github.com/gombit-dev/gombit/issues/226)).
-- `gombit version` (and `--version`), reporting version, commit, build date, Go
-  toolchain, and platform. Release binaries are stamped via ldflags; `go install`
-  builds fall back to module build info.
-- Release pipeline (`.github/workflows/release.yml`): cross-compiled binaries
-  for `linux/amd64`, `linux/arm64`, `darwin/amd64`, `darwin/arm64`, and
-  `windows/amd64`, published with `SHA256SUMS.txt` on a `v*.*.*` tag or a manual
-  bump.
-- Documentation: [installation guide](docs/installation.md), an end-to-end
-  [tutorial](docs/tutorial.md), and a [docs index](docs/README.md).
-- `examples/tutorial/` — the finished tutorial application, compiled in CI.
-- Issue templates for bug reports, feature requests, and questions.
-- `SECURITY.md` and `CODE_OF_CONDUCT.md`.
 
 ### Fixed
 
@@ -181,6 +367,44 @@ version.
   GORM's pluralizer (`jinzhu/inflection`), so irregular nouns agree with the
   table name: `Mouse` → `/mice`, `Person` → `/people`, `Analysis` → `/analyses`
   ([#225](https://github.com/gombit-dev/gombit/issues/225)).
+
+## [0.1.6] — 2026-08-29
+
+### Added
+
+- `framework.WithCSRFExemptPaths` — opt specific request paths out of
+  cookie-mode CSRF enforcement, for non-browser endpoints (webhooks,
+  server-to-server callbacks) that cannot echo a double-submit token and
+  authenticate themselves instead (e.g. HMAC signature verification). Safe
+  methods still bootstrap the cookie; exempt handlers must verify the caller.
+  See [`docs/auth-cookie.md`](docs/auth-cookie.md)
+  ([#226](https://github.com/gombit-dev/gombit/issues/226)).
+
+## [0.1.5] — 2026-08-28
+
+### Changed
+
+- Fewer per-request middleware allocations on the runtime stack ([#211](https://github.com/gombit-dev/gombit/pull/211)).
+
+### Fixed
+
+- Admin create, update, and delete report foreign-key and NOT NULL violations as
+  client errors instead of `500` ([#216](https://github.com/gombit-dev/gombit/pull/216)).
+- Admin create no longer reports a provided but invalid required field as "is
+  required" ([#213](https://github.com/gombit-dev/gombit/pull/213)).
+- The metrics middleware bounds the HTTP method label, closing an
+  unbounded-cardinality memory DoS ([#214](https://github.com/gombit-dev/gombit/pull/214)).
+
+## [0.1.4] — 2026-08-28
+
+### Added
+
+- The BENCH-1 benchmark suite and workflows. No framework changes.
+
+## [0.1.3] — 2026-08-25
+
+### Fixed
+
 - Concurrent `POST /auth/refresh` of the same still-valid token no longer
   family-revokes the winner's new session (two tabs / parallel curls)
   ([#127](https://github.com/gombit-dev/gombit/issues/127)).
@@ -283,95 +507,29 @@ version.
   (`password=secret dbname=app`) without swallowing the rest of the DSN, and
   strip the password token from driver errors that do not echo the full DSN
   ([#136](https://github.com/gombit-dev/gombit/issues/136)).
-- **Scaffolded apps now build with no manual steps.** `gombit new` wrote
-  `require github.com/gombit-dev/gombit v0.0.0` — a version that
-  has never existed on the module proxy — so `go build ./...` in a fresh tree
-  failed with *missing go.sum entry*. The generated `go.mod` is now pinned to
-  the version of the binary that scaffolded it (release tag or
-  pseudo-version), and `go mod tidy` runs to populate `go.sum`. New
-  `--framework-version` and `--skip-tidy` flags override each half. A CLI built
-  from source still reports `dev`, which is unresolvable by design: the command
-  explains that and prints the `replace` recipe instead of emitting a broken
-  tree.
+
+## [0.1.2] — 2026-08-20
 
 ### Changed
 
-- **The per-handler request timeout is now opt-in** (PERF-12,
-  [#270](https://github.com/gombit-dev/gombit/issues/270); ADR-017).
-  `HTTP.RequestTimeout` now defaults to `0`, which imposes no cooperative
-  per-handler context deadline. The deadline lives in the `request_context`
-  middleware (#268 folded it in — there is no separate timeout layer), which
-  always runs; a `0` value only skips the deadline setup, a no-op that adds
-  nothing to the request path (≈4 allocs/op saved on every request). **Breaking for apps that
-  relied on the implicit 60s default:** without setting
-  `GOMBIT_HTTP_REQUEST_TIMEOUT` a long-running DB query is no longer cancelled
-  and a slow handler keeps running after the connection's `WriteTimeout`. Set
-  `GOMBIT_HTTP_REQUEST_TIMEOUT` to any positive duration to restore it;
-  `gombit new` scaffolds `60s` explicitly, so new projects keep the deadline.
-  The `http.Server` `ReadTimeout`/`WriteTimeout`/`IdleTimeout` remain a
-  connection-level safety net regardless — when the per-handler deadline is
-  disabled they fall back to `60s` instead of becoming unbounded, so this is not
-  a DoS regression. (A value of `0` no longer zeroes the server timeouts.) See
-  [docs/adr/017-request-timeout-opt-in.md](docs/adr/017-request-timeout-opt-in.md).
-- **Request-input HTML sanitization is now opt-in** (PERF-13,
-  [#271](https://github.com/gombit-dev/gombit/issues/271); ADR-018). The default
-  `framework.App` no longer strips HTML from request input — it does not read,
-  decode, or rewrite the body/query for sanitization, saving ~4–5 allocs/op on
-  every write request. XSS is handled where it belongs, on **output** (React JSX
-  text escaping in the generated frontend and the React admin SPA; a JSON
-  response is not an HTML sink; the response CSP is a backstop). The default
-  middleware no longer mutates request **values**, so `{"description":"x < y"}`
-  and `{"note":"<b>bold</b>"}` reach handlers intact (value fidelity, not
-  byte-for-byte — the response envelope re-encodes JSON; a handler needing the
-  exact bytes reads the raw body via `WithRawBodyPaths`). The 8MiB JSON
-  body-size bound the sanitizer used to provide incidentally is preserved as a
-  separate, always-on `request_body_limit` layer, so raw Gin routes keep their
-  413-before-handler memory bound whether or not sanitization is enabled.
-  **Breaking for apps that relied on ingress stripping:** set
-  `Security.SanitizeInput` (`GOMBIT_SECURITY_SANITIZE_INPUT=true`) to restore
-  the legacy middleware unchanged (including the `password` exemption and
-  `WithRawBodyPaths` handling), or call the newly exported
-  `framework.SanitizeHTML(s)` to strip a single field from a handler. See
-  [docs/security.md](docs/security.md#input-sanitization-opt-in) and
-  [docs/adr/018-input-sanitization-opt-in.md](docs/adr/018-input-sanitization-opt-in.md).
-- **Security headers are now scoped by response kind** (PERF-9,
-  [#267](https://github.com/gombit-dev/gombit/issues/267)). JSON/API responses
-  get the strict, minimal policy `Content-Security-Policy: default-src 'none';
-  frame-ancestors 'none'` plus `X-Content-Type-Options` (and HSTS in
-  production) — no `X-Frame-Options` or `Referrer-Policy`, since
-  `frame-ancestors 'none'` already subsumes the former and a `default-src
-  'none'` document needs neither. HTML responses (the embedded SPA, the admin
-  SPA, and Huma's `/docs`) keep the full browser policy including
-  `Referrer-Policy` and `X-Frame-Options: DENY`. This holds the common API
-  response under Go's 8-header swiss-map threshold, removing ~5 allocs/op of
-  header-map growth from every API response. The dead IE8-only
-  `X-Download-Options: noopen` header is no longer set on any response. If you
-  relied on `X-Frame-Options`/`Referrer-Policy` or the old `default-src 'self'`
-  CSP on JSON responses, note the new API policy. See
-  [docs/security.md](docs/security.md).
-- **Breaking (minimum Go):** the framework now requires **Go 1.26** (`go.mod`
-  `go 1.26.0`), raised by `golang.org/x/crypto` v0.56.0
-  ([#294](https://github.com/gombit-dev/gombit/pull/294)). Scaffolded apps
-  (`gombit new`) now pin `go 1.26.0`, and the badges/prerequisites in the README,
-  installation guide, and tutorial move to Go 1.26+. Migration URL generation
-  gained a fix required by the newer toolchain: an in-memory SQLite DSN
-  (`:memory:`) now maps to Atlas's canonical `sqlite://file?mode=memory&…` dev
-  URL instead of `sqlite://:memory:?…`, whose empty-host `:memory:` authority
-  `net/url` (and therefore Atlas) rejects as an invalid port on Go 1.26+.
-- **Breaking (probe contract):** `GET /readyz` now reflects real readiness
-  (HOST-2, [#283](https://github.com/gombit-dev/gombit/issues/283)). Its success
-  body is `{"data":{"status":"ready"}}` — `data.status` changed from `"ok"` to
-  `"ready"` — and it now returns `503` with a D10 `not_ready` envelope while
-  draining or when an attached datastore is unreachable. Previously it always
-  returned `200 {"data":{"status":"ok"}}`. `/livez` is unchanged.
-- README rewritten: badges, positioning, feature list, quickstart, architecture
-  diagram, and a comparison table, with the doc link list moved to
-  `docs/README.md`.
-- CONTRIBUTING expanded with setup, the database test matrix, golden-test
-  regeneration, and the contract drift check.
-- CI now builds `./examples/...` so committed examples cannot rot.
+- **Breaking (module path):** the module moved from
+  `github.com/LAA-Software-Engineering/gombit` to `github.com/gombit-dev/gombit`.
+  Update imports and `go.mod`.
 
-## [0.1.0] — unreleased
+## [0.1.1] — 2026-08-19
+
+### Fixed
+
+- SQLite apps apply a seeded bootstrap migration, so `AutoMigrate` and Atlas
+  never diverge ([#101](https://github.com/gombit-dev/gombit/pull/101), [#104](https://github.com/gombit-dev/gombit/pull/104)).
+- The migration model registry persists, so adding a model never drops an older
+  one ([#99](https://github.com/gombit-dev/gombit/pull/99)).
+- The admin data plane's row type has a valid OpenAPI schema name ([#103](https://github.com/gombit-dev/gombit/pull/103)).
+- Tutorial fixes: `.env` loads automatically, the generated JWT secret comment
+  matches its value, generated forms show a required-field message, and
+  `gombit client check` works outside this repository ([#98](https://github.com/gombit-dev/gombit/pull/98)).
+
+## [0.1.0] — 2026-08-18
 
 First tagged release. Milestones M0–M5 plus ADMIN-1 through ADMIN-3.
 
@@ -408,6 +566,40 @@ First tagged release. Milestones M0–M5 plus ADMIN-1 through ADMIN-3.
   `GET /api/v1/admin/meta`, the generic `/api/v1/admin/resources/{slug}` data
   plane, a framework-owned SPA under `/admin/`, and direct/group permission
   enforcement with a superuser bypass.
+- `gombit version` (and `--version`), reporting version, commit, build date, Go
+  toolchain, and platform. Release binaries are stamped via ldflags; `go install`
+  builds fall back to module build info.
+- Release pipeline (`.github/workflows/release.yml`): cross-compiled binaries
+  for `linux/amd64`, `linux/arm64`, `darwin/amd64`, `darwin/arm64`, and
+  `windows/amd64`, published with `SHA256SUMS.txt` on a `v*.*.*` tag or a manual
+  bump.
+- Documentation: [installation guide](docs/installation.md), an end-to-end
+  [tutorial](docs/tutorial.md), and a [docs index](docs/README.md).
+- `examples/tutorial/` — the finished tutorial application, compiled in CI.
+- Issue templates for bug reports, feature requests, and questions.
+- `SECURITY.md` and `CODE_OF_CONDUCT.md`.
+
+### Changed
+
+- README rewritten: badges, positioning, feature list, quickstart, architecture
+  diagram, and a comparison table, with the doc link list moved to
+  `docs/README.md`.
+- CONTRIBUTING expanded with setup, the database test matrix, golden-test
+  regeneration, and the contract drift check.
+- CI now builds `./examples/...` so committed examples cannot rot.
+
+### Fixed
+
+- **Scaffolded apps now build with no manual steps.** `gombit new` wrote
+  `require github.com/gombit-dev/gombit v0.0.0` — a version that
+  has never existed on the module proxy — so `go build ./...` in a fresh tree
+  failed with *missing go.sum entry*. The generated `go.mod` is now pinned to
+  the version of the binary that scaffolded it (release tag or
+  pseudo-version), and `go mod tidy` runs to populate `go.sum`. New
+  `--framework-version` and `--skip-tidy` flags override each half. A CLI built
+  from source still reports `dev`, which is unresolvable by design: the command
+  explains that and prints the `replace` recipe instead of emitting a broken
+  tree.
 
 ### Notes
 
@@ -419,5 +611,22 @@ First tagged release. Milestones M0–M5 plus ADMIN-1 through ADMIN-3.
   multi-tenancy, i18n — are **not** included. See
   [the build plan](docs/GOMBIT_BUILD_PLAN.md).
 
-[Unreleased]: https://github.com/gombit-dev/gombit/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/gombit-dev/gombit/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/gombit-dev/gombit/compare/v0.2.1...v0.3.0
+[0.2.1]: https://github.com/gombit-dev/gombit/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/gombit-dev/gombit/compare/v0.1.14...v0.2.0
+[0.1.14]: https://github.com/gombit-dev/gombit/compare/v0.1.13...v0.1.14
+[0.1.13]: https://github.com/gombit-dev/gombit/compare/v0.1.12...v0.1.13
+[0.1.12]: https://github.com/gombit-dev/gombit/compare/v0.1.11...v0.1.12
+[0.1.11]: https://github.com/gombit-dev/gombit/compare/v0.1.10...v0.1.11
+[0.1.10]: https://github.com/gombit-dev/gombit/compare/v0.1.9...v0.1.10
+[0.1.9]: https://github.com/gombit-dev/gombit/compare/v0.1.8...v0.1.9
+[0.1.8]: https://github.com/gombit-dev/gombit/compare/v0.1.7...v0.1.8
+[0.1.7]: https://github.com/gombit-dev/gombit/compare/v0.1.6...v0.1.7
+[0.1.6]: https://github.com/gombit-dev/gombit/compare/v0.1.5...v0.1.6
+[0.1.5]: https://github.com/gombit-dev/gombit/compare/v0.1.4...v0.1.5
+[0.1.4]: https://github.com/gombit-dev/gombit/compare/v0.1.3...v0.1.4
+[0.1.3]: https://github.com/gombit-dev/gombit/compare/v0.1.2...v0.1.3
+[0.1.2]: https://github.com/gombit-dev/gombit/compare/v0.1.1...v0.1.2
+[0.1.1]: https://github.com/gombit-dev/gombit/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/gombit-dev/gombit/releases/tag/v0.1.0

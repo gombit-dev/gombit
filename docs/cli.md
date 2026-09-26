@@ -319,7 +319,7 @@ plumbing. It writes a feature-package under `internal/<snake>/`:
 
 | File | Owner | When |
 | --- | --- | --- |
-| `<snake>.go` | **you** | GORM model (`gorm.Model` + fields), plus the `gombit:"..."` field policy translated from the CLI modifiers. Scaffolded once; edit it freely — re-running `make resource` never overwrites it (use `--force` to re-scaffold). No DO-NOT-EDIT banner. |
+| `<snake>.go` | **you** | GORM model (`gorm.Model`, or a `uuid.UUID` key with `--id uuid`, + fields), plus the `gombit:"..."` field policy translated from the CLI modifiers. Scaffolded once; edit it freely — re-running `make resource` never overwrites it (use `--force` to re-scaffold). No DO-NOT-EDIT banner. |
 | `.gombit-resource` | generator | Marker that makes the package a model-first resource `gombit generate` regenerates. |
 | `dto.gen.go` | generator | Request/response DTOs + model↔DTO mappers. **DO NOT EDIT** — regenerated from the model. |
 | `handler.gen.go` | generator | Huma list/get/create over GORM + `Register(app *framework.App)` (D10 envelope; list honors `page`/`per_page` and the declared filter/sort/search/aggregate surface; `not_found`/`conflict` mapping). **DO NOT EDIT.** |
@@ -370,13 +370,23 @@ After generating routes, run `gombit client generate` or `gombit dev` so
 Design §27 subset:
 
 ```text
-name:type[:required][,unique][,index]
+name:type[:modifier[,modifier…]]
 ```
 
-Supported types: `string`, `text`, `int`, `int64`, `bool`, `uint`, `decimal`,
-`time`, `time_of_day`, `duration`, and `enum(value)` or `enum(value=Label)`.
-Unknown types error with the supported list. `nullable` is accepted as the
-opposite of `required`. `time` is a datetime. `time_of_day` is a clock
+The type is any generated kind in [fields.md](fields.md): `string`, `text`,
+`int` / `integer`, `int64` / `integer64`, `uint` / `unsigned`, `float` /
+`float64`, `decimal`, `bool` / `boolean`, `date`, `time` / `datetime`,
+`time_of_day`, `duration`, `uuid`, `json`, `email`, `url`, `slug`, `ip`,
+`enum(value)` or `enum(value=Label)`, and the relations `belongs_to`,
+`one_to_one`, `has_many`, and `many_to_many`. Unknown types error with the
+supported list.
+
+Modifiers are `required`, `nullable` (the opposite of `required`), `unique`,
+`index`, the [list-query](contract.md#list-query-filter--sort--search) modifiers
+`filterable`, `sortable`, `searchable`, and `aggregatable`, and the constraints
+`default=`, `min=`, `max=`, `max_length=`, and `regex=` (see
+[fields.md § Constraints](fields.md#constraints)). Relations also take
+`on_delete=`. `time` is a datetime. `time_of_day` is a clock
 (`HH:MM:SS`). `duration` is a Go duration stored as nanoseconds.
 
 | Type | Go type | Column / contract |
@@ -395,15 +405,19 @@ opposite of `required`. `time` is a datetime. `time_of_day` is a clock
 `types.Decimal` is the framework money/decimal type. Because a single Go type
 flows through the model, the handler DTO, the OpenAPI/TS contract, and GORM,
 adding one of these types does not reproduce the model/DTO drift of
-[#218](https://github.com/gombit-dev/gombit/issues/218). A `time` or `decimal`
-field **without** `:required` becomes a pointer (`*time.Time` / `*types.Decimal` /
-`*types.TimeOfDay` / `*types.Duration`)
-on the model and DTO, because those value types cannot be submitted empty — the
-generated forms send `null` for a blank optional value.
+[#218](https://github.com/gombit-dev/gombit/issues/218). A `time`, `date`,
+`decimal`, `uuid`, `time_of_day`, or `duration` field **without** `:required`
+becomes a pointer (`*time.Time` / `*types.Date` / `*types.Decimal` /
+`*uuid.UUID` / `*types.TimeOfDay` / `*types.Duration`) on the model and DTO,
+because those value types cannot be submitted empty — the generated forms send
+`null` for a blank optional value. The same holds for an optional `email`,
+`url`, `slug`, or `ip`, and for a `string` whose `regex=` rejects `""`, so a
+blank value is `null` rather than an invalid `""`.
 
 **Relations** use `name:kind:Target`, where `Target` is a model in
 `internal/<target>/` (imported as `target.Target`). `belongs_to` generates the
-foreign key (`EngineID uint`) plus the association and exposes `engine_id` in
+foreign key (`EngineID`, `uint` or `uuid.UUID` to match the target's primary
+key) plus the association and exposes `engine_id` in
 the REST DTO; `has_many` and `many_to_many` generate the association on the model
 (the join table for m2m), not in the thin REST handler. In the admin,
 `many_to_many` is editable through a relation widget and `has_many` is shown
@@ -699,9 +713,9 @@ gombit --version
 ```
 
 ```text
-gombit:   v0.1.0
-commit:   9abb3c6ecc8c1bf93419aa43c4d4f1ae3de97a2b
-built:    2026-08-18T19:33:15Z
+gombit:   v0.3.0
+commit:   aeffafcfbdad43e7be3f896f5506406567e661bc
+built:    2026-09-26T08:27:27Z
 go:       go1.26.0
 platform: linux/amd64
 ```
@@ -715,7 +729,7 @@ Version resolution has three tiers, in order:
    `-X github.com/gombit-dev/gombit/cli.Version=<tag>` (plus
    `Commit` and `BuildDate`).
 2. **Module build info.** A binary from
-   `go install github.com/gombit-dev/gombit/cmd/gombit@v0.1.0`
+   `go install github.com/gombit-dev/gombit/cmd/gombit@v0.3.0`
    carries no ldflags, so the version comes from
    `runtime/debug.ReadBuildInfo()`. `commit` and `built` come from the
    embedded `vcs.revision` / `vcs.time` settings when the build had them.
@@ -727,7 +741,7 @@ Version resolution has three tiers, in order:
 want in scripts:
 
 ```sh
-test "$(gombit version --short)" = "v0.1.0"
+test "$(gombit version --short)" = "v0.3.0"
 ```
 
 See [installation.md](installation.md) and [releasing.md](releasing.md).

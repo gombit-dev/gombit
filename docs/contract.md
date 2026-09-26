@@ -85,13 +85,13 @@ list columns are a declared subset. Add modifiers to the field grammar:
 
 | Modifier     | Query parameter                          | Types                                |
 | ------------ | ---------------------------------------- | ------------------------------------ |
-| `filterable` | `?<field>=<value>` (exact match)         | string, int, int64, uint, bool, uuid |
-| `sortable`   | `?ordering=<field>` (`-<field>` for DESC) | any scalar (and belongs_to FK)       |
-| `searchable` | `?search=<term>` (case-insensitive LIKE) | string, text, email, slug            |
+| `filterable` | `?<field>=<value>` (exact match)         | string, int, int64, uint, bool, uuid, enum |
+| `sortable`   | `?ordering=<field>` (`-<field>` for DESC) | any scalar except json (and belongs_to / one_to_one FK) |
+| `searchable` | `?search=<term>` (case-insensitive LIKE) | string, text, email, slug, enum      |
 
 `url` and `ip` are exact values. They are sortable and not searchable, even though the admin wire is `string`.
 
-A `belongs_to` foreign key is **filterable by default** — no modifier needed —
+A `belongs_to` or `one_to_one` foreign key is **filterable by default** — no modifier needed —
 so a detail page can list a record's `has_many` children with
 `GET /api/v1/invoices?customer_id=<id>`.
 
@@ -184,7 +184,10 @@ grouping and per-bucket aggregates come later.
 ## Request DTOs
 
 Go structs are the source of truth. Prefer Huma tags — not a separate
-`validate:"..."` layer and not hand-written OpenAPI files.
+`validate:"..."` layer and not hand-written OpenAPI files. (A model-first
+resource keeps its constraints in the model's `validate` tag, and
+`gombit generate` turns them into these Huma tags; see
+[fields.md](fields.md#constraints).)
 
 ```go
 type CreateWidgetBody struct {

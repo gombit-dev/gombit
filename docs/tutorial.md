@@ -215,15 +215,17 @@ human-owned source of truth, and everything else is derived from it.
 - `hooks.go` is **yours** — a default no-op `BeforeCreate` where you set
   server-managed values. Seeded once, never overwritten.
 
-The field grammar is
-`name:type[:required][,unique][,index][,filterable][,sortable][,searchable][,aggregatable]`,
-over `string`, `text`, `int`, `int64`, `bool`, and `uint`. The query modifiers
+The field grammar is `name:type[:modifier[,modifier…]]`. The type is any kind
+in [fields.md](fields.md): scalars such as `string`, `int`, `decimal`, `date`,
+`uuid`, and `email`, `enum(draft=Draft,published=Published)`, or a relation.
+Modifiers are `required` / `nullable`, `unique`, `index`, the query modifiers
+`filterable`, `sortable`, `searchable`, and `aggregatable`, and the constraints
+`default=`, `min=` / `max=`, `max_length=`, and `regex=`. The query modifiers
 become `gombit:"..."` policy on the model field and opt it into the list
 handler's declared query surface — see the
 [list query](contract.md#list-query-filter--sort--search) section. A numeric
 field can also be `aggregatable` for server-side `?aggregate=sum:<field>` totals
 in `meta.aggregates` — see [numeric aggregates](contract.md#list-query-numeric-aggregates).
-(Enum fields aren't supported by the model-first generator yet; use a `string`.)
 
 Two properties of every Gombit generator matter here:
 
@@ -651,6 +653,7 @@ You've used every subsystem in v0.1. The reference docs go deeper:
 | Configuration | [config.md](config.md) |
 | Lifecycle hooks | [lifecycle.md](lifecycle.md) |
 | Raw Gin routes | [router.md](router.md) |
+| Field types and constraints | [fields.md](fields.md) |
 | DTO and validation conventions | [contract.md](contract.md) |
 | OpenAPI and `/docs` | [openapi.md](openapi.md) |
 | Client generation and drift | [client.md](client.md) |
