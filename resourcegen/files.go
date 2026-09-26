@@ -220,7 +220,7 @@ func targetImports(ctx renderContext) []string {
 	seen := map[string]struct{}{}
 	var out []string
 	for _, f := range ctx.Fields {
-		if !f.isRelation() {
+		if !f.isRelation() || f.Self {
 			continue
 		}
 		imp := ctx.Module + "/internal/" + f.TargetPkg
@@ -239,19 +239,34 @@ func targetImports(ctx renderContext) []string {
 // association slice (m2m carries the join-table tag).
 func modelFieldLines(f Field, resourcePkg string) string {
 	switch f.Type {
-	case FieldBelongsTo:
-		// The foreign key is the persisted column: read+write content and filterable
-		// by default (the has_many detail-list case, GET /children?<parent>_id=<id>).
-		// A uuid foreign key is an exact-match filter on the canonical char(36)
-		// text, the same list contract as a uint foreign key. The association
-		// object is not a column.
+	case FieldBelongsTo, FieldOneToOne:
+		// The foreign key is the persisted column: read+write content and
+		// filterable by default (GET /children?<parent>_id=<id>). one_to_one
+		// is that key with a unique index. The column type follows the target
+		// primary key (uint or uuid.UUID); a nullable key is a pointer so a
+		// blank is SQL NULL. The association carries the delete rule; restrict
+		// is the default.
+		fkType := f.fkColumnGoType()
+		if f.Nullable {
+			fkType = "*" + fkType
+		}
 		fkGorm := "index"
-		policy := "read,write,filterable"
 		if f.FKGoType == "uuid.UUID" {
 			fkGorm = "type:char(36);index"
 		}
-		return "\t" + f.fkGoName() + " " + f.fkColumnGoType() + structTag(fkGorm, policy, "") + "\n" +
-			"\t" + f.GoName + " " + f.GoType + "\n"
+		if f.Type == FieldOneToOne {
+			if f.FKGoType == "uuid.UUID" {
+				fkGorm = "type:char(36);uniqueIndex"
+			} else {
+				fkGorm = "uniqueIndex"
+			}
+		}
+		onDelete := f.OnDelete
+		if onDelete == "" {
+			onDelete = "RESTRICT"
+		}
+		return "\t" + f.fkGoName() + " " + fkType + structTag(fkGorm, "read,write,filterable", "") + "\n" +
+			"\t" + f.GoName + " " + f.GoType + structTag("constraint:OnUpdate:CASCADE,OnDelete:"+onDelete+";", "", "") + "\n"
 	case FieldHasMany:
 		return "\t" + f.GoName + " " + f.GoType + "\n"
 	case FieldManyToMany:
@@ -677,6 +692,9 @@ func tsFormType(field Field) string {
 	case FieldBool:
 		return "boolean"
 	case FieldInt, FieldInt64, FieldUint, FieldFloat:
+		if field.pointerType() {
+			return "number | null"
+		}
 		return "number"
 	case FieldJSON:
 		return "string"
@@ -710,6 +728,9 @@ func tsDefaultValue(field Field) string {
 	case FieldBool:
 		return "false"
 	case FieldInt, FieldInt64, FieldUint, FieldFloat:
+		if field.pointerType() {
+			return "null"
+		}
 		return "0"
 	case FieldJSON:
 		return `""`
@@ -815,7 +836,11 @@ func renderFormField(field Field) string {
 	case FieldBool:
 		b.WriteString("          <input type=\"checkbox\" {...register(\"" + field.JSONName + "\")} />\n")
 	case FieldInt, FieldInt64, FieldUint, FieldFloat:
-		b.WriteString("          <input type=\"number\" {...register(\"" + field.JSONName + "\", { setValueAs: (value) => (value === \"\" ? 0 : Number(value))" + tsNumberRules(field) + " })}" + htmlNumberAttrs(field) + " />\n")
+		blank := "0"
+		if field.pointerType() {
+			blank = "null"
+		}
+		b.WriteString("          <input type=\"number\" {...register(\"" + field.JSONName + "\", { setValueAs: (value) => (value === \"\" ? " + blank + " : Number(value))" + tsNumberRules(field) + " })}" + htmlNumberAttrs(field) + " />\n")
 	case FieldDate, FieldUUID:
 		// Empty is null for a pointer date or uuid, and for a required uuid.
 		// A non-pointer optional uuid (a belongs_to foreign key) is a plain
@@ -1244,6 +1269,9 @@ func renderMUIFormField(field Field) string {
 	case FieldInt, FieldInt64, FieldUint, FieldFloat:
 		b.WriteString("              <TextField\n")
 		b.WriteString("                {...field}\n")
+		if field.pointerType() {
+			b.WriteString("                value={field.value ?? \"\"}\n")
+		}
 		b.WriteString("                type=\"number\"\n")
 		b.WriteString("                label=\"" + field.GoName + "\"\n")
 		b.WriteString("                fullWidth\n")
@@ -1264,7 +1292,11 @@ func renderMUIFormField(field Field) string {
 		}
 		b.WriteString("                onChange={(event) => {\n")
 		b.WriteString("                  const raw = event.target.value;\n")
-		b.WriteString("                  field.onChange(raw === \"\" ? 0 : Number(raw));\n")
+		blank := "0"
+		if field.pointerType() {
+			blank = "null"
+		}
+		b.WriteString("                  field.onChange(raw === \"\" ? " + blank + " : Number(raw));\n")
 		b.WriteString("                }}\n")
 		b.WriteString("              />\n")
 	case FieldEnum:

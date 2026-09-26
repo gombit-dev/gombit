@@ -81,6 +81,7 @@ const (
 	RelBelongsTo  RelationKind = "belongs_to"
 	RelHasMany    RelationKind = "has_many"
 	RelManyToMany RelationKind = "many_to_many"
+	RelOneToOne   RelationKind = "one_to_one"
 )
 
 // Spec is the single definition of a kind: storage, generator readiness, and
@@ -134,13 +135,14 @@ var catalog = []Spec{
 	{Kind: Slug, GoType: "string", GeneratorReady: true, CLITokens: []string{"slug"}, AdminWire: "string", Sortable: true, Searchable: true},
 	{Kind: IP, GoType: "string", GeneratorReady: true, CLITokens: []string{"ip"}, AdminWire: "string", Sortable: true},
 	{Kind: Enum, GoType: "string", GeneratorReady: true, CLITokens: []string{"enum"}, AdminWire: "string", Filterable: true, Searchable: true, Sortable: true},
-	{Kind: Relation, GeneratorReady: true, CLITokens: []string{"belongs_to", "has_many", "many_to_many"}, AdminWire: "relation"},
+	{Kind: Relation, GeneratorReady: true, CLITokens: []string{"belongs_to", "has_many", "many_to_many", "one_to_one"}, AdminWire: "relation"},
 }
 
 var relationCaps = map[RelationKind]relCaps{
 	RelBelongsTo:  {Filterable: true, Sortable: true},
 	RelHasMany:    {},
 	RelManyToMany: {},
+	RelOneToOne:   {Filterable: true, Sortable: true},
 }
 
 var (

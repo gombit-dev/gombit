@@ -113,6 +113,14 @@ func Plan(ctx context.Context, opts Options) (*ResourcePlan, error) {
 		return nil, err
 	}
 	fields, err := parseFieldsWithID(opts.Fields, name.Package, func(pkg, typeName string) (string, error) {
+		// The model being scaffolded is not on disk yet. A self relation uses
+		// this command's --id, which is the key that model will have.
+		if pkg == name.Package {
+			if id == idUUID {
+				return "uuid.UUID", nil
+			}
+			return "uint", nil
+		}
 		return lookupTargetPK(opts.WorkDir, pkg, typeName)
 	})
 	if err != nil {

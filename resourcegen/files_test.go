@@ -1,6 +1,9 @@
 package resourcegen
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -239,6 +242,95 @@ func TestRenderRelations(t *testing.T) {
 		if !strings.Contains(model, want) {
 			t.Fatalf("model missing %q:\n%s", want, model)
 		}
+	}
+}
+
+func TestSelfRelationModelCompiles(t *testing.T) {
+	fields, err := parseFields([]string{"parent:belongs_to:Category,nullable,on_delete=set_null"}, "category")
+	if err != nil {
+		t.Fatalf("parseFields: %v", err)
+	}
+	name, err := parseResourceName("Category")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := newRenderContext("example.com/demo", name, fields, "/api/v1", "minimal", false, false)
+	src := renderModel(ctx)
+	if !strings.Contains(src, "Parent *Category") || strings.Contains(src, "Parent Category `") {
+		t.Fatalf("self association must be a pointer:\n%s", src)
+	}
+	// Build inside this module so gorm is already cached. A throwaway module
+	// plus go mod tidy fails CI, which sets GOPROXY=off.
+	root := resourcegenModuleRoot(t)
+	dir := filepath.Join(root, "internal", "_selfcategory")
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "model.go"), []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	build := exec.Command("go", "build", "-mod=readonly", "./internal/_selfcategory")
+	build.Dir = root
+	build.Env = append(os.Environ(), "GOPROXY=off")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("go build: %v\n%s\n%s", err, out, src)
+	}
+	badDir := filepath.Join(root, "internal", "_selfcategory_value")
+	t.Cleanup(func() { _ = os.RemoveAll(badDir) })
+	if err := os.MkdirAll(badDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	bad := strings.Replace(src, "Parent *Category", "Parent Category", 1)
+	if err := os.WriteFile(filepath.Join(badDir, "model.go"), []byte(bad), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	badBuild := exec.Command("go", "build", "-mod=readonly", "./internal/_selfcategory_value")
+	badBuild.Dir = root
+	badBuild.Env = append(os.Environ(), "GOPROXY=off")
+	if out, err := badBuild.CombinedOutput(); err == nil {
+		t.Fatalf("value self association compiled:\n%s", bad)
+	} else if !strings.Contains(string(out), "recursive") {
+		t.Fatalf("go build: %v\n%s", err, out)
+	}
+}
+
+func TestNullableFKFormSubmitsNull(t *testing.T) {
+	fields, err := parseFields([]string{"author:belongs_to:Author,nullable"}, "post")
+	if err != nil {
+		t.Fatalf("parseFields: %v", err)
+	}
+	name, err := parseResourceName("Post")
+	if err != nil {
+		t.Fatal(err)
+	}
+	minimal := newRenderContext("example.com/demo", name, dtoFields(fields), "/api/v1", "minimal", false, false)
+	form := renderFormTSX(minimal)
+	for _, want := range []string{"author_id: null", "number | null", `value === "" ? null : Number(value)`} {
+		if !strings.Contains(form, want) {
+			t.Fatalf("minimal form missing %q:\n%s", want, form)
+		}
+	}
+	mui := renderMUIFormTSX(newRenderContext("example.com/demo", name, dtoFields(fields), "/api/v1", "mui", false, false))
+	if !strings.Contains(mui, `raw === "" ? null : Number(raw)`) || strings.Contains(mui, "author_id: 0") {
+		t.Fatalf("MUI form still submits 0:\n%s", mui)
+	}
+
+	// nullable on a non-pointer number is the opposite of required. The column
+	// stays int, so the form must post 0. Null is only for a pointer Go type.
+	ints, err := parseFields([]string{"count:int:nullable", "qty:uint:nullable"}, "post")
+	if err != nil {
+		t.Fatalf("parseFields: %v", err)
+	}
+	if ints[0].GoType != "int" || ints[1].GoType != "*uint" {
+		t.Fatalf("nullable numbers = %q, %q", ints[0].GoType, ints[1].GoType)
+	}
+	intForm := renderFormTSX(newRenderContext("example.com/demo", name, dtoFields(ints), "/api/v1", "minimal", false, false))
+	if !strings.Contains(intForm, "count: number;") || !strings.Contains(intForm, "count: 0") || !strings.Contains(intForm, `register("count", { setValueAs: (value) => (value === "" ? 0 : Number(value))`) {
+		t.Fatalf("nullable int form posts null:\n%s", intForm)
+	}
+	if !strings.Contains(intForm, "qty: number | null;") || !strings.Contains(intForm, "qty: null") {
+		t.Fatalf("nullable uint form does not post null:\n%s", intForm)
 	}
 }
 

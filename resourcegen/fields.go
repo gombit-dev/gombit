@@ -60,19 +60,26 @@ type Field struct {
 
 	// Target is the related model type (PascalCase) for a relation field, e.g.
 	// "Engine". TargetPkg is its feature-package name (snake), e.g. "engine".
+	// OnDelete is the GORM OnDelete clause (RESTRICT, CASCADE, SET NULL).
+	// Self is a relation whose target is the resource being generated.
 	Target    string
 	TargetPkg string
-	// FKGoType is the belongs_to foreign-key Go type. Empty means uint.
-	// uuid.UUID matches a target whose primary key is a UUID.
+	OnDelete  string
+	Self      bool
+	// FKGoType is the belongs_to / one_to_one foreign-key Go type. Empty
+	// means uint. uuid.UUID matches a target whose primary key is a UUID.
 	FKGoType string
 }
 
-// parseRelationField builds a belongs_to / has_many / many_to_many field from
-// its target model. The target is a PascalCase model living in
+// parseRelationField builds a belongs_to / has_many / many_to_many / one_to_one
+// field from its target model. The target is a PascalCase model living in
 // internal/<target>/ (imported as <target>.<Target>), or the resource itself
-// for a self-referential belongs_to. resourcePkg is the package being
-// generated, used to detect same-package targets.
-func parseRelationField(name, jsonName, goName string, kind FieldType, target, resourcePkg string, lookup pkLookup) (Field, error) {
+// for a nullable self-referential belongs_to or one_to_one. Modifiers after
+// the target are comma-separated: nullable and on_delete=restrict|cascade|set_null.
+// resourcePkg is the package being generated, used to detect same-package targets.
+// lookup reports the target primary key when the model is already on disk.
+func parseRelationField(name, jsonName, goName string, kind FieldType, rawTarget, resourcePkg string, lookup pkLookup) (Field, error) {
+	target, modRaw, _ := strings.Cut(rawTarget, ",")
 	target = strings.TrimSpace(target)
 	if target == "" {
 		return Field{}, fmt.Errorf("resourcegen: relation field %q is missing a target model", name)
@@ -88,14 +95,6 @@ func parseRelationField(name, jsonName, goName string, kind FieldType, target, r
 	if _, kw := goKeywords[targetPkg]; kw {
 		return Field{}, fmt.Errorf("resourcegen: relation target %q maps to Go keyword %q", target, targetPkg)
 	}
-	// Self-referential relations are not supported in this milestone. A
-	// belongs_to onto the same model would need a nullable (*uint) foreign key so
-	// a tree root stores NULL rather than 0 (0 references no row and fails the
-	// self-FK); has_many / many_to_many need explicit join / foreign keys. Rather
-	// than emit output that cannot insert a root or migrate, reject it here.
-	if targetPkg == resourcePkg {
-		return Field{}, fmt.Errorf("resourcegen: %s relation %q cannot target the resource itself (self-referential relations are not supported yet; they need a nullable foreign key / explicit join keys)", strings.ToLower(string(kind)), name)
-	}
 	f := Field{
 		Name:      name,
 		JSONName:  jsonName,
@@ -103,9 +102,28 @@ func parseRelationField(name, jsonName, goName string, kind FieldType, target, r
 		Type:      kind,
 		Target:    targetType,
 		TargetPkg: targetPkg,
+		OnDelete:  "RESTRICT",
+		Self:      targetPkg == resourcePkg,
 		FKGoType:  "uint",
 	}
-	if kind == FieldBelongsTo && lookup != nil {
+	if strings.TrimSpace(modRaw) != "" {
+		if err := applyRelationModifiers(&f, modRaw); err != nil {
+			return Field{}, err
+		}
+	}
+	if f.OnDelete == "SET NULL" && !f.Nullable {
+		return Field{}, fmt.Errorf("resourcegen: %s relation %q on_delete=set_null requires nullable", strings.ToLower(string(kind)), name)
+	}
+	// A self-referential belongs_to or one_to_one needs a nullable foreign
+	// key so a tree root stores NULL rather than the zero id. has_many and
+	// many_to_many onto the same model still need explicit join keys.
+	if f.Self && (kind == FieldHasMany || kind == FieldManyToMany) {
+		return Field{}, fmt.Errorf("resourcegen: %s relation %q cannot target the resource itself (self-referential has_many and many_to_many need explicit join keys)", strings.ToLower(string(kind)), name)
+	}
+	if f.Self && !f.Nullable {
+		return Field{}, fmt.Errorf("resourcegen: %s relation %q cannot target the resource itself without nullable (a tree root must store NULL, not the zero id)", strings.ToLower(string(kind)), name)
+	}
+	if (kind == FieldBelongsTo || kind == FieldOneToOne) && lookup != nil {
 		got, err := lookup(targetPkg, targetType)
 		if err != nil {
 			return Field{}, err
@@ -114,16 +132,55 @@ func parseRelationField(name, jsonName, goName string, kind FieldType, target, r
 			f.FKGoType = got
 		}
 	}
-	// The target is always a distinct feature-package (same-package targets are
-	// rejected above), qualified as <pkg>.<Type>.
 	qualified := targetPkg + "." + targetType
+	if f.Self {
+		// A struct cannot contain a field of its own type. The association
+		// is a pointer; the foreign key is the nullable column.
+		qualified = "*" + targetType
+	}
 	switch kind {
-	case FieldBelongsTo:
-		f.GoType = qualified // the association struct field
+	case FieldBelongsTo, FieldOneToOne:
+		f.GoType = qualified
 	case FieldHasMany, FieldManyToMany:
 		f.GoType = "[]" + qualified
 	}
 	return f, nil
+}
+
+func applyRelationModifiers(field *Field, raw string) error {
+	// The foreign key, and therefore nullable / on_delete, lives on this model
+	// only for belongs_to and one_to_one. has_many and many_to_many would drop
+	// the modifier, so they are rejected instead of silently ignored.
+	if field.Type != FieldBelongsTo && field.Type != FieldOneToOne {
+		return fmt.Errorf("resourcegen: %s relation %q does not accept modifiers (nullable and on_delete apply to belongs_to and one_to_one; the foreign key lives on the other model)", strings.ToLower(string(field.Type)), field.JSONName)
+	}
+	for _, part := range strings.Split(raw, ",") {
+		mod := strings.TrimSpace(part)
+		if mod == "" {
+			continue
+		}
+		key, val, hasVal := strings.Cut(mod, "=")
+		key = strings.ToLower(strings.TrimSpace(key))
+		val = strings.TrimSpace(val)
+		switch {
+		case key == "nullable" && !hasVal:
+			field.Nullable = true
+		case key == "on_delete" && hasVal:
+			switch strings.ToLower(val) {
+			case "restrict":
+				field.OnDelete = "RESTRICT"
+			case "cascade":
+				field.OnDelete = "CASCADE"
+			case "set_null":
+				field.OnDelete = "SET NULL"
+			default:
+				return fmt.Errorf("resourcegen: relation %q on_delete must be restrict, cascade, or set_null", field.JSONName)
+			}
+		default:
+			return fmt.Errorf("resourcegen: relation %q has unknown modifier %q (supported: nullable, on_delete=restrict|cascade|set_null)", field.JSONName, mod)
+		}
+	}
+	return nil
 }
 
 // reservedJSONKeys returns the lowercased JSON identifiers this field claims in
@@ -132,7 +189,7 @@ func parseRelationField(name, jsonName, goName string, kind FieldType, target, r
 // (<name>_id), so both must be reserved — otherwise engine:belongs_to:Engine
 // plus engine_id:uint would emit the EngineID field twice.
 func (f Field) reservedJSONKeys() []string {
-	if f.Type == FieldBelongsTo {
+	if f.Type == FieldBelongsTo || f.Type == FieldOneToOne {
 		return []string{f.JSONName, f.fkJSONName()}
 	}
 	return []string{f.JSONName}
@@ -170,13 +227,18 @@ func dtoFields(fields []Field) []Field {
 		if !f.inDTO() {
 			continue
 		}
-		if f.Type == FieldBelongsTo {
+		if f.Type == FieldBelongsTo || f.Type == FieldOneToOne {
+			goType := f.fkColumnGoType()
+			if f.Nullable {
+				goType = "*" + goType
+			}
 			out = append(out, Field{
 				Name:     f.fkJSONName(),
 				JSONName: f.fkJSONName(),
 				GoName:   f.fkGoName(),
 				Type:     f.fkDTOType(),
-				GoType:   f.fkColumnGoType(),
+				GoType:   goType,
+				Nullable: f.Nullable,
 			})
 			continue
 		}
@@ -188,7 +250,7 @@ func dtoFields(fields []Field) []Field {
 // isRelation reports whether the field is a belongs_to / has_many / many_to_many.
 func (f Field) isRelation() bool {
 	switch f.Type {
-	case FieldBelongsTo, FieldHasMany, FieldManyToMany:
+	case FieldBelongsTo, FieldHasMany, FieldManyToMany, FieldOneToOne:
 		return true
 	default:
 		return false
@@ -200,7 +262,7 @@ func (f Field) isRelation() bool {
 // are model-only — not in the REST DTO — with many_to_many edited and has_many
 // shown read-only through the admin.
 func (f Field) inDTO() bool {
-	return !f.isRelation() || f.Type == FieldBelongsTo
+	return !f.isRelation() || f.Type == FieldBelongsTo || f.Type == FieldOneToOne
 }
 
 // FieldType is the generator's projection of a logical field kind. Scalar
@@ -231,6 +293,7 @@ const (
 	FieldBelongsTo  FieldType = FieldType(logical.RelBelongsTo)
 	FieldHasMany    FieldType = FieldType(logical.RelHasMany)
 	FieldManyToMany FieldType = FieldType(logical.RelManyToMany)
+	FieldOneToOne   FieldType = FieldType(logical.RelOneToOne)
 )
 
 // defaultDecimalPrecision / defaultDecimalScale back a bare `decimal` field.
@@ -245,7 +308,7 @@ const (
 // vocabulary. Relation field types are relation kinds, not scalar kinds.
 func (f Field) logicalKind() logical.Kind {
 	switch f.Type {
-	case FieldBelongsTo, FieldHasMany, FieldManyToMany:
+	case FieldBelongsTo, FieldHasMany, FieldManyToMany, FieldOneToOne:
 		return logical.Relation
 	default:
 		return logical.Kind(f.Type)
@@ -260,6 +323,8 @@ func (f Field) relationKind() logical.RelationKind {
 		return logical.RelHasMany
 	case FieldManyToMany:
 		return logical.RelManyToMany
+	case FieldOneToOne:
+		return logical.RelOneToOne
 	default:
 		return ""
 	}
@@ -1242,12 +1307,22 @@ func patternRejectsEmpty(pattern string) bool {
 	return !re.MatchString("")
 }
 
+// pointerType reports a Go field that accepts JSON null. The form posts null
+// only for these. A nullable non-pointer number (int, int64, float) still
+// posts 0, which is the value that type stores.
+func (f Field) pointerType() bool {
+	return strings.HasPrefix(f.GoType, "*")
+}
+
 // blankIsNull reports that an empty input must be JSON null. Email, URL,
 // slug, and IP reject "", and a user regex does too only when it does not
 // match "". A pattern such as ^[a-z]*$ stays a plain string. A required
 // field stays a plain string so "" still fails. URL and IP are sortable
 // exact values, not search text; email and slug stay searchable.
 func (f Field) blankIsNull() bool {
+	if f.Nullable && f.Type == FieldUint {
+		return true
+	}
 	if f.Required {
 		return false
 	}

@@ -25,7 +25,7 @@ projections of that kind, not separate lists.
 | `slug` | yes | `slug` | `string` | `string`, pattern `^[-a-zA-Z0-9_]+$` |
 | `ip` | yes | `ip` | `string` | `string`, OpenAPI `format: ip` |
 | `enum` | yes | `enum(a,b)` | `string` | `string` |
-| `relation` | yes | `belongs_to`, `has_many`, `many_to_many` | `relation` | |
+| `relation` | yes | `belongs_to`, `has_many`, `many_to_many`, `one_to_one` | `relation` | |
 
 `time` on the command line is a **datetime** (`time.Time`), kept as a
 compatibility alias. `date` is a calendar date (`types.Date`, JSON

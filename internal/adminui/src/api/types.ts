@@ -11,7 +11,7 @@ export type FieldType =
   | "json"
   | "relation";
 
-export type RelationKind = "belongs_to" | "has_many" | "many_to_many";
+export type RelationKind = "belongs_to" | "one_to_one" | "has_many" | "many_to_many";
 
 export type RelationMeta = {
   slug: string;

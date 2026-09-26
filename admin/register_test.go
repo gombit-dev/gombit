@@ -206,6 +206,69 @@ func TestFieldsFromUsesJSONNames(t *testing.T) {
 	}
 }
 
+func TestFieldsFromOneToOneIsUniqueFK(t *testing.T) {
+	type User struct {
+		ID        uint   `gorm:"primaryKey" json:"id"`
+		ProfileID uint   `gorm:"uniqueIndex" json:"profile_id"`
+		Profile   Widget `json:"-"`
+		ParentID  *uint  `json:"parent_id"`
+		Parent    *User  `json:"-"`
+	}
+	fields, err := admin.FieldsFrom(User{})
+	if err != nil {
+		t.Fatalf("FieldsFrom: %v", err)
+	}
+	byName := map[string]admin.Field{}
+	for _, f := range fields {
+		byName[f.Name] = f
+	}
+	if byName["profile_id"].Related == nil || byName["profile_id"].Related.Kind != admin.RelOneToOne {
+		t.Fatalf("profile_id = %+v", byName["profile_id"].Related)
+	}
+	if byName["parent_id"].Related == nil || byName["parent_id"].Related.Kind != admin.RelBelongsTo {
+		t.Fatalf("parent_id = %+v", byName["parent_id"].Related)
+	}
+
+	type Membership struct {
+		ID     uint   `gorm:"primaryKey" json:"id"`
+		UserID uint   `gorm:"uniqueIndex:idx_membership" json:"user_id"`
+		User   Widget `json:"-"`
+		OrgID  uint   `gorm:"uniqueIndex:idx_membership" json:"org_id"`
+		Org    Widget `json:"-"`
+	}
+	membership, err := admin.FieldsFrom(Membership{})
+	if err != nil {
+		t.Fatalf("FieldsFrom membership: %v", err)
+	}
+	for _, f := range membership {
+		if f.Name != "user_id" && f.Name != "org_id" {
+			continue
+		}
+		if f.Related == nil || f.Related.Kind != admin.RelBelongsTo {
+			t.Fatalf("%s composite unique index = %+v, want belongs_to", f.Name, f.Related)
+		}
+	}
+
+	type Account struct {
+		ID        uint   `gorm:"primaryKey" json:"id"`
+		ProfileID uint   `gorm:"index:idx_profile,unique" json:"profile_id"`
+		Profile   Widget `json:"-"`
+	}
+	account, err := admin.FieldsFrom(Account{})
+	if err != nil {
+		t.Fatalf("FieldsFrom account: %v", err)
+	}
+	var profile admin.Field
+	for _, f := range account {
+		if f.Name == "profile_id" {
+			profile = f
+		}
+	}
+	if profile.Related == nil || profile.Related.Kind != admin.RelOneToOne {
+		t.Fatalf("index:name,unique = %+v, want one_to_one", profile.Related)
+	}
+}
+
 func TestFieldsFromInfersUUIDAndJSON(t *testing.T) {
 	type Token struct {
 		ID      uuid.UUID       `gorm:"type:uuid;primaryKey" json:"id"`

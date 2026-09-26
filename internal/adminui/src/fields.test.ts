@@ -202,6 +202,15 @@ describe("belongs_to fields", () => {
     const { body } = formValuesToBody({ warehouse_id: "" }, [rel()]);
     expect(body.warehouse_id).toBeNull();
   });
+
+  it("submits a one_to_one id the same way as belongs_to", () => {
+    const field = rel();
+    field.related = { slug: "profiles", kind: "one_to_one", label_field: "name" };
+    const { body } = formValuesToBody({ warehouse_id: "7" }, [field]);
+    expect(body.warehouse_id).toBe(7);
+    const cleared = formValuesToBody({ warehouse_id: "" }, [field]);
+    expect(cleared.body.warehouse_id).toBeNull();
+  });
 });
 
 describe("many_to_many fields", () => {

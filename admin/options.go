@@ -24,6 +24,7 @@ const (
 	RelBelongsTo  = string(field.RelBelongsTo)
 	RelHasMany    = string(field.RelHasMany)
 	RelManyToMany = string(field.RelManyToMany)
+	RelOneToOne   = string(field.RelOneToOne)
 )
 
 // Implicit timestamp names allowed in List and Ordering even when omitted
