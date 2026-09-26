@@ -51,11 +51,30 @@ func Build(in migrations.Inspection) (SchemaPlan, error) {
 	if err != nil {
 		return SchemaPlan{}, fmt.Errorf("schemaplan: diff schemas: %w", err)
 	}
+	steps := append([]PlanStep{}, classifyChanges(in.Driver, changes)...)
+	for i := range steps {
+		if steps[i].Code == StepDropTable {
+			steps[i].Hint = renameTableHint(steps[i], modelFlags(in))
+		}
+	}
 	return SchemaPlan{
 		Driver:          in.Driver,
-		Steps:           append([]PlanStep{}, classifyChanges(in.Driver, changes)...),
+		Steps:           steps,
 		forgottenTables: defaultTableNames(in.ForgetModels),
 	}, nil
+}
+
+// modelFlags renders the --model / --forget-model flags of an inspection, so
+// a suggested command reproduces the run's model set.
+func modelFlags(in migrations.Inspection) string {
+	var b strings.Builder
+	for _, m := range in.NewModels {
+		fmt.Fprintf(&b, " --model %s.%s", m.ImportPath, m.TypeName)
+	}
+	for _, m := range in.ForgetModels {
+		fmt.Fprintf(&b, " --forget-model %s.%s", m.ImportPath, m.TypeName)
+	}
+	return b.String()
 }
 
 // Acknowledge marks the steps an --allow entry covers. An entry is a step ID
@@ -78,7 +97,11 @@ func (p *SchemaPlan) Acknowledge(allow []string) (unmatched []string) {
 			used[s.Code] = true
 			s.Acknowledged = true
 		}
-		if s.Code == StepDropTable && p.forgottenTables[s.Table] {
+		// A forgotten model's table drop is what --forget-model asks for,
+		// but only when the plan creates no table: any new table may be its
+		// rename, whose rows the drop would lose, so then it needs
+		// --rename-table or an explicit --allow.
+		if s.Code == StepDropTable && p.forgottenTables[s.Table] && len(s.createdInPlan) == 0 {
 			s.Acknowledged = true
 		}
 	}
@@ -134,12 +157,7 @@ func retryCommand(name string, in migrations.Inspection, pending []PlanStep) str
 	var b strings.Builder
 	b.WriteString("gombit db makemigrations ")
 	b.WriteString(name)
-	for _, m := range in.NewModels {
-		fmt.Fprintf(&b, " --model %s.%s", m.ImportPath, m.TypeName)
-	}
-	for _, m := range in.ForgetModels {
-		fmt.Fprintf(&b, " --forget-model %s.%s", m.ImportPath, m.TypeName)
-	}
+	b.WriteString(modelFlags(in))
 	for _, s := range pending {
 		b.WriteString(" --allow ")
 		b.WriteString(s.ID)
