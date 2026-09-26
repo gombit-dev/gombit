@@ -183,6 +183,14 @@ arbitrary Go types.
 - **Empty `Fields`** derives a default from the struct once, inside
   `Register`, via `admin.FieldsFrom(T)`. That helper may use `reflect`
   **only at registration time**. Do not call it from request handlers.
+  The derived list uses the same `gombit` policy as the generated API:
+  `gombit:"-"` is omitted, a response-only or `server` column is
+  read-only, and `gombit:"write"` is accepted on create but left out of
+  row JSON. A NOT NULL `server` column fails create instead of being
+  stored as the zero value. When the model declares that policy and
+  `Filter`, `Ordering`, or `Search` were left unset, those lists follow
+  the tag (`filterable`, `sortable`, `searchable`) rather than every
+  text column.
 - **`created_at` / `updated_at`** are implicit GORM timestamp columns.
   They may appear in `List` and `Ordering` even when omitted from
   `Fields`. When the model has those columns, list and detail row JSON

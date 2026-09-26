@@ -3,10 +3,12 @@ package admin
 import (
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 
 	"github.com/gombit-dev/gombit/config"
 	"github.com/gombit-dev/gombit/field"
+	"github.com/gombit-dev/gombit/resourcepolicy"
 	"gorm.io/gorm/schema"
 )
 
@@ -51,18 +53,22 @@ func registerModel(host Host, model any, opts Options) error {
 		return err
 	}
 
-	if len(opts.Fields) == 0 {
-		derived, err := FieldsFrom(model)
+	derived := len(opts.Fields) == 0
+	if derived {
+		fields, err := FieldsFrom(model)
 		if err != nil {
 			return err
 		}
-		opts.Fields = derived
+		opts.Fields = fields
 	}
 	// Default Search to the model's text columns when the caller left it unset
 	// (nil), so the admin — and the relation pickers, which search server-side —
 	// can filter by name out of the box. A caller who wants no search opts out
 	// explicitly with an empty (non-nil) slice.
 	if err := fillConstraints(opts.Fields, sch); err != nil {
+		return err
+	}
+	if err := alignQuerySurface(&opts, sch, derived); err != nil {
 		return err
 	}
 	if opts.Search == nil {
@@ -154,10 +160,74 @@ func registerModel(host Host, model any, opts Options) error {
 
 // defaultSearchFields returns the writable string/text field names of a model,
 // the sensible default Search set for a purely auto-registered model.
+// alignQuerySurface copies filter, ordering, and search from the gombit tag
+// when Fields were derived and the caller left those lists unset. A model
+// with no gombit tag keeps the previous defaults. An explicit list is kept.
+func alignQuerySurface(opts *Options, sch *schema.Schema, derived bool) error {
+	if !derived || opts == nil {
+		return nil
+	}
+	explicit := false
+	for _, f := range sch.Fields {
+		if f != nil && f.Tag.Get("gombit") != "" {
+			explicit = true
+			break
+		}
+	}
+	if !explicit {
+		return nil
+	}
+	byCol, err := columnPolicy(sch)
+	if err != nil {
+		return err
+	}
+	nameOf := make(map[string]string, len(opts.Fields))
+	for _, f := range opts.Fields {
+		col := f.Column
+		if col == "" {
+			col = f.Name
+		}
+		nameOf[col] = f.Name
+	}
+	if opts.Filter == nil {
+		if names := policyNames(byCol, nameOf, func(r resourcepolicy.Resolved) bool { return r.Filterable }); len(names) > 0 {
+			opts.Filter = names
+		}
+	}
+	if opts.Ordering == nil {
+		if names := policyNames(byCol, nameOf, func(r resourcepolicy.Resolved) bool { return r.Sortable }); len(names) > 0 {
+			opts.Ordering = names
+		}
+	}
+	// Search defaults to every text column. Once a model declares policy,
+	// that default would search columns the public API does not, including
+	// a write-only secret. An empty slice opts out.
+	if opts.Search == nil {
+		opts.Search = policyNames(byCol, nameOf, func(r resourcepolicy.Resolved) bool { return r.Searchable })
+	}
+	return nil
+}
+
+func policyNames(byCol map[string]resourcepolicy.Resolved, nameOf map[string]string, keep func(resourcepolicy.Resolved) bool) []string {
+	out := []string{}
+	for col, r := range byCol {
+		if !keep(r) {
+			continue
+		}
+		name, ok := nameOf[col]
+		if !ok {
+			continue
+		}
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
 func defaultSearchFields(fields []Field) []string {
 	var out []string
 	for _, f := range fields {
-		if f.ReadOnly {
+		if f.ReadOnly || f.WriteOnly {
 			continue
 		}
 		if f.Type == TypeText || (f.Type == TypeString && field.AllowsSearch(f.queryKind(), "")) {

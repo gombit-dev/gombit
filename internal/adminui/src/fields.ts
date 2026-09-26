@@ -161,6 +161,9 @@ export function formValuesToBody(values: Row, fields: FieldMeta[]): { body: Row;
   const jsonErrors: Record<string, string> = {};
   for (const field of writableFields(fields)) {
     const raw = values[field.name];
+    if (field.writeonly && !field.required && isEmptyFormValue(raw)) {
+      continue;
+    }
     if (isManyToMany(field)) {
       // Send the id list so the data plane syncs the join table. An empty
       // list clears the relation; omission is not possible from the form.

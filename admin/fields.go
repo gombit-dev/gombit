@@ -16,6 +16,7 @@ import (
 	"gorm.io/gorm/schema"
 
 	"github.com/gombit-dev/gombit/field"
+	"github.com/gombit-dev/gombit/resourcepolicy"
 	"github.com/gombit-dev/gombit/types"
 )
 
@@ -24,10 +25,17 @@ import (
 //
 // Name comes from the json tag when present, otherwise the GORM column /
 // snake_case of the exported field name. Type is inferred from the Go type.
-// Primary keys are readonly. GORM created_at / updated_at are included when
-// present on the struct.
+// Read, write, and hidden follow resourcepolicy — the same gombit tag the
+// generated API uses — so a column cannot be secret on the public contract
+// and editable here. Primary keys and GORM timestamps stay read-only.
+// GORM created_at / updated_at are included when the policy leaves them
+// on the response.
 func FieldsFrom(model any) ([]Field, error) {
 	sch, err := parseSchema(model)
+	if err != nil {
+		return nil, err
+	}
+	byCol, err := columnPolicy(sch)
 	if err != nil {
 		return nil, err
 	}
@@ -52,15 +60,27 @@ func FieldsFrom(model any) ([]Field, error) {
 		if name == "" || name == "-" {
 			continue
 		}
-		readOnly := sf.PrimaryKey || sf.AutoIncrement || sf.AutoCreateTime > 0 || sf.AutoUpdateTime > 0
-		required := sf.NotNull && !readOnly && !sf.HasDefaultValue && sf.FieldType.Kind() != reflect.Pointer
-		if rel, ok := belongsToFK[sf.DBName]; ok && !readOnly {
+		pol, ok := byCol[sf.DBName]
+		if !ok || sch.FieldsByDBName[sf.DBName] != sf {
+			continue
+		}
+		// Hidden on the public contract (gombit:"-" and soft-delete).
+		if !pol.InRequest && !pol.InResponse {
+			continue
+		}
+		readOnly := !pol.InRequest
+		required := pol.InRequest && sf.NotNull && !sf.HasDefaultValue && sf.FieldType.Kind() != reflect.Pointer
+		writeOnly := pol.InRequest && !pol.InResponse
+		serverRequired := serverMustSupply(pol)
+		if rel, ok := belongsToFK[sf.DBName]; ok {
 			fields = append(fields, Field{
-				Name:     name,
-				Type:     TypeRelation,
-				Required: required,
-				ReadOnly: readOnly,
-				Column:   sf.DBName,
+				Name:           name,
+				Type:           TypeRelation,
+				Required:       required,
+				ReadOnly:       readOnly,
+				WriteOnly:      writeOnly,
+				ServerRequired: serverRequired,
+				Column:         sf.DBName,
 				Related: &Relation{
 					Kind:       relationKindForFK(sf),
 					Slug:       rel.FieldSchema.Table,
@@ -70,11 +90,13 @@ func FieldsFrom(model any) ([]Field, error) {
 			continue
 		}
 		fields = append(fields, Field{
-			Name:     name,
-			Type:     inferFieldType(sf),
-			Required: required,
-			ReadOnly: readOnly,
-			Column:   sf.DBName,
+			Name:           name,
+			Type:           inferFieldType(sf),
+			Required:       required,
+			ReadOnly:       readOnly,
+			WriteOnly:      writeOnly,
+			ServerRequired: serverRequired,
+			Column:         sf.DBName,
 		})
 	}
 	// Many-to-many associations are not in sch.Fields (they have no column), so
@@ -114,6 +136,35 @@ func FieldsFrom(model any) ([]Field, error) {
 		})
 	}
 	return fields, nil
+}
+
+func columnPolicy(sch *schema.Schema) (map[string]resourcepolicy.Resolved, error) {
+	in, err := resourcepolicy.FromSchema(sch)
+	if err != nil {
+		return nil, err
+	}
+	resolved, err := resourcepolicy.ResolveAll(in)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]resourcepolicy.Resolved, len(resolved))
+	for _, r := range resolved {
+		if r.Column != "" {
+			out[r.Column] = r
+		}
+	}
+	return out, nil
+}
+
+// serverMustSupply is resourcepolicy's required-column rule for a hook-owned
+// field: NOT NULL (or primary key), no default, and nothing the database writes
+// on insert. Admin create must fail instead of storing the Go zero value.
+func serverMustSupply(r resourcepolicy.Resolved) bool {
+	if r.CreateSource != resourcepolicy.CreateSourceServer || r.Column == "" {
+		return false
+	}
+	dbSupplies := r.AutoIncrement || (r.AutoTime && r.Creatable)
+	return (r.NotNull || r.PrimaryKey) && !r.HasDefault && !dbSupplies
 }
 
 func parseSchema(model any) (*schema.Schema, error) {

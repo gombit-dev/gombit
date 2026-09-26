@@ -114,6 +114,9 @@ func (m *registered) toRow(inst any) row {
 	out := make(row, len(m.fields)+len(m.implicit))
 	for i := range m.fields {
 		f := &m.fields[i]
+		if f.WriteOnly {
+			continue
+		}
 		out[f.Name] = f.get(inst)
 	}
 	for name, col := range m.implicit {

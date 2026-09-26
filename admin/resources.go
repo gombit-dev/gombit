@@ -449,6 +449,12 @@ func applyWrite(ctx context.Context, m *registered, inst any, body map[string]an
 			fields[name] = []string{"field is read-only"}
 			continue
 		}
+		// A write-only column is absent from the row payload, so an edit form
+		// submits null when the operator left it blank. That means "leave the
+		// stored value", not "clear it".
+		if f.WriteOnly && !f.Required && (raw == nil || raw == "") {
+			continue
+		}
 		// A pointer column stores null for a blank the format or pattern
 		// rejects. A plain string keeps "" and fails that check below.
 		if s, ok := raw.(string); ok && s == "" && !f.Required && f.blankToNull() {
@@ -484,6 +490,9 @@ func applyWrite(ctx context.Context, m *registered, inst any, body map[string]an
 		for i := range m.fields {
 			f := &m.fields[i]
 			if f.ReadOnly {
+				if f.ServerRequired {
+					fields[f.Name] = []string{"is set by the server and cannot be stored empty"}
+				}
 				continue
 			}
 			if _, ok := seen[f.Name]; ok {

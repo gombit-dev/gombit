@@ -96,6 +96,13 @@ type Field struct {
 	// Column is the GORM/SQL column name. Empty means Name == JSON key ==
 	// column (the v1 default). Not emitted in meta.
 	Column string `json:"-"`
+	// WriteOnly matches a public create field that is omitted from the
+	// response (`gombit:"write"`). Row payloads leave it out. An empty
+	// update does not clear it.
+	WriteOnly bool `json:"writeonly,omitempty"`
+	// ServerRequired is a NOT NULL column whose create value comes from a
+	// hook. Admin create reports it instead of storing the zero value.
+	ServerRequired bool `json:"-"`
 }
 
 // Relation describes a belongs_to, has_many, or many_to_many field (#223).

@@ -136,6 +136,15 @@ describe("formValuesToBody", () => {
     const { body } = formValuesToBody({ id: 3, note: "" }, fields);
     expect(body).toEqual({ note: null });
   });
+
+  it("leaves a blank write-only field out of an update", () => {
+    const fields: FieldMeta[] = [
+      field({ name: "password", type: "string", writeonly: true }),
+      field({ name: "note", type: "text" }),
+    ];
+    const { body } = formValuesToBody({ password: "", note: "hi" }, fields);
+    expect(body).toEqual({ note: "hi" });
+  });
 });
 
 describe("relationListQuery", () => {

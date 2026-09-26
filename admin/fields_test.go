@@ -1,8 +1,11 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +14,7 @@ import (
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 
+	"github.com/gombit-dev/gombit/contract"
 	"github.com/gombit-dev/gombit/field"
 	"github.com/gombit-dev/gombit/types"
 )
@@ -415,5 +419,70 @@ func TestAdminWireSetMatchesVocabulary(t *testing.T) {
 	}
 	if len(seen) != 0 {
 		t.Fatalf("vocabulary admin wires with no admin constant: %v", seen)
+	}
+}
+
+func TestFieldsFromFollowsResourcePolicy(t *testing.T) {
+	type book struct {
+		gorm.Model
+		Title    string `gorm:"not null"`
+		Secret   string `gombit:"-"`
+		TenantID uint   `gorm:"not null" gombit:"read,server"`
+		Password string `gombit:"write"`
+		Status   string `gorm:"size:32" gombit:"read,write,filterable,sortable,searchable"`
+	}
+	fields, err := FieldsFrom(&book{})
+	if err != nil {
+		t.Fatalf("FieldsFrom: %v", err)
+	}
+	byName := map[string]Field{}
+	for _, f := range fields {
+		byName[f.Name] = f
+		if f.Name == "secret" {
+			t.Fatal("hidden column was derived")
+		}
+	}
+	title := byName["title"]
+	if title.ReadOnly || !title.Required || title.WriteOnly {
+		t.Fatalf("title = %+v", title)
+	}
+	tenant := byName["tenant_id"]
+	if !tenant.ReadOnly || !tenant.ServerRequired || tenant.Required {
+		t.Fatalf("tenant_id = %+v", tenant)
+	}
+	password := byName["password"]
+	if password.ReadOnly || !password.WriteOnly {
+		t.Fatalf("password = %+v", password)
+	}
+	if _, ok := byName["deleted_at"]; ok {
+		t.Fatal("soft-delete column was derived")
+	}
+
+	m := &registered{fields: []resolvedField{{Field: tenant}}}
+	err = applyWrite(context.Background(), m, &book{}, nil, true)
+	var env *contract.ErrorEnvelope
+	if !errors.As(err, &env) || len(env.Body.Fields["tenant_id"]) == 0 || !strings.Contains(env.Body.Fields["tenant_id"][0], "set by the server") {
+		t.Fatalf("create error = %#v", err)
+	}
+
+	row := (&registered{fields: []resolvedField{
+		{Field: title, get: func(any) any { return "Ada" }},
+		{Field: password, get: func(any) any { return "secret" }},
+	}}).toRow(&book{})
+	if _, ok := row["password"]; ok {
+		t.Fatalf("write-only value was returned: %#v", row)
+	}
+	if row["title"] != "Ada" {
+		t.Fatalf("row = %#v", row)
+	}
+}
+
+func TestFieldsFromRejectsUnsatisfiablePolicy(t *testing.T) {
+	type bad struct {
+		gorm.Model
+		Name string `gorm:"not null" gombit:"read"`
+	}
+	if _, err := FieldsFrom(&bad{}); err == nil {
+		t.Fatal("read-only NOT NULL column was accepted")
 	}
 }
