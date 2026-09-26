@@ -580,6 +580,7 @@ Same subcommands and flags as M2, now on Cobra:
 
 ```sh
 gombit db makemigrations create_products --model github.com/example/demo/internal/product.Product
+gombit db plan [--allow <id>] [--json]
 gombit db migrate
 gombit db rollback
 gombit db status
@@ -594,10 +595,16 @@ gombit db hash
 column), so recovery from a checksum mismatch never needs the raw Atlas CLI.
 `atlas migrate hash` is part of Atlas Community Edition ([ADR-012](adr/012-migrations-atlas-gorm-provider.md)).
 
-> Surfacing destructive/non-appliable changes (`atlas migrate lint`) is **not**
-> wrapped here: ADR-012 places `atlas migrate lint` outside the v0.1 Community
-> Edition dependency surface. Migration-safety analysis and the field-rename
-> affordance are tracked in [#299](https://github.com/gombit-dev/gombit/issues/299).
+`gombit db plan` classifies the change the models imply against the migration
+directory before a migration is written: `destructive` (a dropped table or
+column, a narrowed type), `unsafe` (fails on a populated table, such as a new
+NOT NULL column with no default), `review`, or `safe`. It uses
+`atlas schema inspect` and Atlas's own diff, not `atlas migrate lint`, which
+ADR-012 keeps outside the Community Edition dependency surface. It exits
+non-zero on an unacknowledged destructive or unsafe step.
+`gombit db makemigrations` runs the same plan and refuses to write such a
+migration until each step is acknowledged with `--allow <id|code>`. See
+[migrations.md § Planning a change](migrations.md#planning-a-change).
 
 See [migrations.md](migrations.md) for Atlas behavior and
 [migration-safety.md](migration-safety.md) for `gombit db verify` — the

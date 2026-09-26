@@ -10,6 +10,29 @@ version.
 
 ## [Unreleased]
 
+### Added
+
+- `gombit db plan` classifies the schema change the models imply before a
+  migration is written: `destructive` (dropped table or column, narrowed type),
+  `unsafe` (fails on a populated table: a NOT NULL column with no default,
+  nullable to NOT NULL, a new unique index, foreign key, or check), `review`
+  (delete-rule changes, widened types, SQLite table rebuilds), or `safe`. A
+  dropped column next to a same-typed added column comes with the `--rename`
+  command that keeps the data. It exits non-zero on an unacknowledged
+  destructive or unsafe step, and `--json` prints the steps
+  ([#309](https://github.com/gombit-dev/gombit/issues/309)).
+
+### Changed
+
+- **Breaking (workflow):** `gombit db makemigrations` runs the same plan once a
+  migration exists and refuses to write a destructive or unsafe change until
+  each step is acknowledged with `--allow <id|code>`. `--forget-model`
+  acknowledges the drop of the forgotten model's table (by GORM's default
+  name). `gombit make resource` hits the same check
+  when an unrelated model has a pending destructive change; finish with
+  `gombit db makemigrations --allow`
+  ([#309](https://github.com/gombit-dev/gombit/issues/309)).
+
 ## [0.3.0] — 2026-09-26
 
 ### Added

@@ -142,12 +142,14 @@ func usage(w io.Writer) {
 
 func dbUsage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "available db subcommands:")
-	_, _ = fmt.Fprintln(w, "  makemigrations <name> --model <import.Type> [--driver sqlite|postgres|mysql]")
+	_, _ = fmt.Fprintln(w, "  makemigrations <name> --model <import.Type> [--driver sqlite|postgres|mysql] [--allow <id>]")
+	_, _ = fmt.Fprintln(w, "  plan [--model <import.Type>] [--allow <id>] [--json]")
 	_, _ = fmt.Fprintln(w, "  migrate [--dir database/migrations] [--atlas-bin atlas]")
 	_, _ = fmt.Fprintln(w, "  rollback [--dir database/migrations]")
 	_, _ = fmt.Fprintln(w, "  status [--dir database/migrations] [--atlas-bin atlas]")
 	_, _ = fmt.Fprintln(w, "  seed [--seeds database/seeds]")
 	_, _ = fmt.Fprintln(w, "  reset [--dir database/migrations] [--seeds database/seeds] [--atlas-bin atlas] [--force]")
+	_, _ = fmt.Fprintln(w, "  verify [--dir database/migrations] [--write] [--json] [--strict]")
 	_, _ = fmt.Fprintln(w, "  hash [--dir database/migrations] [--atlas-bin atlas]")
 }
 
