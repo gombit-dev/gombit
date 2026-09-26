@@ -179,13 +179,23 @@ func classifyTable(driver config.DatabaseDriver, m *schema.ModifyTable) []PlanSt
 		case *schema.DropIndex:
 			steps = append(steps, newStep(StepDropIndex, SeveritySafe, table, c.I.Name, fmt.Sprintf("Drops index %s.", c.I.Name)))
 		case *schema.ModifyIndex:
-			if c.To.Unique && !c.From.Unique {
-				step := newStep(StepAddUnique, SeverityUnsafe, table, c.To.Name, fmt.Sprintf("Makes index %s on %s(%s) unique. It fails if existing rows hold duplicate values.", c.To.Name, table, strings.Join(indexColumns(c.To), ", ")))
+			// Atlas matches indexes by name, so a same-named index whose
+			// uniqueness or columns change is a ModifyIndex. Anything past a
+			// comment re-creates it (drop and create on PostgreSQL and MySQL,
+			// a table rebuild on SQLite), so a unique index is checked against
+			// the existing rows again under its new key.
+			cols := strings.Join(indexColumns(c.To), ", ")
+			recreated := c.Change&^schema.ChangeComment != schema.NoChange
+			switch {
+			case c.To.Unique && recreated && onlyNullFilled(indexColumns(c.To)):
+				steps = append(steps, newStep(StepAddUnique, SeveritySafe, table, c.To.Name, fmt.Sprintf("Re-creates unique index %s on %s(%s). The columns are new, nullable, and have no default, so every existing row holds NULL and nothing collides.", c.To.Name, table, cols)))
+			case c.To.Unique && recreated:
+				step := newStep(StepAddUnique, SeverityUnsafe, table, c.To.Name, fmt.Sprintf("Re-creates unique index %s on %s(%s). It fails if existing rows hold duplicate values under the new key.", c.To.Name, table, cols))
 				step.Hint = "Remove or merge the duplicates before this migration applies."
 				steps = append(steps, step)
-				continue
+			default:
+				steps = append(steps, newStep(StepAddIndex, SeveritySafe, table, c.To.Name, fmt.Sprintf("Changes index %s on %s(%s).", c.To.Name, table, cols)))
 			}
-			steps = append(steps, newStep(StepAddIndex, SeveritySafe, table, c.To.Name, fmt.Sprintf("Changes index %s.", c.To.Name)))
 		case *schema.AddForeignKey:
 			cols := fkColumns(c.F)
 			ref := fkRef(c.F)
@@ -199,6 +209,20 @@ func classifyTable(driver config.DatabaseDriver, m *schema.ModifyTable) []PlanSt
 		case *schema.DropForeignKey:
 			steps = append(steps, newStep(StepDropForeignKey, SeverityReview, table, c.F.Symbol, fmt.Sprintf("Drops foreign key %s. The database stops enforcing that %s(%s) references %s.", c.F.Symbol, table, strings.Join(fkColumns(c.F), ", "), fkRef(c.F))))
 		case *schema.ModifyForeignKey:
+			// A change to the columns or the referenced key re-adds the
+			// constraint, which validates the existing rows like a new one. A
+			// pure ON DELETE / ON UPDATE change keeps an already-valid key.
+			if c.Change.Is(schema.ChangeColumn) || c.Change.Is(schema.ChangeRefColumn) || c.Change.Is(schema.ChangeRefTable) {
+				cols := fkColumns(c.To)
+				if onlyNullFilled(cols) {
+					steps = append(steps, newStep(StepAddForeignKey, SeveritySafe, table, c.To.Symbol, fmt.Sprintf("Re-creates foreign key %s: %s. The columns are new, nullable, and have no default, so every existing row holds NULL and passes.", c.To.Symbol, describeFKChange(c))))
+					continue
+				}
+				step := newStep(StepAddForeignKey, SeverityUnsafe, table, c.To.Symbol, fmt.Sprintf("Re-creates foreign key %s: %s. Existing rows that point at a missing row make it fail on PostgreSQL and MySQL and stay as violations on SQLite.", c.To.Symbol, describeFKChange(c)))
+				step.Hint = "Fix or null out rows that reference missing rows before this migration applies."
+				steps = append(steps, step)
+				continue
+			}
 			steps = append(steps, newStep(StepChangeForeignKey, SeverityReview, table, c.To.Symbol, fmt.Sprintf("Changes foreign key %s: %s.", c.To.Symbol, describeFKChange(c))))
 		case *schema.AddCheck:
 			step := newStep(StepAddCheck, SeverityUnsafe, table, c.C.Name, fmt.Sprintf("Adds check %s (%s). It fails if existing rows violate it.", c.C.Name, c.C.Expr))
@@ -210,8 +234,10 @@ func classifyTable(driver config.DatabaseDriver, m *schema.ModifyTable) []PlanSt
 			steps = append(steps, step)
 		case *schema.DropCheck:
 			steps = append(steps, newStep(StepDropCheck, SeveritySafe, table, c.C.Name, fmt.Sprintf("Drops check %s.", c.C.Name)))
-		case *schema.AddPrimaryKey, *schema.ModifyPrimaryKey, *schema.DropPrimaryKey:
+		case *schema.AddPrimaryKey, *schema.ModifyPrimaryKey:
 			steps = append(steps, newStep(StepChangePrimaryKey, SeverityUnsafe, table, "", fmt.Sprintf("Changes the primary key of %s. It fails if existing rows hold duplicate or NULL key values.", table)))
+		case *schema.DropPrimaryKey:
+			steps = append(steps, newStep(StepChangePrimaryKey, SeverityReview, table, "", fmt.Sprintf("Drops the primary key of %s. The database stops enforcing unique row keys.", table)))
 		default:
 			steps = append(steps, newStep(StepOther, SeverityReview, table, "", fmt.Sprintf("Unclassified change to %s (%s).", table, changeName(c))))
 		}

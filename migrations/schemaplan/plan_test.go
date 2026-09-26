@@ -667,3 +667,109 @@ func TestNullDefault(t *testing.T) {
 		}
 	}
 }
+
+// TestRecreatedConstraintsAreRechecked diffs same-named constraints whose key
+// changes. Atlas reports them as ModifyIndex / ModifyForeignKey, and the
+// migration re-creates them against the existing rows.
+func TestRecreatedConstraintsAreRechecked(t *testing.T) {
+	type dialect struct {
+		driver  config.DatabaseDriver
+		schema  string
+		idType  string
+		strType string
+	}
+	dialects := []dialect{
+		{config.DatabaseDriverSQLite, "main", "integer", "text"},
+		{config.DatabaseDriverPostgres, "public", "bigint", "text"},
+		{config.DatabaseDriverMySQL, "dev", "bigint", "varchar(64)"},
+	}
+	type state struct {
+		indexCols    string // columns of idx_member
+		indexComment string
+		fkCols       string // columns of fk_owner
+		fkRef        string // referenced column of fk_owner
+		fkDelete     string
+		newOwner     bool // add a nullable owner2_id with no default
+	}
+	base := state{indexCols: "column.org_id, column.email", fkCols: "column.owner_id", fkRef: "table.users.column.id", fkDelete: "RESTRICT"}
+	build := func(t *testing.T, d dialect, st state) *schema.Realm {
+		t.Helper()
+		var b strings.Builder
+		fmt.Fprintf(&b, "table \"users\" {\n  schema = schema.%s\n  column \"id\" {\n    null = false\n    type = %s\n  }\n  column \"code\" {\n    null = false\n    type = %s\n  }\n  primary_key {\n    columns = [column.id]\n  }\n  index \"idx_code\" {\n    unique  = true\n    columns = [column.code]\n  }\n}\n", d.schema, d.idType, d.strType)
+		fmt.Fprintf(&b, "table \"members\" {\n  schema = schema.%s\n", d.schema)
+		fmt.Fprintf(&b, "  column \"id\" {\n    null = false\n    type = %s\n  }\n", d.idType)
+		fmt.Fprintf(&b, "  column \"org_id\" {\n    null = false\n    type = %s\n  }\n", d.idType)
+		fmt.Fprintf(&b, "  column \"email\" {\n    null = false\n    type = %s\n  }\n", d.strType)
+		fmt.Fprintf(&b, "  column \"name\" {\n    null = false\n    type = %s\n  }\n", d.strType)
+		refType := d.idType
+		if st.fkRef == "table.users.column.code" {
+			refType = d.strType
+		}
+		fmt.Fprintf(&b, "  column \"owner_id\" {\n    null = true\n    type = %s\n  }\n", refType)
+		if st.newOwner {
+			fmt.Fprintf(&b, "  column \"owner2_id\" {\n    null = true\n    type = %s\n  }\n", d.idType)
+		}
+		b.WriteString("  primary_key {\n    columns = [column.id]\n  }\n")
+		fmt.Fprintf(&b, "  foreign_key \"fk_owner\" {\n    columns     = [%s]\n    ref_columns = [%s]\n    on_update   = NO_ACTION\n    on_delete   = %s\n  }\n", st.fkCols, st.fkRef, st.fkDelete)
+		comment := ""
+		if st.indexComment != "" {
+			comment = fmt.Sprintf("    comment = %q\n", st.indexComment)
+		}
+		fmt.Fprintf(&b, "  index \"idx_member\" {\n    unique  = true\n    columns = [%s]\n%s  }\n}\n", st.indexCols, comment)
+		fmt.Fprintf(&b, "schema %q {}\n", d.schema)
+		r := &schema.Realm{}
+		if err := evalHCL(d.driver, []byte(b.String()), r); err != nil {
+			t.Fatalf("eval %s HCL: %v\n%s", d.driver, err, b.String())
+		}
+		return r
+	}
+	cases := []struct {
+		name   string
+		to     func(state) state
+		id     string
+		want   Severity
+		sqlite bool // SQLite HCL has no index comments
+	}{
+		{"unique index columns change", func(s state) state { s.indexCols = "column.org_id, column.name"; return s }, "add_unique:members.idx_member", SeverityUnsafe, true},
+		{"unique index comment only", func(s state) state { s.indexComment = "members per org"; return s }, "add_index:members.idx_member", SeveritySafe, false},
+		{"foreign key retargeted", func(s state) state { s.fkRef = "table.users.column.code"; return s }, "add_foreign_key:members.fk_owner", SeverityUnsafe, true},
+		{"foreign key moved to a new null-filled column", func(s state) state { s.fkCols = "column.owner2_id"; s.newOwner = true; return s }, "add_foreign_key:members.fk_owner", SeveritySafe, true},
+		{"foreign key delete action only", func(s state) state { s.fkDelete = "CASCADE"; return s }, "change_foreign_key:members.fk_owner", SeverityReview, true},
+	}
+	for _, d := range dialects {
+		for _, tc := range cases {
+			if d.driver == config.DatabaseDriverSQLite && !tc.sqlite {
+				continue
+			}
+			t.Run(string(d.driver)+"/"+tc.name, func(t *testing.T) {
+				changes, err := differ(d.driver).RealmDiff(build(t, d, base), build(t, d, tc.to(base)))
+				if err != nil {
+					t.Fatal(err)
+				}
+				steps := classifyChanges(d.driver, changes)
+				got, ok := stepsByID(steps)[tc.id]
+				if !ok || got.Severity != tc.want {
+					t.Fatalf("step %s = %+v (present %v), want %s; steps %v", tc.id, got, ok, tc.want, stepIDs(steps))
+				}
+			})
+		}
+	}
+}
+
+func TestPrimaryKeyChanges(t *testing.T) {
+	tbl := schema.NewTable("items").AddColumns(schema.NewIntColumn("id", "integer"))
+	pk := schema.NewPrimaryKey(tbl.Columns...)
+	for _, tc := range []struct {
+		change schema.Change
+		want   Severity
+	}{
+		{&schema.AddPrimaryKey{P: pk}, SeverityUnsafe},
+		{&schema.ModifyPrimaryKey{From: pk, To: pk}, SeverityUnsafe},
+		{&schema.DropPrimaryKey{P: pk}, SeverityReview},
+	} {
+		steps := classifyTable(config.DatabaseDriverPostgres, &schema.ModifyTable{T: tbl, Changes: []schema.Change{tc.change}})
+		if len(steps) != 1 || steps[0].Severity != tc.want {
+			t.Errorf("%T = %+v, want one %s step", tc.change, steps, tc.want)
+		}
+	}
+}

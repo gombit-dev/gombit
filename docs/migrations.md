@@ -162,8 +162,8 @@ gets a severity:
 | Severity | Meaning | Codes |
 | --- | --- | --- |
 | `destructive` | Loses data | `drop_table`, `drop_column`, `narrow_type` (for example `bigint` to `integer`, `text` to `varchar(100)`) |
-| `unsafe` | Can fail on a table that already has rows | `add_not_null` (no default), `set_not_null`, `add_unique`, `add_foreign_key` on an existing column, `add_check`, `change_type` with no safe direction, `change_primary_key` |
-| `review` | Applies, but changes behavior | `change_foreign_key` (for example `ON DELETE RESTRICT` to `CASCADE`), `drop_foreign_key`, `widen_type`, `table_rebuild` (SQLite) |
+| `unsafe` | Can fail on a table that already has rows | `add_not_null` (no default), `set_not_null`, `add_unique` (a new unique index, or a same-named one re-created with new columns), `add_foreign_key` (a new foreign key over existing columns, or a same-named one whose columns or target change), `add_check`, `change_type` with no safe direction, `change_primary_key` |
+| `review` | Applies, but changes behavior | `change_foreign_key` (only the `ON DELETE` / `ON UPDATE` action, for example `RESTRICT` to `CASCADE`), `drop_foreign_key`, dropping a primary key, `widen_type`, `table_rebuild` (SQLite) |
 | `safe` | Adds structure or relaxes a rule | `add_table`, `add_column`, `add_index`, `drop_not_null`, `change_default`, … |
 
 A dropped column next to an added column of the same type family is reported
