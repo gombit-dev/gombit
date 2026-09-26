@@ -279,3 +279,111 @@ func TestLintDefaultCoversEveryMigrationAtlasCLISQLiteWhenAvailable(t *testing.T
 		t.Fatalf("--latest 1 classifies only add_note and should pass: %+v", r)
 	}
 }
+
+// lintSteps classifies one migration the way Lint does, from HCL states and
+// its SQL, without Atlas: the diff with declared renames, plus the statement
+// findings.
+func lintSteps(t *testing.T, driver config.DatabaseDriver, current, desired, sql string) map[string]PlanStep {
+	t.Helper()
+	plan, err := BuildWithRenames(migrations.Inspection{Driver: driver, Current: []byte(current), Desired: []byte(desired)}, DeclaredRenames(sql))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return stepsByID(withStatementFindings(plan.Steps, sql))
+}
+
+func pgProducts(col, typ, def string) string {
+	d := ""
+	if def != "" {
+		d = "    default = " + def + "\n"
+	}
+	return "table \"products\" {\n  schema = schema.public\n  column \"id\" {\n    null = false\n    type = bigint\n  }\n  column \"" + col + "\" {\n    null = true\n    type = " + typ + "\n" + d + "  }\n  primary_key {\n    columns = [column.id]\n  }\n}\nschema \"public\" {}\n"
+}
+
+func TestAlterColumnUsingIsNeverHidden(t *testing.T) {
+	pg := config.DatabaseDriverPostgres
+	cases := []struct {
+		name           string
+		current, want  string
+		sql            string
+		alterID        string // "" means no alter_column finding
+		mustStayReview string
+	}{
+		{"USING beside a widen", pgProducts("name", "character_varying(255)", ""), pgProducts("name", "text", ""),
+			"ALTER TABLE products ALTER COLUMN name TYPE text USING left(name, 1);", "alter_column:products.name", "widen_type:products.name"},
+		{"USING after a declared rename", pgProducts("name", "character_varying(255)", ""), pgProducts("title", "text", ""),
+			"ALTER TABLE products RENAME COLUMN name TO title;\nALTER TABLE products ALTER COLUMN title TYPE text USING 'redacted';", "alter_column:products.title", ""},
+		{"implicit widen", pgProducts("name", "character_varying(255)", ""), pgProducts("name", "text", ""),
+			"ALTER TABLE products ALTER COLUMN name TYPE text;", "", "widen_type:products.name"},
+		{"set default", pgProducts("name", "text", ""), pgProducts("name", "text", `"x"`),
+			"ALTER TABLE products ALTER COLUMN name SET DEFAULT 'x';", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			steps := lintSteps(t, pg, tc.current, tc.want, tc.sql)
+			var ids []string
+			for id := range steps {
+				ids = append(ids, id)
+			}
+			if tc.alterID == "" {
+				for id := range steps {
+					if strings.HasPrefix(id, "alter_column:") {
+						t.Fatalf("steps = %v, want no alter_column finding", ids)
+					}
+				}
+			} else if s, ok := steps[tc.alterID]; !ok || !s.NeedsAcknowledgement() {
+				t.Fatalf("steps = %v, want an unacknowledged %s", ids, tc.alterID)
+			}
+			if tc.mustStayReview != "" && steps[tc.mustStayReview].Severity != SeverityReview {
+				t.Fatalf("steps = %v, want %s review", ids, tc.mustStayReview)
+			}
+		})
+	}
+}
+
+func sqliteItems(cols ...string) string {
+	var b strings.Builder
+	b.WriteString("table \"items\" {\n  schema = schema.main\n  column \"id\" {\n    null = false\n    type = integer\n  }\n")
+	for _, c := range cols {
+		b.WriteString("  column \"" + c + "\" {\n    null = false\n    type = text\n  }\n")
+	}
+	b.WriteString("  primary_key {\n    columns = [column.id]\n  }\n}\nschema \"main\" {}\n")
+	return b.String()
+}
+
+func TestRebuildExemptionIsExact(t *testing.T) {
+	lite := config.DatabaseDriverSQLite
+	rebuild := func(cols, sel string) string {
+		return "CREATE TABLE `new_items` (`id` integer PRIMARY KEY, `name` text NOT NULL);\n" +
+			"INSERT INTO `new_items` (" + cols + ") SELECT " + sel + " FROM `items`;\n" +
+			"DROP TABLE `items`;\n" +
+			"ALTER TABLE `new_items` RENAME TO `items`;\n"
+	}
+	cases := []struct {
+		name          string
+		current, want string
+		sql           string
+		dropFinding   bool
+	}{
+		{"a constant is not a copy", sqliteItems("name"), sqliteItems("name"), rebuild("`id`, `name`", "`id`, 'gone'"), true},
+		{"an exact copy with nothing rebuilt", sqliteItems("name"), sqliteItems("name"), rebuild("`id`, `name`", "`id`, `name`"), true},
+		{"Atlas's rebuild for a dropped column", sqliteItems("name", "legacy"), sqliteItems("name"), rebuild("`id`, `name`", "`id`, `name`"), false},
+		{"a second drop after a real rebuild", sqliteItems("name", "legacy"), sqliteItems("name"),
+			rebuild("`id`, `name`", "`id`, `name`") + "DROP TABLE `items`;\nCREATE TABLE `items` (`id` integer PRIMARY KEY, `name` text NOT NULL);\n", true},
+		{"no rename back", sqliteItems("name", "legacy"), sqliteItems("name"),
+			"CREATE TABLE `new_items` (`id` integer PRIMARY KEY, `name` text NOT NULL);\nINSERT INTO `new_items` (`id`, `name`) SELECT `id`, `name` FROM `items`;\nDROP TABLE `items`;\n", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			steps := lintSteps(t, lite, tc.current, tc.want, tc.sql)
+			s, ok := steps["drop_table:items"]
+			if tc.dropFinding != (ok && s.NeedsAcknowledgement()) {
+				var ids []string
+				for id := range steps {
+					ids = append(ids, id)
+				}
+				t.Fatalf("steps = %v, want drop_table:items finding = %v", ids, tc.dropFinding)
+			}
+		})
+	}
+}
