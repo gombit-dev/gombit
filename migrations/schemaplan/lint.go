@@ -454,8 +454,8 @@ func (r LintReport) Unacknowledged() []LintFinding {
 }
 
 // Lint checks a migration directory: its integrity (atlas.sum and a clean
-// replay, through `atlas migrate validate`), its layout, and the safety of its
-// newest migrations. Each migration is classified from the schema before and
+// replay, through `atlas migrate validate`), its layout, and the safety of
+// every migration (or the Latest newest, when set). Each migration is classified from the schema before and
 // after it, with the renames it declares applied, and a destructive or unsafe
 // step passes only when the migration carries a `-- gombit:allow` line for it.
 func Lint(ctx context.Context, opts LintOptions) (LintReport, error) {

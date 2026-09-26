@@ -203,11 +203,17 @@ func withAllowDirectives(sql string, ids []string) string {
 }
 
 // writeAllowDirectives records acknowledged steps in the migration files a
-// diff just wrote, then rehashes the directory. A failed hash restores the
-// files, which leaves atlas.sum as Atlas wrote it.
+// diff just wrote, then rehashes the directory. A failed hash restores both
+// the files and atlas.sum (a failing hash may already have rewritten it), so
+// the directory is left exactly as `atlas migrate diff` made it.
 func writeAllowDirectives(ctx context.Context, opts Options, absWorkDir, migrationDir string, files []string, ids []string) error {
 	if len(ids) == 0 || len(files) == 0 {
 		return nil
+	}
+	sumPath := filepath.Join(migrationDir, "atlas.sum")
+	prevSum, sumErr := os.ReadFile(sumPath) // #nosec G304 -- atlas.sum in the configured migration directory
+	if sumErr != nil && !errors.Is(sumErr, os.ErrNotExist) {
+		return fmt.Errorf("migrations: read atlas.sum: %w", sumErr)
 	}
 	originals := map[string][]byte{}
 	for _, f := range files {
@@ -230,6 +236,7 @@ func writeAllowDirectives(ctx context.Context, opts Options, absWorkDir, migrati
 			// #nosec G703 -- restoring the file this function rewrote
 			_ = os.WriteFile(f, data, 0o600)
 		}
+		restoreFile(sumPath, prevSum, sumErr == nil)
 		return fmt.Errorf("migrations: atlas migrate hash after recording acknowledgements: %w", err)
 	}
 	return nil

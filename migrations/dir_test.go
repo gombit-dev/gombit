@@ -116,6 +116,9 @@ func (r *directiveRunner) Run(ctx context.Context, dir string, name string, args
 	if len(args) >= 2 && args[0] == "migrate" && args[1] == "hash" {
 		r.hashed = true
 		if r.failHash {
+			// The worst case: the hash rewrites atlas.sum, then fails.
+			sum := filepath.Join(strings.TrimPrefix(args[3], "file://"), "atlas.sum")
+			_ = os.WriteFile(sum, []byte("partial garbage\n"), 0o600)
 			return errors.New("exit status 1")
 		}
 		return nil
@@ -127,6 +130,8 @@ func TestMakeMigrationsRecordsAcknowledgements(t *testing.T) {
 	for _, failHash := range []bool{false, true} {
 		migrationDir := t.TempDir()
 		seedMigrationDir(t, migrationDir)
+		const sum = "h1:as-atlas-diff-wrote-it\n"
+		writeFile(t, filepath.Join(migrationDir, "atlas.sum"), sum)
 		runner := &directiveRunner{planRunner: planRunner{t: t}, failHash: failHash}
 		err := MakeMigrations(context.Background(), Options{
 			WorkDir:      t.TempDir(),
@@ -152,6 +157,9 @@ func TestMakeMigrationsRecordsAcknowledgements(t *testing.T) {
 		if failHash {
 			if err == nil || strings.Contains(string(data), "gombit:allow") {
 				t.Fatalf("failed hash: err = %v, file = %q; want an error and the file restored", err, data)
+			}
+			if got, _ := os.ReadFile(filepath.Join(migrationDir, "atlas.sum")); string(got) != sum { // #nosec G304 -- test file
+				t.Fatalf("failed hash left atlas.sum = %q, want it restored to %q", got, sum)
 			}
 			continue
 		}
