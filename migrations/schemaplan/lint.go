@@ -170,10 +170,11 @@ func rebuildCopySource(stmt string, desired *schema.Realm, added map[string]bool
 		col := unquote(cols[i])
 		switch {
 		case plainIdent.MatchString(sel[i]) && unquote(sel[i]) == col:
-		case isIfnullCopy(sel[i], col) && nullOrDefaultChanged(source, col):
-			// Atlas copies a NOT NULL column whose default or nullability
-			// changes as IFNULL(col, <default>) AS col: stored values stay,
-			// and a NULL becomes the default the plan already classified.
+		case isIfnullCopy(sel[i], col, findTable(desired, source)) && nullOrDefaultChanged(source, col):
+			// Atlas's copyRows writes IFNULL(col, <default>) AS col only for
+			// a destination column that is NOT NULL and has a default, with
+			// that default as the literal: stored values stay, and the NULLs
+			// a NOT NULL column cannot hold become its own default.
 		default:
 			return "", false
 		}
@@ -196,10 +197,33 @@ var plainIdent = regexp.MustCompile("^[`\"]?[A-Za-z0-9_]+[`\"]?$")
 var reIfnullCopy = regexp.MustCompile(`(?is)^IFNULL\(\s*` + ident + `\s*,\s*(.+)\)\s+AS\s+` + ident + `$`)
 
 // isIfnullCopy reports Atlas's copy of column col as IFNULL(col, <default>)
-// AS col, where the default is a literal.
-func isIfnullCopy(item, col string) bool {
+// AS col: the column in after (the table once the migration ran) is NOT
+// NULL, has a default, and the literal is that default. Any other fill value
+// rewrites stored NULLs, so it is not a copy.
+func isIfnullCopy(item, col string, after *schema.Table) bool {
 	m := reIfnullCopy.FindStringSubmatch(strings.TrimSpace(item))
-	return m != nil && unquote(m[1]) == col && unquote(m[3]) == col && literalDefault.MatchString(strings.TrimSpace(m[2]))
+	if m == nil || unquote(m[1]) != col || unquote(m[3]) != col || after == nil {
+		return false
+	}
+	fill := strings.TrimSpace(m[2])
+	c, ok := after.Column(col)
+	if !ok || c.Type == nil || c.Type.Null || !literalDefault.MatchString(fill) {
+		return false
+	}
+	lit, ok := c.Default.(*schema.Literal)
+	return ok && literalValue(fill) == literalValue(lit.V)
+}
+
+// literalValue normalizes a literal for comparison: surrounding quotes
+// dropped and doubled quotes unescaped, so the SQL 'changed' and the
+// inspected default changed compare equal.
+func literalValue(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) >= 2 && (s[0] == '\'' || s[0] == '"') && s[len(s)-1] == s[0] {
+		q := string(s[0])
+		return strings.ReplaceAll(s[1:len(s)-1], q+q, q)
+	}
+	return s
 }
 
 // literalDefault is a SQL literal: a quoted string, a number, NULL, or a
@@ -235,7 +259,9 @@ func withStatementFindings(steps []PlanStep, sql string, desired *schema.Realm) 
 	added := map[string]bool{}
 	nullOrDefault := map[string]bool{}
 	for _, s := range steps {
-		if s.Code == StepChangeDefault || s.Code == StepSetNotNull || s.Code == StepDropNotNull {
+		// Atlas's IFNULL copy follows a default or NOT NULL change; dropping
+		// NOT NULL never produces one.
+		if s.Code == StepChangeDefault || s.Code == StepSetNotNull {
 			nullOrDefault[s.Table+"."+s.Name] = true
 		}
 		have[s.ID] = true

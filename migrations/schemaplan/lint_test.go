@@ -544,6 +544,11 @@ func TestAtlasIfnullRebuildIsACopy(t *testing.T) {
 		"change_default:items.name": SeveritySafe,
 		"table_rebuild:items":       SeverityReview,
 	})
+	// A fill value that is not the new default rewrites stored NULLs: not a copy.
+	wiped := strings.Replace(atlasIfnullRebuild, "IFNULL(`name`, 'changed') AS `name`", "IFNULL(`name`, 'wiped') AS `name`", 1)
+	if _, ok := lintSteps(t, config.DatabaseDriverSQLite, items("keep"), items("changed"), wiped)["drop_table:items"]; !ok {
+		t.Fatal("IFNULL with a literal other than the new default is not a copy; the drop must stand")
+	}
 	// IFNULL from another column is not Atlas's copy.
 	computed := strings.Replace(atlasIfnullRebuild, "IFNULL(`name`, 'changed') AS `name`", "IFNULL(`name`, `code`) AS `name`", 1)
 	if _, ok := lintSteps(t, config.DatabaseDriverSQLite, items("keep"), items("changed"), computed)["drop_table:items"]; !ok {
@@ -624,5 +629,26 @@ func TestGateAndLintAgreeAtlasCLISQLiteWhenAvailable(t *testing.T) {
 	}
 	if r.Failed() {
 		t.Fatalf("lint of a migration the gate accepted failed: %+v", r.Unacknowledged())
+	}
+}
+
+// TestIfnullOnANullableColumnIsNotACopy is the review's case: the column stays
+// nullable, its default changes, and the copy fills NULLs with a value. Atlas
+// never writes IFNULL for a nullable column, so the drop stands.
+func TestIfnullOnANullableColumnIsNotACopy(t *testing.T) {
+	items := func(def string) string {
+		return "table \"items\" {\n  schema = schema.main\n  column \"id\" {\n    null = false\n    type = integer\n  }\n" +
+			"  column \"name\" {\n    null    = true\n    type    = text\n    default = \"" + def + "\"\n  }\n" +
+			"  primary_key {\n    columns = [column.id]\n  }\n}\nschema \"main\" {}\n"
+	}
+	for _, fill := range []string{"'wiped'", "'changed'"} {
+		sql := "CREATE TABLE `new_items` (`id` integer NOT NULL, `name` text NULL DEFAULT 'changed', PRIMARY KEY (`id`));\n" +
+			"INSERT INTO `new_items` (`id`, `name`) SELECT `id`, IFNULL(`name`, " + fill + ") AS `name` FROM `items`;\n" +
+			"DROP TABLE `items`;\n" +
+			"ALTER TABLE `new_items` RENAME TO `items`;\n"
+		steps := lintSteps(t, config.DatabaseDriverSQLite, items("keep"), items("changed"), sql)
+		if s, ok := steps["drop_table:items"]; !ok || !s.NeedsAcknowledgement() {
+			t.Fatalf("fill %s: steps = %v, want drop_table:items: IFNULL on a nullable column rewrites NULLs", fill, keysOf(steps))
+		}
 	}
 }

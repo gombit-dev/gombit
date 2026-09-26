@@ -328,7 +328,8 @@ gombit db lint --latest 1    # only the newest, a local shortcut
   explains does not count twice: the column drop it reports, an `ALTER COLUMN`
   without `USING` whose change the diff classifies, and Atlas's own SQLite
   rebuild (a copy of every surviving column into `new_<table>`, by name or as
-  Atlas's `IFNULL(col, <default>) AS col` for a default or nullability change
+  Atlas's `IFNULL(col, <default>) AS col`, which Atlas writes only for a column
+  that ends up NOT NULL with that default after a default or NOT NULL change
   the diff classifies, then the drop and the rename back, as three contiguous
   statements, with the change that caused it in the diff). Each data-changing
   statement is its own step, `data_change:<table>.statement_<n>`, so one
