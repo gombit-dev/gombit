@@ -1,8 +1,11 @@
 // Package schemaplan classifies the schema change a migration would make
-// before it is written (SCHEMA-2, #309). It evaluates the HCL that
-// `atlas schema inspect` prints for the migration directory and for the
-// models, diffs the two with Atlas's own differ, and ranks every change by what
-// it can do to existing rows. Nothing is parsed out of migration SQL.
+// before it is written (SCHEMA-2, #309), and lints the migrations already
+// written (SCHEMA-4, #311). It evaluates the HCL that `atlas schema inspect`
+// prints, diffs two states with Atlas's own differ, and ranks every change by
+// what it can do to existing rows. The plan uses only that diff. Lint also
+// reads each migration's statements, with the fail-safe HOST-3 classifier
+// (manifest.Classify), for data loss the diff cannot show, and its declared
+// renames.
 //
 // It is a separate package so the Atlas SQL libraries stay out of package
 // migrations, which generated apps' loaders compile.
@@ -113,6 +116,18 @@ func (p *SchemaPlan) Acknowledge(allow []string) (unmatched []string) {
 	return unmatched
 }
 
+// acknowledgedIDs are the destructive or unsafe steps an --allow entry or
+// --forget-model acknowledged: what makemigrations records in the migration.
+func (p SchemaPlan) acknowledgedIDs() []string {
+	var ids []string
+	for _, s := range p.Steps {
+		if s.Acknowledged && (s.Severity == SeverityDestructive || s.Severity == SeverityUnsafe) {
+			ids = append(ids, s.ID)
+		}
+	}
+	return ids
+}
+
 // Unacknowledged returns the destructive or unsafe steps nothing acknowledged.
 func (p SchemaPlan) Unacknowledged() []PlanStep {
 	var out []PlanStep
@@ -132,20 +147,20 @@ func Gate(allow []string, stderr io.Writer) migrations.Gate {
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	return func(_ context.Context, name string, in migrations.Inspection) error {
+	return func(_ context.Context, name string, in migrations.Inspection) ([]string, error) {
 		plan, err := Build(in)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		for _, a := range plan.Acknowledge(allow) {
 			_, _ = fmt.Fprintf(stderr, "warning: --allow %s matched no change in the plan\n", a)
 		}
 		pending := plan.Unacknowledged()
 		if len(pending) == 0 {
-			return nil
+			return plan.acknowledgedIDs(), nil
 		}
 		WritePlan(stderr, plan)
-		return fmt.Errorf("migrations: %d destructive or unsafe change(s) need acknowledgement, so no migration was written; review them with 'gombit db plan', handle the data, then write this migration with:\n  %s", len(pending), retryCommand(name, in, pending))
+		return nil, fmt.Errorf("migrations: %d destructive or unsafe change(s) need acknowledgement, so no migration was written; review them with 'gombit db plan', handle the data, then write this migration with:\n  %s", len(pending), retryCommand(name, in, pending))
 	}
 }
 

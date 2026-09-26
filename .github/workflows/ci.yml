@@ -554,7 +554,16 @@ jobs:
         env:
           ATLAS_BINARY: atlas
           GOPROXY: "off"
-        run: go test ./migrations ./cmd/gombit
+        run: go test ./migrations/... ./cmd/gombit
+
+      # The real-Atlas lint/repair tests in ./cli. A separate, filtered run:
+      # ./cli and ./cmd/gombit both shell out to npx, and running them in
+      # parallel races a cold _npx cache.
+      - name: Run CLI lint and repair Atlas tests
+        env:
+          ATLAS_BINARY: atlas
+          GOPROXY: "off"
+        run: go test ./cli -run 'TestRepairAtlasCLISQLiteWhenAvailable|TestLintAndRepairHelp'
 
   migrations-postgres:
     name: Migrations (postgres)

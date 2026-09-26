@@ -128,6 +128,7 @@ func MakeMigrations(ctx context.Context, opts Options) error {
 	// Gate before writing. The first migration only creates tables, so there is
 	// nothing to classify; after that, the gate (schemaplan.Gate in the CLI)
 	// refuses a destructive or unsafe change nothing acknowledged (#309).
+	var acknowledged []string
 	if opts.Gate != nil {
 		has, err := ws.hasMigrations()
 		if err != nil {
@@ -138,10 +139,14 @@ func MakeMigrations(ctx context.Context, opts Options) error {
 			if err != nil {
 				return err
 			}
-			if err := opts.Gate(ctx, opts.Name, in); err != nil {
+			if acknowledged, err = opts.Gate(ctx, opts.Name, in); err != nil {
 				return err
 			}
 		}
+	}
+	before, err := migrationFileSet(ws.migrationDir)
+	if err != nil {
+		return err
 	}
 
 	atlasPath := filepath.Join(ws.tmpDir, "atlas.hcl")
@@ -158,8 +163,20 @@ func MakeMigrations(ctx context.Context, opts Options) error {
 		"--config",
 		"file://" + filepath.ToSlash(atlasPath),
 	}
-	if err := opts.runner.Run(ctx, ws.absWorkDir, opts.AtlasBinary, args, opts.Stdout, opts.Stderr); err != nil {
+	hints := newHintWriter(opts.Stderr)
+	err = opts.runner.Run(ctx, ws.absWorkDir, opts.AtlasBinary, args, opts.Stdout, hints)
+	hints.Flush()
+	if err != nil {
 		return fmt.Errorf("migrations: atlas migrate diff: %w", err)
+	}
+	// Persist the acknowledgement in the migration itself, so the change
+	// passes `gombit db lint` in CI without anyone repeating --allow.
+	written, err := newMigrationFiles(ws.migrationDir, before)
+	if err != nil {
+		return err
+	}
+	if err := writeAllowDirectives(ctx, opts, ws.absWorkDir, ws.migrationDir, written, acknowledged); err != nil {
+		return err
 	}
 	if err := SaveRegistry(ws.migrationDir, allModels); err != nil {
 		return err

@@ -588,12 +588,20 @@ gombit db seed
 gombit db reset [--force]
 gombit db verify [--write] [--json] [--strict]
 gombit db hash
+gombit db lint [--latest N] [--json]
+gombit db repair [--write-manifests]
 ```
 
 `gombit db hash` wraps `atlas migrate hash` to recompute the directory checksum
 (`atlas.sum`) after a migration is hand-edited (e.g. to backfill a renamed
 column), so recovery from a checksum mismatch never needs the raw Atlas CLI.
 `atlas migrate hash` is part of Atlas Community Edition ([ADR-012](adr/012-migrations-atlas-gorm-provider.md)).
+`gombit db lint` checks the directory's integrity, layout, and the safety of every
+migration, from the schema before and after it and from its statements (a
+destructive or unsafe change needs a `-- gombit:allow <id>` line in the
+migration), and `gombit db repair` restores consistency after a hand
+edit. See
+[migrations.md § Linting and repairing](migrations.md#linting-and-repairing-the-migration-directory).
 
 `gombit db plan` classifies the change the models imply against the migration
 directory before a migration is written: `destructive` (a dropped table or

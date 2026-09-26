@@ -12,6 +12,20 @@ version.
 
 ### Added
 
+- `gombit db lint` checks the migration directory: integrity (atlas.sum and a
+  clean replay on the dev database, via Atlas Community Edition
+  `migrate validate`), layout (misplaced down files), and the safety of every
+  migration, classified like `gombit db plan` from the schema before and after
+  each one and from its own statements (`DELETE`, `UPDATE`, `TRUNCATE`, a
+  drop-and-recreate the schema does not show). A destructive or unsafe change
+  passes only with a `-- gombit:allow <id>` line in the migration, which
+  `makemigrations --allow` now writes itself; declared renames are safe. It
+  exits non-zero on any problem and prints `--json` for tooling
+  ([#311](https://github.com/gombit-dev/gombit/issues/311)).
+- `gombit db repair` restores the migration directory after an intentional
+  hand edit: rehash, replay check, and stale safety-manifest detection
+  (`--write-manifests` rewrites them after review)
+  ([#311](https://github.com/gombit-dev/gombit/issues/311)).
 - `gombit db makemigrations --rename-table old:new` renames a table with a
   native, data-preserving `ALTER TABLE ... RENAME TO` on SQLite, PostgreSQL,
   and MySQL. With `--forget-model` / `--model` it swaps the renamed model in the
@@ -24,7 +38,6 @@ version.
   `gombit db rollback` can undo them. `--rename` also accepts
   `table.old=table.new`
   ([#310](https://github.com/gombit-dev/gombit/issues/310)).
-
 - `gombit db plan` classifies the schema change the models imply before a
   migration is written: `destructive` (dropped table or column, narrowed type),
   `unsafe` (fails on a populated table: a NOT NULL column with no default,
@@ -37,6 +50,10 @@ version.
 
 ### Changed
 
+- Atlas errors that `gombit db migrate`, `status`, `makemigrations`, and
+  `hash` pass through now name the gombit recovery command
+  (`gombit db hash`) instead of the Atlas CLI
+  ([#311](https://github.com/gombit-dev/gombit/issues/311)).
 - **Breaking (workflow):** `gombit db makemigrations` runs the same plan once a
   migration exists and refuses to write a destructive or unsafe change until
   each step is acknowledged with `--allow <id|code>`. `--forget-model`
