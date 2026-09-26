@@ -88,6 +88,9 @@ func (opts Options) ensureAtlas() error {
 			rerun = append(rerun, flag.name)
 		}
 	}
+	if id := strings.TrimSpace(opts.ID); id != "" && !strings.EqualFold(id, "uint") && !strings.EqualFold(id, "integer") {
+		rerun = append(rerun, "--id", id)
+	}
 	return fmt.Errorf(
 		"resourcegen: Atlas is required to generate database migrations (%q not found on PATH).\n\n"+
 			"Install Atlas and retry, or run:\n\n"+

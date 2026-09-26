@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/gombit-dev/gombit/contract"
+	"github.com/google/uuid"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -23,6 +24,7 @@ const (
 	FilterInt64
 	FilterUint
 	FilterBool
+	FilterUUID
 )
 
 // This file holds the reusable list-query primitives (exact-match filter,
@@ -58,6 +60,12 @@ func FilterEq(ctx context.Context, q *gorm.DB, column string, kind FilterKind, r
 		value = uint(u)
 	case FilterBool:
 		value, err = strconv.ParseBool(raw)
+	case FilterUUID:
+		var id uuid.UUID
+		id, err = uuid.Parse(raw)
+		if err == nil {
+			value = id.String()
+		}
 	default: // FilterString
 		value = raw
 	}

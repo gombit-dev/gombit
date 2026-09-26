@@ -141,6 +141,32 @@ func TestLookupTargetPrimaryKey(t *testing.T) {
 	if _, err := lookupTargetPK(dir, "note", "Note"); err == nil {
 		t.Fatal("string primary key was accepted")
 	}
+
+	defined := "package user\n\nimport \"github.com/google/uuid\"\n\ntype Base struct {\n\tID uuid.UUID `gorm:\"primaryKey\"`\n}\n\ntype Defined Base\n\ntype Alias = Base\n\ntype Both struct {\n\tID  uint\n\tUID uuid.UUID `gorm:\"primaryKey\"`\n}\n\ntype NotStruct string\n"
+	if err := os.WriteFile(filepath.Join(user, "defined.go"), []byte(defined), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, typeName := range []string{"Defined", "Alias"} {
+		got, err = lookupTargetPK(dir, "user", typeName)
+		if err != nil || got != "uuid.UUID" {
+			t.Fatalf("%s lookup = %q %v", typeName, got, err)
+		}
+	}
+	got, err = lookupTargetPK(dir, "user", "Both")
+	if err != nil || got != "uuid.UUID" {
+		t.Fatalf("explicit primaryKey lookup = %q %v", got, err)
+	}
+	if _, err := lookupTargetPK(dir, "user", "NotStruct"); err == nil || !strings.Contains(err.Error(), "cannot be read") {
+		t.Fatalf("non-struct type error = %v", err)
+	}
+	aliased := "package user\n\nimport uid \"github.com/google/uuid\"\n\ntype Aliased struct {\n\tID uid.UUID `gorm:\"primaryKey\"`\n}\n"
+	if err := os.WriteFile(filepath.Join(user, "aliased.go"), []byte(aliased), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err = lookupTargetPK(dir, "user", "Aliased")
+	if err != nil || got != "uuid.UUID" {
+		t.Fatalf("import alias lookup = %q %v", got, err)
+	}
 }
 
 type uuidResource struct {
@@ -185,7 +211,7 @@ func TestUUIDForeignKeyStaysFilterable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("renderModelHandler: %v", err)
 	}
-	want := `database.FilterEq(ctx, q, "author_id", database.FilterString, input.AuthorID)`
+	want := `database.FilterEq(ctx, q, "author_id", database.FilterUUID, input.AuthorID)`
 	if !strings.Contains(src, want) {
 		t.Fatalf("handler missing %q:\n%s", want, src)
 	}

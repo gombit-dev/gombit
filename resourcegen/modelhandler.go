@@ -333,9 +333,12 @@ func columnsOf(fs []modelField) []string {
 // filterKindExpr maps the field's Go kind to the database.FilterKind the generated
 // list handler passes to database.FilterEq to coerce the raw string query value —
 // matching the legacy field-grammar mapping (int→FilterInt, int64→FilterInt64,
-// unsigned→FilterUint, bool→FilterBool, otherwise string). uuid.UUID is an array
-// of bytes, so it takes the string branch: char(36) stores the canonical text.
+// unsigned→FilterUint, bool→FilterBool, uuid→FilterUUID, otherwise string).
+// FilterUUID parses with uuid.Parse and binds the canonical lowercase text.
 func filterKindExpr(f modelField) string {
+	if strings.TrimPrefix(f.GoType, "*") == "uuid.UUID" {
+		return "database.FilterUUID"
+	}
 	switch f.Kind {
 	case reflect.Int:
 		return "database.FilterInt"
