@@ -78,12 +78,19 @@ func unquote(id string) string {
 // shows what else changed (a narrowed type on a renamed column still
 // classifies), and each rename is a safe step: the rows stay.
 func BuildWithRenames(in migrations.Inspection, renames []DeclaredRename) (SchemaPlan, error) {
+	plan, _, err := buildWithRenames(in, renames)
+	return plan, err
+}
+
+// buildWithRenames is BuildWithRenames, also returning the state after the
+// migration, which the statement findings check a rebuild copy against.
+func buildWithRenames(in migrations.Inspection, renames []DeclaredRename) (SchemaPlan, *schema.Realm, error) {
 	current, desired := &schema.Realm{}, &schema.Realm{}
 	if err := evalHCL(in.Driver, in.Current, current); err != nil {
-		return SchemaPlan{}, fmt.Errorf("schemaplan: read the schema before the migration: %w", err)
+		return SchemaPlan{}, nil, fmt.Errorf("schemaplan: read the schema before the migration: %w", err)
 	}
 	if err := evalHCL(in.Driver, in.Desired, desired); err != nil {
-		return SchemaPlan{}, fmt.Errorf("schemaplan: read the schema after the migration: %w", err)
+		return SchemaPlan{}, nil, fmt.Errorf("schemaplan: read the schema after the migration: %w", err)
 	}
 	var renameSteps []PlanStep
 	for _, r := range renames {
@@ -106,7 +113,7 @@ func BuildWithRenames(in migrations.Inspection, renames []DeclaredRename) (Schem
 	alignSchemas(current, desired)
 	changes, err := differ(in.Driver).RealmDiff(current, desired)
 	if err != nil {
-		return SchemaPlan{}, fmt.Errorf("schemaplan: diff schemas: %w", err)
+		return SchemaPlan{}, nil, fmt.Errorf("schemaplan: diff schemas: %w", err)
 	}
 	steps := append(renameSteps, classifyChanges(in.Driver, changes)...)
 	for i := range steps {
@@ -114,7 +121,7 @@ func BuildWithRenames(in migrations.Inspection, renames []DeclaredRename) (Schem
 			steps[i].Hint = renameTableHint(steps[i], "")
 		}
 	}
-	return SchemaPlan{Driver: in.Driver, Steps: steps}, nil
+	return SchemaPlan{Driver: in.Driver, Steps: steps}, desired, nil
 }
 
 func findTable(r *schema.Realm, name string) *schema.Table {
@@ -135,8 +142,11 @@ var (
 
 // rebuildCopySource returns X when stmt is an Atlas-style rebuild copy into
 // new_X: a column list, and a SELECT of exactly those columns, in order, from
-// X. A SELECT of anything else (a literal, an expression) is not a copy.
-func rebuildCopySource(stmt string) (string, bool) {
+// X, that covers every column X has after the migration except the ones it
+// adds (desired is that state; added is keyed table.column). A SELECT of
+// anything else (a literal, an expression) or one that leaves a surviving
+// column out is not a copy.
+func rebuildCopySource(stmt string, desired *schema.Realm, added map[string]bool) (string, bool) {
 	m := reRebuildCopy.FindStringSubmatch(stmt)
 	if m == nil {
 		return "", false
@@ -149,9 +159,20 @@ func rebuildCopySource(stmt string) (string, bool) {
 	if len(cols) == 0 || len(cols) != len(sel) {
 		return "", false
 	}
+	copied := map[string]bool{}
 	for i := range cols {
 		if !plainIdent.MatchString(sel[i]) || unquote(sel[i]) != unquote(cols[i]) {
 			return "", false
+		}
+		copied[unquote(cols[i])] = true
+	}
+	after := findTable(desired, source)
+	if after == nil {
+		return "", false
+	}
+	for _, c := range after.Columns {
+		if !copied[c.Name] && !added[source+"."+c.Name] {
+			return "", false // a surviving column the copy leaves out
 		}
 	}
 	return source, true
@@ -170,19 +191,22 @@ func splitList(s string) []string {
 }
 
 // withStatementFindings adds what the migration's own SQL does to rows that
-// the before/after diff cannot see. The HOST-3 statement classifier
-// (manifest.Classify) is fail-safe: DELETE, UPDATE, TRUNCATE, DROP TABLE,
-// ALTER COLUMN, and anything it does not recognize are data loss. A statement
-// the diff already explains (a drop_column step for the same column, a step
-// on an altered column, Atlas's own SQLite rebuild) adds nothing; any other
-// becomes a destructive or unsafe step the migration has to acknowledge. A
-// declared rename is only safe if the migration does not also drop the table.
-func withStatementFindings(steps []PlanStep, sql string) []PlanStep {
+// the before/after diff cannot see. ALTER TABLE statements are read action by
+// action; every other statement goes through the fail-safe HOST-3 statement
+// classifier (manifest.Classify), for which DELETE, UPDATE, TRUNCATE, DROP
+// TABLE, and anything it does not recognize are data loss. An action or
+// statement the diff already explains (the column drop it reports, an
+// implicit conversion of a column it reports, Atlas's own SQLite rebuild)
+// adds nothing; any other becomes a destructive or unsafe step the migration
+// has to acknowledge. A declared rename is only safe if the migration does
+// not also drop the table. desired is the schema after the migration.
+func withStatementFindings(steps []PlanStep, sql string, desired *schema.Realm) []PlanStep {
 	stmts := manifest.Statements(sql)
 	ops := manifest.Classify(sql)
 	have := map[string]bool{}
 	columnInDiff := map[string]bool{}
 	tableAccounted := map[string]bool{}
+	added := map[string]bool{}
 	for _, s := range steps {
 		have[s.ID] = true
 		if s.Name != "" {
@@ -191,12 +215,16 @@ func withStatementFindings(steps []PlanStep, sql string) []PlanStep {
 		if s.Code == StepTableRebuild || s.NeedsAcknowledgement() {
 			tableAccounted[s.Table] = true
 		}
+		if s.Code == StepAddColumn || s.Code == StepAddNotNull {
+			added[s.Table+"."+s.Name] = true
+		}
 	}
 	// exemptDrop reports whether the DROP TABLE at index i is the middle of
-	// Atlas's SQLite rebuild of X: an exact column-for-column copy into
-	// new_X before it, the rename of new_X back to X after it, and a plan step
-	// that accounts for the rebuild. Each copy exempts one drop. An empty
-	// diff means nothing was rebuilt, so the drop stands.
+	// Atlas's SQLite rebuild of X: a copy into new_X before it that selects
+	// every column X still has afterwards (new ones aside), the rename of
+	// new_X back to X after it, and a plan step that accounts for the
+	// rebuild. Each copy exempts one drop. An empty diff means nothing was
+	// rebuilt, so the drop stands.
 	copies := map[string]int{}
 	exemptDrop := func(i int, table string) bool {
 		c, ok := copies[table]
@@ -221,16 +249,42 @@ func withStatementFindings(steps []PlanStep, sql string) []PlanStep {
 			found = append(found, s)
 		}
 	}
-	for i, op := range ops {
-		if i >= len(stmts) {
-			continue
+	alterColumn := func(table, column, stmt string, rewrite bool) {
+		if rewrite {
+			// A USING expression rewrites the stored values; the schema after
+			// it cannot say how, so it always needs an acknowledgement.
+			add(newStep(StepAlterColumn, SeverityDestructive, table, column, fmt.Sprintf("The migration rewrites every value of %s.%s through an expression (%s); the schema before and after cannot show what it keeps.", table, column, firstWords(stmt))))
+			return
 		}
-		if src, ok := rebuildCopySource(stmts[i]); ok {
+		// Without USING the database converts values the implicit way, and
+		// the diff's step for this column is the classification of that.
+		if columnInDiff[table+"."+column] {
+			return
+		}
+		add(newStep(StepAlterColumn, SeverityUnsafe, table, column, fmt.Sprintf("The migration alters column %s.%s in a way the schema before and after does not show.", table, column)))
+	}
+	for i, stmt := range stmts {
+		if src, ok := rebuildCopySource(stmt, desired, added); ok {
 			copies[src] = i
 		}
-		if op.Safety != manifest.SafetyDataLoss {
+		if m := reAlterTableBody.FindStringSubmatch(stmt); m != nil {
+			table := unquote(m[1])
+			for _, action := range splitActions(m[2]) {
+				switch a := classifyAction(action); a.kind {
+				case actionDropColumn:
+					add(newStep(StepDropColumn, SeverityDestructive, table, a.column, fmt.Sprintf("The migration drops column %s.%s and the data in it.", table, a.column)))
+				case actionAlterColumn:
+					alterColumn(table, a.column, stmt, a.rewrite)
+				case actionUnknownDrop:
+					add(newStep(StepUnclassifiedSQL, SeverityDestructive, fmt.Sprintf("statement_%d", i+1), "", fmt.Sprintf("Gombit cannot classify statement %d (%s), so it is treated as destructive.", i+1, firstWords(stmt))))
+				}
+			}
 			continue
 		}
+		if i >= len(ops) || ops[i].Safety != manifest.SafetyDataLoss {
+			continue
+		}
+		op := ops[i]
 		switch op.Kind {
 		case manifest.OpDropTable:
 			if exemptDrop(i, op.Resource) {
@@ -238,29 +292,13 @@ func withStatementFindings(steps []PlanStep, sql string) []PlanStep {
 			}
 			dropped[op.Resource] = true
 			add(newStep(StepDropTable, SeverityDestructive, op.Resource, "", fmt.Sprintf("The migration runs DROP TABLE %s and every row in it goes, even if a table of that name exists afterwards.", op.Resource)))
-		case manifest.OpDropColumn:
-			add(newStep(StepDropColumn, SeverityDestructive, op.Resource, op.Column, fmt.Sprintf("The migration drops column %s.%s and the data in it.", op.Resource, op.Column)))
-		case manifest.OpAlterColumn:
-			// A USING expression rewrites the stored values; the schema after
-			// it cannot say how, so it always needs an acknowledgement.
-			if reUsing.MatchString(stmts[i]) {
-				add(newStep(StepAlterColumn, SeverityDestructive, op.Resource, op.Column, fmt.Sprintf("The migration rewrites every value of %s.%s through an expression (%s); the schema before and after cannot show what it keeps.", op.Resource, op.Column, firstWords(stmts[i]))))
-				continue
-			}
-			// Without USING the database converts values the implicit way, and
-			// the diff's step for this column (a widen, a narrow, a default)
-			// is the classification of exactly that.
-			if columnInDiff[op.Resource+"."+op.Column] {
-				continue
-			}
-			add(newStep(StepAlterColumn, SeverityUnsafe, op.Resource, op.Column, fmt.Sprintf("The migration alters column %s.%s in a way the schema before and after does not show.", op.Resource, op.Column)))
 		default:
-			if m := reDataChangeTable.FindStringSubmatch(stmts[i]); m != nil {
+			if m := reDataChangeTable.FindStringSubmatch(stmt); m != nil {
 				table := unquote(m[1])
-				add(newStep(StepDataChange, SeverityDestructive, table, "", fmt.Sprintf("The migration deletes or rewrites rows in %s (%s).", table, firstWords(stmts[i]))))
+				add(newStep(StepDataChange, SeverityDestructive, table, "", fmt.Sprintf("The migration deletes or rewrites rows in %s (%s).", table, firstWords(stmt))))
 				continue
 			}
-			add(newStep(StepUnclassifiedSQL, SeverityDestructive, fmt.Sprintf("statement_%d", i+1), "", fmt.Sprintf("Gombit cannot classify statement %d (%s), so it is treated as destructive.", i+1, firstWords(stmts[i]))))
+			add(newStep(StepUnclassifiedSQL, SeverityDestructive, fmt.Sprintf("statement_%d", i+1), "", fmt.Sprintf("Gombit cannot classify statement %d (%s), so it is treated as destructive.", i+1, firstWords(stmt))))
 		}
 	}
 
@@ -273,6 +311,78 @@ func withStatementFindings(steps []PlanStep, sql string) []PlanStep {
 		out = append(out, s)
 	}
 	return append(out, found...)
+}
+
+var reAlterTableBody = regexp.MustCompile(`(?is)^\s*ALTER\s+TABLE\s+(?:ONLY\s+)?(?:IF\s+EXISTS\s+)?` + ident + `\s+(.*)$`)
+
+// splitActions splits an ALTER TABLE body into its comma-separated actions,
+// ignoring commas inside parentheses and quotes.
+func splitActions(body string) []string {
+	var out []string
+	depth, start := 0, 0
+	var quote rune
+	for i, r := range body {
+		switch {
+		case quote != 0:
+			if r == quote {
+				quote = 0
+			}
+		case r == '\'' || r == '"' || r == '`':
+			quote = r
+		case r == '(':
+			depth++
+		case r == ')':
+			depth--
+		case r == ',' && depth == 0:
+			out = append(out, strings.TrimSpace(body[start:i]))
+			start = i + 1
+		}
+	}
+	if rest := strings.TrimSpace(body[start:]); rest != "" {
+		out = append(out, rest)
+	}
+	return out
+}
+
+type actionKind int
+
+const (
+	actionOther actionKind = iota
+	actionDropColumn
+	actionAlterColumn
+	actionUnknownDrop
+)
+
+type alterAction struct {
+	kind    actionKind
+	column  string
+	rewrite bool
+}
+
+var (
+	reActionDrop      = regexp.MustCompile(`(?is)^DROP\s+(?:COLUMN\s+)?(?:IF\s+EXISTS\s+)?` + ident + `(?:\s+(?:CASCADE|RESTRICT))?$`)
+	reActionAlter     = regexp.MustCompile(`(?is)^(?:ALTER\s+(?:COLUMN\s+)?|MODIFY\s+(?:COLUMN\s+)?|CHANGE\s+(?:COLUMN\s+)?)` + ident + `(?:\s+(.*))?$`)
+	reActionKeyword   = regexp.MustCompile(`(?is)^DROP\s+(?:CONSTRAINT|INDEX|KEY|PRIMARY\s+KEY|FOREIGN\s+KEY|UNIQUE|CHECK)\b`)
+	reActionAlterMeta = regexp.MustCompile(`(?is)^ALTER\s+(?:CONSTRAINT|INDEX)\b`)
+	reActionDropAny   = regexp.MustCompile(`(?is)^DROP\b`)
+)
+
+// classifyAction reads one ALTER TABLE action. Additive and metadata actions
+// (ADD, RENAME, a dropped constraint or index) are actionOther; a DROP the
+// reader cannot place is actionUnknownDrop.
+func classifyAction(action string) alterAction {
+	switch {
+	case reActionKeyword.MatchString(action):
+		return alterAction{kind: actionOther}
+	case reActionDrop.MatchString(action):
+		return alterAction{kind: actionDropColumn, column: unquote(reActionDrop.FindStringSubmatch(action)[1])}
+	case reActionAlter.MatchString(action) && !reActionAlterMeta.MatchString(action):
+		m := reActionAlter.FindStringSubmatch(action)
+		return alterAction{kind: actionAlterColumn, column: unquote(m[1]), rewrite: reUsing.MatchString(action)}
+	case reActionDropAny.MatchString(action):
+		return alterAction{kind: actionUnknownDrop}
+	}
+	return alterAction{kind: actionOther}
 }
 
 func firstWords(stmt string) string {
@@ -410,11 +520,11 @@ func Lint(ctx context.Context, opts LintOptions) (LintReport, error) {
 		if err != nil {
 			return report, err
 		}
-		plan, err := BuildWithRenames(migrations.Inspection{Driver: opts.Driver, Current: before, Desired: after}, DeclaredRenames(string(sql)))
+		plan, desired, err := buildWithRenames(migrations.Inspection{Driver: opts.Driver, Current: before, Desired: after}, DeclaredRenames(string(sql)))
 		if err != nil {
 			return report, fmt.Errorf("schemaplan: %s: %w", f.Name, err)
 		}
-		plan.Steps = withStatementFindings(plan.Steps, string(sql))
+		plan.Steps = withStatementFindings(plan.Steps, string(sql), desired)
 		plan.Acknowledge(migrations.AllowDirectives(string(sql)))
 		report.Migrations = append(report.Migrations, MigrationLint{Version: f.Version, Name: f.Name, File: filepath.Base(f.UpPath), Steps: plan.Steps})
 	}
