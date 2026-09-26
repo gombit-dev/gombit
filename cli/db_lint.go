@@ -18,7 +18,7 @@ import (
 func newLintCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
 	cmd := silence(&cobra.Command{
 		Use:   "lint",
-		Short: "Check the migration directory: integrity, layout, and the safety of its newest migrations",
+		Short: "Check the migration directory: integrity, layout, and the safety of every migration",
 		Long: `Check the migration directory without touching the application database.
 
   integrity  atlas.sum matches every migration, and the migrations apply to an

@@ -138,7 +138,9 @@ func TestMakeMigrationsGateSkippedBeforeFirstMigrationAndWhenNil(t *testing.T) {
 		seed bool
 		gate Gate
 	}{
-		{name: "first migration", seed: false, gate: func(context.Context, string, Inspection) ([]string, error) { return nil, errors.New("gate must not run") }},
+		{name: "first migration", seed: false, gate: func(context.Context, string, Inspection) ([]string, error) {
+			return nil, errors.New("gate must not run")
+		}},
 		{name: "nil gate", seed: true, gate: nil},
 	}
 	for _, tc := range cases {
