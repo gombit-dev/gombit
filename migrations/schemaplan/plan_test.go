@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -474,7 +475,7 @@ func TestGateRefusesUnacknowledgedSteps(t *testing.T) {
 	in.NewModels = []migrations.Model{{ImportPath: "example.com/app/internal/order", TypeName: "Order"}}
 	in.ForgetModels = []migrations.Model{{ImportPath: "example.com/app/internal/legacy", TypeName: "Legacy"}}
 	var stderr bytes.Buffer
-	err := Gate([]string{"drop_colum:products.name"}, &stderr)(context.Background(), "reshape_products", in)
+	_, err := Gate([]string{"drop_colum:products.name"}, &stderr)(context.Background(), "reshape_products", in)
 	if err == nil || !strings.Contains(err.Error(), "need acknowledgement") {
 		t.Fatalf("Gate() error = %v, want the refusal", err)
 	}
@@ -502,11 +503,18 @@ func TestGatePassesAcknowledgedSteps(t *testing.T) {
 	allow := []string{"drop_column:products.name", "set_not_null", "add_not_null", "add_unique"}
 	// drop_table:legacy is covered by forgetting the Legacy model (GORM names
 	// its table "legacies", not "legacy"), so it is still pending here.
-	if err := Gate(allow, io.Discard)(context.Background(), "reshape", in); err == nil || !strings.Contains(err.Error(), "drop_table:legacy") {
+	if _, err := Gate(allow, io.Discard)(context.Background(), "reshape", in); err == nil || !strings.Contains(err.Error(), "drop_table:legacy") {
 		t.Fatalf("Gate() error = %v, want drop_table:legacy still pending", err)
 	}
-	if err := Gate(append(allow, "drop_table:legacy"), io.Discard)(context.Background(), "reshape", in); err != nil {
+	ack, err := Gate(append(allow, "drop_table:legacy"), io.Discard)(context.Background(), "reshape", in)
+	if err != nil {
 		t.Fatalf("Gate() error = %v, want nil once every step is allowed", err)
+	}
+	// Every destructive or unsafe step is returned for the migration to record.
+	for _, id := range []string{"drop_column:products.name", "set_not_null:products.note", "add_not_null:products.stock", "add_unique:products.idx_sku", "drop_table:legacy"} {
+		if !slices.Contains(ack, id) {
+			t.Errorf("Gate() acknowledged %v, missing %s", ack, id)
+		}
 	}
 }
 

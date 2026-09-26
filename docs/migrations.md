@@ -206,9 +206,10 @@ SQL and does not plan either.
 unacknowledged, and `--json` prints the steps for tooling. In CI, run it after
 the models change to fail the build on a destructive change nobody signed off
 on. Once the acknowledged migration is committed, the models and the migration
-directory agree and the plan is empty again. For migrations already written,
-including hand-written ones, [`gombit db verify`](migration-safety.md)
-classifies the SQL itself.
+directory agree and the plan is empty again. `makemigrations` records each
+acknowledged step in the migration it writes as a `-- gombit:allow <id>` line,
+so [`gombit db lint`](#linting-and-repairing-the-migration-directory) accepts it
+in CI, and a hand-written destructive migration without that line fails.
 
 ## Renaming a column
 
@@ -294,6 +295,58 @@ migrations. `--rename` also accepts `table.old_column=table.new_column`.
 A rename migration comes with its exact inverse in
 `downs/<version>_<name>.down.sql` (the column renames undone in reverse, then
 the table renames), so `gombit db rollback` can undo it.
+
+## Linting and repairing the migration directory
+
+`gombit db lint` checks the migration directory without touching the
+application database:
+
+```sh
+gombit db lint              # the newest migration
+gombit db lint --latest 3   # the three newest
+gombit db lint --all --json
+```
+
+- **Integrity.** `atlas.sum` matches every file, and the migrations apply to
+  an empty dev database (Atlas Community Edition `migrate validate`). A
+  mismatch names the changed files and the fix, `gombit db repair`.
+- **Layout.** Every `*.sql` file is an up migration; a down file outside
+  `downs/` is reported with where it belongs.
+- **Safety.** Each checked migration is classified like
+  [`gombit db plan`](#planning-a-change), from the schema before and after it.
+  A destructive or unsafe step passes only when the migration carries a line
+  for it:
+
+  ```sql
+  -- gombit:allow drop_column:products.price
+  ALTER TABLE `products` DROP COLUMN `price`;
+  ```
+
+  The line takes a step ID or a code, like `--allow`. `makemigrations` writes
+  these lines itself for the steps `--allow` or `--forget-model` acknowledged.
+  Renames the migration states (`ALTER TABLE ... RENAME TO`,
+  `RENAME COLUMN`, MySQL `RENAME TABLE`) count as safe `rename_table` /
+  `rename_column` steps, and anything else the migration changes is still
+  classified.
+
+`gombit db lint` exits non-zero on any problem, so CI can run it on every pull
+request. It does not wrap `atlas migrate lint`, which ADR-012 keeps outside the
+Community Edition dependency surface.
+
+After an intentional hand edit to a migration (a backfill, a
+`-- gombit:allow` line), restore the directory with gombit alone:
+
+```sh
+gombit db repair
+```
+
+It rehashes `atlas.sum`, checks that every migration still applies to an empty
+dev database, and checks [safety manifests](migration-safety.md) against their
+SQL. A manifest binds reviewed SQL, so a stale one is reported, and rewritten
+only with `gombit db repair --write-manifests` after you review the change.
+Atlas errors that `gombit db migrate`, `status`, `makemigrations`, and `hash`
+pass through name the gombit command (`gombit db hash`) instead of the Atlas
+CLI.
 
 ## Apply / Status / Rollback
 

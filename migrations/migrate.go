@@ -138,7 +138,10 @@ func Migrate(ctx context.Context, opts ApplyOptions) error {
 		"--allow-dirty",
 	}
 	args = withAtlasRevisionsSchema(opts.Database.Driver, args)
-	if err := opts.runner.Run(ctx, absWorkDir, opts.AtlasBinary, args, opts.Stdout, opts.Stderr); err != nil {
+	hints := newHintWriter(opts.Stderr)
+	err = opts.runner.Run(ctx, absWorkDir, opts.AtlasBinary, args, opts.Stdout, hints)
+	hints.Flush()
+	if err != nil {
 		return fmt.Errorf("migrations: atlas migrate apply: %w", err)
 	}
 

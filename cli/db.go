@@ -34,6 +34,8 @@ func newDBCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
 	cmd.AddCommand(newSeedCommand(stdout, stderr))
 	cmd.AddCommand(newResetCommand(stdout, stderr))
 	cmd.AddCommand(newHashCommand(stdout, stderr))
+	cmd.AddCommand(newLintCommand(stdout, stderr))
+	cmd.AddCommand(newRepairCommand(stdout, stderr))
 	return cmd
 }
 

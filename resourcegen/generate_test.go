@@ -440,6 +440,13 @@ func TestGenerateSurfacesMakeMigrationsError(t *testing.T) {
 	}
 }
 
+func gotGateCall(g migrations.Gate) ([]string, error) {
+	if g == nil {
+		return nil, nil
+	}
+	return g(context.Background(), "", migrations.Inspection{})
+}
+
 func TestGeneratePassesAllAutoMigrateModels(t *testing.T) {
 	workDir := t.TempDir()
 	if err := scaffold.Generate(context.Background(), scaffold.Options{
@@ -470,14 +477,14 @@ func TestGeneratePassesAllAutoMigrateModels(t *testing.T) {
 		WorkDir:       filepath.Join(workDir, "demo"),
 		Name:          "Book",
 		Fields:        []string{"title:string:required"},
-		MigrationGate: func(context.Context, string, migrations.Inspection) error { return errGate },
+		MigrationGate: func(context.Context, string, migrations.Inspection) ([]string, error) { return nil, errGate },
 		Stdout:        ioDiscard{},
 	})
 	if err != nil {
 		t.Fatalf("Generate() error = %v", err)
 	}
 	// The CLI's plan gate reaches the migration make resource writes (#309).
-	if gotGate == nil || !errors.Is(gotGate(context.Background(), "", migrations.Inspection{}), errGate) {
+	if _, gateErr := gotGateCall(gotGate); gotGate == nil || !errors.Is(gateErr, errGate) {
 		t.Fatal("MakeMigrations did not receive Options.MigrationGate as its Gate")
 	}
 	mod := readModulePathMust(t, filepath.Join(workDir, "demo"))
