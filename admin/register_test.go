@@ -9,6 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gombit-dev/gombit/admin"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 func TestRegisterMissingSlug(t *testing.T) {
@@ -305,6 +306,28 @@ func TestFieldsFromIsRegistrationTimeOnly(t *testing.T) {
 	_, err := admin.FieldsFrom(Widget{})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRegisterExplicitFieldsSkipServerObligation(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	type book struct {
+		gorm.Model
+		Title   string `gorm:"not null"`
+		OwnerID uint   `gorm:"not null" gombit:"server"`
+		Name    string `gorm:"not null" gombit:"read"`
+	}
+	app := newCookieApp(t)
+	err := admin.Register(app, book{}, admin.Options{
+		Slug: "policy-books",
+		Fields: []admin.Field{
+			{Name: "id", Type: admin.TypeInteger, ReadOnly: true},
+			{Name: "title", Type: admin.TypeString, Required: true},
+			{Name: "owner_id", Type: admin.TypeInteger},
+		},
+	})
+	if err != nil {
+		t.Fatalf("explicit Fields must not apply server policy: %v", err)
 	}
 }
 

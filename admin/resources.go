@@ -523,6 +523,9 @@ func applyWrite(ctx context.Context, m *registered, inst any, body map[string]an
 			if _, ok := fields[name]; ok {
 				continue
 			}
+			if _, ok := seen[name]; ok {
+				continue
+			}
 			fields[name] = []string{"is set by the server and cannot be stored empty"}
 		}
 	}

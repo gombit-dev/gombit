@@ -66,8 +66,9 @@ type registered struct {
 	m2m         []*m2mBinding             // many-to-many fields synced on write (#223)
 	hasMany     []*relationRead           // has_many fields, read-only (preload + ids) (#223)
 	version     *versionField             // optimistic-lock column, if the model has one
-	// serverRequired names columns a hook must set. They may be absent from
-	// fields when the policy hides them. Create fails instead of storing zero.
+	// serverRequired names columns a hook must set when Fields were derived.
+	// They may be absent from fields when the policy hides them. Create fails
+	// only when the body did not set the column.
 	serverRequired []string
 }
 

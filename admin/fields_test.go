@@ -512,6 +512,20 @@ func TestFieldsFromFollowsResourcePolicy(t *testing.T) {
 		t.Fatalf("create blank password = %#v", err)
 	}
 
+	setOwner := false
+	owner := resolvedField{Field: Field{Name: "owner_id", Type: TypeInteger}, set: func(any, any) error {
+		setOwner = true
+		return nil
+	}}
+	supplied := &registered{
+		fields:         []resolvedField{owner},
+		serverRequired: []string{"owner_id"},
+	}
+	supplied.fieldByName = map[string]*resolvedField{"owner_id": &supplied.fields[0]}
+	if err := applyWrite(context.Background(), supplied, &book{}, map[string]any{"owner_id": 7}, true); err != nil || !setOwner {
+		t.Fatalf("create with owner_id set: err=%v set=%v", err, setOwner)
+	}
+
 	row := (&registered{fields: []resolvedField{
 		{Field: title, get: func(any) any { return "Ada" }},
 		{Field: password, get: func(any) any { return "secret" }},

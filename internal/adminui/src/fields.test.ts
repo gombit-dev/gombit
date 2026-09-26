@@ -143,8 +143,13 @@ describe("formValuesToBody", () => {
       field({ name: "active", type: "boolean", writeonly: true }),
       field({ name: "note", type: "text" }),
     ];
-    const { body } = formValuesToBody({ password: "", active: false, note: "hi" }, fields);
+    expect(emptyFormValue(fields[1])).toBeNull();
+    const { body } = formValuesToBody({ password: "", active: null, note: "hi" }, fields);
     expect(body).toEqual({ note: "hi" });
+    expect(formValuesToBody({ password: "", active: false, note: "hi" }, fields).body).toEqual({
+      active: false,
+      note: "hi",
+    });
     expect(formValuesToBody({ password: "s3cret", active: true, note: "hi" }, fields).body).toEqual({
       password: "s3cret",
       active: true,

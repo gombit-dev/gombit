@@ -123,9 +123,16 @@ func registerModel(host Host, model any, opts Options) error {
 	if err := validateQueryableColumns(opts, resolved); err != nil {
 		return err
 	}
-	serverRequired, err := serverCreateNames(sch, opts.Fields)
-	if err != nil {
-		return err
+	// The server-create obligation follows derived fields, the same gate as
+	// search alignment. An explicit Fields list is the handler's list: a
+	// NOT NULL read-only tag is the public API's problem, and a column the
+	// caller made writable is stored when the body sets it.
+	var serverRequired []string
+	if derived {
+		serverRequired, err = serverCreateNames(sch, opts.Fields)
+		if err != nil {
+			return err
+		}
 	}
 
 	m := &registered{

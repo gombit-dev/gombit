@@ -186,9 +186,16 @@ arbitrary Go types.
   The derived list uses the same `gombit` policy as the generated API:
   `gombit:"-"` is omitted, a response-only or `server` column is
   read-only, and `gombit:"write"` is accepted on create but left out of
-  row JSON. A NOT NULL `server` column fails create instead of being
-  stored as the zero value, including `server` and `-,server`, which stay
-  out of the field list. When the model declares that policy and
+  row JSON. A NOT NULL `server` column that the create body did not set
+  fails create instead of being stored as the zero value, including
+  `server` and `-,server`, which stay out of the field list. That check
+  runs only when `Fields` were derived. An explicit `Fields` list is the
+  handler's list, so Register does not reject a NOT NULL `gombit:"read"`
+  tag the caller did not ask to derive, and a column that list makes
+  writable is stored when the body sets it. The admin create form reports
+  a field error for any name that is not a mounted input. A write-only
+  boolean starts unchanged and can be set to true or false; only the
+  unchanged state is omitted. When the model declares that policy and
   `Filter`, `Ordering`, or `Search` were left unset, those lists follow
   the tag (`filterable`, `sortable`, `searchable`) rather than every
   text column.
