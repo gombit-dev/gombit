@@ -141,10 +141,10 @@ Schema plan (sqlite, 4 change(s)):
                  gombit db makemigrations <name> --rename products.title:name
   UNSAFE       add_not_null:products.name
                Adds NOT NULL column products.name with no default. The migration fails when products already has rows.
-               Give the field a default (default=...), or add it as nullable, backfill it, and make it required in a later migration.
+               Give the column a database default (a gorm:"default:..." tag on the model field; Gombit's default= field modifier is applied by the API, not the database, so it does not change this), or add it as nullable, backfill it, and make it required in a later migration.
   UNSAFE       add_not_null:products.price
                Adds NOT NULL column products.price with no default. The migration fails when products already has rows.
-               Give the field a default (default=...), or add it as nullable, backfill it, and make it required in a later migration.
+               Give the column a database default (a gorm:"default:..." tag on the model field; Gombit's default= field modifier is applied by the API, not the database, so it does not change this), or add it as nullable, backfill it, and make it required in a later migration.
   REVIEW       table_rebuild:products
                SQLite rebuilds products: it copies the rows into new_products, drops products, and renames the copy.
 
@@ -169,8 +169,10 @@ gets a severity:
 A dropped column next to an added column of the same type family is reported
 with the `--rename` command that keeps the data (see
 [Renaming a column](#renaming-a-column)). A new unique index or foreign key
-over a column added in the same plan is safe when that column is nullable,
-because every existing row holds NULL. SQLite type changes are `review`, not
+over a column added in the same plan is safe only when that column is nullable
+and has no default, because every existing row then holds NULL. A default is
+written into every existing row first, so the same index can collide and the
+same foreign key can point at a missing row. SQLite type changes are `review`, not
 `destructive`: SQLite column types are affinities and the rebuild copies every
 stored value as it is.
 
@@ -178,7 +180,9 @@ stored value as it is.
 `--allow`. It takes a step ID (`drop_column:products.title`) or a code
 (`add_not_null`, for every step with that code) and is repeatable.
 `makemigrations` refuses to write a migration that contains an unacknowledged
-step; it prints the plan and names the `--allow` flags:
+step. It prints the plan and the full command that writes the same migration
+with every step acknowledged, including any `--model` and `--forget-model` the
+refused run named (a refused run saves no registry):
 
 ```sh
 gombit db makemigrations reshape_products \

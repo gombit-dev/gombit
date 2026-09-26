@@ -29,8 +29,9 @@ version.
   each step is acknowledged with `--allow <id|code>`. `--forget-model`
   acknowledges the drop of the forgotten model's table (by GORM's default
   name). `gombit make resource` hits the same check
-  when an unrelated model has a pending destructive change; finish with
-  `gombit db makemigrations --allow`
+  when an unrelated model has a pending destructive change. The refusal prints
+  the `gombit db makemigrations` command that writes the refused migration,
+  including the new model and every `--allow`
   ([#309](https://github.com/gombit-dev/gombit/issues/309)).
 
 ## [0.3.0] — 2026-09-26

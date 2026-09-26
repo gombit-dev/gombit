@@ -24,6 +24,9 @@ type Inspection struct {
 	Current []byte
 	// Desired is the schema the models declare.
 	Desired []byte
+	// NewModels are the models this run adds to the registry. A refused run
+	// saves no registry, so reproducing it has to name them again.
+	NewModels []Model
 	// ForgetModels are the models this run stops tracking: their tables are
 	// meant to be dropped.
 	ForgetModels []Model
@@ -94,7 +97,9 @@ type workspace struct {
 	migrationDir string
 	tmpDir       string
 	schemaPath   string
-	cleanup      func()
+	// newModels are the requested models the registry does not hold yet.
+	newModels []Model
+	cleanup   func()
 }
 
 // prepareWorkspace resolves the paths, loads and merges the model registry,
@@ -148,6 +153,7 @@ func prepareWorkspace(opts Options) (*workspace, []Model, error) {
 		migrationDir: migrationDir,
 		tmpDir:       tmpDir,
 		schemaPath:   filepath.Join(tmpDir, "schema.sql"),
+		newModels:    SubtractModels(MergeModels(nil, opts.Models), registered),
 		cleanup: func() {
 			_ = os.RemoveAll(tmpDir)
 			if !tmpRootExisted {
@@ -196,7 +202,7 @@ func (ws *workspace) hasMigrations() (bool, error) {
 // inspect inspects the desired schema and, once a migration exists, the
 // migration directory. loadSchema must have run.
 func (ws *workspace) inspect(ctx context.Context, opts Options) (Inspection, error) {
-	in := Inspection{Driver: opts.Driver, ForgetModels: opts.ForgetModels}
+	in := Inspection{Driver: opts.Driver, NewModels: ws.newModels, ForgetModels: opts.ForgetModels}
 	var err error
 	if in.Desired, err = ws.inspectHCL(ctx, opts, "file://"+filepath.ToSlash(ws.schemaPath)); err != nil {
 		return Inspection{}, fmt.Errorf("migrations: inspect the models' schema: %w", err)

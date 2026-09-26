@@ -122,8 +122,29 @@ func Gate(allow []string, stderr io.Writer) migrations.Gate {
 			return nil
 		}
 		WritePlan(stderr, plan)
-		return fmt.Errorf("migrations: %d destructive or unsafe change(s) need acknowledgement, so no migration was written; review them with 'gombit db plan', handle the data, then run 'gombit db makemigrations %s --allow <id>' with one --allow per change (first: %s)", len(pending), name, pending[0].ID)
+		return fmt.Errorf("migrations: %d destructive or unsafe change(s) need acknowledgement, so no migration was written; review them with 'gombit db plan', handle the data, then write this migration with:\n  %s", len(pending), retryCommand(name, in, pending))
 	}
+}
+
+// retryCommand is the makemigrations invocation that reproduces a refused run
+// with its steps acknowledged. A refused run saves no registry, so the models
+// it was adding (make resource's new model among them) and forgetting have to
+// be named again.
+func retryCommand(name string, in migrations.Inspection, pending []PlanStep) string {
+	var b strings.Builder
+	b.WriteString("gombit db makemigrations ")
+	b.WriteString(name)
+	for _, m := range in.NewModels {
+		fmt.Fprintf(&b, " --model %s.%s", m.ImportPath, m.TypeName)
+	}
+	for _, m := range in.ForgetModels {
+		fmt.Fprintf(&b, " --forget-model %s.%s", m.ImportPath, m.TypeName)
+	}
+	for _, s := range pending {
+		b.WriteString(" --allow ")
+		b.WriteString(s.ID)
+	}
+	return b.String()
 }
 
 // WritePlan renders a plan for a terminal. Destructive and unsafe steps come

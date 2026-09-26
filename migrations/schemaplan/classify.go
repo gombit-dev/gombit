@@ -122,24 +122,28 @@ func classifyChanges(driver config.DatabaseDriver, changes []schema.Change) []Pl
 
 func classifyTable(driver config.DatabaseDriver, m *schema.ModifyTable) []PlanStep {
 	table := m.T.Name
-	// Columns added in this same change. A unique index or a foreign key that
-	// covers only new nullable columns cannot fail: every existing row holds NULL.
-	newNullable := map[string]bool{}
+	// Columns added in this same change that leave every existing row NULL: a
+	// nullable column with no default (or an explicit NULL default). A unique
+	// index or a foreign key over only those columns cannot fail. A default
+	// backfills every existing row first (the SQLite rebuild omits the column
+	// from its copy, so the default applies; ADD COLUMN ... DEFAULT does the
+	// same on PostgreSQL and MySQL), so it can.
+	nullFilled := map[string]bool{}
 	var addedCols []*schema.Column
 	for _, c := range m.Changes {
 		if add, ok := c.(*schema.AddColumn); ok {
 			addedCols = append(addedCols, add.C)
-			if add.C.Type != nil && add.C.Type.Null {
-				newNullable[add.C.Name] = true
+			if add.C.Type != nil && add.C.Type.Null && nullDefault(add.C.Default) {
+				nullFilled[add.C.Name] = true
 			}
 		}
 	}
-	onlyNewNullable := func(cols []string) bool {
+	onlyNullFilled := func(cols []string) bool {
 		if len(cols) == 0 {
 			return false
 		}
 		for _, c := range cols {
-			if !newNullable[c] {
+			if !nullFilled[c] {
 				return false
 			}
 		}
@@ -161,13 +165,17 @@ func classifyTable(driver config.DatabaseDriver, m *schema.ModifyTable) []PlanSt
 		case *schema.ModifyColumn:
 			steps = append(steps, classifyModifyColumn(driver, table, c)...)
 		case *schema.AddIndex:
-			if c.I.Unique && !onlyNewNullable(indexColumns(c.I)) {
-				step := newStep(StepAddUnique, SeverityUnsafe, table, c.I.Name, fmt.Sprintf("Adds unique index %s on %s(%s). It fails if existing rows hold duplicate values.", c.I.Name, table, strings.Join(indexColumns(c.I), ", ")))
+			cols := strings.Join(indexColumns(c.I), ", ")
+			switch {
+			case c.I.Unique && onlyNullFilled(indexColumns(c.I)):
+				steps = append(steps, newStep(StepAddUnique, SeveritySafe, table, c.I.Name, fmt.Sprintf("Adds unique index %s on %s(%s). The columns are new, nullable, and have no default, so every existing row holds NULL and nothing collides.", c.I.Name, table, cols)))
+			case c.I.Unique:
+				step := newStep(StepAddUnique, SeverityUnsafe, table, c.I.Name, fmt.Sprintf("Adds unique index %s on %s(%s). It fails if existing rows hold duplicate values, including a default written into every existing row.", c.I.Name, table, cols))
 				step.Hint = "Remove or merge the duplicates before this migration applies."
 				steps = append(steps, step)
-				continue
+			default:
+				steps = append(steps, newStep(StepAddIndex, SeveritySafe, table, c.I.Name, fmt.Sprintf("Adds index %s on %s(%s).", c.I.Name, table, cols)))
 			}
-			steps = append(steps, newStep(StepAddIndex, SeveritySafe, table, c.I.Name, fmt.Sprintf("Adds index %s on %s(%s).", c.I.Name, table, strings.Join(indexColumns(c.I), ", "))))
 		case *schema.DropIndex:
 			steps = append(steps, newStep(StepDropIndex, SeveritySafe, table, c.I.Name, fmt.Sprintf("Drops index %s.", c.I.Name)))
 		case *schema.ModifyIndex:
@@ -181,11 +189,11 @@ func classifyTable(driver config.DatabaseDriver, m *schema.ModifyTable) []PlanSt
 		case *schema.AddForeignKey:
 			cols := fkColumns(c.F)
 			ref := fkRef(c.F)
-			if onlyNewNullable(cols) {
-				steps = append(steps, newStep(StepAddForeignKey, SeveritySafe, table, c.F.Symbol, fmt.Sprintf("Adds foreign key %s: %s(%s) references %s.", c.F.Symbol, table, strings.Join(cols, ", "), ref)))
+			if onlyNullFilled(cols) {
+				steps = append(steps, newStep(StepAddForeignKey, SeveritySafe, table, c.F.Symbol, fmt.Sprintf("Adds foreign key %s: %s(%s) references %s. The columns are new, nullable, and have no default, so every existing row holds NULL and passes.", c.F.Symbol, table, strings.Join(cols, ", "), ref)))
 				continue
 			}
-			step := newStep(StepAddForeignKey, SeverityUnsafe, table, c.F.Symbol, fmt.Sprintf("Adds foreign key %s: %s(%s) references %s. Existing rows that point at a missing row make it fail on PostgreSQL and MySQL, and stay as violations on SQLite.", c.F.Symbol, table, strings.Join(cols, ", "), ref))
+			step := newStep(StepAddForeignKey, SeverityUnsafe, table, c.F.Symbol, fmt.Sprintf("Adds foreign key %s: %s(%s) references %s. Existing rows that point at a missing row, including a default written into every existing row, make it fail on PostgreSQL and MySQL and stay as violations on SQLite.", c.F.Symbol, table, strings.Join(cols, ", "), ref))
 			step.Hint = "Fix or null out rows that reference missing rows before this migration applies."
 			steps = append(steps, step)
 		case *schema.DropForeignKey:
@@ -224,7 +232,7 @@ func classifyAddColumn(driver config.DatabaseDriver, table string, c *schema.Col
 			detail = fmt.Sprintf("Adds NOT NULL column %s.%s with no default. SQLite rejects that even on an empty table.", table, c.Name)
 		}
 		step := newStep(StepAddNotNull, SeverityUnsafe, table, c.Name, detail)
-		step.Hint = "Give the field a default (default=...), or add it as nullable, backfill it, and make it required in a later migration."
+		step.Hint = "Give the column a database default (a gorm:\"default:...\" tag on the model field; Gombit's default= field modifier is applied by the API, not the database, so it does not change this), or add it as nullable, backfill it, and make it required in a later migration."
 		return step
 	}
 	return newStep(StepAddColumn, SeveritySafe, table, c.Name, fmt.Sprintf("Adds column %s.%s.", table, c.Name))
@@ -550,6 +558,20 @@ func fkAction(a schema.ReferenceOption) string {
 		return string(schema.NoAction)
 	}
 	return string(a)
+}
+
+// nullDefault reports whether a column default leaves existing rows NULL:
+// no default at all, or an explicit NULL.
+func nullDefault(d schema.Expr) bool {
+	switch d := d.(type) {
+	case nil:
+		return true
+	case *schema.Literal:
+		return strings.EqualFold(strings.TrimSpace(d.V), "NULL")
+	case *schema.RawExpr:
+		return strings.EqualFold(strings.TrimSpace(d.X), "NULL")
+	}
+	return false
 }
 
 // autoIncrement reports a column the database fills itself, so a NOT NULL

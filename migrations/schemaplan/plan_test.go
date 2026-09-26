@@ -3,6 +3,7 @@ package schemaplan
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -115,6 +116,13 @@ func TestClassifyFixtureMySQL(t *testing.T) {
 
 func assertSteps(t *testing.T, steps []PlanStep, want map[string]Severity) {
 	t.Helper()
+	seen := map[string]bool{}
+	for _, s := range steps {
+		if seen[s.ID] {
+			t.Errorf("duplicate step ID %s", s.ID)
+		}
+		seen[s.ID] = true
+	}
 	got := stepsByID(steps)
 	for id, sev := range want {
 		s, ok := got[id]
@@ -217,8 +225,8 @@ table "items" {
 schema "main" {}
 `,
 			want: map[string]Severity{
-				"add_column:items.slug":    SeveritySafe,
-				"add_index:items.idx_slug": SeveritySafe,
+				"add_column:items.slug":     SeveritySafe,
+				"add_unique:items.idx_slug": SeveritySafe,
 				// A new column that carries an index is not an in-place ALTER.
 				"table_rebuild:items": SeverityReview,
 			},
@@ -461,10 +469,23 @@ func TestBuildEmptyCurrentListsNewTables(t *testing.T) {
 
 func TestGateRefusesUnacknowledgedSteps(t *testing.T) {
 	in := fixtureInspection(t, config.DatabaseDriverSQLite, "sqlite")
+	in.NewModels = []migrations.Model{{ImportPath: "example.com/app/internal/order", TypeName: "Order"}}
+	in.ForgetModels = []migrations.Model{{ImportPath: "example.com/app/internal/legacy", TypeName: "Legacy"}}
 	var stderr bytes.Buffer
 	err := Gate([]string{"drop_colum:products.name"}, &stderr)(context.Background(), "reshape_products", in)
-	if err == nil || !strings.Contains(err.Error(), "need acknowledgement") || !strings.Contains(err.Error(), "gombit db makemigrations reshape_products --allow") {
-		t.Fatalf("Gate() error = %v, want the refusal naming the makemigrations command", err)
+	if err == nil || !strings.Contains(err.Error(), "need acknowledgement") {
+		t.Fatalf("Gate() error = %v, want the refusal", err)
+	}
+	// A refused run saves no registry: the retry command must name the models
+	// it was adding and forgetting, and acknowledge every pending step.
+	want := "gombit db makemigrations reshape_products --model example.com/app/internal/order.Order --forget-model example.com/app/internal/legacy.Legacy --allow drop_column:products.name"
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("Gate() error = %v, want the retry command %q", err, want)
+	}
+	for _, id := range []string{"set_not_null:products.note", "add_not_null:products.stock", "add_unique:products.idx_sku", "drop_table:legacy"} {
+		if !strings.Contains(err.Error(), "--allow "+id) {
+			t.Errorf("retry command missing --allow %s: %v", id, err)
+		}
 	}
 	for _, want := range []string{"warning: --allow drop_colum:products.name matched no change", "DESTRUCTIVE  drop_column:products.name", "--rename products.name:title", "--allow add_not_null:products.stock"} {
 		if !strings.Contains(stderr.String(), want) {
@@ -551,5 +572,98 @@ func TestPlanAndGateAtlasCLISQLiteWhenAvailable(t *testing.T) {
 	}
 	if files, _ := filepath.Glob(filepath.Join(migrationDir, "*.sql")); len(files) != 2 {
 		t.Fatalf("migration files = %v, want the acknowledged migration", files)
+	}
+}
+
+// TestDefaultedNewColumnIsNotNullFilled is the regression test for a unique
+// index or foreign key over a new nullable column: it can fail only when the
+// column has a default, which Atlas writes into every existing row before the
+// constraint is created.
+func TestDefaultedNewColumnIsNotNullFilled(t *testing.T) {
+	type shape struct {
+		driver  config.DatabaseDriver
+		schema  string
+		idType  string
+		strType string
+		strDef  string
+	}
+	shapes := []shape{
+		{config.DatabaseDriverSQLite, "main", "integer", "text", `"pending"`},
+		{config.DatabaseDriverPostgres, "public", "bigint", "text", `"pending"`},
+		{config.DatabaseDriverMySQL, "dev", "bigint", "varchar(32)", `"pending"`},
+	}
+	realm := func(t *testing.T, s shape, withSKU, skuDefault bool, withOwner, ownerDefault bool) *schema.Realm {
+		t.Helper()
+		var b strings.Builder
+		fmt.Fprintf(&b, "table \"owners\" {\n  schema = schema.%s\n  column \"id\" {\n    null = false\n    type = %s\n  }\n  primary_key {\n    columns = [column.id]\n  }\n}\n", s.schema, s.idType)
+		fmt.Fprintf(&b, "table \"products\" {\n  schema = schema.%s\n  column \"id\" {\n    null = false\n    type = %s\n  }\n", s.schema, s.idType)
+		if withSKU {
+			def := ""
+			if skuDefault {
+				def = "    default = " + s.strDef + "\n"
+			}
+			fmt.Fprintf(&b, "  column \"sku\" {\n    null = true\n    type = %s\n%s  }\n", s.strType, def)
+		}
+		if withOwner {
+			def := ""
+			if ownerDefault {
+				def = "    default = 1\n"
+			}
+			fmt.Fprintf(&b, "  column \"owner_id\" {\n    null = true\n    type = %s\n%s  }\n", s.idType, def)
+		}
+		b.WriteString("  primary_key {\n    columns = [column.id]\n  }\n")
+		if withOwner {
+			b.WriteString("  foreign_key \"fk_owner\" {\n    columns     = [column.owner_id]\n    ref_columns = [table.owners.column.id]\n    on_update   = NO_ACTION\n    on_delete   = RESTRICT\n  }\n")
+		}
+		if withSKU {
+			b.WriteString("  index \"idx_sku\" {\n    unique  = true\n    columns = [column.sku]\n  }\n")
+		}
+		fmt.Fprintf(&b, "}\nschema %q {}\n", s.schema)
+		r := &schema.Realm{}
+		if err := evalHCL(s.driver, []byte(b.String()), r); err != nil {
+			t.Fatalf("eval %s HCL: %v\n%s", s.driver, err, b.String())
+		}
+		return r
+	}
+	for _, s := range shapes {
+		for _, withDefault := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/default=%v", s.driver, withDefault), func(t *testing.T) {
+				cur := realm(t, s, false, false, false, false)
+				want := realm(t, s, true, withDefault, true, withDefault)
+				changes, err := differ(s.driver).RealmDiff(cur, want)
+				if err != nil {
+					t.Fatal(err)
+				}
+				steps := stepsByID(classifyChanges(s.driver, changes))
+				expect := SeveritySafe
+				if withDefault {
+					expect = SeverityUnsafe
+				}
+				if got := steps["add_unique:products.idx_sku"]; got.Severity != expect {
+					t.Errorf("unique index over a new nullable column (default=%v) = %+v, want %s", withDefault, got, expect)
+				}
+				if got := steps["add_foreign_key:products.fk_owner"]; got.Severity != expect {
+					t.Errorf("foreign key over a new nullable column (default=%v) = %+v, want %s", withDefault, got, expect)
+				}
+			})
+		}
+	}
+}
+
+func TestNullDefault(t *testing.T) {
+	for _, tc := range []struct {
+		d    schema.Expr
+		want bool
+	}{
+		{nil, true},
+		{&schema.Literal{V: "NULL"}, true},
+		{&schema.RawExpr{X: "null"}, true},
+		{&schema.Literal{V: "'pending'"}, false},
+		{&schema.Literal{V: "0"}, false},
+		{&schema.RawExpr{X: "CURRENT_TIMESTAMP"}, false},
+	} {
+		if got := nullDefault(tc.d); got != tc.want {
+			t.Errorf("nullDefault(%#v) = %v, want %v", tc.d, got, tc.want)
+		}
 	}
 }

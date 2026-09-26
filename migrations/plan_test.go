@@ -95,6 +95,10 @@ func TestMakeMigrationsGateRefusalWritesNothing(t *testing.T) {
 	if len(got.ForgetModels) != 1 || got.ForgetModels[0] != forget[0] {
 		t.Fatalf("gate got ForgetModels %v, want %v", got.ForgetModels, forget)
 	}
+	// Order is new; Product is already registered, so it is not repeated.
+	if len(got.NewModels) != 1 || got.NewModels[0].TypeName != "Order" {
+		t.Fatalf("gate got NewModels %v, want only the unregistered Order", got.NewModels)
+	}
 	files, _ := filepath.Glob(filepath.Join(migrationDir, "*.sql"))
 	if len(files) != 1 {
 		t.Fatalf("migration files = %v, want only the seeded one", files)
