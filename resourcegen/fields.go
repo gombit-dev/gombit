@@ -1336,12 +1336,13 @@ func (f Field) blankIsNull() bool {
 	}
 }
 
-// omitBlankUUID reports a non-pointer uuid.UUID that is not required. A
-// belongs_to UUID foreign key is that shape: blank omits the key so the
-// create body zero-fills uuid.Nil, the same way a uint foreign key zero-fills
-// 0. JSON null is rejected because the column is not a pointer. Optional
-// scalar UUIDs are *uuid.UUID and still submit null.
-func (f Field) omitBlankUUID() bool {
+// submitsNilUUID reports a non-pointer uuid.UUID that is not required. A
+// belongs_to / one_to_one UUID foreign key is that shape. The create body
+// requires the property (no omitempty, format uuid), so a blank input must
+// send the nil UUID string, the same way a uint foreign key sends 0. JSON
+// null is rejected because the column is not a pointer. Optional scalar
+// UUIDs are *uuid.UUID and still submit null.
+func (f Field) submitsNilUUID() bool {
 	return f.Type == FieldUUID && !f.Required && !strings.HasPrefix(f.GoType, "*")
 }
 

@@ -177,6 +177,44 @@ type uuidResource struct {
 	Name      string         `gorm:"not null"`
 }
 
+func TestBlankUUIDForeignKeySubmitsNil(t *testing.T) {
+	fields, err := parseFieldsWithID([]string{"author:belongs_to:User"}, "post", func(string, string) (string, error) {
+		return "uuid.UUID", nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	name, err := parseResourceName("Post")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dto := dtoFields(fields)
+	if len(dto) != 1 || dto[0].GoType != "uuid.UUID" || dto[0].submitsNilUUID() != true {
+		t.Fatalf("dto = %+v", dto)
+	}
+	for _, ui := range []string{"minimal", "mui"} {
+		form := renderFormTSX(newRenderContext("example.com/demo", name, dto, "/api/v1", ui, false, false))
+		if !strings.Contains(form, nilUUID) || strings.Contains(form, "delete body[key]") {
+			t.Fatalf("%s form does not submit the nil UUID:\n%s", ui, form)
+		}
+	}
+
+	nullable, err := parseFieldsWithID([]string{"author:belongs_to:User,nullable"}, "post", func(string, string) (string, error) {
+		return "uuid.UUID", nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ndto := dtoFields(nullable)
+	if len(ndto) != 1 || ndto[0].GoType != "*uuid.UUID" || ndto[0].submitsNilUUID() {
+		t.Fatalf("nullable dto = %+v", ndto)
+	}
+	form := renderFormTSX(newRenderContext("example.com/demo", name, ndto, "/api/v1", "minimal", false, false))
+	if strings.Contains(form, nilUUID) || !strings.Contains(form, `value === "" ? null`) {
+		t.Fatalf("nullable uuid form:\n%s", form)
+	}
+}
+
 func TestUUIDHandlerParsesUUID(t *testing.T) {
 	res, err := buildModelResource(&uuidResource{}, "uuidresource")
 	if err != nil {

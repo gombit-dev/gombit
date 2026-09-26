@@ -598,15 +598,15 @@ func renderMinimalFormTSX(ctx renderContext) string {
 	b.WriteString("    setStatus(\"\");\n")
 	bodyExpr := "values as CreateBody"
 	jsonNames := jsonFieldNames(ctx.Fields)
-	omitNames := omitBlankUUIDNames(ctx.Fields)
-	if len(jsonNames) > 0 || len(omitNames) > 0 {
+	nilUUIDNames := nilUUIDFieldNames(ctx.Fields)
+	if len(jsonNames) > 0 || len(nilUUIDNames) > 0 {
 		b.WriteString("    const body: Record<string, unknown> = { ...values };\n")
 		if len(jsonNames) > 0 {
 			b.WriteString(tsParseJSONFields(jsonNames))
 		}
-		if len(omitNames) > 0 {
-			b.WriteString("    " + tsStringArray(omitNames) + ".forEach((key) => {\n")
-			b.WriteString("      if (body[key] == null || body[key] === \"\") delete body[key];\n")
+		if len(nilUUIDNames) > 0 {
+			b.WriteString("    " + tsStringArray(nilUUIDNames) + ".forEach((key) => {\n")
+			b.WriteString("      if (body[key] == null || body[key] === \"\") body[key] = \"" + nilUUID + "\";\n")
 			b.WriteString("    });\n")
 		}
 		bodyExpr = "body as CreateBody"
@@ -652,10 +652,14 @@ func jsonFieldNames(fields []Field) []string {
 	return names
 }
 
-func omitBlankUUIDNames(fields []Field) []string {
+// nilUUID is the canonical text of uuid.Nil. A blank non-nullable UUID
+// foreign key submits this string so the required create body stays present.
+const nilUUID = "00000000-0000-0000-0000-000000000000"
+
+func nilUUIDFieldNames(fields []Field) []string {
 	var names []string
 	for _, field := range fields {
-		if field.omitBlankUUID() {
+		if field.submitsNilUUID() {
 			names = append(names, field.JSONName)
 		}
 	}
@@ -844,13 +848,13 @@ func renderFormField(field Field) string {
 	case FieldDate, FieldUUID:
 		// Empty is null for a pointer date or uuid, and for a required uuid.
 		// A non-pointer optional uuid (a belongs_to foreign key) is a plain
-		// text input; onSubmit drops a blank so the body omits the key instead
-		// of sending null.
+		// text input; onSubmit sends the nil UUID string for a blank so the
+		// required create body stays present.
 		inputType := "text"
 		if field.Type == FieldDate {
 			inputType = "date"
 		}
-		if field.omitBlankUUID() {
+		if field.submitsNilUUID() {
 			b.WriteString("          <input type=\"text\" {...register(\"" + field.JSONName + "\")} />\n")
 			break
 		}
@@ -1081,13 +1085,13 @@ func renderMUIFormTSX(ctx renderContext) string {
 	b.WriteString("  });\n\n")
 	var timeNames, emptyNullNames []string
 	jsonNames := jsonFieldNames(ctx.Fields)
-	omitNames := omitBlankUUIDNames(ctx.Fields)
+	nilUUIDNames := nilUUIDFieldNames(ctx.Fields)
 	for _, field := range ctx.Fields {
 		switch field.Type {
 		case FieldTime:
 			timeNames = append(timeNames, field.JSONName)
 		case FieldDecimal, FieldDate, FieldUUID:
-			if !field.omitBlankUUID() {
+			if !field.submitsNilUUID() {
 				emptyNullNames = append(emptyNullNames, field.JSONName)
 			}
 		default:
@@ -1099,7 +1103,7 @@ func renderMUIFormTSX(ctx renderContext) string {
 	b.WriteString("  async function onSubmit(values: FormValues) {\n")
 	b.WriteString("    setStatus(\"\");\n")
 	bodyExpr := "values as CreateBody"
-	if len(timeNames) > 0 || len(emptyNullNames) > 0 || len(jsonNames) > 0 || len(omitNames) > 0 {
+	if len(timeNames) > 0 || len(emptyNullNames) > 0 || len(jsonNames) > 0 || len(nilUUIDNames) > 0 {
 		b.WriteString("    const body: Record<string, unknown> = { ...values };\n")
 		if len(timeNames) > 0 {
 			// Local datetime-local -> RFC3339 UTC; empty -> null (optional field).
@@ -1115,11 +1119,12 @@ func renderMUIFormTSX(ctx renderContext) string {
 			b.WriteString("      if (body[key] == null || body[key] === \"\") body[key] = null;\n")
 			b.WriteString("    });\n")
 		}
-		if len(omitNames) > 0 {
-			// A non-pointer uuid foreign key is not nullable. Drop a blank so
-			// the create body omits it and the column keeps uuid.Nil.
-			b.WriteString("    " + tsStringArray(omitNames) + ".forEach((key) => {\n")
-			b.WriteString("      if (body[key] == null || body[key] === \"\") delete body[key];\n")
+		if len(nilUUIDNames) > 0 {
+			// A non-pointer uuid foreign key is required on the create body.
+			// A blank submits the nil UUID, the same way a uint foreign key
+			// submits 0.
+			b.WriteString("    " + tsStringArray(nilUUIDNames) + ".forEach((key) => {\n")
+			b.WriteString("      if (body[key] == null || body[key] === \"\") body[key] = \"" + nilUUID + "\";\n")
 			b.WriteString("    });\n")
 		}
 		if len(jsonNames) > 0 {
@@ -1332,7 +1337,7 @@ func renderMUIFormField(field Field) string {
 		b.WriteString("                disabled={isSubmitting}\n")
 		b.WriteString("                onChange={(event) => {\n")
 		b.WriteString("                  const raw = event.target.value;\n")
-		if field.omitBlankUUID() {
+		if field.submitsNilUUID() {
 			b.WriteString("                  field.onChange(raw);\n")
 		} else {
 			b.WriteString("                  field.onChange(raw === \"\" ? null : raw);\n")
