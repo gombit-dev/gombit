@@ -288,6 +288,12 @@ func classifyModifyColumn(driver config.DatabaseDriver, t *schema.Table, m *sche
 			// SQLite column types are affinities: the table copy keeps every
 			// stored value as it is, so the change neither fails nor truncates.
 			steps = append(steps, newStep(StepChangeType, SeverityReview, table, name, fmt.Sprintf("Changes %s.%s from %s to %s. SQLite keeps stored values as they are, so existing rows may not match the new type.", table, name, from, to)))
+		case dir == typeWiden && driver == config.DatabaseDriverMySQL && indexOverKeyLimit(t, name):
+			// Every value fits the column, but MySQL rebuilds the indexes on it
+			// and a key past the InnoDB limit (or an unprefixed TEXT) fails.
+			step := newStep(StepWidenType, SeverityUnsafe, table, name, fmt.Sprintf("Widens %s.%s from %s to %s, but an index on it can exceed InnoDB's %d-byte key limit (or indexes TEXT without a prefix), which fails the migration.", table, name, from, to, innodbKeyLimit))
+			step.Hint = "Index a prefix of the column, or keep the narrower type."
+			steps = append(steps, step)
 		case dir == typeWiden:
 			steps = append(steps, newStep(StepWidenType, SeverityReview, table, name, fmt.Sprintf("Widens %s.%s from %s to %s. Existing values fit.", table, name, from, to)))
 		case dir == typeNarrow:
@@ -312,10 +318,17 @@ func classifyModifyColumn(driver config.DatabaseDriver, t *schema.Table, m *sche
 	}
 	if m.Change.Is(schema.ChangeCharset) {
 		from, to := columnCharset(m.From), columnCharset(m.To)
-		if strings.EqualFold(to, "utf8mb4") {
+		switch {
+		case strings.EqualFold(to, "utf8mb4") && indexOverKeyLimit(t, name):
+			// Every character converts, but the indexes on the column are
+			// rebuilt at 4 bytes per character and must fit InnoDB's key limit.
+			step := newStep(StepChangeCharset, SeverityUnsafe, table, name, fmt.Sprintf("Converts %s.%s from charset %s to %s. An index on the column can exceed InnoDB's %d-byte key limit at 4 bytes per character, which fails the migration.", table, name, orUnset(from), to, innodbKeyLimit))
+			step.Hint = "Shorten the column or index a prefix of it before converting."
+			steps = append(steps, step)
+		case strings.EqualFold(to, "utf8mb4"):
 			// utf8mb4 holds every character the other charsets can.
-			steps = append(steps, newStep(StepChangeCharset, SeverityReview, table, name, fmt.Sprintf("Converts %s.%s from charset %s to %s. Every stored character has an equivalent.", table, name, orUnset(from), to)))
-		} else {
+			steps = append(steps, newStep(StepChangeCharset, SeverityReview, table, name, fmt.Sprintf("Converts %s.%s from charset %s to %s. Every stored character has an equivalent, and the indexes on the column fit the key limit.", table, name, orUnset(from), to)))
+		default:
 			step := newStep(StepChangeCharset, SeverityUnsafe, table, name, fmt.Sprintf("Converts %s.%s from charset %s to %s. A stored character with no equivalent in %s fails the migration in strict mode or is replaced.", table, name, orUnset(from), orUnset(to), orUnset(to)))
 			step.Hint = "Check the stored values for characters outside the new charset first."
 			steps = append(steps, step)
@@ -323,7 +336,11 @@ func classifyModifyColumn(driver config.DatabaseDriver, t *schema.Table, m *sche
 	}
 	if m.Change.Is(schema.ChangeCollate) {
 		from, to := columnCollation(m.From), columnCollation(m.To)
-		if uniquelyIndexed(t, name) {
+		if other, ok := fkCollationMismatch(t, m.To); ok {
+			step := newStep(StepChangeCollation, SeverityUnsafe, table, name, fmt.Sprintf("Changes the collation of %s.%s from %s to %s, but it is in a foreign key with %s, which keeps a different collation. Both sides of a foreign key must share a collation, so the migration fails.", table, name, orUnset(from), orUnset(to), other))
+			step.Hint = "Change the collation on both sides of the foreign key in the same migration."
+			steps = append(steps, step)
+		} else if uniquelyIndexed(t, name) {
 			step := newStep(StepChangeCollation, SeverityUnsafe, table, name, fmt.Sprintf("Changes the collation of %s.%s from %s to %s. The column is in a unique key, which is rebuilt and fails if two stored values compare equal under the new collation.", table, name, orUnset(from), orUnset(to)))
 			step.Hint = "Check for values that differ only in case or accents before this migration applies."
 			steps = append(steps, step)
@@ -335,7 +352,9 @@ func classifyModifyColumn(driver config.DatabaseDriver, t *schema.Table, m *sche
 		steps = append(steps, newStep(StepChangeComment, SeveritySafe, table, name, fmt.Sprintf("Changes the comment of %s.%s.", table, name)))
 	}
 	if m.Change.Is(schema.ChangeGenerated) {
-		steps = append(steps, newStep(StepChangeGenerated, SeverityReview, table, name, fmt.Sprintf("Changes the generated expression of %s.%s. Stored values are recomputed.", table, name)))
+		step := newStep(StepChangeGenerated, SeverityUnsafe, table, name, fmt.Sprintf("Changes the generated expression of %s.%s. Stored values are recomputed, which fails if the new expression errors on an existing row.", table, name))
+		step.Hint = "Evaluate the new expression against the stored rows first."
+		steps = append(steps, step)
 	}
 	known := schema.ChangeType | schema.ChangeNull | schema.ChangeDefault | schema.ChangeCharset | schema.ChangeCollate | schema.ChangeComment | schema.ChangeGenerated
 	if m.Change&^known != schema.NoChange {
@@ -396,6 +415,126 @@ func columnCollation(c *schema.Column) string {
 		}
 	}
 	return co.V
+}
+
+// innodbKeyLimit is InnoDB's index key limit for the DYNAMIC row format, the
+// MySQL 8 default.
+const innodbKeyLimit = 3072
+
+// indexOverKeyLimit reports whether an index (or the primary key) on column
+// can exceed InnoDB's key limit once its string parts are utf8mb4.
+func indexOverKeyLimit(t *schema.Table, column string) bool {
+	check := func(parts []*schema.IndexPart) bool {
+		has, total := false, 0
+		for _, p := range parts {
+			if p.C == nil {
+				return true // an expression part: its length is unknown
+			}
+			if p.C.Name == column {
+				has = true
+			}
+			total += indexPartBytes(p)
+		}
+		return has && total > innodbKeyLimit
+	}
+	if t.PrimaryKey != nil && check(t.PrimaryKey.Parts) {
+		return true
+	}
+	for _, idx := range t.Indexes {
+		if check(idx.Parts) {
+			return true
+		}
+	}
+	return false
+}
+
+// indexPartBytes is an upper bound on one index part's key length.
+func indexPartBytes(p *schema.IndexPart) int {
+	for _, a := range p.Attrs {
+		if sub, ok := a.(*mysql.SubPart); ok && sub.Len > 0 {
+			return sub.Len * maxBytesPerChar
+		}
+	}
+	if p.C.Type == nil {
+		return innodbKeyLimit + 1
+	}
+	switch t := p.C.Type.Type.(type) {
+	case *schema.StringType:
+		if t.Size > 0 {
+			return t.Size * maxBytesPerChar
+		}
+		// A text column cannot be indexed without a prefix.
+		return innodbKeyLimit + 1
+	case *schema.DecimalType:
+		return t.Precision/2 + 1
+	case *schema.BoolType:
+		return 1
+	default:
+		return 8
+	}
+}
+
+// fkCollationMismatch reports a foreign key through column c whose other side
+// ends up with a different effective collation, and names that side. It
+// checks both the keys t declares and the keys other tables declare against t.
+func fkCollationMismatch(t *schema.Table, c *schema.Column) (string, bool) {
+	want := effectiveCollation(c, t)
+	for _, fk := range t.ForeignKeys {
+		for i, col := range fk.Columns {
+			if col.Name != c.Name || i >= len(fk.RefColumns) || fk.RefTable == nil {
+				continue
+			}
+			ref := fk.RefColumns[i]
+			if got := effectiveCollation(ref, fk.RefTable); !strings.EqualFold(got, want) {
+				return fmt.Sprintf("%s.%s (%s)", fk.RefTable.Name, ref.Name, orUnset(got)), true
+			}
+		}
+	}
+	if t.Schema == nil {
+		return "", false
+	}
+	for _, child := range t.Schema.Tables {
+		for _, fk := range child.ForeignKeys {
+			if fk.RefTable == nil || fk.RefTable.Name != t.Name {
+				continue
+			}
+			for i, ref := range fk.RefColumns {
+				if ref.Name != c.Name || i >= len(fk.Columns) {
+					continue
+				}
+				col := fk.Columns[i]
+				if got := effectiveCollation(col, child); !strings.EqualFold(got, want) {
+					return fmt.Sprintf("%s.%s (%s)", child.Name, col.Name, orUnset(got)), true
+				}
+			}
+		}
+	}
+	return "", false
+}
+
+// effectiveCollation is the column's collation, else its table's, else its
+// schema's.
+func effectiveCollation(c *schema.Column, t *schema.Table) string {
+	if v := columnCollation(c); v != "" {
+		return v
+	}
+	find := func(attrs []schema.Attr) string {
+		for _, a := range attrs {
+			if v, ok := a.(*schema.Collation); ok {
+				return v.V
+			}
+		}
+		return ""
+	}
+	if t != nil {
+		if v := find(t.Attrs); v != "" {
+			return v
+		}
+		if t.Schema != nil {
+			return find(t.Schema.Attrs)
+		}
+	}
+	return ""
 }
 
 func orUnset(v string) string {
@@ -460,18 +599,7 @@ func typeDirection(driver config.DatabaseDriver, from, to schema.Type) typeDir {
 		}
 	case *schema.StringType:
 		if t, ok := to.(*schema.StringType); ok {
-			if fr, tr := textRank(f.T), textRank(t.T); fr > 0 && tr > 0 {
-				return widenIf(tr >= fr)
-			}
-			switch {
-			case t.Size == 0 && (textRank(t.T) > 0 || f.Size > 0 || strings.Contains(t.T, "varying") || t.T == "varchar"):
-				// Unbounded text, or an unsized varchar/character varying.
-				return typeWiden
-			case f.Size == 0 && t.Size > 0:
-				return typeNarrow
-			case f.Size > 0 && t.Size > 0:
-				return widenIf(t.Size >= f.Size)
-			}
+			return widenIf(stringFits(stringCapacity(driver, f), stringCapacity(driver, t)))
 		}
 	case *schema.DecimalType:
 		if t, ok := to.(*schema.DecimalType); ok {
@@ -508,6 +636,58 @@ func typeDirection(driver config.DatabaseDriver, from, to schema.Type) typeDir {
 		}
 	}
 	return typeUnknown
+}
+
+// stringCap is what a string type holds: characters for a sized char or
+// varchar, bytes for MySQL's text types, or no limit.
+type stringCap struct {
+	chars, bytes int64
+	unbounded    bool
+}
+
+// maxBytesPerChar bounds a character when the charset is unknown (utf8mb4).
+const maxBytesPerChar = 4
+
+// stringCapacity reads a string type's limit. Atlas stores no size for the
+// MySQL text types, but each has a byte cap; size 0 is unbounded only for
+// PostgreSQL text and an unsized varchar.
+func stringCapacity(driver config.DatabaseDriver, t *schema.StringType) stringCap {
+	if driver == config.DatabaseDriverMySQL {
+		switch strings.ToLower(t.T) {
+		case "tinytext":
+			return stringCap{bytes: 255}
+		case "text":
+			return stringCap{bytes: 65535}
+		case "mediumtext":
+			return stringCap{bytes: 16777215}
+		case "longtext":
+			return stringCap{bytes: 4294967295}
+		}
+	}
+	if t.Size > 0 {
+		return stringCap{chars: int64(t.Size)}
+	}
+	return stringCap{unbounded: true}
+}
+
+// stringFits reports whether every value of from fits in to.
+func stringFits(from, to stringCap) bool {
+	switch {
+	case to.unbounded:
+		return true
+	case from.unbounded:
+		return false
+	case from.chars > 0 && to.chars > 0:
+		return to.chars >= from.chars
+	case from.bytes > 0 && to.bytes > 0:
+		return to.bytes >= from.bytes
+	case from.chars > 0:
+		// Characters into a byte cap: assume the widest encoding.
+		return from.chars*maxBytesPerChar <= to.bytes
+	default:
+		// A byte cap into characters: a character is at least one byte.
+		return to.chars >= from.bytes
+	}
 }
 
 func widenIf(ok bool) typeDir {

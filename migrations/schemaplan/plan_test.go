@@ -329,7 +329,6 @@ func TestTypeDirection(t *testing.T) {
 		{"varchar shrinks", &schema.StringType{T: "varchar", Size: 255}, &schema.StringType{T: "varchar", Size: 100}, typeNarrow},
 		{"varchar to text", &schema.StringType{T: "character varying", Size: 255}, &schema.StringType{T: "text"}, typeWiden},
 		{"text to varchar", &schema.StringType{T: "text"}, &schema.StringType{T: "character varying", Size: 255}, typeNarrow},
-		{"mediumtext to text", &schema.StringType{T: "mediumtext"}, &schema.StringType{T: "text"}, typeNarrow},
 		{"decimal grows", &schema.DecimalType{T: "decimal", Precision: 10, Scale: 2}, &schema.DecimalType{T: "decimal", Precision: 19, Scale: 4}, typeWiden},
 		{"decimal loses scale", &schema.DecimalType{T: "decimal", Precision: 19, Scale: 4}, &schema.DecimalType{T: "decimal", Precision: 19, Scale: 2}, typeNarrow},
 		{"int into small decimal", &schema.IntegerType{T: "bigint"}, &schema.DecimalType{T: "decimal", Precision: 10, Scale: 2}, typeNarrow},
@@ -884,4 +883,122 @@ func TestUnclassifiedChangesFailClosed(t *testing.T) {
 	if len(top) != 1 || top[0].Severity != SeverityUnsafe {
 		t.Fatalf("unrecognized top-level change = %+v, want one unsafe step", top)
 	}
+}
+
+func TestStringCapacityPerDialect(t *testing.T) {
+	my, pg := config.DatabaseDriverMySQL, config.DatabaseDriverPostgres
+	str := func(name string, size int) *schema.StringType { return &schema.StringType{T: name, Size: size} }
+	cases := []struct {
+		name     string
+		driver   config.DatabaseDriver
+		from, to *schema.StringType
+		want     typeDir
+	}{
+		// Atlas stores no size for MySQL's text types; each has a byte cap.
+		{"mysql varchar(255) to tinytext", my, str("varchar", 255), str("tinytext", 0), typeNarrow},
+		{"mysql varchar(60) to tinytext", my, str("varchar", 60), str("tinytext", 0), typeWiden},
+		{"mysql varchar(255) to text", my, str("varchar", 255), str("text", 0), typeWiden},
+		{"mysql varchar(20000) to text", my, str("varchar", 20000), str("text", 0), typeNarrow},
+		{"mysql tinytext to varchar(255)", my, str("tinytext", 0), str("varchar", 255), typeWiden},
+		{"mysql tinytext to varchar(100)", my, str("tinytext", 0), str("varchar", 100), typeNarrow},
+		{"mysql text to tinytext", my, str("text", 0), str("tinytext", 0), typeNarrow},
+		{"mysql mediumtext to text", my, str("mediumtext", 0), str("text", 0), typeNarrow},
+		{"mysql text to longtext", my, str("text", 0), str("longtext", 0), typeWiden},
+		{"postgres varchar(255) to text", pg, str("character varying", 255), str("text", 0), typeWiden},
+		{"postgres text to varchar(255)", pg, str("text", 0), str("character varying", 255), typeNarrow},
+	}
+	for _, tc := range cases {
+		if got := typeDirection(tc.driver, tc.from, tc.to); got != tc.want {
+			t.Errorf("%s: typeDirection = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// mysqlTablesPlan diffs two MySQL states given as inspected HCL table bodies.
+func mysqlTablesPlan(t *testing.T, from, to string) map[string]PlanStep {
+	t.Helper()
+	build := func(tables string) *schema.Realm {
+		hcl := tables + "schema \"dev\" {\n  charset = \"utf8mb4\"\n  collate = \"utf8mb4_0900_ai_ci\"\n}\n"
+		r := &schema.Realm{}
+		if err := evalHCL(config.DatabaseDriverMySQL, []byte(hcl), r); err != nil {
+			t.Fatalf("eval: %v\n%s", err, hcl)
+		}
+		return r
+	}
+	changes, err := differ(config.DatabaseDriverMySQL).RealmDiff(build(from), build(to))
+	if err != nil {
+		t.Fatal(err)
+	}
+	steps := classifyChanges(config.DatabaseDriverMySQL, changes)
+	assertNoDuplicateIDs(t, steps)
+	return stepsByID(steps)
+}
+
+func TestMySQLNarrowingAndConversionFailures(t *testing.T) {
+	skuTable := func(sku string, index string) string {
+		return "table \"products\" {\n  schema = schema.dev\n  column \"id\" {\n    null = false\n    type = bigint\n  }\n  column \"sku\" {\n    null = false\n" + sku + "  }\n  primary_key {\n    columns = [column.id]\n  }\n" + index + "}\n"
+	}
+	unique := "  index \"idx_sku\" {\n    unique  = true\n    columns = [column.sku]\n  }\n"
+	t.Run("varchar(255) to tinytext narrows", func(t *testing.T) {
+		steps := mysqlTablesPlan(t, skuTable("    type = varchar(255)\n", ""), skuTable("    type = tinytext\n", ""))
+		if s := steps["narrow_type:products.sku"]; s.Severity != SeverityDestructive {
+			t.Fatalf("steps = %v, want narrow_type:products.sku destructive", steps)
+		}
+	})
+	t.Run("widening past the key limit of a unique key", func(t *testing.T) {
+		steps := mysqlTablesPlan(t, skuTable("    type = varchar(255)\n", unique), skuTable("    type = varchar(1000)\n", unique))
+		if s := steps["widen_type:products.sku"]; s.Severity != SeverityUnsafe {
+			t.Fatalf("widen_type = %+v, want unsafe: 1000 chars x 4 bytes exceeds the 3072-byte key", s)
+		}
+	})
+	t.Run("widening an unindexed column", func(t *testing.T) {
+		steps := mysqlTablesPlan(t, skuTable("    type = varchar(255)\n", ""), skuTable("    type = varchar(1000)\n", ""))
+		if s := steps["widen_type:products.sku"]; s.Severity != SeverityReview {
+			t.Fatalf("widen_type = %+v, want review", s)
+		}
+	})
+	t.Run("utf8mb4 over a long unique key", func(t *testing.T) {
+		from := skuTable("    type = varchar(1000)\n    charset = \"latin1\"\n    collate = \"latin1_bin\"\n", unique)
+		to := skuTable("    type = varchar(1000)\n    charset = \"utf8mb4\"\n    collate = \"utf8mb4_bin\"\n", unique)
+		if s := mysqlTablesPlan(t, from, to)["change_charset:products.sku"]; s.Severity != SeverityUnsafe {
+			t.Fatalf("change_charset = %+v, want unsafe: 1000 chars x 4 bytes exceeds the 3072-byte key", s)
+		}
+	})
+	t.Run("utf8mb4 over a short unique key", func(t *testing.T) {
+		from := skuTable("    type = varchar(64)\n    charset = \"latin1\"\n    collate = \"latin1_bin\"\n", unique)
+		to := skuTable("    type = varchar(64)\n    charset = \"utf8mb4\"\n    collate = \"utf8mb4_bin\"\n", unique)
+		if s := mysqlTablesPlan(t, from, to)["change_charset:products.sku"]; s.Severity != SeverityReview {
+			t.Fatalf("change_charset = %+v, want review: 256 bytes fits the key", s)
+		}
+	})
+
+	parent := func(collate string) string {
+		return "table \"products\" {\n  schema = schema.dev\n  column \"sku\" {\n    null = false\n    type = varchar(64)\n    collate = \"" + collate + "\"\n  }\n  primary_key {\n    columns = [column.sku]\n  }\n}\n"
+	}
+	child := func(collate string) string {
+		return "table \"order_lines\" {\n  schema = schema.dev\n  column \"id\" {\n    null = false\n    type = bigint\n  }\n  column \"sku\" {\n    null = false\n    type = varchar(64)\n    collate = \"" + collate + "\"\n  }\n  primary_key {\n    columns = [column.id]\n  }\n  foreign_key \"fk_sku\" {\n    columns     = [column.sku]\n    ref_columns = [table.products.column.sku]\n    on_update   = NO_ACTION\n    on_delete   = RESTRICT\n  }\n  index \"fk_sku\" {\n    columns = [column.sku]\n  }\n}\n"
+	}
+	t.Run("collation on a foreign key child only", func(t *testing.T) {
+		steps := mysqlTablesPlan(t, parent("utf8mb4_bin")+child("utf8mb4_bin"), parent("utf8mb4_bin")+child("utf8mb4_0900_ai_ci"))
+		if s := steps["change_collation:order_lines.sku"]; s.Severity != SeverityUnsafe {
+			t.Fatalf("child collation change = %+v, want unsafe: the parent keeps utf8mb4_bin", s)
+		}
+	})
+	t.Run("collation on a foreign key parent only", func(t *testing.T) {
+		steps := mysqlTablesPlan(t, parent("utf8mb4_bin")+child("utf8mb4_bin"), parent("utf8mb4_0900_ai_ci")+child("utf8mb4_bin"))
+		if s := steps["change_collation:products.sku"]; s.Severity != SeverityUnsafe {
+			t.Fatalf("parent collation change = %+v, want unsafe: the child keeps utf8mb4_bin", s)
+		}
+	})
+	t.Run("collation on both sides of a foreign key", func(t *testing.T) {
+		steps := mysqlTablesPlan(t, parent("utf8mb4_bin")+child("utf8mb4_bin"), parent("utf8mb4_0900_ai_ci")+child("utf8mb4_0900_ai_ci"))
+		if s := steps["change_collation:order_lines.sku"]; s.Severity != SeverityReview {
+			t.Fatalf("child collation change = %+v, want review: both sides move together", s)
+		}
+		// The parent column is its table's primary key, so its own step is
+		// unsafe for the unique-key reason, not the foreign key.
+		if s := steps["change_collation:products.sku"]; s.Severity != SeverityUnsafe || strings.Contains(s.Detail, "foreign key") {
+			t.Fatalf("parent collation change = %+v, want unsafe for the primary key only", s)
+		}
+	})
 }
