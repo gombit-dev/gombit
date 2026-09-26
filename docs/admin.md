@@ -186,10 +186,28 @@ arbitrary Go types.
   (`format:"email"`), not from `validate`.
 - **`Options.PK`** is the JSON/field name of the primary key. Empty means
   derive the GORM primary key **at Register** and store it. The PK field
-  must appear in `Fields`.
+  must appear in `Fields`. An auto-increment primary key is read-only.
+  A manual primary key is required on create and cannot be changed on
+  update.
 - **Empty `Fields`** derives a default from the struct once, inside
   `Register`, via `admin.FieldsFrom(T)`. That helper may use `reflect`
   **only at registration time**. Do not call it from request handlers.
+  The derived list uses the same `gombit` policy as the generated API:
+  `gombit:"-"` is omitted, a response-only or `server` column is
+  read-only, and `gombit:"write"` is accepted on create but left out of
+  row JSON. A NOT NULL `server` column that the create body did not set
+  fails create instead of being stored as the zero value, including
+  `server` and `-,server`, which stay out of the field list. That check
+  runs only when `Fields` were derived. An explicit `Fields` list is the
+  handler's list, so Register does not reject a NOT NULL `gombit:"read"`
+  tag the caller did not ask to derive, and a column that list makes
+  writable is stored when the body sets it. The admin create form reports
+  a field error for any name that is not a mounted input. A write-only
+  boolean starts unchanged and can be set to true or false; only the
+  unchanged state is omitted. When the model declares that policy and
+  `Filter`, `Ordering`, or `Search` were left unset, those lists follow
+  the tag (`filterable`, `sortable`, `searchable`) rather than every
+  text column.
 - **`created_at` / `updated_at`** are implicit GORM timestamp columns.
   They may appear in `List` and `Ordering` even when omitted from
   `Fields`. When the model has those columns, list and detail row JSON

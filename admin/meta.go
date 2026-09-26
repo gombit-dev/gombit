@@ -49,10 +49,13 @@ type Capabilities struct {
 
 // FieldMeta is the introspection shape of a field (no Column).
 type FieldMeta struct {
-	Name      string    `json:"name"`
-	Type      FieldType `json:"type"`
-	Required  bool      `json:"required"`
-	ReadOnly  bool      `json:"readonly"`
+	Name     string    `json:"name"`
+	Type     FieldType `json:"type"`
+	Required bool      `json:"required"`
+	ReadOnly bool      `json:"readonly"`
+	// WriteOnly is a create field the response omits (`gombit:"write"`).
+	// The edit form leaves the key out until the operator sets a value.
+	WriteOnly bool      `json:"writeonly,omitempty"`
 	Related   *Relation `json:"related,omitempty"`
 	Minimum   string    `json:"minimum,omitempty"`
 	Maximum   string    `json:"maximum,omitempty"`
@@ -88,6 +91,7 @@ func modelMetaFrom(opts Options, pk string) ModelMeta {
 			Type:      f.Type,
 			Required:  f.Required,
 			ReadOnly:  f.ReadOnly || (f.Type == TypeRelation && f.Related != nil && f.Related.Kind == RelHasMany),
+			WriteOnly: f.WriteOnly,
 			Related:   rel,
 			Minimum:   f.Minimum,
 			Maximum:   f.Maximum,

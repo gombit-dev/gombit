@@ -30,6 +30,31 @@ export function applyContractErrors<TFieldValues extends FieldValues>(
   return applied;
 }
 
+/**
+ * Form-level text for D10 field errors whose names are not mounted inputs.
+ * A create form does not render read-only or hidden server columns, so
+ * those 422s would otherwise be swallowed when applyContractErrors returns
+ * true.
+ */
+export function unmountedContractMessage(err: unknown, mounted: ReadonlySet<string>): string {
+  const fields = d10Fields(err);
+  if (fields === undefined) {
+    return "";
+  }
+  const lines: string[] = [];
+  for (const [name, messages] of Object.entries(fields)) {
+    if (name === "" || mounted.has(name)) {
+      continue;
+    }
+    const message = (messages ?? []).filter((item) => item.trim() !== "").join("; ");
+    if (message === "") {
+      continue;
+    }
+    lines.push(`${name}: ${message}`);
+  }
+  return lines.join("\n");
+}
+
 function d10Fields(err: unknown): { [key: string]: string[] } | undefined {
   if (err instanceof ContractError) {
     return err.fields;

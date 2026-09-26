@@ -1,8 +1,11 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +14,7 @@ import (
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 
+	"github.com/gombit-dev/gombit/contract"
 	"github.com/gombit-dev/gombit/field"
 	"github.com/gombit-dev/gombit/types"
 )
@@ -415,5 +419,183 @@ func TestAdminWireSetMatchesVocabulary(t *testing.T) {
 	}
 	if len(seen) != 0 {
 		t.Fatalf("vocabulary admin wires with no admin constant: %v", seen)
+	}
+}
+
+func TestFieldsFromFollowsResourcePolicy(t *testing.T) {
+	type book struct {
+		gorm.Model
+		Title    string `gorm:"not null"`
+		Secret   string `gombit:"-"`
+		TenantID uint   `gorm:"not null" gombit:"read,server"`
+		OwnerID  uint   `gorm:"not null" gombit:"server"`
+		AuditID  uint   `gorm:"not null" gombit:"-,server"`
+		Password string `gorm:"not null" gombit:"write"`
+		Status   string `gorm:"size:32" gombit:"read,write,filterable,sortable,searchable"`
+	}
+	fields, err := FieldsFrom(&book{})
+	if err != nil {
+		t.Fatalf("FieldsFrom: %v", err)
+	}
+	byName := map[string]Field{}
+	for _, f := range fields {
+		byName[f.Name] = f
+		if f.Name == "secret" || f.Name == "owner_id" || f.Name == "audit_id" {
+			t.Fatalf("hidden column %s was derived", f.Name)
+		}
+	}
+	title := byName["title"]
+	if title.ReadOnly || !title.Required || title.WriteOnly {
+		t.Fatalf("title = %+v", title)
+	}
+	tenant := byName["tenant_id"]
+	if !tenant.ReadOnly || tenant.Required || tenant.WriteOnly {
+		t.Fatalf("tenant_id = %+v", tenant)
+	}
+	password := byName["password"]
+	if password.ReadOnly || !password.WriteOnly || !password.Required {
+		t.Fatalf("password = %+v", password)
+	}
+	if _, ok := byName["deleted_at"]; ok {
+		t.Fatal("soft-delete column was derived")
+	}
+	meta := modelMetaFrom(Options{Slug: "books", Fields: []Field{password}}, "id")
+	if len(meta.Fields) != 1 || !meta.Fields[0].WriteOnly {
+		t.Fatalf("meta = %+v", meta.Fields)
+	}
+
+	sch, err := parseSchema(&book{})
+	if err != nil {
+		t.Fatalf("parseSchema: %v", err)
+	}
+	names, err := serverCreateNames(sch, fields)
+	if err != nil {
+		t.Fatalf("serverCreateNames: %v", err)
+	}
+	if strings.Join(names, ",") != "audit_id,owner_id,tenant_id" {
+		t.Fatalf("server create names = %v", names)
+	}
+	m := &registered{serverRequired: names}
+	err = applyWrite(context.Background(), m, &book{}, nil, true)
+	var env *contract.ErrorEnvelope
+	if !errors.As(err, &env) {
+		t.Fatalf("create error = %#v", err)
+	}
+	for _, name := range names {
+		if len(env.Body.Fields[name]) == 0 || !strings.Contains(env.Body.Fields[name][0], "set by the server") {
+			t.Fatalf("create fields = %#v", env.Body.Fields)
+		}
+	}
+
+	set := false
+	pw := resolvedField{Field: password, set: func(any, any) error {
+		set = true
+		return nil
+	}}
+	writer := &registered{fields: []resolvedField{pw}}
+	writer.fieldByName = map[string]*resolvedField{"password": &writer.fields[0]}
+	for _, raw := range []any{nil, ""} {
+		set = false
+		if err := applyWrite(context.Background(), writer, &book{}, map[string]any{"password": raw}, false); err != nil {
+			t.Fatalf("update %v: %v", raw, err)
+		}
+		if set {
+			t.Fatalf("update %v stored a write-only blank", raw)
+		}
+	}
+	set = false
+	if err := applyWrite(context.Background(), writer, &book{}, map[string]any{"password": "s3cret"}, false); err != nil || !set {
+		t.Fatalf("update new value: err=%v set=%v", err, set)
+	}
+	err = applyWrite(context.Background(), writer, &book{}, map[string]any{"password": ""}, true)
+	if !errors.As(err, &env) || len(env.Body.Fields["password"]) == 0 {
+		t.Fatalf("create blank password = %#v", err)
+	}
+
+	setOwner := false
+	owner := resolvedField{Field: Field{Name: "owner_id", Type: TypeInteger}, set: func(any, any) error {
+		setOwner = true
+		return nil
+	}}
+	supplied := &registered{
+		fields:         []resolvedField{owner},
+		serverRequired: []string{"owner_id"},
+	}
+	supplied.fieldByName = map[string]*resolvedField{"owner_id": &supplied.fields[0]}
+	if err := applyWrite(context.Background(), supplied, &book{}, map[string]any{"owner_id": 7}, true); err != nil || !setOwner {
+		t.Fatalf("create with owner_id set: err=%v set=%v", err, setOwner)
+	}
+
+	row := (&registered{fields: []resolvedField{
+		{Field: title, get: func(any) any { return "Ada" }},
+		{Field: password, get: func(any) any { return "secret" }},
+	}}).toRow(&book{})
+	if _, ok := row["password"]; ok {
+		t.Fatalf("write-only value was returned: %#v", row)
+	}
+	if row["title"] != "Ada" {
+		t.Fatalf("row = %#v", row)
+	}
+}
+
+func TestFieldsFromRejectsUnsatisfiablePolicy(t *testing.T) {
+	type bad struct {
+		gorm.Model
+		Name string `gorm:"not null" gombit:"read"`
+	}
+	if _, err := FieldsFrom(&bad{}); err == nil {
+		t.Fatal("read-only NOT NULL column was accepted")
+	}
+}
+
+func TestManualPrimaryKeyCreateAndUpdate(t *testing.T) {
+	const id = "11111111-1111-1111-1111-111111111111"
+	stored := any(nil)
+	key := resolvedField{
+		Field: Field{Name: "id", Type: TypeUUID, Required: true},
+		get:   func(any) any { return uuid.MustParse(id) },
+		set: func(_ any, raw any) error {
+			stored = raw
+			return nil
+		},
+	}
+	m := &registered{meta: ModelMeta{PK: "id"}, fields: []resolvedField{key}}
+	m.fieldByName = map[string]*resolvedField{"id": &m.fields[0]}
+
+	if err := applyWrite(context.Background(), m, &struct{}{}, map[string]any{"id": id}, true); err != nil || stored != id {
+		t.Fatalf("create: err=%v stored=%#v", err, stored)
+	}
+	for _, body := range []map[string]any{{"id": nil}, {"id": ""}, {}} {
+		err := applyWrite(context.Background(), m, &struct{}{}, body, true)
+		var env *contract.ErrorEnvelope
+		if !errors.As(err, &env) || !strings.Contains(strings.Join(env.Body.Fields["id"], " "), "is required") {
+			t.Fatalf("create %#v = %#v", body, err)
+		}
+	}
+	stored = nil
+	if err := applyWrite(context.Background(), m, &struct{}{}, map[string]any{"id": strings.ToUpper(id)}, false); err != nil || stored != nil {
+		t.Fatalf("same key update: err=%v stored=%#v", err, stored)
+	}
+	stored = nil
+	err := applyWrite(context.Background(), m, &struct{}{}, map[string]any{"id": "22222222-2222-2222-2222-222222222222"}, false)
+	var env *contract.ErrorEnvelope
+	if !errors.As(err, &env) || !strings.Contains(strings.Join(env.Body.Fields["id"], " "), "cannot be changed") || stored != nil {
+		t.Fatalf("changed key = %#v stored=%#v", err, stored)
+	}
+
+	label := resolvedField{
+		Field: Field{Name: "id", Type: TypeString, Required: true},
+		get:   func(any) any { return "alpha" },
+		set: func(_ any, raw any) error {
+			stored = raw
+			return nil
+		},
+	}
+	text := &registered{meta: ModelMeta{PK: "id"}, fields: []resolvedField{label}}
+	text.fieldByName = map[string]*resolvedField{"id": &text.fields[0]}
+	stored = nil
+	err = applyWrite(context.Background(), text, &struct{}{}, map[string]any{"id": ""}, true)
+	if !errors.As(err, &env) || !strings.Contains(strings.Join(env.Body.Fields["id"], " "), "is required") || stored != nil {
+		t.Fatalf("blank string key = %#v stored=%#v", err, stored)
 	}
 }

@@ -136,6 +136,26 @@ describe("formValuesToBody", () => {
     const { body } = formValuesToBody({ id: 3, note: "" }, fields);
     expect(body).toEqual({ note: null });
   });
+
+  it("leaves a blank write-only field out of an update", () => {
+    const fields: FieldMeta[] = [
+      field({ name: "password", type: "string", required: true, writeonly: true }),
+      field({ name: "active", type: "boolean", writeonly: true }),
+      field({ name: "note", type: "text" }),
+    ];
+    expect(emptyFormValue(fields[1])).toBeNull();
+    const { body } = formValuesToBody({ password: "", active: null, note: "hi" }, fields);
+    expect(body).toEqual({ note: "hi" });
+    expect(formValuesToBody({ password: "", active: false, note: "hi" }, fields).body).toEqual({
+      active: false,
+      note: "hi",
+    });
+    expect(formValuesToBody({ password: "s3cret", active: true, note: "hi" }, fields).body).toEqual({
+      password: "s3cret",
+      active: true,
+      note: "hi",
+    });
+  });
 });
 
 describe("relationListQuery", () => {

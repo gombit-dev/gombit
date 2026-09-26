@@ -9,6 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gombit-dev/gombit/admin"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 func TestRegisterMissingSlug(t *testing.T) {
@@ -290,6 +291,26 @@ func TestFieldsFromInfersUUIDAndJSON(t *testing.T) {
 	if id.Type != admin.TypeUUID {
 		t.Fatalf("id type = %q, want %q", id.Type, admin.TypeUUID)
 	}
+	if id.ReadOnly || !id.Required {
+		t.Fatalf("uuid primary key = %+v, want writable and required", id)
+	}
+	type Named struct {
+		ID   string `gorm:"primaryKey" json:"id"`
+		Name string `json:"name"`
+	}
+	named, err := admin.FieldsFrom(Named{})
+	if err != nil {
+		t.Fatalf("FieldsFrom string pk: %v", err)
+	}
+	var stringPK admin.Field
+	for _, f := range named {
+		if f.Name == "id" {
+			stringPK = f
+		}
+	}
+	if stringPK.Name != "id" || stringPK.ReadOnly || !stringPK.Required {
+		t.Fatalf("string primary key = %+v, want writable required id", stringPK)
+	}
 	payload, ok := byName["payload"]
 	if !ok {
 		t.Fatalf("FieldsFrom missing payload; fields=%v", fields)
@@ -305,6 +326,28 @@ func TestFieldsFromIsRegistrationTimeOnly(t *testing.T) {
 	_, err := admin.FieldsFrom(Widget{})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRegisterExplicitFieldsSkipServerObligation(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	type book struct {
+		gorm.Model
+		Title   string `gorm:"not null"`
+		OwnerID uint   `gorm:"not null" gombit:"server"`
+		Name    string `gorm:"not null" gombit:"read"`
+	}
+	app := newCookieApp(t)
+	err := admin.Register(app, book{}, admin.Options{
+		Slug: "policy-books",
+		Fields: []admin.Field{
+			{Name: "id", Type: admin.TypeInteger, ReadOnly: true},
+			{Name: "title", Type: admin.TypeString, Required: true},
+			{Name: "owner_id", Type: admin.TypeInteger},
+		},
+	})
+	if err != nil {
+		t.Fatalf("explicit Fields must not apply server policy: %v", err)
 	}
 }
 

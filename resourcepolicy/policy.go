@@ -125,6 +125,12 @@ func (f FieldFacts) requiresCreateValue() bool {
 	return (f.NotNull || f.PrimaryKey) && !f.HasDefault && !f.dbSuppliesCreateValue()
 }
 
+// NeedsCreateValue reports whether create must supply this column. Omitting
+// it stores the Go zero value in a required column. Resolve uses the same rule.
+func (r Resolved) NeedsCreateValue() bool {
+	return r.requiresCreateValue()
+}
+
 // CreateSource is where a persisted field's create value comes from.
 type CreateSource int
 

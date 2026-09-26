@@ -26,6 +26,7 @@ export type FieldMeta = {
   type: FieldType;
   required: boolean;
   readonly: boolean;
+  writeonly?: boolean;
   related?: RelationMeta;
   minimum?: string;
   maximum?: string;

@@ -66,6 +66,10 @@ type registered struct {
 	m2m         []*m2mBinding             // many-to-many fields synced on write (#223)
 	hasMany     []*relationRead           // has_many fields, read-only (preload + ids) (#223)
 	version     *versionField             // optimistic-lock column, if the model has one
+	// serverRequired names columns a hook must set when Fields were derived.
+	// They may be absent from fields when the policy hides them. Create fails
+	// only when the body did not set the column.
+	serverRequired []string
 }
 
 // versionField describes a model's integer optimistic-locking column (named
@@ -114,6 +118,9 @@ func (m *registered) toRow(inst any) row {
 	out := make(row, len(m.fields)+len(m.implicit))
 	for i := range m.fields {
 		f := &m.fields[i]
+		if f.WriteOnly {
+			continue
+		}
 		out[f.Name] = f.get(inst)
 	}
 	for name, col := range m.implicit {

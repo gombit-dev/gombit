@@ -8,7 +8,11 @@ import {
   Chip,
   FormControl,
   FormControlLabel,
+  FormHelperText,
   FormLabel,
+  InputLabel,
+  MenuItem,
+  Select,
   TextField,
   MenuItem,
   Typography,
@@ -64,6 +68,34 @@ export function FieldWidget({ field, control, disabled }: Props) {
         name={field.name}
         control={control}
         render={({ field: rhf }) => <HasManyView field={field} ids={normalizeIds(rhf.value, true)} />}
+      />
+    );
+  }
+
+  if (field.type === "boolean" && field.writeonly) {
+    return (
+      <Controller
+        name={field.name}
+        control={control}
+        render={({ field: rhf, fieldState }) => (
+          <FormControl fullWidth disabled={readOnly} error={!!fieldState.error}>
+            <InputLabel id={`${field.name}-writeonly-bool`}>{label}</InputLabel>
+            <Select
+              labelId={`${field.name}-writeonly-bool`}
+              label={label}
+              value={rhf.value === true ? "true" : rhf.value === false ? "false" : ""}
+              onChange={(event) => {
+                const next = event.target.value;
+                rhf.onChange(next === "true" ? true : next === "false" ? false : null);
+              }}
+            >
+              <MenuItem value="">Unchanged</MenuItem>
+              <MenuItem value="true">Yes</MenuItem>
+              <MenuItem value="false">No</MenuItem>
+            </Select>
+            {fieldState.error ? <FormHelperText>{fieldState.error.message}</FormHelperText> : null}
+          </FormControl>
+        )}
       />
     );
   }
@@ -445,7 +477,7 @@ function widgetRules(field: FieldMeta, readOnly: boolean) {
     max?: { value: number; message: string };
     validate?: (value: unknown) => true | string;
   } = {};
-  if (field.required && !readOnly) {
+  if (field.required && !readOnly && !(field.writeonly && field.type === "boolean")) {
     rules.required = true;
   }
   if (field.max_length) {

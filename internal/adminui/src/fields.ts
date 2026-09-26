@@ -143,6 +143,9 @@ export function emptyFormValue(field: FieldMeta): unknown {
     return field.default;
   }
   if (field.type === "boolean") {
+    if (field.writeonly) {
+      return null;
+    }
     return false;
   }
   if (isManyToMany(field) || isHasMany(field)) {
@@ -168,6 +171,13 @@ export function formValuesToBody(values: Row, fields: FieldMeta[]): { body: Row;
   const jsonErrors: Record<string, string> = {};
   for (const field of writableFields(fields)) {
     const raw = values[field.name];
+    if (field.writeonly && field.type === "boolean") {
+      if (raw !== true && raw !== false) {
+        continue;
+      }
+    } else if (field.writeonly && isEmptyFormValue(raw)) {
+      continue;
+    }
     if (isManyToMany(field)) {
       // Send the id list so the data plane syncs the join table. An empty
       // list clears the relation; omission is not possible from the form.
@@ -413,6 +423,9 @@ export function datetimeLocalToRFC3339(raw: string): string {
 
 function valueToForm(field: FieldMeta, raw: unknown): unknown {
   if (field.type === "boolean") {
+    if (field.writeonly) {
+      return null;
+    }
     return Boolean(raw);
   }
   if (isManyToMany(field) || isHasMany(field)) {
