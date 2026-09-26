@@ -134,6 +134,12 @@ func parseRelationField(name, jsonName, goName string, kind FieldType, rawTarget
 }
 
 func applyRelationModifiers(field *Field, raw string) error {
+	// The foreign key, and therefore nullable / on_delete, lives on this model
+	// only for belongs_to and one_to_one. has_many and many_to_many would drop
+	// the modifier, so they are rejected instead of silently ignored.
+	if field.Type != FieldBelongsTo && field.Type != FieldOneToOne {
+		return fmt.Errorf("resourcegen: %s relation %q does not accept modifiers (nullable and on_delete apply to belongs_to and one_to_one; the foreign key lives on the other model)", strings.ToLower(string(field.Type)), field.JSONName)
+	}
 	for _, part := range strings.Split(raw, ",") {
 		mod := strings.TrimSpace(part)
 		if mod == "" {
@@ -1267,6 +1273,13 @@ func patternRejectsEmpty(pattern string) bool {
 		return true
 	}
 	return !re.MatchString("")
+}
+
+// pointerType reports a Go field that accepts JSON null. The form posts null
+// only for these. A nullable non-pointer number (int, int64, float) still
+// posts 0, which is the value that type stores.
+func (f Field) pointerType() bool {
+	return strings.HasPrefix(f.GoType, "*")
 }
 
 // blankIsNull reports that an empty input must be JSON null. Email, URL,

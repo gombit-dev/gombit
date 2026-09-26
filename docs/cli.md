@@ -338,8 +338,10 @@ into generated imports.
 Frontend pages are React + TypeScript (list/table + React Hook Form create)
 under `frontend/src/<feature>/`. They import types from
 `frontend/src/api/generated` — no hand-written API DTOs — and map D10
-`error.fields` through `frontend/src/api/formErrors.ts`. Integer fields
-coerce a cleared number input to `0` (`setValueAs`), not JSON `null`. A generated
+`error.fields` through `frontend/src/api/formErrors.ts`. A non-pointer
+integer coerces a cleared number input to `0` (`setValueAs`). A pointer
+number (`*uint` and any other `*T`) submits JSON `null`, which is what that
+Go type accepts. A generated
 `frontend/src/resources.tsx` registry is the React Router registration
 point (not regex-patched `main.tsx`). When `gombit.yaml` has `ui: mui`,
 list/form pages use MUI Table and TextField instead of raw HTML. Generated

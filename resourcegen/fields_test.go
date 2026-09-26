@@ -373,6 +373,12 @@ func TestOneToOneAndDeleteRule(t *testing.T) {
 	if _, err := parseFields([]string{"author:belongs_to:Author,on_delete=nope"}, "account"); err == nil {
 		t.Fatal("unknown on_delete was accepted")
 	}
+	if _, err := parseFields([]string{"comments:has_many:Comment,on_delete=cascade"}, "account"); err == nil {
+		t.Fatal("on_delete on has_many was accepted")
+	}
+	if _, err := parseFields([]string{"tags:many_to_many:Tag,nullable"}, "account"); err == nil {
+		t.Fatal("nullable on many_to_many was accepted")
+	}
 }
 
 func TestParseBelongsToFKCollision(t *testing.T) {

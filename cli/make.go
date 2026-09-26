@@ -89,17 +89,23 @@ aggregates:
 Relations use name:kind:Target, where Target is a model in internal/<target>/:
 
   engine:belongs_to:Engine        FK (EngineID) + Engine association; the API
-                                  DTO exposes engine_id.
+                                  DTO exposes engine_id. nullable makes the FK
+                                  *uint. on_delete is restrict (default),
+                                  cascade, or set_null.
+  profile:one_to_one:Profile      same as belongs_to, with a unique foreign key.
   parts:has_many:Part             Parts []part.Part; read via the admin. The
                                   child (Part) must carry the RentalID FK.
   warehouses:many_to_many:Warehouse  join table + Warehouses association.
 
-The generated CRUD handler stays thin: belongs_to is exposed as its FK;
-many_to_many / has_many are generated on the model, not in the REST handler.
-The admin picks them up — many_to_many is editable through a relation widget,
-has_many is shown read-only. Self-referential relations (a target equal to the
-resource itself) are not supported yet and are rejected: they need a nullable
-foreign key / explicit join keys. Point relations at a different package.
+The generated CRUD handler stays thin: belongs_to and one_to_one are exposed
+as the foreign key; many_to_many / has_many are generated on the model, not in
+the REST handler. The admin picks them up — many_to_many is editable through a
+relation widget, has_many is shown read-only. A nullable self-referential
+belongs_to or one_to_one is allowed
+(parent:belongs_to:Category,nullable,on_delete=set_null). The association is
+a pointer so a tree root stores NULL. has_many and many_to_many onto the same
+model are rejected: they need explicit join keys. nullable and on_delete on
+those two kinds are rejected, because the foreign key lives on the other model.
 
 Examples:
 

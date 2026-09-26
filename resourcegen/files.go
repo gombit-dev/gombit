@@ -614,7 +614,7 @@ func tsFormType(field Field) string {
 	case FieldBool:
 		return "boolean"
 	case FieldInt, FieldInt64, FieldUint, FieldFloat:
-		if field.Nullable {
+		if field.pointerType() {
 			return "number | null"
 		}
 		return "number"
@@ -650,7 +650,7 @@ func tsDefaultValue(field Field) string {
 	case FieldBool:
 		return "false"
 	case FieldInt, FieldInt64, FieldUint, FieldFloat:
-		if field.Nullable {
+		if field.pointerType() {
 			return "null"
 		}
 		return "0"
@@ -759,7 +759,7 @@ func renderFormField(field Field) string {
 		b.WriteString("          <input type=\"checkbox\" {...register(\"" + field.JSONName + "\")} />\n")
 	case FieldInt, FieldInt64, FieldUint, FieldFloat:
 		blank := "0"
-		if field.Nullable {
+		if field.pointerType() {
 			blank = "null"
 		}
 		b.WriteString("          <input type=\"number\" {...register(\"" + field.JSONName + "\", { setValueAs: (value) => (value === \"\" ? " + blank + " : Number(value))" + tsNumberRules(field) + " })}" + htmlNumberAttrs(field) + " />\n")
@@ -1174,7 +1174,7 @@ func renderMUIFormField(field Field) string {
 	case FieldInt, FieldInt64, FieldUint, FieldFloat:
 		b.WriteString("              <TextField\n")
 		b.WriteString("                {...field}\n")
-		if field.Nullable {
+		if field.pointerType() {
 			b.WriteString("                value={field.value ?? \"\"}\n")
 		}
 		b.WriteString("                type=\"number\"\n")
@@ -1198,7 +1198,7 @@ func renderMUIFormField(field Field) string {
 		b.WriteString("                onChange={(event) => {\n")
 		b.WriteString("                  const raw = event.target.value;\n")
 		blank := "0"
-		if field.Nullable {
+		if field.pointerType() {
 			blank = "null"
 		}
 		b.WriteString("                  field.onChange(raw === \"\" ? " + blank + " : Number(raw));\n")

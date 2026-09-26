@@ -259,22 +259,39 @@ func TestSelfRelationModelCompiles(t *testing.T) {
 	if !strings.Contains(src, "Parent *Category") || strings.Contains(src, "Parent Category `") {
 		t.Fatalf("self association must be a pointer:\n%s", src)
 	}
-	dir := t.TempDir()
+	// Build inside this module so gorm is already cached. A throwaway module
+	// plus go mod tidy fails CI, which sets GOPROXY=off.
+	root := resourcegenModuleRoot(t)
+	dir := filepath.Join(root, "internal", "_selfcategory")
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(dir, "model.go"), []byte(src), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/demo/internal/category\n\ngo 1.26.0\n\nrequire gorm.io/gorm v1.31.2\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	tidy := exec.Command("go", "mod", "tidy")
-	tidy.Dir = dir
-	if out, err := tidy.CombinedOutput(); err != nil {
-		t.Fatalf("go mod tidy: %v\n%s", err, out)
-	}
-	build := exec.Command("go", "build", ".")
-	build.Dir = dir
+	build := exec.Command("go", "build", "-mod=readonly", "./internal/_selfcategory")
+	build.Dir = root
+	build.Env = append(os.Environ(), "GOPROXY=off")
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("go build: %v\n%s\n%s", err, out, src)
+	}
+	badDir := filepath.Join(root, "internal", "_selfcategory_value")
+	t.Cleanup(func() { _ = os.RemoveAll(badDir) })
+	if err := os.MkdirAll(badDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	bad := strings.Replace(src, "Parent *Category", "Parent Category", 1)
+	if err := os.WriteFile(filepath.Join(badDir, "model.go"), []byte(bad), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	badBuild := exec.Command("go", "build", "-mod=readonly", "./internal/_selfcategory_value")
+	badBuild.Dir = root
+	badBuild.Env = append(os.Environ(), "GOPROXY=off")
+	if out, err := badBuild.CombinedOutput(); err == nil {
+		t.Fatalf("value self association compiled:\n%s", bad)
+	} else if !strings.Contains(string(out), "recursive") {
+		t.Fatalf("go build: %v\n%s", err, out)
 	}
 }
 
@@ -297,6 +314,23 @@ func TestNullableFKFormSubmitsNull(t *testing.T) {
 	mui := renderMUIFormTSX(newRenderContext("example.com/demo", name, dtoFields(fields), "/api/v1", "mui", false, false))
 	if !strings.Contains(mui, `raw === "" ? null : Number(raw)`) || strings.Contains(mui, "author_id: 0") {
 		t.Fatalf("MUI form still submits 0:\n%s", mui)
+	}
+
+	// nullable on a non-pointer number is the opposite of required. The column
+	// stays int, so the form must post 0. Null is only for a pointer Go type.
+	ints, err := parseFields([]string{"count:int:nullable", "qty:uint:nullable"}, "post")
+	if err != nil {
+		t.Fatalf("parseFields: %v", err)
+	}
+	if ints[0].GoType != "int" || ints[1].GoType != "*uint" {
+		t.Fatalf("nullable numbers = %q, %q", ints[0].GoType, ints[1].GoType)
+	}
+	intForm := renderFormTSX(newRenderContext("example.com/demo", name, dtoFields(ints), "/api/v1", "minimal", false, false))
+	if !strings.Contains(intForm, "count: number;") || !strings.Contains(intForm, "count: 0") || !strings.Contains(intForm, `register("count", { setValueAs: (value) => (value === "" ? 0 : Number(value))`) {
+		t.Fatalf("nullable int form posts null:\n%s", intForm)
+	}
+	if !strings.Contains(intForm, "qty: number | null;") || !strings.Contains(intForm, "qty: null") {
+		t.Fatalf("nullable uint form does not post null:\n%s", intForm)
 	}
 }
 
