@@ -89,10 +89,10 @@ func WithDefaultOptions(opts Options) RegistryOption {
 
 func (o Options) validate() error {
 	if o.MaxAttempts < 0 {
-		return fmt.Errorf("MaxAttempts %d is negative", o.MaxAttempts)
+		return fmt.Errorf("options: MaxAttempts %d is negative", o.MaxAttempts)
 	}
 	if o.Timeout < 0 {
-		return fmt.Errorf("Timeout %s is negative", o.Timeout)
+		return fmt.Errorf("options: Timeout %s is negative", o.Timeout)
 	}
 	return nil
 }
