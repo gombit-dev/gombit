@@ -107,6 +107,7 @@ func TestWorkerRunsJobsWithBoundedConcurrency(t *testing.T) {
 func TestWorkerRetriesAFailedJob(t *testing.T) {
 	reg := jobs.NewRegistry()
 	var attempts []int
+	var delays []int
 	var mu sync.Mutex
 	jobs.MustRegister(reg, func(ctx context.Context, _ blockJob) error {
 		info, _ := jobs.InfoFromContext(ctx)
@@ -117,19 +118,17 @@ func TestWorkerRetriesAFailedJob(t *testing.T) {
 			return errors.New("smtp down")
 		}
 		return nil
-	})
+	}, jobs.WithOptions(jobs.Options{Backoff: func(attempt int) time.Duration {
+		mu.Lock()
+		delays = append(delays, attempt)
+		mu.Unlock()
+		return 20 * time.Millisecond
+	}}))
 	q := jobs.NewMemoryQueue()
 	dispatchN(t, jobs.NewDispatcher(reg, q), 1)
 	core, logs := observer.New(zap.InfoLevel)
-	var delays []int
 	w, err := jobs.NewWorker(reg, q, jobs.WorkerOptions{
 		Queues: []string{"default"}, PollInterval: 5 * time.Millisecond, Logger: zap.New(core),
-		RetryDelay: func(attempt int) time.Duration {
-			mu.Lock()
-			delays = append(delays, attempt)
-			mu.Unlock()
-			return 20 * time.Millisecond
-		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -510,6 +509,106 @@ func TestAFinishedJobIsNotHeldByARenewal(t *testing.T) {
 	eventually(t, "the ack", func() bool { return q.Len() == 0 })
 	if took := time.Since(begin); took > time.Second {
 		t.Fatalf("the ack came %s after start; it waited out the renewal", took)
+	}
+}
+
+type failingJob struct {
+	Permanent bool `json:"permanent"`
+}
+
+func (failingJob) JobName() string { return "failing_job" }
+
+// TestWorkerGivesUp: a job is retried until MaxAttempts, and a Permanent
+// failure is not retried at all; either way it leaves the queue with an
+// error log.
+func TestWorkerGivesUp(t *testing.T) {
+	reg := jobs.NewRegistry()
+	var runs atomic.Int32
+	jobs.MustRegister(reg, func(_ context.Context, job failingJob) error {
+		runs.Add(1)
+		if job.Permanent {
+			return jobs.Permanent(errors.New("user 7 was deleted"))
+		}
+		return errors.New("smtp down")
+	}, jobs.WithOptions(jobs.Options{MaxAttempts: 3, Backoff: jobs.Constant(5 * time.Millisecond)}))
+	q := jobs.NewMemoryQueue()
+	d := jobs.NewDispatcher(reg, q)
+	core, logs := observer.New(zap.InfoLevel)
+	w, err := jobs.NewWorker(reg, q, jobs.WorkerOptions{Queues: []string{"default"}, PollInterval: 5 * time.Millisecond, Logger: zap.New(core)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	startWorker(t, w)
+
+	if _, err := d.Dispatch(context.Background(), failingJob{}); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the job to be given up", func() bool { return q.Len() == 0 })
+	if runs.Load() != 3 {
+		t.Fatalf("ran %d times, want MaxAttempts 3", runs.Load())
+	}
+	gaveUp := logs.FilterMessage("job failed for good").All()
+	if len(gaveUp) != 1 || gaveUp[0].ContextMap()["reason"] != "attempts exhausted" || gaveUp[0].ContextMap()["attempt"] != int64(3) {
+		t.Fatalf("give-up logs = %+v", gaveUp)
+	}
+	if _, ok := gaveUp[0].ContextMap()["payload"]; ok {
+		t.Fatal("the give-up log carries the payload")
+	}
+
+	runs.Store(0)
+	if _, err := d.Dispatch(context.Background(), failingJob{Permanent: true}); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the permanent failure to be given up", func() bool { return q.Len() == 0 && logs.FilterMessage("job failed for good").Len() == 2 })
+	if runs.Load() != 1 || logs.FilterMessage("job failed for good").All()[1].ContextMap()["reason"] != "permanent failure" {
+		t.Fatalf("a permanent failure ran %d times", runs.Load())
+	}
+}
+
+type slowJob struct{}
+
+func (slowJob) JobName() string { return "slow_job" }
+
+// TestWorkerRetriesTimeoutsAndBoundsUnknownJobs: a timeout is retried like
+// any failure, and a job no handler knows (a newer deploy's) is retried
+// under the registry defaults, then given up.
+func TestWorkerRetriesTimeoutsAndBoundsUnknownJobs(t *testing.T) {
+	reg := jobs.NewRegistry(jobs.WithDefaultOptions(jobs.Options{MaxAttempts: 2, Backoff: jobs.Constant(5 * time.Millisecond)}))
+	var slowRuns atomic.Int32
+	jobs.MustRegister(reg, func(ctx context.Context, _ slowJob) error {
+		if slowRuns.Add(1) == 1 {
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return nil
+	}, jobs.WithOptions(jobs.Options{Timeout: 20 * time.Millisecond}))
+	q := jobs.NewMemoryQueue()
+	if _, err := jobs.NewDispatcher(reg, q).Dispatch(context.Background(), slowJob{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Push(context.Background(), "default", jobs.Envelope{ID: "u1", Name: "from_a_newer_deploy", Version: 1, Payload: []byte(`{}`)}, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	core, logs := observer.New(zap.InfoLevel)
+	w, err := jobs.NewWorker(reg, q, jobs.WorkerOptions{Queues: []string{"default"}, PollInterval: 5 * time.Millisecond, Logger: zap.New(core)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	startWorker(t, w)
+	eventually(t, "both jobs settled", func() bool { return q.Len() == 0 })
+	if slowRuns.Load() != 2 {
+		t.Fatalf("the timed-out job ran %d times, want a retry after the timeout", slowRuns.Load())
+	}
+	kinds := map[string]int{}
+	for _, e := range logs.FilterMessage("job failed").All() {
+		kinds[e.ContextMap()["kind"].(string)]++
+	}
+	if kinds["timeout"] != 1 || kinds["unknown_job"] != 1 {
+		t.Fatalf("retried failure kinds = %v, want one timeout and one unknown_job", kinds)
+	}
+	gaveUp := logs.FilterMessage("job failed for good").All()
+	if len(gaveUp) != 1 || gaveUp[0].ContextMap()["job"] != "from_a_newer_deploy" || gaveUp[0].ContextMap()["max_attempts"] != int64(2) {
+		t.Fatalf("give-ups = %+v, want the unknown job after the default 2 attempts", gaveUp)
 	}
 }
 

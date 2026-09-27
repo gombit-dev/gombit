@@ -15,8 +15,12 @@ type Info struct {
 	// UpgradeFrom steps brought the payload forward.
 	Version       int
 	QueuedVersion int
-	Attempt       int
-	EnqueuedAt    time.Time
+	// Attempt is this delivery (1-based); MaxAttempts is the job's limit, so
+	// Attempt >= MaxAttempts is the last try a worker makes. (The sync driver
+	// never retries: its one run is attempt 1.)
+	Attempt     int
+	MaxAttempts int
+	EnqueuedAt  time.Time
 }
 
 type infoKey struct{}

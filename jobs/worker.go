@@ -29,10 +29,6 @@ type WorkerOptions struct {
 	// finish once the worker stops reserving, then their context is
 	// canceled. Default 30s.
 	ShutdownTimeout time.Duration
-	// RetryDelay is how long a failed job waits before its next attempt,
-	// given the attempt that failed (1-based). Default: 10s per attempt,
-	// capped at 10m.
-	RetryDelay func(attempt int) time.Duration
 	// Logger receives one structured entry per job outcome. Default: no
 	// logging.
 	Logger *zap.Logger
@@ -89,22 +85,11 @@ func NewWorker(registry *Registry, queue Queue, opts WorkerOptions) (*Worker, er
 	if opts.ShutdownTimeout == 0 {
 		opts.ShutdownTimeout = DefaultShutdownTimeout
 	}
-	if opts.RetryDelay == nil {
-		opts.RetryDelay = defaultRetryDelay
-	}
 	log := opts.Logger
 	if log == nil {
 		log = zap.NewNop()
 	}
 	return &Worker{registry: registry, queue: queue, opts: opts, log: log}, nil
-}
-
-func defaultRetryDelay(attempt int) time.Duration {
-	d := time.Duration(attempt) * 10 * time.Second
-	if d > 10*time.Minute || d <= 0 {
-		return 10 * time.Minute
-	}
-	return d
 }
 
 // queueOpTimeout is the deadline of every queue call the worker makes
@@ -281,18 +266,47 @@ func (w *Worker) process(jobCtx, workerCtx context.Context, d Delivery) {
 		return
 	}
 
-	delay := w.opts.RetryDelay(d.Envelope.Attempt)
+	policy := w.registry.Options(d.Envelope.Name)
+	fields = append(fields, zap.String("kind", string(Classify(err))), zap.Error(err))
 	if workerCtx.Err() != nil && errors.Is(err, context.Canceled) {
-		// Interrupted by shutdown, not failed on its own: retry at once.
-		delay = 0
+		// Interrupted by shutdown, not failed on its own: back to the queue
+		// at once, whatever its attempt count.
+		w.retry(d, 0, fields)
+		return
 	}
-	fields = append(fields, zap.String("kind", string(Classify(err))), zap.Error(err), zap.Duration("retry_in", delay))
+	if IsPermanent(err) || d.Envelope.Attempt >= policy.MaxAttempts {
+		w.giveUp(d, err, policy, fields)
+		return
+	}
+	w.retry(d, policy.Backoff(d.Envelope.Attempt), fields)
+}
+
+// retry releases d to run again after delay.
+func (w *Worker) retry(d Delivery, delay time.Duration, fields []zap.Field) {
+	fields = append(fields, zap.Duration("retry_in", delay))
 	if relErr := w.release(d, time.Now().Add(delay)); relErr != nil {
 		w.log.Error("jobs worker: job failed and its release failed; it returns when its lease expires",
 			append(fields, zap.NamedError("release_error", relErr))...)
 		return
 	}
 	w.log.Warn("job failed", fields...)
+}
+
+// giveUp stops retrying d: a permanent failure or the last allowed attempt.
+// It is acked away and logged as an error, without its payload, which may
+// hold personal data (dead-lettering, which keeps it, lands with JOBS-6).
+func (w *Worker) giveUp(d Delivery, err error, policy Options, fields []zap.Field) {
+	reason := "attempts exhausted"
+	if IsPermanent(err) {
+		reason = "permanent failure"
+	}
+	fields = append(fields, zap.String("reason", reason), zap.Int("max_attempts", policy.MaxAttempts))
+	if ackErr := w.ack(d); ackErr != nil {
+		w.log.Error("jobs worker: giving up on a job, but its ack failed; it returns when its lease expires",
+			append(fields, zap.NamedError("ack_error", ackErr))...)
+		return
+	}
+	w.log.Error("job failed for good", fields...)
 }
 
 // renewLease extends d's lease every Lease/3 until the returned stop is

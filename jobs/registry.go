@@ -40,6 +40,7 @@ type Registry struct {
 	byName      map[string]*registration
 	byType      map[reflect.Type]*registration
 	propagators []Propagator
+	defaults    Options
 	now         func() time.Time
 	newID       func() string
 }
@@ -49,6 +50,7 @@ type registration struct {
 	version  int
 	goType   reflect.Type
 	upgrades map[int]Upgrade
+	options  Options
 	// decode returns a call that runs the handler on the decoded job.
 	decode func(payload json.RawMessage) (func(ctx context.Context) error, error)
 }
@@ -93,6 +95,7 @@ type RegisterOption func(*registerConfig)
 type registerConfig struct {
 	upgrades   map[int]Upgrade
 	duplicates []int
+	options    *Options
 }
 
 // UpgradeFrom registers the step that rewrites a version-`from` payload into
@@ -154,17 +157,29 @@ func Register[T Job](r *Registry, handler Handler[T], opts ...RegisterOption) er
 	if len(cfg.duplicates) > 0 {
 		return fmt.Errorf("%w: %s: UpgradeFrom(%d) is given more than once", ErrInvalidJobType, goType, cfg.duplicates[0])
 	}
+	var options Options
+	if cfg.options != nil {
+		if err := cfg.options.validate(); err != nil {
+			return fmt.Errorf("%w: %s: %v", ErrInvalidJobType, goType, err)
+		}
+		options = *cfg.options
+	}
 	for from, fn := range cfg.upgrades {
 		if from < 1 || from >= version || fn == nil {
 			return fmt.Errorf("%w: %s: UpgradeFrom(%d) is outside versions 1..%d or has no function", ErrInvalidJobType, goType, from, version-1)
 		}
 	}
 
+	resolved := options.resolve(r.defaults)
+	if err := resolved.validate(); err != nil {
+		return fmt.Errorf("%w: %s: with the registry defaults (WithDefaultOptions), %v", ErrInvalidJobType, goType, err)
+	}
 	reg := &registration{
 		name:     name,
 		version:  version,
 		goType:   goType,
 		upgrades: cfg.upgrades,
+		options:  resolved,
 		decode: func(payload json.RawMessage) (func(ctx context.Context) error, error) {
 			var job T
 			if err := json.Unmarshal(payload, &job); err != nil {
@@ -183,6 +198,19 @@ func Register[T Job](r *Registry, handler Handler[T], opts ...RegisterOption) er
 	r.byName[name] = reg
 	r.byType[goType] = reg
 	return nil
+}
+
+// Options returns the execution policy of the named job, defaults filled
+// in. A name nothing registered gets the registry's defaults, so an unknown
+// job (a rolling deploy's newer producer) is still retried and bounded.
+func (r *Registry) Options(name string) Options {
+	r.mu.RLock()
+	reg, ok := r.byName[name]
+	r.mu.RUnlock()
+	if ok {
+		return reg.options
+	}
+	return Options{}.resolve(r.defaults)
 }
 
 // MustRegister is Register that panics on error, for registration at
@@ -303,9 +331,21 @@ func (r *Registry) Run(ctx context.Context, env Envelope) (err error) {
 		Version:       reg.version,
 		QueuedVersion: env.Version,
 		Attempt:       env.Attempt,
+		MaxAttempts:   reg.options.MaxAttempts,
 		EnqueuedAt:    env.EnqueuedAt,
 	})
+	if reg.options.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeoutCause(ctx, reg.options.Timeout, errJobTimeout)
+		defer cancel()
+	}
 	if err := call(ctx); err != nil {
+		// Only the job's own deadline is a timeout; a caller's earlier one (a
+		// request deadline around a sync dispatch) is the caller's.
+		if errors.Is(context.Cause(ctx), errJobTimeout) {
+			return &Error{Kind: KindTimeout, Name: reg.name, Version: reg.version,
+				Err: fmt.Errorf("after %s: %w", reg.options.Timeout, err)}
+		}
 		return &Error{Kind: KindHandler, Name: reg.name, Version: reg.version, Err: err}
 	}
 	return nil
@@ -348,6 +388,9 @@ func (reg *registration) upgrade(env Envelope) (json.RawMessage, error) {
 	}
 	return payload, nil
 }
+
+// errJobTimeout is the cause of a context canceled by a job's own Timeout.
+var errJobTimeout = errors.New("job timeout")
 
 // emptyPayload reports a payload json.Unmarshal would accept as the zero
 // job: nothing, or null. A job is a struct, so neither is a job.

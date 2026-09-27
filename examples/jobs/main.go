@@ -45,10 +45,14 @@ func main() {
 	jobs.MustRegister(dispatcher.Registry(), func(ctx context.Context, job SendWelcomeEmail) error {
 		defer done.Add(1)
 		info, _ := jobs.InfoFromContext(ctx)
-		fmt.Printf("welcome user %d (job %s v%d, queued as v%d, attempt %d)\n",
-			job.UserID, info.Name, info.Version, info.QueuedVersion, info.Attempt)
+		fmt.Printf("welcome user %d (job %s v%d, queued as v%d, attempt %d of %d)\n",
+			job.UserID, info.Name, info.Version, info.QueuedVersion, info.Attempt, info.MaxAttempts)
 		return nil
-	}, jobs.UpgradeFrom(1, func(payload json.RawMessage) (json.RawMessage, error) {
+	}, jobs.WithOptions(jobs.Options{
+		MaxAttempts: 8,
+		Timeout:     30 * time.Second,
+		Backoff:     jobs.Jittered(jobs.Exponential(5*time.Second, time.Hour)),
+	}), jobs.UpgradeFrom(1, func(payload json.RawMessage) (json.RawMessage, error) {
 		var v1 struct {
 			UserID uint   `json:"user_id"`
 			Email  string `json:"email"`

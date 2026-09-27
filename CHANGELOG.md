@@ -12,6 +12,16 @@ version.
 
 ### Added
 
+- Job retry policy: `jobs.WithOptions(jobs.Options{MaxAttempts, Timeout,
+  Backoff})` per job and `jobs.WithDefaultOptions` per registry, with
+  `jobs.Exponential`, `jobs.Constant`, and `jobs.Jittered` backoffs. `Timeout`
+  is the handler context's deadline for one attempt (a new `timeout` failure
+  kind). `jobs.Permanent(err)` marks a failure no retry can fix; decode
+  failures are permanent too. The worker retries a failed job after its
+  backoff until it succeeds, fails permanently, or uses its last attempt, then
+  acks it away with an error log. Attempt counts and retry times persist in
+  Redis across worker restarts
+  ([#317](https://github.com/gombit-dev/gombit/issues/317)).
 - The jobs worker: `./server worker [--queue q1,q2] [--concurrency N]
   [--lease 5m] [--shutdown-timeout 30s]` (`framework.Run` starts it instead of
   the HTTP server) and `gombit worker` for development. It runs up to N jobs
