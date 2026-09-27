@@ -409,8 +409,12 @@ func readDatabase(ctx context.Context, o checkOptions) (migrations.DatabaseState
 		err   error
 	}
 	done := make(chan result, 1)
+	// Read the entry point before the goroutine: an abandoned read may still
+	// be running after this returns, and must not observe a later change to
+	// the variable (a test restoring its stub).
+	inspect, opts := inspectDatabase, o.applyOptions()
 	go func() {
-		state, err := inspectDatabase(ctx, o.applyOptions())
+		state, err := inspect(ctx, opts)
 		done <- result{state, err}
 	}()
 	select {
