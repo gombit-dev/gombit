@@ -12,6 +12,14 @@ version.
 
 ### Added
 
+- Failed jobs: a job the worker gives up on (a permanent failure, its last
+  attempt, or an undecodable envelope) is kept on its queue with the original
+  envelope, attempts, and the reason, kind, error, and time, instead of being
+  deleted. `gombit jobs failed|inspect|retry|forget|purge` manage them straight
+  from Redis, without the app's code; `Queue.Bury`, `Failed`, `FailedJob`,
+  `RetryFailed`, `ForgetFailed`, and `PurgeFailed` are the API. Payloads are
+  never logged; docs cover payload retention
+  ([#319](https://github.com/gombit-dev/gombit/issues/319)).
 - Delayed jobs: `jobs.Delay(d)` and `jobs.At(t)` dispatch options and
   `Dispatcher.DispatchAt`. The queue holds the job until its time (Redis keeps
   the schedule across restarts); `jobs.WithDispatcherClock` makes delays
@@ -25,7 +33,7 @@ version.
   step's error is its own retryable `upgrade` kind. `jobs.Permanent(err)` marks a failure no retry can fix; decode
   failures are permanent too. The worker retries a failed job after its
   backoff until it succeeds, fails permanently, or uses its last attempt, then
-  acks it away with an error log. Attempt counts and retry times persist in
+  gives up on it with an error log. Attempt counts and retry times persist in
   Redis across worker restarts
   ([#317](https://github.com/gombit-dev/gombit/issues/317)).
 - The jobs worker: `./server worker [--queue q1,q2] [--concurrency N]

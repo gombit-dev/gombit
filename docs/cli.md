@@ -574,7 +574,7 @@ Registration edits use `go/ast` + `go/parser` + `go/format` (never regex).
 
 Command names that collide with framework families (`new`, `dev`, `build`,
 `make`, `db`, `openapi`, `client`, `routes`, `doctor`, `config`,
-`createsuperuser`, `version`, `worker`, `help`, `completion`) are rejected.
+`createsuperuser`, `version`, `worker`, `jobs`, `help`, `completion`) are rejected.
 
 ## `gombit worker`
 
@@ -587,6 +587,20 @@ builds `./cmd/server` and runs `server worker` with the same flags, stopping
 it gracefully on Ctrl+C and exiting with its status. In production run the
 built binary: `./server worker`. It needs `GOMBIT_JOBS_DRIVER=redis`. See
 [jobs.md § Running the worker](jobs.md#running-the-worker).
+
+## `gombit jobs`
+
+```sh
+gombit jobs failed [--queue q] [--limit 50] [--json]
+gombit jobs inspect <id> [--queue q] [--json]
+gombit jobs retry <id>... | --all [--queue q]
+gombit jobs forget <id>... [--queue q]
+gombit jobs purge --force [--older-than 720h] [--queue q]
+```
+
+Lists, inspects, retries, and deletes the jobs a worker gave up on, straight
+from the Redis queue (`GOMBIT_JOBS_DRIVER=redis`); it does not need the app's
+code. See [jobs.md § Failed jobs](jobs.md#failed-jobs).
 
 ## `gombit db`
 

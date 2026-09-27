@@ -192,8 +192,7 @@ func (w *Worker) Run(ctx context.Context) error {
 }
 
 // reserve takes the next job. An envelope that no longer decodes cannot be
-// run by any worker; it is acknowledged away and logged (dead-lettering
-// lands with JOBS-6).
+// run by any worker; it is set aside with the failed jobs and logged.
 func (w *Worker) reserve(ctx context.Context) (Delivery, error) {
 	opCtx, cancel := context.WithTimeout(ctx, queueOpTimeout)
 	defer cancel()
@@ -201,16 +200,20 @@ func (w *Worker) reserve(ctx context.Context) (Delivery, error) {
 	if err != nil || d.Err == nil {
 		return d, err
 	}
-	w.log.Error("jobs worker: dropping a job whose envelope does not decode",
-		zap.String("job_id", d.Envelope.ID), zap.String("queue", d.Queue), zap.Error(d.Err))
-	if ackErr := w.ack(d); ackErr != nil {
-		w.log.Error("jobs worker: ack undecodable job", zap.String("job_id", d.Envelope.ID), zap.Error(ackErr))
+	failure := Failure{Reason: ReasonUndecodable, Kind: KindDecode, Error: d.Err.Error(), At: time.Now()}
+	if buryErr := w.bury(d, failure); buryErr != nil {
+		w.log.Error("jobs worker: a job whose envelope does not decode could not be set aside; it returns when its lease expires",
+			zap.String("job_id", d.Envelope.ID), zap.String("queue", d.Queue), zap.Error(d.Err), zap.NamedError("bury_error", buryErr))
+		return Delivery{}, errDropped
 	}
+	w.log.Error("job failed for good: its envelope does not decode",
+		zap.String("job_id", d.Envelope.ID), zap.String("queue", d.Queue), zap.String("reason", ReasonUndecodable),
+		zap.Error(d.Err), zap.String("inspect", "gombit jobs inspect "+d.Envelope.ID+" --queue "+d.Queue))
 	return Delivery{}, errDropped
 }
 
-// errDropped: reserve acked an undecodable delivery away.
-var errDropped = errors.New("jobs: undecodable job dropped")
+// errDropped: reserve set an undecodable delivery aside.
+var errDropped = errors.New("jobs: undecodable job set aside")
 
 // maxReserveBackoff caps the wait between failing Reserve calls.
 const maxReserveBackoff = 30 * time.Second
@@ -297,20 +300,29 @@ func (w *Worker) retry(d Delivery, delay time.Duration, fields []zap.Field) {
 }
 
 // giveUp stops retrying d: a permanent failure or the last allowed attempt.
-// It is acked away and logged as an error, without its payload, which may
-// hold personal data (dead-lettering, which keeps it, lands with JOBS-6).
+// It moves to the queue's failed jobs, payload and reason kept for `gombit
+// jobs inspect` and `retry`, and is logged as an error without its payload,
+// which may hold personal data.
 func (w *Worker) giveUp(d Delivery, err error, policy Options, fields []zap.Field) {
-	reason := "attempts exhausted"
+	reason := ReasonExhausted
 	if IsPermanent(err) {
-		reason = "permanent failure"
+		reason = ReasonPermanent
 	}
 	fields = append(fields, zap.String("reason", reason), zap.Int("max_attempts", policy.MaxAttempts))
-	if ackErr := w.ack(d); ackErr != nil {
-		w.log.Error("jobs worker: giving up on a job, but its ack failed; it returns when its lease expires",
-			append(fields, zap.NamedError("ack_error", ackErr))...)
+	failure := Failure{Reason: reason, Kind: Classify(err), Error: err.Error(), At: time.Now()}
+	if buryErr := w.bury(d, failure); buryErr != nil {
+		w.log.Error("jobs worker: giving up on a job, but setting it aside failed; it returns when its lease expires",
+			append(fields, zap.NamedError("bury_error", buryErr))...)
 		return
 	}
-	w.log.Error("job failed for good", fields...)
+	w.log.Error("job failed for good", append(fields,
+		zap.String("inspect", "gombit jobs inspect "+d.Envelope.ID+" --queue "+d.Queue))...)
+}
+
+func (w *Worker) bury(d Delivery, f Failure) error {
+	ctx, cancel := context.WithTimeout(context.Background(), queueOpTimeout)
+	defer cancel()
+	return w.queue.Bury(ctx, d, f)
 }
 
 // renewLease extends d's lease every Lease/3 until the returned stop is

@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -22,6 +23,7 @@ import (
 //
 //	…:pending   sorted set of waiting jobs, scored by when they become available
 //	…:reserved  sorted set of leased jobs, scored by lease deadline
+//	…:failed    sorted set of jobs a worker gave up on (IDs), by when
 //	…:seq       counter that orders jobs available in the same millisecond
 //	…:job:<id>  hash: the envelope, attempt count, lease receipt, and member
 //
@@ -81,7 +83,7 @@ func NewRedisQueue(client redis.UniversalClient, namespace string, opts ...Redis
 }
 
 type redisKeys struct {
-	pending, reserved, seq, jobPrefix string
+	pending, reserved, failed, seq, jobPrefix string
 }
 
 func (q *RedisQueue) keys(queue string) redisKeys {
@@ -89,6 +91,7 @@ func (q *RedisQueue) keys(queue string) redisKeys {
 	return redisKeys{
 		pending:   base + ":pending",
 		reserved:  base + ":reserved",
+		failed:    base + ":failed",
 		seq:       base + ":seq",
 		jobPrefix: base + ":job:",
 	}
@@ -163,6 +166,54 @@ var extendScript = redis.NewScript(`
 if redis.call('HGET', KEYS[1], 'receipt') ~= ARGV[1] then return 0 end
 redis.call('ZADD', KEYS[2], ARGV[2], redis.call('HGET', KEYS[1], 'member'))
 return 1
+`)
+
+// buryScript: KEYS job, reserved, failed; ARGV receipt, id, failed-at ms,
+// failure JSON. Returns 0 when the receipt is not the job's current lease.
+var buryScript = redis.NewScript(`
+if redis.call('HGET', KEYS[1], 'receipt') ~= ARGV[1] then return 0 end
+redis.call('ZREM', KEYS[2], redis.call('HGET', KEYS[1], 'member'))
+redis.call('HSET', KEYS[1], 'receipt', '', 'failure', ARGV[4])
+redis.call('ZADD', KEYS[3], ARGV[3], ARGV[2])
+return 1
+`)
+
+// retryFailedScript: KEYS job, failed, pending, seq; ARGV id, now ms.
+// Returns 0 when the job is not failed.
+var retryFailedScript = redis.NewScript(`
+if not redis.call('ZSCORE', KEYS[2], ARGV[1]) then return 0 end
+redis.call('ZREM', KEYS[2], ARGV[1])
+-- An ID whose job hash is gone (evicted, deleted by hand) has nothing to
+-- retry: drop it rather than queue a job with no envelope.
+if redis.call('HEXISTS', KEYS[1], 'env') == 0 then return 0 end
+local member = string.format('%016d', redis.call('INCR', KEYS[4])) .. ':' .. ARGV[1]
+redis.call('HSET', KEYS[1], 'attempts', 0, 'receipt', '', 'member', member)
+redis.call('HDEL', KEYS[1], 'failure')
+redis.call('ZADD', KEYS[3], ARGV[2], member)
+return 1
+`)
+
+// forgetFailedScript: KEYS job, failed; ARGV id. Returns 0 when the job is
+// not failed.
+var forgetFailedScript = redis.NewScript(`
+if not redis.call('ZSCORE', KEYS[2], ARGV[1]) then return 0 end
+redis.call('ZREM', KEYS[2], ARGV[1])
+redis.call('DEL', KEYS[1])
+return 1
+`)
+
+// purgeFailedScript: KEYS failed; ARGV before ms ('+inf' for all), batch,
+// job key prefix. Deletes up to batch failed jobs older than before and
+// returns how many.
+var purgeFailedScript = redis.NewScript(`
+local max = ARGV[1]
+if max ~= '+inf' then max = '(' .. max end
+local ids = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', max, 'LIMIT', 0, tonumber(ARGV[2]))
+for _, id in ipairs(ids) do
+  redis.call('ZREM', KEYS[1], id)
+  redis.call('DEL', ARGV[3] .. id)
+end
+return #ids
 `)
 
 // Push implements Queue.
@@ -308,6 +359,196 @@ func (q *RedisQueue) Extend(ctx context.Context, d Delivery, lease time.Duration
 		return fmt.Errorf("%w: %s", ErrLeaseLost, d.Envelope.ID)
 	}
 	return nil
+}
+
+// Bury implements Queue.
+func (q *RedisQueue) Bury(ctx context.Context, d Delivery, f Failure) error {
+	if q.closed.Load() {
+		return ErrClosed
+	}
+	if d.Receipt == "" || !ValidName(d.Queue) {
+		return fmt.Errorf("%w: %s", ErrLeaseLost, d.Envelope.ID)
+	}
+	if f.At.IsZero() {
+		f.At = q.now()
+	}
+	data, err := json.Marshal(f)
+	if err != nil {
+		return fmt.Errorf("jobs: bury %s: %w", d.Envelope.ID, err)
+	}
+	k := q.keys(d.Queue)
+	ok, err := buryScript.Run(ctx, q.client, []string{k.jobPrefix + d.Envelope.ID, k.reserved, k.failed},
+		d.Receipt, d.Envelope.ID, f.At.UnixMilli(), data).Int()
+	if err != nil {
+		return fmt.Errorf("jobs: bury %s: %w", d.Envelope.ID, err)
+	}
+	if ok == 0 {
+		return fmt.Errorf("%w: %s", ErrLeaseLost, d.Envelope.ID)
+	}
+	return nil
+}
+
+// Failed implements Queue.
+func (q *RedisQueue) Failed(ctx context.Context, queue string, limit int) ([]FailedJob, error) {
+	if q.closed.Load() {
+		return nil, ErrClosed
+	}
+	if !ValidName(queue) {
+		return nil, fmt.Errorf("%w: %q", ErrInvalidQueue, queue)
+	}
+	stop := int64(-1)
+	if limit > 0 {
+		stop = int64(limit) - 1
+	}
+	k := q.keys(queue)
+	ids, err := q.client.ZRevRange(ctx, k.failed, 0, stop).Result()
+	if err != nil {
+		return nil, fmt.Errorf("jobs: list failed jobs on %s: %w", queue, err)
+	}
+	// One pipelined round trip for all of them, not one per job.
+	pipe := q.client.Pipeline()
+	cmds := make([]*redis.SliceCmd, len(ids))
+	for i, id := range ids {
+		cmds[i] = pipe.HMGet(ctx, k.jobPrefix+id, "env", "attempts", "failure")
+	}
+	if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
+		return nil, fmt.Errorf("jobs: list failed jobs on %s: %w", queue, err)
+	}
+	out := make([]FailedJob, 0, len(ids))
+	for i, id := range ids {
+		job, err := decodeFailedJob(queue, id, cmds[i].Val())
+		if errors.Is(err, ErrNotFailed) {
+			continue // forgotten between the two reads
+		}
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, job)
+	}
+	return out, nil
+}
+
+// FailedJob implements Queue.
+func (q *RedisQueue) FailedJob(ctx context.Context, queue, id string) (FailedJob, error) {
+	if q.closed.Load() {
+		return FailedJob{}, ErrClosed
+	}
+	if !ValidName(queue) {
+		return FailedJob{}, fmt.Errorf("%w: %q", ErrInvalidQueue, queue)
+	}
+	k := q.keys(queue)
+	if err := q.client.ZScore(ctx, k.failed, id).Err(); errors.Is(err, redis.Nil) {
+		return FailedJob{}, fmt.Errorf("%w: %s on %s", ErrNotFailed, id, queue)
+	} else if err != nil {
+		return FailedJob{}, fmt.Errorf("jobs: failed job %s: %w", id, err)
+	}
+	return q.failedJob(ctx, queue, k, id)
+}
+
+func (q *RedisQueue) failedJob(ctx context.Context, queue string, k redisKeys, id string) (FailedJob, error) {
+	fields, err := q.client.HMGet(ctx, k.jobPrefix+id, "env", "attempts", "failure").Result()
+	if err != nil {
+		return FailedJob{}, fmt.Errorf("jobs: failed job %s: %w", id, err)
+	}
+	return decodeFailedJob(queue, id, fields)
+}
+
+// decodeFailedJob builds a FailedJob from a job hash's env, attempts, and
+// failure fields.
+func decodeFailedJob(queue, id string, fields []any) (FailedJob, error) {
+	if len(fields) != 3 {
+		return FailedJob{}, fmt.Errorf("%w: %s on %s", ErrNotFailed, id, queue)
+	}
+	raw, _ := fields[0].(string)
+	failure, _ := fields[2].(string)
+	if raw == "" || failure == "" {
+		return FailedJob{}, fmt.Errorf("%w: %s on %s", ErrNotFailed, id, queue)
+	}
+	job := FailedJob{Queue: queue}
+	if n, err := toInt(fields[1]); err == nil {
+		job.Attempts = n
+	}
+	if err := json.Unmarshal([]byte(failure), &job.Failure); err != nil {
+		return FailedJob{}, fmt.Errorf("jobs: failed job %s: failure record: %w", id, err)
+	}
+	env, err := UnmarshalEnvelope([]byte(raw))
+	if err != nil {
+		job.Envelope = Envelope{ID: id}
+		job.RawEnvelope = []byte(raw)
+	} else {
+		job.Envelope = env
+	}
+	job.Envelope.Attempt = job.Attempts
+	return job, nil
+}
+
+// RetryFailed implements Queue.
+func (q *RedisQueue) RetryFailed(ctx context.Context, queue, id string) error {
+	if q.closed.Load() {
+		return ErrClosed
+	}
+	if !ValidName(queue) {
+		return fmt.Errorf("%w: %q", ErrInvalidQueue, queue)
+	}
+	k := q.keys(queue)
+	ok, err := retryFailedScript.Run(ctx, q.client, []string{k.jobPrefix + id, k.failed, k.pending, k.seq},
+		id, q.now().UnixMilli()).Int()
+	if err != nil {
+		return fmt.Errorf("jobs: retry failed job %s: %w", id, err)
+	}
+	if ok == 0 {
+		return fmt.Errorf("%w: %s on %s", ErrNotFailed, id, queue)
+	}
+	return nil
+}
+
+// ForgetFailed implements Queue.
+func (q *RedisQueue) ForgetFailed(ctx context.Context, queue, id string) error {
+	if q.closed.Load() {
+		return ErrClosed
+	}
+	if !ValidName(queue) {
+		return fmt.Errorf("%w: %q", ErrInvalidQueue, queue)
+	}
+	k := q.keys(queue)
+	ok, err := forgetFailedScript.Run(ctx, q.client, []string{k.jobPrefix + id, k.failed}, id).Int()
+	if err != nil {
+		return fmt.Errorf("jobs: forget failed job %s: %w", id, err)
+	}
+	if ok == 0 {
+		return fmt.Errorf("%w: %s on %s", ErrNotFailed, id, queue)
+	}
+	return nil
+}
+
+// purgeBatch bounds one purge script, so a large purge does not block Redis.
+var purgeBatch = 500
+
+// PurgeFailed implements Queue. It deletes in batches of 500, each one
+// script.
+func (q *RedisQueue) PurgeFailed(ctx context.Context, queue string, before time.Time) (int, error) {
+	if q.closed.Load() {
+		return 0, ErrClosed
+	}
+	if !ValidName(queue) {
+		return 0, fmt.Errorf("%w: %q", ErrInvalidQueue, queue)
+	}
+	bound := "+inf"
+	if !before.IsZero() {
+		bound = strconv.FormatInt(before.UnixMilli(), 10)
+	}
+	k := q.keys(queue)
+	total := 0
+	for {
+		n, err := purgeFailedScript.Run(ctx, q.client, []string{k.failed}, bound, purgeBatch, k.jobPrefix).Int()
+		if err != nil {
+			return total, fmt.Errorf("jobs: purge failed jobs on %s: %w", queue, err)
+		}
+		total += n
+		if n < purgeBatch {
+			return total, nil
+		}
+	}
 }
 
 // Close implements Queue: later calls return ErrClosed. It closes the client
