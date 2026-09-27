@@ -12,6 +12,16 @@ version.
 
 ### Added
 
+- The jobs worker: `./server worker [--queue q1,q2] [--concurrency N]
+  [--lease 5m] [--shutdown-timeout 30s]` (`framework.Run` starts it instead of
+  the HTTP server) and `gombit worker` for development. It runs up to N jobs
+  at once, renews each job's lease while it runs, acks successes, releases
+  failures for a retry, logs one structured entry per job, and shuts down
+  gracefully: it stops reserving, gives in-flight jobs the shutdown timeout,
+  then cancels them and returns them to the queue. A crashed worker's jobs
+  come back when their leases expire. `jobs.NewWorker`, `framework.RunWorker`,
+  and `Queue.Extend` (lease renewal) are the building blocks
+  ([#316](https://github.com/gombit-dev/gombit/issues/316)).
 - Job queue drivers, selected by `GOMBIT_JOBS_DRIVER`: `sync` (the default;
   `Dispatch` runs the job inline), `memory`, and a durable `redis` driver
   whose queued, delayed, and leased jobs survive restarts (atomic Lua

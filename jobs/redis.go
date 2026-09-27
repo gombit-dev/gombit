@@ -136,6 +136,16 @@ redis.call('ZADD', KEYS[2], ARGV[2], member)
 return 1
 `)
 
+// extendScript: KEYS job, reserved; ARGV receipt, lease deadline ms. A lease
+// that lapsed but that no Reserve took is still this receipt's, and still in
+// the reserved set: it is renewed in place. Returns 0 when the receipt is
+// not the job's current lease.
+var extendScript = redis.NewScript(`
+if redis.call('HGET', KEYS[1], 'receipt') ~= ARGV[1] then return 0 end
+redis.call('ZADD', KEYS[2], ARGV[2], redis.call('HGET', KEYS[1], 'member'))
+return 1
+`)
+
 // Push implements Queue.
 func (q *RedisQueue) Push(ctx context.Context, queue string, env Envelope, at time.Time) error {
 	if q.closed.Load() {
@@ -251,6 +261,29 @@ func (q *RedisQueue) Release(ctx context.Context, d Delivery, at time.Time) erro
 		d.Receipt, at.UnixMilli(), d.Envelope.ID).Int()
 	if err != nil {
 		return fmt.Errorf("jobs: release %s: %w", d.Envelope.ID, err)
+	}
+	if ok == 0 {
+		return fmt.Errorf("%w: %s", ErrLeaseLost, d.Envelope.ID)
+	}
+	return nil
+}
+
+// Extend implements Queue.
+func (q *RedisQueue) Extend(ctx context.Context, d Delivery, lease time.Duration) error {
+	if q.closed.Load() {
+		return ErrClosed
+	}
+	if lease <= 0 {
+		return fmt.Errorf("jobs: extend: lease must be positive, got %s", lease)
+	}
+	if d.Receipt == "" || !ValidName(d.Queue) {
+		return fmt.Errorf("%w: %s", ErrLeaseLost, d.Envelope.ID)
+	}
+	k := q.keys(d.Queue)
+	ok, err := extendScript.Run(ctx, q.client, []string{k.jobPrefix + d.Envelope.ID, k.reserved},
+		d.Receipt, q.now().Add(lease).UnixMilli()).Int()
+	if err != nil {
+		return fmt.Errorf("jobs: extend %s: %w", d.Envelope.ID, err)
 	}
 	if ok == 0 {
 		return fmt.Errorf("%w: %s", ErrLeaseLost, d.Envelope.ID)

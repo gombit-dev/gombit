@@ -1,10 +1,9 @@
 # Background jobs
 
-> **Status:** the job contract (JOBS-1) and queue drivers (JOBS-2).
-> `gombit worker`, retries, delayed and failed jobs land in the rest of the
-> [JOBS-0 epic](https://github.com/gombit-dev/gombit/issues/278). Until the
-> worker ships, a queued job waits for a consumer you run yourself (see
-> [Consuming a queue](#consuming-a-queue)).
+> **Status:** the job contract (JOBS-1), queue drivers (JOBS-2), and the
+> worker (JOBS-3). Retry policies, delayed dispatch, and failed-job handling
+> land in the rest of the
+> [JOBS-0 epic](https://github.com/gombit-dev/gombit/issues/278).
 
 A job is work that should not run inside an HTTP request: sending an email,
 resizing an image, delivering a webhook. Application code defines a job as a
@@ -86,33 +85,69 @@ availability order: a waiting job since its available-at time, a job whose
 lease expired since that deadline, push order breaking ties. A job ID is
 unique per queue.
 
-## Consuming a queue
+## Running the worker
 
-Delivery is leased. `Queue.Reserve` hands out the next job with a lease;
-`Ack` completes it; `Release` puts it back, optionally delayed. If the lease
-runs out first (the worker crashed or stalled), the job is delivered again
-and its attempt count goes up. A worker whose lease was taken over gets
-`ErrLeaseLost` from `Ack`/`Release`. `gombit worker` (JOBS-3) runs this loop;
-until then:
+The worker runs your app's job handlers, so it is part of your app binary:
+`framework.Run` starts it instead of the HTTP server when the first argument
+is `worker`. One build deploys as both processes:
 
-```go
-q := app.Jobs().Queue() // nil with the sync driver
-d, err := q.Reserve(ctx, []string{"default"}, time.Minute) // jobs.ErrNoJob when empty
-switch {
-case err != nil:
-	// nothing to do, or the queue is unreachable
-case d.Err != nil:
-	// the stored envelope no longer decodes: it can never run, but it is
-	// leased, so ack it (log d.Err) or it returns on every lease expiry
-	_ = q.Ack(ctx, d)
-default:
-	if err := app.Jobs().Registry().Run(ctx, d.Envelope); err != nil {
-		_ = q.Release(ctx, d, time.Now().Add(time.Minute))
-	} else {
-		_ = q.Ack(ctx, d)
-	}
-}
+```sh
+./server                                   # the web process
+./server worker --queue critical,default --concurrency 8
 ```
+
+In development, `gombit worker` runs `go run ./cmd/server worker` with the
+same flags:
+
+```sh
+GOMBIT_JOBS_DRIVER=redis gombit worker --concurrency 4
+```
+
+| Flag | Default | |
+|------|---------|--|
+| `--queue` | `GOMBIT_JOBS_QUEUE` | queues to consume, highest priority first; repeat or comma-separate |
+| `--concurrency` | `1` | jobs running at once |
+| `--lease` | `5m` | how long a reserved job is held; renewed every third of it while the handler runs |
+| `--shutdown-timeout` | `30s` | how long in-flight jobs get to finish on SIGINT/SIGTERM |
+
+A worker needs a queue another process can reach, so it refuses to start with
+the `sync` driver (jobs already ran at dispatch) and the `memory` driver (its
+queue lives in the dispatching process). Use `redis`.
+
+The worker runs the app's `OnStart` hooks, then:
+
+- reserves jobs from its queues in priority order, up to `--concurrency` at a
+  time, and waits a second when they are empty;
+- runs each through the registry, renewing its lease while the handler runs
+  (a job that runs past one lease is not handed to a second worker; if the
+  lease is lost anyway, the handler's context is canceled);
+- acknowledges a job that succeeded, and releases one that failed for a retry
+  after 10s per attempt so far (capped at 10m; JOBS-4 adds retry limits and
+  policies);
+- logs one structured entry per outcome (`job_id`, `job`, `queue`, `attempt`,
+  `duration`, the failure `kind`, and the propagated request and trace IDs),
+  through the app's logger.
+
+On SIGINT/SIGTERM it stops reserving at once and gives in-flight jobs
+`--shutdown-timeout` to finish. A job still running then sees its context
+canceled and goes back to the queue, available immediately. Then the app's
+`OnStop` hooks run. Give your process manager a stop timeout longer than
+`--shutdown-timeout`.
+
+**Nothing is lost when a worker crashes.** A job a dead worker was running
+keeps its lease in Redis; when the lease expires it is delivered to another
+worker, as its next attempt. That is why delivery is at least once and
+handlers must be idempotent.
+
+To run a worker inside another process (tests, a single-process app with the
+memory driver), call `framework.RunWorker(ctx, app, jobs.WorkerOptions{...})`,
+or build one with `jobs.NewWorker(registry, queue, opts)`.
+
+A stored envelope that no longer decodes cannot run anywhere. `Reserve` still
+hands it out, leased, with the failure on `Delivery.Err` (and a nil error, so
+an `if err != nil` caller cannot drop the lease); the worker logs it and acks
+it away. A consumer of your own must do the same, or the job returns on every
+lease expiry. Dead-lettering such jobs arrives with JOBS-6.
 
 ## The envelope
 

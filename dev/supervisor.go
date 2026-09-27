@@ -145,6 +145,18 @@ func windowsTaskkillArgs(pid int, force bool) []string {
 }
 
 func runOne(ctx context.Context, spec ProcSpec, stdout, stderr io.Writer, command CommandFunc) error {
+	return runProcess(ctx, spec, stdout, stderr, command, 2*time.Second)
+}
+
+// RunProcess runs spec in its own process group until it exits or ctx is
+// canceled. On cancel it sends the group SIGTERM (a graceful stop) and kills
+// it if it has not exited after killAfter. `gombit worker` uses it with the
+// worker's shutdown timeout, so in-flight jobs can finish.
+func RunProcess(ctx context.Context, spec ProcSpec, stdout, stderr io.Writer, killAfter time.Duration) error {
+	return runProcess(ctx, spec, stdout, stderr, exec.Command, killAfter)
+}
+
+func runProcess(ctx context.Context, spec ProcSpec, stdout, stderr io.Writer, command CommandFunc, killAfter time.Duration) error {
 	if command == nil {
 		command = exec.Command
 	}
@@ -177,7 +189,7 @@ func runOne(ctx context.Context, spec ProcSpec, stdout, stderr io.Writer, comman
 		_ = signalProcessGroup(cmd)
 		select {
 		case <-done:
-		case <-time.After(2 * time.Second):
+		case <-time.After(killAfter):
 			_ = killProcessGroup(cmd)
 			select {
 			case <-done:

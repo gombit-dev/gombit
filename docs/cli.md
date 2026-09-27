@@ -574,7 +574,18 @@ Registration edits use `go/ast` + `go/parser` + `go/format` (never regex).
 
 Command names that collide with framework families (`new`, `dev`, `build`,
 `make`, `db`, `openapi`, `client`, `routes`, `doctor`, `config`,
-`createsuperuser`, `version`, `help`, `completion`) are rejected.
+`createsuperuser`, `version`, `worker`, `help`, `completion`) are rejected.
+
+## `gombit worker`
+
+```sh
+gombit worker [--queue default] [--concurrency N] [--lease 5m] [--shutdown-timeout 30s]
+```
+
+Runs the app's background-job worker from an application directory
+(`go run ./cmd/server worker` with the same flags). In production run the
+built binary: `./server worker`. It needs `GOMBIT_JOBS_DRIVER=redis`. See
+[jobs.md § Running the worker](jobs.md#running-the-worker).
 
 ## `gombit db`
 

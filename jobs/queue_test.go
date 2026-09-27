@@ -325,6 +325,71 @@ func runQueueConformance(t *testing.T, newQueue queueFactory) {
 		expectEmpty(t, q, "default")
 	})
 
+	t.Run("extend keeps a long job from a second worker", func(t *testing.T) {
+		clock := newFakeClock()
+		q := newQueue(t, clock)
+		if err := q.Push(ctx, "default", envelope("long"), time.Time{}); err != nil {
+			t.Fatal(err)
+		}
+		d, err := q.Reserve(ctx, []string{"default"}, 30*time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i < 4; i++ { // two minutes of work, renewing every 20s
+			clock.Advance(20 * time.Second)
+			if err := q.Extend(ctx, d, 30*time.Second); err != nil {
+				t.Fatalf("Extend() #%d error = %v", i, err)
+			}
+			expectEmpty(t, q, "default")
+		}
+		if err := q.Ack(ctx, d); err != nil {
+			t.Fatalf("Ack after extending = %v", err)
+		}
+
+		// A lease that ran out and was taken over cannot be extended.
+		if err := q.Push(ctx, "default", envelope("lost"), time.Time{}); err != nil {
+			t.Fatal(err)
+		}
+		stale, err := q.Reserve(ctx, []string{"default"}, time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		clock.Advance(2 * time.Second)
+		mustReserve(t, q, "default")
+		if err := q.Extend(ctx, stale, time.Minute); !errors.Is(err, jobs.ErrLeaseLost) {
+			t.Fatalf("Extend(stale) error = %v, want ErrLeaseLost", err)
+		}
+		if err := q.Extend(ctx, stale, 0); err == nil {
+			t.Fatal("Extend accepted a zero lease")
+		}
+	})
+
+	t.Run("extend reclaims a lapsed lease nobody took", func(t *testing.T) {
+		clock := newFakeClock()
+		q := newQueue(t, clock)
+		if err := q.Push(ctx, "default", envelope("lapsed"), time.Time{}); err != nil {
+			t.Fatal(err)
+		}
+		if err := q.Push(ctx, "other", envelope("x"), time.Time{}); err != nil {
+			t.Fatal(err)
+		}
+		d, err := q.Reserve(ctx, []string{"default"}, time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		clock.Advance(2 * time.Second)
+		// Another queue's reserve does not touch this one; a reserve on
+		// "default" would take the lapsed job over.
+		mustReserve(t, q, "other")
+		if err := q.Extend(ctx, d, time.Minute); err != nil {
+			t.Fatalf("Extend(lapsed, untaken) error = %v", err)
+		}
+		expectEmpty(t, q, "default")
+		if err := q.Ack(ctx, d); err != nil {
+			t.Fatal(err)
+		}
+	})
+
 	t.Run("release can delay the retry", func(t *testing.T) {
 		clock := newFakeClock()
 		q := newQueue(t, clock)

@@ -482,11 +482,17 @@ func (a *App) OnStop(hook Hook) {
 	a.stopHooks = append(a.stopHooks, hook)
 }
 
-// Run runs app until an interrupt or terminate signal is received.
+// Run runs app until an interrupt or terminate signal is received: the HTTP
+// server, or, when the process's first argument is "worker", the jobs worker
+// (see RunWorker; `./server worker --help` lists its flags). Other arguments
+// are ignored, as before.
 func Run(app *App) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	if len(os.Args) > 1 && os.Args[1] == WorkerCommand {
+		return runWorkerCommand(ctx, app, os.Args[2:], os.Stderr)
+	}
 	return RunContext(ctx, app)
 }
 
