@@ -12,6 +12,15 @@ version.
 
 ### Added
 
+- Retry-policy test infrastructure for contributors (INV-4, bounded retry):
+  `faulttest.Sleeper` (with `FakeSleeper` and `RealSleeper`), so backoff is
+  tested without sleeping, and `faulttest.CheckRetryPolicy`, the
+  conformance check every Gombit retry policy must pass: bounded attempts,
+  cancellation mid-backoff, permanent errors not retried, retryable ones
+  retried, backoff on schedule and never overflowing, success ends it, an
+  observable final error. JOBS-4's retry policy
+  ([#317](https://github.com/gombit-dev/gombit/issues/317)) is its first
+  consumer ([#387](https://github.com/gombit-dev/gombit/issues/387)).
 - Cancellation and deadline fault tests (`TestFault_Context_*`) through
   Gombit's layers on SQLite, Postgres, and MySQL: a query or `App.Tx` on the
   request context ends at `HTTP.RequestTimeout`; a client that disconnects

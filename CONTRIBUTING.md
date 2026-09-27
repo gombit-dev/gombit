@@ -202,6 +202,18 @@ wait. Release a blocked fault before closing a server (`defer release()`
 after `defer srv.Close()`), so a regression fails the test instead of hanging
 the server's `Close`.
 
+Any retry policy Gombit adds must pass `faulttest.CheckRetryPolicy(t,
+faulttest.RetryContract{...})` (INV-4, bounded retry). The policy waits
+between attempts through a `faulttest.Sleeper` (in production a
+`faulttest.RealSleeper`-like timer, in tests a `FakeSleeper` that records the
+delays and returns at once, or blocks until canceled), so its backoff is
+tested without sleeping. The checker drives the policy with scripted
+failures and reports each violated property: attempts past `MaxAttempts`, a
+cancellation mid-backoff that does not end it, a permanent error retried, a
+retryable one not retried, a backoff off its schedule or outside `[0,
+MaxDelay]` for any attempt (overflow), a success that does not end it, and a
+final error that hides the last attempt's error.
+
 `make test-faults` runs the whole fault suite: the `internal/faulttest`
 harness and every `TestFault_*` test (found by name, so a new one joins
 without editing anything), under the race detector. Set `FAULT_POSTGRES_DSN`
