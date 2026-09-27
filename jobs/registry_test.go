@@ -66,7 +66,7 @@ func TestEncodeAndRun(t *testing.T) {
 	if got != (sendWelcome{UserID: 7, Locale: "pt"}) {
 		t.Fatalf("handler got %+v", got)
 	}
-	want := jobs.Info{ID: "job-1", Name: "send_welcome_email", Version: 1, QueuedVersion: 1, Attempt: 2, EnqueuedAt: fixedNow}
+	want := jobs.Info{ID: "job-1", Name: "send_welcome_email", Version: 1, QueuedVersion: 1, Attempt: 2, MaxAttempts: jobs.DefaultMaxAttempts, EnqueuedAt: fixedNow}
 	if info != want {
 		t.Fatalf("Info = %+v, want %+v", info, want)
 	}

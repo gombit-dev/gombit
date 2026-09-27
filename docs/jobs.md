@@ -1,8 +1,8 @@
 # Background jobs
 
-> **Status:** the job contract (JOBS-1), queue drivers (JOBS-2), and the
-> worker (JOBS-3). Retry policies, delayed dispatch, and failed-job handling
-> land in the rest of the
+> **Status:** the job contract (JOBS-1), queue drivers (JOBS-2), the worker
+> (JOBS-3), and retries, backoff, and timeouts (JOBS-4). Delayed dispatch and
+> failed-job handling land in the rest of the
 > [JOBS-0 epic](https://github.com/gombit-dev/gombit/issues/278).
 
 A job is work that should not run inside an HTTP request: sending an email,
@@ -123,8 +123,8 @@ The worker runs the app's `OnStart` hooks, then:
   (a job that runs past one lease is not handed to a second worker; if the
   lease is lost anyway, the handler's context is canceled);
 - acknowledges a job that succeeded, and releases one that failed for a retry
-  after 10s per attempt so far (capped at 10m; JOBS-4 adds retry limits and
-  policies);
+  after its backoff, until it succeeds, fails permanently, or uses its last
+  attempt (see [Retries and timeouts](#retries-and-timeouts));
 - logs one structured entry per outcome (`job_id`, `job`, `queue`, `attempt`,
   `duration`, the failure `kind`, and the propagated request and trace IDs),
   through the app's logger.
@@ -200,12 +200,53 @@ and each kind has a sentinel for `errors.Is`:
 | `decode` | `ErrDecode` | the envelope (no name or ID, a version below 1, checked by `Run` itself) or payload (empty, `null`, wrong shape) does not decode into the job type |
 | `unsupported_version` | `ErrUnsupportedVersion` | the payload version is newer than this binary, or older with no upgrade step |
 | `panic` | `ErrPanic` | the handler, an upgrade step, a payload's `UnmarshalJSON`, or a propagator panicked (recovered, so one job cannot take a worker down) |
+| `timeout` | `ErrTimeout` | the attempt ran past the job's `Timeout` |
 | `handler` | `ErrHandler` | the handler returned an error, which `errors.Is/As` still reach |
 
 Use `Classify`, not `errors.Is`, to decide a failure's kind: a handler that
 returns another job's failure is `handler`, though `errors.Is` still reaches the
-inner sentinel through the wrap chain. Which failures are retried is up to the
-worker's retry policy (JOBS-4).
+inner sentinel through the wrap chain.
+
+## Retries and timeouts
+
+Each job has an execution policy, set when it is registered:
+
+```go
+jobs.MustRegister(registry, sendWelcome, jobs.WithOptions(jobs.Options{
+	MaxAttempts: 8,                                                    // default 5
+	Timeout:     30 * time.Second,                                     // per attempt; default none
+	Backoff:     jobs.Jittered(jobs.Exponential(5*time.Second, time.Hour)), // default Exponential(10s, 10m)
+}))
+```
+
+`jobs.NewRegistry(jobs.WithDefaultOptions(...))` sets the policy of every job
+that does not set its own, and fills the fields a job leaves zero.
+
+- **Timeout** is the deadline of the handler's context for one attempt; when it
+  runs out, the attempt fails as `timeout` (and is retried). It applies on every
+  driver, `sync` included, because `Run` applies it. Go cannot stop a goroutine,
+  so a handler must return when its context is done.
+- **Backoff** is the wait before the next attempt, given the attempt that just
+  failed: `jobs.Exponential(base, max)` doubles from `base` up to `max`,
+  `jobs.Constant(d)` waits `d`, and `jobs.Jittered(b)` spreads `b`'s waits over
+  50–100% so jobs that failed together (an outage) do not all retry at once.
+- **Permanent failures** are not retried: return `jobs.Permanent(err)` when no
+  retry can help (the record is gone, the input is invalid). A `decode` failure
+  is permanent too. Every other kind (`handler`, `timeout`, `panic`, and
+  `unknown_job` or `unsupported_version`, which a deploy can fix) is retried.
+- **Giving up.** After a permanent failure, or when the attempt that failed was
+  the last (`Info.MaxAttempts`), the worker acks the job away and logs
+  `job failed for good` at error level, with its ID, name, attempt, and the
+  reason, but not its payload, which may hold personal data. (Keeping failed
+  jobs for inspection and retry arrives with JOBS-6.)
+
+The attempt count and the retry time live in the queue. With Redis both
+survive worker restarts: a job that failed under one worker runs its next
+attempt under another, not before its backoff, and `MaxAttempts` counts
+attempts across both. A job interrupted by a worker's shutdown goes back at
+once rather than waiting out its backoff, but its attempt was already
+counted: every deploy that interrupts a job uses one of its attempts, so leave
+headroom in `MaxAttempts` for long jobs.
 
 ## Changing a payload
 
