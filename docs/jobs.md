@@ -292,13 +292,16 @@ gombit jobs purge --force [--older-than 720h]
 ```
 
 In code the same operations are `Queue.Failed`, `FailedJob`, `RetryFailed`,
-`ForgetFailed`, and `PurgeFailed`. A failed job keeps its ID, so dispatching a
-new job with that ID onto the same queue fails until it is retried, forgotten,
-or purged.
+`ForgetFailed`, and `PurgeFailed`. Forget and purge delete the job; retry puts
+the same job (ID, payload) back on its queue. So the ID stays taken, and
+dispatching a new job with it onto the same queue fails, until the job is
+forgotten or purged while failed, or its retried run is acknowledged.
 
 **Payloads and personal data.** A failed job's payload stays in Redis until
-someone retries, forgets, or purges it, and `inspect` (and `failed --json`)
-prints it; logs never include it. Keep payloads to IDs and versions, never
+someone forgets or purges it. Retrying does not remove it: the payload goes
+back on the queue and leaves when that run is acknowledged (or, if it fails
+again, stays with the failed jobs). `inspect` (and `failed --json`) prints it;
+logs never include it. Keep payloads to IDs and versions, never
 secrets, tokens, or document bodies, and let the handler load the rest. Purge
 old failures on a schedule (`gombit jobs purge --force --older-than 720h`);
 nothing expires them on its own. That is also a capacity matter: a bug that

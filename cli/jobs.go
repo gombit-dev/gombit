@@ -35,8 +35,9 @@ These read the queue directly (GOMBIT_JOBS_DRIVER=redis and GOMBIT_REDIS_*),
 so they run from any machine with the app's configuration; they do not need
 the app's code. --queue selects the queue (default GOMBIT_JOBS_QUEUE).
 
-A failed job's payload stays in Redis until it is retried, forgotten, or
-purged, and 'inspect' prints it. Payloads should carry IDs, not secrets; see
+A failed job's payload stays in Redis until it is forgotten or purged (retry
+puts the job back on the queue, payload included, until that run is acked),
+and 'inspect' prints it. Payloads should carry IDs, not secrets; see
 docs/jobs.md.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {

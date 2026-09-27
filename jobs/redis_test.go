@@ -303,9 +303,9 @@ func failedIDs(t *testing.T, q *jobs.RedisQueue, limit int) []string {
 }
 
 // TestRedisFailedReadsPastHoles: failed IDs whose job hash is gone do not
-// shorten a read (a short read is the end of the set, and `retry --all`
-// stops there), even when a whole page of them is in front; they are
-// dropped from the set as the read passes them.
+// hide the jobs behind them, even when a whole page of them is in front;
+// they are dropped from the set as the read passes them. (This says nothing
+// about the end of the set: a short read is not one.)
 func TestRedisFailedReadsPastHoles(t *testing.T) {
 	addr := redisTestAddr(t)
 	defer jobs.SetFailedPageSize(3)()
@@ -335,8 +335,9 @@ func TestRedisFailedReadsPastHoles(t *testing.T) {
 }
 
 // TestRedisFailedReadSurvivesChanges: a read in pages resumes after the last
-// job it saw, not at a rank: newer failures and deletions between pages
-// neither repeat nor skip jobs.
+// job it saw, not at a rank. Deletions between pages neither repeat a job
+// already read nor skip one behind the cursor; failures that land meanwhile
+// sort ahead of the cursor and are absent (the read is not a snapshot).
 func TestRedisFailedReadSurvivesChanges(t *testing.T) {
 	addr := redisTestAddr(t)
 	defer jobs.SetFailedPageSize(3)()
