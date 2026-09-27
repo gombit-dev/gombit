@@ -150,4 +150,8 @@ func TestJobsQueueOnTheAppsRedisClient(t *testing.T) {
 	if err := app.runStopHooks(); err != nil {
 		t.Fatal(err)
 	}
+	// Closed with the app, though the client is borrowed.
+	if _, err := app.Jobs().Dispatch(context.Background(), correlatedJob{}); !errors.Is(err, jobs.ErrClosed) {
+		t.Fatalf("Dispatch after shutdown = %v, want ErrClosed", err)
+	}
 }

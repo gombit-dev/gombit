@@ -607,13 +607,13 @@ func (a *App) shutdown() error {
 			return errors.Join(
 				fmt.Errorf("framework: shutdown: %w", err),
 				a.runStopHooksWithContext(shutdownCtx),
-				a.closeOwnedCache(),
 				a.closeOwnedJobs(),
+				a.closeOwnedCache(),
 			)
 		}
 	}
 
-	return errors.Join(a.runStopHooksWithContext(shutdownCtx), a.closeOwnedCache(), a.closeOwnedJobs())
+	return errors.Join(a.runStopHooksWithContext(shutdownCtx), a.closeOwnedJobs(), a.closeOwnedCache())
 }
 
 func (a *App) runStopHooks() error {
@@ -623,7 +623,7 @@ func (a *App) runStopHooks() error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	return errors.Join(a.runStopHooksWithContext(ctx), a.closeOwnedCache(), a.closeOwnedJobs())
+	return errors.Join(a.runStopHooksWithContext(ctx), a.closeOwnedJobs(), a.closeOwnedCache())
 }
 
 func (a *App) closeOwnedCache() error {
@@ -640,6 +640,8 @@ func (a *App) closeOwnedCache() error {
 	return store.Close()
 }
 
+// closeOwnedJobs runs before closeOwnedCache: a Redis job queue may borrow
+// the cache's client.
 func (a *App) closeOwnedJobs() error {
 	a.mu.Lock()
 	dispatcher := a.jobs

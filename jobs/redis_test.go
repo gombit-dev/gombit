@@ -105,8 +105,8 @@ func TestRedisQueueSurvivesRestarts(t *testing.T) {
 }
 
 // TestRedisQueueHandsBackAnUndecodableEnvelope: a stored envelope that no
-// longer decodes comes back leased with a decode error, so the caller can
-// ack it away.
+// longer decodes comes back as a leased delivery carrying the decode error,
+// so the caller can ack it away.
 func TestRedisQueueHandsBackAnUndecodableEnvelope(t *testing.T) {
 	addr := redisTestAddr(t)
 	ctx := context.Background()
@@ -121,9 +121,11 @@ func TestRedisQueueHandsBackAnUndecodableEnvelope(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// A plain `if err != nil` caller still holds the lease: the failure rides
+	// on the delivery, not the error.
 	d, err := q.Reserve(ctx, []string{"default"}, time.Minute)
-	if !errors.Is(err, jobs.ErrDecode) || d.Envelope.ID != "poison" || d.Receipt == "" {
-		t.Fatalf("Reserve(poison) = %+v, %v; want the leased delivery and a decode error", d, err)
+	if err != nil || !errors.Is(d.Err, jobs.ErrDecode) || d.Envelope.ID != "poison" || d.Receipt == "" || d.Envelope.Attempt != 1 {
+		t.Fatalf("Reserve(poison) = %+v, %v; want a leased delivery carrying the decode error", d, err)
 	}
 	if err := q.Ack(ctx, d); err != nil {
 		t.Fatalf("Ack(poison) error = %v", err)
@@ -140,6 +142,9 @@ func TestRedisQueueCloseOwnership(t *testing.T) {
 	}
 	if err := borrowed.Ping(context.Background()).Err(); err != nil {
 		t.Fatalf("Close closed a client the queue does not own: %v", err)
+	}
+	if err := jobs.NewRedisQueue(borrowed, ns).Push(context.Background(), "default", envelope("x"), time.Time{}); err != nil {
+		t.Fatalf("a new queue on the borrowed client: %v", err)
 	}
 	owned := redis.NewClient(&redis.Options{Addr: addr})
 	if err := jobs.NewRedisQueue(owned, ns, jobs.WithRedisClientOwned()).Close(); err != nil {

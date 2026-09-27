@@ -16,16 +16,19 @@ import (
 // available again and its next Reserve counts another attempt.
 type Queue interface {
 	// Push stores env on queue. It becomes available at at, or now when at
-	// is zero or in the past. Pushing an ID that is already queued fails
-	// with ErrDuplicateJob.
+	// is zero or in the past. An ID is unique per queue: pushing one that is
+	// already on the queue fails with ErrDuplicateJob.
 	Push(ctx context.Context, queue string, env Envelope, at time.Time) error
 	// Reserve leases the next available job from the first of queues that
-	// has one, in order, oldest first within a queue. The returned
-	// Delivery's Envelope.Attempt counts this delivery. It does not block:
-	// with nothing available it returns ErrNoJob. A stored envelope that no
-	// longer decodes is returned leased (ID and receipt set) with a
-	// KindDecode error, so the caller can Ack it rather than meet it again
-	// on every lease expiry.
+	// has one, in order. Within a queue the job that became available first
+	// goes first: a waiting job since its available-at time, a job whose
+	// lease expired since that deadline, push order breaking ties. The
+	// returned Delivery's Envelope.Attempt counts this delivery. It does not
+	// block: with nothing available it returns ErrNoJob.
+	//
+	// A stored envelope that no longer decodes is still a delivery: leased,
+	// with a nil error and the failure in Delivery.Err. The caller must Ack
+	// it, or it returns on every lease expiry.
 	Reserve(ctx context.Context, queues []string, lease time.Duration) (Delivery, error)
 	// Ack removes a delivered job: it is done.
 	Ack(ctx context.Context, d Delivery) error
@@ -43,6 +46,10 @@ type Delivery struct {
 	// Receipt identifies this lease. Ack and Release with a receipt whose
 	// job was since reserved again fail with ErrLeaseLost.
 	Receipt string
+	// Err is non-nil when the stored envelope does not decode (KindDecode).
+	// Envelope then holds only the ID and attempt: the job cannot run, but
+	// it is leased, so the caller must Ack it.
+	Err error
 }
 
 var (
@@ -51,7 +58,7 @@ var (
 	// ErrLeaseLost: the delivery's lease expired and another Reserve took
 	// the job, or the job is gone.
 	ErrLeaseLost = errors.New("jobs: job lease lost")
-	// ErrDuplicateJob: Push of an ID that is already queued.
+	// ErrDuplicateJob: Push of an ID that is already on that queue.
 	ErrDuplicateJob = errors.New("jobs: job already queued")
 	// ErrInvalidQueue: a queue name outside the job-name alphabet.
 	ErrInvalidQueue = errors.New("jobs: invalid queue name")

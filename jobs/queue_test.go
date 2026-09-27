@@ -162,6 +162,119 @@ func runQueueConformance(t *testing.T, newQueue queueFactory) {
 		}
 	})
 
+	t.Run("a job already waiting goes before one that became due after it", func(t *testing.T) {
+		clock := newFakeClock()
+		q := newQueue(t, clock)
+		if err := q.Push(ctx, "default", envelope("waiting"), time.Time{}); err != nil {
+			t.Fatal(err)
+		}
+		if err := q.Push(ctx, "default", envelope("later"), clock.Now().Add(time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+		clock.Advance(2 * time.Minute)
+		for _, want := range []string{"waiting", "later"} {
+			d := mustReserve(t, q, "default")
+			if d.Envelope.ID != want {
+				t.Fatalf("reserved %s, want %s (available first)", d.Envelope.ID, want)
+			}
+			if err := q.Ack(ctx, d); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+
+	t.Run("an expired lease is ready since its deadline, not before", func(t *testing.T) {
+		clock := newFakeClock()
+		q := newQueue(t, clock)
+		if err := q.Push(ctx, "default", envelope("crashed"), time.Time{}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := q.Reserve(ctx, []string{"default"}, time.Minute); err != nil {
+			t.Fatal(err)
+		}
+		clock.Advance(30 * time.Second)
+		if err := q.Push(ctx, "default", envelope("queued"), time.Time{}); err != nil { // ready at +30s
+			t.Fatal(err)
+		}
+		if err := q.Push(ctx, "default", envelope("after"), clock.Now().Add(time.Minute)); err != nil { // ready at +90s
+			t.Fatal(err)
+		}
+		clock.Advance(2 * time.Minute) // the lease expired at +60s
+		for _, want := range []string{"queued", "crashed", "after"} {
+			d := mustReserve(t, q, "default")
+			if d.Envelope.ID != want {
+				t.Fatalf("reserved %s, want %s", d.Envelope.ID, want)
+			}
+			if err := q.Ack(ctx, d); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+
+	t.Run("delayed jobs come out in the order they became due", func(t *testing.T) {
+		clock := newFakeClock()
+		q := newQueue(t, clock)
+		for i, id := range []string{"d3", "d1", "d2"} {
+			offsets := []time.Duration{3 * time.Second, time.Second, 2 * time.Second}
+			if err := q.Push(ctx, "default", envelope(id), clock.Now().Add(offsets[i])); err != nil {
+				t.Fatal(err)
+			}
+		}
+		clock.Advance(time.Minute)
+		for _, want := range []string{"d1", "d2", "d3"} {
+			d := mustReserve(t, q, "default")
+			if d.Envelope.ID != want {
+				t.Fatalf("reserved %s, want %s", d.Envelope.ID, want)
+			}
+			if err := q.Ack(ctx, d); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+
+	t.Run("an ID is unique per queue", func(t *testing.T) {
+		q := newQueue(t, newFakeClock())
+		for _, queue := range []string{"mail", "critical"} {
+			if err := q.Push(ctx, queue, envelope("same"), time.Time{}); err != nil {
+				t.Fatalf("Push(same ID, %s) error = %v", queue, err)
+			}
+		}
+		if err := q.Push(ctx, "mail", envelope("same"), time.Time{}); !errors.Is(err, jobs.ErrDuplicateJob) {
+			t.Fatalf("Push(same ID, same queue) error = %v, want ErrDuplicateJob", err)
+		}
+		a, b := mustReserve(t, q, "mail"), mustReserve(t, q, "critical")
+		if err := q.Ack(ctx, a); err != nil {
+			t.Fatal(err)
+		}
+		if err := q.Ack(ctx, b); err != nil {
+			t.Fatalf("Ack on the other queue after the first was acked: %v", err)
+		}
+		expectEmpty(t, q, "mail", "critical")
+	})
+
+	t.Run("close is final", func(t *testing.T) {
+		q := newQueue(t, newFakeClock())
+		if err := q.Push(ctx, "default", envelope("x"), time.Time{}); err != nil {
+			t.Fatal(err)
+		}
+		d := mustReserve(t, q, "default")
+		if err := q.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := q.Push(ctx, "default", envelope("y"), time.Time{}); !errors.Is(err, jobs.ErrClosed) {
+			t.Fatalf("Push after Close = %v, want ErrClosed", err)
+		}
+		if _, err := q.Reserve(ctx, []string{"default"}, time.Minute); !errors.Is(err, jobs.ErrClosed) {
+			t.Fatalf("Reserve after Close = %v, want ErrClosed", err)
+		}
+		if err := q.Ack(ctx, d); !errors.Is(err, jobs.ErrClosed) {
+			t.Fatalf("Ack after Close = %v, want ErrClosed", err)
+		}
+		if err := q.Release(ctx, d, time.Time{}); !errors.Is(err, jobs.ErrClosed) {
+			t.Fatalf("Release after Close = %v, want ErrClosed", err)
+		}
+	})
+
 	t.Run("an expired lease redelivers, and the stale holder loses it", func(t *testing.T) {
 		clock := newFakeClock()
 		q := newQueue(t, clock)
@@ -246,6 +359,9 @@ func runQueueConformance(t *testing.T, newQueue queueFactory) {
 		if _, err := q.Reserve(ctx, []string{"default"}, 0); err == nil {
 			t.Fatal("Reserve accepted a zero lease")
 		}
+		if _, err := q.Reserve(ctx, []string{"default", "Bad Queue"}, time.Minute); !errors.Is(err, jobs.ErrInvalidQueue) {
+			t.Fatalf("Reserve(invalid queue) error = %v, want ErrInvalidQueue", err)
+		}
 		if err := q.Ack(ctx, jobs.Delivery{Queue: "default", Envelope: envelope("dup")}); !errors.Is(err, jobs.ErrLeaseLost) {
 			t.Fatalf("Ack(no receipt) error = %v, want ErrLeaseLost", err)
 		}
@@ -303,20 +419,4 @@ func TestMemoryQueueConformance(t *testing.T) {
 		t.Cleanup(func() { _ = q.Close() })
 		return q
 	})
-}
-
-func TestMemoryQueueClose(t *testing.T) {
-	q := jobs.NewMemoryQueue()
-	if err := q.Push(context.Background(), "default", envelope("x"), time.Time{}); err != nil || q.Len() != 1 {
-		t.Fatalf("Push: %v, len %d", err, q.Len())
-	}
-	if err := q.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := q.Push(context.Background(), "default", envelope("y"), time.Time{}); !errors.Is(err, jobs.ErrClosed) {
-		t.Fatalf("Push after Close = %v, want ErrClosed", err)
-	}
-	if _, err := q.Reserve(context.Background(), []string{"default"}, time.Minute); !errors.Is(err, jobs.ErrClosed) {
-		t.Fatalf("Reserve after Close = %v, want ErrClosed", err)
-	}
 }
