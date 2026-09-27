@@ -94,9 +94,10 @@ type OnceStore interface {
 }
 
 // ErrInProgress: Once found another run of the same effect in progress. The
-// worker retries the job after its backoff and does not count it toward
-// giving up (it retries past MaxAttempts): the other run finishes or its
-// lock expires (LockFor), and a later delivery proceeds.
+// worker postpones the job (Queue.Postpone) until after its backoff and
+// takes back the attempt, so waiting spends none of MaxAttempts: the other
+// run finishes or its lock expires (LockFor), and a later delivery proceeds
+// with its full set of attempts.
 var ErrInProgress = errors.New("jobs: this effect is already in progress")
 
 // OnceOption configures Once.

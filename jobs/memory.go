@@ -258,11 +258,23 @@ func (q *MemoryQueue) Ack(_ context.Context, d Delivery) error {
 
 // Release implements Queue.
 func (q *MemoryQueue) Release(_ context.Context, d Delivery, at time.Time) error {
+	return q.release(d, at, false)
+}
+
+// Postpone implements Queue.
+func (q *MemoryQueue) Postpone(_ context.Context, d Delivery, at time.Time) error {
+	return q.release(d, at, true)
+}
+
+func (q *MemoryQueue) release(d Delivery, at time.Time, uncount bool) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	job, err := q.leased(d)
 	if err != nil {
 		return err
+	}
+	if uncount && job.attempts > 0 {
+		job.attempts--
 	}
 	now := q.now()
 	if at.IsZero() || at.Before(now) {

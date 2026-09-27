@@ -171,7 +171,7 @@ func TestOnceWhileAnotherRunHoldsTheLock(t *testing.T) {
 		t.Fatalf("effects = %d, want 1", effects.Load())
 	}
 	sawBusy := false
-	for _, e := range logs.FilterMessage("job failed").All() {
+	for _, e := range logs.FilterMessage("job postponed: another run holds its effect").All() {
 		if msg, _ := e.ContextMap()["error"].(string); strings.Contains(msg, jobs.ErrInProgress.Error()) {
 			sawBusy = true
 		}
@@ -310,18 +310,26 @@ func TestMemoryFinishOnceRefusesAnExpiredLock(t *testing.T) {
 }
 
 // TestOnceLockOutlivesMaxAttempts: a lock held by a crashed run can outlast
-// every attempt the job is allowed. Waiting on it is not failing: the job is
-// retried past MaxAttempts, runs the effect once the lock expires, and is
-// never buried.
+// every attempt the job is allowed. Waiting on it is not failing: the waits
+// are not counted as attempts, so once the lock expires the job still has
+// its whole MaxAttempts; a first real failure is retried, not buried.
 func TestOnceLockOutlivesMaxAttempts(t *testing.T) {
 	q := jobs.NewMemoryQueue()
 	reg := jobs.NewRegistry()
-	var effects atomic.Int32
+	var runs atomic.Int32
+	var lastAttempt atomic.Int64
 	jobs.MustRegister(reg, func(ctx context.Context, _ sendWelcome) error {
-		return jobs.Once(ctx, "crashed", func(context.Context) error { effects.Add(1); return nil })
+		info, _ := jobs.InfoFromContext(ctx)
+		return jobs.Once(ctx, "crashed", func(context.Context) error {
+			lastAttempt.Store(int64(info.Attempt))
+			if runs.Add(1) == 1 {
+				return errors.New("smtp down") // the first real run fails
+			}
+			return nil
+		})
 	}, jobs.WithOptions(jobs.Options{MaxAttempts: 2, Backoff: jobs.Constant(10 * time.Millisecond)}))
 	// A run that crashed after taking the lock: nothing releases it before
-	// it expires, long after two attempts.
+	// it expires, long after two attempts' worth of backoff.
 	if _, err := jobs.OnceStore(q).BeginOnce(context.Background(), "crashed", "dead-run", 300*time.Millisecond); err != nil {
 		t.Fatal(err)
 	}
@@ -334,10 +342,10 @@ func TestOnceLockOutlivesMaxAttempts(t *testing.T) {
 	}
 	startWorker(t, w)
 	eventually(t, "the job to succeed", func() bool { return q.Len() == 0 })
-	if effects.Load() != 1 {
-		t.Fatalf("effects = %d, want 1", effects.Load())
+	if runs.Load() != 2 || lastAttempt.Load() != 2 {
+		t.Fatalf("effect ran %d times, last on attempt %d; want a failed run then a success on attempt 2", runs.Load(), lastAttempt.Load())
 	}
 	if failed, _ := q.Failed(context.Background(), "default", 0); len(failed) != 0 {
-		t.Fatalf("a job waiting on a lock was buried: %+v", failed)
+		t.Fatalf("a job that waited on a lock was buried: %+v", failed)
 	}
 }
