@@ -79,7 +79,7 @@ and each kind has a sentinel for `errors.Is`:
 | Kind | Sentinel | Meaning |
 |------|----------|---------|
 | `unknown_job` | `ErrUnknownJob` | no handler is registered for the name |
-| `decode` | `ErrDecode` | the envelope (no name or ID) or payload (empty, `null`, wrong shape) does not decode into the job type |
+| `decode` | `ErrDecode` | the envelope (no name or ID, checked by `Run` itself) or payload (empty, `null`, wrong shape) does not decode into the job type |
 | `unsupported_version` | `ErrUnsupportedVersion` | the payload version is newer than this binary, or older with no upgrade step |
 | `panic` | `ErrPanic` | the handler, an upgrade step, a payload's `UnmarshalJSON`, or a propagator panicked (recovered, so one job cannot take a worker down) |
 | `handler` | `ErrHandler` | the handler returned an error, which `errors.Is/As` still reach |
@@ -111,7 +111,11 @@ jobs.MustRegister(registry, handler, jobs.UpgradeFrom(1, func(p json.RawMessage)
 }))
 ```
 
-`Run` chains the steps (1→2→3…) before decoding. A version newer than the
+Like `JobName`, `JobVersion` is a constant with a value receiver: `Register`
+rejects a pointer receiver and a step given twice, and `Encode` rejects a value
+that reports another version. `Run` chains the steps (1→2→3…) before decoding,
+and an empty or `null` result from any step is a `decode` failure, never a
+zero-value job. A version newer than the
 binary, or an older one with a missing step, is `unsupported_version`. Keep an
 upgrade step until no queue can still hold jobs of that version.
 

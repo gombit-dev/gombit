@@ -62,15 +62,23 @@ func UnmarshalEnvelope(data []byte) (Envelope, error) {
 	if err := json.Unmarshal(data, &e); err != nil {
 		return Envelope{}, &Error{Kind: KindDecode, Err: fmt.Errorf("envelope: %w", err)}
 	}
-	if e.Name == "" {
-		return Envelope{}, &Error{Kind: KindDecode, Err: fmt.Errorf("envelope has no job name")}
-	}
-	if e.ID == "" {
-		// Handlers use the ID as their idempotency key; an envelope without one
-		// would share "" with every other.
-		return Envelope{}, &Error{Kind: KindDecode, Name: e.Name, Err: fmt.Errorf("envelope has no job ID")}
+	if err := e.validate(); err != nil {
+		return Envelope{}, err
 	}
 	return e, nil
+}
+
+// validate is the envelope invariant every path that runs a job checks: a
+// name to select the handler, and an ID, which handlers use as their
+// idempotency key (an envelope without one would share "" with every other).
+func (e Envelope) validate() error {
+	if e.Name == "" {
+		return &Error{Kind: KindDecode, Err: fmt.Errorf("envelope has no job name")}
+	}
+	if e.ID == "" {
+		return &Error{Kind: KindDecode, Name: e.Name, Err: fmt.Errorf("envelope has no job ID")}
+	}
+	return nil
 }
 
 // maxNameLen bounds a job name so drivers can use it as a key or label.

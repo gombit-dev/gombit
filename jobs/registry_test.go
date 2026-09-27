@@ -344,7 +344,7 @@ func TestPayloadVersioning(t *testing.T) {
 		{2, `{"width":8}`},
 	} {
 		got = resize{}
-		if err := reg.Run(context.Background(), jobs.Envelope{Name: "resize_image", Version: tc.version, Payload: json.RawMessage(tc.payload)}); err != nil {
+		if err := reg.Run(context.Background(), jobs.Envelope{ID: "x", Name: "resize_image", Version: tc.version, Payload: json.RawMessage(tc.payload)}); err != nil {
 			t.Fatalf("Run(v%d) error = %v", tc.version, err)
 		}
 		wantQueued := tc.version
@@ -356,22 +356,22 @@ func TestPayloadVersioning(t *testing.T) {
 		}
 	}
 
-	newer := jobs.Envelope{Name: "resize_image", Version: 4, Payload: json.RawMessage(`{}`)}
+	newer := jobs.Envelope{ID: "x", Name: "resize_image", Version: 4, Payload: json.RawMessage(`{}`)}
 	if err := reg.Run(context.Background(), newer); !errors.Is(err, jobs.ErrUnsupportedVersion) || jobs.Classify(err) != jobs.KindUnsupportedVersion {
 		t.Fatalf("Run(newer version) error = %v, want unsupported_version", err)
 	}
-	negative := jobs.Envelope{Name: "resize_image", Version: -2, Payload: json.RawMessage(`{}`)}
+	negative := jobs.Envelope{ID: "x", Name: "resize_image", Version: -2, Payload: json.RawMessage(`{}`)}
 	if err := reg.Run(context.Background(), negative); !errors.Is(err, jobs.ErrDecode) || !strings.Contains(err.Error(), "invalid payload version -2") {
 		t.Fatalf("Run(negative version) error = %v, want a decode failure naming the version", err)
 	}
-	badUpgrade := jobs.Envelope{Name: "resize_image", Version: 1, Payload: json.RawMessage(`{"size":"big"}`)}
+	badUpgrade := jobs.Envelope{ID: "x", Name: "resize_image", Version: 1, Payload: json.RawMessage(`{"size":"big"}`)}
 	if err := reg.Run(context.Background(), badUpgrade); !errors.Is(err, jobs.ErrDecode) {
 		t.Fatalf("Run(v1 payload the upgrade cannot read) error = %v, want decode", err)
 	}
 
 	gap := newRegistry()
 	jobs.MustRegister(gap, func(context.Context, resize) error { return nil }, jobs.UpgradeFrom(2, v2to3))
-	err = gap.Run(context.Background(), jobs.Envelope{Name: "resize_image", Version: 1, Payload: json.RawMessage(`{"size":1}`)})
+	err = gap.Run(context.Background(), jobs.Envelope{ID: "x", Name: "resize_image", Version: 1, Payload: json.RawMessage(`{"size":1}`)})
 	if !errors.Is(err, jobs.ErrUnsupportedVersion) || !strings.Contains(err.Error(), "UpgradeFrom(1)") {
 		t.Fatalf("Run(v1 with no step from 1) error = %v, want unsupported_version naming the step", err)
 	}
@@ -383,7 +383,7 @@ func TestUnknownFieldsAreCompatible(t *testing.T) {
 	reg := newRegistry()
 	var got sendWelcome
 	jobs.MustRegister(reg, func(_ context.Context, job sendWelcome) error { got = job; return nil })
-	env := jobs.Envelope{Name: "send_welcome_email", Version: 1, Payload: json.RawMessage(`{"user_id":9,"campaign":"fall"}`)}
+	env := jobs.Envelope{ID: "x", Name: "send_welcome_email", Version: 1, Payload: json.RawMessage(`{"user_id":9,"campaign":"fall"}`)}
 	if err := reg.Run(context.Background(), env); err != nil || got.UserID != 9 {
 		t.Fatalf("Run(extra field) = %v, %+v", err, got)
 	}
@@ -486,9 +486,9 @@ func TestPanicsBeforeTheHandlerAreRecovered(t *testing.T) {
 		env  jobs.Envelope
 		want string
 	}{
-		{jobs.Envelope{Name: "resize_image", Version: 1, Payload: json.RawMessage(`{}`)}, "upgrade step"},
-		{jobs.Envelope{Name: "loud", Version: 1, Payload: json.RawMessage(`{"value":1}`)}, "custom decoder"},
-		{jobs.Envelope{Name: "send_welcome_email", Version: 1, Payload: json.RawMessage(`{}`), Metadata: map[string]string{"boom": "1"}}, "propagator"},
+		{jobs.Envelope{ID: "x", Name: "resize_image", Version: 1, Payload: json.RawMessage(`{}`)}, "upgrade step"},
+		{jobs.Envelope{ID: "x", Name: "loud", Version: 1, Payload: json.RawMessage(`{"value":1}`)}, "custom decoder"},
+		{jobs.Envelope{ID: "x", Name: "send_welcome_email", Version: 1, Payload: json.RawMessage(`{}`), Metadata: map[string]string{"boom": "1"}}, "propagator"},
 	} {
 		err := reg.Run(context.Background(), tc.env)
 		if jobs.Classify(err) != jobs.KindPanic || !strings.Contains(err.Error(), tc.want) {
@@ -506,4 +506,132 @@ func (panicky) Extract(ctx context.Context, md map[string]string) context.Contex
 		panic("propagator")
 	}
 	return ctx
+}
+
+// TestNullNeverBecomesAJob: an upgrade step's output is checked like the
+// queued payload, so null cannot reach the decoder or a later step that
+// would turn it into a zero-value job.
+func TestNullNeverBecomesAJob(t *testing.T) {
+	reg := newRegistry()
+	called := false
+	jobs.MustRegister(reg, func(context.Context, resize) error { called = true; return nil },
+		jobs.UpgradeFrom(1, func(json.RawMessage) (json.RawMessage, error) {
+			var nothing *struct{ Width int }
+			return json.Marshal(nothing) // null
+		}),
+		// The documented upgrade shape: unmarshal the old payload, marshal the new.
+		jobs.UpgradeFrom(2, func(p json.RawMessage) (json.RawMessage, error) {
+			var old struct {
+				Width int `json:"width"`
+			}
+			if err := json.Unmarshal(p, &old); err != nil {
+				return nil, err
+			}
+			return json.Marshal(resize{Width: old.Width, Height: old.Width})
+		}))
+	for _, version := range []int{1, 2} {
+		payload := `{"size":7}`
+		if version == 2 {
+			payload = `null`
+		}
+		err := reg.Run(context.Background(), jobs.Envelope{ID: "x", Name: "resize_image", Version: version, Payload: json.RawMessage(payload)})
+		if !errors.Is(err, jobs.ErrDecode) {
+			t.Fatalf("Run(v%d through a null-returning step) error = %v, want decode", version, err)
+		}
+	}
+	if called {
+		t.Fatal("the handler ran on a zero-value job")
+	}
+}
+
+type pointerMarshal struct {
+	N int `json:"n"`
+}
+
+func (pointerMarshal) JobName() string { return "pointer_marshal" }
+
+func (p *pointerMarshal) MarshalJSON() ([]byte, error) {
+	return []byte(fmt.Sprintf(`{"ptr":%d}`, p.N)), nil
+}
+
+// TestPointerAndValueEncodeAlike: *T and T are one registration, so they are
+// one encoding, the struct value's.
+func TestPointerAndValueEncodeAlike(t *testing.T) {
+	reg := newRegistry()
+	var got pointerMarshal
+	jobs.MustRegister(reg, func(_ context.Context, job pointerMarshal) error { got = job; return nil })
+	byValue, err := reg.Encode(context.Background(), pointerMarshal{N: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byPointer, err := reg.Encode(context.Background(), &pointerMarshal{N: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(byPointer.Payload) != string(byValue.Payload) || string(byValue.Payload) != `{"n":4}` {
+		t.Fatalf("payloads: pointer %s, value %s; want both the struct value's", byPointer.Payload, byValue.Payload)
+	}
+	if err := reg.Run(context.Background(), byPointer); err != nil || got.N != 4 {
+		t.Fatalf("Run = %v, got %+v", err, got)
+	}
+}
+
+type pointerVersion struct{}
+
+func (pointerVersion) JobName() string  { return "pointer_version" }
+func (*pointerVersion) JobVersion() int { return 2 }
+
+type varyingVersion struct {
+	Legacy bool `json:"legacy"`
+}
+
+func (varyingVersion) JobName() string { return "varying_version" }
+func (v varyingVersion) JobVersion() int {
+	if v.Legacy {
+		return 1
+	}
+	return 2
+}
+
+func TestJobVersionIsAConstantOfTheType(t *testing.T) {
+	reg := newRegistry()
+	if err := jobs.Register(reg, func(context.Context, pointerVersion) error { return nil }); !errors.Is(err, jobs.ErrInvalidJobType) {
+		t.Fatalf("Register(pointer-receiver JobVersion) error = %v, want ErrInvalidJobType", err)
+	}
+	jobs.MustRegister(reg, func(context.Context, varyingVersion) error { return nil },
+		jobs.UpgradeFrom(1, func(p json.RawMessage) (json.RawMessage, error) { return p, nil }))
+	if _, err := reg.Encode(context.Background(), varyingVersion{}); err != nil {
+		t.Fatalf("Encode(registered version) error = %v", err)
+	}
+	if _, err := reg.Encode(context.Background(), varyingVersion{Legacy: true}); !errors.Is(err, jobs.ErrVersionMismatch) {
+		t.Fatalf("Encode(value reporting another version) error = %v, want ErrVersionMismatch", err)
+	}
+}
+
+func TestRepeatedUpgradeStepIsRejected(t *testing.T) {
+	step := func(p json.RawMessage) (json.RawMessage, error) { return p, nil }
+	err := jobs.Register(newRegistry(), func(context.Context, resize) error { return nil },
+		jobs.UpgradeFrom(1, step), jobs.UpgradeFrom(1, step), jobs.UpgradeFrom(2, step))
+	if !errors.Is(err, jobs.ErrInvalidJobType) || !strings.Contains(err.Error(), "UpgradeFrom(1) is given more than once") {
+		t.Fatalf("Register(duplicate UpgradeFrom) error = %v", err)
+	}
+}
+
+// TestRunChecksTheEnvelope: the envelope invariant holds on the path that
+// runs handlers, not only in UnmarshalEnvelope.
+func TestRunChecksTheEnvelope(t *testing.T) {
+	reg := newRegistry()
+	called := false
+	jobs.MustRegister(reg, func(context.Context, sendWelcome) error { called = true; return nil })
+	for _, env := range []jobs.Envelope{
+		{Name: "send_welcome_email", Version: 1, Payload: json.RawMessage(`{"user_id":1}`)},
+		{ID: "x", Version: 1, Payload: json.RawMessage(`{"user_id":1}`)},
+	} {
+		if err := reg.Run(context.Background(), env); !errors.Is(err, jobs.ErrDecode) {
+			t.Fatalf("Run(%+v) error = %v, want decode", env, err)
+		}
+	}
+	if called {
+		t.Fatal("the handler ran on an envelope without an ID or name")
+	}
 }

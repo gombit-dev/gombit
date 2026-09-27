@@ -24,10 +24,11 @@ type Upgrade func(payload json.RawMessage) (json.RawMessage, error)
 // Registration errors. Registration happens at startup, so each is a
 // programming error to fix, not a runtime condition to handle.
 var (
-	ErrInvalidName    = errors.New("jobs: invalid job name")
-	ErrDuplicateName  = errors.New("jobs: job name already registered")
-	ErrInvalidJobType = errors.New("jobs: invalid job type")
-	ErrNameMismatch   = errors.New("jobs: job name does not match its registration")
+	ErrInvalidName     = errors.New("jobs: invalid job name")
+	ErrDuplicateName   = errors.New("jobs: job name already registered")
+	ErrInvalidJobType  = errors.New("jobs: invalid job type")
+	ErrNameMismatch    = errors.New("jobs: job name does not match its registration")
+	ErrVersionMismatch = errors.New("jobs: job version does not match its registration")
 )
 
 // Registry binds job names to handlers. It encodes jobs for a queue and runs
@@ -89,7 +90,8 @@ func NewRegistry(opts ...RegistryOption) *Registry {
 type RegisterOption func(*registerConfig)
 
 type registerConfig struct {
-	upgrades map[int]Upgrade
+	upgrades   map[int]Upgrade
+	duplicates []int
 }
 
 // UpgradeFrom registers the step that rewrites a version-`from` payload into
@@ -99,6 +101,9 @@ func UpgradeFrom(from int, fn Upgrade) RegisterOption {
 	return func(c *registerConfig) {
 		if c.upgrades == nil {
 			c.upgrades = map[int]Upgrade{}
+		}
+		if _, dup := c.upgrades[from]; dup {
+			c.duplicates = append(c.duplicates, from)
 		}
 		c.upgrades[from] = fn
 	}
@@ -124,6 +129,9 @@ func Register[T Job](r *Registry, handler Handler[T], opts ...RegisterOption) er
 	if _, err := json.Marshal(zero); err != nil {
 		return fmt.Errorf("%w: %s does not encode to JSON: %v", ErrInvalidJobType, goType, err)
 	}
+	if !goType.Implements(versionedType) && reflect.PointerTo(goType).Implements(versionedType) {
+		return fmt.Errorf("%w: %s declares JobVersion on the pointer; use a value receiver, like JobName, so every value reports it", ErrInvalidJobType, goType)
+	}
 	version := jobVersion(zero)
 	if version < 1 {
 		return fmt.Errorf("%w: %s reports JobVersion %d; versions start at 1", ErrInvalidJobType, goType, version)
@@ -131,6 +139,9 @@ func Register[T Job](r *Registry, handler Handler[T], opts ...RegisterOption) er
 	var cfg registerConfig
 	for _, opt := range opts {
 		opt(&cfg)
+	}
+	if len(cfg.duplicates) > 0 {
+		return fmt.Errorf("%w: %s: UpgradeFrom(%d) is given more than once", ErrInvalidJobType, goType, cfg.duplicates[0])
 	}
 	for from, fn := range cfg.upgrades {
 		if from < 1 || from >= version || fn == nil {
@@ -197,7 +208,13 @@ func (r *Registry) Encode(ctx context.Context, job Job) (Envelope, error) {
 		if value.IsNil() {
 			return Envelope{}, fmt.Errorf("%w: nil %s", ErrInvalidJobType, goType)
 		}
+		// *T and T are one registration, so they must be one encoding: the
+		// struct value's, the method set Register checked.
 		goType = goType.Elem()
+		value = value.Elem()
+		if j, ok := value.Interface().(Job); ok {
+			job = j
+		}
 	}
 	name := job.JobName()
 
@@ -210,7 +227,10 @@ func (r *Registry) Encode(ctx context.Context, job Job) (Envelope, error) {
 	if name != reg.name {
 		return Envelope{}, fmt.Errorf("%w: %s was registered as %q but this value names itself %q; JobName must be a constant", ErrNameMismatch, goType, reg.name, name)
 	}
-	payload, err := json.Marshal(job)
+	if v := jobVersion(job); v != reg.version {
+		return Envelope{}, fmt.Errorf("%w: %s was registered at version %d but this value reports %d; JobVersion must be a constant", ErrVersionMismatch, goType, reg.version, v)
+	}
+	payload, err := json.Marshal(value.Interface())
 	if err != nil {
 		return Envelope{}, fmt.Errorf("jobs: encode %q payload: %w", name, err)
 	}
@@ -238,6 +258,9 @@ func (r *Registry) Encode(ctx context.Context, job Job) (Envelope, error) {
 // reports its Kind. A panicking handler is recovered as KindPanic, so one job
 // cannot take a worker down.
 func (r *Registry) Run(ctx context.Context, env Envelope) (err error) {
+	if err := env.validate(); err != nil {
+		return err
+	}
 	r.mu.RLock()
 	reg, ok := r.byName[env.Name]
 	r.mu.RUnlock()
@@ -288,9 +311,7 @@ func (reg *registration) upgrade(env Envelope) (json.RawMessage, error) {
 			Err: fmt.Errorf("this binary handles up to version %d; a newer producer queued it", reg.version)}
 	}
 	payload := env.Payload
-	if trimmed := bytes.TrimSpace(payload); len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
-		// A job is a struct: json.Unmarshal would turn null into a zero-value
-		// job and run the handler on it.
+	if emptyPayload(payload) {
 		return nil, &Error{Kind: KindDecode, Name: reg.name, Version: version, Err: errors.New("empty or null payload")}
 	}
 	for v := version; v < reg.version; v++ {
@@ -304,9 +325,22 @@ func (reg *registration) upgrade(env Envelope) (json.RawMessage, error) {
 			return nil, &Error{Kind: KindDecode, Name: reg.name, Version: version,
 				Err: fmt.Errorf("upgrade from version %d: %w", v, err)}
 		}
+		// Every step's output is checked like the queued payload: a later
+		// step or the decoder would turn null into a zero-value job.
+		if emptyPayload(next) {
+			return nil, &Error{Kind: KindDecode, Name: reg.name, Version: version,
+				Err: fmt.Errorf("upgrade from version %d returned an empty or null payload", v)}
+		}
 		payload = next
 	}
 	return payload, nil
+}
+
+// emptyPayload reports a payload json.Unmarshal would accept as the zero
+// job: nothing, or null. A job is a struct, so neither is a job.
+func emptyPayload(payload []byte) bool {
+	trimmed := bytes.TrimSpace(payload)
+	return len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null"))
 }
 
 // queuedVersion is the payload version env was queued at. An envelope written
@@ -317,6 +351,8 @@ func queuedVersion(env Envelope) int {
 	}
 	return env.Version
 }
+
+var versionedType = reflect.TypeFor[Versioned]()
 
 func jobVersion(job Job) int {
 	if v, ok := job.(Versioned); ok {
