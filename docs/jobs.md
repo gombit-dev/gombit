@@ -1,8 +1,9 @@
 # Background jobs
 
 > **Status:** the job contract (JOBS-1), queue drivers (JOBS-2), the worker
-> (JOBS-3), retries, backoff, and timeouts (JOBS-4), and delayed jobs (JOBS-5).
-> Failed-job handling lands in the rest of the
+> (JOBS-3), retries, backoff, and timeouts (JOBS-4), delayed jobs (JOBS-5), and
+> failed jobs (JOBS-6). Uniqueness helpers, metrics, and a test queue land in
+> the rest of the
 > [JOBS-0 epic](https://github.com/gombit-dev/gombit/issues/278).
 
 A job is work that should not run inside an HTTP request: sending an email,
@@ -180,9 +181,9 @@ or build one with `jobs.NewWorker(registry, queue, opts)`.
 
 A stored envelope that no longer decodes cannot run anywhere. `Reserve` still
 hands it out, leased, with the failure on `Delivery.Err` (and a nil error, so
-an `if err != nil` caller cannot drop the lease); the worker logs it and acks
-it away. A consumer of your own must do the same, or the job returns on every
-lease expiry. Dead-lettering such jobs arrives with JOBS-6.
+an `if err != nil` caller cannot drop the lease); the worker sets it aside
+with the failed jobs (`Queue.Bury`), stored bytes kept. A consumer of your own
+must do the same (or ack it), or the job returns on every lease expiry.
 
 ## The envelope
 
@@ -256,10 +257,10 @@ that does not set its own, and fills the fields a job leaves zero.
   too. Every other kind (`handler`, `timeout`, `panic`, and `unknown_job`,
   `unsupported_version`, or `upgrade`, which a deploy can fix) is retried.
 - **Giving up.** After a permanent failure, or when the attempt that failed was
-  the last (`Info.MaxAttempts`), the worker acks the job away and logs
-  `job failed for good` at error level, with its ID, name, attempt, and the
-  reason, but not its payload, which may hold personal data. (Keeping failed
-  jobs for inspection and retry arrives with JOBS-6.)
+  the last (`Info.MaxAttempts`), the worker moves the job to its queue's
+  [failed jobs](#failed-jobs) and logs `job failed for good` at error level,
+  with its ID, name, attempt, the reason, and the `gombit jobs inspect` command
+  for it, but not its payload.
 
 The attempt count and the retry time live in the queue. With Redis both
 survive worker restarts: a job that failed under one worker runs its next
@@ -271,6 +272,38 @@ headroom in `MaxAttempts` for long jobs. An interrupted attempt is never given
 up on, even the last one, so a job can run again with `Attempt` past
 `MaxAttempts`; a handler should not assume `Attempt == MaxAttempts` is
 certainly its last run.
+
+## Failed jobs
+
+A job the worker gave up on is kept, not deleted: its queue's failed jobs hold
+the original envelope (payload, metadata, version), the number of attempts,
+and why: the reason (`attempts exhausted`, `permanent failure`, or
+`undecodable envelope`), the failure kind, the last error, and when. Manage
+them with `gombit jobs`, which reads the queue directly with the app's
+configuration (`GOMBIT_JOBS_DRIVER=redis`, `GOMBIT_REDIS_*`) and does not need
+the app's code:
+
+```sh
+gombit jobs failed [--queue mail] [--limit 50] [--json]
+gombit jobs inspect <id>            # payload included
+gombit jobs retry <id>... | --all   # back on the queue, available now, fresh attempts
+gombit jobs forget <id>...
+gombit jobs purge --force [--older-than 720h]
+```
+
+In code the same operations are `Queue.Failed`, `FailedJob`, `RetryFailed`,
+`ForgetFailed`, and `PurgeFailed`. A failed job keeps its ID, so dispatching a
+new job with that ID onto the same queue fails until it is retried, forgotten,
+or purged.
+
+**Payloads and personal data.** A failed job's payload stays in Redis until
+someone retries, forgets, or purges it, and `inspect` (and `failed --json`)
+prints it; logs never include it. Keep payloads to IDs and versions, never
+secrets, tokens, or document bodies, and let the handler load the rest. Purge
+old failures on a schedule (`gombit jobs purge --force --older-than 720h`);
+nothing expires them on its own. That is also a capacity matter: a bug that
+fails every job keeps every one of them in Redis until it is purged, so alert
+on the `job failed for good` log and give Redis headroom.
 
 ## Changing a payload
 

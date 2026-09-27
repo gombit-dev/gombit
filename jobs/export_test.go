@@ -11,3 +11,10 @@ func SetShutdownGrace(d time.Duration) (restore func()) {
 
 // ReserveBackoff exposes reserveBackoff.
 var ReserveBackoff = reserveBackoff
+
+// SetPurgeBatch shrinks the Redis purge batch for tests.
+func SetPurgeBatch(n int) (restore func()) {
+	prev := purgeBatch
+	purgeBatch = n
+	return func() { purgeBatch = prev }
+}

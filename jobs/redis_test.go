@@ -128,10 +128,34 @@ func TestRedisQueueHandsBackAnUndecodableEnvelope(t *testing.T) {
 	if err != nil || !errors.Is(d.Err, jobs.ErrDecode) || d.Envelope.ID != "poison" || d.Receipt == "" || d.Envelope.Attempt != 1 {
 		t.Fatalf("Reserve(poison) = %+v, %v; want a leased delivery carrying the decode error", d, err)
 	}
-	if err := q.Ack(ctx, d); err != nil {
-		t.Fatalf("Ack(poison) error = %v", err)
+	if err := q.Bury(ctx, d, jobs.Failure{Reason: jobs.ReasonUndecodable, Kind: jobs.KindDecode, Error: d.Err.Error()}); err != nil {
+		t.Fatalf("Bury(poison) error = %v", err)
 	}
 	expectEmpty(t, q, "default")
+	f, err := q.FailedJob(ctx, "default", "poison")
+	if err != nil || string(f.RawEnvelope) != "{not json" || f.Envelope.ID != "poison" || f.Failure.Reason != jobs.ReasonUndecodable {
+		t.Fatalf("FailedJob(poison) = %+v, %v; want the raw stored bytes kept", f, err)
+	}
+}
+
+func TestRedisPurgeCrossesBatches(t *testing.T) {
+	addr := redisTestAddr(t)
+	defer jobs.SetPurgeBatch(3)()
+	ns := testNamespace()
+	ctx := context.Background()
+	q := jobs.NewRedisQueue(redisClient(t, addr, ns), ns)
+	for i := 0; i < 7; i++ {
+		if err := q.Push(ctx, "default", envelope(fmt.Sprintf("p%d", i)), time.Time{}); err != nil {
+			t.Fatal(err)
+		}
+		d := mustReserve(t, q, "default")
+		if err := q.Bury(ctx, d, jobs.Failure{Reason: jobs.ReasonExhausted}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n, err := q.PurgeFailed(ctx, "default", time.Time{}); err != nil || n != 7 {
+		t.Fatalf("PurgeFailed across batches of 3 = %d, %v; want 7", n, err)
+	}
 }
 
 func TestRedisQueueCloseOwnership(t *testing.T) {
@@ -192,5 +216,33 @@ func TestRedisQueueCallsHonorTheirDeadline(t *testing.T) {
 	opts := jobs.RedisClientOptions(&redis.Options{Addr: addr, MaxRetries: 3})
 	if !opts.ContextTimeoutEnabled || opts.MaxRetries != -1 || opts.Addr != addr {
 		t.Fatalf("RedisClientOptions = %+v", opts)
+	}
+}
+
+// TestRedisRetryOfAnOrphanedFailedID: a failed ID whose job hash is gone
+// (evicted, deleted by hand) is dropped, not queued as a job with no
+// envelope.
+func TestRedisRetryOfAnOrphanedFailedID(t *testing.T) {
+	addr := redisTestAddr(t)
+	ns := testNamespace()
+	ctx := context.Background()
+	client := redisClient(t, addr, ns)
+	q := jobs.NewRedisQueue(client, ns)
+	if err := q.Push(ctx, "default", envelope("orphan"), time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	d := mustReserve(t, q, "default")
+	if err := q.Bury(ctx, d, jobs.Failure{Reason: jobs.ReasonExhausted}); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Del(ctx, fmt.Sprintf("{%s:jobs:default}:job:orphan", ns)).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.RetryFailed(ctx, "default", "orphan"); !errors.Is(err, jobs.ErrNotFailed) {
+		t.Fatalf("RetryFailed(orphan) = %v, want ErrNotFailed", err)
+	}
+	expectEmpty(t, q, "default")
+	if failed, _ := q.Failed(ctx, "default", 0); len(failed) != 0 {
+		t.Fatalf("the orphan is still listed: %+v", failed)
 	}
 }

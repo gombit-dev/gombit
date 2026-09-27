@@ -32,8 +32,9 @@ gates in `ci.yml`. The **JOBS-0** background-jobs epic has started: `jobs` holds
 the job contract (typed jobs, registry, envelope), the sync, memory, and
 Redis queue drivers behind `framework.App.Jobs()`, the worker
 (`./server worker`, `gombit worker`), retry policies (attempts, backoff,
-timeouts, permanent failures), and delayed dispatch (`jobs.Delay`,
-`jobs.At`). Other M6 batteries are not here yet.
+timeouts, permanent failures), delayed dispatch (`jobs.Delay`, `jobs.At`),
+and failed jobs (`gombit jobs failed|inspect|retry|forget|purge`). Other M6
+batteries are not here yet.
 Don't assume generated apps are committed in-tree; `gombit new` writes them
 on demand. Check `git log` / `ls` before describing "how the code works."
 

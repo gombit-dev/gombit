@@ -39,6 +39,23 @@ type Queue interface {
 	// longer than one lease is not delivered to a second worker. A worker
 	// calls it periodically while the handler runs.
 	Extend(ctx context.Context, d Delivery, lease time.Duration) error
+
+	// Bury moves a delivered job the worker gave up on to the queue's failed
+	// jobs, with the original envelope and why, instead of acking it away.
+	Bury(ctx context.Context, d Delivery, f Failure) error
+	// Failed lists a queue's failed jobs, most recent first, at most limit
+	// (all when limit <= 0).
+	Failed(ctx context.Context, queue string, limit int) ([]FailedJob, error)
+	// FailedJob returns one failed job, or ErrNotFailed.
+	FailedJob(ctx context.Context, queue, id string) (FailedJob, error)
+	// RetryFailed puts a failed job back on its queue, available now, with a
+	// fresh set of attempts. ErrNotFailed when there is no such failed job.
+	RetryFailed(ctx context.Context, queue, id string) error
+	// ForgetFailed deletes a failed job. ErrNotFailed when there is none.
+	ForgetFailed(ctx context.Context, queue, id string) error
+	// PurgeFailed deletes a queue's failed jobs that failed before before (all
+	// of them when before is zero) and returns how many.
+	PurgeFailed(ctx context.Context, queue string, before time.Time) (int, error)
 	// Close releases the driver's resources.
 	Close() error
 }

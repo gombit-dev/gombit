@@ -432,6 +432,128 @@ func runQueueConformance(t *testing.T, newQueue queueFactory) {
 		}
 	})
 
+	t.Run("failed jobs are kept, inspectable, retryable, and forgettable", func(t *testing.T) {
+		clock := newFakeClock()
+		q := newQueue(t, clock)
+		for _, id := range []string{"f1", "f2", "f3"} {
+			if err := q.Push(ctx, "default", envelope(id), time.Time{}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		bury := func(reason string) jobs.Delivery {
+			t.Helper()
+			d := mustReserve(t, q, "default")
+			if err := q.Bury(ctx, d, jobs.Failure{Reason: reason, Kind: jobs.KindHandler, Error: "smtp down: " + d.Envelope.ID, At: clock.Now()}); err != nil {
+				t.Fatalf("Bury(%s) error = %v", d.Envelope.ID, err)
+			}
+			clock.Advance(time.Minute)
+			return d
+		}
+		first := bury(jobs.ReasonExhausted)
+		second := bury(jobs.ReasonPermanent)
+		expectEmpty(t, q, "other")
+		if err := q.Bury(ctx, first, jobs.Failure{}); !errors.Is(err, jobs.ErrLeaseLost) {
+			t.Fatalf("Bury twice = %v, want ErrLeaseLost", err)
+		}
+
+		failed, err := q.Failed(ctx, "default", 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(failed) != 2 || failed[0].Envelope.ID != second.Envelope.ID || failed[1].Envelope.ID != first.Envelope.ID {
+			t.Fatalf("Failed() = %+v, want the two buried jobs, most recent first", failed)
+		}
+		if limited, _ := q.Failed(ctx, "default", 1); len(limited) != 1 {
+			t.Fatalf("Failed(limit 1) = %d jobs", len(limited))
+		}
+		got, err := q.FailedJob(ctx, "default", first.Envelope.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Queue != "default" || got.Attempts != 1 || string(got.Envelope.Payload) != `{"user_id":1}` ||
+			got.Envelope.Metadata["gombit.request_id"] != "req-"+first.Envelope.ID || got.Failure.Reason != jobs.ReasonExhausted ||
+			got.Failure.Error != "smtp down: "+first.Envelope.ID || !got.Failure.At.Equal(fixedNow) {
+			t.Fatalf("FailedJob() = %+v, want the original envelope and the failure", got)
+		}
+
+		// The third job is still queued, and a failed job is not reservable.
+		third := mustReserve(t, q, "default")
+		expectEmpty(t, q, "default")
+		if err := q.Ack(ctx, third); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := q.RetryFailed(ctx, "default", first.Envelope.ID); err != nil {
+			t.Fatalf("RetryFailed() error = %v", err)
+		}
+		again := mustReserve(t, q, "default")
+		if again.Envelope.ID != first.Envelope.ID || again.Envelope.Attempt != 1 {
+			t.Fatalf("after RetryFailed reserved %+v, want it back with fresh attempts", again.Envelope)
+		}
+		if err := q.Ack(ctx, again); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := q.FailedJob(ctx, "default", first.Envelope.ID); !errors.Is(err, jobs.ErrNotFailed) {
+			t.Fatalf("FailedJob(retried and done) = %v, want ErrNotFailed", err)
+		}
+
+		if err := q.ForgetFailed(ctx, "default", second.Envelope.ID); err != nil {
+			t.Fatalf("ForgetFailed() error = %v", err)
+		}
+		for _, err := range []error{
+			q.ForgetFailed(ctx, "default", second.Envelope.ID),
+			q.RetryFailed(ctx, "default", "nope"),
+		} {
+			if !errors.Is(err, jobs.ErrNotFailed) {
+				t.Fatalf("on a job that is not failed: %v, want ErrNotFailed", err)
+			}
+		}
+		// A queued (not failed) job cannot be retried or forgotten as failed.
+		if err := q.Push(ctx, "default", envelope("live"), time.Time{}); err != nil {
+			t.Fatal(err)
+		}
+		if err := q.ForgetFailed(ctx, "default", "live"); !errors.Is(err, jobs.ErrNotFailed) {
+			t.Fatalf("ForgetFailed(queued job) = %v, want ErrNotFailed", err)
+		}
+		if left, _ := q.Failed(ctx, "default", 0); len(left) != 0 {
+			t.Fatalf("failed jobs left: %+v", left)
+		}
+		if _, err := q.Failed(ctx, "Bad Queue", 0); !errors.Is(err, jobs.ErrInvalidQueue) {
+			t.Fatalf("Failed(invalid queue) = %v", err)
+		}
+	})
+
+	t.Run("purge deletes failed jobs, optionally only older ones", func(t *testing.T) {
+		clock := newFakeClock()
+		q := newQueue(t, clock)
+		for i, id := range []string{"old1", "old2", "new1"} {
+			if err := q.Push(ctx, "default", envelope(id), time.Time{}); err != nil {
+				t.Fatal(err)
+			}
+			d := mustReserve(t, q, "default")
+			if err := q.Bury(ctx, d, jobs.Failure{Reason: jobs.ReasonExhausted, At: clock.Now()}); err != nil {
+				t.Fatal(err)
+			}
+			if i == 1 {
+				clock.Advance(24 * time.Hour)
+			}
+		}
+		n, err := q.PurgeFailed(ctx, "default", clock.Now().Add(-time.Hour))
+		if err != nil || n != 2 {
+			t.Fatalf("PurgeFailed(older than an hour) = %d, %v; want 2", n, err)
+		}
+		if left, _ := q.Failed(ctx, "default", 0); len(left) != 1 || left[0].Envelope.ID != "new1" {
+			t.Fatalf("after the purge: %+v, want new1 left", left)
+		}
+		if n, err := q.PurgeFailed(ctx, "default", time.Time{}); err != nil || n != 1 {
+			t.Fatalf("PurgeFailed(all) = %d, %v; want 1", n, err)
+		}
+		// The IDs are free again.
+		if err := q.Push(ctx, "default", envelope("old1"), time.Time{}); err != nil {
+			t.Fatalf("Push after purge: %v", err)
+		}
+	})
+
 	t.Run("concurrent workers never share a job", func(t *testing.T) {
 		q := newQueue(t, newFakeClock())
 		const n = 60

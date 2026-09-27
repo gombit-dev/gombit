@@ -3,6 +3,7 @@ package jobs
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -34,6 +35,9 @@ type memoryJob struct {
 	reserved      bool
 	receipt       string
 	leaseDeadline time.Time
+	// failed jobs are out of circulation until retried or forgotten.
+	failure *Failure
+	raw     []byte
 }
 
 // MemoryOption configures NewMemoryQueue.
@@ -123,6 +127,9 @@ func (q *MemoryQueue) Reserve(_ context.Context, queues []string, lease time.Dur
 // available: ready and due, or reserved with its lease expired (a crashed
 // or stalled worker's job).
 func (j *memoryJob) available(now time.Time) bool {
+	if j.failure != nil {
+		return false
+	}
 	if j.reserved {
 		return !now.Before(j.leaseDeadline)
 	}
@@ -191,6 +198,126 @@ func (q *MemoryQueue) Extend(_ context.Context, d Delivery, lease time.Duration)
 	}
 	job.leaseDeadline = q.now().Add(lease)
 	return nil
+}
+
+// Bury implements Queue.
+func (q *MemoryQueue) Bury(_ context.Context, d Delivery, f Failure) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	job, err := q.leased(d)
+	if err != nil {
+		return err
+	}
+	if f.At.IsZero() {
+		f.At = q.now()
+	}
+	job.reserved, job.receipt = false, ""
+	job.failure = &f
+	return nil
+}
+
+// Failed implements Queue.
+func (q *MemoryQueue) Failed(_ context.Context, queue string, limit int) ([]FailedJob, error) {
+	if !ValidName(queue) {
+		return nil, fmt.Errorf("%w: %q", ErrInvalidQueue, queue)
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.closed {
+		return nil, ErrClosed
+	}
+	var out []FailedJob
+	for _, job := range q.jobs {
+		if job.queue == queue && job.failure != nil {
+			out = append(out, job.failedJob())
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].Failure.At.Equal(out[j].Failure.At) {
+			return out[i].Failure.At.After(out[j].Failure.At)
+		}
+		// Ties in the same instant: ID descending, as Redis orders them.
+		return out[i].Envelope.ID > out[j].Envelope.ID
+	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+// FailedJob implements Queue.
+func (q *MemoryQueue) FailedJob(_ context.Context, queue, id string) (FailedJob, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	job, err := q.failed(queue, id)
+	if err != nil {
+		return FailedJob{}, err
+	}
+	return job.failedJob(), nil
+}
+
+// RetryFailed implements Queue.
+func (q *MemoryQueue) RetryFailed(_ context.Context, queue, id string) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	job, err := q.failed(queue, id)
+	if err != nil {
+		return err
+	}
+	job.failure = nil
+	job.attempts = 0
+	job.availableAt = q.now()
+	q.seq++
+	job.seq = q.seq
+	return nil
+}
+
+// ForgetFailed implements Queue.
+func (q *MemoryQueue) ForgetFailed(_ context.Context, queue, id string) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if _, err := q.failed(queue, id); err != nil {
+		return err
+	}
+	delete(q.jobs, memoryKey{queue, id})
+	return nil
+}
+
+// PurgeFailed implements Queue.
+func (q *MemoryQueue) PurgeFailed(_ context.Context, queue string, before time.Time) (int, error) {
+	if !ValidName(queue) {
+		return 0, fmt.Errorf("%w: %q", ErrInvalidQueue, queue)
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.closed {
+		return 0, ErrClosed
+	}
+	n := 0
+	for key, job := range q.jobs {
+		if job.queue == queue && job.failure != nil && (before.IsZero() || job.failure.At.Before(before)) {
+			delete(q.jobs, key)
+			n++
+		}
+	}
+	return n, nil
+}
+
+func (q *MemoryQueue) failed(queue, id string) (*memoryJob, error) {
+	if q.closed {
+		return nil, ErrClosed
+	}
+	job, ok := q.jobs[memoryKey{queue, id}]
+	if !ok || job.failure == nil {
+		return nil, fmt.Errorf("%w: %s on %s", ErrNotFailed, id, queue)
+	}
+	return job, nil
+}
+
+func (j *memoryJob) failedJob() FailedJob {
+	env := j.env
+	env.Attempt = j.attempts
+	return FailedJob{Queue: j.queue, Envelope: env, RawEnvelope: j.raw, Attempts: j.attempts, Failure: *j.failure}
 }
 
 // leased returns the job d holds the current lease of. A lease that expired
