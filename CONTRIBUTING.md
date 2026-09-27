@@ -235,6 +235,15 @@ drew from somewhere other than `env.Rand`. Add a scenario with
 `register(Scenario{Name, Component, Run})`; once a chaos failure is
 understood, pin it as a deterministic `TestFault_*` test.
 
+The `Chaos` workflow runs the suite nightly against an ephemeral Postgres,
+and on demand (Actions → Chaos → Run workflow, with an optional seed,
+scenario, and iteration count). It is never a PR check. Its job summary
+shows the seed and each failure's replay command; on failure it uploads
+`chaos-artifacts/`: the `go test -json` output (race reports included), one
+report per failed iteration, the settings used, and the Postgres container's
+logs and state. `bash scripts/chaos-run.sh` produces the same directory
+locally.
+
 `make test-faults` runs the whole fault suite: the `internal/faulttest`
 harness and every `TestFault_*` test (found by name, so a new one joins
 without editing anything), under the race detector. Set `FAULT_POSTGRES_DSN`

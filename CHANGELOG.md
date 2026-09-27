@@ -12,6 +12,12 @@ version.
 
 ### Added
 
+- The `Chaos` workflow runs `make test-chaos` nightly and on demand (seed,
+  scenario, and iterations as inputs), never as a PR check; its summary
+  gives the seed and every failure's replay command, and a failed run
+  uploads the `go test -json` output, the failure reports (expected vs
+  observed included), the settings, and the Postgres logs and state
+  (`scripts/chaos-run.sh`) ([#390](https://github.com/gombit-dev/gombit/issues/390)).
 - `make test-chaos`: the stochastic resilience suite (`internal/chaos`,
   `chaos` build tag, never in PR CI). Scenarios draw their faults at random
   from one printed seed, randomized failure boundaries in multi-step writes,

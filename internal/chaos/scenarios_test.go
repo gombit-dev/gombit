@@ -115,6 +115,7 @@ func failureBoundary(t *testing.T, env Environment) {
 	default:
 		boundary = "none"
 	}
+	env.Drew(t, "%s, %d inserts, fault at %s", kind, n, boundary)
 	app, db := newApp(t, kind, dsn, faults)
 	batch := fmt.Sprintf("iter-%d", env.Iteration)
 	err := app.Tx(context.Background(), func(tx *gorm.DB) error {
@@ -160,6 +161,7 @@ func concurrentWriters(t *testing.T, env Environment) {
 			steps[i] = faulttest.Success()
 		}
 	}
+	env.Drew(t, "%s, %d writers, %d COMMITs failing", kind, writers, failing)
 	faults := &faulttest.DBFaults{Commit: faulttest.Sequence(steps...)}
 	app, db := newApp(t, kind, dsn, faults)
 	faults.Disarm()
@@ -235,6 +237,7 @@ func cancellationStress(t *testing.T, env Environment) {
 		reached = faults.Commit.Reached(1)
 		at = "COMMIT"
 	}
+	env.Drew(t, "%s, %d inserts, cancel during %s", kind, n, at)
 	app, db := newApp(t, kind, dsn, faults)
 	batch := fmt.Sprintf("iter-%d", env.Iteration)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -304,6 +307,7 @@ func postgresInterruption(t *testing.T, env Environment) {
 	ctx, cancel := context.WithTimeout(context.Background(), deadline)
 	defer cancel()
 	fault := [...]string{"stall", "cut", "reset", "restart"}[env.Rand.IntN(4)]
+	env.Drew(t, "postgres via proxy, fault %s, deadline %s", fault, deadline)
 	start := time.Now()
 	switch fault {
 	case "stall":
@@ -365,6 +369,10 @@ func httpDependencyFaults(t *testing.T, env Environment) {
 	for i := range steps {
 		steps[i] = menu[env.Rand.IntN(len(menu))]()
 	}
+	names := make([]string, len(steps))
+	for i, step := range steps {
+		names[i] = step.String()
+	}
 	dep := faulttest.NewHTTPDependency(t, steps...)
 	tracker := faulttest.TrackBodies(dep.Client().Transport)
 	client := &http.Client{Transport: tracker}
@@ -374,6 +382,7 @@ func httpDependencyFaults(t *testing.T, env Environment) {
 	cfg.HTTP.Addr = "127.0.0.1:0"
 	timeout := time.Duration(100+env.Rand.IntN(300)) * time.Millisecond
 	cfg.HTTP.RequestTimeout = timeout
+	env.Drew(t, "request timeout %s, dependency script %v", timeout, names)
 	app, err := framework.New(framework.WithConfig(cfg))
 	if err != nil {
 		t.Fatal(err)

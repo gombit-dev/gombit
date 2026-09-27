@@ -93,6 +93,7 @@ jobs:
           bash scripts/ci-prefetch-go-modules_test.sh
           bash scripts/ci-install-atlas_test.sh
           bash scripts/test-faults_test.sh
+          bash scripts/chaos-run_test.sh
 
   test:
     name: Test

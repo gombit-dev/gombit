@@ -34,13 +34,32 @@ type Environment struct {
 	Rand *mrand.Rand
 	// PostgresDSN is CHAOS_POSTGRES_DSN ("" skips the Postgres scenarios).
 	PostgresDSN string
+
+	mismatches *[]string // for the failure report
+	drawn      *[]string // what the scenario drew, for the failure report
+}
+
+// Drew records a random choice the scenario made (the database, the fault,
+// its boundary or deadline): logged, and repeated in the failure report so
+// the artifact says what was injected even when the scenario stops early.
+func (e Environment) Drew(t *testing.T, format string, args ...any) {
+	t.Helper()
+	line := fmt.Sprintf(format, args...)
+	if e.drawn != nil {
+		*e.drawn = append(*e.drawn, line)
+	}
+	t.Logf("drew: %s", line)
 }
 
 // Mismatch reports a violated invariant in the failure format: what was
-// expected and what was observed.
-func (Environment) Mismatch(t *testing.T, what, expected, observed string) {
+// expected and what was observed. The failure report repeats it.
+func (e Environment) Mismatch(t *testing.T, what, expected, observed string) {
 	t.Helper()
-	t.Errorf("%s\n\nexpected:\n  %s\n\nobserved:\n  %s", what, expected, observed)
+	msg := fmt.Sprintf("%s\n\nexpected:\n  %s\n\nobserved:\n  %s", what, expected, observed)
+	if e.mismatches != nil {
+		*e.mismatches = append(*e.mismatches, msg)
+	}
+	t.Errorf("%s", msg)
 }
 
 // scenarios are registered by the scenario files' init functions.
@@ -144,10 +163,12 @@ func TestChaos(t *testing.T) {
 			iterEnv := env
 			iterEnv.Iteration = it
 			iterEnv.Rand = rngFor(seed, s.Name, it)
+			var mismatches, drawn []string
+			iterEnv.mismatches, iterEnv.drawn = &mismatches, &drawn
 			t.Run(fmt.Sprintf("%s/iter-%d", s.Name, it), func(t *testing.T) {
 				t.Cleanup(func() {
 					if t.Failed() {
-						report(t, s, it)
+						report(t, s, it, drawn, mismatches)
 					}
 				})
 				s.Run(t, iterEnv)
@@ -158,7 +179,20 @@ func TestChaos(t *testing.T) {
 
 // report logs the failure block and, with CHAOS_REPORT_DIR set, writes it
 // to a file there (the nightly workflow uploads that directory).
-func report(t *testing.T, s Scenario, iteration int) {
+func report(t *testing.T, s Scenario, iteration int, drawn, mismatches []string) {
+	var observed strings.Builder
+	if len(drawn) > 0 {
+		observed.WriteString("\ndrawn:\n")
+		for _, d := range drawn {
+			observed.WriteString("  " + d + "\n")
+		}
+	}
+	for _, m := range mismatches {
+		observed.WriteString("\n" + m + "\n")
+	}
+	if len(mismatches) == 0 {
+		observed.WriteString("\n(the scenario stopped early; its messages are in the test output)\n")
+	}
 	block := fmt.Sprintf(`CHAOS FAILURE
 
 scenario: %s
@@ -167,10 +201,10 @@ seed: %d
 iteration: %d
 package: github.com/gombit-dev/gombit/internal/chaos
 test: %s
-
+%s
 replay:
   CHAOS_SEED=%d CHAOS_SCENARIO=%s CHAOS_ITERATION=%d make test-chaos
-`, s.Name, s.Component, seed, iteration, t.Name(), seed, s.Name, iteration)
+`, s.Name, s.Component, seed, iteration, t.Name(), observed.String(), seed, s.Name, iteration)
 	t.Log("\n" + block)
 	dir := os.Getenv("CHAOS_REPORT_DIR")
 	if dir == "" {
