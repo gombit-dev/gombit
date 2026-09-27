@@ -1,9 +1,9 @@
 # Background jobs
 
 > **Status:** the job contract (JOBS-1), queue drivers (JOBS-2), the worker
-> (JOBS-3), retries, backoff, and timeouts (JOBS-4), delayed jobs (JOBS-5), and
-> failed jobs (JOBS-6). Uniqueness helpers, metrics, and a test queue land in
-> the rest of the
+> (JOBS-3), retries, backoff, and timeouts (JOBS-4), delayed jobs (JOBS-5),
+> failed jobs (JOBS-6), and duplicate handling (JOBS-7). Metrics and a test
+> queue land in the rest of the
 > [JOBS-0 epic](https://github.com/gombit-dev/gombit/issues/278).
 
 A job is work that should not run inside an HTTP request: sending an email,
@@ -272,6 +272,63 @@ headroom in `MaxAttempts` for long jobs. An interrupted attempt is never given
 up on, even the last one, so a job can run again with `Attempt` past
 `MaxAttempts`; a handler should not assume `Attempt == MaxAttempts` is
 certainly its last run.
+
+## Duplicates
+
+Delivery is **at least once**. A job can run more than once:
+
+- its worker crashed, or its lease ran out mid-run, after the side effect but
+  before the acknowledgement: another worker runs it again;
+- it failed after the side effect (a later step errored): its retry runs the
+  whole handler again;
+- a deploy interrupted it, and it goes back to the queue.
+
+A job is never lost to these; it is repeated. Two tools keep the repeats
+harmless.
+
+### Unique dispatch
+
+```go
+app.Jobs().Dispatch(ctx, RebuildReport{AccountID: id},
+	jobs.Unique("rebuild-report:"+id, time.Hour))       // one queued or running at a time
+app.Jobs().Dispatch(ctx, SendDigest{UserID: id},
+	jobs.UniqueFor("digest:"+id, 24*time.Hour))         // at most one per day
+```
+
+`Unique(key, ttl)` refuses a second job with the same key on the same queue
+while one is queued, delayed, or running; the key frees when that job succeeds
+or is given up on, and after `ttl` in any case, so a job that vanishes cannot
+hold it forever. `UniqueFor(key, window)` refuses duplicates for `window` after
+the first dispatch, whether or not it has run. A refused dispatch returns a
+`*jobs.DuplicateError` (`errors.Is(err, jobs.ErrDuplicateDispatch)`) naming the
+job that holds the key; nothing is queued. The `sync` driver has no queue to
+hold a key and runs every dispatch.
+
+### Once per side effect
+
+```go
+func sendWelcome(ctx context.Context, job SendWelcomeEmail) error {
+	info, _ := jobs.InfoFromContext(ctx)
+	return jobs.Once(ctx, "welcome-email:"+info.ID, func(ctx context.Context) error {
+		return mailer.Welcome(ctx, job.UserID)
+	})
+}
+```
+
+`jobs.Once(ctx, key, fn)` runs `fn` unless an effect with that key already
+completed, and records it when `fn` succeeds, so a redelivered job skips it. Key
+it on the job ID and the effect. While one run holds a key, another gets
+`jobs.ErrInProgress`, an ordinary failure retried after the backoff. A failing
+`fn` releases the key for the retry. The lock expires after `jobs.LockFor`
+(default 15m), so a crashed run cannot block the key forever, and completions
+are remembered for `jobs.KeepFor` (default 7 days).
+
+`Once` narrows duplicates, it does not make them impossible: a run that dies
+between `fn` succeeding and the record keeps the lock until it expires, and the
+next delivery then runs `fn` again. When an effect must happen exactly once,
+make it idempotent at its destination too: a unique constraint, an idempotency
+key the other system honors (payment APIs take one; use the job ID). Outside a
+worker (the `sync` driver, a unit test) `Once` just runs `fn`.
 
 ## Failed jobs
 

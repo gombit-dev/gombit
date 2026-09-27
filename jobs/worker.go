@@ -244,6 +244,9 @@ func reserveBackoff(poll time.Duration, failures int) time.Duration {
 // ack it or release it for a retry.
 func (w *Worker) process(jobCtx context.Context, d Delivery) {
 	runCtx, cancelRun := context.WithCancel(jobCtx)
+	if store, ok := w.queue.(OnceStore); ok {
+		runCtx = withOnceStore(runCtx, store)
+	}
 	defer cancelRun()
 	stopRenewing := w.renewLease(runCtx, cancelRun, d)
 
