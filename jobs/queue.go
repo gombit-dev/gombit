@@ -19,6 +19,11 @@ type Queue interface {
 	// is zero or in the past. An ID is unique per queue: pushing one that is
 	// already on the queue fails with ErrDuplicateJob.
 	Push(ctx context.Context, queue string, env Envelope, at time.Time) error
+	// PushUnique is Push under a uniqueness claim: when unique.Key is held
+	// on queue it stores nothing and returns a *DuplicateError naming the
+	// holder; otherwise it claims the key for unique.TTL and pushes. A claim
+	// made UntilDone is released when the job is acked or buried.
+	PushUnique(ctx context.Context, queue string, env Envelope, at time.Time, unique UniqueKey) error
 	// Reserve leases the next available job from the first of queues that
 	// has one, in order. Within a queue the job that became available first
 	// goes first: a waiting job since its available-at time, a job whose
@@ -27,14 +32,47 @@ type Queue interface {
 	// block: with nothing available it returns ErrNoJob.
 	//
 	// A stored envelope that no longer decodes is still a delivery: leased,
-	// with a nil error and the failure in Delivery.Err. The caller must Ack
-	// it, or it returns on every lease expiry.
+	// with a nil error and the failure in Delivery.Err. The caller must end
+	// that lease, or the job returns on every lease expiry: Bury keeps the
+	// stored bytes with the failed jobs (what the worker does); Ack deletes
+	// them.
 	Reserve(ctx context.Context, queues []string, lease time.Duration) (Delivery, error)
 	// Ack removes a delivered job: it is done.
 	Ack(ctx context.Context, d Delivery) error
 	// Release returns a delivered job to its queue, available at at (a
 	// retry). Its attempt count is kept.
 	Release(ctx context.Context, d Delivery, at time.Time) error
+	// Postpone is Release for a delivery that did not get to run (its effect
+	// is held by another run: ErrInProgress): the attempt Reserve counted is
+	// taken back, so waiting does not spend the job's MaxAttempts.
+	Postpone(ctx context.Context, d Delivery, at time.Time) error
+	// Extend renews a delivery's lease to lease from now, so a job that runs
+	// longer than one lease is not delivered to a second worker. A worker
+	// calls it periodically while the handler runs.
+	Extend(ctx context.Context, d Delivery, lease time.Duration) error
+
+	// Bury moves a delivered job the worker gave up on to the queue's failed
+	// jobs, with the original envelope and why, instead of acking it away.
+	Bury(ctx context.Context, d Delivery, f Failure) error
+	// Failed lists a queue's failed jobs, most recent first, at most limit
+	// (all when limit <= 0, read in pages; prefer a limit on a large set).
+	// A read in pages is not a snapshot: a job that fails meanwhile can be
+	// missing from it (read again from the top to see it).
+	Failed(ctx context.Context, queue string, limit int) ([]FailedJob, error)
+	// FailedJob returns one failed job, or ErrNotFailed.
+	FailedJob(ctx context.Context, queue, id string) (FailedJob, error)
+	// RetryFailed puts a failed job back on its queue, available now, with a
+	// fresh set of attempts. ErrNotFailed when there is no such failed job.
+	// A job dispatched Unique reclaims its key, and is refused with a
+	// *DuplicateError while another job holds it.
+	RetryFailed(ctx context.Context, queue, id string) error
+	// ForgetFailed deletes a failed job. ErrNotFailed when there is none.
+	ForgetFailed(ctx context.Context, queue, id string) error
+	// PurgeFailed deletes a queue's failed jobs that failed before before (all
+	// of them when before is zero) and returns how many.
+	PurgeFailed(ctx context.Context, queue string, before time.Time) (int, error)
+	// Stats counts a queue's jobs by state, for metrics.
+	Stats(ctx context.Context, queue string) (QueueStats, error)
 	// Close releases the driver's resources.
 	Close() error
 }
@@ -46,9 +84,14 @@ type Delivery struct {
 	// Receipt identifies this lease. Ack and Release with a receipt whose
 	// job was since reserved again fail with ErrLeaseLost.
 	Receipt string
+	// AvailableAt is when the job became available to this delivery: its
+	// available-at time, or the deadline of the lease that expired. Now minus
+	// AvailableAt is how long it waited in the queue.
+	AvailableAt time.Time
 	// Err is non-nil when the stored envelope does not decode (KindDecode).
 	// Envelope then holds only the ID and attempt: the job cannot run, but
-	// it is leased, so the caller must Ack it.
+	// it is leased. Bury it to keep the stored bytes for inspection (Ack
+	// would delete them).
 	Err error
 }
 
@@ -65,3 +108,18 @@ var (
 	// ErrClosed: the queue was closed.
 	ErrClosed = errors.New("jobs: queue closed")
 )
+
+// QueueStats counts a queue's jobs.
+type QueueStats struct {
+	// Ready are waiting and due now; Scheduled wait for a later time (delays
+	// and retry backoffs).
+	Ready, Scheduled int
+	// Reserved are leased to a worker (running, or a crashed worker's job
+	// waiting for its lease to expire).
+	Reserved int
+	// Failed are given up on and kept (gombit jobs failed).
+	Failed int
+	// OldestReady is when the longest-waiting ready job became available
+	// (zero when none is ready).
+	OldestReady time.Time
+}

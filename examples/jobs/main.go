@@ -1,7 +1,8 @@
 // Command jobs shows background jobs end to end: a typed job registered on
 // the app's dispatcher, dispatched to a queue (the memory driver here; set
-// GOMBIT_JOBS_DRIVER=redis for the durable one), and consumed the way
-// `gombit worker` will: reserve, run, ack.
+// GOMBIT_JOBS_DRIVER=redis for the durable one), and run by the worker.
+// In an app, framework.Run starts the same worker as `./server worker`;
+// this example runs it in-process with framework.RunWorker.
 package main
 
 import (
@@ -10,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sync/atomic"
 	"time"
 
 	"github.com/gombit-dev/gombit/config"
@@ -40,12 +42,21 @@ func main() {
 	}
 	dispatcher := app.Jobs()
 
+	var done atomic.Int32
 	jobs.MustRegister(dispatcher.Registry(), func(ctx context.Context, job SendWelcomeEmail) error {
+		defer done.Add(1)
 		info, _ := jobs.InfoFromContext(ctx)
-		fmt.Printf("welcome user %d (job %s v%d, queued as v%d, attempt %d)\n",
-			job.UserID, info.Name, info.Version, info.QueuedVersion, info.Attempt)
-		return nil
-	}, jobs.UpgradeFrom(1, func(payload json.RawMessage) (json.RawMessage, error) {
+		// Once per job: a redelivered job does not send the email twice.
+		return jobs.Once(ctx, "welcome-email:"+info.ID, func(context.Context) error {
+			fmt.Printf("welcome user %d (job %s v%d, queued as v%d, attempt %d of %d)\n",
+				job.UserID, info.Name, info.Version, info.QueuedVersion, info.Attempt, info.MaxAttempts)
+			return nil
+		})
+	}, jobs.WithOptions(jobs.Options{
+		MaxAttempts: 8,
+		Timeout:     30 * time.Second,
+		Backoff:     jobs.Jittered(jobs.Exponential(5*time.Second, time.Hour)),
+	}), jobs.UpgradeFrom(1, func(payload json.RawMessage) (json.RawMessage, error) {
 		var v1 struct {
 			UserID uint   `json:"user_id"`
 			Email  string `json:"email"`
@@ -57,8 +68,12 @@ func main() {
 	}))
 
 	ctx := context.Background()
-	if _, err := dispatcher.Dispatch(ctx, SendWelcomeEmail{UserID: 42}); err != nil {
+	if _, err := dispatcher.Dispatch(ctx, SendWelcomeEmail{UserID: 42}, jobs.Unique("welcome:42", time.Hour)); err != nil {
 		log.Fatal(err)
+	}
+	// A second welcome for the same user while the first is queued is refused.
+	if _, err := dispatcher.Dispatch(ctx, SendWelcomeEmail{UserID: 42}, jobs.Unique("welcome:42", time.Hour)); !errors.Is(err, jobs.ErrDuplicateDispatch) {
+		log.Fatalf("duplicate dispatch: got %v, want ErrDuplicateDispatch", err)
 	}
 
 	// A version-1 job still in the queue from before the payload changed.
@@ -69,30 +84,21 @@ func main() {
 		log.Fatal(err)
 	}
 
-	// The worker loop, by hand.
-	for {
-		delivery, err := queue.Reserve(ctx, []string{dispatcher.DefaultQueue()}, time.Minute)
-		if errors.Is(err, jobs.ErrNoJob) {
-			break
+	// A job for later: the queue holds it until then.
+	if _, err := dispatcher.Dispatch(ctx, SendWelcomeEmail{UserID: 99}, jobs.Delay(50*time.Millisecond)); err != nil {
+		log.Fatal(err)
+	}
+
+	// Run the worker until all three jobs are done.
+	workerCtx, stopWorker := context.WithCancel(ctx)
+	go func() {
+		for done.Load() < 3 {
+			time.Sleep(10 * time.Millisecond)
 		}
-		if err != nil {
-			log.Fatal(err)
-		}
-		if delivery.Err != nil {
-			// A stored envelope that no longer decodes: it can never run, but
-			// it is leased, so ack it rather than meet it again.
-			log.Printf("dropping undecodable job %s: %v", delivery.Envelope.ID, delivery.Err)
-			_ = queue.Ack(ctx, delivery)
-			continue
-		}
-		if err := dispatcher.Registry().Run(ctx, delivery.Envelope); err != nil {
-			log.Printf("%s failed (%s): %v", delivery.Envelope.Name, jobs.Classify(err), err)
-			_ = queue.Release(ctx, delivery, time.Now().Add(time.Minute))
-			continue
-		}
-		if err := queue.Ack(ctx, delivery); err != nil {
-			log.Fatal(err)
-		}
+		stopWorker()
+	}()
+	if err := framework.RunWorker(workerCtx, app, jobs.WorkerOptions{Concurrency: 2, PollInterval: 10 * time.Millisecond}); err != nil {
+		log.Fatal(err)
 	}
 
 	// A job nothing handles fails visibly, with a classified reason.
