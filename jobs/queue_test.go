@@ -694,6 +694,51 @@ func runQueueConformance(t *testing.T, newQueue queueFactory) {
 		}
 	})
 
+	t.Run("a delivery says how long its job waited, and stats count states", func(t *testing.T) {
+		clock := newFakeClock()
+		q := newQueue(t, clock)
+		t0 := clock.Now()
+		if err := q.Push(ctx, "default", envelope("now"), time.Time{}); err != nil {
+			t.Fatal(err)
+		}
+		if err := q.Push(ctx, "default", envelope("later"), t0.Add(time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+		if err := q.Push(ctx, "default", envelope("failing"), time.Time{}); err != nil {
+			t.Fatal(err)
+		}
+		st, err := q.Stats(ctx, "default")
+		if err != nil || st.Ready != 2 || st.Scheduled != 1 || st.Reserved != 0 || st.Failed != 0 || !st.OldestReady.Equal(t0) {
+			t.Fatalf("Stats() = %+v, %v; want 2 ready (oldest at t0), 1 scheduled", st, err)
+		}
+		clock.Advance(5 * time.Minute)
+		d := mustReserve(t, q, "default")
+		if d.Envelope.ID != "now" || !d.AvailableAt.Equal(t0) {
+			t.Fatalf("reserved %s available since %s, want now since %s", d.Envelope.ID, d.AvailableAt, t0)
+		}
+		f := mustReserve(t, q, "default")
+		if err := q.Bury(ctx, f, jobs.Failure{Reason: jobs.ReasonExhausted}); err != nil {
+			t.Fatal(err)
+		}
+		st, _ = q.Stats(ctx, "default")
+		if st.Ready != 1 || st.Scheduled != 0 || st.Reserved != 1 || st.Failed != 1 {
+			t.Fatalf("Stats() after reserving and burying = %+v", st)
+		}
+		if later := mustReserve(t, q, "default"); !later.AvailableAt.Equal(t0.Add(time.Minute)) {
+			t.Fatalf("the delayed job was available since %s, want its time %s", later.AvailableAt, t0.Add(time.Minute))
+		}
+		// The first delivery's lease (a minute from +5m) runs out; its next
+		// delivery waited since that deadline.
+		deadline := clock.Now().Add(time.Minute)
+		clock.Advance(3 * time.Minute)
+		if again := mustReserve(t, q, "default"); again.Envelope.ID != "now" || !again.AvailableAt.Equal(deadline) {
+			t.Fatalf("redelivery %s available since %s, want since the lease deadline %s", again.Envelope.ID, again.AvailableAt, deadline)
+		}
+		if _, err := q.Stats(ctx, "Bad Queue"); !errors.Is(err, jobs.ErrInvalidQueue) {
+			t.Fatalf("Stats(invalid queue) = %v", err)
+		}
+	})
+
 	t.Run("concurrent workers never share a job", func(t *testing.T) {
 		q := newQueue(t, newFakeClock())
 		const n = 60

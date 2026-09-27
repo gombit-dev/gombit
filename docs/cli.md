@@ -579,7 +579,7 @@ Command names that collide with framework families (`new`, `dev`, `build`,
 ## `gombit worker`
 
 ```sh
-gombit worker [--queue default] [--concurrency N] [--lease 5m] [--shutdown-timeout 30s]
+gombit worker [--queue default] [--concurrency N] [--lease 5m] [--shutdown-timeout 30s] [--metrics-addr :9091]
 ```
 
 Runs the app's background-job worker from an application directory: it

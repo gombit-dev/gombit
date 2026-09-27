@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -58,6 +60,7 @@ type App struct {
 	redis              *redis.Client
 	jobs               *jobs.Dispatcher
 	jobsOwned          bool
+	jobMetrics         *jobs.Metrics
 	db                 *database.DB
 	logger             *zap.Logger
 	router             *gin.Engine
@@ -95,6 +98,7 @@ func New(options ...Option) (*App, error) {
 	app := &App{
 		cfg:             config.Default(),
 		shutdownTimeout: defaultShutdownTimeout,
+		jobMetrics:      jobs.NewMetrics(),
 	}
 
 	for _, option := range options {
@@ -132,7 +136,7 @@ func New(options ...Option) (*App, error) {
 		})
 	}
 	if app.router == nil {
-		router, err := newRouter(app.cfg, app.csrfExemptPaths, app.rawBodyPaths, app.handleReadyz)
+		router, err := newRouter(app.cfg, app.csrfExemptPaths, app.rawBodyPaths, app.handleReadyz, app.writeJobMetrics)
 		if err != nil {
 			return nil, err
 		}
@@ -158,7 +162,7 @@ func New(options ...Option) (*App, error) {
 		app.redis = store.Redis()
 	}
 	if app.jobs == nil {
-		registry := jobs.NewRegistry(jobs.WithPropagator(JobPropagator()))
+		registry := jobs.NewRegistry(jobs.WithPropagator(JobPropagator()), jobs.WithPropagator(jobs.OTelPropagator()))
 		var dispatcher *jobs.Dispatcher
 		var err error
 		if app.cfg.Jobs.Driver == config.JobsDriverRedis && app.redis != nil {
@@ -679,7 +683,7 @@ func syncLogger(logger *zap.Logger) error {
 	return nil
 }
 
-func newRouter(cfg config.Config, csrfExemptPaths, rawBodyPaths []string, readyz gin.HandlerFunc) (*gin.Engine, error) {
+func newRouter(cfg config.Config, csrfExemptPaths, rawBodyPaths []string, readyz gin.HandlerFunc, extraMetrics func(io.Writer)) (*gin.Engine, error) {
 	router := gin.New()
 	enableMethodNotAllowed(router)
 	if err := configureTrustedProxies(router, cfg.HTTP.TrustedProxies); err != nil {
@@ -699,9 +703,28 @@ func newRouter(cfg config.Config, csrfExemptPaths, rawBodyPaths []string, readyz
 		})
 	})
 	router.GET("/readyz", readyz)
-	router.GET("/metrics", metrics.handler)
+	router.GET("/metrics", func(c *gin.Context) {
+		var b strings.Builder
+		b.WriteString(metrics.render())
+		if extraMetrics != nil {
+			extraMetrics(&b)
+		}
+		c.Data(http.StatusOK, "text/plain; version=0.0.4; charset=utf-8", []byte(b.String()))
+	})
 	return router, nil
 }
+
+// writeJobMetrics appends the metrics of workers running in this process
+// (RunWorker), when there are any.
+func (a *App) writeJobMetrics(w io.Writer) {
+	if a.jobMetrics == nil || a.jobMetrics.Empty() {
+		return
+	}
+	_ = a.jobMetrics.WritePrometheus(w, nil, time.Now())
+}
+
+// JobMetrics returns the metrics workers in this process record into.
+func (a *App) JobMetrics() *jobs.Metrics { return a.jobMetrics }
 
 // readinessTimeout bounds the datastore probe so a hung datastore cannot hang
 // the /readyz handler (and, with it, a host's traffic-gating decision). A var,

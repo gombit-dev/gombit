@@ -2,8 +2,8 @@
 
 > **Status:** the job contract (JOBS-1), queue drivers (JOBS-2), the worker
 > (JOBS-3), retries, backoff, and timeouts (JOBS-4), delayed jobs (JOBS-5),
-> failed jobs (JOBS-6), and duplicate handling (JOBS-7). Metrics and a test
-> queue land in the rest of the
+> failed jobs (JOBS-6), duplicate handling (JOBS-7), and observability
+> (JOBS-8). A test queue lands in the rest of the
 > [JOBS-0 epic](https://github.com/gombit-dev/gombit/issues/278).
 
 A job is work that should not run inside an HTTP request: sending an email,
@@ -129,6 +129,7 @@ GOMBIT_JOBS_DRIVER=redis gombit worker --concurrency 4
 | `--concurrency` | `1` | jobs running at once |
 | `--lease` | `5m` | how long a reserved job is held; renewed every third of it while the handler runs |
 | `--shutdown-timeout` | `30s` | how long in-flight jobs get to finish on SIGINT/SIGTERM |
+| `--metrics-addr` | off | serve `/metrics` and `/livez` on this address, e.g. `:9091` (see [Observability](#observability)) |
 
 A worker needs a queue another process can reach, so it refuses to start with
 the `sync` driver (jobs already ran at dispatch) and the `memory` driver (its
@@ -272,6 +273,42 @@ headroom in `MaxAttempts` for long jobs. An interrupted attempt is never given
 up on, even the last one, so a job can run again with `Attempt` past
 `MaxAttempts`; a handler should not assume `Attempt == MaxAttempts` is
 certainly its last run.
+
+## Observability
+
+Every job is observable without instrumenting it.
+
+**Logs.** The worker logs one structured entry per outcome (`job succeeded`,
+`job failed`, `job failed for good`, …) with `job_id`, `job`, `queue`,
+`attempt`, `duration`, `waited` (time in the queue since it became available),
+the failure `kind`, and the propagated request and trace IDs under `metadata`.
+`job_id` is the same on every attempt of a job, so filtering on it shows its
+whole history, retries included; `attempt` orders them.
+
+**Traces.** The app's registry carries OpenTelemetry context through the
+envelope (`jobs.OTelPropagator`: W3C `traceparent`/`tracestate` and baggage,
+or your global propagator), and every run is a span, `job <name>`, a child of
+the span that dispatched it, with the job's name, ID, version, and attempt,
+and an error status when it fails. That needs an OpenTelemetry SDK in your app
+(`otel.SetTracerProvider`); without one both are no-ops.
+
+**Metrics** (Prometheus text format):
+
+| Metric | Labels | |
+|--------|--------|--|
+| `gombit_jobs_processed_total` | `job`, `queue`, `result` | deliveries by outcome: `succeeded`, `retried`, `failed` (given up), `interrupted`, `abandoned` (lease lost), `undecodable` |
+| `gombit_jobs_run_seconds` (histogram) | `job`, `queue` | handler time |
+| `gombit_jobs_wait_seconds` (histogram) | `job`, `queue` | queue latency: from available (dispatch time, delay, retry time, or an expired lease) to started; buckets 10ms to 30m |
+| `gombit_jobs_in_flight` | `queue` | running now |
+| `gombit_jobs_queued` | `queue`, `state` | `ready`, `scheduled`, `reserved`, `failed` (worker endpoint) |
+| `gombit_jobs_oldest_ready_seconds` | `queue` | age of the longest-waiting ready job (worker endpoint) |
+
+A worker process serves no HTTP, so pass `--metrics-addr :9091` and scrape
+that; it also answers `/livez`. The queue gauges are read from the queue at
+scrape time, for the queues the worker consumes. A worker running inside the
+web process (`framework.RunWorker`) records into the app's own `/metrics`.
+`job` labels are registered job names; any other name counts as `unknown`,
+so an envelope cannot create series.
 
 ## Duplicates
 

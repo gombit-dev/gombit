@@ -5,6 +5,9 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -15,9 +18,12 @@ import (
 )
 
 func TestParseWorkerFlags(t *testing.T) {
-	opts, err := ParseWorkerFlags([]string{"--queue", "critical,mail", "--queue=default", "--concurrency", "8", "--lease", "2m", "--shutdown-timeout", "45s"}, nil)
+	opts, err := ParseWorkerFlags([]string{"--queue", "critical,mail", "--queue=default", "--concurrency", "8", "--lease", "2m", "--shutdown-timeout", "45s", "--metrics-addr", ":9091"}, nil)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if opts.MetricsAddr != ":9091" {
+		t.Fatalf("MetricsAddr = %q", opts.MetricsAddr)
 	}
 	if strings.Join(opts.Queues, ",") != "critical,mail,default" || opts.Concurrency != 8 || opts.Lease != 2*time.Minute || opts.ShutdownTimeout != 45*time.Second {
 		t.Fatalf("opts = %+v", opts)
@@ -131,5 +137,74 @@ func TestWorkerModeRefusesDriversAWorkerCannotConsume(t *testing.T) {
 	}
 	if err := RunWorker(context.Background(), app, jobs.WorkerOptions{}); !errors.Is(err, jobs.ErrNoQueue) {
 		t.Fatalf("RunWorker(sync) = %v, want ErrNoQueue", err)
+	}
+}
+
+// TestJobMetricsOnTheAppAndTheWorkerEndpoint: jobs run by an in-process
+// worker show on the app's /metrics, and a worker's --metrics-addr endpoint
+// adds each queue's depth.
+func TestJobMetricsOnTheAppAndTheWorkerEndpoint(t *testing.T) {
+	cfg := config.Default()
+	cfg.Jobs.Driver = config.JobsDriverMemory
+	app, err := New(WithConfig(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ran atomic.Int32
+	jobs.MustRegister(app.Jobs().Registry(), func(context.Context, workerJob) error { ran.Add(1); return nil })
+	for i := 0; i < 2; i++ {
+		if _, err := app.Jobs().Dispatch(context.Background(), workerJob{N: i}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := app.Jobs().Dispatch(context.Background(), workerJob{N: 9}, jobs.Delay(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	addr, stop, err := serveWorkerMetrics("127.0.0.1:0", app, []string{"default"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = stop() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- RunWorker(ctx, app, jobs.WorkerOptions{PollInterval: 5 * time.Millisecond}) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for ran.Load() < 2 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	get := func(url string) string {
+		t.Helper()
+		resp, err := http.Get(url) // #nosec G107 -- the test's own listener
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		body, _ := io.ReadAll(resp.Body)
+		return string(body)
+	}
+	worker := get("http://" + addr + "/metrics")
+	for _, want := range []string{
+		`gombit_jobs_processed_total{job="worker_job",queue="default",result="succeeded"} 2`,
+		`gombit_jobs_queued{queue="default",state="scheduled"} 1`,
+	} {
+		if !strings.Contains(worker, want) {
+			t.Errorf("worker /metrics missing %s:\n%s", want, worker)
+		}
+	}
+	if live := get("http://" + addr + "/livez"); !strings.Contains(live, `"ok"`) {
+		t.Errorf("worker /livez = %s", live)
+	}
+
+	rec := httptest.NewRecorder()
+	app.Router().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if !strings.Contains(rec.Body.String(), `gombit_jobs_processed_total{job="worker_job",queue="default",result="succeeded"} 2`) {
+		t.Errorf("app /metrics lacks the in-process worker's jobs:\n%s", rec.Body.String())
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }
