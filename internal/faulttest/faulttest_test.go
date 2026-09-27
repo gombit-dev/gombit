@@ -209,3 +209,21 @@ func TestMisuseIsRefused(t *testing.T) {
 		})
 	}
 }
+
+// TestResetIsolatesCallsInFlight: a call that started before Reset and ends
+// after it does not count in the new generation.
+func TestResetIsolatesCallsInFlight(t *testing.T) {
+	inj := faulttest.BlockUntil(make(chan struct{}))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- inj.Hit(ctx) }()
+	<-inj.Reached(1)
+	inj.Reset()
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("the blocked call = %v, want context.Canceled", err)
+	}
+	if inj.Calls() != 0 || inj.Failures() != 0 {
+		t.Fatalf("after Reset: Calls %d, Failures %d; a call from before the reset leaked into the counts", inj.Calls(), inj.Failures())
+	}
+}

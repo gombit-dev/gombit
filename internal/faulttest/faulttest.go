@@ -103,6 +103,9 @@ type Injector struct {
 	calls    int
 	failures int
 	reached  map[int]chan struct{}
+	// gen is bumped by Reset: a call that started before it finishes
+	// without touching the new counts.
+	gen int
 }
 
 func newInjector(rest Step, steps ...Step) *Injector {
@@ -158,7 +161,7 @@ func (i *Injector) Hit(ctx context.Context) error {
 	}
 	i.mu.Lock()
 	i.calls++
-	n := i.calls
+	n, gen := i.calls, i.gen
 	step := i.rest
 	if n <= len(i.steps) {
 		step = i.steps[n-1]
@@ -172,7 +175,9 @@ func (i *Injector) Hit(ctx context.Context) error {
 	err := step.run(ctx)
 	if err != nil {
 		i.mu.Lock()
-		i.failures++
+		if i.gen == gen {
+			i.failures++
+		}
 		i.mu.Unlock()
 	}
 	return err
@@ -232,8 +237,9 @@ func (i *Injector) Reached(n int) <-chan struct{} {
 }
 
 // Reset starts the injector over: counts go to zero and the next call is
-// call 1 again. Channels from Reached for calls not yet reached stay
-// pending, numbered from the new start.
+// call 1 again. A call still in flight from before (a blocked one, say)
+// finishes as it would have, but no longer counts. Channels from Reached
+// for calls not yet reached stay pending, numbered from the new start.
 func (i *Injector) Reset() {
 	if i == nil {
 		return
@@ -241,4 +247,5 @@ func (i *Injector) Reset() {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.calls, i.failures = 0, 0
+	i.gen++
 }

@@ -5,11 +5,13 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"errors"
+	"fmt"
 	"io"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"gorm.io/gorm"
 
@@ -307,3 +309,211 @@ func TestAFailedPrepareLeavesNoMark(t *testing.T) {
 		t.Fatalf("executed %d, Statement calls %d; want 0 and 2", execs.Load(), stmt.Calls())
 	}
 }
+
+// capConn is a base connection with a chosen set of optional interfaces.
+type capConn struct{ driver.Conn }
+
+type pingConn struct{ driver.Conn }
+
+func (pingConn) Ping(context.Context) error { return nil }
+
+type resetValidConn struct{ driver.Conn }
+
+func (resetValidConn) ResetSession(context.Context) error { return nil }
+func (resetValidConn) IsValid() bool                      { return true }
+
+type allConn struct{ driver.Conn }
+
+func (allConn) Ping(context.Context) error         { return nil }
+func (allConn) ResetSession(context.Context) error { return nil }
+func (allConn) IsValid() bool                      { return true }
+
+type resetConn struct{ driver.Conn }
+
+func (resetConn) ResetSession(context.Context) error { return nil }
+
+// TestWrappedConnHasTheBasesOptionalInterfaces: database/sql decides how
+// the pool treats a connection by its optional interfaces (SessionResetter
+// + Validator lets it keep one after a canceled transaction), so the
+// wrapper must have exactly the base's.
+func TestWrappedConnHasTheBasesOptionalInterfaces(t *testing.T) {
+	var execs atomic.Int32
+	base := preparingConn{&execs}
+	for name, conn := range map[string]driver.Conn{
+		"none":           capConn{base},
+		"pinger":         pingConn{base},
+		"resetter":       resetConn{base},
+		"resetter+valid": resetValidConn{base},
+		"all three":      allConn{base},
+	} {
+		t.Run(name, func(t *testing.T) {
+			wrapped, err := faulttest.WrapConnector(connFunc(func() driver.Conn { return conn }), nil).Connect(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			for iface, has := range map[string][2]bool{
+				"Pinger":          {implements[driver.Pinger](conn), implements[driver.Pinger](wrapped)},
+				"SessionResetter": {implements[driver.SessionResetter](conn), implements[driver.SessionResetter](wrapped)},
+				"Validator":       {implements[driver.Validator](conn), implements[driver.Validator](wrapped)},
+			} {
+				if has[0] != has[1] {
+					t.Errorf("%s: base %v, wrapped %v; want the same", iface, has[0], has[1])
+				}
+			}
+		})
+	}
+}
+
+func implements[I any](v any) bool {
+	_, ok := v.(I)
+	return ok
+}
+
+// TestWrapperKeepsThePoolsConnectionLifetime: with no fault armed, a
+// transaction canceled mid-flight on SQLite (no SessionResetter/Validator)
+// costs its connection exactly as on the raw driver.
+func TestWrapperKeepsThePoolsConnectionLifetime(t *testing.T) {
+	dsn := filepath.Join(t.TempDir(), "lifetime.db")
+	probe, err := sql.Open("sqlite3", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := probe.Driver()
+	_ = probe.Close()
+	count := func(wrap bool) int {
+		connector := sqliteConnector{driver: base, dsn: dsn}
+		connects := faulttest.Sequence() // never fails: counts connects
+		counted := faulttest.WrapConnector(connector, &faulttest.DBFaults{Connect: connects})
+		var db *sql.DB
+		if wrap {
+			db = sql.OpenDB(counted)
+		} else {
+			// The raw driver's connections, counted by a wrapper around the
+			// connector alone.
+			db = sql.OpenDB(rawConnector{connector: connector, connects: connects})
+		}
+		defer func() { _ = db.Close() }()
+		db.SetMaxOpenConns(1)
+		ctx, cancel := context.WithCancel(context.Background())
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.ExecContext(ctx, "SELECT 1"); err != nil {
+			t.Fatal(err)
+		}
+		cancel()
+		// Let database/sql's own cancellation end the transaction (that is
+		// where it decides to keep or discard the connection), rather than
+		// racing it with an explicit Rollback.
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			_, err := tx.ExecContext(context.Background(), "SELECT 1")
+			if errors.Is(err, sql.ErrTxDone) {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("the canceled transaction never ended: %v", err)
+			}
+			time.Sleep(time.Millisecond)
+		}
+		if err := db.Ping(); err != nil {
+			t.Fatal(err)
+		}
+		return connects.Calls()
+	}
+	if raw, wrapped := count(false), count(true); raw != wrapped {
+		t.Fatalf("connections dialed: raw driver %d, wrapped %d; the wrapper changed the pool's behavior", raw, wrapped)
+	}
+}
+
+// rawConnector counts Connect on the base connector and returns the base
+// driver's connection unwrapped.
+type rawConnector struct {
+	connector driver.Connector
+	connects  *faulttest.Injector
+}
+
+func (r rawConnector) Connect(ctx context.Context) (driver.Conn, error) {
+	_ = r.connects.Hit(ctx)
+	return r.connector.Connect(ctx)
+}
+func (r rawConnector) Driver() driver.Driver { return r.connector.Driver() }
+
+// txConn runs transactions whose Rollback fails when rollbackFails.
+type txConn struct {
+	preparingConn
+	rollbackFails bool
+}
+
+func (c txConn) Begin() (driver.Tx, error) { return fakeTx{c.rollbackFails}, nil }
+
+type fakeTx struct{ rollbackFails bool }
+
+func (fakeTx) Commit() error { return nil }
+func (t fakeTx) Rollback() error {
+	if t.rollbackFails {
+		return errors.New("rollback failed")
+	}
+	return nil
+}
+
+// TestAFailedRollbackDiscardsTheConnection: an injected commit (or
+// rollback) fault whose real rollback fails reports both, plus
+// driver.ErrBadConn, so the pool drops the connection instead of reusing
+// one that may still be inside the transaction.
+func TestAFailedRollbackDiscardsTheConnection(t *testing.T) {
+	for _, rollbackFails := range []bool{false, true} {
+		for _, boundary := range []string{"commit", "rollback"} {
+			t.Run(fmt.Sprintf("%s/rollbackFails=%v", boundary, rollbackFails), func(t *testing.T) {
+				var execs atomic.Int32
+				connects := faulttest.Sequence()
+				faults := &faulttest.DBFaults{Connect: connects}
+				if boundary == "commit" {
+					faults.Commit = faulttest.FailOnce(faulttest.ErrInjected)
+				} else {
+					faults.Rollback = faulttest.FailOnce(faulttest.ErrInjected)
+				}
+				db := sql.OpenDB(faulttest.WrapConnector(connFunc(func() driver.Conn {
+					return txConn{preparingConn{&execs}, rollbackFails}
+				}), faults))
+				defer func() { _ = db.Close() }()
+				db.SetMaxOpenConns(1)
+				tx, err := db.Begin()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if boundary == "commit" {
+					err = tx.Commit()
+				} else {
+					err = tx.Rollback()
+				}
+				if !errors.Is(err, faulttest.ErrInjected) {
+					t.Fatalf("%s = %v, want the injected fault", boundary, err)
+				}
+				if got := errors.Is(err, driver.ErrBadConn); got != rollbackFails {
+					t.Fatalf("%s = %v: ErrBadConn %v, want %v", boundary, err, got, rollbackFails)
+				}
+				if err := db.Ping(); err != nil {
+					t.Fatal(err)
+				}
+				want := 1
+				if rollbackFails {
+					want = 2 // the dirty connection was discarded and redialed
+				}
+				if connects.Calls() != want {
+					t.Fatalf("connections dialed = %d, want %d", connects.Calls(), want)
+				}
+			})
+		}
+	}
+}
+
+// sqliteConnector opens the SQLite driver (which has no DriverContext).
+type sqliteConnector struct {
+	driver driver.Driver
+	dsn    string
+}
+
+func (c sqliteConnector) Connect(context.Context) (driver.Conn, error) { return c.driver.Open(c.dsn) }
+func (c sqliteConnector) Driver() driver.Driver                        { return c.driver }

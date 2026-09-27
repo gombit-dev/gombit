@@ -6,6 +6,7 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
+	"io"
 	"sync"
 
 	"github.com/gombit-dev/gombit/config"
@@ -37,7 +38,9 @@ type DBFaults struct {
 	Commit *Injector
 	// Rollback is hit before a transaction rolls back. The rollback still
 	// happens (the connection must not stay inside the transaction); the
-	// injected error is what the caller sees.
+	// injected error is what the caller sees. When the real rollback fails
+	// too (after either fault), the error also carries it and
+	// driver.ErrBadConn, so the pool discards the connection.
 	Rollback *Injector
 }
 
@@ -113,7 +116,15 @@ func WrapConnector(c driver.Connector, faults *DBFaults) driver.Connector {
 	if faults == nil {
 		faults = &DBFaults{}
 	}
-	return &connector{base: c, faults: faults}
+	wrapped := &connector{base: c, faults: faults}
+	if closer, ok := c.(io.Closer); ok {
+		// database/sql closes a connector that is an io.Closer with the DB.
+		return struct {
+			*connector
+			io.Closer
+		}{wrapped, closer}
+	}
+	return wrapped
 }
 
 type connector struct {
@@ -129,7 +140,63 @@ func (c *connector) Connect(ctx context.Context) (driver.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &faultConn{base: conn, faults: c.faults}, nil
+	return wrapConn(&faultConn{base: conn, faults: c.faults}), nil
+}
+
+// wrapConn gives fc exactly the optional interfaces its base connection
+// has among those database/sql decides pool behavior by: a Pinger, and a
+// SessionResetter and Validator (together they let the pool keep a
+// connection after a canceled transaction). Answering them for a driver
+// that does not would change how the pool treats its connections even with
+// no fault armed.
+func wrapConn(fc *faultConn) driver.Conn {
+	p, hasPing := fc.base.(driver.Pinger)
+	r, hasReset := fc.base.(driver.SessionResetter)
+	v, hasValid := fc.base.(driver.Validator)
+	switch {
+	case hasPing && hasReset && hasValid:
+		return struct {
+			*faultConn
+			driver.Pinger
+			driver.SessionResetter
+			driver.Validator
+		}{fc, p, r, v}
+	case hasPing && hasReset:
+		return struct {
+			*faultConn
+			driver.Pinger
+			driver.SessionResetter
+		}{fc, p, r}
+	case hasPing && hasValid:
+		return struct {
+			*faultConn
+			driver.Pinger
+			driver.Validator
+		}{fc, p, v}
+	case hasReset && hasValid:
+		return struct {
+			*faultConn
+			driver.SessionResetter
+			driver.Validator
+		}{fc, r, v}
+	case hasPing:
+		return struct {
+			*faultConn
+			driver.Pinger
+		}{fc, p}
+	case hasReset:
+		return struct {
+			*faultConn
+			driver.SessionResetter
+		}{fc, r}
+	case hasValid:
+		return struct {
+			*faultConn
+			driver.Validator
+		}{fc, v}
+	default:
+		return fc
+	}
 }
 
 func (c *connector) Driver() driver.Driver { return c.base.Driver() }
@@ -154,9 +221,6 @@ var (
 	_ driver.ExecerContext      = (*faultConn)(nil)
 	_ driver.QueryerContext     = (*faultConn)(nil)
 	_ driver.NamedValueChecker  = (*faultConn)(nil)
-	_ driver.Pinger             = (*faultConn)(nil)
-	_ driver.SessionResetter    = (*faultConn)(nil)
-	_ driver.Validator          = (*faultConn)(nil)
 )
 
 func (c *faultConn) Prepare(query string) (driver.Stmt, error) {
@@ -177,7 +241,14 @@ func (c *faultConn) PrepareContext(ctx context.Context, query string) (driver.St
 		c.checked(query) // no execution will consume a declined statement's mark
 		return nil, err
 	}
-	return &faultStmt{base: st, conn: c, query: query}, nil
+	fs := &faultStmt{base: st, conn: c, query: query}
+	if cc, ok := st.(driver.ColumnConverter); ok { //nolint:staticcheck // forwarded as the driver has it
+		return struct {
+			*faultStmt
+			driver.ColumnConverter //nolint:staticcheck // forwarded as the driver has it
+		}{fs, cc}, nil
+	}
+	return fs, nil
 }
 
 func (c *faultConn) Close() error { return c.base.Close() }
@@ -261,27 +332,6 @@ func (c *faultConn) CheckNamedValue(nv *driver.NamedValue) error {
 		return ch.CheckNamedValue(nv)
 	}
 	return driver.ErrSkip
-}
-
-func (c *faultConn) Ping(ctx context.Context) error {
-	if p, ok := c.base.(driver.Pinger); ok {
-		return p.Ping(ctx)
-	}
-	return nil
-}
-
-func (c *faultConn) ResetSession(ctx context.Context) error {
-	if r, ok := c.base.(driver.SessionResetter); ok {
-		return r.ResetSession(ctx)
-	}
-	return nil
-}
-
-func (c *faultConn) IsValid() bool {
-	if v, ok := c.base.(driver.Validator); ok {
-		return v.IsValid()
-	}
-	return true
 }
 
 type faultStmt struct {
@@ -374,17 +424,30 @@ type faultTx struct {
 }
 
 func (t *faultTx) Commit() error {
-	if err := t.faults.Commit.Hit(context.Background()); err != nil {
-		_ = t.base.Rollback()
-		return err
+	injected := t.faults.Commit.Hit(context.Background())
+	if injected == nil {
+		return t.base.Commit()
 	}
-	return t.base.Commit()
+	return withRollback(injected, t.base.Rollback())
 }
 
 func (t *faultTx) Rollback() error {
 	injected := t.faults.Rollback.Hit(context.Background())
-	if err := t.base.Rollback(); err != nil {
-		return err
+	rbErr := t.base.Rollback()
+	if injected == nil {
+		return rbErr
 	}
-	return injected
+	return withRollback(injected, rbErr)
+}
+
+// withRollback is the error for an injected fault whose real rollback
+// returned rbErr: the fault alone when the rollback succeeded (the
+// connection is clean), else the fault, the rollback's error, and
+// driver.ErrBadConn, so the pool discards a connection that may still be
+// inside the transaction while errors.Is still finds the fault.
+func withRollback(injected, rbErr error) error {
+	if rbErr == nil {
+		return injected
+	}
+	return errors.Join(injected, rbErr, driver.ErrBadConn)
 }
