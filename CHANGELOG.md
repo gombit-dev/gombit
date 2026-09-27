@@ -12,6 +12,15 @@ version.
 
 ### Added
 
+- `gombit db check` validates the whole schema chain in one non-interactive
+  command: generated contract, model registry (`AutoMigrate` ↔
+  `models.json`), migration-directory integrity, migration safety, models ↔
+  migrations, pending migrations, and the live database schema against what
+  its applied migrations build (a column added or an index dropped outside a
+  migration), plus the committed TypeScript client with `--openapi-url`. It
+  names the inconsistent layer with its fix, exits non-zero on drift, and
+  prints a deterministic report (`--json` too). `--no-db` skips the database
+  layers ([#313](https://github.com/gombit-dev/gombit/issues/313)).
 - `database.Delete(ctx, db, value, conds...)` deletes rows physically, even for
   a model that embeds `gorm.DeletedAt`, so the database's `ON DELETE RESTRICT`
   / `CASCADE` / `SET NULL` is what deletion does. A refused delete wraps

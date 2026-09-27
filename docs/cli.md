@@ -592,6 +592,7 @@ gombit db verify [--write] [--json] [--strict]
 gombit db hash
 gombit db lint [--latest N] [--json]
 gombit db repair [--write-manifests]
+gombit db check [--no-db] [--db-timeout 30s] [--openapi-url URL] [--json]
 ```
 
 `gombit db hash` wraps `atlas migrate hash` to recompute the directory checksum
@@ -604,6 +605,14 @@ destructive or unsafe change needs a `-- gombit:allow <id>` line in the
 migration), and `gombit db repair` restores consistency after a hand
 edit. See
 [migrations.md § Linting and repairing](migrations.md#linting-and-repairing-the-migration-directory).
+
+`gombit db check` is the single schema-integrity gate for local development
+and CI: it runs the generated-contract, model-registry, migration-directory,
+migration-safety, models ↔ migrations, pending-migration, and database-schema
+checks (plus the TypeScript client with `--openapi-url`), names the layer that
+is inconsistent with its fix, and exits non-zero on any drift. `--no-db` skips
+the database layers. See
+[migrations.md § Checking the whole chain](migrations.md#checking-the-whole-chain).
 
 `gombit db plan` classifies the change the models imply against the migration
 directory before a migration is written: `destructive` (a dropped table or

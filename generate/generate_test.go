@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"go/parser"
 	"go/token"
 	"io"
@@ -144,6 +145,9 @@ func TestCheckFailsWhenGeneratorOwnedDiffers(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "handler.gen.go") {
 		t.Fatalf("error should name the stale file, got: %v", err)
+	}
+	if !errors.Is(err, ErrStale) {
+		t.Fatalf("error should wrap ErrStale (gombit db check tells staleness from failure by it), got: %v", err)
 	}
 }
 

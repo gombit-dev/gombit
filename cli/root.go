@@ -152,6 +152,7 @@ func dbUsage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "  verify [--dir database/migrations] [--write] [--json] [--strict]")
 	_, _ = fmt.Fprintln(w, "  hash [--dir database/migrations] [--atlas-bin atlas]")
 	_, _ = fmt.Fprintln(w, "  lint [--latest N] [--json]")
+	_, _ = fmt.Fprintln(w, "  check [--no-db] [--db-timeout 30s] [--openapi-url URL] [--json]")
 	_, _ = fmt.Fprintln(w, "  repair [--write-manifests]")
 }
 

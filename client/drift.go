@@ -11,8 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/gombit-dev/gombit/contract"
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/gombit-dev/gombit/contract"
 )
 
 //go:generate go run ../cmd/gombit client check --write --spec ../examples/client/openapi.json --out ../examples/client/frontend/src/api/generated
@@ -50,6 +50,10 @@ type DriftOptions struct {
 	Stdout    io.Writer
 	Stderr    io.Writer
 }
+
+// ErrDrift is the error CheckDrift wraps when a committed artifact differs
+// from what the contract produces.
+var ErrDrift = errors.New("client: contract drift")
 
 // CheckDrift regenerates the OpenAPI document and TypeScript client and
 // reports whether committed artifacts would change.
@@ -202,7 +206,7 @@ func compareSampleFixtures(ctx context.Context, opts DriftOptions, generatedSpec
 	}
 
 	if len(drifted) > 0 {
-		return fmt.Errorf("client: contract drift in %s; regenerate with gombit client check --write", strings.Join(drifted, ", "))
+		return fmt.Errorf("%w in %s; regenerate with gombit client check --write", ErrDrift, strings.Join(drifted, ", "))
 	}
 	_, err = fmt.Fprintln(opts.Stdout, "no contract drift")
 	return err

@@ -81,6 +81,10 @@ func (opts *Options) withDefaults() {
 	}
 }
 
+// ErrStale is the error Generate wraps, with Check, when a generated file
+// differs from what the models produce (or is missing).
+var ErrStale = errors.New("generate: generated files are stale")
+
 // Generate regenerates (or, with Check, verifies) the model-first resource files.
 func Generate(ctx context.Context, opts Options) error {
 	opts.withDefaults()
@@ -490,7 +494,7 @@ func checkArtifacts(absWorkDir string, artifacts []resourcegen.GeneratedArtifact
 	}
 	if len(stale) > 0 {
 		sort.Strings(stale)
-		return fmt.Errorf("generate: generated files are stale; run `gombit generate`:\n\t%s", strings.Join(stale, "\n\t"))
+		return fmt.Errorf("%w; run `gombit generate`:\n\t%s", ErrStale, strings.Join(stale, "\n\t"))
 	}
 	return nil
 }

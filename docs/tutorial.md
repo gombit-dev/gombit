@@ -631,6 +631,18 @@ Before deploying, check the environment:
 gombit doctor
 ```
 
+and the schema chain — models, generated code, migrations, and the database
+you are about to deploy against — in one command:
+
+```bash
+gombit db check
+```
+
+It names the layer that is out of step (a migration not applied, a column
+someone added by hand, a model change no migration captures) with the command
+that fixes it, and exits non-zero, so CI can run it too (`--no-db` when the job
+has no database). See [migrations.md](migrations.md#checking-the-whole-chain).
+
 Production checklist:
 
 | Setting | Value |

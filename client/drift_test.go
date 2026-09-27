@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -11,10 +12,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gombit-dev/gombit/contract"
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humagin"
 	"github.com/gin-gonic/gin"
+	"github.com/gombit-dev/gombit/contract"
 )
 
 func TestCheckDrift(t *testing.T) {
@@ -68,8 +69,8 @@ func TestCheckDrift(t *testing.T) {
 		if err == nil {
 			t.Fatal("CheckDrift() error = nil, want drift after extra Huma path")
 		}
-		if !strings.Contains(err.Error(), "contract drift") {
-			t.Fatalf("CheckDrift() error = %q, want contract drift", err)
+		if !errors.Is(err, ErrDrift) {
+			t.Fatalf("CheckDrift() error = %q, want ErrDrift", err)
 		}
 		if !strings.Contains(err.Error(), "openapi.json") && !strings.Contains(err.Error(), "schema.ts") {
 			t.Fatalf("CheckDrift() error = %q, want spec or schema path", err)

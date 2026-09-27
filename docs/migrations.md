@@ -371,6 +371,57 @@ Atlas errors that `gombit db migrate`, `status`, `makemigrations`, and `hash`
 pass through name the gombit command (`gombit db hash`) instead of the Atlas
 CLI.
 
+## Checking the whole chain
+
+`gombit db check` runs every schema check in one non-interactive command, for
+local development and CI:
+
+```sh
+gombit db check                  # every layer, against the configured database
+gombit db check --no-db          # a CI job without a database
+gombit db check --db-timeout 10s
+gombit db check --openapi-url http://127.0.0.1:8080/openapi.json
+gombit db check --json
+```
+
+It checks each link from the models to the database, in this order, and
+reports each one as `ok`, `DRIFT`, `ERROR`, or `skipped`, with the command that
+fixes it:
+
+| Layer | Checks | Fix |
+|-------|--------|-----|
+| generated contract | the `*.gen.go` match the models (`gombit generate --check`) | `gombit generate` |
+| model registry | the models `AutoMigrate` lists match `models.json` | `makemigrations --model` / `--forget-model` |
+| migration directory | `atlas.sum` matches and every migration applies to an empty dev database; no misplaced files | `gombit db repair` |
+| migration safety | every destructive or unsafe change carries a `-- gombit:allow` line ([Linting](#linting-and-repairing-the-migration-directory)) | handle the data, acknowledge it |
+| models ↔ migrations | the models declare nothing the migrations lack ([`gombit db plan`](#planning-a-change)) | `gombit db makemigrations` |
+| pending migrations | the database has applied every migration | `gombit db migrate` |
+| database schema | the database has exactly the schema its applied migrations build | capture the change in a migration |
+| TypeScript client | the committed client matches the running app's `/openapi.json` (only with `--openapi-url`) | `gombit client check --write --url ...` |
+
+The **database schema** layer compares `atlas schema inspect` of the
+application database with the migration directory inspected at the last
+applied version, so it finds what was changed outside a migration: a column
+added by hand, an index dropped in a console. Gombit's and Atlas's bookkeeping
+tables are not part of the comparison. Each difference is listed as a step
+ID, like `add_column:products.extra` (the database has a column the migrations
+don't create) or `drop_index:products.idx_products_name` (the migrations
+create an index the database lacks).
+
+The command exits non-zero when any layer drifts or errors. A clean project
+prints the same report every run, ending in `The schema chain is consistent.`
+`--no-db` skips the pending-migrations and database-schema layers; without it,
+a database that cannot be read within `--db-timeout` (30s by default) is an
+error, not a skip, so a CI job that forgets its database fails. The
+pending-migrations layer also reports a version the database has applied but
+the directory no longer has (a migration renamed or deleted after it ran).
+While that is so, or while a migration older than the last applied one is
+still pending, the database-schema layer is skipped: the directory replayed to
+the last applied version is not what the database should have. A layer that an earlier one makes meaningless is
+skipped with the reason (the migrations are not classified while `atlas.sum`
+is inconsistent). The command is read-only; on SQLite, opening a database file
+that does not exist yet creates it empty, as `gombit db status` does.
+
 ## Apply / Status / Rollback
 
 M2-2 adds apply, status, and rollback. These commands read the configured
