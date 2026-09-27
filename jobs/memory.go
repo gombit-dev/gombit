@@ -328,7 +328,9 @@ func (q *MemoryQueue) BeginOnce(_ context.Context, key, token string, lock time.
 func (q *MemoryQueue) FinishOnce(_ context.Context, key, token string, keep time.Duration) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if claim, ok := q.once[key]; ok && claim.holder == token {
+	// The token holds the lock only while it is unexpired, as BeginOnce
+	// sees it (and as the Redis key's TTL enforces).
+	if claim, ok := q.once[key]; ok && claim.holder == token && q.now().Before(claim.expires) {
 		q.once[key] = memoryClaim{holder: onceDoneMarker, expires: q.now().Add(keep)}
 		return nil
 	}

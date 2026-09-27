@@ -237,3 +237,57 @@ func TestJobsRetryAllSkipsJobsWhoseKeyIsHeld(t *testing.T) {
 		t.Fatalf("failed after retry --all: %+v, want only the skipped job", left)
 	}
 }
+
+// TestJobsRetryAllReachesPastHeldKeysAtTheHead: the newest failures are
+// refused (their keys are held) and fill whole pages; older free jobs behind
+// them are still retried.
+func TestJobsRetryAllReachesPastHeldKeysAtTheHead(t *testing.T) {
+	clock := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+	q := jobs.NewMemoryQueue(jobs.WithMemoryClock(func() time.Time { return clock }))
+	ctx := context.Background()
+	bury := func(id string, unique *jobs.UniqueKey) {
+		t.Helper()
+		env := jobs.Envelope{ID: id, Name: "rebuild", Version: 1, Payload: json.RawMessage(`{}`)}
+		var err error
+		if unique != nil {
+			err = q.PushUnique(ctx, "mail", env, time.Time{}, *unique)
+		} else {
+			err = q.Push(ctx, "mail", env, time.Time{})
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		d, err := q.Reserve(ctx, []string{"mail"}, time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := q.Bury(ctx, d, jobs.Failure{Reason: jobs.ReasonExhausted, At: clock}); err != nil {
+			t.Fatal(err)
+		}
+		clock = clock.Add(time.Second)
+	}
+	bury("free-old", nil)
+	for _, k := range []string{"a", "b"} { // newest: two jobs whose keys will be held
+		bury("held-"+k, &jobs.UniqueKey{Key: "k-" + k, TTL: time.Hour, UntilDone: true})
+	}
+	// Other jobs have taken both keys since.
+	for _, k := range []string{"a", "b"} {
+		if err := q.PushUnique(ctx, "mail", jobs.Envelope{ID: "holder-" + k, Name: "rebuild", Version: 1, Payload: json.RawMessage(`{}`)}, time.Time{}, jobs.UniqueKey{Key: "k-" + k, TTL: time.Hour, UntilDone: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := config.Default()
+	cfg.Jobs.Driver, cfg.Jobs.Queue = config.JobsDriverRedis, "mail"
+	prevCfg, prevOpen, prevPage := LoadConfig, openJobsQueue, retryAllPage
+	t.Cleanup(func() { LoadConfig, openJobsQueue, retryAllPage = prevCfg, prevOpen, prevPage })
+	LoadConfig = func() (config.Config, error) { return cfg, nil }
+	openJobsQueue = func(config.Config) (jobs.Queue, func() error, error) { return q, func() error { return nil }, nil }
+	retryAllPage = 2 // exactly the number of held keys in front of the free job
+	out, err := runJobs(t, "retry", "--all")
+	if err != nil || !strings.Contains(out, "Retrying free-old on mail.") || strings.Count(out, "Skipped ") != 2 {
+		t.Fatalf("retry --all = %v:\n%s", err, out)
+	}
+	if left, _ := q.Failed(ctx, "mail", 0); len(left) != 2 || left[0].Envelope.ID != "held-b" || left[1].Envelope.ID != "held-a" {
+		t.Fatalf("failed after retry --all: %d jobs, want only the two skipped ones", len(left))
+	}
+}

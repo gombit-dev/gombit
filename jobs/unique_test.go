@@ -264,3 +264,47 @@ func (o *onceOverride) BeginOnce(ctx context.Context, key, token string, lock ti
 func (o *onceOverride) FinishOnce(ctx context.Context, key, token string, keep time.Duration) error {
 	return o.store.FinishOnce(ctx, key, token, keep)
 }
+
+// TestOncePanicReleasesTheLock: a panicking effect is retried (Run recovers
+// it), and the retry must not find the failed attempt's lock.
+func TestOncePanicReleasesTheLock(t *testing.T) {
+	reg := jobs.NewRegistry()
+	var calls atomic.Int32
+	jobs.MustRegister(reg, func(ctx context.Context, _ sendWelcome) error {
+		return jobs.Once(ctx, "e", func(context.Context) error {
+			if calls.Add(1) == 1 {
+				panic("nil map")
+			}
+			return nil
+		})
+	}, jobs.WithOptions(jobs.Options{Backoff: jobs.Constant(5 * time.Millisecond)}))
+	q := jobs.NewMemoryQueue()
+	if _, err := jobs.NewDispatcher(reg, q).Dispatch(context.Background(), sendWelcome{}); err != nil {
+		t.Fatal(err)
+	}
+	w, err := jobs.NewWorker(reg, q, jobs.WorkerOptions{Queues: []string{"default"}, PollInterval: 5 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	startWorker(t, w)
+	eventually(t, "the retry to run the effect", func() bool { return q.Len() == 0 })
+	if calls.Load() != 2 {
+		t.Fatalf("effect ran %d times, want the panic then the retry", calls.Load())
+	}
+}
+
+func TestMemoryFinishOnceRefusesAnExpiredLock(t *testing.T) {
+	clock := newFakeClock()
+	q := jobs.NewMemoryQueue(jobs.WithMemoryClock(clock.Now))
+	ctx := context.Background()
+	if _, err := q.BeginOnce(ctx, "e", "t1", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(2 * time.Minute) // the run outlasted its lock
+	if err := q.FinishOnce(ctx, "e", "t1", time.Hour); !errors.Is(err, jobs.ErrLeaseLost) {
+		t.Fatalf("FinishOnce(expired lock) = %v, want ErrLeaseLost, as on Redis", err)
+	}
+	if state, _ := q.BeginOnce(ctx, "e", "t2", time.Minute); state != jobs.OnceAcquired {
+		t.Fatalf("after the refused finish = %v, want the key free", state)
+	}
+}
