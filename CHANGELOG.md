@@ -12,6 +12,14 @@ version.
 
 ### Added
 
+- [Fault injection and chaos testing](docs/testing/fault-injection.md):
+  Gombit's resilience invariants (INV-1 to INV-8), each linked to the tests
+  that enforce it. It separates what Gombit guarantees from what applications
+  remain responsible for (no exactly-once semantics, no transaction retry,
+  side effects outside the database). It also covers running `make
+  test-faults` and `make test-chaos`, reproducing a chaos failure from its
+  seed, adding a scenario, and contributor rules. CONTRIBUTING's fault section
+  now summarizes it ([#391](https://github.com/gombit-dev/gombit/issues/391)).
 - The `Chaos` workflow runs `make test-chaos` nightly and on demand (seed,
   scenario, and iterations as inputs), never as a PR check; its summary
   gives the seed and every failure's replay command, and a failed run
