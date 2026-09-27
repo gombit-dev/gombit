@@ -285,7 +285,8 @@ func (q *RedisQueue) Reserve(ctx context.Context, queues []string, lease time.Du
 		env, err := UnmarshalEnvelope([]byte(raw))
 		if err != nil {
 			// Leased, not lost: the delivery carries the failure so the
-			// caller acks it rather than meet it on every lease expiry.
+			// caller buries it (keeping the stored bytes) rather than meet
+			// it on every lease expiry.
 			return Delivery{Queue: queue, Envelope: Envelope{ID: id, Attempt: attempts}, Receipt: receipt, Err: err}, nil
 		}
 		env.Attempt = attempts
@@ -388,7 +389,13 @@ func (q *RedisQueue) Bury(ctx context.Context, d Delivery, f Failure) error {
 	return nil
 }
 
-// Failed implements Queue.
+// Failed implements Queue. It reads in pages of 500, each one script that
+// resumes after the last job the previous page saw (not at a rank, which
+// shifts as jobs fail, retry, and are forgotten), so a page of newer failures
+// arriving mid-read is not read twice and a deleted head does not skip the
+// jobs behind it. An ID whose job record is gone (evicted, deleted by hand)
+// is dropped from the failed set as the read passes it, so fewer than limit
+// jobs means the set has no more.
 func (q *RedisQueue) Failed(ctx context.Context, queue string, limit int) ([]FailedJob, error) {
 	if q.closed.Load() {
 		return nil, ErrClosed
@@ -397,63 +404,113 @@ func (q *RedisQueue) Failed(ctx context.Context, queue string, limit int) ([]Fai
 		return nil, fmt.Errorf("%w: %q", ErrInvalidQueue, queue)
 	}
 	k := q.keys(queue)
-	if limit > 0 && limit <= failedPageSize {
-		jobs, _, err := q.failedPage(ctx, queue, k, 0, limit)
-		return jobs, err
-	}
-	// A large or unbounded read goes in pages, so no single reply carries
-	// the whole failed set (payloads included) past the call deadline.
 	var out []FailedJob
-	for start := 0; ; start += failedPageSize {
-		n := failedPageSize
-		if limit > 0 && limit-len(out) < n {
-			n = limit - len(out)
+	// A cursor whose job left the set resumes at the start of its failure
+	// instant, which can meet jobs already read.
+	seen := map[string]bool{}
+	var cursor failedCursor
+	for {
+		want := failedPageSize
+		if limit > 0 && limit-len(out) < want {
+			want = limit - len(out)
 		}
-		page, read, err := q.failedPage(ctx, queue, k, start, n)
+		page, next, done, err := q.failedPage(ctx, queue, k, cursor, want)
 		if err != nil {
 			return out, err
 		}
-		out = append(out, page...)
-		if read < n || (limit > 0 && len(out) >= limit) {
+		for _, job := range page {
+			if !seen[job.Envelope.ID] {
+				seen[job.Envelope.ID] = true
+				out = append(out, job)
+			}
+		}
+		if done || (limit > 0 && len(out) >= limit) {
 			return out, nil
+		}
+		cursor = next
+		if failedPageHook != nil {
+			failedPageHook()
 		}
 	}
 }
 
-// failedPageSize is the size of one read of the failed set.
+// failedPageSize bounds one read of the failed set: the jobs it returns and
+// the set members it looks at.
 var failedPageSize = 500
 
-// failedPage reads count failed jobs from rank start, most recent first, in
-// one pipelined round trip. read is how many IDs the set held there (a job
-// forgotten between the two reads is skipped, so it can exceed len(jobs)).
-func (q *RedisQueue) failedPage(ctx context.Context, queue string, k redisKeys, start, count int) (jobs []FailedJob, read int, err error) {
-	ids, err := q.client.ZRevRange(ctx, k.failed, int64(start), int64(start+count-1)).Result()
+// failedPageHook runs between the pages of a Failed read (tests only).
+var failedPageHook func()
+
+// failedCursor is the last failed-set member a page looked at: its score
+// (failure time in ms) and ID. Zero starts at the most recent.
+type failedCursor struct{ score, id string }
+
+// failedScanScript: KEYS failed; ARGV job key prefix, want, most members to
+// look at, cursor score (empty for the top), cursor ID. Returns done (1 when
+// the set ran out), the new cursor's score and ID, then id, env, attempts,
+// failure for each job. It resumes just after the cursor when the cursor's
+// job is still there at that score, else at the start of the cursor's
+// failure instant. A member without an envelope or failure record is not a
+// failed job any more (its hash was evicted or deleted by hand): it is
+// dropped from the set.
+var failedScanScript = redis.NewScript(`
+local start = 0
+if ARGV[4] ~= '' then
+  local score = redis.call('ZSCORE', KEYS[1], ARGV[5])
+  if score and tonumber(score) == tonumber(ARGV[4]) then
+    start = redis.call('ZREVRANK', KEYS[1], ARGV[5]) + 1
+  else
+    start = redis.call('ZCOUNT', KEYS[1], '(' .. ARGV[4], '+inf')
+  end
+end
+local want, look = tonumber(ARGV[2]), tonumber(ARGV[3])
+local rows = redis.call('ZREVRANGE', KEYS[1], start, start + look - 1, 'WITHSCORES')
+local out = {1, ARGV[4], ARGV[5]}
+if #rows / 2 == look then out[1] = 0 end
+local found = 0
+for i = 1, #rows, 2 do
+  local id = rows[i]
+  out[2], out[3] = rows[i + 1], id
+  local f = redis.call('HMGET', ARGV[1] .. id, 'env', 'attempts', 'failure')
+  if not f[1] or not f[3] then
+    redis.call('ZREM', KEYS[1], id)
+  else
+    out[#out + 1] = id
+    out[#out + 1] = f[1]
+    out[#out + 1] = f[2] or '0'
+    out[#out + 1] = f[3]
+    found = found + 1
+    if found == want then
+      if i + 1 < #rows then out[1] = 0 end
+      break
+    end
+  end
+end
+return out
+`)
+
+// failedPage reads up to want failed jobs after cursor, most recent first,
+// in one script.
+func (q *RedisQueue) failedPage(ctx context.Context, queue string, k redisKeys, cursor failedCursor, want int) (jobs []FailedJob, next failedCursor, done bool, err error) {
+	res, err := failedScanScript.Run(ctx, q.client, []string{k.failed},
+		k.jobPrefix, want, failedPageSize, cursor.score, cursor.id).Slice()
 	if err != nil {
-		return nil, 0, fmt.Errorf("jobs: list failed jobs on %s: %w", queue, err)
+		return nil, cursor, false, fmt.Errorf("jobs: list failed jobs on %s: %w", queue, err)
 	}
-	if len(ids) == 0 {
-		return nil, 0, nil
+	if len(res) < 3 || (len(res)-3)%4 != 0 {
+		return nil, cursor, false, fmt.Errorf("jobs: list failed jobs on %s: malformed reply", queue)
 	}
-	pipe := q.client.Pipeline()
-	cmds := make([]*redis.SliceCmd, len(ids))
-	for i, id := range ids {
-		cmds[i] = pipe.HMGet(ctx, k.jobPrefix+id, "env", "attempts", "failure")
-	}
-	if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
-		return nil, 0, fmt.Errorf("jobs: list failed jobs on %s: %w", queue, err)
-	}
-	out := make([]FailedJob, 0, len(ids))
-	for i, id := range ids {
-		job, err := decodeFailedJob(queue, id, cmds[i].Val())
-		if errors.Is(err, ErrNotFailed) {
-			continue // forgotten between the two reads
-		}
+	flag, _ := toInt(res[0])
+	next = failedCursor{score: fmt.Sprint(res[1]), id: fmt.Sprint(res[2])}
+	for i := 3; i < len(res); i += 4 {
+		id := fmt.Sprint(res[i])
+		job, err := decodeFailedJob(queue, id, res[i+1:i+4])
 		if err != nil {
-			return nil, 0, err
+			return nil, cursor, false, err
 		}
-		out = append(out, job)
+		jobs = append(jobs, job)
 	}
-	return out, len(ids), nil
+	return jobs, next, flag == 1, nil
 }
 
 // FailedJob implements Queue.

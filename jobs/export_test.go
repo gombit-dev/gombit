@@ -25,3 +25,10 @@ func SetFailedPageSize(n int) (restore func()) {
 	failedPageSize = n
 	return func() { failedPageSize = prev }
 }
+
+// SetFailedPageHook runs fn between the pages of a Redis Failed read.
+func SetFailedPageHook(fn func()) (restore func()) {
+	prev := failedPageHook
+	failedPageHook = fn
+	return func() { failedPageHook = prev }
+}

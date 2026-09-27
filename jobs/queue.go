@@ -47,6 +47,7 @@ type Queue interface {
 	Bury(ctx context.Context, d Delivery, f Failure) error
 	// Failed lists a queue's failed jobs, most recent first, at most limit
 	// (all when limit <= 0, read in pages; prefer a limit on a large set).
+	// Fewer than limit means the set had no more when it was read.
 	Failed(ctx context.Context, queue string, limit int) ([]FailedJob, error)
 	// FailedJob returns one failed job, or ErrNotFailed.
 	FailedJob(ctx context.Context, queue, id string) (FailedJob, error)
