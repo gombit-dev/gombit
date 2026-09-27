@@ -129,7 +129,7 @@ func newJobsFailedCommand(stdout io.Writer) *cobra.Command {
 			})
 		},
 	})
-	cmd.Flags().Int("limit", 50, "most jobs to list (0 lists all)")
+	cmd.Flags().Int("limit", 50, "most jobs to list (0 lists all, read in pages)")
 	cmd.Flags().Bool("json", false, "print the failed jobs as JSON, payloads included")
 	return cmd
 }
@@ -167,23 +167,41 @@ func newJobsRetryCommand(stdout io.Writer) *cobra.Command {
 				return errors.New("gombit jobs retry: give job IDs or --all")
 			}
 			return withJobsQueue(cmd, "retry", func(ctx context.Context, q jobs.Queue, queue string) error {
-				ids := args
-				if all {
-					failed, err := q.Failed(ctx, queue, 0)
-					if err != nil {
-						return err
-					}
-					for _, f := range failed {
-						ids = append(ids, f.Envelope.ID)
-					}
-				}
-				for _, id := range ids {
+				retry := func(id string) error {
 					if err := q.RetryFailed(ctx, queue, id); err != nil {
 						return err
 					}
-					_, _ = fmt.Fprintf(stdout, "Retrying %s on %s.\n", id, queue)
+					_, err := fmt.Fprintf(stdout, "Retrying %s on %s.\n", id, queue)
+					return err
 				}
-				if len(ids) == 0 {
+				if !all {
+					for _, id := range args {
+						if err := retry(id); err != nil {
+							return err
+						}
+					}
+					return nil
+				}
+				// Page through the failed set: a retried job leaves it, so each
+				// read is the next page, and an outage's worth of failures is
+				// never one read.
+				total := 0
+				for {
+					page, err := q.Failed(ctx, queue, retryAllPage)
+					if err != nil {
+						return err
+					}
+					for _, f := range page {
+						if err := retry(f.Envelope.ID); err != nil {
+							return err
+						}
+					}
+					total += len(page)
+					if len(page) < retryAllPage {
+						break
+					}
+				}
+				if total == 0 {
 					_, _ = fmt.Fprintf(stdout, "No failed jobs on %s.\n", queue)
 				}
 				return nil
@@ -193,6 +211,9 @@ func newJobsRetryCommand(stdout io.Writer) *cobra.Command {
 	cmd.Flags().Bool("all", false, "retry every failed job on the queue")
 	return cmd
 }
+
+// retryAllPage is how many failed jobs `retry --all` reads at a time.
+var retryAllPage = 200
 
 func newJobsForgetCommand(stdout io.Writer) *cobra.Command {
 	return silence(&cobra.Command{

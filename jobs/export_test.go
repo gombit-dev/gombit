@@ -18,3 +18,10 @@ func SetPurgeBatch(n int) (restore func()) {
 	purgeBatch = n
 	return func() { purgeBatch = prev }
 }
+
+// SetFailedPageSize shrinks the Redis failed-set page for tests.
+func SetFailedPageSize(n int) (restore func()) {
+	prev := failedPageSize
+	failedPageSize = n
+	return func() { failedPageSize = prev }
+}

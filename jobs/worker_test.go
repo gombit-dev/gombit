@@ -347,9 +347,10 @@ func TestWorkerSurvivesATinyLease(t *testing.T) {
 // for a stored envelope that no longer decodes.
 type poisonQueue struct {
 	*jobs.MemoryQueue
-	once    sync.Once
-	buried  atomic.Bool
-	failure atomic.Value
+	once      sync.Once
+	buried    atomic.Bool
+	buryFails bool
+	failure   atomic.Value
 }
 
 func (p *poisonQueue) Reserve(ctx context.Context, queues []string, lease time.Duration) (jobs.Delivery, error) {
@@ -364,6 +365,9 @@ func (p *poisonQueue) Reserve(ctx context.Context, queues []string, lease time.D
 
 func (p *poisonQueue) Bury(ctx context.Context, d jobs.Delivery, f jobs.Failure) error {
 	if d.Envelope.ID == "poison" {
+		if p.buryFails {
+			return errors.New("redis: connection reset")
+		}
 		p.failure.Store(f)
 		p.buried.Store(true)
 		return nil
@@ -790,5 +794,26 @@ func TestUpgradeStepErrorsAreRetried(t *testing.T) {
 	retried := logs.FilterMessage("job failed").All()
 	if len(retried) != 1 || retried[0].ContextMap()["kind"] != "upgrade" || retried[0].ContextMap()["job_id"] != "step" {
 		t.Fatalf("retried failures = %v, want the step error once", retried)
+	}
+}
+
+// TestAPoisonJobThatCannotBeBuriedIsNotReportedSetAside: a failed bury is
+// logged as such, and the next job still runs.
+func TestAPoisonJobThatCannotBeBuriedIsNotReportedSetAside(t *testing.T) {
+	q := &poisonQueue{MemoryQueue: jobs.NewMemoryQueue(), buryFails: true}
+	reg := jobs.NewRegistry()
+	var ran atomic.Bool
+	jobs.MustRegister(reg, func(context.Context, blockJob) error { ran.Store(true); return nil })
+	dispatchN(t, jobs.NewDispatcher(reg, q.MemoryQueue), 1)
+	core, logs := observer.New(zap.ErrorLevel)
+	w, err := jobs.NewWorker(reg, q, jobs.WorkerOptions{Queues: []string{"default"}, PollInterval: time.Hour, Logger: zap.New(core)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	startWorker(t, w)
+	eventually(t, "the next job to run", ran.Load)
+	if logs.FilterMessage("job failed for good: its envelope does not decode").Len() != 0 ||
+		logs.FilterMessage("jobs worker: a job whose envelope does not decode could not be set aside; it returns when its lease expires").Len() != 1 {
+		t.Fatalf("logs = %v, want the failed bury reported, not a set-aside", logs.All())
 	}
 }

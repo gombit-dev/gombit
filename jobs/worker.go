@@ -159,9 +159,12 @@ func (w *Worker) Run(ctx context.Context) error {
 			}
 			return w.shutdown(&inFlight, cancelJobs)
 		}
-		if errors.Is(err, errDropped) {
+		if errors.Is(err, errSetAside) || errors.Is(err, errNotSetAside) {
+			// An undecodable job was buried (or could not be, and stays leased
+			// until it expires, so it is not reserved again meanwhile): look
+			// again at once.
 			<-slots
-			continue // an undecodable job was acked away; look again at once
+			continue
 		}
 		if err != nil {
 			<-slots
@@ -204,16 +207,22 @@ func (w *Worker) reserve(ctx context.Context) (Delivery, error) {
 	if buryErr := w.bury(d, failure); buryErr != nil {
 		w.log.Error("jobs worker: a job whose envelope does not decode could not be set aside; it returns when its lease expires",
 			zap.String("job_id", d.Envelope.ID), zap.String("queue", d.Queue), zap.Error(d.Err), zap.NamedError("bury_error", buryErr))
-		return Delivery{}, errDropped
+		return Delivery{}, errNotSetAside
 	}
 	w.log.Error("job failed for good: its envelope does not decode",
 		zap.String("job_id", d.Envelope.ID), zap.String("queue", d.Queue), zap.String("reason", ReasonUndecodable),
 		zap.Error(d.Err), zap.String("inspect", "gombit jobs inspect "+d.Envelope.ID+" --queue "+d.Queue))
-	return Delivery{}, errDropped
+	return Delivery{}, errSetAside
 }
 
-// errDropped: reserve set an undecodable delivery aside.
-var errDropped = errors.New("jobs: undecodable job set aside")
+var (
+	// errSetAside: reserve buried an undecodable delivery with the failed
+	// jobs.
+	errSetAside = errors.New("jobs: undecodable job set aside")
+	// errNotSetAside: reserve could not bury an undecodable delivery; it
+	// stays leased until its lease expires.
+	errNotSetAside = errors.New("jobs: undecodable job could not be set aside")
+)
 
 // maxReserveBackoff caps the wait between failing Reserve calls.
 const maxReserveBackoff = 30 * time.Second

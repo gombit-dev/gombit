@@ -107,7 +107,7 @@ func TestRedisQueueSurvivesRestarts(t *testing.T) {
 
 // TestRedisQueueHandsBackAnUndecodableEnvelope: a stored envelope that no
 // longer decodes comes back as a leased delivery carrying the decode error,
-// so the caller can ack it away.
+// so the caller can bury it, raw bytes kept.
 func TestRedisQueueHandsBackAnUndecodableEnvelope(t *testing.T) {
 	addr := redisTestAddr(t)
 	ctx := context.Background()
@@ -244,5 +244,34 @@ func TestRedisRetryOfAnOrphanedFailedID(t *testing.T) {
 	expectEmpty(t, q, "default")
 	if failed, _ := q.Failed(ctx, "default", 0); len(failed) != 0 {
 		t.Fatalf("the orphan is still listed: %+v", failed)
+	}
+}
+
+// TestRedisFailedReadsInPages: an unbounded or large listing is read in
+// pages, in order, with nothing lost at the page seams.
+func TestRedisFailedReadsInPages(t *testing.T) {
+	addr := redisTestAddr(t)
+	defer jobs.SetFailedPageSize(3)()
+	ns := testNamespace()
+	ctx := context.Background()
+	clock := newFakeClock()
+	q := jobs.NewRedisQueue(redisClient(t, addr, ns), ns, jobs.WithRedisClock(clock.Now))
+	for i := 0; i < 7; i++ {
+		if err := q.Push(ctx, "default", envelope(fmt.Sprintf("f%d", i)), time.Time{}); err != nil {
+			t.Fatal(err)
+		}
+		d := mustReserve(t, q, "default")
+		if err := q.Bury(ctx, d, jobs.Failure{Reason: jobs.ReasonExhausted, At: clock.Now()}); err != nil {
+			t.Fatal(err)
+		}
+		clock.Advance(time.Second)
+	}
+	all, err := q.Failed(ctx, "default", 0)
+	if err != nil || len(all) != 7 || all[0].Envelope.ID != "f6" || all[6].Envelope.ID != "f0" {
+		t.Fatalf("Failed(all) over pages of 3 = %d jobs, %v", len(all), err)
+	}
+	five, err := q.Failed(ctx, "default", 5)
+	if err != nil || len(five) != 5 || five[4].Envelope.ID != "f2" {
+		t.Fatalf("Failed(5) over pages of 3 = %d jobs, %v", len(five), err)
 	}
 }
