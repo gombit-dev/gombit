@@ -134,7 +134,7 @@ func withOnceStore(ctx context.Context, store OnceStore) context.Context {
 //   - Done before: Once returns nil without running fn.
 //   - In progress in another run: Once returns ErrInProgress (retried).
 //   - Otherwise: fn runs under the key's lock. Success marks the key done;
-//     an error releases the lock, so a retry runs fn again.
+//     an error or a panic releases the lock, so a retry runs fn again.
 //
 // A run that dies between fn's success and the record keeps the lock until
 // LockFor, after which a redelivery runs fn again; so does a run whose effect
@@ -147,7 +147,7 @@ func withOnceStore(ctx context.Context, store OnceStore) context.Context {
 //
 // Outside a worker (the sync driver, a test) there is no store, and fn just
 // runs.
-func Once(ctx context.Context, key string, fn func(context.Context) error, opts ...OnceOption) error {
+func Once(ctx context.Context, key string, fn func(context.Context) error, opts ...OnceOption) (err error) {
 	if key == "" {
 		return errors.New("jobs: Once: empty key")
 	}
@@ -173,14 +173,23 @@ func Once(ctx context.Context, key string, fn func(context.Context) error, opts 
 	case OnceBusy:
 		return fmt.Errorf("%w: %q", ErrInProgress, key)
 	}
-	if err := fn(ctx); err != nil {
+	// Release the lock unless fn succeeded, a panic included (Run recovers
+	// it and retries the job; the retry must not find its own lock).
+	succeeded := false
+	defer func() {
+		if succeeded {
+			return
+		}
 		abandonCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), queueOpTimeout)
 		defer cancel()
-		if abandonErr := store.AbandonOnce(abandonCtx, key, token); abandonErr != nil {
-			return errors.Join(err, fmt.Errorf("jobs: Once %q: release: %w", key, abandonErr))
+		if abandonErr := store.AbandonOnce(abandonCtx, key, token); abandonErr != nil && err != nil {
+			err = errors.Join(err, fmt.Errorf("jobs: Once %q: release: %w", key, abandonErr))
 		}
+	}()
+	if err := fn(ctx); err != nil {
 		return err
 	}
+	succeeded = true
 	finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), queueOpTimeout)
 	defer cancel()
 	// The effect ran. If recording it fails, failing the job would only

@@ -16,8 +16,11 @@ version.
   queued or running job per key, released when it finishes or is given up on,
   and after the TTL) and `jobs.UniqueFor(key, window)` (a deduplication
   window) refuse a duplicate dispatch with `ErrDuplicateDispatch`;
-  `jobs.Once(ctx, key, fn)` runs a side effect at most once per key across
-  redeliveries, under a TTL lock so a dead worker cannot block it. docs/jobs.md
+  `jobs.Once(ctx, key, fn)` skips a side effect that already completed under
+  a key, so a redelivered job does not repeat it in the common cases; it
+  narrows duplicates, it does not guarantee exactly-once (a lost completion
+  record, a run outlasting its TTL lock, or an expired record can repeat the
+  effect). docs/jobs.md
   documents when a job runs more than once
   ([#320](https://github.com/gombit-dev/gombit/issues/320)).
 - Failed jobs: a job the worker gives up on (a permanent failure, its last
