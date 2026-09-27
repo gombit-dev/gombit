@@ -107,6 +107,34 @@ func testDBFaults(t *testing.T, kind database.Driver, dsn string) {
 		}
 	})
 
+	t.Run("opening is not a call: FailOnce fails the test's first statement", func(t *testing.T) {
+		stmt := faulttest.FailOnce(faulttest.ErrInjected)
+		db := openFaultDB(t, kind, dsn, &faulttest.DBFaults{Statement: stmt})
+		if err := db.Create(&faultParent{Name: "first"}).Error; !errors.Is(err, faulttest.ErrInjected) {
+			t.Fatalf("the test's first statement = %v, want the injected fault", err)
+		}
+		if err := db.Create(&faultParent{Name: "second"}).Error; err != nil {
+			t.Fatalf("the second statement = %v, want success", err)
+		}
+		if n := count(t, db, &faultParent{}); n != 1 {
+			t.Fatalf("%d parents; want only the second", n)
+		}
+	})
+
+	t.Run("a connect fault meets the test's first dial, not the open", func(t *testing.T) {
+		connect := faulttest.FailOnce(faulttest.ErrInjected)
+		db := openFaultDB(t, kind, dsn, &faulttest.DBFaults{Connect: connect})
+		if err := db.Create(&faultParent{Name: "first"}).Error; !errors.Is(err, faulttest.ErrInjected) {
+			t.Fatalf("the test's first statement = %v, want the connect fault", err)
+		}
+		if err := db.Create(&faultParent{Name: "second"}).Error; err != nil {
+			t.Fatalf("the next statement = %v, want success on a fresh dial", err)
+		}
+		if connect.Calls() != 2 || connect.Failures() != 1 {
+			t.Fatalf("Connect: %d calls, %d failures; want 2 and 1 (the open's own dial not counted)", connect.Calls(), connect.Failures())
+		}
+	})
+
 	t.Run("every statement counts without a match", func(t *testing.T) {
 		stmt := faulttest.FailOnCall(2, faulttest.ErrInjected)
 		db := openFaultDB(t, kind, dsn, &faulttest.DBFaults{Statement: stmt})
@@ -185,11 +213,18 @@ func TestSQLiteFaults(t *testing.T) {
 	testDBFaults(t, database.DriverSQLite, filepath.Join(t.TempDir(), "faults.db"))
 }
 
-func TestConnectFaultFailsTheOpen(t *testing.T) {
-	_, err := faulttest.OpenDB(database.DriverSQLite, filepath.Join(t.TempDir(), "c.db"),
+// TestAFailingConnectDoesNotFailTheOpen: OpenDB dials outside any fault
+// sequence; with every connect failing, the open succeeds and every call the
+// test makes fails.
+func TestAFailingConnectDoesNotFailTheOpen(t *testing.T) {
+	db, err := faulttest.OpenDB(database.DriverSQLite, filepath.Join(t.TempDir(), "c.db"),
 		&faulttest.DBFaults{Connect: faulttest.FailAlways(faulttest.ErrInjected)})
-	if !errors.Is(err, faulttest.ErrInjected) {
-		t.Fatalf("OpenDB with every connect failing = %v, want the injected fault", err)
+	if err != nil {
+		t.Fatalf("OpenDB with every connect failing = %v, want the open to succeed", err)
+	}
+	defer func() { _ = db.Close() }()
+	if err := db.Exec("SELECT 1").Error; !errors.Is(err, faulttest.ErrInjected) {
+		t.Fatalf("the test's first statement = %v, want the connect fault", err)
 	}
 	if _, err := faulttest.OpenDB("oracle", "", nil); err == nil {
 		t.Fatal("OpenDB accepted an unsupported driver")
@@ -517,3 +552,33 @@ type sqliteConnector struct {
 
 func (c sqliteConnector) Connect(context.Context) (driver.Conn, error) { return c.driver.Open(c.dsn) }
 func (c sqliteConnector) Driver() driver.Driver                        { return c.driver }
+
+// checkingConn accepts any argument in its NamedValueChecker, as pgx's
+// connection does; its statements have no checker of their own.
+type checkingConn struct{ preparingConn }
+
+func (checkingConn) CheckNamedValue(*driver.NamedValue) error { return nil }
+
+// TestAStatementDoesNotShadowTheConnectionsChecker: database/sql asks a
+// statement's NamedValueChecker first, so the wrapper must not give a
+// statement one its driver statement lacks.
+func TestAStatementDoesNotShadowTheConnectionsChecker(t *testing.T) {
+	var execs atomic.Int32
+	db := sql.OpenDB(faulttest.WrapConnector(connFunc(func() driver.Conn {
+		return checkingConn{preparingConn{&execs}}
+	}), nil))
+	defer func() { _ = db.Close() }()
+	stmt, err := db.Prepare("SELECT ?")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = stmt.Close() }()
+	// The default converter refuses a uint64 with the high bit set; the
+	// connection's checker accepts it.
+	if _, err := stmt.Exec(uint64(1 << 63)); err != nil {
+		t.Fatalf("prepared exec = %v; the statement's checker shadowed the connection's", err)
+	}
+	if execs.Load() != 1 {
+		t.Fatalf("executed %d statements, want 1", execs.Load())
+	}
+}

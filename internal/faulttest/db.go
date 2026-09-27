@@ -61,10 +61,14 @@ var sqlDriverNames = map[database.Driver]string{
 
 // OpenDB opens kind's database at dsn through a connection wrapped with
 // faults, as a *database.DB (database.OpenConn): code under test gets the
-// same GORM setup as from database.Open. Every injector in faults is Reset
-// once the database is open, so call 1 is the test's own first call, not
-// one GORM made while initializing. The pool gets database.Open's defaults
-// for the driver (ConfigurePool). Close the DB when done.
+// same GORM setup as from database.Open. Opening is not part of any fault
+// sequence: every injector is suspended while GORM opens (its ping, a
+// dialector's version query), then restored to how it was armed and reset,
+// and the connections the open dialed are closed. So call 1 is the test's
+// own first call on every driver: Statement FailOnce fails the test's first
+// statement, and a Connect fault meets the test's first dial. The pool gets
+// database.Open's defaults for the driver (ConfigurePool). Close the DB
+// when done.
 func OpenDB(kind database.Driver, dsn string, faults *DBFaults) (*database.DB, error) {
 	name, ok := sqlDriverNames[kind]
 	if !ok {
@@ -88,16 +92,28 @@ func OpenDB(kind database.Driver, dsn string, faults *DBFaults) (*database.DB, e
 	} else {
 		connector = dsnConnector{dsn: dsn, driver: base}
 	}
+
+	var restores []func()
+	for _, inj := range []*Injector{faults.Connect, faults.Begin, faults.Statement, faults.Commit, faults.Rollback} {
+		restores = append(restores, inj.suspend())
+	}
+	defer func() {
+		for _, restore := range restores {
+			restore()
+		}
+	}()
+
 	conn := sql.OpenDB(WrapConnector(connector, faults))
-	database.ConfigurePool(conn, config.DatabaseConfig{Driver: config.DatabaseDriver(kind)})
+	cfg := config.DatabaseConfig{Driver: config.DatabaseDriver(kind)}
+	database.ConfigurePool(conn, cfg)
 	db, err := database.OpenConn(kind, conn)
 	if err != nil {
 		_ = conn.Close()
 		return nil, err
 	}
-	for _, inj := range []*Injector{faults.Connect, faults.Begin, faults.Statement, faults.Commit, faults.Rollback} {
-		inj.Reset()
-	}
+	// Close what the open dialed, so the test's first call dials anew.
+	conn.SetMaxIdleConns(0)
+	database.ConfigurePool(conn, cfg)
 	return db, nil
 }
 
@@ -241,14 +257,36 @@ func (c *faultConn) PrepareContext(ctx context.Context, query string) (driver.St
 		c.checked(query) // no execution will consume a declined statement's mark
 		return nil, err
 	}
-	fs := &faultStmt{base: st, conn: c, query: query}
-	if cc, ok := st.(driver.ColumnConverter); ok { //nolint:staticcheck // forwarded as the driver has it
+	return wrapStmt(&faultStmt{base: st, conn: c, query: query}), nil
+}
+
+// wrapStmt gives fs exactly the argument checkers its base statement has.
+// database/sql consults a statement's NamedValueChecker before the
+// connection's, so one the driver's statement lacks would shadow the
+// connection's (pgx keeps its checker on the connection).
+func wrapStmt(fs *faultStmt) driver.Stmt {
+	nvc, hasChecker := fs.base.(driver.NamedValueChecker)
+	cc, hasConverter := fs.base.(driver.ColumnConverter) //nolint:staticcheck // forwarded as the driver has it
+	switch {
+	case hasChecker && hasConverter:
+		return struct {
+			*faultStmt
+			driver.NamedValueChecker
+			driver.ColumnConverter //nolint:staticcheck // forwarded as the driver has it
+		}{fs, nvc, cc}
+	case hasChecker:
+		return struct {
+			*faultStmt
+			driver.NamedValueChecker
+		}{fs, nvc}
+	case hasConverter:
 		return struct {
 			*faultStmt
 			driver.ColumnConverter //nolint:staticcheck // forwarded as the driver has it
-		}{fs, cc}, nil
+		}{fs, cc}
+	default:
+		return fs
 	}
-	return fs, nil
 }
 
 func (c *faultConn) Close() error { return c.base.Close() }
@@ -341,9 +379,8 @@ type faultStmt struct {
 }
 
 var (
-	_ driver.StmtExecContext   = (*faultStmt)(nil)
-	_ driver.StmtQueryContext  = (*faultStmt)(nil)
-	_ driver.NamedValueChecker = (*faultStmt)(nil)
+	_ driver.StmtExecContext  = (*faultStmt)(nil)
+	_ driver.StmtQueryContext = (*faultStmt)(nil)
 )
 
 func (s *faultStmt) Close() error  { return s.base.Close() }
@@ -390,13 +427,6 @@ func (s *faultStmt) QueryContext(ctx context.Context, args []driver.NamedValue) 
 		return nil, err
 	}
 	return s.base.Query(values) //nolint:staticcheck // the driver has no QueryContext
-}
-
-func (s *faultStmt) CheckNamedValue(nv *driver.NamedValue) error {
-	if ch, ok := s.base.(driver.NamedValueChecker); ok {
-		return ch.CheckNamedValue(nv)
-	}
-	return driver.ErrSkip
 }
 
 func namedValues(args []driver.Value) []driver.NamedValue {

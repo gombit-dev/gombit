@@ -106,6 +106,8 @@ type Injector struct {
 	// gen is bumped by Reset: a call that started before it finishes
 	// without touching the new counts.
 	gen int
+	// disarmed lets calls through uncounted (OpenDB, while GORM opens).
+	disarmed bool
 }
 
 func newInjector(rest Step, steps ...Step) *Injector {
@@ -160,6 +162,10 @@ func (i *Injector) Hit(ctx context.Context) error {
 		return nil
 	}
 	i.mu.Lock()
+	if i.disarmed {
+		i.mu.Unlock()
+		return nil
+	}
 	i.calls++
 	n, gen := i.calls, i.gen
 	step := i.rest
@@ -234,6 +240,25 @@ func (i *Injector) Reached(n int) <-chan struct{} {
 	}
 	i.reached[n] = ch
 	return ch
+}
+
+// suspend lets calls through uncounted until the returned restore, which
+// puts back the armed state from before and starts the injector over.
+func (i *Injector) suspend() (restore func()) {
+	if i == nil {
+		return func() {}
+	}
+	i.mu.Lock()
+	was := i.disarmed
+	i.disarmed = true
+	i.mu.Unlock()
+	return func() {
+		i.mu.Lock()
+		defer i.mu.Unlock()
+		i.disarmed = was
+		i.calls, i.failures = 0, 0
+		i.gen++
+	}
 }
 
 // Reset starts the injector over: counts go to zero and the next call is
