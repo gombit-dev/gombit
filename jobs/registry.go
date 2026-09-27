@@ -3,6 +3,7 @@ package jobs
 import (
 	"bytes"
 	"context"
+	"encoding"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -125,6 +126,16 @@ func Register[T Job](r *Registry, handler Handler[T], opts ...RegisterOption) er
 	name := zero.JobName()
 	if !ValidName(name) {
 		return fmt.Errorf("%w: %q (%s): use 1-%d characters of a-z, 0-9, _ . : -, starting with a letter or digit", ErrInvalidName, name, goType, maxNameLen)
+	}
+	// The payload is the struct's fields, both ways. A custom JSON or text
+	// codec on the job type sits in different method sets for Encode (the
+	// value) and Run (the pointer), so the two could disagree and the
+	// unknown-field rule would ack a zero job. Field types (time.Time) may
+	// have their own codecs.
+	for _, codec := range customCodecs {
+		if goType.Implements(codec) || reflect.PointerTo(goType).Implements(codec) {
+			return fmt.Errorf("%w: %s implements %s; a job's payload is its struct fields, so move the custom encoding into a field type", ErrInvalidJobType, goType, codec)
+		}
 	}
 	if _, err := json.Marshal(zero); err != nil {
 		return fmt.Errorf("%w: %s does not encode to JSON: %v", ErrInvalidJobType, goType, err)
@@ -290,7 +301,7 @@ func (r *Registry) Run(ctx context.Context, env Envelope) (err error) {
 		ID:            env.ID,
 		Name:          reg.name,
 		Version:       reg.version,
-		QueuedVersion: queuedVersion(env),
+		QueuedVersion: env.Version,
 		Attempt:       env.Attempt,
 		EnqueuedAt:    env.EnqueuedAt,
 	})
@@ -302,7 +313,9 @@ func (r *Registry) Run(ctx context.Context, env Envelope) (err error) {
 
 // upgrade brings env's payload to the registered version.
 func (reg *registration) upgrade(env Envelope) (json.RawMessage, error) {
-	version := queuedVersion(env)
+	// The envelope's version selects the upgrade chain. Encode always
+	// writes one (>= 1); 0 is an unset field, not an older format.
+	version := env.Version
 	if version < 1 {
 		return nil, &Error{Kind: KindDecode, Name: reg.name, Version: env.Version, Err: fmt.Errorf("invalid payload version %d", env.Version)}
 	}
@@ -343,16 +356,16 @@ func emptyPayload(payload []byte) bool {
 	return len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null"))
 }
 
-// queuedVersion is the payload version env was queued at. An envelope written
-// without one predates versioning: version 1.
-func queuedVersion(env Envelope) int {
-	if env.Version == 0 {
-		return 1
-	}
-	return env.Version
-}
-
 var versionedType = reflect.TypeFor[Versioned]()
+
+// customCodecs are the interfaces that would make encoding/json bypass a
+// job's struct fields.
+var customCodecs = []reflect.Type{
+	reflect.TypeFor[json.Marshaler](),
+	reflect.TypeFor[json.Unmarshaler](),
+	reflect.TypeFor[encoding.TextMarshaler](),
+	reflect.TypeFor[encoding.TextUnmarshaler](),
+}
 
 func jobVersion(job Job) int {
 	if v, ok := job.(Versioned); ok {

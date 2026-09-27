@@ -340,7 +340,6 @@ func TestPayloadVersioning(t *testing.T) {
 		payload string
 	}{
 		{1, `{"size":8}`},
-		{0, `{"size":8}`}, // an envelope from before versioning is version 1
 		{2, `{"width":8}`},
 	} {
 		got = resize{}
@@ -348,9 +347,6 @@ func TestPayloadVersioning(t *testing.T) {
 			t.Fatalf("Run(v%d) error = %v", tc.version, err)
 		}
 		wantQueued := tc.version
-		if wantQueued == 0 {
-			wantQueued = 1
-		}
 		if got != (resize{Width: 8, Height: 8}) || info.Version != 3 || info.QueuedVersion != wantQueued {
 			t.Fatalf("Run(v%d) handler got %+v (info version %d, queued %d), want the upgraded payload", tc.version, got, info.Version, info.QueuedVersion)
 		}
@@ -360,9 +356,14 @@ func TestPayloadVersioning(t *testing.T) {
 	if err := reg.Run(context.Background(), newer); !errors.Is(err, jobs.ErrUnsupportedVersion) || jobs.Classify(err) != jobs.KindUnsupportedVersion {
 		t.Fatalf("Run(newer version) error = %v, want unsupported_version", err)
 	}
-	negative := jobs.Envelope{ID: "x", Name: "resize_image", Version: -2, Payload: json.RawMessage(`{}`)}
-	if err := reg.Run(context.Background(), negative); !errors.Is(err, jobs.ErrDecode) || !strings.Contains(err.Error(), "invalid payload version -2") {
-		t.Fatalf("Run(negative version) error = %v, want a decode failure naming the version", err)
+	// 0 is the unset field, not an older format: a current payload with no
+	// version must not run through the upgrade chain into a zero job.
+	for _, v := range []int{-2, 0} {
+		bad := jobs.Envelope{ID: "x", Name: "resize_image", Version: v, Payload: json.RawMessage(`{"width":8,"height":9}`)}
+		got = resize{}
+		if err := reg.Run(context.Background(), bad); !errors.Is(err, jobs.ErrDecode) || !strings.Contains(err.Error(), fmt.Sprintf("invalid payload version %d", v)) || got != (resize{}) {
+			t.Fatalf("Run(version %d) error = %v, handler got %+v; want a decode failure", v, err, got)
+		}
 	}
 	badUpgrade := jobs.Envelope{ID: "x", Name: "resize_image", Version: 1, Payload: json.RawMessage(`{"size":"big"}`)}
 	if err := reg.Run(context.Background(), badUpgrade); !errors.Is(err, jobs.ErrDecode) {
@@ -544,35 +545,72 @@ func TestNullNeverBecomesAJob(t *testing.T) {
 	}
 }
 
-type pointerMarshal struct {
+type valueMarshal struct {
 	N int `json:"n"`
 }
 
-func (pointerMarshal) JobName() string { return "pointer_marshal" }
-
-func (p *pointerMarshal) MarshalJSON() ([]byte, error) {
-	return []byte(fmt.Sprintf(`{"ptr":%d}`, p.N)), nil
+func (valueMarshal) JobName() string { return "value_marshal" }
+func (v valueMarshal) MarshalJSON() ([]byte, error) {
+	return []byte(fmt.Sprintf(`{"ptr":%d}`, v.N)), nil
 }
 
-// TestPointerAndValueEncodeAlike: *T and T are one registration, so they are
-// one encoding, the struct value's.
-func TestPointerAndValueEncodeAlike(t *testing.T) {
+type pointerPair struct {
+	N int `json:"n"`
+}
+
+func (pointerPair) JobName() string { return "pointer_pair" }
+func (p *pointerPair) MarshalJSON() ([]byte, error) {
+	return []byte(fmt.Sprintf(`{"ptr":%d}`, p.N)), nil
+}
+func (p *pointerPair) UnmarshalJSON(b []byte) error { return nil }
+
+type customCodec struct{}
+
+func (customCodec) MarshalJSON() ([]byte, error) { return []byte(`{"custom":1}`), nil }
+
+type promotedMarshal struct {
+	customCodec
+	UserID uint `json:"user_id"`
+}
+
+func (promotedMarshal) JobName() string { return "promoted_marshal" }
+
+type textJob struct{ N int }
+
+func (textJob) JobName() string                 { return "text_job" }
+func (t textJob) MarshalText() ([]byte, error)  { return []byte("n"), nil }
+func (t *textJob) UnmarshalText(b []byte) error { return nil }
+
+type timeField struct {
+	At time.Time `json:"at"`
+}
+
+func (timeField) JobName() string { return "time_field" }
+
+// TestCustomJobCodecsAreRejected: the payload is the struct's fields on both
+// sides; a job type with its own codec (value, pointer, or promoted) would
+// let Encode and Run disagree and ack a zero job. Field types keep theirs.
+func TestCustomJobCodecsAreRejected(t *testing.T) {
 	reg := newRegistry()
-	var got pointerMarshal
-	jobs.MustRegister(reg, func(_ context.Context, job pointerMarshal) error { got = job; return nil })
-	byValue, err := reg.Encode(context.Background(), pointerMarshal{N: 4})
+	for name, err := range map[string]error{
+		"value MarshalJSON":         jobs.Register(reg, func(context.Context, valueMarshal) error { return nil }),
+		"pointer codec pair":        jobs.Register(reg, func(context.Context, pointerPair) error { return nil }),
+		"promoted MarshalJSON":      jobs.Register(reg, func(context.Context, promotedMarshal) error { return nil }),
+		"TextMarshaler/Unmarshaler": jobs.Register(reg, func(context.Context, textJob) error { return nil }),
+	} {
+		if !errors.Is(err, jobs.ErrInvalidJobType) {
+			t.Errorf("%s: Register() error = %v, want ErrInvalidJobType", name, err)
+		}
+	}
+	var got timeField
+	jobs.MustRegister(reg, func(_ context.Context, job timeField) error { got = job; return nil })
+	at := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+	env, err := reg.Encode(context.Background(), &timeField{At: at})
 	if err != nil {
 		t.Fatal(err)
 	}
-	byPointer, err := reg.Encode(context.Background(), &pointerMarshal{N: 4})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(byPointer.Payload) != string(byValue.Payload) || string(byValue.Payload) != `{"n":4}` {
-		t.Fatalf("payloads: pointer %s, value %s; want both the struct value's", byPointer.Payload, byValue.Payload)
-	}
-	if err := reg.Run(context.Background(), byPointer); err != nil || got.N != 4 {
-		t.Fatalf("Run = %v, got %+v", err, got)
+	if err := reg.Run(context.Background(), env); err != nil || !got.At.Equal(at) {
+		t.Fatalf("a field with its own codec: Run = %v, got %v", err, got.At)
 	}
 }
 

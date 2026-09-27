@@ -9,14 +9,18 @@ import (
 
 // Job is a unit of background work: a JSON-serializable struct whose JobName
 // returns the stable name it is queued under. JobName must be a constant (it
-// must not depend on field values) and must use a value receiver.
+// must not depend on field values) and must use a value receiver. The payload
+// is the struct's exported fields: the job type itself may not implement
+// json.Marshaler, json.Unmarshaler, or their encoding.Text counterparts
+// (its field types may).
 type Job interface {
 	JobName() string
 }
 
 // Versioned is implemented by a job whose payload has changed shape. It
 // reports the payload version this binary produces and handles; a job that
-// does not implement it is version 1.
+// does not implement it is version 1. An envelope's version is always 1 or
+// more; 0 (the unset field) is a decode failure.
 //
 // Adding an optional field needs no new version: older workers ignore fields
 // they do not know, and newer ones see the zero value for fields an older

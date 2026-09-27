@@ -69,6 +69,9 @@ func main() {
 	}
 
 	// A job nothing handles fails visibly, with a classified reason.
-	err = registry.Run(ctx, jobs.Envelope{Name: "send_invoice", Version: 1, Payload: json.RawMessage(`{}`)})
+	err = registry.Run(ctx, jobs.Envelope{ID: "unknown", Name: "send_invoice", Version: 1, Payload: json.RawMessage(`{}`)})
+	if jobs.Classify(err) != jobs.KindUnknownJob {
+		log.Fatalf("unregistered job: got %v, want unknown_job", err)
+	}
 	fmt.Printf("unregistered job: %s (%v)\n", jobs.Classify(err), err)
 }

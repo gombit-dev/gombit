@@ -29,9 +29,12 @@ func (SendWelcomeEmail) JobName() string { return "send_welcome_email" }
 - **The name is a constant.** It must not depend on field values, and
   `JobName` uses a value receiver. `Encode` refuses a value whose name differs
   from the one it was registered under.
-- **The payload is the struct's JSON.** Carry IDs, not secrets or large
-  bodies: a queue is stored, replicated, and inspected by operators. The
-  handler loads what it needs by ID.
+- **The payload is the struct's JSON fields.** The job type may not have its
+  own `MarshalJSON`/`UnmarshalJSON` (or `MarshalText`/`UnmarshalText`), so
+  both directions use the same fields; field types such as `time.Time` keep
+  theirs. Carry IDs, not secrets or large bodies: a queue is stored,
+  replicated, and inspected by operators. The handler loads what it needs by
+  ID.
 
 ## Registering handlers
 
@@ -79,7 +82,7 @@ and each kind has a sentinel for `errors.Is`:
 | Kind | Sentinel | Meaning |
 |------|----------|---------|
 | `unknown_job` | `ErrUnknownJob` | no handler is registered for the name |
-| `decode` | `ErrDecode` | the envelope (no name or ID, checked by `Run` itself) or payload (empty, `null`, wrong shape) does not decode into the job type |
+| `decode` | `ErrDecode` | the envelope (no name or ID, a version below 1, checked by `Run` itself) or payload (empty, `null`, wrong shape) does not decode into the job type |
 | `unsupported_version` | `ErrUnsupportedVersion` | the payload version is newer than this binary, or older with no upgrade step |
 | `panic` | `ErrPanic` | the handler, an upgrade step, a payload's `UnmarshalJSON`, or a propagator panicked (recovered, so one job cannot take a worker down) |
 | `handler` | `ErrHandler` | the handler returned an error, which `errors.Is/As` still reach |
