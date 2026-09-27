@@ -98,9 +98,10 @@ func OpenWithRedis(cfg config.JobsConfig, client *goredis.Client, registry *Regi
 type DispatchOption func(*dispatchConfig)
 
 type dispatchConfig struct {
-	queue string
-	delay time.Duration
-	at    time.Time
+	queue  string
+	delay  time.Duration
+	at     time.Time
+	unique *UniqueKey
 }
 
 // OnQueue sends the job to the named queue instead of the default one.
@@ -135,8 +136,8 @@ func (d *Dispatcher) DispatchAt(ctx context.Context, job Job, when time.Time, op
 // With the sync driver the job runs before Dispatch returns, on ctx, and
 // Dispatch returns the job's failure, if any, alongside the envelope. That is
 // the development convenience the sync driver exists for (it runs a Delay or
-// At job at once, too: there is nothing to hold it); a queued driver returns
-// once the job is stored.
+// At job at once, and a Unique job every time: there is nothing to hold it
+// or to hold a key); a queued driver returns once the job is stored.
 func (d *Dispatcher) Dispatch(ctx context.Context, job Job, opts ...DispatchOption) (Envelope, error) {
 	cfg := dispatchConfig{queue: d.defaultQueue}
 	for _, opt := range opts {
@@ -147,6 +148,11 @@ func (d *Dispatcher) Dispatch(ctx context.Context, job Job, opts ...DispatchOpti
 	}
 	if cfg.delay < 0 {
 		return Envelope{}, fmt.Errorf("jobs: negative delay %s", cfg.delay)
+	}
+	if cfg.unique != nil {
+		if err := cfg.unique.validate(); err != nil {
+			return Envelope{}, err
+		}
 	}
 	env, err := d.registry.Encode(ctx, job)
 	if err != nil {
@@ -159,6 +165,12 @@ func (d *Dispatcher) Dispatch(ctx context.Context, job Job, opts ...DispatchOpti
 	at := cfg.at
 	if cfg.delay > 0 {
 		at = d.now().Add(cfg.delay)
+	}
+	if cfg.unique != nil {
+		if err := d.queue.PushUnique(ctx, cfg.queue, env, at, *cfg.unique); err != nil {
+			return Envelope{}, err
+		}
+		return env, nil
 	}
 	if err := d.queue.Push(ctx, cfg.queue, env, at); err != nil {
 		return Envelope{}, err

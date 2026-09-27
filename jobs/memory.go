@@ -15,11 +15,55 @@ import (
 // jobs when the process exits. It keeps the same lease and attempt semantics
 // as the durable drivers.
 type MemoryQueue struct {
-	mu     sync.Mutex
-	now    func() time.Time
-	jobs   map[memoryKey]*memoryJob
-	seq    uint64
-	closed bool
+	mu      sync.Mutex
+	ops     int // claim operations since the last sweep of expired claims
+	now     func() time.Time
+	jobs    map[memoryKey]*memoryJob
+	uniques map[memoryKey]memoryClaim // by (queue, uniqueness key)
+	once    map[string]memoryClaim    // by Once key
+	seq     uint64
+	closed  bool
+}
+
+// memoryClaim is a held key: a uniqueness claim (holder = job ID) or a Once
+// record (holder = the lock token, or onceDoneMarker).
+type memoryClaim struct {
+	holder  string
+	expires time.Time
+}
+
+const onceDoneMarker = "done"
+
+// claimSweepEvery is how many claim operations pass between sweeps of
+// expired uniqueness claims and Once records, which are otherwise only
+// overwritten, so a long-running process does not keep every key it saw.
+const claimSweepEvery = 256
+
+// sweepClaims drops expired claims every claimSweepEvery calls. Callers hold
+// q.mu.
+func (q *MemoryQueue) sweepClaims(now time.Time) {
+	q.ops++
+	if q.ops < claimSweepEvery {
+		return
+	}
+	q.ops = 0
+	for k, c := range q.uniques {
+		if !now.Before(c.expires) {
+			delete(q.uniques, k)
+		}
+	}
+	for k, c := range q.once {
+		if !now.Before(c.expires) {
+			delete(q.once, k)
+		}
+	}
+}
+
+// ClaimCount reports the uniqueness claims and Once records held (tests).
+func (q *MemoryQueue) ClaimCount() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return len(q.uniques) + len(q.once)
 }
 
 // memoryKey identifies a job: an ID is unique per queue, as on Redis.
@@ -38,6 +82,13 @@ type memoryJob struct {
 	// failed jobs are out of circulation until retried or forgotten.
 	failure *Failure
 	raw     []byte
+	// unique is the uniqueness key the job holds until it is done ("" when
+	// none, or when the claim is a window that outlives the job), claimed
+	// for uniqueTTL. heldUnique reports whether the claim is currently held
+	// (it is released when the job is buried, and reclaimed on a retry).
+	unique     string
+	uniqueTTL  time.Duration
+	heldUnique bool
 }
 
 // MemoryOption configures NewMemoryQueue.
@@ -50,7 +101,7 @@ func WithMemoryClock(now func() time.Time) MemoryOption {
 
 // NewMemoryQueue returns an empty in-memory queue.
 func NewMemoryQueue(opts ...MemoryOption) *MemoryQueue {
-	q := &MemoryQueue{now: time.Now, jobs: map[memoryKey]*memoryJob{}}
+	q := &MemoryQueue{now: time.Now, jobs: map[memoryKey]*memoryJob{}, uniques: map[memoryKey]memoryClaim{}, once: map[string]memoryClaim{}}
 	for _, opt := range opts {
 		opt(q)
 	}
@@ -58,7 +109,19 @@ func NewMemoryQueue(opts ...MemoryOption) *MemoryQueue {
 }
 
 // Push implements Queue.
-func (q *MemoryQueue) Push(_ context.Context, queue string, env Envelope, at time.Time) error {
+func (q *MemoryQueue) Push(ctx context.Context, queue string, env Envelope, at time.Time) error {
+	return q.push(queue, env, at, nil)
+}
+
+// PushUnique implements Queue.
+func (q *MemoryQueue) PushUnique(_ context.Context, queue string, env Envelope, at time.Time, unique UniqueKey) error {
+	if err := unique.validate(); err != nil {
+		return err
+	}
+	return q.push(queue, env, at, &unique)
+}
+
+func (q *MemoryQueue) push(queue string, env Envelope, at time.Time, unique *UniqueKey) error {
 	if !ValidName(queue) {
 		return fmt.Errorf("%w: %q", ErrInvalidQueue, queue)
 	}
@@ -70,6 +133,13 @@ func (q *MemoryQueue) Push(_ context.Context, queue string, env Envelope, at tim
 	if q.closed {
 		return ErrClosed
 	}
+	if unique != nil {
+		q.sweepClaims(q.now())
+		ukey := memoryKey{queue, unique.Key}
+		if claim, ok := q.uniques[ukey]; ok && q.now().Before(claim.expires) {
+			return &DuplicateError{Queue: queue, Key: unique.Key, HolderID: claim.holder}
+		}
+	}
 	key := memoryKey{queue, env.ID}
 	if _, ok := q.jobs[key]; ok {
 		return fmt.Errorf("%w: %s on %s", ErrDuplicateJob, env.ID, queue)
@@ -80,8 +150,28 @@ func (q *MemoryQueue) Push(_ context.Context, queue string, env Envelope, at tim
 	}
 	q.seq++
 	env.Attempt = 0
-	q.jobs[key] = &memoryJob{queue: queue, env: env, availableAt: at, seq: q.seq}
+	job := &memoryJob{queue: queue, env: env, availableAt: at, seq: q.seq}
+	if unique != nil {
+		q.uniques[memoryKey{queue, unique.Key}] = memoryClaim{holder: env.ID, expires: now.Add(unique.TTL)}
+		if unique.UntilDone {
+			job.unique, job.uniqueTTL, job.heldUnique = unique.Key, unique.TTL, true
+		}
+	}
+	q.jobs[key] = job
 	return nil
+}
+
+// releaseUnique drops the uniqueness claim job holds until done, if it still
+// holds it.
+func (q *MemoryQueue) releaseUnique(job *memoryJob) {
+	if !job.heldUnique {
+		return
+	}
+	ukey := memoryKey{job.queue, job.unique}
+	if claim, ok := q.uniques[ukey]; ok && claim.holder == job.env.ID {
+		delete(q.uniques, ukey)
+	}
+	job.heldUnique = false
 }
 
 // Reserve implements Queue.
@@ -161,6 +251,7 @@ func (q *MemoryQueue) Ack(_ context.Context, d Delivery) error {
 	if err != nil {
 		return err
 	}
+	q.releaseUnique(job)
 	delete(q.jobs, memoryKey{job.queue, job.env.ID})
 	return nil
 }
@@ -213,6 +304,44 @@ func (q *MemoryQueue) Bury(_ context.Context, d Delivery, f Failure) error {
 	}
 	job.reserved, job.receipt = false, ""
 	job.failure = &f
+	q.releaseUnique(job)
+	return nil
+}
+
+// BeginOnce implements OnceStore.
+func (q *MemoryQueue) BeginOnce(_ context.Context, key, token string, lock time.Duration) (OnceState, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	now := q.now()
+	q.sweepClaims(now)
+	if claim, ok := q.once[key]; ok && now.Before(claim.expires) {
+		if claim.holder == onceDoneMarker {
+			return OnceDone, nil
+		}
+		return OnceBusy, nil
+	}
+	q.once[key] = memoryClaim{holder: token, expires: now.Add(lock)}
+	return OnceAcquired, nil
+}
+
+// FinishOnce implements OnceStore.
+func (q *MemoryQueue) FinishOnce(_ context.Context, key, token string, keep time.Duration) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if claim, ok := q.once[key]; ok && claim.holder == token {
+		q.once[key] = memoryClaim{holder: onceDoneMarker, expires: q.now().Add(keep)}
+		return nil
+	}
+	return fmt.Errorf("%w: the lock on %q expired before the effect was recorded", ErrLeaseLost, key)
+}
+
+// AbandonOnce implements OnceStore.
+func (q *MemoryQueue) AbandonOnce(_ context.Context, key, token string) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if claim, ok := q.once[key]; ok && claim.holder == token {
+		delete(q.once, key)
+	}
 	return nil
 }
 
@@ -263,6 +392,17 @@ func (q *MemoryQueue) RetryFailed(_ context.Context, queue, id string) error {
 	job, err := q.failed(queue, id)
 	if err != nil {
 		return err
+	}
+	if job.unique != "" {
+		// Reclaim the key the job gave up when it failed, unless another job
+		// has taken it since: running both is what Unique prevents.
+		ukey := memoryKey{queue, job.unique}
+		now := q.now()
+		if claim, ok := q.uniques[ukey]; ok && now.Before(claim.expires) && claim.holder != id {
+			return &DuplicateError{Queue: queue, Key: job.unique, HolderID: claim.holder}
+		}
+		q.uniques[ukey] = memoryClaim{holder: id, expires: now.Add(job.uniqueTTL)}
+		job.heldUnique = true
 	}
 	job.failure = nil
 	job.attempts = 0

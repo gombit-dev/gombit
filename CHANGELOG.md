@@ -12,6 +12,14 @@ version.
 
 ### Added
 
+- Duplicate handling for at-least-once delivery: `jobs.Unique(key, ttl)` (one
+  queued or running job per key, released when it finishes or is given up on,
+  and after the TTL) and `jobs.UniqueFor(key, window)` (a deduplication
+  window) refuse a duplicate dispatch with `ErrDuplicateDispatch`;
+  `jobs.Once(ctx, key, fn)` runs a side effect at most once per key across
+  redeliveries, under a TTL lock so a dead worker cannot block it. docs/jobs.md
+  documents when a job runs more than once
+  ([#320](https://github.com/gombit-dev/gombit/issues/320)).
 - Failed jobs: a job the worker gives up on (a permanent failure, its last
   attempt, or an undecodable envelope) is kept on its queue with the original
   envelope, attempts, and the reason, kind, error, and time, instead of being

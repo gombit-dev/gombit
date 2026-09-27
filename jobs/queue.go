@@ -19,6 +19,11 @@ type Queue interface {
 	// is zero or in the past. An ID is unique per queue: pushing one that is
 	// already on the queue fails with ErrDuplicateJob.
 	Push(ctx context.Context, queue string, env Envelope, at time.Time) error
+	// PushUnique is Push under a uniqueness claim: when unique.Key is held
+	// on queue it stores nothing and returns a *DuplicateError naming the
+	// holder; otherwise it claims the key for unique.TTL and pushes. A claim
+	// made UntilDone is released when the job is acked or buried.
+	PushUnique(ctx context.Context, queue string, env Envelope, at time.Time, unique UniqueKey) error
 	// Reserve leases the next available job from the first of queues that
 	// has one, in order. Within a queue the job that became available first
 	// goes first: a waiting job since its available-at time, a job whose
@@ -54,6 +59,8 @@ type Queue interface {
 	FailedJob(ctx context.Context, queue, id string) (FailedJob, error)
 	// RetryFailed puts a failed job back on its queue, available now, with a
 	// fresh set of attempts. ErrNotFailed when there is no such failed job.
+	// A job dispatched Unique reclaims its key, and is refused with a
+	// *DuplicateError while another job holds it.
 	RetryFailed(ctx context.Context, queue, id string) error
 	// ForgetFailed deletes a failed job. ErrNotFailed when there is none.
 	ForgetFailed(ctx context.Context, queue, id string) error
