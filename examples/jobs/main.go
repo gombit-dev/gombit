@@ -78,6 +78,13 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
+		if delivery.Err != nil {
+			// A stored envelope that no longer decodes: it can never run, but
+			// it is leased, so ack it rather than meet it again.
+			log.Printf("dropping undecodable job %s: %v", delivery.Envelope.ID, delivery.Err)
+			_ = queue.Ack(ctx, delivery)
+			continue
+		}
 		if err := dispatcher.Registry().Run(ctx, delivery.Envelope); err != nil {
 			log.Printf("%s failed (%s): %v", delivery.Envelope.Name, jobs.Classify(err), err)
 			_ = queue.Release(ctx, delivery, time.Now().Add(time.Minute))

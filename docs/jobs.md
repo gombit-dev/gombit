@@ -78,9 +78,13 @@ Redis keys (it defaults like the cache namespace, from app name and
 environment), so apps and environments sharing a server do not share queues.
 
 The `redis` driver keeps each queue under one hash tag,
-`{<namespace>:jobs:<queue>}` (a ready list, delayed and reserved sorted sets,
-and a hash per job), so it works on Redis Cluster, and each operation is one
-Lua script: a crash between steps cannot lose or duplicate a job.
+`{<namespace>:jobs:<queue>}` (a pending sorted set scored by when each job
+becomes available, a reserved sorted set scored by lease deadline, and a hash
+per job), so it works on Redis Cluster, and each operation is one Lua script:
+a crash between steps cannot lose or duplicate a job. Both drivers deliver in
+availability order: a waiting job since its available-at time, a job whose
+lease expired since that deadline, push order breaking ties. A job ID is
+unique per queue.
 
 ## Consuming a queue
 
@@ -94,7 +98,14 @@ until then:
 ```go
 q := app.Jobs().Queue() // nil with the sync driver
 d, err := q.Reserve(ctx, []string{"default"}, time.Minute) // jobs.ErrNoJob when empty
-if err == nil {
+switch {
+case err != nil:
+	// nothing to do, or the queue is unreachable
+case d.Err != nil:
+	// the stored envelope no longer decodes: it can never run, but it is
+	// leased, so ack it (log d.Err) or it returns on every lease expiry
+	_ = q.Ack(ctx, d)
+default:
 	if err := app.Jobs().Registry().Run(ctx, d.Envelope); err != nil {
 		_ = q.Release(ctx, d, time.Now().Add(time.Minute))
 	} else {

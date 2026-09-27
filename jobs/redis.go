@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -19,18 +20,22 @@ import (
 // Each queue is a set of keys sharing one hash tag, {<namespace>:jobs:<queue>},
 // so every operation touches a single Redis Cluster slot:
 //
-//	…:ready     list of job IDs available now (LPUSH in, RPOP out: FIFO)
-//	…:delayed   sorted set of job IDs by the time they become available
-//	…:reserved  sorted set of leased job IDs by lease deadline
-//	…:job:<id>  hash: the envelope, attempt count, and current lease receipt
+//	…:pending   sorted set of waiting jobs, scored by when they become available
+//	…:reserved  sorted set of leased jobs, scored by lease deadline
+//	…:seq       counter that orders jobs available in the same millisecond
+//	…:job:<id>  hash: the envelope, attempt count, lease receipt, and member
 //
-// Each operation is one Lua script, so a crash between steps cannot lose or
-// duplicate a job.
+// A job's member in both sets is "<16-digit sequence>:<id>", so equal scores
+// order by push (or release) order. Reserve takes whichever is earlier: the
+// first pending job due now, or the first lease that has expired (ready since
+// its deadline), the same availability order as MemoryQueue. Each operation
+// is one Lua script, so a crash between steps cannot lose or duplicate a job.
 type RedisQueue struct {
 	client      redis.UniversalClient
 	namespace   string
 	now         func() time.Time
 	ownedClient bool
+	closed      atomic.Bool
 }
 
 // RedisOption configures NewRedisQueue.
@@ -57,91 +62,85 @@ func NewRedisQueue(client redis.UniversalClient, namespace string, opts ...Redis
 }
 
 type redisKeys struct {
-	ready, delayed, reserved, jobPrefix string
+	pending, reserved, seq, jobPrefix string
 }
 
 func (q *RedisQueue) keys(queue string) redisKeys {
 	base := fmt.Sprintf("{%s:jobs:%s}", q.namespace, queue)
 	return redisKeys{
-		ready:     base + ":ready",
-		delayed:   base + ":delayed",
+		pending:   base + ":pending",
 		reserved:  base + ":reserved",
+		seq:       base + ":seq",
 		jobPrefix: base + ":job:",
 	}
 }
 
-// pushScript: KEYS job, ready, delayed; ARGV envelope, available-at ms, now
-// ms, id. Returns 0 when the ID is already queued.
+// pushScript: KEYS job, pending, seq; ARGV envelope, available-at ms, id.
+// Returns 0 when the ID is already on this queue.
 var pushScript = redis.NewScript(`
 if redis.call('EXISTS', KEYS[1]) == 1 then return 0 end
-redis.call('HSET', KEYS[1], 'env', ARGV[1], 'attempts', 0, 'receipt', '')
-if tonumber(ARGV[2]) <= tonumber(ARGV[3]) then
-  redis.call('LPUSH', KEYS[2], ARGV[4])
-else
-  redis.call('ZADD', KEYS[3], ARGV[2], ARGV[4])
-end
+local member = string.format('%016d', redis.call('INCR', KEYS[3])) .. ':' .. ARGV[3]
+redis.call('HSET', KEYS[1], 'env', ARGV[1], 'attempts', 0, 'receipt', '', 'member', member)
+redis.call('ZADD', KEYS[2], ARGV[2], member)
 return 1
 `)
 
-// reserveScript: KEYS ready, delayed, reserved; ARGV now ms, lease deadline
-// ms, receipt, job key prefix. Promotes due delayed jobs and reclaims expired
-// leases, then leases the oldest ready job. Returns false when none is
-// available, else {id, envelope, attempts}.
+// reserveScript: KEYS pending, reserved; ARGV now ms, lease deadline ms,
+// receipt, job key prefix. Leases the earliest-available job: the first
+// pending job due by now or the first expired lease, whichever became
+// available first. Returns false when none is, else {id, envelope, attempts}.
 var reserveScript = redis.NewScript(`
-local now = ARGV[1]
--- Due delayed jobs became available before anything pushed since, so they
--- go to the RPOP end, earliest last so it pops first.
-local due = redis.call('ZRANGEBYSCORE', KEYS[2], '-inf', now, 'LIMIT', 0, 100)
-for i = #due, 1, -1 do
-  redis.call('ZREM', KEYS[2], due[i])
-  redis.call('RPUSH', KEYS[1], due[i])
-end
-local expired = redis.call('ZRANGEBYSCORE', KEYS[3], '-inf', now, 'LIMIT', 0, 100)
-for _, id in ipairs(expired) do
-  redis.call('ZREM', KEYS[3], id)
-  redis.call('RPUSH', KEYS[1], id)
-end
+local now = tonumber(ARGV[1])
 while true do
-  local id = redis.call('RPOP', KEYS[1])
-  if not id then return false end
+  local p = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', now, 'WITHSCORES', 'LIMIT', 0, 1)
+  local r = redis.call('ZRANGEBYSCORE', KEYS[2], '-inf', now, 'WITHSCORES', 'LIMIT', 0, 1)
+  local member, from
+  if #p > 0 and #r > 0 then
+    local ps, rs = tonumber(p[2]), tonumber(r[2])
+    if rs < ps or (rs == ps and r[1] < p[1]) then member, from = r[1], KEYS[2] else member, from = p[1], KEYS[1] end
+  elseif #p > 0 then member, from = p[1], KEYS[1]
+  elseif #r > 0 then member, from = r[1], KEYS[2]
+  else return false end
+  redis.call('ZREM', from, member)
+  local id = string.sub(member, 18)
   local job = ARGV[4] .. id
   if redis.call('EXISTS', job) == 1 then
     local attempts = redis.call('HINCRBY', job, 'attempts', 1)
     redis.call('HSET', job, 'receipt', ARGV[3])
-    redis.call('ZADD', KEYS[3], ARGV[2], id)
+    redis.call('ZADD', KEYS[2], ARGV[2], member)
     return {id, redis.call('HGET', job, 'env'), attempts}
   end
 end
 `)
 
-// ackScript: KEYS job, ready, reserved; ARGV id, receipt. Returns 0 when
-// the receipt is not the job's current lease.
+// ackScript: KEYS job, pending, reserved; ARGV receipt. Returns 0 when the
+// receipt is not the job's current lease.
 var ackScript = redis.NewScript(`
-if redis.call('HGET', KEYS[1], 'receipt') ~= ARGV[2] then return 0 end
-redis.call('ZREM', KEYS[3], ARGV[1])
-redis.call('LREM', KEYS[2], 0, ARGV[1])
+if redis.call('HGET', KEYS[1], 'receipt') ~= ARGV[1] then return 0 end
+local member = redis.call('HGET', KEYS[1], 'member')
+redis.call('ZREM', KEYS[3], member)
+redis.call('ZREM', KEYS[2], member)
 redis.call('DEL', KEYS[1])
 return 1
 `)
 
-// releaseScript: KEYS job, ready, delayed, reserved; ARGV id, receipt,
-// available-at ms, now ms. Returns 0 when the receipt is not the job's
-// current lease.
+// releaseScript: KEYS job, pending, reserved, seq; ARGV receipt,
+// available-at ms, id. Returns 0 when the receipt is not the job's current
+// lease. The job goes behind others available at the same time.
 var releaseScript = redis.NewScript(`
-if redis.call('HGET', KEYS[1], 'receipt') ~= ARGV[2] then return 0 end
-redis.call('ZREM', KEYS[4], ARGV[1])
-redis.call('LREM', KEYS[2], 0, ARGV[1])
-redis.call('HSET', KEYS[1], 'receipt', '')
-if tonumber(ARGV[3]) <= tonumber(ARGV[4]) then
-  redis.call('LPUSH', KEYS[2], ARGV[1])
-else
-  redis.call('ZADD', KEYS[3], ARGV[3], ARGV[1])
-end
+if redis.call('HGET', KEYS[1], 'receipt') ~= ARGV[1] then return 0 end
+redis.call('ZREM', KEYS[3], redis.call('HGET', KEYS[1], 'member'))
+local member = string.format('%016d', redis.call('INCR', KEYS[4])) .. ':' .. ARGV[3]
+redis.call('HSET', KEYS[1], 'receipt', '', 'member', member)
+redis.call('ZADD', KEYS[2], ARGV[2], member)
 return 1
 `)
 
 // Push implements Queue.
 func (q *RedisQueue) Push(ctx context.Context, queue string, env Envelope, at time.Time) error {
+	if q.closed.Load() {
+		return ErrClosed
+	}
 	if !ValidName(queue) {
 		return fmt.Errorf("%w: %q", ErrInvalidQueue, queue)
 	}
@@ -158,19 +157,22 @@ func (q *RedisQueue) Push(ctx context.Context, queue string, env Envelope, at ti
 		at = now
 	}
 	k := q.keys(queue)
-	added, err := pushScript.Run(ctx, q.client, []string{k.jobPrefix + env.ID, k.ready, k.delayed},
-		data, at.UnixMilli(), now.UnixMilli(), env.ID).Int()
+	added, err := pushScript.Run(ctx, q.client, []string{k.jobPrefix + env.ID, k.pending, k.seq},
+		data, at.UnixMilli(), env.ID).Int()
 	if err != nil {
 		return fmt.Errorf("jobs: push %q to %s: %w", env.Name, queue, err)
 	}
 	if added == 0 {
-		return fmt.Errorf("%w: %s", ErrDuplicateJob, env.ID)
+		return fmt.Errorf("%w: %s on %s", ErrDuplicateJob, env.ID, queue)
 	}
 	return nil
 }
 
 // Reserve implements Queue.
 func (q *RedisQueue) Reserve(ctx context.Context, queues []string, lease time.Duration) (Delivery, error) {
+	if q.closed.Load() {
+		return Delivery{}, ErrClosed
+	}
 	if lease <= 0 {
 		return Delivery{}, fmt.Errorf("jobs: reserve: lease must be positive, got %s", lease)
 	}
@@ -178,10 +180,12 @@ func (q *RedisQueue) Reserve(ctx context.Context, queues []string, lease time.Du
 		if !ValidName(queue) {
 			return Delivery{}, fmt.Errorf("%w: %q", ErrInvalidQueue, queue)
 		}
+	}
+	for _, queue := range queues {
 		now := q.now()
 		receipt := uuid.NewString()
 		k := q.keys(queue)
-		res, err := reserveScript.Run(ctx, q.client, []string{k.ready, k.delayed, k.reserved},
+		res, err := reserveScript.Run(ctx, q.client, []string{k.pending, k.reserved},
 			now.UnixMilli(), now.Add(lease).UnixMilli(), receipt, k.jobPrefix).Slice()
 		if errors.Is(err, redis.Nil) {
 			continue
@@ -192,18 +196,17 @@ func (q *RedisQueue) Reserve(ctx context.Context, queues []string, lease time.Du
 		if len(res) != 3 {
 			return Delivery{}, fmt.Errorf("jobs: reserve from %s: unexpected reply %v", queue, res)
 		}
-		raw, _ := res[1].(string)
-		env, err := UnmarshalEnvelope([]byte(raw))
-		if err != nil {
-			// A stored envelope that no longer decodes. The job is leased, not
-			// lost; the Delivery (ID and receipt) comes back with the decode
-			// error so the caller can Ack it away or set it aside rather than
-			// let it return on every lease expiry.
-			return Delivery{Queue: queue, Envelope: Envelope{ID: fmt.Sprint(res[0])}, Receipt: receipt}, err
-		}
+		id := fmt.Sprint(res[0])
 		attempts, err := toInt(res[2])
 		if err != nil {
 			return Delivery{}, fmt.Errorf("jobs: reserve from %s: attempts: %w", queue, err)
+		}
+		raw, _ := res[1].(string)
+		env, err := UnmarshalEnvelope([]byte(raw))
+		if err != nil {
+			// Leased, not lost: the delivery carries the failure so the
+			// caller acks it rather than meet it on every lease expiry.
+			return Delivery{Queue: queue, Envelope: Envelope{ID: id, Attempt: attempts}, Receipt: receipt, Err: err}, nil
 		}
 		env.Attempt = attempts
 		return Delivery{Queue: queue, Envelope: env, Receipt: receipt}, nil
@@ -213,12 +216,15 @@ func (q *RedisQueue) Reserve(ctx context.Context, queues []string, lease time.Du
 
 // Ack implements Queue.
 func (q *RedisQueue) Ack(ctx context.Context, d Delivery) error {
+	if q.closed.Load() {
+		return ErrClosed
+	}
 	if d.Receipt == "" || !ValidName(d.Queue) {
 		return fmt.Errorf("%w: %s", ErrLeaseLost, d.Envelope.ID)
 	}
 	k := q.keys(d.Queue)
-	ok, err := ackScript.Run(ctx, q.client, []string{k.jobPrefix + d.Envelope.ID, k.ready, k.reserved},
-		d.Envelope.ID, d.Receipt).Int()
+	ok, err := ackScript.Run(ctx, q.client, []string{k.jobPrefix + d.Envelope.ID, k.pending, k.reserved},
+		d.Receipt).Int()
 	if err != nil {
 		return fmt.Errorf("jobs: ack %s: %w", d.Envelope.ID, err)
 	}
@@ -230,6 +236,9 @@ func (q *RedisQueue) Ack(ctx context.Context, d Delivery) error {
 
 // Release implements Queue.
 func (q *RedisQueue) Release(ctx context.Context, d Delivery, at time.Time) error {
+	if q.closed.Load() {
+		return ErrClosed
+	}
 	if d.Receipt == "" || !ValidName(d.Queue) {
 		return fmt.Errorf("%w: %s", ErrLeaseLost, d.Envelope.ID)
 	}
@@ -238,8 +247,8 @@ func (q *RedisQueue) Release(ctx context.Context, d Delivery, at time.Time) erro
 		at = now
 	}
 	k := q.keys(d.Queue)
-	ok, err := releaseScript.Run(ctx, q.client, []string{k.jobPrefix + d.Envelope.ID, k.ready, k.delayed, k.reserved},
-		d.Envelope.ID, d.Receipt, at.UnixMilli(), now.UnixMilli()).Int()
+	ok, err := releaseScript.Run(ctx, q.client, []string{k.jobPrefix + d.Envelope.ID, k.pending, k.reserved, k.seq},
+		d.Receipt, at.UnixMilli(), d.Envelope.ID).Int()
 	if err != nil {
 		return fmt.Errorf("jobs: release %s: %w", d.Envelope.ID, err)
 	}
@@ -249,9 +258,10 @@ func (q *RedisQueue) Release(ctx context.Context, d Delivery, at time.Time) erro
 	return nil
 }
 
-// Close implements Queue. It closes the client only when the queue owns it.
+// Close implements Queue: later calls return ErrClosed. It closes the client
+// only when the queue owns it.
 func (q *RedisQueue) Close() error {
-	if !q.ownedClient {
+	if q.closed.Swap(true) || !q.ownedClient {
 		return nil
 	}
 	return q.client.Close()

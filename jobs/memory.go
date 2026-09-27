@@ -16,10 +16,13 @@ import (
 type MemoryQueue struct {
 	mu     sync.Mutex
 	now    func() time.Time
-	jobs   map[string]*memoryJob
+	jobs   map[memoryKey]*memoryJob
 	seq    uint64
 	closed bool
 }
+
+// memoryKey identifies a job: an ID is unique per queue, as on Redis.
+type memoryKey struct{ queue, id string }
 
 type memoryJob struct {
 	queue       string
@@ -43,7 +46,7 @@ func WithMemoryClock(now func() time.Time) MemoryOption {
 
 // NewMemoryQueue returns an empty in-memory queue.
 func NewMemoryQueue(opts ...MemoryOption) *MemoryQueue {
-	q := &MemoryQueue{now: time.Now, jobs: map[string]*memoryJob{}}
+	q := &MemoryQueue{now: time.Now, jobs: map[memoryKey]*memoryJob{}}
 	for _, opt := range opts {
 		opt(q)
 	}
@@ -63,8 +66,9 @@ func (q *MemoryQueue) Push(_ context.Context, queue string, env Envelope, at tim
 	if q.closed {
 		return ErrClosed
 	}
-	if _, ok := q.jobs[env.ID]; ok {
-		return fmt.Errorf("%w: %s", ErrDuplicateJob, env.ID)
+	key := memoryKey{queue, env.ID}
+	if _, ok := q.jobs[key]; ok {
+		return fmt.Errorf("%w: %s on %s", ErrDuplicateJob, env.ID, queue)
 	}
 	now := q.now()
 	if at.IsZero() || at.Before(now) {
@@ -72,7 +76,7 @@ func (q *MemoryQueue) Push(_ context.Context, queue string, env Envelope, at tim
 	}
 	q.seq++
 	env.Attempt = 0
-	q.jobs[env.ID] = &memoryJob{queue: queue, env: env, availableAt: at, seq: q.seq}
+	q.jobs[key] = &memoryJob{queue: queue, env: env, availableAt: at, seq: q.seq}
 	return nil
 }
 
@@ -80,6 +84,11 @@ func (q *MemoryQueue) Push(_ context.Context, queue string, env Envelope, at tim
 func (q *MemoryQueue) Reserve(_ context.Context, queues []string, lease time.Duration) (Delivery, error) {
 	if lease <= 0 {
 		return Delivery{}, fmt.Errorf("jobs: reserve: lease must be positive, got %s", lease)
+	}
+	for _, queue := range queues {
+		if !ValidName(queue) {
+			return Delivery{}, fmt.Errorf("%w: %q", ErrInvalidQueue, queue)
+		}
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -145,7 +154,7 @@ func (q *MemoryQueue) Ack(_ context.Context, d Delivery) error {
 	if err != nil {
 		return err
 	}
-	delete(q.jobs, job.env.ID)
+	delete(q.jobs, memoryKey{job.queue, job.env.ID})
 	return nil
 }
 
@@ -176,8 +185,8 @@ func (q *MemoryQueue) leased(d Delivery) (*memoryJob, error) {
 	if q.closed {
 		return nil, ErrClosed
 	}
-	job, ok := q.jobs[d.Envelope.ID]
-	if !ok || !job.reserved || job.receipt != d.Receipt || job.queue != d.Queue {
+	job, ok := q.jobs[memoryKey{d.Queue, d.Envelope.ID}]
+	if !ok || !job.reserved || d.Receipt == "" || job.receipt != d.Receipt {
 		return nil, fmt.Errorf("%w: %s", ErrLeaseLost, d.Envelope.ID)
 	}
 	return job, nil
@@ -195,6 +204,6 @@ func (q *MemoryQueue) Close() error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.closed = true
-	q.jobs = map[string]*memoryJob{}
+	q.jobs = map[memoryKey]*memoryJob{}
 	return nil
 }
