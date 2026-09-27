@@ -191,6 +191,17 @@ refused), and `Heal()` (all lifted, so the next operation must succeed
 without a restart). The `framework` and `cache` network tests
 (`TestFault_Network_*`) run against a real Postgres and Redis this way.
 
+Cancellation and deadline tests (`TestFault_Context_*`) check for leaks by
+explicit synchronization, not by counting goroutines (the suite does not use
+`goleak`: a process-wide goroutine snapshot also sees the database pool's and
+HTTP transport's own goroutines, and needs ignore-lists that drift). The
+downstream call is a fault whose own counters must show the cancellation,
+`faulttest.Idle` must find no connection held, `dep.WaitIdle` no outbound
+call running, and each handler signals when it returns, under a bounded
+wait. Release a blocked fault before closing a server (`defer release()`
+after `defer srv.Close()`), so a regression fails the test instead of hanging
+the server's `Close`.
+
 `make test-faults` runs the whole fault suite: the `internal/faulttest`
 harness and every `TestFault_*` test (found by name, so a new one joins
 without editing anything), under the race detector. Set `FAULT_POSTGRES_DSN`

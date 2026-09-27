@@ -12,6 +12,13 @@ version.
 
 ### Added
 
+- Cancellation and deadline fault tests (`TestFault_Context_*`) through
+  Gombit's layers on SQLite, Postgres, and MySQL: a query or `App.Tx` on the
+  request context ends at `HTTP.RequestTimeout`; a client that disconnects
+  cancels its in-flight query or outbound call; shutdown with requests stuck
+  in the database reports draining on `/readyz`, returns within the drain
+  delay plus the shutdown timeout, and cancels every stuck query
+  ([#386](https://github.com/gombit-dev/gombit/issues/386)).
 - Network fault tests (`TestFault_Network_*`) through an in-process TCP
   proxy (`faulttest.NewTCPProxy`) in front of a real Postgres and Redis: a
   refused, stalled, cut, or reset connection ends the call at its deadline
