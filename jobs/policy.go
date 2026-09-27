@@ -15,12 +15,18 @@ type Options struct {
 	// on it, the first run included. Default 5.
 	MaxAttempts int
 	// Timeout bounds one attempt: the handler's context is canceled when it
-	// runs out, and the attempt fails as KindTimeout. Zero means no timeout.
+	// runs out, and the attempt fails as KindTimeout. Zero takes the
+	// registry default (none unless WithDefaultOptions sets one); NoTimeout
+	// means none even then.
 	Timeout time.Duration
 	// Backoff is how long a failed job waits before its next attempt.
 	// Default: Exponential(10s, 10m).
 	Backoff Backoff
 }
+
+// NoTimeout, as Options.Timeout, runs the job without a timeout even when
+// the registry defaults set one.
+const NoTimeout time.Duration = -1
 
 // Backoff returns how long to wait after the attempt-th failure (1-based)
 // before the next attempt.
@@ -91,7 +97,7 @@ func (o Options) validate() error {
 	if o.MaxAttempts < 0 {
 		return fmt.Errorf("options: MaxAttempts %d is negative", o.MaxAttempts)
 	}
-	if o.Timeout < 0 {
+	if o.Timeout < 0 && o.Timeout != NoTimeout {
 		return fmt.Errorf("options: Timeout %s is negative", o.Timeout)
 	}
 	return nil
@@ -108,6 +114,9 @@ func (o Options) resolve(defaults Options) Options {
 	}
 	if o.Timeout == 0 {
 		o.Timeout = defaults.Timeout
+	}
+	if o.Timeout == NoTimeout {
+		o.Timeout = 0
 	}
 	if o.Backoff == nil {
 		o.Backoff = defaults.Backoff

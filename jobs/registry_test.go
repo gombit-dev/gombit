@@ -366,8 +366,10 @@ func TestPayloadVersioning(t *testing.T) {
 		}
 	}
 	badUpgrade := jobs.Envelope{ID: "x", Name: "resize_image", Version: 1, Payload: json.RawMessage(`{"size":"big"}`)}
-	if err := reg.Run(context.Background(), badUpgrade); !errors.Is(err, jobs.ErrDecode) {
-		t.Fatalf("Run(v1 payload the upgrade cannot read) error = %v, want decode", err)
+	// A step's own error is the step's failure, not bad bytes: retryable,
+	// since a deploy can fix the step.
+	if err := reg.Run(context.Background(), badUpgrade); !errors.Is(err, jobs.ErrUpgrade) || jobs.IsPermanent(err) {
+		t.Fatalf("Run(v1 payload the upgrade step rejects) error = %v, want a retryable upgrade failure", err)
 	}
 
 	gap := newRegistry()

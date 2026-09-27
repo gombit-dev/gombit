@@ -201,6 +201,7 @@ and each kind has a sentinel for `errors.Is`:
 | `unsupported_version` | `ErrUnsupportedVersion` | the payload version is newer than this binary, or older with no upgrade step |
 | `panic` | `ErrPanic` | the handler, an upgrade step, a payload's `UnmarshalJSON`, or a propagator panicked (recovered, so one job cannot take a worker down) |
 | `timeout` | `ErrTimeout` | the attempt ran past the job's `Timeout` |
+| `upgrade` | `ErrUpgrade` | an `UpgradeFrom` step returned an error (the payload is intact; a deploy can fix the step) |
 | `handler` | `ErrHandler` | the handler returned an error, which `errors.Is/As` still reach |
 
 Use `Classify`, not `errors.Is`, to decide a failure's kind: a handler that
@@ -223,7 +224,8 @@ jobs.MustRegister(registry, sendWelcome, jobs.WithOptions(jobs.Options{
 that does not set its own, and fills the fields a job leaves zero.
 
 - **Timeout** is the deadline of the handler's context for one attempt; when it
-  runs out, the attempt fails as `timeout` (and is retried). It applies on every
+  runs out, the attempt fails as `timeout` (and is retried). Zero takes the
+  registry default; `jobs.NoTimeout` opts a job out of a default timeout. It applies on every
   driver, `sync` included, because `Run` applies it. Go cannot stop a goroutine,
   so a handler must return when its context is done.
 - **Backoff** is the wait before the next attempt, given the attempt that just
@@ -232,8 +234,9 @@ that does not set its own, and fills the fields a job leaves zero.
   50–100% so jobs that failed together (an outage) do not all retry at once.
 - **Permanent failures** are not retried: return `jobs.Permanent(err)` when no
   retry can help (the record is gone, the input is invalid). A `decode` failure
-  is permanent too. Every other kind (`handler`, `timeout`, `panic`, and
-  `unknown_job` or `unsupported_version`, which a deploy can fix) is retried.
+  (bytes that cannot be the job: empty, `null`, the wrong shape) is permanent
+  too. Every other kind (`handler`, `timeout`, `panic`, and `unknown_job`,
+  `unsupported_version`, or `upgrade`, which a deploy can fix) is retried.
 - **Giving up.** After a permanent failure, or when the attempt that failed was
   the last (`Info.MaxAttempts`), the worker acks the job away and logs
   `job failed for good` at error level, with its ID, name, attempt, and the
@@ -246,7 +249,10 @@ attempt under another, not before its backoff, and `MaxAttempts` counts
 attempts across both. A job interrupted by a worker's shutdown goes back at
 once rather than waiting out its backoff, but its attempt was already
 counted: every deploy that interrupts a job uses one of its attempts, so leave
-headroom in `MaxAttempts` for long jobs.
+headroom in `MaxAttempts` for long jobs. An interrupted attempt is never given
+up on, even the last one, so a job can run again with `Attempt` past
+`MaxAttempts`; a handler should not assume `Attempt == MaxAttempts` is
+certainly its last run.
 
 ## Changing a payload
 

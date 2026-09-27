@@ -2,6 +2,7 @@ package jobs_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 	"sync/atomic"
@@ -718,5 +719,56 @@ func TestAnInterruptedLastAttemptIsNotGivenUp(t *testing.T) {
 				t.Fatalf("after shutdown: %+v, %v; want the job back, as attempt 2", d, err)
 			}
 		})
+	}
+}
+
+type upgradedJob struct {
+	N int `json:"n"`
+}
+
+func (upgradedJob) JobName() string { return "upgraded_job" }
+func (upgradedJob) JobVersion() int { return 2 }
+
+// TestUpgradeStepErrorsAreRetried: a step that returns an error is retried
+// (a deploy can fix it) like a step that panics, while bytes that cannot be
+// a job (an unmarshal failure after the steps) are given up at once.
+func TestUpgradeStepErrorsAreRetried(t *testing.T) {
+	reg := jobs.NewRegistry()
+	var stepCalls, runs atomic.Int32
+	jobs.MustRegister(reg, func(context.Context, upgradedJob) error { runs.Add(1); return nil },
+		jobs.WithOptions(jobs.Options{MaxAttempts: 3, Backoff: jobs.Constant(5 * time.Millisecond)}),
+		jobs.UpgradeFrom(1, func(p json.RawMessage) (json.RawMessage, error) {
+			if stepCalls.Add(1) == 1 {
+				return nil, errors.New("temporary: lookup table unavailable")
+			}
+			return p, nil
+		}))
+	q := jobs.NewMemoryQueue()
+	ctx := context.Background()
+	for id, payload := range map[string]string{"step": `{"n":1}`, "bytes": `{"n":"not a number"}`} {
+		version := 1
+		if id == "bytes" {
+			version = 2 // no step: straight to the decoder
+		}
+		if err := q.Push(ctx, "default", jobs.Envelope{ID: id, Name: "upgraded_job", Version: version, Payload: json.RawMessage(payload)}, time.Time{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	core, logs := observer.New(zap.InfoLevel)
+	w, err := jobs.NewWorker(reg, q, jobs.WorkerOptions{Queues: []string{"default"}, PollInterval: 5 * time.Millisecond, Logger: zap.New(core)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	startWorker(t, w)
+	eventually(t, "the step job to succeed and the bad bytes to be given up", func() bool {
+		return runs.Load() == 1 && logs.FilterMessage("job failed for good").Len() == 1
+	})
+	gaveUp := logs.FilterMessage("job failed for good").All()[0].ContextMap()
+	if gaveUp["job_id"] != "bytes" || gaveUp["kind"] != "decode" || gaveUp["attempt"] != int64(1) {
+		t.Fatalf("given up = %v, want the undecodable payload on its first attempt", gaveUp)
+	}
+	retried := logs.FilterMessage("job failed").All()
+	if len(retried) != 1 || retried[0].ContextMap()["kind"] != "upgrade" || retried[0].ContextMap()["job_id"] != "step" {
+		t.Fatalf("retried failures = %v, want the step error once", retried)
 	}
 }

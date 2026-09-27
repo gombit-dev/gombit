@@ -375,8 +375,10 @@ func (reg *registration) upgrade(env Envelope) (json.RawMessage, error) {
 		}
 		next, err := step(payload)
 		if err != nil {
-			return nil, &Error{Kind: KindDecode, Name: reg.name, Version: version,
-				Err: fmt.Errorf("upgrade from version %d: %w", v, err)}
+			// The step's own failure, not bad bytes: retryable, like a panic
+			// in the step or a missing one (a deploy can fix it).
+			return nil, &Error{Kind: KindUpgrade, Name: reg.name, Version: v,
+				Err: err}
 		}
 		// Every step's output is checked like the queued payload: a later
 		// step or the decoder would turn null into a zero-value job.
