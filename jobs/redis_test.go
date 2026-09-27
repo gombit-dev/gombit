@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/gombit-dev/gombit/config"
 	"github.com/gombit-dev/gombit/jobs"
 )
 
@@ -152,5 +153,44 @@ func TestRedisQueueCloseOwnership(t *testing.T) {
 	}
 	if err := owned.Ping(context.Background()).Err(); err == nil {
 		t.Fatal("Close left an owned client open")
+	}
+}
+
+// TestRedisQueueCallsHonorTheirDeadline: go-redis ignores the caller's
+// context unless ContextTimeoutEnabled is set. The queue's client sets it,
+// so a stalled server cannot hold a call past its deadline; the worker's
+// shutdown budget depends on that.
+func TestRedisQueueCallsHonorTheirDeadline(t *testing.T) {
+	addr := redisTestAddr(t)
+	ns := testNamespace()
+	admin := redisClient(t, addr, ns)
+	cfg := config.JobsConfig{Driver: config.JobsDriverRedis, Queue: "default", Namespace: ns}
+	d, err := jobs.OpenWithRedis(cfg, admin, jobs.NewRegistry())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+	q := d.Queue()
+	if err := q.Push(context.Background(), "default", envelope("x"), time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Stall every client for 2s (longer than the call's 200ms deadline and
+	// shorter than the socket read timeout, so only the deadline can end it).
+	if err := admin.Do(context.Background(), "CLIENT", "PAUSE", 2000, "ALL").Err(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = admin.Do(context.Background(), "CLIENT", "UNPAUSE").Err() })
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	begin := time.Now()
+	_, err = q.Reserve(ctx, []string{"default"}, time.Minute)
+	if took := time.Since(begin); err == nil || took > time.Second {
+		t.Fatalf("Reserve on a stalled server = %v after %s, want an error at its 200ms deadline", err, took)
+	}
+
+	opts := jobs.RedisClientOptions(&redis.Options{Addr: addr, MaxRetries: 3})
+	if !opts.ContextTimeoutEnabled || opts.MaxRetries != -1 || opts.Addr != addr {
+		t.Fatalf("RedisClientOptions = %+v", opts)
 	}
 }

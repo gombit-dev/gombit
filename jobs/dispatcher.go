@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/redis/go-redis/v9"
+	goredis "github.com/redis/go-redis/v9"
 
 	"github.com/gombit-dev/gombit/cache"
 	"github.com/gombit-dev/gombit/config"
@@ -60,10 +60,7 @@ func Open(cfg config.JobsConfig, redis config.RedisConfig, registry *Registry) (
 	case config.JobsDriverMemory:
 		queue = NewMemoryQueue()
 	case config.JobsDriverRedis:
-		client, err := cache.NewRedisClient(redis)
-		if err != nil {
-			return nil, err
-		}
+		client := goredis.NewClient(RedisClientOptions(cache.RedisOptions(redis)))
 		queue = NewRedisQueue(client, cfg.Namespace, WithRedisClientOwned())
 	default:
 		return nil, fmt.Errorf("jobs: unsupported driver %q", cfg.Driver)
@@ -71,9 +68,11 @@ func Open(cfg config.JobsConfig, redis config.RedisConfig, registry *Registry) (
 	return NewDispatcher(registry, queue, WithDefaultQueue(cfg.Queue), withDriver(cfg.Driver)), nil
 }
 
-// OpenWithRedis opens the redis driver on an existing client, which the
-// dispatcher does not close. cfg.Driver must be redis.
-func OpenWithRedis(cfg config.JobsConfig, client redis.UniversalClient, registry *Registry) (*Dispatcher, error) {
+// OpenWithRedis opens the redis driver against the server client talks to,
+// with the same address, credentials, and TLS, but on a connection pool of
+// its own configured for queue calls (RedisClientOptions), which the
+// dispatcher closes. client itself is left alone. cfg.Driver must be redis.
+func OpenWithRedis(cfg config.JobsConfig, client *goredis.Client, registry *Registry) (*Dispatcher, error) {
 	if err := config.ValidateJobs(cfg); err != nil {
 		return nil, err
 	}
@@ -83,7 +82,8 @@ func OpenWithRedis(cfg config.JobsConfig, client redis.UniversalClient, registry
 	if client == nil {
 		return nil, fmt.Errorf("jobs: OpenWithRedis: nil client")
 	}
-	queue := NewRedisQueue(client, cfg.Namespace)
+	own := goredis.NewClient(RedisClientOptions(client.Options()))
+	queue := NewRedisQueue(own, cfg.Namespace, WithRedisClientOwned())
 	return NewDispatcher(registry, queue, WithDefaultQueue(cfg.Queue), withDriver(cfg.Driver)), nil
 }
 

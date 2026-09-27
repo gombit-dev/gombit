@@ -52,7 +52,26 @@ func WithRedisClientOwned() RedisOption {
 	return func(q *RedisQueue) { q.ownedClient = true }
 }
 
+// RedisClientOptions adapts go-redis options for a job queue's client:
+//
+//   - ContextTimeoutEnabled, so a call's context deadline bounds it (go-redis
+//     otherwise runs every call on context.Background() and only the socket
+//     timeouts apply), which is what the worker's shutdown budget relies on;
+//   - no retries (MaxRetries -1): every queue operation is one Lua script, and
+//     retrying one whose reply was lost could lease a second job or report a
+//     pushed job as a duplicate.
+//
+// Open and OpenWithRedis build their clients with it; a caller of
+// NewRedisQueue should too.
+func RedisClientOptions(base *redis.Options) *redis.Options {
+	opts := *base
+	opts.ContextTimeoutEnabled = true
+	opts.MaxRetries = -1
+	return &opts
+}
+
 // NewRedisQueue returns a queue over client, with every key under namespace.
+// Build client with RedisClientOptions.
 func NewRedisQueue(client redis.UniversalClient, namespace string, opts ...RedisOption) *RedisQueue {
 	q := &RedisQueue{client: client, namespace: namespace, now: time.Now}
 	for _, opt := range opts {

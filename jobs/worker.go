@@ -107,16 +107,21 @@ func defaultRetryDelay(attempt int) time.Duration {
 	return d
 }
 
-// queueOpTimeout bounds one queue call made on behalf of a job (ack,
-// release, extend), independent of the worker's own context, so a job that
-// finishes during shutdown is still acknowledged. It is shorter than
-// ShutdownGrace, which must cover one such call after a handler returns.
-const queueOpTimeout = 5 * time.Second
+// queueOpTimeout is the deadline of every queue call the worker makes
+// (reserve, extend, ack, release). It is a real bound only on a client that
+// enforces context deadlines: MemoryQueue, and a RedisQueue built with
+// RedisClientOptions (as Open and OpenWithRedis build it); go-redis's default
+// client ignores the caller's context. Ack and release run on their own
+// context, not the worker's, so a job that finishes during shutdown is still
+// acknowledged.
+const queueOpTimeout = 4 * time.Second
 
 // ShutdownGrace is how long Run waits, after canceling in-flight jobs at the
-// shutdown timeout, for their handlers to return and their queue calls to
-// finish. A process supervisor should allow ShutdownTimeout + ShutdownGrace
-// and a margin before it kills a worker.
+// shutdown timeout, for them to settle. It covers the worst case of one lease
+// renewal still in flight when a handler returns plus the ack or release
+// after it, each bounded by the 4s queue-call deadline. A process supervisor
+// should allow ShutdownTimeout + ShutdownGrace and a margin (framework's
+// WorkerKillAfter) before it kills a worker.
 const ShutdownGrace = 10 * time.Second
 
 // Run works the queues until ctx is canceled, then shuts down gracefully: it
@@ -148,8 +153,11 @@ func (w *Worker) Run(ctx context.Context) error {
 			<-slots
 			return w.shutdown(&inFlight, cancelJobs)
 		}
-		// Reserve on the worker's own context: shutdown cancels a call in
-		// flight, and a delivery that lands after it is handed back, not run.
+		// Reserve on the worker's own context: shutdown stops a call that has
+		// not started, and a delivery that lands after the stop is handed back,
+		// not run. (A call already on the wire runs to its deadline; if its
+		// reply is lost after the queue leased a job, the lease brings the job
+		// back.)
 		d, err := w.reserve(ctx)
 		if ctx.Err() != nil {
 			<-slots

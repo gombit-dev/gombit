@@ -411,8 +411,9 @@ func TestNewWorkerValidates(t *testing.T) {
 	}
 }
 
-// ctxQueue wraps a MemoryQueue with the context behavior of a real network
-// driver: Reserve and Extend can be slow and honor cancellation.
+// ctxQueue wraps a MemoryQueue whose Reserve and Extend are slow and honor
+// cancellation. (The Redis client does not honor cancellation mid-call; see
+// stubbornQueue.)
 type ctxQueue struct {
 	*jobs.MemoryQueue
 	reserveBlocks bool          // Reserve waits for ctx
@@ -509,5 +510,78 @@ func TestAFinishedJobIsNotHeldByARenewal(t *testing.T) {
 	eventually(t, "the ack", func() bool { return q.Len() == 0 })
 	if took := time.Since(begin); took > time.Second {
 		t.Fatalf("the ack came %s after start; it waited out the renewal", took)
+	}
+}
+
+// stubbornQueue behaves like the Redis driver on a slow or lossy network:
+// calls ignore their context, and a reserve can lease a job and still fail
+// (the reply was lost after the script ran).
+type stubbornQueue struct {
+	*jobs.MemoryQueue
+	loseReply     atomic.Bool   // the next Reserve leases, then errors
+	extendTakes   time.Duration // Extend runs this long, whatever its context
+	extendStarted chan struct{}
+}
+
+func (q *stubbornQueue) Reserve(ctx context.Context, queues []string, lease time.Duration) (jobs.Delivery, error) {
+	d, err := q.MemoryQueue.Reserve(context.WithoutCancel(ctx), queues, lease)
+	if err == nil && q.loseReply.CompareAndSwap(true, false) {
+		return jobs.Delivery{}, errors.New("i/o timeout")
+	}
+	return d, err
+}
+
+func (q *stubbornQueue) Extend(ctx context.Context, d jobs.Delivery, lease time.Duration) error {
+	if q.extendStarted != nil {
+		select {
+		case q.extendStarted <- struct{}{}:
+		default:
+		}
+	}
+	time.Sleep(q.extendTakes)
+	return q.MemoryQueue.Extend(context.WithoutCancel(ctx), d, lease)
+}
+
+// TestALostReserveReplyLosesNoJob: a reserve that leased a job but whose
+// reply was lost leaves no receipt to release; the lease brings the job back
+// and it runs.
+func TestALostReserveReplyLosesNoJob(t *testing.T) {
+	reg := jobs.NewRegistry()
+	var runs atomic.Int32
+	jobs.MustRegister(reg, func(context.Context, blockJob) error { runs.Add(1); return nil })
+	q := &stubbornQueue{MemoryQueue: jobs.NewMemoryQueue()}
+	q.loseReply.Store(true)
+	dispatchN(t, jobs.NewDispatcher(reg, q.MemoryQueue), 1)
+	w, err := jobs.NewWorker(reg, q, jobs.WorkerOptions{Queues: []string{"default"}, PollInterval: 5 * time.Millisecond, Lease: 100 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	startWorker(t, w)
+	eventually(t, "the job to run once its lost lease expired", func() bool { return runs.Load() == 1 && q.Len() == 0 })
+}
+
+// TestShutdownOutlastsAnUncancelableRenewal: a handler that returns while a
+// renewal it cannot cancel is on the wire is still acknowledged before Run
+// returns, because ShutdownGrace covers that call plus the ack.
+func TestShutdownOutlastsAnUncancelableRenewal(t *testing.T) {
+	reg := jobs.NewRegistry()
+	release := make(chan struct{})
+	jobs.MustRegister(reg, func(context.Context, blockJob) error { <-release; return nil })
+	q := &stubbornQueue{MemoryQueue: jobs.NewMemoryQueue(), extendTakes: 300 * time.Millisecond, extendStarted: make(chan struct{}, 1)}
+	dispatchN(t, jobs.NewDispatcher(reg, q.MemoryQueue), 1)
+	w, err := jobs.NewWorker(reg, q, jobs.WorkerOptions{Queues: []string{"default"}, PollInterval: 5 * time.Millisecond, Lease: 30 * time.Millisecond, ShutdownTimeout: 50 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stop := startWorker(t, w)
+	<-q.extendStarted // a renewal is on the wire
+	stopped := make(chan error, 1)
+	go func() { stopped <- stop() }()
+	close(release) // the handler returns mid-renewal
+	if err := <-stopped; err != nil {
+		t.Fatalf("Run() = %v", err)
+	}
+	if q.Len() != 0 {
+		t.Fatal("the finished job was not acknowledged before the worker stopped")
 	}
 }

@@ -130,9 +130,22 @@ The worker runs the app's `OnStart` hooks, then:
 
 On SIGINT/SIGTERM it stops reserving at once and gives in-flight jobs
 `--shutdown-timeout` to finish. A job still running then sees its context
-canceled and goes back to the queue, available immediately. Then the app's
-`OnStop` hooks run. Give your process manager a stop timeout longer than
-`--shutdown-timeout`.
+canceled and gets up to 10 more seconds (`jobs.ShutdownGrace`) to return and
+be released, available immediately. Then the app's `OnStop` hooks run.
+
+**Give your process manager a stop timeout of at least `--shutdown-timeout`
+plus 15 seconds** (45s at the defaults; `terminationGracePeriodSeconds` on
+Kubernetes, `TimeoutStopSec` on systemd, `stop_grace_period` in Compose). A
+manager that kills the worker right after `--shutdown-timeout` cuts off that
+release, and the job waits out its lease instead. `gombit worker` waits this
+long itself.
+
+Every queue call the worker makes has a 4s deadline. The Redis driver's client
+(built by `jobs.Open`, or `jobs.OpenWithRedis` from the app's own client)
+enforces it: it is configured with go-redis's `ContextTimeoutEnabled`, and
+without retries, since retrying a Lua script whose reply was lost could lease
+a second job. If you build a `RedisQueue` yourself, use
+`jobs.RedisClientOptions`.
 
 **Nothing is lost when a worker crashes.** A job a dead worker was running
 keeps its lease in Redis; when the lease expires it is delivered to another
