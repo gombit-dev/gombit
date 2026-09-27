@@ -15,9 +15,9 @@ version.
 - Retry-policy test infrastructure for contributors (INV-4, bounded retry):
   `faulttest.Sleeper` (with `FakeSleeper` and `RealSleeper`), so backoff is
   tested without sleeping, and `faulttest.CheckRetryPolicy`, the
-  conformance check every Gombit retry policy must pass: bounded attempts,
-  cancellation mid-backoff, permanent errors not retried, retryable ones
-  retried, backoff on schedule and never overflowing, success ends it, an
+  conformance check every Gombit retry policy must pass. It checks that an always-retryable failure uses
+  exactly the `MaxAttempts` budget (never more, never fewer), cancellation
+  (before the first attempt and mid-backoff), permanent errors not retried, backoff on schedule and never overflowing, success ends it, an
   observable final error. JOBS-4's retry policy
   ([#317](https://github.com/gombit-dev/gombit/issues/317)) is its first
   consumer ([#387](https://github.com/gombit-dev/gombit/issues/387)).
