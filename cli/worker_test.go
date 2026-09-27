@@ -24,6 +24,13 @@ func TestWorkerCommandRunsTheAppsWorker(t *testing.T) {
 		got, gotKill = spec, killAfter
 		return nil
 	}
+	prevBuild := buildServer
+	t.Cleanup(func() { buildServer = prevBuild })
+	built := false
+	buildServer = func(context.Context, io.Writer, io.Writer) (string, func(), error) {
+		built = true
+		return "/tmp/built/server", func() {}, nil
+	}
 	run := func(args ...string) (string, error) {
 		stdout, stderr := new(bytes.Buffer), new(bytes.Buffer)
 		err := ExecuteRoot(context.Background(), NewRoot(stdout, stderr), append([]string{"worker"}, args...))
@@ -39,8 +46,9 @@ func TestWorkerCommandRunsTheAppsWorker(t *testing.T) {
 	if _, err := run("--queue", "mail,default", "--concurrency", "4", "--shutdown-timeout", "1m"); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(got.Args, " ") != "run ./cmd/server worker --queue mail,default --concurrency 4 --shutdown-timeout 1m" {
-		t.Fatalf("args = %v", got.Args)
+	// The supervised process is the built server itself, not `go run`.
+	if !built || got.Path != "/tmp/built/server" || strings.Join(got.Args, " ") != "worker --queue mail,default --concurrency 4 --shutdown-timeout 1m" {
+		t.Fatalf("ran %s %v (built %v), want the built server with the worker args", got.Path, got.Args, built)
 	}
 	if gotKill <= time.Minute {
 		t.Fatalf("kill after %s, want longer than the worker's 1m shutdown timeout", gotKill)

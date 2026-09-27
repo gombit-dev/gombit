@@ -42,9 +42,11 @@ func TestParseWorkerFlags(t *testing.T) {
 	if _, err := ParseWorkerFlags([]string{"--help"}, &help); !errors.Is(err, flag.ErrHelp) || !strings.Contains(help.String(), "-concurrency") {
 		t.Fatalf("--help = %v, output %q", err, help.String())
 	}
-	got := WorkerKillAfter([]string{"--shutdown-timeout", "1m"})
-	if got != time.Minute+workerShutdownGrace || got <= time.Minute+jobs.ShutdownGrace {
-		t.Fatalf("WorkerKillAfter = %s, want more than the timeout plus the worker's own grace", got)
+	// Everything after SIGTERM: a reserve on the wire and its release, the
+	// shutdown timeout, the grace, and the stop hooks.
+	want := time.Minute + 2*jobs.QueueCallTimeout + jobs.ShutdownGrace + defaultShutdownTimeout
+	if got := WorkerKillAfter([]string{"--shutdown-timeout", "1m"}); got != want {
+		t.Fatalf("WorkerKillAfter = %s, want %s", got, want)
 	}
 }
 

@@ -96,8 +96,9 @@ is `worker`. One build deploys as both processes:
 ./server worker --queue critical,default --concurrency 8
 ```
 
-In development, `gombit worker` runs `go run ./cmd/server worker` with the
-same flags:
+In development, `gombit worker` builds `./cmd/server` and runs it as
+`server worker` with the same flags (it supervises the server itself, so
+Ctrl+C gets a graceful shutdown and the worker's exit status):
 
 ```sh
 GOMBIT_JOBS_DRIVER=redis gombit worker --concurrency 4
@@ -134,11 +135,14 @@ canceled and gets up to 10 more seconds (`jobs.ShutdownGrace`) to return and
 be released, available immediately. Then the app's `OnStop` hooks run.
 
 **Give your process manager a stop timeout of at least `--shutdown-timeout`
-plus 15 seconds** (45s at the defaults; `terminationGracePeriodSeconds` on
-Kubernetes, `TimeoutStopSec` on systemd, `stop_grace_period` in Compose). A
-manager that kills the worker right after `--shutdown-timeout` cuts off that
-release, and the job waits out its lease instead. `gombit worker` waits this
-long itself.
+plus 28 seconds** (58s at the defaults; `terminationGracePeriodSeconds` on
+Kubernetes, `TimeoutStopSec` on systemd, `stop_grace_period` in Compose). That
+is everything that follows SIGTERM: a reserve already on the wire and the
+release of what it returns (4s each), the shutdown timeout, the 10s grace, and
+the app's stop hooks (10s). A manager that kills the worker sooner can cut off
+a release or an ack, and that job waits out its lease instead.
+`framework.WorkerKillAfter` computes it, and `gombit worker` waits that long
+itself.
 
 Every queue call the worker makes has a 4s deadline. The Redis driver's client
 (built by `jobs.Open`, or `jobs.OpenWithRedis` from the app's own client)

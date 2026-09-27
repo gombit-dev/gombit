@@ -582,8 +582,9 @@ Command names that collide with framework families (`new`, `dev`, `build`,
 gombit worker [--queue default] [--concurrency N] [--lease 5m] [--shutdown-timeout 30s]
 ```
 
-Runs the app's background-job worker from an application directory
-(`go run ./cmd/server worker` with the same flags). In production run the
+Runs the app's background-job worker from an application directory: it
+builds `./cmd/server` and runs `server worker` with the same flags, stopping
+it gracefully on Ctrl+C and exiting with its status. In production run the
 built binary: `./server worker`. It needs `GOMBIT_JOBS_DRIVER=redis`. See
 [jobs.md § Running the worker](jobs.md#running-the-worker).
 

@@ -114,7 +114,12 @@ func defaultRetryDelay(attempt int) time.Duration {
 // client ignores the caller's context. Ack and release run on their own
 // context, not the worker's, so a job that finishes during shutdown is still
 // acknowledged.
-const queueOpTimeout = 4 * time.Second
+const queueOpTimeout = QueueCallTimeout
+
+// QueueCallTimeout is the deadline of each queue call the worker makes. A
+// stop can find one reserve on the wire, and the release of what it returns,
+// before the shutdown timeout even starts: a supervisor's budget counts two.
+const QueueCallTimeout = 4 * time.Second
 
 // ShutdownGrace is how long Run waits, after canceling in-flight jobs at the
 // shutdown timeout, for them to settle. It covers the worst case of one lease

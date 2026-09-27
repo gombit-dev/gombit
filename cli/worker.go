@@ -20,8 +20,8 @@ func newWorkerCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
 	return silence(&cobra.Command{
 		Use:   "worker [--queue default] [--concurrency N] [--lease 5m] [--shutdown-timeout 30s]",
 		Short: "Run this app's background-job worker",
-		Long: `Run the app's jobs worker from an application directory: go run ./cmd/server
-worker, with these flags passed through.
+		Long: `Run the app's jobs worker from an application directory: it builds ./cmd/server
+and runs it as "server worker", with these flags passed through.
 
 The worker is part of the app binary, because it runs the app's own job
 handlers. In production run the built binary the same way:
@@ -56,15 +56,20 @@ lives inside the dispatching process.`,
 			if _, err := os.Stat(filepath.Join("cmd", "server")); err != nil {
 				return errors.New("gombit worker: cmd/server not found; run it from a gombit new application directory, or run your built binary with: ./server worker")
 			}
-			goBin, err := exec.LookPath("go")
+			// Build, then run the server binary itself: `go run` does not catch
+			// SIGTERM, so it would die at once and leave the worker it started
+			// unsupervised. The process signaled and waited on must be the one
+			// framework.Run is shutting down.
+			bin, cleanup, err := buildServer(cmd.Context(), stdout, stderr)
 			if err != nil {
-				return fmt.Errorf("gombit worker: go not found on PATH: %w", err)
+				return err
 			}
+			defer cleanup()
 			spec := dev.ProcSpec{
 				Name: "worker",
 				Dir:  ".",
-				Path: goBin,
-				Args: append([]string{"run", "./cmd/server", framework.WorkerCommand}, args...),
+				Path: bin,
+				Args: append([]string{framework.WorkerCommand}, args...),
 			}
 			err = runWorkerProcess(cmd.Context(), spec, stdout, stderr, framework.WorkerKillAfter(args))
 			if errors.Is(err, context.Canceled) {
@@ -77,3 +82,25 @@ lives inside the dispatching process.`,
 
 // runWorkerProcess starts the app's worker; tests replace it.
 var runWorkerProcess = dev.RunProcess
+
+// buildServer compiles ./cmd/server into a temporary directory; tests
+// replace it.
+var buildServer = func(ctx context.Context, stdout, stderr io.Writer) (bin string, cleanup func(), err error) {
+	goBin, err := exec.LookPath("go")
+	if err != nil {
+		return "", nil, fmt.Errorf("gombit worker: go not found on PATH: %w", err)
+	}
+	dir, err := os.MkdirTemp("", "gombit-worker-*")
+	if err != nil {
+		return "", nil, fmt.Errorf("gombit worker: %w", err)
+	}
+	cleanup = func() { _ = os.RemoveAll(dir) }
+	bin = filepath.Join(dir, "server")
+	build := exec.CommandContext(ctx, goBin, "build", "-o", bin, "./cmd/server") // #nosec G204 -- fixed go build of the app's own cmd/server
+	build.Stdout, build.Stderr = stdout, stderr
+	if err := build.Run(); err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("gombit worker: build ./cmd/server: %w", err)
+	}
+	return bin, cleanup, nil
+}
