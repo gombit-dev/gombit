@@ -93,6 +93,19 @@ if grep -qE 'secret-(pg|my)' <<<"$out"; then
   note "a DSN was printed unmasked: $out"
 fi
 
+# ---- Redis: only packages that define -<pkg>.redis-addr get it ----
+newlog
+out="$(FAULT_REDIS_ADDR='127.0.0.1:6399' suite)" || note "suite with a Redis address failed: $out"
+calls="$(cat "$CALL_LOG")"
+grep -qF -- '-run ^TestFault_ ./cache -cache.redis-addr 127.0.0.1:6399' <<<"$calls" ||
+  note "the cache package got no Redis run: $calls"
+if grep 'integration' <<<"$calls" | grep -qE -- '-(framework|auth|admin)\.'; then
+  note "a package without a Redis flag got a database run from FAULT_REDIS_ADDR alone: $calls"
+fi
+if grep -qF '127.0.0.1:6399' <<<"$out"; then
+  note "the Redis address was printed unmasked: $out"
+fi
+
 # ---- a failing go test fails the suite, and stops it ----
 newlog
 if out="$(FAULT_POSTGRES_DSN="$pg" FAIL_MATCH='./internal/faulttest' suite 2>&1)"; then

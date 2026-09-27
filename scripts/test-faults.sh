@@ -6,10 +6,11 @@
 #   - the internal/faulttest harness's own tests, whole;
 #   - every TestFault_* test, in every package that declares one (found by
 #     name, so a new fault test joins the suite without editing this file);
-#   - with FAULT_POSTGRES_DSN and/or FAULT_MYSQL_DSN set, the same packages
-#     again under the `integration` tag against those databases, one
-#     package at a time (they share tables such as the auth ones), each with
-#     its own -<pkg>.postgres-dsn / -<pkg>.mysql-dsn flags.
+#   - with FAULT_POSTGRES_DSN, FAULT_MYSQL_DSN, and/or FAULT_REDIS_ADDR set,
+#     the same packages again under the `integration` tag against those
+#     dependencies, one package at a time (they share tables such as the
+#     auth ones), each with the -<pkg>.postgres-dsn / -<pkg>.mysql-dsn /
+#     -<pkg>.redis-addr flags it defines.
 #
 # Plain bash 3.2+ (macOS) and POSIX tools.
 #
@@ -81,7 +82,7 @@ fi
 # run echoes a command (database DSNs masked) and runs it.
 run() {
   local shown="$*"
-  for dsn in "${FAULT_POSTGRES_DSN:-}" "${FAULT_MYSQL_DSN:-}"; do
+  for dsn in "${FAULT_POSTGRES_DSN:-}" "${FAULT_MYSQL_DSN:-}" "${FAULT_REDIS_ADDR:-}"; do
     if [ -n "$dsn" ]; then
       shown="${shown//"$dsn"/<dsn>}"
     fi
@@ -140,7 +141,7 @@ if [ "${#faultPkgs[@]}" -gt 0 ]; then
   run go test -race -count="$count" -run "$faultRun" "${faultPkgs[@]}"
 fi
 
-if [ -n "${FAULT_POSTGRES_DSN:-}${FAULT_MYSQL_DSN:-}" ]; then
+if [ -n "${FAULT_POSTGRES_DSN:-}${FAULT_MYSQL_DSN:-}${FAULT_REDIS_ADDR:-}" ]; then
   # flagFor prints the -<prefix>.<name> flag pkg's tests define (e.g.
   # -framework.postgres-dsn), or nothing when they define none.
   flagFor() {
@@ -155,7 +156,7 @@ if [ -n "${FAULT_POSTGRES_DSN:-}${FAULT_MYSQL_DSN:-}" ]; then
   # Each package gets the flags it defines, for the dependencies configured.
   for pkg in ${mine[@]+"${mine[@]}"}; do
     args=()
-    for pair in "postgres-dsn:${FAULT_POSTGRES_DSN:-}" "mysql-dsn:${FAULT_MYSQL_DSN:-}"; do
+    for pair in "postgres-dsn:${FAULT_POSTGRES_DSN:-}" "mysql-dsn:${FAULT_MYSQL_DSN:-}" "redis-addr:${FAULT_REDIS_ADDR:-}"; do
       name="${pair%%:*}"
       value="${pair#*:}"
       [ -n "$value" ] || continue

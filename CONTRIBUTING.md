@@ -181,14 +181,26 @@ a channel or the client going away), `CutBody(partial)`, or
 body was closed, and call `dep.WaitIdle(t)` to prove no call was left
 running on the dependency.
 
+Real transport faults go through `faulttest.NewTCPProxy(t, upstream)`, an
+in-process TCP proxy the test points its dependency at (for Postgres,
+`faulttest.PostgresDSNVia(dsn, proxy.Addr())`). The test toggles each fault
+at an explicit point: `Hold()` (the dependency stops answering: latency past
+any deadline; `Held()` says a call has stalled), `Cut()` / `Reset()` (open
+connections drop, with FIN or RST), `Refuse()` (new connections are
+refused), and `Heal()` (all lifted, so the next operation must succeed
+without a restart). The `framework` and `cache` network tests
+(`TestFault_Network_*`) run against a real Postgres and Redis this way.
+
 `make test-faults` runs the whole fault suite: the `internal/faulttest`
 harness and every `TestFault_*` test (found by name, so a new one joins
 without editing anything), under the race detector. Set `FAULT_POSTGRES_DSN`
-and `FAULT_MYSQL_DSN` to add those databases, as CI's `fault-tests` job does:
+and `FAULT_MYSQL_DSN` to add those databases, and `FAULT_REDIS_ADDR` for
+Redis, as CI's `fault-tests` job does:
 
 ```bash
 FAULT_POSTGRES_DSN='postgres://gombit:gombit@127.0.0.1:5432/gombit?sslmode=disable' \
 FAULT_MYSQL_DSN='gombit:gombit@tcp(127.0.0.1:3306)/gombit?parseTime=true' \
+FAULT_REDIS_ADDR=127.0.0.1:6379 \
   make test-faults
 ```
 
