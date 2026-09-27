@@ -163,8 +163,9 @@ func New(options ...Option) (*App, error) {
 		var err error
 		if app.cfg.Jobs.Driver == config.JobsDriverRedis && app.redis != nil {
 			// The app already has a Redis client (WithRedis, or the cache's):
-			// queue on it rather than dial GOMBIT_REDIS_* a second time, which
-			// could even reach a different server than the attached client.
+			// queue against the server it talks to rather than dial
+			// GOMBIT_REDIS_*, which could even be a different one. The queue
+			// gets its own pool, tuned for queue calls.
 			dispatcher, err = jobs.OpenWithRedis(app.cfg.Jobs, app.redis, registry)
 		} else {
 			dispatcher, err = jobs.Open(app.cfg.Jobs, app.cfg.Cache.Redis, registry)

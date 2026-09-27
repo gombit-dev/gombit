@@ -84,6 +84,12 @@ func Open(cfg config.CacheConfig) (*Store, error) {
 
 // NewRedisClient builds a go-redis client from typed configuration.
 func NewRedisClient(cfg config.RedisConfig) (*redis.Client, error) {
+	return redis.NewClient(RedisOptions(cfg)), nil
+}
+
+// RedisOptions maps the typed Redis settings to go-redis options, for a
+// caller that tunes them further before building a client (the job queue).
+func RedisOptions(cfg config.RedisConfig) *redis.Options {
 	options := &redis.Options{
 		Addr:         cfg.Addr,
 		Username:     cfg.Username,
@@ -99,7 +105,7 @@ func NewRedisClient(cfg config.RedisConfig) (*redis.Client, error) {
 			options.TLSConfig.InsecureSkipVerify = true // #nosec G402 -- explicit config opt-in for development TLS.
 		}
 	}
-	return redis.NewClient(options), nil
+	return options
 }
 
 // Driver returns the configured driver.
