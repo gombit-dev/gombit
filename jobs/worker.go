@@ -295,9 +295,10 @@ func (w *Worker) process(jobCtx context.Context, d Delivery) {
 	}
 	if errors.Is(err, ErrInProgress) && !IsPermanent(err) {
 		// Another run holds the effect's Once lock. Waiting is not failing:
-		// retried past MaxAttempts, bounded by the lock's expiry, so a job
-		// whose other run crashed is not buried before the lock frees.
-		w.retry(d, policy.Backoff(d.Envelope.Attempt), fields)
+		// the job is postponed, its attempt taken back, until the other run
+		// finishes or its lock expires, so a job whose other run crashed
+		// keeps its whole MaxAttempts for when it can run.
+		w.postpone(d, policy.Backoff(d.Envelope.Attempt), fields)
 		return
 	}
 	if IsPermanent(err) || d.Envelope.Attempt >= policy.MaxAttempts {
@@ -316,6 +317,20 @@ func (w *Worker) retry(d Delivery, delay time.Duration, fields []zap.Field) {
 		return
 	}
 	w.log.Warn("job failed", fields...)
+}
+
+// postpone releases d to try again after delay without counting this
+// delivery as an attempt.
+func (w *Worker) postpone(d Delivery, delay time.Duration, fields []zap.Field) {
+	fields = append(fields, zap.Duration("retry_in", delay))
+	ctx, cancel := context.WithTimeout(context.Background(), queueOpTimeout)
+	defer cancel()
+	if err := w.queue.Postpone(ctx, d, time.Now().Add(delay)); err != nil {
+		w.log.Error("jobs worker: postponing a job waiting on another run failed; it returns when its lease expires",
+			append(fields, zap.NamedError("release_error", err))...)
+		return
+	}
+	w.log.Info("job postponed: another run holds its effect", fields...)
 }
 
 // giveUp stops retrying d: a permanent failure or the last allowed attempt.

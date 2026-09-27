@@ -21,8 +21,8 @@ version.
   narrows duplicates, it does not guarantee exactly-once (a lost completion
   record, a run outlasting its TTL lock, or a redelivery after the record's
   `KeepFor` expiry can repeat the effect). A job that meets another run's
-  lock (`ErrInProgress`) waits it out: it is retried without counting toward
-  `MaxAttempts`. docs/jobs.md
+  lock (`ErrInProgress`) waits it out: `Queue.Postpone` releases it and
+  takes back the attempt, so waiting spends none of `MaxAttempts`. docs/jobs.md
   documents when a job runs more than once
   ([#320](https://github.com/gombit-dev/gombit/issues/320)).
 - Failed jobs: a job the worker gives up on (a permanent failure, its last

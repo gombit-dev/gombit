@@ -176,10 +176,14 @@ return 1
 `)
 
 // releaseScript: KEYS job, pending, reserved, seq; ARGV receipt,
-// available-at ms, id. Returns 0 when the receipt is not the job's current
-// lease. The job goes behind others available at the same time.
+// available-at ms, id, and '1' to take back the delivery's attempt
+// (Postpone). Returns 0 when the receipt is not the job's current lease. The
+// job goes behind others available at the same time.
 var releaseScript = redis.NewScript(`
 if redis.call('HGET', KEYS[1], 'receipt') ~= ARGV[1] then return 0 end
+if ARGV[4] == '1' and tonumber(redis.call('HGET', KEYS[1], 'attempts') or '0') > 0 then
+  redis.call('HINCRBY', KEYS[1], 'attempts', -1)
+end
 redis.call('ZREM', KEYS[3], redis.call('HGET', KEYS[1], 'member'))
 local member = string.format('%016d', redis.call('INCR', KEYS[4])) .. ':' .. ARGV[3]
 redis.call('HSET', KEYS[1], 'receipt', '', 'member', member)
@@ -406,6 +410,15 @@ func (q *RedisQueue) Ack(ctx context.Context, d Delivery) error {
 
 // Release implements Queue.
 func (q *RedisQueue) Release(ctx context.Context, d Delivery, at time.Time) error {
+	return q.release(ctx, d, at, false)
+}
+
+// Postpone implements Queue.
+func (q *RedisQueue) Postpone(ctx context.Context, d Delivery, at time.Time) error {
+	return q.release(ctx, d, at, true)
+}
+
+func (q *RedisQueue) release(ctx context.Context, d Delivery, at time.Time, uncount bool) error {
 	if q.closed.Load() {
 		return ErrClosed
 	}
@@ -418,7 +431,7 @@ func (q *RedisQueue) Release(ctx context.Context, d Delivery, at time.Time) erro
 	}
 	k := q.keys(d.Queue)
 	ok, err := releaseScript.Run(ctx, q.client, []string{k.jobPrefix + d.Envelope.ID, k.pending, k.reserved, k.seq},
-		d.Receipt, at.UnixMilli(), d.Envelope.ID).Int()
+		d.Receipt, at.UnixMilli(), d.Envelope.ID, uncount).Int()
 	if err != nil {
 		return fmt.Errorf("jobs: release %s: %w", d.Envelope.ID, err)
 	}

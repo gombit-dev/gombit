@@ -407,6 +407,30 @@ func runQueueConformance(t *testing.T, newQueue queueFactory) {
 		}
 	})
 
+	t.Run("postpone releases without counting the attempt", func(t *testing.T) {
+		clock := newFakeClock()
+		q := newQueue(t, clock)
+		if err := q.Push(ctx, "default", envelope("p1"), time.Time{}); err != nil {
+			t.Fatal(err)
+		}
+		d := mustReserve(t, q, "default")
+		if err := q.Release(ctx, d, time.Time{}); err != nil { // attempt 1 counted
+			t.Fatal(err)
+		}
+		d = mustReserve(t, q, "default")
+		if err := q.Postpone(ctx, d, clock.Now().Add(time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+		if err := q.Postpone(ctx, d, time.Time{}); !errors.Is(err, jobs.ErrLeaseLost) {
+			t.Fatalf("Postpone with a spent receipt = %v, want ErrLeaseLost", err)
+		}
+		expectEmpty(t, q, "default")
+		clock.Advance(time.Minute)
+		if again := mustReserve(t, q, "default"); again.Envelope.ID != "p1" || again.Envelope.Attempt != 2 {
+			t.Fatalf("after postponing attempt 2, delivery = %+v, want p1 at attempt 2 again", again)
+		}
+	})
+
 	t.Run("pushes are validated", func(t *testing.T) {
 		q := newQueue(t, newFakeClock())
 		if err := q.Push(ctx, "default", envelope("dup"), time.Time{}); err != nil {
