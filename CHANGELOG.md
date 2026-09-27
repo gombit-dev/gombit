@@ -12,6 +12,27 @@ version.
 
 ### Added
 
+- Job observability: Prometheus metrics for job outcomes (counted once the
+  queue committed them), run time, queue latency, in-flight jobs, and queue
+  depth (`gombit_jobs_*`, the job's name as `job_name`), on the app's
+  `/metrics` and on a worker's `--metrics-addr` endpoint; OpenTelemetry trace
+  context carried through the envelope (`jobs.OTelPropagator`, on by default)
+  with a `job <name>` span per run; a `waited` log field. `Queue.Stats` and
+  `Delivery.AvailableAt` back the metrics
+  ([#321](https://github.com/gombit-dev/gombit/issues/321)).
+- Duplicate handling for at-least-once delivery: `jobs.Unique(key, ttl)` (one
+  queued or running job per key, released when it finishes or is given up on,
+  and after the TTL) and `jobs.UniqueFor(key, window)` (a deduplication
+  window) refuse a duplicate dispatch with `ErrDuplicateDispatch`;
+  `jobs.Once(ctx, key, fn)` skips a side effect that already completed under
+  a key, so a redelivered job does not repeat it in the common cases; it
+  narrows duplicates, it does not guarantee exactly-once (a lost completion
+  record, a run outlasting its TTL lock, or a redelivery after the record's
+  `KeepFor` expiry can repeat the effect). A job that meets another run's
+  lock (`ErrInProgress`) waits it out: `Queue.Postpone` releases it and
+  takes back the attempt, so waiting spends none of `MaxAttempts`. docs/jobs.md
+  documents when a job runs more than once
+  ([#320](https://github.com/gombit-dev/gombit/issues/320)).
 - Failed jobs: a job the worker gives up on (a permanent failure, its last
   attempt, or an undecodable envelope) is kept on its queue with the original
   envelope, attempts, and the reason, kind, error, and time, instead of being

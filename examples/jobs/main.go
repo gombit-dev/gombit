@@ -8,6 +8,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"sync/atomic"
@@ -45,9 +46,12 @@ func main() {
 	jobs.MustRegister(dispatcher.Registry(), func(ctx context.Context, job SendWelcomeEmail) error {
 		defer done.Add(1)
 		info, _ := jobs.InfoFromContext(ctx)
-		fmt.Printf("welcome user %d (job %s v%d, queued as v%d, attempt %d of %d)\n",
-			job.UserID, info.Name, info.Version, info.QueuedVersion, info.Attempt, info.MaxAttempts)
-		return nil
+		// Once per job: a redelivered job does not send the email twice.
+		return jobs.Once(ctx, "welcome-email:"+info.ID, func(context.Context) error {
+			fmt.Printf("welcome user %d (job %s v%d, queued as v%d, attempt %d of %d)\n",
+				job.UserID, info.Name, info.Version, info.QueuedVersion, info.Attempt, info.MaxAttempts)
+			return nil
+		})
 	}, jobs.WithOptions(jobs.Options{
 		MaxAttempts: 8,
 		Timeout:     30 * time.Second,
@@ -64,8 +68,12 @@ func main() {
 	}))
 
 	ctx := context.Background()
-	if _, err := dispatcher.Dispatch(ctx, SendWelcomeEmail{UserID: 42}); err != nil {
+	if _, err := dispatcher.Dispatch(ctx, SendWelcomeEmail{UserID: 42}, jobs.Unique("welcome:42", time.Hour)); err != nil {
 		log.Fatal(err)
+	}
+	// A second welcome for the same user while the first is queued is refused.
+	if _, err := dispatcher.Dispatch(ctx, SendWelcomeEmail{UserID: 42}, jobs.Unique("welcome:42", time.Hour)); !errors.Is(err, jobs.ErrDuplicateDispatch) {
+		log.Fatalf("duplicate dispatch: got %v, want ErrDuplicateDispatch", err)
 	}
 
 	// A version-1 job still in the queue from before the payload changed.

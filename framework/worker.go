@@ -6,9 +6,13 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"os"
 	"strings"
 	"time"
+
+	"go.uber.org/zap"
 
 	"github.com/gombit-dev/gombit/config"
 	"github.com/gombit-dev/gombit/jobs"
@@ -37,6 +41,13 @@ func RunWorker(ctx context.Context, app *App, opts jobs.WorkerOptions) error {
 	if opts.Logger == nil {
 		opts.Logger = app.Logger()
 	}
+	if opts.Metrics == nil {
+		opts.Metrics = app.JobMetrics()
+	}
+	if opts.Metrics == app.JobMetrics() && dispatcher.Queue() != nil {
+		// The app's /metrics reports these queues' depth too.
+		app.addWorkerQueues(opts.Queues)
+	}
 	worker, err := jobs.NewWorker(dispatcher.Registry(), dispatcher.Queue(), opts)
 	if err != nil {
 		return err
@@ -51,26 +62,110 @@ func RunWorker(ctx context.Context, app *App, opts jobs.WorkerOptions) error {
 // runWorkerCommand is Run's `worker` mode: it parses the worker flags and
 // refuses a driver a separate worker process cannot consume.
 func runWorkerCommand(ctx context.Context, app *App, args []string, stderr io.Writer) error {
-	opts, err := ParseWorkerFlags(args, stderr)
+	flags, err := ParseWorkerFlags(args, stderr)
 	if errors.Is(err, flag.ErrHelp) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
+	opts := flags.WorkerOptions
 	switch app.Config().Jobs.Driver {
 	case config.JobsDriverSync:
 		return fmt.Errorf("framework: worker: GOMBIT_JOBS_DRIVER is sync, which runs every job when it is dispatched; there is no queue to work. Set GOMBIT_JOBS_DRIVER=redis")
 	case config.JobsDriverMemory:
 		return fmt.Errorf("framework: worker: GOMBIT_JOBS_DRIVER is memory, whose queue lives inside the process that dispatches; a separate worker process cannot see it. Set GOMBIT_JOBS_DRIVER=redis")
 	}
-	return RunWorker(ctx, app, opts)
+	if flags.MetricsAddr == "" {
+		return RunWorker(ctx, app, opts)
+	}
+	queues := opts.Queues
+	if len(queues) == 0 {
+		queues = []string{app.Jobs().DefaultQueue()}
+	}
+	_, stop, err := serveWorkerMetrics(flags.MetricsAddr, app, queues)
+	if err != nil {
+		return err
+	}
+	runErr := RunWorker(ctx, app, opts)
+	return errors.Join(runErr, stop())
+}
+
+// serveWorkerMetrics serves a worker process's /metrics (its job outcomes,
+// then each queue's depth, read at scrape time) and /livez on addr, until the
+// returned stop is called.
+// queueStatsTimeout bounds the queue reads of one metrics scrape.
+const queueStatsTimeout = 2 * time.Second
+
+// readQueueStats reads each queue's depth for the queue gauges. It returns
+// what it read and an error naming each queue that did not answer.
+func readQueueStats(ctx context.Context, q jobs.Queue, queues []string) (map[string]jobs.QueueStats, error) {
+	stats := map[string]jobs.QueueStats{}
+	if q == nil {
+		return stats, nil
+	}
+	var errs []error
+	for _, name := range queues {
+		st, err := q.Stats(ctx, name)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("queue %s: %w", name, err))
+			continue
+		}
+		stats[name] = st
+	}
+	return stats, errors.Join(errs...)
+}
+
+func serveWorkerMetrics(addr string, app *App, queues []string) (bound string, stop func() error, err error) {
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return "", nil, fmt.Errorf("framework: worker: metrics listener: %w", err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/livez", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"data":{"status":"ok"}}`)
+	})
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), queueStatsTimeout)
+		defer cancel()
+		stats, err := readQueueStats(ctx, app.Jobs().Queue(), queues)
+		if err != nil {
+			// Fail the scrape rather than drop the queue gauges: Prometheus
+			// keeps the last good sample instead of reading an empty queue.
+			app.Logger().Warn("jobs worker: metrics scrape failed reading queue stats", zap.Error(err))
+			http.Error(w, "jobs: queue stats: "+err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		_ = app.JobMetrics().WritePrometheus(w, stats, time.Now())
+	})
+	server := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	go func() {
+		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			app.Logger().Error("jobs worker: metrics server stopped", zap.String("addr", addr), zap.Error(err))
+		}
+	}()
+	return listener.Addr().String(), func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return server.Shutdown(ctx)
+	}, nil
+}
+
+// WorkerFlags are the parsed worker flags: the worker's options, plus where
+// to serve its metrics.
+type WorkerFlags struct {
+	jobs.WorkerOptions
+	// MetricsAddr, when set, serves /metrics (job outcomes and queue depth)
+	// and /livez on that address while the worker runs.
+	MetricsAddr string
 }
 
 // ParseWorkerFlags parses the worker flags `gombit worker` and `./server
 // worker` share: --queue (repeatable or comma-separated, in priority order),
-// --concurrency, --lease, and --shutdown-timeout.
-func ParseWorkerFlags(args []string, output io.Writer) (jobs.WorkerOptions, error) {
+// --concurrency, --lease, --shutdown-timeout, and --metrics-addr.
+func ParseWorkerFlags(args []string, output io.Writer) (WorkerFlags, error) {
 	fs := flag.NewFlagSet(WorkerCommand, flag.ContinueOnError)
 	if output == nil {
 		output = io.Discard
@@ -81,27 +176,31 @@ func ParseWorkerFlags(args []string, output io.Writer) (jobs.WorkerOptions, erro
 	concurrency := fs.Int("concurrency", 1, "jobs to run at once")
 	lease := fs.Duration("lease", jobs.DefaultLease, "how long a reserved job is held; renewed while it runs")
 	shutdown := fs.Duration("shutdown-timeout", jobs.DefaultShutdownTimeout, "how long in-flight jobs get to finish on shutdown")
+	metricsAddr := fs.String("metrics-addr", "", "serve /metrics and /livez on this address (e.g. :9091); off by default")
 	fs.Usage = func() {
 		_, _ = fmt.Fprintf(output, "Usage: %s worker [flags]\n\nRun this app's background-job worker.\n\n", os.Args[0])
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
-		return jobs.WorkerOptions{}, err
+		return WorkerFlags{}, err
 	}
 	if fs.NArg() > 0 {
-		return jobs.WorkerOptions{}, fmt.Errorf("framework: worker: unexpected argument %q", fs.Arg(0))
+		return WorkerFlags{}, fmt.Errorf("framework: worker: unexpected argument %q", fs.Arg(0))
 	}
 	if *concurrency < 1 {
-		return jobs.WorkerOptions{}, fmt.Errorf("framework: worker: --concurrency must be at least 1, got %d", *concurrency)
+		return WorkerFlags{}, fmt.Errorf("framework: worker: --concurrency must be at least 1, got %d", *concurrency)
 	}
 	if *lease <= 0 || *shutdown <= 0 {
-		return jobs.WorkerOptions{}, errors.New("framework: worker: --lease and --shutdown-timeout must be positive")
+		return WorkerFlags{}, errors.New("framework: worker: --lease and --shutdown-timeout must be positive")
 	}
-	return jobs.WorkerOptions{
-		Queues:          queues,
-		Concurrency:     *concurrency,
-		Lease:           *lease,
-		ShutdownTimeout: *shutdown,
+	return WorkerFlags{
+		WorkerOptions: jobs.WorkerOptions{
+			Queues:          queues,
+			Concurrency:     *concurrency,
+			Lease:           *lease,
+			ShutdownTimeout: *shutdown,
+		},
+		MetricsAddr: *metricsAddr,
 	}, nil
 }
 

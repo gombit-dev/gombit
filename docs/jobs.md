@@ -1,9 +1,9 @@
 # Background jobs
 
 > **Status:** the job contract (JOBS-1), queue drivers (JOBS-2), the worker
-> (JOBS-3), retries, backoff, and timeouts (JOBS-4), delayed jobs (JOBS-5), and
-> failed jobs (JOBS-6). Uniqueness helpers, metrics, and a test queue land in
-> the rest of the
+> (JOBS-3), retries, backoff, and timeouts (JOBS-4), delayed jobs (JOBS-5),
+> failed jobs (JOBS-6), duplicate handling (JOBS-7), and observability
+> (JOBS-8). A test queue lands in the rest of the
 > [JOBS-0 epic](https://github.com/gombit-dev/gombit/issues/278).
 
 A job is work that should not run inside an HTTP request: sending an email,
@@ -129,6 +129,7 @@ GOMBIT_JOBS_DRIVER=redis gombit worker --concurrency 4
 | `--concurrency` | `1` | jobs running at once |
 | `--lease` | `5m` | how long a reserved job is held; renewed every third of it while the handler runs |
 | `--shutdown-timeout` | `30s` | how long in-flight jobs get to finish on SIGINT/SIGTERM |
+| `--metrics-addr` | off | serve `/metrics` and `/livez` on this address, e.g. `:9091` (see [Observability](#observability)) |
 
 A worker needs a queue another process can reach, so it refuses to start with
 the `sync` driver (jobs already ran at dispatch) and the `memory` driver (its
@@ -272,6 +273,115 @@ headroom in `MaxAttempts` for long jobs. An interrupted attempt is never given
 up on, even the last one, so a job can run again with `Attempt` past
 `MaxAttempts`; a handler should not assume `Attempt == MaxAttempts` is
 certainly its last run.
+
+## Observability
+
+Every job is observable without instrumenting it.
+
+**Logs.** The worker logs one structured entry per outcome (`job succeeded`,
+`job failed`, `job failed for good`, …) with `job_id`, `job`, `queue`,
+`attempt`, `duration`, `waited` (time in the queue since it became available),
+the failure `kind`, and the propagated request and trace IDs under `metadata`.
+`job_id` is the same on every attempt of a job, so filtering on it shows its
+whole history, retries included; `attempt` orders them.
+
+**Traces.** The app's registry carries OpenTelemetry context through the
+envelope (`jobs.OTelPropagator`: W3C `traceparent`/`tracestate` and baggage,
+or your global propagator), and every run is a span, `job <name>`, a child of
+the span that dispatched it, with the job's name, ID, version, and attempt,
+and an error status when it fails. That needs an OpenTelemetry SDK in your app
+(`otel.SetTracerProvider`); without one both are no-ops.
+
+**Metrics** (Prometheus text format):
+
+| Metric | Labels | |
+|--------|--------|--|
+| `gombit_jobs_processed_total` | `job_name`, `queue`, `result` | deliveries by outcome: `succeeded`, `retried`, `failed` (given up), `interrupted`, `postponed` (waited on another run's `Once` lock), `abandoned` (lease lost), `undecodable`, `unsettled` (the ack, release, or bury failed; the job returns when its lease expires) |
+| `gombit_jobs_run_seconds` (histogram) | `job_name`, `queue` | handler time |
+| `gombit_jobs_wait_seconds` (histogram) | `job_name`, `queue` | queue latency: from available (dispatch time, delay, retry time, or an expired lease) to started; buckets 10ms to 30m |
+| `gombit_jobs_in_flight` | `queue` | running now |
+| `gombit_jobs_queued` | `queue`, `state` | `ready` (a lapsed lease counts: the job is due again), `scheduled`, `reserved`, `failed` |
+| `gombit_jobs_oldest_ready_seconds` | `queue` | age of the longest-waiting ready job |
+
+A worker process serves no HTTP, so pass `--metrics-addr :9091` and scrape
+that; it also answers `/livez`. The queue gauges are read from the queue at
+scrape time, for the queues the worker consumes; when a queue does not answer,
+the scrape fails (503), so Prometheus keeps the last good sample rather than
+record an empty queue. A worker running inside the web process
+(`framework.RunWorker`) records into the app's own `/metrics`, queue gauges
+included; there a queue that does not answer is left out and reported as
+`gombit_jobs_queue_stats_up{queue} 0`, so an outage does not also take the
+HTTP series down.
+
+Outcomes count once the queue committed them: `succeeded` after the ack,
+`retried`, `interrupted`, and `postponed` after the release, `failed` and `undecodable`
+after the bury. When that call fails the job stays leased and returns after
+the lease; it counts as `unsettled` (or `abandoned`, when the lease was lost).
+
+The job's name is the `job_name` label (Prometheus reserves `job` for the
+scrape job). Only registered job names appear; any other name counts as
+`unknown`, so an envelope cannot create series.
+
+## Duplicates
+
+Delivery is **at least once**. A job can run more than once:
+
+- its worker crashed, or its lease ran out mid-run, after the side effect but
+  before the acknowledgement: another worker runs it again;
+- it failed after the side effect (a later step errored): its retry runs the
+  whole handler again;
+- a deploy interrupted it, and it goes back to the queue.
+
+A job is never lost to these; it is repeated. Two tools keep the repeats
+harmless.
+
+### Unique dispatch
+
+```go
+app.Jobs().Dispatch(ctx, RebuildReport{AccountID: id},
+	jobs.Unique("rebuild-report:"+id, time.Hour))       // one queued or running at a time
+app.Jobs().Dispatch(ctx, SendDigest{UserID: id},
+	jobs.UniqueFor("digest:"+id, 24*time.Hour))         // at most one per day
+```
+
+`Unique(key, ttl)` refuses a second job with the same key on the same queue
+while one is queued, delayed, or running; the key frees when that job succeeds
+or is given up on, and after `ttl` in any case, so a job that vanishes cannot
+hold it forever. `UniqueFor(key, window)` refuses duplicates for `window` after
+the first dispatch, whether or not it has run. A refused dispatch returns a
+`*jobs.DuplicateError` (`errors.Is(err, jobs.ErrDuplicateDispatch)`) naming the
+job that holds the key; nothing is queued. The `sync` driver has no queue to
+hold a key and runs every dispatch.
+
+### Once per side effect
+
+```go
+func sendWelcome(ctx context.Context, job SendWelcomeEmail) error {
+	info, _ := jobs.InfoFromContext(ctx)
+	return jobs.Once(ctx, "welcome-email:"+info.ID, func(ctx context.Context) error {
+		return mailer.Welcome(ctx, job.UserID)
+	})
+}
+```
+
+`jobs.Once(ctx, key, fn)` runs `fn` unless an effect with that key already
+completed, and records it when `fn` succeeds, so a redelivered job skips it. Key
+it on the job ID and the effect. While one run holds a key, another gets
+`jobs.ErrInProgress`: the worker postpones the job for the backoff and takes
+back the attempt (`Queue.Postpone`), so it waits out the other run without
+spending any of `MaxAttempts`. A failing `fn` releases the key for the retry. The lock expires
+after `jobs.LockFor` (default 15m), so a crashed run cannot block the key
+forever. Completions are remembered for `jobs.KeepFor` (default 7 days), and
+then the record expires: failed jobs are kept until forgotten or purged, so a
+redelivery after `KeepFor` (`gombit jobs retry` a week later) runs `fn` again.
+Set `KeepFor` past the longest a job carrying the key can come back.
+
+`Once` narrows duplicates, it does not make them impossible: a run that dies
+between `fn` succeeding and the record keeps the lock until it expires, and the
+next delivery then runs `fn` again. When an effect must happen exactly once,
+make it idempotent at its destination too: a unique constraint, an idempotency
+key the other system honors (payment APIs take one; use the job ID). Outside a
+worker (the `sync` driver, a unit test) `Once` just runs `fn`.
 
 ## Failed jobs
 

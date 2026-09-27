@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -26,6 +27,7 @@ import (
 //	…:failed    sorted set of jobs a worker gave up on (IDs), by when
 //	…:seq       counter that orders jobs available in the same millisecond
 //	…:job:<id>  hash: the envelope, attempt count, lease receipt, and member
+//	…:unique:<key>  the ID of the job holding a uniqueness key, with a TTL
 //
 // A job's member in both sets is "<16-digit sequence>:<id>", so equal scores
 // order by push (or release) order. Reserve takes whichever is earlier: the
@@ -83,7 +85,7 @@ func NewRedisQueue(client redis.UniversalClient, namespace string, opts ...Redis
 }
 
 type redisKeys struct {
-	pending, reserved, failed, seq, jobPrefix string
+	pending, reserved, failed, seq, jobPrefix, unique string
 }
 
 func (q *RedisQueue) keys(queue string) redisKeys {
@@ -94,6 +96,7 @@ func (q *RedisQueue) keys(queue string) redisKeys {
 		failed:    base + ":failed",
 		seq:       base + ":seq",
 		jobPrefix: base + ":job:",
+		unique:    base + ":unique:",
 	}
 }
 
@@ -107,21 +110,46 @@ redis.call('ZADD', KEYS[2], ARGV[2], member)
 return 1
 `)
 
+// pushUniqueScript: KEYS job, pending, seq, unique; ARGV envelope,
+// available-at ms, id, claim ttl ms, until-done ('1' or '0'). Returns
+// {1, ”} when pushed, {0, holder} when the uniqueness key is held, and
+// {-1, ”} when the ID is already on this queue.
+var pushUniqueScript = redis.NewScript(`
+local holder = redis.call('GET', KEYS[4])
+if holder then return {0, holder} end
+if redis.call('EXISTS', KEYS[1]) == 1 then return {-1, ''} end
+redis.call('SET', KEYS[4], ARGV[3], 'PX', ARGV[4])
+local member = string.format('%016d', redis.call('INCR', KEYS[3])) .. ':' .. ARGV[3]
+redis.call('HSET', KEYS[1], 'env', ARGV[1], 'attempts', 0, 'receipt', '', 'member', member)
+if ARGV[5] == '1' then redis.call('HSET', KEYS[1], 'unique', KEYS[4], 'unique_ttl', ARGV[4]) end
+redis.call('ZADD', KEYS[2], ARGV[2], member)
+return {1, ''}
+`)
+
+// releaseUniqueLua drops the uniqueness claim a job holds until done, if it
+// still holds it. It expects the job key in KEYS[1] and the job ID in `id`.
+// The claim key shares the queue's hash tag.
+const releaseUniqueLua = `
+local unique = redis.call('HGET', KEYS[1], 'unique')
+if unique and unique ~= '' and redis.call('GET', unique) == id then redis.call('DEL', unique) end
+`
+
 // reserveScript: KEYS pending, reserved; ARGV now ms, lease deadline ms,
 // receipt, job key prefix. Leases the earliest-available job: the first
 // pending job due by now or the first expired lease, whichever became
-// available first. Returns false when none is, else {id, envelope, attempts}.
+// available first. Returns false when none is, else {id, envelope, attempts,
+// available-since ms}.
 var reserveScript = redis.NewScript(`
 local now = tonumber(ARGV[1])
 while true do
   local p = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', now, 'WITHSCORES', 'LIMIT', 0, 1)
   local r = redis.call('ZRANGEBYSCORE', KEYS[2], '-inf', now, 'WITHSCORES', 'LIMIT', 0, 1)
-  local member, from
+  local member, from, since
   if #p > 0 and #r > 0 then
     local ps, rs = tonumber(p[2]), tonumber(r[2])
-    if rs < ps or (rs == ps and r[1] < p[1]) then member, from = r[1], KEYS[2] else member, from = p[1], KEYS[1] end
-  elseif #p > 0 then member, from = p[1], KEYS[1]
-  elseif #r > 0 then member, from = r[1], KEYS[2]
+    if rs < ps or (rs == ps and r[1] < p[1]) then member, from, since = r[1], KEYS[2], r[2] else member, from, since = p[1], KEYS[1], p[2] end
+  elseif #p > 0 then member, from, since = p[1], KEYS[1], p[2]
+  elseif #r > 0 then member, from, since = r[1], KEYS[2], r[2]
   else return false end
   redis.call('ZREM', from, member)
   local id = string.sub(member, 18)
@@ -130,7 +158,7 @@ while true do
     local attempts = redis.call('HINCRBY', job, 'attempts', 1)
     redis.call('HSET', job, 'receipt', ARGV[3])
     redis.call('ZADD', KEYS[2], ARGV[2], member)
-    return {id, redis.call('HGET', job, 'env'), attempts}
+    return {id, redis.call('HGET', job, 'env'), attempts, since}
   end
 end
 `)
@@ -140,6 +168,8 @@ end
 var ackScript = redis.NewScript(`
 if redis.call('HGET', KEYS[1], 'receipt') ~= ARGV[1] then return 0 end
 local member = redis.call('HGET', KEYS[1], 'member')
+local id = string.sub(member, 18)
+` + releaseUniqueLua + `
 redis.call('ZREM', KEYS[3], member)
 redis.call('ZREM', KEYS[2], member)
 redis.call('DEL', KEYS[1])
@@ -147,10 +177,14 @@ return 1
 `)
 
 // releaseScript: KEYS job, pending, reserved, seq; ARGV receipt,
-// available-at ms, id. Returns 0 when the receipt is not the job's current
-// lease. The job goes behind others available at the same time.
+// available-at ms, id, and '1' to take back the delivery's attempt
+// (Postpone). Returns 0 when the receipt is not the job's current lease. The
+// job goes behind others available at the same time.
 var releaseScript = redis.NewScript(`
 if redis.call('HGET', KEYS[1], 'receipt') ~= ARGV[1] then return 0 end
+if ARGV[4] == '1' and tonumber(redis.call('HGET', KEYS[1], 'attempts') or '0') > 0 then
+  redis.call('HINCRBY', KEYS[1], 'attempts', -1)
+end
 redis.call('ZREM', KEYS[3], redis.call('HGET', KEYS[1], 'member'))
 local member = string.format('%016d', redis.call('INCR', KEYS[4])) .. ':' .. ARGV[3]
 redis.call('HSET', KEYS[1], 'receipt', '', 'member', member)
@@ -172,6 +206,8 @@ return 1
 // failure JSON. Returns 0 when the receipt is not the job's current lease.
 var buryScript = redis.NewScript(`
 if redis.call('HGET', KEYS[1], 'receipt') ~= ARGV[1] then return 0 end
+local id = ARGV[2]
+` + releaseUniqueLua + `
 redis.call('ZREM', KEYS[2], redis.call('HGET', KEYS[1], 'member'))
 redis.call('HSET', KEYS[1], 'receipt', '', 'failure', ARGV[4])
 redis.call('ZADD', KEYS[3], ARGV[3], ARGV[2])
@@ -179,18 +215,30 @@ return 1
 `)
 
 // retryFailedScript: KEYS job, failed, pending, seq; ARGV id, now ms.
-// Returns 0 when the job is not failed.
+// Returns {0, ”} when the job is not failed, {2, holder} when its
+// uniqueness key is held by another job, {1, ”} when retried.
 var retryFailedScript = redis.NewScript(`
-if not redis.call('ZSCORE', KEYS[2], ARGV[1]) then return 0 end
-redis.call('ZREM', KEYS[2], ARGV[1])
+if not redis.call('ZSCORE', KEYS[2], ARGV[1]) then return {0, ''} end
 -- An ID whose job hash is gone (evicted, deleted by hand) has nothing to
 -- retry: drop it rather than queue a job with no envelope.
-if redis.call('HEXISTS', KEYS[1], 'env') == 0 then return 0 end
+if redis.call('HEXISTS', KEYS[1], 'env') == 0 then
+  redis.call('ZREM', KEYS[2], ARGV[1])
+  return {0, ''}
+end
+-- Reclaim the uniqueness key the job gave up when it failed, unless another
+-- job holds it now: running both is what Unique prevents.
+local unique = redis.call('HGET', KEYS[1], 'unique')
+if unique and unique ~= '' then
+  local holder = redis.call('GET', unique)
+  if holder and holder ~= ARGV[1] then return {2, holder} end
+  redis.call('SET', unique, ARGV[1], 'PX', redis.call('HGET', KEYS[1], 'unique_ttl'))
+end
+redis.call('ZREM', KEYS[2], ARGV[1])
 local member = string.format('%016d', redis.call('INCR', KEYS[4])) .. ':' .. ARGV[1]
 redis.call('HSET', KEYS[1], 'attempts', 0, 'receipt', '', 'member', member)
 redis.call('HDEL', KEYS[1], 'failure')
 redis.call('ZADD', KEYS[3], ARGV[2], member)
-return 1
+return {1, ''}
 `)
 
 // forgetFailedScript: KEYS job, failed; ARGV id. Returns 0 when the job is
@@ -248,6 +296,52 @@ func (q *RedisQueue) Push(ctx context.Context, queue string, env Envelope, at ti
 	return nil
 }
 
+// PushUnique implements Queue.
+func (q *RedisQueue) PushUnique(ctx context.Context, queue string, env Envelope, at time.Time, unique UniqueKey) error {
+	if q.closed.Load() {
+		return ErrClosed
+	}
+	if !ValidName(queue) {
+		return fmt.Errorf("%w: %q", ErrInvalidQueue, queue)
+	}
+	if env.ID == "" {
+		return fmt.Errorf("jobs: push %q: envelope has no ID", env.Name)
+	}
+	if err := unique.validate(); err != nil {
+		return err
+	}
+	env.Attempt = 0
+	data, err := env.Marshal()
+	if err != nil {
+		return err
+	}
+	now := q.now()
+	if at.IsZero() || at.Before(now) {
+		at = now
+	}
+	untilDone := "0"
+	if unique.UntilDone {
+		untilDone = "1"
+	}
+	k := q.keys(queue)
+	res, err := pushUniqueScript.Run(ctx, q.client, []string{k.jobPrefix + env.ID, k.pending, k.seq, k.unique + unique.Key},
+		data, at.UnixMilli(), env.ID, unique.TTL.Milliseconds(), untilDone).Slice()
+	if err != nil {
+		return fmt.Errorf("jobs: push %q to %s: %w", env.Name, queue, err)
+	}
+	if len(res) != 2 {
+		return fmt.Errorf("jobs: push %q to %s: unexpected reply %v", env.Name, queue, res)
+	}
+	switch code, _ := toInt(res[0]); code {
+	case 1:
+		return nil
+	case 0:
+		return &DuplicateError{Queue: queue, Key: unique.Key, HolderID: fmt.Sprint(res[1])}
+	default:
+		return fmt.Errorf("%w: %s on %s", ErrDuplicateJob, env.ID, queue)
+	}
+}
+
 // Reserve implements Queue.
 func (q *RedisQueue) Reserve(ctx context.Context, queues []string, lease time.Duration) (Delivery, error) {
 	if q.closed.Load() {
@@ -273,8 +367,12 @@ func (q *RedisQueue) Reserve(ctx context.Context, queues []string, lease time.Du
 		if err != nil {
 			return Delivery{}, fmt.Errorf("jobs: reserve from %s: %w", queue, err)
 		}
-		if len(res) != 3 {
+		if len(res) != 4 {
 			return Delivery{}, fmt.Errorf("jobs: reserve from %s: unexpected reply %v", queue, res)
+		}
+		var availableAt time.Time
+		if ms, err := strconv.ParseFloat(fmt.Sprint(res[3]), 64); err == nil {
+			availableAt = time.UnixMilli(int64(ms))
 		}
 		id := fmt.Sprint(res[0])
 		attempts, err := toInt(res[2])
@@ -287,10 +385,10 @@ func (q *RedisQueue) Reserve(ctx context.Context, queues []string, lease time.Du
 			// Leased, not lost: the delivery carries the failure so the
 			// caller buries it (keeping the stored bytes) rather than meet
 			// it on every lease expiry.
-			return Delivery{Queue: queue, Envelope: Envelope{ID: id, Attempt: attempts}, Receipt: receipt, Err: err}, nil
+			return Delivery{Queue: queue, Envelope: Envelope{ID: id, Attempt: attempts}, Receipt: receipt, Err: err, AvailableAt: availableAt}, nil
 		}
 		env.Attempt = attempts
-		return Delivery{Queue: queue, Envelope: env, Receipt: receipt}, nil
+		return Delivery{Queue: queue, Envelope: env, Receipt: receipt, AvailableAt: availableAt}, nil
 	}
 	return Delivery{}, ErrNoJob
 }
@@ -317,6 +415,15 @@ func (q *RedisQueue) Ack(ctx context.Context, d Delivery) error {
 
 // Release implements Queue.
 func (q *RedisQueue) Release(ctx context.Context, d Delivery, at time.Time) error {
+	return q.release(ctx, d, at, false)
+}
+
+// Postpone implements Queue.
+func (q *RedisQueue) Postpone(ctx context.Context, d Delivery, at time.Time) error {
+	return q.release(ctx, d, at, true)
+}
+
+func (q *RedisQueue) release(ctx context.Context, d Delivery, at time.Time, uncount bool) error {
 	if q.closed.Load() {
 		return ErrClosed
 	}
@@ -329,7 +436,7 @@ func (q *RedisQueue) Release(ctx context.Context, d Delivery, at time.Time) erro
 	}
 	k := q.keys(d.Queue)
 	ok, err := releaseScript.Run(ctx, q.client, []string{k.jobPrefix + d.Envelope.ID, k.pending, k.reserved, k.seq},
-		d.Receipt, at.UnixMilli(), d.Envelope.ID).Int()
+		d.Receipt, at.UnixMilli(), d.Envelope.ID, uncount).Int()
 	if err != nil {
 		return fmt.Errorf("jobs: release %s: %w", d.Envelope.ID, err)
 	}
@@ -578,15 +685,23 @@ func (q *RedisQueue) RetryFailed(ctx context.Context, queue, id string) error {
 		return fmt.Errorf("%w: %q", ErrInvalidQueue, queue)
 	}
 	k := q.keys(queue)
-	ok, err := retryFailedScript.Run(ctx, q.client, []string{k.jobPrefix + id, k.failed, k.pending, k.seq},
-		id, q.now().UnixMilli()).Int()
+	res, err := retryFailedScript.Run(ctx, q.client, []string{k.jobPrefix + id, k.failed, k.pending, k.seq},
+		id, q.now().UnixMilli()).Slice()
 	if err != nil {
 		return fmt.Errorf("jobs: retry failed job %s: %w", id, err)
 	}
-	if ok == 0 {
+	if len(res) != 2 {
+		return fmt.Errorf("jobs: retry failed job %s: unexpected reply %v", id, res)
+	}
+	switch code, _ := toInt(res[0]); code {
+	case 1:
+		return nil
+	case 2:
+		unique, _ := q.client.HGet(ctx, k.jobPrefix+id, "unique").Result()
+		return &DuplicateError{Queue: queue, Key: strings.TrimPrefix(unique, k.unique), HolderID: fmt.Sprint(res[1])}
+	default:
 		return fmt.Errorf("%w: %s on %s", ErrNotFailed, id, queue)
 	}
-	return nil
 }
 
 // ForgetFailed implements Queue.
@@ -638,6 +753,116 @@ func (q *RedisQueue) PurgeFailed(ctx context.Context, queue string, before time.
 	}
 }
 
+// onceBeginScript: KEYS once; ARGV token, lock ms. Returns 1 when done, 2
+// when another run holds the lock, 0 when the caller took it.
+var onceBeginScript = redis.NewScript(`
+local v = redis.call('GET', KEYS[1])
+if v == 'done' then return 1 end
+if v then return 2 end
+redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
+return 0
+`)
+
+// onceFinishScript: KEYS once; ARGV token, keep ms. Returns 0 when the
+// token no longer holds the lock.
+var onceFinishScript = redis.NewScript(`
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+redis.call('SET', KEYS[1], 'done', 'PX', ARGV[2])
+return 1
+`)
+
+// onceAbandonScript: KEYS once; ARGV token.
+var onceAbandonScript = redis.NewScript(`
+if redis.call('GET', KEYS[1]) == ARGV[1] then redis.call('DEL', KEYS[1]) end
+return 1
+`)
+
+func (q *RedisQueue) onceKey(key string) string {
+	return fmt.Sprintf("%s:jobs:once:%s", q.namespace, key)
+}
+
+// BeginOnce implements OnceStore.
+func (q *RedisQueue) BeginOnce(ctx context.Context, key, token string, lock time.Duration) (OnceState, error) {
+	if q.closed.Load() {
+		return 0, ErrClosed
+	}
+	n, err := onceBeginScript.Run(ctx, q.client, []string{q.onceKey(key)}, token, lock.Milliseconds()).Int()
+	if err != nil {
+		return 0, err
+	}
+	switch n {
+	case 1:
+		return OnceDone, nil
+	case 2:
+		return OnceBusy, nil
+	default:
+		return OnceAcquired, nil
+	}
+}
+
+// FinishOnce implements OnceStore.
+func (q *RedisQueue) FinishOnce(ctx context.Context, key, token string, keep time.Duration) error {
+	if q.closed.Load() {
+		return ErrClosed
+	}
+	n, err := onceFinishScript.Run(ctx, q.client, []string{q.onceKey(key)}, token, keep.Milliseconds()).Int()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("%w: the lock on %q expired before the effect was recorded", ErrLeaseLost, key)
+	}
+	return nil
+}
+
+// AbandonOnce implements OnceStore.
+func (q *RedisQueue) AbandonOnce(ctx context.Context, key, token string) error {
+	if q.closed.Load() {
+		return ErrClosed
+	}
+	return onceAbandonScript.Run(ctx, q.client, []string{q.onceKey(key)}, token).Err()
+}
+
+// statsScript: KEYS pending, reserved, failed; ARGV now ms. Returns ready,
+// scheduled, reserved, failed, and the oldest ready time in ms (-1 when
+// none), read at one instant. A reserved job whose lease expired is ready
+// (Reserve takes it), since its deadline.
+var statsScript = redis.NewScript(`
+local now = tonumber(ARGV[1])
+local ready = redis.call('ZCOUNT', KEYS[1], '-inf', now)
+local expired = redis.call('ZCOUNT', KEYS[2], '-inf', now)
+local oldest = -1
+local p = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', now, 'WITHSCORES', 'LIMIT', 0, 1)
+if #p == 2 then oldest = tonumber(p[2]) end
+local r = redis.call('ZRANGEBYSCORE', KEYS[2], '-inf', now, 'WITHSCORES', 'LIMIT', 0, 1)
+if #r == 2 and (oldest < 0 or tonumber(r[2]) < oldest) then oldest = tonumber(r[2]) end
+return {ready + expired, redis.call('ZCOUNT', KEYS[1], '(' .. now, '+inf'),
+  redis.call('ZCARD', KEYS[2]) - expired, redis.call('ZCARD', KEYS[3]), oldest}
+`)
+
+// Stats implements Queue.
+func (q *RedisQueue) Stats(ctx context.Context, queue string) (QueueStats, error) {
+	if q.closed.Load() {
+		return QueueStats{}, ErrClosed
+	}
+	if !ValidName(queue) {
+		return QueueStats{}, fmt.Errorf("%w: %q", ErrInvalidQueue, queue)
+	}
+	k := q.keys(queue)
+	res, err := statsScript.Run(ctx, q.client, []string{k.pending, k.reserved, k.failed}, q.now().UnixMilli()).Int64Slice()
+	if err != nil {
+		return QueueStats{}, fmt.Errorf("jobs: stats of %s: %w", queue, err)
+	}
+	if len(res) != 5 {
+		return QueueStats{}, fmt.Errorf("jobs: stats of %s: malformed reply", queue)
+	}
+	st := QueueStats{Ready: int(res[0]), Scheduled: int(res[1]), Reserved: int(res[2]), Failed: int(res[3])}
+	if res[4] >= 0 {
+		st.OldestReady = time.UnixMilli(res[4])
+	}
+	return st, nil
+}
+
 // Close implements Queue: later calls return ErrClosed. It closes the client
 // only when the queue owns it.
 func (q *RedisQueue) Close() error {
@@ -658,5 +883,9 @@ func toInt(v any) (int, error) {
 	}
 }
 
-var _ Queue = (*RedisQueue)(nil)
-var _ Queue = (*MemoryQueue)(nil)
+var (
+	_ Queue     = (*RedisQueue)(nil)
+	_ Queue     = (*MemoryQueue)(nil)
+	_ OnceStore = (*RedisQueue)(nil)
+	_ OnceStore = (*MemoryQueue)(nil)
+)

@@ -407,6 +407,30 @@ func runQueueConformance(t *testing.T, newQueue queueFactory) {
 		}
 	})
 
+	t.Run("postpone releases without counting the attempt", func(t *testing.T) {
+		clock := newFakeClock()
+		q := newQueue(t, clock)
+		if err := q.Push(ctx, "default", envelope("p1"), time.Time{}); err != nil {
+			t.Fatal(err)
+		}
+		d := mustReserve(t, q, "default")
+		if err := q.Release(ctx, d, time.Time{}); err != nil { // attempt 1 counted
+			t.Fatal(err)
+		}
+		d = mustReserve(t, q, "default")
+		if err := q.Postpone(ctx, d, clock.Now().Add(time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+		if err := q.Postpone(ctx, d, time.Time{}); !errors.Is(err, jobs.ErrLeaseLost) {
+			t.Fatalf("Postpone with a spent receipt = %v, want ErrLeaseLost", err)
+		}
+		expectEmpty(t, q, "default")
+		clock.Advance(time.Minute)
+		if again := mustReserve(t, q, "default"); again.Envelope.ID != "p1" || again.Envelope.Attempt != 2 {
+			t.Fatalf("after postponing attempt 2, delivery = %+v, want p1 at attempt 2 again", again)
+		}
+	})
+
 	t.Run("pushes are validated", func(t *testing.T) {
 		q := newQueue(t, newFakeClock())
 		if err := q.Push(ctx, "default", envelope("dup"), time.Time{}); err != nil {
@@ -551,6 +575,173 @@ func runQueueConformance(t *testing.T, newQueue queueFactory) {
 		// The IDs are free again.
 		if err := q.Push(ctx, "default", envelope("old1"), time.Time{}); err != nil {
 			t.Fatalf("Push after purge: %v", err)
+		}
+	})
+
+	t.Run("a unique key admits one job until it is done", func(t *testing.T) {
+		q := newQueue(t, newFakeClock())
+		key := jobs.UniqueKey{Key: "report:42", TTL: time.Hour, UntilDone: true}
+		if err := q.PushUnique(ctx, "default", envelope("u1"), time.Time{}, key); err != nil {
+			t.Fatal(err)
+		}
+		err := q.PushUnique(ctx, "default", envelope("u2"), time.Time{}, key)
+		var dup *jobs.DuplicateError
+		if !errors.As(err, &dup) || !errors.Is(err, jobs.ErrDuplicateDispatch) || dup.HolderID != "u1" || dup.Key != "report:42" {
+			t.Fatalf("second PushUnique = %v, want a DuplicateError naming u1", err)
+		}
+		if err := q.PushUnique(ctx, "other", envelope("u3"), time.Time{}, key); err != nil {
+			t.Fatalf("the same key on another queue = %v, want it free", err)
+		}
+		d := mustReserve(t, q, "default")
+		if err := q.PushUnique(ctx, "default", envelope("u2"), time.Time{}, key); !errors.Is(err, jobs.ErrDuplicateDispatch) {
+			t.Fatalf("while running = %v, want the key still held", err)
+		}
+		if err := q.Ack(ctx, d); err != nil {
+			t.Fatal(err)
+		}
+		if err := q.PushUnique(ctx, "default", envelope("u2"), time.Time{}, key); err != nil {
+			t.Fatalf("after the holder was acked = %v, want the key free", err)
+		}
+		// Giving up on the holder frees the key too.
+		d = mustReserve(t, q, "default")
+		if err := q.Bury(ctx, d, jobs.Failure{Reason: jobs.ReasonPermanent}); err != nil {
+			t.Fatal(err)
+		}
+		if err := q.PushUnique(ctx, "default", envelope("u4"), time.Time{}, key); err != nil {
+			t.Fatalf("after the holder was buried = %v, want the key free", err)
+		}
+		// A key held for a window outlives its job.
+		window := jobs.UniqueKey{Key: "digest", TTL: time.Hour}
+		if err := q.PushUnique(ctx, "digest", envelope("w1"), time.Time{}, window); err != nil {
+			t.Fatal(err)
+		}
+		if err := q.Ack(ctx, mustReserve(t, q, "digest")); err != nil {
+			t.Fatal(err)
+		}
+		if err := q.PushUnique(ctx, "digest", envelope("w2"), time.Time{}, window); !errors.Is(err, jobs.ErrDuplicateDispatch) {
+			t.Fatalf("inside the window after the job ran = %v, want a duplicate", err)
+		}
+		if err := q.PushUnique(ctx, "default", envelope("v"), time.Time{}, jobs.UniqueKey{Key: "k"}); err == nil {
+			t.Fatal("PushUnique accepted a zero TTL")
+		}
+	})
+
+	t.Run("retrying a failed unique job reclaims its key", func(t *testing.T) {
+		q := newQueue(t, newFakeClock())
+		key := jobs.UniqueKey{Key: "rebuild:7", TTL: time.Hour, UntilDone: true}
+		if err := q.PushUnique(ctx, "default", envelope("r1"), time.Time{}, key); err != nil {
+			t.Fatal(err)
+		}
+		if err := q.Bury(ctx, mustReserve(t, q, "default"), jobs.Failure{Reason: jobs.ReasonExhausted}); err != nil {
+			t.Fatal(err)
+		}
+		// The key was released; another job took it.
+		if err := q.PushUnique(ctx, "default", envelope("r2"), time.Time{}, key); err != nil {
+			t.Fatal(err)
+		}
+		err := q.RetryFailed(ctx, "default", "r1")
+		var dup *jobs.DuplicateError
+		if !errors.As(err, &dup) || dup.HolderID != "r2" || dup.Key != "rebuild:7" {
+			t.Fatalf("RetryFailed while r2 holds the key = %v, want a DuplicateError naming r2", err)
+		}
+		if err := q.Ack(ctx, mustReserve(t, q, "default")); err != nil { // r2 done
+			t.Fatal(err)
+		}
+		if err := q.RetryFailed(ctx, "default", "r1"); err != nil {
+			t.Fatalf("RetryFailed after r2 finished = %v", err)
+		}
+		if err := q.PushUnique(ctx, "default", envelope("r3"), time.Time{}, key); !errors.Is(err, jobs.ErrDuplicateDispatch) {
+			t.Fatalf("a dispatch while the retried r1 is queued = %v, want the key held again", err)
+		}
+	})
+
+	t.Run("the once store remembers completed effects", func(t *testing.T) {
+		store, ok := newQueue(t, newFakeClock()).(jobs.OnceStore)
+		if !ok {
+			t.Fatal("the queue is not a OnceStore")
+		}
+		state, err := store.BeginOnce(ctx, "email:1", "t1", time.Minute)
+		if err != nil || state != jobs.OnceAcquired {
+			t.Fatalf("BeginOnce(fresh) = %v, %v", state, err)
+		}
+		if state, _ := store.BeginOnce(ctx, "email:1", "t2", time.Minute); state != jobs.OnceBusy {
+			t.Fatalf("BeginOnce(locked) = %v, want busy", state)
+		}
+		if err := store.FinishOnce(ctx, "email:1", "t2", time.Hour); !errors.Is(err, jobs.ErrLeaseLost) {
+			t.Fatalf("FinishOnce by a non-holder = %v", err)
+		}
+		if err := store.FinishOnce(ctx, "email:1", "t1", time.Hour); err != nil {
+			t.Fatal(err)
+		}
+		if state, _ := store.BeginOnce(ctx, "email:1", "t3", time.Minute); state != jobs.OnceDone {
+			t.Fatalf("BeginOnce(done) = %v, want done", state)
+		}
+		// An abandoned lock frees the key; another run's abandon does not.
+		if state, _ := store.BeginOnce(ctx, "email:2", "t4", time.Minute); state != jobs.OnceAcquired {
+			t.Fatal("email:2 not acquired")
+		}
+		if err := store.AbandonOnce(ctx, "email:2", "someone-else"); err != nil {
+			t.Fatal(err)
+		}
+		if state, _ := store.BeginOnce(ctx, "email:2", "t5", time.Minute); state != jobs.OnceBusy {
+			t.Fatalf("after a foreign abandon = %v, want still busy", state)
+		}
+		if err := store.AbandonOnce(ctx, "email:2", "t4"); err != nil {
+			t.Fatal(err)
+		}
+		if state, _ := store.BeginOnce(ctx, "email:2", "t6", time.Minute); state != jobs.OnceAcquired {
+			t.Fatalf("after the holder abandoned = %v, want acquired", state)
+		}
+	})
+
+	t.Run("a delivery says how long its job waited, and stats count states", func(t *testing.T) {
+		clock := newFakeClock()
+		q := newQueue(t, clock)
+		t0 := clock.Now()
+		if err := q.Push(ctx, "default", envelope("now"), time.Time{}); err != nil {
+			t.Fatal(err)
+		}
+		if err := q.Push(ctx, "default", envelope("later"), t0.Add(time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+		if err := q.Push(ctx, "default", envelope("failing"), time.Time{}); err != nil {
+			t.Fatal(err)
+		}
+		st, err := q.Stats(ctx, "default")
+		if err != nil || st.Ready != 2 || st.Scheduled != 1 || st.Reserved != 0 || st.Failed != 0 || !st.OldestReady.Equal(t0) {
+			t.Fatalf("Stats() = %+v, %v; want 2 ready (oldest at t0), 1 scheduled", st, err)
+		}
+		clock.Advance(5 * time.Minute)
+		d := mustReserve(t, q, "default")
+		if d.Envelope.ID != "now" || !d.AvailableAt.Equal(t0) {
+			t.Fatalf("reserved %s available since %s, want now since %s", d.Envelope.ID, d.AvailableAt, t0)
+		}
+		f := mustReserve(t, q, "default")
+		if err := q.Bury(ctx, f, jobs.Failure{Reason: jobs.ReasonExhausted}); err != nil {
+			t.Fatal(err)
+		}
+		st, _ = q.Stats(ctx, "default")
+		if st.Ready != 1 || st.Scheduled != 0 || st.Reserved != 1 || st.Failed != 1 {
+			t.Fatalf("Stats() after reserving and burying = %+v", st)
+		}
+		if later := mustReserve(t, q, "default"); !later.AvailableAt.Equal(t0.Add(time.Minute)) {
+			t.Fatalf("the delayed job was available since %s, want its time %s", later.AvailableAt, t0.Add(time.Minute))
+		}
+		// The first delivery's lease (a minute from +5m) runs out; its next
+		// delivery waited since that deadline.
+		deadline := clock.Now().Add(time.Minute)
+		clock.Advance(3 * time.Minute)
+		// Both leases lapsed: the jobs are due again, not in flight, and have
+		// been ready since their deadline.
+		st, err = q.Stats(ctx, "default")
+		if err != nil || st.Ready != 2 || st.Reserved != 0 || st.Scheduled != 0 || st.Failed != 1 || !st.OldestReady.Equal(deadline) {
+			t.Fatalf("Stats() with lapsed leases = %+v, %v; want 2 ready since %s", st, err, deadline)
+		}
+		if again := mustReserve(t, q, "default"); again.Envelope.ID != "now" || !again.AvailableAt.Equal(deadline) {
+			t.Fatalf("redelivery %s available since %s, want since the lease deadline %s", again.Envelope.ID, again.AvailableAt, deadline)
+		}
+		if _, err := q.Stats(ctx, "Bad Queue"); !errors.Is(err, jobs.ErrInvalidQueue) {
+			t.Fatalf("Stats(invalid queue) = %v", err)
 		}
 	})
 
