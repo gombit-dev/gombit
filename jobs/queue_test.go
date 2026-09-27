@@ -731,6 +731,12 @@ func runQueueConformance(t *testing.T, newQueue queueFactory) {
 		// delivery waited since that deadline.
 		deadline := clock.Now().Add(time.Minute)
 		clock.Advance(3 * time.Minute)
+		// Both leases lapsed: the jobs are due again, not in flight, and have
+		// been ready since their deadline.
+		st, err = q.Stats(ctx, "default")
+		if err != nil || st.Ready != 2 || st.Reserved != 0 || st.Scheduled != 0 || st.Failed != 1 || !st.OldestReady.Equal(deadline) {
+			t.Fatalf("Stats() with lapsed leases = %+v, %v; want 2 ready since %s", st, err, deadline)
+		}
 		if again := mustReserve(t, q, "default"); again.Envelope.ID != "now" || !again.AvailableAt.Equal(deadline) {
 			t.Fatalf("redelivery %s available since %s, want since the lease deadline %s", again.Envelope.ID, again.AvailableAt, deadline)
 		}

@@ -44,6 +44,10 @@ func RunWorker(ctx context.Context, app *App, opts jobs.WorkerOptions) error {
 	if opts.Metrics == nil {
 		opts.Metrics = app.JobMetrics()
 	}
+	if opts.Metrics == app.JobMetrics() && dispatcher.Queue() != nil {
+		// The app's /metrics reports these queues' depth too.
+		app.addWorkerQueues(opts.Queues)
+	}
 	worker, err := jobs.NewWorker(dispatcher.Registry(), dispatcher.Queue(), opts)
 	if err != nil {
 		return err
@@ -90,6 +94,28 @@ func runWorkerCommand(ctx context.Context, app *App, args []string, stderr io.Wr
 // serveWorkerMetrics serves a worker process's /metrics (its job outcomes,
 // then each queue's depth, read at scrape time) and /livez on addr, until the
 // returned stop is called.
+// queueStatsTimeout bounds the queue reads of one metrics scrape.
+const queueStatsTimeout = 2 * time.Second
+
+// readQueueStats reads each queue's depth for the queue gauges. It returns
+// what it read and an error naming each queue that did not answer.
+func readQueueStats(ctx context.Context, q jobs.Queue, queues []string) (map[string]jobs.QueueStats, error) {
+	stats := map[string]jobs.QueueStats{}
+	if q == nil {
+		return stats, nil
+	}
+	var errs []error
+	for _, name := range queues {
+		st, err := q.Stats(ctx, name)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("queue %s: %w", name, err))
+			continue
+		}
+		stats[name] = st
+	}
+	return stats, errors.Join(errs...)
+}
+
 func serveWorkerMetrics(addr string, app *App, queues []string) (bound string, stop func() error, err error) {
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -101,15 +127,15 @@ func serveWorkerMetrics(addr string, app *App, queues []string) (bound string, s
 		_, _ = io.WriteString(w, `{"data":{"status":"ok"}}`)
 	})
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
-		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(r.Context(), queueStatsTimeout)
 		defer cancel()
-		stats := map[string]jobs.QueueStats{}
-		if q := app.Jobs().Queue(); q != nil {
-			for _, name := range queues {
-				if st, err := q.Stats(ctx, name); err == nil {
-					stats[name] = st
-				}
-			}
+		stats, err := readQueueStats(ctx, app.Jobs().Queue(), queues)
+		if err != nil {
+			// Fail the scrape rather than drop the queue gauges: Prometheus
+			// keeps the last good sample instead of reading an empty queue.
+			app.Logger().Warn("jobs worker: metrics scrape failed reading queue stats", zap.Error(err))
+			http.Error(w, "jobs: queue stats: "+err.Error(), http.StatusServiceUnavailable)
+			return
 		}
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 		_ = app.JobMetrics().WritePrometheus(w, stats, time.Now())

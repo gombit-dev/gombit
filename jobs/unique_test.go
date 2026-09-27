@@ -161,7 +161,8 @@ func TestOnceWhileAnotherRunHoldsTheLock(t *testing.T) {
 		t.Fatal(err)
 	}
 	core, logs := observer.New(zap.InfoLevel)
-	w, err := jobs.NewWorker(reg, q, jobs.WorkerOptions{Queues: []string{"default"}, PollInterval: 5 * time.Millisecond, Logger: zap.New(core)})
+	metrics := jobs.NewMetrics()
+	w, err := jobs.NewWorker(reg, q, jobs.WorkerOptions{Queues: []string{"default"}, PollInterval: 5 * time.Millisecond, Logger: zap.New(core), Metrics: metrics})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,6 +179,11 @@ func TestOnceWhileAnotherRunHoldsTheLock(t *testing.T) {
 	}
 	if !sawBusy {
 		t.Fatal("no attempt reported the effect in progress")
+	}
+	var out strings.Builder
+	_ = metrics.WritePrometheus(&out, nil, time.Now())
+	if !strings.Contains(out.String(), `job_name="send_welcome_email",queue="default",result="postponed"}`) {
+		t.Fatalf("no postponed outcome in the metrics:\n%s", out.String())
 	}
 }
 
