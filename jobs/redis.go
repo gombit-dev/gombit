@@ -396,23 +396,51 @@ func (q *RedisQueue) Failed(ctx context.Context, queue string, limit int) ([]Fai
 	if !ValidName(queue) {
 		return nil, fmt.Errorf("%w: %q", ErrInvalidQueue, queue)
 	}
-	stop := int64(-1)
-	if limit > 0 {
-		stop = int64(limit) - 1
-	}
 	k := q.keys(queue)
-	ids, err := q.client.ZRevRange(ctx, k.failed, 0, stop).Result()
-	if err != nil {
-		return nil, fmt.Errorf("jobs: list failed jobs on %s: %w", queue, err)
+	if limit > 0 && limit <= failedPageSize {
+		jobs, _, err := q.failedPage(ctx, queue, k, 0, limit)
+		return jobs, err
 	}
-	// One pipelined round trip for all of them, not one per job.
+	// A large or unbounded read goes in pages, so no single reply carries
+	// the whole failed set (payloads included) past the call deadline.
+	var out []FailedJob
+	for start := 0; ; start += failedPageSize {
+		n := failedPageSize
+		if limit > 0 && limit-len(out) < n {
+			n = limit - len(out)
+		}
+		page, read, err := q.failedPage(ctx, queue, k, start, n)
+		if err != nil {
+			return out, err
+		}
+		out = append(out, page...)
+		if read < n || (limit > 0 && len(out) >= limit) {
+			return out, nil
+		}
+	}
+}
+
+// failedPageSize is the size of one read of the failed set.
+var failedPageSize = 500
+
+// failedPage reads count failed jobs from rank start, most recent first, in
+// one pipelined round trip. read is how many IDs the set held there (a job
+// forgotten between the two reads is skipped, so it can exceed len(jobs)).
+func (q *RedisQueue) failedPage(ctx context.Context, queue string, k redisKeys, start, count int) (jobs []FailedJob, read int, err error) {
+	ids, err := q.client.ZRevRange(ctx, k.failed, int64(start), int64(start+count-1)).Result()
+	if err != nil {
+		return nil, 0, fmt.Errorf("jobs: list failed jobs on %s: %w", queue, err)
+	}
+	if len(ids) == 0 {
+		return nil, 0, nil
+	}
 	pipe := q.client.Pipeline()
 	cmds := make([]*redis.SliceCmd, len(ids))
 	for i, id := range ids {
 		cmds[i] = pipe.HMGet(ctx, k.jobPrefix+id, "env", "attempts", "failure")
 	}
 	if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
-		return nil, fmt.Errorf("jobs: list failed jobs on %s: %w", queue, err)
+		return nil, 0, fmt.Errorf("jobs: list failed jobs on %s: %w", queue, err)
 	}
 	out := make([]FailedJob, 0, len(ids))
 	for i, id := range ids {
@@ -421,11 +449,11 @@ func (q *RedisQueue) Failed(ctx context.Context, queue string, limit int) ([]Fai
 			continue // forgotten between the two reads
 		}
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		out = append(out, job)
 	}
-	return out, nil
+	return out, len(ids), nil
 }
 
 // FailedJob implements Queue.

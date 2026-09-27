@@ -27,8 +27,10 @@ type Queue interface {
 	// block: with nothing available it returns ErrNoJob.
 	//
 	// A stored envelope that no longer decodes is still a delivery: leased,
-	// with a nil error and the failure in Delivery.Err. The caller must Ack
-	// it, or it returns on every lease expiry.
+	// with a nil error and the failure in Delivery.Err. The caller must end
+	// that lease, or the job returns on every lease expiry: Bury keeps the
+	// stored bytes with the failed jobs (what the worker does); Ack deletes
+	// them.
 	Reserve(ctx context.Context, queues []string, lease time.Duration) (Delivery, error)
 	// Ack removes a delivered job: it is done.
 	Ack(ctx context.Context, d Delivery) error
@@ -44,7 +46,7 @@ type Queue interface {
 	// jobs, with the original envelope and why, instead of acking it away.
 	Bury(ctx context.Context, d Delivery, f Failure) error
 	// Failed lists a queue's failed jobs, most recent first, at most limit
-	// (all when limit <= 0).
+	// (all when limit <= 0, read in pages; prefer a limit on a large set).
 	Failed(ctx context.Context, queue string, limit int) ([]FailedJob, error)
 	// FailedJob returns one failed job, or ErrNotFailed.
 	FailedJob(ctx context.Context, queue, id string) (FailedJob, error)
@@ -69,7 +71,8 @@ type Delivery struct {
 	Receipt string
 	// Err is non-nil when the stored envelope does not decode (KindDecode).
 	// Envelope then holds only the ID and attempt: the job cannot run, but
-	// it is leased, so the caller must Ack it.
+	// it is leased. Bury it to keep the stored bytes for inspection (Ack
+	// would delete them).
 	Err error
 }
 

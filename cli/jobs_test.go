@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -131,5 +132,35 @@ func TestTruncateKeepsRunesWhole(t *testing.T) {
 	}
 	if got := truncate("short\nline", 60); got != "short line" {
 		t.Fatalf("truncate = %q", got)
+	}
+}
+
+func TestJobsRetryAllPages(t *testing.T) {
+	q := jobsFixture(t)
+	ctx := context.Background()
+	for i := 0; i < 3; i++ { // five failed jobs in all
+		env := jobs.Envelope{ID: fmt.Sprintf("more-%d", i), Name: "send_welcome_email", Version: 1, Payload: json.RawMessage(`{}`)}
+		if err := q.Push(ctx, "mail", env, time.Time{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for {
+		d, err := q.Reserve(ctx, []string{"mail"}, time.Minute)
+		if err != nil {
+			break
+		}
+		if err := q.Bury(ctx, d, jobs.Failure{Reason: jobs.ReasonExhausted}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	prev := retryAllPage
+	t.Cleanup(func() { retryAllPage = prev })
+	retryAllPage = 2
+	out, err := runJobs(t, "retry", "--all")
+	if err != nil || strings.Count(out, "Retrying ") != 6 {
+		t.Fatalf("retry --all in pages of 2 = %v:\n%s", err, out)
+	}
+	if left, _ := q.Failed(ctx, "mail", 0); len(left) != 0 {
+		t.Fatalf("%d failed jobs left", len(left))
 	}
 }
