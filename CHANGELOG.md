@@ -12,6 +12,13 @@ version.
 
 ### Added
 
+- `database.OpenConn(driver, *sql.DB)` opens a GORM database over a
+  `database/sql` handle the caller built (a wrapped driver), with the same
+  setup as `database.Open`. Contributors get `internal/faulttest`:
+  deterministic fault injection (`FailOnce`, `FailNTimes`, `FailOnCall`,
+  `Delay`, `BlockUntil`, `Sequence`) and a faulting database driver that can
+  fail the Nth statement, a begin, a commit, or a rollback
+  ([#381](https://github.com/gombit-dev/gombit/issues/381)).
 - `jobs` package: the background-job contract. A job is a struct with a
   constant `JobName`; `jobs.Register` binds a typed handler to it,
   `Registry.Encode` turns a job into the `Envelope` a queue stores, and

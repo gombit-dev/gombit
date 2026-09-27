@@ -142,6 +142,26 @@ Migrations and the conformance suite follow the same shape — see
 [`ci.yml`](.github/workflows/ci.yml) for the exact invocations, including
 `-conformance.driver` and the `ATLAS_BINARY` environment variable.
 
+### Fault injection
+
+Failure paths get deterministic tests with `internal/faulttest`: an
+`Injector` fails exactly the calls a test names (`FailOnce`, `FailNTimes`,
+`FailOnCall(n, err)`, `Sequence(...)`), or holds them (`Delay`, `BlockUntil`)
+until a timer, a channel, or the call's context ends — never on a guessed
+sleep. `faulttest.OpenDB` wraps a real driver so a test can fail the Nth
+statement, a `Begin`, a `Commit`, or a `Rollback` on SQLite, PostgreSQL, and
+MySQL alike:
+
+```go
+db, _ := faulttest.OpenDB(database.DriverSQLite, dsn, &faulttest.DBFaults{
+	Commit: faulttest.FailOnce(faulttest.ErrInjected),
+})
+// the first transaction's commit fails: assert nothing it wrote persists
+```
+
+A fault test must pass `go test -count=50` (and `-race`) before it lands: a
+flaky failure-path test is worse than none.
+
 ### Generator golden tests
 
 Generators are covered by golden trees in `goldentest`. After an **intentional**

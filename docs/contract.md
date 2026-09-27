@@ -279,8 +279,8 @@ plane) go through `database.MapLoadError` / `database.MapPersistError`:
 | Any other database error | `internal` | 500 |
 
 `database.IsUniqueViolation` is the portable detector (`gorm.ErrDuplicatedKey`
-or a driver string containing `unique` / `duplicate` — `database.Open` does
-not enable GORM `TranslateError`). Auth registration uses the same helper
+from GORM's `TranslateError`, which `database.Open` enables, or a driver string
+containing `unique` / `duplicate` as a fallback). Auth registration uses the same helper
 and still returns `conflict` for a taken email. Do not map every `First()`
 error to 404 or every `Create()` error to 500.
 

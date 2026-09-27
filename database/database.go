@@ -56,6 +56,50 @@ func Open(cfg config.DatabaseConfig) (*DB, error) {
 		return nil, err
 	}
 
+	db, err := open(driver, dialector)
+	if err != nil {
+		return nil, err
+	}
+	sqlDB, err := db.SQLDB()
+	if err != nil {
+		return nil, err
+	}
+	ConfigurePool(sqlDB, cfg)
+	return db, nil
+}
+
+// ConfigurePool applies Open's pool settings to conn: cfg's MaxOpenConns,
+// MaxIdleConns, and ConnMaxLifetime, and the driver-aware defaults for
+// cfg.Driver where they are zero. OpenConn leaves a caller's handle alone;
+// call this to give it what Open would have.
+func ConfigurePool(conn *sql.DB, cfg config.DatabaseConfig) {
+	applyPoolConfig(conn, poolConfigFor(Driver(cfg.Driver), cfg))
+}
+
+// OpenConn opens a GORM database for driver over conn, a database/sql
+// handle the caller built: one whose driver is wrapped for instrumentation
+// or, in tests, for fault injection. The DB behaves as one from Open (the
+// same error translation and model validation). The caller owns conn's pool
+// settings (ConfigurePool gives it Open's); Close closes conn.
+func OpenConn(driver Driver, conn *sql.DB) (*DB, error) {
+	if conn == nil {
+		return nil, errors.New("database: OpenConn: nil conn")
+	}
+	var dialector gorm.Dialector
+	switch driver {
+	case DriverSQLite:
+		dialector = sqlite.New(sqlite.Config{Conn: conn})
+	case DriverPostgres:
+		dialector = postgres.New(postgres.Config{Conn: conn})
+	case DriverMySQL:
+		dialector = mysql.New(mysql.Config{Conn: conn})
+	default:
+		return nil, fmt.Errorf("database: unsupported driver %q", driver)
+	}
+	return open(driver, dialector)
+}
+
+func open(driver Driver, dialector gorm.Dialector) (*DB, error) {
 	// TranslateError lets each dialector map its own structured error codes
 	// (Postgres SQLSTATE, MySQL error numbers, SQLite extended result codes)
 	// to portable gorm.ErrXxx sentinels, so database/errors.go can classify
@@ -71,12 +115,6 @@ func Open(cfg config.DatabaseConfig) (*DB, error) {
 	if err := registerValidationCallback(gormDB); err != nil {
 		return nil, err
 	}
-
-	sqlDB, err := gormDB.DB()
-	if err != nil {
-		return nil, fmt.Errorf("database: sql db: %w", err)
-	}
-	applyPoolConfig(sqlDB, poolConfigFor(driver, cfg))
 
 	return &DB{
 		DB:           gormDB,

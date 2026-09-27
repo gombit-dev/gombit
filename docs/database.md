@@ -39,6 +39,17 @@ fmt.Println(db.Driver())
 fmt.Println(db.Capabilities().Returning)
 ```
 
+To open over a `database/sql` handle you built yourself (a driver wrapped for
+tracing, or, in tests, for fault injection), use `database.OpenConn`. The DB
+gets the same GORM setup as from `Open` (error translation, model `Validate`
+hooks); you own the handle's pool settings (`database.ConfigurePool` applies
+`Open`'s), and `db.Close()` closes it:
+
+```go
+conn := sql.OpenDB(instrumented) // your driver.Connector
+db, err := database.OpenConn(database.DriverPostgres, conn)
+```
+
 `framework.App` can receive an opened handle through `framework.WithDatabase`;
 the caller owns opening and closing that handle. `app.Database()` returns the
 metadata handle and `app.DB()` returns the raw `*gorm.DB` escape hatch.
@@ -46,9 +57,10 @@ HTTP-only apps can omit `WithDatabase`.
 
 ## Error mapping
 
-`database.Open` does not set `gorm.Config.TranslateError`, so duplicate-key
-errors are usually the driver string rather than `gorm.ErrDuplicatedKey`.
-Callers should not inspect those strings themselves:
+`database.Open` (and `OpenConn`) enable `gorm.Config.TranslateError`, so each
+dialector maps its unique-violation code to `gorm.ErrDuplicatedKey`; the
+driver's error string stays a fallback. Callers should not inspect either
+themselves:
 
 ```go
 if err := db.Create(&row).Error; err != nil {
