@@ -109,8 +109,15 @@ func defaultRetryDelay(attempt int) time.Duration {
 
 // queueOpTimeout bounds one queue call made on behalf of a job (ack,
 // release, extend), independent of the worker's own context, so a job that
-// finishes during shutdown is still acknowledged.
-const queueOpTimeout = 10 * time.Second
+// finishes during shutdown is still acknowledged. It is shorter than
+// ShutdownGrace, which must cover one such call after a handler returns.
+const queueOpTimeout = 5 * time.Second
+
+// ShutdownGrace is how long Run waits, after canceling in-flight jobs at the
+// shutdown timeout, for their handlers to return and their queue calls to
+// finish. A process supervisor should allow ShutdownTimeout + ShutdownGrace
+// and a margin before it kills a worker.
+const ShutdownGrace = 10 * time.Second
 
 // Run works the queues until ctx is canceled, then shuts down gracefully: it
 // stops reserving at once, lets in-flight jobs finish for up to
@@ -141,7 +148,19 @@ func (w *Worker) Run(ctx context.Context) error {
 			<-slots
 			return w.shutdown(&inFlight, cancelJobs)
 		}
-		d, err := w.reserve(jobCtx)
+		// Reserve on the worker's own context: shutdown cancels a call in
+		// flight, and a delivery that lands after it is handed back, not run.
+		d, err := w.reserve(ctx)
+		if ctx.Err() != nil {
+			<-slots
+			if err == nil {
+				if relErr := w.release(d, time.Now()); relErr != nil {
+					w.log.Warn("jobs worker: returning a job reserved during shutdown; it returns when its lease expires",
+						zap.String("job_id", d.Envelope.ID), zap.Error(relErr))
+				}
+			}
+			return w.shutdown(&inFlight, cancelJobs)
+		}
 		if errors.Is(err, errDropped) {
 			<-slots
 			continue // an undecodable job was acked away; look again at once
@@ -268,6 +287,9 @@ func (w *Worker) process(jobCtx, workerCtx context.Context, d Delivery) {
 // handler: its result would be discarded anyway.
 func (w *Worker) renewLease(ctx context.Context, cancelRun context.CancelFunc, d Delivery) (stop func() (lost bool)) {
 	done := make(chan struct{})
+	// Renewal calls run on their own context, canceled by stop, so a handler
+	// that returned never waits out an Extend in flight before its ack.
+	renewCtx, cancelRenew := context.WithCancel(context.WithoutCancel(ctx))
 	var leaseLost atomic.Bool
 	var once sync.Once
 	var wg sync.WaitGroup
@@ -287,7 +309,7 @@ func (w *Worker) renewLease(ctx context.Context, cancelRun context.CancelFunc, d
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				opCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), queueOpTimeout)
+				opCtx, cancel := context.WithTimeout(renewCtx, queueOpTimeout)
 				err := w.queue.Extend(opCtx, d, w.opts.Lease)
 				cancel()
 				if errors.Is(err, ErrLeaseLost) {
@@ -297,8 +319,8 @@ func (w *Worker) renewLease(ctx context.Context, cancelRun context.CancelFunc, d
 					cancelRun()
 					return
 				}
-				if errors.Is(err, ErrClosed) {
-					return // shutting down; the lease runs out on its own
+				if errors.Is(err, ErrClosed) || renewCtx.Err() != nil {
+					return // stopped, or shutting down; the lease runs out on its own
 				}
 				if err != nil {
 					w.log.Error("jobs worker: renew lease", zap.String("job_id", d.Envelope.ID), zap.Error(err))
@@ -307,7 +329,10 @@ func (w *Worker) renewLease(ctx context.Context, cancelRun context.CancelFunc, d
 		}
 	}()
 	return func() bool {
-		once.Do(func() { close(done) })
+		once.Do(func() {
+			close(done)
+			cancelRenew()
+		})
 		wg.Wait()
 		return leaseLost.Load()
 	}
@@ -351,6 +376,5 @@ func (w *Worker) shutdown(inFlight *sync.WaitGroup, cancelJobs context.CancelFun
 	}
 }
 
-// shutdownGrace is how long a canceled handler gets to return before Run
-// gives up on it.
-var shutdownGrace = 5 * time.Second
+// shutdownGrace is ShutdownGrace, variable for tests.
+var shutdownGrace = ShutdownGrace

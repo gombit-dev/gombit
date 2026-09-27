@@ -124,12 +124,13 @@ func (q *queueList) Set(value string) error {
 }
 
 // workerShutdownGrace is how much longer than the worker's own shutdown
-// timeout a supervisor should wait before killing it.
-const workerShutdownGrace = 10 * time.Second
+// timeout a supervisor should wait before killing it: the worker's grace for
+// canceled jobs to return and be released, plus a margin for the stop hooks.
+const workerShutdownGrace = jobs.ShutdownGrace + 5*time.Second
 
 // WorkerKillAfter is how long a process supervisor should wait after asking a
 // worker started with args to stop before killing it: its shutdown timeout
-// plus a grace.
+// plus the worker's grace and a margin.
 func WorkerKillAfter(args []string) time.Duration {
 	opts, err := ParseWorkerFlags(args, io.Discard)
 	if err != nil || opts.ShutdownTimeout <= 0 {
