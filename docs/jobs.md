@@ -1,8 +1,8 @@
 # Background jobs
 
 > **Status:** the job contract (JOBS-1), queue drivers (JOBS-2), the worker
-> (JOBS-3), and retries, backoff, and timeouts (JOBS-4). Delayed dispatch and
-> failed-job handling land in the rest of the
+> (JOBS-3), retries, backoff, and timeouts (JOBS-4), and delayed jobs (JOBS-5).
+> Failed-job handling lands in the rest of the
 > [JOBS-0 epic](https://github.com/gombit-dev/gombit/issues/278).
 
 A job is work that should not run inside an HTTP request: sending an email,
@@ -49,6 +49,24 @@ jobs.MustRegister(app.Jobs().Registry(), func(ctx context.Context, job SendWelco
 env, err := app.Jobs().Dispatch(ctx, SendWelcomeEmail{UserID: user.ID})
 env, err = app.Jobs().Dispatch(ctx, job, jobs.OnQueue("mail")) // another queue
 ```
+
+### Later
+
+```go
+app.Jobs().Dispatch(ctx, SendReminder{UserID: id}, jobs.Delay(24*time.Hour))
+app.Jobs().DispatchAt(ctx, PublishPost{PostID: id}, post.PublishAt) // or jobs.At(t)
+```
+
+A delayed job waits in the queue, scored by when it becomes available; the
+worker picks it up at its time (within its poll interval), and nothing in your
+application polls. With the `redis` driver the schedule survives restarts of
+the app and the workers. A time in the past means now. A delay is measured on
+the dispatching host's clock and compared with the worker's, so keep hosts'
+clocks synchronized (NTP), as leases already require. The `sync` driver has
+nowhere to hold a job, so it runs a delayed one at once, as it does every job.
+In tests, give the dispatcher and the queue the same clock
+(`jobs.WithDispatcherClock`, `jobs.WithMemoryClock`/`jobs.WithRedisClock`) and
+advance it instead of sleeping.
 
 Application code depends on `*jobs.Dispatcher`, never on a driver. The app's
 registry already carries request and trace IDs into handlers

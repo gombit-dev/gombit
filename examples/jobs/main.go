@@ -76,10 +76,15 @@ func main() {
 		log.Fatal(err)
 	}
 
-	// Run the worker until both jobs are done.
+	// A job for later: the queue holds it until then.
+	if _, err := dispatcher.Dispatch(ctx, SendWelcomeEmail{UserID: 99}, jobs.Delay(50*time.Millisecond)); err != nil {
+		log.Fatal(err)
+	}
+
+	// Run the worker until all three jobs are done.
 	workerCtx, stopWorker := context.WithCancel(ctx)
 	go func() {
-		for done.Load() < 2 {
+		for done.Load() < 3 {
 			time.Sleep(10 * time.Millisecond)
 		}
 		stopWorker()

@@ -12,6 +12,11 @@ version.
 
 ### Added
 
+- Delayed jobs: `jobs.Delay(d)` and `jobs.At(t)` dispatch options and
+  `Dispatcher.DispatchAt`. The queue holds the job until its time (Redis keeps
+  the schedule across restarts); `jobs.WithDispatcherClock` makes delays
+  testable with the queues' injectable clocks
+  ([#318](https://github.com/gombit-dev/gombit/issues/318)).
 - Job retry policy: `jobs.WithOptions(jobs.Options{MaxAttempts, Timeout,
   Backoff})` per job and `jobs.WithDefaultOptions` per registry, with
   `jobs.Exponential`, `jobs.Constant`, and `jobs.Jittered` backoffs. `Timeout`
