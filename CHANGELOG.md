@@ -12,6 +12,12 @@ version.
 
 ### Added
 
+- `make test-faults` runs the deterministic fault-injection suite (every
+  `TestFault_*` test and the `faulttest` harness, race detector on;
+  `FAULT_POSTGRES_DSN`/`FAULT_MYSQL_DSN` add databases, `FAULT_COUNT`
+  repeats). CI runs it as the `fault-tests` job against SQLite, Postgres,
+  and MySQL, and the `Fault soak` workflow runs it 100x weekly or on demand
+  ([#384](https://github.com/gombit-dev/gombit/issues/384)).
 - HTTP fault tests (`TestFault_HTTP_*`): `gombit openapi generate` fails
   promptly on a 500, a 429, a hung or reset dependency, a cut body, or a
   malformed document, closing every response body and writing nothing; the

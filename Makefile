@@ -33,14 +33,21 @@ OUT_DIR ?= benchmarks/results/latest
 # applied verdict per app (via inspect-limits).
 INTENDED_LIMITS ?= intended (applied only under benchmark-crud-all): app $(APP_CPUS)cpu/$(APP_MEMORY); postgres $(POSTGRES_CPUS)cpu/$(POSTGRES_MEMORY)
 
-.PHONY: help benchmark benchmark-smoke benchmark-crud benchmark-crud-all benchmark-micro benchmark-micro-ablation benchmark-footprint benchmark-summary benchmark-metadata benchmark-report benchmark-report-check
+.PHONY: help test-faults benchmark benchmark-smoke benchmark-crud benchmark-crud-all benchmark-micro benchmark-micro-ablation benchmark-footprint benchmark-summary benchmark-metadata benchmark-report benchmark-report-check
 
 ## help: list the benchmark targets (the default goal — a bare `make` prints
 ## this, never a multi-hour run). Full docs: benchmarks/README.md.
 help:
-	@echo "Gombit benchmark targets (make <target>; see benchmarks/README.md):"
+	@echo "Gombit make targets (make <target>; benchmarks: see benchmarks/README.md):"
 	@echo ""
 	@grep -hE '^## [a-z][a-z0-9-]*:' $(MAKEFILE_LIST) | sed -E 's/^## /  make /'
+
+## test-faults: run the deterministic fault-injection suite (every TestFault_*
+## test plus internal/faulttest, race detector on). FAULT_POSTGRES_DSN and
+## FAULT_MYSQL_DSN add those databases; FAULT_COUNT=100 is the flake soak.
+## See scripts/test-faults.sh and CONTRIBUTING.md (Fault injection).
+test-faults:
+	@bash scripts/test-faults.sh
 
 ## benchmark: run the whole suite end to end into OUT_DIR and regenerate the
 ## README ## Performance block + summary.md — the one-command dedicated-host

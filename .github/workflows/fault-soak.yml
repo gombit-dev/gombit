@@ -1,0 +1,86 @@
+name: Fault soak
+
+# Flake soak for the deterministic fault suite (CHAOS-4): runs
+# `make test-faults` with every test repeated FAULT_COUNT times (100 by
+# default) against SQLite, Postgres, and MySQL. The suite must survive this
+# with zero failures before the `fault-tests` CI job is proposed as a
+# required status check, and it keeps running weekly so a test that turns
+# flaky later is caught. Never a PR gate: it is manual and scheduled only.
+
+on:
+  workflow_dispatch:
+    inputs:
+      count:
+        description: Times to run every fault test
+        required: false
+        default: "100"
+  schedule:
+    - cron: "17 4 * * 1" # Mondays 04:17 UTC
+
+permissions:
+  contents: read
+
+jobs:
+  soak:
+    name: Fault soak
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: gombit
+          POSTGRES_PASSWORD: gombit
+          POSTGRES_DB: gombit
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U gombit -d gombit"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: gombit
+          MYSQL_USER: gombit
+          MYSQL_PASSWORD: gombit
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -ugombit -pgombit"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Pre-fetch Go modules
+        run: bash scripts/ci-prefetch-go-modules.sh
+
+      - name: Soak the fault suite
+        env:
+          GOPROXY: "off"
+          FAULT_COUNT: ${{ inputs.count || '100' }}
+          FAULT_POSTGRES_DSN: postgres://gombit:gombit@127.0.0.1:5432/gombit?sslmode=disable
+          FAULT_MYSQL_DSN: gombit:gombit@tcp(127.0.0.1:3306)/gombit?parseTime=true
+        run: |
+          start=$(date +%s)
+          set -o pipefail
+          make test-faults 2>&1 | tee soak.log
+          echo "Fault soak: every test x${FAULT_COUNT}, 0 failures, $(( $(date +%s) - start ))s" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the log of a failed soak
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fault-soak-log
+          path: soak.log

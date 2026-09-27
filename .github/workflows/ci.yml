@@ -92,6 +92,7 @@ jobs:
         run: |
           bash scripts/ci-prefetch-go-modules_test.sh
           bash scripts/ci-install-atlas_test.sh
+          bash scripts/test-faults_test.sh
 
   test:
     name: Test
@@ -276,6 +277,67 @@ jobs:
       - name: Run SQLite database tests
         run: go test ./database
 
+  fault-tests:
+    name: Fault injection
+    # The deterministic fault suite (CHAOS-4, INV-7): every TestFault_* test
+    # and the internal/faulttest harness under the race detector, on SQLite
+    # and against real Postgres and MySQL. Deterministic by construction —
+    # faults are "the Nth call", never a probability — and soaked 100x via
+    # fault-soak.yml before it is proposed as a required check.
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: gombit
+          POSTGRES_PASSWORD: gombit
+          POSTGRES_DB: gombit
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U gombit -d gombit"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: gombit
+          MYSQL_USER: gombit
+          MYSQL_PASSWORD: gombit
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -ugombit -pgombit"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Pre-fetch Go modules
+        run: bash scripts/ci-prefetch-go-modules.sh
+
+      - name: Run the fault suite
+        env:
+          GOPROXY: "off"
+          FAULT_POSTGRES_DSN: postgres://gombit:gombit@127.0.0.1:5432/gombit?sslmode=disable
+          FAULT_MYSQL_DSN: gombit:gombit@tcp(127.0.0.1:3306)/gombit?parseTime=true
+        run: |
+          start=$(date +%s)
+          make test-faults
+          echo "Fault suite wall time: $(( $(date +%s) - start ))s (budget: 120s)" | tee -a "$GITHUB_STEP_SUMMARY"
+
   database-postgres:
     name: Database (postgres)
     needs: test
@@ -304,18 +366,20 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # TestFault_* tests run in the fault-tests job (make test-faults),
+      # against its own Postgres and MySQL, so they are skipped here.
       - name: Run Postgres database tests
         run: |
           go test -tags integration ./database \
             -database.postgres-dsn \
             'postgres://gombit:gombit@127.0.0.1:5432/gombit?sslmode=disable'
-          go test -tags integration ./auth \
+          go test -tags integration -skip '^TestFault_' ./auth \
             -auth.postgres-dsn \
             'postgres://gombit:gombit@127.0.0.1:5432/gombit?sslmode=disable'
-          go test -tags integration ./admin \
+          go test -tags integration -skip '^TestFault_' ./admin \
             -admin.postgres-dsn \
             'postgres://gombit:gombit@127.0.0.1:5432/gombit?sslmode=disable'
-          go test -tags integration ./framework \
+          go test -tags integration -skip '^TestFault_' ./framework \
             -framework.postgres-dsn \
             'postgres://gombit:gombit@127.0.0.1:5432/gombit?sslmode=disable'
           go test -tags integration ./resourcegen \
@@ -323,9 +387,6 @@ jobs:
             'postgres://gombit:gombit@127.0.0.1:5432/gombit?sslmode=disable'
           go test -tags integration ./types \
             -types.postgres-dsn \
-            'postgres://gombit:gombit@127.0.0.1:5432/gombit?sslmode=disable'
-          go test -tags integration ./internal/faulttest \
-            -faulttest.postgres-dsn \
             'postgres://gombit:gombit@127.0.0.1:5432/gombit?sslmode=disable'
 
       # Separate database from the auth/database/admin tests above: gin-gorm's
@@ -516,20 +577,17 @@ jobs:
           go test -tags integration ./database \
             -database.mysql-dsn \
             'gombit:gombit@tcp(127.0.0.1:3306)/gombit?parseTime=true'
-          go test -tags integration ./auth \
+          go test -tags integration -skip '^TestFault_' ./auth \
             -auth.mysql-dsn \
             'gombit:gombit@tcp(127.0.0.1:3306)/gombit?parseTime=true'
-          go test -tags integration ./admin \
+          go test -tags integration -skip '^TestFault_' ./admin \
             -admin.mysql-dsn \
             'gombit:gombit@tcp(127.0.0.1:3306)/gombit?parseTime=true'
-          go test -tags integration ./framework \
+          go test -tags integration -skip '^TestFault_' ./framework \
             -framework.mysql-dsn \
             'gombit:gombit@tcp(127.0.0.1:3306)/gombit?parseTime=true'
           go test -tags integration ./resourcegen \
             -resourcegen.mysql-dsn \
-            'gombit:gombit@tcp(127.0.0.1:3306)/gombit?parseTime=true'
-          go test -tags integration ./internal/faulttest \
-            -faulttest.mysql-dsn \
             'gombit:gombit@tcp(127.0.0.1:3306)/gombit?parseTime=true'
 
   migrations-sqlite:

@@ -181,8 +181,22 @@ a channel or the client going away), `CutBody(partial)`, or
 body was closed, and call `dep.WaitIdle(t)` to prove no call was left
 running on the dependency.
 
+`make test-faults` runs the whole fault suite: the `internal/faulttest`
+harness and every `TestFault_*` test (found by name, so a new one joins
+without editing anything), under the race detector. Set `FAULT_POSTGRES_DSN`
+and `FAULT_MYSQL_DSN` to add those databases, as CI's `fault-tests` job does:
+
+```bash
+FAULT_POSTGRES_DSN='postgres://gombit:gombit@127.0.0.1:5432/gombit?sslmode=disable' \
+FAULT_MYSQL_DSN='gombit:gombit@tcp(127.0.0.1:3306)/gombit?parseTime=true' \
+  make test-faults
+```
+
 A fault test must pass `go test -count=50` (and `-race`) before it lands: a
-flaky failure-path test is worse than none.
+flaky failure-path test is worse than none. `FAULT_COUNT=100 make
+test-faults` is the soak the `Fault soak` workflow runs weekly (and on
+demand); the `fault-tests` job becomes a required check only after that soak
+stays clean.
 
 ### Generator golden tests
 
