@@ -93,9 +93,10 @@ type OnceStore interface {
 	AbandonOnce(ctx context.Context, key, token string) error
 }
 
-// ErrInProgress: Once found another run of the same effect in progress. It
-// is an ordinary (retryable) failure: the job runs again after its backoff,
-// by which time the other run has finished or its lock expired.
+// ErrInProgress: Once found another run of the same effect in progress. The
+// worker retries the job after its backoff and does not count it toward
+// giving up (it retries past MaxAttempts): the other run finishes or its
+// lock expires (LockFor), and a later delivery proceeds.
 var ErrInProgress = errors.New("jobs: this effect is already in progress")
 
 // OnceOption configures Once.
@@ -111,8 +112,11 @@ const (
 	DefaultOnceLock = 15 * time.Minute
 )
 
-// KeepFor sets how long Once remembers a completed effect (default 7 days):
-// longer than any job carrying the key can still be redelivered.
+// KeepFor sets how long Once remembers a completed effect (default 7 days).
+// The record then expires, while a failed job is kept until it is forgotten
+// or purged: a redelivery after KeepFor (`gombit jobs retry` on day 8
+// included) runs the effect again. Set it past the longest a job carrying
+// the key can come back.
 func KeepFor(d time.Duration) OnceOption { return func(c *onceConfig) { c.keep = d } }
 
 // LockFor sets how long a run holds the key before another may take over

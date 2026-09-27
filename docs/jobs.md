@@ -318,10 +318,14 @@ func sendWelcome(ctx context.Context, job SendWelcomeEmail) error {
 `jobs.Once(ctx, key, fn)` runs `fn` unless an effect with that key already
 completed, and records it when `fn` succeeds, so a redelivered job skips it. Key
 it on the job ID and the effect. While one run holds a key, another gets
-`jobs.ErrInProgress`, an ordinary failure retried after the backoff. A failing
-`fn` releases the key for the retry. The lock expires after `jobs.LockFor`
-(default 15m), so a crashed run cannot block the key forever, and completions
-are remembered for `jobs.KeepFor` (default 7 days).
+`jobs.ErrInProgress`: the worker retries it after the backoff and does not
+count it toward giving up (it retries past `MaxAttempts`), so it waits out the
+other run. A failing `fn` releases the key for the retry. The lock expires
+after `jobs.LockFor` (default 15m), so a crashed run cannot block the key
+forever. Completions are remembered for `jobs.KeepFor` (default 7 days), and
+then the record expires: failed jobs are kept until forgotten or purged, so a
+redelivery after `KeepFor` (`gombit jobs retry` a week later) runs `fn` again.
+Set `KeepFor` past the longest a job carrying the key can come back.
 
 `Once` narrows duplicates, it does not make them impossible: a run that dies
 between `fn` succeeding and the record keeps the lock until it expires, and the
