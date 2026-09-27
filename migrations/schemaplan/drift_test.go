@@ -2,6 +2,7 @@ package schemaplan
 
 import (
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -177,10 +178,7 @@ schema "shop" {
 	}
 }
 
-// TestDatabaseDriftPostgresIgnoresTheRevisionsSchema: Atlas keeps its
-// revisions table in a schema of its own on PostgreSQL.
-func TestDatabaseDriftPostgresIgnoresTheRevisionsSchema(t *testing.T) {
-	const widgets = `
+const driftPostgresWidgets = `
 table "widgets" {
   schema = schema.public
   column "id" {
@@ -195,7 +193,40 @@ schema "public" {
   comment = "standard public schema"
 }
 `
-	live := widgets + `
+
+const driftPostgresBookkeeping = `
+table "framework_migrations" {
+  schema = schema.public
+  column "version" {
+    null = false
+    type = character_varying
+  }
+}
+table "atlas_schema_revisions" {
+  schema = schema.public
+  column "version" {
+    null = false
+    type = character_varying
+  }
+}
+`
+
+// TestDatabaseDriftPostgres: the bookkeeping tables and Atlas's own revisions
+// schema are set aside, and nothing else is. A schema is an object the
+// migrations create on PostgreSQL, so its name counts.
+func TestDatabaseDriftPostgres(t *testing.T) {
+	cases := []struct {
+		name string
+		live string
+		want []string
+	}{
+		{
+			name: "bookkeeping in public, as gombit db migrate keeps it",
+			live: driftPostgresWidgets + driftPostgresBookkeeping,
+		},
+		{
+			name: "Atlas's revisions in a schema of their own",
+			live: driftPostgresWidgets + `
 table "atlas_schema_revisions" {
   schema = schema.atlas_schema_revisions
   column "version" {
@@ -204,29 +235,44 @@ table "atlas_schema_revisions" {
   }
 }
 schema "atlas_schema_revisions" {}
-`
-	steps, err := DatabaseDrift(config.DatabaseDriverPostgres, []byte(widgets), []byte(live), bookkeeping)
-	if err != nil {
-		t.Fatalf("DatabaseDrift() error = %v", err)
-	}
-	if len(steps) != 0 {
-		t.Fatalf("steps = %v, want none", stepIDs(steps))
-	}
-
-	// Only the revisions schema is set aside, so an application schema of
-	// another name is still compared with the migrations' one.
-	renamed := strings.ReplaceAll(live, "schema.public", "schema.app")
-	renamed = strings.Replace(renamed, `schema "public"`, `schema "app"`, 1)
-	steps, err = DatabaseDrift(config.DatabaseDriverPostgres, []byte(widgets), []byte(renamed), bookkeeping)
-	if err != nil {
-		t.Fatalf("DatabaseDrift() error = %v", err)
-	}
-	if len(steps) != 0 {
-		t.Fatalf("steps with the application schema named app = %v, want none", stepIDs(steps))
-	}
-
-	// A schema the application created by hand is drift.
-	steps, err = DatabaseDrift(config.DatabaseDriverPostgres, []byte(widgets), []byte(widgets+`
+`,
+		},
+		{
+			// ALTER TABLE widgets SET SCHEMA app: public keeps only the
+			// bookkeeping tables.
+			name: "a table moved to another schema",
+			live: driftPostgresBookkeeping + `
+table "widgets" {
+  schema = schema.app
+  column "id" {
+    null = false
+    type = bigserial
+  }
+  primary_key {
+    columns = [column.id]
+  }
+}
+schema "app" {}
+schema "public" {
+  comment = "standard public schema"
+}
+`,
+			want: []string{"extra_schema:app", "add_table:widgets", "drop_table:widgets"},
+		},
+		{
+			name: "the application schema renamed",
+			live: strings.ReplaceAll(strings.Replace(driftPostgresWidgets, `schema "public"`, `schema "app"`, 1), "schema.public", "schema.app"),
+			want: []string{"extra_schema:app", "missing_schema:public", "add_table:widgets", "drop_table:widgets"},
+		},
+		{
+			name: "an empty schema created by hand",
+			live: driftPostgresWidgets + `schema "scratch" {}
+`,
+			want: []string{"extra_schema:scratch"},
+		},
+		{
+			name: "a schema created by hand with a table in it",
+			live: driftPostgresWidgets + `
 table "notes" {
   schema = schema.reports
   column "id" {
@@ -235,12 +281,38 @@ table "notes" {
   }
 }
 schema "reports" {}
-`), bookkeeping)
-	if err != nil {
-		t.Fatalf("DatabaseDrift() error = %v", err)
+`,
+			want: []string{"add_table:notes", "extra_schema:reports"},
+		},
 	}
-	if len(steps) == 0 {
-		t.Fatal("a hand-made schema is not reported")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			steps, err := DatabaseDrift(config.DatabaseDriverPostgres, []byte(driftPostgresWidgets), []byte(tc.live), bookkeeping)
+			if err != nil {
+				t.Fatalf("DatabaseDrift() error = %v", err)
+			}
+			got := stepIDs(steps)
+			sort.Strings(got)
+			want := append([]string{}, tc.want...)
+			sort.Strings(want)
+			if strings.Join(got, ",") != strings.Join(want, ",") {
+				t.Fatalf("steps = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+// TestDatabaseDriftNothingAppliedYet: before the first migration the live
+// database must hold nothing but bookkeeping.
+func TestDatabaseDriftNothingAppliedYet(t *testing.T) {
+	steps, err := DatabaseDrift(config.DatabaseDriverPostgres, nil, []byte(driftPostgresBookkeeping+`schema "public" {}
+`), bookkeeping)
+	if err != nil || len(steps) != 0 {
+		t.Fatalf("steps = %v, err = %v, want none", stepIDs(steps), err)
+	}
+	steps, err = DatabaseDrift(config.DatabaseDriverPostgres, nil, []byte(driftPostgresWidgets), bookkeeping)
+	if err != nil || strings.Join(stepIDs(steps), ",") != "add_table:widgets" {
+		t.Fatalf("steps = %v, err = %v, want [add_table:widgets]", stepIDs(steps), err)
 	}
 }
 

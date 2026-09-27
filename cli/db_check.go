@@ -312,6 +312,14 @@ func checkDatabaseLayers(ctx context.Context, o checkOptions, dirOK bool) (check
 		return pending, schemaLayer
 	}
 	state, err := readDatabase(ctx, o)
+	inspectErr := err
+	if errors.Is(err, migrations.ErrSchemaInspect) {
+		// The ledger was read; only the schema read failed. The pending
+		// layer still reports, and the failure belongs to the schema layer.
+		err = nil
+	} else {
+		inspectErr = nil
+	}
 	if err != nil {
 		pending.Status, pending.Detail = layerError, oneLine(err.Error())
 		pending.Fix = "configure GOMBIT_DATABASE_*, or pass --no-db where no database is available"
@@ -335,6 +343,11 @@ func checkDatabaseLayers(ctx context.Context, o checkOptions, dirOK bool) (check
 		pending.Status, pending.Detail, pending.Fix = layerDrift, "migrations the database has not applied", "gombit db migrate"
 	default:
 		pending.Status, pending.Detail = layerOK, "every migration is applied"
+	}
+	if inspectErr != nil {
+		schemaLayer.Status, schemaLayer.Detail = layerError, oneLine(inspectErr.Error())
+		schemaLayer.Fix = "check the Atlas CLI (--atlas-bin) and that the database user can read the schema catalog"
+		return pending, schemaLayer
 	}
 	if !dirOK {
 		schemaLayer.Status, schemaLayer.Detail = layerSkipped, "the migration directory is inconsistent"

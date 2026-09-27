@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gombit-dev/gombit/config"
 	"github.com/gombit-dev/gombit/migrations"
 	"github.com/gombit-dev/gombit/migrations/schemaplan"
 )
@@ -54,5 +55,29 @@ func TestDatabaseCheck(t *testing.T) {
 	}
 	if ids := drift(); strings.Join(ids, ",") != "add_column:items.hand_note" {
 		t.Fatalf("drift after a hand-added column = %v, want [add_column:items.hand_note]", ids)
+	}
+	if err := db.Exec("ALTER TABLE items DROP COLUMN hand_note").Error; err != nil {
+		t.Fatalf("drop the hand-added column: %v", err)
+	}
+
+	if h.cfg.Driver != config.DatabaseDriverPostgres {
+		return
+	}
+	// On PostgreSQL a schema is part of what the migrations build: a table
+	// moved out of public is drift, even though the bookkeeping stays there.
+	for _, stmt := range []string{"CREATE SCHEMA moved", "ALTER TABLE items SET SCHEMA moved"} {
+		if err := db.Exec(stmt).Error; err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	t.Cleanup(func() {
+		_ = db.Exec("ALTER TABLE moved.items SET SCHEMA public").Error
+		_ = db.Exec("DROP SCHEMA IF EXISTS moved").Error
+	})
+	ids := strings.Join(drift(), ",")
+	for _, want := range []string{"extra_schema:moved", "add_table:items", "drop_table:items"} {
+		if !strings.Contains(ids, want) {
+			t.Fatalf("drift after moving items to another schema = %s, want %s", ids, want)
+		}
 	}
 }

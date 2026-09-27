@@ -403,7 +403,12 @@ The **database schema** layer compares `atlas schema inspect` of the
 application database with the migration directory inspected at the last
 applied version, so it finds what was changed outside a migration: a column
 added by hand, an index dropped in a console. Gombit's and Atlas's bookkeeping
-tables are not part of the comparison. Each difference is listed as a step
+tables (and Atlas's own `atlas_schema_revisions` schema, once it holds nothing
+else) are the only things set aside. On PostgreSQL a schema is part of what
+the migrations build, so a table moved out of `public` or a schema created by
+hand is drift (`extra_schema:<name>`, `missing_schema:<name>`). On MySQL the
+schema is the database itself, so the application database is compared with
+the dev database the migrations replay on whatever each is named. Each difference is listed as a step
 ID, like `add_column:products.extra` (the database has a column the migrations
 don't create) or `drop_index:products.idx_products_name` (the migrations
 create an index the database lacks).
@@ -417,7 +422,11 @@ pending-migrations layer also reports a version the database has applied but
 the directory no longer has (a migration renamed or deleted after it ran).
 While that is so, or while a migration older than the last applied one is
 still pending, the database-schema layer is skipped: the directory replayed to
-the last applied version is not what the database should have. A layer that an earlier one makes meaningless is
+the last applied version is not what the database should have. The migration
+ledger and the live schema are separate reads: when the database answers but
+`atlas schema inspect` fails (no Atlas CLI, no catalog access), the
+database-schema layer reports the error and the pending layer still lists
+what is unapplied. A layer that an earlier one makes meaningless is
 skipped with the reason (the migrations are not classified while `atlas.sum`
 is inconsistent). The command is read-only; on SQLite, opening a database file
 that does not exist yet creates it empty, as `gombit db status` does.

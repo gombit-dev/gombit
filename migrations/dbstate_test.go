@@ -106,13 +106,17 @@ func TestInspectDatabaseReportsAtlasFailure(t *testing.T) {
 	writeFile(t, filepath.Join(workDir, "database", "migrations", "20260101000000_create_widgets.sql"),
 		"CREATE TABLE widgets (id INTEGER PRIMARY KEY);")
 	runner := &inspectFakeAtlas{applyFakeAtlas: applyFakeAtlas{t: t}, failStderr: "Error: connection refused\n"}
-	_, err := InspectDatabase(context.Background(), ApplyOptions{
+	state, err := InspectDatabase(context.Background(), ApplyOptions{
 		WorkDir:  workDir,
 		Database: config.DatabaseConfig{Driver: config.DatabaseDriverSQLite, DSN: filepath.Join(workDir, "app.db")},
 		runner:   runner,
 	})
-	if err == nil || !strings.Contains(err.Error(), "connection refused") {
-		t.Fatalf("InspectDatabase() error = %v, want the atlas message", err)
+	if err == nil || !strings.Contains(err.Error(), "connection refused") || !errors.Is(err, ErrSchemaInspect) {
+		t.Fatalf("InspectDatabase() error = %v, want the atlas message wrapping ErrSchemaInspect", err)
+	}
+	// The ledger was read before the schema; the failure does not erase it.
+	if versions(state.Pending) != "20260101000000" {
+		t.Fatalf("pending after a failed schema read = %s, want the unapplied migration", versions(state.Pending))
 	}
 }
 

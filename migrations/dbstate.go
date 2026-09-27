@@ -13,6 +13,11 @@ import (
 // migrations build, so a schema comparison ignores them.
 var BookkeepingTables = []string{revisionsTable, atlasRevisionsTable}
 
+// ErrSchemaInspect wraps an InspectDatabase failure that happened after the
+// migration ledger was read: the database answered, `atlas schema inspect`
+// did not. The returned state still carries the ledger.
+var ErrSchemaInspect = errors.New("migrations: inspect the database schema")
+
 // DatabaseState is what `gombit db check` reads from the application
 // database: which migrations it has applied and the schema it actually has.
 type DatabaseState struct {
@@ -31,7 +36,9 @@ type DatabaseState struct {
 
 // InspectDatabase reads the application database without changing it: the
 // applied versions from framework_migrations (a missing table means none), the
-// migrations still pending, and the live schema.
+// migrations still pending, and the live schema. The ledger and the schema are
+// separate reads: when only the schema read fails, the error wraps
+// ErrSchemaInspect and the state still carries the ledger.
 func InspectDatabase(ctx context.Context, opts ApplyOptions) (DatabaseState, error) {
 	if ctx == nil {
 		return DatabaseState{}, errors.New("migrations: nil context")
@@ -78,15 +85,15 @@ func InspectDatabase(ctx context.Context, opts ApplyOptions) (DatabaseState, err
 
 	absWorkDir, err := filepath.Abs(opts.WorkDir)
 	if err != nil {
-		return DatabaseState{}, fmt.Errorf("migrations: resolve work dir: %w", err)
+		return state, fmt.Errorf("%w: resolve work dir: %w", ErrSchemaInspect, err)
 	}
 	var out, errOut bytes.Buffer
 	args := []string{"schema", "inspect", "--url", atlasURL}
 	if err := opts.runner.Run(ctx, absWorkDir, opts.AtlasBinary, args, &out, &errOut); err != nil {
 		if msg := atlasMessage(errOut.String()); msg != "" {
-			return DatabaseState{}, fmt.Errorf("migrations: inspect the database: %w: %s", err, msg)
+			return state, fmt.Errorf("%w: %w: %s", ErrSchemaInspect, err, msg)
 		}
-		return DatabaseState{}, fmt.Errorf("migrations: inspect the database: %w", err)
+		return state, fmt.Errorf("%w: %w", ErrSchemaInspect, err)
 	}
 	state.Schema = out.Bytes()
 	return state, nil

@@ -369,3 +369,20 @@ func TestCheckTellsDriftFromFailure(t *testing.T) {
 		}
 	}
 }
+
+func TestCheckSchemaInspectFailureKeepsTheLedger(t *testing.T) {
+	stubInspectDatabase(t, func(context.Context, migrations.ApplyOptions) (migrations.DatabaseState, error) {
+		return migrations.DatabaseState{Pending: []migrations.MigrationFile{{Version: "20260101000000", Name: "create_widgets"}}},
+			fmt.Errorf("%w: exec: \"atlas\": executable file not found", migrations.ErrSchemaInspect)
+	})
+	pending, schemaLayer := checkDatabaseLayers(context.Background(), checkOptions{
+		dir:      migrations.DirOptions{Driver: config.DatabaseDriverSQLite},
+		database: config.DatabaseConfig{Driver: config.DatabaseDriverSQLite, DSN: "app.db"},
+	}, true)
+	if pending.Status != layerDrift || strings.Join(pending.Items, ",") != "20260101000000_create_widgets" || pending.Fix != "gombit db migrate" {
+		t.Fatalf("pending = %+v, want the unapplied migration", pending)
+	}
+	if schemaLayer.Status != layerError || !strings.Contains(schemaLayer.Detail, "executable file not found") || !strings.Contains(schemaLayer.Fix, "--atlas-bin") {
+		t.Fatalf("database schema = %+v, want the inspect failure", schemaLayer)
+	}
+}
