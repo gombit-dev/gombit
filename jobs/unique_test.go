@@ -308,3 +308,36 @@ func TestMemoryFinishOnceRefusesAnExpiredLock(t *testing.T) {
 		t.Fatalf("after the refused finish = %v, want the key free", state)
 	}
 }
+
+// TestOnceLockOutlivesMaxAttempts: a lock held by a crashed run can outlast
+// every attempt the job is allowed. Waiting on it is not failing: the job is
+// retried past MaxAttempts, runs the effect once the lock expires, and is
+// never buried.
+func TestOnceLockOutlivesMaxAttempts(t *testing.T) {
+	q := jobs.NewMemoryQueue()
+	reg := jobs.NewRegistry()
+	var effects atomic.Int32
+	jobs.MustRegister(reg, func(ctx context.Context, _ sendWelcome) error {
+		return jobs.Once(ctx, "crashed", func(context.Context) error { effects.Add(1); return nil })
+	}, jobs.WithOptions(jobs.Options{MaxAttempts: 2, Backoff: jobs.Constant(10 * time.Millisecond)}))
+	// A run that crashed after taking the lock: nothing releases it before
+	// it expires, long after two attempts.
+	if _, err := jobs.OnceStore(q).BeginOnce(context.Background(), "crashed", "dead-run", 300*time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := jobs.NewDispatcher(reg, q).Dispatch(context.Background(), sendWelcome{}); err != nil {
+		t.Fatal(err)
+	}
+	w, err := jobs.NewWorker(reg, q, jobs.WorkerOptions{Queues: []string{"default"}, PollInterval: 5 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	startWorker(t, w)
+	eventually(t, "the job to succeed", func() bool { return q.Len() == 0 })
+	if effects.Load() != 1 {
+		t.Fatalf("effects = %d, want 1", effects.Load())
+	}
+	if failed, _ := q.Failed(context.Background(), "default", 0); len(failed) != 0 {
+		t.Fatalf("a job waiting on a lock was buried: %+v", failed)
+	}
+}

@@ -293,6 +293,13 @@ func (w *Worker) process(jobCtx context.Context, d Delivery) {
 		w.retry(d, 0, fields)
 		return
 	}
+	if errors.Is(err, ErrInProgress) && !IsPermanent(err) {
+		// Another run holds the effect's Once lock. Waiting is not failing:
+		// retried past MaxAttempts, bounded by the lock's expiry, so a job
+		// whose other run crashed is not buried before the lock frees.
+		w.retry(d, policy.Backoff(d.Envelope.Attempt), fields)
+		return
+	}
 	if IsPermanent(err) || d.Envelope.Attempt >= policy.MaxAttempts {
 		w.giveUp(d, err, policy, fields)
 		return
