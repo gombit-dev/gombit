@@ -178,6 +178,21 @@ func (q *MemoryQueue) Release(_ context.Context, d Delivery, at time.Time) error
 	return nil
 }
 
+// Extend implements Queue.
+func (q *MemoryQueue) Extend(_ context.Context, d Delivery, lease time.Duration) error {
+	if lease <= 0 {
+		return fmt.Errorf("jobs: extend: lease must be positive, got %s", lease)
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	job, err := q.leased(d)
+	if err != nil {
+		return err
+	}
+	job.leaseDeadline = q.now().Add(lease)
+	return nil
+}
+
 // leased returns the job d holds the current lease of. A lease that expired
 // but that no other Reserve has taken yet still counts: the job was not
 // delivered twice.

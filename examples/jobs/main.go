@@ -1,15 +1,16 @@
 // Command jobs shows background jobs end to end: a typed job registered on
 // the app's dispatcher, dispatched to a queue (the memory driver here; set
-// GOMBIT_JOBS_DRIVER=redis for the durable one), and consumed the way
-// `gombit worker` will: reserve, run, ack.
+// GOMBIT_JOBS_DRIVER=redis for the durable one), and run by the worker.
+// In an app, framework.Run starts the same worker as `./server worker`;
+// this example runs it in-process with framework.RunWorker.
 package main
 
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
+	"sync/atomic"
 	"time"
 
 	"github.com/gombit-dev/gombit/config"
@@ -40,7 +41,9 @@ func main() {
 	}
 	dispatcher := app.Jobs()
 
+	var done atomic.Int32
 	jobs.MustRegister(dispatcher.Registry(), func(ctx context.Context, job SendWelcomeEmail) error {
+		defer done.Add(1)
 		info, _ := jobs.InfoFromContext(ctx)
 		fmt.Printf("welcome user %d (job %s v%d, queued as v%d, attempt %d)\n",
 			job.UserID, info.Name, info.Version, info.QueuedVersion, info.Attempt)
@@ -69,30 +72,16 @@ func main() {
 		log.Fatal(err)
 	}
 
-	// The worker loop, by hand.
-	for {
-		delivery, err := queue.Reserve(ctx, []string{dispatcher.DefaultQueue()}, time.Minute)
-		if errors.Is(err, jobs.ErrNoJob) {
-			break
+	// Run the worker until both jobs are done.
+	workerCtx, stopWorker := context.WithCancel(ctx)
+	go func() {
+		for done.Load() < 2 {
+			time.Sleep(10 * time.Millisecond)
 		}
-		if err != nil {
-			log.Fatal(err)
-		}
-		if delivery.Err != nil {
-			// A stored envelope that no longer decodes: it can never run, but
-			// it is leased, so ack it rather than meet it again.
-			log.Printf("dropping undecodable job %s: %v", delivery.Envelope.ID, delivery.Err)
-			_ = queue.Ack(ctx, delivery)
-			continue
-		}
-		if err := dispatcher.Registry().Run(ctx, delivery.Envelope); err != nil {
-			log.Printf("%s failed (%s): %v", delivery.Envelope.Name, jobs.Classify(err), err)
-			_ = queue.Release(ctx, delivery, time.Now().Add(time.Minute))
-			continue
-		}
-		if err := queue.Ack(ctx, delivery); err != nil {
-			log.Fatal(err)
-		}
+		stopWorker()
+	}()
+	if err := framework.RunWorker(workerCtx, app, jobs.WorkerOptions{Concurrency: 2, PollInterval: 10 * time.Millisecond}); err != nil {
+		log.Fatal(err)
 	}
 
 	// A job nothing handles fails visibly, with a classified reason.

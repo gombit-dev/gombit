@@ -35,6 +35,10 @@ type Queue interface {
 	// Release returns a delivered job to its queue, available at at (a
 	// retry). Its attempt count is kept.
 	Release(ctx context.Context, d Delivery, at time.Time) error
+	// Extend renews a delivery's lease to lease from now, so a job that runs
+	// longer than one lease is not delivered to a second worker. A worker
+	// calls it periodically while the handler runs.
+	Extend(ctx context.Context, d Delivery, lease time.Duration) error
 	// Close releases the driver's resources.
 	Close() error
 }
