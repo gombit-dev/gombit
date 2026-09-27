@@ -12,6 +12,14 @@ version.
 
 ### Added
 
+- Job queue drivers, selected by `GOMBIT_JOBS_DRIVER`: `sync` (the default;
+  `Dispatch` runs the job inline), `memory`, and a durable `redis` driver
+  whose queued, delayed, and leased jobs survive restarts (atomic Lua
+  scripts, one Redis Cluster hash slot per queue). `framework.App.Jobs()`
+  returns a `*jobs.Dispatcher` opened from `Config.Jobs`; delivery is leased,
+  so a crashed worker's job comes back with its attempt count kept. New
+  settings: `GOMBIT_JOBS_DRIVER`, `GOMBIT_JOBS_QUEUE`, `GOMBIT_JOBS_NAMESPACE`
+  ([#315](https://github.com/gombit-dev/gombit/issues/315)).
 - `jobs` package: the background-job contract. A job is a struct with a
   constant `JobName`; `jobs.Register` binds a typed handler to it,
   `Registry.Encode` turns a job into the `Envelope` a queue stores, and

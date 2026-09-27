@@ -1,0 +1,60 @@
+package jobs
+
+import (
+	"context"
+	"errors"
+	"time"
+)
+
+// Queue is the driver contract: durable (or in-memory) storage of envelopes
+// on named queues, with leased delivery. Application code does not call it;
+// it dispatches through a Dispatcher, and a worker consumes through Reserve,
+// Ack, and Release.
+//
+// Delivery is at least once. A reserved job is leased; if the lease expires
+// before Ack or Release (the worker crashed or stalled), the job becomes
+// available again and its next Reserve counts another attempt.
+type Queue interface {
+	// Push stores env on queue. It becomes available at at, or now when at
+	// is zero or in the past. Pushing an ID that is already queued fails
+	// with ErrDuplicateJob.
+	Push(ctx context.Context, queue string, env Envelope, at time.Time) error
+	// Reserve leases the next available job from the first of queues that
+	// has one, in order, oldest first within a queue. The returned
+	// Delivery's Envelope.Attempt counts this delivery. It does not block:
+	// with nothing available it returns ErrNoJob. A stored envelope that no
+	// longer decodes is returned leased (ID and receipt set) with a
+	// KindDecode error, so the caller can Ack it rather than meet it again
+	// on every lease expiry.
+	Reserve(ctx context.Context, queues []string, lease time.Duration) (Delivery, error)
+	// Ack removes a delivered job: it is done.
+	Ack(ctx context.Context, d Delivery) error
+	// Release returns a delivered job to its queue, available at at (a
+	// retry). Its attempt count is kept.
+	Release(ctx context.Context, d Delivery, at time.Time) error
+	// Close releases the driver's resources.
+	Close() error
+}
+
+// Delivery is a job leased by Reserve.
+type Delivery struct {
+	Queue    string
+	Envelope Envelope
+	// Receipt identifies this lease. Ack and Release with a receipt whose
+	// job was since reserved again fail with ErrLeaseLost.
+	Receipt string
+}
+
+var (
+	// ErrNoJob: Reserve found nothing available.
+	ErrNoJob = errors.New("jobs: no job available")
+	// ErrLeaseLost: the delivery's lease expired and another Reserve took
+	// the job, or the job is gone.
+	ErrLeaseLost = errors.New("jobs: job lease lost")
+	// ErrDuplicateJob: Push of an ID that is already queued.
+	ErrDuplicateJob = errors.New("jobs: job already queued")
+	// ErrInvalidQueue: a queue name outside the job-name alphabet.
+	ErrInvalidQueue = errors.New("jobs: invalid queue name")
+	// ErrClosed: the queue was closed.
+	ErrClosed = errors.New("jobs: queue closed")
+)

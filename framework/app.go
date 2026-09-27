@@ -24,6 +24,7 @@ import (
 	"github.com/gombit-dev/gombit/contract"
 	"github.com/gombit-dev/gombit/database"
 	"github.com/gombit-dev/gombit/internal/adminui"
+	"github.com/gombit-dev/gombit/jobs"
 	"github.com/gombit-dev/gombit/logging"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
@@ -55,6 +56,8 @@ type App struct {
 	cacheStore         *cache.Store
 	cacheOwned         bool
 	redis              *redis.Client
+	jobs               *jobs.Dispatcher
+	jobsOwned          bool
 	db                 *database.DB
 	logger             *zap.Logger
 	router             *gin.Engine
@@ -154,6 +157,24 @@ func New(options ...Option) (*App, error) {
 		app.cacheOwned = true
 		app.redis = store.Redis()
 	}
+	if app.jobs == nil {
+		registry := jobs.NewRegistry(jobs.WithPropagator(JobPropagator()))
+		var dispatcher *jobs.Dispatcher
+		var err error
+		if app.cfg.Jobs.Driver == config.JobsDriverRedis && app.redis != nil {
+			// The app already has a Redis client (WithRedis, or the cache's):
+			// queue on it rather than dial GOMBIT_REDIS_* a second time, which
+			// could even reach a different server than the attached client.
+			dispatcher, err = jobs.OpenWithRedis(app.cfg.Jobs, app.redis, registry)
+		} else {
+			dispatcher, err = jobs.Open(app.cfg.Jobs, app.cfg.Cache.Redis, registry)
+		}
+		if err != nil {
+			return nil, err
+		}
+		app.jobs = dispatcher
+		app.jobsOwned = true
+	}
 	if app.cfg.Auth.Enabled() {
 		if app.db == nil || app.db.DB == nil {
 			return nil, errors.New("framework: JWT secret is set but no database is attached")
@@ -214,6 +235,20 @@ func WithCache(c cache.Cache) Option {
 			app.cacheStore = store
 			app.redis = store.Redis()
 		}
+		return nil
+	}
+}
+
+// WithJobs attaches a job dispatcher the caller opened, instead of the one
+// App opens from Config.Jobs. App does not close a dispatcher attached this
+// way.
+func WithJobs(dispatcher *jobs.Dispatcher) Option {
+	return func(app *App) error {
+		if dispatcher == nil {
+			return errors.New("framework: nil job dispatcher")
+		}
+		app.jobs = dispatcher
+		app.jobsOwned = false
 		return nil
 	}
 }
@@ -334,6 +369,14 @@ func (a *App) Config() config.Config {
 }
 
 // Cache returns the configured cache implementation.
+// Jobs returns the job dispatcher: register jobs on Jobs().Registry() at
+// startup, and dispatch with Jobs().Dispatch. The driver comes from
+// Config.Jobs (GOMBIT_JOBS_DRIVER, sync by default), and the registry
+// carries request and trace IDs into job handlers (JobPropagator).
+func (a *App) Jobs() *jobs.Dispatcher {
+	return a.jobs
+}
+
 func (a *App) Cache() cache.Cache {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
@@ -565,11 +608,12 @@ func (a *App) shutdown() error {
 				fmt.Errorf("framework: shutdown: %w", err),
 				a.runStopHooksWithContext(shutdownCtx),
 				a.closeOwnedCache(),
+				a.closeOwnedJobs(),
 			)
 		}
 	}
 
-	return errors.Join(a.runStopHooksWithContext(shutdownCtx), a.closeOwnedCache())
+	return errors.Join(a.runStopHooksWithContext(shutdownCtx), a.closeOwnedCache(), a.closeOwnedJobs())
 }
 
 func (a *App) runStopHooks() error {
@@ -579,7 +623,7 @@ func (a *App) runStopHooks() error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	return errors.Join(a.runStopHooksWithContext(ctx), a.closeOwnedCache())
+	return errors.Join(a.runStopHooksWithContext(ctx), a.closeOwnedCache(), a.closeOwnedJobs())
 }
 
 func (a *App) closeOwnedCache() error {
@@ -594,6 +638,18 @@ func (a *App) closeOwnedCache() error {
 		return nil
 	}
 	return store.Close()
+}
+
+func (a *App) closeOwnedJobs() error {
+	a.mu.Lock()
+	dispatcher := a.jobs
+	owned := a.jobsOwned
+	a.jobsOwned = false
+	a.mu.Unlock()
+	if !owned || dispatcher == nil {
+		return nil
+	}
+	return dispatcher.Close()
 }
 
 func (a *App) runStopHooksWithContext(ctx context.Context) error {
