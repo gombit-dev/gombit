@@ -117,7 +117,7 @@ func TestPermanent(t *testing.T) {
 	if !jobs.IsPermanent(&jobs.Error{Kind: jobs.KindDecode, Err: base}) {
 		t.Fatal("a decode failure is permanent")
 	}
-	for _, kind := range []jobs.Kind{jobs.KindUnknownJob, jobs.KindUnsupportedVersion, jobs.KindPanic, jobs.KindTimeout} {
+	for _, kind := range []jobs.Kind{jobs.KindUnknownJob, jobs.KindUnsupportedVersion, jobs.KindPanic, jobs.KindTimeout, jobs.KindUpgrade} {
 		if jobs.IsPermanent(&jobs.Error{Kind: kind, Err: base}) {
 			t.Errorf("%s is permanent; it may succeed on a retry (a later deploy, a transient state)", kind)
 		}
@@ -152,5 +152,25 @@ func TestExponentialDoesNotOverflow(t *testing.T) {
 		if d := huge(attempt); d <= 0 {
 			t.Fatalf("Exponential(1s, max)(%d) = %s", attempt, d)
 		}
+	}
+}
+
+func TestNoTimeoutOverridesTheDefault(t *testing.T) {
+	reg := jobs.NewRegistry(jobs.WithDefaultOptions(jobs.Options{Timeout: time.Minute}))
+	jobs.MustRegister(reg, func(ctx context.Context, _ sendWelcome) error {
+		if _, ok := ctx.Deadline(); ok {
+			return errors.New("the handler has a deadline")
+		}
+		return nil
+	}, jobs.WithOptions(jobs.Options{Timeout: jobs.NoTimeout}))
+	if got := reg.Options("send_welcome_email").Timeout; got != 0 {
+		t.Fatalf("Options.Timeout = %s, want none", got)
+	}
+	env, _ := reg.Encode(context.Background(), sendWelcome{})
+	if err := reg.Run(context.Background(), env); err != nil {
+		t.Fatal(err)
+	}
+	if err := jobs.Register(jobs.NewRegistry(), func(context.Context, other) error { return nil }, jobs.WithOptions(jobs.Options{Timeout: -2})); err == nil {
+		t.Fatal("a negative Timeout other than NoTimeout was accepted")
 	}
 }

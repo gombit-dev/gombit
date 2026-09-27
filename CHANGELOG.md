@@ -16,7 +16,8 @@ version.
   Backoff})` per job and `jobs.WithDefaultOptions` per registry, with
   `jobs.Exponential`, `jobs.Constant`, and `jobs.Jittered` backoffs. `Timeout`
   is the handler context's deadline for one attempt (a new `timeout` failure
-  kind). `jobs.Permanent(err)` marks a failure no retry can fix; decode
+  kind; `jobs.NoTimeout` opts out of a registry default). An `UpgradeFrom`
+  step's error is its own retryable `upgrade` kind. `jobs.Permanent(err)` marks a failure no retry can fix; decode
   failures are permanent too. The worker retries a failed job after its
   backoff until it succeeds, fails permanently, or uses its last attempt, then
   acks it away with an error log. Attempt counts and retry times persist in
