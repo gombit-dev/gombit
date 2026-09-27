@@ -171,6 +171,16 @@ auth tables, so against one shared database run the packages one at a time
 write, `faulttest.Idle` checks that no transaction was left holding a
 connection; row counts alone cannot see an open transaction.
 
+Outbound HTTP gets a loopback dependency, `faulttest.NewHTTPDependency(t,
+steps...)`, that answers each call with the next scripted step:
+`ServerError()`, `TooManyRequests(retryAfter)`, `Respond(status, body)` (a
+malformed body, say), `Hang(release)` (slower than any deadline, released by
+a channel or the client going away), `CutBody(partial)`, or
+`ResetConnection()`. Point the code under test at `dep.URL()` through
+`faulttest.TrackBodies(dep.Client().Transport)` to assert every response
+body was closed, and call `dep.WaitIdle(t)` to prove no call was left
+running on the dependency.
+
 A fault test must pass `go test -count=50` (and `-race`) before it lands: a
 flaky failure-path test is worse than none.
 
