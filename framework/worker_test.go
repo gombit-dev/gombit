@@ -187,7 +187,7 @@ func TestJobMetricsOnTheAppAndTheWorkerEndpoint(t *testing.T) {
 	}
 	worker := get("http://" + addr + "/metrics")
 	for _, want := range []string{
-		`gombit_jobs_processed_total{job="worker_job",queue="default",result="succeeded"} 2`,
+		`gombit_jobs_processed_total{job_name="worker_job",queue="default",result="succeeded"} 2`,
 		`gombit_jobs_queued{queue="default",state="scheduled"} 1`,
 	} {
 		if !strings.Contains(worker, want) {
@@ -200,11 +200,57 @@ func TestJobMetricsOnTheAppAndTheWorkerEndpoint(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	app.Router().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-	if !strings.Contains(rec.Body.String(), `gombit_jobs_processed_total{job="worker_job",queue="default",result="succeeded"} 2`) {
-		t.Errorf("app /metrics lacks the in-process worker's jobs:\n%s", rec.Body.String())
+	for _, want := range []string{
+		`gombit_jobs_processed_total{job_name="worker_job",queue="default",result="succeeded"} 2`,
+		`gombit_jobs_queued{queue="default",state="scheduled"} 1`,
+		`gombit_jobs_queue_stats_up{queue="default"} 1`,
+	} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Errorf("app /metrics lacks the in-process worker's %s:\n%s", want, rec.Body.String())
+		}
 	}
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatal(err)
+	}
+}
+
+// statsDownQueue cannot read its stats, as in a Redis outage.
+type statsDownQueue struct{ *jobs.MemoryQueue }
+
+func (statsDownQueue) Stats(context.Context, string) (jobs.QueueStats, error) {
+	return jobs.QueueStats{}, errors.New("redis: i/o timeout")
+}
+
+// TestJobMetricsWhenQueueStatsFail: the worker endpoint fails the scrape, so
+// Prometheus keeps the last good sample instead of an empty queue; the app's
+// /metrics keeps its HTTP series and says the queue's stats are down.
+func TestJobMetricsWhenQueueStatsFail(t *testing.T) {
+	dispatcher := jobs.NewDispatcher(jobs.NewRegistry(), statsDownQueue{jobs.NewMemoryQueue()})
+	app, err := New(WithConfig(config.Default()), WithJobs(dispatcher))
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.addWorkerQueues([]string{"default"})
+	addr, stop, err := serveWorkerMetrics("127.0.0.1:0", app, []string{"default"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = stop() }()
+	resp, err := http.Get("http://" + addr + "/metrics") // #nosec G107 -- the test's own listener
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("worker /metrics with unreadable stats = %d, want 503", resp.StatusCode)
+	}
+
+	rec := httptest.NewRecorder()
+	app.Router().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := rec.Body.String()
+	if rec.Code != http.StatusOK || !strings.Contains(body, `gombit_jobs_queue_stats_up{queue="default"} 0`) ||
+		strings.Contains(body, "gombit_jobs_queued{") || !strings.Contains(body, "gombit_http_") {
+		t.Fatalf("app /metrics with unreadable stats = %d:\n%s", rec.Code, body)
 	}
 }

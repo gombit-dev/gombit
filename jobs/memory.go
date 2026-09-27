@@ -505,17 +505,19 @@ func (q *MemoryQueue) Stats(_ context.Context, queue string) (QueueStats, error)
 		if job.queue != queue {
 			continue
 		}
+		// A lease that expired is due again (Reserve takes it), ready since
+		// its deadline: readyAt.
 		switch {
 		case job.failure != nil:
 			st.Failed++
-		case job.reserved:
+		case job.reserved && now.Before(job.leaseDeadline):
 			st.Reserved++
-		case now.Before(job.availableAt):
+		case !job.reserved && now.Before(job.availableAt):
 			st.Scheduled++
 		default:
 			st.Ready++
-			if st.OldestReady.IsZero() || job.availableAt.Before(st.OldestReady) {
-				st.OldestReady = job.availableAt
+			if at := job.readyAt(); st.OldestReady.IsZero() || at.Before(st.OldestReady) {
+				st.OldestReady = at
 			}
 		}
 	}

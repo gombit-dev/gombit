@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -61,6 +62,7 @@ type App struct {
 	jobs               *jobs.Dispatcher
 	jobsOwned          bool
 	jobMetrics         *jobs.Metrics
+	workerQueues       []string // consumed by RunWorker in this process
 	db                 *database.DB
 	logger             *zap.Logger
 	router             *gin.Engine
@@ -683,7 +685,7 @@ func syncLogger(logger *zap.Logger) error {
 	return nil
 }
 
-func newRouter(cfg config.Config, csrfExemptPaths, rawBodyPaths []string, readyz gin.HandlerFunc, extraMetrics func(io.Writer)) (*gin.Engine, error) {
+func newRouter(cfg config.Config, csrfExemptPaths, rawBodyPaths []string, readyz gin.HandlerFunc, extraMetrics func(context.Context, io.Writer)) (*gin.Engine, error) {
 	router := gin.New()
 	enableMethodNotAllowed(router)
 	if err := configureTrustedProxies(router, cfg.HTTP.TrustedProxies); err != nil {
@@ -707,20 +709,59 @@ func newRouter(cfg config.Config, csrfExemptPaths, rawBodyPaths []string, readyz
 		var b strings.Builder
 		b.WriteString(metrics.render())
 		if extraMetrics != nil {
-			extraMetrics(&b)
+			extraMetrics(c.Request.Context(), &b)
 		}
 		c.Data(http.StatusOK, "text/plain; version=0.0.4; charset=utf-8", []byte(b.String()))
 	})
 	return router, nil
 }
 
+// addWorkerQueues records queues a worker in this process consumes, for the
+// queue gauges on /metrics.
+func (a *App) addWorkerQueues(queues []string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, q := range queues {
+		if !slices.Contains(a.workerQueues, q) {
+			a.workerQueues = append(a.workerQueues, q)
+		}
+	}
+}
+
 // writeJobMetrics appends the metrics of workers running in this process
-// (RunWorker), when there are any.
-func (a *App) writeJobMetrics(w io.Writer) {
-	if a.jobMetrics == nil || a.jobMetrics.Empty() {
+// (RunWorker), when there are any, with the depth of the queues they
+// consume. A queue whose stats cannot be read is left out, logged, and
+// reported by gombit_jobs_queue_stats_up{queue} 0, rather than failing the
+// app's whole scrape (HTTP metrics included) during a queue outage.
+func (a *App) writeJobMetrics(ctx context.Context, w io.Writer) {
+	a.mu.RLock()
+	queues := slices.Clone(a.workerQueues)
+	a.mu.RUnlock()
+	if a.jobMetrics == nil || (a.jobMetrics.Empty() && len(queues) == 0) {
 		return
 	}
-	_ = a.jobMetrics.WritePrometheus(w, nil, time.Now())
+	var stats map[string]jobs.QueueStats
+	var up []string
+	if len(queues) > 0 {
+		ctx, cancel := context.WithTimeout(ctx, queueStatsTimeout)
+		defer cancel()
+		var err error
+		stats, err = readQueueStats(ctx, a.jobs.Queue(), queues)
+		if err != nil {
+			a.Logger().Warn("metrics: reading job queue stats failed", zap.Error(err))
+		}
+		for _, q := range queues {
+			v := "1"
+			if _, ok := stats[q]; !ok {
+				v = "0"
+			}
+			up = append(up, fmt.Sprintf("gombit_jobs_queue_stats_up{queue=%q} %s\n", q, v))
+		}
+	}
+	_ = a.jobMetrics.WritePrometheus(w, stats, time.Now())
+	if len(up) > 0 {
+		_, _ = io.WriteString(w, "# HELP gombit_jobs_queue_stats_up Whether the queue's stats were read for this scrape.\n# TYPE gombit_jobs_queue_stats_up gauge\n"+strings.Join(up, ""))
+	}
 }
 
 // JobMetrics returns the metrics workers in this process record into.

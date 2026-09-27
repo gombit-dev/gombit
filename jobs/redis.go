@@ -823,6 +823,23 @@ func (q *RedisQueue) AbandonOnce(ctx context.Context, key, token string) error {
 	return onceAbandonScript.Run(ctx, q.client, []string{q.onceKey(key)}, token).Err()
 }
 
+// statsScript: KEYS pending, reserved, failed; ARGV now ms. Returns ready,
+// scheduled, reserved, failed, and the oldest ready time in ms (-1 when
+// none), read at one instant. A reserved job whose lease expired is ready
+// (Reserve takes it), since its deadline.
+var statsScript = redis.NewScript(`
+local now = tonumber(ARGV[1])
+local ready = redis.call('ZCOUNT', KEYS[1], '-inf', now)
+local expired = redis.call('ZCOUNT', KEYS[2], '-inf', now)
+local oldest = -1
+local p = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', now, 'WITHSCORES', 'LIMIT', 0, 1)
+if #p == 2 then oldest = tonumber(p[2]) end
+local r = redis.call('ZRANGEBYSCORE', KEYS[2], '-inf', now, 'WITHSCORES', 'LIMIT', 0, 1)
+if #r == 2 and (oldest < 0 or tonumber(r[2]) < oldest) then oldest = tonumber(r[2]) end
+return {ready + expired, redis.call('ZCOUNT', KEYS[1], '(' .. now, '+inf'),
+  redis.call('ZCARD', KEYS[2]) - expired, redis.call('ZCARD', KEYS[3]), oldest}
+`)
+
 // Stats implements Queue.
 func (q *RedisQueue) Stats(ctx context.Context, queue string) (QueueStats, error) {
 	if q.closed.Load() {
@@ -832,19 +849,16 @@ func (q *RedisQueue) Stats(ctx context.Context, queue string) (QueueStats, error
 		return QueueStats{}, fmt.Errorf("%w: %q", ErrInvalidQueue, queue)
 	}
 	k := q.keys(queue)
-	now := strconv.FormatInt(q.now().UnixMilli(), 10)
-	pipe := q.client.Pipeline()
-	ready := pipe.ZCount(ctx, k.pending, "-inf", now)
-	scheduled := pipe.ZCount(ctx, k.pending, "("+now, "+inf")
-	reserved := pipe.ZCard(ctx, k.reserved)
-	failed := pipe.ZCard(ctx, k.failed)
-	oldest := pipe.ZRangeWithScores(ctx, k.pending, 0, 0)
-	if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
+	res, err := statsScript.Run(ctx, q.client, []string{k.pending, k.reserved, k.failed}, q.now().UnixMilli()).Int64Slice()
+	if err != nil {
 		return QueueStats{}, fmt.Errorf("jobs: stats of %s: %w", queue, err)
 	}
-	st := QueueStats{Ready: int(ready.Val()), Scheduled: int(scheduled.Val()), Reserved: int(reserved.Val()), Failed: int(failed.Val())}
-	if z := oldest.Val(); len(z) == 1 && st.Ready > 0 {
-		st.OldestReady = time.UnixMilli(int64(z[0].Score))
+	if len(res) != 5 {
+		return QueueStats{}, fmt.Errorf("jobs: stats of %s: malformed reply", queue)
+	}
+	st := QueueStats{Ready: int(res[0]), Scheduled: int(res[1]), Reserved: int(res[2]), Failed: int(res[3])}
+	if res[4] >= 0 {
+		st.OldestReady = time.UnixMilli(res[4])
 	}
 	return st, nil
 }

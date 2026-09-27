@@ -296,19 +296,31 @@ and an error status when it fails. That needs an OpenTelemetry SDK in your app
 
 | Metric | Labels | |
 |--------|--------|--|
-| `gombit_jobs_processed_total` | `job`, `queue`, `result` | deliveries by outcome: `succeeded`, `retried`, `failed` (given up), `interrupted`, `abandoned` (lease lost), `undecodable` |
-| `gombit_jobs_run_seconds` (histogram) | `job`, `queue` | handler time |
-| `gombit_jobs_wait_seconds` (histogram) | `job`, `queue` | queue latency: from available (dispatch time, delay, retry time, or an expired lease) to started; buckets 10ms to 30m |
+| `gombit_jobs_processed_total` | `job_name`, `queue`, `result` | deliveries by outcome: `succeeded`, `retried`, `failed` (given up), `interrupted`, `postponed` (waited on another run's `Once` lock), `abandoned` (lease lost), `undecodable`, `unsettled` (the ack, release, or bury failed; the job returns when its lease expires) |
+| `gombit_jobs_run_seconds` (histogram) | `job_name`, `queue` | handler time |
+| `gombit_jobs_wait_seconds` (histogram) | `job_name`, `queue` | queue latency: from available (dispatch time, delay, retry time, or an expired lease) to started; buckets 10ms to 30m |
 | `gombit_jobs_in_flight` | `queue` | running now |
-| `gombit_jobs_queued` | `queue`, `state` | `ready`, `scheduled`, `reserved`, `failed` (worker endpoint) |
-| `gombit_jobs_oldest_ready_seconds` | `queue` | age of the longest-waiting ready job (worker endpoint) |
+| `gombit_jobs_queued` | `queue`, `state` | `ready` (a lapsed lease counts: the job is due again), `scheduled`, `reserved`, `failed` |
+| `gombit_jobs_oldest_ready_seconds` | `queue` | age of the longest-waiting ready job |
 
 A worker process serves no HTTP, so pass `--metrics-addr :9091` and scrape
 that; it also answers `/livez`. The queue gauges are read from the queue at
-scrape time, for the queues the worker consumes. A worker running inside the
-web process (`framework.RunWorker`) records into the app's own `/metrics`.
-`job` labels are registered job names; any other name counts as `unknown`,
-so an envelope cannot create series.
+scrape time, for the queues the worker consumes; when a queue does not answer,
+the scrape fails (503), so Prometheus keeps the last good sample rather than
+record an empty queue. A worker running inside the web process
+(`framework.RunWorker`) records into the app's own `/metrics`, queue gauges
+included; there a queue that does not answer is left out and reported as
+`gombit_jobs_queue_stats_up{queue} 0`, so an outage does not also take the
+HTTP series down.
+
+Outcomes count once the queue committed them: `succeeded` after the ack,
+`retried`, `interrupted`, and `postponed` after the release, `failed` and `undecodable`
+after the bury. When that call fails the job stays leased and returns after
+the lease; it counts as `unsettled` (or `abandoned`, when the lease was lost).
+
+The job's name is the `job_name` label (Prometheus reserves `job` for the
+scrape job). Only registered job names appear; any other name counts as
+`unknown`, so an envelope cannot create series.
 
 ## Duplicates
 

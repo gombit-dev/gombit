@@ -12,8 +12,9 @@ version.
 
 ### Added
 
-- Job observability: Prometheus metrics for job outcomes, run time, queue
-  latency, in-flight jobs, and queue depth (`gombit_jobs_*`), on the app's
+- Job observability: Prometheus metrics for job outcomes (counted once the
+  queue committed them), run time, queue latency, in-flight jobs, and queue
+  depth (`gombit_jobs_*`, the job's name as `job_name`), on the app's
   `/metrics` and on a worker's `--metrics-addr` endpoint; OpenTelemetry trace
   context carried through the envelope (`jobs.OTelPropagator`, on by default)
   with a `job <name>` span per run; a `waited` log field. `Queue.Stats` and

@@ -11,14 +11,21 @@ import (
 	"time"
 )
 
-// Outcomes a worker records for a delivery (the `result` metric label).
+// Outcomes a worker records for a delivery (the `result` metric label). Each
+// is recorded once the queue call that commits it (ack, release, bury)
+// returned; a call that failed is recorded as abandoned (the lease was lost)
+// or unsettled.
 const (
 	ResultSucceeded   = "succeeded"   // acknowledged
 	ResultRetried     = "retried"     // failed, released for another attempt
 	ResultFailed      = "failed"      // given up on, kept with the failed jobs
 	ResultInterrupted = "interrupted" // canceled by the worker's shutdown, released
+	ResultPostponed   = "postponed"   // waited on another run's Once lock, released uncounted
 	ResultAbandoned   = "abandoned"   // lease lost to another worker
 	ResultUndecodable = "undecodable" // stored envelope does not decode, set aside
+	// ResultUnsettled: the ack, release, or bury failed; the job is still
+	// leased and returns when the lease expires.
+	ResultUnsettled = "unsettled"
 )
 
 // unknownJobLabel is the job label of a job no handler knows (or an
@@ -46,16 +53,21 @@ type jobCounter struct {
 
 // latencyBuckets are the histogram upper bounds, in seconds: job handlers
 // and queue waits range from milliseconds to minutes.
-var latencyBuckets = []float64{0.01, 0.05, 0.1, 0.5, 1, 5, 10, 30, 60, 300, 1800}
+var latencyBuckets = [...]float64{0.01, 0.05, 0.1, 0.5, 1, 5, 10, 30, 60, 300, 1800}
 
 // histogram is a lock-free Prometheus histogram over latencyBuckets.
 type histogram struct {
-	buckets [11]atomic.Int64 // len(latencyBuckets); cumulative on render
+	buckets [len(latencyBuckets)]atomic.Int64 // cumulative on render
 	count   atomic.Int64
 	nanos   atomic.Int64
 }
 
+// observe counts first and fills the bucket after, and a render reads the
+// buckets before the count, so a scrape racing an observation never shows a
+// finite bucket above +Inf (the count).
 func (h *histogram) observe(d time.Duration) {
+	h.count.Add(1)
+	h.nanos.Add(int64(d))
 	secs := d.Seconds()
 	for i, bound := range latencyBuckets {
 		if secs <= bound {
@@ -63,8 +75,6 @@ func (h *histogram) observe(d time.Duration) {
 			break
 		}
 	}
-	h.count.Add(1)
-	h.nanos.Add(int64(d))
 }
 
 // NewMetrics returns empty job metrics.
@@ -113,12 +123,15 @@ func (m *Metrics) Empty() bool {
 // WritePrometheus writes the metrics in the Prometheus text format. stats,
 // when given, adds each queue's depth by state.
 //
-//	gombit_jobs_processed_total{job,queue,result}   deliveries by outcome
-//	gombit_jobs_run_seconds{job,queue}              handler time (histogram)
-//	gombit_jobs_wait_seconds{job,queue}             time from available to started (histogram)
-//	gombit_jobs_in_flight{queue}                    running now
-//	gombit_jobs_queued{queue,state}                 ready, scheduled, reserved, failed
-//	gombit_jobs_oldest_ready_seconds{queue}         age of the longest-waiting ready job
+//	gombit_jobs_processed_total{job_name,queue,result}  deliveries by outcome
+//	gombit_jobs_run_seconds{job_name,queue}             handler time (histogram)
+//	gombit_jobs_wait_seconds{job_name,queue}            time from available to started (histogram)
+//	gombit_jobs_in_flight{queue}                        running now
+//	gombit_jobs_queued{queue,state}                     ready, scheduled, reserved, failed
+//	gombit_jobs_oldest_ready_seconds{queue}             age of the longest-waiting ready job
+//
+// The job's name is job_name, not job: Prometheus sets job to the scrape
+// job, and would rename ours to exported_job.
 func (m *Metrics) WritePrometheus(w io.Writer, stats map[string]QueueStats, now time.Time) error {
 	type row struct {
 		key metricsSeries
@@ -143,11 +156,11 @@ func (m *Metrics) WritePrometheus(w io.Writer, stats map[string]QueueStats, now 
 	if len(rows) > 0 {
 		b.WriteString("# HELP gombit_jobs_processed_total Job deliveries by outcome.\n# TYPE gombit_jobs_processed_total counter\n")
 		for _, r := range rows {
-			fmt.Fprintf(&b, "gombit_jobs_processed_total{job=%q,queue=%q,result=%q} %d\n", r.key.job, r.key.queue, r.key.result, r.c.count.Load())
+			fmt.Fprintf(&b, "gombit_jobs_processed_total{job_name=%q,queue=%q,result=%q} %d\n", r.key.job, r.key.queue, r.key.result, r.c.count.Load())
 		}
 		// Durations aggregate over outcomes, per job and queue.
 		type agg struct {
-			run, wait           [11]int64
+			run, wait           [len(latencyBuckets)]int64
 			runN, waitN         int64
 			runNanos, waitNanos int64
 		}
@@ -170,22 +183,22 @@ func (m *Metrics) WritePrometheus(w io.Writer, stats map[string]QueueStats, now 
 			a.runNanos += r.c.run.nanos.Load()
 			a.waitNanos += r.c.wait.nanos.Load()
 		}
-		writeHist := func(name, help string, pick func(*agg) ([11]int64, int64, int64)) {
+		writeHist := func(name, help string, pick func(*agg) ([len(latencyBuckets)]int64, int64, int64)) {
 			fmt.Fprintf(&b, "# HELP %s %s\n# TYPE %s histogram\n", name, help, name)
 			for _, k := range order {
 				buckets, n, nanos := pick(totals[k])
 				cumulative := int64(0)
 				for i, bound := range latencyBuckets {
 					cumulative += buckets[i]
-					fmt.Fprintf(&b, "%s_bucket{job=%q,queue=%q,le=%q} %d\n", name, k[0], k[1], strconv.FormatFloat(bound, 'g', -1, 64), cumulative)
+					fmt.Fprintf(&b, "%s_bucket{job_name=%q,queue=%q,le=%q} %d\n", name, k[0], k[1], strconv.FormatFloat(bound, 'g', -1, 64), cumulative)
 				}
-				fmt.Fprintf(&b, "%s_bucket{job=%q,queue=%q,le=\"+Inf\"} %d\n", name, k[0], k[1], n)
-				fmt.Fprintf(&b, "%s_sum{job=%q,queue=%q} %g\n", name, k[0], k[1], time.Duration(nanos).Seconds())
-				fmt.Fprintf(&b, "%s_count{job=%q,queue=%q} %d\n", name, k[0], k[1], n)
+				fmt.Fprintf(&b, "%s_bucket{job_name=%q,queue=%q,le=\"+Inf\"} %d\n", name, k[0], k[1], n)
+				fmt.Fprintf(&b, "%s_sum{job_name=%q,queue=%q} %g\n", name, k[0], k[1], time.Duration(nanos).Seconds())
+				fmt.Fprintf(&b, "%s_count{job_name=%q,queue=%q} %d\n", name, k[0], k[1], n)
 			}
 		}
-		writeHist("gombit_jobs_run_seconds", "Time job handlers ran.", func(a *agg) ([11]int64, int64, int64) { return a.run, a.runN, a.runNanos })
-		writeHist("gombit_jobs_wait_seconds", "Time jobs waited in the queue after becoming available.", func(a *agg) ([11]int64, int64, int64) { return a.wait, a.waitN, a.waitNanos })
+		writeHist("gombit_jobs_run_seconds", "Time job handlers ran.", func(a *agg) ([len(latencyBuckets)]int64, int64, int64) { return a.run, a.runN, a.runNanos })
+		writeHist("gombit_jobs_wait_seconds", "Time jobs waited in the queue after becoming available.", func(a *agg) ([len(latencyBuckets)]int64, int64, int64) { return a.wait, a.waitN, a.waitNanos })
 	}
 	var queues []string
 	m.inFlight.Range(func(k, _ any) bool { queues = append(queues, k.(string)); return true })

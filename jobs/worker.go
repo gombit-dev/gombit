@@ -211,9 +211,10 @@ func (w *Worker) reserve(ctx context.Context) (Delivery, error) {
 	if err != nil || d.Err == nil {
 		return d, err
 	}
-	w.metrics.record(unknownJobLabel, d.Queue, ResultUndecodable, 0, 0)
 	failure := Failure{Reason: ReasonUndecodable, Kind: KindDecode, Error: d.Err.Error(), At: time.Now()}
-	if buryErr := w.bury(d, failure); buryErr != nil {
+	buryErr := w.bury(d, failure)
+	w.metrics.record(unknownJobLabel, d.Queue, settled(ResultUndecodable, buryErr), 0, 0)
+	if buryErr != nil {
 		w.log.Error("jobs worker: a job whose envelope does not decode could not be set aside; it returns when its lease expires",
 			zap.String("job_id", d.Envelope.ID), zap.String("queue", d.Queue), zap.Error(d.Err), zap.NamedError("bury_error", buryErr))
 		return Delivery{}, errNotSetAside
@@ -265,7 +266,9 @@ func (w *Worker) process(jobCtx context.Context, d Delivery) {
 		waited = started.Sub(d.AvailableAt)
 	}
 	w.metrics.started(d.Queue)
-	result := ResultRetried // set by every outcome below
+	// Every outcome below sets result once the queue has committed it (or
+	// refused: settled).
+	var result string
 	var ran time.Duration
 	defer func() {
 		w.metrics.finished(d.Queue)
@@ -296,8 +299,9 @@ func (w *Worker) process(jobCtx context.Context, d Delivery) {
 	}
 
 	if err == nil {
-		result = ResultSucceeded
-		if ackErr := w.ack(d); ackErr != nil {
+		ackErr := w.ack(d)
+		result = settled(ResultSucceeded, ackErr)
+		if ackErr != nil {
 			w.log.Warn("jobs worker: job succeeded but its ack failed; it may run again",
 				append(fields, zap.Error(ackErr))...)
 			return
@@ -315,8 +319,7 @@ func (w *Worker) process(jobCtx context.Context, d Delivery) {
 		// deploy cannot delete a job on its last attempt. (A lost lease
 		// returned above; a job's own Timeout cancels a context inside Run,
 		// not runCtx.)
-		result = ResultInterrupted
-		w.retry(d, 0, fields)
+		result = settled(ResultInterrupted, w.retry(d, 0, fields))
 		return
 	}
 	if errors.Is(err, ErrInProgress) && !IsPermanent(err) {
@@ -324,47 +327,62 @@ func (w *Worker) process(jobCtx context.Context, d Delivery) {
 		// the job is postponed, its attempt taken back, until the other run
 		// finishes or its lock expires, so a job whose other run crashed
 		// keeps its whole MaxAttempts for when it can run.
-		w.postpone(d, policy.Backoff(d.Envelope.Attempt), fields)
+		result = settled(ResultPostponed, w.postpone(d, policy.Backoff(d.Envelope.Attempt), fields))
 		return
 	}
 	if IsPermanent(err) || d.Envelope.Attempt >= policy.MaxAttempts {
-		result = ResultFailed
-		w.giveUp(d, err, policy, fields)
+		result = settled(ResultFailed, w.giveUp(d, err, policy, fields))
 		return
 	}
-	w.retry(d, policy.Backoff(d.Envelope.Attempt), fields)
+	result = settled(ResultRetried, w.retry(d, policy.Backoff(d.Envelope.Attempt), fields))
+}
+
+// settled is the result to record for an outcome whose queue call (ack,
+// release, bury) returned err: the outcome itself once the queue committed
+// it; abandoned when the lease was lost meanwhile; unsettled otherwise.
+func settled(result string, err error) string {
+	switch {
+	case err == nil:
+		return result
+	case errors.Is(err, ErrLeaseLost):
+		return ResultAbandoned
+	default:
+		return ResultUnsettled
+	}
 }
 
 // retry releases d to run again after delay.
-func (w *Worker) retry(d Delivery, delay time.Duration, fields []zap.Field) {
+func (w *Worker) retry(d Delivery, delay time.Duration, fields []zap.Field) error {
 	fields = append(fields, zap.Duration("retry_in", delay))
 	if relErr := w.release(d, time.Now().Add(delay)); relErr != nil {
 		w.log.Error("jobs worker: job failed and its release failed; it returns when its lease expires",
 			append(fields, zap.NamedError("release_error", relErr))...)
-		return
+		return relErr
 	}
 	w.log.Warn("job failed", fields...)
+	return nil
 }
 
 // postpone releases d to try again after delay without counting this
 // delivery as an attempt.
-func (w *Worker) postpone(d Delivery, delay time.Duration, fields []zap.Field) {
+func (w *Worker) postpone(d Delivery, delay time.Duration, fields []zap.Field) error {
 	fields = append(fields, zap.Duration("retry_in", delay))
 	ctx, cancel := context.WithTimeout(context.Background(), queueOpTimeout)
 	defer cancel()
 	if err := w.queue.Postpone(ctx, d, time.Now().Add(delay)); err != nil {
 		w.log.Error("jobs worker: postponing a job waiting on another run failed; it returns when its lease expires",
 			append(fields, zap.NamedError("release_error", err))...)
-		return
+		return err
 	}
 	w.log.Info("job postponed: another run holds its effect", fields...)
+	return nil
 }
 
 // giveUp stops retrying d: a permanent failure or the last allowed attempt.
 // It moves to the queue's failed jobs, payload and reason kept for `gombit
 // jobs inspect` and `retry`, and is logged as an error without its payload,
 // which may hold personal data.
-func (w *Worker) giveUp(d Delivery, err error, policy Options, fields []zap.Field) {
+func (w *Worker) giveUp(d Delivery, err error, policy Options, fields []zap.Field) error {
 	reason := ReasonExhausted
 	if IsPermanent(err) {
 		reason = ReasonPermanent
@@ -374,10 +392,11 @@ func (w *Worker) giveUp(d Delivery, err error, policy Options, fields []zap.Fiel
 	if buryErr := w.bury(d, failure); buryErr != nil {
 		w.log.Error("jobs worker: giving up on a job, but setting it aside failed; it returns when its lease expires",
 			append(fields, zap.NamedError("bury_error", buryErr))...)
-		return
+		return buryErr
 	}
 	w.log.Error("job failed for good", append(fields,
 		zap.String("inspect", "gombit jobs inspect "+d.Envelope.ID+" --queue "+d.Queue))...)
+	return nil
 }
 
 // jobLabel is the metrics label of a job name: the name when a handler is
