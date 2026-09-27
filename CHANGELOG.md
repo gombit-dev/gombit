@@ -12,11 +12,13 @@ version.
 
 ### Added
 
-- HTTP fault tests (`TestFault_HTTP_*`): `gombit openapi generate` and the
-  dev server's spec fetch fail promptly on a 500, a 429, a hung or reset
-  dependency, a cut body, or a malformed document, closing every response
-  body and writing nothing; a handler behind `HTTP.RequestTimeout` ends at
-  the deadline and its outbound call is abandoned downstream. Contributors
+- HTTP fault tests (`TestFault_HTTP_*`): `gombit openapi generate` fails
+  promptly on a 500, a 429, a hung or reset dependency, a cut body, or a
+  malformed document, closing every response body and writing nothing; the
+  dev server's spec fetch returns an error, promptly and with the body
+  closed, on the same transport and status failures; a handler behind
+  `HTTP.RequestTimeout` ends at the deadline and its outbound call is
+  abandoned downstream. Contributors
   get `faulttest.NewHTTPDependency` (a scripted loopback dependency) and
   `faulttest.TrackBodies`
   ([#383](https://github.com/gombit-dev/gombit/issues/383)).

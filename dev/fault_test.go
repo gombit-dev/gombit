@@ -11,9 +11,10 @@ import (
 	"github.com/gombit-dev/gombit/internal/faulttest"
 )
 
-// Fault tests for the dev server's /openapi.json fetch (client
-// regeneration): a failing app server is an error, promptly, with the body
-// closed; the watcher logs it and polls again.
+// Fault tests for defaultHTTPGet, the dev server's fetch of the app's
+// /openapi.json: a failing app server is an error, promptly, with the
+// response body closed. (It returns a 200's bytes as they are; rejecting a
+// malformed document is `gombit openapi generate`'s, tested in cli.)
 
 func trackSpecClient(t *testing.T, dep *faulttest.HTTPDependency) *faulttest.BodyTracker {
 	t.Helper()
@@ -28,19 +29,19 @@ func TestFault_HTTP_DevSpecFetch(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		step faulttest.HTTPStep
-		want string
+		want []string // the error mentions one of these
 	}{
-		{"server error", faulttest.ServerError(), "status 500"},
-		{"too many requests", faulttest.TooManyRequests(time.Second), "status 429"},
-		{"connection reset", faulttest.ResetConnection(), ""},
-		{"body cut", faulttest.CutBody(`{"openapi":`), "unexpected EOF"},
+		{"server error", faulttest.ServerError(), []string{"status 500"}},
+		{"too many requests", faulttest.TooManyRequests(time.Second), []string{"status 429"}},
+		{"connection reset", faulttest.ResetConnection(), []string{"reset", "EOF"}}, // a transport error, never a status
+		{"body cut", faulttest.CutBody(`{"openapi":`), []string{"unexpected EOF"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dep := faulttest.NewHTTPDependency(t, tc.step)
 			tracker := trackSpecClient(t, dep)
 			body, err := defaultHTTPGet(context.Background(), dep.URL())
-			if err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("fetch = %q, %v; want an error mentioning %q", body, err, tc.want)
+			if err == nil || !mentionsAny(err.Error(), tc.want) {
+				t.Fatalf("fetch = %q, %v; want an error mentioning one of %q", body, err, tc.want)
 			}
 			if tracker.Open() != 0 {
 				t.Fatalf("%d response bodies left open", tracker.Open())
@@ -61,8 +62,11 @@ func TestFault_HTTP_DevSpecFetchTimeout(t *testing.T) {
 	if _, err := defaultHTTPGet(ctx, dep.URL()); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("fetch = %v, want context.DeadlineExceeded", err)
 	}
-	if took := time.Since(start); took > 5*time.Second {
-		t.Fatalf("fetch took %s, want it to end at the 100ms deadline", took)
+	// Under a second: well past the 100ms deadline, and well short of the
+	// client's own 2s Timeout, which also reports DeadlineExceeded, so a
+	// fetch that ignored ctx cannot pass.
+	if took := time.Since(start); took >= time.Second {
+		t.Fatalf("fetch took %s, want it to end at the 100ms caller deadline (not the client's %s timeout)", took, specHTTPClient.Timeout)
 	}
 	if tracker.Open() != 0 {
 		t.Fatalf("%d response bodies left open", tracker.Open())
@@ -71,4 +75,13 @@ func TestFault_HTTP_DevSpecFetchTimeout(t *testing.T) {
 	if dep.Abandoned() != 1 {
 		t.Fatalf("abandoned = %d, want 1", dep.Abandoned())
 	}
+}
+
+func mentionsAny(msg string, wants []string) bool {
+	for _, w := range wants {
+		if strings.Contains(msg, w) {
+			return true
+		}
+	}
+	return false
 }
