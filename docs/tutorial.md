@@ -129,7 +129,7 @@ Create `internal/task/task.go`:
 ```go
 package task
 
-import "gorm.io/gorm"
+import "time"
 
 // Task is the feature-package GORM model.
 type Task struct {
