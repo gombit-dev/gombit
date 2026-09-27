@@ -186,7 +186,7 @@ func (w *Worker) Run(ctx context.Context) error {
 		go func() {
 			defer inFlight.Done()
 			defer func() { <-slots }()
-			w.process(jobCtx, ctx, d)
+			w.process(jobCtx, d)
 		}()
 	}
 }
@@ -230,7 +230,7 @@ func reserveBackoff(poll time.Duration, failures int) time.Duration {
 
 // process runs one delivery: renew its lease while the handler runs, then
 // ack it or release it for a retry.
-func (w *Worker) process(jobCtx, workerCtx context.Context, d Delivery) {
+func (w *Worker) process(jobCtx context.Context, d Delivery) {
 	runCtx, cancelRun := context.WithCancel(jobCtx)
 	defer cancelRun()
 	stopRenewing := w.renewLease(runCtx, cancelRun, d)
@@ -268,9 +268,13 @@ func (w *Worker) process(jobCtx, workerCtx context.Context, d Delivery) {
 
 	policy := w.registry.Options(d.Envelope.Name)
 	fields = append(fields, zap.String("kind", string(Classify(err))), zap.Error(err))
-	if workerCtx.Err() != nil && errors.Is(err, context.Canceled) {
-		// Interrupted by shutdown, not failed on its own: back to the queue
-		// at once, whatever its attempt count.
+	if runCtx.Err() != nil {
+		// The worker canceled this attempt (the shutdown timeout ran out): it
+		// was interrupted, not failed, whatever error the handler made of
+		// the cancellation. Back to the queue at once, never given up, so a
+		// deploy cannot delete a job on its last attempt. (A lost lease
+		// returned above; a job's own Timeout cancels a context inside Run,
+		// not runCtx.)
 		w.retry(d, 0, fields)
 		return
 	}

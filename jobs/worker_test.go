@@ -684,3 +684,39 @@ func TestShutdownOutlastsAnUncancelableRenewal(t *testing.T) {
 		t.Fatal("the finished job was not acknowledged before the worker stopped")
 	}
 }
+
+// TestAnInterruptedLastAttemptIsNotGivenUp: an attempt the worker canceled at
+// the shutdown timeout goes back to the queue whatever the handler returned,
+// even on its last allowed attempt and even as Permanent; it was interrupted,
+// not failed.
+func TestAnInterruptedLastAttemptIsNotGivenUp(t *testing.T) {
+	for name, fail := range map[string]func(error) error{
+		"a message that does not wrap it": func(err error) error { return errors.New("aborted: " + err.Error()) },
+		"Permanent":                       func(error) error { return jobs.Permanent(errors.New("user gone")) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			reg := jobs.NewRegistry()
+			started := make(chan struct{}, 1)
+			jobs.MustRegister(reg, func(ctx context.Context, _ blockJob) error {
+				started <- struct{}{}
+				<-ctx.Done()
+				return fail(ctx.Err())
+			}, jobs.WithOptions(jobs.Options{MaxAttempts: 1}))
+			q := jobs.NewMemoryQueue()
+			dispatchN(t, jobs.NewDispatcher(reg, q), 1)
+			w, err := jobs.NewWorker(reg, q, jobs.WorkerOptions{Queues: []string{"default"}, PollInterval: 5 * time.Millisecond, ShutdownTimeout: 30 * time.Millisecond})
+			if err != nil {
+				t.Fatal(err)
+			}
+			stop := startWorker(t, w)
+			<-started
+			if err := stop(); err != nil {
+				t.Fatal(err)
+			}
+			d, err := q.Reserve(context.Background(), []string{"default"}, time.Minute)
+			if err != nil || d.Envelope.Attempt != 2 {
+				t.Fatalf("after shutdown: %+v, %v; want the job back, as attempt 2", d, err)
+			}
+		})
+	}
+}
