@@ -1,10 +1,10 @@
 # Background jobs
 
-> **Status:** the job contract (JOBS-1). Queue drivers, `gombit worker`,
-> retries, delayed and failed jobs land in the rest of the
-> [JOBS-0 epic](https://github.com/gombit-dev/gombit/issues/278). This page
-> covers what exists: typed jobs, the registry, and the envelope a queue
-> stores.
+> **Status:** the job contract (JOBS-1) and queue drivers (JOBS-2).
+> `gombit worker`, retries, delayed and failed jobs land in the rest of the
+> [JOBS-0 epic](https://github.com/gombit-dev/gombit/issues/278). Until the
+> worker ships, a queued job waits for a consumer you run yourself (see
+> [Consuming a queue](#consuming-a-queue)).
 
 A job is work that should not run inside an HTTP request: sending an email,
 resizing an image, delivering a webhook. Application code defines a job as a
@@ -36,22 +36,74 @@ func (SendWelcomeEmail) JobName() string { return "send_welcome_email" }
   replicated, and inspected by operators. The handler loads what it needs by
   ID.
 
-## Registering handlers
+## Registering and dispatching
+
+`framework.App` opens a dispatcher for the configured driver. Register every
+job on its registry at startup, and dispatch through it:
 
 ```go
-registry := jobs.NewRegistry(jobs.WithPropagator(framework.JobPropagator()))
-
-jobs.MustRegister(registry, func(ctx context.Context, job SendWelcomeEmail) error {
+jobs.MustRegister(app.Jobs().Registry(), func(ctx context.Context, job SendWelcomeEmail) error {
 	return mailer.Welcome(ctx, job.UserID)
 })
+
+// in a handler or service:
+env, err := app.Jobs().Dispatch(ctx, SendWelcomeEmail{UserID: user.ID})
+env, err = app.Jobs().Dispatch(ctx, job, jobs.OnQueue("mail")) // another queue
 ```
+
+Application code depends on `*jobs.Dispatcher`, never on a driver. The app's
+registry already carries request and trace IDs into handlers
+(`framework.JobPropagator`). Outside an App, build one yourself:
+`jobs.NewRegistry(...)` plus `jobs.Open(cfg.Jobs, cfg.Cache.Redis, registry)`
+or `jobs.NewDispatcher(registry, queue)`.
 
 Register every job at startup. `Register` returns an error (and
 `MustRegister` panics) for a programming mistake: an invalid name, a name
 another type already uses, a pointer type, a payload that cannot be encoded as
 JSON, or a bad version. The handler receives the decoded job, typed.
 
-## Dispatch and run
+## Drivers
+
+`GOMBIT_JOBS_DRIVER` selects the backend; application code does not change.
+
+| Driver | Where jobs live | Use |
+|--------|-----------------|-----|
+| `sync` (default) | nowhere: `Dispatch` runs the job before it returns | development and tests; no infrastructure, no worker. `Dispatch` returns the job's own failure. |
+| `memory` | process memory | tests and single-process apps that accept losing queued jobs on exit |
+| `redis` | Redis (the shared `GOMBIT_REDIS_*` connection) | production: jobs survive app and worker restarts |
+
+Jobs go to `GOMBIT_JOBS_QUEUE` (`default`) unless dispatched `OnQueue`.
+Queue names use the job-name alphabet. `GOMBIT_JOBS_NAMESPACE` prefixes the
+Redis keys (it defaults like the cache namespace, from app name and
+environment), so apps and environments sharing a server do not share queues.
+
+The `redis` driver keeps each queue under one hash tag,
+`{<namespace>:jobs:<queue>}` (a ready list, delayed and reserved sorted sets,
+and a hash per job), so it works on Redis Cluster, and each operation is one
+Lua script: a crash between steps cannot lose or duplicate a job.
+
+## Consuming a queue
+
+Delivery is leased. `Queue.Reserve` hands out the next job with a lease;
+`Ack` completes it; `Release` puts it back, optionally delayed. If the lease
+runs out first (the worker crashed or stalled), the job is delivered again
+and its attempt count goes up. A worker whose lease was taken over gets
+`ErrLeaseLost` from `Ack`/`Release`. `gombit worker` (JOBS-3) runs this loop;
+until then:
+
+```go
+q := app.Jobs().Queue() // nil with the sync driver
+d, err := q.Reserve(ctx, []string{"default"}, time.Minute) // jobs.ErrNoJob when empty
+if err == nil {
+	if err := app.Jobs().Registry().Run(ctx, d.Envelope); err != nil {
+		_ = q.Release(ctx, d, time.Now().Add(time.Minute))
+	} else {
+		_ = q.Ack(ctx, d)
+	}
+}
+```
+
+## The envelope
 
 A queue driver sits between two registry calls:
 

@@ -259,6 +259,37 @@ jobs:
           bash benchmarks/scripts/footprint-all_test.sh
           bash benchmarks/scripts/microbench-staleness_test.sh
 
+  jobs-redis:
+    name: Jobs (redis)
+    needs: test
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # The durable Redis queue driver against a real server: the shared
+      # driver conformance suite, restart survival, and lease recovery.
+      - name: Run Redis job queue tests
+        env:
+          GOMBIT_TEST_REDIS_ADDR: 127.0.0.1:6379
+        run: go test -race -count=1 ./jobs
+
   database-sqlite:
     name: Database (sqlite)
     needs: test
