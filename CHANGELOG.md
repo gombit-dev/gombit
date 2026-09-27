@@ -12,6 +12,14 @@ version.
 
 ### Added
 
+- `make test-chaos`: the stochastic resilience suite (`internal/chaos`,
+  `chaos` build tag, never in PR CI). Scenarios draw their faults at random
+  from one printed seed, randomized failure boundaries in multi-step writes,
+  concurrent writers with random COMMIT failures, cancellation at a random
+  point, Postgres stalls/drops/restarts through the proxy, random HTTP
+  dependency faults, in a random order; `CHAOS_SEED` replays a run exactly,
+  `CHAOS_SCENARIO`/`CHAOS_ITERATION` pick one, and every failure prints its
+  replay command ([#389](https://github.com/gombit-dev/gombit/issues/389)).
 - Concurrency + fault tests (`TestFault_Concurrency_*`) on SQLite,
   Postgres, and MySQL: two transactions writing the same row while the
   first's COMMIT fails leave one winner and nothing of the loser;

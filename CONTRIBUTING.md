@@ -223,6 +223,18 @@ retryable one not retried, a backoff off its schedule or outside `[0,
 MaxDelay]` for any attempt (overflow), a success that does not end it, and a
 final error that hides the last attempt's error.
 
+`make test-chaos` is the other half: the stochastic suite in
+`internal/chaos` (behind the `chaos` build tag, never in PR CI). Each
+scenario draws its fault, boundary, and sizes from a random source derived
+from one seed, which every run prints first. A failure prints a `CHAOS
+FAILURE` block with the seed, scenario, iteration, expected and observed,
+and the replay command (`CHAOS_SEED=... CHAOS_SCENARIO=...
+CHAOS_ITERATION=... make test-chaos`). A failure that does not reproduce
+from its seed is a harness bug, not a flake: find the randomness a scenario
+drew from somewhere other than `env.Rand`. Add a scenario with
+`register(Scenario{Name, Component, Run})`; once a chaos failure is
+understood, pin it as a deterministic `TestFault_*` test.
+
 `make test-faults` runs the whole fault suite: the `internal/faulttest`
 harness and every `TestFault_*` test (found by name, so a new one joins
 without editing anything), under the race detector. Set `FAULT_POSTGRES_DSN`
