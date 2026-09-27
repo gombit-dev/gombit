@@ -394,8 +394,10 @@ func (q *RedisQueue) Bury(ctx context.Context, d Delivery, f Failure) error {
 // shifts as jobs fail, retry, and are forgotten), so a page of newer failures
 // arriving mid-read is not read twice and a deleted head does not skip the
 // jobs behind it. An ID whose job record is gone (evicted, deleted by hand)
-// is dropped from the failed set as the read passes it, so fewer than limit
-// jobs means the set has no more.
+// is dropped from the failed set as the read passes it. It is not a
+// snapshot: a job that fails while a read in pages is under way sorts ahead
+// of where the read resumes and is not in the result, and a job returned
+// may have been retried or forgotten since.
 func (q *RedisQueue) Failed(ctx context.Context, queue string, limit int) ([]FailedJob, error) {
 	if q.closed.Load() {
 		return nil, ErrClosed

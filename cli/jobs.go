@@ -129,7 +129,7 @@ func newJobsFailedCommand(stdout io.Writer) *cobra.Command {
 			})
 		},
 	})
-	cmd.Flags().Int("limit", 50, "most jobs to list (0 lists all, read in pages)")
+	cmd.Flags().Int("limit", 50, "most jobs to list (0 lists all, read in pages; a job failing meanwhile may be missed)")
 	cmd.Flags().Bool("json", false, "print the failed jobs as JSON, payloads included")
 	return cmd
 }
@@ -188,8 +188,9 @@ func newJobsRetryCommand(stdout io.Writer) *cobra.Command {
 				}
 				// Page through the failed set: a retried job leaves it, so each
 				// read is the next page, and an outage's worth of failures is
-				// never one read. A short page is the end: Failed returns
-				// fewer than asked only when the set has no more.
+				// never one read. Only an empty read is the end: a job that
+				// failed while a page was read or retried can be missing from
+				// a short one, and the next read from the top finds it.
 				total := 0
 				for {
 					page, err := q.Failed(ctx, queue, retryAllPage)
@@ -201,10 +202,10 @@ func newJobsRetryCommand(stdout io.Writer) *cobra.Command {
 							return err
 						}
 					}
-					total += len(page)
-					if len(page) < retryAllPage {
+					if len(page) == 0 {
 						break
 					}
+					total += len(page)
 				}
 				if total == 0 {
 					_, _ = fmt.Fprintf(stdout, "No failed jobs on %s.\n", queue)

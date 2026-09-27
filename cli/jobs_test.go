@@ -164,3 +164,33 @@ func TestJobsRetryAllPages(t *testing.T) {
 		t.Fatalf("%d failed jobs left", len(left))
 	}
 }
+
+// shortPageQueue returns one short page first, as a Redis read in pages
+// does when a job fails while it is under way.
+type shortPageQueue struct {
+	*jobs.MemoryQueue
+	short bool
+}
+
+func (q *shortPageQueue) Failed(ctx context.Context, queue string, limit int) ([]jobs.FailedJob, error) {
+	page, err := q.MemoryQueue.Failed(ctx, queue, limit)
+	if !q.short && len(page) > 1 {
+		q.short = true
+		page = page[:1]
+	}
+	return page, err
+}
+
+// TestJobsRetryAllReadsUntilEmpty: a short page is not the end of the
+// failed set; retry --all stops only when a read comes back empty.
+func TestJobsRetryAllReadsUntilEmpty(t *testing.T) {
+	q := &shortPageQueue{MemoryQueue: jobsFixture(t)}
+	openJobsQueue = func(config.Config) (jobs.Queue, func() error, error) { return q, func() error { return nil }, nil }
+	out, err := runJobs(t, "retry", "--all")
+	if err != nil || strings.Count(out, "Retrying ") != 2 {
+		t.Fatalf("retry --all after a short page = %v:\n%s", err, out)
+	}
+	if left, _ := q.MemoryQueue.Failed(context.Background(), "mail", 0); len(left) != 0 {
+		t.Fatalf("%d failed jobs left behind a short page", len(left))
+	}
+}
