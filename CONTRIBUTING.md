@@ -202,6 +202,15 @@ wait. Release a blocked fault before closing a server (`defer release()`
 after `defer srv.Close()`), so a regression fails the test instead of hanging
 the server's `Close`.
 
+Concurrency + fault scenarios (`TestFault_Concurrency_*`) pin their
+interleaving with the injectors, never with sleeps: hold a call at a
+dangerous boundary (`Block`, or `BlockThenFail(release, err)` for a call
+that stalls and then fails, such as a COMMIT holding its row lock), wait on
+`Reached(n)`, start the competing operation, then release. `SequenceThen(rest,
+steps...)` scripts the first calls and sets what every later one does. Each
+scenario states its expected outcome (one winner, rollback, or a terminal
+error for everyone) and must pass `-race -count=100`.
+
 Any retry policy Gombit adds must pass `faulttest.CheckRetryPolicy(t,
 faulttest.RetryContract{...})` (INV-4, bounded retry). The policy waits
 between attempts through a `faulttest.Sleeper` (in production a

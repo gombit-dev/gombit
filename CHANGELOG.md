@@ -12,6 +12,14 @@ version.
 
 ### Added
 
+- Concurrency + fault tests (`TestFault_Concurrency_*`) on SQLite,
+  Postgres, and MySQL: two transactions writing the same row while the
+  first's COMMIT fails leave one winner and nothing of the loser;
+  concurrent refresh-token rotations behind a failing rotation all return
+  the failure, none wedged, the token intact; a context canceled during
+  COMMIT gets an answer consistent with what persisted. `faulttest` gains
+  `BlockThenFail` and `SequenceThen`
+  ([#388](https://github.com/gombit-dev/gombit/issues/388)).
 - Retry-policy test infrastructure for contributors (INV-4, bounded retry):
   `faulttest.Sleeper` (with `FakeSleeper` and `RealSleeper`), so backoff is
   tested without sleeping, and `faulttest.CheckRetryPolicy`, the
