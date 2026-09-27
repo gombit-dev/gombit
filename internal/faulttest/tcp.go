@@ -185,7 +185,8 @@ func (p *TCPProxy) Hold() {
 }
 
 // Held returns a channel closed once traffic is waiting on the current Hold:
-// the call under test has reached the dependency and stalled.
+// the proxy has the call's bytes and has not forwarded them (the dependency
+// has not seen the call yet).
 func (p *TCPProxy) Held() <-chan struct{} {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -225,8 +226,11 @@ func (p *TCPProxy) Refuse() {
 }
 
 // Heal lifts every fault: held traffic flows, and a refusing proxy listens
-// again on the same address. Connections that were cut stay cut; the next
-// operation has to reconnect, which is the recovery a test asserts.
+// again on the same address. Bytes held on a connection that is still open
+// are delivered, as a recovering network would, even if their caller gave
+// up meanwhile; those on a connection that closed are dropped with it.
+// Connections that were cut stay cut; the next operation has to reconnect,
+// which is the recovery a test asserts.
 func (p *TCPProxy) Heal() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()

@@ -100,8 +100,9 @@ func assertRecovers(t *testing.T, app *App, proxy *faulttest.TCPProxy) {
 	}
 }
 
-// awaitHeld waits until a call has stalled on the proxy's Hold, failing t
-// if the call returns first or never reaches the proxy.
+// awaitHeld waits until the proxy holds a call's bytes (sent by the client,
+// not yet forwarded to the dependency), failing t if the call returns first
+// or never reaches the proxy.
 func awaitHeld(t *testing.T, proxy *faulttest.TCPProxy, done <-chan error) {
 	t.Helper()
 	select {
@@ -146,11 +147,13 @@ func TestFault_Network_Latency(t *testing.T) {
 	assertRecovers(t, app, proxy)
 }
 
-// TestFault_Network_ConnectionLost: a connection lost while a query is in
-// flight, dropped (Cut) or reset, with the database still unreachable, fails
-// that query promptly (database/sql may retry a query that never reached the
-// server on a fresh connection; refusing new ones makes the loss final), and
-// the pool recovers.
+// TestFault_Network_ConnectionLost: a connection lost while the client is
+// waiting on a query, dropped (Cut) or reset, with the database still
+// unreachable, fails that query promptly, and the pool recovers. The query
+// is held in the proxy (the server has not seen it), so database/sql may
+// retry it on a fresh connection; refusing new ones makes the loss final.
+// (A connection lost after the server executed a statement is
+// TestFault_Network_ConnectionLostMidTransaction.)
 func TestFault_Network_ConnectionLost(t *testing.T) {
 	for name, drop := range map[string]func(*faulttest.TCPProxy){
 		"cut":   (*faulttest.TCPProxy).Cut,
@@ -164,7 +167,7 @@ func TestFault_Network_ConnectionLost(t *testing.T) {
 			proxy.Hold()
 			done := make(chan error, 1)
 			go func() { done <- ping(context.Background(), app) }()
-			awaitHeld(t, proxy, done) // the query is on the wire, unanswered
+			awaitHeld(t, proxy, done) // the client has sent the query; the proxy holds it
 			proxy.Refuse()
 			drop(proxy)
 			select {

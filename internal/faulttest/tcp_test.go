@@ -119,8 +119,13 @@ func TestTCPProxyCutAndReset(t *testing.T) {
 			if err == nil {
 				t.Fatal("a round trip on a dropped connection succeeded")
 			}
-			if name == "reset" && !errors.Is(err, syscall.ECONNRESET) && !errors.Is(err, io.EOF) && !errors.Is(err, syscall.EPIPE) {
-				t.Fatalf("after reset = %v, want a reset", err)
+			// A reset reads as ECONNRESET (or EPIPE on the write); a FIN (Cut)
+			// reads as EOF, which must not pass for a reset.
+			if name == "reset" && !errors.Is(err, syscall.ECONNRESET) && !errors.Is(err, syscall.EPIPE) {
+				t.Fatalf("after reset = %v, want ECONNRESET or EPIPE, not a plain close", err)
+			}
+			if name == "cut" && !errors.Is(err, io.EOF) {
+				t.Fatalf("after cut = %v, want EOF (a FIN)", err)
 			}
 			// Recovery: a new connection works.
 			if got, err := roundTrip(dial(t, proxy.Addr()), "again", 5*time.Second); err != nil || got != "again" {
