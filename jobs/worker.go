@@ -32,6 +32,9 @@ type WorkerOptions struct {
 	// Logger receives one structured entry per job outcome. Default: no
 	// logging.
 	Logger *zap.Logger
+	// Metrics records every outcome, run time, and queue wait. Default: a
+	// fresh Metrics (Worker.Metrics).
+	Metrics *Metrics
 }
 
 // Worker runs the jobs of a Registry from a Queue. At most Concurrency jobs
@@ -42,6 +45,7 @@ type Worker struct {
 	queue    Queue
 	opts     WorkerOptions
 	log      *zap.Logger
+	metrics  *Metrics
 }
 
 // Defaults for WorkerOptions.
@@ -89,7 +93,11 @@ func NewWorker(registry *Registry, queue Queue, opts WorkerOptions) (*Worker, er
 	if log == nil {
 		log = zap.NewNop()
 	}
-	return &Worker{registry: registry, queue: queue, opts: opts, log: log}, nil
+	metrics := opts.Metrics
+	if metrics == nil {
+		metrics = NewMetrics()
+	}
+	return &Worker{registry: registry, queue: queue, opts: opts, log: log, metrics: metrics}, nil
 }
 
 // queueOpTimeout is the deadline of every queue call the worker makes
@@ -159,9 +167,12 @@ func (w *Worker) Run(ctx context.Context) error {
 			}
 			return w.shutdown(&inFlight, cancelJobs)
 		}
-		if errors.Is(err, errDropped) {
+		if errors.Is(err, errSetAside) || errors.Is(err, errNotSetAside) {
+			// An undecodable job was buried (or could not be, and stays leased
+			// until it expires, so it is not reserved again meanwhile): look
+			// again at once.
 			<-slots
-			continue // an undecodable job was acked away; look again at once
+			continue
 		}
 		if err != nil {
 			<-slots
@@ -192,8 +203,7 @@ func (w *Worker) Run(ctx context.Context) error {
 }
 
 // reserve takes the next job. An envelope that no longer decodes cannot be
-// run by any worker; it is acknowledged away and logged (dead-lettering
-// lands with JOBS-6).
+// run by any worker; it is set aside with the failed jobs and logged.
 func (w *Worker) reserve(ctx context.Context) (Delivery, error) {
 	opCtx, cancel := context.WithTimeout(ctx, queueOpTimeout)
 	defer cancel()
@@ -201,16 +211,28 @@ func (w *Worker) reserve(ctx context.Context) (Delivery, error) {
 	if err != nil || d.Err == nil {
 		return d, err
 	}
-	w.log.Error("jobs worker: dropping a job whose envelope does not decode",
-		zap.String("job_id", d.Envelope.ID), zap.String("queue", d.Queue), zap.Error(d.Err))
-	if ackErr := w.ack(d); ackErr != nil {
-		w.log.Error("jobs worker: ack undecodable job", zap.String("job_id", d.Envelope.ID), zap.Error(ackErr))
+	failure := Failure{Reason: ReasonUndecodable, Kind: KindDecode, Error: d.Err.Error(), At: time.Now()}
+	buryErr := w.bury(d, failure)
+	w.metrics.record(unknownJobLabel, d.Queue, settled(ResultUndecodable, buryErr), 0, 0)
+	if buryErr != nil {
+		w.log.Error("jobs worker: a job whose envelope does not decode could not be set aside; it returns when its lease expires",
+			zap.String("job_id", d.Envelope.ID), zap.String("queue", d.Queue), zap.Error(d.Err), zap.NamedError("bury_error", buryErr))
+		return Delivery{}, errNotSetAside
 	}
-	return Delivery{}, errDropped
+	w.log.Error("job failed for good: its envelope does not decode",
+		zap.String("job_id", d.Envelope.ID), zap.String("queue", d.Queue), zap.String("reason", ReasonUndecodable),
+		zap.Error(d.Err), zap.String("inspect", "gombit jobs inspect "+d.Envelope.ID+" --queue "+d.Queue))
+	return Delivery{}, errSetAside
 }
 
-// errDropped: reserve acked an undecodable delivery away.
-var errDropped = errors.New("jobs: undecodable job dropped")
+var (
+	// errSetAside: reserve buried an undecodable delivery with the failed
+	// jobs.
+	errSetAside = errors.New("jobs: undecodable job set aside")
+	// errNotSetAside: reserve could not bury an undecodable delivery; it
+	// stays leased until its lease expires.
+	errNotSetAside = errors.New("jobs: undecodable job could not be set aside")
+)
 
 // maxReserveBackoff caps the wait between failing Reserve calls.
 const maxReserveBackoff = 30 * time.Second
@@ -232,18 +254,37 @@ func reserveBackoff(poll time.Duration, failures int) time.Duration {
 // ack it or release it for a retry.
 func (w *Worker) process(jobCtx context.Context, d Delivery) {
 	runCtx, cancelRun := context.WithCancel(jobCtx)
+	if store, ok := w.queue.(OnceStore); ok {
+		runCtx = withOnceStore(runCtx, store)
+	}
 	defer cancelRun()
 	stopRenewing := w.renewLease(runCtx, cancelRun, d)
 
 	started := time.Now()
+	var waited time.Duration
+	if !d.AvailableAt.IsZero() && started.After(d.AvailableAt) {
+		waited = started.Sub(d.AvailableAt)
+	}
+	w.metrics.started(d.Queue)
+	// Every outcome below sets result once the queue has committed it (or
+	// refused: settled).
+	var result string
+	var ran time.Duration
+	defer func() {
+		w.metrics.finished(d.Queue)
+		w.metrics.record(w.jobLabel(d.Envelope.Name), d.Queue, result, ran, waited)
+	}()
+
 	err := w.registry.Run(runCtx, d.Envelope)
+	ran = time.Since(started)
 	lost := stopRenewing()
 	fields := []zap.Field{
 		zap.String("job_id", d.Envelope.ID),
 		zap.String("job", d.Envelope.Name),
 		zap.String("queue", d.Queue),
 		zap.Int("attempt", d.Envelope.Attempt),
-		zap.Duration("duration", time.Since(started)),
+		zap.Duration("duration", ran),
+		zap.Duration("waited", waited),
 	}
 	if len(d.Envelope.Metadata) > 0 {
 		// Under their own key, so a propagated name cannot shadow a field above.
@@ -252,12 +293,15 @@ func (w *Worker) process(jobCtx context.Context, d Delivery) {
 	if lost {
 		// Another worker holds the job now; its outcome is that worker's to
 		// record, and this lease can neither ack nor release it.
+		result = ResultAbandoned
 		w.log.Warn("job abandoned after its lease was lost", fields...)
 		return
 	}
 
 	if err == nil {
-		if ackErr := w.ack(d); ackErr != nil {
+		ackErr := w.ack(d)
+		result = settled(ResultSucceeded, ackErr)
+		if ackErr != nil {
 			w.log.Warn("jobs worker: job succeeded but its ack failed; it may run again",
 				append(fields, zap.Error(ackErr))...)
 			return
@@ -275,42 +319,102 @@ func (w *Worker) process(jobCtx context.Context, d Delivery) {
 		// deploy cannot delete a job on its last attempt. (A lost lease
 		// returned above; a job's own Timeout cancels a context inside Run,
 		// not runCtx.)
-		w.retry(d, 0, fields)
+		result = settled(ResultInterrupted, w.retry(d, 0, fields))
+		return
+	}
+	if errors.Is(err, ErrInProgress) && !IsPermanent(err) {
+		// Another run holds the effect's Once lock. Waiting is not failing:
+		// the job is postponed, its attempt taken back, until the other run
+		// finishes or its lock expires, so a job whose other run crashed
+		// keeps its whole MaxAttempts for when it can run.
+		result = settled(ResultPostponed, w.postpone(d, policy.Backoff(d.Envelope.Attempt), fields))
 		return
 	}
 	if IsPermanent(err) || d.Envelope.Attempt >= policy.MaxAttempts {
-		w.giveUp(d, err, policy, fields)
+		result = settled(ResultFailed, w.giveUp(d, err, policy, fields))
 		return
 	}
-	w.retry(d, policy.Backoff(d.Envelope.Attempt), fields)
+	result = settled(ResultRetried, w.retry(d, policy.Backoff(d.Envelope.Attempt), fields))
+}
+
+// settled is the result to record for an outcome whose queue call (ack,
+// release, bury) returned err: the outcome itself once the queue committed
+// it; abandoned when the lease was lost meanwhile; unsettled otherwise.
+func settled(result string, err error) string {
+	switch {
+	case err == nil:
+		return result
+	case errors.Is(err, ErrLeaseLost):
+		return ResultAbandoned
+	default:
+		return ResultUnsettled
+	}
 }
 
 // retry releases d to run again after delay.
-func (w *Worker) retry(d Delivery, delay time.Duration, fields []zap.Field) {
+func (w *Worker) retry(d Delivery, delay time.Duration, fields []zap.Field) error {
 	fields = append(fields, zap.Duration("retry_in", delay))
 	if relErr := w.release(d, time.Now().Add(delay)); relErr != nil {
 		w.log.Error("jobs worker: job failed and its release failed; it returns when its lease expires",
 			append(fields, zap.NamedError("release_error", relErr))...)
-		return
+		return relErr
 	}
 	w.log.Warn("job failed", fields...)
+	return nil
+}
+
+// postpone releases d to try again after delay without counting this
+// delivery as an attempt.
+func (w *Worker) postpone(d Delivery, delay time.Duration, fields []zap.Field) error {
+	fields = append(fields, zap.Duration("retry_in", delay))
+	ctx, cancel := context.WithTimeout(context.Background(), queueOpTimeout)
+	defer cancel()
+	if err := w.queue.Postpone(ctx, d, time.Now().Add(delay)); err != nil {
+		w.log.Error("jobs worker: postponing a job waiting on another run failed; it returns when its lease expires",
+			append(fields, zap.NamedError("release_error", err))...)
+		return err
+	}
+	w.log.Info("job postponed: another run holds its effect", fields...)
+	return nil
 }
 
 // giveUp stops retrying d: a permanent failure or the last allowed attempt.
-// It is acked away and logged as an error, without its payload, which may
-// hold personal data (dead-lettering, which keeps it, lands with JOBS-6).
-func (w *Worker) giveUp(d Delivery, err error, policy Options, fields []zap.Field) {
-	reason := "attempts exhausted"
+// It moves to the queue's failed jobs, payload and reason kept for `gombit
+// jobs inspect` and `retry`, and is logged as an error without its payload,
+// which may hold personal data.
+func (w *Worker) giveUp(d Delivery, err error, policy Options, fields []zap.Field) error {
+	reason := ReasonExhausted
 	if IsPermanent(err) {
-		reason = "permanent failure"
+		reason = ReasonPermanent
 	}
 	fields = append(fields, zap.String("reason", reason), zap.Int("max_attempts", policy.MaxAttempts))
-	if ackErr := w.ack(d); ackErr != nil {
-		w.log.Error("jobs worker: giving up on a job, but its ack failed; it returns when its lease expires",
-			append(fields, zap.NamedError("ack_error", ackErr))...)
-		return
+	failure := Failure{Reason: reason, Kind: Classify(err), Error: err.Error(), At: time.Now()}
+	if buryErr := w.bury(d, failure); buryErr != nil {
+		w.log.Error("jobs worker: giving up on a job, but setting it aside failed; it returns when its lease expires",
+			append(fields, zap.NamedError("bury_error", buryErr))...)
+		return buryErr
 	}
-	w.log.Error("job failed for good", fields...)
+	w.log.Error("job failed for good", append(fields,
+		zap.String("inspect", "gombit jobs inspect "+d.Envelope.ID+" --queue "+d.Queue))...)
+	return nil
+}
+
+// jobLabel is the metrics label of a job name: the name when a handler is
+// registered for it, else "unknown", so envelopes cannot mint series.
+func (w *Worker) jobLabel(name string) string {
+	if w.registry.Has(name) {
+		return name
+	}
+	return unknownJobLabel
+}
+
+// Metrics returns what the worker records.
+func (w *Worker) Metrics() *Metrics { return w.metrics }
+
+func (w *Worker) bury(d Delivery, f Failure) error {
+	ctx, cancel := context.WithTimeout(context.Background(), queueOpTimeout)
+	defer cancel()
+	return w.queue.Bury(ctx, d, f)
 }
 
 // renewLease extends d's lease every Lease/3 until the returned stop is

@@ -347,8 +347,10 @@ func TestWorkerSurvivesATinyLease(t *testing.T) {
 // for a stored envelope that no longer decodes.
 type poisonQueue struct {
 	*jobs.MemoryQueue
-	once  sync.Once
-	acked atomic.Bool
+	once      sync.Once
+	buried    atomic.Bool
+	buryFails bool
+	failure   atomic.Value
 }
 
 func (p *poisonQueue) Reserve(ctx context.Context, queues []string, lease time.Duration) (jobs.Delivery, error) {
@@ -361,15 +363,19 @@ func (p *poisonQueue) Reserve(ctx context.Context, queues []string, lease time.D
 	return p.MemoryQueue.Reserve(ctx, queues, lease)
 }
 
-func (p *poisonQueue) Ack(ctx context.Context, d jobs.Delivery) error {
+func (p *poisonQueue) Bury(ctx context.Context, d jobs.Delivery, f jobs.Failure) error {
 	if d.Envelope.ID == "poison" {
-		p.acked.Store(true)
+		if p.buryFails {
+			return errors.New("redis: connection reset")
+		}
+		p.failure.Store(f)
+		p.buried.Store(true)
 		return nil
 	}
-	return p.MemoryQueue.Ack(ctx, d)
+	return p.MemoryQueue.Bury(ctx, d, f)
 }
 
-func TestWorkerDropsAnUndecodableEnvelope(t *testing.T) {
+func TestWorkerSetsAsideAnUndecodableEnvelope(t *testing.T) {
 	q := &poisonQueue{MemoryQueue: jobs.NewMemoryQueue()}
 	reg := jobs.NewRegistry()
 	var ran atomic.Bool
@@ -382,9 +388,12 @@ func TestWorkerDropsAnUndecodableEnvelope(t *testing.T) {
 		t.Fatal(err)
 	}
 	startWorker(t, w)
-	eventually(t, "the poison envelope acked", q.acked.Load)
+	eventually(t, "the poison envelope set aside", q.buried.Load)
 	eventually(t, "the next job to run at once", ran.Load)
-	if logs.FilterMessage("jobs worker: dropping a job whose envelope does not decode").Len() != 1 {
+	if f, _ := q.failure.Load().(jobs.Failure); f.Reason != jobs.ReasonUndecodable || f.Kind != jobs.KindDecode || f.Error == "" {
+		t.Fatalf("failure = %+v, want an undecodable-envelope record", f)
+	}
+	if logs.FilterMessage("job failed for good: its envelope does not decode").Len() != 1 {
 		t.Fatalf("logs = %v", logs.All())
 	}
 }
@@ -544,9 +553,21 @@ func TestWorkerGivesUp(t *testing.T) {
 	if _, err := d.Dispatch(context.Background(), failingJob{}); err != nil {
 		t.Fatal(err)
 	}
-	eventually(t, "the job to be given up", func() bool { return q.Len() == 0 })
+	failedCount := func() int {
+		failed, err := q.Failed(context.Background(), "default", 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(failed)
+	}
+	eventually(t, "the job to be given up", func() bool { return failedCount() == 1 })
 	if runs.Load() != 3 {
 		t.Fatalf("ran %d times, want MaxAttempts 3", runs.Load())
+	}
+	failed, _ := q.Failed(context.Background(), "default", 0)
+	if f := failed[0]; f.Attempts != 3 || f.Failure.Reason != jobs.ReasonExhausted || f.Failure.Kind != jobs.KindHandler ||
+		f.Failure.Error == "" || string(f.Envelope.Payload) != `{"permanent":false}` {
+		t.Fatalf("failed job = %+v, want the original payload, 3 attempts, and why", f)
 	}
 	gaveUp := logs.FilterMessage("job failed for good").All()
 	if len(gaveUp) != 1 || gaveUp[0].ContextMap()["reason"] != "attempts exhausted" || gaveUp[0].ContextMap()["attempt"] != int64(3) {
@@ -560,7 +581,7 @@ func TestWorkerGivesUp(t *testing.T) {
 	if _, err := d.Dispatch(context.Background(), failingJob{Permanent: true}); err != nil {
 		t.Fatal(err)
 	}
-	eventually(t, "the permanent failure to be given up", func() bool { return q.Len() == 0 && logs.FilterMessage("job failed for good").Len() == 2 })
+	eventually(t, "the permanent failure to be given up", func() bool { return failedCount() == 2 && logs.FilterMessage("job failed for good").Len() == 2 })
 	if runs.Load() != 1 || logs.FilterMessage("job failed for good").All()[1].ContextMap()["reason"] != "permanent failure" {
 		t.Fatalf("a permanent failure ran %d times", runs.Load())
 	}
@@ -596,7 +617,10 @@ func TestWorkerRetriesTimeoutsAndBoundsUnknownJobs(t *testing.T) {
 		t.Fatal(err)
 	}
 	startWorker(t, w)
-	eventually(t, "both jobs settled", func() bool { return q.Len() == 0 })
+	eventually(t, "both jobs settled", func() bool {
+		failed, _ := q.Failed(context.Background(), "default", 0)
+		return slowRuns.Load() == 2 && len(failed) == 1 && q.Len() == 1
+	})
 	if slowRuns.Load() != 2 {
 		t.Fatalf("the timed-out job ran %d times, want a retry after the timeout", slowRuns.Load())
 	}
@@ -770,5 +794,26 @@ func TestUpgradeStepErrorsAreRetried(t *testing.T) {
 	retried := logs.FilterMessage("job failed").All()
 	if len(retried) != 1 || retried[0].ContextMap()["kind"] != "upgrade" || retried[0].ContextMap()["job_id"] != "step" {
 		t.Fatalf("retried failures = %v, want the step error once", retried)
+	}
+}
+
+// TestAPoisonJobThatCannotBeBuriedIsNotReportedSetAside: a failed bury is
+// logged as such, and the next job still runs.
+func TestAPoisonJobThatCannotBeBuriedIsNotReportedSetAside(t *testing.T) {
+	q := &poisonQueue{MemoryQueue: jobs.NewMemoryQueue(), buryFails: true}
+	reg := jobs.NewRegistry()
+	var ran atomic.Bool
+	jobs.MustRegister(reg, func(context.Context, blockJob) error { ran.Store(true); return nil })
+	dispatchN(t, jobs.NewDispatcher(reg, q.MemoryQueue), 1)
+	core, logs := observer.New(zap.ErrorLevel)
+	w, err := jobs.NewWorker(reg, q, jobs.WorkerOptions{Queues: []string{"default"}, PollInterval: time.Hour, Logger: zap.New(core)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	startWorker(t, w)
+	eventually(t, "the next job to run", ran.Load)
+	if logs.FilterMessage("job failed for good: its envelope does not decode").Len() != 0 ||
+		logs.FilterMessage("jobs worker: a job whose envelope does not decode could not be set aside; it returns when its lease expires").Len() != 1 {
+		t.Fatalf("logs = %v, want the failed bury reported, not a set-aside", logs.All())
 	}
 }
