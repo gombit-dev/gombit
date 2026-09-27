@@ -159,6 +159,18 @@ db, _ := faulttest.OpenDB(database.DriverSQLite, dsn, &faulttest.DBFaults{
 // the first transaction's commit fails: assert nothing it wrote persists
 ```
 
+Set up over the same wrapped database with the injectors disarmed
+(`inj.Disarm()`), and `Arm()` them for the calls under test, so migrations
+and fixtures are never numbered. Name fault tests by the epic's taxonomy
+(`TestFault_Database_CommitFailure`) and assert persisted state and returned
+errors, not call counts. The `framework`, `auth`, and `admin` fault tests run
+on SQLite by default and add PostgreSQL and MySQL under the `integration` tag
+with that package's DSN flags. `auth` and `admin` both create and drop the
+auth tables, so against one shared database run the packages one at a time
+(`go test -p 1 ...`, or one package per command as CI does). After a failed
+write, `faulttest.Idle` checks that no transaction was left holding a
+connection; row counts alone cannot see an open transaction.
+
 A fault test must pass `go test -count=50` (and `-race`) before it lands: a
 flaky failure-path test is worse than none.
 

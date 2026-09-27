@@ -12,6 +12,14 @@ version.
 
 ### Added
 
+- Fault tests for Gombit's transactional writes (`TestFault_Database_*`):
+  `App.Tx`, refresh-token rotation, and admin many-to-many writes leave no
+  partial state when a statement, the commit, or the context fails mid-way,
+  a serialization failure surfaces unretried and classifiable, and a panic
+  still rolls back, on SQLite, PostgreSQL, and MySQL. `faulttest` gains
+  `Disarm`/`Arm` for setup, a shared database matrix (`ForEachDB`), and
+  `Idle`, which catches a transaction left open
+  ([#382](https://github.com/gombit-dev/gombit/issues/382)).
 - `database.OpenConn(driver, *sql.DB)` opens a GORM database over a
   `database/sql` handle the caller built (a wrapped driver), with the same
   setup as `database.Open`. Contributors get `internal/faulttest`:

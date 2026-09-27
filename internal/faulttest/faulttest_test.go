@@ -227,3 +227,14 @@ func TestResetIsolatesCallsInFlight(t *testing.T) {
 		t.Fatalf("after Reset: Calls %d, Failures %d; a call from before the reset leaked into the counts", inj.Calls(), inj.Failures())
 	}
 }
+
+func TestDisarmedCallsPassUncounted(t *testing.T) {
+	inj := faulttest.FailOnCall(1, errBoom).Disarm()
+	if got := outcomes(inj, 3); got[0] || got[1] || got[2] || inj.Calls() != 0 {
+		t.Fatalf("disarmed: outcomes %v, Calls %d; want all passing, none counted", got, inj.Calls())
+	}
+	inj.Arm()
+	if got := outcomes(inj, 2); !got[0] || got[1] {
+		t.Fatalf("armed: outcomes %v; want the 1st call after Arm to fail", got)
+	}
+}
