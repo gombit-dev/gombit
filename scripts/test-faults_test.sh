@@ -32,6 +32,9 @@ if [ "$1" = list ]; then
   exec "$REAL_GO" "$@"
 fi
 echo "$*" >> "$CALL_LOG"
+if [ -n "${GO_SLEEP:-}" ]; then
+  sleep "$GO_SLEEP"
+fi
 if [ -n "${FAIL_MATCH:-}" ] && [[ "$*" == *"$FAIL_MATCH"* ]]; then
   echo "--- FAIL: TestFault_Something" >&2
   exit 1
@@ -57,7 +60,7 @@ unset FAULT_POSTGRES_DSN FAULT_MYSQL_DSN FAULT_COUNT
 newlog
 out="$(suite)" || note "suite without DSNs failed: $out"
 calls="$(cat "$CALL_LOG")"
-grep -qx 'test -race -count=1 ./internal/faulttest' <<<"$calls" || note "the harness does not run whole: $calls"
+grep -qx 'test -race -count=1 -run . ./internal/faulttest' <<<"$calls" || note "the harness does not run whole: $calls"
 for pkg in ./framework ./auth ./admin ./cli ./dev; do
   grep -E '^test -race -count=1 -run \^TestFault_ ' <<<"$calls" | grep -qw -- "$pkg" ||
     note "TestFault_ package $pkg not selected: $calls"
@@ -123,10 +126,61 @@ if [ -s "$CALL_LOG" ]; then
   note "the suite ran tests after go list failed: $(cat "$CALL_LOG")"
 fi
 
-# ---- a bad FAULT_COUNT is refused ----
-if FAULT_COUNT=zero suite >/dev/null 2>&1; then
-  note "FAULT_COUNT=zero was accepted"
+# ---- a bad FAULT_COUNT is refused: base 10, positive, no leading zero ----
+# (go test parses -count in base 0: 00 runs nothing and passes, 010 is 8)
+for bad in zero 0 00 010 -1 ''; do
+  [ -n "$bad" ] || continue
+  if FAULT_COUNT="$bad" suite >/dev/null 2>&1; then
+    note "FAULT_COUNT=$bad was accepted"
+  fi
+done
+
+# ---- shards partition the packages: every one runs, exactly once ----
+newlog
+FAULT_POSTGRES_DSN="$pg" suite >/dev/null || note "unsharded suite failed"
+whole="$(grep -oE '\./[a-z/]+' "$CALL_LOG" | sort)"
+sharded=""
+for i in 1 2 3; do
+  newlog
+  FAULT_POSTGRES_DSN="$pg" FAULT_SHARD="$i/3" suite >/dev/null || note "shard $i/3 failed"
+  sharded="$sharded"$'\n'"$(grep -oE '\./[a-z/]+' "$CALL_LOG")"
+done
+sharded="$(grep . <<<"$sharded" | sort)"
+if [ "$whole" != "$sharded" ]; then
+  note "shards 1..3 do not cover the suite exactly once:
+unsharded: $whole
+sharded:   $sharded"
 fi
+for bad in 0/3 4/3 1/0 1 a/b 01/3; do
+  if FAULT_SHARD="$bad" suite >/dev/null 2>&1; then
+    note "FAULT_SHARD=$bad was accepted"
+  fi
+done
+
+# ---- compile-only builds the same binaries and runs no test ----
+newlog
+FAULT_POSTGRES_DSN="$pg" suite >/dev/null || note "suite failed"
+full="$(sed -E 's/-run [^ ]+ //; s/-count=[0-9]+ //' "$CALL_LOG")"
+newlog
+FAULT_POSTGRES_DSN="$pg" FAULT_COMPILE_ONLY=1 FAULT_COUNT=9 suite >/dev/null || note "compile-only failed"
+if grep -v -- "-run ^\$ " "$CALL_LOG" | grep -q .; then
+  note "compile-only ran tests: $(cat "$CALL_LOG")"
+fi
+if [ "$(sed -E 's/-run [^ ]+ //; s/-count=[0-9]+ //' "$CALL_LOG")" != "$full" ]; then
+  note "compile-only did not build what the run uses:
+run:     $full
+compile: $(cat "$CALL_LOG")"
+fi
+
+# ---- a run over its budget fails, and says so ----
+newlog
+if out="$(GO_SLEEP=2 FAULT_BUDGET_SECONDS=1 FAULT_SHARD=1/9 suite 2>&1)"; then
+  note "a run over FAULT_BUDGET_SECONDS passed: $out"
+elif ! grep -q 'over budget' <<<"$out"; then
+  note "an over-budget run did not say why: $out"
+fi
+newlog
+FAULT_BUDGET_SECONDS=600 suite >/dev/null || note "a run within its budget failed"
 
 if [ "$fail" -ne 0 ]; then
   exit 1

@@ -195,8 +195,15 @@ FAULT_MYSQL_DSN='gombit:gombit@tcp(127.0.0.1:3306)/gombit?parseTime=true' \
 A fault test must pass `go test -count=50` (and `-race`) before it lands: a
 flaky failure-path test is worse than none. `FAULT_COUNT=100 make
 test-faults` is the soak the `Fault soak` workflow runs weekly (and on
-demand); the `fault-tests` job becomes a required check only after that soak
-stays clean.
+demand); the `Fault injection` check becomes required only after that soak
+stays clean. (`FAULT_COUNT` is a plain base-10 count: `go test` would read
+`010` as octal and `00` as "run nothing".)
+
+In CI the suite runs as six shards (`FAULT_SHARD=i/6`, packages spread
+round-robin, so a new fault package needs no CI edit). Each shard first
+compiles its test binaries (`FAULT_COMPILE_ONLY=1`), then runs under
+`FAULT_BUDGET_SECONDS=120`: a shard whose run takes longer fails, and the
+remedy is another shard, never a dropped scenario.
 
 ### Generator golden tests
 

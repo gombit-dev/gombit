@@ -278,15 +278,26 @@ jobs:
         run: go test ./database
 
   fault-tests:
-    name: Fault injection
+    name: Fault injection (${{ matrix.shard }}/6)
     # The deterministic fault suite (CHAOS-4, INV-7): every TestFault_* test
     # and the internal/faulttest harness under the race detector, on SQLite
     # and against real Postgres and MySQL. Deterministic by construction —
     # faults are "the Nth call", never a probability — and soaked 100x via
     # fault-soak.yml before it is proposed as a required check.
+    #
+    # Six shards (packages spread round-robin, so a new fault package lands
+    # in one on its own): compiling every test binary under -race serially
+    # is what outgrows one job, not the tests. Each shard compiles in a step
+    # of its own (its dependencies' race builds cached by setup-go), then
+    # runs the suite under FAULT_BUDGET_SECONDS, which fails the shard when
+    # the run takes longer than the budget.
     needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
     services:
       postgres:
         image: postgres:16-alpine
@@ -315,28 +326,56 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 12
+    env:
+      FAULT_SHARD: ${{ matrix.shard }}/6
+      FAULT_POSTGRES_DSN: postgres://gombit:gombit@127.0.0.1:5432/gombit?sslmode=disable
+      FAULT_MYSQL_DSN: gombit:gombit@tcp(127.0.0.1:3306)/gombit?parseTime=true
     steps:
       - name: Checkout
         uses: actions/checkout@v7
 
+      # A cache of its own (keyed on the suite script as well as go.sum),
+      # so it holds -race builds rather than the test job's plain ones.
       - name: Setup Go
         uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
+          cache-dependency-path: |
+            go.sum
+            scripts/test-faults.sh
 
       - name: Pre-fetch Go modules
         run: bash scripts/ci-prefetch-go-modules.sh
 
-      - name: Run the fault suite
+      - name: Compile the fault tests
         env:
           GOPROXY: "off"
-          FAULT_POSTGRES_DSN: postgres://gombit:gombit@127.0.0.1:5432/gombit?sslmode=disable
-          FAULT_MYSQL_DSN: gombit:gombit@tcp(127.0.0.1:3306)/gombit?parseTime=true
+          FAULT_COMPILE_ONLY: "1"
         run: |
           start=$(date +%s)
           make test-faults
-          echo "Fault suite wall time: $(( $(date +%s) - start ))s (budget: 120s)" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "Shard ${FAULT_SHARD} compile: $(( $(date +%s) - start ))s" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Run the fault suite (budget 120s)
+        env:
+          GOPROXY: "off"
+          FAULT_BUDGET_SECONDS: "120"
+        shell: bash -eo pipefail {0}
+        run: |
+          make test-faults 2>&1 | tee fault-run.log
+          grep 'test-faults: shard' fault-run.log >> "$GITHUB_STEP_SUMMARY"
+
+  fault-tests-result:
+    # One stable check name over the shards, to mark required once the soak
+    # has stayed clean.
+    name: Fault injection
+    needs: fault-tests
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every shard passed
+        run: test "${{ needs.fault-tests.result }}" = success
 
   database-postgres:
     name: Database (postgres)

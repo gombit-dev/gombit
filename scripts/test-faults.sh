@@ -14,7 +14,8 @@
 # Plain bash 3.2+ (macOS) and POSIX tools.
 #
 # FAULT_COUNT (default 1) repeats every test: FAULT_COUNT=100 is the flake
-# soak. Nothing here reaches the internet or needs credentials beyond the
+# soak. FAULT_SHARD=i/n runs one of n slices (CI's parallel jobs), and
+# FAULT_BUDGET_SECONDS fails a run that takes longer. Nothing here reaches the internet or needs credentials beyond the
 # test databases; plain `go test ./...` is unchanged by it.
 #
 #   bash scripts/test-faults.sh
@@ -24,13 +25,58 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+start=$(date +%s)
+
+# positive checks $2 is a plain base-10 positive integer: go test's flags
+# parse base 0, so a leading zero would be octal (010 is 8) and 00 is zero
+# (run nothing, pass).
+positive() {
+  case "$2" in
+  '' | *[!0-9]* | 0*)
+    echo "test-faults: $1 must be a positive base-10 integer without leading zeros, got '$2'" >&2
+    exit 2
+    ;;
+  esac
+}
+
 count="${FAULT_COUNT:-1}"
-case "$count" in
-'' | *[!0-9]* | 0)
-  echo "test-faults: FAULT_COUNT must be a positive integer, got '$count'" >&2
-  exit 2
-  ;;
-esac
+positive FAULT_COUNT "$count"
+
+# FAULT_SHARD=i/n runs the i-th of n round-robin slices of the suite's
+# packages (CI runs the slices as parallel jobs, since compiling every test
+# binary under -race serially outgrows one job's budget).
+shard=1
+shards=1
+if [ -n "${FAULT_SHARD:-}" ]; then
+  case "$FAULT_SHARD" in
+  */*)
+    shard="${FAULT_SHARD%/*}"
+    shards="${FAULT_SHARD#*/}"
+    ;;
+  *)
+    echo "test-faults: FAULT_SHARD must be i/n, got '$FAULT_SHARD'" >&2
+    exit 2
+    ;;
+  esac
+  positive "FAULT_SHARD's i" "$shard"
+  positive "FAULT_SHARD's n" "$shards"
+  if [ "$shard" -gt "$shards" ]; then
+    echo "test-faults: FAULT_SHARD $FAULT_SHARD: i is larger than n" >&2
+    exit 2
+  fi
+fi
+
+# FAULT_COMPILE_ONLY=1 builds every test binary the run would use and runs
+# no test (CI compiles, cached, in a step of its own, so the budget below
+# measures the suite, not a cold -race build).
+compileOnly="${FAULT_COMPILE_ONLY:-}"
+
+# FAULT_BUDGET_SECONDS fails the run when it takes longer (the PR job's
+# budget).
+budget="${FAULT_BUDGET_SECONDS:-}"
+if [ -n "$budget" ]; then
+  positive FAULT_BUDGET_SECONDS "$budget"
+fi
 
 # run echoes a command (database DSNs masked) and runs it.
 run() {
@@ -61,33 +107,75 @@ if [ "${#pkgs[@]}" -eq 0 ]; then
   exit 1
 fi
 
-run go test -race -count="$count" "$harness"
-run go test -race -count="$count" -run '^TestFault_' "${pkgs[@]}"
+# This shard's packages: every n-th of the harness plus the fault packages.
+all=("$harness" "${pkgs[@]}")
+mine=()
+i=0
+for pkg in "${all[@]}"; do
+  if [ $((i % shards + 1)) -eq "$shard" ]; then
+    mine+=("$pkg")
+  fi
+  i=$((i + 1))
+done
 
-if [ -z "${FAULT_POSTGRES_DSN:-}" ] && [ -z "${FAULT_MYSQL_DSN:-}" ]; then
-  exit 0
+# The tests each run selects: the harness whole, elsewhere TestFault_ only;
+# nothing when only compiling.
+harnessRun='.'
+faultRun='^TestFault_'
+if [ -n "$compileOnly" ]; then
+  harnessRun='^$'
+  faultRun='^$'
+  count=1
 fi
 
-# integrationFlag prints the prefix of pkg's -<prefix>.postgres-dsn flag, or
-# nothing when the package has no database integration tests.
-integrationFlag() {
-  { grep -rhoE --include='*_test.go' 'flag\.String\("[a-z]+\.postgres-dsn"' "$1" 2>/dev/null || true; } |
-    head -n1 | sed -E 's/.*"([a-z]+)\.postgres-dsn"/\1/'
-}
-
-for pkg in "$harness" "${pkgs[@]}"; do
-  prefix="$(integrationFlag "$pkg")"
-  [ -n "$prefix" ] || continue
-  args=()
-  if [ -n "${FAULT_POSTGRES_DSN:-}" ]; then
-    args+=("-$prefix.postgres-dsn" "$FAULT_POSTGRES_DSN")
-  fi
-  if [ -n "${FAULT_MYSQL_DSN:-}" ]; then
-    args+=("-$prefix.mysql-dsn" "$FAULT_MYSQL_DSN")
-  fi
-  filter='^TestFault_'
+faultPkgs=()
+for pkg in ${mine[@]+"${mine[@]}"}; do
   if [ "$pkg" = "$harness" ]; then
-    filter='.' # the harness's database tests run whole
+    run go test -race -count="$count" -run "$harnessRun" "$harness"
+  else
+    faultPkgs+=("$pkg")
   fi
-  run go test -tags integration -race -count="$count" -run "$filter" "$pkg" "${args[@]}"
 done
+if [ "${#faultPkgs[@]}" -gt 0 ]; then
+  run go test -race -count="$count" -run "$faultRun" "${faultPkgs[@]}"
+fi
+
+if [ -n "${FAULT_POSTGRES_DSN:-}${FAULT_MYSQL_DSN:-}" ]; then
+  # flagFor prints the -<prefix>.<name> flag pkg's tests define (e.g.
+  # -framework.postgres-dsn), or nothing when they define none.
+  flagFor() {
+    local prefix
+    prefix="$({ grep -rhoE --include='*_test.go' "flag\.String\(\"[a-z]+\.$2\"" "$1" 2>/dev/null || true; } |
+      head -n1 | sed -E "s/.*\"([a-z]+)\.$2\"/\1/")"
+    if [ -n "$prefix" ]; then
+      echo "-$prefix.$2"
+    fi
+  }
+
+  # Each package gets the flags it defines, for the dependencies configured.
+  for pkg in ${mine[@]+"${mine[@]}"}; do
+    args=()
+    for pair in "postgres-dsn:${FAULT_POSTGRES_DSN:-}" "mysql-dsn:${FAULT_MYSQL_DSN:-}"; do
+      name="${pair%%:*}"
+      value="${pair#*:}"
+      [ -n "$value" ] || continue
+      flag="$(flagFor "$pkg" "$name")"
+      if [ -n "$flag" ]; then
+        args+=("$flag" "$value")
+      fi
+    done
+    [ "${#args[@]}" -gt 0 ] || continue
+    filter="$faultRun"
+    if [ "$pkg" = "$harness" ]; then
+      filter="$harnessRun" # the harness's database tests run whole
+    fi
+    run go test -tags integration -race -count="$count" -run "$filter" "$pkg" "${args[@]}"
+  done
+fi
+
+elapsed=$(($(date +%s) - start))
+echo "test-faults: shard $shard/$shards took ${elapsed}s${budget:+ (budget ${budget}s)}"
+if [ -z "$compileOnly" ] && [ -n "$budget" ] && [ "$elapsed" -gt "$budget" ]; then
+  echo "test-faults: over budget: ${elapsed}s > ${budget}s; add a shard rather than drop scenarios" >&2
+  exit 1
+fi
