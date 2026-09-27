@@ -1,0 +1,39 @@
+package jobs
+
+import (
+	"context"
+	"time"
+)
+
+// Info describes the job a handler is running. Handlers read it with
+// InfoFromContext.
+type Info struct {
+	ID   string
+	Name string
+	// Version is the payload version the handler receives (the job's
+	// JobVersion); QueuedVersion is the one it was queued at, older when
+	// UpgradeFrom steps brought the payload forward.
+	Version       int
+	QueuedVersion int
+	Attempt       int
+	EnqueuedAt    time.Time
+}
+
+type infoKey struct{}
+
+// InfoFromContext returns the Info of the job running in ctx.
+func InfoFromContext(ctx context.Context) (Info, bool) {
+	info, ok := ctx.Value(infoKey{}).(Info)
+	return info, ok
+}
+
+// Propagator carries values from the dispatching context into the handler's
+// context, through Envelope.Metadata: request and trace IDs, so a job's logs
+// correlate with the request that queued it. Keys should be namespaced
+// ("gombit.request_id") because every propagator shares one map.
+type Propagator interface {
+	// Inject copies what ctx carries into metadata.
+	Inject(ctx context.Context, metadata map[string]string)
+	// Extract returns ctx with what metadata carries.
+	Extract(ctx context.Context, metadata map[string]string) context.Context
+}

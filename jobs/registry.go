@@ -1,0 +1,326 @@
+package jobs
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"reflect"
+	"sort"
+	"sync"
+	"time"
+
+	"github.com/google/uuid"
+)
+
+// Handler runs one job. Returning nil completes it; an error fails the
+// attempt. It must be safe to run more than once for the same job ID.
+type Handler[T Job] func(ctx context.Context, job T) error
+
+// Upgrade rewrites a payload from one version to the next.
+type Upgrade func(payload json.RawMessage) (json.RawMessage, error)
+
+// Registration errors. Registration happens at startup, so each is a
+// programming error to fix, not a runtime condition to handle.
+var (
+	ErrInvalidName    = errors.New("jobs: invalid job name")
+	ErrDuplicateName  = errors.New("jobs: job name already registered")
+	ErrInvalidJobType = errors.New("jobs: invalid job type")
+	ErrNameMismatch   = errors.New("jobs: job name does not match its registration")
+)
+
+// Registry binds job names to handlers. It encodes jobs for a queue and runs
+// the envelopes a queue hands back. It is safe for concurrent use; register
+// every job at startup, before the first Encode or Run.
+type Registry struct {
+	mu          sync.RWMutex
+	byName      map[string]*registration
+	byType      map[reflect.Type]*registration
+	propagators []Propagator
+	now         func() time.Time
+	newID       func() string
+}
+
+type registration struct {
+	name     string
+	version  int
+	goType   reflect.Type
+	upgrades map[int]Upgrade
+	// decode returns a call that runs the handler on the decoded job.
+	decode func(payload json.RawMessage) (func(ctx context.Context) error, error)
+}
+
+// RegistryOption configures NewRegistry.
+type RegistryOption func(*Registry)
+
+// WithPropagator adds a Propagator. Encode runs every propagator's Inject;
+// Run runs every Extract, in the order they were added.
+func WithPropagator(p Propagator) RegistryOption {
+	return func(r *Registry) { r.propagators = append(r.propagators, p) }
+}
+
+// WithClock sets the clock that stamps Envelope.EnqueuedAt (tests).
+func WithClock(now func() time.Time) RegistryOption {
+	return func(r *Registry) { r.now = now }
+}
+
+// WithIDGenerator sets the generator of Envelope.ID (tests). The default is a
+// random UUID.
+func WithIDGenerator(newID func() string) RegistryOption {
+	return func(r *Registry) { r.newID = newID }
+}
+
+// NewRegistry returns an empty registry.
+func NewRegistry(opts ...RegistryOption) *Registry {
+	r := &Registry{
+		byName: map[string]*registration{},
+		byType: map[reflect.Type]*registration{},
+		now:    time.Now,
+		newID:  func() string { return uuid.NewString() },
+	}
+	for _, opt := range opts {
+		opt(r)
+	}
+	return r
+}
+
+// RegisterOption configures one Register call.
+type RegisterOption func(*registerConfig)
+
+type registerConfig struct {
+	upgrades map[int]Upgrade
+}
+
+// UpgradeFrom registers the step that rewrites a version-`from` payload into
+// version from+1. Run chains the steps to bring an old payload up to the
+// job's JobVersion.
+func UpgradeFrom(from int, fn Upgrade) RegisterOption {
+	return func(c *registerConfig) {
+		if c.upgrades == nil {
+			c.upgrades = map[int]Upgrade{}
+		}
+		c.upgrades[from] = fn
+	}
+}
+
+// Register binds handler to job type T under T's JobName. T must be a struct
+// type (not a pointer) that encodes to JSON. It fails on an invalid name, a
+// name registered twice (by this type or another), and an UpgradeFrom step outside
+// [1, JobVersion).
+func Register[T Job](r *Registry, handler Handler[T], opts ...RegisterOption) error {
+	goType := reflect.TypeFor[T]()
+	if goType.Kind() != reflect.Struct {
+		return fmt.Errorf("%w: %s is not a struct type; register the struct, with a value-receiver JobName", ErrInvalidJobType, goType)
+	}
+	if handler == nil {
+		return fmt.Errorf("%w: %s has a nil handler", ErrInvalidJobType, goType)
+	}
+	var zero T
+	name := zero.JobName()
+	if !ValidName(name) {
+		return fmt.Errorf("%w: %q (%s): use 1-%d characters of a-z, 0-9, _ . : -, starting with a letter or digit", ErrInvalidName, name, goType, maxNameLen)
+	}
+	if _, err := json.Marshal(zero); err != nil {
+		return fmt.Errorf("%w: %s does not encode to JSON: %v", ErrInvalidJobType, goType, err)
+	}
+	version := jobVersion(zero)
+	if version < 1 {
+		return fmt.Errorf("%w: %s reports JobVersion %d; versions start at 1", ErrInvalidJobType, goType, version)
+	}
+	var cfg registerConfig
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	for from, fn := range cfg.upgrades {
+		if from < 1 || from >= version || fn == nil {
+			return fmt.Errorf("%w: %s: UpgradeFrom(%d) is outside versions 1..%d or has no function", ErrInvalidJobType, goType, from, version-1)
+		}
+	}
+
+	reg := &registration{
+		name:     name,
+		version:  version,
+		goType:   goType,
+		upgrades: cfg.upgrades,
+		decode: func(payload json.RawMessage) (func(ctx context.Context) error, error) {
+			var job T
+			if err := json.Unmarshal(payload, &job); err != nil {
+				return nil, err
+			}
+			return func(ctx context.Context) error { return handler(ctx, job) }, nil
+		},
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	// The name comes from the type's zero value, so a type registered twice
+	// collides on its name too.
+	if prev, ok := r.byName[name]; ok {
+		return fmt.Errorf("%w: %q is %s's name already, so %s cannot use it", ErrDuplicateName, name, prev.goType, goType)
+	}
+	r.byName[name] = reg
+	r.byType[goType] = reg
+	return nil
+}
+
+// MustRegister is Register that panics on error, for registration at
+// startup.
+func MustRegister[T Job](r *Registry, handler Handler[T], opts ...RegisterOption) {
+	if err := Register(r, handler, opts...); err != nil {
+		panic(err)
+	}
+}
+
+// Names returns the registered job names, sorted.
+func (r *Registry) Names() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	names := make([]string, 0, len(r.byName))
+	for name := range r.byName {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// Encode turns a registered job into an envelope for a queue: a fresh ID,
+// the registered name and version, the JSON payload, and the metadata the
+// propagators take from ctx. An unregistered job fails here, at dispatch,
+// rather than later in a worker.
+func (r *Registry) Encode(ctx context.Context, job Job) (Envelope, error) {
+	if job == nil {
+		return Envelope{}, fmt.Errorf("%w: nil job", ErrInvalidJobType)
+	}
+	goType := reflect.TypeOf(job)
+	value := reflect.ValueOf(job)
+	if goType.Kind() == reflect.Pointer {
+		if value.IsNil() {
+			return Envelope{}, fmt.Errorf("%w: nil %s", ErrInvalidJobType, goType)
+		}
+		goType = goType.Elem()
+	}
+	name := job.JobName()
+
+	r.mu.RLock()
+	reg, ok := r.byType[goType]
+	r.mu.RUnlock()
+	if !ok {
+		return Envelope{}, &Error{Kind: KindUnknownJob, Name: name, Err: fmt.Errorf("%s is not registered", goType)}
+	}
+	if name != reg.name {
+		return Envelope{}, fmt.Errorf("%w: %s was registered as %q but this value names itself %q; JobName must be a constant", ErrNameMismatch, goType, reg.name, name)
+	}
+	payload, err := json.Marshal(job)
+	if err != nil {
+		return Envelope{}, fmt.Errorf("jobs: encode %q payload: %w", name, err)
+	}
+	env := Envelope{
+		ID:         r.newID(),
+		Name:       reg.name,
+		Version:    reg.version,
+		Payload:    payload,
+		EnqueuedAt: r.now().UTC(),
+	}
+	if len(r.propagators) > 0 {
+		metadata := map[string]string{}
+		for _, p := range r.propagators {
+			p.Inject(ctx, metadata)
+		}
+		if len(metadata) > 0 {
+			env.Metadata = metadata
+		}
+	}
+	return env, nil
+}
+
+// Run decodes env and calls its handler with a context carrying the job's
+// Info and the propagated metadata. Every failure is an *Error; Classify
+// reports its Kind. A panicking handler is recovered as KindPanic, so one job
+// cannot take a worker down.
+func (r *Registry) Run(ctx context.Context, env Envelope) (err error) {
+	r.mu.RLock()
+	reg, ok := r.byName[env.Name]
+	r.mu.RUnlock()
+	if !ok {
+		return &Error{Kind: KindUnknownJob, Name: env.Name, Version: env.Version}
+	}
+	// Everything past the lookup runs application code (upgrade steps, a
+	// payload's UnmarshalJSON, propagators, the handler), so a panic anywhere
+	// in it is this job's failure, not the worker's.
+	defer func() {
+		if p := recover(); p != nil {
+			err = &Error{Kind: KindPanic, Name: reg.name, Version: reg.version, Err: fmt.Errorf("%v", p)}
+		}
+	}()
+	payload, err := reg.upgrade(env)
+	if err != nil {
+		return err
+	}
+	call, err := reg.decode(payload)
+	if err != nil {
+		return &Error{Kind: KindDecode, Name: reg.name, Version: reg.version, Err: err}
+	}
+	for _, p := range r.propagators {
+		ctx = p.Extract(ctx, env.Metadata)
+	}
+	ctx = context.WithValue(ctx, infoKey{}, Info{
+		ID:            env.ID,
+		Name:          reg.name,
+		Version:       reg.version,
+		QueuedVersion: queuedVersion(env),
+		Attempt:       env.Attempt,
+		EnqueuedAt:    env.EnqueuedAt,
+	})
+	if err := call(ctx); err != nil {
+		return &Error{Kind: KindHandler, Name: reg.name, Version: reg.version, Err: err}
+	}
+	return nil
+}
+
+// upgrade brings env's payload to the registered version.
+func (reg *registration) upgrade(env Envelope) (json.RawMessage, error) {
+	version := queuedVersion(env)
+	if version < 1 {
+		return nil, &Error{Kind: KindDecode, Name: reg.name, Version: env.Version, Err: fmt.Errorf("invalid payload version %d", env.Version)}
+	}
+	if version > reg.version {
+		return nil, &Error{Kind: KindUnsupportedVersion, Name: reg.name, Version: version,
+			Err: fmt.Errorf("this binary handles up to version %d; a newer producer queued it", reg.version)}
+	}
+	payload := env.Payload
+	if trimmed := bytes.TrimSpace(payload); len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		// A job is a struct: json.Unmarshal would turn null into a zero-value
+		// job and run the handler on it.
+		return nil, &Error{Kind: KindDecode, Name: reg.name, Version: version, Err: errors.New("empty or null payload")}
+	}
+	for v := version; v < reg.version; v++ {
+		step, ok := reg.upgrades[v]
+		if !ok {
+			return nil, &Error{Kind: KindUnsupportedVersion, Name: reg.name, Version: version,
+				Err: fmt.Errorf("no UpgradeFrom(%d) step to reach version %d", v, reg.version)}
+		}
+		next, err := step(payload)
+		if err != nil {
+			return nil, &Error{Kind: KindDecode, Name: reg.name, Version: version,
+				Err: fmt.Errorf("upgrade from version %d: %w", v, err)}
+		}
+		payload = next
+	}
+	return payload, nil
+}
+
+// queuedVersion is the payload version env was queued at. An envelope written
+// without one predates versioning: version 1.
+func queuedVersion(env Envelope) int {
+	if env.Version == 0 {
+		return 1
+	}
+	return env.Version
+}
+
+func jobVersion(job Job) int {
+	if v, ok := job.(Versioned); ok {
+		return v.JobVersion()
+	}
+	return 1
+}

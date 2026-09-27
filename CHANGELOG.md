@@ -12,6 +12,15 @@ version.
 
 ### Added
 
+- `jobs` package: the background-job contract. A job is a struct with a
+  constant `JobName`; `jobs.Register` binds a typed handler to it,
+  `Registry.Encode` turns a job into the `Envelope` a queue stores, and
+  `Registry.Run` decodes it and runs the handler. Failures are classified
+  (`unknown_job`, `decode`, `unsupported_version`, `panic`, `handler`),
+  payloads version through `UpgradeFrom` steps, and
+  `framework.JobPropagator` carries the dispatching request's request and
+  trace IDs into the handler
+  ([#314](https://github.com/gombit-dev/gombit/issues/314)).
 - `gombit db check` validates the whole schema chain in one non-interactive
   command: generated contract, model registry (`AutoMigrate` ↔
   `models.json`), migration-directory integrity, migration safety, models ↔
