@@ -22,7 +22,7 @@ New here? [Install](installation.md), then work through the
 | [router.md](router.md) | Application-owned route registration and the raw `*gin.Engine` escape hatch |
 | [logging.md](logging.md) | Runtime logging |
 | [cache.md](cache.md) | Cache runtime (memory, Redis, noop) |
-| [jobs.md](jobs.md) | Background jobs: typed jobs, the registry, payload versioning (JOBS-1) |
+| [jobs.md](jobs.md) | Background jobs: typed jobs, the registry, payload versioning, queue drivers, the worker, retries, delayed and failed jobs, duplicates, observability, and testing (`jobstest`) |
 | [security.md](security.md) | The security headers applied per response kind (API vs HTML) and why |
 
 ## Data

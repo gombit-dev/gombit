@@ -12,6 +12,13 @@ version.
 
 ### Added
 
+- Testing jobs: package `jobs/jobstest` has a `Queue` that records every
+  dispatch, for tests that assert what was queued without running it
+  (`AssertDispatched`, `AssertDispatchedTimes`, `AssertNotDispatched`,
+  `AssertNothingDispatched`, `jobstest.Payload[T]`) and without Redis. `RunAll`
+  runs the queued jobs in the test when it wants their effects; its clock
+  stands still until `Advance`, so delayed jobs are tested without waiting.
+  `jobs.ContextWithOnceStore` lets any consumer back `jobs.Once`. docs/jobs.md
 - Job observability: Prometheus metrics for job outcomes (counted once the
   queue committed them), run time, queue latency, in-flight jobs, and queue
   depth (`gombit_jobs_*`, the job's name as `job_name`), on the app's

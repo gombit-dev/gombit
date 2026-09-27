@@ -1,10 +1,10 @@
 # Background jobs
 
-> **Status:** the job contract (JOBS-1), queue drivers (JOBS-2), the worker
-> (JOBS-3), retries, backoff, and timeouts (JOBS-4), delayed jobs (JOBS-5),
-> failed jobs (JOBS-6), duplicate handling (JOBS-7), and observability
-> (JOBS-8). A test queue lands in the rest of the
-> [JOBS-0 epic](https://github.com/gombit-dev/gombit/issues/278).
+> **Status:** the [JOBS-0 epic](https://github.com/gombit-dev/gombit/issues/278):
+> the job contract (JOBS-1), queue drivers (JOBS-2), the worker (JOBS-3),
+> retries, backoff, and timeouts (JOBS-4), delayed jobs (JOBS-5), failed jobs
+> (JOBS-6), duplicate handling (JOBS-7), observability (JOBS-8), and the test
+> queue (JOBS-9).
 
 A job is work that should not run inside an HTTP request: sending an email,
 resizing an image, delivering a webhook. Application code defines a job as a
@@ -381,7 +381,10 @@ between `fn` succeeding and the record keeps the lock until it expires, and the
 next delivery then runs `fn` again. When an effect must happen exactly once,
 make it idempotent at its destination too: a unique constraint, an idempotency
 key the other system honors (payment APIs take one; use the job ID). Outside a
-worker (the `sync` driver, a unit test) `Once` just runs `fn`.
+worker (the `sync` driver, a unit test) `Once` just runs `fn`; `jobstest`'s
+`RunAll` remembers effects like a worker does. A consumer of your own gives
+its handlers a store with `jobs.ContextWithOnceStore(ctx, store)` (the memory
+and Redis queues are `OnceStore`s).
 
 ## Failed jobs
 
@@ -447,6 +450,59 @@ and an empty or `null` result from any step is a `decode` failure, never a
 zero-value job. A version newer than the
 binary, or an older one with a missing step, is `unsupported_version`. Keep an
 upgrade step until no queue can still hold jobs of that version.
+
+## Testing
+
+Package `jobs/jobstest` tests code that dispatches jobs without Redis or a
+worker. Its `Queue` is an in-memory queue that records every job pushed to
+it; attach its dispatcher to the app and assert what was queued:
+
+```go
+func TestSignUpQueuesTheWelcomeEmail(t *testing.T) {
+	q := jobstest.New()
+	app, err := framework.New(framework.WithConfig(config.Default()), framework.WithJobs(q.Dispatcher()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	registerJobs(app.Jobs().Registry()) // the app's own registration
+
+	// ... call the code under test, which dispatches ...
+
+	d := q.AssertDispatched(t, "send_welcome_email") // the last one
+	if job := jobstest.Payload[SendWelcomeEmail](t, d); job.UserID != 42 {
+		t.Fatalf("queued %+v", job)
+	}
+	q.AssertNotDispatched(t, "send_receipt")
+}
+```
+
+Nothing runs until the test says so. The assertions are `AssertDispatched`,
+`AssertDispatchedTimes(t, name, n)`, `AssertNotDispatched`, and
+`AssertNothingDispatched`; `q.Dispatched(name)` returns the records (queue,
+envelope, `AvailableAt`, and the `Unique` key, if any) and
+`jobstest.Payloads[T](t, q)` decodes every `T` dispatched. A `Unique` dispatch
+refused as a duplicate is not recorded. `Reset` forgets the records, leaving
+the queued jobs queued.
+
+`q.RunAll(ctx)` runs the queued jobs in the test's goroutine, through the
+registry, until none is left: jobs they dispatch run too, and `jobs.Once`
+remembers effects as under a worker. Each job gets one attempt; a failure is
+kept with the failed jobs (`q.Failed`) and its error returned, joined with
+the others, once the rest ran; when `ctx` ends, `RunAll` stops and leaves
+the interrupted job queued. The queue's clock stands still (from
+`jobstest.WithStart(t)`, or the time `New` was called), so delayed jobs wait
+until `q.Advance(d)` moves it past them.
+
+The queue has a registry of its own, stamped with its clock and without the
+app's propagators; add them with
+`jobstest.WithRegistryOptions(jobs.WithPropagator(framework.JobPropagator()))`
+when a test checks the request ID a job carries (or pass a whole registry
+with `jobstest.WithRegistry`). Put jobs on the queue through `q` (its
+dispatcher or `q.Push`), which is what records them.
+
+The queue is a real one (a `*jobs.MemoryQueue` underneath), so a test of a
+retry policy runs a `jobs.Worker` over it. The worker schedules retries by
+the wall clock, so build that queue with `jobstest.WithWallClock()`.
 
 ## Context propagation
 

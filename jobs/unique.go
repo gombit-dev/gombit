@@ -127,8 +127,10 @@ func LockFor(d time.Duration) OnceOption { return func(c *onceConfig) { c.lock =
 
 type onceStoreKey struct{}
 
-// withOnceStore makes Once in ctx use store.
-func withOnceStore(ctx context.Context, store OnceStore) context.Context {
+// ContextWithOnceStore makes Once in ctx use store. The worker does this for
+// every job it runs, with its queue; a consumer of your own (or a test
+// runner) does the same so handlers' Once calls are remembered.
+func ContextWithOnceStore(ctx context.Context, store OnceStore) context.Context {
 	return context.WithValue(ctx, onceStoreKey{}, store)
 }
 

@@ -43,36 +43,14 @@ func main() {
 	dispatcher := app.Jobs()
 
 	var done atomic.Int32
-	jobs.MustRegister(dispatcher.Registry(), func(ctx context.Context, job SendWelcomeEmail) error {
-		defer done.Add(1)
-		info, _ := jobs.InfoFromContext(ctx)
-		// Once per job: a redelivered job does not send the email twice.
-		return jobs.Once(ctx, "welcome-email:"+info.ID, func(context.Context) error {
-			fmt.Printf("welcome user %d (job %s v%d, queued as v%d, attempt %d of %d)\n",
-				job.UserID, info.Name, info.Version, info.QueuedVersion, info.Attempt, info.MaxAttempts)
-			return nil
-		})
-	}, jobs.WithOptions(jobs.Options{
-		MaxAttempts: 8,
-		Timeout:     30 * time.Second,
-		Backoff:     jobs.Jittered(jobs.Exponential(5*time.Second, time.Hour)),
-	}), jobs.UpgradeFrom(1, func(payload json.RawMessage) (json.RawMessage, error) {
-		var v1 struct {
-			UserID uint   `json:"user_id"`
-			Email  string `json:"email"`
-		}
-		if err := json.Unmarshal(payload, &v1); err != nil {
-			return nil, err
-		}
-		return json.Marshal(SendWelcomeEmail{UserID: v1.UserID})
-	}))
+	registerJobs(dispatcher.Registry(), &done)
 
 	ctx := context.Background()
-	if _, err := dispatcher.Dispatch(ctx, SendWelcomeEmail{UserID: 42}, jobs.Unique("welcome:42", time.Hour)); err != nil {
+	if err := signUp(ctx, dispatcher, 42); err != nil {
 		log.Fatal(err)
 	}
 	// A second welcome for the same user while the first is queued is refused.
-	if _, err := dispatcher.Dispatch(ctx, SendWelcomeEmail{UserID: 42}, jobs.Unique("welcome:42", time.Hour)); !errors.Is(err, jobs.ErrDuplicateDispatch) {
+	if err := signUp(ctx, dispatcher, 42); !errors.Is(err, jobs.ErrDuplicateDispatch) {
 		log.Fatalf("duplicate dispatch: got %v, want ErrDuplicateDispatch", err)
 	}
 
@@ -107,4 +85,39 @@ func main() {
 		log.Fatalf("unregistered job: got %v, want unknown_job", err)
 	}
 	fmt.Printf("unregistered job: %s (%v)\n", jobs.Classify(err), err)
+}
+
+// signUp is the application code that queues work: here, the welcome email
+// of a new user, once while one is queued. main_test.go tests it with
+// jobstest, without a worker.
+func signUp(ctx context.Context, dispatcher *jobs.Dispatcher, userID uint) error {
+	_, err := dispatcher.Dispatch(ctx, SendWelcomeEmail{UserID: userID}, jobs.Unique(fmt.Sprintf("welcome:%d", userID), time.Hour))
+	return err
+}
+
+// registerJobs registers the app's jobs; done counts finished runs.
+func registerJobs(registry *jobs.Registry, done *atomic.Int32) {
+	jobs.MustRegister(registry, func(ctx context.Context, job SendWelcomeEmail) error {
+		defer done.Add(1)
+		info, _ := jobs.InfoFromContext(ctx)
+		// Once per job: a redelivered job does not send the email twice.
+		return jobs.Once(ctx, "welcome-email:"+info.ID, func(context.Context) error {
+			fmt.Printf("welcome user %d (job %s v%d, queued as v%d, attempt %d of %d)\n",
+				job.UserID, info.Name, info.Version, info.QueuedVersion, info.Attempt, info.MaxAttempts)
+			return nil
+		})
+	}, jobs.WithOptions(jobs.Options{
+		MaxAttempts: 8,
+		Timeout:     30 * time.Second,
+		Backoff:     jobs.Jittered(jobs.Exponential(5*time.Second, time.Hour)),
+	}), jobs.UpgradeFrom(1, func(payload json.RawMessage) (json.RawMessage, error) {
+		var v1 struct {
+			UserID uint   `json:"user_id"`
+			Email  string `json:"email"`
+		}
+		if err := json.Unmarshal(payload, &v1); err != nil {
+			return nil, err
+		}
+		return json.Marshal(SendWelcomeEmail{UserID: v1.UserID})
+	}))
 }

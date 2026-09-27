@@ -255,7 +255,7 @@ func reserveBackoff(poll time.Duration, failures int) time.Duration {
 func (w *Worker) process(jobCtx context.Context, d Delivery) {
 	runCtx, cancelRun := context.WithCancel(jobCtx)
 	if store, ok := w.queue.(OnceStore); ok {
-		runCtx = withOnceStore(runCtx, store)
+		runCtx = ContextWithOnceStore(runCtx, store)
 	}
 	defer cancelRun()
 	stopRenewing := w.renewLease(runCtx, cancelRun, d)
