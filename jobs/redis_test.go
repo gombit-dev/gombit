@@ -275,3 +275,122 @@ func TestRedisFailedReadsInPages(t *testing.T) {
 		t.Fatalf("Failed(5) over pages of 3 = %d jobs, %v", len(five), err)
 	}
 }
+
+// buryAt pushes a job and buries it as failed at clock's time.
+func buryAt(t *testing.T, q *jobs.RedisQueue, id string, at time.Time) {
+	t.Helper()
+	ctx := context.Background()
+	if err := q.Push(ctx, "default", envelope(id), time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	d := mustReserve(t, q, "default")
+	if err := q.Bury(ctx, d, jobs.Failure{Reason: jobs.ReasonExhausted, At: at}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func failedIDs(t *testing.T, q *jobs.RedisQueue, limit int) []string {
+	t.Helper()
+	failed, err := q.Failed(context.Background(), "default", limit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := make([]string, len(failed))
+	for i, f := range failed {
+		ids[i] = f.Envelope.ID
+	}
+	return ids
+}
+
+// TestRedisFailedReadsPastHoles: failed IDs whose job hash is gone do not
+// shorten a read (a short read is the end of the set, and `retry --all`
+// stops there), even when a whole page of them is in front; they are
+// dropped from the set as the read passes them.
+func TestRedisFailedReadsPastHoles(t *testing.T) {
+	addr := redisTestAddr(t)
+	defer jobs.SetFailedPageSize(3)()
+	ns := testNamespace()
+	ctx := context.Background()
+	clock := newFakeClock()
+	client := redisClient(t, addr, ns)
+	q := jobs.NewRedisQueue(client, ns, jobs.WithRedisClock(clock.Now))
+	for i := 0; i < 8; i++ {
+		buryAt(t, q, fmt.Sprintf("f%d", i), clock.Now())
+		clock.Advance(time.Second)
+	}
+	for _, id := range []string{"f7", "f6", "f5", "f3"} {
+		if err := client.Del(ctx, fmt.Sprintf("{%s:jobs:default}:job:%s", ns, id)).Err(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := failedIDs(t, q, 2); fmt.Sprint(got) != "[f4 f2]" {
+		t.Fatalf("Failed(2) behind a page of holes = %v, want [f4 f2]", got)
+	}
+	if got := failedIDs(t, q, 0); fmt.Sprint(got) != "[f4 f2 f1 f0]" {
+		t.Fatalf("Failed(all) = %v", got)
+	}
+	if n := client.ZCard(ctx, fmt.Sprintf("{%s:jobs:default}:failed", ns)).Val(); n != 4 {
+		t.Fatalf("failed set holds %d IDs after the read, want the 4 real jobs", n)
+	}
+}
+
+// TestRedisFailedReadSurvivesChanges: a read in pages resumes after the last
+// job it saw, not at a rank: newer failures and deletions between pages
+// neither repeat nor skip jobs.
+func TestRedisFailedReadSurvivesChanges(t *testing.T) {
+	addr := redisTestAddr(t)
+	defer jobs.SetFailedPageSize(3)()
+	ns := testNamespace()
+	ctx := context.Background()
+	clock := newFakeClock()
+	q := jobs.NewRedisQueue(redisClient(t, addr, ns), ns, jobs.WithRedisClock(clock.Now))
+	for i := 0; i < 7; i++ {
+		buryAt(t, q, fmt.Sprintf("f%d", i), clock.Now())
+		clock.Advance(time.Second)
+	}
+	fired := false
+	defer jobs.SetFailedPageHook(func() {
+		if fired {
+			return
+		}
+		fired = true
+		for i := 0; i < 3; i++ { // a page of newer failures
+			buryAt(t, q, fmt.Sprintf("n%d", i), clock.Now())
+			clock.Advance(time.Second)
+		}
+		for _, id := range []string{"f6", "f5"} { // read already
+			if err := q.ForgetFailed(ctx, "default", id); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})()
+	if got := failedIDs(t, q, 0); fmt.Sprint(got) != "[f6 f5 f4 f3 f2 f1 f0]" {
+		t.Fatalf("Failed(all) with changes between pages = %v", got)
+	}
+}
+
+// TestRedisFailedReadAcrossATie: jobs that failed in the same instant are
+// read once each, even when the job a page ended on leaves the set.
+func TestRedisFailedReadAcrossATie(t *testing.T) {
+	addr := redisTestAddr(t)
+	defer jobs.SetFailedPageSize(2)()
+	ns := testNamespace()
+	ctx := context.Background()
+	clock := newFakeClock()
+	q := jobs.NewRedisQueue(redisClient(t, addr, ns), ns, jobs.WithRedisClock(clock.Now))
+	for i := 0; i < 5; i++ {
+		buryAt(t, q, fmt.Sprintf("t%d", i), clock.Now())
+	}
+	fired := false
+	defer jobs.SetFailedPageHook(func() {
+		if !fired {
+			fired = true
+			if err := q.ForgetFailed(ctx, "default", "t3"); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})()
+	if got := failedIDs(t, q, 0); fmt.Sprint(got) != "[t4 t3 t2 t1 t0]" {
+		t.Fatalf("Failed(all) across a tie = %v", got)
+	}
+}

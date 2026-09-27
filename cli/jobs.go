@@ -168,10 +168,14 @@ func newJobsRetryCommand(stdout io.Writer) *cobra.Command {
 			}
 			return withJobsQueue(cmd, "retry", func(ctx context.Context, q jobs.Queue, queue string) error {
 				retry := func(id string) error {
-					if err := q.RetryFailed(ctx, queue, id); err != nil {
+					err := q.RetryFailed(ctx, queue, id)
+					if all && errors.Is(err, jobs.ErrNotFailed) {
+						return nil // retried or forgotten since it was listed
+					}
+					if err != nil {
 						return err
 					}
-					_, err := fmt.Fprintf(stdout, "Retrying %s on %s.\n", id, queue)
+					_, err = fmt.Fprintf(stdout, "Retrying %s on %s.\n", id, queue)
 					return err
 				}
 				if !all {
@@ -184,7 +188,8 @@ func newJobsRetryCommand(stdout io.Writer) *cobra.Command {
 				}
 				// Page through the failed set: a retried job leaves it, so each
 				// read is the next page, and an outage's worth of failures is
-				// never one read.
+				// never one read. A short page is the end: Failed returns
+				// fewer than asked only when the set has no more.
 				total := 0
 				for {
 					page, err := q.Failed(ctx, queue, retryAllPage)
