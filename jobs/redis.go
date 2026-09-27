@@ -137,18 +137,19 @@ if unique and unique ~= '' and redis.call('GET', unique) == id then redis.call('
 // reserveScript: KEYS pending, reserved; ARGV now ms, lease deadline ms,
 // receipt, job key prefix. Leases the earliest-available job: the first
 // pending job due by now or the first expired lease, whichever became
-// available first. Returns false when none is, else {id, envelope, attempts}.
+// available first. Returns false when none is, else {id, envelope, attempts,
+// available-since ms}.
 var reserveScript = redis.NewScript(`
 local now = tonumber(ARGV[1])
 while true do
   local p = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', now, 'WITHSCORES', 'LIMIT', 0, 1)
   local r = redis.call('ZRANGEBYSCORE', KEYS[2], '-inf', now, 'WITHSCORES', 'LIMIT', 0, 1)
-  local member, from
+  local member, from, since
   if #p > 0 and #r > 0 then
     local ps, rs = tonumber(p[2]), tonumber(r[2])
-    if rs < ps or (rs == ps and r[1] < p[1]) then member, from = r[1], KEYS[2] else member, from = p[1], KEYS[1] end
-  elseif #p > 0 then member, from = p[1], KEYS[1]
-  elseif #r > 0 then member, from = r[1], KEYS[2]
+    if rs < ps or (rs == ps and r[1] < p[1]) then member, from, since = r[1], KEYS[2], r[2] else member, from, since = p[1], KEYS[1], p[2] end
+  elseif #p > 0 then member, from, since = p[1], KEYS[1], p[2]
+  elseif #r > 0 then member, from, since = r[1], KEYS[2], r[2]
   else return false end
   redis.call('ZREM', from, member)
   local id = string.sub(member, 18)
@@ -157,7 +158,7 @@ while true do
     local attempts = redis.call('HINCRBY', job, 'attempts', 1)
     redis.call('HSET', job, 'receipt', ARGV[3])
     redis.call('ZADD', KEYS[2], ARGV[2], member)
-    return {id, redis.call('HGET', job, 'env'), attempts}
+    return {id, redis.call('HGET', job, 'env'), attempts, since}
   end
 end
 `)
@@ -366,8 +367,12 @@ func (q *RedisQueue) Reserve(ctx context.Context, queues []string, lease time.Du
 		if err != nil {
 			return Delivery{}, fmt.Errorf("jobs: reserve from %s: %w", queue, err)
 		}
-		if len(res) != 3 {
+		if len(res) != 4 {
 			return Delivery{}, fmt.Errorf("jobs: reserve from %s: unexpected reply %v", queue, res)
+		}
+		var availableAt time.Time
+		if ms, err := strconv.ParseFloat(fmt.Sprint(res[3]), 64); err == nil {
+			availableAt = time.UnixMilli(int64(ms))
 		}
 		id := fmt.Sprint(res[0])
 		attempts, err := toInt(res[2])
@@ -380,10 +385,10 @@ func (q *RedisQueue) Reserve(ctx context.Context, queues []string, lease time.Du
 			// Leased, not lost: the delivery carries the failure so the
 			// caller buries it (keeping the stored bytes) rather than meet
 			// it on every lease expiry.
-			return Delivery{Queue: queue, Envelope: Envelope{ID: id, Attempt: attempts}, Receipt: receipt, Err: err}, nil
+			return Delivery{Queue: queue, Envelope: Envelope{ID: id, Attempt: attempts}, Receipt: receipt, Err: err, AvailableAt: availableAt}, nil
 		}
 		env.Attempt = attempts
-		return Delivery{Queue: queue, Envelope: env, Receipt: receipt}, nil
+		return Delivery{Queue: queue, Envelope: env, Receipt: receipt, AvailableAt: availableAt}, nil
 	}
 	return Delivery{}, ErrNoJob
 }
@@ -816,6 +821,32 @@ func (q *RedisQueue) AbandonOnce(ctx context.Context, key, token string) error {
 		return ErrClosed
 	}
 	return onceAbandonScript.Run(ctx, q.client, []string{q.onceKey(key)}, token).Err()
+}
+
+// Stats implements Queue.
+func (q *RedisQueue) Stats(ctx context.Context, queue string) (QueueStats, error) {
+	if q.closed.Load() {
+		return QueueStats{}, ErrClosed
+	}
+	if !ValidName(queue) {
+		return QueueStats{}, fmt.Errorf("%w: %q", ErrInvalidQueue, queue)
+	}
+	k := q.keys(queue)
+	now := strconv.FormatInt(q.now().UnixMilli(), 10)
+	pipe := q.client.Pipeline()
+	ready := pipe.ZCount(ctx, k.pending, "-inf", now)
+	scheduled := pipe.ZCount(ctx, k.pending, "("+now, "+inf")
+	reserved := pipe.ZCard(ctx, k.reserved)
+	failed := pipe.ZCard(ctx, k.failed)
+	oldest := pipe.ZRangeWithScores(ctx, k.pending, 0, 0)
+	if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
+		return QueueStats{}, fmt.Errorf("jobs: stats of %s: %w", queue, err)
+	}
+	st := QueueStats{Ready: int(ready.Val()), Scheduled: int(scheduled.Val()), Reserved: int(reserved.Val()), Failed: int(failed.Val())}
+	if z := oldest.Val(); len(z) == 1 && st.Ready > 0 {
+		st.OldestReady = time.UnixMilli(int64(z[0].Score))
+	}
+	return st, nil
 }
 
 // Close implements Queue: later calls return ErrClosed. It closes the client

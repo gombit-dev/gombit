@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Handler runs one job. Returning nil completes it; an error fails the
@@ -221,6 +222,14 @@ func MustRegister[T Job](r *Registry, handler Handler[T], opts ...RegisterOption
 	}
 }
 
+// Has reports whether a handler is registered for name.
+func (r *Registry) Has(name string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, ok := r.byName[name]
+	return ok
+}
+
 // Names returns the registered job names, sorted.
 func (r *Registry) Names() []string {
 	r.mu.RLock()
@@ -306,6 +315,14 @@ func (r *Registry) Run(ctx context.Context, env Envelope) (err error) {
 	if !ok {
 		return &Error{Kind: KindUnknownJob, Name: env.Name, Version: env.Version}
 	}
+	// The run's span, started once the propagators restored the trace. Its
+	// end is deferred before the recovery below so it sees a recovered panic.
+	var span trace.Span
+	defer func() {
+		if span != nil {
+			endRunSpan(span, err)
+		}
+	}()
 	// Everything past the lookup runs application code (upgrade steps, a
 	// payload's UnmarshalJSON, propagators, the handler), so a panic anywhere
 	// in it is this job's failure, not the worker's.
@@ -314,6 +331,12 @@ func (r *Registry) Run(ctx context.Context, env Envelope) (err error) {
 			err = &Error{Kind: KindPanic, Name: reg.name, Version: reg.version, Err: fmt.Errorf("%v", p)}
 		}
 	}()
+	// Restore the dispatching context and start the run's span first, so a
+	// run that fails in an upgrade step or the decoder is traced too.
+	for _, p := range r.propagators {
+		ctx = p.Extract(ctx, env.Metadata)
+	}
+	ctx, span = startRunSpan(ctx, reg.name, env.ID, reg.version, env.Attempt)
 	payload, err := reg.upgrade(env)
 	if err != nil {
 		return err
@@ -321,9 +344,6 @@ func (r *Registry) Run(ctx context.Context, env Envelope) (err error) {
 	call, err := reg.decode(payload)
 	if err != nil {
 		return &Error{Kind: KindDecode, Name: reg.name, Version: reg.version, Err: err}
-	}
-	for _, p := range r.propagators {
-		ctx = p.Extract(ctx, env.Metadata)
 	}
 	ctx = context.WithValue(ctx, infoKey{}, Info{
 		ID:            env.ID,

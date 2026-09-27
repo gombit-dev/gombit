@@ -203,13 +203,14 @@ func (q *MemoryQueue) Reserve(_ context.Context, queues []string, lease time.Dur
 		if next == nil {
 			continue
 		}
+		availableAt := next.readyAt()
 		next.attempts++
 		next.reserved = true
 		next.receipt = uuid.NewString()
 		next.leaseDeadline = now.Add(lease)
 		env := next.env
 		env.Attempt = next.attempts
-		return Delivery{Queue: queue, Envelope: env, Receipt: next.receipt}, nil
+		return Delivery{Queue: queue, Envelope: env, Receipt: next.receipt, AvailableAt: availableAt}, nil
 	}
 	return Delivery{}, ErrNoJob
 }
@@ -486,6 +487,39 @@ func (q *MemoryQueue) leased(d Delivery) (*memoryJob, error) {
 		return nil, fmt.Errorf("%w: %s", ErrLeaseLost, d.Envelope.ID)
 	}
 	return job, nil
+}
+
+// Stats implements Queue.
+func (q *MemoryQueue) Stats(_ context.Context, queue string) (QueueStats, error) {
+	if !ValidName(queue) {
+		return QueueStats{}, fmt.Errorf("%w: %q", ErrInvalidQueue, queue)
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.closed {
+		return QueueStats{}, ErrClosed
+	}
+	now := q.now()
+	var st QueueStats
+	for _, job := range q.jobs {
+		if job.queue != queue {
+			continue
+		}
+		switch {
+		case job.failure != nil:
+			st.Failed++
+		case job.reserved:
+			st.Reserved++
+		case now.Before(job.availableAt):
+			st.Scheduled++
+		default:
+			st.Ready++
+			if st.OldestReady.IsZero() || job.availableAt.Before(st.OldestReady) {
+				st.OldestReady = job.availableAt
+			}
+		}
+	}
+	return st, nil
 }
 
 // Len returns how many jobs the queue holds, available or not (tests).

@@ -71,6 +71,8 @@ type Queue interface {
 	// PurgeFailed deletes a queue's failed jobs that failed before before (all
 	// of them when before is zero) and returns how many.
 	PurgeFailed(ctx context.Context, queue string, before time.Time) (int, error)
+	// Stats counts a queue's jobs by state, for metrics.
+	Stats(ctx context.Context, queue string) (QueueStats, error)
 	// Close releases the driver's resources.
 	Close() error
 }
@@ -82,6 +84,10 @@ type Delivery struct {
 	// Receipt identifies this lease. Ack and Release with a receipt whose
 	// job was since reserved again fail with ErrLeaseLost.
 	Receipt string
+	// AvailableAt is when the job became available to this delivery: its
+	// available-at time, or the deadline of the lease that expired. Now minus
+	// AvailableAt is how long it waited in the queue.
+	AvailableAt time.Time
 	// Err is non-nil when the stored envelope does not decode (KindDecode).
 	// Envelope then holds only the ID and attempt: the job cannot run, but
 	// it is leased. Bury it to keep the stored bytes for inspection (Ack
@@ -102,3 +108,18 @@ var (
 	// ErrClosed: the queue was closed.
 	ErrClosed = errors.New("jobs: queue closed")
 )
+
+// QueueStats counts a queue's jobs.
+type QueueStats struct {
+	// Ready are waiting and due now; Scheduled wait for a later time (delays
+	// and retry backoffs).
+	Ready, Scheduled int
+	// Reserved are leased to a worker (running, or a crashed worker's job
+	// waiting for its lease to expire).
+	Reserved int
+	// Failed are given up on and kept (gombit jobs failed).
+	Failed int
+	// OldestReady is when the longest-waiting ready job became available
+	// (zero when none is ready).
+	OldestReady time.Time
+}

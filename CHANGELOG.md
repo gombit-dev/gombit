@@ -12,6 +12,13 @@ version.
 
 ### Added
 
+- Job observability: Prometheus metrics for job outcomes, run time, queue
+  latency, in-flight jobs, and queue depth (`gombit_jobs_*`), on the app's
+  `/metrics` and on a worker's `--metrics-addr` endpoint; OpenTelemetry trace
+  context carried through the envelope (`jobs.OTelPropagator`, on by default)
+  with a `job <name>` span per run; a `waited` log field. `Queue.Stats` and
+  `Delivery.AvailableAt` back the metrics
+  ([#321](https://github.com/gombit-dev/gombit/issues/321)).
 - Duplicate handling for at-least-once delivery: `jobs.Unique(key, ttl)` (one
   queued or running job per key, released when it finishes or is given up on,
   and after the TTL) and `jobs.UniqueFor(key, window)` (a deduplication
