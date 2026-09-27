@@ -42,8 +42,9 @@ func TestParseWorkerFlags(t *testing.T) {
 	if _, err := ParseWorkerFlags([]string{"--help"}, &help); !errors.Is(err, flag.ErrHelp) || !strings.Contains(help.String(), "-concurrency") {
 		t.Fatalf("--help = %v, output %q", err, help.String())
 	}
-	if got := WorkerKillAfter([]string{"--shutdown-timeout", "1m"}); got != time.Minute+workerShutdownGrace {
-		t.Fatalf("WorkerKillAfter = %s", got)
+	got := WorkerKillAfter([]string{"--shutdown-timeout", "1m"})
+	if got != time.Minute+workerShutdownGrace || got <= time.Minute+jobs.ShutdownGrace {
+		t.Fatalf("WorkerKillAfter = %s, want more than the timeout plus the worker's own grace", got)
 	}
 }
 

@@ -410,3 +410,104 @@ func TestNewWorkerValidates(t *testing.T) {
 		t.Error("NewWorker accepted a nil registry")
 	}
 }
+
+// ctxQueue wraps a MemoryQueue with the context behavior of a real network
+// driver: Reserve and Extend can be slow and honor cancellation.
+type ctxQueue struct {
+	*jobs.MemoryQueue
+	reserveBlocks bool          // Reserve waits for ctx
+	reserveDelay  time.Duration // Reserve ignores ctx, then answers
+	extendBlocks  bool          // Extend waits for ctx
+	released      atomic.Int32
+}
+
+func (q *ctxQueue) Reserve(ctx context.Context, queues []string, lease time.Duration) (jobs.Delivery, error) {
+	if q.reserveBlocks {
+		<-ctx.Done()
+		return jobs.Delivery{}, ctx.Err()
+	}
+	time.Sleep(q.reserveDelay)
+	return q.MemoryQueue.Reserve(ctx, queues, lease)
+}
+
+func (q *ctxQueue) Extend(ctx context.Context, d jobs.Delivery, lease time.Duration) error {
+	if q.extendBlocks {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return q.MemoryQueue.Extend(ctx, d, lease)
+}
+
+func (q *ctxQueue) Release(ctx context.Context, d jobs.Delivery, at time.Time) error {
+	q.released.Add(1)
+	return q.MemoryQueue.Release(ctx, d, at)
+}
+
+func TestShutdownCancelsAReserveInFlight(t *testing.T) {
+	q := &ctxQueue{MemoryQueue: jobs.NewMemoryQueue(), reserveBlocks: true}
+	core, logs := observer.New(zap.ErrorLevel)
+	w, err := jobs.NewWorker(jobs.NewRegistry(), q, jobs.WorkerOptions{Queues: []string{"default"}, Logger: zap.New(core)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stop := startWorker(t, w)
+	time.Sleep(20 * time.Millisecond) // inside Reserve
+	begin := time.Now()
+	if err := stop(); err != nil {
+		t.Fatal(err)
+	}
+	if took := time.Since(begin); took > time.Second {
+		t.Fatalf("stopping took %s; a Reserve in flight must see the cancellation", took)
+	}
+	if logs.Len() != 0 {
+		t.Fatalf("shutdown logged errors: %v", logs.All())
+	}
+}
+
+// TestADeliveryAfterShutdownIsHandedBack: a Reserve that answers after the
+// worker was told to stop does not start the job; it goes back to the queue.
+func TestADeliveryAfterShutdownIsHandedBack(t *testing.T) {
+	reg := jobs.NewRegistry()
+	var ran atomic.Bool
+	jobs.MustRegister(reg, func(context.Context, blockJob) error { ran.Store(true); return nil })
+	q := &ctxQueue{MemoryQueue: jobs.NewMemoryQueue(), reserveDelay: 150 * time.Millisecond}
+	dispatchN(t, jobs.NewDispatcher(reg, q.MemoryQueue), 1)
+	w, err := jobs.NewWorker(reg, q, jobs.WorkerOptions{Queues: []string{"default"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stop := startWorker(t, w)
+	time.Sleep(30 * time.Millisecond) // inside the slow Reserve
+	if err := stop(); err != nil {
+		t.Fatal(err)
+	}
+	if ran.Load() || q.released.Load() != 1 {
+		t.Fatalf("ran = %v, released %d; want the late delivery handed back unstarted", ran.Load(), q.released.Load())
+	}
+	if d, err := q.MemoryQueue.Reserve(context.Background(), []string{"default"}, time.Minute); err != nil || d.Envelope.ID == "" {
+		t.Fatalf("the job is not back in the queue: %+v, %v", d, err)
+	}
+}
+
+// TestAFinishedJobIsNotHeldByARenewal: a handler that returns while a lease
+// renewal is in flight is acked at once; the renewal is canceled, not waited
+// out.
+func TestAFinishedJobIsNotHeldByARenewal(t *testing.T) {
+	reg := jobs.NewRegistry()
+	jobs.MustRegister(reg, func(context.Context, blockJob) error {
+		time.Sleep(60 * time.Millisecond) // long enough for a renewal to start
+		return nil
+	})
+	q := &ctxQueue{MemoryQueue: jobs.NewMemoryQueue(), extendBlocks: true}
+	dispatchN(t, jobs.NewDispatcher(reg, q.MemoryQueue), 1)
+	w, err := jobs.NewWorker(reg, q, jobs.WorkerOptions{Queues: []string{"default"}, PollInterval: 5 * time.Millisecond, Lease: 30 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	begin := time.Now()
+	startWorker(t, w)
+	eventually(t, "the ack", func() bool { return q.Len() == 0 })
+	if took := time.Since(begin); took > time.Second {
+		t.Fatalf("the ack came %s after start; it waited out the renewal", took)
+	}
+}
