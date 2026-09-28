@@ -62,9 +62,8 @@ regression is caught on every PR from then on.
 
 ## Invariants
 
-The tables claim only what a test enforces, and every test named fails when
-its invariant breaks. Regressions were planted to check that the tests catch
-them:
+The tables claim only what a test asserts, and each row says what that is.
+Regressions were planted to check that the tests catch them:
 
 - `App.Tx` ignoring its commit error;
 - `App.Tx` or the request middleware dropping the caller's context (the
@@ -165,7 +164,7 @@ An expected dependency failure is an error the caller handles, not a
 process-level panic. Every `TestFault_*` test fails on a panic. These in
 particular drive a dependency into total failure:
 
-- [`framework/fault_test.go`](../../framework/fault_test.go): `TestFault_Database_Unavailable` (every statement fails).
+- [`framework/fault_test.go`](../../framework/fault_test.go): `TestFault_Database_Unavailable` (every insert into its tables fails: an error from `App.Tx`, not a panic, and nothing persists).
 - [`framework/network_fault_integration_test.go`](../../framework/network_fault_integration_test.go): `TestFault_Network_Unavailable`, `_ConnectionLost` (refused and dropped connections).
 - [`cli/fault_test.go`](../../cli/fault_test.go): `TestFault_HTTP_ServerError`, `_ConnectionReset`, `_MalformedResponse` (a malformed body is rejected, never written).
 - [`dev/fault_test.go`](../../dev/fault_test.go): `TestFault_HTTP_DevSpecFetch`.
@@ -225,10 +224,21 @@ something.
 
 ### What Gombit guarantees
 
-- **`App.Tx` is all or nothing.** If `fn` returns an error or panics, or a
-  statement, the COMMIT, or the context fails, the transaction rolls back and
-  `App.Tx` returns an error (or re-panics). It never returns `nil` for a write
-  that did not persist.
+- **`App.Tx` is all or nothing.** The transaction rolls back and `App.Tx`
+  returns an error (or re-panics) when any of these happens:
+  - `fn` returns an error or panics;
+  - a statement fails;
+  - the COMMIT fails;
+  - the context is canceled or times out while a statement is running.
+
+  A context canceled **during COMMIT** gets an answer that matches what
+  persisted, and that answer depends on the driver. On SQLite and MySQL the
+  commit completes and `App.Tx` returns `nil` with the row there. On
+  PostgreSQL it is aborted and `App.Tx` returns `context.Canceled` with
+  nothing persisted (`TestFault_Concurrency_CancelDuringCommit`). Either
+  way, `App.Tx` never returns `nil` for a write that did not persist, nor an
+  error for one that did. A connection *lost* during COMMIT is different:
+  see the application responsibilities.
 - **`App.Tx` does not retry.** A retryable driver error comes back as the
   driver's error, so you can recognize it (for example `pgconn.PgError`
   code `40001`, MySQL error `1213`, or `SQLITE_BUSY`), and `fn` runs once.
@@ -592,12 +602,17 @@ every violated property:
 
 - more attempts than `MaxAttempts`, or fewer (a retryable failure not
   retried while budget remains);
-- a cancellation, before the first attempt or mid-backoff, that does not end
-  it;
+- an attempt started on a context that had already ended (`Do` must return
+  the context's error without calling the op);
+- a cancellation mid-backoff that does not end it;
 - a permanent error retried;
-- a delay off its schedule, or outside `[0, MaxDelay]` for any attempt.
-  Every attempt up to 128 is probed, which finds a doubling backoff's int64
-  overflow wherever it happens;
+- a wait off its schedule;
+- a `Delay` outside `[0, MaxDelay]` at any **sampled** attempt. The sample is
+  every attempt up to `max(MaxAttempts, 128)` and 1000 (20 draws each, for
+  jitter), plus 2^22. That catches a shift or doubling that overflows (any
+  base of 1ns or more wraps before attempt 64), and an attempt multiplied by
+  a unit of about 36 minutes or more. It is a sample, not a proof, so cap a
+  delay before the arithmetic can overflow;
 - a success that does not end it;
 - a final error that hides the last attempt's error.
 
