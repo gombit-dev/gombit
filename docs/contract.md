@@ -286,9 +286,10 @@ error to 404 or every `Create()` error to 500.
 
 Gin middleware may also emit D10 errors that are not §41 categories.
 `contract.PayloadTooLarge` (`error.code` `payload_too_large`, HTTP 413) comes
-from the default router's 8MiB JSON request body limit, and from the XSS JSON
-sanitizer's buffer when `GOMBIT_SECURITY_SANITIZE_INPUT=true` (see
-[`docs/router.md`](router.md)); cookie CSRF uses `Authorization` (403). An unsupported method on a known
+from the `request_body_limit` layer, which rejects a JSON POST/PUT/PATCH body
+over 8MiB (see [`docs/router.md`](router.md)). The opt-in XSS sanitizer
+(`GOMBIT_SECURITY_SANITIZE_INPUT=true`) runs after that layer with the same
+cap, so it never produces its own 413; cookie CSRF uses `Authorization` (403). An unsupported method on a known
 route yields `contract.MethodNotAllowed` (`error.code` `method_not_allowed`,
 HTTP 405) with an `Allow` header listing the methods the path supports — the
 router distinguishes this from a genuinely unknown path (404). Do not treat

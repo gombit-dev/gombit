@@ -142,8 +142,8 @@ A release archive (Option 2) is stamped with build metadata:
 
 ```text
 gombit:   v0.6.0
-commit:   aeffafcfbdad43e7be3f896f5506406567e661bc
-built:    2026-09-26T08:27:27Z
+commit:   617b487f7abe353bf9bbbb8fc78bc69709bee18c
+built:    2026-09-28T08:03:45Z
 go:       go1.26.0
 platform: linux/amd64
 ```
