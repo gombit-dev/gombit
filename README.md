@@ -40,7 +40,10 @@ truth** instead of hand-synchronized:
   versioned SQL diffed by Atlas from your models — readable, reviewable, and
   reversible, with destructive changes refused until you acknowledge them. The
   request/response DTOs and CRUD handlers are regenerated from the same model.
-  No `AutoMigrate` in production, no hand-rolled migration DSL.
+  Versioned SQL is the migration path and there is no hand-rolled migration
+  DSL. (The scaffolded server also runs `platform.AutoMigrate` on start, so a
+  new app can serve before its first `gombit db migrate`; see
+  [migrations.md](docs/migrations.md).)
 - **Your registry is the admin.** A real Django-style admin at `/admin/`,
   served by the framework at runtime, not generated pages you inherit and
   maintain.
@@ -115,7 +118,8 @@ gombit createsuperuser --email admin@example.com
 yours, while `dto.gen.go` and `handler.gen.go` are regenerated from the model
 by `gombit generate` — change the model, re-run it, and
 `gombit generate --check` exits non-zero when a committed copy is stale.
-Routes and models are registered in `cmd/server/main.go` through `go/ast`,
+Routes are registered in `cmd/server/main.go` and the model is added to the
+`AutoMigrate` list in `internal/platform/database.go`, both through `go/ast`,
 never regex. Generators are idempotent and additive, support `--dry-run` and
 `--force`, and never overwrite files you own. `createsuperuser` needs no setup:
 `gombit new` already wrote a random `GOMBIT_JWT_SECRET` into `.env`, and every
