@@ -101,8 +101,10 @@ type RetryContract struct {
 	// failure is retried while budget remains).
 	MaxAttempts int
 	// Delay is the policy's backoff: the wait after the attempt-th failure
-	// (1-based). Every delay it produces, for any attempt, must lie within
-	// [0, MaxDelay] (no negative or overflowed durations, jitter included).
+	// (1-based). Every delay it produces must lie within [0, MaxDelay] (no
+	// negative or overflowed durations, jitter included). The checker samples
+	// that (see CheckRetryPolicy's backoff bullet): cap a delay before the
+	// arithmetic can overflow, not after.
 	Delay func(attempt int) time.Duration
 	// MaxDelay caps Delay.
 	MaxDelay time.Duration
@@ -127,12 +129,19 @@ var retryGuard = 5 * time.Second
 //   - retryable: ...and no fewer (a retryable failure is retried while the
 //     budget lasts), and an op that fails once and then succeeds succeeds
 //     on the retry;
-//   - cancellation: a context canceled mid-backoff ends Do promptly with the
-//     context's error, and no further attempt runs;
+//   - cancellation: a context that has already ended makes Do return the
+//     context's error without starting an attempt; a context canceled
+//     mid-backoff ends Do promptly with the context's error, and no further
+//     attempt runs;
 //   - permanent: a non-retryable error is not retried;
 //   - backoff: the waits asked for follow Delay (exactly, when
-//     Deterministic) and every Delay, for any attempt, is within
-//     [0, MaxDelay];
+//     Deterministic) and lie within [0, MaxDelay]; and Delay itself,
+//     sampled 20 times per attempt for jitter, is within [0, MaxDelay] at
+//     every attempt 1..max(MaxAttempts, 128), at 1000, and (sampled 3
+//     times) at 2^22. That sample catches a shift or doubling that
+//     overflows (any base of 1ns or more wraps before attempt 64) and a
+//     multiply of the attempt by a unit of about 36 minutes or more (it
+//     wraps by 2^22). It is a sample, not a proof for every attempt;
 //   - success: a success ends the retries at once;
 //   - observable failure: the final error wraps the last attempt's error
 //     (and reports the attempt count, when Attempts is set).
@@ -268,30 +277,32 @@ func CheckRetryPolicy(t testing.TB, c RetryContract) {
 		}
 	}
 
-	// already canceled: no attempt should start work for an abandoned caller
+	// already canceled: no attempt starts work for a caller that has gone
 	{
 		sleeper := &FakeSleeper{}
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 		o := run(ctx, sleeper, c.Retryable)
-		if !o.finished || o.runaway || !errors.Is(o.err, context.Canceled) || o.calls > 1 {
-			t.Errorf("cancellation: on an already-canceled context Do ran %d attempts and returned %v; want at most 1 attempt and context.Canceled",
+		if !o.finished || o.runaway || !errors.Is(o.err, context.Canceled) || o.calls != 0 {
+			t.Errorf("cancellation: on an already-canceled context Do ran %d attempts and returned %v; want no attempt and context.Canceled",
 				o.calls, o.err)
 		}
 	}
 
-	// backoff: the waits asked for, then Delay itself for every attempt the
-	// policy can make and every attempt 1..128 and 1000. A doubling backoff
-	// (shift or multiply) of any base of 1ns or more crosses the int64 sign
-	// bit, or shifts off it to 0 and then goes on, before attempt 64, so
-	// sampling each attempt up to 128 finds the overflow wherever it is.
-	// Sampled 20 times each for jitter. It all runs under the guard, so a
-	// Delay that never returns fails the check rather than hanging it.
-	attempts := make([]int, 0, 129)
+	// backoff: the waits asked for, then the Delay sample the godoc lists.
+	// A doubling of any base of 1ns or more crosses the int64 sign bit (or
+	// shifts off it to 0) before attempt 64, so every attempt up to 128 is
+	// probed; 2^22 catches an attempt multiplied by a large unit (an hour
+	// wraps at about 2.56 million). Attempts past MaxAttempts are probed on
+	// purpose: an overflow a policy would reach with a larger budget is
+	// still a bug. It all runs under the guard, so a Delay that never
+	// returns fails the check rather than hanging it.
+	type probe struct{ attempt, samples int }
+	probes := make([]probe, 0, 130)
 	for a := 1; a <= max(c.MaxAttempts, 128); a++ {
-		attempts = append(attempts, a)
+		probes = append(probes, probe{a, 20})
 	}
-	attempts = append(attempts, 1000)
+	probes = append(probes, probe{1000, 20}, probe{1 << 22, 3})
 	problems := make(chan []string, 1)
 	go func() {
 		var found []string
@@ -305,12 +316,12 @@ func CheckRetryPolicy(t testing.TB, c RetryContract) {
 				}
 			}
 		}
-	probe:
-		for _, attempt := range attempts {
-			for i := 0; i < 20; i++ {
-				if d := c.Delay(attempt); d < 0 || d > c.MaxDelay {
-					found = append(found, fmt.Sprintf("backoff: Delay(%d) = %s, outside [0, %s] (overflow or unbounded jitter)", attempt, d, c.MaxDelay))
-					break probe
+	sample:
+		for _, p := range probes {
+			for i := 0; i < p.samples; i++ {
+				if d := c.Delay(p.attempt); d < 0 || d > c.MaxDelay {
+					found = append(found, fmt.Sprintf("backoff: Delay(%d) = %s, outside [0, %s] (overflow or unbounded jitter)", p.attempt, d, c.MaxDelay))
+					break sample
 				}
 			}
 		}
