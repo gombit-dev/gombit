@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
@@ -591,6 +592,14 @@ func (c Config) Validate() error {
 			})
 		}
 	}
+	if c.Environment == EnvironmentProduction && trustedProxiesCoverAll(c.HTTP.TrustedProxies) {
+		errs = append(errs, FieldError{
+			Field:   "HTTP.TrustedProxies",
+			Env:     envHTTPTrustedProxies,
+			Value:   strings.Join(c.HTTP.TrustedProxies, ","),
+			Message: "must not trust all proxies in production",
+		})
+	}
 
 	if !strings.HasPrefix(c.API.Prefix, "/") {
 		errs = append(errs, FieldError{
@@ -1109,12 +1118,107 @@ func applyBool(lookup EnvLookup, key string, field string, dest *bool, errs *Fie
 }
 
 func isUnsafeTrustedProxy(proxy string) bool {
-	switch strings.TrimSpace(proxy) {
-	case "*", "0.0.0.0/0", "::/0":
+	proxy = strings.TrimSpace(proxy)
+	if proxy == "*" {
 		return true
-	default:
+	}
+	prefix, ok := parseTrustedProxyPrefix(proxy)
+	if !ok {
 		return false
 	}
+	return prefix.Bits() == 0
+}
+
+func parseTrustedProxyPrefix(proxy string) (netip.Prefix, bool) {
+	proxy = strings.TrimSpace(proxy)
+	if proxy == "" || proxy == "*" {
+		return netip.Prefix{}, false
+	}
+	if !strings.Contains(proxy, "/") {
+		addr, err := netip.ParseAddr(proxy)
+		if err != nil {
+			return netip.Prefix{}, false
+		}
+		return netip.PrefixFrom(addr, addr.BitLen()), true
+	}
+	prefix, err := netip.ParsePrefix(proxy)
+	if err == nil {
+		return prefix, true
+	}
+	// netip rejects leading-zero bit lengths such as /00; those still
+	// mean the whole address space once the bits parse as zero.
+	host, bitsStr, ok := strings.Cut(proxy, "/")
+	if !ok {
+		return netip.Prefix{}, false
+	}
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return netip.Prefix{}, false
+	}
+	bits, err := strconv.Atoi(bitsStr)
+	if err != nil || bits < 0 || bits > addr.BitLen() {
+		return netip.Prefix{}, false
+	}
+	return netip.PrefixFrom(addr, bits), true
+}
+
+// trustedProxiesCoverAll reports whether the configured ranges together
+// cover the entire IPv4 or IPv6 address space. A single /0 is already
+// caught per entry; this covers complementary halves such as
+// 0.0.0.0/1 + 128.0.0.0/1.
+func trustedProxiesCoverAll(proxies []string) bool {
+	var v4, v6 []netip.Prefix
+	for _, proxy := range proxies {
+		prefix, ok := parseTrustedProxyPrefix(proxy)
+		if !ok {
+			continue
+		}
+		if prefix.Addr().Is4() {
+			v4 = append(v4, prefix)
+		} else {
+			v6 = append(v6, prefix)
+		}
+	}
+	return prefixesCoverFamily(v4, 32) || prefixesCoverFamily(v6, 128)
+}
+
+func prefixesCoverFamily(prefixes []netip.Prefix, bits int) bool {
+	if len(prefixes) == 0 {
+		return false
+	}
+	var zero netip.Addr
+	if bits == 32 {
+		zero = netip.IPv4Unspecified()
+	} else {
+		zero = netip.IPv6Unspecified()
+	}
+	return prefixSetCovers(prefixes, netip.PrefixFrom(zero, 0))
+}
+
+func prefixSetCovers(set []netip.Prefix, target netip.Prefix) bool {
+	for _, p := range set {
+		if p.Bits() <= target.Bits() && p.Contains(target.Addr()) {
+			return true
+		}
+	}
+	if target.Bits() >= target.Addr().BitLen() {
+		return false
+	}
+	low, high := splitPrefix(target)
+	return prefixSetCovers(set, low) && prefixSetCovers(set, high)
+}
+
+func splitPrefix(p netip.Prefix) (netip.Prefix, netip.Prefix) {
+	nextBits := p.Bits() + 1
+	low := netip.PrefixFrom(p.Addr(), nextBits)
+	b := p.Addr().AsSlice()
+	bitIndex := p.Bits()
+	byteIndex := bitIndex / 8
+	shift := 7 - (bitIndex % 8)
+	b[byteIndex] |= 1 << shift
+	highAddr, _ := netip.AddrFromSlice(b)
+	high := netip.PrefixFrom(highAddr, nextBits)
+	return low, high
 }
 
 func applyDuration(lookup EnvLookup, key string, field string, dest *time.Duration, errs *FieldErrors) {

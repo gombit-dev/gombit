@@ -96,8 +96,10 @@ When `GOMBIT_CACHE_NAMESPACE` is unset, the namespace is derived from the
 normalized app name and environment, such as `gombit:development`.
 `GOMBIT_HTTP_TRUSTED_PROXIES` is a comma-separated list of IPs or CIDRs passed
 to Gin's trusted-proxy configuration. When unset, forwarded-client IP headers
-are ignored. Production config rejects values that trust all proxies, such as
-`0.0.0.0/0`.
+are ignored. Production config rejects values that trust all proxies: `*`, any
+CIDR whose prefix length is 0 (including spellings such as `10.0.0.0/0` or
+`0.0.0.0/00`), and sets of ranges that together cover the whole address space
+(for example `0.0.0.0/1,128.0.0.0/1`).
 `GOMBIT_HTTP_REQUEST_TIMEOUT` uses Go duration syntax such as `30s` or `2m`.
 It is opt-in (issue #270 / PERF-12): the default `0` imposes no cooperative
 per-handler context deadline. The deadline is applied inside the

@@ -533,31 +533,94 @@ func TestValidateReportsExplicitFieldErrors(t *testing.T) {
 }
 
 func TestValidateRejectsUnsafeTrustedProxyInProduction(t *testing.T) {
+	cases := []struct {
+		name    string
+		proxies []string
+		value   string
+	}{
+		{name: "ipv4 slash zero", proxies: []string{"0.0.0.0/0"}, value: "0.0.0.0/0"},
+		{name: "star", proxies: []string{"*"}, value: "*"},
+		{name: "ipv6 slash zero", proxies: []string{"::/0"}, value: "::/0"},
+		{name: "nonzero network slash zero", proxies: []string{"10.0.0.0/0"}, value: "10.0.0.0/0"},
+		{name: "leading-zero prefix length", proxies: []string{"0.0.0.0/00"}, value: "0.0.0.0/00"},
+		{name: "ipv6 unspecified alt", proxies: []string{"::0/0"}, value: "::0/0"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Environment = EnvironmentProduction
+			cfg.Auth.JWTSecret = "production-jwt-secret-32-bytes-min"
+			cfg.HTTP.TrustedProxies = tc.proxies
+
+			err := cfg.Validate()
+			if err == nil {
+				t.Fatal("Validate() error = nil, want trusted proxy validation error")
+			}
+
+			var fieldErrors FieldErrors
+			if !errors.As(err, &fieldErrors) {
+				t.Fatalf("Validate() error type = %T, want FieldErrors", err)
+			}
+			found := false
+			for _, fe := range fieldErrors {
+				if fe.Field == "HTTP.TrustedProxies" && fe.Message == "must not trust all proxies in production" && fe.Value == tc.value {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("Validate() field errors = %#v, want HTTP.TrustedProxies value %q", []FieldError(fieldErrors), tc.value)
+			}
+		})
+	}
+}
+
+func TestValidateRejectsComplementaryHalvesInProduction(t *testing.T) {
 	cfg := Default()
 	cfg.Environment = EnvironmentProduction
 	cfg.Auth.JWTSecret = "production-jwt-secret-32-bytes-min"
-	cfg.HTTP.TrustedProxies = []string{"0.0.0.0/0"}
+	cfg.HTTP.TrustedProxies = []string{"0.0.0.0/1", "128.0.0.0/1"}
 
 	err := cfg.Validate()
 	if err == nil {
-		t.Fatal("Validate() error = nil, want trusted proxy validation error")
+		t.Fatal("Validate() error = nil, want trusted proxy coverage error")
 	}
-
 	var fieldErrors FieldErrors
 	if !errors.As(err, &fieldErrors) {
 		t.Fatalf("Validate() error type = %T, want FieldErrors", err)
 	}
-
-	want := []FieldError{
-		{
-			Field:   "HTTP.TrustedProxies",
-			Env:     envHTTPTrustedProxies,
-			Value:   "0.0.0.0/0",
-			Message: "must not trust all proxies in production",
-		},
+	found := false
+	for _, fe := range fieldErrors {
+		if fe.Field == "HTTP.TrustedProxies" && fe.Message == "must not trust all proxies in production" {
+			found = true
+		}
 	}
-	if !reflect.DeepEqual([]FieldError(fieldErrors), want) {
-		t.Fatalf("Validate() field errors = %#v, want %#v", []FieldError(fieldErrors), want)
+	if !found {
+		t.Fatalf("Validate() field errors = %#v, want coverage rejection", []FieldError(fieldErrors))
+	}
+}
+
+func TestValidateAllowsSpecificTrustedProxiesInProduction(t *testing.T) {
+	cfg := Default()
+	cfg.Environment = EnvironmentProduction
+	cfg.Auth.JWTSecret = "production-jwt-secret-32-bytes-min"
+	cfg.HTTP.TrustedProxies = []string{"10.0.0.0/8", "192.168.0.0/16", "2001:db8::/32"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v, want nil", err)
+	}
+}
+
+func TestIsUnsafeTrustedProxy(t *testing.T) {
+	unsafe := []string{"*", "0.0.0.0/0", "::/0", "10.0.0.0/0", "0.0.0.0/00", "::0/0"}
+	for _, proxy := range unsafe {
+		if !isUnsafeTrustedProxy(proxy) {
+			t.Errorf("isUnsafeTrustedProxy(%q) = false, want true", proxy)
+		}
+	}
+	safe := []string{"10.0.0.0/8", "127.0.0.1", "0.0.0.0/1", "128.0.0.0/1", "2001:db8::/32"}
+	for _, proxy := range safe {
+		if isUnsafeTrustedProxy(proxy) {
+			t.Errorf("isUnsafeTrustedProxy(%q) = true, want false", proxy)
+		}
 	}
 }
 
