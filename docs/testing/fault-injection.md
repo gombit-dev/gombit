@@ -612,7 +612,11 @@ every violated property:
   the context's error without calling the op);
 - a cancellation mid-backoff that does not end it;
 - a permanent error retried;
-- a wait off its schedule;
+- a wrong number of waits (anything but one fewer than the attempts);
+- a wait outside `[0, MaxDelay]`;
+- with `Deterministic` set only, a wait that is not `Delay(n)` for the
+  `n`-th failure (a jittered policy sets it to false and is held to the
+  count and the bounds);
 - a `Delay` outside `[0, MaxDelay]` at any **sampled** attempt. The sample is
   every attempt up to `max(MaxAttempts, 128)`, and 1000, with 20 calls each
   for jitter. That catches a shift or doubling that overflows, since any base

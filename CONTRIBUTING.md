@@ -168,7 +168,8 @@ The rules, in short:
 - Name fault tests `TestFault_<Component>_<Scenario>`. The prefix is what puts
   them in `make test-faults`, so a new one needs no CI edit.
 - Assert invariants (errors, persisted state, released resources, recovery),
-  not call counts.
+  not call counts, unless the call sequence is itself the contract ("`App.Tx`
+  runs `fn` once", "one rotation, one INSERT").
 - Pin interleavings with the injectors (`Block`, `Reached(n)`,
   `proxy.Held()`), never with `time.Sleep`. Bound every wait in a test.
 - No unbounded retries: any retry policy must pass
