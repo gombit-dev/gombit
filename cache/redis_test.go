@@ -36,6 +36,9 @@ func TestNewRedisClientUsesTypedConfig(t *testing.T) {
 	if options.DB != 2 {
 		t.Fatalf("DB = %d, want 2", options.DB)
 	}
+	if !options.ContextTimeoutEnabled {
+		t.Fatal("ContextTimeoutEnabled = false, want the caller's deadline honored")
+	}
 	if options.DialTimeout != time.Second {
 		t.Fatalf("DialTimeout = %s, want 1s", options.DialTimeout)
 	}

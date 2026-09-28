@@ -161,13 +161,19 @@ func Sequence(steps ...Step) *Injector { return newInjector(Success(), steps...)
 // Hit counts a call and applies its step: nil to let it through, or the
 // error it fails with.
 func (i *Injector) Hit(ctx context.Context) error {
+	_, err := i.hit(ctx)
+	return err
+}
+
+// hit is Hit, also returning the call's number (0 when uncounted).
+func (i *Injector) hit(ctx context.Context) (int, error) {
 	if i == nil {
-		return nil
+		return 0, nil
 	}
 	i.mu.Lock()
 	if i.disarmed {
 		i.mu.Unlock()
-		return nil
+		return 0, nil
 	}
 	i.calls++
 	n, gen := i.calls, i.gen
@@ -189,7 +195,7 @@ func (i *Injector) Hit(ctx context.Context) error {
 		}
 		i.mu.Unlock()
 	}
-	return err
+	return n, err
 }
 
 // Do runs fn unless the call fails: Hit, then fn.
