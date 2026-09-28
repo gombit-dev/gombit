@@ -223,11 +223,16 @@ times. The checker reports:
 
 - more attempts than `MaxAttempts`, or fewer (a retryable failure not
   retried while budget remains);
+- an attempt started on a context that had already ended (`Do` must return
+  the context's error without calling the op);
 - a cancellation mid-backoff that does not end it;
 - a permanent error retried;
-- a backoff off its schedule, or outside `[0, MaxDelay]` for any attempt
-  (every attempt up to 128 is probed, which finds a doubling backoff's
-  overflow wherever it happens);
+- a backoff off its schedule;
+- a `Delay` outside `[0, MaxDelay]` at any sampled attempt. The sample is
+  every attempt up to `max(MaxAttempts, 128)`, plus 1000. That catches a
+  shift or doubling that overflows (it wraps by attempt 64). It does not
+  catch an attempt multiplied by a unit, which wraps at an attempt that
+  depends on the unit, so compute a delay so it cannot overflow;
 - a success that does not end it;
 - a final error that hides the last attempt's error.
 
