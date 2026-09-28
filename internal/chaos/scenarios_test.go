@@ -90,11 +90,15 @@ func newApp(t *testing.T, env Environment, kind database.Driver, dsn string, fau
 	return app, db
 }
 
+// countBatch counts the batch's rows, bounded: a connection the scenario
+// left held must fail it, not hang it.
 func countBatch(t *testing.T, env Environment, app *framework.App, batch string) int64 {
 	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	var n int64
-	if err := app.DB().Model(&chaosRow{}).Where("batch = ?", batch).Count(&n).Error; err != nil {
-		env.Fatalf(t, "%v", err)
+	if err := app.DB().WithContext(ctx).Model(&chaosRow{}).Where("batch = ?", batch).Count(&n).Error; err != nil {
+		env.Fatalf(t, "counting the batch's rows: %v", err)
 	}
 	return n
 }
@@ -129,6 +133,7 @@ func failureBoundary(t *testing.T, env Environment) {
 		}
 		return nil
 	})
+	faulttest.Idle(env.TB(t), db) // nothing left held, before anything else needs a connection
 	got := countBatch(t, env, app, batch)
 	if boundary == "none" {
 		if err != nil || got != int64(n) {
@@ -142,7 +147,7 @@ func failureBoundary(t *testing.T, env Environment) {
 	}); err != nil {
 		env.Mismatch(t, "the next transaction", "success", err.Error())
 	}
-	faulttest.Idle(t, db)
+	faulttest.Idle(env.TB(t), db)
 }
 
 // concurrentWriters: 2..8 transactions increment one counter at once, a
@@ -196,8 +201,11 @@ func concurrentWriters(t *testing.T, env Environment) {
 			env.Fatalf(t, "%d of %d writers still running", writers-i, writers)
 		}
 	}
+	faulttest.Idle(env.TB(t), db)
 	var final chaosCounter
-	if err := app.DB().First(&final, counter.ID).Error; err != nil {
+	fctx, fcancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer fcancel()
+	if err := app.DB().WithContext(fctx).First(&final, counter.ID).Error; err != nil {
 		env.Fatalf(t, "%v", err)
 	}
 	if succeeded != writers-failing || final.N != succeeded {
@@ -205,7 +213,7 @@ func concurrentWriters(t *testing.T, env Environment) {
 			fmt.Sprintf("%d successes and the counter at %d", writers-failing, writers-failing),
 			fmt.Sprintf("%d successes and the counter at %d", succeeded, final.N))
 	}
-	faulttest.Idle(t, db)
+	faulttest.Idle(env.TB(t), db)
 }
 
 // cancellationStress: a transaction of n inserts has its context canceled
@@ -282,9 +290,13 @@ func cancellationStress(t *testing.T, env Environment) {
 		env.Mismatch(t, fmt.Sprintf("%s: a transaction canceled during %s", kind, at),
 			"it returns once canceled", "still running 10s after the cancel: the cancellation never reached it")
 		close(release)
-		<-result
+		select {
+		case <-result:
+		case <-time.After(10 * time.Second):
+		}
 		return
 	}
+	faulttest.Idle(env.TB(t), db) // nothing left held, before counting needs a connection
 	got := countBatch(t, env, app, batch)
 	switch {
 	case onInsert && (!errors.Is(err, context.Canceled) || got != 0):
@@ -294,7 +306,7 @@ func cancellationStress(t *testing.T, env Environment) {
 		env.Mismatch(t, fmt.Sprintf("%s: a transaction canceled during %s", kind, at),
 			fmt.Sprintf("success with %d rows, or an error with 0", n), fmt.Sprintf("%v with %d rows", err, got))
 	}
-	faulttest.Idle(t, db)
+	faulttest.Idle(env.TB(t), db)
 }
 
 // postgresInterruption: through a TCP proxy, the database stalls, drops a
@@ -307,7 +319,7 @@ func postgresInterruption(t *testing.T, env Environment) {
 	if err != nil {
 		env.Fatalf(t, "%v", err)
 	}
-	proxy := faulttest.NewTCPProxy(t, upstream)
+	proxy := faulttest.NewTCPProxy(env.TB(t), upstream)
 	dsn, err := faulttest.PostgresDSNVia(env.PostgresDSN, proxy.Addr())
 	if err != nil {
 		env.Fatalf(t, "%v", err)
@@ -327,15 +339,19 @@ func postgresInterruption(t *testing.T, env Environment) {
 	defer cancel()
 	fault := [...]string{"stall", "cut", "reset", "restart"}[env.Rand.IntN(4)]
 	env.Drew(t, "postgres via proxy, fault %s, deadline %s", fault, deadline)
+	// The query runs on its own goroutine for every fault, so a call that
+	// ignores its deadline fails the scenario here instead of hanging the
+	// suite until the package timeout.
 	start := time.Now()
+	done := make(chan error, 1)
+	query := func() { go func() { done <- ping(ctx) }() }
 	switch fault {
 	case "stall":
 		proxy.Hold()
-		err = ping(ctx)
+		query()
 	case "cut", "reset":
 		proxy.Hold()
-		done := make(chan error, 1)
-		go func() { done <- ping(ctx) }()
+		query()
 		select {
 		case <-proxy.Held():
 		case err := <-done:
@@ -349,11 +365,22 @@ func postgresInterruption(t *testing.T, env Environment) {
 		} else {
 			proxy.Reset()
 		}
-		err = <-done
 	case "restart":
 		proxy.Refuse()
 		proxy.Cut()
-		err = ping(ctx)
+		query()
+	}
+	select {
+	case err = <-done:
+	case <-time.After(deadline + 5*time.Second):
+		env.Mismatch(t, fmt.Sprintf("a query against a Postgres that %s", fault),
+			fmt.Sprintf("an error within the %s deadline", deadline), fmt.Sprintf("still running after %s", time.Since(start)))
+		_ = proxy.Heal() // let the stuck query finish before the scenario's cleanup closes the pool
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+		}
+		return
 	}
 	if took := time.Since(start); err == nil || took > deadline+time.Second {
 		env.Mismatch(t, fmt.Sprintf("a query against a Postgres that %s", fault),
@@ -392,7 +419,7 @@ func httpDependencyFaults(t *testing.T, env Environment) {
 	for i, step := range steps {
 		names[i] = step.String()
 	}
-	dep := faulttest.NewHTTPDependency(t, steps...)
+	dep := faulttest.NewHTTPDependency(env.TB(t), steps...)
 	tracker := faulttest.TrackBodies(dep.Client().Transport)
 	client := &http.Client{Transport: tracker}
 
@@ -440,5 +467,5 @@ func httpDependencyFaults(t *testing.T, env Environment) {
 	if tracker.Open() != 0 {
 		env.Mismatch(t, "response bodies", "all closed", fmt.Sprintf("%d open", tracker.Open()))
 	}
-	dep.WaitIdle(t)
+	dep.WaitIdle(env.TB(t))
 }

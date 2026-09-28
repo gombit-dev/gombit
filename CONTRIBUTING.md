@@ -253,8 +253,10 @@ flake: find the randomness a scenario drew from somewhere other than
 
 To add a scenario, call `register(Scenario{Name, Component, Run})`. Record
 the scenario's draws with `env.Drew`, report violated invariants with
-`env.Mismatch`, and stop with `env.Fatalf` (not `t.Fatalf`), so the report
-carries every message. Once a chaos failure is understood, pin it as a
+`env.Mismatch`, stop with `env.Fatalf` (not `t.Fatalf`), and hand the
+faulttest helpers `env.TB(t)` (`faulttest.Idle(env.TB(t), db)`), so the
+report carries every message. Bound every wait, including a query's (a
+hang must fail the scenario, not the package timeout). Once a chaos failure is understood, pin it as a
 deterministic `TestFault_*` test.
 
 `make test-faults` runs the whole fault suite: the `internal/faulttest`
