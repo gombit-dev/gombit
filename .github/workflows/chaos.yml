@@ -1,0 +1,90 @@
+name: Chaos
+
+# The stochastic resilience suite (make test-chaos, CHAOS-10), nightly and
+# on demand. It is never a PR check: it has no pull_request trigger, and a
+# red nightly run means "reproduce with the seed", not "block merges".
+#
+# Everything it needs to reproduce a failure locally is in the job summary
+# (the seed and each failure's replay command) and, on failure, in the
+# uploaded artifact: go test -json output (race reports included), one
+# CHAOS FAILURE report per failed iteration (expected vs observed, the fault
+# drawn, the replay command), the CHAOS_* settings, and the Postgres
+# container's logs and state. Dependencies are this job's ephemeral service
+# containers only; the fault proxy runs in-process and reaches only them.
+
+on:
+  schedule:
+    - cron: "23 3 * * *" # nightly, 03:23 UTC
+  workflow_dispatch:
+    inputs:
+      seed:
+        description: Replay this seed (empty for a new one)
+        required: false
+        default: ""
+      scenario:
+        description: Run only this scenario (e.g. database/failure-boundary)
+        required: false
+        default: ""
+      iterations:
+        description: Iterations per scenario
+        required: false
+        default: "50"
+
+permissions:
+  contents: read
+
+jobs:
+  chaos:
+    name: Chaos
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: gombit
+          POSTGRES_PASSWORD: gombit
+          POSTGRES_DB: gombit
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U gombit -d gombit"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Pre-fetch Go modules
+        run: bash scripts/ci-prefetch-go-modules.sh
+
+      - name: Run the chaos suite
+        env:
+          GOPROXY: "off"
+          CHAOS_SEED: ${{ inputs.seed }}
+          CHAOS_SCENARIO: ${{ inputs.scenario }}
+          CHAOS_ITERATIONS: ${{ inputs.iterations || '50' }}
+          CHAOS_POSTGRES_DSN: postgres://gombit:gombit@127.0.0.1:5432/gombit?sslmode=disable
+          CHAOS_ARTIFACTS: chaos-artifacts
+        run: bash scripts/chaos-run.sh
+
+      - name: Collect dependency state
+        if: failure() || cancelled() # a run that hit the job timeout needs them most
+        run: |
+          mkdir -p chaos-artifacts
+          docker logs "${{ job.services.postgres.id }}" > chaos-artifacts/postgres.log 2>&1 || true
+          docker inspect --format '{{json .State}}' "${{ job.services.postgres.id }}" > chaos-artifacts/postgres-state.json 2>&1 || true
+
+      - name: Upload the failure's artifacts
+        if: failure() || cancelled() # a run that hit the job timeout needs them most
+        uses: actions/upload-artifact@v7
+        with:
+          name: chaos-${{ github.run_id }}
+          path: chaos-artifacts

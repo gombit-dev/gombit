@@ -238,3 +238,34 @@ func TestDisarmedCallsPassUncounted(t *testing.T) {
 		t.Fatalf("armed: outcomes %v; want the 1st call after Arm to fail", got)
 	}
 }
+
+func TestBlockThenFailAndSequenceThen(t *testing.T) {
+	release := make(chan struct{})
+	inj := faulttest.SequenceThen(faulttest.Failure(errBoom), faulttest.BlockThenFail(release, faulttest.ErrInjected), faulttest.Success())
+	done := make(chan error, 1)
+	go func() { done <- inj.Hit(context.Background()) }()
+	<-inj.Reached(1)
+	select {
+	case err := <-done:
+		t.Fatalf("BlockThenFail returned (%v) before release", err)
+	default:
+	}
+	close(release)
+	if err := <-done; !errors.Is(err, faulttest.ErrInjected) {
+		t.Fatalf("released BlockThenFail = %v, want its error", err)
+	}
+	if got := outcomes(inj, 3); got[0] || !got[1] || !got[2] {
+		t.Fatalf("after the steps: %v; want call 2 to pass and the rest to fail", got)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := faulttest.Sequence(faulttest.BlockThenFail(make(chan struct{}), errBoom)).Hit(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("BlockThenFail on a canceled context = %v, want context.Canceled", err)
+	}
+	defer func() {
+		if recover() == nil {
+			t.Fatal("BlockThenFail(nil, nil) did not panic")
+		}
+	}()
+	faulttest.BlockThenFail(nil, nil)
+}
