@@ -34,7 +34,11 @@ artifacts="${CHAOS_ARTIFACTS:-chaos-artifacts}"
 rm -rf "$artifacts/reports"
 rm -f "$artifacts/test.json" "$artifacts/go-stderr.txt" "$artifacts/environment.txt" "$artifacts/summary.md"
 mkdir -p "$artifacts/reports"
-export CHAOS_REPORT_DIR="$artifacts/reports"
+# Absolute: go test runs the suite with its package directory
+# (internal/chaos) as the working directory, where a relative path would
+# put the reports outside this directory.
+CHAOS_REPORT_DIR="$(cd "$artifacts/reports" && pwd)"
+export CHAOS_REPORT_DIR
 
 # Workflow inputs arrive as empty strings when not given: unset them, so the
 # suite chooses (and prints) a seed and runs every scenario.
@@ -99,6 +103,10 @@ seed="$(grep -oE '"Output":"CHAOS_SEED=[0-9]+' "$artifacts/test.json" | head -n1
     if [ -e "${reports[0]}" ]; then
       echo
       echo "Replay each failure locally:"
+      if [ -n "${CHAOS_POSTGRES_DSN:-}" ]; then
+        echo
+        echo "(These commands carry the run's CHAOS_POSTGRES_DSN; the reports and the test output never print it, so their replay lines need it exported.)"
+      fi
       echo
       # In iteration order (iter-2 before iter-14), then by scenario; the
       # iteration is the number in the report's name (POSIX sort, no -V).
