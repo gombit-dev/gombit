@@ -29,6 +29,10 @@ if [ -n "${NO_SEED:-}" ]; then
 fi
 echo '{"Action":"output","Package":"github.com/gombit-dev/gombit/internal/chaos","Output":"CHAOS_SEED=4242\n"}'
 if [ -n "${FAIL_ITERATIONS:-}" ]; then
+  # Like the real suite, write from the package directory, not the
+  # script's working directory.
+  cd internal/chaos
+  mkdir -p "$CHAOS_REPORT_DIR" # as the suite's report does
   pg=0
   if [ -n "${CHAOS_POSTGRES_DSN:-}" ]; then pg=1; fi
   for it in $FAIL_ITERATIONS; do
@@ -107,6 +111,18 @@ line="$(grep -F 'CHAOS_ITERATION=4 ' "$a/summary.md" | sed -E 's/^ +//')"
 got="$(eval "${line%% make test-chaos}"' env' | grep '^CHAOS_POSTGRES_DSN=')"
 [ "$got" = "CHAOS_POSTGRES_DSN=$dsn" ] || note "the replay does not restore the DSN: $got"
 grep -qxF "CHAOS_POSTGRES_DSN=$dsn" "$a/environment.txt" || note "environment.txt does not record the DSN: $(cat "$a/environment.txt")"
+
+# ---- a relative CHAOS_ARTIFACTS (the workflow's) still collects the
+# reports the suite writes from its package directory ----
+rel="chaos-artifacts/run-test-$$"
+if (CHAOS_ARTIFACTS="$rel" FAIL_ITERATIONS=6 run >/dev/null); then note "a failing run exited 0"; fi
+[ -f "$ROOT/$rel/reports/database_failure-boundary-iter-6.txt" ] ||
+  note "the report is not under the relative artifact directory"
+grep -q 'CHAOS_ITERATION=6 ' "$ROOT/$rel/summary.md" 2>/dev/null ||
+  note "the summary does not list the failure: $(cat "$ROOT/$rel/summary.md" 2>/dev/null)"
+if [ -e "$ROOT/internal/chaos/$rel" ]; then note "reports were written under internal/chaos"; fi
+rm -rf "${ROOT:?}/$rel" "${ROOT:?}/internal/chaos/chaos-artifacts"
+rmdir "$ROOT/chaos-artifacts" 2>/dev/null || true
 
 # ---- a run that never started: no seed, says so, keeps go's stderr ----
 a="$work/broken"
