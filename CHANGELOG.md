@@ -110,6 +110,19 @@ version.
   `Delay`, `BlockUntil`, `Sequence`) and a faulting database driver that can
   fail the Nth statement, a begin, a commit, or a rollback
   ([#381](https://github.com/gombit-dev/gombit/issues/381)).
+
+### Fixed
+
+- The Redis cache client (`cache.NewRedisClient`, `cache.Open`) now honors
+  the caller's context deadline (`ContextTimeoutEnabled`): a Redis that
+  stopped answering held a request past its deadline until go-redis's own
+  read timeout and retries ran out (found by
+  `TestFault_Network_RedisLatency`).
+
+## [0.5.0] — 2026-09-27
+
+### Added
+
 - Job observability: Prometheus metrics for job outcomes (counted once the
   queue committed them), run time, queue latency, in-flight jobs, and queue
   depth (`gombit_jobs_*`, the job's name as `job_name`), on the app's
@@ -165,19 +178,6 @@ version.
   come back when their leases expire. `jobs.NewWorker`, `framework.RunWorker`,
   and `Queue.Extend` (lease renewal) are the building blocks
   ([#316](https://github.com/gombit-dev/gombit/issues/316)).
-
-### Fixed
-
-- The Redis cache client (`cache.NewRedisClient`, `cache.Open`) now honors
-  the caller's context deadline (`ContextTimeoutEnabled`): a Redis that
-  stopped answering held a request past its deadline until go-redis's own
-  read timeout and retries ran out (found by
-  `TestFault_Network_RedisLatency`).
-
-## [0.5.0] — 2026-09-27
-
-### Added
-
 - Job queue drivers, selected by `GOMBIT_JOBS_DRIVER`: `sync` (the default;
   `Dispatch` runs the job inline), `memory`, and a durable `redis` driver
   whose queued, delayed, and leased jobs survive restarts (atomic Lua
