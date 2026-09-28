@@ -4,11 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -24,6 +27,7 @@ import (
 	"github.com/gombit-dev/gombit/contract"
 	"github.com/gombit-dev/gombit/database"
 	"github.com/gombit-dev/gombit/internal/adminui"
+	"github.com/gombit-dev/gombit/jobs"
 	"github.com/gombit-dev/gombit/logging"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
@@ -55,6 +59,10 @@ type App struct {
 	cacheStore         *cache.Store
 	cacheOwned         bool
 	redis              *redis.Client
+	jobs               *jobs.Dispatcher
+	jobsOwned          bool
+	jobMetrics         *jobs.Metrics
+	workerQueues       []string // consumed by RunWorker in this process
 	db                 *database.DB
 	logger             *zap.Logger
 	router             *gin.Engine
@@ -92,6 +100,7 @@ func New(options ...Option) (*App, error) {
 	app := &App{
 		cfg:             config.Default(),
 		shutdownTimeout: defaultShutdownTimeout,
+		jobMetrics:      jobs.NewMetrics(),
 	}
 
 	for _, option := range options {
@@ -129,7 +138,7 @@ func New(options ...Option) (*App, error) {
 		})
 	}
 	if app.router == nil {
-		router, err := newRouter(app.cfg, app.csrfExemptPaths, app.rawBodyPaths, app.handleReadyz)
+		router, err := newRouter(app.cfg, app.csrfExemptPaths, app.rawBodyPaths, app.handleReadyz, app.writeJobMetrics)
 		if err != nil {
 			return nil, err
 		}
@@ -153,6 +162,25 @@ func New(options ...Option) (*App, error) {
 		app.cacheStore = store
 		app.cacheOwned = true
 		app.redis = store.Redis()
+	}
+	if app.jobs == nil {
+		registry := jobs.NewRegistry(jobs.WithPropagator(JobPropagator()), jobs.WithPropagator(jobs.OTelPropagator()))
+		var dispatcher *jobs.Dispatcher
+		var err error
+		if app.cfg.Jobs.Driver == config.JobsDriverRedis && app.redis != nil {
+			// The app already has a Redis client (WithRedis, or the cache's):
+			// queue against the server it talks to rather than dial
+			// GOMBIT_REDIS_*, which could even be a different one. The queue
+			// gets its own pool, tuned for queue calls.
+			dispatcher, err = jobs.OpenWithRedis(app.cfg.Jobs, app.redis, registry)
+		} else {
+			dispatcher, err = jobs.Open(app.cfg.Jobs, app.cfg.Cache.Redis, registry)
+		}
+		if err != nil {
+			return nil, err
+		}
+		app.jobs = dispatcher
+		app.jobsOwned = true
 	}
 	if app.cfg.Auth.Enabled() {
 		if app.db == nil || app.db.DB == nil {
@@ -214,6 +242,20 @@ func WithCache(c cache.Cache) Option {
 			app.cacheStore = store
 			app.redis = store.Redis()
 		}
+		return nil
+	}
+}
+
+// WithJobs attaches a job dispatcher the caller opened, instead of the one
+// App opens from Config.Jobs. App does not close a dispatcher attached this
+// way.
+func WithJobs(dispatcher *jobs.Dispatcher) Option {
+	return func(app *App) error {
+		if dispatcher == nil {
+			return errors.New("framework: nil job dispatcher")
+		}
+		app.jobs = dispatcher
+		app.jobsOwned = false
 		return nil
 	}
 }
@@ -334,6 +376,14 @@ func (a *App) Config() config.Config {
 }
 
 // Cache returns the configured cache implementation.
+// Jobs returns the job dispatcher: register jobs on Jobs().Registry() at
+// startup, and dispatch with Jobs().Dispatch. The driver comes from
+// Config.Jobs (GOMBIT_JOBS_DRIVER, sync by default), and the registry
+// carries request and trace IDs into job handlers (JobPropagator).
+func (a *App) Jobs() *jobs.Dispatcher {
+	return a.jobs
+}
+
 func (a *App) Cache() cache.Cache {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
@@ -439,11 +489,17 @@ func (a *App) OnStop(hook Hook) {
 	a.stopHooks = append(a.stopHooks, hook)
 }
 
-// Run runs app until an interrupt or terminate signal is received.
+// Run runs app until an interrupt or terminate signal is received: the HTTP
+// server, or, when the process's first argument is "worker", the jobs worker
+// (see RunWorker; `./server worker --help` lists its flags). Other arguments
+// are ignored, as before.
 func Run(app *App) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	if len(os.Args) > 1 && os.Args[1] == WorkerCommand {
+		return runWorkerCommand(ctx, app, os.Args[2:], os.Stderr)
+	}
 	return RunContext(ctx, app)
 }
 
@@ -564,12 +620,13 @@ func (a *App) shutdown() error {
 			return errors.Join(
 				fmt.Errorf("framework: shutdown: %w", err),
 				a.runStopHooksWithContext(shutdownCtx),
+				a.closeOwnedJobs(),
 				a.closeOwnedCache(),
 			)
 		}
 	}
 
-	return errors.Join(a.runStopHooksWithContext(shutdownCtx), a.closeOwnedCache())
+	return errors.Join(a.runStopHooksWithContext(shutdownCtx), a.closeOwnedJobs(), a.closeOwnedCache())
 }
 
 func (a *App) runStopHooks() error {
@@ -579,7 +636,7 @@ func (a *App) runStopHooks() error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	return errors.Join(a.runStopHooksWithContext(ctx), a.closeOwnedCache())
+	return errors.Join(a.runStopHooksWithContext(ctx), a.closeOwnedJobs(), a.closeOwnedCache())
 }
 
 func (a *App) closeOwnedCache() error {
@@ -594,6 +651,20 @@ func (a *App) closeOwnedCache() error {
 		return nil
 	}
 	return store.Close()
+}
+
+// closeOwnedJobs runs before closeOwnedCache: a Redis job queue may borrow
+// the cache's client.
+func (a *App) closeOwnedJobs() error {
+	a.mu.Lock()
+	dispatcher := a.jobs
+	owned := a.jobsOwned
+	a.jobsOwned = false
+	a.mu.Unlock()
+	if !owned || dispatcher == nil {
+		return nil
+	}
+	return dispatcher.Close()
 }
 
 func (a *App) runStopHooksWithContext(ctx context.Context) error {
@@ -614,7 +685,7 @@ func syncLogger(logger *zap.Logger) error {
 	return nil
 }
 
-func newRouter(cfg config.Config, csrfExemptPaths, rawBodyPaths []string, readyz gin.HandlerFunc) (*gin.Engine, error) {
+func newRouter(cfg config.Config, csrfExemptPaths, rawBodyPaths []string, readyz gin.HandlerFunc, extraMetrics func(context.Context, io.Writer)) (*gin.Engine, error) {
 	router := gin.New()
 	enableMethodNotAllowed(router)
 	if err := configureTrustedProxies(router, cfg.HTTP.TrustedProxies); err != nil {
@@ -634,9 +705,67 @@ func newRouter(cfg config.Config, csrfExemptPaths, rawBodyPaths []string, readyz
 		})
 	})
 	router.GET("/readyz", readyz)
-	router.GET("/metrics", metrics.handler)
+	router.GET("/metrics", func(c *gin.Context) {
+		var b strings.Builder
+		b.WriteString(metrics.render())
+		if extraMetrics != nil {
+			extraMetrics(c.Request.Context(), &b)
+		}
+		c.Data(http.StatusOK, "text/plain; version=0.0.4; charset=utf-8", []byte(b.String()))
+	})
 	return router, nil
 }
+
+// addWorkerQueues records queues a worker in this process consumes, for the
+// queue gauges on /metrics.
+func (a *App) addWorkerQueues(queues []string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, q := range queues {
+		if !slices.Contains(a.workerQueues, q) {
+			a.workerQueues = append(a.workerQueues, q)
+		}
+	}
+}
+
+// writeJobMetrics appends the metrics of workers running in this process
+// (RunWorker), when there are any, with the depth of the queues they
+// consume. A queue whose stats cannot be read is left out, logged, and
+// reported by gombit_jobs_queue_stats_up{queue} 0, rather than failing the
+// app's whole scrape (HTTP metrics included) during a queue outage.
+func (a *App) writeJobMetrics(ctx context.Context, w io.Writer) {
+	a.mu.RLock()
+	queues := slices.Clone(a.workerQueues)
+	a.mu.RUnlock()
+	if a.jobMetrics == nil || (a.jobMetrics.Empty() && len(queues) == 0) {
+		return
+	}
+	var stats map[string]jobs.QueueStats
+	var up []string
+	if len(queues) > 0 {
+		ctx, cancel := context.WithTimeout(ctx, queueStatsTimeout)
+		defer cancel()
+		var err error
+		stats, err = readQueueStats(ctx, a.jobs.Queue(), queues)
+		if err != nil {
+			a.Logger().Warn("metrics: reading job queue stats failed", zap.Error(err))
+		}
+		for _, q := range queues {
+			v := "1"
+			if _, ok := stats[q]; !ok {
+				v = "0"
+			}
+			up = append(up, fmt.Sprintf("gombit_jobs_queue_stats_up{queue=%q} %s\n", q, v))
+		}
+	}
+	_ = a.jobMetrics.WritePrometheus(w, stats, time.Now())
+	if len(up) > 0 {
+		_, _ = io.WriteString(w, "# HELP gombit_jobs_queue_stats_up Whether the queue's stats were read for this scrape.\n# TYPE gombit_jobs_queue_stats_up gauge\n"+strings.Join(up, ""))
+	}
+}
+
+// JobMetrics returns the metrics workers in this process record into.
+func (a *App) JobMetrics() *jobs.Metrics { return a.jobMetrics }
 
 // readinessTimeout bounds the datastore probe so a hung datastore cannot hang
 // the /readyz handler (and, with it, a host's traffic-gating decision). A var,

@@ -24,6 +24,9 @@ type Service struct {
 	dummyHash   string
 	rotateMu    sync.Mutex
 	rotateCalls map[string]*rotateCall
+	// onRotateJoin, when set (tests only), runs when a caller joins another
+	// caller's in-flight rotation, just before it waits for the result.
+	onRotateJoin func()
 }
 
 type rotateCall struct {
@@ -153,6 +156,9 @@ func (s *Service) RotateRefresh(ctx context.Context, raw string) (TokenPair, err
 	}
 	if call, ok := s.rotateCalls[hash]; ok {
 		s.rotateMu.Unlock()
+		if s.onRotateJoin != nil {
+			s.onRotateJoin()
+		}
 		call.wg.Wait()
 		return call.pair, call.err
 	}

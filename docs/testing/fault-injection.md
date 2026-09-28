@@ -529,12 +529,24 @@ faulttest.CheckRetryPolicy(t, faulttest.RetryContract{
 })
 ```
 
-The check drives the policy with scripted failures and a `FakeSleeper`
-(no real waiting). It fails on attempts past `MaxAttempts`; a cancellation
-before the first attempt or mid-backoff that does not end it; a permanent
-error retried; a retryable one not retried; a delay off its schedule, or
-outside `[0, MaxDelay]` for any attempt, including after overflow; a success
-that does not end it; or a final error that hides the last attempt's error.
+The check drives the policy with scripted failures and a `FakeSleeper`, so
+nothing really waits. `MaxAttempts` is the policy's **budget**: an op that
+keeps failing retryably must run exactly that many times. The check reports
+every violated property:
+
+- more attempts than `MaxAttempts`, or fewer (a retryable failure not
+  retried while budget remains);
+- a cancellation, before the first attempt or mid-backoff, that does not end
+  it;
+- a permanent error retried;
+- a delay off its schedule, or outside `[0, MaxDelay]` for any attempt.
+  Every attempt up to 128 is probed, which finds a doubling backoff's int64
+  overflow wherever it happens;
+- a success that does not end it;
+- a final error that hides the last attempt's error.
+
+Use `RealSleeper` in production: it fails the wait at once on a context that
+has already ended, however short the delay.
 
 ## Worked examples
 

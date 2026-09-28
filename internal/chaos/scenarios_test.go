@@ -45,9 +45,12 @@ type chaosCounter struct {
 func (chaosCounter) TableName() string { return "chaos_counters" }
 
 // pickDB draws the database: Postgres (when configured) or a fresh SQLite.
+// The draw is made either way, so the draws after it are the same with or
+// without Postgres; which database ran is in the failure report, and the
+// replay command pins whether Postgres was configured (CHAOS_POSTGRES).
 func pickDB(t *testing.T, env Environment) (database.Driver, string) {
 	t.Helper()
-	if env.PostgresDSN != "" && env.Rand.IntN(2) == 0 {
+	if env.Rand.IntN(2) == 0 && env.PostgresDSN != "" {
 		return database.DriverPostgres, env.PostgresDSN
 	}
 	return database.DriverSQLite, "file:" + filepath.Join(t.TempDir(), "chaos.db") + "?_fk=1"
@@ -55,12 +58,12 @@ func pickDB(t *testing.T, env Environment) (database.Driver, string) {
 
 // newApp is an App over kind's database wrapped with faults, with fresh
 // chaos tables; faults are disarmed while the tables are made.
-func newApp(t *testing.T, kind database.Driver, dsn string, faults *faulttest.DBFaults, opts ...framework.Option) (*framework.App, *database.DB) {
+func newApp(t *testing.T, env Environment, kind database.Driver, dsn string, faults *faulttest.DBFaults, opts ...framework.Option) (*framework.App, *database.DB) {
 	t.Helper()
 	faults.Disarm()
 	db, err := faulttest.OpenDB(kind, dsn, faults)
 	if err != nil {
-		t.Fatal(err)
+		env.Fatalf(t, "%v", err)
 	}
 	drop := func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -74,7 +77,7 @@ func newApp(t *testing.T, kind database.Driver, dsn string, faults *faulttest.DB
 	})
 	drop()
 	if err := db.AutoMigrate(&chaosRow{}, &chaosCounter{}); err != nil {
-		t.Fatal(err)
+		env.Fatalf(t, "%v", err)
 	}
 	faults.Arm()
 	cfg := config.Default()
@@ -82,16 +85,16 @@ func newApp(t *testing.T, kind database.Driver, dsn string, faults *faulttest.DB
 	cfg.HTTP.Addr = "127.0.0.1:0"
 	app, err := framework.New(append([]framework.Option{framework.WithConfig(cfg), framework.WithDatabase(db)}, opts...)...)
 	if err != nil {
-		t.Fatal(err)
+		env.Fatalf(t, "%v", err)
 	}
 	return app, db
 }
 
-func countBatch(t *testing.T, app *framework.App, batch string) int64 {
+func countBatch(t *testing.T, env Environment, app *framework.App, batch string) int64 {
 	t.Helper()
 	var n int64
 	if err := app.DB().Model(&chaosRow{}).Where("batch = ?", batch).Count(&n).Error; err != nil {
-		t.Fatal(err)
+		env.Fatalf(t, "%v", err)
 	}
 	return n
 }
@@ -116,7 +119,7 @@ func failureBoundary(t *testing.T, env Environment) {
 		boundary = "none"
 	}
 	env.Drew(t, "%s, %d inserts, fault at %s", kind, n, boundary)
-	app, db := newApp(t, kind, dsn, faults)
+	app, db := newApp(t, env, kind, dsn, faults)
 	batch := fmt.Sprintf("iter-%d", env.Iteration)
 	err := app.Tx(context.Background(), func(tx *gorm.DB) error {
 		for i := 0; i < n; i++ {
@@ -126,7 +129,7 @@ func failureBoundary(t *testing.T, env Environment) {
 		}
 		return nil
 	})
-	got := countBatch(t, app, batch)
+	got := countBatch(t, env, app, batch)
 	if boundary == "none" {
 		if err != nil || got != int64(n) {
 			env.Mismatch(t, fmt.Sprintf("%s: a transaction with no fault", kind), fmt.Sprintf("success and %d rows", n), fmt.Sprintf("%v and %d rows", err, got))
@@ -163,11 +166,11 @@ func concurrentWriters(t *testing.T, env Environment) {
 	}
 	env.Drew(t, "%s, %d writers, %d COMMITs failing", kind, writers, failing)
 	faults := &faulttest.DBFaults{Commit: faulttest.Sequence(steps...)}
-	app, db := newApp(t, kind, dsn, faults)
+	app, db := newApp(t, env, kind, dsn, faults)
 	faults.Disarm()
 	counter := chaosCounter{}
 	if err := app.DB().Create(&counter).Error; err != nil {
-		t.Fatal(err)
+		env.Fatalf(t, "%v", err)
 	}
 	faults.Arm()
 
@@ -190,12 +193,12 @@ func concurrentWriters(t *testing.T, env Environment) {
 				env.Mismatch(t, fmt.Sprintf("%s: a concurrent writer", kind), "success or the injected COMMIT fault", err.Error())
 			}
 		case <-time.After(10 * time.Second):
-			t.Fatalf("%d of %d writers still running", writers-i, writers)
+			env.Fatalf(t, "%d of %d writers still running", writers-i, writers)
 		}
 	}
 	var final chaosCounter
 	if err := app.DB().First(&final, counter.ID).Error; err != nil {
-		t.Fatal(err)
+		env.Fatalf(t, "%v", err)
 	}
 	if succeeded != writers-failing || final.N != succeeded {
 		env.Mismatch(t, fmt.Sprintf("%s: %d writers, %d COMMITs failing", kind, writers, failing),
@@ -206,9 +209,11 @@ func concurrentWriters(t *testing.T, env Environment) {
 }
 
 // cancellationStress: a transaction of n inserts has its context canceled
-// while a random insert, or its COMMIT, is in flight. Invariant: the answer
-// matches what persisted (an error means no rows, success means all), and
-// no connection is left held.
+// while a random insert, or its COMMIT, is in flight. Invariants: canceled
+// during an insert, the transaction ends with context.Canceled and nothing
+// persisted (the cancellation reached the statement: INV-3); canceled during
+// COMMIT, which takes no context, the answer matches what persisted (an
+// error means no rows, success means all). No connection is left held.
 func cancellationStress(t *testing.T, env Environment) {
 	kind, dsn := pickDB(t, env)
 	n := 1 + env.Rand.IntN(5)
@@ -223,7 +228,9 @@ func cancellationStress(t *testing.T, env Environment) {
 	faults := &faulttest.DBFaults{Match: faulttest.Inserts("chaos_rows")}
 	var reached <-chan struct{}
 	var at string
+	onInsert := false
 	if k := env.Rand.IntN(n + 1); k < n { // cancel during insert k+1
+		onInsert = true
 		steps := make([]faulttest.Step, k+1)
 		for i := range steps[:k] {
 			steps[i] = faulttest.Success()
@@ -238,7 +245,7 @@ func cancellationStress(t *testing.T, env Environment) {
 		at = "COMMIT"
 	}
 	env.Drew(t, "%s, %d inserts, cancel during %s", kind, n, at)
-	app, db := newApp(t, kind, dsn, faults)
+	app, db := newApp(t, env, kind, dsn, faults)
 	batch := fmt.Sprintf("iter-%d", env.Iteration)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -256,20 +263,34 @@ func cancellationStress(t *testing.T, env Environment) {
 	select {
 	case <-reached:
 	case err := <-result:
-		t.Fatalf("the transaction ended (%v) before reaching %s", err, at)
+		env.Fatalf(t, "the transaction ended (%v) before reaching %s", err, at)
 	case <-time.After(10 * time.Second):
-		t.Fatalf("the transaction never reached %s", at)
+		env.Fatalf(t, "the transaction never reached %s", at)
 	}
 	cancel()
-	close(release) // a held COMMIT (no context) proceeds; a held insert already saw the cancel
+	if !onInsert {
+		// COMMIT takes no context: release it, and check the answer is
+		// consistent with what persisted.
+		close(release)
+	}
+	// A held insert is never released: only the cancellation can end it.
+	// A transaction that dropped its context stays held, and fails here.
 	var err error
 	select {
 	case err = <-result:
 	case <-time.After(10 * time.Second):
-		t.Fatalf("the transaction canceled at %s did not return", at)
+		env.Mismatch(t, fmt.Sprintf("%s: a transaction canceled during %s", kind, at),
+			"it returns once canceled", "still running 10s after the cancel: the cancellation never reached it")
+		close(release)
+		<-result
+		return
 	}
-	got := countBatch(t, app, batch)
-	if (err == nil && got != int64(n)) || (err != nil && got != 0) {
+	got := countBatch(t, env, app, batch)
+	switch {
+	case onInsert && (!errors.Is(err, context.Canceled) || got != 0):
+		env.Mismatch(t, fmt.Sprintf("%s: a transaction canceled during %s", kind, at),
+			"context.Canceled and 0 rows", fmt.Sprintf("%v with %d rows", err, got))
+	case !onInsert && ((err == nil && got != int64(n)) || (err != nil && got != 0)):
 		env.Mismatch(t, fmt.Sprintf("%s: a transaction canceled during %s", kind, at),
 			fmt.Sprintf("success with %d rows, or an error with 0", n), fmt.Sprintf("%v with %d rows", err, got))
 	}
@@ -281,26 +302,24 @@ func cancellationStress(t *testing.T, env Environment) {
 // everything). Invariant: the call ends within its deadline (INV-2) and,
 // once the fault clears, the next call succeeds without a restart (INV-6).
 func postgresInterruption(t *testing.T, env Environment) {
-	if env.PostgresDSN == "" {
-		t.Skip("set CHAOS_POSTGRES_DSN for the Postgres scenarios")
-	}
+	env.RequirePostgres(t)
 	upstream, err := faulttest.PostgresHostPort(env.PostgresDSN)
 	if err != nil {
-		t.Fatal(err)
+		env.Fatalf(t, "%v", err)
 	}
 	proxy := faulttest.NewTCPProxy(t, upstream)
 	dsn, err := faulttest.PostgresDSNVia(env.PostgresDSN, proxy.Addr())
 	if err != nil {
-		t.Fatal(err)
+		env.Fatalf(t, "%v", err)
 	}
 	db, err := database.Open(config.DatabaseConfig{Driver: config.DatabaseDriverPostgres, DSN: dsn})
 	if err != nil {
-		t.Fatal(err)
+		env.Fatalf(t, "%v", err)
 	}
 	t.Cleanup(func() { _ = proxy.Heal(); _ = db.Close() })
 	ping := func(ctx context.Context) error { return db.WithContext(ctx).Exec("SELECT 1").Error }
 	if err := ping(context.Background()); err != nil {
-		t.Fatal(err)
+		env.Fatalf(t, "%v", err)
 	}
 
 	deadline := time.Duration(100+env.Rand.IntN(400)) * time.Millisecond
@@ -320,9 +339,9 @@ func postgresInterruption(t *testing.T, env Environment) {
 		select {
 		case <-proxy.Held():
 		case err := <-done:
-			t.Fatalf("the query returned (%v) before reaching the proxy", err)
+			env.Fatalf(t, "the query returned (%v) before reaching the proxy", err)
 		case <-time.After(10 * time.Second):
-			t.Fatal("the query never reached the proxy")
+			env.Fatalf(t, "the query never reached the proxy")
 		}
 		proxy.Refuse()
 		if fault == "cut" {
@@ -341,7 +360,7 @@ func postgresInterruption(t *testing.T, env Environment) {
 			fmt.Sprintf("an error within the %s deadline", deadline), fmt.Sprintf("%v after %s", err, took))
 	}
 	if err := proxy.Heal(); err != nil {
-		t.Fatal(err)
+		env.Fatalf(t, "%v", err)
 	}
 	rctx, rcancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer rcancel()
@@ -385,7 +404,7 @@ func httpDependencyFaults(t *testing.T, env Environment) {
 	env.Drew(t, "request timeout %s, dependency script %v", timeout, names)
 	app, err := framework.New(framework.WithConfig(cfg))
 	if err != nil {
-		t.Fatal(err)
+		env.Fatalf(t, "%v", err)
 	}
 	app.Router().GET("/call", func(c *gin.Context) {
 		req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodGet, dep.URL(), nil)
