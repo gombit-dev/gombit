@@ -259,12 +259,24 @@ deterministic `TestFault_*` test.
 
 The `Chaos` workflow runs the suite nightly against an ephemeral Postgres,
 and on demand (Actions → Chaos → Run workflow, with an optional seed,
-scenario, and iteration count). It is never a PR check. Its job summary
-shows the seed and each failure's replay command; on failure it uploads
-`chaos-artifacts/`: the `go test -json` output (race reports included), one
-report per failed iteration, the settings used, and the Postgres container's
-logs and state. `bash scripts/chaos-run.sh` produces the same directory
-locally.
+scenario, and iteration count). It is never a PR check.
+
+Its job summary shows the seed, a command that replays the whole run, and
+each failure's replay command. The commands carry every setting that
+changes what runs: the quoted `CHAOS_POSTGRES_DSN` of the run's throwaway
+database, `CHAOS_POSTGRES=1`, and the iteration count. Start a Postgres at
+that address, as the `docker run` above does, and paste.
+
+On failure it uploads `chaos-artifacts/`:
+
+- the `go test -json` output (race reports included);
+- `go`'s own stderr (build errors);
+- one report per failed iteration;
+- the settings used;
+- the Postgres container's logs and state.
+
+`bash scripts/chaos-run.sh` produces the same directory locally, replacing
+the previous run's files.
 
 `make test-faults` runs the whole fault suite: the `internal/faulttest`
 harness and every `TestFault_*` test (found by name, so a new one joins
