@@ -144,123 +144,51 @@ Migrations and the conformance suite follow the same shape — see
 
 ### Fault injection
 
-Failure paths get deterministic tests with `internal/faulttest`: an
-`Injector` fails exactly the calls a test names (`FailOnce`, `FailNTimes`,
-`FailOnCall(n, err)`, `Sequence(...)`), or holds them (`Delay`, `BlockUntil`)
-until a timer, a channel, or the call's context ends — never on a guessed
-sleep. `faulttest.OpenDB` wraps a real driver so a test can fail the Nth
-statement, a `Begin`, a `Commit`, or a `Rollback` on SQLite, PostgreSQL, and
-MySQL alike:
-
-```go
-db, _ := faulttest.OpenDB(database.DriverSQLite, dsn, &faulttest.DBFaults{
-	Commit: faulttest.FailOnce(faulttest.ErrInjected),
-})
-// the first transaction's commit fails: assert nothing it wrote persists
-```
-
-Set up over the same wrapped database with the injectors disarmed
-(`inj.Disarm()`), and `Arm()` them for the calls under test, so migrations
-and fixtures are never numbered. Name fault tests by the epic's taxonomy
-(`TestFault_Database_CommitFailure`) and assert persisted state and returned
-errors, not call counts. The `framework`, `auth`, and `admin` fault tests run
-on SQLite by default and add PostgreSQL and MySQL under the `integration` tag
-with that package's DSN flags. `auth` and `admin` both create and drop the
-auth tables, so against one shared database run the packages one at a time
-(`go test -p 1 ...`, or one package per command as CI does). After a failed
-write, `faulttest.Idle` checks that no transaction was left holding a
-connection; row counts alone cannot see an open transaction.
-
-Outbound HTTP gets a loopback dependency, `faulttest.NewHTTPDependency(t,
-steps...)`, that answers each call with the next scripted step:
-`ServerError()`, `TooManyRequests(retryAfter)`, `Respond(status, body)` (a
-malformed body, say), `Hang(release)` (slower than any deadline, released by
-a channel or the client going away), `CutBody(partial)`, or
-`ResetConnection()`. Point the code under test at `dep.URL()` through
-`faulttest.TrackBodies(dep.Client().Transport)` to assert every response
-body was closed, and call `dep.WaitIdle(t)` to prove no call was left
-running on the dependency.
-
-Real transport faults go through `faulttest.NewTCPProxy(t, upstream)`, an
-in-process TCP proxy the test points its dependency at (for Postgres,
-`faulttest.PostgresDSNVia(dsn, proxy.Addr())`). The test toggles each fault
-at an explicit point: `Hold()` (the dependency stops answering: latency past
-any deadline; `Held()` says a call has stalled), `Cut()` / `Reset()` (open
-connections drop, with FIN or RST), `Refuse()` (new connections are
-refused), and `Heal()` (all lifted, so the next operation must succeed
-without a restart). The `framework` and `cache` network tests
-(`TestFault_Network_*`) run against a real Postgres and Redis this way.
-
-Cancellation and deadline tests (`TestFault_Context_*`) check for leaks by
-explicit synchronization, not by counting goroutines (the suite does not use
-`goleak`: a process-wide goroutine snapshot also sees the database pool's and
-HTTP transport's own goroutines, and needs ignore-lists that drift). The
-downstream call is a fault whose own counters must show the cancellation,
-`faulttest.Idle` must find no connection held, `dep.WaitIdle` no outbound
-call running, and each handler signals when it returns, under a bounded
-wait. Release a blocked fault before closing a server (`defer release()`
-after `defer srv.Close()`), so a regression fails the test instead of hanging
-the server's `Close`.
-
-Concurrency + fault scenarios (`TestFault_Concurrency_*`) pin their
-interleaving with the injectors, never with sleeps: hold a call at a
-dangerous boundary (`Block`, or `BlockThenFail(release, err)` for a call
-that stalls and then fails, such as a COMMIT holding its row lock), wait on
-`Reached(n)`, start the competing operation, then release. `SequenceThen(rest,
-steps...)` scripts the first calls and sets what every later one does. Each
-scenario states its expected outcome (one winner, rollback, or a terminal
-error for everyone) and must pass `-race -count=100`.
-
-Any retry policy Gombit adds must pass `faulttest.CheckRetryPolicy(t,
-faulttest.RetryContract{...})` (INV-4, bounded retry). The policy waits
-between attempts through a `faulttest.Sleeper` (in production a
-`faulttest.RealSleeper`-like timer, in tests a `FakeSleeper` that records the
-delays and returns at once, or blocks until canceled), so its backoff is
-tested without sleeping. The checker drives the policy with scripted
-failures and reports each violated property. `MaxAttempts` is the policy's
-budget, so an op that keeps failing retryably must run exactly that many
-times. The checker reports:
-
-- more attempts than `MaxAttempts`, or fewer (a retryable failure not
-  retried while budget remains);
-- an attempt started on a context that had already ended (`Do` must return
-  the context's error without calling the op);
-- a cancellation mid-backoff that does not end it;
-- a permanent error retried;
-- a backoff off its schedule;
-- a `Delay` outside `[0, MaxDelay]` at any sampled attempt. The sample is
-  every attempt up to `max(MaxAttempts, 128)`, plus 1000. That catches a
-  shift or doubling that overflows (it wraps by attempt 64). It does not
-  catch an attempt multiplied by a unit, which wraps at an attempt that
-  depends on the unit, so compute a delay so it cannot overflow;
-- a success that does not end it;
-- a final error that hides the last attempt's error.
-
-`make test-faults` runs the whole fault suite: the `internal/faulttest`
-harness and every `TestFault_*` test (found by name, so a new one joins
-without editing anything), under the race detector. Set `FAULT_POSTGRES_DSN`
-and `FAULT_MYSQL_DSN` to add those databases, and `FAULT_REDIS_ADDR` for
-Redis, as CI's `fault-tests` job does:
+Failure paths get deterministic tests. The full guide is
+[docs/testing/fault-injection.md](docs/testing/fault-injection.md). It covers
+the invariants (INV-1 to INV-8) and the tests that enforce them, what Gombit
+guarantees versus what applications must handle, the `internal/faulttest`
+primitives, the naming taxonomy, worked examples, and how to reproduce a
+chaos failure from its seed.
 
 ```bash
+make test-faults    # every TestFault_* test and the faulttest harness, under -race
+
 FAULT_POSTGRES_DSN='postgres://gombit:gombit@127.0.0.1:5432/gombit?sslmode=disable' \
 FAULT_MYSQL_DSN='gombit:gombit@tcp(127.0.0.1:3306)/gombit?parseTime=true' \
 FAULT_REDIS_ADDR=127.0.0.1:6379 \
-  make test-faults
+  make test-faults  # plus the real databases and Redis, as CI's fault-tests job does
+
+make test-chaos     # the stochastic suite: nightly/on demand only, never a PR check
+CHAOS_POSTGRES=0 CHAOS_SEED=<seed> CHAOS_SCENARIO=<name> CHAOS_ITERATION=<i> make test-chaos  # replay: paste the report's line
 ```
 
-A fault test must pass `go test -count=50` (and `-race`) before it lands: a
-flaky failure-path test is worse than none. `FAULT_COUNT=100 make
-test-faults` is the soak the `Fault soak` workflow runs weekly (and on
-demand); the `Fault injection` check becomes required only after that soak
-stays clean. (`FAULT_COUNT` is a plain base-10 count: `go test` would read
-`010` as octal and `00` as "run nothing".)
+The rules, in short:
 
-In CI the suite runs as six shards (`FAULT_SHARD=i/6`, packages spread
-round-robin, so a new fault package needs no CI edit). Each shard first
-compiles its test binaries (`FAULT_COMPILE_ONLY=1`), then runs under
-`FAULT_BUDGET_SECONDS=120`: a shard whose run takes longer fails, and the
-remedy is another shard, never a dropped scenario.
+- Name fault tests `TestFault_<Component>_<Scenario>`. The prefix is what puts
+  them in `make test-faults`, so a new one needs no CI edit.
+- Assert invariants (errors, persisted state, released resources, recovery),
+  not call counts, unless the call sequence is itself the contract ("`App.Tx`
+  runs `fn` once", "one rotation, one INSERT").
+- Pin interleavings with the injectors (`Block`, `Reached(n)`,
+  `proxy.Held()`), never with `time.Sleep`. Bound every wait in a test.
+- No unbounded retries: any retry policy must pass
+  `faulttest.CheckRetryPolicy`.
+- Fault injection is explicit opt-in, through wrappers and proxies a test
+  builds. Production code never imports `internal/faulttest`.
+- A fault test must pass `go test -race -count=50` before it lands, and a
+  `TestFault_Concurrency_*` scenario `-race -count=100`. A flaky
+  failure-path test is worse than none.
+- Adding, changing, or removing a fault test means updating the invariant
+  tables in the guide.
+
+The `Fault injection` check runs `make test-faults` as six shards on every PR
+(`FAULT_SHARD`; each compiles first with `FAULT_COMPILE_ONLY=1`, then runs
+under `FAULT_BUDGET_SECONDS=120`). The `Fault soak` workflow
+reruns it 100 times weekly, and the check becomes required once that stays
+clean. The `Chaos` workflow runs `make test-chaos` nightly, and its artifacts
+carry everything needed to replay a failure. `bash scripts/chaos-run.sh`
+produces the same artifacts locally.
 
 ### Generator golden tests
 
