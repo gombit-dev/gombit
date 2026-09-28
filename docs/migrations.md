@@ -41,6 +41,9 @@ gombit db makemigrations create_products \
   --model github.com/acme/shop/internal/product.Product
 ```
 
+`--driver` defaults to the configured driver (`GOMBIT_DATABASE_DRIVER`, `sqlite`
+when unset) and `--dir` to `database/migrations`.
+
 The Atlas Community Edition CLI must be installed and available on `PATH`, or
 supplied with `--atlas-bin`:
 
@@ -125,8 +128,8 @@ must not start with a hyphen.
 ## Planning a change
 
 `gombit db plan` shows what the next `makemigrations` would do, without writing
-anything. It takes the same `--driver`, `--dir`, `--model`, and `--forget-model`
-flags:
+anything. It takes the same `--driver`, `--dir`, `--atlas-bin`, `--model`, and
+`--forget-model` flags:
 
 ```sh
 gombit db plan --driver sqlite
@@ -284,8 +287,8 @@ The supported workflow:
    The registry is written after `atlas.sum` is refreshed, and a failed hash
    restores both.
 3. Run `gombit db makemigrations sync_items`. GORM names indexes and foreign keys
-   after the table (`idx_products_deleted_at` → `idx_items_deleted_at`), so this
-   migration renames them. The plan reports each as a safe `rename_index` /
+   after the table (`idx_products_sku` → `idx_items_sku`, `fk_products_owner` →
+   `fk_items_owner`), so this migration renames them. The plan reports each as a safe `rename_index` /
    `rename_foreign_key`, because the definition is unchanged and the rows already
    satisfy it, so no `--allow` is needed. Afterwards `gombit db plan` reports no
    changes.
@@ -310,6 +313,11 @@ gombit db lint               # every migration: what CI should run
 gombit db lint --json
 gombit db lint --latest 1    # only the newest, a local shortcut
 ```
+
+`lint`, `repair`, and `check` take `--dir` (default `database/migrations`),
+`--atlas-bin` (default `atlas`), and `--driver` (default: the configured
+driver), which picks the Atlas dev database the migrations are replayed on. For
+PostgreSQL and MySQL that dev database runs in Docker ([Drivers](#drivers)).
 
 - **Integrity.** `atlas.sum` matches every file, and the migrations apply to
   an empty dev database (Atlas Community Edition `migrate validate`). A
@@ -371,6 +379,17 @@ Atlas errors that `gombit db migrate`, `status`, `makemigrations`, and `hash`
 pass through name the gombit command (`gombit db hash`) instead of the Atlas
 CLI.
 
+### Rehashing only: `gombit db hash`
+
+```sh
+gombit db hash [--dir database/migrations] [--atlas-bin atlas]
+```
+
+`gombit db hash` wraps `atlas migrate hash`: it recomputes `atlas.sum` and
+nothing else. It does not replay the migrations or check safety manifests, and
+it needs no dev database. `gombit db repair` rehashes too and then runs those
+checks, so prefer it after a hand edit.
+
 ## Checking the whole chain
 
 `gombit db check` runs every schema check in one non-interactive command, for
@@ -416,8 +435,8 @@ create an index the database lacks).
 The command exits non-zero when any layer drifts or errors. A clean project
 prints the same report every run, ending in `The schema chain is consistent.`
 `--no-db` skips the pending-migrations and database-schema layers; without it,
-a database that cannot be read within `--db-timeout` (30s by default) is an
-error, not a skip, so a CI job that forgets its database fails. The
+a database that cannot be read within `--db-timeout` (30s by default; `0`
+waits indefinitely) is an error, not a skip, so a CI job that forgets its database fails. The
 pending-migrations layer also reports a version the database has applied but
 the directory no longer has (a migration renamed or deleted after it ran).
 While that is so, or while a migration older than the last applied one is
@@ -440,7 +459,7 @@ and the migration directory (default `database/migrations`).
 ```sh
 gombit db migrate [--dir database/migrations] [--atlas-bin atlas]
 gombit db status  [--dir database/migrations] [--atlas-bin atlas]
-gombit db rollback [--dir database/migrations]
+gombit db rollback [--dir database/migrations] [--atlas-bin atlas]
 ```
 
 ### Apply
@@ -583,7 +602,8 @@ integrity. That is separate from D4: Gombit does not store checksums in
 
 ## Drivers
 
-`--driver` (makemigrations) accepts the supported v0.1 database drivers:
+`--driver` (`makemigrations`, `plan`, `lint`, `repair`, `check`) accepts the
+supported database drivers:
 
 | Driver | Atlas dev database |
 | --- | --- |
@@ -592,7 +612,8 @@ integrity. That is separate from D4: Gombit does not store checksums in
 | `mysql` | `docker://mysql/8/dev` |
 
 SQLite runs without Docker. PostgreSQL and MySQL use Atlas dev-database Docker
-URLs, so Docker must be available when generating those migrations.
+URLs, so Docker must be available to generate, plan, lint, repair, or check
+migrations for those drivers.
 
 Apply/status convert the configured GORM DSN into an Atlas `--url` for the
 same three drivers. Libpq keyword/value DSNs with a slash-prefixed `host`

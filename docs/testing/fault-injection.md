@@ -142,8 +142,11 @@ transaction, the outbound call. It is not left running.
 Every retry ends in success or an observable terminal error, within a bounded
 number of attempts, and stops when its context is canceled.
 
-Gombit's own code paths mostly **do not retry**, which is the simplest way to
-keep this invariant, and that is what the tests pin:
+Apart from background jobs, Gombit's own code paths mostly **do not retry**,
+which is the simplest way to keep this invariant, and that is what the tests
+pin. Jobs are the exception: a failed job is retried under its `jobs.Options` policy
+(`MaxAttempts`, `Backoff`; see [jobs.md](../jobs.md#retries-and-timeouts)), and
+the `jobs` package's own tests hold it to this invariant:
 
 | Where it holds | Enforced by |
 | --- | --- |
@@ -151,8 +154,15 @@ keep this invariant, and that is what the tests pin:
 | The CLI's spec fetch reports a 429 at once and does not retry | [`cli/fault_test.go`](../../cli/fault_test.go): `TestFault_HTTP_TooManyRequests` |
 | Callers that rotate a refresh token while another rotation of it is in flight join that rotation. The test pins four of them inside it before the stalled rotation fails. Every caller gets the terminal error, none is wedged, and only the one rotation touched the database (a single INSERT: nobody retried or ran their own) | [`auth/concurrency_fault_test.go`](../../auth/concurrency_fault_test.go): `TestFault_Concurrency_RotationLeaderFails` |
 | The one retrying client Gombit wraps, go-redis, finishes its dial retries in bounded time | [`cache/network_fault_integration_test.go`](../../cache/network_fault_integration_test.go): `TestFault_Network_RedisUnavailable` |
+| A failing job runs at most `MaxAttempts` times and a `jobs.Permanent` failure is not retried; after that the worker moves it to the failed jobs | [`jobs/worker_test.go`](../../jobs/worker_test.go): `TestWorkerRetriesAFailedJob`, `TestWorkerGivesUp` |
+| Job backoffs are capped and do not overflow | [`jobs/policy_test.go`](../../jobs/policy_test.go): `TestBackoffs`, `TestExponentialDoesNotOverflow` |
+| While the queue is unreachable, the worker's poll loop backs off: the wait doubles from the poll interval, capped at 30s | [`jobs/worker_test.go`](../../jobs/worker_test.go): `TestReserveBackoff` |
 
-Any retry policy Gombit adds must pass `faulttest.CheckRetryPolicy` (see
+Job retries do not wait in-process: the worker releases the job back to the
+queue with its backoff as the time it becomes available again, so there is no
+sleep for `faulttest.CheckRetryPolicy` to drive, and no production code calls it
+today. An in-process retry policy Gombit adds (one that sleeps between
+attempts) must pass `faulttest.CheckRetryPolicy` (see
 [Adding a scenario](#retry-policies)). The checker's own tests prove that it
 rejects unbounded, cancellation-deaf, and overflowing policies:
 [`internal/faulttest/retry_test.go`](../../internal/faulttest/retry_test.go),
@@ -281,8 +291,8 @@ something.
 - **Retry deliberately, if at all.** Gombit does not retry transactions. To
   retry serialization failures or deadlocks, write a bounded policy (with
   attempts, backoff, and context) around a whole `App.Tx`, and make `fn` safe
-  to run again. `faulttest.CheckRetryPolicy` is how Gombit checks its own
-  policies, and you can copy its contract.
+  to run again. `faulttest.CheckRetryPolicy` is Gombit's check for an
+  in-process retry policy, and you can copy its contract.
 - **Side effects outside the database are not rolled back.** An email sent,
   an HTTP call made, or a file written inside `fn` stays done when the
   transaction rolls back. Gombit provides **no exactly-once semantics**. A
@@ -586,8 +596,10 @@ automatically.
 
 ### Retry policies
 
-A retry policy in Gombit waits between attempts through a `faulttest.Sleeper`
-and must pass the conformance check:
+An in-process retry policy in Gombit waits between attempts through a
+`faulttest.Sleeper` and must pass the conformance check. (Job retries are
+scheduled through the queue instead and are covered by the `jobs` tests; see
+[INV-4](#inv-4-bounded-retry).)
 
 ```go
 faulttest.CheckRetryPolicy(t, faulttest.RetryContract{
@@ -739,8 +751,9 @@ report shown under [Reproducing a chaos failure](#reproducing-a-chaos-failure).
   `defer srv.Close()`), because `Close` waits for in-flight handlers.
 - **No unbounded retries,** in production code or tests. Every retry policy
   has a maximum number of attempts or a deadline, honors its context, has
-  bounded backoff, and surfaces its final error. It must pass
-  `faulttest.CheckRetryPolicy`.
+  bounded backoff, and surfaces its final error. An in-process policy must pass
+  `faulttest.CheckRetryPolicy`; job retries, which the queue schedules, are
+  covered by the `jobs` package's tests.
 - **Fault injection is explicit opt-in.** Faults come from wrappers and
   proxies that a test constructs: `OpenDB`, `NewHTTPDependency`,
   `NewTCPProxy`. There is no global chaos switch, no environment variable

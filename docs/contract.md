@@ -285,9 +285,10 @@ and still returns `conflict` for a taken email. Do not map every `First()`
 error to 404 or every `Create()` error to 500.
 
 Gin middleware may also emit D10 errors that are not §41 categories.
-`contract.PayloadTooLarge` (`error.code` `payload_too_large`, HTTP 413) is
-used by XSS JSON sanitizer buffering (see [`docs/router.md`](router.md));
-cookie CSRF uses `Authorization` (403). An unsupported method on a known
+`contract.PayloadTooLarge` (`error.code` `payload_too_large`, HTTP 413) comes
+from the default router's 8MiB JSON request body limit, and from the XSS JSON
+sanitizer's buffer when `GOMBIT_SECURITY_SANITIZE_INPUT=true` (see
+[`docs/router.md`](router.md)); cookie CSRF uses `Authorization` (403). An unsupported method on a known
 route yields `contract.MethodNotAllowed` (`error.code` `method_not_allowed`,
 HTTP 405) with an `Allow` header listing the methods the path supports — the
 router distinguishes this from a genuinely unknown path (404). Do not treat
@@ -319,5 +320,7 @@ and fails on drift — see [`docs/openapi.md`](openapi.md) and
 
 ## What is not here yet
 
-- Pagination query DSL / filter/sort helpers (design §42)
+- Filter operators and ranges (list filters are exact-match), cursor
+  pagination, and grouped aggregates — see
+  [List query](#list-query-filter--sort--search)
 - gRPC status mapping (post-v0.1)

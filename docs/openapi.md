@@ -84,14 +84,16 @@ CI regenerates the sample widget spec and TypeScript client in-process from
 and fails if the committed files would change. An intentional Huma handler
 change without regenerating those fixtures fails CI.
 
-From the repository root:
+From the repository root, pass the example paths explicitly — the bare
+defaults (`openapi.json`, `frontend/src/api/generated`) target a generated app,
+not this repository:
 
 ```sh
 # Report drift without writing (whitespace-only JSON is not drift)
-go run ./cmd/gombit client check
+go run ./cmd/gombit client check --spec examples/client/openapi.json --out examples/client/frontend/src/api/generated
 
 # Rewrite examples/client/openapi.json and the generated TypeScript client
-go run ./cmd/gombit client check --write
+go run ./cmd/gombit client check --write --spec examples/client/openapi.json --out examples/client/frontend/src/api/generated
 
 # Same rewrite via go generate
 go generate ./client

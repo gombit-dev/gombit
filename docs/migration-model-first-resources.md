@@ -41,12 +41,18 @@ hook refers to are produced by generation:
 
    ```go
    type Book struct {
-       gorm.Model
-       Title    string `gorm:"not null" gombit:"read,write,searchable,sortable"`
-       TenantID uint   `gorm:"not null" gombit:"read,server"` // set by a hook, not the client
-       Secret   string `gombit:"-"`                            // never in the API
+       ID        uint `gorm:"primaryKey" json:"id"`
+       CreatedAt time.Time
+       UpdatedAt time.Time
+       Title     string `gorm:"not null" gombit:"read,write,searchable,sortable"`
+       TenantID  uint   `gorm:"not null" gombit:"read,server"` // set by a hook, not the client
+       Secret    string `gombit:"-"`                            // never in the API
    }
    ```
+
+   This is the shape `gombit make resource` scaffolds: no `gorm.Model` and no
+   soft-delete `DeletedAt`, because deletion is physical
+   ([ADR-019](adr/019-hard-delete-semantics.md)).
 
    - `read`/`write` — in the response / accepted on create (untagged columns
      default to read+write).

@@ -2,7 +2,7 @@
 
 You'll build a small task tracker end to end: a typed API, a migration, a
 generated TypeScript client, a React page, cookie login, and the same model
-running in the admin. That's the whole v0.1 loop.
+running in the admin. That's the core CRUD loop.
 
 **Time:** about 45 minutes.
 **Prerequisites:** [installation.md](installation.md) — Go 1.26+, Node 22+,
@@ -613,8 +613,10 @@ gombit build --embed
 
 `--embed` runs the frontend build and compiles the assets into the Go binary
 with `go:embed`, giving you **one artifact** that serves the API, the SPA, and
-the admin. Without the flag you get a plain backend build and deploy the
-frontend separately — both are supported.
+the admin. A bare `gombit build` without the flag is refused (exit 1): split
+deploy is the default, and embedding is opt-in. For a split deploy, build the
+API with `go build ./cmd/server` and build and host `frontend/` separately (a
+static host or CDN) — both are supported. See [build.md](build.md).
 
 Configuration is environment-driven and typed:
 
@@ -660,7 +662,7 @@ one port with no `node` on the box.
 
 ## 12. Where next
 
-You've used every subsystem in v0.1. The reference docs go deeper:
+You've used the core subsystems. The reference docs go deeper:
 
 | Topic | Doc |
 | --- | --- |
@@ -677,13 +679,14 @@ You've used every subsystem in v0.1. The reference docs go deeper:
 | Bearer auth | [auth.md](auth.md) |
 | Cookie auth and CSRF | [auth-cookie.md](auth-cookie.md) |
 | Admin | [admin.md](admin.md) |
+| Background jobs | [jobs.md](jobs.md) |
 | Single-binary builds | [build.md](build.md) |
 | Everything | [docs index](README.md) |
 
 Architecture rationale lives in the [ADRs](adr/). Scope and roadmap live in
 [GOMBIT_BUILD_PLAN.md](GOMBIT_BUILD_PLAN.md) — including the post-v0.1
-batteries (jobs, events, scheduler, mail, storage, gRPC, multi-tenancy, i18n)
-that are deliberately **not** here yet.
+batteries (events, scheduler, mail, storage, gRPC, multi-tenancy, i18n) that
+are deliberately **not** here yet.
 
 Something wrong or unclear in this tutorial? That's a docs bug —
 [open an issue](https://github.com/gombit-dev/gombit/issues/new/choose).

@@ -290,7 +290,9 @@ never fire, leaving a live child row pointing at a parent the API now reports as
 
 Because the delete is physical, the admin does not keep soft-deleted rows around
 (it has never exposed a restore/trash path). This is the framework-owned admin
-surface; generated per-resource handlers are thin and user-owned.
+surface; generated per-resource handlers live in generator-owned `*.gen.go`
+files and are customized through hooks, not by editing them
+([ADR-016](adr/016-model-first-resource-generation.md)).
 
 List query parameters:
 
@@ -333,5 +335,5 @@ superuser with `auth.Service.CreateSuperuser` (the same path as
 - Full users/groups management screens in the admin SPA
 - `--admin` generator / golden template changes / copying the SPA into
   generated `frontend/`
-- M6 batteries (jobs, events, scheduler, mail, storage, gRPC, multi-tenancy, i18n)
+- M6 batteries (events, scheduler, mail, storage, gRPC, multi-tenancy, i18n)
 - `localStorage` tokens
