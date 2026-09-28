@@ -3,8 +3,9 @@ package jobs
 import (
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"time"
+
+	"github.com/gombit-dev/gombit/config"
 )
 
 // Job is a unit of background work: a JSON-serializable struct whose JobName
@@ -88,12 +89,10 @@ func (e Envelope) validate() error {
 // maxNameLen bounds a job name so drivers can use it as a key or label.
 const maxNameLen = 128
 
-// namePattern is the job-name alphabet: lower case, digits, and _ . : -
-// separators, starting with a letter or digit. Names are stable identifiers
-// in queues and metrics, so they stay ASCII and case-insensitive-safe.
-var namePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_.:-]*$`)
-
-// ValidName reports whether name can identify a job.
+// ValidName reports whether name can identify a job or a queue: 1-128
+// characters of lower case, digits, and _ . : - separators, starting with a
+// letter or digit. Names are stable identifiers in queues and metrics, so
+// they stay ASCII. It is config.ValidJobName, one rule for both.
 func ValidName(name string) bool {
-	return len(name) <= maxNameLen && namePattern.MatchString(name)
+	return config.ValidJobName(name)
 }

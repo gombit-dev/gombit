@@ -29,8 +29,14 @@ footprint/cold-start harness, k6 load workloads, the canonical results
 snapshot behind the README performance table, and a manual `benchmarks.yml`
 workflow — plus the per-PR `benchmark-report-drift` and `benchmark-smoke`
 gates in `ci.yml`. The **JOBS-0** background-jobs epic has started: `jobs` holds
-the job contract (typed jobs, registry, envelope); queue drivers and
-`gombit worker` are not here yet. Other M6 batteries are not here yet.
+the job contract (typed jobs, registry, envelope), the sync, memory, and
+Redis queue drivers behind `framework.App.Jobs()`, the worker
+(`./server worker`, `gombit worker`), retry policies (attempts, backoff,
+timeouts, permanent failures), delayed dispatch (`jobs.Delay`, `jobs.At`),
+failed jobs (`gombit jobs failed|inspect|retry|forget|purge`), duplicate
+handling (`jobs.Unique`, `jobs.UniqueFor`, `jobs.Once`), and observability
+(`gombit_jobs_*` metrics, OpenTelemetry spans). Other M6 batteries are not
+here yet.
 Don't assume generated apps are committed in-tree; `gombit new` writes them
 on demand. Check `git log` / `ls` before describing "how the code works."
 

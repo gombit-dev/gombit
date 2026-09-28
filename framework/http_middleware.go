@@ -392,10 +392,6 @@ func (m *httpMetrics) series() int {
 	return count
 }
 
-func (m *httpMetrics) handler(c *gin.Context) {
-	c.Data(http.StatusOK, "text/plain; version=0.0.4; charset=utf-8", []byte(m.render()))
-}
-
 func (m *httpMetrics) render() string {
 	active := m.active.Load()
 	requests := make(map[metricsKey]int64)
