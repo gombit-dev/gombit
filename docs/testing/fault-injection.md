@@ -418,8 +418,9 @@ replay:
 ```
 
 The report holds every message the scenario recorded: its draws
-(`env.Drew`), each violated invariant (`env.Mismatch`), and why it stopped
-early (`env.Fatalf`). The replay line pins `CHAOS_POSTGRES` but never
+(`env.Drew`), each violated invariant (`env.Mismatch`), why it stopped
+early (`env.Fatalf`), and any failure a faulttest helper reported through
+`env.TB(t)`, such as `stopped: 1 connection(s) still in use`. The replay line pins `CHAOS_POSTGRES` but never
 prints the DSN.
 
 1. **Get the report.** Locally it is in the test output.
@@ -568,7 +569,12 @@ func init() {
 Every random choice comes from `env.Rand`. Record what was drawn with
 `env.Drew`. Report a violated invariant with `env.Mismatch`, which puts the
 expected and observed values in the failure report. Stop with
-`env.Fatalf`, not `t.Fatalf`, so the report says why.
+`env.Fatalf`, not `t.Fatalf`, and hand the faulttest helpers `env.TB(t)`
+(`faulttest.Idle(env.TB(t), db)`), so the report says why, even when a
+leak check stops the scenario. Bound every wait, a query's included: run it
+on a goroutine and `select` with a timeout, so a call that ignores its
+deadline fails the scenario instead of hanging the suite until the package
+timeout.
 
 A scenario that needs Postgres calls `env.RequirePostgres(t)`: it skips in
 a full run without a DSN, and fails when the run selected the scenario, so a
