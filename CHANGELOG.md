@@ -12,6 +12,51 @@ version.
 
 ### Added
 
+- [Fault injection and chaos testing](docs/testing/fault-injection.md):
+  Gombit's resilience invariants (INV-1 to INV-8), each linked to the tests
+  that enforce it. It separates what Gombit guarantees from what applications
+  remain responsible for (no exactly-once semantics, no transaction retry,
+  side effects outside the database). It also covers running `make
+  test-faults` and `make test-chaos`, reproducing a chaos failure from its
+  seed, adding a scenario, and contributor rules. CONTRIBUTING's fault section
+  now summarizes it ([#391](https://github.com/gombit-dev/gombit/issues/391)).
+- The `Chaos` workflow runs `make test-chaos` nightly and on demand (seed,
+  scenario, and iterations as inputs), never as a PR check. Its summary
+  gives the seed and replay commands for the whole run and for every
+  failure, carrying the run's Postgres DSN and iteration count. A failed
+  run uploads the `go test -json` output, `go`'s stderr, the failure
+  reports (drawn configuration and expected vs observed included), the
+  settings, and the Postgres logs and state
+  (`scripts/chaos-run.sh`) ([#390](https://github.com/gombit-dev/gombit/issues/390)).
+- `make test-chaos`: the stochastic resilience suite (`internal/chaos`,
+  `chaos` build tag, never in PR CI). Scenarios draw their faults at random
+  from one printed seed, randomized failure boundaries in multi-step writes,
+  concurrent writers with random COMMIT failures, cancellation at a random
+  point, Postgres stalls/drops/restarts through the proxy, random HTTP
+  dependency faults, in a random order; `CHAOS_SEED` replays a run exactly,
+  `CHAOS_SCENARIO`/`CHAOS_ITERATION` pick one, and every failure prints a
+  report with what was drawn, expected vs observed, and its replay command,
+  which pins whether Postgres was configured (`CHAOS_POSTGRES=0|1`)
+  ([#389](https://github.com/gombit-dev/gombit/issues/389)).
+- Concurrency + fault tests (`TestFault_Concurrency_*`) on SQLite,
+  Postgres, and MySQL: two transactions writing the same row while the
+  first's COMMIT fails leave one winner and nothing of the loser;
+  concurrent refresh-token rotations behind a failing rotation all return
+  the failure, none wedged, the token intact; a context canceled during
+  COMMIT gets an answer consistent with what persisted. `faulttest` gains
+  `BlockThenFail` and `SequenceThen`
+  ([#388](https://github.com/gombit-dev/gombit/issues/388)).
+- Retry-policy test infrastructure for contributors (INV-4, bounded retry):
+  `faulttest.Sleeper` (with `FakeSleeper` and `RealSleeper`), so backoff is
+  tested without sleeping, and `faulttest.CheckRetryPolicy`, the
+  conformance check every Gombit retry policy must pass. It checks that an always-retryable failure uses
+  exactly the `MaxAttempts` budget (never more, never fewer), cancellation
+  (an already-ended context starts no attempt; a cancel mid-backoff ends
+  it), permanent errors not retried, backoff on schedule and within
+  `[0, MaxDelay]` over a sample of attempts (1..128 and 1000) that catches
+  a doubling that overflows, success ends it, and an observable final error. JOBS-4's retry policy
+  ([#317](https://github.com/gombit-dev/gombit/issues/317)) is its first
+  consumer ([#387](https://github.com/gombit-dev/gombit/issues/387)).
 - Cancellation and deadline fault tests (`TestFault_Context_*`) through
   Gombit's layers on SQLite, Postgres, and MySQL: a query or `App.Tx` on the
   request context ends at `HTTP.RequestTimeout`; a client that disconnects

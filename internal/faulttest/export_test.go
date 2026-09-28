@@ -8,3 +8,10 @@ func SetIdleTimeout(d time.Duration) (restore func()) {
 	idleTimeout = d
 	return func() { idleTimeout = prev }
 }
+
+// SetRetryGuard shortens CheckRetryPolicy's runaway guard for tests.
+func SetRetryGuard(d time.Duration) (restore func()) {
+	prev := retryGuard
+	retryGuard = d
+	return func() { retryGuard = prev }
+}

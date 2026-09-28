@@ -37,6 +37,12 @@ failed jobs (`gombit jobs failed|inspect|retry|forget|purge`), duplicate
 handling (`jobs.Unique`, `jobs.UniqueFor`, `jobs.Once`), and observability
 (`gombit_jobs_*` metrics, OpenTelemetry spans). Other M6 batteries are not
 here yet.
+The **CHAOS-0** resilience suite is in: `internal/faulttest` (deterministic
+fault injection: a faulting `database/sql` driver, a scripted HTTP
+dependency, a TCP fault proxy, the retry-policy check), `TestFault_*` tests
+run by `make test-faults` (a sharded PR check), and the seeded stochastic
+suite `internal/chaos` (`make test-chaos`, nightly `chaos.yml`, never a PR
+check). See `docs/testing/fault-injection.md`.
 Don't assume generated apps are committed in-tree; `gombit new` writes them
 on demand. Check `git log` / `ls` before describing "how the code works."
 
