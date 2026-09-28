@@ -235,13 +235,27 @@ times. The checker reports:
 `internal/chaos` (behind the `chaos` build tag, never in PR CI). Each
 scenario draws its fault, boundary, and sizes from a random source derived
 from one seed, which every run prints first. A failure prints a `CHAOS
-FAILURE` block with the seed, scenario, iteration, expected and observed,
-and the replay command (`CHAOS_SEED=... CHAOS_SCENARIO=...
-CHAOS_ITERATION=... make test-chaos`). A failure that does not reproduce
-from its seed is a harness bug, not a flake: find the randomness a scenario
-drew from somewhere other than `env.Rand`. Add a scenario with
-`register(Scenario{Name, Component, Run})`; once a chaos failure is
-understood, pin it as a deterministic `TestFault_*` test.
+FAILURE` block with:
+
+- the seed, scenario, and iteration;
+- what the scenario drew;
+- expected and observed;
+- the replay command (`CHAOS_POSTGRES=0|1 CHAOS_SEED=... CHAOS_SCENARIO=...
+  CHAOS_ITERATION=... make test-chaos`).
+
+`CHAOS_POSTGRES=1` refuses to run without `CHAOS_POSTGRES_DSN`, so a replay
+cannot silently switch a Postgres failure to SQLite. A selected scenario
+that cannot run fails instead of skipping.
+
+A failure that does not reproduce from its seed is a harness bug, not a
+flake: find the randomness a scenario drew from somewhere other than
+`env.Rand`.
+
+To add a scenario, call `register(Scenario{Name, Component, Run})`. Record
+the scenario's draws with `env.Drew`, report violated invariants with
+`env.Mismatch`, and stop with `env.Fatalf` (not `t.Fatalf`), so the report
+carries every message. Once a chaos failure is understood, pin it as a
+deterministic `TestFault_*` test.
 
 `make test-faults` runs the whole fault suite: the `internal/faulttest`
 harness and every `TestFault_*` test (found by name, so a new one joins
