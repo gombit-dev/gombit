@@ -173,8 +173,10 @@ The rules, in short:
   runs `fn` once", "one rotation, one INSERT").
 - Pin interleavings with the injectors (`Block`, `Reached(n)`,
   `proxy.Held()`), never with `time.Sleep`. Bound every wait in a test.
-- No unbounded retries: any retry policy must pass
-  `faulttest.CheckRetryPolicy`.
+- No unbounded retries: an in-process retry policy (one that waits through a
+  `faulttest.Sleeper`) must pass `faulttest.CheckRetryPolicy`. Job retries,
+  which the queue schedules, are bounded by `MaxAttempts` and tested in
+  `jobs/policy_test.go` and `jobs/worker_test.go`.
 - Fault injection is explicit opt-in, through wrappers and proxies a test
   builds. Production code never imports `internal/faulttest`.
 - A fault test must pass `go test -race -count=50` before it lands, and a

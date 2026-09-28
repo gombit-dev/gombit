@@ -51,7 +51,8 @@ version.
 - Retry-policy test infrastructure for contributors (INV-4, bounded retry):
   `faulttest.Sleeper` (with `FakeSleeper` and `RealSleeper`), so backoff is
   tested without sleeping, and `faulttest.CheckRetryPolicy`, the
-  conformance check every Gombit retry policy must pass. It checks that an always-retryable failure uses
+  conformance check for an in-process retry policy that waits through a
+  `Sleeper`. It checks that an always-retryable failure uses
   exactly the `MaxAttempts` budget (never more, never fewer), cancellation
   (an already-ended context starts no attempt; a cancel mid-backoff ends
   it), permanent errors not retried, backoff on schedule and within

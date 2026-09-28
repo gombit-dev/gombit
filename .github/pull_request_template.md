@@ -1,6 +1,7 @@
 <!--
 Fill in every section below. Delete this comment block before submitting.
-See AGENTS.md and docs/GOMBIT_BUILD_PLAN.md §5 (Agent working agreement)
+See the agent working agreement in AGENTS.md (carried over from the historical
+docs/GOMBIT_BUILD_PLAN.md §5)
 for the definition of done this template encodes.
 -->
 

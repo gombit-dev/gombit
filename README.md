@@ -117,10 +117,10 @@ by `gombit generate` — change the model, re-run it, and
 Routes and models are registered in `cmd/server/main.go` through `go/ast`,
 never regex. Generators are idempotent and additive, support `--dry-run` and
 `--force`, and never overwrite files you own. `createsuperuser` needs no setup:
-`gombit new` already wrote a random `GOMBIT_JWT_SECRET` into `.env`, and the
-commands that read the app's configuration (`createsuperuser`, `dev`, `db`,
-`doctor`, `config show`, and the server itself) apply `.env` from the project
-directory, with the process environment taking precedence.
+`gombit new` already wrote a random `GOMBIT_JWT_SECRET` into `.env`, and every
+command that reads the app's configuration — `createsuperuser` among them, and
+the server itself — applies the project's `.env`, with the process environment
+taking precedence.
 
 Before you ship a schema change, `gombit db check` validates the whole chain —
 models, generated contract, migrations, and the live database — in one command.

@@ -6,6 +6,6 @@ contact_links:
   - name: Security vulnerability
     url: https://github.com/gombit-dev/gombit/security/advisories/new
     about: Report privately via a GitHub security advisory — never in a public issue.
-  - name: Roadmap and backlog
-    url: https://github.com/gombit-dev/gombit/blob/main/docs/GOMBIT_BUILD_PLAN.md
-    about: Scope, locked architecture decisions, and the issue backlog (§4).
+  - name: Architecture decisions
+    url: https://github.com/gombit-dev/gombit/tree/main/docs/adr
+    about: The ADRs that record Gombit's settled architecture decisions.
