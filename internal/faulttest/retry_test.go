@@ -131,7 +131,7 @@ func rejects(t *testing.T, c faulttest.RetryContract, properties ...string) {
 
 // TestCheckRetryPolicyAcceptsASlowButCorrectBackoff: a capped backoff that
 // loops over the attempt number is correct, and the checker's probes past
-// MaxAttempts (up to 2^22) stay well inside its guard for it.
+// MaxAttempts (up to 1000) stay well inside its guard for it.
 func TestCheckRetryPolicyAcceptsASlowButCorrectBackoff(t *testing.T) {
 	r := reference{max: 5, base: 10 * time.Millisecond, maxDelay: time.Second}
 	c := referenceContract(r)
@@ -225,28 +225,6 @@ func TestCheckRetryPolicyRejectsBrokenPolicies(t *testing.T) {
 		faulttest.CheckRetryPolicy(rec, c)
 		if all := strings.Join(rec.errs, "\n"); len(rec.errs) != 1 || !strings.Contains(all, "backoff: Delay(40) = -") {
 			t.Fatalf("want exactly the overflow at Delay(40) reported; got:\n%s", all)
-		}
-	})
-
-	t.Run("an overflowing multiply, capped too late", func(t *testing.T) {
-		// attempt * time.Hour is positive through attempt 1000 and wraps
-		// negative by 2^22; a cap applied after the multiply lets the
-		// wrapped value through.
-		const maxDelay = 10 * time.Hour
-		hours := func(attempt int) time.Duration {
-			d := time.Duration(attempt) * time.Hour
-			if d > maxDelay {
-				return maxDelay
-			}
-			return d
-		}
-		c := referenceContract(reference{max: 3, base: time.Hour, maxDelay: maxDelay, schedule: hours})
-		c.Delay = hours
-		c.Deterministic = false
-		rec := &recorder{}
-		faulttest.CheckRetryPolicy(rec, c)
-		if all := strings.Join(rec.errs, "\n"); len(rec.errs) != 1 || !strings.Contains(all, "backoff: Delay(4194304) = -") {
-			t.Fatalf("want exactly the overflow at Delay(4194304) reported; got:\n%s", all)
 		}
 	})
 

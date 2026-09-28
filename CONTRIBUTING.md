@@ -220,10 +220,10 @@ times. The checker reports:
 - a permanent error retried;
 - a backoff off its schedule;
 - a `Delay` outside `[0, MaxDelay]` at any sampled attempt. The sample is
-  every attempt up to `max(MaxAttempts, 128)`, plus 1000 and 2^22. That
-  catches a doubling that overflows, and an attempt multiplied by a large
-  unit. It is a sample, so cap a delay before the arithmetic can
-  overflow;
+  every attempt up to `max(MaxAttempts, 128)`, plus 1000. That catches a
+  shift or doubling that overflows (it wraps by attempt 64). It does not
+  catch an attempt multiplied by a unit, which wraps at an attempt that
+  depends on the unit, so compute a delay so it cannot overflow;
 - a success that does not end it;
 - a final error that hides the last attempt's error.
 

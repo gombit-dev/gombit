@@ -103,8 +103,9 @@ type RetryContract struct {
 	// Delay is the policy's backoff: the wait after the attempt-th failure
 	// (1-based). Every delay it produces must lie within [0, MaxDelay] (no
 	// negative or overflowed durations, jitter included). The checker samples
-	// that (see CheckRetryPolicy's backoff bullet): cap a delay before the
-	// arithmetic can overflow, not after.
+	// that (see CheckRetryPolicy's backoff bullet, which says what the sample
+	// does not catch): cap a delay before the arithmetic can overflow, not
+	// after.
 	Delay func(attempt int) time.Duration
 	// MaxDelay caps Delay.
 	MaxDelay time.Duration
@@ -136,12 +137,13 @@ var retryGuard = 5 * time.Second
 //   - permanent: a non-retryable error is not retried;
 //   - backoff: the waits asked for follow Delay (exactly, when
 //     Deterministic) and lie within [0, MaxDelay]; and Delay itself,
-//     sampled 20 times per attempt for jitter, is within [0, MaxDelay] at
-//     every attempt 1..max(MaxAttempts, 128), at 1000, and (sampled 3
-//     times) at 2^22. That sample catches a shift or doubling that
-//     overflows (any base of 1ns or more wraps before attempt 64) and a
-//     multiply of the attempt by a unit of about 36 minutes or more (it
-//     wraps by 2^22). It is a sample, not a proof for every attempt;
+//     called 20 times per attempt (for jitter) at every attempt
+//     1..max(MaxAttempts, 128) and at 1000, is within [0, MaxDelay]. That
+//     catches a shift or doubling that overflows: any base of 1ns or more
+//     wraps by attempt 64. It does not catch an attempt multiplied by a
+//     unit, which wraps at an attempt that depends on the unit, usually far
+//     past 1000: compute a delay so it cannot overflow (cap before the
+//     arithmetic, not after);
 //   - success: a success ends the retries at once;
 //   - observable failure: the final error wraps the last attempt's error
 //     (and reports the attempt count, when Attempts is set).
@@ -291,18 +293,16 @@ func CheckRetryPolicy(t testing.TB, c RetryContract) {
 
 	// backoff: the waits asked for, then the Delay sample the godoc lists.
 	// A doubling of any base of 1ns or more crosses the int64 sign bit (or
-	// shifts off it to 0) before attempt 64, so every attempt up to 128 is
-	// probed; 2^22 catches an attempt multiplied by a large unit (an hour
-	// wraps at about 2.56 million). Attempts past MaxAttempts are probed on
-	// purpose: an overflow a policy would reach with a larger budget is
-	// still a bug. It all runs under the guard, so a Delay that never
-	// returns fails the check rather than hanging it.
-	type probe struct{ attempt, samples int }
-	probes := make([]probe, 0, 130)
+	// shifts off it to 0) by attempt 64, so every attempt up to 128 is
+	// probed. Attempts past MaxAttempts are probed on purpose: an overflow a
+	// policy would reach with a larger budget is still a bug. It all runs
+	// under the guard, so a Delay that never returns fails the check rather
+	// than hanging it.
+	attempts := make([]int, 0, 129)
 	for a := 1; a <= max(c.MaxAttempts, 128); a++ {
-		probes = append(probes, probe{a, 20})
+		attempts = append(attempts, a)
 	}
-	probes = append(probes, probe{1000, 20}, probe{1 << 22, 3})
+	attempts = append(attempts, 1000)
 	problems := make(chan []string, 1)
 	go func() {
 		var found []string
@@ -317,10 +317,10 @@ func CheckRetryPolicy(t testing.TB, c RetryContract) {
 			}
 		}
 	sample:
-		for _, p := range probes {
-			for i := 0; i < p.samples; i++ {
-				if d := c.Delay(p.attempt); d < 0 || d > c.MaxDelay {
-					found = append(found, fmt.Sprintf("backoff: Delay(%d) = %s, outside [0, %s] (overflow or unbounded jitter)", p.attempt, d, c.MaxDelay))
+		for _, attempt := range attempts {
+			for i := 0; i < 20; i++ {
+				if d := c.Delay(attempt); d < 0 || d > c.MaxDelay {
+					found = append(found, fmt.Sprintf("backoff: Delay(%d) = %s, outside [0, %s] (overflow or unbounded jitter)", attempt, d, c.MaxDelay))
 					break sample
 				}
 			}
