@@ -25,6 +25,9 @@ const (
 	envDatabaseConnMaxLifetime = "GOMBIT_DATABASE_CONN_MAX_LIFETIME"
 	envCacheDriver             = "GOMBIT_CACHE_DRIVER"
 	envCacheNamespace          = "GOMBIT_CACHE_NAMESPACE"
+	envJobsDriver              = "GOMBIT_JOBS_DRIVER"
+	envJobsQueue               = "GOMBIT_JOBS_QUEUE"
+	envJobsNamespace           = "GOMBIT_JOBS_NAMESPACE"
 	envRedisAddr               = "GOMBIT_REDIS_ADDR"
 	envRedisUsername           = "GOMBIT_REDIS_USERNAME"
 	envRedisPassword           = "GOMBIT_REDIS_PASSWORD" // #nosec G101 -- environment variable name, not a credential.
@@ -87,6 +90,7 @@ type Config struct {
 	API         APIConfig
 	Database    DatabaseConfig
 	Cache       CacheConfig
+	Jobs        JobsConfig
 	Logging     LoggingConfig
 	Auth        AuthConfig
 	Security    SecurityConfig
@@ -182,6 +186,36 @@ type CacheConfig struct {
 	Driver    CacheDriver
 	Namespace string
 	Redis     RedisConfig
+}
+
+// JobsDriver names a supported background-job queue driver.
+type JobsDriver string
+
+const (
+	// JobsDriverSync runs a dispatched job immediately, inside the
+	// dispatching call. It needs no infrastructure and no worker.
+	JobsDriverSync JobsDriver = "sync"
+	// JobsDriverMemory queues jobs in process memory. Queued jobs are lost
+	// when the process exits.
+	JobsDriverMemory JobsDriver = "memory"
+	// JobsDriverRedis queues jobs durably in Redis, using the shared Redis
+	// connection settings (GOMBIT_REDIS_*).
+	JobsDriverRedis JobsDriver = "redis"
+)
+
+// DefaultJobsQueue is the queue a job is dispatched to unless it names one.
+const DefaultJobsQueue = "default"
+
+// JobsConfig contains background-job configuration consumed by jobs.Open.
+// The redis driver connects with Cache.Redis, the shared GOMBIT_REDIS_*
+// settings.
+type JobsConfig struct {
+	Driver JobsDriver
+	// Queue is the default queue name.
+	Queue string
+	// Namespace prefixes every Redis key, so apps and environments sharing a
+	// Redis server do not share queues.
+	Namespace string
 }
 
 // RedisConfig contains go-redis client configuration.
@@ -362,6 +396,11 @@ func DefaultFor(env Environment) Config {
 				WriteTimeout: 3 * time.Second,
 			},
 		},
+		Jobs: JobsConfig{
+			Driver:    JobsDriverSync,
+			Queue:     DefaultJobsQueue,
+			Namespace: DefaultCacheNamespace("Gombit", env),
+		},
 		Logging: LoggingConfig{
 			Level: LogLevelInfo,
 			Sink:  LogSinkStderr,
@@ -455,6 +494,13 @@ func LoadFromEnv(lookup EnvLookup) (Config, error) {
 	applyBool(lookup, envRedisTLSInsecure, "Cache.Redis.TLSInsecure", &cfg.Cache.Redis.TLSInsecure, &errs)
 	if !cacheNamespaceSet {
 		cfg.Cache.Namespace = DefaultCacheNamespace(cfg.AppName, cfg.Environment)
+	}
+	applyJobsDriver(lookup, envJobsDriver, &cfg.Jobs.Driver)
+	applyString(lookup, envJobsQueue, &cfg.Jobs.Queue)
+	if _, set := lookup(envJobsNamespace); set {
+		applyString(lookup, envJobsNamespace, &cfg.Jobs.Namespace)
+	} else {
+		cfg.Jobs.Namespace = DefaultCacheNamespace(cfg.AppName, cfg.Environment)
 	}
 	applyLogLevel(lookup, envLogLevel, &cfg.Logging.Level)
 	applyLogSink(lookup, envLogSink, &cfg.Logging.Sink)
@@ -557,6 +603,14 @@ func (c Config) Validate() error {
 
 	validateDatabaseConfig(&errs, c.Database)
 	validateCacheConfig(&errs, c.Environment, c.Cache)
+	validateJobsConfig(&errs, c.Jobs)
+	// The redis jobs driver shares the cache's Redis connection settings;
+	// validate them when only the jobs driver uses them.
+	// (validateCacheConfig checks them for every cache driver but memory and
+	// noop, including an unknown one).
+	if c.Jobs.Driver == JobsDriverRedis && (c.Cache.Driver == CacheDriverMemory || c.Cache.Driver == CacheDriverNoop) {
+		validateRedisConfig(&errs, c.Environment, c.Cache.Redis)
+	}
 	validateLoggingConfig(&errs, c.Logging)
 	validateAuthConfig(&errs, c.Environment, c.Auth)
 
@@ -772,58 +826,122 @@ func validateCacheConfig(errs *FieldErrors, env Environment, cfg CacheConfig) {
 	if !validateRedis {
 		return
 	}
+	validateRedisConfig(errs, env, cfg.Redis)
+}
 
-	if strings.TrimSpace(cfg.Redis.Addr) == "" {
+// validateRedisConfig checks the shared Redis connection settings (reported
+// under Cache.Redis, where they live).
+func validateRedisConfig(errs *FieldErrors, env Environment, redis RedisConfig) {
+	if strings.TrimSpace(redis.Addr) == "" {
 		*errs = append(*errs, FieldError{
 			Field:   "Cache.Redis.Addr",
 			Env:     envRedisAddr,
-			Value:   cfg.Redis.Addr,
+			Value:   redis.Addr,
 			Message: "must not be empty",
 		})
 	}
 
-	if cfg.Redis.DB < 0 {
+	if redis.DB < 0 {
 		*errs = append(*errs, FieldError{
 			Field:   "Cache.Redis.DB",
 			Env:     envRedisDB,
-			Value:   strconv.Itoa(cfg.Redis.DB),
+			Value:   strconv.Itoa(redis.DB),
 			Message: "must be greater than or equal to zero",
 		})
 	}
 
-	if cfg.Redis.DialTimeout <= 0 {
+	if redis.DialTimeout <= 0 {
 		*errs = append(*errs, FieldError{
 			Field:   "Cache.Redis.DialTimeout",
 			Env:     envRedisDialTimeout,
-			Value:   cfg.Redis.DialTimeout.String(),
+			Value:   redis.DialTimeout.String(),
 			Message: "must be greater than zero",
 		})
 	}
-	if cfg.Redis.ReadTimeout <= 0 {
+	if redis.ReadTimeout <= 0 {
 		*errs = append(*errs, FieldError{
 			Field:   "Cache.Redis.ReadTimeout",
 			Env:     envRedisReadTimeout,
-			Value:   cfg.Redis.ReadTimeout.String(),
+			Value:   redis.ReadTimeout.String(),
 			Message: "must be greater than zero",
 		})
 	}
-	if cfg.Redis.WriteTimeout <= 0 {
+	if redis.WriteTimeout <= 0 {
 		*errs = append(*errs, FieldError{
 			Field:   "Cache.Redis.WriteTimeout",
 			Env:     envRedisWriteTimeout,
-			Value:   cfg.Redis.WriteTimeout.String(),
+			Value:   redis.WriteTimeout.String(),
 			Message: "must be greater than zero",
 		})
 	}
 
-	if env == EnvironmentProduction && cfg.Redis.TLSInsecure {
+	if env == EnvironmentProduction && redis.TLSInsecure {
 		*errs = append(*errs, FieldError{
 			Field:   "Cache.Redis.TLSInsecure",
 			Env:     envRedisTLSInsecure,
-			Value:   strconv.FormatBool(cfg.Redis.TLSInsecure),
+			Value:   strconv.FormatBool(redis.TLSInsecure),
 			Message: "must be false in production",
 		})
 	}
+}
+
+// ValidateJobs returns explicit field errors for invalid job settings. It
+// does not check the shared Redis connection; Config.Validate does.
+func ValidateJobs(cfg JobsConfig) error {
+	var errs FieldErrors
+	validateJobsConfig(&errs, cfg)
+	if len(errs) > 0 {
+		return errs
+	}
+	return nil
+}
+
+func validateJobsConfig(errs *FieldErrors, cfg JobsConfig) {
+	switch cfg.Driver {
+	case JobsDriverSync, JobsDriverMemory, JobsDriverRedis:
+	default:
+		*errs = append(*errs, FieldError{
+			Field:   "Jobs.Driver",
+			Env:     envJobsDriver,
+			Value:   string(cfg.Driver),
+			Message: "must be one of sync, memory, redis",
+		})
+	}
+	if !ValidJobName(cfg.Queue) {
+		*errs = append(*errs, FieldError{
+			Field:   "Jobs.Queue",
+			Env:     envJobsQueue,
+			Value:   cfg.Queue,
+			Message: "must be 1-128 characters of a-z, 0-9, _ . : -, starting with a letter or digit",
+		})
+	}
+	if strings.TrimSpace(cfg.Namespace) == "" {
+		*errs = append(*errs, FieldError{
+			Field:   "Jobs.Namespace",
+			Env:     envJobsNamespace,
+			Value:   cfg.Namespace,
+			Message: "must not be empty",
+		})
+	}
+}
+
+// ValidJobName reports whether name can identify a job or a queue: 1-128
+// characters of a-z, 0-9, and _ . : -, starting with a letter or digit.
+// jobs.ValidName is this rule; it lives here because config validates
+// GOMBIT_JOBS_QUEUE and cannot import jobs.
+func ValidJobName(name string) bool {
+	if name == "" || len(name) > 128 {
+		return false
+	}
+	for i, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+		case i > 0 && (r == '_' || r == '.' || r == ':' || r == '-'):
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func validateDatabaseConfig(errs *FieldErrors, cfg DatabaseConfig) {
@@ -919,6 +1037,12 @@ func applyDatabaseDriver(lookup EnvLookup, key string, dest *DatabaseDriver) {
 func applyCacheDriver(lookup EnvLookup, key string, dest *CacheDriver) {
 	if value, ok := lookup(key); ok {
 		*dest = CacheDriver(strings.TrimSpace(value))
+	}
+}
+
+func applyJobsDriver(lookup EnvLookup, key string, dest *JobsDriver) {
+	if value, ok := lookup(key); ok {
+		*dest = JobsDriver(strings.TrimSpace(value))
 	}
 }
 
