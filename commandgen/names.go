@@ -21,12 +21,24 @@ var reservedPackages = map[string]struct{}{
 	"web": {},
 }
 
+// reservedCommands are the names a generated command may not take: every
+// top-level command cli.NewRoot registers (reserved_test.go asserts this list
+// covers them), Cobra's built-in help and completion, and names the generator
+// itself relies on.
 var reservedCommands = map[string]struct{}{
-	"new": {}, "dev": {}, "build": {}, "make": {}, "db": {}, "openapi": {}, "client": {},
+	"new": {}, "dev": {}, "worker": {}, "jobs": {}, "build": {}, "make": {},
+	"generate": {}, "db": {}, "openapi": {}, "contract": {}, "client": {},
 	"routes": {}, "doctor": {}, "config": {}, "createsuperuser": {}, "version": {},
-	"worker": {}, "jobs": {},
 	"help": {}, "completion": {},
 	"gombit": {}, "register": {},
+}
+
+// isReservedCommandName reports whether use (a command's Cobra name, as in
+// `gombit <use>`) collides with a framework command, so `gombit make command`
+// refuses it.
+func isReservedCommandName(use string) bool {
+	_, reserved := reservedCommands[use]
+	return reserved
 }
 
 // CommandName is the derived identifiers for one generated management command.
@@ -65,7 +77,7 @@ func parseCommandName(raw, pkg string) (CommandName, error) {
 	}
 	fileBase := toSnake(typeName)
 	use := strings.ReplaceAll(fileBase, "_", "-")
-	if _, reserved := reservedCommands[use]; reserved {
+	if isReservedCommandName(use) {
 		return CommandName{}, fmt.Errorf("commandgen: command name %q collides with a framework command", raw)
 	}
 	if fileBase == "register" || fileBase == "commands" {

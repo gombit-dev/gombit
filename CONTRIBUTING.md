@@ -14,8 +14,8 @@ change reviewed, and the bar a change has to clear.
 | Go | 1.26+ (`go.mod` is authoritative) | everything |
 | A C toolchain | gcc/clang, or Xcode CLT on macOS | SQLite (`mattn/go-sqlite3` is cgo-only) |
 | Node.js | 22+ | frontend, admin UI, TypeScript client generation |
-| Atlas | Community Edition, pinned by CI | `gombit db makemigrations` / `migrate` and the migration tests |
-| Docker | any recent | PostgreSQL and MySQL test matrices |
+| Atlas | Community Edition, pinned by CI | `gombit make resource`, the Atlas-backed `gombit db` subcommands, and the migration tests |
+| Docker | any recent | PostgreSQL and MySQL test matrices, and the Redis job-queue tests |
 
 ```bash
 curl -sSf https://atlasgo.sh | sh -s -- --community
@@ -143,6 +143,18 @@ Migrations and the conformance suite follow the same shape — see
 [`ci.yml`](.github/workflows/ci.yml) for the exact invocations, including
 `-conformance.driver` and the `ATLAS_BINARY` environment variable.
 
+### Redis job-queue tests
+
+The Redis queue driver in `jobs` runs against a real server only when
+`GOMBIT_TEST_REDIS_ADDR` is set; otherwise those tests skip. CI runs them in
+the `jobs-redis` job:
+
+```bash
+docker run --rm -d --name gombit-redis -p 6379:6379 redis:7-alpine
+
+GOMBIT_TEST_REDIS_ADDR=127.0.0.1:6379 go test -race ./jobs
+```
+
 ### Fault injection
 
 Failure paths get deterministic tests. The full guide is
@@ -257,7 +269,7 @@ short:
   (`go/ast` / `go/format`, never regex), and never overwrite user-owned files;
 - generated frontend source contains no secrets; `VITE_*` is public;
 - API changes regenerate OpenAPI and the TypeScript client in the same PR;
-- scope stays inside the issue milestone — no M6 "battery" creep (jobs, events,
+- scope stays inside the issue milestone — no M6 "battery" creep (events,
   scheduler, mail, storage, gRPC, multi-tenancy, i18n);
 - the PR links its issue and states which acceptance criteria it satisfies.
 

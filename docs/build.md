@@ -53,8 +53,9 @@ gombit build --embed --out bin/server
 gombit build --embed --dry-run
 ```
 
-A bare `gombit build` without `--embed` is refused. That is deliberate: v0.1
-must not silently change the default production path to embed.
+A bare `gombit build` without `--embed` is refused (exit 1). That is
+deliberate: the build must not silently change the default production path to
+embed. For a split deploy, build the API with `go build ./cmd/server`.
 
 The compiled binary serves:
 

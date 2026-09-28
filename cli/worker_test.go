@@ -3,15 +3,50 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
+	"flag"
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gombit-dev/gombit/dev"
+	"github.com/gombit-dev/gombit/framework"
 )
+
+// TestWorkerHelpListsEveryWorkerFlag guards the hand-written worker help.
+// gombit worker passes its flags through to the app binary, so Cobra has no
+// flag set and --help prints only Use and Long: every flag the app's worker
+// parses (framework.ParseWorkerFlags) must be spelled out there.
+func TestWorkerHelpListsEveryWorkerFlag(t *testing.T) {
+	var defaults bytes.Buffer
+	if _, err := framework.ParseWorkerFlags([]string{"-h"}, &defaults); !errors.Is(err, flag.ErrHelp) {
+		t.Fatalf("ParseWorkerFlags(-h) error = %v, want flag.ErrHelp", err)
+	}
+	flags := regexp.MustCompile(`(?m)^  -([a-z][a-z0-9-]*)`).FindAllStringSubmatch(defaults.String(), -1)
+	if len(flags) == 0 {
+		t.Fatalf("no flags found in ParseWorkerFlags usage:\n%s", defaults.String())
+	}
+
+	var out bytes.Buffer
+	root := NewRoot(&out, io.Discard)
+	if err := ExecuteRoot(context.Background(), root, []string{"worker", "--help"}); err != nil {
+		t.Fatalf("worker --help: %v", err)
+	}
+	help := out.String()
+	for _, f := range flags {
+		name := "--" + f[1]
+		if !strings.Contains(help, "["+name+" ") {
+			t.Errorf("worker usage line does not show %s:\n%s", name, help)
+		}
+		if !regexp.MustCompile(`(?m)^  ` + regexp.QuoteMeta(name) + `\s`).MatchString(help) {
+			t.Errorf("worker help Flags section does not describe %s:\n%s", name, help)
+		}
+	}
+}
 
 func TestWorkerCommandRunsTheAppsWorker(t *testing.T) {
 	app := t.TempDir()

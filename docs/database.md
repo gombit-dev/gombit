@@ -71,13 +71,15 @@ if err := db.First(&row, id).Error; err != nil {
 }
 ```
 
-| Helper | `gorm.ErrRecordNotFound` | unique / duplicate | other |
-| --- | --- | --- | --- |
-| `MapLoadError` | D10 `not_found` | `internal` | `internal` |
-| `MapPersistError` | `internal` | D10 `conflict` | `internal` |
+| Helper | Maps | Anything else |
+| --- | --- | --- |
+| `MapLoadError` | `gorm.ErrRecordNotFound` → D10 `not_found` (404) | `internal` |
+| `MapPersistError` | `*database.ValidationError` → `validation_error` (422, with its fields); unique / duplicate → `conflict` (409); foreign-key or NOT NULL violation → `validation_error` (422) | `internal` |
+| `MapDeleteError` | `database.ErrReferenced` or a foreign-key violation → `conflict` (409) | `internal` |
 
-`IsUniqueViolation` is the shared detector used by those helpers and by
-auth registration. See [`docs/contract.md`](contract.md#application-errors-41-categories).
+`IsUniqueViolation`, `IsForeignKeyViolation`, and `IsNotNullViolation` are the
+shared detectors behind those helpers; auth registration uses
+`IsUniqueViolation` too. See [`docs/contract.md`](contract.md#application-errors-41-categories).
 
 ## Deleting rows
 
@@ -148,12 +150,13 @@ defaults:
 | PostgreSQL | 25 | 5 | 30m |
 | MySQL | 25 | 5 | 30m |
 
-Set `Config.Database.MaxOpenConns`, `MaxIdleConns`, or `ConnMaxLifetime` to
+Set `Config.Database.MaxOpenConns`, `MaxIdleConns`, or `ConnMaxLifetime` (the
+`GOMBIT_DATABASE_*` variables in [`docs/config.md`](config.md#environment)) to
 override these defaults.
 
 The default SQLite DSN writes `gombit.db` in the current working directory.
-Production checks for unwritable SQLite paths are tracked with the later
-Appendix C hardening work.
+`gombit doctor` flags a SQLite path whose directory is missing or not writable
+(the `insecure` row).
 
 ## Integration Tests
 
@@ -178,6 +181,12 @@ Official multi-DB support is gated by the conformance suite under
 - timestamps, nullable columns, unique constraints, indexes
 - decimal round-trip
 - CRUD, transactions, pagination (`Offset` / `Limit`)
+- relation deletion (`relation_deletion`): `ON DELETE` `RESTRICT` / `CASCADE` /
+  `SET NULL` through `database.Delete`
+
+`TestDatabaseCheck` runs `gombit db check`'s database-schema layer on each
+driver: a migrated database matches its migrations, and a column added outside
+a migration is reported.
 
 The suite uses the `conformance` build tag so default `go test ./...` stays
 offline. Install Atlas Community Edition and set `ATLAS_BINARY` (or have

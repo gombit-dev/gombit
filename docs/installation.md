@@ -16,10 +16,12 @@ Install the `gombit` CLI, then verify it with `gombit doctor`.
 | [Go](https://go.dev/dl/) | 1.26+ | building the CLI and your application |
 | A C toolchain | gcc/clang | **SQLite only** — see below |
 | [Node.js](https://nodejs.org/) | 22+ | `gombit dev`, the frontend, and TypeScript client generation |
-| [Atlas](https://atlasgo.io/) | Community Edition | `gombit db makemigrations` and `gombit db migrate` |
+| [Atlas](https://atlasgo.io/) | Community Edition | `gombit make resource` (unless `--skip-migrations`) and the Atlas-backed `gombit db` subcommands (`makemigrations`, `migrate`, `status`, `rollback`, `reset`, `plan`, `lint`, `check`, `hash`, `repair`) |
 
 Only Go is needed to install the binary. The rest are needed by the commands
-that use them, and `gombit doctor` tells you which are missing.
+that use them. `gombit doctor` fails when `go` is not on `PATH` and warns when
+`node` is missing; it does not check Atlas or a C toolchain, and it does not
+enforce the minimum Go version.
 
 ### SQLite needs cgo
 
@@ -59,7 +61,7 @@ go install github.com/gombit-dev/gombit/cmd/gombit@latest
 Pin a version instead of tracking `@latest`:
 
 ```bash
-go install github.com/gombit-dev/gombit/cmd/gombit@v0.3.0
+go install github.com/gombit-dev/gombit/cmd/gombit@v0.6.0
 ```
 
 The binary lands in `$(go env GOBIN)`, or `$(go env GOPATH)/bin` when `GOBIN`
@@ -73,7 +75,7 @@ Add that line to `~/.bashrc`, `~/.zshrc`, or your shell's equivalent to make it
 permanent.
 
 Binaries installed this way carry no ldflags, so `gombit version` reads the
-module version recorded by Go — `@v0.3.0` reports `v0.3.0`, while `@latest` on
+module version recorded by Go — `@v0.6.0` reports `v0.6.0`, while `@latest` on
 an untagged commit may report a pseudo-version.
 
 ### Option 2 — release archive
@@ -83,7 +85,7 @@ Archives are published for `linux/amd64`, `linux/arm64`, `darwin/amd64`,
 `darwin/arm64`, and `windows/amd64`.
 
 ```bash
-# Latest release; set VERSION=v0.3.0 (for example) to pin one instead.
+# Latest release; set VERSION=v0.6.0 (for example) to pin one instead.
 VERSION=$(basename "$(curl -fsSLo /dev/null -w '%{url_effective}' https://github.com/gombit-dev/gombit/releases/latest)")
 OS=linux      # or darwin
 ARCH=amd64    # or arm64
@@ -104,7 +106,7 @@ On macOS `sha256sum` may not exist; use `shasum -a 256 -c SHA256SUMS.txt
 Windows (PowerShell):
 
 ```powershell
-# Latest release; set $Version = "v0.3.0" (for example) to pin one instead.
+# Latest release; set $Version = "v0.6.0" (for example) to pin one instead.
 $Version = (Invoke-RestMethod https://api.github.com/repos/gombit-dev/gombit/releases/latest).tag_name
 Invoke-WebRequest -Uri "https://github.com/gombit-dev/gombit/releases/download/$Version/gombit-$Version-windows-amd64.zip" -OutFile gombit.zip
 Expand-Archive gombit.zip -DestinationPath "$env:LOCALAPPDATA\gombit"
@@ -139,9 +141,9 @@ gombit version
 A release archive (Option 2) is stamped with build metadata:
 
 ```text
-gombit:   v0.3.0
-commit:   aeffafcfbdad43e7be3f896f5506406567e661bc
-built:    2026-09-26T08:27:27Z
+gombit:   v0.6.0
+commit:   617b487f7abe353bf9bbbb8fc78bc69709bee18c
+built:    2026-09-28T08:03:45Z
 go:       go1.26.0
 platform: linux/amd64
 ```
@@ -285,7 +287,7 @@ The framework module version used by *your application* is independent of the
 CLI, and is upgraded in the app:
 
 ```bash
-go get github.com/gombit-dev/gombit@v0.3.0
+go get github.com/gombit-dev/gombit@v0.6.0
 go mod tidy
 ```
 

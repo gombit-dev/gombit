@@ -5,7 +5,9 @@ M1-3 de-domains the router introduced in M1-2: `framework.New` builds a
 its own endpoints. Today that means `/livez`, `/readyz`, `/metrics`, the Huma
 OpenAPI routes (`/openapi.json` and siblings), `/docs` when
 `API.DocsEnabled` is true, and — when `GOMBIT_JWT_SECRET` is set and a
-database is attached — the Bearer auth routes (`/api/v1/auth/*`, `/api/v1/me`).
+database is attached — the auth routes (`<prefix>/auth/*`, `<prefix>/me`, where
+`<prefix>` is `API.Prefix`, `/api/v1` by default; cookie mode also mounts the
+admin API and `/admin/`).
 Public API handlers register on `app.API()` (see [`docs/contract.md`](contract.md));
 raw Gin routes continue to use `app.Router()`.
 
@@ -56,6 +58,7 @@ Recovery
   -> security headers
   -> request body size limit (JSON POST/PUT/PATCH; 413 over 8MiB; default router)
   -> XSS HTML-tag sanitization (request input; only when GOMBIT_SECURITY_SANITIZE_INPUT=true)
+  -> CSRF double-submit check (unsafe methods; only in cookie auth mode)
   -> Bearer JWT middleware on protected Huma operations (`GET /me`)
   -> feature group middleware (if any)
     -> feature handler
@@ -215,9 +218,10 @@ Recovery still applying to an application-registered route.
 
 Contract DTOs, validation → D10 field errors, and `app.API()` are documented in
 [`docs/contract.md`](contract.md). This router surface still does not include
-CORS, rate limiting, or authentication middleware:
-
-- auth middleware: M5
+CORS, rate limiting, or an authentication middleware for raw Gin routes. The
+auth package checks the Bearer token or session on its own protected Huma
+operations (`<prefix>/me`), and cookie mode's CSRF check is global — see [`docs/auth.md`](auth.md) and
+[`docs/auth-cookie.md`](auth-cookie.md).
 
 OpenAPI emission, `/docs`, and `gombit openapi generate` are documented in
 [`docs/openapi.md`](openapi.md).
@@ -227,4 +231,5 @@ Until then, an application that needs middleware can add it directly via
 silently reorder or override it.
 
 `examples/router` posts JSON to `/echo` and returns the comment the handler
-saw after XSS sanitization.
+saw — unchanged by default, or with HTML tags stripped when
+`GOMBIT_SECURITY_SANITIZE_INPUT=true`.

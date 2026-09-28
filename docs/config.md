@@ -139,9 +139,14 @@ shorter than 32 characters, for the generated-app development placeholder,
 and for cookie-mode auth (`GOMBIT_AUTH_MODE=cookie`) without
 `GOMBIT_COOKIE_SECURE=true` (`config.Load` / `Validate` and `gombit
 doctor`). The secret is never copied into `FieldError.Value` and is
-redacted by `Config.Redacted()`. Remaining Appendix C cases (CORS) land
-with the features that introduce those fields. Do not put JWT material in
-`VITE_*`.
+redacted by `Config.Redacted()`. Production config also rejects
+`GOMBIT_REDIS_TLS_INSECURE=true` whenever Redis is in use (the `redis` cache or
+jobs driver) and trusted proxies that trust everything (above). In every
+environment, validation rejects a negative `GOMBIT_HTTP_REQUEST_TIMEOUT`,
+negative `GOMBIT_DATABASE_MAX_OPEN_CONNS` / `MAX_IDLE_CONNS` /
+`CONN_MAX_LIFETIME`, a max-idle count above a non-zero max-open count, and,
+when Redis is in use, a non-positive Redis timeout. Remaining Appendix C cases (CORS) land with the
+features that introduce those fields. Do not put JWT material in `VITE_*`.
 See [auth.md](auth.md) (Bearer default) and
 [auth-cookie.md](auth-cookie.md) (`--auth cookie`, threat model).
 

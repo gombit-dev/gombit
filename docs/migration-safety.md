@@ -40,8 +40,8 @@ It is a statement-level DDL classifier, not a full SQL parser, and it is
 **fail-safe**: only statements it positively recognizes as additive or metadata
 (create table/index/view, add column, insert, grant, …) are `non_destructive`.
 Everything else — `UPDATE`, `TRUNCATE`, any `DELETE` (including MySQL
-multi-table `DELETE t FROM …`), `DROP SCHEMA`/`DROP DATABASE`, a narrowing
-`alter_column`, and any statement it cannot parse — classifies as `data_loss`
+multi-table `DELETE t FROM …`), `DROP SCHEMA`/`DROP DATABASE`, every
+`alter_column` (widening or narrowing), and any statement it cannot parse — classifies as `data_loss`
 so a host reviews it. It handles the Postgres (`"`), MySQL (`` ` ``) and SQLite
 quoting Atlas emits; where SQLite rewrites a drop-column as a table rebuild, the
 old-table `DROP` still flags data loss, and a multi-action `ALTER`

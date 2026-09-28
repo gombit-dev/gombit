@@ -28,6 +28,7 @@ go run ./cmd/gombit --help
 | `gombit generate` | Regenerate model-first resource files (`*.gen.go`); `--check` gates drift | RESGEN-1 |
 | `gombit db …` | Atlas-backed migrations | M2, migrated onto Cobra in M4-1 |
 | `gombit db verify` | Classify + verify migration safety manifests | HOST-3 |
+| `gombit db plan` / `lint` / `repair` / `hash` / `check` | Plan a schema change, lint and repair the migration directory, recompute `atlas.sum`, check the whole schema chain | SCHEMA-2, SCHEMA-4, SCHEMA-6; `hash` #219 |
 | `gombit openapi generate` | Write the live OpenAPI 3.1 document | M3-3 |
 | `gombit contract app` | Emit the machine-readable application contract | HOST-1 |
 | `gombit client generate` / `check` | TypeScript client + drift | M3-4, M3-5 |
@@ -35,6 +36,8 @@ go run ./cmd/gombit --help
 | `gombit doctor` | Environment and config checks | M4-4 |
 | `gombit config show` | Print typed config with secrets redacted | M4-4 |
 | `gombit createsuperuser` | Create a superuser (admin) account | M4-6 |
+| `gombit worker` | Run the app's background-job worker | JOBS-3 |
+| `gombit jobs …` | Inspect, retry, and delete failed jobs | JOBS-6 |
 | `gombit version` | Print version and build metadata | REL-4 |
 
 ## Generator golden tests
@@ -173,9 +176,10 @@ and `cli.ExecuteRoot`. Public product routes are Huma-typed under `/api/v1`.
 There is no generated `service.go` or `repo.go` until
 `gombit make resource --service` / `--repo`.
 
-`.env.example` lists `GOMBIT_*` server variables from the `config` package
-and public `VITE_API_URL` (empty means same-origin for the Vite `/api`
-proxy). `VITE_*` is baked into the browser bundle — never put secrets there.
+`.env.example` lists every `GOMBIT_*` server variable the `config` package
+reads (optional ones commented out with their defaults; the cookie-auth
+settings only in `--auth cookie` apps) and public `VITE_API_URL` (empty
+means same-origin for the Vite `/api` proxy). `VITE_*` is baked into the browser bundle — never put secrets there.
 Access tokens stay in memory; generated source does not use `localStorage`.
 
 ## `gombit dev`
@@ -380,8 +384,9 @@ The type is any generated kind in [fields.md](fields.md): `string`, `text`,
 `float64`, `decimal`, `bool` / `boolean`, `date`, `time` / `datetime`,
 `time_of_day`, `duration`, `uuid`, `json`, `email`, `url`, `slug`, `ip`,
 `enum(value)` or `enum(value=Label)`, and the relations `belongs_to`,
-`one_to_one`, `has_many`, and `many_to_many`. Unknown types error with the
-supported list.
+`one_to_one`, `has_many`, and `many_to_many`. An unknown type errors with the
+list of supported scalar types (one spelling each; relation kinds are not
+listed).
 
 Modifiers are `required`, `nullable` (the opposite of `required`), `unique`,
 `index`, the [list-query](contract.md#list-query-filter--sort--search) modifiers
@@ -572,9 +577,10 @@ Registration edits use `go/ast` + `go/parser` + `go/format` (never regex).
 (or a user-owned file) is refused unless `--force`. `commands.go` and
 `cmd/gombit/main.go` are additive AST edits of known registration points.
 
-Command names that collide with framework families (`new`, `dev`, `build`,
-`make`, `db`, `openapi`, `client`, `routes`, `doctor`, `config`,
-`createsuperuser`, `version`, `worker`, `jobs`, `help`, `completion`) are rejected.
+Command names that collide with framework families (`new`, `dev`, `worker`,
+`jobs`, `build`, `make`, `generate`, `db`, `openapi`, `contract`, `client`,
+`routes`, `doctor`, `config`, `createsuperuser`, `version`, `help`,
+`completion`) are rejected, as are `gombit` and `register`.
 
 ## `gombit worker`
 
@@ -604,7 +610,7 @@ code. See [jobs.md § Failed jobs](jobs.md#failed-jobs).
 
 ## `gombit db`
 
-Same subcommands and flags as M2, now on Cobra:
+Subcommands (each takes `--help` for its full flag list):
 
 ```sh
 gombit db makemigrations create_products --model github.com/example/demo/internal/product.Product
@@ -702,9 +708,11 @@ unwritable SQLite path is enough to flag a deliberately-broken config.
 
 Appendix C rejects a production JWT secret shorter than 32 characters, and
 the generated-app development placeholder, on the `config` row
-(`config.Load`) and the `insecure` row when config is stubbed past Load. Cookie `Secure` and CORS+credentials checks wait for
-M5-3. Production trusted-proxy and Redis `TLSInsecure` rejections already
-live in `config.Validate()` and show up on the `config` row.
+(`config.Load`) and the `insecure` row when config is stubbed past Load.
+Production cookie-mode auth without `GOMBIT_COOKIE_SECURE=true`, trusted-proxy,
+and Redis `TLSInsecure` rejections live in `config.Validate()` and show up on
+the `config` row. Gombit has no CORS configuration, so there is no
+CORS+credentials check.
 
 ## `gombit config show`
 
@@ -769,9 +777,9 @@ gombit --version
 ```
 
 ```text
-gombit:   v0.3.0
-commit:   aeffafcfbdad43e7be3f896f5506406567e661bc
-built:    2026-09-26T08:27:27Z
+gombit:   v0.6.0
+commit:   617b487f7abe353bf9bbbb8fc78bc69709bee18c
+built:    2026-09-28T08:03:45Z
 go:       go1.26.0
 platform: linux/amd64
 ```
@@ -785,7 +793,7 @@ Version resolution has three tiers, in order:
    `-X github.com/gombit-dev/gombit/cli.Version=<tag>` (plus
    `Commit` and `BuildDate`).
 2. **Module build info.** A binary from
-   `go install github.com/gombit-dev/gombit/cmd/gombit@v0.3.0`
+   `go install github.com/gombit-dev/gombit/cmd/gombit@v0.6.0`
    carries no ldflags, so the version comes from
    `runtime/debug.ReadBuildInfo()`. `commit` and `built` come from the
    embedded `vcs.revision` / `vcs.time` settings when the build had them.
@@ -797,7 +805,7 @@ Version resolution has three tiers, in order:
 want in scripts:
 
 ```sh
-test "$(gombit version --short)" = "v0.3.0"
+test "$(gombit version --short)" = "v0.6.0"
 ```
 
 See [installation.md](installation.md) and [releasing.md](releasing.md).

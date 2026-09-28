@@ -12,7 +12,7 @@ automatically on merge.
 2. **No contract drift:**
 
    ```bash
-   go run ./cmd/gombit client check
+   go run ./cmd/gombit client check --spec examples/client/openapi.json --out examples/client/frontend/src/api/generated
    ```
 
 3. **Update [`CHANGELOG.md`](../CHANGELOG.md).** Move `[Unreleased]` entries
