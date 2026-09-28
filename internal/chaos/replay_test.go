@@ -148,3 +148,42 @@ func TestPostgresModeIsPinned(t *testing.T) {
 		}
 	}
 }
+
+// stubTB stands in for a *testing.T under recordingT, noting what reached it.
+type stubTB struct {
+	testing.TB
+	got []string
+}
+
+func (s *stubTB) Helper()                      {}
+func (s *stubTB) Errorf(f string, args ...any) { s.got = append(s.got, fmt.Sprintf(f, args...)) }
+func (s *stubTB) Error(args ...any)            { s.got = append(s.got, fmt.Sprint(args...)) }
+func (s *stubTB) Fatalf(f string, args ...any) { s.got = append(s.got, fmt.Sprintf(f, args...)) }
+func (s *stubTB) Fatal(args ...any)            { s.got = append(s.got, fmt.Sprint(args...)) }
+
+// TestHelperFailuresReachTheReport: a faulttest helper failing through
+// env.TB(t) (faulttest.Idle's "connection(s) still in use", WaitIdle's
+// "still being answered") lands in the failure report's messages, in
+// order after any mismatch, and still fails the test.
+func TestHelperFailuresReachTheReport(t *testing.T) {
+	var messages []string
+	env := Environment{mismatches: &messages}
+	stub := &stubTB{}
+	tb := recordingT{TB: stub, env: env}
+	tb.Errorf("%d dependency call(s) still being answered", 1)
+	tb.Fatalf("%d connection(s) still in use: a transaction was left open", 1)
+	tb.Error("plain error")
+	tb.Fatal("plain fatal")
+	want := []string{
+		"failed: 1 dependency call(s) still being answered",
+		"stopped: 1 connection(s) still in use: a transaction was left open",
+		"failed: plain error",
+		"stopped: plain fatal",
+	}
+	if strings.Join(messages, "\n") != strings.Join(want, "\n") {
+		t.Errorf("recorded %q, want %q", messages, want)
+	}
+	if len(stub.got) != 4 {
+		t.Errorf("the test itself saw %d failures, want 4: %q", len(stub.got), stub.got)
+	}
+}

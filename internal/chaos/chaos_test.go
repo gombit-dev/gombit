@@ -61,9 +61,7 @@ func (e Environment) Drew(t *testing.T, format string, args ...any) {
 func (e Environment) Mismatch(t *testing.T, what, expected, observed string) {
 	t.Helper()
 	msg := fmt.Sprintf("%s\n\nexpected:\n  %s\n\nobserved:\n  %s", what, expected, observed)
-	if e.mismatches != nil {
-		*e.mismatches = append(*e.mismatches, msg)
-	}
+	e.record(msg)
 	t.Errorf("%s", msg)
 }
 
@@ -72,10 +70,53 @@ func (e Environment) Mismatch(t *testing.T, what, expected, observed string) {
 func (e Environment) Fatalf(t *testing.T, format string, args ...any) {
 	t.Helper()
 	msg := fmt.Sprintf(format, args...)
-	if e.mismatches != nil {
-		*e.mismatches = append(*e.mismatches, "stopped: "+msg)
-	}
+	e.record("stopped: " + msg)
 	t.Fatalf("%s", msg)
+}
+
+// TB is t for the faulttest helpers a scenario calls (Idle, WaitIdle, the
+// dependencies and proxies): a failure they report goes into the failure
+// report too, not only the test output.
+func (e Environment) TB(t *testing.T) testing.TB { return recordingT{TB: t, env: e} }
+
+func (e Environment) record(msg string) {
+	if e.mismatches != nil {
+		*e.mismatches = append(*e.mismatches, msg)
+	}
+}
+
+// recordingT records every failure a helper reports before passing it on.
+type recordingT struct {
+	testing.TB
+	env Environment
+}
+
+func (r recordingT) Errorf(format string, args ...any) {
+	r.Helper()
+	msg := fmt.Sprintf(format, args...)
+	r.env.record("failed: " + msg)
+	r.TB.Errorf("%s", msg)
+}
+
+func (r recordingT) Error(args ...any) {
+	r.Helper()
+	msg := fmt.Sprint(args...)
+	r.env.record("failed: " + msg)
+	r.TB.Error(msg)
+}
+
+func (r recordingT) Fatalf(format string, args ...any) {
+	r.Helper()
+	msg := fmt.Sprintf(format, args...)
+	r.env.record("stopped: " + msg)
+	r.TB.Fatalf("%s", msg)
+}
+
+func (r recordingT) Fatal(args ...any) {
+	r.Helper()
+	msg := fmt.Sprint(args...)
+	r.env.record("stopped: " + msg)
+	r.TB.Fatal(msg)
 }
 
 // RequirePostgres skips the scenario when Postgres is not configured, or,
@@ -251,7 +292,9 @@ func report(t *testing.T, s Scenario, iteration int, drawn, mismatches []string)
 		observed.WriteString("\n" + m + "\n")
 	}
 	if len(mismatches) == 0 {
-		observed.WriteString("\n(no message was recorded: the scenario failed through t directly; see the test output)\n")
+		// Every failure path in a scenario goes through env (Mismatch,
+		// Fatalf, TB); reaching this is a harness bug to fix, not a report.
+		observed.WriteString("\n(harness bug: the scenario failed without recording why; route that failure through env.Mismatch, env.Fatalf, or env.TB)\n")
 	}
 	// The replay pins whether Postgres was configured (never the DSN
 	// itself): with it, a database scenario may have drawn Postgres, and a
