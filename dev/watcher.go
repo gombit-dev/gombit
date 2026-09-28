@@ -42,7 +42,7 @@ func watchOpenAPI(ctx context.Context, opts Options, specURL string) error {
 		// once, rather than starting the same process again on every poll tick.
 		lastAttempted = append([]byte(nil), spec...)
 		if err := generate(ctx, spec); err != nil {
-			_, _ = fmt.Fprintf(opts.Stderr, "gombit dev: regenerate TypeScript client: %v\n", err)
+			_, _ = fmt.Fprintf(opts.Stderr, "gombit dev: regenerate TypeScript client: %v (will retry when the OpenAPI spec changes; restart gombit dev to retry now)\n", err)
 			return
 		}
 	}
