@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -32,6 +33,8 @@ func (e *retryError) Unwrap() error { return e.last }
 type reference struct {
 	max            int
 	base, maxDelay time.Duration
+	// schedule, when set, replaces delay as the backoff Do waits by.
+	schedule func(attempt int) time.Duration
 }
 
 func (r reference) delay(attempt int) time.Duration {
@@ -58,7 +61,11 @@ func (r reference) do(ctx context.Context, sleeper faulttest.Sleeper, op func(co
 		if errors.Is(last, errPermanent) || attempt == r.max {
 			break
 		}
-		if err := sleeper.Sleep(ctx, r.delay(attempt)); err != nil {
+		wait := r.delay
+		if r.schedule != nil {
+			wait = r.schedule
+		}
+		if err := sleeper.Sleep(ctx, wait(attempt)); err != nil {
 			return err
 		}
 	}
@@ -191,9 +198,19 @@ func TestCheckRetryPolicyRejectsBrokenPolicies(t *testing.T) {
 	})
 
 	t.Run("an overflowing backoff", func(t *testing.T) {
-		c := referenceContract(good)
-		c.Delay = func(attempt int) time.Duration { return good.base << attempt } // wraps negative
-		rejects(t, c, "backoff")
+		// An uncapped doubling of 10ms stays positive through attempt 39
+		// (~5.5e18ns) and wraps negative at 40. The policy waits by the same
+		// schedule, and every wait it actually makes is in range (MaxDelay is
+		// the largest Duration), so only the overflow can fail it.
+		shift := func(attempt int) time.Duration { return good.base << attempt }
+		c := referenceContract(reference{max: 3, base: good.base, maxDelay: time.Duration(math.MaxInt64), schedule: shift})
+		c.Delay = shift
+		c.Deterministic = false
+		rec := &recorder{}
+		faulttest.CheckRetryPolicy(rec, c)
+		if all := strings.Join(rec.errs, "\n"); len(rec.errs) != 1 || !strings.Contains(all, "backoff: Delay(40) = -") {
+			t.Fatalf("want exactly the overflow at Delay(40) reported; got:\n%s", all)
+		}
 	})
 
 	t.Run("a backoff that differs from its promise", func(t *testing.T) {
@@ -226,10 +243,32 @@ func TestCheckRetryPolicyRejectsBrokenPolicies(t *testing.T) {
 		rejects(t, c, "backoff")
 	})
 
+	t.Run("a backoff that never returns, compared exactly", func(t *testing.T) {
+		defer faulttest.SetRetryGuard(200 * time.Millisecond)()
+		c := referenceContract(good) // Deterministic: the waits are compared to Delay
+		block := make(chan struct{})
+		defer close(block)
+		c.Delay = func(int) time.Duration { <-block; return 0 }
+		rejects(t, c, "backoff")
+	})
+
 	t.Run("giving up early", func(t *testing.T) {
+		// MaxAttempts is the budget: an always-retryable failure uses all
+		// of it.
 		c := referenceContract(good)
 		c.Do = reference{max: 2, base: good.base, maxDelay: good.maxDelay}.do
 		rejects(t, c, "retryable")
+	})
+
+	t.Run("several violations are all reported", func(t *testing.T) {
+		c := referenceContract(good)
+		c.Do = func(ctx context.Context, s faulttest.Sleeper, op func(context.Context) error) error {
+			if err := (reference{max: 2, base: good.base, maxDelay: good.maxDelay}).do(ctx, s, op); err != nil {
+				return errors.New("retries exhausted")
+			}
+			return nil
+		}
+		rejects(t, c, "retryable", "observable failure")
 	})
 }
 
@@ -267,7 +306,14 @@ func TestSleepers(t *testing.T) {
 	}
 	ctx, cancel = context.WithCancel(context.Background())
 	cancel()
-	if err := (faulttest.RealSleeper{}).Sleep(ctx, time.Hour); !errors.Is(err, context.Canceled) {
-		t.Fatalf("real sleep on a canceled context = %v", err)
+	// An already-ended context fails the wait, however short: a timer that
+	// has already fired must not win (it would, about half the time, in a
+	// plain select).
+	for _, d := range []time.Duration{time.Hour, time.Nanosecond, 0} {
+		for i := 0; i < 1000; i++ {
+			if err := (faulttest.RealSleeper{}).Sleep(ctx, d); !errors.Is(err, context.Canceled) {
+				t.Fatalf("real sleep of %s on a canceled context = %v, want context.Canceled", d, err)
+			}
+		}
 	}
 }

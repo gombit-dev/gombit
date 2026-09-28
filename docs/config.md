@@ -22,6 +22,7 @@ shape with environment-derived `/docs` and cache namespace. Mutating
 - cache driver: `memory`
 - cache namespace: `gombit:development`
 - Redis address: `127.0.0.1:6379`
+- jobs driver: `sync` (default queue `default`, namespace as for the cache)
 - log level: `info`
 - log sink: `stderr`
 
@@ -53,6 +54,9 @@ recognizes:
 | `GOMBIT_DATABASE_CONN_MAX_LIFETIME` | `Config.Database.ConnMaxLifetime` | `0` |
 | `GOMBIT_CACHE_DRIVER` | `Config.Cache.Driver` | `memory` |
 | `GOMBIT_CACHE_NAMESPACE` | `Config.Cache.Namespace` | derived from app/environment |
+| `GOMBIT_JOBS_DRIVER` | `Config.Jobs.Driver` | `sync` |
+| `GOMBIT_JOBS_QUEUE` | `Config.Jobs.Queue` | `default` |
+| `GOMBIT_JOBS_NAMESPACE` | `Config.Jobs.Namespace` | derived from app/environment |
 | `GOMBIT_REDIS_ADDR` | `Config.Cache.Redis.Addr` | `127.0.0.1:6379` |
 | `GOMBIT_REDIS_USERNAME` | `Config.Cache.Redis.Username` | empty |
 | `GOMBIT_REDIS_PASSWORD` | `Config.Cache.Redis.Password` | empty |
@@ -85,6 +89,9 @@ regenerating. See [frontend.md](frontend.md#talking-to-the-api).
 `production`.
 `GOMBIT_DATABASE_DRIVER` accepts `sqlite`, `postgres`, and `mysql`.
 `GOMBIT_CACHE_DRIVER` accepts `memory`, `redis`, and `noop`.
+`GOMBIT_JOBS_DRIVER` accepts `sync`, `memory`, and `redis`; the `redis` driver
+connects with the shared `GOMBIT_REDIS_*` settings, which are then validated
+even when the cache does not use Redis. See [jobs.md](jobs.md#drivers).
 When `GOMBIT_CACHE_NAMESPACE` is unset, the namespace is derived from the
 normalized app name and environment, such as `gombit:development`.
 `GOMBIT_HTTP_TRUSTED_PROXIES` is a comma-separated list of IPs or CIDRs passed

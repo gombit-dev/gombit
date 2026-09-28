@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Handler runs one job. Returning nil completes it; an error fails the
@@ -40,6 +41,7 @@ type Registry struct {
 	byName      map[string]*registration
 	byType      map[reflect.Type]*registration
 	propagators []Propagator
+	defaults    Options
 	now         func() time.Time
 	newID       func() string
 }
@@ -49,6 +51,7 @@ type registration struct {
 	version  int
 	goType   reflect.Type
 	upgrades map[int]Upgrade
+	options  Options
 	// decode returns a call that runs the handler on the decoded job.
 	decode func(payload json.RawMessage) (func(ctx context.Context) error, error)
 }
@@ -93,6 +96,7 @@ type RegisterOption func(*registerConfig)
 type registerConfig struct {
 	upgrades   map[int]Upgrade
 	duplicates []int
+	options    *Options
 }
 
 // UpgradeFrom registers the step that rewrites a version-`from` payload into
@@ -154,17 +158,29 @@ func Register[T Job](r *Registry, handler Handler[T], opts ...RegisterOption) er
 	if len(cfg.duplicates) > 0 {
 		return fmt.Errorf("%w: %s: UpgradeFrom(%d) is given more than once", ErrInvalidJobType, goType, cfg.duplicates[0])
 	}
+	var options Options
+	if cfg.options != nil {
+		if err := cfg.options.validate(); err != nil {
+			return fmt.Errorf("%w: %s: %v", ErrInvalidJobType, goType, err)
+		}
+		options = *cfg.options
+	}
 	for from, fn := range cfg.upgrades {
 		if from < 1 || from >= version || fn == nil {
 			return fmt.Errorf("%w: %s: UpgradeFrom(%d) is outside versions 1..%d or has no function", ErrInvalidJobType, goType, from, version-1)
 		}
 	}
 
+	resolved := options.resolve(r.defaults)
+	if err := resolved.validate(); err != nil {
+		return fmt.Errorf("%w: %s: with the registry defaults (WithDefaultOptions), %v", ErrInvalidJobType, goType, err)
+	}
 	reg := &registration{
 		name:     name,
 		version:  version,
 		goType:   goType,
 		upgrades: cfg.upgrades,
+		options:  resolved,
 		decode: func(payload json.RawMessage) (func(ctx context.Context) error, error) {
 			var job T
 			if err := json.Unmarshal(payload, &job); err != nil {
@@ -185,12 +201,33 @@ func Register[T Job](r *Registry, handler Handler[T], opts ...RegisterOption) er
 	return nil
 }
 
+// Options returns the execution policy of the named job, defaults filled
+// in. A name nothing registered gets the registry's defaults, so an unknown
+// job (a rolling deploy's newer producer) is still retried and bounded.
+func (r *Registry) Options(name string) Options {
+	r.mu.RLock()
+	reg, ok := r.byName[name]
+	r.mu.RUnlock()
+	if ok {
+		return reg.options
+	}
+	return Options{}.resolve(r.defaults)
+}
+
 // MustRegister is Register that panics on error, for registration at
 // startup.
 func MustRegister[T Job](r *Registry, handler Handler[T], opts ...RegisterOption) {
 	if err := Register(r, handler, opts...); err != nil {
 		panic(err)
 	}
+}
+
+// Has reports whether a handler is registered for name.
+func (r *Registry) Has(name string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, ok := r.byName[name]
+	return ok
 }
 
 // Names returns the registered job names, sorted.
@@ -278,6 +315,14 @@ func (r *Registry) Run(ctx context.Context, env Envelope) (err error) {
 	if !ok {
 		return &Error{Kind: KindUnknownJob, Name: env.Name, Version: env.Version}
 	}
+	// The run's span, started once the propagators restored the trace. Its
+	// end is deferred before the recovery below so it sees a recovered panic.
+	var span trace.Span
+	defer func() {
+		if span != nil {
+			endRunSpan(span, err)
+		}
+	}()
 	// Everything past the lookup runs application code (upgrade steps, a
 	// payload's UnmarshalJSON, propagators, the handler), so a panic anywhere
 	// in it is this job's failure, not the worker's.
@@ -286,6 +331,12 @@ func (r *Registry) Run(ctx context.Context, env Envelope) (err error) {
 			err = &Error{Kind: KindPanic, Name: reg.name, Version: reg.version, Err: fmt.Errorf("%v", p)}
 		}
 	}()
+	// Restore the dispatching context and start the run's span first, so a
+	// run that fails in an upgrade step or the decoder is traced too.
+	for _, p := range r.propagators {
+		ctx = p.Extract(ctx, env.Metadata)
+	}
+	ctx, span = startRunSpan(ctx, reg.name, env.ID, reg.version, env.Attempt)
 	payload, err := reg.upgrade(env)
 	if err != nil {
 		return err
@@ -294,18 +345,27 @@ func (r *Registry) Run(ctx context.Context, env Envelope) (err error) {
 	if err != nil {
 		return &Error{Kind: KindDecode, Name: reg.name, Version: reg.version, Err: err}
 	}
-	for _, p := range r.propagators {
-		ctx = p.Extract(ctx, env.Metadata)
-	}
 	ctx = context.WithValue(ctx, infoKey{}, Info{
 		ID:            env.ID,
 		Name:          reg.name,
 		Version:       reg.version,
 		QueuedVersion: env.Version,
 		Attempt:       env.Attempt,
+		MaxAttempts:   reg.options.MaxAttempts,
 		EnqueuedAt:    env.EnqueuedAt,
 	})
+	if reg.options.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeoutCause(ctx, reg.options.Timeout, errJobTimeout)
+		defer cancel()
+	}
 	if err := call(ctx); err != nil {
+		// Only the job's own deadline is a timeout; a caller's earlier one (a
+		// request deadline around a sync dispatch) is the caller's.
+		if errors.Is(context.Cause(ctx), errJobTimeout) {
+			return &Error{Kind: KindTimeout, Name: reg.name, Version: reg.version,
+				Err: fmt.Errorf("after %s: %w", reg.options.Timeout, err)}
+		}
 		return &Error{Kind: KindHandler, Name: reg.name, Version: reg.version, Err: err}
 	}
 	return nil
@@ -335,8 +395,10 @@ func (reg *registration) upgrade(env Envelope) (json.RawMessage, error) {
 		}
 		next, err := step(payload)
 		if err != nil {
-			return nil, &Error{Kind: KindDecode, Name: reg.name, Version: version,
-				Err: fmt.Errorf("upgrade from version %d: %w", v, err)}
+			// The step's own failure, not bad bytes: retryable, like a panic
+			// in the step or a missing one (a deploy can fix it).
+			return nil, &Error{Kind: KindUpgrade, Name: reg.name, Version: v,
+				Err: err}
 		}
 		// Every step's output is checked like the queued payload: a later
 		// step or the decoder would turn null into a zero-value job.
@@ -348,6 +410,9 @@ func (reg *registration) upgrade(env Envelope) (json.RawMessage, error) {
 	}
 	return payload, nil
 }
+
+// errJobTimeout is the cause of a context canceled by a job's own Timeout.
+var errJobTimeout = errors.New("job timeout")
 
 // emptyPayload reports a payload json.Unmarshal would accept as the zero
 // job: nothing, or null. A job is a struct, so neither is a job.
