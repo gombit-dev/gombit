@@ -10,6 +10,8 @@ version.
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-09-28
+
 ### Added
 
 - [Fault injection and chaos testing](docs/testing/fault-injection.md):
@@ -54,9 +56,11 @@ version.
   (an already-ended context starts no attempt; a cancel mid-backoff ends
   it), permanent errors not retried, backoff on schedule and within
   `[0, MaxDelay]` over a sample of attempts (1..128 and 1000) that catches
-  a doubling that overflows, success ends it, and an observable final error. JOBS-4's retry policy
-  ([#317](https://github.com/gombit-dev/gombit/issues/317)) is its first
-  consumer ([#387](https://github.com/gombit-dev/gombit/issues/387)).
+  a doubling that overflows, success ends it, and an observable final error.
+  The jobs retry policy ([#317](https://github.com/gombit-dev/gombit/issues/317))
+  backs off through queue availability rather than a `Sleeper`, so it keeps
+  its own tests in `jobs/policy_test.go`
+  ([#387](https://github.com/gombit-dev/gombit/issues/387)).
 - Cancellation and deadline fault tests (`TestFault_Context_*`) through
   Gombit's layers on SQLite, Postgres, and MySQL: a query or `App.Tx` on the
   request context ends at `HTTP.RequestTimeout`; a client that disconnects
@@ -161,6 +165,19 @@ version.
   come back when their leases expire. `jobs.NewWorker`, `framework.RunWorker`,
   and `Queue.Extend` (lease renewal) are the building blocks
   ([#316](https://github.com/gombit-dev/gombit/issues/316)).
+
+### Fixed
+
+- The Redis cache client (`cache.NewRedisClient`, `cache.Open`) now honors
+  the caller's context deadline (`ContextTimeoutEnabled`): a Redis that
+  stopped answering held a request past its deadline until go-redis's own
+  read timeout and retries ran out (found by
+  `TestFault_Network_RedisLatency`).
+
+## [0.5.0] — 2026-09-27
+
+### Added
+
 - Job queue drivers, selected by `GOMBIT_JOBS_DRIVER`: `sync` (the default;
   `Dispatch` runs the job inline), `memory`, and a durable `redis` driver
   whose queued, delayed, and leased jobs survive restarts (atomic Lua
@@ -178,6 +195,11 @@ version.
   `framework.JobPropagator` carries the dispatching request's request and
   trace IDs into the handler
   ([#314](https://github.com/gombit-dev/gombit/issues/314)).
+
+## [0.4.0] — 2026-09-27
+
+### Added
+
 - `gombit db check` validates the whole schema chain in one non-interactive
   command: generated contract, model registry (`AutoMigrate` ↔
   `models.json`), migration-directory integrity, migration safety, models ↔
@@ -257,11 +279,21 @@ version.
 
 ### Fixed
 
-- The Redis cache client (`cache.NewRedisClient`, `cache.Open`) now honors
-  the caller's context deadline (`ContextTimeoutEnabled`): a Redis that
-  stopped answering held a request past its deadline until go-redis's own
-  read timeout and retries ran out (found by
-  `TestFault_Network_RedisLatency`).
+- The admin derives its fields from the same policy as the generated CRUD
+  contract: a column the public contract hides or the server sets is no longer
+  writable in the admin, a required server-set column can't be stored as its
+  zero value, a write-only field changes only when a new value is sent, and the
+  create form shows errors for fields it doesn't render
+  ([#399](https://github.com/gombit-dev/gombit/pull/399)).
+
+## [0.3.1] — 2026-09-26
+
+### Changed
+
+- Documentation only: the changelog is split into the release that first
+  shipped each entry, and the field grammar, type lists, and list-query
+  tables in the tutorial, CLI, and contract docs are brought up to the v0.3
+  set ([#401](https://github.com/gombit-dev/gombit/pull/401)).
 
 ## [0.3.0] — 2026-09-26
 
@@ -869,7 +901,11 @@ First tagged release. Milestones M0–M5 plus ADMIN-1 through ADMIN-3.
   multi-tenancy, i18n — are **not** included. See
   [the build plan](docs/GOMBIT_BUILD_PLAN.md).
 
-[Unreleased]: https://github.com/gombit-dev/gombit/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/gombit-dev/gombit/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/gombit-dev/gombit/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/gombit-dev/gombit/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/gombit-dev/gombit/compare/v0.3.1...v0.4.0
+[0.3.1]: https://github.com/gombit-dev/gombit/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/gombit-dev/gombit/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/gombit-dev/gombit/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/gombit-dev/gombit/compare/v0.1.14...v0.2.0

@@ -49,14 +49,15 @@ binary.
 
 ## How work is organised
 
-Gombit is built issue-by-issue from the backlog in
-[`docs/GOMBIT_BUILD_PLAN.md`](docs/GOMBIT_BUILD_PLAN.md) §4. Issues are titled
-`[ID] …` (e.g. `[M2-2] gombit db migrate / rollback / status`) and belong to a
-milestone. Two things follow from that:
+Gombit is built issue-by-issue. Issues are titled `[ID] …` (e.g. `[M2-2]
+gombit db migrate / rollback / status`); larger features are epics whose issue
+lists its children. (The v0.1 backlog came from
+[`docs/GOMBIT_BUILD_PLAN.md`](docs/GOMBIT_BUILD_PLAN.md) §4, now a historical
+record.) Two things follow from that:
 
 - **One issue → one pull request** where practical, and the PR links its issue.
 - **Don't start an issue whose "Depends on #N" is still open** — the dependency
-  ordering in §4 is real.
+  ordering is real.
 
 Build plan **§1–§3 record locked architecture decisions** (Huma as the contract
 source of truth, Atlas-backed migrations, Cobra for the CLI, the runtime generic
@@ -241,8 +242,9 @@ above.
 
 ## Working agreement
 
-A pull request is not done unless it satisfies the Agent Working Agreement in
-[`docs/GOMBIT_BUILD_PLAN.md`](docs/GOMBIT_BUILD_PLAN.md) §5. In short:
+A pull request is not done unless it satisfies the working agreement in
+[`AGENTS.md`](AGENTS.md) (carried over from the v0.1 build plan §5). In
+short:
 
 - new behavior has tests; DB-touching changes pass the SQLite + PostgreSQL +
   MySQL matrix;

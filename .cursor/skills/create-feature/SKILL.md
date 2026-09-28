@@ -5,7 +5,7 @@ description: Implements a Gombit backlog issue or new framework capability as a 
 
 # Create Feature
 
-Implement one Gombit unit of work. Read `AGENTS.md` first. `docs/GOMBIT_BUILD_PLAN.md` wins on conflicts; the design doc is rationale only.
+Implement one Gombit unit of work. Read `AGENTS.md` first. `AGENTS.md` and the ADRs in `docs/adr/` win on conflicts (`docs/GOMBIT_BUILD_PLAN.md` is the historical v0.1 plan); the design doc is rationale only.
 
 ## When not to use
 

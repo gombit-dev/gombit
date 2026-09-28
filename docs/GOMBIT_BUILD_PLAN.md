@@ -1,5 +1,16 @@
 # Gombit — Build Plan & Locked Decisions
 
+> **Historical document.** This is the original v0.1 build plan, kept as a
+> record of how Gombit was scoped and why. It is no longer maintained and is
+> not the source of truth for current scope: what has shipped is in the
+> [changelog](../CHANGELOG.md), architecture decisions are recorded as
+> [ADRs](adr/), and current work is tracked in
+> [GitHub issues](https://github.com/gombit-dev/gombit/issues). Later ADRs
+> supersede parts of it — notably [ADR-016](adr/016-model-first-resource-generation.md)
+> (generated resource code is generator-owned, not a one-time user-owned
+> scaffold) — and several "post-v0.1" batteries it defers, such as background
+> jobs, have since shipped.
+
 **Status:** Build-ready v1.0
 **Date:** 2026-08-14
 **Supersedes:** the "Open Decisions" (§57) of `GO_FULLSTACK_FRAMEWORK_DESIGN.md`, and the specific sections noted inline below.

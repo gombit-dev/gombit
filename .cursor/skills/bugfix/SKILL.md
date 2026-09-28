@@ -5,7 +5,7 @@ description: Reproduces, tests, and fixes a Gombit defect with a minimal, verifi
 
 # Bugfix
 
-Reproduce first, then fix the root cause only. Read `AGENTS.md` first. `docs/GOMBIT_BUILD_PLAN.md` wins on conflicts.
+Reproduce first, then fix the root cause only. Read `AGENTS.md` first. `AGENTS.md` and the ADRs in `docs/adr/` win on conflicts (`docs/GOMBIT_BUILD_PLAN.md` is the historical v0.1 plan).
 
 ## When not to use
 

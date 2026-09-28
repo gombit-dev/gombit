@@ -9,7 +9,7 @@ New here? [Install](installation.md), then work through the
 | --- | --- |
 | [installation.md](installation.md) | Prerequisites, install paths, verification, troubleshooting |
 | [tutorial.md](tutorial.md) | Build a task app end to end — API, migration, client, React, auth, admin |
-| [cli.md](cli.md) | Every command and flag: `new`, `dev`, `worker`, `jobs`, `build`, `make`, `generate`, `db`, `openapi`, `client`, `routes`, `doctor`, `config`, `createsuperuser`, `version` |
+| [cli.md](cli.md) | Every command and flag: `new`, `dev`, `worker`, `jobs`, `build`, `make`, `generate`, `db`, `openapi`, `client`, `contract`, `routes`, `doctor`, `config`, `createsuperuser`, `version` |
 | [migration-model-first-resources.md](migration-model-first-resources.md) | Migrating resources from the old human-owned `handler.go` to the model-first, generator-owned layout (ADR-016) |
 
 ## Runtime
@@ -22,7 +22,7 @@ New here? [Install](installation.md), then work through the
 | [router.md](router.md) | Application-owned route registration and the raw `*gin.Engine` escape hatch |
 | [logging.md](logging.md) | Runtime logging |
 | [cache.md](cache.md) | Cache runtime (memory, Redis, noop) |
-| [jobs.md](jobs.md) | Background jobs: typed jobs, the registry, payload versioning (JOBS-1) |
+| [jobs.md](jobs.md) | Background jobs: typed jobs and payload versioning, queue drivers, the worker, retries, delayed and failed jobs, duplicate handling, metrics |
 | [security.md](security.md) | The security headers applied per response kind (API vs HTML) and why |
 
 ## Data
@@ -70,7 +70,7 @@ New here? [Install](installation.md), then work through the
 
 | Doc | What it covers |
 | --- | --- |
-| [GOMBIT_BUILD_PLAN.md](GOMBIT_BUILD_PLAN.md) | **Authoritative** scope, locked decisions, and the issue backlog (§4) |
+| [GOMBIT_BUILD_PLAN.md](GOMBIT_BUILD_PLAN.md) | The original v0.1 build plan and locked decisions — historical, no longer maintained |
 | [GO_FULLSTACK_FRAMEWORK_DESIGN.md](GO_FULLSTACK_FRAMEWORK_DESIGN.md) | Long-form rationale — prose only, never a source of scope |
 | [releasing.md](releasing.md) | Maintainer release runbook |
 | [adr/](adr/) | Accepted architecture decision records |
@@ -86,6 +86,9 @@ New here? [Install](installation.md), then work through the
 | [014](adr/014-cli-cobra.md) | Cobra is the CLI framework |
 | [015](adr/015-host-deployment-contracts.md) | Host/deployment contracts: application contract, health convention, migration safety manifest |
 | [016](adr/016-model-first-resource-generation.md) | Resource contracts are model-derived and generator-owned; customization via hooks, not edits to generated plumbing |
+| [017](adr/017-request-timeout-opt-in.md) | The per-handler request timeout is opt-in |
+| [018](adr/018-input-sanitization-opt-in.md) | Request-input HTML sanitization is opt-in |
+| [019](adr/019-hard-delete-semantics.md) | Deletion is the database's deletion: rows are removed physically and `ON DELETE` decides the rest |
 
 ## Contributing
 

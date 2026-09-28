@@ -17,7 +17,7 @@ The Cursor counterpart is `.cursor/skills/code-review/SKILL.md`. Keep both align
 ## Setup
 
 1. Determine the review surface: `git diff` / `git diff main...HEAD` / the named PR.
-2. Identify the linked issue (`[ID] ...`) and its acceptance criteria in `docs/GOMBIT_BUILD_PLAN.md` §4.
+2. Identify the linked issue (`[ID] ...`) and its acceptance criteria from the GitHub issue (v0.1 issues also mirror `docs/GOMBIT_BUILD_PLAN.md` §4, a historical record).
 3. If the repo is still pre-code, review docs and scaffolding for invented APIs, scope creep, and decision regressions — not imaginary runtime files.
 4. Load [references/checklist.md](references/checklist.md). Walk only the sections the diff touches. Treat each item as a contract to attack, not a substitute for tracing the change end-to-end.
 5. **Read [references/adversarial-review.md](references/adversarial-review.md) in full before writing any review.** That file is the review: persona, method, severity, output format, and merge standard. Do not fall back to a diplomatic template, a findings dump, or the old Verdict / Blockers / Major / Minor outline.
