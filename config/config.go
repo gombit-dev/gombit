@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -573,6 +574,7 @@ func (c Config) Validate() error {
 		})
 	}
 
+	unsafeProxy := false
 	for _, proxy := range c.HTTP.TrustedProxies {
 		if strings.TrimSpace(proxy) == "" {
 			errs = append(errs, FieldError{
@@ -583,6 +585,7 @@ func (c Config) Validate() error {
 			})
 		}
 		if c.Environment == EnvironmentProduction && isUnsafeTrustedProxy(proxy) {
+			unsafeProxy = true
 			errs = append(errs, FieldError{
 				Field:   "HTTP.TrustedProxies",
 				Env:     envHTTPTrustedProxies,
@@ -590,6 +593,14 @@ func (c Config) Validate() error {
 				Message: "must not trust all proxies in production",
 			})
 		}
+	}
+	if c.Environment == EnvironmentProduction && !unsafeProxy && trustedProxyRangesCoverAll(c.HTTP.TrustedProxies) {
+		errs = append(errs, FieldError{
+			Field:   "HTTP.TrustedProxies",
+			Env:     envHTTPTrustedProxies,
+			Value:   strings.Join(c.HTTP.TrustedProxies, ","),
+			Message: "must not trust all proxies in production",
+		})
 	}
 
 	if !strings.HasPrefix(c.API.Prefix, "/") {
@@ -1109,11 +1120,63 @@ func applyBool(lookup EnvLookup, key string, field string, dest *bool, errs *Fie
 }
 
 func isUnsafeTrustedProxy(proxy string) bool {
-	switch strings.TrimSpace(proxy) {
-	case "*", "0.0.0.0/0", "::/0":
+	proxy = strings.TrimSpace(proxy)
+	if proxy == "*" {
 		return true
-	default:
+	}
+	_, network, err := net.ParseCIDR(proxy)
+	if err != nil {
 		return false
+	}
+	ones, _ := network.Mask.Size()
+	return ones == 0
+}
+
+// trustedProxyRangesCoverAll detects a set of CIDRs that jointly trusts every
+// IPv4 or IPv6 peer. Each family has its own prefix tree, so a partial range
+// in one family cannot make a partial range in the other appear complete.
+func trustedProxyRangesCoverAll(proxies []string) bool {
+	var ipv4, ipv6 trustedProxyRangeNode
+	for _, proxy := range proxies {
+		_, network, err := net.ParseCIDR(strings.TrimSpace(proxy))
+		if err != nil {
+			continue // Gin reports invalid addresses when configuring its router.
+		}
+		bits, _ := network.Mask.Size()
+		if address := network.IP.To4(); address != nil {
+			insertTrustedProxyRange(&ipv4, address, bits, 0)
+		} else {
+			insertTrustedProxyRange(&ipv6, network.IP.To16(), bits, 0)
+		}
+		if ipv4.covered || ipv6.covered {
+			return true
+		}
+	}
+	return false
+}
+
+type trustedProxyRangeNode struct {
+	covered  bool
+	children [2]*trustedProxyRangeNode
+}
+
+func insertTrustedProxyRange(node *trustedProxyRangeNode, address net.IP, bits, depth int) {
+	if node.covered {
+		return
+	}
+	if depth == bits {
+		node.covered = true
+		node.children = [2]*trustedProxyRangeNode{}
+		return
+	}
+	bit := (address[depth/8] >> (7 - depth%8)) & 1
+	if node.children[bit] == nil {
+		node.children[bit] = &trustedProxyRangeNode{}
+	}
+	insertTrustedProxyRange(node.children[bit], address, bits, depth+1)
+	if node.children[0] != nil && node.children[0].covered && node.children[1] != nil && node.children[1].covered {
+		node.covered = true
+		node.children = [2]*trustedProxyRangeNode{}
 	}
 }
 
