@@ -173,9 +173,10 @@ and `cli.ExecuteRoot`. Public product routes are Huma-typed under `/api/v1`.
 There is no generated `service.go` or `repo.go` until
 `gombit make resource --service` / `--repo`.
 
-`.env.example` lists `GOMBIT_*` server variables from the `config` package
-and public `VITE_API_URL` (empty means same-origin for the Vite `/api`
-proxy). `VITE_*` is baked into the browser bundle — never put secrets there.
+`.env.example` lists every `GOMBIT_*` server variable the `config` package
+reads (optional ones commented out with their defaults; the cookie-auth
+settings only in `--auth cookie` apps) and public `VITE_API_URL` (empty
+means same-origin for the Vite `/api` proxy). `VITE_*` is baked into the browser bundle — never put secrets there.
 Access tokens stay in memory; generated source does not use `localStorage`.
 
 ## `gombit dev`
@@ -572,9 +573,10 @@ Registration edits use `go/ast` + `go/parser` + `go/format` (never regex).
 (or a user-owned file) is refused unless `--force`. `commands.go` and
 `cmd/gombit/main.go` are additive AST edits of known registration points.
 
-Command names that collide with framework families (`new`, `dev`, `build`,
-`make`, `db`, `openapi`, `client`, `routes`, `doctor`, `config`,
-`createsuperuser`, `version`, `worker`, `jobs`, `help`, `completion`) are rejected.
+Command names that collide with framework families (`new`, `dev`, `worker`,
+`jobs`, `build`, `make`, `generate`, `db`, `openapi`, `contract`, `client`,
+`routes`, `doctor`, `config`, `createsuperuser`, `version`, `help`,
+`completion`) are rejected, as are `gombit` and `register`.
 
 ## `gombit worker`
 

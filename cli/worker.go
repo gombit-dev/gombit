@@ -18,8 +18,12 @@ import (
 
 func newWorkerCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
 	return silence(&cobra.Command{
-		Use:   "worker [--queue default] [--concurrency N] [--lease 5m] [--shutdown-timeout 30s]",
+		Use:   "worker [--queue default] [--concurrency N] [--lease 5m] [--shutdown-timeout 30s] [--metrics-addr :9091]",
 		Short: "Run this app's background-job worker",
+		// Flag parsing is disabled: the flags belong to the app binary's worker
+		// (framework.ParseWorkerFlags) and are passed through to it, so Cobra
+		// has no flag set to print. The Flags section below is that help; a
+		// test keeps it in step with ParseWorkerFlags.
 		Long: `Run the app's jobs worker from an application directory: it builds ./cmd/server
 and runs it as "server worker", with these flags passed through.
 
@@ -36,6 +40,8 @@ Flags:
                       (default 5m)
   --shutdown-timeout  how long in-flight jobs get to finish on SIGINT/SIGTERM
                       before their context is canceled (default 30s)
+  --metrics-addr      serve /metrics (Prometheus job outcomes and queue depth)
+                      and /livez on this address, e.g. :9091 (default: off)
 
 The worker needs a queue a separate process can reach: GOMBIT_JOBS_DRIVER=redis.
 With the sync driver jobs run as they are dispatched; the memory driver's queue
