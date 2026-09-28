@@ -326,10 +326,20 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 12
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     env:
       FAULT_SHARD: ${{ matrix.shard }}/6
       FAULT_POSTGRES_DSN: postgres://gombit:gombit@127.0.0.1:5432/gombit?sslmode=disable
       FAULT_MYSQL_DSN: gombit:gombit@tcp(127.0.0.1:3306)/gombit?parseTime=true
+      FAULT_REDIS_ADDR: 127.0.0.1:6379
     steps:
       - name: Checkout
         uses: actions/checkout@v7
