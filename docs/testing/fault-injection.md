@@ -84,7 +84,7 @@ and never reports success for a write that did not persist.
 
 | Where it holds | Enforced by |
 | --- | --- |
-| `App.Tx`: a statement fails, the COMMIT fails, the context is canceled mid-statement, `fn` panics (even when the rollback also fails), every statement fails | [`framework/fault_test.go`](../../framework/fault_test.go): `TestFault_Database_TransactionRollback`, `_CommitFailure`, `_Cancellation`, `_PanicRollsBack`, `_Unavailable`, `_RetryableError` |
+| `App.Tx`: a statement fails, the COMMIT fails, the context is canceled mid-statement, `fn` panics (even when the rollback also fails), every insert into its tables fails | [`framework/fault_test.go`](../../framework/fault_test.go): `TestFault_Database_TransactionRollback`, `_CommitFailure`, `_Cancellation`, `_PanicRollsBack`, `_Unavailable`, `_RetryableError` |
 | `App.Tx` when the connection drops before COMMIT, over a real network | [`framework/network_fault_integration_test.go`](../../framework/network_fault_integration_test.go): `TestFault_Network_ConnectionLostMidTransaction` |
 | A losing writer whose COMMIT fails while holding the row lock leaves nothing, and the winner's write stands | [`framework/concurrency_fault_test.go`](../../framework/concurrency_fault_test.go): `TestFault_Concurrency_ConflictingWriters` |
 | Cancellation during COMMIT gives a consistent answer: an error means nothing persisted, success means it did | [`framework/concurrency_fault_test.go`](../../framework/concurrency_fault_test.go): `TestFault_Concurrency_CancelDuringCommit` |
@@ -92,9 +92,12 @@ and never reports success for a write that did not persist.
 | Admin creates, including many-to-many join rows, are atomic, and a failed commit is an error response | [`admin/fault_test.go`](../../admin/fault_test.go): `TestFault_Database_AdminManyToManyRollback`, `_AdminCommitFailure` |
 | All or nothing at a random failure boundary. A counter equals the number of transactions that reported success, under random failed COMMITs. Cancellation at a random point matches what persisted | [`internal/chaos/scenarios_test.go`](../../internal/chaos/scenarios_test.go): `database/failure-boundary`, `database/concurrent-writers`, `context/cancellation-stress` |
 
-Every one of these database tests also checks, with `faulttest.Idle`, that no
-transaction was left holding a connection. A row count alone cannot see an
-open transaction.
+Every one of these database tests except
+`TestFault_Network_ConnectionLostMidTransaction` also checks, with
+`faulttest.Idle`, that no transaction was left holding a connection
+(directly, or through `assertNoFamily`, `assertUnrotated`, or
+`assertNoEngine`). A row count alone cannot see an open transaction. The
+network test checks the error, the row count, and that the pool recovers.
 
 ### INV-2: bounded waiting
 
@@ -106,10 +109,20 @@ block the caller past it.
 | A handler's query, or its `App.Tx`, ends at `HTTP.RequestTimeout` | [`framework/context_fault_test.go`](../../framework/context_fault_test.go): `TestFault_Context_HandlerDeadline_DB`, `_HandlerDeadline_Tx` |
 | A handler's outbound HTTP call to a hung dependency ends at the request deadline | [`framework/http_fault_test.go`](../../framework/http_fault_test.go): `TestFault_HTTP_HandlerDeadline` |
 | Shutdown with requests stuck in the database returns within drain delay + shutdown timeout | [`framework/context_fault_test.go`](../../framework/context_fault_test.go): `TestFault_Context_ShutdownUnderLoad` |
-| A stalled database, a refusing one (fails at once), and an exhausted pool (the waiter honors its deadline) | [`framework/network_fault_integration_test.go`](../../framework/network_fault_integration_test.go): `TestFault_Network_Latency`, `_Unavailable`, `_PoolExhaustion`, `_ConnectionLost` |
-| A stalled Redis ends a cache call at the caller's deadline, and a refusing one within go-redis's bounded dial retries | [`cache/network_fault_integration_test.go`](../../cache/network_fault_integration_test.go): `TestFault_Network_RedisLatency`, `_RedisUnavailable`, `_RedisConnectionLost` |
+| A query against a stalled database ends at the caller's deadline (`context.DeadlineExceeded`). A caller waiting on an exhausted pool honors its deadline. A refusing database fails the call at once (under a second) | [`framework/network_fault_integration_test.go`](../../framework/network_fault_integration_test.go): `TestFault_Network_Latency`, `_PoolExhaustion`, `_Unavailable` |
+| A cache call against a stalled Redis ends at the caller's deadline | [`cache/network_fault_integration_test.go`](../../cache/network_fault_integration_test.go): `TestFault_Network_RedisLatency` |
 | `gombit openapi` / `gombit dev` spec fetches against a hung server end at the caller's deadline | [`cli/fault_test.go`](../../cli/fault_test.go): `TestFault_HTTP_Timeout`; [`dev/fault_test.go`](../../dev/fault_test.go): `TestFault_HTTP_DevSpecFetchTimeout` |
 | Random stalls, drops, and restarts of Postgres; random HTTP dependency scripts behind a request timeout | [`internal/chaos/scenarios_test.go`](../../internal/chaos/scenarios_test.go): `postgres/interruption`, `http/dependency-faults` |
+
+Three tests bound a failure where the caller sets **no** deadline, so they
+check a fixed ceiling rather than a deadline:
+
+- a query whose connection is dropped (FIN or RST) while the database stays
+  unreachable fails within 5 seconds of the drop (`TestFault_Network_ConnectionLost`);
+- a Redis command whose connection drops fails within 5 seconds
+  (`TestFault_Network_RedisConnectionLost`);
+- a refusing Redis fails within go-redis's bounded dial retries, about 2
+  seconds and under a 4-second ceiling (`TestFault_Network_RedisUnavailable`).
 
 ### INV-3: cancellation propagation
 
@@ -123,6 +136,7 @@ transaction, the outbound call. It is not left running.
 | `App.Tx` carries the caller's context into every statement, so cancellation rolls it back | [`framework/fault_test.go`](../../framework/fault_test.go): `TestFault_Database_Cancellation`; [`framework/context_fault_test.go`](../../framework/context_fault_test.go): `TestFault_Context_HandlerDeadline_Tx`; [`auth/fault_test.go`](../../auth/fault_test.go): `TestFault_Database_RefreshRotationCanceled` |
 | Shutdown cancels the stuck requests' queries, leaving none running | [`framework/context_fault_test.go`](../../framework/context_fault_test.go): `TestFault_Context_ShutdownUnderLoad` |
 | The CLI's abandoned fetch does not keep running on the server | [`cli/fault_test.go`](../../cli/fault_test.go): `TestFault_HTTP_Timeout`; [`dev/fault_test.go`](../../dev/fault_test.go): `TestFault_HTTP_DevSpecFetchTimeout` |
+| Canceled during a random insert, a transaction ends with `context.Canceled` and nothing persisted. The held insert is never released, so a transaction that dropped its context fails the scenario instead of passing | [`internal/chaos/scenarios_test.go`](../../internal/chaos/scenarios_test.go): `context/cancellation-stress` |
 
 ### INV-4: bounded retry
 
@@ -136,7 +150,7 @@ keep this invariant, and that is what the tests pin:
 | --- | --- |
 | `App.Tx` returns a driver's retryable error (serialization failure, deadlock, `SQLITE_BUSY`) as a terminal error the caller can recognize, and runs `fn` once | [`framework/fault_test.go`](../../framework/fault_test.go): `TestFault_Database_RetryableError` |
 | The CLI's spec fetch reports a 429 at once and does not retry | [`cli/fault_test.go`](../../cli/fault_test.go): `TestFault_HTTP_TooManyRequests` |
-| Concurrent refresh-token rotations of one token share the in-flight rotation (a caller arriving after it ended starts its own, which fails the same way). When the rotation fails, every caller gets the terminal error, none is wedged, and none retries | [`auth/concurrency_fault_test.go`](../../auth/concurrency_fault_test.go): `TestFault_Concurrency_RotationLeaderFails` |
+| Callers that rotate a refresh token while another rotation of it is in flight join that rotation. The test pins four of them inside it before the stalled rotation fails. Every caller gets the terminal error, none is wedged, and only the one rotation touched the database (a single INSERT: nobody retried or ran their own) | [`auth/concurrency_fault_test.go`](../../auth/concurrency_fault_test.go): `TestFault_Concurrency_RotationLeaderFails` |
 | The one retrying client Gombit wraps, go-redis, finishes its dial retries in bounded time | [`cache/network_fault_integration_test.go`](../../cache/network_fault_integration_test.go): `TestFault_Network_RedisUnavailable` |
 
 Any retry policy Gombit adds must pass `faulttest.CheckRetryPolicy` (see
@@ -196,9 +210,11 @@ Every stochastic failure can be rerun from the seed its run reported.
 
 | Where it holds | Enforced by |
 | --- | --- |
-| A scenario's draws are a pure function of (seed, scenario, iteration): the same three replay them, a different one changes them | [`internal/chaos/replay_test.go`](../../internal/chaos/replay_test.go): `TestReplayIsDeterministic` |
-| Scenarios draw only from `env.Rand`, never from `math/rand`'s global source or the clock | [`internal/chaos/replay_test.go`](../../internal/chaos/replay_test.go): `TestScenariosDrawOnlyFromEnvRand` |
-| The nightly run's summary carries the seed and each failure's replay command | [`scripts/chaos-run_test.sh`](../../scripts/chaos-run_test.sh) |
+| Every registered scenario, run twice at one (seed, iteration), draws the same configuration and reports the same failures. This includes an iteration that cancels during an insert, and the Postgres scenario when `CHAOS_POSTGRES_DSN` is set | [`internal/chaos/replay_test.go`](../../internal/chaos/replay_test.go): `TestScenarioReplays` |
+| The random source is a pure function of (seed, scenario, iteration) | [`internal/chaos/replay_test.go`](../../internal/chaos/replay_test.go): `TestRandIsAPureFunctionOfTheKey` |
+| No scenario file imports a random source (`math/rand`, `crypto/rand`). This is an import check only: a draw from the clock or from map order is not caught by a test, which is why a seed that does not replay is treated as a harness bug | [`internal/chaos/replay_test.go`](../../internal/chaos/replay_test.go): `TestScenariosDrawOnlyFromEnvRand` |
+| A replay cannot pass by not running. The replay command pins `CHAOS_POSTGRES`, and `CHAOS_POSTGRES=1` refuses to run without a DSN. A selected scenario that needs Postgres fails instead of skipping | [`internal/chaos/replay_test.go`](../../internal/chaos/replay_test.go): `TestPostgresModeIsPinned` (the selected-scenario rule is `Environment.RequirePostgres`, checked by hand) |
+| The nightly summary's replay commands carry the run's quoted DSN, `CHAOS_POSTGRES`, and iteration count, and hand the suite the same DSN back. The artifacts describe only the run that produced them | [`scripts/chaos-run_test.sh`](../../scripts/chaos-run_test.sh) |
 
 ## Guarantees vs application responsibilities
 
@@ -229,9 +245,13 @@ something.
   waiting for a pooled connection honors its deadline.
 - **The Redis cache honors the caller's deadline.** It does not fall back to
   the client's own read timeout.
-- **Framework features built on these are atomic.** Refresh-token rotation
-  (including concurrent rotations of one token) and admin creates with
-  many-to-many rows are atomic.
+- **Framework features built on these are atomic.** A refresh-token
+  rotation revokes the old token and inserts the new one in one
+  transaction, under a failed insert, a failed commit, or cancellation.
+  Callers that rotate the same token while its rotation is in flight share
+  that rotation's result, failure included. A caller arriving after it
+  ended starts a new rotation. Admin creates with many-to-many rows are
+  atomic.
 - **The CLI's spec fetches** (`gombit openapi generate --url`, and
   `gombit dev`'s fetch from the app server) end at their deadline. `gombit
   openapi generate` also reports 5xx and 429 at once without retrying, and
@@ -347,7 +367,8 @@ CHAOS_SEED=8303673706723925916
 | `CHAOS_SCENARIO` | Run one scenario (`database/failure-boundary`, …) |
 | `CHAOS_ITERATION` | Run one iteration |
 | `CHAOS_ITERATIONS` | How many iterations (default 20) |
-| `CHAOS_POSTGRES_DSN` | Adds the Postgres scenarios and lets the database scenarios draw Postgres. Without it they use SQLite, and `postgres/interruption` skips |
+| `CHAOS_POSTGRES_DSN` | Adds the Postgres scenarios and lets the database scenarios draw Postgres. Without it they use SQLite, and `postgres/interruption` skips in a full run (a run that selects it fails instead) |
+| `CHAOS_POSTGRES` | Pins the Postgres configuration, as every replay command does. `1` refuses to run without `CHAOS_POSTGRES_DSN`, `0` ignores it, unset follows the DSN |
 | `CHAOS_REPORT_DIR` | Also write each failure report to a file there |
 
 The **Chaos** workflow ([`chaos.yml`](../../.github/workflows/chaos.yml)) runs
@@ -357,7 +378,8 @@ It is never a PR check and not a required status check.
 
 ## Reproducing a chaos failure
 
-A failing iteration prints a report:
+A failing iteration prints a report. This one came from `App.Tx` planted to
+ignore its commit error:
 
 ```text
 CHAOS FAILURE
@@ -365,14 +387,15 @@ CHAOS FAILURE
 scenario: database/failure-boundary
 component: database
 seed: 8303673706723925916
-iteration: 14
+iteration: 2
 package: github.com/gombit-dev/gombit/internal/chaos
-test: TestChaos/database/failure-boundary/iter-14
+test: TestChaos/database/failure-boundary/iter-2
+postgres: not configured
 
 drawn:
-  sqlite, 6 inserts, fault at COMMIT after 6 inserts
+  sqlite, 3 inserts, fault at COMMIT after 3 inserts
 
-sqlite: a transaction failing at COMMIT after 6 inserts
+sqlite: a transaction failing at COMMIT after 3 inserts
 
 expected:
   the injected fault and 0 rows
@@ -381,42 +404,67 @@ observed:
   <nil> and 0 rows
 
 replay:
-  CHAOS_SEED=8303673706723925916 CHAOS_SCENARIO=database/failure-boundary CHAOS_ITERATION=14 make test-chaos
+  CHAOS_POSTGRES=0 CHAOS_SEED=8303673706723925916 CHAOS_SCENARIO=database/failure-boundary CHAOS_ITERATION=2 make test-chaos
 ```
 
-1. **Get the report.** Locally it is in the test output. From the nightly
-   run, open the run's job summary, which lists the seed and every failure's
-   replay command in iteration order. For more, download the `chaos-<run id>`
-   artifact:
-   - `summary.md`: the same list;
+The report holds every message the scenario recorded: its draws
+(`env.Drew`), each violated invariant (`env.Mismatch`), and why it stopped
+early (`env.Fatalf`). The replay line pins `CHAOS_POSTGRES` but never
+prints the DSN.
+
+1. **Get the report.** Locally it is in the test output.
+
+   From the nightly run, open the job summary. It lists the seed, a command
+   that replays the whole run, and every failure's replay command in
+   iteration order. Those commands carry everything that decides what runs:
+   the run's quoted `CHAOS_POSTGRES_DSN` (the workflow's throwaway database
+   at `127.0.0.1:5432`), `CHAOS_POSTGRES=1`, and, for the whole run, the
+   iteration count.
+
+   For more, download the `chaos-<run id>` artifact. It describes that run
+   only:
+   - `summary.md`: the same commands;
    - `reports/<scenario>-iter-<n>.txt`: one report per failed iteration, as
-     above;
+     above. The scenario's `/` becomes `_`, so for example
+     `reports/database_failure-boundary-iter-2.txt`;
    - `test.json`: the full `go test -json` output, including race reports;
+   - `go-stderr.txt`: the `go` command's own stderr, where a build error
+     lands;
    - `environment.txt`: the `CHAOS_*` settings in effect;
    - `postgres.log` and `postgres-state.json`: the database container's logs
      and state.
 2. **Run the replay line.** It reruns that scenario and iteration with the
-   same draws. The `drawn:` section says which ones: database, fault,
-   boundary, sizes. If the failure needs Postgres, add `CHAOS_POSTGRES_DSN`.
-   A Postgres scenario draws the same way whatever address the database is
-   at.
-3. **Rerun the whole run** (`CHAOS_SEED=<seed> make test-chaos`, with the
-   run's `CHAOS_ITERATIONS`) if the failure only shows among its neighbors.
+   same draws, and the `drawn:` section lists them: database, fault,
+   boundary, sizes.
+
+   For a run that had Postgres, start one at the DSN's address (the
+   `docker run` in [CONTRIBUTING.md](../../CONTRIBUTING.md#the-database-matrix),
+   on port 5432) or export your own `CHAOS_POSTGRES_DSN`.
+   `CHAOS_POSTGRES=1` refuses to run without it, so a replay cannot quietly
+   switch a Postgres failure to SQLite. A scenario draws the same way
+   whatever address the database is at.
+3. **Rerun the whole run** with the summary's whole-run command if the
+   failure only shows among its neighbors.
 4. **Pin it.** Once you understand the failure, write a deterministic
    `TestFault_*` test that fails at that exact boundary, fix the bug, and keep
    the test. The chaos suite finds bugs; the fault suite keeps them fixed.
 
-Two scenarios involve scheduling: `database/concurrent-writers` (which
-goroutine reaches which COMMIT) and the moment a cancellation lands. Their
-invariants hold for every interleaving, so the seed replays the conditions,
-though not necessarily the exact thread order. Run the replay with
-`-count` (for example `go test -tags chaos -race -count=20 -run 'TestChaos'
-./internal/chaos` with the same `CHAOS_*` variables) until it reproduces.
+The seed fixes every choice a scenario makes, but not the Go scheduler. In
+`database/concurrent-writers` the seed fixes how many writers there are and
+which COMMITs (in commit order) fail. Which goroutine reaches which COMMIT
+is the scheduler's choice. The invariant holds for every interleaving, so
+the replay recreates the conditions but not necessarily the thread order.
+Run it with `-count` until it reproduces:
+
+```bash
+CHAOS_POSTGRES=0 CHAOS_SEED=<seed> CHAOS_SCENARIO=database/concurrent-writers \
+  CHAOS_ITERATION=<i> go test -tags chaos -race -count=20 -run TestChaos ./internal/chaos
+```
 
 **A failure that does not reproduce from its seed is a harness bug, not a
 flake.** Find the randomness the scenario drew from somewhere other than
 `env.Rand`: the global `math/rand`, the clock, map iteration order, or an
-unsynchronized goroutine.
+unsynchronized goroutine. Only the first of those is caught by a test.
 
 ## Adding a scenario
 
@@ -428,10 +476,10 @@ imports it).
 | Primitive | What it does |
 | --- | --- |
 | `FailAlways(err)`, `FailOnce(err)`, `FailNTimes(n, err)`, `FailOnCall(n, err)` | An `*Injector` that fails exactly those calls |
-| `Delay(d)`, `BlockUntil(release)` | Hold calls for a duration, or until a channel closes or the call's context ends |
+| `Delay(d)`, `BlockUntil(release)` | Hold calls for a duration, or until a channel closes or the call's context ends. On `DBFaults.Commit` and `Rollback` there is no call context (see `OpenDB`), so a hold there ends only on its timer or channel: release it yourself after canceling |
 | `Sequence(steps...)`, `SequenceThen(rest, steps...)` | Script the first calls from `Success()`, `Failure(err)`, `Wait(d)`, `Block(release)`, `BlockThenFail(release, err)`; later calls succeed, or do `rest` |
 | `inj.Calls()`, `inj.Failures()`, `inj.Reached(n)`, `inj.Reset()`, `inj.Disarm()` / `Arm()` | Counters; a channel closed when call `n` begins (to pin an interleaving); start over; pass calls through uncounted during setup |
-| `OpenDB(kind, dsn, &DBFaults{Connect, Begin, Statement, Match, Commit, Rollback})` | A `*database.DB` over the real driver with injectors at each boundary. `Match` (for example `Inserts("table")`) restricts `Statement` to the statements it accepts |
+| `OpenDB(kind, dsn, &DBFaults{Connect, Begin, Statement, Match, Commit, Rollback})` | A `*database.DB` over the real driver with injectors at each boundary. `Match` (for example `Inserts("table")`) restricts `Statement` to the statements it accepts. `Connect`, `Begin`, and `Statement` are hit with the caller's context. `database/sql` gives a transaction's `Commit` and `Rollback` no context, so those two are hit with `context.Background()`, and canceling the caller does not release a hold on them |
 | `ForEachDB(t, dbs, fn)`, `SQLiteDB()` | Run on SQLite, plus PostgreSQL and MySQL under the `integration` tag |
 | `Idle(t, db)` | Fail unless every pooled connection is back, so no transaction was left open |
 | `NewHTTPDependency(t, steps...)` | A loopback server answering each call with the next step: `Respond(status, body)`, `ServerError()`, `TooManyRequests(retryAfter)`, `Hang(release)`, `CutBody(partial)`, `ResetConnection()`. It has `Calls`, `Reached`, `InFlight`, `Abandoned`, `WaitIdle` |
@@ -508,9 +556,17 @@ func init() {
 ```
 
 Every random choice comes from `env.Rand`. Record what was drawn with
-`env.Drew`, and report a violated invariant with `env.Mismatch`, which puts
-the expected and observed values in the failure report. Skip (`t.Skip`) when
-a dependency the scenario needs is not configured.
+`env.Drew`. Report a violated invariant with `env.Mismatch`, which puts the
+expected and observed values in the failure report. Stop with
+`env.Fatalf`, not `t.Fatalf`, so the report says why.
+
+A scenario that needs Postgres calls `env.RequirePostgres(t)`: it skips in
+a full run without a DSN, and fails when the run selected the scenario, so a
+replay never passes by skipping. A database scenario picks its database with
+`pickDB`, which makes its draw whether or not Postgres is configured, so the
+draws after it do not shift. `TestScenarioReplays` runs every registered
+scenario twice under one seed, so a new scenario is checked for replay
+automatically.
 
 ### Retry policies
 
@@ -545,8 +601,10 @@ every violated property:
 - a success that does not end it;
 - a final error that hides the last attempt's error.
 
-Use `RealSleeper` in production: it fails the wait at once on a context that
-has already ended, however short the delay.
+A production sleeper must fail the wait at once on a context that has
+already ended, however short the delay, as `faulttest.RealSleeper` does.
+(Production code cannot import `internal/faulttest`: copy the pattern of
+checking `ctx.Err()` before arming the timer.)
 
 ## Worked examples
 
@@ -630,7 +688,7 @@ func failureBoundary(t *testing.T, env Environment) {
 	}
 	env.Drew(t, "%s, %d inserts, fault at %s", kind, n, boundary)
 
-	app, _ := newApp(t, kind, dsn, faults)
+	app, _ := newApp(t, env, kind, dsn, faults)
 	// ... run the n inserts in one App.Tx, count what persisted ...
 
 	if boundary != "none" && (!errors.Is(err, faulttest.ErrInjected) || got != 0) {
@@ -641,8 +699,7 @@ func failureBoundary(t *testing.T, env Environment) {
 ```
 
 With `App.Tx` changed to ignore its commit error, this scenario produced the
-report shown under [Reproducing a chaos failure](#reproducing-a-chaos-failure),
-and its replay line failed the same way every time.
+report shown under [Reproducing a chaos failure](#reproducing-a-chaos-failure).
 
 ## Rules for contributors
 

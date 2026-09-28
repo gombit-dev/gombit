@@ -160,7 +160,7 @@ FAULT_REDIS_ADDR=127.0.0.1:6379 \
   make test-faults  # plus the real databases and Redis, as CI's fault-tests job does
 
 make test-chaos     # the stochastic suite: nightly/on demand only, never a PR check
-CHAOS_SEED=<seed> CHAOS_SCENARIO=<name> CHAOS_ITERATION=<i> make test-chaos  # replay a failure
+CHAOS_POSTGRES=0 CHAOS_SEED=<seed> CHAOS_SCENARIO=<name> CHAOS_ITERATION=<i> make test-chaos  # replay: paste the report's line
 ```
 
 The rules, in short:
