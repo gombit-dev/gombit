@@ -41,7 +41,7 @@ var faultDBs = []faulttest.TestDB{faulttest.SQLiteDB()}
 // newFaultApp is an App over a database wrapped with faults, with fresh
 // tables. Every injector in faults is disarmed while the tables are made
 // and armed for the test.
-func newFaultApp(t *testing.T, kind database.Driver, dsn string, faults *faulttest.DBFaults) *App {
+func newFaultApp(t *testing.T, kind database.Driver, dsn string, faults *faulttest.DBFaults, opts ...Option) *App {
 	t.Helper()
 	faults.Disarm()
 	db, err := faulttest.OpenDB(kind, dsn, faults)
@@ -64,7 +64,7 @@ func newFaultApp(t *testing.T, kind database.Driver, dsn string, faults *faultte
 		t.Fatal(err)
 	}
 	faults.Arm()
-	return newTestApp(t, WithDatabase(db))
+	return newTestApp(t, append([]Option{WithDatabase(db)}, opts...)...)
 }
 
 // writeFamily inserts a parent and its child in one App.Tx.

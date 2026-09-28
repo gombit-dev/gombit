@@ -70,18 +70,29 @@ func Block(release <-chan struct{}) Step {
 	return Step{release: release}
 }
 
+// BlockThenFail holds the call until release is closed, then fails it with
+// err: a call that stalls, and then its dependency gives up (the second
+// writer waits on the first's lock, which then rolls back). A context that
+// ends first fails the call with the context's error.
+func BlockThenFail(release <-chan struct{}, err error) Step {
+	if release == nil || err == nil {
+		panic("faulttest: BlockThenFail needs a channel and an error")
+	}
+	return Step{release: release, err: err}
+}
+
 // run applies the step to one call.
 func (s Step) run(ctx context.Context) error {
 	switch {
-	case s.err != nil:
-		return s.err
 	case s.release != nil:
 		select {
 		case <-s.release:
-			return nil
+			return s.err // nil for Block; the fault for BlockThenFail
 		case <-ctx.Done():
 			return ctx.Err()
 		}
+	case s.err != nil:
+		return s.err
 	case s.wait > 0:
 		timer := time.NewTimer(s.wait)
 		defer timer.Stop()
@@ -157,6 +168,10 @@ func BlockUntil(release <-chan struct{}) *Injector { return newInjector(Block(re
 // Sequence applies steps to the first calls, one each, and lets every call
 // after them through.
 func Sequence(steps ...Step) *Injector { return newInjector(Success(), steps...) }
+
+// SequenceThen applies steps to the first calls, one each, and rest to
+// every call after them (Sequence is SequenceThen(Success(), ...)).
+func SequenceThen(rest Step, steps ...Step) *Injector { return newInjector(rest, steps...) }
 
 // Hit counts a call and applies its step: nil to let it through, or the
 // error it fails with.

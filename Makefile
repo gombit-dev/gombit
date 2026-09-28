@@ -33,7 +33,7 @@ OUT_DIR ?= benchmarks/results/latest
 # applied verdict per app (via inspect-limits).
 INTENDED_LIMITS ?= intended (applied only under benchmark-crud-all): app $(APP_CPUS)cpu/$(APP_MEMORY); postgres $(POSTGRES_CPUS)cpu/$(POSTGRES_MEMORY)
 
-.PHONY: help test-faults benchmark benchmark-smoke benchmark-crud benchmark-crud-all benchmark-micro benchmark-micro-ablation benchmark-footprint benchmark-summary benchmark-metadata benchmark-report benchmark-report-check
+.PHONY: help test-faults test-chaos benchmark benchmark-smoke benchmark-crud benchmark-crud-all benchmark-micro benchmark-micro-ablation benchmark-footprint benchmark-summary benchmark-metadata benchmark-report benchmark-report-check
 
 ## help: list the benchmark targets (the default goal — a bare `make` prints
 ## this, never a multi-hour run). Full docs: benchmarks/README.md.
@@ -48,6 +48,14 @@ help:
 ## See scripts/test-faults.sh and CONTRIBUTING.md (Fault injection).
 test-faults:
 	@bash scripts/test-faults.sh
+
+## test-chaos: run the stochastic resilience suite (never PR CI). The seed
+## prints first; CHAOS_SEED=<n> replays a run, CHAOS_SCENARIO=<name> and
+## CHAOS_ITERATION=<i> pick one, CHAOS_ITERATIONS (default 20) sets how many,
+## CHAOS_POSTGRES_DSN adds the Postgres scenarios (CHAOS_POSTGRES=1 requires
+## it, =0 ignores it: printed replays pin one). See internal/chaos.
+test-chaos:
+	go test -tags chaos -race -count=1 -timeout 60m -v ./internal/chaos
 
 ## benchmark: run the whole suite end to end into OUT_DIR and regenerate the
 ## README ## Performance block + summary.md — the one-command dedicated-host

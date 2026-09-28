@@ -60,6 +60,12 @@ New here? [Install](installation.md), then work through the
 | [auth-cookie.md](auth-cookie.md) | Cookie/session auth, CSRF double-submit, threat model |
 | [admin.md](admin.md) | The admin registry, introspection API, SPA, and permissions |
 
+## Testing
+
+| Doc | What it covers |
+| --- | --- |
+| [testing/fault-injection.md](testing/fault-injection.md) | Fault injection and chaos testing: resilience invariants and their tests, guarantees vs application responsibilities, `make test-faults` / `make test-chaos`, reproducing from a seed |
+
 ## Project
 
 | Doc | What it covers |
