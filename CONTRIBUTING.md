@@ -217,23 +217,45 @@ between attempts through a `faulttest.Sleeper` (in production a
 `faulttest.RealSleeper`-like timer, in tests a `FakeSleeper` that records the
 delays and returns at once, or blocks until canceled), so its backoff is
 tested without sleeping. The checker drives the policy with scripted
-failures and reports each violated property: attempts past `MaxAttempts`, a
-cancellation mid-backoff that does not end it, a permanent error retried, a
-retryable one not retried, a backoff off its schedule or outside `[0,
-MaxDelay]` for any attempt (overflow), a success that does not end it, and a
-final error that hides the last attempt's error.
+failures and reports each violated property. `MaxAttempts` is the policy's
+budget, so an op that keeps failing retryably must run exactly that many
+times. The checker reports:
+
+- more attempts than `MaxAttempts`, or fewer (a retryable failure not
+  retried while budget remains);
+- a cancellation mid-backoff that does not end it;
+- a permanent error retried;
+- a backoff off its schedule, or outside `[0, MaxDelay]` for any attempt
+  (every attempt up to 128 is probed, which finds a doubling backoff's
+  overflow wherever it happens);
+- a success that does not end it;
+- a final error that hides the last attempt's error.
 
 `make test-chaos` is the other half: the stochastic suite in
 `internal/chaos` (behind the `chaos` build tag, never in PR CI). Each
 scenario draws its fault, boundary, and sizes from a random source derived
 from one seed, which every run prints first. A failure prints a `CHAOS
-FAILURE` block with the seed, scenario, iteration, expected and observed,
-and the replay command (`CHAOS_SEED=... CHAOS_SCENARIO=...
-CHAOS_ITERATION=... make test-chaos`). A failure that does not reproduce
-from its seed is a harness bug, not a flake: find the randomness a scenario
-drew from somewhere other than `env.Rand`. Add a scenario with
-`register(Scenario{Name, Component, Run})`; once a chaos failure is
-understood, pin it as a deterministic `TestFault_*` test.
+FAILURE` block with:
+
+- the seed, scenario, and iteration;
+- what the scenario drew;
+- expected and observed;
+- the replay command (`CHAOS_POSTGRES=0|1 CHAOS_SEED=... CHAOS_SCENARIO=...
+  CHAOS_ITERATION=... make test-chaos`).
+
+`CHAOS_POSTGRES=1` refuses to run without `CHAOS_POSTGRES_DSN`, so a replay
+cannot silently switch a Postgres failure to SQLite. A selected scenario
+that cannot run fails instead of skipping.
+
+A failure that does not reproduce from its seed is a harness bug, not a
+flake: find the randomness a scenario drew from somewhere other than
+`env.Rand`.
+
+To add a scenario, call `register(Scenario{Name, Component, Run})`. Record
+the scenario's draws with `env.Drew`, report violated invariants with
+`env.Mismatch`, and stop with `env.Fatalf` (not `t.Fatalf`), so the report
+carries every message. Once a chaos failure is understood, pin it as a
+deterministic `TestFault_*` test.
 
 The `Chaos` workflow runs the suite nightly against an ephemeral Postgres,
 and on demand (Actions → Chaos → Run workflow, with an optional seed,

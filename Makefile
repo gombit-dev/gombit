@@ -52,7 +52,8 @@ test-faults:
 ## test-chaos: run the stochastic resilience suite (never PR CI). The seed
 ## prints first; CHAOS_SEED=<n> replays a run, CHAOS_SCENARIO=<name> and
 ## CHAOS_ITERATION=<i> pick one, CHAOS_ITERATIONS (default 20) sets how many,
-## CHAOS_POSTGRES_DSN adds the Postgres scenarios. See internal/chaos.
+## CHAOS_POSTGRES_DSN adds the Postgres scenarios (CHAOS_POSTGRES=1 requires
+## it, =0 ignores it: printed replays pin one). See internal/chaos.
 test-chaos:
 	go test -tags chaos -race -count=1 -timeout 60m -v ./internal/chaos
 

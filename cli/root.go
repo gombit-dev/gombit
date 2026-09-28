@@ -65,6 +65,8 @@ func NewRoot(stdout io.Writer, stderr io.Writer) *Command {
 	root.SetVersionTemplate("gombit {{.Version}}\n")
 	root.AddCommand(newNewCommand(stdout, stderr))
 	root.AddCommand(newDevCommand(stdout, stderr))
+	root.AddCommand(newWorkerCommand(stdout, stderr))
+	root.AddCommand(newJobsCommand(stdout, stderr))
 	root.AddCommand(newBuildCommand(stdout, stderr))
 	root.AddCommand(newMakeCommand(stdout, stderr))
 	root.AddCommand(newGenerateCommand(stdout, stderr))
@@ -106,6 +108,8 @@ func rootLongHelp() string {
 		"Command families:",
 		"  new       Scaffold a new application",
 		"  dev       Run the API and Vite frontend together",
+		"  worker    Run the app's background-job worker",
+		"  jobs      Inspect, retry, and purge failed background jobs",
 		"  build     Production build (embed is opt-in via --embed)",
 		"  make      Generate application code (resource, command)",
 		"  generate  Regenerate model-first resource files (*.gen.go); --check for drift",

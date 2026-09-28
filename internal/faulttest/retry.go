@@ -21,8 +21,10 @@ type RealSleeper struct{}
 
 // Sleep implements Sleeper.
 func (RealSleeper) Sleep(ctx context.Context, d time.Duration) error {
-	if d <= 0 {
-		return ctx.Err()
+	// A context that has already ended fails the wait, whatever d is: in the
+	// select below an already-fired timer would win half the time.
+	if err := ctx.Err(); err != nil || d <= 0 {
+		return err
 	}
 	timer := time.NewTimer(d)
 	defer timer.Stop()
@@ -93,8 +95,10 @@ type RetryContract struct {
 	Do func(ctx context.Context, sleeper Sleeper, op func(context.Context) error) error
 	// Retryable is an error the policy retries; Permanent one it must not.
 	Retryable, Permanent error
-	// MaxAttempts is the most attempts the policy promises, the first
-	// included.
+	// MaxAttempts is the policy's attempt budget, the first attempt
+	// included: an op that keeps failing retryably runs exactly MaxAttempts
+	// times (never more, which is the bound; never fewer, since a retryable
+	// failure is retried while budget remains).
 	MaxAttempts int
 	// Delay is the policy's backoff: the wait after the attempt-th failure
 	// (1-based). Every delay it produces, for any attempt, must lie within
@@ -118,12 +122,14 @@ var retryGuard = 5 * time.Second
 // CheckRetryPolicy runs c.Do through the retry contract and reports every
 // violated property (by name) through t.Errorf:
 //
-//   - bounded: an op that always fails retryably is tried at most
+//   - bounded: an op that always fails retryably is tried no more than
 //     MaxAttempts times;
+//   - retryable: ...and no fewer (a retryable failure is retried while the
+//     budget lasts), and an op that fails once and then succeeds succeeds
+//     on the retry;
 //   - cancellation: a context canceled mid-backoff ends Do promptly with the
 //     context's error, and no further attempt runs;
 //   - permanent: a non-retryable error is not retried;
-//   - retryable: a retryable error is retried until the op succeeds;
 //   - backoff: the waits asked for follow Delay (exactly, when
 //     Deterministic) and every Delay, for any attempt, is within
 //     [0, MaxDelay];
@@ -184,18 +190,23 @@ func CheckRetryPolicy(t testing.TB, c RetryContract) {
 		}
 	}
 
-	// bounded + observable failure
+	// bounded, retryable (the budget is used), observable failure, and the
+	// waits asked for: each reported on its own, so one violation does not
+	// hide the others.
+	var waits []time.Duration
 	{
 		sleeper := &FakeSleeper{}
 		o := run(context.Background(), sleeper, c.Retryable)
+		waits = sleeper.Delays()
 		switch {
 		case !o.finished || o.runaway:
 			t.Errorf("bounded: an op that always fails retryably ran %d+ times and did not stop (MaxAttempts %d)", o.calls, c.MaxAttempts)
 		case o.calls > c.MaxAttempts:
 			t.Errorf("bounded: %d attempts, more than MaxAttempts %d", o.calls, c.MaxAttempts)
 		case o.calls < c.MaxAttempts:
-			t.Errorf("retryable: gave up after %d attempts, before MaxAttempts %d", o.calls, c.MaxAttempts)
-		default:
+			t.Errorf("retryable: gave up after %d attempts, before its budget of MaxAttempts %d", o.calls, c.MaxAttempts)
+		}
+		if o.finished && !o.runaway {
 			if !errors.Is(o.err, c.Retryable) {
 				t.Errorf("observable failure: final error %v does not wrap the last attempt's error %v", o.err, c.Retryable)
 			}
@@ -204,10 +215,9 @@ func CheckRetryPolicy(t testing.TB, c RetryContract) {
 					t.Errorf("observable failure: final error reports %d attempts (found %v), want %d", n, ok, o.calls)
 				}
 			}
-			if got := len(sleeper.Delays()); got != o.calls-1 {
+			if got := len(waits); got != o.calls-1 {
 				t.Errorf("backoff: %d waits between %d attempts, want %d", got, o.calls, o.calls-1)
 			}
-			checkDelays(t, c, sleeper.Delays())
 		}
 	}
 
@@ -270,45 +280,48 @@ func CheckRetryPolicy(t testing.TB, c RetryContract) {
 		}
 	}
 
-	// backoff bounds for every attempt the policy can make and around the
-	// overflow points of a doubling backoff (2^31, 2^63), jitter sampled;
-	// under the guard, so a slow Delay fails rather than hangs.
-	attempts := []int{31, 32, 62, 63, 64, 100, 1000}
-	for a := 1; a <= c.MaxAttempts; a++ {
+	// backoff: the waits asked for, then Delay itself for every attempt the
+	// policy can make and every attempt 1..128 and 1000. A doubling backoff
+	// (shift or multiply) of any base of 1ns or more crosses the int64 sign
+	// bit, or shifts off it to 0 and then goes on, before attempt 64, so
+	// sampling each attempt up to 128 finds the overflow wherever it is.
+	// Sampled 20 times each for jitter. It all runs under the guard, so a
+	// Delay that never returns fails the check rather than hanging it.
+	attempts := make([]int, 0, 129)
+	for a := 1; a <= max(c.MaxAttempts, 128); a++ {
 		attempts = append(attempts, a)
 	}
-	problem := make(chan string, 1)
+	attempts = append(attempts, 1000)
+	problems := make(chan []string, 1)
 	go func() {
-		for _, attempt := range attempts {
-			for i := 0; i < 20; i++ {
-				if d := c.Delay(attempt); d < 0 || d > c.MaxDelay {
-					problem <- fmt.Sprintf("backoff: Delay(%d) = %s, outside [0, %s] (overflow or unbounded jitter)", attempt, d, c.MaxDelay)
-					return
+		var found []string
+		for i, d := range waits {
+			if d < 0 || d > c.MaxDelay {
+				found = append(found, fmt.Sprintf("backoff: wait %d was %s, outside [0, %s]", i+1, d, c.MaxDelay))
+			}
+			if c.Deterministic {
+				if want := c.Delay(i + 1); d != want {
+					found = append(found, fmt.Sprintf("backoff: wait %d was %s, want Delay(%d) = %s", i+1, d, i+1, want))
 				}
 			}
 		}
-		problem <- ""
+	probe:
+		for _, attempt := range attempts {
+			for i := 0; i < 20; i++ {
+				if d := c.Delay(attempt); d < 0 || d > c.MaxDelay {
+					found = append(found, fmt.Sprintf("backoff: Delay(%d) = %s, outside [0, %s] (overflow or unbounded jitter)", attempt, d, c.MaxDelay))
+					break probe
+				}
+			}
+		}
+		problems <- found
 	}()
 	select {
-	case msg := <-problem:
-		if msg != "" {
+	case found := <-problems:
+		for _, msg := range found {
 			t.Errorf("%s", msg)
 		}
 	case <-time.After(retryGuard):
 		t.Errorf("backoff: Delay did not return within %s", retryGuard)
-	}
-}
-
-func checkDelays(t testing.TB, c RetryContract, delays []time.Duration) {
-	t.Helper()
-	for i, d := range delays {
-		if d < 0 || d > c.MaxDelay {
-			t.Errorf("backoff: wait %d was %s, outside [0, %s]", i+1, d, c.MaxDelay)
-		}
-		if c.Deterministic {
-			if want := c.Delay(i + 1); d != want {
-				t.Errorf("backoff: wait %d was %s, want Delay(%d) = %s", i+1, d, i+1, want)
-			}
-		}
 	}
 }

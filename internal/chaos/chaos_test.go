@@ -32,8 +32,13 @@ type Environment struct {
 	// Rand derives from (Seed, scenario name, Iteration): every choice a
 	// scenario makes comes from here.
 	Rand *mrand.Rand
-	// PostgresDSN is CHAOS_POSTGRES_DSN ("" skips the Postgres scenarios).
+	// PostgresDSN is CHAOS_POSTGRES_DSN ("" when Postgres is not configured,
+	// or CHAOS_POSTGRES=0 turned it off).
 	PostgresDSN string
+	// Selected says the run named this scenario (CHAOS_SCENARIO): a replay.
+	// A selected scenario that cannot run fails instead of skipping, since a
+	// skip would make the replay pass.
+	Selected bool
 
 	mismatches *[]string // for the failure report
 	drawn      *[]string // what the scenario drew, for the failure report
@@ -62,6 +67,31 @@ func (e Environment) Mismatch(t *testing.T, what, expected, observed string) {
 	t.Errorf("%s", msg)
 }
 
+// Fatalf stops the scenario, keeping the message for the failure report
+// (t.Fatalf alone would leave the report without it).
+func (e Environment) Fatalf(t *testing.T, format string, args ...any) {
+	t.Helper()
+	msg := fmt.Sprintf(format, args...)
+	if e.mismatches != nil {
+		*e.mismatches = append(*e.mismatches, "stopped: "+msg)
+	}
+	t.Fatalf("%s", msg)
+}
+
+// RequirePostgres skips the scenario when Postgres is not configured, or,
+// when the scenario was selected (a replay), fails it: a replay that skips
+// would pass without reproducing anything.
+func (e Environment) RequirePostgres(t *testing.T) {
+	t.Helper()
+	if e.PostgresDSN != "" {
+		return
+	}
+	if e.Selected {
+		e.Fatalf(t, "this scenario needs Postgres: set CHAOS_POSTGRES_DSN to replay it (a skip would pass without reproducing anything)")
+	}
+	t.Skip("set CHAOS_POSTGRES_DSN for the Postgres scenarios")
+}
+
 // scenarios are registered by the scenario files' init functions.
 var scenarios []Scenario
 
@@ -77,9 +107,38 @@ func TestMain(m *testing.M) {
 		os.Exit(2)
 	}
 	seed = s
+	dsn, err := postgresDSN(os.Getenv("CHAOS_POSTGRES"), os.Getenv("CHAOS_POSTGRES_DSN"))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	postgres = dsn
 	// First line of every run: the seed that reproduces it.
 	fmt.Printf("CHAOS_SEED=%d\n", seed)
 	os.Exit(m.Run())
+}
+
+// postgres is the run's Postgres DSN, "" when it has none.
+var postgres string
+
+// postgresDSN applies CHAOS_POSTGRES to CHAOS_POSTGRES_DSN. Whether Postgres
+// is configured changes what a database scenario runs on, so every replay
+// command pins it: CHAOS_POSTGRES=1 requires the DSN (a replay without it
+// would silently run on SQLite), CHAOS_POSTGRES=0 ignores it, and unset
+// takes whatever the DSN says.
+func postgresDSN(mode, dsn string) (string, error) {
+	switch mode {
+	case "":
+		return dsn, nil
+	case "0":
+		return "", nil
+	case "1":
+		if dsn == "" {
+			return "", fmt.Errorf("chaos: CHAOS_POSTGRES=1: this run needs Postgres, set CHAOS_POSTGRES_DSN (the failure being replayed ran with it)")
+		}
+		return dsn, nil
+	}
+	return "", fmt.Errorf("chaos: CHAOS_POSTGRES must be 0 or 1, got %q", mode)
 }
 
 // chooseSeed parses CHAOS_SEED, or draws a fresh one.
@@ -134,7 +193,8 @@ func TestChaos(t *testing.T) {
 		}
 	}
 	selected := scenarios
-	if name := os.Getenv("CHAOS_SCENARIO"); name != "" {
+	name := os.Getenv("CHAOS_SCENARIO")
+	if name != "" {
 		selected = nil
 		for _, s := range scenarios {
 			if s.Name == name {
@@ -149,7 +209,7 @@ func TestChaos(t *testing.T) {
 			t.Fatalf("chaos: no scenario %q; scenarios: %s", name, strings.Join(names, ", "))
 		}
 	}
-	env := Environment{Seed: seed, PostgresDSN: os.Getenv("CHAOS_POSTGRES_DSN")}
+	env := Environment{Seed: seed, PostgresDSN: postgres, Selected: name != ""}
 	t.Logf("seed %d, %d iteration(s), %d scenario(s)", seed, iterations, len(selected))
 
 	for it := 0; it < iterations; it++ {
@@ -191,7 +251,14 @@ func report(t *testing.T, s Scenario, iteration int, drawn, mismatches []string)
 		observed.WriteString("\n" + m + "\n")
 	}
 	if len(mismatches) == 0 {
-		observed.WriteString("\n(the scenario stopped early; its messages are in the test output)\n")
+		observed.WriteString("\n(no message was recorded: the scenario failed through t directly; see the test output)\n")
+	}
+	// The replay pins whether Postgres was configured (never the DSN
+	// itself): with it, a database scenario may have drawn Postgres, and a
+	// replay without it would run SQLite and pass.
+	pg, pgNote := "0", "postgres: not configured"
+	if postgres != "" {
+		pg, pgNote = "1", "postgres: configured (export CHAOS_POSTGRES_DSN before replaying; CHAOS_POSTGRES=1 refuses to run without it)"
 	}
 	block := fmt.Sprintf(`CHAOS FAILURE
 
@@ -202,9 +269,10 @@ iteration: %d
 package: github.com/gombit-dev/gombit/internal/chaos
 test: %s
 %s
+%s
 replay:
-  CHAOS_SEED=%d CHAOS_SCENARIO=%s CHAOS_ITERATION=%d make test-chaos
-`, s.Name, s.Component, seed, iteration, t.Name(), observed.String(), seed, s.Name, iteration)
+  CHAOS_POSTGRES=%s CHAOS_SEED=%d CHAOS_SCENARIO=%s CHAOS_ITERATION=%d make test-chaos
+`, s.Name, s.Component, seed, iteration, t.Name(), pgNote, observed.String(), pg, seed, s.Name, iteration)
 	t.Log("\n" + block)
 	dir := os.Getenv("CHAOS_REPORT_DIR")
 	if dir == "" {
