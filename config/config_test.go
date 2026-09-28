@@ -107,6 +107,9 @@ func TestLoadFromEnv(t *testing.T) {
 		envAuthMode:                " Cookie ",
 		envCookieSecure:            " false ",
 		envCookieSameSite:          " Strict ",
+		envJobsDriver:              " redis ",
+		envJobsQueue:               " mail ",
+		envJobsNamespace:           " example-jobs ",
 	}
 
 	got, err := LoadFromEnv(mapLookup(env))
@@ -148,6 +151,11 @@ func TestLoadFromEnv(t *testing.T) {
 				TLS:          true,
 				TLSInsecure:  true,
 			},
+		},
+		Jobs: JobsConfig{
+			Driver:    JobsDriverRedis,
+			Queue:     "mail",
+			Namespace: "example-jobs",
 		},
 		Logging: LoggingConfig{
 			Level: LogLevelDebug,
@@ -315,6 +323,11 @@ func TestLoadUsesProcessEnvironment(t *testing.T) {
 			Namespace: "process-example:production",
 			Redis:     Default().Cache.Redis,
 		},
+		Jobs: JobsConfig{
+			Driver:    JobsDriverSync,
+			Queue:     DefaultJobsQueue,
+			Namespace: "process-example:production",
+		},
 		Logging: LoggingConfig{
 			Level: LogLevelError,
 			Sink:  LogSinkMongo,
@@ -372,6 +385,10 @@ func TestValidateReportsExplicitFieldErrors(t *testing.T) {
 				ReadTimeout:  0,
 				WriteTimeout: 0,
 			},
+		},
+		Jobs: JobsConfig{
+			Driver: "kafka",
+			Queue:  "Mail Queue",
 		},
 		Logging: LoggingConfig{
 			Level: "trace",
@@ -462,6 +479,14 @@ func TestValidateReportsExplicitFieldErrors(t *testing.T) {
 			Value:   "0s",
 			Message: "must be greater than zero",
 		},
+		{Field: "Jobs.Driver", Env: envJobsDriver, Value: "kafka", Message: "must be one of sync, memory, redis"},
+		{
+			Field:   "Jobs.Queue",
+			Env:     envJobsQueue,
+			Value:   "Mail Queue",
+			Message: "must be 1-128 characters of a-z, 0-9, _ . : -, starting with a letter or digit",
+		},
+		{Field: "Jobs.Namespace", Env: envJobsNamespace, Value: "", Message: "must not be empty"},
 		{
 			Field:   "Logging.Level",
 			Env:     envLogLevel,
@@ -929,5 +954,52 @@ func mapLookup(values map[string]string) EnvLookup {
 	return func(key string) (string, bool) {
 		value, ok := values[key]
 		return value, ok
+	}
+}
+
+// TestJobsRedisValidatesTheSharedConnection: the redis jobs driver uses the
+// cache's Redis settings, so they are checked even when the cache does not
+// use Redis, and reported once when both do.
+func TestJobsRedisValidatesTheSharedConnection(t *testing.T) {
+	cfg := Default()
+	cfg.Cache.Redis.Addr = ""
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() with sync jobs and memory cache = %v, want nil (Redis unused)", err)
+	}
+
+	cfg.Jobs.Driver = JobsDriverRedis
+	var fieldErrors FieldErrors
+	if err := cfg.Validate(); !errors.As(err, &fieldErrors) || len(fieldErrors) != 1 || fieldErrors[0].Field != "Cache.Redis.Addr" {
+		t.Fatalf("Validate() with redis jobs = %v, want the shared Redis address", err)
+	}
+
+	cfg.Cache.Driver = CacheDriverRedis
+	fieldErrors = nil
+	if err := cfg.Validate(); !errors.As(err, &fieldErrors) || len(fieldErrors) != 1 {
+		t.Fatalf("Validate() with redis cache and jobs = %v, want the address reported once", err)
+	}
+
+	// An unknown cache driver validates the Redis settings itself; jobs must
+	// not report them a second time.
+	cfg.Cache.Driver = "disk"
+	fieldErrors = nil
+	if err := cfg.Validate(); !errors.As(err, &fieldErrors) {
+		t.Fatalf("Validate() = %v", err)
+	}
+	addrErrors := 0
+	for _, fe := range fieldErrors {
+		if fe.Field == "Cache.Redis.Addr" {
+			addrErrors++
+		}
+	}
+	if addrErrors != 1 {
+		t.Fatalf("Cache.Redis.Addr reported %d times with an unknown cache driver, want once: %v", addrErrors, fieldErrors)
+	}
+
+	if err := ValidateJobs(JobsConfig{Driver: JobsDriverMemory, Queue: "default", Namespace: "app"}); err != nil {
+		t.Fatalf("ValidateJobs(valid) = %v", err)
+	}
+	if err := ValidateJobs(JobsConfig{Driver: JobsDriverMemory, Queue: "_bad", Namespace: "app"}); err == nil {
+		t.Fatal("ValidateJobs accepted a queue name starting with a separator")
 	}
 }

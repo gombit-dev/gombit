@@ -145,6 +145,22 @@ func windowsTaskkillArgs(pid int, force bool) []string {
 }
 
 func runOne(ctx context.Context, spec ProcSpec, stdout, stderr io.Writer, command CommandFunc) error {
+	return runProcess(ctx, spec, stdout, stderr, command, 2*time.Second, false)
+}
+
+// RunProcess runs spec in its own process group until it exits or ctx is
+// canceled. On cancel it sends the group SIGTERM (a graceful stop) and kills
+// it if it has not exited after killAfter. `gombit worker` uses it with the
+// worker's shutdown budget, so in-flight jobs can finish.
+//
+// A stop it asked for returns ctx.Err() only when the process then exited
+// cleanly; a process that failed its shutdown (a non-zero status) or had to
+// be killed returns that failure.
+func RunProcess(ctx context.Context, spec ProcSpec, stdout, stderr io.Writer, killAfter time.Duration) error {
+	return runProcess(ctx, spec, stdout, stderr, exec.Command, killAfter, true)
+}
+
+func runProcess(ctx context.Context, spec ProcSpec, stdout, stderr io.Writer, command CommandFunc, killAfter time.Duration, reportStop bool) error {
 	if command == nil {
 		command = exec.Command
 	}
@@ -175,14 +191,19 @@ func runOne(ctx context.Context, spec ProcSpec, stdout, stderr io.Writer, comman
 		return err
 	case <-ctx.Done():
 		_ = signalProcessGroup(cmd)
+		var exitErr error
 		select {
-		case <-done:
-		case <-time.After(2 * time.Second):
+		case exitErr = <-done:
+		case <-time.After(killAfter):
 			_ = killProcessGroup(cmd)
+			exitErr = fmt.Errorf("dev: %s did not stop within %s and was killed", spec.Name, killAfter)
 			select {
 			case <-done:
 			case <-time.After(2 * time.Second):
 			}
+		}
+		if reportStop && exitErr != nil {
+			return fmt.Errorf("dev: %s stopped with an error: %w", spec.Name, exitErr)
 		}
 		return ctx.Err()
 	}
