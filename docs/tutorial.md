@@ -683,10 +683,10 @@ You've used the core subsystems. The reference docs go deeper:
 | Single-binary builds | [build.md](build.md) |
 | Everything | [docs index](README.md) |
 
-Architecture rationale lives in the [ADRs](adr/). Scope and roadmap live in
-[GOMBIT_BUILD_PLAN.md](GOMBIT_BUILD_PLAN.md) — including the post-v0.1
-batteries (events, scheduler, mail, storage, gRPC, multi-tenancy, i18n) that
-are deliberately **not** here yet.
+Architecture rationale lives in the [ADRs](adr/), and current work is tracked
+in [GitHub issues](https://github.com/gombit-dev/gombit/issues). The README's
+[roadmap](../README.md#roadmap) lists the batteries (events, scheduler, mail,
+storage, gRPC, multi-tenancy, i18n) that are deliberately **not** here yet.
 
 Something wrong or unclear in this tutorial? That's a docs bug —
 [open an issue](https://github.com/gombit-dev/gombit/issues/new/choose).

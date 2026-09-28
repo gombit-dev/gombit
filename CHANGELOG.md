@@ -10,6 +10,24 @@ version.
 
 ## [Unreleased]
 
+### Changed
+
+- A new app's `.env.example` lists every `GOMBIT_*` variable the config
+  package reads, including `GOMBIT_JOBS_DRIVER`, `GOMBIT_JOBS_QUEUE`,
+  `GOMBIT_JOBS_NAMESPACE`, `GOMBIT_HTTP_TRUSTED_PROXIES`, and the database
+  pool settings, commented out with their defaults
+  ([#447](https://github.com/gombit-dev/gombit/pull/447)).
+
+### Fixed
+
+- `gombit make command` refuses the names `generate` and `contract`, which
+  collided with framework commands; every command the root registers is now
+  reserved ([#447](https://github.com/gombit-dev/gombit/pull/447)).
+- `gombit --help` lists every command family and `db` subcommand,
+  `gombit make resource --help` describes the model-first layout and every
+  field kind, and `gombit worker --help` shows `--metrics-addr`
+  ([#447](https://github.com/gombit-dev/gombit/pull/447)).
+
 ## [0.6.0] — 2026-09-28
 
 ### Added
