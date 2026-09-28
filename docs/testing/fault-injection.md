@@ -614,11 +614,12 @@ every violated property:
 - a permanent error retried;
 - a wait off its schedule;
 - a `Delay` outside `[0, MaxDelay]` at any **sampled** attempt. The sample is
-  every attempt up to `max(MaxAttempts, 128)` and 1000 (20 draws each, for
-  jitter), plus 2^22. That catches a shift or doubling that overflows (any
-  base of 1ns or more wraps before attempt 64), and an attempt multiplied by
-  a unit of about 36 minutes or more. It is a sample, not a proof, so cap a
-  delay before the arithmetic can overflow;
+  every attempt up to `max(MaxAttempts, 128)`, and 1000, with 20 calls each
+  for jitter. That catches a shift or doubling that overflows, since any base
+  of 1ns or more wraps by attempt 64. It does **not** catch an attempt
+  multiplied by a unit, which wraps at an attempt that depends on the unit,
+  usually far past 1000. Compute a delay so it cannot overflow: cap before
+  the arithmetic, not after;
 - a success that does not end it;
 - a final error that hides the last attempt's error.
 
