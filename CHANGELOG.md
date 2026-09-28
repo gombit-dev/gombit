@@ -12,6 +12,41 @@ version.
 
 ### Added
 
+- Network fault tests (`TestFault_Network_*`) through an in-process TCP
+  proxy (`faulttest.NewTCPProxy`) in front of a real Postgres and Redis: a
+  refused, stalled, cut, or reset connection ends the call at its deadline
+  or promptly, a transaction whose connection drops before COMMIT persists
+  nothing, a caller waiting on an exhausted pool honors its deadline,
+  `/readyz` reports 503 `not_ready` during the outage (no DSN) and 200 after,
+  and every scenario recovers without a restart. `make test-faults` takes
+  `FAULT_REDIS_ADDR`
+  ([#385](https://github.com/gombit-dev/gombit/issues/385)).
+- `make test-faults` runs the deterministic fault-injection suite (every
+  `TestFault_*` test and the `faulttest` harness, race detector on;
+  `FAULT_POSTGRES_DSN`/`FAULT_MYSQL_DSN` add databases, `FAULT_COUNT`
+  repeats, `FAULT_SHARD=i/n` runs a slice, `FAULT_BUDGET_SECONDS` fails a
+  run that takes longer). CI runs it against SQLite, Postgres, and MySQL as
+  six shards, each compiled first and then run within a 120s budget, behind
+  one `Fault injection` check; the `Fault soak` workflow runs it 100x weekly
+  or on demand ([#384](https://github.com/gombit-dev/gombit/issues/384)).
+- HTTP fault tests (`TestFault_HTTP_*`): `gombit openapi generate` fails
+  promptly on a 500, a 429, a hung or reset dependency, a cut body, or a
+  malformed document, closing every response body and writing nothing; the
+  dev server's spec fetch returns an error, promptly and with the body
+  closed, on the same transport and status failures; a handler behind
+  `HTTP.RequestTimeout` ends at the deadline and its outbound call is
+  abandoned downstream. Contributors
+  get `faulttest.NewHTTPDependency` (a scripted loopback dependency) and
+  `faulttest.TrackBodies`
+  ([#383](https://github.com/gombit-dev/gombit/issues/383)).
+- Fault tests for Gombit's transactional writes (`TestFault_Database_*`):
+  `App.Tx`, refresh-token rotation, and admin many-to-many writes leave no
+  partial state when a statement, the commit, or the context fails mid-way,
+  a serialization failure surfaces unretried and classifiable, and a panic
+  still rolls back, on SQLite, PostgreSQL, and MySQL. `faulttest` gains
+  `Disarm`/`Arm` for setup, a shared database matrix (`ForEachDB`), and
+  `Idle`, which catches a transaction left open
+  ([#382](https://github.com/gombit-dev/gombit/issues/382)).
 - `database.OpenConn(driver, *sql.DB)` opens a GORM database over a
   `database/sql` handle the caller built (a wrapped driver), with the same
   setup as `database.Open`. Contributors get `internal/faulttest`:
@@ -104,6 +139,14 @@ version.
   the `gombit db makemigrations` command that writes the refused migration,
   including the new model and every `--allow`
   ([#309](https://github.com/gombit-dev/gombit/issues/309)).
+
+### Fixed
+
+- The Redis cache client (`cache.NewRedisClient`, `cache.Open`) now honors
+  the caller's context deadline (`ContextTimeoutEnabled`): a Redis that
+  stopped answering held a request past its deadline until go-redis's own
+  read timeout and retries ran out (found by
+  `TestFault_Network_RedisLatency`).
 
 ## [0.3.0] — 2026-09-26
 

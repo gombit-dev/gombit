@@ -13,6 +13,9 @@
 // transactions. Nothing here is global and nothing changes production code
 // paths: a test opts in by building the wrapped dependency itself.
 //
+// A test that sets up over the same wrapped dependency (migrations,
+// fixtures) disarms the injector first and arms it for the calls under test.
+//
 // Delays and blocks wait on timers, channels, and the call's context, never
 // on sleeps the test has to guess at: a test that needs a call to be in
 // flight waits on Reached(n), and releases it by closing the channel it
@@ -158,13 +161,19 @@ func Sequence(steps ...Step) *Injector { return newInjector(Success(), steps...)
 // Hit counts a call and applies its step: nil to let it through, or the
 // error it fails with.
 func (i *Injector) Hit(ctx context.Context) error {
+	_, err := i.hit(ctx)
+	return err
+}
+
+// hit is Hit, also returning the call's number (0 when uncounted).
+func (i *Injector) hit(ctx context.Context) (int, error) {
 	if i == nil {
-		return nil
+		return 0, nil
 	}
 	i.mu.Lock()
 	if i.disarmed {
 		i.mu.Unlock()
-		return nil
+		return 0, nil
 	}
 	i.calls++
 	n, gen := i.calls, i.gen
@@ -186,7 +195,7 @@ func (i *Injector) Hit(ctx context.Context) error {
 		}
 		i.mu.Unlock()
 	}
-	return err
+	return n, err
 }
 
 // Do runs fn unless the call fails: Hit, then fn.
@@ -259,6 +268,31 @@ func (i *Injector) suspend() (restore func()) {
 		i.calls, i.failures = 0, 0
 		i.gen++
 	}
+}
+
+// Disarm lets every call through without counting it, until Arm: a test
+// disarms an injector while it sets up (migrations, fixtures, a login) over
+// the same wrapped dependency, so only the calls under test are numbered.
+func (i *Injector) Disarm() *Injector {
+	if i == nil {
+		return nil
+	}
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.disarmed = true
+	return i
+}
+
+// Arm ends Disarm and starts over (Reset): the next call is call 1.
+func (i *Injector) Arm() {
+	if i == nil {
+		return
+	}
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.disarmed = false
+	i.calls, i.failures = 0, 0
+	i.gen++
 }
 
 // Reset starts the injector over: counts go to zero and the next call is

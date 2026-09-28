@@ -7,7 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
+	"testing"
+	"time"
 
 	"github.com/gombit-dev/gombit/config"
 	"github.com/gombit-dev/gombit/database"
@@ -42,6 +47,33 @@ type DBFaults struct {
 	// too (after either fault), the error also carries it and
 	// driver.ErrBadConn, so the pool discards the connection.
 	Rollback *Injector
+}
+
+// Injectors are the boundary injectors, nil ones included.
+func (f *DBFaults) Injectors() []*Injector {
+	return []*Injector{f.Connect, f.Begin, f.Statement, f.Commit, f.Rollback}
+}
+
+// Disarm disarms every injector (for setup over the wrapped database).
+func (f *DBFaults) Disarm() {
+	for _, inj := range f.Injectors() {
+		inj.Disarm()
+	}
+}
+
+// Arm arms every injector: the next call at each boundary is its call 1.
+func (f *DBFaults) Arm() {
+	for _, inj := range f.Injectors() {
+		inj.Arm()
+	}
+}
+
+// Inserts matches INSERT statements into table, however the dialect quotes
+// it (a DBFaults.Match).
+func Inserts(table string) func(query string) bool {
+	return func(query string) bool {
+		return strings.HasPrefix(strings.TrimSpace(strings.ToUpper(query)), "INSERT") && strings.Contains(query, table)
+	}
 }
 
 func (f *DBFaults) statement(ctx context.Context, query string) error {
@@ -115,6 +147,63 @@ func OpenDB(kind database.Driver, dsn string, faults *DBFaults) (*database.DB, e
 	conn.SetMaxIdleConns(0)
 	database.ConfigurePool(conn, cfg)
 	return db, nil
+}
+
+// TestDB is a database a fault test runs against: SQLite always, PostgreSQL
+// and MySQL when a package's integration flags name one.
+type TestDB struct {
+	Name string
+	Kind database.Driver
+	// DSN returns the database to use; "" skips it.
+	DSN func(t *testing.T) string
+}
+
+// SQLiteDB is a fresh SQLite file per test.
+func SQLiteDB() TestDB {
+	return TestDB{Name: "sqlite", Kind: database.DriverSQLite, DSN: func(t *testing.T) string {
+		return "file:" + filepath.Join(t.TempDir(), "faults.db") + "?_fk=1"
+	}}
+}
+
+// ForEachDB runs fn as a subtest per database, skipping those without a
+// DSN.
+func ForEachDB(t *testing.T, dbs []TestDB, fn func(t *testing.T, kind database.Driver, dsn string)) {
+	t.Helper()
+	for _, db := range dbs {
+		t.Run(db.Name, func(t *testing.T) {
+			dsn := db.DSN(t)
+			if dsn == "" {
+				t.Skipf("no %s database configured", db.Name)
+			}
+			fn(t, db.Kind, dsn)
+		})
+	}
+}
+
+// idleTimeout bounds Idle's wait.
+var idleTimeout = 5 * time.Second
+
+// Idle waits until no connection of db is in use, and fails t if one stays
+// in use: a transaction a failure left open (never committed or rolled
+// back) holds its connection, and row counts on another connection cannot
+// see it. database/sql releases a context-canceled transaction's connection
+// on its own goroutine, so this waits (up to 5s) rather than sampling once.
+func Idle(t testing.TB, db *database.DB) {
+	t.Helper()
+	sqlDB, err := db.SQLDB()
+	if err != nil {
+		t.Fatal(err)
+		return
+	}
+	deadline := time.Now().Add(idleTimeout)
+	for sqlDB.Stats().InUse > 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d connection(s) still in use: a transaction was left open", sqlDB.Stats().InUse)
+			return
+		}
+		runtime.Gosched()
+		time.Sleep(time.Millisecond)
+	}
 }
 
 // dsnConnector adapts a driver without DriverContext.

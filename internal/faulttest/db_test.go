@@ -582,3 +582,35 @@ func TestAStatementDoesNotShadowTheConnectionsChecker(t *testing.T) {
 		t.Fatalf("executed %d statements, want 1", execs.Load())
 	}
 }
+
+// TestIdleCatchesAnOpenTransaction: a transaction nobody finished holds its
+// connection, and Idle says so.
+func TestIdleCatchesAnOpenTransaction(t *testing.T) {
+	defer faulttest.SetIdleTimeout(20 * time.Millisecond)()
+	db, err := faulttest.OpenDB(database.DriverSQLite, filepath.Join(t.TempDir(), "idle.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	faulttest.Idle(t, db) // nothing open
+
+	tx := db.Begin()
+	ft := &fakeT{}
+	faulttest.Idle(ft, db)
+	if !strings.Contains(ft.failed, "left open") {
+		t.Fatalf("Idle with an open transaction: %q, want a failure", ft.failed)
+	}
+	tx.Rollback()
+	faulttest.Idle(t, db)
+}
+
+// fakeT records a Fatalf instead of ending the test.
+type fakeT struct {
+	testing.TB
+	failed string
+}
+
+func (f *fakeT) Helper() {}
+func (f *fakeT) Fatalf(format string, args ...any) {
+	f.failed = fmt.Sprintf(format, args...)
+}

@@ -73,13 +73,16 @@ func generateClient(ctx context.Context, opts Options, spec []byte) error {
 	})
 }
 
+// specHTTPClient fetches the dev server's /openapi.json. The 2s timeout
+// bounds a hung server; tests swap the transport.
+var specHTTPClient = &http.Client{Timeout: 2 * time.Second}
+
 func defaultHTTPGet(ctx context.Context, rawURL string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, err
 	}
-	httpClient := &http.Client{Timeout: 2 * time.Second}
-	resp, err := httpClient.Do(req) //nolint:gosec // URL is the local Go server's /openapi.json
+	resp, err := specHTTPClient.Do(req) //nolint:gosec // URL is the local Go server's /openapi.json
 	if err != nil {
 		return nil, err
 	}
