@@ -289,7 +289,9 @@ func cancellationStress(t *testing.T, env Environment) {
 	case <-time.After(10 * time.Second):
 		env.Mismatch(t, fmt.Sprintf("%s: a transaction canceled during %s", kind, at),
 			"it returns once canceled", "still running 10s after the cancel: the cancellation never reached it")
-		close(release)
+		if onInsert {
+			close(release) // let the held insert go, so the transaction can end (COMMIT's was released above)
+		}
 		select {
 		case <-result:
 		case <-time.After(10 * time.Second):
@@ -338,13 +340,21 @@ func postgresInterruption(t *testing.T, env Environment) {
 	ctx, cancel := context.WithTimeout(context.Background(), deadline)
 	defer cancel()
 	fault := [...]string{"stall", "cut", "reset", "restart"}[env.Rand.IntN(4)]
-	env.Drew(t, "postgres via proxy, fault %s, deadline %s", fault, deadline)
+	// A dropped connection must end the query by itself: with a deadline,
+	// a drop that did nothing would still end at the deadline and pass.
+	queryCtx, bound := ctx, deadline+5*time.Second
+	if fault == "cut" || fault == "reset" {
+		queryCtx, bound = context.Background(), 5*time.Second
+		env.Drew(t, "postgres via proxy, fault %s, no deadline (the drop must end the query)", fault)
+	} else {
+		env.Drew(t, "postgres via proxy, fault %s, deadline %s", fault, deadline)
+	}
 	// The query runs on its own goroutine for every fault, so a call that
 	// ignores its deadline fails the scenario here instead of hanging the
 	// suite until the package timeout.
 	start := time.Now()
 	done := make(chan error, 1)
-	query := func() { go func() { done <- ping(ctx) }() }
+	query := func() { go func() { done <- ping(queryCtx) }() }
 	switch fault {
 	case "stall":
 		proxy.Hold()
@@ -372,9 +382,9 @@ func postgresInterruption(t *testing.T, env Environment) {
 	}
 	select {
 	case err = <-done:
-	case <-time.After(deadline + 5*time.Second):
+	case <-time.After(bound):
 		env.Mismatch(t, fmt.Sprintf("a query against a Postgres that %s", fault),
-			fmt.Sprintf("an error within the %s deadline", deadline), fmt.Sprintf("still running after %s", time.Since(start)))
+			fmt.Sprintf("an error within %s", bound), fmt.Sprintf("still running after %s", time.Since(start)))
 		_ = proxy.Heal() // let the stuck query finish before the scenario's cleanup closes the pool
 		select {
 		case <-done:
@@ -382,9 +392,23 @@ func postgresInterruption(t *testing.T, env Environment) {
 		}
 		return
 	}
-	if took := time.Since(start); err == nil || took > deadline+time.Second {
-		env.Mismatch(t, fmt.Sprintf("a query against a Postgres that %s", fault),
-			fmt.Sprintf("an error within the %s deadline", deadline), fmt.Sprintf("%v after %s", err, took))
+	took := time.Since(start)
+	switch fault {
+	case "stall": // only the deadline can end it
+		if !errors.Is(err, context.DeadlineExceeded) || took > deadline+time.Second {
+			env.Mismatch(t, "a query against a Postgres that stalls",
+				fmt.Sprintf("context.DeadlineExceeded at the %s deadline", deadline), fmt.Sprintf("%v after %s", err, took))
+		}
+	case "restart": // refused: fails at once, well within the deadline
+		if err == nil || took > deadline+time.Second {
+			env.Mismatch(t, "a query against a Postgres that restarts",
+				fmt.Sprintf("an error within the %s deadline", deadline), fmt.Sprintf("%v after %s", err, took))
+		}
+	default: // cut, reset: no deadline, so the drop ended it
+		if err == nil {
+			env.Mismatch(t, fmt.Sprintf("a query whose connection is %s", map[string]string{"cut": "cut (FIN)", "reset": "reset (RST)"}[fault]),
+				"an error, ended by the drop", "success")
+		}
 	}
 	if err := proxy.Heal(); err != nil {
 		env.Fatalf(t, "%v", err)
