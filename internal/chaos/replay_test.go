@@ -124,3 +124,27 @@ func TestScenarioReplays(t *testing.T) {
 		})
 	}
 }
+
+// TestPostgresModeIsPinned: CHAOS_POSTGRES, which every replay command
+// sets, decides the Postgres configuration: 1 requires the DSN (a replay of
+// a Postgres run cannot silently fall back to SQLite), 0 ignores it, unset
+// follows it, anything else is refused.
+func TestPostgresModeIsPinned(t *testing.T) {
+	const dsn = "postgres://h/db"
+	for _, tc := range []struct {
+		mode, dsn, want string
+		fails           bool
+	}{
+		{"", dsn, dsn, false},
+		{"", "", "", false},
+		{"1", dsn, dsn, false},
+		{"1", "", "", true},
+		{"0", dsn, "", false},
+		{"yes", dsn, "", true},
+	} {
+		got, err := postgresDSN(tc.mode, tc.dsn)
+		if (err != nil) != tc.fails || got != tc.want {
+			t.Errorf("CHAOS_POSTGRES=%q with DSN %q = %q, %v; want %q (error: %v)", tc.mode, tc.dsn, got, err, tc.want, tc.fails)
+		}
+	}
+}
