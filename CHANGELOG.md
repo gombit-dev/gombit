@@ -35,8 +35,10 @@ version.
   tested without sleeping, and `faulttest.CheckRetryPolicy`, the
   conformance check every Gombit retry policy must pass. It checks that an always-retryable failure uses
   exactly the `MaxAttempts` budget (never more, never fewer), cancellation
-  (before the first attempt and mid-backoff), permanent errors not retried, backoff on schedule and never overflowing, success ends it, an
-  observable final error. JOBS-4's retry policy
+  (an already-ended context starts no attempt; a cancel mid-backoff ends
+  it), permanent errors not retried, backoff on schedule and within
+  `[0, MaxDelay]` over a sample of attempts (1..128 and 1000) that catches
+  a doubling that overflows, success ends it, and an observable final error. JOBS-4's retry policy
   ([#317](https://github.com/gombit-dev/gombit/issues/317)) is its first
   consumer ([#387](https://github.com/gombit-dev/gombit/issues/387)).
 - Cancellation and deadline fault tests (`TestFault_Context_*`) through
