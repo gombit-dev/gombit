@@ -217,11 +217,19 @@ between attempts through a `faulttest.Sleeper` (in production a
 `faulttest.RealSleeper`-like timer, in tests a `FakeSleeper` that records the
 delays and returns at once, or blocks until canceled), so its backoff is
 tested without sleeping. The checker drives the policy with scripted
-failures and reports each violated property: attempts past `MaxAttempts`, a
-cancellation mid-backoff that does not end it, a permanent error retried, a
-retryable one not retried, a backoff off its schedule or outside `[0,
-MaxDelay]` for any attempt (overflow), a success that does not end it, and a
-final error that hides the last attempt's error.
+failures and reports each violated property. `MaxAttempts` is the policy's
+budget, so an op that keeps failing retryably must run exactly that many
+times. The checker reports:
+
+- more attempts than `MaxAttempts`, or fewer (a retryable failure not
+  retried while budget remains);
+- a cancellation mid-backoff that does not end it;
+- a permanent error retried;
+- a backoff off its schedule, or outside `[0, MaxDelay]` for any attempt
+  (every attempt up to 128 is probed, which finds a doubling backoff's
+  overflow wherever it happens);
+- a success that does not end it;
+- a final error that hides the last attempt's error.
 
 `make test-chaos` is the other half: the stochastic suite in
 `internal/chaos` (behind the `chaos` build tag, never in PR CI). Each

@@ -20,6 +20,11 @@ const (
 	KindUnsupportedVersion Kind = "unsupported_version"
 	// KindPanic: the handler panicked.
 	KindPanic Kind = "panic"
+	// KindTimeout: the attempt ran past the job's Options.Timeout.
+	KindTimeout Kind = "timeout"
+	// KindUpgrade: an UpgradeFrom step returned an error. The payload is
+	// intact and a deploy can fix the step, so it is retried.
+	KindUpgrade Kind = "upgrade"
 	// KindHandler: the handler returned an error.
 	KindHandler Kind = "handler"
 )
@@ -30,6 +35,8 @@ var (
 	ErrDecode             = errors.New("jobs: decode job")
 	ErrUnsupportedVersion = errors.New("jobs: unsupported job version")
 	ErrPanic              = errors.New("jobs: job handler panicked")
+	ErrTimeout            = errors.New("jobs: job timed out")
+	ErrUpgrade            = errors.New("jobs: job upgrade step failed")
 	ErrHandler            = errors.New("jobs: job handler failed")
 )
 
@@ -38,6 +45,8 @@ var kindSentinels = map[Kind]error{
 	KindDecode:             ErrDecode,
 	KindUnsupportedVersion: ErrUnsupportedVersion,
 	KindPanic:              ErrPanic,
+	KindTimeout:            ErrTimeout,
+	KindUpgrade:            ErrUpgrade,
 	KindHandler:            ErrHandler,
 }
 
@@ -67,6 +76,10 @@ func (e *Error) Error() string {
 		return fmt.Sprintf("jobs: %s version %d: %v", subject, e.Version, e.Err)
 	case KindPanic:
 		return fmt.Sprintf("jobs: %s panicked: %v", subject, e.Err)
+	case KindTimeout:
+		return fmt.Sprintf("jobs: %s timed out: %v", subject, e.Err)
+	case KindUpgrade:
+		return fmt.Sprintf("jobs: upgrade %s from version %d: %v", subject, e.Version, e.Err)
 	default:
 		return fmt.Sprintf("jobs: %s failed: %v", subject, e.Err)
 	}
