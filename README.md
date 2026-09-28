@@ -17,9 +17,10 @@ gombit new tasks --database sqlite --auth cookie --ui mui
 cd tasks && gombit dev
 ```
 
-> **Status: pre-1.0 (v0.6).** The CRUD loop, the admin, schema-safety tooling,
-> and background jobs are shipped and CI-gated across SQLite, PostgreSQL, and
-> MySQL, with a fault-injection suite on every PR. APIs may still change
+> **Status: pre-1.0 (v0.6).** The CRUD loop, the admin, and schema-safety
+> tooling are shipped and CI-gated across SQLite, PostgreSQL, and MySQL;
+> background jobs are shipped and CI-gated against Redis; and a fault-injection
+> suite runs on every PR. APIs may still change
 > between minor versions — pin an exact version and read the
 > [changelog](CHANGELOG.md) before upgrading.
 
