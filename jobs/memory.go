@@ -203,6 +203,7 @@ func (q *MemoryQueue) Reserve(_ context.Context, queues []string, lease time.Dur
 		if next == nil {
 			continue
 		}
+		leaseExpired := next.reserved
 		availableAt := next.readyAt()
 		next.attempts++
 		next.reserved = true
@@ -210,7 +211,7 @@ func (q *MemoryQueue) Reserve(_ context.Context, queues []string, lease time.Dur
 		next.leaseDeadline = now.Add(lease)
 		env := next.env
 		env.Attempt = next.attempts
-		return Delivery{Queue: queue, Envelope: env, Receipt: next.receipt, AvailableAt: availableAt}, nil
+		return Delivery{Queue: queue, Envelope: env, Receipt: next.receipt, LeaseExpired: leaseExpired, AvailableAt: availableAt}, nil
 	}
 	return Delivery{}, ErrNoJob
 }
