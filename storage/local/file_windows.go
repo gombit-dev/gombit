@@ -2,8 +2,10 @@ package local
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
+	"runtime"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -32,29 +34,59 @@ func createShared(name string) (*os.File, error) {
 }
 
 func createFile(name string, access, mode uint32, op string) (*os.File, error) {
-	p, err := windows.UTF16PtrFromString(name)
+	h, err := create(name, access, mode, op)
 	if err != nil {
-		return nil, &fs.PathError{Op: op, Path: name, Err: err}
-	}
-	h, err := windows.CreateFile(p, access, shareAll, nil, mode, windows.FILE_ATTRIBUTE_NORMAL, 0)
-	if err != nil {
-		return nil, &fs.PathError{Op: op, Path: name, Err: err}
+		return nil, err
 	}
 	return os.NewFile(uintptr(h), name), nil
+}
+
+// create is CreateFile with the store's share mode. A file that has been
+// deleted but whose name lingers until another handle on it closes (a
+// delete without POSIX semantics, by the store's fallback or by another
+// program) fails with ERROR_ACCESS_DENIED, which is indistinguishable
+// from a permission failure but for the call's NTSTATUS,
+// STATUS_DELETE_PENDING; that file is gone, so it is reported as not
+// existing.
+func create(name string, access, mode uint32, op string) (windows.Handle, error) {
+	p, err := windows.UTF16PtrFromString(name)
+	if err != nil {
+		return 0, &fs.PathError{Op: op, Path: name, Err: err}
+	}
+	// The NTSTATUS is per thread: read it on the thread that made the call.
+	runtime.LockOSThread()
+	h, err := windows.CreateFile(p, access, shareAll, nil, mode, windows.FILE_ATTRIBUTE_NORMAL, 0)
+	var status windows.NTStatus
+	if err != nil {
+		status = lastNtStatus()
+	}
+	runtime.UnlockOSThread()
+	switch {
+	case err == nil:
+		return h, nil
+	case errors.Is(err, windows.ERROR_ACCESS_DENIED) && status == windows.STATUS_DELETE_PENDING:
+		err = windows.ERROR_FILE_NOT_FOUND
+	case errors.Is(err, windows.ERROR_ACCESS_DENIED):
+		err = fmt.Errorf("%w (%s)", err, status)
+	}
+	return 0, &fs.PathError{Op: op, Path: name, Err: err}
+}
+
+var procRtlGetLastNtStatus = windows.NewLazySystemDLL("ntdll.dll").NewProc("RtlGetLastNtStatus")
+
+// lastNtStatus is the NTSTATUS of the calling thread's last failed call.
+func lastNtStatus() windows.NTStatus {
+	if procRtlGetLastNtStatus.Find() != nil {
+		return 0
+	}
+	r, _, _ := procRtlGetLastNtStatus.Call()
+	return windows.NTStatus(uint32(r)) // #nosec G115 -- an NTSTATUS is 32 bits
 }
 
 // openForDelete opens name with the DELETE access a rename or a delete by
 // handle needs.
 func openForDelete(name, op string) (windows.Handle, error) {
-	p, err := windows.UTF16PtrFromString(name)
-	if err != nil {
-		return 0, &fs.PathError{Op: op, Path: name, Err: err}
-	}
-	h, err := windows.CreateFile(p, windows.DELETE|windows.SYNCHRONIZE, shareAll, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
-	if err != nil {
-		return 0, &fs.PathError{Op: op, Path: name, Err: err}
-	}
-	return h, nil
+	return create(name, windows.DELETE|windows.SYNCHRONIZE, windows.OPEN_EXISTING, op)
 }
 
 // posixUnsupported reports a filesystem (FAT, say) or Windows version
