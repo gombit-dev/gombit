@@ -16,9 +16,9 @@ const MaxContentTypeBytes = 256
 
 // MaxMetadataBytes bounds a PutOptions.Metadata, measured as S3 measures
 // user metadata on the wire: the names and values together, with every
-// byte of a value outside printable ASCII counted as three (its
-// percent-encoded length), so a driver that has to encode values still
-// fits S3's 2 KB limit.
+// byte of a value outside printable ASCII, and every '%', counted as three
+// (its percent-encoded length), so a driver that has to encode values
+// still fits S3's 2 KB limit.
 const MaxMetadataBytes = 2048
 
 // ValidateKey reports whether key is a valid object key, as ErrInvalidKey
@@ -142,12 +142,13 @@ func unsafeRune(r rune) bool {
 	return unicode.IsControl(r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r) || unicode.Is(unicode.Bidi_Control, r)
 }
 
-// encodedLen is s's length with every byte outside printable ASCII
-// counted as three, its percent-encoded length.
+// encodedLen is s's length with every byte outside printable ASCII, and
+// '%' itself (which a reversible encoding must escape), counted as three:
+// its percent-encoded length.
 func encodedLen(s string) int {
 	n := 0
 	for i := 0; i < len(s); i++ {
-		if c := s[i]; c < 0x20 || c > 0x7e {
+		if c := s[i]; c < 0x20 || c > 0x7e || c == '%' {
 			n += 3
 		} else {
 			n++
