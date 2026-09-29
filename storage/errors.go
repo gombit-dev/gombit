@@ -58,25 +58,32 @@ func Wrap(op, key string, err error) error {
 }
 
 // MapError maps a storage error to a D10 category error for a handler:
-// ErrNotFound becomes not_found (with notFound as the message);
-// ErrInvalidKey, ErrInvalidOptions, and ErrSizeMismatch become validation
-// (the request named or sent something unusable); ErrUnavailable becomes
-// dependency_unavailable; anything else, internal (with internal as the
-// message). The driver's own error text never reaches the client.
+//
+//   - ErrNotFound becomes not_found (with notFound as the message);
+//   - ErrInvalidOptions and ErrSizeMismatch become validation (the request
+//     sent a content type, metadata, or length that cannot be stored);
+//   - ErrUnavailable, and a context that ended (the request timed out or
+//     the client went away), become dependency_unavailable;
+//   - anything else, ErrInvalidKey included, becomes internal (with
+//     internal as the message): keys are built by the server, so an invalid
+//     one is a server bug. Validate a key taken from a request with
+//     ValidateKey first, and answer not_found.
+//
+// The driver's own error text never reaches the client.
 func MapError(ctx context.Context, err error, notFound, internal string) error {
 	switch {
 	case err == nil:
 		return nil
 	case errors.Is(err, ErrNotFound):
 		return contract.WithContext(ctx, contract.NotFound(notFound))
-	case errors.Is(err, ErrInvalidKey):
-		return contract.WithContext(ctx, contract.Validation("The object key is invalid.", nil))
 	case errors.Is(err, ErrInvalidOptions):
 		return contract.WithContext(ctx, contract.Validation("The object's content type or metadata is invalid.", nil))
 	case errors.Is(err, ErrSizeMismatch):
 		return contract.WithContext(ctx, contract.Validation("The upload's length does not match its declared size.", nil))
 	case errors.Is(err, ErrUnavailable):
 		return contract.WithContext(ctx, contract.DependencyUnavailable("File storage is temporarily unavailable."))
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+		return contract.WithContext(ctx, contract.DependencyUnavailable("The file storage request did not finish in time."))
 	default:
 		return contract.WithContext(ctx, contract.Internal(internal))
 	}

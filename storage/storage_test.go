@@ -32,20 +32,25 @@ func TestValidateKey(t *testing.T) {
 		}
 	}
 	invalid := map[string]string{
-		"":               "empty",
-		"/abs":           "starts with '/'",
-		"trailing/":      "ends with '/'",
-		"a//b":           "empty segment",
-		".":              `"." segment`,
-		"..":             `".." segment`,
-		"../escape":      `".." segment`,
-		"a/../../escape": `".." segment`,
-		"a/./b":          `"." segment`,
-		`a\b`:            "backslash",
-		"nul\x00byte":    "control character",
-		"new\nline":      "control character",
-		"del\x7fchar":    "control character",
-		"bad\xffutf8":    "UTF-8",
+		"":                "empty",
+		"/abs":            "starts with '/'",
+		"trailing/":       "ends with '/'",
+		"a//b":            "empty segment",
+		".":               `"." segment`,
+		"..":              `".." segment`,
+		"../escape":       `".." segment`,
+		"a/../../escape":  `".." segment`,
+		"a/./b":           `"." segment`,
+		`a\b`:             "backslash",
+		"nul\x00byte":     "control character",
+		"new\nline":       "control character",
+		"del\x7fchar":     "control character",
+		"bad\xffutf8":     "UTF-8",
+		"c1\u0085control": "U+0085",
+		"bidi\u202eflip":  "U+202E",
+		"line\u2028break": "U+2028",
+		"para\u2029break": "U+2029",
+		"lrm\u200emark":   "U+200E",
 		strings.Repeat("k", storage.MaxKeyBytes+1): "longer than",
 	}
 	for key, reason := range invalid {
@@ -63,6 +68,8 @@ func TestValidatePutOptions(t *testing.T) {
 		{ContentType: "text/plain; charset=utf-8"},
 		{Metadata: map[string]string{"original-name": "résumé final.pdf", "v2": ""}},
 		{Metadata: map[string]string{"n": strings.Repeat("v", storage.MaxMetadataBytes-1)}},
+		// 1 + 341 × 2 bytes × 3 = 2047: fits once percent-encoded.
+		{Metadata: map[string]string{"n": strings.Repeat("é", 341)}},
 	}
 	for _, opts := range ok {
 		if err := storage.ValidatePutOptions(opts); err != nil {
@@ -79,6 +86,9 @@ func TestValidatePutOptions(t *testing.T) {
 		{Metadata: map[string]string{"ok": "tab\there"}},
 		{Metadata: map[string]string{"ok": "bad\xffutf8"}},
 		{Metadata: map[string]string{"n": strings.Repeat("v", storage.MaxMetadataBytes)}},
+		// 1 + 342 × 2 bytes × 3 = 2053 once percent-encoded.
+		{Metadata: map[string]string{"n": strings.Repeat("é", 342)}},
+		{Metadata: map[string]string{"n": "bidi\u202eflip"}},
 	}
 	for _, opts := range bad {
 		if err := storage.ValidatePutOptions(opts); !errors.Is(err, storage.ErrInvalidOptions) {
@@ -157,7 +167,9 @@ func TestMapError(t *testing.T) {
 		status int
 	}{
 		{storage.Wrap("open", "k", storage.ErrNotFound), http.StatusNotFound},
-		{storage.Wrap("put", "k", storage.ErrInvalidKey), http.StatusUnprocessableEntity},
+		{storage.Wrap("put", "k", storage.ErrInvalidKey), http.StatusInternalServerError},
+		{storage.Wrap("put", "k", context.DeadlineExceeded), http.StatusServiceUnavailable},
+		{storage.Wrap("open", "k", context.Canceled), http.StatusServiceUnavailable},
 		{storage.Wrap("put", "k", storage.ErrInvalidOptions), http.StatusUnprocessableEntity},
 		{storage.Wrap("put", "k", storage.ErrSizeMismatch), http.StatusUnprocessableEntity},
 		{storage.Wrap("put", "k", errors.Join(storage.ErrUnavailable, cause)), http.StatusServiceUnavailable},

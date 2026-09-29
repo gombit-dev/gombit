@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"path"
 	"runtime"
 	"strings"
 	"sync"
@@ -28,6 +29,15 @@ type fake struct {
 	noDefaultType    bool // stores "" as the content type
 	emptyURL         bool // URL returns "", nil
 	dropsMetadata    bool // does not keep PutOptions.Metadata
+	keepsOldType     bool // an overwrite keeps the previous content type
+	deleteByPrefix   bool // Delete also removes keys under key + "/"
+	baseNameKey      bool // reports path.Base(key) as ObjectInfo.Key
+	truncates        bool // stores at most 1 MiB, reading the rest
+	rejectsEmpty     bool // refuses a zero-length object
+	noOptionsCheck   bool // skips ValidatePutOptions
+	tornWrites       bool // overwrites in place, only every other chunk
+	readIgnoresCtx   bool // Open/Stat/Delete/URL never check ctx
+	caseInsensitive  bool // keys are compared case-insensitively
 }
 
 type object struct {
@@ -41,8 +51,10 @@ func (f *fake) Put(ctx context.Context, key string, r io.Reader, opts storage.Pu
 	if err := f.checkKey(key); err != nil {
 		return storage.ObjectInfo{}, storage.Wrap("put", key, err)
 	}
-	if err := storage.ValidatePutOptions(opts); err != nil {
-		return storage.ObjectInfo{}, storage.Wrap("put", key, err)
+	if !f.noOptionsCheck {
+		if err := storage.ValidatePutOptions(opts); err != nil {
+			return storage.ObjectInfo{}, storage.Wrap("put", key, err)
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return storage.ObjectInfo{}, storage.Wrap("put", key, err)
@@ -51,6 +63,14 @@ func (f *fake) Put(ctx context.Context, key string, r io.Reader, opts storage.Pu
 		r = storage.ExpectSize(r, opts.Size)
 	}
 	info := storage.ObjectInfo{Key: key, ContentType: opts.ContentType, ModTime: time.Now()}
+	if f.baseNameKey {
+		info.Key = path.Base(key)
+	}
+	if f.keepsOldType {
+		if old, err := f.get("put", key); err == nil {
+			info.ContentType = old.info.ContentType
+		}
+	}
 	if info.ContentType == "" && !f.noDefaultType {
 		info.ContentType = storage.DefaultContentType
 	}
@@ -80,16 +100,60 @@ func (f *fake) Put(ctx context.Context, key string, r io.Reader, opts storage.Pu
 			return storage.ObjectInfo{}, storage.Wrap("put", key, err)
 		}
 	}
-	info.Size = int64(buf.Len())
-	f.store(key, buf.Bytes(), info)
+	data := buf.Bytes()
+	if f.truncates && len(data) > 1<<20 {
+		data = data[:1<<20]
+	}
+	if f.rejectsEmpty && len(data) == 0 {
+		return storage.ObjectInfo{}, storage.Wrap("put", key, fmt.Errorf("%w: empty object", storage.ErrInvalidOptions))
+	}
+	if f.tornWrites {
+		f.writeTorn(key, data, info)
+		info.Size = int64(len(data))
+		return info, nil
+	}
+	info.Size = int64(len(data))
+	f.store(key, data, info)
 	return info, nil
+}
+
+// writeTorn overwrites key's bytes in place, only every other 32 KiB
+// chunk: what an unsynchronized in-place writer can leave behind.
+func (f *fake) writeTorn(key string, data []byte, info storage.ObjectInfo) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	o := f.objects[f.mapKey(key)]
+	if len(o.data) < len(data) {
+		o.data = append(o.data, make([]byte, len(data)-len(o.data))...)
+	}
+	for off := 0; off < len(data); off += 64 << 10 {
+		end := min(off+32<<10, len(data))
+		copy(o.data[off:end], data[off:end])
+	}
+	info.Size = int64(len(o.data))
+	o.info = info
+	f.objects[f.mapKey(key)] = o
+}
+
+func (f *fake) mapKey(key string) string {
+	if f.caseInsensitive {
+		return strings.ToLower(key)
+	}
+	return key
+}
+
+func (f *fake) readCtx(ctx context.Context) error {
+	if f.readIgnoresCtx {
+		return nil
+	}
+	return ctx.Err()
 }
 
 func (f *fake) store(key string, data []byte, info storage.ObjectInfo) {
 	info.Size = int64(len(data))
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.objects[key] = object{data: append([]byte(nil), data...), info: info}
+	f.objects[f.mapKey(key)] = object{data: append([]byte(nil), data...), info: info}
 }
 
 func (f *fake) checkKey(key string) error {
@@ -105,14 +169,20 @@ func (f *fake) get(op, key string) (object, error) {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	o, ok := f.objects[key]
+	o, ok := f.objects[f.mapKey(key)]
 	if !ok {
 		return object{}, storage.Wrap(op, key, storage.ErrNotFound)
 	}
 	return o, nil
 }
 
-func (f *fake) Open(_ context.Context, key string) (io.ReadCloser, storage.ObjectInfo, error) {
+func (f *fake) Open(ctx context.Context, key string) (io.ReadCloser, storage.ObjectInfo, error) {
+	if err := f.checkKey(key); err != nil {
+		return nil, storage.ObjectInfo{}, storage.Wrap("open", key, err)
+	}
+	if err := f.readCtx(ctx); err != nil {
+		return nil, storage.ObjectInfo{}, storage.Wrap("open", key, err)
+	}
 	o, err := f.get("open", key)
 	if err != nil {
 		return nil, storage.ObjectInfo{}, err
@@ -120,26 +190,45 @@ func (f *fake) Open(_ context.Context, key string) (io.ReadCloser, storage.Objec
 	return io.NopCloser(bytes.NewReader(o.data)), o.info, nil
 }
 
-func (f *fake) Stat(_ context.Context, key string) (storage.ObjectInfo, error) {
+func (f *fake) Stat(ctx context.Context, key string) (storage.ObjectInfo, error) {
+	if err := f.checkKey(key); err != nil {
+		return storage.ObjectInfo{}, storage.Wrap("stat", key, err)
+	}
+	if err := f.readCtx(ctx); err != nil {
+		return storage.ObjectInfo{}, storage.Wrap("stat", key, err)
+	}
 	o, err := f.get("stat", key)
 	return o.info, err
 }
 
-func (f *fake) Delete(_ context.Context, key string) error {
+func (f *fake) Delete(ctx context.Context, key string) error {
 	if err := f.checkKey(key); err != nil {
+		return storage.Wrap("delete", key, err)
+	}
+	if err := f.readCtx(ctx); err != nil {
 		return storage.Wrap("delete", key, err)
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if _, ok := f.objects[key]; !ok && f.deleteMissingErr {
+	if _, ok := f.objects[f.mapKey(key)]; !ok && f.deleteMissingErr {
 		return storage.Wrap("delete", key, storage.ErrNotFound)
 	}
-	delete(f.objects, key)
+	delete(f.objects, f.mapKey(key))
+	if f.deleteByPrefix {
+		for k := range f.objects {
+			if strings.HasPrefix(k, path.Dir(key)+"/") {
+				delete(f.objects, k)
+			}
+		}
+	}
 	return nil
 }
 
-func (f *fake) URL(_ context.Context, key string, opts storage.URLOptions) (string, error) {
+func (f *fake) URL(ctx context.Context, key string, opts storage.URLOptions) (string, error) {
 	if err := f.checkKey(key); err != nil {
+		return "", storage.Wrap("url", key, err)
+	}
+	if err := f.readCtx(ctx); err != nil {
 		return "", storage.Wrap("url", key, err)
 	}
 	if err := storage.ValidateURLOptions(opts); err != nil {
@@ -222,6 +311,24 @@ func TestSuiteCatchesBrokenDrivers(t *testing.T) {
 		{"DefaultContentType", func(f *fake) { f.noDefaultType = true }, "want \"application/octet-stream\""},
 		{"URL", func(f *fake) { f.emptyURL = true }, "empty URL and no error"},
 		{"RoundTrip", func(f *fake) { f.dropsMetadata = true }, "metadata"},
+		{"Overwrite", func(f *fake) { f.keepsOldType = true }, "ContentType"},
+		{"Delete", func(f *fake) { f.deleteByPrefix = true }, "a/c"},
+		{"NestedKeys", func(f *fake) { f.baseNameKey = true }, "with the same key"},
+		{"Streaming", func(f *fake) { f.truncates = true }, "want 8388608"},
+		{"EmptyObject", func(f *fake) { f.rejectsEmpty = true }, "Put(\"empty\")"},
+		{"InvalidOptions", func(f *fake) { f.noOptionsCheck = true }, "want storage.ErrInvalidOptions"},
+		{"ConcurrentPuts", func(f *fake) { f.tornWrites = true }, "torn write"},
+		{"CanceledContext", func(f *fake) { f.readIgnoresCtx = true }, "want context.Canceled"},
+		{"PortableKeys", func(f *fake) { f.caseInsensitive = true }, "two keys share one object"},
+	}
+	covered := map[string]bool{}
+	for _, tc := range cases {
+		covered[tc.check] = true
+	}
+	for _, c := range checks {
+		if !covered[c.name] {
+			t.Errorf("check %s has no broken driver proving it can fail", c.name)
+		}
 	}
 	for _, tc := range cases {
 		t.Run(tc.check, func(t *testing.T) {

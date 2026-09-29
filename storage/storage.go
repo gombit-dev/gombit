@@ -12,7 +12,14 @@ import (
 // call), so switching drivers changes configuration, not code.
 //
 // Every method validates its key with ValidateKey and fails with
-// ErrInvalidKey before touching the backend. Every method honors ctx.
+// ErrInvalidKey before touching the backend. Every method honors ctx: one
+// that has already ended fails the call with ctx's error.
+//
+// Every valid key is its own object on every driver: keys that differ only
+// in case, a key that is a prefix of another ("a" and "a/b"), long
+// segments, and names a filesystem reserves ("CON", "c:") all store and
+// read back as themselves. A driver on a filesystem must map keys to paths
+// in a way that keeps this (it cannot just join the key to a directory).
 //
 // Implementations must pass the storagetest conformance suite.
 type Storage interface {
@@ -62,9 +69,10 @@ type PutOptions struct {
 	Size int64
 
 	// Metadata is small user metadata stored with the object and returned
-	// in its ObjectInfo. Names are lower-case ASCII letters, digits, and
-	// '-'; values are UTF-8 without control characters; together at most
-	// MaxMetadataBytes. See ValidateMetadata.
+	// in its ObjectInfo exactly as given. Names are lower-case ASCII
+	// letters, digits, and '-'; values are UTF-8 without control
+	// characters; see ValidateMetadata for the size limit. A driver whose
+	// backend carries only ASCII (S3 headers) encodes values reversibly.
 	Metadata map[string]string
 }
 
@@ -81,7 +89,10 @@ type ObjectInfo struct {
 	// has one (a content hash or the backend's ETag); it changes when the
 	// object is replaced with different bytes. Empty when unsupported.
 	ETag string
-	// ModTime is when the object was last stored.
+	// ModTime is when the object was last stored. Stat and Open always
+	// report it; the ObjectInfo Put returns may leave it zero when the
+	// backend does not say (S3's PutObject), rather than cost a second
+	// request.
 	ModTime time.Time
 	// Metadata is the user metadata the object was stored with (nil when
 	// none).

@@ -6,14 +6,18 @@ import (
 	"io"
 	"mime"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
 // MaxKeyBytes is the longest key, in bytes (S3's limit).
 const MaxKeyBytes = 1024
 
-// MaxMetadataBytes bounds a PutOptions.Metadata: the names and values
-// together (S3's limit for user metadata).
+// MaxMetadataBytes bounds a PutOptions.Metadata, measured as S3 measures
+// user metadata on the wire: the names and values together, with every
+// byte of a value outside printable ASCII counted as three (its
+// percent-encoded length), so a driver that has to encode values still
+// fits S3's 2 KB limit.
 const MaxMetadataBytes = 2048
 
 // ValidateKey reports whether key is a valid object key, as ErrInvalidKey
@@ -26,8 +30,10 @@ const MaxMetadataBytes = 2048
 //   - no leading or trailing '/', and no empty segment ("a//b");
 //   - no "." or ".." segment, so a key can never climb out of a prefix or,
 //     on the local driver, out of the storage root;
-//   - no backslash (a path separator on Windows) and no control character
-//     (NUL, newline, ...).
+//   - no backslash (a path separator on Windows), no control character
+//     (NUL, newline, DEL, the C1 controls), and no Unicode line separator
+//     or bidirectional control (which can split a log line or disguise a
+//     name in a listing: "invoice\u202efdp.exe").
 //
 // A key is an address, not a filename a client chose: build keys on the
 // server and keep a client's filename as metadata.
@@ -56,8 +62,8 @@ func keyProblem(key string) string {
 		switch {
 		case r == '\\':
 			return "contains a backslash"
-		case r < 0x20 || r == 0x7f:
-			return "contains a control character"
+		case unsafeRune(r):
+			return fmt.Sprintf("contains the control character %U", r)
 		}
 	}
 	for _, seg := range strings.Split(key, "/") {
@@ -108,16 +114,36 @@ func ValidateMetadata(md map[string]string) error {
 			return fmt.Errorf("%w: metadata %q: value is not valid UTF-8", ErrInvalidOptions, name)
 		}
 		for _, r := range value {
-			if r < 0x20 || r == 0x7f {
-				return fmt.Errorf("%w: metadata %q: value contains a control character", ErrInvalidOptions, name)
+			if unsafeRune(r) {
+				return fmt.Errorf("%w: metadata %q: value contains the control character %U", ErrInvalidOptions, name, r)
 			}
 		}
-		total += len(name) + len(value)
+		total += len(name) + encodedLen(value)
 	}
 	if total > MaxMetadataBytes {
 		return fmt.Errorf("%w: metadata is %d bytes, more than %d", ErrInvalidOptions, total, MaxMetadataBytes)
 	}
 	return nil
+}
+
+// unsafeRune reports control characters (C0, DEL, C1), Unicode line and
+// paragraph separators, and bidirectional controls.
+func unsafeRune(r rune) bool {
+	return unicode.IsControl(r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r) || unicode.Is(unicode.Bidi_Control, r)
+}
+
+// encodedLen is s's length with every byte outside printable ASCII
+// counted as three, its percent-encoded length.
+func encodedLen(s string) int {
+	n := 0
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c < 0x20 || c > 0x7e {
+			n += 3
+		} else {
+			n++
+		}
+	}
+	return n
 }
 
 // ValidateURLOptions reports whether opts is valid, as ErrInvalidOptions

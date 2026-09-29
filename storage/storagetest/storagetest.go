@@ -55,6 +55,8 @@ var checks = []check{
 	{"Delete", checkDelete},
 	{"InvalidKeys", checkInvalidKeys},
 	{"NestedKeys", checkNestedKeys},
+	{"PortableKeys", checkPortableKeys},
+	{"CanceledContext", checkCanceledContext},
 	{"Streaming", checkStreaming},
 	{"EmptyObject", checkEmptyObject},
 	{"FailedPutKeepsPrevious", checkFailedPutKeepsPrevious},
@@ -112,28 +114,28 @@ func checkRoundTrip(t testing.TB, s storage.Storage) {
 	md := map[string]string{"original-name": "résumé final.pdf", "owner": "42"}
 	info := put(t, s, "docs/report.txt", data, storage.PutOptions{ContentType: "text/plain; charset=utf-8", Metadata: md})
 	want := storage.ObjectInfo{Key: "docs/report.txt", Size: int64(len(data)), ContentType: "text/plain; charset=utf-8", Metadata: md}
-	sameInfo(t, "Put", info, want)
+	sameInfo(t, "Put", info, want, false)
 
 	got, opened := read(t, s, "docs/report.txt")
 	if !bytes.Equal(got, data) {
 		t.Fatalf("Open read %q, want %q", got, data)
 	}
-	sameInfo(t, "Open", opened, want)
+	sameInfo(t, "Open", opened, want, true)
 
 	stat, err := s.Stat(ctxFor(t), "docs/report.txt")
 	if err != nil {
 		t.Fatalf("Stat = %v", err)
 	}
-	sameInfo(t, "Stat", stat, want)
+	sameInfo(t, "Stat", stat, want, true)
 	if ok, err := storage.Exists(ctxFor(t), s, "docs/report.txt"); err != nil || !ok {
 		t.Fatalf("Exists = %v, %v; want true", ok, err)
 	}
 }
 
-// sameInfo compares the fields every driver must report. ETag and ModTime
-// are driver-defined, but must be set consistently: a zero ModTime is not
-// allowed.
-func sameInfo(t testing.TB, op string, got, want storage.ObjectInfo) {
+// sameInfo compares the fields every driver must report. ETag is
+// driver-defined; ModTime must be set by Stat and Open (withTime), and may
+// be zero in what Put returns.
+func sameInfo(t testing.TB, op string, got, want storage.ObjectInfo, withTime bool) {
 	t.Helper()
 	if got.Key != want.Key || got.Size != want.Size || got.ContentType != want.ContentType {
 		t.Fatalf("%s info = {Key:%q Size:%d ContentType:%q}, want {Key:%q Size:%d ContentType:%q}",
@@ -147,7 +149,7 @@ func sameInfo(t testing.TB, op string, got, want storage.ObjectInfo) {
 			t.Fatalf("%s metadata = %v, want %v", op, got.Metadata, want.Metadata)
 		}
 	}
-	if got.ModTime.IsZero() {
+	if withTime && got.ModTime.IsZero() {
 		t.Fatalf("%s info has a zero ModTime", op)
 	}
 }
@@ -169,7 +171,7 @@ func checkOverwrite(t testing.TB, s storage.Storage) {
 	if string(got) != "second" {
 		t.Fatalf("after an overwrite Open read %q, want %q", got, "second")
 	}
-	sameInfo(t, "Open after overwrite", info, storage.ObjectInfo{Key: "k", Size: 6, ContentType: "application/json"})
+	sameInfo(t, "Open after overwrite", info, storage.ObjectInfo{Key: "k", Size: 6, ContentType: "application/json"}, true)
 }
 
 func checkMissing(t testing.TB, s storage.Storage) {
@@ -216,6 +218,9 @@ var invalidKeys = []string{
 	"nul\x00byte",
 	"new\nline",
 	"bad\xffutf8",
+	"c1\u0085control",
+	"bidi\u202eoverride",
+	"line\u2028separator",
 	strings.Repeat("k", storage.MaxKeyBytes+1),
 }
 
@@ -264,6 +269,65 @@ func checkNestedKeys(t testing.TB, s storage.Storage) {
 		if string(got) != fmt.Sprint(i) || info.Key != key {
 			t.Fatalf("Open(%q) read %q with key %q, want %q with the same key", key, got, info.Key, fmt.Sprint(i))
 		}
+	}
+}
+
+// checkPortableKeys: every valid key is its own object, including keys a
+// filesystem would conflate or refuse: case variants, a key that is a
+// prefix of another, a long segment, names Windows reserves, and segments
+// ending in a dot or a space.
+func checkPortableKeys(t testing.TB, s storage.Storage) {
+	keys := []string{
+		"Case/File.txt",
+		"case/file.txt",
+		"prefix",
+		"prefix/child",
+		"prefix/child/grandchild",
+		strings.Repeat("l", 300) + "/long-segment",
+		"CON/nul.txt",
+		"c:/aux",
+		"dot./space /x",
+	}
+	for i, key := range keys {
+		put(t, s, key, []byte(fmt.Sprint(i)), storage.PutOptions{})
+	}
+	for i, key := range keys {
+		got, info := read(t, s, key)
+		if string(got) != fmt.Sprint(i) || info.Key != key {
+			t.Fatalf("Open(%q) read %q with key %q, want %q with the same key: two keys share one object, or one did not store", key, got, info.Key, fmt.Sprint(i))
+		}
+	}
+	if err := s.Delete(ctxFor(t), "prefix"); err != nil {
+		t.Fatalf("Delete(prefix) = %v", err)
+	}
+	if got, _ := read(t, s, "prefix/child"); string(got) != "3" {
+		t.Fatalf("deleting \"prefix\" changed \"prefix/child\" to %q", got)
+	}
+}
+
+// checkCanceledContext: every method called with a context that has
+// already ended fails with the context's error.
+func checkCanceledContext(t testing.TB, s storage.Storage) {
+	put(t, s, "present", []byte("x"), storage.PutOptions{})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if body, _, err := s.Open(ctx, "present"); !errors.Is(err, context.Canceled) {
+		if body != nil {
+			_ = body.Close()
+		}
+		t.Fatalf("Open on a canceled context = %v, want context.Canceled", err)
+	}
+	if _, err := s.Stat(ctx, "present"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Stat on a canceled context = %v, want context.Canceled", err)
+	}
+	if err := s.Delete(ctx, "present"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Delete on a canceled context = %v, want context.Canceled", err)
+	}
+	if _, err := s.URL(ctx, "present", storage.SignedURL(time.Minute)); !errors.Is(err, context.Canceled) {
+		t.Fatalf("URL on a canceled context = %v, want context.Canceled", err)
+	}
+	if got, _ := read(t, s, "present"); string(got) != "x" {
+		t.Fatalf("a canceled Delete removed the object")
 	}
 }
 
@@ -466,6 +530,10 @@ func checkInvalidOptions(t testing.TB, s storage.Storage) {
 		{Metadata: map[string]string{"": "x"}},
 		{Metadata: map[string]string{"ok": "new\nline"}},
 		{Metadata: map[string]string{"big": strings.Repeat("v", storage.MaxMetadataBytes)}},
+		// 1400 bytes of UTF-8, 4200 once percent-encoded: over S3's limit.
+		{Metadata: map[string]string{"name": strings.Repeat("é", 700)}},
+		{Metadata: map[string]string{"name": "invoice\u202efdp.exe"}},
+		{Metadata: map[string]string{"name": "line\u2028break"}},
 	} {
 		if _, err := s.Put(ctxFor(t), "opts", strings.NewReader("x"), opts); !errors.Is(err, storage.ErrInvalidOptions) {
 			t.Fatalf("Put with %+v = %v, want storage.ErrInvalidOptions", opts, err)

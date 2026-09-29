@@ -49,8 +49,8 @@ err = store.Delete(ctx, "avatars/42.png")
 | **Atomic writes** | A `Put` that fails leaves the key as it was: the previous object whole, or still absent. That covers the reader returning an error, the context ending, and a length that differs from the declared `Size`. No one ever reads a partial object. Concurrent `Put`s to one key leave one of them whole. |
 | **Overwrite** | `Put` replaces an existing object, including its content type and metadata. |
 | **Idempotent delete** | Deleting a missing object is not an error, so a retried delete is safe. |
-| **Portable keys** | Every method validates its key with the same rule (below) and fails with `ErrInvalidKey` before touching the backend. |
-| **Context** | Every method honors `ctx`. A `Put` canceled mid-stream fails with the context's error and stores nothing. |
+| **Portable keys** | Every method validates its key with the same rule (below) and fails with `ErrInvalidKey` before touching the backend. Every valid key is its own object on every driver: keys that differ only in case, a key that is a prefix of another (`a` and `a/b`), long segments, and names Windows reserves (`CON`, `c:`) all store and read back as themselves. |
+| **Context** | Every method honors `ctx`: one that has already ended fails the call with the context's error. A `Put` canceled mid-stream fails the same way and stores nothing. |
 
 ### `PutOptions` and `ObjectInfo`
 
@@ -60,14 +60,18 @@ err = store.Delete(ctx, "avatars/42.png")
 - **`Size`**, when positive, is the exact length the reader will produce.
   `Put` then fails with `ErrSizeMismatch`, storing nothing, if the reader
   ends early or runs long. Zero means unknown.
-- **`Metadata`** is small user metadata returned in `ObjectInfo`. Names are
-  lower-case ASCII letters, digits and `-`. Values are UTF-8 without control
-  characters. Names and values together are at most 2 KiB, S3's limit. Keep
-  a client's original filename here, never in the key.
+- **`Metadata`** is small user metadata returned in `ObjectInfo` exactly as
+  given. Names are lower-case ASCII letters, digits and `-`. Values are UTF-8
+  without control characters. The size limit is 2 KiB for names and values
+  together, S3's limit, measured the way S3 measures it on the wire: every
+  value byte outside printable ASCII counts as three, its percent-encoded
+  length. Keep a client's original filename here, never in the key.
 
 `ObjectInfo` reports `Key`, `Size`, `ContentType`, `Metadata`, `ModTime`, and
-`ETag`. `ETag` identifies this version of the bytes where the driver has one,
-and is empty otherwise.
+`ETag`. `Stat` and `Open` always report `ModTime`. The `ObjectInfo` that `Put`
+returns may leave it zero where the backend doesn't say, as with S3's
+`PutObject`, rather than cost a second request. `ETag` identifies this version
+of the bytes where the driver has one, and is empty otherwise.
 
 ### URLs
 
@@ -88,7 +92,9 @@ development works in production:
 - no leading or trailing `/`, and no empty segment (`a//b`);
 - no `.` or `..` segment, so a key can never climb out of a prefix or, on the
   local driver, out of the storage root;
-- no backslash and no control character.
+- no backslash, no control character (including the C1 range), and no
+  Unicode line separator or bidirectional control. Those can split a log line
+  or disguise a name in a listing, as in `invoice\u202efdp.exe`.
 
 Spaces, Unicode and dots inside a segment (`..hidden`, `name..ext`) are fine.
 
@@ -105,10 +111,11 @@ same thing on every driver:
 | Sentinel | Meaning | `MapError` result |
 | --- | --- | --- |
 | `ErrNotFound` | No object under the key | `404 not_found` (your message) |
-| `ErrInvalidKey` | The key breaks the key rules | `422 validation` |
+| `ErrInvalidKey` | The key breaks the key rules | `500 internal`: keys are built by the server, so an invalid one is a bug. Validate a key taken from a request with `ValidateKey` first, and answer 404. |
 | `ErrInvalidOptions` | A malformed content type or metadata, or a negative size or expiry | `422 validation` |
 | `ErrSizeMismatch` | The bytes read differ from the declared `Size` | `422 validation` |
 | `ErrUnavailable` | The backend is unreachable or failed transiently | `503 dependency_unavailable` |
+| `context.DeadlineExceeded` / `Canceled` | The request timed out, or the client went away | `503 dependency_unavailable` |
 | `ErrUnsupported` | The driver cannot do this, for example a URL | `500 internal` |
 | anything else | | `500 internal` (your message) |
 
@@ -134,6 +141,8 @@ The suite checks every guarantee above:
 - the default content type;
 - overwrites and idempotent deletes;
 - every invalid key, on every method;
+- portable keys (case variants, prefix keys, long segments, reserved names);
+- every method on an already-canceled context;
 - an 8 MiB object streamed through a pipe in small pieces, which is never
   held in memory by the test;
 - a failed or canceled `Put` leaving the previous object whole;
@@ -141,11 +150,18 @@ The suite checks every guarantee above:
 - concurrent `Put`s to one key;
 - `URL` returning either a URL or `ErrUnsupported`.
 
-The suite's own tests prove it catches a driver that breaks each rule.
+The suite's own tests prove that every check fails for a driver broken the
+way it guards against. A new check can't land without such a driver.
 
 Helpers for drivers:
 - `ValidateKey`, `ValidatePutOptions` and `ValidateURLOptions` apply the shared
   rules.
+- A backend that carries only ASCII metadata (S3 headers) must encode values
+  reversibly, for example by percent-encoding. The size limit already allows
+  for that.
+- A filesystem driver cannot just join the key to a directory. That would
+  conflate case variants, and it can't hold both `a` and `a/b`. Map keys to
+  paths in a way that keeps every key distinct.
 - `ExpectSize` enforces a declared `Size` on a reader.
 - `Wrap` builds the `*storage.Error`.
 
