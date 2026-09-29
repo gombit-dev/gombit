@@ -78,8 +78,8 @@ func TestValidatePutOptions(t *testing.T) {
 		{Metadata: map[string]string{"original-name": "résumé final.pdf", "v2": ""}},
 		{Metadata: map[string]string{"n": strings.Repeat("v", storage.MaxMetadataBytes-1)}},
 		// 1 + 341 × 2 bytes × 3 = 2047: fits once percent-encoded.
-		// 1 + 1023 × 2 = 2047 UTF-8 bytes, S3's measure.
-		{Metadata: map[string]string{"n": strings.Repeat("é", 1023)}},
+		// 1 + 12 + base64(762 × 2 bytes) = 1 + 12 + 2032 = 2045 on the wire.
+		{Metadata: map[string]string{"n": strings.Repeat("é", 762)}},
 		{Metadata: map[string]string{"n": strings.Repeat("%", storage.MaxMetadataBytes-1)}},
 	}
 	for _, opts := range ok {
@@ -101,8 +101,10 @@ func TestValidatePutOptions(t *testing.T) {
 		{Metadata: map[string]string{"ok": "tab\there"}},
 		{Metadata: map[string]string{"ok": "bad\xffutf8"}},
 		{Metadata: map[string]string{"n": strings.Repeat("v", storage.MaxMetadataBytes)}},
-		// 1 + 1024 × 2 = 2049 UTF-8 bytes.
-		{Metadata: map[string]string{"n": strings.Repeat("é", 1024)}},
+		// 1 + 12 + base64(763 × 2 bytes) = 1 + 12 + 2036 = 2049 on the wire.
+		{Metadata: map[string]string{"n": strings.Repeat("é", 763)}},
+		// Printable ASCII that would read as an encoded word is sent encoded.
+		{Metadata: map[string]string{"n": "=?" + strings.Repeat("a", 1600)}},
 		{Metadata: map[string]string{"n": "bidi\u202eflip"}},
 	}
 	for _, opts := range bad {
@@ -278,5 +280,21 @@ func TestNoDriverDependencies(t *testing.T) {
 			continue
 		}
 		t.Errorf("package storage imports %s: the contract must not depend on a driver or third-party module", imp)
+	}
+}
+
+func TestMetadataValueWireLen(t *testing.T) {
+	for value, want := range map[string]int{
+		"":            0,
+		"plain ascii": 11,
+		"100% sure":   9,
+		"é":           12 + 4, // base64 of 2 bytes is 4
+		"=?literal":   12 + 12,
+		"tab\there":   12 + 12,
+		"résumé.pdf":  12 + 16,
+	} {
+		if got := storage.MetadataValueWireLen(value); got != want {
+			t.Errorf("MetadataValueWireLen(%q) = %d, want %d", value, got, want)
+		}
 	}
 }

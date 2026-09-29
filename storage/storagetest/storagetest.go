@@ -545,8 +545,9 @@ func checkInvalidOptions(t testing.TB, s storage.Storage) {
 		{Metadata: map[string]string{"": "x"}},
 		{Metadata: map[string]string{"ok": "new\nline"}},
 		{Metadata: map[string]string{"big": strings.Repeat("v", storage.MaxMetadataBytes)}},
-		// 2200 UTF-8 bytes: over S3's 2 KB, which counts UTF-8 bytes.
-		{Metadata: map[string]string{"name": strings.Repeat("é", 1100)}},
+		// 1400 + 200 UTF-8 bytes, over 2 KB once RFC 2047 encoded as S3
+		// needs.
+		{Metadata: map[string]string{"name": strings.Repeat("é", 700), "name2": strings.Repeat("é", 100)}},
 		{Metadata: map[string]string{"name": "invoice\u202efdp.exe"}},
 		{Metadata: map[string]string{"name": "line\u2028break"}},
 	} {
