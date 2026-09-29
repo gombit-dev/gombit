@@ -375,6 +375,17 @@ func TestDirectUploads(t *testing.T) {
 	if string(b) != "hello" || info.ContentType != "text/plain" || info.Metadata["filename"] != "résumé.txt" {
 		t.Fatalf("stored %q %+v", b, info)
 	}
+	// The grant is spent: it cannot replace what it stored.
+	if code := send(t, srv, req, "HELLO", nil); code != http.StatusConflict {
+		t.Fatalf("replaying the grant = %d, want 409", code)
+	}
+	if body, _, _ := store.Open(ctx, "uploads/a"); body != nil {
+		b, _ := io.ReadAll(body)
+		_ = body.Close()
+		if string(b) != "hello" {
+			t.Fatalf("the replay replaced the object with %q", b)
+		}
+	}
 	// The upload URL does not read the object.
 	if resp, _ := get(t, srv, req.URL); resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("GET with the upload URL = %d, want 403", resp.StatusCode)

@@ -294,9 +294,14 @@ What a grant enforces:
   another length, type, metadata or key, or a chunked body. S3 refuses it
   because they are in the SigV4 signature; the local and memory drivers
   because `presign.Handler` checks them.
-- **Lifetime.** `Policy.GrantExpiry`, 15 minutes by default. Within it, a
-  grant can be replayed: that replaces the object with another of the same
-  length and type. So check it with `Confirm` whenever you use it.
+- **Lifetime and single use.** `Policy.GrantExpiry` is 15 minutes by
+  default. A grant stores only where nothing is stored yet. S3 enforces this
+  with a signed `If-None-Match: *` (412 otherwise); the app's route answers a
+  D10 409. So once the file has been uploaded and confirmed, the grant cannot
+  replace it with other bytes. If `Confirm` refuses a file, it deletes it,
+  and an unexpired grant can then upload again. On the local driver, each
+  process serializes its own uploads. Processes sharing one root could both
+  store a grant used by two clients at the same instant.
 - **Confirmation.** The declared type is only a claim, and it is what the
   store will serve the object as. `Confirm` reads the object's first bytes.
   It fails, and deletes the object, in any of these cases:

@@ -412,8 +412,9 @@ func (s *Store) URL(ctx context.Context, key string, opts storage.URLOptions) (s
 var _ storage.DirectUploader = (*Store)(nil)
 
 // UploadURL implements storage.DirectUploader: a presigned PutObject whose
-// signature covers the length, the content type, and the metadata
-// headers, so S3 refuses (403) a request that differs in any of them. The
+// signature covers the length, the content type, the metadata headers,
+// and "If-None-Match: *", so S3 refuses (403) a request that differs in
+// any of them, and (412) one to a key that already holds an object. The
 // client sends the returned headers; the bucket needs a CORS rule allowing
 // PUT from the app's origin for a browser to do so.
 func (s *Store) UploadURL(ctx context.Context, key string, opts storage.UploadURLOptions) (storage.UploadRequest, error) {
@@ -431,12 +432,18 @@ func (s *Store) UploadURL(ctx context.Context, key string, opts storage.UploadUR
 	if contentType == "" {
 		contentType = storage.DefaultContentType
 	}
+	// The signature is dated after now (second precision): an expiry
+	// counted from now, truncated, is never later than S3's.
+	expires := time.Now().Truncate(time.Second).Add(opts.Expires)
 	req, err := s.presign.PresignPutObject(ctx, &awss3.PutObjectInput{
 		Bucket:        aws.String(s.bucket),
 		Key:           aws.String(full),
 		ContentType:   aws.String(contentType),
 		ContentLength: aws.Int64(opts.Size),
 		Metadata:      encodeMetadata(opts.Metadata),
+		// Single use: S3 stores it only where no object is (412
+		// otherwise), so an upload checked after it cannot be replaced.
+		IfNoneMatch: aws.String("*"),
 	}, awss3.WithPresignExpires(opts.Expires))
 	if err != nil {
 		return storage.UploadRequest{}, storage.Wrap("upload url", key, classify(ctx, err))
@@ -453,7 +460,7 @@ func (s *Store) UploadURL(ctx context.Context, key string, opts storage.UploadUR
 		Method:  req.Method,
 		URL:     req.URL,
 		Header:  header,
-		Expires: time.Now().Add(opts.Expires),
+		Expires: expires,
 	}, nil
 }
 

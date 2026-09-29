@@ -380,4 +380,22 @@ func TestDirectUploads(t *testing.T) {
 	if f.Size != int64(len(png)) || f.ContentType != "image/png" || f.Filename != "résumé.png" {
 		t.Fatalf("confirmed %+v", f)
 	}
+	// The grant is spent: other bytes of the same length and type cannot
+	// replace the confirmed file.
+	other := bytes.Repeat([]byte("<"), len(png))
+	if code := put(other, nil); code != http.StatusPreconditionFailed {
+		t.Fatalf("replaying the grant = %d, want 412", code)
+	}
+	body, _, err := s.Open(ctx, g.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := io.ReadAll(body)
+	_ = body.Close()
+	if !bytes.Equal(got, png) {
+		t.Fatal("the confirmed file was replaced")
+	}
+	if !g.Request.Expires.After(time.Now()) || g.Request.Header["If-None-Match"] != "*" {
+		t.Fatalf("grant %+v", g.Request)
+	}
 }

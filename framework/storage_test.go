@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -326,15 +327,15 @@ func TestStorageDirectUploadsThroughTheApp(t *testing.T) {
 	if info, err := app.Storage().Stat(ctx, "uploads/a.txt"); err != nil || info.Size != 5 {
 		t.Fatalf("Stat = %+v, %v", info, err)
 	}
-	if got := storageCSRFExemptPrefixes(cfg); len(got) != 1 || got[0] != "/_storage/" {
+	if got := storageRoutePrefixes(cfg); len(got) != 1 || got[0] != "/_storage/" {
 		t.Fatalf("CSRF-exempt prefixes = %v", got)
 	}
 	cfg.Storage.Local.URL = "https://files.example.com/blobs"
-	if got := storageCSRFExemptPrefixes(cfg); len(got) != 1 || got[0] != "/blobs/" {
+	if got := storageRoutePrefixes(cfg); len(got) != 1 || got[0] != "/blobs/" {
 		t.Fatalf("CSRF-exempt prefixes for an absolute URL = %v", got)
 	}
 	cfg.Storage.Driver = config.StorageDriverS3
-	if got := storageCSRFExemptPrefixes(cfg); got != nil {
+	if got := storageRoutePrefixes(cfg); got != nil {
 		t.Fatalf("s3 (no app route) exempts %v", got)
 	}
 }
@@ -360,5 +361,48 @@ func TestStorageRouteIsCSRFExemptInCookieMode(t *testing.T) {
 		if w.Code != want {
 			t.Errorf("PUT %s = %d, want %d", path, w.Code, want)
 		}
+	}
+}
+
+// TestStorageRouteSkipsBodyRewritingMiddleware: a direct upload of a JSON
+// file larger than the JSON body limit, with input sanitization on, is
+// stored whole and unchanged.
+func TestStorageRouteSkipsBodyRewritingMiddleware(t *testing.T) {
+	cfg := config.Default()
+	cfg.Storage.Driver = config.StorageDriverMemory
+	cfg.Storage.URLSecret = strings.Repeat("u", 32)
+	cfg.Security.SanitizeInput = true
+	app := newTestApp(t, WithConfig(cfg))
+	ctx := context.Background()
+	doc := `{"note":"<b>kept</b>","pad":"` + strings.Repeat("x", int(maxRequestBodyBytes)) + `"}`
+	req, err := storage.UploadURL(ctx, app.Storage(), "uploads/doc.json", storage.UploadURLOptions{Expires: time.Minute, Size: int64(len(doc)), ContentType: "application/json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest(req.Method, req.URL, strings.NewReader(doc))
+	for k, v := range req.Header {
+		r.Header.Set(k, v)
+	}
+	w := httptest.NewRecorder()
+	app.Router().ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("PUT = %d %.200s", w.Code, w.Body)
+	}
+	body, _, err := app.Storage().Open(ctx, "uploads/doc.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = body.Close() }()
+	got, _ := io.ReadAll(body)
+	if string(got) != doc {
+		t.Fatalf("stored %d bytes, want the %d sent unchanged", len(got), len(doc))
+	}
+	// Elsewhere, the JSON limit still applies.
+	w = httptest.NewRecorder()
+	big := httptest.NewRequest(http.MethodPut, "/api/anything", strings.NewReader(doc))
+	big.Header.Set("Content-Type", "application/json")
+	app.Router().ServeHTTP(w, big)
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("a large JSON PUT elsewhere = %d, want 413", w.Code)
 	}
 }

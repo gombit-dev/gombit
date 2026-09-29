@@ -17,11 +17,13 @@ type DirectUploader interface {
 	// key, of exactly opts.Size bytes, with opts.ContentType and
 	// opts.Metadata, until opts.Expires has passed. The backend refuses a
 	// request that differs in any of these (a different length, type,
-	// metadata, or key), so the grant is scoped to that one object; within
-	// its lifetime it may be replayed, replacing the object with another
-	// of the same length and type. Like URL, it does not check the key
-	// against what is stored and authorizes nobody: decide who may upload
-	// first, and check what arrived (upload.Confirm) before using it.
+	// metadata, or key), so the grant is scoped to that one object. It
+	// stores only where nothing is stored yet (S3 answers 412, the app's
+	// storage route a D10 409 conflict, otherwise): once used,
+	// the object cannot be replaced through the grant, so bytes checked
+	// after the upload stay the bytes stored. It authorizes nobody: decide
+	// who may upload first, and check what arrived (upload.Confirm) before
+	// using it.
 	UploadURL(ctx context.Context, key string, opts UploadURLOptions) (UploadRequest, error)
 }
 
@@ -72,6 +74,9 @@ func UploadURL(ctx context.Context, s Storage, key string, opts UploadURLOptions
 	d, ok := s.(DirectUploader)
 	if !ok {
 		if err := ValidateKey(key); err != nil {
+			return UploadRequest{}, Wrap("upload url", key, err)
+		}
+		if err := ValidateUploadURLOptions(opts); err != nil {
 			return UploadRequest{}, Wrap("upload url", key, err)
 		}
 		return UploadRequest{}, Wrap("upload url", key, fmt.Errorf("%w: %T has no direct uploads", ErrUnsupported, s))

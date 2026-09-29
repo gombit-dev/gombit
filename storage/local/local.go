@@ -481,20 +481,7 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 // one. Without a Signer it returns storage.ErrUnsupported (after
 // validating its arguments).
 func (s *Store) URL(ctx context.Context, key string, opts storage.URLOptions) (string, error) {
-	if err := storage.ValidateKey(key); err != nil {
-		return "", storage.Wrap("url", key, err)
-	}
-	if err := storage.ValidateURLOptions(opts); err != nil {
-		return "", storage.Wrap("url", key, err)
-	}
-	if err := ctx.Err(); err != nil {
-		return "", storage.Wrap("url", key, err)
-	}
-	if s.urls == nil {
-		return "", storage.Wrap("url", key, storage.ErrUnsupported)
-	}
-	u, err := s.urls.URL(key, opts)
-	return u, storage.Wrap("url", key, err)
+	return presign.StoreURL(ctx, s.urls, key, opts)
 }
 
 var _ storage.DirectUploader = (*Store)(nil)
@@ -504,18 +491,5 @@ var _ storage.DirectUploader = (*Store)(nil)
 // Without a Signer it returns storage.ErrUnsupported (after validating its
 // arguments).
 func (s *Store) UploadURL(ctx context.Context, key string, opts storage.UploadURLOptions) (storage.UploadRequest, error) {
-	if err := storage.ValidateKey(key); err != nil {
-		return storage.UploadRequest{}, storage.Wrap("upload url", key, err)
-	}
-	if err := storage.ValidateUploadURLOptions(opts); err != nil {
-		return storage.UploadRequest{}, storage.Wrap("upload url", key, err)
-	}
-	if err := ctx.Err(); err != nil {
-		return storage.UploadRequest{}, storage.Wrap("upload url", key, err)
-	}
-	if s.urls == nil {
-		return storage.UploadRequest{}, storage.Wrap("upload url", key, storage.ErrUnsupported)
-	}
-	req, err := s.urls.UploadURL(key, opts)
-	return req, storage.Wrap("upload url", key, err)
+	return presign.StoreUploadURL(ctx, s.urls, key, opts)
 }

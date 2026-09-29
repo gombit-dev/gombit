@@ -921,7 +921,9 @@ func runtimeMiddlewareStack(cfg config.Config, metrics *httpMetrics, csrfExemptP
 		// it now stands on its own. It bounds JSON bodies only; non-JSON bodies
 		// (uploads, text/plain) are not size-limited here — a general body-size
 		// middleware is deferred. See requestBodyLimitMiddleware.
-		{name: "request_body_limit", handler: requestBodyLimitMiddleware()},
+		// The storage route's direct uploads are bounded by their signed
+		// length instead, and must be stored byte for byte.
+		{name: "request_body_limit", handler: skipPrefixes(storageRoutePrefixes(cfg), requestBodyLimitMiddleware())},
 	}
 	// Input sanitization is opt-in (issue #271 / PERF-13). The default pipeline
 	// does not rewrite request input: XSS is an output-encoding concern — the
@@ -935,7 +937,7 @@ func runtimeMiddlewareStack(cfg config.Config, metrics *httpMetrics, csrfExemptP
 	// call framework.SanitizeHTML from the handler instead. See
 	// docs/adr/018-input-sanitization-opt-in.md.
 	if cfg.Security.SanitizeInput {
-		stack = append(stack, namedMiddleware{name: "xss", handler: xssMiddleware(rawBodyPaths...)})
+		stack = append(stack, namedMiddleware{name: "xss", handler: skipPrefixes(storageRoutePrefixes(cfg), xssMiddleware(rawBodyPaths...))})
 	}
 	// CSRF must run as global Gin middleware, not just on the auth Huma
 	// routes: it covers every state-changing request (M5-3), including
@@ -944,7 +946,7 @@ func runtimeMiddlewareStack(cfg config.Config, metrics *httpMetrics, csrfExemptP
 	// needs its raw body cannot do the double-submit either.
 	if cfg.Auth.Enabled() && cfg.Auth.EffectiveMode() == config.AuthModeCookie {
 		csrfExempt := append(append([]string{}, csrfExemptPaths...), rawBodyPaths...)
-		stack = append(stack, namedMiddleware{name: "csrf", handler: auth.CSRFMiddlewareExempting(cfg, csrfExempt, storageCSRFExemptPrefixes(cfg))})
+		stack = append(stack, namedMiddleware{name: "csrf", handler: auth.CSRFMiddlewareExempting(cfg, csrfExempt, storageRoutePrefixes(cfg))})
 	}
 	// The per-handler timeout is opt-in (issue #270 / PERF-12): HTTP.RequestTimeout
 	// defaults to 0. There is no separate request_timeout layer to omit — #268

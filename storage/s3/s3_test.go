@@ -200,12 +200,12 @@ func TestUploadURL(t *testing.T) {
 	if req.Method != http.MethodPut || !strings.HasPrefix(req.URL, "http://127.0.0.1:9/b/app/uploads/a.png?") || !strings.Contains(req.URL, "X-Amz-Expires=300") {
 		t.Fatalf("request = %+v", req)
 	}
-	for _, signed := range []string{"content-length", "content-type", "x-amz-meta-filename"} {
+	for _, signed := range []string{"content-length", "content-type", "if-none-match", "x-amz-meta-filename"} {
 		if !strings.Contains(req.URL, signed) {
 			t.Errorf("%s is not signed: %s", signed, req.URL)
 		}
 	}
-	if req.Header["Content-Type"] != "image/png" || req.Header["X-Amz-Meta-Filename"] != "=?UTF-8?b?w6kucG5n?=" {
+	if req.Header["Content-Type"] != "image/png" || req.Header["If-None-Match"] != "*" || req.Header["X-Amz-Meta-Filename"] != "=?UTF-8?b?w6kucG5n?=" {
 		t.Fatalf("headers = %v", req.Header)
 	}
 	if _, ok := req.Header["Host"]; ok {
