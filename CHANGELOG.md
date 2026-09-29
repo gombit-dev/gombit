@@ -33,7 +33,10 @@ version.
     (default `./storage`, created on the first write, gitignored in new
     apps). Objects are stored by the SHA-256 of their key, so every key is
     its own file on any filesystem and none can escape the root. Writes go
-    to a temporary file that is renamed into place, so they are atomic.
+    to a temporary file that is renamed into place, so they are atomic,
+    and an open reader keeps its version across a replace or delete, on
+    Windows too. Temporary files a crashed process left are removed once
+    its lock on them is gone.
   - `storage/memory` is the test driver.
   - `GOMBIT_STORAGE_DRIVER` selects the driver (`local` by default, or
     `memory`), and `framework.WithStorage` attaches your own.
