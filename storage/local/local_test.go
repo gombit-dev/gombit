@@ -68,7 +68,7 @@ func TestObjectsStayUnderTheRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	for _, key := range []string{"a", "a/b", "CON/nul.txt", "c:/x", "..hidden/x", strings.Repeat("s", 400)} {
+	for _, key := range []string{"a", "a/b", "CON/nul.txt", "c:/x", "..hidden/x", strings.Repeat("s", storage.MaxSegmentBytes)} {
 		if _, err := s.Put(ctx, key, strings.NewReader(key), storage.PutOptions{}); err != nil {
 			t.Fatalf("Put(%q) = %v", key, err)
 		}
