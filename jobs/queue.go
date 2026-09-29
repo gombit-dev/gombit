@@ -28,8 +28,10 @@ type Queue interface {
 	// has one, in order. Within a queue the job that became available first
 	// goes first: a waiting job since its available-at time, a job whose
 	// lease expired since that deadline, push order breaking ties. The
-	// returned Delivery's Envelope.Attempt counts this delivery. It does not
-	// block: with nothing available it returns ErrNoJob.
+	// returned Delivery's Envelope.Attempt counts this delivery. Delivery.LeaseExpired
+	// must be true when Reserve reclaims a previous delivery whose lease expired,
+	// and false for pending jobs and jobs returned by Release or Postpone. It does
+	// not block: with nothing available it returns ErrNoJob.
 	//
 	// A stored envelope that no longer decodes is still a delivery: leased,
 	// with a nil error and the failure in Delivery.Err. The caller must end
@@ -84,6 +86,10 @@ type Delivery struct {
 	// Receipt identifies this lease. Ack and Release with a receipt whose
 	// job was since reserved again fail with ErrLeaseLost.
 	Receipt string
+	// LeaseExpired reports that this delivery reclaimed a previous worker's
+	// expired lease. It is false for normal pending jobs and jobs explicitly
+	// released by a worker, including shutdown interruption.
+	LeaseExpired bool
 	// AvailableAt is when the job became available to this delivery: its
 	// available-at time, or the deadline of the lease that expired. Now minus
 	// AvailableAt is how long it waited in the queue.
