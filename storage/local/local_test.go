@@ -836,6 +836,25 @@ func TestListDoesNotBlockWrites(t *testing.T) {
 			}
 			if err := s.List(ctx, "", func(storage.ObjectInfo) error { return nil }); err != nil {
 				listed <- err
+				return
+			}
+		}
+	}()
+	for i := 0; i < 300; i++ {
+		if _, err := s.Put(ctx, "k", strings.NewReader("version"), storage.PutOptions{}); err != nil {
+			t.Fatalf("Put %d during a List = %v", i, err)
+		}
+		if i%3 == 0 {
+			if err := s.Delete(ctx, "k"); err != nil {
+				t.Fatalf("Delete %d during a List = %v", i, err)
+			}
+		}
+	}
+	close(stop)
+	if err := <-listed; err != nil {
+		t.Fatalf("List = %v", err)
+	}
+}
 
 // TestReadsDuringWritesSeeAVersionOrNothing: Open and Stat racing Puts and
 // Deletes of the same key see a whole version or ErrNotFound, never
@@ -874,18 +893,6 @@ func TestReadsDuringWritesSeeAVersionOrNothing(t *testing.T) {
 	}()
 	for i := 0; i < 300; i++ {
 		if _, err := s.Put(ctx, "k", strings.NewReader("version"), storage.PutOptions{}); err != nil {
-			t.Fatalf("Put %d during a List = %v", i, err)
-		}
-		if i%3 == 0 {
-			if err := s.Delete(ctx, "k"); err != nil {
-				t.Fatalf("Delete %d during a List = %v", i, err)
-			}
-		}
-	}
-	close(stop)
-	if err := <-listed; err != nil {
-		t.Fatalf("List = %v", err)
-
 			t.Fatalf("Put %d = %v", i, err)
 		}
 		if err := s.Delete(ctx, "k"); err != nil {
