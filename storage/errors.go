@@ -48,13 +48,18 @@ func (e *Error) Error() string {
 func (e *Error) Unwrap() error { return e.Err }
 
 // Wrap returns err as an *Error for op on key, or nil when err is nil. An
-// err that is already an *Error is returned unchanged.
+// err that is already the *Error of op on key is returned unchanged; one
+// for another operation or key is wrapped, so the outer envelope always
+// names the call that failed.
 func Wrap(op, key string, err error) error {
 	if err == nil {
 		return nil
 	}
+	// Already this operation's envelope: keep it. Any other *Error (a Put
+	// source that failed reading another object, say) is the cause, not
+	// this failure's description, so it is wrapped too.
 	var se *Error
-	if errors.As(err, &se) {
+	if errors.As(err, &se) && se.Op == op && se.Key == key {
 		return err
 	}
 	return &Error{Op: op, Key: key, Err: err}
