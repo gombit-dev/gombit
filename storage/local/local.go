@@ -25,9 +25,13 @@
 // # Writes
 //
 // Put streams into a temporary file in <root>/tmp, never holding the object
-// in memory, flushes it to disk, renames it into place, and flushes the
+// in memory, flushes it to disk, flushes the entry of every new directory
+// on the path (once per process), renames it into place, and flushes the
 // directory: the rename is atomic, so a reader sees the old object or the
-// new one, never part of one, and a Put that returned is on disk. A failed
+// new one, never part of one, and on Linux and macOS a Put that returned
+// survives a crash. Delete flushes its directory too. Windows has no
+// directory flush a process can request, so there writes and deletes are
+// atomic but their durability is the filesystem's. A failed
 // Put removes its temporary file. A process killed mid-Put cannot, so a
 // store's first Put removes temporary files nothing has written to for an
 // hour. The root and its directories are created on the first Put.
@@ -62,6 +66,9 @@ type Store struct {
 	firstPut func(root string)
 	warn     func(msg string, err error)
 	once     sync.Once
+	// durable holds the directories whose own entry this process has
+	// flushed (see ensureDir).
+	durable sync.Map
 }
 
 // Option configures a Store.
@@ -169,15 +176,7 @@ func (s *Store) put(ctx context.Context, key string, r io.Reader, opts storage.P
 	tmpDir := filepath.Join(s.root, "tmp")
 	tmp, err := os.CreateTemp(tmpDir, "put-*")
 	if errors.Is(err, fs.ErrNotExist) {
-		// The first Put: create the root and flush its entry (in its parent)
-		// and tmp's (in the root) now, before any object is published, so a
-		// crash cannot drop the root under objects renamed into it.
 		if err = os.MkdirAll(tmpDir, 0o750); err == nil {
-			if err = syncDir(filepath.Dir(s.root)); err == nil {
-				err = syncDir(s.root)
-			}
-		}
-		if err == nil {
 			tmp, err = os.CreateTemp(tmpDir, "put-*")
 		}
 	}
@@ -224,61 +223,74 @@ func (s *Store) put(ctx context.Context, key string, r io.Reader, opts storage.P
 	if err := ctx.Err(); err != nil {
 		return storage.ObjectInfo{}, err
 	}
+	// Make the directory the object is renamed into durable first: its
+	// entry, and every ancestor's, up to one this process has already seen
+	// flushed. If that fails, the object is still only a temporary file.
 	dst := s.path(key)
-	err = os.Rename(tmp.Name(), dst)
-	if errors.Is(err, fs.ErrNotExist) {
-		// The fan-out directories do not exist yet: create them, and flush
-		// each new entry up to the root, so the object survives a crash.
-		if err = os.MkdirAll(filepath.Dir(dst), 0o750); err == nil {
-			for dir := filepath.Dir(dst); dir != s.root && err == nil; dir = filepath.Dir(dir) {
-				err = syncDir(filepath.Dir(dir))
-			}
-			if err == nil {
-				err = os.Rename(tmp.Name(), dst)
-			}
-		}
+	if err := s.ensureDir(filepath.Dir(dst)); err != nil {
+		return storage.ObjectInfo{}, err
 	}
-	if err != nil {
+	if err := os.Rename(tmp.Name(), dst); err != nil {
 		return storage.ObjectInfo{}, err
 	}
 	// The rename published the object: from here the Put has happened, and
-	// returning an error would tell the caller it did not. Flush the
-	// directory entry so it survives a crash; if that fails even on a
-	// retry, report it through the warning hook and return success.
+	// returning an error would tell the caller it did not. Flush the new
+	// entry; if that fails even on a retry, report it through the warning
+	// hook and return success.
 	committed = true
-	if err := flushRenameHook(dst); err != nil {
-		if err = flushRenameHook(dst); err != nil && s.warn != nil {
-			s.warn("local storage: an object was stored, but flushing its directory entry to disk failed; it may not survive a crash", err)
-		}
-	}
+	s.flushCommitted(filepath.Dir(dst), "an object was stored")
 	return h.info(n), nil
 }
 
-// flushRenameHook is flushRename, replaceable by tests.
-var flushRenameHook = flushRename
-
-// flushRename makes a rename to dst durable. On Unix that is an fsync of
-// the directory that holds the new entry. Windows cannot open a directory
-// to flush it; there, flushing the renamed file itself (FlushFileBuffers)
-// writes its metadata, which NTFS journals together with the rename.
-func flushRename(dst string) error {
-	if runtime.GOOS != "windows" {
-		return syncDir(filepath.Dir(dst))
+// ensureDir creates dir if needed and makes its entry durable: each new
+// directory's name is flushed in its parent, from the deepest ancestor
+// this process has not yet flushed, down. A directory is remembered only
+// once its flush has succeeded, so a failure is retried by the next Put.
+func (s *Store) ensureDir(dir string) error {
+	if _, ok := s.durable.Load(dir); ok {
+		return nil
 	}
-	f, err := os.OpenFile(dst, os.O_RDWR, 0) // #nosec G304 -- an object file under the store's own root
-	if err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return err
 	}
-	err = f.Sync()
-	if cerr := f.Close(); err == nil {
-		err = cerr
-	}
-	return err
+	return s.ensureEntry(dir)
 }
 
-// syncDir flushes a directory's entries (a rename or a new subdirectory) to
-// disk. Windows cannot open a directory to flush it, so it is a no-op there;
-// flushRename covers a rename on Windows by flushing the renamed file.
+func (s *Store) ensureEntry(dir string) error {
+	if _, ok := s.durable.Load(dir); ok {
+		return nil
+	}
+	parent := filepath.Dir(dir)
+	if parent != dir {
+		if err := s.ensureEntry(parent); err != nil {
+			return err
+		}
+		if err := syncDirHook(parent); err != nil {
+			return err
+		}
+	}
+	s.durable.Store(dir, struct{}{})
+	return nil
+}
+
+// flushCommitted flushes dir after an operation already took effect in it
+// (a rename or a remove), retrying once; a failure cannot undo the
+// operation, so it goes to the warning hook instead of the caller.
+func (s *Store) flushCommitted(dir, what string) {
+	if err := syncDirHook(dir); err != nil {
+		if err = syncDirHook(dir); err != nil && s.warn != nil {
+			s.warn("local storage: "+what+", but flushing its directory to disk failed; it may not survive a crash", err)
+		}
+	}
+}
+
+// syncDirHook is syncDir, replaceable by tests.
+var syncDirHook = syncDir
+
+// syncDir flushes a directory's entries (a rename, a remove, or a new
+// subdirectory) to disk. Windows offers no directory flush a process can
+// request, so it is a no-op there: on Windows, writes and deletes are
+// atomic but their crash durability is the filesystem's.
 func syncDir(dir string) error {
 	if runtime.GOOS == "windows" {
 		return nil
@@ -441,9 +453,17 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 	if err := ctx.Err(); err != nil {
 		return storage.Wrap("delete", key, err)
 	}
-	if err := os.Remove(s.path(key)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	path := s.path(key)
+	err := os.Remove(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
 		return storage.Wrap("delete", key, err)
 	}
+	// The remove took effect: flush it so a crash cannot bring the object
+	// back, warning (not failing) if that is not possible.
+	s.flushCommitted(filepath.Dir(path), "an object was deleted")
 	return nil
 }
 

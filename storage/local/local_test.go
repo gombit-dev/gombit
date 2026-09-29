@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -341,28 +342,124 @@ func TestFirstPutHook(t *testing.T) {
 	}
 }
 
-// TestFlushFailureAfterRenameIsNotAFailedPut: once the rename has published
-// the object, a failing directory flush does not make Put report failure
-// (the caller would think nothing was stored); it is retried and then
-// reported through the warning hook.
-func TestFlushFailureAfterRenameIsNotAFailedPut(t *testing.T) {
+// TestFlushFailureAfterCommitIsNotAFailure: once a rename has published an
+// object (or a remove deleted one), a failing flush of its directory does
+// not make the operation report failure (the caller would think nothing
+// happened); it is retried and then reported through the warning hook.
+func TestFlushFailureAfterCommitIsNotAFailure(t *testing.T) {
 	var warned []error
 	s, _ := local.New(filepath.Join(t.TempDir(), "root"), local.WithWarn(func(_ string, err error) { warned = append(warned, err) }))
+	ctx := context.Background()
+	leaf := filepath.Dir(s.Path("k"))
 	calls := 0
-	defer local.SetFlushRename(func(string) error { calls++; return errors.New("fsync: I/O error") })()
-	info, err := s.Put(context.Background(), "k", strings.NewReader("stored"), storage.PutOptions{})
+	defer local.SetSyncDir(func(dir string) error {
+		if dir == leaf {
+			calls++
+			return errors.New("fsync: I/O error")
+		}
+		return nil
+	})()
+	info, err := s.Put(ctx, "k", strings.NewReader("stored"), storage.PutOptions{})
 	if err != nil {
 		t.Fatalf("Put = %v, want success: the object was published", err)
 	}
 	if info.Size != 6 || calls != 2 || len(warned) != 1 {
-		t.Fatalf("info %+v, %d flush attempts, %d warnings; want size 6, 2 attempts, 1 warning", info, calls, len(warned))
+		t.Fatalf("info %+v, %d flushes of the leaf, %d warnings; want size 6, 2, 1", info, calls, len(warned))
 	}
-	body, _, err := s.Open(context.Background(), "k")
-	if err != nil {
+	if st, err := s.Stat(ctx, "k"); err != nil || st.Size != 6 {
+		t.Fatalf("Stat = %+v, %v", st, err)
+	}
+	if err := s.Delete(ctx, "k"); err != nil {
+		t.Fatalf("Delete = %v, want success: the object was removed", err)
+	}
+	if calls != 4 || len(warned) != 2 {
+		t.Fatalf("after Delete: %d leaf flushes, %d warnings; want 4, 2", calls, len(warned))
+	}
+}
+
+// TestAncestorFlushFailureFailsBeforePublishing: if a new directory's entry
+// cannot be flushed, Put fails while the object is still a temporary file,
+// and the next Put flushes it again (a directory that exists is not taken
+// to be durable).
+func TestAncestorFlushFailureFailsBeforePublishing(t *testing.T) {
+	s, _ := local.New(filepath.Join(t.TempDir(), "root"))
+	ctx := context.Background()
+	failRoot := true
+	var synced []string
+	defer local.SetSyncDir(func(dir string) error {
+		synced = append(synced, dir)
+		if dir == s.Root() && failRoot {
+			return errors.New("fsync: I/O error")
+		}
+		return nil
+	})()
+	if _, err := s.Put(ctx, "k", strings.NewReader("x"), storage.PutOptions{}); err == nil {
+		t.Fatal("Put succeeded although the root's entry for objects/ could not be flushed")
+	}
+	if _, err := s.Stat(ctx, "k"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("after the failed Put, Stat = %v; want nothing published", err)
+	}
+	tmp, _ := os.ReadDir(filepath.Join(s.Root(), "tmp"))
+	if len(tmp) != 0 {
+		t.Fatalf("the failed Put left %d temporary files", len(tmp))
+	}
+	failRoot, synced = false, nil
+	if _, err := s.Put(ctx, "k", strings.NewReader("x"), storage.PutOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = body.Close() }()
-	if got, _ := io.ReadAll(body); string(got) != "stored" {
-		t.Fatalf("read %q", got)
+	if !slices.Contains(synced, s.Root()) {
+		t.Fatalf("the retry did not flush the root again (flushed %v)", synced)
+	}
+}
+
+// TestEveryNewAncestorIsFlushedOnce: a root under directories that do not
+// exist yet has each new directory's entry flushed in its parent, up
+// through the deepest one that already existed; a second Put into the same
+// directory flushes only the directory it renames into.
+func TestEveryNewAncestorIsFlushedOnce(t *testing.T) {
+	base := t.TempDir()
+	s, _ := local.New(filepath.Join(base, "a", "b", "root"))
+	ctx := context.Background()
+	var synced []string
+	defer local.SetSyncDir(func(dir string) error { synced = append(synced, dir); return nil })()
+	if _, err := s.Put(ctx, "k", strings.NewReader("x"), storage.PutOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	leaf := filepath.Dir(s.Path("k"))
+	for _, dir := range []string{base, filepath.Join(base, "a"), filepath.Join(base, "a", "b"), s.Root(), filepath.Join(s.Root(), "objects"), filepath.Dir(leaf), leaf} {
+		if !slices.Contains(synced, dir) {
+			t.Errorf("%s was never flushed (flushed %v)", dir, synced)
+		}
+	}
+	synced = nil
+	if _, err := s.Put(ctx, "k", strings.NewReader("y"), storage.PutOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(synced) != 1 || synced[0] != leaf {
+		t.Fatalf("a second Put into the same directory flushed %v, want only %s", synced, leaf)
+	}
+}
+
+// TestPathsDependOnlyOnTheKey: the key-to-path mapping is a pure function
+// of the key's bytes, in lower-case hex, so no host's way of comparing
+// names (case folding, Unicode normalization, reserved names) can make two
+// keys share a file.
+func TestPathsDependOnlyOnTheKey(t *testing.T) {
+	s, _ := local.New("/root")
+	seen := map[string]string{}
+	for _, key := range []string{"Case/File.txt", "case/file.txt", "caf\u00e9/x", "cafe\u0301/x", "CON/nul.txt", "c:/aux", "a", "a/b"} {
+		rel, err := filepath.Rel(filepath.Join(s.Root(), "objects"), s.Path(key))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, part := range strings.Split(filepath.ToSlash(rel), "/") {
+			if strings.Trim(part, "0123456789abcdef") != "" {
+				t.Fatalf("path component %q of %q is not lower-case hex", part, key)
+			}
+		}
+		if other, ok := seen[rel]; ok {
+			t.Fatalf("%q and %q map to the same path", key, other)
+		}
+		seen[rel] = key
 	}
 }
