@@ -74,7 +74,8 @@ const (
 	IP        Kind = "ip"
 	Enum      Kind = "enum"
 	// File and Image are storage-backed: the column holds an object key
-	// (types.File, types.Image), the bytes live in App.Storage().
+	// (types.File, types.Image), the bytes live in App.Storage(). Their
+	// admin widgets upload, preview, and remove files.
 	File     Kind = "file"
 	Image    Kind = "image"
 	Relation Kind = "relation"
@@ -141,9 +142,8 @@ var catalog = []Spec{
 	{Kind: Slug, GoType: "string", GeneratorReady: true, CLITokens: []string{"slug"}, AdminWire: "string", Sortable: true, Searchable: true},
 	{Kind: IP, GoType: "string", GeneratorReady: true, CLITokens: []string{"ip"}, AdminWire: "string", Sortable: true},
 	{Kind: Enum, GoType: "string", GeneratorReady: true, CLITokens: []string{"enum"}, AdminWire: "string", Filterable: true, Searchable: true, Sortable: true},
-	// No admin widget yet (STORAGE-8): the admin leaves these columns out.
-	{Kind: File, GoType: "types.File", GeneratorReady: true, CLITokens: []string{"file"}},
-	{Kind: Image, GoType: "types.Image", GeneratorReady: true, CLITokens: []string{"image"}},
+	{Kind: File, GoType: "types.File", GeneratorReady: true, CLITokens: []string{"file"}, AdminWire: "file"},
+	{Kind: Image, GoType: "types.Image", GeneratorReady: true, CLITokens: []string{"image"}, AdminWire: "image"},
 	{Kind: Relation, GeneratorReady: true, CLITokens: []string{"belongs_to", "has_many", "many_to_many", "one_to_one"}, AdminWire: "relation"},
 }
 

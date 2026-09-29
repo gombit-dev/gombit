@@ -27,6 +27,7 @@ import type { Row } from "../api/types";
 import { canCreate, canList, canViewDetail } from "../capabilities";
 import { spaDetailPath, spaNewPath } from "../api/paths";
 import { formatCell } from "../fields";
+import { cellValue } from "../components/cellValue";
 
 export function ResourceListPage() {
   const { slug = "" } = useParams();
@@ -251,7 +252,7 @@ export function ResourceListPage() {
                     >
                       {columns.map((column) => (
                         <TableCell key={column}>
-                          {formatCell(row[column], model.fields.find((field) => field.name === column))}
+                          {cellValue(row[column], model.fields.find((field) => field.name === column))}
                         </TableCell>
                       ))}
                     </TableRow>

@@ -18,9 +18,9 @@ import (
 func TestResourceOptimisticLocking(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	type Account struct {
-		ID      uint   `gorm:"primaryKey" json:"id"`
-		Balance int    `json:"balance"`
-		Version int    `json:"version"`
+		ID      uint `gorm:"primaryKey" json:"id"`
+		Balance int  `json:"balance"`
+		Version int  `json:"version"`
 	}
 	app := newCookieApp(t)
 	if err := app.DB().AutoMigrate(&Account{}); err != nil {

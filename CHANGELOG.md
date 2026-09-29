@@ -134,6 +134,22 @@ version.
   - The admin leaves file columns out until it has a file widget.
   - `examples/storage` gains a `Document` resource
     ([#530](https://github.com/gombit-dev/gombit/issues/530)).
+- Admin support for storage-backed fields (STORAGE-8):
+  - `file` and `image` admin types; the meta carries each field's `accept`
+    and `max_bytes`;
+  - rows carry file objects with download URLs;
+  - `POST /admin/resources/{slug}/uploads/{field}` grants a direct upload,
+    and needs create or update permission;
+  - writes accept a key only for an upload under the field's prefix that
+    passes its policy and belongs to no other record;
+  - files replaced, removed, or taken with a deleted record are deleted
+    after the change commits;
+  - the SPA's file widget uploads, previews images, and removes, and lists
+    and detail pages link files;
+  - the admin and embedded SPA pages allow the store's origin in their
+    Content-Security-Policy;
+  - `examples/admin` gains a `Brochure` model
+    ([#330](https://github.com/gombit-dev/gombit/issues/330)).
 
 ### Changed
 

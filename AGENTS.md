@@ -57,7 +57,8 @@ served at `/_storage` for local and memory), and direct uploads
 cleanup semantics (`storage.Lister`, `DeleteIfFails`, `DeleteOwned`,
 `Sweep`; nothing shared is deleted without the owned-prefix contract), and
 storage-backed model fields (`file` / `image` kinds, `types.File` /
-`types.Image`, runtime `storage/filefield`; MODEL-8). The other batteries
+`types.Image`, runtime `storage/filefield`; MODEL-8) with their admin
+widgets (upload grants, previews, cleanup after commit; STORAGE-8). The other batteries
 (events, scheduler, mail, gRPC, multi-tenancy, i18n) are not here yet.
 The **CHAOS-0** resilience suite is in: `internal/faulttest` (deterministic
 fault injection: a faulting `database/sql` driver, a scripted HTTP

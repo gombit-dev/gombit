@@ -4,6 +4,7 @@ import { Controller, type Control, type FieldValues } from "react-hook-form";
 import {
   Autocomplete,
   Box,
+  Button,
   Checkbox,
   Chip,
   FormControl,
@@ -14,11 +15,12 @@ import {
   MenuItem,
   Select,
   TextField,
-  MenuItem,
   Typography,
 } from "@mui/material";
 
 import { useApiClient } from "../api/client";
+import { acceptAttribute, asFileValue, isFileField, uploadFile } from "../files";
+import { FileCell } from "./FileCell";
 import { useCatalog } from "../app/providers";
 import type { FieldMeta, Row } from "../api/types";
 import {
@@ -38,6 +40,8 @@ type Props = {
   field: FieldMeta;
   control: Control<FieldValues>;
   disabled?: boolean;
+  // slug is the model's, for a file field's upload grants.
+  slug?: string;
 };
 
 type Option = { value: string; label: string };
@@ -48,9 +52,13 @@ type Option = { value: string; label: string };
 // widget filters the loaded page client-side and flags the truncation.
 const relationPageSize = 100;
 
-export function FieldWidget({ field, control, disabled }: Props) {
+export function FieldWidget({ field, control, disabled, slug }: Props) {
   const readOnly = disabled || field.readonly || isHasMany(field);
   const label = fieldLabel(field);
+
+  if (isFileField(field)) {
+    return <FileInput field={field} control={control} disabled={readOnly} slug={slug} label={label} />;
+  }
 
   if (isManyToMany(field)) {
     return <RelationMultiSelect field={field} control={control} disabled={disabled} />;
@@ -588,4 +596,89 @@ function helperText(field: FieldMeta): string | undefined {
     return "has_many is meta-only";
   }
   return undefined;
+}
+
+type FileInputProps = {
+  field: FieldMeta;
+  control: Control<FieldValues>;
+  disabled: boolean;
+  slug?: string;
+  label: string;
+};
+
+// FileInput is a file or image field: the current file (a link, and a
+// preview for an image), a chooser that uploads the chosen file directly
+// to storage as soon as it is picked, and Remove for an optional field.
+// The form's value is the file (its key is what is sent).
+function FileInput({ field, control, disabled, slug, label }: FileInputProps) {
+  const client = useApiClient();
+  const [busy, setBusy] = useState(false);
+  const [problem, setProblem] = useState("");
+  return (
+    <Controller
+      name={field.name}
+      control={control}
+      rules={field.required ? { validate: (value) => (asFileValue(value) ? true : `${label} is required`) } : undefined}
+      render={({ field: rhf, fieldState }) => (
+        <FormControl error={Boolean(fieldState.error || problem)} disabled={disabled || busy}>
+          <FormLabel>{label}</FormLabel>
+          <Box sx={{ display: "flex", alignItems: "center", gap: 1, flexWrap: "wrap", mt: 1 }}>
+            <FileCell field={field} value={rhf.value} preview />
+            <Button component="label" variant="outlined" size="small" disabled={disabled || busy || !slug}>
+              {busy ? "Uploading…" : asFileValue(rhf.value) ? "Replace" : "Choose file"}
+              <input
+                hidden
+                type="file"
+                accept={acceptAttribute(field)}
+                onChange={(event) => {
+                  const input = event.target as HTMLInputElement;
+                  const file = input.files?.[0];
+                  input.value = "";
+                  if (!file || !slug) {
+                    return;
+                  }
+                  setProblem("");
+                  setBusy(true);
+                  uploadFile(client, slug, field, file)
+                    .then((uploaded) => rhf.onChange(uploaded))
+                    .catch((err: unknown) => setProblem(err instanceof Error ? err.message : "The upload failed."))
+                    .finally(() => setBusy(false));
+                }}
+              />
+            </Button>
+            {!field.required && asFileValue(rhf.value) ? (
+              <Button size="small" disabled={disabled || busy} onClick={() => rhf.onChange(null)}>
+                Remove
+              </Button>
+            ) : null}
+          </Box>
+          <FormHelperText>
+            {problem || fieldState.error?.message || fileHint(field)}
+          </FormHelperText>
+        </FormControl>
+      )}
+    />
+  );
+}
+
+// fileHint describes a file field's policy for the operator.
+function fileHint(field: FieldMeta): string {
+  const parts: string[] = [];
+  if (field.accept && field.accept.length > 0 && !field.accept.includes("*/*")) {
+    parts.push(field.accept.join(", "));
+  }
+  if (field.max_bytes) {
+    parts.push(`up to ${formatBytes(field.max_bytes)}`);
+  }
+  return parts.join(", ");
+}
+
+function formatBytes(n: number): string {
+  if (n >= 1 << 20) {
+    return `${Math.round((n / (1 << 20)) * 10) / 10} MiB`;
+  }
+  if (n >= 1 << 10) {
+    return `${Math.round((n / (1 << 10)) * 10) / 10} KiB`;
+  }
+  return `${n} bytes`;
 }

@@ -6,9 +6,9 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/danielgtaylor/huma/v2"
 	"github.com/gombit-dev/gombit/auth"
 	"github.com/gombit-dev/gombit/config"
-	"github.com/danielgtaylor/huma/v2"
 )
 
 const cookieSecurityName = "cookieAuth"
@@ -128,6 +128,8 @@ func mountRoutes(host Host, reg *registry, svc *auth.Service) {
 		Security:    security,
 		Middlewares: gates,
 	}, h.deleteResource)
+
+	mountFileRoutes(host.API(), h, prefix, gates, security, tags)
 }
 
 func attachQuery(ctx huma.Context, next func(huma.Context)) {

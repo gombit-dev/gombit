@@ -9,11 +9,11 @@ import (
 	"testing/fstest"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/gombit-dev/gombit/auth"
 	"github.com/gombit-dev/gombit/config"
 	"github.com/gombit-dev/gombit/framework"
 	"github.com/gombit-dev/gombit/internal/adminui"
-	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/bcrypt"
 )

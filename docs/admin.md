@@ -218,8 +218,51 @@ arbitrary Go types.
   stored keys, including custom keys, and echo them in meta.
 
 Closed field types: `string`, `text`, `integer`, `float`, `decimal`,
-`boolean`, `datetime`, `date`, `time`, `duration`, `uuid`, `json`, `relation`. These strings are
+`boolean`, `datetime`, `date`, `time`, `duration`, `uuid`, `json`, `file`, `image`, `relation`. These strings are
 the admin projection of the shared vocabulary in [fields.md](fields.md).
+
+### File and image fields
+
+A `types.File` or `types.Image` column (see
+[fields.md § Storage-backed fields](fields.md#storage-backed-fields)) is a
+`file` or `image` field. Its upload policy comes from the model's `storage`
+tag. Without a `prefix`, the field owns `<table>/<column>/`. Meta carries the
+policy as hints: `accept` (media types) and `max_bytes`.
+
+- **Rows** carry a file object: `key`, `filename`, `size`, `content_type`,
+  and `url`, which is signed for 15 minutes unless the file is public.
+  `missing` is `true` when the store no longer has the file. Lists resolve
+  files a few rows at a time.
+- **Uploads:** `POST /api/v1/admin/resources/{slug}/uploads/{field}` with
+  `{size, content_type, filename}` grants one direct upload
+  ([storage.md § Direct uploads](storage.md#direct-uploads)). The grant needs
+  the model's create or update permission, and the declared size and type
+  must fit the policy. The SPA sends the bytes with the grant, then puts the
+  key in the form.
+- **Writes** take the key, or the row's file object (sending it back keeps
+  the file), or `null` to remove it. A changed key is accepted only if it is:
+  - an upload that passes the policy by its bytes (a refused file is deleted);
+  - under the field's prefix;
+  - held by no other record.
+
+  Anything else is a field error: 422 with `fields.<name>`.
+- **Cleanup:** after an update commits, the file it replaced or removed is
+  deleted. After a delete commits, the record's files are deleted. Only keys
+  under the field's own prefix are deleted (`storage.DeleteOwned`). A failed
+  delete leaves a file no record refers to, which `storage.Sweep` removes.
+  So does an upload the operator chose but never saved: the widget uploads as
+  soon as a file is picked. Run
+  `storage.Sweep(ctx, store, "<prefix>", age, filefield.ReferencedBy(db, &Model{}, "<column>"))`
+  for each field periodically (see [storage.md § Cleanup](storage.md#cleanup)).
+- **The SPA:**
+  - the list links each file;
+  - the detail page and the form preview an image;
+  - the form's widget uploads a chosen file at once, and offers Remove for an
+    optional field.
+
+  The admin page's Content-Security-Policy allows the store's origin, such as
+  an S3 bucket or a CDN, for images and requests, so previews and direct
+  uploads work there too.
 
 Relation `kind` is `belongs_to`, `one_to_one`, `has_many`, or `many_to_many`.
 **`belongs_to`** and **`one_to_one`** are stored as the foreign key on

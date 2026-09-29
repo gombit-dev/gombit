@@ -9,6 +9,7 @@ import (
 	"github.com/gombit-dev/gombit/config"
 	"github.com/gombit-dev/gombit/field"
 	"github.com/gombit-dev/gombit/resourcepolicy"
+	"github.com/gombit-dev/gombit/storage/filefield"
 	"gorm.io/gorm/schema"
 )
 
@@ -66,6 +67,9 @@ func registerModel(host Host, model any, opts Options) error {
 	// can filter by name out of the box. A caller who wants no search opts out
 	// explicitly with an empty (non-nil) slice.
 	if err := fillConstraints(opts.Fields, sch); err != nil {
+		return err
+	}
+	if err := fillFilePolicies(opts.Fields, sch); err != nil {
 		return err
 	}
 	if err := alignQuerySurface(&opts, sch, derived); err != nil {
@@ -152,6 +156,9 @@ func registerModel(host Host, model any, opts Options) error {
 	}
 	for i := range m.fields {
 		m.fieldByName[m.fields[i].Name] = &m.fields[i]
+		if m.fields[i].policy != nil {
+			m.files = append(m.files, &m.fields[i])
+		}
 	}
 	m.version = detectVersionField(sch)
 	// The optimistic-lock update path (updateVersioned) and the many-to-many
@@ -542,4 +549,29 @@ func resolveFields(fields []Field, sch *schema.Schema) ([]resolvedField, []*m2mB
 		})
 	}
 	return out, bindings, hasMany, nil
+}
+
+// fillFilePolicies parses each file or image field's upload policy from the
+// model's storage tag (the prefix it owns, its largest file, the types it
+// accepts; see filefield.Policy). A field without a prefix owns
+// <table>/<column>/.
+func fillFilePolicies(fields []Field, sch *schema.Schema) error {
+	for i := range fields {
+		f := &fields[i]
+		if f.Type != TypeFile && f.Type != TypeImage {
+			continue
+		}
+		sf := matchSchemaField(sch, *f)
+		if sf == nil {
+			return fmt.Errorf("admin: file field %q does not exist on the model", f.Name)
+		}
+		p, err := filefield.Policy(sf.Tag.Get("storage"), field.Kind(f.Type), sch.Table+"/"+sf.DBName+"/")
+		if err != nil {
+			return fmt.Errorf("admin: field %q: %w", f.Name, err)
+		}
+		f.policy = &p
+		f.Accept = append([]string(nil), p.Types...)
+		f.MaxBytes = p.MaxBytes
+	}
+	return nil
 }

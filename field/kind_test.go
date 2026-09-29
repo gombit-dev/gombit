@@ -117,7 +117,7 @@ func TestAdminWiresAreTheHistoricalSet(t *testing.T) {
 		}
 		got[w] = struct{}{}
 	}
-	want := []string{"string", "text", "integer", "float", "decimal", "boolean", "datetime", "date", "time", "duration", "uuid", "json", "relation"}
+	want := []string{"string", "text", "integer", "float", "decimal", "boolean", "datetime", "date", "time", "duration", "uuid", "json", "file", "image", "relation"}
 	if len(got) != len(want) {
 		t.Fatalf("admin wires = %v, want %v", AdminWires(), want)
 	}
@@ -170,8 +170,8 @@ func TestKindFromGoMatchesAdminInference(t *testing.T) {
 		{reflect.TypeOf(types.Duration{}), "", "duration"},
 		{reflect.TypeOf(types.JSON(nil)), "", "json"},
 		{reflect.TypeOf(types.NullJSON(nil)), "", "json"},
-		{reflect.TypeOf(types.File("")), "", ""}, // no admin widget yet
-		{reflect.TypeOf((*types.Image)(nil)), "", ""},
+		{reflect.TypeOf(types.File("")), "", "file"},
+		{reflect.TypeOf((*types.Image)(nil)), "", "image"},
 	}
 	for _, tc := range cases {
 		k := KindFromGo(tc.typ, tc.dataType)
@@ -220,8 +220,8 @@ func TestPreferredGeneratorTokensParse(t *testing.T) {
 }
 
 // TestStorageBackedKinds: file and image come from their own Go types (a
-// plain string stays a string), have no query capabilities, and no admin
-// widget until the admin learns one.
+// plain string stays a string), have no query capabilities, and their own
+// admin widgets.
 func TestStorageBackedKinds(t *testing.T) {
 	t.Parallel()
 	for typ, want := range map[reflect.Type]Kind{
@@ -235,7 +235,7 @@ func TestStorageBackedKinds(t *testing.T) {
 	}
 	for _, k := range []Kind{File, Image} {
 		spec, ok := Lookup(k)
-		if !ok || !spec.GeneratorReady || spec.AdminWire != "" || spec.Filterable || spec.Searchable || spec.Sortable || spec.Aggregatable {
+		if !ok || !spec.GeneratorReady || spec.AdminWire != string(k) || spec.Filterable || spec.Searchable || spec.Sortable || spec.Aggregatable {
 			t.Errorf("%s spec = %+v", k, spec)
 		}
 		if p, _, ok := ParseCLI(string(k)); !ok || p != k {

@@ -1,4 +1,5 @@
 import type { FieldMeta, Row } from "./api/types";
+import { asFileValue, fileBodyValue, fileLabel, isFileField } from "./files";
 
 export function isHasMany(field: FieldMeta): boolean {
   return field.type === "relation" && field.related?.kind === "has_many";
@@ -115,6 +116,9 @@ export function formatCell(value: unknown, field?: FieldMeta): string {
   if (typeof value === "boolean") {
     return value ? "yes" : "no";
   }
+  if (isFileField(field)) {
+    return fileLabel(value);
+  }
   if (typeof value === "object") {
     try {
       return JSON.stringify(value);
@@ -154,6 +158,9 @@ export function emptyFormValue(field: FieldMeta): unknown {
   if (field.type === "json") {
     return "";
   }
+  if (isFileField(field)) {
+    return null;
+  }
   return "";
 }
 
@@ -187,6 +194,11 @@ export function formValuesToBody(values: Row, fields: FieldMeta[]): { body: Row;
     if (isBelongsTo(field)) {
       // Send the selected foreign key (preserving its type), or null to clear.
       body[field.name] = isEmptyFormValue(raw) ? null : toRelId(raw);
+      continue;
+    }
+    if (isFileField(field)) {
+      // The key of the file (kept or just uploaded), or null to remove it.
+      body[field.name] = fileBodyValue(raw);
       continue;
     }
     if (field.type === "json") {
@@ -430,6 +442,9 @@ function valueToForm(field: FieldMeta, raw: unknown): unknown {
   }
   if (isManyToMany(field) || isHasMany(field)) {
     return toIdList(raw);
+  }
+  if (isFileField(field)) {
+    return asFileValue(raw);
   }
   if (field.type === "json") {
     if (raw === undefined || raw === null || raw === "") {

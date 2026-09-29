@@ -181,6 +181,13 @@ func coerceValue(raw any, ft FieldType) (any, error) {
 		return span.String(), nil
 	case TypeJSON:
 		return raw, nil
+	case TypeFile, TypeImage:
+		// A key, or the file object a row carries (the form sends back what
+		// it read to keep the file).
+		if obj, ok := raw.(map[string]any); ok {
+			raw = obj["key"]
+		}
+		return asString(raw)
 	case TypeRelation:
 		// belongs_to stores the FK as integer or string, whichever the
 		// payload used. The setter converts to the Go field type.

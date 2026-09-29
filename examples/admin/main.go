@@ -8,6 +8,7 @@ import (
 	"github.com/gombit-dev/gombit/auth"
 	"github.com/gombit-dev/gombit/config"
 	"github.com/gombit-dev/gombit/database"
+	"github.com/gombit-dev/gombit/examples/admin/internal/brochure"
 	"github.com/gombit-dev/gombit/examples/admin/internal/part"
 	"github.com/gombit-dev/gombit/examples/admin/internal/warehouse"
 	"github.com/gombit-dev/gombit/examples/admin/internal/widget"
@@ -43,6 +44,7 @@ func main() {
 		warehouse.RegisterAdmin,
 		part.RegisterAdmin,
 		widget.RegisterAdmin,
+		brochure.RegisterAdmin,
 	} {
 		if err := register(app); err != nil {
 			_ = db.Close()
@@ -54,7 +56,7 @@ func main() {
 		if err := auth.Migrate(db.DB); err != nil {
 			return err
 		}
-		if err := db.AutoMigrate(&warehouse.Warehouse{}, &part.Part{}, &widget.Widget{}); err != nil {
+		if err := db.AutoMigrate(&warehouse.Warehouse{}, &part.Part{}, &widget.Widget{}, &brochure.Brochure{}); err != nil {
 			return err
 		}
 		svc, err := auth.NewService(db.DB, cfg)

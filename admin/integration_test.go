@@ -11,12 +11,12 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/gin-gonic/gin"
 	"github.com/gombit-dev/gombit/admin"
 	"github.com/gombit-dev/gombit/auth"
 	"github.com/gombit-dev/gombit/config"
 	"github.com/gombit-dev/gombit/database"
 	"github.com/gombit-dev/gombit/framework"
-	"github.com/gin-gonic/gin"
 )
 
 var (

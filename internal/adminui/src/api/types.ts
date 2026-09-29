@@ -11,6 +11,8 @@ export type FieldType =
   | "duration"
   | "uuid"
   | "json"
+  | "file"
+  | "image"
   | "relation";
 
 export type RelationKind = "belongs_to" | "one_to_one" | "has_many" | "many_to_many";
@@ -35,6 +37,27 @@ export type FieldMeta = {
   default?: string;
   format?: string;
   choices?: { value: string; label: string }[];
+  // A file or image field's upload policy, as hints (the server enforces it).
+  accept?: string[];
+  max_bytes?: number;
+};
+
+// FileValue is a file field's value: what a row carries (key, filename,
+// size, type, download URL), or what an upload just produced (no URL yet).
+export type FileValue = {
+  key: string;
+  filename?: string;
+  size?: number;
+  content_type?: string;
+  url?: string;
+  missing?: boolean;
+};
+
+// UploadGrant is the admin's answer to an upload request: the key to send
+// as the field's value, and the request that uploads the bytes.
+export type UploadGrant = {
+  key: string;
+  upload: { method: string; url: string; headers?: Record<string, string>; expires?: string };
 };
 
 export type Actions = {

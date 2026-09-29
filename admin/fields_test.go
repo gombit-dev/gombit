@@ -411,6 +411,7 @@ func TestAdminWireSetMatchesVocabulary(t *testing.T) {
 	for _, declared := range []FieldType{
 		TypeString, TypeText, TypeInteger, TypeFloat, TypeDecimal, TypeBoolean,
 		TypeDateTime, TypeDate, TypeTime, TypeDuration, TypeUUID, TypeJSON, TypeRelation,
+		TypeFile, TypeImage,
 	} {
 		if _, ok := seen[string(declared)]; !ok {
 			t.Fatalf("admin type %q is not in the vocabulary admin wires", declared)
@@ -600,9 +601,9 @@ func TestManualPrimaryKeyCreateAndUpdate(t *testing.T) {
 	}
 }
 
-// TestFieldsFromLeavesOutFileColumns: storage-backed columns have no admin
-// widget yet, so the admin leaves them out and still registers the model.
-func TestFieldsFromLeavesOutFileColumns(t *testing.T) {
+// TestFieldsFromDerivesFileColumns: storage-backed columns get the file and
+// image widgets.
+func TestFieldsFromDerivesFileColumns(t *testing.T) {
 	type document struct {
 		gorm.Model
 		Title string       `gorm:"not null"`
@@ -613,9 +614,11 @@ func TestFieldsFromLeavesOutFileColumns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FieldsFrom: %v", err)
 	}
+	types := map[string]FieldType{}
 	for _, f := range fields {
-		if f.Name == "file" || f.Name == "cover" {
-			t.Fatalf("file column %s was derived as %q", f.Name, f.Type)
-		}
+		types[f.Name] = f.Type
+	}
+	if types["file"] != TypeFile || types["cover"] != TypeImage {
+		t.Fatalf("file columns derived as %v", types)
 	}
 }

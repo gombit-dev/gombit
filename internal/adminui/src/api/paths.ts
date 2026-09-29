@@ -18,6 +18,10 @@ export function apiResourcePath(slug: string, id?: string): string {
   return `${base}/${pathSegment(id)}`;
 }
 
+export function apiUploadPath(slug: string, field: string): string {
+  return `${apiResourcePath(slug)}/uploads/${pathSegment(field)}`;
+}
+
 export function spaListPath(slug: string): string {
   return `/${pathSegment(slug)}`;
 }

@@ -7,8 +7,8 @@ import {
   setCSRFToken,
 } from "../auth/session";
 import { ContractError } from "./error";
-import { apiMetaPath, apiResourcePath } from "./paths";
-import type { Catalog, CatalogAux, ModelMeta, PageMeta, Row } from "./types";
+import { apiMetaPath, apiResourcePath, apiUploadPath } from "./paths";
+import type { Catalog, CatalogAux, ModelMeta, PageMeta, Row, UploadGrant } from "./types";
 
 export type Envelope<T, M = unknown> = {
   data: T;
@@ -202,6 +202,8 @@ export function createAdminClient() {
       request<Row>("PATCH", apiPath(apiResourcePath(slug, id)), { body }),
     remove: (slug: string, id: string) =>
       request<{ ok: boolean }>("DELETE", apiPath(apiResourcePath(slug, id))),
+    uploadGrant: (slug: string, field: string, body: { size: number; content_type: string; filename: string }) =>
+      request<UploadGrant>("POST", apiPath(apiUploadPath(slug, field)), { body }),
   };
 }
 

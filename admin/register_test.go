@@ -394,8 +394,8 @@ type Attachment struct {
 	File  *types.File `gorm:"size:512;uniqueIndex"`
 }
 
-// TestRegisterWithAFileColumn: a model with a storage-backed column
-// registers; the column is left out until the admin has a file widget.
+// TestRegisterWithAFileColumn: a model with a storage-backed column, with
+// no storage tag, registers (its field owns <table>/<column>/).
 func TestRegisterWithAFileColumn(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	app := newCookieApp(t)

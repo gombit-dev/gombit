@@ -214,6 +214,7 @@ export function ResourceFormPage({ mode }: Props) {
               field={field}
               control={control}
               disabled={field.readonly}
+              slug={slug}
             />
           ))}
           <Button type="submit" variant="contained" disabled={isSubmitting}>
