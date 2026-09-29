@@ -129,5 +129,5 @@ func Confirm(ctx context.Context, store storage.Storage, key string, p Policy) (
 	if err != nil || declaredType != detectedType {
 		return reject(fmt.Errorf("%w: declared %q, but the bytes are %q", ErrType, info.ContentType, detected))
 	}
-	return File{ObjectInfo: info, Filename: info.Metadata[FilenameMetadata]}, nil
+	return File{ObjectInfo: info}, nil
 }

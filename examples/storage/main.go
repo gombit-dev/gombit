@@ -135,7 +135,7 @@ func sweepAbandoned(ctx context.Context, store storage.Storage, recs *records) (
 // record writes the record for a stored upload, and deletes the file when
 // that fails (storage.DeleteIfFails): no file is left that nothing refers to.
 func record(c *gin.Context, store storage.Storage, recs *records, f upload.File) bool {
-	err := storage.DeleteIfFails(c.Request.Context(), store, f.Key, func() error { return recs.insert(f.Key, f.Filename) })
+	err := storage.DeleteIfFails(c.Request.Context(), store, f.Key, func() error { return recs.insert(f.Key, f.Filename()) })
 	if errors.Is(err, errFull) {
 		fail(c, contract.Conflict("No more files can be stored."))
 		return false
@@ -207,7 +207,7 @@ func register(r gin.IRouter, store storage.Storage, recs *records) {
 		}
 		c.JSON(http.StatusCreated, gin.H{"data": gin.H{
 			"id":           strings.TrimPrefix(f.Key, images.Prefix),
-			"filename":     f.Filename,
+			"filename":     f.Filename(),
 			"content_type": f.ContentType,
 			"size":         f.Size,
 		}})
@@ -273,7 +273,7 @@ func register(r gin.IRouter, store storage.Storage, recs *records) {
 		}
 		c.JSON(http.StatusOK, gin.H{"data": gin.H{
 			"id":           c.Param("id"),
-			"filename":     f.Filename,
+			"filename":     f.Filename(),
 			"content_type": f.ContentType,
 			"size":         f.Size,
 		}})

@@ -99,8 +99,9 @@ type SweepResult struct {
 // record (see DeleteOwned), with olderThan longer than an upload can take
 // to be recorded (for direct uploads, more than the grant's lifetime).
 //
-// A referenced error stops the sweep and is returned, with what was done
-// so far. It needs a Lister (ErrUnsupported otherwise).
+// referenced is called once per candidate: keep it an indexed lookup of
+// the key. A referenced error stops the sweep and is returned, with what
+// was done so far. It needs a Lister (ErrUnsupported otherwise).
 func Sweep(ctx context.Context, s Storage, prefix string, olderThan time.Duration, referenced func(ctx context.Context, key string) (bool, error)) (SweepResult, error) {
 	var res SweepResult
 	if olderThan <= 0 {

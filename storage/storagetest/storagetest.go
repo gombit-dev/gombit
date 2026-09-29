@@ -813,6 +813,14 @@ func checkList(t testing.TB, s storage.Storage) {
 		if !ok || o.Size != int64(len("bytes of "+key)) || o.ModTime.IsZero() {
 			t.Fatalf("List(\"list/\") gave %q as %+v", key, o)
 		}
+		st, err := s.Stat(ctxFor(t), key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// To the second: an S3 listing has milliseconds, its HEAD not.
+		if o.ETag != st.ETag || !o.ModTime.Truncate(time.Second).Equal(st.ModTime.Truncate(time.Second)) {
+			t.Fatalf("List gave %q ETag %q at %s; Stat says %q at %s (Sweep decides on these)", key, o.ETag, o.ModTime, st.ETag, st.ModTime)
+		}
 	}
 	if all := collect(""); len(all) < 5 {
 		t.Fatalf("List(\"\") = %v, want every object", keysOf(all))

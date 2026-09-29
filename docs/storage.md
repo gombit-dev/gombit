@@ -217,6 +217,9 @@ shared transaction. `storage` defines what happens when they diverge:
   store that can list (`storage.Lister`: local, memory and S3). On the local
   driver, listing reads every object file, whatever the prefix.
 
+`DeleteOwned` and `Sweep` work only under a prefix, never on a whole store.
+So give `upload.Policy` a `Prefix` for files a record owns.
+
 **Ownership.** Nothing is deleted automatically, and a shared file is never
 deleted. The contract is explicit: a record owns the objects under the prefix
 its field stores them under (`upload.Policy.Prefix`, one generated key per
@@ -271,7 +274,7 @@ r.POST("/avatars", func(c *gin.Context) {
 		fail(c, upload.MapError(c.Request.Context(), err))
 		return
 	}
-	// f.Key is "avatars/<32 hex digits>"; f.Filename is the client's name.
+	// f.Key is "avatars/<32 hex digits>"; f.Filename() is the client's name.
 })
 ```
 

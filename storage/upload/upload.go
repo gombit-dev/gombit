@@ -93,7 +93,9 @@ type Policy struct {
 	// Required: "*/*" accepts any type, and must be asked for.
 	Types []string
 	// Prefix starts every generated key ("avatars/"): empty, or a valid
-	// key path ending with '/'.
+	// key path ending with '/'. Set one for files a record owns: the
+	// cleanup helpers (storage.DeleteOwned, storage.Sweep) work only under
+	// a prefix, never on the whole store.
 	Prefix string
 	// Field is the multipart form field holding the file (DefaultField
 	// when empty). Receive only.
@@ -117,12 +119,11 @@ type Policy struct {
 // short enough that a leaked grant is soon useless.
 const DefaultGrantExpiry = 15 * time.Minute
 
-// File is a stored upload.
+// File is a stored upload. Its Filename() is the client's filename,
+// cleaned (empty when it sent none): for display and Content-Disposition
+// only, never a path.
 type File struct {
 	storage.ObjectInfo
-	// Filename is the client's filename, cleaned (empty when it sent none):
-	// for display and Content-Disposition only, never a path.
-	Filename string
 }
 
 func (p Policy) validate() error {
@@ -216,7 +217,7 @@ func save(ctx context.Context, store storage.Storage, src io.Reader, filename st
 		if md == nil {
 			md = map[string]string{}
 		}
-		filename = fitMetadata(md, filename)
+		fitMetadata(md, filename)
 	}
 	info, err := store.Put(ctx, key, io.MultiReader(bytes.NewReader(head), src), storage.PutOptions{
 		ContentType: contentType,
@@ -226,7 +227,7 @@ func save(ctx context.Context, store storage.Storage, src io.Reader, filename st
 	if err != nil {
 		return File{}, source.classify(ctx, err)
 	}
-	return File{ObjectInfo: info, Filename: filename}, nil
+	return File{ObjectInfo: info}, nil
 }
 
 // sourceReader remembers the first error its reader returned other than

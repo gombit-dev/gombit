@@ -448,8 +448,9 @@ var _ storage.Lister = (*Store)(nil)
 
 // List implements storage.Lister. Objects are stored by the hash of their
 // key, so it reads every object file's trailer: its cost is the whole
-// store, whatever the prefix. A file that is not a readable object (a
-// damaged one) fails the listing, rather than be skipped silently.
+// store, whatever the prefix. A damaged file (one that is not a readable
+// object) is skipped and reported to WithWarn, so one bad file does not
+// stop every cleanup that lists.
 func (s *Store) List(ctx context.Context, prefix string, fn func(storage.ObjectInfo) error) error {
 	err := filepath.WalkDir(filepath.Join(s.root, "objects"), func(path string, d fs.DirEntry, err error) error {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -473,6 +474,12 @@ func (s *Store) List(ctx context.Context, prefix string, fn func(storage.ObjectI
 		}
 		size, h, err := readTrailer(f)
 		_ = f.Close()
+		if errors.Is(err, errCorrupt) {
+			if s.warn != nil {
+				s.warn("local storage: skipping a damaged object file while listing", err)
+			}
+			return nil
+		}
 		if err != nil {
 			return err
 		}

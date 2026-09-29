@@ -533,11 +533,20 @@ func TestListEdgeCases(t *testing.T) {
 	if len(got) != 1 || got[0].ContentType != "text/plain" || got[0].Metadata["k"] != "v" {
 		t.Fatalf("List = %+v, want the full ObjectInfo", got)
 	}
-	// A damaged object file fails the listing instead of hiding objects.
+	// A damaged object file is skipped and reported; the rest still list.
+	var warned []error
+	s, err := local.New(s.Root(), local.WithWarn(func(_ string, err error) { warned = append(warned, err) }))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(s.Root(), "objects", "zz"), []byte("junk"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.List(ctx, "", func(storage.ObjectInfo) error { return nil }); err == nil || !strings.Contains(err.Error(), "corrupt") {
-		t.Fatalf("List over a damaged file = %v", err)
+	n := 0
+	if err := s.List(ctx, "", func(storage.ObjectInfo) error { n++; return nil }); err != nil || n != 1 {
+		t.Fatalf("List over a damaged file = %v, %d objects; want the good one", err, n)
+	}
+	if len(warned) != 1 || !strings.Contains(warned[0].Error(), "corrupt") {
+		t.Fatalf("warnings = %v, want the damaged file reported", warned)
 	}
 }

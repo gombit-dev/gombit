@@ -44,6 +44,7 @@ type fake struct {
 	noUploadCheck    bool // UploadURL grants anything, valid or not
 	listByDir        bool // List("list/") also gives "listing" (a string prefix of the directory)
 	listSwallows     bool // List ignores fn's error and goes on
+	listStaleTime    bool // List reports the time of the listing, not of the object
 }
 
 type object struct {
@@ -279,7 +280,11 @@ func (f *fake) List(ctx context.Context, prefix string, fn func(storage.ObjectIn
 			match = strings.HasPrefix(k, strings.TrimSuffix(prefix, "/"))
 		}
 		if match {
-			infos = append(infos, o.info)
+			info := o.info
+			if f.listStaleTime {
+				info.ModTime = time.Now().Add(time.Hour)
+			}
+			infos = append(infos, info)
 		}
 	}
 	f.mu.Unlock()
@@ -378,6 +383,7 @@ func TestSuiteCatchesBrokenDrivers(t *testing.T) {
 		{"DirectUpload", func(f *fake) { f.noUploadCheck = true }, "want storage.ErrInvalidKey"},
 		{"List", func(f *fake) { f.listByDir = true }, "want exactly list/a"},
 		{"List", func(f *fake) { f.listSwallows = true }, "want fn's error after 1"},
+		{"List", func(f *fake) { f.listStaleTime = true }, "Sweep decides on these"},
 	}
 	covered := map[string]bool{}
 	for _, tc := range cases {

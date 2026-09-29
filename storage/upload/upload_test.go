@@ -80,7 +80,7 @@ func TestReceiveStoresTheFile(t *testing.T) {
 	if !generatedKey.MatchString(f.Key) {
 		t.Fatalf("key = %q, want a generated key under the prefix", f.Key)
 	}
-	if f.ContentType != "image/png" || f.Filename != "résumé.png" || f.Size != int64(len(png)) {
+	if f.ContentType != "image/png" || f.Filename() != "résumé.png" || f.Size != int64(len(png)) {
 		t.Fatalf("file = %+v", f)
 	}
 	body, info, err := store.Open(context.Background(), f.Key)
@@ -125,10 +125,10 @@ func TestFilenamesCannotTraverse(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%q: %v", tc.in, err)
 		}
-		if !generatedKey.MatchString(f.Key) || f.Filename != tc.want {
-			t.Errorf("%q stored as %q named %q", tc.in, f.Key, f.Filename)
+		if !generatedKey.MatchString(f.Key) || f.Filename() != tc.want {
+			t.Errorf("%q stored as %q named %q", tc.in, f.Key, f.Filename())
 		}
-		if err := storage.ValidateMetadata(map[string]string{upload.FilenameMetadata: f.Filename}); err != nil {
+		if err := storage.ValidateMetadata(map[string]string{upload.FilenameMetadata: f.Filename()}); err != nil {
 			t.Errorf("%q: the cleaned name is not valid metadata: %v", tc.in, err)
 		}
 	}
@@ -142,8 +142,8 @@ func TestReceiveIgnoresTheClientsPath(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%q: %v", name, err)
 		}
-		if !generatedKey.MatchString(f.Key) || strings.ContainsAny(f.Filename, `/\`) || f.Filename == ".." {
-			t.Errorf("%q stored as %q named %q", name, f.Key, f.Filename)
+		if !generatedKey.MatchString(f.Key) || strings.ContainsAny(f.Filename(), `/\`) || f.Filename() == ".." {
+			t.Errorf("%q stored as %q named %q", name, f.Key, f.Filename())
 		}
 	}
 }
@@ -428,7 +428,7 @@ func TestReceiveBody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !generatedKey.MatchString(f.Key) || f.ContentType != "image/png" || f.Filename != "me.png" || f.Size != int64(len(png)) {
+	if !generatedKey.MatchString(f.Key) || f.ContentType != "image/png" || f.Filename() != "me.png" || f.Size != int64(len(png)) {
 		t.Fatalf("file = %+v", f)
 	}
 
@@ -498,8 +498,8 @@ func TestLongFilenameFitsTheMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if f.Filename == "" || len(f.Filename) >= 240 || f.Metadata[upload.FilenameMetadata] != f.Filename {
-		t.Fatalf("filename %d bytes, metadata %d bytes", len(f.Filename), len(f.Metadata[upload.FilenameMetadata]))
+	if f.Filename() == "" || len(f.Filename()) >= 240 || f.Metadata[upload.FilenameMetadata] != f.Filename() {
+		t.Fatalf("filename %d bytes, metadata %d bytes", len(f.Filename()), len(f.Metadata[upload.FilenameMetadata]))
 	}
 	if err := storage.ValidateMetadata(f.Metadata); err != nil {
 		t.Fatal(err)

@@ -66,7 +66,7 @@ func TestDirectUploadFlow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if f.Key != g.Key || f.Size != int64(len(png)) || f.ContentType != "image/png" || f.Filename != "me.png" {
+	if f.Key != g.Key || f.Size != int64(len(png)) || f.ContentType != "image/png" || f.Filename() != "me.png" {
 		t.Fatalf("confirmed %+v", f)
 	}
 }
