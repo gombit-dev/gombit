@@ -16,8 +16,8 @@ import (
 // that has already ended fails the call with ctx's error.
 //
 // Every valid key is its own object on every driver: keys that differ only
-// in case, a key that is a prefix of another ("a" and "a/b"), long
-// segments, and names a filesystem reserves ("CON", "c:") all store and
+// in case, a key that is a prefix of another ("a" and "a/b"), segments up
+// to 255 bytes, and names a filesystem reserves ("CON", "c:") all store and
 // read back as themselves. A driver on a filesystem must map keys to paths
 // in a way that keeps this (it cannot just join the key to a directory).
 //

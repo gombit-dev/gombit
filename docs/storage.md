@@ -52,7 +52,7 @@ err = store.Delete(ctx, "avatars/42.png")
 | **Atomic writes** | A `Put` that fails leaves the key as it was: the previous object whole, or still absent. That covers the reader returning an error, the context ending, and a length that differs from the declared `Size`. No one ever reads a partial object. Concurrent `Put`s to one key leave one of them whole. |
 | **Overwrite** | `Put` replaces an existing object, including its content type and metadata. |
 | **Idempotent delete** | Deleting a missing object is not an error, so a retried delete is safe. |
-| **Portable keys** | Every method validates its key with the same rule (below) and fails with `ErrInvalidKey` before touching the backend. Every valid key is its own object on every driver: keys that differ only in case, a key that is a prefix of another (`a` and `a/b`), long segments, and names Windows reserves (`CON`, `c:`) all store and read back as themselves. |
+| **Portable keys** | Every method validates its key with the same rule (below) and fails with `ErrInvalidKey` before touching the backend. Every valid key is its own object on every driver: keys that differ only in case, a key that is a prefix of another (`a` and `a/b`), segments up to 255 bytes, and names Windows reserves (`CON`, `c:`) all store and read back as themselves. |
 | **Context** | Every method honors `ctx`: one that has already ended fails the call with the context's error. A `Put` canceled mid-stream fails the same way and stores nothing. |
 
 ### `PutOptions` and `ObjectInfo`
@@ -92,7 +92,8 @@ A key is a `/`-separated path of one or more segments. The same rule
 (`storage.ValidateKey`) applies on every driver, so a key that works in
 development works in production:
 
-- 1 to 1024 bytes of valid UTF-8;
+- 1 to 1024 bytes of valid UTF-8, with no segment longer than 255 bytes
+  (the file-name limit of the filesystems under services such as MinIO);
 - no leading or trailing `/`, and no empty segment (`a//b`);
 - no `.` or `..` segment, so a key can never climb out of a prefix or, on the
   local driver, out of the storage root;
@@ -203,7 +204,7 @@ The suite checks every guarantee above:
 - the default content type;
 - overwrites and idempotent deletes;
 - every invalid key, on every method;
-- portable keys (case variants, prefix keys, long segments, reserved names);
+- portable keys (case variants, prefix keys, segments up to 255 bytes, reserved names);
 - every method on an already-canceled context;
 - an 8 MiB object streamed through a pipe in small pieces, which is never
   held in memory by the test;
