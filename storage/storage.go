@@ -37,10 +37,10 @@ type Storage interface {
 	// Open returns the object's bytes as a stream, and its ObjectInfo. The
 	// caller must Close the reader. A missing object is ErrNotFound. The
 	// reader stays bound to ctx until it is closed: once ctx ends, Read
-	// fails with ctx's error on every driver, and a Read in progress is
-	// interrupted (an HTTP response body does this by itself;
-	// ContextReadCloser does it for the others), so keep ctx alive for as
-	// long as the stream is read.
+	// fails with ctx's error on every driver, and a Read blocked in the
+	// backend returns (an HTTP response body does this by itself;
+	// ContextReadCloser does it for a reader whose Close interrupts a Read),
+	// so keep ctx alive for as long as the stream is read.
 	Open(ctx context.Context, key string) (io.ReadCloser, ObjectInfo, error)
 
 	// Stat returns the object's ObjectInfo without its bytes. A missing
@@ -99,10 +99,11 @@ type ObjectInfo struct {
 	ContentType string
 	// ETag identifies this version of the object's bytes, when the driver
 	// has one; it changes when the object is replaced with different
-	// bytes. Empty when unsupported. Compare ETags, don't compute them: the
-	// local and memory drivers' is the hex SHA-256 of the bytes, S3's the
-	// hex MD5 for an object stored in one request and "<md5>-<parts>" for a
-	// multipart upload (a checksum of the parts, not of the bytes).
+	// bytes. A driver reports it from Put, Open, and Stat alike, or from
+	// none of them (empty: unsupported). Compare ETags, don't compute them:
+	// the local and memory drivers' is the hex SHA-256 of the bytes, S3's
+	// the hex MD5 for an object stored in one request and "<md5>-<parts>"
+	// for a multipart upload (a checksum of the parts, not of the bytes).
 	ETag string
 	// ModTime is when the object was last stored (for an object written
 	// once, as uploads under generated keys are, when it was created).
