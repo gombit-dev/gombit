@@ -434,7 +434,8 @@ func (s *Store) Open(ctx context.Context, key string) (io.ReadCloser, storage.Ob
 	if err != nil {
 		return nil, storage.ObjectInfo{}, storage.Wrap("open", key, err)
 	}
-	return &objectReader{SectionReader: io.NewSectionReader(f, 0, size), f: f}, h.info(size), nil
+	// Bound to ctx until closed, as the contract asks; it keeps Seek.
+	return storage.ContextReadCloser(ctx, &objectReader{SectionReader: io.NewSectionReader(f, 0, size), f: f}), h.info(size), nil
 }
 
 type objectReader struct {

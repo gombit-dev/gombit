@@ -130,7 +130,7 @@ func (s *Store) Open(ctx context.Context, key string) (io.ReadCloser, storage.Ob
 	if err != nil {
 		return nil, storage.ObjectInfo{}, err
 	}
-	return reader{bytes.NewReader(o.data)}, copyInfo(o.info), nil
+	return storage.ContextReadCloser(ctx, reader{bytes.NewReader(o.data)}), copyInfo(o.info), nil
 }
 
 // Stat implements storage.Storage.
