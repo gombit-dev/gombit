@@ -39,6 +39,14 @@ const csrfTokenBytes = 32
 // Safe methods still bootstrap the cookie on those paths. See
 // framework.WithCSRFExemptPaths and docs/auth-cookie.md.
 func CSRFMiddleware(cfg config.Config, exemptPaths ...string) gin.HandlerFunc {
+	return CSRFMiddlewareExempting(cfg, exemptPaths, nil)
+}
+
+// CSRFMiddlewareExempting is CSRFMiddleware that also exempts every path
+// under each of exemptPrefixes (each ending with '/'). framework.New uses it
+// for the storage route, whose signed upload URLs authorize themselves and
+// carry no cookie credentials, like a presigned S3 URL.
+func CSRFMiddlewareExempting(cfg config.Config, exemptPaths, exemptPrefixes []string) gin.HandlerFunc {
 	secret := []byte(cfg.Auth.JWTSecret)
 	authCfg := cfg.Auth
 	exempt := make(map[string]struct{}, len(exemptPaths))
@@ -56,6 +64,12 @@ func CSRFMiddleware(cfg config.Config, exemptPaths ...string) gin.HandlerFunc {
 		if _, ok := exempt[c.Request.URL.Path]; ok {
 			c.Next()
 			return
+		}
+		for _, prefix := range exemptPrefixes {
+			if prefix != "" && strings.HasPrefix(c.Request.URL.Path, prefix) {
+				c.Next()
+				return
+			}
 		}
 		if !validCSRFRequest(c, secret) {
 			writeCSRFError(c)

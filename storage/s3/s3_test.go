@@ -186,3 +186,32 @@ func TestURLs(t *testing.T) {
 		}
 	}
 }
+
+func TestUploadURL(t *testing.T) {
+	ctx := context.Background()
+	s, err := New(ctx, Config{Endpoint: "http://127.0.0.1:9", Region: "us-east-1", Bucket: "b", Prefix: "app/", AccessKeyID: "id", SecretAccessKey: "secret", ForcePathStyle: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := s.UploadURL(ctx, "uploads/a.png", storage.UploadURLOptions{Expires: 5 * time.Minute, Size: 10, ContentType: "image/png", Metadata: map[string]string{"filename": "é.png"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.Method != http.MethodPut || !strings.HasPrefix(req.URL, "http://127.0.0.1:9/b/app/uploads/a.png?") || !strings.Contains(req.URL, "X-Amz-Expires=300") {
+		t.Fatalf("request = %+v", req)
+	}
+	for _, signed := range []string{"content-length", "content-type", "x-amz-meta-filename"} {
+		if !strings.Contains(req.URL, signed) {
+			t.Errorf("%s is not signed: %s", signed, req.URL)
+		}
+	}
+	if req.Header["Content-Type"] != "image/png" || req.Header["X-Amz-Meta-Filename"] != "=?UTF-8?b?w6kucG5n?=" {
+		t.Fatalf("headers = %v", req.Header)
+	}
+	if _, ok := req.Header["Host"]; ok {
+		t.Fatalf("headers include Host: %v", req.Header)
+	}
+	if _, err := s.UploadURL(ctx, "k", storage.UploadURLOptions{Expires: time.Minute, Size: -1}); !errors.Is(err, storage.ErrInvalidOptions) {
+		t.Fatalf("a negative size = %v", err)
+	}
+}

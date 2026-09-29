@@ -11,6 +11,12 @@
 //	curl localhost:8080/uploads/<id> -OJ
 //	curl localhost:8080/uploads/<id>/link   # a download link valid for 5 minutes
 //
+// A direct upload sends the bytes straight to storage, not through the app:
+//
+//	curl -X POST localhost:8080/uploads/direct -d '{"size":1234,"content_type":"image/png","filename":"a.png"}'
+//	curl -X PUT --data-binary @a.png -H 'Content-Type: image/png' '<data.upload.url>'
+//	curl -X POST localhost:8080/uploads/direct/<id>/confirm
+//
 // The key is built by the server: "files/" + the id in the path (checked
 // first, so a malformed one is a 404, not a server error), or, for a form
 // upload, a random id under "uploads/" from storage/upload, which also
@@ -152,6 +158,48 @@ func register(r gin.IRouter, store storage.Storage) {
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"data": gin.H{"url": u, "expires_in": int(linkLifetime.Seconds())}})
+	})
+
+	// A direct upload, step 1: grant it. The client declares the file;
+	// the grant is a signed PUT of exactly that size and type (decide who
+	// may upload first; this example lets anyone).
+	r.POST("/uploads/direct", func(c *gin.Context) {
+		var in struct {
+			Size        int64  `json:"size"`
+			ContentType string `json:"content_type"`
+			Filename    string `json:"filename"`
+		}
+		if err := c.ShouldBindJSON(&in); err != nil {
+			fail(c, contract.Validation("Send the file's size, content_type, and filename.", nil))
+			return
+		}
+		g, err := upload.Authorize(c.Request.Context(), store, images, in.Size, in.ContentType, in.Filename)
+		if errors.Is(err, storage.ErrUnsupported) {
+			fail(c, contract.Internal("Direct uploads are not configured on this server."))
+			return
+		}
+		if err != nil {
+			fail(c, upload.MapError(c.Request.Context(), err))
+			return
+		}
+		c.JSON(http.StatusCreated, gin.H{"data": gin.H{"id": strings.TrimPrefix(g.Key, images.Prefix), "upload": g.Request}})
+	})
+
+	// Step 3, after the client's PUT: check what arrived, by its bytes.
+	// A real app confirms only ids it granted to this caller (kept with
+	// the grant), then records the file.
+	r.POST("/uploads/direct/:id/confirm", func(c *gin.Context) {
+		f, err := upload.Confirm(c.Request.Context(), store, images.Prefix+c.Param("id"), images)
+		if err != nil {
+			fail(c, upload.MapError(c.Request.Context(), err))
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"data": gin.H{
+			"id":           c.Param("id"),
+			"filename":     f.Filename,
+			"content_type": f.ContentType,
+			"size":         f.Size,
+		}})
 	})
 
 	r.GET("/uploads/:id", func(c *gin.Context) {

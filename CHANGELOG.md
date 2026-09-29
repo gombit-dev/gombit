@@ -88,6 +88,20 @@ version.
   - authorization stays with the application, before it asks for a URL;
   - `examples/storage` gains `GET /uploads/:id/link`
     ([#327](https://github.com/gombit-dev/gombit/issues/327)).
+- Direct uploads (STORAGE-6):
+  - `upload.Authorize` grants a client one upload straight to storage: a
+    signed `PUT` of exactly the declared size and type, with the metadata,
+    under a generated key, for `Policy.GrantExpiry` (15 minutes);
+  - `upload.Confirm` then checks the stored object's size and its type (as
+    detected from its bytes, which must be the declared type), and deletes
+    what fails;
+  - the contract is the optional `storage.DirectUploader`, implemented by
+    `storage/s3` (a presigned `PutObject` with the length, type and metadata
+    signed) and by local and memory (signed `PUT`s to the app's
+    `/_storage` route, exempt from cookie-mode CSRF);
+  - `examples/storage` gains `POST /uploads/direct` and
+    `POST /uploads/direct/:id/confirm`
+    ([#328](https://github.com/gombit-dev/gombit/issues/328)).
 
 ### Changed
 

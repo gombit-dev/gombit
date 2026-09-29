@@ -3,6 +3,7 @@
 package s3
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/gombit-dev/gombit/storage"
 	"github.com/gombit-dev/gombit/storage/storagetest"
+	"github.com/gombit-dev/gombit/storage/upload"
 )
 
 // An S3-compatible integration target, for example a local MinIO:
@@ -326,5 +328,56 @@ func TestPublicURLs(t *testing.T) {
 	private := s.publicURL + "/" + storage.EscapeKey(s.prefix+"private/x.txt")
 	if code, _ := fetch(t, private); code != http.StatusForbidden {
 		t.Fatalf("GET a private object's would-be public URL = %d, want 403", code)
+	}
+}
+
+// TestDirectUploads: a grant from upload.Authorize uploads straight to the
+// bucket; S3 refuses any other length, type, or metadata; upload.Confirm
+// accepts what the grant allowed.
+func TestDirectUploads(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	png := append([]byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"), make([]byte, 100)...)
+	policy := upload.Policy{MaxBytes: 1 << 20, Types: []string{"image/png"}, Prefix: "avatars/"}
+	g, err := upload.Authorize(ctx, s, policy, int64(len(png)), "image/png", "résumé.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	put := func(body []byte, edit func(*http.Request)) int {
+		r, _ := http.NewRequest(g.Request.Method, g.Request.URL, bytes.NewReader(body))
+		for k, v := range g.Request.Header {
+			r.Header.Set(k, v)
+		}
+		if edit != nil {
+			edit(r)
+		}
+		resp, err := http.DefaultClient.Do(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		return resp.StatusCode
+	}
+	if code := put(append(png, 0), nil); code != http.StatusForbidden {
+		t.Fatalf("a longer body = %d, want 403", code)
+	}
+	if code := put(png, func(r *http.Request) { r.Header.Set("Content-Type", "text/html") }); code != http.StatusForbidden {
+		t.Fatalf("another type = %d, want 403", code)
+	}
+	if code := put(png, func(r *http.Request) { r.Header.Set("X-Amz-Meta-Filename", "other.png") }); code != http.StatusForbidden {
+		t.Fatalf("other metadata = %d, want 403", code)
+	}
+	if ok, _ := storage.Exists(ctx, s, g.Key); ok {
+		t.Fatal("a refused upload was stored")
+	}
+	if code := put(png, nil); code != http.StatusOK {
+		t.Fatalf("the granted upload = %d", code)
+	}
+	f, err := upload.Confirm(ctx, s, g.Key, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.Size != int64(len(png)) || f.ContentType != "image/png" || f.Filename != "résumé.png" {
+		t.Fatalf("confirmed %+v", f)
 	}
 }

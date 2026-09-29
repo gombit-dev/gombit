@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/gombit-dev/gombit/storage"
 	"github.com/gombit-dev/gombit/storage/memory"
 	"github.com/gombit-dev/gombit/storage/presign"
 )
@@ -25,7 +27,9 @@ func newServer(t *testing.T) *gin.Engine {
 		t.Fatal(err)
 	}
 	store := memory.New(memory.WithURLs(signer))
-	r.GET("/_storage/*key", gin.WrapH(presign.Handler(store, signer)))
+	h := gin.WrapH(presign.Handler(store, signer))
+	r.GET("/_storage/*key", h)
+	r.PUT("/_storage/*key", h)
 	register(r, store)
 	return r
 }
@@ -145,5 +149,43 @@ func TestFormUpload(t *testing.T) {
 	}
 	if w := formUpload(t, r, "big.gif", append(gif, bytes.Repeat([]byte{0}, maxUpload)...)); w.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("an oversized upload = %d %s", w.Code, w.Body)
+	}
+}
+
+func TestDirectUpload(t *testing.T) {
+	r := newServer(t)
+	gif := []byte("GIF89a\x01\x00\x01\x00\x00\x00\x00;")
+	w := do(r, http.MethodPost, "/uploads/direct", fmt.Sprintf(`{"size":%d,"content_type":"image/gif","filename":"../cat.gif"}`, len(gif)), "application/json")
+	if w.Code != http.StatusCreated {
+		t.Fatalf("POST /uploads/direct = %d %s", w.Code, w.Body)
+	}
+	var grant struct {
+		Data struct {
+			ID     string                `json:"id"`
+			Upload storage.UploadRequest `json:"upload"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &grant); err != nil {
+		t.Fatal(err)
+	}
+	// The client's PUT, straight to storage.
+	req := httptest.NewRequest(grant.Data.Upload.Method, grant.Data.Upload.URL, bytes.NewReader(gif))
+	for k, v := range grant.Data.Upload.Header {
+		req.Header.Set(k, v)
+	}
+	put := httptest.NewRecorder()
+	r.ServeHTTP(put, req)
+	if put.Code != http.StatusOK {
+		t.Fatalf("PUT = %d %s", put.Code, put.Body)
+	}
+	w = do(r, http.MethodPost, "/uploads/direct/"+grant.Data.ID+"/confirm", "", "")
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"filename":"cat.gif"`) {
+		t.Fatalf("confirm = %d %s", w.Code, w.Body)
+	}
+	if w := do(r, http.MethodPost, "/uploads/direct", `{"size":99999999,"content_type":"image/gif"}`, "application/json"); w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("a grant over the limit = %d %s", w.Code, w.Body)
+	}
+	if w := do(r, http.MethodPost, "/uploads/direct/nothing-here/confirm", "", ""); w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("confirming nothing = %d %s", w.Code, w.Body)
 	}
 }

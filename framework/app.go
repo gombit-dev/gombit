@@ -944,7 +944,7 @@ func runtimeMiddlewareStack(cfg config.Config, metrics *httpMetrics, csrfExemptP
 	// needs its raw body cannot do the double-submit either.
 	if cfg.Auth.Enabled() && cfg.Auth.EffectiveMode() == config.AuthModeCookie {
 		csrfExempt := append(append([]string{}, csrfExemptPaths...), rawBodyPaths...)
-		stack = append(stack, namedMiddleware{name: "csrf", handler: auth.CSRFMiddleware(cfg, csrfExempt...)})
+		stack = append(stack, namedMiddleware{name: "csrf", handler: auth.CSRFMiddlewareExempting(cfg, csrfExempt, storageCSRFExemptPrefixes(cfg))})
 	}
 	// The per-handler timeout is opt-in (issue #270 / PERF-12): HTTP.RequestTimeout
 	// defaults to 0. There is no separate request_timeout layer to omit — #268

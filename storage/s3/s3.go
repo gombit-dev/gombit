@@ -409,6 +409,54 @@ func (s *Store) URL(ctx context.Context, key string, opts storage.URLOptions) (s
 	return req.URL, nil
 }
 
+var _ storage.DirectUploader = (*Store)(nil)
+
+// UploadURL implements storage.DirectUploader: a presigned PutObject whose
+// signature covers the length, the content type, and the metadata
+// headers, so S3 refuses (403) a request that differs in any of them. The
+// client sends the returned headers; the bucket needs a CORS rule allowing
+// PUT from the app's origin for a browser to do so.
+func (s *Store) UploadURL(ctx context.Context, key string, opts storage.UploadURLOptions) (storage.UploadRequest, error) {
+	full, err := s.objectKey(key)
+	if err != nil {
+		return storage.UploadRequest{}, storage.Wrap("upload url", key, err)
+	}
+	if err := storage.ValidateUploadURLOptions(opts); err != nil {
+		return storage.UploadRequest{}, storage.Wrap("upload url", key, err)
+	}
+	if err := ctx.Err(); err != nil {
+		return storage.UploadRequest{}, storage.Wrap("upload url", key, err)
+	}
+	contentType := opts.ContentType
+	if contentType == "" {
+		contentType = storage.DefaultContentType
+	}
+	req, err := s.presign.PresignPutObject(ctx, &awss3.PutObjectInput{
+		Bucket:        aws.String(s.bucket),
+		Key:           aws.String(full),
+		ContentType:   aws.String(contentType),
+		ContentLength: aws.Int64(opts.Size),
+		Metadata:      encodeMetadata(opts.Metadata),
+	}, awss3.WithPresignExpires(opts.Expires))
+	if err != nil {
+		return storage.UploadRequest{}, storage.Wrap("upload url", key, classify(ctx, err))
+	}
+	header := map[string]string{}
+	for name, values := range req.SignedHeader {
+		switch http.CanonicalHeaderKey(name) {
+		case "Host", "Content-Length": // set by the client's HTTP library
+			continue
+		}
+		header[http.CanonicalHeaderKey(name)] = strings.Join(values, ",")
+	}
+	return storage.UploadRequest{
+		Method:  req.Method,
+		URL:     req.URL,
+		Header:  header,
+		Expires: time.Now().Add(opts.Expires),
+	}, nil
+}
+
 // checkBucket returns notFound when the bucket exists, and a
 // configuration error when it does not: a HEAD request's 404 carries no
 // error code to tell them apart. A bucket found once is not checked again.

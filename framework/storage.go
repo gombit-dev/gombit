@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"fmt"
+	"net/url"
 	"path/filepath"
 	"strings"
 
@@ -165,5 +166,22 @@ func mountStorageURLs(router *gin.Engine, store storage.Storage, signer *presign
 	h := gin.WrapH(presign.Handler(store, signer))
 	router.GET(signer.Path()+"/*key", h)
 	router.HEAD(signer.Path()+"/*key", h)
+	router.PUT(signer.Path()+"/*key", h) // direct uploads
 	return nil
+}
+
+// storageCSRFExemptPrefixes is the storage route's prefix, for the CSRF
+// middleware: a direct upload there is a PUT authorized by its signed URL
+// alone (no cookie is involved), as a presigned S3 URL is, so it cannot
+// and need not carry a CSRF token.
+func storageCSRFExemptPrefixes(cfg config.Config) []string {
+	st := cfg.Storage
+	if st.Local.URL == "" || (st.Driver != config.StorageDriverLocal && st.Driver != config.StorageDriverMemory) {
+		return nil
+	}
+	u, err := url.Parse(st.Local.URL)
+	if err != nil || u.Path == "" {
+		return nil
+	}
+	return []string{u.Path + "/"}
 }

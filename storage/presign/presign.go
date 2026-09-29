@@ -123,24 +123,126 @@ func (s *Signer) URL(key string, opts storage.URLOptions) (string, error) {
 		}
 		return u, nil
 	}
-	now := s.now()
-	expires := now.Add(opts.Expires).Unix()
-	if now.Add(opts.Expires).After(time.Unix(expires, 0)) {
-		expires++ // round up: never shorter than asked
-	}
-	e := strconv.FormatInt(expires, 10)
+	e := strconv.FormatInt(s.expiry(opts.Expires), 10)
 	return u + "?expires=" + e + "&signature=" + s.sign(key, e), nil
 }
 
 // sign returns the signature of key expiring at expires (decimal Unix
-// seconds).
+// seconds), for reading it.
 func (s *Signer) sign(key, expires string) string {
+	return s.mac("gombit-storage-url-v2", key, expires)
+}
+
+// mac returns the signature of a message of kind about key: the kind
+// keeps a read URL's signature from authorizing an upload and back.
+func (s *Signer) mac(kind, key string, parts ...string) string {
 	mac := hmac.New(sha256.New, s.secret)
 	// Each part is length-prefixed, so the message splits one way only.
-	for _, part := range []string{"gombit-storage-url-v2", s.scope, s.path, key, expires} {
+	for _, part := range append([]string{kind, s.scope, s.path, key}, parts...) {
 		_, _ = io.WriteString(mac, strconv.Itoa(len(part))+":"+part)
 	}
 	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
+
+// expiry returns the Unix second a URL living ttl from now expires at,
+// rounded up so it is never shorter than asked.
+func (s *Signer) expiry(ttl time.Duration) int64 {
+	end := s.now().Add(ttl)
+	expires := end.Unix()
+	if end.After(time.Unix(expires, 0)) {
+		expires++
+	}
+	return expires
+}
+
+// UploadURL returns a signed direct upload (storage.DirectUploader): a PUT
+// to key's URL whose query signs the length, the content type, and the
+// metadata, and the Content-Type header the client must send. Handler
+// stores the body only when all of them match.
+func (s *Signer) UploadURL(key string, opts storage.UploadURLOptions) (storage.UploadRequest, error) {
+	if err := storage.ValidateKey(key); err != nil {
+		return storage.UploadRequest{}, err
+	}
+	if err := storage.ValidateUploadURLOptions(opts); err != nil {
+		return storage.UploadRequest{}, err
+	}
+	contentType := opts.ContentType
+	if contentType == "" {
+		contentType = storage.DefaultContentType
+	}
+	meta, err := encodeMetadata(opts.Metadata)
+	if err != nil {
+		return storage.UploadRequest{}, err
+	}
+	expires := s.expiry(opts.Expires)
+	e, size := strconv.FormatInt(expires, 10), strconv.FormatInt(opts.Size, 10)
+	q := url.Values{"expires": {e}, "size": {size}, "type": {contentType}}
+	if meta != "" {
+		q.Set("meta", meta)
+	}
+	q.Set("signature", s.mac("gombit-storage-upload-v1", key, e, size, contentType, meta))
+	return storage.UploadRequest{
+		Method:  http.MethodPut,
+		URL:     s.base + "/" + storage.EscapeKey(key) + "?" + q.Encode(),
+		Header:  map[string]string{"Content-Type": contentType},
+		Expires: time.Unix(expires, 0),
+	}, nil
+}
+
+// encodeMetadata is md as an upload URL carries it: base64url JSON
+// (encoding/json sorts the names), empty for none.
+func encodeMetadata(md map[string]string) (string, error) {
+	if len(md) == 0 {
+		return "", nil
+	}
+	b, err := json.Marshal(md)
+	if err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+// grant is a verified upload: what the request may store.
+type grant struct {
+	size        int64
+	contentType string
+	metadata    map[string]string
+}
+
+// verifyUpload checks an upload request for key against its signed query
+// (ErrSignature, ErrExpired).
+func (s *Signer) verifyUpload(key string, q url.Values) (grant, error) {
+	for _, name := range []string{"expires", "size", "type", "signature"} {
+		if len(q[name]) != 1 {
+			return grant{}, ErrSignature
+		}
+	}
+	if len(q["meta"]) > 1 {
+		return grant{}, ErrSignature
+	}
+	e, size, contentType, meta := q.Get("expires"), q.Get("size"), q.Get("type"), q.Get("meta")
+	if !hmac.Equal([]byte(q.Get("signature")), []byte(s.mac("gombit-storage-upload-v1", key, e, size, contentType, meta))) {
+		return grant{}, ErrSignature
+	}
+	expires, err := strconv.ParseInt(e, 10, 64)
+	if err != nil {
+		return grant{}, ErrSignature
+	}
+	if !s.now().Before(time.Unix(expires, 0)) {
+		return grant{}, ErrExpired
+	}
+	n, err := strconv.ParseInt(size, 10, 64)
+	if err != nil || n < 0 {
+		return grant{}, ErrSignature
+	}
+	g := grant{size: n, contentType: contentType}
+	if meta != "" {
+		b, err := base64.RawURLEncoding.DecodeString(meta)
+		if err != nil || json.Unmarshal(b, &g.metadata) != nil {
+			return grant{}, ErrSignature
+		}
+	}
+	return g, nil
 }
 
 // Verify reports whether a request for key with query q may read it: yes
@@ -179,10 +281,15 @@ func (s *Signer) Verify(key string, q url.Values) error {
 // application's origin cannot run script there. A signed URL's response
 // may be cached privately until the URL expires; a public one's, not at
 // all (the object can be replaced under the same URL).
+//
+// PUT stores a direct upload (Signer.UploadURL): only with an unexpired
+// upload signature, a Content-Type equal to the signed one, and a body of
+// exactly the signed length (403 otherwise, as S3 refuses a request that
+// differs from its presigned one). It answers 200 with the new ETag.
 func Handler(store storage.Storage, s *Signer) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet && r.Method != http.MethodHead {
-			w.Header().Set("Allow", "GET, HEAD")
+		if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodPut {
+			w.Header().Set("Allow", "GET, HEAD, PUT")
 			writeError(w, r, contract.MethodNotAllowed(""))
 			return
 		}
@@ -192,6 +299,10 @@ func Handler(store storage.Storage, s *Signer) http.Handler {
 			return
 		}
 		q := r.URL.Query()
+		if r.Method == http.MethodPut {
+			serveUpload(w, r, store, s, key, q)
+			return
+		}
 		if err := s.Verify(key, q); err != nil {
 			writeError(w, r, contract.Authorization("The link is invalid or has expired."))
 			return
@@ -236,6 +347,37 @@ func Handler(store storage.Storage, s *Signer) http.Handler {
 			_, _ = io.Copy(w, body)
 		}
 	})
+}
+
+// serveUpload stores the body of a PUT to key's upload URL.
+func serveUpload(w http.ResponseWriter, r *http.Request, store storage.Storage, s *Signer, key string, q url.Values) {
+	g, err := s.verifyUpload(key, q)
+	if err != nil {
+		writeError(w, r, contract.Authorization("The upload link is invalid or has expired."))
+		return
+	}
+	if r.Header.Get("Content-Type") != g.contentType || r.ContentLength != g.size {
+		writeError(w, r, contract.Authorization("The upload does not match its link: send the signed Content-Type and exactly the signed length."))
+		return
+	}
+	body := io.Reader(http.NoBody)
+	if r.Body != nil {
+		body = r.Body
+	}
+	info, err := store.Put(r.Context(), key, body, storage.PutOptions{
+		ContentType: g.contentType,
+		Size:        storage.KnownSize(g.size),
+		Metadata:    g.metadata,
+	})
+	if err != nil {
+		writeError(w, r, storage.MapError(r.Context(), err, "file not found", "could not store the file"))
+		return
+	}
+	if info.ETag != "" {
+		w.Header().Set("ETag", strconv.Quote(info.ETag))
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
 }
 
 // writeError writes err, a D10 envelope, as the response.

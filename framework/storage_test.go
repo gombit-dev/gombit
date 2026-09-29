@@ -300,3 +300,65 @@ func TestStorageURLsServeRangesAndHEAD(t *testing.T) {
 		t.Fatalf("conditional GET (ETag %q) = %d", etag, w.Code)
 	}
 }
+
+// TestStorageDirectUploadsThroughTheApp: the app's storage route stores a
+// direct upload made with the grant's request, and the route is exempt
+// from cookie-mode CSRF (the signed URL is the authorization).
+func TestStorageDirectUploadsThroughTheApp(t *testing.T) {
+	cfg := config.Default()
+	cfg.Storage.Driver = config.StorageDriverMemory
+	cfg.Storage.URLSecret = strings.Repeat("u", 32)
+	app := newTestApp(t, WithConfig(cfg))
+	ctx := context.Background()
+	req, err := storage.UploadURL(ctx, app.Storage(), "uploads/a.txt", storage.UploadURLOptions{Expires: time.Minute, Size: 5, ContentType: "text/plain"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest(req.Method, req.URL, strings.NewReader("hello"))
+	for k, v := range req.Header {
+		r.Header.Set(k, v)
+	}
+	w := httptest.NewRecorder()
+	app.Router().ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("PUT = %d %s", w.Code, w.Body)
+	}
+	if info, err := app.Storage().Stat(ctx, "uploads/a.txt"); err != nil || info.Size != 5 {
+		t.Fatalf("Stat = %+v, %v", info, err)
+	}
+	if got := storageCSRFExemptPrefixes(cfg); len(got) != 1 || got[0] != "/_storage/" {
+		t.Fatalf("CSRF-exempt prefixes = %v", got)
+	}
+	cfg.Storage.Local.URL = "https://files.example.com/blobs"
+	if got := storageCSRFExemptPrefixes(cfg); len(got) != 1 || got[0] != "/blobs/" {
+		t.Fatalf("CSRF-exempt prefixes for an absolute URL = %v", got)
+	}
+	cfg.Storage.Driver = config.StorageDriverS3
+	if got := storageCSRFExemptPrefixes(cfg); got != nil {
+		t.Fatalf("s3 (no app route) exempts %v", got)
+	}
+}
+
+// TestStorageRouteIsCSRFExemptInCookieMode: with cookie auth, a direct
+// upload to the storage route passes without a CSRF token, and any other
+// unsafe request still needs one.
+func TestStorageRouteIsCSRFExemptInCookieMode(t *testing.T) {
+	cfg := config.Default()
+	cfg.Environment = config.EnvironmentTest
+	cfg.Auth.JWTSecret = strings.Repeat("j", 32)
+	cfg.Auth.Mode = config.AuthModeCookie
+	router, err := newRouter(cfg, nil, nil, func(c *gin.Context) { c.Status(http.StatusOK) }, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok := func(c *gin.Context) { c.Status(http.StatusOK) }
+	router.PUT("/_storage/*key", ok)
+	router.PUT("/api/things/:id", ok)
+	for path, want := range map[string]int{"/_storage/uploads/a": http.StatusOK, "/api/things/1": http.StatusForbidden} {
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, httptest.NewRequest(http.MethodPut, path, strings.NewReader("x")))
+		if w.Code != want {
+			t.Errorf("PUT %s = %d, want %d", path, w.Code, want)
+		}
+	}
+}

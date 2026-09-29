@@ -41,6 +41,7 @@ type fake struct {
 	urlNeedsObject   bool // URL returns ErrNotFound for a missing object
 	anyExpiry        bool // URL accepts a lifetime over MaxURLExpiry
 	signedNotPublic  bool // URL refuses a signed URL for a private object
+	noUploadCheck    bool // UploadURL grants anything, valid or not
 }
 
 type object struct {
@@ -251,6 +252,19 @@ func (f *fake) URL(ctx context.Context, key string, opts storage.URLOptions) (st
 	return "", storage.Wrap("url", key, storage.ErrUnsupported)
 }
 
+func (f *fake) UploadURL(ctx context.Context, key string, opts storage.UploadURLOptions) (storage.UploadRequest, error) {
+	if f.noUploadCheck {
+		return storage.UploadRequest{Method: "PUT", URL: "https://example.com/" + key, Expires: time.Now().Add(opts.Expires)}, nil
+	}
+	if err := f.checkKey(key); err != nil {
+		return storage.UploadRequest{}, storage.Wrap("upload url", key, err)
+	}
+	if err := storage.ValidateUploadURLOptions(opts); err != nil {
+		return storage.UploadRequest{}, storage.Wrap("upload url", key, err)
+	}
+	return storage.UploadRequest{Method: "PUT", URL: "https://example.com/" + key, Expires: time.Now().Add(opts.Expires)}, nil
+}
+
 func TestReferenceFakePasses(t *testing.T) {
 	Run(t, func(*testing.T) storage.Storage { return newFake() })
 }
@@ -335,6 +349,7 @@ func TestSuiteCatchesBrokenDrivers(t *testing.T) {
 		{"NoPartialReads", func(f *fake) { f.nonAtomic = true }, "part of the object being written"},
 		{"InvalidOptions", func(f *fake) { f.anyExpiry = true }, "MaxURLExpiry"},
 		{"URL", func(f *fake) { f.signedNotPublic = true }, "a signed URL works for a private object"},
+		{"DirectUpload", func(f *fake) { f.noUploadCheck = true }, "want storage.ErrInvalidKey"},
 	}
 	covered := map[string]bool{}
 	for _, tc := range cases {

@@ -496,3 +496,26 @@ func (s *Store) URL(ctx context.Context, key string, opts storage.URLOptions) (s
 	u, err := s.urls.URL(key, opts)
 	return u, storage.Wrap("url", key, err)
 }
+
+var _ storage.DirectUploader = (*Store)(nil)
+
+// UploadURL implements storage.DirectUploader with the store's
+// presign.Signer (WithURLs): a signed PUT that presign.Handler stores.
+// Without a Signer it returns storage.ErrUnsupported (after validating its
+// arguments).
+func (s *Store) UploadURL(ctx context.Context, key string, opts storage.UploadURLOptions) (storage.UploadRequest, error) {
+	if err := storage.ValidateKey(key); err != nil {
+		return storage.UploadRequest{}, storage.Wrap("upload url", key, err)
+	}
+	if err := storage.ValidateUploadURLOptions(opts); err != nil {
+		return storage.UploadRequest{}, storage.Wrap("upload url", key, err)
+	}
+	if err := ctx.Err(); err != nil {
+		return storage.UploadRequest{}, storage.Wrap("upload url", key, err)
+	}
+	if s.urls == nil {
+		return storage.UploadRequest{}, storage.Wrap("upload url", key, storage.ErrUnsupported)
+	}
+	req, err := s.urls.UploadURL(key, opts)
+	return req, storage.Wrap("upload url", key, err)
+}

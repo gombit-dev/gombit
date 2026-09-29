@@ -7,8 +7,8 @@ call, so moving from local development to S3-compatible storage in
 production changes configuration, not code.
 
 > **Status:** the contract, the local, in-memory, and S3-compatible
-> drivers, the upload helpers, and public and signed URLs. Direct uploads
-> and admin fields follow
+> drivers, the upload helpers, public and signed URLs, and direct uploads.
+> Lifecycle and cleanup, and admin fields, follow
 > ([epic #279](https://github.com/gombit-dev/gombit/issues/279)).
 
 Every app has a store: `app.Storage()` returns the driver `GOMBIT_STORAGE_DRIVER`
@@ -263,6 +263,78 @@ Serve an upload as an attachment, with the stored filename:
 [`examples/storage`](../examples/storage/main.go) has `POST /uploads` and
 `GET /uploads/:id`.
 
+### Direct uploads
+
+A large file doesn't need to pass through the application. The client
+uploads it straight to storage with a short-lived grant, and the app checks
+the result:
+
+```go
+// 1. The client declares the file; the app decides it may upload, and grants.
+g, err := upload.Authorize(ctx, app.Storage(), avatars, in.Size, in.ContentType, in.Filename)
+// Remember g.Key with the user who asked; send g.Request to the client.
+
+// 2. The client sends the bytes: g.Request.Method to g.Request.URL, with the
+//    headers in g.Request.Header and the file as the body.
+
+// 3. The client says it is done; the app checks what arrived.
+f, err := upload.Confirm(ctx, app.Storage(), key, avatars)
+```
+
+What a grant enforces:
+
+- **Scope.** A grant is one signed `PUT`:
+  - to one generated key (`Prefix` plus a random id);
+  - of exactly the declared size (at most `MaxBytes`, else `ErrTooLarge`
+    before any grant);
+  - with the declared `Content-Type` (one `Types` accepts) and the metadata
+    (the cleaned filename).
+
+  The backend refuses a request that differs in any of these with `403`:
+  another length, type, metadata or key, or a chunked body. S3 refuses it
+  because they are in the SigV4 signature; the local and memory drivers
+  because `presign.Handler` checks them.
+- **Lifetime.** `Policy.GrantExpiry`, 15 minutes by default. Within it, a
+  grant can be replayed: that replaces the object with another of the same
+  length and type. So check it with `Confirm` whenever you use it.
+- **Confirmation.** The declared type is only a claim, and it is what the
+  store will serve the object as. `Confirm` reads the object's first bytes.
+  It fails, and deletes the object, in any of these cases:
+  - the detected type isn't accepted by the policy (`ErrType`);
+  - the detected type isn't the declared one: a "PNG" whose bytes are HTML,
+    or a JPEG declared as PNG (`ErrType`);
+  - the object is over `MaxBytes` (`ErrTooLarge`).
+
+  Nothing uploaded is `ErrNoFile`. Confirm only keys you granted, to the
+  user who asked. `Confirm` checks the prefix but not ownership.
+- **Stores.** Direct uploads are an optional interface,
+  `storage.DirectUploader`. The local, memory and S3 drivers implement it.
+  `storage.UploadURL` and `upload.Authorize` return `ErrUnsupported` for a
+  store that doesn't; use `Receive` for those.
+
+A grant that is never used expires. An upload that is never confirmed stays
+stored until something removes it (STORAGE-7 defines that cleanup).
+
+**Browsers and S3.** A browser's `PUT` to the bucket is cross-origin, so the
+bucket needs a CORS rule allowing it from the app's origin, with the headers
+the grant asks for:
+
+```json
+[{
+  "AllowedOrigins": ["https://app.example.com"],
+  "AllowedMethods": ["PUT"],
+  "AllowedHeaders": ["content-type", "x-amz-meta-*"],
+  "ExposeHeaders": ["ETag"],
+  "MaxAgeSeconds": 3600
+}]
+```
+
+With the local and memory drivers the grant is a `PUT` to the app's own
+`GOMBIT_STORAGE_LOCAL_URL`. That route is exempt from cookie-mode CSRF: the
+signed URL is the authorization, and no cookie is involved, as with S3.
+[`examples/storage`](../examples/storage/main.go) has `POST /uploads/direct`
+and `POST /uploads/direct/:id/confirm`.
+
 ## Errors
 
 Drivers wrap failures in `*storage.Error` (the operation, the key, and the
@@ -443,7 +515,9 @@ The suite checks every guarantee above:
 - concurrent `Put`s to one key;
 - `URL` returning either a URL or `ErrUnsupported` (or `ErrNotPublic` for a
   public URL; never for a signed one), and refusing a lifetime over
-  `MaxURLExpiry`.
+  `MaxURLExpiry`;
+- for a store with direct uploads (`storage.DirectUploader`): invalid keys
+  and options refused, and a grant that stores nothing by itself.
 
 The suite's own tests prove that every check fails for a driver broken the
 way it guards against. A new check can't land without such a driver.

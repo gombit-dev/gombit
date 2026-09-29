@@ -66,6 +66,7 @@ var checks = []check{
 	{"ConcurrentPuts", checkConcurrentPuts},
 	{"NoPartialReads", checkNoPartialReads},
 	{"URL", checkURL},
+	{"DirectUpload", checkDirectUpload},
 }
 
 func ctxFor(t testing.TB) context.Context {
@@ -731,4 +732,48 @@ func checkOneURL(t testing.TB, s storage.Storage, key string, opts storage.URLOp
 	case u == "":
 		t.Fatalf("URL(%q, %+v) returned an empty URL and no error", key, opts)
 	}
+}
+
+// checkDirectUpload: a store that offers direct uploads
+// (storage.DirectUploader) validates the key and the options as URL and
+// Put do, and either says it cannot or returns a request to make: a
+// method, a URL, and a lifetime within the one asked for. Whether the
+// backend then enforces the grant needs a real HTTP round trip, which each
+// driver's own tests make.
+func checkDirectUpload(t testing.TB, s storage.Storage) {
+	d, ok := s.(storage.DirectUploader)
+	if !ok {
+		return
+	}
+	valid := storage.UploadURLOptions{Expires: time.Minute, Size: 3, ContentType: "text/plain"}
+	for _, key := range invalidKeys {
+		if _, err := d.UploadURL(ctxFor(t), key, valid); !errors.Is(err, storage.ErrInvalidKey) {
+			t.Fatalf("UploadURL(%q) = %v, want storage.ErrInvalidKey", key, err)
+		}
+	}
+	for _, opts := range []storage.UploadURLOptions{
+		{Expires: 0, Size: 3},
+		{Expires: -time.Minute, Size: 3},
+		{Expires: storage.MaxURLExpiry + time.Second, Size: 3},
+		{Expires: time.Minute, Size: -1},
+		{Expires: time.Minute, ContentType: "not a media type"},
+		{Expires: time.Minute, Metadata: map[string]string{"Upper": "x"}},
+	} {
+		if _, err := d.UploadURL(ctxFor(t), "direct", opts); !errors.Is(err, storage.ErrInvalidOptions) {
+			t.Fatalf("UploadURL with %+v = %v, want storage.ErrInvalidOptions", opts, err)
+		}
+	}
+	before := time.Now()
+	req, err := d.UploadURL(ctxFor(t), "direct/never-stored", valid)
+	switch {
+	case errors.Is(err, storage.ErrUnsupported):
+		return
+	case err != nil:
+		t.Fatalf("UploadURL = %v, want a request or storage.ErrUnsupported", err)
+	case req.Method == "" || req.URL == "":
+		t.Fatalf("UploadURL = %+v: no method or URL", req)
+	case req.Expires.Before(before) || req.Expires.After(time.Now().Add(valid.Expires+time.Second)):
+		t.Fatalf("UploadURL expires at %s, want within %s", req.Expires, valid.Expires)
+	}
+	wantNotFound(t, s, "direct/never-stored") // asking for a grant stores nothing
 }
