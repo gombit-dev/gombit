@@ -191,6 +191,33 @@ func checkOverwrite(t testing.TB, s storage.Storage) {
 		t.Fatalf("after an overwrite Open read %q, want %q", got, "second")
 	}
 	sameInfo(t, "Open after overwrite", info, storage.ObjectInfo{Key: "k", Size: 6, ContentType: "application/json"}, true)
+	checkETagVersions(t, s)
+}
+
+// checkETagVersions: a driver that reports ETags (empty is "unsupported")
+// reports the same one from Put and Stat, and a different one once
+// different bytes replace the object, so a conditional read never takes
+// changed content for unchanged.
+func checkETagVersions(t testing.TB, s storage.Storage) {
+	first := put(t, s, "versioned", []byte("version one"), storage.PutOptions{})
+	st1, err := s.Stat(ctxFor(t), "versioned")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st1.ETag == "" {
+		return // the driver has no ETags
+	}
+	if first.ETag != "" && first.ETag != st1.ETag {
+		t.Fatalf("Put reported ETag %q, Stat %q for the same bytes", first.ETag, st1.ETag)
+	}
+	put(t, s, "versioned", []byte("version two"), storage.PutOptions{})
+	st2, err := s.Stat(ctxFor(t), "versioned")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st2.ETag == st1.ETag {
+		t.Fatalf("different bytes kept the ETag %q: a conditional read would take the new content for the old", st1.ETag)
+	}
 }
 
 func checkMissing(t testing.TB, s storage.Storage) {
@@ -447,6 +474,11 @@ func checkFailedPutKeepsPrevious(t testing.TB, s storage.Storage) {
 
 	_, err = s.Put(ctxFor(t), "never", &failingReader{n: 1, err: errBrokenReader}, storage.PutOptions{})
 	wantErr(t, err, errBrokenReader, "put", "never")
+	// A source that fails with another operation's envelope (reading another
+	// object): the failure is still this Put's.
+	foreign := storage.Wrap("open", "some/source", errBrokenReader)
+	_, err = s.Put(ctxFor(t), "copied", &failingReader{n: 1, err: foreign}, storage.PutOptions{})
+	wantErr(t, err, errBrokenReader, "put", "copied")
 	wantNotFound(t, s, "never")
 }
 
@@ -723,8 +755,12 @@ func checkMetadataIsOwned(t testing.TB, s storage.Storage) {
 	md := map[string]string{"owner": "alice"}
 	info := put(t, s, "owned", []byte("x"), storage.PutOptions{Metadata: md})
 	md["owner"] = "changed through the Put input"
-	if info.Metadata != nil {
-		info.Metadata["owner"] = "changed through the Put result"
+	if info.Metadata["owner"] != "alice" {
+		t.Fatalf("changing the Put input changed the Put result to %q: the result shares the caller's map", info.Metadata["owner"])
+	}
+	info.Metadata["owner"] = "changed through the Put result"
+	if md["owner"] != "changed through the Put input" {
+		t.Fatalf("changing the Put result changed the caller's map to %q", md["owner"])
 	}
 	stat := func(label string) storage.ObjectInfo {
 		t.Helper()
