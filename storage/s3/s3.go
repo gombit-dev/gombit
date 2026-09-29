@@ -302,7 +302,9 @@ func (s *Store) Open(ctx context.Context, key string) (io.ReadCloser, storage.Ob
 		_ = out.Body.Close()
 		return nil, storage.ObjectInfo{}, storage.Wrap("open", key, err)
 	}
-	return out.Body, info, nil
+	// The body follows the request context already; the wrapper makes it
+	// exact (no buffered bytes after ctx ends), as the contract asks.
+	return storage.ContextReadCloser(ctx, out.Body), info, nil
 }
 
 // Stat implements storage.Storage.
