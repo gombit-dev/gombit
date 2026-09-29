@@ -813,3 +813,44 @@ func readAll(t *testing.T, s *local.Store, key string) string {
 	}
 	return string(b)
 }
+
+// TestListDoesNotBlockWrites: a List reading an object's description does
+// not keep a concurrent Put or Delete of that object from proceeding (on
+// Windows, a file opened without delete sharing would).
+func TestListDoesNotBlockWrites(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	if _, err := s.Put(ctx, "k", strings.NewReader("x"), storage.PutOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	stop := make(chan struct{})
+	listed := make(chan error, 1)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				listed <- nil
+				return
+			default:
+			}
+			if err := s.List(ctx, "", func(storage.ObjectInfo) error { return nil }); err != nil {
+				listed <- err
+				return
+			}
+		}
+	}()
+	for i := 0; i < 300; i++ {
+		if _, err := s.Put(ctx, "k", strings.NewReader("version"), storage.PutOptions{}); err != nil {
+			t.Fatalf("Put %d during a List = %v", i, err)
+		}
+		if i%3 == 0 {
+			if err := s.Delete(ctx, "k"); err != nil {
+				t.Fatalf("Delete %d during a List = %v", i, err)
+			}
+		}
+	}
+	close(stop)
+	if err := <-listed; err != nil {
+		t.Fatalf("List = %v", err)
+	}
+}

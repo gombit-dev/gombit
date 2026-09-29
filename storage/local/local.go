@@ -608,7 +608,7 @@ func (s *Store) List(ctx context.Context, prefix string, fn func(storage.ObjectI
 		if !d.Type().IsRegular() {
 			return nil
 		}
-		f, err := os.Open(path) // #nosec G122 G304 -- a regular file (never a symlink: d.Type) under the store's own root, which only the store writes.
+		f, err := openShared(path) // a regular file (never a symlink: d.Type) under the store's own root, which only the store writes; shared, so a concurrent Put or Delete of it proceeds
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil // deleted meanwhile
 		}
