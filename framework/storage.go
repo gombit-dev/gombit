@@ -23,7 +23,7 @@ func openStorage(cfg config.Config, logger *zap.Logger) (storage.Storage, error)
 	case config.StorageDriverMemory:
 		return memory.New(), nil
 	case config.StorageDriverLocal:
-		var opts []local.Option
+		opts := []local.Option{local.WithWarn(func(msg string, err error) { logger.Warn(msg, zap.Error(err)) })}
 		if cfg.Environment == config.EnvironmentProduction && !filepath.IsAbs(cfg.Storage.Local.Root) {
 			opts = append(opts, local.WithFirstPut(func(root string) {
 				logger.Warn("storage: production files are going to a directory relative to the working directory, "+

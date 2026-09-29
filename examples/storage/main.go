@@ -16,6 +16,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"mime"
 	"net/http"
 	"strconv"
 
@@ -80,6 +81,10 @@ func register(r gin.IRouter, store storage.Storage) {
 			return
 		}
 		defer func() { _ = body.Close() }()
+		// An attachment, never rendered inline: the content type came from
+		// the uploader, and a text/html or image/svg+xml object rendered as
+		// a same-origin page would run in the app's origin.
+		c.Header("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": c.Param("id")}))
 		c.Header("Content-Type", info.ContentType)
 		c.Header("Content-Length", strconv.FormatInt(info.Size, 10))
 		c.Header("ETag", strconv.Quote(info.ETag))

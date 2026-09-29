@@ -340,3 +340,29 @@ func TestFirstPutHook(t *testing.T) {
 		t.Fatalf("hook calls = %v, want one with the root", calls)
 	}
 }
+
+// TestFlushFailureAfterRenameIsNotAFailedPut: once the rename has published
+// the object, a failing directory flush does not make Put report failure
+// (the caller would think nothing was stored); it is retried and then
+// reported through the warning hook.
+func TestFlushFailureAfterRenameIsNotAFailedPut(t *testing.T) {
+	var warned []error
+	s, _ := local.New(filepath.Join(t.TempDir(), "root"), local.WithWarn(func(_ string, err error) { warned = append(warned, err) }))
+	calls := 0
+	defer local.SetFlushRename(func(string) error { calls++; return errors.New("fsync: I/O error") })()
+	info, err := s.Put(context.Background(), "k", strings.NewReader("stored"), storage.PutOptions{})
+	if err != nil {
+		t.Fatalf("Put = %v, want success: the object was published", err)
+	}
+	if info.Size != 6 || calls != 2 || len(warned) != 1 {
+		t.Fatalf("info %+v, %d flush attempts, %d warnings; want size 6, 2 attempts, 1 warning", info, calls, len(warned))
+	}
+	body, _, err := s.Open(context.Background(), "k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = body.Close() }()
+	if got, _ := io.ReadAll(body); string(got) != "stored" {
+		t.Fatalf("read %q", got)
+	}
+}

@@ -13,7 +13,10 @@ production changes configuration, not code.
 
 Every app has a store: `app.Storage()` returns the driver `GOMBIT_STORAGE_DRIVER`
 names, which is local files under `./storage` by default. A runnable example
-is in [`examples/storage`](../examples/storage/main.go).
+is in [`examples/storage`](../examples/storage/main.go). It serves downloads
+with `Content-Disposition: attachment`, because an uploaded `text/html` or
+`image/svg+xml` object rendered inline would run as a page in the app's
+origin.
 
 ## The interface
 
@@ -174,8 +177,13 @@ the directory. `gombit new` gitignores `/storage/`.
 - **Streaming, atomic, durable writes.** `Put` streams into a temporary file
   under `<root>/tmp` in 32 KiB pieces, never holding the object in memory.
   It then flushes the file, renames it into place, and flushes the
-  directory. A reader sees the old object or the new one, never part of one,
-  and a `Put` that returned survives a crash. A failed `Put` removes its
+  directory (and, on the first `Put`, the root's own entry). On Windows,
+  which can't flush a directory, it flushes the renamed file instead. A
+  reader sees the old object or the new one, never part of one, and a `Put`
+  that returned survives a crash. If the flush after the rename fails even
+  on a retry, the object is stored but may not survive a crash. `Put` still
+  reports success, because the object is visible, and `app.Storage()` logs a
+  warning. A failed `Put` removes its
   temporary file. A process killed mid-`Put` can't, so a store's first `Put`
   removes temporary files nothing has written to for an hour. `Open` reads
   from disk as you read.

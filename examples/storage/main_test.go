@@ -39,6 +39,9 @@ func TestUploadDownloadDelete(t *testing.T) {
 	if w.Code != http.StatusOK || w.Body.String() != "jpeg bytes" || w.Header().Get("Content-Type") != "image/jpeg" {
 		t.Fatalf("GET = %d %q (%s)", w.Code, w.Body, w.Header().Get("Content-Type"))
 	}
+	if cd := w.Header().Get("Content-Disposition"); !strings.HasPrefix(cd, "attachment") {
+		t.Fatalf("Content-Disposition = %q, want an attachment (uploaded HTML must not render inline)", cd)
+	}
 	if w := do(r, http.MethodDelete, "/files/photo", "", ""); w.Code != http.StatusNoContent {
 		t.Fatalf("DELETE = %d", w.Code)
 	}
