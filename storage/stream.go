@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -74,4 +75,45 @@ func (e *exactReader) probe() error {
 		}
 	}
 	return io.ErrNoProgress
+}
+
+// ContextReader returns r stopping at ctx: each Read first checks ctx and
+// fails with its error once it has ended. A driver copies a Put's reader
+// through it so a canceled Put stops streaming instead of reading to EOF.
+func ContextReader(ctx context.Context, r io.Reader) io.Reader {
+	return &ctxReader{ctx: ctx, r: r}
+}
+
+type ctxReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (c *ctxReader) Read(p []byte) (int, error) {
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return c.r.Read(p)
+}
+
+// ContextReadCloser returns rc bound to ctx, as the reader Storage.Open
+// returns must be: once ctx has ended, each Read fails with its error (the
+// way an HTTP response body does when its request's context ends); Close
+// closes rc. When rc can seek, so can the result.
+func ContextReadCloser(ctx context.Context, rc io.ReadCloser) io.ReadCloser {
+	c := ctxReadCloser{ctxReader{ctx: ctx, r: rc}, rc}
+	if s, ok := rc.(io.Seeker); ok {
+		return &ctxReadSeekCloser{c, s}
+	}
+	return &c
+}
+
+type ctxReadCloser struct {
+	ctxReader
+	io.Closer
+}
+
+type ctxReadSeekCloser struct {
+	ctxReadCloser
+	io.Seeker
 }

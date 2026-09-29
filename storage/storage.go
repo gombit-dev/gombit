@@ -35,7 +35,11 @@ type Storage interface {
 	Put(ctx context.Context, key string, r io.Reader, opts PutOptions) (ObjectInfo, error)
 
 	// Open returns the object's bytes as a stream, and its ObjectInfo. The
-	// caller must Close the reader. A missing object is ErrNotFound.
+	// caller must Close the reader. A missing object is ErrNotFound. The
+	// reader stays bound to ctx until it is closed: once ctx ends, Read
+	// fails with ctx's error on every driver (an HTTP response body does
+	// this by itself; ContextReadCloser does it for the others), so keep ctx
+	// alive for as long as the stream is read.
 	Open(ctx context.Context, key string) (io.ReadCloser, ObjectInfo, error)
 
 	// Stat returns the object's ObjectInfo without its bytes. A missing
@@ -74,8 +78,10 @@ type PutOptions struct {
 	// Metadata is small user metadata stored with the object and returned
 	// in its ObjectInfo exactly as given. Names are lower-case ASCII
 	// letters, digits, and '-'; values are UTF-8 without control
-	// characters; see ValidateMetadata for the size limit. A driver whose
-	// backend carries only ASCII (S3 headers) encodes values reversibly.
+	// characters or leading or trailing spaces (HTTP trims header values);
+	// see ValidateMetadata for the size limit. A driver whose backend
+	// carries only ASCII (S3 headers) encodes values reversibly. Put copies
+	// the map: changing it afterwards changes nothing stored.
 	Metadata map[string]string
 }
 
@@ -98,7 +104,9 @@ type ObjectInfo struct {
 	// request.
 	ModTime time.Time
 	// Metadata is the user metadata the object was stored with (nil when
-	// none).
+	// none). Every ObjectInfo a driver returns has a map of its own: the
+	// caller may change it without changing the stored object or any other
+	// result.
 	Metadata map[string]string
 }
 
