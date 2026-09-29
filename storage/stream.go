@@ -108,10 +108,15 @@ func PutReader(ctx context.Context, r io.Reader, opts PutOptions) io.Reader {
 }
 
 // ContextReadCloser returns rc bound to ctx, as the reader Storage.Open
-// returns must be: once ctx has ended, Read fails with its error, and a
-// Read already in progress is interrupted, by closing rc (the way an HTTP
-// response body behaves when its request's context ends). Close closes rc
-// once. When rc can seek, so can the result.
+// returns must be: once ctx has ended, every Read fails with ctx's error,
+// and ContextReadCloser closes rc to end a Read in progress. That
+// interruption needs rc's Close to be safe while a Read runs and to make
+// that Read return, which an *os.File, an HTTP response body, and an
+// io.Pipe provide (and a reader that never blocks, such as a
+// bytes.Reader, does not need); a driver passes such a reader. With an rc
+// whose Close cannot interrupt a Read, a Read blocked when ctx ends
+// returns when rc lets it, and then fails with ctx's error. Close closes
+// rc once. When rc can seek, so can the result.
 func ContextReadCloser(ctx context.Context, rc io.ReadCloser) io.ReadCloser {
 	c := &ctxReadCloser{ctx: ctx, rc: rc}
 	c.stop = context.AfterFunc(ctx, func() { _ = c.close() })

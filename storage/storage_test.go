@@ -3,11 +3,13 @@ package storage_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"go/build"
 	"io"
 	"mime"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"testing/iotest"
 	"time"
@@ -369,10 +371,20 @@ func TestContextReadCloser(t *testing.T) {
 	}
 }
 
-// blockingBody is a body whose Read blocks until it is closed.
-type blockingBody struct{ closed chan struct{} }
+// blockingBody is a body whose Read blocks until it is closed, telling
+// started when a Read has begun.
+type blockingBody struct {
+	started chan struct{}
+	closed  chan struct{}
+	once    sync.Once
+}
+
+func newBlockingBody() *blockingBody {
+	return &blockingBody{started: make(chan struct{}), closed: make(chan struct{})}
+}
 
 func (b *blockingBody) Read([]byte) (int, error) {
+	b.once.Do(func() { close(b.started) })
 	<-b.closed
 	return 0, io.ErrClosedPipe
 }
@@ -386,18 +398,19 @@ func (b *blockingBody) Close() error {
 	return nil
 }
 
-// TestContextReadCloserInterruptsARead: a Read blocked when the context
-// ends returns the context's error, as an HTTP response body's does.
+// TestContextReadCloserInterruptsARead: a Read in progress (it has begun:
+// the body said so) when the context ends returns the context's error,
+// because the wrapper closes a body whose Close interrupts a Read.
 func TestContextReadCloserInterruptsARead(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	body := &blockingBody{closed: make(chan struct{})}
+	body := newBlockingBody()
 	rc := storage.ContextReadCloser(ctx, body)
 	done := make(chan error, 1)
 	go func() {
 		_, err := rc.Read(make([]byte, 8))
 		done <- err
 	}()
-	time.Sleep(20 * time.Millisecond) // let the Read block
+	<-body.started // the Read is in progress, past the context check
 	cancel()
 	select {
 	case err := <-done:
@@ -409,5 +422,48 @@ func TestContextReadCloserInterruptsARead(t *testing.T) {
 	}
 	if err := rc.Close(); err != nil {
 		t.Fatalf("Close after the interruption = %v", err)
+	}
+}
+
+// stubbornBody's Read blocks until release, whatever Close does: a reader
+// whose Close cannot interrupt a Read.
+type stubbornBody struct {
+	started, release chan struct{}
+	once             sync.Once
+}
+
+func (b *stubbornBody) Read(p []byte) (int, error) {
+	b.once.Do(func() { close(b.started) })
+	<-b.release
+	return copy(p, "late"), nil
+}
+
+func (*stubbornBody) Close() error { return nil }
+
+// TestContextReadCloserWithoutInterruption: over a reader whose Close does
+// not end a Read, a Read blocked when the context ends returns when the
+// reader lets it, and then with the context's error, not the late data.
+func TestContextReadCloserWithoutInterruption(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	body := &stubbornBody{started: make(chan struct{}), release: make(chan struct{})}
+	rc := storage.ContextReadCloser(ctx, body)
+	done := make(chan error, 1)
+	go func() {
+		n, err := rc.Read(make([]byte, 8))
+		if n != 0 {
+			err = fmt.Errorf("returned %d late bytes (%v)", n, err)
+		}
+		done <- err
+	}()
+	<-body.started
+	cancel()
+	select {
+	case err := <-done:
+		t.Fatalf("the Read returned (%v) before the reader let it", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(body.release)
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("the late Read = %v, want context.Canceled", err)
 	}
 }
