@@ -39,6 +39,10 @@ type fake struct {
 	readIgnoresCtx   bool // Open/Stat/Delete/URL never check ctx
 	caseInsensitive  bool // keys are compared case-insensitively
 	urlNeedsObject   bool // URL returns ErrNotFound for a missing object
+	bareErrors       bool // returns bare sentinels, not *storage.Error
+	aliasMetadata    bool // stores and returns one shared metadata map
+	openDetached     bool // Open's reader ignores the context once returned
+	nonAtomicFirst   bool // a key's first Put writes in place as it streams
 }
 
 type object struct {
@@ -50,15 +54,15 @@ func newFake() *fake { return &fake{objects: map[string]object{}} }
 
 func (f *fake) Put(ctx context.Context, key string, r io.Reader, opts storage.PutOptions) (storage.ObjectInfo, error) {
 	if err := f.checkKey(key); err != nil {
-		return storage.ObjectInfo{}, storage.Wrap("put", key, err)
+		return storage.ObjectInfo{}, f.wrap("put", key, err)
 	}
 	if !f.noOptionsCheck {
 		if err := storage.ValidatePutOptions(opts); err != nil {
-			return storage.ObjectInfo{}, storage.Wrap("put", key, err)
+			return storage.ObjectInfo{}, f.wrap("put", key, err)
 		}
 	}
 	if err := ctx.Err(); err != nil {
-		return storage.ObjectInfo{}, storage.Wrap("put", key, err)
+		return storage.ObjectInfo{}, f.wrap("put", key, err)
 	}
 	if !f.ignoresSize && opts.Size != nil {
 		r = storage.ExpectSize(r, *opts.Size)
@@ -83,22 +87,23 @@ func (f *fake) Put(ctx context.Context, key string, r io.Reader, opts storage.Pu
 	}
 	var buf bytes.Buffer
 	chunk := make([]byte, 32<<10)
+	_, existed := f.lookup(key)
 	for {
 		if !f.ignoresCtx {
 			if err := ctx.Err(); err != nil {
-				return storage.ObjectInfo{}, storage.Wrap("put", key, err)
+				return storage.ObjectInfo{}, f.wrap("put", key, err)
 			}
 		}
 		n, err := r.Read(chunk)
 		buf.Write(chunk[:n])
-		if f.nonAtomic {
+		if f.nonAtomic || (f.nonAtomicFirst && !existed) {
 			f.store(key, buf.Bytes(), info)
 		}
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			return storage.ObjectInfo{}, storage.Wrap("put", key, err)
+			return storage.ObjectInfo{}, f.wrap("put", key, err)
 		}
 	}
 	data := buf.Bytes()
@@ -106,7 +111,7 @@ func (f *fake) Put(ctx context.Context, key string, r io.Reader, opts storage.Pu
 		data = data[:1<<20]
 	}
 	if f.rejectsEmpty && len(data) == 0 {
-		return storage.ObjectInfo{}, storage.Wrap("put", key, fmt.Errorf("%w: empty object", storage.ErrInvalidOptions))
+		return storage.ObjectInfo{}, f.wrap("put", key, fmt.Errorf("%w: empty object", storage.ErrInvalidOptions))
 	}
 	if f.tornWrites {
 		f.writeTorn(key, data, info)
@@ -115,6 +120,10 @@ func (f *fake) Put(ctx context.Context, key string, r io.Reader, opts storage.Pu
 	}
 	info.Size = int64(len(data))
 	f.store(key, data, info)
+	if f.aliasMetadata {
+		o, _ := f.lookup(key)
+		return o.info, nil
+	}
 	return info, nil
 }
 
@@ -136,6 +145,27 @@ func (f *fake) writeTorn(key string, data []byte, info storage.ObjectInfo) {
 	f.objects[f.mapKey(key)] = o
 }
 
+// wrap is storage.Wrap, unless the fake returns bare sentinels.
+func (f *fake) wrap(op, key string, err error) error {
+	if f.bareErrors {
+		return err
+	}
+	return storage.Wrap(op, key, err)
+}
+
+// owned returns info with a metadata map of its own.
+func (f *fake) owned(info storage.ObjectInfo) storage.ObjectInfo {
+	if f.aliasMetadata || info.Metadata == nil {
+		return info
+	}
+	md := make(map[string]string, len(info.Metadata))
+	for k, v := range info.Metadata {
+		md[k] = v
+	}
+	info.Metadata = md
+	return info
+}
+
 func (f *fake) mapKey(key string) string {
 	if f.caseInsensitive {
 		return strings.ToLower(key)
@@ -154,7 +184,15 @@ func (f *fake) store(key string, data []byte, info storage.ObjectInfo) {
 	info.Size = int64(len(data))
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.objects[f.mapKey(key)] = object{data: append([]byte(nil), data...), info: info}
+	f.objects[f.mapKey(key)] = object{data: append([]byte(nil), data...), info: f.owned(info)}
+}
+
+// lookup reports whether key holds an object.
+func (f *fake) lookup(key string) (object, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	o, ok := f.objects[f.mapKey(key)]
+	return o, ok
 }
 
 func (f *fake) checkKey(key string) error {
@@ -166,37 +204,42 @@ func (f *fake) checkKey(key string) error {
 
 func (f *fake) get(op, key string) (object, error) {
 	if err := f.checkKey(key); err != nil {
-		return object{}, storage.Wrap(op, key, err)
+		return object{}, f.wrap(op, key, err)
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	o, ok := f.objects[f.mapKey(key)]
 	if !ok {
-		return object{}, storage.Wrap(op, key, storage.ErrNotFound)
+		return object{}, f.wrap(op, key, storage.ErrNotFound)
 	}
+	o.info = f.owned(o.info)
 	return o, nil
 }
 
 func (f *fake) Open(ctx context.Context, key string) (io.ReadCloser, storage.ObjectInfo, error) {
 	if err := f.checkKey(key); err != nil {
-		return nil, storage.ObjectInfo{}, storage.Wrap("open", key, err)
+		return nil, storage.ObjectInfo{}, f.wrap("open", key, err)
 	}
 	if err := f.readCtx(ctx); err != nil {
-		return nil, storage.ObjectInfo{}, storage.Wrap("open", key, err)
+		return nil, storage.ObjectInfo{}, f.wrap("open", key, err)
 	}
 	o, err := f.get("open", key)
 	if err != nil {
 		return nil, storage.ObjectInfo{}, err
 	}
-	return io.NopCloser(bytes.NewReader(o.data)), o.info, nil
+	body := io.NopCloser(bytes.NewReader(o.data))
+	if f.openDetached {
+		return body, o.info, nil
+	}
+	return storage.ContextReadCloser(ctx, body), o.info, nil
 }
 
 func (f *fake) Stat(ctx context.Context, key string) (storage.ObjectInfo, error) {
 	if err := f.checkKey(key); err != nil {
-		return storage.ObjectInfo{}, storage.Wrap("stat", key, err)
+		return storage.ObjectInfo{}, f.wrap("stat", key, err)
 	}
 	if err := f.readCtx(ctx); err != nil {
-		return storage.ObjectInfo{}, storage.Wrap("stat", key, err)
+		return storage.ObjectInfo{}, f.wrap("stat", key, err)
 	}
 	o, err := f.get("stat", key)
 	return o.info, err
@@ -204,15 +247,15 @@ func (f *fake) Stat(ctx context.Context, key string) (storage.ObjectInfo, error)
 
 func (f *fake) Delete(ctx context.Context, key string) error {
 	if err := f.checkKey(key); err != nil {
-		return storage.Wrap("delete", key, err)
+		return f.wrap("delete", key, err)
 	}
 	if err := f.readCtx(ctx); err != nil {
-		return storage.Wrap("delete", key, err)
+		return f.wrap("delete", key, err)
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if _, ok := f.objects[f.mapKey(key)]; !ok && f.deleteMissingErr {
-		return storage.Wrap("delete", key, storage.ErrNotFound)
+		return f.wrap("delete", key, storage.ErrNotFound)
 	}
 	delete(f.objects, f.mapKey(key))
 	if f.deleteByPrefix {
@@ -227,13 +270,13 @@ func (f *fake) Delete(ctx context.Context, key string) error {
 
 func (f *fake) URL(ctx context.Context, key string, opts storage.URLOptions) (string, error) {
 	if err := f.checkKey(key); err != nil {
-		return "", storage.Wrap("url", key, err)
+		return "", f.wrap("url", key, err)
 	}
 	if err := f.readCtx(ctx); err != nil {
-		return "", storage.Wrap("url", key, err)
+		return "", f.wrap("url", key, err)
 	}
 	if err := storage.ValidateURLOptions(opts); err != nil {
-		return "", storage.Wrap("url", key, err)
+		return "", f.wrap("url", key, err)
 	}
 	if f.urlNeedsObject {
 		if _, err := f.get("url", key); err != nil {
@@ -243,7 +286,7 @@ func (f *fake) URL(ctx context.Context, key string, opts storage.URLOptions) (st
 	if f.emptyURL {
 		return "", nil
 	}
-	return "", storage.Wrap("url", key, storage.ErrUnsupported)
+	return "", f.wrap("url", key, storage.ErrUnsupported)
 }
 
 func TestReferenceFakePasses(t *testing.T) {
@@ -310,9 +353,9 @@ func TestSuiteCatchesBrokenDrivers(t *testing.T) {
 		want   string
 	}{
 		{"FailedPutKeepsPrevious", func(f *fake) { f.nonAtomic = true }, "want the previous version whole"},
-		{"InvalidKeys", func(f *fake) { f.noKeyCheck = true }, "want storage.ErrInvalidKey"},
-		{"SizeMismatch", func(f *fake) { f.ignoresSize = true }, "want storage.ErrSizeMismatch"},
-		{"CanceledPut", func(f *fake) { f.ignoresCtx = true }, "want context.Canceled"},
+		{"InvalidKeys", func(f *fake) { f.noKeyCheck = true }, "want storage: invalid object key"},
+		{"SizeMismatch", func(f *fake) { f.ignoresSize = true }, "want storage: object length differs"},
+		{"CanceledPut", func(f *fake) { f.ignoresCtx = true }, "want context canceled"},
 		{"Missing", func(f *fake) { f.deleteMissingErr = true }, "deletes are idempotent"},
 		{"DefaultContentType", func(f *fake) { f.noDefaultType = true }, "want \"application/octet-stream\""},
 		{"URL", func(f *fake) { f.emptyURL = true }, "empty URL and no error"},
@@ -324,10 +367,15 @@ func TestSuiteCatchesBrokenDrivers(t *testing.T) {
 		{"EmptyObject", func(f *fake) { f.rejectsEmpty = true }, "Put(\"empty\")"},
 		{"InvalidOptions", func(f *fake) { f.noOptionsCheck = true }, "want storage.ErrInvalidOptions"},
 		{"ConcurrentPuts", func(f *fake) { f.tornWrites = true }, "torn write"},
-		{"CanceledContext", func(f *fake) { f.readIgnoresCtx = true }, "want context.Canceled"},
+		{"CanceledContext", func(f *fake) { f.readIgnoresCtx = true }, "want context canceled"},
 		{"PortableKeys", func(f *fake) { f.caseInsensitive = true }, "two keys share one object"},
 		{"URL", func(f *fake) { f.urlNeedsObject = true }, "must not check that the object exists"},
 		{"NoPartialReads", func(f *fake) { f.nonAtomic = true }, "part of the object being written"},
+		{"NoPartialReads", func(f *fake) { f.nonAtomicFirst = true }, "mid-Put of a new key"},
+		{"MetadataIsOwned", func(f *fake) { f.aliasMetadata = true }, "the stored metadata changed without a Put"},
+		{"OpenFollowsContext", func(f *fake) { f.openDetached = true }, "must follow the context"},
+		{"Missing", func(f *fake) { f.bareErrors = true }, "inside a *storage.Error"},
+		{"InvalidKeys", func(f *fake) { f.bareErrors = true }, "inside a *storage.Error"},
 	}
 	covered := map[string]bool{}
 	for _, tc := range cases {

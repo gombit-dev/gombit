@@ -148,6 +148,12 @@ func ValidateMetadata(md map[string]string) error {
 		if !utf8.ValidString(value) {
 			return fmt.Errorf("%w: metadata %q: value is not valid UTF-8", ErrInvalidOptions, name)
 		}
+		// HTTP trims a header value's surrounding whitespace (Go's
+		// transport does; SigV4 signs the trimmed value), so an S3 driver
+		// could not give such a value back as given.
+		if strings.TrimLeft(value, " ") != value || strings.TrimRight(value, " ") != value {
+			return fmt.Errorf("%w: metadata %q: value has leading or trailing spaces, which HTTP headers drop", ErrInvalidOptions, name)
+		}
 		for _, r := range value {
 			if unsafeRune(r) {
 				return fmt.Errorf("%w: metadata %q: value contains the control character %U", ErrInvalidOptions, name, r)
