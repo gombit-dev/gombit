@@ -544,6 +544,35 @@ func checkCanceledPut(t testing.TB, s storage.Storage) {
 	if got, _ := read(t, s, "streaming"); string(got) != "before" {
 		t.Fatalf("after a canceled overwrite the key holds %d bytes, want the previous version", len(got))
 	}
+
+	// Canceled while a source Read is blocked: Put cannot interrupt that
+	// Read (the contract), but once it returns, the Put fails with ctx's
+	// error and stores nothing, even though the source then ends cleanly.
+	ctx, cancel = context.WithCancel(context.Background())
+	defer cancel()
+	g := &gate{started: make(chan struct{}), release: make(chan struct{})}
+	src := io.MultiReader(strings.NewReader("blocked-first-half"), g, strings.NewReader("-second-half"))
+	done = make(chan error, 1)
+	go func() {
+		_, err := s.Put(ctx, "blocked", src, storage.PutOptions{})
+		done <- err
+	}()
+	select {
+	case <-g.started:
+	case err := <-done:
+		t.Fatalf("the Put returned (%v) before reading past the first half of its source", err)
+	case <-time.After(20 * time.Second):
+		t.Fatal("the Put never read past the first half of its source")
+	}
+	cancel() // the Put is blocked in its source's Read
+	close(g.release)
+	select {
+	case err := <-done:
+		wantErr(t, err, context.Canceled, "put", "blocked")
+	case <-time.After(20 * time.Second):
+		t.Fatal("a Put whose context ended while its source was blocked did not return once the source did")
+	}
+	wantNotFound(t, s, "blocked")
 }
 
 func checkSizeMismatch(t testing.TB, s storage.Storage) {
