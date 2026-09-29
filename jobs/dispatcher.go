@@ -127,7 +127,7 @@ func At(t time.Time) DispatchOption {
 // DispatchAt is Dispatch with At(when); when overrides any Delay or At in
 // opts.
 func (d *Dispatcher) DispatchAt(ctx context.Context, job Job, when time.Time, opts ...DispatchOption) (Envelope, error) {
-	return d.Dispatch(ctx, job, append(opts, At(when))...)
+	return d.Dispatch(ctx, job, append(opts[:len(opts):len(opts)], At(when))...)
 }
 
 // Dispatch encodes job and queues it. It returns the envelope it queued, whose
