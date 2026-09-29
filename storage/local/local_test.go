@@ -516,3 +516,28 @@ func TestSignedURLsInDevelopment(t *testing.T) {
 		t.Fatalf("a public URL for a private object = %v", err)
 	}
 }
+
+func TestListEdgeCases(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	if err := s.List(ctx, "", func(storage.ObjectInfo) error { t.Fatal("an empty store listed something"); return nil }); err != nil {
+		t.Fatalf("List before any Put = %v", err)
+	}
+	if _, err := s.Put(ctx, "a/b", strings.NewReader("x"), storage.PutOptions{ContentType: "text/plain", Metadata: map[string]string{"k": "v"}}); err != nil {
+		t.Fatal(err)
+	}
+	var got []storage.ObjectInfo
+	if err := s.List(ctx, "a/", func(o storage.ObjectInfo) error { got = append(got, o); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ContentType != "text/plain" || got[0].Metadata["k"] != "v" {
+		t.Fatalf("List = %+v, want the full ObjectInfo", got)
+	}
+	// A damaged object file fails the listing instead of hiding objects.
+	if err := os.WriteFile(filepath.Join(s.Root(), "objects", "zz"), []byte("junk"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.List(ctx, "", func(storage.ObjectInfo) error { return nil }); err == nil || !strings.Contains(err.Error(), "corrupt") {
+		t.Fatalf("List over a damaged file = %v", err)
+	}
+}

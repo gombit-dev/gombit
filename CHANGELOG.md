@@ -102,6 +102,21 @@ version.
   - `examples/storage` gains `POST /uploads/direct` and
     `POST /uploads/direct/:id/confirm`
     ([#328](https://github.com/gombit-dev/gombit/issues/328)).
+- Object metadata and cleanup semantics (STORAGE-7):
+  - `ObjectInfo` documents what each field means per driver (ETag: SHA-256
+    locally, MD5 or `<md5>-<parts>` on S3; `ModTime`), and gains
+    `Filename()`;
+  - `storage.Lister` (local, memory, S3) enumerates objects under a prefix,
+    with its own conformance check;
+  - `storage.DeleteIfFails` deletes a just-stored file when the insert that
+    records it fails;
+  - `storage.DeleteOwned` deletes a record's file after the record, only
+    under the prefix the record owns, so shared files are never deleted;
+  - `storage.Sweep` removes abandoned uploads (older than a grace period,
+    and unreferenced according to the application's lookup);
+  - `examples/storage` records its uploads, deletes them with their
+    records, and sweeps the rest
+    ([#329](https://github.com/gombit-dev/gombit/issues/329)).
 
 ### Changed
 

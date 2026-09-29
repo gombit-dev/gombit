@@ -7,8 +7,8 @@ call, so moving from local development to S3-compatible storage in
 production changes configuration, not code.
 
 > **Status:** the contract, the local, in-memory, and S3-compatible
-> drivers, the upload helpers, public and signed URLs, and direct uploads.
-> Lifecycle and cleanup, and admin fields, follow
+> drivers, the upload helpers, public and signed URLs, direct uploads, and
+> metadata and cleanup semantics. Admin fields follow
 > ([epic #279](https://github.com/gombit-dev/gombit/issues/279)).
 
 Every app has a store: `app.Storage()` returns the driver `GOMBIT_STORAGE_DRIVER`
@@ -170,6 +170,66 @@ An app that passes its own store with `framework.WithStorage` builds a
 `presign.Signer`, passes it to `local.WithURLs` or `memory.WithURLs`, and
 mounts `presign.Handler` itself.
 
+## Metadata and lifecycle
+
+### What an object says about itself
+
+`Stat` (and `Open`) return an `ObjectInfo`:
+
+| Field | Meaning |
+| --- | --- |
+| `Key` | The object's key. |
+| `Size` | Its length in bytes. |
+| `ContentType` | Its media type (for an upload, the detected or confirmed type). |
+| `ETag` | A version identifier, which changes when the bytes change. Local and memory use the hex SHA-256 of the bytes. S3 uses the hex MD5 for a single-request upload and `<md5>-<parts>` for a multipart one. Compare ETags; don't compute them. |
+| `ModTime` | When it was last stored. For an upload under a generated key, which is written once, that is when it was created. |
+| `Metadata`, `Filename()` | The user metadata. `Filename()` is the client's cleaned filename (the `filename` metadata) that `storage/upload` stores. |
+
+### Cleanup
+
+A file and the database record that refers to it are two writes with no
+shared transaction. `storage` defines what happens when they diverge:
+
+- **The insert fails after the upload.** Wrap the insert in
+  `storage.DeleteIfFails`. When it fails, the just-uploaded file is deleted,
+  even if the request's context has ended, and the insert's error is
+  returned:
+
+  ```go
+  f, err := upload.Receive(store, r, avatars)
+  // ...
+  err = storage.DeleteIfFails(ctx, store, f.Key, func() error {
+  	return db.Create(&Avatar{UserID: user.ID, FileKey: f.Key}).Error
+  })
+  ```
+- **The record is deleted.** Delete the file after the record's deletion
+  commits, never before: deleting first loses the file of a record whose
+  deletion then fails. Use `storage.DeleteOwned(ctx, store, key, ownedPrefix)`,
+  which deletes only a key under `ownedPrefix`.
+- **The upload is abandoned.** Examples: a direct upload granted but never
+  confirmed, or a crash between storing the file and writing its record.
+  `storage.Sweep(ctx, store, prefix, olderThan, referenced)` lists the
+  objects under `prefix` last stored more than `olderThan` ago. It asks
+  `referenced` (a lookup of the key in your database) whether anything
+  refers to each one, and deletes those nothing does. Run it periodically,
+  as a job, and set `olderThan` longer than an upload can take to be
+  recorded: more than `Policy.GrantExpiry` for direct uploads. It needs a
+  store that can list (`storage.Lister`: local, memory and S3). On the local
+  driver, listing reads every object file, whatever the prefix.
+
+**Ownership.** Nothing is deleted automatically, and a shared file is never
+deleted. The contract is explicit: a record owns the objects under the prefix
+its field stores them under (`upload.Policy.Prefix`, one generated key per
+file), and nothing else. So:
+
+- `DeleteOwned` refuses a key outside the owned prefix. That covers a file
+  from a shared library, another field's file, or a key the application chose.
+- `Sweep` only looks under the prefix you give it.
+- Keep that prefix for files each owned by one record. If two records can
+  refer to one key (a copied reference), keep those files under a prefix you
+  never pass to `DeleteOwned` or `Sweep`, and delete them yourself when the
+  last reference goes.
+
 ## Keys
 
 A key is a `/`-separated path of one or more segments. The same rule
@@ -318,7 +378,7 @@ What a grant enforces:
   store that doesn't; use `Receive` for those.
 
 A grant that is never used expires. An upload that is never confirmed stays
-stored until something removes it (STORAGE-7 defines that cleanup).
+stored until `storage.Sweep` removes it (see [Cleanup](#cleanup)).
 
 **Browsers and S3.** A browser's `PUT` to the bucket is cross-origin, so the
 bucket needs a CORS rule allowing it from the app's origin, with the headers
@@ -522,7 +582,10 @@ The suite checks every guarantee above:
   public URL; never for a signed one), and refusing a lifetime over
   `MaxURLExpiry`;
 - for a store with direct uploads (`storage.DirectUploader`): invalid keys
-  and options refused, and a grant that stores nothing by itself.
+  and options refused, and a grant that stores nothing by itself;
+- for a store that lists (`storage.Lister`): exactly the objects under the
+  prefix, each once, with its size and time; stopping at the callback's
+  error; deleting as it goes; an ended context.
 
 The suite's own tests prove that every check fails for a driver broken the
 way it guards against. A new check can't land without such a driver.

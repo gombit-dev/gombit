@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"mime/multipart"
@@ -9,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -30,7 +32,7 @@ func newServer(t *testing.T) *gin.Engine {
 	h := gin.WrapH(presign.Handler(store, signer))
 	r.GET("/_storage/*key", h)
 	r.PUT("/_storage/*key", h)
-	register(r, store)
+	register(r, store, newRecords(100))
 	return r
 }
 
@@ -187,5 +189,56 @@ func TestDirectUpload(t *testing.T) {
 	}
 	if w := do(r, http.MethodPost, "/uploads/direct/nothing-here/confirm", "", ""); w.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("confirming nothing = %d %s", w.Code, w.Body)
+	}
+}
+
+// TestCleanup: the three cleanup cases of the example.
+func TestCleanup(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	store := memory.New()
+	recs := newRecords(1)
+	r := gin.New()
+	register(r, store, recs)
+	gif := []byte("GIF89a\x01\x00\x01\x00\x00\x00\x00;")
+
+	// A record's insert fails: the file just stored is deleted.
+	if w := formUpload(t, r, "a.gif", gif); w.Code != http.StatusCreated {
+		t.Fatalf("first upload = %d", w.Code)
+	}
+	if w := formUpload(t, r, "b.gif", gif); w.Code != http.StatusConflict {
+		t.Fatalf("an upload whose record cannot be written = %d %s", w.Code, w.Body)
+	}
+	if n := len(store.Keys()); n != 1 {
+		t.Fatalf("%d files stored, want only the recorded one", n)
+	}
+
+	// Deleting the record deletes the file it owns.
+	var id string
+	for k := range recs.rows {
+		id = strings.TrimPrefix(k, images.Prefix)
+	}
+	if w := do(r, http.MethodDelete, "/uploads/"+id, "", ""); w.Code != http.StatusNoContent {
+		t.Fatalf("DELETE = %d", w.Code)
+	}
+	if n := len(store.Keys()); n != 0 {
+		t.Fatalf("%d files left after the record was deleted", n)
+	}
+
+	// An upload nothing records is swept once it is old enough, and a
+	// shared file outside the prefix is never touched.
+	old := memory.New(memory.WithClock(func() time.Time { return time.Now().Add(-time.Hour) }))
+	for _, k := range []string{images.Prefix + "abandoned", images.Prefix + "kept", "shared/logo.png"} {
+		if _, err := old.Put(context.Background(), k, bytes.NewReader(gif), storage.PutOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	recs = newRecords(10)
+	_ = recs.insert(images.Prefix+"kept", "kept.gif")
+	res, err := sweepAbandoned(context.Background(), old, recs)
+	if err != nil || res.Deleted != 1 {
+		t.Fatalf("sweep = %+v, %v", res, err)
+	}
+	if keys := old.Keys(); len(keys) != 2 {
+		t.Fatalf("after the sweep: %v", keys)
 	}
 }

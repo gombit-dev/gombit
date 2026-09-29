@@ -67,6 +67,7 @@ var checks = []check{
 	{"NoPartialReads", checkNoPartialReads},
 	{"URL", checkURL},
 	{"DirectUpload", checkDirectUpload},
+	{"List", checkList},
 }
 
 func ctxFor(t testing.TB) context.Context {
@@ -776,4 +777,68 @@ func checkDirectUpload(t testing.TB, s storage.Storage) {
 		t.Fatalf("UploadURL expires at %s, want within %s", req.Expires, valid.Expires)
 	}
 	wantNotFound(t, s, "direct/never-stored") // asking for a grant stores nothing
+}
+
+// checkList: a store that lists its objects (storage.Lister) lists exactly
+// those under the prefix, each once with its key, size, and modification
+// time; stops at fn's error and returns it; lets fn delete what it is
+// given; and honors an ended context.
+func checkList(t testing.TB, s storage.Storage) {
+	l, ok := s.(storage.Lister)
+	if !ok {
+		return
+	}
+	for _, key := range []string{"list/a", "list/b/c", "list/b/d", "listing", "other/list/a"} {
+		put(t, s, key, []byte("bytes of "+key), storage.PutOptions{})
+	}
+	collect := func(prefix string) map[string]storage.ObjectInfo {
+		got := map[string]storage.ObjectInfo{}
+		if err := l.List(ctxFor(t), prefix, func(o storage.ObjectInfo) error {
+			if _, dup := got[o.Key]; dup {
+				t.Fatalf("List(%q) gave %q twice", prefix, o.Key)
+			}
+			got[o.Key] = o
+			return nil
+		}); err != nil {
+			t.Fatalf("List(%q) = %v", prefix, err)
+		}
+		return got
+	}
+	got := collect("list/")
+	if len(got) != 3 {
+		t.Fatalf("List(\"list/\") = %v, want exactly list/a, list/b/c, list/b/d", keysOf(got))
+	}
+	for _, key := range []string{"list/a", "list/b/c", "list/b/d"} {
+		o, ok := got[key]
+		if !ok || o.Size != int64(len("bytes of "+key)) || o.ModTime.IsZero() {
+			t.Fatalf("List(\"list/\") gave %q as %+v", key, o)
+		}
+	}
+	if all := collect(""); len(all) < 5 {
+		t.Fatalf("List(\"\") = %v, want every object", keysOf(all))
+	}
+	stop := errors.New("stop here")
+	calls := 0
+	if err := l.List(ctxFor(t), "list/", func(storage.ObjectInfo) error { calls++; return stop }); !errors.Is(err, stop) || calls != 1 {
+		t.Fatalf("List stopped by fn = %v after %d calls, want fn's error after 1", err, calls)
+	}
+	if err := l.List(ctxFor(t), "list/b/", func(o storage.ObjectInfo) error { return s.Delete(ctxFor(t), o.Key) }); err != nil {
+		t.Fatalf("List deleting as it goes = %v", err)
+	}
+	if left := collect("list/"); len(left) != 1 {
+		t.Fatalf("after deleting list/b/*, List = %v", keysOf(left))
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := l.List(canceled, "list/", func(storage.ObjectInfo) error { return nil }); !errors.Is(err, context.Canceled) {
+		t.Fatalf("List on a canceled context = %v, want context.Canceled", err)
+	}
+}
+
+func keysOf(m map[string]storage.ObjectInfo) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }

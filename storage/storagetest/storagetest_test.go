@@ -42,6 +42,8 @@ type fake struct {
 	anyExpiry        bool // URL accepts a lifetime over MaxURLExpiry
 	signedNotPublic  bool // URL refuses a signed URL for a private object
 	noUploadCheck    bool // UploadURL grants anything, valid or not
+	listByDir        bool // List("list/") also gives "listing" (a string prefix of the directory)
+	listSwallows     bool // List ignores fn's error and goes on
 }
 
 type object struct {
@@ -265,6 +267,30 @@ func (f *fake) UploadURL(ctx context.Context, key string, opts storage.UploadURL
 	return storage.UploadRequest{Method: "PUT", URL: "https://example.com/" + key, Expires: time.Now().Add(opts.Expires)}, nil
 }
 
+func (f *fake) List(ctx context.Context, prefix string, fn func(storage.ObjectInfo) error) error {
+	if err := f.readCtx(ctx); err != nil {
+		return storage.Wrap("list", prefix, err)
+	}
+	f.mu.Lock()
+	var infos []storage.ObjectInfo
+	for k, o := range f.objects {
+		match := strings.HasPrefix(k, prefix)
+		if f.listByDir {
+			match = strings.HasPrefix(k, strings.TrimSuffix(prefix, "/"))
+		}
+		if match {
+			infos = append(infos, o.info)
+		}
+	}
+	f.mu.Unlock()
+	for _, info := range infos {
+		if err := fn(info); err != nil && !f.listSwallows {
+			return err
+		}
+	}
+	return nil
+}
+
 func TestReferenceFakePasses(t *testing.T) {
 	Run(t, func(*testing.T) storage.Storage { return newFake() })
 }
@@ -350,6 +376,8 @@ func TestSuiteCatchesBrokenDrivers(t *testing.T) {
 		{"InvalidOptions", func(f *fake) { f.anyExpiry = true }, "MaxURLExpiry"},
 		{"URL", func(f *fake) { f.signedNotPublic = true }, "a signed URL works for a private object"},
 		{"DirectUpload", func(f *fake) { f.noUploadCheck = true }, "want storage.ErrInvalidKey"},
+		{"List", func(f *fake) { f.listByDir = true }, "want exactly list/a"},
+		{"List", func(f *fake) { f.listSwallows = true }, "want fn's error after 1"},
 	}
 	covered := map[string]bool{}
 	for _, tc := range cases {

@@ -53,7 +53,9 @@ local by default), `storage/upload` the upload helpers (size limits,
 content-detected type policy, generated keys), and public and signed URLs
 (visibility by key prefix; presigned on S3, `storage/presign` HMAC URLs
 served at `/_storage` for local and memory), and direct uploads
-(`storage.DirectUploader`, `upload.Authorize` / `upload.Confirm`). The other batteries
+(`storage.DirectUploader`, `upload.Authorize` / `upload.Confirm`), and
+cleanup semantics (`storage.Lister`, `DeleteIfFails`, `DeleteOwned`,
+`Sweep`; nothing shared is deleted without the owned-prefix contract). The other batteries
 (events, scheduler, mail, gRPC, multi-tenancy, i18n) are not here yet.
 The **CHAOS-0** resilience suite is in: `internal/faulttest` (deterministic
 fault injection: a faulting `database/sql` driver, a scripted HTTP

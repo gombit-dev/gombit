@@ -399,3 +399,24 @@ func TestDirectUploads(t *testing.T) {
 		t.Fatalf("grant %+v", g.Request)
 	}
 }
+
+// TestListSkipsForeignKeys: an object under the store's prefix that is not
+// a valid storage key (written by another tool) is not listed, since no
+// method could act on it.
+func TestListSkipsForeignKeys(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	if _, err := s.Put(ctx, "mine/a", strings.NewReader("x"), storage.PutOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.client.PutObject(ctx, &awss3.PutObjectInput{Bucket: aws.String(*s3Bucket), Key: aws.String(s.prefix + "mine/dot./x"), Body: strings.NewReader("y")}); err != nil {
+		t.Fatal(err)
+	}
+	var keys []string
+	if err := s.List(ctx, "mine/", func(o storage.ObjectInfo) error { keys = append(keys, o.Key); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 1 || keys[0] != "mine/a" {
+		t.Fatalf("List = %v, want only mine/a", keys)
+	}
+}

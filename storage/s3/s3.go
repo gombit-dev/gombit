@@ -409,6 +409,43 @@ func (s *Store) URL(ctx context.Context, key string, opts storage.URLOptions) (s
 	return req.URL, nil
 }
 
+var _ storage.Lister = (*Store)(nil)
+
+// List implements storage.Lister with ListObjectsV2, in key order, a page
+// (up to 1000 objects) at a time. ContentType and Metadata are empty: a
+// listing does not carry them. Objects under the store's prefix whose keys
+// are not valid storage keys (written by something else) are skipped.
+func (s *Store) List(ctx context.Context, prefix string, fn func(storage.ObjectInfo) error) error {
+	if err := ctx.Err(); err != nil {
+		return storage.Wrap("list", prefix, err)
+	}
+	pages := awss3.NewListObjectsV2Paginator(s.client, &awss3.ListObjectsV2Input{
+		Bucket: aws.String(s.bucket),
+		Prefix: aws.String(s.prefix + prefix),
+	})
+	for pages.HasMorePages() {
+		page, err := pages.NextPage(ctx)
+		if err != nil {
+			return storage.Wrap("list", prefix, classify(ctx, err))
+		}
+		for _, o := range page.Contents {
+			key, ok := strings.CutPrefix(aws.ToString(o.Key), s.prefix)
+			if !ok || storage.ValidateKey(key) != nil {
+				continue
+			}
+			if err := fn(storage.ObjectInfo{
+				Key:     key,
+				Size:    aws.ToInt64(o.Size),
+				ETag:    strings.Trim(aws.ToString(o.ETag), `"`),
+				ModTime: aws.ToTime(o.LastModified),
+			}); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 var _ storage.DirectUploader = (*Store)(nil)
 
 // UploadURL implements storage.DirectUploader: a presigned PutObject whose
