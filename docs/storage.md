@@ -6,11 +6,14 @@ code depends on `storage.Storage`, never on a filesystem path or an S3 SDK
 call, so moving from local development to S3-compatible storage in
 production changes configuration, not code.
 
-> **Status: the contract only (STORAGE-1).** No driver ships yet. The local
-> filesystem and in-memory drivers (STORAGE-2) and the S3-compatible driver
-> (STORAGE-3) implement this interface, and later issues add upload helpers,
-> signed URLs, direct uploads, and admin fields
+> **Status:** the contract and the local and in-memory drivers. The
+> S3-compatible driver (STORAGE-3), upload helpers, signed URLs, direct
+> uploads, and admin fields follow
 > ([epic #279](https://github.com/gombit-dev/gombit/issues/279)).
+
+Every app has a store: `app.Storage()` returns the driver `GOMBIT_STORAGE_DRIVER`
+names, which is local files under `./storage` by default. A runnable example
+is in [`examples/storage`](../examples/storage/main.go).
 
 ## The interface
 
@@ -123,6 +126,64 @@ same thing on every driver:
 `storage.MapError(ctx, err, notFound, internal)` does that mapping for a
 handler, in the D10 envelope with the request id. The driver's own error text
 never reaches the client.
+
+## Drivers
+
+| `GOMBIT_STORAGE_DRIVER` | Package | For |
+| --- | --- | --- |
+| `local` (default) | `storage/local` | Development and single-host deployments: files on disk |
+| `memory` | `storage/memory` | Tests: objects in the process, nothing on disk |
+
+`framework.New` opens the configured driver into `app.Storage()`.
+`framework.WithStorage(s)` attaches one you opened yourself, for example a
+`memory.New()` in a test. Either way, handlers use the same `storage.Storage`.
+
+### Local
+
+`GOMBIT_STORAGE_LOCAL_ROOT` (default `storage`, relative to the working
+directory) is the root. It is resolved to an absolute path when the app starts
+and created on the first write, so an app that never stores a file never grows
+the directory. `gombit new` gitignores `/storage/`.
+
+- **Layout.** A key is not a path. Each object is one file at
+  `<root>/objects/<h[0:2]>/<h[2:4]>/<h>`, where `h` is the SHA-256 of the key.
+  The file holds the object's bytes followed by a small trailer: a format
+  version, the key, content type, metadata, modification time, and a SHA-256
+  `ETag`. Readers ignore trailer fields they don't know, so a newer version
+  can add fields and still share a root with an older one, as in a rolling
+  deploy. Hashing is
+  what keeps every key its own object on any filesystem. Case variants,
+  `a` alongside `a/b`, long segments and names Windows reserves all just
+  work, and no key can reach outside the root. The files are not meant to
+  be browsed or edited by hand; go through the store.
+- **Streaming, atomic, durable writes.** `Put` streams into a temporary file
+  under `<root>/tmp` in 32 KiB pieces, never holding the object in memory.
+  It then flushes the file, renames it into place, and flushes the
+  directory. A reader sees the old object or the new one, never part of one,
+  and a `Put` that returned survives a crash. A failed `Put` removes its
+  temporary file. A process killed mid-`Put` can't, so a store's first `Put`
+  removes temporary files nothing has written to for an hour. `Open` reads
+  from disk as you read.
+- **Sharing.** Several processes can share one root (an app and its worker).
+  Several *hosts* need a shared filesystem, or an S3-compatible store
+  (STORAGE-3).
+- **Windows.** An object that is open for reading cannot be replaced or
+  deleted until its reader is closed.
+- **URLs.** `URL` returns `ErrUnsupported` for now. Serving local files needs
+  the public/private rules of STORAGE-5; serving every object would expose
+  private ones.
+
+In production, point `GOMBIT_STORAGE_LOCAL_ROOT` at a persistent volume. A
+container's working directory is lost when the container is replaced. A
+production app whose root is relative to the working directory logs a warning
+on its first write. An app that never stores a file is never warned.
+
+### Memory
+
+`memory.New()` keeps objects in a map, deterministically, with no disk. It
+keeps the whole contract, but it holds each object in memory. `Keys()` lists
+what was stored, for assertions. `WithClock` fixes `ModTime`, in both
+drivers.
 
 ## Writing a driver
 

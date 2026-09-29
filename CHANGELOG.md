@@ -24,8 +24,18 @@ version.
     turns into D10 responses;
   - `storage/storagetest`, the conformance suite every driver must pass.
 
-  No driver ships yet; local, in-memory and S3-compatible drivers follow in
-  STORAGE-2/3 ([#323](https://github.com/gombit-dev/gombit/issues/323)).
+  ([#323](https://github.com/gombit-dev/gombit/issues/323)).
+- Storage drivers and `app.Storage()` (STORAGE-2):
+  - `storage/local` streams files to disk under `GOMBIT_STORAGE_LOCAL_ROOT`
+    (default `./storage`, created on the first write, gitignored in new
+    apps). Objects are stored by the SHA-256 of their key, so every key is
+    its own file on any filesystem and none can escape the root. Writes go
+    to a temporary file that is renamed into place, so they are atomic.
+  - `storage/memory` is the test driver.
+  - `GOMBIT_STORAGE_DRIVER` selects the driver (`local` by default, or
+    `memory`), and `framework.WithStorage` attaches your own.
+  - `examples/storage` shows upload, download and delete handlers
+    ([#324](https://github.com/gombit-dev/gombit/issues/324)).
 
 ### Changed
 

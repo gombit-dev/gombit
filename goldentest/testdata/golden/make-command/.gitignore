@@ -3,6 +3,7 @@
 *.db-journal
 .gombit/
 tmp/
+/storage/
 node_modules/
 dist/
 bin/

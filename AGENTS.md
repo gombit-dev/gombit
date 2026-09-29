@@ -45,8 +45,10 @@ failed jobs (`gombit jobs failed|inspect|retry|forget|purge`), duplicate
 handling (`jobs.Unique`, `jobs.UniqueFor`, `jobs.Once`), and observability
 (`gombit_jobs_*` metrics, OpenTelemetry spans). The **STORAGE-0** epic
 (#279) has started: `storage` holds the object storage contract
-(`storage.Storage`, portable keys, classified errors) and `storage/storagetest`
-the driver conformance suite; no driver is here yet. The other batteries
+(`storage.Storage`, portable keys, classified errors), `storage/storagetest`
+the driver conformance suite, and `storage/local` (hash-addressed files,
+atomic writes) and `storage/memory` the drivers behind `framework.App.Storage()`
+(`GOMBIT_STORAGE_DRIVER`, local by default); S3 is not here yet. The other batteries
 (events, scheduler, mail, gRPC, multi-tenancy, i18n) are not here yet.
 The **CHAOS-0** resilience suite is in: `internal/faulttest` (deterministic
 fault injection: a faulting `database/sql` driver, a scripted HTTP

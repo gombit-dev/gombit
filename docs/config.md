@@ -57,6 +57,8 @@ recognizes:
 | `GOMBIT_JOBS_DRIVER` | `Config.Jobs.Driver` | `sync` |
 | `GOMBIT_JOBS_QUEUE` | `Config.Jobs.Queue` | `default` |
 | `GOMBIT_JOBS_NAMESPACE` | `Config.Jobs.Namespace` | derived from app/environment |
+| `GOMBIT_STORAGE_DRIVER` | `Config.Storage.Driver` | `local` |
+| `GOMBIT_STORAGE_LOCAL_ROOT` | `Config.Storage.Local.Root` | `storage` |
 | `GOMBIT_REDIS_ADDR` | `Config.Cache.Redis.Addr` | `127.0.0.1:6379` |
 | `GOMBIT_REDIS_USERNAME` | `Config.Cache.Redis.Username` | empty |
 | `GOMBIT_REDIS_PASSWORD` | `Config.Cache.Redis.Password` | empty |
@@ -92,6 +94,9 @@ regenerating. See [frontend.md](frontend.md#talking-to-the-api).
 `GOMBIT_JOBS_DRIVER` accepts `sync`, `memory`, and `redis`; the `redis` driver
 connects with the shared `GOMBIT_REDIS_*` settings, which are then validated
 even when the cache does not use Redis. See [jobs.md](jobs.md#drivers).
+`GOMBIT_STORAGE_DRIVER` accepts `local` and `memory`. The local driver keeps
+files under `GOMBIT_STORAGE_LOCAL_ROOT` (relative to the working directory),
+which is created on the first write. See [storage.md](storage.md#drivers).
 When `GOMBIT_CACHE_NAMESPACE` is unset, the namespace is derived from the
 normalized app name and environment, such as `gombit:development`.
 `GOMBIT_HTTP_TRUSTED_PROXIES` is a comma-separated list of IPs or CIDRs passed

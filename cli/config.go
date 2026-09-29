@@ -71,6 +71,8 @@ func writeConfigShow(w io.Writer, cfg config.Config) error {
 		{"Jobs.Driver", string(cfg.Jobs.Driver)},
 		{"Jobs.Queue", cfg.Jobs.Queue},
 		{"Jobs.Namespace", cfg.Jobs.Namespace},
+		{"Storage.Driver", string(cfg.Storage.Driver)},
+		{"Storage.Local.Root", cfg.Storage.Local.Root},
 		{"Cache.Redis.Addr", cfg.Cache.Redis.Addr},
 		{"Cache.Redis.Username", cfg.Cache.Redis.Username},
 		{"Cache.Redis.Password", cfg.Cache.Redis.Password},

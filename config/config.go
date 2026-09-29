@@ -28,6 +28,8 @@ const (
 	envJobsDriver              = "GOMBIT_JOBS_DRIVER"
 	envJobsQueue               = "GOMBIT_JOBS_QUEUE"
 	envJobsNamespace           = "GOMBIT_JOBS_NAMESPACE"
+	envStorageDriver           = "GOMBIT_STORAGE_DRIVER"
+	envStorageLocalRoot        = "GOMBIT_STORAGE_LOCAL_ROOT"
 	envRedisAddr               = "GOMBIT_REDIS_ADDR"
 	envRedisUsername           = "GOMBIT_REDIS_USERNAME"
 	envRedisPassword           = "GOMBIT_REDIS_PASSWORD" // #nosec G101 -- environment variable name, not a credential.
@@ -91,6 +93,7 @@ type Config struct {
 	Database    DatabaseConfig
 	Cache       CacheConfig
 	Jobs        JobsConfig
+	Storage     StorageConfig
 	Logging     LoggingConfig
 	Auth        AuthConfig
 	Security    SecurityConfig
@@ -216,6 +219,37 @@ type JobsConfig struct {
 	// Namespace prefixes every Redis key, so apps and environments sharing a
 	// Redis server do not share queues.
 	Namespace string
+}
+
+// StorageDriver names a supported object storage driver.
+type StorageDriver string
+
+const (
+	// StorageDriverLocal stores objects as files under
+	// Storage.Local.Root, for development and single-host deployments.
+	StorageDriverLocal StorageDriver = "local"
+	// StorageDriverMemory keeps objects in process memory, for tests.
+	// Stored objects are lost when the process exits.
+	StorageDriverMemory StorageDriver = "memory"
+)
+
+// DefaultStorageLocalRoot is the local driver's root directory, relative to
+// the working directory, unless GOMBIT_STORAGE_LOCAL_ROOT says otherwise.
+const DefaultStorageLocalRoot = "storage"
+
+// StorageConfig contains object storage configuration, opened by
+// framework.New into App.Storage().
+type StorageConfig struct {
+	Driver StorageDriver
+	Local  LocalStorageConfig
+}
+
+// LocalStorageConfig configures the local filesystem driver.
+type LocalStorageConfig struct {
+	// Root is the directory objects are stored under; a relative path is
+	// resolved against the working directory when the app starts. It is
+	// created on the first write.
+	Root string
 }
 
 // RedisConfig contains go-redis client configuration.
@@ -401,6 +435,10 @@ func DefaultFor(env Environment) Config {
 			Queue:     DefaultJobsQueue,
 			Namespace: DefaultCacheNamespace("Gombit", env),
 		},
+		Storage: StorageConfig{
+			Driver: StorageDriverLocal,
+			Local:  LocalStorageConfig{Root: DefaultStorageLocalRoot},
+		},
 		Logging: LoggingConfig{
 			Level: LogLevelInfo,
 			Sink:  LogSinkStderr,
@@ -502,6 +540,8 @@ func LoadFromEnv(lookup EnvLookup) (Config, error) {
 	} else {
 		cfg.Jobs.Namespace = DefaultCacheNamespace(cfg.AppName, cfg.Environment)
 	}
+	applyStorageDriver(lookup, envStorageDriver, &cfg.Storage.Driver)
+	applyString(lookup, envStorageLocalRoot, &cfg.Storage.Local.Root)
 	applyLogLevel(lookup, envLogLevel, &cfg.Logging.Level)
 	applyLogSink(lookup, envLogSink, &cfg.Logging.Sink)
 	applyString(lookup, envJWTSecret, &cfg.Auth.JWTSecret)
@@ -611,6 +651,7 @@ func (c Config) Validate() error {
 	if c.Jobs.Driver == JobsDriverRedis && (c.Cache.Driver == CacheDriverMemory || c.Cache.Driver == CacheDriverNoop) {
 		validateRedisConfig(&errs, c.Environment, c.Cache.Redis)
 	}
+	validateStorageConfig(&errs, c.Storage)
 	validateLoggingConfig(&errs, c.Logging)
 	validateAuthConfig(&errs, c.Environment, c.Auth)
 
@@ -896,6 +937,39 @@ func ValidateJobs(cfg JobsConfig) error {
 	return nil
 }
 
+// ValidateStorage returns explicit field errors for invalid storage
+// settings.
+func ValidateStorage(cfg StorageConfig) error {
+	var errs FieldErrors
+	validateStorageConfig(&errs, cfg)
+	if len(errs) > 0 {
+		return errs
+	}
+	return nil
+}
+
+func validateStorageConfig(errs *FieldErrors, cfg StorageConfig) {
+	switch cfg.Driver {
+	case StorageDriverLocal:
+		if strings.TrimSpace(cfg.Local.Root) == "" {
+			*errs = append(*errs, FieldError{
+				Field:   "Storage.Local.Root",
+				Env:     envStorageLocalRoot,
+				Value:   cfg.Local.Root,
+				Message: "must not be empty with the local storage driver",
+			})
+		}
+	case StorageDriverMemory:
+	default:
+		*errs = append(*errs, FieldError{
+			Field:   "Storage.Driver",
+			Env:     envStorageDriver,
+			Value:   string(cfg.Driver),
+			Message: "must be one of local, memory",
+		})
+	}
+}
+
 func validateJobsConfig(errs *FieldErrors, cfg JobsConfig) {
 	switch cfg.Driver {
 	case JobsDriverSync, JobsDriverMemory, JobsDriverRedis:
@@ -1043,6 +1117,12 @@ func applyCacheDriver(lookup EnvLookup, key string, dest *CacheDriver) {
 func applyJobsDriver(lookup EnvLookup, key string, dest *JobsDriver) {
 	if value, ok := lookup(key); ok {
 		*dest = JobsDriver(strings.TrimSpace(value))
+	}
+}
+
+func applyStorageDriver(lookup EnvLookup, key string, dest *StorageDriver) {
+	if value, ok := lookup(key); ok {
+		*dest = StorageDriver(strings.ToLower(strings.TrimSpace(value)))
 	}
 }
 

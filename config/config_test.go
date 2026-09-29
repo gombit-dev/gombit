@@ -110,6 +110,8 @@ func TestLoadFromEnv(t *testing.T) {
 		envJobsDriver:              " redis ",
 		envJobsQueue:               " mail ",
 		envJobsNamespace:           " example-jobs ",
+		envStorageDriver:           " Memory ",
+		envStorageLocalRoot:        "/var/lib/example/files",
 	}
 
 	got, err := LoadFromEnv(mapLookup(env))
@@ -156,6 +158,10 @@ func TestLoadFromEnv(t *testing.T) {
 			Driver:    JobsDriverRedis,
 			Queue:     "mail",
 			Namespace: "example-jobs",
+		},
+		Storage: StorageConfig{
+			Driver: StorageDriverMemory,
+			Local:  LocalStorageConfig{Root: "/var/lib/example/files"},
 		},
 		Logging: LoggingConfig{
 			Level: LogLevelDebug,
@@ -328,6 +334,10 @@ func TestLoadUsesProcessEnvironment(t *testing.T) {
 			Queue:     DefaultJobsQueue,
 			Namespace: "process-example:production",
 		},
+		Storage: StorageConfig{
+			Driver: StorageDriverLocal,
+			Local:  LocalStorageConfig{Root: DefaultStorageLocalRoot},
+		},
 		Logging: LoggingConfig{
 			Level: LogLevelError,
 			Sink:  LogSinkMongo,
@@ -389,6 +399,9 @@ func TestValidateReportsExplicitFieldErrors(t *testing.T) {
 		Jobs: JobsConfig{
 			Driver: "kafka",
 			Queue:  "Mail Queue",
+		},
+		Storage: StorageConfig{
+			Driver: "s4",
 		},
 		Logging: LoggingConfig{
 			Level: "trace",
@@ -487,6 +500,7 @@ func TestValidateReportsExplicitFieldErrors(t *testing.T) {
 			Message: "must be 1-128 characters of a-z, 0-9, _ . : -, starting with a letter or digit",
 		},
 		{Field: "Jobs.Namespace", Env: envJobsNamespace, Value: "", Message: "must not be empty"},
+		{Field: "Storage.Driver", Env: envStorageDriver, Value: "s4", Message: "must be one of local, memory"},
 		{
 			Field:   "Logging.Level",
 			Env:     envLogLevel,
@@ -1001,5 +1015,19 @@ func TestJobsRedisValidatesTheSharedConnection(t *testing.T) {
 	}
 	if err := ValidateJobs(JobsConfig{Driver: JobsDriverMemory, Queue: "_bad", Namespace: "app"}); err == nil {
 		t.Fatal("ValidateJobs accepted a queue name starting with a separator")
+	}
+}
+
+func TestValidateStorage(t *testing.T) {
+	if err := ValidateStorage(Default().Storage); err != nil {
+		t.Fatalf("the default storage config is invalid: %v", err)
+	}
+	if err := ValidateStorage(StorageConfig{Driver: StorageDriverMemory}); err != nil {
+		t.Fatalf("memory needs no root: %v", err)
+	}
+	err := ValidateStorage(StorageConfig{Driver: StorageDriverLocal, Local: LocalStorageConfig{Root: "  "}})
+	var fe FieldErrors
+	if !errors.As(err, &fe) || len(fe) != 1 || fe[0].Field != "Storage.Local.Root" || fe[0].Env != envStorageLocalRoot {
+		t.Fatalf("an empty local root = %v, want a Storage.Local.Root field error", err)
 	}
 }

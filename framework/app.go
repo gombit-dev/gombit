@@ -29,6 +29,7 @@ import (
 	"github.com/gombit-dev/gombit/internal/adminui"
 	"github.com/gombit-dev/gombit/jobs"
 	"github.com/gombit-dev/gombit/logging"
+	"github.com/gombit-dev/gombit/storage"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
@@ -62,6 +63,7 @@ type App struct {
 	jobs               *jobs.Dispatcher
 	jobsOwned          bool
 	jobMetrics         *jobs.Metrics
+	storage            storage.Storage
 	workerQueues       []string // consumed by RunWorker in this process
 	db                 *database.DB
 	logger             *zap.Logger
@@ -182,6 +184,13 @@ func New(options ...Option) (*App, error) {
 		app.jobs = dispatcher
 		app.jobsOwned = true
 	}
+	if app.storage == nil {
+		store, err := openStorage(app.cfg, app.logger)
+		if err != nil {
+			return nil, err
+		}
+		app.storage = store
+	}
 	if app.cfg.Auth.Enabled() {
 		if app.db == nil || app.db.DB == nil {
 			return nil, errors.New("framework: JWT secret is set but no database is attached")
@@ -256,6 +265,19 @@ func WithJobs(dispatcher *jobs.Dispatcher) Option {
 		}
 		app.jobs = dispatcher
 		app.jobsOwned = false
+		return nil
+	}
+}
+
+// WithStorage attaches an object store the caller opened (a driver, or a
+// test double such as storage/memory), instead of the one App opens from
+// Config.Storage.
+func WithStorage(s storage.Storage) Option {
+	return func(app *App) error {
+		if s == nil {
+			return errors.New("framework: nil storage")
+		}
+		app.storage = s
 		return nil
 	}
 }
@@ -375,7 +397,6 @@ func (a *App) Config() config.Config {
 	return a.cfg
 }
 
-// Cache returns the configured cache implementation.
 // Jobs returns the job dispatcher: register jobs on Jobs().Registry() at
 // startup, and dispatch with Jobs().Dispatch. The driver comes from
 // Config.Jobs (GOMBIT_JOBS_DRIVER, sync by default), and the registry
@@ -384,6 +405,13 @@ func (a *App) Jobs() *jobs.Dispatcher {
 	return a.jobs
 }
 
+// Storage returns the app's object store: the driver Config.Storage names
+// (local files by default), or the one attached with WithStorage.
+func (a *App) Storage() storage.Storage {
+	return a.storage
+}
+
+// Cache returns the configured cache implementation.
 func (a *App) Cache() cache.Cache {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
