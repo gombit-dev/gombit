@@ -168,9 +168,9 @@ func (w *Worker) Run(ctx context.Context) error {
 			return w.shutdown(&inFlight, cancelJobs)
 		}
 		if errors.Is(err, errSetAside) || errors.Is(err, errNotSetAside) {
-			// An undecodable job was buried (or could not be, and stays leased
-			// until it expires, so it is not reserved again meanwhile): look
-			// again at once.
+			// A delivery that cannot be run was buried (or could not be, and
+			// stays leased until it expires, so it is not reserved again
+			// meanwhile): look again at once.
 			<-slots
 			continue
 		}
@@ -202,14 +202,49 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 }
 
-// reserve takes the next job. An envelope that no longer decodes cannot be
-// run by any worker; it is set aside with the failed jobs and logged.
+// reserve takes the next job. It sets aside deliveries that cannot be run:
+// undecodable envelopes, and expired-lease redeliveries whose next attempt
+// would exceed MaxAttempts.
 func (w *Worker) reserve(ctx context.Context) (Delivery, error) {
 	opCtx, cancel := context.WithTimeout(ctx, queueOpTimeout)
 	defer cancel()
 	d, err := w.queue.Reserve(opCtx, w.opts.Queues, w.opts.Lease)
-	if err != nil || d.Err == nil {
+	if err != nil {
 		return d, err
+	}
+	if d.Err == nil {
+		if !d.LeaseExpired {
+			return d, nil
+		}
+		policy := w.registry.Options(d.Envelope.Name)
+		if d.Envelope.Attempt <= policy.MaxAttempts {
+			return d, nil
+		}
+		started := time.Now()
+		var waited time.Duration
+		if !d.AvailableAt.IsZero() && started.After(d.AvailableAt) {
+			waited = started.Sub(d.AvailableAt)
+		}
+		exhaustErr := errors.New("previous worker did not settle the job before its lease expired")
+		fields := []zap.Field{
+			zap.String("job_id", d.Envelope.ID),
+			zap.String("job", d.Envelope.Name),
+			zap.String("queue", d.Queue),
+			zap.Int("attempt", d.Envelope.Attempt),
+			zap.Duration("duration", 0),
+			zap.Duration("waited", waited),
+			zap.String("kind", string(KindHandler)),
+			zap.Error(exhaustErr),
+		}
+		if len(d.Envelope.Metadata) > 0 {
+			fields = append(fields, zap.Any("metadata", d.Envelope.Metadata))
+		}
+		buryErr := w.giveUp(d, exhaustErr, policy, fields)
+		w.metrics.record(w.jobLabel(d.Envelope.Name), d.Queue, settled(ResultFailed, buryErr), 0, waited)
+		if buryErr != nil {
+			return Delivery{}, errNotSetAside
+		}
+		return Delivery{}, errSetAside
 	}
 	failure := Failure{Reason: ReasonUndecodable, Kind: KindDecode, Error: d.Err.Error(), At: time.Now()}
 	buryErr := w.bury(d, failure)
@@ -226,12 +261,12 @@ func (w *Worker) reserve(ctx context.Context) (Delivery, error) {
 }
 
 var (
-	// errSetAside: reserve buried an undecodable delivery with the failed
-	// jobs.
-	errSetAside = errors.New("jobs: undecodable job set aside")
-	// errNotSetAside: reserve could not bury an undecodable delivery; it
-	// stays leased until its lease expires.
-	errNotSetAside = errors.New("jobs: undecodable job could not be set aside")
+	// errSetAside: reserve buried a delivery that cannot be run with the
+	// failed jobs.
+	errSetAside = errors.New("jobs: delivery set aside")
+	// errNotSetAside: reserve could not bury a delivery that cannot be run;
+	// it stays leased until its lease expires.
+	errNotSetAside = errors.New("jobs: delivery could not be set aside")
 )
 
 // maxReserveBackoff caps the wait between failing Reserve calls.
