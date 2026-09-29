@@ -54,6 +54,8 @@ type fake struct {
 	nonAtomicFirst   bool // a key's first Put writes in place as it streams
 	resultIsInput    bool // Put's result carries the caller's metadata map
 	constantETag     bool // every version reports the same ETag
+	putNoETag        bool // Put reports no ETag (Open and Stat do)
+	openNoETag       bool // Open reports no ETag (Put and Stat do)
 	keepsForeignErr  bool // wraps like the old Wrap: keeps any *storage.Error
 }
 
@@ -143,6 +145,9 @@ func (f *fake) Put(ctx context.Context, key string, r io.Reader, opts storage.Pu
 	}
 	if f.resultIsInput {
 		info.Metadata = opts.Metadata
+	}
+	if f.putNoETag {
+		info.ETag = ""
 	}
 	return info, nil
 }
@@ -252,6 +257,9 @@ func (f *fake) Open(ctx context.Context, key string) (io.ReadCloser, storage.Obj
 		return nil, storage.ObjectInfo{}, err
 	}
 	body := io.NopCloser(bytes.NewReader(o.data))
+	if f.openNoETag {
+		o.info.ETag = ""
+	}
 	if f.openDetached {
 		return body, o.info, nil
 	}
@@ -446,6 +454,8 @@ func TestSuiteCatchesBrokenDrivers(t *testing.T) {
 		{"MetadataIsOwned", func(f *fake) { f.aliasMetadata = true }, "the stored metadata changed without a Put"},
 		{"MetadataIsOwned", func(f *fake) { f.resultIsInput = true }, "shares the caller's map"},
 		{"Overwrite", func(f *fake) { f.constantETag = true }, "different bytes kept the ETag"},
+		{"Overwrite", func(f *fake) { f.putNoETag = true }, "they must agree"},
+		{"Overwrite", func(f *fake) { f.openNoETag = true }, "they must agree"},
 		{"FailedPutKeepsPrevious", func(f *fake) { f.keepsForeignErr = true }, "inside a *storage.Error"},
 		{"OpenFollowsContext", func(f *fake) { f.openDetached = true }, "must follow the context"},
 		{"Missing", func(f *fake) { f.bareErrors = true }, "inside a *storage.Error"},
