@@ -282,7 +282,11 @@ func checkNestedKeys(t testing.TB, s storage.Storage) {
 // checkPortableKeys: every valid key is its own object, including keys a
 // filesystem would conflate or refuse: case variants, Unicode
 // normalization variants (APFS folds NFC and NFD), a key that is a prefix
-// of another, a long segment, and names Windows reserves.
+// of another, a long segment, and names Windows reserves. A round trip can
+// only see what the host it runs on does: Linux keeps all of these apart, so
+// a filesystem driver must also show that its key-to-path mapping never
+// depends on how the host compares names (the local driver hashes keys, and
+// tests that its paths are hex).
 func checkPortableKeys(t testing.TB, s storage.Storage) {
 	keys := []string{
 		"Case/File.txt",
@@ -558,9 +562,9 @@ func checkInvalidOptions(t testing.TB, s storage.Storage) {
 		{Metadata: map[string]string{"": "x"}},
 		{Metadata: map[string]string{"ok": "new\nline"}},
 		{Metadata: map[string]string{"big": strings.Repeat("v", storage.MaxMetadataBytes)}},
-		// 1400 + 200 UTF-8 bytes, over 2 KB once RFC 2047 encoded as S3
-		// needs.
-		{Metadata: map[string]string{"name": strings.Repeat("é", 700), "name2": strings.Repeat("é", 100)}},
+		// 1400 UTF-8 bytes, over 2 KB once RFC 2047 encoded as S3 needs.
+		{Metadata: map[string]string{"name": strings.Repeat("é", 700)}},
+		{Metadata: map[string]string{"name": "a =? b"}},
 		{Metadata: map[string]string{"name": "invoice\u202efdp.exe"}},
 		{Metadata: map[string]string{"name": "line\u2028break"}},
 	} {
@@ -615,26 +619,18 @@ func checkConcurrentPuts(t testing.TB, s storage.Storage) {
 	t.Fatalf("after concurrent Puts the key holds %d bytes matching none of the writers: a torn write", len(got))
 }
 
-// blockingReader returns first, then blocks until release is closed, then
-// returns rest.
-type blockingReader struct {
-	first, rest []byte
-	started     chan struct{}
-	release     chan struct{}
-	stage       int
+// gate is a reader that blocks its first Read until release is closed,
+// telling started when it is reached, and then reports EOF: between two
+// byte readers in an io.MultiReader, it holds a Put in the middle of its
+// source, whatever buffer size the driver reads with.
+type gate struct {
+	started, release chan struct{}
+	once             sync.Once
 }
 
-func (b *blockingReader) Read(p []byte) (int, error) {
-	switch b.stage {
-	case 0:
-		b.stage = 1
-		close(b.started)
-		return copy(p, b.first), nil
-	case 1:
-		<-b.release
-		b.stage = 2
-		return copy(p, b.rest), nil
-	}
+func (g *gate) Read([]byte) (int, error) {
+	g.once.Do(func() { close(g.started) })
+	<-g.release
 	return 0, io.EOF
 }
 
@@ -642,26 +638,61 @@ func (b *blockingReader) Read(p []byte) (int, error) {
 // object whole, never the part written so far.
 func checkNoPartialReads(t testing.TB, s storage.Storage) {
 	put(t, s, "streaming", []byte("the previous version"), storage.PutOptions{ContentType: "text/plain"})
-	r := &blockingReader{first: []byte("NEW-first-half"), rest: []byte("-second-half"), started: make(chan struct{}), release: make(chan struct{})}
+	g := &gate{started: make(chan struct{}), release: make(chan struct{})}
+	defer func() {
+		select {
+		case <-g.release:
+		default:
+			close(g.release)
+		}
+	}()
+	src := io.MultiReader(strings.NewReader("NEW-first-half"), g, strings.NewReader("-second-half"))
 	done := make(chan error, 1)
 	go func() {
-		_, err := s.Put(ctxFor(t), "streaming", r, storage.PutOptions{ContentType: "application/json"})
+		_, err := s.Put(ctxFor(t), "streaming", src, storage.PutOptions{ContentType: "application/json"})
 		done <- err
 	}()
 	select {
-	case <-r.started:
+	case <-g.started:
 	case err := <-done:
-		t.Fatalf("the Put returned (%v) before reading its source", err)
+		t.Fatalf("the Put returned (%v) before reading past the first half of its source", err)
 	case <-time.After(20 * time.Second):
-		t.Fatal("the Put never started reading its source")
+		t.Fatal("the Put never read past the first half of its source")
 	}
-	got, info := read(t, s, "streaming")
-	close(r.release)
+	// Read while the Put is held mid-source; bounded, so a driver that
+	// blocks readers during a Put fails here rather than hanging.
+	type result struct {
+		data []byte
+		info storage.ObjectInfo
+		err  error
+	}
+	mid := make(chan result, 1)
+	go func() {
+		body, info, err := s.Open(ctxFor(t), "streaming")
+		if err != nil {
+			mid <- result{err: err}
+			return
+		}
+		data, err := io.ReadAll(body)
+		_ = body.Close()
+		mid <- result{data, info, err}
+	}()
+	var got result
+	select {
+	case got = <-mid:
+	case <-time.After(20 * time.Second):
+		close(g.release)
+		t.Fatal("Open blocked while a Put was streaming: readers must see the previous object, not wait for the write")
+	}
+	close(g.release)
 	if err := <-done; err != nil {
 		t.Fatalf("Put = %v", err)
 	}
-	if string(got) != "the previous version" || info.ContentType != "text/plain" {
-		t.Fatalf("mid-Put, a reader saw %q (%s): part of the object being written", got, info.ContentType)
+	if got.err != nil {
+		t.Fatalf("Open while a Put was streaming = %v", got.err)
+	}
+	if string(got.data) != "the previous version" || got.info.ContentType != "text/plain" {
+		t.Fatalf("mid-Put, a reader saw %q (%s): part of the object being written", got.data, got.info.ContentType)
 	}
 	if final, _ := read(t, s, "streaming"); string(final) != "NEW-first-half-second-half" {
 		t.Fatalf("after the Put the key holds %q", final)
