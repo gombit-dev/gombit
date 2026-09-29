@@ -79,8 +79,11 @@ func (e *exactReader) probe() error {
 }
 
 // ContextReader returns r stopping at ctx: each Read first checks ctx and
-// fails with its error once it has ended. A driver copies a Put's reader
-// through it so a canceled Put stops streaming instead of reading to EOF.
+// fails with its error once it has ended, without calling r. It does not
+// interrupt a Read of r already in progress (r has no way to be
+// interrupted); that Read returns when r returns, and the next one fails.
+// A driver copies a Put's reader through it so a canceled Put stops
+// streaming instead of reading to EOF, as Storage.Put specifies.
 func ContextReader(ctx context.Context, r io.Reader) io.Reader {
 	return &ctxReader{ctx: ctx, r: r}
 }
