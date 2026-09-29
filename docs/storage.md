@@ -13,7 +13,10 @@ production changes configuration, not code.
 
 Every app has a store: `app.Storage()` returns the driver `GOMBIT_STORAGE_DRIVER`
 names, which is local files under `./storage` by default. A runnable example
-is in [`examples/storage`](../examples/storage/main.go).
+is in [`examples/storage`](../examples/storage/main.go). It serves downloads
+with `Content-Disposition: attachment`, because an uploaded `text/html` or
+`image/svg+xml` object rendered inline would run as a page in the app's
+origin.
 
 ## The interface
 
@@ -49,10 +52,10 @@ err = store.Delete(ctx, "avatars/42.png")
 | Guarantee | What it means |
 | --- | --- |
 | **Streaming** | `Put` reads an `io.Reader` to EOF in pieces, and `Open` returns an `io.ReadCloser`. Neither needs the whole object in memory, a seekable source, or a known length. |
-| **Atomic writes** | A `Put` that fails leaves the key as it was: the previous object whole, or still absent. That covers the reader returning an error, the context ending, and a length that differs from the declared `Size`. No one ever reads a partial object. Concurrent `Put`s to one key leave one of them whole. |
+| **Atomic writes** | A `Put` that fails leaves the key as it was: the previous object whole, or still absent. That covers the reader returning an error, the context ending, and a length that differs from the declared `Size`. A reader during a `Put` reads the previous object whole, never part of the new one. Concurrent `Put`s to one key leave one of them whole. |
 | **Overwrite** | `Put` replaces an existing object, including its content type and metadata. |
 | **Idempotent delete** | Deleting a missing object is not an error, so a retried delete is safe. |
-| **Portable keys** | Every method validates its key with the same rule (below) and fails with `ErrInvalidKey` before touching the backend. Every valid key is its own object on every driver: keys that differ only in case, a key that is a prefix of another (`a` and `a/b`), segments up to 255 bytes, and names Windows reserves (`CON`, `c:`) all store and read back as themselves. |
+| **Portable keys** | Every method validates its key with the same rule (below) and fails with `ErrInvalidKey` before touching the backend. Every valid key is its own object on every driver: keys that differ only in case or in Unicode normalization (`café` NFC and NFD), a key that is a prefix of another (`a` and `a/b`), segments up to 255 bytes, and names Windows reserves (`CON`, `c:`) all store and read back as themselves. |
 | **Context** | Every method honors `ctx`: one that has already ended fails the call with the context's error. A `Put` canceled mid-stream fails the same way and stores nothing. |
 
 ### `PutOptions` and `ObjectInfo`
@@ -104,8 +107,9 @@ A key is a `/`-separated path of one or more segments. The same rule
 (`storage.ValidateKey`) applies on every driver, so a key that works in
 development works in production:
 
-- 1 to 1024 bytes of valid UTF-8, with no segment longer than 255 bytes
-  (the file-name limit of the filesystems under services such as MinIO);
+- 1 to 1024 bytes of valid UTF-8, with no segment longer than 255 bytes.
+  AWS allows longer segments, but MinIO, which stores objects as files,
+  refuses them;
 - no leading or trailing `/`, and no empty segment (`a//b`);
 - no segment that is `.` or `..`, or that ends with `.` or a space. Windows
   strips a trailing dot or space from a path component, so `...` or `.. `
@@ -174,8 +178,13 @@ the directory. `gombit new` gitignores `/storage/`.
 - **Streaming, atomic, durable writes.** `Put` streams into a temporary file
   under `<root>/tmp` in 32 KiB pieces, never holding the object in memory.
   It then flushes the file, renames it into place, and flushes the
-  directory. A reader sees the old object or the new one, never part of one,
-  and a `Put` that returned survives a crash. A failed `Put` removes its
+  directory (and, on the first `Put`, the root's own entry). On Windows,
+  which can't flush a directory, it flushes the renamed file instead. A
+  reader sees the old object or the new one, never part of one, and a `Put`
+  that returned survives a crash. If the flush after the rename fails even
+  on a retry, the object is stored but may not survive a crash. `Put` still
+  reports success, because the object is visible, and `app.Storage()` logs a
+  warning. A failed `Put` removes its
   temporary file. A process killed mid-`Put` can't, so a store's first `Put`
   removes temporary files nothing has written to for an hour. `Open` reads
   from disk as you read.
@@ -278,11 +287,14 @@ The suite checks every guarantee above:
 - the default content type;
 - overwrites and idempotent deletes;
 - every invalid key, on every method;
-- portable keys (case variants, prefix keys, segments up to 255 bytes, reserved names);
+- portable keys (case and Unicode-normalization variants, prefix keys,
+  segments up to 255 bytes, reserved names);
+- a reader during a `Put` sees the previous object;
 - every method on an already-canceled context;
 - an 8 MiB object streamed through a pipe in small pieces, which is never
   held in memory by the test;
-- a failed or canceled `Put` leaving the previous object whole;
+- a failed, canceled, mismatched or refused `Put` leaving the previous
+  object whole;
 - size mismatches and invalid options;
 - concurrent `Put`s to one key;
 - `URL` returning either a URL or `ErrUnsupported`.

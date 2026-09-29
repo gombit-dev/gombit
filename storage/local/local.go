@@ -60,6 +60,7 @@ type Store struct {
 	root     string
 	now      func() time.Time
 	firstPut func(root string)
+	warn     func(msg string, err error)
 	once     sync.Once
 }
 
@@ -77,6 +78,13 @@ func WithClock(now func() time.Time) Option {
 // production).
 func WithFirstPut(fn func(root string)) Option {
 	return func(s *Store) { s.firstPut = fn }
+}
+
+// WithWarn sets a function told about failures that do not fail the
+// operation, such as a stored object whose directory entry could not be
+// flushed to disk (framework.New sends these to the app's logger).
+func WithWarn(fn func(msg string, err error)) Option {
+	return func(s *Store) { s.warn = fn }
 }
 
 // staleTemp is how long a temporary file may go unwritten before a store
@@ -161,7 +169,15 @@ func (s *Store) put(ctx context.Context, key string, r io.Reader, opts storage.P
 	tmpDir := filepath.Join(s.root, "tmp")
 	tmp, err := os.CreateTemp(tmpDir, "put-*")
 	if errors.Is(err, fs.ErrNotExist) {
+		// The first Put: create the root and flush its entry (in its parent)
+		// and tmp's (in the root) now, before any object is published, so a
+		// crash cannot drop the root under objects renamed into it.
 		if err = os.MkdirAll(tmpDir, 0o750); err == nil {
+			if err = syncDir(filepath.Dir(s.root)); err == nil {
+				err = syncDir(s.root)
+			}
+		}
+		if err == nil {
 			tmp, err = os.CreateTemp(tmpDir, "put-*")
 		}
 	}
@@ -225,16 +241,44 @@ func (s *Store) put(ctx context.Context, key string, r io.Reader, opts storage.P
 	if err != nil {
 		return storage.ObjectInfo{}, err
 	}
+	// The rename published the object: from here the Put has happened, and
+	// returning an error would tell the caller it did not. Flush the
+	// directory entry so it survives a crash; if that fails even on a
+	// retry, report it through the warning hook and return success.
 	committed = true
-	if err := syncDir(filepath.Dir(dst)); err != nil {
-		return storage.ObjectInfo{}, err
+	if err := flushRenameHook(dst); err != nil {
+		if err = flushRenameHook(dst); err != nil && s.warn != nil {
+			s.warn("local storage: an object was stored, but flushing its directory entry to disk failed; it may not survive a crash", err)
+		}
 	}
 	return h.info(n), nil
 }
 
+// flushRenameHook is flushRename, replaceable by tests.
+var flushRenameHook = flushRename
+
+// flushRename makes a rename to dst durable. On Unix that is an fsync of
+// the directory that holds the new entry. Windows cannot open a directory
+// to flush it; there, flushing the renamed file itself (FlushFileBuffers)
+// writes its metadata, which NTFS journals together with the rename.
+func flushRename(dst string) error {
+	if runtime.GOOS != "windows" {
+		return syncDir(filepath.Dir(dst))
+	}
+	f, err := os.OpenFile(dst, os.O_RDWR, 0) // #nosec G304 -- an object file under the store's own root
+	if err != nil {
+		return err
+	}
+	err = f.Sync()
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	return err
+}
+
 // syncDir flushes a directory's entries (a rename or a new subdirectory) to
-// disk. Windows cannot open a directory for syncing, and flushes renames
-// itself; it is a no-op there.
+// disk. Windows cannot open a directory to flush it, so it is a no-op there;
+// flushRename covers a rename on Windows by flushing the renamed file.
 func syncDir(dir string) error {
 	if runtime.GOOS == "windows" {
 		return nil

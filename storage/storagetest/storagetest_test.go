@@ -327,6 +327,7 @@ func TestSuiteCatchesBrokenDrivers(t *testing.T) {
 		{"CanceledContext", func(f *fake) { f.readIgnoresCtx = true }, "want context.Canceled"},
 		{"PortableKeys", func(f *fake) { f.caseInsensitive = true }, "two keys share one object"},
 		{"URL", func(f *fake) { f.urlNeedsObject = true }, "must not check that the object exists"},
+		{"NoPartialReads", func(f *fake) { f.nonAtomic = true }, "part of the object being written"},
 	}
 	covered := map[string]bool{}
 	for _, tc := range cases {

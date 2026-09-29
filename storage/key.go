@@ -13,8 +13,9 @@ import (
 const MaxKeyBytes = 1024
 
 // MaxSegmentBytes is the longest segment of a key (the part between '/'s),
-// in bytes: the file-name limit of the filesystems under S3-compatible
-// services such as MinIO, which refuse a longer one.
+// in bytes. AWS S3 itself allows longer, but MinIO, an S3-compatible
+// service that stores objects as files, refuses a longer segment
+// (XMinioInvalidObjectName), so a portable key stays within it.
 const MaxSegmentBytes = 255
 
 // MaxContentTypeBytes bounds PutOptions.ContentType, parameters included.
@@ -103,6 +104,14 @@ func keyProblem(key string) string {
 func ValidatePutOptions(opts PutOptions) error {
 	if len(opts.ContentType) > MaxContentTypeBytes {
 		return fmt.Errorf("%w: content type is %d bytes, more than %d", ErrInvalidOptions, len(opts.ContentType), MaxContentTypeBytes)
+	}
+	// The raw string is what a driver stores and later sends as a header:
+	// check it, not only what mime.ParseMediaType makes of it (the parser
+	// skips CR, LF, tab, and Unicode line separators as whitespace).
+	for _, r := range opts.ContentType {
+		if unsafeRune(r) {
+			return fmt.Errorf("%w: content type %q contains the control character %U", ErrInvalidOptions, opts.ContentType, r)
+		}
 	}
 	if opts.ContentType != "" {
 		mediaType, _, err := mime.ParseMediaType(opts.ContentType)

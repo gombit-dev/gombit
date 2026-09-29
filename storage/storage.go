@@ -30,8 +30,8 @@ type Storage interface {
 	// Put is atomic. When it fails (r returns an error, ctx ends, the
 	// length differs from a declared opts.Size), key keeps the object it
 	// had before, or stays absent; no reader ever sees a partial object.
-	// Concurrent Puts to one key leave one of them whole (the last to
-	// finish wins).
+	// Concurrent Puts to one key leave one of them whole, and a reader
+	// during a Put reads the previous object whole.
 	Put(ctx context.Context, key string, r io.Reader, opts PutOptions) (ObjectInfo, error)
 
 	// Open returns the object's bytes as a stream, and its ObjectInfo. The
