@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"encoding/base64"
 	"fmt"
 	"mime"
 	"strings"
@@ -19,9 +20,13 @@ const MaxSegmentBytes = 255
 // MaxContentTypeBytes bounds PutOptions.ContentType, parameters included.
 const MaxContentTypeBytes = 256
 
-// MaxMetadataBytes bounds a PutOptions.Metadata: the UTF-8 bytes of every
-// name and value together, which is how S3 measures its 2 KB user-metadata
-// limit.
+// MaxMetadataBytes bounds a PutOptions.Metadata, measured as the metadata
+// headers of an S3 request: each name, plus each value as it is sent. A
+// printable-ASCII value is sent as is; any other value (and one containing
+// "=?", which would read as an encoded word) as one RFC 2047 base64 word,
+// S3's documented encoding for non-ASCII metadata, which is 12 bytes plus
+// the base64 of its UTF-8. That is the strictest measure among S3-compatible
+// services: AWS counts the decoded UTF-8, MinIO the headers as sent.
 const MaxMetadataBytes = 2048
 
 // ValidateKey reports whether key is a valid object key, as ErrInvalidKey
@@ -140,12 +145,29 @@ func ValidateMetadata(md map[string]string) error {
 				return fmt.Errorf("%w: metadata %q: value contains the control character %U", ErrInvalidOptions, name, r)
 			}
 		}
-		total += len(name) + len(value)
+		total += len(name) + MetadataValueWireLen(value)
 	}
 	if total > MaxMetadataBytes {
 		return fmt.Errorf("%w: metadata is %d bytes, more than %d", ErrInvalidOptions, total, MaxMetadataBytes)
 	}
 	return nil
+}
+
+// MetadataValueWireLen is how many bytes value takes in an S3 metadata
+// header: its length when it is printable ASCII without "=?", otherwise the
+// length of "=?UTF-8?B?" + base64(value) + "?=". An S3 driver that encodes
+// values must encode exactly this way, so what ValidateMetadata accepts
+// fits every S3-compatible service.
+func MetadataValueWireLen(value string) int {
+	if strings.Contains(value, "=?") {
+		return 12 + base64.StdEncoding.EncodedLen(len(value))
+	}
+	for i := 0; i < len(value); i++ {
+		if c := value[i]; c < 0x20 || c > 0x7e {
+			return 12 + base64.StdEncoding.EncodedLen(len(value))
+		}
+	}
+	return len(value)
 }
 
 // unsafeRune reports control characters (C0, DEL, C1), Unicode line and

@@ -70,9 +70,13 @@ err = store.Delete(ctx, "avatars/42.png")
   non-empty body.
 - **`Metadata`** is small user metadata returned in `ObjectInfo` exactly as
   given. Names are lower-case ASCII letters, digits and `-`. Values are UTF-8
-  without control characters. The limit is 2 KiB of UTF-8 for names and
-  values together, which is how S3 measures its own limit. Keep a client's
-  original filename here, never in the key.
+  without control characters. The limit is 2 KiB for names and values
+  together, measured as the headers of an S3 request. A printable-ASCII
+  value counts as is. Any other value counts as its RFC 2047 encoding, S3's
+  own for non-ASCII metadata, which adds about a third plus 12 bytes
+  (`storage.MetadataValueWireLen`). That is the strictest measure among S3
+  services: MinIO counts the headers as sent, AWS the decoded UTF-8. Keep a
+  client's original filename here, never in the key.
 
 `ObjectInfo` reports `Key`, `Size`, `ContentType`, `Metadata`, `ModTime`, and
 `ETag`. `Stat` and `Open` always report `ModTime`. The `ObjectInfo` that `Put`
