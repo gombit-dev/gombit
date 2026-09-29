@@ -81,7 +81,8 @@ func (e *exactReader) probe() error {
 // ContextReader returns r stopping at ctx: each Read first checks ctx and
 // fails with its error once it has ended, without calling r. It does not
 // interrupt a Read of r already in progress (r has no way to be
-// interrupted); that Read returns when r returns, and the next one fails.
+// interrupted), but when that Read returns after ctx has ended it fails
+// with ctx's error, whatever r returned (EOF included).
 // A driver copies a Put's reader through it so a canceled Put stops
 // streaming instead of reading to EOF, as Storage.Put specifies.
 func ContextReader(ctx context.Context, r io.Reader) io.Reader {
@@ -97,7 +98,14 @@ func (c *ctxReader) Read(p []byte) (int, error) {
 	if err := c.ctx.Err(); err != nil {
 		return 0, err
 	}
-	return c.r.Read(p)
+	n, err := c.r.Read(p)
+	if cerr := c.ctx.Err(); cerr != nil {
+		// ctx ended while r was reading: cancellation wins over whatever
+		// the read returned, a clean EOF included, so a canceled Put never
+		// commits on the source's last read.
+		return 0, cerr
+	}
+	return n, err
 }
 
 // ContextReadCloser returns rc bound to ctx, as the reader Storage.Open
