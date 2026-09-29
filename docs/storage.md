@@ -56,9 +56,10 @@ err = store.Delete(ctx, "avatars/42.png")
 | **Overwrite** | `Put` replaces an existing object, including its content type and metadata. |
 | **Idempotent delete** | Deleting a missing object is not an error, so a retried delete is safe. |
 | **Portable keys** | Every method validates its key with the same rule (below) and fails with `ErrInvalidKey` before touching the backend. Every valid key is its own object on every driver: keys that differ only in case or in Unicode normalization (`café` NFC and NFD), a key that is a prefix of another (`a` and `a/b`), segments up to 255 bytes, and names Windows reserves (`CON`, `c:`) all store and read back as themselves. |
-| **Context** | Every method honors `ctx`: one that has already ended fails the call with the context's error. A `Put` canceled mid-stream fails the same way and stores nothing. The reader `Open` returns stays bound to its `ctx` until it is closed: once the context ends, reading fails with its error, the way an HTTP response body does (`storage.ContextReadCloser` gives other drivers that behavior). Keep the context alive while the stream is read. |
+| **Context** | Every method honors `ctx`: one that has already ended fails the call with the context's error. A `Put` canceled mid-stream fails the same way and stores nothing. The reader `Open` returns stays bound to its `ctx` until it is closed: once the context ends, reading fails with its error and a read in progress is interrupted, the way an HTTP response body does (`storage.ContextReadCloser` gives other drivers that behavior). Keep the context alive while the stream is read. |
 | **Owned metadata** | `Put` copies the metadata map it is given, and every `ObjectInfo` returned has a map of its own. Changing one changes neither the stored object nor any other result. |
-| **Errors** | Every failure is a `*storage.Error` carrying the operation and the key, around a sentinel for `errors.Is` (see [Errors](#errors)). |
+| **Errors** | Every failure is a `*storage.Error` carrying the operation and the key, around a sentinel for `errors.Is` (see [Errors](#errors)). The outermost envelope always names the call that failed, even when the cause is another call's error (a `Put` source that failed reading another object). |
+| **Versions** | A driver that reports an `ETag` reports the same one from `Put` and `Stat`, and a new one when different bytes replace the object. An empty `ETag` means the driver has none. |
 
 ### `PutOptions` and `ObjectInfo`
 
@@ -513,6 +514,7 @@ The suite checks every guarantee above:
 - every invalid key, on every method;
 - every failure wrapped in a `*storage.Error` with its operation and key;
 - metadata owned by each result, and `Open`'s reader following its context;
+- ETags that change with the bytes;
 - portable keys (case and Unicode-normalization variants, prefix keys,
   segments up to 255 bytes, reserved names);
 - a reader during a `Put` sees the previous object, or none for a first write;
@@ -544,7 +546,8 @@ Helpers for drivers:
 - `ExpectSize` enforces a declared `Size` on a reader. It reports excess on
   the read that reaches the size, but read it to EOF (`io.Copy`), because
   `io.ReadFull` and `io.CopyN` drop an error returned with the last bytes.
-- `Wrap` builds the `*storage.Error`.
+- `Wrap` builds the `*storage.Error`: it keeps an error that is already this
+  call's envelope and wraps any other, including another call's.
 - `IsPublic` and `ValidatePublicPrefix` apply the visibility rule, and
   `EscapeKey` turns a key into a URL path, with every byte that could mean
   something else in a URL encoded.
