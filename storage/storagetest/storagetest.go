@@ -524,6 +524,7 @@ func checkInvalidOptions(t testing.TB, s storage.Storage) {
 	for _, opts := range []storage.PutOptions{
 		{ContentType: "not a media type"},
 		{ContentType: "text/"},
+		{ContentType: "text"},
 		{Size: -1},
 		{Metadata: map[string]string{"Upper": "x"}},
 		{Metadata: map[string]string{"under_score": "x"}},

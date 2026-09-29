@@ -54,8 +54,9 @@ err = store.Delete(ctx, "avatars/42.png")
 
 ### `PutOptions` and `ObjectInfo`
 
-- **`ContentType`** is the object's media type. It must parse as a media
-  type (`text/plain; charset=utf-8` is fine). Empty stores
+- **`ContentType`** is the object's media type. It must be a
+  `type/subtype` media type; parameters are fine
+  (`text/plain; charset=utf-8`). Empty stores
   `application/octet-stream`.
 - **`Size`**, when positive, is the exact length the reader will produce.
   `Put` then fails with `ErrSizeMismatch`, storing nothing, if the reader

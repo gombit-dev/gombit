@@ -79,6 +79,9 @@ func TestValidatePutOptions(t *testing.T) {
 	bad := []storage.PutOptions{
 		{ContentType: "not a media type"},
 		{ContentType: "text/"},
+		{ContentType: "text"},
+		{ContentType: "/plain"},
+		{ContentType: "a/b/c"},
 		{Size: -1},
 		{Metadata: map[string]string{"": "x"}},
 		{Metadata: map[string]string{"Upper": "x"}},

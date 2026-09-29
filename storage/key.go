@@ -79,12 +79,18 @@ func keyProblem(key string) string {
 
 // ValidatePutOptions reports whether opts is valid, as ErrInvalidOptions
 // (wrapped with the reason) when it is not: the content type must parse as
-// a media type, Size must not be negative, and Metadata must pass
+// a type/subtype media type, Size must not be negative, and Metadata must pass
 // ValidateMetadata.
 func ValidatePutOptions(opts PutOptions) error {
 	if opts.ContentType != "" {
-		if _, _, err := mime.ParseMediaType(opts.ContentType); err != nil {
+		mediaType, _, err := mime.ParseMediaType(opts.ContentType)
+		if err != nil {
 			return fmt.Errorf("%w: content type %q: %v", ErrInvalidOptions, opts.ContentType, err)
+		}
+		// ParseMediaType accepts a bare token ("text"); a stored object
+		// needs a type and a subtype, as HTTP sends it.
+		if typ, sub, ok := strings.Cut(mediaType, "/"); !ok || typ == "" || sub == "" || strings.Contains(sub, "/") {
+			return fmt.Errorf("%w: content type %q: want type/subtype", ErrInvalidOptions, opts.ContentType)
 		}
 	}
 	if opts.Size < 0 {

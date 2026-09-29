@@ -59,8 +59,9 @@ const DefaultContentType = "application/octet-stream"
 
 // PutOptions describes an object being stored.
 type PutOptions struct {
-	// ContentType is the object's media type ("image/png"). Empty stores
-	// DefaultContentType. It must parse as a media type.
+	// ContentType is the object's media type ("image/png"), parameters
+	// allowed ("text/plain; charset=utf-8"). Empty stores
+	// DefaultContentType. It must be a type/subtype media type.
 	ContentType string
 
 	// Size, when positive, is the exact length r will produce. Put then
