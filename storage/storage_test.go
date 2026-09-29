@@ -92,6 +92,8 @@ func TestValidatePutOptions(t *testing.T) {
 		{Metadata: map[string]string{"n": strings.Repeat("v", storage.MaxMetadataBytes)}},
 		// 1 + 342 × 2 bytes × 3 = 2053 once percent-encoded.
 		{Metadata: map[string]string{"n": strings.Repeat("é", 342)}},
+		// 1 + 683 × 3 = 2050: '%' is escaped too.
+		{Metadata: map[string]string{"n": strings.Repeat("%", 683)}},
 		{Metadata: map[string]string{"n": "bidi\u202eflip"}},
 	}
 	for _, opts := range bad {
