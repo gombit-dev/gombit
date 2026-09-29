@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -147,13 +148,19 @@ func TestFailedPutLeavesNothingBehind(t *testing.T) {
 	if !errors.Is(err, storage.ErrSizeMismatch) {
 		t.Fatalf("Put = %v, want storage.ErrSizeMismatch", err)
 	}
-	tmp, err := os.ReadDir(filepath.Join(s.Root(), "tmp"))
+	if left := tempFiles(t, s.Root()); len(left) != 0 {
+		t.Fatalf("failed Puts left temporary files %v", left)
+	}
+}
+
+// tempFiles lists the temporary files in every work directory under root.
+func tempFiles(t *testing.T, root string) []string {
+	t.Helper()
+	found, err := filepath.Glob(filepath.Join(root, "tmp", "w-*", "put-*"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tmp) != 0 {
-		t.Fatalf("failed Puts left %d temporary files", len(tmp))
-	}
+	return found
 }
 
 type errReader struct{ err error }
@@ -254,38 +261,231 @@ func TestClockAndETag(t *testing.T) {
 	}
 }
 
-// TestSweepsAbandonedTempFiles: a store's first Put removes temporary files
-// nothing has written to for an hour (left by a process killed mid-Put),
-// and keeps fresh ones (another process's Put in progress) and anything
-// that is not a temporary file.
-func TestSweepsAbandonedTempFiles(t *testing.T) {
+// TestSweepSparesLiveStores: a store's first Put removes the work
+// directories of stores that are gone (a process killed mid-Put) and keeps
+// a live store's in the same process, however long its Put has been
+// waiting on its source: a Put that has written part of its object, then
+// blocks for longer than any age limit, still completes after another
+// store's sweep. TestSweepSparesOtherProcesses covers stores in other
+// processes, which only their lock speaks for.
+func TestSweepSparesLiveStores(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "root")
-	tmp := filepath.Join(root, "tmp")
-	if err := os.MkdirAll(tmp, 0o750); err != nil {
+	ctx := context.Background()
+	live, _ := local.New(root)
+	if _, err := live.Put(ctx, "warm", strings.NewReader("x"), storage.PutOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	old := time.Now().Add(-2 * time.Hour)
-	for name, mtime := range map[string]time.Time{"put-abandoned": old, "put-in-progress": time.Now(), "notes.txt": old} {
-		p := filepath.Join(tmp, name)
-		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+	src, release := blockedSource("written before the pause, ")
+	done := make(chan error, 1)
+	go func() {
+		_, err := live.Put(ctx, "paused", src, storage.PutOptions{})
+		done <- err
+	}()
+	var inFlight []string
+	for deadline := time.Now().Add(10 * time.Second); len(inFlight) == 0; {
+		if time.Now().After(deadline) {
+			t.Fatal("the paused Put never created its temporary file")
+		}
+		time.Sleep(time.Millisecond)
+		inFlight = tempFiles(t, root)
+	}
+	tmp := filepath.Join(root, "tmp")
+	long := time.Now().Add(-48 * time.Hour)
+	age := func(p string) {
+		t.Helper()
+		if err := os.Chtimes(p, long, long); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Chtimes(p, mtime, mtime); err != nil {
+	}
+	// The live store's files look untouched for two days.
+	age(inFlight[0])
+	age(filepath.Dir(inFlight[0]))
+	// A store that died mid-Put: its owner file exists but nothing holds it.
+	dead := filepath.Join(tmp, "w-dead")
+	for _, name := range []string{"owner", "put-1"} {
+		if err := os.MkdirAll(dead, 0o750); err != nil {
 			t.Fatal(err)
 		}
+		if err := os.WriteFile(filepath.Join(dead, name), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	age(dead)
+	// A store that died before creating its owner file, one that is
+	// creating it right now, and something that is not a work directory.
+	for _, dir := range []string{"w-unowned", "w-starting", "notes"} {
+		if err := os.Mkdir(filepath.Join(tmp, dir), 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	age(filepath.Join(tmp, "w-unowned"))
+	age(filepath.Join(tmp, "notes"))
+
+	next, _ := local.New(root)
+	if _, err := next.Put(ctx, "k", strings.NewReader("x"), storage.PutOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	for dir, want := range map[string]bool{filepath.Dir(inFlight[0]): true, dead: false, filepath.Join(tmp, "w-unowned"): false, filepath.Join(tmp, "w-starting"): true, filepath.Join(tmp, "notes"): true} {
+		if _, err := os.Stat(dir); (err == nil) != want {
+			t.Errorf("after the sweep %s exists = %v, want %v", filepath.Base(dir), err == nil, want)
+		}
+	}
+	if _, err := os.Stat(inFlight[0]); err != nil {
+		t.Fatalf("the sweep removed the live store's temporary file: %v", err)
+	}
+	release("and after it")
+	if err := <-done; err != nil {
+		t.Fatalf("the paused Put = %v, want success after another store's sweep", err)
+	}
+	if got := readAll(t, live, "paused"); got != "written before the pause, and after it" {
+		t.Fatalf("the paused Put stored %q", got)
+	}
+}
+
+// helperRootEnv makes the test binary a helper process: a store on that
+// root that Puts "helper" from stdin (see TestSweepSparesOtherProcesses).
+const helperRootEnv = "GOMBIT_LOCAL_TEST_HELPER_ROOT"
+
+func TestHelperProcess(t *testing.T) {
+	root := os.Getenv(helperRootEnv)
+	if root == "" {
+		t.Skip("run as a helper process only")
+	}
+	s, err := local.New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Put(context.Background(), "helper", os.Stdin, storage.PutOptions{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// startHelper starts a helper process whose Put has written first and is
+// blocked on its stdin, and returns it with the temporary file it writes.
+func startHelper(t *testing.T, root, first string) (*exec.Cmd, io.WriteCloser, string) {
+	t.Helper()
+	before := tempFiles(t, root)
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(self, "-test.run=^TestHelperProcess$") // #nosec G204 -- the test binary itself
+	cmd.Env = append(os.Environ(), helperRootEnv+"="+root)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	if _, err := io.WriteString(stdin, first); err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		for _, f := range tempFiles(t, root) {
+			if !slices.Contains(before, f) {
+				if info, err := os.Stat(f); err == nil && info.Size() == int64(len(first)) {
+					return cmd, stdin, f
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the helper process never wrote its temporary file")
+		}
+	}
+}
+
+// TestSweepSparesOtherProcesses: a store in another process that is
+// blocked mid-Put, its files untouched for two days, keeps its work
+// directory through a sweep and completes its Put; once that process is
+// killed, the next sweep removes what it left.
+func TestSweepSparesOtherProcesses(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "root")
+	ctx := context.Background()
+	long := time.Now().Add(-48 * time.Hour)
+	age := func(paths ...string) {
+		t.Helper()
+		for _, p := range paths {
+			if err := os.Chtimes(p, long, long); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	sweep := func() {
+		t.Helper()
+		s, _ := local.New(root)
+		if _, err := s.Put(ctx, "sweeper", strings.NewReader("x"), storage.PutOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	live, stdin, tmp := startHelper(t, root, "written before the pause, ")
+	age(tmp, filepath.Dir(tmp))
+	sweep()
+	if _, err := os.Stat(tmp); err != nil {
+		t.Fatalf("a sweep removed a live process's temporary file: %v", err)
+	}
+	if _, err := io.WriteString(stdin, "and after it"); err != nil {
+		t.Fatal(err)
+	}
+	_ = stdin.Close()
+	if err := live.Wait(); err != nil {
+		t.Fatalf("the helper's Put failed after another store's sweep: %v", err)
 	}
 	s, _ := local.New(root)
-	if _, err := s.Put(context.Background(), "k", strings.NewReader("x"), storage.PutOptions{}); err != nil {
+	if got := readAll(t, s, "helper"); got != "written before the pause, and after it" {
+		t.Fatalf("the helper stored %q", got)
+	}
+
+	dead, _, tmp := startHelper(t, root, "never finished")
+	if err := dead.Process.Kill(); err != nil {
 		t.Fatal(err)
 	}
-	left := map[string]bool{}
-	entries, _ := os.ReadDir(tmp)
-	for _, e := range entries {
-		left[e.Name()] = true
+	_ = dead.Wait()
+	age(tmp, filepath.Dir(tmp))
+	sweep()
+	if _, err := os.Stat(filepath.Dir(tmp)); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("the killed process's work directory survived the sweep (%v)", err)
 	}
-	if left["put-abandoned"] || !left["put-in-progress"] || !left["notes.txt"] {
-		t.Fatalf("after the sweep tmp holds %v; want the abandoned temp file gone and the others kept", left)
+}
+
+// TestRootRemovedWhileRunning: if the root is removed under a running
+// store, the next Put creates it again.
+func TestRootRemovedWhileRunning(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	if _, err := s.Put(ctx, "k", strings.NewReader("before"), storage.PutOptions{}); err != nil {
+		t.Fatal(err)
 	}
+	if err := os.RemoveAll(s.Root()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Put(ctx, "k", strings.NewReader("after"), storage.PutOptions{}); err != nil {
+		t.Fatalf("Put after the root was removed = %v", err)
+	}
+	if got := readAll(t, s, "k"); got != "after" {
+		t.Fatalf("read %q", got)
+	}
+}
+
+// blockedSource returns a reader that yields first, then blocks until
+// release is called with the rest.
+func blockedSource(first string) (io.Reader, func(rest string)) {
+	rest := make(chan string, 1)
+	return io.MultiReader(strings.NewReader(first), &gateReader{rest: rest}), func(r string) { rest <- r }
+}
+
+type gateReader struct {
+	rest chan string
+	r    io.Reader
+}
+
+func (g *gateReader) Read(p []byte) (int, error) {
+	if g.r == nil {
+		g.r = strings.NewReader(<-g.rest)
+	}
+	return g.r.Read(p)
 }
 
 // rewriteHeader replaces the object file's trailer header with js.
@@ -402,9 +602,8 @@ func TestAncestorFlushFailureFailsBeforePublishing(t *testing.T) {
 	if _, err := s.Stat(ctx, "k"); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("after the failed Put, Stat = %v; want nothing published", err)
 	}
-	tmp, _ := os.ReadDir(filepath.Join(s.Root(), "tmp"))
-	if len(tmp) != 0 {
-		t.Fatalf("the failed Put left %d temporary files", len(tmp))
+	if left := tempFiles(t, s.Root()); len(left) != 0 {
+		t.Fatalf("the failed Put left temporary files %v", left)
 	}
 	failRoot, synced = false, nil
 	if _, err := s.Put(ctx, "k", strings.NewReader("x"), storage.PutOptions{}); err != nil {
@@ -416,9 +615,10 @@ func TestAncestorFlushFailureFailsBeforePublishing(t *testing.T) {
 }
 
 // TestEveryNewAncestorIsFlushedOnce: a root under directories that do not
-// exist yet has each new directory's entry flushed in its parent, up
-// through the deepest one that already existed; a second Put into the same
-// directory flushes only the directory it renames into.
+// exist yet has each new directory's entry flushed in its parent, from the
+// deepest one that already existed, and nothing above it is flushed (a
+// process may be able to traverse an ancestor but not read it); a second
+// Put into the same directory flushes only the directory it renames into.
 func TestEveryNewAncestorIsFlushedOnce(t *testing.T) {
 	base := t.TempDir()
 	s, _ := local.New(filepath.Join(base, "a", "b", "root"))
@@ -429,9 +629,15 @@ func TestEveryNewAncestorIsFlushedOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	leaf := filepath.Dir(s.Path("k"))
-	for _, dir := range []string{base, filepath.Join(base, "a"), filepath.Join(base, "a", "b"), s.Root(), filepath.Join(s.Root(), "objects"), filepath.Dir(leaf), leaf} {
+	want := []string{base, filepath.Join(base, "a"), filepath.Join(base, "a", "b"), s.Root(), filepath.Join(s.Root(), "objects"), filepath.Dir(leaf), leaf}
+	for _, dir := range want {
 		if !slices.Contains(synced, dir) {
 			t.Errorf("%s was never flushed (flushed %v)", dir, synced)
+		}
+	}
+	for _, dir := range synced {
+		if !slices.Contains(want, dir) {
+			t.Errorf("%s was flushed, but this store created no entry in it", dir)
 		}
 	}
 	synced = nil
@@ -515,4 +721,61 @@ func TestSignedURLsInDevelopment(t *testing.T) {
 	if _, err := store.URL(ctx, "private/report.pdf", storage.PublicURL()); !errors.Is(err, storage.ErrNotPublic) {
 		t.Fatalf("a public URL for a private object = %v", err)
 	}
+}
+
+// TestOpenReaderSurvivesOverwriteAndDelete: a reader keeps the version it
+// opened while a Put replaces the object and a Delete removes it, as the
+// contract promises, on every platform (Windows included: the open file
+// does not lock its name).
+func TestOpenReaderSurvivesOverwriteAndDelete(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	if _, err := s.Put(ctx, "k", strings.NewReader("first version"), storage.PutOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	body, _, err := s.Open(ctx, "k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = body.Close() }()
+	head := make([]byte, 6)
+	if _, err := io.ReadFull(body, head); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Put(ctx, "k", strings.NewReader("second version"), storage.PutOptions{}); err != nil {
+		t.Fatalf("Put over an open reader = %v", err)
+	}
+	if got := readAll(t, s, "k"); got != "second version" {
+		t.Fatalf("after the overwrite Open reads %q", got)
+	}
+	if err := s.Delete(ctx, "k"); err != nil {
+		t.Fatalf("Delete of an object with an open reader = %v", err)
+	}
+	if _, err := s.Stat(ctx, "k"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("after Delete, Stat = %v", err)
+	}
+	if _, err := s.Put(ctx, "k", strings.NewReader("third"), storage.PutOptions{}); err != nil {
+		t.Fatalf("Put after deleting an object with an open reader = %v", err)
+	}
+	rest, err := io.ReadAll(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(head) + string(rest); got != "first version" {
+		t.Fatalf("the open reader read %q, want the version it opened", got)
+	}
+}
+
+func readAll(t *testing.T, s *local.Store, key string) string {
+	t.Helper()
+	body, _, err := s.Open(context.Background(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = body.Close() }()
+	b, err := io.ReadAll(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
 }
