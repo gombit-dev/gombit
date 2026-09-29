@@ -251,6 +251,64 @@ func TestACrashedWorkerLosesNoJob(t *testing.T) {
 	eventually(t, "redelivery after the lease", func() bool { return calls.Load() == 2 && q.Len() == 0 })
 }
 
+// TestWorkerStopsCrashRedeliveryPastMaxAttempts: lease-expiry redelivery
+// cannot let a poison job run forever after successive workers die.
+func TestWorkerStopsCrashRedeliveryPastMaxAttempts(t *testing.T) {
+	reg := jobs.NewRegistry()
+	var runs atomic.Int32
+	jobs.MustRegister(reg, func(context.Context, blockJob) error {
+		runs.Add(1)
+		return nil
+	}, jobs.WithOptions(jobs.Options{MaxAttempts: 3}))
+
+	clock := newFakeClock()
+	q := jobs.NewMemoryQueue(jobs.WithMemoryClock(clock.Now))
+	dispatchN(t, jobs.NewDispatcher(reg, q, jobs.WithDispatcherClock(clock.Now)), 1)
+
+	// Three workers reserve the job and disappear without settling it.
+	for attempt := 1; attempt <= 3; attempt++ {
+		d, err := q.Reserve(context.Background(), []string{"default"}, time.Minute)
+		if err != nil {
+			t.Fatalf("Reserve attempt %d: %v", attempt, err)
+		}
+		if d.Envelope.Attempt != attempt {
+			t.Fatalf("Reserve attempt = %d, want %d", d.Envelope.Attempt, attempt)
+		}
+		clock.Advance(2 * time.Minute)
+	}
+
+	core, logs := observer.New(zap.InfoLevel)
+	w, err := jobs.NewWorker(reg, q, jobs.WorkerOptions{
+		Queues: []string{"default"}, PollInterval: 5 * time.Millisecond, Lease: time.Minute, Logger: zap.New(core),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	startWorker(t, w)
+
+	failedCount := func() int {
+		failed, err := q.Failed(context.Background(), "default", 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(failed)
+	}
+	eventually(t, "the exhausted crash-redelivered job to be set aside", func() bool {
+		return failedCount() == 1 || runs.Load() != 0
+	})
+	if runs.Load() != 0 {
+		t.Fatalf("handler ran %d times after three crashed deliveries with MaxAttempts 3; want no fourth run", runs.Load())
+	}
+	failed, _ := q.Failed(context.Background(), "default", 0)
+	if f := failed[0]; f.Attempts != 4 || f.Failure.Reason != jobs.ReasonExhausted || f.Failure.Error == "" {
+		t.Fatalf("failed job = %+v, want attempt 4 set aside as attempts exhausted", f)
+	}
+	gaveUp := logs.FilterMessage("job failed for good").All()
+	if len(gaveUp) != 1 || gaveUp[0].ContextMap()["attempt"] != int64(4) || gaveUp[0].ContextMap()["max_attempts"] != int64(3) {
+		t.Fatalf("give-up logs = %+v, want attempt 4 past MaxAttempts 3", gaveUp)
+	}
+}
+
 // TestWorkerRenewsTheLeaseOfALongJob: a job running for several leases is not
 // delivered to a second worker.
 func TestWorkerRenewsTheLeaseOfALongJob(t *testing.T) {
@@ -739,8 +797,8 @@ func TestAnInterruptedLastAttemptIsNotGivenUp(t *testing.T) {
 				t.Fatal(err)
 			}
 			d, err := q.Reserve(context.Background(), []string{"default"}, time.Minute)
-			if err != nil || d.Envelope.Attempt != 2 {
-				t.Fatalf("after shutdown: %+v, %v; want the job back, as attempt 2", d, err)
+			if err != nil || d.Envelope.Attempt != 2 || d.LeaseExpired {
+				t.Fatalf("after shutdown: %+v, %v; want an explicitly released attempt 2, not an expired-lease reclaim", d, err)
 			}
 		})
 	}
