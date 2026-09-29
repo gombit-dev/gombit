@@ -223,6 +223,11 @@ var invalidKeys = []string{
 	"line\u2028separator",
 	strings.Repeat("k", storage.MaxKeyBytes+1),
 	"a/" + strings.Repeat("s", storage.MaxSegmentBytes+1),
+	"...",
+	".. ",
+	"foo/.. /bar",
+	"a./b",
+	"a /b",
 }
 
 func checkInvalidKeys(t testing.TB, s storage.Storage) {
@@ -287,7 +292,7 @@ func checkPortableKeys(t testing.TB, s storage.Storage) {
 		strings.Repeat("l", storage.MaxSegmentBytes) + "/long-segment",
 		"CON/nul.txt",
 		"c:/aux",
-		"dot./space /x",
+		"dot.x/ space/x",
 	}
 	for i, key := range keys {
 		put(t, s, key, []byte(fmt.Sprint(i)), storage.PutOptions{})
@@ -509,13 +514,20 @@ func checkSizeMismatch(t testing.TB, s storage.Storage) {
 		{"short", "12345", 10},
 		{"long", "123456789012345", 10},
 	} {
-		_, err := s.Put(ctxFor(t), "sized/"+tc.name, strings.NewReader(tc.data), storage.PutOptions{Size: tc.size})
+		_, err := s.Put(ctxFor(t), "sized/"+tc.name, strings.NewReader(tc.data), storage.PutOptions{Size: storage.KnownSize(tc.size)})
 		if !errors.Is(err, storage.ErrSizeMismatch) {
 			t.Fatalf("Put of %d bytes declared as %d = %v, want storage.ErrSizeMismatch", len(tc.data), tc.size, err)
 		}
 		wantNotFound(t, s, "sized/"+tc.name)
 	}
-	info := put(t, s, "sized/exact", []byte("0123456789"), storage.PutOptions{Size: 10})
+	if _, err := s.Put(ctxFor(t), "sized/not-empty", strings.NewReader("x"), storage.PutOptions{Size: storage.KnownSize(0)}); !errors.Is(err, storage.ErrSizeMismatch) {
+		t.Fatalf("Put of 1 byte declared empty = %v, want storage.ErrSizeMismatch", err)
+	}
+	wantNotFound(t, s, "sized/not-empty")
+	if info := put(t, s, "sized/empty", nil, storage.PutOptions{Size: storage.KnownSize(0)}); info.Size != 0 {
+		t.Fatalf("an empty Put declared empty reports size %d", info.Size)
+	}
+	info := put(t, s, "sized/exact", []byte("0123456789"), storage.PutOptions{Size: storage.KnownSize(10)})
 	if info.Size != 10 {
 		t.Fatalf("an exactly sized Put reports size %d, want 10", info.Size)
 	}
@@ -527,14 +539,14 @@ func checkInvalidOptions(t testing.TB, s storage.Storage) {
 		{ContentType: "text/"},
 		{ContentType: "text"},
 		{ContentType: "text/plain; x=" + strings.Repeat("y", storage.MaxContentTypeBytes)},
-		{Size: -1},
+		{Size: storage.KnownSize(-1)},
 		{Metadata: map[string]string{"Upper": "x"}},
 		{Metadata: map[string]string{"under_score": "x"}},
 		{Metadata: map[string]string{"": "x"}},
 		{Metadata: map[string]string{"ok": "new\nline"}},
 		{Metadata: map[string]string{"big": strings.Repeat("v", storage.MaxMetadataBytes)}},
-		// 1400 bytes of UTF-8, 4200 once percent-encoded: over S3's limit.
-		{Metadata: map[string]string{"name": strings.Repeat("é", 700)}},
+		// 2200 UTF-8 bytes: over S3's 2 KB, which counts UTF-8 bytes.
+		{Metadata: map[string]string{"name": strings.Repeat("é", 1100)}},
 		{Metadata: map[string]string{"name": "invoice\u202efdp.exe"}},
 		{Metadata: map[string]string{"name": "line\u2028break"}},
 	} {
@@ -543,8 +555,10 @@ func checkInvalidOptions(t testing.TB, s storage.Storage) {
 		}
 		wantNotFound(t, s, "opts")
 	}
-	if _, err := s.URL(ctxFor(t), "opts", storage.URLOptions{Expires: -time.Second}); !errors.Is(err, storage.ErrInvalidOptions) {
-		t.Fatalf("URL with a negative expiry = %v, want storage.ErrInvalidOptions", err)
+	for _, opts := range []storage.URLOptions{storage.SignedURL(0), storage.SignedURL(-time.Second), {Expires: time.Minute}} {
+		if _, err := s.URL(ctxFor(t), "opts", opts); !errors.Is(err, storage.ErrInvalidOptions) {
+			t.Fatalf("URL(%+v) = %v, want storage.ErrInvalidOptions: a signed URL must never widen into a permanent one", opts, err)
+		}
 	}
 }
 
@@ -580,17 +594,27 @@ func checkConcurrentPuts(t testing.TB, s storage.Storage) {
 }
 
 // checkURL: a driver either produces URLs or says it cannot; it never
-// returns an empty URL without an error.
+// returns an empty URL without an error, and it never checks that the
+// object exists (a URL for an upload names a key not stored yet).
 func checkURL(t testing.TB, s storage.Storage) {
 	put(t, s, "linked/file.txt", []byte("x"), storage.PutOptions{})
-	for _, opts := range []storage.URLOptions{storage.PublicURL(), storage.SignedURL(time.Minute)} {
-		u, err := s.URL(ctxFor(t), "linked/file.txt", opts)
-		switch {
-		case errors.Is(err, storage.ErrUnsupported):
-		case err != nil:
-			t.Fatalf("URL(%+v) = %v, want a URL or storage.ErrUnsupported", opts, err)
-		case u == "":
-			t.Fatalf("URL(%+v) returned an empty URL and no error", opts)
+	for _, key := range []string{"linked/file.txt", "linked/never-stored.txt"} {
+		for _, opts := range []storage.URLOptions{storage.PublicURL(), storage.SignedURL(time.Minute)} {
+			checkOneURL(t, s, key, opts)
 		}
+	}
+}
+
+func checkOneURL(t testing.TB, s storage.Storage, key string, opts storage.URLOptions) {
+	t.Helper()
+	u, err := s.URL(ctxFor(t), key, opts)
+	switch {
+	case errors.Is(err, storage.ErrUnsupported):
+	case errors.Is(err, storage.ErrNotFound):
+		t.Fatalf("URL(%q, %+v) = %v: URL must not check that the object exists", key, opts, err)
+	case err != nil:
+		t.Fatalf("URL(%q, %+v) = %v, want a URL or storage.ErrUnsupported", key, opts, err)
+	case u == "":
+		t.Fatalf("URL(%q, %+v) returned an empty URL and no error", key, opts)
 	}
 }

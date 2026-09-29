@@ -64,10 +64,12 @@ type PutOptions struct {
 	// DefaultContentType. It must be a type/subtype media type.
 	ContentType string
 
-	// Size, when positive, is the exact length r will produce. Put then
-	// fails with ErrSizeMismatch, storing nothing, if r ends early or runs
-	// long. Zero means unknown: Put reads r to EOF.
-	Size int64
+	// Size, when set, is the exact length r will produce (zero for an empty
+	// object). Put then fails with ErrSizeMismatch, storing nothing, if r
+	// ends early or runs long. Nil means unknown: Put reads r to EOF. Build
+	// it with KnownSize, or from an HTTP request's Content-Length with
+	// SizeFromContentLength (-1, unknown, is nil).
+	Size *int64
 
 	// Metadata is small user metadata stored with the object and returned
 	// in its ObjectInfo exactly as given. Names are lower-case ASCII
@@ -100,10 +102,15 @@ type ObjectInfo struct {
 	Metadata map[string]string
 }
 
-// URLOptions chooses the kind of URL URL returns.
+// URLOptions chooses the kind of URL URL returns. Build it with PublicURL
+// or SignedURL.
 type URLOptions struct {
-	// Expires, when positive, asks for a signed URL valid for that long.
-	// Zero asks for a permanent public URL. Negative is ErrInvalidOptions.
+	// Signed asks for a URL that grants access only until Expires has
+	// passed. Unsigned asks for a permanent public URL.
+	Signed bool
+	// Expires is how long a signed URL is valid: it must be positive for a
+	// signed URL, and zero for a public one (ErrInvalidOptions otherwise),
+	// so a zero or negative lifetime can never widen into a permanent URL.
 	Expires time.Duration
 }
 
@@ -112,8 +119,22 @@ type URLOptions struct {
 func PublicURL() URLOptions { return URLOptions{} }
 
 // SignedURL asks for a URL that grants access to the object until ttl has
-// passed.
-func SignedURL(ttl time.Duration) URLOptions { return URLOptions{Expires: ttl} }
+// passed. ttl must be positive: URL fails with ErrInvalidOptions otherwise,
+// rather than returning anything longer-lived.
+func SignedURL(ttl time.Duration) URLOptions { return URLOptions{Signed: true, Expires: ttl} }
+
+// KnownSize is a PutOptions.Size of exactly n bytes.
+func KnownSize(n int64) *int64 { return &n }
+
+// SizeFromContentLength is the PutOptions.Size for an HTTP request body of
+// Content-Length n: nil when unknown (-1), the exact length otherwise
+// (zero included, so a request claiming an empty body cannot store one).
+func SizeFromContentLength(n int64) *int64 {
+	if n < 0 {
+		return nil
+	}
+	return KnownSize(n)
+}
 
 // Exists reports whether key holds an object: Stat, with ErrNotFound as
 // false.

@@ -96,7 +96,7 @@ func TestPutStreams(t *testing.T) {
 	var before, after runtime.MemStats
 	runtime.GC()
 	runtime.ReadMemStats(&before)
-	info, err := s.Put(context.Background(), "big", src, storage.PutOptions{Size: size})
+	info, err := s.Put(context.Background(), "big", src, storage.PutOptions{Size: storage.KnownSize(size)})
 	runtime.ReadMemStats(&after)
 	if err != nil {
 		t.Fatal(err)
@@ -139,7 +139,7 @@ func TestFailedPutLeavesNothingBehind(t *testing.T) {
 	if !errors.Is(err, boom) {
 		t.Fatalf("Put = %v, want the reader's error", err)
 	}
-	_, err = s.Put(context.Background(), "k", strings.NewReader("123"), storage.PutOptions{Size: 5})
+	_, err = s.Put(context.Background(), "k", strings.NewReader("123"), storage.PutOptions{Size: storage.KnownSize(5)})
 	if !errors.Is(err, storage.ErrSizeMismatch) {
 		t.Fatalf("Put = %v, want storage.ErrSizeMismatch", err)
 	}

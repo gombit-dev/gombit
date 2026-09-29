@@ -64,7 +64,7 @@ func (s *Store) Put(ctx context.Context, key string, r io.Reader, opts storage.P
 		return storage.ObjectInfo{}, storage.Wrap("put", key, err)
 	}
 	var buf bytes.Buffer
-	if _, err := io.Copy(&buf, storage.ContextReader(ctx, storage.ExpectSize(r, opts.Size))); err != nil {
+	if _, err := io.Copy(&buf, storage.PutReader(ctx, r, opts)); err != nil {
 		return storage.ObjectInfo{}, storage.Wrap("put", key, err)
 	}
 	if err := ctx.Err(); err != nil {

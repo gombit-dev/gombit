@@ -38,6 +38,7 @@ type fake struct {
 	tornWrites       bool // overwrites in place, only every other chunk
 	readIgnoresCtx   bool // Open/Stat/Delete/URL never check ctx
 	caseInsensitive  bool // keys are compared case-insensitively
+	urlNeedsObject   bool // URL returns ErrNotFound for a missing object
 }
 
 type object struct {
@@ -59,8 +60,8 @@ func (f *fake) Put(ctx context.Context, key string, r io.Reader, opts storage.Pu
 	if err := ctx.Err(); err != nil {
 		return storage.ObjectInfo{}, storage.Wrap("put", key, err)
 	}
-	if !f.ignoresSize {
-		r = storage.ExpectSize(r, opts.Size)
+	if !f.ignoresSize && opts.Size != nil {
+		r = storage.ExpectSize(r, *opts.Size)
 	}
 	info := storage.ObjectInfo{Key: key, ContentType: opts.ContentType, ModTime: time.Now()}
 	if f.baseNameKey {
@@ -234,6 +235,11 @@ func (f *fake) URL(ctx context.Context, key string, opts storage.URLOptions) (st
 	if err := storage.ValidateURLOptions(opts); err != nil {
 		return "", storage.Wrap("url", key, err)
 	}
+	if f.urlNeedsObject {
+		if _, err := f.get("url", key); err != nil {
+			return "", err
+		}
+	}
 	if f.emptyURL {
 		return "", nil
 	}
@@ -320,6 +326,7 @@ func TestSuiteCatchesBrokenDrivers(t *testing.T) {
 		{"ConcurrentPuts", func(f *fake) { f.tornWrites = true }, "torn write"},
 		{"CanceledContext", func(f *fake) { f.readIgnoresCtx = true }, "want context.Canceled"},
 		{"PortableKeys", func(f *fake) { f.caseInsensitive = true }, "two keys share one object"},
+		{"URL", func(f *fake) { f.urlNeedsObject = true }, "must not check that the object exists"},
 	}
 	covered := map[string]bool{}
 	for _, tc := range cases {

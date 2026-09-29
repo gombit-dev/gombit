@@ -55,7 +55,7 @@ func register(r gin.IRouter, store storage.Storage) {
 		body := http.MaxBytesReader(c.Writer, c.Request.Body, maxUpload)
 		info, err := store.Put(c.Request.Context(), key, body, storage.PutOptions{
 			ContentType: c.GetHeader("Content-Type"),
-			Size:        max(c.Request.ContentLength, 0),
+			Size:        storage.SizeFromContentLength(c.Request.ContentLength),
 		})
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {

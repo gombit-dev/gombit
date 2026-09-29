@@ -19,11 +19,9 @@ const MaxSegmentBytes = 255
 // MaxContentTypeBytes bounds PutOptions.ContentType, parameters included.
 const MaxContentTypeBytes = 256
 
-// MaxMetadataBytes bounds a PutOptions.Metadata, measured as S3 measures
-// user metadata on the wire: the names and values together, with every
-// byte of a value outside printable ASCII, and every '%', counted as three
-// (its percent-encoded length), so a driver that has to encode values
-// still fits S3's 2 KB limit.
+// MaxMetadataBytes bounds a PutOptions.Metadata: the UTF-8 bytes of every
+// name and value together, which is how S3 measures its 2 KB user-metadata
+// limit.
 const MaxMetadataBytes = 2048
 
 // ValidateKey reports whether key is a valid object key, as ErrInvalidKey
@@ -34,8 +32,10 @@ const MaxMetadataBytes = 2048
 //
 //   - 1 to MaxKeyBytes bytes of valid UTF-8;
 //   - no leading or trailing '/', and no empty segment ("a//b");
-//   - no "." or ".." segment, so a key can never climb out of a prefix or,
-//     on the local driver, out of the storage root;
+//   - no segment that is "." or "..", or that ends with '.' or a space:
+//     Windows strips a trailing dot or space from a path component, so
+//     "..." or ".. " would otherwise become ".." on a filesystem there,
+//     and "a." would collide with "a";
 //   - no segment longer than MaxSegmentBytes;
 //   - no backslash (a path separator on Windows), no control character
 //     (NUL, newline, DEL, the C1 controls), and no Unicode line separator
@@ -80,6 +80,9 @@ func keyProblem(key string) string {
 		case ".", "..":
 			return fmt.Sprintf("contains a %q segment", seg)
 		}
+		if last := seg[len(seg)-1]; last == '.' || last == ' ' {
+			return fmt.Sprintf("has a segment ending with %q (%q)", last, seg)
+		}
 		if len(seg) > MaxSegmentBytes {
 			return fmt.Sprintf("has a %d-byte segment, longer than %d", len(seg), MaxSegmentBytes)
 		}
@@ -106,8 +109,8 @@ func ValidatePutOptions(opts PutOptions) error {
 			return fmt.Errorf("%w: content type %q: want type/subtype", ErrInvalidOptions, opts.ContentType)
 		}
 	}
-	if opts.Size < 0 {
-		return fmt.Errorf("%w: negative size %d", ErrInvalidOptions, opts.Size)
+	if opts.Size != nil && *opts.Size < 0 {
+		return fmt.Errorf("%w: negative size %d", ErrInvalidOptions, *opts.Size)
 	}
 	return ValidateMetadata(opts.Metadata)
 }
@@ -137,7 +140,7 @@ func ValidateMetadata(md map[string]string) error {
 				return fmt.Errorf("%w: metadata %q: value contains the control character %U", ErrInvalidOptions, name, r)
 			}
 		}
-		total += len(name) + encodedLen(value)
+		total += len(name) + len(value)
 	}
 	if total > MaxMetadataBytes {
 		return fmt.Errorf("%w: metadata is %d bytes, more than %d", ErrInvalidOptions, total, MaxMetadataBytes)
@@ -151,26 +154,15 @@ func unsafeRune(r rune) bool {
 	return unicode.IsControl(r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r) || unicode.Is(unicode.Bidi_Control, r)
 }
 
-// encodedLen is s's length with every byte outside printable ASCII, and
-// '%' itself (which a reversible encoding must escape), counted as three:
-// its percent-encoded length.
-func encodedLen(s string) int {
-	n := 0
-	for i := 0; i < len(s); i++ {
-		if c := s[i]; c < 0x20 || c > 0x7e || c == '%' {
-			n += 3
-		} else {
-			n++
-		}
-	}
-	return n
-}
-
 // ValidateURLOptions reports whether opts is valid, as ErrInvalidOptions
-// when it is not (a negative Expires).
+// when it is not: a signed URL needs a positive Expires, and a public one
+// none.
 func ValidateURLOptions(opts URLOptions) error {
-	if opts.Expires < 0 {
-		return fmt.Errorf("%w: negative expiry %s", ErrInvalidOptions, opts.Expires)
+	switch {
+	case opts.Signed && opts.Expires <= 0:
+		return fmt.Errorf("%w: a signed URL needs a positive lifetime, not %s", ErrInvalidOptions, opts.Expires)
+	case !opts.Signed && opts.Expires != 0:
+		return fmt.Errorf("%w: a public URL has no lifetime; use SignedURL", ErrInvalidOptions)
 	}
 	return nil
 }

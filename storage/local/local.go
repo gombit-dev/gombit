@@ -177,7 +177,7 @@ func (s *Store) put(ctx context.Context, key string, r io.Reader, opts storage.P
 	}()
 
 	hash := sha256.New()
-	n, err := io.CopyBuffer(io.MultiWriter(tmp, hash), storage.ContextReader(ctx, storage.ExpectSize(r, opts.Size)), make([]byte, 32<<10))
+	n, err := io.CopyBuffer(io.MultiWriter(tmp, hash), storage.PutReader(ctx, r, opts), make([]byte, 32<<10))
 	if err != nil {
 		return storage.ObjectInfo{}, err
 	}
