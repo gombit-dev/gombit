@@ -194,30 +194,36 @@ func checkOverwrite(t testing.TB, s storage.Storage) {
 	checkETagVersions(t, s)
 }
 
-// checkETagVersions: a driver that reports ETags (empty is "unsupported")
-// reports the same one from Put and Stat, and a different one once
-// different bytes replace the object, so a conditional read never takes
-// changed content for unchanged.
+// checkETagVersions: ETags are one capability. A driver reports the same
+// ETag from Put, Open, and Stat for one version of an object, or reports
+// none from any of them; and a driver that reports them gives different
+// bytes a different ETag, so a conditional read never takes changed
+// content for unchanged.
 func checkETagVersions(t testing.TB, s storage.Storage) {
-	first := put(t, s, "versioned", []byte("version one"), storage.PutOptions{})
-	st1, err := s.Stat(ctxFor(t), "versioned")
+	first := versionETag(t, s, "version one")
+	second := versionETag(t, s, "version two")
+	if (first == "") != (second == "") {
+		t.Fatalf("the first version has ETag %q and the second %q: a driver reports ETags always or never", first, second)
+	}
+	if first != "" && first == second {
+		t.Fatalf("different bytes kept the ETag %q: a conditional read would take the new content for the old", first)
+	}
+}
+
+// versionETag stores data under "versioned" and returns its ETag, failing
+// t unless Put, Open, and Stat agree on it (all empty, or all the same).
+func versionETag(t testing.TB, s storage.Storage, data string) string {
+	t.Helper()
+	put := put(t, s, "versioned", []byte(data), storage.PutOptions{})
+	_, opened := read(t, s, "versioned")
+	stat, err := s.Stat(ctxFor(t), "versioned")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st1.ETag == "" {
-		return // the driver has no ETags
+	if put.ETag != stat.ETag || opened.ETag != stat.ETag {
+		t.Fatalf("one version of an object has ETag %q from Put, %q from Open, and %q from Stat: they must agree (or all be empty, for no ETags)", put.ETag, opened.ETag, stat.ETag)
 	}
-	if first.ETag != "" && first.ETag != st1.ETag {
-		t.Fatalf("Put reported ETag %q, Stat %q for the same bytes", first.ETag, st1.ETag)
-	}
-	put(t, s, "versioned", []byte("version two"), storage.PutOptions{})
-	st2, err := s.Stat(ctxFor(t), "versioned")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if st2.ETag == st1.ETag {
-		t.Fatalf("different bytes kept the ETag %q: a conditional read would take the new content for the old", st1.ETag)
-	}
+	return stat.ETag
 }
 
 func checkMissing(t testing.TB, s storage.Storage) {
