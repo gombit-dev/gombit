@@ -126,6 +126,11 @@ type File struct {
 	storage.ObjectInfo
 }
 
+// Validate reports whether p is a usable policy (the check every function
+// here makes first): a positive MaxBytes, Types listed, a valid Prefix and
+// Metadata, a GrantExpiry within storage.MaxURLExpiry.
+func (p Policy) Validate() error { return p.validate() }
+
 func (p Policy) validate() error {
 	switch {
 	case p.MaxBytes <= 0:

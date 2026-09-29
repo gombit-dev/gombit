@@ -294,6 +294,8 @@ const (
 	FieldSlug      FieldType = FieldType(logical.Slug)
 	FieldIP        FieldType = FieldType(logical.IP)
 	FieldEnum      FieldType = FieldType(logical.Enum)
+	FieldFile      FieldType = FieldType(logical.File)
+	FieldImage     FieldType = FieldType(logical.Image)
 
 	FieldBelongsTo  FieldType = FieldType(logical.RelBelongsTo)
 	FieldHasMany    FieldType = FieldType(logical.RelHasMany)
@@ -1266,6 +1268,10 @@ func (f Field) gormTag() string {
 		// Nanoseconds in a signed bigint. A native interval type is not
 		// portable to SQLite.
 		parts = append(parts, "type:bigint")
+	case FieldFile, FieldImage:
+		// The object key. 512 bytes keeps the unique index within MySQL's
+		// key length (utf8mb4).
+		parts = append(parts, "size:512")
 	}
 	if f.Required && !f.Nullable {
 		parts = append(parts, "not null")
@@ -1277,7 +1283,9 @@ func (f Field) gormTag() string {
 		parts = append(parts, "check:"+check)
 	}
 	switch {
-	case f.Unique:
+	case f.Unique, f.Type == FieldFile, f.Type == FieldImage:
+		// A file belongs to one record: the unique index is the ownership
+		// contract its cleanup relies on (storage.DeleteOwned).
 		parts = append(parts, "uniqueIndex")
 	case f.Index:
 		parts = append(parts, "index")
@@ -1378,7 +1386,7 @@ func (f Field) blankIsNull() bool {
 		return false
 	}
 	switch f.Type {
-	case FieldTime, FieldDecimal, FieldDate, FieldUUID, FieldEmail, FieldURL, FieldSlug, FieldIP, FieldTimeOfDay, FieldDuration:
+	case FieldTime, FieldDecimal, FieldDate, FieldUUID, FieldEmail, FieldURL, FieldSlug, FieldIP, FieldTimeOfDay, FieldDuration, FieldFile, FieldImage:
 		return true
 	case FieldString, FieldText:
 		return patternRejectsEmpty(f.Pattern)
@@ -1433,4 +1441,14 @@ func (f Field) enumLabel(i int) string {
 		return f.EnumValues[i]
 	}
 	return ""
+}
+
+// storageTag is a file or image field's `storage` tag: the prefix it owns,
+// <package>/<field>/, which gombit generate turns into its upload policy
+// (filefield.Policy). Empty for other kinds.
+func (f Field) storageTag(resourcePkg string) string {
+	if f.Type != FieldFile && f.Type != FieldImage {
+		return ""
+	}
+	return `storage:"prefix=` + resourcePkg + "/" + f.JSONName + `/"`
 }

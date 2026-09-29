@@ -75,6 +75,11 @@ func renderModelHandler(r modelResource) (string, error) {
 	} else {
 		stdImports = append(stdImports, "strconv")
 	}
+	if r.hasFiles() {
+		thirdImports = append(thirdImports,
+			"github.com/gombit-dev/gombit/storage",
+			"github.com/gombit-dev/gombit/storage/filefield")
+	}
 	thirdImports = append(thirdImports, "gorm.io/gorm")
 	b.WriteString(importBlock(stdImports, thirdImports))
 
@@ -93,6 +98,10 @@ func renderModelHandler(r modelResource) (string, error) {
 	b.WriteString("type Handler struct {\n")
 	b.WriteString("\tDB    *gorm.DB\n")
 	b.WriteString("\tHooks " + hooks + "\n")
+	if r.hasFiles() {
+		b.WriteString("\t// Store holds the files of the resource's file fields.\n")
+		b.WriteString("\tStore storage.Storage\n")
+	}
 	b.WriteString("}\n\n")
 
 	// The declared list-query surface, derived from resolved policy facts (never by
@@ -191,7 +200,14 @@ func renderModelHandler(r modelResource) (string, error) {
 	b.WriteString("\t\treturn nil, contract.WithContext(ctx, contract.Internal(\"list " + name.PluralSnake + "\"))\n")
 	b.WriteString("\t}\n")
 	b.WriteString("\titems := make([]" + data + ", 0, len(rows))\n")
-	b.WriteString("\tfor _, row := range rows {\n\t\titems = append(items, to" + typ + "Data(row))\n\t}\n")
+	if r.hasFiles() {
+		b.WriteString("\tfor _, row := range rows {\n")
+		b.WriteString("\t\titem := to" + typ + "Data(row)\n")
+		b.WriteString("\t\tif err := h.resolveFiles(ctx, row, &item); err != nil {\n\t\t\treturn nil, err\n\t\t}\n")
+		b.WriteString("\t\titems = append(items, item)\n\t}\n")
+	} else {
+		b.WriteString("\tfor _, row := range rows {\n\t\titems = append(items, to" + typ + "Data(row))\n\t}\n")
+	}
 	b.WriteString("\treturn &" + listOut + "{\n")
 	b.WriteString("\t\tBody: contract.DataMeta[[]" + data + ", " + metaType + "]{\n")
 	b.WriteString("\t\t\tData: items,\n")
@@ -220,7 +236,7 @@ func renderModelHandler(r modelResource) (string, error) {
 	}
 	b.WriteString("\t\treturn nil, database.MapLoadError(ctx, err, \"" + singular + " not found\", \"load " + singular + "\")\n")
 	b.WriteString("\t}\n")
-	b.WriteString("\treturn &get" + typ + "Output{Body: contract.Data[" + data + "]{Data: to" + typ + "Data(row)}}, nil\n}\n\n")
+	b.WriteString(r.respond("get"+typ+"Output", data, typ))
 
 	// create: the invariant sequence — build from the request, run the hook, then
 	// persist. bookFromCreateBody sets only request columns; server-managed columns
@@ -236,16 +252,30 @@ func renderModelHandler(r modelResource) (string, error) {
 	b.WriteString("\tif err := h.Hooks.BeforeCreate(ctx, &row, input.Body); err != nil {\n")
 	b.WriteString("\t\treturn nil, err\n")
 	b.WriteString("\t}\n")
+	if r.hasFiles() {
+		// The files named in the body must be uploads that pass their
+		// fields' policies and belong to no other record.
+		b.WriteString("\tif err := h.acceptFiles(ctx, row); err != nil {\n")
+		b.WriteString("\t\treturn nil, err\n")
+		b.WriteString("\t}\n")
+	}
 	b.WriteString("\tif err := h.DB.WithContext(ctx).Create(&row).Error; err != nil {\n")
 	b.WriteString("\t\treturn nil, database.MapPersistError(ctx, err, \"resource already exists\", \"create " + singular + "\")\n")
 	b.WriteString("\t}\n")
-	b.WriteString("\treturn &create" + typ + "Output{Body: contract.Data[" + data + "]{Data: to" + typ + "Data(row)}}, nil\n}\n\n")
+	b.WriteString(r.respond("create"+typ+"Output", data, typ))
+	if r.hasFiles() {
+		b.WriteString(r.fileHandlers())
+	}
 
 	// Register mounts the routes and wires the human-owned Hooks. Gombit does not
 	// discover feature packages by reflection; main calls this explicitly.
 	b.WriteString("// Register mounts " + r.Package + " Huma routes, wiring the human-owned " + r.defaultHooksType() + ".\n")
 	b.WriteString("func Register(app *framework.App) {\n")
-	b.WriteString("\th := &Handler{DB: app.DB(), Hooks: " + r.defaultHooksType() + "{}}\n")
+	if r.hasFiles() {
+		b.WriteString("\th := &Handler{DB: app.DB(), Hooks: " + r.defaultHooksType() + "{}, Store: app.Storage()}\n")
+	} else {
+		b.WriteString("\th := &Handler{DB: app.DB(), Hooks: " + r.defaultHooksType() + "{}}\n")
+	}
 	b.WriteString("\tprefix := app.Config().API.Prefix\n")
 	b.WriteString("\tapi := app.API()\n\n")
 	// Operation IDs match the legacy path: list is plural (list-books), get/create
@@ -253,6 +283,14 @@ func renderModelHandler(r modelResource) (string, error) {
 	writeHumaOp(&b, "list-"+name.Kebab, "http.MethodGet", "prefix + \""+name.HTTPPath+"\"", "List "+strings.ToLower(name.Tag), name.Tag, "h.list")
 	writeHumaOp(&b, "get-"+name.Package, "http.MethodGet", "prefix + \""+name.HTTPPath+"/{id}\"", "Get a "+singular, name.Tag, "h.get")
 	writeHumaOp(&b, "create-"+name.Package, "http.MethodPost", "prefix + \""+name.HTTPPath+"\"", "Create a "+singular, name.Tag, "h.create")
+	for _, f := range r.fileFields() {
+		if !f.InRequest {
+			continue
+		}
+		writeHumaOp(&b, "upload-"+name.Package+"-"+strings.ReplaceAll(f.jsonName(), "_", "-"), "http.MethodPost",
+			"prefix + \""+name.HTTPPath+"/uploads/"+f.jsonName()+"\"",
+			"Grant an upload of a "+singular+" "+strings.ReplaceAll(f.jsonName(), "_", " "), name.Tag, "h.upload"+f.GoName)
+	}
 	b.WriteString("}\n")
 
 	return b.String(), nil
@@ -399,5 +437,77 @@ func renderModelHooks(r modelResource) string {
 	b.WriteString("// persisted. The default is a no-op; add server-derived values here.\n")
 	b.WriteString("func (" + hooksType + ") BeforeCreate(ctx context.Context, row *" + typ + ", body " + body + ") error {\n")
 	b.WriteString("\treturn nil\n}\n")
+	if r.hasFiles() {
+		b.WriteString("\n// BeforeUpload runs before an upload grant for a file field (its JSON\n")
+		b.WriteString("// name). Decide here who may upload; an error refuses the grant. The\n")
+		b.WriteString("// default lets anyone who may call the endpoint, as create does.\n")
+		b.WriteString("func (" + hooksType + ") BeforeUpload(ctx context.Context, field string) error {\n")
+		b.WriteString("\treturn nil\n}\n")
+	}
+	return b.String()
+}
+
+// respond emits the end of a get or create handler: the response DTO, with
+// its files resolved when the resource has any.
+func (r modelResource) respond(out, data, typ string) string {
+	if !r.hasFiles() {
+		return "\treturn &" + out + "{Body: contract.Data[" + data + "]{Data: to" + typ + "Data(row)}}, nil\n}\n\n"
+	}
+	return "\titem := to" + typ + "Data(row)\n" +
+		"\tif err := h.resolveFiles(ctx, row, &item); err != nil {\n\t\treturn nil, err\n\t}\n" +
+		"\treturn &" + out + "{Body: contract.Data[" + data + "]{Data: item}}, nil\n}\n\n"
+}
+
+// fileHandlers emits the file-field plumbing: resolving files for a
+// response, accepting them on create, and one upload-grant operation per
+// writable file field.
+func (r modelResource) fileHandlers() string {
+	typ := r.TypeName
+	data := r.dataType()
+	var b strings.Builder
+	b.WriteString("// resolveFiles describes the row's files in its response (key, filename,\n")
+	b.WriteString("// size, type, download URL).\n")
+	b.WriteString("func (h *Handler) resolveFiles(ctx context.Context, row " + typ + ", item *" + data + ") error {\n")
+	b.WriteString("\tvar err error\n")
+	for _, f := range r.fileFields() {
+		if !f.InResponse {
+			continue
+		}
+		b.WriteString("\tif item." + f.GoName + ", err = filefield.Resolve(ctx, h.Store, " + f.fileKeyExpr("row") + "); err != nil {\n")
+		b.WriteString("\t\treturn filefield.MapError(ctx, err)\n\t}\n")
+	}
+	b.WriteString("\treturn nil\n}\n\n")
+
+	b.WriteString("// acceptFiles checks the files a new row names: each an upload that passes\n")
+	b.WriteString("// its field's policy (by its bytes) and that no other row holds.\n")
+	b.WriteString("func (h *Handler) acceptFiles(ctx context.Context, row " + typ + ") error {\n")
+	for _, f := range r.fileFields() {
+		if !f.InRequest {
+			continue
+		}
+		b.WriteString("\tif err := filefield.Accept(ctx, h.DB, h.Store, &" + typ + "{}, \"" + f.Column + "\", " + f.fileKeyExpr("row") + ", " + f.policyName(typ) + "); err != nil {\n")
+		b.WriteString("\t\treturn filefield.MapError(ctx, err)\n\t}\n")
+	}
+	b.WriteString("\treturn nil\n}\n\n")
+
+	b.WriteString("type upload" + typ + "FileOutput struct {\n")
+	b.WriteString("\tBody contract.Data[filefield.UploadGrant]\n}\n\n")
+	for _, f := range r.fileFields() {
+		if !f.InRequest {
+			continue
+		}
+		in := "upload" + typ + f.GoName + "Input"
+		b.WriteString("type " + in + " struct {\n")
+		b.WriteString("\tBody filefield.UploadGrantRequest\n}\n\n")
+		b.WriteString("// upload" + f.GoName + " grants the client one direct upload for the " + f.jsonName() + " field:\n")
+		b.WriteString("// it sends the returned request, then creates the " + strings.ToLower(typ) + " with the key.\n")
+		b.WriteString("// Hooks with a BeforeUpload(ctx, field) method decide who may upload.\n")
+		b.WriteString("func (h *Handler) upload" + f.GoName + "(ctx context.Context, input *" + in + ") (*upload" + typ + "FileOutput, error) {\n")
+		b.WriteString("\tif hk, ok := h.Hooks.(interface {\n\t\tBeforeUpload(ctx context.Context, field string) error\n\t}); ok {\n")
+		b.WriteString("\t\tif err := hk.BeforeUpload(ctx, \"" + f.jsonName() + "\"); err != nil {\n\t\t\treturn nil, err\n\t\t}\n\t}\n")
+		b.WriteString("\tg, err := filefield.Authorize(ctx, h.Store, " + f.policyName(typ) + ", input.Body)\n")
+		b.WriteString("\tif err != nil {\n\t\treturn nil, filefield.MapError(ctx, err)\n\t}\n")
+		b.WriteString("\treturn &upload" + typ + "FileOutput{Body: contract.Data[filefield.UploadGrant]{Data: g}}, nil\n}\n\n")
+	}
 	return b.String()
 }

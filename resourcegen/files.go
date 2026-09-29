@@ -168,7 +168,7 @@ func renderModel(ctx renderContext) string {
 	if ctx.IDStrategy == idUUID {
 		third = append(third, "gorm.io/gorm")
 	}
-	if fieldsUse(ctx.Fields, FieldDecimal) || fieldsUse(ctx.Fields, FieldDate) || fieldsUse(ctx.Fields, FieldJSON) || fieldsUse(ctx.Fields, FieldTimeOfDay) || fieldsUse(ctx.Fields, FieldDuration) {
+	if fieldsUse(ctx.Fields, FieldDecimal) || fieldsUse(ctx.Fields, FieldDate) || fieldsUse(ctx.Fields, FieldJSON) || fieldsUse(ctx.Fields, FieldTimeOfDay) || fieldsUse(ctx.Fields, FieldDuration) || fieldsUse(ctx.Fields, FieldFile) || fieldsUse(ctx.Fields, FieldImage) {
 		third = append(third, gombitTypesImport)
 	}
 	if fieldsUse(ctx.Fields, FieldUUID) || ctx.IDStrategy == idUUID || fieldsUseFK(ctx.Fields, "uuid.UUID") {
@@ -277,7 +277,11 @@ func modelFieldLines(f Field, resourcePkg string) string {
 	case FieldManyToMany:
 		return "\t" + f.GoName + " " + f.GoType + structTag("many2many:"+f.joinTable(resourcePkg)+";", "", "") + "\n"
 	default:
-		return "\t" + f.GoName + " " + f.GoType + modelStructTag(f) + "\n"
+		tag := modelStructTag(f)
+		if st := f.storageTag(resourcePkg); st != "" {
+			tag = " `" + strings.TrimSuffix(strings.TrimPrefix(tag, " `"), "`") + " " + st + "`"
+		}
+		return "\t" + f.GoName + " " + f.GoType + tag + "\n"
 	}
 }
 
@@ -422,7 +426,11 @@ func renderMinimalListTSX(ctx renderContext) string {
 
 	var b strings.Builder
 	b.WriteString(tsBanner())
-	b.WriteString("\nimport { useEffect, useState } from \"react\";\n")
+	if len(formFileFields(ctx.Fields)) > 0 {
+		b.WriteString("\nimport { useEffect, useState, type ReactNode } from \"react\";\n")
+	} else {
+		b.WriteString("\nimport { useEffect, useState } from \"react\";\n")
+	}
 	b.WriteString("import { Link } from \"react-router\";\n\n")
 	b.WriteString("import { useApiClient } from \"../api/client\";\n")
 	b.WriteString("import { unwrap } from \"../api/generated/client\";\n")
@@ -433,6 +441,9 @@ func renderMinimalListTSX(ctx renderContext) string {
 	b.WriteString("type ListRow = NonNullable<ListResponse[\"data\"]>[number];\n\n")
 	b.WriteString("/**\n * React list/table page. Types come from the generated OpenAPI client\n")
 	b.WriteString(" * (gombit client generate / gombit dev). Do not duplicate API DTOs here.\n */\n")
+	if len(formFileFields(ctx.Fields)) > 0 {
+		b.WriteString(tsCellValue)
+	}
 	b.WriteString("export function " + ctx.Resource.TypeName + "ListPage() {\n")
 	b.WriteString("  const client = useApiClient();\n")
 	b.WriteString("  const [rows, setRows] = useState<ListRow[]>([]);\n")
@@ -489,7 +500,11 @@ func renderMinimalListTSX(ctx renderContext) string {
 	b.WriteString("            return (\n")
 	b.WriteString("              <tr key={key}>\n")
 	b.WriteString("                {values.map((value, cell) => (\n")
-	b.WriteString("                  <td key={cell}>{value == null ? \"\" : String(value)}</td>\n")
+	if len(formFileFields(ctx.Fields)) > 0 {
+		b.WriteString("                  <td key={cell}>{cellValue(value)}</td>\n")
+	} else {
+		b.WriteString("                  <td key={cell}>{value == null ? \"\" : String(value)}</td>\n")
+	}
 	b.WriteString("                ))}\n")
 	b.WriteString("              </tr>\n")
 	b.WriteString("            );\n")
@@ -599,12 +614,13 @@ func renderMinimalFormTSX(ctx renderContext) string {
 	}
 	b.WriteString(" },\n")
 	b.WriteString("  });\n\n")
+	b.WriteString(tsUploadFunctions(ctx))
 	b.WriteString("  async function onSubmit(values: FormValues) {\n")
 	b.WriteString("    setStatus(\"\");\n")
 	bodyExpr := "values as CreateBody"
 	jsonNames := jsonFieldNames(ctx.Fields)
 	nilUUIDNames := nilUUIDFieldNames(ctx.Fields)
-	if len(jsonNames) > 0 || len(nilUUIDNames) > 0 {
+	if len(jsonNames) > 0 || len(nilUUIDNames) > 0 || len(formFileFields(ctx.Fields)) > 0 {
 		b.WriteString("    const body: Record<string, unknown> = { ...values };\n")
 		if len(jsonNames) > 0 {
 			b.WriteString(tsParseJSONFields(jsonNames))
@@ -617,6 +633,7 @@ func renderMinimalFormTSX(ctx renderContext) string {
 		bodyExpr = "body as CreateBody"
 	}
 	b.WriteString("    try {\n")
+	b.WriteString(tsUploadAssignments(ctx.Fields))
 	b.WriteString("      await unwrap(await client.POST(createPath, { body: " + bodyExpr + " }));\n")
 	b.WriteString("      navigate(\"/" + ctx.Resource.Kebab + "\");\n")
 	b.WriteString("    } catch (err: unknown) {\n")
@@ -707,6 +724,8 @@ func tsFormType(field Field) string {
 		return "number"
 	case FieldJSON:
 		return "string"
+	case FieldFile, FieldImage:
+		return "FileList | null"
 	case FieldEnum:
 		return tsEnumUnion(field)
 	default:
@@ -743,6 +762,8 @@ func tsDefaultValue(field Field) string {
 		return "0"
 	case FieldJSON:
 		return `""`
+	case FieldFile, FieldImage:
+		return "null"
 	case FieldEnum:
 		if len(field.EnumValues) > 0 {
 			return `"` + field.EnumValues[0] + `"`
@@ -909,6 +930,14 @@ func renderFormField(field Field) string {
 		// Empty becomes null so an optional (*types.Decimal) field round-trips; a
 		// non-empty value is sent as the exact decimal string.
 		b.WriteString("          <input type=\"text\" inputMode=\"decimal\" {...register(\"" + field.JSONName + "\", { setValueAs: (value) => (value === \"\" ? null : value)" + tsDecimalRules(field) + " })}" + htmlNumberAttrs(field) + " />\n")
+	case FieldFile, FieldImage:
+		// The file is uploaded on submit (upload<Field>), and the create
+		// body carries its key.
+		b.WriteString("          <input type=\"file\"" + htmlAccept(field) + " {...register(\"" + field.JSONName + "\"")
+		if field.Required {
+			b.WriteString(", { required: \"" + field.GoName + " is required\" }")
+		}
+		b.WriteString(")} />\n")
 	default:
 		inputType := "text"
 		switch field.Type {
@@ -935,7 +964,11 @@ func renderMUIListTSX(ctx renderContext) string {
 
 	var b strings.Builder
 	b.WriteString(tsBanner())
-	b.WriteString("\nimport { useEffect, useState } from \"react\";\n")
+	if len(formFileFields(ctx.Fields)) > 0 {
+		b.WriteString("\nimport { useEffect, useState, type ReactNode } from \"react\";\n")
+	} else {
+		b.WriteString("\nimport { useEffect, useState } from \"react\";\n")
+	}
 	b.WriteString("import { Link } from \"react-router\";\n")
 	b.WriteString("import AddIcon from \"@mui/icons-material/Add\";\n")
 	b.WriteString("import {\n")
@@ -952,6 +985,9 @@ func renderMUIListTSX(ctx renderContext) string {
 	b.WriteString("type ListRow = NonNullable<ListResponse[\"data\"]>[number];\n\n")
 	b.WriteString("/**\n * MUI Table list page. Types come from the generated OpenAPI client\n")
 	b.WriteString(" * (gombit client generate / gombit dev). Do not duplicate API DTOs here.\n */\n")
+	if len(formFileFields(ctx.Fields)) > 0 {
+		b.WriteString(tsCellValue)
+	}
 	b.WriteString("export function " + ctx.Resource.TypeName + "ListPage() {\n")
 	b.WriteString("  const client = useApiClient();\n")
 	b.WriteString("  const [rows, setRows] = useState<ListRow[]>([]);\n")
@@ -1030,7 +1066,11 @@ func renderMUIListTSX(ctx renderContext) string {
 	b.WriteString("                  return (\n")
 	b.WriteString("                    <TableRow key={key}>\n")
 	b.WriteString("                      {values.map((value, cell) => (\n")
-	b.WriteString("                        <TableCell key={cell}>{value == null ? \"\" : String(value)}</TableCell>\n")
+	if len(formFileFields(ctx.Fields)) > 0 {
+		b.WriteString("                        <TableCell key={cell}>{cellValue(value)}</TableCell>\n")
+	} else {
+		b.WriteString("                        <TableCell key={cell}>{value == null ? \"\" : String(value)}</TableCell>\n")
+	}
 	b.WriteString("                      ))}\n")
 	b.WriteString("                    </TableRow>\n")
 	b.WriteString("                  );\n")
@@ -1101,6 +1141,7 @@ func renderMUIFormTSX(ctx renderContext) string {
 	}
 	b.WriteString(" },\n")
 	b.WriteString("  });\n\n")
+	b.WriteString(tsUploadFunctions(ctx))
 	var timeNames, timeOfDayNames, emptyNullNames []string
 	jsonNames := jsonFieldNames(ctx.Fields)
 	nilUUIDNames := nilUUIDFieldNames(ctx.Fields)
@@ -1114,6 +1155,8 @@ func renderMUIFormTSX(ctx renderContext) string {
 			if !field.submitsNilUUID() {
 				emptyNullNames = append(emptyNullNames, field.JSONName)
 			}
+		case FieldFile, FieldImage:
+			// Uploaded on submit (tsUploadAssignments).
 		default:
 			if field.blankIsNull() {
 				emptyNullNames = append(emptyNullNames, field.JSONName)
@@ -1123,7 +1166,7 @@ func renderMUIFormTSX(ctx renderContext) string {
 	b.WriteString("  async function onSubmit(values: FormValues) {\n")
 	b.WriteString("    setStatus(\"\");\n")
 	bodyExpr := "values as CreateBody"
-	if len(timeNames) > 0 || len(timeOfDayNames) > 0 || len(emptyNullNames) > 0 || len(jsonNames) > 0 || len(nilUUIDNames) > 0 {
+	if len(timeNames) > 0 || len(timeOfDayNames) > 0 || len(emptyNullNames) > 0 || len(jsonNames) > 0 || len(nilUUIDNames) > 0 || len(formFileFields(ctx.Fields)) > 0 {
 		b.WriteString("    const body: Record<string, unknown> = { ...values };\n")
 		if len(timeNames) > 0 {
 			// Local datetime-local -> RFC3339 UTC; empty -> null (optional field).
@@ -1162,6 +1205,7 @@ func renderMUIFormTSX(ctx renderContext) string {
 		bodyExpr = "body as CreateBody"
 	}
 	b.WriteString("    try {\n")
+	b.WriteString(tsUploadAssignments(ctx.Fields))
 	b.WriteString("      await unwrap(await client.POST(createPath, { body: " + bodyExpr + " }));\n")
 	b.WriteString("      navigate(\"/" + ctx.Resource.Kebab + "\");\n")
 	b.WriteString("    } catch (err: unknown) {\n")
@@ -1275,6 +1319,29 @@ func renderMUIFormField(field Field) string {
 	}
 	b.WriteString("            render={({ field, fieldState }) => (\n")
 	switch field.Type {
+	case FieldFile, FieldImage:
+		// A file input is uncontrolled: it reports the chosen files, and
+		// the file is uploaded on submit.
+		accept := ""
+		if field.Type == FieldImage {
+			accept = ", htmlInput: { accept: \"image/*\" }"
+		}
+		b.WriteString("              <TextField\n")
+		b.WriteString("                type=\"file\"\n")
+		b.WriteString("                name={field.name}\n")
+		b.WriteString("                inputRef={field.ref}\n")
+		b.WriteString("                onBlur={field.onBlur}\n")
+		b.WriteString("                onChange={(event) => {\n")
+		b.WriteString("                  const files = (event.target as HTMLInputElement).files;\n")
+		b.WriteString("                  field.onChange(files && files.length > 0 ? files : null);\n")
+		b.WriteString("                }}\n")
+		b.WriteString("                label=\"" + field.GoName + "\"\n")
+		b.WriteString("                fullWidth\n")
+		b.WriteString("                slotProps={{ inputLabel: { shrink: true }" + accept + " }}\n")
+		b.WriteString("                error={Boolean(fieldState.error)}\n")
+		b.WriteString("                helperText={fieldState.error?.message}\n")
+		b.WriteString("                disabled={isSubmitting}\n")
+		b.WriteString("              />\n")
 	case FieldBool:
 		b.WriteString("              <FormControlLabel\n")
 		b.WriteString("                control={\n")
@@ -1465,3 +1532,74 @@ func renderMUIFormField(field Field) string {
 	b.WriteString("          />\n")
 	return b.String()
 }
+
+// htmlAccept is a file input's accept attribute: images for an image field.
+func htmlAccept(field Field) string {
+	if field.Type == FieldImage {
+		return ` accept="image/*"`
+	}
+	return ""
+}
+
+// formFileFields are the form's file and image fields.
+func formFileFields(fields []Field) []Field {
+	var out []Field
+	for _, f := range fields {
+		if f.Type == FieldFile || f.Type == FieldImage {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// tsUploadFunctions emits, inside the form component, one function per
+// file field that uploads a chosen file directly to storage: it asks the
+// field's upload endpoint for a grant, sends the file as the grant says,
+// and returns the key the create body carries.
+func tsUploadFunctions(ctx renderContext) string {
+	var b strings.Builder
+	for _, f := range formFileFields(ctx.Fields) {
+		path := defaultAPIPrefix + ctx.Resource.HTTPPath + "/uploads/" + f.JSONName
+		b.WriteString("  async function upload" + f.GoName + "(file: File): Promise<string> {\n")
+		b.WriteString("    const granted = await unwrap(\n")
+		b.WriteString("      await client.POST(\"" + path + "\", {\n")
+		b.WriteString("        body: { size: file.size, content_type: file.type || \"application/octet-stream\", filename: file.name },\n")
+		b.WriteString("      }),\n")
+		b.WriteString("    );\n")
+		b.WriteString("    const grant = granted.data as { key: string; upload: { method: string; url: string; headers?: Record<string, string> } };\n")
+		b.WriteString("    const sent = await fetch(grant.upload.url, { method: grant.upload.method, headers: grant.upload.headers ?? {}, body: file });\n")
+		b.WriteString("    if (!sent.ok) {\n")
+		b.WriteString("      throw new Error(`" + f.GoName + " upload failed (${sent.status})`);\n")
+		b.WriteString("    }\n")
+		b.WriteString("    return grant.key;\n")
+		b.WriteString("  }\n\n")
+	}
+	return b.String()
+}
+
+// tsUploadAssignments emits, at the start of the submit's try block, the
+// uploads of the chosen files, putting each key (or null) in the body.
+func tsUploadAssignments(fields []Field) string {
+	var b strings.Builder
+	for _, f := range formFileFields(fields) {
+		b.WriteString("      const " + jsIdent(f.JSONName) + "File = values." + jsIdent(f.JSONName) + "?.[0];\n")
+		b.WriteString("      body." + jsIdent(f.JSONName) + " = " + jsIdent(f.JSONName) + "File ? await upload" + f.GoName + "(" + jsIdent(f.JSONName) + "File) : null;\n")
+	}
+	return b.String()
+}
+
+// tsCellValue is the list pages' cell renderer when a column is a file: a
+// link to its download URL, labeled with its filename.
+const tsCellValue = `function cellValue(value: unknown): React.ReactNode {
+  if (value == null) {
+    return "";
+  }
+  if (typeof value === "object" && "key" in value) {
+    const file = value as { key: string; filename?: string; url?: string };
+    const label = file.filename || file.key;
+    return file.url ? <a href={file.url}>{label}</a> : label;
+  }
+  return String(value);
+}
+
+`

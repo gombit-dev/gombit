@@ -117,6 +117,23 @@ version.
   - `examples/storage` records its uploads, deletes them with their
     records, and sweeps the rest
     ([#329](https://github.com/gombit-dev/gombit/issues/329)).
+- Storage-backed model fields (MODEL-8):
+  - `file` and `image` field kinds (`types.File`, `types.Image`) store an
+    object key, never bytes. The column has a unique index, so one record
+    owns each file.
+  - A `storage:"prefix=...;max_bytes=...;types=..."` tag sets the field's
+    upload policy.
+  - `gombit generate` emits:
+    - an upload-grant operation per file field;
+    - create checks: the key must be a confirmed upload under the field's
+      prefix, passing the policy by its bytes, and not held by another record;
+    - reads that return `{key, filename, size, content_type, url}`.
+  - The generated forms upload the chosen file directly to storage, and the
+    lists link to it.
+  - The runtime is `storage/filefield`.
+  - The admin leaves file columns out until it has a file widget.
+  - `examples/storage` gains a `Document` resource
+    ([#530](https://github.com/gombit-dev/gombit/issues/530)).
 
 ### Changed
 

@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gombit-dev/gombit/admin"
+	"github.com/gombit-dev/gombit/types"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -384,5 +385,21 @@ func TestRegisterErrorIsNotWrappedAsHTTP(t *testing.T) {
 	var env interface{ GetStatus() int }
 	if errors.As(err, &env) {
 		t.Fatalf("Register should not return an HTTP error, got %#v", err)
+	}
+}
+
+type Attachment struct {
+	gorm.Model
+	Title string      `gorm:"not null"`
+	File  *types.File `gorm:"size:512;uniqueIndex"`
+}
+
+// TestRegisterWithAFileColumn: a model with a storage-backed column
+// registers; the column is left out until the admin has a file widget.
+func TestRegisterWithAFileColumn(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	app := newCookieApp(t)
+	if err := admin.Register(app, Attachment{}, admin.Options{Slug: "attachments"}); err != nil {
+		t.Fatalf("Register() = %v", err)
 	}
 }
