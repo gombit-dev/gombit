@@ -53,6 +53,7 @@ type fake struct {
 	putNoETag        bool // Put reports no ETag (Open and Stat do)
 	openNoETag       bool // Open reports no ETag (Put and Stat do)
 	keepsForeignErr  bool // wraps like the old Wrap: keeps any *storage.Error
+	eofHidesCancel   bool // commits when the source's last read returns EOF after ctx ended
 }
 
 type object struct {
@@ -113,6 +114,13 @@ func (f *fake) Put(ctx context.Context, key string, r io.Reader, opts storage.Pu
 			break
 		}
 		if err != nil {
+			return storage.ObjectInfo{}, f.wrap("put", key, err)
+		}
+	}
+	// The source's last read may have returned (EOF) after ctx ended:
+	// cancellation wins, and nothing is committed.
+	if !f.ignoresCtx && !f.eofHidesCancel {
+		if err := ctx.Err(); err != nil {
 			return storage.ObjectInfo{}, f.wrap("put", key, err)
 		}
 	}
@@ -411,6 +419,7 @@ func TestSuiteCatchesBrokenDrivers(t *testing.T) {
 		{"Overwrite", func(f *fake) { f.putNoETag = true }, "they must agree"},
 		{"Overwrite", func(f *fake) { f.openNoETag = true }, "they must agree"},
 		{"FailedPutKeepsPrevious", func(f *fake) { f.keepsForeignErr = true }, "inside a *storage.Error"},
+		{"CanceledPut", func(f *fake) { f.eofHidesCancel = true }, "want context canceled"},
 		{"OpenFollowsContext", func(f *fake) { f.openDetached = true }, "must follow the context"},
 		{"Missing", func(f *fake) { f.bareErrors = true }, "inside a *storage.Error"},
 		{"InvalidKeys", func(f *fake) { f.bareErrors = true }, "inside a *storage.Error"},
