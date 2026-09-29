@@ -467,3 +467,32 @@ func TestContextReadCloserWithoutInterruption(t *testing.T) {
 		t.Fatalf("the late Read = %v, want context.Canceled", err)
 	}
 }
+
+// eofAfter is a source whose Read blocks until release, then ends cleanly.
+type eofAfter struct{ started, release chan struct{} }
+
+func (e *eofAfter) Read([]byte) (int, error) {
+	close(e.started)
+	<-e.release
+	return 0, io.EOF
+}
+
+// TestContextReaderCancellationBeatsEOF: a Read that returns (EOF) after
+// ctx ended fails with ctx's error, so a canceled Put cannot commit on its
+// source's last read.
+func TestContextReaderCancellationBeatsEOF(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	src := &eofAfter{started: make(chan struct{}), release: make(chan struct{})}
+	r := storage.ContextReader(ctx, src)
+	done := make(chan error, 1)
+	go func() {
+		_, err := r.Read(make([]byte, 8))
+		done <- err
+	}()
+	<-src.started
+	cancel()
+	close(src.release)
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("the Read that returned EOF after cancellation = %v, want context.Canceled", err)
+	}
+}
