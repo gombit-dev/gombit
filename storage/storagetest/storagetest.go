@@ -64,6 +64,7 @@ var checks = []check{
 	{"SizeMismatch", checkSizeMismatch},
 	{"InvalidOptions", checkInvalidOptions},
 	{"ConcurrentPuts", checkConcurrentPuts},
+	{"NoPartialReads", checkNoPartialReads},
 	{"URL", checkURL},
 }
 
@@ -279,13 +280,15 @@ func checkNestedKeys(t testing.TB, s storage.Storage) {
 }
 
 // checkPortableKeys: every valid key is its own object, including keys a
-// filesystem would conflate or refuse: case variants, a key that is a
-// prefix of another, a long segment, names Windows reserves, and segments
-// ending in a dot or a space.
+// filesystem would conflate or refuse: case variants, Unicode
+// normalization variants (APFS folds NFC and NFD), a key that is a prefix
+// of another, a long segment, and names Windows reserves.
 func checkPortableKeys(t testing.TB, s storage.Storage) {
 	keys := []string{
 		"Case/File.txt",
 		"case/file.txt",
+		"caf\u00e9/nfc",  // é precomposed (NFC)
+		"cafe\u0301/nfc", // e + combining acute (NFD): a different key
 		"prefix",
 		"prefix/child",
 		"prefix/child/grandchild",
@@ -306,7 +309,7 @@ func checkPortableKeys(t testing.TB, s storage.Storage) {
 	if err := s.Delete(ctxFor(t), "prefix"); err != nil {
 		t.Fatalf("Delete(prefix) = %v", err)
 	}
-	if got, _ := read(t, s, "prefix/child"); string(got) != "3" {
+	if got, _ := read(t, s, "prefix/child"); string(got) != "5" {
 		t.Fatalf("deleting \"prefix\" changed \"prefix/child\" to %q", got)
 	}
 }
@@ -519,6 +522,14 @@ func checkSizeMismatch(t testing.TB, s storage.Storage) {
 			t.Fatalf("Put of %d bytes declared as %d = %v, want storage.ErrSizeMismatch", len(tc.data), tc.size, err)
 		}
 		wantNotFound(t, s, "sized/"+tc.name)
+		// Over an existing object, the mismatch leaves it whole.
+		put(t, s, "sized/kept-"+tc.name, []byte("previous version"), storage.PutOptions{ContentType: "text/plain"})
+		if _, err := s.Put(ctxFor(t), "sized/kept-"+tc.name, strings.NewReader(tc.data), storage.PutOptions{Size: storage.KnownSize(tc.size), ContentType: "image/png"}); !errors.Is(err, storage.ErrSizeMismatch) {
+			t.Fatalf("a mismatched overwrite = %v, want storage.ErrSizeMismatch", err)
+		}
+		if got, info := read(t, s, "sized/kept-"+tc.name); string(got) != "previous version" || info.ContentType != "text/plain" {
+			t.Fatalf("a mismatched overwrite left %q (%s), want the previous object", got, info.ContentType)
+		}
 	}
 	if _, err := s.Put(ctxFor(t), "sized/not-empty", strings.NewReader("x"), storage.PutOptions{Size: storage.KnownSize(0)}); !errors.Is(err, storage.ErrSizeMismatch) {
 		t.Fatalf("Put of 1 byte declared empty = %v, want storage.ErrSizeMismatch", err)
@@ -539,6 +550,8 @@ func checkInvalidOptions(t testing.TB, s storage.Storage) {
 		{ContentType: "text/"},
 		{ContentType: "text"},
 		{ContentType: "text/plain; x=" + strings.Repeat("y", storage.MaxContentTypeBytes)},
+		{ContentType: "text/plain\r\n\r\n"},
+		{ContentType: "text/plain\u2028"},
 		{Size: storage.KnownSize(-1)},
 		{Metadata: map[string]string{"Upper": "x"}},
 		{Metadata: map[string]string{"under_score": "x"}},
@@ -555,6 +568,14 @@ func checkInvalidOptions(t testing.TB, s storage.Storage) {
 			t.Fatalf("Put with %+v = %v, want storage.ErrInvalidOptions", opts, err)
 		}
 		wantNotFound(t, s, "opts")
+	}
+	// A refused overwrite leaves the previous object whole.
+	put(t, s, "opts-kept", []byte("previous"), storage.PutOptions{ContentType: "text/plain"})
+	if _, err := s.Put(ctxFor(t), "opts-kept", strings.NewReader("new"), storage.PutOptions{ContentType: "not a media type"}); !errors.Is(err, storage.ErrInvalidOptions) {
+		t.Fatalf("an invalid overwrite = %v, want storage.ErrInvalidOptions", err)
+	}
+	if got, info := read(t, s, "opts-kept"); string(got) != "previous" || info.ContentType != "text/plain" {
+		t.Fatalf("a refused overwrite left %q (%s), want the previous object", got, info.ContentType)
 	}
 	for _, opts := range []storage.URLOptions{storage.SignedURL(0), storage.SignedURL(-time.Second), {Expires: time.Minute}} {
 		if _, err := s.URL(ctxFor(t), "opts", opts); !errors.Is(err, storage.ErrInvalidOptions) {
@@ -592,6 +613,59 @@ func checkConcurrentPuts(t testing.TB, s storage.Storage) {
 		}
 	}
 	t.Fatalf("after concurrent Puts the key holds %d bytes matching none of the writers: a torn write", len(got))
+}
+
+// blockingReader returns first, then blocks until release is closed, then
+// returns rest.
+type blockingReader struct {
+	first, rest []byte
+	started     chan struct{}
+	release     chan struct{}
+	stage       int
+}
+
+func (b *blockingReader) Read(p []byte) (int, error) {
+	switch b.stage {
+	case 0:
+		b.stage = 1
+		close(b.started)
+		return copy(p, b.first), nil
+	case 1:
+		<-b.release
+		b.stage = 2
+		return copy(p, b.rest), nil
+	}
+	return 0, io.EOF
+}
+
+// checkNoPartialReads: while a Put is streaming, a reader sees the previous
+// object whole, never the part written so far.
+func checkNoPartialReads(t testing.TB, s storage.Storage) {
+	put(t, s, "streaming", []byte("the previous version"), storage.PutOptions{ContentType: "text/plain"})
+	r := &blockingReader{first: []byte("NEW-first-half"), rest: []byte("-second-half"), started: make(chan struct{}), release: make(chan struct{})}
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.Put(ctxFor(t), "streaming", r, storage.PutOptions{ContentType: "application/json"})
+		done <- err
+	}()
+	select {
+	case <-r.started:
+	case err := <-done:
+		t.Fatalf("the Put returned (%v) before reading its source", err)
+	case <-time.After(20 * time.Second):
+		t.Fatal("the Put never started reading its source")
+	}
+	got, info := read(t, s, "streaming")
+	close(r.release)
+	if err := <-done; err != nil {
+		t.Fatalf("Put = %v", err)
+	}
+	if string(got) != "the previous version" || info.ContentType != "text/plain" {
+		t.Fatalf("mid-Put, a reader saw %q (%s): part of the object being written", got, info.ContentType)
+	}
+	if final, _ := read(t, s, "streaming"); string(final) != "NEW-first-half-second-half" {
+		t.Fatalf("after the Put the key holds %q", final)
+	}
 }
 
 // checkURL: a driver either produces URLs or says it cannot; it never
