@@ -3,6 +3,9 @@ package storagetest
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"path"
@@ -49,6 +52,9 @@ type fake struct {
 	aliasMetadata    bool // stores and returns one shared metadata map
 	openDetached     bool // Open's reader ignores the context once returned
 	nonAtomicFirst   bool // a key's first Put writes in place as it streams
+	resultIsInput    bool // Put's result carries the caller's metadata map
+	constantETag     bool // every version reports the same ETag
+	keepsForeignErr  bool // wraps like the old Wrap: keeps any *storage.Error
 }
 
 type object struct {
@@ -125,10 +131,18 @@ func (f *fake) Put(ctx context.Context, key string, r io.Reader, opts storage.Pu
 		return info, nil
 	}
 	info.Size = int64(len(data))
+	sum := sha256.Sum256(data)
+	info.ETag = hex.EncodeToString(sum[:])
+	if f.constantETag {
+		info.ETag = "constant"
+	}
 	f.store(key, data, info)
 	if f.aliasMetadata {
 		o, _ := f.lookup(key)
 		return o.info, nil
+	}
+	if f.resultIsInput {
+		info.Metadata = opts.Metadata
 	}
 	return info, nil
 }
@@ -154,6 +168,10 @@ func (f *fake) writeTorn(key string, data []byte, info storage.ObjectInfo) {
 // wrap is storage.Wrap, unless the fake returns bare sentinels.
 func (f *fake) wrap(op, key string, err error) error {
 	if f.bareErrors {
+		return err
+	}
+	var se *storage.Error
+	if f.keepsForeignErr && errors.As(err, &se) {
 		return err
 	}
 	return storage.Wrap(op, key, err)
@@ -426,6 +444,9 @@ func TestSuiteCatchesBrokenDrivers(t *testing.T) {
 		{"DirectUpload", func(f *fake) { f.noUploadCheck = true }, "want storage: invalid object key"},
 		{"NoPartialReads", func(f *fake) { f.nonAtomicFirst = true }, "mid-Put of a new key"},
 		{"MetadataIsOwned", func(f *fake) { f.aliasMetadata = true }, "the stored metadata changed without a Put"},
+		{"MetadataIsOwned", func(f *fake) { f.resultIsInput = true }, "shares the caller's map"},
+		{"Overwrite", func(f *fake) { f.constantETag = true }, "different bytes kept the ETag"},
+		{"FailedPutKeepsPrevious", func(f *fake) { f.keepsForeignErr = true }, "inside a *storage.Error"},
 		{"OpenFollowsContext", func(f *fake) { f.openDetached = true }, "must follow the context"},
 		{"Missing", func(f *fake) { f.bareErrors = true }, "inside a *storage.Error"},
 		{"InvalidKeys", func(f *fake) { f.bareErrors = true }, "inside a *storage.Error"},
