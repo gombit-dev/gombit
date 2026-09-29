@@ -181,26 +181,38 @@ the directory. `gombit new` gitignores `/storage/`.
   be browsed or edited by hand; go through the store.
 - **Streaming, atomic, durable writes.** `Put` streams into a temporary file
   under `<root>/tmp` in 32 KiB pieces, never holding the object in memory.
-  It then flushes the file, and flushes the entry of every directory on the
-  path that this process hasn't yet seen flushed (the root and its new
-  ancestors included). Only then does it rename the file into place and
-  flush that directory. A reader sees the old object or the new one, never
+  It then flushes the file, and flushes the entry of every directory it
+  created on the path (the root and any missing ancestors included, but no
+  directory that already existed, so the store needs no access above its
+  root beyond creating what is missing). Only then does it rename the file
+  into place and flush that directory. A reader sees the old object or the new one, never
   part of one. On Linux and macOS, a `Put` or `Delete` that returned
   survives a crash. If a directory flush before the rename fails, `Put`
   fails with the object still a temporary file, and the next `Put` flushes
   again. If the flush after the rename (or a delete's) fails even on a
   retry, the change has already happened: the call reports success, and
-  `app.Storage()` logs a warning that it may not survive a crash. A failed
-  `Put` removes its temporary file. A process killed mid-`Put` can't, so a
-  store's first `Put` removes temporary files nothing has written to for an
-  hour. `Open` reads from disk as you read.
+  `app.Storage()` logs a warning that it may not survive a crash. `Open`
+  reads from disk as you read.
+- **Temporary files.** A failed `Put` removes its temporary file. A process
+  killed mid-`Put` can't, so each store writes its temporary files in its
+  own work directory (`<root>/tmp/w-*`) and holds a lock on that
+  directory's `owner` file while it exists. A store's first `Put` removes
+  the work directories whose owner file it can lock: those of processes
+  that are gone. A live store's directory is never removed, however long
+  its `Put`s wait on their sources. The locks are `flock` (Linux, macOS,
+  the BSDs) and `LockFileEx` (Windows). On any other platform nothing is
+  swept.
 - **Sharing.** Several processes can share one root (an app and its worker).
   Several *hosts* need a shared filesystem, or an S3-compatible store
   (STORAGE-3).
-- **Windows.** An object that is open for reading cannot be replaced or
-  deleted until its reader is closed. Windows offers no directory flush a
-  process can request, so writes and deletes there are atomic, but whether
-  they survive a crash is up to the filesystem.
+- **Windows.** An open reader keeps the version it opened while a `Put`
+  replaces the object or a `Delete` removes it, as everywhere. The store
+  opens objects with delete sharing and replaces and deletes them with POSIX
+  semantics, which need NTFS on Windows 10 1709 or later. On a filesystem
+  without them (FAT, say), an open reader blocks a replace or delete of its
+  object until it is closed. Windows offers no directory flush a process can
+  request, so writes and deletes there are atomic, but whether they survive
+  a crash is up to the filesystem. CI runs the storage packages on Windows.
 - **URLs.** `URL` returns `ErrUnsupported` for now. Serving local files needs
   the public/private rules of STORAGE-5; serving every object would expose
   private ones.
