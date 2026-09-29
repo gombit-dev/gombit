@@ -7,8 +7,8 @@ call, so moving from local development to S3-compatible storage in
 production changes configuration, not code.
 
 > **Status:** the contract, the local, in-memory, and S3-compatible
-> drivers, and the upload helpers. Signed URLs, direct uploads, and admin
-> fields follow
+> drivers, the upload helpers, and public and signed URLs. Direct uploads
+> and admin fields follow
 > ([epic #279](https://github.com/gombit-dev/gombit/issues/279)).
 
 Every app has a store: `app.Storage()` returns the driver `GOMBIT_STORAGE_DRIVER`
@@ -88,18 +88,79 @@ returns may leave it zero where the backend doesn't say, as with S3's
 `PutObject`, rather than cost a second request. `ETag` identifies this version
 of the bytes where the driver has one, and is empty otherwise.
 
-### URLs
+### Visibility and URLs
 
-`URL(ctx, key, storage.PublicURL())` asks for a permanent public URL.
-`URL(ctx, key, storage.SignedURL(15*time.Minute))` asks for one that stops
-working after 15 minutes. A signed URL needs a positive lifetime:
-`SignedURL(0)` is refused with `ErrInvalidOptions`, never quietly turned into
-a permanent URL. A driver without a URL scheme returns `ErrUnsupported`.
+An object is **public** when its key starts with the store's public prefix,
+`GOMBIT_STORAGE_PUBLIC_PREFIX` (`public/` by default; empty makes nothing
+public). Every other object is **private**. Visibility follows the key rather
+than a flag stored with the object, because a key prefix is what a bucket
+policy or a CDN can serve. To make an object public, store it under the
+prefix: `public/avatars/<id>.png`.
 
-`URL` doesn't check that the object exists, since a URL for an upload names
-a key that isn't stored yet, and the suite checks that. It also doesn't
-authorize anyone: decide who may have the URL before asking for it.
-Visibility and signed URLs are specified fully in STORAGE-5.
+```go
+// A public object: a permanent URL, for <img src>, a CDN, or a feed.
+u, err := app.Storage().URL(ctx, "public/logos/acme.png", storage.PublicURL())
+
+// A private object: a URL that stops working after 15 minutes, so the
+// browser downloads straight from storage without the app proxying the bytes.
+if !canRead(user, doc) { // authorization stays in the application
+	return contract.Authorization("")
+}
+u, err := app.Storage().URL(ctx, doc.FileKey, storage.SignedURL(15*time.Minute))
+```
+
+- `PublicURL()` for a private key fails with `ErrNotPublic`, never a URL.
+- `SignedURL(ttl)` works for any key, public or private. `ttl` must be
+  positive and at most `storage.MaxURLExpiry` (7 days, S3's limit): anything
+  else is `ErrInvalidOptions`, so a zero or negative lifetime never becomes a
+  permanent URL.
+- `URL` doesn't check that the object exists (a URL may name a key that isn't
+  stored yet), and it doesn't authorize anyone. Decide who may have the URL
+  before asking for it. Anyone holding a signed URL can use it until it
+  expires.
+
+Per driver:
+
+| Driver | Public URL | Signed URL |
+| --- | --- | --- |
+| `s3` | `GOMBIT_STORAGE_S3_PUBLIC_URL` + `/` + the object key. Configure the bucket to serve the public prefix (below). Without a public URL: `ErrUnsupported`. | A presigned `GetObject` (SigV4 query parameters). It stops working at its expiry, or earlier if the credentials that signed it are revoked or expire (temporary IAM-role credentials last hours). |
+| `local`, `memory` | `GOMBIT_STORAGE_LOCAL_URL` (`/_storage`) + `/` + the key, served by the app. | The same URL plus `expires` and an HMAC-SHA256 `signature`, checked by the app. |
+
+**S3.** Let anyone read the public prefix with a bucket policy, and point
+`GOMBIT_STORAGE_S3_PUBLIC_URL` at the bucket or at a CDN in front of it. The
+URL stands for the bucket's root, and `GOMBIT_STORAGE_S3_PREFIX` is part of
+the object key:
+
+```json
+{"Version": "2012-10-17", "Statement": [{
+  "Effect": "Allow", "Principal": "*", "Action": "s3:GetObject",
+  "Resource": "arn:aws:s3:::my-bucket/myapp/public/*"
+}]}
+```
+
+Private objects need nothing: they stay unreadable without credentials, and
+a signed URL carries them.
+
+**Local and memory.** `framework.New` mounts `GET` and `HEAD` at
+`GOMBIT_STORAGE_LOCAL_URL`. That is a path (`/_storage`), or an absolute URL
+when the files are served from another address. Its behavior:
+
+- A public key is served to anyone.
+- A private key needs a signed URL that hasn't expired. Anything else is a
+  D10 `403`: a missing, wrong or altered signature, or another key.
+- A missing object is `404`.
+- Objects are served inline with their stored type, plus
+  `X-Content-Type-Options: nosniff` and `Content-Security-Policy: sandbox`.
+  An uploaded HTML or SVG file therefore cannot run script in the app's
+  origin.
+
+URLs are signed with `GOMBIT_STORAGE_URL_SECRET` (at least 32 bytes). When
+that is unset, the key is derived from `GOMBIT_JWT_SECRET`. With neither
+secret, or with `GOMBIT_STORAGE_LOCAL_URL` empty, `URL` returns
+`ErrUnsupported`. Changing the secret invalidates every URL signed with it.
+An app that passes its own store with `framework.WithStorage` builds a
+`presign.Signer`, passes it to `local.WithURLs` or `memory.WithURLs`, and
+mounts `presign.Handler` itself.
 
 ## Keys
 
@@ -209,6 +270,7 @@ same thing on every driver:
 | `ErrUnavailable` | The backend is unreachable or failed transiently | `503 dependency_unavailable` |
 | `context.DeadlineExceeded` / `Canceled` | The request timed out, or the client went away | `503 dependency_unavailable` |
 | `ErrUnsupported` | The driver cannot do this, for example a URL | `500 internal` |
+| `ErrNotPublic` | A public URL was asked for a private object | `500 internal`: the server chose the key and the kind of URL |
 | anything else | | `500 internal` (your message) |
 
 `storage.MapError(ctx, err, notFound, internal)` does that mapping for a
@@ -267,9 +329,9 @@ the directory. `gombit new` gitignores `/storage/`.
   deleted until its reader is closed. Windows offers no directory flush a
   process can request, so writes and deletes there are atomic, but whether
   they survive a crash is up to the filesystem.
-- **URLs.** `URL` returns `ErrUnsupported` for now. Serving local files needs
-  the public/private rules of STORAGE-5; serving every object would expose
-  private ones.
+- **URLs** are served by the app at `GOMBIT_STORAGE_LOCAL_URL`: public
+  objects to anyone, private ones through signed URLs only (see
+  [Visibility and URLs](#visibility-and-urls)).
 
 In production, point `GOMBIT_STORAGE_LOCAL_ROOT` at a persistent volume. A
 container's working directory is lost when the container is replaced. A
@@ -325,8 +387,8 @@ GOMBIT_STORAGE_S3_FORCE_PATH_STYLE=false      # true for MinIO and most S3-compa
   returns leaves it zero, since S3 doesn't return one.
 - **Checksums** are sent only where S3 requires them, because several
   S3-compatible services reject the SDK's newer default checksums.
-- **`URL`** returns `ErrUnsupported` until STORAGE-5 adds public and signed
-  URLs.
+- **`URL`** gives presigned `GetObject` URLs, and public URLs under
+  `GOMBIT_STORAGE_S3_PUBLIC_URL` (see [Visibility and URLs](#visibility-and-urls)).
 
 The driver runs the full conformance suite against MinIO in CI (the
 `Storage (s3)` job):
@@ -371,7 +433,9 @@ The suite checks every guarantee above:
   object whole;
 - size mismatches and invalid options;
 - concurrent `Put`s to one key;
-- `URL` returning either a URL or `ErrUnsupported`.
+- `URL` returning either a URL or `ErrUnsupported` (or `ErrNotPublic` for a
+  public URL; never for a signed one), and refusing a lifetime over
+  `MaxURLExpiry`.
 
 The suite's own tests prove that every check fails for a driver broken the
 way it guards against. A new check can't land without such a driver.
@@ -389,6 +453,12 @@ Helpers for drivers:
   the read that reaches the size, but read it to EOF (`io.Copy`), because
   `io.ReadFull` and `io.CopyN` drop an error returned with the last bytes.
 - `Wrap` builds the `*storage.Error`.
+- `IsPublic` and `ValidatePublicPrefix` apply the visibility rule, and
+  `EscapeKey` turns a key into a URL path, with every byte that could mean
+  something else in a URL encoded.
+- A backend with no URL scheme of its own can take a `presign.Signer`
+  (`storage/presign`) for its `URL`, and have the app serve
+  `presign.Handler`, as the local and memory drivers do.
 
 The `storage` package imports only the standard library and Gombit's
 `contract` package (a test enforces this), so an application that uses it

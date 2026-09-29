@@ -56,6 +56,7 @@ import (
 	"time"
 
 	"github.com/gombit-dev/gombit/storage"
+	"github.com/gombit-dev/gombit/storage/presign"
 )
 
 // Store is a storage.Storage under a root directory. It is safe for
@@ -65,6 +66,7 @@ type Store struct {
 	now      func() time.Time
 	firstPut func(root string)
 	warn     func(msg string, err error)
+	urls     *presign.Signer
 	once     sync.Once
 	// durable holds the directories whose own entry this process has
 	// flushed (see ensureDir).
@@ -78,6 +80,13 @@ type Option func(*Store)
 // time.Now), for tests that assert on it.
 func WithClock(now func() time.Time) Option {
 	return func(s *Store) { s.now = now }
+}
+
+// WithURLs gives the store URLs, made by signer and served by
+// presign.Handler (which the application mounts at signer.Path(); framework.New
+// does). Without it, URL returns storage.ErrUnsupported.
+func WithURLs(signer *presign.Signer) Option {
+	return func(s *Store) { s.urls = signer }
 }
 
 // WithFirstPut sets a function called with the root on the store's first
@@ -467,9 +476,10 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 	return nil
 }
 
-// URL implements storage.Storage. Files on local disk have no URL until
-// visibility and signed URLs land (STORAGE-5); it returns
-// storage.ErrUnsupported (after validating its arguments).
+// URL implements storage.Storage with the store's presign.Signer
+// (WithURLs): a public URL for a key under its public prefix, or a signed
+// one. Without a Signer it returns storage.ErrUnsupported (after
+// validating its arguments).
 func (s *Store) URL(ctx context.Context, key string, opts storage.URLOptions) (string, error) {
 	if err := storage.ValidateKey(key); err != nil {
 		return "", storage.Wrap("url", key, err)
@@ -480,5 +490,9 @@ func (s *Store) URL(ctx context.Context, key string, opts storage.URLOptions) (s
 	if err := ctx.Err(); err != nil {
 		return "", storage.Wrap("url", key, err)
 	}
-	return "", storage.Wrap("url", key, storage.ErrUnsupported)
+	if s.urls == nil {
+		return "", storage.Wrap("url", key, storage.ErrUnsupported)
+	}
+	u, err := s.urls.URL(key, opts)
+	return u, storage.Wrap("url", key, err)
 }

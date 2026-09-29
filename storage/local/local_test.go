@@ -6,6 +6,8 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -16,6 +18,7 @@ import (
 
 	"github.com/gombit-dev/gombit/storage"
 	"github.com/gombit-dev/gombit/storage/local"
+	"github.com/gombit-dev/gombit/storage/presign"
 	"github.com/gombit-dev/gombit/storage/storagetest"
 )
 
@@ -461,5 +464,55 @@ func TestPathsDependOnlyOnTheKey(t *testing.T) {
 			t.Fatalf("%q and %q map to the same path", key, other)
 		}
 		seen[rel] = key
+	}
+}
+
+// TestSignedURLsInDevelopment: the local driver's URLs work end to end
+// through presign.Handler, as framework.New mounts it.
+func TestSignedURLsInDevelopment(t *testing.T) {
+	signer, err := presign.New(presign.Config{Base: "/_storage", Secret: []byte(strings.Repeat("k", 32)), PublicPrefix: "public/"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := local.New(t.TempDir(), local.WithURLs(signer))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(presign.Handler(store, signer))
+	defer srv.Close()
+	ctx := context.Background()
+	for _, key := range []string{"private/report.pdf", "public/logo.png"} {
+		if _, err := store.Put(ctx, key, strings.NewReader("bytes of "+key), storage.PutOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fetch := func(u string) (int, string) {
+		resp, err := srv.Client().Get(srv.URL + u)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(b)
+	}
+	signed, err := store.URL(ctx, "private/report.pdf", storage.SignedURL(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, body := fetch(signed); code != http.StatusOK || body != "bytes of private/report.pdf" {
+		t.Fatalf("signed URL = %d %q", code, body)
+	}
+	if code, _ := fetch("/_storage/private/report.pdf"); code != http.StatusForbidden {
+		t.Fatalf("the private object without a signature = %d, want 403", code)
+	}
+	public, err := store.URL(ctx, "public/logo.png", storage.PublicURL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, body := fetch(public); code != http.StatusOK || body != "bytes of public/logo.png" {
+		t.Fatalf("public URL = %d %q", code, body)
+	}
+	if _, err := store.URL(ctx, "private/report.pdf", storage.PublicURL()); !errors.Is(err, storage.ErrNotPublic) {
+		t.Fatalf("a public URL for a private object = %v", err)
 	}
 }

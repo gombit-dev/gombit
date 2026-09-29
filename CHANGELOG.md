@@ -69,6 +69,25 @@ version.
   - `upload.MapError` maps the errors to D10 responses;
   - `examples/storage` gains `POST /uploads`
     ([#326](https://github.com/gombit-dev/gombit/issues/326)).
+- Object visibility and URLs (STORAGE-5):
+  - an object is public when its key is under `GOMBIT_STORAGE_PUBLIC_PREFIX`
+    (`public/` by default) and private otherwise;
+  - `URL(ctx, key, storage.PublicURL())` gives a permanent URL for a public
+    object, and `ErrNotPublic` for a private one;
+  - `URL(ctx, key, storage.SignedURL(ttl))` gives a URL to any object that
+    expires after `ttl`, at most 7 days (`storage.MaxURLExpiry`);
+  - on S3, signed URLs are presigned `GetObject` requests, and public URLs
+    sit under `GOMBIT_STORAGE_S3_PUBLIC_URL` (a CDN, or the bucket, with a
+    bucket policy for the public prefix);
+  - on the local and memory drivers, the app serves them at
+    `GOMBIT_STORAGE_LOCAL_URL` (`/_storage`), with HMAC-signed, expiring URLs
+    (`storage/presign`) keyed by `GOMBIT_STORAGE_URL_SECRET` or derived from
+    `GOMBIT_JWT_SECRET`;
+  - served files are sandboxed so that an uploaded HTML file cannot run in
+    the app's origin;
+  - authorization stays with the application, before it asks for a URL;
+  - `examples/storage` gains `GET /uploads/:id/link`
+    ([#327](https://github.com/gombit-dev/gombit/issues/327)).
 
 ### Changed
 

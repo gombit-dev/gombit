@@ -46,8 +46,10 @@ type Storage interface {
 	// so a retried Delete is safe.
 	Delete(ctx context.Context, key string) error
 
-	// URL returns a URL a client can fetch the object from: a public URL,
-	// or a signed one that expires (see URLOptions). A driver that cannot
+	// URL returns a URL a client can fetch the object from: a permanent
+	// public URL for a public object (ErrNotPublic for a private one; see
+	// IsPublic), or a signed one that works for any object until it
+	// expires (see URLOptions; at most MaxURLExpiry). A driver that cannot
 	// produce one returns ErrUnsupported. URL does not check that the
 	// object exists, and it does not authorize anyone: decide who may have
 	// the URL before asking for it.

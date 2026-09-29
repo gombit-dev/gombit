@@ -2,11 +2,16 @@ package framework
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
@@ -15,6 +20,7 @@ import (
 	"github.com/gombit-dev/gombit/storage"
 	"github.com/gombit-dev/gombit/storage/local"
 	"github.com/gombit-dev/gombit/storage/memory"
+	"github.com/gombit-dev/gombit/storage/presign"
 	"github.com/gombit-dev/gombit/storage/s3"
 )
 
@@ -110,7 +116,7 @@ func TestStorageWarnsAboutAnEphemeralRootInProduction(t *testing.T) {
 			cfg := config.Default()
 			cfg.Environment = tc.env
 			cfg.Storage.Local.Root = tc.root
-			store, err := openStorage(cfg, zap.New(core))
+			store, _, err := openStorage(cfg, zap.New(core))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -124,5 +130,95 @@ func TestStorageWarnsAboutAnEphemeralRootInProduction(t *testing.T) {
 				t.Fatalf("%d warnings, want %d", n, tc.want)
 			}
 		})
+	}
+}
+
+// TestStorageURLsAreServedByTheApp: with a URL secret, the local driver's
+// signed and public URLs work through the app's own router, and a private
+// object is not readable without a signature.
+func TestStorageURLsAreServedByTheApp(t *testing.T) {
+	cfg := config.Default()
+	cfg.Storage.Local.Root = t.TempDir()
+	cfg.Storage.URLSecret = strings.Repeat("u", config.MinStorageURLSecretLength)
+	app := newTestApp(t, WithConfig(cfg))
+	ctx := context.Background()
+	for _, key := range []string{"private/report.txt", "public/logo.txt"} {
+		if _, err := app.Storage().Put(ctx, key, strings.NewReader("bytes of "+key), storage.PutOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	get := func(u string) (int, string) {
+		w := httptest.NewRecorder()
+		app.Router().ServeHTTP(w, httptest.NewRequest(http.MethodGet, u, nil))
+		return w.Code, w.Body.String()
+	}
+	signed, err := app.Storage().URL(ctx, "private/report.txt", storage.SignedURL(time.Minute))
+	if err != nil || !strings.HasPrefix(signed, config.DefaultStorageLocalURL+"/") {
+		t.Fatalf("URL = %q, %v", signed, err)
+	}
+	if code, body := get(signed); code != http.StatusOK || body != "bytes of private/report.txt" {
+		t.Fatalf("GET signed = %d %q", code, body)
+	}
+	if code, body := get("/_storage/private/report.txt"); code != http.StatusForbidden || !strings.Contains(body, `"authorization"`) {
+		t.Fatalf("GET private without a signature = %d %s", code, body)
+	}
+	public, err := app.Storage().URL(ctx, "public/logo.txt", storage.PublicURL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, body := get(public); code != http.StatusOK || body != "bytes of public/logo.txt" {
+		t.Fatalf("GET public = %d %q", code, body)
+	}
+}
+
+func TestStorageURLsNeedASecret(t *testing.T) {
+	cfg := config.Default()
+	cfg.Storage.Driver = config.StorageDriverMemory
+	app := newTestApp(t, WithConfig(cfg))
+	if _, err := app.Storage().URL(context.Background(), "k", storage.SignedURL(time.Minute)); !errors.Is(err, storage.ErrUnsupported) {
+		t.Fatalf("URL with no secret = %v, want ErrUnsupported", err)
+	}
+	w := httptest.NewRecorder()
+	app.Router().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/_storage/k", nil))
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("/_storage is mounted with no URLs: %d", w.Code)
+	}
+}
+
+// TestStorageURLKeyIsDerivedFromTheJWTSecret: without its own secret, the
+// signing key comes from the JWT secret, separated from it: the same JWT
+// secret gives the same URLs, and the key is not the JWT secret itself.
+func TestStorageURLKeyIsDerivedFromTheJWTSecret(t *testing.T) {
+	cfg := config.Default()
+	cfg.Auth.JWTSecret = strings.Repeat("j", 32)
+	a, err := storageSigner(cfg)
+	if err != nil || a == nil {
+		t.Fatalf("storageSigner = %v, %v", a, err)
+	}
+	b, _ := storageSigner(cfg)
+	ua, _ := a.URL("private/k", storage.SignedURL(time.Hour))
+	ub, _ := b.URL("private/k", storage.SignedURL(time.Hour))
+	if ua == "" || ua != ub {
+		t.Fatalf("the derived key is not stable: %q vs %q", ua, ub)
+	}
+	cfg.Storage.URLSecret = cfg.Auth.JWTSecret // the underived key
+	raw, _ := storageSigner(cfg)
+	if ur, _ := raw.URL("private/k", storage.SignedURL(time.Hour)); ur == ua {
+		t.Fatal("the URL key is the JWT secret itself")
+	}
+	// Pinned: HMAC-SHA256(JWT secret, label), so a change to the derivation
+	// (which would break every link already handed out) is deliberate.
+	mac := hmac.New(sha256.New, []byte(cfg.Auth.JWTSecret))
+	_, _ = mac.Write([]byte("gombit storage url signing key v1"))
+	pinned, err := presign.New(presign.Config{Base: config.DefaultStorageLocalURL, Secret: mac.Sum(nil), PublicPrefix: cfg.Storage.PublicPrefix})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if up, _ := pinned.URL("private/k", storage.SignedURL(time.Hour)); up != ua {
+		t.Fatalf("the derived key changed: %q, want %q", ua, up)
+	}
+	cfg.Storage.Local.URL = ""
+	if s, err := storageSigner(cfg); s != nil || err != nil {
+		t.Fatalf("no local URL = %v, %v; want no signer", s, err)
 	}
 }

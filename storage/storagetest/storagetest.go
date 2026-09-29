@@ -586,6 +586,9 @@ func checkInvalidOptions(t testing.TB, s storage.Storage) {
 			t.Fatalf("URL(%+v) = %v, want storage.ErrInvalidOptions: a signed URL must never widen into a permanent one", opts, err)
 		}
 	}
+	if _, err := s.URL(ctxFor(t), "opts", storage.SignedURL(storage.MaxURLExpiry+time.Second)); !errors.Is(err, storage.ErrInvalidOptions) {
+		t.Fatalf("URL with a lifetime over storage.MaxURLExpiry = %v, want storage.ErrInvalidOptions", err)
+	}
 }
 
 // checkConcurrentPuts: concurrent Puts to one key leave exactly one of
@@ -701,7 +704,9 @@ func checkNoPartialReads(t testing.TB, s storage.Storage) {
 
 // checkURL: a driver either produces URLs or says it cannot; it never
 // returns an empty URL without an error, and it never checks that the
-// object exists (a URL for an upload names a key not stored yet).
+// object exists (a URL for an upload names a key not stored yet). A public
+// URL may be refused as storage.ErrNotPublic (the suite's keys are not
+// under a public prefix); a signed one never is.
 func checkURL(t testing.TB, s storage.Storage) {
 	put(t, s, "linked/file.txt", []byte("x"), storage.PutOptions{})
 	for _, key := range []string{"linked/file.txt", "linked/never-stored.txt"} {
@@ -716,6 +721,9 @@ func checkOneURL(t testing.TB, s storage.Storage, key string, opts storage.URLOp
 	u, err := s.URL(ctxFor(t), key, opts)
 	switch {
 	case errors.Is(err, storage.ErrUnsupported):
+	case errors.Is(err, storage.ErrNotPublic) && !opts.Signed:
+	case errors.Is(err, storage.ErrNotPublic):
+		t.Fatalf("URL(%q, %+v) = %v: a signed URL works for a private object", key, opts, err)
 	case errors.Is(err, storage.ErrNotFound):
 		t.Fatalf("URL(%q, %+v) = %v: URL must not check that the object exists", key, opts, err)
 	case err != nil:

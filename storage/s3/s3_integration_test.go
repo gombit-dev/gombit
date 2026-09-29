@@ -9,9 +9,11 @@ import (
 	"errors"
 	"flag"
 	"io"
+	"net/http"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
@@ -37,13 +39,19 @@ var (
 // prefix, so each test (and each conformance check) starts empty.
 func testStore(t *testing.T) *Store {
 	t.Helper()
+	return testStoreWith(t, func(*Config) {})
+}
+
+// testStoreWith is testStore with its Config changed by edit.
+func testStoreWith(t *testing.T, edit func(*Config)) *Store {
+	t.Helper()
 	if *s3Endpoint == "" {
 		t.Skip("set -s3.endpoint to run the S3 integration tests")
 	}
 	ctx := context.Background()
 	var b [6]byte
 	_, _ = rand.Read(b[:])
-	s, err := New(ctx, Config{
+	cfg := Config{
 		Endpoint:        *s3Endpoint,
 		Region:          *s3Region,
 		Bucket:          *s3Bucket,
@@ -51,7 +59,9 @@ func testStore(t *testing.T) *Store {
 		AccessKeyID:     *s3AccessKey,
 		SecretAccessKey: *s3SecretKey,
 		ForcePathStyle:  true,
-	})
+	}
+	edit(&cfg)
+	s, err := New(ctx, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,3 +248,83 @@ func TestFailedMultipartIsAborted(t *testing.T) {
 type failing struct{ err error }
 
 func (f failing) Read([]byte) (int, error) { return 0, f.err }
+
+// fetch GETs u without credentials: the status and the body.
+func fetch(t *testing.T, u string) (int, string) {
+	t.Helper()
+	resp, err := http.Get(u) // #nosec G107 -- the test's own presigned URL.
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	b, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(b)
+}
+
+// TestSignedURLs: a presigned URL reads a private object without
+// credentials until it expires; the object is not readable without one.
+func TestSignedURLs(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	key := "private/ré sumé+1.txt"
+	if _, err := s.Put(ctx, key, strings.NewReader("secret bytes"), storage.PutOptions{ContentType: "text/plain"}); err != nil {
+		t.Fatal(err)
+	}
+	u, err := s.URL(ctx, key, storage.SignedURL(2*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, body := fetch(t, u); code != http.StatusOK || body != "secret bytes" {
+		t.Fatalf("GET the signed URL = %d %q", code, body)
+	}
+	unsigned := strings.SplitN(u, "?", 2)[0]
+	if code, _ := fetch(t, unsigned); code != http.StatusForbidden {
+		t.Fatalf("GET without the signature = %d, want 403: the object is private", code)
+	}
+	tampered := strings.Replace(u, "X-Amz-Expires=2", "X-Amz-Expires=3600", 1)
+	if code, _ := fetch(t, tampered); code != http.StatusForbidden {
+		t.Fatalf("GET with a longer expiry = %d, want 403", code)
+	}
+	time.Sleep(3 * time.Second)
+	if code, _ := fetch(t, u); code != http.StatusForbidden {
+		t.Fatalf("GET after the expiry = %d, want 403", code)
+	}
+	if _, err := s.URL(ctx, key, storage.PublicURL()); !errors.Is(err, storage.ErrNotPublic) {
+		t.Fatalf("a public URL for a private key = %v, want ErrNotPublic", err)
+	}
+}
+
+// TestPublicURLs: with a bucket policy that lets anyone read the public
+// prefix (what the operator configures), a public URL reads a public
+// object; a private object in the same bucket stays private.
+func TestPublicURLs(t *testing.T) {
+	s := testStoreWith(t, func(c *Config) {
+		c.PublicPrefix = "public/"
+		c.PublicURL = strings.TrimSuffix(*s3Endpoint, "/") + "/" + *s3Bucket
+	})
+	ctx := context.Background()
+	policy := `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":["*"]},"Action":["s3:GetObject"],` +
+		`"Resource":["arn:aws:s3:::` + *s3Bucket + `/` + s.prefix + `public/*"]}]}`
+	if _, err := s.client.PutBucketPolicy(ctx, &awss3.PutBucketPolicyInput{Bucket: aws.String(*s3Bucket), Policy: aws.String(policy)}); err != nil {
+		t.Fatalf("set the bucket policy: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = s.client.DeleteBucketPolicy(ctx, &awss3.DeleteBucketPolicyInput{Bucket: aws.String(*s3Bucket)})
+	})
+	for _, key := range []string{"public/logo & co.png", "private/x.txt"} {
+		if _, err := s.Put(ctx, key, strings.NewReader("bytes of "+key), storage.PutOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	u, err := s.URL(ctx, "public/logo & co.png", storage.PublicURL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, body := fetch(t, u); code != http.StatusOK || body != "bytes of public/logo & co.png" {
+		t.Fatalf("GET %s = %d %q", u, code, body)
+	}
+	private := s.publicURL + "/" + storage.EscapeKey(s.prefix+"private/x.txt")
+	if code, _ := fetch(t, private); code != http.StatusForbidden {
+		t.Fatalf("GET a private object's would-be public URL = %d, want 403", code)
+	}
+}

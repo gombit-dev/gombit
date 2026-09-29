@@ -24,6 +24,9 @@ var (
 	// ErrUnsupported: the driver cannot do this (a URL from a driver with no
 	// URL scheme).
 	ErrUnsupported = errors.New("storage: operation not supported by this driver")
+	// ErrNotPublic: a public URL was asked for an object that is not
+	// public (its key is not under the store's public prefix).
+	ErrNotPublic = errors.New("storage: object is not public")
 	// ErrUnavailable: the backend could not be reached or failed
 	// transiently; retrying later may succeed.
 	ErrUnavailable = errors.New("storage: backend unavailable")
@@ -64,9 +67,9 @@ func Wrap(op, key string, err error) error {
 //     sent a content type, metadata, or length that cannot be stored);
 //   - ErrUnavailable, and a context that ended (the request timed out or
 //     the client went away), become dependency_unavailable;
-//   - anything else, ErrInvalidKey included, becomes internal (with
-//     internal as the message): keys are built by the server, so an invalid
-//     one is a server bug. Validate a key taken from a request with
+//   - anything else, ErrInvalidKey and ErrNotPublic included, becomes
+//     internal (with internal as the message): keys and the URLs asked for
+//     are chosen by the server, so either is a server bug. Validate a key taken from a request with
 //     ValidateKey first, and answer not_found.
 //
 // The driver's own error text never reaches the client.

@@ -189,14 +189,16 @@ func unsafeRune(r rune) bool {
 }
 
 // ValidateURLOptions reports whether opts is valid, as ErrInvalidOptions
-// when it is not: a signed URL needs a positive Expires, and a public one
-// none.
+// when it is not: a signed URL needs a positive Expires of at most
+// MaxURLExpiry, and a public one none.
 func ValidateURLOptions(opts URLOptions) error {
 	switch {
 	case opts.Signed && opts.Expires <= 0:
 		return fmt.Errorf("%w: a signed URL needs a positive lifetime, not %s", ErrInvalidOptions, opts.Expires)
 	case !opts.Signed && opts.Expires != 0:
 		return fmt.Errorf("%w: a public URL has no lifetime; use SignedURL", ErrInvalidOptions)
+	case opts.Expires > MaxURLExpiry:
+		return fmt.Errorf("%w: a signed URL lives at most %s, not %s", ErrInvalidOptions, MaxURLExpiry, opts.Expires)
 	}
 	return nil
 }

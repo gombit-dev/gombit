@@ -9,12 +9,18 @@
 //	curl -X DELETE localhost:8080/files/photo
 //	curl -F file=@photo.jpg localhost:8080/uploads
 //	curl localhost:8080/uploads/<id> -OJ
+//	curl localhost:8080/uploads/<id>/link   # a download link valid for 5 minutes
 //
 // The key is built by the server: "files/" + the id in the path (checked
 // first, so a malformed one is a 404, not a server error), or, for a form
 // upload, a random id under "uploads/" from storage/upload, which also
 // bounds the size, checks the detected type, and keeps the client's
 // filename as metadata only.
+//
+// A link is a signed URL: the browser downloads straight from storage (here,
+// the app's own /_storage route; on S3, the bucket) until it expires. Links
+// need a signing key, GOMBIT_STORAGE_URL_SECRET (32 bytes or more) or
+// GOMBIT_JWT_SECRET, for the local and memory drivers.
 package main
 
 import (
@@ -25,6 +31,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -37,6 +44,9 @@ import (
 
 // maxUpload bounds an upload's size.
 const maxUpload = 10 << 20
+
+// linkLifetime is how long a download link works.
+const linkLifetime = 5 * time.Minute
 
 // images is the policy for form uploads: images only, judged by their
 // bytes, stored under uploads/ with a generated key.
@@ -121,6 +131,22 @@ func register(r gin.IRouter, store storage.Storage) {
 			"content_type": f.ContentType,
 			"size":         f.Size,
 		}})
+	})
+
+	// A download link. The URL is the authorization: decide who may have
+	// it before asking for it (this example lets anyone).
+	r.GET("/uploads/:id/link", func(c *gin.Context) {
+		key := images.Prefix + c.Param("id")
+		if storage.ValidateKey(key) != nil {
+			fail(c, contract.NotFound("file not found"))
+			return
+		}
+		u, err := store.URL(c.Request.Context(), key, storage.SignedURL(linkLifetime))
+		if err != nil {
+			fail(c, storage.MapError(c.Request.Context(), err, "file not found", "could not make a link"))
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"data": gin.H{"url": u, "expires_in": int(linkLifetime.Seconds())}})
 	})
 
 	r.GET("/uploads/:id", func(c *gin.Context) {

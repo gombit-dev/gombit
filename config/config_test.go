@@ -167,8 +167,9 @@ func TestLoadFromEnv(t *testing.T) {
 			Namespace: "example-jobs",
 		},
 		Storage: StorageConfig{
-			Driver: StorageDriverMemory,
-			Local:  LocalStorageConfig{Root: "/var/lib/example/files"},
+			Driver:       StorageDriverMemory,
+			PublicPrefix: DefaultStoragePublicPrefix,
+			Local:        LocalStorageConfig{Root: "/var/lib/example/files", URL: DefaultStorageLocalURL},
 			S3: S3StorageConfig{
 				Endpoint:        "http://127.0.0.1:9000",
 				Region:          "auto",
@@ -351,9 +352,10 @@ func TestLoadUsesProcessEnvironment(t *testing.T) {
 			Namespace: "process-example:production",
 		},
 		Storage: StorageConfig{
-			Driver: StorageDriverLocal,
-			Local:  LocalStorageConfig{Root: DefaultStorageLocalRoot},
-			S3:     S3StorageConfig{Region: DefaultStorageS3Region},
+			Driver:       StorageDriverLocal,
+			PublicPrefix: DefaultStoragePublicPrefix,
+			Local:        LocalStorageConfig{Root: DefaultStorageLocalRoot, URL: DefaultStorageLocalURL},
+			S3:           S3StorageConfig{Region: DefaultStorageS3Region},
 		},
 		Logging: LoggingConfig{
 			Level: LogLevelError,
@@ -1081,5 +1083,45 @@ func TestValidateS3Storage(t *testing.T) {
 		if err != nil && strings.Contains(err.Error(), "secret\"") && name == "secret only" {
 			t.Errorf("%s: the error echoes the secret: %v", name, err)
 		}
+	}
+}
+
+func TestStorageURLSettings(t *testing.T) {
+	cfg, err := LoadFromEnv(func(key string) (string, bool) {
+		v, ok := map[string]string{
+			envStoragePublicPrefix: "",
+			envStorageURLSecret:    strings.Repeat("u", MinStorageURLSecretLength),
+			envStorageLocalURL:     "https://app.example.com/files",
+			envStorageS3PublicURL:  "https://cdn.example.com",
+		}[key]
+		return v, ok
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := cfg.Storage
+	if st.PublicPrefix != "" || st.Local.URL != "https://app.example.com/files" || st.S3.PublicURL != "https://cdn.example.com" || len(st.URLSecret) != MinStorageURLSecretLength {
+		t.Fatalf("storage = %+v", st)
+	}
+	if got := cfg.Redacted().Storage.URLSecret; got != RedactedSecret {
+		t.Fatalf("redacted URL secret = %q", got)
+	}
+	for name, sc := range map[string]StorageConfig{
+		"public prefix without '/'": {Driver: StorageDriverMemory, PublicPrefix: "public"},
+		"public prefix traversal":   {Driver: StorageDriverMemory, PublicPrefix: "../public/"},
+		"short URL secret":          {Driver: StorageDriverMemory, URLSecret: "short"},
+		"relative local URL":        {Driver: StorageDriverLocal, Local: LocalStorageConfig{Root: "s", URL: "_storage"}},
+		"local URL trailing slash":  {Driver: StorageDriverLocal, Local: LocalStorageConfig{Root: "s", URL: "/_storage/"}},
+		"local URL root":            {Driver: StorageDriverLocal, Local: LocalStorageConfig{Root: "s", URL: "/"}},
+		"local URL with a query":    {Driver: StorageDriverMemory, Local: LocalStorageConfig{URL: "/_storage?x=1"}},
+		"local URL scheme":          {Driver: StorageDriverMemory, Local: LocalStorageConfig{URL: "ftp://h/_storage"}},
+		"S3 public URL":             {Driver: StorageDriverS3, S3: S3StorageConfig{Bucket: "b", Region: "r", PublicURL: "cdn.example.com"}},
+	} {
+		if err := ValidateStorage(sc); err == nil {
+			t.Errorf("%s: ValidateStorage(%+v) = nil", name, sc)
+		}
+	}
+	if err := ValidateStorage(StorageConfig{Driver: StorageDriverMemory, URLSecret: "short"}); err != nil && strings.Contains(err.Error(), "short") {
+		t.Fatalf("the URL secret was echoed: %v", err)
 	}
 }

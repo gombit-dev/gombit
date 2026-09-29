@@ -66,6 +66,10 @@ recognizes:
 | `GOMBIT_STORAGE_S3_ACCESS_KEY_ID` | `Config.Storage.S3.AccessKeyID` | empty (default credential chain) |
 | `GOMBIT_STORAGE_S3_SECRET_ACCESS_KEY` | `Config.Storage.S3.SecretAccessKey` | empty; redacted |
 | `GOMBIT_STORAGE_S3_FORCE_PATH_STYLE` | `Config.Storage.S3.ForcePathStyle` | `false` |
+| `GOMBIT_STORAGE_S3_PUBLIC_URL` | `Config.Storage.S3.PublicURL` | empty (public objects have no URL) |
+| `GOMBIT_STORAGE_PUBLIC_PREFIX` | `Config.Storage.PublicPrefix` | `public/` (empty: none public) |
+| `GOMBIT_STORAGE_LOCAL_URL` | `Config.Storage.Local.URL` | `/_storage` (empty: no URLs) |
+| `GOMBIT_STORAGE_URL_SECRET` | `Config.Storage.URLSecret` | empty (derived from `GOMBIT_JWT_SECRET`); redacted |
 | `GOMBIT_REDIS_ADDR` | `Config.Cache.Redis.Addr` | `127.0.0.1:6379` |
 | `GOMBIT_REDIS_USERNAME` | `Config.Cache.Redis.Username` | empty |
 | `GOMBIT_REDIS_PASSWORD` | `Config.Cache.Redis.Password` | empty |

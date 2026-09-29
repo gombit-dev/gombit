@@ -12,13 +12,21 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/gombit-dev/gombit/storage/memory"
+	"github.com/gombit-dev/gombit/storage/presign"
 )
 
 func newServer(t *testing.T) *gin.Engine {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	register(r, memory.New())
+	// What framework.New does for the memory and local drivers.
+	signer, err := presign.New(presign.Config{Base: "/_storage", Secret: []byte(strings.Repeat("k", 32)), PublicPrefix: "public/"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := memory.New(memory.WithURLs(signer))
+	r.GET("/_storage/*key", gin.WrapH(presign.Handler(store, signer)))
+	register(r, store)
 	return r
 }
 
@@ -110,6 +118,25 @@ func TestFormUpload(t *testing.T) {
 	}
 	if cd := w.Header().Get("Content-Disposition"); cd != `attachment; filename=cat.gif` {
 		t.Fatalf("Content-Disposition = %q", cd)
+	}
+
+	// A signed link downloads it without the app's handler.
+	w = do(r, http.MethodGet, "/uploads/"+resp.Data.ID+"/link", "", "")
+	var link struct {
+		Data struct {
+			URL       string `json:"url"`
+			ExpiresIn int    `json:"expires_in"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &link); err != nil || w.Code != http.StatusOK || link.Data.ExpiresIn != 300 {
+		t.Fatalf("GET link = %d %s", w.Code, w.Body)
+	}
+	if w := do(r, http.MethodGet, link.Data.URL, "", ""); w.Code != http.StatusOK || w.Body.String() != string(gif) {
+		t.Fatalf("GET %s = %d", link.Data.URL, w.Code)
+	}
+	unsigned := strings.SplitN(link.Data.URL, "?", 2)[0]
+	if w := do(r, http.MethodGet, unsigned, "", ""); w.Code != http.StatusForbidden {
+		t.Fatalf("GET without the signature = %d, want 403", w.Code)
 	}
 
 	// HTML with an image's name is refused by its bytes.

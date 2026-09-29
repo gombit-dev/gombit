@@ -185,11 +185,17 @@ func New(options ...Option) (*App, error) {
 		app.jobsOwned = true
 	}
 	if app.storage == nil {
-		store, err := openStorage(app.cfg, app.logger)
+		store, signer, err := openStorage(app.cfg, app.logger)
 		if err != nil {
 			return nil, err
 		}
 		app.storage = store
+		if signer != nil {
+			// The local and memory drivers' URLs, served by the app. An app
+			// that passes its own store (WithStorage) mounts presign.Handler
+			// itself if it wants them.
+			mountStorageURLs(app.router, store, signer)
+		}
 	}
 	if app.cfg.Auth.Enabled() {
 		if app.db == nil || app.db.DB == nil {

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
@@ -135,6 +136,53 @@ func TestEncodingMatchesTheContractsMeasure(t *testing.T) {
 		enc := encodeMetadata(map[string]string{"n": v})["n"]
 		if len(enc) != storage.MetadataValueWireLen(v) {
 			t.Errorf("%q encodes to %d bytes; the contract counts %d", v, len(enc), storage.MetadataValueWireLen(v))
+		}
+	}
+}
+
+func TestURLs(t *testing.T) {
+	ctx := context.Background()
+	s, err := New(ctx, Config{
+		Endpoint: "http://127.0.0.1:9", Region: "us-east-1", Bucket: "b", Prefix: "app/",
+		AccessKeyID: "id", SecretAccessKey: "secret", ForcePathStyle: true,
+		PublicPrefix: "public/", PublicURL: "https://cdn.example.com/assets",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u, err := s.URL(ctx, "public/a b+c.png", storage.PublicURL()); err != nil || u != "https://cdn.example.com/assets/app/public/a%20b%2Bc.png" {
+		t.Fatalf("public URL = %q, %v", u, err)
+	}
+	if _, err := s.URL(ctx, "private/a.png", storage.PublicURL()); !errors.Is(err, storage.ErrNotPublic) {
+		t.Fatalf("a public URL for a private key = %v", err)
+	}
+	u, err := s.URL(ctx, "private/a.png", storage.SignedURL(15*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(u, "http://127.0.0.1:9/b/app/private/a.png?") || !strings.Contains(u, "X-Amz-Expires=900") || !strings.Contains(u, "X-Amz-Signature=") {
+		t.Fatalf("signed URL = %q", u)
+	}
+	if _, err := s.URL(ctx, "k", storage.SignedURL(storage.MaxURLExpiry+time.Second)); !errors.Is(err, storage.ErrInvalidOptions) {
+		t.Fatalf("a lifetime over the maximum = %v", err)
+	}
+
+	noPublic, err := New(ctx, Config{Region: "us-east-1", Bucket: "b", PublicPrefix: "public/"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := noPublic.URL(ctx, "public/a", storage.PublicURL()); !errors.Is(err, storage.ErrUnsupported) {
+		t.Fatalf("a public URL with no PublicURL configured = %v, want ErrUnsupported", err)
+	}
+	for _, bad := range []Config{
+		{Region: "r", Bucket: "b", PublicPrefix: "public"},
+		{Region: "r", Bucket: "b", PublicURL: "cdn.example.com"},
+		{Region: "r", Bucket: "b", PublicURL: "https://cdn.example.com/"},
+		{Region: "r", Bucket: "b", PublicURL: "https://cdn.example.com?x=1"},
+		{Region: "r", Bucket: "b", PublicURL: "ftp://cdn.example.com"},
+	} {
+		if _, err := New(ctx, bad); err == nil {
+			t.Errorf("New(%+v) succeeded", bad)
 		}
 	}
 }

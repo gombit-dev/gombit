@@ -26,6 +26,9 @@ func (c Config) Redacted() Config {
 	if strings.TrimSpace(c.Auth.JWTSecret) != "" {
 		out.Auth.JWTSecret = RedactedSecret
 	}
+	if strings.TrimSpace(c.Storage.URLSecret) != "" {
+		out.Storage.URLSecret = RedactedSecret
+	}
 	if strings.TrimSpace(c.Storage.S3.SecretAccessKey) != "" {
 		out.Storage.S3.SecretAccessKey = RedactedSecret
 	}
