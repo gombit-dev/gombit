@@ -232,9 +232,10 @@ way it guards against. A new check can't land without such a driver.
 Helpers for drivers:
 - `ValidateKey`, `ValidatePutOptions` and `ValidateURLOptions` apply the shared
   rules.
-- A backend that carries only ASCII metadata (S3 headers) must encode values
-  reversibly, for example by percent-encoding. The size limit already allows
-  for that.
+- A backend that carries only ASCII metadata (S3 headers) must encode
+  values the way `storage.MetadataValueWireLen` measures them: RFC 2047
+  base64 for anything that isn't printable ASCII. The size limit counts that
+  encoding.
 - A filesystem driver cannot just join the key to a directory. That would
   conflate case variants, and it can't hold both `a` and `a/b`. Map keys to
   paths in a way that keeps every key distinct.
