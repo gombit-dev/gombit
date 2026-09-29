@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/gombit-dev/gombit/contract"
 	"github.com/gombit-dev/gombit/storage"
@@ -476,6 +479,7 @@ func TestPolicyIsValidated(t *testing.T) {
 		{MaxBytes: 1, Types: []string{"*/*"}, Prefix: "../avatars/"},
 		{MaxBytes: 1, Types: []string{"*/*"}, Metadata: map[string]string{upload.FilenameMetadata: "x"}},
 		{MaxBytes: 1, Types: []string{"*/*"}, Metadata: map[string]string{"Bad Name": "x"}},
+		{MaxBytes: math.MaxInt64, Types: []string{"*/*"}}, // the request's limit would overflow
 	} {
 		_, err := upload.Save(context.Background(), memory.New(), strings.NewReader("x"), "", p)
 		if err == nil {
@@ -528,5 +532,84 @@ func TestMapError(t *testing.T) {
 	}
 	if upload.MapError(ctx, nil) != nil {
 		t.Error("MapError(nil) != nil")
+	}
+}
+
+// TestCleanFilenameMatchesTheMetadataRules: every character CleanFilename
+// keeps is one metadata accepts, so a cleaned name is never dropped for a
+// character the contract refuses.
+func TestCleanFilenameMatchesTheMetadataRules(t *testing.T) {
+	for r := rune(0); r <= unicode.MaxRune; r++ {
+		if !utf8.ValidRune(r) {
+			continue
+		}
+		name := upload.CleanFilename("a" + string(r) + "b")
+		if err := storage.ValidateMetadata(map[string]string{upload.FilenameMetadata: name}); err != nil {
+			t.Fatalf("CleanFilename kept %U, which metadata refuses: %v", r, err)
+		}
+	}
+}
+
+// TestClientGoneIsNotAServerError: a client that disconnects mid-file is
+// the context's error (503), not an internal one.
+func TestClientGoneIsNotAServerError(t *testing.T) {
+	store, err := local.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	src := &goneAfter{data: append(append([]byte{}, png...), bytes.Repeat([]byte{1}, 100<<10)...), cancel: cancel}
+	_, err = upload.Save(ctx, store, src, "a.png", images)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Save = %v, want context.Canceled", err)
+	}
+	if got := status(upload.MapError(ctx, err)); got != http.StatusServiceUnavailable {
+		t.Fatalf("MapError = %d, want 503", got)
+	}
+}
+
+// failingDelete is a store whose Delete fails.
+type failingDelete struct {
+	storage.Storage
+	err error
+}
+
+func (f failingDelete) Delete(context.Context, string) error { return f.err }
+
+func TestFailedCleanupIsReported(t *testing.T) {
+	deleteErr := errors.New("delete failed")
+	store := failingDelete{Storage: memory.New(), err: deleteErr}
+	_, err := upload.Receive(store, form(t, part{field: "file", filename: "a.png", body: png}, part{field: "file", filename: "b.png", body: png}), images)
+	if !errors.Is(err, upload.ErrMalformed) || !errors.Is(err, deleteErr) {
+		t.Fatalf("Receive = %v, want ErrMalformed and the failed delete", err)
+	}
+	if got := status(upload.MapError(context.Background(), err)); got != http.StatusUnprocessableEntity {
+		t.Fatalf("MapError = %d, want the upload's own error (422)", got)
+	}
+}
+
+func TestReceiveMarksTheRequestRead(t *testing.T) {
+	r := form(t, part{field: "file", filename: "a.png", body: png})
+	if _, err := upload.Receive(memory.New(), r, images); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.ParseMultipartForm(1 << 20); err == nil || !strings.Contains(err.Error(), "MultipartReader") {
+		t.Fatalf("ParseMultipartForm after Receive = %v, want Go's multipart-reader-used error", err)
+	}
+}
+
+// TestBadDetectorIsTheServersFault: a detector returning a type the store
+// cannot record is a 500, not the client's 422.
+func TestBadDetectorIsTheServersFault(t *testing.T) {
+	p := upload.Policy{MaxBytes: 1 << 10, Types: []string{"*/*"}, Detect: func([]byte) string {
+		return "application/x-long; profile=" + strings.Repeat("p", 300)
+	}}
+	_, err := upload.Save(context.Background(), memory.New(), strings.NewReader("x"), "", p)
+	if err == nil || errors.Is(err, upload.ErrType) {
+		t.Fatalf("Save = %v", err)
+	}
+	if got := status(upload.MapError(context.Background(), err)); got != http.StatusInternalServerError {
+		t.Fatalf("MapError = %d, want 500", got)
 	}
 }

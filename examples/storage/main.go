@@ -63,6 +63,9 @@ func main() {
 
 // register mounts the file routes on r, backed by store.
 func register(r gin.IRouter, store storage.Storage) {
+	// A named file: the body stored as sent, with the client's declared
+	// Content-Type (it is served as an attachment, never inline). For files
+	// whose type must be checked, see POST /uploads (storage/upload).
 	r.PUT("/files/:id", func(c *gin.Context) {
 		key, ok := fileKey(c)
 		if !ok {

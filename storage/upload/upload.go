@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"math"
 	"mime"
 	"mime/multipart"
 	"net/http"
@@ -114,6 +115,8 @@ func (p Policy) validate() error {
 	switch {
 	case p.MaxBytes <= 0:
 		return errors.New("upload: Policy.MaxBytes must be positive")
+	case p.MaxBytes > math.MaxInt64-MaxFormBytes:
+		return fmt.Errorf("upload: Policy.MaxBytes must be at most %d", int64(math.MaxInt64-MaxFormBytes))
 	case len(p.Types) == 0:
 		return errors.New(`upload: Policy.Types must list the accepted media types ("*/*" for any)`)
 	case p.Prefix != "" && !strings.HasSuffix(p.Prefix, "/"):
@@ -156,13 +159,15 @@ func (p Policy) accepts(mediaType string) bool {
 // past p.MaxBytes. filename is the client's name for it (metadata only;
 // empty when none). A file Save refuses is not stored.
 func Save(ctx context.Context, store storage.Storage, src io.Reader, filename string, p Policy) (File, error) {
-	return save(ctx, store, src, filename, nil, p)
-}
-
-func save(ctx context.Context, store storage.Storage, src io.Reader, filename string, size *int64, p Policy) (File, error) {
 	if err := p.validate(); err != nil {
 		return File{}, err
 	}
+	return save(ctx, store, src, filename, nil, p)
+}
+
+// save is Save with an optional declared size, for a policy that has been
+// validated.
+func save(ctx context.Context, store storage.Storage, src io.Reader, filename string, size *int64, p Policy) (File, error) {
 	source := &sourceReader{r: src}
 	src = &limitReader{r: source, max: p.MaxBytes}
 	head := make([]byte, SniffBytes)
@@ -179,6 +184,10 @@ func save(ctx context.Context, store storage.Storage, src io.Reader, filename st
 	mediaType, _, err := mime.ParseMediaType(contentType)
 	if err != nil || !p.accepts(mediaType) {
 		return File{}, fmt.Errorf("%w: detected %q", ErrType, contentType)
+	}
+	if err := storage.ValidatePutOptions(storage.PutOptions{ContentType: contentType}); err != nil {
+		// An accepted type the store cannot record: the detector's mistake.
+		return File{}, fmt.Errorf("upload: Policy.Detect returned %q: %v", contentType, err)
 	}
 	key, err := newKey(p.Prefix)
 	if err != nil {
@@ -219,11 +228,17 @@ func (s *sourceReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// classify returns err, the reason an upload failed, as ErrMalformed when
-// the source failed first (unless it went over a limit, or ctx ended: the
-// client went away).
+// classify returns err, the reason an upload failed: with ctx's error when
+// ctx has ended (the client went away, so its body failed too), and as
+// ErrMalformed when the source failed first (unless it went over a limit).
 func (s *sourceReader) classify(ctx context.Context, err error) error {
-	if s.err == nil || errors.Is(s.err, ErrTooLarge) || ctx.Err() != nil {
+	if cerr := ctx.Err(); cerr != nil {
+		if errors.Is(err, cerr) {
+			return err
+		}
+		return fmt.Errorf("%w: %w", cerr, err)
+	}
+	if s.err == nil || errors.Is(s.err, ErrTooLarge) {
 		return err
 	}
 	return fmt.Errorf("%w: reading the file: %w", ErrMalformed, s.err)
@@ -313,7 +328,9 @@ func Receive(store storage.Storage, r *http.Request, p Policy) (File, error) {
 	stored := false
 	fail := func(err error) (File, error) {
 		if stored {
-			discard(ctx, store, file.Key)
+			if derr := discard(ctx, store, file.Key); derr != nil {
+				err = errors.Join(err, fmt.Errorf("upload: delete the stored file %q: %w", file.Key, derr))
+			}
 		}
 		return File{}, err
 	}
@@ -334,7 +351,7 @@ func Receive(store storage.Storage, r *http.Request, p Policy) (File, error) {
 		if stored {
 			return fail(fmt.Errorf("%w: more than one file in %q", ErrMalformed, field))
 		}
-		file, err = Save(ctx, store, part, part.FileName(), p)
+		file, err = save(ctx, store, part, part.FileName(), nil, p)
 		if err != nil {
 			return fail(err)
 		}
@@ -369,15 +386,18 @@ func ReceiveBody(store storage.Storage, r *http.Request, p Policy) (File, error)
 	return save(r.Context(), store, body, filename, storage.SizeFromContentLength(r.ContentLength), p)
 }
 
-// multipartReader returns the multipart reader of r, whose body is limited
-// to limit bytes.
+// multipartReader returns the multipart reader of r, whose body it limits
+// to limit bytes. r is marked as read, as by r.MultipartReader: a later
+// ParseMultipartForm on it fails plainly instead of parsing a drained body.
 func multipartReader(r *http.Request, limit int64) (*multipart.Reader, error) {
 	if r.Body == nil {
 		return nil, fmt.Errorf("%w: no body", ErrMalformed)
 	}
-	req := *r
-	req.Body = io.NopCloser(&limitReader{r: r.Body, max: limit})
-	mr, err := req.MultipartReader()
+	r.Body = struct {
+		io.Reader
+		io.Closer
+	}{&limitReader{r: r.Body, max: limit}, r.Body}
+	mr, err := r.MultipartReader()
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrMalformed, err)
 	}
@@ -396,10 +416,10 @@ func malformed(err error) error {
 // discard deletes a stored file that turned out to be part of an invalid
 // request, even when the request's context has ended (a client that went
 // away mid-request).
-func discard(ctx context.Context, store storage.Storage, key string) {
+func discard(ctx context.Context, store storage.Storage, key string) error {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
-	_ = store.Delete(ctx, key)
+	return store.Delete(ctx, key)
 }
 
 // limitReader fails with ErrTooLarge once more than max bytes come
