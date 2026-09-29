@@ -65,6 +65,32 @@ jobs:
       - name: Build examples
         run: go build ./examples/...
 
+  # The storage drivers promise the same semantics on every platform the
+  # release ships for, and Windows is the one whose file sharing and rename
+  # rules differ (an open file can lock its name). Everything else runs on
+  # Ubuntu only, so the storage packages run here too.
+  storage-windows:
+    name: Storage (Windows)
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # storage/filefield's tests use the cgo SQLite driver: the runner's
+      # MinGW gcc builds it, and requiring cgo fails the build if it is
+      # missing instead of running the driver's stub.
+      - name: Run storage tests
+        env:
+          CGO_ENABLED: "1"
+        run: go test -count=1 ./storage/...
+
   ci-scripts:
     name: CI script tests
     # Mirrors the benchmark-scripts job below: hermetic bash tests (stubs
