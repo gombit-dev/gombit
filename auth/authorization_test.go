@@ -185,7 +185,6 @@ func TestPermissionKeyColumnAvoidsMySQLReservedWord(t *testing.T) {
 	field := parsed.LookUpField("Key")
 	if field == nil {
 		t.Fatal("Permission.Key field missing")
-		return // unreachable; for staticcheck SA5011
 	}
 	if strings.EqualFold(field.DBName, "key") {
 		t.Fatalf("Permission.Key column %q is a reserved MySQL identifier", field.DBName)
