@@ -32,6 +32,14 @@ type Storage interface {
 	// had before, or stays absent; no reader ever sees a partial object.
 	// Concurrent Puts to one key leave one of them whole, and a reader
 	// during a Put reads the previous object whole.
+	//
+	// Put observes ctx between reads of r: once ctx has ended, it makes no
+	// further Read, and it fails with ctx's error and stores nothing, even
+	// if r then reaches EOF. It cannot interrupt a Read of r already in
+	// progress (an io.Reader has no way to be interrupted, and r is the
+	// caller's): a source that can block must be made to return by its
+	// owner, as an HTTP server closes a request body when the client goes
+	// away, or a caller closes the pipe it writes.
 	Put(ctx context.Context, key string, r io.Reader, opts PutOptions) (ObjectInfo, error)
 
 	// Open returns the object's bytes as a stream, and its ObjectInfo. The
