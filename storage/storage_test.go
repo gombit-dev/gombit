@@ -205,8 +205,13 @@ func TestErrorAndWrap(t *testing.T) {
 	if !errors.As(err, &se) || se.Op != "open" || se.Key != "a/b" {
 		t.Errorf("errors.As = %+v", se)
 	}
-	if again := storage.Wrap("put", "x", err); again != err {
-		t.Errorf("Wrap of an *Error rewrapped it: %v", again)
+	if again := storage.Wrap("open", "a/b", err); again != err {
+		t.Errorf("Wrap of its own envelope rewrapped it: %v", again)
+	}
+	// Another call's envelope is the cause: the outer one names this call.
+	outer := storage.Wrap("put", "x", err)
+	if !errors.As(outer, &se) || se.Op != "put" || se.Key != "x" || !errors.Is(outer, storage.ErrNotFound) {
+		t.Errorf("Wrap of another call's envelope = %v (%+v)", outer, se)
 	}
 	if storage.Wrap("put", "x", nil) != nil {
 		t.Error("Wrap(nil) != nil")
@@ -361,5 +366,48 @@ func TestContextReadCloser(t *testing.T) {
 	plain := storage.ContextReadCloser(context.Background(), io.NopCloser(strings.NewReader("x")))
 	if _, ok := plain.(io.Seeker); ok {
 		t.Fatal("a reader that cannot seek gained Seek")
+	}
+}
+
+// blockingBody is a body whose Read blocks until it is closed.
+type blockingBody struct{ closed chan struct{} }
+
+func (b *blockingBody) Read([]byte) (int, error) {
+	<-b.closed
+	return 0, io.ErrClosedPipe
+}
+
+func (b *blockingBody) Close() error {
+	select {
+	case <-b.closed:
+	default:
+		close(b.closed)
+	}
+	return nil
+}
+
+// TestContextReadCloserInterruptsARead: a Read blocked when the context
+// ends returns the context's error, as an HTTP response body's does.
+func TestContextReadCloserInterruptsARead(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	body := &blockingBody{closed: make(chan struct{})}
+	rc := storage.ContextReadCloser(ctx, body)
+	done := make(chan error, 1)
+	go func() {
+		_, err := rc.Read(make([]byte, 8))
+		done <- err
+	}()
+	time.Sleep(20 * time.Millisecond) // let the Read block
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("the interrupted Read = %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a Read in progress was not interrupted when the context ended")
+	}
+	if err := rc.Close(); err != nil {
+		t.Fatalf("Close after the interruption = %v", err)
 	}
 }
