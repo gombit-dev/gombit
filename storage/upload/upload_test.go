@@ -1,0 +1,532 @@
+package upload_test
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"mime/multipart"
+	"net/http"
+	"net/http/httptest"
+	"net/textproto"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"testing"
+
+	"github.com/gombit-dev/gombit/contract"
+	"github.com/gombit-dev/gombit/storage"
+	"github.com/gombit-dev/gombit/storage/local"
+	"github.com/gombit-dev/gombit/storage/memory"
+	"github.com/gombit-dev/gombit/storage/upload"
+)
+
+// png is the start of a PNG file: enough for content sniffing.
+var png = append([]byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"), bytes.Repeat([]byte{7}, 200)...)
+
+var images = upload.Policy{MaxBytes: 1 << 20, Types: []string{"image/png", "image/jpeg"}, Prefix: "avatars/"}
+
+// part is one part of a multipart request.
+type part struct {
+	field, filename, contentType string
+	body                         []byte
+}
+
+// form returns a multipart/form-data request with parts.
+func form(t *testing.T, parts ...part) *http.Request {
+	t.Helper()
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	for _, p := range parts {
+		h := textproto.MIMEHeader{}
+		disposition := fmt.Sprintf(`form-data; name=%q`, p.field)
+		if p.filename != "" || p.contentType != "" {
+			disposition += fmt.Sprintf(`; filename=%q`, p.filename)
+		}
+		h.Set("Content-Disposition", disposition)
+		if p.contentType != "" {
+			h.Set("Content-Type", p.contentType)
+		}
+		pw, err := w.CreatePart(h)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = pw.Write(p.body)
+	}
+	_ = w.Close()
+	r := httptest.NewRequest(http.MethodPost, "/upload", &buf)
+	r.Header.Set("Content-Type", w.FormDataContentType())
+	return r
+}
+
+var generatedKey = regexp.MustCompile(`^avatars/[0-9a-f]{32}$`)
+
+func TestReceiveStoresTheFile(t *testing.T) {
+	store := memory.New()
+	r := form(t,
+		part{field: "title", body: []byte("my avatar")},
+		part{field: "file", filename: "../../etc/résumé.png", contentType: "text/html", body: png},
+		part{field: "csrf", body: []byte("token")},
+	)
+	f, err := upload.Receive(store, r, images)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !generatedKey.MatchString(f.Key) {
+		t.Fatalf("key = %q, want a generated key under the prefix", f.Key)
+	}
+	if f.ContentType != "image/png" || f.Filename != "résumé.png" || f.Size != int64(len(png)) {
+		t.Fatalf("file = %+v", f)
+	}
+	body, info, err := store.Open(context.Background(), f.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := io.ReadAll(body)
+	if !bytes.Equal(got, png) || info.ContentType != "image/png" || info.Metadata[upload.FilenameMetadata] != "résumé.png" {
+		t.Fatalf("stored %d bytes of %q, metadata %v", len(got), info.ContentType, info.Metadata)
+	}
+	if keys := store.Keys(); len(keys) != 1 {
+		t.Fatalf("stored %v, want one object", keys)
+	}
+}
+
+// TestFilenamesCannotTraverse: whatever the client calls the file, the key
+// is the server's, and the filename kept is one plain name.
+func TestFilenamesCannotTraverse(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"photo.png", "photo.png"},
+		{"../../etc/passwd", "passwd"},
+		{`..\..\windows\system32\evil.png`, "evil.png"},
+		{"C:\\Users\\me\\photo.png", "photo.png"},
+		{"a/b/../c.png", "c.png"},
+		{"..", ""},
+		{".", ""},
+		{"/", ""},
+		{"dir/", ""},
+		{"  spaced.png  ", "spaced.png"},
+		{"new\nline\r.png", "newline.png"},
+		{"nul\x00.png", "nul.png"},
+		{"gnp.\u202eexe", "gnp.exe"}, // a right-to-left override
+		{"=?UTF-8?B?Zm9v?=.png", "=_UTF-8?B?Zm9v?=.png"},
+		{"=\x00?x", "=_x"},
+		{"bad\xffutf8.png", "bad\ufffdutf8.png"},
+		{strings.Repeat("é", 200), strings.Repeat("é", 127)},
+	} {
+		if got := upload.CleanFilename(tc.in); got != tc.want {
+			t.Errorf("CleanFilename(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+		f, err := upload.Save(context.Background(), memory.New(), bytes.NewReader(png), tc.in, images)
+		if err != nil {
+			t.Fatalf("%q: %v", tc.in, err)
+		}
+		if !generatedKey.MatchString(f.Key) || f.Filename != tc.want {
+			t.Errorf("%q stored as %q named %q", tc.in, f.Key, f.Filename)
+		}
+		if err := storage.ValidateMetadata(map[string]string{upload.FilenameMetadata: f.Filename}); err != nil {
+			t.Errorf("%q: the cleaned name is not valid metadata: %v", tc.in, err)
+		}
+	}
+}
+
+// TestReceiveIgnoresTheClientsPath: a multipart filename with a path is
+// stored under a generated key, named by its last element.
+func TestReceiveIgnoresTheClientsPath(t *testing.T) {
+	for _, name := range []string{"../../etc/passwd", `..\..\evil.png`, "/abs/x.png", ".."} {
+		f, err := upload.Receive(memory.New(), form(t, part{field: "file", filename: name, body: png}), images)
+		if err != nil {
+			t.Fatalf("%q: %v", name, err)
+		}
+		if !generatedKey.MatchString(f.Key) || strings.ContainsAny(f.Filename, `/\`) || f.Filename == ".." {
+			t.Errorf("%q stored as %q named %q", name, f.Key, f.Filename)
+		}
+	}
+}
+
+// TestTypeIsDetectedNotTrusted: the policy judges the bytes, not the
+// client's Content-Type or the filename's extension.
+func TestTypeIsDetectedNotTrusted(t *testing.T) {
+	store := memory.New()
+	html := []byte("<!DOCTYPE html><script>alert(1)</script>")
+	_, err := upload.Receive(store, form(t, part{field: "file", filename: "cat.png", contentType: "image/png", body: html}), images)
+	if !errors.Is(err, upload.ErrType) {
+		t.Fatalf("HTML named .png with Content-Type image/png = %v, want ErrType", err)
+	}
+	if keys := store.Keys(); len(keys) != 0 {
+		t.Fatalf("a refused file was stored: %v", keys)
+	}
+	f, err := upload.Receive(store, form(t, part{field: "file", filename: "cat.html", contentType: "text/html", body: png}), images)
+	if err != nil || f.ContentType != "image/png" {
+		t.Fatalf("a PNG named .html = %+v, %v; want it stored as image/png", f, err)
+	}
+}
+
+func TestTypePatterns(t *testing.T) {
+	jpeg := append([]byte("\xff\xd8\xff"), bytes.Repeat([]byte{1}, 50)...)
+	for _, tc := range []struct {
+		types []string
+		body  []byte
+		ok    bool
+	}{
+		{[]string{"image/*"}, jpeg, true},
+		{[]string{"image/*"}, []byte("plain text"), false},
+		{[]string{"text/plain"}, []byte("plain text"), true}, // detected as text/plain; charset=utf-8
+		{[]string{"*/*"}, []byte("<html>"), true},
+		{[]string{"image/png"}, jpeg, false},
+		{[]string{"image/*"}, []byte(`<svg xmlns="http://www.w3.org/2000/svg"><script/></svg>`), false}, // never image/svg+xml
+		{[]string{"image/png"}, nil, false},                                                             // empty is text/plain
+	} {
+		p := upload.Policy{MaxBytes: 1 << 10, Types: tc.types}
+		_, err := upload.Save(context.Background(), memory.New(), bytes.NewReader(tc.body), "", p)
+		if ok := err == nil; ok != tc.ok || (!ok && !errors.Is(err, upload.ErrType)) {
+			t.Errorf("%v accepting %.12q = %v, want ok=%v", tc.types, tc.body, err, tc.ok)
+		}
+	}
+}
+
+func TestCustomDetector(t *testing.T) {
+	p := upload.Policy{MaxBytes: 1 << 10, Types: []string{"application/json"}, Detect: func(head []byte) string {
+		if bytes.HasPrefix(bytes.TrimSpace(head), []byte("{")) {
+			return "application/json"
+		}
+		return http.DetectContentType(head)
+	}}
+	f, err := upload.Save(context.Background(), memory.New(), strings.NewReader(`{"a":1}`), "a.json", p)
+	if err != nil || f.ContentType != "application/json" {
+		t.Fatalf("Save = %+v, %v", f, err)
+	}
+	p.Detect = func([]byte) string { return "not a media type" }
+	if _, err := upload.Save(context.Background(), memory.New(), strings.NewReader(`{}`), "", p); !errors.Is(err, upload.ErrType) {
+		t.Fatalf("a detector returning garbage = %v, want ErrType", err)
+	}
+}
+
+// endless is a body that never ends, counting what was read from it.
+type endless struct{ read int64 }
+
+func (e *endless) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 'x'
+	}
+	e.read += int64(len(p))
+	return len(p), nil
+}
+
+// endlessForm is a multipart request whose file part never ends.
+func endlessForm(src *endless) *http.Request {
+	head := "--b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"big.png\"\r\n\r\n" + string(png)
+	r := httptest.NewRequest(http.MethodPost, "/upload", io.MultiReader(strings.NewReader(head), src))
+	r.ContentLength = -1
+	r.Header.Set("Content-Type", "multipart/form-data; boundary=b")
+	return r
+}
+
+// TestOversizedFailsBeforeUnboundedBuffering: a file over the limit is
+// refused unread when its length is declared, and at the byte past the
+// limit when it is not; the rest of an endless body is never read.
+func TestOversizedFailsBeforeUnboundedBuffering(t *testing.T) {
+	p := upload.Policy{MaxBytes: 64 << 10, Types: []string{"*/*"}}
+	store := memory.New()
+
+	unread := &endless{}
+	r := httptest.NewRequest(http.MethodPut, "/upload", unread)
+	r.ContentLength = p.MaxBytes + 1
+	if _, err := upload.ReceiveBody(store, r, p); !errors.Is(err, upload.ErrTooLarge) || unread.read != 0 {
+		t.Fatalf("a declared length over the limit = %v after reading %d bytes, want ErrTooLarge unread", err, unread.read)
+	}
+	r = form(t, part{field: "file", filename: "a.png", body: png})
+	r.ContentLength = p.MaxBytes + upload.MaxFormBytes + 1
+	if _, err := upload.Receive(store, r, p); !errors.Is(err, upload.ErrTooLarge) {
+		t.Fatalf("a multipart request declared over the limit = %v", err)
+	}
+
+	src := &endless{}
+	r = httptest.NewRequest(http.MethodPut, "/upload", src)
+	r.ContentLength = -1
+	if _, err := upload.ReceiveBody(store, r, p); !errors.Is(err, upload.ErrTooLarge) {
+		t.Fatalf("an endless body = %v, want ErrTooLarge", err)
+	}
+	if src.read > p.MaxBytes+64<<10 {
+		t.Fatalf("read %d bytes of an endless body with a %d-byte limit", src.read, p.MaxBytes)
+	}
+
+	src = &endless{}
+	if _, err := upload.Receive(store, endlessForm(src), p); !errors.Is(err, upload.ErrTooLarge) {
+		t.Fatalf("an endless multipart file = %v, want ErrTooLarge", err)
+	}
+	if src.read > p.MaxBytes+64<<10 {
+		t.Fatalf("read %d bytes of an endless multipart file with a %d-byte limit", src.read, p.MaxBytes)
+	}
+
+	if keys := store.Keys(); len(keys) != 0 {
+		t.Fatalf("oversized uploads were stored: %v", keys)
+	}
+	if err := upload.MapError(context.Background(), upload.ErrTooLarge); status(err) != http.StatusRequestEntityTooLarge {
+		t.Fatalf("ErrTooLarge maps to %d", status(err))
+	}
+}
+
+func TestLimitIsExact(t *testing.T) {
+	p := upload.Policy{MaxBytes: 10, Types: []string{"*/*"}} // smaller than what detection reads
+	store := memory.New()
+	if _, err := upload.Save(context.Background(), store, strings.NewReader("0123456789"), "", p); err != nil {
+		t.Fatalf("a file of exactly MaxBytes = %v", err)
+	}
+	if _, err := upload.Save(context.Background(), store, strings.NewReader("0123456789A"), "", p); !errors.Is(err, upload.ErrTooLarge) {
+		t.Fatalf("a file of MaxBytes+1 = %v, want ErrTooLarge", err)
+	}
+	r := httptest.NewRequest(http.MethodPut, "/upload", strings.NewReader("0123456789"))
+	if _, err := upload.ReceiveBody(store, r, p); err != nil {
+		t.Fatalf("a body of exactly MaxBytes = %v", err)
+	}
+}
+
+// files lists the regular files under root.
+func files(t *testing.T, root string) []string {
+	t.Helper()
+	var out []string
+	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err == nil && d.Type().IsRegular() {
+			out = append(out, path)
+		}
+		return nil
+	})
+	return out
+}
+
+// failing is a reader that returns n bytes of data, then err.
+type failing struct {
+	data []byte
+	err  error
+}
+
+func (f *failing) Read(p []byte) (int, error) {
+	if len(f.data) == 0 {
+		return 0, f.err
+	}
+	n := copy(p, f.data)
+	f.data = f.data[n:]
+	return n, nil
+}
+
+// goneAfter is a client that sends data, then disconnects: its context
+// ends and the body fails, as a server's does.
+type goneAfter struct {
+	data   []byte
+	cancel context.CancelFunc
+}
+
+func (g *goneAfter) Read(p []byte) (int, error) {
+	if len(g.data) == 0 {
+		g.cancel()
+		return 0, errors.New("connection reset by peer")
+	}
+	n := copy(p, g.data)
+	g.data = g.data[n:]
+	return n, nil
+}
+
+// TestFailuresLeaveNothingBehind: on the local driver, every way an upload
+// fails leaves no file on disk: not the object, not a temporary file.
+func TestFailuresLeaveNothingBehind(t *testing.T) {
+	root := t.TempDir()
+	store, err := local.New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := upload.Policy{MaxBytes: 256 << 10, Types: []string{"image/png"}}
+	big := append(append([]byte{}, png...), bytes.Repeat([]byte{1}, 300<<10)...)
+	half := append(append([]byte{}, png...), bytes.Repeat([]byte{1}, 100<<10)...)
+	canceled, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	for name, tc := range map[string]struct {
+		req  func() *http.Request
+		want error
+	}{
+		"too large": {func() *http.Request { return form(t, part{field: "file", filename: "a.png", body: big}) }, upload.ErrTooLarge},
+		"wrong type": {func() *http.Request {
+			return form(t, part{field: "file", filename: "a.png", body: []byte("<html>")})
+		}, upload.ErrType},
+		"body breaks mid-file": {func() *http.Request {
+			src := &failing{data: []byte("--b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.png\"\r\n\r\n" + string(half)), err: errors.New("connection reset")}
+			r := httptest.NewRequest(http.MethodPost, "/upload", src)
+			r.Header.Set("Content-Type", "multipart/form-data; boundary=b")
+			return r
+		}, upload.ErrMalformed},
+		"truncated form": {func() *http.Request {
+			full := form(t, part{field: "file", filename: "a.png", body: half})
+			b, _ := io.ReadAll(full.Body)
+			r := httptest.NewRequest(http.MethodPost, "/upload", bytes.NewReader(b[:len(b)-200]))
+			r.Header = full.Header
+			return r
+		}, upload.ErrMalformed},
+		"second file after the first was stored": {func() *http.Request {
+			return form(t, part{field: "file", filename: "a.png", body: png}, part{field: "file", filename: "b.png", body: png})
+		}, upload.ErrMalformed},
+		"broken trailing part after the file was stored": {func() *http.Request {
+			full := form(t, part{field: "file", filename: "a.png", body: png}, part{field: "note", body: bytes.Repeat([]byte("n"), 1000)})
+			b, _ := io.ReadAll(full.Body)
+			r := httptest.NewRequest(http.MethodPost, "/upload", bytes.NewReader(b[:len(b)-100]))
+			r.Header = full.Header
+			return r
+		}, upload.ErrMalformed},
+		"trailing fields over the form limit": {func() *http.Request {
+			return form(t, part{field: "file", filename: "a.png", body: png}, part{field: "note", body: bytes.Repeat([]byte("n"), int(upload.MaxFormBytes+p.MaxBytes))})
+		}, upload.ErrTooLarge},
+		"trailing fields over the form limit, chunked": {func() *http.Request {
+			r := form(t, part{field: "file", filename: "a.png", body: png}, part{field: "note", body: bytes.Repeat([]byte("n"), int(upload.MaxFormBytes+p.MaxBytes))})
+			r.ContentLength = -1
+			return r
+		}, upload.ErrTooLarge},
+		"fields before the file use up the request's limit": {func() *http.Request {
+			file := append(append([]byte{}, png...), bytes.Repeat([]byte{1}, int(p.MaxBytes)-len(png))...)
+			r := form(t, part{field: "note", body: bytes.Repeat([]byte("n"), upload.MaxFormBytes-100)}, part{field: "file", filename: "a.png", body: file})
+			r.ContentLength = -1
+			return r
+		}, upload.ErrTooLarge},
+		"client went away after the file was stored": {func() *http.Request {
+			ctx, cancel := context.WithCancel(context.Background())
+			full := form(t, part{field: "file", filename: "a.png", body: png}, part{field: "note", body: bytes.Repeat([]byte("n"), 1000)})
+			b, _ := io.ReadAll(full.Body)
+			cut := bytes.Index(b, []byte(`name="note"`))
+			r := httptest.NewRequest(http.MethodPost, "/upload", &goneAfter{data: b[:cut], cancel: cancel})
+			r.Header = full.Header
+			return r.WithContext(ctx)
+		}, upload.ErrMalformed},
+		"client went away": {func() *http.Request {
+			return form(t, part{field: "file", filename: "a.png", body: half}).WithContext(canceled)
+		}, context.Canceled},
+	} {
+		if name == "client went away" {
+			cancel()
+		}
+		_, err := upload.Receive(store, tc.req(), p)
+		if !errors.Is(err, tc.want) {
+			t.Errorf("%s: Receive = %v, want %v", name, err, tc.want)
+		}
+		if tc.want == upload.ErrTooLarge && errors.Is(err, upload.ErrMalformed) {
+			t.Errorf("%s: %v is both ErrTooLarge and ErrMalformed", name, err)
+		}
+		if left := files(t, root); len(left) != 0 {
+			t.Errorf("%s: left %v on disk", name, left)
+		}
+	}
+}
+
+func TestReceiveBody(t *testing.T) {
+	store := memory.New()
+	r := httptest.NewRequest(http.MethodPut, "/upload", bytes.NewReader(png))
+	r.Header.Set("Content-Type", "text/html")
+	r.Header.Set("Content-Disposition", `attachment; filename="../me.png"`)
+	f, err := upload.ReceiveBody(store, r, images)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !generatedKey.MatchString(f.Key) || f.ContentType != "image/png" || f.Filename != "me.png" || f.Size != int64(len(png)) {
+		t.Fatalf("file = %+v", f)
+	}
+
+	r = httptest.NewRequest(http.MethodPut, "/upload", bytes.NewReader(png))
+	r.ContentLength = int64(len(png)) + 10 // the body is shorter than declared
+	if _, err := upload.ReceiveBody(store, r, images); !errors.Is(err, storage.ErrSizeMismatch) {
+		t.Fatalf("a short body = %v, want storage.ErrSizeMismatch", err)
+	}
+	if n := len(store.Keys()); n != 1 {
+		t.Fatalf("%d objects stored, want 1", n)
+	}
+}
+
+func TestNoFile(t *testing.T) {
+	store := memory.New()
+	for name, r := range map[string]*http.Request{
+		"no parts":        form(t),
+		"only fields":     form(t, part{field: "title", body: []byte("x")}),
+		"other field":     form(t, part{field: "photo", filename: "a.png", body: png}),
+		"empty input":     form(t, part{field: "file", filename: "", contentType: "application/octet-stream"}),
+		"field, not file": form(t, part{field: "file", body: png}),
+	} {
+		if _, err := upload.Receive(store, r, images); !errors.Is(err, upload.ErrNoFile) {
+			t.Errorf("%s: Receive = %v, want ErrNoFile", name, err)
+		}
+	}
+	r := httptest.NewRequest(http.MethodPost, "/upload", bytes.NewReader(png))
+	r.Header.Set("Content-Type", "image/png")
+	if _, err := upload.Receive(store, r, images); !errors.Is(err, upload.ErrMalformed) {
+		t.Errorf("a request that is not multipart = %v, want ErrMalformed", err)
+	}
+	p := images
+	p.Field = "photo"
+	if _, err := upload.Receive(store, form(t, part{field: "photo", filename: "a.png", body: png}), p); err != nil {
+		t.Errorf("Policy.Field = %v", err)
+	}
+}
+
+func TestPolicyIsValidated(t *testing.T) {
+	for _, p := range []upload.Policy{
+		{Types: []string{"*/*"}},
+		{MaxBytes: 1},
+		{MaxBytes: 1, Types: []string{"image"}},
+		{MaxBytes: 1, Types: []string{"Image/PNG"}},
+		{MaxBytes: 1, Types: []string{"*/png"}},
+		{MaxBytes: 1, Types: []string{"text/plain; charset=utf-8"}},
+		{MaxBytes: 1, Types: []string{"*/*"}, Prefix: "avatars"},
+		{MaxBytes: 1, Types: []string{"*/*"}, Prefix: "../avatars/"},
+		{MaxBytes: 1, Types: []string{"*/*"}, Metadata: map[string]string{upload.FilenameMetadata: "x"}},
+		{MaxBytes: 1, Types: []string{"*/*"}, Metadata: map[string]string{"Bad Name": "x"}},
+	} {
+		_, err := upload.Save(context.Background(), memory.New(), strings.NewReader("x"), "", p)
+		if err == nil {
+			t.Errorf("Save with %+v succeeded", p)
+		} else if status(upload.MapError(context.Background(), err)) != http.StatusInternalServerError {
+			t.Errorf("an invalid policy (%v) maps to %d, want 500: it is the server's fault", err, status(upload.MapError(context.Background(), err)))
+		}
+	}
+}
+
+// TestLongFilenameFitsTheMetadata: a filename that would push the policy's
+// metadata over the limit is shortened, not a failed upload.
+func TestLongFilenameFitsTheMetadata(t *testing.T) {
+	p := upload.Policy{MaxBytes: 1 << 10, Types: []string{"*/*"}, Metadata: map[string]string{"note": strings.Repeat("n", 1900)}}
+	f, err := upload.Save(context.Background(), memory.New(), strings.NewReader("x"), strings.Repeat("é", 120), p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.Filename == "" || len(f.Filename) >= 240 || f.Metadata[upload.FilenameMetadata] != f.Filename {
+		t.Fatalf("filename %d bytes, metadata %d bytes", len(f.Filename), len(f.Metadata[upload.FilenameMetadata]))
+	}
+	if err := storage.ValidateMetadata(f.Metadata); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func status(err error) int {
+	var env *contract.ErrorEnvelope
+	if !errors.As(err, &env) {
+		return 0
+	}
+	return env.GetStatus()
+}
+
+func TestMapError(t *testing.T) {
+	ctx := context.Background()
+	for err, want := range map[error]int{
+		upload.ErrTooLarge:                          http.StatusRequestEntityTooLarge,
+		&http.MaxBytesError{Limit: 1}:               http.StatusRequestEntityTooLarge,
+		fmt.Errorf("x: %w", upload.ErrType):         http.StatusUnprocessableEntity,
+		upload.ErrNoFile:                            http.StatusUnprocessableEntity,
+		upload.ErrMalformed:                         http.StatusUnprocessableEntity,
+		storage.ErrSizeMismatch:                     http.StatusUnprocessableEntity,
+		&storage.Error{Err: storage.ErrUnavailable}: http.StatusServiceUnavailable,
+		errors.New("disk on fire"):                  http.StatusInternalServerError,
+	} {
+		if got := status(upload.MapError(ctx, err)); got != want {
+			t.Errorf("MapError(%v) = %d, want %d", err, got, want)
+		}
+	}
+	if upload.MapError(ctx, nil) != nil {
+		t.Error("MapError(nil) != nil")
+	}
+}

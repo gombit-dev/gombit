@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -66,5 +68,55 @@ func TestUploadErrors(t *testing.T) {
 	}
 	if w := do(r, http.MethodGet, "/files/big", "", ""); w.Code != http.StatusNotFound {
 		t.Fatalf("the oversized upload was stored (%d)", w.Code)
+	}
+}
+
+func formUpload(t *testing.T, r http.Handler, filename string, body []byte) *httptest.ResponseRecorder {
+	t.Helper()
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	fw, err := mw.CreateFormFile("file", filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = fw.Write(body)
+	_ = mw.Close()
+	req := httptest.NewRequest(http.MethodPost, "/uploads", &buf)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	return w
+}
+
+func TestFormUpload(t *testing.T) {
+	r := newServer(t)
+	gif := []byte("GIF89a\x01\x00\x01\x00\x00\x00\x00;")
+	w := formUpload(t, r, "../../cat.gif", gif)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("POST /uploads = %d %s", w.Code, w.Body)
+	}
+	var resp struct {
+		Data struct{ ID, Filename, ContentType string } `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Data.Filename != "cat.gif" || strings.Contains(resp.Data.ID, "cat") {
+		t.Fatalf("stored %+v; the client's name must be metadata, not the key", resp.Data)
+	}
+	w = do(r, http.MethodGet, "/uploads/"+resp.Data.ID, "", "")
+	if w.Code != http.StatusOK || w.Body.String() != string(gif) || w.Header().Get("Content-Type") != "image/gif" {
+		t.Fatalf("GET = %d (%s)", w.Code, w.Header().Get("Content-Type"))
+	}
+	if cd := w.Header().Get("Content-Disposition"); cd != `attachment; filename=cat.gif` {
+		t.Fatalf("Content-Disposition = %q", cd)
+	}
+
+	// HTML with an image's name is refused by its bytes.
+	if w := formUpload(t, r, "cat.png", []byte("<html><script>alert(1)</script>")); w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("HTML named .png = %d %s", w.Code, w.Body)
+	}
+	if w := formUpload(t, r, "big.gif", append(gif, bytes.Repeat([]byte{0}, maxUpload)...)); w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("an oversized upload = %d %s", w.Code, w.Body)
 	}
 }

@@ -7,9 +7,14 @@
 //	curl -X PUT --data-binary @photo.jpg -H 'Content-Type: image/jpeg' localhost:8080/files/photo
 //	curl localhost:8080/files/photo -o copy.jpg
 //	curl -X DELETE localhost:8080/files/photo
+//	curl -F file=@photo.jpg localhost:8080/uploads
+//	curl localhost:8080/uploads/<id> -OJ
 //
-// The key is built by the server ("files/" + the id in the path); the id is
-// checked first, so a malformed one is a 404, not a server error.
+// The key is built by the server: "files/" + the id in the path (checked
+// first, so a malformed one is a 404, not a server error), or, for a form
+// upload, a random id under "uploads/" from storage/upload, which also
+// bounds the size, checks the detected type, and keeps the client's
+// filename as metadata only.
 package main
 
 import (
@@ -19,6 +24,7 @@ import (
 	"mime"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -26,10 +32,19 @@ import (
 	"github.com/gombit-dev/gombit/contract"
 	"github.com/gombit-dev/gombit/framework"
 	"github.com/gombit-dev/gombit/storage"
+	"github.com/gombit-dev/gombit/storage/upload"
 )
 
 // maxUpload bounds an upload's size.
 const maxUpload = 10 << 20
+
+// images is the policy for form uploads: images only, judged by their
+// bytes, stored under uploads/ with a generated key.
+var images = upload.Policy{
+	MaxBytes: maxUpload,
+	Types:    []string{"image/png", "image/jpeg", "image/gif", "image/webp"},
+	Prefix:   "uploads/",
+}
 
 func main() {
 	cfg, err := config.Load()
@@ -75,21 +90,7 @@ func register(r gin.IRouter, store storage.Storage) {
 		if !ok {
 			return
 		}
-		body, info, err := store.Open(c.Request.Context(), key)
-		if err != nil {
-			fail(c, storage.MapError(c.Request.Context(), err, "file not found", "could not read the file"))
-			return
-		}
-		defer func() { _ = body.Close() }()
-		// An attachment, never rendered inline: the content type came from
-		// the uploader, and a text/html or image/svg+xml object rendered as
-		// a same-origin page would run in the app's origin.
-		c.Header("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": c.Param("id")}))
-		c.Header("Content-Type", info.ContentType)
-		c.Header("Content-Length", strconv.FormatInt(info.Size, 10))
-		c.Header("ETag", strconv.Quote(info.ETag))
-		c.Status(http.StatusOK)
-		_, _ = io.Copy(c.Writer, body)
+		serve(c, store, key, c.Param("id"))
 	})
 
 	r.DELETE("/files/:id", func(c *gin.Context) {
@@ -103,6 +104,57 @@ func register(r gin.IRouter, store storage.Storage) {
 		}
 		c.Status(http.StatusNoContent)
 	})
+
+	// A form upload: multipart/form-data with the image in the "file" field.
+	r.POST("/uploads", func(c *gin.Context) {
+		f, err := upload.Receive(store, c.Request, images)
+		if err != nil {
+			fail(c, upload.MapError(c.Request.Context(), err))
+			return
+		}
+		c.JSON(http.StatusCreated, gin.H{"data": gin.H{
+			"id":           strings.TrimPrefix(f.Key, images.Prefix),
+			"filename":     f.Filename,
+			"content_type": f.ContentType,
+			"size":         f.Size,
+		}})
+	})
+
+	r.GET("/uploads/:id", func(c *gin.Context) {
+		key := images.Prefix + c.Param("id")
+		if storage.ValidateKey(key) != nil {
+			fail(c, contract.NotFound("file not found"))
+			return
+		}
+		serve(c, store, key, "")
+	})
+}
+
+// serve writes the object at key as a download named filename (or the
+// name it was uploaded with, when filename is empty).
+func serve(c *gin.Context, store storage.Storage, key, filename string) {
+	body, info, err := store.Open(c.Request.Context(), key)
+	if err != nil {
+		fail(c, storage.MapError(c.Request.Context(), err, "file not found", "could not read the file"))
+		return
+	}
+	defer func() { _ = body.Close() }()
+	if filename == "" {
+		filename = info.Metadata[upload.FilenameMetadata]
+	}
+	// An attachment, never rendered inline: the content type came from
+	// the uploader, and a text/html or image/svg+xml object rendered as a
+	// same-origin page would run in the app's origin.
+	disposition := "attachment"
+	if filename != "" {
+		disposition = mime.FormatMediaType("attachment", map[string]string{"filename": filename})
+	}
+	c.Header("Content-Disposition", disposition)
+	c.Header("Content-Type", info.ContentType)
+	c.Header("Content-Length", strconv.FormatInt(info.Size, 10))
+	c.Header("ETag", strconv.Quote(info.ETag))
+	c.Status(http.StatusOK)
+	_, _ = io.Copy(c.Writer, body)
 }
 
 // fileKey builds the object key from the path id, answering 404 for an id

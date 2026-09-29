@@ -49,7 +49,8 @@ handling (`jobs.Unique`, `jobs.UniqueFor`, `jobs.Once`), and observability
 the driver conformance suite, and `storage/local` (hash-addressed files,
 atomic writes), `storage/memory`, and `storage/s3` (S3-compatible, streaming
 multipart) the drivers behind `framework.App.Storage()` (`GOMBIT_STORAGE_DRIVER`,
-local by default). The other batteries
+local by default), and `storage/upload` the upload helpers (size limits,
+content-detected type policy, generated keys). The other batteries
 (events, scheduler, mail, gRPC, multi-tenancy, i18n) are not here yet.
 The **CHAOS-0** resilience suite is in: `internal/faulttest` (deterministic
 fault injection: a faulting `database/sql` driver, a scripted HTTP
