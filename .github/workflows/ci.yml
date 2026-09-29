@@ -306,14 +306,14 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      # MinIO needs `server /data`, which a service container cannot pass,
-      # so it runs as a step. The release is pinned: MinIO no longer
-      # publishes a floating community image.
+      # MinIO's own images are no longer public (quay.io/minio requires
+      # authentication, Docker Hub's minio/minio is gone), so this is the
+      # frozen Bitnami build, pinned: it starts the server itself.
       - name: Start MinIO
         run: |
           docker run -d --name minio -p 127.0.0.1:9000:9000 \
             -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
-            quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z server /data
+            bitnamilegacy/minio:2025.7.23-debian-12-r5
           for i in $(seq 1 30); do
             curl -sf http://127.0.0.1:9000/minio/health/live >/dev/null && exit 0
             sleep 1
