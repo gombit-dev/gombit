@@ -37,9 +37,10 @@ type Storage interface {
 	// Open returns the object's bytes as a stream, and its ObjectInfo. The
 	// caller must Close the reader. A missing object is ErrNotFound. The
 	// reader stays bound to ctx until it is closed: once ctx ends, Read
-	// fails with ctx's error on every driver (an HTTP response body does
-	// this by itself; ContextReadCloser does it for the others), so keep ctx
-	// alive for as long as the stream is read.
+	// fails with ctx's error on every driver, and a Read in progress is
+	// interrupted (an HTTP response body does this by itself;
+	// ContextReadCloser does it for the others), so keep ctx alive for as
+	// long as the stream is read.
 	Open(ctx context.Context, key string) (io.ReadCloser, ObjectInfo, error)
 
 	// Stat returns the object's ObjectInfo without its bytes. A missing
