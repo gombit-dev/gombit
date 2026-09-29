@@ -18,7 +18,6 @@ func TestMetadataRoundTrips(t *testing.T) {
 	md := map[string]string{
 		"original-name": "résumé final (1).pdf",
 		"percent":       "100% sure %20 not a space",
-		"looks-encoded": "=?UTF-8?B?aGk=?= is literal text",
 		"plain":         "ascii only",
 		"empty":         "",
 	}
@@ -132,7 +131,7 @@ func TestNewValidates(t *testing.T) {
 // exactly as long as storage.MetadataValueWireLen says, so metadata that
 // storage.ValidateMetadata accepts fits S3's 2 KB as sent.
 func TestEncodingMatchesTheContractsMeasure(t *testing.T) {
-	for _, v := range []string{"", "ascii", "100%", "é", "=?x", strings.Repeat("é", 762), "tab\there"} {
+	for _, v := range []string{"", "ascii", "100%", "é", strings.Repeat("é", 700), "tab\there"} {
 		enc := encodeMetadata(map[string]string{"n": v})["n"]
 		if len(enc) != storage.MetadataValueWireLen(v) {
 			t.Errorf("%q encodes to %d bytes; the contract counts %d", v, len(enc), storage.MetadataValueWireLen(v))

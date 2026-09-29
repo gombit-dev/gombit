@@ -19,17 +19,14 @@
 // 404, and the driver cannot tell a missing object from a denied one.
 //
 // S3 carries user metadata as ASCII HTTP headers. A value that is not
-// printable ASCII (or that contains "=?", which would read as an encoded
-// word) is sent RFC 2047 encoded, as S3 expects: S3 stores the decoded
-// UTF-8, counts it against its 2 KB limit (as storage.ValidateMetadata
-// does), and returns it encoded again, and the driver decodes it on the way
-// back.
+// printable ASCII is sent RFC 2047 encoded (mime.BEncoding), as S3
+// expects, and decoded on the way back; storage.ValidateMetadata measures
+// exactly those headers against the 2 KB limit.
 package s3
 
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -401,33 +398,19 @@ func objectInfo(key string, size int64, contentType, etag *string, modTime *time
 	return info, nil
 }
 
-// encodeMetadata RFC 2047-encodes each value that is not printable ASCII,
-// or that contains "=?" (so a decoder never mistakes it for an encoded
-// word), as one UTF-8 base64 encoded word.
+// encodeMetadata RFC 2047-encodes each value that is not printable ASCII
+// with mime.BEncoding (UTF-8, words of at most 75 characters), exactly
+// what storage.MetadataValueWireLen measures. The contract refuses values
+// containing "=?", so a printable-ASCII value never reads as encoded.
 func encodeMetadata(md map[string]string) map[string]string {
 	if len(md) == 0 {
 		return nil
 	}
 	out := make(map[string]string, len(md))
 	for name, value := range md {
-		if needsEncoding(value) {
-			value = "=?UTF-8?B?" + base64.StdEncoding.EncodeToString([]byte(value)) + "?="
-		}
-		out[name] = value
+		out[name] = mime.BEncoding.Encode("UTF-8", value)
 	}
 	return out
-}
-
-func needsEncoding(v string) bool {
-	if strings.Contains(v, "=?") {
-		return true
-	}
-	for i := 0; i < len(v); i++ {
-		if c := v[i]; c < 0x20 || c > 0x7e {
-			return true
-		}
-	}
-	return false
 }
 
 var wordDecoder = new(mime.WordDecoder)

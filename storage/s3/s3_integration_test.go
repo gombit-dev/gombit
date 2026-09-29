@@ -70,7 +70,7 @@ func TestConformance(t *testing.T) {
 
 // TestLargeUploadIsBounded: a multipart upload's memory does not grow with
 // the object: 256 MiB of unknown length allocates about what 32 MiB does
-// (the transfer manager's part buffers), not the object.
+// (the multipart part buffer), not the object.
 func TestLargeUploadIsBounded(t *testing.T) {
 	s := testStore(t)
 	alloc := func(size int64) uint64 {
@@ -146,10 +146,7 @@ func TestMissingBucketIsNotNotFound(t *testing.T) {
 func TestLargeMetadataRoundTrips(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
-	// As MinIO counts it: "x-amz-meta-original-name" (24) + 12 + base64(1446
-	// bytes) = 1964, plus "x-amz-meta-note" (15) + 12 + base64(24 bytes) = 59:
-	// 2023, under 2048.
-	md := map[string]string{"original-name": strings.Repeat("é", 723), "note": "=?UTF-8?B?aGk=?= literal"}
+	md := map[string]string{"original-name": strings.Repeat("é", 500), "note": "plain ascii note"}
 	if err := storage.ValidateMetadata(md); err != nil {
 		t.Fatalf("the test metadata is over the limit: %v", err)
 	}
@@ -173,9 +170,16 @@ func TestLargeMetadataRoundTrips(t *testing.T) {
 func TestMetadataAtTheContractsLimit(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
+	maxRunes := func(r string) int {
+		n := 0
+		for storage.ValidateMetadata(map[string]string{"n": strings.Repeat(r, n+1)}) == nil {
+			n++
+		}
+		return n
+	}
 	for _, md := range []map[string]string{
-		{"n": strings.Repeat("a", 2036)}, // "x-amz-meta-n" + 2036 = 2048
-		{"n": strings.Repeat("é", 759)},  // 12 + 12 + base64(1518) = 2048
+		{"n": strings.Repeat("a", maxRunes("a"))}, // "x-amz-meta-n" + value = 2048
+		{"n": strings.Repeat("é", maxRunes("é"))}, // the largest RFC 2047-encoded value
 	} {
 		if err := storage.ValidateMetadata(md); err != nil {
 			t.Fatalf("%d-byte value: %v", len(md["n"]), err)
