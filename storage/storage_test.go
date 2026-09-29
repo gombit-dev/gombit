@@ -82,6 +82,7 @@ func TestValidatePutOptions(t *testing.T) {
 		{ContentType: "text"},
 		{ContentType: "/plain"},
 		{ContentType: "a/b/c"},
+		{ContentType: "text/plain; x=" + strings.Repeat("y", storage.MaxContentTypeBytes)},
 		{Size: -1},
 		{Metadata: map[string]string{"": "x"}},
 		{Metadata: map[string]string{"Upper": "x"}},

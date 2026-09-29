@@ -525,6 +525,7 @@ func checkInvalidOptions(t testing.TB, s storage.Storage) {
 		{ContentType: "not a media type"},
 		{ContentType: "text/"},
 		{ContentType: "text"},
+		{ContentType: "text/plain; x=" + strings.Repeat("y", storage.MaxContentTypeBytes)},
 		{Size: -1},
 		{Metadata: map[string]string{"Upper": "x"}},
 		{Metadata: map[string]string{"under_score": "x"}},

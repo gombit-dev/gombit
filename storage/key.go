@@ -13,6 +13,9 @@ import (
 // MaxKeyBytes is the longest key, in bytes (S3's limit).
 const MaxKeyBytes = 1024
 
+// MaxContentTypeBytes bounds PutOptions.ContentType, parameters included.
+const MaxContentTypeBytes = 256
+
 // MaxMetadataBytes bounds a PutOptions.Metadata, measured as S3 measures
 // user metadata on the wire: the names and values together, with every
 // byte of a value outside printable ASCII counted as three (its
@@ -79,9 +82,12 @@ func keyProblem(key string) string {
 
 // ValidatePutOptions reports whether opts is valid, as ErrInvalidOptions
 // (wrapped with the reason) when it is not: the content type must parse as
-// a type/subtype media type, Size must not be negative, and Metadata must pass
+// a type/subtype media type of at most MaxContentTypeBytes, Size must not be negative, and Metadata must pass
 // ValidateMetadata.
 func ValidatePutOptions(opts PutOptions) error {
+	if len(opts.ContentType) > MaxContentTypeBytes {
+		return fmt.Errorf("%w: content type is %d bytes, more than %d", ErrInvalidOptions, len(opts.ContentType), MaxContentTypeBytes)
+	}
 	if opts.ContentType != "" {
 		mediaType, _, err := mime.ParseMediaType(opts.ContentType)
 		if err != nil {
