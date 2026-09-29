@@ -21,12 +21,13 @@ const MaxSegmentBytes = 255
 const MaxContentTypeBytes = 256
 
 // MaxMetadataBytes bounds a PutOptions.Metadata, measured as the metadata
-// headers of an S3 request: each name, plus each value as it is sent. A
+// headers of an S3 request: each header name ("x-amz-meta-" and the name),
+// plus each value as it is sent. A
 // printable-ASCII value is sent as is; any other value (and one containing
 // "=?", which would read as an encoded word) as one RFC 2047 base64 word,
 // S3's documented encoding for non-ASCII metadata, which is 12 bytes plus
 // the base64 of its UTF-8. That is the strictest measure among S3-compatible
-// services: AWS counts the decoded UTF-8, MinIO the headers as sent.
+// services (MinIO counts exactly this; AWS the decoded UTF-8).
 const MaxMetadataBytes = 2048
 
 // ValidateKey reports whether key is a valid object key, as ErrInvalidKey
@@ -145,13 +146,16 @@ func ValidateMetadata(md map[string]string) error {
 				return fmt.Errorf("%w: metadata %q: value contains the control character %U", ErrInvalidOptions, name, r)
 			}
 		}
-		total += len(name) + MetadataValueWireLen(value)
+		total += len(metadataHeaderPrefix) + len(name) + MetadataValueWireLen(value)
 	}
 	if total > MaxMetadataBytes {
 		return fmt.Errorf("%w: metadata is %d bytes, more than %d", ErrInvalidOptions, total, MaxMetadataBytes)
 	}
 	return nil
 }
+
+// metadataHeaderPrefix starts every S3 user-metadata header name.
+const metadataHeaderPrefix = "x-amz-meta-"
 
 // MetadataValueWireLen is how many bytes value takes in an S3 metadata
 // header: its length when it is printable ASCII without "=?", otherwise the
