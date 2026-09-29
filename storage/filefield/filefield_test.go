@@ -6,6 +6,8 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -189,5 +191,67 @@ func TestMapError(t *testing.T) {
 		if !errors.As(filefield.MapError(ctx, err), &env) || env.GetStatus() != want {
 			t.Errorf("MapError(%v) = %v, want %d", err, env, want)
 		}
+	}
+}
+
+func TestForEach(t *testing.T) {
+	ctx := context.Background()
+	var mu sync.Mutex
+	seen := map[int]bool{}
+	if err := filefield.ForEach(ctx, 50, func(_ context.Context, i int) error {
+		mu.Lock()
+		seen[i] = true
+		mu.Unlock()
+		return nil
+	}); err != nil || len(seen) != 50 {
+		t.Fatalf("ForEach = %v, ran %d of 50", err, len(seen))
+	}
+	boom := errors.New("boom")
+	var running, peak int32
+	err := filefield.ForEach(ctx, 100, func(ctx context.Context, i int) error {
+		n := atomic.AddInt32(&running, 1)
+		defer atomic.AddInt32(&running, -1)
+		for {
+			p := atomic.LoadInt32(&peak)
+			if n <= p || atomic.CompareAndSwapInt32(&peak, p, n) {
+				break
+			}
+		}
+		time.Sleep(time.Millisecond)
+		if i == 3 {
+			return boom
+		}
+		return nil
+	})
+	if !errors.Is(err, boom) || peak > filefield.ResolveConcurrency {
+		t.Fatalf("ForEach = %v with %d at once, want boom with at most %d", err, peak, filefield.ResolveConcurrency)
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := filefield.ForEach(canceled, 3, func(context.Context, int) error { return nil }); !errors.Is(err, context.Canceled) {
+		t.Fatalf("ForEach on a canceled context = %v", err)
+	}
+	if err := filefield.ForEach(ctx, 0, nil); err != nil {
+		t.Fatalf("ForEach over nothing = %v", err)
+	}
+}
+
+// noPublicURLs is a store whose public URLs are unsupported (S3 without
+// GOMBIT_STORAGE_S3_PUBLIC_URL) but which signs URLs.
+type noPublicURLs struct{ *memory.Store }
+
+func (s noPublicURLs) URL(ctx context.Context, key string, opts storage.URLOptions) (string, error) {
+	if !opts.Signed {
+		return "", storage.ErrUnsupported
+	}
+	return s.Store.URL(ctx, key, opts)
+}
+
+func TestResolveFallsBackToASignedURL(t *testing.T) {
+	_, store, _ := setup(t)
+	putFile(t, store, "public/avatar", png, "image/png")
+	d, err := filefield.Resolve(context.Background(), noPublicURLs{store}, "public/avatar")
+	if err != nil || !strings.Contains(d.URL, "signature=") {
+		t.Fatalf("a public file without public URLs = %+v, %v; want a signed URL", d, err)
 	}
 }

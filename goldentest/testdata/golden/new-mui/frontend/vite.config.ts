@@ -47,6 +47,9 @@ const proxy: Record<string, { target: string; changeOrigin: boolean }> = {
   "/openapi.json": { target: backend, changeOrigin: true },
   "/docs": { target: backend, changeOrigin: true },
   "/admin": { target: backend, changeOrigin: true },
+  // The app serves stored files and their direct uploads here
+  // (GOMBIT_STORAGE_LOCAL_URL) with the local and memory drivers.
+  "/_storage": { target: backend, changeOrigin: true },
 };
 if (apiPrefix !== "/" && apiPrefix !== "/api" && !apiPrefix.startsWith("/api/")) {
   proxy[apiPrefix] = { target: backend, changeOrigin: true };

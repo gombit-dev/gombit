@@ -69,11 +69,13 @@ func (h *Handler) list(ctx context.Context, input *listDocumentsInput) (*listDoc
 	}
 	items := make([]documentData, 0, len(rows))
 	for _, row := range rows {
-		item := toDocumentData(row)
-		if err := h.resolveFiles(ctx, row, &item); err != nil {
-			return nil, err
-		}
-		items = append(items, item)
+		items = append(items, toDocumentData(row))
+	}
+	// One storage request per file: resolved in parallel, bounded.
+	if err := filefield.ForEach(ctx, len(rows), func(ctx context.Context, i int) error {
+		return h.resolveFiles(ctx, rows[i], &items[i])
+	}); err != nil {
+		return nil, err
 	}
 	return &listDocumentsOutput{
 		Body: contract.DataMeta[[]documentData, contract.PageMeta]{

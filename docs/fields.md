@@ -138,7 +138,10 @@ from under another record. Uploads granted but never attached are removed by
 
 **Who may upload.** Uploading is as open as create. A `BeforeUpload(ctx, field)`
 method on the resource's hooks decides who may have a grant; the seeded
-`hooks.go` of a resource with file fields has one.
+`hooks.go` of a resource with file fields has one. On an app reachable by
+anyone, restrict it (to signed-in users, say), and run the sweep below: each
+grant lets its holder store up to the field's `max_bytes`, and an upload
+that is never attached stays stored until swept.
 
 **Frontend and admin.**
 - The generated form has a file input per field. On submit it uploads the file

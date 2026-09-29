@@ -201,10 +201,11 @@ func renderModelHandler(r modelResource) (string, error) {
 	b.WriteString("\t}\n")
 	b.WriteString("\titems := make([]" + data + ", 0, len(rows))\n")
 	if r.hasFiles() {
-		b.WriteString("\tfor _, row := range rows {\n")
-		b.WriteString("\t\titem := to" + typ + "Data(row)\n")
-		b.WriteString("\t\tif err := h.resolveFiles(ctx, row, &item); err != nil {\n\t\t\treturn nil, err\n\t\t}\n")
-		b.WriteString("\t\titems = append(items, item)\n\t}\n")
+		b.WriteString("\tfor _, row := range rows {\n\t\titems = append(items, to" + typ + "Data(row))\n\t}\n")
+		b.WriteString("\t// One storage request per file: resolved in parallel, bounded.\n")
+		b.WriteString("\tif err := filefield.ForEach(ctx, len(rows), func(ctx context.Context, i int) error {\n")
+		b.WriteString("\t\treturn h.resolveFiles(ctx, rows[i], &items[i])\n")
+		b.WriteString("\t}); err != nil {\n\t\treturn nil, err\n\t}\n")
 	} else {
 		b.WriteString("\tfor _, row := range rows {\n\t\titems = append(items, to" + typ + "Data(row))\n\t}\n")
 	}

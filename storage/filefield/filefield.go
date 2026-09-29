@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"gorm.io/gorm"
@@ -188,7 +189,9 @@ func Resolve(ctx context.Context, store storage.Storage, key string) (*FileInfo,
 	}
 	d := &FileInfo{Key: key, Filename: info.Filename(), Size: info.Size, ContentType: info.ContentType}
 	u, err := store.URL(ctx, key, storage.PublicURL())
-	if errors.Is(err, storage.ErrNotPublic) {
+	if errors.Is(err, storage.ErrNotPublic) || errors.Is(err, storage.ErrUnsupported) {
+		// Private, or public on a store without public URLs: a signed URL
+		// still reaches it.
 		u, err = store.URL(ctx, key, storage.SignedURL(LinkTTL))
 	}
 	switch {
@@ -219,4 +222,39 @@ func KeyOf[T ~string](v *T) string {
 		return ""
 	}
 	return string(*v)
+}
+
+// ResolveConcurrency bounds how many rows' files a list resolves at once.
+const ResolveConcurrency = 8
+
+// ForEach runs fn for i in [0, n), at most ResolveConcurrency at a time,
+// waits for all of them, and returns the first error (after which the rest
+// see ctx canceled and are not started). The generated list uses it to
+// resolve its rows' files in parallel rather than one storage request
+// after another.
+func ForEach(ctx context.Context, n int, fn func(ctx context.Context, i int) error) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var (
+		wg    sync.WaitGroup
+		once  sync.Once
+		first error
+	)
+	sem := make(chan struct{}, ResolveConcurrency)
+	for i := 0; i < n && ctx.Err() == nil; i++ {
+		sem <- struct{}{}
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			if err := fn(ctx, i); err != nil {
+				once.Do(func() { first = err; cancel() })
+			}
+		}(i)
+	}
+	wg.Wait()
+	if first == nil {
+		first = ctx.Err() // the caller's context ended before every fn ran
+	}
+	return first
 }

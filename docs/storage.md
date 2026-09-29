@@ -391,7 +391,7 @@ the grant asks for:
 [{
   "AllowedOrigins": ["https://app.example.com"],
   "AllowedMethods": ["PUT"],
-  "AllowedHeaders": ["content-type", "x-amz-meta-*"],
+  "AllowedHeaders": ["content-type", "if-none-match", "x-amz-meta-*"],
   "ExposeHeaders": ["ETag"],
   "MaxAgeSeconds": 3600
 }]
