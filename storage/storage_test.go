@@ -24,7 +24,7 @@ func TestValidateKey(t *testing.T) {
 		"ünïcødé/数据.bin",
 		"dots/..hidden/.also/name..ext",
 		"c:/drive-like/segment",
-		strings.Repeat("k", storage.MaxKeyBytes),
+		strings.Repeat("k", storage.MaxSegmentBytes) + "/" + strings.Repeat("k", storage.MaxSegmentBytes),
 	}
 	for _, key := range valid {
 		if err := storage.ValidateKey(key); err != nil {
@@ -51,7 +51,8 @@ func TestValidateKey(t *testing.T) {
 		"line\u2028break": "U+2028",
 		"para\u2029break": "U+2029",
 		"lrm\u200emark":   "U+200E",
-		strings.Repeat("k", storage.MaxKeyBytes+1): "longer than",
+		strings.Repeat("k", storage.MaxKeyBytes+1):                   "longer than",
+		"a/" + strings.Repeat("s", storage.MaxSegmentBytes+1) + "/b": "segment, longer than",
 	}
 	for key, reason := range invalid {
 		err := storage.ValidateKey(key)

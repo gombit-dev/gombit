@@ -13,6 +13,11 @@ import (
 // MaxKeyBytes is the longest key, in bytes (S3's limit).
 const MaxKeyBytes = 1024
 
+// MaxSegmentBytes is the longest segment of a key (the part between '/'s),
+// in bytes: the file-name limit of the filesystems under S3-compatible
+// services such as MinIO, which refuse a longer one.
+const MaxSegmentBytes = 255
+
 // MaxContentTypeBytes bounds PutOptions.ContentType, parameters included.
 const MaxContentTypeBytes = 256
 
@@ -33,6 +38,7 @@ const MaxMetadataBytes = 2048
 //   - no leading or trailing '/', and no empty segment ("a//b");
 //   - no "." or ".." segment, so a key can never climb out of a prefix or,
 //     on the local driver, out of the storage root;
+//   - no segment longer than MaxSegmentBytes;
 //   - no backslash (a path separator on Windows), no control character
 //     (NUL, newline, DEL, the C1 controls), and no Unicode line separator
 //     or bidirectional control (which can split a log line or disguise a
@@ -75,6 +81,9 @@ func keyProblem(key string) string {
 			return "contains an empty segment"
 		case ".", "..":
 			return fmt.Sprintf("contains a %q segment", seg)
+		}
+		if len(seg) > MaxSegmentBytes {
+			return fmt.Sprintf("has a %d-byte segment, longer than %d", len(seg), MaxSegmentBytes)
 		}
 	}
 	return ""

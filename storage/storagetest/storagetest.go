@@ -222,6 +222,7 @@ var invalidKeys = []string{
 	"bidi\u202eoverride",
 	"line\u2028separator",
 	strings.Repeat("k", storage.MaxKeyBytes+1),
+	"a/" + strings.Repeat("s", storage.MaxSegmentBytes+1),
 }
 
 func checkInvalidKeys(t testing.TB, s storage.Storage) {
@@ -283,7 +284,7 @@ func checkPortableKeys(t testing.TB, s storage.Storage) {
 		"prefix",
 		"prefix/child",
 		"prefix/child/grandchild",
-		strings.Repeat("l", 300) + "/long-segment",
+		strings.Repeat("l", storage.MaxSegmentBytes) + "/long-segment",
 		"CON/nul.txt",
 		"c:/aux",
 		"dot./space /x",
