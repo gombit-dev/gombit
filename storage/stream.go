@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 )
 
 // ExpectSize returns r limited to exactly size bytes, for a driver
@@ -97,23 +98,51 @@ func (c *ctxReader) Read(p []byte) (int, error) {
 }
 
 // ContextReadCloser returns rc bound to ctx, as the reader Storage.Open
-// returns must be: once ctx has ended, each Read fails with its error (the
-// way an HTTP response body does when its request's context ends); Close
-// closes rc. When rc can seek, so can the result.
+// returns must be: once ctx has ended, Read fails with its error, and a
+// Read already in progress is interrupted, by closing rc (the way an HTTP
+// response body behaves when its request's context ends). Close closes rc
+// once. When rc can seek, so can the result.
 func ContextReadCloser(ctx context.Context, rc io.ReadCloser) io.ReadCloser {
-	c := ctxReadCloser{ctxReader{ctx: ctx, r: rc}, rc}
+	c := &ctxReadCloser{ctx: ctx, rc: rc}
+	c.stop = context.AfterFunc(ctx, func() { _ = c.close() })
 	if s, ok := rc.(io.Seeker); ok {
 		return &ctxReadSeekCloser{c, s}
 	}
-	return &c
+	return c
 }
 
 type ctxReadCloser struct {
-	ctxReader
-	io.Closer
+	ctx    context.Context
+	rc     io.ReadCloser
+	stop   func() bool
+	once   sync.Once
+	closed error
+}
+
+func (c *ctxReadCloser) Read(p []byte) (int, error) {
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
+	}
+	n, err := c.rc.Read(p)
+	if cerr := c.ctx.Err(); cerr != nil {
+		// Ended during the Read: whatever the interrupted read returned,
+		// the stream is over with the context's error.
+		return 0, cerr
+	}
+	return n, err
+}
+
+func (c *ctxReadCloser) close() error {
+	c.once.Do(func() { c.closed = c.rc.Close() })
+	return c.closed
+}
+
+func (c *ctxReadCloser) Close() error {
+	c.stop()
+	return c.close()
 }
 
 type ctxReadSeekCloser struct {
-	ctxReadCloser
+	*ctxReadCloser
 	io.Seeker
 }
