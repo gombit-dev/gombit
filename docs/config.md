@@ -59,6 +59,13 @@ recognizes:
 | `GOMBIT_JOBS_NAMESPACE` | `Config.Jobs.Namespace` | derived from app/environment |
 | `GOMBIT_STORAGE_DRIVER` | `Config.Storage.Driver` | `local` |
 | `GOMBIT_STORAGE_LOCAL_ROOT` | `Config.Storage.Local.Root` | `storage` |
+| `GOMBIT_STORAGE_S3_BUCKET` | `Config.Storage.S3.Bucket` | empty (required with `s3`) |
+| `GOMBIT_STORAGE_S3_REGION` | `Config.Storage.S3.Region` | `us-east-1` |
+| `GOMBIT_STORAGE_S3_ENDPOINT` | `Config.Storage.S3.Endpoint` | empty (AWS) |
+| `GOMBIT_STORAGE_S3_PREFIX` | `Config.Storage.S3.Prefix` | empty |
+| `GOMBIT_STORAGE_S3_ACCESS_KEY_ID` | `Config.Storage.S3.AccessKeyID` | empty (default credential chain) |
+| `GOMBIT_STORAGE_S3_SECRET_ACCESS_KEY` | `Config.Storage.S3.SecretAccessKey` | empty; redacted |
+| `GOMBIT_STORAGE_S3_FORCE_PATH_STYLE` | `Config.Storage.S3.ForcePathStyle` | `false` |
 | `GOMBIT_REDIS_ADDR` | `Config.Cache.Redis.Addr` | `127.0.0.1:6379` |
 | `GOMBIT_REDIS_USERNAME` | `Config.Cache.Redis.Username` | empty |
 | `GOMBIT_REDIS_PASSWORD` | `Config.Cache.Redis.Password` | empty |
@@ -94,7 +101,8 @@ regenerating. See [frontend.md](frontend.md#talking-to-the-api).
 `GOMBIT_JOBS_DRIVER` accepts `sync`, `memory`, and `redis`; the `redis` driver
 connects with the shared `GOMBIT_REDIS_*` settings, which are then validated
 even when the cache does not use Redis. See [jobs.md](jobs.md#drivers).
-`GOMBIT_STORAGE_DRIVER` accepts `local` and `memory`. The local driver keeps
+`GOMBIT_STORAGE_DRIVER` accepts `local`, `memory`, and `s3` (which needs a
+bucket; set both S3 keys or neither). The local driver keeps
 files under `GOMBIT_STORAGE_LOCAL_ROOT` (relative to the working directory),
 which is created on the first write. See [storage.md](storage.md#drivers).
 When `GOMBIT_CACHE_NAMESPACE` is unset, the namespace is derived from the

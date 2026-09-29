@@ -39,6 +39,22 @@ version.
     `memory`), and `framework.WithStorage` attaches your own.
   - `examples/storage` shows upload, download and delete handlers
     ([#324](https://github.com/gombit-dev/gombit/issues/324)).
+- The S3-compatible storage driver, `storage/s3` (STORAGE-3), for AWS S3,
+  Cloudflare R2, MinIO and others:
+  - configured with `GOMBIT_STORAGE_DRIVER=s3` and the
+    `GOMBIT_STORAGE_S3_*` settings: bucket, region, endpoint, prefix, keys,
+    path style;
+  - static keys, or the AWS default credential chain (IAM roles); the secret
+    key is redacted;
+  - streaming uploads in at most 8 MiB of memory: one `PutObject` sized to
+    a small object, or sequential 8 MiB multipart parts, aborted on
+    failure;
+  - metadata sent RFC 2047 encoded when not ASCII, so it round-trips;
+  - throttling, 5xx and network failures classified as `ErrUnavailable`, and
+    a missing bucket reported as a configuration error, not a missing object.
+
+  Its conformance suite runs against MinIO in CI
+  ([#325](https://github.com/gombit-dev/gombit/issues/325)).
 
 ### Changed
 

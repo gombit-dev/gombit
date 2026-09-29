@@ -8,10 +8,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gombit-dev/gombit/config"
-	"github.com/gombit-dev/gombit/contract"
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/gin-gonic/gin"
+	"github.com/gombit-dev/gombit/config"
+	"github.com/gombit-dev/gombit/contract"
 )
 
 func TestAPIValidationReturnsD10FieldErrors(t *testing.T) {

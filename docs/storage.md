@@ -6,9 +6,9 @@ code depends on `storage.Storage`, never on a filesystem path or an S3 SDK
 call, so moving from local development to S3-compatible storage in
 production changes configuration, not code.
 
-> **Status:** the contract and the local and in-memory drivers. The
-> S3-compatible driver (STORAGE-3), upload helpers, signed URLs, direct
-> uploads, and admin fields follow
+> **Status:** the contract and the local, in-memory, and S3-compatible
+> drivers. Upload helpers, signed URLs, direct uploads, and admin fields
+> follow
 > ([epic #279](https://github.com/gombit-dev/gombit/issues/279)).
 
 Every app has a store: `app.Storage()` returns the driver `GOMBIT_STORAGE_DRIVER`
@@ -147,6 +147,7 @@ never reaches the client.
 | --- | --- | --- |
 | `local` (default) | `storage/local` | Development and single-host deployments: files on disk |
 | `memory` | `storage/memory` | Tests: objects in the process, nothing on disk |
+| `s3` | `storage/s3` | Production: AWS S3, Cloudflare R2, MinIO, or any S3-compatible service |
 
 `framework.New` opens the configured driver into `app.Storage()`.
 `framework.WithStorage(s)` attaches one you opened yourself, for example a
@@ -191,6 +192,66 @@ In production, point `GOMBIT_STORAGE_LOCAL_ROOT` at a persistent volume. A
 container's working directory is lost when the container is replaced. A
 production app whose root is relative to the working directory logs a warning
 on its first write. An app that never stores a file is never warned.
+
+### S3
+
+```bash
+GOMBIT_STORAGE_DRIVER=s3
+GOMBIT_STORAGE_S3_BUCKET=my-app-uploads
+GOMBIT_STORAGE_S3_REGION=us-east-1            # "auto" for Cloudflare R2
+GOMBIT_STORAGE_S3_ENDPOINT=                   # empty for AWS; https://<account>.r2.cloudflarestorage.com, http://127.0.0.1:9000 (MinIO)
+GOMBIT_STORAGE_S3_PREFIX=                     # optional, for example "myapp/prod/", to share a bucket
+GOMBIT_STORAGE_S3_ACCESS_KEY_ID=              # both empty: the AWS default credential chain
+GOMBIT_STORAGE_S3_SECRET_ACCESS_KEY=
+GOMBIT_STORAGE_S3_FORCE_PATH_STYLE=false      # true for MinIO and most S3-compatible services
+```
+
+- **Credentials.** Leave both keys empty to use the AWS default credential
+  chain: the `AWS_*` environment variables, shared config, or an IAM role on
+  ECS, Fargate or EC2. The secret key is redacted from `gombit config show`
+  and never appears in errors.
+- **Streaming.** `Put` reads the object into one buffer of at most 8 MiB. An
+  object that fits is a single `PutObject`, and the buffer is sized to it
+  when the size is declared: a 10 KiB upload allocates about its own size.
+  A larger object is a multipart upload of 8 MiB parts sent one after
+  another, so a `Put` holds at most 8 MiB whatever the size. The largest
+  object is 10,000 parts, about 78 GiB. `Open` streams the response body.
+- **Atomic writes.** An object appears only when its upload completes. A
+  failed or canceled `Put` aborts its multipart upload, on a fresh context,
+  so no incomplete upload lingers to be billed.
+- **Permissions.** The credentials need `s3:GetObject`, `s3:PutObject`,
+  `s3:DeleteObject` and `s3:AbortMultipartUpload` on the objects
+  (`arn:aws:s3:::BUCKET/PREFIX*`), and `s3:ListBucket` on the bucket.
+  Without `ListBucket`, S3 answers a request for a missing object with
+  `403 Access Denied` instead of 404, and a missing object would become a 500
+  rather than a 404.
+- **Prefix.** `GOMBIT_STORAGE_S3_PREFIX` must end with `/` (`myapp/prod/`) and
+  follow the key rules. It is put before every key.
+- **Metadata** values that aren't printable ASCII (or that contain `=?`) are
+  sent RFC 2047 encoded, which is S3's own encoding for non-ASCII metadata,
+  and decoded on the way back, so they round-trip exactly. The contract's
+  size limit counts the encoded headers, which is exactly how MinIO measures
+  them.
+- **Errors.** A missing object is `ErrNotFound`. Throttling, a 5xx or a
+  network failure is `ErrUnavailable`, so `MapError` answers 503. A missing
+  bucket or denied credentials is a plain error, so `MapError` answers 500
+  rather than a misleading 404. A `HEAD` that returns 404 checks the bucket (at most
+  once a minute), because a `HEAD` response can't tell a missing object from a
+  missing bucket.
+- `ModTime` comes from S3 on `Stat` and `Open`. The `ObjectInfo` that `Put`
+  returns leaves it zero, since S3 doesn't return one.
+- **Checksums** are sent only where S3 requires them, because several
+  S3-compatible services reject the SDK's newer default checksums.
+- **`URL`** returns `ErrUnsupported` until STORAGE-5 adds public and signed
+  URLs.
+
+The driver runs the full conformance suite against MinIO in CI (the
+`Storage (s3)` job):
+
+```bash
+go test -tags integration ./storage/s3 -s3.endpoint http://127.0.0.1:9000 \
+  -s3.access-key minioadmin -s3.secret-key minioadmin
+```
 
 ### Memory
 

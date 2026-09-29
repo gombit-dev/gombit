@@ -1,8 +1,10 @@
 package framework
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	"go.uber.org/zap"
 
@@ -10,6 +12,7 @@ import (
 	"github.com/gombit-dev/gombit/storage"
 	"github.com/gombit-dev/gombit/storage/local"
 	"github.com/gombit-dev/gombit/storage/memory"
+	"github.com/gombit-dev/gombit/storage/s3"
 )
 
 // openStorage opens the object store cfg.Storage names. The local driver
@@ -33,6 +36,25 @@ func openStorage(cfg config.Config, logger *zap.Logger) (storage.Storage, error)
 			}))
 		}
 		store, err := local.New(cfg.Storage.Local.Root, opts...)
+		if err != nil {
+			return nil, fmt.Errorf("framework: %w", err)
+		}
+		return store, nil
+	case config.StorageDriverS3:
+		c := cfg.Storage.S3
+		if cfg.Environment == config.EnvironmentProduction && strings.HasPrefix(strings.ToLower(c.Endpoint), "http://") {
+			logger.Warn("storage: the S3 endpoint is plain http, so objects cross the network unencrypted; use https in production",
+				zap.String("endpoint", c.Endpoint))
+		}
+		store, err := s3.New(context.Background(), s3.Config{
+			Endpoint:        c.Endpoint,
+			Region:          c.Region,
+			Bucket:          c.Bucket,
+			Prefix:          c.Prefix,
+			AccessKeyID:     c.AccessKeyID,
+			SecretAccessKey: c.SecretAccessKey,
+			ForcePathStyle:  c.ForcePathStyle,
+		})
 		if err != nil {
 			return nil, fmt.Errorf("framework: %w", err)
 		}

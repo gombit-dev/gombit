@@ -15,6 +15,7 @@ import (
 	"github.com/gombit-dev/gombit/storage"
 	"github.com/gombit-dev/gombit/storage/local"
 	"github.com/gombit-dev/gombit/storage/memory"
+	"github.com/gombit-dev/gombit/storage/s3"
 )
 
 // TestStorageDefaultsToLocal: a new app stores files locally with no
@@ -60,6 +61,23 @@ func TestWithStorage(t *testing.T) {
 	}
 	if _, err := New(WithStorage(nil)); err == nil {
 		t.Fatal("WithStorage(nil) was accepted")
+	}
+}
+
+func TestStorageS3Driver(t *testing.T) {
+	cfg := config.Default()
+	cfg.Storage.Driver = config.StorageDriverS3
+	cfg.Storage.S3.Bucket = "uploads"
+	cfg.Storage.S3.Endpoint = "http://127.0.0.1:9"
+	cfg.Storage.S3.AccessKeyID = "id"
+	cfg.Storage.S3.SecretAccessKey = "secret"
+	app := newTestApp(t, WithConfig(cfg))
+	if _, ok := app.Storage().(*s3.Store); !ok {
+		t.Fatalf("Storage() = %T, want *s3.Store", app.Storage())
+	}
+	cfg.Storage.S3.Bucket = ""
+	if _, err := New(WithConfig(cfg)); err == nil || !strings.Contains(err.Error(), "Storage.S3.Bucket") {
+		t.Fatalf("New without a bucket = %v, want a Storage.S3.Bucket error", err)
 	}
 }
 

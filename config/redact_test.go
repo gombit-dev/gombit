@@ -85,6 +85,23 @@ func TestRedactDSNHidesQuotedLibpqPassword(t *testing.T) {
 	}
 }
 
+func TestConfigRedactedHidesTheS3SecretKey(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	cfg.Storage.S3.AccessKeyID = "AKIAEXAMPLE"
+	cfg.Storage.S3.SecretAccessKey = "s3-super-secret" // #nosec G101 -- fake test secret.
+	got := cfg.Redacted()
+	if got.Storage.S3.SecretAccessKey != RedactedSecret {
+		t.Fatalf("Redacted S3 secret = %q", got.Storage.S3.SecretAccessKey)
+	}
+	if got.Storage.S3.AccessKeyID != "AKIAEXAMPLE" {
+		t.Fatalf("the access key id (not a secret) was changed: %q", got.Storage.S3.AccessKeyID)
+	}
+	if cfg.Storage.S3.SecretAccessKey != "s3-super-secret" {
+		t.Fatal("Redacted modified the original config")
+	}
+}
+
 func TestConfigRedactedHidesRedisPassword(t *testing.T) {
 	t.Parallel()
 
