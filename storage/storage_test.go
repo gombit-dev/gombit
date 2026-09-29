@@ -316,3 +316,50 @@ func TestMetadataValueWireLen(t *testing.T) {
 		t.Fatalf("the accepted maximum measures %d and one more rune %d; want <= %d and > %d", at, over, storage.MaxMetadataBytes, storage.MaxMetadataBytes)
 	}
 }
+
+// TestPaddedMetadataIsRefused: HTTP drops a header value's surrounding
+// spaces, so such a value could not come back as given.
+func TestPaddedMetadataIsRefused(t *testing.T) {
+	for _, v := range []string{" padded", "padded ", " "} {
+		if err := storage.ValidateMetadata(map[string]string{"n": v}); !errors.Is(err, storage.ErrInvalidOptions) {
+			t.Errorf("ValidateMetadata(%q) = %v", v, err)
+		}
+	}
+	for _, v := range []string{"two  spaces inside", "a b", ""} {
+		if err := storage.ValidateMetadata(map[string]string{"n": v}); err != nil {
+			t.Errorf("ValidateMetadata(%q) = %v", v, err)
+		}
+	}
+}
+
+// seekCloser is an io.ReadSeekCloser over a string.
+type seekCloser struct{ *strings.Reader }
+
+func (seekCloser) Close() error { return nil }
+
+func TestContextReadCloser(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	rc := storage.ContextReadCloser(ctx, seekCloser{strings.NewReader("0123456789")})
+	s, ok := rc.(io.Seeker)
+	if !ok {
+		t.Fatal("a seekable reader lost Seek")
+	}
+	if _, err := s.Seek(5, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	b := make([]byte, 2)
+	if n, err := rc.Read(b); err != nil || string(b[:n]) != "56" {
+		t.Fatalf("Read after Seek = %q, %v", b[:n], err)
+	}
+	cancel()
+	if _, err := rc.Read(b); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Read after the context ended = %v", err)
+	}
+	if err := rc.Close(); err != nil {
+		t.Fatal(err)
+	}
+	plain := storage.ContextReadCloser(context.Background(), io.NopCloser(strings.NewReader("x")))
+	if _, ok := plain.(io.Seeker); ok {
+		t.Fatal("a reader that cannot seek gained Seek")
+	}
+}
