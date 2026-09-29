@@ -176,22 +176,26 @@ the directory. `gombit new` gitignores `/storage/`.
   be browsed or edited by hand; go through the store.
 - **Streaming, atomic, durable writes.** `Put` streams into a temporary file
   under `<root>/tmp` in 32 KiB pieces, never holding the object in memory.
-  It then flushes the file, renames it into place, and flushes the
-  directory (and, on the first `Put`, the root's own entry). On Windows,
-  which can't flush a directory, it flushes the renamed file instead. A
-  reader sees the old object or the new one, never part of one, and a `Put`
-  that returned survives a crash. If the flush after the rename fails even
-  on a retry, the object is stored but may not survive a crash. `Put` still
-  reports success, because the object is visible, and `app.Storage()` logs a
-  warning. A failed `Put` removes its
-  temporary file. A process killed mid-`Put` can't, so a store's first `Put`
-  removes temporary files nothing has written to for an hour. `Open` reads
-  from disk as you read.
+  It then flushes the file, and flushes the entry of every directory on the
+  path that this process hasn't yet seen flushed (the root and its new
+  ancestors included). Only then does it rename the file into place and
+  flush that directory. A reader sees the old object or the new one, never
+  part of one. On Linux and macOS, a `Put` or `Delete` that returned
+  survives a crash. If a directory flush before the rename fails, `Put`
+  fails with the object still a temporary file, and the next `Put` flushes
+  again. If the flush after the rename (or a delete's) fails even on a
+  retry, the change has already happened: the call reports success, and
+  `app.Storage()` logs a warning that it may not survive a crash. A failed
+  `Put` removes its temporary file. A process killed mid-`Put` can't, so a
+  store's first `Put` removes temporary files nothing has written to for an
+  hour. `Open` reads from disk as you read.
 - **Sharing.** Several processes can share one root (an app and its worker).
   Several *hosts* need a shared filesystem, or an S3-compatible store
   (STORAGE-3).
 - **Windows.** An object that is open for reading cannot be replaced or
-  deleted until its reader is closed.
+  deleted until its reader is closed. Windows offers no directory flush a
+  process can request, so writes and deletes there are atomic, but whether
+  they survive a crash is up to the filesystem.
 - **URLs.** `URL` returns `ErrUnsupported` for now. Serving local files needs
   the public/private rules of STORAGE-5; serving every object would expose
   private ones.
