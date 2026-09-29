@@ -23,6 +23,7 @@ func TestValidateKey(t *testing.T) {
 		"spaces in name/file (1).pdf",
 		"ünïcødé/数据.bin",
 		"dots/..hidden/.also/name..ext",
+		"trailing dot inside/a.b/ leading space",
 		"c:/drive-like/segment",
 		strings.Repeat("k", storage.MaxSegmentBytes) + "/" + strings.Repeat("k", storage.MaxSegmentBytes),
 	}
@@ -51,6 +52,12 @@ func TestValidateKey(t *testing.T) {
 		"line\u2028break": "U+2028",
 		"para\u2029break": "U+2029",
 		"lrm\u200emark":   "U+200E",
+		"...":             "ending with '.'",
+		".. ":             "ending with ' '",
+		"foo/.. /bar":     "ending with ' '",
+		"a./b":            "ending with '.'",
+		"a /b":            "ending with ' '",
+		"name.":           "ending with '.'",
 		strings.Repeat("k", storage.MaxKeyBytes+1):                   "longer than",
 		"a/" + strings.Repeat("s", storage.MaxSegmentBytes+1) + "/b": "segment, longer than",
 	}
@@ -65,12 +72,15 @@ func TestValidateKey(t *testing.T) {
 func TestValidatePutOptions(t *testing.T) {
 	ok := []storage.PutOptions{
 		{},
-		{ContentType: "image/png", Size: 10},
+		{ContentType: "image/png", Size: storage.KnownSize(10)},
+		{Size: storage.KnownSize(0)},
 		{ContentType: "text/plain; charset=utf-8"},
 		{Metadata: map[string]string{"original-name": "résumé final.pdf", "v2": ""}},
 		{Metadata: map[string]string{"n": strings.Repeat("v", storage.MaxMetadataBytes-1)}},
 		// 1 + 341 × 2 bytes × 3 = 2047: fits once percent-encoded.
-		{Metadata: map[string]string{"n": strings.Repeat("é", 341)}},
+		// 1 + 1023 × 2 = 2047 UTF-8 bytes, S3's measure.
+		{Metadata: map[string]string{"n": strings.Repeat("é", 1023)}},
+		{Metadata: map[string]string{"n": strings.Repeat("%", storage.MaxMetadataBytes-1)}},
 	}
 	for _, opts := range ok {
 		if err := storage.ValidatePutOptions(opts); err != nil {
@@ -84,17 +94,15 @@ func TestValidatePutOptions(t *testing.T) {
 		{ContentType: "/plain"},
 		{ContentType: "a/b/c"},
 		{ContentType: "text/plain; x=" + strings.Repeat("y", storage.MaxContentTypeBytes)},
-		{Size: -1},
+		{Size: storage.KnownSize(-1)},
 		{Metadata: map[string]string{"": "x"}},
 		{Metadata: map[string]string{"Upper": "x"}},
 		{Metadata: map[string]string{"under_score": "x"}},
 		{Metadata: map[string]string{"ok": "tab\there"}},
 		{Metadata: map[string]string{"ok": "bad\xffutf8"}},
 		{Metadata: map[string]string{"n": strings.Repeat("v", storage.MaxMetadataBytes)}},
-		// 1 + 342 × 2 bytes × 3 = 2053 once percent-encoded.
-		{Metadata: map[string]string{"n": strings.Repeat("é", 342)}},
-		// 1 + 683 × 3 = 2050: '%' is escaped too.
-		{Metadata: map[string]string{"n": strings.Repeat("%", 683)}},
+		// 1 + 1024 × 2 = 2049 UTF-8 bytes.
+		{Metadata: map[string]string{"n": strings.Repeat("é", 1024)}},
 		{Metadata: map[string]string{"n": "bidi\u202eflip"}},
 	}
 	for _, opts := range bad {
@@ -108,8 +116,19 @@ func TestValidatePutOptions(t *testing.T) {
 	if err := storage.ValidateURLOptions(storage.PublicURL()); err != nil {
 		t.Errorf("ValidateURLOptions(PublicURL) = %v", err)
 	}
-	if err := storage.ValidateURLOptions(storage.URLOptions{Expires: -1}); !errors.Is(err, storage.ErrInvalidOptions) {
-		t.Errorf("ValidateURLOptions(negative) = %v, want storage.ErrInvalidOptions", err)
+	// A signed URL never widens into a permanent one: a zero or negative
+	// lifetime is refused, not treated as public.
+	for _, opts := range []storage.URLOptions{
+		storage.SignedURL(0),
+		storage.SignedURL(-time.Second),
+		{Expires: time.Minute}, // a lifetime on a public URL
+	} {
+		if err := storage.ValidateURLOptions(opts); !errors.Is(err, storage.ErrInvalidOptions) {
+			t.Errorf("ValidateURLOptions(%+v) = %v, want storage.ErrInvalidOptions", opts, err)
+		}
+	}
+	if storage.SignedURL(0) == storage.PublicURL() {
+		t.Error("SignedURL(0) is the same request as PublicURL()")
 	}
 }
 
@@ -142,10 +161,30 @@ func TestExpectSize(t *testing.T) {
 	if _, err := read(storage.ExpectSize(iotest.ErrReader(boom), 5)); !errors.Is(err, boom) {
 		t.Errorf("source error = %v, want it passed through", err)
 	}
-	// Zero means unknown: no limit.
-	r := strings.NewReader("anything")
-	if storage.ExpectSize(r, 0) != io.Reader(r) {
-		t.Error("ExpectSize(r, 0) should return r itself")
+	// Zero is an exact empty size, not "unknown".
+	if got, err := read(storage.ExpectSize(strings.NewReader(""), 0)); err != nil || got != "" {
+		t.Errorf("empty, size 0 = %q, %v", got, err)
+	}
+	if _, err := read(storage.ExpectSize(strings.NewReader("x"), 0)); !errors.Is(err, storage.ErrSizeMismatch) {
+		t.Errorf("one byte, size 0 = %v, want storage.ErrSizeMismatch", err)
+	}
+	if _, err := read(storage.ExpectSize(strings.NewReader("x"), -1)); !errors.Is(err, storage.ErrInvalidOptions) {
+		t.Errorf("negative size = %v, want storage.ErrInvalidOptions", err)
+	}
+	// The read that reaches the size reports excess itself: a caller that
+	// reads exactly the declared length in one Read still sees it.
+	buf := make([]byte, 10)
+	if n, err := storage.ExpectSize(strings.NewReader("123456789012345"), 10).Read(buf); n != 10 || !errors.Is(err, storage.ErrSizeMismatch) {
+		t.Errorf("one Read of the declared length from a long source = %d, %v; want 10 and storage.ErrSizeMismatch", n, err)
+	}
+	if n, err := storage.ExpectSize(strings.NewReader("1234567890"), 10).Read(buf); n != 10 || err != io.EOF {
+		t.Errorf("one Read of an exact source = %d, %v; want 10 and io.EOF", n, err)
+	}
+	if got := storage.SizeFromContentLength(-1); got != nil {
+		t.Errorf("SizeFromContentLength(-1) = %d, want nil (unknown)", *got)
+	}
+	if got := storage.SizeFromContentLength(0); got == nil || *got != 0 {
+		t.Error("SizeFromContentLength(0) should be an exact empty size")
 	}
 }
 

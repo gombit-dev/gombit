@@ -17,8 +17,11 @@ version.
     and `URL`, streaming through `io.Reader`/`io.ReadCloser`;
   - atomic writes: a failed or canceled `Put` leaves the key as it was;
   - idempotent deletes;
-  - one portable key rule (`ValidateKey`), which rejects `..`, leading `/`,
-    backslashes and control characters;
+  - one portable key rule (`ValidateKey`), which rejects `.`/`..` segments,
+    segments ending in `.` or a space, a leading `/`, backslashes and
+    control characters;
+  - an optional exact `Size` (`KnownSize`, `SizeFromContentLength`);
+  - `PublicURL` / `SignedURL` (a signed URL needs a positive lifetime);
   - classified errors (`ErrNotFound`, `ErrInvalidKey`, `ErrInvalidOptions`,
     `ErrSizeMismatch`, `ErrUnsupported`, `ErrUnavailable`), which `MapError`
     turns into D10 responses;

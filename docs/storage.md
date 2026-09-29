@@ -58,15 +58,18 @@ err = store.Delete(ctx, "avatars/42.png")
   `type/subtype` media type; parameters are fine
   (`text/plain; charset=utf-8`). Empty stores
   `application/octet-stream`.
-- **`Size`**, when positive, is the exact length the reader will produce.
-  `Put` then fails with `ErrSizeMismatch`, storing nothing, if the reader
-  ends early or runs long. Zero means unknown.
+- **`Size`**, when set, is the exact length the reader will produce (zero
+  for an empty object). `Put` then fails with `ErrSizeMismatch`, storing
+  nothing, if the reader ends early or runs long. `nil` means unknown. Build
+  it with `storage.KnownSize(n)`. For an HTTP body, use
+  `storage.SizeFromContentLength(r.ContentLength)`: `-1` (unknown) becomes
+  `nil`, and a request that claims `Content-Length: 0` can't store a
+  non-empty body.
 - **`Metadata`** is small user metadata returned in `ObjectInfo` exactly as
   given. Names are lower-case ASCII letters, digits and `-`. Values are UTF-8
-  without control characters. The size limit is 2 KiB for names and values
-  together, S3's limit, measured the way S3 measures it on the wire: every
-  value byte outside printable ASCII counts as three, its percent-encoded
-  length. Keep a client's original filename here, never in the key.
+  without control characters. The limit is 2 KiB of UTF-8 for names and
+  values together, which is how S3 measures its own limit. Keep a client's
+  original filename here, never in the key.
 
 `ObjectInfo` reports `Key`, `Size`, `ContentType`, `Metadata`, `ModTime`, and
 `ETag`. `Stat` and `Open` always report `ModTime`. The `ObjectInfo` that `Put`
@@ -78,8 +81,12 @@ of the bytes where the driver has one, and is empty otherwise.
 
 `URL(ctx, key, storage.PublicURL())` asks for a permanent public URL.
 `URL(ctx, key, storage.SignedURL(15*time.Minute))` asks for one that stops
-working after 15 minutes. A driver without a URL scheme returns
-`ErrUnsupported`. `URL` does not check that the object exists, and it does not
+working after 15 minutes. A signed URL needs a positive lifetime:
+`SignedURL(0)` is refused with `ErrInvalidOptions`, never quietly turned into
+a permanent URL. A driver without a URL scheme returns `ErrUnsupported`.
+
+`URL` doesn't check that the object exists, since a URL for an upload names
+a key that isn't stored yet, and the suite checks that. It also doesn't
 authorize anyone: decide who may have the URL before asking for it.
 Visibility and signed URLs are specified fully in STORAGE-5.
 
@@ -92,8 +99,9 @@ development works in production:
 - 1 to 1024 bytes of valid UTF-8, with no segment longer than 255 bytes
   (the file-name limit of the filesystems under services such as MinIO);
 - no leading or trailing `/`, and no empty segment (`a//b`);
-- no `.` or `..` segment, so a key can never climb out of a prefix or, on the
-  local driver, out of the storage root;
+- no segment that is `.` or `..`, or that ends with `.` or a space. Windows
+  strips a trailing dot or space from a path component, so `...` or `.. `
+  would become `..` on a filesystem there, and `a.` would collide with `a`;
 - no backslash, no control character (including the C1 range), and no
   Unicode line separator or bidirectional control. Those can split a log line
   or disguise a name in a listing, as in `invoice\u202efdp.exe`.
@@ -164,7 +172,9 @@ Helpers for drivers:
 - A filesystem driver cannot just join the key to a directory. That would
   conflate case variants, and it can't hold both `a` and `a/b`. Map keys to
   paths in a way that keeps every key distinct.
-- `ExpectSize` enforces a declared `Size` on a reader.
+- `ExpectSize` enforces a declared `Size` on a reader. It reports excess on
+  the read that reaches the size, but read it to EOF (`io.Copy`), because
+  `io.ReadFull` and `io.CopyN` drop an error returned with the last bytes.
 - `Wrap` builds the `*storage.Error`.
 
 The `storage` package imports only the standard library and Gombit's
