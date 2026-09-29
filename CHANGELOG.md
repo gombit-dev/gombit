@@ -10,6 +10,23 @@ version.
 
 ## [Unreleased]
 
+### Added
+
+- `storage`, the object storage contract (STORAGE-1). It provides:
+  - a driver-neutral `storage.Storage` with `Put`, `Open`, `Stat`, `Delete`
+    and `URL`, streaming through `io.Reader`/`io.ReadCloser`;
+  - atomic writes: a failed or canceled `Put` leaves the key as it was;
+  - idempotent deletes;
+  - one portable key rule (`ValidateKey`), which rejects `..`, leading `/`,
+    backslashes and control characters;
+  - classified errors (`ErrNotFound`, `ErrInvalidKey`, `ErrInvalidOptions`,
+    `ErrSizeMismatch`, `ErrUnsupported`, `ErrUnavailable`), which `MapError`
+    turns into D10 responses;
+  - `storage/storagetest`, the conformance suite every driver must pass.
+
+  No driver ships yet; local, in-memory and S3-compatible drivers follow in
+  STORAGE-2/3 ([#323](https://github.com/gombit-dev/gombit/issues/323)).
+
 ### Changed
 
 - A new app's `.env.example` lists every `GOMBIT_*` variable the config

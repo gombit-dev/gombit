@@ -1,0 +1,114 @@
+package storage
+
+import (
+	"context"
+	"errors"
+	"io"
+	"time"
+)
+
+// Storage is the driver-neutral object storage contract. Application code
+// depends on it, never on a driver's API (a filesystem path, an S3 SDK
+// call), so switching drivers changes configuration, not code.
+//
+// Every method validates its key with ValidateKey and fails with
+// ErrInvalidKey before touching the backend. Every method honors ctx.
+//
+// Implementations must pass the storagetest conformance suite.
+type Storage interface {
+	// Put stores the bytes read from r under key, replacing any object
+	// already there. It streams: r is read to EOF in pieces, never required
+	// to be seekable or of known length.
+	//
+	// Put is atomic. When it fails (r returns an error, ctx ends, the
+	// length differs from a declared opts.Size), key keeps the object it
+	// had before, or stays absent; no reader ever sees a partial object.
+	// Concurrent Puts to one key leave one of them whole (the last to
+	// finish wins).
+	Put(ctx context.Context, key string, r io.Reader, opts PutOptions) (ObjectInfo, error)
+
+	// Open returns the object's bytes as a stream, and its ObjectInfo. The
+	// caller must Close the reader. A missing object is ErrNotFound.
+	Open(ctx context.Context, key string) (io.ReadCloser, ObjectInfo, error)
+
+	// Stat returns the object's ObjectInfo without its bytes. A missing
+	// object is ErrNotFound.
+	Stat(ctx context.Context, key string) (ObjectInfo, error)
+
+	// Delete removes the object. Deleting a missing object is not an error,
+	// so a retried Delete is safe.
+	Delete(ctx context.Context, key string) error
+
+	// URL returns a URL a client can fetch the object from: a public URL,
+	// or a signed one that expires (see URLOptions). A driver that cannot
+	// produce one returns ErrUnsupported. URL does not check that the
+	// object exists, and it does not authorize anyone: decide who may have
+	// the URL before asking for it.
+	URL(ctx context.Context, key string, opts URLOptions) (string, error)
+}
+
+// DefaultContentType is the content type of an object stored without one.
+const DefaultContentType = "application/octet-stream"
+
+// PutOptions describes an object being stored.
+type PutOptions struct {
+	// ContentType is the object's media type ("image/png"). Empty stores
+	// DefaultContentType. It must parse as a media type.
+	ContentType string
+
+	// Size, when positive, is the exact length r will produce. Put then
+	// fails with ErrSizeMismatch, storing nothing, if r ends early or runs
+	// long. Zero means unknown: Put reads r to EOF.
+	Size int64
+
+	// Metadata is small user metadata stored with the object and returned
+	// in its ObjectInfo. Names are lower-case ASCII letters, digits, and
+	// '-'; values are UTF-8 without control characters; together at most
+	// MaxMetadataBytes. See ValidateMetadata.
+	Metadata map[string]string
+}
+
+// ObjectInfo describes a stored object.
+type ObjectInfo struct {
+	// Key is the object's key.
+	Key string
+	// Size is the object's length in bytes.
+	Size int64
+	// ContentType is the object's media type (DefaultContentType when it
+	// was stored without one).
+	ContentType string
+	// ETag identifies this version of the object's bytes, when the driver
+	// has one (a content hash or the backend's ETag); it changes when the
+	// object is replaced with different bytes. Empty when unsupported.
+	ETag string
+	// ModTime is when the object was last stored.
+	ModTime time.Time
+	// Metadata is the user metadata the object was stored with (nil when
+	// none).
+	Metadata map[string]string
+}
+
+// URLOptions chooses the kind of URL URL returns.
+type URLOptions struct {
+	// Expires, when positive, asks for a signed URL valid for that long.
+	// Zero asks for a permanent public URL. Negative is ErrInvalidOptions.
+	Expires time.Duration
+}
+
+// PublicURL asks for a permanent URL to an object readable without
+// credentials.
+func PublicURL() URLOptions { return URLOptions{} }
+
+// SignedURL asks for a URL that grants access to the object until ttl has
+// passed.
+func SignedURL(ttl time.Duration) URLOptions { return URLOptions{Expires: ttl} }
+
+// Exists reports whether key holds an object: Stat, with ErrNotFound as
+// false.
+func Exists(ctx context.Context, s Storage, key string) (bool, error) {
+	_, err := s.Stat(ctx, key)
+	if errors.Is(err, ErrNotFound) {
+		return false, nil
+	}
+	return err == nil, err
+}
