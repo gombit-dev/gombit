@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/gombit-dev/gombit/config"
+	"github.com/gombit-dev/gombit/contract"
 	"github.com/gombit-dev/gombit/storage"
 	"github.com/gombit-dev/gombit/storage/local"
 	"github.com/gombit-dev/gombit/storage/memory"
@@ -110,17 +111,59 @@ func storageSigner(cfg config.Config) (*presign.Signer, error) {
 		_, _ = mac.Write([]byte(storageURLSecretLabel))
 		secret = mac.Sum(nil)
 	}
-	signer, err := presign.New(presign.Config{Base: st.Local.URL, Secret: secret, PublicPrefix: st.PublicPrefix})
+	signer, err := presign.New(presign.Config{
+		Base:         st.Local.URL,
+		Secret:       secret,
+		PublicPrefix: st.PublicPrefix,
+		// A URL opens only this app in this environment, even where
+		// several share a JWT secret.
+		Scope: cfg.AppName + "\x00" + string(cfg.Environment),
+	})
 	if err != nil {
 		return nil, fmt.Errorf("framework: storage URLs: %w", err)
+	}
+	if err := checkStorageURLPath(signer.Path(), cfg.API.Prefix); err != nil {
+		return nil, err
 	}
 	return signer, nil
 }
 
+// frameworkPaths are the routes framework.New serves itself (and the
+// OpenAPI documents, every path starting with contract.OpenAPIPath).
+var frameworkPaths = []string{"/livez", "/readyz", "/metrics", "/admin", contract.DocsPath}
+
+// checkStorageURLPath refuses a storage URL path that overlaps the API or
+// a framework route, which would shadow them (or make the router panic).
+func checkStorageURLPath(path, apiPrefix string) error {
+	overlaps := func(a, b string) bool {
+		return a == b || strings.HasPrefix(a, b+"/") || strings.HasPrefix(b, a+"/")
+	}
+	reserved := frameworkPaths
+	if p := strings.TrimSuffix(apiPrefix, "/"); p != "" {
+		reserved = append([]string{p}, reserved...)
+	}
+	for _, r := range reserved {
+		if overlaps(path, r) {
+			return fmt.Errorf("framework: GOMBIT_STORAGE_LOCAL_URL serves under %q, which overlaps %q; choose a path of its own, such as /_storage", path, r)
+		}
+	}
+	if strings.HasPrefix(path, contract.OpenAPIPath) {
+		return fmt.Errorf("framework: GOMBIT_STORAGE_LOCAL_URL serves under %q, which overlaps the OpenAPI documents (%s*)", path, contract.OpenAPIPath)
+	}
+	return nil
+}
+
 // mountStorageURLs serves the objects of store at signer's URLs on router
-// (GET and HEAD under signer.Path()).
-func mountStorageURLs(router *gin.Engine, store storage.Storage, signer *presign.Signer) {
+// (GET and HEAD under signer.Path()). A path the router cannot take (it
+// conflicts with a route already there) is an error, not a panic.
+func mountStorageURLs(router *gin.Engine, store storage.Storage, signer *presign.Signer) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("framework: GOMBIT_STORAGE_LOCAL_URL %q conflicts with a route: %v", signer.Path(), r)
+		}
+	}()
 	h := gin.WrapH(presign.Handler(store, signer))
 	router.GET(signer.Path()+"/*key", h)
 	router.HEAD(signer.Path()+"/*key", h)
+	return nil
 }

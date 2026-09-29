@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 const (
@@ -1032,8 +1034,8 @@ func ValidateStorage(cfg StorageConfig) error {
 }
 
 func validateStorageConfig(errs *FieldErrors, cfg StorageConfig) {
-	if p := cfg.PublicPrefix; p != "" && (!strings.HasSuffix(p, "/") || strings.HasPrefix(p, "/") || strings.Contains(p, "//") || strings.Contains(p, "..") || strings.Contains(p, `\`)) {
-		*errs = append(*errs, FieldError{Field: "Storage.PublicPrefix", Env: envStoragePublicPrefix, Value: p, Message: "must be empty (no public objects) or end with '/', and not start with '/' or contain '//', '..', or a backslash"})
+	if p := cfg.PublicPrefix; p != "" && !validKeyPrefix(p) {
+		*errs = append(*errs, FieldError{Field: "Storage.PublicPrefix", Env: envStoragePublicPrefix, Value: p, Message: "must be empty (no public objects) or a key path ending with '/': segments without '.', '..', a trailing '.' or space, a backslash, or control characters"})
 	}
 	if cfg.URLSecret != "" && len(cfg.URLSecret) < MinStorageURLSecretLength {
 		// Never echo the value: it is a secret.
@@ -1062,6 +1064,27 @@ func validateStorageConfig(errs *FieldErrors, cfg StorageConfig) {
 			Message: "must be one of local, memory, s3",
 		})
 	}
+}
+
+// validKeyPrefix reports whether p is a key path ending with '/', by the
+// storage package's key rules (storage.ValidatePublicPrefix, which config
+// does not import): no empty, "." or ".." segment, none ending in '.' or a
+// space, no backslash or control character.
+func validKeyPrefix(p string) bool {
+	if !strings.HasSuffix(p, "/") || len(p) > 1024 {
+		return false
+	}
+	for _, seg := range strings.Split(strings.TrimSuffix(p, "/"), "/") {
+		if seg == "" || seg == "." || seg == ".." || strings.HasSuffix(seg, ".") || strings.HasSuffix(seg, " ") || len(seg) > 255 || strings.ContainsRune(seg, '\\') || !utf8.ValidString(seg) {
+			return false
+		}
+		for _, r := range seg {
+			if unicode.IsControl(r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r) || unicode.Is(unicode.Bidi_Control, r) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // validateStorageLocalURL checks where the local and memory drivers' URLs

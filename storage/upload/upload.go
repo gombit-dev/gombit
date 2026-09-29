@@ -47,8 +47,8 @@ const (
 	// when Policy.Field is empty.
 	DefaultField = "file"
 	// FilenameMetadata is the metadata name the client's filename, cleaned,
-	// is stored under.
-	FilenameMetadata = "filename"
+	// is stored under (storage.FilenameMetadata).
+	FilenameMetadata = storage.FilenameMetadata
 	// MaxFilenameBytes bounds the stored filename; a longer one is cut at a
 	// character boundary.
 	MaxFilenameBytes = 255

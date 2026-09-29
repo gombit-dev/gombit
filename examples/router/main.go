@@ -4,8 +4,8 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/gombit-dev/gombit/framework"
 	"github.com/gin-gonic/gin"
+	"github.com/gombit-dev/gombit/framework"
 )
 
 // registerPingRoutes stands in for a feature package's routes.go,

@@ -209,6 +209,30 @@ func TestExpiryRoundsUp(t *testing.T) {
 	}
 }
 
+func TestSignersWithDifferentScopesDisagree(t *testing.T) {
+	c := &clock{t: time.Unix(1000, 0)}
+	mk := func(scope, base string) *presign.Signer {
+		s, err := presign.New(presign.Config{Base: base, Secret: secret, Scope: scope, Now: c.now})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	u, _ := mk("app\x00staging", "/_storage").URL("private/k", storage.SignedURL(time.Hour))
+	parsed, _ := url.Parse(u)
+	for name, other := range map[string]*presign.Signer{
+		"another scope": mk("app\x00production", "/_storage"),
+		"another path":  mk("app\x00staging", "/files"),
+	} {
+		if err := other.Verify("private/k", parsed.Query()); !errors.Is(err, presign.ErrSignature) {
+			t.Errorf("%s accepted the URL: %v", name, err)
+		}
+	}
+	if err := mk("app\x00staging", "/_storage").Verify("private/k", parsed.Query()); err != nil {
+		t.Fatalf("the same scope = %v", err)
+	}
+}
+
 func TestSignersWithDifferentSecretsDisagree(t *testing.T) {
 	c := &clock{t: time.Unix(1000, 0)}
 	a := newSigner(t, c)

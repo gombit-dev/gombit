@@ -153,11 +153,19 @@ when the files are served from another address. Its behavior:
   `X-Content-Type-Options: nosniff` and `Content-Security-Policy: sandbox`.
   An uploaded HTML or SVG file therefore cannot run script in the app's
   origin.
+- Byte ranges and conditional requests (`ETag`, `If-None-Match`) work as
+  they do on S3, so media seeks and downloads resume.
+- The path must be the route's own: one that overlaps the API prefix,
+  `/admin`, the health or metrics routes, the docs, or the OpenAPI documents
+  fails `framework.New`.
 
 URLs are signed with `GOMBIT_STORAGE_URL_SECRET` (at least 32 bytes). When
 that is unset, the key is derived from `GOMBIT_JWT_SECRET`. With neither
 secret, or with `GOMBIT_STORAGE_LOCAL_URL` empty, `URL` returns
-`ErrUnsupported`. Changing the secret invalidates every URL signed with it.
+`ErrUnsupported`. A signature also covers the app's name and environment and
+the URL's path, so staging and production never accept each other's URLs,
+even with the same JWT secret. Changing the secret, the name, or the
+environment invalidates every URL signed before.
 An app that passes its own store with `framework.WithStorage` builds a
 `presign.Signer`, passes it to `local.WithURLs` or `memory.WithURLs`, and
 mounts `presign.Handler` itself.

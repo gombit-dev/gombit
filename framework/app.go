@@ -194,7 +194,9 @@ func New(options ...Option) (*App, error) {
 			// The local and memory drivers' URLs, served by the app. An app
 			// that passes its own store (WithStorage) mounts presign.Handler
 			// itself if it wants them.
-			mountStorageURLs(app.router, store, signer)
+			if err := mountStorageURLs(app.router, store, signer); err != nil {
+				return nil, err
+			}
 		}
 	}
 	if app.cfg.Auth.Enabled() {

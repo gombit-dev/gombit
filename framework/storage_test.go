@@ -7,12 +7,14 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 
@@ -210,7 +212,7 @@ func TestStorageURLKeyIsDerivedFromTheJWTSecret(t *testing.T) {
 	// (which would break every link already handed out) is deliberate.
 	mac := hmac.New(sha256.New, []byte(cfg.Auth.JWTSecret))
 	_, _ = mac.Write([]byte("gombit storage url signing key v1"))
-	pinned, err := presign.New(presign.Config{Base: config.DefaultStorageLocalURL, Secret: mac.Sum(nil), PublicPrefix: cfg.Storage.PublicPrefix})
+	pinned, err := presign.New(presign.Config{Base: config.DefaultStorageLocalURL, Secret: mac.Sum(nil), PublicPrefix: cfg.Storage.PublicPrefix, Scope: cfg.AppName + "\x00" + string(cfg.Environment)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,5 +222,81 @@ func TestStorageURLKeyIsDerivedFromTheJWTSecret(t *testing.T) {
 	cfg.Storage.Local.URL = ""
 	if s, err := storageSigner(cfg); s != nil || err != nil {
 		t.Fatalf("no local URL = %v, %v; want no signer", s, err)
+	}
+}
+
+// TestStorageURLsAreScopedToTheApp: apps sharing a secret (staging and
+// production with one JWT secret) do not accept each other's URLs.
+func TestStorageURLsAreScopedToTheApp(t *testing.T) {
+	cfg := config.Default()
+	cfg.Auth.JWTSecret = strings.Repeat("j", 32)
+	staging, _ := storageSigner(cfg)
+	cfg.Environment = config.EnvironmentProduction
+	production, _ := storageSigner(cfg)
+	u, _ := staging.URL("private/k", storage.SignedURL(time.Hour))
+	parsed, _ := url.Parse(u)
+	if err := production.Verify("private/k", parsed.Query()); !errors.Is(err, presign.ErrSignature) {
+		t.Fatalf("production accepted a staging URL: %v", err)
+	}
+}
+
+func TestStorageURLPathMayNotShadowTheFramework(t *testing.T) {
+	for _, path := range []string{"/api", "/api/v1/files", "/admin", "/admin/files", "/livez", "/docs", "/openapi.json", "/openapi"} {
+		cfg := config.Default()
+		cfg.Storage.Driver = config.StorageDriverMemory
+		cfg.Storage.URLSecret = strings.Repeat("u", 32)
+		cfg.Storage.Local.URL = path
+		if _, err := New(WithConfig(cfg)); err == nil || !strings.Contains(err.Error(), "GOMBIT_STORAGE_LOCAL_URL") {
+			t.Errorf("GOMBIT_STORAGE_LOCAL_URL=%s = %v, want an error naming the setting", path, err)
+		}
+	}
+	// A route the app already has is an error from New, not a panic.
+	cfg := config.Default()
+	cfg.Storage.Driver = config.StorageDriverMemory
+	cfg.Storage.URLSecret = strings.Repeat("u", 32)
+	cfg.Storage.Local.URL = "/files"
+	r := gin.New()
+	r.GET("/files/:id", func(*gin.Context) {})
+	if _, err := New(WithConfig(cfg), WithRouter(r)); err == nil || !strings.Contains(err.Error(), "conflicts") {
+		t.Fatalf("a conflicting route = %v", err)
+	}
+}
+
+// TestStorageURLsServeRangesAndHEAD, at an absolute GOMBIT_STORAGE_LOCAL_URL
+// (mounted at its path, URLs carrying the host).
+func TestStorageURLsServeRangesAndHEAD(t *testing.T) {
+	cfg := config.Default()
+	cfg.Storage.Driver = config.StorageDriverMemory
+	cfg.Storage.URLSecret = strings.Repeat("u", 32)
+	cfg.Storage.Local.URL = "https://files.example.com/blobs"
+	app := newTestApp(t, WithConfig(cfg))
+	ctx := context.Background()
+	if _, err := app.Storage().Put(ctx, "private/video.bin", strings.NewReader("0123456789"), storage.PutOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	u, err := app.Storage().URL(ctx, "private/video.bin", storage.SignedURL(time.Minute))
+	if err != nil || !strings.HasPrefix(u, "https://files.example.com/blobs/private/video.bin?") {
+		t.Fatalf("URL = %q, %v", u, err)
+	}
+	path := strings.TrimPrefix(u, "https://files.example.com")
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	req.Header.Set("Range", "bytes=2-5")
+	w := httptest.NewRecorder()
+	app.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusPartialContent || w.Body.String() != "2345" {
+		t.Fatalf("Range GET = %d %q", w.Code, w.Body)
+	}
+	w = httptest.NewRecorder()
+	app.Router().ServeHTTP(w, httptest.NewRequest(http.MethodHead, path, nil))
+	if w.Code != http.StatusOK || w.Body.Len() != 0 || w.Header().Get("Content-Length") != "10" {
+		t.Fatalf("HEAD = %d, %d bytes, length %q", w.Code, w.Body.Len(), w.Header().Get("Content-Length"))
+	}
+	etag := w.Header().Get("ETag")
+	req = httptest.NewRequest(http.MethodGet, path, nil)
+	req.Header.Set("If-None-Match", etag)
+	w = httptest.NewRecorder()
+	app.Router().ServeHTTP(w, req)
+	if etag == "" || w.Code != http.StatusNotModified {
+		t.Fatalf("conditional GET (ETag %q) = %d", etag, w.Code)
 	}
 }

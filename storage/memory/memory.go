@@ -60,6 +60,11 @@ func New(opts ...Option) *Store {
 
 var _ storage.Storage = (*Store)(nil)
 
+// reader is an object's bytes, seekable (for Range requests).
+type reader struct{ *bytes.Reader }
+
+func (reader) Close() error { return nil }
+
 // Put implements storage.Storage. The object is read completely before it
 // replaces the old one, so a failed Put changes nothing.
 func (s *Store) Put(ctx context.Context, key string, r io.Reader, opts storage.PutOptions) (storage.ObjectInfo, error) {
@@ -123,7 +128,7 @@ func (s *Store) Open(ctx context.Context, key string) (io.ReadCloser, storage.Ob
 	if err != nil {
 		return nil, storage.ObjectInfo{}, err
 	}
-	return io.NopCloser(bytes.NewReader(o.data)), copyInfo(o.info), nil
+	return reader{bytes.NewReader(o.data)}, copyInfo(o.info), nil
 }
 
 // Stat implements storage.Storage.

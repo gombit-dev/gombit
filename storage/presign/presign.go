@@ -31,7 +31,6 @@ import (
 
 	"github.com/gombit-dev/gombit/contract"
 	"github.com/gombit-dev/gombit/storage"
-	"github.com/gombit-dev/gombit/storage/upload"
 )
 
 // MinSecretBytes is the shortest Secret a Signer accepts.
@@ -57,6 +56,11 @@ type Config struct {
 	// PublicPrefix makes the keys under it public (storage.IsPublic): their
 	// URLs need no signature. Empty makes no object public.
 	PublicPrefix string
+	// Scope is signed into every URL, so a URL works only on Signers with
+	// the same Scope and Secret: set it to what tells apps sharing a secret
+	// apart (framework.New uses the app's name and environment, so a
+	// staging URL does not open production's object of the same key).
+	Scope string
 	// Now is the clock (time.Now when nil), for tests.
 	Now func() time.Time
 }
@@ -67,6 +71,7 @@ type Signer struct {
 	path   string // the path of base, where Handler is mounted
 	secret []byte
 	public string
+	scope  string
 	now    func() time.Time
 }
 
@@ -94,7 +99,7 @@ func New(cfg Config) (*Signer, error) {
 	if now == nil {
 		now = time.Now
 	}
-	return &Signer{base: cfg.Base, path: u.Path, secret: append([]byte(nil), cfg.Secret...), public: cfg.PublicPrefix, now: now}, nil
+	return &Signer{base: cfg.Base, path: u.Path, secret: append([]byte(nil), cfg.Secret...), public: cfg.PublicPrefix, scope: cfg.Scope, now: now}, nil
 }
 
 // Path is the URL path Handler serves under (the path of Base).
@@ -131,9 +136,10 @@ func (s *Signer) URL(key string, opts storage.URLOptions) (string, error) {
 // seconds).
 func (s *Signer) sign(key, expires string) string {
 	mac := hmac.New(sha256.New, s.secret)
-	// The key cannot contain a NUL byte (ValidateKey refuses control
-	// characters), so the message splits one way only.
-	_, _ = io.WriteString(mac, "gombit-storage-url-v1\x00"+key+"\x00"+expires)
+	// Each part is length-prefixed, so the message splits one way only.
+	for _, part := range []string{"gombit-storage-url-v2", s.scope, s.path, key, expires} {
+		_, _ = io.WriteString(mac, strconv.Itoa(len(part))+":"+part)
+	}
 	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
@@ -165,7 +171,9 @@ func (s *Signer) Verify(key string, q url.Values) error {
 // on s.Path() + "/" + key. A private object needs a valid signed URL
 // (403 otherwise), a missing one is 404, and errors are D10 envelopes.
 //
-// Objects are served as the store has them, inline, with
+// Objects are served as the store has them, inline (with byte ranges and
+// conditional requests when the store's reader can seek, as the local and
+// memory drivers' can), with
 // "X-Content-Type-Options: nosniff" and a sandboxing
 // Content-Security-Policy, so an uploaded HTML or SVG file served from the
 // application's origin cannot run script there. A signed URL's response
@@ -196,16 +204,12 @@ func Handler(store storage.Storage, s *Signer) http.Handler {
 		defer func() { _ = body.Close() }()
 		h := w.Header()
 		h.Set("Content-Type", info.ContentType)
-		h.Set("Content-Length", strconv.FormatInt(info.Size, 10))
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Content-Security-Policy", "default-src 'none'; sandbox")
 		if info.ETag != "" {
 			h.Set("ETag", strconv.Quote(info.ETag))
 		}
-		if !info.ModTime.IsZero() {
-			h.Set("Last-Modified", info.ModTime.UTC().Format(http.TimeFormat))
-		}
-		if name := info.Metadata[upload.FilenameMetadata]; name != "" {
+		if name := info.Metadata[storage.FilenameMetadata]; name != "" {
 			if d := mime.FormatMediaType("inline", map[string]string{"filename": name}); d != "" {
 				h.Set("Content-Disposition", d)
 			}
@@ -216,6 +220,16 @@ func Handler(store storage.Storage, s *Signer) http.Handler {
 			expires, _ := strconv.ParseInt(q.Get("expires"), 10, 64)
 			left := math.Max(0, time.Unix(expires, 0).Sub(s.now()).Seconds())
 			h.Set("Cache-Control", "private, max-age="+strconv.Itoa(int(left)))
+		}
+		if rs, ok := body.(io.ReadSeeker); ok {
+			// Ranges (media seeking, resumed downloads), conditional
+			// requests on the ETag and ModTime, and HEAD, as S3 serves them.
+			http.ServeContent(w, r, "", info.ModTime, rs)
+			return
+		}
+		h.Set("Content-Length", strconv.FormatInt(info.Size, 10))
+		if !info.ModTime.IsZero() {
+			h.Set("Last-Modified", info.ModTime.UTC().Format(http.TimeFormat))
 		}
 		w.WriteHeader(http.StatusOK)
 		if r.Method == http.MethodGet {

@@ -6,6 +6,11 @@ import (
 	"time"
 )
 
+// FilenameMetadata is the metadata name of an object's filename, for
+// display and Content-Disposition (storage/upload stores the client's
+// filename under it; presign.Handler serves it).
+const FilenameMetadata = "filename"
+
 // MaxURLExpiry is the longest a signed URL may live: S3's limit for a
 // presigned URL (SigV4), applied on every driver so a lifetime that works
 // in development works in production.

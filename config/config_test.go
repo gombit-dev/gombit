@@ -1107,15 +1107,17 @@ func TestStorageURLSettings(t *testing.T) {
 		t.Fatalf("redacted URL secret = %q", got)
 	}
 	for name, sc := range map[string]StorageConfig{
-		"public prefix without '/'": {Driver: StorageDriverMemory, PublicPrefix: "public"},
-		"public prefix traversal":   {Driver: StorageDriverMemory, PublicPrefix: "../public/"},
-		"short URL secret":          {Driver: StorageDriverMemory, URLSecret: "short"},
-		"relative local URL":        {Driver: StorageDriverLocal, Local: LocalStorageConfig{Root: "s", URL: "_storage"}},
-		"local URL trailing slash":  {Driver: StorageDriverLocal, Local: LocalStorageConfig{Root: "s", URL: "/_storage/"}},
-		"local URL root":            {Driver: StorageDriverLocal, Local: LocalStorageConfig{Root: "s", URL: "/"}},
-		"local URL with a query":    {Driver: StorageDriverMemory, Local: LocalStorageConfig{URL: "/_storage?x=1"}},
-		"local URL scheme":          {Driver: StorageDriverMemory, Local: LocalStorageConfig{URL: "ftp://h/_storage"}},
-		"S3 public URL":             {Driver: StorageDriverS3, S3: S3StorageConfig{Bucket: "b", Region: "r", PublicURL: "cdn.example.com"}},
+		"public prefix without '/'":  {Driver: StorageDriverMemory, PublicPrefix: "public"},
+		"public prefix traversal":    {Driver: StorageDriverMemory, PublicPrefix: "../public/"},
+		"public prefix trailing dot": {Driver: StorageDriverMemory, PublicPrefix: "pub./"},
+		"public prefix control":      {Driver: StorageDriverMemory, PublicPrefix: "pub\x01/"},
+		"short URL secret":           {Driver: StorageDriverMemory, URLSecret: "short"},
+		"relative local URL":         {Driver: StorageDriverLocal, Local: LocalStorageConfig{Root: "s", URL: "_storage"}},
+		"local URL trailing slash":   {Driver: StorageDriverLocal, Local: LocalStorageConfig{Root: "s", URL: "/_storage/"}},
+		"local URL root":             {Driver: StorageDriverLocal, Local: LocalStorageConfig{Root: "s", URL: "/"}},
+		"local URL with a query":     {Driver: StorageDriverMemory, Local: LocalStorageConfig{URL: "/_storage?x=1"}},
+		"local URL scheme":           {Driver: StorageDriverMemory, Local: LocalStorageConfig{URL: "ftp://h/_storage"}},
+		"S3 public URL":              {Driver: StorageDriverS3, S3: S3StorageConfig{Bucket: "b", Region: "r", PublicURL: "cdn.example.com"}},
 	} {
 		if err := ValidateStorage(sc); err == nil {
 			t.Errorf("%s: ValidateStorage(%+v) = nil", name, sc)

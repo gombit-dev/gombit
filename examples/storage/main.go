@@ -142,6 +142,11 @@ func register(r gin.IRouter, store storage.Storage) {
 			return
 		}
 		u, err := store.URL(c.Request.Context(), key, storage.SignedURL(linkLifetime))
+		if errors.Is(err, storage.ErrUnsupported) {
+			// No signing key is configured (see the package comment).
+			fail(c, contract.Internal("Download links are not configured on this server."))
+			return
+		}
 		if err != nil {
 			fail(c, storage.MapError(c.Request.Context(), err, "file not found", "could not make a link"))
 			return
