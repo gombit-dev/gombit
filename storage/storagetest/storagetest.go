@@ -548,11 +548,12 @@ func checkCanceledPut(t testing.TB, s storage.Storage) {
 
 	// Canceled while a source Read is blocked: Put cannot interrupt that
 	// Read (the contract), but once it returns, the Put fails with ctx's
-	// error and stores nothing, even though the source then ends cleanly.
+	// error and stores nothing. The blocked Read is the source's last: it
+	// returns a clean EOF, which must not win over the cancellation.
 	ctx, cancel = context.WithCancel(context.Background())
 	defer cancel()
 	g := &gate{started: make(chan struct{}), release: make(chan struct{})}
-	src := io.MultiReader(strings.NewReader("blocked-first-half"), g, strings.NewReader("-second-half"))
+	src := io.MultiReader(strings.NewReader("blocked-first-half"), g)
 	done = make(chan error, 1)
 	go func() {
 		_, err := s.Put(ctx, "blocked", src, storage.PutOptions{})
