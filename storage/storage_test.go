@@ -76,11 +76,12 @@ func TestValidatePutOptions(t *testing.T) {
 		{Size: storage.KnownSize(0)},
 		{ContentType: "text/plain; charset=utf-8"},
 		{Metadata: map[string]string{"original-name": "résumé final.pdf", "v2": ""}},
-		{Metadata: map[string]string{"n": strings.Repeat("v", storage.MaxMetadataBytes-1)}},
+		// "x-amz-meta-n" (12) + 2036 = 2048, as MinIO counts it.
+		{Metadata: map[string]string{"n": strings.Repeat("v", 2036)}},
 		// 1 + 341 × 2 bytes × 3 = 2047: fits once percent-encoded.
-		// 1 + 12 + base64(762 × 2 bytes) = 1 + 12 + 2032 = 2045 on the wire.
-		{Metadata: map[string]string{"n": strings.Repeat("é", 762)}},
-		{Metadata: map[string]string{"n": strings.Repeat("%", storage.MaxMetadataBytes-1)}},
+		// 12 + 12 + base64(759 × 2 bytes) = 12 + 12 + 2024 = 2048 as sent.
+		{Metadata: map[string]string{"n": strings.Repeat("é", 759)}},
+		{Metadata: map[string]string{"n": strings.Repeat("%", 2036)}},
 	}
 	for _, opts := range ok {
 		if err := storage.ValidatePutOptions(opts); err != nil {
@@ -101,8 +102,9 @@ func TestValidatePutOptions(t *testing.T) {
 		{Metadata: map[string]string{"ok": "tab\there"}},
 		{Metadata: map[string]string{"ok": "bad\xffutf8"}},
 		{Metadata: map[string]string{"n": strings.Repeat("v", storage.MaxMetadataBytes)}},
-		// 1 + 12 + base64(763 × 2 bytes) = 1 + 12 + 2036 = 2049 on the wire.
-		{Metadata: map[string]string{"n": strings.Repeat("é", 763)}},
+		// 12 + 12 + base64(760 × 2 bytes) = 12 + 12 + 2028 = 2052 as sent.
+		{Metadata: map[string]string{"n": strings.Repeat("é", 760)}},
+		{Metadata: map[string]string{"n": strings.Repeat("v", 2037)}},
 		// Printable ASCII that would read as an encoded word is sent encoded.
 		{Metadata: map[string]string{"n": "=?" + strings.Repeat("a", 1600)}},
 		{Metadata: map[string]string{"n": "bidi\u202eflip"}},
