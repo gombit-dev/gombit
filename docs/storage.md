@@ -67,11 +67,11 @@ err = store.Delete(ctx, "avatars/42.png")
   non-empty body.
 - **`Metadata`** is small user metadata returned in `ObjectInfo` exactly as
   given. Names are lower-case ASCII letters, digits and `-`. Values are UTF-8
-  without control characters. The limit is 2 KiB for names and values
-  together, measured as the headers of an S3 request: each header name
-  (`x-amz-meta-` plus the name) and its value as sent. A printable-ASCII
-  value counts as is. Any other value counts as its RFC 2047 encoding, S3's
-  own for non-ASCII metadata, which adds about a third plus 12 bytes
+  without control characters, and without `=?`, which starts an RFC 2047
+  encoded word. The limit is 2 KiB, measured as the headers of an S3 request:
+  each header name (`x-amz-meta-` plus the name) and its value as sent. A
+  printable-ASCII value counts as is. Any other value counts as its RFC 2047
+  encoding (`mime.BEncoding`), S3's own for non-ASCII metadata
   (`storage.MetadataValueWireLen`). That is the strictest measure among S3
   services: MinIO counts exactly this, AWS the decoded UTF-8. Keep a
   client's original filename here, never in the key.
@@ -175,10 +175,9 @@ way it guards against. A new check can't land without such a driver.
 Helpers for drivers:
 - `ValidateKey`, `ValidatePutOptions` and `ValidateURLOptions` apply the shared
   rules.
-- A backend that carries only ASCII metadata (S3 headers) must encode
-  values the way `storage.MetadataValueWireLen` measures them: RFC 2047
-  base64 for anything that isn't printable ASCII. The size limit counts that
-  encoding.
+- A backend that carries only ASCII metadata (S3 headers) must send a value
+  that isn't printable ASCII as `mime.BEncoding.Encode("UTF-8", value)`,
+  exactly what `storage.MetadataValueWireLen` measures.
 - A filesystem driver cannot just join the key to a directory. That would
   conflate case variants, and it can't hold both `a` and `a/b`. Map keys to
   paths in a way that keeps every key distinct.

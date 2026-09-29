@@ -5,6 +5,7 @@ import (
 	"errors"
 	"go/build"
 	"io"
+	"mime"
 	"net/http"
 	"strings"
 	"testing"
@@ -78,9 +79,8 @@ func TestValidatePutOptions(t *testing.T) {
 		{Metadata: map[string]string{"original-name": "résumé final.pdf", "v2": ""}},
 		// "x-amz-meta-n" (12) + 2036 = 2048, as MinIO counts it.
 		{Metadata: map[string]string{"n": strings.Repeat("v", 2036)}},
-		// 1 + 341 × 2 bytes × 3 = 2047: fits once percent-encoded.
-		// 12 + 12 + base64(759 × 2 bytes) = 12 + 12 + 2024 = 2048 as sent.
-		{Metadata: map[string]string{"n": strings.Repeat("é", 759)}},
+		{Metadata: map[string]string{"n": strings.Repeat("é", maxRunes("é"))}},
+		// Printable ASCII is sent as is: '%' counts one byte.
 		{Metadata: map[string]string{"n": strings.Repeat("%", 2036)}},
 	}
 	for _, opts := range ok {
@@ -107,11 +107,10 @@ func TestValidatePutOptions(t *testing.T) {
 		{Metadata: map[string]string{"ok": "tab\there"}},
 		{Metadata: map[string]string{"ok": "bad\xffutf8"}},
 		{Metadata: map[string]string{"n": strings.Repeat("v", storage.MaxMetadataBytes)}},
-		// 12 + 12 + base64(760 × 2 bytes) = 12 + 12 + 2028 = 2052 as sent.
-		{Metadata: map[string]string{"n": strings.Repeat("é", 760)}},
+		{Metadata: map[string]string{"n": strings.Repeat("é", maxRunes("é")+1)}},
 		{Metadata: map[string]string{"n": strings.Repeat("v", 2037)}},
-		// Printable ASCII that would read as an encoded word is sent encoded.
-		{Metadata: map[string]string{"n": "=?" + strings.Repeat("a", 1600)}},
+		// "=?" starts an RFC 2047 encoded word.
+		{Metadata: map[string]string{"n": "a =? b"}},
 		{Metadata: map[string]string{"n": "bidi\u202eflip"}},
 	}
 	for _, opts := range bad {
@@ -290,18 +289,30 @@ func TestNoDriverDependencies(t *testing.T) {
 	}
 }
 
+// maxRunes is the most repetitions of r a one-letter metadata name ("n")
+// can hold within MaxMetadataBytes, found with the contract's own measure.
+func maxRunes(r string) int {
+	n := 0
+	for storage.ValidateMetadata(map[string]string{"n": strings.Repeat(r, n+1)}) == nil {
+		n++
+	}
+	return n
+}
+
 func TestMetadataValueWireLen(t *testing.T) {
-	for value, want := range map[string]int{
-		"":            0,
-		"plain ascii": 11,
-		"100% sure":   9,
-		"é":           12 + 4, // base64 of 2 bytes is 4
-		"=?literal":   12 + 12,
-		"tab\there":   12 + 12,
-		"résumé.pdf":  12 + 16,
-	} {
+	for _, value := range []string{"", "plain ascii", "100% sure", "é", "tab\there", "résumé.pdf", strings.Repeat("é", 700)} {
+		want := len(value)
+		if strings.ContainsFunc(value, func(r rune) bool { return r < 0x20 || r > 0x7e }) {
+			want = len(mime.BEncoding.Encode("UTF-8", value))
+		}
 		if got := storage.MetadataValueWireLen(value); got != want {
 			t.Errorf("MetadataValueWireLen(%q) = %d, want %d", value, got, want)
 		}
+	}
+	// The boundary is exactly MaxMetadataBytes as MinIO counts it.
+	at := len("x-amz-meta-n") + storage.MetadataValueWireLen(strings.Repeat("é", maxRunes("é")))
+	over := len("x-amz-meta-n") + storage.MetadataValueWireLen(strings.Repeat("é", maxRunes("é")+1))
+	if at > storage.MaxMetadataBytes || over <= storage.MaxMetadataBytes {
+		t.Fatalf("the accepted maximum measures %d and one more rune %d; want <= %d and > %d", at, over, storage.MaxMetadataBytes, storage.MaxMetadataBytes)
 	}
 }
