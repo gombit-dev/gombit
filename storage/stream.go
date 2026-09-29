@@ -105,3 +105,25 @@ func PutReader(ctx context.Context, r io.Reader, opts PutOptions) io.Reader {
 	}
 	return ContextReader(ctx, r)
 }
+
+// ContextReadCloser returns rc bound to ctx, as the reader Storage.Open
+// returns must be: once ctx has ended, each Read fails with its error (the
+// way an HTTP response body does when its request's context ends); Close
+// closes rc. When rc can seek, so can the result.
+func ContextReadCloser(ctx context.Context, rc io.ReadCloser) io.ReadCloser {
+	c := ctxReadCloser{ctxReader{ctx: ctx, r: rc}, rc}
+	if s, ok := rc.(io.Seeker); ok {
+		return &ctxReadSeekCloser{c, s}
+	}
+	return &c
+}
+
+type ctxReadCloser struct {
+	ctxReader
+	io.Closer
+}
+
+type ctxReadSeekCloser struct {
+	ctxReadCloser
+	io.Seeker
+}
