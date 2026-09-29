@@ -65,6 +65,8 @@ var checks = []check{
 	{"InvalidOptions", checkInvalidOptions},
 	{"ConcurrentPuts", checkConcurrentPuts},
 	{"NoPartialReads", checkNoPartialReads},
+	{"MetadataIsOwned", checkMetadataIsOwned},
+	{"OpenFollowsContext", checkOpenFollowsContext},
 	{"URL", checkURL},
 	{"DirectUpload", checkDirectUpload},
 }
@@ -106,14 +108,30 @@ func wantNotFound(t testing.TB, s storage.Storage, key string) {
 		_ = body.Close()
 		t.Fatalf("Open(%q) succeeded, want storage.ErrNotFound", key)
 	}
-	if !errors.Is(err, storage.ErrNotFound) {
-		t.Fatalf("Open(%q) = %v, want storage.ErrNotFound", key, err)
+	wantErr(t, err, storage.ErrNotFound, "open", key)
+}
+
+// wantErr fails t unless err is want (errors.Is) inside the *storage.Error
+// of op on key: every driver failure carries that envelope, so the
+// operation and the key reach the logs whatever the driver.
+func wantErr(t testing.TB, err, want error, op, key string) {
+	t.Helper()
+	label := fmt.Sprintf("%q", key)
+	if len(label) > 40 {
+		label = label[:40] + "…"
+	}
+	if !errors.Is(err, want) {
+		t.Fatalf("%s(%s) = %v, want %v", op, label, err, want)
+	}
+	var se *storage.Error
+	if !errors.As(err, &se) || se.Op != op || se.Key != key {
+		t.Fatalf("%s(%s) = %v: want it inside a *storage.Error with Op %q and the key (the envelope drivers must return)", op, label, err, op)
 	}
 }
 
 func checkRoundTrip(t testing.TB, s storage.Storage) {
 	data := []byte("hello, storage")
-	md := map[string]string{"original-name": "résumé final.pdf", "owner": "42"}
+	md := map[string]string{"original-name": "résumé final.pdf", "owner": "42", "note": "two  spaces inside"}
 	info := put(t, s, "docs/report.txt", data, storage.PutOptions{ContentType: "text/plain; charset=utf-8", Metadata: md})
 	want := storage.ObjectInfo{Key: "docs/report.txt", Size: int64(len(data)), ContentType: "text/plain; charset=utf-8", Metadata: md}
 	sameInfo(t, "Put", info, want, false)
@@ -178,9 +196,8 @@ func checkOverwrite(t testing.TB, s storage.Storage) {
 
 func checkMissing(t testing.TB, s storage.Storage) {
 	wantNotFound(t, s, "nope")
-	if _, err := s.Stat(ctxFor(t), "nope"); !errors.Is(err, storage.ErrNotFound) {
-		t.Fatalf("Stat of a missing key = %v, want storage.ErrNotFound", err)
-	}
+	_, err := s.Stat(ctxFor(t), "nope")
+	wantErr(t, err, storage.ErrNotFound, "stat", "nope")
 	if ok, err := storage.Exists(ctxFor(t), s, "nope"); err != nil || ok {
 		t.Fatalf("Exists of a missing key = %v, %v; want false, nil", ok, err)
 	}
@@ -234,28 +251,18 @@ var invalidKeys = []string{
 
 func checkInvalidKeys(t testing.TB, s storage.Storage) {
 	for _, key := range invalidKeys {
-		label := fmt.Sprintf("%q", key)
-		if len(label) > 40 {
-			label = label[:40] + "…"
+		_, err := s.Put(ctxFor(t), key, strings.NewReader("x"), storage.PutOptions{})
+		wantErr(t, err, storage.ErrInvalidKey, "put", key)
+		body, _, err := s.Open(ctxFor(t), key)
+		if body != nil {
+			_ = body.Close()
 		}
-		if _, err := s.Put(ctxFor(t), key, strings.NewReader("x"), storage.PutOptions{}); !errors.Is(err, storage.ErrInvalidKey) {
-			t.Fatalf("Put(%s) = %v, want storage.ErrInvalidKey", label, err)
-		}
-		if body, _, err := s.Open(ctxFor(t), key); !errors.Is(err, storage.ErrInvalidKey) {
-			if body != nil {
-				_ = body.Close()
-			}
-			t.Fatalf("Open(%s) = %v, want storage.ErrInvalidKey", label, err)
-		}
-		if _, err := s.Stat(ctxFor(t), key); !errors.Is(err, storage.ErrInvalidKey) {
-			t.Fatalf("Stat(%s) = %v, want storage.ErrInvalidKey", label, err)
-		}
-		if err := s.Delete(ctxFor(t), key); !errors.Is(err, storage.ErrInvalidKey) {
-			t.Fatalf("Delete(%s) = %v, want storage.ErrInvalidKey", label, err)
-		}
-		if _, err := s.URL(ctxFor(t), key, storage.PublicURL()); !errors.Is(err, storage.ErrInvalidKey) {
-			t.Fatalf("URL(%s) = %v, want storage.ErrInvalidKey", label, err)
-		}
+		wantErr(t, err, storage.ErrInvalidKey, "open", key)
+		_, err = s.Stat(ctxFor(t), key)
+		wantErr(t, err, storage.ErrInvalidKey, "stat", key)
+		wantErr(t, s.Delete(ctxFor(t), key), storage.ErrInvalidKey, "delete", key)
+		_, err = s.URL(ctxFor(t), key, storage.PublicURL())
+		wantErr(t, err, storage.ErrInvalidKey, "url", key)
 	}
 }
 
@@ -325,21 +332,16 @@ func checkCanceledContext(t testing.TB, s storage.Storage) {
 	put(t, s, "present", []byte("x"), storage.PutOptions{})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if body, _, err := s.Open(ctx, "present"); !errors.Is(err, context.Canceled) {
-		if body != nil {
-			_ = body.Close()
-		}
-		t.Fatalf("Open on a canceled context = %v, want context.Canceled", err)
+	body, _, err := s.Open(ctx, "present")
+	if body != nil {
+		_ = body.Close()
 	}
-	if _, err := s.Stat(ctx, "present"); !errors.Is(err, context.Canceled) {
-		t.Fatalf("Stat on a canceled context = %v, want context.Canceled", err)
-	}
-	if err := s.Delete(ctx, "present"); !errors.Is(err, context.Canceled) {
-		t.Fatalf("Delete on a canceled context = %v, want context.Canceled", err)
-	}
-	if _, err := s.URL(ctx, "present", storage.SignedURL(time.Minute)); !errors.Is(err, context.Canceled) {
-		t.Fatalf("URL on a canceled context = %v, want context.Canceled", err)
-	}
+	wantErr(t, err, context.Canceled, "open", "present")
+	_, err = s.Stat(ctx, "present")
+	wantErr(t, err, context.Canceled, "stat", "present")
+	wantErr(t, s.Delete(ctx, "present"), context.Canceled, "delete", "present")
+	_, err = s.URL(ctx, "present", storage.SignedURL(time.Minute))
+	wantErr(t, err, context.Canceled, "url", "present")
 	if got, _ := read(t, s, "present"); string(got) != "x" {
 		t.Fatalf("a canceled Delete removed the object")
 	}
@@ -438,17 +440,14 @@ func (f *failingReader) Read(p []byte) (int, error) {
 func checkFailedPutKeepsPrevious(t testing.TB, s storage.Storage) {
 	put(t, s, "kept", []byte("the previous version"), storage.PutOptions{ContentType: "text/plain"})
 	_, err := s.Put(ctxFor(t), "kept", &failingReader{n: 64 << 10, err: errBrokenReader}, storage.PutOptions{ContentType: "image/png"})
-	if !errors.Is(err, errBrokenReader) {
-		t.Fatalf("a Put whose reader failed = %v, want that reader's error", err)
-	}
+	wantErr(t, err, errBrokenReader, "put", "kept")
 	got, info := read(t, s, "kept")
 	if string(got) != "the previous version" || info.ContentType != "text/plain" {
 		t.Fatalf("after a failed overwrite the key holds %d bytes of %q, want the previous version whole", len(got), info.ContentType)
 	}
 
-	if _, err := s.Put(ctxFor(t), "never", &failingReader{n: 1, err: errBrokenReader}, storage.PutOptions{}); !errors.Is(err, errBrokenReader) {
-		t.Fatalf("a failed first Put = %v, want the reader's error", err)
-	}
+	_, err = s.Put(ctxFor(t), "never", &failingReader{n: 1, err: errBrokenReader}, storage.PutOptions{})
+	wantErr(t, err, errBrokenReader, "put", "never")
 	wantNotFound(t, s, "never")
 }
 
@@ -487,9 +486,8 @@ func (c *cancelingReader) Read(p []byte) (int, error) {
 func checkCanceledPut(t testing.TB, s storage.Storage) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := s.Put(ctx, "canceled", strings.NewReader("x"), storage.PutOptions{}); !errors.Is(err, context.Canceled) {
-		t.Fatalf("Put on a canceled context = %v, want context.Canceled", err)
-	}
+	_, err := s.Put(ctx, "canceled", strings.NewReader("x"), storage.PutOptions{})
+	wantErr(t, err, context.Canceled, "put", "canceled")
 	wantNotFound(t, s, "canceled")
 
 	put(t, s, "streaming", []byte("before"), storage.PutOptions{})
@@ -502,9 +500,7 @@ func checkCanceledPut(t testing.TB, s storage.Storage) {
 	}()
 	select {
 	case err := <-done:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("a Put canceled while streaming = %v, want context.Canceled", err)
-		}
+		wantErr(t, err, context.Canceled, "put", "streaming")
 	case <-time.After(20 * time.Second):
 		t.Fatal("a Put canceled while streaming did not return: it ignores its context")
 	}
@@ -523,9 +519,7 @@ func checkSizeMismatch(t testing.TB, s storage.Storage) {
 		{"long", "123456789012345", 10},
 	} {
 		_, err := s.Put(ctxFor(t), "sized/"+tc.name, strings.NewReader(tc.data), storage.PutOptions{Size: storage.KnownSize(tc.size)})
-		if !errors.Is(err, storage.ErrSizeMismatch) {
-			t.Fatalf("Put of %d bytes declared as %d = %v, want storage.ErrSizeMismatch", len(tc.data), tc.size, err)
-		}
+		wantErr(t, err, storage.ErrSizeMismatch, "put", "sized/"+tc.name)
 		wantNotFound(t, s, "sized/"+tc.name)
 		// Over an existing object, the mismatch leaves it whole.
 		put(t, s, "sized/kept-"+tc.name, []byte("previous version"), storage.PutOptions{ContentType: "text/plain"})
@@ -568,10 +562,14 @@ func checkInvalidOptions(t testing.TB, s storage.Storage) {
 		{Metadata: map[string]string{"name": "a =? b"}},
 		{Metadata: map[string]string{"name": "invoice\u202efdp.exe"}},
 		{Metadata: map[string]string{"name": "line\u2028break"}},
+		{Metadata: map[string]string{"name": " padded"}}, // HTTP trims header values
+		{Metadata: map[string]string{"name": "padded "}},
 	} {
-		if _, err := s.Put(ctxFor(t), "opts", strings.NewReader("x"), opts); !errors.Is(err, storage.ErrInvalidOptions) {
+		_, err := s.Put(ctxFor(t), "opts", strings.NewReader("x"), opts)
+		if !errors.Is(err, storage.ErrInvalidOptions) {
 			t.Fatalf("Put with %+v = %v, want storage.ErrInvalidOptions", opts, err)
 		}
+		wantErr(t, err, storage.ErrInvalidOptions, "put", "opts")
 		wantNotFound(t, s, "opts")
 	}
 	// A refused overwrite leaves the previous object whole.
@@ -583,9 +581,11 @@ func checkInvalidOptions(t testing.TB, s storage.Storage) {
 		t.Fatalf("a refused overwrite left %q (%s), want the previous object", got, info.ContentType)
 	}
 	for _, opts := range []storage.URLOptions{storage.SignedURL(0), storage.SignedURL(-time.Second), {Expires: time.Minute}} {
-		if _, err := s.URL(ctxFor(t), "opts", opts); !errors.Is(err, storage.ErrInvalidOptions) {
+		_, err := s.URL(ctxFor(t), "opts", opts)
+		if !errors.Is(err, storage.ErrInvalidOptions) {
 			t.Fatalf("URL(%+v) = %v, want storage.ErrInvalidOptions: a signed URL must never widen into a permanent one", opts, err)
 		}
+		wantErr(t, err, storage.ErrInvalidOptions, "url", "opts")
 	}
 	if _, err := s.URL(ctxFor(t), "opts", storage.SignedURL(storage.MaxURLExpiry+time.Second)); !errors.Is(err, storage.ErrInvalidOptions) {
 		t.Fatalf("URL with a lifetime over storage.MaxURLExpiry = %v, want storage.ErrInvalidOptions", err)
@@ -639,9 +639,31 @@ func (g *gate) Read([]byte) (int, error) {
 }
 
 // checkNoPartialReads: while a Put is streaming, a reader sees the previous
-// object whole, never the part written so far.
+// object whole, never the part written so far; for a key stored for the
+// first time, it sees no object at all.
 func checkNoPartialReads(t testing.TB, s storage.Storage) {
 	put(t, s, "streaming", []byte("the previous version"), storage.PutOptions{ContentType: "text/plain"})
+	midPut(t, s, "streaming", func(data []byte, info storage.ObjectInfo, err error) {
+		if err != nil {
+			t.Fatalf("Open while a Put was streaming = %v", err)
+		}
+		if string(data) != "the previous version" || info.ContentType != "text/plain" {
+			t.Fatalf("mid-Put, a reader saw %q (%s): part of the object being written", data, info.ContentType)
+		}
+	})
+	midPut(t, s, "first-write", func(data []byte, _ storage.ObjectInfo, err error) {
+		if err == nil {
+			t.Fatalf("mid-Put of a new key, a reader saw %q: part of the object being written", data)
+		}
+		wantErr(t, err, storage.ErrNotFound, "open", "first-write")
+	})
+}
+
+// midPut Puts to key from a source held in the middle, calls check with
+// what an Open of key reads meanwhile, then lets the Put finish and
+// requires the whole new object.
+func midPut(t testing.TB, s storage.Storage, key string, check func([]byte, storage.ObjectInfo, error)) {
+	t.Helper()
 	g := &gate{started: make(chan struct{}), release: make(chan struct{})}
 	defer func() {
 		select {
@@ -653,7 +675,7 @@ func checkNoPartialReads(t testing.TB, s storage.Storage) {
 	src := io.MultiReader(strings.NewReader("NEW-first-half"), g, strings.NewReader("-second-half"))
 	done := make(chan error, 1)
 	go func() {
-		_, err := s.Put(ctxFor(t), "streaming", src, storage.PutOptions{ContentType: "application/json"})
+		_, err := s.Put(ctxFor(t), key, src, storage.PutOptions{ContentType: "application/json"})
 		done <- err
 	}()
 	select {
@@ -672,7 +694,7 @@ func checkNoPartialReads(t testing.TB, s storage.Storage) {
 	}
 	mid := make(chan result, 1)
 	go func() {
-		body, info, err := s.Open(ctxFor(t), "streaming")
+		body, info, err := s.Open(ctxFor(t), key)
 		if err != nil {
 			mid <- result{err: err}
 			return
@@ -692,14 +714,62 @@ func checkNoPartialReads(t testing.TB, s storage.Storage) {
 	if err := <-done; err != nil {
 		t.Fatalf("Put = %v", err)
 	}
-	if got.err != nil {
-		t.Fatalf("Open while a Put was streaming = %v", got.err)
-	}
-	if string(got.data) != "the previous version" || got.info.ContentType != "text/plain" {
-		t.Fatalf("mid-Put, a reader saw %q (%s): part of the object being written", got.data, got.info.ContentType)
-	}
-	if final, _ := read(t, s, "streaming"); string(final) != "NEW-first-half-second-half" {
+	check(got.data, got.info, got.err)
+	if final, _ := read(t, s, key); string(final) != "NEW-first-half-second-half" {
 		t.Fatalf("after the Put the key holds %q", final)
+	}
+}
+
+// checkMetadataIsOwned: Put copies the caller's metadata, and every
+// ObjectInfo returned owns its map: changing any of them changes neither
+// the stored object nor another result (an S3 driver cannot share them).
+func checkMetadataIsOwned(t testing.TB, s storage.Storage) {
+	md := map[string]string{"owner": "alice"}
+	info := put(t, s, "owned", []byte("x"), storage.PutOptions{Metadata: md})
+	md["owner"] = "changed through the Put input"
+	if info.Metadata != nil {
+		info.Metadata["owner"] = "changed through the Put result"
+	}
+	stat := func(label string) storage.ObjectInfo {
+		t.Helper()
+		st, err := s.Stat(ctxFor(t), "owned")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st.Metadata["owner"] != "alice" {
+			t.Fatalf("after changing %s, Stat reports owner %q: the stored metadata changed without a Put", label, st.Metadata["owner"])
+		}
+		return st
+	}
+	stat("the Put input and result").Metadata["owner"] = "changed through a Stat result"
+	body, opened, err := s.Open(ctxFor(t), "owned")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = body.Close()
+	stat("a Stat result")
+	opened.Metadata["owner"] = "changed through an Open result"
+	stat("an Open result")
+}
+
+// checkOpenFollowsContext: the reader Open returns stays bound to its
+// context: once the context ends, reading fails with its error (as an HTTP
+// response body does), on every driver.
+func checkOpenFollowsContext(t testing.TB, s storage.Storage) {
+	put(t, s, "bound", bytes.Repeat([]byte("b"), 1<<20), storage.PutOptions{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	body, _, err := s.Open(ctx, "bound")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = body.Close() }()
+	if _, err := io.ReadFull(body, make([]byte, 16)); err != nil {
+		t.Fatalf("reading before the context ended = %v", err)
+	}
+	cancel()
+	if _, err := io.Copy(io.Discard, body); !errors.Is(err, context.Canceled) {
+		t.Fatalf("reading after Open's context ended = %v, want context.Canceled: the reader must follow the context it was opened with", err)
 	}
 }
 
@@ -722,7 +792,9 @@ func checkOneURL(t testing.TB, s storage.Storage, key string, opts storage.URLOp
 	u, err := s.URL(ctxFor(t), key, opts)
 	switch {
 	case errors.Is(err, storage.ErrUnsupported):
+		wantErr(t, err, storage.ErrUnsupported, "url", key)
 	case errors.Is(err, storage.ErrNotPublic) && !opts.Signed:
+		wantErr(t, err, storage.ErrNotPublic, "url", key)
 	case errors.Is(err, storage.ErrNotPublic):
 		t.Fatalf("URL(%q, %+v) = %v: a signed URL works for a private object", key, opts, err)
 	case errors.Is(err, storage.ErrNotFound):
@@ -747,9 +819,8 @@ func checkDirectUpload(t testing.TB, s storage.Storage) {
 	}
 	valid := storage.UploadURLOptions{Expires: time.Minute, Size: 3, ContentType: "text/plain"}
 	for _, key := range invalidKeys {
-		if _, err := d.UploadURL(ctxFor(t), key, valid); !errors.Is(err, storage.ErrInvalidKey) {
-			t.Fatalf("UploadURL(%q) = %v, want storage.ErrInvalidKey", key, err)
-		}
+		_, err := d.UploadURL(ctxFor(t), key, valid)
+		wantErr(t, err, storage.ErrInvalidKey, "upload url", key)
 	}
 	for _, opts := range []storage.UploadURLOptions{
 		{Expires: 0, Size: 3},
@@ -759,9 +830,11 @@ func checkDirectUpload(t testing.TB, s storage.Storage) {
 		{Expires: time.Minute, ContentType: "not a media type"},
 		{Expires: time.Minute, Metadata: map[string]string{"Upper": "x"}},
 	} {
-		if _, err := d.UploadURL(ctxFor(t), "direct", opts); !errors.Is(err, storage.ErrInvalidOptions) {
+		_, err := d.UploadURL(ctxFor(t), "direct", opts)
+		if !errors.Is(err, storage.ErrInvalidOptions) {
 			t.Fatalf("UploadURL with %+v = %v, want storage.ErrInvalidOptions", opts, err)
 		}
+		wantErr(t, err, storage.ErrInvalidOptions, "upload url", "direct")
 	}
 	before := time.Now()
 	req, err := d.UploadURL(ctxFor(t), "direct/never-stored", valid)
