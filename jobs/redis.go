@@ -138,7 +138,7 @@ if unique and unique ~= '' and redis.call('GET', unique) == id then redis.call('
 // receipt, job key prefix. Leases the earliest-available job: the first
 // pending job due by now or the first expired lease, whichever became
 // available first. Returns false when none is, else {id, envelope, attempts,
-// available-since ms}.
+// available-since ms, reclaimed-expired-lease (0 or 1)}.
 var reserveScript = redis.NewScript(`
 local now = tonumber(ARGV[1])
 while true do
@@ -151,6 +151,7 @@ while true do
   elseif #p > 0 then member, from, since = p[1], KEYS[1], p[2]
   elseif #r > 0 then member, from, since = r[1], KEYS[2], r[2]
   else return false end
+  local lease_expired = from == KEYS[2] and 1 or 0
   redis.call('ZREM', from, member)
   local id = string.sub(member, 18)
   local job = ARGV[4] .. id
@@ -158,7 +159,7 @@ while true do
     local attempts = redis.call('HINCRBY', job, 'attempts', 1)
     redis.call('HSET', job, 'receipt', ARGV[3])
     redis.call('ZADD', KEYS[2], ARGV[2], member)
-    return {id, redis.call('HGET', job, 'env'), attempts, since}
+    return {id, redis.call('HGET', job, 'env'), attempts, since, lease_expired}
   end
 end
 `)
@@ -367,7 +368,7 @@ func (q *RedisQueue) Reserve(ctx context.Context, queues []string, lease time.Du
 		if err != nil {
 			return Delivery{}, fmt.Errorf("jobs: reserve from %s: %w", queue, err)
 		}
-		if len(res) != 4 {
+		if len(res) != 5 {
 			return Delivery{}, fmt.Errorf("jobs: reserve from %s: unexpected reply %v", queue, res)
 		}
 		var availableAt time.Time
@@ -379,16 +380,20 @@ func (q *RedisQueue) Reserve(ctx context.Context, queues []string, lease time.Du
 		if err != nil {
 			return Delivery{}, fmt.Errorf("jobs: reserve from %s: attempts: %w", queue, err)
 		}
+		leaseExpired, err := toInt(res[4])
+		if err != nil {
+			return Delivery{}, fmt.Errorf("jobs: reserve from %s: expired-lease flag: %w", queue, err)
+		}
 		raw, _ := res[1].(string)
 		env, err := UnmarshalEnvelope([]byte(raw))
 		if err != nil {
 			// Leased, not lost: the delivery carries the failure so the
 			// caller buries it (keeping the stored bytes) rather than meet
 			// it on every lease expiry.
-			return Delivery{Queue: queue, Envelope: Envelope{ID: id, Attempt: attempts}, Receipt: receipt, Err: err, AvailableAt: availableAt}, nil
+			return Delivery{Queue: queue, Envelope: Envelope{ID: id, Attempt: attempts}, Receipt: receipt, LeaseExpired: leaseExpired == 1, Err: err, AvailableAt: availableAt}, nil
 		}
 		env.Attempt = attempts
-		return Delivery{Queue: queue, Envelope: env, Receipt: receipt, AvailableAt: availableAt}, nil
+		return Delivery{Queue: queue, Envelope: env, Receipt: receipt, LeaseExpired: leaseExpired == 1, AvailableAt: availableAt}, nil
 	}
 	return Delivery{}, ErrNoJob
 }
