@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/gombit-dev/gombit/internal/storagekey"
 )
 
 const (
@@ -1036,8 +1038,10 @@ func validateS3StorageConfig(errs *FieldErrors, cfg S3StorageConfig) {
 		// Never echo either value: one of them is a secret.
 		*errs = append(*errs, FieldError{Field: "Storage.S3.AccessKeyID", Env: envStorageS3AccessKeyID, Message: "set both GOMBIT_STORAGE_S3_ACCESS_KEY_ID and GOMBIT_STORAGE_S3_SECRET_ACCESS_KEY, or neither (the default AWS credential chain)"})
 	}
-	if cfg.Prefix != "" && (!strings.HasSuffix(cfg.Prefix, "/") || strings.HasPrefix(cfg.Prefix, "/") || strings.Contains(cfg.Prefix, "//") || strings.Contains(cfg.Prefix, "..") || strings.Contains(cfg.Prefix, `\`)) {
-		*errs = append(*errs, FieldError{Field: "Storage.S3.Prefix", Env: envStorageS3Prefix, Value: cfg.Prefix, Message: "must end with '/', and not start with '/' or contain '//', '..', or a backslash"})
+	// The key rules of package storage (storage.ValidatePrefix), which the
+	// driver applies too: one rule, so the two cannot disagree.
+	if reason := storagekey.PrefixProblem(cfg.Prefix); reason != "" {
+		*errs = append(*errs, FieldError{Field: "Storage.S3.Prefix", Env: envStorageS3Prefix, Value: cfg.Prefix, Message: "must be a valid storage key followed by '/' (" + reason + ")"})
 	}
 }
 
