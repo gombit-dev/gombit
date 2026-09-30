@@ -52,10 +52,17 @@ version.
     key is redacted;
   - streaming uploads in at most 8 MiB of memory: one `PutObject` sized to
     a small object, or sequential 8 MiB multipart parts, aborted on
-    failure;
+    failure (best effort: a failed abort is reported as `*s3.AbortError`,
+    and a bucket lifecycle rule is the backstop);
+  - a `Put` whose publishing request S3 never answered fails with the new
+    `storage.ErrUnknownOutcome` (the key holds the old object or the new
+    one), rather than claiming the key is unchanged;
   - metadata sent RFC 2047 encoded when not ASCII, so it round-trips;
   - throttling, 5xx and network failures classified as `ErrUnavailable`, and
-    a missing bucket reported as a configuration error, not a missing object.
+    a missing bucket reported as a configuration error, not a missing object
+    (one `HeadBucket` at a time, its answer kept for a minute);
+  - the prefix checked by `storage.ValidatePrefix`, the same rule
+    `gombit config` applies.
 
   Its conformance suite runs against MinIO in CI
   ([#325](https://github.com/gombit-dev/gombit/issues/325)).

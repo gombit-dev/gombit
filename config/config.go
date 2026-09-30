@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
-	"unicode/utf8"
+
+	"github.com/gombit-dev/gombit/internal/storagekey"
 )
 
 const (
@@ -1034,8 +1034,10 @@ func ValidateStorage(cfg StorageConfig) error {
 }
 
 func validateStorageConfig(errs *FieldErrors, cfg StorageConfig) {
-	if p := cfg.PublicPrefix; p != "" && !validKeyPrefix(p) {
-		*errs = append(*errs, FieldError{Field: "Storage.PublicPrefix", Env: envStoragePublicPrefix, Value: p, Message: "must be empty (no public objects) or a key path ending with '/': segments without '.', '..', a trailing '.' or space, a backslash, or control characters"})
+	// The key rules of package storage (storage.ValidatePublicPrefix), which
+	// the drivers apply too: one rule, so the two cannot disagree.
+	if reason := storagekey.PrefixProblem(cfg.PublicPrefix); reason != "" {
+		*errs = append(*errs, FieldError{Field: "Storage.PublicPrefix", Env: envStoragePublicPrefix, Value: cfg.PublicPrefix, Message: "must be empty (no public objects) or a valid storage key followed by '/' (" + reason + ")"})
 	}
 	if cfg.URLSecret != "" && len(cfg.URLSecret) < MinStorageURLSecretLength {
 		// Never echo the value: it is a secret.
@@ -1064,27 +1066,6 @@ func validateStorageConfig(errs *FieldErrors, cfg StorageConfig) {
 			Message: "must be one of local, memory, s3",
 		})
 	}
-}
-
-// validKeyPrefix reports whether p is a key path ending with '/', by the
-// storage package's key rules (storage.ValidatePublicPrefix, which config
-// does not import): no empty, "." or ".." segment, none ending in '.' or a
-// space, no backslash or control character.
-func validKeyPrefix(p string) bool {
-	if !strings.HasSuffix(p, "/") || len(p) > 1024 {
-		return false
-	}
-	for _, seg := range strings.Split(strings.TrimSuffix(p, "/"), "/") {
-		if seg == "" || seg == "." || seg == ".." || strings.HasSuffix(seg, ".") || strings.HasSuffix(seg, " ") || len(seg) > 255 || strings.ContainsRune(seg, '\\') || !utf8.ValidString(seg) {
-			return false
-		}
-		for _, r := range seg {
-			if unicode.IsControl(r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r) || unicode.Is(unicode.Bidi_Control, r) {
-				return false
-			}
-		}
-	}
-	return true
 }
 
 // validateStorageLocalURL checks where the local and memory drivers' URLs
@@ -1128,8 +1109,10 @@ func validateS3StorageConfig(errs *FieldErrors, cfg S3StorageConfig) {
 			*errs = append(*errs, FieldError{Field: "Storage.S3.PublicURL", Env: envStorageS3PublicURL, Value: cfg.PublicURL, Message: "must be an http or https URL without a trailing '/', query, or fragment"})
 		}
 	}
-	if cfg.Prefix != "" && (!strings.HasSuffix(cfg.Prefix, "/") || strings.HasPrefix(cfg.Prefix, "/") || strings.Contains(cfg.Prefix, "//") || strings.Contains(cfg.Prefix, "..") || strings.Contains(cfg.Prefix, `\`)) {
-		*errs = append(*errs, FieldError{Field: "Storage.S3.Prefix", Env: envStorageS3Prefix, Value: cfg.Prefix, Message: "must end with '/', and not start with '/' or contain '//', '..', or a backslash"})
+	// The key rules of package storage (storage.ValidatePrefix), which the
+	// driver applies too: one rule, so the two cannot disagree.
+	if reason := storagekey.PrefixProblem(cfg.Prefix); reason != "" {
+		*errs = append(*errs, FieldError{Field: "Storage.S3.Prefix", Env: envStorageS3Prefix, Value: cfg.Prefix, Message: "must be a valid storage key followed by '/' (" + reason + ")"})
 	}
 }
 
