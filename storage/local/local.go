@@ -25,14 +25,23 @@
 // # Writes
 //
 // Put streams into a temporary file, never holding the object in memory,
-// flushes it to disk, flushes the entry of every directory this store
-// created on the path (not directories that already existed), renames it
-// into place, and flushes the directory: the rename is atomic, so a reader
-// sees the old object or the new one, never part of one, and on Linux and
-// macOS a Put that returned survives a crash. Delete flushes its directory
-// too. Windows has no directory flush a process can request, so there
-// writes and deletes are atomic but their durability is the filesystem's.
-// The root and its directories are created on the first Put.
+// flushes it to disk, makes every directory on the object's path durable
+// (below), renames it into place, and flushes the directory: the rename is
+// atomic, so a reader sees the old object or the new one, never part of
+// one, and on Linux and macOS a Put that returned survives a crash. Delete
+// flushes its directory too. Windows has no directory flush a process can
+// request, so there writes and deletes are atomic but their durability is
+// the filesystem's.
+//
+// Durability is a fact about the shared root, not about one store: a
+// directory that exists may have been created by another store (another
+// process) that has not flushed its entry yet, or failed to. So a store
+// trusts nothing it has not flushed itself. The root is created on the
+// first Put, in a parent directory that must exist; its entry there is
+// flushed before the marker file <root>/.durable is written, and a store
+// that finds no marker flushes the parent itself. Inside the root, a store
+// flushes the entry of every directory on an object's path, whoever
+// created it, before its first Put into that directory.
 //
 // # Readers
 //
@@ -46,11 +55,15 @@
 //
 // Each store writes its temporary files in its own work directory,
 // <root>/tmp/w-*, and holds a lock on the directory's owner file for as
-// long as the store exists. A failed Put removes its temporary file; a
-// process killed mid-Put cannot, but its lock ends with it, so a store's
-// first Put removes the work directories whose owner file it can lock:
-// those of stores that are gone. A live store's directory is never
-// removed, however long its Puts wait on their sources. On a platform
+// long as the store exists. The owner file is created and locked as
+// owner.new and only then renamed to owner, so every owner file is locked
+// from the moment it has that name. A failed Put removes its temporary
+// file; a process killed mid-Put cannot, but its lock ends with it, so a
+// store's first Put removes the work directories whose owner file it can
+// lock: those of stores that are gone. A directory without an owner file
+// is kept (its store may be setting it up; if it died doing so, it left
+// an empty directory), and so is a live store's, however long its Puts
+// wait on their sources: no age or clock is involved. On a platform
 // without file locks (flock, or LockFileEx on Windows) nothing is swept.
 package local
 
@@ -83,11 +96,9 @@ type Store struct {
 	firstPut func(root string)
 	warn     func(msg string, err error)
 	once     sync.Once
-	// durable holds the directories whose own entry this process has
-	// flushed, and pending those it created whose entry is not flushed yet
-	// (see ensureDir).
+	// durable holds the directories under the root whose entry this store
+	// has flushed (see ensureDir).
 	durable sync.Map
-	pending sync.Map
 	// mu guards work and owner: the store's work directory and its locked
 	// owner file (see workDir).
 	mu    sync.Mutex
@@ -118,11 +129,9 @@ func WithWarn(fn func(msg string, err error)) Option {
 	return func(s *Store) { s.warn = fn }
 }
 
-// ownerGrace is how old a work directory must be before a sweep looks at
-// it. A store creates its directory and locks the owner file within
-// microseconds; the grace only keeps a sweep from reading that moment as a
-// dead store. It says nothing about Puts, which the lock alone speaks for.
-const ownerGrace = time.Minute
+// rootMarker is the file in the root whose presence says the root's entry
+// in its parent has been flushed (see initRoot).
+const rootMarker = ".durable"
 
 // owned holds the work directories of this process's stores. A sweep never
 // probes them: where file locks are per process (flock emulated with POSIX
@@ -269,54 +278,64 @@ func (s *Store) put(ctx context.Context, key string, r io.Reader, opts storage.P
 	return h.info(n), nil
 }
 
-// ensureDir creates dir if needed and makes its entry durable: the entry of
-// each directory this store creates on the way is flushed in its parent,
-// from the top down. Directories that already existed are not ours to
-// flush (a process may traverse an ancestor it cannot read), so the walk
-// stops at the deepest one, or at one this process has already flushed. A
-// directory it created is pending until its flush succeeds, so a failure
-// is retried by the next Put although the directory now exists.
+// ensureDir creates dir, a directory under the root, if needed and makes
+// the entry of every directory from the root down to it durable, flushing
+// each in its parent. A directory's existence says nothing about whether
+// its entry was flushed (another store may have created it and not got
+// that far), so each is flushed by this store, whoever created it, and
+// remembered only once the flush has succeeded: a failure is retried by
+// the next Put.
 func (s *Store) ensureDir(dir string) error {
 	if _, ok := s.durable.Load(dir); ok {
 		return nil
 	}
-	var created []string // dir and its ancestors to flush, deepest first
-	for d := dir; ; {
-		if _, ok := s.durable.Load(d); ok {
-			break
-		}
-		if _, ok := s.pending.Load(d); !ok {
-			_, err := os.Stat(d)
-			if err == nil {
-				break // it existed before: its entry is not ours
-			}
-			if !errors.Is(err, fs.ErrNotExist) {
-				return err
-			}
-		}
-		created = append(created, d)
-		parent := filepath.Dir(d)
-		if parent == d {
-			break
-		}
-		d = parent
-	}
-	for _, d := range created {
-		s.pending.Store(d, struct{}{})
-	}
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return err
 	}
-	for i := len(created) - 1; i >= 0; i-- {
-		d := created[i]
-		if err := syncDirHook(filepath.Dir(d)); err != nil {
+	var chain []string // dir and its ancestors below the root, deepest first
+	for d := dir; d != s.root; d = filepath.Dir(d) {
+		if _, ok := s.durable.Load(d); ok {
+			break
+		}
+		if filepath.Dir(d) == d {
+			return fmt.Errorf("local storage: %s is not under the root %s", dir, s.root)
+		}
+		chain = append(chain, d)
+	}
+	for i := len(chain) - 1; i >= 0; i-- {
+		if err := syncDirHook(filepath.Dir(chain[i])); err != nil {
 			return err
 		}
-		s.pending.Delete(d)
-		s.durable.Store(d, struct{}{})
+		s.durable.Store(chain[i], struct{}{})
 	}
-	s.durable.Store(dir, struct{}{})
 	return nil
+}
+
+// initRoot creates the root if needed and makes its entry in its parent
+// durable. The parent must exist: the store creates nothing outside the
+// root but the root itself, so the only entry outside it that an object's
+// durability depends on is the root's own. Whoever created the root, a
+// store that finds no marker flushes the parent, then writes the marker;
+// one that finds the marker knows the flush has happened.
+func (s *Store) initRoot() error {
+	if err := os.Mkdir(s.root, 0o750); err != nil && !errors.Is(err, fs.ErrExist) {
+		if errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("local storage: the root's parent directory %s does not exist: %w", filepath.Dir(s.root), err)
+		}
+		return err
+	}
+	marker := filepath.Join(s.root, rootMarker)
+	if _, err := os.Stat(marker); err == nil {
+		return nil
+	}
+	if err := syncDirHook(filepath.Dir(s.root)); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(marker, os.O_WRONLY|os.O_CREATE, 0o600) // #nosec G304 -- a file in the store's own root
+	if err != nil {
+		return err
+	}
+	return f.Close()
 }
 
 // flushCommitted flushes dir after an operation already took effect in it
@@ -380,29 +399,38 @@ func (s *Store) workDir() (string, error) {
 	if s.work != "" {
 		return s.work, nil
 	}
-	if err := s.ensureDir(s.root); err != nil {
+	if err := s.initRoot(); err != nil {
 		return "", err
 	}
 	tmp := filepath.Join(s.root, "tmp")
 	if err := os.Mkdir(tmp, 0o750); err != nil && !errors.Is(err, fs.ErrExist) {
 		return "", err
 	}
-	sweepTemp(tmp, time.Now())
+	sweepTemp(tmp)
 	dir, err := os.MkdirTemp(tmp, "w-")
 	if err != nil {
 		return "", err
 	}
-	owner, err := createShared(filepath.Join(dir, "owner"))
+	// The owner file gets its name only once it is locked, so a sweep never
+	// finds an owner file that is not yet held.
+	staged := filepath.Join(dir, "owner.new")
+	owner, err := createShared(staged)
 	if err != nil {
 		_ = os.RemoveAll(dir)
 		return "", err
 	}
-	if locked, err := tryLock(owner); !locked && !errors.Is(err, errNoLock) {
+	locked, err := tryLock(owner)
+	if !locked && !errors.Is(err, errNoLock) {
 		_ = owner.Close()
 		_ = os.RemoveAll(dir)
 		if err == nil {
-			err = fmt.Errorf("local storage: %s is locked by another store", owner.Name())
+			err = fmt.Errorf("local storage: %s is locked by another store", staged)
 		}
+		return "", err
+	}
+	if err := replaceFile(staged, filepath.Join(dir, "owner")); err != nil {
+		_ = owner.Close()
+		_ = os.RemoveAll(dir)
 		return "", err
 	}
 	owned.Store(dir, struct{}{})
@@ -428,17 +456,13 @@ func (s *Store) dropWork(dir string) {
 // a process killed mid-Put left behind. A directory whose owner file is
 // locked belongs to a live store and is kept. Errors are ignored; a
 // directory another store just removed is fine.
-func sweepTemp(tmp string, now time.Time) {
+func sweepTemp(tmp string) {
 	entries, err := os.ReadDir(tmp)
 	if err != nil {
 		return
 	}
 	for _, e := range entries {
 		if !e.IsDir() || !strings.HasPrefix(e.Name(), "w-") {
-			continue
-		}
-		info, err := e.Info()
-		if err != nil || now.Sub(info.ModTime()) < ownerGrace {
 			continue
 		}
 		dir := filepath.Join(tmp, e.Name())
@@ -448,18 +472,17 @@ func sweepTemp(tmp string, now time.Time) {
 	}
 }
 
-// abandoned reports whether dir's store is gone: its owner file can be
-// locked (the lock is released at once), or it was never created. No
-// store writes into another's directory, so once its owner is gone
-// nothing can start using it again.
+// abandoned reports whether dir's store is provably gone: its owner file
+// exists and can be locked (the lock is released at once). An owner file
+// is locked before it is given its name, so one that can be locked was
+// held by a store whose lock ended with it. A directory with no owner file
+// is not provably abandoned and is kept. No store writes into another's
+// directory, so once its owner is gone nothing can start using it again.
 func abandoned(dir string) bool {
 	if _, ok := owned.Load(dir); ok {
 		return false
 	}
 	f, err := openShared(filepath.Join(dir, "owner"))
-	if errors.Is(err, fs.ErrNotExist) {
-		return true
-	}
 	if err != nil {
 		return false
 	}
