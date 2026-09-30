@@ -56,7 +56,8 @@ version.
     and a bucket lifecycle rule is the backstop);
   - a `Put` whose publishing request S3 never answered fails with the new
     `storage.ErrUnknownOutcome` (the key holds the old object or the new
-    one), rather than claiming the key is unchanged;
+    one), rather than claiming the key is unchanged; that request is sent
+    once, without the SDK's retries, so its answer is the one classified;
   - metadata sent RFC 2047 encoded when not ASCII, so it round-trips;
   - throttling, 5xx and network failures classified as `ErrUnavailable`, and
     a missing bucket reported as a configuration error, not a missing object
