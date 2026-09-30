@@ -288,8 +288,8 @@ func TestLimitIsExact(t *testing.T) {
 
 // files lists the regular files under root.
 // files lists the objects and temporary files under a local store's root:
-// every regular file but the owner file each store keeps locked in its
-// work directory.
+// every regular file but the store's own bookkeeping, the owner file each
+// store keeps locked in its work directory and the root's .durable marker.
 func files(t *testing.T, root string) []string {
 	t.Helper()
 	var out []string
@@ -297,7 +297,7 @@ func files(t *testing.T, root string) []string {
 		if err != nil || !d.Type().IsRegular() {
 			return nil
 		}
-		if owner, _ := filepath.Match(filepath.Join(root, "tmp", "w-*", "owner"), path); !owner {
+		if owner, _ := filepath.Match(filepath.Join(root, "tmp", "w-*", "owner"), path); !owner && path != filepath.Join(root, ".durable") {
 			out = append(out, path)
 		}
 		return nil
