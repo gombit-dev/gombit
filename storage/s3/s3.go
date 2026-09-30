@@ -7,8 +7,28 @@
 // single PutObject, a larger one a multipart upload of PartSize parts sent
 // one after another. A Put holds at most PartSize in memory, whatever the
 // object's size (the largest object is 10,000 parts, about 78 GiB). The
-// object appears only when the upload completes (S3 writes are atomic), and
-// a failed or canceled Put aborts its multipart upload.
+// object appears only when the upload completes (S3 writes are atomic).
+//
+// # Failed writes
+//
+// A Put that fails before sending the request that publishes the object
+// (the PutObject, or the CompleteMultipartUpload) leaves the key as it was.
+// Once that request is sent, only S3's answer says whether it took effect:
+// a 4xx answer is a refusal, and the key is as it was; no answer (a dropped
+// connection, a timeout, ctx ending), or a 5xx one, leaves the outcome
+// unknown, and Put fails with storage.ErrUnknownOutcome. A multipart
+// upload settles that by aborting the upload: an abort that succeeds proves
+// the upload never completed, so the key is as it was; one that finds the
+// upload gone means it completed, and the outcome stays unknown (the new
+// object is most likely in place).
+//
+// A failed multipart upload is aborted, on a fresh context, so its parts do
+// not stay stored. The abort is best effort: when it fails too (the
+// network still down, s3:AbortMultipartUpload not granted), Put's error
+// also carries an *AbortError naming the upload, whose parts stay (and are
+// billed) until they are aborted. Give the bucket a lifecycle rule that
+// aborts incomplete multipart uploads after a day or so
+// (AbortIncompleteMultipartUpload): it is what guarantees none lingers.
 //
 // # Permissions
 //
@@ -36,7 +56,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -100,18 +120,61 @@ type Store struct {
 	prefix    string
 	public    string // PublicPrefix
 	publicURL string
-	// bucketChecked is when the bucket was last seen to exist (Unix nanos):
-	// a HEAD request's 404 does not say whether the object or the bucket
-	// is missing, so a 404 checks the bucket, at most once a bucketRecheck.
-	bucketChecked atomic.Int64
+	// bucketState is what a HEAD request's 404 needs: it does not say
+	// whether the object or the bucket is missing (see checkBucket).
+	bucketState bucketCheck
+}
+
+// bucketCheck is the bucket's last known state. One HeadBucket runs at a
+// time; callers that miss the cache meanwhile wait for its answer. A
+// definite answer (the bucket exists, is missing, or is denied) is kept
+// for bucketRecheck; a transient failure is not kept.
+type bucketCheck struct {
+	mu      sync.Mutex
+	at      time.Time // when result was found; zero for none
+	result  error     // nil: the bucket exists
+	pending *bucketCall
+}
+
+// bucketCall is one HeadBucket in flight; done is closed once state is set.
+type bucketCall struct {
+	done  chan struct{}
+	state bucketState
+}
+
+// bucketState is a HeadBucket's answer: the state to report (nil: the
+// bucket exists), and whether it is definite enough to keep.
+type bucketState struct {
+	err  error
+	keep bool
 }
 
 // PartSize is the size of each multipart upload part, and the most a Put
 // holds in memory.
 const PartSize = 8 << 20
 
-// bucketRecheck is how long a bucket seen to exist is taken to still exist.
+// bucketRecheck is how long a checked bucket state (it exists, it does not,
+// or access to it is denied) is taken to still hold.
 const bucketRecheck = time.Minute
+
+// bucketProbeTimeout bounds a HeadBucket, which runs apart from any one
+// caller's context (the callers waiting on it may outlive it).
+const bucketProbeTimeout = 10 * time.Second
+
+// AbortError is a multipart upload that a failed Put could not abort. Its
+// parts stay stored, and billed, until the bucket's lifecycle rule for
+// incomplete uploads removes them or someone aborts UploadID. Put's error
+// carries it (errors.As), alongside the failure it reports; it does not
+// change how that failure is classified.
+type AbortError struct {
+	Key      string // the S3 object key
+	UploadID string
+	Err      error // why the abort failed
+}
+
+func (e *AbortError) Error() string {
+	return fmt.Sprintf("s3 storage: aborting multipart upload %s of %q failed, so its parts remain until the bucket's lifecycle rule removes them: %v", e.UploadID, e.Key, e.Err)
+}
 
 var _ storage.Storage = (*Store)(nil)
 
@@ -127,15 +190,10 @@ func New(ctx context.Context, cfg Config) (*Store, error) {
 	if (cfg.AccessKeyID == "") != (cfg.SecretAccessKey == "") {
 		return nil, errors.New("s3 storage: set both the access key id and the secret access key, or neither")
 	}
-	if cfg.Prefix != "" {
-		// The prefix is the start of every object key: a directory-like
-		// path that ends with '/' and follows the key rules.
-		if !strings.HasSuffix(cfg.Prefix, "/") {
-			return nil, fmt.Errorf("s3 storage: prefix %q must end with '/'", cfg.Prefix)
-		}
-		if err := storage.ValidateKey(strings.TrimSuffix(cfg.Prefix, "/")); err != nil {
-			return nil, fmt.Errorf("s3 storage: prefix %q: %w", cfg.Prefix, err)
-		}
+	// The prefix starts every object key: config.Validate applies this same
+	// rule, so a configuration it accepts is one New accepts.
+	if err := storage.ValidatePrefix(cfg.Prefix); err != nil {
+		return nil, fmt.Errorf("s3 storage: %w", err)
 	}
 	loadOpts := []func(*awsconfig.LoadOptions) error{awsconfig.WithRegion(cfg.Region)}
 	if cfg.AccessKeyID != "" {
@@ -210,7 +268,7 @@ func (s *Store) put(ctx context.Context, key string, r io.Reader, opts storage.P
 	}
 	size, etag, err := s.upload(ctx, objKey, storage.PutReader(ctx, r, opts), opts.Size, contentType, encodeMetadata(opts.Metadata))
 	if err != nil {
-		return storage.ObjectInfo{}, classify(ctx, err)
+		return storage.ObjectInfo{}, classifyPut(ctx, err)
 	}
 	return storage.ObjectInfo{
 		Key:         key,
@@ -232,6 +290,11 @@ func (s *Store) upload(ctx context.Context, objKey string, body io.Reader, decla
 	n, err := io.ReadFull(body, buf)
 	switch {
 	case errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF):
+		// Nothing has been sent yet: a context that has ended is a failure
+		// that leaves the key as it was.
+		if err := ctx.Err(); err != nil {
+			return 0, "", err
+		}
 		out, err := s.client.PutObject(ctx, &awss3.PutObjectInput{
 			Bucket:        aws.String(s.bucket),
 			Key:           aws.String(objKey),
@@ -241,7 +304,7 @@ func (s *Store) upload(ctx context.Context, objKey string, body io.Reader, decla
 			Metadata:      md,
 		})
 		if err != nil {
-			return 0, "", err
+			return 0, "", publishFailed(err)
 		}
 		return int64(n), aws.ToString(out.ETag), nil
 	case err != nil:
@@ -267,13 +330,7 @@ func (s *Store) multipart(ctx context.Context, objKey string, body io.Reader, bu
 	}
 	defer func() {
 		if err != nil {
-			// The caller's context may be what ended the upload: abort on
-			// a fresh one, so no incomplete upload lingers (and bills).
-			abortCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-			defer cancel()
-			_, _ = s.client.AbortMultipartUpload(abortCtx, &awss3.AbortMultipartUploadInput{
-				Bucket: aws.String(s.bucket), Key: aws.String(objKey), UploadId: created.UploadId,
-			})
+			err = s.settle(ctx, objKey, aws.ToString(created.UploadId), err)
 		}
 	}()
 	var parts []types.CompletedPart
@@ -302,6 +359,9 @@ func (s *Store) multipart(ctx context.Context, objKey string, body io.Reader, bu
 			return 0, "", rerr
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return 0, "", err
+	}
 	done, err := s.client.CompleteMultipartUpload(ctx, &awss3.CompleteMultipartUploadInput{
 		Bucket:          aws.String(s.bucket),
 		Key:             aws.String(objKey),
@@ -309,9 +369,97 @@ func (s *Store) multipart(ctx context.Context, objKey string, body io.Reader, bu
 		MultipartUpload: &types.CompletedMultipartUpload{Parts: parts},
 	})
 	if err != nil {
-		return 0, "", err
+		return 0, "", publishFailed(err)
 	}
 	return total, aws.ToString(done.ETag), nil
+}
+
+// settle aborts the failed multipart upload uploadID of objKey, on a fresh
+// context (the caller's may be what ended the upload), and returns the
+// Put's error as the abort's result settles it: an abort that succeeds
+// proves the upload never completed, so even a Complete whose answer was
+// lost left the key as it was; an abort that finds the upload gone after
+// such a Complete means it completed, and the outcome stays unknown; any
+// other failed abort leaves the parts stored, which the error reports.
+func (s *Store) settle(ctx context.Context, objKey, uploadID string, err error) error {
+	abortCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	_, abortErr := s.client.AbortMultipartUpload(abortCtx, &awss3.AbortMultipartUploadInput{
+		Bucket: aws.String(s.bucket), Key: aws.String(objKey), UploadId: aws.String(uploadID),
+	})
+	var unknown *unknownOutcome
+	switch {
+	case abortErr == nil:
+		if errors.As(err, &unknown) {
+			return unknown.err // the Complete did not take effect
+		}
+		return err
+	case errors.As(err, &unknown) && isNoSuchUpload(abortErr):
+		return err // the Complete took effect, most likely: still unknown
+	default:
+		return &abortFailed{err: err, abort: &AbortError{Key: objKey, UploadID: uploadID, Err: abortErr}}
+	}
+}
+
+func isNoSuchUpload(err error) bool {
+	var noUpload *types.NoSuchUpload
+	var apiErr smithy.APIError
+	return errors.As(err, &noUpload) || (errors.As(err, &apiErr) && apiErr.ErrorCode() == "NoSuchUpload")
+}
+
+// unknownOutcome is a failure of the request that publishes an object when
+// S3 did not answer it with a refusal: it may have taken effect.
+type unknownOutcome struct{ err error }
+
+func (u *unknownOutcome) Error() string { return u.err.Error() }
+func (u *unknownOutcome) Unwrap() error { return u.err }
+
+// abortFailed is a failed Put whose multipart upload could not be aborted.
+type abortFailed struct {
+	err   error
+	abort *AbortError
+}
+
+func (a *abortFailed) Error() string { return a.err.Error() }
+func (a *abortFailed) Unwrap() error { return a.err }
+
+// publishFailed classifies a failure of the request that publishes an
+// object: an HTTP answer in the 4xx range is S3 refusing it (the key is as
+// it was); anything else (no answer, a 5xx one, ctx ending while waiting)
+// may have taken effect.
+func publishFailed(err error) error {
+	var respErr *smithyhttp.ResponseError
+	if errors.As(err, &respErr) {
+		if status := respErr.HTTPStatusCode(); status >= 400 && status < 500 {
+			return err
+		}
+	}
+	return &unknownOutcome{err: err}
+}
+
+// classifyPut classifies an upload's failure with classify, then adds what
+// the upload knows: that the outcome is unknown (storage.ErrUnknownOutcome),
+// and that a multipart upload could not be aborted (*AbortError). Neither
+// changes the classification of the failure itself.
+func classifyPut(ctx context.Context, err error) error {
+	var failed *abortFailed
+	var abort *AbortError
+	if errors.As(err, &failed) {
+		abort, err = failed.abort, failed.err
+	}
+	var unknown *unknownOutcome
+	isUnknown := errors.As(err, &unknown)
+	if isUnknown {
+		err = unknown.err
+	}
+	out := classify(ctx, err)
+	if isUnknown {
+		out = errors.Join(storage.ErrUnknownOutcome, out)
+	}
+	if abort != nil {
+		out = errors.Join(out, abort)
+	}
+	return out
 }
 
 // Open implements storage.Storage. The object streams from S3 as the
@@ -413,25 +561,79 @@ func (s *Store) URL(ctx context.Context, key string, opts storage.URLOptions) (s
 
 // checkBucket returns notFound when the bucket exists, and a
 // configuration error when it does not: a HEAD request's 404 carries no
-// error code to tell them apart. A bucket found once is not checked again.
+// error code to tell them apart. The bucket's state is checked at most
+// once per bucketRecheck however many misses arrive together: one
+// HeadBucket runs, and the others wait for its answer (or for their own
+// ctx to end).
 func (s *Store) checkBucket(ctx context.Context, notFound error) error {
-	if time.Since(time.Unix(0, s.bucketChecked.Load())) < bucketRecheck {
+	result, err := s.bucketState.get(ctx, s.probeBucket)
+	if err != nil {
+		return err // ctx ended while waiting
+	}
+	if result == nil {
 		return notFound
 	}
+	return result
+}
+
+// probeBucket asks S3 whether the bucket exists.
+func (s *Store) probeBucket(ctx context.Context) bucketState {
 	_, err := s.client.HeadBucket(ctx, &awss3.HeadBucketInput{Bucket: aws.String(s.bucket)})
 	if err == nil {
-		s.bucketChecked.Store(time.Now().UnixNano())
-		return notFound
+		return bucketState{keep: true}
 	}
 	classified := classify(ctx, err)
-	if errors.Is(classified, storage.ErrNotFound) {
+	switch {
+	case errors.Is(classified, storage.ErrNotFound):
 		// Not the sentinel: a missing bucket is a configuration error, not
 		// a missing object a handler would answer with 404.
-		return fmt.Errorf("s3 storage: bucket %q does not exist: %v", s.bucket, err)
+		return bucketState{err: fmt.Errorf("s3 storage: bucket %q does not exist: %v", s.bucket, err), keep: true}
+	case errors.Is(classified, storage.ErrUnavailable), ctx.Err() != nil:
+		return bucketState{err: classified} // transient: check again next time
+	default:
+		return bucketState{err: classified, keep: true} // denied, or otherwise refused
 	}
-	// Denied, unreachable, or canceled: report that rather than a missing
-	// object.
-	return classified
+}
+
+// get returns the cached state, or the answer of the probe in flight,
+// starting one if none is (on a context of its own, bounded by
+// bucketProbeTimeout, so it serves every caller waiting on it). Every
+// caller, the one that started it included, stops waiting when its own ctx
+// ends: err is then ctx's error.
+func (b *bucketCheck) get(ctx context.Context, probe func(context.Context) bucketState) (result, err error) {
+	b.mu.Lock()
+	if !b.at.IsZero() && time.Since(b.at) < bucketRecheck {
+		result := b.result
+		b.mu.Unlock()
+		return result, nil
+	}
+	call := b.pending
+	if call == nil {
+		call = &bucketCall{done: make(chan struct{})}
+		b.pending = call
+		go b.run(context.WithoutCancel(ctx), call, probe)
+	}
+	b.mu.Unlock()
+	select {
+	case <-call.done:
+		return call.state.err, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// run performs call's probe and publishes its answer.
+func (b *bucketCheck) run(ctx context.Context, call *bucketCall, probe func(context.Context) bucketState) {
+	probeCtx, cancel := context.WithTimeout(ctx, bucketProbeTimeout)
+	call.state = probe(probeCtx)
+	cancel()
+	b.mu.Lock()
+	if call.state.keep {
+		b.at, b.result = time.Now(), call.state.err
+	}
+	b.pending = nil
+	b.mu.Unlock()
+	close(call.done)
 }
 
 func objectInfo(key string, size int64, contentType, etag *string, modTime *time.Time, md map[string]string) (storage.ObjectInfo, error) {

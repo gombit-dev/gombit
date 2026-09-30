@@ -16,12 +16,15 @@
 //     seekable source, or a known length.
 //   - Atomic writes. A Put that fails (its reader errors, its context
 //     ends, its declared size is wrong) leaves the key as it was; no one
-//     ever reads a partial object.
+//     ever reads a partial object. The exception is ErrUnknownOutcome: a
+//     remote backend was sent the object and never confirmed or denied
+//     storing it, so the key holds the old object or the new one, whole.
 //   - Portable keys. ValidateKey is the same rule on every driver, and it
 //     rejects any key that could climb out of a prefix ("..", a leading
 //     '/', a backslash).
 //   - Classified errors. ErrNotFound, ErrInvalidKey, ErrInvalidOptions,
-//     ErrSizeMismatch, ErrUnsupported, and ErrUnavailable match with
+//     ErrSizeMismatch, ErrUnsupported, ErrUnavailable, and
+//     ErrUnknownOutcome match with
 //     errors.Is on every driver, and MapError turns them into D10 errors
 //     for a handler.
 //

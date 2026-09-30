@@ -12,6 +12,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 
+	"github.com/gombit-dev/gombit/config"
 	"github.com/gombit-dev/gombit/storage"
 )
 
@@ -183,6 +184,49 @@ func TestURLs(t *testing.T) {
 	} {
 		if _, err := New(ctx, bad); err == nil {
 			t.Errorf("New(%+v) succeeded", bad)
+		}
+	}
+}
+
+// TestPrefixRuleIsShared: config validation and New accept exactly the
+// same prefixes, in both directions: one rule (storage.ValidatePrefix).
+// A prefix is a valid key followed by '/' that leaves room for a key.
+func TestPrefixRuleIsShared(t *testing.T) {
+	ctx := context.Background()
+	for prefix, valid := range map[string]bool{
+		"":                                true,
+		"myapp/":                          true,
+		"a/b/c/":                          true,
+		"v1..beta/":                       true, // ".." inside a segment is fine
+		"café/":                           true,
+		strings.Repeat("s", 255) + "/":    true,
+		strings.Repeat("a/", 510) + "bc/": true,  // 1023 bytes: one byte left for a key
+		"myapp":                           false, // no trailing '/'
+		"/myapp/":                         false,
+		"a//b/":                           false,
+		"../escape/":                      false,
+		"app./prod/":                      false, // a segment ending with '.'
+		"app /":                           false, // ... or a space
+		"a\x01b/":                         false, // a control character
+		"a\u202eb/":                       false, // a bidirectional control
+		`a\b/`:                            false,
+		strings.Repeat("s", 256) + "/":    false, // a segment too long
+		strings.Repeat("a/", 512):         false, // 1024 bytes: no room for any key
+		"\xff/":                           false,
+	} {
+		_, newErr := New(ctx, Config{Bucket: "b", Region: "us-east-1", Prefix: prefix})
+		cfgErr := config.ValidateStorage(config.StorageConfig{Driver: config.StorageDriverS3, S3: config.S3StorageConfig{Bucket: "b", Region: "us-east-1", Prefix: prefix}})
+		if (newErr == nil) != valid || (cfgErr == nil) != valid {
+			t.Errorf("prefix %.40q: New = %v, config = %v; want valid = %v", prefix, newErr, cfgErr, valid)
+		}
+		if newErr != nil && !errors.Is(newErr, storage.ErrInvalidKey) {
+			t.Errorf("prefix %.40q: New = %v, want ErrInvalidKey", prefix, newErr)
+		}
+		// The public prefix follows the same rule.
+		pubErr := storage.ValidatePublicPrefix(prefix)
+		pubCfgErr := config.ValidateStorage(config.StorageConfig{Driver: config.StorageDriverMemory, PublicPrefix: prefix})
+		if (pubErr == nil) != valid || (pubCfgErr == nil) != valid {
+			t.Errorf("public prefix %.40q: storage = %v, config = %v; want valid = %v", prefix, pubErr, pubCfgErr, valid)
 		}
 	}
 }
