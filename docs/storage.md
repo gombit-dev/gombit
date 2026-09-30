@@ -481,6 +481,11 @@ GOMBIT_STORAGE_S3_FORCE_PATH_STYLE=false      # true for MinIO and most S3-compa
   a 5xx one leaves the outcome unknown, and `Put` fails with
   `ErrUnknownOutcome`. A multipart upload settles it by aborting: an abort
   that succeeds proves the upload never completed, so the key is as it was.
+  The SDK retries every request but that one: a retry's answer says nothing
+  about the attempt before it (a `CompleteMultipartUpload` that took effect
+  and lost its answer makes its retry fail with `NoSuchUpload`), so only a
+  single attempt's answer is classified. To retry, repeat the `Put`; that
+  is always safe.
 - **Incomplete uploads.** A failed multipart upload is aborted, on a fresh
   context, so its parts aren't kept. The abort is best effort. When it
   fails too (the network is still down, or `s3:AbortMultipartUpload` isn't

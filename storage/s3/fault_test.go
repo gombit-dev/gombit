@@ -36,7 +36,9 @@ type fakeS3 struct {
 	dropBeforeApply  bool // drop a Complete without applying it
 	refusePart       int  // answer an UploadPart with this status
 	refuseAbort      int  // answer an Abort with this status
+	goneBeforeAbort  bool // the upload is gone by the time it is aborted
 	abortedUploadIDs []string
+	puts, completes  int // PutObject and CompleteMultipartUpload requests seen
 }
 
 func newFakeS3() *fakeS3 {
@@ -75,6 +77,7 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("ETag", `"part"`)
 	case r.Method == http.MethodPut: // PutObject
+		f.puts++
 		if f.refusePut != 0 {
 			s3Error(w, f.refusePut, "AccessDenied")
 			return
@@ -91,6 +94,13 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.uploads[id] = true
 		_, _ = fmt.Fprintf(w, `<InitiateMultipartUploadResult><Bucket>b</Bucket><UploadId>%s</UploadId></InitiateMultipartUploadResult>`, id)
 	case r.Method == http.MethodPost && q.Has("uploadId"): // CompleteMultipartUpload
+		f.completes++
+		if !f.uploads[q.Get("uploadId")] {
+			// Already completed (or aborted): what S3 answers a retry of a
+			// Complete whose first attempt took effect.
+			s3Error(w, http.StatusNotFound, "NoSuchUpload")
+			return
+		}
 		if f.dropBeforeApply {
 			drop(w)
 			return
@@ -108,6 +118,9 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		id := q.Get("uploadId")
+		if f.goneBeforeAbort {
+			delete(f.uploads, id)
+		}
 		if !f.uploads[id] {
 			s3Error(w, http.StatusNotFound, "NoSuchUpload")
 			return
@@ -135,6 +148,13 @@ func drop(w http.ResponseWriter) {
 	}
 }
 
+// requests returns the PutObject and CompleteMultipartUpload counts.
+func (f *fakeS3) requests() (puts, completes int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.puts, f.completes
+}
+
 func (f *fakeS3) has(key string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -142,11 +162,10 @@ func (f *fakeS3) has(key string) bool {
 	return ok
 }
 
-// fakeStore is a Store on f, with one attempt per request, so a dropped
-// answer is not retried away.
+// fakeStore is a Store on f, configured as in production: the SDK's
+// default retryer (three attempts) included.
 func fakeStore(t *testing.T, f *fakeS3) *Store {
 	t.Helper()
-	t.Setenv("AWS_MAX_ATTEMPTS", "1")
 	srv := httptest.NewServer(f)
 	t.Cleanup(srv.Close)
 	s, err := New(context.Background(), Config{Endpoint: srv.URL, Region: "us-east-1", Bucket: "b", AccessKeyID: "id", SecretAccessKey: "secret", ForcePathStyle: true})
@@ -214,10 +233,58 @@ func TestLostCompleteAnswer(t *testing.T) {
 		if err == nil || errors.Is(err, storage.ErrUnknownOutcome) {
 			t.Fatalf("Put whose Complete was lost before S3 applied it = %v, want a definite failure (the abort proved it)", err)
 		}
-		if f.has("k") || len(f.abortedUploadIDs) != 1 {
-			t.Fatalf("object stored = %v, aborted uploads %v; want none stored, one aborted", f.has("k"), f.abortedUploadIDs)
+		f.mu.Lock()
+		aborted := len(f.abortedUploadIDs)
+		f.mu.Unlock()
+		if f.has("k") || aborted != 1 {
+			t.Fatalf("object stored = %v, %d uploads aborted; want none stored, one aborted", f.has("k"), aborted)
 		}
 	})
+}
+
+// TestPublishingIsNotRetried: with the SDK's default retries, a publishing
+// request whose answer is lost is not sent again. A retry's answer says
+// nothing about the first attempt: a CompleteMultipartUpload that took
+// effect and lost its answer makes its retry fail with NoSuchUpload, which
+// would read as a refusal (and the settled abort as parts left behind)
+// although the object was published.
+func TestPublishingIsNotRetried(t *testing.T) {
+	t.Run("complete", func(t *testing.T) {
+		f := newFakeS3()
+		f.dropComplete = true
+		_, err := fakeStore(t, f).Put(context.Background(), "k", large(), storage.PutOptions{})
+		var abort *AbortError
+		if !errors.Is(err, storage.ErrUnknownOutcome) || errors.As(err, &abort) {
+			t.Fatalf("Put whose first Complete took effect and lost its answer = %v; want ErrUnknownOutcome and no *AbortError", err)
+		}
+		if _, completes := f.requests(); completes != 1 || !f.has("k") {
+			t.Fatalf("%d Complete requests (object stored: %v), want 1", completes, f.has("k"))
+		}
+	})
+	t.Run("put", func(t *testing.T) {
+		f := newFakeS3()
+		f.dropPut = true
+		_, err := fakeStore(t, f).Put(context.Background(), "k", strings.NewReader("new"), storage.PutOptions{})
+		if puts, _ := f.requests(); !errors.Is(err, storage.ErrUnknownOutcome) || puts != 1 {
+			t.Fatalf("Put = %v after %d PutObject requests, want ErrUnknownOutcome after 1", err, puts)
+		}
+	})
+}
+
+// TestAbortOfAGoneUploadLeavesNothing: an abort that finds the upload gone
+// (a lifecycle rule removed it, say) is not reported as parts left behind.
+func TestAbortOfAGoneUploadLeavesNothing(t *testing.T) {
+	f := newFakeS3()
+	f.refusePart = http.StatusBadRequest
+	s := fakeStore(t, f)
+	f.mu.Lock()
+	f.goneBeforeAbort = true
+	f.mu.Unlock()
+	_, err := s.Put(context.Background(), "k", large(), storage.PutOptions{})
+	var abort *AbortError
+	if err == nil || errors.As(err, &abort) || errors.Is(err, storage.ErrUnknownOutcome) {
+		t.Fatalf("Put = %v; want the part's failure, without an *AbortError (no upload remains)", err)
+	}
 }
 
 // TestFailedAbortIsReported: when an upload fails and its abort fails too,
@@ -290,6 +357,9 @@ func TestBucketCheckIsSingleFlight(t *testing.T) {
 		}
 	})
 	t.Run("transient failure is not kept", func(t *testing.T) {
+		// One attempt per HeadBucket, so the count below is of checks, not
+		// of the SDK's retries of each.
+		t.Setenv("AWS_MAX_ATTEMPTS", "1")
 		f := newFakeS3()
 		f.bucketStatus = http.StatusServiceUnavailable
 		s := fakeStore(t, f)
