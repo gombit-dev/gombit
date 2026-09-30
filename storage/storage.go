@@ -33,9 +33,18 @@ type Storage interface {
 	// Concurrent Puts to one key leave one of them whole, and a reader
 	// during a Put reads the previous object whole.
 	//
+	// The one exception is a failure that matches ErrUnknownOutcome: a
+	// driver whose backend is across a network sent the request that
+	// publishes the object and never learned whether it took effect. The
+	// key then holds the previous object or the new one, whole; which, the
+	// driver cannot say. Every other failure, ctx ending before the object
+	// was sent included, leaves the key as it was.
+	//
 	// Put observes ctx between reads of r: once ctx has ended, it makes no
 	// further Read, and it fails with ctx's error and stores nothing, even
-	// if r then reaches EOF. It cannot interrupt a Read of r already in
+	// if r then reaches EOF. (If ctx ends while a remote backend is
+	// publishing the object, the error may match ErrUnknownOutcome as well
+	// as ctx's error.) It cannot interrupt a Read of r already in
 	// progress (an io.Reader has no way to be interrupted, and r is the
 	// caller's): a source that can block must be made to return by its
 	// owner, as an HTTP server closes a request body when the client goes
