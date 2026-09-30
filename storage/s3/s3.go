@@ -16,7 +16,12 @@
 // Once that request is sent, only S3's answer says whether it took effect:
 // a 4xx answer is a refusal, and the key is as it was; no answer (a dropped
 // connection, a timeout, ctx ending), or a 5xx one, leaves the outcome
-// unknown, and Put fails with storage.ErrUnknownOutcome. A multipart
+// unknown, and Put fails with storage.ErrUnknownOutcome. The SDK does not
+// retry that request (every other one it does): a retry's answer says
+// nothing about the attempt before it (a Complete that took effect and lost
+// its answer makes its retry fail with NoSuchUpload), so only one
+// attempt's answer is ever classified. The way to retry is to repeat the
+// Put, which is safe. A multipart
 // upload settles that by aborting the upload: an abort that succeeds proves
 // the upload never completed, so the key is as it was; one that finds the
 // upload gone means it completed, and the outcome stays unknown (the new
@@ -302,7 +307,7 @@ func (s *Store) upload(ctx context.Context, objKey string, body io.Reader, decla
 			ContentLength: aws.Int64(int64(n)),
 			ContentType:   aws.String(contentType),
 			Metadata:      md,
-		})
+		}, singleAttempt)
 		if err != nil {
 			return 0, "", publishFailed(err)
 		}
@@ -367,19 +372,25 @@ func (s *Store) multipart(ctx context.Context, objKey string, body io.Reader, bu
 		Key:             aws.String(objKey),
 		UploadId:        created.UploadId,
 		MultipartUpload: &types.CompletedMultipartUpload{Parts: parts},
-	})
+	}, singleAttempt)
 	if err != nil {
 		return 0, "", publishFailed(err)
 	}
 	return total, aws.ToString(done.ETag), nil
 }
 
+// singleAttempt sends a request once, without the SDK's automatic
+// retries: the requests that publish an object use it, so that the answer
+// publishFailed classifies is the answer to the only attempt.
+func singleAttempt(o *awss3.Options) { o.RetryMaxAttempts = 1 }
+
 // settle aborts the failed multipart upload uploadID of objKey, on a fresh
 // context (the caller's may be what ended the upload), and returns the
 // Put's error as the abort's result settles it: an abort that succeeds
 // proves the upload never completed, so even a Complete whose answer was
 // lost left the key as it was; an abort that finds the upload gone after
-// such a Complete means it completed, and the outcome stays unknown; any
+// such a Complete means it completed, and the outcome stays unknown; after
+// any other failure, an upload already gone leaves nothing behind. Any
 // other failed abort leaves the parts stored, which the error reports.
 func (s *Store) settle(ctx context.Context, objKey, uploadID string, err error) error {
 	abortCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
@@ -394,8 +405,11 @@ func (s *Store) settle(ctx context.Context, objKey, uploadID string, err error) 
 			return unknown.err // the Complete did not take effect
 		}
 		return err
-	case errors.As(err, &unknown) && isNoSuchUpload(abortErr):
-		return err // the Complete took effect, most likely: still unknown
+	case isNoSuchUpload(abortErr):
+		// No upload remains: either the ambiguous Complete took effect (the
+		// outcome stays unknown), or something else ended the upload (a
+		// lifecycle rule), and the Put's failure stands, nothing left behind.
+		return err
 	default:
 		return &abortFailed{err: err, abort: &AbortError{Key: objKey, UploadID: uploadID, Err: abortErr}}
 	}
