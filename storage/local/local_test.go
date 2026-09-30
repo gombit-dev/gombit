@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -313,7 +314,8 @@ func TestSweepSparesLiveStores(t *testing.T) {
 	}
 	age(dead)
 	// A store that died before creating its owner file, one that is
-	// creating it right now, and something that is not a work directory.
+	// creating it right now (neither provably gone, so both kept), and
+	// something that is not a work directory.
 	for _, dir := range []string{"w-unowned", "w-starting", "notes"} {
 		if err := os.Mkdir(filepath.Join(tmp, dir), 0o750); err != nil {
 			t.Fatal(err)
@@ -326,7 +328,7 @@ func TestSweepSparesLiveStores(t *testing.T) {
 	if _, err := next.Put(ctx, "k", strings.NewReader("x"), storage.PutOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	for dir, want := range map[string]bool{filepath.Dir(inFlight[0]): true, dead: false, filepath.Join(tmp, "w-unowned"): false, filepath.Join(tmp, "w-starting"): true, filepath.Join(tmp, "notes"): true} {
+	for dir, want := range map[string]bool{filepath.Dir(inFlight[0]): true, dead: false, filepath.Join(tmp, "w-unowned"): true, filepath.Join(tmp, "w-starting"): true, filepath.Join(tmp, "notes"): true} {
 		if _, err := os.Stat(dir); (err == nil) != want {
 			t.Errorf("after the sweep %s exists = %v, want %v", filepath.Base(dir), err == nil, want)
 		}
@@ -615,14 +617,15 @@ func TestAncestorFlushFailureFailsBeforePublishing(t *testing.T) {
 	}
 }
 
-// TestEveryNewAncestorIsFlushedOnce: a root under directories that do not
-// exist yet has each new directory's entry flushed in its parent, from the
-// deepest one that already existed, and nothing above it is flushed (a
-// process may be able to traverse an ancestor but not read it); a second
-// Put into the same directory flushes only the directory it renames into.
-func TestEveryNewAncestorIsFlushedOnce(t *testing.T) {
+// TestEveryEntryOnThePathIsFlushedOnce: the first Put flushes the root's
+// entry in its parent and the entry of every directory under the root on
+// the object's path, and nothing above the root's parent; a second Put
+// into the same directory flushes only the directory it renames into; a
+// second store sharing the root trusts the root marker for the root's
+// entry, but flushes the directories under the root itself.
+func TestEveryEntryOnThePathIsFlushedOnce(t *testing.T) {
 	base := t.TempDir()
-	s, _ := local.New(filepath.Join(base, "a", "b", "root"))
+	s, _ := local.New(filepath.Join(base, "root"))
 	ctx := context.Background()
 	var synced []string
 	defer local.SetSyncDir(func(dir string) error { synced = append(synced, dir); return nil })()
@@ -630,23 +633,68 @@ func TestEveryNewAncestorIsFlushedOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	leaf := filepath.Dir(s.Path("k"))
-	want := []string{base, filepath.Join(base, "a"), filepath.Join(base, "a", "b"), s.Root(), filepath.Join(s.Root(), "objects"), filepath.Dir(leaf), leaf}
-	for _, dir := range want {
-		if !slices.Contains(synced, dir) {
-			t.Errorf("%s was never flushed (flushed %v)", dir, synced)
-		}
-	}
-	for _, dir := range synced {
-		if !slices.Contains(want, dir) {
-			t.Errorf("%s was flushed, but this store created no entry in it", dir)
-		}
+	objects := filepath.Join(s.Root(), "objects")
+	want := []string{base, s.Root(), objects, filepath.Dir(leaf), leaf}
+	if !slices.Equal(sorted(synced), sorted(want)) {
+		t.Fatalf("the first Put flushed %v, want %v", synced, want)
 	}
 	synced = nil
 	if _, err := s.Put(ctx, "k", strings.NewReader("y"), storage.PutOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if len(synced) != 1 || synced[0] != leaf {
+	if !slices.Equal(synced, []string{leaf}) {
 		t.Fatalf("a second Put into the same directory flushed %v, want only %s", synced, leaf)
+	}
+	synced = nil
+	other, _ := local.New(s.Root())
+	if _, err := other.Put(ctx, "k", strings.NewReader("z"), storage.PutOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{s.Root(), objects, filepath.Dir(leaf), leaf}; !slices.Equal(sorted(synced), sorted(want)) {
+		t.Fatalf("a second store's first Put flushed %v, want %v", synced, want)
+	}
+}
+
+func sorted(s []string) []string {
+	s = slices.Clone(s)
+	slices.Sort(s)
+	return s
+}
+
+// TestRootWithoutMarkerIsFlushed: a root that exists without the marker
+// (made by hand, or by a store that stopped before flushing it) is not
+// taken for durable: the first Put flushes its entry in the parent, then
+// writes the marker, and a later store trusts it.
+func TestRootWithoutMarkerIsFlushed(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "root")
+	if err := os.Mkdir(root, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	var synced []string
+	defer local.SetSyncDir(func(dir string) error { synced = append(synced, dir); return nil })()
+	for i, wantParent := range []bool{true, false} {
+		synced = nil
+		s, _ := local.New(root)
+		if _, err := s.Put(context.Background(), "k", strings.NewReader("x"), storage.PutOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		if got := slices.Contains(synced, base); got != wantParent {
+			t.Fatalf("store %d flushed the root's parent = %v, want %v (flushed %v)", i, got, wantParent, synced)
+		}
+		if _, err := os.Stat(filepath.Join(root, ".durable")); err != nil {
+			t.Fatalf("no marker after store %d's Put: %v", i, err)
+		}
+	}
+}
+
+// TestRootParentMustExist: the store creates its root, not the directories
+// above it, whose durability it could not vouch for.
+func TestRootParentMustExist(t *testing.T) {
+	s, _ := local.New(filepath.Join(t.TempDir(), "missing", "root"))
+	_, err := s.Put(context.Background(), "k", strings.NewReader("x"), storage.PutOptions{})
+	if err == nil || !strings.Contains(err.Error(), "parent directory") {
+		t.Fatalf("Put under a missing parent = %v, want an error naming the parent", err)
 	}
 }
 
@@ -827,5 +875,141 @@ func TestReadsDuringWritesSeeAVersionOrNothing(t *testing.T) {
 	close(stop)
 	if err := <-failed; err != nil {
 		t.Fatalf("a read racing writes = %v, want a version or ErrNotFound", err)
+	}
+}
+
+// TestStoresDoNotTrustAnotherStoresUnflushedDirectories: store A creates
+// the directories on an object's path and stops before flushing their
+// entries (paused, or its flush failing); store B, sharing the root, must
+// not take their existence for durability. It flushes every directory
+// entry on the path itself before its Put returns.
+func TestStoresDoNotTrustAnotherStoresUnflushedDirectories(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "root")
+	a, _ := local.New(root)
+	b, _ := local.New(root)
+	ctx := context.Background()
+	leaf := filepath.Dir(a.Path("k"))
+	objects := filepath.Dir(filepath.Dir(leaf))
+
+	var mu sync.Mutex
+	var recording bool
+	var byB []string
+	paused, release := make(chan struct{}), make(chan struct{})
+	pausedOnce := false
+	defer local.SetSyncDir(func(dir string) error {
+		mu.Lock()
+		if dir == objects && !pausedOnce {
+			pausedOnce = true
+			mu.Unlock()
+			close(paused)
+			<-release
+			return nil
+		}
+		if recording {
+			byB = append(byB, dir)
+		}
+		mu.Unlock()
+		return nil
+	})()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := a.Put(ctx, "k", strings.NewReader("from a"), storage.PutOptions{})
+		done <- err
+	}()
+	<-paused // A has created objects/xx/yy but not flushed the entry of xx
+	mu.Lock()
+	recording = true
+	mu.Unlock()
+	if _, err := b.Put(ctx, "k", strings.NewReader("from b"), storage.PutOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	recording = false
+	got := slices.Clone(byB)
+	mu.Unlock()
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{root, objects, filepath.Dir(leaf), leaf} {
+		if !slices.Contains(got, dir) {
+			t.Errorf("B published into directories A had not flushed without flushing %s (B flushed %v)", dir, got)
+		}
+	}
+}
+
+// TestSweepSparesWorkDirectoriesBeingSetUp: a work directory whose owner
+// file is not in place yet (its store is between creating the directory
+// and locking the owner, or died there) is never taken for a dead
+// store's, however old it looks: only a lock proves a store is gone.
+func TestSweepSparesWorkDirectoriesBeingSetUp(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "root")
+	tmp := filepath.Join(root, "tmp")
+	long := time.Now().Add(-48 * time.Hour)
+	for _, dir := range []string{"w-no-owner-yet", "w-owner-not-locked-yet"} {
+		if err := os.MkdirAll(filepath.Join(tmp, dir), 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "w-owner-not-locked-yet", "owner.new"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{"w-no-owner-yet", "w-owner-not-locked-yet"} {
+		if err := os.Chtimes(filepath.Join(tmp, dir), long, long); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s, _ := local.New(root)
+	if _, err := s.Put(context.Background(), "k", strings.NewReader("x"), storage.PutOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{"w-no-owner-yet", "w-owner-not-locked-yet"} {
+		if _, err := os.Stat(filepath.Join(tmp, dir)); err != nil {
+			t.Errorf("the sweep removed %s, a store that may still be setting it up: %v", dir, err)
+		}
+	}
+}
+
+// TestLongRoot: a root whose object paths are longer than Windows' legacy
+// 260-character limit works like any other (every path the store hands
+// the system is in its long form there).
+func TestLongRoot(t *testing.T) {
+	parent := t.TempDir()
+	for len(parent) < 250 {
+		parent = filepath.Join(parent, strings.Repeat("d", 40))
+	}
+	if err := os.MkdirAll(parent, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(parent, "root")
+	s, _ := local.New(root)
+	ctx := context.Background()
+	if p := s.Path("k"); len(p) < 300 {
+		t.Fatalf("object path is only %d characters", len(p))
+	}
+	if _, err := s.Put(ctx, "k", strings.NewReader("first"), storage.PutOptions{}); err != nil {
+		t.Fatalf("Put = %v", err)
+	}
+	body, _, err := s.Open(ctx, "k")
+	if err != nil {
+		t.Fatalf("Open = %v", err)
+	}
+	defer func() { _ = body.Close() }()
+	if _, err := s.Put(ctx, "k", strings.NewReader("second"), storage.PutOptions{}); err != nil {
+		t.Fatalf("Put over an open reader = %v", err)
+	}
+	if got := readAll(t, s, "k"); got != "second" {
+		t.Fatalf("read %q", got)
+	}
+	if err := s.Delete(ctx, "k"); err != nil {
+		t.Fatalf("Delete = %v", err)
+	}
+	if _, err := s.Stat(ctx, "k"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("Stat after Delete = %v", err)
+	}
+	other, _ := local.New(root) // its first Put sweeps, probing s's owner file
+	if _, err := other.Put(ctx, "k2", strings.NewReader("x"), storage.PutOptions{}); err != nil {
+		t.Fatalf("a second store's Put = %v", err)
 	}
 }

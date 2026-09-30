@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"runtime"
+	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -49,7 +50,7 @@ func createFile(name string, access, mode uint32, op string) (*os.File, error) {
 // STATUS_DELETE_PENDING; that file is gone, so it is reported as not
 // existing.
 func create(name string, access, mode uint32, op string) (windows.Handle, error) {
-	p, err := windows.UTF16PtrFromString(name)
+	p, err := windows.UTF16PtrFromString(longPath(name))
 	if err != nil {
 		return 0, &fs.PathError{Op: op, Path: name, Err: err}
 	}
@@ -107,7 +108,7 @@ type fileRenameInfo struct {
 // open. Where POSIX semantics are not available it falls back to
 // os.Rename, which fails while dst is open.
 func replaceFile(src, dst string) error {
-	name, err := windows.UTF16FromString(dst)
+	name, err := windows.UTF16FromString(longPath(dst))
 	if err != nil {
 		return &os.LinkError{Op: "rename", Old: src, New: dst, Err: err}
 	}
@@ -162,4 +163,21 @@ func tryLock(f *os.File) (bool, error) {
 		return false, nil
 	}
 	return err == nil, err
+}
+
+// longPath returns path in the form the raw Win32 calls above need to
+// reach it when it is long. The os package does the same for its own calls
+// (os.fixLongPath): on Windows 10 1703 and later the Go runtime opts the
+// process into long paths and neither is needed, but on the older versions
+// Go supports (Windows Server 2016, say) a path of 248 characters or more
+// works only with the extended \\?\ prefix, or \\?\UNC\ for a share. The
+// store's paths are absolute and clean, as the prefix requires.
+func longPath(path string) string {
+	if len(path) < 248 || strings.HasPrefix(path, `\\?\`) || strings.HasPrefix(path, `\\.\`) {
+		return path
+	}
+	if strings.HasPrefix(path, `\\`) {
+		return `\\?\UNC\` + path[2:]
+	}
+	return `\\?\` + path
 }
