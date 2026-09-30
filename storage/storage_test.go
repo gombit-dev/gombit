@@ -8,6 +8,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -234,6 +235,7 @@ func TestMapError(t *testing.T) {
 		{storage.Wrap("put", "k", storage.ErrInvalidOptions), http.StatusUnprocessableEntity},
 		{storage.Wrap("put", "k", storage.ErrSizeMismatch), http.StatusUnprocessableEntity},
 		{storage.Wrap("put", "k", errors.Join(storage.ErrUnavailable, cause)), http.StatusServiceUnavailable},
+		{storage.Wrap("put", "k", errors.Join(storage.ErrUnknownOutcome, storage.ErrUnavailable, cause)), http.StatusServiceUnavailable},
 		{storage.Wrap("url", "k", storage.ErrUnsupported), http.StatusInternalServerError},
 		{cause, http.StatusInternalServerError},
 	}
@@ -280,19 +282,25 @@ func TestExists(t *testing.T) {
 }
 
 // TestNoDriverDependencies: the contract package, which application code
-// imports, depends on nothing but the standard library and Gombit's own
-// contract package, so it can never pull an S3 SDK or a filesystem driver
+// imports, depends on nothing but the standard library, Gombit's own
+// contract package, and the key rules (internal/storagekey, itself only the
+// standard library), so it can never pull an S3 SDK or a filesystem driver
 // into an application.
 func TestNoDriverDependencies(t *testing.T) {
-	pkg, err := build.ImportDir(".", 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, imp := range pkg.Imports {
-		if imp == "github.com/gombit-dev/gombit/contract" || !strings.Contains(strings.Split(imp, "/")[0], ".") {
-			continue
+	for dir, allowed := range map[string][]string{
+		".":                      {"github.com/gombit-dev/gombit/contract", "github.com/gombit-dev/gombit/internal/storagekey"},
+		"../internal/storagekey": nil,
+	} {
+		pkg, err := build.ImportDir(dir, 0)
+		if err != nil {
+			t.Fatal(err)
 		}
-		t.Errorf("package storage imports %s: the contract must not depend on a driver or third-party module", imp)
+		for _, imp := range pkg.Imports {
+			if slices.Contains(allowed, imp) || !strings.Contains(strings.Split(imp, "/")[0], ".") {
+				continue
+			}
+			t.Errorf("package %s imports %s: the contract must not depend on a driver or third-party module", pkg.ImportPath, imp)
+		}
 	}
 }
 

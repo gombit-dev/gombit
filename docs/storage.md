@@ -52,7 +52,7 @@ err = store.Delete(ctx, "avatars/42.png")
 | Guarantee | What it means |
 | --- | --- |
 | **Streaming** | `Put` reads an `io.Reader` to EOF in pieces, and `Open` returns an `io.ReadCloser`. Neither needs the whole object in memory, a seekable source, or a known length. |
-| **Atomic writes** | A `Put` that fails leaves the key as it was: the previous object whole, or still absent. That covers the reader returning an error, the context ending, and a length that differs from the declared `Size`. A reader during a `Put` reads the previous object whole, never part of the new one; for a key stored for the first time, it finds no object until the `Put` completes. Concurrent `Put`s to one key leave one of them whole. |
+| **Atomic writes** | A `Put` that fails leaves the key as it was: the previous object whole, or still absent. That covers the reader returning an error, the context ending, and a length that differs from the declared `Size`. A reader during a `Put` reads the previous object whole, never part of the new one; for a key stored for the first time, it finds no object until the `Put` completes. Concurrent `Put`s to one key leave one of them whole. The one exception is a failure that matches `ErrUnknownOutcome`: a remote backend (S3) was sent the object and never said whether it stored it, because the answer was lost, the connection dropped, or the service failed. The key then holds the previous object or the new one, whole; which is unknown. `Stat` the key, or `Put` again (repeating a `Put` is safe). The local and memory drivers never return it. |
 | **Overwrite** | `Put` replaces an existing object, including its content type and metadata. |
 | **Idempotent delete** | Deleting a missing object is not an error, so a retried delete is safe. |
 | **Portable keys** | Every method validates its key with the same rule (below) and fails with `ErrInvalidKey` before touching the backend. Every valid key is its own object on every driver: keys that differ only in case or in Unicode normalization (`café` NFC and NFD), a key that is a prefix of another (`a` and `a/b`), segments up to 255 bytes, and names Windows reserves (`CON`, `c:`) all store and read back as themselves. |
@@ -211,6 +211,7 @@ same thing on every driver:
 | `ErrInvalidOptions` | A malformed content type or metadata, or a negative size or expiry | `422 validation` |
 | `ErrSizeMismatch` | The bytes read differ from the declared `Size` | `422 validation` |
 | `ErrUnavailable` | The backend is unreachable or failed transiently | `503 dependency_unavailable` |
+| `ErrUnknownOutcome` | A `Put` sent the object to a remote backend and never learned whether it was stored; the key holds the old object or the new one | `503 dependency_unavailable` |
 | `context.DeadlineExceeded` / `Canceled` | The request timed out, or the client went away | `503 dependency_unavailable` |
 | `ErrUnsupported` | The driver cannot do this, for example a URL | `500 internal` |
 | anything else | | `500 internal` (your message) |
@@ -325,16 +326,34 @@ GOMBIT_STORAGE_S3_FORCE_PATH_STYLE=false      # true for MinIO and most S3-compa
   another, so a `Put` holds at most 8 MiB whatever the size. The largest
   object is 10,000 parts, about 78 GiB. `Open` streams the response body.
 - **Atomic writes.** An object appears only when its upload completes. A
-  failed or canceled `Put` aborts its multipart upload, on a fresh context,
-  so no incomplete upload lingers to be billed.
+  `Put` that fails before sending the request that publishes the object
+  (the `PutObject`, or the multipart upload's `CompleteMultipartUpload`)
+  leaves the key as it was. Once that request is sent, only S3's answer
+  says whether it took effect. A 4xx answer is a refusal, and the key is as
+  it was. No answer (a dropped connection, a timeout, the context ending) or
+  a 5xx one leaves the outcome unknown, and `Put` fails with
+  `ErrUnknownOutcome`. A multipart upload settles it by aborting: an abort
+  that succeeds proves the upload never completed, so the key is as it was.
+- **Incomplete uploads.** A failed multipart upload is aborted, on a fresh
+  context, so its parts aren't kept. The abort is best effort. When it
+  fails too (the network is still down, or `s3:AbortMultipartUpload` isn't
+  granted), `Put`'s error also carries an `*s3.AbortError` naming the
+  upload, and its parts stay stored, and billed, until they're aborted.
+  **Give the bucket a lifecycle rule that aborts incomplete multipart
+  uploads** (`AbortIncompleteMultipartUpload`, after a day or so): that
+  rule, not the driver, is what guarantees none lingers.
 - **Permissions.** The credentials need `s3:GetObject`, `s3:PutObject`,
   `s3:DeleteObject` and `s3:AbortMultipartUpload` on the objects
   (`arn:aws:s3:::BUCKET/PREFIX*`), and `s3:ListBucket` on the bucket.
   Without `ListBucket`, S3 answers a request for a missing object with
   `403 Access Denied` instead of 404, and a missing object would become a 500
   rather than a 404.
-- **Prefix.** `GOMBIT_STORAGE_S3_PREFIX` must end with `/` (`myapp/prod/`) and
-  follow the key rules. It is put before every key.
+- **Prefix.** `GOMBIT_STORAGE_S3_PREFIX` is a valid key followed by `/`
+  (`myapp/prod/`), short enough to leave room for a key: the prefix and key
+  together are held to the 1024-byte key limit. It is put before every key.
+  `gombit config` and the driver check it with the same rule
+  (`storage.ValidatePrefix`), so a configuration that validates is one the
+  driver accepts.
 - **Metadata** values that aren't printable ASCII (or that contain `=?`) are
   sent RFC 2047 encoded, which is S3's own encoding for non-ASCII metadata,
   and decoded on the way back, so they round-trip exactly. The contract's
@@ -343,9 +362,11 @@ GOMBIT_STORAGE_S3_FORCE_PATH_STYLE=false      # true for MinIO and most S3-compa
 - **Errors.** A missing object is `ErrNotFound`. Throttling, a 5xx or a
   network failure is `ErrUnavailable`, so `MapError` answers 503. A missing
   bucket or denied credentials is a plain error, so `MapError` answers 500
-  rather than a misleading 404. A `HEAD` that returns 404 checks the bucket (at most
-  once a minute), because a `HEAD` response can't tell a missing object from a
-  missing bucket.
+  rather than a misleading 404. A `HEAD` that returns 404 checks the
+  bucket, because a `HEAD` response can't tell a missing object from a
+  missing bucket. One `HeadBucket` runs at a time, however many misses
+  arrive together, and its answer (the bucket exists, is missing, or is
+  denied) is kept for a minute. A transient failure isn't kept.
 - `ModTime` comes from S3 on `Stat` and `Open`. The `ObjectInfo` that `Put`
   returns leaves it zero, since S3 doesn't return one.
 - **Checksums** are sent only where S3 requires them, because several

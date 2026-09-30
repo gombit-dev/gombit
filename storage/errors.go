@@ -27,6 +27,15 @@ var (
 	// ErrUnavailable: the backend could not be reached or failed
 	// transiently; retrying later may succeed.
 	ErrUnavailable = errors.New("storage: backend unavailable")
+	// ErrUnknownOutcome: a Put failed after sending the request that would
+	// publish the object, and the backend never said whether it did (the
+	// response was lost, the connection dropped, the service failed, or ctx
+	// ended while waiting). The key holds either the previous object or the
+	// new one, whole; which one is unknown. Only a driver whose backend is
+	// across a network returns it. The error also matches the cause
+	// (ErrUnavailable, or ctx's error). Stat the key, or Put again: a Put is
+	// safe to repeat.
+	ErrUnknownOutcome = errors.New("storage: outcome unknown: the object may or may not have been stored")
 )
 
 // Error is a failed storage operation: what was attempted, on which key,
@@ -67,8 +76,9 @@ func Wrap(op, key string, err error) error {
 //   - ErrNotFound becomes not_found (with notFound as the message);
 //   - ErrInvalidOptions and ErrSizeMismatch become validation (the request
 //     sent a content type, metadata, or length that cannot be stored);
-//   - ErrUnavailable, and a context that ended (the request timed out or
-//     the client went away), become dependency_unavailable;
+//   - ErrUnavailable, ErrUnknownOutcome, and a context that ended (the
+//     request timed out or the client went away), become
+//     dependency_unavailable;
 //   - anything else, ErrInvalidKey included, becomes internal (with
 //     internal as the message): keys are built by the server, so an invalid
 //     one is a server bug. Validate a key taken from a request with
@@ -85,6 +95,8 @@ func MapError(ctx context.Context, err error, notFound, internal string) error {
 		return contract.WithContext(ctx, contract.Validation("The object's content type or metadata is invalid.", nil))
 	case errors.Is(err, ErrSizeMismatch):
 		return contract.WithContext(ctx, contract.Validation("The upload's length does not match its declared size.", nil))
+	case errors.Is(err, ErrUnknownOutcome):
+		return contract.WithContext(ctx, contract.DependencyUnavailable("File storage did not confirm the upload; it may or may not have been stored."))
 	case errors.Is(err, ErrUnavailable):
 		return contract.WithContext(ctx, contract.DependencyUnavailable("File storage is temporarily unavailable."))
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):

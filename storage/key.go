@@ -4,18 +4,19 @@ import (
 	"fmt"
 	"mime"
 	"strings"
-	"unicode"
 	"unicode/utf8"
+
+	"github.com/gombit-dev/gombit/internal/storagekey"
 )
 
 // MaxKeyBytes is the longest key, in bytes (S3's limit).
-const MaxKeyBytes = 1024
+const MaxKeyBytes = storagekey.MaxKeyBytes
 
 // MaxSegmentBytes is the longest segment of a key (the part between '/'s),
 // in bytes. AWS S3 itself allows longer, but MinIO, an S3-compatible
 // service that stores objects as files, refuses a longer segment
 // (XMinioInvalidObjectName), so a portable key stays within it.
-const MaxSegmentBytes = 255
+const MaxSegmentBytes = storagekey.MaxSegmentBytes
 
 // MaxContentTypeBytes bounds PutOptions.ContentType, parameters included.
 const MaxContentTypeBytes = 256
@@ -50,49 +51,23 @@ const MaxMetadataBytes = 2048
 // A key is an address, not a filename a client chose: build keys on the
 // server and keep a client's filename as metadata.
 func ValidateKey(key string) error {
-	reason := keyProblem(key)
-	if reason == "" {
-		return nil
+	if reason := storagekey.Problem(key); reason != "" {
+		return fmt.Errorf("%w: %s", ErrInvalidKey, reason)
 	}
-	return fmt.Errorf("%w: %s", ErrInvalidKey, reason)
+	return nil
 }
 
-func keyProblem(key string) string {
-	switch {
-	case key == "":
-		return "empty"
-	case len(key) > MaxKeyBytes:
-		return fmt.Sprintf("longer than %d bytes", MaxKeyBytes)
-	case !utf8.ValidString(key):
-		return "not valid UTF-8"
-	case strings.HasPrefix(key, "/"):
-		return "starts with '/'"
-	case strings.HasSuffix(key, "/"):
-		return "ends with '/'"
+// ValidatePrefix reports whether prefix can start every key of a store (a
+// driver's configured prefix, "myapp/"), as ErrInvalidKey when it cannot.
+// A prefix is empty, or a valid key (see ValidateKey) followed by '/',
+// shorter than MaxKeyBytes so that a key fits after it: prefix + key is
+// held to the key rules, MaxKeyBytes included. config.Validate applies the
+// same rule, so a configuration it accepts is one the driver accepts.
+func ValidatePrefix(prefix string) error {
+	if reason := storagekey.PrefixProblem(prefix); reason != "" {
+		return fmt.Errorf("%w: prefix %q %s", ErrInvalidKey, prefix, reason)
 	}
-	for _, r := range key {
-		switch {
-		case r == '\\':
-			return "contains a backslash"
-		case unsafeRune(r):
-			return fmt.Sprintf("contains the control character %U", r)
-		}
-	}
-	for _, seg := range strings.Split(key, "/") {
-		switch seg {
-		case "":
-			return "contains an empty segment"
-		case ".", "..":
-			return fmt.Sprintf("contains a %q segment", seg)
-		}
-		if last := seg[len(seg)-1]; last == '.' || last == ' ' {
-			return fmt.Sprintf("has a segment ending with %q (%q)", last, seg)
-		}
-		if len(seg) > MaxSegmentBytes {
-			return fmt.Sprintf("has a %d-byte segment, longer than %d", len(seg), MaxSegmentBytes)
-		}
-	}
-	return ""
+	return nil
 }
 
 // ValidatePutOptions reports whether opts is valid, as ErrInvalidOptions
@@ -188,11 +163,7 @@ func MetadataValueWireLen(value string) int {
 	return len(value)
 }
 
-// unsafeRune reports control characters (C0, DEL, C1), Unicode line and
-// paragraph separators, and bidirectional controls.
-func unsafeRune(r rune) bool {
-	return unicode.IsControl(r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r) || unicode.Is(unicode.Bidi_Control, r)
-}
+func unsafeRune(r rune) bool { return storagekey.UnsafeRune(r) }
 
 // ValidateURLOptions reports whether opts is valid, as ErrInvalidOptions
 // when it is not: a signed URL needs a positive Expires, and a public one
