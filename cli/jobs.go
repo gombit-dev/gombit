@@ -192,23 +192,35 @@ func newJobsRetryCommand(stdout io.Writer) *cobra.Command {
 				// never one read. Only an empty read is the end: a job that
 				// failed while a page was read or retried can be missing from
 				// a short one, and the next read from the top finds it.
-				total, skipped := 0, map[string]bool{}
+				total, processed, skipped := 0, map[string]bool{}, map[string]bool{}
+				limit := retryAllPage
 				for {
-					// Jobs refused for a held key stay failed wherever they are in
-					// the set, so each read asks for a page beyond the ones already
-					// skipped.
-					limit := retryAllPage + len(skipped)
 					page, err := q.Failed(ctx, queue, limit)
 					if err != nil {
 						return err
 					}
-					progress := false
+
+					// Only IDs that are still present in this read need padding.
+					// Successfully retried jobs have left the failed set and must
+					// not make future reads grow with the whole processed history.
+					seenProcessed := 0
+					for _, f := range page {
+						if processed[f.Envelope.ID] {
+							seenProcessed++
+						}
+					}
+
+					newProcessed := 0
 					for _, f := range page {
 						id := f.Envelope.ID
-						if skipped[id] {
+						if processed[id] {
 							continue
 						}
-						progress = true
+						if newProcessed == retryAllPage {
+							break
+						}
+						processed[id] = true
+						newProcessed++
 						err := retry(id)
 						var dup *jobs.DuplicateError
 						if errors.As(err, &dup) {
@@ -223,12 +235,21 @@ func newJobsRetryCommand(stdout io.Writer) *cobra.Command {
 						}
 						total++
 					}
-					// Only a read with nothing new to retry is the end (an empty
-					// one included): a short page is not, since a job that failed
-					// meanwhile can be missing from it.
-					if !progress {
+
+					if newProcessed == 0 {
+						// A full page of already-processed jobs can hide older failures
+						// behind it. Widen one page at a time until a short read proves
+						// there is nothing new left to reach.
+						if len(page) == limit && len(page) != 0 {
+							limit += retryAllPage
+							continue
+						}
 						break
 					}
+
+					// Keep ordinary outage recovery bounded to one page; pad only
+					// for IDs actually observed lingering in the failed set.
+					limit = retryAllPage + seenProcessed
 				}
 				if total == 0 && len(skipped) == 0 {
 					_, _ = fmt.Fprintf(stdout, "No failed jobs on %s.\n", queue)
