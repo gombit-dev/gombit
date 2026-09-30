@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/gombit-dev/gombit/internal/storagekey"
 )
 
 // FilenameMetadata is the metadata name of an object's filename, for
@@ -34,14 +36,10 @@ func IsPublic(publicPrefix, key string) bool {
 // ValidatePublicPrefix reports whether prefix can be a store's public
 // prefix: empty (no object is public), or a key path ending with '/'.
 func ValidatePublicPrefix(prefix string) error {
-	if prefix == "" {
-		return nil
-	}
-	if !strings.HasSuffix(prefix, "/") {
-		return fmt.Errorf("%w: public prefix %q must end with '/'", ErrInvalidOptions, prefix)
-	}
-	if err := ValidateKey(prefix + "k"); err != nil {
-		return fmt.Errorf("%w: public prefix %q: %v", ErrInvalidOptions, prefix, err)
+	// The rule of ValidatePrefix (config applies it too), classified as
+	// ErrInvalidOptions: a public prefix is an option, not a key.
+	if reason := storagekey.PrefixProblem(prefix); reason != "" {
+		return fmt.Errorf("%w: public prefix %q %s", ErrInvalidOptions, prefix, reason)
 	}
 	return nil
 }
