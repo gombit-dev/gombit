@@ -165,8 +165,7 @@ func (p Policy) validate() error {
 		return fmt.Errorf("upload: Policy.Prefix %q leaves no room for a generated key: %v", p.Prefix, err)
 	}
 	for _, t := range p.Types {
-		typ, sub, ok := strings.Cut(t, "/")
-		if !ok || typ == "" || sub == "" || t != strings.ToLower(t) || strings.ContainsAny(t, "; \t") || (typ == "*" && sub != "*") {
+		if !validType(t) {
 			return fmt.Errorf(`upload: Policy.Types entry %q: want a lowercase "type/subtype", "type/*", or "*/*"`, t)
 		}
 	}
@@ -180,6 +179,30 @@ func (p Policy) validate() error {
 		return fmt.Errorf("upload: Policy.Metadata: %v", err)
 	}
 	return nil
+}
+
+// validType reports whether t is a Policy.Types entry: a media type as
+// mime.ParseMediaType reads one, without parameters, written exactly as it
+// parses (lowercase, nothing around it), or a wildcard: "type/*" or "*/*".
+// Anything else could never match a detected type.
+func validType(t string) bool {
+	mediaType, params, err := mime.ParseMediaType(t)
+	if err != nil || len(params) != 0 || mediaType != t {
+		return false
+	}
+	typ, sub, ok := strings.Cut(t, "/")
+	if !ok || typ == "" || sub == "" || strings.Contains(sub, "/") {
+		return false // ParseMediaType also accepts a bare "type"
+	}
+	switch {
+	case typ == "*":
+		return sub == "*"
+	case strings.Contains(typ, "*"):
+		return false
+	case strings.Contains(sub, "*"):
+		return sub == "*"
+	}
+	return true
 }
 
 // accepts reports whether the policy accepts the media type mediaType
@@ -446,6 +469,12 @@ func Receive(store storage.Storage, r *http.Request, p Policy) (File, error) {
 	if body.read-fileBytes > MaxFormBytes {
 		return fail(formTooLarge())
 	}
+	// The body may have failed in a Read whose bytes the parser used (a body
+	// cut short ends with its last bytes and io.ErrUnexpectedEOF together):
+	// the request failed, whatever the multipart entity looked like.
+	if body.err != nil {
+		return fail(malformed(body.err))
+	}
 	if !stored {
 		return File{}, fmt.Errorf("%w in the form field %q", ErrNoFile, field)
 	}
@@ -530,11 +559,15 @@ func discard(ctx context.Context, store storage.Storage, key string) error {
 }
 
 // limitReader fails with ErrTooLarge once more than max bytes come
-// through.
+// through. It remembers the first error its reader returned other than
+// io.EOF (err): a buffered reader above it (multipart's) may hand out the
+// bytes that came with an error and keep the error, so the failure has to
+// be recorded here, where it passed.
 type limitReader struct {
 	r    io.Reader
 	max  int64
 	read int64
+	err  error
 }
 
 func (l *limitReader) Read(p []byte) (int, error) {
@@ -546,6 +579,9 @@ func (l *limitReader) Read(p []byte) (int, error) {
 	}
 	n, err := l.r.Read(p)
 	l.read += int64(n)
+	if err != nil && !errors.Is(err, io.EOF) && l.err == nil {
+		l.err = err
+	}
 	if l.read > l.max {
 		return 0, l.tooLarge()
 	}
