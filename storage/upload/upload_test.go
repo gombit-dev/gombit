@@ -755,3 +755,42 @@ func (c *countingPuts) Put(ctx context.Context, key string, r io.Reader, opts st
 	c.puts++
 	return c.Store.Put(ctx, key, r, opts)
 }
+
+// TestEpilogueIsBounded: bytes after the closing boundary (the MIME
+// epilogue, which a multipart parser stops before) are part of the request
+// and of the form's overhead: a chunked request cannot follow a valid form
+// with an unbounded tail. A small epilogue is fine.
+func TestEpilogueIsBounded(t *testing.T) {
+	chunked := func(epilogue int) *http.Request {
+		t.Helper()
+		f := form(t, part{field: "file", filename: "a.png", body: png})
+		b, err := io.ReadAll(f.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body := io.MultiReader(bytes.NewReader(b), bytes.NewReader(bytes.Repeat([]byte("e"), epilogue)))
+		r := httptest.NewRequest(http.MethodPost, "/upload", struct{ io.Reader }{body}) // no length: chunked
+		r.Header = f.Header
+		if r.ContentLength != -1 {
+			t.Fatalf("ContentLength = %d, want -1 (unknown)", r.ContentLength)
+		}
+		return r
+	}
+	for name, tc := range map[string]struct {
+		epilogue int
+		want     error
+	}{
+		"over the form limit":  {upload.MaxFormBytes + 1, upload.ErrTooLarge},
+		"over the total limit": {int(images.MaxBytes) + upload.MaxFormBytes, upload.ErrTooLarge},
+		"small":                {100, nil},
+	} {
+		store := memory.New()
+		_, err := upload.Receive(store, chunked(tc.epilogue), images)
+		if !errors.Is(err, tc.want) || (tc.want == nil) != (err == nil) {
+			t.Errorf("%s: Receive = %v, want %v", name, err, tc.want)
+		}
+		if keys := store.Keys(); tc.want != nil && len(keys) != 0 {
+			t.Errorf("%s: the store holds %v after the refused request", name, keys)
+		}
+	}
+}
