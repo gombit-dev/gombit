@@ -144,3 +144,25 @@ func TestConfirmChecksTheBytes(t *testing.T) {
 		t.Fatalf("a key outside the prefix = %v, want ErrMalformed", err)
 	}
 }
+
+// TestConfirmReportsAFailedCleanup: when Confirm refuses an uploaded file
+// and cannot delete it, the error names the key that still holds it
+// (*upload.CleanupError), as every upload's cleanup does.
+func TestConfirmReportsAFailedCleanup(t *testing.T) {
+	store, srv := directStore(t)
+	ctx := context.Background()
+	html := []byte("<!DOCTYPE html><script>alert(1)</script>")
+	g, err := upload.Authorize(ctx, store, images, int64(len(html)), "image/png", "cat.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := perform(t, srv, g, html); code != http.StatusOK {
+		t.Fatalf("upload = %d", code)
+	}
+	deleteErr := errors.New("delete failed")
+	_, err = upload.Confirm(ctx, failingDelete{Storage: store, err: deleteErr}, g.Key, images)
+	var cleanup *upload.CleanupError
+	if !errors.Is(err, upload.ErrType) || !errors.As(err, &cleanup) || cleanup.Key != g.Key || !errors.Is(cleanup.Err, deleteErr) {
+		t.Fatalf("Confirm = %v; want ErrType and an *upload.CleanupError for %q", err, g.Key)
+	}
+}
