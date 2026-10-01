@@ -369,7 +369,9 @@ func CleanFilename(name string) string {
 // rest of the request, so that a second file is refused. Everything but
 // the file (part headers, boundaries, other fields) may be at most
 // MaxFormBytes, on its own: other fields fail with ErrTooLarge as soon as
-// they pass it, and the request as a whole is checked at its end. The
+// they pass it, and the request as a whole is checked at its end, which is
+// the end of the body (bytes after the closing boundary count too), not
+// the closing boundary. The
 // request may be at most p.MaxBytes plus MaxFormBytes long: a longer
 // declared length fails before a byte is read, and a longer body when it
 // gets there. If the request turns out to be invalid after the file was
@@ -432,7 +434,15 @@ func Receive(store storage.Storage, r *http.Request, p Policy) (File, error) {
 		stored = true
 		fileBytes = counted.n
 	}
-	// The whole request has been read: what was not the file is the form.
+	// The parser stops at the closing boundary; the request goes on to the
+	// end of its body (the MIME epilogue), and that is form overhead too.
+	// Read it to the end, within what is left of MaxFormBytes (and of the
+	// request's limit, which body enforces), then check the whole request.
+	if left := MaxFormBytes - (body.read - fileBytes); left >= 0 {
+		if _, err := io.Copy(io.Discard, io.LimitReader(body, left+1)); err != nil {
+			return fail(malformed(err))
+		}
+	}
 	if body.read-fileBytes > MaxFormBytes {
 		return fail(formTooLarge())
 	}
