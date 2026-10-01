@@ -169,7 +169,8 @@ What the policy guarantees:
   headers, boundaries and other fields, and that is a bound of its own: a
   file smaller than `MaxBytes` doesn't make room for more. Other fields fail
   with `ErrTooLarge` as soon as they pass it, and the whole request is
-  checked when it ends. The framework's default body limit covers JSON
+  checked when its body ends: bytes after the closing boundary (a MIME
+  epilogue) count too. The framework's default body limit covers JSON
   only, so this is the bound for uploads.
 - **Type.** The media type is detected from the file's first 512 bytes
   (`http.DetectContentType`) and checked against `Types` (`image/png`,
