@@ -13,6 +13,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
+
 	"github.com/gombit-dev/gombit/storage"
 )
 
@@ -37,6 +40,10 @@ type fakeS3 struct {
 	refusePart       int  // answer an UploadPart with this status
 	refuseAbort      int  // answer an Abort with this status
 	goneBeforeAbort  bool // the upload is gone by the time it is aborted
+	dropPart         bool // never answer an UploadPart; S3 stores it once the upload is aborted
+	pendingParts     int  // parts received, still being processed
+	lateParts        int  // parts stored after their upload was aborted
+	requestsSeen     int  // every request
 	abortedUploadIDs []string
 	puts, completes  int // PutObject and CompleteMultipartUpload requests seen
 }
@@ -51,6 +58,7 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body)
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.requestsSeen++
 	switch {
 	case r.Method == http.MethodHead && key == "": // HeadBucket
 		f.headBucket.Add(1)
@@ -71,6 +79,13 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Length", fmt.Sprint(size))
 	case r.Method == http.MethodPut && q.Has("partNumber"): // UploadPart
+		if f.dropPart {
+			// Still processing when the client gives up: it lands after the
+			// abort (AWS documents that an in-progress part may).
+			f.pendingParts++
+			drop(w)
+			return
+		}
 		if f.refusePart != 0 {
 			s3Error(w, f.refusePart, "InvalidRequest")
 			return
@@ -127,6 +142,7 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		delete(f.uploads, id)
 		f.abortedUploadIDs = append(f.abortedUploadIDs, id)
+		f.lateParts, f.pendingParts = f.pendingParts, 0
 		w.WriteHeader(http.StatusNoContent)
 	default:
 		s3Error(w, http.StatusNotImplemented, "NotImplemented")
@@ -284,6 +300,74 @@ func TestAbortOfAGoneUploadLeavesNothing(t *testing.T) {
 	var abort *AbortError
 	if err == nil || errors.As(err, &abort) || errors.Is(err, storage.ErrUnknownOutcome) {
 		t.Fatalf("Put = %v; want the part's failure, without an *AbortError (no upload remains)", err)
+	}
+}
+
+// failingCredentials never yields credentials, as a default credential
+// chain with nothing configured (or a failing refresh) does.
+type failingCredentials struct{}
+
+func (failingCredentials) Retrieve(context.Context) (aws.Credentials, error) {
+	return aws.Credentials{}, errors.New("no credentials")
+}
+
+// TestNothingSentIsNotUnknown: a Put that fails before any request is
+// written (the credentials cannot be had, so nothing is signed; or the
+// endpoint refuses the connection) left the key as it was: it is not
+// ErrUnknownOutcome.
+func TestNothingSentIsNotUnknown(t *testing.T) {
+	t.Run("credentials", func(t *testing.T) {
+		f := newFakeS3()
+		s := fakeStore(t, f)
+		s.client = awss3.New(s.client.Options(), func(o *awss3.Options) { o.Credentials = failingCredentials{} })
+		for _, body := range []io.Reader{strings.NewReader("small"), large()} {
+			_, err := s.Put(context.Background(), "k", body, storage.PutOptions{})
+			if err == nil || errors.Is(err, storage.ErrUnknownOutcome) {
+				t.Fatalf("Put without credentials = %v, want a definite failure", err)
+			}
+		}
+		f.mu.Lock()
+		seen := f.requestsSeen
+		f.mu.Unlock()
+		if seen != 0 {
+			t.Fatalf("the fake saw %d requests, want none: nothing could be signed", seen)
+		}
+	})
+	t.Run("connection refused", func(t *testing.T) {
+		srv := httptest.NewServer(http.NotFoundHandler())
+		endpoint := srv.URL
+		srv.Close() // nothing listens there now
+		s, err := New(context.Background(), Config{Endpoint: endpoint, Region: "us-east-1", Bucket: "b", AccessKeyID: "id", SecretAccessKey: "secret", ForcePathStyle: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = s.Put(context.Background(), "k", strings.NewReader("small"), storage.PutOptions{})
+		if !errors.Is(err, storage.ErrUnavailable) || errors.Is(err, storage.ErrUnknownOutcome) {
+			t.Fatalf("Put to a refused connection = %v, want ErrUnavailable and not ErrUnknownOutcome", err)
+		}
+	})
+}
+
+// TestPartInFlightAtAbortIsReported: a part upload that never got an
+// answer may be stored by S3 after the upload is aborted, so even a
+// successful abort cannot vouch that no parts remain; the error says so
+// (*AbortError), and the fake shows the part arriving late.
+func TestPartInFlightAtAbortIsReported(t *testing.T) {
+	f := newFakeS3()
+	f.dropPart = true
+	_, err := fakeStore(t, f).Put(context.Background(), "k", large(), storage.PutOptions{})
+	var abort *AbortError
+	if !errors.As(err, &abort) || abort.UploadID != "upload-1" {
+		t.Fatalf("Put = %v, want an *AbortError for upload-1: a part was in flight when it was aborted", err)
+	}
+	if errors.Is(err, storage.ErrUnknownOutcome) {
+		t.Fatalf("Put = %v: nothing was published, the outcome is known", err)
+	}
+	f.mu.Lock()
+	late, aborted := f.lateParts, len(f.abortedUploadIDs)
+	f.mu.Unlock()
+	if aborted != 1 || late == 0 {
+		t.Fatalf("%d aborts, %d parts stored after the abort; the test models nothing", aborted, late)
 	}
 }
 
