@@ -13,7 +13,12 @@
 //
 // A Put that fails before sending the request that publishes the object
 // (the PutObject, or the CompleteMultipartUpload) leaves the key as it was.
-// Once that request is sent, only S3's answer says whether it took effect:
+// "Sent" is observed, not assumed: the driver's HTTP client counts, per
+// call, the requests written out in full and the responses that came back
+// (httptrace). A call that failed before writing its request (no
+// credentials, nothing signed, the connection refused, ctx ending first)
+// sent nothing. Once that request is sent, only S3's answer says whether
+// it took effect:
 // a 4xx answer is a refusal, and the key is as it was; no answer (a dropped
 // connection, a timeout, ctx ending), or a 5xx one, leaves the outcome
 // unknown, and Put fails with storage.ErrUnknownOutcome. The SDK does not
@@ -27,13 +32,16 @@
 // upload gone means it completed, and the outcome stays unknown (the new
 // object is most likely in place).
 //
-// A failed multipart upload is aborted, on a fresh context, so its parts do
-// not stay stored. The abort is best effort: when it fails too (the
-// network still down, s3:AbortMultipartUpload not granted), Put's error
-// also carries an *AbortError naming the upload, whose parts stay (and are
-// billed) until they are aborted. Give the bucket a lifecycle rule that
-// aborts incomplete multipart uploads after a day or so
-// (AbortIncompleteMultipartUpload): it is what guarantees none lingers.
+// A failed multipart upload is aborted, on a fresh context, which removes
+// the parts S3 has stored. It cannot remove more: a part upload that never
+// got an answer may still be in progress at S3 and be stored after the
+// abort (AWS documents this), and the abort itself can fail (the network
+// still down, s3:AbortMultipartUpload not granted). In either case Put's
+// error also carries an *AbortError naming the upload, whose parts may stay
+// (and be billed). So any failed multipart Put may leave parts behind for
+// a while, and only a lifecycle rule on the bucket that aborts incomplete
+// multipart uploads after a day or so (AbortIncompleteMultipartUpload)
+// guarantees none lingers: give the bucket one.
 //
 // # Permissions
 //
@@ -59,8 +67,10 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -151,19 +161,69 @@ const bucketRecheck = time.Minute
 // caller's context (the callers waiting on it may outlive it).
 const bucketProbeTimeout = 10 * time.Second
 
-// AbortError is a multipart upload that a failed Put could not abort. Its
-// parts stay stored, and billed, until the bucket's lifecycle rule for
-// incomplete uploads removes them or someone aborts UploadID. Put's error
+// AbortError is a multipart upload that a failed Put may have left parts
+// of: its abort failed, or a part upload was still unanswered when it was
+// aborted (S3 may store such a part afterwards). Err says which. The parts
+// stay stored, and billed, until the bucket's lifecycle rule for incomplete
+// uploads removes them, or someone aborts UploadID again. Put's error
 // carries it (errors.As), alongside the failure it reports; it does not
 // change how that failure is classified.
 type AbortError struct {
 	Key      string // the S3 object key
 	UploadID string
-	Err      error // why the abort failed
+	Err      error // the abort's failure, or errPartInFlight
 }
 
 func (e *AbortError) Error() string {
-	return fmt.Sprintf("s3 storage: aborting multipart upload %s of %q failed, so its parts remain until the bucket's lifecycle rule removes them: %v", e.UploadID, e.Key, e.Err)
+	return fmt.Sprintf("s3 storage: multipart upload %s of %q may have left parts stored until the bucket's lifecycle rule removes them: %v", e.UploadID, e.Key, e.Err)
+}
+
+// errPartInFlight is AbortError.Err for an upload aborted with a part
+// upload unanswered.
+var errPartInFlight = errors.New("a part upload was still unanswered when the upload was aborted, and S3 may store it afterwards")
+
+// attempts counts, for one SDK call, the HTTP requests written out in full
+// and the responses that came back. A request never written in full
+// cannot have taken effect; one whose response never came may have.
+type attempts struct{ written, answered atomic.Int32 }
+
+// sent reports whether any request of the call was written in full.
+func (a *attempts) sent() bool { return a.written.Load() > 0 }
+
+// unanswered reports whether a request was written and got no response.
+func (a *attempts) unanswered() bool { return a.written.Load() > a.answered.Load() }
+
+type attemptsKey struct{}
+
+// counting returns ctx carrying a fresh attempts for one SDK call.
+func counting(ctx context.Context) (context.Context, *attempts) {
+	a := new(attempts)
+	return context.WithValue(ctx, attemptsKey{}, a), a
+}
+
+// countingClient is the S3 client's HTTP client: for a call made with
+// counting, it records each request written in full (httptrace) and each
+// response (a final one, as Do returns it: an interim "100 Continue",
+// which S3 sends before reading a large body, is not an answer).
+type countingClient struct{ next awss3.HTTPClient }
+
+func (c countingClient) Do(req *http.Request) (*http.Response, error) {
+	a, ok := req.Context().Value(attemptsKey{}).(*attempts)
+	if !ok {
+		return c.next.Do(req)
+	}
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
+		WroteRequest: func(info httptrace.WroteRequestInfo) {
+			if info.Err == nil {
+				a.written.Add(1)
+			}
+		},
+	}))
+	resp, err := c.next.Do(req)
+	if resp != nil {
+		a.answered.Add(1)
+	}
+	return resp, err
 }
 
 var _ storage.Storage = (*Store)(nil)
@@ -199,6 +259,8 @@ func New(ctx context.Context, cfg Config) (*Store, error) {
 			o.BaseEndpoint = aws.String(cfg.Endpoint)
 		}
 		o.UsePathStyle = cfg.ForcePathStyle
+		// Observe what was sent: see attempts.
+		o.HTTPClient = countingClient{next: o.HTTPClient}
 		// Checksums only where S3 requires them: several S3-compatible
 		// services reject the newer default trailing checksums.
 		o.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
@@ -269,7 +331,8 @@ func (s *Store) upload(ctx context.Context, objKey string, body io.Reader, decla
 		if err := ctx.Err(); err != nil {
 			return 0, "", err
 		}
-		out, err := s.client.PutObject(ctx, &awss3.PutObjectInput{
+		callCtx, sent := counting(ctx)
+		out, err := s.client.PutObject(callCtx, &awss3.PutObjectInput{
 			Bucket:        aws.String(s.bucket),
 			Key:           aws.String(objKey),
 			Body:          bytes.NewReader(buf[:n]),
@@ -278,7 +341,7 @@ func (s *Store) upload(ctx context.Context, objKey string, body io.Reader, decla
 			Metadata:      md,
 		}, singleAttempt)
 		if err != nil {
-			return 0, "", publishFailed(err)
+			return 0, "", publishFailed(err, sent)
 		}
 		return int64(n), aws.ToString(out.ETag), nil
 	case err != nil:
@@ -302,9 +365,10 @@ func (s *Store) multipart(ctx context.Context, objKey string, body io.Reader, bu
 	if err != nil {
 		return 0, "", err
 	}
+	partInFlight := false // a part upload went unanswered
 	defer func() {
 		if err != nil {
-			err = s.settle(ctx, objKey, aws.ToString(created.UploadId), err)
+			err = s.settle(ctx, objKey, aws.ToString(created.UploadId), err, partInFlight)
 		}
 	}()
 	var parts []types.CompletedPart
@@ -314,7 +378,8 @@ func (s *Store) multipart(ctx context.Context, objKey string, body io.Reader, bu
 		if number > 10000 {
 			return 0, "", fmt.Errorf("s3 storage: object larger than 10000 parts of %d bytes", PartSize)
 		}
-		out, err := s.client.UploadPart(ctx, &awss3.UploadPartInput{
+		partCtx, part := counting(ctx)
+		out, err := s.client.UploadPart(partCtx, &awss3.UploadPartInput{
 			Bucket:        aws.String(s.bucket),
 			Key:           aws.String(objKey),
 			UploadId:      created.UploadId,
@@ -323,6 +388,7 @@ func (s *Store) multipart(ctx context.Context, objKey string, body io.Reader, bu
 			ContentLength: aws.Int64(int64(n)),
 		})
 		if err != nil {
+			partInFlight = part.unanswered()
 			return 0, "", err
 		}
 		parts = append(parts, types.CompletedPart{ETag: out.ETag, PartNumber: aws.Int32(number)})
@@ -336,14 +402,15 @@ func (s *Store) multipart(ctx context.Context, objKey string, body io.Reader, bu
 	if err := ctx.Err(); err != nil {
 		return 0, "", err
 	}
-	done, err := s.client.CompleteMultipartUpload(ctx, &awss3.CompleteMultipartUploadInput{
+	callCtx, sent := counting(ctx)
+	done, err := s.client.CompleteMultipartUpload(callCtx, &awss3.CompleteMultipartUploadInput{
 		Bucket:          aws.String(s.bucket),
 		Key:             aws.String(objKey),
 		UploadId:        created.UploadId,
 		MultipartUpload: &types.CompletedMultipartUpload{Parts: parts},
 	}, singleAttempt)
 	if err != nil {
-		return 0, "", publishFailed(err)
+		return 0, "", publishFailed(err, sent)
 	}
 	return total, aws.ToString(done.ETag), nil
 }
@@ -359,9 +426,10 @@ func singleAttempt(o *awss3.Options) { o.RetryMaxAttempts = 1 }
 // proves the upload never completed, so even a Complete whose answer was
 // lost left the key as it was; an abort that finds the upload gone after
 // such a Complete means it completed, and the outcome stays unknown; after
-// any other failure, an upload already gone leaves nothing behind. Any
-// other failed abort leaves the parts stored, which the error reports.
-func (s *Store) settle(ctx context.Context, objKey, uploadID string, err error) error {
+// any other failure, an upload already gone leaves nothing behind. A
+// failed abort, or a part upload that went unanswered (partInFlight: S3
+// may store it after the abort), may leave parts, which the error reports.
+func (s *Store) settle(ctx context.Context, objKey, uploadID string, err error, partInFlight bool) error {
 	abortCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
 	_, abortErr := s.client.AbortMultipartUpload(abortCtx, &awss3.AbortMultipartUploadInput{
@@ -369,6 +437,9 @@ func (s *Store) settle(ctx context.Context, objKey, uploadID string, err error) 
 	})
 	var unknown *unknownOutcome
 	switch {
+	case abortErr == nil && partInFlight:
+		// Aborted, but a part S3 never answered may still be stored.
+		return &abortFailed{err: err, abort: &AbortError{Key: objKey, UploadID: uploadID, Err: errPartInFlight}}
 	case abortErr == nil:
 		if errors.As(err, &unknown) {
 			return unknown.err // the Complete did not take effect
@@ -407,10 +478,15 @@ func (a *abortFailed) Error() string { return a.err.Error() }
 func (a *abortFailed) Unwrap() error { return a.err }
 
 // publishFailed classifies a failure of the request that publishes an
-// object: an HTTP answer in the 4xx range is S3 refusing it (the key is as
-// it was); anything else (no answer, a 5xx one, ctx ending while waiting)
-// may have taken effect.
-func publishFailed(err error) error {
+// object, made with sent counting its attempt: a request never written in
+// full (no credentials to sign it, the connection refused, ctx ending
+// first) cannot have taken effect; an HTTP answer in the 4xx range is S3
+// refusing it (the key is as it was); anything else (no answer, a 5xx
+// one, ctx ending while waiting) may have taken effect.
+func publishFailed(err error, sent *attempts) error {
+	if !sent.sent() {
+		return err
+	}
 	var respErr *smithyhttp.ResponseError
 	if errors.As(err, &respErr) {
 		if status := respErr.HTTPStatusCode(); status >= 400 && status < 500 {
@@ -682,7 +758,7 @@ func classify(ctx context.Context, err error) error {
 		return fmt.Errorf("%w: %v", storage.ErrNotFound, err)
 	}
 	var respErr *smithyhttp.ResponseError
-	if errors.As(err, &respErr) {
+	if errors.As(err, &respErr) && respErr.HTTPStatusCode() != 0 { // 0: no response; see the network check below
 		switch status := respErr.HTTPStatusCode(); {
 		case status == http.StatusNotFound:
 			var apiErr smithy.APIError
