@@ -619,3 +619,139 @@ func TestBadDetectorIsTheServersFault(t *testing.T) {
 		t.Fatalf("MapError = %d, want 500", got)
 	}
 }
+
+// unknownOutcome stores the object, then reports that it does not know
+// whether it did: a remote store whose answer was lost.
+type unknownOutcome struct {
+	*memory.Store
+	deleteErr error
+}
+
+func (u unknownOutcome) Put(ctx context.Context, key string, r io.Reader, opts storage.PutOptions) (storage.ObjectInfo, error) {
+	if _, err := u.Store.Put(ctx, key, r, opts); err != nil {
+		return storage.ObjectInfo{}, err
+	}
+	return storage.ObjectInfo{}, storage.Wrap("put", key, errors.Join(storage.ErrUnknownOutcome, storage.ErrUnavailable))
+}
+
+func (u unknownOutcome) Delete(ctx context.Context, key string) error {
+	if u.deleteErr != nil {
+		return u.deleteErr
+	}
+	return u.Store.Delete(ctx, key)
+}
+
+// TestUnknownOutcomeIsCleanedUp: a Put whose outcome is unknown may have
+// stored the file under its generated key; Save deletes the key, so
+// nothing is left behind, and the failure no longer claims an unknown
+// outcome. When that delete fails, the error names the key
+// (*upload.CleanupError) and still reports the unknown outcome.
+func TestUnknownOutcomeIsCleanedUp(t *testing.T) {
+	ctx := context.Background()
+	t.Run("deleted", func(t *testing.T) {
+		store := unknownOutcome{Store: memory.New()}
+		_, err := upload.Save(ctx, store, bytes.NewReader(png), "a.png", images)
+		if err == nil || errors.Is(err, storage.ErrUnknownOutcome) || !errors.Is(err, storage.ErrUnavailable) {
+			t.Fatalf("Save = %v; want the store's failure (ErrUnavailable), no longer of unknown outcome", err)
+		}
+		if keys := store.Keys(); len(keys) != 0 {
+			t.Fatalf("the store holds %v after the failed Save, want nothing", keys)
+		}
+	})
+	t.Run("delete fails", func(t *testing.T) {
+		deleteErr := errors.New("delete failed")
+		store := unknownOutcome{Store: memory.New(), deleteErr: deleteErr}
+		_, err := upload.Save(ctx, store, bytes.NewReader(png), "a.png", images)
+		var cleanup *upload.CleanupError
+		if !errors.As(err, &cleanup) || !errors.Is(err, storage.ErrUnknownOutcome) || !errors.Is(cleanup.Err, deleteErr) {
+			t.Fatalf("Save = %v; want ErrUnknownOutcome and an *upload.CleanupError carrying the delete's failure", err)
+		}
+		if keys := store.Keys(); len(keys) != 1 || keys[0] != cleanup.Key || !generatedKey.MatchString(cleanup.Key) {
+			t.Fatalf("CleanupError.Key = %q, store holds %v; want the generated key of the stored file", cleanup.Key, keys)
+		}
+	})
+}
+
+// TestFormOverheadIsBounded: MaxFormBytes bounds everything in a multipart
+// request but the file (part headers, boundaries, other fields), on its
+// own, not just as part of one total: a tiny file does not lend its unused
+// MaxBytes to the other fields.
+func TestFormOverheadIsBounded(t *testing.T) {
+	small := upload.Policy{MaxBytes: 256 << 10, Types: []string{"image/png"}, Prefix: "avatars/"}
+	field := func(n int) part { return part{field: "note", body: bytes.Repeat([]byte("n"), n)} }
+	file := part{field: "file", filename: "a.png", body: png}
+	many := []part{file}
+	for i := 0; i < 70; i++ {
+		many = append(many, field(1<<10)) // 70 KiB of small fields
+	}
+	for name, tc := range map[string]struct {
+		req  *http.Request
+		want error
+	}{
+		"field after the file":    {form(t, file, field(upload.MaxFormBytes+1)), upload.ErrTooLarge},
+		"field before the file":   {form(t, field(upload.MaxFormBytes+1), file), upload.ErrTooLarge},
+		"many small fields":       {form(t, many...), upload.ErrTooLarge},
+		"fields within the limit": {form(t, file, field(upload.MaxFormBytes-4<<10)), nil},
+	} {
+		store := memory.New()
+		_, err := upload.Receive(store, tc.req, small)
+		if !errors.Is(err, tc.want) || (tc.want == nil) != (err == nil) {
+			t.Errorf("%s: Receive = %v, want %v", name, err, tc.want)
+		}
+		if keys := store.Keys(); tc.want != nil && len(keys) != 0 {
+			t.Errorf("%s: the store holds %v after the refused request", name, keys)
+		}
+	}
+}
+
+// prefixOf returns a valid prefix exactly n bytes long (n >= 2).
+func prefixOf(n int) string {
+	var b strings.Builder
+	for b.Len() < n-1 {
+		seg := min(200, n-1-b.Len())
+		if b.Len() > 0 {
+			seg = min(200, n-2-b.Len())
+			b.WriteByte('/')
+		}
+		b.WriteString(strings.Repeat("p", seg))
+	}
+	b.WriteByte('/')
+	return b.String()
+}
+
+// TestPrefixLeavesRoomForTheKey: the policy checks the key it will
+// generate (Prefix and a 32-character id), so a prefix the policy accepts
+// gives keys every driver accepts.
+func TestPrefixLeavesRoomForTheKey(t *testing.T) {
+	ctx := context.Background()
+	fits := prefixOf(storage.MaxKeyBytes - 32)
+	tooLong := prefixOf(storage.MaxKeyBytes - 31)
+	if len(fits) != storage.MaxKeyBytes-32 || len(tooLong) != storage.MaxKeyBytes-31 {
+		t.Fatalf("prefixOf made %d and %d bytes", len(fits), len(tooLong))
+	}
+	p := images
+	p.Prefix = fits
+	f, err := upload.Save(ctx, memory.New(), bytes.NewReader(png), "", p)
+	if err != nil || len(f.Key) != storage.MaxKeyBytes {
+		t.Fatalf("Save with a %d-byte prefix = %q (%d bytes), %v; want a %d-byte key", len(fits), f.Key, len(f.Key), err, storage.MaxKeyBytes)
+	}
+	p.Prefix = tooLong
+	store := &countingPuts{Store: memory.New()}
+	if _, err := upload.Save(ctx, store, bytes.NewReader(png), "", p); err == nil || status(upload.MapError(ctx, err)) != http.StatusInternalServerError {
+		t.Fatalf("Save with a %d-byte prefix = %v, want the policy refused (500: the server's mistake)", len(tooLong), err)
+	}
+	if store.puts != 0 {
+		t.Fatalf("Save with a %d-byte prefix reached the store (%d Puts): the policy should have refused it", len(tooLong), store.puts)
+	}
+}
+
+// countingPuts counts the Puts that reach a store.
+type countingPuts struct {
+	*memory.Store
+	puts int
+}
+
+func (c *countingPuts) Put(ctx context.Context, key string, r io.Reader, opts storage.PutOptions) (storage.ObjectInfo, error) {
+	c.puts++
+	return c.Store.Put(ctx, key, r, opts)
+}
