@@ -1129,6 +1129,9 @@ func isUnsafeTrustedProxy(proxy string) bool {
 		return false
 	}
 	ones, _ := network.Mask.Size()
+	if network.IP.To4() != nil && len(network.Mask) == net.IPv6len {
+		ones -= 96
+	}
 	return ones == 0
 }
 
@@ -1144,6 +1147,9 @@ func trustedProxyRangesCoverAll(proxies []string) bool {
 		}
 		bits, _ := network.Mask.Size()
 		if address := network.IP.To4(); address != nil {
+			if len(network.Mask) == net.IPv6len {
+				bits -= 96
+			}
 			insertTrustedProxyRange(&ipv4, address, bits, 0)
 		} else {
 			insertTrustedProxyRange(&ipv6, network.IP.To16(), bits, 0)

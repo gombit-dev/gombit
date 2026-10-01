@@ -571,6 +571,8 @@ func TestValidateRejectsEquivalentTrustAllProxyRanges(t *testing.T) {
 		{"IPv6 zero prefix", []string{"::0/0"}},
 		{"two IPv4 halves", []string{"0.0.0.0/1", "128.0.0.0/1"}},
 		{"two IPv6 halves", []string{"::/1", "8000::/1"}},
+		{"IPv4-mapped IPv6 zero prefix", []string{"::ffff:0.0.0.0/96"}},
+		{"two IPv4-mapped IPv6 halves", []string{"::ffff:0.0.0.0/97", "::ffff:128.0.0.0/97"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -592,6 +594,7 @@ func TestValidateAllowsLimitedTrustedProxyRanges(t *testing.T) {
 		{"private IPv4 range", []string{"10.0.0.0/8"}},
 		{"one IPv4 half", []string{"0.0.0.0/1"}},
 		{"mixed limited ranges", []string{"10.0.0.0/8", "2001:db8::/32"}},
+		{"IPv4-mapped private range", []string{"::ffff:10.0.0.0/104"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := DefaultFor(EnvironmentProduction)
