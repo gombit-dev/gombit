@@ -109,7 +109,7 @@ func Confirm(ctx context.Context, store storage.Storage, key string, p Policy) (
 	}
 	reject := func(err error) (File, error) {
 		if derr := discard(ctx, store, key); derr != nil {
-			err = errors.Join(err, fmt.Errorf("upload: delete the refused file %q: %w", key, derr))
+			err = errors.Join(err, &CleanupError{Key: key, Err: derr})
 		}
 		return File{}, err
 	}
