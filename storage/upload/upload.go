@@ -11,8 +11,11 @@
 //     so a client-controlled filename never becomes an object path: it is
 //     kept, cleaned, as metadata (FilenameMetadata);
 //   - a failed upload leaves nothing behind: a Put that fails stores
-//     nothing (the storage contract), and a file stored before the request
-//     turned out to be invalid is deleted.
+//     nothing (the storage contract); one whose outcome is unknown
+//     (storage.ErrUnknownOutcome: a remote store may have stored it) has its
+//     generated key deleted; and a file stored before the request turned
+//     out to be invalid is deleted. When such a delete fails, the error
+//     says which key may still hold a file (*CleanupError).
 //
 // Receive reads a multipart/form-data request (an HTML file input);
 // ReceiveBody reads a request whose body is the file (PUT or POST with the
@@ -61,9 +64,12 @@ const (
 	// SniffBytes is how many leading bytes a Detector sees (at most; fewer
 	// when the file is shorter).
 	SniffBytes = 512
-	// MaxFormBytes bounds the rest of a multipart request: its part
-	// headers, boundaries, and fields other than the file.
+	// MaxFormBytes bounds the rest of a multipart request, on its own: its
+	// part headers, boundaries, and fields other than the file. A file
+	// smaller than Policy.MaxBytes does not make room for more of them.
 	MaxFormBytes = 64 << 10
+	// idHexLen is the length of the random id a generated key ends with.
+	idHexLen = 32
 )
 
 var (
@@ -79,6 +85,22 @@ var (
 	// multipart, a broken body, or more than one file).
 	ErrMalformed = errors.New("upload: malformed request")
 )
+
+// CleanupError reports a key that may still hold a file after a failed
+// upload: one stored before the request turned out to be invalid, or one a
+// Put of unknown outcome may have stored, whose delete failed too. The
+// upload's error carries it (errors.As) alongside the failure it reports,
+// which it does not change; delete Key when the store is reachable again.
+type CleanupError struct {
+	Key string
+	Err error // why the delete failed
+}
+
+func (e *CleanupError) Error() string {
+	return fmt.Sprintf("upload: %q may still hold a file: deleting it failed: %v", e.Key, e.Err)
+}
+
+func (e *CleanupError) Unwrap() error { return e.Err }
 
 // Detector returns a file's media type (with parameters, if any) from its
 // first bytes: at most SniffBytes of them, fewer when the file is shorter.
@@ -133,13 +155,14 @@ func (p Policy) validate() error {
 		return fmt.Errorf("upload: Policy.MaxBytes must be at most %d", int64(math.MaxInt64-MaxFormBytes))
 	case len(p.Types) == 0:
 		return errors.New(`upload: Policy.Types must list the accepted media types ("*/*" for any)`)
-	case p.Prefix != "" && !strings.HasSuffix(p.Prefix, "/"):
-		return fmt.Errorf("upload: Policy.Prefix %q must end with '/'", p.Prefix)
 	}
-	if p.Prefix != "" {
-		if err := storage.ValidateKey(p.Prefix + "id"); err != nil {
-			return fmt.Errorf("upload: Policy.Prefix %q: %v", p.Prefix, err) // the server's mistake, not an invalid request
-		}
+	// The keys are Prefix and a 32-character id: check that shape, so a
+	// prefix the policy accepts gives keys every driver accepts.
+	if err := storage.ValidatePrefix(p.Prefix); err != nil {
+		return fmt.Errorf("upload: Policy.Prefix: %v", err) // the server's mistake, not an invalid request
+	}
+	if err := storage.ValidateKey(p.Prefix + strings.Repeat("0", idHexLen)); err != nil {
+		return fmt.Errorf("upload: Policy.Prefix %q leaves no room for a generated key: %v", p.Prefix, err)
 	}
 	for _, t := range p.Types {
 		typ, sub, ok := strings.Cut(t, "/")
@@ -223,10 +246,33 @@ func save(ctx context.Context, store storage.Storage, src io.Reader, filename st
 		Metadata:    md,
 		Size:        size,
 	})
+	if errors.Is(err, storage.ErrUnknownOutcome) {
+		// The store may hold the file under key: no one else will ever use
+		// this key, so delete it, then report the failure as it now stands.
+		if derr := discard(ctx, store, key); derr != nil {
+			return File{}, errors.Join(source.classify(ctx, err), &CleanupError{Key: key, Err: derr})
+		}
+		return File{}, source.classify(ctx, settled(key, err))
+	}
 	if err != nil {
 		return File{}, source.classify(ctx, err)
 	}
 	return File{ObjectInfo: info, Filename: filename}, nil
+}
+
+// settled is a Put failure of unknown outcome whose key has since been
+// deleted: nothing is stored, so it is reported as the transient failure
+// it was (ctx's error, or storage.ErrUnavailable), no longer as
+// storage.ErrUnknownOutcome. The original error stays in the message.
+func settled(key string, err error) error {
+	cause := storage.ErrUnavailable
+	switch {
+	case errors.Is(err, context.Canceled):
+		cause = context.Canceled
+	case errors.Is(err, context.DeadlineExceeded):
+		cause = context.DeadlineExceeded
+	}
+	return storage.Wrap("put", key, fmt.Errorf("%w (%v; the key was then deleted, so nothing is stored)", cause, err))
 }
 
 // sourceReader remembers the first error its reader returned other than
@@ -276,7 +322,8 @@ func fitMetadata(md map[string]string, filename string) string {
 	return ""
 }
 
-// newKey returns prefix followed by a random 128-bit id.
+// newKey returns prefix followed by a random 128-bit id, idHexLen hex
+// characters.
 func newKey(prefix string) (string, error) {
 	var id [16]byte
 	if _, err := rand.Read(id[:]); err != nil {
@@ -319,11 +366,14 @@ func CleanFilename(name string) string {
 
 // Receive stores the file of a multipart/form-data request (the part in
 // p.Field with a filename; an empty file input sends none) and reads the
-// rest of the request, so that a second file is refused. The request may
-// be at most p.MaxBytes plus MaxFormBytes long: a longer declared length
-// fails before a byte is read, and a longer body when it gets there. If the
-// request turns out to be invalid after the file was stored, the file is
-// deleted.
+// rest of the request, so that a second file is refused. Everything but
+// the file (part headers, boundaries, other fields) may be at most
+// MaxFormBytes, on its own: other fields fail with ErrTooLarge as soon as
+// they pass it, and the request as a whole is checked at its end. The
+// request may be at most p.MaxBytes plus MaxFormBytes long: a longer
+// declared length fails before a byte is read, and a longer body when it
+// gets there. If the request turns out to be invalid after the file was
+// stored, the file is deleted.
 func Receive(store storage.Storage, r *http.Request, p Policy) (File, error) {
 	if err := p.validate(); err != nil {
 		return File{}, err
@@ -333,7 +383,7 @@ func Receive(store storage.Storage, r *http.Request, p Policy) (File, error) {
 		return File{}, fmt.Errorf("%w: the request is %d bytes, more than %d", ErrTooLarge, r.ContentLength, limit)
 	}
 	ctx := r.Context()
-	mr, err := multipartReader(r, limit)
+	mr, body, err := multipartReader(r, limit)
 	if err != nil {
 		return File{}, err
 	}
@@ -343,10 +393,11 @@ func Receive(store storage.Storage, r *http.Request, p Policy) (File, error) {
 	}
 	var file File
 	stored := false
+	var fileBytes, fieldBytes int64 // the file's bytes; other fields' bytes
 	fail := func(err error) (File, error) {
 		if stored {
 			if derr := discard(ctx, store, file.Key); derr != nil {
-				err = errors.Join(err, fmt.Errorf("upload: delete the stored file %q: %w", file.Key, derr))
+				err = errors.Join(err, &CleanupError{Key: file.Key, Err: derr})
 			}
 		}
 		return File{}, err
@@ -360,24 +411,51 @@ func Receive(store storage.Storage, r *http.Request, p Policy) (File, error) {
 			return fail(malformed(err))
 		}
 		if part.FormName() != field || part.FileName() == "" {
-			if _, err := io.Copy(io.Discard, part); err != nil {
+			n, err := io.Copy(io.Discard, io.LimitReader(part, MaxFormBytes-fieldBytes+1))
+			fieldBytes += n
+			if err != nil {
 				return fail(malformed(err))
+			}
+			if fieldBytes > MaxFormBytes {
+				return fail(formTooLarge())
 			}
 			continue
 		}
 		if stored {
 			return fail(fmt.Errorf("%w: more than one file in %q", ErrMalformed, field))
 		}
-		file, err = save(ctx, store, part, part.FileName(), nil, p)
+		counted := &countReader{r: part}
+		file, err = save(ctx, store, counted, part.FileName(), nil, p)
 		if err != nil {
 			return fail(err)
 		}
 		stored = true
+		fileBytes = counted.n
+	}
+	// The whole request has been read: what was not the file is the form.
+	if body.read-fileBytes > MaxFormBytes {
+		return fail(formTooLarge())
 	}
 	if !stored {
 		return File{}, fmt.Errorf("%w in the form field %q", ErrNoFile, field)
 	}
 	return file, nil
+}
+
+func formTooLarge() error {
+	return fmt.Errorf("%w: the form's fields other than the file are more than %d bytes", ErrTooLarge, MaxFormBytes)
+}
+
+// countReader counts the bytes read through it.
+type countReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
 }
 
 // ReceiveBody stores a request's body as the file: its declared length, if
@@ -404,21 +482,23 @@ func ReceiveBody(store storage.Storage, r *http.Request, p Policy) (File, error)
 }
 
 // multipartReader returns the multipart reader of r, whose body it limits
-// to limit bytes. r is marked as read, as by r.MultipartReader: a later
+// to limit bytes, and that limited body (whose read count is the bytes
+// consumed). r is marked as read, as by r.MultipartReader: a later
 // ParseMultipartForm on it fails plainly instead of parsing a drained body.
-func multipartReader(r *http.Request, limit int64) (*multipart.Reader, error) {
+func multipartReader(r *http.Request, limit int64) (*multipart.Reader, *limitReader, error) {
 	if r.Body == nil {
-		return nil, fmt.Errorf("%w: no body", ErrMalformed)
+		return nil, nil, fmt.Errorf("%w: no body", ErrMalformed)
 	}
+	body := &limitReader{r: r.Body, max: limit}
 	r.Body = struct {
 		io.Reader
 		io.Closer
-	}{&limitReader{r: r.Body, max: limit}, r.Body}
+	}{body, r.Body}
 	mr, err := r.MultipartReader()
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrMalformed, err)
+		return nil, nil, fmt.Errorf("%w: %w", ErrMalformed, err)
 	}
-	return mr, nil
+	return mr, body, nil
 }
 
 // malformed classifies an error reading a multipart request's structure:
