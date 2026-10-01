@@ -52,12 +52,15 @@ version.
     key is redacted;
   - streaming uploads in at most 8 MiB of memory: one `PutObject` sized to
     a small object, or sequential 8 MiB multipart parts, aborted on
-    failure (best effort: a failed abort is reported as `*s3.AbortError`,
-    and a bucket lifecycle rule is the backstop);
+    failure (best effort: an abort that failed, or one that ran while a
+    part upload was unanswered, is reported as `*s3.AbortError`, and a
+    bucket lifecycle rule is what guarantees no parts linger);
   - a `Put` whose publishing request S3 never answered fails with the new
     `storage.ErrUnknownOutcome` (the key holds the old object or the new
     one), rather than claiming the key is unchanged; that request is sent
-    once, without the SDK's retries, so its answer is the one classified;
+    once, without the SDK's retries, so its answer is the one classified,
+    and a request never written out (no credentials, a refused connection)
+    is a definite failure;
   - metadata sent RFC 2047 encoded when not ASCII, so it round-trips;
   - throttling, 5xx and network failures classified as `ErrUnavailable`, and
     a missing bucket reported as a configuration error, not a missing object
