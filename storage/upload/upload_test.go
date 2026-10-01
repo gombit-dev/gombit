@@ -884,3 +884,38 @@ func TestClientGoneAfterTheFileIsNotAServerError(t *testing.T) {
 		cancel()
 	}
 }
+
+// TestDetectorCannotChangeTheFile: the detector sees a copy of the file's
+// first bytes: overwriting it (or keeping it and writing later) does not
+// change what is stored.
+func TestDetectorCannotChangeTheFile(t *testing.T) {
+	ctx := context.Background()
+	kept := make(chan []byte, 1)
+	p := images
+	p.Detect = func(head []byte) string {
+		typ := http.DetectContentType(head)
+		clear(head) // a detector that scribbles on its argument
+		kept <- head
+		return typ
+	}
+	store := memory.New()
+	f, err := upload.Save(ctx, store, bytes.NewReader(png), "a.png", p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, head := 0, <-kept; i < len(head); i++ {
+		head[i] = 0xff // and writes to what it kept after Save returned
+	}
+	body, _, err := store.Open(ctx, f.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = body.Close() }()
+	got, err := io.ReadAll(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, png) {
+		t.Fatalf("the stored file differs from the upload: the detector changed it (first bytes %q)", got[:16])
+	}
+}

@@ -104,6 +104,8 @@ func (e *CleanupError) Unwrap() error { return e.Err }
 
 // Detector returns a file's media type (with parameters, if any) from its
 // first bytes: at most SniffBytes of them, fewer when the file is shorter.
+// It gets a copy of them, its own to keep or change: nothing it does to it
+// changes the file stored.
 type Detector func(head []byte) string
 
 // Policy is what an upload must satisfy and where it is stored.
@@ -243,7 +245,9 @@ func save(ctx context.Context, store storage.Storage, src io.Reader, filename st
 	if detect == nil {
 		detect = http.DetectContentType
 	}
-	contentType := detect(head)
+	// The detector gets a copy: what it does with its argument (or keeps of
+	// it) cannot reach the bytes stored.
+	contentType := detect(bytes.Clone(head))
 	mediaType, _, err := mime.ParseMediaType(contentType)
 	if err != nil || !p.accepts(mediaType) {
 		return File{}, fmt.Errorf("%w: detected %q", ErrType, contentType)
