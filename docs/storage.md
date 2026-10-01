@@ -398,7 +398,10 @@ GOMBIT_STORAGE_S3_FORCE_PATH_STYLE=false      # true for MinIO and most S3-compa
 - **Atomic writes.** An object appears only when its upload completes. A
   `Put` that fails before sending the request that publishes the object
   (the `PutObject`, or the multipart upload's `CompleteMultipartUpload`)
-  leaves the key as it was. Once that request is sent, only S3's answer
+  leaves the key as it was. "Sent" is observed, not assumed: the driver's
+  HTTP client counts the requests written out in full, so a call that
+  failed first (no credentials to sign with, the connection refused, the
+  context ending) sent nothing. Once that request is sent, only S3's answer
   says whether it took effect. A 4xx answer is a refusal, and the key is as
   it was. No answer (a dropped connection, a timeout, the context ending) or
   a 5xx one leaves the outcome unknown, and `Put` fails with
@@ -410,13 +413,16 @@ GOMBIT_STORAGE_S3_FORCE_PATH_STYLE=false      # true for MinIO and most S3-compa
   single attempt's answer is classified. To retry, repeat the `Put`; that
   is always safe.
 - **Incomplete uploads.** A failed multipart upload is aborted, on a fresh
-  context, so its parts aren't kept. The abort is best effort. When it
-  fails too (the network is still down, or `s3:AbortMultipartUpload` isn't
-  granted), `Put`'s error also carries an `*s3.AbortError` naming the
-  upload, and its parts stay stored, and billed, until they're aborted.
-  **Give the bucket a lifecycle rule that aborts incomplete multipart
-  uploads** (`AbortIncompleteMultipartUpload`, after a day or so): that
-  rule, not the driver, is what guarantees none lingers.
+  context, which removes the parts S3 has stored. It can't remove more. A
+  part upload that never got an answer may still be in progress at S3 and
+  be stored after the abort (AWS documents this), and the abort itself can
+  fail (the network is still down, or `s3:AbortMultipartUpload` isn't
+  granted). In either case `Put`'s error also carries an `*s3.AbortError`
+  naming the upload, whose parts may stay stored, and billed. So any failed
+  multipart `Put` may leave parts behind for a while. **Give the bucket a
+  lifecycle rule that aborts incomplete multipart uploads**
+  (`AbortIncompleteMultipartUpload`, after a day or so): that rule, not the
+  driver, is what guarantees none lingers.
 - **Permissions.** The credentials need `s3:GetObject`, `s3:PutObject`,
   `s3:DeleteObject` and `s3:AbortMultipartUpload` on the objects
   (`arn:aws:s3:::BUCKET/PREFIX*`), and `s3:ListBucket` on the bucket.
