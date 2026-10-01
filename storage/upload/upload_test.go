@@ -404,7 +404,7 @@ func TestFailuresLeaveNothingBehind(t *testing.T) {
 			r := httptest.NewRequest(http.MethodPost, "/upload", &goneAfter{data: b[:cut], cancel: cancel})
 			r.Header = full.Header
 			return r.WithContext(ctx)
-		}, upload.ErrMalformed},
+		}, context.Canceled},
 		"client went away": {func() *http.Request {
 			return form(t, part{field: "file", filename: "a.png", body: half}).WithContext(canceled)
 		}, context.Canceled},
@@ -850,5 +850,37 @@ func TestBodyErrorAfterTheClosingBoundaryFails(t *testing.T) {
 	}
 	if keys := store.Keys(); len(keys) != 0 {
 		t.Fatalf("the store holds %v after the failed request", keys)
+	}
+}
+
+// TestClientGoneAfterTheFileIsNotAServerError: a client that goes away
+// after the file part (while a later field is read, or after the closing
+// boundary) is reported the way one gone during the file is: the context's
+// error, a 503, not a malformed request; and the stored file is deleted.
+func TestClientGoneAfterTheFileIsNotAServerError(t *testing.T) {
+	full := form(t, part{field: "file", filename: "a.png", body: png}, part{field: "note", body: bytes.Repeat([]byte("n"), 1000)})
+	b, err := io.ReadAll(full.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, data := range map[string][]byte{
+		"during a later field":       b[:bytes.Index(b, []byte(`name="note"`))+20],
+		"after the closing boundary": b,
+	} {
+		ctx, cancel := context.WithCancel(context.Background())
+		r := httptest.NewRequest(http.MethodPost, "/upload", &goneAfter{data: data, cancel: cancel})
+		r.Header = full.Header
+		store := memory.New()
+		_, err := upload.Receive(store, r.WithContext(ctx), images)
+		if !errors.Is(err, context.Canceled) || errors.Is(err, upload.ErrMalformed) {
+			t.Errorf("%s: Receive = %v, want context.Canceled, not ErrMalformed", name, err)
+		}
+		if got := status(upload.MapError(ctx, err)); got != http.StatusServiceUnavailable {
+			t.Errorf("%s: MapError = %d, want 503", name, got)
+		}
+		if keys := store.Keys(); len(keys) != 0 {
+			t.Errorf("%s: the store holds %v after the failed request", name, keys)
+		}
+		cancel()
 	}
 }
