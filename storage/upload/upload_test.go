@@ -481,6 +481,19 @@ func TestPolicyIsValidated(t *testing.T) {
 		{MaxBytes: 1, Types: []string{"Image/PNG"}},
 		{MaxBytes: 1, Types: []string{"*/png"}},
 		{MaxBytes: 1, Types: []string{"text/plain; charset=utf-8"}},
+		// Not media types, or wildcards other than "type/*" and "*/*": none
+		// could ever match a detected type.
+		{MaxBytes: 1, Types: []string{"image/png/garbage"}},
+		{MaxBytes: 1, Types: []string{"image/p@ng"}},
+		{MaxBytes: 1, Types: []string{"image/*suffix"}},
+		{MaxBytes: 1, Types: []string{"image/**"}},
+		{MaxBytes: 1, Types: []string{"ima*ge/png"}},
+		{MaxBytes: 1, Types: []string{"image/png\n"}},
+		{MaxBytes: 1, Types: []string{" image/png"}},
+		{MaxBytes: 1, Types: []string{"image/"}},
+		{MaxBytes: 1, Types: []string{"/png"}},
+		{MaxBytes: 1, Types: []string{"image/png;"}},
+		{MaxBytes: 1, Types: []string{"image/png", "text/(plain)"}},
 		{MaxBytes: 1, Types: []string{"*/*"}, Prefix: "avatars"},
 		{MaxBytes: 1, Types: []string{"*/*"}, Prefix: "../avatars/"},
 		{MaxBytes: 1, Types: []string{"*/*"}, Metadata: map[string]string{upload.FilenameMetadata: "x"}},
@@ -792,5 +805,50 @@ func TestEpilogueIsBounded(t *testing.T) {
 		if keys := store.Keys(); tc.want != nil && len(keys) != 0 {
 			t.Errorf("%s: the store holds %v after the refused request", name, keys)
 		}
+	}
+}
+
+// truncatedAtTheEnd returns all of data together with err in one Read, then
+// io.EOF: what a body cut short (fewer bytes than its Content-Length) can
+// do. A buffered parser may keep err while it hands out the bytes.
+type truncatedAtTheEnd struct {
+	data []byte
+	err  error
+	done bool
+}
+
+func (r *truncatedAtTheEnd) Read(p []byte) (int, error) {
+	if r.done {
+		return 0, io.EOF
+	}
+	r.done = true
+	n := copy(p, r.data)
+	r.data = r.data[n:]
+	if len(r.data) > 0 {
+		r.done = false
+		return n, nil
+	}
+	return n, r.err
+}
+
+// TestBodyErrorAfterTheClosingBoundaryFails: a body that fails (here with
+// io.ErrUnexpectedEOF) in the same Read that delivered the closing
+// boundary has failed, though the multipart entity parsed whole: Receive
+// fails and deletes the file it stored.
+func TestBodyErrorAfterTheClosingBoundaryFails(t *testing.T) {
+	f := form(t, part{field: "file", filename: "a.png", body: png})
+	b, err := io.ReadAll(f.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest(http.MethodPost, "/upload", struct{ io.Reader }{&truncatedAtTheEnd{data: b, err: io.ErrUnexpectedEOF}})
+	r.Header = f.Header
+	store := memory.New()
+	_, err = upload.Receive(store, r, images)
+	if !errors.Is(err, upload.ErrMalformed) || !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("Receive of a body that failed at its end = %v, want ErrMalformed carrying io.ErrUnexpectedEOF", err)
+	}
+	if keys := store.Keys(); len(keys) != 0 {
+		t.Fatalf("the store holds %v after the failed request", keys)
 	}
 }
