@@ -340,6 +340,7 @@ What the policy guarantees:
 | `ErrTooLarge` (or an `http.MaxBytesError`) | `413 payload_too_large` |
 | `ErrType`, `ErrNoFile`, `ErrMalformed` | `422 validation` |
 | An invalid `Policy` | `500 internal` (the server's mistake) |
+| The request's context ended (the client went away, or it timed out), at any point of the request: during the file, a later field, or after the closing boundary | `503 dependency_unavailable`, through `storage.MapError` |
 | Anything else | `storage.MapError` |
 
 Serve an upload as an attachment, with the stored filename:

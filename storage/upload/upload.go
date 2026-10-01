@@ -324,11 +324,8 @@ func (s *sourceReader) Read(p []byte) (int, error) {
 // ctx has ended (the client went away, so its body failed too), and as
 // ErrMalformed when the source failed first (unless it went over a limit).
 func (s *sourceReader) classify(ctx context.Context, err error) error {
-	if cerr := ctx.Err(); cerr != nil {
-		if errors.Is(err, cerr) {
-			return err
-		}
-		return fmt.Errorf("%w: %w", cerr, err)
+	if gone := clientGone(ctx, err); gone != nil {
+		return gone
 	}
 	if s.err == nil || errors.Is(s.err, ErrTooLarge) {
 		return err
@@ -439,13 +436,13 @@ func Receive(store storage.Storage, r *http.Request, p Policy) (File, error) {
 			break
 		}
 		if err != nil {
-			return fail(malformed(err))
+			return fail(malformed(ctx, err))
 		}
 		if part.FormName() != field || part.FileName() == "" {
 			n, err := io.Copy(io.Discard, io.LimitReader(part, MaxFormBytes-fieldBytes+1))
 			fieldBytes += n
 			if err != nil {
-				return fail(malformed(err))
+				return fail(malformed(ctx, err))
 			}
 			if fieldBytes > MaxFormBytes {
 				return fail(formTooLarge())
@@ -469,7 +466,7 @@ func Receive(store storage.Storage, r *http.Request, p Policy) (File, error) {
 	// request's limit, which body enforces), then check the whole request.
 	if left := MaxFormBytes - (body.read - fileBytes); left >= 0 {
 		if _, err := io.Copy(io.Discard, io.LimitReader(body, left+1)); err != nil {
-			return fail(malformed(err))
+			return fail(malformed(ctx, err))
 		}
 	}
 	if body.read-fileBytes > MaxFormBytes {
@@ -479,7 +476,7 @@ func Receive(store storage.Storage, r *http.Request, p Policy) (File, error) {
 	// cut short ends with its last bytes and io.ErrUnexpectedEOF together):
 	// the request failed, whatever the multipart entity looked like.
 	if body.err != nil {
-		return fail(malformed(body.err))
+		return fail(malformed(ctx, body.err))
 	}
 	if !stored {
 		return File{}, fmt.Errorf("%w in the form field %q", ErrNoFile, field)
@@ -546,13 +543,35 @@ func multipartReader(r *http.Request, limit int64) (*multipart.Reader, *limitRea
 	return mr, body, nil
 }
 
-// malformed classifies an error reading a multipart request's structure:
-// ErrTooLarge past the request's limit, otherwise ErrMalformed.
-func malformed(err error) error {
+// malformed classifies a failure reading a multipart request, at any point
+// of it (a part's headers, a field other than the file, after the closing
+// boundary), the way sourceReader.classify does while the file is read: the
+// context's error first when the request's context has ended (the client
+// went away, so its body failed too), ErrTooLarge past the request's
+// limit, otherwise ErrMalformed.
+func malformed(ctx context.Context, err error) error {
+	if gone := clientGone(ctx, err); gone != nil {
+		return gone
+	}
 	if errors.Is(err, ErrTooLarge) {
 		return err
 	}
 	return fmt.Errorf("%w: %w", ErrMalformed, err)
+}
+
+// clientGone returns err as the request context's error when that context
+// has ended (the client went away or the request timed out, so whatever
+// failed reading its body failed because of it), or nil when it has not.
+// Every read failure of an upload is classified through it first.
+func clientGone(ctx context.Context, err error) error {
+	cerr := ctx.Err()
+	switch {
+	case cerr == nil:
+		return nil
+	case errors.Is(err, cerr):
+		return err
+	}
+	return fmt.Errorf("%w: %w", cerr, err)
 }
 
 // discard deletes a stored file that turned out to be part of an invalid
