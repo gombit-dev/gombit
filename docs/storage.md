@@ -174,7 +174,10 @@ What the policy guarantees:
   only, so this is the bound for uploads.
 - **Type.** The media type is detected from the file's first 512 bytes
   (`http.DetectContentType`) and checked against `Types` (`image/png`,
-  `image/*`, `*/*`). The client's `Content-Type` and the filename's extension
+  `image/*`, `*/*`). Each entry must be a lowercase media type without
+  parameters, as `mime.ParseMediaType` reads it, or one of those two
+  wildcards; anything else is refused with the policy (a 500, the server's
+  mistake) rather than rejecting every upload. The client's `Content-Type` and the filename's extension
   are ignored, and the detected type is what is stored. The default detector
   never reports `image/svg+xml` or `application/json`. For those, or other
   types it does not recognize, set `Policy.Detect`.
@@ -192,7 +195,9 @@ What the policy guarantees:
   deleted, since nothing else will ever use that key. The error then
   reports the failure as `ErrUnavailable` (or the context's error), since
   nothing is stored. A file stored before the rest of the request turned
-  out invalid is deleted, even if the client went away. When one of those
+  out invalid is deleted, even if the client went away, and so is one whose
+  request body then failed, even in the read that delivered the form's
+  closing boundary (a body cut short). When one of those
   deletes fails, the error carries an `*upload.CleanupError` naming the key
   that may still hold a file.
 
