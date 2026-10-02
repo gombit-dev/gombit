@@ -144,6 +144,8 @@ type URLOptions struct {
 	// Expires is how long a signed URL is valid: it must be positive for a
 	// signed URL, and zero for a public one (ErrInvalidOptions otherwise),
 	// so a zero or negative lifetime can never widen into a permanent URL.
+	// Every driver rounds it up to a whole second (RoundExpiry): a
+	// millisecond asks for a one-second URL, on every driver.
 	Expires time.Duration
 }
 
