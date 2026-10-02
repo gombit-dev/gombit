@@ -53,7 +53,7 @@ err = store.Delete(ctx, "avatars/42.png")
 | --- | --- |
 | **Streaming** | `Put` reads an `io.Reader` to EOF in pieces, and `Open` returns an `io.ReadCloser`. Neither needs the whole object in memory, a seekable source, or a known length. |
 | **Atomic writes** | A `Put` that fails leaves the key as it was: the previous object whole, or still absent. That covers the reader returning an error, the context ending, and a length that differs from the declared `Size`. A reader during a `Put` reads the previous object whole, never part of the new one; for a key stored for the first time, it finds no object until the `Put` completes. Concurrent `Put`s to one key leave one of them whole. The one exception is a failure that matches `ErrUnknownOutcome`: a remote backend (S3) was sent the object and never said whether it stored it, because the answer was lost, the connection dropped, or the service failed. The key then holds the previous object or the new one, whole; which is unknown. `Stat` the key, or `Put` again (repeating a `Put` is safe). The local and memory drivers never return it. |
-| **Overwrite** | `Put` replaces an existing object, including its content type and metadata. |
+| **Overwrite** | `Put` replaces an existing object, including its content type and metadata. With `PutOptions{IfAbsent: true}` it stores only where nothing is stored, and otherwise fails with `ErrExists` and leaves the object. The check and the store are one atomic step on every driver, against other processes sharing the backend too: the local driver publishes with a rename that refuses to replace, and S3 with a conditional write (`If-None-Match: *`). Of two `IfAbsent` `Put`s to one empty key, exactly one succeeds. |
 | **Idempotent delete** | Deleting a missing object is not an error, so a retried delete is safe. |
 | **Portable keys** | Every method validates its key with the same rule (below) and fails with `ErrInvalidKey` before touching the backend. Every valid key is its own object on every driver: keys that differ only in case or in Unicode normalization (`café` NFC and NFD), a key that is a prefix of another (`a` and `a/b`), segments up to 255 bytes, and names Windows reserves (`CON`, `c:`) all store and read back as themselves. |
 | **Context** | Every method honors `ctx`: one that has already ended fails the call with the context's error. A `Put` canceled mid-stream fails the same way and stores nothing. `Put` observes the context between reads of its source: it cannot interrupt a source `Read` already blocked, since an `io.Reader` has no way to be interrupted. The source's owner makes it return, as an HTTP server closes a request body when the client goes away. Once the context has ended, the `Put` fails even if the source then reaches EOF. The reader `Open` returns stays bound to its `ctx` until it is closed: once the context ends, reading fails with its error and a read blocked in the backend returns, the way an HTTP response body does. `storage.ContextReadCloser` gives other drivers that behavior over a reader whose `Close` interrupts a `Read` (a file, an HTTP body, a pipe). Keep the context alive while the stream is read. |
@@ -365,9 +365,12 @@ Serve an upload as an attachment, with the stored filename:
 
 ### Direct uploads
 
-A large file doesn't need to pass through the application. The client
-uploads it straight to storage with a short-lived grant, and the app checks
-the result:
+A client can upload a file on its own with a short-lived signed grant, and
+the app checks the result. On S3 the grant is a presigned `PUT` to the bucket,
+so a large file never passes through the application. With the local and
+memory drivers it is a `PUT` to the app's storage route (`/_storage`), which
+streams the bytes into the store: they pass through the app process, but not
+through your handlers or the framework's request parsing.
 
 ```go
 // 1. The client declares the file; the app decides it may upload, and grants.
@@ -396,12 +399,22 @@ What a grant enforces:
   because `presign.Handler` checks them.
 - **Lifetime and single use.** `Policy.GrantExpiry` is 15 minutes by
   default. A grant stores only where nothing is stored yet. S3 enforces this
-  with a signed `If-None-Match: *` (412 otherwise); the app's route answers a
-  D10 409. So once the file has been uploaded and confirmed, the grant cannot
-  replace it with other bytes. If `Confirm` refuses a file, it deletes it,
-  and an unexpired grant can then upload again. On the local driver, each
-  process serializes its own uploads. Processes sharing one root could both
-  store a grant used by two clients at the same instant.
+  with a signed `If-None-Match: *` (412 otherwise); the app's route stores
+  with `PutOptions{IfAbsent: true}` and answers a D10 409. Either way the check
+  and the store are one atomic step, so of two clients using one grant at the
+  same instant, through any number of app processes, exactly one stores. Once
+  the file has been uploaded and confirmed, the grant cannot replace it with
+  other bytes. If `Confirm` refuses a file, it deletes it, and an unexpired
+  grant can then upload again. An S3-compatible service must support
+  conditional writes (`If-None-Match` on `PutObject` and
+  `CompleteMultipartUpload`); AWS S3 and MinIO do.
+- **Size.** On S3 a direct upload is one presigned `PutObject`, so it is at
+  most 5 GiB (`s3.MaxUploadURLBytes`, S3's single-`PUT` limit); a larger
+  `Size` is `ErrInvalidOptions` rather than a grant that could never succeed.
+  (`Put` has no such limit: it uploads larger objects in parts.)
+- **Expiry and credentials.** A grant signed with temporary credentials (an
+  IAM role's, say) stops working when they expire, whatever its own lifetime.
+  The `Expires` it reports is the earlier of the two.
 - **Confirmation.** The declared type is only a claim, and it is what the
   store will serve the object as. `Confirm` reads the object's first bytes.
   It fails, and deletes the object, in any of these cases:
@@ -421,22 +434,30 @@ A grant that is never used expires. An upload that is never confirmed stays
 stored until `storage.Sweep` removes it (see [Cleanup](#cleanup)).
 
 **Browsers and S3.** A browser's `PUT` to the bucket is cross-origin, so the
-bucket needs a CORS rule allowing it from the app's origin, with the headers
-the grant asks for:
+bucket needs a CORS rule allowing it from the app's origin, with every header
+the grant asks for that a browser doesn't send freely: `Content-Type` (with a
+type other than a form's), `If-None-Match` (the single-use condition), and the
+`x-amz-meta-*` metadata. A browser checks them in a preflight before the `PUT`,
+and S3 refuses the preflight if one is missing:
 
 ```json
 [{
   "AllowedOrigins": ["https://app.example.com"],
   "AllowedMethods": ["PUT"],
-  "AllowedHeaders": ["content-type", "x-amz-meta-*"],
+  "AllowedHeaders": ["content-type", "if-none-match", "x-amz-meta-*"],
   "ExposeHeaders": ["ETag"],
   "MaxAgeSeconds": 3600
 }]
 ```
 
 With the local and memory drivers the grant is a `PUT` to the app's own
-`GOMBIT_STORAGE_LOCAL_URL`. That route is exempt from cookie-mode CSRF: the
-signed URL is the authorization, and no cookie is involved, as with S3.
+`GOMBIT_STORAGE_LOCAL_URL`. The storage route `framework.New` mounts there is
+exempt from cookie-mode CSRF (the signed URL is the authorization, and no
+cookie is involved, as with S3), the JSON body limit (the signed length bounds
+it) and input sanitization (the file is stored byte for byte). The exemption
+covers that mounted route and nothing else. With `WithStorage` the framework
+mounts no route, so a route your app registers under that path keeps every
+protection.
 [`examples/storage`](../examples/storage/main.go) has `POST /uploads/direct`
 and `POST /uploads/direct/:id/confirm`.
 
@@ -454,6 +475,7 @@ same thing on every driver:
 | `ErrSizeMismatch` | The bytes read differ from the declared `Size` | `422 validation` |
 | `ErrUnavailable` | The backend is unreachable or failed transiently | `503 dependency_unavailable` |
 | `ErrUnknownOutcome` | A `Put` sent the object to a remote backend and never learned whether it was stored; the key holds the old object or the new one | `503 dependency_unavailable` |
+| `ErrExists` | A `Put` with `IfAbsent` found an object already stored under the key | `409 conflict` |
 | `context.DeadlineExceeded` / `Canceled` | The request timed out, or the client went away | `503 dependency_unavailable` |
 | `ErrUnsupported` | The driver cannot do this, for example a URL | `500 internal` |
 | `ErrNotPublic` | A public URL was asked for a private object | `500 internal`: the server chose the key and the kind of URL |

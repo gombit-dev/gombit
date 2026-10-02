@@ -103,8 +103,11 @@ func (s *Store) Put(ctx context.Context, key string, r io.Reader, opts storage.P
 		info.Metadata = nil
 	}
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, taken := s.objects[key]; taken && opts.IfAbsent {
+		return storage.ObjectInfo{}, storage.Wrap("put", key, storage.ErrExists) // checked and stored under one lock
+	}
 	s.objects[key] = object{data: data, info: info}
-	s.mu.Unlock()
 	return copyInfo(info), nil
 }
 

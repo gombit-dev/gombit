@@ -39,6 +39,9 @@ var (
 	// (ErrUnavailable, or ctx's error). Stat the key, or Put again: a Put is
 	// safe to repeat.
 	ErrUnknownOutcome = errors.New("storage: outcome unknown: the object may or may not have been stored")
+	// ErrExists: a Put with PutOptions.IfAbsent found an object already
+	// stored under the key, and left it as it was.
+	ErrExists = errors.New("storage: an object is already stored under the key")
 )
 
 // Error is a failed storage operation: what was attempted, on which key,
@@ -77,6 +80,7 @@ func Wrap(op, key string, err error) error {
 // MapError maps a storage error to a D10 category error for a handler:
 //
 //   - ErrNotFound becomes not_found (with notFound as the message);
+//   - ErrExists becomes conflict (an IfAbsent Put found an object);
 //   - ErrInvalidOptions and ErrSizeMismatch become validation (the request
 //     sent a content type, metadata, or length that cannot be stored);
 //   - ErrUnavailable, ErrUnknownOutcome, and a context that ended (the
@@ -98,6 +102,8 @@ func MapError(ctx context.Context, err error, notFound, internal string) error {
 		return contract.WithContext(ctx, contract.Validation("The object's content type or metadata is invalid.", nil))
 	case errors.Is(err, ErrSizeMismatch):
 		return contract.WithContext(ctx, contract.Validation("The upload's length does not match its declared size.", nil))
+	case errors.Is(err, ErrExists):
+		return contract.WithContext(ctx, contract.Conflict("A file is already stored there."))
 	case errors.Is(err, ErrUnknownOutcome):
 		return contract.WithContext(ctx, contract.DependencyUnavailable("File storage did not confirm the upload; it may or may not have been stored."))
 	case errors.Is(err, ErrUnavailable):

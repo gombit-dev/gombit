@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -488,5 +489,55 @@ func TestBaseRuleIsShared(t *testing.T) {
 		if (newErr == nil) != valid || (cfgErr == nil) != valid {
 			t.Errorf("Base %q: presign.New = %v, config = %v; want valid = %v", base, newErr, cfgErr, valid)
 		}
+	}
+}
+
+// TestOneGrantStoresOnceAcrossHandlers: one upload grant used at the same
+// instant through separate handlers (as by separate app processes sharing
+// a store) stores once: exactly one PUT succeeds, the others are 409.
+func TestOneGrantStoresOnceAcrossHandlers(t *testing.T) {
+	c := &clock{t: time.Unix(1_800_000_000, 0)}
+	signer := newSigner(t, c)
+	store := memory.New(memory.WithURLs(signer))
+	var servers []*httptest.Server
+	for i := 0; i < 4; i++ {
+		mux := http.NewServeMux()
+		mux.Handle(signer.Path()+"/", presign.Handler(store, signer)) // a handler of its own
+		srv := httptest.NewServer(mux)
+		t.Cleanup(srv.Close)
+		servers = append(servers, srv)
+	}
+	req, err := signer.UploadURL("uploads/once", storage.UploadURLOptions{Expires: time.Minute, Size: 5, ContentType: "text/plain"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	codes := make(chan int, 2*len(servers))
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 2*len(servers); i++ {
+		srv := servers[i%len(servers)]
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			codes <- send(t, srv, req, "bytes", nil)
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(codes)
+	ok, conflict := 0, 0
+	for code := range codes {
+		switch code {
+		case http.StatusOK:
+			ok++
+		case http.StatusConflict:
+			conflict++
+		default:
+			t.Fatalf("a PUT with the grant = %d, want 200 or 409", code)
+		}
+	}
+	if ok != 1 || conflict != 2*len(servers)-1 {
+		t.Fatalf("%d PUTs succeeded and %d conflicted; want exactly one success", ok, conflict)
 	}
 }
