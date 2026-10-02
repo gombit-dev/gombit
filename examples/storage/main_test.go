@@ -170,7 +170,8 @@ func TestDirectUpload(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &grant); err != nil {
 		t.Fatal(err)
 	}
-	// The client's PUT, straight to storage.
+	// The client's PUT, with the grant: to the app's storage route, for the
+	// local driver this test runs on (S3 would take it directly).
 	req := httptest.NewRequest(grant.Data.Upload.Method, grant.Data.Upload.URL, bytes.NewReader(gif))
 	for k, v := range grant.Data.Upload.Header {
 		req.Header.Set(k, v)
