@@ -120,7 +120,10 @@ version.
     rename locally, `If-None-Match: *` on S3), which keeps a grant single-use
     across app processes;
   - `upload.Confirm` then checks the stored object's size and its type (as
-    detected from its bytes, which must be the declared type), and deletes
+    detected from its bytes, which must be the declared type), and on S3
+    that the client added none of the standard headers S3 keeps unsigned
+    (`Cache-Control`, `Content-Disposition`, `Content-Encoding`,
+    `Content-Language`, `Expires`; `storage.UploadVerifier`), and deletes
     what fails;
   - the contract is the optional `storage.DirectUploader`, implemented by
     `storage/s3` (a presigned `PutObject` with the length, type and metadata

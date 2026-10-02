@@ -434,3 +434,56 @@ func TestIfAbsentMultipart(t *testing.T) {
 		t.Fatalf("a multipart IfAbsent Put on an empty key = %v", err)
 	}
 }
+
+// TestConfirmRefusesHeadersTheGrantDidNotSet: SigV4 leaves standard
+// headers outside X-Amz-SignedHeaders unauthenticated, and S3 keeps five of
+// them with the object and serves them back. A grant holder who adds one to
+// an otherwise valid upload gets it stored; Confirm then refuses the
+// upload (ErrMalformed) and deletes it, so a confirmed object carries only
+// what its grant described.
+func TestConfirmRefusesHeadersTheGrantDidNotSet(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	png := append([]byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"), make([]byte, 100)...)
+	policy := upload.Policy{MaxBytes: 1 << 20, Types: []string{"image/png"}, Prefix: "avatars/"}
+	for header, value := range map[string]string{
+		"Cache-Control":       "public, max-age=31536000",
+		"Content-Disposition": "attachment; filename=evil.html",
+		"Content-Encoding":    "gzip",
+		"Content-Language":    "fr",
+		"Expires":             "Wed, 21 Oct 2037 07:28:00 GMT",
+	} {
+		t.Run(header, func(t *testing.T) {
+			g, err := upload.Authorize(ctx, s, policy, int64(len(png)), "image/png", "a.png")
+			if err != nil {
+				t.Fatal(err)
+			}
+			r, _ := http.NewRequest(g.Request.Method, g.Request.URL, bytes.NewReader(png))
+			for k, v := range g.Request.Header {
+				r.Header.Set(k, v)
+			}
+			r.Header.Set(header, value)
+			resp, err := http.DefaultClient.Do(r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Skipf("S3 refused the unsigned %s (%d): nothing to confirm", header, resp.StatusCode)
+			}
+			head, err := s.client.HeadObject(ctx, &awss3.HeadObjectInput{Bucket: aws.String(s.bucket), Key: aws.String(s.prefix + g.Key)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if aws.ToString(head.CacheControl)+aws.ToString(head.ContentDisposition)+aws.ToString(head.ContentEncoding)+aws.ToString(head.ContentLanguage)+aws.ToString(head.ExpiresString) == "" {
+				t.Fatalf("S3 did not keep the %s header: the test proves nothing", header)
+			}
+			if _, err := upload.Confirm(ctx, s, g.Key, policy); !errors.Is(err, upload.ErrMalformed) {
+				t.Fatalf("Confirm of an upload with an unsigned %s = %v, want ErrMalformed", header, err)
+			}
+			if ok, _ := storage.Exists(ctx, s, g.Key); ok {
+				t.Fatalf("the refused upload with %s was not deleted", header)
+			}
+		})
+	}
+}

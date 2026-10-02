@@ -345,6 +345,14 @@ What a grant enforces:
   grant can then upload again. An S3-compatible service must support
   conditional writes (`If-None-Match` on `PutObject` and
   `CompleteMultipartUpload`); AWS S3 and MinIO do.
+- **Headers the grant does not sign.** SigV4 authenticates only the headers
+  a grant signs (length, type, metadata, `If-None-Match`). S3 also keeps five
+  standard headers a client can add unsigned: `Cache-Control`,
+  `Content-Disposition`, `Content-Encoding`, `Content-Language` and `Expires`.
+  It serves them back with the object. A grant never sets them, so on S3
+  `Confirm` refuses (and deletes) an upload that carries any of them
+  (`storage.UploadVerifier`): a confirmed object has only what its grant
+  described. The local and memory drivers keep none of those headers anyway.
 - **Size.** On S3 a direct upload is one presigned `PutObject`, so it is at
   most 5 GiB (`s3.MaxUploadURLBytes`, S3's single-`PUT` limit); a larger
   `Size` is `ErrInvalidOptions` rather than a grant that could never succeed.

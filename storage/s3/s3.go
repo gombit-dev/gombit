@@ -69,6 +69,7 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -720,6 +721,43 @@ func (s *Store) URL(ctx context.Context, key string, opts storage.URLOptions) (s
 }
 
 var _ storage.DirectUploader = (*Store)(nil)
+
+var _ storage.UploadVerifier = (*Store)(nil)
+
+// VerifyUpload implements storage.UploadVerifier. A grant signs the length,
+// type, metadata and If-None-Match of the PUT; SigV4 leaves other standard
+// headers unauthenticated, and S3 keeps five of them with the object and
+// serves them back: Cache-Control, Content-Disposition, Content-Encoding,
+// Content-Language and Expires. A grant never sets them, so an object that
+// has one was given it by the client: VerifyUpload fails with
+// storage.ErrInvalidOptions, naming them.
+func (s *Store) VerifyUpload(ctx context.Context, key string) error {
+	objKey, err := s.objectKey(key)
+	if err != nil {
+		return storage.Wrap("verify upload", key, err)
+	}
+	out, err := s.client.HeadObject(ctx, &awss3.HeadObjectInput{Bucket: aws.String(s.bucket), Key: aws.String(objKey)})
+	if err != nil {
+		return storage.Wrap("verify upload", key, classify(ctx, err))
+	}
+	var set []string
+	for name, value := range map[string]*string{
+		"Cache-Control":       out.CacheControl,
+		"Content-Disposition": out.ContentDisposition,
+		"Content-Encoding":    out.ContentEncoding,
+		"Content-Language":    out.ContentLanguage,
+		"Expires":             out.ExpiresString,
+	} {
+		if aws.ToString(value) != "" {
+			set = append(set, name)
+		}
+	}
+	if len(set) > 0 {
+		slices.Sort(set)
+		return storage.Wrap("verify upload", key, fmt.Errorf("%w: the upload set %s, which its grant does not allow", storage.ErrInvalidOptions, strings.Join(set, ", ")))
+	}
+	return nil
+}
 
 // UploadURL implements storage.DirectUploader: a presigned PutObject whose
 // signature covers the length, the content type, the metadata headers,

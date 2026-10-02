@@ -116,6 +116,17 @@ func Confirm(ctx context.Context, store storage.Storage, key string, p Policy) (
 	if info.Size > p.MaxBytes {
 		return reject(fmt.Errorf("%w: %d bytes, more than %d", ErrTooLarge, info.Size, p.MaxBytes))
 	}
+	// What the store kept beyond ObjectInfo (S3's unsigned standard headers,
+	// such as Content-Encoding): an upload that set any of it is not the
+	// object its grant described.
+	if v, ok := store.(storage.UploadVerifier); ok {
+		switch err := v.VerifyUpload(ctx, key); {
+		case errors.Is(err, storage.ErrInvalidOptions):
+			return reject(fmt.Errorf("%w: %w", ErrMalformed, err))
+		case err != nil:
+			return File{}, err // the check itself failed: nothing is refused yet
+		}
+	}
 	detect := p.Detect
 	if detect == nil {
 		detect = http.DetectContentType
