@@ -9,7 +9,7 @@
 //	curl -X DELETE localhost:8080/files/photo
 //	curl -F file=@photo.jpg localhost:8080/uploads
 //	curl localhost:8080/uploads/<id> -OJ
-//	curl localhost:8080/uploads/<id>/link   # a download link valid for 5 minutes
+//	curl localhost:8080/uploads/<id>/link   # a download link valid for up to 5 minutes
 //
 // The key is built by the server: "files/" + the id in the path (checked
 // first, so a malformed one is a 404, not a server error), or, for a form
@@ -45,7 +45,8 @@ import (
 // maxUpload bounds an upload's size.
 const maxUpload = 10 << 20
 
-// linkLifetime is how long a download link works.
+// linkLifetime is how long a download link works, counted from the start
+// of the second it is made (storage.SignedURL).
 const linkLifetime = 5 * time.Minute
 
 // images is the policy for form uploads: images only, judged by their
