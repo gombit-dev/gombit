@@ -1,8 +1,10 @@
 package upload_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -164,5 +166,45 @@ func TestConfirmReportsAFailedCleanup(t *testing.T) {
 	var cleanup *upload.CleanupError
 	if !errors.Is(err, upload.ErrType) || !errors.As(err, &cleanup) || cleanup.Key != g.Key || !errors.Is(cleanup.Err, deleteErr) {
 		t.Fatalf("Confirm = %v; want ErrType and an *upload.CleanupError for %q", err, g.Key)
+	}
+}
+
+// verifying is a store whose backend can keep more than ObjectInfo says
+// (as S3 keeps unsigned headers), checked by VerifyUpload.
+type verifying struct {
+	*memory.Store
+	err error
+}
+
+func (v verifying) VerifyUpload(context.Context, string) error { return v.err }
+
+// TestConfirmAsksTheStoreToVerify: Confirm refuses, and deletes, an upload
+// the store's VerifyUpload rejects (ErrInvalidOptions: the client set
+// something the grant did not), and returns any other failure of the check
+// without deleting anything.
+func TestConfirmAsksTheStoreToVerify(t *testing.T) {
+	ctx := context.Background()
+	for name, tc := range map[string]struct {
+		err     error
+		want    error
+		deleted bool
+	}{
+		"rejected":    {fmt.Errorf("%w: the upload set Content-Encoding", storage.ErrInvalidOptions), upload.ErrMalformed, true},
+		"unavailable": {storage.ErrUnavailable, storage.ErrUnavailable, false},
+		"clean":       {nil, nil, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			store := verifying{Store: memory.New(), err: tc.err}
+			if _, err := store.Put(ctx, "avatars/a", bytes.NewReader(png), storage.PutOptions{ContentType: "image/png"}); err != nil {
+				t.Fatal(err)
+			}
+			_, err := upload.Confirm(ctx, store, "avatars/a", images)
+			if !errors.Is(err, tc.want) || (tc.want == nil) != (err == nil) {
+				t.Fatalf("Confirm = %v, want %v", err, tc.want)
+			}
+			if exists, _ := storage.Exists(ctx, store, "avatars/a"); exists == tc.deleted {
+				t.Fatalf("after Confirm the object exists = %v, want deleted = %v", exists, tc.deleted)
+			}
+		})
 	}
 }

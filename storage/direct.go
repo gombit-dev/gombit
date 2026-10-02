@@ -36,6 +36,19 @@ type DirectUploader interface {
 	UploadURL(ctx context.Context, key string, opts UploadURLOptions) (UploadRequest, error)
 }
 
+// UploadVerifier is a DirectUploader whose backend can keep more about an
+// uploaded object than ObjectInfo describes, set by the client outside
+// what its grant signed: S3 stores a PUT's Cache-Control,
+// Content-Disposition, Content-Encoding, Content-Language and Expires
+// headers, which SigV4 does not authenticate unless signed, and serves them
+// back. VerifyUpload fails with ErrInvalidOptions when the object at key
+// carries any of that, so the object can be refused before it is used.
+// upload.Confirm calls it. A store without it (local, memory) keeps only
+// what ObjectInfo describes, whatever headers the upload sent.
+type UploadVerifier interface {
+	VerifyUpload(ctx context.Context, key string) error
+}
+
 // UploadURLOptions describes the object a direct upload will store.
 type UploadURLOptions struct {
 	// Expires is how long the upload URL works, counted from the start of
