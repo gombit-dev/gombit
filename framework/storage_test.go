@@ -327,8 +327,8 @@ func TestStorageDirectUploadsThroughTheApp(t *testing.T) {
 	if info, err := app.Storage().Stat(ctx, "uploads/a.txt"); err != nil || info.Size != 5 {
 		t.Fatalf("Stat = %+v, %v", info, err)
 	}
-	if !app.storageRoute.owns("/_storage/uploads/a.txt") || app.storageRoute.owns("/_storagex/a") {
-		t.Fatal("the mounted storage route is not the one the middleware leaves alone")
+	if !app.storageRoute.owns(http.MethodPut, "/_storage/uploads/a.txt") || app.storageRoute.owns(http.MethodPut, "/_storagex/a") || app.storageRoute.owns(http.MethodPost, "/_storage/uploads/a.txt") {
+		t.Fatal("the middleware leaves alone something other than the mounted route's signed uploads")
 	}
 }
 
@@ -363,8 +363,8 @@ func TestStorageRouteIsCSRFExemptInCookieMode(t *testing.T) {
 			t.Errorf("PUT %s = %d, want %d", path, got, want)
 		}
 	}
-	if route.owns("/_storagex/a") || route.owns("/_storage") {
-		t.Fatal("the mounted route claims a path outside it")
+	if route.owns(http.MethodPut, "/_storagex/a") || route.owns(http.MethodPut, "/_storage") || route.owns(http.MethodPost, "/_storage/uploads/a") {
+		t.Fatal("the mounted route claims a request outside its signed uploads")
 	}
 }
 
@@ -393,7 +393,7 @@ func TestWithStorageKeepsProtectionsUnderTheStoragePath(t *testing.T) {
 	if w.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("an oversized JSON POST to an app route under the storage path = %d, want 413: the body limit applies", w.Code)
 	}
-	if app.storageRoute.owns("/_storage/hook") {
+	if app.storageRoute.owns(http.MethodPost, "/_storage/hook") {
 		t.Fatal("WithStorage mounted no storage route, yet the middleware would leave its path alone")
 	}
 }
@@ -438,5 +438,36 @@ func TestStorageRouteSkipsBodyRewritingMiddleware(t *testing.T) {
 	app.Router().ServeHTTP(w, big)
 	if w.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("a large JSON PUT elsewhere = %d, want 413", w.Code)
+	}
+}
+
+// TestAppRoutesUnderTheMountedStoragePathKeepProtections: with the
+// framework's storage route mounted, an application route under the same
+// path with another method (a POST hook) is application code, not a signed
+// upload: the JSON body limit still applies to it, while the route's own
+// signed PUTs stay exempt.
+func TestAppRoutesUnderTheMountedStoragePathKeepProtections(t *testing.T) {
+	cfg := config.Default()
+	cfg.Storage.Driver = config.StorageDriverMemory
+	cfg.Storage.URLSecret = strings.Repeat("u", 32)
+	app := newTestApp(t, WithConfig(cfg))
+	if !app.storageRoute.owns(http.MethodPut, "/_storage/x") {
+		t.Fatal("the storage route was not mounted")
+	}
+	app.Router().POST("/_storage/hook", func(c *gin.Context) {
+		var v map[string]any
+		if err := c.ShouldBindJSON(&v); err != nil {
+			c.Status(http.StatusBadRequest)
+			return
+		}
+		c.Status(http.StatusOK)
+	})
+	body := `{"pad":"` + strings.Repeat("x", int(maxRequestBodyBytes)) + `"}`
+	r := httptest.NewRequest(http.MethodPost, "/_storage/hook", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	app.Router().ServeHTTP(w, r)
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("an oversized JSON POST to an app route under the mounted storage path = %d, want 413", w.Code)
 	}
 }
