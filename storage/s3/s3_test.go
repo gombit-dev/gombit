@@ -288,19 +288,21 @@ func TestPublicURLRuleIsShared(t *testing.T) {
 }
 
 // TestSignedURLLifetimeIsWholeSeconds: every lifetime URLOptions accepts
-// becomes a valid X-Amz-Expires (whole seconds, 1 to 604800), rounded up.
+// is a valid X-Amz-Expires (whole seconds, 1 to 604800), sent as it is; a
+// finer one is refused.
 func TestSignedURLLifetimeIsWholeSeconds(t *testing.T) {
 	ctx := context.Background()
 	s, err := New(ctx, Config{Endpoint: "http://127.0.0.1:9", Region: "us-east-1", Bucket: "b", AccessKeyID: "id", SecretAccessKey: "secret", ForcePathStyle: true})
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := s.URL(ctx, "k", storage.SignedURL(time.Millisecond)); !errors.Is(err, storage.ErrInvalidOptions) {
+		t.Fatalf("URL(1ms) = %v, want ErrInvalidOptions", err)
+	}
 	for ttl, want := range map[time.Duration]string{
-		time.Nanosecond:         "1",
-		time.Millisecond:        "1",
-		1500 * time.Millisecond: "2",
-		time.Minute:             "60",
-		storage.MaxURLExpiry:    "604800",
+		time.Second:          "1",
+		time.Minute:          "60",
+		storage.MaxURLExpiry: "604800",
 	} {
 		u, err := s.URL(ctx, "k", storage.SignedURL(ttl))
 		if err != nil {
@@ -316,17 +318,20 @@ func TestSignedURLLifetimeIsWholeSeconds(t *testing.T) {
 	}
 }
 
-// TestUploadURLLifetimeIsWholeSeconds: a direct upload's presigned PUT gets
-// a valid X-Amz-Expires too (storage.RoundExpiry), however short its
-// lifetime, and the Expires it reports is no earlier than that.
+// TestUploadURLLifetimeIsWholeSeconds: a direct upload's presigned PUT
+// lives a whole number of seconds (a finer lifetime is refused), and the
+// Expires it reports is exactly when S3 stops honoring it: X-Amz-Date plus
+// X-Amz-Expires, read from the URL itself.
 func TestUploadURLLifetimeIsWholeSeconds(t *testing.T) {
 	ctx := context.Background()
 	s, err := New(ctx, Config{Endpoint: "http://127.0.0.1:9", Region: "us-east-1", Bucket: "b", AccessKeyID: "id", SecretAccessKey: "secret", ForcePathStyle: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	before := time.Now()
-	req, err := s.UploadURL(ctx, "uploads/a.png", storage.UploadURLOptions{Expires: time.Millisecond, Size: 10, ContentType: "image/png"})
+	if _, err := s.UploadURL(ctx, "uploads/a.png", storage.UploadURLOptions{Expires: time.Millisecond, Size: 10, ContentType: "image/png"}); !errors.Is(err, storage.ErrInvalidOptions) {
+		t.Fatalf("a 1ms upload URL = %v, want ErrInvalidOptions", err)
+	}
+	req, err := s.UploadURL(ctx, "uploads/a.png", storage.UploadURLOptions{Expires: time.Second, Size: 10, ContentType: "image/png"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -334,10 +339,12 @@ func TestUploadURLLifetimeIsWholeSeconds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := u.Query().Get("X-Amz-Expires"); got != "1" {
-		t.Fatalf("a 1ms upload URL: X-Amz-Expires = %q, want \"1\"", got)
+	q := u.Query()
+	date, err := time.Parse("20060102T150405Z", q.Get("X-Amz-Date"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if req.Expires.Before(before.Truncate(time.Second).Add(time.Second)) {
-		t.Fatalf("Expires = %v, earlier than the second the URL lives", req.Expires)
+	if q.Get("X-Amz-Expires") != "1" || !req.Expires.Equal(date.Add(time.Second)) {
+		t.Fatalf("X-Amz-Expires = %q, Expires = %v; want 1 and X-Amz-Date+1s (%v)", q.Get("X-Amz-Expires"), req.Expires, date.Add(time.Second))
 	}
 }
