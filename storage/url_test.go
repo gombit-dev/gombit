@@ -65,3 +65,21 @@ func TestURLLifetimeIsBounded(t *testing.T) {
 		t.Fatalf("over MaxURLExpiry = %v", err)
 	}
 }
+
+// TestRoundExpiry: a lifetime is rounded up to a whole second, never down,
+// at least one second, and MaxURLExpiry stays what it is.
+func TestRoundExpiry(t *testing.T) {
+	for in, want := range map[time.Duration]time.Duration{
+		time.Nanosecond:                         time.Second,
+		time.Millisecond:                        time.Second,
+		time.Second:                             time.Second,
+		1500 * time.Millisecond:                 2 * time.Second,
+		time.Minute:                             time.Minute,
+		storage.MaxURLExpiry - time.Millisecond: storage.MaxURLExpiry,
+		storage.MaxURLExpiry:                    storage.MaxURLExpiry,
+	} {
+		if got := storage.RoundExpiry(in); got != want {
+			t.Errorf("RoundExpiry(%s) = %s, want %s", in, got, want)
+		}
+	}
+}
