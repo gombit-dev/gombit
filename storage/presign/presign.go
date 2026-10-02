@@ -21,7 +21,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"io"
 	"math"
 	"mime"
@@ -29,7 +28,6 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/gombit-dev/gombit/contract"
@@ -289,7 +287,6 @@ func (s *Signer) Verify(key string, q url.Values) error {
 // exactly the signed length (403 otherwise, as S3 refuses a request that
 // differs from its presigned one). It answers 200 with the new ETag.
 func Handler(store storage.Storage, s *Signer) http.Handler {
-	locks := new(keyLocks)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodPut {
 			w.Header().Set("Allow", "GET, HEAD, PUT")
@@ -303,7 +300,7 @@ func Handler(store storage.Storage, s *Signer) http.Handler {
 		}
 		q := r.URL.Query()
 		if r.Method == http.MethodPut {
-			serveUpload(w, r, store, s, locks, key, q)
+			serveUpload(w, r, store, s, key, q)
 			return
 		}
 		if err := s.Verify(key, q); err != nil {
@@ -352,24 +349,14 @@ func Handler(store storage.Storage, s *Signer) http.Handler {
 	})
 }
 
-// keyLocks serializes uploads per key (striped), so two uses of one grant
-// in this process cannot both find the key empty.
-type keyLocks [64]sync.Mutex
-
-func (l *keyLocks) lock(key string) func() {
-	h := fnv.New32a()
-	_, _ = io.WriteString(h, key)
-	m := &l[h.Sum32()%uint32(len(l))]
-	m.Lock()
-	return m.Unlock
-}
-
-// serveUpload stores the body of a PUT to key's upload URL, once: a key
-// that already holds an object is a D10 409 conflict (S3 answers the
-// grant's "If-None-Match: *" with 412), so a checked upload cannot be replaced through its
-// grant. (Processes sharing a local root each serialize their own
-// uploads; two using one grant at the same instant could both store.)
-func serveUpload(w http.ResponseWriter, r *http.Request, store storage.Storage, s *Signer, locks *keyLocks, key string, q url.Values) {
+// serveUpload stores the body of a PUT to key's upload URL, once: it
+// stores with PutOptions.IfAbsent, so a key that already holds an object is
+// a D10 409 conflict (S3 answers the grant's "If-None-Match: *" with 412),
+// and a checked upload cannot be replaced through its grant. The check and
+// the store are one atomic step in the driver, for every handler and every
+// process sharing the store: of two uses of one grant at the same instant,
+// one stores and the other gets the 409.
+func serveUpload(w http.ResponseWriter, r *http.Request, store storage.Storage, s *Signer, key string, q url.Values) {
 	g, err := s.verifyUpload(key, q)
 	if err != nil {
 		writeError(w, r, contract.Authorization("The upload link is invalid or has expired."))
@@ -383,20 +370,16 @@ func serveUpload(w http.ResponseWriter, r *http.Request, store storage.Storage, 
 	if r.Body != nil {
 		body = r.Body
 	}
-	defer locks.lock(key)()
-	switch exists, err := storage.Exists(r.Context(), store, key); {
-	case err != nil:
-		writeError(w, r, storage.MapError(r.Context(), err, "file not found", "could not store the file"))
-		return
-	case exists:
-		writeError(w, r, contract.New(contract.CategoryConflict, "This upload link has been used."))
-		return
-	}
 	info, err := store.Put(r.Context(), key, body, storage.PutOptions{
 		ContentType: g.contentType,
 		Size:        storage.KnownSize(g.size),
 		Metadata:    g.metadata,
+		IfAbsent:    true,
 	})
+	if errors.Is(err, storage.ErrExists) {
+		writeError(w, r, contract.New(contract.CategoryConflict, "This upload link has been used."))
+		return
+	}
 	if err != nil {
 		writeError(w, r, storage.MapError(r.Context(), err, "file not found", "could not store the file"))
 		return

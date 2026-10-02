@@ -327,16 +327,8 @@ func TestStorageDirectUploadsThroughTheApp(t *testing.T) {
 	if info, err := app.Storage().Stat(ctx, "uploads/a.txt"); err != nil || info.Size != 5 {
 		t.Fatalf("Stat = %+v, %v", info, err)
 	}
-	if got := storageRoutePrefixes(cfg); len(got) != 1 || got[0] != "/_storage/" {
-		t.Fatalf("CSRF-exempt prefixes = %v", got)
-	}
-	cfg.Storage.Local.URL = "https://files.example.com/blobs"
-	if got := storageRoutePrefixes(cfg); len(got) != 1 || got[0] != "/blobs/" {
-		t.Fatalf("CSRF-exempt prefixes for an absolute URL = %v", got)
-	}
-	cfg.Storage.Driver = config.StorageDriverS3
-	if got := storageRoutePrefixes(cfg); got != nil {
-		t.Fatalf("s3 (no app route) exempts %v", got)
+	if !app.storageRoute.owns("/_storage/uploads/a.txt") || app.storageRoute.owns("/_storagex/a") {
+		t.Fatal("the mounted storage route is not the one the middleware leaves alone")
 	}
 }
 
@@ -348,19 +340,61 @@ func TestStorageRouteIsCSRFExemptInCookieMode(t *testing.T) {
 	cfg.Environment = config.EnvironmentTest
 	cfg.Auth.JWTSecret = strings.Repeat("j", 32)
 	cfg.Auth.Mode = config.AuthModeCookie
-	router, err := newRouter(cfg, nil, nil, func(c *gin.Context) { c.Status(http.StatusOK) }, nil)
+	router, route, err := newRouter(cfg, nil, nil, func(c *gin.Context) { c.Status(http.StatusOK) }, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ok := func(c *gin.Context) { c.Status(http.StatusOK) }
 	router.PUT("/_storage/*key", ok)
 	router.PUT("/api/things/:id", ok)
-	for path, want := range map[string]int{"/_storage/uploads/a": http.StatusOK, "/api/things/1": http.StatusForbidden} {
+	// Before the storage route is mounted, a route under its path is an
+	// ordinary route: CSRF applies.
+	put := func(path string) int {
 		w := httptest.NewRecorder()
 		router.ServeHTTP(w, httptest.NewRequest(http.MethodPut, path, strings.NewReader("x")))
-		if w.Code != want {
-			t.Errorf("PUT %s = %d, want %d", path, w.Code, want)
+		return w.Code
+	}
+	if got := put("/_storage/uploads/a"); got != http.StatusForbidden {
+		t.Fatalf("PUT under an unmounted storage path = %d, want 403: CSRF applies", got)
+	}
+	route.mounted("/_storage")
+	for path, want := range map[string]int{"/_storage/uploads/a": http.StatusOK, "/api/things/1": http.StatusForbidden} {
+		if got := put(path); got != want {
+			t.Errorf("PUT %s = %d, want %d", path, got, want)
 		}
+	}
+	if route.owns("/_storagex/a") || route.owns("/_storage") {
+		t.Fatal("the mounted route claims a path outside it")
+	}
+}
+
+// TestWithStorageKeepsProtectionsUnderTheStoragePath: an app that brings
+// its own store (WithStorage) gets no framework storage route, so a route
+// it registers under GOMBIT_STORAGE_LOCAL_URL is an ordinary route: the
+// JSON body limit (and CSRF, and sanitization) still apply to it.
+func TestWithStorageKeepsProtectionsUnderTheStoragePath(t *testing.T) {
+	cfg := config.Default()
+	cfg.Storage.Driver = config.StorageDriverMemory
+	cfg.Storage.URLSecret = strings.Repeat("u", 32)
+	app := newTestApp(t, WithConfig(cfg), WithStorage(memory.New()))
+	app.Router().POST("/_storage/hook", func(c *gin.Context) {
+		var v map[string]any
+		if err := c.ShouldBindJSON(&v); err != nil {
+			c.Status(http.StatusBadRequest)
+			return
+		}
+		c.Status(http.StatusOK)
+	})
+	body := `{"pad":"` + strings.Repeat("x", int(maxRequestBodyBytes)) + `"}`
+	r := httptest.NewRequest(http.MethodPost, "/_storage/hook", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	app.Router().ServeHTTP(w, r)
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("an oversized JSON POST to an app route under the storage path = %d, want 413: the body limit applies", w.Code)
+	}
+	if app.storageRoute.owns("/_storage/hook") {
+		t.Fatal("WithStorage mounted no storage route, yet the middleware would leave its path alone")
 	}
 }
 

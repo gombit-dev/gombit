@@ -72,6 +72,7 @@ type App struct {
 	db                 *database.DB
 	logger             *zap.Logger
 	router             *gin.Engine
+	storageRoute       *storageRoute // the storage route New mounted, if any (nil with WithRouter)
 	api                huma.API
 	startHooks         []Hook
 	stopHooks          []Hook
@@ -144,11 +145,12 @@ func New(options ...Option) (*App, error) {
 		})
 	}
 	if app.router == nil {
-		router, err := newRouter(app.cfg, app.csrfExemptPaths, app.rawBodyPaths, app.handleReadyz, app.writeJobMetrics)
+		router, route, err := newRouter(app.cfg, app.csrfExemptPaths, app.rawBodyPaths, app.handleReadyz, app.writeJobMetrics)
 		if err != nil {
 			return nil, err
 		}
 		app.router = router
+		app.storageRoute = route
 	} else if err := configureTrustedProxies(app.router, app.cfg.HTTP.TrustedProxies); err != nil {
 		return nil, err
 	}
@@ -198,7 +200,7 @@ func New(options ...Option) (*App, error) {
 			// The local and memory drivers' URLs, served by the app. An app
 			// that passes its own store (WithStorage) mounts presign.Handler
 			// itself if it wants them.
-			if err := mountStorageURLs(app.router, store, signer); err != nil {
+			if err := mountStorageURLs(app.router, store, signer, app.storageRoute); err != nil {
 				return nil, err
 			}
 		}
@@ -727,15 +729,16 @@ func syncLogger(logger *zap.Logger) error {
 	return nil
 }
 
-func newRouter(cfg config.Config, csrfExemptPaths, rawBodyPaths []string, readyz gin.HandlerFunc, extraMetrics func(context.Context, io.Writer)) (*gin.Engine, error) {
+func newRouter(cfg config.Config, csrfExemptPaths, rawBodyPaths []string, readyz gin.HandlerFunc, extraMetrics func(context.Context, io.Writer)) (*gin.Engine, *storageRoute, error) {
 	router := gin.New()
 	enableMethodNotAllowed(router)
 	if err := configureTrustedProxies(router, cfg.HTTP.TrustedProxies); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	metrics := newHTTPMetrics()
-	router.Use(middlewareHandlers(runtimeMiddlewareStack(cfg, metrics, csrfExemptPaths, rawBodyPaths))...)
+	route := new(storageRoute) // set only if New mounts the storage route
+	router.Use(middlewareHandlers(runtimeMiddlewareStack(cfg, metrics, csrfExemptPaths, rawBodyPaths, route))...)
 	// Operational probes (HOST-2 / ADR-015). Raw Gin, out of OpenAPI — like
 	// /metrics and the admin SPA. /livez is liveness (process up); /readyz is
 	// readiness (safe to receive traffic). Hosts gate traffic on /readyz.
@@ -755,7 +758,7 @@ func newRouter(cfg config.Config, csrfExemptPaths, rawBodyPaths []string, readyz
 		}
 		c.Data(http.StatusOK, "text/plain; version=0.0.4; charset=utf-8", []byte(b.String()))
 	})
-	return router, nil
+	return router, route, nil
 }
 
 // addWorkerQueues records queues a worker in this process consumes, for the
@@ -903,7 +906,7 @@ func configureTrustedProxies(engine *gin.Engine, proxies []string) error {
 	return nil
 }
 
-func runtimeMiddlewareStack(cfg config.Config, metrics *httpMetrics, csrfExemptPaths, rawBodyPaths []string) []namedMiddleware {
+func runtimeMiddlewareStack(cfg config.Config, metrics *httpMetrics, csrfExemptPaths, rawBodyPaths []string, route *storageRoute) []namedMiddleware {
 	stack := []namedMiddleware{
 		{name: "recovery", handler: gin.Recovery()},
 		// request_context also imposes the per-handler timeout (issue #268): the
@@ -929,7 +932,7 @@ func runtimeMiddlewareStack(cfg config.Config, metrics *httpMetrics, csrfExemptP
 		// middleware is deferred. See requestBodyLimitMiddleware.
 		// The storage route's direct uploads are bounded by their signed
 		// length instead, and must be stored byte for byte.
-		{name: "request_body_limit", handler: skipPrefixes(storageRoutePrefixes(cfg), requestBodyLimitMiddleware())},
+		{name: "request_body_limit", handler: skipStorageRoute(route, requestBodyLimitMiddleware())},
 	}
 	// Input sanitization is opt-in (issue #271 / PERF-13). The default pipeline
 	// does not rewrite request input: XSS is an output-encoding concern — the
@@ -943,7 +946,7 @@ func runtimeMiddlewareStack(cfg config.Config, metrics *httpMetrics, csrfExemptP
 	// call framework.SanitizeHTML from the handler instead. See
 	// docs/adr/018-input-sanitization-opt-in.md.
 	if cfg.Security.SanitizeInput {
-		stack = append(stack, namedMiddleware{name: "xss", handler: skipPrefixes(storageRoutePrefixes(cfg), xssMiddleware(rawBodyPaths...))})
+		stack = append(stack, namedMiddleware{name: "xss", handler: skipStorageRoute(route, xssMiddleware(rawBodyPaths...))})
 	}
 	// CSRF must run as global Gin middleware, not just on the auth Huma
 	// routes: it covers every state-changing request (M5-3), including
@@ -952,7 +955,7 @@ func runtimeMiddlewareStack(cfg config.Config, metrics *httpMetrics, csrfExemptP
 	// needs its raw body cannot do the double-submit either.
 	if cfg.Auth.Enabled() && cfg.Auth.EffectiveMode() == config.AuthModeCookie {
 		csrfExempt := append(append([]string{}, csrfExemptPaths...), rawBodyPaths...)
-		stack = append(stack, namedMiddleware{name: "csrf", handler: auth.CSRFMiddlewareExempting(cfg, csrfExempt, storageRoutePrefixes(cfg))})
+		stack = append(stack, namedMiddleware{name: "csrf", handler: skipStorageRoute(route, auth.CSRFMiddleware(cfg, csrfExempt...))})
 	}
 	// The per-handler timeout is opt-in (issue #270 / PERF-12): HTTP.RequestTimeout
 	// defaults to 0. There is no separate request_timeout layer to omit — #268

@@ -2,14 +2,20 @@ package s3
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 
@@ -346,5 +352,125 @@ func TestUploadURLLifetimeIsWholeSeconds(t *testing.T) {
 	}
 	if q.Get("X-Amz-Expires") != "1" || !req.Expires.Equal(date.Add(time.Second)) {
 		t.Fatalf("X-Amz-Expires = %q, Expires = %v; want 1 and X-Amz-Date+1s (%v)", q.Get("X-Amz-Expires"), req.Expires, date.Add(time.Second))
+	}
+}
+
+// TestDocumentedCORSPolicyAllowsTheUpload: the CORS rule docs/storage.md
+// tells users to put on the bucket allows the browser upload a grant
+// describes. A browser preflights every request header that is not
+// CORS-safelisted (Fetch), and S3 refuses the preflight unless the rule
+// allows each one (AllowedHeaders, "*" a wildcard suffix) and the method:
+// this makes that same decision for the headers UploadURL returns.
+func TestDocumentedCORSPolicyAllowsTheUpload(t *testing.T) {
+	doc, err := os.ReadFile("../../docs/storage.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile("(?s)CORS rule.*?```json\n(.*?)```").FindSubmatch(doc)
+	if m == nil {
+		t.Fatal("docs/storage.md has no CORS rule in a json block")
+	}
+	var rules []struct {
+		AllowedMethods []string
+		AllowedHeaders []string
+	}
+	if err := json.Unmarshal(m[1], &rules); err != nil || len(rules) != 1 {
+		t.Fatalf("the documented CORS rule does not parse: %v", err)
+	}
+	rule := rules[0]
+	allowed := func(header string) bool {
+		h := strings.ToLower(header)
+		for _, a := range rule.AllowedHeaders {
+			a = strings.ToLower(a)
+			if a == h || (strings.HasSuffix(a, "*") && strings.HasPrefix(h, strings.TrimSuffix(a, "*"))) {
+				return true
+			}
+		}
+		return false
+	}
+	safelisted := func(name, value string) bool { // Fetch's CORS-safelisted request headers
+		switch strings.ToLower(name) {
+		case "accept", "accept-language", "content-language":
+			return true
+		case "content-type":
+			mt, _, _ := strings.Cut(strings.ToLower(value), ";")
+			return mt == "application/x-www-form-urlencoded" || mt == "multipart/form-data" || mt == "text/plain"
+		}
+		return false
+	}
+	ctx := context.Background()
+	s, err := New(ctx, Config{Endpoint: "http://127.0.0.1:9", Region: "us-east-1", Bucket: "b", AccessKeyID: "id", SecretAccessKey: "secret", ForcePathStyle: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := s.UploadURL(ctx, "uploads/a.png", storage.UploadURLOptions{Expires: time.Minute, Size: 10, ContentType: "image/png", Metadata: map[string]string{"filename": "a.png"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(rule.AllowedMethods, func(m string) bool { return strings.EqualFold(m, req.Method) }) {
+		t.Errorf("the documented rule does not allow %s", req.Method)
+	}
+	if req.Header["If-None-Match"] == "" {
+		t.Fatalf("the grant has no If-None-Match header (headers %v): the test would prove nothing", req.Header)
+	}
+	for name, value := range req.Header {
+		if !safelisted(name, value) && !allowed(name) {
+			t.Errorf("the grant needs %s, which a browser preflights and the documented CORS rule does not allow", name)
+		}
+	}
+}
+
+// TestUploadURLSizeLimit: a direct upload is one PutObject, so UploadURL
+// grants at most S3's single-PUT limit, 5 GiB, and refuses a byte more
+// rather than signing a grant that can never succeed.
+func TestUploadURLSizeLimit(t *testing.T) {
+	ctx := context.Background()
+	s, err := New(ctx, Config{Endpoint: "http://127.0.0.1:9", Region: "us-east-1", Bucket: "b", AccessKeyID: "id", SecretAccessKey: "secret", ForcePathStyle: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.UploadURL(ctx, "uploads/big", storage.UploadURLOptions{Expires: time.Minute, Size: MaxUploadURLBytes, ContentType: "application/octet-stream"}); err != nil {
+		t.Fatalf("a 5 GiB direct upload = %v, want a grant", err)
+	}
+	if _, err := s.UploadURL(ctx, "uploads/big", storage.UploadURLOptions{Expires: time.Minute, Size: MaxUploadURLBytes + 1, ContentType: "application/octet-stream"}); !errors.Is(err, storage.ErrInvalidOptions) {
+		t.Fatalf("a direct upload one byte over 5 GiB = %v, want ErrInvalidOptions", err)
+	}
+}
+
+// expiringCredentials are temporary credentials (an IAM role's, say) that
+// expire at a set time.
+type expiringCredentials struct{ expires time.Time }
+
+func (e expiringCredentials) Retrieve(context.Context) (aws.Credentials, error) {
+	return aws.Credentials{AccessKeyID: "id", SecretAccessKey: "secret", SessionToken: "token", CanExpire: true, Expires: e.expires}, nil
+}
+
+// TestUploadURLExpiresWithTheCredentials: a grant signed with temporary
+// credentials stops working when they expire, so the Expires it reports is
+// no later than that, however long the URL itself was asked to live; with
+// long-lived credentials it is the URL's own expiry.
+func TestUploadURLExpiresWithTheCredentials(t *testing.T) {
+	ctx := context.Background()
+	s, err := New(ctx, Config{Endpoint: "http://127.0.0.1:9", Region: "us-east-1", Bucket: "b", AccessKeyID: "id", SecretAccessKey: "secret", ForcePathStyle: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := storage.UploadURLOptions{Expires: 15 * time.Minute, Size: 10, ContentType: "image/png"}
+	long, err := s.UploadURL(ctx, "uploads/a.png", opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if left := time.Until(long.Expires); left < 14*time.Minute {
+		t.Fatalf("with long-lived credentials Expires is %v away, want the URL's 15 minutes", left)
+	}
+	soon := time.Now().Add(30 * time.Second).Truncate(time.Second)
+	s.client = awss3.New(s.client.Options(), func(o *awss3.Options) { o.Credentials = aws.NewCredentialsCache(expiringCredentials{soon}) })
+	s.presign = awss3.NewPresignClient(s.client)
+	short, err := s.UploadURL(ctx, "uploads/a.png", opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if short.Expires.After(soon) {
+		t.Fatalf("Expires = %v, after the signing credentials expire (%v): the URL dies with them", short.Expires, soon)
 	}
 }
