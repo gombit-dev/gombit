@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/gombit-dev/gombit/contract"
+	"github.com/gombit-dev/gombit/internal/urlbase"
 	"github.com/gombit-dev/gombit/storage"
 )
 
@@ -80,18 +81,11 @@ type Signer struct {
 
 // New returns a Signer for cfg.
 func New(cfg Config) (*Signer, error) {
-	u, err := url.Parse(cfg.Base)
+	// The rule config.Validate applies to GOMBIT_STORAGE_LOCAL_URL too.
+	path, problem := urlbase.Base(cfg.Base)
 	switch {
-	case err != nil:
-		return nil, fmt.Errorf("presign: Base %q: %w", cfg.Base, err)
-	case u.RawQuery != "" || u.Fragment != "" || strings.HasSuffix(cfg.Base, "/") || u.User != nil:
-		return nil, fmt.Errorf("presign: Base %q: want a URL or path without a query, fragment, credentials, or trailing '/'", cfg.Base)
-	case u.IsAbs() && (u.Scheme != "http" && u.Scheme != "https" || u.Host == ""):
-		return nil, fmt.Errorf("presign: Base %q: an absolute Base must be http(s)://host/path", cfg.Base)
-	case !u.IsAbs() && (u.Host != "" || !strings.HasPrefix(cfg.Base, "/")):
-		return nil, fmt.Errorf("presign: Base %q: a relative Base must be a path starting with '/'", cfg.Base)
-	case u.Path == "" || u.EscapedPath() != u.Path:
-		return nil, fmt.Errorf("presign: Base %q: needs a plain path to serve under, such as /_storage", cfg.Base)
+	case problem != "":
+		return nil, fmt.Errorf("presign: Base %q: %s", cfg.Base, problem)
 	case len(cfg.Secret) < MinSecretBytes:
 		return nil, fmt.Errorf("presign: Secret is %d bytes; at least %d are needed", len(cfg.Secret), MinSecretBytes)
 	}
@@ -102,7 +96,7 @@ func New(cfg Config) (*Signer, error) {
 	if now == nil {
 		now = time.Now
 	}
-	return &Signer{base: cfg.Base, path: u.Path, secret: append([]byte(nil), cfg.Secret...), public: cfg.PublicPrefix, scope: cfg.Scope, now: now}, nil
+	return &Signer{base: cfg.Base, path: path, secret: append([]byte(nil), cfg.Secret...), public: cfg.PublicPrefix, scope: cfg.Scope, now: now}, nil
 }
 
 // Path is the URL path Handler serves under (the path of Base).
@@ -248,12 +242,19 @@ func (s *Signer) verifyUpload(key string, q url.Values) (grant, error) {
 	return g, nil
 }
 
-// Verify reports whether a request for key with query q may read it: yes
-// for a public key; for a private one, only with an unexpired signature
-// the Signer made (ErrExpired, ErrSignature).
+// Verify reports whether a request for key with query q may read it: a
+// request carrying a signature (or an expiry) only if it is an unexpired
+// signature the Signer made for key (ErrExpired, ErrSignature), whether
+// key is public or not; an unsigned request only for a public key.
 func (s *Signer) Verify(key string, q url.Values) error {
-	if storage.IsPublic(s.public, key) {
-		return nil
+	// A public key needs no signature, but a URL that carries one is a
+	// signed URL, and holds to what it says: it expires, and a forged one
+	// fails. (The same key without the query still reads the object: it
+	// is public.)
+	if _, signed := q["signature"]; !signed {
+		if _, signed = q["expires"]; !signed && storage.IsPublic(s.public, key) {
+			return nil
+		}
 	}
 	e, sig := q.Get("expires"), q.Get("signature")
 	if len(q["expires"]) != 1 || len(q["signature"]) != 1 {

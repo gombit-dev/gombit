@@ -259,3 +259,29 @@ func TestPrefixRuleIsShared(t *testing.T) {
 		}
 	}
 }
+
+// TestPublicURLRuleIsShared: config validation and New accept exactly the
+// same PublicURL, in both directions: one rule.
+func TestPublicURLRuleIsShared(t *testing.T) {
+	ctx := context.Background()
+	for publicURL, valid := range map[string]bool{
+		"":                                true,
+		"https://cdn.example.com":         true,
+		"https://cdn.example.com/assets":  true,
+		"http://127.0.0.1:9000/bucket":    true,
+		"https://cdn.example.com/":        false,
+		"https://cdn.example.com/a%2Fb":   false,
+		"cdn.example.com":                 false,
+		"/assets":                         false,
+		"ftp://cdn.example.com":           false,
+		"https://cdn.example.com?x=1":     false,
+		"https://cdn.example.com#f":       false,
+		"https://user:pw@cdn.example.com": false,
+	} {
+		_, newErr := New(ctx, Config{Bucket: "b", Region: "us-east-1", PublicURL: publicURL})
+		cfgErr := config.ValidateStorage(config.StorageConfig{Driver: config.StorageDriverS3, S3: config.S3StorageConfig{Bucket: "b", Region: "us-east-1", PublicURL: publicURL}})
+		if (newErr == nil) != valid || (cfgErr == nil) != valid {
+			t.Errorf("PublicURL %q: New = %v, config = %v; want valid = %v", publicURL, newErr, cfgErr, valid)
+		}
+	}
+}
