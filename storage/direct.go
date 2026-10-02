@@ -15,7 +15,8 @@ import (
 type DirectUploader interface {
 	// UploadURL returns the request that stores exactly one object: under
 	// key, of exactly opts.Size bytes, with opts.ContentType and
-	// opts.Metadata, until opts.Expires has passed. The backend refuses a
+	// opts.Metadata, until opts.Expires after the start of the second it is
+	// signed in (the model of storage.SignedURL). The backend refuses a
 	// request that differs in any of these (a different length, type,
 	// metadata, or key), so the grant is scoped to that one object. It
 	// stores only where nothing is stored yet (S3 answers 412, the app's
@@ -29,8 +30,11 @@ type DirectUploader interface {
 
 // UploadURLOptions describes the object a direct upload will store.
 type UploadURLOptions struct {
-	// Expires is how long the upload URL works: positive, and at most
-	// MaxURLExpiry. Keep it short (minutes): the URL is a bearer grant.
+	// Expires is how long the upload URL works, counted from the start of
+	// the second it is signed in, as for SignedURL (so for more than
+	// Expires minus a second, and at most Expires): a positive whole number
+	// of seconds, at most MaxURLExpiry. Keep it short (minutes): the URL is
+	// a bearer grant.
 	Expires time.Duration
 	// Size is the exact length the client will upload, in bytes (zero for
 	// an empty object). A request of any other length is refused.

@@ -9,7 +9,7 @@
 //	curl -X DELETE localhost:8080/files/photo
 //	curl -F file=@photo.jpg localhost:8080/uploads
 //	curl localhost:8080/uploads/<id> -OJ
-//	curl localhost:8080/uploads/<id>/link   # a download link valid for 5 minutes
+//	curl localhost:8080/uploads/<id>/link   # a download link valid for up to 5 minutes
 //
 // A direct upload sends the bytes straight to storage, not through the app:
 //
@@ -70,7 +70,8 @@ const maxUpload = 10 << 20
 // Never use a fixed secret outside development.
 const devURLSecret = "dev-only-storage-example-url-signing-secret" // #nosec G101 -- a documented development-only value.
 
-// linkLifetime is how long a download link works.
+// linkLifetime is how long a download link works, counted from the start
+// of the second it is made (storage.SignedURL).
 const linkLifetime = 5 * time.Minute
 
 // images is the policy for form uploads: images only, judged by their
