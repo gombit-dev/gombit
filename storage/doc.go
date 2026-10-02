@@ -23,8 +23,8 @@
 //     rejects any key that could climb out of a prefix ("..", a leading
 //     '/', a backslash).
 //   - Classified errors. ErrNotFound, ErrInvalidKey, ErrInvalidOptions,
-//     ErrSizeMismatch, ErrUnsupported, ErrUnavailable, and
-//     ErrUnknownOutcome match with
+//     ErrSizeMismatch, ErrUnsupported, ErrUnavailable, ErrUnknownOutcome,
+//     and ErrExists match with
 //     errors.Is on every driver, and MapError turns them into D10 errors
 //     for a handler.
 //

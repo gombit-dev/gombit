@@ -111,16 +111,23 @@ version.
   - `examples/storage` gains `GET /uploads/:id/link`
     ([#327](https://github.com/gombit-dev/gombit/issues/327)).
 - Direct uploads (STORAGE-6):
-  - `upload.Authorize` grants a client one upload straight to storage: a
-    signed `PUT` of exactly the declared size and type, with the metadata,
-    under a generated key, for `Policy.GrantExpiry` (15 minutes);
+  - `upload.Authorize` grants a client one signed upload: a `PUT` of
+    exactly the declared size and type, with the metadata, under a generated
+    key, for `Policy.GrantExpiry` (15 minutes), straight to S3, or to the
+    app's storage route for the local and memory drivers;
+  - `PutOptions.IfAbsent` and `storage.ErrExists` (409): a `Put` that stores
+    only where nothing is stored, atomically on every driver (a no-replace
+    rename locally, `If-None-Match: *` on S3), which keeps a grant single-use
+    across app processes;
   - `upload.Confirm` then checks the stored object's size and its type (as
     detected from its bytes, which must be the declared type), and deletes
     what fails;
   - the contract is the optional `storage.DirectUploader`, implemented by
     `storage/s3` (a presigned `PutObject` with the length, type and metadata
-    signed) and by local and memory (signed `PUT`s to the app's
-    `/_storage` route, exempt from cookie-mode CSRF);
+    signed, at most 5 GiB, whose `Expires` accounts for expiring
+    credentials) and by local and memory (signed `PUT`s to the app's
+    `/_storage` route, which the framework exempts from cookie-mode CSRF,
+    the body limit and sanitization only when it mounted that route);
   - `examples/storage` gains `POST /uploads/direct` and
     `POST /uploads/direct/:id/confirm`
     ([#328](https://github.com/gombit-dev/gombit/issues/328)).

@@ -103,6 +103,15 @@ type PutOptions struct {
 	// carries only ASCII (S3 headers) encodes values reversibly. Put copies
 	// the map: changing it afterwards changes nothing stored.
 	Metadata map[string]string
+
+	// IfAbsent stores the object only where no object is stored under key:
+	// when one is, Put fails with ErrExists and leaves it as it is. The
+	// check and the store are one atomic step on every driver, against
+	// concurrent Puts from this process and from any other sharing the
+	// backend (the local driver publishes with a rename that refuses to
+	// replace; S3 with a conditional write, "If-None-Match: *"), so of two
+	// IfAbsent Puts to one empty key exactly one succeeds.
+	IfAbsent bool
 }
 
 // ObjectInfo describes a stored object.

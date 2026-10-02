@@ -22,11 +22,12 @@
 // file's bytes); Save applies the same policy to any reader. MapError turns
 // their errors into D10 errors for a handler.
 //
-// Authorize and Confirm are the direct-upload flow, for files too large to
-// pass through the application: Authorize grants the client one upload
-// straight to the store (a signed PUT of a declared size and type, under a
-// generated key); the client uploads; Confirm then checks what arrived,
-// by its bytes, and deletes it if it breaks the policy.
+// Authorize and Confirm are the direct-upload flow: Authorize grants the
+// client one signed upload (a PUT of a declared size and type, under a
+// generated key, to S3 directly or to the app's storage route for the
+// local and memory drivers; see storage.DirectUploader); the client
+// uploads; Confirm then checks what arrived, by its bytes, and deletes it
+// if it breaks the policy.
 package upload
 
 import (

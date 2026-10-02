@@ -6,12 +6,20 @@ import (
 	"time"
 )
 
-// DirectUploader is a Storage a client can upload to directly, without
-// the object's bytes passing through the application: the application
-// asks for an upload URL (after deciding the client may upload), hands it
-// to the client, and the client sends the bytes to the backend. The local,
-// memory (with a presign.Signer), and S3 drivers implement it; UploadURL
-// answers ErrUnsupported for a store that does not.
+// DirectUploader is a Storage that grants signed uploads: a request a
+// client makes on its own, authorized by the grant alone (no session, no
+// application credentials), that stores exactly one object. The
+// application asks for one (after deciding the client may upload), hands
+// it to the client, and the client sends the bytes.
+//
+// Where the bytes go depends on the driver, and only S3 keeps them out of
+// the application process. S3 grants a presigned PUT to the bucket: the
+// bytes go straight to S3. The local and memory drivers (with a
+// presign.Signer) grant a PUT to the application's own storage route
+// (presign.Handler, mounted by framework.New): the bytes pass through the
+// application process, streamed into the store, but not through the
+// application's handlers or its request parsing. UploadURL answers
+// ErrUnsupported for a store that grants neither.
 type DirectUploader interface {
 	// UploadURL returns the request that stores exactly one object: under
 	// key, of exactly opts.Size bytes, with opts.ContentType and
@@ -51,7 +59,10 @@ type UploadURLOptions struct {
 // UploadRequest is a direct upload for a client to make: send Method to
 // URL with exactly the headers in Header and the object's bytes as the
 // body, before Expires. The client's HTTP library sets Content-Length from
-// the body (a browser's fetch does; it cannot be set by hand).
+// the body (a browser's fetch does; it cannot be set by hand). Expires is
+// when the grant stops working: its lifetime's end, or earlier on S3 when
+// the credentials it was signed with expire first (temporary credentials,
+// such as an IAM role's), since the grant ends with them.
 type UploadRequest struct {
 	Method  string            `json:"method"`
 	URL     string            `json:"url"`

@@ -5,9 +5,9 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"fmt"
-	"net/url"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -157,7 +157,7 @@ func checkStorageURLPath(path, apiPrefix string) error {
 // mountStorageURLs serves the objects of store at signer's URLs on router
 // (GET and HEAD under signer.Path()). A path the router cannot take (it
 // conflicts with a route already there) is an error, not a panic.
-func mountStorageURLs(router *gin.Engine, store storage.Storage, signer *presign.Signer) (err error) {
+func mountStorageURLs(router *gin.Engine, store storage.Storage, signer *presign.Signer, route *storageRoute) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("framework: GOMBIT_STORAGE_LOCAL_URL %q conflicts with a route: %v", signer.Path(), r)
@@ -167,37 +167,46 @@ func mountStorageURLs(router *gin.Engine, store storage.Storage, signer *presign
 	router.GET(signer.Path()+"/*key", h)
 	router.HEAD(signer.Path()+"/*key", h)
 	router.PUT(signer.Path()+"/*key", h) // direct uploads
+	route.mounted(signer.Path())
 	return nil
 }
 
-// storageRoutePrefixes is the storage route's prefix, which the runtime
-// middleware leaves alone for a direct upload there: CSRF (the PUT is
-// authorized by its signed URL alone, with no cookie involved, as a
-// presigned S3 URL is), the JSON body limit (the signed length bounds it),
-// and input sanitization (the file is stored byte for byte).
-func storageRoutePrefixes(cfg config.Config) []string {
-	st := cfg.Storage
-	if st.Local.URL == "" || (st.Driver != config.StorageDriverLocal && st.Driver != config.StorageDriverMemory) {
-		return nil
+// storageRoute is the storage route New mounted (presign.Handler, for
+// the local and memory drivers' URLs), if it mounted one: the runtime
+// middleware leaves requests under it alone, and only those. CSRF (a
+// direct upload is authorized by its signed URL alone, with no cookie
+// involved, as a presigned S3 URL is), the JSON body limit (the signed
+// length bounds it), and input sanitization (the file is stored byte for
+// byte). Route ownership is what the app mounted, not what the
+// configuration names: with WithStorage New mounts nothing, and a route an
+// app registers under GOMBIT_STORAGE_LOCAL_URL keeps every protection.
+type storageRoute struct{ prefix atomic.Pointer[string] }
+
+// mounted records the path presign.Handler was mounted under (nothing for
+// an app that brought its own router and middleware: WithRouter).
+func (r *storageRoute) mounted(path string) {
+	if r == nil {
+		return
 	}
-	u, err := url.Parse(st.Local.URL)
-	if err != nil || u.Path == "" {
-		return nil
-	}
-	return []string{u.Path + "/"}
+	p := path + "/"
+	r.prefix.Store(&p)
 }
 
-// skipPrefixes runs h except for requests under one of prefixes.
-func skipPrefixes(prefixes []string, h gin.HandlerFunc) gin.HandlerFunc {
-	if len(prefixes) == 0 {
-		return h
+// owns reports whether path is under the mounted storage route.
+func (r *storageRoute) owns(path string) bool {
+	if r == nil {
+		return false
 	}
+	p := r.prefix.Load()
+	return p != nil && strings.HasPrefix(path, *p)
+}
+
+// skipStorageRoute runs h except for requests to the mounted storage route.
+func skipStorageRoute(route *storageRoute, h gin.HandlerFunc) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		for _, p := range prefixes {
-			if strings.HasPrefix(c.Request.URL.Path, p) {
-				c.Next()
-				return
-			}
+		if route.owns(c.Request.URL.Path) {
+			c.Next()
+			return
 		}
 		h(c)
 	}
