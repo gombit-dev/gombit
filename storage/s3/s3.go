@@ -68,7 +68,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptrace"
-	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -82,6 +81,7 @@ import (
 	"github.com/aws/smithy-go"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 
+	"github.com/gombit-dev/gombit/internal/urlbase"
 	"github.com/gombit-dev/gombit/storage"
 )
 
@@ -284,10 +284,10 @@ func New(ctx context.Context, cfg Config) (*Store, error) {
 	if err := storage.ValidatePublicPrefix(cfg.PublicPrefix); err != nil {
 		return nil, fmt.Errorf("s3 storage: %v", err)
 	}
+	// The rule config.Validate applies to GOMBIT_STORAGE_S3_PUBLIC_URL too.
 	if cfg.PublicURL != "" {
-		u, err := url.Parse(cfg.PublicURL)
-		if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.RawQuery != "" || u.Fragment != "" || u.User != nil || strings.HasSuffix(cfg.PublicURL, "/") {
-			return nil, fmt.Errorf("s3 storage: public URL %q: want http(s)://host[/path] without a query, fragment, credentials, or trailing '/'", cfg.PublicURL)
+		if problem := urlbase.Root(cfg.PublicURL); problem != "" {
+			return nil, fmt.Errorf("s3 storage: public URL %q: %s", cfg.PublicURL, problem)
 		}
 	}
 	return &Store{

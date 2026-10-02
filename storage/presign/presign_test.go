@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gombit-dev/gombit/config"
 	"github.com/gombit-dev/gombit/storage"
 	"github.com/gombit-dev/gombit/storage/memory"
 	"github.com/gombit-dev/gombit/storage/presign"
@@ -283,4 +284,71 @@ func TestConformance(t *testing.T) {
 	storagetest.Run(t, func(t *testing.T) storage.Storage {
 		return memory.New(memory.WithURLs(newSigner(t, &clock{t: time.Now()})))
 	})
+}
+
+// TestSignedURLForAPublicKeyExpires: a signed URL holds to what it says
+// even when its key is public: past its expiry it is refused, and a forged
+// signature is refused. The same key without the query still serves the
+// object, because the key itself is public.
+func TestSignedURLForAPublicKeyExpires(t *testing.T) {
+	store, srv, c := setup(t)
+	put(t, store, "public/logo.png", "png", nil)
+	signed, err := store.URL(context.Background(), "public/logo.png", storage.SignedURL(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp, body := get(t, srv, signed); resp.StatusCode != http.StatusOK || body != "png" {
+		t.Fatalf("the signed URL before it expires = %d %q", resp.StatusCode, body)
+	}
+	u, _ := url.Parse(signed)
+	q := u.Query()
+	q.Set("signature", strings.Repeat("A", len(q.Get("signature"))))
+	forged := u.Path + "?" + q.Encode()
+	if resp, _ := get(t, srv, forged); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("a forged signature on a public key = %d, want 403", resp.StatusCode)
+	}
+	onlyExpires := u.Path + "?expires=" + u.Query().Get("expires")
+	if resp, _ := get(t, srv, onlyExpires); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("an expiry without a signature on a public key = %d, want 403", resp.StatusCode)
+	}
+	c.t = c.t.Add(2 * time.Minute)
+	if resp, _ := get(t, srv, signed); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("the signed URL of a public key after it expired = %d, want 403", resp.StatusCode)
+	}
+	if resp, body := get(t, srv, u.Path); resp.StatusCode != http.StatusOK || body != "png" {
+		t.Fatalf("the public key without the query = %d %q, want 200: the key is public", resp.StatusCode, body)
+	}
+}
+
+// TestBaseRuleIsShared: config validation and presign.New accept exactly
+// the same Base (GOMBIT_STORAGE_LOCAL_URL), in both directions: one rule.
+func TestBaseRuleIsShared(t *testing.T) {
+	for base, valid := range map[string]bool{
+		"/_storage":                           true,
+		"/files/v1":                           true,
+		"https://files.example.com/_storage":  true,
+		"http://127.0.0.1:8080/s":             true,
+		"/_stor%61ge":                         false, // percent-escaped: not a plain path
+		"/a%2Fb":                              false,
+		"/_storage/":                          false,
+		"/":                                   false,
+		"_storage":                            false,
+		"//host/path":                         false,
+		"https://files.example.com":           false, // no path to serve under
+		"https://files.example.com/":          false,
+		"ftp://files.example.com/s":           false,
+		"https://user:pw@files.example.com/s": false,
+		"/_storage?x=1":                       false,
+		"/_storage?":                          false,
+		"/_storage#top":                       false,
+	} {
+		_, newErr := presign.New(presign.Config{Base: base, Secret: secret})
+		cfg := config.Default()
+		cfg.Storage.Driver = config.StorageDriverMemory
+		cfg.Storage.Local.URL = base
+		cfgErr := config.ValidateStorage(cfg.Storage)
+		if (newErr == nil) != valid || (cfgErr == nil) != valid {
+			t.Errorf("Base %q: presign.New = %v, config = %v; want valid = %v", base, newErr, cfgErr, valid)
+		}
+	}
 }
