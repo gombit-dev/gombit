@@ -117,10 +117,12 @@ u, err := app.Storage().URL(ctx, doc.FileKey, storage.SignedURL(15*time.Minute))
 - `SignedURL(ttl)` works for any key, public or private. `ttl` must be
   positive and at most `storage.MaxURLExpiry` (7 days, S3's limit): anything
   else is `ErrInvalidOptions`, so a zero or negative lifetime never becomes a
-  permanent URL. Every driver rounds the lifetime up to a whole second
-  (`storage.RoundExpiry`, since S3 counts presigned lifetimes in whole seconds,
-  at least one), so `SignedURL(time.Millisecond)` gives a URL that lives a
-  second on every driver. A signed URL expires even when its key is public. Past its
+  permanent URL. The lifetime is a whole number of seconds (`SignedURL(time.Millisecond)`
+  is `ErrInvalidOptions`), and every driver counts it the way S3 does: from
+  the start of the second the URL is signed in, since SigV4's `X-Amz-Date` has
+  whole-second precision. A URL from `SignedURL(ttl)` is valid for more than
+  `ttl` minus a second and at most `ttl` after `URL` returns, on every driver.
+  A signed URL expires even when its key is public. Past its
   expiry, or with an altered signature, it is refused. The same key without
   the query still reads the object, because the key itself is public: a
   signed URL doesn't make a public object private.
