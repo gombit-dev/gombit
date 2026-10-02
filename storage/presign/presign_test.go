@@ -197,14 +197,17 @@ func TestExpiryRoundsUp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A millisecond is a second (storage.RoundExpiry), as on S3: from
+	// 100.9 that is 101.9, and the expiry is the whole second after it.
 	parsed, _ := url.Parse(u)
-	if got := parsed.Query().Get("expires"); got != "101" {
-		t.Fatalf("expires = %s, want 101 (never shorter than asked)", got)
+	if got := parsed.Query().Get("expires"); got != "102" {
+		t.Fatalf("expires = %s, want 102 (a second at least, never shorter than asked)", got)
 	}
+	c.t = time.Unix(101, 800_000_000)
 	if err := s.Verify("k", parsed.Query()); err != nil {
-		t.Fatalf("Verify = %v", err)
+		t.Fatalf("Verify 0.9s later = %v, want valid", err)
 	}
-	c.t = time.Unix(101, 0)
+	c.t = time.Unix(102, 0)
 	if err := s.Verify("k", parsed.Query()); !errors.Is(err, presign.ErrExpired) {
 		t.Fatalf("Verify at the expiry = %v, want ErrExpired", err)
 	}
@@ -350,5 +353,25 @@ func TestBaseRuleIsShared(t *testing.T) {
 		if (newErr == nil) != valid || (cfgErr == nil) != valid {
 			t.Errorf("Base %q: presign.New = %v, config = %v; want valid = %v", base, newErr, cfgErr, valid)
 		}
+	}
+}
+
+// TestSubSecondLifetime: a signed URL asked to live a millisecond lives a
+// second (storage.RoundExpiry), as on every driver: it works 999ms later
+// and is refused once the second has passed.
+func TestSubSecondLifetime(t *testing.T) {
+	store, srv, c := setup(t)
+	put(t, store, "private/x", "x", nil)
+	u, err := store.URL(context.Background(), "private/x", storage.SignedURL(time.Millisecond))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.t = c.t.Add(999 * time.Millisecond)
+	if resp, _ := get(t, srv, u); resp.StatusCode != http.StatusOK {
+		t.Fatalf("a 1ms signed URL 999ms later = %d, want 200: it lives a whole second", resp.StatusCode)
+	}
+	c.t = c.t.Add(2 * time.Second)
+	if resp, _ := get(t, srv, u); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("a 1ms signed URL 3s later = %d, want 403", resp.StatusCode)
 	}
 }

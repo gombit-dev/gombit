@@ -18,6 +18,19 @@ const FilenameMetadata = "filename"
 // in development works in production.
 const MaxURLExpiry = 7 * 24 * time.Hour
 
+// RoundExpiry is the lifetime every driver gives a signed URL asked to
+// live ttl: ttl rounded up to a whole second, so never shorter than asked
+// and at least one second. S3 counts a presigned URL's lifetime in whole
+// seconds (X-Amz-Expires, 1 to 604800), so every accepted URLOptions maps
+// to a valid one; MaxURLExpiry is whole seconds, so rounding never passes
+// it. Drivers sign with RoundExpiry(opts.Expires), never opts.Expires.
+func RoundExpiry(ttl time.Duration) time.Duration {
+	if r := ttl % time.Second; r != 0 {
+		ttl += time.Second - r
+	}
+	return ttl
+}
+
 // Visibility. An object is public when its key is under the store's
 // public prefix ("public/" unless configured otherwise; empty makes no
 // object public), and private otherwise. A public object has a permanent

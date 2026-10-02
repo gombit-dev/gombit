@@ -642,7 +642,7 @@ func (s *Store) URL(ctx context.Context, key string, opts storage.URLOptions) (s
 	req, err := s.presign.PresignGetObject(ctx, &awss3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(full),
-	}, awss3.WithPresignExpires(opts.Expires))
+	}, awss3.WithPresignExpires(storage.RoundExpiry(opts.Expires))) // whole seconds, at least one: X-Amz-Expires
 	if err != nil {
 		return "", storage.Wrap("url", key, classify(ctx, err))
 	}
