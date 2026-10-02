@@ -101,8 +101,8 @@ func (s *Signer) Path() string { return s.path }
 
 // URL returns key's URL, as Storage.URL specifies: a public one for a
 // public key (ErrNotPublic for a private one), or a signed one that
-// expires after storage.RoundExpiry(opts.Expires), at a whole Unix second
-// no earlier than that. key and opts must
+// expires opts.Expires (whole seconds) after the start of the second it is
+// signed in, as S3's SigV4 counts it. key and opts must
 // be valid (a driver checks them first).
 func (s *Signer) URL(key string, opts storage.URLOptions) (string, error) {
 	if err := storage.ValidateKey(key); err != nil {
@@ -118,12 +118,7 @@ func (s *Signer) URL(key string, opts storage.URLOptions) (string, error) {
 		}
 		return u, nil
 	}
-	now := s.now()
-	end := now.Add(storage.RoundExpiry(opts.Expires))
-	expires := end.Unix()
-	if end.After(time.Unix(expires, 0)) {
-		expires++ // round up: never shorter than asked
-	}
+	expires := s.now().Unix() + int64(opts.Expires/time.Second)
 	e := strconv.FormatInt(expires, 10)
 	return u + "?expires=" + e + "&signature=" + s.sign(key, e), nil
 }

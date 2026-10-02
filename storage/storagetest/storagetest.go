@@ -647,10 +647,13 @@ func checkInvalidOptions(t testing.TB, s storage.Storage) {
 	if got, info := read(t, s, "opts-kept"); string(got) != "previous" || info.ContentType != "text/plain" {
 		t.Fatalf("a refused overwrite left %q (%s), want the previous object", got, info.ContentType)
 	}
-	for _, opts := range []storage.URLOptions{storage.SignedURL(0), storage.SignedURL(-time.Second), {Expires: time.Minute}} {
+	// A lifetime is whole seconds, as S3 counts it: a finer one is refused,
+	// on every driver, rather than given a lifetime the drivers would count
+	// differently.
+	for _, opts := range []storage.URLOptions{storage.SignedURL(0), storage.SignedURL(-time.Second), {Expires: time.Minute}, storage.SignedURL(time.Millisecond), storage.SignedURL(1500 * time.Millisecond)} {
 		_, err := s.URL(ctxFor(t), "opts", opts)
 		if !errors.Is(err, storage.ErrInvalidOptions) {
-			t.Fatalf("URL(%+v) = %v, want storage.ErrInvalidOptions: a signed URL must never widen into a permanent one", opts, err)
+			t.Fatalf("URL(%+v) = %v, want storage.ErrInvalidOptions", opts, err)
 		}
 		wantErr(t, err, storage.ErrInvalidOptions, "url", "opts")
 	}
@@ -852,9 +855,9 @@ func checkOpenFollowsContext(t testing.TB, s storage.Storage) {
 func checkURL(t testing.TB, s storage.Storage) {
 	put(t, s, "linked/file.txt", []byte("x"), storage.PutOptions{})
 	for _, key := range []string{"linked/file.txt", "linked/never-stored.txt"} {
-		// The bounds of a signed URL's lifetime too: a nanosecond (which
-		// every driver rounds up to a second) and MaxURLExpiry are valid.
-		for _, opts := range []storage.URLOptions{storage.PublicURL(), storage.SignedURL(time.Minute), storage.SignedURL(time.Nanosecond), storage.SignedURL(storage.MaxURLExpiry)} {
+		// The bounds of a signed URL's lifetime too: a second and
+		// MaxURLExpiry are valid.
+		for _, opts := range []storage.URLOptions{storage.PublicURL(), storage.SignedURL(time.Minute), storage.SignedURL(time.Second), storage.SignedURL(storage.MaxURLExpiry)} {
 			checkOneURL(t, s, key, opts)
 		}
 	}

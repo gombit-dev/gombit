@@ -259,19 +259,21 @@ func TestPublicURLRuleIsShared(t *testing.T) {
 }
 
 // TestSignedURLLifetimeIsWholeSeconds: every lifetime URLOptions accepts
-// becomes a valid X-Amz-Expires (whole seconds, 1 to 604800), rounded up.
+// is a valid X-Amz-Expires (whole seconds, 1 to 604800), sent as it is; a
+// finer one is refused.
 func TestSignedURLLifetimeIsWholeSeconds(t *testing.T) {
 	ctx := context.Background()
 	s, err := New(ctx, Config{Endpoint: "http://127.0.0.1:9", Region: "us-east-1", Bucket: "b", AccessKeyID: "id", SecretAccessKey: "secret", ForcePathStyle: true})
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := s.URL(ctx, "k", storage.SignedURL(time.Millisecond)); !errors.Is(err, storage.ErrInvalidOptions) {
+		t.Fatalf("URL(1ms) = %v, want ErrInvalidOptions", err)
+	}
 	for ttl, want := range map[time.Duration]string{
-		time.Nanosecond:         "1",
-		time.Millisecond:        "1",
-		1500 * time.Millisecond: "2",
-		time.Minute:             "60",
-		storage.MaxURLExpiry:    "604800",
+		time.Second:          "1",
+		time.Minute:          "60",
+		storage.MaxURLExpiry: "604800",
 	} {
 		u, err := s.URL(ctx, "k", storage.SignedURL(ttl))
 		if err != nil {
