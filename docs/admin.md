@@ -188,7 +188,12 @@ arbitrary Go types.
   derive the GORM primary key **at Register** and store it. The PK field
   must appear in `Fields`. An auto-increment primary key is read-only.
   A manual primary key is required on create and cannot be changed on
-  update.
+  update. A model whose primary key spans several columns is refused at
+  `Register` (`admin: T has a composite primary key, which is not
+  supported`), the same shape `gombit make resource` rejects: the admin
+  addresses a row by one column, so the other key columns would not be
+  part of the URL. Naming one of them in `PK` does not lift the
+  restriction. Give an admin-managed model a single-column primary key.
 - **Empty `Fields`** derives a default from the struct once, inside
   `Register`, via `admin.FieldsFrom(T)`. That helper may use `reflect`
   **only at registration time**. Do not call it from request handlers.
