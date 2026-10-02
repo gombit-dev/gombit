@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -498,7 +499,8 @@ func TestPolicyIsValidated(t *testing.T) {
 		{MaxBytes: 1, Types: []string{"*/*"}, Prefix: "../avatars/"},
 		{MaxBytes: 1, Types: []string{"*/*"}, Metadata: map[string]string{upload.FilenameMetadata: "x"}},
 		{MaxBytes: 1, Types: []string{"*/*"}, Metadata: map[string]string{"Bad Name": "x"}},
-		{MaxBytes: math.MaxInt64, Types: []string{"*/*"}}, // the request's limit would overflow
+		{MaxBytes: math.MaxInt64, Types: []string{"*/*"}},                           // the request's limit would overflow
+		{MaxBytes: 1, Types: []string{"*/*"}, GrantExpiry: 1500 * time.Millisecond}, // signed URLs live whole seconds
 	} {
 		_, err := upload.Save(context.Background(), memory.New(), strings.NewReader("x"), "", p)
 		if err == nil {
