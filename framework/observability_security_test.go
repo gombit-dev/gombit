@@ -20,7 +20,7 @@ import (
 )
 
 func TestDefaultRuntimeMiddlewareOrder(t *testing.T) {
-	stack := runtimeMiddlewareStack(config.Default(), newHTTPMetrics(), nil, nil)
+	stack := runtimeMiddlewareStack(config.Default(), newHTTPMetrics(), nil, nil, nil)
 	got := make([]string, 0, len(stack))
 	for _, middleware := range stack {
 		got = append(got, middleware.name)
@@ -50,7 +50,7 @@ func TestDefaultRuntimeMiddlewareOrder(t *testing.T) {
 // from the default stack.
 func TestSanitizeInputOptInInstallsXSSLayer(t *testing.T) {
 	hasXSS := func(cfg config.Config) bool {
-		for _, mw := range runtimeMiddlewareStack(cfg, newHTTPMetrics(), nil, nil) {
+		for _, mw := range runtimeMiddlewareStack(cfg, newHTTPMetrics(), nil, nil, nil) {
 			if mw.name == "xss" {
 				return true
 			}

@@ -1013,3 +1013,38 @@ func TestLongRoot(t *testing.T) {
 		t.Fatalf("a second store's Put = %v", err)
 	}
 }
+
+// TestIfAbsentAcrossStores: IfAbsent is atomic for stores that share a
+// root (separate processes, say), not just within one store: of two stores
+// racing to create one key, exactly one succeeds.
+func TestIfAbsentAcrossStores(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "root")
+	ctx := context.Background()
+	for round := 0; round < 20; round++ {
+		key := fmt.Sprintf("race/%d", round)
+		results := make(chan error, 2)
+		start := make(chan struct{})
+		for i := 0; i < 2; i++ {
+			s, _ := local.New(root)
+			body := fmt.Sprintf("store %d", i)
+			go func() {
+				<-start
+				_, err := s.Put(ctx, key, strings.NewReader(body), storage.PutOptions{IfAbsent: true})
+				results <- err
+			}()
+		}
+		close(start)
+		won := 0
+		for i := 0; i < 2; i++ {
+			switch err := <-results; {
+			case err == nil:
+				won++
+			case !errors.Is(err, storage.ErrExists):
+				t.Fatalf("round %d: Put = %v, want success or ErrExists", round, err)
+			}
+		}
+		if won != 1 {
+			t.Fatalf("round %d: %d of 2 stores created %q, want exactly one", round, won, key)
+		}
+	}
+}

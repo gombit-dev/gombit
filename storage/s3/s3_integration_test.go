@@ -404,3 +404,33 @@ func TestDirectUploads(t *testing.T) {
 		t.Fatalf("grant %+v", g.Request)
 	}
 }
+
+// TestIfAbsentMultipart: IfAbsent holds for a multipart upload too: S3
+// refuses its CompleteMultipartUpload ("If-None-Match: *") where an object
+// exists, the Put fails with ErrExists, and the object stays as it was.
+func TestIfAbsentMultipart(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	key := "if-absent/large"
+	if _, err := s.Put(ctx, key, strings.NewReader("small original"), storage.PutOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	large := io.LimitReader(rand.Reader, PartSize+1)
+	_, err := s.Put(ctx, key, large, storage.PutOptions{IfAbsent: true})
+	if !errors.Is(err, storage.ErrExists) || errors.Is(err, storage.ErrUnknownOutcome) {
+		t.Fatalf("a multipart IfAbsent Put on a held key = %v, want ErrExists", err)
+	}
+	body, info, err := s.Open(ctx, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = body.Close() }()
+	got, _ := io.ReadAll(body)
+	if string(got) != "small original" || info.Size != int64(len("small original")) {
+		t.Fatalf("the key holds %d bytes after the refused multipart Put, want the original", info.Size)
+	}
+	fresh := "if-absent/large-fresh"
+	if _, err := s.Put(ctx, fresh, io.LimitReader(rand.Reader, PartSize+1), storage.PutOptions{IfAbsent: true}); err != nil {
+		t.Fatalf("a multipart IfAbsent Put on an empty key = %v", err)
+	}
+}

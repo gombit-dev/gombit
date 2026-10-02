@@ -275,7 +275,16 @@ func (s *Store) put(ctx context.Context, key string, r io.Reader, opts storage.P
 	if err := s.ensureDir(filepath.Dir(dst)); err != nil {
 		return storage.ObjectInfo{}, err
 	}
-	if err := replaceFile(tmp.Name(), dst); err != nil {
+	// IfAbsent publishes with a rename that refuses to replace: the check
+	// and the store are one step, for every process sharing the root.
+	publish := replaceFile
+	if opts.IfAbsent {
+		publish = renameNoReplace
+	}
+	if err := publish(tmp.Name(), dst); err != nil {
+		if opts.IfAbsent && errors.Is(err, fs.ErrExist) {
+			return storage.ObjectInfo{}, storage.ErrExists
+		}
 		return storage.ObjectInfo{}, err
 	}
 	// The rename published the object: from here the Put has happened, and

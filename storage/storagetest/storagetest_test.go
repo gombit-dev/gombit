@@ -55,6 +55,8 @@ type fake struct {
 	openNoETag       bool // Open reports no ETag (Put and Stat do)
 	keepsForeignErr  bool // wraps like the old Wrap: keeps any *storage.Error
 	eofHidesCancel   bool // commits when the source's last read returns EOF after ctx ended
+	ignoresIfAbsent  bool // PutOptions.IfAbsent overwrites anyway
+	racyIfAbsent     bool // IfAbsent checks before reading the source, stores after
 }
 
 type object struct {
@@ -95,6 +97,11 @@ func (f *fake) Put(ctx context.Context, key string, r io.Reader, opts storage.Pu
 		info.Metadata = make(map[string]string, len(opts.Metadata))
 		for k, v := range opts.Metadata {
 			info.Metadata[k] = v
+		}
+	}
+	if opts.IfAbsent && f.racyIfAbsent {
+		if _, taken := f.lookup(key); taken {
+			return storage.ObjectInfo{}, f.wrap("put", key, storage.ErrExists)
 		}
 	}
 	var buf bytes.Buffer
@@ -143,7 +150,13 @@ func (f *fake) Put(ctx context.Context, key string, r io.Reader, opts storage.Pu
 	if f.constantETag {
 		info.ETag = "constant"
 	}
-	f.store(key, data, info)
+	if opts.IfAbsent && !f.ignoresIfAbsent && !f.racyIfAbsent {
+		if !f.storeIfAbsent(key, data, info) {
+			return storage.ObjectInfo{}, f.wrap("put", key, storage.ErrExists)
+		}
+	} else {
+		f.store(key, data, info)
+	}
 	if f.aliasMetadata {
 		o, _ := f.lookup(key)
 		return o.info, nil
@@ -219,6 +232,19 @@ func (f *fake) store(key string, data []byte, info storage.ObjectInfo) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.objects[f.mapKey(key)] = object{data: append([]byte(nil), data...), info: f.owned(info)}
+}
+
+// storeIfAbsent stores data under key only if nothing is stored there,
+// checking and storing under one lock.
+func (f *fake) storeIfAbsent(key string, data []byte, info storage.ObjectInfo) bool {
+	info.Size = int64(len(data))
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, taken := f.objects[f.mapKey(key)]; taken {
+		return false
+	}
+	f.objects[f.mapKey(key)] = object{data: append([]byte(nil), data...), info: f.owned(info)}
+	return true
 }
 
 // lookup reports whether key holds an object.
@@ -436,6 +462,8 @@ func TestSuiteCatchesBrokenDrivers(t *testing.T) {
 		{"FailedPutKeepsPrevious", func(f *fake) { f.keepsForeignErr = true }, "inside a *storage.Error"},
 		{"CanceledPut", func(f *fake) { f.eofHidesCancel = true }, "want context canceled"},
 		{"OpenFollowsContext", func(f *fake) { f.openDetached = true }, "must follow the context"},
+		{"IfAbsent", func(f *fake) { f.ignoresIfAbsent = true }, "want storage: an object is already stored"},
+		{"IfAbsent", func(f *fake) { f.racyIfAbsent = true }, "want exactly one"},
 		{"Missing", func(f *fake) { f.bareErrors = true }, "inside a *storage.Error"},
 		{"InvalidKeys", func(f *fake) { f.bareErrors = true }, "inside a *storage.Error"},
 	}

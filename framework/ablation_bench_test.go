@@ -52,7 +52,7 @@ type ablationRow struct {
 // matches the real App.
 func ablationRows() []ablationRow {
 	cfg := ablationConfig()
-	layers := runtimeMiddlewareStack(cfg, newHTTPMetrics(), nil, nil)
+	layers := runtimeMiddlewareStack(cfg, newHTTPMetrics(), nil, nil, nil)
 
 	rows := make([]ablationRow, 0, len(layers)+2)
 	rows = append(rows, ablationRow{name: "baseline", handler: ablationHandler(cfg, 0)})
@@ -76,7 +76,7 @@ func ablationHandler(cfg config.Config, n int) http.Handler {
 	contract.Install(contract.InstallOptions{RequestID: GetRequestIDFromContext})
 
 	router := gin.New()
-	layers := runtimeMiddlewareStack(cfg, newHTTPMetrics(), nil, nil)
+	layers := runtimeMiddlewareStack(cfg, newHTTPMetrics(), nil, nil, nil)
 	for _, mw := range layers[:n] {
 		router.Use(mw.handler)
 	}
@@ -145,7 +145,7 @@ func TestAblationFullAppMatchesRuntimeStack(t *testing.T) {
 	t.Cleanup(func() { gin.SetMode(previous) })
 
 	cfg := ablationConfig()
-	layers := runtimeMiddlewareStack(cfg, newHTTPMetrics(), nil, nil)
+	layers := runtimeMiddlewareStack(cfg, newHTTPMetrics(), nil, nil, nil)
 	lastLayer := ablationHandler(cfg, len(layers))
 	full := fullAppHandler(cfg)
 

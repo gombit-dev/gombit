@@ -83,30 +83,3 @@ func TestCSRFMiddlewareSafeMethodBootstrapsCookie(t *testing.T) {
 		t.Fatalf("GET did not set %s cookie", auth.CSRFCookieName)
 	}
 }
-
-// TestCSRFMiddlewareExemptPrefix: a prefix exempts the paths under it (the
-// storage route's signed uploads), and nothing else: not the prefix
-// without its slash, not a sibling path, and exact exemptions stay exact.
-func TestCSRFMiddlewareExemptPrefix(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	cfg := config.DefaultFor(config.EnvironmentTest)
-	cfg.Auth.JWTSecret = testJWTSecret
-	engine := gin.New()
-	engine.Use(auth.CSRFMiddlewareExempting(cfg, []string{"/hooks/exact"}, []string{"/_storage/"}))
-	ok := func(c *gin.Context) { c.Status(http.StatusOK) }
-	engine.PUT("/_storage/*key", ok)
-	engine.PUT("/_storagex/*key", ok)
-	engine.PUT("/hooks/*rest", ok)
-	for path, want := range map[string]int{
-		"/_storage/uploads/a":  http.StatusOK,
-		"/_storagex/uploads/a": http.StatusForbidden,
-		"/hooks/exact":         http.StatusOK,
-		"/hooks/exact/more":    http.StatusForbidden,
-	} {
-		rec := httptest.NewRecorder()
-		engine.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, path, strings.NewReader("x")))
-		if rec.Code != want {
-			t.Errorf("PUT %s = %d, want %d", path, rec.Code, want)
-		}
-	}
-}

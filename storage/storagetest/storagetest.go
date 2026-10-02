@@ -64,6 +64,7 @@ var checks = []check{
 	{"SizeMismatch", checkSizeMismatch},
 	{"InvalidOptions", checkInvalidOptions},
 	{"ConcurrentPuts", checkConcurrentPuts},
+	{"IfAbsent", checkIfAbsent},
 	{"NoPartialReads", checkNoPartialReads},
 	{"MetadataIsOwned", checkMetadataIsOwned},
 	{"OpenFollowsContext", checkOpenFollowsContext},
@@ -661,6 +662,79 @@ func checkInvalidOptions(t testing.TB, s storage.Storage) {
 	if _, err := s.URL(ctxFor(t), "opts", storage.SignedURL(storage.MaxURLExpiry+time.Second)); !errors.Is(err, storage.ErrInvalidOptions) {
 		t.Fatalf("URL with a lifetime over storage.MaxURLExpiry = %v, want storage.ErrInvalidOptions", err)
 	}
+}
+
+// checkIfAbsent: PutOptions.IfAbsent stores only where nothing is stored.
+// On an empty key it stores; on a held key it fails with ErrExists and
+// leaves the object as it was; and of concurrent IfAbsent Puts to one
+// empty key exactly one succeeds, its bytes the ones stored, the others
+// failing with ErrExists. (The racing sources all wait for one another
+// before ending, so a driver that checks before it stores, in two steps,
+// shows its race.)
+func checkIfAbsent(t testing.TB, s storage.Storage) {
+	key := "if-absent/once"
+	put(t, s, key, []byte("first"), storage.PutOptions{IfAbsent: true})
+	_, err := s.Put(ctxFor(t), key, strings.NewReader("second"), storage.PutOptions{IfAbsent: true})
+	wantErr(t, err, storage.ErrExists, "put", key)
+	if got, _ := read(t, s, key); string(got) != "first" {
+		t.Fatalf("an IfAbsent Put on a held key left %q, want the object it found (%q)", got, "first")
+	}
+
+	race := "if-absent/race"
+	const writers = 8
+	var arrived sync.WaitGroup
+	arrived.Add(writers)
+	all := make(chan struct{})
+	go func() { arrived.Wait(); close(all) }()
+	type result struct {
+		body string
+		err  error
+	}
+	results := make(chan result, writers)
+	for i := 0; i < writers; i++ {
+		body := fmt.Sprintf("writer %d", i)
+		go func() {
+			src := io.MultiReader(strings.NewReader(body), &barrier{arrived: &arrived, all: all})
+			_, err := s.Put(ctxFor(t), race, src, storage.PutOptions{IfAbsent: true})
+			results <- result{body, err}
+		}()
+	}
+	var won []string
+	for i := 0; i < writers; i++ {
+		r := <-results
+		switch {
+		case r.err == nil:
+			won = append(won, r.body)
+		case !errors.Is(r.err, storage.ErrExists):
+			t.Fatalf("a racing IfAbsent Put = %v, want success or storage.ErrExists", r.err)
+		}
+	}
+	if len(won) != 1 {
+		t.Fatalf("%d of %d concurrent IfAbsent Puts to one empty key succeeded (%q), want exactly one", len(won), writers, won)
+	}
+	if got, _ := read(t, s, race); string(got) != won[0] {
+		t.Fatalf("after the race the key holds %q, want the winner's %q", got, won[0])
+	}
+}
+
+// barrier is the end of a racing source: its first Read waits until every
+// racer has reached it (or two seconds have passed, for a driver that
+// serializes whole Puts), then reports EOF.
+type barrier struct {
+	arrived *sync.WaitGroup
+	all     chan struct{}
+	once    sync.Once
+}
+
+func (b *barrier) Read([]byte) (int, error) {
+	b.once.Do(func() {
+		b.arrived.Done()
+		select {
+		case <-b.all:
+		case <-time.After(2 * time.Second):
+		}
+	})
+	return 0, io.EOF
 }
 
 // checkConcurrentPuts: concurrent Puts to one key leave exactly one of

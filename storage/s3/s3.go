@@ -166,6 +166,12 @@ type bucketState struct {
 	keep bool
 }
 
+// MaxUploadURLBytes is the largest direct upload UploadURL grants: a
+// direct upload is one presigned PutObject, and S3's limit for a single
+// PUT is 5 GiB. (Put has no such limit: it uploads larger objects in
+// parts.)
+const MaxUploadURLBytes = 5 << 30
+
 // PartSize is the size of each multipart upload part, and the most a Put
 // holds in memory.
 const PartSize = 8 << 20
@@ -335,8 +341,20 @@ func (s *Store) put(ctx context.Context, key string, r io.Reader, opts storage.P
 	if contentType == "" {
 		contentType = storage.DefaultContentType
 	}
-	size, etag, err := s.upload(ctx, objKey, storage.PutReader(ctx, r, opts), opts.Size, contentType, encodeMetadata(opts.Metadata))
+	// IfAbsent is S3's conditional write: "If-None-Match: *" on the request
+	// that publishes the object (PutObject, or CompleteMultipartUpload),
+	// which S3 refuses with 412 where an object exists, atomically.
+	var ifNoneMatch *string
+	if opts.IfAbsent {
+		ifNoneMatch = aws.String("*")
+	}
+	size, etag, err := s.upload(ctx, objKey, storage.PutReader(ctx, r, opts), opts.Size, contentType, encodeMetadata(opts.Metadata), ifNoneMatch)
 	if err != nil {
+		if opts.IfAbsent {
+			if cerr := conditionFailed(err); cerr != nil {
+				return storage.ObjectInfo{}, cerr
+			}
+		}
 		return storage.ObjectInfo{}, classifyPut(ctx, err)
 	}
 	return storage.ObjectInfo{
@@ -350,7 +368,7 @@ func (s *Store) put(ctx context.Context, key string, r io.Reader, opts storage.P
 
 // upload stores body under objKey: one PutObject when it fits in a part, a
 // multipart upload otherwise. It returns the bytes stored and the ETag.
-func (s *Store) upload(ctx context.Context, objKey string, body io.Reader, declared *int64, contentType string, md map[string]string) (int64, string, error) {
+func (s *Store) upload(ctx context.Context, objKey string, body io.Reader, declared *int64, contentType string, md map[string]string, ifNoneMatch *string) (int64, string, error) {
 	bufSize := int64(PartSize)
 	if declared != nil && *declared < bufSize {
 		bufSize = *declared + 1 // room to see that the source ends there
@@ -372,6 +390,7 @@ func (s *Store) upload(ctx context.Context, objKey string, body io.Reader, decla
 			ContentLength: aws.Int64(int64(n)),
 			ContentType:   aws.String(contentType),
 			Metadata:      md,
+			IfNoneMatch:   ifNoneMatch,
 		}, singleAttempt)
 		if err != nil {
 			return 0, "", publishFailed(err, sent)
@@ -383,12 +402,12 @@ func (s *Store) upload(ctx context.Context, objKey string, body io.Reader, decla
 	// The buffer is full, so there may be more: go multipart. (A buffer
 	// sized to a declared size cannot fill: the size-checking reader fails
 	// the read that would put a byte past the size into it.)
-	return s.multipart(ctx, objKey, body, buf, contentType, md)
+	return s.multipart(ctx, objKey, body, buf, contentType, md, ifNoneMatch)
 }
 
 // multipart uploads buf (the first part, full) and the rest of body as
 // PartSize parts, aborting the upload if anything fails.
-func (s *Store) multipart(ctx context.Context, objKey string, body io.Reader, buf []byte, contentType string, md map[string]string) (_ int64, _ string, err error) {
+func (s *Store) multipart(ctx context.Context, objKey string, body io.Reader, buf []byte, contentType string, md map[string]string, ifNoneMatch *string) (_ int64, _ string, err error) {
 	created, err := s.client.CreateMultipartUpload(ctx, &awss3.CreateMultipartUploadInput{
 		Bucket:      aws.String(s.bucket),
 		Key:         aws.String(objKey),
@@ -441,6 +460,7 @@ func (s *Store) multipart(ctx context.Context, objKey string, body io.Reader, bu
 		Key:             aws.String(objKey),
 		UploadId:        created.UploadId,
 		MultipartUpload: &types.CompletedMultipartUpload{Parts: parts},
+		IfNoneMatch:     ifNoneMatch,
 	}, singleAttempt)
 	if err != nil {
 		return 0, "", publishFailed(err, sent)
@@ -527,6 +547,28 @@ func publishFailed(err error, sent *attempts) error {
 		}
 	}
 	return &unknownOutcome{err: err}
+}
+
+// conditionFailed classifies the failure of a conditional write
+// (IfAbsent): S3's 412 is storage.ErrExists (an object is there, and was
+// left as it was); a 409 ConditionalRequestConflict, a conflicting write
+// still in progress, is transient (storage.ErrUnavailable). It returns nil
+// for any other failure.
+func conditionFailed(err error) error {
+	var respErr *smithyhttp.ResponseError
+	if !errors.As(err, &respErr) {
+		return nil
+	}
+	switch respErr.HTTPStatusCode() {
+	case http.StatusPreconditionFailed:
+		return fmt.Errorf("%w: %v", storage.ErrExists, err)
+	case http.StatusConflict:
+		var apiErr smithy.APIError
+		if errors.As(err, &apiErr) && apiErr.ErrorCode() == "ConditionalRequestConflict" {
+			return errors.Join(storage.ErrUnavailable, err)
+		}
+	}
+	return nil
 }
 
 // classifyPut classifies an upload's failure with classify, then adds what
@@ -689,6 +731,11 @@ func (s *Store) UploadURL(ctx context.Context, key string, opts storage.UploadUR
 	if err := storage.ValidateUploadURLOptions(opts); err != nil {
 		return storage.UploadRequest{}, storage.Wrap("upload url", key, err)
 	}
+	if opts.Size > MaxUploadURLBytes {
+		// A direct upload is one presigned PutObject, and S3 refuses one
+		// over 5 GiB: a grant for more could never succeed.
+		return storage.UploadRequest{}, storage.Wrap("upload url", key, fmt.Errorf("%w: a direct upload to S3 is one PutObject, at most %d bytes (5 GiB), not %d", storage.ErrInvalidOptions, MaxUploadURLBytes, opts.Size))
+	}
 	if err := ctx.Err(); err != nil {
 		return storage.UploadRequest{}, storage.Wrap("upload url", key, err)
 	}
@@ -698,6 +745,21 @@ func (s *Store) UploadURL(ctx context.Context, key string, opts storage.UploadUR
 	}
 	// The signature is dated after now (second precision): an expiry
 	// counted from now, truncated, is never later than S3's.
+	// The credentials the grant is signed with: temporary ones (an IAM
+	// role's, STS) end the URL when they expire, whatever its own expiry.
+	// Read before signing: if the cache refreshes them in between, the
+	// signature carries newer, later-expiring ones, so the Expires
+	// reported is never later than the real end.
+	var credsExpire time.Time
+	if provider := s.client.Options().Credentials; provider != nil {
+		creds, err := provider.Retrieve(ctx)
+		if err != nil {
+			return storage.UploadRequest{}, storage.Wrap("upload url", key, classify(ctx, err))
+		}
+		if creds.CanExpire {
+			credsExpire = creds.Expires
+		}
+	}
 	req, err := s.presign.PresignPutObject(ctx, &awss3.PutObjectInput{
 		Bucket:        aws.String(s.bucket),
 		Key:           aws.String(full),
@@ -714,6 +776,9 @@ func (s *Store) UploadURL(ctx context.Context, key string, opts storage.UploadUR
 	expires, err := presignedExpiry(req.URL)
 	if err != nil {
 		return storage.UploadRequest{}, storage.Wrap("upload url", key, err)
+	}
+	if !credsExpire.IsZero() && credsExpire.Before(expires) {
+		expires = credsExpire // the credentials end first, and the URL with them
 	}
 	header := map[string]string{}
 	for name, values := range req.SignedHeader {

@@ -108,6 +108,36 @@ type fileRenameInfo struct {
 // open. Where POSIX semantics are not available it falls back to
 // os.Rename, which fails while dst is open.
 func replaceFile(src, dst string) error {
+	err := renameByHandle(src, dst, windows.FILE_RENAME_REPLACE_IF_EXISTS|windows.FILE_RENAME_POSIX_SEMANTICS)
+	if err != nil && posixUnsupported(err) {
+		return os.Rename(src, dst)
+	}
+	return err
+}
+
+// renameNoReplace renames src to dst unless dst exists (fs.ErrExist), in
+// one atomic step: the rename without REPLACE_IF_EXISTS, or MoveFileEx
+// without MOVEFILE_REPLACE_EXISTING where POSIX semantics are not
+// available.
+func renameNoReplace(src, dst string) error {
+	err := renameByHandle(src, dst, windows.FILE_RENAME_POSIX_SEMANTICS)
+	if err != nil && posixUnsupported(err) {
+		from, ferr := windows.UTF16PtrFromString(longPath(src))
+		to, terr := windows.UTF16PtrFromString(longPath(dst))
+		if ferr != nil || terr != nil {
+			return &os.LinkError{Op: "rename", Old: src, New: dst, Err: errors.Join(ferr, terr)}
+		}
+		if err := windows.MoveFileEx(from, to, 0); err != nil {
+			return &os.LinkError{Op: "rename", Old: src, New: dst, Err: err}
+		}
+		return nil
+	}
+	return err
+}
+
+// renameByHandle renames src to dst with SetFileInformationByHandle
+// (FileRenameInfoEx) and flags.
+func renameByHandle(src, dst string, flags uint32) error {
 	name, err := windows.UTF16FromString(longPath(dst))
 	if err != nil {
 		return &os.LinkError{Op: "rename", Old: src, New: dst, Err: err}
@@ -120,14 +150,11 @@ func replaceFile(src, dst string) error {
 	nameBytes := (len(name) - 1) * 2 // without the terminating NUL
 	buf := make([]byte, int(unsafe.Offsetof(info.FileName))+len(name)*2)
 	ri := (*fileRenameInfo)(unsafe.Pointer(&buf[0])) // #nosec G103 -- FILE_RENAME_INFO over a buffer sized for its name
-	ri.Flags = windows.FILE_RENAME_REPLACE_IF_EXISTS | windows.FILE_RENAME_POSIX_SEMANTICS
+	ri.Flags = flags
 	ri.FileNameLength = uint32(nameBytes)                                                            // #nosec G115 -- a path, far below 4 GiB
 	copy(unsafe.Slice(&ri.FileName[0], len(name)), name)                                             // #nosec G103 -- within buf, as above
 	err = windows.SetFileInformationByHandle(h, windows.FileRenameInfoEx, &buf[0], uint32(len(buf))) // #nosec G115 -- as above
 	_ = windows.CloseHandle(h)
-	if err != nil && posixUnsupported(err) {
-		return os.Rename(src, dst)
-	}
 	if err != nil {
 		return &os.LinkError{Op: "rename", Old: src, New: dst, Err: err}
 	}
