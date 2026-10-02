@@ -642,7 +642,7 @@ func (s *Store) URL(ctx context.Context, key string, opts storage.URLOptions) (s
 	req, err := s.presign.PresignGetObject(ctx, &awss3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(full),
-	}, awss3.WithPresignExpires(opts.Expires))
+	}, awss3.WithPresignExpires(storage.RoundExpiry(opts.Expires))) // whole seconds, at least one: X-Amz-Expires
 	if err != nil {
 		return "", storage.Wrap("url", key, classify(ctx, err))
 	}
@@ -674,7 +674,8 @@ func (s *Store) UploadURL(ctx context.Context, key string, opts storage.UploadUR
 	}
 	// The signature is dated after now (second precision): an expiry
 	// counted from now, truncated, is never later than S3's.
-	expires := time.Now().Truncate(time.Second).Add(opts.Expires)
+	ttl := storage.RoundExpiry(opts.Expires) // whole seconds, at least one: X-Amz-Expires
+	expires := time.Now().Truncate(time.Second).Add(ttl)
 	req, err := s.presign.PresignPutObject(ctx, &awss3.PutObjectInput{
 		Bucket:        aws.String(s.bucket),
 		Key:           aws.String(full),
@@ -684,7 +685,7 @@ func (s *Store) UploadURL(ctx context.Context, key string, opts storage.UploadUR
 		// Single use: S3 stores it only where no object is (412
 		// otherwise), so an upload checked after it cannot be replaced.
 		IfNoneMatch: aws.String("*"),
-	}, awss3.WithPresignExpires(opts.Expires))
+	}, awss3.WithPresignExpires(ttl))
 	if err != nil {
 		return storage.UploadRequest{}, storage.Wrap("upload url", key, classify(ctx, err))
 	}

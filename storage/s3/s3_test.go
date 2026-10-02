@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -282,6 +283,35 @@ func TestPublicURLRuleIsShared(t *testing.T) {
 		cfgErr := config.ValidateStorage(config.StorageConfig{Driver: config.StorageDriverS3, S3: config.S3StorageConfig{Bucket: "b", Region: "us-east-1", PublicURL: publicURL}})
 		if (newErr == nil) != valid || (cfgErr == nil) != valid {
 			t.Errorf("PublicURL %q: New = %v, config = %v; want valid = %v", publicURL, newErr, cfgErr, valid)
+		}
+	}
+}
+
+// TestSignedURLLifetimeIsWholeSeconds: every lifetime URLOptions accepts
+// becomes a valid X-Amz-Expires (whole seconds, 1 to 604800), rounded up.
+func TestSignedURLLifetimeIsWholeSeconds(t *testing.T) {
+	ctx := context.Background()
+	s, err := New(ctx, Config{Endpoint: "http://127.0.0.1:9", Region: "us-east-1", Bucket: "b", AccessKeyID: "id", SecretAccessKey: "secret", ForcePathStyle: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for ttl, want := range map[time.Duration]string{
+		time.Nanosecond:         "1",
+		time.Millisecond:        "1",
+		1500 * time.Millisecond: "2",
+		time.Minute:             "60",
+		storage.MaxURLExpiry:    "604800",
+	} {
+		u, err := s.URL(ctx, "k", storage.SignedURL(ttl))
+		if err != nil {
+			t.Fatalf("URL(%s) = %v", ttl, err)
+		}
+		parsed, err := url.Parse(u)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := parsed.Query().Get("X-Amz-Expires"); got != want {
+			t.Errorf("SignedURL(%s): X-Amz-Expires = %q, want %q", ttl, got, want)
 		}
 	}
 }
