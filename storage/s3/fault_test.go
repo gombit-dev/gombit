@@ -33,17 +33,19 @@ type fakeS3 struct {
 	bucketDelay   time.Duration
 	headBucket    atomic.Int32
 
-	dropPut          bool // apply a PutObject, then drop the connection
-	refusePut        int  // answer a PutObject with this status, applying nothing
-	dropComplete     bool // apply a Complete, then drop the connection
-	dropBeforeApply  bool // drop a Complete without applying it
-	refusePart       int  // answer an UploadPart with this status
-	refuseAbort      int  // answer an Abort with this status
-	goneBeforeAbort  bool // the upload is gone by the time it is aborted
-	dropPart         bool // never answer an UploadPart; S3 stores it once the upload is aborted
-	pendingParts     int  // parts received, still being processed
-	lateParts        int  // parts stored after their upload was aborted
-	requestsSeen     int  // every request
+	dropPut          bool   // apply a PutObject, then drop the connection
+	refusePut        int    // answer a PutObject with this status, applying nothing
+	dropComplete     bool   // apply a Complete, then drop the connection
+	dropBeforeApply  bool   // drop a Complete without applying it
+	refusePart       int    // answer an UploadPart with this status
+	refuseAbort      int    // answer an Abort with this status
+	goneBeforeAbort  bool   // the upload is gone by the time it is aborted
+	refuseComplete   int    // answer a CompleteMultipartUpload with this status, applying nothing
+	completeCode     string // and this error code
+	dropPart         bool   // never answer an UploadPart; S3 stores it once the upload is aborted
+	pendingParts     int    // parts received, still being processed
+	lateParts        int    // parts stored after their upload was aborted
+	requestsSeen     int    // every request
 	abortedUploadIDs []string
 	puts, completes  int // PutObject and CompleteMultipartUpload requests seen
 }
@@ -114,6 +116,10 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// Already completed (or aborted): what S3 answers a retry of a
 			// Complete whose first attempt took effect.
 			s3Error(w, http.StatusNotFound, "NoSuchUpload")
+			return
+		}
+		if f.refuseComplete != 0 {
+			s3Error(w, f.refuseComplete, f.completeCode)
 			return
 		}
 		if f.dropBeforeApply {
@@ -480,5 +486,32 @@ func TestBucketCheckHonorsEveryCallersContext(t *testing.T) {
 	}
 	if n := f.headBucket.Load(); n != 1 {
 		t.Fatalf("%d HeadBucket requests, want 1 (the later Stat joins the probe in flight)", n)
+	}
+}
+
+// TestConditionalRefusalKeepsTheAbortError: a multipart IfAbsent Put whose
+// CompleteMultipartUpload S3 refuses (412: an object is there; 409: a
+// conflicting conditional write) and whose abort then fails reports both:
+// the refusal's classification (ErrExists, ErrUnavailable) and the
+// *AbortError naming the upload whose parts may remain.
+func TestConditionalRefusalKeepsTheAbortError(t *testing.T) {
+	for name, tc := range map[string]struct {
+		status int
+		code   string
+		want   error
+	}{
+		"412": {http.StatusPreconditionFailed, "PreconditionFailed", storage.ErrExists},
+		"409": {http.StatusConflict, "ConditionalRequestConflict", storage.ErrUnavailable},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFakeS3()
+			f.refuseComplete, f.completeCode = tc.status, tc.code
+			f.refuseAbort = http.StatusForbidden
+			_, err := fakeStore(t, f).Put(context.Background(), "k", large(), storage.PutOptions{IfAbsent: true})
+			var abort *AbortError
+			if !errors.Is(err, tc.want) || !errors.As(err, &abort) || abort.UploadID != "upload-1" {
+				t.Fatalf("Put = %v; want %v and an *AbortError for upload-1", err, tc.want)
+			}
+		})
 	}
 }

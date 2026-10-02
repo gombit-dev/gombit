@@ -11,7 +11,12 @@
 //	curl localhost:8080/uploads/<id> -OJ
 //	curl localhost:8080/uploads/<id>/link   # a download link valid for up to 5 minutes
 //
-// A direct upload sends the bytes straight to storage, not through the app:
+// A direct upload is a signed PUT the client makes on its own, with the
+// grant the app gave it. Only with S3 (GOMBIT_STORAGE_DRIVER=s3) do the
+// bytes go straight to the bucket, bypassing the app process; with the
+// local driver (the default) and memory, the PUT goes to the app's own
+// storage route (/_storage), which streams the bytes into the store, so
+// they pass through the app process (though not through these handlers):
 //
 //	curl -X POST localhost:8080/uploads/direct -d '{"size":1234,"content_type":"image/png","filename":"a.png"}'
 //	curl -X PUT --data-binary @a.png -H 'Content-Type: image/png' '<data.upload.url>'

@@ -1,6 +1,7 @@
 package s3
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -366,6 +367,7 @@ func TestDocumentedCORSPolicyAllowsTheUpload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	doc = bytes.ReplaceAll(doc, []byte("\r\n"), []byte("\n")) // a Windows checkout has CRLF line endings
 	m := regexp.MustCompile("(?s)CORS rule.*?```json\n(.*?)```").FindSubmatch(doc)
 	if m == nil {
 		t.Fatal("docs/storage.md has no CORS rule in a json block")

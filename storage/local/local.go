@@ -279,9 +279,17 @@ func (s *Store) put(ctx context.Context, key string, r io.Reader, opts storage.P
 	// and the store are one step, for every process sharing the root.
 	publish := replaceFile
 	if opts.IfAbsent {
-		publish = renameNoReplace
+		publish = renameNoReplaceHook
 	}
-	if err := publish(tmp.Name(), dst); err != nil {
+	var leftover *leftoverError
+	if err := publish(tmp.Name(), dst); errors.As(err, &leftover) {
+		// Published (a hard link): only the temporary name remains, in this
+		// store's work directory. The Put has happened; say so, and let the
+		// warning hook report the stray file.
+		if s.warn != nil {
+			s.warn("local storage: an object was stored, but its temporary file could not be removed", leftover)
+		}
+	} else if err != nil {
 		if opts.IfAbsent && errors.Is(err, fs.ErrExist) {
 			return storage.ObjectInfo{}, storage.ErrExists
 		}
