@@ -52,6 +52,16 @@ func registerModel(host Host, model any, opts Options) error {
 	if err != nil {
 		return err
 	}
+	// The data plane addresses one row by one column: loadByID filters on
+	// m.pkColumn and the update guard covers m.meta.PK alone. A model whose
+	// primary key spans several columns would register cleanly, then read the
+	// first row that matches, turn a PATCH of the second key column into an
+	// insert, and delete whichever row the single key column selects (#453).
+	// Refuse the model here instead of corrupting rows at request time; the
+	// generator already rejects the same shape.
+	if len(sch.PrimaryFields) > 1 {
+		return errCompositePrimaryKey(sch.ModelType.Name())
+	}
 
 	derived := len(opts.Fields) == 0
 	if derived {

@@ -157,6 +157,17 @@ version.
   `gombit make resource --help` describes the model-first layout and every
   field kind, and `gombit worker --help` shows `--metrics-addr`
   ([#447](https://github.com/gombit-dev/gombit/pull/447)).
+- `admin.Register` refuses a model whose primary key spans several columns
+  (`admin: Membership has a composite primary key, which is not supported`).
+  Such a model used to register without error, and the data plane then
+  addressed rows by the first key column alone: a detail request served the
+  first of several matching rows, a `PATCH` that changed a second key column
+  inserted a new row, and a `DELETE` removed whichever row the single column
+  matched. `gombit make resource` already rejected the shape, so a scaffolded
+  app never hit it; an app that registered a hand-written composite-key model
+  now fails `Register` at startup instead of writing the wrong row. Give such
+  a model a single-column primary key, or keep it out of the admin registry
+  ([#453](https://github.com/gombit-dev/gombit/issues/453)).
 
 ## [0.6.0] — 2026-09-28
 
