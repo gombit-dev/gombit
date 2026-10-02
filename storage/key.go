@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"mime"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/gombit-dev/gombit/internal/storagekey"
@@ -172,6 +173,8 @@ func ValidateURLOptions(opts URLOptions) error {
 	switch {
 	case opts.Signed && opts.Expires <= 0:
 		return fmt.Errorf("%w: a signed URL needs a positive lifetime, not %s", ErrInvalidOptions, opts.Expires)
+	case opts.Signed && opts.Expires%time.Second != 0:
+		return fmt.Errorf("%w: a signed URL lives a whole number of seconds (S3's precision), not %s", ErrInvalidOptions, opts.Expires)
 	case !opts.Signed && opts.Expires != 0:
 		return fmt.Errorf("%w: a public URL has no lifetime; use SignedURL", ErrInvalidOptions)
 	case opts.Expires > MaxURLExpiry:

@@ -104,8 +104,8 @@ func (s *Signer) Path() string { return s.path }
 
 // URL returns key's URL, as Storage.URL specifies: a public one for a
 // public key (ErrNotPublic for a private one), or a signed one that
-// expires after storage.RoundExpiry(opts.Expires), at a whole Unix second
-// no earlier than that. key and opts must
+// expires opts.Expires (whole seconds) after the start of the second it is
+// signed in, as S3's SigV4 counts it. key and opts must
 // be valid (a driver checks them first).
 func (s *Signer) URL(key string, opts storage.URLOptions) (string, error) {
 	if err := storage.ValidateKey(key); err != nil {
@@ -142,17 +142,12 @@ func (s *Signer) mac(kind, key string, parts ...string) string {
 	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
-// expiry returns the Unix second a URL living ttl from now expires at:
-// ttl rounded up to a whole second (storage.RoundExpiry, as on every
-// driver), then the end rounded up to a whole second, so it is never
-// shorter than asked.
+// expiry returns the Unix second a URL living ttl (whole seconds, as
+// storage.ValidateURLOptions requires) expires at, counted from the start
+// of the second it is signed in, as S3's SigV4 counts X-Amz-Expires from
+// X-Amz-Date.
 func (s *Signer) expiry(ttl time.Duration) int64 {
-	end := s.now().Add(storage.RoundExpiry(ttl))
-	expires := end.Unix()
-	if end.After(time.Unix(expires, 0)) {
-		expires++
-	}
-	return expires
+	return s.now().Unix() + int64(ttl/time.Second)
 }
 
 // UploadURL returns a signed direct upload (storage.DirectUploader): a PUT
