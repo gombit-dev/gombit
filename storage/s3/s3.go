@@ -68,6 +68,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptrace"
+	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -611,6 +613,27 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 	return storage.Wrap("delete", key, classify(ctx, err))
 }
 
+// presignedExpiry is when the presigned URL rawURL stops working, as S3
+// computes it: X-Amz-Date (whole seconds, the signing time) plus
+// X-Amz-Expires. Read from the URL itself, it is exactly what S3 enforces,
+// not a second clock reading that could fall in another second.
+func presignedExpiry(rawURL string) (time.Time, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return time.Time{}, err
+	}
+	q := u.Query()
+	date, err := time.Parse("20060102T150405Z", q.Get("X-Amz-Date"))
+	if err != nil {
+		return time.Time{}, fmt.Errorf("s3 storage: presigned URL without a valid X-Amz-Date: %w", err)
+	}
+	secs, err := strconv.ParseInt(q.Get("X-Amz-Expires"), 10, 64)
+	if err != nil || secs <= 0 {
+		return time.Time{}, fmt.Errorf("s3 storage: presigned URL without a valid X-Amz-Expires (%q)", q.Get("X-Amz-Expires"))
+	}
+	return date.Add(time.Duration(secs) * time.Second), nil
+}
+
 // URL implements storage.Storage. A public URL is PublicURL + "/" + the
 // escaped object key, for a key under PublicPrefix (storage.ErrNotPublic
 // otherwise; storage.ErrUnsupported without a PublicURL). A signed URL is a
@@ -642,7 +665,7 @@ func (s *Store) URL(ctx context.Context, key string, opts storage.URLOptions) (s
 	req, err := s.presign.PresignGetObject(ctx, &awss3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(full),
-	}, awss3.WithPresignExpires(storage.RoundExpiry(opts.Expires))) // whole seconds, at least one: X-Amz-Expires
+	}, awss3.WithPresignExpires(opts.Expires)) // whole seconds (URLOptions): X-Amz-Expires
 	if err != nil {
 		return "", storage.Wrap("url", key, classify(ctx, err))
 	}
@@ -674,8 +697,6 @@ func (s *Store) UploadURL(ctx context.Context, key string, opts storage.UploadUR
 	}
 	// The signature is dated after now (second precision): an expiry
 	// counted from now, truncated, is never later than S3's.
-	ttl := storage.RoundExpiry(opts.Expires) // whole seconds, at least one: X-Amz-Expires
-	expires := time.Now().Truncate(time.Second).Add(ttl)
 	req, err := s.presign.PresignPutObject(ctx, &awss3.PutObjectInput{
 		Bucket:        aws.String(s.bucket),
 		Key:           aws.String(full),
@@ -685,9 +706,13 @@ func (s *Store) UploadURL(ctx context.Context, key string, opts storage.UploadUR
 		// Single use: S3 stores it only where no object is (412
 		// otherwise), so an upload checked after it cannot be replaced.
 		IfNoneMatch: aws.String("*"),
-	}, awss3.WithPresignExpires(ttl))
+	}, awss3.WithPresignExpires(opts.Expires)) // whole seconds (URLOptions): X-Amz-Expires
 	if err != nil {
 		return storage.UploadRequest{}, storage.Wrap("upload url", key, classify(ctx, err))
+	}
+	expires, err := presignedExpiry(req.URL)
+	if err != nil {
+		return storage.UploadRequest{}, storage.Wrap("upload url", key, err)
 	}
 	header := map[string]string{}
 	for name, values := range req.SignedHeader {

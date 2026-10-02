@@ -66,20 +66,23 @@ func TestURLLifetimeIsBounded(t *testing.T) {
 	}
 }
 
-// TestRoundExpiry: a lifetime is rounded up to a whole second, never down,
-// at least one second, and MaxURLExpiry stays what it is.
-func TestRoundExpiry(t *testing.T) {
-	for in, want := range map[time.Duration]time.Duration{
-		time.Nanosecond:                         time.Second,
-		time.Millisecond:                        time.Second,
-		time.Second:                             time.Second,
-		1500 * time.Millisecond:                 2 * time.Second,
-		time.Minute:                             time.Minute,
-		storage.MaxURLExpiry - time.Millisecond: storage.MaxURLExpiry,
-		storage.MaxURLExpiry:                    storage.MaxURLExpiry,
+// TestSignedURLLifetimeIsWholeSeconds: a signed URL's lifetime is a whole
+// number of seconds, from one second to MaxURLExpiry, as S3 counts it; a
+// finer one is refused rather than counted differently by each driver.
+func TestSignedURLLifetimeIsWholeSeconds(t *testing.T) {
+	for ttl, valid := range map[time.Duration]bool{
+		time.Second:                             true,
+		time.Minute:                             true,
+		storage.MaxURLExpiry:                    true,
+		time.Nanosecond:                         false,
+		time.Millisecond:                        false,
+		1500 * time.Millisecond:                 false,
+		storage.MaxURLExpiry - time.Millisecond: false,
+		storage.MaxURLExpiry + time.Second:      false,
 	} {
-		if got := storage.RoundExpiry(in); got != want {
-			t.Errorf("RoundExpiry(%s) = %s, want %s", in, got, want)
+		err := storage.ValidateURLOptions(storage.SignedURL(ttl))
+		if (err == nil) != valid || (err != nil && !errors.Is(err, storage.ErrInvalidOptions)) {
+			t.Errorf("SignedURL(%s): %v, want valid = %v", ttl, err, valid)
 		}
 	}
 }
