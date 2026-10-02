@@ -143,6 +143,24 @@ func TestSanitizeErrorRemovesSecrets(t *testing.T) {
 	}
 }
 
+// TestSanitizeErrorRemovesStorageSecrets: the storage secrets (the URL
+// signing key and the S3 secret access key) are known secrets too.
+func TestSanitizeErrorRemovesStorageSecrets(t *testing.T) {
+	t.Parallel()
+
+	cfg := Default()
+	cfg.Storage.URLSecret = "url-signing-secret-0123456789abcdef"
+	cfg.Storage.S3.SecretAccessKey = "s3-secret-access-key"
+
+	got := SanitizeError(errors.New("signing with url-signing-secret-0123456789abcdef as s3-secret-access-key"), cfg)
+	if strings.Contains(got, "url-signing-secret") || strings.Contains(got, "s3-secret-access-key") {
+		t.Fatalf("SanitizeError() = %q, still contains a storage secret", got)
+	}
+	if !strings.Contains(got, RedactedSecret) {
+		t.Fatalf("SanitizeError() = %q, want the secrets redacted", got)
+	}
+}
+
 func TestSanitizeErrorRemovesLibpqKeywordPassword(t *testing.T) {
 	t.Parallel()
 

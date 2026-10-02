@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gombit-dev/gombit/internal/storagekey"
+	"github.com/gombit-dev/gombit/internal/urlbase"
 )
 
 const (
@@ -1074,15 +1075,10 @@ func validateStorageLocalURL(errs *FieldErrors, raw string) {
 	if raw == "" {
 		return // no URLs
 	}
-	u, err := url.Parse(raw)
-	ok := err == nil && u.RawQuery == "" && u.Fragment == "" && u.User == nil && u.Path != "" && u.Path != "/" && !strings.HasSuffix(raw, "/")
-	if ok && u.IsAbs() {
-		ok = (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
-	} else if ok {
-		ok = u.Host == "" && strings.HasPrefix(raw, "/")
-	}
-	if !ok {
-		*errs = append(*errs, FieldError{Field: "Storage.Local.URL", Env: envStorageLocalURL, Value: raw, Message: "must be a path such as /_storage, or an http(s) URL ending in one, without a trailing '/', query, or fragment"})
+	// The rule presign.New applies (internal/urlbase): one rule, so a URL
+	// that validates here is one the local and memory drivers can serve.
+	if _, problem := urlbase.Base(raw); problem != "" {
+		*errs = append(*errs, FieldError{Field: "Storage.Local.URL", Env: envStorageLocalURL, Value: raw, Message: "must be a path such as /_storage, or an http(s) URL ending in one, without a trailing '/', query, or fragment (" + problem + ")"})
 	}
 }
 
@@ -1104,8 +1100,7 @@ func validateS3StorageConfig(errs *FieldErrors, cfg S3StorageConfig) {
 		*errs = append(*errs, FieldError{Field: "Storage.S3.AccessKeyID", Env: envStorageS3AccessKeyID, Message: "set both GOMBIT_STORAGE_S3_ACCESS_KEY_ID and GOMBIT_STORAGE_S3_SECRET_ACCESS_KEY, or neither (the default AWS credential chain)"})
 	}
 	if cfg.PublicURL != "" {
-		u, err := url.Parse(cfg.PublicURL)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.RawQuery != "" || u.Fragment != "" || u.User != nil || strings.HasSuffix(cfg.PublicURL, "/") {
+		if problem := urlbase.Root(cfg.PublicURL); problem != "" { // the rule s3.New applies
 			*errs = append(*errs, FieldError{Field: "Storage.S3.PublicURL", Env: envStorageS3PublicURL, Value: cfg.PublicURL, Message: "must be an http or https URL without a trailing '/', query, or fragment"})
 		}
 	}
