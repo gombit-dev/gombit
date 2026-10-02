@@ -133,9 +133,10 @@ type Policy struct {
 	// Metadata is stored with every file, besides FilenameMetadata (which
 	// it must not set).
 	Metadata map[string]string
-	// GrantExpiry is how long a direct upload grant (Authorize) works
-	// (DefaultGrantExpiry when zero; whole seconds, at most
-	// storage.MaxURLExpiry, as for any signed URL).
+	// GrantExpiry is how long a direct upload grant (Authorize) works,
+	// counted from the start of the second it is signed in, as for any
+	// signed URL (DefaultGrantExpiry when zero; whole seconds, at most
+	// storage.MaxURLExpiry).
 	GrantExpiry time.Duration
 }
 

@@ -638,7 +638,8 @@ func presignedExpiry(rawURL string) (time.Time, error) {
 // escaped object key, for a key under PublicPrefix (storage.ErrNotPublic
 // otherwise; storage.ErrUnsupported without a PublicURL). A signed URL is a
 // presigned GetObject request (SigV4 query parameters) valid for
-// opts.Expires; it carries the credentials' authority, so it works for a
+// opts.Expires counted from its X-Amz-Date, the signing second (see
+// storage.SignedURL); it carries the credentials' authority, so it works for a
 // private object, and stops working when it expires or the credentials
 // are revoked (a URL signed with temporary credentials, such as an IAM
 // role's, also ends when they do).

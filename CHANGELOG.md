@@ -94,7 +94,10 @@ version.
   - `URL(ctx, key, storage.PublicURL())` gives a permanent URL for a public
     object, and `ErrNotPublic` for a private one;
   - `URL(ctx, key, storage.SignedURL(ttl))` gives a URL to any object that
-    expires after `ttl`, at most 7 days (`storage.MaxURLExpiry`);
+    expires `ttl` after the start of the second it is signed in, as S3
+    counts it: it works for more than `ttl` minus a second and at most
+    `ttl`. `ttl` is a whole number of seconds, at most 7 days
+    (`storage.MaxURLExpiry`);
   - on S3, signed URLs are presigned `GetObject` requests, and public URLs
     sit under `GOMBIT_STORAGE_S3_PUBLIC_URL` (a CDN, or the bucket, with a
     bucket policy for the public prefix);
