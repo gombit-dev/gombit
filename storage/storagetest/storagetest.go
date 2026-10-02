@@ -854,7 +854,9 @@ func checkOpenFollowsContext(t testing.TB, s storage.Storage) {
 func checkURL(t testing.TB, s storage.Storage) {
 	put(t, s, "linked/file.txt", []byte("x"), storage.PutOptions{})
 	for _, key := range []string{"linked/file.txt", "linked/never-stored.txt"} {
-		for _, opts := range []storage.URLOptions{storage.PublicURL(), storage.SignedURL(time.Minute)} {
+		// The bounds of a signed URL's lifetime too: a nanosecond (which
+		// every driver rounds up to a second) and MaxURLExpiry are valid.
+		for _, opts := range []storage.URLOptions{storage.PublicURL(), storage.SignedURL(time.Minute), storage.SignedURL(time.Nanosecond), storage.SignedURL(storage.MaxURLExpiry)} {
 			checkOneURL(t, s, key, opts)
 		}
 	}

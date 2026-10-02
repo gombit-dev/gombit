@@ -287,9 +287,21 @@ func TestSignedURLs(t *testing.T) {
 	if code, _ := fetch(t, tampered); code != http.StatusForbidden {
 		t.Fatalf("GET with a longer expiry = %d, want 403", code)
 	}
+	// A sub-second lifetime is a valid URL that lives a second
+	// (storage.RoundExpiry), not an X-Amz-Expires=0 that S3 refuses.
+	brief, err := s.URL(ctx, key, storage.SignedURL(time.Millisecond))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, body := fetch(t, brief); code != http.StatusOK || body != "secret bytes" {
+		t.Fatalf("GET a 1ms signed URL right away = %d %q, want 200", code, body)
+	}
 	time.Sleep(3 * time.Second)
 	if code, _ := fetch(t, u); code != http.StatusForbidden {
 		t.Fatalf("GET after the expiry = %d, want 403", code)
+	}
+	if code, _ := fetch(t, brief); code != http.StatusForbidden {
+		t.Fatalf("GET the 1ms signed URL 3s later = %d, want 403", code)
 	}
 	if _, err := s.URL(ctx, key, storage.PublicURL()); !errors.Is(err, storage.ErrNotPublic) {
 		t.Fatalf("a public URL for a private key = %v, want ErrNotPublic", err)
