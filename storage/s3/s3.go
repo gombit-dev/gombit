@@ -350,12 +350,7 @@ func (s *Store) put(ctx context.Context, key string, r io.Reader, opts storage.P
 	}
 	size, etag, err := s.upload(ctx, objKey, storage.PutReader(ctx, r, opts), opts.Size, contentType, encodeMetadata(opts.Metadata), ifNoneMatch)
 	if err != nil {
-		if opts.IfAbsent {
-			if cerr := conditionFailed(err); cerr != nil {
-				return storage.ObjectInfo{}, cerr
-			}
-		}
-		return storage.ObjectInfo{}, classifyPut(ctx, err)
+		return storage.ObjectInfo{}, classifyPut(ctx, err, opts.IfAbsent)
 	}
 	return storage.ObjectInfo{
 		Key:         key,
@@ -571,11 +566,14 @@ func conditionFailed(err error) error {
 	return nil
 }
 
-// classifyPut classifies an upload's failure with classify, then adds what
-// the upload knows: that the outcome is unknown (storage.ErrUnknownOutcome),
-// and that a multipart upload could not be aborted (*AbortError). Neither
-// changes the classification of the failure itself.
-func classifyPut(ctx context.Context, err error) error {
+// classifyPut classifies an upload's failure: a conditional write's refusal
+// (ifAbsent: storage.ErrExists, or a transient conflict) with
+// conditionFailed, anything else with classify. It then adds what the
+// upload knows: that the outcome is unknown (storage.ErrUnknownOutcome),
+// and that a multipart upload could not be aborted (*AbortError), which a
+// refusal keeps too. Neither changes the classification of the failure
+// itself.
+func classifyPut(ctx context.Context, err error, ifAbsent bool) error {
 	var failed *abortFailed
 	var abort *AbortError
 	if errors.As(err, &failed) {
@@ -586,7 +584,13 @@ func classifyPut(ctx context.Context, err error) error {
 	if isUnknown {
 		err = unknown.err
 	}
-	out := classify(ctx, err)
+	var out error
+	if ifAbsent {
+		out = conditionFailed(err) // a conditional write's refusal, if it is one
+	}
+	if out == nil {
+		out = classify(ctx, err)
+	}
 	if isUnknown {
 		out = errors.Join(storage.ErrUnknownOutcome, out)
 	}

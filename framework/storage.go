@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"fmt"
+	"net/http"
 	"net/url"
 	"path/filepath"
 	"strings"
@@ -174,14 +175,17 @@ func mountStorageURLs(router *gin.Engine, store storage.Storage, signer *presign
 }
 
 // storageRoute is the storage route New mounted (presign.Handler, for
-// the local and memory drivers' URLs), if it mounted one: the runtime
-// middleware leaves requests under it alone, and only those. CSRF (a
-// direct upload is authorized by its signed URL alone, with no cookie
-// involved, as a presigned S3 URL is), the JSON body limit (the signed
-// length bounds it), and input sanitization (the file is stored byte for
-// byte). Route ownership is what the app mounted, not what the
-// configuration names: with WithStorage New mounts nothing, and a route an
-// app registers under GOMBIT_STORAGE_LOCAL_URL keeps every protection.
+// the local and memory drivers' URLs), if it mounted one. The runtime
+// middleware leaves its signed uploads alone, and nothing else: a PUT
+// under its path, which the route's catch-all owns outright (Gin refuses
+// any other PUT route there). Those uploads need it: CSRF (a direct upload
+// is authorized by its signed URL alone, with no cookie involved, as a
+// presigned S3 URL is), the JSON body limit (the signed length bounds it),
+// and input sanitization (the file is stored byte for byte). Ownership is
+// what New mounted, by method and path, not what the configuration names:
+// with WithStorage New mounts nothing, and a route an app registers under
+// GOMBIT_STORAGE_LOCAL_URL with another method (a POST hook, say) keeps
+// every protection.
 type storageRoute struct{ prefix atomic.Pointer[string] }
 
 // mounted records the path presign.Handler was mounted under (nothing for
@@ -194,19 +198,21 @@ func (r *storageRoute) mounted(path string) {
 	r.prefix.Store(&p)
 }
 
-// owns reports whether path is under the mounted storage route.
-func (r *storageRoute) owns(path string) bool {
-	if r == nil {
+// owns reports whether a request with method and path is a signed upload
+// to the mounted storage route: a PUT under its path.
+func (r *storageRoute) owns(method, path string) bool {
+	if r == nil || method != http.MethodPut {
 		return false
 	}
 	p := r.prefix.Load()
 	return p != nil && strings.HasPrefix(path, *p)
 }
 
-// skipStorageRoute runs h except for requests to the mounted storage route.
+// skipStorageRoute runs h except for signed uploads to the mounted storage
+// route.
 func skipStorageRoute(route *storageRoute, h gin.HandlerFunc) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if route.owns(c.Request.URL.Path) {
+		if route.owns(c.Request.Method, c.Request.URL.Path) {
 			c.Next()
 			return
 		}
