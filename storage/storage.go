@@ -150,9 +150,14 @@ type URLOptions struct {
 // credentials.
 func PublicURL() URLOptions { return URLOptions{} }
 
-// SignedURL asks for a URL that grants access to the object until ttl has
-// passed. ttl must be positive: URL fails with ErrInvalidOptions otherwise,
-// rather than returning anything longer-lived.
+// SignedURL asks for a URL that grants access to the object for ttl,
+// counted from the start of the second the URL is signed in, as S3 counts
+// a presigned URL's lifetime: it expires at that second plus ttl, so it
+// works for more than ttl minus one second and at most ttl after URL
+// returns (less any time URL itself takes). ttl must be a positive whole
+// number of seconds, at most MaxURLExpiry: URL fails with
+// ErrInvalidOptions otherwise, rather than returning anything longer-lived
+// or counted differently by another driver.
 func SignedURL(ttl time.Duration) URLOptions { return URLOptions{Signed: true, Expires: ttl} }
 
 // KnownSize is a PutOptions.Size of exactly n bytes.
