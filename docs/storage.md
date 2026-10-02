@@ -105,7 +105,8 @@ prefix: `public/avatars/<id>.png`.
 // A public object: a permanent URL, for <img src>, a CDN, or a feed.
 u, err := app.Storage().URL(ctx, "public/logos/acme.png", storage.PublicURL())
 
-// A private object: a URL that stops working after 15 minutes, so the
+// A private object: a URL that stops working within 15 minutes (15 minutes
+// after the start of the second it is signed in), so the
 // browser downloads straight from storage without the app proxying the bytes.
 if !canRead(user, doc) { // authorization stays in the application
 	return contract.Authorization("")
