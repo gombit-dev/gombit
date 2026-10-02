@@ -134,7 +134,8 @@ type Policy struct {
 	// it must not set).
 	Metadata map[string]string
 	// GrantExpiry is how long a direct upload grant (Authorize) works
-	// (DefaultGrantExpiry when zero; at most storage.MaxURLExpiry).
+	// (DefaultGrantExpiry when zero; whole seconds, at most
+	// storage.MaxURLExpiry, as for any signed URL).
 	GrantExpiry time.Duration
 }
 
@@ -172,8 +173,8 @@ func (p Policy) validate() error {
 			return fmt.Errorf(`upload: Policy.Types entry %q: want a lowercase "type/subtype", "type/*", or "*/*"`, t)
 		}
 	}
-	if p.GrantExpiry < 0 || p.GrantExpiry > storage.MaxURLExpiry {
-		return fmt.Errorf("upload: Policy.GrantExpiry must be between 0 (the default) and %s", storage.MaxURLExpiry)
+	if p.GrantExpiry < 0 || p.GrantExpiry > storage.MaxURLExpiry || p.GrantExpiry%time.Second != 0 {
+		return fmt.Errorf("upload: Policy.GrantExpiry must be whole seconds between 0 (the default) and %s, not %s", storage.MaxURLExpiry, p.GrantExpiry)
 	}
 	if _, ok := p.Metadata[FilenameMetadata]; ok {
 		return fmt.Errorf("upload: Policy.Metadata must not set %q; the upload's filename goes there", FilenameMetadata)
