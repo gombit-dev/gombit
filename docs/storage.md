@@ -117,7 +117,10 @@ u, err := app.Storage().URL(ctx, doc.FileKey, storage.SignedURL(15*time.Minute))
 - `SignedURL(ttl)` works for any key, public or private. `ttl` must be
   positive and at most `storage.MaxURLExpiry` (7 days, S3's limit): anything
   else is `ErrInvalidOptions`, so a zero or negative lifetime never becomes a
-  permanent URL.
+  permanent URL. A signed URL expires even when its key is public. Past its
+  expiry, or with an altered signature, it is refused. The same key without
+  the query still reads the object, because the key itself is public: a
+  signed URL doesn't make a public object private.
 - `URL` doesn't check that the object exists (a URL may name a key that isn't
   stored yet), and it doesn't authorize anyone. Decide who may have the URL
   before asking for it. Anyone holding a signed URL can use it until it
@@ -146,10 +149,14 @@ Private objects need nothing: they stay unreadable without credentials, and
 a signed URL carries them.
 
 **Local and memory.** `framework.New` mounts `GET` and `HEAD` at
-`GOMBIT_STORAGE_LOCAL_URL`. That is a path (`/_storage`), or an absolute URL
-when the files are served from another address. Its behavior:
+`GOMBIT_STORAGE_LOCAL_URL`. That is a plain path (`/_storage`, without
+percent-escapes), or an absolute http(s) URL with one, when the files are
+served from another address. `gombit config` and the driver check it with the
+same rule. Its behavior:
 
-- A public key is served to anyone.
+- A public key is served to anyone without a signature. A request that does
+  carry one (an `expires` or `signature` parameter) is checked like any signed
+  URL, public key or not.
 - A private key needs a signed URL that hasn't expired. Anything else is a
   D10 `403`: a missing, wrong or altered signature, or another key.
 - A missing object is `404`.

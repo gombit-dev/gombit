@@ -101,8 +101,10 @@ func SanitizeSecretText(text string, cfg Config) string {
 	if password := cfg.Cache.Redis.Password; password != "" {
 		text = strings.ReplaceAll(text, password, RedactedSecret)
 	}
-	if secret := cfg.Auth.JWTSecret; secret != "" {
-		text = strings.ReplaceAll(text, secret, RedactedSecret)
+	for _, secret := range []string{cfg.Auth.JWTSecret, cfg.Storage.URLSecret, cfg.Storage.S3.SecretAccessKey} {
+		if secret != "" {
+			text = strings.ReplaceAll(text, secret, RedactedSecret)
+		}
 	}
 	return text
 }
