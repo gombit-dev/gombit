@@ -408,6 +408,46 @@ func TestDirectUploads(t *testing.T) {
 	}
 }
 
+// TestDirectUploadIsAbortedAtItsDeadline: a PUT still writing
+// SignedUploadTimeout after its URL expired is aborted before it
+// publishes, so nothing it stores outlives the claim's lease
+// (storage/claims).
+func TestDirectUploadIsAbortedAtItsDeadline(t *testing.T) {
+	store, srv, _ := setup(t)
+	ctx := context.Background()
+	// The URL expires in 10 minutes; its deadline is 200ms from now.
+	defer presign.SetUploadTimeout(-10*time.Minute + 200*time.Millisecond)()
+	req, err := store.UploadURL(ctx, "uploads/slow", storage.UploadURLOptions{Expires: 10 * time.Minute, Size: 5, ContentType: "text/plain"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr, pw := io.Pipe()
+	go func() {
+		_, _ = pw.Write([]byte("he"))
+		time.Sleep(2 * time.Second) // still sending at the deadline
+		_, _ = pw.Write([]byte("llo"))
+		_ = pw.Close()
+	}()
+	r, err := http.NewRequest(req.Method, srv.URL+req.URL, pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.ContentLength = 5
+	for k, v := range req.Header {
+		r.Header.Set(k, v)
+	}
+	resp, err := srv.Client().Do(r)
+	if err == nil {
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("a PUT past its deadline = %d, want 403", resp.StatusCode)
+		}
+	}
+	if ok, _ := storage.Exists(ctx, store, "uploads/slow"); ok {
+		t.Fatal("a PUT past its deadline was published")
+	}
+}
+
 func TestDirectUploadOfAnEmptyObject(t *testing.T) {
 	store, srv, _ := setup(t)
 	req, err := store.UploadURL(context.Background(), "uploads/empty", storage.UploadURLOptions{Expires: time.Minute})

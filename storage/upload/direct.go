@@ -9,6 +9,7 @@ import (
 	"mime"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gombit-dev/gombit/storage"
 )
@@ -55,7 +56,13 @@ func Authorize(ctx context.Context, store storage.Storage, p Policy, size int64,
 	if err != nil {
 		return Grant{}, err
 	}
-	if err := claim(ctx, p, key); err != nil {
+	ttl := p.GrantExpiry
+	if ttl == 0 {
+		ttl = DefaultGrantExpiry
+	}
+	// The PUT may start until the grant expires, and the app's storage
+	// route aborts it storage.SignedUploadTimeout later: the claim's lease.
+	if err := claim(ctx, p, key, time.Now().Add(ttl+storage.SignedUploadTimeout)); err != nil {
 		return Grant{}, err
 	}
 	md := maps.Clone(p.Metadata)
@@ -64,10 +71,6 @@ func Authorize(ctx context.Context, store storage.Storage, p Policy, size int64,
 			md = map[string]string{}
 		}
 		fitMetadata(md, filename)
-	}
-	ttl := p.GrantExpiry
-	if ttl == 0 {
-		ttl = DefaultGrantExpiry
 	}
 	req, err := storage.UploadURL(ctx, store, key, storage.UploadURLOptions{
 		Expires:     ttl,

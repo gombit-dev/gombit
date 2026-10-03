@@ -225,6 +225,11 @@ func TestAuthorizeClaims(t *testing.T) {
 	if len(cl.claimed) != 1 || cl.claimed[0] != g.Key {
 		t.Fatalf("claimed %v, want the granted key %s", cl.claimed, g.Key)
 	}
+	// Leased until the grant expires plus the time a PUT started by then
+	// may take (storage.SignedUploadTimeout).
+	if want := g.Request.Expires.Add(storage.SignedUploadTimeout); cl.leases[0].Before(want) {
+		t.Fatalf("lease = %s, want at least %s", cl.leases[0], want)
+	}
 	boom := errors.New("claims: database down")
 	cl.pendingErr = boom
 	if _, err := upload.Authorize(ctx, store, p, int64(len(png)), "image/png", "a.png"); !errors.Is(err, boom) {

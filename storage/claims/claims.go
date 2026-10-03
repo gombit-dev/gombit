@@ -19,7 +19,7 @@
 //	Pending         (none)  -> pending   when an upload's key is generated
 //	Hold     (tx)   pending -> held      in the transaction writing the record
 //	Release  (tx)   held    -> deleting  in the transaction deleting the record
-//	Abandon         pending -> deleting  then the object, then the row
+//	Abandon         pending -> deleting  then the object is deleted
 //	Sweep           pending -> deleting  for stale pending claims, likewise
 //
 // Only a deleting claim's object is ever deleted, and a key reaches
@@ -29,6 +29,16 @@
 // condition no longer matches. A record whose insert committed although the
 // caller saw an error holds its key, so the cleanup that follows finds it
 // held and keeps the object.
+//
+// The other writer is the upload itself: a claim comes before its object,
+// and an upload still streaming can publish the object after the claim was
+// abandoned. So every claim has a lease (Pending's until): the time after
+// which no writer publishes under its key any more. The upload helpers
+// enforce it (storage/upload aborts its Put at the lease; the app's
+// /_storage route aborts a signed PUT at storage.SignedUploadTimeout after
+// its URL expired). A deleting claim stays as a tombstone until its lease
+// (plus LeaseMargin) has passed: each Sweep deletes its object again, so an
+// object published late is still deleted, and only then is the row removed.
 //
 // Use CreateWith to write a record that refers to new uploads, Update to
 // change which files a record refers to, DeleteWith to delete a record, and
@@ -61,8 +71,17 @@ type Claim struct {
 	// CreatedAt is when the key was claimed; Sweep abandons a pending claim
 	// once it is older than the sweep's grace period.
 	CreatedAt time.Time `gorm:"index:idx_storage_claims_sweep,priority:2"`
-	UpdatedAt time.Time
+	// LeaseUntil is when the lease ends: no writer publishes an object
+	// under the key after it, so a deleting claim is kept (a tombstone)
+	// until then.
+	LeaseUntil time.Time
+	UpdatedAt  time.Time
 }
+
+// LeaseMargin is how long after a claim's lease its tombstone is kept: for
+// clocks that disagree across servers and for a publish request already
+// sent when the lease ended.
+const LeaseMargin = 5 * time.Minute
 
 // MaxKeyLen is the longest key a claim can hold, in bytes: shorter than
 // storage keys may be (1024), to fit a primary key on every database
@@ -135,14 +154,15 @@ func New(db *gorm.DB, store storage.Storage, opts ...Option) *Claims {
 }
 
 // Pending claims key for an upload about to store an object under it, which
-// no record refers to yet. A key that already has a claim fails with
-// ErrClaimed, and one longer than MaxKeyLen with ErrKeyTooLong. Uploads
-// call it through upload.Policy.Claims.
-func (c *Claims) Pending(ctx context.Context, key string) error {
+// no record refers to yet. until is the lease: the writer will not publish
+// the object after it (storage/upload enforces that). A key that already
+// has a claim fails with ErrClaimed, and one longer than MaxKeyLen with
+// ErrKeyTooLong. Uploads call it through upload.Policy.Claims.
+func (c *Claims) Pending(ctx context.Context, key string, until time.Time) error {
 	if len(key) > MaxKeyLen {
 		return fmt.Errorf("%w: %d bytes, more than %d", ErrKeyTooLong, len(key), MaxKeyLen)
 	}
-	res := c.db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&Claim{Key: key, State: Pending})
+	res := c.db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&Claim{Key: key, State: Pending, LeaseUntil: until})
 	if res.Error != nil {
 		return fmt.Errorf("claims: pending %q: %w", key, res.Error)
 	}
@@ -257,7 +277,7 @@ func (c *Claims) Update(ctx context.Context, hold, release []string, fn func(tx 
 		return err
 	}
 	for _, key := range released {
-		if err := c.Finish(dctx, key); err != nil && c.warn != nil {
+		if _, err := c.Finish(dctx, key); err != nil && c.warn != nil {
 			c.warn("claims: a record let go of a file, but deleting it failed; Sweep will retry", err)
 		}
 	}
@@ -307,9 +327,9 @@ func changed(hold, release []string) ([]string, []string) {
 }
 
 // Abandon deletes the object of key if its claim is pending (no record took
-// it): pending moves to deleting, then the object is deleted, then the
-// claim. It reports whether it deleted; a key held by a record, or with no
-// claim, is left alone (false, nil).
+// it): pending moves to deleting, then the object is deleted (Finish). It
+// reports whether it did; a key held by a record, or with no claim, is
+// left alone (false, nil).
 func (c *Claims) Abandon(ctx context.Context, key string) (bool, error) {
 	if err := transition(ctx, c.db, key, Pending, Deleting, ErrNotPending); err != nil {
 		if errors.Is(err, ErrNotPending) {
@@ -317,43 +337,56 @@ func (c *Claims) Abandon(ctx context.Context, key string) (bool, error) {
 		}
 		return false, err
 	}
-	return true, c.Finish(ctx, key)
+	_, err := c.Finish(ctx, key)
+	return true, err
 }
 
-// Finish completes a deleting claim: the object is deleted, then the claim.
-// It does nothing for a key whose claim is not deleting.
-func (c *Claims) Finish(ctx context.Context, key string) error {
+// Finish deletes the object of a deleting claim, then the claim itself,
+// unless its lease (plus LeaseMargin) has not ended: a writer may still
+// publish the object, so the claim stays as a tombstone, and the next
+// Sweep deletes the object again. It reports whether the claim is gone; it
+// does nothing for a key whose claim is not deleting.
+func (c *Claims) Finish(ctx context.Context, key string) (bool, error) {
 	var claim Claim
 	err := c.db.WithContext(ctx).Where("object_key = ? AND state = ?", key, Deleting).Take(&claim).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil
+		return true, nil
 	}
 	if err != nil {
-		return fmt.Errorf("claims: finish %q: %w", key, err)
+		return false, fmt.Errorf("claims: finish %q: %w", key, err)
 	}
+	// Read the clock before deleting: a lease that ends during the delete
+	// keeps the tombstone for one more sweep.
+	ended := !time.Now().Before(claim.LeaseUntil.Add(LeaseMargin))
 	if err := c.store.Delete(ctx, key); err != nil {
-		return fmt.Errorf("claims: delete the object of %q: %w", key, err)
+		return false, fmt.Errorf("claims: delete the object of %q: %w", key, err)
+	}
+	if !ended {
+		return false, nil
 	}
 	if err := c.db.WithContext(ctx).Where("object_key = ? AND state = ?", key, Deleting).Delete(&Claim{}).Error; err != nil {
-		return fmt.Errorf("claims: forget %q: %w", key, err)
+		return false, fmt.Errorf("claims: forget %q: %w", key, err)
 	}
-	return nil
+	return true, nil
 }
 
 // SweepResult is what Sweep did.
 type SweepResult struct {
 	Abandoned int // stale pending claims whose objects were deleted
-	Finished  int // deleting claims completed (interrupted deletes)
+	Finished  int // deleting claims completed and removed
+	Waiting   int // tombstones kept until their leases end (objects deleted again)
 	Failed    int // keys that failed (see the error), retried next time
 }
 
 // Sweep cleans up after uploads no record ever took, and after interrupted
 // deletes: it abandons every pending claim older than grace (moving it to
 // deleting first, so a Hold racing it loses or wins cleanly), and finishes
-// every deleting claim. Make grace longer than an upload's grant plus its
-// confirmation can take: a pending claim younger than that may still be
-// held. It reads claims, never lists the store: an object without a claim
-// is never touched.
+// every deleting claim, deleting its object again and removing the claim
+// once its lease has ended. Make grace longer than an upload and its
+// confirmation can take to be recorded: a pending claim younger than that
+// may still be held. (An upload still writing when its claim is abandoned
+// is safe either way: the tombstone outlives it.) Sweep reads claims and
+// never lists the store: an object without a claim is never touched.
 func (c *Claims) Sweep(ctx context.Context, grace time.Duration) (SweepResult, error) {
 	var res SweepResult
 	var errs []error
@@ -374,12 +407,16 @@ func (c *Claims) Sweep(ctx context.Context, grace time.Duration) (SweepResult, e
 		err = c.eachKey(ctx, func(db *gorm.DB) *gorm.DB {
 			return db.Where("state = ?", Deleting)
 		}, func(key string) {
-			if err := c.Finish(ctx, key); err != nil {
+			done, err := c.Finish(ctx, key)
+			switch {
+			case err != nil:
 				res.Failed++
 				errs = append(errs, err)
-				return
+			case done:
+				res.Finished++
+			default:
+				res.Waiting++
 			}
-			res.Finished++
 		})
 	}
 	if err != nil {
