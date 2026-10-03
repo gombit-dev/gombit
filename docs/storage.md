@@ -350,9 +350,13 @@ copy can no longer publish. On S3 it aborts the multipart upload, which S3
 orders against completing it: a successful abort means it never completes,
 and `NoSuchUpload` means it is over. That, and only that, is what a
 successful fence proves: the copy can never be published, so it can never
-become an object without a claim. As AWS advises, it then lists the
-upload's parts and aborts again while any are listed, and every sweep
-fences again while the claim's tombstone lasts. A listing is a snapshot,
+become an object without a claim. The fence needs only
+`s3:AbortMultipartUpload`. As AWS advises, it then lists the upload's parts
+and aborts again while any are listed, and every sweep fences again while
+the claim's tombstone lasts. That part only frees storage: it uses the
+optional `s3:ListMultipartUploadParts`, and a failure there is reported
+through the driver's warning hook (`s3.Config.Warn`, the app's logger) and
+never fails the fence. A listing is a snapshot,
 though: a part still being processed can land after the last fence. Such a
 part is never an object (it cannot be read or published), only storage
 billed to an aborted upload; a bucket lifecycle rule aborting incomplete
@@ -794,7 +798,10 @@ GOMBIT_STORAGE_S3_FORCE_PATH_STYLE=false      # true for MinIO and most S3-compa
   (`arn:aws:s3:::BUCKET/PREFIX*`), and `s3:ListBucket` on the bucket.
   Without `ListBucket`, S3 answers a request for a missing object with
   `403 Access Denied` instead of 404, and a missing object would become a 500
-  rather than a 404.
+  rather than a 404. `s3:ListMultipartUploadParts` on the objects is
+  optional: a fence (see [Cleanup](#cleanup)) uses it to free parts stored
+  after an abort, and without it leaves them to the lifecycle rule. The
+  fence itself needs only `s3:AbortMultipartUpload`.
 - **Prefix.** `GOMBIT_STORAGE_S3_PREFIX` is a valid key followed by `/`
   (`myapp/prod/`), short enough to leave room for a key: the prefix and key
   together are held to the 1024-byte key limit. It is put before every key.

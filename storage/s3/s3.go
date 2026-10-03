@@ -50,6 +50,9 @@
 // s3:ListBucket on the bucket (arn:aws:s3:::BUCKET). Without ListBucket, S3
 // answers a request for a missing object with 403 Access Denied rather than
 // 404, and the driver cannot tell a missing object from a denied one.
+// s3:ListMultipartUploadParts on the objects is optional: Fence uses it to
+// free parts stored after an abort, and without it leaves them to a
+// lifecycle rule (the fence itself needs only AbortMultipartUpload).
 //
 // S3 carries user metadata as ASCII HTTP headers. A value that is not
 // printable ASCII is sent RFC 2047 encoded (mime.BEncoding), as S3
@@ -117,6 +120,9 @@ type Config struct {
 	// bucket's own address. Empty: URL answers storage.ErrUnsupported for a
 	// public URL (signed URLs still work).
 	PublicURL string
+	// Warn, when set, is told about failures that fail no operation, such
+	// as parts Fence could not free after the upload was already fenced.
+	Warn func(msg string, err error)
 }
 
 // String describes the store without its credentials.
@@ -139,6 +145,7 @@ type Store struct {
 	prefix    string
 	public    string // PublicPrefix
 	publicURL string
+	warn      func(msg string, err error)
 	// bucketState is what a HEAD request's 404 needs: it does not say
 	// whether the object or the bucket is missing (see checkBucket).
 	bucketState bucketCheck
@@ -307,6 +314,7 @@ func New(ctx context.Context, cfg Config) (*Store, error) {
 		prefix:    cfg.Prefix,
 		public:    cfg.PublicPrefix,
 		publicURL: cfg.PublicURL,
+		warn:      cfg.Warn,
 	}, nil
 }
 
@@ -914,13 +922,17 @@ const fenceRounds = 3
 // an abort and a Complete of one upload: an abort that succeeds proves the
 // upload never completed and never will; NoSuchUpload means it is over
 // already (completed, or aborted before). Either way nothing more can be
-// published: that is what nil proves. A part request still being processed
-// may store its part after the abort, so, as AWS advises, Fence then lists
-// the upload's parts and aborts again while any are listed. A listing is a
-// snapshot, though: a part can still land after Fence returns. Such a part
-// is never an object (it cannot be read or published); a bucket lifecycle
-// rule aborting incomplete multipart uploads reclaims it. Any failure
-// proves nothing, and is returned.
+// published: that, the first abort's result, is what nil proves, and an
+// abort that fails otherwise proves nothing and is returned.
+//
+// The rest only frees storage, never a reason to fail the fence: a part
+// request still being processed may store its part after the abort, so, as
+// AWS advises, Fence lists the upload's parts (s3:ListMultipartUploadParts,
+// optional) and aborts again while any are listed. A failure there is told
+// to Config.Warn. A listing is a snapshot, and a part can still land after
+// Fence returns; such a part is never an object (it cannot be read or
+// published), and a bucket lifecycle rule aborting incomplete multipart
+// uploads reclaims it.
 func (s *Store) Fence(ctx context.Context, token string) error {
 	p, err := parsePublication(token)
 	if err != nil {
@@ -930,13 +942,20 @@ func (s *Store) Fence(ctx context.Context, token string) error {
 	if err != nil {
 		return storage.Wrap("fence", p.Key, err)
 	}
-	for range fenceRounds {
+	abort := func() error {
 		_, err := s.client.AbortMultipartUpload(ctx, &awss3.AbortMultipartUploadInput{
 			Bucket: aws.String(s.bucket), Key: aws.String(objKey), UploadId: aws.String(p.UploadID),
 		})
 		if err != nil && !isNoSuchUpload(err) {
-			return storage.Wrap("fence", p.Key, classify(ctx, err))
+			return classify(ctx, err)
 		}
+		return nil
+	}
+	if err := abort(); err != nil {
+		return storage.Wrap("fence", p.Key, err) // nothing proven
+	}
+	// Fenced. From here on, freeing parts stored after the abort.
+	for range fenceRounds {
 		out, err := s.client.ListParts(ctx, &awss3.ListPartsInput{
 			Bucket: aws.String(s.bucket), Key: aws.String(objKey), UploadId: aws.String(p.UploadID),
 		})
@@ -944,10 +963,24 @@ func (s *Store) Fence(ctx context.Context, token string) error {
 		case isNoSuchUpload(err), err == nil && len(out.Parts) == 0:
 			return nil
 		case err != nil:
-			return storage.Wrap("fence", p.Key, classify(ctx, err))
+			s.warnf("s3 storage: an upload was fenced, but its parts could not be listed to free them (a lifecycle rule aborting incomplete multipart uploads reclaims them)", storage.Wrap("fence", p.Key, classify(ctx, err)))
+			return nil
+		}
+		if err := abort(); err != nil {
+			s.warnf("s3 storage: an upload was fenced, but parts stored after the abort could not be freed (a lifecycle rule reclaims them)", storage.Wrap("fence", p.Key, err))
+			return nil
 		}
 	}
-	return storage.Wrap("fence", p.Key, fmt.Errorf("%w: parts of upload %s remain after %d aborts", storage.ErrUnavailable, p.UploadID, fenceRounds))
+	s.warnf("s3 storage: an upload was fenced, but parts remain after repeated aborts (a lifecycle rule reclaims them)",
+		storage.Wrap("fence", p.Key, fmt.Errorf("upload %s", p.UploadID)))
+	return nil
+}
+
+// warnf tells Config.Warn about msg and err, if it is set.
+func (s *Store) warnf(msg string, err error) {
+	if s.warn != nil {
+		s.warn(msg, err)
+	}
 }
 
 // Delete implements storage.Storage. S3 deletes are idempotent: deleting a

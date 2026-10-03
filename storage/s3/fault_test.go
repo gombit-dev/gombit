@@ -58,6 +58,7 @@ type fakeS3 struct {
 	aborts           int                 // AbortMultipartUpload requests seen
 	stickyGhosts     int                 // aborts that leave a ghost's parts listed (AWS: abort may need repeating)
 	etagLen          int                 // pad each part copy's ETag with this many bytes (ETags are opaque)
+	denyListParts    bool                // ListParts is AccessDenied (s3:ListMultipartUploadParts not granted)
 	manifest         []string            // the ETags the last Complete was sent
 }
 
@@ -106,6 +107,10 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.partsOf[id] = append(f.partsOf[id], etag)
 		_, _ = fmt.Fprintf(w, `<CopyPartResult><ETag>"part-%d%s"</ETag></CopyPartResult>`, n, pad)
 	case r.Method == http.MethodGet && q.Has("uploadId"): // ListParts
+		if f.denyListParts {
+			s3Error(w, http.StatusForbidden, "AccessDenied")
+			return
+		}
 		id := q.Get("uploadId")
 		n := len(f.partsOf[id])
 		if !f.uploads[id] {
@@ -245,12 +250,17 @@ func (f *fakeS3) has(key string) bool {
 }
 
 // fakeStore is a Store on f, configured as in production: the SDK's
-// default retryer (three attempts) included.
-func fakeStore(t *testing.T, f *fakeS3) *Store {
+// default retryer (three attempts) included. edit, if given, changes the
+// Config first.
+func fakeStore(t *testing.T, f *fakeS3, edit ...func(*Config)) *Store {
 	t.Helper()
 	srv := httptest.NewServer(f)
 	t.Cleanup(srv.Close)
-	s, err := New(context.Background(), Config{Endpoint: srv.URL, Region: "us-east-1", Bucket: "b", AccessKeyID: "id", SecretAccessKey: "secret", ForcePathStyle: true})
+	cfg := Config{Endpoint: srv.URL, Region: "us-east-1", Bucket: "b", AccessKeyID: "id", SecretAccessKey: "secret", ForcePathStyle: true}
+	for _, e := range edit {
+		e(&cfg)
+	}
+	s, err := New(context.Background(), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -822,5 +832,45 @@ func TestFenceProvesNoPublicationNotNoParts(t *testing.T) {
 	defer f.mu.Unlock()
 	if len(f.ghosts) != 0 {
 		t.Fatal("the late part was not reclaimed by the next fence")
+	}
+}
+
+// TestFenceNeedsOnlyAbort: with the documented least-privilege policy
+// (no s3:ListMultipartUploadParts), the abort is the fence: a denied
+// listing only leaves parts to the lifecycle rule, told to Config.Warn,
+// and never fails the fence (which would wedge every fenced claim).
+func TestFenceNeedsOnlyAbort(t *testing.T) {
+	f := newFakeS3()
+	var warned []error
+	s := fakeStore(t, f, func(c *Config) { c.Warn = func(_ string, err error) { warned = append(warned, err) } })
+	if _, err := s.Put(context.Background(), "src", strings.NewReader("bytes"), storage.PutOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	token, err := s.PreparePublish(context.Background(), "src", "dst")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	f.denyListParts = true
+	f.mu.Unlock()
+	if err := s.Fence(context.Background(), token); err != nil {
+		t.Fatalf("Fence with ListParts denied = %v; the successful abort is the fence", err)
+	}
+	if len(warned) != 1 || !strings.Contains(warned[0].Error(), "AccessDenied") {
+		t.Fatalf("warned %v; want the denied listing reported", warned)
+	}
+	if _, err := s.Publish(context.Background(), token); err == nil || f.has("dst") {
+		t.Fatal("a fenced copy was published")
+	}
+	// The abort itself is still required: without it nothing is proven.
+	token, err = s.PreparePublish(context.Background(), "src", "dst2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	f.refuseAbort = http.StatusForbidden
+	f.mu.Unlock()
+	if err := s.Fence(context.Background(), token); err == nil {
+		t.Fatal("Fence whose abort was denied = nil, want an error")
 	}
 }
