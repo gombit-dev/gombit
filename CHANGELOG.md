@@ -182,8 +182,10 @@ version.
       any object there whose key has no live claim, whoever stored it (a
       bucket lifecycle rule on `_staging/` is an optional backstop);
     - `storage.Publisher` (S3: a multipart upload with server-side part
-      copies, completed with the ETags S3 returned for them, and fenced by
-      aborting until no part is listed) with `storage.PreparePublish` /
+      copies, completed with the ETags S3 returned for them, its token
+      bounded by construction, a failure returning a cleanup-only token;
+      fenced by aborting, which proves the copy is never published, and
+      re-aborting while parts are listed) with `storage.PreparePublish` /
       `Publish` / `Fence`, with a conformance check;
     - only an ownable store takes part: a `storage.Publisher` or a
       `storage.BoundedWriter` (local, memory: writes end with their

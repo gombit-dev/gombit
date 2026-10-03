@@ -651,13 +651,13 @@ var _ storage.Publisher = (*Store)(nil)
 
 // Copy parts: at most maxCopyPart bytes each (S3's limit for one
 // UploadPartCopy), copyPartSize by default, and at most maxCopyParts of
-// them, so that a publication token, which records every part's ETag, stays
-// within storage.MaxPublicationToken. That covers S3's largest object
-// (5 TiB).
+// them, which covers S3's largest object (5 TiB). ETags are opaque, so the
+// publication token's size is not assumed from the part count: it is
+// checked as each ETag arrives (preparePublish).
 const (
 	maxCopyPart  = 5 << 30
 	copyPartSize = 1 << 30
-	maxCopyParts = 1100 // 1100 parts of 5 GiB cover 5 TiB; 1100 ETags (~37 bytes each) fit the token
+	maxCopyParts = 1100 // 1100 parts of 5 GiB cover 5 TiB
 )
 
 // publication is a prepared copy: the multipart upload of Key (the
@@ -665,13 +665,22 @@ const (
 // part as S3 returned it when the part was uploaded (the manifest
 // CompleteMultipartUpload is sent; AWS forbids building it from a
 // listing), and the object it will publish.
+// A cleanup token (Cleanup) names only the key and upload ID: a prepared
+// upload that can be fenced but not published, returned when preparing
+// fails with something left to abort.
 type publication struct {
 	Key         string            `json:"k"`
 	UploadID    string            `json:"u"`
+	Cleanup     bool              `json:"c,omitempty"`
 	ETags       []string          `json:"e"`
 	Size        int64             `json:"s"`
 	ContentType string            `json:"t"`
 	Metadata    map[string]string `json:"m,omitempty"`
+}
+
+// cleanupToken is p's cleanup token: its key and upload ID only.
+func (p publication) cleanupToken() (string, error) {
+	return publication{Key: p.Key, UploadID: p.UploadID, Cleanup: true}.token()
 }
 
 func (p publication) token() (string, error) {
@@ -708,10 +717,14 @@ func copyParts(size int64) (int64, error) {
 // upload of dst with src's content type and metadata, and copies src into
 // its parts server-side (UploadPartCopy; the bytes stay in S3), keeping
 // each part's ETag for the token. Nothing is published until Publish
-// completes the upload. If preparing fails, the upload is aborted; if a
-// part request went unanswered (S3 may still store the part after the
-// abort) or the abort failed, the error is returned with the token, to be
-// fenced later (Fence aborts until no part remains).
+// completes the upload. The token never exceeds
+// storage.MaxPublicationToken: its size is checked as each (opaque) ETag
+// arrives, and preparing fails as soon as the next would not fit. If
+// preparing fails, the upload is aborted; if a part request went
+// unanswered (S3 may still store the part after the abort) or the abort
+// failed, the error is returned with a cleanup token (the key and upload
+// ID only, checked to fit before any part is copied), for the caller to
+// record and Fence.
 func (s *Store) PreparePublish(ctx context.Context, src, dst string) (string, error) {
 	token, err := s.preparePublish(ctx, src, dst)
 	return token, storage.Wrap("publish", dst, err)
@@ -743,20 +756,47 @@ func (s *Store) preparePublish(ctx context.Context, src, dst string) (string, er
 	if err != nil {
 		return "", classify(ctx, err)
 	}
-	p := publication{Key: dst, UploadID: aws.ToString(created.UploadId), Size: info.Size, ContentType: info.ContentType, Metadata: info.Metadata}
+	p := publication{Key: dst, UploadID: aws.ToString(created.UploadId), ETags: []string{}, Size: info.Size, ContentType: info.ContentType, Metadata: info.Metadata}
+	// The cleanup token is what a failure returns: it must fit before
+	// anything is copied, so that a prepared upload is always recordable.
+	cleanup, cerr := p.cleanupToken()
 	fail := func(err error, inFlight bool) (string, error) {
 		// Nothing was published (only Publish completes the upload): abort
-		// it. If that proves nothing is left, the token is not needed.
+		// it. If that proves nothing is left, no token is needed.
 		err = classifyPut(ctx, s.settle(ctx, dstKey, p.UploadID, err, inFlight), false)
 		var abort *AbortError
 		if !errors.As(err, &abort) {
 			return "", err
 		}
-		token, terr := p.token()
-		if terr != nil {
-			return "", errors.Join(err, terr)
+		if cerr != nil {
+			// Unrecordable (an upload ID too long to fit any token): the
+			// error says what was left; a lifecycle rule aborting
+			// incomplete multipart uploads is the only backstop.
+			return "", errors.Join(err, cerr)
 		}
-		return token, err
+		return cleanup, err
+	}
+	if cerr != nil {
+		return fail(cerr, false)
+	}
+	// used is the token's size so far; each ETag adds its JSON encoding and
+	// a comma.
+	base, err := json.Marshal(p)
+	if err != nil {
+		return fail(err, false)
+	}
+	used := len(base)
+	addETag := func(etag string, number int32) error {
+		enc, err := json.Marshal(etag)
+		if err != nil {
+			return err
+		}
+		if used+len(enc)+1 > storage.MaxPublicationToken {
+			return fmt.Errorf("s3 storage: part %d's ETag would make the publication token larger than %d bytes", number, storage.MaxPublicationToken)
+		}
+		used += len(enc) + 1
+		p.ETags = append(p.ETags, etag)
+		return nil
 	}
 	if info.Size == 0 {
 		// UploadPartCopy copies at least a byte; an empty object is one
@@ -769,7 +809,9 @@ func (s *Store) preparePublish(ctx context.Context, src, dst string) (string, er
 		if err != nil {
 			return fail(err, sent.unanswered())
 		}
-		p.ETags = append(p.ETags, aws.ToString(out.ETag))
+		if err := addETag(aws.ToString(out.ETag), 1); err != nil {
+			return fail(err, false)
+		}
 	}
 	source := copySource(s.bucket, srcKey)
 	for number, start := int32(1), int64(0); start < info.Size; number++ {
@@ -790,10 +832,16 @@ func (s *Store) preparePublish(ctx context.Context, src, dst string) (string, er
 		if out.CopyPartResult == nil || aws.ToString(out.CopyPartResult.ETag) == "" {
 			return fail(fmt.Errorf("s3 storage: UploadPartCopy answered no ETag for part %d", number), false)
 		}
-		p.ETags = append(p.ETags, aws.ToString(out.CopyPartResult.ETag))
+		if err := addETag(aws.ToString(out.CopyPartResult.ETag), number); err != nil {
+			return fail(err, false)
+		}
 		start = end
 	}
-	return p.token()
+	token, err := p.token()
+	if err != nil {
+		return fail(err, false) // cannot happen: the size was checked part by part
+	}
+	return token, nil
 }
 
 // copySource is CopySource for objKey in bucket: each segment escaped.
@@ -822,6 +870,9 @@ func (s *Store) publish(ctx context.Context, p publication) (storage.ObjectInfo,
 	objKey, err := s.objectKey(p.Key)
 	if err != nil {
 		return storage.ObjectInfo{}, err
+	}
+	if p.Cleanup {
+		return storage.ObjectInfo{}, fmt.Errorf("%w: a cleanup token can be fenced, not published", storage.ErrInvalidOptions)
 	}
 	// The manifest is the parts as S3 acknowledged them when they were
 	// uploaded, recorded in the token.
@@ -863,10 +914,13 @@ const fenceRounds = 3
 // an abort and a Complete of one upload: an abort that succeeds proves the
 // upload never completed and never will; NoSuchUpload means it is over
 // already (completed, or aborted before). Either way nothing more can be
-// published. A part request still in progress may store its part after
-// the abort, so, as AWS advises, Fence then lists the upload's parts and
-// aborts again until none remain: nil means nothing of an unpublished copy
-// is left either. Any failure proves nothing, and is returned.
+// published: that is what nil proves. A part request still being processed
+// may store its part after the abort, so, as AWS advises, Fence then lists
+// the upload's parts and aborts again while any are listed. A listing is a
+// snapshot, though: a part can still land after Fence returns. Such a part
+// is never an object (it cannot be read or published); a bucket lifecycle
+// rule aborting incomplete multipart uploads reclaims it. Any failure
+// proves nothing, and is returned.
 func (s *Store) Fence(ctx context.Context, token string) error {
 	p, err := parsePublication(token)
 	if err != nil {
