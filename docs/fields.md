@@ -25,6 +25,8 @@ projections of that kind, not separate lists.
 | `slug` | yes | `slug` | `string` | `string`, pattern `^[-a-zA-Z0-9_]+$` |
 | `ip` | yes | `ip` | `string` | `string`, OpenAPI `format: ip` |
 | `enum` | yes | `enum(a,b)` or `enum(draft=Draft)` | `string` | `string`; the label is display-only |
+| `file` | yes | `file` | none yet (left out of the admin) | `types.File`, the object key; reads return a file object |
+| `image` | yes | `image` | none yet (left out of the admin) | `types.Image`, as `file` with image types only |
 | `relation` | yes | `belongs_to`, `has_many`, `many_to_many`, `one_to_one` | `relation` | |
 
 `time` on the command line is a **datetime** (`time.Time`), kept as a
@@ -78,6 +80,97 @@ create. A later PATCH of `""` stores null, because the default applies only
 on create. On a plain string, `""` is rejected when the format or pattern
 rejects it. Email and slug are searchable. URL and IP are exact values, so
 they are sortable and not searchable.
+
+## Storage-backed fields
+
+`file` and `image` store a file in `App.Storage()` (see [storage.md](storage.md)),
+never in a SQL column. The column holds the object key:
+
+```sh
+gombit make resource Document title:string:required attachment:file:required cover:image
+```
+
+```go
+Attachment types.File   `gorm:"size:512;not null;uniqueIndex" storage:"prefix=document/attachment/"`
+Cover      *types.Image `gorm:"size:512;uniqueIndex" storage:"prefix=document/cover/"`
+```
+
+**The policy.** The `storage` tag sets what `gombit generate` puts in the
+field's upload policy:
+
+| Setting | Meaning | Default |
+| --- | --- | --- |
+| `prefix=` | The key prefix the field owns | `<package>/<column>/` |
+| `max_bytes=` | Largest file | 10 MiB |
+| `types=` | Accepted media types, comma-separated (`image/*` style patterns allowed) | any (`*/*`) for `file`; PNG, JPEG, GIF, WebP for `image` |
+
+The types are detected from the file's bytes. `image` never accepts SVG, which
+can carry script. An unknown setting is an error, so a typo does not loosen a
+limit.
+
+**The API.** The generated handler has one extra operation per file field, and
+file fields change the create and read shapes:
+
+- `POST /<resources>/uploads/<field>` takes `{size, content_type, filename}`.
+  It checks the declared size and type against the policy, then returns
+  `{key, upload}`: a signed, single-use upload request, 15 minutes by default.
+  See [direct uploads](storage.md#direct-uploads).
+- The client sends the bytes with that request, straight to storage.
+- The create body carries the `key`: a string, or `null` for an optional file
+  with none. The create is refused unless:
+  - the key is under the field's prefix (otherwise 422);
+  - the upload exists and passes the policy, detected by its bytes (otherwise
+    422, and a refused file is deleted if no record holds it);
+  - the key's claim is still pending: no other record holds it, and the
+    upload has not expired and been swept (otherwise 409).
+- Reads return a file object: `key`, `filename`, `size`, `content_type`, and
+  `url`. The URL is permanent for keys under the public prefix and signed for
+  15 minutes otherwise. `missing` is `true` when the store no longer has the
+  file.
+
+Every read stats each file, so a list page makes one storage request per file
+per row.
+
+**Ownership.** Files are owned through [`storage/claims`](storage.md#cleanup),
+so the app needs its `storage_claims` table (apps made by `gombit new`
+migrate it). The upload grant claims its key as a staged upload: the
+client uploads to `_staging/<key>`, never to the key, and the create's
+check promotes it (copies it to the key) once it passes. The create holds
+the claims of the row's files in the insert's transaction
+(`claims.CreateWith`), so the row and its files commit together, and a
+failed insert deletes the uploads it named. The column's unique index backs
+this up: one record per file. Uploads granted but never attached stay
+`pending` until a periodic `claims.Sweep(ctx, grace)` deletes them; one sweep
+covers every field. On S3, also run `claims.SweepStaging(ctx)` for staged
+uploads that outlive their claims.
+
+A grant belongs to the field that issued it: its key is claimed for the
+field's scope (`"<package>.<column>"`, the policy's `Scope` in
+`dto.gen.go`), and the create accepts it only for that field, whatever the
+prefixes. So a file uploaded for one field cannot be attached to another,
+and each field's `BeforeUpload` decision holds.
+
+**Who may upload.** Uploading is as open as create. A `BeforeUpload(ctx, field)`
+method on the resource's hooks decides who may have a grant; the seeded
+`hooks.go` of a resource with file fields has one. On an app reachable by
+anyone, restrict it (to signed-in users, say), and run the sweep above: each
+grant lets its holder store up to the field's `max_bytes`, and an upload
+that is never attached stays stored until swept.
+
+**Frontend and admin.**
+- The generated form has a file input per field. On every submit it asks
+  for a new grant, uploads the file, and sends its key. It never reuses a
+  key from an earlier attempt: a create that fails abandons the uploads it
+  named.
+- The list links each file to its URL.
+- The admin leaves file columns out until it has a file widget (STORAGE-8).
+  Meanwhile, a required file column cannot be set there, and delete is off
+  for a model with file columns: deleting the row there would leave its
+  file held by a record that no longer exists. Asking for `Actions.Delete`
+  on such a model is a registration error.
+
+[`examples/storage`](../examples/storage/internal/document/document.go) has a
+`Document` resource with both kinds.
 
 ## Adding a kind
 

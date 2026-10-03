@@ -449,3 +449,67 @@ func TestRenderDurationTimeOfDayAndEnumLabel(t *testing.T) {
 		t.Fatalf("mui form missing clock or label:\n%s", mui)
 	}
 }
+
+func TestRenderFileAndImageFields(t *testing.T) {
+	fields, err := parseFields([]string{"attachment:file:required", "cover:image"}, "document")
+	if err != nil {
+		t.Fatalf("parseFields: %v", err)
+	}
+	name, err := parseResourceName("Document")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := newRenderContext("github.com/example/demo", name, fields, "/api/v1", "minimal", false, false)
+	model := string(mustFormatGo(renderModel(ctx)))
+	for _, want := range []string{
+		"Attachment types.File",
+		`gorm:"size:512;not null;uniqueIndex"`,
+		`storage:"prefix=document/attachment/"`,
+		"Cover      *types.Image",
+		`storage:"prefix=document/cover/"`,
+		`"github.com/gombit-dev/gombit/types"`,
+	} {
+		if !strings.Contains(model, want) {
+			t.Fatalf("model missing %q:\n%s", want, model)
+		}
+	}
+	for _, bad := range []string{"cover:image:filterable", "cover:image:sortable", "cover:image:searchable", "cover:file:default=x"} {
+		if _, err := parseFields([]string{bad}, "document"); err == nil {
+			t.Errorf("parseFields(%q) succeeded", bad)
+		}
+	}
+}
+
+// TestFileFormsUploadAfreshOnEverySubmit: the generated forms never reuse
+// an uploaded key across submits. A create that fails abandons the uploads
+// it named (storage/claims), so a retry with the same chosen File must ask
+// for a new grant and upload again, never resend the dead key.
+func TestFileFormsUploadAfreshOnEverySubmit(t *testing.T) {
+	fields, err := parseFields([]string{"attachment:file:required", "cover:image"}, "document")
+	if err != nil {
+		t.Fatal(err)
+	}
+	name, err := parseResourceName("Document")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, preset := range []string{"minimal", "mui"} {
+		ctx := newRenderContext("github.com/example/demo", name, fields, "/api/v1", preset, false, false)
+		var form string
+		if preset == "mui" {
+			form = renderMUIFormTSX(ctx)
+		} else {
+			form = renderMinimalFormTSX(ctx)
+		}
+		for _, bad := range []string{"WeakMap", "useRef", "uploaded.current"} {
+			if strings.Contains(form, bad) {
+				t.Errorf("%s form keeps uploaded keys across submits (%q):\n%s", preset, bad, form)
+			}
+		}
+		for _, want := range []string{"async function uploadAttachment(file: File)", "/api/v1/documents/uploads/attachment", "await uploadAttachment(attachmentFile)"} {
+			if !strings.Contains(form, want) {
+				t.Errorf("%s form lacks %q", preset, want)
+			}
+		}
+	}
+}

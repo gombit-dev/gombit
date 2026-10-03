@@ -599,3 +599,23 @@ func TestManualPrimaryKeyCreateAndUpdate(t *testing.T) {
 		t.Fatalf("blank string key = %#v stored=%#v", err, stored)
 	}
 }
+
+// TestFieldsFromLeavesOutFileColumns: storage-backed columns have no admin
+// widget yet, so the admin leaves them out and still registers the model.
+func TestFieldsFromLeavesOutFileColumns(t *testing.T) {
+	type document struct {
+		gorm.Model
+		Title string       `gorm:"not null"`
+		File  *types.File  `gorm:"size:512;uniqueIndex"`
+		Cover *types.Image `gorm:"size:512;uniqueIndex"`
+	}
+	fields, err := FieldsFrom(&document{})
+	if err != nil {
+		t.Fatalf("FieldsFrom: %v", err)
+	}
+	for _, f := range fields {
+		if f.Name == "file" || f.Name == "cover" {
+			t.Fatalf("file column %s was derived as %q", f.Name, f.Type)
+		}
+	}
+}

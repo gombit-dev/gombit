@@ -383,7 +383,7 @@ The type is any generated kind in [fields.md](fields.md): `string`, `text`,
 `int` / `integer`, `int64` / `integer64`, `uint` / `unsigned`, `float` /
 `float64`, `decimal`, `bool` / `boolean`, `date`, `time` / `datetime`,
 `time_of_day`, `duration`, `uuid`, `json`, `email`, `url`, `slug`, `ip`,
-`enum(value)` or `enum(value=Label)`, and the relations `belongs_to`,
+`enum(value)` or `enum(value=Label)`, `file`, `image`, and the relations `belongs_to`,
 `one_to_one`, `has_many`, and `many_to_many`. An unknown type errors with the
 list of supported scalar types (one spelling each; relation kinds are not
 listed).
@@ -404,6 +404,8 @@ Modifiers are `required`, `nullable` (the opposite of `required`), `unique`,
 | `time_of_day` | `types.TimeOfDay` | `char(8)` clock. `HH:MM`, `HH:MM:SS`, and `15:04:05+07:00` are one pattern, stored as `HH:MM:SS`. Optional is a pointer; a blank submits null |
 | `duration` | `types.Duration` | bigint nanoseconds; JSON is a Go duration (`1h30m0s`). Optional is a pointer |
 | `enum(draft=Draft)` | `string` | stored value `draft`, display label `Draft`. The API enum is the stored value |
+| `file` | `types.File` | the object key, `size:512` unique; the file lives in `App.Storage()`. An upload-grant operation per field; reads return a file object. See [fields.md § Storage-backed fields](fields.md#storage-backed-fields). Optional is a pointer |
+| `image` | `types.Image` | as `file`, accepting images only (detected from the bytes) |
 | `belongs_to:Target` | FK `TargetID` + `Target target.Target` | DTO exposes `target_id`; admin renders a picker. The FK type is the target primary key (`uint` or `uuid.UUID`). `nullable` makes the FK a pointer. `on_delete` is `restrict` (the default), `cascade`, or `set_null` |
 | `one_to_one:Target` | unique FK `TargetID` + `Target target.Target` | same wire as `belongs_to`; the foreign key is unique |
 | `has_many:Target` | `[]target.Target` | model-only, read via the admin; the child must carry the parent FK |

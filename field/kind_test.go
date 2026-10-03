@@ -20,7 +20,7 @@ func TestCatalogCoversEveryKindOnce(t *testing.T) {
 	for _, k := range []Kind{
 		String, Text, Integer, Integer64, Unsigned, Float, Decimal, Boolean,
 		Date, DateTime, TimeOfDay, Duration, UUID, JSON, Email, URL, Slug, IP,
-		Enum, Relation,
+		Enum, File, Image, Relation,
 	} {
 		if seen[k] != 1 {
 			t.Errorf("kind %q appears %d times in the catalog, want 1", k, seen[k])
@@ -170,6 +170,8 @@ func TestKindFromGoMatchesAdminInference(t *testing.T) {
 		{reflect.TypeOf(types.Duration{}), "", "duration"},
 		{reflect.TypeOf(types.JSON(nil)), "", "json"},
 		{reflect.TypeOf(types.NullJSON(nil)), "", "json"},
+		{reflect.TypeOf(types.File("")), "", ""}, // no admin widget yet
+		{reflect.TypeOf((*types.Image)(nil)), "", ""},
 	}
 	for _, tc := range cases {
 		k := KindFromGo(tc.typ, tc.dataType)
@@ -213,6 +215,31 @@ func TestPreferredGeneratorTokensParse(t *testing.T) {
 		spec, ok := Lookup(k)
 		if !ok || !spec.GeneratorReady || spec.GoType == "" {
 			t.Fatalf("preferred token %q kind %s is not an emitted scalar", tok, k)
+		}
+	}
+}
+
+// TestStorageBackedKinds: file and image come from their own Go types (a
+// plain string stays a string), have no query capabilities, and no admin
+// widget until the admin learns one.
+func TestStorageBackedKinds(t *testing.T) {
+	t.Parallel()
+	for typ, want := range map[reflect.Type]Kind{
+		reflect.TypeOf(types.File("")):  File,
+		reflect.TypeOf(types.Image("")): Image,
+		reflect.TypeOf(""):              String,
+	} {
+		if got := KindFromGo(typ, ""); got != want {
+			t.Errorf("KindFromGo(%s) = %s, want %s", typ, got, want)
+		}
+	}
+	for _, k := range []Kind{File, Image} {
+		spec, ok := Lookup(k)
+		if !ok || !spec.GeneratorReady || spec.AdminWire != "" || spec.Filterable || spec.Searchable || spec.Sortable || spec.Aggregatable {
+			t.Errorf("%s spec = %+v", k, spec)
+		}
+		if p, _, ok := ParseCLI(string(k)); !ok || p != k {
+			t.Errorf("ParseCLI(%q) = %v, %v", k, p, ok)
 		}
 	}
 }

@@ -87,6 +87,16 @@ func registerModel(host Host, model any, opts Options) error {
 
 	if opts.Actions.zero() {
 		opts.Actions = defaultActions()
+		// A storage-backed column (file, image) is owned through
+		// storage/claims, and the admin does not take part in that yet
+		// (STORAGE-8): deleting the row here would leave its file held by
+		// a record that no longer exists, never reclaimed. Delete is off
+		// for such a model until the admin deletes through the claims.
+		if hasFileColumn(sch) {
+			opts.Actions.Delete = false
+		}
+	} else if opts.Actions.Delete && hasFileColumn(sch) {
+		return fmt.Errorf("admin: %s has storage-backed (file or image) fields, which the admin cannot delete yet: it would leave their files held by a record that no longer exists (STORAGE-8); leave Actions.Delete off", opts.Slug)
 	}
 	if opts.Singular == "" {
 		if name := elem.Name(); name != "" {
@@ -552,4 +562,19 @@ func resolveFields(fields []Field, sch *schema.Schema) ([]resolvedField, []*m2mB
 		})
 	}
 	return out, bindings, hasMany, nil
+}
+
+// hasFileColumn reports whether sch has a storage-backed column (a file or
+// image field).
+func hasFileColumn(sch *schema.Schema) bool {
+	for _, sf := range sch.Fields {
+		if sf.DBName == "" {
+			continue
+		}
+		switch field.KindFromGo(sf.FieldType, string(sf.DataType)) {
+		case field.File, field.Image:
+			return true
+		}
+	}
+	return false
 }

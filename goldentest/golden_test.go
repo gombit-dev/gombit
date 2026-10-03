@@ -216,6 +216,174 @@ func TestMakeResourceScalarTypesCompiles(t *testing.T) {
 	})
 }
 
+// TestMakeResourceFileFieldsCompiles: a resource with file and image
+// fields generates a model, DTOs, and a handler (file resolution, create
+// acceptance, upload grants) that compile.
+func TestMakeResourceFileFieldsCompiles(t *testing.T) {
+	appDir := scaffoldDemo(t)
+	stdout := new(bytes.Buffer)
+	if err := resourcegen.Generate(context.Background(), resourcegen.Options{
+		WorkDir:        appDir,
+		Name:           "Document",
+		Fields:         []string{"title:string:required", "attachment:file:required", "cover:image"},
+		SkipMigrations: true,
+		Stdout:         stdout,
+		Stderr:         io.Discard,
+	}); err != nil {
+		t.Fatalf("gombit make resource (files): %v\nstdout=%s", err, stdout.String())
+	}
+	t.Run("compile", func(t *testing.T) {
+		generateAndCompileBackend(t, appDir)
+	})
+	t.Run("typecheck", func(t *testing.T) {
+		typecheckFrontend(t, appDir, true)
+	})
+	t.Run("runtime", func(t *testing.T) {
+		generateAndTestBackend(t, appDir, "internal/document/files_flow_test.go", fileFlowTest, "./internal/document/")
+	})
+}
+
+// fileFlowTest runs inside the generated app: the whole file-field flow
+// through the generated handler, on SQLite and the memory store.
+const fileFlowTest = `package document
+
+import (
+	"bytes"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
+	"strings"
+	"testing"
+
+	"github.com/gombit-dev/gombit/config"
+	"github.com/gombit-dev/gombit/database"
+	"github.com/gombit-dev/gombit/framework"
+	"github.com/gombit-dev/gombit/storage"
+	"github.com/gombit-dev/gombit/storage/claims"
+)
+
+func TestFileFieldFlow(t *testing.T) {
+	cfg := config.Default()
+	cfg.Environment = config.EnvironmentTest
+	cfg.Storage.Driver = config.StorageDriverMemory
+	cfg.Storage.URLSecret = strings.Repeat("u", 32)
+	cfg.Database = config.DatabaseConfig{Driver: config.DatabaseDriverSQLite, DSN: "file:files?mode=memory&cache=shared"}
+	db, err := database.Open(cfg.Database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// internal/platform's AutoMigrate migrates claims.Claim in the app
+	// (it imports this package, so the test cannot call it).
+	if err := db.AutoMigrate(append(claims.Models(), &Document{})...); err != nil {
+		t.Fatal(err)
+	}
+	app, err := framework.New(framework.WithConfig(cfg), framework.WithDatabase(db))
+	if err != nil {
+		t.Fatal(err)
+	}
+	Register(app)
+	api := cfg.API.Prefix + "/documents"
+	call := func(method, path string, body any) (int, map[string]any) {
+		var buf bytes.Buffer
+		_ = json.NewEncoder(&buf).Encode(body)
+		req := httptest.NewRequest(method, path, &buf)
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		app.Router().ServeHTTP(w, req)
+		var out map[string]any
+		_ = json.Unmarshal(w.Body.Bytes(), &out)
+		return w.Code, out
+	}
+	upload := func(field string, content []byte, contentType string) string {
+		code, out := call(http.MethodPost, api+"/uploads/"+field, map[string]any{"size": len(content), "content_type": contentType, "filename": "../" + field + ".bin"})
+		if code != http.StatusOK {
+			t.Fatalf("grant %s = %d %v", field, code, out)
+		}
+		data := out["data"].(map[string]any)
+		up := data["upload"].(map[string]any)
+		req := httptest.NewRequest(up["method"].(string), up["url"].(string), bytes.NewReader(content))
+		for k, v := range up["headers"].(map[string]any) {
+			req.Header.Set(k, v.(string))
+		}
+		w := httptest.NewRecorder()
+		app.Router().ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("PUT %s = %d %s", field, w.Code, w.Body)
+		}
+		return data["key"].(string)
+	}
+	pdf := []byte("%PDF-1.7 a small document")
+	key := upload("attachment", pdf, "application/pdf")
+	if !strings.HasPrefix(key, "document/attachment/") {
+		t.Fatalf("key = %q", key)
+	}
+
+	code, out := call(http.MethodPost, api, map[string]any{"title": "a", "attachment": key, "cover": nil})
+	if code != http.StatusOK && code != http.StatusCreated {
+		t.Fatalf("create = %d %v", code, out)
+	}
+	file := out["data"].(map[string]any)["attachment"].(map[string]any)
+	if file["key"] != key || file["filename"] != "attachment.bin" || file["size"] != float64(len(pdf)) || !strings.Contains(file["url"].(string), "signature=") {
+		t.Fatalf("created attachment = %v", file)
+	}
+	id := strconv.Itoa(int(out["data"].(map[string]any)["id"].(float64)))
+	code, out = call(http.MethodGet, api+"/"+id, nil)
+	if code != http.StatusOK || out["data"].(map[string]any)["attachment"].(map[string]any)["key"] != key {
+		t.Fatalf("get = %d %v", code, out)
+	}
+	if _, out = call(http.MethodGet, api, nil); len(out["data"].([]any)) != 1 {
+		t.Fatalf("list = %v", out)
+	}
+
+	// Another record cannot take the file; a key never uploaded is refused.
+	if code, out := call(http.MethodPost, api, map[string]any{"title": "b", "attachment": key, "cover": nil}); code != http.StatusConflict {
+		t.Fatalf("a held file = %d %v, want 409", code, out)
+	}
+	if code, out := call(http.MethodPost, api, map[string]any{"title": "c", "attachment": "document/attachment/never", "cover": nil}); code != http.StatusUnprocessableEntity {
+		t.Fatalf("a key never uploaded = %d %v, want 422", code, out)
+	}
+	if code, out := call(http.MethodPost, api, map[string]any{"title": "d", "attachment": "other/prefix/x", "cover": nil}); code != http.StatusUnprocessableEntity {
+		t.Fatalf("a key outside the field = %d %v, want 422", code, out)
+	}
+	if code, out := call(http.MethodPost, api, map[string]any{"title": "d", "attachment": key, "cover": ""}); code != http.StatusUnprocessableEntity {
+		t.Fatalf("an empty cover key = %d %v, want 422", code, out)
+	}
+
+	// An image field refuses a file whose bytes are not an image, and
+	// deletes it.
+	html := upload("cover", []byte("<!DOCTYPE html><script>alert(1)</script>"), "image/png")
+	key2 := upload("attachment", pdf, "application/pdf")
+	if code, out := call(http.MethodPost, api, map[string]any{"title": "e", "attachment": key2, "cover": html}); code != http.StatusUnprocessableEntity {
+		t.Fatalf("HTML as an image = %d %v, want 422", code, out)
+	}
+	if ok, _ := storage.Exists(t.Context(), app.Storage(), html); ok {
+		t.Fatal("the refused cover was kept")
+	}
+	// A grant over the field's limits is refused before any upload.
+	if code, _ := call(http.MethodPost, api+"/uploads/cover", map[string]any{"size": 1, "content_type": "text/html"}); code != http.StatusUnprocessableEntity {
+		t.Fatalf("a grant for HTML as a cover = %d, want 422", code)
+	}
+}
+`
+
+// TestMakeResourceFileFieldsTypecheckMUI: the MUI preset's file inputs,
+// upload functions, and file cells typecheck.
+func TestMakeResourceFileFieldsTypecheckMUI(t *testing.T) {
+	appDir := scaffoldMUIDemo(t)
+	if err := resourcegen.Generate(context.Background(), resourcegen.Options{
+		WorkDir:        appDir,
+		Name:           "Document",
+		Fields:         []string{"title:string:required", "attachment:file:required", "cover:image"},
+		SkipMigrations: true,
+		Stdout:         io.Discard,
+		Stderr:         io.Discard,
+	}); err != nil {
+		t.Fatalf("gombit make resource (files, mui): %v", err)
+	}
+	typecheckFrontend(t, appDir, true)
+}
+
 // TestMakeResourceRelationsCompiles exercises the #222(b) relation grammar end
 // to end: it generates the target models, then a resource with belongs_to /
 // has_many / many_to_many fields, and compiles the app (the generated model

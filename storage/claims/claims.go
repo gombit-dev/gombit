@@ -108,6 +108,11 @@ type Claim struct {
 	// Staged is a direct upload's claim: the client uploads to the staging
 	// key, and the key is written only by promotion.
 	Staged bool `gorm:"not null;default:false"`
+	// Scope names who the key was claimed for (upload.Policy.Scope: a
+	// field, say), and only that scope may confirm it (Promote, Belongs):
+	// a grant for one field cannot be attached to another, whatever their
+	// prefixes. Empty is a scope of its own.
+	Scope string `gorm:"size:255;not null;default:''"`
 	// Publication is the token of the promotion's copy to the key
 	// (storage.PreparePublish), recorded before it is published: until
 	// storage.Fence proves it can no longer publish, the claim is never
@@ -201,21 +206,25 @@ func New(db *gorm.DB, store storage.Storage, opts ...Option) *Claims {
 // already has a claim fails with ErrClaimed, and one longer than MaxKeyLen
 // with ErrKeyTooLong. A store that is neither a storage.Publisher nor a
 // storage.BoundedWriter cannot be owned: storage.ErrUnsupported
-// (storage.CheckOwnable).
-func (c *Claims) Pending(ctx context.Context, key string, until time.Time) error {
-	return c.insert(ctx, key, until, false)
+// (storage.CheckOwnable). scope is who the key is claimed for (Claim.Scope),
+// at most MaxScopeLen bytes.
+func (c *Claims) Pending(ctx context.Context, key, scope string, until time.Time) error {
+	return c.insert(ctx, key, scope, until, false)
 }
 
 // Stage claims key for a direct upload (upload.Authorize): the client
 // uploads to the staging key, never to key, which only promotion writes.
 // until is the lease of the staging key's writes through the app's own
 // route; a PUT straight to S3 may end later, but can only ever publish a
-// staging object. Errors as for Pending.
-func (c *Claims) Stage(ctx context.Context, key string, until time.Time) error {
-	return c.insert(ctx, key, until, true)
+// staging object. scope and errors as for Pending.
+func (c *Claims) Stage(ctx context.Context, key, scope string, until time.Time) error {
+	return c.insert(ctx, key, scope, until, true)
 }
 
-func (c *Claims) insert(ctx context.Context, key string, until time.Time, staged bool) error {
+// MaxScopeLen is the longest Claim.Scope, in bytes.
+const MaxScopeLen = 255
+
+func (c *Claims) insert(ctx context.Context, key, scope string, until time.Time, staged bool) error {
 	// Only a store whose writes can be proven over (fenced, or bounded by
 	// their calls) can be owned: otherwise a write it sent could complete
 	// after its claim is gone.
@@ -225,7 +234,10 @@ func (c *Claims) insert(ctx context.Context, key string, until time.Time, staged
 	if len(key) > MaxKeyLen {
 		return fmt.Errorf("%w: %d bytes, more than %d", ErrKeyTooLong, len(key), MaxKeyLen)
 	}
-	res := c.db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&Claim{Key: key, State: Pending, LeaseUntil: until, Staged: staged})
+	if len(scope) > MaxScopeLen {
+		return fmt.Errorf("claims: a %d-byte scope, more than %d", len(scope), MaxScopeLen)
+	}
+	res := c.db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&Claim{Key: key, State: Pending, LeaseUntil: until, Staged: staged, Scope: scope})
 	if res.Error != nil {
 		return fmt.Errorf("claims: pending %q: %w", key, res.Error)
 	}
@@ -241,10 +253,11 @@ func (c *Claims) insert(ctx context.Context, key string, until time.Time, staged
 // nothing) for any other key: one not staged, already promoting (another
 // confirmation), held, deleting, or never claimed. Only one Promote of a
 // key succeeds, so exactly one copy is ever made to it; a sweep does not
-// abandon a promoting claim before its lease has ended.
-func (c *Claims) Promote(ctx context.Context, key string, until time.Time) (bool, error) {
+// abandon a promoting claim before its lease has ended. Only the scope the
+// key was staged for can promote it: any other reports false.
+func (c *Claims) Promote(ctx context.Context, key, scope string, until time.Time) (bool, error) {
 	res := c.db.WithContext(ctx).Model(&Claim{}).
-		Where("object_key = ? AND state = ? AND staged = ?", key, Pending, true).
+		Where("object_key = ? AND state = ? AND staged = ? AND scope = ?", key, Pending, true, scope).
 		Updates(map[string]any{
 			"state":       Promoting,
 			"lease_until": gorm.Expr("CASE WHEN lease_until < ? THEN ? ELSE lease_until END", until, until),
@@ -254,6 +267,21 @@ func (c *Claims) Promote(ctx context.Context, key string, until time.Time) (bool
 		return false, fmt.Errorf("claims: promote %q: %w", key, res.Error)
 	}
 	return res.RowsAffected == 1, nil
+}
+
+// Belongs reports whether key is claimed for scope, and not being deleted:
+// a confirmation of a key that is not a staged upload awaiting it (already
+// promoted or held, or stored by Save) must still belong to the scope that
+// confirms it.
+func (c *Claims) Belongs(ctx context.Context, key, scope string) (bool, error) {
+	var n int64
+	err := c.db.WithContext(ctx).Model(&Claim{}).
+		Where("object_key = ? AND scope = ? AND state IN ?", key, scope, []string{Pending, Promoting, Held}).
+		Count(&n).Error
+	if err != nil {
+		return false, fmt.Errorf("claims: %q: %w", key, err)
+	}
+	return n > 0, nil
 }
 
 // Publishing records token, the copy promotion is about to publish to key

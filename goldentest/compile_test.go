@@ -110,6 +110,32 @@ func generateAndCompileBackend(t *testing.T, appDir string) {
 	}
 }
 
+// generateAndTestBackend is generateAndCompileBackend, then `go test pkg`
+// with one extra test file (relPath, content) written into the temp copy:
+// the generated code, run.
+func generateAndTestBackend(t *testing.T, appDir, relPath, content, pkg string) {
+	t.Helper()
+	copyDir := filepath.Join(t.TempDir(), "run")
+	copyTree(t, appDir, copyDir)
+	appendLocalReplace(t, copyDir)
+	tidy := exec.Command("go", "mod", "tidy")
+	tidy.Dir = copyDir
+	if out, err := tidy.CombinedOutput(); err != nil {
+		t.Fatalf("go mod tidy: %v\n%s", err, out)
+	}
+	if err := generate.Generate(context.Background(), generate.Options{WorkDir: copyDir, Stdout: io.Discard, Stderr: io.Discard}); err != nil {
+		t.Fatalf("gombit generate: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(copyDir, relPath), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	test := exec.Command("go", "test", "-count=1", pkg) // #nosec G204 -- fixed test arguments
+	test.Dir = copyDir
+	if out, err := test.CombinedOutput(); err != nil {
+		t.Fatalf("go test %s: %v\n%s", pkg, err, out)
+	}
+}
+
 func appendLocalReplace(t *testing.T, appDir string) {
 	t.Helper()
 	goModPath := filepath.Join(appDir, "go.mod")

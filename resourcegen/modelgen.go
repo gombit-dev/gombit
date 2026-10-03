@@ -12,6 +12,8 @@ import (
 
 	"github.com/gombit-dev/gombit/field"
 	"github.com/gombit-dev/gombit/resourcepolicy"
+	"github.com/gombit-dev/gombit/storage/filefield"
+	"github.com/gombit-dev/gombit/storage/upload"
 	"github.com/gombit-dev/gombit/types"
 	"gorm.io/gorm/schema"
 )
@@ -87,6 +89,16 @@ type modelField struct {
 	// string column, filter coercion) key off this. Query capability does not:
 	// filter, search, sort, and aggregate read field.KindFromGo plus field.Allows*.
 	Kind reflect.Kind
+	// File is set for a storage-backed column (types.File, types.Image):
+	// its upload policy, parsed from the model's storage tag.
+	File *storageField
+}
+
+// storageField is a storage-backed column's generation facts.
+type storageField struct {
+	Kind    field.Kind
+	Policy  upload.Policy
+	Pointer bool // the column is *types.File / *types.Image
 }
 
 // importSpec is one import the generated DTOs need, with the alias used to qualify
@@ -189,6 +201,13 @@ func buildModelResource(model any, pkg string) (modelResource, error) {
 			Format:      f.Tag.Get("format"),
 			Pattern:     f.Tag.Get("pattern"),
 			Constraints: constraints,
+		}
+		if k := field.KindFromGo(f.FieldType, string(f.DataType)); k == field.File || k == field.Image {
+			p, err := filefield.Policy(f.Tag.Get("storage"), k, pkg+"/"+r.Column+"/")
+			if err != nil {
+				return modelResource{}, fmt.Errorf("resourcegen: column %q: %w", r.Column, err)
+			}
+			mf.File = &storageField{Kind: k, Policy: p, Pointer: f.FieldType.Kind() == reflect.Pointer}
 		}
 		// resourcepolicy validated the query capabilities as API policy (declared,
 		// response-visible). Whether the column's type supports the operation is
@@ -597,8 +616,13 @@ func (f modelField) requestTag() string {
 	}
 	tag := `json:"` + name + `"` + f.schemaExtras()
 	if f.Kind == reflect.String && !f.isDecimal() {
-		if f.NotNull && f.Constraints.Default == "" {
+		// A file key is never "": no file is null (an optional file), and
+		// an empty key would collide in the column's unique index.
+		if (f.NotNull || f.File != nil) && f.Constraints.Default == "" {
 			tag += ` minLength:"1"`
+		}
+		if f.File != nil && f.File.Pointer {
+			tag += ` nullable:"true"`
 		}
 		maxLen := f.Size
 		if f.Constraints.MaxLength > 0 {
@@ -695,8 +719,13 @@ func renderModelDTOs(r modelResource) string {
 	imports := r.imports
 	if r.hasDecimalBounds() {
 		imports = append(imports, importSpec{Alias: "huma", Path: "github.com/danielgtaylor/huma/v2"})
-		sort.Slice(imports, func(i, j int) bool { return imports[i].Path < imports[j].Path })
 	}
+	if r.hasFiles() {
+		imports = append(imports,
+			importSpec{Alias: "filefield", Path: "github.com/gombit-dev/gombit/storage/filefield"},
+			importSpec{Alias: "upload", Path: "github.com/gombit-dev/gombit/storage/upload"})
+	}
+	sort.Slice(imports, func(i, j int) bool { return imports[i].Path < imports[j].Path })
 
 	var b strings.Builder
 	b.WriteString(goBanner())
@@ -707,6 +736,12 @@ func renderModelDTOs(r modelResource) string {
 	b.WriteString("// " + data + " is the response body for a " + typ + ".\n")
 	b.WriteString("type " + data + " struct {\n")
 	for _, f := range r.responseFields() {
+		if f.File != nil {
+			// A file is described, not just named: resolved from the store
+			// by the handler (resolveFiles).
+			b.WriteString("\t" + f.GoName + " *filefield.FileInfo `json:\"" + f.jsonName() + "\" doc:\"" + f.GoName + " (a file: key, filename, size, type, and a download URL)\"`\n")
+			continue
+		}
 		b.WriteString("\t" + f.GoName + " " + f.GoType + " `" + f.responseTag() + "`\n")
 	}
 	b.WriteString("}\n\n")
@@ -725,9 +760,15 @@ func renderModelDTOs(r modelResource) string {
 	b.WriteString("func to" + typ + "Data(row " + typ + ") " + data + " {\n")
 	b.WriteString("\treturn " + data + "{\n")
 	for _, f := range r.responseFields() {
+		if f.File != nil {
+			continue // resolveFiles fills it
+		}
 		b.WriteString("\t\t" + f.GoName + ": row." + f.AccessPath + ",\n")
 	}
 	b.WriteString("\t}\n}\n\n")
+	for _, f := range r.fileFields() {
+		b.WriteString(f.policyVar(typ, r.Package))
+	}
 
 	// Create mapper: request DTO -> a new model. Assignments (not a composite
 	// literal) so a column reached through a value embed (row.Audit.Note) is valid
@@ -807,4 +848,63 @@ func renderImports(specs []importSpec) string {
 		lines = append(lines, "\t"+s.line())
 	}
 	return "import (\n" + strings.Join(lines, "\n") + "\n)\n\n"
+}
+
+// hasFiles reports whether the resource has a storage-backed column.
+func (r modelResource) hasFiles() bool { return len(r.fileFields()) > 0 }
+
+// fileFields are the storage-backed columns in the response or request, in
+// schema order.
+func (r modelResource) fileFields() []modelField {
+	var out []modelField
+	for _, f := range r.Fields {
+		if f.File != nil {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// policyName is the generated variable holding f's upload policy.
+func (f modelField) policyName(typ string) string {
+	return unexported(typ) + f.GoName + "Policy"
+}
+
+// policyVar emits f's upload policy as a literal, so the generated code
+// shows the limits the model's storage tag sets. Its Scope is the field
+// ("<package>.<column>"): its grants are claimed for it, and only it can
+// confirm them (storage/claims), whatever other fields' prefixes are.
+func (f modelField) policyVar(typ, pkg string) string {
+	p := f.File.Policy
+	types := make([]string, len(p.Types))
+	for i, t := range p.Types {
+		types[i] = strconv.Quote(t)
+	}
+	return "// " + f.policyName(typ) + " is the " + f.GoName + " field's upload policy (its storage tag).\n" +
+		"var " + f.policyName(typ) + " = upload.Policy{\n" +
+		"\tPrefix:   " + strconv.Quote(p.Prefix) + ",\n" +
+		"\tMaxBytes: " + strconv.FormatInt(p.MaxBytes, 10) + ",\n" +
+		"\tTypes:    []string{" + strings.Join(types, ", ") + "},\n" +
+		"\tScope:    " + strconv.Quote(pkg+"."+f.Column) + ",\n" +
+		"}\n\n"
+}
+
+// fileKeysExpr is the Go expression for the keys of row's request file
+// fields, a []string (claims.CreateWith skips the empty ones).
+func (r modelResource) fileKeysExpr(row string) string {
+	var keys []string
+	for _, f := range r.fileFields() {
+		if f.InRequest {
+			keys = append(keys, f.fileKeyExpr(row))
+		}
+	}
+	return "[]string{" + strings.Join(keys, ", ") + "}"
+}
+
+// fileKeyExpr is the Go expression for f's object key in row ("" when none).
+func (f modelField) fileKeyExpr(row string) string {
+	if f.File.Pointer {
+		return "filefield.KeyOf(" + row + "." + f.AccessPath + ")"
+	}
+	return "string(" + row + "." + f.AccessPath + ")"
 }

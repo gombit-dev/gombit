@@ -60,7 +60,9 @@ leases and tombstones, so cleanup never deletes a file a record holds and
 no late upload leaves an orphan; direct uploads are staged under
 `_staging/` (a reserved namespace) and promoted by `upload.Confirm`
 with a fenceable `storage.PreparePublish`/`Publish`/`Fence`;
-`storage.Lister` enumerates objects). The other batteries
+`storage.Lister` enumerates objects), and
+storage-backed model fields (`file` / `image` kinds, `types.File` /
+`types.Image`, runtime `storage/filefield`; MODEL-8). The other batteries
 (events, scheduler, mail, gRPC, multi-tenancy, i18n) are not here yet.
 The **CHAOS-0** resilience suite is in: `internal/faulttest` (deterministic
 fault injection: a faulting `database/sql` driver, a scripted HTTP

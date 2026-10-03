@@ -31,9 +31,19 @@
 // A link is a signed URL: the browser downloads straight from storage (here,
 // the app's own /_storage route; on S3, the bucket) until it expires. Links
 // need a signing key, GOMBIT_STORAGE_URL_SECRET (32 bytes or more) or
-// GOMBIT_JWT_SECRET, for the local and memory drivers.
+// GOMBIT_JWT_SECRET, for the local and memory drivers; this example sets a
+// development-only one when neither is configured.
 //
-// Uploads are recorded in a SQLite database (storage-example.db) under the
+// internal/document is a generated resource with storage-backed fields (a
+// file and an image): ask the field's upload endpoint for a grant, upload,
+// then create the record with the key.
+//
+//	curl -X POST localhost:8080/api/v1/documents/uploads/attachment -d '{"size":1234,"content_type":"application/pdf","filename":"a.pdf"}'
+//	curl -X PUT --data-binary @a.pdf -H 'Content-Type: application/pdf' 'localhost:8080<data.upload.url>'
+//	curl -X POST localhost:8080/api/v1/documents -d '{"title":"A","attachment":"<data.key>","cover":null}'
+//	curl localhost:8080/api/v1/documents
+//
+// Uploads are recorded in a SQLite database (in memory) under the
 // ownership protocol of storage/claims: every upload's key is claimed
 // (pending) before anything is stored; the record that refers to it holds
 // it in the same transaction; deleting the record releases it; and an hourly
@@ -58,6 +68,7 @@ import (
 	"github.com/gombit-dev/gombit/config"
 	"github.com/gombit-dev/gombit/contract"
 	"github.com/gombit-dev/gombit/database"
+	"github.com/gombit-dev/gombit/examples/storage/internal/document"
 	"github.com/gombit-dev/gombit/framework"
 	"github.com/gombit-dev/gombit/storage"
 	"github.com/gombit-dev/gombit/storage/claims"
@@ -66,6 +77,10 @@ import (
 
 // maxUpload bounds an upload's size.
 const maxUpload = 10 << 20
+
+// devURLSecret signs this example's links when no secret is configured.
+// Never use a fixed secret outside development.
+const devURLSecret = "dev-only-storage-example-url-signing-secret" // #nosec G101 -- a documented development-only value.
 
 // linkLifetime is how long a download link works, counted from the start
 // of the second it is made (storage.SignedURL).
@@ -84,22 +99,35 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	app, err := framework.New(framework.WithConfig(cfg))
+	if cfg.Storage.URLSecret == "" && cfg.Auth.JWTSecret == "" {
+		cfg.Storage.URLSecret = devURLSecret
+	}
+	db, err := database.Open(config.DatabaseConfig{
+		Driver: config.DatabaseDriverSQLite,
+		DSN:    "file:storage-example?mode=memory&cache=shared&_fk=1&_busy_timeout=5000",
+	})
 	if err != nil {
 		log.Fatal(err)
 	}
-	db, err := database.Open(config.DatabaseConfig{Driver: config.DatabaseDriverSQLite, DSN: "file:storage-example.db?_fk=1&_busy_timeout=5000"})
+	app, err := framework.New(framework.WithConfig(cfg), framework.WithDatabase(db))
 	if err != nil {
 		log.Fatal(err)
 	}
+	// newFiles migrates the claims table and the example's records; a
+	// generated app runs `gombit db migrate` instead.
 	fs, err := newFiles(db.DB, app.Storage(), 10000)
 	if err != nil {
 		log.Fatal(err)
 	}
+	app.OnStart(func(context.Context) error {
+		return db.AutoMigrate(&document.Document{})
+	})
+	document.Register(app)
 	register(app.Router(), fs)
 	// Uploads no record ever held (abandoned forms, unconfirmed direct
-	// uploads) are swept every hour, once older than a grant and its
-	// confirmation could take. A real app runs this as a job.
+	// uploads, the document fields' grants never attached: one claims
+	// table covers them all) are swept every hour, once older than a grant
+	// and its confirmation could take. A real app runs this as a job.
 	go func() {
 		for range time.Tick(time.Hour) {
 			if res, err := fs.claims.Sweep(context.Background(), 2*upload.DefaultGrantExpiry); err != nil {

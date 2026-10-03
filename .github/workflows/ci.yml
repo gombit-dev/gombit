@@ -83,7 +83,12 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # storage/filefield's tests use the cgo SQLite driver: the runner's
+      # MinGW gcc builds it, and requiring cgo fails the build if it is
+      # missing instead of running the driver's stub.
       - name: Run storage tests
+        env:
+          CGO_ENABLED: "1"
         run: go test -count=1 ./storage/...
 
   ci-scripts:
@@ -528,6 +533,9 @@ jobs:
           go test -tags integration ./types \
             -types.postgres-dsn \
             'postgres://gombit:gombit@127.0.0.1:5432/gombit?sslmode=disable'
+          go test -tags integration ./storage/filefield \
+            -filefield.postgres-dsn \
+            'postgres://gombit:gombit@127.0.0.1:5432/gombit?sslmode=disable'
           go test -tags integration ./storage/claims \
             -claims.postgres-dsn \
             'postgres://gombit:gombit@127.0.0.1:5432/gombit?sslmode=disable'
@@ -731,6 +739,9 @@ jobs:
             'gombit:gombit@tcp(127.0.0.1:3306)/gombit?parseTime=true'
           go test -tags integration ./resourcegen \
             -resourcegen.mysql-dsn \
+            'gombit:gombit@tcp(127.0.0.1:3306)/gombit?parseTime=true'
+          go test -tags integration ./storage/filefield \
+            -filefield.mysql-dsn \
             'gombit:gombit@tcp(127.0.0.1:3306)/gombit?parseTime=true'
           go test -tags integration ./storage/claims \
             -claims.mysql-dsn \

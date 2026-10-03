@@ -20,7 +20,9 @@
 //  3. Set GeneratorReady only when resourcegen emits the kind. Until then
 //     `gombit make resource` rejects the token with a "not generated yet" error.
 //  4. If the admin widget string is new, the admin SPA must learn it in the
-//     same change. Reusing an existing AdminWire needs no SPA change.
+//     same change. Reusing an existing AdminWire needs no SPA change. An
+//     empty AdminWire means no widget yet: the admin leaves such columns
+//     out of its resources.
 //  5. Extend the doc table in docs/fields.md.
 //
 // A relation cardinality is not a new Kind. Add a RelationKind, a relationCaps
@@ -71,7 +73,11 @@ const (
 	Slug      Kind = "slug"
 	IP        Kind = "ip"
 	Enum      Kind = "enum"
-	Relation  Kind = "relation"
+	// File and Image are storage-backed: the column holds an object key
+	// (types.File, types.Image), the bytes live in App.Storage().
+	File     Kind = "file"
+	Image    Kind = "image"
+	Relation Kind = "relation"
 )
 
 // RelationKind is the cardinality of a KindRelation field.
@@ -135,6 +141,9 @@ var catalog = []Spec{
 	{Kind: Slug, GoType: "string", GeneratorReady: true, CLITokens: []string{"slug"}, AdminWire: "string", Sortable: true, Searchable: true},
 	{Kind: IP, GoType: "string", GeneratorReady: true, CLITokens: []string{"ip"}, AdminWire: "string", Sortable: true},
 	{Kind: Enum, GoType: "string", GeneratorReady: true, CLITokens: []string{"enum"}, AdminWire: "string", Filterable: true, Searchable: true, Sortable: true},
+	// No admin widget yet (STORAGE-8): the admin leaves these columns out.
+	{Kind: File, GoType: "types.File", GeneratorReady: true, CLITokens: []string{"file"}},
+	{Kind: Image, GoType: "types.Image", GeneratorReady: true, CLITokens: []string{"image"}},
 	{Kind: Relation, GeneratorReady: true, CLITokens: []string{"belongs_to", "has_many", "many_to_many", "one_to_one"}, AdminWire: "relation"},
 }
 
@@ -336,6 +345,8 @@ var (
 	goDuration = reflect.TypeOf(types.Duration{})
 	goJSON     = reflect.TypeOf(types.JSON(nil))
 	goNullJSON = reflect.TypeOf(types.NullJSON(nil))
+	goFile     = reflect.TypeOf(types.File(""))
+	goImage    = reflect.TypeOf(types.Image(""))
 )
 
 // SemanticKind recovers email, url, ip, or slug from model tags. format is
@@ -383,6 +394,10 @@ func KindFromGo(t reflect.Type, dataType string) Kind {
 		return UUID
 	case goDecimal, goTypesDec:
 		return Decimal
+	case goFile:
+		return File
+	case goImage:
+		return Image
 	}
 	switch t.Kind() {
 	case reflect.String:

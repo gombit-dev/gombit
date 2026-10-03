@@ -197,6 +197,33 @@ version.
   - `examples/storage` records its uploads in SQLite under claims, deletes
     them with their records, and sweeps the rest
     ([#329](https://github.com/gombit-dev/gombit/issues/329)).
+- Storage-backed model fields (MODEL-8):
+  - `file` and `image` field kinds (`types.File`, `types.Image`) store an
+    object key, never bytes. The column has a unique index, so one record
+    owns each file.
+  - A `storage:"prefix=...;max_bytes=...;types=..."` tag sets the field's
+    upload policy.
+  - `gombit generate` emits:
+    - an upload-grant operation per file field;
+    - create checks: the key must be a confirmed upload under the field's
+      prefix, passing the policy by its bytes, claimed for that field (each
+      policy's `Scope`, `"<package>.<column>"`), and the insert holds its
+      claim in the same transaction (`storage/claims`), so another field's
+      grant, another record's file or an expired upload is refused and a
+      failed insert deletes the uploads;
+    - reads that return `{key, filename, size, content_type, url}`.
+  - The generated forms upload the chosen file directly to storage on every
+    submit (never reusing a key from a failed attempt), and the lists link
+    to it.
+  - `storage/claims` claims record a scope (`upload.Policy.Scope`);
+    `upload.Confirm` accepts only a key claimed for its policy's scope
+    (`claims.Promote` matches it, new `claims.Belongs`).
+  - The runtime is `storage/filefield`.
+  - The admin leaves file columns out until it has a file widget, and
+    turns delete off for such a model (an explicit `Actions.Delete` is a
+    registration error) so a deleted row cannot strand its held file.
+  - `examples/storage` gains a `Document` resource
+    ([#530](https://github.com/gombit-dev/gombit/issues/530)).
 
 ### Changed
 

@@ -375,7 +375,7 @@ func TestConfirmNeverAssumesACopyFailed(t *testing.T) {
 			p := images
 			p.Claims = cl
 			key := "avatars/k"
-			if err := cl.Stage(ctx, key, time.Now()); err != nil {
+			if err := cl.Stage(ctx, key, "", time.Now()); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := mem.Put(ctx, upload.StagingKey(key), bytes.NewReader(png), storage.PutOptions{ContentType: "image/png"}); err != nil {
@@ -441,7 +441,7 @@ func TestPromotionKeepsALeftoverPreparation(t *testing.T) {
 	p := images
 	p.Claims = cl
 	key := "avatars/k"
-	if err := cl.Stage(ctx, key, time.Now()); err != nil {
+	if err := cl.Stage(ctx, key, "", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := mem.Put(ctx, upload.StagingKey(key), bytes.NewReader(png), storage.PutOptions{ContentType: "image/png"}); err != nil {

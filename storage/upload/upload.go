@@ -151,20 +151,30 @@ type Policy struct {
 	// deletes it only while its claim is pending: never a file a record
 	// holds, nor one under a key that was never claimed.
 	Claims Claimer
+	// Scope names who the uploads are for under Claims (a field:
+	// "document.attachment"), at most 255 bytes. Each key is claimed for
+	// it, and Confirm accepts only a key claimed for the same scope: a
+	// grant from one field cannot be attached to another, whatever their
+	// prefixes. Give every policy sharing a store under Claims its own.
+	Scope string
 }
 
 // Claimer is the ownership protocol uploads take part in; *claims.Claims
 // implements it.
 type Claimer interface {
-	// Pending claims key, which nothing has been stored under yet, leased
-	// until until: Save publishes nothing under key after it.
-	Pending(ctx context.Context, key string, until time.Time) error
-	// Stage claims key for a direct upload to StagingKey(key) (Authorize).
-	Stage(ctx context.Context, key string, until time.Time) error
-	// Promote moves a staged key to promoting, leased until until, and
-	// reports whether it did: only then may Confirm copy the staged object
-	// to key.
-	Promote(ctx context.Context, key string, until time.Time) (bool, error)
+	// Pending claims key for scope, which nothing has been stored under
+	// yet, leased until until: Save publishes nothing under key after it.
+	Pending(ctx context.Context, key, scope string, until time.Time) error
+	// Stage claims key for scope, for a direct upload to StagingKey(key)
+	// (Authorize).
+	Stage(ctx context.Context, key, scope string, until time.Time) error
+	// Promote moves a key staged for scope to promoting, leased until
+	// until, and reports whether it did: only then may Confirm copy the
+	// staged object to key.
+	Promote(ctx context.Context, key, scope string, until time.Time) (bool, error)
+	// Belongs reports whether key is claimed for scope (and not being
+	// deleted).
+	Belongs(ctx context.Context, key, scope string) (bool, error)
 	// Publishing records the token of the promotion's copy on the key's
 	// promoting claim, before it is published (storage.PreparePublish).
 	Publishing(ctx context.Context, key, token string) error
@@ -213,6 +223,11 @@ type File struct {
 	Filename string
 }
 
+// Validate reports whether p is a usable policy (the check every function
+// here makes first): a positive MaxBytes, Types listed, a valid Prefix and
+// Metadata, a GrantExpiry within storage.MaxURLExpiry.
+func (p Policy) Validate() error { return p.validate() }
+
 func (p Policy) validate() error {
 	switch {
 	case p.MaxBytes <= 0:
@@ -239,6 +254,9 @@ func (p Policy) validate() error {
 		if !validType(t) {
 			return fmt.Errorf(`upload: Policy.Types entry %q: want a lowercase "type/subtype", "type/*", or "*/*"`, t)
 		}
+	}
+	if len(p.Scope) > 255 {
+		return fmt.Errorf("upload: Policy.Scope is %d bytes, more than 255", len(p.Scope))
 	}
 	if p.UploadTimeout < 0 {
 		return fmt.Errorf("upload: Policy.UploadTimeout must not be negative, not %s", p.UploadTimeout)
@@ -346,7 +364,7 @@ func save(ctx context.Context, store storage.Storage, src io.Reader, filename st
 			return File{}, fmt.Errorf("upload: claims: %w", err)
 		}
 		if _, staged = store.(storage.Publisher); staged {
-			if err := p.Claims.Stage(ctx, key, deadline); err != nil {
+			if err := p.Claims.Stage(ctx, key, p.Scope, deadline); err != nil {
 				return File{}, fmt.Errorf("upload: claim %q: %w", key, err)
 			}
 			target = StagingKey(key)
@@ -383,7 +401,7 @@ func save(ctx context.Context, store storage.Storage, src io.Reader, filename st
 		return File{}, source.classify(ctx, err)
 	}
 	if staged {
-		promoted, err := p.Claims.Promote(ctx, key, deadline)
+		promoted, err := p.Claims.Promote(ctx, key, p.Scope, deadline)
 		if err == nil && !promoted {
 			err = fmt.Errorf("%w: the claim of %q is no longer pending", storage.ErrUnavailable, key)
 		}
@@ -463,7 +481,7 @@ func claim(ctx context.Context, p Policy, key string, until time.Time) error {
 	if p.Claims == nil {
 		return nil
 	}
-	if err := p.Claims.Pending(ctx, key, until); err != nil {
+	if err := p.Claims.Pending(ctx, key, p.Scope, until); err != nil {
 		return fmt.Errorf("upload: claim %q: %w", key, err)
 	}
 	return nil
