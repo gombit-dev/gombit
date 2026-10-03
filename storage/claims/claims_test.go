@@ -428,8 +428,8 @@ func testUpdate(t *testing.T, db *gorm.DB) {
 	upload(t, c, store, "u/a")
 	upload(t, c, store, "u/b")
 	boom := errors.New("constraint")
-	if err := c.CreateWith(ctx, []string{"u/a", "", "u/b"}, func(*gorm.DB) error { return boom }); !errors.Is(err, boom) {
-		t.Fatalf("CreateWith = %v, want the record's error", err)
+	if err := c.CreateWith(ctx, []string{"u/a", "", "u/b"}, func(*gorm.DB) error { return boom }); err != boom { //nolint:errorlint // the error itself, unwrapped
+		t.Fatalf("CreateWith = %v, want the record's error itself", err)
 	}
 	if exists(t, store, "u/a") || exists(t, store, "u/b") {
 		t.Fatal("a failed create with two files kept one")
