@@ -242,10 +242,11 @@ policy as hints: `accept` (media types) and `max_bytes`.
   `{size, content_type, filename}` grants one direct upload
   ([storage.md § Direct uploads](storage.md#direct-uploads)). The grant needs
   the model's create or update permission, and the declared size and type
-  must fit the policy. The grant claims the key (`pending`; see
-  [storage.md § Cleanup](storage.md#cleanup)), so the app needs the
-  `storage_claims` table (apps made by `gombit new` migrate it). The SPA
-  sends the bytes with the grant, then puts the key in the form.
+  must fit the policy. The grant claims the key as a staged upload (see
+  [storage.md § Cleanup](storage.md#cleanup)): the SPA sends the bytes to
+  `_staging/<key>` with the grant, then puts the key in the form, and the
+  write's check promotes the staged object to the key. The app needs the
+  `storage_claims` table (apps made by `gombit new` migrate it).
 - **Writes** take the key, or the row's file object (sending it back keeps
   the file), or `null` to remove it. A changed key is accepted only if it is:
   - an upload that passes the policy by its bytes (a refused file is

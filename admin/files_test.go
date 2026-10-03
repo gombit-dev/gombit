@@ -23,6 +23,7 @@ import (
 	"github.com/gombit-dev/gombit/storage"
 	"github.com/gombit-dev/gombit/storage/claims"
 	"github.com/gombit-dev/gombit/storage/memory"
+	"github.com/gombit-dev/gombit/storage/upload"
 	"github.com/gombit-dev/gombit/types"
 )
 
@@ -191,8 +192,8 @@ func TestAdminFileFields(t *testing.T) {
 			t.Errorf("create %s = %d %s, want 422 %q", body, rec.Code, rec.Body, want)
 		}
 	}
-	if exists(t, app, junk) {
-		t.Fatal("the refused image was kept")
+	if exists(t, app, junk) || exists(t, app, upload.StagingKey(junk)) {
+		t.Fatal("the refused image was kept (or reached its key)")
 	}
 
 	// A grant over the field's limits is refused before any upload.
