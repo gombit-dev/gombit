@@ -325,12 +325,17 @@ func TestConfirmPromotesStagedUploads(t *testing.T) {
 // then reports err, and which records the fences it is asked for.
 type publishOutcome struct {
 	*memory.Store
-	err    error
-	fenced *[]string
+	err        error
+	prepareErr error // PreparePublish fails with it, returning its token
+	fenced     *[]string
 }
 
 func (o publishOutcome) PreparePublish(ctx context.Context, src, dst string) (string, error) {
-	return storage.PreparePublish(ctx, o.Store, src, dst)
+	token, err := storage.PreparePublish(ctx, o.Store, src, dst)
+	if err == nil && o.prepareErr != nil {
+		return token, o.prepareErr
+	}
+	return token, err
 }
 
 func (o publishOutcome) Publish(ctx context.Context, token string) (storage.ObjectInfo, error) {
@@ -423,5 +428,32 @@ func TestSaveStagesOnRemoteStores(t *testing.T) {
 	}
 	if ok, _ := storage.Exists(ctx, mem, upload.StagingKey(f.Key)); ok {
 		t.Fatal("the staged copy was left")
+	}
+}
+
+// TestPromotionKeepsALeftoverPreparation: a preparation that failed but
+// returned its token (something of the copy may remain) leaves the claim
+// promoting with the token recorded, for the protocol to fence.
+func TestPromotionKeepsALeftoverPreparation(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.New()
+	cl := newFakeClaims(mem)
+	p := images
+	p.Claims = cl
+	key := "avatars/k"
+	if err := cl.Stage(ctx, key, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mem.Put(ctx, upload.StagingKey(key), bytes.NewReader(png), storage.PutOptions{ContentType: "image/png"}); err != nil {
+		t.Fatal(err)
+	}
+	var fenced []string
+	boom := errors.New("a part copy went unanswered")
+	store := publishOutcome{Store: mem, prepareErr: boom, fenced: &fenced}
+	if _, err := upload.Confirm(ctx, store, key, p); !errors.Is(err, boom) {
+		t.Fatalf("Confirm = %v, want the preparation's failure", err)
+	}
+	if !cl.promoting[key] || cl.published[key] == "" {
+		t.Fatalf("promoting %v, recorded %q; want the claim kept with the token", cl.promoting[key], cl.published[key])
 	}
 }

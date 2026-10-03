@@ -328,21 +328,44 @@ it will not complete later. So it is published in two steps
 (`storage.Publisher`):
 
 1. `storage.PreparePublish` creates a multipart upload of the key and
-   copies the staged object into its parts server-side. This publishes
-   nothing.
+   copies the staged object into its parts server-side (`UploadPartCopy`,
+   in ranges for objects over 5 GiB, at most 1,100 parts). This publishes
+   nothing. The token records each part's ETag as S3 returned it: the
+   manifest the upload is completed with (AWS forbids completing from a
+   listing).
 2. The copy's token is recorded on the claim (`claims.Publishing`).
-3. `storage.Publish` completes the upload.
+3. `storage.Publish` completes the upload with that manifest.
+
+If preparing fails after a part request went unanswered (S3 may store the
+part after the upload is aborted), it returns the token with the error,
+and the claim keeps it, `promoting`, to be fenced.
 
 If the answer is lost, the claim stays `promoting` with its token: the
 copy may exist, and a retried `Confirm` checks the key as it is. No claim
 with a recorded copy is ever forgotten until `storage.Fence` has proven the
 copy can no longer publish. On S3 it aborts the multipart upload, which S3
 orders against completing it: a successful abort means it never completes,
-and `NoSuchUpload` means it is over. A fence that fails keeps the claim for
-the next sweep. A sweep abandons a `promoting` claim only once the
+and `NoSuchUpload` means it is over. Then, as AWS advises, it lists the
+upload's parts and aborts again until none remain, so nothing of an
+unpublished copy is left. A fence that fails keeps the claim for the next
+sweep. A sweep abandons a `promoting` claim only once the
 promotion's lease (`Policy.UploadTimeout`) has ended. With the local and
 memory drivers the copy runs in the application process and publishes
 nothing after its call returns.
+
+**Which stores can be owned.** The protocol needs proof about every write
+it lets near a claimed key, so a store must be one of:
+
+- a `storage.Publisher` (S3): its copies can be fenced;
+- a `storage.BoundedWriter` (local, memory): a `Put` publishes, if at all,
+  before it returns, and never once its context has ended.
+
+Any other store, a third-party remote driver for one, is refused:
+`claims.Pending` and `claims.Stage`, `upload.Save`/`Receive`/`Authorize`
+under claims, and `storage.PreparePublish`/`Publish`/`Fence` fail with
+`storage.ErrUnsupported` (`storage.CheckOwnable`). A write such a store sent
+could complete after its claim was forgotten, and nothing could prove
+otherwise.
 
 On a remote store (a `storage.Publisher`: S3), `upload.Save` and
 `upload.Receive` under claims stage too: they put the file at the staging
@@ -841,7 +864,18 @@ The suite checks every guarantee above:
   and options refused, and a grant that stores nothing by itself;
 - for a store that lists (`storage.Lister`): exactly the objects under the
   prefix, each once, with its size and time; stopping at the callback's
-  error; deleting as it goes; an ended context.
+  error; deleting as it goes; an ended context;
+- publication (`storage.PreparePublish` / `Publish` / `Fence`): preparing
+  publishes nothing; publishing copies the bytes, type and metadata (an
+  empty object too) and refuses an occupied destination; for a
+  `storage.Publisher`, a fenced copy is never published, and fencing is
+  idempotent.
+
+A driver that can take part in `storage/claims` declares how: implement
+`storage.Publisher` if a write it sends can complete after the call
+returns (a remote service), or `storage.BoundedWriter` if it cannot (its
+`Put` publishes within the call, after checking its context). Declaring
+`BoundedWriter` for a remote driver breaks the ownership guarantee.
 
 The suite's own tests prove that every check fails for a driver broken the
 way it guards against. A new check can't land without such a driver.

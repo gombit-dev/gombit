@@ -337,9 +337,9 @@ func save(ctx context.Context, store storage.Storage, src io.Reader, filename st
 	if err != nil {
 		return File{}, err
 	}
-	// Under Claims, the key is leased until the deadline, and the Put is
-	// aborted then: it can never publish after its claim's lease. A store
-	// that publishes remotely (storage.Publisher: S3) cannot prove that a
+	// Under Claims, the store must be ownable (storage.CheckOwnable). A
+	// storage.BoundedWriter's Put runs under the lease's deadline: it can
+	// never publish after it. A storage.Publisher (S3) cannot prove that a
 	// Put which went unanswered will not publish later, so there the file
 	// is put at the staging key and promoted, like a direct upload: only a
 	// fenceable copy ever writes the claimed key.
@@ -347,6 +347,9 @@ func save(ctx context.Context, store storage.Storage, src io.Reader, filename st
 	var deadline time.Time
 	if p.Claims != nil {
 		deadline = time.Now().Add(uploadTimeout(p))
+		if err := storage.CheckOwnable(store); err != nil {
+			return File{}, fmt.Errorf("upload: claims: %w", err)
+		}
 		if _, staged = store.(storage.Publisher); staged {
 			if err := p.Claims.Stage(ctx, key, deadline); err != nil {
 				return File{}, fmt.Errorf("upload: claim %q: %w", key, err)

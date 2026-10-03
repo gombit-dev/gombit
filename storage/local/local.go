@@ -171,6 +171,13 @@ func New(root string, opts ...Option) (*Store, error) {
 
 var _ storage.Storage = (*Store)(nil)
 
+var _ storage.BoundedWriter = (*Store)(nil)
+
+// BoundedWrites implements storage.BoundedWriter: a Put publishes with one
+// rename after checking its context, within the call, so nothing it wrote
+// is published after it returns.
+func (*Store) BoundedWrites() {}
+
 // Root returns the absolute root directory.
 func (s *Store) Root() string { return s.root }
 

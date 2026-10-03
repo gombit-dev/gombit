@@ -62,6 +62,12 @@ func New(opts ...Option) *Store {
 
 var _ storage.Storage = (*Store)(nil)
 
+var _ storage.BoundedWriter = (*Store)(nil)
+
+// BoundedWrites implements storage.BoundedWriter: a Put publishes in the
+// process, after checking its context, within the call.
+func (*Store) BoundedWrites() {}
+
 // reader is an object's bytes, seekable (for Range requests).
 type reader struct{ *bytes.Reader }
 

@@ -181,9 +181,15 @@ version.
     - `_staging/` is a reserved namespace: `claims.SweepStaging` deletes
       any object there whose key has no live claim, whoever stored it (a
       bucket lifecycle rule on `_staging/` is an optional backstop);
-    - `storage.Publisher` (S3) with `storage.PreparePublish` / `Publish` /
-      `Fence` (an in-process copy for other stores), with a conformance
-      check.
+    - `storage.Publisher` (S3: a multipart upload with server-side part
+      copies, completed with the ETags S3 returned for them, and fenced by
+      aborting until no part is listed) with `storage.PreparePublish` /
+      `Publish` / `Fence`, with a conformance check;
+    - only an ownable store takes part: a `storage.Publisher` or a
+      `storage.BoundedWriter` (local, memory: writes end with their
+      calls). Claims, uploads under claims, and the publication helpers
+      refuse any other store with `storage.ErrUnsupported`
+      (`storage.CheckOwnable`).
   - `examples/storage` records its uploads in SQLite under claims, deletes
     them with their records, and sweeps the rest
     ([#329](https://github.com/gombit-dev/gombit/issues/329)).
