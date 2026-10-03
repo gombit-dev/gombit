@@ -332,23 +332,32 @@ it will not complete later. So it is published in two steps
    in ranges for objects over 5 GiB, at most 1,100 parts). This publishes
    nothing. The token records each part's ETag as S3 returned it: the
    manifest the upload is completed with (AWS forbids completing from a
-   listing).
+   listing). ETags are opaque, so the token's size is checked as each one
+   arrives: preparing fails as soon as the next would not fit
+   (`storage.MaxPublicationToken`).
 2. The copy's token is recorded on the claim (`claims.Publishing`).
 3. `storage.Publish` completes the upload with that manifest.
 
-If preparing fails after a part request went unanswered (S3 may store the
-part after the upload is aborted), it returns the token with the error,
-and the claim keeps it, `promoting`, to be fenced.
+If preparing fails with something left to abort (a part request that went
+unanswered, or an abort that failed), it returns a cleanup token with the
+error: the key and upload ID only, checked to fit before any part is
+copied. The claim keeps it, `promoting`, to be fenced.
 
 If the answer is lost, the claim stays `promoting` with its token: the
 copy may exist, and a retried `Confirm` checks the key as it is. No claim
 with a recorded copy is ever forgotten until `storage.Fence` has proven the
 copy can no longer publish. On S3 it aborts the multipart upload, which S3
 orders against completing it: a successful abort means it never completes,
-and `NoSuchUpload` means it is over. Then, as AWS advises, it lists the
-upload's parts and aborts again until none remain, so nothing of an
-unpublished copy is left. A fence that fails keeps the claim for the next
-sweep. A sweep abandons a `promoting` claim only once the
+and `NoSuchUpload` means it is over. That, and only that, is what a
+successful fence proves: the copy can never be published, so it can never
+become an object without a claim. As AWS advises, it then lists the
+upload's parts and aborts again while any are listed, and every sweep
+fences again while the claim's tombstone lasts. A listing is a snapshot,
+though: a part still being processed can land after the last fence. Such a
+part is never an object (it cannot be read or published), only storage
+billed to an aborted upload; a bucket lifecycle rule aborting incomplete
+multipart uploads after a day reclaims it, and is recommended on S3. A
+fence that fails keeps the claim for the next sweep. A sweep abandons a `promoting` claim only once the
 promotion's lease (`Policy.UploadTimeout`) has ended. With the local and
 memory drivers the copy runs in the application process and publishes
 nothing after its call returns.
@@ -385,9 +394,10 @@ backend (S3); it lists `_staging/`. With the local and memory drivers the
 app's own route aborts a signed `PUT` at `storage.SignedUploadTimeout` (an
 hour) after its URL expired, within the staged claim's lease, so `Sweep`
 alone suffices. On S3, a bucket lifecycle rule expiring `_staging/` after a
-day (and aborting incomplete multipart uploads) is a useful backstop, but
-it is not part of the protocol: lifecycle expiry is coarse and
-asynchronous.
+day, and aborting incomplete multipart uploads after a day, is a useful
+backstop, but it is not part of the ownership protocol: lifecycle expiry
+is coarse and asynchronous. (It is what reclaims a part that lands after
+its upload was fenced, which is never an object.)
 
 **Ownership.** `Sweep` reads claims, never the store. Outside `_staging/`,
 a file without a claim is outside the protocol: nothing in `storage/claims`

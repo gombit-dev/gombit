@@ -57,6 +57,7 @@ type fakeS3 struct {
 	pendingCopies    map[string]int      // upload id -> part copies still being processed
 	aborts           int                 // AbortMultipartUpload requests seen
 	stickyGhosts     int                 // aborts that leave a ghost's parts listed (AWS: abort may need repeating)
+	etagLen          int                 // pad each part copy's ETag with this many bytes (ETags are opaque)
 	manifest         []string            // the ETags the last Complete was sent
 }
 
@@ -100,9 +101,10 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		n, _ := strconv.Atoi(q.Get("partNumber"))
-		etag := fmt.Sprintf(`"part-%d"`, n)
+		pad := strings.Repeat("x", f.etagLen)
+		etag := fmt.Sprintf(`"part-%d%s"`, n, pad)
 		f.partsOf[id] = append(f.partsOf[id], etag)
-		_, _ = fmt.Fprintf(w, `<CopyPartResult><ETag>"part-%d"</ETag></CopyPartResult>`, n)
+		_, _ = fmt.Fprintf(w, `<CopyPartResult><ETag>"part-%d%s"</ETag></CopyPartResult>`, n, pad)
 	case r.Method == http.MethodGet && q.Has("uploadId"): // ListParts
 		id := q.Get("uploadId")
 		n := len(f.partsOf[id])
@@ -736,5 +738,89 @@ func TestLostPartCopyIsFencedUntilNoPartRemains(t *testing.T) {
 	defer f.mu.Unlock()
 	if len(f.ghosts) != 0 || f.aborts < 3 {
 		t.Fatalf("after Fence: %d uploads with parts, %d aborts; want none left", len(f.ghosts), f.aborts)
+	}
+}
+
+// TestLongETagsKeepTheTokenBounded: ETags are opaque, so a backend may
+// return long ones. Preparing fails as soon as the next would push the
+// token past storage.MaxPublicationToken, before copying the rest; a
+// failure that leaves something to abort returns the bounded cleanup
+// token, which can be fenced and never published.
+func TestLongETagsKeepTheTokenBounded(t *testing.T) {
+	for name, refuseAbort := range map[string]bool{"aborted": false, "abort failed": true} {
+		t.Run(name, func(t *testing.T) {
+			f := newFakeS3()
+			s := fakeStore(t, f)
+			f.mu.Lock()
+			f.objects["big"] = 6<<30 + 7 // seven ranged parts
+			f.etagLen = 15000            // four of them fill the token
+			if refuseAbort {
+				f.refuseAbort = http.StatusInternalServerError
+			}
+			f.mu.Unlock()
+			token, err := s.PreparePublish(context.Background(), "big", "dst")
+			if err == nil {
+				t.Fatal("PreparePublish with ETags too long for the token succeeded")
+			}
+			if len(token) > storage.MaxPublicationToken {
+				t.Fatalf("a %d-byte token, over the %d-byte maximum", len(token), storage.MaxPublicationToken)
+			}
+			if f.partCopies >= 7 {
+				t.Fatalf("%d part copies: preparing must stop when the token is full", f.partCopies)
+			}
+			if !refuseAbort {
+				if token != "" {
+					t.Fatalf("token %q after an abort that succeeded; want none", token)
+				}
+				return
+			}
+			if token == "" {
+				t.Fatal("an upload whose abort failed was left with no token to fence: untrackable")
+			}
+			if _, err := s.Publish(context.Background(), token); err == nil {
+				t.Fatal("a cleanup token was published")
+			}
+			f.mu.Lock()
+			f.refuseAbort = 0
+			f.mu.Unlock()
+			if err := s.Fence(context.Background(), token); err != nil {
+				t.Fatalf("Fence of the cleanup token = %v", err)
+			}
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			if len(f.uploads) != 0 {
+				t.Fatalf("%d uploads left after the fence", len(f.uploads))
+			}
+		})
+	}
+}
+
+// TestFenceProvesNoPublicationNotNoParts: a part can land after Fence has
+// returned (a listing is a snapshot). Fence's nil still holds: the copy is
+// never published. A later Fence (the claims protocol repeats it while the
+// claim's tombstone lasts) reclaims the part.
+func TestFenceProvesNoPublicationNotNoParts(t *testing.T) {
+	f := newFakeS3()
+	s, token := prepared(t, f)
+	if err := s.Fence(context.Background(), token); err != nil {
+		t.Fatal(err)
+	}
+	p, err := parsePublication(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	f.ghosts[p.UploadID] = 1 // a part copy still being processed lands now
+	f.mu.Unlock()
+	if _, err := s.Publish(context.Background(), token); err == nil || f.has("dst") {
+		t.Fatalf("Publish after the fence = %v (published %v); want it refused", err, f.has("dst"))
+	}
+	if err := s.Fence(context.Background(), token); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.ghosts) != 0 {
+		t.Fatal("the late part was not reclaimed by the next fence")
 	}
 }

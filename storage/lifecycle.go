@@ -48,7 +48,7 @@ func List(ctx context.Context, s Storage, prefix string, fn func(ObjectInfo) err
 type Publisher interface {
 	// PreparePublish readies a copy of the object at src (its bytes,
 	// ContentType and Metadata) to dst, and returns a token naming it (at
-	// most MaxPublicationToken bytes). Nothing is published yet: record the
+	// most MaxPublicationToken bytes, by construction). Nothing is published yet: record the
 	// token durably before Publish, so that the copy can be fenced whatever
 	// happens to the caller. A missing src is ErrNotFound. When it fails
 	// but returns a token, something of the copy may remain (a request
@@ -60,9 +60,11 @@ type Publisher interface {
 	// settles it.
 	Publish(ctx context.Context, token string) (ObjectInfo, error)
 	// Fence makes sure the copy named by token can never be published
-	// after it returns nil (it was published already, or never will be),
-	// and that nothing of an unpublished copy remains. It is idempotent.
-	// An error means nothing is proven yet: try again.
+	// after it returns nil: it was published already, or never will be.
+	// It also removes what it can of an unpublished copy, but proves no
+	// more than that nothing will be published (on S3 a part still being
+	// processed may be stored afterwards; it is never an object). It is
+	// idempotent. An error means nothing is proven yet: try again.
 	Fence(ctx context.Context, token string) error
 }
 
