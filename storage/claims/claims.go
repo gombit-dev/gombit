@@ -243,13 +243,18 @@ func (c *Claims) Update(ctx context.Context, hold, release []string, fn func(tx 
 	dctx, cancel := detached(ctx)
 	defer cancel()
 	if err != nil {
-		errs := []error{err}
+		// The transaction's error itself, unless abandoning failed too: a
+		// caller's typed error (a D10 error, say) comes back unwrapped.
+		var aerrs []error
 		for _, key := range hold {
 			if _, aerr := c.Abandon(dctx, key); aerr != nil {
-				errs = append(errs, aerr)
+				aerrs = append(aerrs, aerr)
 			}
 		}
-		return errors.Join(errs...)
+		if len(aerrs) > 0 {
+			return errors.Join(append([]error{err}, aerrs...)...)
+		}
+		return err
 	}
 	for _, key := range released {
 		if err := c.Finish(dctx, key); err != nil && c.warn != nil {
