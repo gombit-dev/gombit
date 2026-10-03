@@ -21,6 +21,7 @@ import (
 	"github.com/gombit-dev/gombit/config"
 	"github.com/gombit-dev/gombit/framework"
 	"github.com/gombit-dev/gombit/storage"
+	"github.com/gombit-dev/gombit/storage/claims"
 	"github.com/gombit-dev/gombit/storage/memory"
 	"github.com/gombit-dev/gombit/types"
 )
@@ -46,7 +47,7 @@ func newFileApp(t *testing.T) *framework.App {
 	if err := auth.Migrate(db.DB); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AutoMigrate(&Paper{}); err != nil {
+	if err := db.AutoMigrate(append(claims.Models(), &Paper{})...); err != nil {
 		t.Fatal(err)
 	}
 	cfg := config.DefaultFor(config.EnvironmentTest)
@@ -282,6 +283,17 @@ func TestAdminFilesOnTheVersionedPath(t *testing.T) {
 	if rec.Code != http.StatusOK || exists(t, app, first) || !exists(t, app, second) {
 		t.Fatalf("versioned replace = %d %s (old kept: %v)", rec.Code, rec.Body, exists(t, app, first))
 	}
+	// A stale version refuses the whole change: the new file is
+	// abandoned and the current one kept.
+	third := grant(pngBytes)
+	rec = doRequest(app, jar, http.MethodPatch, base+"/"+id, fmt.Sprintf(`{"scan":%q,"version":%d}`, third, asInt(created.Data["version"])))
+	if rec.Code != http.StatusConflict || exists(t, app, third) || !exists(t, app, second) {
+		t.Fatalf("a stale versioned replace = %d %s (new kept: %v, current kept: %v)", rec.Code, rec.Body, exists(t, app, third), exists(t, app, second))
+	}
+	var claim claims.Claim
+	if err := app.DB().Where("object_key = ?", second).Take(&claim).Error; err != nil || claim.State != claims.Held {
+		t.Fatalf("the current file's claim = %+v, %v; want held", claim, err)
+	}
 	rec = doRequest(app, jar, http.MethodPatch, base+"/"+id, `{"scan":"ledgers/scan/never"}`)
 	if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "was not uploaded") {
 		t.Fatalf("versioned update with a key never uploaded = %d %s", rec.Code, rec.Body)
@@ -309,7 +321,7 @@ func TestAdminListSurvivesAStorageOutage(t *testing.T) {
 	if err := auth.Migrate(db.DB); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AutoMigrate(&Paper{}); err != nil {
+	if err := db.AutoMigrate(append(claims.Models(), &Paper{})...); err != nil {
 		t.Fatal(err)
 	}
 	mem := memory.New()

@@ -190,9 +190,11 @@ version.
   - `POST /admin/resources/{slug}/uploads/{field}` grants a direct upload,
     and needs create or update permission;
   - writes accept a key only for an upload under the field's prefix that
-    passes its policy and belongs to no other record;
-  - files replaced, removed, or taken with a deleted record are deleted
-    after the change commits;
+    passes its policy, and hold its claim in the write's transaction
+    (`storage/claims`), so another record's file is refused;
+  - files replaced, removed, or taken with a deleted record are released in
+    that transaction and deleted once it commits; a failed write abandons
+    its new uploads;
   - the SPA's file widget uploads, previews images, and removes, and lists
     and detail pages link files;
   - the admin and embedded SPA pages allow the store's origin in their

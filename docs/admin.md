@@ -242,23 +242,28 @@ policy as hints: `accept` (media types) and `max_bytes`.
   `{size, content_type, filename}` grants one direct upload
   ([storage.md § Direct uploads](storage.md#direct-uploads)). The grant needs
   the model's create or update permission, and the declared size and type
-  must fit the policy. The SPA sends the bytes with the grant, then puts the
-  key in the form.
+  must fit the policy. The grant claims the key (`pending`; see
+  [storage.md § Cleanup](storage.md#cleanup)), so the app needs the
+  `storage_claims` table (apps made by `gombit new` migrate it). The SPA
+  sends the bytes with the grant, then puts the key in the form.
 - **Writes** take the key, or the row's file object (sending it back keeps
   the file), or `null` to remove it. A changed key is accepted only if it is:
-  - an upload that passes the policy by its bytes (a refused file is deleted);
+  - an upload that passes the policy by its bytes (a refused file is
+    deleted, unless a record holds it);
   - under the field's prefix;
-  - held by no other record.
+  - still pending: held by no other record, and not expired and swept.
 
   Anything else is a field error: 422 with `fields.<name>`.
-- **Cleanup:** after an update commits, the file it replaced or removed is
-  deleted. After a delete commits, the record's files are deleted. Only keys
-  under the field's own prefix are deleted (`storage.DeleteOwned`). A failed
-  delete leaves a file no record refers to, which `storage.Sweep` removes.
-  So does an upload the operator chose but never saved: the widget uploads as
-  soon as a file is picked. Run
-  `storage.Sweep(ctx, store, "<prefix>", age, filefield.ReferencedBy(db, &Model{}, "<column>"))`
-  for each field periodically (see [storage.md § Cleanup](storage.md#cleanup)).
+- **Cleanup:** a write moves the record's file claims in its own
+  transaction (`claims.Update`): new keys are held, and replaced or removed
+  ones released. A write that fails (a stale version, say) abandons the new
+  uploads and keeps the old files. Once it commits, the released files are
+  deleted; a delete releases all of the record's files the same way. A failed
+  file delete is retried by the claims sweep, which also removes uploads the
+  operator chose but never saved (the widget uploads as soon as a file is
+  picked). Run `claims.Sweep(ctx, grace)` periodically; one sweep covers every
+  field. A file without a claim (stored before the app adopted claims) is
+  never deleted.
 - **The SPA:**
   - the list links each file;
   - the detail page and the form preview an image;

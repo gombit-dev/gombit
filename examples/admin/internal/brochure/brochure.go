@@ -9,7 +9,8 @@ import (
 // Brochure has storage-backed fields: a required PDF and an optional cover
 // image. Each column holds the object key under the prefix its field owns
 // (the storage tag); the admin uploads to it, previews the image, and
-// deletes the replaced or removed file after the change commits.
+// deletes the replaced or removed file after the change commits (through
+// storage/claims, whose table main migrates).
 type Brochure struct {
 	ID        uint         `gorm:"primaryKey" json:"id"`
 	Title     string       `gorm:"size:255;not null" json:"title"`

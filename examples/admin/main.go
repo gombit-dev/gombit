@@ -13,6 +13,7 @@ import (
 	"github.com/gombit-dev/gombit/examples/admin/internal/warehouse"
 	"github.com/gombit-dev/gombit/examples/admin/internal/widget"
 	"github.com/gombit-dev/gombit/framework"
+	"github.com/gombit-dev/gombit/storage/claims"
 )
 
 func main() {
@@ -56,7 +57,8 @@ func main() {
 		if err := auth.Migrate(db.DB); err != nil {
 			return err
 		}
-		if err := db.AutoMigrate(&warehouse.Warehouse{}, &part.Part{}, &widget.Widget{}, &brochure.Brochure{}); err != nil {
+		// claims.Claim: the table the brochure's files are owned through.
+		if err := db.AutoMigrate(&claims.Claim{}, &warehouse.Warehouse{}, &part.Part{}, &widget.Widget{}, &brochure.Brochure{}); err != nil {
 			return err
 		}
 		svc, err := auth.NewService(db.DB, cfg)

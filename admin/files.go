@@ -4,13 +4,14 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"time"
 
 	"github.com/danielgtaylor/huma/v2"
+	"go.uber.org/zap"
 	"gorm.io/gorm"
 
 	"github.com/gombit-dev/gombit/contract"
 	"github.com/gombit-dev/gombit/storage"
+	"github.com/gombit-dev/gombit/storage/claims"
 	"github.com/gombit-dev/gombit/storage/filefield"
 	"github.com/gombit-dev/gombit/storage/upload"
 	"github.com/gombit-dev/gombit/types"
@@ -19,10 +20,13 @@ import (
 // Storage-backed fields (types.File, types.Image) in the admin: a row
 // carries a file object (filefield.FileInfo: key, filename, size, type,
 // URL); a write takes the key of an upload the admin granted (the upload
-// endpoint); a changed key is accepted only when it passes the field's
-// policy and no other record holds it; and a file the record replaced,
-// cleared, or took with it on delete is deleted once the change has
-// committed, and only under the prefix the field owns.
+// endpoint, which claims it: storage/claims). A changed key is accepted
+// only when it passes the field's policy, and the write's transaction
+// holds its claim (so another record's file, or an expired upload, is
+// refused) and releases the claims of the files it replaced, cleared, or
+// took with it on delete; those are deleted once the change has committed.
+// Files the record holds are never deleted otherwise, and a file without
+// a claim (stored before the app adopted claims) is never deleted.
 
 // storer is a Host that has object storage (framework.App does).
 type storer interface{ Storage() storage.Storage }
@@ -32,6 +36,23 @@ func (h *handlers) store() storage.Storage {
 		return s.Storage()
 	}
 	return nil
+}
+
+// logged is a Host with a logger (framework.App is).
+type logged interface{ Logger() *zap.Logger }
+
+// fileClaims is the claims the admin owns files through, over db and the
+// host's store; nil when the host has no store.
+func (h *handlers) fileClaims(db *gorm.DB) *claims.Claims {
+	store := h.store()
+	if store == nil {
+		return nil
+	}
+	log := zap.NewNop()
+	if l, ok := h.host.(logged); ok && l.Logger() != nil {
+		log = l.Logger()
+	}
+	return filefield.Claims(db, store, log)
 }
 
 // fileFields are m's storage-backed fields (found at registration).
@@ -104,9 +125,10 @@ func (h *handlers) resolveRows(ctx context.Context, m *registered, rows []row) e
 
 // acceptFiles checks every file field whose key a write changed (before
 // holds the keys the record had, nil on create): each new key must be an
-// upload that passes the field's policy and that no other record holds.
-// Failures are field errors, the way applyWrite reports them.
-func (h *handlers) acceptFiles(ctx context.Context, db *gorm.DB, m *registered, inst any, before map[string]string) error {
+// upload that passes the field's policy. (A refused file is deleted only
+// while no record holds it.) Failures are field errors, the way applyWrite
+// reports them.
+func (h *handlers) acceptFiles(ctx context.Context, cl *claims.Claims, m *registered, inst any, before map[string]string) error {
 	files := m.fileFields()
 	if len(files) == 0 {
 		return nil
@@ -118,14 +140,12 @@ func (h *handlers) acceptFiles(ctx context.Context, db *gorm.DB, m *registered, 
 		if key == "" || key == before[f.Name] {
 			continue
 		}
-		if store == nil {
+		if store == nil || cl == nil {
 			return contract.WithContext(ctx, contract.Internal("admin: file storage is not attached"))
 		}
-		err := filefield.Accept(ctx, db, store, m.newInstance(), f.column, key, *f.policy)
+		err := filefield.Accept(ctx, store, cl, key, *f.policy)
 		switch {
 		case err == nil:
-		case errors.Is(err, filefield.ErrReferenced):
-			errs[f.Name] = append(errs[f.Name], "is attached to another record")
 		case errors.Is(err, upload.ErrNoFile):
 			errs[f.Name] = append(errs[f.Name], "was not uploaded")
 		case errors.Is(err, upload.ErrTooLarge):
@@ -144,28 +164,49 @@ func (h *handlers) acceptFiles(ctx context.Context, db *gorm.DB, m *registered, 
 	return nil
 }
 
-// discardFiles deletes the files a committed change let go of: each key in
-// before that inst no longer holds (all of them when inst is nil, a
-// deleted record). Only keys under the field's own prefix are deleted
-// (storage.DeleteOwned). A failed delete leaves a file no record refers
-// to, which storage.Sweep removes; the change itself has succeeded.
-func (h *handlers) discardFiles(ctx context.Context, m *registered, before map[string]string, inst any) {
-	store := h.store()
-	if store == nil {
-		return
-	}
+// fileChanges is what a write does to a record's files: the keys it now
+// holds that it did not (hold), and the keys it held that it no longer
+// does (release). before is nil on create; inst is nil on delete.
+func (m *registered) fileChanges(before map[string]string, inst any) (hold, release []string) {
 	for _, f := range m.fileFields() {
-		old := before[f.Name]
-		if old == "" {
+		old, cur := before[f.Name], ""
+		if inst != nil {
+			cur = fileKey(f.get(inst))
+		}
+		if cur == old {
 			continue
 		}
-		if inst != nil && fileKey(f.get(inst)) == old {
-			continue
+		if cur != "" {
+			hold = append(hold, cur)
 		}
-		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-		_, _ = storage.DeleteOwned(dctx, store, old, f.policy.Prefix)
-		cancel()
+		if old != "" {
+			release = append(release, old)
+		}
 	}
+	return hold, release
+}
+
+// writeFiles runs write (the record's change, in tx) with the record's file
+// claims moved in the same transaction (claims.Update): the new keys held,
+// the replaced ones released and, once it commits, deleted. Without files
+// (or a store) it is write on db.
+func (h *handlers) writeFiles(ctx context.Context, cl *claims.Claims, db *gorm.DB, m *registered, before map[string]string, inst any, write func(tx *gorm.DB) error) error {
+	if len(m.fileFields()) == 0 || cl == nil {
+		return write(db)
+	}
+	hold, release := m.fileChanges(before, inst)
+	err := cl.Update(ctx, hold, release, write)
+	var ke *claims.KeyError
+	if errors.As(err, &ke) && errors.Is(err, claims.ErrNotPending) {
+		// A new key the transaction could not hold: name its field.
+		for _, f := range m.fileFields() {
+			if inst != nil && fileKey(f.get(inst)) == ke.Key {
+				return contract.WithContext(ctx, contract.Validation("The request contains invalid fields.",
+					map[string][]string{f.Name: {"is attached to another record, or its upload has expired"}}))
+			}
+		}
+	}
+	return err
 }
 
 type uploadGrantInput struct {
@@ -200,11 +241,15 @@ func (h *handlers) grantUpload(ctx context.Context, input *uploadGrantInput) (*u
 	if !ok || f.policy == nil || f.ReadOnly {
 		return nil, contract.WithContext(ctx, contract.NotFound("unknown file field"))
 	}
-	store := h.store()
+	db, err := h.db()
+	if err != nil {
+		return nil, contract.WithContext(ctx, contract.Internal("admin database is not attached"))
+	}
+	store, cl := h.store(), h.fileClaims(db)
 	if store == nil {
 		return nil, contract.WithContext(ctx, contract.Internal("admin: file storage is not attached"))
 	}
-	g, err := filefield.Authorize(ctx, store, *f.policy, input.Body)
+	g, err := filefield.Authorize(ctx, store, cl, *f.policy, input.Body)
 	if err != nil {
 		return nil, filefield.MapError(ctx, err)
 	}
