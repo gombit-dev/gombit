@@ -48,6 +48,7 @@ func TestConfigLoadRejectsInsecureCookieInProductionBeforeDoctorChecks(t *testin
 	}
 	if configCheck == nil {
 		t.Fatal("runDoctorChecks did not produce a config check")
+		return
 	}
 	if configCheck.Status != doctorStatusFail {
 		t.Fatalf("config check status = %q, want %q; message: %s", configCheck.Status, doctorStatusFail, configCheck.Message)

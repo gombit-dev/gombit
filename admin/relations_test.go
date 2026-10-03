@@ -533,6 +533,7 @@ func TestBelongsToAutoDerivation(t *testing.T) {
 	}
 	if fk == nil {
 		t.Fatalf("derived fields %v missing warehouse_id", fields)
+		return
 	}
 	if fk.Type != admin.TypeRelation || fk.Related == nil || fk.Related.Kind != admin.RelBelongsTo {
 		t.Fatalf("warehouse_id = %+v, want belongs_to relation", fk)
@@ -731,6 +732,7 @@ func TestManyToManyAutoDerivation(t *testing.T) {
 	}
 	if found == nil {
 		t.Fatalf("derived fields %v missing warehouses relation", fields)
+		return
 	}
 	if found.Type != admin.TypeRelation || found.Related == nil || found.Related.Kind != admin.RelManyToMany {
 		t.Fatalf("warehouses field = %+v, want many_to_many relation", found)
