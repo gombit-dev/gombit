@@ -112,7 +112,7 @@ func TestAccept(t *testing.T) {
 	}
 	claimed := func(key string, body []byte) {
 		t.Helper()
-		if err := cl.Pending(ctx, key); err != nil {
+		if err := cl.Pending(ctx, key, time.Now()); err != nil {
 			t.Fatal(err)
 		}
 		putFile(t, store, key, body, "image/png")

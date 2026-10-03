@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"testing"
+	"time"
 
 	"gorm.io/driver/mysql"
 	"gorm.io/driver/postgres"
@@ -75,7 +76,7 @@ func checkDatabase(t *testing.T, db *gorm.DB) {
 		t.Fatal(err)
 	}
 	long := types.File("files/file/0123456789abcdef0123456789abcdef")
-	if err := cl.Pending(ctx, long.Key()); err != nil {
+	if err := cl.Pending(ctx, long.Key(), time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	putFile(t, store, long.Key(), png, "image/png")
