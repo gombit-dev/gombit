@@ -252,6 +252,9 @@ policy as hints: `accept` (media types) and `max_bytes`.
   - an upload that passes the policy by its bytes (a refused file is
     deleted, unless a record holds it);
   - under the field's prefix;
+  - granted for this field: the admin's grants are claimed for
+    `admin:<slug>.<field>`, so another field's grant (even under the same
+    prefix) is refused;
   - still pending: held by no other record, and not expired and swept.
 
   Anything else is a field error: 422 with `fields.<name>`.

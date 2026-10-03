@@ -232,7 +232,8 @@ over the database and the store, and give it to upload policies:
 
 ```go
 cl := claims.New(db, app.Storage(), claims.WithWarn(logWarning))
-avatars.Claims = cl // upload.Policy: each generated key is claimed first
+avatars.Claims = cl           // upload.Policy: each generated key is claimed first
+avatars.Scope = "user.avatar" // and claimed for this field only
 ```
 
 `upload.Receive` and `upload.Authorize` then claim each key (`pending`)
@@ -243,6 +244,15 @@ upload, and nothing is stored. A claim holds keys of at most
 `Confirm`) is deleted through the protocol: only while its key is
 `pending`. A refused confirmation of a key a record holds, or of a key
 never claimed, deletes nothing.
+
+**Scope.** Each key is claimed for its policy's `Scope` (a field:
+`"user.avatar"`, at most 255 bytes), and `upload.Confirm` accepts only a key
+claimed for the same scope (`claims.Promote` matches it, `claims.Belongs`
+checks a retried confirmation). So a grant from one field cannot be
+attached to another, even with the same or an overlapping prefix and a
+policy its bytes pass, which would also skip the other field's decision on
+who may upload. Give every policy sharing a store under claims its own
+scope; generated resources use `"<package>.<column>"`.
 
 **Recording an upload.** Write the record with `CreateWith`. It runs your
 insert in a transaction that also moves the key from `pending` to `held`,

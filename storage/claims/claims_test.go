@@ -97,7 +97,7 @@ func clean(t *testing.T, db *gorm.DB) {
 func uploaded(t *testing.T, c *claims.Claims, store storage.Storage, key string) {
 	t.Helper()
 	ctx := context.Background()
-	if err := c.Pending(ctx, key, ended); err != nil {
+	if err := c.Pending(ctx, key, "", ended); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.Put(ctx, key, strings.NewReader("bytes of "+key), storage.PutOptions{}); err != nil {
@@ -134,19 +134,19 @@ func insert(key string) func(tx *gorm.DB) error {
 func testPendingIsUnique(t *testing.T, db *gorm.DB) {
 	c := claims.New(db, memory.New())
 	ctx := context.Background()
-	if err := c.Pending(ctx, "u/1", ended); err != nil {
+	if err := c.Pending(ctx, "u/1", "", ended); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Pending(ctx, "u/1", ended); !errors.Is(err, claims.ErrClaimed) {
+	if err := c.Pending(ctx, "u/1", "", ended); !errors.Is(err, claims.ErrClaimed) {
 		t.Fatalf("a second Pending = %v, want ErrClaimed", err)
 	}
 	// Refused up front on every dialect (SQLite would store it; the others
 	// would fail with an error of their own).
 	long := "u/" + strings.Repeat("k", claims.MaxKeyLen)
-	if err := c.Pending(ctx, long, ended); !errors.Is(err, claims.ErrKeyTooLong) {
+	if err := c.Pending(ctx, long, "", ended); !errors.Is(err, claims.ErrKeyTooLong) {
 		t.Fatalf("Pending of a %d-byte key = %v, want ErrKeyTooLong", len(long), err)
 	}
-	if err := c.Pending(ctx, strings.Repeat("k", claims.MaxKeyLen), ended); err != nil {
+	if err := c.Pending(ctx, strings.Repeat("k", claims.MaxKeyLen), "", ended); err != nil {
 		t.Fatalf("Pending of a %d-byte key = %v", claims.MaxKeyLen, err)
 	}
 }
@@ -514,7 +514,7 @@ func testLease(t *testing.T, db *gorm.DB) {
 	store := memory.New()
 	c := claims.New(db, store)
 	ctx := context.Background()
-	if err := c.Pending(ctx, "u/slow", time.Now().Add(time.Hour)); err != nil {
+	if err := c.Pending(ctx, "u/slow", "", time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	// The upload is still streaming: nothing is stored yet.
@@ -626,7 +626,7 @@ func testUploadOutlivesItsClaim(t *testing.T, db *gorm.DB) {
 func stage(t *testing.T, c *claims.Claims, store storage.Storage, key string, until time.Time) {
 	t.Helper()
 	ctx := context.Background()
-	if err := c.Stage(ctx, key, until); err != nil {
+	if err := c.Stage(ctx, key, "", until); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.Put(ctx, upload.StagingKey(key), strings.NewReader("staged "+key), storage.PutOptions{}); err != nil {
@@ -649,10 +649,10 @@ func testStaged(t *testing.T, db *gorm.DB) {
 	if err := hold("u/s"); !errors.Is(err, claims.ErrNotPending) {
 		t.Fatalf("Hold of a staged, unpromoted key = %v, want ErrNotPending", err)
 	}
-	if ok, err := c.Promote(ctx, "u/s", time.Now().Add(time.Hour)); err != nil || !ok {
+	if ok, err := c.Promote(ctx, "u/s", "", time.Now().Add(time.Hour)); err != nil || !ok {
 		t.Fatalf("Promote = %v, %v", ok, err)
 	}
-	if ok, err := c.Promote(ctx, "u/s", time.Now().Add(time.Hour)); err != nil || ok {
+	if ok, err := c.Promote(ctx, "u/s", "", time.Now().Add(time.Hour)); err != nil || ok {
 		t.Fatalf("a second Promote = %v, %v; want false", ok, err)
 	}
 	var claim claims.Claim
@@ -662,17 +662,17 @@ func testStaged(t *testing.T, db *gorm.DB) {
 	if err := c.Unpromote(ctx, "u/s"); err != nil || state(t, db, "u/s") != claims.Pending {
 		t.Fatalf("Unpromote = %v, claim %s", err, state(t, db, "u/s"))
 	}
-	if ok, _ := c.Promote(ctx, "u/s", time.Now()); !ok {
+	if ok, _ := c.Promote(ctx, "u/s", "", time.Now()); !ok {
 		t.Fatal("Promote after Unpromote failed")
 	}
 	if err := hold("u/s"); err != nil || state(t, db, "u/s") != claims.Held {
 		t.Fatalf("Hold of a promoted key = %v, claim %s", err, state(t, db, "u/s"))
 	}
-	if ok, _ := c.Promote(ctx, "u/1-not-staged", time.Now()); ok {
+	if ok, _ := c.Promote(ctx, "u/1-not-staged", "", time.Now()); ok {
 		t.Fatal("Promote of an unclaimed key succeeded")
 	}
 	uploaded(t, c, store, "u/plain")
-	if ok, _ := c.Promote(ctx, "u/plain", time.Now()); ok {
+	if ok, _ := c.Promote(ctx, "u/plain", "", time.Now()); ok {
 		t.Fatal("Promote of a key stored by the application (not staged) succeeded")
 	}
 
@@ -695,7 +695,7 @@ func testLatePutOnlyStages(t *testing.T, db *gorm.DB) {
 	store := memory.New()
 	c := claims.New(db, store)
 	ctx := context.Background()
-	if err := c.Stage(ctx, "u/late", time.Now().Add(time.Hour)); err != nil {
+	if err := c.Stage(ctx, "u/late", "", time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	if res, err := c.Sweep(ctx, 0); err != nil || res.Abandoned != 1 {
@@ -714,7 +714,7 @@ func testLatePutOnlyStages(t *testing.T, db *gorm.DB) {
 	}
 	stage(t, c, store, "u/live", time.Now().Add(time.Hour))
 	stage(t, c, store, "u/held", ended)
-	if ok, _ := c.Promote(ctx, "u/held", time.Now()); !ok {
+	if ok, _ := c.Promote(ctx, "u/held", "", time.Now()); !ok {
 		t.Fatal("Promote failed")
 	}
 	if err := c.CreateWith(ctx, []string{"u/held"}, insert("u/held")); err != nil {
@@ -738,7 +738,7 @@ func testPromotionIsNotSwept(t *testing.T, db *gorm.DB) {
 	c := claims.New(db, store)
 	ctx := context.Background()
 	stage(t, c, store, "u/p", ended)
-	if ok, _ := c.Promote(ctx, "u/p", time.Now().Add(time.Hour)); !ok {
+	if ok, _ := c.Promote(ctx, "u/p", "", time.Now().Add(time.Hour)); !ok {
 		t.Fatal("Promote failed")
 	}
 	if _, err := store.Put(ctx, "u/p", strings.NewReader("copied"), storage.PutOptions{}); err != nil {
@@ -839,7 +839,7 @@ func testLateRemotePromotion(t *testing.T, db *gorm.DB) {
 	p := upload.Policy{MaxBytes: 1 << 20, Types: []string{"*/*"}, Prefix: "u/", Claims: c}
 	promotion := func(key string) string {
 		t.Helper()
-		if err := c.Stage(ctx, key, ended); err != nil {
+		if err := c.Stage(ctx, key, "", ended); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := mem.Put(ctx, upload.StagingKey(key), strings.NewReader("staged bytes"), storage.PutOptions{ContentType: "text/plain"}); err != nil {
@@ -925,10 +925,10 @@ func testUnownableStore(t *testing.T, db *gorm.DB) {
 	ctx := context.Background()
 	store := &laterStore{Storage: memory.New()}
 	c := claims.New(db, store)
-	if err := c.Pending(ctx, "u/x", time.Now()); !errors.Is(err, storage.ErrUnsupported) {
+	if err := c.Pending(ctx, "u/x", "", time.Now()); !errors.Is(err, storage.ErrUnsupported) {
 		t.Fatalf("Pending on an unownable store = %v, want ErrUnsupported", err)
 	}
-	if err := c.Stage(ctx, "u/x", time.Now()); !errors.Is(err, storage.ErrUnsupported) {
+	if err := c.Stage(ctx, "u/x", "", time.Now()); !errors.Is(err, storage.ErrUnsupported) {
 		t.Fatalf("Stage on an unownable store = %v, want ErrUnsupported", err)
 	}
 	p := upload.Policy{MaxBytes: 1 << 20, Types: []string{"*/*"}, Prefix: "u/", Claims: c}

@@ -40,6 +40,7 @@ var documentAttachmentPolicy = upload.Policy{
 	Prefix:   "document/attachment/",
 	MaxBytes: 10485760,
 	Types:    []string{"application/pdf", "image/png", "image/jpeg", "text/plain"},
+	Scope:    "document.attachment",
 }
 
 // documentCoverPolicy is the Cover field's upload policy (its storage tag).
@@ -47,6 +48,7 @@ var documentCoverPolicy = upload.Policy{
 	Prefix:   "document/cover/",
 	MaxBytes: 2097152,
 	Types:    []string{"image/png", "image/jpeg", "image/gif", "image/webp"},
+	Scope:    "document.cover",
 }
 
 // documentFromCreateBody builds a new Document from a create request.

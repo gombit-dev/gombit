@@ -79,7 +79,7 @@ func registerModel(host Host, model any, opts Options) error {
 	if err := fillConstraints(opts.Fields, sch); err != nil {
 		return err
 	}
-	if err := fillFilePolicies(opts.Fields, sch); err != nil {
+	if err := fillFilePolicies(opts.Slug, opts.Fields, sch); err != nil {
 		return err
 	}
 	if err := alignQuerySurface(&opts, sch, derived); err != nil {
@@ -564,8 +564,10 @@ func resolveFields(fields []Field, sch *schema.Schema) ([]resolvedField, []*m2mB
 // fillFilePolicies parses each file or image field's upload policy from the
 // model's storage tag (the prefix it owns, its largest file, the types it
 // accepts; see filefield.Policy). A field without a prefix owns
-// <table>/<column>/.
-func fillFilePolicies(fields []Field, sch *schema.Schema) error {
+// <table>/<column>/. Its Scope is "admin:<slug>.<field>": the admin's
+// grants are claimed for that field of that model, and only it can accept
+// them (storage/claims), whatever the prefixes.
+func fillFilePolicies(slug string, fields []Field, sch *schema.Schema) error {
 	for i := range fields {
 		f := &fields[i]
 		if f.Type != TypeFile && f.Type != TypeImage {
@@ -579,6 +581,7 @@ func fillFilePolicies(fields []Field, sch *schema.Schema) error {
 		if err != nil {
 			return fmt.Errorf("admin: field %q: %w", f.Name, err)
 		}
+		p.Scope = "admin:" + slug + "." + f.Name
 		f.policy = &p
 		f.Accept = append([]string(nil), p.Types...)
 		f.MaxBytes = p.MaxBytes

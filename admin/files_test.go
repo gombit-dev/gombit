@@ -183,7 +183,7 @@ func TestAdminFileFields(t *testing.T) {
 	junk := uploadFile(t, app, jar, "photo", []byte("<!DOCTYPE html><script>x</script>"), "image/png")
 	for body, want := range map[string]string{
 		fmt.Sprintf(`{"title":"c","doc":%q}`, doc):                  "attached to another record",
-		`{"title":"c","doc":"papers/doc/never"}`:                    "was not uploaded",
+		`{"title":"c","doc":"papers/doc/never"}`:                    "not an upload for this field", // never granted
 		`{"title":"c","doc":"elsewhere/x"}`:                         "not an upload for this field",
 		fmt.Sprintf(`{"title":"c","doc":%q,"photo":%q}`, doc, junk): "",
 	} {
@@ -296,7 +296,7 @@ func TestAdminFilesOnTheVersionedPath(t *testing.T) {
 		t.Fatalf("the current file's claim = %+v, %v; want held", claim, err)
 	}
 	rec = doRequest(app, jar, http.MethodPatch, base+"/"+id, `{"scan":"ledgers/scan/never"}`)
-	if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "was not uploaded") {
+	if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "not an upload for this field") {
 		t.Fatalf("versioned update with a key never uploaded = %d %s", rec.Code, rec.Body)
 	}
 }
@@ -349,5 +349,62 @@ func TestAdminListSurvivesAStorageOutage(t *testing.T) {
 	_ = json.Unmarshal(rec.Body.Bytes(), &listed)
 	if rec.Code != http.StatusOK || len(listed.Data) != 1 || fileOf(t, listed.Data[0], "doc")["key"] != "papers/doc/x" {
 		t.Fatalf("list during an outage = %d %s", rec.Code, rec.Body)
+	}
+}
+
+// Poster has two image fields that share a prefix: only the claim's scope
+// tells their grants apart.
+type Poster struct {
+	gorm.Model
+	Title string       `gorm:"not null"`
+	Front *types.Image `gorm:"size:512;uniqueIndex" storage:"prefix=posters/"`
+	Back  *types.Image `gorm:"size:512;uniqueIndex" storage:"prefix=posters/"`
+}
+
+// TestAdminGrantBelongsToItsField: a grant the admin issued for one field
+// cannot be written into another field of the model, even under the same
+// prefix with the same policy; it is refused as a field error, and its own
+// field accepts it.
+func TestAdminGrantBelongsToItsField(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	app := newFileApp(t)
+	if err := app.DB().AutoMigrate(&Poster{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := admin.Register(app, Poster{}, admin.Options{Slug: "posters"}); err != nil {
+		t.Fatal(err)
+	}
+	jar := loginSuperuser(t, app)
+	body := fmt.Sprintf(`{"size":%d,"content_type":"image/png"}`, len(pngBytes))
+	rec := doRequest(app, jar, http.MethodPost, apiPrefix(app)+"/admin/resources/posters/uploads/front", body)
+	var g struct {
+		Data struct {
+			Key    string `json:"key"`
+			Upload struct {
+				Method, URL string
+				Headers     map[string]string
+			} `json:"upload"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &g); err != nil || rec.Code != http.StatusOK {
+		t.Fatalf("grant = %d %s", rec.Code, rec.Body)
+	}
+	req := httptest.NewRequest(g.Data.Upload.Method, g.Data.Upload.URL, bytes.NewReader(pngBytes))
+	for k, v := range g.Data.Upload.Headers {
+		req.Header.Set(k, v)
+	}
+	w := httptest.NewRecorder()
+	app.Router().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("PUT = %d %s", w.Code, w.Body)
+	}
+	base := apiPrefix(app) + "/admin/resources/posters"
+	rec = doRequest(app, jar, http.MethodPost, base, fmt.Sprintf(`{"title":"p","back":%q}`, g.Data.Key))
+	if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "not an upload for this field") {
+		t.Fatalf("the front's grant written to back = %d %s, want a 422 field error", rec.Code, rec.Body)
+	}
+	rec = doRequest(app, jar, http.MethodPost, base, fmt.Sprintf(`{"title":"p","front":%q}`, g.Data.Key))
+	if rec.Code != http.StatusOK && rec.Code != http.StatusCreated {
+		t.Fatalf("the front's grant written to front = %d %s", rec.Code, rec.Body)
 	}
 }

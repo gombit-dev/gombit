@@ -114,7 +114,7 @@ func TestAccept(t *testing.T) {
 	// a staged claim, the bytes at the staging key.
 	staged := func(key string, body []byte) {
 		t.Helper()
-		if err := cl.Stage(ctx, key, time.Now()); err != nil {
+		if err := cl.Stage(ctx, key, "", time.Now()); err != nil {
 			t.Fatal(err)
 		}
 		putFile(t, store, upload.StagingKey(key), body, "image/png")
@@ -148,10 +148,16 @@ func TestAccept(t *testing.T) {
 	}
 	// Nothing uploaded, outside the prefix, or failing the policy.
 	staged("documents/cover/script", []byte("<html><script>x</script>"))
+	// A key granted (staged) but never uploaded is ErrNoFile; one never
+	// granted for this field at all is not an upload for it.
+	if err := cl.Stage(ctx, "documents/cover/granted", "", time.Now()); err != nil {
+		t.Fatal(err)
+	}
 	for key, want := range map[string]error{
-		"documents/cover/never":  upload.ErrNoFile,
-		"other/cover/stolen":     upload.ErrMalformed,
-		"documents/cover/script": upload.ErrType,
+		"documents/cover/granted": upload.ErrNoFile,
+		"documents/cover/never":   upload.ErrMalformed,
+		"other/cover/stolen":      upload.ErrMalformed,
+		"documents/cover/script":  upload.ErrType,
 	} {
 		if err := filefield.Accept(ctx, store, cl, key, p); !errors.Is(err, want) {
 			t.Errorf("Accept(%q) = %v, want %v", key, err, want)
@@ -166,7 +172,7 @@ func TestAccept(t *testing.T) {
 	// A held file that fails the policy (another field's stricter policy
 	// under the same prefix, say) is refused but never deleted. (Stored by
 	// the application, as Save does: a staged one could not be promoted.)
-	if err := cl.Pending(ctx, "documents/cover/held", time.Now()); err != nil {
+	if err := cl.Pending(ctx, "documents/cover/held", "", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	putFile(t, store, "documents/cover/held", []byte("<html>"), "image/png")
@@ -296,5 +302,75 @@ func TestResolveFallsBackToASignedURL(t *testing.T) {
 	d, err := filefield.Resolve(context.Background(), noPublicURLs{store}, "public/avatar")
 	if err != nil || !strings.Contains(d.URL, "signature=") {
 		t.Fatalf("a public file without public URLs = %+v, %v; want a signed URL", d, err)
+	}
+}
+
+// TestAGrantBelongsToItsField: a grant is claimed for the field that
+// issued it (Policy.Scope). Another field cannot accept it, even with the
+// same prefix and a policy its bytes pass, and the refusal deletes
+// nothing: the grant still belongs to its field, which accepts it.
+func TestAGrantBelongsToItsField(t *testing.T) {
+	db, store, p := setup(t)
+	ctx := context.Background()
+	cl := claims.New(db, store)
+	a, b := p, p
+	a.Scope, b.Scope = "documents.cover", "documents.banner" // one prefix, two fields
+	g, err := filefield.Authorize(ctx, store, cl, a, filefield.UploadGrantRequest{Size: int64(len(png)), ContentType: "image/png", Filename: "c.png"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	putFile(t, store, upload.StagingKey(g.Key), png, "image/png") // the client's PUT
+	if err := filefield.Accept(ctx, store, cl, g.Key, b); !errors.Is(err, upload.ErrMalformed) {
+		t.Fatalf("another field's Accept of the grant = %v, want ErrMalformed", err)
+	}
+	if ok, _ := storage.Exists(ctx, store, upload.StagingKey(g.Key)); !ok {
+		t.Fatal("the refusal deleted the other field's upload")
+	}
+	if err := filefield.Accept(ctx, store, cl, g.Key, a); err != nil {
+		t.Fatalf("its own field's Accept = %v", err)
+	}
+	// Once promoted, the other field still cannot take it.
+	if err := filefield.Accept(ctx, store, cl, g.Key, b); !errors.Is(err, upload.ErrMalformed) {
+		t.Fatalf("another field's Accept of the promoted file = %v, want ErrMalformed", err)
+	}
+}
+
+// TestAFailedCreateNeedsANewUpload: when the insert fails, the create
+// abandons the uploads it named, so resubmitting the same key is refused
+// (the generated forms upload afresh on every submit), and a new upload
+// is accepted.
+func TestAFailedCreateNeedsANewUpload(t *testing.T) {
+	db, store, p := setup(t)
+	ctx := context.Background()
+	cl := claims.New(db, store)
+	newUpload := func() string {
+		g, err := filefield.Authorize(ctx, store, cl, p, filefield.UploadGrantRequest{Size: int64(len(png)), ContentType: "image/png"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		putFile(t, store, upload.StagingKey(g.Key), png, "image/png")
+		return g.Key
+	}
+	create := func(id uint, key string) error {
+		if err := filefield.Accept(ctx, store, cl, key, p); err != nil {
+			return err
+		}
+		k := types.Image(key)
+		return cl.CreateWith(ctx, []string{key}, func(tx *gorm.DB) error {
+			return tx.Create(&document{ID: id, Title: "t", Cover: &k}).Error
+		})
+	}
+	if err := create(1, newUpload()); err != nil {
+		t.Fatal(err)
+	}
+	key := newUpload()
+	if err := create(1, key); err == nil {
+		t.Fatal("an insert with a taken id succeeded")
+	}
+	if err := create(2, key); !errors.Is(err, upload.ErrMalformed) {
+		t.Fatalf("resubmitting the abandoned key = %v, want ErrMalformed (it must be uploaded again)", err)
+	}
+	if err := create(2, newUpload()); err != nil {
+		t.Fatalf("the create with a new upload = %v", err)
 	}
 }

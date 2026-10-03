@@ -479,3 +479,37 @@ func TestRenderFileAndImageFields(t *testing.T) {
 		}
 	}
 }
+
+// TestFileFormsUploadAfreshOnEverySubmit: the generated forms never reuse
+// an uploaded key across submits. A create that fails abandons the uploads
+// it named (storage/claims), so a retry with the same chosen File must ask
+// for a new grant and upload again, never resend the dead key.
+func TestFileFormsUploadAfreshOnEverySubmit(t *testing.T) {
+	fields, err := parseFields([]string{"attachment:file:required", "cover:image"}, "document")
+	if err != nil {
+		t.Fatal(err)
+	}
+	name, err := parseResourceName("Document")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, preset := range []string{"minimal", "mui"} {
+		ctx := newRenderContext("github.com/example/demo", name, fields, "/api/v1", preset, false, false)
+		var form string
+		if preset == "mui" {
+			form = renderMUIFormTSX(ctx)
+		} else {
+			form = renderMinimalFormTSX(ctx)
+		}
+		for _, bad := range []string{"WeakMap", "useRef", "uploaded.current"} {
+			if strings.Contains(form, bad) {
+				t.Errorf("%s form keeps uploaded keys across submits (%q):\n%s", preset, bad, form)
+			}
+		}
+		for _, want := range []string{"async function uploadAttachment(file: File)", "/api/v1/documents/uploads/attachment", "await uploadAttachment(attachmentFile)"} {
+			if !strings.Contains(form, want) {
+				t.Errorf("%s form lacks %q", preset, want)
+			}
+		}
+	}
+}

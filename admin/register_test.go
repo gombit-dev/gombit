@@ -1,15 +1,26 @@
 package admin_test
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gombit-dev/gombit/admin"
+	"github.com/gombit-dev/gombit/auth"
+	"github.com/gombit-dev/gombit/config"
+	"github.com/gombit-dev/gombit/framework"
+	"github.com/gombit-dev/gombit/storage"
+	"github.com/gombit-dev/gombit/storage/claims"
 	"github.com/gombit-dev/gombit/types"
 	"github.com/google/uuid"
+	"go.uber.org/zap"
+	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 )
 
@@ -395,11 +406,66 @@ type Attachment struct {
 }
 
 // TestRegisterWithAFileColumn: a model with a storage-backed column, with
-// no storage tag, registers (its field owns <table>/<column>/).
+// no storage tag, registers (its field owns <table>/<column>/), delete
+// included: the admin deletes the row through the claims (claims.DeleteWith),
+// releasing its file in the same transaction and deleting it after.
 func TestRegisterWithAFileColumn(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	app := newCookieApp(t)
+	db := openSQLite(t)
+	if err := auth.Migrate(db.DB); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(append(claims.Models(), &Attachment{})...); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.DefaultFor(config.EnvironmentTest)
+	cfg.HTTP.Addr = "127.0.0.1:0"
+	cfg.Auth.JWTSecret = testJWTSecret
+	cfg.Auth.BcryptCost = bcrypt.MinCost
+	cfg.Auth.AccessTokenTTL = time.Minute
+	cfg.Auth.RefreshTokenTTL = time.Hour
+	cfg.Auth.Mode = config.AuthModeCookie
+	cfg.Storage.Driver = config.StorageDriverMemory
+	app, err := framework.New(framework.WithConfig(cfg), framework.WithDatabase(db), framework.WithLogger(zap.NewNop()))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := admin.Register(app, Attachment{}, admin.Options{Slug: "attachments"}); err != nil {
 		t.Fatalf("Register() = %v", err)
+	}
+	// A record holding a file, through the claims protocol.
+	ctx := context.Background()
+	cl := claims.New(db.DB, app.Storage())
+	key := "attachments/file/held"
+	if err := cl.Pending(ctx, key, "", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.Storage().Put(ctx, key, strings.NewReader("bytes"), storage.PutOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	k := types.File(key)
+	rec := Attachment{Title: "a", File: &k}
+	if err := cl.CreateWith(ctx, []string{key}, func(tx *gorm.DB) error { return tx.Create(&rec).Error }); err != nil {
+		t.Fatal(err)
+	}
+
+	jar := loginSuperuser(t, app)
+	meta := doRequest(app, jar, http.MethodGet, apiPrefix(app)+"/admin/meta/attachments", "")
+	if meta.Code != http.StatusOK || !strings.Contains(meta.Body.String(), `"delete":true`) {
+		t.Fatalf("meta = %d %s; want delete enabled", meta.Code, meta.Body)
+	}
+	del := doRequest(app, jar, http.MethodDelete, fmt.Sprintf("%s/admin/resources/attachments/%d", apiPrefix(app), rec.ID), "")
+	if del.Code != http.StatusOK {
+		t.Fatalf("DELETE of a file-backed record = %d %s", del.Code, del.Body)
+	}
+	var n int64
+	db.Model(&Attachment{}).Where("id = ?", rec.ID).Count(&n)
+	var claim claims.Claim
+	err = db.Where("object_key = ?", key).Take(&claim).Error
+	if n != 0 || (err == nil && claim.State != claims.Deleting) {
+		t.Fatalf("after the delete: %d records, claim %+v (%v); want the record gone and its claim released", n, claim, err)
+	}
+	if ok, _ := storage.Exists(ctx, app.Storage(), key); ok {
+		t.Fatal("the deleted record's file was kept")
 	}
 }

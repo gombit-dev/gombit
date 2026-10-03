@@ -409,12 +409,13 @@ func TestDirectUploads(t *testing.T) {
 // once, held after.
 type stagingClaims struct{ staged, promoted map[string]bool }
 
-func (c *stagingClaims) Pending(context.Context, string, time.Time) error { return nil }
-func (c *stagingClaims) Stage(_ context.Context, key string, _ time.Time) error {
+func (c *stagingClaims) Pending(context.Context, string, string, time.Time) error { return nil }
+func (c *stagingClaims) Belongs(context.Context, string, string) (bool, error)    { return true, nil }
+func (c *stagingClaims) Stage(_ context.Context, key, _ string, _ time.Time) error {
 	c.staged[key] = true
 	return nil
 }
-func (c *stagingClaims) Promote(_ context.Context, key string, _ time.Time) (bool, error) {
+func (c *stagingClaims) Promote(_ context.Context, key, _ string, _ time.Time) (bool, error) {
 	if !c.staged[key] || c.promoted[key] {
 		return false, nil
 	}
