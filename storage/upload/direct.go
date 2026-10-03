@@ -72,6 +72,9 @@ func Authorize(ctx context.Context, store storage.Storage, p Policy, size int64,
 	// writes through that route.
 	target := key
 	if p.Claims != nil {
+		if err := storage.CheckOwnable(store); err != nil {
+			return Grant{}, fmt.Errorf("upload: claims: %w", err)
+		}
 		if err := p.Claims.Stage(ctx, key, time.Now().Add(ttl+storage.SignedUploadTimeout)); err != nil {
 			return Grant{}, fmt.Errorf("upload: claim %q: %w", key, err)
 		}
@@ -164,7 +167,18 @@ func promote(ctx context.Context, store storage.Storage, p Policy, key string, d
 	defer cancel()
 	token, err := storage.PreparePublish(cctx, store, staged, key)
 	if err != nil {
-		return storage.ObjectInfo{}, unpromote(ctx, p, key, fmt.Errorf("upload: promote %q: %w", key, err))
+		err = fmt.Errorf("upload: promote %q: %w", key, err)
+		if token == "" {
+			return storage.ObjectInfo{}, unpromote(ctx, p, key, err) // nothing remains
+		}
+		// Something of the copy may remain (a part stored after its upload
+		// was aborted): keep it recorded on the claim, which stays
+		// promoting until the protocol has fenced it.
+		if perr := p.Claims.Publishing(ctx, key, token); perr != nil {
+			fence(ctx, store, token)
+			err = errors.Join(err, perr)
+		}
+		return storage.ObjectInfo{}, err
 	}
 	if err := p.Claims.Publishing(ctx, key, token); err != nil {
 		// The claim moved on (a sweep abandoned it), or could not be

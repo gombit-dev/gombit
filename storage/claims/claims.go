@@ -199,7 +199,9 @@ func New(db *gorm.DB, store storage.Storage, opts ...Option) *Claims {
 // (upload.Save, Receive), which no record refers to yet. until is the
 // lease: the application will not publish the object after it. A key that
 // already has a claim fails with ErrClaimed, and one longer than MaxKeyLen
-// with ErrKeyTooLong.
+// with ErrKeyTooLong. A store that is neither a storage.Publisher nor a
+// storage.BoundedWriter cannot be owned: storage.ErrUnsupported
+// (storage.CheckOwnable).
 func (c *Claims) Pending(ctx context.Context, key string, until time.Time) error {
 	return c.insert(ctx, key, until, false)
 }
@@ -214,6 +216,12 @@ func (c *Claims) Stage(ctx context.Context, key string, until time.Time) error {
 }
 
 func (c *Claims) insert(ctx context.Context, key string, until time.Time, staged bool) error {
+	// Only a store whose writes can be proven over (fenced, or bounded by
+	// their calls) can be owned: otherwise a write it sent could complete
+	// after its claim is gone.
+	if err := storage.CheckOwnable(c.store); err != nil {
+		return fmt.Errorf("claims: %w", err)
+	}
 	if len(key) > MaxKeyLen {
 		return fmt.Errorf("%w: %d bytes, more than %d", ErrKeyTooLong, len(key), MaxKeyLen)
 	}
@@ -254,6 +262,9 @@ func (c *Claims) Promote(ctx context.Context, key string, until time.Time) (bool
 // (and records nothing) when the claim is no longer promoting (a sweep
 // abandoned it): fence the copy and give up.
 func (c *Claims) Publishing(ctx context.Context, key, token string) error {
+	if len(token) > storage.MaxPublicationToken {
+		return fmt.Errorf("claims: publishing %q: a %d-byte token, more than %d", key, len(token), storage.MaxPublicationToken)
+	}
 	res := c.db.WithContext(ctx).Model(&Claim{}).
 		Where("object_key = ? AND state = ?", key, Promoting).
 		Updates(map[string]any{"publication": token, "updated_at": time.Now()})

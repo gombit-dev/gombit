@@ -43,13 +43,16 @@ func List(ctx context.Context, s Storage, prefix string, fn func(ObjectInfo) err
 // is a multipart upload whose parts are copied server-side, published by
 // CompleteMultipartUpload and fenced by AbortMultipartUpload.
 // PreparePublish, Publish and Fence (the functions) use it, and fall back
-// to an in-process copy for any other store.
+// to an in-process copy for a BoundedWriter; for any other store they fail
+// with ErrUnsupported.
 type Publisher interface {
 	// PreparePublish readies a copy of the object at src (its bytes,
-	// ContentType and Metadata) to dst, and returns a token naming it.
-	// Nothing is published yet: record the token durably before Publish,
-	// so that the copy can be fenced whatever happens to the caller. A
-	// missing src is ErrNotFound.
+	// ContentType and Metadata) to dst, and returns a token naming it (at
+	// most MaxPublicationToken bytes). Nothing is published yet: record the
+	// token durably before Publish, so that the copy can be fenced whatever
+	// happens to the caller. A missing src is ErrNotFound. When it fails
+	// but returns a token, something of the copy may remain (a request
+	// whose answer was lost): record the token and Fence it.
 	PreparePublish(ctx context.Context, src, dst string) (string, error)
 	// Publish publishes the prepared copy at dst. A failure whose outcome
 	// is unknown (the request sent, no definite answer) is
@@ -57,21 +60,54 @@ type Publisher interface {
 	// settles it.
 	Publish(ctx context.Context, token string) (ObjectInfo, error)
 	// Fence makes sure the copy named by token can never be published
-	// after it returns nil: it was published already, or never will be.
-	// It is idempotent. An error means nothing is proven yet: try again.
+	// after it returns nil (it was published already, or never will be),
+	// and that nothing of an unpublished copy remains. It is idempotent.
+	// An error means nothing is proven yet: try again.
 	Fence(ctx context.Context, token string) error
 }
 
+// MaxPublicationToken is the longest token a Publisher returns: it fits a
+// TEXT column on every supported database.
+const MaxPublicationToken = 60000
+
+// BoundedWriter is a Storage whose writes are bounded by their calls: a Put
+// publishes, if at all, before it returns, and never once its context has
+// ended (the driver checks it just before publishing). The local and
+// memory drivers are. A store that writes through a remote service
+// generally is not (a request it sent may complete later), and cannot
+// declare it; to take part in storage/claims it must be a Publisher.
+type BoundedWriter interface {
+	Storage
+	// BoundedWrites declares the guarantee; it does nothing.
+	BoundedWrites()
+}
+
+// CheckOwnable reports whether storage/claims can own s's objects: s must
+// be a Publisher (its copies can be fenced) or a BoundedWriter (its writes
+// end with their calls). Any other store fails with ErrUnsupported: nothing
+// proves that a write it sent will not complete after its claim is gone.
+func CheckOwnable(s Storage) error {
+	switch s.(type) {
+	case Publisher, BoundedWriter:
+		return nil
+	}
+	return fmt.Errorf("%w: %T can neither fence a publication (storage.Publisher) nor bound its writes (storage.BoundedWriter)", ErrUnsupported, s)
+}
+
 // fallbackToken is the token of a copy within the application process
-// (a store that is not a Publisher): the source and destination keys.
+// (a BoundedWriter): the source and destination keys.
 const fallbackToken = "copy\n"
 
 // PreparePublish readies a copy of src to dst in s (Publisher), and
-// returns its token. For any other store nothing happens yet: the token
-// names the keys, and Publish copies in the process.
+// returns its token. For a BoundedWriter nothing happens yet: the token
+// names the keys, and Publish copies in the process. Any other store fails
+// with ErrUnsupported.
 func PreparePublish(ctx context.Context, s Storage, src, dst string) (string, error) {
 	if p, ok := s.(Publisher); ok {
 		return p.PreparePublish(ctx, src, dst)
+	}
+	if err := CheckOwnable(s); err != nil {
+		return "", Wrap("publish", dst, err)
 	}
 	if err := ValidateKey(src); err != nil {
 		return "", Wrap("publish", src, err)
@@ -82,14 +118,17 @@ func PreparePublish(ctx context.Context, s Storage, src, dst string) (string, er
 	return fallbackToken + src + "\n" + dst, nil
 }
 
-// Publish publishes the copy token names (PreparePublish). For a store
-// that is not a Publisher, it copies within the process (Open, then Put
-// with src's ContentType, Metadata and size, IfAbsent), under ctx: the
-// drivers check ctx just before they publish, so the copy publishes
-// nothing once Publish has returned, or after ctx's deadline.
+// Publish publishes the copy token names (PreparePublish). For a
+// BoundedWriter, it copies within the process (Open, then Put with src's
+// ContentType, Metadata and size, IfAbsent), under ctx: the copy publishes
+// nothing once Publish has returned, or after ctx's deadline. Any other
+// store fails with ErrUnsupported.
 func Publish(ctx context.Context, s Storage, token string) (ObjectInfo, error) {
 	if p, ok := s.(Publisher); ok {
 		return p.Publish(ctx, token)
+	}
+	if err := CheckOwnable(s); err != nil {
+		return ObjectInfo{}, Wrap("publish", "", err)
 	}
 	src, dst, ok := strings.Cut(strings.TrimPrefix(token, fallbackToken), "\n")
 	if !ok || !strings.HasPrefix(token, fallbackToken) {
@@ -109,13 +148,17 @@ func Publish(ctx context.Context, s Storage, token string) (ObjectInfo, error) {
 }
 
 // Fence makes sure the copy token names can never be published after it
-// returns nil (Publisher.Fence). For a store that is not a Publisher it
-// does nothing: an in-process copy publishes nothing after its Publish
-// call's context ended, so a caller that bounded that context (a lease)
-// need only wait for the bound.
+// returns nil (Publisher.Fence). For a BoundedWriter it does nothing: an
+// in-process copy publishes nothing after its Publish call's context
+// ended, so a caller that bounded that context (a lease) need only wait
+// for the bound. Any other store fails with ErrUnsupported: nothing can be
+// proven about it.
 func Fence(ctx context.Context, s Storage, token string) error {
 	if p, ok := s.(Publisher); ok {
 		return p.Fence(ctx, token)
+	}
+	if err := CheckOwnable(s); err != nil {
+		return Wrap("fence", "", err)
 	}
 	return nil
 }
