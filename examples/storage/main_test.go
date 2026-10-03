@@ -259,7 +259,7 @@ func TestCleanup(t *testing.T) {
 	// it is past the grace period; a young one is not, nor is a file
 	// without a claim.
 	for _, k := range []string{images.Prefix + "abandoned", images.Prefix + "young"} {
-		if err := fs.claims.Pending(ctx, k, time.Now()); err != nil {
+		if err := fs.claims.Pending(ctx, k, "", time.Now()); err != nil {
 			t.Fatal(err)
 		}
 	}

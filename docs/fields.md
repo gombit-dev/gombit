@@ -144,6 +144,12 @@ this up: one record per file. Uploads granted but never attached stay
 covers every field. On S3, also run `claims.SweepStaging(ctx)` for staged
 uploads that outlive their claims.
 
+A grant belongs to the field that issued it: its key is claimed for the
+field's scope (`"<package>.<column>"`, the policy's `Scope` in
+`dto.gen.go`), and the create accepts it only for that field, whatever the
+prefixes. So a file uploaded for one field cannot be attached to another,
+and each field's `BeforeUpload` decision holds.
+
 **Who may upload.** Uploading is as open as create. A `BeforeUpload(ctx, field)`
 method on the resource's hooks decides who may have a grant; the seeded
 `hooks.go` of a resource with file fields has one. On an app reachable by
@@ -152,11 +158,16 @@ grant lets its holder store up to the field's `max_bytes`, and an upload
 that is never attached stays stored until swept.
 
 **Frontend and admin.**
-- The generated form has a file input per field. On submit it uploads the file
-  and sends its key.
+- The generated form has a file input per field. On every submit it asks
+  for a new grant, uploads the file, and sends its key. It never reuses a
+  key from an earlier attempt: a create that fails abandons the uploads it
+  named.
 - The list links each file to its URL.
 - The admin leaves file columns out until it has a file widget (STORAGE-8).
-  Meanwhile, a required file column cannot be set there.
+  Meanwhile, a required file column cannot be set there, and delete is off
+  for a model with file columns: deleting the row there would leave its
+  file held by a record that no longer exists. Asking for `Actions.Delete`
+  on such a model is a registration error.
 
 [`examples/storage`](../examples/storage/internal/document/document.go) has a
 `Document` resource with both kinds.

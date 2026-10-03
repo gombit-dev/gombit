@@ -933,16 +933,17 @@ type fakeClaims struct {
 	staged     map[string]bool
 	promoting  map[string]bool
 	published  map[string]string // the publication token recorded per key
+	scopes     map[string]string // the scope each key was claimed for
 	claimed    []string
 	leases     []time.Time
 	abandoned  []string
 }
 
 func newFakeClaims(store storage.Storage) *fakeClaims {
-	return &fakeClaims{store: store, pending: map[string]bool{}, staged: map[string]bool{}, promoting: map[string]bool{}, published: map[string]string{}}
+	return &fakeClaims{store: store, pending: map[string]bool{}, staged: map[string]bool{}, promoting: map[string]bool{}, published: map[string]string{}, scopes: map[string]string{}}
 }
 
-func (c *fakeClaims) Pending(_ context.Context, key string, until time.Time) error {
+func (c *fakeClaims) Pending(_ context.Context, key, scope string, until time.Time) error {
 	if c.before != nil {
 		c.before(key)
 	}
@@ -952,25 +953,36 @@ func (c *fakeClaims) Pending(_ context.Context, key string, until time.Time) err
 	c.claimed = append(c.claimed, key)
 	c.leases = append(c.leases, until)
 	c.pending[key] = true
+	c.scopes[key] = scope
 	return nil
 }
 
-func (c *fakeClaims) Stage(ctx context.Context, key string, until time.Time) error {
-	if err := c.Pending(ctx, key, until); err != nil {
+func (c *fakeClaims) Stage(ctx context.Context, key, scope string, until time.Time) error {
+	if err := c.Pending(ctx, key, scope, until); err != nil {
 		return err
 	}
 	c.staged[key] = true
 	return nil
 }
 
-func (c *fakeClaims) Promote(_ context.Context, key string, until time.Time) (bool, error) {
-	if !c.pending[key] || !c.staged[key] {
+func (c *fakeClaims) Promote(_ context.Context, key, scope string, until time.Time) (bool, error) {
+	if !c.pending[key] || !c.staged[key] || c.scopes[key] != scope {
 		return false, nil
 	}
 	delete(c.pending, key)
 	c.promoting[key] = true
 	c.leases = append(c.leases, until)
 	return true, nil
+}
+
+// Belongs: a key is held unless pending or promoting; a key never claimed
+// through the fake counts as held for the empty scope (an existing record).
+func (c *fakeClaims) Belongs(_ context.Context, key, scope string) (bool, error) {
+	s, claimed := c.scopes[key]
+	if !claimed {
+		return scope == "", nil
+	}
+	return s == scope, nil
 }
 
 func (c *fakeClaims) Publishing(_ context.Context, key, token string) error {

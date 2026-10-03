@@ -75,7 +75,7 @@ func Authorize(ctx context.Context, store storage.Storage, p Policy, size int64,
 		if err := storage.CheckOwnable(store); err != nil {
 			return Grant{}, fmt.Errorf("upload: claims: %w", err)
 		}
-		if err := p.Claims.Stage(ctx, key, time.Now().Add(ttl+storage.SignedUploadTimeout)); err != nil {
+		if err := p.Claims.Stage(ctx, key, p.Scope, time.Now().Add(ttl+storage.SignedUploadTimeout)); err != nil {
 			return Grant{}, fmt.Errorf("upload: claim %q: %w", key, err)
 		}
 		target = StagingKey(key)
@@ -132,11 +132,21 @@ func Confirm(ctx context.Context, store storage.Storage, key string, p Policy) (
 		return check(ctx, store, key, p, func(ctx context.Context) error { return discard(ctx, store, p, key) })
 	}
 	deadline := time.Now().Add(uploadTimeout(p))
-	promoted, err := p.Claims.Promote(ctx, key, deadline)
+	promoted, err := p.Claims.Promote(ctx, key, p.Scope, deadline)
 	if err != nil {
 		return File{}, fmt.Errorf("upload: promote %q: %w", key, err)
 	}
 	if !promoted {
+		// Not a staged upload of this scope awaiting confirmation: a
+		// retried confirmation, or a key stored by Save. It must still
+		// have been claimed for this scope, not another field's.
+		belongs, err := p.Claims.Belongs(ctx, key, p.Scope)
+		if err != nil {
+			return File{}, fmt.Errorf("upload: %q: %w", key, err)
+		}
+		if !belongs {
+			return File{}, fmt.Errorf("%w: %q was not uploaded for %q", ErrMalformed, key, p.Scope)
+		}
 		return check(ctx, store, key, p, nil)
 	}
 	staged := StagingKey(key)

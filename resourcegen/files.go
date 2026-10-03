@@ -574,11 +574,7 @@ func renderMinimalFormTSX(ctx renderContext) string {
 	createPath := defaultAPIPrefix + ctx.Resource.HTTPPath
 	var b strings.Builder
 	b.WriteString(tsBanner())
-	if len(formFileFields(ctx.Fields)) > 0 {
-		b.WriteString("\nimport { useRef, useState } from \"react\";\n")
-	} else {
-		b.WriteString("\nimport { useState } from \"react\";\n")
-	}
+	b.WriteString("\nimport { useState } from \"react\";\n")
 	b.WriteString("import { useForm } from \"react-hook-form\";\n")
 	b.WriteString("import { Link, useNavigate } from \"react-router\";\n\n")
 	b.WriteString("import { useApiClient } from \"../api/client\";\n")
@@ -1097,11 +1093,7 @@ func renderMUIFormTSX(ctx renderContext) string {
 
 	var b strings.Builder
 	b.WriteString(tsBanner())
-	if len(formFileFields(ctx.Fields)) > 0 {
-		b.WriteString("\nimport { useRef, useState } from \"react\";\n")
-	} else {
-		b.WriteString("\nimport { useState } from \"react\";\n")
-	}
+	b.WriteString("\nimport { useState } from \"react\";\n")
 	b.WriteString("import { Controller, useForm } from \"react-hook-form\";\n")
 	b.WriteString("import { Link, useNavigate } from \"react-router\";\n")
 	b.WriteString("import { Alert, Box, Button, Paper, TextField, Typography")
@@ -1569,16 +1561,12 @@ func tsUploadFunctions(ctx renderContext) string {
 		return ""
 	}
 	var b strings.Builder
-	// A file already uploaded is not uploaded again when a submit is
-	// retried (the first create failed on another field).
-	b.WriteString("  const uploaded = useRef(new WeakMap<File, string>());\n\n")
+	// Every submit uploads the chosen files afresh, with new grants: a
+	// create that fails abandons the uploads it named (storage/claims), so
+	// a key from an earlier attempt can never be reused.
 	for _, f := range formFileFields(ctx.Fields) {
 		path := defaultAPIPrefix + ctx.Resource.HTTPPath + "/uploads/" + f.JSONName
 		b.WriteString("  async function upload" + f.GoName + "(file: File): Promise<string> {\n")
-		b.WriteString("    const known = uploaded.current.get(file);\n")
-		b.WriteString("    if (known) {\n")
-		b.WriteString("      return known;\n")
-		b.WriteString("    }\n")
 		b.WriteString("    const granted = await unwrap(\n")
 		b.WriteString("      await client.POST(\"" + path + "\", {\n")
 		b.WriteString("        body: { size: file.size, content_type: file.type || \"application/octet-stream\", filename: file.name },\n")
@@ -1589,7 +1577,6 @@ func tsUploadFunctions(ctx renderContext) string {
 		b.WriteString("    if (!sent.ok) {\n")
 		b.WriteString("      throw new Error(`" + f.GoName + " upload failed (${sent.status})`);\n")
 		b.WriteString("    }\n")
-		b.WriteString("    uploaded.current.set(file, grant.key);\n")
 		b.WriteString("    return grant.key;\n")
 		b.WriteString("  }\n\n")
 	}

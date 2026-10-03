@@ -767,7 +767,7 @@ func renderModelDTOs(r modelResource) string {
 	}
 	b.WriteString("\t}\n}\n\n")
 	for _, f := range r.fileFields() {
-		b.WriteString(f.policyVar(typ))
+		b.WriteString(f.policyVar(typ, r.Package))
 	}
 
 	// Create mapper: request DTO -> a new model. Assignments (not a composite
@@ -871,8 +871,10 @@ func (f modelField) policyName(typ string) string {
 }
 
 // policyVar emits f's upload policy as a literal, so the generated code
-// shows the limits the model's storage tag sets.
-func (f modelField) policyVar(typ string) string {
+// shows the limits the model's storage tag sets. Its Scope is the field
+// ("<package>.<column>"): its grants are claimed for it, and only it can
+// confirm them (storage/claims), whatever other fields' prefixes are.
+func (f modelField) policyVar(typ, pkg string) string {
 	p := f.File.Policy
 	types := make([]string, len(p.Types))
 	for i, t := range p.Types {
@@ -883,6 +885,7 @@ func (f modelField) policyVar(typ string) string {
 		"\tPrefix:   " + strconv.Quote(p.Prefix) + ",\n" +
 		"\tMaxBytes: " + strconv.FormatInt(p.MaxBytes, 10) + ",\n" +
 		"\tTypes:    []string{" + strings.Join(types, ", ") + "},\n" +
+		"\tScope:    " + strconv.Quote(pkg+"."+f.Column) + ",\n" +
 		"}\n\n"
 }
 
