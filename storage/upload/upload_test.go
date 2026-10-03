@@ -930,6 +930,7 @@ type fakeClaims struct {
 	before     func(key string) // called by Pending first
 	pending    map[string]bool
 	claimed    []string
+	leases     []time.Time
 	abandoned  []string
 }
 
@@ -937,7 +938,7 @@ func newFakeClaims(store storage.Storage) *fakeClaims {
 	return &fakeClaims{store: store, pending: map[string]bool{}}
 }
 
-func (c *fakeClaims) Pending(_ context.Context, key string) error {
+func (c *fakeClaims) Pending(_ context.Context, key string, until time.Time) error {
 	if c.before != nil {
 		c.before(key)
 	}
@@ -945,6 +946,7 @@ func (c *fakeClaims) Pending(_ context.Context, key string) error {
 		return c.pendingErr
 	}
 	c.claimed = append(c.claimed, key)
+	c.leases = append(c.leases, until)
 	c.pending[key] = true
 	return nil
 }
@@ -1014,5 +1016,65 @@ func TestClaimsDiscardThroughAbandon(t *testing.T) {
 	}
 	if len(cl.abandoned) != 1 || len(store.Keys()) != 0 {
 		t.Fatalf("abandoned %v, stored %v: the pending file must be deleted through Abandon", cl.abandoned, store.Keys())
+	}
+}
+
+// slowBody sends data, then blocks until released (or for good).
+type slowBody struct {
+	data    []byte
+	release chan struct{}
+}
+
+func (b *slowBody) Read(p []byte) (int, error) {
+	if len(b.data) > 0 {
+		n := copy(p, b.data)
+		b.data = b.data[n:]
+		return n, nil
+	}
+	<-b.release
+	return 0, io.EOF
+}
+
+// TestClaimsLeaseTheUpload: under Policy.Claims, Save leases its key until
+// its deadline (Policy.UploadTimeout from the start), and a Put still
+// running then never publishes, even when its body resumes later: nothing
+// is stored after the claim's lease, and the claim is dropped.
+func TestClaimsLeaseTheUpload(t *testing.T) {
+	ctx := context.Background()
+	store := memory.New()
+	cl := newFakeClaims(store)
+	p := images
+	p.Claims = cl
+	start := time.Now()
+	if _, err := upload.Save(ctx, store, bytes.NewReader(png), "a.png", p); err != nil {
+		t.Fatal(err)
+	}
+	if lease := cl.leases[0]; lease.Before(start.Add(upload.DefaultUploadTimeout)) || lease.After(time.Now().Add(upload.DefaultUploadTimeout)) {
+		t.Fatalf("lease = %s, want the default timeout from the start", lease.Sub(start))
+	}
+
+	cl = newFakeClaims(store)
+	p.Claims = cl
+	p.UploadTimeout = 100 * time.Millisecond
+	// The body resumes only after the deadline: a read in progress is not
+	// interrupted, but the Put must not publish once it has passed.
+	body := &slowBody{data: append(bytes.Clone(png), make([]byte, 2*upload.SniffBytes)...), release: make(chan struct{})}
+	time.AfterFunc(400*time.Millisecond, func() { close(body.release) })
+	before := len(store.Keys())
+	if _, err := upload.Save(ctx, store, body, "slow.png", p); err == nil {
+		t.Fatal("a Save past its deadline succeeded")
+	}
+	if len(store.Keys()) != before {
+		t.Fatal("a Save past its deadline stored a file")
+	}
+	if len(cl.claimed) != 1 || len(cl.pending) != 0 {
+		t.Fatalf("claimed %v, still pending %v: the aborted upload must drop its claim", cl.claimed, cl.pending)
+	}
+	if lease := cl.leases[0]; time.Since(lease) < 0 {
+		t.Fatalf("the Put ran past its lease (%s left)", time.Until(lease))
+	}
+	p.UploadTimeout = -time.Second
+	if _, err := upload.Save(ctx, store, bytes.NewReader(png), "a.png", p); err == nil {
+		t.Fatal("a negative UploadTimeout was accepted")
 	}
 }

@@ -222,8 +222,8 @@ func TestCleanup(t *testing.T) {
 	gif := []byte("GIF89a\x01\x00\x01\x00\x00\x00\x00;")
 	ctx := context.Background()
 
-	// A record's insert fails: the file just stored is deleted, and so is
-	// its claim.
+	// A record's insert fails: the file just stored is deleted. Its claim
+	// stays as a tombstone (deleting) until the upload's lease ends.
 	if w := formUpload(t, r, "a.gif", gif); w.Code != http.StatusCreated {
 		t.Fatalf("first upload = %d", w.Code)
 	}
@@ -237,8 +237,8 @@ func TestCleanup(t *testing.T) {
 	if err := fs.db.Take(&rec).Error; err != nil {
 		t.Fatal(err)
 	}
-	if got := claimStates(t, fs); len(got) != 1 || got[rec.Key] != claims.Held {
-		t.Fatalf("claims = %v, want only %s held", got, rec.Key)
+	if got := claimStates(t, fs); len(got) != 2 || got[rec.Key] != claims.Held {
+		t.Fatalf("claims = %v, want %s held and the failed upload's tombstone", got, rec.Key)
 	}
 
 	// Deleting the record deletes the file it holds, and its claim.
@@ -248,8 +248,8 @@ func TestCleanup(t *testing.T) {
 	if n := len(store.Keys()); n != 0 {
 		t.Fatalf("%d files left after the record was deleted", n)
 	}
-	if got := claimStates(t, fs); len(got) != 0 {
-		t.Fatalf("claims left after the delete: %v", got)
+	if got := claimStates(t, fs); len(got) != 2 || got[rec.Key] != claims.Deleting {
+		t.Fatalf("claims after the delete = %v, want two tombstones", got)
 	}
 	if w := do(r, http.MethodDelete, "/"+rec.Key, "", ""); w.Code != http.StatusNotFound {
 		t.Fatalf("DELETE again = %d", w.Code)
@@ -259,7 +259,7 @@ func TestCleanup(t *testing.T) {
 	// it is past the grace period; a young one is not, nor is a file
 	// without a claim.
 	for _, k := range []string{images.Prefix + "abandoned", images.Prefix + "young"} {
-		if err := fs.claims.Pending(ctx, k); err != nil {
+		if err := fs.claims.Pending(ctx, k, time.Now()); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -278,6 +278,19 @@ func TestCleanup(t *testing.T) {
 	}
 	if keys := store.Keys(); len(keys) != 2 {
 		t.Fatalf("after the sweep: %v", keys)
+	}
+
+	// Once the uploads' leases have ended, the sweep removes the
+	// tombstones; the young pending claim stays.
+	if err := fs.db.Model(&claims.Claim{}).Where("state = ?", claims.Deleting).
+		Update("lease_until", time.Now().Add(-time.Hour)).Error; err != nil {
+		t.Fatal(err)
+	}
+	if res, err := fs.claims.Sweep(ctx, time.Hour); err != nil || res.Finished != 3 {
+		t.Fatalf("sweep after the leases = %+v, %v; want the 3 tombstones finished", res, err)
+	}
+	if got := claimStates(t, fs); len(got) != 1 || got[images.Prefix+"young"] != claims.Pending {
+		t.Fatalf("claims at the end = %v, want only the young pending one", got)
 	}
 }
 

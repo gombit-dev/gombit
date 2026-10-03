@@ -156,6 +156,14 @@ version.
       the files (a key with no claim is left alone);
     - `Sweep` abandons stale pending claims and finishes interrupted
       deletes. It reads claims only, so a file without one is never
+      deleted;
+    - every claim has a lease, the time after which no writer publishes
+      under its key: `upload.Save`/`Receive` run their `Put` under it
+      (`Policy.UploadTimeout`, an hour by default), and the app's storage
+      route aborts a signed `PUT` at `storage.SignedUploadTimeout` (an hour)
+      after its URL expired. A deleting claim stays as a tombstone until
+      its lease has ended, and each sweep deletes its file again, so an
+      upload that publishes after its claim was abandoned is still
       deleted.
 
     Tested on SQLite, PostgreSQL and MySQL, including a confirmation racing

@@ -200,6 +200,7 @@ type grant struct {
 	size        int64
 	contentType string
 	metadata    map[string]string
+	expires     time.Time
 }
 
 // verifyUpload checks an upload request for key against its signed query
@@ -228,7 +229,7 @@ func (s *Signer) verifyUpload(key string, q url.Values) (grant, error) {
 	if err != nil || n < 0 {
 		return grant{}, ErrSignature
 	}
-	g := grant{size: n, contentType: contentType}
+	g := grant{size: n, contentType: contentType, expires: time.Unix(expires, 0)}
 	if meta != "" {
 		b, err := base64.RawURLEncoding.DecodeString(meta)
 		if err != nil || json.Unmarshal(b, &g.metadata) != nil {
@@ -370,12 +371,22 @@ func serveUpload(w http.ResponseWriter, r *http.Request, store storage.Storage, 
 	if r.Body != nil {
 		body = r.Body
 	}
-	info, err := store.Put(r.Context(), key, body, storage.PutOptions{
+	// The PUT must have published by uploadTimeout after the URL expired:
+	// past that, the key's claim may be gone (storage/claims leases a
+	// granted key until then), so an object published later would belong
+	// to nobody. The deadline aborts the Put before it publishes.
+	ctx, cancel := context.WithTimeout(r.Context(), g.expires.Add(uploadTimeout).Sub(s.now()))
+	defer cancel()
+	info, err := store.Put(ctx, key, body, storage.PutOptions{
 		ContentType: g.contentType,
 		Size:        storage.KnownSize(g.size),
 		Metadata:    g.metadata,
 		IfAbsent:    true,
 	})
+	if err != nil && ctx.Err() != nil && r.Context().Err() == nil {
+		writeError(w, r, contract.Authorization("The upload took too long: its link has expired."))
+		return
+	}
 	if errors.Is(err, storage.ErrExists) {
 		writeError(w, r, contract.New(contract.CategoryConflict, "This upload link has been used."))
 		return
@@ -390,6 +401,9 @@ func serveUpload(w http.ResponseWriter, r *http.Request, store storage.Storage, 
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
 }
+
+// uploadTimeout is storage.SignedUploadTimeout (a variable for the tests).
+var uploadTimeout = storage.SignedUploadTimeout
 
 // writeError writes err, a D10 envelope, as the response.
 func writeError(w http.ResponseWriter, r *http.Request, err error) {
