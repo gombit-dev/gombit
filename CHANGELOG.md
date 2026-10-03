@@ -219,11 +219,28 @@ version.
     `upload.Confirm` accepts only a key claimed for its policy's scope
     (`claims.Promote` matches it, new `claims.Belongs`).
   - The runtime is `storage/filefield`.
-  - The admin leaves file columns out until it has a file widget, and
-    turns delete off for such a model (an explicit `Actions.Delete` is a
-    registration error) so a deleted row cannot strand its held file.
+  - Admin support (file widget, uploads, deletion through the claims)
+    comes with STORAGE-8, below.
   - `examples/storage` gains a `Document` resource
     ([#530](https://github.com/gombit-dev/gombit/issues/530)).
+- Admin support for storage-backed fields (STORAGE-8):
+  - `file` and `image` admin types; the meta carries each field's `accept`
+    and `max_bytes`;
+  - rows carry file objects with download URLs;
+  - `POST /admin/resources/{slug}/uploads/{field}` grants a direct upload,
+    and needs create or update permission;
+  - writes accept a key only for an upload under the field's prefix that
+    passes its policy, and hold its claim in the write's transaction
+    (`storage/claims`), so another record's file is refused;
+  - files replaced, removed, or taken with a deleted record are released in
+    that transaction and deleted once it commits; a failed write abandons
+    its new uploads;
+  - the SPA's file widget uploads, previews images, and removes, and lists
+    and detail pages link files;
+  - the admin and embedded SPA pages allow the store's origin in their
+    Content-Security-Policy;
+  - `examples/admin` gains a `Brochure` model
+    ([#330](https://github.com/gombit-dev/gombit/issues/330)).
 
 ### Changed
 

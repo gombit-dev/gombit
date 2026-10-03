@@ -9,6 +9,7 @@ import (
 	"github.com/gombit-dev/gombit/config"
 	"github.com/gombit-dev/gombit/field"
 	"github.com/gombit-dev/gombit/resourcepolicy"
+	"github.com/gombit-dev/gombit/storage/filefield"
 	"gorm.io/gorm/schema"
 )
 
@@ -78,6 +79,9 @@ func registerModel(host Host, model any, opts Options) error {
 	if err := fillConstraints(opts.Fields, sch); err != nil {
 		return err
 	}
+	if err := fillFilePolicies(opts.Slug, opts.Fields, sch); err != nil {
+		return err
+	}
 	if err := alignQuerySurface(&opts, sch, derived); err != nil {
 		return err
 	}
@@ -87,16 +91,6 @@ func registerModel(host Host, model any, opts Options) error {
 
 	if opts.Actions.zero() {
 		opts.Actions = defaultActions()
-		// A storage-backed column (file, image) is owned through
-		// storage/claims, and the admin does not take part in that yet
-		// (STORAGE-8): deleting the row here would leave its file held by
-		// a record that no longer exists, never reclaimed. Delete is off
-		// for such a model until the admin deletes through the claims.
-		if hasFileColumn(sch) {
-			opts.Actions.Delete = false
-		}
-	} else if opts.Actions.Delete && hasFileColumn(sch) {
-		return fmt.Errorf("admin: %s has storage-backed (file or image) fields, which the admin cannot delete yet: it would leave their files held by a record that no longer exists (STORAGE-8); leave Actions.Delete off", opts.Slug)
 	}
 	if opts.Singular == "" {
 		if name := elem.Name(); name != "" {
@@ -172,6 +166,9 @@ func registerModel(host Host, model any, opts Options) error {
 	}
 	for i := range m.fields {
 		m.fieldByName[m.fields[i].Name] = &m.fields[i]
+		if m.fields[i].policy != nil {
+			m.files = append(m.files, &m.fields[i])
+		}
 	}
 	m.version = detectVersionField(sch)
 	// The optimistic-lock update path (updateVersioned) and the many-to-many
@@ -564,17 +561,30 @@ func resolveFields(fields []Field, sch *schema.Schema) ([]resolvedField, []*m2mB
 	return out, bindings, hasMany, nil
 }
 
-// hasFileColumn reports whether sch has a storage-backed column (a file or
-// image field).
-func hasFileColumn(sch *schema.Schema) bool {
-	for _, sf := range sch.Fields {
-		if sf.DBName == "" {
+// fillFilePolicies parses each file or image field's upload policy from the
+// model's storage tag (the prefix it owns, its largest file, the types it
+// accepts; see filefield.Policy). A field without a prefix owns
+// <table>/<column>/. Its Scope is "admin:<slug>.<field>": the admin's
+// grants are claimed for that field of that model, and only it can accept
+// them (storage/claims), whatever the prefixes.
+func fillFilePolicies(slug string, fields []Field, sch *schema.Schema) error {
+	for i := range fields {
+		f := &fields[i]
+		if f.Type != TypeFile && f.Type != TypeImage {
 			continue
 		}
-		switch field.KindFromGo(sf.FieldType, string(sf.DataType)) {
-		case field.File, field.Image:
-			return true
+		sf := matchSchemaField(sch, *f)
+		if sf == nil {
+			return fmt.Errorf("admin: file field %q does not exist on the model", f.Name)
 		}
+		p, err := filefield.Policy(sf.Tag.Get("storage"), field.Kind(f.Type), sch.Table+"/"+sf.DBName+"/")
+		if err != nil {
+			return fmt.Errorf("admin: field %q: %w", f.Name, err)
+		}
+		p.Scope = "admin:" + slug + "." + f.Name
+		f.policy = &p
+		f.Accept = append([]string(nil), p.Types...)
+		f.MaxBytes = p.MaxBytes
 	}
-	return false
+	return nil
 }

@@ -25,8 +25,8 @@ projections of that kind, not separate lists.
 | `slug` | yes | `slug` | `string` | `string`, pattern `^[-a-zA-Z0-9_]+$` |
 | `ip` | yes | `ip` | `string` | `string`, OpenAPI `format: ip` |
 | `enum` | yes | `enum(a,b)` or `enum(draft=Draft)` | `string` | `string`; the label is display-only |
-| `file` | yes | `file` | none yet (left out of the admin) | `types.File`, the object key; reads return a file object |
-| `image` | yes | `image` | none yet (left out of the admin) | `types.Image`, as `file` with image types only |
+| `file` | yes | `file` | `file` | `types.File`, the object key; reads return a file object |
+| `image` | yes | `image` | `image` | `types.Image`, as `file` with image types only |
 | `relation` | yes | `belongs_to`, `has_many`, `many_to_many`, `one_to_one` | `relation` | |
 
 `time` on the command line is a **datetime** (`time.Time`), kept as a
@@ -163,11 +163,9 @@ that is never attached stays stored until swept.
   key from an earlier attempt: a create that fails abandons the uploads it
   named.
 - The list links each file to its URL.
-- The admin leaves file columns out until it has a file widget (STORAGE-8).
-  Meanwhile, a required file column cannot be set there, and delete is off
-  for a model with file columns: deleting the row there would leave its
-  file held by a record that no longer exists. Asking for `Actions.Delete`
-  on such a model is a registration error.
+- The admin has a file widget: it shows the current file (and previews an
+  image), uploads a chosen file directly to storage, and removes an
+  optional one. See [admin.md § File and image fields](admin.md#file-and-image-fields).
 
 [`examples/storage`](../examples/storage/internal/document/document.go) has a
 `Document` resource with both kinds.

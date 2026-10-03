@@ -25,6 +25,11 @@ per-field wiring:
   children's ids (`Part` carries the `widget_id` back-reference). A write to it
   is rejected.
 
+`Brochure` has storage-backed fields: `pdf` (a file, PDFs only) and `cover`
+(an image). The admin uploads them directly to storage (`./storage` by
+default), previews the cover, and deletes a replaced or removed file after the
+change commits.
+
 `Part.widget_id` is a plain integer, not a picker: `Part` cannot hold a
 `Widget` association without an import cycle, which is the same constraint
 `gombit make resource ... has_many:Part` documents.

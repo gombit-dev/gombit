@@ -113,6 +113,9 @@ func (h *handlers) listResources(ctx context.Context, input *listInput) (*listOu
 	m.forEach(slice, func(item any) {
 		rows = append(rows, m.toRow(item))
 	})
+	if err := h.resolveRows(ctx, m, rows); err != nil {
+		return nil, err
+	}
 	return &listOutput{
 		Body: contract.DataMeta[[]row, contract.PageMeta]{
 			Data: rows,
@@ -143,10 +146,24 @@ func (h *handlers) createResource(ctx context.Context, input *writeInput) (*rowO
 	if err := applyWrite(ctx, m, inst, body, true); err != nil {
 		return nil, err
 	}
-	if err := persistWithM2M(ctx, db, m, inst, m2mIDs, true); err != nil {
+	cl := h.fileClaims(db)
+	if err := h.acceptFiles(ctx, cl, m, inst, nil); err != nil {
 		return nil, err
 	}
-	return &rowOutput{Body: contract.Data[row]{Data: rowWithM2M(m, inst, m2mIDs)}}, nil
+	if err := h.writeFiles(ctx, cl, db, m, nil, inst, func(tx *gorm.DB) error {
+		return persistWithM2M(ctx, tx, m, inst, m2mIDs, true)
+	}); err != nil {
+		return nil, err
+	}
+	return h.respond(ctx, m, rowWithM2M(m, inst, m2mIDs))
+}
+
+// respond is a single-row response, with its files resolved.
+func (h *handlers) respond(ctx context.Context, m *registered, r row) (*rowOutput, error) {
+	if err := h.resolveFiles(ctx, m, r); err != nil {
+		return nil, err
+	}
+	return &rowOutput{Body: contract.Data[row]{Data: r}}, nil
 }
 
 func (h *handlers) getResource(ctx context.Context, input *itemInput) (*rowOutput, error) {
@@ -163,7 +180,7 @@ func (h *handlers) getResource(ctx context.Context, input *itemInput) (*rowOutpu
 	if err != nil {
 		return nil, err
 	}
-	return &rowOutput{Body: contract.Data[row]{Data: m.toRow(inst)}}, nil
+	return h.respond(ctx, m, m.toRow(inst))
 }
 
 func (h *handlers) updateResource(ctx context.Context, input *patchInput) (*rowOutput, error) {
@@ -190,6 +207,7 @@ func (h *handlers) updateResource(ctx context.Context, input *patchInput) (*rowO
 	if m.version != nil {
 		return h.updateVersioned(ctx, m, inst, input, db)
 	}
+	before := m.fileKeys(inst)
 	m2mIDs, body, err := splitM2M(ctx, m, input.Body)
 	if err != nil {
 		return nil, err
@@ -197,10 +215,16 @@ func (h *handlers) updateResource(ctx context.Context, input *patchInput) (*rowO
 	if err := applyWrite(ctx, m, inst, body, false); err != nil {
 		return nil, err
 	}
-	if err := persistWithM2M(ctx, db, m, inst, m2mIDs, false); err != nil {
+	cl := h.fileClaims(db)
+	if err := h.acceptFiles(ctx, cl, m, inst, before); err != nil {
 		return nil, err
 	}
-	return &rowOutput{Body: contract.Data[row]{Data: rowWithM2M(m, inst, m2mIDs)}}, nil
+	if err := h.writeFiles(ctx, cl, db, m, before, inst, func(tx *gorm.DB) error {
+		return persistWithM2M(ctx, tx, m, inst, m2mIDs, false)
+	}); err != nil {
+		return nil, err
+	}
+	return h.respond(ctx, m, rowWithM2M(m, inst, m2mIDs))
 }
 
 // updateVersioned performs an optimistic-locking update for a model that carries
@@ -211,6 +235,7 @@ func (h *handlers) updateResource(ctx context.Context, input *patchInput) (*rowO
 // loser matches zero rows and gets a 409 instead of a silent last-write-wins.
 func (h *handlers) updateVersioned(ctx context.Context, m *registered, inst any, input *patchInput, db *gorm.DB) (*rowOutput, error) {
 	expected := m.version.get(inst)
+	before := m.fileKeys(inst)
 	body := input.Body
 	if raw, ok := body[m.version.name]; ok {
 		cv, err := asInt64(raw)
@@ -226,20 +251,31 @@ func (h *handlers) updateVersioned(ctx context.Context, m *registered, inst any,
 	if err := applyWrite(ctx, m, inst, body, false); err != nil {
 		return nil, err
 	}
+	cl := h.fileClaims(db)
+	if err := h.acceptFiles(ctx, cl, m, inst, before); err != nil {
+		return nil, err
+	}
 	m.version.set(inst, expected+1)
-	res := db.WithContext(ctx).
-		Model(inst).
-		Where(clause.Eq{Column: clause.Column{Name: m.version.column}, Value: expected}).
-		Select("*").
-		Updates(inst)
-	if res.Error != nil {
-		return nil, database.MapPersistError(ctx, res.Error, "resource already exists", "persist resource")
+	if err := h.writeFiles(ctx, cl, db, m, before, inst, func(tx *gorm.DB) error {
+		res := tx.WithContext(ctx).
+			Model(inst).
+			Where(clause.Eq{Column: clause.Column{Name: m.version.column}, Value: expected}).
+			Select("*").
+			Updates(inst)
+		if res.Error != nil {
+			return database.MapPersistError(ctx, res.Error, "resource already exists", "persist resource")
+		}
+		if res.RowsAffected == 0 {
+			// Rolls back the file claims too: the new file is abandoned,
+			// the old one kept.
+			return contract.WithContext(ctx, contract.Conflict(
+				"The resource was modified by another request; reload and retry."))
+		}
+		return nil
+	}); err != nil {
+		return nil, err
 	}
-	if res.RowsAffected == 0 {
-		return nil, contract.WithContext(ctx, contract.Conflict(
-			"The resource was modified by another request; reload and retry."))
-	}
-	return &rowOutput{Body: contract.Data[row]{Data: m.toRow(inst)}}, nil
+	return h.respond(ctx, m, m.toRow(inst))
 }
 
 // withoutKey returns a shallow copy of body without key.
@@ -277,7 +313,13 @@ func (h *handlers) deleteResource(ctx context.Context, input *itemInput) (*delet
 	// statement (a referenced row errors, mapped to 409 by MapDeleteError) and
 	// actually executes a declared CASCADE / SET NULL. There is no app-layer
 	// pre-scan to race: the invariant is the database constraint itself.
-	if _, err := database.Delete(ctx, db, inst); err != nil {
+	// The record's files are released in the delete's transaction and
+	// deleted once it has committed.
+	before := m.fileKeys(inst)
+	if err := h.writeFiles(ctx, h.fileClaims(db), db, m, before, nil, func(tx *gorm.DB) error {
+		_, err := database.Delete(ctx, tx, inst)
+		return err
+	}); err != nil {
 		return nil, database.MapDeleteError(ctx, err, "resource is still referenced by other records", "delete resource")
 	}
 	return &deleteOutput{Body: contract.Data[deleteResult]{Data: deleteResult{OK: true}}}, nil

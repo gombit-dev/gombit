@@ -18,21 +18,21 @@ const apiPrefixPlaceholder = "__GOMBIT_API_PREFIX__"
 // mountAdminSPA registers explicit GET/HEAD routes for /admin and
 // /admin/*filepath. Those win over Huma and over WithEmbeddedFrontend
 // NoRoute. If fsys has no index.html, this is a no-op (same as M5-5).
-func mountAdminSPA(router *gin.Engine, fsys fs.FS, apiPrefix string) {
+func mountAdminSPA(router *gin.Engine, fsys fs.FS, apiPrefix string, storageOrigins ...string) {
 	if router == nil || fsys == nil {
 		return
 	}
 	if !hasIndexHTML(fsys) {
 		return
 	}
-	handler := adminSPAHandler(fsys, apiPrefix)
+	handler := adminSPAHandler(fsys, apiPrefix, spaCSP(storageOrigins))
 	router.GET("/admin", handler)
 	router.HEAD("/admin", handler)
 	router.GET("/admin/*filepath", handler)
 	router.HEAD("/admin/*filepath", handler)
 }
 
-func adminSPAHandler(fsys fs.FS, apiPrefix string) gin.HandlerFunc {
+func adminSPAHandler(fsys fs.FS, apiPrefix string, csp []string) gin.HandlerFunc {
 	prefix := normalizeAPIPrefix(apiPrefix)
 	return func(c *gin.Context) {
 		if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead {
@@ -54,15 +54,15 @@ func adminSPAHandler(fsys fs.FS, apiPrefix string) gin.HandlerFunc {
 			return
 		}
 		if rel == "" || rel == "." || rel == "index.html" {
-			serveAdminIndexHTML(c, fsys, prefix)
+			serveAdminIndexHTML(c, fsys, prefix, csp)
 			return
 		}
 		if fs.ValidPath(rel) {
-			if serveEmbeddedFile(c, fsys, rel) {
+			if serveEmbeddedFile(c, fsys, rel, csp) {
 				return
 			}
 		}
-		serveAdminIndexHTML(c, fsys, prefix)
+		serveAdminIndexHTML(c, fsys, prefix, csp)
 	}
 }
 
@@ -83,14 +83,14 @@ func serveAdminRuntimeConfig(c *gin.Context, apiPrefix string) {
 	writeBytes(c, "application/json; charset=utf-8", body)
 }
 
-func serveAdminIndexHTML(c *gin.Context, fsys fs.FS, apiPrefix string) {
+func serveAdminIndexHTML(c *gin.Context, fsys fs.FS, apiPrefix string, csp []string) {
 	data, err := fs.ReadFile(fsys, "index.html")
 	if err != nil {
 		c.AbortWithStatus(http.StatusNotFound)
 		return
 	}
 	data = injectAPIPrefixHTML(data, apiPrefix)
-	applyBrowserSecurityHeaders(c)
+	applyBrowserSecurityHeaders(c, csp)
 	writeBytes(c, "text/html; charset=utf-8", data)
 }
 

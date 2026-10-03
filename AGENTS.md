@@ -62,7 +62,8 @@ no late upload leaves an orphan; direct uploads are staged under
 with a fenceable `storage.PreparePublish`/`Publish`/`Fence`;
 `storage.Lister` enumerates objects), and
 storage-backed model fields (`file` / `image` kinds, `types.File` /
-`types.Image`, runtime `storage/filefield`; MODEL-8). The other batteries
+`types.Image`, runtime `storage/filefield`; MODEL-8) with their admin
+widgets (upload grants, previews, cleanup after commit; STORAGE-8). The other batteries
 (events, scheduler, mail, gRPC, multi-tenancy, i18n) are not here yet.
 The **CHAOS-0** resilience suite is in: `internal/faulttest` (deterministic
 fault injection: a faulting `database/sql` driver, a scripted HTTP

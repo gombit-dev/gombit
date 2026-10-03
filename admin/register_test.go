@@ -405,11 +405,10 @@ type Attachment struct {
 	File  *types.File `gorm:"size:512;uniqueIndex"`
 }
 
-// TestRegisterWithAFileColumn: a model with a storage-backed column
-// registers; the column is left out until the admin has a file widget, and
-// delete is off: deleting the row would leave its file held by a record
-// that no longer exists (storage/claims), never reclaimed. Asking for
-// delete explicitly is an error.
+// TestRegisterWithAFileColumn: a model with a storage-backed column, with
+// no storage tag, registers (its field owns <table>/<column>/), delete
+// included: the admin deletes the row through the claims (claims.DeleteWith),
+// releasing its file in the same transaction and deleting it after.
 func TestRegisterWithAFileColumn(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	db := openSQLite(t)
@@ -434,11 +433,6 @@ func TestRegisterWithAFileColumn(t *testing.T) {
 	if err := admin.Register(app, Attachment{}, admin.Options{Slug: "attachments"}); err != nil {
 		t.Fatalf("Register() = %v", err)
 	}
-	explicit := admin.Options{Slug: "attachments-all", Actions: admin.Actions{List: true, Detail: true, Delete: true}}
-	if err := admin.Register(app, Attachment{}, explicit); err == nil || !strings.Contains(err.Error(), "cannot delete") {
-		t.Fatalf("Register() with Delete on a file-backed model = %v, want an error", err)
-	}
-
 	// A record holding a file, through the claims protocol.
 	ctx := context.Background()
 	cl := claims.New(db.DB, app.Storage())
@@ -457,20 +451,21 @@ func TestRegisterWithAFileColumn(t *testing.T) {
 
 	jar := loginSuperuser(t, app)
 	meta := doRequest(app, jar, http.MethodGet, apiPrefix(app)+"/admin/meta/attachments", "")
-	if meta.Code != http.StatusOK || !strings.Contains(meta.Body.String(), `"delete":false`) {
-		t.Fatalf("meta = %d %s; want delete disabled", meta.Code, meta.Body)
+	if meta.Code != http.StatusOK || !strings.Contains(meta.Body.String(), `"delete":true`) {
+		t.Fatalf("meta = %d %s; want delete enabled", meta.Code, meta.Body)
 	}
 	del := doRequest(app, jar, http.MethodDelete, fmt.Sprintf("%s/admin/resources/attachments/%d", apiPrefix(app), rec.ID), "")
-	if del.Code != http.StatusForbidden {
-		t.Fatalf("DELETE of a file-backed record = %d %s, want 403 (action disabled)", del.Code, del.Body)
+	if del.Code != http.StatusOK {
+		t.Fatalf("DELETE of a file-backed record = %d %s", del.Code, del.Body)
 	}
 	var n int64
 	db.Model(&Attachment{}).Where("id = ?", rec.ID).Count(&n)
 	var claim claims.Claim
-	if err := db.Where("object_key = ?", key).Take(&claim).Error; err != nil || n != 1 || claim.State != claims.Held {
-		t.Fatalf("after the refused delete: %d records, claim %+v (%v); want the record and its held claim kept", n, claim, err)
+	err = db.Where("object_key = ?", key).Take(&claim).Error
+	if n != 0 || (err == nil && claim.State != claims.Deleting) {
+		t.Fatalf("after the delete: %d records, claim %+v (%v); want the record gone and its claim released", n, claim, err)
 	}
-	if ok, _ := storage.Exists(ctx, app.Storage(), key); !ok {
-		t.Fatal("the file was deleted")
+	if ok, _ := storage.Exists(ctx, app.Storage(), key); ok {
+		t.Fatal("the deleted record's file was kept")
 	}
 }

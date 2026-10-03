@@ -471,3 +471,50 @@ func TestAppRoutesUnderTheMountedStoragePathKeepProtections(t *testing.T) {
 		t.Fatalf("an oversized JSON POST to an app route under the mounted storage path = %d, want 413", w.Code)
 	}
 }
+
+// absoluteURLs is a store whose URLs are on another origin (an S3 bucket).
+type absoluteURLs struct{ *memory.Store }
+
+func (absoluteURLs) URL(_ context.Context, key string, opts storage.URLOptions) (string, error) {
+	if !opts.Signed {
+		return "https://cdn.example.com/" + key, nil
+	}
+	return "https://bucket.s3.example.com/" + key + "?X-Amz-Signature=x", nil
+}
+
+func (absoluteURLs) UploadURL(_ context.Context, key string, _ storage.UploadURLOptions) (storage.UploadRequest, error) {
+	return storage.UploadRequest{Method: http.MethodPut, URL: "https://bucket.s3.example.com/" + key + "?X-Amz-Signature=y"}, nil
+}
+
+// TestSPAPagesAllowTheStoreOrigins: the admin and embedded SPA pages may
+// show images from, and upload to, the store's own origin; a store whose
+// URLs are app paths adds nothing.
+func TestSPAPagesAllowTheStoreOrigins(t *testing.T) {
+	origins := storageOrigins(absoluteURLs{memory.New()}, "public/")
+	if len(origins) != 2 || origins[0] != "https://cdn.example.com" || origins[1] != "https://bucket.s3.example.com" {
+		t.Fatalf("storageOrigins = %v", origins)
+	}
+	csp := spaCSP(origins)[0]
+	for _, want := range []string{
+		"img-src 'self' data: https://cdn.example.com https://bucket.s3.example.com",
+		"connect-src 'self' https://cdn.example.com https://bucket.s3.example.com",
+		"script-src 'self';",
+	} {
+		if !strings.Contains(csp, want) {
+			t.Errorf("CSP %q lacks %q", csp, want)
+		}
+	}
+	cfg := config.Default()
+	cfg.Storage.Driver = config.StorageDriverMemory
+	cfg.Storage.URLSecret = strings.Repeat("u", 32)
+	app := newTestApp(t, WithConfig(cfg))
+	if got := storageOrigins(app.Storage(), "public/"); len(got) != 0 {
+		t.Fatalf("app-path URLs gave origins %v", got)
+	}
+	if got := spaCSP(nil); got[0] != spaContentSecurityPolicy {
+		t.Fatalf("no origins changed the CSP: %v", got)
+	}
+	if got := storageOrigins(memory.New(), "public/"); got != nil {
+		t.Fatalf("a store without URLs gave %v", got)
+	}
+}

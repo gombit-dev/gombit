@@ -169,3 +169,16 @@ func TestAdminSPAInjectsRuntimeAPIPrefix(t *testing.T) {
 		t.Fatalf("GET /admin/config.json still mentions /api/v1: %s", rec.Body.String())
 	}
 }
+
+func TestAdminSPAAllowsTheStoreOrigin(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	fsys := fstest.MapFS{"index.html": {Data: []byte("<!doctype html>admin")}}
+	router := gin.New()
+	mountAdminSPA(router, fsys, "/api/v1", "https://bucket.s3.example.com")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/admin/", nil))
+	csp := rec.Header().Get("Content-Security-Policy")
+	if !strings.Contains(csp, "img-src 'self' data: https://bucket.s3.example.com") || !strings.Contains(csp, "connect-src 'self' https://bucket.s3.example.com") {
+		t.Fatalf("admin CSP = %q", csp)
+	}
+}

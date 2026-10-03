@@ -64,6 +64,10 @@ type FieldMeta struct {
 	Default   string    `json:"default,omitempty"`
 	Format    string    `json:"format,omitempty"`
 	Choices   []Choice  `json:"choices,omitempty"`
+	// Accept and MaxBytes: a file or image field's upload policy, as hints
+	// for the form (the server enforces them).
+	Accept   []string `json:"accept,omitempty"`
+	MaxBytes int64    `json:"max_bytes,omitempty"`
 }
 
 type catalogOutput struct {
@@ -100,6 +104,8 @@ func modelMetaFrom(opts Options, pk string) ModelMeta {
 			Default:   f.Default,
 			Format:    f.Format,
 			Choices:   cloneChoices(f.Choices),
+			Accept:    append([]string(nil), f.Accept...),
+			MaxBytes:  f.MaxBytes,
 		})
 	}
 	return ModelMeta{

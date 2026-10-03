@@ -6,9 +6,11 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -217,4 +219,58 @@ func skipStorageRoute(route *storageRoute, h gin.HandlerFunc) gin.HandlerFunc {
 		}
 		h(c)
 	}
+}
+
+// storageOrigins are the origins the store's URLs point to when they are
+// not the app's own (an S3 bucket's host, a CDN): the SPA pages' CSP
+// allows them for images and requests (spaCSP), so the admin can preview a
+// stored image and a page can upload directly to the store. It asks the
+// store for a public, a signed, and an upload URL of a probe key; a URL the
+// store cannot make, or a path on the app's own origin, adds nothing.
+func storageOrigins(store storage.Storage, publicPrefix string) []string {
+	if store == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	const probe = "gombit-csp-probe"
+	var urls []string
+	if publicPrefix != "" {
+		if u, err := store.URL(ctx, publicPrefix+probe, storage.PublicURL()); err == nil {
+			urls = append(urls, u)
+		}
+	}
+	if u, err := store.URL(ctx, probe, storage.SignedURL(time.Minute)); err == nil {
+		urls = append(urls, u)
+	}
+	if req, err := storage.UploadURL(ctx, store, probe, storage.UploadURLOptions{Expires: time.Minute}); err == nil {
+		urls = append(urls, req.URL)
+	}
+	var origins []string
+	seen := map[string]bool{}
+	for _, raw := range urls {
+		u, err := url.Parse(raw)
+		if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+			continue
+		}
+		origin := u.Scheme + "://" + u.Host
+		if !seen[origin] {
+			seen[origin] = true
+			origins = append(origins, origin)
+		}
+	}
+	return origins
+}
+
+// spaStorageOrigins is storageOrigins for the app's store, computed once
+// (both SPA mounts use it). An S3 store that yields none is logged: its
+// pages' CSP then blocks image previews and direct uploads to the bucket.
+func (a *App) spaStorageOrigins() []string {
+	a.storageOriginsOnce.Do(func() {
+		a.storageOrigins = storageOrigins(a.storage, a.cfg.Storage.PublicPrefix)
+		if len(a.storageOrigins) == 0 && a.cfg.Storage.Driver == config.StorageDriverS3 && a.logger != nil {
+			a.logger.Warn("storage: could not make an S3 URL at startup (credentials?), so the admin and SPA pages' Content-Security-Policy does not allow the bucket: image previews and direct uploads from the browser will be blocked")
+		}
+	})
+	return a.storageOrigins
 }

@@ -21,6 +21,7 @@ import type { Row } from "../api/types";
 import { canDelete, canUpdate, canViewDetail } from "../capabilities";
 import { spaEditPath, spaListPath } from "../api/paths";
 import { formatCell } from "../fields";
+import { cellValue } from "../components/cellValue";
 
 export function ResourceDetailPage() {
   const { slug = "", id = "" } = useParams();
@@ -157,7 +158,7 @@ export function ResourceDetailPage() {
               <TableRow key={name}>
                 <TableCell width="30%">{name}</TableCell>
                 <TableCell>
-                  {formatCell(row[name], model.fields.find((field) => field.name === name))}
+                  {cellValue(row[name], model.fields.find((field) => field.name === name), true)}
                 </TableCell>
               </TableRow>
             ))}

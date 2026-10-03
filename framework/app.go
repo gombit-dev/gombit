@@ -54,16 +54,20 @@ type Option func(*App) error
 
 // App owns Gombit's runtime lifecycle and HTTP router.
 type App struct {
-	cfg                config.Config
-	cfgSet             bool
-	cache              cache.Cache
-	cacheStore         *cache.Store
-	cacheOwned         bool
-	redis              *redis.Client
-	jobs               *jobs.Dispatcher
-	jobsOwned          bool
-	jobMetrics         *jobs.Metrics
-	storage            storage.Storage
+	cfg        config.Config
+	cfgSet     bool
+	cache      cache.Cache
+	cacheStore *cache.Store
+	cacheOwned bool
+	redis      *redis.Client
+	jobs       *jobs.Dispatcher
+	jobsOwned  bool
+	jobMetrics *jobs.Metrics
+	storage    storage.Storage
+	// storageOrigins are the store's URL origins for the SPA pages' CSP
+	// (spaStorageOrigins).
+	storageOrigins     []string
+	storageOriginsOnce sync.Once
 	workerQueues       []string // consumed by RunWorker in this process
 	db                 *database.DB
 	logger             *zap.Logger
@@ -216,10 +220,12 @@ func New(options ...Option) (*App, error) {
 			}
 			// Framework-owned admin SPA (ADMIN-2 / ADR-013). Explicit Gin
 			// routes so /admin wins over Huma and over the app NoRoute SPA.
-			mountAdminSPA(app.router, adminui.FS(), app.cfg.API.Prefix)
+			mountAdminSPA(app.router, adminui.FS(), app.cfg.API.Prefix, app.spaStorageOrigins()...)
 		}
 	}
-	mountEmbeddedFrontend(app.router, app.embeddedFrontend, app.cfg.API.Prefix)
+	if app.embeddedFrontend != nil {
+		mountEmbeddedFrontend(app.router, app.embeddedFrontend, app.cfg.API.Prefix, app.spaStorageOrigins()...)
+	}
 
 	// A /readyz datastore probe exists only when a database is attached
 	// (HOST-2 / ADR-015). Apps with no datastore are ready on the drain flag
