@@ -448,6 +448,17 @@ func testUpdate(t *testing.T, db *gorm.DB) {
 			return tx.Model(&doc{}).Where("file_key = ?", from).Update("file_key", to).Error
 		}
 	}
+	// A key another record holds fails the change, naming the key.
+	upload(t, c, store, "u/d")
+	err := c.CreateWith(ctx, []string{"u/d", "u/a"}, insert("u/d"))
+	var ke *claims.KeyError
+	if !errors.Is(err, claims.ErrNotPending) || !errors.As(err, &ke) || ke.Key != "u/a" {
+		t.Fatalf("CreateWith of a held key = %v, want a *claims.KeyError for u/a", err)
+	}
+	if !exists(t, store, "u/a") || exists(t, store, "u/d") {
+		t.Fatal("the refused change deleted the held file or kept its pending one")
+	}
+
 	upload(t, c, store, "u/c")
 	if err := c.Update(ctx, []string{"u/c"}, []string{"u/a"}, func(*gorm.DB) error { return boom }); !errors.Is(err, boom) {
 		t.Fatalf("Update = %v, want the record's error", err)
