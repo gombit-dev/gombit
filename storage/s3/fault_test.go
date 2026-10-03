@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -47,12 +48,20 @@ type fakeS3 struct {
 	lateParts        int    // parts stored after their upload was aborted
 	requestsSeen     int    // every request
 	abortedUploadIDs []string
-	puts, completes  int // PutObject and CompleteMultipartUpload requests seen
-	partCopies       int // UploadPartCopy requests seen
+	puts, completes  int                 // PutObject and CompleteMultipartUpload requests seen
+	partCopies       int                 // UploadPartCopy requests seen
+	copyRanges       []string            // their CopySourceRange headers
+	dropPartCopy     bool                // never answer an UploadPartCopy; S3 stores it once the upload is aborted
+	partsOf          map[string][]string // live upload id -> part ETags
+	ghosts           map[string]int      // aborted upload id -> parts stored after the abort
+	pendingCopies    map[string]int      // upload id -> part copies still being processed
+	aborts           int                 // AbortMultipartUpload requests seen
+	stickyGhosts     int                 // aborts that leave a ghost's parts listed (AWS: abort may need repeating)
+	manifest         []string            // the ETags the last Complete was sent
 }
 
 func newFakeS3() *fakeS3 {
-	return &fakeS3{objects: map[string]int64{}, uploads: map[string]bool{}}
+	return &fakeS3{objects: map[string]int64{}, uploads: map[string]bool{}, partsOf: map[string][]string{}, ghosts: map[string]int{}, pendingCopies: map[string]int{}}
 }
 
 func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -83,13 +92,31 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", fmt.Sprint(size))
 	case r.Method == http.MethodPut && q.Has("partNumber") && r.Header.Get("X-Amz-Copy-Source") != "": // UploadPartCopy
 		f.partCopies++
-		_, _ = io.WriteString(w, `<CopyPartResult><ETag>"part"</ETag></CopyPartResult>`)
-	case r.Method == http.MethodGet && q.Has("uploadId"): // ListParts
-		if !f.uploads[q.Get("uploadId")] {
-			s3Error(w, http.StatusNotFound, "NoSuchUpload")
+		f.copyRanges = append(f.copyRanges, r.Header.Get("X-Amz-Copy-Source-Range"))
+		id := q.Get("uploadId")
+		if f.dropPartCopy {
+			f.pendingCopies[id]++
+			drop(w)
 			return
 		}
-		_, _ = io.WriteString(w, `<ListPartsResult><Part><PartNumber>1</PartNumber><ETag>"part"</ETag><Size>5</Size></Part><IsTruncated>false</IsTruncated></ListPartsResult>`)
+		n, _ := strconv.Atoi(q.Get("partNumber"))
+		etag := fmt.Sprintf(`"part-%d"`, n)
+		f.partsOf[id] = append(f.partsOf[id], etag)
+		_, _ = fmt.Fprintf(w, `<CopyPartResult><ETag>"part-%d"</ETag></CopyPartResult>`, n)
+	case r.Method == http.MethodGet && q.Has("uploadId"): // ListParts
+		id := q.Get("uploadId")
+		n := len(f.partsOf[id])
+		if !f.uploads[id] {
+			if n = f.ghosts[id]; n == 0 {
+				s3Error(w, http.StatusNotFound, "NoSuchUpload")
+				return
+			}
+		}
+		var b strings.Builder
+		for i := 1; i <= n; i++ {
+			fmt.Fprintf(&b, `<Part><PartNumber>%d</PartNumber><ETag>"part-%d"</ETag><Size>5</Size></Part>`, i, i)
+		}
+		_, _ = fmt.Fprintf(w, `<ListPartsResult>%s<IsTruncated>false</IsTruncated></ListPartsResult>`, b.String())
 	case r.Method == http.MethodPut && q.Has("partNumber"): // UploadPart
 		if f.dropPart {
 			// Still processing when the client gives up: it lands after the
@@ -136,6 +163,10 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			drop(w)
 			return
 		}
+		f.manifest = f.manifest[:0]
+		for _, m := range strings.Split(string(body), "<ETag>")[1:] {
+			f.manifest = append(f.manifest, strings.NewReplacer("&#34;", `"`, "&quot;", `"`).Replace(strings.SplitN(m, "</ETag>", 2)[0]))
+		}
 		delete(f.uploads, q.Get("uploadId"))
 		f.objects[key] = -1 // assembled
 		if f.dropComplete {
@@ -144,6 +175,18 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		_, _ = io.WriteString(w, `<CompleteMultipartUploadResult><Bucket>b</Bucket><ETag>"done"</ETag></CompleteMultipartUploadResult>`)
 	case r.Method == http.MethodDelete && q.Has("uploadId"): // AbortMultipartUpload
+		f.aborts++
+		if id := q.Get("uploadId"); !f.uploads[id] && f.ghosts[id] > 0 {
+			// Parts stored after an earlier abort: this one frees them, or
+			// (stickyGhosts) not yet.
+			if f.stickyGhosts > 0 {
+				f.stickyGhosts--
+			} else {
+				delete(f.ghosts, id)
+			}
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		if f.refuseAbort != 0 {
 			s3Error(w, f.refuseAbort, "AccessDenied")
 			return
@@ -157,6 +200,11 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		delete(f.uploads, id)
+		delete(f.partsOf, id)
+		if f.pendingCopies[id] > 0 {
+			// A part copy still being processed lands after the abort.
+			f.ghosts[id], f.pendingCopies[id] = f.pendingCopies[id], 0
+		}
 		f.abortedUploadIDs = append(f.abortedUploadIDs, id)
 		f.lateParts, f.pendingParts = f.pendingParts, 0
 		w.WriteHeader(http.StatusNoContent)
@@ -596,5 +644,97 @@ func TestFailedFenceProvesNothing(t *testing.T) {
 	}
 	if err := s.Fence(context.Background(), "not a token"); err == nil {
 		t.Fatal("Fence of a malformed token = nil")
+	}
+}
+
+// TestManifestIsWhatPreparationRecorded: a source over 5 GiB is copied in
+// ranged parts, and Complete is sent exactly the parts and ETags S3
+// returned when they were copied, in order (never a listing).
+func TestManifestIsWhatPreparationRecorded(t *testing.T) {
+	f := newFakeS3()
+	s := fakeStore(t, f)
+	const size = 6<<30 + 7
+	f.mu.Lock()
+	f.objects["big"] = size
+	f.mu.Unlock()
+	token, err := s.PreparePublish(context.Background(), "big", "dst")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"bytes=0-1073741823", "bytes=1073741824-2147483647", "bytes=2147483648-3221225471", "bytes=3221225472-4294967295", "bytes=4294967296-5368709119", "bytes=5368709120-6442450943", "bytes=6442450944-6442450950"}
+	if fmt.Sprint(f.copyRanges) != fmt.Sprint(want) {
+		t.Fatalf("copied ranges %v, want %v", f.copyRanges, want)
+	}
+	if _, err := s.Publish(context.Background(), token); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.manifest) != len(want) || f.manifest[0] != `"part-1"` || f.manifest[len(want)-1] != fmt.Sprintf(`"part-%d"`, len(want)) {
+		t.Fatalf("Complete was sent %v; want the %d parts as copied", f.manifest, len(want))
+	}
+}
+
+// TestCopyPartsStayWithinTheToken: however large the object, the parts
+// number at most maxCopyParts, each within S3's limit.
+func TestCopyPartsStayWithinTheToken(t *testing.T) {
+	for _, size := range []int64{1, maxCopyPart, maxCopyPart + 1, 2 << 40, 5 << 40} {
+		part, err := copyParts(size)
+		if err != nil {
+			t.Fatalf("copyParts(%d) = %v", size, err)
+		}
+		if part == 0 {
+			if size > maxCopyPart {
+				t.Fatalf("copyParts(%d): one part over S3's limit", size)
+			}
+			continue
+		}
+		if part > maxCopyPart || (size+part-1)/part > maxCopyParts {
+			t.Fatalf("copyParts(%d) = %d: %d parts", size, part, (size+part-1)/part)
+		}
+	}
+	// A token with the most parts, and the most metadata, still fits.
+	etags := make([]string, maxCopyParts)
+	for i := range etags {
+		etags[i] = `"0123456789abcdef0123456789abcdef"`
+	}
+	md := map[string]string{"filename": strings.Repeat("é", storage.MaxMetadataBytes/2)}
+	if _, err := (publication{Key: strings.Repeat("k", 1024), UploadID: strings.Repeat("u", 300), ETags: etags, Metadata: md}).token(); err != nil {
+		t.Fatalf("the largest token = %v", err)
+	}
+	if _, err := copyParts(maxCopyParts*maxCopyPart + 1); err == nil {
+		t.Fatal("an object beyond maxCopyParts parts of maxCopyPart was accepted")
+	}
+}
+
+// TestLostPartCopyIsFencedUntilNoPartRemains: a part copy whose answer was
+// lost may store its part after the abort. Preparing then fails with the
+// token, and Fence aborts again until the upload lists no part.
+func TestLostPartCopyIsFencedUntilNoPartRemains(t *testing.T) {
+	f := newFakeS3()
+	s := fakeStore(t, f)
+	if _, err := s.Put(context.Background(), "src", strings.NewReader("bytes"), storage.PutOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	f.dropPartCopy = true
+	token, err := s.PreparePublish(context.Background(), "src", "dst")
+	var abort *AbortError
+	if err == nil || token == "" || !errors.As(err, &abort) {
+		t.Fatalf("PreparePublish with a lost part copy = %q, %v; want the token and an *AbortError", token, err)
+	}
+	f.mu.Lock()
+	ghosts := len(f.ghosts)
+	f.mu.Unlock()
+	if ghosts != 1 {
+		t.Fatal("the fake stored no part after the abort: the test proves nothing")
+	}
+	f.mu.Lock()
+	f.stickyGhosts = 1 // the first abort of the fence does not free them yet
+	f.mu.Unlock()
+	if err := s.Fence(context.Background(), token); err != nil {
+		t.Fatalf("Fence = %v", err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.ghosts) != 0 || f.aborts < 3 {
+		t.Fatalf("after Fence: %d uploads with parts, %d aborts; want none left", len(f.ghosts), f.aborts)
 	}
 }

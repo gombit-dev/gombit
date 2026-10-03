@@ -68,6 +68,7 @@ func runSuite(t *testing.T, db *gorm.DB) {
 		"LatePutOnlyStages":         testLatePutOnlyStages,
 		"PromotionIsNotSwept":       testPromotionIsNotSwept,
 		"LateRemotePromotion":       testLateRemotePromotion,
+		"UnownableStore":            testUnownableStore,
 		"ConfirmRacesSweep":         testConfirmRacesSweep,
 		"SweepFirstWins":            testSweepFirstWins,
 		"ConfirmationInFlightWins":  testConfirmationInFlightWins,
@@ -889,5 +890,61 @@ func testLateRemotePromotion(t *testing.T, db *gorm.DB) {
 	}
 	if store.complete(t, token) || exists(t, mem, "u/unsure") {
 		t.Fatal("a promotion completed after its claim was forgotten: an orphan")
+	}
+}
+
+// laterStore is a remote store that is neither a storage.Publisher nor a
+// storage.BoundedWriter: its Put sends the request and returns
+// ErrUnknownOutcome, and the backend completes it later (later), whatever
+// anyone did meanwhile.
+type laterStore struct {
+	storage.Storage // a *memory.Store, behind an interface: no capability
+	sent            []func()
+}
+
+func (l *laterStore) Put(ctx context.Context, key string, r io.Reader, opts storage.PutOptions) (storage.ObjectInfo, error) {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return storage.ObjectInfo{}, err
+	}
+	l.sent = append(l.sent, func() { _, _ = l.Storage.Put(context.Background(), key, bytes.NewReader(data), opts) })
+	return storage.ObjectInfo{}, storage.Wrap("put", key, errors.Join(storage.ErrUnknownOutcome, storage.ErrUnavailable))
+}
+
+func (l *laterStore) later() {
+	for _, f := range l.sent {
+		f()
+	}
+}
+
+// testUnownableStore: a store that can neither fence a publication nor
+// bound its writes is refused by the protocol, and by the uploads and the
+// publication helpers under it, rather than given a fence that proves
+// nothing: a write it sent could complete after its claim was forgotten.
+func testUnownableStore(t *testing.T, db *gorm.DB) {
+	ctx := context.Background()
+	store := &laterStore{Storage: memory.New()}
+	c := claims.New(db, store)
+	if err := c.Pending(ctx, "u/x", time.Now()); !errors.Is(err, storage.ErrUnsupported) {
+		t.Fatalf("Pending on an unownable store = %v, want ErrUnsupported", err)
+	}
+	if err := c.Stage(ctx, "u/x", time.Now()); !errors.Is(err, storage.ErrUnsupported) {
+		t.Fatalf("Stage on an unownable store = %v, want ErrUnsupported", err)
+	}
+	p := upload.Policy{MaxBytes: 1 << 20, Types: []string{"*/*"}, Prefix: "u/", Claims: c}
+	if _, err := upload.Save(ctx, store, strings.NewReader("bytes"), "a.txt", p); !errors.Is(err, storage.ErrUnsupported) {
+		t.Fatalf("Save under claims on an unownable store = %v, want ErrUnsupported", err)
+	}
+	if _, err := storage.PreparePublish(ctx, store, "u/a", "u/b"); !errors.Is(err, storage.ErrUnsupported) {
+		t.Fatalf("PreparePublish = %v, want ErrUnsupported", err)
+	}
+	if err := storage.Fence(ctx, store, "copy\nu/a\nu/b"); !errors.Is(err, storage.ErrUnsupported) {
+		t.Fatalf("Fence = %v, want ErrUnsupported: it must never claim to have proven anything", err)
+	}
+	store.later()
+	var n int64
+	db.Model(&claims.Claim{}).Count(&n)
+	if keys := store.Storage.(*memory.Store).Keys(); len(keys) != 0 || n != 0 {
+		t.Fatalf("objects %v, %d claims: nothing may have entered the protocol", keys, n)
 	}
 }
