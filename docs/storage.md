@@ -198,57 +198,96 @@ mounts `presign.Handler` itself.
 | `Key` | The object's key. |
 | `Size` | Its length in bytes. |
 | `ContentType` | Its media type (for an upload, the detected or confirmed type). |
-| `ETag` | A version identifier, which changes when the bytes change. Local and memory use the hex SHA-256 of the bytes. S3 uses the hex MD5 for a single-request upload and `<md5>-<parts>` for a multipart one. Compare ETags; don't compute them. |
+| `ETag` | An opaque version identifier, which changes when the bytes change. Compare ETags; never compute or interpret one. On S3 its form depends on how the object was uploaded and on the bucket's encryption (SSE-KMS, say), so it is not a checksum of the bytes. |
 | `ModTime` | When it was last stored. For an upload under a generated key, which is written once, that is when it was created. |
-| `Metadata`, `Filename()` | The user metadata. `Filename()` is the client's cleaned filename (the `filename` metadata) that `storage/upload` stores. |
+| `Metadata`, `StoredFilename()` | The user metadata. `StoredFilename()` is the client's cleaned filename (the `filename` metadata) that `storage/upload` stores; an `upload.File` has it as its `Filename` field. |
 
 ### Cleanup
 
-A file and the database record that refers to it are two writes with no
-shared transaction. `storage` defines what happens when they diverge:
+A file and the database record that refers to it are two writes in two
+systems, with no shared transaction. Neither "the insert returned an error"
+nor "no record refers to it right now" proves a file is unreferenced: an
+insert can commit and lose its answer (a dropped connection), and a record
+can be written a moment after the check. Deleting on either evidence can
+delete the file of a live record.
 
-- **The insert fails after the upload.** Wrap the insert in
-  `storage.DeleteIfFails`. When it fails, the just-uploaded file is deleted,
-  even if the request's context has ended, and the insert's error is
-  returned:
+`storage/claims` closes that gap by making the database the authority on
+who owns a file. It keeps a table, `storage_claims`, with one row per key
+under the protocol, in one of three states:
 
-  ```go
-  f, err := upload.Receive(store, r, avatars)
-  // ...
-  err = storage.DeleteIfFails(ctx, store, f.Key, func() error {
-  	return db.Create(&Avatar{UserID: user.ID, FileKey: f.Key}).Error
-  })
-  ```
-- **The record is deleted.** Delete the file after the record's deletion
-  commits, never before: deleting first loses the file of a record whose
-  deletion then fails. Use `storage.DeleteOwned(ctx, store, key, ownedPrefix)`,
-  which deletes only a key under `ownedPrefix`.
-- **The upload is abandoned.** Examples: a direct upload granted but never
-  confirmed, or a crash between storing the file and writing its record.
-  `storage.Sweep(ctx, store, prefix, olderThan, referenced)` lists the
-  objects under `prefix` last stored more than `olderThan` ago. It asks
-  `referenced` (a lookup of the key in your database) whether anything
-  refers to each one, and deletes those nothing does. Run it periodically,
-  as a job, and set `olderThan` longer than an upload can take to be
-  recorded: more than `Policy.GrantExpiry` for direct uploads. It needs a
-  store that can list (`storage.Lister`: local, memory and S3). On the local
-  driver, listing reads every object file, whatever the prefix.
+| State | Meaning |
+| --- | --- |
+| `pending` | Stored (or about to be), and no record refers to it yet. |
+| `held` | A record refers to it. A held file is never deleted. |
+| `deleting` | Being deleted. No record can take it. |
 
-`DeleteOwned` and `Sweep` work only under a prefix, never on a whole store.
-So give `upload.Policy` a `Prefix` for files a record owns.
+Every transition is one conditional `UPDATE`, so two that race on a key
+(a record taking it and a sweep abandoning it, say) cannot both win, in
+any number of processes. Storage drivers know nothing of claims:
+`storage.Storage` stays objects only.
 
-**Ownership.** Nothing is deleted automatically, and a shared file is never
-deleted. The contract is explicit: a record owns the objects under the prefix
-its field stores them under (`upload.Policy.Prefix`, one generated key per
-file), and nothing else. So:
+**Setup.** Add the table to the application's migrations
+(`claims.Models()`; apps made by `gombit new` have it), build a `Claims`
+over the database and the store, and give it to upload policies:
 
-- `DeleteOwned` refuses a key outside the owned prefix. That covers a file
-  from a shared library, another field's file, or a key the application chose.
-- `Sweep` only looks under the prefix you give it.
-- Keep that prefix for files each owned by one record. If two records can
-  refer to one key (a copied reference), keep those files under a prefix you
-  never pass to `DeleteOwned` or `Sweep`, and delete them yourself when the
-  last reference goes.
+```go
+cl := claims.New(db, app.Storage(), claims.WithWarn(logWarning))
+avatars.Claims = cl // upload.Policy: each generated key is claimed first
+```
+
+`upload.Receive` and `upload.Authorize` then claim each key (`pending`)
+before anything is stored under it. A key that cannot be claimed fails the
+upload, and nothing is stored. A claim holds keys of at most
+`claims.MaxKeyLen` (512) bytes, so keep `Policy.Prefix` under 480. Under
+`Policy.Claims`, a file that fails (an invalid request, a refused
+`Confirm`) is deleted through the protocol: only while its key is
+`pending`. A refused confirmation of a key a record holds, or of a key
+never claimed, deletes nothing.
+
+**Recording an upload.** Write the record with `CreateWith`. It runs your
+insert in a transaction that also moves the key from `pending` to `held`,
+so the record and the hold commit together or not at all:
+
+```go
+f, err := upload.Receive(store, r, avatars)
+// ...
+err = cl.CreateWith(ctx, f.Key, func(tx *gorm.DB) error {
+	return tx.Create(&Avatar{UserID: user.ID, FileKey: f.Key}).Error
+})
+```
+
+When the transaction fails, `CreateWith` abandons the upload: it moves the
+key from `pending` to `deleting`, deletes the file, then the claim. If the
+transaction in fact committed although it returned an error, or another
+request already recorded the key (a retried confirmation), the key is
+`held`. Abandoning it then does nothing, and the file is kept. A key that
+is not `pending` fails the transaction with `claims.ErrNotPending`.
+
+**Deleting a record.** Use `DeleteWith`. Your delete and the key's move
+from `held` to `deleting` commit in one transaction, and then the file is
+deleted. If deleting the file fails, the record is still gone: the warning
+hook is told, and the next sweep finishes the delete. A key with no claim
+(a file stored before the application adopted claims, or no file at all)
+is outside the protocol: the record is deleted and the file is left alone.
+A claim that is `pending` or `deleting` is not the record's to release:
+`DeleteWith` fails with `claims.ErrNotHeld` and the record is kept.
+
+**Abandoned uploads.** Some uploads are never recorded: a direct upload
+granted but never confirmed, or a crash between storing a file and writing
+its record. Their claims stay `pending`. Run `cl.Sweep(ctx, grace)`
+periodically, as a job. It abandons every `pending` claim older than
+`grace` and finishes every `deleting` one. Set `grace` longer than an
+upload can take to be recorded: more than `Policy.GrantExpiry` plus the
+confirmation, for direct uploads (the example uses twice
+`upload.DefaultGrantExpiry`).
+
+**Ownership.** The sweep reads claims, never the store. A file without a
+claim is outside the protocol: nothing in `storage/claims` ever deletes it.
+That covers a file from a shared library, a key the application chose, and
+files stored before the application adopted claims. A claim is one key
+held by one record: if two records can refer to one file (a copied
+reference), keep that file out of the protocol and delete it yourself when
+the last reference goes.
 
 ## Keys
 
@@ -291,7 +330,7 @@ r.POST("/avatars", func(c *gin.Context) {
 		fail(c, upload.MapError(c.Request.Context(), err))
 		return
 	}
-	// f.Key is "avatars/<32 hex digits>"; f.Filename() is the client's name.
+	// f.Key is "avatars/<32 hex digits>"; f.Filename is the client's name.
 })
 ```
 
@@ -431,7 +470,8 @@ What a grant enforces:
     or a JPEG declared as PNG (`ErrType`);
   - the object is over `MaxBytes` (`ErrTooLarge`).
 
-  Nothing uploaded is `ErrNoFile`. Confirm only keys you granted, to the
+  Under `Policy.Claims`, it deletes the object only while its key is
+  `pending` (see [Cleanup](#cleanup)). Nothing uploaded is `ErrNoFile`. Confirm only keys you granted, to the
   user who asked. `Confirm` checks the prefix but not ownership.
 - **Stores.** Direct uploads are an optional interface,
   `storage.DirectUploader`. The local, memory and S3 drivers implement it.
@@ -439,7 +479,8 @@ What a grant enforces:
   store that doesn't; use `Receive` for those.
 
 A grant that is never used expires. An upload that is never confirmed stays
-stored until `storage.Sweep` removes it (see [Cleanup](#cleanup)).
+stored, with a `pending` claim, until the claims sweep removes it (see
+[Cleanup](#cleanup)).
 
 **Browsers and S3.** A browser's `PUT` to the bucket is cross-origin, so the
 bucket needs a CORS rule allowing it from the app's origin, with every header

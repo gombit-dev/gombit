@@ -135,19 +135,26 @@ version.
     `POST /uploads/direct/:id/confirm`
     ([#328](https://github.com/gombit-dev/gombit/issues/328)).
 - Object metadata and cleanup semantics (STORAGE-7):
-  - `ObjectInfo` documents what each field means per driver (ETag: SHA-256
-    locally, MD5 or `<md5>-<parts>` on S3; `ModTime`), and gains
-    `Filename()`;
+  - `ObjectInfo` documents what each field means (an opaque `ETag`, never a
+    checksum to compute; `ModTime`), and gains `StoredFilename()`;
+    `upload.File.Filename` is unchanged;
   - `storage.Lister` (local, memory, S3) enumerates objects under a prefix,
     with its own conformance check;
-  - `storage.DeleteIfFails` deletes a just-stored file when the insert that
-    records it fails;
-  - `storage.DeleteOwned` deletes a record's file after the record, only
-    under the prefix the record owns, so shared files are never deleted;
-  - `storage.Sweep` removes abandoned uploads (older than a grace period,
-    and unreferenced according to the application's lookup);
-  - `examples/storage` records its uploads, deletes them with their
-    records, and sweeps the rest
+  - `storage/claims` is the ownership protocol for stored files: a
+    `storage_claims` table (in new apps' migrations) where each key is
+    `pending`, `held` by a record, or `deleting`, moved by conditional
+    updates. `upload.Policy.Claims` claims each generated key before
+    anything is stored, and deletes a failed upload only while its key is
+    pending (a refused `Confirm` never deletes a held file); `CreateWith` holds it in the transaction that
+    writes the record and abandons the upload otherwise, unless the key
+    turns out held (a commit whose answer was lost, a retried
+    confirmation); `DeleteWith` releases it with the record's delete and
+    then deletes the file (a key with no claim is left alone); `Sweep` abandons stale pending claims and
+    finishes interrupted deletes. It reads claims only, so a file without
+    one is never deleted. Tested on SQLite, PostgreSQL and MySQL, including
+    a confirmation racing a sweep;
+  - `examples/storage` records its uploads in SQLite under claims, deletes
+    them with their records, and sweeps the rest
     ([#329](https://github.com/gombit-dev/gombit/issues/329)).
 
 ### Changed

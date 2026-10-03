@@ -1043,7 +1043,7 @@ func checkList(t testing.TB, s storage.Storage) {
 		}
 		// To the second: an S3 listing has milliseconds, its HEAD not.
 		if o.ETag != st.ETag || !o.ModTime.Truncate(time.Second).Equal(st.ModTime.Truncate(time.Second)) {
-			t.Fatalf("List gave %q ETag %q at %s; Stat says %q at %s (Sweep decides on these)", key, o.ETag, o.ModTime, st.ETag, st.ModTime)
+			t.Fatalf("List gave %q ETag %q at %s; Stat says %q at %s (callers decide on these)", key, o.ETag, o.ModTime, st.ETag, st.ModTime)
 		}
 	}
 	if all := collect(""); len(all) < 5 {

@@ -14,10 +14,29 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/gombit-dev/gombit/config"
+	"github.com/gombit-dev/gombit/database"
 	"github.com/gombit-dev/gombit/storage"
+	"github.com/gombit-dev/gombit/storage/claims"
 	"github.com/gombit-dev/gombit/storage/memory"
 	"github.com/gombit-dev/gombit/storage/presign"
 )
+
+// newFilesFor is the example's records and claims in a fresh SQLite
+// database, over store.
+func newFilesFor(t *testing.T, store storage.Storage, max int) *files {
+	t.Helper()
+	db, err := database.Open(config.DatabaseConfig{Driver: config.DatabaseDriverSQLite, DSN: "file:" + t.TempDir() + "/example.db?_fk=1&_busy_timeout=5000"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	fs, err := newFiles(db.DB, store, max)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fs
+}
 
 func newServer(t *testing.T) *gin.Engine {
 	t.Helper()
@@ -32,7 +51,7 @@ func newServer(t *testing.T) *gin.Engine {
 	h := gin.WrapH(presign.Handler(store, signer))
 	r.GET("/_storage/*key", h)
 	r.PUT("/_storage/*key", h)
-	register(r, store, newRecords(100))
+	register(r, newFilesFor(t, store, 100))
 	return r
 }
 
@@ -197,12 +216,14 @@ func TestDirectUpload(t *testing.T) {
 func TestCleanup(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	store := memory.New()
-	recs := newRecords(1)
+	fs := newFilesFor(t, store, 1)
 	r := gin.New()
-	register(r, store, recs)
+	register(r, fs)
 	gif := []byte("GIF89a\x01\x00\x01\x00\x00\x00\x00;")
+	ctx := context.Background()
 
-	// A record's insert fails: the file just stored is deleted.
+	// A record's insert fails: the file just stored is deleted, and so is
+	// its claim.
 	if w := formUpload(t, r, "a.gif", gif); w.Code != http.StatusCreated {
 		t.Fatalf("first upload = %d", w.Code)
 	}
@@ -212,34 +233,63 @@ func TestCleanup(t *testing.T) {
 	if n := len(store.Keys()); n != 1 {
 		t.Fatalf("%d files stored, want only the recorded one", n)
 	}
-
-	// Deleting the record deletes the file it owns.
-	var id string
-	for k := range recs.rows {
-		id = strings.TrimPrefix(k, images.Prefix)
+	var rec fileRecord
+	if err := fs.db.Take(&rec).Error; err != nil {
+		t.Fatal(err)
 	}
-	if w := do(r, http.MethodDelete, "/uploads/"+id, "", ""); w.Code != http.StatusNoContent {
-		t.Fatalf("DELETE = %d", w.Code)
+	if got := claimStates(t, fs); len(got) != 1 || got[rec.Key] != claims.Held {
+		t.Fatalf("claims = %v, want only %s held", got, rec.Key)
+	}
+
+	// Deleting the record deletes the file it holds, and its claim.
+	if w := do(r, http.MethodDelete, "/"+rec.Key, "", ""); w.Code != http.StatusNoContent {
+		t.Fatalf("DELETE = %d %s", w.Code, w.Body)
 	}
 	if n := len(store.Keys()); n != 0 {
 		t.Fatalf("%d files left after the record was deleted", n)
 	}
+	if got := claimStates(t, fs); len(got) != 0 {
+		t.Fatalf("claims left after the delete: %v", got)
+	}
+	if w := do(r, http.MethodDelete, "/"+rec.Key, "", ""); w.Code != http.StatusNotFound {
+		t.Fatalf("DELETE again = %d", w.Code)
+	}
 
-	// An upload nothing records is swept once it is old enough, and a
-	// shared file outside the prefix is never touched.
-	old := memory.New(memory.WithClock(func() time.Time { return time.Now().Add(-time.Hour) }))
-	for _, k := range []string{images.Prefix + "abandoned", images.Prefix + "kept", "shared/logo.png"} {
-		if _, err := old.Put(context.Background(), k, bytes.NewReader(gif), storage.PutOptions{}); err != nil {
+	// An upload no record ever held (a grant never confirmed) is swept once
+	// it is past the grace period; a young one is not, nor is a file
+	// without a claim.
+	for _, k := range []string{images.Prefix + "abandoned", images.Prefix + "young"} {
+		if err := fs.claims.Pending(ctx, k); err != nil {
 			t.Fatal(err)
 		}
 	}
-	recs = newRecords(10)
-	_ = recs.insert(images.Prefix+"kept", "kept.gif")
-	res, err := sweepAbandoned(context.Background(), old, recs)
-	if err != nil || res.Deleted != 1 {
+	for _, k := range []string{images.Prefix + "abandoned", images.Prefix + "young", "shared/logo.png"} {
+		if _, err := store.Put(ctx, k, bytes.NewReader(gif), storage.PutOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := fs.db.Model(&claims.Claim{}).Where("object_key = ?", images.Prefix+"abandoned").
+		Update("created_at", time.Now().Add(-3*time.Hour)).Error; err != nil {
+		t.Fatal(err)
+	}
+	res, err := fs.claims.Sweep(ctx, time.Hour)
+	if err != nil || res.Abandoned != 1 {
 		t.Fatalf("sweep = %+v, %v", res, err)
 	}
-	if keys := old.Keys(); len(keys) != 2 {
+	if keys := store.Keys(); len(keys) != 2 {
 		t.Fatalf("after the sweep: %v", keys)
 	}
+}
+
+func claimStates(t *testing.T, fs *files) map[string]string {
+	t.Helper()
+	var rows []claims.Claim
+	if err := fs.db.Find(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+	m := map[string]string{}
+	for _, c := range rows {
+		m[c.Key] = c.State
+	}
+	return m
 }

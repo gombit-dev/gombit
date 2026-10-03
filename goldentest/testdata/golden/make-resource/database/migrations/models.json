@@ -23,6 +23,10 @@
     {
       "import_path": "github.com/gombit-dev/gombit/auth",
       "type_name": "User"
+    },
+    {
+      "import_path": "github.com/gombit-dev/gombit/storage/claims",
+      "type_name": "Claim"
     }
   ]
 }

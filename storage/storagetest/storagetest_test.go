@@ -499,7 +499,7 @@ func TestSuiteCatchesBrokenDrivers(t *testing.T) {
 		{"InvalidKeys", func(f *fake) { f.bareErrors = true }, "inside a *storage.Error"},
 		{"List", func(f *fake) { f.listByDir = true }, "want exactly list/a"},
 		{"List", func(f *fake) { f.listSwallows = true }, "want fn's error after 1"},
-		{"List", func(f *fake) { f.listStaleTime = true }, "Sweep decides on these"},
+		{"List", func(f *fake) { f.listStaleTime = true }, "callers decide on these"},
 	}
 	covered := map[string]bool{}
 	for _, tc := range cases {

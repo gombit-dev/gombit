@@ -10,8 +10,10 @@ does not define its own migration DSL.
 `models.json` registry entry for it — see [Generate A
 Migration](#generate-a-migration)) covering every model
 `internal/platform/database.go`'s `AutoMigrate` call registers — the
-framework's own auth tables (`users`, `permissions`, `groups`,
-`refresh_tokens`, their join tables) plus the `product/` example — when Atlas
+framework's own tables (auth's `users`, `permissions`, `groups`,
+`refresh_tokens` and their join tables, and `storage_claims`, which
+[storage](storage.md#cleanup) owns uploaded files through) plus the
+`product/` example — when Atlas
 is on `PATH` and `go mod tidy` succeeded. For `--database sqlite` (the
 default), `gombit new` also **applies** it immediately, so
 `gombit db status` shows it already applied before you've run `db migrate`
