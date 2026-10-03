@@ -71,7 +71,7 @@ var checks = []check{
 	{"URL", checkURL},
 	{"DirectUpload", checkDirectUpload},
 	{"List", checkList},
-	{"Copy", checkCopy},
+	{"Publish", checkPublish},
 }
 
 func ctxFor(t testing.TB) context.Context {
@@ -1074,39 +1074,93 @@ func keysOf(m map[string]storage.ObjectInfo) []string {
 	return keys
 }
 
-// checkCopy: storage.Copy (the store's Copier, or Open and Put) copies the
-// bytes, content type and metadata and leaves the source; a missing source
-// is ErrNotFound. Onto an occupied destination it either refuses with
-// ErrExists, leaving the destination, or (a backend without conditional
-// copies) replaces it: never anything in between.
-func checkCopy(t testing.TB, s storage.Storage) {
+// checkPublish: storage.PreparePublish publishes nothing; storage.Publish
+// copies the bytes, content type and metadata and leaves the source, and
+// refuses an occupied destination (ErrExists, leaving it); a missing source
+// is ErrNotFound. For a storage.Publisher, a fenced copy can never be
+// published, and fencing is idempotent, before and after publishing.
+func checkPublish(t testing.TB, s storage.Storage) {
 	ctx := ctxFor(t)
 	md := map[string]string{"filename": "a.txt"}
-	put(t, s, "copy/src", []byte("copied bytes"), storage.PutOptions{ContentType: "text/plain", Metadata: md})
-	info, err := storage.Copy(ctx, s, "copy/src", "copy/dst")
+	put(t, s, "pub/src", []byte("copied bytes"), storage.PutOptions{ContentType: "text/plain", Metadata: md})
+	token, err := storage.PreparePublish(ctx, s, "pub/src", "pub/dst")
 	if err != nil {
-		t.Fatalf("Copy = %v", err)
+		t.Fatalf("PreparePublish = %v", err)
 	}
-	if info.Key != "copy/dst" || info.Size != int64(len("copied bytes")) {
-		t.Fatalf("Copy reported %+v", info)
+	if ok, err := storage.Exists(ctx, s, "pub/dst"); err != nil || ok {
+		t.Fatalf("PreparePublish published already (exists = %v, %v)", ok, err)
 	}
-	data, got := read(t, s, "copy/dst")
+	info, err := storage.Publish(ctx, s, token)
+	if err != nil {
+		t.Fatalf("Publish = %v", err)
+	}
+	if info.Key != "pub/dst" || info.Size != int64(len("copied bytes")) {
+		t.Fatalf("Publish reported %+v", info)
+	}
+	data, got := read(t, s, "pub/dst")
 	if string(data) != "copied bytes" || got.ContentType != "text/plain" || got.Metadata["filename"] != "a.txt" {
 		t.Fatalf("the copy is %q (%s, %v); want the source's bytes, type and metadata", data, got.ContentType, got.Metadata)
 	}
-	if data, _ := read(t, s, "copy/src"); string(data) != "copied bytes" {
-		t.Fatalf("Copy changed its source to %q", data)
+	if data, _ := read(t, s, "pub/src"); string(data) != "copied bytes" {
+		t.Fatalf("Publish changed its source to %q", data)
 	}
-	if _, err := storage.Copy(ctx, s, "copy/missing", "copy/dst2"); !errors.Is(err, storage.ErrNotFound) {
-		t.Fatalf("Copy of a missing source = %v, want storage: object not found", err)
+	if err := storage.Fence(ctx, s, token); err != nil {
+		t.Fatalf("Fence after Publish = %v", err)
 	}
-	put(t, s, "copy/taken", []byte("kept"), storage.PutOptions{})
-	_, err = storage.Copy(ctx, s, "copy/src", "copy/taken")
-	data, _ = read(t, s, "copy/taken")
-	switch {
-	case errors.Is(err, storage.ErrExists) && string(data) == "kept":
-	case err == nil && string(data) == "copied bytes":
-	default:
-		t.Fatalf("Copy onto an object = %v, leaving %q; want ErrExists and the object kept, or the copy", err, data)
+	if data, _ := read(t, s, "pub/dst"); string(data) != "copied bytes" {
+		t.Fatal("Fence after Publish removed the copy")
+	}
+	if _, err := storage.PreparePublish(ctx, s, "pub/missing", "pub/dst2"); !errors.Is(err, storage.ErrNotFound) {
+		// A store that copies in the process finds the source missing when
+		// it publishes.
+		if err != nil {
+			t.Fatalf("PreparePublish of a missing source = %v", err)
+		}
+		tok, _ := storage.PreparePublish(ctx, s, "pub/missing", "pub/dst2")
+		if _, err := storage.Publish(ctx, s, tok); !errors.Is(err, storage.ErrNotFound) {
+			t.Fatalf("Publish of a missing source = %v, want storage: object not found", err)
+		}
+	}
+	put(t, s, "pub/empty", nil, storage.PutOptions{})
+	token, err = storage.PreparePublish(ctx, s, "pub/empty", "pub/empty-copy")
+	if err != nil {
+		t.Fatalf("PreparePublish of an empty object = %v", err)
+	}
+	if _, err := storage.Publish(ctx, s, token); err != nil {
+		t.Fatalf("Publish of an empty object = %v", err)
+	}
+	if data, info := read(t, s, "pub/empty-copy"); len(data) != 0 || info.Size != 0 {
+		t.Fatalf("the empty object's copy is %q (%d bytes)", data, info.Size)
+	}
+	put(t, s, "pub/taken", []byte("kept"), storage.PutOptions{})
+	token, err = storage.PreparePublish(ctx, s, "pub/src", "pub/taken")
+	if err != nil {
+		t.Fatalf("PreparePublish onto an object = %v", err)
+	}
+	if _, err := storage.Publish(ctx, s, token); !errors.Is(err, storage.ErrExists) {
+		t.Fatalf("Publish onto an object = %v, want storage: an object is already stored", err)
+	}
+	_ = storage.Fence(ctx, s, token)
+	if data, _ := read(t, s, "pub/taken"); string(data) != "kept" {
+		t.Fatalf("a refused Publish changed its destination to %q", data)
+	}
+	if _, ok := s.(storage.Publisher); !ok {
+		return
+	}
+	token, err = storage.PreparePublish(ctx, s, "pub/src", "pub/fenced")
+	if err != nil {
+		t.Fatalf("PreparePublish = %v", err)
+	}
+	if err := storage.Fence(ctx, s, token); err != nil {
+		t.Fatalf("Fence = %v", err)
+	}
+	if _, err := storage.Publish(ctx, s, token); err == nil {
+		t.Fatal("a fenced copy was published")
+	}
+	if ok, _ := storage.Exists(ctx, s, "pub/fenced"); ok {
+		t.Fatal("a fenced copy was published")
+	}
+	if err := storage.Fence(ctx, s, token); err != nil {
+		t.Fatalf("Fence again = %v; fencing must be idempotent", err)
 	}
 }

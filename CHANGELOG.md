@@ -166,20 +166,24 @@ version.
     - direct uploads under claims are staged: `upload.Authorize` grants a
       `PUT` to `_staging/<key>` (`upload.StagingKey`), and `upload.Confirm`
       promotes the claim (`pending → promoting`, won by one confirmation),
-      checks the staged object, and copies it to the key with
-      `storage.Copy` (S3 `CopyObject`, `If-None-Match` where supported). A
-      client never writes a claimed key, so a presigned S3 `PUT` that ends
-      late only publishes a staging object; a copy of unknown outcome
-      leaves the claim promoting until its lease ends.
-      `claims.SweepStaging` deletes leftover staging objects (a bucket
-      lifecycle rule on `_staging/` is an optional backstop). The app's
-      storage route also aborts a signed `PUT` at
+      checks the staged object, and publishes a copy at the key. A client
+      never writes a claimed key, so a presigned S3 `PUT` that ends late
+      only publishes a staging object. On S3, `Save`/`Receive` under claims
+      stage too. The app's storage route also aborts a signed `PUT` at
       `storage.SignedUploadTimeout` (an hour) after its URL expired;
-    - `storage.Copier` / `storage.Copy` copy an object within a store
-      (S3 server-side; Open and Put elsewhere), with a conformance check.
-
-    Tested on SQLite, PostgreSQL and MySQL, including a confirmation racing
-    a sweep;
+    - promotion is fenced: the copy is prepared (`storage.PreparePublish`:
+      on S3 a multipart upload with server-side part copies, publishing
+      nothing), its token recorded on the claim (`claims.Publishing`), then
+      published (`storage.Publish`). A claim with a recorded copy is never
+      forgotten until `storage.Fence` (on S3, aborting the upload) proves
+      it can no longer publish, so a copy of unknown outcome cannot
+      complete after its claim is gone;
+    - `_staging/` is a reserved namespace: `claims.SweepStaging` deletes
+      any object there whose key has no live claim, whoever stored it (a
+      bucket lifecycle rule on `_staging/` is an optional backstop);
+    - `storage.Publisher` (S3) with `storage.PreparePublish` / `Publish` /
+      `Fence` (an in-process copy for other stores), with a conformance
+      check.
   - `examples/storage` records its uploads in SQLite under claims, deletes
     them with their records, and sweeps the rest
     ([#329](https://github.com/gombit-dev/gombit/issues/329)).
