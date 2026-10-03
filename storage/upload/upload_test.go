@@ -932,13 +932,14 @@ type fakeClaims struct {
 	pending    map[string]bool
 	staged     map[string]bool
 	promoting  map[string]bool
+	published  map[string]string // the publication token recorded per key
 	claimed    []string
 	leases     []time.Time
 	abandoned  []string
 }
 
 func newFakeClaims(store storage.Storage) *fakeClaims {
-	return &fakeClaims{store: store, pending: map[string]bool{}, staged: map[string]bool{}, promoting: map[string]bool{}}
+	return &fakeClaims{store: store, pending: map[string]bool{}, staged: map[string]bool{}, promoting: map[string]bool{}, published: map[string]string{}}
 }
 
 func (c *fakeClaims) Pending(_ context.Context, key string, until time.Time) error {
@@ -972,9 +973,18 @@ func (c *fakeClaims) Promote(_ context.Context, key string, until time.Time) (bo
 	return true, nil
 }
 
+func (c *fakeClaims) Publishing(_ context.Context, key, token string) error {
+	if !c.promoting[key] {
+		return errors.New("fake claims: not promoting")
+	}
+	c.published[key] = token
+	return nil
+}
+
 func (c *fakeClaims) Unpromote(_ context.Context, key string) error {
 	if c.promoting[key] {
 		delete(c.promoting, key)
+		delete(c.published, key)
 		c.pending[key] = true
 	}
 	return nil

@@ -47,10 +47,8 @@ type fakeS3 struct {
 	lateParts        int    // parts stored after their upload was aborted
 	requestsSeen     int    // every request
 	abortedUploadIDs []string
-	puts, completes  int  // PutObject and CompleteMultipartUpload requests seen
-	dropCopy         bool // apply a CopyObject, then drop the connection
-	refuseCopy       int  // answer a CopyObject with this status, applying nothing
-	copies           int  // CopyObject requests seen
+	puts, completes  int // PutObject and CompleteMultipartUpload requests seen
+	partCopies       int // UploadPartCopy requests seen
 }
 
 func newFakeS3() *fakeS3 {
@@ -83,6 +81,15 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Content-Length", fmt.Sprint(size))
+	case r.Method == http.MethodPut && q.Has("partNumber") && r.Header.Get("X-Amz-Copy-Source") != "": // UploadPartCopy
+		f.partCopies++
+		_, _ = io.WriteString(w, `<CopyPartResult><ETag>"part"</ETag></CopyPartResult>`)
+	case r.Method == http.MethodGet && q.Has("uploadId"): // ListParts
+		if !f.uploads[q.Get("uploadId")] {
+			s3Error(w, http.StatusNotFound, "NoSuchUpload")
+			return
+		}
+		_, _ = io.WriteString(w, `<ListPartsResult><Part><PartNumber>1</PartNumber><ETag>"part"</ETag><Size>5</Size></Part><IsTruncated>false</IsTruncated></ListPartsResult>`)
 	case r.Method == http.MethodPut && q.Has("partNumber"): // UploadPart
 		if f.dropPart {
 			// Still processing when the client gives up: it lands after the
@@ -96,20 +103,6 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("ETag", `"part"`)
-	case r.Method == http.MethodPut && r.Header.Get("X-Amz-Copy-Source") != "": // CopyObject
-		f.copies++
-		if f.refuseCopy != 0 {
-			s3Error(w, f.refuseCopy, "AccessDenied")
-			return
-		}
-		src := r.Header.Get("X-Amz-Copy-Source")
-		_, srcKey, _ := strings.Cut(strings.TrimPrefix(src, "/"), "/")
-		f.objects[key] = f.objects[srcKey]
-		if f.dropCopy {
-			drop(w)
-			return
-		}
-		_, _ = io.WriteString(w, `<CopyObjectResult><ETag>"copied"</ETag></CopyObjectResult>`)
 	case r.Method == http.MethodPut: // PutObject
 		f.puts++
 		if f.refusePut != 0 {
@@ -533,38 +526,75 @@ func TestConditionalRefusalKeepsTheAbortError(t *testing.T) {
 	}
 }
 
-// TestLostCopyAnswerIsUnknownOutcome: a CopyObject that S3 applied but
-// never answered is ErrUnknownOutcome, never a failure that left the key
-// as it was, and it is sent once (a retry would hide the first attempt).
-func TestLostCopyAnswerIsUnknownOutcome(t *testing.T) {
-	f := newFakeS3()
+// prepared puts src and prepares its publication to dst.
+func prepared(t *testing.T, f *fakeS3) (*Store, string) {
+	t.Helper()
 	s := fakeStore(t, f)
 	if _, err := s.Put(context.Background(), "src", strings.NewReader("bytes"), storage.PutOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	f.dropCopy = true
-	_, err := s.Copy(context.Background(), "src", "dst")
-	if !errors.Is(err, storage.ErrUnknownOutcome) {
-		t.Fatalf("Copy whose answer was lost = %v, want ErrUnknownOutcome", err)
+	token, err := s.PreparePublish(context.Background(), "src", "dst")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !f.has("dst") || f.copies != 1 {
-		t.Fatalf("copied = %v after %d CopyObject requests; want it applied, once", f.has("dst"), f.copies)
+	if f.has("dst") || f.partCopies != 1 {
+		t.Fatalf("PreparePublish: dst exists = %v after %d part copies; want nothing published, one copy", f.has("dst"), f.partCopies)
+	}
+	return s, token
+}
+
+// TestLostPublishAnswerIsSettledByFence: a Complete that S3 applied but
+// never answered is ErrUnknownOutcome, sent once; Fence then proves it is
+// over (the abort finds no upload), and nothing more can be published.
+func TestLostPublishAnswerIsSettledByFence(t *testing.T) {
+	f := newFakeS3()
+	s, token := prepared(t, f)
+	f.dropComplete = true
+	if _, err := s.Publish(context.Background(), token); !errors.Is(err, storage.ErrUnknownOutcome) {
+		t.Fatalf("Publish whose answer was lost = %v, want ErrUnknownOutcome", err)
+	}
+	if _, completes := f.requests(); !f.has("dst") || completes != 1 {
+		t.Fatalf("published = %v after %d Completes; want it applied, once", f.has("dst"), completes)
+	}
+	if err := s.Fence(context.Background(), token); err != nil {
+		t.Fatalf("Fence after a completed upload = %v, want nil (NoSuchUpload: it is over)", err)
 	}
 }
 
-// TestRefusedCopyIsDefinite: a CopyObject S3 refused left the key as it
-// was: a definite failure.
-func TestRefusedCopyIsDefinite(t *testing.T) {
+// TestFenceStopsAPublication: a Complete lost before S3 applied it is
+// ErrUnknownOutcome too; Fence aborts the upload, after which it can never
+// complete: a late Complete (here, a replay) fails, and nothing appears.
+func TestFenceStopsAPublication(t *testing.T) {
 	f := newFakeS3()
-	s := fakeStore(t, f)
-	if _, err := s.Put(context.Background(), "src", strings.NewReader("bytes"), storage.PutOptions{}); err != nil {
-		t.Fatal(err)
+	s, token := prepared(t, f)
+	f.dropBeforeApply = true
+	if _, err := s.Publish(context.Background(), token); !errors.Is(err, storage.ErrUnknownOutcome) {
+		t.Fatalf("Publish whose request was lost = %v, want ErrUnknownOutcome", err)
 	}
-	f.refuseCopy = http.StatusForbidden
-	if _, err := s.Copy(context.Background(), "src", "dst"); err == nil || errors.Is(err, storage.ErrUnknownOutcome) {
-		t.Fatalf("Copy refused with 403 = %v, want a definite failure", err)
+	f.mu.Lock()
+	f.dropBeforeApply = false
+	f.mu.Unlock()
+	if err := s.Fence(context.Background(), token); err != nil {
+		t.Fatalf("Fence = %v", err)
 	}
-	if _, err := s.Copy(context.Background(), "missing", "dst"); !errors.Is(err, storage.ErrNotFound) {
-		t.Fatalf("Copy of a missing source = %v, want ErrNotFound", err)
+	if _, err := s.Publish(context.Background(), token); err == nil || f.has("dst") {
+		t.Fatalf("Publish after the fence = %v (published %v); want it refused, nothing published", err, f.has("dst"))
+	}
+	if err := s.Fence(context.Background(), token); err != nil {
+		t.Fatalf("Fence again = %v; want it idempotent", err)
+	}
+}
+
+// TestFailedFenceProvesNothing: an abort S3 refused proves nothing, and
+// Fence says so.
+func TestFailedFenceProvesNothing(t *testing.T) {
+	f := newFakeS3()
+	s, token := prepared(t, f)
+	f.refuseAbort = http.StatusInternalServerError
+	if err := s.Fence(context.Background(), token); err == nil {
+		t.Fatal("Fence whose abort failed = nil, want an error")
+	}
+	if err := s.Fence(context.Background(), "not a token"); err == nil {
+		t.Fatal("Fence of a malformed token = nil")
 	}
 }
