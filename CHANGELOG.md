@@ -157,14 +157,26 @@ version.
     - `Sweep` abandons stale pending claims and finishes interrupted
       deletes. It reads claims only, so a file without one is never
       deleted;
-    - every claim has a lease, the time after which no writer publishes
-      under its key: `upload.Save`/`Receive` run their `Put` under it
-      (`Policy.UploadTimeout`, an hour by default), and the app's storage
-      route aborts a signed `PUT` at `storage.SignedUploadTimeout` (an hour)
-      after its URL expired. A deleting claim stays as a tombstone until
-      its lease has ended, and each sweep deletes its file again, so an
-      upload that publishes after its claim was abandoned is still
-      deleted.
+    - every claim has a lease, the time after which no writer the
+      application controls publishes under its key: `upload.Save`/`Receive`
+      run their `Put` under it (`Policy.UploadTimeout`, an hour by
+      default). A deleting claim stays as a tombstone until its lease has
+      ended, and each sweep deletes its file again, so an upload that
+      publishes after its claim was abandoned is still deleted;
+    - direct uploads under claims are staged: `upload.Authorize` grants a
+      `PUT` to `_staging/<key>` (`upload.StagingKey`), and `upload.Confirm`
+      promotes the claim (`pending → promoting`, won by one confirmation),
+      checks the staged object, and copies it to the key with
+      `storage.Copy` (S3 `CopyObject`, `If-None-Match` where supported). A
+      client never writes a claimed key, so a presigned S3 `PUT` that ends
+      late only publishes a staging object; a copy of unknown outcome
+      leaves the claim promoting until its lease ends.
+      `claims.SweepStaging` deletes leftover staging objects (a bucket
+      lifecycle rule on `_staging/` is an optional backstop). The app's
+      storage route also aborts a signed `PUT` at
+      `storage.SignedUploadTimeout` (an hour) after its URL expired;
+    - `storage.Copier` / `storage.Copy` copy an object within a store
+      (S3 server-side; Open and Put elsewhere), with a conformance check.
 
     Tested on SQLite, PostgreSQL and MySQL, including a confirmation racing
     a sweep;

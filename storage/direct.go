@@ -40,10 +40,9 @@ type DirectUploader interface {
 // upload may still be writing the object. A grant bounds only when the PUT
 // may start, so the app's own storage route (presign.Handler) aborts a PUT
 // still running this long after its URL expired: nothing it serves is
-// published later. storage/claims leases a granted key until then. S3
-// cannot be told to abort a presigned PUT it has started: one still
-// sending its body then (S3 drops a connection idle for about 20 seconds,
-// so only a body trickled for over an hour) can publish after the lease.
+// published later. S3 cannot be told to abort a presigned PUT it has
+// started, which is why direct uploads under storage/claims are staged:
+// the client only ever writes a staging key (upload.StagingKey).
 const SignedUploadTimeout = time.Hour
 
 // UploadVerifier is a DirectUploader whose backend can keep more about an

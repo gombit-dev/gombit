@@ -60,6 +60,39 @@ type fake struct {
 	eofHidesCancel   bool // commits when the source's last read returns EOF after ctx ended
 	ignoresIfAbsent  bool // PutOptions.IfAbsent overwrites anyway
 	racyIfAbsent     bool // IfAbsent checks before reading the source, stores after
+	copyDropsMeta    bool // Copy loses the source's metadata
+	copyRefusesTorn  bool // Copy onto an object refuses, but clobbers it first
+	copyMissingEmpty bool // Copy of a missing source stores an empty object
+}
+
+// Copy implements storage.Copier (the fake copies within its map).
+func (f *fake) Copy(ctx context.Context, src, dst string) (storage.ObjectInfo, error) {
+	if err := f.checkKey(dst); err != nil {
+		return storage.ObjectInfo{}, f.wrap("copy", dst, err)
+	}
+	o, err := f.get("copy", src)
+	if errors.Is(err, storage.ErrNotFound) && f.copyMissingEmpty {
+		o, err = object{info: storage.ObjectInfo{ContentType: storage.DefaultContentType}}, nil
+	}
+	if err != nil {
+		return storage.ObjectInfo{}, err
+	}
+	info := o.info
+	info.Key = dst
+	if f.copyDropsMeta {
+		info.Metadata = nil
+	}
+	if f.copyRefusesTorn {
+		if _, taken := f.lookup(dst); taken {
+			f.store(dst, nil, info)
+			return storage.ObjectInfo{}, f.wrap("copy", dst, storage.ErrExists)
+		}
+	}
+	if !f.storeIfAbsent(dst, o.data, info) {
+		return storage.ObjectInfo{}, f.wrap("copy", dst, storage.ErrExists)
+	}
+	info.Size = int64(len(o.data))
+	return f.owned(info), nil
 }
 
 type object struct {
@@ -500,6 +533,9 @@ func TestSuiteCatchesBrokenDrivers(t *testing.T) {
 		{"List", func(f *fake) { f.listByDir = true }, "want exactly list/a"},
 		{"List", func(f *fake) { f.listSwallows = true }, "want fn's error after 1"},
 		{"List", func(f *fake) { f.listStaleTime = true }, "callers decide on these"},
+		{"Copy", func(f *fake) { f.copyDropsMeta = true }, "want the source's bytes, type and metadata"},
+		{"Copy", func(f *fake) { f.copyRefusesTorn = true }, "want ErrExists and the object kept, or the copy"},
+		{"Copy", func(f *fake) { f.copyMissingEmpty = true }, "want storage: object not found"},
 	}
 	covered := map[string]bool{}
 	for _, tc := range cases {

@@ -646,6 +646,60 @@ func (s *Store) Stat(ctx context.Context, key string) (storage.ObjectInfo, error
 	return info, storage.Wrap("stat", key, err)
 }
 
+var _ storage.Copier = (*Store)(nil)
+
+// Copy implements storage.Copier with CopyObject: the bytes stay in S3,
+// with the source's content type and metadata (MetadataDirective COPY).
+// It sends "If-None-Match: *", which AWS refuses with 412 where an object
+// exists (storage.ErrExists); MinIO, for one, ignores it. CopyObject copies at most 5 GiB (larger uploads, which direct
+// uploads never are, fail with S3's error). Like Put, it is sent once, and
+// a request sent without a definite answer is storage.ErrUnknownOutcome:
+// S3 may finish a copy it has started after the connection is gone.
+func (s *Store) Copy(ctx context.Context, src, dst string) (storage.ObjectInfo, error) {
+	info, err := s.copyObject(ctx, src, dst)
+	return info, storage.Wrap("copy", dst, err)
+}
+
+func (s *Store) copyObject(ctx context.Context, src, dst string) (storage.ObjectInfo, error) {
+	srcKey, err := s.objectKey(src)
+	if err != nil {
+		return storage.ObjectInfo{}, err
+	}
+	dstKey, err := s.objectKey(dst)
+	if err != nil {
+		return storage.ObjectInfo{}, err
+	}
+	// The source's description first: a missing source is ErrNotFound
+	// before anything is sent, and the copy's info comes from it.
+	srcInfo, err := s.Stat(ctx, src)
+	if err != nil {
+		return storage.ObjectInfo{}, err
+	}
+	segments := strings.Split(srcKey, "/")
+	for i, seg := range segments {
+		segments[i] = url.PathEscape(seg)
+	}
+	callCtx, sent := counting(ctx)
+	out, err := s.client.CopyObject(callCtx, &awss3.CopyObjectInput{
+		Bucket:      aws.String(s.bucket),
+		Key:         aws.String(dstKey),
+		CopySource:  aws.String(url.PathEscape(s.bucket) + "/" + strings.Join(segments, "/")),
+		IfNoneMatch: aws.String("*"),
+	}, singleAttempt)
+	if err != nil {
+		return storage.ObjectInfo{}, classifyPut(ctx, publishFailed(err, sent), true)
+	}
+	info := srcInfo
+	info.Key = dst
+	if out.CopyObjectResult != nil {
+		info.ETag = strings.Trim(aws.ToString(out.CopyObjectResult.ETag), `"`)
+		if t := out.CopyObjectResult.LastModified; t != nil {
+			info.ModTime = *t
+		}
+	}
+	return info, nil
+}
+
 // Delete implements storage.Storage. S3 deletes are idempotent: deleting a
 // missing object succeeds.
 func (s *Store) Delete(ctx context.Context, key string) error {

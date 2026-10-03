@@ -133,6 +133,14 @@ func main() {
 			if res, err := fs.claims.Sweep(context.Background(), 2*upload.DefaultGrantExpiry); err != nil {
 				log.Printf("sweep: %v (after %+v)", err, res)
 			}
+			// Staged direct uploads left over (a late S3 PUT, a promoted
+			// upload's staged copy). Only S3 needs it: the app's own route
+			// ends local and memory uploads within their claims' leases.
+			if cfg.Storage.Driver == config.StorageDriverS3 {
+				if _, err := fs.claims.SweepStaging(context.Background()); err != nil {
+					log.Printf("sweep staging: %v", err)
+				}
+			}
 		}
 	}()
 	if err := framework.Run(app); err != nil {
