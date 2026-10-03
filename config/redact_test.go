@@ -85,6 +85,23 @@ func TestRedactDSNHidesQuotedLibpqPassword(t *testing.T) {
 	}
 }
 
+func TestConfigRedactedHidesTheS3SecretKey(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	cfg.Storage.S3.AccessKeyID = "AKIAEXAMPLE"
+	cfg.Storage.S3.SecretAccessKey = "s3-super-secret" // #nosec G101 -- fake test secret.
+	got := cfg.Redacted()
+	if got.Storage.S3.SecretAccessKey != RedactedSecret {
+		t.Fatalf("Redacted S3 secret = %q", got.Storage.S3.SecretAccessKey)
+	}
+	if got.Storage.S3.AccessKeyID != "AKIAEXAMPLE" {
+		t.Fatalf("the access key id (not a secret) was changed: %q", got.Storage.S3.AccessKeyID)
+	}
+	if cfg.Storage.S3.SecretAccessKey != "s3-super-secret" {
+		t.Fatal("Redacted modified the original config")
+	}
+}
+
 func TestConfigRedactedHidesRedisPassword(t *testing.T) {
 	t.Parallel()
 
@@ -123,6 +140,24 @@ func TestSanitizeErrorRemovesSecrets(t *testing.T) {
 	got := SanitizeError(err, cfg)
 	if strings.Contains(got, "db-secret") || strings.Contains(got, "redis-secret") || strings.Contains(got, "jwt-super-secret") {
 		t.Fatalf("SanitizeError() = %q, still contains secrets", got)
+	}
+}
+
+// TestSanitizeErrorRemovesStorageSecrets: the storage secrets (the URL
+// signing key and the S3 secret access key) are known secrets too.
+func TestSanitizeErrorRemovesStorageSecrets(t *testing.T) {
+	t.Parallel()
+
+	cfg := Default()
+	cfg.Storage.URLSecret = "url-signing-secret-0123456789abcdef"
+	cfg.Storage.S3.SecretAccessKey = "s3-secret-access-key"
+
+	got := SanitizeError(errors.New("signing with url-signing-secret-0123456789abcdef as s3-secret-access-key"), cfg)
+	if strings.Contains(got, "url-signing-secret") || strings.Contains(got, "s3-secret-access-key") {
+		t.Fatalf("SanitizeError() = %q, still contains a storage secret", got)
+	}
+	if !strings.Contains(got, RedactedSecret) {
+		t.Fatalf("SanitizeError() = %q, want the secrets redacted", got)
 	}
 }
 

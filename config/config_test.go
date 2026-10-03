@@ -110,6 +110,15 @@ func TestLoadFromEnv(t *testing.T) {
 		envJobsDriver:              " redis ",
 		envJobsQueue:               " mail ",
 		envJobsNamespace:           " example-jobs ",
+		envStorageDriver:           " Memory ",
+		envStorageLocalRoot:        "/var/lib/example/files",
+		envStorageS3Endpoint:       " http://127.0.0.1:9000 ",
+		envStorageS3Region:         " auto ",
+		envStorageS3Bucket:         " uploads ",
+		envStorageS3Prefix:         "example/",
+		envStorageS3AccessKeyID:    "AKIAEXAMPLE",
+		envStorageS3SecretKey:      "s3-secret", // #nosec G101 -- fake test secret.
+		envStorageS3PathStyle:      " true ",
 	}
 
 	got, err := LoadFromEnv(mapLookup(env))
@@ -156,6 +165,20 @@ func TestLoadFromEnv(t *testing.T) {
 			Driver:    JobsDriverRedis,
 			Queue:     "mail",
 			Namespace: "example-jobs",
+		},
+		Storage: StorageConfig{
+			Driver:       StorageDriverMemory,
+			PublicPrefix: DefaultStoragePublicPrefix,
+			Local:        LocalStorageConfig{Root: "/var/lib/example/files", URL: DefaultStorageLocalURL},
+			S3: S3StorageConfig{
+				Endpoint:        "http://127.0.0.1:9000",
+				Region:          "auto",
+				Bucket:          "uploads",
+				Prefix:          "example/",
+				AccessKeyID:     "AKIAEXAMPLE",
+				SecretAccessKey: "s3-secret",
+				ForcePathStyle:  true,
+			},
 		},
 		Logging: LoggingConfig{
 			Level: LogLevelDebug,
@@ -328,6 +351,12 @@ func TestLoadUsesProcessEnvironment(t *testing.T) {
 			Queue:     DefaultJobsQueue,
 			Namespace: "process-example:production",
 		},
+		Storage: StorageConfig{
+			Driver:       StorageDriverLocal,
+			PublicPrefix: DefaultStoragePublicPrefix,
+			Local:        LocalStorageConfig{Root: DefaultStorageLocalRoot, URL: DefaultStorageLocalURL},
+			S3:           S3StorageConfig{Region: DefaultStorageS3Region},
+		},
 		Logging: LoggingConfig{
 			Level: LogLevelError,
 			Sink:  LogSinkMongo,
@@ -389,6 +418,9 @@ func TestValidateReportsExplicitFieldErrors(t *testing.T) {
 		Jobs: JobsConfig{
 			Driver: "kafka",
 			Queue:  "Mail Queue",
+		},
+		Storage: StorageConfig{
+			Driver: "s4",
 		},
 		Logging: LoggingConfig{
 			Level: "trace",
@@ -487,6 +519,7 @@ func TestValidateReportsExplicitFieldErrors(t *testing.T) {
 			Message: "must be 1-128 characters of a-z, 0-9, _ . : -, starting with a letter or digit",
 		},
 		{Field: "Jobs.Namespace", Env: envJobsNamespace, Value: "", Message: "must not be empty"},
+		{Field: "Storage.Driver", Env: envStorageDriver, Value: "s4", Message: "must be one of local, memory, s3"},
 		{
 			Field:   "Logging.Level",
 			Env:     envLogLevel,
@@ -1047,5 +1080,96 @@ func TestJobsRedisValidatesTheSharedConnection(t *testing.T) {
 	}
 	if err := ValidateJobs(JobsConfig{Driver: JobsDriverMemory, Queue: "_bad", Namespace: "app"}); err == nil {
 		t.Fatal("ValidateJobs accepted a queue name starting with a separator")
+	}
+}
+
+func TestValidateStorage(t *testing.T) {
+	if err := ValidateStorage(Default().Storage); err != nil {
+		t.Fatalf("the default storage config is invalid: %v", err)
+	}
+	if err := ValidateStorage(StorageConfig{Driver: StorageDriverMemory}); err != nil {
+		t.Fatalf("memory needs no root: %v", err)
+	}
+	err := ValidateStorage(StorageConfig{Driver: StorageDriverLocal, Local: LocalStorageConfig{Root: "  "}})
+	var fe FieldErrors
+	if !errors.As(err, &fe) || len(fe) != 1 || fe[0].Field != "Storage.Local.Root" || fe[0].Env != envStorageLocalRoot {
+		t.Fatalf("an empty local root = %v, want a Storage.Local.Root field error", err)
+	}
+}
+
+func TestValidateS3Storage(t *testing.T) {
+	ok := StorageConfig{Driver: StorageDriverS3, S3: S3StorageConfig{Bucket: "b", Region: "auto"}}
+	if err := ValidateStorage(ok); err != nil {
+		t.Fatalf("a bucket with the default credential chain = %v", err)
+	}
+	withKeys := ok
+	withKeys.S3.AccessKeyID, withKeys.S3.SecretAccessKey, withKeys.S3.Endpoint = "id", "secret", "https://acct.r2.cloudflarestorage.com"
+	if err := ValidateStorage(withKeys); err != nil {
+		t.Fatalf("static keys and an endpoint = %v", err)
+	}
+	for name, tc := range map[string]struct {
+		mutate func(*S3StorageConfig)
+		field  string
+	}{
+		"no bucket":       {func(c *S3StorageConfig) { c.Bucket = "" }, "Storage.S3.Bucket"},
+		"no region":       {func(c *S3StorageConfig) { c.Region = "" }, "Storage.S3.Region"},
+		"bad endpoint":    {func(c *S3StorageConfig) { c.Endpoint = "minio:9000" }, "Storage.S3.Endpoint"},
+		"one key only":    {func(c *S3StorageConfig) { c.AccessKeyID = "id" }, "Storage.S3.AccessKeyID"},
+		"secret only":     {func(c *S3StorageConfig) { c.SecretAccessKey = "secret" }, "Storage.S3.AccessKeyID"},
+		"escaping prefix": {func(c *S3StorageConfig) { c.Prefix = "../other/" }, "Storage.S3.Prefix"},
+		"unended prefix":  {func(c *S3StorageConfig) { c.Prefix = "myapp" }, "Storage.S3.Prefix"},
+	} {
+		cfg := ok
+		tc.mutate(&cfg.S3)
+		err := ValidateStorage(cfg)
+		var fe FieldErrors
+		if !errors.As(err, &fe) || len(fe) != 1 || fe[0].Field != tc.field {
+			t.Errorf("%s: %v, want one %s error", name, err, tc.field)
+		}
+		if err != nil && strings.Contains(err.Error(), "secret\"") && name == "secret only" {
+			t.Errorf("%s: the error echoes the secret: %v", name, err)
+		}
+	}
+}
+
+func TestStorageURLSettings(t *testing.T) {
+	cfg, err := LoadFromEnv(func(key string) (string, bool) {
+		v, ok := map[string]string{
+			envStoragePublicPrefix: "",
+			envStorageURLSecret:    strings.Repeat("u", MinStorageURLSecretLength),
+			envStorageLocalURL:     "https://app.example.com/files",
+			envStorageS3PublicURL:  "https://cdn.example.com",
+		}[key]
+		return v, ok
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := cfg.Storage
+	if st.PublicPrefix != "" || st.Local.URL != "https://app.example.com/files" || st.S3.PublicURL != "https://cdn.example.com" || len(st.URLSecret) != MinStorageURLSecretLength {
+		t.Fatalf("storage = %+v", st)
+	}
+	if got := cfg.Redacted().Storage.URLSecret; got != RedactedSecret {
+		t.Fatalf("redacted URL secret = %q", got)
+	}
+	for name, sc := range map[string]StorageConfig{
+		"public prefix without '/'":  {Driver: StorageDriverMemory, PublicPrefix: "public"},
+		"public prefix traversal":    {Driver: StorageDriverMemory, PublicPrefix: "../public/"},
+		"public prefix trailing dot": {Driver: StorageDriverMemory, PublicPrefix: "pub./"},
+		"public prefix control":      {Driver: StorageDriverMemory, PublicPrefix: "pub\x01/"},
+		"short URL secret":           {Driver: StorageDriverMemory, URLSecret: "short"},
+		"relative local URL":         {Driver: StorageDriverLocal, Local: LocalStorageConfig{Root: "s", URL: "_storage"}},
+		"local URL trailing slash":   {Driver: StorageDriverLocal, Local: LocalStorageConfig{Root: "s", URL: "/_storage/"}},
+		"local URL root":             {Driver: StorageDriverLocal, Local: LocalStorageConfig{Root: "s", URL: "/"}},
+		"local URL with a query":     {Driver: StorageDriverMemory, Local: LocalStorageConfig{URL: "/_storage?x=1"}},
+		"local URL scheme":           {Driver: StorageDriverMemory, Local: LocalStorageConfig{URL: "ftp://h/_storage"}},
+		"S3 public URL":              {Driver: StorageDriverS3, S3: S3StorageConfig{Bucket: "b", Region: "r", PublicURL: "cdn.example.com"}},
+	} {
+		if err := ValidateStorage(sc); err == nil {
+			t.Errorf("%s: ValidateStorage(%+v) = nil", name, sc)
+		}
+	}
+	if err := ValidateStorage(StorageConfig{Driver: StorageDriverMemory, URLSecret: "short"}); err != nil && strings.Contains(err.Error(), "short") {
+		t.Fatalf("the URL secret was echoed: %v", err)
 	}
 }

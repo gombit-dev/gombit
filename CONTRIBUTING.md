@@ -14,8 +14,8 @@ change reviewed, and the bar a change has to clear.
 | Go | 1.26+ (`go.mod` is authoritative) | everything |
 | A C toolchain | gcc/clang, or Xcode CLT on macOS | SQLite (`mattn/go-sqlite3` is cgo-only) |
 | Node.js | 22+ | frontend, admin UI, TypeScript client generation |
-| Atlas | Community Edition, pinned by CI | `gombit db makemigrations` / `migrate` and the migration tests |
-| Docker | any recent | PostgreSQL and MySQL test matrices |
+| Atlas | Community Edition, pinned by CI | `gombit make resource`, the Atlas-backed `gombit db` subcommands, and the migration tests |
+| Docker | any recent | PostgreSQL and MySQL test matrices, and the Redis job-queue tests |
 
 ```bash
 curl -sSf https://atlasgo.sh | sh -s -- --community
@@ -49,14 +49,15 @@ binary.
 
 ## How work is organised
 
-Gombit is built issue-by-issue from the backlog in
-[`docs/GOMBIT_BUILD_PLAN.md`](docs/GOMBIT_BUILD_PLAN.md) §4. Issues are titled
-`[ID] …` (e.g. `[M2-2] gombit db migrate / rollback / status`) and belong to a
-milestone. Two things follow from that:
+Gombit is built issue-by-issue. Issues are titled `[ID] …` (e.g. `[M2-2]
+gombit db migrate / rollback / status`); larger features are epics whose issue
+lists its children. (The v0.1 backlog came from
+[`docs/GOMBIT_BUILD_PLAN.md`](docs/GOMBIT_BUILD_PLAN.md) §4, now a historical
+record.) Two things follow from that:
 
 - **One issue → one pull request** where practical, and the PR links its issue.
 - **Don't start an issue whose "Depends on #N" is still open** — the dependency
-  ordering in §4 is real.
+  ordering is real.
 
 Build plan **§1–§3 record locked architecture decisions** (Huma as the contract
 source of truth, Atlas-backed migrations, Cobra for the CLI, the runtime generic
@@ -142,6 +143,18 @@ Migrations and the conformance suite follow the same shape — see
 [`ci.yml`](.github/workflows/ci.yml) for the exact invocations, including
 `-conformance.driver` and the `ATLAS_BINARY` environment variable.
 
+### Redis job-queue tests
+
+The Redis queue driver in `jobs` runs against a real server only when
+`GOMBIT_TEST_REDIS_ADDR` is set; otherwise those tests skip. CI runs them in
+the `jobs-redis` job:
+
+```bash
+docker run --rm -d --name gombit-redis -p 6379:6379 redis:7-alpine
+
+GOMBIT_TEST_REDIS_ADDR=127.0.0.1:6379 go test -race ./jobs
+```
+
 ### Fault injection
 
 Failure paths get deterministic tests. The full guide is
@@ -172,8 +185,10 @@ The rules, in short:
   runs `fn` once", "one rotation, one INSERT").
 - Pin interleavings with the injectors (`Block`, `Reached(n)`,
   `proxy.Held()`), never with `time.Sleep`. Bound every wait in a test.
-- No unbounded retries: any retry policy must pass
-  `faulttest.CheckRetryPolicy`.
+- No unbounded retries: an in-process retry policy (one that waits through a
+  `faulttest.Sleeper`) must pass `faulttest.CheckRetryPolicy`. Job retries,
+  which the queue schedules, are bounded by `MaxAttempts` and tested in
+  `jobs/policy_test.go` and `jobs/worker_test.go`.
 - Fault injection is explicit opt-in, through wrappers and proxies a test
   builds. Production code never imports `internal/faulttest`.
 - A fault test must pass `go test -race -count=50` before it lands, and a
@@ -239,10 +254,17 @@ This repo ships a review skill for it:
 Cursor also ships `/create-feature` and `/bugfix` skills encoding the workflows
 above.
 
+New to the repo? In Claude Code, run `/onboarding`
+(`.claude/skills/onboarding/SKILL.md`). It walks through the required reading,
+checks the repo's live state, helps pick an open issue (a bug fix suited to a
+first contribution, or a backlog/epic item), and carries the work through
+tests, local checks, `/code-review`, and the PR template.
+
 ## Working agreement
 
-A pull request is not done unless it satisfies the Agent Working Agreement in
-[`docs/GOMBIT_BUILD_PLAN.md`](docs/GOMBIT_BUILD_PLAN.md) §5. In short:
+A pull request is not done unless it satisfies the working agreement in
+[`AGENTS.md`](AGENTS.md) (carried over from the v0.1 build plan §5). In
+short:
 
 - new behavior has tests; DB-touching changes pass the SQLite + PostgreSQL +
   MySQL matrix;
@@ -253,7 +275,7 @@ A pull request is not done unless it satisfies the Agent Working Agreement in
   (`go/ast` / `go/format`, never regex), and never overwrite user-owned files;
 - generated frontend source contains no secrets; `VITE_*` is public;
 - API changes regenerate OpenAPI and the TypeScript client in the same PR;
-- scope stays inside the issue milestone — no M6 "battery" creep (jobs, events,
+- scope stays inside the issue milestone — no M6 "battery" creep (events,
   scheduler, mail, storage, gRPC, multi-tenancy, i18n);
 - the PR links its issue and states which acceptance criteria it satisfies.
 

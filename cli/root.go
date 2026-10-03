@@ -33,8 +33,9 @@ func AddCommand(root *Command, cmds ...*Command) {
 	root.AddCommand(cmds...)
 }
 
-// NewRoot returns the framework Cobra tree (new, dev, build, make, db, openapi,
-// client, routes, doctor, config, createsuperuser, version). Generated apps call NewRoot, then
+// NewRoot returns the framework Cobra tree (new, dev, worker, jobs, build,
+// make, generate, db, openapi, contract, client, routes, doctor, config,
+// createsuperuser, version). Generated apps call NewRoot, then
 // feature-package RegisterCommands, then ExecuteRoot.
 func NewRoot(stdout io.Writer, stderr io.Writer) *Command {
 	if stdout == nil {
@@ -113,8 +114,10 @@ func rootLongHelp() string {
 		"  build     Production build (embed is opt-in via --embed)",
 		"  make      Generate application code (resource, command)",
 		"  generate  Regenerate model-first resource files (*.gen.go); --check for drift",
-		"  db        Database migrations (makemigrations, migrate, rollback, status, seed, reset)",
+		"  db        Database migrations (makemigrations, plan, migrate, rollback, status,",
+		"            verify, seed, reset, hash, lint, check, repair)",
 		"  openapi   Write the live OpenAPI 3.1 document",
+		"  contract  Emit the machine-readable application contract (contract app)",
 		"  client    Generate and check the TypeScript client",
 		"  routes    Print HTTP routes",
 		"  doctor    Check Go, Node, config, database, Redis, migrations, and ports",
@@ -129,12 +132,15 @@ func usage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "available commands:")
 	_, _ = fmt.Fprintln(w, "  new [name]        scaffold a new Gombit application")
 	_, _ = fmt.Fprintln(w, "  dev               run the API and Vite frontend together")
+	_, _ = fmt.Fprintln(w, "  worker [--queue default] [--concurrency N] [--lease 5m] [--shutdown-timeout 30s] [--metrics-addr :9091]")
+	_, _ = fmt.Fprintln(w, "  jobs <subcommand> failed | inspect | retry | forget | purge (see gombit jobs)")
 	_, _ = fmt.Fprintln(w, "  build --embed     collectstatic + compile a single binary (opt-in)")
 	_, _ = fmt.Fprintln(w, "  make resource     generate a feature-package resource")
 	_, _ = fmt.Fprintln(w, "  make command      generate a management command")
 	_, _ = fmt.Fprintln(w, "  generate [--check] [--dry-run]   regenerate model-first *.gen.go from the app's models")
 	_, _ = fmt.Fprintln(w, "  db <subcommand>   see gombit db")
 	_, _ = fmt.Fprintln(w, "  openapi generate [--out openapi.json] [--url http://127.0.0.1:8080/openapi.json]")
+	_, _ = fmt.Fprintln(w, "  contract app [--dir .] [--out contract.json]")
 	_, _ = fmt.Fprintln(w, "  client generate [--spec openapi.json] [--out frontend/src/api/generated] [--dry-run] [--force]")
 	_, _ = fmt.Fprintln(w, "  client check [--write] [--spec openapi.json] [--out frontend/src/api/generated] [--url http://127.0.0.1:8080/openapi.json]")
 	_, _ = fmt.Fprintln(w, "  routes [--url http://127.0.0.1:8080]")

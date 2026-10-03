@@ -65,6 +65,27 @@ jobs:
       - name: Build examples
         run: go build ./examples/...
 
+  # The storage drivers promise the same semantics on every platform the
+  # release ships for, and Windows is the one whose file sharing and rename
+  # rules differ (an open file can lock its name). Everything else runs on
+  # Ubuntu only, so the storage packages run here too.
+  storage-windows:
+    name: Storage (Windows)
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run storage tests
+        run: go test -count=1 ./storage/...
+
   ci-scripts:
     name: CI script tests
     # Mirrors the benchmark-scripts job below: hermetic bash tests (stubs
@@ -291,6 +312,44 @@ jobs:
         env:
           GOMBIT_TEST_REDIS_ADDR: 127.0.0.1:6379
         run: go test -race -count=1 ./jobs
+
+  storage-s3:
+    name: Storage (s3)
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # MinIO's own images are no longer public (quay.io/minio requires
+      # authentication, Docker Hub's minio/minio is gone), so this is the
+      # frozen Bitnami build, pinned: it starts the server itself.
+      - name: Start MinIO
+        run: |
+          docker run -d --name minio -p 127.0.0.1:9000:9000 \
+            -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
+            bitnamilegacy/minio:2025.7.23-debian-12-r5
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:9000/minio/health/live >/dev/null && exit 0
+            sleep 1
+          done
+          docker logs minio; exit 1
+
+      # The S3-compatible driver against a real S3 API: the shared storage
+      # conformance suite, bounded-memory multipart and small uploads, the
+      # abort of a failed multipart upload, metadata at the contract's
+      # limit, and the missing-bucket classification.
+      - name: Run S3 storage tests
+        run: >-
+          go test -race -count=1 -tags integration ./storage/s3
+          -s3.endpoint http://127.0.0.1:9000
+          -s3.access-key minioadmin -s3.secret-key minioadmin
 
   database-sqlite:
     name: Database (sqlite)

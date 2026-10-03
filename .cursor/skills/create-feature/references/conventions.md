@@ -1,6 +1,6 @@
 # Feature conventions (locked)
 
-Do not re-litigate these. Full text: `AGENTS.md` and `docs/GOMBIT_BUILD_PLAN.md` §1–§3.
+Do not re-litigate these. Full text: `AGENTS.md` and the ADRs in `docs/adr/` (the historical `docs/GOMBIT_BUILD_PLAN.md` §1–§3 is where they started).
 
 ## Contract pipeline
 

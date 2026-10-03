@@ -65,6 +65,11 @@ when configured namespacing is required.
 | `GOMBIT_REDIS_TLS` | `Config.Cache.Redis.TLS` | `false` |
 | `GOMBIT_REDIS_TLS_INSECURE` | `Config.Cache.Redis.TLSInsecure` | `false` |
 
+The `GOMBIT_REDIS_*` settings are shared: the `redis` background-job driver
+(`GOMBIT_JOBS_DRIVER=redis`) connects with them too, and they are validated
+when either the cache or the jobs driver uses Redis. See
+[jobs.md](jobs.md#drivers).
+
 Cache keys opened through `cache.Open` are prefixed with the configured
 namespace. Caller keys are prefixed as-is: leading colons are not stripped, so
 `foo` and `:foo` occupy distinct slots. When no namespace is configured

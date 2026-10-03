@@ -5,7 +5,7 @@ description: Reproduces, tests, and fixes a Gombit defect with a minimal, verifi
 
 # Bugfix
 
-Reproduce first, then fix the root cause only. Read `AGENTS.md` first. `docs/GOMBIT_BUILD_PLAN.md` wins on conflicts.
+Reproduce first, then fix the root cause only. Read `AGENTS.md` first. `AGENTS.md` and the ADRs in `docs/adr/` win on conflicts (`docs/GOMBIT_BUILD_PLAN.md` is the historical v0.1 plan).
 
 ## When not to use
 
@@ -28,7 +28,7 @@ Reproduce first, then fix the root cause only. Read `AGENTS.md` first. `docs/GOM
 ### 1. Understand
 
 - Capture expected vs actual, stack traces, request IDs, and the last good revision.
-- If a GitHub issue exists, treat it as the ticket. If the defect is new, do **not** open a backlog-style `[M#]` issue unless asked — Gombit issues map 1:1 to build plan §4. Describe the bug in the PR instead.
+- If a GitHub issue exists, treat it as the ticket. If the defect is new, do **not** open a backlog-style `[M#]` issue unless asked — issues are created by the maintainer. Describe the bug in the PR instead.
 - Check whether the code is an extraction from `golang-rest-api-template` / `crud-template-monorepo`. Prefer restoring the proven contract over rewriting the subsystem.
 
 ### 2. Reproduce
@@ -42,7 +42,7 @@ Confirm the failure with the smallest command or test that shows it.
 | DB | SQLite first, then PostgreSQL. Do not declare a dialect bug from one driver. |
 | Frontend / auth | Trace token storage and the generated client. Access tokens must stay in memory. |
 | Generator | Re-run the generator; check idempotency and whether user-owned files were overwritten |
-| Docs-only / pre-code | Reproduce as a contradiction between build plan, AGENTS.md, and the file text |
+| Docs-only / pre-code | Reproduce as a contradiction between AGENTS.md, the ADRs, and the file text |
 
 If reproduction fails, report what was tried and stop.
 
@@ -79,7 +79,7 @@ Assess blast radius: other feature-packages, middleware order, migration history
 - API-visible fixes regenerate OpenAPI + the TS client in the same change.
 - Generator fixes stay AST-based (`go/ast` / `go/format`), idempotent, and must not start clobbering user-owned files.
 - Auth fixes must not move bearer tokens into `localStorage` / `sessionStorage`.
-- If the real fix is an M6 battery or a new product decision, stop and flag it.
+- If the real fix is a new battery or a new product decision, stop and flag it.
 
 ### 6. Verify
 
@@ -102,4 +102,4 @@ Assess blast radius: other feature-packages, middleware order, migration history
 - Rewriting a passing extraction because the bug was nearby
 - Editing Go with regex in a generator
 - Changing the D10 envelope or inventing a parallel error shape
-- Pulling jobs, events, mail, gRPC, or other M6 work into the fix
+- Pulling events, mail, gRPC, or other unplanned battery work into the fix

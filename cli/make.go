@@ -3,8 +3,10 @@ package cli
 import (
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/gombit-dev/gombit/commandgen"
+	logical "github.com/gombit-dev/gombit/field"
 	"github.com/gombit-dev/gombit/generate"
 	"github.com/gombit-dev/gombit/migrations/schemaplan"
 	"github.com/gombit-dev/gombit/resourcegen"
@@ -41,25 +43,55 @@ func newMakeResourceCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
 	cmd := silence(&cobra.Command{
 		Use:   "resource <Name> [field:type[:modifiers]...]",
 		Short: "Generate a feature-package resource (AST-safe)",
-		Long: `Generate a feature-package under internal/<name>/ with a GORM model,
-thin Huma handler (list/get/create), routes, and React list/table +
-React Hook Form create pages.
+		Long: `Generate a model-first feature-package (ADR-016) under internal/<name>/,
+React list/table + React Hook Form create pages, and its Atlas migration
+(unless --skip-migrations; see the end of this help).
 
-Route registration is appended in cmd/server/main.go via go/ast (never
-regex), next to product.Register(app). AutoMigrate is updated the same way.
+  internal/<name>/<name>.go         GORM model plus its gombit:"..." field
+                                    policy. Yours: seeded once, kept on
+                                    re-runs unless --force.
+  internal/<name>/hooks.go          no-op BeforeCreate hook for server-managed
+                                    columns. Yours: seeded once.
+  internal/<name>/dto.gen.go        request/response DTOs and model mappers.
+  internal/<name>/handler.gen.go    thin Huma list/get/create handler over GORM
+                                    plus Register(app).
+  internal/<name>/.gombit-resource  marker: gombit generate owns this package.
+  frontend/src/<name>/list.tsx, form.tsx, and frontend/src/resources.tsx.
 
-Field grammar (design §27 subset):
+The *.gen.go files are generator-owned (DO NOT EDIT): make resource derives
+them from the model with gombit generate, and re-running gombit generate
+after you edit the model rewrites them. Customize the model, its field
+policy, and hooks.go instead.
 
-  name:type[:required][,unique][,index][,filterable][,sortable][,searchable][,aggregatable]
+Wiring uses go/ast (never regex): <name>.Register(app) is added to
+cmd/server/main.go next to product.Register(app), and the model is added to
+the AutoMigrate call in internal/platform/database.go, which cmd/server runs
+on start.
 
-Supported types: string, text, int, int64, bool, uint, decimal, time,
-belongs_to, has_many, many_to_many.
+Field grammar:
 
+  name:type[:modifier,...]                          scalar field
+  name:relation:Target[,nullable][,on_delete=...]   relation (see Relations)
+
+Scalar modifiers: required, unique, index, nullable, filterable, sortable,
+searchable, aggregatable, default=<value>, min=<n> and max=<n> (int, int64,
+uint, decimal), max_length=<n> (string, email, url, slug, ip), and
+regex=<pattern> (string, text).
+
+` + resourceTypeHelp() + `
+
+  float              float64 (sortable, not aggregatable).
   decimal            money/exact numeric (types.Decimal; decimal(19,4) column).
   decimal(p,s)       pin precision/scale, e.g. decimal(10,2).
+  date               calendar date (types.Date; YYYY-MM-DD).
   time               time.Time (RFC3339 in JSON). This is a datetime.
   time_of_day        clock time (types.TimeOfDay; HH:MM:SS). Not the time token.
   duration           Go duration (types.Duration; 1h30m). Stored as nanoseconds.
+  uuid               uuid.UUID, stored as char(36).
+  json               a JSON object or array (types.JSON; types.NullJSON when
+                     optional).
+  email, url, ip     strings validated as OpenAPI format email, uri, and ip.
+  slug               string matching ^[-a-zA-Z0-9_]+$.
   enum(a,b)          stored values. enum(draft=Draft) separates the stored
                      value from the admin and form label.
 
@@ -70,26 +102,28 @@ List-query modifiers opt a field into the generated list handler's declared
 query surface (safe, indexable subset). The query spelling matches Gombit's
 admin data plane so the two contracts stay in sync:
 
-  filterable         exact-match ?<field>=<value> query param.
-                     Types: string, int, int64, uint, bool, uuid. A belongs_to
+  filterable         exact-match ?<field>=<value> query param. A belongs_to
                      foreign key is filterable by default (GET /children?
                      <parent>_id=<id>) with no modifier needed.
+` + resourceCapabilityTypes(logical.AllowsFilter) + `
   sortable           ?ordering=<field> (prefix with - for DESC, e.g.
                      ?ordering=-title). Replaces the fixed id order; id
                      stays the default when ?ordering= is absent.
+` + resourceCapabilityTypes(logical.AllowsSort) + `
   searchable         case-insensitive ?search=<term> LIKE across searchable
-                     text fields. Types: string, text.
+                     text fields.
+` + resourceCapabilityTypes(logical.AllowsSearch) + `
 
 The generated list handler (not the admin data plane) also supports numeric
 aggregates:
 
   aggregatable       server-side ?aggregate=<func>:<field> (func: sum, avg,
                      min, max), computed over the filtered set before
-                     pagination and returned in meta.aggregates. Types: int,
-                     int64, uint, decimal. Integer aggregates and decimal sum
-                     are exact on Postgres/MySQL; SQLite computes avg and
-                     fractional decimal sum in float. avg is an approximation
-                     on any driver.
+                     pagination and returned in meta.aggregates. Integer
+                     aggregates and decimal sum are exact on Postgres/MySQL;
+                     SQLite computes avg and fractional decimal sum in float.
+                     avg is an approximation on any driver.
+` + resourceCapabilityTypes(logical.AllowsAggregate) + `
 
 Relations use name:kind:Target, where Target is a model in internal/<target>/:
 
@@ -284,6 +318,82 @@ Run the generated command from the application module:
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print files that would be written without writing")
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite files that differ from this run")
 	return cmd
+}
+
+// helpWidth is the column the generated parts of `make resource --help` wrap at.
+const helpWidth = 78
+
+// resourceScalarSpecs is every scalar kind `gombit make resource` emits, in
+// field-catalog order: the resource grammar's scalar types.
+func resourceScalarSpecs() []logical.Spec {
+	var out []logical.Spec
+	for _, kind := range logical.Kinds() {
+		spec, ok := logical.Lookup(kind)
+		if !ok || !spec.GeneratorReady || kind == logical.Relation || len(spec.CLITokens) == 0 {
+			continue
+		}
+		out = append(out, spec)
+	}
+	return out
+}
+
+// resourceRelationTokens is every relation cardinality the grammar accepts.
+func resourceRelationTokens() []string {
+	spec, ok := logical.Lookup(logical.Relation)
+	if !ok || !spec.GeneratorReady {
+		return nil
+	}
+	return spec.CLITokens
+}
+
+// resourceTypeHelp renders the type list of `gombit make resource --help` from
+// the field vocabulary (package field), the same catalog the grammar parses
+// against, so the help cannot drift from what is accepted.
+func resourceTypeHelp() string {
+	var scalars []string
+	for _, spec := range resourceScalarSpecs() {
+		scalars = append(scalars, strings.Join(spec.CLITokens, "/"))
+	}
+	return wrapHelpList("Scalar types (aliases after /): ", "  ", scalars) + "\n" +
+		wrapHelpList("Relation types: ", "  ", resourceRelationTokens())
+}
+
+// resourceCapabilityTypes is the "Types:" line under a list-query modifier:
+// the scalar types whose kind allows it, per the field vocabulary.
+func resourceCapabilityTypes(allows func(logical.Kind, logical.RelationKind) bool) string {
+	var tokens []string
+	for _, spec := range resourceScalarSpecs() {
+		if allows(spec.Kind, "") {
+			tokens = append(tokens, spec.CLITokens[0])
+		}
+	}
+	const indent = "                     "
+	return wrapHelpList(indent+"Types: ", indent, tokens) + "."
+}
+
+// wrapHelpList joins items with ", " after first, wrapping at helpWidth with
+// continuation lines starting with indent.
+func wrapHelpList(first, indent string, items []string) string {
+	var b strings.Builder
+	line := first
+	for i, item := range items {
+		word := item
+		if i < len(items)-1 {
+			word += ","
+		}
+		switch {
+		case line == first || line == indent:
+			line += word
+		case len(line)+1+len(word) > helpWidth:
+			b.WriteString(line)
+			b.WriteByte('\n')
+			line = indent + word
+		default:
+			line += " " + word
+		}
+	}
+	b.WriteString(line)
+	return b.String()
 }
 
 func makeUsage(w io.Writer) {

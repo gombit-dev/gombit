@@ -17,8 +17,12 @@ gombit new tasks --database sqlite --auth cookie --ui mui
 cd tasks && gombit dev
 ```
 
-> **Status: pre-1.0.** M0–M5 and ADMIN-1..3 are complete and CI-gated across
-> SQLite, PostgreSQL, and MySQL. APIs may still change between minor versions.
+> **Status: pre-1.0 (v0.6).** The CRUD loop, the admin, and schema-safety
+> tooling are shipped and CI-gated across SQLite, PostgreSQL, and MySQL;
+> background jobs are shipped and CI-gated against Redis; and a fault-injection
+> suite runs on every PR. APIs may still change
+> between minor versions — pin an exact version and read the
+> [changelog](CHANGELOG.md) before upgrading.
 
 ## Why Gombit
 
@@ -32,9 +36,14 @@ truth** instead of hand-synchronized:
 - **Your handler signature is the contract.** OpenAPI 3.1 is emitted from
   Huma-typed handlers, never hand-written, and the TypeScript client is
   generated from that. A drift check fails CI when they disagree.
-- **Your GORM model is the schema.** Migrations are versioned SQL diffed by
-  Atlas from your models — readable, reviewable, and reversible. No
-  `AutoMigrate` in production, no hand-rolled migration DSL.
+- **Your GORM model is the schema — and the resource.** Migrations are
+  versioned SQL diffed by Atlas from your models — readable, reviewable, and
+  reversible, with destructive changes refused until you acknowledge them. The
+  request/response DTOs and CRUD handlers are regenerated from the same model.
+  Versioned SQL is the migration path and there is no hand-rolled migration
+  DSL. (The scaffolded server also runs `platform.AutoMigrate` on start, so a
+  new app can serve before its first `gombit db migrate`; see
+  [migrations.md](docs/migrations.md).)
 - **Your registry is the admin.** A real Django-style admin at `/admin/`,
   served by the framework at runtime, not generated pages you inherit and
   maintain.
@@ -46,20 +55,23 @@ tested and first-class.
 
 | | |
 | --- | --- |
-| **Runtime** | Gin + [Huma](https://huma.rocks/) with typed handlers, `framework.App` lifecycle hooks, graceful shutdown, structured logging, typed env config with secret redaction |
-| **Data** | GORM over **SQLite, PostgreSQL, and MySQL** — all three CI-gated on every push, with a shared conformance suite |
-| **Migrations** | [Atlas](https://atlasgo.io/)-backed `gombit db makemigrations / migrate / rollback / status / seed / reset` |
+| **Runtime** | Gin + [Huma](https://huma.rocks/) with typed handlers, `framework.App` lifecycle hooks, graceful shutdown, structured logging, typed env config with secret redaction, memory/Redis cache, `/livez` + `/readyz` probes, Prometheus `/metrics` |
+| **Data** | GORM over **SQLite, PostgreSQL, and MySQL** — all three CI-gated on every push, with a shared conformance suite; deletes are physical, so your `ON DELETE` rules decide what happens |
+| **Resources** | `make resource` scaffolds a model you own; `gombit generate` derives the DTOs and CRUD handlers (`*.gen.go`) from it, with hooks for customization and `--check` to catch drift |
+| **Migrations** | [Atlas](https://atlasgo.io/)-backed `gombit db makemigrations / migrate / rollback / status / seed / reset`, plus `plan`, `lint`, and `check`, which classify every change and refuse destructive or unsafe ones until acknowledged |
 | **Contract** | OpenAPI 3.1 emitted from code, interactive `/docs`, generated TypeScript client, contract drift check |
+| **Jobs** | Typed background jobs over sync, in-memory, or Redis queues; a worker with retries, backoff, timeouts, delayed and unique jobs; failed-job tooling (`gombit jobs`); job metrics and OpenTelemetry spans |
 | **Frontend** | Vite + React + TypeScript, React Hook Form, optional Material UI CRUD preset (`--ui mui`) |
 | **Auth** | Bearer JWT with refresh rotation (token in memory, **never `localStorage`**), or first-class cookie sessions with CSRF (`--auth cookie`) |
 | **Admin** | Runtime generic admin at `/admin/` with introspection API, permissions, groups, and superuser bypass |
-| **CLI** | Cobra tree: `new`, `dev`, `build --embed`, `make resource`, `make command`, `db`, `openapi`, `client`, `routes`, `doctor`, `config`, `createsuperuser`, `version` |
-| **Deploy** | `gombit build --embed` — API, SPA, and admin in one binary |
+| **CLI** | Cobra tree: `new`, `dev`, `worker`, `jobs`, `build --embed`, `make resource`, `make command`, `generate`, `db`, `openapi`, `client`, `contract`, `routes`, `doctor`, `config`, `createsuperuser`, `version` |
+| **Deploy** | `gombit build --embed` — API, SPA, and admin in one binary; a machine-readable app contract (`gombit contract app`) and migration safety manifests for deployment hosts |
 
 ## Quick start
 
 **Prerequisites:** Go 1.26+, Node 22+, and a C toolchain (SQLite is cgo-only).
-Migrations also need [Atlas](https://atlasgo.io/):
+`make resource` and most `gombit db` commands also need
+[Atlas](https://atlasgo.io/):
 `curl -sSf https://atlasgo.sh | sh -s -- --community`. Full details in
 [installation.md](docs/installation.md).
 
@@ -88,24 +100,35 @@ changes:
 ### The CRUD loop
 
 ```bash
-# Generate a feature package: model + Huma handler + routes + React pages.
+# Generate a feature package: the model (yours), generated DTOs and handlers,
+# React pages, and the versioned SQL migration for the new table.
 gombit make resource Task title:string:required done:bool
 
-# Diff your models into versioned SQL, then apply it.
-gombit db makemigrations create_tasks --model github.com/example/tasks/internal/task.Task
+# Read the migration it wrote, then apply it.
 gombit db migrate
 
-# Regenerate the typed client from the live spec.
+# Regenerate the typed client (gombit dev also does this when the spec changes).
 gombit client generate
 
 # Create an admin account and open /admin/.
-export GOMBIT_JWT_SECRET="$(openssl rand -hex 32)"
 gombit createsuperuser --email admin@example.com
 ```
 
-`make resource` edits `cmd/server/main.go` through `go/ast` — never regex — to
-register your routes and models. Generators are idempotent and additive, support
-`--dry-run` and `--force`, and never overwrite files you own.
+`make resource` is model-first: `internal/task/task.go` and `hooks.go` are
+yours, while `dto.gen.go` and `handler.gen.go` are regenerated from the model
+by `gombit generate` — change the model, re-run it, and
+`gombit generate --check` exits non-zero when a committed copy is stale.
+Routes are registered in `cmd/server/main.go` and the model is added to the
+`AutoMigrate` list in `internal/platform/database.go`, both through `go/ast`,
+never regex. Generators are idempotent and additive, support `--dry-run` and
+`--force`, and never overwrite files you own. `createsuperuser` needs no setup:
+`gombit new` already wrote a random `GOMBIT_JWT_SECRET` into `.env`, and every
+command that reads the app's configuration — `createsuperuser` among them, and
+the server itself — applies the project's `.env`, with the process environment
+taking precedence.
+
+Before you ship a schema change, `gombit db check` validates the whole chain —
+models, generated contract, migrations, and the live database — in one command.
 
 Then ship it:
 
@@ -154,8 +177,9 @@ per-field detail:
 
 ## The admin
 
-No other Go web framework ships a real Django-style admin — not Gin, Echo,
-Fiber, or Encore. Gombit's is a **runtime** surface over an explicit registry:
+Gin, Echo, Fiber, and Encore don't ship a Django-style admin; in Go it is
+usually a separate library you wire up yourself. Gombit's is built in — a
+**runtime** surface over an explicit registry:
 
 ```go
 admin.Register(app, Task{}, admin.Options{
@@ -185,8 +209,8 @@ to maintain. Requires cookie auth. See [admin.md](docs/admin.md) and
 | Versioned SQL migrations | ✅ (Atlas) | ➖ | ✅ (fizz) | ✅ |
 | Scaffolding generators | ✅ AST-safe | ➖ | ✅ | ➖ |
 | Session auth + CSRF | ✅ | ➖ | ✅ | ➖ |
+| Background jobs + worker | ✅ | ➖ | ✅ | ✅ (Pub/Sub) |
 | **Django-style admin** | ✅ | ➖ | ➖ | ➖ |
-| Self-hosted, no vendor runtime | ✅ | ✅ | ✅ | ➖ |
 
 Gombit is younger than all of them. If you want a minimal router, use Gin
 directly — Gombit *is* Gin underneath, and hands it back to you on request.
@@ -268,18 +292,23 @@ Start with [**installation**](docs/installation.md) and the
 [**tutorial**](docs/tutorial.md). The full index — runtime, data, contract,
 frontend, auth, admin, and ADRs — is at [**docs/README.md**](docs/README.md).
 
-Scope, locked architecture decisions, and the issue backlog live in
-[`docs/GOMBIT_BUILD_PLAN.md`](docs/GOMBIT_BUILD_PLAN.md), which is authoritative.
+Architecture decisions are recorded as [ADRs](docs/README.md#architecture-decisions),
+and current work is tracked in [GitHub issues](https://github.com/gombit-dev/gombit/issues).
+[`docs/GOMBIT_BUILD_PLAN.md`](docs/GOMBIT_BUILD_PLAN.md) is the original v0.1
+build plan, kept as a historical record.
 
 ## Roadmap
 
-**Shipped:** typed config and lifecycle (M1) · Atlas migrations (M2) · Huma
-contract, OpenAPI, and TS client (M3) · Cobra CLI and generators (M4) · React
-frontend, Bearer and cookie auth, MUI preset, embedded builds (M5) · the runtime
-admin with permissions (ADMIN-1..3).
+**Shipped:** typed config and lifecycle, Atlas migrations, the Huma contract
+with OpenAPI and the TS client, the Cobra CLI and generators, the React
+frontend, Bearer and cookie auth, the MUI preset, embedded builds, and the
+runtime admin with permissions (v0.1) · model-first resources (v0.2) and a
+wider field vocabulary (v0.3) · schema-safety tooling (`db plan`, `lint`,
+`repair`, `check`), table renames, and hard delete (v0.4) · background jobs,
+the worker, and the fault-injection and chaos suites (v0.5–v0.6). See the
+[changelog](CHANGELOG.md) for detail.
 
-**Post-v0.1**, deliberately not here yet: background jobs and queues, events,
-scheduler, mail, storage, gRPC, multi-tenancy, i18n.
+**Not here yet:** events, scheduler, mail, storage, gRPC, multi-tenancy, i18n.
 
 ## Contributing
 

@@ -1,0 +1,76 @@
+package storage
+
+import (
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/gombit-dev/gombit/internal/storagekey"
+)
+
+// FilenameMetadata is the metadata name of an object's filename, for
+// display and Content-Disposition (storage/upload stores the client's
+// filename under it; presign.Handler serves it).
+const FilenameMetadata = "filename"
+
+// MaxURLExpiry is the longest a signed URL may live: S3's limit for a
+// presigned URL (SigV4), applied on every driver so a lifetime that works
+// in development works in production.
+const MaxURLExpiry = 7 * 24 * time.Hour
+
+// A signed URL's lifetime is a whole number of seconds (URLOptions), and
+// every driver counts it the way S3 does (SigV4: X-Amz-Expires counts from
+// X-Amz-Date, which has whole-second precision): from the start of the
+// second the URL is signed in. A URL from SignedURL(ttl) is therefore
+// valid for more than ttl minus one second and at most ttl after URL
+// returns, on every driver.
+
+// Visibility. An object is public when its key is under the store's
+// public prefix ("public/" unless configured otherwise; empty makes no
+// object public), and private otherwise. A public object has a permanent
+// URL anyone can fetch (URL with PublicURL); a private one is reached
+// through the application, or through a signed URL that expires (URL with
+// SignedURL). Visibility follows the key, not a flag stored with the
+// object, because that is what a bucket policy or a CDN can serve: to make
+// an object public, store it under the public prefix.
+
+// IsPublic reports whether key is public under publicPrefix: publicPrefix
+// is not empty and key starts with it.
+func IsPublic(publicPrefix, key string) bool {
+	return publicPrefix != "" && strings.HasPrefix(key, publicPrefix)
+}
+
+// ValidatePublicPrefix reports whether prefix can be a store's public
+// prefix: empty (no object is public), or a key path ending with '/'.
+func ValidatePublicPrefix(prefix string) error {
+	// The rule of ValidatePrefix (config applies it too), classified as
+	// ErrInvalidOptions: a public prefix is an option, not a key.
+	if reason := storagekey.PrefixProblem(prefix); reason != "" {
+		return fmt.Errorf("%w: public prefix %q %s", ErrInvalidOptions, prefix, reason)
+	}
+	return nil
+}
+
+// EscapeKey returns key as a URL path: each segment percent-encoded except
+// for unreserved characters (letters, digits, '-', '.', '_', '~'), the '/'
+// between segments kept. Every byte that could mean something else in a
+// URL, or that a server might decode differently ('+', ';', '%'), is
+// encoded.
+func EscapeKey(key string) string {
+	const hex = "0123456789ABCDEF"
+	var b strings.Builder
+	b.Grow(len(key))
+	for i := 0; i < len(key); i++ {
+		c := key[i]
+		switch {
+		case 'a' <= c && c <= 'z', 'A' <= c && c <= 'Z', '0' <= c && c <= '9',
+			c == '-', c == '.', c == '_', c == '~', c == '/':
+			b.WriteByte(c)
+		default:
+			b.WriteByte('%')
+			b.WriteByte(hex[c>>4])
+			b.WriteByte(hex[c&15])
+		}
+	}
+	return b.String()
+}

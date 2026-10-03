@@ -28,15 +28,32 @@ scaffolded apps resolving a published framework version. **BENCH-1** adds the
 footprint/cold-start harness, k6 load workloads, the canonical results
 snapshot behind the README performance table, and a manual `benchmarks.yml`
 workflow — plus the per-PR `benchmark-report-drift` and `benchmark-smoke`
-gates in `ci.yml`. The **JOBS-0** background-jobs epic has started: `jobs` holds
+gates in `ci.yml`. Resources are **model-first** (ADR-016): `make resource`
+scaffolds a user-owned model and `hooks.go`, and `gombit generate` derives the
+generator-owned `dto.gen.go` / `handler.gen.go` (`--check` for drift). The
+**SCHEMA** epic (#277) is in: `gombit db plan` classifies a change before a
+migration is written and `makemigrations --allow` acknowledges destructive or
+unsafe steps, `--rename-table` renames tables in place, `db lint` / `db repair`
+/ `db check` validate the migration directory and the whole schema chain, and
+deletion is physical (`database.Delete`, ADR-019). The **JOBS-0**
+background-jobs epic is in: `jobs` holds
 the job contract (typed jobs, registry, envelope), the sync, memory, and
 Redis queue drivers behind `framework.App.Jobs()`, the worker
 (`./server worker`, `gombit worker`), retry policies (attempts, backoff,
 timeouts, permanent failures), delayed dispatch (`jobs.Delay`, `jobs.At`),
 failed jobs (`gombit jobs failed|inspect|retry|forget|purge`), duplicate
 handling (`jobs.Unique`, `jobs.UniqueFor`, `jobs.Once`), and observability
-(`gombit_jobs_*` metrics, OpenTelemetry spans). Other M6 batteries are not
-here yet.
+(`gombit_jobs_*` metrics, OpenTelemetry spans). The **STORAGE-0** epic
+(#279) has started: `storage` holds the object storage contract
+(`storage.Storage`, portable keys, classified errors), `storage/storagetest`
+the driver conformance suite, and `storage/local` (hash-addressed files,
+atomic writes), `storage/memory`, and `storage/s3` (S3-compatible, streaming
+multipart) the drivers behind `framework.App.Storage()` (`GOMBIT_STORAGE_DRIVER`,
+local by default), `storage/upload` the upload helpers (size limits,
+content-detected type policy, generated keys), and public and signed URLs
+(visibility by key prefix; presigned on S3, `storage/presign` HMAC URLs
+served at `/_storage` for local and memory). The other batteries
+(events, scheduler, mail, gRPC, multi-tenancy, i18n) are not here yet.
 The **CHAOS-0** resilience suite is in: `internal/faulttest` (deterministic
 fault injection: a faulting `database/sql` driver, a scripted HTTP
 dependency, a TCP fault proxy, the retry-policy check), `TestFault_*` tests
@@ -48,16 +65,21 @@ on demand. Check `git log` / `ls` before describing "how the code works."
 
 ## Source of truth
 
-- `docs/GOMBIT_BUILD_PLAN.md` is authoritative for scope, decisions, and the
-  issue backlog (§4). It wins over the design doc on any conflict.
+- `docs/GOMBIT_BUILD_PLAN.md` is the **historical v0.1 build plan** — no
+  longer maintained. Its locked decisions (§1-§3) and working agreement (§5)
+  still apply as restated in this file; later ADRs in `docs/adr/` supersede
+  it where they differ (e.g. ADR-016 on generated resource code). Current
+  scope lives in this file, the ADRs, and GitHub issues.
 - `docs/GO_FULLSTACK_FRAMEWORK_DESIGN.md` is rationale/prose only, cited by
   backlog entries (e.g. "draft §41") for context — never a source of
   additional scope on its own.
-- GitHub issues, one per §4 backlog entry, titled `[ID] ...` (e.g. `[M1-2]
-  framework.App + lifecycle + hooks`), are the unit of work. Milestones run
-  `M0 spike` → `M1 runtime` → `M2 migrations` → `M3 contract` → `M4 cli` →
-  `M5 frontend-auth` → `M6 admin` → `post-v0.1`. Don't start an issue whose
-  "Depends on #N" is still open.
+- GitHub issues, titled `[ID] ...` (e.g. `[M1-2] framework.App + lifecycle +
+  hooks`, `[JOBS-3] ...`), are the unit of work. The v0.1 ones map to build
+  plan §4 entries; later epics (SCHEMA, JOBS, CHAOS, ...) list their children
+  in the epic issue. Milestones run `M0 spike` → `M1 runtime` →
+  `M2 migrations` → `M3 contract` → `M4 cli` → `M5 frontend-auth` →
+  `M6 admin` → `post-v0.1`. Don't start an issue whose "Depends on #N" is
+  still open.
 
 ## Locked architecture decisions (build plan §1-§3 — do not re-litigate)
 
@@ -65,8 +87,8 @@ on demand. Check `git log` / `ls` before describing "how the code works."
   the API contract (OpenAPI 3.1 emitted, not hand-written). Raw `*gin.Engine`
   stays reachable via `app.Router()` as a first-class, tested escape hatch.
 - **App layout (generated apps):** feature-package under `internal/<feature>/`
-  (model, handler, routes; `service.go`/`repo.go` only with `--service`/
-  `--repo`). Never Laravel-style `app/controllers`, `app/models`.
+  (user-owned model and `hooks.go`, generator-owned `*.gen.go` per ADR-016;
+  `service.go`/`repo.go` only with `--service`/`--repo`). Never Laravel-style `app/controllers`, `app/models`.
 - **Migrations:** wrap `ariga.io/atlas-provider-gorm` (Program Mode) +
   `atlas migrate diff`. Never hand-roll a migration DSL.
 - **Auth:** Bearer JWT (access token in memory, never `localStorage`) is the
@@ -98,8 +120,8 @@ A change is not done unless:
 4. Any API change regenerates the OpenAPI doc + TS client in the same PR.
 5. No secrets in generated frontend source; `VITE_*` is treated as public.
 6. Scope stays inside the issue's milestone. If work starts pulling in an M6
-   "battery" (jobs, events, scheduler, mail, storage, gRPC, multi-tenancy,
-   i18n), stop and split it out — v0.1 is one CRUD loop, nothing more.
+   "battery" (events, scheduler, mail, storage, gRPC, multi-tenancy, i18n),
+   stop and split it out into its own epic.
 7. The PR links its issue and states which acceptance criteria it satisfies.
 
 ## Working conventions
@@ -112,7 +134,7 @@ A change is not done unless:
 - Conventional commit prefixes (`feat:`, `fix:`, `docs:`, `chore:`) are fine;
   the build plan doesn't mandate anything stricter.
 - Don't create milestones/labels beyond build plan §6, and don't create
-  issues beyond §4 backlog entries, without asking first.
+  issues, without asking first.
 - If something looks missing from the backlog, flag it — don't silently add
   scope.
 
@@ -124,6 +146,16 @@ working agreement above. Personality is presentation; technical analysis
 comes first. Do not invent findings. In Claude Code, run the project
 `code-review` skill (`.claude/skills/code-review/SKILL.md`); in Cursor, run
 the project `code-review` skill (`.cursor/skills/code-review/SKILL.md`).
+
+## Onboarding
+
+For a new contributor, Claude Code has the project `onboarding` skill
+(`.claude/skills/onboarding/SKILL.md`): required reading, live repo
+reconnaissance, issue selection (bug-fix or backlog/epic lane), the
+implementation loop, validation, and PR. It is opt-in — run via
+`/onboarding`, when a user says they are new to the repo, or when they ask
+to be walked through a first issue — and not part of ordinary issue work.
+It defers to this file wherever the two disagree.
 
 ## Cursor skills
 

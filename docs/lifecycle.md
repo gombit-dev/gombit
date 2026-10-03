@@ -53,18 +53,23 @@ steps that need their own runtime surfaces.
 | 1. config loading | Owned in M1-1/M1-2 through `config.Config` and `framework.New`. |
 | 2. logging initialization | Owned in M1-6 through Zap-backed `logging.New`; Mongo sinks are external modules. |
 | 3. database connection | Owned in M1-4 through `database.Open`; applications open/close the handle and attach it with `framework.WithDatabase`. |
-| 4. migration state checks | Deferred to M2. |
+| 4. migration state checks | Not checked at startup. Run `gombit db check` (in CI or before a deploy) to catch pending migrations and schema drift — see [`docs/migrations.md`](migrations.md#checking-the-whole-chain). |
 | 5. optional Redis/cache connection | Owned in M1-5 through `cache.Open`, the default memory cache, and `app.Redis()` for the Redis escape hatch. |
 | 6. auth infrastructure | Owned in M5-2 (Bearer) and M5-3 (cookie/session + CSRF) through `auth` + `framework.New` when `GOMBIT_JWT_SECRET` is set. Cookie-mode `New` also mounts empty admin Huma routes (ADMIN-1) and the `/admin/` SPA (ADMIN-2); models are added with `admin.Register`. JWT-only apps do not get admin routes. |
 | 7. tracing and metrics | Basic trace-ID propagation and HTTP request metrics are owned in M1-7; full OpenTelemetry exporter wiring is future runtime work. |
 | 8. HTTP server construction | Owned in M1-2 through `framework.Run` and `RunContext`. |
-| 9. middleware installation | Recovery is owned in M1-2. Route-registration composition (independently-registered route groups, each with optional group-scoped middleware) is owned in M1-3 — see [`docs/router.md`](router.md). Request ID, trace context, metrics, security headers, request timeout, and trusted-proxy configuration are owned in M1-7. An always-on request body-size limit (JSON, 8MiB, 413) and the M1-8 request-input XSS HTML-tag sanitizer are owned in M1-8 — but PERF-13 (#271, ADR-018) made the sanitizer **opt-in** (`Security.SanitizeInput`), off by default: XSS is enforced on output (React JSX escaping; JSON is not an HTML sink; response CSP), while the body-size bound stays always-on in its own layer. CORS, rate limiting, and auth remain separate issues. |
+| 9. middleware installation | Recovery is owned in M1-2. Route-registration composition (independently-registered route groups, each with optional group-scoped middleware) is owned in M1-3 — see [`docs/router.md`](router.md). Request ID, trace context, metrics, security headers, request timeout, and trusted-proxy configuration are owned in M1-7. An always-on request body-size limit (JSON, 8MiB, 413) and the M1-8 request-input XSS HTML-tag sanitizer are owned in M1-8 — but PERF-13 (#271, ADR-018) made the sanitizer **opt-in** (`Security.SanitizeInput`), off by default: XSS is enforced on output (React JSX escaping; JSON is not an HTML sink; response CSP), while the body-size bound stays always-on in its own layer. CORS and rate limiting remain separate issues; auth is step 6. |
 | 10. module registration | Owned in M1-3 — applications register feature routes directly against `app.Router()`; see [`docs/router.md`](router.md). |
 | 11. readiness/liveness endpoints | `GET /livez` (liveness) and `GET /readyz` (readiness) are raw Gin probes owned in M1-2. HOST-2 (ADR-015) makes `/readyz` datastore-aware — `503` while draining or when an attached database is unreachable, `200` otherwise — as the stable host health contract. See [`docs/health.md`](health.md). |
 | 12. frontend static asset mounting when embedded | Owned in M5-5 through `framework.WithEmbeddedFrontend` (application SPA) and ADMIN-2 through explicit `/admin` Gin routes over `internal/adminui` embed. Application SPA fallback is installed only when the FS has `index.html`; the `gombit new` placeholder embed (`.keep` only) is a no-op so `go run ./cmd/server` works without a Vite `dist`. Admin `/admin/` is cookie-mode only. See [`docs/build.md`](build.md) and [`docs/admin.md`](admin.md). |
 | 13. signal handling | Owned in M1-2 through `framework.Run`. |
 | 14. graceful shutdown | Owned in M1-2 through bounded `http.Server.Shutdown`; on timeout, `server.Close()` drops remaining connections so `Run`/`RunContext` can return with `Serve` stopped. |
-| 15. dependency cleanup | Owned in M1-2 through `OnStop`; concrete DB/cache/log sink cleanup lands with those features. |
+| 15. dependency cleanup | Owned in M1-2 through `OnStop`. After the stop hooks, the framework closes the job dispatcher and the cache it opened itself (not ones passed in with an option); when it built the logger, a stop hook syncs it. The database handle is the application's to close. |
+
+`framework.New` also opens a background-job dispatcher (`app.Jobs()`) from
+`GOMBIT_JOBS_*` unless one is supplied, and `framework.Run` runs the jobs worker
+instead of the HTTP server when the process's first argument is `worker`
+(`./server worker`). See [`docs/jobs.md`](jobs.md#running-the-worker).
 
 The probes are raw Gin routes with D10-style bodies and remain outside
 generated OpenAPI when Huma is mounted. `/readyz` is datastore-aware

@@ -188,7 +188,12 @@ arbitrary Go types.
   derive the GORM primary key **at Register** and store it. The PK field
   must appear in `Fields`. An auto-increment primary key is read-only.
   A manual primary key is required on create and cannot be changed on
-  update.
+  update. A model whose primary key spans several columns is refused at
+  `Register` (`admin: T has a composite primary key, which is not
+  supported`), the same shape `gombit make resource` rejects: the admin
+  addresses a row by one column, so the other key columns would not be
+  part of the URL. Naming one of them in `PK` does not lift the
+  restriction. Give an admin-managed model a single-column primary key.
 - **Empty `Fields`** derives a default from the struct once, inside
   `Register`, via `admin.FieldsFrom(T)`. That helper may use `reflect`
   **only at registration time**. Do not call it from request handlers.
@@ -290,7 +295,9 @@ never fire, leaving a live child row pointing at a parent the API now reports as
 
 Because the delete is physical, the admin does not keep soft-deleted rows around
 (it has never exposed a restore/trash path). This is the framework-owned admin
-surface; generated per-resource handlers are thin and user-owned.
+surface; generated per-resource handlers live in generator-owned `*.gen.go`
+files and are customized through hooks, not by editing them
+([ADR-016](adr/016-model-first-resource-generation.md)).
 
 List query parameters:
 
@@ -333,5 +340,5 @@ superuser with `auth.Service.CreateSuperuser` (the same path as
 - Full users/groups management screens in the admin SPA
 - `--admin` generator / golden template changes / copying the SPA into
   generated `frontend/`
-- M6 batteries (jobs, events, scheduler, mail, storage, gRPC, multi-tenancy, i18n)
+- M6 batteries (events, scheduler, mail, storage, gRPC, multi-tenancy, i18n)
 - `localStorage` tokens

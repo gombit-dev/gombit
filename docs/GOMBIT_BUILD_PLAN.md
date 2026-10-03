@@ -1,15 +1,28 @@
 # Gombit — Build Plan & Locked Decisions
 
-**Status:** Build-ready v1.0
+> **Historical document.** This is the original v0.1 build plan, kept as a
+> record of how Gombit was scoped and why. It is no longer maintained and is
+> not the source of truth for current scope: what has shipped is in the
+> [changelog](../CHANGELOG.md), architecture decisions are recorded as
+> [ADRs](adr/), and current work is tracked in
+> [GitHub issues](https://github.com/gombit-dev/gombit/issues). Later ADRs
+> supersede parts of it — notably [ADR-016](adr/016-model-first-resource-generation.md)
+> (generated resource code is generator-owned, not a one-time user-owned
+> scaffold) — and several "post-v0.1" batteries it defers, such as background
+> jobs, have since shipped.
+
+**Status:** Historical — the v0.1 plan as written ("Build-ready v1.0" at the time); not maintained
 **Date:** 2026-08-14
 **Supersedes:** the "Open Decisions" (§57) of `GO_FULLSTACK_FRAMEWORK_DESIGN.md`, and the specific sections noted inline below.
-**Purpose:** This document is the authoritative source for creating GitHub issues and driving agent-based implementation. The original design doc remains the reference for *rationale and prose*; where the two conflict, **this document wins**.
+**Purpose (as of v0.1):** This document was the source for creating the v0.1 GitHub issues and driving agent-based implementation, and it won over the original design doc on any conflict. It no longer governs current scope: [`AGENTS.md`](../AGENTS.md), the [ADRs](adr/), and GitHub issues do (see the note above).
 
 **Spiritual model — Django, not Laravel.** The identity line shifts from "Rails/Laravel/Django cohesion" to specifically **Django-for-Go**: Django's feature set (apps, migrations incl. `makemigrations`, `createsuperuser`, an auto-admin, management commands) and CLI ergonomics, implemented with a Go-idiomatic backend, a React + TypeScript (+ optional MUI) frontend, and **none of Django's runtime metaclass/reflection magic**. The rule is: copy Django's *what*, keep Go's *how* — the same stance principle 6.2 already takes toward Rails/Laravel. This reinforces C2 (Django "apps" ≈ feature-packages) and also differentiates positioning from the existing "Laravel-for-Go" (Goravel).
 
 ---
 
 ## 0. How to use this document
+
+*Historical: this was the v0.1 workflow. §4 lists the v0.1 backlog only; the locked decisions (§1–§3) and the working agreement (§5) are carried forward in [`AGENTS.md`](../AGENTS.md), with later ADRs superseding them where they differ.*
 
 1. Read §1 (Decisions I changed) first — these reverse the original draft. Veto any you disagree with **before** issues are created; every downstream issue assumes them.
 2. §2 locks all remaining open questions so no agent is ever blocked on a product decision.

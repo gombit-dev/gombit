@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -116,5 +117,59 @@ func TestWatchOpenAPISkipsUnchangedSpec(t *testing.T) {
 	defer mu.Unlock()
 	if calls != 1 {
 		t.Fatalf("Generate called %d times, want 1 for unchanged spec", calls)
+	}
+}
+
+func TestWatchOpenAPIDoesNotRetryFailedGenerateUntilSpecChanges(t *testing.T) {
+	t.Parallel()
+
+	const (
+		specOne = `{"openapi":"3.1.0","info":{"title":"one"}}`
+		specTwo = `{"openapi":"3.1.0","info":{"title":"two"}}`
+	)
+	var (
+		fetches   int
+		generated []string
+		stderr    bytes.Buffer
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	get := func(context.Context, string) ([]byte, error) {
+		fetches++
+		switch fetches {
+		case 1, 2:
+			return []byte(specOne), nil
+		case 3:
+			return []byte(specTwo), nil
+		default:
+			cancel()
+			return []byte(specTwo), nil
+		}
+	}
+	generate := func(_ context.Context, spec []byte) error {
+		generated = append(generated, string(spec))
+		return errors.New("generation failed")
+	}
+
+	err := watchOpenAPI(ctx, Options{
+		PollInterval: time.Millisecond,
+		HTTPGet:      get,
+		Generate:     generate,
+		Stderr:       &stderr,
+	}, "http://127.0.0.1:8080/openapi.json")
+	if err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("watchOpenAPI() error = %v", err)
+	}
+
+	if len(generated) != 2 {
+		t.Fatalf("Generate called %d times for two distinct specs, want 2: %v", len(generated), generated)
+	}
+	if generated[0] != specOne || generated[1] != specTwo {
+		t.Fatalf("generated = %v, want [%s %s]", generated, specOne, specTwo)
+	}
+	if got := strings.Count(stderr.String(), "gombit dev: regenerate TypeScript client: generation failed"); got != 2 {
+		t.Fatalf("generation error logged %d times, want once per distinct spec", got)
 	}
 }

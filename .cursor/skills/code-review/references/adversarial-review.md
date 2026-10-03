@@ -682,11 +682,11 @@ Review the code that exists.
 
 # GOMBIT ADDENDUM
 
-This repository's locked architecture decisions and agent working agreement (`AGENTS.md`, `docs/GOMBIT_BUILD_PLAN.md` §1–§3 and §5) are part of the contract in step 1.
+This repository's locked architecture decisions and agent working agreement (`AGENTS.md`, which carries forward the historical `docs/GOMBIT_BUILD_PLAN.md` §1–§3 and §5, plus the ADRs in `docs/adr/`, which supersede it where they differ) are part of the contract in step 1.
 
 When identifying the contract, also extract:
 
-* the linked issue's acceptance criteria (`[ID] ...` in `docs/GOMBIT_BUILD_PLAN.md` §4)
+* the linked issue's acceptance criteria (the `[ID] ...` GitHub issue, or its epic)
 * locked decisions the diff must not reopen (Huma-typed handlers, feature-packages, Atlas GORM provider, JWT-in-memory as API default, D10 envelope, AST-only Go generators, Cobra CLI, ADR-013 runtime admin)
 * generator / frontend / persistence / auth claims in [checklist.md](checklist.md)
 
@@ -722,7 +722,7 @@ The FINAL STANDARD above still governs. For this repository, APPROVE also requir
 4. Generator safety (`go/ast`, idempotent, `--dry-run` / `--force`, no silent overwrite).
 5. No secrets in generated frontend; `VITE_*` is public; Appendix C prod checks still fail loudly.
 6. API changes regenerate OpenAPI + TS client in the same PR.
-7. Scope stays in-milestone; no M6 batteries (jobs, events, scheduler, mail, storage, gRPC, multi-tenancy, i18n).
+7. Scope stays in-milestone; no unplanned batteries (events, scheduler, mail, storage, gRPC, multi-tenancy, i18n).
 8. PR links its issue and lists satisfied AC.
 
 If the change is docs-only or pre-code, apply the subset that still makes sense (scope, decisions, AC, no invented APIs).

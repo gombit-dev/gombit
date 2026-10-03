@@ -5,9 +5,9 @@ import (
 	"log"
 	"net/http"
 
+	"github.com/danielgtaylor/huma/v2"
 	"github.com/gombit-dev/gombit/contract"
 	"github.com/gombit-dev/gombit/framework"
-	"github.com/danielgtaylor/huma/v2"
 )
 
 // Widget is a sample typed resource for the contract example.

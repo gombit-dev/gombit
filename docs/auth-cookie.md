@@ -92,10 +92,11 @@ in both the `Set-Cookie` header and the JSON body (`{"data": {"csrf_token":
 A **webhook** or other server-to-server `POST` cannot participate in the
 double-submit defense — the caller has no `gombit_csrf` cookie to echo — so in
 cookie mode it would always 403. It also usually verifies a **signature over
-the raw request body** (e.g. GitHub's `X-Hub-Signature-256` HMAC), and the XSS
-input sanitizer re-encodes JSON bodies, which would break that check. Use
-`framework.WithRawBodyPaths` for these endpoints — it exempts them from **both**
-CSRF and body sanitization:
+the raw request body** (e.g. GitHub's `X-Hub-Signature-256` HMAC). When input
+sanitization is enabled (`GOMBIT_SECURITY_SANITIZE_INPUT=true`; it is off by
+default), the XSS input sanitizer re-encodes JSON bodies, which would break that
+check. Use `framework.WithRawBodyPaths` for these endpoints — it exempts them
+from CSRF and, when sanitization is on, from body sanitization:
 
 ```go
 app, err := framework.New(

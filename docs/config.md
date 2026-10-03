@@ -57,6 +57,19 @@ recognizes:
 | `GOMBIT_JOBS_DRIVER` | `Config.Jobs.Driver` | `sync` |
 | `GOMBIT_JOBS_QUEUE` | `Config.Jobs.Queue` | `default` |
 | `GOMBIT_JOBS_NAMESPACE` | `Config.Jobs.Namespace` | derived from app/environment |
+| `GOMBIT_STORAGE_DRIVER` | `Config.Storage.Driver` | `local` |
+| `GOMBIT_STORAGE_LOCAL_ROOT` | `Config.Storage.Local.Root` | `storage` |
+| `GOMBIT_STORAGE_S3_BUCKET` | `Config.Storage.S3.Bucket` | empty (required with `s3`) |
+| `GOMBIT_STORAGE_S3_REGION` | `Config.Storage.S3.Region` | `us-east-1` |
+| `GOMBIT_STORAGE_S3_ENDPOINT` | `Config.Storage.S3.Endpoint` | empty (AWS) |
+| `GOMBIT_STORAGE_S3_PREFIX` | `Config.Storage.S3.Prefix` | empty |
+| `GOMBIT_STORAGE_S3_ACCESS_KEY_ID` | `Config.Storage.S3.AccessKeyID` | empty (default credential chain) |
+| `GOMBIT_STORAGE_S3_SECRET_ACCESS_KEY` | `Config.Storage.S3.SecretAccessKey` | empty; redacted |
+| `GOMBIT_STORAGE_S3_FORCE_PATH_STYLE` | `Config.Storage.S3.ForcePathStyle` | `false` |
+| `GOMBIT_STORAGE_S3_PUBLIC_URL` | `Config.Storage.S3.PublicURL` | empty (public objects have no URL) |
+| `GOMBIT_STORAGE_PUBLIC_PREFIX` | `Config.Storage.PublicPrefix` | `public/` (empty: none public) |
+| `GOMBIT_STORAGE_LOCAL_URL` | `Config.Storage.Local.URL` | `/_storage` (empty: no URLs) |
+| `GOMBIT_STORAGE_URL_SECRET` | `Config.Storage.URLSecret` | empty (derived from `GOMBIT_JWT_SECRET`); redacted |
 | `GOMBIT_REDIS_ADDR` | `Config.Cache.Redis.Addr` | `127.0.0.1:6379` |
 | `GOMBIT_REDIS_USERNAME` | `Config.Cache.Redis.Username` | empty |
 | `GOMBIT_REDIS_PASSWORD` | `Config.Cache.Redis.Password` | empty |
@@ -92,6 +105,10 @@ regenerating. See [frontend.md](frontend.md#talking-to-the-api).
 `GOMBIT_JOBS_DRIVER` accepts `sync`, `memory`, and `redis`; the `redis` driver
 connects with the shared `GOMBIT_REDIS_*` settings, which are then validated
 even when the cache does not use Redis. See [jobs.md](jobs.md#drivers).
+`GOMBIT_STORAGE_DRIVER` accepts `local`, `memory`, and `s3` (which needs a
+bucket; set both S3 keys or neither). The local driver keeps
+files under `GOMBIT_STORAGE_LOCAL_ROOT` (relative to the working directory),
+which is created on the first write. See [storage.md](storage.md#drivers).
 When `GOMBIT_CACHE_NAMESPACE` is unset, the namespace is derived from the
 normalized app name and environment, such as `gombit:development`.
 `GOMBIT_HTTP_TRUSTED_PROXIES` is a comma-separated list of IPs or CIDRs passed
@@ -141,9 +158,14 @@ shorter than 32 characters, for the generated-app development placeholder,
 and for cookie-mode auth (`GOMBIT_AUTH_MODE=cookie`) without
 `GOMBIT_COOKIE_SECURE=true` (`config.Load` / `Validate` and `gombit
 doctor`). The secret is never copied into `FieldError.Value` and is
-redacted by `Config.Redacted()`. Remaining Appendix C cases (CORS) land
-with the features that introduce those fields. Do not put JWT material in
-`VITE_*`.
+redacted by `Config.Redacted()`. Production config also rejects
+`GOMBIT_REDIS_TLS_INSECURE=true` whenever Redis is in use (the `redis` cache or
+jobs driver) and trusted proxies that trust everything (above). In every
+environment, validation rejects a negative `GOMBIT_HTTP_REQUEST_TIMEOUT`,
+negative `GOMBIT_DATABASE_MAX_OPEN_CONNS` / `MAX_IDLE_CONNS` /
+`CONN_MAX_LIFETIME`, a max-idle count above a non-zero max-open count, and,
+when Redis is in use, a non-positive Redis timeout. Remaining Appendix C cases (CORS) land with the
+features that introduce those fields. Do not put JWT material in `VITE_*`.
 See [auth.md](auth.md) (Bearer default) and
 [auth-cookie.md](auth-cookie.md) (`--auth cookie`, threat model).
 
