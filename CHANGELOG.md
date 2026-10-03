@@ -184,8 +184,10 @@ version.
     - `storage.Publisher` (S3: a multipart upload with server-side part
       copies, completed with the ETags S3 returned for them, its token
       bounded by construction, a failure returning a cleanup-only token;
-      fenced by aborting, which proves the copy is never published, and
-      re-aborting while parts are listed) with `storage.PreparePublish` /
+      fenced by aborting, which proves the copy is never published and
+      needs only `s3:AbortMultipartUpload`, then, best effort, re-aborting
+      while parts are listed; `s3.Config.Warn` reports what it could not
+      free) with `storage.PreparePublish` /
       `Publish` / `Fence`, with a conformance check;
     - only an ownable store takes part: a `storage.Publisher` or a
       `storage.BoundedWriter` (local, memory: writes end with their
