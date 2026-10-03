@@ -95,6 +95,19 @@ var (
 	ErrKeyTooLong = errors.New("claims: the key is too long")
 )
 
+// KeyError is a transition refused for one key: errors.Is matches its Err
+// (ErrNotPending, ErrNotHeld), and errors.As finds which key it was, among
+// the several a record's change can hold or release.
+type KeyError struct {
+	Key string
+	Err error
+}
+
+func (e *KeyError) Error() string { return fmt.Sprintf("%v: %q", e.Err, e.Key) }
+
+// Unwrap returns Err.
+func (e *KeyError) Unwrap() error { return e.Err }
+
 // Claims runs the protocol over db (the table) and store (the objects).
 type Claims struct {
 	db    *gorm.DB
@@ -165,7 +178,7 @@ func transition(ctx context.Context, db *gorm.DB, key, from, to string, notFrom 
 		return fmt.Errorf("claims: %s %q: %w", to, key, res.Error)
 	}
 	if res.RowsAffected != 1 {
-		return fmt.Errorf("%w: %q", notFrom, key)
+		return &KeyError{Key: key, Err: notFrom}
 	}
 	return nil
 }
