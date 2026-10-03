@@ -9,18 +9,24 @@
 // protocol has a row in storage_claims, keyed by its storage key, in one of
 // three states:
 //
-//	pending   stored (or about to be) and referenced by no record yet
-//	held      referenced by a record: never deleted
-//	deleting  being deleted: no record may take it
+//	pending    stored (or about to be) and referenced by no record yet
+//	promoting  a staged upload being copied to its key by the application
+//	held       referenced by a record: never deleted
+//	deleting   being deleted: no record may take it
 //
 // The transitions are conditional updates, so each is atomic against the
 // others, across processes:
 //
-//	Pending         (none)  -> pending   when an upload's key is generated
-//	Hold     (tx)   pending -> held      in the transaction writing the record
-//	Release  (tx)   held    -> deleting  in the transaction deleting the record
-//	Abandon         pending -> deleting  then the object is deleted
-//	Sweep           pending -> deleting  for stale pending claims, likewise
+//	Pending          (none)    -> pending    an upload the application stores itself
+//	Stage            (none)    -> pending    a direct upload (staged, see below)
+//	Promote          pending   -> promoting  a staged upload, confirmed
+//	Unpromote        promoting -> pending    its staged file was refused
+//	Hold      (tx)   pending   -> held       in the transaction writing the record
+//	                 promoting -> held       (pending only when not staged)
+//	Release   (tx)   held      -> deleting   in the transaction deleting the record
+//	Abandon          pending   -> deleting   then the object is deleted
+//	                 promoting -> deleting
+//	Sweep                                    abandons stale claims, likewise
 //
 // Only a deleting claim's object is ever deleted, and a key reaches
 // deleting only from pending (no record holds it) or through Release (the
@@ -32,13 +38,23 @@
 //
 // The other writer is the upload itself: a claim comes before its object,
 // and an upload still streaming can publish the object after the claim was
-// abandoned. So every claim has a lease (Pending's until): the time after
-// which no writer publishes under its key any more. The upload helpers
-// enforce it (storage/upload aborts its Put at the lease; the app's
-// /_storage route aborts a signed PUT at storage.SignedUploadTimeout after
-// its URL expired). A deleting claim stays as a tombstone until its lease
-// (plus LeaseMargin) has passed: each Sweep deletes its object again, so an
-// object published late is still deleted, and only then is the row removed.
+// abandoned. So every claim has a lease: the time after which no writer
+// the application controls publishes under its key any more (storage/
+// upload aborts its Put then). A deleting claim stays as a tombstone until
+// its lease (plus LeaseMargin) has passed: each Sweep deletes its object
+// again, so an object published late is still deleted, and only then is
+// the row removed.
+//
+// A direct upload is a writer the application does not control: S3 checks
+// a presigned PUT's expiry when the request starts, and a PUT started in
+// time can publish whenever it ends. So a direct upload never writes a
+// claimed key. Its claim is staged: the client uploads to the staging key
+// (upload.StagingKey: "_staging/" + key), and only the application writes
+// the claimed key, by copying the staged object once it is confirmed
+// (Promote, then upload.Confirm's copy, under the promotion's lease). A
+// late PUT can only ever publish a staging object, which nothing refers to:
+// a deleting staged claim deletes it too, and SweepStaging (or a bucket
+// lifecycle rule on "_staging/") deletes those that outlive their claims.
 //
 // Use CreateWith to write a record that refers to new uploads, Update to
 // change which files a record refers to, DeleteWith to delete a record, and
@@ -52,12 +68,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
 	"github.com/gombit-dev/gombit/storage"
+	"github.com/gombit-dev/gombit/storage/upload"
 )
 
 // Claim is a row of storage_claims: the ownership state of one stored
@@ -71,11 +89,15 @@ type Claim struct {
 	// CreatedAt is when the key was claimed; Sweep abandons a pending claim
 	// once it is older than the sweep's grace period.
 	CreatedAt time.Time `gorm:"index:idx_storage_claims_sweep,priority:2"`
-	// LeaseUntil is when the lease ends: no writer publishes an object
-	// under the key after it, so a deleting claim is kept (a tombstone)
-	// until then.
+	// LeaseUntil is when the lease ends: no writer the application
+	// controls publishes an object under the key (or, staged, under its
+	// staging key through the app's own route) after it, so a deleting
+	// claim is kept (a tombstone) until then.
 	LeaseUntil time.Time
-	UpdatedAt  time.Time
+	// Staged is a direct upload's claim: the client uploads to the staging
+	// key, and the key is written only by promotion.
+	Staged    bool `gorm:"not null;default:false"`
+	UpdatedAt time.Time
 }
 
 // LeaseMargin is how long after a claim's lease its tombstone is kept: for
@@ -97,16 +119,18 @@ func Models() []any { return []any{&Claim{}} }
 
 // The states of a claim.
 const (
-	Pending  = "pending"
-	Held     = "held"
-	Deleting = "deleting"
+	Pending   = "pending"
+	Promoting = "promoting"
+	Held      = "held"
+	Deleting  = "deleting"
 )
 
 var (
 	// ErrClaimed: the key already has a claim (Pending).
 	ErrClaimed = errors.New("claims: the key is already claimed")
-	// ErrNotPending: the key's claim is not pending (Hold): it is already
-	// held by a record, being deleted, or was never claimed.
+	// ErrNotPending: the key's claim cannot be held (Hold): it is already
+	// held by a record, being deleted, staged and not promoted, or was
+	// never claimed.
 	ErrNotPending = errors.New("claims: the key is not pending")
 	// ErrNotHeld: the key's claim is not held (Release).
 	ErrNotHeld = errors.New("claims: the key is not held")
@@ -153,16 +177,29 @@ func New(db *gorm.DB, store storage.Storage, opts ...Option) *Claims {
 	return c
 }
 
-// Pending claims key for an upload about to store an object under it, which
-// no record refers to yet. until is the lease: the writer will not publish
-// the object after it (storage/upload enforces that). A key that already
-// has a claim fails with ErrClaimed, and one longer than MaxKeyLen with
-// ErrKeyTooLong. Uploads call it through upload.Policy.Claims.
+// Pending claims key for an upload the application stores itself
+// (upload.Save, Receive), which no record refers to yet. until is the
+// lease: the application will not publish the object after it. A key that
+// already has a claim fails with ErrClaimed, and one longer than MaxKeyLen
+// with ErrKeyTooLong.
 func (c *Claims) Pending(ctx context.Context, key string, until time.Time) error {
+	return c.insert(ctx, key, until, false)
+}
+
+// Stage claims key for a direct upload (upload.Authorize): the client
+// uploads to the staging key, never to key, which only promotion writes.
+// until is the lease of the staging key's writes through the app's own
+// route; a PUT straight to S3 may end later, but can only ever publish a
+// staging object. Errors as for Pending.
+func (c *Claims) Stage(ctx context.Context, key string, until time.Time) error {
+	return c.insert(ctx, key, until, true)
+}
+
+func (c *Claims) insert(ctx context.Context, key string, until time.Time, staged bool) error {
 	if len(key) > MaxKeyLen {
 		return fmt.Errorf("%w: %d bytes, more than %d", ErrKeyTooLong, len(key), MaxKeyLen)
 	}
-	res := c.db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&Claim{Key: key, State: Pending, LeaseUntil: until})
+	res := c.db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&Claim{Key: key, State: Pending, LeaseUntil: until, Staged: staged})
 	if res.Error != nil {
 		return fmt.Errorf("claims: pending %q: %w", key, res.Error)
 	}
@@ -172,12 +209,41 @@ func (c *Claims) Pending(ctx context.Context, key string, until time.Time) error
 	return nil
 }
 
-// Hold moves key from pending to held, in tx, the transaction that writes
-// the record referring to key: the record and the hold commit together, or
-// neither does. A key that is not pending (already held, being deleted, or
-// never claimed) fails with ErrNotPending, and tx should roll back.
+// Promote moves a staged pending key to promoting: its upload is being
+// confirmed, and the application may now copy the staged object to key,
+// until until (the lease is extended to it). It reports false (and changes
+// nothing) for any other key: one not staged, already promoting (another
+// confirmation), held, deleting, or never claimed. Only one Promote of a
+// key succeeds, so exactly one copy is ever made to it; a sweep does not
+// abandon a promoting claim before its lease has ended.
+func (c *Claims) Promote(ctx context.Context, key string, until time.Time) (bool, error) {
+	res := c.db.WithContext(ctx).Model(&Claim{}).
+		Where("object_key = ? AND state = ? AND staged = ?", key, Pending, true).
+		Updates(map[string]any{
+			"state":       Promoting,
+			"lease_until": gorm.Expr("CASE WHEN lease_until < ? THEN ? ELSE lease_until END", until, until),
+			"updated_at":  time.Now(),
+		})
+	if res.Error != nil {
+		return false, fmt.Errorf("claims: promote %q: %w", key, res.Error)
+	}
+	return res.RowsAffected == 1, nil
+}
+
+// Unpromote moves a promoting key back to pending: its staged object was
+// refused before anything was copied to key, and the grant may upload
+// again. A key that is not promoting is left alone.
+func (c *Claims) Unpromote(ctx context.Context, key string) error {
+	return ignoreNotFrom(transition(ctx, c.db, key, []string{Promoting}, Pending, ErrNotPending, false))
+}
+
+// Hold moves key to held, in tx, the transaction that writes the record
+// referring to key: the record and the hold commit together, or neither
+// does. The key must be pending (and not staged: a direct upload is held
+// once promoted) or promoting; any other fails with ErrNotPending, and tx
+// should roll back.
 func (c *Claims) Hold(ctx context.Context, tx *gorm.DB, key string) error {
-	return transition(ctx, tx, key, Pending, Held, ErrNotPending)
+	return transition(ctx, tx, key, []string{Pending, Promoting}, Held, ErrNotPending, true)
 }
 
 // Release moves key from held to deleting, in tx, the transaction that
@@ -185,15 +251,18 @@ func (c *Claims) Hold(ctx context.Context, tx *gorm.DB, key string) error {
 // with Finish (DeleteWith does both). A key that is not held fails with
 // ErrNotHeld.
 func (c *Claims) Release(ctx context.Context, tx *gorm.DB, key string) error {
-	return transition(ctx, tx, key, Held, Deleting, ErrNotHeld)
+	return transition(ctx, tx, key, []string{Held}, Deleting, ErrNotHeld, false)
 }
 
-// transition moves key from one state to another, if it is in from: one
-// conditional update, atomic against every other transition of key.
-func transition(ctx context.Context, db *gorm.DB, key, from, to string, notFrom error) error {
-	res := db.WithContext(ctx).Model(&Claim{}).
-		Where("object_key = ? AND state = ?", key, from).
-		Updates(map[string]any{"state": to, "updated_at": time.Now()})
+// transition moves key to state to, if it is in one of from (and, with
+// unstaged, not a staged pending claim): one conditional update, atomic
+// against every other transition of key.
+func transition(ctx context.Context, db *gorm.DB, key string, from []string, to string, notFrom error, unstaged bool) error {
+	q := db.WithContext(ctx).Model(&Claim{}).Where("object_key = ? AND state IN ?", key, from)
+	if unstaged {
+		q = q.Where("NOT (state = ? AND staged = ?)", Pending, true)
+	}
+	res := q.Updates(map[string]any{"state": to, "updated_at": time.Now()})
 	if res.Error != nil {
 		return fmt.Errorf("claims: %s %q: %w", to, key, res.Error)
 	}
@@ -201,6 +270,16 @@ func transition(ctx context.Context, db *gorm.DB, key, from, to string, notFrom 
 		return &KeyError{Key: key, Err: notFrom}
 	}
 	return nil
+}
+
+// ignoreNotFrom is err, except a transition whose key was not in its
+// from state.
+func ignoreNotFrom(err error) error {
+	var ke *KeyError
+	if errors.As(err, &ke) {
+		return nil
+	}
+	return err
 }
 
 // CreateWith writes a record that refers to keys, new uploads' pending
@@ -326,12 +405,12 @@ func changed(hold, release []string) ([]string, []string) {
 	return pick(hold, inRelease), pick(release, inHold)
 }
 
-// Abandon deletes the object of key if its claim is pending (no record took
-// it): pending moves to deleting, then the object is deleted (Finish). It
-// reports whether it did; a key held by a record, or with no claim, is
-// left alone (false, nil).
+// Abandon deletes the object of key if its claim is pending or promoting
+// (no record took it): it moves to deleting, then the object is deleted
+// (Finish). It reports whether it did; a key held by a record, or with no
+// claim, is left alone (false, nil).
 func (c *Claims) Abandon(ctx context.Context, key string) (bool, error) {
-	if err := transition(ctx, c.db, key, Pending, Deleting, ErrNotPending); err != nil {
+	if err := transition(ctx, c.db, key, []string{Pending, Promoting}, Deleting, ErrNotPending, false); err != nil {
 		if errors.Is(err, ErrNotPending) {
 			return false, nil
 		}
@@ -360,6 +439,11 @@ func (c *Claims) Finish(ctx context.Context, key string) (bool, error) {
 	ended := !time.Now().Before(claim.LeaseUntil.Add(LeaseMargin))
 	if err := c.store.Delete(ctx, key); err != nil {
 		return false, fmt.Errorf("claims: delete the object of %q: %w", key, err)
+	}
+	if claim.Staged {
+		if err := c.store.Delete(ctx, upload.StagingKey(key)); err != nil {
+			return false, fmt.Errorf("claims: delete the staged object of %q: %w", key, err)
+		}
 	}
 	if !ended {
 		return false, nil
@@ -391,8 +475,11 @@ func (c *Claims) Sweep(ctx context.Context, grace time.Duration) (SweepResult, e
 	var res SweepResult
 	var errs []error
 	cutoff := time.Now().Add(-grace)
+	now := time.Now()
 	err := c.eachKey(ctx, func(db *gorm.DB) *gorm.DB {
-		return db.Where("state = ? AND created_at < ?", Pending, cutoff)
+		// A promoting claim only once its lease has ended: the copy
+		// cannot be running any more.
+		return db.Where("(state = ? AND created_at < ?) OR (state = ? AND lease_until < ?)", Pending, cutoff, Promoting, now)
 	}, func(key string) {
 		deleted, err := c.Abandon(ctx, key)
 		switch {
@@ -423,6 +510,43 @@ func (c *Claims) Sweep(ctx context.Context, grace time.Duration) (SweepResult, e
 		errs = append(errs, fmt.Errorf("claims: sweep: %w", err))
 	}
 	return res, errors.Join(errs...)
+}
+
+// SweepStaging deletes staging objects (under upload.StagingPrefix) that no
+// claim needs any more: their key's claim is gone (abandoned, or a late PUT
+// after its tombstone) or held (promoted; the staged copy is left over).
+// A staging object whose claim is pending, promoting or deleting is left
+// to the protocol. It lists the store (storage.Lister), so run it where
+// clients upload straight to the backend (S3), whose PUTs the application
+// cannot end; with the local and memory drivers, the app's own route ends
+// them within the lease, and Sweep's tombstones suffice. A bucket
+// lifecycle rule expiring "_staging/" after a day or so is a fine backstop
+// on S3, but not a substitute: it is coarse and asynchronous.
+func (c *Claims) SweepStaging(ctx context.Context) (deleted int, err error) {
+	var errs []error
+	err = storage.List(ctx, c.store, upload.StagingPrefix, func(o storage.ObjectInfo) error {
+		key := strings.TrimPrefix(o.Key, upload.StagingPrefix)
+		var claim Claim
+		err := c.db.WithContext(ctx).Where("object_key = ?", key).Take(&claim).Error
+		switch {
+		case errors.Is(err, gorm.ErrRecordNotFound), err == nil && claim.State == Held:
+		case err != nil:
+			errs = append(errs, fmt.Errorf("claims: sweep staging %q: %w", o.Key, err))
+			return nil
+		default:
+			return nil
+		}
+		if err := c.store.Delete(ctx, o.Key); err != nil {
+			errs = append(errs, fmt.Errorf("claims: sweep staging %q: %w", o.Key, err))
+			return nil
+		}
+		deleted++
+		return nil
+	})
+	if err != nil {
+		errs = append(errs, fmt.Errorf("claims: sweep staging: %w", err))
+	}
+	return deleted, errors.Join(errs...)
 }
 
 // sweepBatch is how many keys Sweep reads at a time (a variable for the

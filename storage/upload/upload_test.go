@@ -922,20 +922,23 @@ func TestDetectorCannotChangeTheFile(t *testing.T) {
 	}
 }
 
-// fakeClaims is a Claimer over store: Abandon deletes a key's object only
-// while the key is pending, as storage/claims does.
+// fakeClaims is a Claimer over store, as storage/claims behaves: Abandon
+// deletes a key's object (and a staged key's staging object) only while
+// the key is pending or promoting; any other key counts as held.
 type fakeClaims struct {
 	store      storage.Storage
 	pendingErr error
 	before     func(key string) // called by Pending first
 	pending    map[string]bool
+	staged     map[string]bool
+	promoting  map[string]bool
 	claimed    []string
 	leases     []time.Time
 	abandoned  []string
 }
 
 func newFakeClaims(store storage.Storage) *fakeClaims {
-	return &fakeClaims{store: store, pending: map[string]bool{}}
+	return &fakeClaims{store: store, pending: map[string]bool{}, staged: map[string]bool{}, promoting: map[string]bool{}}
 }
 
 func (c *fakeClaims) Pending(_ context.Context, key string, until time.Time) error {
@@ -951,12 +954,44 @@ func (c *fakeClaims) Pending(_ context.Context, key string, until time.Time) err
 	return nil
 }
 
-func (c *fakeClaims) Abandon(ctx context.Context, key string) (bool, error) {
-	c.abandoned = append(c.abandoned, key)
-	if !c.pending[key] {
+func (c *fakeClaims) Stage(ctx context.Context, key string, until time.Time) error {
+	if err := c.Pending(ctx, key, until); err != nil {
+		return err
+	}
+	c.staged[key] = true
+	return nil
+}
+
+func (c *fakeClaims) Promote(_ context.Context, key string, until time.Time) (bool, error) {
+	if !c.pending[key] || !c.staged[key] {
 		return false, nil
 	}
 	delete(c.pending, key)
+	c.promoting[key] = true
+	c.leases = append(c.leases, until)
+	return true, nil
+}
+
+func (c *fakeClaims) Unpromote(_ context.Context, key string) error {
+	if c.promoting[key] {
+		delete(c.promoting, key)
+		c.pending[key] = true
+	}
+	return nil
+}
+
+func (c *fakeClaims) Abandon(ctx context.Context, key string) (bool, error) {
+	c.abandoned = append(c.abandoned, key)
+	if !c.pending[key] && !c.promoting[key] {
+		return false, nil
+	}
+	delete(c.pending, key)
+	delete(c.promoting, key)
+	if c.staged[key] {
+		if err := c.store.Delete(ctx, upload.StagingKey(key)); err != nil {
+			return true, err
+		}
+	}
 	return true, c.store.Delete(ctx, key)
 }
 

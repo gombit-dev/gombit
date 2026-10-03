@@ -47,7 +47,10 @@ type fakeS3 struct {
 	lateParts        int    // parts stored after their upload was aborted
 	requestsSeen     int    // every request
 	abortedUploadIDs []string
-	puts, completes  int // PutObject and CompleteMultipartUpload requests seen
+	puts, completes  int  // PutObject and CompleteMultipartUpload requests seen
+	dropCopy         bool // apply a CopyObject, then drop the connection
+	refuseCopy       int  // answer a CopyObject with this status, applying nothing
+	copies           int  // CopyObject requests seen
 }
 
 func newFakeS3() *fakeS3 {
@@ -93,6 +96,20 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("ETag", `"part"`)
+	case r.Method == http.MethodPut && r.Header.Get("X-Amz-Copy-Source") != "": // CopyObject
+		f.copies++
+		if f.refuseCopy != 0 {
+			s3Error(w, f.refuseCopy, "AccessDenied")
+			return
+		}
+		src := r.Header.Get("X-Amz-Copy-Source")
+		_, srcKey, _ := strings.Cut(strings.TrimPrefix(src, "/"), "/")
+		f.objects[key] = f.objects[srcKey]
+		if f.dropCopy {
+			drop(w)
+			return
+		}
+		_, _ = io.WriteString(w, `<CopyObjectResult><ETag>"copied"</ETag></CopyObjectResult>`)
 	case r.Method == http.MethodPut: // PutObject
 		f.puts++
 		if f.refusePut != 0 {
@@ -513,5 +530,41 @@ func TestConditionalRefusalKeepsTheAbortError(t *testing.T) {
 				t.Fatalf("Put = %v; want %v and an *AbortError for upload-1", err, tc.want)
 			}
 		})
+	}
+}
+
+// TestLostCopyAnswerIsUnknownOutcome: a CopyObject that S3 applied but
+// never answered is ErrUnknownOutcome, never a failure that left the key
+// as it was, and it is sent once (a retry would hide the first attempt).
+func TestLostCopyAnswerIsUnknownOutcome(t *testing.T) {
+	f := newFakeS3()
+	s := fakeStore(t, f)
+	if _, err := s.Put(context.Background(), "src", strings.NewReader("bytes"), storage.PutOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	f.dropCopy = true
+	_, err := s.Copy(context.Background(), "src", "dst")
+	if !errors.Is(err, storage.ErrUnknownOutcome) {
+		t.Fatalf("Copy whose answer was lost = %v, want ErrUnknownOutcome", err)
+	}
+	if !f.has("dst") || f.copies != 1 {
+		t.Fatalf("copied = %v after %d CopyObject requests; want it applied, once", f.has("dst"), f.copies)
+	}
+}
+
+// TestRefusedCopyIsDefinite: a CopyObject S3 refused left the key as it
+// was: a definite failure.
+func TestRefusedCopyIsDefinite(t *testing.T) {
+	f := newFakeS3()
+	s := fakeStore(t, f)
+	if _, err := s.Put(context.Background(), "src", strings.NewReader("bytes"), storage.PutOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	f.refuseCopy = http.StatusForbidden
+	if _, err := s.Copy(context.Background(), "src", "dst"); err == nil || errors.Is(err, storage.ErrUnknownOutcome) {
+		t.Fatalf("Copy refused with 403 = %v, want a definite failure", err)
+	}
+	if _, err := s.Copy(context.Background(), "missing", "dst"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("Copy of a missing source = %v, want ErrNotFound", err)
 	}
 }

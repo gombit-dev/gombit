@@ -405,6 +405,91 @@ func TestDirectUploads(t *testing.T) {
 	}
 }
 
+// stagingClaims is a minimal upload.Claimer: every key staged, promoted
+// once, held after.
+type stagingClaims struct{ staged, promoted map[string]bool }
+
+func (c *stagingClaims) Pending(context.Context, string, time.Time) error { return nil }
+func (c *stagingClaims) Stage(_ context.Context, key string, _ time.Time) error {
+	c.staged[key] = true
+	return nil
+}
+func (c *stagingClaims) Promote(_ context.Context, key string, _ time.Time) (bool, error) {
+	if !c.staged[key] || c.promoted[key] {
+		return false, nil
+	}
+	c.promoted[key] = true
+	return true, nil
+}
+func (c *stagingClaims) Unpromote(_ context.Context, key string) error {
+	delete(c.promoted, key)
+	return nil
+}
+func (c *stagingClaims) Abandon(context.Context, string) (bool, error) { return false, nil }
+
+// TestStagedDirectUploads: under Policy.Claims, the presigned PUT goes to
+// the staging key; Confirm promotes it with CopyObject (the bytes, type and
+// metadata), and deletes the staged copy. Replaying the grant afterwards,
+// as a late PUT would land, only ever writes the staging key again.
+func TestStagedDirectUploads(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	png := append([]byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"), make([]byte, 100)...)
+	policy := upload.Policy{MaxBytes: 1 << 20, Types: []string{"image/png"}, Prefix: "avatars/", Claims: &stagingClaims{staged: map[string]bool{}, promoted: map[string]bool{}}}
+	g, err := upload.Authorize(ctx, s, policy, int64(len(png)), "image/png", "résumé.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	put := func(body []byte) int {
+		r, _ := http.NewRequest(g.Request.Method, g.Request.URL, bytes.NewReader(body))
+		for k, v := range g.Request.Header {
+			r.Header.Set(k, v)
+		}
+		resp, err := http.DefaultClient.Do(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		return resp.StatusCode
+	}
+	exists := func(key string) bool {
+		ok, err := storage.Exists(ctx, s, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ok
+	}
+	if code := put(png); code != http.StatusOK {
+		t.Fatalf("the granted upload = %d", code)
+	}
+	if exists(g.Key) || !exists(upload.StagingKey(g.Key)) {
+		t.Fatal("the grant did not upload to the staging key only")
+	}
+	f, err := upload.Confirm(ctx, s, g.Key, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := s.Stat(ctx, g.Key)
+	if err != nil || f.Key != g.Key || info.Size != int64(len(png)) || info.ContentType != "image/png" || info.StoredFilename() != "résumé.png" {
+		t.Fatalf("promoted %+v (%+v, %v)", f, info, err)
+	}
+	if exists(upload.StagingKey(g.Key)) {
+		t.Fatal("the staged copy was left")
+	}
+	if code := put(bytes.Repeat([]byte("<"), len(png))); code != http.StatusOK {
+		t.Fatalf("replaying the grant = %d", code)
+	}
+	body, _, err := s.Open(ctx, g.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := io.ReadAll(body)
+	_ = body.Close()
+	if !bytes.Equal(got, png) {
+		t.Fatal("a PUT with the grant changed the claimed key")
+	}
+}
+
 // TestListSkipsForeignKeys: an object under the store's prefix that is not
 // a valid storage key (written by another tool) is not listed, since no
 // method could act on it.

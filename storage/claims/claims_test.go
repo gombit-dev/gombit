@@ -63,6 +63,9 @@ func runSuite(t *testing.T, db *gorm.DB) {
 		"Update":                    testUpdate,
 		"Lease":                     testLease,
 		"UploadOutlivesItsClaim":    testUploadOutlivesItsClaim,
+		"Staged":                    testStaged,
+		"LatePutOnlyStages":         testLatePutOnlyStages,
+		"PromotionIsNotSwept":       testPromotionIsNotSwept,
 		"ConfirmRacesSweep":         testConfirmRacesSweep,
 		"SweepFirstWins":            testSweepFirstWins,
 		"ConfirmationInFlightWins":  testConfirmationInFlightWins,
@@ -612,5 +615,140 @@ func testUploadOutlivesItsClaim(t *testing.T, db *gorm.DB) {
 	expire(t, db, key)
 	if _, err := c.Sweep(ctx, 0); err != nil || state(t, db, key) != "none" {
 		t.Fatalf("the sweep after the lease = %v, claim %s", err, state(t, db, key))
+	}
+}
+
+// stage claims key for a direct upload and stores its staged object, as
+// upload.Authorize and the client's PUT do.
+func stage(t *testing.T, c *claims.Claims, store storage.Storage, key string, until time.Time) {
+	t.Helper()
+	ctx := context.Background()
+	if err := c.Stage(ctx, key, until); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Put(ctx, upload.StagingKey(key), strings.NewReader("staged "+key), storage.PutOptions{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// testStaged: a staged claim cannot be held before it is promoted (its key
+// was never written by the application); Promote succeeds once; a promoted
+// claim is held; Unpromote puts a promoting claim back; abandoning a staged
+// claim deletes its staging object too.
+func testStaged(t *testing.T, db *gorm.DB) {
+	store := memory.New()
+	c := claims.New(db, store)
+	ctx := context.Background()
+	stage(t, c, store, "u/s", ended)
+	hold := func(key string) error {
+		return db.Transaction(func(tx *gorm.DB) error { return c.Hold(ctx, tx, key) })
+	}
+	if err := hold("u/s"); !errors.Is(err, claims.ErrNotPending) {
+		t.Fatalf("Hold of a staged, unpromoted key = %v, want ErrNotPending", err)
+	}
+	if ok, err := c.Promote(ctx, "u/s", time.Now().Add(time.Hour)); err != nil || !ok {
+		t.Fatalf("Promote = %v, %v", ok, err)
+	}
+	if ok, err := c.Promote(ctx, "u/s", time.Now().Add(time.Hour)); err != nil || ok {
+		t.Fatalf("a second Promote = %v, %v; want false", ok, err)
+	}
+	var claim claims.Claim
+	if err := db.Where("object_key = ?", "u/s").Take(&claim).Error; err != nil || claim.State != claims.Promoting || time.Until(claim.LeaseUntil) < 50*time.Minute {
+		t.Fatalf("promoted claim = %+v, %v; want promoting, the lease extended", claim, err)
+	}
+	if err := c.Unpromote(ctx, "u/s"); err != nil || state(t, db, "u/s") != claims.Pending {
+		t.Fatalf("Unpromote = %v, claim %s", err, state(t, db, "u/s"))
+	}
+	if ok, _ := c.Promote(ctx, "u/s", time.Now()); !ok {
+		t.Fatal("Promote after Unpromote failed")
+	}
+	if err := hold("u/s"); err != nil || state(t, db, "u/s") != claims.Held {
+		t.Fatalf("Hold of a promoted key = %v, claim %s", err, state(t, db, "u/s"))
+	}
+	if ok, _ := c.Promote(ctx, "u/1-not-staged", time.Now()); ok {
+		t.Fatal("Promote of an unclaimed key succeeded")
+	}
+	uploaded(t, c, store, "u/plain")
+	if ok, _ := c.Promote(ctx, "u/plain", time.Now()); ok {
+		t.Fatal("Promote of a key stored by the application (not staged) succeeded")
+	}
+
+	stage(t, c, store, "u/gone", ended)
+	if deleted, err := c.Abandon(ctx, "u/gone"); err != nil || !deleted {
+		t.Fatalf("Abandon = %v, %v", deleted, err)
+	}
+	if exists(t, store, upload.StagingKey("u/gone")) || state(t, db, "u/gone") != "none" {
+		t.Fatal("abandoning a staged claim left its staging object or claim")
+	}
+}
+
+// testLatePutOnlyStages: the S3 schedule. A client starts a presigned PUT
+// just before its grant expires and trickles the body; the sweep abandons
+// the claim, and its tombstone ends; then the PUT completes. It can only
+// publish the staging object: the claimed key is never written, and
+// SweepStaging deletes the leftover. A promoted (held) key's leftover
+// staged copy goes too; staging objects of live claims stay.
+func testLatePutOnlyStages(t *testing.T, db *gorm.DB) {
+	store := memory.New()
+	c := claims.New(db, store)
+	ctx := context.Background()
+	if err := c.Stage(ctx, "u/late", time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := c.Sweep(ctx, 0); err != nil || res.Abandoned != 1 {
+		t.Fatalf("Sweep = %+v, %v", res, err)
+	}
+	expire(t, db, "u/late")
+	if _, err := c.Sweep(ctx, 0); err != nil || state(t, db, "u/late") != "none" {
+		t.Fatalf("the sweep after the lease = %v, claim %s; want the tombstone gone", err, state(t, db, "u/late"))
+	}
+	// The trickled PUT completes now, long after everything.
+	if _, err := store.Put(ctx, upload.StagingKey("u/late"), strings.NewReader("late"), storage.PutOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if exists(t, store, "u/late") {
+		t.Fatal("a direct upload wrote the claimed key")
+	}
+	stage(t, c, store, "u/live", time.Now().Add(time.Hour))
+	stage(t, c, store, "u/held", ended)
+	if ok, _ := c.Promote(ctx, "u/held", time.Now()); !ok {
+		t.Fatal("Promote failed")
+	}
+	if err := c.CreateWith(ctx, []string{"u/held"}, insert("u/held")); err != nil {
+		t.Fatal(err)
+	}
+	n, err := c.SweepStaging(ctx)
+	if err != nil || n != 2 {
+		t.Fatalf("SweepStaging = %d, %v; want the late and the promoted leftovers", n, err)
+	}
+	if exists(t, store, upload.StagingKey("u/late")) || exists(t, store, upload.StagingKey("u/held")) || !exists(t, store, upload.StagingKey("u/live")) {
+		t.Fatal("SweepStaging deleted the wrong staging objects")
+	}
+}
+
+// testPromotionIsNotSwept: a sweep never abandons a promoting claim before
+// its lease ends (the application may be copying to the key); after it,
+// the claim is abandoned like a stale pending one, and its key and staged
+// object are deleted.
+func testPromotionIsNotSwept(t *testing.T, db *gorm.DB) {
+	store := memory.New()
+	c := claims.New(db, store)
+	ctx := context.Background()
+	stage(t, c, store, "u/p", ended)
+	if ok, _ := c.Promote(ctx, "u/p", time.Now().Add(time.Hour)); !ok {
+		t.Fatal("Promote failed")
+	}
+	if _, err := store.Put(ctx, "u/p", strings.NewReader("copied"), storage.PutOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := c.Sweep(ctx, 0); err != nil || res.Abandoned != 0 || state(t, db, "u/p") != claims.Promoting {
+		t.Fatalf("Sweep during the promotion = %+v, %v, claim %s", res, err, state(t, db, "u/p"))
+	}
+	expire(t, db, "u/p")
+	if res, err := c.Sweep(ctx, 0); err != nil || res.Abandoned != 1 {
+		t.Fatalf("Sweep after the promotion's lease = %+v, %v", res, err)
+	}
+	if exists(t, store, "u/p") || exists(t, store, upload.StagingKey("u/p")) {
+		t.Fatal("the abandoned promotion left its key or staged object")
 	}
 }

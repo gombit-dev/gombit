@@ -110,12 +110,14 @@ func TestAccept(t *testing.T) {
 	if err := filefield.Accept(ctx, store, cl, "", p); err != nil {
 		t.Fatalf("no file = %v", err)
 	}
-	claimed := func(key string, body []byte) {
+	// staged is a granted upload (upload.Authorize, then the client's PUT):
+	// a staged claim, the bytes at the staging key.
+	staged := func(key string, body []byte) {
 		t.Helper()
-		if err := cl.Pending(ctx, key, time.Now()); err != nil {
+		if err := cl.Stage(ctx, key, time.Now()); err != nil {
 			t.Fatal(err)
 		}
-		putFile(t, store, key, body, "image/png")
+		putFile(t, store, upload.StagingKey(key), body, "image/png")
 	}
 	create := func(title, key string) error {
 		k := types.Image(key)
@@ -123,9 +125,12 @@ func TestAccept(t *testing.T) {
 			return tx.Create(&document{Title: title, Cover: &k}).Error
 		})
 	}
-	claimed("documents/cover/good", png)
+	staged("documents/cover/good", png)
 	if err := filefield.Accept(ctx, store, cl, "documents/cover/good", p); err != nil {
 		t.Fatalf("a good upload = %v", err)
+	}
+	if ok, _ := storage.Exists(ctx, store, "documents/cover/good"); !ok {
+		t.Fatal("Accept did not promote the staged upload to its key")
 	}
 	if err := create("a", "documents/cover/good"); err != nil {
 		t.Fatal(err)
@@ -142,7 +147,7 @@ func TestAccept(t *testing.T) {
 		t.Fatal("refusing a held file deleted it")
 	}
 	// Nothing uploaded, outside the prefix, or failing the policy.
-	claimed("documents/cover/script", []byte("<html><script>x</script>"))
+	staged("documents/cover/script", []byte("<html><script>x</script>"))
 	for key, want := range map[string]error{
 		"documents/cover/never":  upload.ErrNoFile,
 		"other/cover/stolen":     upload.ErrMalformed,
@@ -152,12 +157,19 @@ func TestAccept(t *testing.T) {
 			t.Errorf("Accept(%q) = %v, want %v", key, err, want)
 		}
 	}
+	if ok, _ := storage.Exists(ctx, store, upload.StagingKey("documents/cover/script")); ok {
+		t.Fatal("a staged file failing the policy was kept")
+	}
 	if ok, _ := storage.Exists(ctx, store, "documents/cover/script"); ok {
-		t.Fatal("a pending file failing the policy was kept")
+		t.Fatal("a refused staged file reached its key")
 	}
 	// A held file that fails the policy (another field's stricter policy
-	// under the same prefix, say) is refused but never deleted.
-	claimed("documents/cover/held", []byte("<html>"))
+	// under the same prefix, say) is refused but never deleted. (Stored by
+	// the application, as Save does: a staged one could not be promoted.)
+	if err := cl.Pending(ctx, "documents/cover/held", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	putFile(t, store, "documents/cover/held", []byte("<html>"), "image/png")
 	if err := create("c", "documents/cover/held"); err != nil {
 		t.Fatal(err)
 	}

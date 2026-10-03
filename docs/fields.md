@@ -133,13 +133,16 @@ per row.
 
 **Ownership.** Files are owned through [`storage/claims`](storage.md#cleanup),
 so the app needs its `storage_claims` table (apps made by `gombit new`
-migrate it). The upload grant claims its key (`pending`); the create holds
+migrate it). The upload grant claims its key as a staged upload: the
+client uploads to `_staging/<key>`, never to the key, and the create's
+check promotes it (copies it to the key) once it passes. The create holds
 the claims of the row's files in the insert's transaction
 (`claims.CreateWith`), so the row and its files commit together, and a
 failed insert deletes the uploads it named. The column's unique index backs
 this up: one record per file. Uploads granted but never attached stay
 `pending` until a periodic `claims.Sweep(ctx, grace)` deletes them; one sweep
-covers every field.
+covers every field. On S3, also run `claims.SweepStaging(ctx)` for staged
+uploads that outlive their claims.
 
 **Who may upload.** Uploading is as open as create. A `BeforeUpload(ctx, field)`
 method on the resource's hooks decides who may have a grant; the seeded
