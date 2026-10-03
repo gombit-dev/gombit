@@ -137,6 +137,11 @@ type Policy struct {
 	// signed URL (DefaultGrantExpiry when zero; whole seconds, at most
 	// storage.MaxURLExpiry).
 	GrantExpiry time.Duration
+	// UploadTimeout bounds how long Save and Receive may take to store a
+	// file under Claims (DefaultUploadTimeout when zero): the Put is
+	// aborted then, before it publishes, so the key's claim can lease it
+	// until a known time (storage/claims). Unused without Claims.
+	UploadTimeout time.Duration
 	// Claims, when set, puts uploads under an ownership protocol
 	// (storage/claims: a *claims.Claims). Each generated key is claimed
 	// (Pending) before anything is stored or granted under it, and a
@@ -150,8 +155,9 @@ type Policy struct {
 // Claimer is the ownership protocol uploads take part in; *claims.Claims
 // implements it.
 type Claimer interface {
-	// Pending claims key, which nothing has been stored under yet.
-	Pending(ctx context.Context, key string) error
+	// Pending claims key, which nothing has been stored under yet, leased
+	// until until: the upload publishes nothing under key after it.
+	Pending(ctx context.Context, key string, until time.Time) error
 	// Abandon deletes the object of key and its claim if the claim is
 	// still pending, and reports whether it did; it leaves any other key
 	// alone.
@@ -162,6 +168,10 @@ type Claimer interface {
 // Policy.GrantExpiry says otherwise: long enough to start a large upload,
 // short enough that a leaked grant is soon useless.
 const DefaultGrantExpiry = 15 * time.Minute
+
+// DefaultUploadTimeout is how long Save and Receive may take to store a
+// file under Policy.Claims unless Policy.UploadTimeout says otherwise.
+const DefaultUploadTimeout = time.Hour
 
 // File is a stored upload.
 type File struct {
@@ -198,6 +208,9 @@ func (p Policy) validate() error {
 		if !validType(t) {
 			return fmt.Errorf(`upload: Policy.Types entry %q: want a lowercase "type/subtype", "type/*", or "*/*"`, t)
 		}
+	}
+	if p.UploadTimeout < 0 {
+		return fmt.Errorf("upload: Policy.UploadTimeout must not be negative, not %s", p.UploadTimeout)
 	}
 	if p.GrantExpiry < 0 || p.GrantExpiry > storage.MaxURLExpiry || p.GrantExpiry%time.Second != 0 {
 		return fmt.Errorf("upload: Policy.GrantExpiry must be whole seconds between 0 (the default) and %s, not %s", storage.MaxURLExpiry, p.GrantExpiry)
@@ -288,8 +301,21 @@ func save(ctx context.Context, store storage.Storage, src io.Reader, filename st
 	if err != nil {
 		return File{}, err
 	}
-	if err := claim(ctx, p, key); err != nil {
-		return File{}, err
+	// Under Claims, the key is leased until the deadline, and the Put is
+	// aborted then: it can never publish after its claim's lease.
+	putCtx := ctx
+	if p.Claims != nil {
+		timeout := p.UploadTimeout
+		if timeout == 0 {
+			timeout = DefaultUploadTimeout
+		}
+		deadline := time.Now().Add(timeout)
+		if err := claim(ctx, p, key, deadline); err != nil {
+			return File{}, err
+		}
+		var cancel context.CancelFunc
+		putCtx, cancel = context.WithDeadline(ctx, deadline)
+		defer cancel()
 	}
 	filename = CleanFilename(filename)
 	md := maps.Clone(p.Metadata)
@@ -299,7 +325,7 @@ func save(ctx context.Context, store storage.Storage, src io.Reader, filename st
 		}
 		filename = fitMetadata(md, filename)
 	}
-	info, err := store.Put(ctx, key, io.MultiReader(bytes.NewReader(head), src), storage.PutOptions{
+	info, err := store.Put(putCtx, key, io.MultiReader(bytes.NewReader(head), src), storage.PutOptions{
 		ContentType: contentType,
 		Metadata:    md,
 		Size:        size,
@@ -378,12 +404,13 @@ func fitMetadata(md map[string]string, filename string) string {
 	return ""
 }
 
-// claim claims key (Policy.Claims) before anything is stored under it.
-func claim(ctx context.Context, p Policy, key string) error {
+// claim claims key (Policy.Claims), leased until until, before anything is
+// stored under it.
+func claim(ctx context.Context, p Policy, key string, until time.Time) error {
 	if p.Claims == nil {
 		return nil
 	}
-	if err := p.Claims.Pending(ctx, key); err != nil {
+	if err := p.Claims.Pending(ctx, key, until); err != nil {
 		return fmt.Errorf("upload: claim %q: %w", key, err)
 	}
 	return nil

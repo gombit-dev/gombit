@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"math/rand/v2"
 	"path/filepath"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"github.com/gombit-dev/gombit/storage"
 	"github.com/gombit-dev/gombit/storage/claims"
 	"github.com/gombit-dev/gombit/storage/memory"
+	"github.com/gombit-dev/gombit/storage/upload"
 )
 
 // doc is a record that refers to a stored file, one record per file.
@@ -28,6 +30,9 @@ type doc struct {
 }
 
 func (doc) TableName() string { return "claims_test_docs" }
+
+// ended is a lease that ended long ago.
+var ended = time.Now().Add(-time.Hour)
 
 func TestSQLite(t *testing.T) {
 	db, err := database.Open(config.DatabaseConfig{
@@ -56,6 +61,8 @@ func runSuite(t *testing.T, db *gorm.DB) {
 		"Sweep":                     testSweep,
 		"DeleteWith":                testDeleteWith,
 		"Update":                    testUpdate,
+		"Lease":                     testLease,
+		"UploadOutlivesItsClaim":    testUploadOutlivesItsClaim,
 		"ConfirmRacesSweep":         testConfirmRacesSweep,
 		"SweepFirstWins":            testSweepFirstWins,
 		"ConfirmationInFlightWins":  testConfirmationInFlightWins,
@@ -77,12 +84,14 @@ func clean(t *testing.T, db *gorm.DB) {
 	}
 }
 
-// upload stores an object under a newly claimed key, as an upload with
-// Policy.Claims does.
-func upload(t *testing.T, c *claims.Claims, store storage.Storage, key string) {
+// uploaded stores an object under a newly claimed key, as an upload with
+// Policy.Claims does, whose lease has already ended (the upload is done):
+// deleting its claim removes the row at once. testLease covers leases
+// still running.
+func uploaded(t *testing.T, c *claims.Claims, store storage.Storage, key string) {
 	t.Helper()
 	ctx := context.Background()
-	if err := c.Pending(ctx, key); err != nil {
+	if err := c.Pending(ctx, key, ended); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.Put(ctx, key, strings.NewReader("bytes of "+key), storage.PutOptions{}); err != nil {
@@ -119,19 +128,19 @@ func insert(key string) func(tx *gorm.DB) error {
 func testPendingIsUnique(t *testing.T, db *gorm.DB) {
 	c := claims.New(db, memory.New())
 	ctx := context.Background()
-	if err := c.Pending(ctx, "u/1"); err != nil {
+	if err := c.Pending(ctx, "u/1", ended); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Pending(ctx, "u/1"); !errors.Is(err, claims.ErrClaimed) {
+	if err := c.Pending(ctx, "u/1", ended); !errors.Is(err, claims.ErrClaimed) {
 		t.Fatalf("a second Pending = %v, want ErrClaimed", err)
 	}
 	// Refused up front on every dialect (SQLite would store it; the others
 	// would fail with an error of their own).
 	long := "u/" + strings.Repeat("k", claims.MaxKeyLen)
-	if err := c.Pending(ctx, long); !errors.Is(err, claims.ErrKeyTooLong) {
+	if err := c.Pending(ctx, long, ended); !errors.Is(err, claims.ErrKeyTooLong) {
 		t.Fatalf("Pending of a %d-byte key = %v, want ErrKeyTooLong", len(long), err)
 	}
-	if err := c.Pending(ctx, strings.Repeat("k", claims.MaxKeyLen)); err != nil {
+	if err := c.Pending(ctx, strings.Repeat("k", claims.MaxKeyLen), ended); err != nil {
 		t.Fatalf("Pending of a %d-byte key = %v", claims.MaxKeyLen, err)
 	}
 }
@@ -139,7 +148,7 @@ func testPendingIsUnique(t *testing.T, db *gorm.DB) {
 func testCreateHolds(t *testing.T, db *gorm.DB) {
 	store := memory.New()
 	c := claims.New(db, store)
-	upload(t, c, store, "u/1")
+	uploaded(t, c, store, "u/1")
 	if err := c.CreateWith(context.Background(), []string{"u/1"}, insert("u/1")); err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +163,7 @@ func testCreateHolds(t *testing.T, db *gorm.DB) {
 func testFailedCreateDeletes(t *testing.T, db *gorm.DB) {
 	store := memory.New()
 	c := claims.New(db, store)
-	upload(t, c, store, "u/1")
+	uploaded(t, c, store, "u/1")
 	boom := errors.New("validation failed")
 	err := c.CreateWith(context.Background(), []string{"u/1"}, func(*gorm.DB) error { return boom })
 	if !errors.Is(err, boom) {
@@ -172,7 +181,7 @@ func testFailedCreateDeletes(t *testing.T, db *gorm.DB) {
 func testRetriedConfirmationKeeps(t *testing.T, db *gorm.DB) {
 	store := memory.New()
 	c := claims.New(db, store)
-	upload(t, c, store, "u/1")
+	uploaded(t, c, store, "u/1")
 	ctx := context.Background()
 	if err := c.CreateWith(ctx, []string{"u/1"}, insert("u/1")); err != nil {
 		t.Fatal(err)
@@ -194,7 +203,7 @@ func testRetriedConfirmationKeeps(t *testing.T, db *gorm.DB) {
 func testCommittedHoldIsNotDeleted(t *testing.T, db *gorm.DB) {
 	store := memory.New()
 	c := claims.New(db, store)
-	upload(t, c, store, "u/1")
+	uploaded(t, c, store, "u/1")
 	ctx := context.Background()
 	if err := db.Transaction(func(tx *gorm.DB) error {
 		if err := c.Hold(ctx, tx, "u/1"); err != nil {
@@ -214,12 +223,12 @@ func testSweep(t *testing.T, db *gorm.DB) {
 	store := memory.New()
 	c := claims.New(db, store)
 	ctx := context.Background()
-	upload(t, c, store, "u/stale")
-	upload(t, c, store, "u/held")
+	uploaded(t, c, store, "u/stale")
+	uploaded(t, c, store, "u/held")
 	if err := c.CreateWith(ctx, []string{"u/held"}, insert("u/held")); err != nil {
 		t.Fatal(err)
 	}
-	upload(t, c, store, "u/deleting") // a delete interrupted after its record went
+	uploaded(t, c, store, "u/deleting") // a delete interrupted after its record went
 	if err := c.CreateWith(ctx, []string{"u/deleting"}, insert("u/deleting")); err != nil {
 		t.Fatal(err)
 	}
@@ -250,8 +259,8 @@ func testSweep(t *testing.T, db *gorm.DB) {
 	// A backlog larger than a batch is swept in full, page by page.
 	defer claims.SetSweepBatch(2)()
 	for i := range 5 {
-		upload(t, c, store, fmt.Sprintf("u/backlog-%d", i))
-		upload(t, c, store, fmt.Sprintf("u/doomed-%d", i))
+		uploaded(t, c, store, fmt.Sprintf("u/backlog-%d", i))
+		uploaded(t, c, store, fmt.Sprintf("u/doomed-%d", i))
 		if err := c.CreateWith(ctx, []string{fmt.Sprintf("u/doomed-%d", i)}, insert(fmt.Sprintf("u/doomed-%d", i))); err != nil {
 			t.Fatal(err)
 		}
@@ -269,7 +278,7 @@ func testDeleteWith(t *testing.T, db *gorm.DB) {
 	store := memory.New()
 	c := claims.New(db, store)
 	ctx := context.Background()
-	upload(t, c, store, "u/1")
+	uploaded(t, c, store, "u/1")
 	if err := c.CreateWith(ctx, []string{"u/1"}, insert("u/1")); err != nil {
 		t.Fatal(err)
 	}
@@ -305,7 +314,7 @@ func testDeleteWith(t *testing.T, db *gorm.DB) {
 	}
 
 	// A claim that is not held is not this record's: nothing changes.
-	upload(t, c, store, "u/pending")
+	uploaded(t, c, store, "u/pending")
 	if err := db.Create(&doc{FileKey: "u/pending"}).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -329,7 +338,7 @@ func testConfirmRacesSweep(t *testing.T, db *gorm.DB) {
 	confirmed, swept := 0, 0
 	for i := 0; i < 40; i++ {
 		key := fmt.Sprintf("u/race-%d", i)
-		upload(t, c, store, key)
+		uploaded(t, c, store, key)
 		var wg sync.WaitGroup
 		var createErr error
 		wg.Add(2)
@@ -365,7 +374,7 @@ func testSweepFirstWins(t *testing.T, db *gorm.DB) {
 	store := memory.New()
 	c := claims.New(db, store)
 	ctx := context.Background()
-	upload(t, c, store, "u/1")
+	uploaded(t, c, store, "u/1")
 	if res, err := c.Sweep(ctx, 0); err != nil || res.Abandoned != 1 {
 		t.Fatalf("Sweep = %+v, %v", res, err)
 	}
@@ -389,7 +398,7 @@ func testConfirmationInFlightWins(t *testing.T, db *gorm.DB) {
 	store := memory.New()
 	c := claims.New(db, store)
 	ctx := context.Background()
-	upload(t, c, store, "u/1")
+	uploaded(t, c, store, "u/1")
 	tx := db.Begin()
 	if tx.Error != nil {
 		t.Fatal(tx.Error)
@@ -425,8 +434,8 @@ func testUpdate(t *testing.T, db *gorm.DB) {
 	store := memory.New()
 	c := claims.New(db, store)
 	ctx := context.Background()
-	upload(t, c, store, "u/a")
-	upload(t, c, store, "u/b")
+	uploaded(t, c, store, "u/a")
+	uploaded(t, c, store, "u/b")
 	boom := errors.New("constraint")
 	if err := c.CreateWith(ctx, []string{"u/a", "", "u/b"}, func(*gorm.DB) error { return boom }); err != boom { //nolint:errorlint // the error itself, unwrapped
 		t.Fatalf("CreateWith = %v, want the record's error itself", err)
@@ -434,8 +443,8 @@ func testUpdate(t *testing.T, db *gorm.DB) {
 	if exists(t, store, "u/a") || exists(t, store, "u/b") {
 		t.Fatal("a failed create with two files kept one")
 	}
-	upload(t, c, store, "u/a")
-	upload(t, c, store, "u/b")
+	uploaded(t, c, store, "u/a")
+	uploaded(t, c, store, "u/b")
 	if err := c.CreateWith(ctx, []string{"u/a", "", "u/b"}, insert("u/a")); err != nil {
 		t.Fatal(err)
 	}
@@ -449,7 +458,7 @@ func testUpdate(t *testing.T, db *gorm.DB) {
 		}
 	}
 	// A key another record holds fails the change, naming the key.
-	upload(t, c, store, "u/d")
+	uploaded(t, c, store, "u/d")
 	err := c.CreateWith(ctx, []string{"u/d", "u/a"}, insert("u/d"))
 	var ke *claims.KeyError
 	if !errors.Is(err, claims.ErrNotPending) || !errors.As(err, &ke) || ke.Key != "u/a" {
@@ -459,14 +468,14 @@ func testUpdate(t *testing.T, db *gorm.DB) {
 		t.Fatal("the refused change deleted the held file or kept its pending one")
 	}
 
-	upload(t, c, store, "u/c")
+	uploaded(t, c, store, "u/c")
 	if err := c.Update(ctx, []string{"u/c"}, []string{"u/a"}, func(*gorm.DB) error { return boom }); !errors.Is(err, boom) {
 		t.Fatalf("Update = %v, want the record's error", err)
 	}
 	if !exists(t, store, "u/a") || state(t, db, "u/a") != claims.Held || exists(t, store, "u/c") {
 		t.Fatal("a failed replacement lost the old file or kept the new one")
 	}
-	upload(t, c, store, "u/c")
+	uploaded(t, c, store, "u/c")
 	if err := c.Update(ctx, []string{"u/c", "u/b"}, []string{"u/a", "u/b", ""}, replace("u/a", "u/c")); err != nil {
 		t.Fatal(err)
 	}
@@ -478,5 +487,130 @@ func testUpdate(t *testing.T, db *gorm.DB) {
 	}
 	if !exists(t, store, "u/b") || state(t, db, "u/b") != claims.Held {
 		t.Fatal("a file in both lists (unchanged) was touched")
+	}
+}
+
+// expire ends the lease of key's claim (as if its upload's deadline, plus
+// LeaseMargin, had passed).
+func expire(t *testing.T, db *gorm.DB, key string) {
+	t.Helper()
+	if err := db.Model(&claims.Claim{}).Where("object_key = ?", key).
+		Update("lease_until", time.Now().Add(-claims.LeaseMargin-time.Second)).Error; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// testLease: a claim whose upload may still be writing is abandoned, but
+// its row stays as a tombstone until the lease ends: an object the upload
+// publishes afterwards is deleted by the next sweep, and no record can take
+// the key. Only after the lease is the row removed.
+func testLease(t *testing.T, db *gorm.DB) {
+	store := memory.New()
+	c := claims.New(db, store)
+	ctx := context.Background()
+	if err := c.Pending(ctx, "u/slow", time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	// The upload is still streaming: nothing is stored yet.
+	if res, err := c.Sweep(ctx, 0); err != nil || res.Abandoned != 1 || res.Finished != 0 {
+		t.Fatalf("Sweep = %+v, %v; want it abandoned and kept as a tombstone", res, err)
+	}
+	if state(t, db, "u/slow") != claims.Deleting {
+		t.Fatalf("claim = %s, want a deleting tombstone", state(t, db, "u/slow"))
+	}
+	// The upload publishes after all.
+	if _, err := store.Put(ctx, "u/slow", strings.NewReader("late"), storage.PutOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Transaction(func(tx *gorm.DB) error { return c.Hold(ctx, tx, "u/slow") }); !errors.Is(err, claims.ErrNotPending) {
+		t.Fatalf("Hold of a tombstone = %v, want ErrNotPending", err)
+	}
+	if res, err := c.Sweep(ctx, 0); err != nil || res.Waiting != 1 || exists(t, store, "u/slow") {
+		t.Fatalf("Sweep = %+v, %v (object exists = %v); want the late object deleted, the tombstone kept", res, err, exists(t, store, "u/slow"))
+	}
+	// A lease that ended a moment ago is within LeaseMargin (clocks that
+	// disagree, a publish already sent): the tombstone stays.
+	if err := db.Model(&claims.Claim{}).Where("object_key = ?", "u/slow").Update("lease_until", time.Now().Add(-time.Second)).Error; err != nil {
+		t.Fatal(err)
+	}
+	if res, err := c.Sweep(ctx, 0); err != nil || res.Waiting != 1 {
+		t.Fatalf("Sweep within the margin = %+v, %v; want the tombstone kept", res, err)
+	}
+	expire(t, db, "u/slow")
+	if res, err := c.Sweep(ctx, 0); err != nil || res.Finished != 1 || state(t, db, "u/slow") != "none" {
+		t.Fatalf("Sweep after the lease = %+v, %v; want the tombstone removed", res, err)
+	}
+}
+
+// blocked is an upload body that sends its first bytes, then blocks until
+// released, as a slow client does.
+type blocked struct {
+	head    []byte
+	release chan struct{}
+}
+
+func (b *blocked) Read(p []byte) (int, error) {
+	if len(b.head) > 0 {
+		n := copy(p, b.head)
+		b.head = b.head[n:]
+		return n, nil
+	}
+	<-b.release
+	return 0, io.EOF
+}
+
+// testUploadOutlivesItsClaim: the schedule a claims-only sweep must
+// survive. upload.Save claims its key and blocks in Put; the sweep
+// abandons the claim; then the Put publishes. The object is not an orphan:
+// the tombstone is still there, the next sweep deletes the object, and no
+// record can take the key.
+func testUploadOutlivesItsClaim(t *testing.T, db *gorm.DB) {
+	store := memory.New()
+	c := claims.New(db, store)
+	ctx := context.Background()
+	p := upload.Policy{MaxBytes: 1 << 20, Types: []string{"*/*"}, Prefix: "u/", Claims: c}
+	body := &blocked{head: []byte(strings.Repeat("x", 2*upload.SniffBytes)), release: make(chan struct{})}
+	type result struct {
+		f   upload.File
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		f, err := upload.Save(ctx, store, body, "slow.txt", p)
+		done <- result{f, err}
+	}()
+	// Wait for the claim: Save is now in Put, reading the blocked body.
+	var key string
+	for deadline := time.Now().Add(10 * time.Second); key == ""; {
+		var keys []string
+		db.Model(&claims.Claim{}).Pluck("object_key", &keys)
+		if len(keys) == 1 {
+			key = keys[0]
+		} else if time.Now().After(deadline) {
+			t.Fatal("Save never claimed its key")
+		} else {
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	if res, err := c.Sweep(ctx, 0); err != nil || res.Abandoned != 1 {
+		t.Fatalf("Sweep during the upload = %+v, %v", res, err)
+	}
+	close(body.release)
+	r := <-done
+	if r.err != nil || r.f.Key != key {
+		t.Fatalf("Save = %+v, %v", r.f, r.err)
+	}
+	if !exists(t, store, key) || state(t, db, key) != claims.Deleting {
+		t.Fatalf("after the late publish: object exists = %v, claim %s; want both (the tombstone)", exists(t, store, key), state(t, db, key))
+	}
+	if err := c.CreateWith(ctx, []string{key}, insert(key)); !errors.Is(err, claims.ErrNotPending) {
+		t.Fatalf("CreateWith of the swept upload = %v, want ErrNotPending", err)
+	}
+	if _, err := c.Sweep(ctx, 0); err != nil || exists(t, store, key) {
+		t.Fatalf("the next sweep = %v, object exists = %v; want it deleted", err, exists(t, store, key))
+	}
+	expire(t, db, key)
+	if _, err := c.Sweep(ctx, 0); err != nil || state(t, db, key) != "none" {
+		t.Fatalf("the sweep after the lease = %v, claim %s", err, state(t, db, key))
 	}
 }
