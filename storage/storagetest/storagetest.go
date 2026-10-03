@@ -71,6 +71,7 @@ var checks = []check{
 	{"URL", checkURL},
 	{"DirectUpload", checkDirectUpload},
 	{"List", checkList},
+	{"Copy", checkCopy},
 }
 
 func ctxFor(t testing.TB) context.Context {
@@ -1071,4 +1072,41 @@ func keysOf(m map[string]storage.ObjectInfo) []string {
 		keys = append(keys, k)
 	}
 	return keys
+}
+
+// checkCopy: storage.Copy (the store's Copier, or Open and Put) copies the
+// bytes, content type and metadata and leaves the source; a missing source
+// is ErrNotFound. Onto an occupied destination it either refuses with
+// ErrExists, leaving the destination, or (a backend without conditional
+// copies) replaces it: never anything in between.
+func checkCopy(t testing.TB, s storage.Storage) {
+	ctx := ctxFor(t)
+	md := map[string]string{"filename": "a.txt"}
+	put(t, s, "copy/src", []byte("copied bytes"), storage.PutOptions{ContentType: "text/plain", Metadata: md})
+	info, err := storage.Copy(ctx, s, "copy/src", "copy/dst")
+	if err != nil {
+		t.Fatalf("Copy = %v", err)
+	}
+	if info.Key != "copy/dst" || info.Size != int64(len("copied bytes")) {
+		t.Fatalf("Copy reported %+v", info)
+	}
+	data, got := read(t, s, "copy/dst")
+	if string(data) != "copied bytes" || got.ContentType != "text/plain" || got.Metadata["filename"] != "a.txt" {
+		t.Fatalf("the copy is %q (%s, %v); want the source's bytes, type and metadata", data, got.ContentType, got.Metadata)
+	}
+	if data, _ := read(t, s, "copy/src"); string(data) != "copied bytes" {
+		t.Fatalf("Copy changed its source to %q", data)
+	}
+	if _, err := storage.Copy(ctx, s, "copy/missing", "copy/dst2"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("Copy of a missing source = %v, want storage: object not found", err)
+	}
+	put(t, s, "copy/taken", []byte("kept"), storage.PutOptions{})
+	_, err = storage.Copy(ctx, s, "copy/src", "copy/taken")
+	data, _ = read(t, s, "copy/taken")
+	switch {
+	case errors.Is(err, storage.ErrExists) && string(data) == "kept":
+	case err == nil && string(data) == "copied bytes":
+	default:
+		t.Fatalf("Copy onto an object = %v, leaving %q; want ErrExists and the object kept, or the copy", err, data)
+	}
 }

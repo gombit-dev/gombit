@@ -209,9 +209,10 @@ func TestConfirmAsksTheStoreToVerify(t *testing.T) {
 	}
 }
 
-// TestAuthorizeClaims: a direct upload's key is claimed before the grant is
-// made, a failing claim makes no grant, and a grant that cannot be made
-// drops its claim.
+// TestAuthorizeClaims: under Policy.Claims a direct upload is staged: its
+// key is claimed (Stage) before the grant is made, and the grant uploads
+// to the staging key, never to the key. A failing claim makes no grant,
+// and a grant that cannot be made drops its claim.
 func TestAuthorizeClaims(t *testing.T) {
 	store, _ := directStore(t)
 	ctx := context.Background()
@@ -222,11 +223,14 @@ func TestAuthorizeClaims(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cl.claimed) != 1 || cl.claimed[0] != g.Key {
-		t.Fatalf("claimed %v, want the granted key %s", cl.claimed, g.Key)
+	if len(cl.claimed) != 1 || cl.claimed[0] != g.Key || !cl.staged[g.Key] {
+		t.Fatalf("claimed %v (staged %v), want the granted key %s staged", cl.claimed, cl.staged, g.Key)
+	}
+	if !strings.Contains(g.Request.URL, "/"+upload.StagingKey(g.Key)+"?") {
+		t.Fatalf("the grant uploads to %s, want the staging key %s", g.Request.URL, upload.StagingKey(g.Key))
 	}
 	// Leased until the grant expires plus the time a PUT started by then
-	// may take (storage.SignedUploadTimeout).
+	// may take through the app's route (storage.SignedUploadTimeout).
 	if want := g.Request.Expires.Add(storage.SignedUploadTimeout); cl.leases[0].Before(want) {
 		t.Fatalf("lease = %s, want at least %s", cl.leases[0], want)
 	}
@@ -243,31 +247,131 @@ func TestAuthorizeClaims(t *testing.T) {
 	if len(cl.claimed) != 1 || len(cl.pending) != 0 {
 		t.Fatalf("claimed %v, still pending %v: a grant not made must drop its claim", cl.claimed, cl.pending)
 	}
+	p.Prefix = upload.StagingPrefix + "x/"
+	if _, err := upload.Authorize(ctx, store, p, int64(len(png)), "image/png", "a.png"); err == nil {
+		t.Fatal("a policy prefix under the staging prefix was accepted")
+	}
 }
 
-// TestConfirmUnderClaimsKeepsHeld: under Policy.Claims, a refused
-// confirmation deletes the file only while its key is pending: a file a
-// record holds (or one never claimed) is kept, whatever policy confirms it.
-func TestConfirmUnderClaimsKeepsHeld(t *testing.T) {
+// TestConfirmPromotesStagedUploads: under Policy.Claims, Confirm promotes
+// the claim, checks the staged object, copies it to the key, and deletes
+// the staged copy. A refused staged object is deleted and the claim goes
+// back to pending (the grant may upload again). A key that is not a
+// staged upload awaiting confirmation (promoted already, or held) is
+// checked as it is, and a refusal deletes nothing.
+func TestConfirmPromotesStagedUploads(t *testing.T) {
+	store, srv := directStore(t)
 	ctx := context.Background()
-	store := memory.New()
-	if _, err := store.Put(ctx, "avatars/a", strings.NewReader("<html>"), storage.PutOptions{ContentType: "image/png"}); err != nil {
-		t.Fatal(err)
-	}
 	cl := newFakeClaims(store)
 	p := images
 	p.Claims = cl
-	if _, err := upload.Confirm(ctx, store, "avatars/a", p); !errors.Is(err, upload.ErrType) {
-		t.Fatalf("Confirm = %v, want ErrType", err)
+	exists := func(key string) bool {
+		ok, err := storage.Exists(ctx, store, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ok
 	}
-	if exists, _ := storage.Exists(ctx, store, "avatars/a"); !exists || len(cl.abandoned) != 1 {
-		t.Fatalf("a held file: exists = %v, abandoned %v; want it kept, through Abandon", exists, cl.abandoned)
+	grant := func(body []byte) upload.Grant {
+		g, err := upload.Authorize(ctx, store, p, int64(len(body)), "image/png", "a.png")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if code := perform(t, srv, g, body); code != http.StatusOK {
+			t.Fatalf("PUT = %d", code)
+		}
+		if exists(g.Key) || !exists(upload.StagingKey(g.Key)) {
+			t.Fatal("the grant did not upload to the staging key only")
+		}
+		return g
 	}
-	cl.pending["avatars/a"] = true
-	if _, err := upload.Confirm(ctx, store, "avatars/a", p); !errors.Is(err, upload.ErrType) {
-		t.Fatalf("Confirm = %v, want ErrType", err)
+
+	g := grant(png)
+	f, err := upload.Confirm(ctx, store, g.Key, p)
+	if err != nil || f.Key != g.Key || f.Filename != "a.png" || f.Size != int64(len(png)) {
+		t.Fatalf("Confirm = %+v, %v", f, err)
 	}
-	if exists, _ := storage.Exists(ctx, store, "avatars/a"); exists {
-		t.Fatal("a refused pending file was kept")
+	if !exists(g.Key) || exists(upload.StagingKey(g.Key)) || !cl.promoting[g.Key] {
+		t.Fatalf("after Confirm: key %v, staged %v, promoting %v; want the key, no staged copy, promoting", exists(g.Key), exists(upload.StagingKey(g.Key)), cl.promoting[g.Key])
+	}
+	// A retried confirmation checks the promoted key as it is.
+	if f, err := upload.Confirm(ctx, store, g.Key, p); err != nil || f.Key != g.Key {
+		t.Fatalf("a retried Confirm = %+v, %v", f, err)
+	}
+
+	html := []byte("<html><script>alert(1)</script>")
+	bad := grant(html)
+	if _, err := upload.Confirm(ctx, store, bad.Key, p); !errors.Is(err, upload.ErrType) {
+		t.Fatalf("Confirm of HTML = %v, want ErrType", err)
+	}
+	if exists(bad.Key) || exists(upload.StagingKey(bad.Key)) || !cl.pending[bad.Key] {
+		t.Fatalf("a refused staged object: key %v, staged %v, pending %v; want neither stored, the claim pending again", exists(bad.Key), exists(upload.StagingKey(bad.Key)), cl.pending[bad.Key])
+	}
+	if _, err := upload.Confirm(ctx, store, bad.Key, p); !errors.Is(err, upload.ErrNoFile) {
+		t.Fatalf("Confirm with nothing staged = %v, want ErrNoFile", err)
+	}
+
+	// A held key (no pending or promoting claim) that fails the policy is
+	// refused, and kept.
+	if _, err := store.Put(ctx, "avatars/held", strings.NewReader("<html>"), storage.PutOptions{ContentType: "image/png"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := upload.Confirm(ctx, store, "avatars/held", p); !errors.Is(err, upload.ErrType) || !exists("avatars/held") {
+		t.Fatalf("Confirm of a held key failing the policy = %v (kept: %v); want ErrType, kept", err, exists("avatars/held"))
+	}
+}
+
+// copyOutcome is a store whose Copy copies, then reports err.
+type copyOutcome struct {
+	*memory.Store
+	err error
+}
+
+func (c copyOutcome) Copy(ctx context.Context, src, dst string) (storage.ObjectInfo, error) {
+	if _, err := storage.Copy(ctx, c.Store, src, dst); err != nil {
+		return storage.ObjectInfo{}, err
+	}
+	return storage.ObjectInfo{}, c.err
+}
+
+// TestConfirmNeverAssumesACopyFailed: a promotion copy of unknown outcome
+// leaves the claim promoting (the copy may exist), and a retried Confirm
+// finds the key as it is; a definite failure puts the claim back to
+// pending.
+func TestConfirmNeverAssumesACopyFailed(t *testing.T) {
+	ctx := context.Background()
+	for name, tc := range map[string]struct {
+		err       error
+		promoting bool
+	}{
+		"unknown":  {storage.Wrap("copy", "k", errors.Join(storage.ErrUnknownOutcome, storage.ErrUnavailable)), true},
+		"definite": {storage.Wrap("copy", "k", storage.ErrUnavailable), false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			mem := memory.New()
+			cl := newFakeClaims(mem)
+			p := images
+			p.Claims = cl
+			key := "avatars/k"
+			if err := cl.Stage(ctx, key, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := mem.Put(ctx, upload.StagingKey(key), bytes.NewReader(png), storage.PutOptions{ContentType: "image/png"}); err != nil {
+				t.Fatal(err)
+			}
+			store := copyOutcome{Store: mem, err: tc.err}
+			if _, err := upload.Confirm(ctx, store, key, p); !errors.Is(err, storage.ErrUnavailable) {
+				t.Fatalf("Confirm = %v, want the copy's failure", err)
+			}
+			if cl.promoting[key] != tc.promoting || cl.pending[key] == tc.promoting {
+				t.Fatalf("promoting %v, pending %v; want promoting = %v", cl.promoting[key], cl.pending[key], tc.promoting)
+			}
+			if tc.promoting {
+				// The copy did happen: a retry finds it.
+				if f, err := upload.Confirm(ctx, mem, key, p); err != nil || f.Key != key {
+					t.Fatalf("retried Confirm = %+v, %v", f, err)
+				}
+			}
+		})
 	}
 }

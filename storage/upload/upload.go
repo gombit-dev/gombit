@@ -137,10 +137,11 @@ type Policy struct {
 	// signed URL (DefaultGrantExpiry when zero; whole seconds, at most
 	// storage.MaxURLExpiry).
 	GrantExpiry time.Duration
-	// UploadTimeout bounds how long Save and Receive may take to store a
-	// file under Claims (DefaultUploadTimeout when zero): the Put is
-	// aborted then, before it publishes, so the key's claim can lease it
-	// until a known time (storage/claims). Unused without Claims.
+	// UploadTimeout bounds how long the application may take to write a
+	// claimed key under Claims (DefaultUploadTimeout when zero): Save's and
+	// Receive's Put, and Confirm's copy of a staged upload, are aborted
+	// then, before they publish, so the key's claim can lease it until a
+	// known time (storage/claims). Unused without Claims.
 	UploadTimeout time.Duration
 	// Claims, when set, puts uploads under an ownership protocol
 	// (storage/claims: a *claims.Claims). Each generated key is claimed
@@ -156,8 +157,16 @@ type Policy struct {
 // implements it.
 type Claimer interface {
 	// Pending claims key, which nothing has been stored under yet, leased
-	// until until: the upload publishes nothing under key after it.
+	// until until: Save publishes nothing under key after it.
 	Pending(ctx context.Context, key string, until time.Time) error
+	// Stage claims key for a direct upload to StagingKey(key) (Authorize).
+	Stage(ctx context.Context, key string, until time.Time) error
+	// Promote moves a staged key to promoting, leased until until, and
+	// reports whether it did: only then may Confirm copy the staged object
+	// to key.
+	Promote(ctx context.Context, key string, until time.Time) (bool, error)
+	// Unpromote moves a promoting key back to pending (nothing was copied).
+	Unpromote(ctx context.Context, key string) error
 	// Abandon deletes the object of key and its claim if the claim is
 	// still pending, and reports whether it did; it leaves any other key
 	// alone.
@@ -168,6 +177,22 @@ type Claimer interface {
 // Policy.GrantExpiry says otherwise: long enough to start a large upload,
 // short enough that a leaked grant is soon useless.
 const DefaultGrantExpiry = 15 * time.Minute
+
+// StagingPrefix starts the keys direct uploads under Policy.Claims are
+// uploaded to (StagingKey). Policy prefixes may not start with it.
+const StagingPrefix = "_staging/"
+
+// StagingKey is where a direct upload of key is uploaded under
+// Policy.Claims: StagingPrefix and key. Only Confirm writes key itself.
+func StagingKey(key string) string { return StagingPrefix + key }
+
+// uploadTimeout is p.UploadTimeout, or DefaultUploadTimeout.
+func uploadTimeout(p Policy) time.Duration {
+	if p.UploadTimeout == 0 {
+		return DefaultUploadTimeout
+	}
+	return p.UploadTimeout
+}
 
 // DefaultUploadTimeout is how long Save and Receive may take to store a
 // file under Policy.Claims unless Policy.UploadTimeout says otherwise.
@@ -196,6 +221,11 @@ func (p Policy) validate() error {
 	if err := storage.ValidatePrefix(p.Prefix); err != nil {
 		return fmt.Errorf("upload: Policy.Prefix: %v", err) // the server's mistake, not an invalid request
 	}
+	if strings.HasPrefix(p.Prefix, StagingPrefix) {
+		return fmt.Errorf("upload: Policy.Prefix %q is under %q, which direct uploads are staged under", p.Prefix, StagingPrefix)
+	}
+	// (A staged upload's key is StagingPrefix and the key: claimed keys are
+	// at most claims.MaxKeyLen, 512 bytes, so it always fits.)
 	if err := storage.ValidateKey(p.Prefix + strings.Repeat("0", idHexLen)); err != nil {
 		return fmt.Errorf("upload: Policy.Prefix %q leaves no room for a generated key: %v", p.Prefix, err)
 	}
@@ -300,11 +330,7 @@ func save(ctx context.Context, store storage.Storage, src io.Reader, filename st
 	// aborted then: it can never publish after its claim's lease.
 	putCtx := ctx
 	if p.Claims != nil {
-		timeout := p.UploadTimeout
-		if timeout == 0 {
-			timeout = DefaultUploadTimeout
-		}
-		deadline := time.Now().Add(timeout)
+		deadline := time.Now().Add(uploadTimeout(p))
 		if err := claim(ctx, p, key, deadline); err != nil {
 			return File{}, err
 		}

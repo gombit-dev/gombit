@@ -33,6 +33,12 @@ type Grant struct {
 // Key (with who asked) to Confirm the same one: a grant is not a record
 // that the upload happened.
 //
+// Under Policy.Claims the upload is staged: the key is claimed (Stage), and
+// the request uploads to StagingKey(key), never to the key itself, which
+// only Confirm writes, by copying the staged object once it passes. A PUT
+// the application cannot end (S3 checks a presigned URL's expiry when the
+// request starts) can then only ever publish a staging object.
+//
 // It fails with storage.ErrUnsupported when the store has no direct
 // uploads (storage.DirectUploader); Receive is the fallback.
 func Authorize(ctx context.Context, store storage.Storage, p Policy, size int64, contentType, filename string) (Grant, error) {
@@ -60,10 +66,16 @@ func Authorize(ctx context.Context, store storage.Storage, p Policy, size int64,
 	if ttl == 0 {
 		ttl = DefaultGrantExpiry
 	}
-	// The PUT may start until the grant expires, and the app's storage
-	// route aborts it storage.SignedUploadTimeout later: the claim's lease.
-	if err := claim(ctx, p, key, time.Now().Add(ttl+storage.SignedUploadTimeout)); err != nil {
-		return Grant{}, err
+	// Under Claims the client writes only the staging key. The PUT may
+	// start until the grant expires, and the app's storage route aborts it
+	// storage.SignedUploadTimeout later: the lease of the staging key's
+	// writes through that route.
+	target := key
+	if p.Claims != nil {
+		if err := p.Claims.Stage(ctx, key, time.Now().Add(ttl+storage.SignedUploadTimeout)); err != nil {
+			return Grant{}, fmt.Errorf("upload: claim %q: %w", key, err)
+		}
+		target = StagingKey(key)
 	}
 	md := maps.Clone(p.Metadata)
 	if filename = CleanFilename(filename); filename != "" {
@@ -72,7 +84,7 @@ func Authorize(ctx context.Context, store storage.Storage, p Policy, size int64,
 		}
 		fitMetadata(md, filename)
 	}
-	req, err := storage.UploadURL(ctx, store, key, storage.UploadURLOptions{
+	req, err := storage.UploadURL(ctx, store, target, storage.UploadURLOptions{
 		Expires:     ttl,
 		Size:        size,
 		ContentType: contentType,
@@ -90,9 +102,18 @@ func Authorize(ctx context.Context, store storage.Storage, p Policy, size int64,
 // most p.MaxBytes long (ErrTooLarge), and of a type p accepts as detected
 // from its bytes, the same media type it was declared as (ErrType: a
 // declared image/png whose bytes are HTML is refused, since the declared
-// type is what the store serves it as). A file that fails is deleted
-// (under Policy.Claims, only while its key is pending: never a file a
-// record holds).
+// type is what the store serves it as). A file that fails is deleted.
+//
+// Under Policy.Claims, the upload was staged (Authorize): Confirm promotes
+// the claim (Claimer.Promote), checks the staged object, and copies it to
+// key under the promotion's lease (Policy.UploadTimeout), then deletes the
+// staged object. A refused staged object is deleted and the claim goes
+// back to pending, so the grant can upload again. A copy whose outcome is
+// unknown leaves the claim promoting (the copy may exist): a retried
+// Confirm then checks key as it is, and a sweep abandons the claim once
+// the lease has ended. A key that is not a staged upload awaiting
+// confirmation (already promoted or held: a retried confirmation; or
+// stored by Save) is checked as it is, and a refusal deletes nothing.
 //
 // key must be one the application granted (Policy.Prefix is checked, as
 // a guard): Confirm checks the file, not who may claim it.
@@ -103,9 +124,59 @@ func Confirm(ctx context.Context, store storage.Storage, key string, p Policy) (
 	if !strings.HasPrefix(key, p.Prefix) || storage.ValidateKey(key) != nil {
 		return File{}, fmt.Errorf("%w: key %q is not under the policy's prefix %q", ErrMalformed, key, p.Prefix)
 	}
-	body, info, err := store.Open(ctx, key)
+	if p.Claims == nil {
+		return check(ctx, store, key, p, func(ctx context.Context) error { return discard(ctx, store, p, key) })
+	}
+	deadline := time.Now().Add(uploadTimeout(p))
+	promoted, err := p.Claims.Promote(ctx, key, deadline)
+	if err != nil {
+		return File{}, fmt.Errorf("upload: promote %q: %w", key, err)
+	}
+	if !promoted {
+		return check(ctx, store, key, p, nil)
+	}
+	staged := StagingKey(key)
+	unpromote := func(err error) (File, error) {
+		uctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		if uerr := p.Claims.Unpromote(uctx, key); uerr != nil {
+			err = errors.Join(err, uerr)
+		}
+		return File{}, err
+	}
+	if _, err := check(ctx, store, staged, p, func(ctx context.Context) error {
+		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		return store.Delete(dctx, staged)
+	}); err != nil {
+		return unpromote(err) // nothing was copied to key
+	}
+	cctx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
+	info, err := storage.Copy(cctx, store, staged, key)
+	if err != nil {
+		err = fmt.Errorf("upload: promote %q: %w", key, err)
+		if errors.Is(err, storage.ErrUnknownOutcome) || errors.Is(err, storage.ErrExists) {
+			// The copy may exist (or something is at key): never assume it
+			// does not. The claim stays promoting, under its lease.
+			return File{}, err
+		}
+		return unpromote(err)
+	}
+	// The staged object has served its purpose (if this fails,
+	// claims.SweepStaging deletes it).
+	dctx, dcancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer dcancel()
+	_ = store.Delete(dctx, staged)
+	return File{ObjectInfo: info, Filename: info.StoredFilename()}, nil
+}
+
+// check checks the object at objKey against p as Confirm does. A refused
+// object is deleted with discard (nothing is deleted when it is nil).
+func check(ctx context.Context, store storage.Storage, objKey string, p Policy, discard func(context.Context) error) (File, error) {
+	body, info, err := store.Open(ctx, objKey)
 	if errors.Is(err, storage.ErrNotFound) {
-		return File{}, fmt.Errorf("%w: nothing was uploaded to %q", ErrNoFile, key)
+		return File{}, fmt.Errorf("%w: nothing was uploaded to %q", ErrNoFile, objKey)
 	}
 	if err != nil {
 		return File{}, err
@@ -117,8 +188,11 @@ func Confirm(ctx context.Context, store storage.Storage, key string, p Policy) (
 		return File{}, rerr
 	}
 	reject := func(err error) (File, error) {
-		if derr := discard(ctx, store, p, key); derr != nil {
-			err = errors.Join(err, &CleanupError{Key: key, Err: derr})
+		if discard == nil {
+			return File{}, err
+		}
+		if derr := discard(ctx); derr != nil {
+			err = errors.Join(err, &CleanupError{Key: objKey, Err: derr})
 		}
 		return File{}, err
 	}
@@ -129,7 +203,7 @@ func Confirm(ctx context.Context, store storage.Storage, key string, p Policy) (
 	// such as Content-Encoding): an upload that set any of it is not the
 	// object its grant described.
 	if v, ok := store.(storage.UploadVerifier); ok {
-		switch err := v.VerifyUpload(ctx, key); {
+		switch err := v.VerifyUpload(ctx, objKey); {
 		case errors.Is(err, storage.ErrInvalidOptions):
 			return reject(fmt.Errorf("%w: %w", ErrMalformed, err))
 		case err != nil:

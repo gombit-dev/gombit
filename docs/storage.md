@@ -293,30 +293,49 @@ confirmation, for direct uploads (the example uses twice
 **Uploads still writing.** A claim comes before its file, so a sweep can
 abandon the claim of an upload that is still streaming, and the upload can
 then publish its file. To keep that file from becoming an orphan no sweep
-can find, every claim has a **lease**: the time after which no writer
-publishes under its key any more.
+can find, every claim has a **lease**: the time after which no writer the
+application controls publishes under its key any more.
 
 - `upload.Save` and `upload.Receive` lease the key for
   `Policy.UploadTimeout` (`upload.DefaultUploadTimeout`, an hour, when zero)
   and run the `Put` under that deadline. A body read already in progress is
   not interrupted, but the drivers check the deadline just before they
   publish, so a `Put` still running then never stores anything.
-- `upload.Authorize` leases the key until the grant expires plus
-  `storage.SignedUploadTimeout` (an hour). The app's storage route aborts a
-  signed `PUT` that is still running then, before it publishes.
 - A `deleting` claim (abandoned, swept, or released by a record's delete)
   stays as a **tombstone** until its lease, plus `claims.LeaseMargin` (5
   minutes, for clocks that disagree and a publish already sent), has ended.
   Each sweep deletes its file again, so a file published late is still
   deleted, and no record can hold the key. Only then is the row removed.
 
-The lease bounds when a writer can publish. On S3 a direct upload goes
-straight to the bucket, and S3 cannot be told to abort a presigned `PUT` it
-has started. A `PUT` still sending its body when the lease ends can publish
-after the tombstone is gone. S3 drops a connection that is idle for about
-20 seconds, so this takes a body trickled for over an hour after the grant
-expired. If clients upload very large files over slow links, sweep less
-often than that, or keep such keys out of the protocol.
+**Direct uploads are staged.** The application cannot end a direct upload:
+S3 checks a presigned URL's expiry when the `PUT` starts, and a `PUT`
+started in time can publish whenever it ends. So under claims a client
+never writes a claimed key:
+
+1. `upload.Authorize` claims the key as staged (`claims.Stage`) and grants
+   a `PUT` to its staging key, `upload.StagingKey(key)`: `_staging/` and the
+   key. The grant's `Key` is still the key, which the client submits.
+2. `upload.Confirm` moves the claim to `promoting` (`claims.Promote`, which
+   one confirmation wins), checks the staged object, copies it to the key
+   (`storage.Copy`: S3's `CopyObject`, conditional where the backend
+   supports it), and deletes the staged copy. Only then can a record hold
+   the key; a staged claim that was never promoted cannot be held.
+3. A refused staged object is deleted and the claim goes back to `pending`,
+   so the grant can upload again. A copy whose outcome is unknown leaves the
+   claim `promoting`: the copy may exist. A retried `Confirm` checks the key
+   as it is, and a sweep abandons the claim once the promotion's lease
+   (`Policy.UploadTimeout`) has ended, never before.
+
+A late `PUT` can therefore only ever publish a staging object, which
+nothing refers to. A `deleting` staged claim deletes its staging object
+too, and `cl.SweepStaging(ctx)` deletes staging objects whose claim is gone
+or held. Run it periodically where clients upload straight to the backend
+(S3); it lists `_staging/`. With the local and memory drivers the app's own
+route aborts a signed `PUT` at `storage.SignedUploadTimeout` (an hour)
+after its URL expired, within the staged claim's lease, so `Sweep` alone
+suffices. On S3, a bucket lifecycle rule expiring `_staging/` after a day
+is a useful backstop for staging objects, but it is not part of the
+protocol: lifecycle expiry is coarse and asynchronous.
 
 **Ownership.** The sweep reads claims, never the store. A file without a
 claim is outside the protocol: nothing in `storage/claims` ever deletes it.
@@ -481,10 +500,10 @@ What a grant enforces:
   same instant, through any number of app processes, exactly one stores. Once
   the file has been uploaded and confirmed, the grant cannot replace it with
   other bytes. If `Confirm` refuses a file, it deletes it, and an unexpired
-  grant can then upload again. (Under claims, that upload is deleted too:
-  the refused key's tombstone outlives the grant.) A `PUT` may start until
-  the grant expires; the app's route aborts one still running
-  `storage.SignedUploadTimeout` later. An S3-compatible service must support
+  grant can then upload again. A `PUT` may start until the grant expires;
+  the app's route aborts one still running `storage.SignedUploadTimeout`
+  later (S3 cannot: under claims, uploads are staged, see
+  [Cleanup](#cleanup)). An S3-compatible service must support
   conditional writes (`If-None-Match` on `PutObject` and
   `CompleteMultipartUpload`); AWS S3 and MinIO do.
 - **Headers the grant does not sign.** SigV4 authenticates only the headers
