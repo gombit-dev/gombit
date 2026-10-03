@@ -82,6 +82,7 @@ func openStorage(cfg config.Config, logger *zap.Logger) (storage.Storage, *presi
 			ForcePathStyle:  c.ForcePathStyle,
 			PublicPrefix:    cfg.Storage.PublicPrefix,
 			PublicURL:       c.PublicURL,
+			Warn:            func(msg string, err error) { logger.Warn(msg, zap.Error(err)) },
 		})
 		if err != nil {
 			return nil, nil, fmt.Errorf("framework: %w", err)
