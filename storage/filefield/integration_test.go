@@ -13,6 +13,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/gombit-dev/gombit/field"
+	"github.com/gombit-dev/gombit/storage/claims"
 	"github.com/gombit-dev/gombit/storage/filefield"
 	"github.com/gombit-dev/gombit/storage/memory"
 	"github.com/gombit-dev/gombit/types"
@@ -54,25 +55,31 @@ func TestMySQL(t *testing.T) {
 
 // checkDatabase: the file column's unique index (512 bytes, within MySQL's
 // key length) holds one record per file, several records without an
-// optional file, and Accept / ReferencedBy see the stored keys.
+// optional file, and a record holds its file's claim, which another
+// record then cannot take.
 func checkDatabase(t *testing.T, db *gorm.DB) {
 	t.Helper()
 	ctx := context.Background()
-	if err := db.Migrator().DropTable(&integrationFile{}); err != nil {
+	models := append(claims.Models(), &integrationFile{})
+	if err := db.Migrator().DropTable(models...); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = db.Migrator().DropTable(&integrationFile{}) })
-	if err := db.AutoMigrate(&integrationFile{}); err != nil {
+	t.Cleanup(func() { _ = db.Migrator().DropTable(models...) })
+	if err := db.AutoMigrate(models...); err != nil {
 		t.Fatalf("migrate a 512-byte unique file column: %v", err)
 	}
 	store := memory.New()
+	cl := claims.New(db, store)
 	p, err := filefield.Policy("prefix=files/file/", field.File, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	long := types.File("files/file/0123456789abcdef0123456789abcdef")
+	if err := cl.Pending(ctx, long.Key()); err != nil {
+		t.Fatal(err)
+	}
 	putFile(t, store, long.Key(), png, "image/png")
-	if err := filefield.Accept(ctx, db, store, &integrationFile{}, "file", long.Key(), p); err != nil {
+	if err := filefield.Accept(ctx, store, cl, long.Key(), p); err != nil {
 		t.Fatalf("Accept = %v", err)
 	}
 	for i := 0; i < 2; i++ { // two records without a cover: NULLs do not collide
@@ -81,17 +88,18 @@ func checkDatabase(t *testing.T, db *gorm.DB) {
 			t.Fatalf("create without a cover: %v", err)
 		}
 	}
-	if err := db.Create(&integrationFile{File: long}).Error; err != nil {
+	create := func() error {
+		return cl.CreateWith(ctx, []string{long.Key()}, func(tx *gorm.DB) error {
+			return tx.Create(&integrationFile{File: long}).Error
+		})
+	}
+	if err := create(); err != nil {
 		t.Fatal(err)
 	}
-	if err := filefield.Accept(ctx, db, store, &integrationFile{}, "file", long.Key(), p); !errors.Is(err, filefield.ErrReferenced) {
-		t.Fatalf("Accept of a held file = %v, want ErrReferenced", err)
+	if err := create(); !errors.Is(err, claims.ErrNotPending) {
+		t.Fatalf("a second record taking a held file = %v, want ErrNotPending", err)
 	}
 	if err := db.Create(&integrationFile{File: long}).Error; err == nil {
 		t.Fatal("the unique index let two records hold one file")
-	}
-	used, err := filefield.ReferencedBy(db, &integrationFile{}, "file")(ctx, "files/file/nobody")
-	if err != nil || used {
-		t.Fatalf("ReferencedBy(an unheld key) = %v, %v", used, err)
 	}
 }

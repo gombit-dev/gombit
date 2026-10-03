@@ -126,10 +126,11 @@ type ObjectInfo struct {
 	// ETag identifies this version of the object's bytes, when the driver
 	// has one; it changes when the object is replaced with different
 	// bytes. A driver reports it from Put, Open, and Stat alike, or from
-	// none of them (empty: unsupported). Compare ETags, don't compute them:
-	// the local and memory drivers' is the hex SHA-256 of the bytes, S3's
-	// the hex MD5 for an object stored in one request and "<md5>-<parts>"
-	// for a multipart upload (a checksum of the parts, not of the bytes).
+	// none of them (empty: unsupported). It is opaque: compare ETags, never
+	// compute or interpret one. (S3's depends on how the object was stored
+	// and on the bucket's encryption, and is not a checksum of the bytes in
+	// general; the local and memory drivers happen to use a SHA-256, which
+	// is not part of the contract.)
 	ETag string
 	// ModTime is when the object was last stored (for an object written
 	// once, as uploads under generated keys are, when it was created).

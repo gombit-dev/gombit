@@ -594,6 +594,52 @@ func TestValidateRejectsUnsafeTrustedProxyInProduction(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsEquivalentTrustAllProxyRanges(t *testing.T) {
+	cases := []struct {
+		name    string
+		proxies []string
+	}{
+		{"nonzero IPv4 address with zero prefix", []string{"10.0.0.0/0"}},
+		{"padded zero prefix", []string{"0.0.0.0/00"}},
+		{"IPv6 zero prefix", []string{"::0/0"}},
+		{"two IPv4 halves", []string{"0.0.0.0/1", "128.0.0.0/1"}},
+		{"two IPv6 halves", []string{"::/1", "8000::/1"}},
+		{"IPv4-mapped IPv6 zero prefix", []string{"::ffff:0.0.0.0/96"}},
+		{"two IPv4-mapped IPv6 halves", []string{"::ffff:0.0.0.0/97", "::ffff:128.0.0.0/97"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := DefaultFor(EnvironmentProduction)
+			cfg.Auth.JWTSecret = "production-jwt-secret-32-bytes-min"
+			cfg.HTTP.TrustedProxies = tc.proxies
+			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "must not trust all proxies in production") {
+				t.Fatalf("Validate() = %v, want trust-all rejection for %q", err, tc.proxies)
+			}
+		})
+	}
+}
+
+func TestValidateAllowsLimitedTrustedProxyRanges(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		proxies []string
+	}{
+		{"private IPv4 range", []string{"10.0.0.0/8"}},
+		{"one IPv4 half", []string{"0.0.0.0/1"}},
+		{"mixed limited ranges", []string{"10.0.0.0/8", "2001:db8::/32"}},
+		{"IPv4-mapped private range", []string{"::ffff:10.0.0.0/104"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := DefaultFor(EnvironmentProduction)
+			cfg.Auth.JWTSecret = "production-jwt-secret-32-bytes-min"
+			cfg.HTTP.TrustedProxies = tc.proxies
+			if err := cfg.Validate(); err != nil {
+				t.Fatalf("Validate() = %v, want limited range accepted", err)
+			}
+		})
+	}
+}
+
 func TestValidateRejectsShortJWTSecretInProduction(t *testing.T) {
 	cfg := DefaultFor(EnvironmentProduction)
 	cfg.Auth.JWTSecret = "short"

@@ -382,7 +382,7 @@ func TestDirectUploads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if f.Size != int64(len(png)) || f.ContentType != "image/png" || f.Filename() != "résumé.png" {
+	if f.Size != int64(len(png)) || f.ContentType != "image/png" || f.Filename != "résumé.png" {
 		t.Fatalf("confirmed %+v", f)
 	}
 	// The grant is spent: other bytes of the same length and type cannot

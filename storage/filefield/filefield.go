@@ -5,12 +5,13 @@
 //
 // A field's value is an object key in App.Storage(). Its Policy (the
 // model's `storage` tag) is the prefix the field owns, the largest file,
-// and the accepted types. A record accepts a key only for an upload that
-// passes the policy (upload.Confirm, which checks the bytes) and that no
-// other record holds (the column's unique index is the ownership: one
-// record per file), so a client cannot attach a file it did not upload or
-// another record's file. Files never attached are removed by
-// storage.Sweep with ReferencedBy.
+// and the accepted types. Files are owned through storage/claims: an
+// upload grant claims its key (pending), and a record takes a key only for
+// an upload that passes the policy (Accept: upload.Confirm, which checks
+// the bytes) and whose claim its transaction holds (claims.CreateWith), so
+// a client cannot attach a file that was not uploaded for the field, or
+// another record's file. The column's unique index backs that up. Uploads
+// never attached stay pending until claims.Sweep removes them.
 package filefield
 
 import (
@@ -22,12 +23,14 @@ import (
 	"sync"
 	"time"
 
+	"go.uber.org/zap"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 
 	"github.com/gombit-dev/gombit/contract"
+	"github.com/gombit-dev/gombit/database"
 	"github.com/gombit-dev/gombit/field"
 	"github.com/gombit-dev/gombit/storage"
+	"github.com/gombit-dev/gombit/storage/claims"
 	"github.com/gombit-dev/gombit/storage/upload"
 )
 
@@ -43,11 +46,9 @@ var ImageTypes = []string{"image/png", "image/jpeg", "image/gif", "image/webp"}
 const LinkTTL = 15 * time.Minute
 
 // MaxKeyBytes bounds a file column (a generated key is the prefix and 32
-// hex digits): it keeps the column's unique index within MySQL's limit.
-const MaxKeyBytes = 512
-
-// ErrReferenced: the file is already another record's.
-var ErrReferenced = errors.New("filefield: the file belongs to another record")
+// hex digits): it keeps the column's unique index within MySQL's limit,
+// and is the longest key a claim holds (claims.MaxKeyLen).
+const MaxKeyBytes = claims.MaxKeyLen
 
 // FileInfo is a file as a read returns it.
 type FileInfo struct {
@@ -133,10 +134,19 @@ type UploadGrant struct {
 	Upload storage.UploadRequest `json:"upload" doc:"Send the file's bytes with this request, before it expires."`
 }
 
+// Claims is the claims the generated handlers own their files through,
+// over db and store, with failures to delete a released file logged to log.
+func Claims(db *gorm.DB, store storage.Storage, log *zap.Logger) *claims.Claims {
+	return claims.New(db, store, claims.WithWarn(func(msg string, err error) {
+		log.Warn(msg, zap.Error(err))
+	}))
+}
+
 // Authorize grants the upload of one file for a field with policy p
-// (upload.Authorize): the client sends the returned request, then submits
-// the grant's key as the field's value.
-func Authorize(ctx context.Context, store storage.Storage, p upload.Policy, r UploadGrantRequest) (UploadGrant, error) {
+// (upload.Authorize), its key claimed in cl: the client sends the returned
+// request, then submits the grant's key as the field's value.
+func Authorize(ctx context.Context, store storage.Storage, cl upload.Claimer, p upload.Policy, r UploadGrantRequest) (UploadGrant, error) {
+	p.Claims = cl
 	g, err := upload.Authorize(ctx, store, p, r.Size, r.ContentType, r.Filename)
 	if err != nil {
 		return UploadGrant{}, err
@@ -144,34 +154,21 @@ func Authorize(ctx context.Context, store storage.Storage, p upload.Policy, r Up
 	return UploadGrant{Key: g.Key, Upload: g.Request}, nil
 }
 
-// Accept checks that key may become the value of column in a new record of
-// model: nothing for no key; otherwise no record holds it yet
-// (ErrReferenced), and it is an upload that passes p (upload.Confirm: under
-// p's prefix, stored, within the size, of an accepted type by its bytes;
-// a file that fails is deleted).
-func Accept(ctx context.Context, db *gorm.DB, store storage.Storage, model any, column, key string, p upload.Policy) error {
+// Accept checks that key may become the value of a field with policy p in
+// a record: nothing for no key; otherwise an upload that passes p
+// (upload.Confirm under cl: under p's prefix, stored, within the size, of
+// an accepted type by its bytes). A file that fails is deleted, but only
+// while its claim is pending: never another record's file. Whether this
+// record may take the file is decided when its transaction holds the key
+// (claims.CreateWith fails with claims.ErrNotPending for a file another
+// record holds, or an upload that expired).
+func Accept(ctx context.Context, store storage.Storage, cl upload.Claimer, key string, p upload.Policy) error {
 	if key == "" {
 		return nil
 	}
-	used, err := ReferencedBy(db, model, column)(ctx, key)
-	if err != nil {
-		return err
-	}
-	if used {
-		return ErrReferenced
-	}
-	_, err = upload.Confirm(ctx, store, key, p)
+	p.Claims = cl
+	_, err := upload.Confirm(ctx, store, key, p)
 	return err
-}
-
-// ReferencedBy returns whether a record of model holds key in column: the
-// lookup storage.Sweep needs to remove the field's abandoned uploads.
-func ReferencedBy(db *gorm.DB, model any, column string) func(ctx context.Context, key string) (bool, error) {
-	return func(ctx context.Context, key string) (bool, error) {
-		var n int64
-		err := db.WithContext(ctx).Model(model).Where(clause.Eq{Column: clause.Column{Name: column}, Value: key}).Limit(1).Count(&n).Error
-		return n > 0, err
-	}
 }
 
 // Resolve describes the file with key for a read: nil for no key; Missing
@@ -187,7 +184,7 @@ func Resolve(ctx context.Context, store storage.Storage, key string) (*FileInfo,
 	if err != nil {
 		return nil, err
 	}
-	d := &FileInfo{Key: key, Filename: info.Filename(), Size: info.Size, ContentType: info.ContentType}
+	d := &FileInfo{Key: key, Filename: info.StoredFilename(), Size: info.Size, ContentType: info.ContentType}
 	u, err := store.URL(ctx, key, storage.PublicURL())
 	if errors.Is(err, storage.ErrNotPublic) || errors.Is(err, storage.ErrUnsupported) {
 		// Private, or public on a store without public URLs: a signed URL
@@ -204,16 +201,27 @@ func Resolve(ctx context.Context, store storage.Storage, key string) (*FileInfo,
 	return d, nil
 }
 
-// MapError maps an error of this package (or of upload and storage) to a
-// D10 error for a handler.
+// MapError maps an error of this package (or of upload, storage and
+// claims) to a D10 error for a handler.
 func MapError(ctx context.Context, err error) error {
-	if errors.Is(err, ErrReferenced) {
-		return contract.WithContext(ctx, contract.Conflict("The file is already attached to another record."))
+	if errors.Is(err, claims.ErrNotPending) {
+		return contract.WithContext(ctx, contract.Conflict("The file is already attached to a record, or its upload has expired."))
 	}
 	if errors.Is(err, storage.ErrUnsupported) {
 		return contract.WithContext(ctx, contract.Internal("File uploads are not configured on this server."))
 	}
 	return upload.MapError(ctx, err)
+}
+
+// MapCreateError maps the error of creating a record with files
+// (claims.CreateWith): a file it cannot take is MapError's conflict;
+// anything else is the database's (database.MapPersistError, with
+// conflict and op as there).
+func MapCreateError(ctx context.Context, err error, conflict, op string) error {
+	if errors.Is(err, claims.ErrNotPending) {
+		return MapError(ctx, err)
+	}
+	return database.MapPersistError(ctx, err, conflict, op)
 }
 
 // KeyOf is the key of an optional file field's value ("" for nil).

@@ -68,7 +68,7 @@ func TestDirectUploadFlow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if f.Key != g.Key || f.Size != int64(len(png)) || f.ContentType != "image/png" || f.Filename() != "me.png" {
+	if f.Key != g.Key || f.Size != int64(len(png)) || f.ContentType != "image/png" || f.Filename != "me.png" {
 		t.Fatalf("confirmed %+v", f)
 	}
 }
@@ -206,5 +206,63 @@ func TestConfirmAsksTheStoreToVerify(t *testing.T) {
 				t.Fatalf("after Confirm the object exists = %v, want deleted = %v", exists, tc.deleted)
 			}
 		})
+	}
+}
+
+// TestAuthorizeClaims: a direct upload's key is claimed before the grant is
+// made, a failing claim makes no grant, and a grant that cannot be made
+// drops its claim.
+func TestAuthorizeClaims(t *testing.T) {
+	store, _ := directStore(t)
+	ctx := context.Background()
+	cl := newFakeClaims(store)
+	p := images
+	p.Claims = cl
+	g, err := upload.Authorize(ctx, store, p, int64(len(png)), "image/png", "a.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cl.claimed) != 1 || cl.claimed[0] != g.Key {
+		t.Fatalf("claimed %v, want the granted key %s", cl.claimed, g.Key)
+	}
+	boom := errors.New("claims: database down")
+	cl.pendingErr = boom
+	if _, err := upload.Authorize(ctx, store, p, int64(len(png)), "image/png", "a.png"); !errors.Is(err, boom) {
+		t.Fatalf("Authorize with a failing claim = %v, want its error", err)
+	}
+	cl = newFakeClaims(store)
+	p.Claims = cl
+	if _, err := upload.Authorize(ctx, memory.New(), p, int64(len(png)), "image/png", "a.png"); !errors.Is(err, storage.ErrUnsupported) {
+		t.Fatalf("Authorize on a store without direct uploads = %v", err)
+	}
+	if len(cl.claimed) != 1 || len(cl.pending) != 0 {
+		t.Fatalf("claimed %v, still pending %v: a grant not made must drop its claim", cl.claimed, cl.pending)
+	}
+}
+
+// TestConfirmUnderClaimsKeepsHeld: under Policy.Claims, a refused
+// confirmation deletes the file only while its key is pending: a file a
+// record holds (or one never claimed) is kept, whatever policy confirms it.
+func TestConfirmUnderClaimsKeepsHeld(t *testing.T) {
+	ctx := context.Background()
+	store := memory.New()
+	if _, err := store.Put(ctx, "avatars/a", strings.NewReader("<html>"), storage.PutOptions{ContentType: "image/png"}); err != nil {
+		t.Fatal(err)
+	}
+	cl := newFakeClaims(store)
+	p := images
+	p.Claims = cl
+	if _, err := upload.Confirm(ctx, store, "avatars/a", p); !errors.Is(err, upload.ErrType) {
+		t.Fatalf("Confirm = %v, want ErrType", err)
+	}
+	if exists, _ := storage.Exists(ctx, store, "avatars/a"); !exists || len(cl.abandoned) != 1 {
+		t.Fatalf("a held file: exists = %v, abandoned %v; want it kept, through Abandon", exists, cl.abandoned)
+	}
+	cl.pending["avatars/a"] = true
+	if _, err := upload.Confirm(ctx, store, "avatars/a", p); !errors.Is(err, upload.ErrType) {
+		t.Fatalf("Confirm = %v, want ErrType", err)
+	}
+	if exists, _ := storage.Exists(ctx, store, "avatars/a"); exists {
+		t.Fatal("a refused pending file was kept")
 	}
 }

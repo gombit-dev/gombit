@@ -886,6 +886,18 @@ func (f modelField) policyVar(typ string) string {
 		"}\n\n"
 }
 
+// fileKeysExpr is the Go expression for the keys of row's request file
+// fields, a []string (claims.CreateWith skips the empty ones).
+func (r modelResource) fileKeysExpr(row string) string {
+	var keys []string
+	for _, f := range r.fileFields() {
+		if f.InRequest {
+			keys = append(keys, f.fileKeyExpr(row))
+		}
+	}
+	return "[]string{" + strings.Join(keys, ", ") + "}"
+}
+
 // fileKeyExpr is the Go expression for f's object key in row ("" when none).
 func (f modelField) fileKeyExpr(row string) string {
 	if f.File.Pointer {

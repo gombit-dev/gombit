@@ -1239,6 +1239,7 @@ func TestGenerateSeedsBootstrapMigrationForResolvableVersion(t *testing.T) {
 		{ImportPath: "github.com/gombit-dev/gombit/auth", TypeName: "RefreshToken"},
 		{ImportPath: "github.com/gombit-dev/gombit/auth", TypeName: "Group"},
 		{ImportPath: "github.com/gombit-dev/gombit/auth", TypeName: "Permission"},
+		{ImportPath: "github.com/gombit-dev/gombit/storage/claims", TypeName: "Claim"},
 		{ImportPath: "github.com/example/demo/internal/product", TypeName: "Product"},
 	}
 	if !reflect.DeepEqual(got.Models, wantModels) {

@@ -55,6 +55,9 @@ func Authorize(ctx context.Context, store storage.Storage, p Policy, size int64,
 	if err != nil {
 		return Grant{}, err
 	}
+	if err := claim(ctx, p, key); err != nil {
+		return Grant{}, err
+	}
 	md := maps.Clone(p.Metadata)
 	if filename = CleanFilename(filename); filename != "" {
 		if md == nil {
@@ -73,6 +76,7 @@ func Authorize(ctx context.Context, store storage.Storage, p Policy, size int64,
 		Metadata:    md,
 	})
 	if err != nil {
+		unclaim(ctx, p, key)
 		return Grant{}, err
 	}
 	return Grant{Key: key, Request: req}, nil
@@ -83,7 +87,9 @@ func Authorize(ctx context.Context, store storage.Storage, p Policy, size int64,
 // most p.MaxBytes long (ErrTooLarge), and of a type p accepts as detected
 // from its bytes, the same media type it was declared as (ErrType: a
 // declared image/png whose bytes are HTML is refused, since the declared
-// type is what the store serves it as). A file that fails is deleted.
+// type is what the store serves it as). A file that fails is deleted
+// (under Policy.Claims, only while its key is pending: never a file a
+// record holds).
 //
 // key must be one the application granted (Policy.Prefix is checked, as
 // a guard): Confirm checks the file, not who may claim it.
@@ -108,7 +114,7 @@ func Confirm(ctx context.Context, store storage.Storage, key string, p Policy) (
 		return File{}, rerr
 	}
 	reject := func(err error) (File, error) {
-		if derr := discard(ctx, store, key); derr != nil {
+		if derr := discard(ctx, store, p, key); derr != nil {
 			err = errors.Join(err, &CleanupError{Key: key, Err: derr})
 		}
 		return File{}, err
@@ -140,5 +146,5 @@ func Confirm(ctx context.Context, store storage.Storage, key string, p Policy) (
 	if err != nil || declaredType != detectedType {
 		return reject(fmt.Errorf("%w: declared %q, but the bytes are %q", ErrType, info.ContentType, detected))
 	}
-	return File{ObjectInfo: info}, nil
+	return File{ObjectInfo: info, Filename: info.StoredFilename()}, nil
 }

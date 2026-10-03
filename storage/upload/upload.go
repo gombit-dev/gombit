@@ -118,9 +118,7 @@ type Policy struct {
 	// Required: "*/*" accepts any type, and must be asked for.
 	Types []string
 	// Prefix starts every generated key ("avatars/"): empty, or a valid
-	// key path ending with '/'. Set one for files a record owns: the
-	// cleanup helpers (storage.DeleteOwned, storage.Sweep) work only under
-	// a prefix, never on the whole store.
+	// key path ending with '/'.
 	Prefix string
 	// Field is the multipart form field holding the file (DefaultField
 	// when empty). Receive only.
@@ -139,6 +137,25 @@ type Policy struct {
 	// signed URL (DefaultGrantExpiry when zero; whole seconds, at most
 	// storage.MaxURLExpiry).
 	GrantExpiry time.Duration
+	// Claims, when set, puts uploads under an ownership protocol
+	// (storage/claims: a *claims.Claims). Each generated key is claimed
+	// (Pending) before anything is stored or granted under it, and a
+	// failure to claim fails the upload. A file that fails (an invalid
+	// request, a refused confirmation) is deleted through Abandon, which
+	// deletes it only while its claim is pending: never a file a record
+	// holds, nor one under a key that was never claimed.
+	Claims Claimer
+}
+
+// Claimer is the ownership protocol uploads take part in; *claims.Claims
+// implements it.
+type Claimer interface {
+	// Pending claims key, which nothing has been stored under yet.
+	Pending(ctx context.Context, key string) error
+	// Abandon deletes the object of key and its claim if the claim is
+	// still pending, and reports whether it did; it leaves any other key
+	// alone.
+	Abandon(ctx context.Context, key string) (bool, error)
 }
 
 // DefaultGrantExpiry is how long a direct upload grant works unless
@@ -146,11 +163,13 @@ type Policy struct {
 // short enough that a leaked grant is soon useless.
 const DefaultGrantExpiry = 15 * time.Minute
 
-// File is a stored upload. Its Filename() is the client's filename,
-// cleaned (empty when it sent none): for display and Content-Disposition
-// only, never a path.
+// File is a stored upload.
 type File struct {
 	storage.ObjectInfo
+	// Filename is the client's filename, cleaned (empty when it sent none):
+	// for display and Content-Disposition only, never a path. It is the
+	// stored FilenameMetadata (ObjectInfo.StoredFilename).
+	Filename string
 }
 
 // Validate reports whether p is a usable policy (the check every function
@@ -269,13 +288,16 @@ func save(ctx context.Context, store storage.Storage, src io.Reader, filename st
 	if err != nil {
 		return File{}, err
 	}
+	if err := claim(ctx, p, key); err != nil {
+		return File{}, err
+	}
 	filename = CleanFilename(filename)
 	md := maps.Clone(p.Metadata)
 	if filename != "" {
 		if md == nil {
 			md = map[string]string{}
 		}
-		fitMetadata(md, filename)
+		filename = fitMetadata(md, filename)
 	}
 	info, err := store.Put(ctx, key, io.MultiReader(bytes.NewReader(head), src), storage.PutOptions{
 		ContentType: contentType,
@@ -285,15 +307,16 @@ func save(ctx context.Context, store storage.Storage, src io.Reader, filename st
 	if errors.Is(err, storage.ErrUnknownOutcome) {
 		// The store may hold the file under key: no one else will ever use
 		// this key, so delete it, then report the failure as it now stands.
-		if derr := discard(ctx, store, key); derr != nil {
+		if derr := discard(ctx, store, p, key); derr != nil {
 			return File{}, errors.Join(source.classify(ctx, err), &CleanupError{Key: key, Err: derr})
 		}
 		return File{}, source.classify(ctx, settled(key, err))
 	}
 	if err != nil {
+		unclaim(ctx, p, key)
 		return File{}, source.classify(ctx, err)
 	}
-	return File{ObjectInfo: info}, nil
+	return File{ObjectInfo: info, Filename: filename}, nil
 }
 
 // settled is a Put failure of unknown outcome whose key has since been
@@ -353,6 +376,26 @@ func fitMetadata(md map[string]string, filename string) string {
 	}
 	delete(md, FilenameMetadata)
 	return ""
+}
+
+// claim claims key (Policy.Claims) before anything is stored under it.
+func claim(ctx context.Context, p Policy, key string) error {
+	if p.Claims == nil {
+		return nil
+	}
+	if err := p.Claims.Pending(ctx, key); err != nil {
+		return fmt.Errorf("upload: claim %q: %w", key, err)
+	}
+	return nil
+}
+
+// unclaim drops the claim of key, under which nothing was stored (a failed
+// Put, a grant that could not be made). If that fails too, the claim stays
+// pending, and the protocol's sweep drops it later.
+func unclaim(ctx context.Context, p Policy, key string) {
+	if p.Claims != nil {
+		_ = discard(ctx, nil, p, key)
+	}
 }
 
 // newKey returns prefix followed by a random 128-bit id, idHexLen hex
@@ -431,7 +474,7 @@ func Receive(store storage.Storage, r *http.Request, p Policy) (File, error) {
 	var fileBytes, fieldBytes int64 // the file's bytes; other fields' bytes
 	fail := func(err error) (File, error) {
 		if stored {
-			if derr := discard(ctx, store, file.Key); derr != nil {
+			if derr := discard(ctx, store, p, file.Key); derr != nil {
 				err = errors.Join(err, &CleanupError{Key: file.Key, Err: derr})
 			}
 		}
@@ -583,10 +626,15 @@ func clientGone(ctx context.Context, err error) error {
 
 // discard deletes a stored file that turned out to be part of an invalid
 // request, even when the request's context has ended (a client that went
-// away mid-request).
-func discard(ctx context.Context, store storage.Storage, key string) error {
+// away mid-request). Under Policy.Claims it abandons the key instead, which
+// deletes the file only while its claim is pending.
+func discard(ctx context.Context, store storage.Storage, p Policy, key string) error {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
+	if p.Claims != nil {
+		_, err := p.Claims.Abandon(ctx, key)
+		return err
+	}
 	return store.Delete(ctx, key)
 }
 

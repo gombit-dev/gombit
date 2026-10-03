@@ -11,8 +11,9 @@ import (
 )
 
 // bootstrapModels lists the GORM models internal/platform/database.go.tmpl
-// registers for AutoMigrate: the framework's own auth tables plus the
-// product/ example, in the same order the template writes them.
+// registers for AutoMigrate: the framework's own auth and storage-claims
+// tables plus the product/ example, in the same order the template writes
+// them.
 //
 // AutoMigrate runs at every app startup (app.OnStart), creating these tables
 // directly through GORM. Without a migration on disk for them from the
@@ -33,6 +34,7 @@ func bootstrapModels(module string) []migrations.Model {
 		{ImportPath: authImport, TypeName: "RefreshToken"},
 		{ImportPath: authImport, TypeName: "Group"},
 		{ImportPath: authImport, TypeName: "Permission"},
+		{ImportPath: "github.com/gombit-dev/gombit/storage/claims", TypeName: "Claim"},
 		{ImportPath: module + "/internal/product", TypeName: "Product"},
 	}
 }

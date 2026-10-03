@@ -14,6 +14,7 @@ import (
 	"github.com/gombit-dev/gombit/examples/storage/internal/document"
 	"github.com/gombit-dev/gombit/framework"
 	"github.com/gombit-dev/gombit/storage"
+	"github.com/gombit-dev/gombit/storage/claims"
 )
 
 // TestFileFieldFlow: the example's Document resource, end to end through
@@ -30,7 +31,7 @@ func TestFileFieldFlow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AutoMigrate(&document.Document{}); err != nil {
+	if err := db.AutoMigrate(append(claims.Models(), &document.Document{})...); err != nil {
 		t.Fatal(err)
 	}
 	app, err := framework.New(framework.WithConfig(cfg), framework.WithDatabase(db))
@@ -94,6 +95,13 @@ func TestFileFieldFlow(t *testing.T) {
 	// Another record cannot take the file; a key never uploaded is refused.
 	if code, out := call(http.MethodPost, api, map[string]any{"title": "b", "attachment": key, "cover": nil}); code != http.StatusConflict {
 		t.Fatalf("a held file = %d %v, want 409", code, out)
+	}
+	var claim claims.Claim
+	if err := db.Where("object_key = ?", key).Take(&claim).Error; err != nil || claim.State != claims.Held {
+		t.Fatalf("the attached file's claim = %+v, %v; want held", claim, err)
+	}
+	if ok, _ := storage.Exists(t.Context(), app.Storage(), key); !ok {
+		t.Fatal("refusing a held file deleted it")
 	}
 	if code, out := call(http.MethodPost, api, map[string]any{"title": "c", "attachment": "document/attachment/never", "cover": nil}); code != http.StatusUnprocessableEntity {
 		t.Fatalf("a key never uploaded = %d %v, want 422", code, out)
