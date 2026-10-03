@@ -155,7 +155,7 @@ var errFull = errors.New("records: full")
 // a retried confirmation): no file is left that nothing refers to, and no
 // file a record refers to is ever deleted.
 func (fs *files) record(c *gin.Context, f upload.File) bool {
-	err := fs.claims.CreateWith(c.Request.Context(), f.Key, func(tx *gorm.DB) error {
+	err := fs.claims.CreateWith(c.Request.Context(), []string{f.Key}, func(tx *gorm.DB) error {
 		var n int64
 		if err := tx.Model(&fileRecord{}).Count(&n).Error; err != nil {
 			return err
@@ -320,7 +320,7 @@ func register(r gin.IRouter, fs *files) {
 			fail(c, contract.NotFound("file not found"))
 			return
 		}
-		err := fs.claims.DeleteWith(c.Request.Context(), key, func(tx *gorm.DB) error {
+		err := fs.claims.DeleteWith(c.Request.Context(), []string{key}, func(tx *gorm.DB) error {
 			res := tx.Delete(&fileRecord{Key: key})
 			if res.Error == nil && res.RowsAffected == 0 {
 				return errNoRecord

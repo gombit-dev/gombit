@@ -251,7 +251,7 @@ so the record and the hold commit together or not at all:
 ```go
 f, err := upload.Receive(store, r, avatars)
 // ...
-err = cl.CreateWith(ctx, f.Key, func(tx *gorm.DB) error {
+err = cl.CreateWith(ctx, []string{f.Key}, func(tx *gorm.DB) error {
 	return tx.Create(&Avatar{UserID: user.ID, FileKey: f.Key}).Error
 })
 ```
@@ -263,8 +263,17 @@ request already recorded the key (a retried confirmation), the key is
 `held`. Abandoning it then does nothing, and the file is kept. A key that
 is not `pending` fails the transaction with `claims.ErrNotPending`.
 
-**Deleting a record.** Use `DeleteWith`. Your delete and the key's move
-from `held` to `deleting` commit in one transaction, and then the file is
+A record with several files passes all their keys; empty keys (an
+optional file left out) are skipped.
+
+**Replacing a file.** Use `Update(ctx, hold, release, fn)`. Your change,
+the new keys' moves to `held`, and the old keys' moves to `deleting`
+commit in one transaction. If it fails, the new uploads are abandoned and
+the old files kept; once it commits, the old files are deleted. A key in
+both lists (a file kept) is left alone.
+
+**Deleting a record.** Use `DeleteWith`. Your delete and the keys' moves
+from `held` to `deleting` commit in one transaction, and then the files are
 deleted. If deleting the file fails, the record is still gone: the warning
 hook is told, and the next sweep finishes the delete. A key with no claim
 (a file stored before the application adopted claims, or no file at all)

@@ -55,6 +55,7 @@ func runSuite(t *testing.T, db *gorm.DB) {
 		"CommittedHoldIsNotDeleted": testCommittedHoldIsNotDeleted,
 		"Sweep":                     testSweep,
 		"DeleteWith":                testDeleteWith,
+		"Update":                    testUpdate,
 		"ConfirmRacesSweep":         testConfirmRacesSweep,
 		"SweepFirstWins":            testSweepFirstWins,
 		"ConfirmationInFlightWins":  testConfirmationInFlightWins,
@@ -139,7 +140,7 @@ func testCreateHolds(t *testing.T, db *gorm.DB) {
 	store := memory.New()
 	c := claims.New(db, store)
 	upload(t, c, store, "u/1")
-	if err := c.CreateWith(context.Background(), "u/1", insert("u/1")); err != nil {
+	if err := c.CreateWith(context.Background(), []string{"u/1"}, insert("u/1")); err != nil {
 		t.Fatal(err)
 	}
 	if state(t, db, "u/1") != claims.Held || !exists(t, store, "u/1") {
@@ -155,7 +156,7 @@ func testFailedCreateDeletes(t *testing.T, db *gorm.DB) {
 	c := claims.New(db, store)
 	upload(t, c, store, "u/1")
 	boom := errors.New("validation failed")
-	err := c.CreateWith(context.Background(), "u/1", func(*gorm.DB) error { return boom })
+	err := c.CreateWith(context.Background(), []string{"u/1"}, func(*gorm.DB) error { return boom })
 	if !errors.Is(err, boom) {
 		t.Fatalf("CreateWith = %v, want the record's error", err)
 	}
@@ -173,10 +174,10 @@ func testRetriedConfirmationKeeps(t *testing.T, db *gorm.DB) {
 	c := claims.New(db, store)
 	upload(t, c, store, "u/1")
 	ctx := context.Background()
-	if err := c.CreateWith(ctx, "u/1", insert("u/1")); err != nil {
+	if err := c.CreateWith(ctx, []string{"u/1"}, insert("u/1")); err != nil {
 		t.Fatal(err)
 	}
-	err := c.CreateWith(ctx, "u/1", insert("u/1"))
+	err := c.CreateWith(ctx, []string{"u/1"}, insert("u/1"))
 	if err == nil {
 		t.Fatal("a retried create of a held key succeeded")
 	}
@@ -215,11 +216,11 @@ func testSweep(t *testing.T, db *gorm.DB) {
 	ctx := context.Background()
 	upload(t, c, store, "u/stale")
 	upload(t, c, store, "u/held")
-	if err := c.CreateWith(ctx, "u/held", insert("u/held")); err != nil {
+	if err := c.CreateWith(ctx, []string{"u/held"}, insert("u/held")); err != nil {
 		t.Fatal(err)
 	}
 	upload(t, c, store, "u/deleting") // a delete interrupted after its record went
-	if err := c.CreateWith(ctx, "u/deleting", insert("u/deleting")); err != nil {
+	if err := c.CreateWith(ctx, []string{"u/deleting"}, insert("u/deleting")); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Transaction(func(tx *gorm.DB) error { return c.Release(ctx, tx, "u/deleting") }); err != nil {
@@ -251,7 +252,7 @@ func testSweep(t *testing.T, db *gorm.DB) {
 	for i := range 5 {
 		upload(t, c, store, fmt.Sprintf("u/backlog-%d", i))
 		upload(t, c, store, fmt.Sprintf("u/doomed-%d", i))
-		if err := c.CreateWith(ctx, fmt.Sprintf("u/doomed-%d", i), insert(fmt.Sprintf("u/doomed-%d", i))); err != nil {
+		if err := c.CreateWith(ctx, []string{fmt.Sprintf("u/doomed-%d", i)}, insert(fmt.Sprintf("u/doomed-%d", i))); err != nil {
 			t.Fatal(err)
 		}
 		if err := db.Transaction(func(tx *gorm.DB) error { return c.Release(ctx, tx, fmt.Sprintf("u/doomed-%d", i)) }); err != nil {
@@ -269,17 +270,17 @@ func testDeleteWith(t *testing.T, db *gorm.DB) {
 	c := claims.New(db, store)
 	ctx := context.Background()
 	upload(t, c, store, "u/1")
-	if err := c.CreateWith(ctx, "u/1", insert("u/1")); err != nil {
+	if err := c.CreateWith(ctx, []string{"u/1"}, insert("u/1")); err != nil {
 		t.Fatal(err)
 	}
 	boom := errors.New("constraint")
-	if err := c.DeleteWith(ctx, "u/1", func(*gorm.DB) error { return boom }); !errors.Is(err, boom) {
+	if err := c.DeleteWith(ctx, []string{"u/1"}, func(*gorm.DB) error { return boom }); !errors.Is(err, boom) {
 		t.Fatalf("DeleteWith = %v, want the record's error", err)
 	}
 	if !exists(t, store, "u/1") || state(t, db, "u/1") != claims.Held {
 		t.Fatal("a failed record delete removed the file or its hold")
 	}
-	if err := c.DeleteWith(ctx, "u/1", func(tx *gorm.DB) error { return tx.Where("file_key = ?", "u/1").Delete(&doc{}).Error }); err != nil {
+	if err := c.DeleteWith(ctx, []string{"u/1"}, func(tx *gorm.DB) error { return tx.Where("file_key = ?", "u/1").Delete(&doc{}).Error }); err != nil {
 		t.Fatal(err)
 	}
 	if exists(t, store, "u/1") || state(t, db, "u/1") != "none" {
@@ -294,7 +295,7 @@ func testDeleteWith(t *testing.T, db *gorm.DB) {
 	if err := db.Create(&doc{FileKey: "u/legacy"}).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := c.DeleteWith(ctx, "u/legacy", func(tx *gorm.DB) error { return tx.Where("file_key = ?", "u/legacy").Delete(&doc{}).Error }); err != nil {
+	if err := c.DeleteWith(ctx, []string{"u/legacy"}, func(tx *gorm.DB) error { return tx.Where("file_key = ?", "u/legacy").Delete(&doc{}).Error }); err != nil {
 		t.Fatalf("DeleteWith of an unclaimed key = %v", err)
 	}
 	var n int64
@@ -308,7 +309,7 @@ func testDeleteWith(t *testing.T, db *gorm.DB) {
 	if err := db.Create(&doc{FileKey: "u/pending"}).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := c.DeleteWith(ctx, "u/pending", func(tx *gorm.DB) error { return tx.Where("file_key = ?", "u/pending").Delete(&doc{}).Error }); !errors.Is(err, claims.ErrNotHeld) {
+	if err := c.DeleteWith(ctx, []string{"u/pending"}, func(tx *gorm.DB) error { return tx.Where("file_key = ?", "u/pending").Delete(&doc{}).Error }); !errors.Is(err, claims.ErrNotHeld) {
 		t.Fatalf("DeleteWith of a pending key = %v, want ErrNotHeld", err)
 	}
 	db.Model(&doc{}).Where("file_key = ?", "u/pending").Count(&n)
@@ -333,7 +334,7 @@ func testConfirmRacesSweep(t *testing.T, db *gorm.DB) {
 		var createErr error
 		wg.Add(2)
 		jitter := func() { time.Sleep(time.Duration(rand.IntN(3000)) * time.Microsecond) } //nolint:gosec // scheduling jitter, not a secret
-		go func() { defer wg.Done(); jitter(); createErr = c.CreateWith(ctx, key, insert(key)) }()
+		go func() { defer wg.Done(); jitter(); createErr = c.CreateWith(ctx, []string{key}, insert(key)) }()
 		go func() { defer wg.Done(); jitter(); _, _ = c.Sweep(ctx, 0) }()
 		wg.Wait()
 		var n int64
@@ -368,7 +369,7 @@ func testSweepFirstWins(t *testing.T, db *gorm.DB) {
 	if res, err := c.Sweep(ctx, 0); err != nil || res.Abandoned != 1 {
 		t.Fatalf("Sweep = %+v, %v", res, err)
 	}
-	err := c.CreateWith(ctx, "u/1", insert("u/1"))
+	err := c.CreateWith(ctx, []string{"u/1"}, insert("u/1"))
 	if !errors.Is(err, claims.ErrNotPending) {
 		t.Fatalf("a confirmation after the sweep = %v, want ErrNotPending", err)
 	}
@@ -413,5 +414,58 @@ func testConfirmationInFlightWins(t *testing.T, db *gorm.DB) {
 	<-swept // its error, if any, is an engine refusing to wait: it deleted nothing
 	if !exists(t, store, "u/1") || state(t, db, "u/1") != claims.Held {
 		t.Fatalf("after the in-flight confirmation committed: object %v, claim %s; want kept, held", exists(t, store, "u/1"), state(t, db, "u/1"))
+	}
+}
+
+// testUpdate: one record, several files. Creating with two keys holds both,
+// or abandons both; replacing a file holds the new one and deletes the old
+// one only once the change commits; a failed replacement keeps the old one
+// and abandons the new one; unchanged and empty keys are left alone.
+func testUpdate(t *testing.T, db *gorm.DB) {
+	store := memory.New()
+	c := claims.New(db, store)
+	ctx := context.Background()
+	upload(t, c, store, "u/a")
+	upload(t, c, store, "u/b")
+	boom := errors.New("constraint")
+	if err := c.CreateWith(ctx, []string{"u/a", "", "u/b"}, func(*gorm.DB) error { return boom }); !errors.Is(err, boom) {
+		t.Fatalf("CreateWith = %v, want the record's error", err)
+	}
+	if exists(t, store, "u/a") || exists(t, store, "u/b") {
+		t.Fatal("a failed create with two files kept one")
+	}
+	upload(t, c, store, "u/a")
+	upload(t, c, store, "u/b")
+	if err := c.CreateWith(ctx, []string{"u/a", "", "u/b"}, insert("u/a")); err != nil {
+		t.Fatal(err)
+	}
+	if state(t, db, "u/a") != claims.Held || state(t, db, "u/b") != claims.Held {
+		t.Fatal("CreateWith with two files did not hold both")
+	}
+
+	replace := func(from, to string) func(tx *gorm.DB) error {
+		return func(tx *gorm.DB) error {
+			return tx.Model(&doc{}).Where("file_key = ?", from).Update("file_key", to).Error
+		}
+	}
+	upload(t, c, store, "u/c")
+	if err := c.Update(ctx, []string{"u/c"}, []string{"u/a"}, func(*gorm.DB) error { return boom }); !errors.Is(err, boom) {
+		t.Fatalf("Update = %v, want the record's error", err)
+	}
+	if !exists(t, store, "u/a") || state(t, db, "u/a") != claims.Held || exists(t, store, "u/c") {
+		t.Fatal("a failed replacement lost the old file or kept the new one")
+	}
+	upload(t, c, store, "u/c")
+	if err := c.Update(ctx, []string{"u/c", "u/b"}, []string{"u/a", "u/b", ""}, replace("u/a", "u/c")); err != nil {
+		t.Fatal(err)
+	}
+	if exists(t, store, "u/a") || state(t, db, "u/a") != "none" {
+		t.Fatal("the replaced file or its claim remains")
+	}
+	if !exists(t, store, "u/c") || state(t, db, "u/c") != claims.Held {
+		t.Fatal("the new file is not held")
+	}
+	if !exists(t, store, "u/b") || state(t, db, "u/b") != claims.Held {
+		t.Fatal("a file in both lists (unchanged) was touched")
 	}
 }

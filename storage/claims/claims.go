@@ -30,8 +30,9 @@
 // caller saw an error holds its key, so the cleanup that follows finds it
 // held and keeps the object.
 //
-// Use CreateWith to write a record that refers to a new upload, DeleteWith
-// to delete one, and Sweep, periodically, for uploads no record ever took.
+// Use CreateWith to write a record that refers to new uploads, Update to
+// change which files a record refers to, DeleteWith to delete a record, and
+// Sweep, periodically, for uploads no record ever took.
 // Objects without a claim are outside the protocol, and nothing here ever
 // deletes them. Storage drivers know nothing of claims: storage.Storage is
 // objects only.
@@ -169,71 +170,122 @@ func transition(ctx context.Context, db *gorm.DB, key, from, to string, notFrom 
 	return nil
 }
 
-// CreateWith writes a record that refers to key, a new upload's pending
-// key: fn writes the record in tx, and the key is held in the same
-// transaction. When the transaction fails, CreateWith abandons the upload:
-// it deletes the object, but only if the key is still pending. If the
-// transaction in fact committed (its answer lost), or another request
-// already holds the key (a retried confirmation), the key is held and the
-// object is kept. The result is the transaction's error.
-func (c *Claims) CreateWith(ctx context.Context, key string, fn func(tx *gorm.DB) error) error {
-	err := c.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := c.Hold(ctx, tx, key); err != nil {
-			return err
-		}
-		return fn(tx)
-	})
-	if err == nil {
-		return nil
-	}
-	actx, cancel := detached(ctx)
-	defer cancel()
-	if _, aerr := c.Abandon(actx, key); aerr != nil {
-		return errors.Join(err, aerr)
-	}
-	return err
+// CreateWith writes a record that refers to keys, new uploads' pending
+// keys: fn writes the record in tx, and the keys are held in the same
+// transaction. When the transaction fails, CreateWith abandons the
+// uploads: it deletes each object, but only if its key is still pending.
+// If the transaction in fact committed (its answer lost), or another
+// request already holds a key (a retried confirmation), the key is held
+// and its object is kept. Empty keys (an optional file left out) are
+// skipped. The result is the transaction's error.
+func (c *Claims) CreateWith(ctx context.Context, keys []string, fn func(tx *gorm.DB) error) error {
+	return c.Update(ctx, keys, nil, fn)
 }
 
-// DeleteWith deletes a record that refers to key: fn deletes the record in
-// tx, and the key is released in the same transaction. Once it commits,
-// the object is deleted (Finish); a failure to delete it then is reported
-// through the warning hook, and Sweep finishes it. A key with no claim at
-// all (a file stored before the application adopted claims, or no file:
-// key "") is outside the protocol: the record is deleted and the object,
-// if any, is left alone. A claim that is not held (pending or deleting:
-// not this record's) fails with ErrNotHeld, and the record is kept. The
-// result is the transaction's error: nil means the record is gone.
-func (c *Claims) DeleteWith(ctx context.Context, key string, fn func(tx *gorm.DB) error) error {
-	unclaimed := false
-	if err := c.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+// DeleteWith deletes a record that refers to keys: fn deletes the record in
+// tx, and the keys are released in the same transaction. Once it commits,
+// their objects are deleted (Finish); a failure to delete one then is
+// reported through the warning hook, and Sweep finishes it. A key with no
+// claim at all (a file stored before the application adopted claims) is
+// outside the protocol: the record is deleted and the object is left
+// alone. A claim that is not held (pending or deleting: not this
+// record's) fails with ErrNotHeld, and the record is kept. Empty keys are
+// skipped. The result is the transaction's error: nil means the record is
+// gone.
+func (c *Claims) DeleteWith(ctx context.Context, keys []string, fn func(tx *gorm.DB) error) error {
+	return c.Update(ctx, nil, keys, fn)
+}
+
+// Update changes a record's files: fn writes the record in tx, the keys in
+// hold (new uploads it now refers to) are held, and the keys in release
+// (files it no longer refers to) are released, all in one transaction. If
+// the transaction fails, the uploads in hold are abandoned, as by
+// CreateWith; once it commits, the released files are deleted, as by
+// DeleteWith. A key in both lists is unchanged and left out of both, and
+// empty keys are skipped. CreateWith and DeleteWith are Update with only
+// hold or only release.
+func (c *Claims) Update(ctx context.Context, hold, release []string, fn func(tx *gorm.DB) error) error {
+	hold, release = changed(hold, release)
+	var released []string
+	err := c.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		for _, key := range hold {
+			if err := c.Hold(ctx, tx, key); err != nil {
+				return err
+			}
+		}
 		if err := fn(tx); err != nil {
 			return err
 		}
-		err := c.Release(ctx, tx, key)
-		if !errors.Is(err, ErrNotHeld) {
-			return err
+		for _, key := range release {
+			claimed, err := c.release(ctx, tx, key)
+			if err != nil {
+				return err
+			}
+			if claimed {
+				released = append(released, key)
+			}
 		}
-		var n int64
-		if cerr := tx.WithContext(ctx).Model(&Claim{}).Where("object_key = ?", key).Count(&n).Error; cerr != nil {
-			return fmt.Errorf("claims: release %q: %w", key, cerr)
-		}
-		if n > 0 {
-			return err
-		}
-		unclaimed = true
 		return nil
-	}); err != nil {
-		return err
-	}
-	if unclaimed {
-		return nil
-	}
-	fctx, cancel := detached(ctx)
+	})
+	dctx, cancel := detached(ctx)
 	defer cancel()
-	if err := c.Finish(fctx, key); err != nil && c.warn != nil {
-		c.warn("claims: a record was deleted, but deleting its file failed; Sweep will retry", err)
+	if err != nil {
+		errs := []error{err}
+		for _, key := range hold {
+			if _, aerr := c.Abandon(dctx, key); aerr != nil {
+				errs = append(errs, aerr)
+			}
+		}
+		return errors.Join(errs...)
+	}
+	for _, key := range released {
+		if err := c.Finish(dctx, key); err != nil && c.warn != nil {
+			c.warn("claims: a record let go of a file, but deleting it failed; Sweep will retry", err)
+		}
 	}
 	return nil
+}
+
+// release is Release, except that a key with no claim at all is outside
+// the protocol: it reports false, and nothing is to be deleted.
+func (c *Claims) release(ctx context.Context, tx *gorm.DB, key string) (bool, error) {
+	err := c.Release(ctx, tx, key)
+	if !errors.Is(err, ErrNotHeld) {
+		return err == nil, err
+	}
+	var n int64
+	if cerr := tx.WithContext(ctx).Model(&Claim{}).Where("object_key = ?", key).Count(&n).Error; cerr != nil {
+		return false, fmt.Errorf("claims: release %q: %w", key, cerr)
+	}
+	if n > 0 {
+		return false, err
+	}
+	return false, nil
+}
+
+// changed is hold and release without empty keys, duplicates, or the keys
+// in both (unchanged files).
+func changed(hold, release []string) ([]string, []string) {
+	in := func(keys []string) map[string]bool {
+		m := make(map[string]bool, len(keys))
+		for _, k := range keys {
+			m[k] = true
+		}
+		return m
+	}
+	inHold, inRelease := in(hold), in(release)
+	pick := func(keys []string, other map[string]bool) []string {
+		var out []string
+		seen := map[string]bool{"": true}
+		for _, k := range keys {
+			if !seen[k] && !other[k] {
+				out = append(out, k)
+			}
+			seen[k] = true
+		}
+		return out
+	}
+	return pick(hold, inRelease), pick(release, inHold)
 }
 
 // Abandon deletes the object of key if its claim is pending (no record took

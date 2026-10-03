@@ -143,16 +143,23 @@ version.
   - `storage/claims` is the ownership protocol for stored files: a
     `storage_claims` table (in new apps' migrations) where each key is
     `pending`, `held` by a record, or `deleting`, moved by conditional
-    updates. `upload.Policy.Claims` claims each generated key before
-    anything is stored, and deletes a failed upload only while its key is
-    pending (a refused `Confirm` never deletes a held file); `CreateWith` holds it in the transaction that
-    writes the record and abandons the upload otherwise, unless the key
-    turns out held (a commit whose answer was lost, a retried
-    confirmation); `DeleteWith` releases it with the record's delete and
-    then deletes the file (a key with no claim is left alone); `Sweep` abandons stale pending claims and
-    finishes interrupted deletes. It reads claims only, so a file without
-    one is never deleted. Tested on SQLite, PostgreSQL and MySQL, including
-    a confirmation racing a sweep;
+    updates:
+    - `upload.Policy.Claims` claims each generated key before anything is
+      stored, and deletes a failed upload only while its key is pending (a
+      refused `Confirm` never deletes a held file);
+    - `CreateWith` holds a record's keys in the transaction that writes it
+      and abandons the uploads otherwise, unless a key turns out held (a
+      commit whose answer was lost, a retried confirmation);
+    - `Update` holds new keys and releases replaced ones in the record's
+      transaction, deleting the replaced files once it commits;
+    - `DeleteWith` releases the keys with the record's delete, then deletes
+      the files (a key with no claim is left alone);
+    - `Sweep` abandons stale pending claims and finishes interrupted
+      deletes. It reads claims only, so a file without one is never
+      deleted.
+
+    Tested on SQLite, PostgreSQL and MySQL, including a confirmation racing
+    a sweep;
   - `examples/storage` records its uploads in SQLite under claims, deletes
     them with their records, and sweeps the rest
     ([#329](https://github.com/gombit-dev/gombit/issues/329)).
