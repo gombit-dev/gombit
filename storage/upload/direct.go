@@ -105,13 +105,14 @@ func Authorize(ctx context.Context, store storage.Storage, p Policy, size int64,
 // type is what the store serves it as). A file that fails is deleted.
 //
 // Under Policy.Claims, the upload was staged (Authorize): Confirm promotes
-// the claim (Claimer.Promote), checks the staged object, and copies it to
-// key under the promotion's lease (Policy.UploadTimeout), then deletes the
-// staged object. A refused staged object is deleted and the claim goes
-// back to pending, so the grant can upload again. A copy whose outcome is
-// unknown leaves the claim promoting (the copy may exist): a retried
-// Confirm then checks key as it is, and a sweep abandons the claim once
-// the lease has ended. A key that is not a staged upload awaiting
+// the claim (Claimer.Promote), checks the staged object, and publishes a
+// copy of it at key (promote: prepared, recorded on the claim, then
+// published, under the promotion's lease, Policy.UploadTimeout), then
+// deletes the staged object. A refused staged object is deleted and the
+// claim goes back to pending, so the grant can upload again. A copy whose
+// outcome is unknown leaves the claim promoting with the copy recorded
+// (it may exist): a retried Confirm then checks key as it is, and the
+// claims protocol fences the copy before it ever forgets the key. A key that is not a staged upload awaiting
 // confirmation (already promoted or held: a retried confirmation; or
 // stored by Save) is checked as it is, and a refusal deletes nothing.
 //
@@ -136,39 +137,82 @@ func Confirm(ctx context.Context, store storage.Storage, key string, p Policy) (
 		return check(ctx, store, key, p, nil)
 	}
 	staged := StagingKey(key)
-	unpromote := func(err error) (File, error) {
-		uctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-		defer cancel()
-		if uerr := p.Claims.Unpromote(uctx, key); uerr != nil {
-			err = errors.Join(err, uerr)
-		}
-		return File{}, err
-	}
 	if _, err := check(ctx, store, staged, p, func(ctx context.Context) error {
 		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 		defer cancel()
 		return store.Delete(dctx, staged)
 	}); err != nil {
-		return unpromote(err) // nothing was copied to key
+		return File{}, unpromote(ctx, p, key, err) // nothing was copied to key
 	}
+	info, err := promote(ctx, store, p, key, deadline)
+	if err != nil {
+		return File{}, err
+	}
+	return File{ObjectInfo: info, Filename: info.StoredFilename()}, nil
+}
+
+// promote publishes the staged object of key to key, whose claim is
+// promoting: the copy is prepared (storage.PreparePublish), its token
+// recorded on the claim (Claimer.Publishing) before anything can publish,
+// then published under deadline, and the staged object deleted. A copy
+// whose outcome is unknown is never assumed not to have happened: the
+// claim stays promoting with the token, and the claims protocol fences the
+// copy (storage.Fence) before it ever forgets the key.
+func promote(ctx context.Context, store storage.Storage, p Policy, key string, deadline time.Time) (storage.ObjectInfo, error) {
+	staged := StagingKey(key)
 	cctx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
-	info, err := storage.Copy(cctx, store, staged, key)
+	token, err := storage.PreparePublish(cctx, store, staged, key)
+	if err != nil {
+		return storage.ObjectInfo{}, unpromote(ctx, p, key, fmt.Errorf("upload: promote %q: %w", key, err))
+	}
+	if err := p.Claims.Publishing(ctx, key, token); err != nil {
+		// The claim moved on (a sweep abandoned it), or could not be
+		// updated: publish nothing. Only this call holds the token, so an
+		// unrecorded copy is never published; fencing it frees it now.
+		fence(ctx, store, token)
+		return storage.ObjectInfo{}, fmt.Errorf("upload: promote %q: %w", key, err)
+	}
+	info, err := storage.Publish(cctx, store, token)
 	if err != nil {
 		err = fmt.Errorf("upload: promote %q: %w", key, err)
 		if errors.Is(err, storage.ErrUnknownOutcome) || errors.Is(err, storage.ErrExists) {
-			// The copy may exist (or something is at key): never assume it
-			// does not. The claim stays promoting, under its lease.
-			return File{}, err
+			// The copy may be published (or something is at key): the
+			// claim stays promoting, with the token to fence.
+			return storage.ObjectInfo{}, err
 		}
-		return unpromote(err)
+		// A definite failure: once fenced, nothing can be published.
+		if fence(ctx, store, token) {
+			return storage.ObjectInfo{}, unpromote(ctx, p, key, err)
+		}
+		return storage.ObjectInfo{}, err
 	}
 	// The staged object has served its purpose (if this fails,
 	// claims.SweepStaging deletes it).
 	dctx, dcancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer dcancel()
 	_ = store.Delete(dctx, staged)
-	return File{ObjectInfo: info, Filename: info.StoredFilename()}, nil
+	return info, nil
+}
+
+// fence fences the copy token names, on a context detached from ctx, and
+// reports whether it succeeded.
+func fence(ctx context.Context, store storage.Storage, token string) bool {
+	fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	return storage.Fence(fctx, store, token) == nil
+}
+
+// unpromote puts key's claim back to pending (nothing was published to
+// key), on a context detached from ctx, and returns err with any failure
+// to.
+func unpromote(ctx context.Context, p Policy, key string, err error) error {
+	uctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	if uerr := p.Claims.Unpromote(uctx, key); uerr != nil {
+		err = errors.Join(err, uerr)
+	}
+	return err
 }
 
 // check checks the object at objKey against p as Confirm does. A refused

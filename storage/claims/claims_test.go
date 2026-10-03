@@ -1,6 +1,7 @@
 package claims_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -66,6 +67,7 @@ func runSuite(t *testing.T, db *gorm.DB) {
 		"Staged":                    testStaged,
 		"LatePutOnlyStages":         testLatePutOnlyStages,
 		"PromotionIsNotSwept":       testPromotionIsNotSwept,
+		"LateRemotePromotion":       testLateRemotePromotion,
 		"ConfirmRacesSweep":         testConfirmRacesSweep,
 		"SweepFirstWins":            testSweepFirstWins,
 		"ConfirmationInFlightWins":  testConfirmationInFlightWins,
@@ -750,5 +752,142 @@ func testPromotionIsNotSwept(t *testing.T, db *gorm.DB) {
 	}
 	if exists(t, store, "u/p") || exists(t, store, upload.StagingKey("u/p")) {
 		t.Fatal("the abandoned promotion left its key or staged object")
+	}
+}
+
+// remote is a store whose promotions publish remotely, like S3's: Publish
+// sends the copy and never hears back (ErrUnknownOutcome), and the remote
+// side may complete it whenever it likes (complete), unless it was fenced
+// first. Fence fails while fenceErr is set.
+type remote struct {
+	*memory.Store
+	mu       sync.Mutex
+	pubs     []*remotePub
+	fenceErr error
+}
+
+type remotePub struct {
+	data         []byte
+	info         storage.ObjectInfo
+	fenced, done bool
+}
+
+func (r *remote) PreparePublish(ctx context.Context, src, dst string) (string, error) {
+	body, info, err := r.Open(ctx, src)
+	if err != nil {
+		return "", err
+	}
+	data, _ := io.ReadAll(body)
+	_ = body.Close()
+	info.Key = dst
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.pubs = append(r.pubs, &remotePub{data: data, info: info})
+	return fmt.Sprint(len(r.pubs) - 1), nil
+}
+
+func (r *remote) Publish(context.Context, string) (storage.ObjectInfo, error) {
+	return storage.ObjectInfo{}, storage.Wrap("publish", "", errors.Join(storage.ErrUnknownOutcome, storage.ErrUnavailable))
+}
+
+func (r *remote) pub(token string) *remotePub {
+	var i int
+	_, _ = fmt.Sscan(token, &i)
+	return r.pubs[i]
+}
+
+// complete is the remote side finishing the copy token names, late. It
+// reports whether it published.
+func (r *remote) complete(t *testing.T, token string) bool {
+	t.Helper()
+	r.mu.Lock()
+	p := r.pub(token)
+	if p.fenced || p.done {
+		r.mu.Unlock()
+		return false
+	}
+	p.done = true
+	r.mu.Unlock()
+	if _, err := r.Put(context.Background(), p.info.Key, bytes.NewReader(p.data), storage.PutOptions{ContentType: p.info.ContentType}); err != nil {
+		t.Fatal(err)
+	}
+	return true
+}
+
+func (r *remote) Fence(_ context.Context, token string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.fenceErr != nil {
+		return r.fenceErr
+	}
+	r.pub(token).fenced = true
+	return nil
+}
+
+// testLateRemotePromotion: a promotion whose copy went unanswered, which
+// the remote completes after the claim's lease (and margin) has ended. The
+// claim recorded the copy before publishing it, and the sweep fences it
+// before forgetting the key: a completion after that is refused, so no
+// object is ever published without a claim. A copy that completed before
+// the sweep is deleted with its claim; a fence that fails keeps the claim.
+func testLateRemotePromotion(t *testing.T, db *gorm.DB) {
+	ctx := context.Background()
+	mem := memory.New()
+	store := &remote{Store: mem}
+	c := claims.New(db, store)
+	p := upload.Policy{MaxBytes: 1 << 20, Types: []string{"*/*"}, Prefix: "u/", Claims: c}
+	promotion := func(key string) string {
+		t.Helper()
+		if err := c.Stage(ctx, key, ended); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := mem.Put(ctx, upload.StagingKey(key), strings.NewReader("staged bytes"), storage.PutOptions{ContentType: "text/plain"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := upload.Confirm(ctx, store, key, p); !errors.Is(err, storage.ErrUnknownOutcome) {
+			t.Fatalf("Confirm = %v, want the copy's unknown outcome", err)
+		}
+		var claim claims.Claim
+		if err := db.Where("object_key = ?", key).Take(&claim).Error; err != nil || claim.State != claims.Promoting || claim.Publication == "" {
+			t.Fatalf("claim = %+v, %v; want promoting, its copy recorded", claim, err)
+		}
+		return claim.Publication
+	}
+
+	// The remote completes only after the lease, the margin and the sweeps.
+	token := promotion("u/late")
+	expire(t, db, "u/late")
+	if _, err := c.Sweep(ctx, 0); err != nil || state(t, db, "u/late") != "none" {
+		t.Fatalf("Sweep = %v, claim %s; want it fenced and forgotten", err, state(t, db, "u/late"))
+	}
+	if store.complete(t, token) || exists(t, mem, "u/late") {
+		t.Fatal("a promotion completed after its claim was forgotten: an orphan")
+	}
+
+	// The remote completes before the sweep: the object is deleted with
+	// its claim, and the copy cannot publish again.
+	token = promotion("u/early")
+	if !store.complete(t, token) || !exists(t, mem, "u/early") {
+		t.Fatal("the remote did not complete")
+	}
+	expire(t, db, "u/early")
+	if _, err := c.Sweep(ctx, 0); err != nil || state(t, db, "u/early") != "none" || exists(t, mem, "u/early") {
+		t.Fatalf("Sweep = %v, claim %s, object %v; want both gone", err, state(t, db, "u/early"), exists(t, mem, "u/early"))
+	}
+
+	// A fence that fails proves nothing: the claim is kept, and the next
+	// sweep, whose fence works, settles it.
+	token = promotion("u/unsure")
+	expire(t, db, "u/unsure")
+	store.fenceErr = errors.New("abort: service unavailable")
+	if res, err := c.Sweep(ctx, 0); err == nil || res.Failed == 0 || state(t, db, "u/unsure") != claims.Deleting {
+		t.Fatalf("Sweep with a failing fence = %+v, %v, claim %s; want it failed, the claim kept", res, err, state(t, db, "u/unsure"))
+	}
+	store.fenceErr = nil
+	if _, err := c.Sweep(ctx, 0); err != nil || state(t, db, "u/unsure") != "none" {
+		t.Fatalf("Sweep = %v, claim %s", err, state(t, db, "u/unsure"))
+	}
+	if store.complete(t, token) || exists(t, mem, "u/unsure") {
+		t.Fatal("a promotion completed after its claim was forgotten: an orphan")
 	}
 }

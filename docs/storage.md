@@ -316,34 +316,64 @@ never writes a claimed key:
    a `PUT` to its staging key, `upload.StagingKey(key)`: `_staging/` and the
    key. The grant's `Key` is still the key, which the client submits.
 2. `upload.Confirm` moves the claim to `promoting` (`claims.Promote`, which
-   one confirmation wins), checks the staged object, copies it to the key
-   (`storage.Copy`: S3's `CopyObject`, conditional where the backend
-   supports it), and deletes the staged copy. Only then can a record hold
-   the key; a staged claim that was never promoted cannot be held.
+   one confirmation wins), checks the staged object, publishes a copy of it
+   at the key, and deletes the staged copy. Only then can a record hold the
+   key; a staged claim that was never promoted cannot be held.
 3. A refused staged object is deleted and the claim goes back to `pending`,
-   so the grant can upload again. A copy whose outcome is unknown leaves the
-   claim `promoting`: the copy may exist. A retried `Confirm` checks the key
-   as it is, and a sweep abandons the claim once the promotion's lease
-   (`Policy.UploadTimeout`) has ended, never before.
+   so the grant can upload again.
 
-A late `PUT` can therefore only ever publish a staging object, which
-nothing refers to. A `deleting` staged claim deletes its staging object
-too, and `cl.SweepStaging(ctx)` deletes staging objects whose claim is gone
-or held. Run it periodically where clients upload straight to the backend
-(S3); it lists `_staging/`. With the local and memory drivers the app's own
-route aborts a signed `PUT` at `storage.SignedUploadTimeout` (an hour)
-after its URL expired, within the staged claim's lease, so `Sweep` alone
-suffices. On S3, a bucket lifecycle rule expiring `_staging/` after a day
-is a useful backstop for staging objects, but it is not part of the
-protocol: lifecycle expiry is coarse and asynchronous.
+**Promotion is fenced.** On S3 the copy to the key is a remote request
+too: once S3 has accepted it, no deadline on the application's side proves
+it will not complete later. So it is published in two steps
+(`storage.Publisher`):
 
-**Ownership.** The sweep reads claims, never the store. A file without a
-claim is outside the protocol: nothing in `storage/claims` ever deletes it.
-That covers a file from a shared library, a key the application chose, and
-files stored before the application adopted claims. A claim is one key
-held by one record: if two records can refer to one file (a copied
-reference), keep that file out of the protocol and delete it yourself when
-the last reference goes.
+1. `storage.PreparePublish` creates a multipart upload of the key and
+   copies the staged object into its parts server-side. This publishes
+   nothing.
+2. The copy's token is recorded on the claim (`claims.Publishing`).
+3. `storage.Publish` completes the upload.
+
+If the answer is lost, the claim stays `promoting` with its token: the
+copy may exist, and a retried `Confirm` checks the key as it is. No claim
+with a recorded copy is ever forgotten until `storage.Fence` has proven the
+copy can no longer publish. On S3 it aborts the multipart upload, which S3
+orders against completing it: a successful abort means it never completes,
+and `NoSuchUpload` means it is over. A fence that fails keeps the claim for
+the next sweep. A sweep abandons a `promoting` claim only once the
+promotion's lease (`Policy.UploadTimeout`) has ended. With the local and
+memory drivers the copy runs in the application process and publishes
+nothing after its call returns.
+
+On a remote store (a `storage.Publisher`: S3), `upload.Save` and
+`upload.Receive` under claims stage too: they put the file at the staging
+key and promote it the same way, since an unanswered `PutObject` cannot be
+fenced. There, only a fenced copy ever writes a claimed key.
+
+**The staging namespace is reserved.** `_staging/` at the root of the
+store belongs to `storage/upload` and `storage/claims`. A late `PUT` can
+only ever publish a staging object, which nothing refers to. A `deleting`
+staged claim deletes its staging object too, and `cl.SweepStaging(ctx)`
+deletes every object under `_staging/` whose key has no live claim (or is
+held: a leftover after promotion), **whoever stored it**. Never store other
+objects there; `upload.Policy` refuses prefixes under it.
+
+Run `SweepStaging` periodically where clients upload straight to the
+backend (S3); it lists `_staging/`. With the local and memory drivers the
+app's own route aborts a signed `PUT` at `storage.SignedUploadTimeout` (an
+hour) after its URL expired, within the staged claim's lease, so `Sweep`
+alone suffices. On S3, a bucket lifecycle rule expiring `_staging/` after a
+day (and aborting incomplete multipart uploads) is a useful backstop, but
+it is not part of the protocol: lifecycle expiry is coarse and
+asynchronous.
+
+**Ownership.** `Sweep` reads claims, never the store. Outside `_staging/`,
+a file without a claim is outside the protocol: nothing in `storage/claims`
+ever deletes it. That covers a file from a shared library, a key the
+application chose, and files stored before the application adopted claims.
+Inside `_staging/`, the reserved namespace above, the protocol owns
+everything. A claim is one key held by one record: if two records can refer
+to one file (a copied reference), keep that file out of the protocol and
+delete it yourself when the last reference goes.
 
 ## Keys
 

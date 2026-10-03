@@ -51,7 +51,12 @@
 // claimed key. Its claim is staged: the client uploads to the staging key
 // (upload.StagingKey: "_staging/" + key), and only the application writes
 // the claimed key, by copying the staged object once it is confirmed
-// (Promote, then upload.Confirm's copy, under the promotion's lease). A
+// (Promote, then upload.Confirm's copy). On S3 that copy is itself remote:
+// once sent, no deadline proves it will not complete later. So the copy is
+// prepared first (storage.PreparePublish), its token recorded on the claim
+// (Publishing) before it can publish, and no claim with a recorded copy is
+// ever forgotten until storage.Fence has proven the copy can no longer
+// publish (on S3, by aborting its multipart upload). A
 // late PUT can only ever publish a staging object, which nothing refers to:
 // a deleting staged claim deletes it too, and SweepStaging (or a bucket
 // lifecycle rule on "_staging/") deletes those that outlive their claims.
@@ -59,9 +64,15 @@
 // Use CreateWith to write a record that refers to new uploads, Update to
 // change which files a record refers to, DeleteWith to delete a record, and
 // Sweep, periodically, for uploads no record ever took.
-// Objects without a claim are outside the protocol, and nothing here ever
-// deletes them. Storage drivers know nothing of claims: storage.Storage is
-// objects only.
+//
+// Ownership: outside the staging namespace, an object without a claim is
+// outside the protocol, and nothing here ever deletes it (a shared
+// library's file, a key the application chose, files stored before claims).
+// The staging namespace, upload.StagingPrefix ("_staging/") at the root of
+// the store, is reserved: it belongs to storage/upload and this package,
+// and SweepStaging deletes any object there whose key has no live claim,
+// whoever stored it. Never store anything else under it. Storage drivers
+// know nothing of claims: storage.Storage is objects only.
 package claims
 
 import (
@@ -96,8 +107,13 @@ type Claim struct {
 	LeaseUntil time.Time
 	// Staged is a direct upload's claim: the client uploads to the staging
 	// key, and the key is written only by promotion.
-	Staged    bool `gorm:"not null;default:false"`
-	UpdatedAt time.Time
+	Staged bool `gorm:"not null;default:false"`
+	// Publication is the token of the promotion's copy to the key
+	// (storage.PreparePublish), recorded before it is published: until
+	// storage.Fence proves it can no longer publish, the claim is never
+	// forgotten.
+	Publication string `gorm:"type:text"`
+	UpdatedAt   time.Time
 }
 
 // LeaseMargin is how long after a claim's lease its tombstone is kept: for
@@ -134,6 +150,8 @@ var (
 	ErrNotPending = errors.New("claims: the key is not pending")
 	// ErrNotHeld: the key's claim is not held (Release).
 	ErrNotHeld = errors.New("claims: the key is not held")
+	// ErrNotPromoting: the key's claim is not promoting (Publishing).
+	ErrNotPromoting = errors.New("claims: the key is not promoting")
 	// ErrKeyTooLong: the key is longer than MaxKeyLen (Pending).
 	ErrKeyTooLong = errors.New("claims: the key is too long")
 )
@@ -230,11 +248,36 @@ func (c *Claims) Promote(ctx context.Context, key string, until time.Time) (bool
 	return res.RowsAffected == 1, nil
 }
 
+// Publishing records token, the copy promotion is about to publish to key
+// (storage.PreparePublish), on key's promoting claim: from then on the
+// claim is kept until the copy is fenced. It fails with ErrNotPromoting
+// (and records nothing) when the claim is no longer promoting (a sweep
+// abandoned it): fence the copy and give up.
+func (c *Claims) Publishing(ctx context.Context, key, token string) error {
+	res := c.db.WithContext(ctx).Model(&Claim{}).
+		Where("object_key = ? AND state = ?", key, Promoting).
+		Updates(map[string]any{"publication": token, "updated_at": time.Now()})
+	if res.Error != nil {
+		return fmt.Errorf("claims: publishing %q: %w", key, res.Error)
+	}
+	if res.RowsAffected != 1 {
+		return &KeyError{Key: key, Err: ErrNotPromoting}
+	}
+	return nil
+}
+
 // Unpromote moves a promoting key back to pending: its staged object was
-// refused before anything was copied to key, and the grant may upload
-// again. A key that is not promoting is left alone.
+// refused, or its copy failed and was fenced, so nothing was published to
+// key, and the grant may upload again. A key that is not promoting is left
+// alone.
 func (c *Claims) Unpromote(ctx context.Context, key string) error {
-	return ignoreNotFrom(transition(ctx, c.db, key, []string{Promoting}, Pending, ErrNotPending, false))
+	res := c.db.WithContext(ctx).Model(&Claim{}).
+		Where("object_key = ? AND state = ?", key, Promoting).
+		Updates(map[string]any{"state": Pending, "publication": "", "updated_at": time.Now()})
+	if res.Error != nil {
+		return fmt.Errorf("claims: pending %q: %w", key, res.Error)
+	}
+	return nil
 }
 
 // Hold moves key to held, in tx, the transaction that writes the record
@@ -270,16 +313,6 @@ func transition(ctx context.Context, db *gorm.DB, key string, from []string, to 
 		return &KeyError{Key: key, Err: notFrom}
 	}
 	return nil
-}
-
-// ignoreNotFrom is err, except a transition whose key was not in its
-// from state.
-func ignoreNotFrom(err error) error {
-	var ke *KeyError
-	if errors.As(err, &ke) {
-		return nil
-	}
-	return err
 }
 
 // CreateWith writes a record that refers to keys, new uploads' pending
@@ -420,23 +453,31 @@ func (c *Claims) Abandon(ctx context.Context, key string) (bool, error) {
 	return true, err
 }
 
-// Finish deletes the object of a deleting claim, then the claim itself,
-// unless its lease (plus LeaseMargin) has not ended: a writer may still
-// publish the object, so the claim stays as a tombstone, and the next
-// Sweep deletes the object again. It reports whether the claim is gone; it
-// does nothing for a key whose claim is not deleting.
+// Finish deletes the object of a deleting claim, then the claim itself.
+// First, a promotion's copy (Publication) is fenced (storage.Fence): until
+// that succeeds, nothing is deleted and the claim stays, so a copy whose
+// outcome was unknown can never publish after the claim is gone. The claim
+// also stays, as a tombstone, until its lease (plus LeaseMargin) has ended:
+// a writer within the application may still publish, and the next Sweep
+// deletes the object again. It reports whether the claim is gone; it does
+// nothing for a key whose claim is not deleting.
 func (c *Claims) Finish(ctx context.Context, key string) (bool, error) {
-	var claim Claim
-	err := c.db.WithContext(ctx).Where("object_key = ? AND state = ?", key, Deleting).Take(&claim).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return true, nil
-	}
-	if err != nil {
+	var found []Claim
+	if err := c.db.WithContext(ctx).Where("object_key = ? AND state = ?", key, Deleting).Limit(1).Find(&found).Error; err != nil {
 		return false, fmt.Errorf("claims: finish %q: %w", key, err)
 	}
+	if len(found) == 0 {
+		return true, nil
+	}
+	claim := found[0]
 	// Read the clock before deleting: a lease that ends during the delete
 	// keeps the tombstone for one more sweep.
 	ended := !time.Now().Before(claim.LeaseUntil.Add(LeaseMargin))
+	if claim.Publication != "" {
+		if err := storage.Fence(ctx, c.store, claim.Publication); err != nil {
+			return false, fmt.Errorf("claims: fence the promotion of %q: %w", key, err)
+		}
+	}
 	if err := c.store.Delete(ctx, key); err != nil {
 		return false, fmt.Errorf("claims: delete the object of %q: %w", key, err)
 	}
@@ -515,6 +556,8 @@ func (c *Claims) Sweep(ctx context.Context, grace time.Duration) (SweepResult, e
 // SweepStaging deletes staging objects (under upload.StagingPrefix) that no
 // claim needs any more: their key's claim is gone (abandoned, or a late PUT
 // after its tombstone) or held (promoted; the staged copy is left over).
+// The staging namespace is reserved (see the package documentation): an
+// object there with no claim is deleted whoever stored it.
 // A staging object whose claim is pending, promoting or deleting is left
 // to the protocol. It lists the store (storage.Lister), so run it where
 // clients upload straight to the backend (S3), whose PUTs the application

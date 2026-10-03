@@ -165,6 +165,9 @@ type Claimer interface {
 	// reports whether it did: only then may Confirm copy the staged object
 	// to key.
 	Promote(ctx context.Context, key string, until time.Time) (bool, error)
+	// Publishing records the token of the promotion's copy on the key's
+	// promoting claim, before it is published (storage.PreparePublish).
+	Publishing(ctx context.Context, key, token string) error
 	// Unpromote moves a promoting key back to pending (nothing was copied).
 	Unpromote(ctx context.Context, key string) error
 	// Abandon deletes the object of key and its claim if the claim is
@@ -178,8 +181,11 @@ type Claimer interface {
 // short enough that a leaked grant is soon useless.
 const DefaultGrantExpiry = 15 * time.Minute
 
-// StagingPrefix starts the keys direct uploads under Policy.Claims are
-// uploaded to (StagingKey). Policy prefixes may not start with it.
+// StagingPrefix starts the keys uploads under Policy.Claims are staged at
+// (StagingKey): direct uploads always, and Save's on a remote store. It is
+// a reserved namespace at the root of the store: claims.SweepStaging
+// deletes any object under it whose key has no live claim, whoever stored
+// it. Store nothing else there; Policy prefixes may not start with it.
 const StagingPrefix = "_staging/"
 
 // StagingKey is where a direct upload of key is uploaded under
@@ -327,11 +333,21 @@ func save(ctx context.Context, store storage.Storage, src io.Reader, filename st
 		return File{}, err
 	}
 	// Under Claims, the key is leased until the deadline, and the Put is
-	// aborted then: it can never publish after its claim's lease.
-	putCtx := ctx
+	// aborted then: it can never publish after its claim's lease. A store
+	// that publishes remotely (storage.Publisher: S3) cannot prove that a
+	// Put which went unanswered will not publish later, so there the file
+	// is put at the staging key and promoted, like a direct upload: only a
+	// fenceable copy ever writes the claimed key.
+	putCtx, target, staged := ctx, key, false
+	var deadline time.Time
 	if p.Claims != nil {
-		deadline := time.Now().Add(uploadTimeout(p))
-		if err := claim(ctx, p, key, deadline); err != nil {
+		deadline = time.Now().Add(uploadTimeout(p))
+		if _, staged = store.(storage.Publisher); staged {
+			if err := p.Claims.Stage(ctx, key, deadline); err != nil {
+				return File{}, fmt.Errorf("upload: claim %q: %w", key, err)
+			}
+			target = StagingKey(key)
+		} else if err := claim(ctx, p, key, deadline); err != nil {
 			return File{}, err
 		}
 		var cancel context.CancelFunc
@@ -346,7 +362,7 @@ func save(ctx context.Context, store storage.Storage, src io.Reader, filename st
 		}
 		filename = fitMetadata(md, filename)
 	}
-	info, err := store.Put(putCtx, key, io.MultiReader(bytes.NewReader(head), src), storage.PutOptions{
+	info, err := store.Put(putCtx, target, io.MultiReader(bytes.NewReader(head), src), storage.PutOptions{
 		ContentType: contentType,
 		Metadata:    md,
 		Size:        size,
@@ -362,6 +378,19 @@ func save(ctx context.Context, store storage.Storage, src io.Reader, filename st
 	if err != nil {
 		unclaim(ctx, p, key)
 		return File{}, source.classify(ctx, err)
+	}
+	if staged {
+		promoted, err := p.Claims.Promote(ctx, key, deadline)
+		if err == nil && !promoted {
+			err = fmt.Errorf("%w: the claim of %q is no longer pending", storage.ErrUnavailable, key)
+		}
+		if err != nil {
+			unclaim(ctx, p, key)
+			return File{}, fmt.Errorf("upload: promote %q: %w", key, err)
+		}
+		if info, err = promote(ctx, store, p, key, deadline); err != nil {
+			return File{}, err
+		}
 	}
 	return File{ObjectInfo: info, Filename: filename}, nil
 }

@@ -58,7 +58,8 @@ cleanup semantics (`storage/claims`: a `storage_claims` table of
 pending/promoting/held/deleting keys moved by conditional updates, with
 leases and tombstones, so cleanup never deletes a file a record holds and
 no late upload leaves an orphan; direct uploads are staged under
-`_staging/` and promoted by `upload.Confirm` with `storage.Copy`;
+`_staging/` (a reserved namespace) and promoted by `upload.Confirm`
+with a fenceable `storage.PreparePublish`/`Publish`/`Fence`;
 `storage.Lister` enumerates objects). The other batteries
 (events, scheduler, mail, gRPC, multi-tenancy, i18n) are not here yet.
 The **CHAOS-0** resilience suite is in: `internal/faulttest` (deterministic

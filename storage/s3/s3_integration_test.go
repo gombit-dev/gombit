@@ -421,6 +421,7 @@ func (c *stagingClaims) Promote(_ context.Context, key string, _ time.Time) (boo
 	c.promoted[key] = true
 	return true, nil
 }
+func (c *stagingClaims) Publishing(context.Context, string, string) error { return nil }
 func (c *stagingClaims) Unpromote(_ context.Context, key string) error {
 	delete(c.promoted, key)
 	return nil
@@ -428,8 +429,9 @@ func (c *stagingClaims) Unpromote(_ context.Context, key string) error {
 func (c *stagingClaims) Abandon(context.Context, string) (bool, error) { return false, nil }
 
 // TestStagedDirectUploads: under Policy.Claims, the presigned PUT goes to
-// the staging key; Confirm promotes it with CopyObject (the bytes, type and
-// metadata), and deletes the staged copy. Replaying the grant afterwards,
+// the staging key; Confirm promotes it (a multipart upload whose part is
+// copied server-side: the bytes, type and metadata), and deletes the staged
+// copy. Replaying the grant afterwards,
 // as a late PUT would land, only ever writes the staging key again.
 func TestStagedDirectUploads(t *testing.T) {
 	s := testStore(t)

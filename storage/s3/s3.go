@@ -60,6 +60,8 @@ package s3
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -646,58 +648,200 @@ func (s *Store) Stat(ctx context.Context, key string) (storage.ObjectInfo, error
 	return info, storage.Wrap("stat", key, err)
 }
 
-var _ storage.Copier = (*Store)(nil)
+var _ storage.Publisher = (*Store)(nil)
 
-// Copy implements storage.Copier with CopyObject: the bytes stay in S3,
-// with the source's content type and metadata (MetadataDirective COPY).
-// It sends "If-None-Match: *", which AWS refuses with 412 where an object
-// exists (storage.ErrExists); MinIO, for one, ignores it. CopyObject copies at most 5 GiB (larger uploads, which direct
-// uploads never are, fail with S3's error). Like Put, it is sent once, and
-// a request sent without a definite answer is storage.ErrUnknownOutcome:
-// S3 may finish a copy it has started after the connection is gone.
-func (s *Store) Copy(ctx context.Context, src, dst string) (storage.ObjectInfo, error) {
-	info, err := s.copyObject(ctx, src, dst)
-	return info, storage.Wrap("copy", dst, err)
+// maxCopyPart is the most UploadPartCopy copies into one part (S3's limit);
+// a larger source is copied in copyPartSize ranges.
+const (
+	maxCopyPart  = 5 << 30
+	copyPartSize = 1 << 30
+)
+
+// publication is a prepared copy: the multipart upload of Key (the
+// storage key) that Publish completes and Fence aborts, and the object it
+// will publish.
+type publication struct {
+	Key         string            `json:"k"`
+	UploadID    string            `json:"u"`
+	Size        int64             `json:"s"`
+	ContentType string            `json:"t"`
+	Metadata    map[string]string `json:"m,omitempty"`
 }
 
-func (s *Store) copyObject(ctx context.Context, src, dst string) (storage.ObjectInfo, error) {
+func (p publication) token() (string, error) {
+	b, err := json.Marshal(p)
+	return base64.RawURLEncoding.EncodeToString(b), err
+}
+
+func parsePublication(token string) (publication, error) {
+	var p publication
+	b, err := base64.RawURLEncoding.DecodeString(token)
+	if err == nil {
+		err = json.Unmarshal(b, &p)
+	}
+	if err != nil || p.Key == "" || p.UploadID == "" {
+		return publication{}, fmt.Errorf("%w: a malformed publication token", storage.ErrInvalidOptions)
+	}
+	return p, nil
+}
+
+// PreparePublish implements storage.Publisher: it creates a multipart
+// upload of dst with src's content type and metadata, and copies src into
+// its parts server-side (UploadPartCopy; the bytes stay in S3). Nothing is
+// published until Publish completes the upload. If preparing fails, the
+// upload is aborted.
+func (s *Store) PreparePublish(ctx context.Context, src, dst string) (string, error) {
+	token, err := s.preparePublish(ctx, src, dst)
+	return token, storage.Wrap("publish", dst, err)
+}
+
+func (s *Store) preparePublish(ctx context.Context, src, dst string) (_ string, err error) {
 	srcKey, err := s.objectKey(src)
 	if err != nil {
-		return storage.ObjectInfo{}, err
+		return "", err
 	}
 	dstKey, err := s.objectKey(dst)
 	if err != nil {
-		return storage.ObjectInfo{}, err
+		return "", err
 	}
-	// The source's description first: a missing source is ErrNotFound
-	// before anything is sent, and the copy's info comes from it.
-	srcInfo, err := s.Stat(ctx, src)
+	info, err := s.Stat(ctx, src)
 	if err != nil {
-		return storage.ObjectInfo{}, err
+		return "", err
 	}
-	segments := strings.Split(srcKey, "/")
+	created, err := s.client.CreateMultipartUpload(ctx, &awss3.CreateMultipartUploadInput{
+		Bucket:      aws.String(s.bucket),
+		Key:         aws.String(dstKey),
+		ContentType: aws.String(info.ContentType),
+		Metadata:    encodeMetadata(info.Metadata),
+	})
+	if err != nil {
+		return "", classify(ctx, err)
+	}
+	uploadID := aws.ToString(created.UploadId)
+	defer func() {
+		if err != nil {
+			// Nothing was published (only Publish completes the upload):
+			// abort it so its parts do not linger.
+			err = s.settle(ctx, dstKey, uploadID, err, false)
+		}
+	}()
+	if info.Size == 0 {
+		// UploadPartCopy copies at least a byte; an empty object is one
+		// empty part.
+		if _, err := s.client.UploadPart(ctx, &awss3.UploadPartInput{
+			Bucket: aws.String(s.bucket), Key: aws.String(dstKey), UploadId: created.UploadId,
+			PartNumber: aws.Int32(1), Body: bytes.NewReader(nil), ContentLength: aws.Int64(0),
+		}); err != nil {
+			return "", classify(ctx, err)
+		}
+	}
+	source := copySource(s.bucket, srcKey)
+	for number, start := int32(1), int64(0); start < info.Size; number++ {
+		in := &awss3.UploadPartCopyInput{
+			Bucket: aws.String(s.bucket), Key: aws.String(dstKey), UploadId: created.UploadId,
+			PartNumber: aws.Int32(number), CopySource: aws.String(source),
+		}
+		end := info.Size
+		if info.Size > maxCopyPart {
+			end = min(start+copyPartSize, info.Size)
+			in.CopySourceRange = aws.String(fmt.Sprintf("bytes=%d-%d", start, end-1))
+		}
+		if _, err := s.client.UploadPartCopy(ctx, in); err != nil {
+			return "", classify(ctx, err)
+		}
+		start = end
+	}
+	return publication{Key: dst, UploadID: uploadID, Size: info.Size, ContentType: info.ContentType, Metadata: info.Metadata}.token()
+}
+
+// copySource is CopySource for objKey in bucket: each segment escaped.
+func copySource(bucket, objKey string) string {
+	segments := strings.Split(objKey, "/")
 	for i, seg := range segments {
 		segments[i] = url.PathEscape(seg)
 	}
+	return url.PathEscape(bucket) + "/" + strings.Join(segments, "/")
+}
+
+// Publish implements storage.Publisher: it completes the prepared upload,
+// once (a request sent without a definite answer is
+// storage.ErrUnknownOutcome, which Fence settles), with
+// "If-None-Match: *" where S3 honors it.
+func (s *Store) Publish(ctx context.Context, token string) (storage.ObjectInfo, error) {
+	p, err := parsePublication(token)
+	if err != nil {
+		return storage.ObjectInfo{}, storage.Wrap("publish", "", err)
+	}
+	info, err := s.publish(ctx, p)
+	return info, storage.Wrap("publish", p.Key, err)
+}
+
+func (s *Store) publish(ctx context.Context, p publication) (storage.ObjectInfo, error) {
+	objKey, err := s.objectKey(p.Key)
+	if err != nil {
+		return storage.ObjectInfo{}, err
+	}
+	var parts []types.CompletedPart
+	var marker *string
+	for {
+		out, err := s.client.ListParts(ctx, &awss3.ListPartsInput{
+			Bucket: aws.String(s.bucket), Key: aws.String(objKey), UploadId: aws.String(p.UploadID), PartNumberMarker: marker,
+		})
+		if err != nil {
+			return storage.ObjectInfo{}, classify(ctx, err)
+		}
+		for _, part := range out.Parts {
+			parts = append(parts, types.CompletedPart{ETag: part.ETag, PartNumber: part.PartNumber})
+		}
+		if !aws.ToBool(out.IsTruncated) {
+			break
+		}
+		marker = out.NextPartNumberMarker
+	}
+	if err := ctx.Err(); err != nil {
+		return storage.ObjectInfo{}, err
+	}
 	callCtx, sent := counting(ctx)
-	out, err := s.client.CopyObject(callCtx, &awss3.CopyObjectInput{
-		Bucket:      aws.String(s.bucket),
-		Key:         aws.String(dstKey),
-		CopySource:  aws.String(url.PathEscape(s.bucket) + "/" + strings.Join(segments, "/")),
-		IfNoneMatch: aws.String("*"),
+	done, err := s.client.CompleteMultipartUpload(callCtx, &awss3.CompleteMultipartUploadInput{
+		Bucket:          aws.String(s.bucket),
+		Key:             aws.String(objKey),
+		UploadId:        aws.String(p.UploadID),
+		MultipartUpload: &types.CompletedMultipartUpload{Parts: parts},
+		IfNoneMatch:     aws.String("*"),
 	}, singleAttempt)
 	if err != nil {
 		return storage.ObjectInfo{}, classifyPut(ctx, publishFailed(err, sent), true)
 	}
-	info := srcInfo
-	info.Key = dst
-	if out.CopyObjectResult != nil {
-		info.ETag = strings.Trim(aws.ToString(out.CopyObjectResult.ETag), `"`)
-		if t := out.CopyObjectResult.LastModified; t != nil {
-			info.ModTime = *t
-		}
+	return storage.ObjectInfo{
+		Key:         p.Key,
+		Size:        p.Size,
+		ContentType: p.ContentType,
+		ETag:        strings.Trim(aws.ToString(done.ETag), `"`),
+		Metadata:    cloneOrNil(p.Metadata),
+	}, nil
+}
+
+// Fence implements storage.Publisher with AbortMultipartUpload. S3 orders
+// an abort and a Complete of one upload: an abort that succeeds proves the
+// upload never completed and never will; NoSuchUpload means it is over
+// already (completed, or aborted before). Either way nothing more can be
+// published. Any other failure proves nothing, and is returned.
+func (s *Store) Fence(ctx context.Context, token string) error {
+	p, err := parsePublication(token)
+	if err != nil {
+		return storage.Wrap("fence", "", err)
 	}
-	return info, nil
+	objKey, err := s.objectKey(p.Key)
+	if err != nil {
+		return storage.Wrap("fence", p.Key, err)
+	}
+	_, err = s.client.AbortMultipartUpload(ctx, &awss3.AbortMultipartUploadInput{
+		Bucket: aws.String(s.bucket), Key: aws.String(objKey), UploadId: aws.String(p.UploadID),
+	})
+	if err == nil || isNoSuchUpload(err) {
+		return nil
+	}
+	return storage.Wrap("fence", p.Key, classify(ctx, err))
 }
 
 // Delete implements storage.Storage. S3 deletes are idempotent: deleting a

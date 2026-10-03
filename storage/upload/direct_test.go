@@ -321,31 +321,48 @@ func TestConfirmPromotesStagedUploads(t *testing.T) {
 	}
 }
 
-// copyOutcome is a store whose Copy copies, then reports err.
-type copyOutcome struct {
+// publishOutcome is a store (a storage.Publisher) whose Publish copies,
+// then reports err, and which records the fences it is asked for.
+type publishOutcome struct {
 	*memory.Store
-	err error
+	err    error
+	fenced *[]string
 }
 
-func (c copyOutcome) Copy(ctx context.Context, src, dst string) (storage.ObjectInfo, error) {
-	if _, err := storage.Copy(ctx, c.Store, src, dst); err != nil {
+func (o publishOutcome) PreparePublish(ctx context.Context, src, dst string) (string, error) {
+	return storage.PreparePublish(ctx, o.Store, src, dst)
+}
+
+func (o publishOutcome) Publish(ctx context.Context, token string) (storage.ObjectInfo, error) {
+	info, err := storage.Publish(ctx, o.Store, token)
+	if err != nil {
 		return storage.ObjectInfo{}, err
 	}
-	return storage.ObjectInfo{}, c.err
+	if o.err != nil {
+		return storage.ObjectInfo{}, o.err
+	}
+	return info, nil
 }
 
-// TestConfirmNeverAssumesACopyFailed: a promotion copy of unknown outcome
-// leaves the claim promoting (the copy may exist), and a retried Confirm
-// finds the key as it is; a definite failure puts the claim back to
-// pending.
+func (o publishOutcome) Fence(_ context.Context, token string) error {
+	*o.fenced = append(*o.fenced, token)
+	return nil
+}
+
+// TestConfirmNeverAssumesACopyFailed: a promotion's copy is recorded on the
+// claim (Publishing) before it is published. One of unknown outcome leaves
+// the claim promoting with that record (the copy may exist: the claims
+// protocol fences it before forgetting the key), and a retried Confirm
+// finds the key as it is; a definite failure is fenced, then the claim
+// goes back to pending.
 func TestConfirmNeverAssumesACopyFailed(t *testing.T) {
 	ctx := context.Background()
 	for name, tc := range map[string]struct {
 		err       error
 		promoting bool
 	}{
-		"unknown":  {storage.Wrap("copy", "k", errors.Join(storage.ErrUnknownOutcome, storage.ErrUnavailable)), true},
-		"definite": {storage.Wrap("copy", "k", storage.ErrUnavailable), false},
+		"unknown":  {storage.Wrap("publish", "k", errors.Join(storage.ErrUnknownOutcome, storage.ErrUnavailable)), true},
+		"definite": {storage.Wrap("publish", "k", storage.ErrUnavailable), false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			mem := memory.New()
@@ -359,7 +376,8 @@ func TestConfirmNeverAssumesACopyFailed(t *testing.T) {
 			if _, err := mem.Put(ctx, upload.StagingKey(key), bytes.NewReader(png), storage.PutOptions{ContentType: "image/png"}); err != nil {
 				t.Fatal(err)
 			}
-			store := copyOutcome{Store: mem, err: tc.err}
+			var fenced []string
+			store := publishOutcome{Store: mem, err: tc.err, fenced: &fenced}
 			if _, err := upload.Confirm(ctx, store, key, p); !errors.Is(err, storage.ErrUnavailable) {
 				t.Fatalf("Confirm = %v, want the copy's failure", err)
 			}
@@ -367,11 +385,43 @@ func TestConfirmNeverAssumesACopyFailed(t *testing.T) {
 				t.Fatalf("promoting %v, pending %v; want promoting = %v", cl.promoting[key], cl.pending[key], tc.promoting)
 			}
 			if tc.promoting {
+				if cl.published[key] == "" || len(fenced) != 0 {
+					t.Fatalf("recorded %q, fenced %v; want the token kept for the protocol to fence", cl.published[key], fenced)
+				}
 				// The copy did happen: a retry finds it.
 				if f, err := upload.Confirm(ctx, mem, key, p); err != nil || f.Key != key {
 					t.Fatalf("retried Confirm = %+v, %v", f, err)
 				}
+			} else if len(fenced) != 1 {
+				t.Fatalf("fenced %v; a definite failure must be fenced before the claim is put back", fenced)
 			}
 		})
+	}
+}
+
+// TestSaveStagesOnRemoteStores: under Policy.Claims, on a store that
+// publishes remotely (a storage.Publisher, as S3 is), Save puts the file at
+// the staging key and promotes it: the claimed key is written only by the
+// recorded, fenceable copy.
+func TestSaveStagesOnRemoteStores(t *testing.T) {
+	ctx := context.Background()
+	mem := memory.New()
+	cl := newFakeClaims(mem)
+	p := images
+	p.Claims = cl
+	var fenced []string
+	store := publishOutcome{Store: mem, fenced: &fenced}
+	f, err := upload.Save(ctx, store, bytes.NewReader(png), "a.png", p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cl.staged[f.Key] || !cl.promoting[f.Key] || cl.published[f.Key] == "" {
+		t.Fatalf("claim of %s: staged %v, promoting %v, recorded %q; want a recorded promotion", f.Key, cl.staged[f.Key], cl.promoting[f.Key], cl.published[f.Key])
+	}
+	if ok, _ := storage.Exists(ctx, mem, f.Key); !ok {
+		t.Fatal("the promoted file is missing")
+	}
+	if ok, _ := storage.Exists(ctx, mem, upload.StagingKey(f.Key)); ok {
+		t.Fatal("the staged copy was left")
 	}
 }
