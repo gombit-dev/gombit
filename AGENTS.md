@@ -54,8 +54,9 @@ content-detected type policy, generated keys), and public and signed URLs
 (visibility by key prefix; presigned on S3, `storage/presign` HMAC URLs
 served at `/_storage` for local and memory), and direct uploads
 (`storage.DirectUploader`, `upload.Authorize` / `upload.Confirm`), and
-cleanup semantics (`storage.Lister`, `DeleteIfFails`, `DeleteOwned`,
-`Sweep`; nothing shared is deleted without the owned-prefix contract), and
+cleanup semantics (`storage/claims`: a `storage_claims` table of
+pending/held/deleting keys moved by conditional updates, so cleanup never
+deletes a file a record holds; `storage.Lister` enumerates objects), and
 storage-backed model fields (`file` / `image` kinds, `types.File` /
 `types.Image`, runtime `storage/filefield`; MODEL-8) with their admin
 widgets (upload grants, previews, cleanup after commit; STORAGE-8). The other batteries

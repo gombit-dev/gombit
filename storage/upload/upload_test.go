@@ -81,7 +81,7 @@ func TestReceiveStoresTheFile(t *testing.T) {
 	if !generatedKey.MatchString(f.Key) {
 		t.Fatalf("key = %q, want a generated key under the prefix", f.Key)
 	}
-	if f.ContentType != "image/png" || f.Filename() != "résumé.png" || f.Size != int64(len(png)) {
+	if f.ContentType != "image/png" || f.Filename != "résumé.png" || f.Size != int64(len(png)) {
 		t.Fatalf("file = %+v", f)
 	}
 	body, info, err := store.Open(context.Background(), f.Key)
@@ -126,10 +126,10 @@ func TestFilenamesCannotTraverse(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%q: %v", tc.in, err)
 		}
-		if !generatedKey.MatchString(f.Key) || f.Filename() != tc.want {
-			t.Errorf("%q stored as %q named %q", tc.in, f.Key, f.Filename())
+		if !generatedKey.MatchString(f.Key) || f.Filename != tc.want {
+			t.Errorf("%q stored as %q named %q", tc.in, f.Key, f.Filename)
 		}
-		if err := storage.ValidateMetadata(map[string]string{upload.FilenameMetadata: f.Filename()}); err != nil {
+		if err := storage.ValidateMetadata(map[string]string{upload.FilenameMetadata: f.Filename}); err != nil {
 			t.Errorf("%q: the cleaned name is not valid metadata: %v", tc.in, err)
 		}
 	}
@@ -143,8 +143,8 @@ func TestReceiveIgnoresTheClientsPath(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%q: %v", name, err)
 		}
-		if !generatedKey.MatchString(f.Key) || strings.ContainsAny(f.Filename(), `/\`) || f.Filename() == ".." {
-			t.Errorf("%q stored as %q named %q", name, f.Key, f.Filename())
+		if !generatedKey.MatchString(f.Key) || strings.ContainsAny(f.Filename, `/\`) || f.Filename == ".." {
+			t.Errorf("%q stored as %q named %q", name, f.Key, f.Filename)
 		}
 	}
 }
@@ -435,7 +435,7 @@ func TestReceiveBody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !generatedKey.MatchString(f.Key) || f.ContentType != "image/png" || f.Filename() != "me.png" || f.Size != int64(len(png)) {
+	if !generatedKey.MatchString(f.Key) || f.ContentType != "image/png" || f.Filename != "me.png" || f.Size != int64(len(png)) {
 		t.Fatalf("file = %+v", f)
 	}
 
@@ -519,8 +519,8 @@ func TestLongFilenameFitsTheMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if f.Filename() == "" || len(f.Filename()) >= 240 || f.Metadata[upload.FilenameMetadata] != f.Filename() {
-		t.Fatalf("filename %d bytes, metadata %d bytes", len(f.Filename()), len(f.Metadata[upload.FilenameMetadata]))
+	if f.Filename == "" || len(f.Filename) >= 240 || f.Metadata[upload.FilenameMetadata] != f.Filename {
+		t.Fatalf("filename %d bytes, metadata %d bytes", len(f.Filename), len(f.Metadata[upload.FilenameMetadata]))
 	}
 	if err := storage.ValidateMetadata(f.Metadata); err != nil {
 		t.Fatal(err)
@@ -919,5 +919,100 @@ func TestDetectorCannotChangeTheFile(t *testing.T) {
 	}
 	if !bytes.Equal(got, png) {
 		t.Fatalf("the stored file differs from the upload: the detector changed it (first bytes %q)", got[:16])
+	}
+}
+
+// fakeClaims is a Claimer over store: Abandon deletes a key's object only
+// while the key is pending, as storage/claims does.
+type fakeClaims struct {
+	store      storage.Storage
+	pendingErr error
+	before     func(key string) // called by Pending first
+	pending    map[string]bool
+	claimed    []string
+	abandoned  []string
+}
+
+func newFakeClaims(store storage.Storage) *fakeClaims {
+	return &fakeClaims{store: store, pending: map[string]bool{}}
+}
+
+func (c *fakeClaims) Pending(_ context.Context, key string) error {
+	if c.before != nil {
+		c.before(key)
+	}
+	if c.pendingErr != nil {
+		return c.pendingErr
+	}
+	c.claimed = append(c.claimed, key)
+	c.pending[key] = true
+	return nil
+}
+
+func (c *fakeClaims) Abandon(ctx context.Context, key string) (bool, error) {
+	c.abandoned = append(c.abandoned, key)
+	if !c.pending[key] {
+		return false, nil
+	}
+	delete(c.pending, key)
+	return true, c.store.Delete(ctx, key)
+}
+
+// TestClaimComesFirst: Policy.Claims claims each generated key before
+// anything is stored or granted under it, for Save (and so Receive) and
+// Authorize alike; a failing claim fails the upload with nothing stored.
+func TestClaimComesFirst(t *testing.T) {
+	ctx := context.Background()
+	store := memory.New()
+	cl := newFakeClaims(store)
+	cl.before = func(key string) {
+		if exists, _ := storage.Exists(ctx, store, key); exists {
+			t.Errorf("%s was stored before it was claimed", key)
+		}
+	}
+	p := images
+	p.Claims = cl
+	f, err := upload.Save(ctx, store, bytes.NewReader(png), "a.png", p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cl.claimed) != 1 || cl.claimed[0] != f.Key {
+		t.Fatalf("claimed %v, want the stored key %s", cl.claimed, f.Key)
+	}
+	boom := errors.New("claims: database down")
+	cl.pendingErr = boom
+	before := len(store.Keys())
+	if _, err := upload.Save(ctx, store, bytes.NewReader(png), "a.png", p); !errors.Is(err, boom) {
+		t.Fatalf("Save with a failing claim = %v, want its error", err)
+	}
+	if len(store.Keys()) != before {
+		t.Fatal("an upload whose claim failed stored a file")
+	}
+}
+
+// TestClaimsDiscardThroughAbandon: under Policy.Claims, a failed upload
+// is cleaned up through Abandon: a failed Put drops its claim, and a Put
+// of unknown outcome deletes the pending key's file.
+func TestClaimsDiscardThroughAbandon(t *testing.T) {
+	ctx := context.Background()
+	store := memory.New()
+	cl := newFakeClaims(store)
+	p := images
+	p.Claims = cl
+	// A body that fails after its first bytes: during the Put.
+	src := &failing{data: append(bytes.Clone(png), make([]byte, 2*upload.SniffBytes)...), err: errors.New("connection reset by peer")}
+	if _, err := upload.Save(ctx, store, src, "a.png", p); err == nil {
+		t.Fatal("Save of a failing body succeeded")
+	}
+	if len(cl.claimed) != 1 || len(cl.abandoned) != 1 || cl.abandoned[0] != cl.claimed[0] || len(cl.pending) != 0 {
+		t.Fatalf("claimed %v, abandoned %v: a failed Put must drop its claim", cl.claimed, cl.abandoned)
+	}
+	cl = newFakeClaims(store)
+	p.Claims = cl
+	if _, err := upload.Save(ctx, unknownOutcome{Store: store}, bytes.NewReader(png), "a.png", p); err == nil {
+		t.Fatal("Save of an unknown outcome succeeded")
+	}
+	if len(cl.abandoned) != 1 || len(store.Keys()) != 0 {
+		t.Fatalf("abandoned %v, stored %v: the pending file must be deleted through Abandon", cl.abandoned, store.Keys())
 	}
 }

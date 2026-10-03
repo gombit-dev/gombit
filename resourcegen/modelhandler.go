@@ -78,6 +78,7 @@ func renderModelHandler(r modelResource) (string, error) {
 	if r.hasFiles() {
 		thirdImports = append(thirdImports,
 			"github.com/gombit-dev/gombit/storage",
+			"github.com/gombit-dev/gombit/storage/claims",
 			"github.com/gombit-dev/gombit/storage/filefield")
 	}
 	thirdImports = append(thirdImports, "gorm.io/gorm")
@@ -101,6 +102,8 @@ func renderModelHandler(r modelResource) (string, error) {
 	if r.hasFiles() {
 		b.WriteString("\t// Store holds the files of the resource's file fields.\n")
 		b.WriteString("\tStore storage.Storage\n")
+		b.WriteString("\t// Claims owns them: a record holds its files' keys (storage/claims).\n")
+		b.WriteString("\tClaims *claims.Claims\n")
 	}
 	b.WriteString("}\n\n")
 
@@ -255,14 +258,22 @@ func renderModelHandler(r modelResource) (string, error) {
 	b.WriteString("\t}\n")
 	if r.hasFiles() {
 		// The files named in the body must be uploads that pass their
-		// fields' policies and belong to no other record.
+		// fields' policies; the insert holds their claims in its
+		// transaction, so a file another record holds (or an expired
+		// upload) is refused, and a failed insert abandons the uploads.
 		b.WriteString("\tif err := h.acceptFiles(ctx, row); err != nil {\n")
 		b.WriteString("\t\treturn nil, err\n")
 		b.WriteString("\t}\n")
+		b.WriteString("\tif err := h.Claims.CreateWith(ctx, " + r.fileKeysExpr("row") + ", func(tx *gorm.DB) error {\n")
+		b.WriteString("\t\treturn tx.Create(&row).Error\n")
+		b.WriteString("\t}); err != nil {\n")
+		b.WriteString("\t\treturn nil, filefield.MapCreateError(ctx, err, \"resource already exists\", \"create " + singular + "\")\n")
+		b.WriteString("\t}\n")
+	} else {
+		b.WriteString("\tif err := h.DB.WithContext(ctx).Create(&row).Error; err != nil {\n")
+		b.WriteString("\t\treturn nil, database.MapPersistError(ctx, err, \"resource already exists\", \"create " + singular + "\")\n")
+		b.WriteString("\t}\n")
 	}
-	b.WriteString("\tif err := h.DB.WithContext(ctx).Create(&row).Error; err != nil {\n")
-	b.WriteString("\t\treturn nil, database.MapPersistError(ctx, err, \"resource already exists\", \"create " + singular + "\")\n")
-	b.WriteString("\t}\n")
 	b.WriteString(r.respond("create"+typ+"Output", data, typ))
 	if r.hasFiles() {
 		b.WriteString(r.fileHandlers())
@@ -273,7 +284,7 @@ func renderModelHandler(r modelResource) (string, error) {
 	b.WriteString("// Register mounts " + r.Package + " Huma routes, wiring the human-owned " + r.defaultHooksType() + ".\n")
 	b.WriteString("func Register(app *framework.App) {\n")
 	if r.hasFiles() {
-		b.WriteString("\th := &Handler{DB: app.DB(), Hooks: " + r.defaultHooksType() + "{}, Store: app.Storage()}\n")
+		b.WriteString("\th := &Handler{DB: app.DB(), Hooks: " + r.defaultHooksType() + "{}, Store: app.Storage(), Claims: filefield.Claims(app.DB(), app.Storage(), app.Logger())}\n")
 	} else {
 		b.WriteString("\th := &Handler{DB: app.DB(), Hooks: " + r.defaultHooksType() + "{}}\n")
 	}
@@ -480,13 +491,13 @@ func (r modelResource) fileHandlers() string {
 	b.WriteString("\treturn nil\n}\n\n")
 
 	b.WriteString("// acceptFiles checks the files a new row names: each an upload that passes\n")
-	b.WriteString("// its field's policy (by its bytes) and that no other row holds.\n")
+	b.WriteString("// its field's policy (by its bytes). The insert then holds their claims.\n")
 	b.WriteString("func (h *Handler) acceptFiles(ctx context.Context, row " + typ + ") error {\n")
 	for _, f := range r.fileFields() {
 		if !f.InRequest {
 			continue
 		}
-		b.WriteString("\tif err := filefield.Accept(ctx, h.DB, h.Store, &" + typ + "{}, \"" + f.Column + "\", " + f.fileKeyExpr("row") + ", " + f.policyName(typ) + "); err != nil {\n")
+		b.WriteString("\tif err := filefield.Accept(ctx, h.Store, h.Claims, " + f.fileKeyExpr("row") + ", " + f.policyName(typ) + "); err != nil {\n")
 		b.WriteString("\t\treturn filefield.MapError(ctx, err)\n\t}\n")
 	}
 	b.WriteString("\treturn nil\n}\n\n")
@@ -506,7 +517,7 @@ func (r modelResource) fileHandlers() string {
 		b.WriteString("func (h *Handler) upload" + f.GoName + "(ctx context.Context, input *" + in + ") (*upload" + typ + "FileOutput, error) {\n")
 		b.WriteString("\tif hk, ok := h.Hooks.(interface {\n\t\tBeforeUpload(ctx context.Context, field string) error\n\t}); ok {\n")
 		b.WriteString("\t\tif err := hk.BeforeUpload(ctx, \"" + f.jsonName() + "\"); err != nil {\n\t\t\treturn nil, err\n\t\t}\n\t}\n")
-		b.WriteString("\tg, err := filefield.Authorize(ctx, h.Store, " + f.policyName(typ) + ", input.Body)\n")
+		b.WriteString("\tg, err := filefield.Authorize(ctx, h.Store, h.Claims, " + f.policyName(typ) + ", input.Body)\n")
 		b.WriteString("\tif err != nil {\n\t\treturn nil, filefield.MapError(ctx, err)\n\t}\n")
 		b.WriteString("\treturn &upload" + typ + "FileOutput{Body: contract.Data[filefield.UploadGrant]{Data: g}}, nil\n}\n\n")
 	}

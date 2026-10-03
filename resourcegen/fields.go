@@ -1284,8 +1284,8 @@ func (f Field) gormTag() string {
 	}
 	switch {
 	case f.Unique, f.Type == FieldFile, f.Type == FieldImage:
-		// A file belongs to one record: the unique index is the ownership
-		// contract its cleanup relies on (storage.DeleteOwned).
+		// A file belongs to one record: the unique index backs up the
+		// claim the record holds (storage/claims).
 		parts = append(parts, "uniqueIndex")
 	case f.Index:
 		parts = append(parts, "index")

@@ -260,6 +260,7 @@ import (
 	"github.com/gombit-dev/gombit/database"
 	"github.com/gombit-dev/gombit/framework"
 	"github.com/gombit-dev/gombit/storage"
+	"github.com/gombit-dev/gombit/storage/claims"
 )
 
 func TestFileFieldFlow(t *testing.T) {
@@ -272,7 +273,9 @@ func TestFileFieldFlow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AutoMigrate(&Document{}); err != nil {
+	// internal/platform's AutoMigrate migrates claims.Claim in the app
+	// (it imports this package, so the test cannot call it).
+	if err := db.AutoMigrate(append(claims.Models(), &Document{})...); err != nil {
 		t.Fatal(err)
 	}
 	app, err := framework.New(framework.WithConfig(cfg), framework.WithDatabase(db))

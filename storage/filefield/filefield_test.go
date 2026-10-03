@@ -13,10 +13,12 @@ import (
 
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 
 	"github.com/gombit-dev/gombit/contract"
 	"github.com/gombit-dev/gombit/field"
 	"github.com/gombit-dev/gombit/storage"
+	"github.com/gombit-dev/gombit/storage/claims"
 	"github.com/gombit-dev/gombit/storage/filefield"
 	"github.com/gombit-dev/gombit/storage/memory"
 	"github.com/gombit-dev/gombit/storage/presign"
@@ -34,11 +36,14 @@ var png = append([]byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"), bytes.Repeat([]b
 
 func setup(t *testing.T) (*gorm.DB, *memory.Store, upload.Policy) {
 	t.Helper()
-	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	db, err := gorm.Open(sqlite.Open("file:"+t.TempDir()+"/f.db?_fk=1&_busy_timeout=5000"), &gorm.Config{Logger: logger.Discard})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AutoMigrate(&document{}); err != nil {
+	if sqlDB, err := db.DB(); err == nil {
+		t.Cleanup(func() { _ = sqlDB.Close() }) // before TempDir's removal (Windows)
+	}
+	if err := db.AutoMigrate(append(claims.Models(), &document{})...); err != nil {
 		t.Fatal(err)
 	}
 	signer, err := presign.New(presign.Config{Base: "/_storage", Secret: []byte(strings.Repeat("k", 32)), PublicPrefix: "public/"})
@@ -95,62 +100,88 @@ func TestPolicy(t *testing.T) {
 	}
 }
 
+// TestAccept: a record takes a key only for an upload that passes the
+// field's policy, and only one record takes it (its transaction holds the
+// claim). A refused file is deleted only while its claim is pending.
 func TestAccept(t *testing.T) {
 	db, store, p := setup(t)
 	ctx := context.Background()
-	if err := filefield.Accept(ctx, db, store, &document{}, "cover", "", p); err != nil {
+	cl := claims.New(db, store)
+	if err := filefield.Accept(ctx, store, cl, "", p); err != nil {
 		t.Fatalf("no file = %v", err)
 	}
-	putFile(t, store, "documents/cover/good", png, "image/png")
-	if err := filefield.Accept(ctx, db, store, &document{}, "cover", "documents/cover/good", p); err != nil {
+	claimed := func(key string, body []byte) {
+		t.Helper()
+		if err := cl.Pending(ctx, key); err != nil {
+			t.Fatal(err)
+		}
+		putFile(t, store, key, body, "image/png")
+	}
+	create := func(title, key string) error {
+		k := types.Image(key)
+		return cl.CreateWith(ctx, []string{key}, func(tx *gorm.DB) error {
+			return tx.Create(&document{Title: title, Cover: &k}).Error
+		})
+	}
+	claimed("documents/cover/good", png)
+	if err := filefield.Accept(ctx, store, cl, "documents/cover/good", p); err != nil {
 		t.Fatalf("a good upload = %v", err)
 	}
-	key := types.Image("documents/cover/good")
-	if err := db.Create(&document{Title: "a", Cover: &key}).Error; err != nil {
+	if err := create("a", "documents/cover/good"); err != nil {
 		t.Fatal(err)
 	}
-	// Another record cannot take it.
-	if err := filefield.Accept(ctx, db, store, &document{}, "cover", "documents/cover/good", p); !errors.Is(err, filefield.ErrReferenced) {
-		t.Fatalf("a file another record holds = %v, want ErrReferenced", err)
+	// Another record cannot take it: the policy still passes, but the
+	// claim is held.
+	if err := filefield.Accept(ctx, store, cl, "documents/cover/good", p); err != nil {
+		t.Fatalf("Accept of a held, valid file = %v", err)
+	}
+	if err := create("b", "documents/cover/good"); !errors.Is(err, claims.ErrNotPending) {
+		t.Fatalf("a file another record holds = %v, want ErrNotPending", err)
 	}
 	if ok, _ := storage.Exists(ctx, store, "documents/cover/good"); !ok {
 		t.Fatal("refusing a held file deleted it")
 	}
 	// Nothing uploaded, outside the prefix, or failing the policy.
+	claimed("documents/cover/script", []byte("<html><script>x</script>"))
 	for key, want := range map[string]error{
 		"documents/cover/never":  upload.ErrNoFile,
 		"other/cover/stolen":     upload.ErrMalformed,
 		"documents/cover/script": upload.ErrType,
 	} {
-		if key == "documents/cover/script" {
-			putFile(t, store, key, []byte("<html><script>x</script>"), "image/png")
-		}
-		if err := filefield.Accept(ctx, db, store, &document{}, "cover", key, p); !errors.Is(err, want) {
+		if err := filefield.Accept(ctx, store, cl, key, p); !errors.Is(err, want) {
 			t.Errorf("Accept(%q) = %v, want %v", key, err, want)
 		}
 	}
 	if ok, _ := storage.Exists(ctx, store, "documents/cover/script"); ok {
-		t.Fatal("a file failing the policy was kept")
+		t.Fatal("a pending file failing the policy was kept")
+	}
+	// A held file that fails the policy (another field's stricter policy
+	// under the same prefix, say) is refused but never deleted.
+	claimed("documents/cover/held", []byte("<html>"))
+	if err := create("c", "documents/cover/held"); err != nil {
+		t.Fatal(err)
+	}
+	if err := filefield.Accept(ctx, store, cl, "documents/cover/held", p); !errors.Is(err, upload.ErrType) {
+		t.Fatalf("Accept of a held file failing the policy = %v, want ErrType", err)
+	}
+	if ok, _ := storage.Exists(ctx, store, "documents/cover/held"); !ok {
+		t.Fatal("a held file was deleted")
 	}
 }
 
-func TestReferencedBySweeps(t *testing.T) {
-	db, _, _ := setup(t)
+// TestAuthorizeClaims: a grant's key is pending in the claims until a
+// record holds it.
+func TestAuthorizeClaims(t *testing.T) {
+	db, store, p := setup(t)
 	ctx := context.Background()
-	old := memory.New(memory.WithClock(func() time.Time { return time.Now().Add(-2 * time.Hour) }))
-	for _, k := range []string{"documents/cover/kept", "documents/cover/abandoned"} {
-		putFile(t, old, k, png, "image/png")
-	}
-	key := types.Image("documents/cover/kept")
-	if err := db.Create(&document{Title: "a", Cover: &key}).Error; err != nil {
+	cl := claims.New(db, store)
+	g, err := filefield.Authorize(ctx, store, cl, p, filefield.UploadGrantRequest{Size: int64(len(png)), ContentType: "image/png"})
+	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := storage.Sweep(ctx, old, "documents/cover/", time.Hour, filefield.ReferencedBy(db, &document{}, "cover"))
-	if err != nil || res.Deleted != 1 {
-		t.Fatalf("Sweep = %+v, %v", res, err)
-	}
-	if ok, _ := storage.Exists(ctx, old, "documents/cover/kept"); !ok {
-		t.Fatal("the attached file was swept")
+	var c claims.Claim
+	if err := db.Where("object_key = ?", g.Key).Take(&c).Error; err != nil || c.State != claims.Pending {
+		t.Fatalf("the grant's claim = %+v, %v; want pending", c, err)
 	}
 }
 
@@ -182,10 +213,10 @@ func TestResolve(t *testing.T) {
 func TestMapError(t *testing.T) {
 	ctx := context.Background()
 	for err, want := range map[error]int{
-		filefield.ErrReferenced: http.StatusConflict,
-		upload.ErrType:          http.StatusUnprocessableEntity,
-		upload.ErrTooLarge:      http.StatusRequestEntityTooLarge,
-		storage.ErrUnsupported:  http.StatusInternalServerError,
+		claims.ErrNotPending:   http.StatusConflict,
+		upload.ErrType:         http.StatusUnprocessableEntity,
+		upload.ErrTooLarge:     http.StatusRequestEntityTooLarge,
+		storage.ErrUnsupported: http.StatusInternalServerError,
 	} {
 		var env *contract.ErrorEnvelope
 		if !errors.As(filefield.MapError(ctx, err), &env) || env.GetStatus() != want {

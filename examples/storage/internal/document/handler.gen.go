@@ -11,6 +11,7 @@ import (
 	"github.com/gombit-dev/gombit/database"
 	"github.com/gombit-dev/gombit/framework"
 	"github.com/gombit-dev/gombit/storage"
+	"github.com/gombit-dev/gombit/storage/claims"
 	"github.com/gombit-dev/gombit/storage/filefield"
 	"gorm.io/gorm"
 )
@@ -29,6 +30,8 @@ type Handler struct {
 	Hooks DocumentHooks
 	// Store holds the files of the resource's file fields.
 	Store storage.Storage
+	// Claims owns them: a record holds its files' keys (storage/claims).
+	Claims *claims.Claims
 }
 
 type listDocumentsOutput struct {
@@ -112,8 +115,10 @@ func (h *Handler) create(ctx context.Context, input *createDocumentInput) (*crea
 	if err := h.acceptFiles(ctx, row); err != nil {
 		return nil, err
 	}
-	if err := h.DB.WithContext(ctx).Create(&row).Error; err != nil {
-		return nil, database.MapPersistError(ctx, err, "resource already exists", "create document")
+	if err := h.Claims.CreateWith(ctx, []string{string(row.Attachment), filefield.KeyOf(row.Cover)}, func(tx *gorm.DB) error {
+		return tx.Create(&row).Error
+	}); err != nil {
+		return nil, filefield.MapCreateError(ctx, err, "resource already exists", "create document")
 	}
 	item := toDocumentData(row)
 	if err := h.resolveFiles(ctx, row, &item); err != nil {
@@ -136,12 +141,12 @@ func (h *Handler) resolveFiles(ctx context.Context, row Document, item *document
 }
 
 // acceptFiles checks the files a new row names: each an upload that passes
-// its field's policy (by its bytes) and that no other row holds.
+// its field's policy (by its bytes). The insert then holds their claims.
 func (h *Handler) acceptFiles(ctx context.Context, row Document) error {
-	if err := filefield.Accept(ctx, h.DB, h.Store, &Document{}, "attachment", string(row.Attachment), documentAttachmentPolicy); err != nil {
+	if err := filefield.Accept(ctx, h.Store, h.Claims, string(row.Attachment), documentAttachmentPolicy); err != nil {
 		return filefield.MapError(ctx, err)
 	}
-	if err := filefield.Accept(ctx, h.DB, h.Store, &Document{}, "cover", filefield.KeyOf(row.Cover), documentCoverPolicy); err != nil {
+	if err := filefield.Accept(ctx, h.Store, h.Claims, filefield.KeyOf(row.Cover), documentCoverPolicy); err != nil {
 		return filefield.MapError(ctx, err)
 	}
 	return nil
@@ -166,7 +171,7 @@ func (h *Handler) uploadAttachment(ctx context.Context, input *uploadDocumentAtt
 			return nil, err
 		}
 	}
-	g, err := filefield.Authorize(ctx, h.Store, documentAttachmentPolicy, input.Body)
+	g, err := filefield.Authorize(ctx, h.Store, h.Claims, documentAttachmentPolicy, input.Body)
 	if err != nil {
 		return nil, filefield.MapError(ctx, err)
 	}
@@ -188,7 +193,7 @@ func (h *Handler) uploadCover(ctx context.Context, input *uploadDocumentCoverInp
 			return nil, err
 		}
 	}
-	g, err := filefield.Authorize(ctx, h.Store, documentCoverPolicy, input.Body)
+	g, err := filefield.Authorize(ctx, h.Store, h.Claims, documentCoverPolicy, input.Body)
 	if err != nil {
 		return nil, filefield.MapError(ctx, err)
 	}
@@ -197,7 +202,7 @@ func (h *Handler) uploadCover(ctx context.Context, input *uploadDocumentCoverInp
 
 // Register mounts document Huma routes, wiring the human-owned Hooks.
 func Register(app *framework.App) {
-	h := &Handler{DB: app.DB(), Hooks: Hooks{}, Store: app.Storage()}
+	h := &Handler{DB: app.DB(), Hooks: Hooks{}, Store: app.Storage(), Claims: filefield.Claims(app.DB(), app.Storage(), app.Logger())}
 	prefix := app.Config().API.Prefix
 	api := app.API()
 

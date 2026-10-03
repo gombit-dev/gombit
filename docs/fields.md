@@ -120,8 +120,9 @@ file fields change the create and read shapes:
   with none. The create is refused unless:
   - the key is under the field's prefix (otherwise 422);
   - the upload exists and passes the policy, detected by its bytes (otherwise
-    422, and a refused file is deleted);
-  - no other record holds it (otherwise 409).
+    422, and a refused file is deleted if no record holds it);
+  - the key's claim is still pending: no other record holds it, and the
+    upload has not expired and been swept (otherwise 409).
 - Reads return a file object: `key`, `filename`, `size`, `content_type`, and
   `url`. The URL is permanent for keys under the public prefix and signed for
   15 minutes otherwise. `missing` is `true` when the store no longer has the
@@ -130,16 +131,20 @@ file fields change the create and read shapes:
 Every read stats each file, so a list page makes one storage request per file
 per row.
 
-**Ownership.** The column's unique index means one record per file, and the
-field's prefix is what it owns. That is the contract
-`storage.DeleteOwned` and `storage.Sweep` rely on: a file is never deleted
-from under another record. Uploads granted but never attached are removed by
-`storage.Sweep(ctx, store, "<prefix>", age, filefield.ReferencedBy(db, &Model{}, "<column>"))`.
+**Ownership.** Files are owned through [`storage/claims`](storage.md#cleanup),
+so the app needs its `storage_claims` table (apps made by `gombit new`
+migrate it). The upload grant claims its key (`pending`); the create holds
+the claims of the row's files in the insert's transaction
+(`claims.CreateWith`), so the row and its files commit together, and a
+failed insert deletes the uploads it named. The column's unique index backs
+this up: one record per file. Uploads granted but never attached stay
+`pending` until a periodic `claims.Sweep(ctx, grace)` deletes them; one sweep
+covers every field.
 
 **Who may upload.** Uploading is as open as create. A `BeforeUpload(ctx, field)`
 method on the resource's hooks decides who may have a grant; the seeded
 `hooks.go` of a resource with file fields has one. On an app reachable by
-anyone, restrict it (to signed-in users, say), and run the sweep below: each
+anyone, restrict it (to signed-in users, say), and run the sweep above: each
 grant lets its holder store up to the field's `max_bytes`, and an upload
 that is never attached stays stored until swept.
 
