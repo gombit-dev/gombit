@@ -439,6 +439,32 @@ func TestGenerateFlagValidation(t *testing.T) {
 	}
 }
 
+func TestGenerateDevNullIsNonInteractive(t *testing.T) {
+	devNull, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatalf("open %s: %v", os.DevNull, err)
+	}
+	defer func() { _ = devNull.Close() }()
+
+	stdout := new(bytes.Buffer)
+	err = Generate(context.Background(), Options{
+		Database: "sqlite",
+		WorkDir:  t.TempDir(),
+		Stdin:    devNull,
+		Stdout:   stdout,
+	})
+	if err == nil {
+		t.Fatal("Generate() error = nil, want non-interactive project-name error")
+	}
+	want := "project name is required (pass a name or run interactively on a TTY)"
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("Generate() error = %q, want %q", err, want)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want no interactive prompt", stdout.String())
+	}
+}
+
 func TestGenerateRecordsAuthAndUIChoices(t *testing.T) {
 	workDir := t.TempDir()
 	err := Generate(context.Background(), Options{
