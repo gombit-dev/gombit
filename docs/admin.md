@@ -259,7 +259,15 @@ policy as hints: `accept` (media types) and `max_bytes`.
 
   An explicit `Options.Fields` entry for a file or image column must be
   declared `file` or `image`: mapped as any other type it would write keys
-  past the upload protocol, so registration refuses it.
+  past the upload protocol, so registration refuses it. A file column left
+  out of explicit `Fields` cannot be written at all: delete is then off,
+  create too when the column is required (it would store an empty key),
+  and asking for either is a registration error.
+- **Concurrent writers:** an update writes a file column only when it
+  changes its key (through the claims, which fail if another writer
+  replaced that file meanwhile: a 409, nothing written); an unchanged one
+  is left out of the write, so a PATCH never puts back a key it loaded
+  over a concurrent replacement.
 
   Anything else is a field error: 422 with `fields.<name>`.
 - **Cleanup:** a write moves the record's file claims in its own

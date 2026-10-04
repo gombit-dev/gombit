@@ -14,6 +14,7 @@ import (
 	"github.com/gombit-dev/gombit/admin"
 	"github.com/gombit-dev/gombit/auth"
 	"github.com/gombit-dev/gombit/config"
+	"github.com/gombit-dev/gombit/database"
 	"github.com/gombit-dev/gombit/framework"
 	"github.com/gombit-dev/gombit/storage"
 	"github.com/gombit-dev/gombit/storage/claims"
@@ -516,5 +517,167 @@ func TestRegisterWithAFileColumn(t *testing.T) {
 	var claim2 claims.Claim
 	if err := db.Where("object_key = ?", key2).Take(&claim2).Error; err != nil || claim2.State != claims.Held {
 		t.Fatalf("after the PATCHes the claim = %+v, %v; want held", claim2, err)
+	}
+}
+
+// Contract has a required file (the shape `make resource` generates for
+// attachment:file:required), and Report a versioned optional image.
+type Contract struct {
+	gorm.Model
+	Title string     `gorm:"not null"`
+	Doc   types.File `gorm:"size:512;not null;uniqueIndex"`
+}
+
+type Report struct {
+	gorm.Model
+	Title   string       `gorm:"not null"`
+	Version int          `json:"version"`
+	Scan    *types.Image `gorm:"size:512;uniqueIndex"`
+}
+
+// newMemoryFileApp is a cookie-mode app on in-memory storage with the
+// claims table and models migrated.
+func newMemoryFileApp(t *testing.T, models ...any) (*framework.App, *database.DB) {
+	t.Helper()
+	db := openSQLite(t)
+	if err := auth.Migrate(db.DB); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(append(claims.Models(), models...)...); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.DefaultFor(config.EnvironmentTest)
+	cfg.HTTP.Addr = "127.0.0.1:0"
+	cfg.Auth.JWTSecret = testJWTSecret
+	cfg.Auth.BcryptCost = bcrypt.MinCost
+	cfg.Auth.AccessTokenTTL = time.Minute
+	cfg.Auth.RefreshTokenTTL = time.Hour
+	cfg.Auth.Mode = config.AuthModeCookie
+	cfg.Storage.Driver = config.StorageDriverMemory
+	app, err := framework.New(framework.WithConfig(cfg), framework.WithDatabase(db), framework.WithLogger(zap.NewNop()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return app, db
+}
+
+// TestAdminCannotCreateWithARequiredFile: a required file column the
+// admin maps (a file field) is created only with a confirmed upload; one it
+// does not map (explicit Fields leaving it out) cannot be set, so create is
+// off by default there, refused at request time, and an explicit
+// Actions.Create is a registration error. No path stores the empty key.
+func TestAdminCannotCreateWithARequiredFile(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	app, db := newMemoryFileApp(t, &Contract{}, &Report{})
+	if err := admin.Register(app, Contract{}, admin.Options{Slug: "contracts"}); err != nil {
+		t.Fatal(err)
+	}
+	id := admin.Field{Name: "id", Type: admin.TypeInteger, ReadOnly: true}
+	titled := []admin.Field{id, {Name: "title", Type: admin.TypeString}}
+	if err := admin.Register(app, Contract{}, admin.Options{Slug: "contracts-titled", Fields: titled}); err != nil {
+		t.Fatal(err)
+	}
+	explicit := admin.Options{Slug: "contracts-all", Fields: titled, Actions: admin.Actions{List: true, Detail: true, Create: true, Update: true}}
+	if err := admin.Register(app, Contract{}, explicit); err == nil || !strings.Contains(err.Error(), "cannot set") {
+		t.Fatalf("Register() with Create and the required file unmapped = %v, want an error", err)
+	}
+	jar := loginSuperuser(t, app)
+	base := apiPrefix(app) + "/admin/resources/"
+	if rec := doRequest(app, jar, http.MethodPost, base+"contracts", `{"title":"x"}`); rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("admin create without the required file = %d %s, want 422", rec.Code, rec.Body)
+	}
+	meta := doRequest(app, jar, http.MethodGet, apiPrefix(app)+"/admin/meta/contracts-titled", "")
+	if !strings.Contains(meta.Body.String(), `"create":false`) || !strings.Contains(meta.Body.String(), `"delete":false`) {
+		t.Fatalf("meta = %s; want create and delete off with the file unmapped", meta.Body)
+	}
+	for range 2 {
+		if rec := doRequest(app, jar, http.MethodPost, base+"contracts-titled", `{"title":"x"}`); rec.Code != http.StatusForbidden {
+			t.Fatalf("admin create with the required file unmapped = %d %s, want 403", rec.Code, rec.Body)
+		}
+	}
+	var n int64
+	db.Model(&Contract{}).Count(&n)
+	if n != 0 {
+		t.Fatalf("%d contracts inserted; want none (no empty keys)", n)
+	}
+	// An optional file is different: create stores NULL, which is valid.
+	if err := admin.Register(app, Report{}, admin.Options{Slug: "reports"}); err != nil {
+		t.Fatal(err)
+	}
+	if rec := doRequest(app, jar, http.MethodPost, base+"reports", `{"title":"r"}`); rec.Code != http.StatusOK && rec.Code != http.StatusCreated {
+		t.Fatalf("admin create with an optional file = %d %s", rec.Code, rec.Body)
+	}
+}
+
+// TestAdminUpdateLeavesFileColumnsAlone: an admin update never writes a
+// file column it does not own. Here a claims.Update replaces the file
+// between the admin's load and its write (simulated by a callback); the
+// admin's write must not put the old, released key back, on the plain and
+// the versioned paths.
+func TestAdminUpdateLeavesFileColumnsAlone(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	app, db := newMemoryFileApp(t, &Attachment{}, &Report{})
+	for _, reg := range []struct {
+		model any
+		slug  string
+	}{{Attachment{}, "attachments"}, {Report{}, "reports"}} {
+		if err := admin.Register(app, reg.model, admin.Options{Slug: reg.slug}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	jar := loginSuperuser(t, app)
+	// replace runs once, just before the admin's UPDATE, in its connection
+	// (and transaction): another writer's change landing between the
+	// admin's load and its write.
+	var replace func(tx *gorm.DB)
+	if err := db.DB.Callback().Update().Before("gorm:update").Register("test:replace-file", func(tx *gorm.DB) {
+		if replace != nil {
+			r := replace
+			replace = nil
+			r(tx.Session(&gorm.Session{NewDB: true}))
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	old, newer := types.File("attachments/file/old"), types.File("attachments/file/new")
+	att := Attachment{Title: "a", File: &old}
+	if err := db.Create(&att).Error; err != nil {
+		t.Fatal(err)
+	}
+	replace = func(tx *gorm.DB) {
+		if err := tx.Exec("UPDATE attachments SET file = ? WHERE id = ?", string(newer), att.ID).Error; err != nil {
+			t.Error(err)
+		}
+	}
+	if rec := doRequest(app, jar, http.MethodPatch, fmt.Sprintf("%s/admin/resources/attachments/%d", apiPrefix(app), att.ID), `{"title":"b"}`); rec.Code != http.StatusOK {
+		t.Fatalf("PATCH = %d %s", rec.Code, rec.Body)
+	}
+	var got Attachment
+	if err := db.First(&got, att.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if got.Title != "b" || got.File == nil || *got.File != newer {
+		t.Fatalf("after the PATCH: %+v; want the title changed and the replaced file kept", got)
+	}
+
+	oldScan, newScan := types.Image("reports/scan/old"), types.Image("reports/scan/new")
+	rep := Report{Title: "r", Scan: &oldScan}
+	if err := db.Create(&rep).Error; err != nil {
+		t.Fatal(err)
+	}
+	replace = func(tx *gorm.DB) {
+		if err := tx.Exec("UPDATE reports SET scan = ? WHERE id = ?", string(newScan), rep.ID).Error; err != nil {
+			t.Error(err)
+		}
+	}
+	if rec := doRequest(app, jar, http.MethodPatch, fmt.Sprintf("%s/admin/resources/reports/%d", apiPrefix(app), rep.ID), fmt.Sprintf(`{"title":"s","version":%d}`, rep.Version)); rec.Code != http.StatusOK {
+		t.Fatalf("versioned PATCH = %d %s", rec.Code, rec.Body)
+	}
+	var gotRep Report
+	if err := db.First(&gotRep, rep.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if gotRep.Title != "s" || gotRep.Scan == nil || *gotRep.Scan != newScan {
+		t.Fatalf("after the versioned PATCH: %+v; want the title changed and the replaced file kept", gotRep)
 	}
 }

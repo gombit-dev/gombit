@@ -408,3 +408,35 @@ func TestAdminGrantBelongsToItsField(t *testing.T) {
 		t.Fatalf("the front's grant written to front = %d %s", rec.Code, rec.Body)
 	}
 }
+
+// TestAdminReplaceLosesToAConcurrentReplacement: an admin write replacing a
+// file releases the old key in its transaction. If another writer released
+// it meanwhile (a concurrent replacement), that fails: the admin answers
+// 409, writes nothing, and its new upload is abandoned.
+func TestAdminReplaceLosesToAConcurrentReplacement(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	app := newFileApp(t)
+	jar := loginSuperuser(t, app)
+	base := apiPrefix(app) + "/admin/resources/papers"
+	doc := uploadFile(t, app, jar, "doc", pdfBytes, "application/pdf")
+	rec := doRequest(app, jar, http.MethodPost, base, fmt.Sprintf(`{"title":"a","doc":%q}`, doc))
+	var created rowEnvelope
+	_ = json.Unmarshal(rec.Body.Bytes(), &created)
+	id := fmt.Sprint(asInt(created.Data["id"]))
+	// Another writer released the held key (its replacement committed).
+	if err := app.DB().Model(&claims.Claim{}).Where("object_key = ?", doc).Update("state", claims.Deleting).Error; err != nil {
+		t.Fatal(err)
+	}
+	doc2 := uploadFile(t, app, jar, "doc", pdfBytes, "application/pdf")
+	rec = doRequest(app, jar, http.MethodPatch, base+"/"+id, fmt.Sprintf(`{"doc":%q}`, doc2))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("replacing a file another writer released = %d %s, want 409", rec.Code, rec.Body)
+	}
+	var paper Paper
+	if err := app.DB().First(&paper, id).Error; err != nil || string(paper.Doc) != doc {
+		t.Fatalf("the row = %+v, %v; want it unchanged", paper, err)
+	}
+	if exists(t, app, doc2) {
+		t.Fatal("the losing write's upload was kept")
+	}
+}

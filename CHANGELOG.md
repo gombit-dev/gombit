@@ -230,6 +230,9 @@ version.
   - an explicit `Options.Fields` entry for a file or image column must be
     declared `file` or `image` (any other type is a registration error, so
     no admin write bypasses the upload protocol);
+  - an update writes a file column only when it changes its key (a
+    concurrent replacement makes it a 409, nothing written) and leaves
+    unchanged and unmapped file columns out of the write;
   - `POST /admin/resources/{slug}/uploads/{field}` grants a direct upload,
     and needs create or update permission;
   - writes accept a key only for an upload under the field's prefix that

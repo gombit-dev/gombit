@@ -186,6 +186,22 @@ func (m *registered) fileChanges(before map[string]string, inst any) (hold, rele
 	return hold, release
 }
 
+// updateOmits are the columns an update leaves out of its write: the file
+// columns no admin field maps (omitOnUpdate), and the mapped ones whose key
+// this write does not change. A changed key goes through claims.Update (the
+// old key released in the same transaction, which fails if another writer
+// replaced it meanwhile); an unchanged one is not written at all, so the
+// update never puts back a key it loaded over a concurrent replacement.
+func (m *registered) updateOmits(before map[string]string, inst any) []string {
+	omit := append([]string(nil), m.omitOnUpdate...)
+	for _, f := range m.fileFields() {
+		if fileKey(f.get(inst)) == before[f.Name] {
+			omit = append(omit, f.column)
+		}
+	}
+	return omit
+}
+
 // writeFiles runs write (the record's change, in tx) with the record's file
 // claims moved in the same transaction (claims.Update): the new keys held,
 // the replaced ones released and, once it commits, deleted. Without files
@@ -196,6 +212,11 @@ func (h *handlers) writeFiles(ctx context.Context, cl *claims.Claims, db *gorm.D
 	}
 	hold, release := m.fileChanges(before, inst)
 	err := cl.Update(ctx, hold, release, write)
+	if errors.Is(err, claims.ErrNotHeld) {
+		// A key this write replaces was released by another writer
+		// meanwhile (a concurrent replacement): nothing was written.
+		return contract.WithContext(ctx, contract.Conflict("A file of this record was changed by another request; reload and retry."))
+	}
 	var ke *claims.KeyError
 	if errors.As(err, &ke) && errors.Is(err, claims.ErrNotPending) {
 		// A new key the transaction could not hold: name its field.

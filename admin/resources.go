@@ -151,7 +151,7 @@ func (h *handlers) createResource(ctx context.Context, input *writeInput) (*rowO
 		return nil, err
 	}
 	if err := h.writeFiles(ctx, cl, db, m, nil, inst, func(tx *gorm.DB) error {
-		return persistWithM2M(ctx, tx, m, inst, m2mIDs, true)
+		return persistWithM2M(ctx, tx, m, inst, m2mIDs, true, nil)
 	}); err != nil {
 		return nil, err
 	}
@@ -220,7 +220,7 @@ func (h *handlers) updateResource(ctx context.Context, input *patchInput) (*rowO
 		return nil, err
 	}
 	if err := h.writeFiles(ctx, cl, db, m, before, inst, func(tx *gorm.DB) error {
-		return persistWithM2M(ctx, tx, m, inst, m2mIDs, false)
+		return persistWithM2M(ctx, tx, m, inst, m2mIDs, false, m.updateOmits(before, inst))
 	}); err != nil {
 		return nil, err
 	}
@@ -261,6 +261,7 @@ func (h *handlers) updateVersioned(ctx context.Context, m *registered, inst any,
 			Model(inst).
 			Where(clause.Eq{Column: clause.Column{Name: m.version.column}, Value: expected}).
 			Select("*").
+			Omit(m.updateOmits(before, inst)...).
 			Updates(inst)
 		if res.Error != nil {
 			return database.MapPersistError(ctx, res.Error, "resource already exists", "persist resource")
@@ -417,13 +418,14 @@ func splitM2M(ctx context.Context, m *registered, body map[string]any) (ids map[
 // a single transaction, so a bad related id (a 422 from the sync) rolls back the
 // parent insert/update instead of leaving an orphan row. A model with no m2m
 // fields writes directly (no transaction needed).
-func persistWithM2M(ctx context.Context, db *gorm.DB, m *registered, inst any, ids map[string][]any, creating bool) error {
+// An update leaves the omit columns out of its write (registered.updateOmits).
+func persistWithM2M(ctx context.Context, db *gorm.DB, m *registered, inst any, ids map[string][]any, creating bool, omit []string) error {
 	write := func(tx *gorm.DB) error {
 		var perr error
 		if creating {
 			perr = tx.WithContext(ctx).Create(inst).Error
 		} else {
-			perr = tx.WithContext(ctx).Save(inst).Error
+			perr = omitted(tx.WithContext(ctx), omit).Save(inst).Error
 		}
 		if perr != nil {
 			return database.MapPersistError(ctx, perr, "resource already exists", "persist resource")
@@ -695,4 +697,12 @@ func applyOrdering(q *gorm.DB, m *registered, ordering string) (*gorm.DB, error)
 		return nil, errors.New("ordering is not allowed for this field")
 	}
 	return q.Order(clause.OrderByColumn{Column: clause.Column{Name: col}, Desc: desc}), nil
+}
+
+// omitted is db leaving cols out of its writes (nothing to leave out: db).
+func omitted(db *gorm.DB, cols []string) *gorm.DB {
+	if len(cols) == 0 {
+		return db
+	}
+	return db.Omit(cols...)
 }
