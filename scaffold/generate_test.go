@@ -14,6 +14,7 @@ import (
 
 	"github.com/gombit-dev/gombit/config"
 	"github.com/gombit-dev/gombit/migrations"
+	"github.com/gombit-dev/gombit/upgrade"
 )
 
 func TestGenerateWritesFeaturePackageLayout(t *testing.T) {
@@ -103,6 +104,15 @@ func TestGenerateWritesFeaturePackageLayout(t *testing.T) {
 		if !strings.Contains(yaml, want) {
 			t.Fatalf("gombit.yaml missing %q:\n%s", want, yaml)
 		}
+	}
+	// The upgrade baseline: recorded, at the current scaffold conventions,
+	// with go.mod's framework version.
+	baseline, err := upgrade.Detect(dest)
+	if err != nil {
+		t.Fatalf("upgrade.Detect on a new app: %v", err)
+	}
+	if !baseline.Recorded || baseline.Scaffold != upgrade.ScaffoldVersion || baseline.Metadata != upgrade.MetadataVersion || baseline.Framework.Version == "" {
+		t.Fatalf("a new app's baseline = %+v; want recorded at scaffold %d", baseline, upgrade.ScaffoldVersion)
 	}
 
 	envExample := readFile(t, filepath.Join(dest, ".env.example"))

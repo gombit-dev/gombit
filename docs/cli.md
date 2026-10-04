@@ -39,6 +39,7 @@ go run ./cmd/gombit --help
 | `gombit worker` | Run the app's background-job worker | JOBS-3 |
 | `gombit jobs …` | Inspect, retry, and delete failed jobs | JOBS-6 |
 | `gombit version` | Print version and build metadata | REL-4 |
+| `gombit upgrade baseline` | Show (or record) the app's upgrade baseline: framework and scaffold versions | UPGRADE-1 |
 
 ## Generator golden tests
 
@@ -824,3 +825,19 @@ config and `go.mod`, never inferred from the source tree. Writes JSON to stdout
 or `--out`; `--dir` selects the project directory. Fails loudly when the
 framework version is missing or replaced by a local checkout. See
 [app-contract.md](app-contract.md).
+
+## `gombit upgrade baseline`
+
+Shows the application's **upgrade baseline**: the framework version it builds
+against (from `go.mod`) and the scaffold conventions it was generated with
+(recorded in `gombit.yaml` by `gombit new`). An app generated before that
+record existed is detected as scaffold 0; `--write` records it (appending the
+metadata block to `gombit.yaml`, nothing else). `--json` prints JSON, `--dir`
+selects the app. Nothing is written without `--write`. See
+[upgrade.md](upgrade.md).
+
+| Flag | Meaning | Default |
+| --- | --- | --- |
+| `--dir` | Application directory (`go.mod`, `gombit.yaml`) | `.` |
+| `--json` | Print the baseline as JSON | off |
+| `--write` | Record a detected baseline in `gombit.yaml` | off |

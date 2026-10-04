@@ -265,6 +265,20 @@ version.
     Content-Security-Policy;
   - `examples/admin` gains a `Brochure` model
     ([#330](https://github.com/gombit-dev/gombit/issues/330)).
+- The upgrade baseline (UPGRADE-1). It provides:
+  - `upgrade.Detect`, which reads an app's framework version from `go.mod`
+    (following a `replace`, or a `go.work` that uses the app; a local
+    checkout is reported as such) and its scaffold version from
+    `gombit.yaml`;
+  - a versioned `gombit:` block (`metadata: 1`, `scaffold: 1`) that `gombit
+    new` now writes to `gombit.yaml`; a newer metadata format or scaffold
+    version is refused;
+  - scaffold version 0 for apps generated before the block existed, which
+    `gombit upgrade baseline --write` records without touching anything
+    else;
+  - `gombit upgrade baseline [--dir] [--json] [--write]`, and
+    [docs/upgrade.md](docs/upgrade.md)
+    ([#341](https://github.com/gombit-dev/gombit/issues/341)).
 
 ### Changed
 
@@ -273,6 +287,10 @@ version.
   `GOMBIT_JOBS_NAMESPACE`, `GOMBIT_HTTP_TRUSTED_PROXIES`, and the database
   pool settings, commented out with their defaults
   ([#447](https://github.com/gombit-dev/gombit/pull/447)).
+- `upgrade` is a framework command now, and `gombit make command` refuses
+  it. An app that already registers its own `upgrade` command should rename
+  it: the framework's is added first and Cobra resolves to it
+  ([#341](https://github.com/gombit-dev/gombit/issues/341)).
 
 ### Fixed
 

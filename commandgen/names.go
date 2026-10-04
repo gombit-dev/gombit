@@ -28,7 +28,7 @@ var reservedPackages = map[string]struct{}{
 var reservedCommands = map[string]struct{}{
 	"new": {}, "dev": {}, "worker": {}, "jobs": {}, "build": {}, "make": {},
 	"generate": {}, "db": {}, "openapi": {}, "contract": {}, "client": {},
-	"routes": {}, "doctor": {}, "config": {}, "createsuperuser": {}, "version": {},
+	"routes": {}, "doctor": {}, "config": {}, "createsuperuser": {}, "version": {}, "upgrade": {},
 	"help": {}, "completion": {},
 	"gombit": {}, "register": {},
 }

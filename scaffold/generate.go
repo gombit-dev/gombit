@@ -18,6 +18,7 @@ import (
 	"text/template"
 
 	"github.com/gombit-dev/gombit/config"
+	"github.com/gombit-dev/gombit/upgrade"
 )
 
 // Generate scaffolds a new Gombit application into opts.Dest (or <workdir>/<name>).
@@ -61,6 +62,7 @@ func Generate(ctx context.Context, opts Options) error {
 		CacheNamespace:   config.DefaultCacheNamespace(opts.Name, config.EnvironmentDevelopment),
 		GoVersion:        generatedGoVersion,
 		FrameworkVersion: frameworkVersion,
+		UpgradeMetadata:  upgrade.MetadataBlock(upgrade.ScaffoldVersion),
 	}
 
 	files, err := renderFiles(vars)
@@ -178,6 +180,9 @@ type templateVars struct {
 	CacheNamespace   string
 	GoVersion        string
 	FrameworkVersion string
+	// UpgradeMetadata is gombit.yaml's upgrade baseline block: the scaffold
+	// conventions this app is generated with (upgrade.ScaffoldVersion).
+	UpgradeMetadata string
 }
 
 // warnUnresolvableFramework explains why the generated go.mod pins a version

@@ -44,7 +44,7 @@ timeouts, permanent failures), delayed dispatch (`jobs.Delay`, `jobs.At`),
 failed jobs (`gombit jobs failed|inspect|retry|forget|purge`), duplicate
 handling (`jobs.Unique`, `jobs.UniqueFor`, `jobs.Once`), and observability
 (`gombit_jobs_*` metrics, OpenTelemetry spans). The **STORAGE-0** epic
-(#279) has started: `storage` holds the object storage contract
+(#279) is complete: `storage` holds the object storage contract
 (`storage.Storage`, portable keys, classified errors), `storage/storagetest`
 the driver conformance suite, and `storage/local` (hash-addressed files,
 atomic writes), `storage/memory`, and `storage/s3` (S3-compatible, streaming
@@ -63,7 +63,11 @@ with a fenceable `storage.PreparePublish`/`Publish`/`Fence`;
 `storage.Lister` enumerates objects), and
 storage-backed model fields (`file` / `image` kinds, `types.File` /
 `types.Image`, runtime `storage/filefield`; MODEL-8) with their admin
-widgets (upload grants, previews, cleanup after commit; STORAGE-8). The other batteries
+widgets (upload grants, previews, cleanup after commit; STORAGE-8). The
+**UPGRADE-0** epic (#281) has started: `upgrade` detects an app's upgrade
+baseline (framework version from `go.mod`, scaffold version from the
+`gombit:` block `gombit new` writes to `gombit.yaml`, scaffold 0 for older
+apps), shown and recorded by `gombit upgrade baseline` (UPGRADE-1). The other batteries
 (events, scheduler, mail, gRPC, multi-tenancy, i18n) are not here yet.
 The **CHAOS-0** resilience suite is in: `internal/faulttest` (deterministic
 fault injection: a faulting `database/sql` driver, a scripted HTTP
