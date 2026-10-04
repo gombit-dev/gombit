@@ -249,8 +249,10 @@ make benchmark-crud FRAMEWORK=gin-gorm FRAMEWORK_VERSION=v1.12.0 \
 It warms up (a discarded run), measures `TRIALS` times at each concurrency
 level in `benchmarks/config/versions.env`, and **merges** its rows into
 `benchmarks/results/latest/{results.json,results.csv,metadata.json}` (raw k6
-summaries under `raw/`) — re-running one framework's workload replaces those
-rows while other frameworks and workloads are kept, so running each in turn
+summaries under `raw/<framework>_<benchmark>_c<concurrency>_t<trial>.json`) —
+re-running one framework's workload replaces those rows and rewrites only that
+workload's raw summaries, while
+other frameworks and workloads are kept, so running each in turn
 accumulates all six. The protocol and load generator are recorded once per
 snapshot, so a run whose values differ from the recorded ones is refused, with
 nothing modified, while rows it does not replace remain (use a separate

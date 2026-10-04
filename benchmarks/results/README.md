@@ -10,7 +10,7 @@ A full run writes a `latest/` snapshot:
 results/
 └── latest/
     ├── metadata.json   reproducibility metadata (benchmarks/internal/metadata)
-    ├── raw/            per-trial raw load-generator output (k6 JSON, ...)
+    ├── raw/            per-trial raw k6 summaries, <framework>_<benchmark>_c<concurrency>_t<trial>.json
     ├── results.json    the canonical structured throughput results (benchmarks/internal/result)
     ├── results.csv     flat CSV derived from results.json
     ├── summary.md      human-readable tables derived from results.json
@@ -25,7 +25,9 @@ results/
 [`benchmarks/scripts/collect-host-info`](../scripts/collect-host-info).
 
 `latest/` **is committed** (including `raw/`, the per-trial k6 summaries, so a
-later parser fix can reconstruct the numbers), so the published README
+later parser fix can reconstruct the numbers; each is named for the framework
+and workload whose rows it backs, so recording one workload never overwrites
+another's evidence), so the published README
 performance tables are always regenerable from a committed snapshot. The current
 committed snapshot is a **reduced run on a single developer host** (a contended
 WSL2 laptop, not dedicated benchmark hardware) — `metadata.json` records the exact

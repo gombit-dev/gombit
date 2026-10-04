@@ -65,7 +65,7 @@ func TestBenchmarkNameComesFromTheWorkloadScript(t *testing.T) {
 			t.Errorf("benchmarkName(%q) = %q, %v; want %q", in, got, err, want)
 		}
 	}
-	for _, in := range []string{"", ".js", "/", "workloads/a:b.js"} {
+	for _, in := range []string{"", ".js", "/", "workloads/a:b.js", "workloads/gorm_crud.js"} {
 		if got, err := benchmarkName(in); err == nil {
 			t.Errorf("benchmarkName(%q) = %q, nil; want an error", in, got)
 		}
@@ -170,6 +170,83 @@ func TestRunReplacesOnlyItsOwnWorkload(t *testing.T) {
 	}
 	if labelled != 1 || len(rows) != 4 {
 		t.Errorf("a non-default workload's rows must carry its own benchmark and add to the snapshot: %+v", rows)
+	}
+}
+
+// Raw summaries are evidence for the rows, so they are keyed like the rows: a
+// second workload for the same app must write its own files and leave the first
+// workload's on disk (#370).
+func TestRunKeepsEachWorkloadsRawSummaries(t *testing.T) {
+	dir := t.TempDir()
+	cfg := runConfig{
+		targetURL: "http://unused", framework: "gombit", benchmark: "crud-list",
+		concurrency: []int{1, 10}, duration: "1s", warmup: "1s", trials: 2, outDir: dir, k6Image: "grafana/k6:0.55.0",
+	}
+	written := map[string][]string{}
+	recording := func(benchmark string) k6Runner {
+		inner := okK6(t)
+		return func(vus int, duration, summaryPath string) error {
+			if summaryPath != "" {
+				written[benchmark] = append(written[benchmark], summaryPath)
+			}
+			return inner(vus, duration, summaryPath)
+		}
+	}
+
+	if err := run(cfg, recording("crud-list")); err != nil {
+		t.Fatalf("run(crud-list): %v", err)
+	}
+	cfg.benchmark = "auth-jwt"
+	if err := run(cfg, recording("auth-jwt")); err != nil {
+		t.Fatalf("run(auth-jwt): %v", err)
+	}
+
+	perRun := len(cfg.concurrency) * cfg.trials
+	seen := map[string]string{}
+	for _, benchmark := range []string{"crud-list", "auth-jwt"} {
+		paths := written[benchmark]
+		if len(paths) != perRun {
+			t.Fatalf("%s wrote %d raw summaries, want %d: %v", benchmark, len(paths), perRun, paths)
+		}
+		for _, p := range paths {
+			if other, dup := seen[p]; dup {
+				t.Errorf("%s overwrote %s's raw summary %s", benchmark, other, p)
+			}
+			seen[p] = benchmark
+			if !strings.Contains(filepath.Base(p), "_"+benchmark+"_") {
+				t.Errorf("raw summary %s does not name its benchmark %s", p, benchmark)
+			}
+			if _, err := os.Stat(p); err != nil {
+				t.Errorf("%s raw summary missing after both runs: %v", benchmark, err)
+			}
+		}
+	}
+	entries, err := os.ReadDir(filepath.Join(dir, "raw"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2*perRun {
+		t.Errorf("raw/ holds %d files, want %d (both workloads' summaries)", len(entries), 2*perRun)
+	}
+	if got, want := filepath.Base(written["crud-list"][0]), "gombit_crud-list_c1_t1.json"; got != want {
+		t.Errorf("raw summary name = %q, want %q", got, want)
+	}
+}
+
+// '_' joins framework and benchmark in raw summary names, so a framework that
+// contained it could share a file with another (framework, benchmark) key:
+// gin_gorm + crud and gin + gorm_crud. run() refuses it before writing anything.
+func TestRunRefusesAFrameworkNameContainingTheRawSeparator(t *testing.T) {
+	dir := t.TempDir()
+	cfg := runConfig{
+		targetURL: "http://unused", framework: "gin_gorm", benchmark: "crud",
+		concurrency: []int{1}, duration: "1s", warmup: "1s", trials: 1, outDir: dir, k6Image: "grafana/k6:0.55.0",
+	}
+	if err := run(cfg, okK6(t)); err == nil || !strings.Contains(err.Error(), "'_'") {
+		t.Fatalf("run(framework=gin_gorm) = %v; want a '_' refusal", err)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+		t.Errorf("a refused run must write nothing, found %d entries", len(entries))
 	}
 }
 
