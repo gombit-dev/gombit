@@ -91,13 +91,37 @@ export async function uploadFile(
 }
 
 // freshFileFields are the file fields whose value in current is not the one
-// the form loaded (initial): uploads made for this save. A save that fails
-// for any reason but a field error may have discarded them on the server
-// (a failed write abandons the uploads it named), so the form drops them
-// and asks for the files again rather than resubmit dead keys.
+// the form loaded (initial): uploads (or removals) made for this save.
 export function freshFileFields(fields: FieldMeta[], current: Record<string, unknown>, initial: Record<string, unknown>): string[] {
   return fields
     .filter((field) => isFileField(field))
     .filter((field) => asFileValue(current[field.name])?.key !== asFileValue(initial[field.name])?.key)
     .map((field) => field.name);
+}
+
+// DroppedUpload is a file field to put back after a failed save: its loaded
+// value, and the message to show (none when the field was only cleared, or
+// already carries the server's own error).
+export type DroppedUpload = { name: string; value: unknown; message: string | null };
+
+// uploadsToDrop is what the form does to its file fields after a save
+// fails, whatever the failure: the server may have discarded the uploads it
+// named (a failed write abandons them, field errors raised inside the write
+// included), so every fresh one is put back to the loaded value, and the
+// operator is asked for the file again, rather than resubmit a dead key.
+// errored names the fields that already show a server error.
+export function uploadsToDrop(
+  fields: FieldMeta[],
+  current: Record<string, unknown>,
+  initial: Record<string, unknown>,
+  errored: Set<string>,
+): DroppedUpload[] {
+  return freshFileFields(fields, current, initial).map((name) => ({
+    name,
+    value: initial[name] ?? null,
+    message:
+      asFileValue(current[name]) && !errored.has(name)
+        ? "The upload was discarded by the failed save; choose the file again."
+        : null,
+  }));
 }

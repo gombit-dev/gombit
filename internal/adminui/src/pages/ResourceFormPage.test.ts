@@ -10,4 +10,9 @@ describe("ResourceFormPage", () => {
     expect(formSrc).toMatch(/unmountedContractMessage\(err, mounted\)/);
     expect(formSrc).toMatch(/if \(orphan\) \{\s*setStatus\(orphan\);/s);
   });
+  it("drops the uploads of any failed save, field errors included", () => {
+    const catchBlock = formSrc.slice(formSrc.indexOf("} catch (err: unknown) {"));
+    expect(catchBlock).toMatch(/for \(const drop of uploadsToDrop\(model\.fields, getValues\(\), loaded\.current, errored\)\)/);
+    expect(catchBlock).not.toMatch(/if \(!fieldErrors\)/);
+  });
 });

@@ -521,7 +521,8 @@ func TestAdminFileRaces(t *testing.T) {
 // TestAdminRequiredFileRefusesTheEmptyKey: a blank key ("" or a file object
 // with an empty key) is no file. A required file field refuses it, on
 // create and on update (which would otherwise release and delete the
-// file); an optional one is cleared by it.
+// file); an optional one is cleared by it. A malformed file object (no key,
+// a null or non-string one) is refused, and changes nothing.
 func TestAdminRequiredFileRefusesTheEmptyKey(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	app := newFileApp(t)
@@ -550,6 +551,17 @@ func TestAdminRequiredFileRefusesTheEmptyKey(t *testing.T) {
 	}
 	if !exists(t, app, doc) {
 		t.Fatal("a blank key deleted the required file")
+	}
+	// A malformed file object is not a blank: a 422, and nothing changes.
+	for _, body := range []string{`{"photo":{"key":5}}`, `{"photo":{"key":null}}`, `{"photo":{}}`, `{"photo":{"filename":"x.png"}}`, `{"doc":{"key":5}}`} {
+		rec := doRequest(app, jar, http.MethodPatch, base+"/"+id, body)
+		if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "must be a string") {
+			t.Fatalf("update %s = %d %s, want 422 must be a string", body, rec.Code, rec.Body)
+		}
+		var claim claims.Claim
+		if err := app.DB().Where("object_key = ?", photo).Take(&claim).Error; err != nil || claim.State != claims.Held || !exists(t, app, photo) {
+			t.Fatalf("after %s: the photo's claim %+v (%v), stored %v; want it held and kept", body, claim, err, exists(t, app, photo))
+		}
 	}
 	if rec := doRequest(app, jar, http.MethodPatch, base+"/"+id, `{"photo":""}`); rec.Code != http.StatusOK || exists(t, app, photo) {
 		t.Fatalf("clearing the optional photo = %d %s (kept %v)", rec.Code, rec.Body, exists(t, app, photo))

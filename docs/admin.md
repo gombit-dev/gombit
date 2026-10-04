@@ -252,8 +252,9 @@ policy as hints: `accept` (media types) and `max_bytes`.
   `storage_claims` table (apps made by `gombit new` migrate it).
 - **Writes** take the key, or the row's file object (sending it back keeps
   the file), or `null` to remove it. A blank key (`""`, or a file object
-  with an empty key) is `null` too, so a required file field refuses it, on
-  create and on update. A changed key is accepted only if it is:
+  whose `key` is `""`) is `null` too, so a required file field refuses it, on
+  create and on update. A malformed file object (no `key`, or a null or
+  non-string one) is a field error, never a removal. A changed key is accepted only if it is:
   - an upload that passes the policy by its bytes (a refused file is
     deleted, unless a record holds it);
   - under the field's prefix;
@@ -268,8 +269,9 @@ policy as hints: `accept` (media types) and `max_bytes`.
 - **Concurrent writers:** an update or a delete is fenced on the file keys
   it loaded, empty ones included. If another writer attached, replaced or
   removed a file of the row meanwhile, it matches no row: a 409, nothing
-  written, and its new uploads are discarded. The SPA then drops those
-  uploads from the form and asks for the files again. An update writes a
+  written, and its new uploads are discarded. After any failed save (a field
+  error raised inside the write discards them too), the SPA drops the files
+  uploaded for it from the form and asks for them again. An update writes a
   file column only when it changes its key; an unchanged one is left out of
   the write.
 - **Fields and storage:** an explicit `Options.Fields` entry for a file or

@@ -239,8 +239,9 @@ version.
     included): a concurrent attach, replacement or removal of a file makes
     them a 409 with nothing written (a delete's 409 is no longer a 500), and
     an update leaves unchanged and unmapped file columns out of the write;
-  - a blank key (`""`, or a file object with an empty key) is no file, so a
-    required file field refuses it on create and update;
+  - a blank key (`""`, or a file object whose `key` is `""`) is no file, so
+    a required file field refuses it on create and update; a malformed file
+    object (no key, a null or non-string one) is a 422, never a removal;
   - an explicit file field must be declared as its column's own kind
     (`image` for an image column), and file fields need the host's storage;
   - a file column the admin does not map (hidden, or left out of explicit
@@ -248,7 +249,8 @@ version.
     either is a registration error;
   - an upload a failed save discarded is reported as expired ("choose the
     file again", `upload.ErrExpired`), not as another field's, and the SPA
-    drops such uploads from the form after a non-field failure;
+    drops the uploads of any failed save from the form and asks for them
+    again;
   - `POST /admin/resources/{slug}/uploads/{field}` grants a direct upload,
     and needs create or update permission;
   - writes accept a key only for an upload under the field's prefix that

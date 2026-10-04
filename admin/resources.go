@@ -765,11 +765,13 @@ func updateFenced(ctx context.Context, tx *gorm.DB, m *registered, inst any, omi
 }
 
 // blankFileToNil is nil for a file field's blank value: "", or a file object
-// whose key is missing or empty. Anything else is returned as it is.
+// whose key is the string "". Anything else is returned as it is, a
+// malformed object (no key, a null or non-string one) included, for
+// coerceValue to refuse: a malformed request must never read as "remove the
+// file".
 func blankFileToNil(raw any) any {
 	if obj, ok := raw.(map[string]any); ok {
-		key, _ := obj["key"].(string)
-		if key == "" {
+		if key, ok := obj["key"].(string); ok && key == "" {
 			return nil
 		}
 		return raw

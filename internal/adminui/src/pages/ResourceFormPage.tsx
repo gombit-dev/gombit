@@ -12,7 +12,7 @@ import { FieldWidget } from "../components/FieldWidget";
 import { canCreate, canPopulateEditForm, canUpdate, canViewDetail } from "../capabilities";
 import { spaDetailPath, spaListPath } from "../api/paths";
 import { emptyFormValue, formValuesToBody, rowToFormValues, writableFields } from "../fields";
-import { asFileValue, freshFileFields } from "../files";
+import { uploadsToDrop } from "../files";
 import type { Row } from "../api/types";
 
 type Props = {
@@ -49,6 +49,7 @@ export function ResourceFormPage({ mode }: Props) {
     setError,
     getValues,
     setValue,
+    getFieldState,
     formState: { isSubmitting },
   } = useForm<FieldValues>({
     defaultValues: defaults,
@@ -151,19 +152,17 @@ export function ResourceFormPage({ mode }: Props) {
       if (orphan) {
         setStatus(orphan);
       }
-      const fieldErrors = applyContractErrors(setError, err);
-      if (!fieldErrors && !orphan) {
+      if (!applyContractErrors(setError, err) && !orphan) {
         setStatus(err instanceof Error ? err.message : "request failed");
       }
-      if (!fieldErrors) {
-        // The write itself failed (a conflict, a stale version): the server
-        // discarded the files uploaded for it. Drop them, and ask again.
-        const current = getValues();
-        for (const name of freshFileFields(model.fields, current, loaded.current)) {
-          setValue(name, loaded.current[name] ?? null);
-          if (asFileValue(current[name])) {
-            setError(name, { type: "server", message: "The upload was discarded by the failed save; choose the file again." });
-          }
+      // Any failed save may have discarded the files uploaded for it (a
+      // conflict, a stale version, or a field error raised inside the
+      // write): drop them, and ask for the files again.
+      const errored = new Set(model.fields.map((field) => field.name).filter((name) => getFieldState(name).error));
+      for (const drop of uploadsToDrop(model.fields, getValues(), loaded.current, errored)) {
+        setValue(drop.name, drop.value);
+        if (drop.message) {
+          setError(drop.name, { type: "server", message: drop.message });
         }
       }
     }

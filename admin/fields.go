@@ -99,9 +99,8 @@ func FieldsFrom(model any) ([]Field, error) {
 		}
 		typ := inferFieldType(sf)
 		if typ == "" {
-			// A kind with no admin widget yet (a storage-backed file or
-			// image, STORAGE-8): leave the column out rather than fail the
-			// registration or edit an object key as text.
+			// A kind with no admin wire: leave the column out rather than
+			// fail the registration.
 			continue
 		}
 		fields = append(fields, Field{

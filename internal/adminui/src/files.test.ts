@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { FieldMeta, UploadGrant } from "./api/types";
-import { acceptAttribute, accepts, asFileValue, fileBodyValue, fileLabel, freshFileFields, uploadFile } from "./files";
+import { acceptAttribute, accepts, asFileValue, fileBodyValue, fileLabel, freshFileFields, uploadFile, uploadsToDrop } from "./files";
 import { emptyFormValue, formValuesToBody, formatCell, rowToFormValues } from "./fields";
 
 function field(partial: Pick<FieldMeta, "name" | "type"> & Partial<FieldMeta>): FieldMeta {
@@ -87,5 +87,26 @@ describe("freshFileFields", () => {
     const initial = { doc: { key: "a" }, photo: { key: "p" } };
     const current = { doc: "b", photo: null };
     expect(freshFileFields(fields, current, initial)).toEqual(["doc", "photo"]);
+  });
+});
+
+describe("uploadsToDrop", () => {
+  const fields = [
+    { name: "doc", type: "file" },
+    { name: "photo", type: "image" },
+    { name: "cover", type: "image" },
+  ] as FieldMeta[];
+  const initial = { doc: { key: "a" }, photo: null, cover: { key: "c" } };
+  it("puts every fresh upload back, after any failed save", () => {
+    const current = { doc: { key: "new" }, photo: { key: "p" }, cover: null };
+    expect(uploadsToDrop(fields, current, initial, new Set())).toEqual([
+      { name: "doc", value: { key: "a" }, message: "The upload was discarded by the failed save; choose the file again." },
+      { name: "photo", value: null, message: "The upload was discarded by the failed save; choose the file again." },
+      { name: "cover", value: { key: "c" }, message: null },
+    ]);
+  });
+  it("keeps the server's own error on a field", () => {
+    const current = { doc: { key: "new" }, photo: null, cover: { key: "c" } };
+    expect(uploadsToDrop(fields, current, initial, new Set(["doc"]))).toEqual([{ name: "doc", value: { key: "a" }, message: null }]);
   });
 });
