@@ -47,6 +47,17 @@ func TestFrameworkVersionFromModfile(t *testing.T) {
 			want:    "v0.6.0",
 			ok:      true,
 		},
+		// The go command's choice of replace, shared with gombit upgrade.
+		"replace of another version does not apply": {
+			content: "module x\nrequire github.com/gombit-dev/gombit v0.8.2\nreplace github.com/gombit-dev/gombit v0.7.0 => github.com/fork/gombit v1.2.3\n",
+			want:    "v0.8.2",
+			ok:      true,
+		},
+		"exact replace wins over wildcard": {
+			content: "module x\nrequire github.com/gombit-dev/gombit v0.8.2\nreplace github.com/gombit-dev/gombit => ../wildcard\nreplace github.com/gombit-dev/gombit v0.8.2 => github.com/fork/gombit v1.2.3\n",
+			want:    "v1.2.3",
+			ok:      true,
+		},
 		"missing framework require": {
 			content: "module x\n\nrequire github.com/gin-gonic/gin v1.10.0\n",
 			wantErr: errors.New("not a gombit app"), // any error

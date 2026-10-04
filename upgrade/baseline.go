@@ -4,9 +4,11 @@
 // It never rewrites user-owned source without an explicit write action.
 //
 // The baseline is two facts. The framework version comes from the app's
-// go.mod, the source of truth Go itself builds from, and is never copied
-// anywhere else. The scaffold version, the generation conventions the app
-// was created with, is recorded by gombit new in a versioned block of
+// go.mod, read offline and never copied anywhere else; gombit contract app
+// reads it the same way (internal/frameworkmod). When a go.work applies to
+// the app, the workspace decides what it builds against, and no version is
+// claimed. The scaffold version, the generation conventions the app was
+// created with, is recorded by gombit new in a versioned block of
 // gombit.yaml:
 //
 //	gombit:
@@ -23,14 +25,19 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"reflect"
+	"strings"
 
-	"golang.org/x/mod/modfile"
 	"gopkg.in/yaml.v3"
+
+	"github.com/gombit-dev/gombit/internal/atomicfile"
+	"github.com/gombit-dev/gombit/internal/frameworkmod"
 )
 
 // FrameworkModulePath is the module a Gombit application requires.
-const FrameworkModulePath = "github.com/gombit-dev/gombit"
+const FrameworkModulePath = frameworkmod.ModulePath
 
 // MetadataVersion is the format of the gombit block in gombit.yaml that this
 // framework reads and writes. A block with a newer format is refused
@@ -52,10 +59,8 @@ const ProjectFile = "gombit.yaml"
 var (
 	// ErrNotGombitApp: the directory has no go.mod requiring the framework.
 	ErrNotGombitApp = errors.New("upgrade: not a Gombit application")
-	// ErrMetadataTooNew: gombit.yaml's metadata format is newer than this
-	// framework understands.
-	// ErrMetadataTooNew also covers a scaffold version newer than
-	// ScaffoldVersion: conventions this framework cannot know.
+	// ErrMetadataTooNew: gombit.yaml's metadata format, or its scaffold
+	// version, is newer than this framework understands.
 	ErrMetadataTooNew = errors.New("upgrade: the upgrade metadata is newer than this gombit understands")
 )
 
@@ -76,30 +81,42 @@ type Baseline struct {
 	Recorded bool `json:"recorded"`
 }
 
-// Framework is the framework dependency as go.mod declares it.
+// Replacement is a replace directive's target: a module path and version,
+// or a local directory (no version).
+type Replacement = frameworkmod.Replacement
+
+// Framework is the framework dependency as the app's go.mod declares it.
 type Framework struct {
 	// Module is the framework's module path.
 	Module string `json:"module"`
-	// Version is the version the app builds against: the require
-	// directive's, or a version replace's target. Empty when the framework
-	// is replaced by a local directory (Local).
+	// Version is the framework release the app builds against: the require
+	// directive's version, or the version of a replace by the framework
+	// module itself. It is empty when there is no framework release to
+	// name: the framework is replaced by a local directory (Local) or by
+	// another module (a fork: see Replace), or a go.work decides the build
+	// (Workspace). Upgrade planning starts from Version, so it never names
+	// what is not a release of the framework.
 	Version string `json:"version,omitempty"`
 	// Required is the require directive's version.
 	Required string `json:"required"`
-	// Replace is the replace directive's target, if the framework module is
-	// replaced: a local path, or "module version". In a workspace that uses
-	// a framework checkout, it is that checkout's directory.
-	Replace string `json:"replace,omitempty"`
+	// Replace is the replace directive that applies to Required, as the go
+	// command picks it, if any.
+	Replace *Replacement `json:"replace,omitempty"`
 	// Local is true when the framework is replaced by a local directory (a
 	// framework checkout): there is no published version to upgrade from.
 	Local bool `json:"local,omitempty"`
-	// Workspace is the go.work file whose use or replace directive decides
-	// the framework the app builds against, when one does.
+	// Workspace is the go.work the go command uses for the app (its own
+	// answer, `go env GOWORK`), if any. The workspace then decides the
+	// framework the app builds against: its other modules' requirements and
+	// replaces count too. This package does not resolve that, so Version is
+	// empty; with GOWORK=off the app builds from its go.mod alone.
 	Workspace string `json:"workspace,omitempty"`
 }
 
 // Detect reads the baseline of the application in workDir: the framework
 // from go.mod, the scaffold version from gombit.yaml. It writes nothing.
+// It asks the go command which go.work applies (`go env GOWORK`), so the go
+// command must be on PATH.
 func Detect(workDir string) (Baseline, error) {
 	fw, err := detectFramework(workDir)
 	if err != nil {
@@ -113,152 +130,70 @@ func Detect(workDir string) (Baseline, error) {
 	if ok {
 		b.Recorded = true
 		b.Metadata = meta.Metadata
-		b.Scaffold = *meta.Scaffold
+		b.Scaffold = meta.Scaffold
 	}
 	return b, nil
 }
 
 func detectFramework(workDir string) (Framework, error) {
-	path := filepath.Join(workDir, "go.mod")
-	data, err := os.ReadFile(path) // #nosec G304 -- go.mod of the app being upgraded
-	if errors.Is(err, os.ErrNotExist) {
+	d, err := frameworkmod.Read(workDir)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
 		return Framework{}, fmt.Errorf("%w: no go.mod in %s", ErrNotGombitApp, workDir)
-	}
-	if err != nil {
-		return Framework{}, fmt.Errorf("upgrade: read %s: %w", path, err)
-	}
-	f, err := modfile.Parse(path, data, nil)
-	if err != nil {
+	case errors.Is(err, frameworkmod.ErrNotRequired):
+		return Framework{}, fmt.Errorf("%w: %v", ErrNotGombitApp, err)
+	case err != nil:
 		return Framework{}, fmt.Errorf("upgrade: %w", err)
 	}
-	fw := Framework{Module: FrameworkModulePath}
-	for _, r := range f.Require {
-		if r.Mod.Path == FrameworkModulePath {
-			fw.Required = r.Mod.Version
-		}
+	fw := Framework{Module: FrameworkModulePath, Required: d.Required, Replace: d.Replace}
+	switch {
+	case d.Replace == nil:
+		fw.Version = d.Required
+	case d.Replace.Local():
+		fw.Local = true
+	case d.Replace.Path == FrameworkModulePath:
+		fw.Version = d.Replace.Version
 	}
-	if fw.Required == "" {
-		return Framework{}, fmt.Errorf("%w: %s does not require %s", ErrNotGombitApp, path, FrameworkModulePath)
-	}
-	fw.Version = fw.Required
-	if r := frameworkReplace(f.Replace, fw.Required); r != nil {
-		fw.applyReplace(r)
-	}
-	if err := fw.applyWorkspace(workDir); err != nil {
+	work, err := goWork(workDir)
+	if err != nil {
 		return Framework{}, err
+	}
+	if work != "" {
+		fw.Workspace, fw.Version = work, ""
 	}
 	return fw, nil
 }
 
-// frameworkReplace is the replace directive that applies to the framework at
-// version required, as Go resolves it: a replace of that exact version wins
-// over one of every version, whatever their order.
-func frameworkReplace(replaces []*modfile.Replace, required string) *modfile.Replace {
-	var wildcard *modfile.Replace
-	for _, r := range replaces {
-		switch {
-		case r.Old.Path != FrameworkModulePath:
-		case r.Old.Version == required:
-			return r
-		case r.Old.Version == "":
-			wildcard = r
-		}
-	}
-	return wildcard
-}
-
-func (fw *Framework) applyReplace(r *modfile.Replace) {
-	if r.New.Version == "" {
-		fw.Replace, fw.Local, fw.Version = r.New.Path, true, ""
-	} else {
-		fw.Replace, fw.Local, fw.Version = r.New.Path+" "+r.New.Version, false, r.New.Version
-	}
-}
-
-// applyWorkspace applies the go.work the go command would use for the app
-// in workDir (GOWORK, or the nearest go.work above it that uses the app): a
-// workspace module that is the framework replaces it with that checkout,
-// and the workspace's replace directives override go.mod's.
-func (fw *Framework) applyWorkspace(workDir string) error {
-	path, err := findWorkFile(workDir)
-	if err != nil || path == "" {
-		return err
-	}
-	data, err := os.ReadFile(path) // #nosec G304 -- the go.work the go command uses for the app
+// goWork is the go.work the go command uses for the app in workDir, or ""
+// for none. It is the go command's own answer (`go env GOWORK`), so
+// GOWORK=auto, a GOWORK set with `go env -w`, and a refused relative GOWORK
+// behave here exactly as they do for go build.
+func goWork(workDir string) (string, error) {
+	cmd := exec.Command("go", "env", "GOWORK")
+	cmd.Dir = workDir
+	// The answer needs no other toolchain: never switch to (or download) the
+	// one the app's go.mod asks for just to read it.
+	cmd.Env = append(os.Environ(), "GOTOOLCHAIN=local")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
 	if err != nil {
-		return fmt.Errorf("upgrade: read %s: %w", path, err)
-	}
-	wf, err := modfile.ParseWork(path, data, nil)
-	if err != nil {
-		return fmt.Errorf("upgrade: %w", err)
-	}
-	app, err := filepath.Abs(workDir)
-	if err != nil {
-		return fmt.Errorf("upgrade: %w", err)
-	}
-	inWorkspace := false
-	var checkout string
-	for _, u := range wf.Use {
-		dir := u.Path
-		if !filepath.IsAbs(dir) {
-			dir = filepath.Join(filepath.Dir(path), dir)
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			err = fmt.Errorf("%w: %s", err, msg)
 		}
-		dir = filepath.Clean(dir)
-		if dir == app {
-			inWorkspace = true
-			continue
-		}
-		mod, err := os.ReadFile(filepath.Join(dir, "go.mod")) // #nosec G304 -- a module the workspace uses
-		if err == nil && modfile.ModulePath(mod) == FrameworkModulePath {
-			checkout = u.Path
-		}
+		return "", fmt.Errorf("upgrade: ask the go command which go.work applies (go env GOWORK): %w", err)
 	}
-	if !inWorkspace {
-		// The go command refuses to build the app from this workspace; GOWORK
-		// pointing elsewhere is the only way here, and it decides nothing.
-		return nil
+	work := strings.TrimSpace(string(out))
+	if work == "off" {
+		return "", nil
 	}
-	switch r := frameworkReplace(wf.Replace, fw.Required); {
-	case checkout != "":
-		fw.Replace, fw.Local, fw.Version, fw.Workspace = checkout, true, "", path
-	case r != nil:
-		fw.applyReplace(r)
-		fw.Workspace = path
-	}
-	return nil
-}
-
-// findWorkFile is the go.work the go command uses for workDir: GOWORK when
-// set ("off" disables workspaces), else the nearest go.work in workDir or
-// one of its parents. "" when there is none.
-func findWorkFile(workDir string) (string, error) {
-	if gowork := os.Getenv("GOWORK"); gowork != "" {
-		if gowork == "off" {
-			return "", nil
-		}
-		return gowork, nil
-	}
-	dir, err := filepath.Abs(workDir)
-	if err != nil {
-		return "", fmt.Errorf("upgrade: %w", err)
-	}
-	for {
-		path := filepath.Join(dir, "go.work")
-		if info, err := os.Stat(path); err == nil && !info.IsDir() {
-			return path, nil
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return "", nil
-		}
-		dir = parent
-	}
+	return work, nil
 }
 
 // metadata is the gombit block of gombit.yaml.
 type metadata struct {
-	Metadata int  `yaml:"metadata"`
-	Scaffold *int `yaml:"scaffold"`
+	Metadata int
+	Scaffold int
 }
 
 // readMetadata reads the gombit block of gombit.yaml; ok is false when the
@@ -275,37 +210,92 @@ func readMetadata(workDir string) (metadata, bool, error) {
 	return parseMetadata(path, data)
 }
 
+// parseMetadata reads the gombit block from gombit.yaml content. The block's
+// keys are exactly those of its format: metadata and scaffold, both integers
+// (a float is not truncated into one, and an unknown key, such as a
+// misspelling, is refused).
 func parseMetadata(path string, data []byte) (metadata, bool, error) {
-	var doc struct {
-		Gombit *metadata `yaml:"gombit"`
-	}
+	var doc yaml.Node
 	if err := yaml.Unmarshal(data, &doc); err != nil {
 		return metadata{}, false, fmt.Errorf("upgrade: %s: %w", path, err)
 	}
-	if doc.Gombit == nil {
+	if doc.Kind == 0 || len(doc.Content) == 0 {
+		return metadata{}, false, nil // an empty file
+	}
+	root := doc.Content[0]
+	if root.Kind != yaml.MappingNode {
+		return metadata{}, false, fmt.Errorf("upgrade: %s: want a mapping of keys at the top level", path)
+	}
+	var block *yaml.Node
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value != "gombit" {
+			continue
+		}
+		if block != nil {
+			return metadata{}, false, fmt.Errorf("upgrade: %s: the gombit key appears twice", path)
+		}
+		block = root.Content[i+1]
+	}
+	switch {
+	case block == nil:
+		return metadata{}, false, nil
+	case block.Kind == yaml.ScalarNode && block.ShortTag() == "!!null":
 		// An empty gombit key is not "no metadata": recording a block
 		// would then duplicate the key.
-		var keys map[string]any
-		if err := yaml.Unmarshal(data, &keys); err == nil {
-			if _, present := keys["gombit"]; present {
-				return metadata{}, false, fmt.Errorf("upgrade: %s: the gombit key is empty (want the metadata block: gombit.metadata, gombit.scaffold)", path)
-			}
+		return metadata{}, false, fmt.Errorf("upgrade: %s: the gombit key is empty (want the metadata block: gombit.metadata, gombit.scaffold)", path)
+	case block.Kind != yaml.MappingNode:
+		return metadata{}, false, fmt.Errorf("upgrade: %s: gombit must be the metadata block (gombit.metadata, gombit.scaffold)", path)
+	}
+	values := map[string]*yaml.Node{}
+	var keys []string
+	for i := 0; i+1 < len(block.Content); i += 2 {
+		k := block.Content[i].Value
+		if _, dup := values[k]; dup {
+			return metadata{}, false, fmt.Errorf("upgrade: %s: gombit.%s appears twice", path, k)
 		}
-		return metadata{}, false, nil
+		values[k] = block.Content[i+1]
+		keys = append(keys, k)
 	}
-	m := *doc.Gombit
+	integer := func(key string) (int, bool, error) {
+		n, ok := values[key]
+		if !ok {
+			return 0, false, nil
+		}
+		var v int
+		if n.Kind != yaml.ScalarNode || n.ShortTag() != "!!int" || n.Decode(&v) != nil {
+			return 0, false, fmt.Errorf("upgrade: %s: gombit.%s is %q, want an integer", path, key, n.Value)
+		}
+		return v, true, nil
+	}
+	var m metadata
+	format, ok, err := integer("metadata")
 	switch {
-	case m.Metadata > MetadataVersion:
-		return metadata{}, false, fmt.Errorf("%w: %s has metadata format %d, this gombit reads up to %d; upgrade the gombit CLI", ErrMetadataTooNew, path, m.Metadata, MetadataVersion)
-	case m.Metadata < 1:
+	case err != nil:
+		return metadata{}, false, err
+	case !ok || format < 1:
 		return metadata{}, false, fmt.Errorf("upgrade: %s: the gombit block has no metadata format (want gombit.metadata: %d)", path, MetadataVersion)
-	case m.Scaffold == nil:
-		return metadata{}, false, fmt.Errorf("upgrade: %s: the gombit block has no scaffold version (want gombit.scaffold)", path)
-	case *m.Scaffold < 0:
-		return metadata{}, false, fmt.Errorf("upgrade: %s: gombit.scaffold is %d, want 0 or more", path, *m.Scaffold)
-	case *m.Scaffold > ScaffoldVersion:
-		return metadata{}, false, fmt.Errorf("%w: %s has scaffold version %d, this gombit knows up to %d; upgrade the gombit CLI", ErrMetadataTooNew, path, *m.Scaffold, ScaffoldVersion)
+	case format > MetadataVersion:
+		// Checked before the keys: a newer format may well have others.
+		return metadata{}, false, fmt.Errorf("%w: %s has metadata format %d, this gombit reads up to %d; upgrade the gombit CLI", ErrMetadataTooNew, path, format, MetadataVersion)
 	}
+	m.Metadata = format
+	for _, k := range keys {
+		if k != "metadata" && k != "scaffold" {
+			return metadata{}, false, fmt.Errorf("upgrade: %s: gombit.%s is not a key of metadata format %d (metadata, scaffold)", path, k, MetadataVersion)
+		}
+	}
+	scaffold, ok, err := integer("scaffold")
+	switch {
+	case err != nil:
+		return metadata{}, false, err
+	case !ok:
+		return metadata{}, false, fmt.Errorf("upgrade: %s: the gombit block has no scaffold version (want gombit.scaffold)", path)
+	case scaffold < 0:
+		return metadata{}, false, fmt.Errorf("upgrade: %s: gombit.scaffold is %d, want 0 or more", path, scaffold)
+	case scaffold > ScaffoldVersion:
+		return metadata{}, false, fmt.Errorf("%w: %s has scaffold version %d, this gombit knows up to %d; upgrade the gombit CLI", ErrMetadataTooNew, path, scaffold, ScaffoldVersion)
+	}
+	m.Scaffold = scaffold
 	return m, true, nil
 }
 
@@ -324,8 +314,10 @@ gombit:
 // RecordBaseline records the detected baseline of an app that has none (one
 // generated before upgrade metadata existed) by appending the metadata block,
 // with scaffold 0, to its gombit.yaml (creating the file if there is none).
-// Nothing else in the file changes. It reports whether it wrote; an app that
-// already records its baseline is left as it is.
+// Nothing else in the file changes: the result must read back as recorded,
+// with every other key meaning what it did, or nothing is written. The file
+// is replaced atomically. It reports whether it wrote; an app that already
+// records its baseline is left as it is.
 func RecordBaseline(workDir string) (Baseline, bool, error) {
 	b, err := Detect(workDir)
 	if err != nil || b.Recorded {
@@ -336,28 +328,69 @@ func RecordBaseline(workDir string) (Baseline, bool, error) {
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return b, false, fmt.Errorf("upgrade: read %s: %w", path, err)
 	}
+	mode := os.FileMode(0o644)
+	if info, err := os.Stat(path); err == nil {
+		mode = info.Mode().Perm()
+	}
+	// A blank line before the block reads best, but it would join a
+	// keep-chomped block scalar (|+, >+) ending the file; without it the
+	// scalar may end cleanly. Use the first that leaves the rest unchanged.
+	var lastErr error
+	for _, sep := range []string{"\n", ""} {
+		out := appended(data, sep)
+		meta, ok, err := parseMetadata(path, out)
+		switch {
+		case err != nil:
+			lastErr = err
+			continue
+		case !ok:
+			lastErr = errors.New("the block would not be read back")
+			continue
+		case !sameExceptBlock(data, out):
+			lastErr = errors.New("appending it would change the meaning of the file's last value")
+			continue
+		}
+		if err := atomicfile.Write(path, out, mode); err != nil {
+			return b, false, fmt.Errorf("upgrade: write %s: %w", path, err)
+		}
+		b.Recorded, b.Metadata, b.Scaffold = true, meta.Metadata, meta.Scaffold
+		return b, true, nil
+	}
+	return b, false, fmt.Errorf("upgrade: %s cannot take the metadata block appended (%v); add it by hand:\n%s", path, lastErr, MetadataBlock(0))
+}
+
+// appended is data with the scaffold-0 metadata block appended after sep.
+func appended(data []byte, sep string) []byte {
 	var out bytes.Buffer
 	out.Write(data)
 	if len(data) > 0 {
 		if data[len(data)-1] != '\n' {
 			out.WriteByte('\n')
 		}
-		out.WriteByte('\n')
+		out.WriteString(sep)
 	}
 	out.WriteString(MetadataBlock(0))
-	// Appending is only safe when the result reads back as recorded: a flow
-	// mapping, or a file of several YAML documents, would be corrupted or
-	// keep the block out of reach. Check before touching the file.
-	meta, ok, err := parseMetadata(path, out.Bytes())
-	if err == nil && !ok {
-		err = errors.New("the block would not be read back")
+	return out.Bytes()
+}
+
+// sameExceptBlock reports whether after decodes to before plus the gombit
+// key, and nothing else changed.
+func sameExceptBlock(before, after []byte) bool {
+	var b, a any
+	if yaml.Unmarshal(before, &b) != nil || yaml.Unmarshal(after, &a) != nil {
+		return false
 	}
-	if err != nil {
-		return b, false, fmt.Errorf("upgrade: %s cannot take the metadata block appended (%v); add it by hand:\n%s", path, err, MetadataBlock(0))
+	am, ok := a.(map[string]any)
+	if !ok {
+		return false
 	}
-	if err := os.WriteFile(path, out.Bytes(), 0o644); err != nil { // #nosec G306 -- a project file, committed with the app
-		return b, false, fmt.Errorf("upgrade: write %s: %w", path, err)
+	delete(am, "gombit")
+	switch bm := b.(type) {
+	case nil:
+		return len(am) == 0
+	case map[string]any:
+		return reflect.DeepEqual(bm, am)
+	default:
+		return false
 	}
-	b.Recorded, b.Metadata, b.Scaffold = true, meta.Metadata, *meta.Scaffold
-	return b, true, nil
 }

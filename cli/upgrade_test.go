@@ -100,3 +100,39 @@ func TestUpgradeRefuses(t *testing.T) {
 		t.Fatalf("upgrade without a subcommand = %v", err)
 	}
 }
+
+// TestUpgradeBaselineFrameworkLines: a fork, a local checkout and a
+// workspace claim no framework version, and say why.
+func TestUpgradeBaselineFrameworkLines(t *testing.T) {
+	for name, tc := range map[string]struct{ replace, want string }{
+		"fork":  {"replace github.com/gombit-dev/gombit => github.com/me/gombit v0.8.3-fork\n", "replaced by another module, github.com/me/gombit v0.8.3-fork (not a framework release)"},
+		"local": {"replace github.com/gombit-dev/gombit => ../gombit\n", "replaced by the local directory ../gombit (no published version)"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := upgradeApp(t, "")
+			goMod := filepath.Join(dir, "go.mod")
+			data, err := os.ReadFile(goMod) // #nosec G304 -- under t.TempDir()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(goMod, append(data, tc.replace...), 0o600); err != nil { // #nosec G703 -- under t.TempDir()
+				t.Fatal(err)
+			}
+			if out, err := runUpgradeCLI(t, "baseline", "--dir", dir); err != nil || !strings.Contains(out, tc.want) {
+				t.Fatalf("baseline = %q, %v; want %q", out, err, tc.want)
+			}
+		})
+	}
+
+	root := t.TempDir()
+	work := filepath.Join(root, "go.work")
+	if err := os.WriteFile(work, []byte("go 1.26\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dir := upgradeApp(t, "") // sets GOWORK=off
+	t.Setenv("GOWORK", work)
+	out, err := runUpgradeCLI(t, "baseline", "--dir", dir)
+	if err != nil || !strings.Contains(out, "decided by the workspace "+work) {
+		t.Fatalf("baseline in a workspace = %q, %v", out, err)
+	}
+}

@@ -93,22 +93,7 @@ func runUpgradeBaseline(stdout io.Writer, dir string, asJSON, write bool) error 
 		_, err = fmt.Fprintf(stdout, "%s\n", data)
 		return err
 	}
-	fw := b.Framework
-	source := "go.mod"
-	if fw.Workspace != "" {
-		source = fw.Workspace
-	}
-	switch {
-	case fw.Local && fw.Workspace != "":
-		_, err = fmt.Fprintf(stdout, "Framework: %s, the local checkout %s used by %s (no published version)\n", fw.Module, fw.Replace, fw.Workspace)
-	case fw.Local:
-		_, err = fmt.Fprintf(stdout, "Framework: %s, replaced by the local directory %s (no published version)\n", fw.Module, fw.Replace)
-	case fw.Replace != "":
-		_, err = fmt.Fprintf(stdout, "Framework: %s %s (%s; replaced by %s)\n", fw.Module, fw.Version, source, fw.Replace)
-	default:
-		_, err = fmt.Fprintf(stdout, "Framework: %s %s (go.mod)\n", fw.Module, fw.Version)
-	}
-	if err != nil {
+	if err := printFramework(stdout, b.Framework); err != nil {
 		return err
 	}
 	switch {
@@ -119,6 +104,31 @@ func runUpgradeBaseline(stdout io.Writer, dir string, asJSON, write bool) error 
 	default:
 		_, err = fmt.Fprintf(stdout, "Scaffold:  0 (no upgrade metadata in %s: generated before it existed)\n"+
 			"           Run gombit upgrade baseline --write to record it.\n", upgrade.ProjectFile)
+	}
+	return err
+}
+
+// printFramework writes the Framework line of the baseline.
+func printFramework(stdout io.Writer, fw upgrade.Framework) error {
+	var replaced string
+	if r := fw.Replace; r != nil {
+		replaced = r.Path
+		if r.Version != "" {
+			replaced += " " + r.Version
+		}
+	}
+	var err error
+	switch {
+	case fw.Workspace != "":
+		_, err = fmt.Fprintf(stdout, "Framework: %s, decided by the workspace %s (go.mod requires %s; with GOWORK=off the app builds from go.mod alone)\n", fw.Module, fw.Workspace, fw.Required)
+	case fw.Local:
+		_, err = fmt.Fprintf(stdout, "Framework: %s, replaced by the local directory %s (no published version)\n", fw.Module, replaced)
+	case fw.Version == "":
+		_, err = fmt.Fprintf(stdout, "Framework: %s, replaced by another module, %s (not a framework release)\n", fw.Module, replaced)
+	case fw.Replace != nil:
+		_, err = fmt.Fprintf(stdout, "Framework: %s %s (go.mod; replaced by %s)\n", fw.Module, fw.Version, replaced)
+	default:
+		_, err = fmt.Fprintf(stdout, "Framework: %s %s (go.mod)\n", fw.Module, fw.Version)
 	}
 	return err
 }

@@ -16,7 +16,7 @@ An application's baseline is two facts:
 
 | Fact | Where it comes from |
 | --- | --- |
-| The **framework version** it builds against | `go.mod`: the `require github.com/gombit-dev/gombit` version, or the target of a `replace` of it (a replace of that exact version wins over one of every version, as in Go). A `go.work` that uses the app can override it, with its own `replace` or a framework checkout among its modules. It is never copied anywhere else, so it cannot drift from what Go actually builds. |
+| The **framework version** it builds against | `go.mod`, read offline: the `require github.com/gombit-dev/gombit` version, or the version of a `replace` of it by the framework module (when both an exact-version and an every-version replace exist, the exact one applies, as in Go). It is never copied anywhere else, and `gombit contract app` reads it the same way. |
 | The **scaffold version**: the generation conventions it was created with (layout, framework-owned files, their contents) | `gombit.yaml`, recorded by `gombit new` |
 
 The scaffold version moves only when those conventions change in a way an
@@ -36,9 +36,11 @@ gombit:
   scaffold: 1
 ```
 
-`metadata` is the version of the block's own format. Both keys are required.
-A framework that finds a newer format, or a newer scaffold version, than it
-understands refuses to guess, and asks you to upgrade the `gombit` CLI.
+`metadata` is the version of the block's own format. Both keys are required,
+both are integers, and no other key belongs in the block (a misspelt key is
+refused rather than ignored; a new key means a new format). A framework that
+finds a newer format, or a newer scaffold version, than it understands
+refuses to guess, and asks you to upgrade the `gombit` CLI.
 
 Show an app's baseline:
 
@@ -48,13 +50,24 @@ Framework: github.com/gombit-dev/gombit v0.8.2 (go.mod)
 Scaffold:  1 (recorded in gombit.yaml, metadata format 1)
 ```
 
-`--json` prints it as JSON (`framework.version`, `framework.replace`,
-`framework.local`, `framework.workspace`, `scaffold`, `metadata`,
-`recorded`, and with `--write`, `written`), and `--dir` selects the
-application directory. When the framework is replaced by a local directory
-(a framework checkout, in `go.mod` or a `go.work`), there is no published
-version to upgrade from, and the baseline says so (`framework.local`;
-`framework.workspace` names the `go.work` when it decided).
+`--json` prints it as JSON (`framework.version`, `framework.required`,
+`framework.replace` as `{path, version}`, `framework.local`,
+`framework.workspace`, `scaffold`, `metadata`, `recorded`, and with
+`--write`, `written`), and `--dir` selects the application directory.
+
+`framework.version` is a framework release, or nothing. No version is
+claimed when:
+
+- `go.mod` replaces the framework with a local directory, a framework
+  checkout (`framework.local`): there is no published version to upgrade
+  from;
+- `go.mod` replaces it with another module, a fork (`framework.replace`): a
+  fork's version is not the framework's;
+- a `go.work` applies to the app (`framework.workspace`), as the go command
+  says (`go env GOWORK`, so `GOWORK=auto` and `go env -w` count). In a
+  workspace, every module's requirements and replaces decide the framework
+  version, which `gombit` does not work out. Run with `GOWORK=off` to read
+  the app's own `go.mod`.
 
 ### Apps without upgrade metadata
 

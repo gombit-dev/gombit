@@ -4,6 +4,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+
+	"github.com/gombit-dev/gombit/internal/atomicfile"
 )
 
 // fsTx applies a sequence of file writes that can be undone. Each write goes to a
@@ -52,7 +54,7 @@ func (tx *fsTx) write(path string, content []byte) error {
 	if err != nil {
 		return err
 	}
-	if err := writeFileAtomic(path, content, mode); err != nil {
+	if err := atomicfile.Write(path, content, mode); err != nil {
 		removeDirs(created)
 		return err
 	}
@@ -68,7 +70,7 @@ func (tx *fsTx) rollback() error {
 	for i := len(tx.steps) - 1; i >= 0; i-- {
 		s := tx.steps[i]
 		if s.existed {
-			if err := writeFileAtomic(s.path, s.prior, s.priorMode); err != nil && firstErr == nil {
+			if err := atomicfile.Write(s.path, s.prior, s.priorMode); err != nil && firstErr == nil {
 				firstErr = err
 			}
 		} else if err := os.Remove(s.path); err != nil && !errors.Is(err, os.ErrNotExist) && firstErr == nil {
@@ -78,37 +80,6 @@ func (tx *fsTx) rollback() error {
 	}
 	tx.steps = nil
 	return firstErr
-}
-
-// writeFileAtomic writes content to a temp file in the target's directory, fsyncs
-// and closes it, sets mode, then renames it over path. The rename is atomic on the
-// same filesystem, so path is never observed truncated; a failure anywhere before
-// the rename leaves path untouched and removes the temp file.
-func writeFileAtomic(path string, content []byte, mode os.FileMode) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".gombit-tmp-*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	// If we return before the rename, the temp file must not linger. After a
-	// successful rename tmpName no longer exists and this is a harmless no-op.
-	defer func() { _ = os.Remove(tmpName) }()
-	if _, err := tmp.Write(content); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Chmod(tmpName, mode); err != nil {
-		return err
-	}
-	return os.Rename(tmpName, path)
 }
 
 // mkdirAllTracked creates dir (and any missing parents) and returns the
