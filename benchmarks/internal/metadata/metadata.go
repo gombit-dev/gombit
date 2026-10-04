@@ -121,6 +121,14 @@ type Provenance struct {
 	// empty means none was made.
 	HostClass string `json:"host_class"`
 	GoVersion string `json:"go_version"`
+
+	// Protocol is the sweep protocol and load generator this unit's rows were
+	// measured under, recorded on the same boundary as the rows (#377). Only CRUD
+	// units have one; a group with no protocol (microbench, footprint) and a unit
+	// stamped before protocols were per unit leave it nil, which the JSON omits.
+	// A pointer keeps Provenance a comparable value and makes "not recorded"
+	// distinct from a recorded zero.
+	Protocol *RunParams `json:"protocol,omitempty"`
 }
 
 // Dedicated reports whether the unit was declared to be measured on dedicated
@@ -277,6 +285,17 @@ func (m Metadata) UnitProvenance(group, unit string) Provenance {
 	return m.Provenance()
 }
 
+// WithRunParams returns m with its top-level run parameters replaced by p. It is
+// the inverse of RunParams.
+func (m Metadata) WithRunParams(p RunParams) Metadata {
+	m.Concurrency = p.Concurrency
+	m.Trials = p.Trials
+	m.DurationSeconds = p.DurationSeconds
+	m.WarmupSeconds = p.WarmupSeconds
+	m.BenchmarkTool = p.BenchmarkTool
+	return m
+}
+
 // WithProvenance returns m with its top-level commit/host/toolchain block
 // replaced by prov, leaving the run parameters and Groups untouched. It is the
 // inverse of Provenance.
@@ -349,6 +368,11 @@ func (m Metadata) UnitsProvenance(group string, units []string) (map[string]Prov
 // GitDirty is a pointer, so it is compared by what it points at: two separately
 // collected records of the same clean tree are the same state, not different
 // ones because they hold different addresses.
+//
+// Protocol is excluded for the same reason as HostClass: the caption this
+// answers is "same source, machine and toolchain". Which protocol each unit ran
+// is reported separately, per unit, by the methodology block and the
+// reduced-snapshot banner.
 func (p Provenance) ComparableTo(other Provenance) bool {
 	if (p.GitDirty == nil) != (other.GitDirty == nil) {
 		return false
@@ -359,6 +383,7 @@ func (p Provenance) ComparableTo(other Provenance) bool {
 	p.GitDirty, other.GitDirty = nil, nil
 	p.Timestamp, other.Timestamp = "", ""
 	p.HostClass, other.HostClass = "", ""
+	p.Protocol, other.Protocol = nil, nil
 	return p == other
 }
 
@@ -539,6 +564,7 @@ func Collect(ctx context.Context, opts Options) Metadata {
 // overwrites, so a stale enforced/partial never sticks across a re-run whose
 // check failed.
 func Merge(existing, incoming Metadata) Metadata {
+	existing = existing.WithLegacyProtocols()
 	incoming.FrameworkVersions = union(existing.FrameworkVersions, incoming.FrameworkVersions)
 	incoming.RuntimeVersions = union(existing.RuntimeVersions, incoming.RuntimeVersions)
 	incoming.ResourceLimitsByFramework = union(existing.ResourceLimitsByFramework, incoming.ResourceLimitsByFramework)
@@ -549,35 +575,24 @@ func Merge(existing, incoming Metadata) Metadata {
 	return incoming
 }
 
-// RunParams is the sweep protocol and load generator a snapshot records ONCE,
-// at the top level, for every row in it.
+// RunParams is the sweep protocol and load generator a CRUD run measured under.
 //
-// Unlike the version maps and the per-framework limit verdicts, Merge cannot
-// union these: metadata.json holds exactly one protocol, and the report prints
-// exactly one "Protocol:" / "Load generator:" line (report.writeMethodology)
-// and judges one "reduced development snapshot" banner from it
-// (report.reducedFrom). Last-writer-wins is therefore only honest while every
-// row in the file was measured under the incoming parameters.
+// The authoritative record is per unit, in each CRUD unit's
+// Provenance.Protocol, because rows are per (framework, benchmark) and two
+// workloads, or two apps, may legitimately run under different pins (#377).
+// The report describes and judges each table by the protocols of the units it
+// renders (UnitRunParams).
 //
-// That is what makes them different in kind from provenance. Provenance became
-// per unit (Groups) because a run measures one unit and must not caption the
-// others (issue #266). These cannot follow the same boundary without the report
-// growing a per-unit protocol block, so run-crud holds the invariant from the
-// producer side instead: it refuses to merge a run whose parameters differ from
-// the recorded ones while rows it does not replace remain (#361, review round 1).
-//
-// ConflictsWith is directional (see there): an incoming zero is a value, never
-// a wildcard, because Merge writes it (#361, review round 2).
-//
-// That covers run-crud only. `make benchmark-metadata` (collect-host-info)
-// also writes these fields, replaces them wholesale, and measures nothing, so
-// it can still describe existing rows under other parameters; it is not guarded.
+// The top-level fields (Metadata.Concurrency and friends) are still written for
+// older readers. Like the top-level provenance block they describe whichever
+// collection last rewrote the record, run-crud or `make benchmark-metadata`, and
+// no reader may use them to describe a unit once any unit is recorded.
 type RunParams struct {
-	Concurrency     []int
-	Trials          int
-	DurationSeconds float64
-	WarmupSeconds   float64
-	BenchmarkTool   string
+	Concurrency     []int   `json:"concurrency"`
+	Trials          int     `json:"trials"`
+	DurationSeconds float64 `json:"duration_seconds"`
+	WarmupSeconds   float64 `json:"warmup_seconds"`
+	BenchmarkTool   string  `json:"benchmark_tool"`
 }
 
 // RunParams returns the run parameters recorded at the top level.
@@ -600,79 +615,69 @@ func (p RunParams) Recorded() bool {
 		p.WarmupSeconds != 0 || p.BenchmarkTool != ""
 }
 
-// ConflictsWith describes every parameter the incoming run would change in a
-// recorded snapshot, as "<what> <recorded> -> <incoming>" in a fixed order so
-// an error message is stable. Concurrency compares as an ordered list, the way
-// the report prints it. No conflict returns nil.
-//
-// It is directional because Merge is: the incoming values are written whole,
-// so every incoming field is a value, and a zero there (a zero-second warm-up)
-// is compared like any other rather than read as "unstated". Callers must hand
-// it complete incoming parameters; run-crud validates them before measuring.
-//
-// Only the recorded side can be absent, and only as a whole: a record that
-// states nothing (a fresh OUT_DIR, a snapshot written before these fields were
-// recorded) has no protocol to misdescribe, so nothing conflicts with it. Once
-// it states anything, all five fields are compared exactly. A partial record,
-// such as `make benchmark-metadata` given only -trials, therefore conflicts on
-// its zeros; that fails closed rather than guessing what those rows ran.
-func (recorded RunParams) ConflictsWith(incoming RunParams) []string {
-	if !recorded.Recorded() {
-		return nil
-	}
-	var diffs []string
-	if !equalInts(recorded.Concurrency, incoming.Concurrency) {
-		diffs = append(diffs, fmt.Sprintf("concurrency %s -> %s",
-			intList(recorded.Concurrency), intList(incoming.Concurrency)))
-	}
-	if recorded.Trials != incoming.Trials {
-		diffs = append(diffs, fmt.Sprintf("trials %d -> %d", recorded.Trials, incoming.Trials))
-	}
-	if recorded.DurationSeconds != incoming.DurationSeconds {
-		diffs = append(diffs, fmt.Sprintf("duration per trial %s -> %s",
-			secs(recorded.DurationSeconds), secs(incoming.DurationSeconds)))
-	}
-	if recorded.WarmupSeconds != incoming.WarmupSeconds {
-		diffs = append(diffs, fmt.Sprintf("warm-up %s -> %s",
-			secs(recorded.WarmupSeconds), secs(incoming.WarmupSeconds)))
-	}
-	if recorded.BenchmarkTool != incoming.BenchmarkTool {
-		diffs = append(diffs, fmt.Sprintf("benchmark tool %s -> %s",
-			orNone(recorded.BenchmarkTool), orNone(incoming.BenchmarkTool)))
-	}
-	return diffs
-}
-
-func equalInts(a, b []int) bool {
-	if len(a) != len(b) {
+// Equal reports whether two protocols are the same sweep with the same load
+// generator. Concurrency compares as an ordered list, the way it is printed.
+func (p RunParams) Equal(other RunParams) bool {
+	if len(p.Concurrency) != len(other.Concurrency) {
 		return false
 	}
-	for i := range a {
-		if a[i] != b[i] {
+	for i := range p.Concurrency {
+		if p.Concurrency[i] != other.Concurrency[i] {
 			return false
 		}
 	}
-	return true
+	return p.Trials == other.Trials && p.DurationSeconds == other.DurationSeconds &&
+		p.WarmupSeconds == other.WarmupSeconds && p.BenchmarkTool == other.BenchmarkTool
 }
 
-func intList(xs []int) string {
-	if len(xs) == 0 {
-		return "none"
+// UnitRunParams returns the protocol one unit's rows were measured under, and
+// false when none was recorded for it. It follows UnitProvenance's rule: the
+// top-level parameters stand in only for a snapshot that records no unit at all,
+// where one run produced every row. Once any unit is recorded, the top level is
+// rewritten by producers that did not measure most rows (run-crud for another
+// unit, `make benchmark-metadata` for none), so an unrecorded unit is reported
+// as unrecorded.
+func (m Metadata) UnitRunParams(group, unit string) (RunParams, bool) {
+	if p, ok := m.Groups[group][unit]; ok {
+		if p.Protocol == nil {
+			return RunParams{}, false
+		}
+		return *p.Protocol, true
 	}
-	parts := make([]string, len(xs))
-	for i, x := range xs {
-		parts[i] = strconv.Itoa(x)
+	if m.RecordsUnits() {
+		return RunParams{}, false
 	}
-	return strings.Join(parts, "/")
+	top := m.RunParams()
+	return top, top.Recorded()
 }
 
-func secs(s float64) string { return strconv.FormatFloat(s, 'f', -1, 64) + "s" }
-
-func orNone(s string) string {
-	if s == "" {
-		return "none"
+// WithLegacyProtocols returns m with the top-level run parameters filed on every
+// CRUD unit that has no protocol of its own.
+//
+// Before protocols were per unit (#377), the top-level parameters were the only
+// protocol a CRUD unit had, and the README described every CRUD row with them.
+// That is not a guarantee they ran under it: per-unit provenance (#292) predates
+// the run-crud merge guard (#371), and collect-host-info was never guarded. It
+// is the best record there is, and the one already published, so it is kept
+// rather than dropped: ReadJSON applies this on every read and the report on
+// every render, so producers and the report agree on it, and a producer records
+// it per unit before it rewrites the top level. Only CRUD: the top-level
+// protocol never described microbench or footprint rows. A snapshot that
+// records no top-level parameters has nothing to file.
+func (m Metadata) WithLegacyProtocols() Metadata {
+	top := m.RunParams()
+	if !top.Recorded() {
+		return m
 	}
-	return s
+	for unit, p := range m.Groups[GroupCRUD] {
+		if p.Protocol != nil {
+			continue
+		}
+		params := top
+		p.Protocol = &params
+		m = StampUnit(m, GroupCRUD, unit, p)
+	}
+	return m
 }
 
 // StampUnit records prov as one unit's provenance in meta and changes nothing

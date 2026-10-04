@@ -54,9 +54,10 @@ type runConfig struct {
 	k6Image                string
 }
 
-// runParams is the protocol and load generator this run records at the top level
-// of metadata.json. metadata.Collect is fed from it, and so is the merge guard,
-// so what is compared can never differ from what is written.
+// runParams is the protocol and load generator this run records: on its own unit
+// in metadata.json (the authoritative record the report reads, #377) and, for
+// older readers, at the top level. Both are fed from here, so they can never
+// differ.
 func (c runConfig) runParams() metadata.RunParams {
 	return metadata.RunParams{
 		Concurrency:     c.concurrency,
@@ -71,13 +72,11 @@ func (c runConfig) runParams() metadata.RunParams {
 }
 
 // validateRunParams rejects a run whose recorded parameters would be incomplete
-// or invalid. metadata.Merge writes every one of them whole, and
-// RunParams.ConflictsWith compares them as values, so an incoming zero must be
-// a real choice, never a flag that was left at zero or a string that failed to
-// parse: `-trials 0` used to pass the merge guard unchecked, measure nothing,
-// delete this unit's own rows, and record "0 trials" over rows measured with
-// five (#361 review round 2). A zero-second warm-up is a legitimate choice and
-// is accepted as a value.
+// or invalid. The unit's protocol is written whole and the report prints it as
+// a fact, so an incoming zero must be a real choice, never a flag that was left
+// at zero or a string that failed to parse: `-trials 0` would measure nothing,
+// delete this unit's own rows, and record "0 trials" (#361 review round 2). A
+// zero-second warm-up is a legitimate choice and is accepted as a value.
 func (c runConfig) validateRunParams() error {
 	if c.trials < 1 {
 		return fmt.Errorf("-trials must be at least 1, got %d", c.trials)
@@ -180,14 +179,9 @@ func run(cfg runConfig, k6run k6Runner) error {
 	if err := metadata.CheckHostClassEnv(); err != nil {
 		return err
 	}
-	// Refuse an incompatible merge before hours of measurement, not after: every
-	// input to the check is known now. writeOutputs checks again on the snapshot it
-	// actually merges into (see refuseIncompatible).
-	before, err := readSnapshot(cfg.outDir)
-	if err != nil {
-		return err
-	}
-	if err := refuseIncompatible(before, cfg.outDir, cfg.framework, cfg.benchmark, cfg.runParams()); err != nil {
+	// Fail on an unreadable snapshot before hours of measurement, not after.
+	// writeOutputs reads it again for the merge.
+	if _, err := readSnapshot(cfg.outDir); err != nil {
 		return err
 	}
 	rawDir := filepath.Join(cfg.outDir, "raw")
@@ -250,13 +244,16 @@ func run(cfg runConfig, k6run k6Runner) error {
 		Concurrency:               params.Concurrency,
 		Trials:                    params.Trials,
 	})
-	// This run's own provenance, filed under this (app, workload) alone. run-crud
-	// replaces exactly those rows and preserves the others, and APPS= subsetting
-	// is a supported run, so stamping the whole crud group here would caption
-	// every other app's rows with a commit they never ran at (issue #266, round
-	// 2), and stamping the app alone would do the same to its other workloads
-	// (#361).
-	meta = metadata.StampUnit(meta, metadata.GroupCRUD, result.ProvenanceUnit(cfg.framework, cfg.benchmark), meta.Provenance())
+	// This run's own provenance and protocol, filed under this (app, workload)
+	// alone. run-crud replaces exactly those rows and preserves the others, and
+	// APPS= subsetting is a supported run, so stamping the whole crud group here
+	// would caption every other app's rows with a commit they never ran at (issue
+	// #266, round 2), stamping the app alone would do the same to its other
+	// workloads (#361), and a snapshot-wide protocol would describe them under
+	// parameters they never ran (#377).
+	prov := meta.Provenance()
+	prov.Protocol = &params
+	meta = metadata.StampUnit(meta, metadata.GroupCRUD, result.ProvenanceUnit(cfg.framework, cfg.benchmark), prov)
 
 	if err := writeOutputs(cfg.outDir, cfg.framework, cfg.benchmark, rows, meta); err != nil {
 		return err
@@ -314,16 +311,14 @@ func parseSummaryFile(path string) (k6.Summary, error) {
 // truncating it: re-running one framework's workload replaces those rows,
 // while running each framework (or workload) in turn accumulates them all.
 // metadata's version maps are unioned the same way so a multi-framework
-// snapshot records every implementation that contributed.
+// snapshot records every implementation that contributed, and each unit keeps
+// the protocol it was measured under, so units at different protocols share
+// one snapshot (#377).
 func writeOutputs(outDir, framework, benchmark string, newRows []result.Result, meta metadata.Metadata) error {
-	// Read once, before writing anything, and both check and merge that same
-	// snapshot, so an unreadable snapshot or a refused merge fails the run with
-	// the files untouched, and what was checked is what is merged.
+	// Read before writing anything, so an unreadable snapshot fails the run with
+	// the files untouched.
 	snap, err := readSnapshot(outDir)
 	if err != nil {
-		return err
-	}
-	if err := refuseIncompatible(snap, outDir, framework, benchmark, meta.RunParams()); err != nil {
 		return err
 	}
 	rows := mergeRows(snap.rows, newRows, framework, benchmark)
@@ -365,56 +360,6 @@ func readSnapshot(outDir string) (snapshot, error) {
 		return snapshot{}, err
 	}
 	return snapshot{rows: rows, meta: meta}, nil
-}
-
-// refuseIncompatible refuses a run whose protocol or load generator differs from
-// what snap records while rows this run will not replace remain in it.
-//
-// The rows are per (framework, benchmark) and so is their provenance, but the
-// protocol and load generator are recorded once for the whole snapshot, and
-// metadata.Merge writes the incoming values whole. Merging such a run would
-// leave the README describing the surviving rows — another app's, or another
-// workload's — with parameters they were not measured under, and nothing would
-// say so (#361 review round 1; the framework axis has had the same gap since
-// run-crud began merging). Incoming parameters are complete by the time they
-// get here (validateRunParams), so every incoming field is compared as a value.
-//
-// run() checks the snapshot as it stands before the sweep, so a doomed run
-// fails before hours of measurement. writeOutputs checks the snapshot it then
-// merges into, which catches one another producer rewrote while this run was
-// measuring. Neither is concurrency control: no producer locks OUT_DIR, and a
-// write that overlaps this run's own read-merge-write can still interleave with
-// it. Running two producers against one OUT_DIR at the same time is
-// unsupported, as it was before this check existed. raw/ summaries are written
-// during the sweep, before either check can refuse the merge.
-//
-// It needs no per-unit protocol record: the state it forbids is the one that
-// could not be described honestly. A run that replaces every row in the file,
-// a fresh out dir, or a snapshot that records no parameters has nothing to
-// misdescribe and passes. There is no incremental way to adopt a new protocol
-// on a populated snapshot (each app's run is refused while the others' rows
-// remain), so the way out is a separate OUT_DIR or starting the snapshot over.
-func refuseIncompatible(snap snapshot, outDir, framework, benchmark string, params metadata.RunParams) error {
-	kept := 0
-	for _, r := range snap.rows {
-		// The exact negation of what mergeRows replaces.
-		if r.Framework != framework || r.Benchmark != benchmark {
-			kept++
-		}
-	}
-	if kept == 0 {
-		return nil
-	}
-	diffs := snap.meta.RunParams().ConflictsWith(params)
-	if len(diffs) == 0 {
-		return nil
-	}
-	return fmt.Errorf("refusing to record %s:%s under different parameters from the snapshot in %s (%s): "+
-		"the %d rows it would keep would then be reported under parameters they were not measured with. "+
-		"Write to a separate OUT_DIR, or remove the old snapshot to start over under the new parameters "+
-		"(the other rows cannot be re-measured first: each of their runs is refused the same way). "+
-		"results.json, results.csv and metadata.json were not modified",
-		framework, benchmark, outDir, strings.Join(diffs, "; "), kept)
 }
 
 // mergeRows drops any existing rows for (framework, benchmark) (a re-run

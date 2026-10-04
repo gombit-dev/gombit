@@ -148,3 +148,27 @@ func readFrom(t *testing.T, path string) Metadata {
 	}
 	return m
 }
+
+// Every producer reads a pre-#377 CRUD unit with the top-level protocol filed on
+// it, the same answer the report renders, so nothing can rewrite the top level
+// out from under it.
+func TestReadJSONFilesTheLegacyProtocolOnCRUDUnits(t *testing.T) {
+	top := RunParams{Concurrency: []int{1}, Trials: 1, DurationSeconds: 5, WarmupSeconds: 1, BenchmarkTool: "k6"}
+	m := Metadata{}.WithRunParams(top)
+	m = StampUnit(m, GroupCRUD, "gombit:crud-list", Provenance{GitCommit: "a"})
+	m = StampUnit(m, GroupFootprint, "gombit:container", Provenance{GitCommit: "a"})
+	var b strings.Builder
+	if err := WriteJSON(&b, m); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadJSON(strings.NewReader(b.String()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p, ok := got.UnitRunParams(GroupCRUD, "gombit:crud-list"); !ok || !p.Equal(top) {
+		t.Errorf("a legacy CRUD unit must be read with the top-level protocol, got %+v, %v", p, ok)
+	}
+	if got.Groups[GroupFootprint]["gombit:container"].Protocol != nil {
+		t.Error("the top-level protocol never described footprint rows")
+	}
+}

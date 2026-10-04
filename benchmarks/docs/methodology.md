@@ -290,33 +290,32 @@ The CRUD unit is likewise the row's full merge key, `framework:benchmark`
 (`workloads/<benchmark>.js`). Recording another workload for an app therefore
 neither replaces nor relabels its `crud-list` rows.
 
-Provenance is per unit; the sweep protocol and load generator are not. The
-top-level `concurrency`, `trials`, `duration_seconds`, `warmup_seconds` and
-`benchmark_tool` are recorded once for the whole snapshot, and the README prints
-one "Protocol" line and one reduced-snapshot banner from them. They are only
-true while every row in the file was measured under them, so `run-crud` refuses
-a run whose values differ from the recorded ones while rows it does not replace
-remain (another app's, or another workload's), and modifies nothing. A
-populated snapshot cannot be moved to a new protocol one app at a time, because
-each app's run is refused while the others' rows remain: write to a separate
-`OUT_DIR`, or remove the old snapshot and start over. A fresh `OUT_DIR`, a
-snapshot that records no parameters, and a run that replaces every row in the
-file are unaffected. `make benchmark-metadata` also writes these fields and is
-not guarded. Recording a protocol per unit, so that workloads with different
-pins can share a snapshot, is a separate change.
+The sweep protocol and load generator are per unit too (#377). Each CRUD unit
+records the `concurrency`, `trials`, `duration_seconds`, `warmup_seconds` and
+`benchmark_tool` its own rows ran under, in `groups.crud.<unit>.protocol`. The
+README's "Protocol" and "Load generator" lines and the reduced-snapshot banner
+are derived from the units the CRUD table renders: one line when they agree,
+each unit's own when they do not. So two workloads, or two apps, with different
+pins share one snapshot, and a populated snapshot can move to a new protocol one
+app at a time; until every app has been re-run, the README names which unit ran
+which protocol. The top-level fields of the same names are still written for
+older readers, but they describe whichever run last rewrote the record and are
+never read for a unit once any unit is recorded. A unit stamped before
+protocols were per unit is read with the top-level parameters, the protocol the
+README always attributed to it (the best record there is, not a guarantee:
+nothing guarded those fields before #371, and `make benchmark-metadata` never
+was), and the next producer to rewrite the top level files them on that unit
+first. A snapshot that records no unit at all keeps its top-level parameters
+across `make benchmark-metadata`, as it keeps its provenance.
 
-Because the incoming values are written whole, `run-crud` compares every one of
-them as a value, never as "unstated": it rejects `-trials` below 1, an empty or
-non-positive concurrency level, a duration that is not positive, a negative
-warm-up and an empty `-k6-image` before measuring anything. A zero-second
-warm-up is accepted and recorded as a value, so it matches a snapshot recorded
-with no warm-up and conflicts with one recorded with a warm-up. On the recorded
-side, a snapshot that states none of the five fields has no protocol to
-misdescribe; one that states any of them is compared on all five.
+`run-crud` records its parameters as a fact about the unit, so it rejects
+`-trials` below 1, an empty or non-positive concurrency level, a duration that
+is not positive, a negative warm-up and an empty `-k6-image` before measuring
+anything. A zero-second warm-up is accepted and recorded as a value.
 
-The producers do not lock `OUT_DIR`. `run-crud` checks the snapshot before the
-sweep and again on the snapshot it merges into, which catches another producer
-that finished while it was measuring, but a write that overlaps its own
+The producers do not lock `OUT_DIR`. `run-crud` merges into the snapshot as it
+finds it when the sweep ends, so another producer that finished while it was
+measuring keeps its rows and protocol, but a write that overlaps its own
 read-merge-write is not detected. Running two producers against one `OUT_DIR`
 at the same time is unsupported.
 
@@ -339,10 +338,10 @@ whole record, and they are **not a caption for any table**:
 Both directions are expected; neither is stale bookkeeping to "fix" by editing the
 top level.
 
-The practical rule: **read `groups.<group>.<unit>` for a row's provenance; read
-the top level only for the shared run parameters** (database, resource limits, sweep
-protocol, load generator), and as every row's provenance only in a snapshot that
-records no unit at all.
+The practical rule: **read `groups.<group>.<unit>` for a row's provenance and,
+for CRUD, its protocol; read the top level only for the shared run parameters**
+(database, resource limits), and as every row's provenance and protocol only in a
+snapshot that records no unit at all.
 
 The shape is additive, so `schema_version` stays `1`: a reader that predates
 `groups` still sees exactly the flat fields it always saw.

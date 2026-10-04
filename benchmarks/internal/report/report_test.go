@@ -246,7 +246,8 @@ func TestReducedProtocolIsLabelled(t *testing.T) {
 	meta.Trials = 3
 	meta.DurationSeconds = 10
 	meta.WarmupSeconds = 3
-	out := Render(nil, nil, nil, meta)
+	// A snapshot that records no unit: its top-level protocol is every row's.
+	out := Render([]result.Result{crudRow("gombit", 100, 1, 1000, 5, 10, 20)}, nil, nil, meta)
 	if !strings.Contains(out, "Reduced development snapshot") {
 		t.Errorf("a narrower-than-canonical run must be labelled reduced:\n%s", out)
 	}
@@ -269,12 +270,158 @@ func TestReducedProtocolIsLabelled(t *testing.T) {
 // The pre-run placeholder (no protocol recorded) must NOT be mislabelled as a
 // reduced snapshot — there is nothing to compare against canonical yet.
 func TestEmptyProtocolIsNotReduced(t *testing.T) {
-	if reduced, _ := reducedFrom(metadata.Metadata{}); reduced {
+	if reduced, _ := reducedFrom(protocolsOf(metadata.Metadata{}, []string{crudUnit("gombit")})); reduced > 0 {
 		t.Error("empty metadata should not be classified as a reduced snapshot")
 	}
 	out := Render(nil, nil, nil, metadata.Metadata{})
 	if strings.Contains(out, "Reduced development snapshot") {
 		t.Errorf("empty render must not carry the reduced banner:\n%s", out)
+	}
+}
+
+// protocolOf is the protocol a run-crud invocation files on its unit.
+func protocolOf(conc []int, trials int, duration, warmup float64) *metadata.RunParams {
+	return &metadata.RunParams{
+		Concurrency: conc, Trials: trials, DurationSeconds: duration, WarmupSeconds: warmup,
+		BenchmarkTool: "grafana/k6:0.55.0",
+	}
+}
+
+func canonicalProtocol() *metadata.RunParams {
+	return protocolOf(append([]int(nil), CanonicalProtocol.Concurrency...), CanonicalProtocol.Trials,
+		CanonicalProtocol.DurationSeconds, CanonicalProtocol.WarmupSeconds)
+}
+
+func methodologySection(out string) string {
+	return out[strings.Index(out, "### How these were measured"):]
+}
+
+// Two workloads recorded at different protocols in one snapshot: the published
+// crud-list table is described by, and judged on, its own protocol — not the
+// auth-jwt run that rewrote the top level last (#377).
+func TestEachTableIsDescribedByItsOwnUnitsProtocol(t *testing.T) {
+	clean := false
+	list := crudRow("gombit", 100, 1, 1000, 5, 10, 20)
+	auth := list
+	auth.Benchmark = "auth-jwt"
+
+	meta := canonicalMeta()
+	meta.Concurrency, meta.Trials, meta.DurationSeconds, meta.WarmupSeconds = []int{1}, 1, 5, 1
+	meta = metadata.StampUnit(meta, metadata.GroupCRUD, list.ProvenanceUnit(),
+		metadata.Provenance{GitCommit: "aaaa11112222", GitDirty: &clean, Protocol: canonicalProtocol()})
+	meta = metadata.StampUnit(meta, metadata.GroupCRUD, auth.ProvenanceUnit(),
+		metadata.Provenance{GitCommit: "aaaa11112222", GitDirty: &clean, Protocol: protocolOf([]int{1}, 1, 5, 1)})
+
+	out := Render([]result.Result{list, auth}, nil, nil, meta)
+	if strings.Contains(out, "Reduced development snapshot") {
+		t.Errorf("another workload's reduced run must not stamp the canonical crud-list table:\n%s", out)
+	}
+	how := methodologySection(out)
+	if !strings.Contains(how, "- **Protocol:** concurrency 1/10/100/500/1000 VUs, 5 trials × 30s each (warm-up 10s)") {
+		t.Errorf("the crud-list table must be described by its own protocol:\n%s", how)
+	}
+	if strings.Contains(how, "1 trial ") || strings.Contains(how, "per unit") {
+		t.Errorf("the auth-jwt protocol must not describe the crud-list table:\n%s", how)
+	}
+
+	// And the other way round: the canonical run recorded last cannot hide a
+	// reduced crud-list table.
+	meta.Concurrency, meta.Trials, meta.DurationSeconds, meta.WarmupSeconds =
+		append([]int(nil), CanonicalProtocol.Concurrency...), CanonicalProtocol.Trials,
+		CanonicalProtocol.DurationSeconds, CanonicalProtocol.WarmupSeconds
+	meta = metadata.StampUnit(meta, metadata.GroupCRUD, list.ProvenanceUnit(),
+		metadata.Provenance{GitCommit: "aaaa11112222", GitDirty: &clean, Protocol: protocolOf([]int{1, 10}, 2, 5, 1)})
+	meta = metadata.StampUnit(meta, metadata.GroupCRUD, auth.ProvenanceUnit(),
+		metadata.Provenance{GitCommit: "aaaa11112222", GitDirty: &clean, Protocol: canonicalProtocol()})
+	out = Render([]result.Result{list, auth}, nil, nil, meta)
+	if !strings.Contains(out, "Reduced development snapshot") || !strings.Contains(out, "2 trials (canonical 5 trials)") {
+		t.Errorf("a reduced crud-list table must be labelled whatever the top level says:\n%s", out)
+	}
+	if !strings.Contains(methodologySection(out), "- **Protocol:** concurrency 1/10 VUs, 2 trials × 5s each (warm-up 1s)") {
+		t.Errorf("the crud-list table must be described by its own reduced protocol:\n%s", methodologySection(out))
+	}
+}
+
+// One table whose apps ran under different protocols names each one's, in the
+// banner and in the methodology block, instead of picking one.
+func TestATableMixingProtocolsNamesEachUnits(t *testing.T) {
+	clean := false
+	meta := canonicalMeta()
+	// No top-level protocol, so the unit stamped without one stays unrecorded
+	// rather than inheriting it (see TestLegacyUnitsAreJudgedByTheTopLevelProtocol).
+	meta = meta.WithRunParams(metadata.RunParams{})
+	meta = metadata.StampUnit(meta, metadata.GroupCRUD, crudUnit("rails"),
+		metadata.Provenance{GitCommit: "aaaa11112222", GitDirty: &clean, Protocol: canonicalProtocol()})
+	reduced := protocolOf([]int{1, 10}, 1, 5, 1)
+	reduced.BenchmarkTool = "grafana/k6:0.99.0"
+	meta = metadata.StampUnit(meta, metadata.GroupCRUD, crudUnit("gombit"),
+		metadata.Provenance{GitCommit: "aaaa11112222", GitDirty: &clean, Protocol: reduced})
+	meta = metadata.StampUnit(meta, metadata.GroupCRUD, crudUnit("django"),
+		metadata.Provenance{GitCommit: "aaaa11112222", GitDirty: &clean})
+
+	out := Render([]result.Result{
+		crudRow("rails", 10, 1, 900, 5, 10, 20),
+		crudRow("gombit", 10, 1, 1000, 5, 10, 20),
+		crudRow("django", 10, 1, 800, 5, 10, 20),
+	}, nil, nil, meta)
+
+	if !strings.Contains(out, "Some published rows were measured under a **narrower protocol") ||
+		!strings.Contains(out, "gombit:crud-list: concurrency 1/10 (canonical 1/10/100/500/1000), 1 trial (canonical 5 trials)") {
+		t.Errorf("the banner must name the unit that ran the reduced protocol:\n%s", out)
+	}
+	if strings.Contains(out, "rails:crud-list: ") {
+		t.Errorf("a canonical unit must not be listed as reduced:\n%s", out)
+	}
+	how := methodologySection(out)
+	for _, want := range []string{
+		"- **Protocol (per unit):** django:crud-list — not recorded; gombit:crud-list — concurrency 1/10 VUs, 1 trial × 5s each (warm-up 1s); rails:crud-list — concurrency 1/10/100/500/1000 VUs, 5 trials × 30s each (warm-up 10s)",
+		"- **Load generator (per unit):** django:crud-list — not recorded; gombit:crud-list — grafana/k6:0.99.0; rails:crud-list — grafana/k6:0.55.0.",
+	} {
+		if !strings.Contains(how, want) {
+			t.Errorf("methodology missing %q:\n%s", want, how)
+		}
+	}
+}
+
+// A CRUD unit stamped before protocols were per unit is described, and judged,
+// by the top-level protocol the README always attributed to it — the same answer
+// metadata.ReadJSON gives every producer. A reduced one must keep its banner.
+func TestLegacyUnitsAreJudgedByTheTopLevelProtocol(t *testing.T) {
+	clean := false
+	meta := canonicalMeta()
+	meta = meta.WithRunParams(*protocolOf([]int{1}, 1, 5, 1))
+	meta = metadata.StampUnit(meta, metadata.GroupCRUD, crudUnit("gombit"),
+		metadata.Provenance{GitCommit: "aaaa11112222", GitDirty: &clean})
+
+	out := Render([]result.Result{crudRow("gombit", 1, 1, 1000, 5, 10, 20)}, nil, nil, meta)
+	if !strings.Contains(out, "Reduced development snapshot") || !strings.Contains(out, "1 trial (canonical 5 trials)") {
+		t.Errorf("a legacy unit under a reduced top-level protocol must carry the banner:\n%s", out)
+	}
+	if !strings.Contains(methodologySection(out), "- **Protocol:** concurrency 1 VUs, 1 trial × 5s each (warm-up 1s)") {
+		t.Errorf("a legacy unit must be described by the top-level protocol:\n%s", methodologySection(out))
+	}
+}
+
+// Units that differ only in the load generator share one Protocol line; and when
+// every rendered unit ran a reduced protocol the banner says so.
+func TestProtocolAndLoadGeneratorCollapseIndependently(t *testing.T) {
+	clean := false
+	meta := canonicalMeta()
+	a, b := protocolOf([]int{1, 10}, 1, 5, 1), protocolOf([]int{1, 10}, 1, 5, 1)
+	b.BenchmarkTool = "grafana/k6:0.99.0"
+	meta = metadata.StampUnit(meta, metadata.GroupCRUD, crudUnit("rails"), metadata.Provenance{GitCommit: "a", GitDirty: &clean, Protocol: a})
+	meta = metadata.StampUnit(meta, metadata.GroupCRUD, crudUnit("gombit"), metadata.Provenance{GitCommit: "a", GitDirty: &clean, Protocol: b})
+
+	out := Render([]result.Result{crudRow("rails", 10, 1, 900, 5, 10, 20), crudRow("gombit", 10, 1, 1000, 5, 10, 20)}, nil, nil, meta)
+	how := methodologySection(out)
+	if !strings.Contains(how, "- **Protocol:** concurrency 1/10 VUs, 1 trial × 5s each (warm-up 1s)\n") {
+		t.Errorf("units sharing a protocol must share one Protocol line:\n%s", how)
+	}
+	if !strings.Contains(how, "- **Load generator (per unit):** gombit:crud-list — grafana/k6:0.99.0; rails:crud-list — grafana/k6:0.55.0.") {
+		t.Errorf("differing load generators must be named per unit:\n%s", how)
+	}
+	if !strings.Contains(out, "> Every published row was measured under a ") {
+		t.Errorf("a table whose every unit is reduced must not say only some are:\n%s", out)
 	}
 }
 

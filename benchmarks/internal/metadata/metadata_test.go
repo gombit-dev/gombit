@@ -509,80 +509,125 @@ func TestParseMemTotalBytes(t *testing.T) {
 	}
 }
 
-// The five run parameters are recorded once per snapshot, and Merge writes the
-// incoming ones whole, so the comparison is directional: an incoming zero is a
-// value, and only a recorded side that states nothing at all is absent (#361
-// review round 2).
-func TestRunParamsConflictsWith(t *testing.T) {
+// Equal is exact on every field, and the concurrency ladder is ordered: the
+// report prints it in recorded order, so a reordered list is a different
+// statement of the protocol. A zero is a value, not a wildcard.
+func TestRunParamsEqual(t *testing.T) {
 	canonical := RunParams{
 		Concurrency: []int{1, 10, 100}, Trials: 5, DurationSeconds: 30, WarmupSeconds: 10,
 		BenchmarkTool: "grafana/k6:0.55.0",
 	}
-
-	if got := canonical.ConflictsWith(canonical); got != nil {
-		t.Errorf("identical parameters must not conflict, got %v", got)
+	if !canonical.Equal(canonical) {
+		t.Error("identical parameters must be equal")
 	}
-	if got := (RunParams{}).ConflictsWith(canonical); got != nil {
-		t.Errorf("a snapshot recording nothing cannot conflict, got %v", got)
-	}
-
-	// The review's case: a zero-valued incoming field is not a wildcard, because
-	// Merge would write it over rows measured with five trials.
-	zeroTrials := canonical
-	zeroTrials.Trials = 0
-	if got := canonical.ConflictsWith(zeroTrials); len(got) != 1 || got[0] != "trials 5 -> 0" {
-		t.Errorf("an incoming zero must conflict with a recorded value, got %v", got)
-	}
-
-	// A zero warm-up is a value on both sides: recorded 0 vs incoming 0 is the
-	// same protocol, recorded 10s vs incoming 0 is a different one.
-	noWarmup := canonical
-	noWarmup.WarmupSeconds = 0
-	if got := noWarmup.ConflictsWith(noWarmup); got != nil {
-		t.Errorf("a deliberate zero warm-up must match itself, got %v", got)
-	}
-	if got := canonical.ConflictsWith(noWarmup); len(got) != 1 || got[0] != "warm-up 10s -> 0s" {
-		t.Errorf("dropping the warm-up must conflict, got %v", got)
-	}
-	if got := noWarmup.ConflictsWith(canonical); len(got) != 1 || got[0] != "warm-up 0s -> 10s" {
-		t.Errorf("adding a warm-up to a zero-warm-up snapshot must conflict, got %v", got)
-	}
-
-	// Every field, in a fixed order.
-	reduced := RunParams{
-		Concurrency: []int{1}, Trials: 1, DurationSeconds: 1, WarmupSeconds: 1,
-		BenchmarkTool: "grafana/k6:0.99.0",
-	}
-	want := []string{
-		"concurrency 1/10/100 -> 1",
-		"trials 5 -> 1",
-		"duration per trial 30s -> 1s",
-		"warm-up 10s -> 1s",
-		"benchmark tool grafana/k6:0.55.0 -> grafana/k6:0.99.0",
-	}
-	got := canonical.ConflictsWith(reduced)
-	if len(got) != len(want) {
-		t.Fatalf("conflicts = %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("conflict[%d] = %q, want %q", i, got[i], want[i])
+	for name, mutate := range map[string]func(*RunParams){
+		"concurrency": func(p *RunParams) { p.Concurrency = []int{1, 10} },
+		"reordered":   func(p *RunParams) { p.Concurrency = []int{100, 10, 1} },
+		"trials":      func(p *RunParams) { p.Trials = 0 },
+		"duration":    func(p *RunParams) { p.DurationSeconds = 1 },
+		"warm-up":     func(p *RunParams) { p.WarmupSeconds = 0 },
+		"tool":        func(p *RunParams) { p.BenchmarkTool = "grafana/k6:0.99.0" },
+	} {
+		other := canonical
+		other.Concurrency = append([]int(nil), canonical.Concurrency...)
+		mutate(&other)
+		if canonical.Equal(other) || other.Equal(canonical) {
+			t.Errorf("parameters differing in %s must not be equal", name)
 		}
 	}
+}
 
-	// The report prints the ladder in recorded order, so a reordered list is a
-	// different statement of the protocol, not the same one.
-	reordered := canonical
-	reordered.Concurrency = []int{100, 10, 1}
-	if got := canonical.ConflictsWith(reordered); len(got) != 1 {
-		t.Errorf("a reordered concurrency list must conflict, got %v", got)
+// Each unit answers for its own protocol (#377). The top level stands in only
+// for a snapshot that records no unit at all, as it does for provenance.
+func TestUnitRunParamsIsPerUnit(t *testing.T) {
+	canonical := RunParams{Concurrency: []int{1, 10}, Trials: 5, DurationSeconds: 30, WarmupSeconds: 10, BenchmarkTool: "k6"}
+	reduced := RunParams{Concurrency: []int{1}, Trials: 1, DurationSeconds: 5, WarmupSeconds: 1, BenchmarkTool: "k6"}
+
+	legacy := Metadata{Concurrency: canonical.Concurrency, Trials: 5, DurationSeconds: 30, WarmupSeconds: 10, BenchmarkTool: "k6"}
+	if got, ok := legacy.UnitRunParams(GroupCRUD, "gombit:crud-list"); !ok || !got.Equal(canonical) {
+		t.Errorf("a snapshot recording no unit must fall back to its top level, got %+v, %v", got, ok)
+	}
+	if _, ok := (Metadata{}).UnitRunParams(GroupCRUD, "gombit:crud-list"); ok {
+		t.Error("a snapshot recording nothing has no protocol to report")
 	}
 
-	// A partial record (collect-host-info given only -trials) compares its zeros
-	// as values and fails closed.
-	partial := RunParams{Trials: 5}
-	if got := partial.ConflictsWith(canonical); len(got) != 4 {
-		t.Errorf("a partial record must conflict on every field it leaves at zero, got %v", got)
+	// The top level now says "reduced", written by the last run; neither unit
+	// was measured under it.
+	m := Metadata{Concurrency: reduced.Concurrency, Trials: 1, DurationSeconds: 5, WarmupSeconds: 1, BenchmarkTool: "k6"}
+	listParams := canonical
+	m = StampUnit(m, GroupCRUD, "gombit:crud-list", Provenance{GitCommit: "a", Protocol: &listParams})
+	m = StampUnit(m, GroupCRUD, "rails:crud-list", Provenance{GitCommit: "a"})
+	if got, ok := m.UnitRunParams(GroupCRUD, "gombit:crud-list"); !ok || !got.Equal(canonical) {
+		t.Errorf("a unit must report its own protocol, not the top level's, got %+v, %v", got, ok)
+	}
+	if _, ok := m.UnitRunParams(GroupCRUD, "rails:crud-list"); ok {
+		t.Error("a unit stamped without a protocol must report none, not borrow the top level")
+	}
+	if _, ok := m.UnitRunParams(GroupCRUD, "django:crud-list"); ok {
+		t.Error("an unrecorded unit must not borrow the rewritable top level")
+	}
+}
+
+// A snapshot written before protocols were per unit described every CRUD unit
+// with the top-level parameters. The first producer to rewrite the top level
+// must file that on each unit first, or the next run would leave those rows
+// with no protocol at all.
+func TestMergeFilesTheLegacyProtocolOnEveryCRUDUnitBeforeTheTopLevelMoves(t *testing.T) {
+	canonical := RunParams{Concurrency: []int{1, 10}, Trials: 5, DurationSeconds: 30, WarmupSeconds: 10, BenchmarkTool: "k6"}
+	existing := Metadata{Concurrency: canonical.Concurrency, Trials: 5, DurationSeconds: 30, WarmupSeconds: 10, BenchmarkTool: "k6"}
+	existing = StampUnit(existing, GroupCRUD, "rails:crud-list", Provenance{GitCommit: "a"})
+	existing = StampUnit(existing, GroupMicrobench, "gin", Provenance{GitCommit: "a"})
+
+	reduced := RunParams{Concurrency: []int{1}, Trials: 1, DurationSeconds: 5, WarmupSeconds: 0, BenchmarkTool: "k6"}
+	incoming := Metadata{Concurrency: reduced.Concurrency, Trials: 1, DurationSeconds: 5, BenchmarkTool: "k6"}
+	incoming = StampUnit(incoming, GroupCRUD, "gombit:auth-jwt", Provenance{GitCommit: "b", Protocol: &reduced})
+
+	merged := Merge(existing, incoming)
+	if got, ok := merged.UnitRunParams(GroupCRUD, "rails:crud-list"); !ok || !got.Equal(canonical) {
+		t.Errorf("the legacy unit must keep the protocol it was measured under, got %+v, %v", got, ok)
+	}
+	if got, ok := merged.UnitRunParams(GroupCRUD, "gombit:auth-jwt"); !ok || !got.Equal(reduced) {
+		t.Errorf("the incoming unit must keep its own protocol, got %+v, %v", got, ok)
+	}
+	if merged.Groups[GroupMicrobench]["gin"].Protocol != nil {
+		t.Error("the top-level protocol never described microbench rows and must not be filed on them")
+	}
+	if !merged.RunParams().Equal(reduced) {
+		t.Errorf("the top level is still last-writer-wins for older readers, got %+v", merged.RunParams())
+	}
+}
+
+func TestProtocolIsOmittedFromJSONUntilRecorded(t *testing.T) {
+	m := StampUnit(Metadata{}, GroupMicrobench, "gin", Provenance{GitCommit: "a"})
+	var b strings.Builder
+	if err := WriteJSON(&b, m); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(b.String(), `"protocol"`) {
+		t.Errorf("a unit with no protocol must not serialize one:\n%s", b.String())
+	}
+
+	params := RunParams{Concurrency: []int{1, 10}, Trials: 2, DurationSeconds: 3, WarmupSeconds: 0, BenchmarkTool: "k6"}
+	m = StampUnit(m, GroupCRUD, "gombit:crud-list", Provenance{GitCommit: "a", Protocol: &params})
+	b.Reset()
+	if err := WriteJSON(&b, m); err != nil {
+		t.Fatal(err)
+	}
+	back, err := ReadJSON(strings.NewReader(b.String()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := back.UnitRunParams(GroupCRUD, "gombit:crud-list"); !ok || !got.Equal(params) {
+		t.Errorf("a unit's protocol must round-trip, got %+v, %v\n%s", got, ok, b.String())
+	}
+}
+
+// Protocol is reported per unit on its own; it is not part of "same source,
+// machine and toolchain".
+func TestComparableToIgnoresProtocol(t *testing.T) {
+	a, b := RunParams{Trials: 5}, RunParams{Trials: 1}
+	if !(Provenance{GitCommit: "x", Protocol: &a}).ComparableTo(Provenance{GitCommit: "x", Protocol: &b}) {
+		t.Error("units at one commit, host and toolchain must stay comparable whatever their protocols")
 	}
 }
 
@@ -606,8 +651,8 @@ func TestRunParamsRecorded(t *testing.T) {
 
 func TestMetadataRunParamsReadsTheTopLevelFields(t *testing.T) {
 	m := Metadata{Concurrency: []int{10}, Trials: 2, DurationSeconds: 3, WarmupSeconds: 4, BenchmarkTool: "k6"}
-	if diffs := m.RunParams().ConflictsWith(RunParams{Concurrency: []int{10}, Trials: 2, DurationSeconds: 3, WarmupSeconds: 4, BenchmarkTool: "k6"}); diffs != nil {
-		t.Errorf("RunParams must mirror the recorded fields, got %v", diffs)
+	if want := (RunParams{Concurrency: []int{10}, Trials: 2, DurationSeconds: 3, WarmupSeconds: 4, BenchmarkTool: "k6"}); !m.RunParams().Equal(want) {
+		t.Errorf("RunParams must mirror the recorded fields, got %+v", m.RunParams())
 	}
 }
 

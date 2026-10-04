@@ -61,7 +61,20 @@
         "cpu_model": "Intel(R) Core(TM) i5-8250U CPU @ 1.60GHz",
         "logical_cpus": 8,
         "ram_bytes": 7690293248,
-        "go_version": "go1.27.0"
+        "go_version": "go1.27.0",
+        "protocol": {
+          "concurrency": [
+            1,
+            10,
+            100,
+            500,
+            1000
+          ],
+          "trials": 5,
+          "duration_seconds": 30,
+          "warmup_seconds": 10,
+          "benchmark_tool": "grafana/k6:0.55.0"
+        }
       },
       "gin-gorm:crud-list": {
         "timestamp": "2026-08-27T21:57:34Z",
@@ -73,7 +86,20 @@
         "cpu_model": "Intel(R) Core(TM) i5-8250U CPU @ 1.60GHz",
         "logical_cpus": 8,
         "ram_bytes": 7690293248,
-        "go_version": "go1.27.0"
+        "go_version": "go1.27.0",
+        "protocol": {
+          "concurrency": [
+            1,
+            10,
+            100,
+            500,
+            1000
+          ],
+          "trials": 5,
+          "duration_seconds": 30,
+          "warmup_seconds": 10,
+          "benchmark_tool": "grafana/k6:0.55.0"
+        }
       },
       "gombit:crud-list": {
         "timestamp": "2026-08-27T21:57:34Z",
@@ -85,7 +111,20 @@
         "cpu_model": "Intel(R) Core(TM) i5-8250U CPU @ 1.60GHz",
         "logical_cpus": 8,
         "ram_bytes": 7690293248,
-        "go_version": "go1.27.0"
+        "go_version": "go1.27.0",
+        "protocol": {
+          "concurrency": [
+            1,
+            10,
+            100,
+            500,
+            1000
+          ],
+          "trials": 5,
+          "duration_seconds": 30,
+          "warmup_seconds": 10,
+          "benchmark_tool": "grafana/k6:0.55.0"
+        }
       },
       "laravel:crud-list": {
         "timestamp": "2026-08-27T21:57:34Z",
@@ -97,7 +136,20 @@
         "cpu_model": "Intel(R) Core(TM) i5-8250U CPU @ 1.60GHz",
         "logical_cpus": 8,
         "ram_bytes": 7690293248,
-        "go_version": "go1.27.0"
+        "go_version": "go1.27.0",
+        "protocol": {
+          "concurrency": [
+            1,
+            10,
+            100,
+            500,
+            1000
+          ],
+          "trials": 5,
+          "duration_seconds": 30,
+          "warmup_seconds": 10,
+          "benchmark_tool": "grafana/k6:0.55.0"
+        }
       },
       "nestjs:crud-list": {
         "timestamp": "2026-08-27T21:57:34Z",
@@ -109,7 +161,20 @@
         "cpu_model": "Intel(R) Core(TM) i5-8250U CPU @ 1.60GHz",
         "logical_cpus": 8,
         "ram_bytes": 7690293248,
-        "go_version": "go1.27.0"
+        "go_version": "go1.27.0",
+        "protocol": {
+          "concurrency": [
+            1,
+            10,
+            100,
+            500,
+            1000
+          ],
+          "trials": 5,
+          "duration_seconds": 30,
+          "warmup_seconds": 10,
+          "benchmark_tool": "grafana/k6:0.55.0"
+        }
       },
       "rails:crud-list": {
         "timestamp": "2026-08-27T21:57:34Z",
@@ -121,7 +186,20 @@
         "cpu_model": "Intel(R) Core(TM) i5-8250U CPU @ 1.60GHz",
         "logical_cpus": 8,
         "ram_bytes": 7690293248,
-        "go_version": "go1.27.0"
+        "go_version": "go1.27.0",
+        "protocol": {
+          "concurrency": [
+            1,
+            10,
+            100,
+            500,
+            1000
+          ],
+          "trials": 5,
+          "duration_seconds": 30,
+          "warmup_seconds": 10,
+          "benchmark_tool": "grafana/k6:0.55.0"
+        }
       }
     },
     "footprint": {

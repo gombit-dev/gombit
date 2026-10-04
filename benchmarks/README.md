@@ -260,10 +260,10 @@ summaries under `raw/<framework>_<benchmark>_c<concurrency>_t<trial>.json`) —
 re-running one framework's workload replaces those rows and rewrites only that
 workload's raw summaries, while
 other frameworks and workloads are kept, so running each in turn
-accumulates all six. The protocol and load generator are recorded once per
-snapshot, so a run whose values differ from the recorded ones is refused, with
-nothing modified, while rows it does not replace remain (use a separate
-`OUT_DIR`, or start the snapshot over). Producers do not lock `OUT_DIR`, so run
+accumulates all six. Each app's workload records the protocol and load
+generator it ran under, so apps and workloads with different pins share one
+snapshot and the README names each one's protocol when they differ. Producers
+do not lock `OUT_DIR`, so run
 one at a time per directory. A trial that sends no traffic, has any
 HTTP error, or fails a content check (a 200 with the wrong page shape) fails the
 command loudly **with

@@ -18,12 +18,17 @@ func WriteJSON(w io.Writer, m Metadata) error {
 
 // ReadJSON decodes a metadata.json. It is the inverse of WriteJSON, used by the
 // producers that merge into an existing snapshot rather than replacing it.
+//
+// A CRUD unit recorded before protocols were per unit is read with the
+// top-level protocol filed on it (Metadata.WithLegacyProtocols), so every
+// producer sees the same answer the report does, and records it before
+// rewriting the top level.
 func ReadJSON(r io.Reader) (Metadata, error) {
 	var m Metadata
 	if err := json.NewDecoder(r).Decode(&m); err != nil {
 		return Metadata{}, err
 	}
-	return m, nil
+	return m.WithLegacyProtocols(), nil
 }
 
 // ReadFile returns the metadata.json at path. It is the one way every producer

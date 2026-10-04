@@ -7,9 +7,10 @@
 //	go run ./benchmarks/scripts/collect-host-info -out benchmarks/results/latest/metadata.json
 //
 // It measures nothing itself, so it never files a per-unit provenance entry and
-// never deletes one: per-unit provenance is written by the producers that write
-// the rows (scripts/microbench, scripts/footprint, scripts/run-crud), and this
-// command carries whatever they recorded across its whole-snapshot rewrite.
+// never deletes or rewrites one, a CRUD unit's protocol included: per-unit
+// provenance is written by the producers that write the rows
+// (scripts/microbench, scripts/footprint, scripts/run-crud), and this command
+// carries whatever they recorded across its whole-snapshot rewrite.
 package main
 
 import (
@@ -82,23 +83,36 @@ func main() {
 // replace the record of measurements other producers did run (issue #266):
 //
 //   - Every unit's entry in Groups is carried forward unchanged.
+//
 //   - If the snapshot on disk records no unit at all, it predates per-unit
-//     provenance and its top-level block IS every row's provenance (see
-//     metadata.Metadata.UnitProvenance). That block is carried forward too:
-//     replacing it would re-caption every table with the commit and host of
-//     this collection. Once any unit is recorded, the top-level block describes
-//     no row, and this collection's own block is written as before.
+//     provenance and its top-level block and run parameters ARE every row's
+//     provenance and protocol (see metadata.Metadata.UnitProvenance and
+//     UnitRunParams). Both are carried forward too: replacing them would
+//     re-caption every table with the commit and host of this collection and
+//     re-describe its rows under parameters they never ran (#377). Once any unit
+//     is recorded, the top level describes no row, and this collection's own
+//     block and parameters are written as before.
+//
+//   - Each CRUD unit's protocol travels with its entry, so the run parameters
+//     this command writes at the top level never describe a recorded unit
+//     (#377). A unit stamped before protocols were per unit already has the
+//     top-level parameters filed on it by metadata.ReadFile.
 //
 // Nothing else is preserved. This target's existing behavior of replacing the
-// version maps, limit verdicts and run parameters is untouched here — changing
-// that is a separate question from the provenance invariant.
+// version maps, limit verdicts and top-level run parameters is untouched here —
+// changing that is a separate question from the provenance invariant.
 func carryGroups(path string, collected metadata.Metadata) (metadata.Metadata, error) {
 	existing, err := metadata.ReadFile(path)
 	if err != nil {
 		return metadata.Metadata{}, err
 	}
-	if !existing.RecordsUnits() && !existing.Provenance().Empty() {
-		collected = collected.WithProvenance(existing.Provenance())
+	if !existing.RecordsUnits() {
+		if !existing.Provenance().Empty() {
+			collected = collected.WithProvenance(existing.Provenance())
+		}
+		if existing.RunParams().Recorded() {
+			collected = collected.WithRunParams(existing.RunParams())
+		}
 	}
 	for group, units := range existing.Groups {
 		for unit, prov := range units {
