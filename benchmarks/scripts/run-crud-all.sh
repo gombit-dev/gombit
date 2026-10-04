@@ -27,6 +27,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
+# shellcheck source=/dev/null
+source benchmarks/scripts/host-class.sh
 
 CONFIG="benchmarks/config/versions.env"
 
@@ -207,6 +209,9 @@ run_one() {
 }
 
 main() {
+  # Refuse a mistyped declaration before any app is built or seeded; run-crud
+  # would only refuse it per app, after that work.
+  check_host_class
   echo "run-crud-all: ensuring postgres is up"
   "${COMPOSE[@]}" up -d postgres >/dev/null
   verify_postgres_limits

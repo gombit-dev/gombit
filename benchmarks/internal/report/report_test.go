@@ -233,7 +233,7 @@ func TestDirtyTreeStampsUnpublishable(t *testing.T) {
 
 func TestCanonicalCleanRunHasNoBanner(t *testing.T) {
 	out := Render(nil, nil, nil, canonicalMeta())
-	for _, unwanted := range []string{"UNPUBLISHABLE", "Reduced development snapshot"} {
+	for _, unwanted := range []string{"UNPUBLISHABLE", "Reduced development snapshot", hostBanner} {
 		if strings.Contains(out, unwanted) {
 			t.Errorf("a clean canonical run must carry no %q banner:\n%s", unwanted, out)
 		}
@@ -602,10 +602,13 @@ func TestDirtyUnitStampsUnpublishableAndNamesOnlyThatGroupsTarget(t *testing.T) 
 	if !strings.Contains(banner, "UNPUBLISHABLE DEVELOPMENT RUN") {
 		t.Errorf("a unit measured on a dirty tree must stamp the block unpublishable:\n%s", banner)
 	}
-	if !strings.Contains(banner, "`make benchmark-micro benchmark-report`") {
+	// Judged on the dirty callout alone: the host-class callout below it names
+	// its own targets.
+	remedy := lineWith(banner, "dirty working tree")
+	if !strings.Contains(remedy, "`make benchmark-micro benchmark-report`") {
 		t.Errorf("remediation must name the dirty unit's group target:\n%s", banner)
 	}
-	if strings.Contains(banner, "benchmark-crud-all") {
+	if strings.Contains(remedy, "benchmark-crud-all") {
 		t.Errorf("remediation must not prescribe re-running the clean CRUD sweep:\n%s", banner)
 	}
 }
@@ -648,6 +651,117 @@ func TestDirtyTopLevelStillPrescribesTheWholeChain(t *testing.T) {
 		if banner := bannerOf(Render(nil, nil, nil, meta)); !strings.Contains(banner, rerunChain) {
 			t.Errorf("%s: must fall back to the full rerun chain:\n%s", name, banner)
 		}
+	}
+}
+
+const hostBanner = "Not measured on dedicated hardware"
+
+// dedicatedMeta is canonicalMeta with every unit the tables below publish
+// stamped as measured on a declared dedicated host at one clean commit.
+func dedicatedMeta(crudFrameworks ...string) metadata.Metadata {
+	meta := canonicalMeta()
+	clean := false
+	prov := metadata.Provenance{GitCommit: "abc123def456", GitDirty: &clean, HostClass: metadata.HostClassDedicated}
+	for _, s := range stackLadder {
+		meta = metadata.StampUnit(meta, metadata.GroupMicrobench, s.key, prov)
+	}
+	for _, fw := range crudFrameworks {
+		meta = metadata.StampUnit(meta, metadata.GroupCRUD, crudUnit(fw), prov)
+	}
+	return meta
+}
+
+// Issue #291: the canonical protocol on a clean tree used to publish
+// banner-free from a developer laptop. A unit that does not declare a dedicated
+// host must stamp the block, and saying nothing is not a declaration.
+func TestUndeclaredHostIsNotPublishedAsCanonical(t *testing.T) {
+	meta := canonicalMeta()
+	clean := false
+	for _, s := range stackLadder {
+		meta = metadata.StampUnit(meta, metadata.GroupMicrobench, s.key, metadata.Provenance{GitCommit: "abc123def456", GitDirty: &clean})
+	}
+	banner := bannerOf(Render(nil, nil, taxLadder(), meta))
+	if !strings.Contains(banner, hostBanner) {
+		t.Fatalf("a canonical clean run with no declared host class must be labelled:\n%s", banner)
+	}
+	for _, want := range []string{"`undeclared`", "BENCHMARK_HOST_CLASS=dedicated", "`make benchmark-micro benchmark-report`"} {
+		if !strings.Contains(banner, want) {
+			t.Errorf("host banner missing %q:\n%s", want, banner)
+		}
+	}
+}
+
+func TestDedicatedHostRunHasNoHostBanner(t *testing.T) {
+	meta := dedicatedMeta("rails")
+	// A unit no table publishes (the ablation ladder) says nothing about the
+	// numbers on the page, whatever host it ran on.
+	meta = metadata.StampUnit(meta, metadata.GroupMicrobench, "gombit-ablation", metadata.Provenance{HostClass: metadata.HostClassDeveloper})
+	out := Render([]result.Result{crudRow("rails", 100, 1, 900, 5, 10, 20)}, nil, taxLadder(), meta)
+	if banner := bannerOf(out); banner != "" {
+		t.Errorf("a clean canonical run on a declared dedicated host must carry no banner:\n%s", banner)
+	}
+}
+
+// One developer-host unit stamps the block and names only its group's target
+// and its own class.
+func TestDeveloperUnitNamesOnlyItsGroup(t *testing.T) {
+	meta := dedicatedMeta("rails")
+	clean := false
+	meta = metadata.StampUnit(meta, metadata.GroupMicrobench, "gin", metadata.Provenance{
+		GitCommit: "abc123def456", GitDirty: &clean, HostClass: metadata.HostClassDeveloper,
+	})
+	banner := bannerOf(Render([]result.Result{crudRow("rails", 100, 1, 900, 5, 10, 20)}, nil, taxLadder(), meta))
+	remedy := lineWith(banner, "dedicated benchmark hardware")
+	if remedy == "" {
+		t.Fatalf("a developer-host unit must stamp the block:\n%s", banner)
+	}
+	if !strings.Contains(remedy, "`developer`") || strings.Contains(remedy, "`undeclared`") {
+		t.Errorf("banner must name exactly the recorded class:\n%s", banner)
+	}
+	if !strings.Contains(remedy, "`make benchmark-micro benchmark-report`") || strings.Contains(remedy, "benchmark-crud-all") {
+		t.Errorf("banner must prescribe only the developer unit's group:\n%s", banner)
+	}
+}
+
+// An unrecognised class (a hand-edited or older metadata.json) still stamps the
+// block, but is never pasted into the Markdown, where a backtick or newline
+// would break it.
+func TestUnrecognisedHostClassIsNotEchoed(t *testing.T) {
+	meta := dedicatedMeta()
+	clean := false
+	meta = metadata.StampUnit(meta, metadata.GroupMicrobench, "gin", metadata.Provenance{
+		GitCommit: "abc123def456", GitDirty: &clean, HostClass: "dedicated`\n> injected",
+	})
+	banner := bannerOf(Render(nil, nil, taxLadder(), meta))
+	if !strings.Contains(banner, "recorded host class: an unrecognised value") {
+		t.Errorf("an unrecognised class must stamp the block and be named as such:\n%s", banner)
+	}
+	if strings.Contains(banner, "injected") {
+		t.Errorf("the raw class was echoed into the Markdown:\n%s", banner)
+	}
+}
+
+// collect-host-info rewrites the top level without measuring anything, so a
+// dedicated top level must not vouch for units recorded without a class. A
+// snapshot that records no unit at all is still judged by its top level.
+func TestHostClassIsJudgedPerUnitNotByTheTopLevel(t *testing.T) {
+	clean := false
+	rewritten := canonicalMeta()
+	rewritten.HostClass = metadata.HostClassDedicated
+	for _, s := range stackLadder {
+		rewritten = metadata.StampUnit(rewritten, metadata.GroupMicrobench, s.key, metadata.Provenance{GitCommit: "abc123def456", GitDirty: &clean})
+	}
+	if banner := bannerOf(Render(nil, nil, taxLadder(), rewritten)); !strings.Contains(banner, hostBanner) {
+		t.Errorf("a dedicated top level must not vouch for undeclared units:\n%s", banner)
+	}
+
+	legacy := canonicalMeta()
+	if banner := bannerOf(Render(nil, nil, taxLadder(), legacy)); !strings.Contains(banner, hostBanner) {
+		t.Errorf("a pre-groups snapshot with no host class must be labelled:\n%s", banner)
+	}
+	legacy.HostClass = metadata.HostClassDedicated
+	if banner := bannerOf(Render(nil, nil, taxLadder(), legacy)); strings.Contains(banner, hostBanner) {
+		t.Errorf("a pre-groups snapshot is judged by its declared top level:\n%s", banner)
 	}
 }
 

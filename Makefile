@@ -33,6 +33,13 @@ OUT_DIR ?= benchmarks/results/latest
 # applied verdict per app (via inspect-limits).
 INTENDED_LIMITS ?= intended (applied only under benchmark-crud-all): app $(APP_CPUS)cpu/$(APP_MEMORY); postgres $(POSTGRES_CPUS)cpu/$(POSTGRES_MEMORY)
 
+# BENCHMARK_HOST_CLASS declares the host a run measures on: dedicated, developer,
+# or unset (issue #291; benchmarks/docs/methodology.md). Every measuring target
+# checks it before its first stage, so a typo fails now rather than in the README
+# banner after the run. host-class.sh holds the allowed set; a Go test keeps it
+# equal to the one the producers enforce (metadata.HostClasses).
+CHECK_HOST_CLASS = bash benchmarks/scripts/host-class.sh
+
 .PHONY: help test-faults test-chaos benchmark benchmark-smoke benchmark-crud benchmark-crud-all benchmark-micro benchmark-micro-ablation benchmark-footprint benchmark-summary benchmark-metadata benchmark-report benchmark-report-check
 
 ## help: list the benchmark targets (the default goal — a bare `make` prints
@@ -58,14 +65,15 @@ test-chaos:
 	go test -tags chaos -race -count=1 -timeout 60m -v ./internal/chaos
 
 ## benchmark: run the whole suite end to end into OUT_DIR and regenerate the
-## README ## Performance block + summary.md — the one-command dedicated-host
-## run. The CRUD pins come from versions.env (concurrency 1/10/100/500/1000,
-## 5 trials x 30s, 10s warm-up); the cold-start count is footprint-all.sh's
-## COLD_START_RUNS default (20). Narrow any on the command line for a reduced
-## run, e.g.
+## README ## Performance block + summary.md. The CRUD pins come from
+## versions.env (concurrency 1/10/100/500/1000, 5 trials x 30s, 10s warm-up);
+## the cold-start count is footprint-all.sh's COLD_START_RUNS default (20).
+## Only a run declared on dedicated hardware is canonical; without the
+## declaration the README block is stamped "Not measured on dedicated hardware".
+## Narrow any pin on the command line for a reduced run, e.g.
 ##
-##   make benchmark                          # canonical
-##   make benchmark CONCURRENCY=1,10,100      # reduced sweep (unsustained 1000)
+##   BENCHMARK_HOST_CLASS=dedicated make benchmark   # canonical (dedicated host)
+##   make benchmark CONCURRENCY=1,10,100             # reduced dev sweep (unsustained 1000)
 ##
 ## Each step is invoked via $(MAKE) so they run strictly in order (they share the
 ## compose stack and OUT_DIR) even under `make -j`. Bring a fresh Postgres up
@@ -73,6 +81,7 @@ test-chaos:
 ##   docker compose --env-file $(BENCH_CONFIG) -f benchmarks/compose.yml down -v && \
 ##     docker compose --env-file $(BENCH_CONFIG) -f benchmarks/compose.yml up -d postgres
 benchmark:
+	@$(CHECK_HOST_CLASS)
 	$(MAKE) benchmark-crud-all
 	$(MAKE) benchmark-footprint
 	$(MAKE) benchmark-micro
@@ -113,6 +122,7 @@ MICRO_COUNT ?= 10
 ## for the report. Each stack is its own `go test` process (a framework.App
 ## constructor mutates a process global), piped through the microbench parser.
 benchmark-micro:
+	@$(CHECK_HOST_CLASS)
 	@mkdir -p "$(OUT_DIR)"
 	@rm -f "$(OUT_DIR)/microbench.json"
 	bash -c 'set -euo pipefail; for s in nethttp gin huma gombit; do \
@@ -137,6 +147,7 @@ benchmark-micro:
 ##   make benchmark-micro-ablation
 ##   go test ./framework -run='^$' -bench='^BenchmarkAblation$' -benchmem -count=10   # without persisting
 benchmark-micro-ablation:
+	@$(CHECK_HOST_CLASS)
 	@mkdir -p "$(OUT_DIR)"
 	bash -c 'set -euo pipefail; \
 		echo "benchmark-micro-ablation: gombit"; \
@@ -172,6 +183,7 @@ benchmark-report-check:
 ##   make benchmark-footprint
 ##   make benchmark-footprint COLD_START_RUNS=3 APPS=gin-gorm   # smoke
 benchmark-footprint:
+	@$(CHECK_HOST_CLASS)
 	OUT_DIR="$(OUT_DIR)" bash benchmarks/scripts/footprint-all.sh
 
 ## benchmark-crud-all: bring every containerized implementation up under compose
@@ -185,6 +197,7 @@ benchmark-footprint:
 ##   make benchmark-crud-all
 ##   make benchmark-crud-all CONCURRENCY=1 TRIALS=1 DURATION_SECONDS=3   # smoke
 benchmark-crud-all:
+	@$(CHECK_HOST_CLASS)
 	OUT_DIR="$(OUT_DIR)" bash benchmarks/scripts/run-crud-all.sh
 
 ## benchmark-crud: run the headline CRUD-read workload against one running,
@@ -198,6 +211,7 @@ benchmark-crud-all:
 benchmark-crud:
 	@test -n "$(TARGET_URL)" || { echo "error: set TARGET_URL=<app list endpoint>"; exit 1; }
 	@test -n "$(FRAMEWORK)" || { echo "error: set FRAMEWORK=<name>"; exit 1; }
+	@$(CHECK_HOST_CLASS)
 	go run ./benchmarks/scripts/run-crud \
 		-target-url "$(TARGET_URL)" \
 		-framework "$(FRAMEWORK)" -framework-version "$(FRAMEWORK_VERSION)" \
@@ -223,6 +237,7 @@ benchmark-summary:
 ## benchmark-metadata: write just the reproducibility metadata for the current
 ## host and pinned run configuration to OUT_DIR/metadata.json.
 benchmark-metadata:
+	@$(CHECK_HOST_CLASS)
 	@mkdir -p "$(OUT_DIR)"
 	go run ./benchmarks/scripts/collect-host-info \
 		-out "$(OUT_DIR)/metadata.json" \

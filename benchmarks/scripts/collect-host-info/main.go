@@ -36,6 +36,9 @@ func main() {
 	runtimeVersions := flag.String("runtime-versions", "", "comma-separated runtime=version pairs, e.g. 'go=1.26.0,node=24'")
 	flag.Parse()
 
+	if err := metadata.CheckHostClassEnv(); err != nil {
+		fatalf("%v", err)
+	}
 	concurrencyLevels, err := parseIntList(*concurrency)
 	if err != nil {
 		fatalf("-concurrency: %v", err)

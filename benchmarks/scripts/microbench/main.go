@@ -40,6 +40,10 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintln(stderr, "microbench: -stack is required")
 		return 2
 	}
+	if err := metadata.CheckHostClassEnv(); err != nil {
+		_, _ = fmt.Fprintf(stderr, "microbench: %v\n", err)
+		return 2
+	}
 
 	rows, err := microbench.ParseBenchOutput(*stack, stdin)
 	if err != nil {

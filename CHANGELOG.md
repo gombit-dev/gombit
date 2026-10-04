@@ -265,7 +265,16 @@ version.
   is armed before the handler's context is created, so it always expired
   first and the client saw the connection close (`EOF`). `WriteTimeout` is now
   the request timeout plus 5s; with the timeout unset the server timeouts are
-  unchanged ([#430](https://github.com/gombit-dev/gombit/issues/430)).
+- The benchmark report no longer publishes a snapshot from a developer host
+  as if it were the canonical run. A clean tree on the canonical protocol used
+  to render with no banner whatever machine ran it. Each measured unit now
+  records the operator's `BENCHMARK_HOST_CLASS` declaration as `host_class`,
+  and `make benchmark-report` stamps the README block "Not measured on
+  dedicated hardware" unless every published unit declares `dedicated`. An
+  undeclared host counts as not dedicated, so the committed snapshot now
+  carries the banner. The declaration must be `dedicated`, `developer` or
+  unset; the `make benchmark-*` targets and every producer refuse any other
+  value before measuring ([#291](https://github.com/gombit-dev/gombit/issues/291)).
 
 ## [0.6.0] — 2026-09-28
 

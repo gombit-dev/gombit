@@ -28,13 +28,16 @@ results/
 later parser fix can reconstruct the numbers; each is named for the framework
 and workload whose rows it backs, so recording one workload never overwrites
 another's evidence), so the published README
-performance tables are always regenerable from a committed snapshot. The current
-committed snapshot is a **reduced run on a single developer host** (a contended
-WSL2 laptop, not dedicated benchmark hardware) — `metadata.json` records the exact
-host, kernel, and the protocol that ran (concurrency levels, trials, duration),
-and the generated README block prints them so the numbers can't be mistaken for
-the canonical sweep. Re-running the full sweep on quiet, dedicated hardware and
-committing that snapshot remains open. The orchestration that fills `latest/`:
+performance tables are always regenerable from a committed snapshot. This page
+deliberately does not describe the committed snapshot, so it cannot drift from
+it: `metadata.json` records the protocol that ran (concurrency levels, trials,
+duration) and, per measured unit, the commit, host, kernel and declared host
+class, and the generated README block prints them and stamps any snapshot that
+falls short of the canonical protocol, a clean tree, or a declared dedicated host
+(see [methodology.md](../docs/methodology.md#dedicated-hardware-is-declared-not-inferred)).
+Re-running the full sweep on quiet, dedicated hardware
+(`BENCHMARK_HOST_CLASS=dedicated make benchmark`) and committing that snapshot
+remains open. The orchestration that fills `latest/`:
 `make benchmark-crud-all` (CRUD throughput across all six apps),
 `make benchmark-footprint` (cold-start/RSS/CPU → `footprint.json`),
 `make benchmark-micro` (framework tax → `microbench.json`), and

@@ -2,7 +2,12 @@ package metadata
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"regexp"
 	"runtime"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -292,6 +297,11 @@ func TestComparableToIgnoresTimestampButNotTheRest(t *testing.T) {
 	if !base.ComparableTo(later) {
 		t.Error("units of one run differing only in clock time must be comparable")
 	}
+	declared := base
+	declared.HostClass = HostClassDedicated
+	if !base.ComparableTo(declared) {
+		t.Error("units differing only in their host-class declaration must be comparable")
+	}
 	for name, other := range map[string]Provenance{
 		"commit":    {GitCommit: "bbbb2222", GitDirty: &clean, CPUModel: "Host", GoVersion: "go1.26.1"},
 		"host":      {GitCommit: "aaaa1111", GitDirty: &clean, CPUModel: "Other", GoVersion: "go1.26.1"},
@@ -381,6 +391,75 @@ func TestAnyUnitDirtyJudgesOnlyTheGivenUnits(t *testing.T) {
 	legacy := Metadata{GitDirty: &dirty}
 	if !legacy.AnyUnitDirty(GroupCRUD, []string{"rails"}) {
 		t.Error("a snapshot with no recorded unit must be judged by its dirty top level")
+	}
+}
+
+// The declaration is a closed set matched exactly: a near miss is an error, so
+// it can be refused before a run rather than discovered in the banner.
+func TestParseHostClass(t *testing.T) {
+	for _, ok := range []string{"", HostClassDedicated, HostClassDeveloper} {
+		if got, err := ParseHostClass(ok); err != nil || got != ok {
+			t.Errorf("ParseHostClass(%q) = %q, %v; want it accepted", ok, got, err)
+		}
+	}
+	for _, bad := range []string{"Dedicated", "dedicaed", " dedicated", "laptop", "dedicated`", "dedicated\nx"} {
+		if _, err := ParseHostClass(bad); err == nil || !strings.Contains(err.Error(), HostClassEnv) {
+			t.Errorf("ParseHostClass(%q) err = %v, want a refusal naming %s", bad, err, HostClassEnv)
+		}
+	}
+	t.Setenv(HostClassEnv, "Dedicated")
+	if CheckHostClassEnv() == nil {
+		t.Error("CheckHostClassEnv accepted an invalid environment value")
+	}
+	t.Setenv(HostClassEnv, HostClassDeveloper)
+	if err := CheckHostClassEnv(); err != nil {
+		t.Errorf("CheckHostClassEnv(developer) = %v", err)
+	}
+}
+
+// Collect records a valid declaration, and records nothing when none was made
+// or the value is invalid (producers refuse those before measuring).
+func TestCollectRecordsTheDeclaredHostClass(t *testing.T) {
+	run := func(context.Context, string, ...string) (string, error) { return "", nil }
+	for env, want := range map[string]string{HostClassDedicated: HostClassDedicated, HostClassDeveloper: HostClassDeveloper, "": "", "laptop": ""} {
+		m := Collect(context.Background(), Options{Run: run, Getenv: func(key string) string {
+			if key != HostClassEnv {
+				t.Errorf("Getenv(%q), want %q", key, HostClassEnv)
+			}
+			return env
+		}})
+		if m.HostClass != want || m.Provenance().HostClass != want {
+			t.Errorf("env %q: HostClass = %q / provenance %q, want %q", env, m.HostClass, m.Provenance().HostClass, want)
+		}
+	}
+	m := Metadata{}.WithProvenance(Provenance{HostClass: HostClassDeveloper})
+	if m.HostClass != HostClassDeveloper {
+		t.Errorf("WithProvenance dropped HostClass: %q", m.HostClass)
+	}
+}
+
+// Only an explicit dedicated declaration is dedicated; an unrecorded unit, an
+// empty class and any other value are not, and units outside the given set are
+// not judged.
+func TestNonDedicatedUnitsFailsClosed(t *testing.T) {
+	m := Metadata{Groups: map[string]map[string]Provenance{
+		GroupCRUD: {
+			"rails":  {HostClass: HostClassDedicated},
+			"gombit": {HostClass: HostClassDeveloper},
+			"django": {},
+			"nest":   {HostClass: "Dedicated"},
+		},
+	}}
+	got := m.NonDedicatedUnits(GroupCRUD, []string{"rails", "gombit", "django", "nest", "laravel"})
+	if strings.Join(got, ",") != "gombit,django,nest,laravel" {
+		t.Errorf("NonDedicatedUnits = %v, want gombit,django,nest,laravel", got)
+	}
+	if got := m.NonDedicatedUnits(GroupCRUD, []string{"rails"}); len(got) != 0 {
+		t.Errorf("NonDedicatedUnits(rails) = %v, want none", got)
+	}
+	legacy := Metadata{HostClass: HostClassDedicated}
+	if got := legacy.NonDedicatedUnits(GroupCRUD, []string{"rails"}); len(got) != 0 {
+		t.Errorf("a snapshot with no recorded unit is judged by its top level; got %v", got)
 	}
 }
 
@@ -529,5 +608,31 @@ func TestMetadataRunParamsReadsTheTopLevelFields(t *testing.T) {
 	m := Metadata{Concurrency: []int{10}, Trials: 2, DurationSeconds: 3, WarmupSeconds: 4, BenchmarkTool: "k6"}
 	if diffs := m.RunParams().ConflictsWith(RunParams{Concurrency: []int{10}, Trials: 2, DurationSeconds: 3, WarmupSeconds: 4, BenchmarkTool: "k6"}); diffs != nil {
 		t.Errorf("RunParams must mirror the recorded fields, got %v", diffs)
+	}
+}
+
+// The Makefile and the orchestration scripts refuse a bad declaration before
+// measuring, from host-class.sh's own copy of the set. If the two drifted, make
+// would refuse a value the producers accept, or let through one that run-crud
+// refuses only after the first app is built and seeded.
+func TestHostClassShellListMatchesGo(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("..", "..", "scripts", "host-class.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`(?m)^host_classes=\((.*)\)$`).FindSubmatch(src)
+	if m == nil {
+		t.Fatal("host-class.sh: no host_classes=(...) line")
+	}
+	var shell []string
+	for _, field := range strings.Fields(string(m[1])) {
+		unquoted, err := strconv.Unquote(field)
+		if err != nil {
+			t.Fatalf("host-class.sh: entry %s is not a double-quoted string: %v", field, err)
+		}
+		shell = append(shell, unquoted)
+	}
+	if !slices.Equal(shell, HostClasses) {
+		t.Errorf("host-class.sh allows %q, metadata.HostClasses is %q", shell, HostClasses)
 	}
 }
