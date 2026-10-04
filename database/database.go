@@ -112,7 +112,7 @@ func open(driver Driver, dialector gorm.Dialector) (*DB, error) {
 
 	// Reject a decimal the column would not store exactly (issue #440) before
 	// the Validate hooks run, on the same create/update chains.
-	if err := registerDecimalCallback(gormDB, driver == DriverSQLite); err != nil {
+	if err := registerDecimalCallback(gormDB, driver); err != nil {
 		return nil, err
 	}
 	// Run model Validate hooks on every create/update, so a domain invariant

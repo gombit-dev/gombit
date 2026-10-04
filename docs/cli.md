@@ -411,12 +411,16 @@ Modifiers are `required`, `nullable` (the opposite of `required`), `unique`,
 | `has_many:Target` | `[]target.Target` | model-only, read via the admin; the child must carry the parent FK |
 | `many_to_many:Target` | `[]target.Target` (`many2many:` join) | model-only, edited via the admin |
 
-`types.Decimal` is exact on every driver. A value that does not fit its
+A decimal column never stores a value changed. Any value written to one, as a
+`types.Decimal` or as the string, number, or struct field a map or `Updates`
+carries, is refused with a 422 before it is written when it does not fit the
 column's `decimal(p,s)` (more than `p-s` digits before the point, or more than
-`s` after it, ignoring trailing zeros) is refused with a 422 before it is
-written, rather than rounded by PostgreSQL or MySQL. SQLite has no fixed-point
-type: its `decimal` column converts through float64, which keeps 15 significant
-digits, so on SQLite a decimal may carry **at most 15 significant digits**
+`s` after it, ignoring trailing zeros), rather than rounded by PostgreSQL or
+MySQL. A column declared without `(p,s)`, such as an untagged `types.Decimal`,
+is MySQL's `DECIMAL(10,0)` there (whole numbers only, so pin `(p,s)` for money)
+and an unbounded `numeric` on PostgreSQL. SQLite has no fixed-point type: its
+`decimal` column converts through float64, which keeps 15 significant digits,
+so on SQLite a decimal may carry **at most 15 digits**
 (`database.SQLiteDecimalDigits`) and a longer one is a 422 instead of being
 silently changed. `99999999999.9999` round-trips on every driver;
 `99999999999999.9999` fits `decimal(19,4)` on PostgreSQL and MySQL but is

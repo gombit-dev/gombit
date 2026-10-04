@@ -77,13 +77,22 @@ if err := db.First(&row, id).Error; err != nil {
 | `MapPersistError` | `*database.ValidationError` → `validation_error` (422, with its fields), including a decimal the column would not store exactly (below); unique / duplicate → `conflict` (409); foreign-key or NOT NULL violation → `validation_error` (422) | `internal` |
 | `MapDeleteError` | `database.ErrReferenced` or a foreign-key violation → `conflict` (409) | `internal` |
 
-Before every create and update, `database.Open` also checks each
-`types.Decimal` / `decimal.Decimal` field against its declared `decimal(p,s)`:
-a value with more digits than the column holds, before or after the point, is
-a `*database.ValidationError` naming the field, not a rounded or truncated
-write. On SQLite, which stores decimals through float64, a value with more
-than 15 significant digits (`database.SQLiteDecimalDigits`) is refused the same
-way. The check runs on the API and admin write paths alike.
+Before every create and update, `database.Open` also checks each value the
+statement assigns to a decimal column (a `types.Decimal` / `decimal.Decimal`
+field) against the column's `decimal(p,s)`: a value with more digits than the
+column holds, before or after the point, is a `*database.ValidationError`
+naming the field, not a rounded or truncated write. The check follows the
+columns written, not the Go values in reach: a create checks the rows (or map)
+it inserts; an update checks its map (`Updates(map)`, `Update(column, value)`)
+or the struct it writes (`Save`, `Updates(struct)`, any struct type, by column
+name), honoring `Select` and `Omit`, so an update that does not write a decimal
+column is never refused for the row's old value. Strings, numbers, and
+`json.Number` bound for a decimal column are checked like decimals; a SQL
+expression (`gorm.Expr`) is left to the database. A column declared without
+`(p,s)` has the driver's own default: `DECIMAL(10,0)` on MySQL, an unbounded
+`numeric` on PostgreSQL. On SQLite, which stores decimals through float64, a
+value with more than 15 digits (`database.SQLiteDecimalDigits`) is refused the
+same way. The check runs on the API and admin write paths alike.
 
 `IsUniqueViolation`, `IsForeignKeyViolation`, and `IsNotNullViolation` are the
 shared detectors behind those helpers; auth registration uses
@@ -188,8 +197,10 @@ Official multi-DB support is gated by the conformance suite under
 - migrate up / migrate down (Gombit-owned companion downs)
 - timestamps, nullable columns, unique constraints, indexes
 - decimal round-trip, and precision: a `decimal(19,4)` value round-trips
-  exactly, a value over the scale is refused on every driver, and one over 15
-  significant digits is refused on SQLite
+  exactly, a value over the scale is refused on every driver (on create and on
+  the update paths, whatever Go value carries it), one over 15 digits is
+  refused on SQLite, and an undeclared-precision decimal is MySQL's
+  `DECIMAL(10,0)`
 - CRUD, transactions, pagination (`Offset` / `Limit`)
 - relation deletion (`relation_deletion`): `ON DELETE` `RESTRICT` / `CASCADE` /
   `SET NULL` through `database.Delete`

@@ -25,7 +25,9 @@ import (
 // A database opened with database.Open refuses, with a 422-mapped
 // database.ValidationError, a value its column would not store exactly: one
 // that does not fit decimal(p,s), and on SQLite, which has no fixed-point type,
-// one with more than database.SQLiteDecimalDigits significant digits.
+// one with more than database.SQLiteDecimalDigits digits. Without a `type:`
+// tag the column is the driver's bare decimal, which on MySQL is
+// DECIMAL(10,0) (whole numbers only), so pin decimal(p,s) for money.
 type Decimal struct {
 	decimal.Decimal
 }

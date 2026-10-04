@@ -222,6 +222,58 @@ func TestConformanceSuite(t *testing.T) {
 				t.Fatalf("%s on %s stored as %s / %s, want it exactly", c.value, db.Driver(), loaded.Price, loaded.Discount)
 			}
 		}
+
+		// The update paths are checked by the column they assign, whatever Go
+		// value carries it: a string, a float, a struct of another type.
+		base := models.Item{Code: "dec-precision-update", Name: "decimal update", Price: decimal.RequireFromString("1"), Discount: types.Decimal{Decimal: decimal.RequireFromString("1")}}
+		if err := db.Create(&base).Error; err != nil {
+			t.Fatalf("Create base: %v", err)
+		}
+		refuse := func(label string, err error) {
+			t.Helper()
+			var ve *database.ValidationError
+			if !errors.As(err, &ve) {
+				t.Fatalf("%s on %s: error = %v, want a *database.ValidationError", label, db.Driver(), err)
+			}
+		}
+		target := db.Model(&models.Item{}).Where("id = ?", base.ID)
+		refuse("Update(price, string over scale)", target.Session(&gorm.Session{}).Update("price", "1.00005").Error)
+		refuse("Update(price, float over scale)", target.Session(&gorm.Session{}).Update("price", 3.00005).Error)
+		type priceDTO struct{ Price types.Decimal }
+		refuse("Updates(non-model struct over scale)", target.Session(&gorm.Session{}).Updates(priceDTO{Price: types.MustDecimal("2.00005")}).Error)
+		wide := "99999999999999.9999"
+		err := target.Session(&gorm.Session{}).Updates(map[string]any{"discount": wide}).Error
+		if sqlite {
+			refuse("Updates(map, 19 digits)", err)
+		} else {
+			if err != nil {
+				t.Fatalf("Updates(map, %s) on %s: %v", wide, db.Driver(), err)
+			}
+			var loaded models.Item
+			if err := db.First(&loaded, base.ID).Error; err != nil {
+				t.Fatalf("First: %v", err)
+			}
+			if !loaded.Discount.Equal(decimal.RequireFromString(wide)) {
+				t.Fatalf("discount on %s stored as %s, want %s exactly", db.Driver(), loaded.Discount, wide)
+			}
+		}
+
+		// A decimal with no declared precision is MySQL's DECIMAL(10,0): 1.5
+		// would be stored as 2 there, so it is refused; elsewhere it fits.
+		half := types.MustDecimal("1.5")
+		loose := models.Item{Code: "dec-precision-loose", Name: "decimal loose", Price: decimal.RequireFromString("1"), Discount: types.Decimal{Decimal: decimal.RequireFromString("1")}, Loose: &half}
+		err = db.Create(&loose).Error
+		if db.Driver() == database.DriverMySQL {
+			refuse("Create(untagged decimal 1.5)", err)
+		} else {
+			if err != nil {
+				t.Fatalf("Create(untagged decimal 1.5) on %s: %v", db.Driver(), err)
+			}
+			var loaded models.Item
+			if err := db.First(&loaded, loose.ID).Error; err != nil || loaded.Loose == nil || !loaded.Loose.Equal(half.Decimal) {
+				t.Fatalf("untagged decimal on %s stored as %v (%v), want 1.5", db.Driver(), loaded.Loose, err)
+			}
+		}
 	})
 
 	t.Run("crud", func(t *testing.T) {
