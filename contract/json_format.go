@@ -1,11 +1,11 @@
 package contract
 
 import (
-	"bytes"
 	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -19,42 +19,41 @@ const RequestIDHeader = "X-Request-Id"
 // encoded becomes.
 const encodeFailedMessage = "The server could not encode the response."
 
-// pooledEncoder is a buffer and the encoder bound to it, reused across
-// responses so encoding first costs no more allocations than Huma's default
-// (which builds an encoder per response).
+// pooledEncoder is a JSON encoder bound to a writer it can swap per response,
+// so a Gombit response costs no more allocations than Huma's default (which
+// builds an encoder per response) and needs no buffer of its own.
 type pooledEncoder struct {
-	buf bytes.Buffer
+	w   io.Writer
 	enc *json.Encoder
 }
 
+func (p *pooledEncoder) Write(b []byte) (int, error) { return p.w.Write(b) }
+
 var encoderPool = sync.Pool{New: func() any {
 	pe := &pooledEncoder{}
-	pe.enc = json.NewEncoder(&pe.buf)
+	pe.enc = json.NewEncoder(pe)
 	pe.enc.SetEscapeHTML(false)
 	return pe
 }}
 
-// maxPooledEncodeBuf bounds the buffer an encoder keeps between responses. A
-// larger body still reuses the encoder but drops the buffer afterwards, so it
-// costs one buffer allocation; bodies up to this size cost none.
-const maxPooledEncodeBuf = 64 << 10
-
-// JSONFormat is Huma's JSON format with one difference: the body is encoded in
-// full before anything is written (issue #442).
+// JSONFormat is Huma's JSON format, except that a body that cannot be encoded
+// is answered as an error instead of being handed back to Huma (issue #442).
 //
-// Huma sets the status and then marshals straight into the response. A value
-// encoding/json cannot encode (a time outside years 0..9999, a float holding
-// NaN or ±Inf) used to fail after the status was decided, so the client got
-// HTTP 200, Content-Type application/json, and the plain-text body "error
-// marshaling response", and every list page holding such a row did the same.
+// Huma sets the status and then marshals into the response; when marshalling
+// fails it writes the plain-text "error marshaling response" under that status
+// and panics. A value encoding/json cannot encode (a time outside years
+// 0..9999, a float holding NaN or ±Inf) therefore reached the client as HTTP
+// 200, Content-Type application/json, with that plain-text body, on every
+// endpoint and list page holding it.
 //
-// Encoding first means a failure is known before any body byte is sent. When
-// the writer proves it has not written yet, by reporting Written() == false
-// (Gin's does: it holds the status until the first byte), the failure is
-// answered with a 500 carrying the D10 internal envelope and the response's
-// request ID, and report is called with that ID and the encoding error. Any
-// other writer, including a net/http one that may already have sent Huma's
-// status, gets the error back to Huma as before.
+// encoding/json encodes the whole value before its single Write, so on such a
+// failure nothing has been written. When the writer can still change its
+// status, which Gin's does until the first byte, the failure is answered with
+// a 500 carrying the D10 internal envelope and the response's request ID, and
+// report is called with that ID and the encoding error. The writer must prove
+// it: it has to report Written() == false, and Status() == 500 once the 500 is
+// set. Any other writer, such as a net/http one that may already have sent
+// Huma's status, gets the error back to Huma as before.
 //
 // report may be nil, in which case the failure is logged with slog's default
 // logger: it is never dropped silently.
@@ -67,19 +66,16 @@ func JSONFormat(report func(requestID string, err error)) huma.Format {
 	return huma.Format{
 		Marshal: func(w io.Writer, v any) error {
 			pe := encoderPool.Get().(*pooledEncoder)
-			pe.buf.Reset()
-			defer func() {
-				if pe.buf.Cap() > maxPooledEncodeBuf {
-					// enc writes to &pe.buf, so replacing the value keeps it valid.
-					pe.buf = bytes.Buffer{}
-				}
-				encoderPool.Put(pe)
-			}()
-			if err := pe.enc.Encode(v); err != nil {
+			pe.w = w
+			err := pe.enc.Encode(v)
+			pe.w = nil
+			if err != nil {
+				// Not pooled again: an Encoder whose Write failed keeps
+				// returning that error.
 				return answerEncodeFailure(w, err, report)
 			}
-			_, err := w.Write(pe.buf.Bytes())
-			return err
+			encoderPool.Put(pe)
+			return nil
 		},
 		Unmarshal: json.Unmarshal,
 	}
@@ -99,19 +95,28 @@ func JSONFormats(report func(requestID string, err error)) map[string]huma.Forma
 	return formats
 }
 
-// representationHeaders describe the body the handler meant to send. They are
-// removed from the 500 that replaces it; Set-Cookie and the like are kept.
-var representationHeaders = []string{"Content-Length", "Content-Disposition", "ETag", "Last-Modified", "Location"}
+// validatorHeaders describe the body the handler meant to send without being
+// Content-* headers; they go with the Content-* headers (bar Content-Type)
+// from the 500 that replaces it. Set-Cookie and the like are kept.
+var validatorHeaders = []string{"ETag", "Last-Modified", "Location"}
 
 func answerEncodeFailure(w io.Writer, encodeErr error, report func(string, error)) error {
 	rw, ok := w.(http.ResponseWriter)
 	if !ok {
 		return encodeErr
 	}
-	// Only a writer that proves it has sent nothing can still change the
-	// status; a net/http writer may already have sent Huma's 200.
-	written, ok := w.(interface{ Written() bool })
-	if !ok || written.Written() {
+	// Only a writer that proves it has sent nothing, and then proves the 500
+	// took, can answer: a net/http writer may already have sent Huma's 200,
+	// and a wrapper that holds the first WriteHeader keeps that 200.
+	sw, ok := w.(interface {
+		Written() bool
+		Status() int
+	})
+	if !ok || sw.Written() {
+		return encodeErr
+	}
+	rw.WriteHeader(http.StatusInternalServerError)
+	if sw.Status() != http.StatusInternalServerError {
 		return encodeErr
 	}
 	requestID := rw.Header().Get(RequestIDHeader)
@@ -121,12 +126,16 @@ func answerEncodeFailure(w io.Writer, encodeErr error, report func(string, error
 		return encodeErr
 	}
 	header := rw.Header()
-	for _, name := range representationHeaders {
+	for name := range header {
+		if strings.HasPrefix(name, "Content-") && name != "Content-Type" {
+			header.Del(name)
+		}
+	}
+	for _, name := range validatorHeaders {
 		header.Del(name)
 	}
 	header.Set("Content-Type", "application/json")
 	header.Set("Cache-Control", "no-store")
-	rw.WriteHeader(http.StatusInternalServerError)
 	_, err = rw.Write(append(body, '\n'))
 	return err
 }

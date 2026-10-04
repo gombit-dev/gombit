@@ -3,6 +3,7 @@ package contract
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"math"
@@ -46,7 +47,7 @@ func TestJSONFormatAnswersAnUnencodableValueWithA500(t *testing.T) {
 			rec.Header().Set(RequestIDHeader, "req-442")
 			var reportedID string
 			var reportedErr error
-			err := JSONFormat(func(id string, err error) { reportedID, reportedErr = id, err }).Marshal(pending{rec}, v)
+			err := JSONFormat(func(id string, err error) { reportedID, reportedErr = id, err }).Marshal(newPending(rec), v)
 			if err != nil {
 				t.Fatalf("Marshal() = %v, want the failure answered, not returned to Huma", err)
 			}
@@ -70,15 +71,44 @@ func TestJSONFormatAnswersAnUnencodableValueWithA500(t *testing.T) {
 	}
 }
 
-// pending is a response writer that proves it has sent nothing yet, as Gin's
-// does until the first body byte.
-type pending struct{ *httptest.ResponseRecorder }
+// pending is a response writer that, like Gin's, holds the status until the
+// first body byte: it proves it has sent nothing (Written) and reports the
+// status it will send (Status).
+type pending struct {
+	*httptest.ResponseRecorder
+	status int
+}
 
-func (pending) Written() bool { return false }
+func newPending(rec *httptest.ResponseRecorder) *pending {
+	return &pending{ResponseRecorder: rec, status: http.StatusOK}
+}
+
+func (p *pending) Written() bool { return false }
+func (p *pending) Status() int   { return p.status }
+func (p *pending) WriteHeader(code int) {
+	p.status = code
+	p.ResponseRecorder.WriteHeader(code)
+}
+
+// holdsFirstStatus keeps the first status it is given, as a header-buffering
+// wrapper over Gin's writer can: Huma's 200 sticks, so a 500 cannot be set.
+type holdsFirstStatus struct {
+	*httptest.ResponseRecorder
+	status int
+}
+
+func (h *holdsFirstStatus) Written() bool { return false }
+func (h *holdsFirstStatus) Status() int   { return h.status }
+func (h *holdsFirstStatus) WriteHeader(code int) {
+	if h.status == 0 {
+		h.status = code
+	}
+}
 
 type writtenWriter struct{ http.ResponseWriter }
 
 func (writtenWriter) Written() bool { return true }
+func (writtenWriter) Status() int   { return http.StatusOK }
 
 // Where the status may already be on the wire, the error goes back to Huma as
 // before, and nothing is written: a writer that is not an http.ResponseWriter,
@@ -100,6 +130,43 @@ func TestJSONFormatReturnsTheErrorWhenItCannotAnswer(t *testing.T) {
 			t.Fatalf("%s writer: err %v, status %d, wrote %q; want the error and nothing written", name, err, rec.Code, rec.Body.String())
 		}
 	}
+
+	// A writer that says it has sent nothing but keeps Huma's 200 must not
+	// get an error envelope under that 200.
+	held := &holdsFirstStatus{ResponseRecorder: httptest.NewRecorder()}
+	held.WriteHeader(http.StatusOK)
+	if err := JSONFormat(func(string, error) { t.Error("reported a failure it did not answer") }).Marshal(held, v); err == nil || held.Body.Len() != 0 {
+		t.Fatalf("status-holding writer: err %v, wrote %q; want the error and nothing written", err, held.Body.String())
+	}
+}
+
+type failOnWrite struct{ t *testing.T }
+
+func (f failOnWrite) Write(b []byte) (int, error) {
+	f.t.Errorf("encoding/json wrote %d bytes of a value it could not encode", len(b))
+	return len(b), nil
+}
+
+// The invariant the fix relies on: encoding/json encodes the whole value
+// before its single Write, so a value it cannot encode writes nothing, however
+// large and wherever the bad field sits.
+func TestEncodingJSONWritesNothingOnFailure(t *testing.T) {
+	big := make(map[string]float64, 20000)
+	for i := range 20000 {
+		big[fmt.Sprintf("k%05d", i)] = float64(i)
+	}
+	big["k99999"] = math.NaN()
+	for name, v := range map[string]any{
+		"+Inf":       math.Inf(1),
+		"NaN":        math.NaN(),
+		"year 10000": time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC),
+		"last item":  []float64{1, 2, math.Inf(-1)},
+		"1 MiB map":  big,
+	} {
+		if err := json.NewEncoder(failOnWrite{t}).Encode(v); err == nil {
+			t.Errorf("%s: encoded", name)
+		}
+	}
 }
 
 // The 500 replaces the body the handler meant to send, so headers describing
@@ -111,12 +178,15 @@ func TestJSONFormatFailureDropsTheIntendedBodysHeaders(t *testing.T) {
 	h.Set("Last-Modified", "Mon, 01 Jan 2024 00:00:00 GMT")
 	h.Set("Location", "/api/v1/invoices/1")
 	h.Set("Content-Length", "123")
+	h.Set("Content-Encoding", "gzip")
+	h.Set("Content-Language", "pt-BR")
+	h.Set("Content-Disposition", "attachment")
 	h.Set("Cache-Control", "max-age=600")
 	h.Set("Set-Cookie", "refresh=abc")
-	if err := JSONFormat(func(string, error) {}).Marshal(pending{rec}, Data[float64]{Data: math.NaN()}); err != nil {
+	if err := JSONFormat(func(string, error) {}).Marshal(newPending(rec), Data[float64]{Data: math.NaN()}); err != nil {
 		t.Fatal(err)
 	}
-	for _, gone := range []string{"ETag", "Last-Modified", "Location", "Content-Length"} {
+	for _, gone := range []string{"ETag", "Last-Modified", "Location", "Content-Length", "Content-Encoding", "Content-Language", "Content-Disposition"} {
 		if got := rec.Header().Get(gone); got != "" {
 			t.Errorf("%s = %q survived onto the 500", gone, got)
 		}
@@ -142,7 +212,7 @@ func TestJSONFormatWithoutAReporterLogsThroughSlog(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	rec.Header().Set(RequestIDHeader, "req-slog")
-	if err := JSONFormat(nil).Marshal(pending{rec}, Data[float64]{Data: math.Inf(1)}); err != nil {
+	if err := JSONFormat(nil).Marshal(newPending(rec), Data[float64]{Data: math.Inf(1)}); err != nil {
 		t.Fatal(err)
 	}
 	if out := logged.String(); !strings.Contains(out, "response could not be encoded") || !strings.Contains(out, "req-slog") {
@@ -165,24 +235,26 @@ func TestJSONFormatsKeepsOtherRegisteredFormats(t *testing.T) {
 	}
 }
 
-// Encoding first costs no extra allocation for bodies up to the pooled buffer
-// size, and one buffer allocation above it (an ordinary 100-row list page can
-// be ~100 KiB).
+// A Gombit JSON response costs no more allocations than Huma's default, at any
+// body size and with sizes changing between responses (an ordinary 100-row
+// list page is ~100 KiB): the encoder is pooled and keeps no buffer.
 func TestJSONFormatAllocations(t *testing.T) {
 	row := map[string]any{"id": 1, "name": strings.Repeat("x", 900), "price": 1.5}
-	for name, body := range map[string]any{
-		"small": Data[map[string]any]{Data: row},
-		"large": Data[[]map[string]any]{Data: slices.Repeat([]map[string]any{row}, 110)},
+	small := Data[map[string]any]{Data: row}
+	mid := Data[[]map[string]any]{Data: slices.Repeat([]map[string]any{row}, 40)}
+	large := Data[[]map[string]any]{Data: slices.Repeat([]map[string]any{row}, 200)}
+	for name, bodies := range map[string][]any{
+		"small":       {small},
+		"large":       {large},
+		"alternating": {mid, large, small, large},
 	} {
 		f := JSONFormat(nil)
-		gombit := testing.AllocsPerRun(50, func() { _ = f.Marshal(io.Discard, body) })
-		huma := testing.AllocsPerRun(50, func() { _ = huma.DefaultJSONFormat.Marshal(io.Discard, body) })
-		budget := 0.0
-		if name == "large" {
-			budget = 1
-		}
-		if gombit > huma+budget {
-			t.Errorf("%s body: %.0f allocs, Huma's default %.0f; want at most %.0f more", name, gombit, huma, budget)
+		i := 0
+		gombit := testing.AllocsPerRun(100, func() { _ = f.Marshal(io.Discard, bodies[i%len(bodies)]); i++ })
+		i = 0
+		def := testing.AllocsPerRun(100, func() { _ = huma.DefaultJSONFormat.Marshal(io.Discard, bodies[i%len(bodies)]); i++ })
+		if gombit > def {
+			t.Errorf("%s bodies: %.2f allocs, Huma's default %.2f", name, gombit, def)
 		}
 	}
 }
