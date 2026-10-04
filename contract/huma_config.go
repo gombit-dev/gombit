@@ -35,6 +35,10 @@ func HumaConfigFor(title, version string, docsEnabled bool) huma.Config {
 	// CreateHooks is the supported way to opt out — it is the only default hook
 	// and setting SchemasPath="" alone does not remove it. See #225.
 	config.CreateHooks = nil
+	// Encode before writing, so a response that cannot be encoded becomes a
+	// D10 500 instead of a 200 with a plain-text body (#442). framework.New
+	// replaces this with a format that also logs the failure.
+	config.Formats = JSONFormats(nil)
 	if docsEnabled {
 		config.DocsPath = DocsPath
 		config.DocsRenderer = huma.DocsRendererSwaggerUI

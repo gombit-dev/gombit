@@ -184,7 +184,14 @@ func New(options ...Option) (_ *App, err error) {
 			RequestID: GetRequestIDFromContext,
 		})
 		// OpenAPI Info.Version stays 0.0.0 until runtime versioning lands.
-		app.api = humagin.New(app.router, contract.HumaConfigFor(app.cfg.AppName, "0.0.0", app.cfg.API.DocsEnabled))
+		humaConfig := contract.HumaConfigFor(app.cfg.AppName, "0.0.0", app.cfg.API.DocsEnabled)
+		// A response that cannot be encoded is answered as a D10 500; log why
+		// through the app's logger (#442).
+		logger := app.logger
+		humaConfig.Formats = contract.JSONFormats(func(requestID string, err error) {
+			logger.Error("http: response could not be encoded", zap.String("request_id", requestID), zap.Error(err))
+		})
+		app.api = humagin.New(app.router, humaConfig)
 	}
 	if app.cache == nil {
 		store, err := cache.Open(app.cfg.Cache)
