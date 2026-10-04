@@ -101,18 +101,22 @@ garbage write.
   `AutoMigrate` and the Atlas provider create, so the model's declared type
   must match the migrated column. A decimal type without `(p,s)` is
   `DECIMAL(10,0)` on MySQL and an unbounded `numeric` on PostgreSQL; a
-  `precision:`/`scale:` tag does not reach the column for `types.Decimal`; a
-  text column stores the digits as written; any other type (e.g. `real`) is
-  an error rather than an unchecked write.
+  `precision:`/`scale:` tag does not reach the column for `types.Decimal`; an
+  `unsigned` column refuses a negative value; a text column stores the digits
+  as written, up to its length (`varchar(n)`); any other type (`real`,
+  `double precision`, `money`, `bigint` cents) fails every write with an
+  error rather than an unchecked one. Declare such a field `decimal(p,s)`.
 - **On SQLite**, which stores decimals through float64, a value with more than
   15 digits (`database.SQLiteDecimalDigits`), or outside about 1e±307, is
   refused the same way.
-- **On every driver**, a value that would spell more than
-  `types.MaxDecimalDigits` (1000) digits is refused before anything formats it.
-  A decimal's exponent is unbounded, and formatting `"1e1000000000"` would
-  materialise a billion digits. `types.Decimal` refuses such a value when it is
-  unmarshalled (`UnmarshalJSON`, `UnmarshalText`, `NewDecimalFromString`), and
-  the admin refuses it before comparing it to a bound.
+- **On every driver**, a value whose exponent is beyond ±1000, or that would
+  spell more than `types.MaxDecimalDigits` (1000) digits, is refused before
+  anything formats or compares it. A decimal's exponent is unbounded, and
+  formatting or comparing one rescales it to that exponent, zero included:
+  `"0e1000000000"` costs as much as `"1e1000000000"`. `types.Decimal` refuses
+  such a value when it is unmarshalled (`UnmarshalJSON`, `UnmarshalText`,
+  `NewDecimalFromString`) or scanned, and the admin refuses it before comparing
+  it to a bound.
 
 The check runs on the API and admin write paths alike.
 

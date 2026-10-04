@@ -1,7 +1,6 @@
 package database
 
 import (
-	"context"
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
@@ -55,80 +54,76 @@ const (
 var (
 	shopspringDecimal = reflect.TypeOf(decimal.Decimal{})
 	nullDecimal       = reflect.TypeOf(decimal.NullDecimal{})
-	// decimalDDL reads precision and scale from the type GORM emits for a
-	// column ("decimal(19,4)", "numeric", "decimal(19,4) unsigned"), allowing
-	// trailing modifiers.
-	decimalDDL = regexp.MustCompile(`(?i)^\s*(?:decimal|numeric|dec|fixed)\s*(?:\(\s*(\d+)\s*(?:,\s*(\d+)\s*)?\))?(?:\s+.*)?$`)
-	textDDL    = regexp.MustCompile(`(?i)^\s*(?:var)?(?:char|text|clob|string|tinytext|mediumtext|longtext|nvarchar|nchar)\b`)
-
-	// decimalFieldCache holds each model schema's decimal fields, so a write
-	// to a model without one returns before doing any work.
-	decimalFieldCache sync.Map // *schema.Schema -> []*schema.Field
-	// decimalColumnCache holds each decimal field's column limits per dialect.
-	decimalColumnCache sync.Map // decimalColumnKey -> decimalColumn
+	// decimalDDL reads a decimal column type as GORM emits it: precision and
+	// scale ("decimal(19,4)", a bare "numeric") and any modifiers after them
+	// ("decimal(19,4) unsigned").
+	decimalDDL = regexp.MustCompile(`(?i)^\s*(?:decimal|numeric|dec|fixed)\s*(?:\(\s*(\d+)\s*(?:,\s*(\d+)\s*)?\))?(\s+.*)?$`)
+	// textDDL reads a text column type and its length, if it has one.
+	textDDL     = regexp.MustCompile(`(?i)^\s*(?:var)?(?:char|text|clob|string|tinytext|mediumtext|longtext|nvarchar|nchar)\b(?:\s*\(\s*(\d+)\s*\))?`)
+	unsignedDDL = regexp.MustCompile(`(?i)\bunsigned\b`)
 )
-
-type decimalColumnKey struct {
-	field   *schema.Field
-	dialect string
-}
 
 // decimalColumn is what a decimal field's column can hold, read from the DDL
 // GORM emits for it on the open dialect.
 type decimalColumn struct {
 	precision, scale int    // 0, 0: no fixed precision (PostgreSQL numeric, SQLite)
-	text             bool   // a text column stores the decimal's digits exactly
+	unsigned         bool   // MySQL "unsigned": no negative values
+	text             bool   // a text column stores the decimal's digits as written
+	textLength       int    // the text column's length, 0 when unbounded
 	unsupported      string // a column type gombit cannot check, e.g. "real"
+}
+
+// decimalGuard is the gombit:decimal GORM plugin. Its caches live as long as
+// the *gorm.DB it is registered on, not the process: a schema holds its DB's
+// whole schema cache, so a process-global map keyed by schemas would pin every
+// opened-and-closed DB's schemas for good (per-tenant pools, test suites).
+type decimalGuard struct {
+	driver  Driver
+	fields  sync.Map // *schema.Schema -> map[string]*schema.Field (by DBName)
+	columns sync.Map // *schema.Field -> decimalColumn
+}
+
+// Name names the plugin.
+func (*decimalGuard) Name() string { return "gombit:decimal" }
+
+// Initialize registers the check before every create and update.
+func (g *decimalGuard) Initialize(db *gorm.DB) error {
+	create := db.Callback().Create().Before("gorm:create")
+	if err := create.Register("gombit:decimal", func(tx *gorm.DB) { g.check(tx, true) }); err != nil {
+		return fmt.Errorf("database: register create decimal callback: %w", err)
+	}
+	update := db.Callback().Update().Before("gorm:update")
+	if err := update.Register("gombit:decimal", func(tx *gorm.DB) { g.check(tx, false) }); err != nil {
+		return fmt.Errorf("database: register update decimal callback: %w", err)
+	}
+	return nil
 }
 
 // registerDecimalCallback rejects, before the SQL runs on every create and
 // update, a value assigned to a decimal column that the column would not store
 // exactly (issue #440): one that does not fit the column's decimal(p,s), which
 // PostgreSQL and MySQL round and SQLite silently changes, one with more than
-// SQLiteDecimalDigits digits on SQLite, and one that is not a decimal number
-// at all. The failure is a *ValidationError, so MapPersistError answers it
-// with a D10 422 on the API and admin write paths alike, the same single
-// chokepoint the Validate hook uses.
+// SQLiteDecimalDigits digits on SQLite, one beyond types.MaxDecimalDigits on any
+// driver, and one that is not a decimal number at all. The failure is a
+// *ValidationError, so MapPersistError answers it with a D10 422 on the API and
+// admin write paths alike, the same single chokepoint the Validate hook uses.
 //
-// The check is keyed on the assignment set, the columns a statement writes,
-// not on the Go values reachable from it. A create checks the rows it inserts
-// (or its map) and an upsert's explicit ON CONFLICT DO UPDATE values. An update
-// checks only what it assigns: its map, or the fields of the struct it was
-// given (any struct type, matched to the model's columns by name), filtered by
-// Select/Omit as GORM filters them. The model of an update is checked only when
-// it is that struct (Save, Updates(&row)); otherwise it holds the row's old
-// values, which the statement is not writing.
+// What a statement writes is forEachAssigned's one definition, shared with the
+// other write-path guards: a create's rows (or map) and an upsert's explicit
+// ON CONFLICT DO UPDATE values; an update's map or the struct it writes, never
+// the model's old values; filtered by Select/Omit. A model without a decimal
+// field costs nothing.
 func registerDecimalCallback(db *gorm.DB, driver Driver) error {
-	create := db.Callback().Create().Before("gorm:create")
-	if err := create.Register("gombit:decimal", func(tx *gorm.DB) { runDecimalCheck(tx, driver, true) }); err != nil {
-		return fmt.Errorf("database: register create decimal callback: %w", err)
-	}
-	update := db.Callback().Update().Before("gorm:update")
-	if err := update.Register("gombit:decimal", func(tx *gorm.DB) { runDecimalCheck(tx, driver, false) }); err != nil {
-		return fmt.Errorf("database: register update decimal callback: %w", err)
-	}
-	return nil
+	return db.Use(&decimalGuard{driver: driver})
 }
 
-func runDecimalCheck(db *gorm.DB, driver Driver, creating bool) {
+func (g *decimalGuard) check(db *gorm.DB, creating bool) {
 	if db.Error != nil || db.Statement == nil || db.Statement.Schema == nil {
 		return
 	}
-	stmt := db.Statement
-	fields := decimalFieldsOf(stmt.Schema)
-	if len(fields) == 0 {
+	targets := g.fieldsOf(db.Statement.Schema)
+	if len(targets) == 0 {
 		return // no decimal column to write: no further work on this write
-	}
-	ctx := stmt.Context
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	selected, restricted := stmt.SelectAndOmitColumns(creating, !creating)
-	written := func(column string) bool {
-		if v, ok := selected[column]; ok {
-			return v
-		}
-		return !restricted
 	}
 
 	var problems map[string][]string
@@ -145,116 +140,26 @@ func runDecimalCheck(db *gorm.DB, driver Driver, creating bool) {
 		}
 		problems[key] = append(problems[key], msg)
 	}
-	check := func(f *schema.Field, value any) {
-		d, state := assignedDecimal(value)
+	forEachAssigned(db, creating, targets, func(a assignedValue) {
+		d, state := assignedDecimalValue(a.Value)
 		switch state {
 		case noDecimal:
 			return
 		case notDecimal:
-			report(f, "is not a decimal number")
+			report(a.Field, "is not a decimal number")
 			return
 		}
-		col := decimalColumnOf(db, f)
+		col := g.columnOf(db, a.Field)
 		if col.unsupported != "" {
 			if configErr == nil {
-				configErr = fmt.Errorf("database: decimal field %s.%s has column type %q, which cannot be checked for exact storage; declare it decimal(p,s)", stmt.Schema.Name, f.Name, col.unsupported)
+				configErr = fmt.Errorf("database: decimal field %s.%s has column type %q, which cannot be checked for exact storage; declare it decimal(p,s)", db.Statement.Schema.Name, a.Field.Name, col.unsupported)
 			}
 			return
 		}
-		if col.text {
-			return // its digits are stored as written
+		if msg := columnProblem(d, col, g.driver == DriverSQLite); msg != "" {
+			report(a.Field, msg)
 		}
-		if msg := DecimalStorageProblem(d, col.precision, col.scale, driver == DriverSQLite); msg != "" {
-			report(f, msg)
-		}
-	}
-	// checkStruct checks the decimal columns rv writes: its own decimal fields
-	// when it is the model, else the fields of its type that carry a model
-	// decimal column's name.
-	checkStruct := func(rv reflect.Value) {
-		for rv.Kind() == reflect.Pointer {
-			if rv.IsNil() {
-				return
-			}
-			rv = rv.Elem()
-		}
-		if rv.Kind() != reflect.Struct {
-			return
-		}
-		if rv.Type() == stmt.Schema.ModelType {
-			for _, f := range fields {
-				if written(f.DBName) {
-					check(f, f.ReflectValueOf(ctx, rv).Interface())
-				}
-			}
-			return
-		}
-		dest := &gorm.Statement{DB: db}
-		if !rv.CanAddr() {
-			ptr := reflect.New(rv.Type())
-			ptr.Elem().Set(rv)
-			rv = ptr.Elem()
-		}
-		if err := dest.Parse(rv.Addr().Interface()); err != nil || dest.Schema == nil {
-			return
-		}
-		for _, f := range fields {
-			if !written(f.DBName) {
-				continue
-			}
-			if src := dest.Schema.LookUpField(f.DBName); src != nil {
-				check(f, src.ReflectValueOf(ctx, rv).Interface())
-			}
-		}
-	}
-	checkMap := func(m map[string]any, filter bool) {
-		for key, value := range m {
-			f := stmt.Schema.LookUpField(key)
-			if f == nil || !isDecimalField(f) || (filter && !written(f.DBName)) {
-				continue
-			}
-			check(f, value)
-		}
-	}
-	var checkDest func(v reflect.Value)
-	checkDest = func(v reflect.Value) {
-		for v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface {
-			if v.IsNil() {
-				return
-			}
-			v = v.Elem()
-		}
-		switch v.Kind() {
-		case reflect.Map:
-			if m, ok := v.Interface().(map[string]any); ok {
-				checkMap(m, true)
-			}
-		case reflect.Slice, reflect.Array:
-			for i := 0; i < v.Len(); i++ {
-				checkDest(v.Index(i))
-			}
-		case reflect.Struct:
-			checkStruct(v)
-		}
-	}
-
-	// The Dest is what the statement writes. A create inserts it: the model
-	// rows (struct or slice) or a map. An update assigns it: a map
-	// (Updates(map), Update(column, value)) or a struct (Save, Updates(struct)).
-	checkDest(reflect.ValueOf(stmt.Dest))
-	// An upsert's explicit DO UPDATE values are written too. AssignmentColumns
-	// and UpdateAll reuse the inserted (checked) value as a clause.Column.
-	if creating {
-		if c, ok := stmt.Clauses["ON CONFLICT"]; ok {
-			if oc, ok := c.Expression.(clause.OnConflict); ok {
-				for _, a := range oc.DoUpdates {
-					if f := stmt.Schema.LookUpField(a.Column.Name); f != nil && isDecimalField(f) {
-						check(f, a.Value)
-					}
-				}
-			}
-		}
-	}
+	})
 
 	if configErr != nil {
 		_ = db.AddError(configErr)
@@ -265,23 +170,97 @@ func runDecimalCheck(db *gorm.DB, driver Driver, creating bool) {
 	}
 }
 
-// decimalFieldsOf returns the model's decimal fields, cached per schema.
-func decimalFieldsOf(s *schema.Schema) []*schema.Field {
-	if cached, ok := decimalFieldCache.Load(s); ok {
-		return cached.([]*schema.Field)
+// fieldsOf returns the model's decimal fields by DBName, cached per schema.
+func (g *decimalGuard) fieldsOf(s *schema.Schema) map[string]*schema.Field {
+	if cached, ok := g.fields.Load(s); ok {
+		return cached.(map[string]*schema.Field)
 	}
-	var fields []*schema.Field
+	var fields map[string]*schema.Field
 	for _, f := range s.Fields {
-		if isDecimalField(f) {
-			fields = append(fields, f)
+		if f.DBName != "" && isDecimalType(f.FieldType) {
+			if fields == nil {
+				fields = map[string]*schema.Field{}
+			}
+			fields[f.DBName] = f
 		}
 	}
-	decimalFieldCache.Store(s, fields)
+	g.fields.Store(s, fields)
 	return fields
 }
 
-func isDecimalField(f *schema.Field) bool {
-	return f.DBName != "" && isDecimalType(f.FieldType)
+// columnOf reads what f's column holds from the DDL GORM emits for it on db's
+// dialect: the migrator's own GormDBDataType-then-Dialector.DataTypeOf lookup,
+// so the check judges the column Atlas and AutoMigrate create, not the struct
+// tag (GORM ignores precision:/scale: tags for a custom type such as
+// types.Decimal). Cached per field.
+func (g *decimalGuard) columnOf(db *gorm.DB, f *schema.Field) decimalColumn {
+	if cached, ok := g.columns.Load(f); ok {
+		return cached.(decimalColumn)
+	}
+	col := parseDecimalDDL(columnDDL(db, f), g.driver == DriverMySQL)
+	g.columns.Store(f, col)
+	return col
+}
+
+func columnDDL(db *gorm.DB, f *schema.Field) string {
+	if typer, ok := reflect.New(f.IndirectFieldType).Interface().(interface {
+		GormDBDataType(*gorm.DB, *schema.Field) string
+	}); ok {
+		if ddl := typer.GormDBDataType(db, f); ddl != "" {
+			return ddl
+		}
+	}
+	return db.DataTypeOf(f)
+}
+
+// parseDecimalDDL reads a column type as GORM emits it. A decimal type without
+// arguments is MySQL's DECIMAL(10,0) there and has no fixed precision
+// elsewhere; a text column stores the digits as written, up to its length; any
+// other type is reported as unsupported.
+func parseDecimalDDL(ddl string, mysql bool) decimalColumn {
+	if m := decimalDDL.FindStringSubmatch(ddl); m != nil {
+		col := decimalColumn{unsigned: unsignedDDL.MatchString(m[3])}
+		switch {
+		case m[1] != "":
+			col.precision, _ = strconv.Atoi(m[1])
+			if m[2] != "" {
+				col.scale, _ = strconv.Atoi(m[2])
+			}
+		case mysql:
+			col.precision, col.scale = mysqlDefaultPrecision, mysqlDefaultScale
+		}
+		return col
+	}
+	if m := textDDL.FindStringSubmatch(ddl); m != nil {
+		col := decimalColumn{text: true}
+		if m[1] != "" {
+			col.textLength, _ = strconv.Atoi(m[1])
+		}
+		return col
+	}
+	return decimalColumn{unsupported: strings.TrimSpace(ddl)}
+}
+
+// columnProblem describes why d would not be stored exactly in col, or returns
+// "" when it would.
+func columnProblem(d decimal.Decimal, col decimalColumn, sqlite bool) string {
+	if col.text {
+		if err := types.CheckDecimalSize(d); err != nil {
+			return err.Error()
+		}
+		// The column stores the digits as the driver.Valuer writes them; the
+		// size bound above makes formatting them cheap.
+		if col.textLength > 0 {
+			if n := len(d.String()); n > col.textLength {
+				return fmt.Sprintf("is %d characters; the column holds %d", n, col.textLength)
+			}
+		}
+		return ""
+	}
+	if col.unsigned && d.Sign() < 0 {
+		return "must not be negative: the column is unsigned"
+	}
+	return DecimalStorageProblem(d, col.precision, col.scale, sqlite)
 }
 
 // isDecimalType reports whether t (through pointers) is shopspring's
@@ -310,6 +289,34 @@ const (
 	notDecimal                     // a value that is not a decimal number: refused
 )
 
+// assignedDecimalValue reads the decimal a struct field, map value, or clause
+// value carries. A field of a decimal type is read through its address, so the
+// common case boxes nothing; anything else goes through assignedDecimal.
+func assignedDecimalValue(v reflect.Value) (decimal.Decimal, decimalState) {
+	if !v.IsValid() {
+		return decimal.Decimal{}, noDecimal
+	}
+	if v.CanAddr() {
+		switch p := v.Addr().Interface().(type) {
+		case *types.Decimal:
+			return p.Decimal, isDecimal
+		case *decimal.Decimal:
+			return *p, isDecimal
+		case **types.Decimal:
+			if *p == nil {
+				return decimal.Decimal{}, noDecimal
+			}
+			return (*p).Decimal, isDecimal
+		case **decimal.Decimal:
+			if *p == nil {
+				return decimal.Decimal{}, noDecimal
+			}
+			return **p, isDecimal
+		}
+	}
+	return assignedDecimal(v.Interface())
+}
+
 // assignedDecimal reads the decimal a value assigned to a decimal column
 // carries. It is total: a value is a decimal, carries none (nil, an invalid
 // NullDecimal, a SQL expression or column reference, which are the database's
@@ -325,6 +332,8 @@ func assignedDecimal(value any) (decimal.Decimal, decimalState) {
 		return decimal.Decimal{}, noDecimal
 	case clause.Expression, clause.Column, *clause.Column:
 		return decimal.Decimal{}, noDecimal
+	case types.Decimal:
+		return v.Decimal, isDecimal
 	case decimal.Decimal:
 		return v, isDecimal
 	case decimal.NullDecimal:
@@ -394,76 +403,43 @@ func parseDecimal(s string) (decimal.Decimal, decimalState) {
 	return d, isDecimal
 }
 
-// decimalColumnOf reads what f's column holds from the DDL GORM emits for it on
-// db's dialect: the migrator's own GormDBDataType-then-Dialector.DataTypeOf
-// lookup, so the check judges the column Atlas and AutoMigrate create, not the
-// struct tag (GORM ignores precision:/scale: tags for a custom type such as
-// types.Decimal). A decimal type without arguments is MySQL's DECIMAL(10,0)
-// there and has no fixed precision elsewhere; a text column stores the digits
-// exactly; any other type is reported as unsupported. Cached per field and
-// dialect.
-func decimalColumnOf(db *gorm.DB, f *schema.Field) decimalColumn {
-	key := decimalColumnKey{field: f, dialect: db.Name()}
-	if cached, ok := decimalColumnCache.Load(key); ok {
-		return cached.(decimalColumn)
-	}
-	col := parseDecimalDDL(columnDDL(db, f), db.Name() == "mysql")
-	decimalColumnCache.Store(key, col)
-	return col
-}
-
-func columnDDL(db *gorm.DB, f *schema.Field) string {
-	if typer, ok := reflect.New(f.IndirectFieldType).Interface().(interface {
-		GormDBDataType(*gorm.DB, *schema.Field) string
-	}); ok {
-		if ddl := typer.GormDBDataType(db, f); ddl != "" {
-			return ddl
-		}
-	}
-	return db.DataTypeOf(f)
-}
-
-// parseDecimalDDL reads a column type as GORM emits it.
-func parseDecimalDDL(ddl string, mysql bool) decimalColumn {
-	if m := decimalDDL.FindStringSubmatch(ddl); m != nil {
-		if m[1] == "" {
-			if mysql {
-				return decimalColumn{precision: mysqlDefaultPrecision, scale: mysqlDefaultScale}
-			}
-			return decimalColumn{}
-		}
-		precision, _ := strconv.Atoi(m[1])
-		scale := 0
-		if m[2] != "" {
-			scale, _ = strconv.Atoi(m[2])
-		}
-		return decimalColumn{precision: precision, scale: scale}
-	}
-	if textDDL.MatchString(ddl) {
-		return decimalColumn{text: true}
-	}
-	return decimalColumn{unsupported: strings.TrimSpace(ddl)}
-}
-
 // DecimalStorageProblem describes why d would not be stored exactly in a
 // decimal(precision,scale) column, or returns "" when it would (issue #440).
 // precision <= 0 means the column has no limit of its own (PostgreSQL's
-// unbounded numeric), so only the SQLite limit applies. Trailing zeros after
-// the point are not digits that need storing: 1.5000 fits decimal(5,1).
+// unbounded numeric), so only the size bound and the SQLite limit apply.
+// Trailing zeros after the point are not digits that need storing: 1.5000 fits
+// decimal(5,1).
 //
-// It never formats d. A decimal's exponent is unbounded and formatting one
-// materialises every digit ("1e1000000000" would hold a core indefinitely), so
-// the size is checked first, from the coefficient's bit length and the
-// exponent, against types.MaxDecimalDigits, and the digit counts are derived
-// arithmetically from the (then bounded) coefficient.
+// It never formats d before bounding it. Formatting or comparing a decimal
+// rescales it to its exponent, so the exponent is bounded first, zero
+// included ("0e1000000000" costs as much as "1e1000000000"), then the
+// coefficient's size from its bit length; only then is the (bounded)
+// coefficient formatted, once, to count its digits.
 func DecimalStorageProblem(d decimal.Decimal, precision, scale int, sqlite bool) string {
-	if err := types.CheckDecimalSize(d); err != nil {
-		return err.Error()
+	exponent := int(d.Exponent())
+	if exponent > types.MaxDecimalDigits || exponent < -types.MaxDecimalDigits {
+		return fmt.Sprintf("has more than %d digits", types.MaxDecimalDigits)
 	}
-	if d.IsZero() {
+	// One copy of the coefficient (shopspring has no allocation-free size
+	// accessor; NumDigits computes 10^n for a large one).
+	c := d.Coefficient()
+	if c.Sign() == 0 {
 		return ""
 	}
-	whole, frac, digits, magnitude := decimalDigits(d)
+	c.Abs(c)
+	var whole, frac, digits, magnitude int
+	if c.IsUint64() {
+		// The path almost every real value takes: counted, not formatted.
+		whole, frac, digits, magnitude = smallCoefficientShape(c.Uint64(), exponent)
+	} else {
+		if estimate := int(float64(c.BitLen())*0.30102999566398119521) + 1; estimate > types.MaxDecimalDigits+1 {
+			return fmt.Sprintf("has more than %d digits", types.MaxDecimalDigits)
+		}
+		whole, frac, digits, magnitude = coefficientShape(c, exponent)
+	}
+	if whole+frac > types.MaxDecimalDigits {
+		return fmt.Sprintf("has more than %d digits", types.MaxDecimalDigits)
+	}
 	if precision > 0 {
 		if whole > precision-scale {
 			return fmt.Sprintf("does not fit decimal(%d,%d): at most %d digits before the decimal point", precision, scale, precision-scale)
@@ -483,18 +459,37 @@ func DecimalStorageProblem(d decimal.Decimal, precision, scale int, sqlite bool)
 	return ""
 }
 
-// decimalDigits counts a non-zero d's digits from its coefficient and exponent:
-// whole and frac are the digits before and after the point as written without
-// trailing fractional zeros, digits runs from the first non-zero digit to the
-// last digit written (trailing integer zeros included), and magnitude is the
-// decimal exponent of the leading digit. Callers bound d's size first
-// (types.CheckDecimalSize), so formatting the coefficient here is cheap.
-func decimalDigits(d decimal.Decimal) (whole, frac, digits, magnitude int) {
-	c := new(big.Int).Abs(d.Coefficient())
+// smallCoefficientShape is coefficientShape for a coefficient that fits a
+// uint64, computed without formatting it.
+func smallCoefficientShape(v uint64, exponent int) (whole, frac, digits, magnitude int) {
+	for v%10 == 0 {
+		v /= 10
+		exponent++
+	}
+	n := 1
+	for x := v; x >= 10; x /= 10 {
+		n++
+	}
+	return shape(n, exponent)
+}
+
+// coefficientShape counts the digits of the value |c| × 10^exponent (c
+// non-zero and bounded): whole and frac are the digits before and after the
+// point as written without trailing fractional zeros, digits runs from the
+// first non-zero digit to the last digit written (trailing integer zeros
+// included), and magnitude is the decimal exponent of the leading digit.
+func coefficientShape(c *big.Int, exponent int) (whole, frac, digits, magnitude int) {
 	s := c.String()
-	trimmed := strings.TrimRight(s, "0")
-	n := len(trimmed)
-	exponent := int(d.Exponent()) + len(s) - n
+	n := len(s)
+	for n > 1 && s[n-1] == '0' {
+		n--
+	}
+	return shape(n, exponent+len(s)-n)
+}
+
+// shape derives the digit counts from a coefficient of n digits with no
+// trailing zero, times 10^exponent.
+func shape(n, exponent int) (whole, frac, digits, magnitude int) {
 	if n+exponent > 0 {
 		whole = n + exponent
 	}
@@ -505,13 +500,4 @@ func decimalDigits(d decimal.Decimal) (whole, frac, digits, magnitude int) {
 		digits = n + exponent
 	}
 	return whole, frac, digits, n + exponent - 1
-}
-
-// fieldKey names f in a ValidationError the way the API names it: its JSON
-// name, else its column.
-func fieldKey(f *schema.Field) string {
-	if name, _, _ := strings.Cut(f.Tag.Get("json"), ","); name != "" && name != "-" {
-		return name
-	}
-	return f.DBName
 }

@@ -12,11 +12,14 @@ func TestDecimalParsingRefusesUnboundedSizeQuickly(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		if _, err := asDecimalString("1e1000000000"); err == nil {
-			t.Error("asDecimalString(1e1000000000) accepted, want a refusal")
-		}
-		if _, ok := decimalValue("1e1000000000"); ok {
-			t.Error("decimalValue(1e1000000000) ok, want no bound comparison")
+		// A zero coefficient is no cheaper: comparing rescales to the exponent.
+		for _, hostile := range []string{"1e1000000000", "0e1000000000", "-0e999999999", "0e-1000000000"} {
+			if _, err := asDecimalString(hostile); err == nil {
+				t.Errorf("asDecimalString(%s) accepted, want a refusal", hostile)
+			}
+			if _, ok := decimalValue(hostile); ok {
+				t.Errorf("decimalValue(%s) ok, want no bound comparison", hostile)
+			}
 		}
 		if _, err := asDecimalString("12.5"); err != nil {
 			t.Errorf("asDecimalString(12.5) = %v, want accepted", err)

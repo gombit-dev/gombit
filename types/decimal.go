@@ -43,11 +43,20 @@ type Decimal struct {
 // holds a core and gigabytes of memory (issue #440 review).
 const MaxDecimalDigits = 1000
 
-// CheckDecimalSize returns an error when d would spell more than
-// MaxDecimalDigits digits. It never formats d: the count comes from the
-// coefficient's bit length and the exponent, so a hostile value is refused in
-// constant time.
+// CheckDecimalSize returns an error when d's exponent is beyond
+// ±MaxDecimalDigits or d would spell more than MaxDecimalDigits digits. It
+// never formats d.
+//
+// The exponent is bounded on its own, whatever the coefficient: formatting or
+// comparing a shopspring decimal rescales it, which computes 10^|exponent|
+// (and String repeats |exponent| zeros) before the coefficient matters, so
+// "0e1000000000" costs as much as "1e1000000000" (issue #440 review). The digit
+// count comes from the coefficient's bit length, so a hostile value is refused
+// without materialising it.
 func CheckDecimalSize(d decimal.Decimal) error {
+	if e := d.Exponent(); e > MaxDecimalDigits || e < -MaxDecimalDigits {
+		return fmt.Errorf("has more than %d digits", MaxDecimalDigits)
+	}
 	if digits := decimalSpelledDigits(d); digits > MaxDecimalDigits {
 		return fmt.Errorf("has more than %d digits", MaxDecimalDigits)
 	}
@@ -85,8 +94,12 @@ func coefficientDigits(c *big.Int) int {
 }
 
 // UnmarshalJSON parses a decimal and refuses one beyond MaxDecimalDigits
-// before anything formats it.
+// before anything formats it. A JSON null leaves d unchanged, as
+// encoding/json's convention (and shopspring's own decoder) has it.
 func (d *Decimal) UnmarshalJSON(b []byte) error {
+	if string(b) == "null" {
+		return nil
+	}
 	var inner decimal.Decimal
 	if err := inner.UnmarshalJSON(b); err != nil {
 		return err
@@ -103,6 +116,22 @@ func (d *Decimal) UnmarshalJSON(b []byte) error {
 func (d *Decimal) UnmarshalText(b []byte) error {
 	var inner decimal.Decimal
 	if err := inner.UnmarshalText(b); err != nil {
+		return err
+	}
+	if err := CheckDecimalSize(inner); err != nil {
+		return fmt.Errorf("decimal %s", err)
+	}
+	d.Decimal = inner
+	return nil
+}
+
+// Scan reads a decimal from the database and refuses one beyond
+// MaxDecimalDigits, so a row stored before the bound existed (SQLite kept the
+// text "1e1000000000" as written) fails to load instead of hanging the first
+// formatting of it.
+func (d *Decimal) Scan(value any) error {
+	var inner decimal.Decimal
+	if err := inner.Scan(value); err != nil {
 		return err
 	}
 	if err := CheckDecimalSize(inner); err != nil {

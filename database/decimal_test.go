@@ -273,25 +273,26 @@ func TestDecimalColumnComesFromEmittedDDL(t *testing.T) {
 	unbounded := decimalColumn{}
 	text := decimalColumn{text: true}
 	unsupported := decimalColumn{unsupported: "real"}
+	unsignedLimits := decimalColumn{precision: 19, scale: 4, unsigned: true}
 	want := map[string]map[string]decimalColumn{
 		"mysql": {
 			"Plain": text, "Untagged": limits(10, 0), "Prec": limits(10, 0), "Pinned": limits(19, 4),
-			"Unsigned": limits(19, 4), "Txt": text, "Real": unsupported,
+			"Unsigned": unsignedLimits, "Txt": text, "Real": unsupported,
 		},
 		"postgres": {
 			"Plain": text, "Untagged": unbounded, "Prec": unbounded, "Pinned": limits(19, 4),
-			"Unsigned": limits(19, 4), "Txt": text, "Real": unsupported,
+			"Unsigned": unsignedLimits, "Txt": text, "Real": unsupported,
 		},
 		"sqlite": {
 			"Plain": text, "Untagged": unbounded, "Prec": unbounded, "Pinned": limits(19, 4),
-			"Unsigned": limits(19, 4), "Txt": text, "Real": unsupported,
+			"Unsigned": unsignedLimits, "Txt": text, "Real": unsupported,
 		},
 	}
 	for name, d := range dialects {
 		db := &gorm.DB{Config: &gorm.Config{Dialector: d}}
 		for f, w := range want[name] {
 			fld := s.LookUpField(f)
-			if got := decimalColumnOf(db, fld); got != w {
+			if got := parseDecimalDDL(columnDDL(db, fld), name == "mysql"); got != w {
 				t.Errorf("%s %s (ddl %q) = %+v, want %+v", name, f, columnDDL(db, fld), got, w)
 			}
 		}
@@ -320,7 +321,7 @@ func TestDecimalSQLiteRange(t *testing.T) {
 	}
 }
 
-type plainRow struct {
+type decimalFreeRow struct {
 	ID    uint `gorm:"primaryKey"`
 	Name  string
 	Count int
@@ -332,13 +333,14 @@ type plainRow struct {
 // not tax every write).
 func TestDecimalCheckIsFreeWithoutDecimalFields(t *testing.T) {
 	db := openSQLite(t)
-	tx := db.Session(&gorm.Session{DryRun: true}).Model(&plainRow{})
-	if err := tx.Statement.Parse(&plainRow{}); err != nil {
+	tx := db.Session(&gorm.Session{DryRun: true}).Model(&decimalFreeRow{})
+	if err := tx.Statement.Parse(&decimalFreeRow{}); err != nil {
 		t.Fatal(err)
 	}
-	tx.Statement.Dest = &[]plainRow{{Name: "a"}, {Name: "b"}}
-	decimalFieldsOf(tx.Statement.Schema) // warm the per-schema cache
-	if allocs := testing.AllocsPerRun(100, func() { runDecimalCheck(tx, DriverSQLite, true) }); allocs != 0 {
+	tx.Statement.Dest = &[]decimalFreeRow{{Name: "a"}, {Name: "b"}}
+	g := &decimalGuard{driver: DriverSQLite}
+	g.fieldsOf(tx.Statement.Schema) // warm the per-schema cache
+	if allocs := testing.AllocsPerRun(100, func() { g.check(tx, true) }); allocs != 0 {
 		t.Fatalf("decimal check on a model without decimal fields = %v allocs, want 0", allocs)
 	}
 }
@@ -360,26 +362,66 @@ func TestDecimalGuardRefusesUnboundedSizeQuickly(t *testing.T) {
 			return nil
 		}
 	}
-	hostile := decimal.RequireFromString("1e1000000000")
-	for _, c := range []struct{ precision, scale int }{{0, 0}, {19, 4}} {
-		if got := within("DecimalStorageProblem", func() error {
-			if msg := DecimalStorageProblem(hostile, c.precision, c.scale, false); msg != "" {
-				return errors.New(msg)
+	// A zero coefficient is no cheaper: formatting rescales to the exponent.
+	for _, value := range []string{"1e1000000000", "0e1000000000", "-0e999999999", "0e-1000000000"} {
+		hostile := decimal.RequireFromString(value)
+		for _, c := range []struct{ precision, scale int }{{0, 0}, {19, 4}} {
+			if got := within("DecimalStorageProblem", func() error {
+				if msg := DecimalStorageProblem(hostile, c.precision, c.scale, false); msg != "" {
+					return errors.New(msg)
+				}
+				return nil
+			}); got == nil {
+				t.Errorf("DecimalStorageProblem(%s, %d, %d) = no problem, want a refusal", value, c.precision, c.scale)
 			}
-			return nil
-		}); got == nil {
-			t.Errorf("DecimalStorageProblem(1e1000000000, %d, %d) = no problem, want a refusal", c.precision, c.scale)
 		}
 	}
 	db := openSQLite(t)
 	if err := db.AutoMigrate(&decimalRow{}); err != nil {
 		t.Fatal(err)
 	}
-	err := within("update", func() error {
-		return db.Model(&decimalRow{ID: 1}).Update("amount", "1e1000000000").Error
-	})
+	for _, value := range []string{"1e1000000000", "0e1000000000", "0e-1000000000"} {
+		err := within("update "+value, func() error {
+			return db.Model(&decimalRow{ID: 1}).Update("amount", value).Error
+		})
+		var ve *ValidationError
+		if !errors.As(err, &ve) {
+			t.Fatalf("update with %s: error = %v, want a *ValidationError", value, err)
+		}
+		// A typed decimal with a huge exponent reaches the guard the same way.
+		err = within("create typed "+value, func() error {
+			return db.Create(&decimalRow{Amount: types.Decimal{Decimal: decimal.RequireFromString(value)}}).Error
+		})
+		if !errors.As(err, &ve) {
+			t.Fatalf("create with typed %s: error = %v, want a *ValidationError", value, err)
+		}
+	}
+}
+
+type textAndUnsignedRow struct {
+	ID       uint          `gorm:"primaryKey"`
+	Code     types.Decimal `gorm:"type:varchar(5)"`
+	Positive types.Decimal `gorm:"type:decimal(19,4) unsigned"`
+}
+
+// TestDecimalTextLengthAndUnsigned: a value that would overflow a varchar(n)
+// decimal column, or a negative one bound for an unsigned column, is a 422 like
+// any other value the column cannot store (round-3 review), not a driver error.
+func TestDecimalTextLengthAndUnsigned(t *testing.T) {
+	db := openSQLite(t)
+	// "unsigned" is MySQL DDL; the guard reads the model's declared type, so
+	// the SQLite table only needs compatible columns.
+	if err := db.Exec("CREATE TABLE text_and_unsigned_rows (id integer PRIMARY KEY, code varchar(5), positive decimal)").Error; err != nil {
+		t.Fatal(err)
+	}
 	var ve *ValidationError
-	if !errors.As(err, &ve) {
-		t.Fatalf("update with 1e1000000000: error = %v, want a *ValidationError", err)
+	if err := db.Create(&textAndUnsignedRow{Code: types.MustDecimal("123456.78")}).Error; !errors.As(err, &ve) || len(ve.Fields["code"]) == 0 {
+		t.Fatalf("create with a 9-character value in varchar(5): error = %v, want a refusal of code", err)
+	}
+	if err := db.Create(&textAndUnsignedRow{Positive: types.MustDecimal("-1")}).Error; !errors.As(err, &ve) || len(ve.Fields["positive"]) == 0 {
+		t.Fatalf("create with -1 in an unsigned column: error = %v, want a refusal of positive", err)
+	}
+	if err := db.Create(&textAndUnsignedRow{Code: types.MustDecimal("12.5"), Positive: types.MustDecimal("3")}).Error; err != nil {
+		t.Fatalf("create with fitting values: %v", err)
 	}
 }

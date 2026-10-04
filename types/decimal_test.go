@@ -95,7 +95,9 @@ func TestDecimalRefusesUnboundedSizeQuickly(t *testing.T) {
 			t.Fatalf("%s: still running after 2s; the value is being formatted", label)
 		}
 	}
-	for _, hostile := range []string{"1e1000000000", "-7.5e-999999999", "1e1001", strings.Repeat("9", types.MaxDecimalDigits+1)} {
+	// A zero coefficient is no cheaper: formatting rescales to the exponent.
+	for _, hostile := range []string{"1e1000000000", "-7.5e-999999999", "1e1001", strings.Repeat("9", types.MaxDecimalDigits+1),
+		"0e1000000000", "-0e999999999", "0e-1000000000"} {
 		within("UnmarshalJSON "+hostile[:min(len(hostile), 20)], func() error {
 			var d types.Decimal
 			return json.Unmarshal([]byte(`"`+hostile+`"`), &d)
@@ -115,5 +117,35 @@ func TestDecimalRefusesUnboundedSizeQuickly(t *testing.T) {
 		if err := json.Unmarshal([]byte(`"`+ok+`"`), &d); err != nil {
 			t.Errorf("UnmarshalJSON %.20s: %v, want accepted", ok, err)
 		}
+	}
+}
+
+// TestDecimalUnmarshalNullKeepsTheValue: a JSON null leaves the decimal as it
+// was, the encoding/json convention shopspring's decoder follows, so decoding a
+// partial body onto a loaded row does not zero it.
+func TestDecimalUnmarshalNullKeepsTheValue(t *testing.T) {
+	var row struct{ P types.Decimal }
+	row.P = types.MustDecimal("12.5")
+	if err := json.Unmarshal([]byte(`{"P":null}`), &row); err != nil {
+		t.Fatal(err)
+	}
+	if row.P.String() != "12.5" {
+		t.Fatalf("P after null = %s, want 12.5 kept", row.P)
+	}
+}
+
+// TestDecimalScanIsBounded: a value stored before the bound existed (SQLite
+// kept the text "1e1000000000" as written) fails to load instead of hanging the
+// first formatting of it.
+func TestDecimalScanIsBounded(t *testing.T) {
+	var d types.Decimal
+	if err := d.Scan("1e1000000000"); err == nil {
+		t.Error("Scan(1e1000000000) accepted, want a refusal")
+	}
+	if err := d.Scan("0e-1000000000"); err == nil {
+		t.Error("Scan(0e-1000000000) accepted, want a refusal")
+	}
+	if err := d.Scan("12.5"); err != nil || d.String() != "12.5" {
+		t.Errorf("Scan(12.5) = %s, %v, want 12.5", d, err)
 	}
 }

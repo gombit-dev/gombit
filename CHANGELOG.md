@@ -325,9 +325,13 @@ version.
   none is declared), that is not a decimal number, or on SQLite that has
   more than 15 digits (`database.SQLiteDecimalDigits`). An update that does
   not write a decimal column is not affected by the row's existing value. A
-  decimal spelling more than 1000 digits (`types.MaxDecimalDigits`, e.g.
-  `"1e1000000000"`) is refused when parsed and before any write, instead of
-  pinning a CPU while it is formatted. The generated
+  decimal whose exponent is beyond ±1000 or that spells more than 1000 digits
+  (`types.MaxDecimalDigits`, e.g. `"1e1000000000"` or `"0e1000000000"`) is
+  refused when parsed, scanned, and before any write, instead of pinning a CPU
+  while it is formatted. **Behavior change:** a decimal field whose column type
+  is neither decimal nor text (`type:real`, `type:double precision`,
+  `type:money`, `type:bigint`) now fails every write with an error; declare it
+  `decimal(p,s)`. The generated
   create handler now responds with the stored row, so its body is what a get
   returns; run `gombit generate` to pick that up in an existing app
   ([#440](https://github.com/gombit-dev/gombit/issues/440)).
