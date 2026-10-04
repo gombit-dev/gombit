@@ -43,8 +43,21 @@ const defaultShutdownTimeout = 10 * time.Second
 // per-handler context deadline is opt-in, but the connection-level safety net
 // against slow or stuck sockets is not — a disabled per-handler deadline must
 // not mean an unbounded ReadTimeout/WriteTimeout/IdleTimeout. When
-// RequestTimeout is set, it still drives all three, unchanged.
+// RequestTimeout is set, it drives all three, WriteTimeout plus
+// requestTimeoutWriteGrace.
 const defaultHTTPServerTimeout = 60 * time.Second
+
+// requestTimeoutWriteGrace is how far the connection write deadline outlasts
+// the per-handler deadline when HTTP.RequestTimeout is set (issue #430).
+//
+// net/http arms the write deadline when it finishes reading the request
+// headers, which is before request_context derives the handler's context. With
+// equal durations the write deadline therefore expires first, and a handler
+// that honors its context and then writes its timeout response (504, D10
+// envelope with request_id) has that write dropped: the client sees the
+// connection close instead. The grace leaves the handler time to return and
+// write its response after its own deadline fires.
+const requestTimeoutWriteGrace = 5 * time.Second
 
 // Hook is an application lifecycle callback.
 type Hook func(context.Context) error
@@ -557,18 +570,22 @@ func RunContext(ctx context.Context, app *App) error {
 
 	// The per-handler context deadline (HTTP.RequestTimeout) is opt-in and off by
 	// default (issue #270), but the connection-level timeouts are a safety net
-	// that must stay on. When RequestTimeout is set it still drives all three;
-	// when it is disabled they fall back to defaultHTTPServerTimeout rather than 0
-	// (unbounded).
+	// that must stay on. When RequestTimeout is set it drives all three, and the
+	// write timeout gets requestTimeoutWriteGrace on top so the handler's own
+	// timeout response can still be written (issue #430); when it is disabled
+	// they fall back to defaultHTTPServerTimeout rather than 0 (unbounded), and
+	// there is no handler deadline to outlast.
 	serverTimeout := app.Config().HTTP.RequestTimeout
+	writeTimeout := serverTimeout + requestTimeoutWriteGrace
 	if serverTimeout <= 0 {
 		serverTimeout = defaultHTTPServerTimeout
+		writeTimeout = defaultHTTPServerTimeout
 	}
 	server := &http.Server{
 		Handler:           app.Router(),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       serverTimeout,
-		WriteTimeout:      serverTimeout,
+		WriteTimeout:      writeTimeout,
 		IdleTimeout:       serverTimeout,
 	}
 	app.setServer(server, listener.Addr().String())

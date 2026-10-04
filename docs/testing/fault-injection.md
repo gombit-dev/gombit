@@ -107,6 +107,7 @@ block the caller past it.
 | --- | --- |
 | A handler's query, or its `App.Tx`, ends at `HTTP.RequestTimeout` | [`framework/context_fault_test.go`](../../framework/context_fault_test.go): `TestFault_Context_HandlerDeadline_DB`, `_HandlerDeadline_Tx` |
 | A handler's outbound HTTP call to a hung dependency ends at the request deadline | [`framework/http_fault_test.go`](../../framework/http_fault_test.go): `TestFault_HTTP_HandlerDeadline` |
+| The response a handler writes at its request deadline reaches the client over a real connection (the server's write deadline outlasts the handler's) | [`framework/http_fault_test.go`](../../framework/http_fault_test.go): `TestFault_HTTP_HandlerDeadlineResponseDelivered` |
 | Shutdown with requests stuck in the database returns within drain delay + shutdown timeout | [`framework/context_fault_test.go`](../../framework/context_fault_test.go): `TestFault_Context_ShutdownUnderLoad` |
 | A query against a stalled database ends at the caller's deadline (`context.DeadlineExceeded`). A caller waiting on an exhausted pool honors its deadline. A refusing database fails the call at once (under a second) | [`framework/network_fault_integration_test.go`](../../framework/network_fault_integration_test.go): `TestFault_Network_Latency`, `_PoolExhaustion`, `_Unavailable` |
 | A cache call against a stalled Redis ends at the caller's deadline | [`cache/network_fault_integration_test.go`](../../cache/network_fault_integration_test.go): `TestFault_Network_RedisLatency` |

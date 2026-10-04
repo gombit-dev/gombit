@@ -587,8 +587,10 @@ func TestRunContextConfiguresServerTimeouts(t *testing.T) {
 	if server.ReadTimeout != cfg.HTTP.RequestTimeout {
 		t.Fatalf("server.ReadTimeout = %v, want %v", server.ReadTimeout, cfg.HTTP.RequestTimeout)
 	}
-	if server.WriteTimeout != cfg.HTTP.RequestTimeout {
-		t.Fatalf("server.WriteTimeout = %v, want %v", server.WriteTimeout, cfg.HTTP.RequestTimeout)
+	// The write deadline must outlast the handler deadline, or the handler's
+	// timeout response is dropped (issue #430).
+	if want := cfg.HTTP.RequestTimeout + requestTimeoutWriteGrace; server.WriteTimeout != want {
+		t.Fatalf("server.WriteTimeout = %v, want %v", server.WriteTimeout, want)
 	}
 	if server.IdleTimeout != cfg.HTTP.RequestTimeout {
 		t.Fatalf("server.IdleTimeout = %v, want %v", server.IdleTimeout, cfg.HTTP.RequestTimeout)

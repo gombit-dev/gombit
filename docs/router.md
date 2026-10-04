@@ -72,7 +72,10 @@ timer, nothing added on the request path. Set
 `GOMBIT_HTTP_REQUEST_TIMEOUT` (scaffolded apps set `60s`) to install it; the
 deadline then propagates into the request context and any DB/cache call that
 honors it. The `http.Server` `ReadHeaderTimeout`/`ReadTimeout`/`WriteTimeout`/
-`IdleTimeout` remain the connection-level safety net either way. Trade-off: with
+`IdleTimeout` remain the connection-level safety net either way. With the
+deadline set, `WriteTimeout` is the request timeout plus 5s, so a handler that
+returns at its deadline can still write its timeout response (a 504 with the
+D10 envelope) before the connection's write deadline closes it. Trade-off: with
 the per-handler deadline off, a slow handler keeps running after `WriteTimeout`
 closes the connection, and a long-running DB query is not cancelled unless the
 app enables the timeout or sets its own deadline. See
