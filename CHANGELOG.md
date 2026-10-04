@@ -315,6 +315,11 @@ version.
   `default-src 'none'` blocked the page's scripts, styles and images. The
   policy now follows the served content type, not the file name
   ([#434](https://github.com/gombit-dev/gombit/issues/434)).
+- `cache.WithJanitor` with a zero or negative interval no longer crashes the
+  process. The value reached `time.NewTicker` inside the janitor goroutine,
+  whose panic the caller could not recover; it now means no janitor, as if
+  the option were omitted
+  ([#436](https://github.com/gombit-dev/gombit/issues/436)).
 - The benchmark report no longer publishes a snapshot from a developer host
   as if it were the canonical run. A clean tree on the canonical protocol used
   to render with no banner whatever machine ran it. Each measured unit now
