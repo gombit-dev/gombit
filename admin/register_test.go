@@ -473,4 +473,36 @@ func TestRegisterWithAFileColumn(t *testing.T) {
 	if ok, _ := storage.Exists(ctx, app.Storage(), key); !ok {
 		t.Fatal("the file was deleted")
 	}
+
+	id := admin.Field{Name: "id", Type: admin.TypeInteger, ReadOnly: true}
+	// Explicit Fields cannot map the file column as another type: that
+	// would write arbitrary keys past the upload protocol (and strand the
+	// replaced key's claim).
+	for name, fields := range map[string][]admin.Field{
+		"by name":   {id, {Name: "title", Type: admin.TypeString}, {Name: "file", Type: admin.TypeString}},
+		"by column": {id, {Name: "title", Type: admin.TypeString}, {Name: "attachment_key", Type: admin.TypeString, Column: "file"}},
+		"read-only": {id, {Name: "title", Type: admin.TypeString}, {Name: "file", Type: admin.TypeString, ReadOnly: true}},
+	} {
+		err := admin.Register(app, Attachment{}, admin.Options{Slug: "attachments-" + strings.ReplaceAll(name, " ", "-"), Fields: fields})
+		if err == nil || !strings.Contains(err.Error(), "cannot write") {
+			t.Errorf("Register() with the file column mapped %s = %v, want an error", name, err)
+		}
+	}
+	// Leaving it out is fine, and a write through the admin cannot reach it.
+	if err := admin.Register(app, Attachment{}, admin.Options{Slug: "attachments-titled", Fields: []admin.Field{id, {Name: "title", Type: admin.TypeString}}}); err != nil {
+		t.Fatalf("Register() with explicit Fields leaving the file out = %v", err)
+	}
+	for _, slug := range []string{"attachments", "attachments-titled"} {
+		patch := doRequest(app, jar, http.MethodPatch, fmt.Sprintf("%s/admin/resources/%s/%d", apiPrefix(app), slug, rec.ID), `{"title":"b","file":"some/foreign/key"}`)
+		var got Attachment
+		if err := db.First(&got, rec.ID).Error; err != nil {
+			t.Fatal(err)
+		}
+		if got.File == nil || string(*got.File) != key {
+			t.Fatalf("PATCH %s (%d %s) changed the file to %v", slug, patch.Code, patch.Body, got.File)
+		}
+	}
+	if err := db.Where("object_key = ?", key).Take(&claim).Error; err != nil || claim.State != claims.Held {
+		t.Fatalf("after the PATCHes the claim = %+v, %v; want held", claim, err)
+	}
 }

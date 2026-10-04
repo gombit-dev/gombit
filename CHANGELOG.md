@@ -221,7 +221,10 @@ version.
   - The runtime is `storage/filefield`.
   - The admin leaves file columns out until it has a file widget, and
     turns delete off for such a model (an explicit `Actions.Delete` is a
-    registration error) so a deleted row cannot strand its held file.
+    registration error) so a deleted row cannot strand its held file; an
+    explicit `Options.Fields` entry mapping a file column under any type is
+    a registration error too, so the admin cannot write a key past the
+    upload protocol.
   - `examples/storage` gains a `Document` resource
     ([#530](https://github.com/gombit-dev/gombit/issues/530)).
 

@@ -167,7 +167,9 @@ that is never attached stays stored until swept.
   Meanwhile, a required file column cannot be set there, and delete is off
   for a model with file columns: deleting the row there would leave its
   file held by a record that no longer exists. Asking for `Actions.Delete`
-  on such a model is a registration error.
+  on such a model is a registration error, and so is an explicit
+  `Options.Fields` entry that maps a file column under any type: a key may
+  only be written through the upload protocol.
 
 [`examples/storage`](../examples/storage/internal/document/document.go) has a
 `Document` resource with both kinds.
