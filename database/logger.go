@@ -44,6 +44,10 @@ const SlowQueryThreshold = 200 * time.Millisecond
 // framework.New installs it on an attached database that still has the logger
 // Open installed.
 func NewLogger(z *zap.Logger) gormlogger.Interface {
+	// Scan's SQL is built by GORM's recorder, not by this logger, so the
+	// guarantee above needs the recorder's filter too, whoever opened the
+	// database (#439 review round 2).
+	dropRecorderParams()
 	if z == nil {
 		z = zap.NewNop()
 	}
@@ -215,7 +219,7 @@ func (l defaultLogger) Trace(ctx context.Context, begin time.Time, fc func() (st
 // gormlogger.Recorder, whose filter is the package-wide
 // gormlogger.RecorderParamsFilter, and hands the recorded SQL to the logger
 // already built, values inlined (#439 review). The setting is process-wide;
-// Open and OpenConn make it on first use.
+// Open, OpenConn and NewLogger make it on first use.
 var dropRecorderParams = sync.OnceFunc(func() {
 	gormlogger.RecorderParamsFilter = func(_ context.Context, sql string, _ ...any) (string, []any) {
 		return sql, nil

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -20,6 +21,7 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
+	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 )
@@ -157,6 +159,35 @@ func isNormalTraffic(errText string) bool {
 
 func TestNewLoggerOnSQLite(t *testing.T) {
 	testLoggerOnDriver(t, openSQLiteLoggedDB(t))
+}
+
+// NewLogger keeps its no-values guarantee on a database it did not open:
+// installed on a plain gorm.Open, Scan's SQL still carries no values. The
+// recorder filter is process-wide and set once, so this runs in a fresh process.
+func TestNewLoggerDropsScanValuesOnAPlainGormDB(t *testing.T) {
+	if os.Getenv("GOMBIT_PLAIN_GORM_SCAN") == "1" {
+		core, logs := observer.New(zapcore.DebugLevel)
+		gdb, err := gorm.Open(sqlite.Open("file:"+filepath.Join(t.TempDir(), "plain.db")), &gorm.Config{Logger: NewLogger(zap.New(core))})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []loggedUser
+		_ = gdb.Raw("SELECT * FROM missing_table WHERE email = ?", "plain@example.com").Scan(&out).Error
+		for _, e := range logs.All() {
+			if sql, _ := e.ContextMap()["sql"].(string); strings.Contains(sql, "plain@example.com") {
+				t.Fatalf("Scan on a plain gorm.DB logged the value: %s", sql)
+			}
+		}
+		if logs.Len() == 0 {
+			t.Fatal("the failed Scan was not logged")
+		}
+		return
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestNewLoggerDropsScanValuesOnAPlainGormDB$", "-test.count=1") //nolint:gosec // re-runs this test binary
+	cmd.Env = append(os.Environ(), "GOMBIT_PLAIN_GORM_SCAN=1")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("fresh process: %v\n%s", err, out)
+	}
 }
 
 // Open's default logger replaces GORM's: stderr instead of stdout, no

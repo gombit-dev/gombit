@@ -63,8 +63,9 @@ error is reported. GORM's `Debug()` raises its session's statements to `info`.
 Each entry carries the SQL with its placeholders (`sql`), `elapsed`, `rows`, the
 calling `source` line and, for a failure, the driver's `error`. The SQL never
 carries parameter values: they can be password hashes, tokens or personal data.
-That covers `Scan` too, which GORM traces through its recorder: `database.Open`
-sets GORM's process-wide `logger.RecorderParamsFilter` to drop values. The
+That covers `Scan` too, which GORM traces through its recorder: `database.Open`,
+`OpenConn` and `NewLogger` set GORM's process-wide `logger.RecorderParamsFilter`
+to drop values. The
 driver's error text is logged as the driver reports it, and some drivers quote
 the offending input there (for example a malformed UUID).
 
