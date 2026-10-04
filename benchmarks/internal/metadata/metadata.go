@@ -127,7 +127,9 @@ type Provenance struct {
 	// units have one; a group with no protocol (microbench, footprint) and a unit
 	// stamped before protocols were per unit leave it nil, which the JSON omits.
 	// A pointer keeps Provenance a comparable value and makes "not recorded"
-	// distinct from a recorded zero.
+	// distinct from a recorded zero. An empty object ({}) is an explicit "not
+	// recorded" filed by WithLegacyProtocols, so a top level written later is
+	// never mistaken for what this unit ran.
 	Protocol *RunParams `json:"protocol,omitempty"`
 }
 
@@ -587,12 +589,17 @@ func Merge(existing, incoming Metadata) Metadata {
 // older readers. Like the top-level provenance block they describe whichever
 // collection last rewrote the record, run-crud or `make benchmark-metadata`, and
 // no reader may use them to describe a unit once any unit is recorded.
+//
+// Every field is omitempty so the explicit "not recorded" marker serializes as
+// {}. A recorded protocol always states trials, duration, concurrency and tool
+// (run-crud validates them), so only a zero warm-up is ever omitted, and it
+// reads back as the same zero.
 type RunParams struct {
-	Concurrency     []int   `json:"concurrency"`
-	Trials          int     `json:"trials"`
-	DurationSeconds float64 `json:"duration_seconds"`
-	WarmupSeconds   float64 `json:"warmup_seconds"`
-	BenchmarkTool   string  `json:"benchmark_tool"`
+	Concurrency     []int   `json:"concurrency,omitempty"`
+	Trials          int     `json:"trials,omitempty"`
+	DurationSeconds float64 `json:"duration_seconds,omitempty"`
+	WarmupSeconds   float64 `json:"warmup_seconds,omitempty"`
+	BenchmarkTool   string  `json:"benchmark_tool,omitempty"`
 }
 
 // RunParams returns the run parameters recorded at the top level.
@@ -639,7 +646,7 @@ func (p RunParams) Equal(other RunParams) bool {
 // as unrecorded.
 func (m Metadata) UnitRunParams(group, unit string) (RunParams, bool) {
 	if p, ok := m.Groups[group][unit]; ok {
-		if p.Protocol == nil {
+		if p.Protocol == nil || !p.Protocol.Recorded() {
 			return RunParams{}, false
 		}
 		return *p.Protocol, true
@@ -662,13 +669,14 @@ func (m Metadata) UnitRunParams(group, unit string) (RunParams, bool) {
 // rather than dropped: ReadJSON applies this on every read and the report on
 // every render, so producers and the report agree on it, and a producer records
 // it per unit before it rewrites the top level. Only CRUD: the top-level
-// protocol never described microbench or footprint rows. A snapshot that
-// records no top-level parameters has nothing to file.
+// protocol never described microbench or footprint rows.
+//
+// When the top level records no parameters, there is nothing to attribute, and
+// the unit gets an explicit empty protocol instead: "not recorded" is then a
+// fact on file, and parameters a later `make benchmark-metadata` writes at the
+// top level are never read as what this unit ran (#377 review).
 func (m Metadata) WithLegacyProtocols() Metadata {
 	top := m.RunParams()
-	if !top.Recorded() {
-		return m
-	}
 	for unit, p := range m.Groups[GroupCRUD] {
 		if p.Protocol != nil {
 			continue

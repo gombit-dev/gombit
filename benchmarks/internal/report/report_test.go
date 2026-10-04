@@ -365,7 +365,7 @@ func TestATableMixingProtocolsNamesEachUnits(t *testing.T) {
 		crudRow("django", 10, 1, 800, 5, 10, 20),
 	}, nil, nil, meta)
 
-	if !strings.Contains(out, "Some published rows were measured under a **narrower protocol") ||
+	if !strings.Contains(out, "Some CRUD rows were measured under a **narrower protocol") ||
 		!strings.Contains(out, "gombit:crud-list: concurrency 1/10 (canonical 1/10/100/500/1000), 1 trial (canonical 5 trials)") {
 		t.Errorf("the banner must name the unit that ran the reduced protocol:\n%s", out)
 	}
@@ -420,8 +420,49 @@ func TestProtocolAndLoadGeneratorCollapseIndependently(t *testing.T) {
 	if !strings.Contains(how, "- **Load generator (per unit):** gombit:crud-list — grafana/k6:0.99.0; rails:crud-list — grafana/k6:0.55.0.") {
 		t.Errorf("differing load generators must be named per unit:\n%s", how)
 	}
-	if !strings.Contains(out, "> Every published row was measured under a ") {
+	if !strings.Contains(out, "> Every CRUD row was measured under a ") {
 		t.Errorf("a table whose every unit is reduced must not say only some are:\n%s", out)
+	}
+}
+
+// sweep returns one framework's crud-list rows at every level of a sweep.
+func sweep(fw string, levels []int, trials int) []result.Result {
+	var rows []result.Result
+	for _, c := range levels {
+		for trial := 1; trial <= trials; trial++ {
+			rows = append(rows, crudRow(fw, c, trial, 1000, 5, 10, 20))
+		}
+	}
+	return rows
+}
+
+// The workflow per-unit protocols allow: one app re-run at a smoke sweep
+// without the headline concurrency while the others keep the canonical one. That
+// app has no row in the table, so the table must say it is missing, and its
+// protocol must still be named and judged (#377 review round 1).
+func TestAnAppWithoutTheHeadlineLevelIsNamedAndJudged(t *testing.T) {
+	clean := false
+	meta := canonicalMeta()
+	meta = metadata.StampUnit(meta, metadata.GroupCRUD, crudUnit("rails"),
+		metadata.Provenance{GitCommit: "aaaa11112222", GitDirty: &clean, Protocol: canonicalProtocol()})
+	meta = metadata.StampUnit(meta, metadata.GroupCRUD, crudUnit("gombit"),
+		metadata.Provenance{GitCommit: "aaaa11112222", GitDirty: &clean, Protocol: protocolOf([]int{1, 10}, 1, 5, 1)})
+
+	results := append(sweep("rails", CanonicalProtocol.Concurrency, CanonicalProtocol.Trials), sweep("gombit", []int{1, 10}, 1)...)
+	out := Render(results, nil, nil, meta)
+	crud := out[strings.Index(out, "### PostgreSQL CRUD read"):strings.Index(out, "### Operational footprint")]
+
+	if !strings.Contains(crud, "At **100 concurrent clients**") || strings.Contains(crud, "| gombit |") {
+		t.Fatalf("the table stays at the headline level, which gombit lacks:\n%s", crud)
+	}
+	if !strings.Contains(crud, "_**Not in this table** — no rows at 100 concurrent clients: gombit (measured at 1/10 VUs only)._") {
+		t.Errorf("an app with no row at the table's concurrency must be named, not dropped:\n%s", crud)
+	}
+	if !strings.Contains(out, "Reduced development snapshot") || !strings.Contains(out, "gombit:crud-list: concurrency 1/10") {
+		t.Errorf("the missing app's reduced protocol must still raise the banner:\n%s", out)
+	}
+	if !strings.Contains(methodologySection(out), "gombit:crud-list — concurrency 1/10 VUs, 1 trial × 5s each (warm-up 1s)") {
+		t.Errorf("the missing app's protocol must still be named:\n%s", methodologySection(out))
 	}
 }
 

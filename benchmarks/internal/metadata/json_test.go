@@ -172,3 +172,43 @@ func TestReadJSONFilesTheLegacyProtocolOnCRUDUnits(t *testing.T) {
 		t.Error("the top-level protocol never described footprint rows")
 	}
 }
+
+// A protocol-less CRUD unit read while the top level records nothing is filed
+// as explicitly "not recorded" ({}), so parameters a later collect-host-info
+// writes at the top level are never read as what that unit ran (#377 review).
+func TestALegacyUnitWithNothingToInheritStaysUnrecorded(t *testing.T) {
+	m := StampUnit(Metadata{}, GroupCRUD, "gombit:crud-list", Provenance{GitCommit: "a"})
+	var b strings.Builder
+	if err := WriteJSON(&b, m); err != nil {
+		t.Fatal(err)
+	}
+	read, err := ReadJSON(strings.NewReader(b.String()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.Reset()
+	if err := WriteJSON(&b, read); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(b.String(), `"protocol": {}`) {
+		t.Errorf("the not-recorded marker must be persisted as {}:\n%s", b.String())
+	}
+
+	// A later collection writes its own flags at the top level.
+	later, err := ReadJSON(strings.NewReader(b.String()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	later = later.WithRunParams(RunParams{Concurrency: []int{1}, Trials: 5, DurationSeconds: 30, WarmupSeconds: 10, BenchmarkTool: "k6"})
+	b.Reset()
+	if err := WriteJSON(&b, later); err != nil {
+		t.Fatal(err)
+	}
+	again, err := ReadJSON(strings.NewReader(b.String()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p, ok := again.UnitRunParams(GroupCRUD, "gombit:crud-list"); ok {
+		t.Errorf("a later top level must not become the unit's protocol, got %+v", p)
+	}
+}

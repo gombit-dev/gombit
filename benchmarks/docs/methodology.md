@@ -298,14 +298,19 @@ are derived from the units the CRUD table renders: one line when they agree,
 each unit's own when they do not. So two workloads, or two apps, with different
 pins share one snapshot, and a populated snapshot can move to a new protocol one
 app at a time; until every app has been re-run, the README names which unit ran
-which protocol. The top-level fields of the same names are still written for
+which protocol. The protocol and banner are judged over every `crud-list` app in
+`results.json`, and an app with no row at the table's concurrency (say, one
+re-run at a smoke sweep without 100 VUs) is listed under the table with the
+levels it was measured at, rather than dropped from it. The top-level fields of the same names are still written for
 older readers, but they describe whichever run last rewrote the record and are
 never read for a unit once any unit is recorded. A unit stamped before
 protocols were per unit is read with the top-level parameters, the protocol the
 README always attributed to it (the best record there is, not a guarantee:
 nothing guarded those fields before #371, and `make benchmark-metadata` never
 was), and the next producer to rewrite the top level files them on that unit
-first. A snapshot that records no unit at all keeps its top-level parameters
+first. When the top level records no parameters either, the unit is filed as
+explicitly not recorded (`"protocol": {}`), so parameters written there later are
+never read as what it ran. A snapshot that records no unit at all keeps its top-level parameters
 across `make benchmark-metadata`, as it keeps its provenance.
 
 `run-crud` records its parameters as a fact about the unit, so it rejects
