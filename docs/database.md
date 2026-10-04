@@ -79,20 +79,36 @@ if err := db.First(&row, id).Error; err != nil {
 
 Before every create and update, `database.Open` also checks each value the
 statement assigns to a decimal column (a `types.Decimal` / `decimal.Decimal`
-field) against the column's `decimal(p,s)`: a value with more digits than the
-column holds, before or after the point, is a `*database.ValidationError`
-naming the field, not a rounded or truncated write. The check follows the
-columns written, not the Go values in reach: a create checks the rows (or map)
-it inserts; an update checks its map (`Updates(map)`, `Update(column, value)`)
-or the struct it writes (`Save`, `Updates(struct)`, any struct type, by column
-name), honoring `Select` and `Omit`, so an update that does not write a decimal
-column is never refused for the row's old value. Strings, numbers, and
-`json.Number` bound for a decimal column are checked like decimals; a SQL
-expression (`gorm.Expr`) is left to the database. A column declared without
-`(p,s)` has the driver's own default: `DECIMAL(10,0)` on MySQL, an unbounded
-`numeric` on PostgreSQL. On SQLite, which stores decimals through float64, a
-value with more than 15 digits (`database.SQLiteDecimalDigits`) is refused the
-same way. The check runs on the API and admin write paths alike.
+field): a value with more digits than the column holds, before or after the
+point, or one that is not a decimal number at all, is a
+`*database.ValidationError` naming the field, not a rounded, truncated, or
+garbage write.
+
+- **What is checked** is the assignment set, the columns the statement writes:
+  a create's rows (or map) and an upsert's explicit `ON CONFLICT DO UPDATE`
+  values; an update's map (`Updates(map)`, `Update(column, value)`) or the
+  struct it writes (`Save`, `Updates(struct)`, any struct type, by column
+  name), honoring `Select` and `Omit`. An update that does not write a decimal
+  column is never refused for the row's old value, and a model with no decimal
+  field costs nothing.
+- **Every value shape** is read: decimals, strings, numbers, `json.Number`,
+  pointers (a `*string` / `*float64` PATCH field), named types, and
+  `driver.Valuer`s such as `sql.NullString`. A null is nothing to check, and a
+  SQL expression (`gorm.Expr`) or an upsert's column reference is left to the
+  database.
+- **The column's limits** come from the type GORM emits for the model field
+  (`GormDBDataType`, else the dialect's `DataTypeOf`), the same type
+  `AutoMigrate` and the Atlas provider create, so the model's declared type
+  must match the migrated column. A decimal type without `(p,s)` is
+  `DECIMAL(10,0)` on MySQL and an unbounded `numeric` on PostgreSQL; a
+  `precision:`/`scale:` tag does not reach the column for `types.Decimal`; a
+  text column stores the digits as written; any other type (e.g. `real`) is
+  an error rather than an unchecked write.
+- **On SQLite**, which stores decimals through float64, a value with more than
+  15 digits (`database.SQLiteDecimalDigits`), or outside about 1e±307, is
+  refused the same way.
+
+The check runs on the API and admin write paths alike.
 
 `IsUniqueViolation`, `IsForeignKeyViolation`, and `IsNotNullViolation` are the
 shared detectors behind those helpers; auth registration uses
@@ -197,10 +213,10 @@ Official multi-DB support is gated by the conformance suite under
 - migrate up / migrate down (Gombit-owned companion downs)
 - timestamps, nullable columns, unique constraints, indexes
 - decimal round-trip, and precision: a `decimal(19,4)` value round-trips
-  exactly, a value over the scale is refused on every driver (on create and on
-  the update paths, whatever Go value carries it), one over 15 digits is
-  refused on SQLite, and an undeclared-precision decimal is MySQL's
-  `DECIMAL(10,0)`
+  exactly, a value over the scale or not a decimal at all is refused on every
+  driver (on create, upsert, and the update paths, whatever Go value carries
+  it), one over 15 digits is refused on SQLite, and an undeclared-precision
+  decimal is MySQL's `DECIMAL(10,0)`
 - CRUD, transactions, pagination (`Offset` / `Limit`)
 - relation deletion (`relation_deletion`): `ON DELETE` `RESTRICT` / `CASCADE` /
   `SET NULL` through `database.Delete`

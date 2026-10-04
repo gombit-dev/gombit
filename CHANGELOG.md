@@ -318,12 +318,13 @@ version.
 - Decimals are no longer silently changed on write. On SQLite, which stores a
   `decimal` column through float64, `99999999999999.9999` used to become
   `100000000000000`; PostgreSQL and MySQL rounded a value over the column's
-  scale. Every create and update now refuses, with a 422 naming the field, a
-  value written to a decimal column (as a decimal, string, number, or struct
-  field) that does not fit its `decimal(p,s)` (MySQL's `DECIMAL(10,0)` when
-  none is declared), and on SQLite one with more than 15 digits
-  (`database.SQLiteDecimalDigits`). An update that does not write a decimal
-  column is not affected by the row's existing value. The generated
+  scale. Every create, upsert, and update now refuses, with a 422 naming the
+  field, a value written to a decimal column (in any Go shape: decimal,
+  string, number, pointer, named type, `sql.Null*`) that does not fit the
+  column's `decimal(p,s)` as GORM emits it (MySQL's `DECIMAL(10,0)` when
+  none is declared), that is not a decimal number, or on SQLite that has
+  more than 15 digits (`database.SQLiteDecimalDigits`). An update that does
+  not write a decimal column is not affected by the row's existing value. The generated
   create handler now responds with the stored row, so its body is what a get
   returns; run `gombit generate` to pick that up in an existing app
   ([#440](https://github.com/gombit-dev/gombit/issues/440)).

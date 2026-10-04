@@ -1,14 +1,20 @@
 package database
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
+	"math"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/shopspring/decimal"
+	"gorm.io/driver/mysql"
+	"gorm.io/driver/postgres"
+	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"gorm.io/gorm/schema"
 
 	"github.com/gombit-dev/gombit/types"
@@ -137,6 +143,59 @@ func TestDecimalCallbackOnSQLite(t *testing.T) {
 	type amountDTO struct{ Amount types.Decimal }
 	assertRefused("updates(non-model struct)",
 		db.Model(&decimalRow{ID: row.ID}).Updates(amountDTO{Amount: dec("2.00005")}).Error, "amount")
+	// Value coercion is total (round-2 review): pointers, named types, and
+	// driver.Valuers are read like the plain value, and a value that is not a
+	// decimal number is refused rather than passed to the driver.
+	str := "1.00005"
+	flt := 1.00005
+	type amountText string
+	type patchDTO struct {
+		Amount *string
+		Tip    *float64
+	}
+	for label, value := range map[string]any{
+		"*string":            &str,
+		"*float64":           &flt,
+		"named string type":  amountText("1.00005"),
+		"sql.NullString":     sql.NullString{String: "1.00005", Valid: true},
+		"sql.NullFloat64":    sql.NullFloat64{Float64: 1.00005, Valid: true},
+		"comma decimal":      "1,5",
+		"NaN string":         "NaN",
+		"digit separators":   "1.000_05",
+		"empty string":       "",
+		"bool":               true,
+		"NaN float":          math.NaN(),
+		"infinite float":     math.Inf(1),
+		"unparseable []byte": []byte("12abc"),
+	} {
+		assertRefused("update(column, "+label+")",
+			db.Model(&decimalRow{ID: row.ID}).Update("amount", value).Error, "amount")
+	}
+	assertRefused("updates(pointer-field PATCH DTO)",
+		db.Model(&decimalRow{ID: row.ID}).Updates(patchDTO{Amount: &str}).Error, "amount")
+	assertRefused("updates(pointer-field PATCH DTO, float)",
+		db.Model(&decimalRow{ID: row.ID}).Updates(patchDTO{Tip: &flt}).Error, "tip")
+	// No value to check is not a refusal.
+	if err := db.Model(&decimalRow{ID: row.ID}).Updates(map[string]any{"tip": sql.NullString{}}).Error; err != nil {
+		t.Fatalf("updates(map, invalid sql.NullString) error = %v, want nil", err)
+	}
+	good := "2.5"
+	if err := db.Model(&decimalRow{ID: row.ID}).Updates(patchDTO{Amount: &good}).Error; err != nil {
+		t.Fatalf("updates(pointer-field PATCH DTO, 2.5) error = %v, want nil", err)
+	}
+	// An upsert's explicit DO UPDATE values are written too.
+	assertRefused("upsert DoUpdates",
+		db.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "id"}},
+			DoUpdates: clause.Assignments(map[string]any{"amount": "1.00005"}),
+		}).Create(&decimalRow{ID: row.ID, Amount: dec("1")}).Error, "amount")
+	if err := db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "id"}},
+		DoUpdates: clause.AssignmentColumns([]string{"amount"}),
+	}).Create(&decimalRow{ID: row.ID, Amount: dec("3.25")}).Error; err != nil {
+		t.Fatalf("upsert AssignmentColumns error = %v, want nil: it reuses the checked inserted value", err)
+	}
+
 	// A SQL expression is the database's to compute.
 	if err := db.Model(&decimalRow{ID: row.ID}).Update("amount", gorm.Expr("amount + ?", 1)).Error; err != nil {
 		t.Fatalf("update(column, gorm.Expr) error = %v, want nil", err)
@@ -183,43 +242,102 @@ func TestDecimalCallbackChecksOnlyWrittenColumns(t *testing.T) {
 	}
 }
 
-// TestDecimalPrecisionScaleUsesTheDriverDefault: a decimal column declared
-// without (p,s), including an untagged types.Decimal, is DECIMAL(10,0) on MySQL,
-// so 1.5 would be rounded to 2 there; PostgreSQL makes it an unbounded numeric
-// and SQLite has no fixed precision.
-func TestDecimalPrecisionScaleUsesTheDriverDefault(t *testing.T) {
-	type loose struct {
+// TestDecimalColumnComesFromEmittedDDL: a decimal column's limits are read from
+// the DDL GORM emits for it on the dialect (the migrator's GormDBDataType then
+// Dialector.DataTypeOf), not from the struct tag. GORM ignores precision:/scale:
+// tags for a custom type such as types.Decimal, so such a field is MySQL's bare
+// DECIMAL(10,0) and PostgreSQL's unbounded numeric; trailing modifiers are
+// allowed; a text column is exact; anything else is unsupported.
+func TestDecimalColumnComesFromEmittedDDL(t *testing.T) {
+	type m struct {
 		ID       uint
+		Plain    decimal.Decimal
 		Untagged types.Decimal
-		Bare     types.Decimal `gorm:"type:decimal"`
-		Numeric  types.Decimal `gorm:"type:NUMERIC"`
+		Prec     types.Decimal `gorm:"precision:19;scale:4"`
 		Pinned   types.Decimal `gorm:"type:decimal(19,4)"`
-		Tagged   types.Decimal `gorm:"precision:8;scale:2"`
+		Unsigned types.Decimal `gorm:"type:decimal(19,4) unsigned"`
+		Txt      types.Decimal `gorm:"type:text"`
+		Real     types.Decimal `gorm:"type:real"`
 	}
-	s, err := schema.Parse(&loose{}, &sync.Map{}, schema.NamingStrategy{})
+	s, err := schema.Parse(&m{}, &sync.Map{}, schema.NamingStrategy{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, c := range []struct {
-		field         string
-		driver        Driver
-		precision, sc int
-	}{
-		{"Untagged", DriverMySQL, 10, 0},
-		{"Bare", DriverMySQL, 10, 0},
-		{"Numeric", DriverMySQL, 10, 0},
-		{"Untagged", DriverPostgres, 0, 0},
-		{"Bare", DriverSQLite, 0, 0},
-		{"Pinned", DriverMySQL, 19, 4},
-		{"Pinned", DriverSQLite, 19, 4},
-		{"Tagged", DriverPostgres, 8, 2},
-	} {
-		p, sc := decimalPrecisionScale(s.LookUpField(c.field), c.driver)
-		if p != c.precision || sc != c.sc {
-			t.Errorf("%s on %s = (%d,%d), want (%d,%d)", c.field, c.driver, p, sc, c.precision, c.sc)
+	dialects := map[string]gorm.Dialector{
+		"sqlite":   sqlite.Open(":memory:"),
+		"mysql":    mysql.New(mysql.Config{SkipInitializeWithVersion: true}),
+		"postgres": postgres.New(postgres.Config{}),
+	}
+	limits := func(p, sc int) decimalColumn { return decimalColumn{precision: p, scale: sc} }
+	unbounded := decimalColumn{}
+	text := decimalColumn{text: true}
+	unsupported := decimalColumn{unsupported: "real"}
+	want := map[string]map[string]decimalColumn{
+		"mysql": {
+			"Plain": text, "Untagged": limits(10, 0), "Prec": limits(10, 0), "Pinned": limits(19, 4),
+			"Unsigned": limits(19, 4), "Txt": text, "Real": unsupported,
+		},
+		"postgres": {
+			"Plain": text, "Untagged": unbounded, "Prec": unbounded, "Pinned": limits(19, 4),
+			"Unsigned": limits(19, 4), "Txt": text, "Real": unsupported,
+		},
+		"sqlite": {
+			"Plain": text, "Untagged": unbounded, "Prec": unbounded, "Pinned": limits(19, 4),
+			"Unsigned": limits(19, 4), "Txt": text, "Real": unsupported,
+		},
+	}
+	for name, d := range dialects {
+		db := &gorm.DB{Config: &gorm.Config{Dialector: d}}
+		for f, w := range want[name] {
+			fld := s.LookUpField(f)
+			if got := decimalColumnOf(db, fld); got != w {
+				t.Errorf("%s %s (ddl %q) = %+v, want %+v", name, f, columnDDL(db, fld), got, w)
+			}
 		}
 	}
 	if got := DecimalStorageProblem(decimal.RequireFromString("1.5"), 10, 0, false); got == "" {
 		t.Error("1.5 in MySQL's default DECIMAL(10,0): no problem reported, want a refusal (it would be stored as 2)")
+	}
+}
+
+// TestDecimalSQLiteRange: below float64's normal range SQLite keeps fewer
+// digits (1e-400 is stored as 0), above it a REAL overflows, so on SQLite a
+// value outside about 1e±307 is refused even with few digits.
+func TestDecimalSQLiteRange(t *testing.T) {
+	// 1e300 has 301 digits, which the 15-digit rule already refuses; the
+	// range rule is what catches a one-digit value too small to keep.
+	for value, refused := range map[string]bool{
+		"1e-400": true, "-2.5e-350": true, "1e-300": false, "0": false, "-0.0001": false,
+	} {
+		got := DecimalStorageProblem(decimal.RequireFromString(value), 0, 0, true)
+		if (got != "") != refused {
+			t.Errorf("SQLite %s: problem %q, want refused=%v", value, got, refused)
+		}
+		if refused && !strings.Contains(got, "range") {
+			t.Errorf("SQLite %s: problem %q, want the range message", value, got)
+		}
+	}
+}
+
+type plainRow struct {
+	ID    uint `gorm:"primaryKey"`
+	Name  string
+	Count int
+	Note  *string
+}
+
+// TestDecimalCheckIsFreeWithoutDecimalFields: a write to a model with no
+// decimal field returns before doing any work (round-2 review: the guard must
+// not tax every write).
+func TestDecimalCheckIsFreeWithoutDecimalFields(t *testing.T) {
+	db := openSQLite(t)
+	tx := db.Session(&gorm.Session{DryRun: true}).Model(&plainRow{})
+	if err := tx.Statement.Parse(&plainRow{}); err != nil {
+		t.Fatal(err)
+	}
+	tx.Statement.Dest = &[]plainRow{{Name: "a"}, {Name: "b"}}
+	decimalFieldsOf(tx.Statement.Schema) // warm the per-schema cache
+	if allocs := testing.AllocsPerRun(100, func() { runDecimalCheck(tx, DriverSQLite, true) }); allocs != 0 {
+		t.Fatalf("decimal check on a model without decimal fields = %v allocs, want 0", allocs)
 	}
 }

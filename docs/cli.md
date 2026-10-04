@@ -411,13 +411,17 @@ Modifiers are `required`, `nullable` (the opposite of `required`), `unique`,
 | `has_many:Target` | `[]target.Target` | model-only, read via the admin; the child must carry the parent FK |
 | `many_to_many:Target` | `[]target.Target` (`many2many:` join) | model-only, edited via the admin |
 
-A decimal column never stores a value changed. Any value written to one, as a
-`types.Decimal` or as the string, number, or struct field a map or `Updates`
-carries, is refused with a 422 before it is written when it does not fit the
-column's `decimal(p,s)` (more than `p-s` digits before the point, or more than
-`s` after it, ignoring trailing zeros), rather than rounded by PostgreSQL or
-MySQL. A column declared without `(p,s)`, such as an untagged `types.Decimal`,
-is MySQL's `DECIMAL(10,0)` there (whole numbers only, so pin `(p,s)` for money)
+A decimal column never stores a value changed. Any value written to one is
+checked first: a `types.Decimal`, or the string, number, pointer, named type, or
+`sql.Null*` value a map, a struct field, or an upsert carries. One that does not
+fit the column's `decimal(p,s)` (more than `p-s` digits before the point, or
+more than `s` after it, ignoring trailing zeros) is refused with a 422 rather
+than rounded by PostgreSQL or MySQL, and one that is not a decimal number at
+all (`"1,5"`, `"NaN"`, `""`) is refused too. The column type is the one GORM
+emits for the model, which must match the migrated column: `type:decimal(p,s)`.
+A `precision:`/`scale:` tag does not reach the column for `types.Decimal`, and a
+type without `(p,s)`, such as an untagged `types.Decimal`, is MySQL's
+`DECIMAL(10,0)` there (whole numbers only, so pin `type:decimal(p,s)` for money)
 and an unbounded `numeric` on PostgreSQL. SQLite has no fixed-point type: its
 `decimal` column converts through float64, which keeps 15 significant digits,
 so on SQLite a decimal may carry **at most 15 digits**

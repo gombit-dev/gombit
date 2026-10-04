@@ -4,6 +4,7 @@ package conformance_test
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"testing"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/gombit-dev/gombit/types"
 	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 func TestConformanceSuite(t *testing.T) {
@@ -241,6 +243,32 @@ func TestConformanceSuite(t *testing.T) {
 		refuse("Update(price, float over scale)", target.Session(&gorm.Session{}).Update("price", 3.00005).Error)
 		type priceDTO struct{ Price types.Decimal }
 		refuse("Updates(non-model struct over scale)", target.Session(&gorm.Session{}).Updates(priceDTO{Price: types.MustDecimal("2.00005")}).Error)
+		// Coercion is total: pointers, named types, Valuers, and strings that
+		// are not plain decimals are checked (PostgreSQL would accept the digit
+		// separator and round 1.000_05 to 1.0001).
+		str := "1.00005"
+		type amountText string
+		type patchDTO struct{ Price *string }
+		for label, value := range map[string]any{
+			"*string":          &str,
+			"named type":       amountText("1.00005"),
+			"sql.NullString":   sql.NullString{String: "1.00005", Valid: true},
+			"digit separators": "1.000_05",
+			"NaN":              "NaN",
+		} {
+			refuse("Update(price, "+label+")", target.Session(&gorm.Session{}).Update("price", value).Error)
+		}
+		refuse("Updates(pointer-field PATCH DTO)", target.Session(&gorm.Session{}).Updates(patchDTO{Price: &str}).Error)
+		// An upsert's explicit DO UPDATE value is checked like an update.
+		refuse("upsert DoUpdates", db.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "id"}},
+			DoUpdates: clause.Assignments(map[string]any{"price": "1.00005"}),
+		}).Create(&models.Item{Model: gorm.Model{ID: base.ID}, Code: base.Code, Name: base.Name, Price: decimal.RequireFromString("1"), Discount: types.Decimal{Decimal: decimal.RequireFromString("1")}}).Error)
+		var unchanged models.Item
+		if err := db.First(&unchanged, base.ID).Error; err != nil || !unchanged.Price.Equal(decimal.RequireFromString("1")) {
+			t.Fatalf("price after refused writes on %s = %s (%v), want 1 untouched", db.Driver(), unchanged.Price, err)
+		}
+
 		wide := "99999999999999.9999"
 		err := target.Session(&gorm.Session{}).Updates(map[string]any{"discount": wide}).Error
 		if sqlite {
