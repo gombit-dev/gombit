@@ -84,23 +84,39 @@ shared detectors behind those helpers; auth registration uses
 ### Timestamp and date range
 
 `database.Open` and `OpenConn` refuse, before the SQL runs on every create and
-update (`Create`, `Save`, `Updates` with a map or a struct, `Update` of one
-column), a `time.Time`, `sql.NullTime` or `types.Date` value outside what all
-three drivers can store and return: `1000-01-02T00:00:00Z`..`9999-12-30T23:59:59Z`
-for a timestamp and `1000-01-01`..`9999-12-31` for a date
-(`types.TimeBounds`, `types.DateBounds`). MySQL stores no earlier year, and a
-timestamp outside years 0..9999 in the time zone it is read into cannot be
-encoded as JSON; PostgreSQL would store year 0 as 1 BC and then fail every
-read of the row. The timestamp bounds keep a day's margin for that time-zone
-conversion. The failure is a `*database.ValidationError` naming the field, so
-`MapPersistError` answers it with a 422 on the generated API, the admin data
-plane, and your own handlers alike. Only what a statement writes is checked,
-filtered by `Select` / `Omit`: an update assigning other columns of a row that
-already holds an out-of-range value is not refused. A string written to such a
-column (`Update("due", "0000-01-01T00:00:00Z")`) is read as the driver would
-read it; an expression (`gorm.Expr`) is left to the database. Zero values
-(unset), NULLs, and GORM's auto-managed `CreatedAt` / `UpdatedAt` are left
-alone.
+update, a `time.Time`, `sql.NullTime` or `types.Date` value the statement writes
+that is outside what all three drivers can store and return:
+`1000-01-02T00:00:00Z`..`9999-12-30T23:59:59Z` for a timestamp and
+`1000-01-01`..`9999-12-31` for a date (`types.TimeBounds`, `types.DateBounds`).
+MySQL stores no earlier year, and a timestamp outside years 0..9999 in the time
+zone it is read into cannot be encoded as JSON; PostgreSQL would store year 0
+as 1 BC and then fail every read of the row. The timestamp bounds keep a day's
+margin for that time-zone conversion. The failure is a
+`*database.ValidationError` naming the field, so `MapPersistError` answers it
+with a 422 on the generated API, the admin data plane, and your own code alike.
+
+What a statement writes is what GORM writes:
+
+- `Create`, `Save`, `Updates` with a map or a struct (of any type, matched to
+  the model's columns by name), `Update`, `UpdateColumn(s)`, and the literal
+  assignments of an upsert's `ON CONFLICT DO UPDATE`, filtered by
+  `Select` / `Omit`. An update's model is not checked unless it is what is
+  written (`Save`, `Updates(&row)`), so updating other columns of a row that
+  already holds an out-of-range value is not refused.
+- The zero instant `0001-01-01T00:00:00Z` is a value like any other wherever
+  GORM writes it: a zero non-pointer field on create (MySQL refused it with a
+  500; the others stored it), a zero value in a map or a `Select`ed column, and
+  any column `Save` writes (it selects them all). It is left alone where GORM
+  does not write it: a zero auto `CreatedAt` / `UpdatedAt` on create (GORM fills
+  it), a zero column with a `default` (the database fills it), and a zero struct
+  field on an update. Use a pointer (or `sql.NullTime`) for an optional time.
+- A caller-set `CreatedAt` / `UpdatedAt` (a hook, a seeder, a map naming the
+  column, `UpdateColumns`) is checked; a struct update that runs hooks writes
+  now over `UpdatedAt`, so that one is not.
+- A string written to such a column is read as the drivers read it (RFC 3339,
+  `YYYY-MM-DD hh:mm:ss`, `YYYY-MM-DD`); one that does not parse is refused,
+  since PostgreSQL accepts forms (`'infinity'`, `'… BC'`) no Go time can be read
+  back from. An expression (`gorm.Expr`) and NULL are left to the database.
 
 ## Deleting rows
 

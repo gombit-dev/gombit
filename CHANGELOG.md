@@ -357,13 +357,19 @@ version.
   row's endpoint and every list page holding it could no longer be read, and
   MySQL refused it with a 500. `database.Open` now registers a
   `gombit:timerange` callback, next to the `Validate` hook, that checks every
-  `time.Time`, `sql.NullTime` and `types.Date` value on `Create`, `Save`,
-  `Updates` and `Update` against `1000-01-02T00:00:00Z`..`9999-12-30T23:59:59Z`
-  (a day's margin for the time zone a value is read into) and
-  `1000-01-01`..`9999-12-31` (`types.TimeBounds`, `types.DateBounds`,
-  `types.TimeWithin`, `types.DateWithin`). It covers the generated API, the
-  admin data plane and custom code alike, with no regeneration
-  ([#443](https://github.com/gombit-dev/gombit/issues/443)).
+  `time.Time`, `sql.NullTime` and `types.Date` value a create or update writes
+  (`Create`, `Save`, `Updates`, `Update`, `UpdateColumns`, upsert
+  `DO UPDATE` literals, honouring `Select`/`Omit`) against
+  `1000-01-02T00:00:00Z`..`9999-12-30T23:59:59Z` (a day's margin for the time
+  zone a value is read into) and `1000-01-01`..`9999-12-31`
+  (`types.TimeBounds`, `types.DateBounds`, `types.TimeWithin`,
+  `types.DateWithin`). It covers the generated API, the admin data plane and
+  custom code alike, with no regeneration. **Behaviour change:** a zero
+  `time.Time` that GORM writes (a non-pointer field left unset on create, a
+  zero in a map or a `Select`, any column `Save` writes) is now a 422 on every
+  driver; it was stored on SQLite/PostgreSQL and a 500 on MySQL. Use a pointer
+  for an optional time. A string no Go time parses (`'infinity'`) is refused
+  too ([#443](https://github.com/gombit-dev/gombit/issues/443)).
 
 ## [0.6.0] — 2026-09-28
 

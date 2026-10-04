@@ -13,6 +13,7 @@ import (
 	"github.com/gombit-dev/gombit/contract"
 	"github.com/gombit-dev/gombit/types"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type rangedEvent struct {
@@ -117,30 +118,108 @@ func testTimeRangeWritePaths(t *testing.T, db *DB) {
 	}
 }
 
-// Unset values are left alone, as before: a zero time.Time is Go's "not set"
-// (GORM fills the create/update timestamps after the check), and nil pointers
-// and an invalid sql.NullTime are NULL. (A zero types.Date was never storable:
-// its Value refuses it.) In-range values on every path are written.
+type rangedDefault struct {
+	ID   uint `gorm:"primaryKey"`
+	Name string
+	At   time.Time `gorm:"default:CURRENT_TIMESTAMP"`
+}
+
+// What GORM does not write is left alone: a nil pointer or an invalid
+// sql.NullTime (NULL), a zero auto create/update timestamp (GORM fills it), a
+// zero column with a default (the database fills it), a zero struct field on
+// an update (not written), and an auto-update timestamp on a struct update
+// that runs hooks (GORM writes now over it). In-range values on every path are
+// written. The integration tests run it on PostgreSQL and MySQL.
 func TestTimeRangeLeavesUnsetAndInRangeValuesAlone(t *testing.T) {
-	db := openRangedDB(t)
-	row := rangedEvent{Name: "unset", Issued: dateFine}
+	testTimeRangeUnsetAndInRange(t, openRangedDB(t))
+}
+
+func testTimeRangeUnsetAndInRange(t *testing.T, db *DB) {
+	t.Helper()
+	row := rangedEvent{Name: "unset", Due: inRange, Issued: dateFine}
 	if err := db.Create(&row).Error; err != nil {
-		t.Fatalf("Create with every time unset: %v", err)
+		t.Fatalf("Create with the optional times unset: %v", err)
 	}
-	if row.CreatedAt.IsZero() {
-		t.Fatal("GORM's CreatedAt was not filled")
+	if row.CreatedAt.IsZero() || row.UpdatedAt.IsZero() {
+		t.Fatal("GORM's CreatedAt/UpdatedAt were not filled")
 	}
+	// The column's default is spelled per driver (MySQL wants the precision of
+	// a datetime(3) repeated in CURRENT_TIMESTAMP); the model's default tag is
+	// what tells GORM to leave a zero At to it.
+	_ = db.Migrator().DropTable(&rangedDefault{})
+	ddl := map[Driver]string{
+		DriverSQLite:   "CREATE TABLE ranged_defaults (id integer PRIMARY KEY, name text, at datetime DEFAULT CURRENT_TIMESTAMP)",
+		DriverPostgres: "CREATE TABLE ranged_defaults (id serial PRIMARY KEY, name text, at timestamptz DEFAULT now())",
+		DriverMySQL:    "CREATE TABLE ranged_defaults (id bigint AUTO_INCREMENT PRIMARY KEY, name varchar(64), at datetime(3) DEFAULT CURRENT_TIMESTAMP(3))",
+	}[db.Driver()]
+	if err := db.Exec(ddl).Error; err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Migrator().DropTable(&rangedDefault{}) })
+	if err := db.Create(&rangedDefault{Name: "defaulted"}).Error; err != nil {
+		t.Errorf("a zero column with a default: %v", err)
+	}
+
 	paid := inRange
+	legacy := row
+	legacy.UpdatedAt = yearZero // GORM overwrites it with now on this Save
 	for what, err := range map[string]error{
-		"Updates(map)":   db.Model(&row).Updates(map[string]any{"due": inRange, "issued": dateFine}).Error,
-		"Update(column)": db.Model(&row).Update("paid", &paid).Error,
-		"Save":           db.Save(&rangedEvent{ID: row.ID, Name: "saved", Due: inRange, Issued: dateFine, Noted: sql.NullTime{Time: inRange, Valid: true}}).Error,
-		"NULL":           db.Model(&row).Updates(map[string]any{"paid": nil, "noted": sql.NullTime{}}).Error,
-		"expression":     db.Model(&row).Update("due", gorm.Expr("due")).Error,
+		"Updates(map)":              db.Model(&row).Updates(map[string]any{"due": inRange, "issued": dateFine}).Error,
+		"Update(column)":            db.Model(&row).Update("paid", &paid).Error,
+		"Update(column, ISO local)": db.Model(&row).Update("due", "2026-10-04T12:00:00").Error,
+		// Save selects every column, so it writes CreatedAt as given.
+		"Save":                       db.Save(&rangedEvent{ID: row.ID, Name: "saved", Due: inRange, Issued: dateFine, Noted: sql.NullTime{Time: inRange, Valid: true}, CreatedAt: row.CreatedAt}).Error,
+		"Save over an old UpdatedAt": db.Save(&legacy).Error,
+		"Updates(struct, zero due)":  db.Model(&row).Updates(rangedEvent{Name: "zero due is not written"}).Error,
+		"NULL":                       db.Model(&row).Updates(map[string]any{"paid": nil, "noted": sql.NullTime{}}).Error,
+		"expression":                 db.Model(&row).Update("due", gorm.Expr("due")).Error,
 	} {
 		if err != nil {
 			t.Errorf("%s: %v", what, err)
 		}
+	}
+}
+
+// What GORM does write is checked, the zero instant and caller-set auto
+// timestamps included (#562 review round 2): 0001-01-01T00:00:00Z is not a
+// stored "unset" but a value (MySQL refused it with a 500, the others stored
+// it), and a hook or seeder setting CreatedAt/UpdatedAt to year 0 stored the
+// row-breaking value. An upsert's DO UPDATE literals are written too, and a
+// string no Go time parses (Postgres's 'infinity') is refused, since the row
+// could not be read back.
+func TestTimeRangeChecksWhatGORMWrites(t *testing.T) {
+	testTimeRangeWhatGORMWrites(t, openRangedDB(t))
+}
+
+func testTimeRangeWhatGORMWrites(t *testing.T, db *DB) {
+	t.Helper()
+	row := rangedEvent{Name: "base", Due: inRange, Issued: dateFine}
+	if err := db.Create(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	wantRangeError(t, "Create zero due", db.Create(&rangedEvent{Name: "z", Issued: dateFine}).Error, "due")
+	// Save selects every column, so a zero CreatedAt would overwrite the stored one.
+	wantRangeError(t, "Save zero CreatedAt", db.Save(&rangedEvent{ID: row.ID, Name: "s", Due: inRange, Issued: dateFine}).Error, "created_at")
+	wantRangeError(t, "Update(column, zero instant)", db.Model(&row).Update("due", "0001-01-01T00:00:00Z").Error, "due")
+	wantRangeError(t, "Updates(map, zero time)", db.Model(&row).Updates(map[string]any{"due": time.Time{}}).Error, "due")
+	wantRangeError(t, "Select zero due", db.Model(&row).Select("due").Updates(rangedEvent{}).Error, "due")
+	wantRangeError(t, "Create CreatedAt year 0", db.Create(&rangedEvent{Name: "c", Due: inRange, Issued: dateFine, CreatedAt: yearZero}).Error, "created_at")
+	wantRangeError(t, "Updates(map created_at)", db.Model(&row).Updates(map[string]any{"created_at": yearZero}).Error, "created_at")
+	wantRangeError(t, "Updates(map updated_at)", db.Model(&row).Updates(map[string]any{"updated_at": yearZero}).Error, "updated_at")
+	wantRangeError(t, "UpdateColumns(struct UpdatedAt)", db.Model(&row).UpdateColumns(rangedEvent{UpdatedAt: yearZero}).Error, "updated_at")
+	wantRangeError(t, "upsert DO UPDATE", db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "id"}},
+		DoUpdates: clause.Assignments(map[string]any{"due": yearZero}),
+	}).Create(&rangedEvent{ID: row.ID, Name: "upsert", Due: inRange, Issued: dateFine}).Error, "due")
+	wantRangeError(t, "Update(column, infinity)", db.Model(&row).Update("due", "infinity").Error, "due")
+	wantRangeError(t, "Update(column, BC)", db.Model(&row).Update("issued", "0001-01-01 BC").Error, "issued_on")
+
+	var stored rangedEvent
+	if err := db.First(&stored, row.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !stored.Due.Equal(inRange) || stored.CreatedAt.Year() < 2000 || stored.UpdatedAt.Year() < 2000 {
+		t.Fatalf("a refused write changed the row: %+v", stored)
 	}
 }
 

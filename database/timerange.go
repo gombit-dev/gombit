@@ -1,12 +1,10 @@
 package database
 
 import (
-	"context"
 	"database/sql"
 	"fmt"
 	"reflect"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/gombit-dev/gombit/types"
@@ -47,106 +45,61 @@ func registerTimeRangeCallback(db *gorm.DB) error {
 	return nil
 }
 
-// timeRangeDestSchemas caches the parsed schema of an Updates(struct) Dest
-// whose type is not the model's.
-var timeRangeDestSchemas sync.Map
-
 func runTimeRangeCheck(db *gorm.DB, creating bool) {
 	if db.Error != nil || db.Statement == nil || db.Statement.Schema == nil {
 		return
 	}
-	stmt := db.Statement
-	ctx := stmt.Context
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	selected, restricted := stmt.SelectAndOmitColumns(creating, !creating)
-	written := func(column string) bool {
-		if v, ok := selected[column]; ok {
-			return v
-		}
-		return !restricted
-	}
-
+	skipHooks := db.Statement.SkipHooks
 	fields := map[string][]string{}
-	check := func(column *schema.Field, value reflect.Value) {
-		if column == nil || !isRangedTimeField(column) || !written(column.DBName) {
+	forEachAssigned(db, creating, func(a assignedValue) {
+		f := a.Field
+		if !isRangedTimeField(f) {
 			return
 		}
-		msg := timeRangeProblem(column, value)
+		// GORM writes now over an auto-update timestamp on a struct update
+		// that runs hooks, whatever the struct holds.
+		if !a.Creating && a.FromStruct && !skipHooks && f.AutoUpdateTime > 0 {
+			return
+		}
+		msg := timeRangeProblem(f, a.Value, zeroIsWritten(a))
 		if msg == "" {
 			return
 		}
-		key := timeRangeFieldKey(column)
+		key := fieldKey(f)
 		for _, have := range fields[key] {
 			if have == msg {
 				return
 			}
 		}
 		fields[key] = append(fields[key], msg)
-	}
-	checkStruct := func(rv reflect.Value) {
-		if !rv.CanAddr() {
-			copied := reflect.New(rv.Type()).Elem()
-			copied.Set(rv)
-			rv = copied
-		}
-		src := stmt.Schema
-		if rv.Type() != stmt.Schema.ModelType {
-			parsed, err := schema.Parse(rv.Addr().Interface(), &timeRangeDestSchemas, db.NamingStrategy)
-			if err != nil {
-				return
-			}
-			src = parsed
-		}
-		for _, f := range src.Fields {
-			if f.DBName != "" {
-				check(stmt.Schema.LookUpField(f.DBName), f.ReflectValueOf(ctx, rv))
-			}
-		}
-	}
-	checkMap := func(m map[string]any) {
-		for key, value := range m {
-			check(stmt.Schema.LookUpField(key), reflect.ValueOf(value))
-		}
-	}
-	var checkAny func(v reflect.Value)
-	checkAny = func(v reflect.Value) {
-		for v.IsValid() && (v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface) {
-			if v.IsNil() {
-				return
-			}
-			v = v.Elem()
-		}
-		switch v.Kind() {
-		case reflect.Map:
-			if m, ok := v.Interface().(map[string]any); ok {
-				checkMap(m)
-			}
-		case reflect.Slice, reflect.Array:
-			for i := 0; i < v.Len(); i++ {
-				checkAny(v.Index(i))
-			}
-		case reflect.Struct:
-			checkStruct(v)
-		}
-	}
-	// The Dest is what the statement writes: a create's rows or map, an
-	// update's map (Updates(map), Update(column, value)) or struct (Save,
-	// Updates(struct)).
-	checkAny(reflect.ValueOf(stmt.Dest))
-
+	})
 	if len(fields) > 0 {
 		_ = db.AddError(NewValidationError("The request contains invalid fields.", fields))
 	}
 }
 
+// zeroIsWritten reports whether a zero time in a is what reaches the column,
+// as GORM decides it. A struct field's zero is not written on an update unless
+// the column is selected, and on a create GORM fills an auto timestamp or
+// leaves a column with a default to the database. Anything the statement
+// names explicitly (a map, an upsert assignment, a Select) is written as is.
+func zeroIsWritten(a assignedValue) bool {
+	if a.Explicit || !a.FromStruct {
+		return true
+	}
+	if !a.Creating {
+		return false
+	}
+	f := a.Field
+	return f.AutoCreateTime == 0 && f.AutoUpdateTime == 0 && !f.HasDefaultValue
+}
+
 // isRangedTimeField reports whether f is a stored time.Time, sql.NullTime or
-// types.Date column (pointer or not) that the application writes. GORM's
-// auto-managed create/update timestamps are filled after this callback runs
-// and are always "now", so they are left alone.
+// types.Date column, pointer or not. Auto create/update timestamps are
+// included: GORM fills them only when they are zero, and keeps a value a
+// caller sets (a hook, a seeder, a map update naming updated_at).
 func isRangedTimeField(f *schema.Field) bool {
-	if f.DBName == "" || f.AutoCreateTime > 0 || f.AutoUpdateTime > 0 {
+	if f.DBName == "" {
 		return false
 	}
 	t := f.FieldType
@@ -158,11 +111,13 @@ func isRangedTimeField(f *schema.Field) bool {
 
 // timeRangeProblem describes why v, assigned to column, cannot be stored and
 // returned on every driver, or returns "" when it can. A string headed for the
-// column is read as the driver would read it (RFC 3339, "YYYY-MM-DD hh:mm:ss",
-// or "YYYY-MM-DD"); one that does not parse, an expression, and anything else
-// is left to the database. A zero value is Go's "not set" and is left to the
-// column (NOT NULL, a default, or GORM) as before; so is NULL.
-func timeRangeProblem(column *schema.Field, v reflect.Value) string {
+// column is read as the drivers read it (RFC 3339, "YYYY-MM-DD hh:mm:ss",
+// "YYYY-MM-DD"); one that does not parse is refused too, since PostgreSQL
+// accepts forms ('infinity', '... BC') no Go time can be read back from.
+// Expressions arrive as clause values, not strings, and are left to the
+// database, as are NULL (a nil pointer, an invalid sql.NullTime) and, when
+// zeroWritten is false, a zero value GORM will not write.
+func timeRangeProblem(column *schema.Field, v reflect.Value, zeroWritten bool) string {
 	for v.IsValid() && (v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface) {
 		if v.IsNil() {
 			return ""
@@ -184,22 +139,23 @@ func timeRangeProblem(column *schema.Field, v reflect.Value) string {
 		t = x.Time
 	case types.Date:
 		t = x.Time()
-	case string:
-		parsed, ok := parseAssignedTime(x)
-		if !ok {
-			return ""
+	case string, []byte:
+		raw := fmt.Sprint(x)
+		if b, ok := x.([]byte); ok {
+			raw = string(b)
 		}
-		t = parsed
-	case []byte:
-		parsed, ok := parseAssignedTime(string(x))
+		parsed, ok := parseAssignedTime(raw)
 		if !ok {
-			return ""
+			if dateColumn {
+				return "must be a date (YYYY-MM-DD)"
+			}
+			return "must be an RFC 3339 timestamp"
 		}
 		t = parsed
 	default:
 		return ""
 	}
-	if t.IsZero() {
+	if t.IsZero() && !zeroWritten {
 		return ""
 	}
 	var err error
@@ -217,7 +173,7 @@ func timeRangeProblem(column *schema.Field, v reflect.Value) string {
 // parseAssignedTime reads a string assigned to a timestamp or date column in
 // the forms the drivers accept.
 func parseAssignedTime(s string) (time.Time, bool) {
-	for _, layout := range []string{time.RFC3339Nano, "2006-01-02 15:04:05.999999999Z07:00", "2006-01-02 15:04:05.999999999", time.DateOnly} {
+	for _, layout := range []string{time.RFC3339Nano, "2006-01-02T15:04:05.999999999", "2006-01-02 15:04:05.999999999Z07:00", "2006-01-02 15:04:05.999999999", time.DateOnly} {
 		if t, err := time.Parse(layout, strings.TrimSpace(s)); err == nil {
 			return t, true
 		}
@@ -231,13 +187,4 @@ func isRangedDateField(f *schema.Field) bool {
 		t = t.Elem()
 	}
 	return t == rangeDateType
-}
-
-// timeRangeFieldKey names f in a ValidationError the way the API names it:
-// its JSON name, else its column.
-func timeRangeFieldKey(f *schema.Field) string {
-	if name, _, _ := strings.Cut(f.Tag.Get("json"), ","); name != "" && name != "-" {
-		return name
-	}
-	return f.DBName
 }

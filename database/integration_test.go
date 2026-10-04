@@ -68,6 +68,10 @@ func TestTimeRangeWritePathsOnPostgres(t *testing.T) {
 	db := openIntegrationDB(t, config.DatabaseConfig{Driver: config.DatabaseDriverPostgres, DSN: *postgresDSN})
 	migrateRanged(t, db)
 	testTimeRangeWritePaths(t, db)
+	migrateRanged(t, db)
+	testTimeRangeUnsetAndInRange(t, db)
+	migrateRanged(t, db)
+	testTimeRangeWhatGORMWrites(t, db)
 }
 
 func TestTimeRangeWritePathsOnMySQL(t *testing.T) {
@@ -77,6 +81,10 @@ func TestTimeRangeWritePathsOnMySQL(t *testing.T) {
 	db := openIntegrationDB(t, config.DatabaseConfig{Driver: config.DatabaseDriverMySQL, DSN: *mysqlDSN})
 	migrateRanged(t, db)
 	testTimeRangeWritePaths(t, db)
+	migrateRanged(t, db)
+	testTimeRangeUnsetAndInRange(t, db)
+	migrateRanged(t, db)
+	testTimeRangeWhatGORMWrites(t, db)
 }
 
 func TestTimeBoundsRoundTripOnPostgres(t *testing.T) {
