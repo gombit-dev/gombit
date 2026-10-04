@@ -10,7 +10,8 @@ New here? [Install](installation.md), then work through the
 | [installation.md](installation.md) | Prerequisites, install paths, verification, troubleshooting |
 | [tutorial.md](tutorial.md) | Build a task app end to end — API, migration, client, React, auth, admin |
 | [cli.md](cli.md) | Every command and flag: `new`, `dev`, `worker`, `jobs`, `build`, `make`, `generate`, `db`, `openapi`, `client`, `contract`, `routes`, `doctor`, `config`, `createsuperuser`, `version`, `upgrade` |
-| [upgrade.md](upgrade.md) | Upgrading an application between framework versions: the upgrade baseline (`gombit upgrade baseline`) |
+| [upgrade.md](upgrade.md) | Upgrading an application between framework versions: the upgrade baseline (`gombit upgrade baseline`) and the compatibility manifest (`gombit upgrade notes`) |
+| [upgrade-notes.md](upgrade-notes.md) | What each release asks of an application moving to it, rendered from the compatibility manifest |
 | [migration-model-first-resources.md](migration-model-first-resources.md) | Migrating resources from the old human-owned `handler.go` to the model-first, generator-owned layout (ADR-016) |
 
 ## Runtime

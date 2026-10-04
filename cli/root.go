@@ -125,7 +125,7 @@ func rootLongHelp() string {
 		"  config    Show typed configuration (config show)",
 		"  createsuperuser  Create a superuser (admin) account",
 		"  version   Print the gombit version and build metadata",
-		"  upgrade   Framework upgrade tooling (upgrade baseline)",
+		"  upgrade   Framework upgrade tooling (upgrade baseline, upgrade notes)",
 	}, "\n")
 }
 
@@ -151,6 +151,7 @@ func usage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "  createsuperuser [--email you@example.com] [--password ...] [--no-input]")
 	_, _ = fmt.Fprintln(w, "  version [--short]")
 	_, _ = fmt.Fprintln(w, "  upgrade baseline [--dir .] [--json] [--write]")
+	_, _ = fmt.Fprintln(w, "  upgrade notes [--release v | --from v [--to v]] [--json]")
 }
 
 func dbUsage(w io.Writer) {

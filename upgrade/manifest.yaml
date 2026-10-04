@@ -1,0 +1,117 @@
+# Gombit's compatibility manifest (docs/upgrade.md § The compatibility
+# manifest): every upgrade-relevant change of each release, classified. The
+# upgrade tooling plans from it, and the upgrade notes (docs/upgrade-notes.md,
+# the GitHub release body) are rendered from it. Regenerate the notes with
+#   go test ./upgrade -run TestUpgradeNotesDoc -update
+#
+# Every release from the first one covered is listed, even with no changes: an
+# unlisted version has no known upgrade path. The next release's changes
+# collect under `unreleased`, renamed to its version when it is cut
+# (docs/releasing.md).
+#
+# A change has:
+#   id        kebab-case, unique across the manifest
+#   kind      automatic (the tooling applies it: names an `action`),
+#             manual (the developer acts: `details` says how), or
+#             informational (nothing to do, worth knowing)
+#   breaking  whether an app can stop building or behave differently without
+#             acting
+#   area      api, behavior, cli, client, config, dependency, scaffold, schema
+#             or security
+#   summary   one line; details: Markdown; refs: issue/PR numbers
+format: 1
+releases:
+  - version: v0.6.1
+    # The first release the manifest covers: upgrades are described from here.
+
+  - version: unreleased
+    changes:
+      - id: reserved-upgrade-command
+        kind: manual
+        breaking: true
+        area: cli
+        summary: "`upgrade` is a framework command, and a reserved management-command name."
+        details: |
+          An app that registers its own `upgrade` command loses it: the
+          framework's is added first, and Cobra resolves to it. Rename the
+          app's command (and its `internal/<pkg>/commands.go` registration).
+        refs: [341]
+
+      - id: record-upgrade-baseline
+        kind: automatic
+        action: record-baseline
+        area: scaffold
+        summary: "`gombit new` records the app's upgrade baseline in a `gombit:` block of `gombit.yaml`."
+        details: |
+          An app generated before records none, and is detected as scaffold
+          version 0. `gombit upgrade baseline --write` records it.
+        refs: [341]
+
+      - id: admin-composite-primary-keys
+        kind: manual
+        breaking: true
+        area: api
+        summary: "`admin.Register` refuses a model whose primary key spans several columns."
+        details: |
+          Such a model used to register, and the admin addressed its rows by
+          the first key column alone. Startup now fails with `admin: <Model>
+          has a composite primary key, which is not supported`. Give the
+          model a single-column primary key, or keep it out of the admin
+          registry.
+        refs: [453]
+
+      - id: stop-hook-shutdown-budget
+        kind: manual
+        area: behavior
+        summary: "`OnStop` hooks get their own shutdown-timeout budget, so a full shutdown can take longer."
+        details: |
+          A shutdown can now take the drain delay plus up to twice the
+          shutdown timeout (`framework.WithShutdownTimeout`, 10s by default).
+          Check that the orchestrator's termination grace period (Kubernetes
+          `terminationGracePeriodSeconds`, ECS `stopTimeout`) still covers
+          it.
+        refs: [431]
+
+      - id: sanitize-html-stray-angle-bracket
+        kind: informational
+        area: security
+        summary: "`framework.SanitizeHTML` keeps text after a stray `<` when the value also has a real tag."
+        details: |
+          That tail comes back as `SanitizeHTML` returns a value with no
+          complete tag: raw, undecoded input. It is no safer than that case;
+          escape on output as before.
+        refs: [433]
+
+      - id: admin-csp-allows-storage-origin
+        kind: informational
+        area: security
+        summary: "The admin and embedded SPA pages' Content-Security-Policy allows the object store's origin for images and requests."
+        details: |
+          With a remote store (an S3 bucket, a CDN), its origin joins the
+          policy's `img-src` and `connect-src`, so file previews and direct
+          uploads work. Review it if the store's origin is shared with
+          content you do not control.
+        refs: [330]
+
+      - id: request-timeout-response-reaches-client
+        kind: informational
+        area: behavior
+        summary: "With `GOMBIT_HTTP_REQUEST_TIMEOUT` set, the 504 a timed-out handler writes reaches the client; `WriteTimeout` is the request timeout plus 5s."
+        refs: [430]
+
+      - id: panicking-requests-in-metrics
+        kind: informational
+        area: behavior
+        summary: "Requests whose handler panics are counted in `gombit_http_requests_total` (as 500, or the status already sent)."
+        refs: [432]
+
+      - id: object-storage
+        kind: informational
+        area: schema
+        summary: "Object storage (`app.Storage()`, `GOMBIT_STORAGE_*`) and storage-backed `file` / `image` model fields."
+        details: |
+          File fields record ownership in a framework table, `storage_claims`,
+          which new apps' migrations create. An existing app that adopts file
+          fields adds the table to its migrations (`claims.Models()`; see
+          docs/storage.md, "Setup").
+        refs: [279]

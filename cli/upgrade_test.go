@@ -100,3 +100,57 @@ func TestUpgradeRefuses(t *testing.T) {
 		t.Fatalf("upgrade without a subcommand = %v", err)
 	}
 }
+
+// TestUpgradeNotes: the notes come from the embedded manifest; a path the
+// manifest does not describe fails rather than guessing.
+func TestUpgradeNotes(t *testing.T) {
+	m, err := upgrade.LoadManifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, latest := m.Releases[0].Version, m.Latest()
+
+	out, err := runUpgradeCLI(t, "notes")
+	if err != nil || !strings.Contains(out, "## "+latest+"\n") || !strings.Contains(out, "The first release the compatibility manifest covers") {
+		t.Fatalf("notes = %q, %v", out, err)
+	}
+	var want strings.Builder
+	r, err := m.Release(latest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.RenderNotes(&want, []upgrade.Release{r}); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := runUpgradeCLI(t, "notes", "--release", latest); err != nil || out != want.String() {
+		t.Fatalf("notes --release %s = %q, %v; want %q", latest, out, err, want.String())
+	}
+
+	out, err = runUpgradeCLI(t, "notes", "--from", first, "--json")
+	var got struct {
+		Releases       []upgrade.Release      `json:"releases"`
+		Classification upgrade.Classification `json:"classification"`
+	}
+	if err != nil || json.Unmarshal([]byte(out), &got) != nil || got.Classification.Manual == nil {
+		t.Fatalf("notes --from %s --json = %s, %v", first, out, err)
+	}
+	path, _ := m.Path(first, latest)
+	if len(got.Releases) != len(path) {
+		t.Fatalf("notes --from %s: %d releases, want %d", first, len(got.Releases), len(path))
+	}
+
+	for _, tc := range []struct {
+		args []string
+		msg  string
+	}{
+		{[]string{"notes", "--from", "v0.0.1"}, "no upgrade path"},
+		{[]string{"notes", "--from", first, "--to", "v99.0.0"}, "upgrade the gombit CLI"},
+		{[]string{"notes", "--release", "v99.0.0"}, "no release v99.0.0"},
+		{[]string{"notes", "--to", latest}, "--to needs --from"},
+		{[]string{"notes", "--release", latest, "--from", first}, "cannot be combined"},
+	} {
+		if _, err := runUpgradeCLI(t, tc.args...); err == nil || !strings.Contains(err.Error(), tc.msg) {
+			t.Fatalf("%v = %v; want an error mentioning %q", tc.args, err, tc.msg)
+		}
+	}
+}

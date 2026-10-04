@@ -279,6 +279,23 @@ version.
   - `gombit upgrade baseline [--dir] [--json] [--write]`, and
     [docs/upgrade.md](docs/upgrade.md)
     ([#341](https://github.com/gombit-dev/gombit/issues/341)).
+- The compatibility manifest (UPGRADE-2). It provides:
+  - `upgrade/manifest.yaml`, built into `gombit`, which lists every release
+    from v0.6.1 and its upgrade-relevant changes. Each change is classified
+    `manual`, `automatic` (it names an action this framework implements) or
+    `informational`, can be marked `breaking`, and names its area. The
+    manifest is validated strictly.
+  - `upgrade.LoadManifest`, `Manifest.Path`, and `Classify`. A version the
+    manifest does not list fails with `ErrNoUpgradePath` and the reason
+    (older than its first release, newer than the CLI, a pseudo-version, a
+    downgrade); it never guesses.
+  - `gombit upgrade notes [--release | --from [--to]] [--json]`.
+  - Upgrade notes rendered from the manifest:
+    [docs/upgrade-notes.md](docs/upgrade-notes.md), checked for drift, and
+    the top of each GitHub release body. The release workflow fails before
+    publishing a release the manifest does not list
+    ([docs/releasing.md](docs/releasing.md))
+    ([#342](https://github.com/gombit-dev/gombit/issues/342)).
 
 ### Changed
 

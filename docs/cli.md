@@ -40,6 +40,7 @@ go run ./cmd/gombit --help
 | `gombit jobs …` | Inspect, retry, and delete failed jobs | JOBS-6 |
 | `gombit version` | Print version and build metadata | REL-4 |
 | `gombit upgrade baseline` | Show (or record) the app's upgrade baseline: framework and scaffold versions | UPGRADE-1 |
+| `gombit upgrade notes` | Print upgrade notes from the compatibility manifest | UPGRADE-2 |
 
 ## Generator golden tests
 
@@ -841,3 +842,21 @@ selects the app. Nothing is written without `--write`. See
 | `--dir` | Application directory (`go.mod`, `gombit.yaml`) | `.` |
 | `--json` | Print the baseline as JSON | off |
 | `--write` | Record a detected baseline in `gombit.yaml` | off |
+
+## `gombit upgrade notes`
+
+Prints upgrade notes from the **compatibility manifest** built into this
+`gombit`: each release's upgrade-relevant changes, classified as manual,
+automatic, or informational, with breaking ones marked. The release notes and
+[upgrade-notes.md](upgrade-notes.md) are rendered from the same manifest.
+With no flags, it prints every release, newest first. A version the manifest
+does not list fails with the reason (older than its first release, newer than
+this CLI, a pseudo-version, a downgrade). It never guesses. See
+[upgrade.md](upgrade.md#the-compatibility-manifest).
+
+| Flag | Meaning | Default |
+| --- | --- | --- |
+| `--release` | One release's notes (a version, or `unreleased`) | — |
+| `--from` | The notes of an upgrade from this version | — |
+| `--to` | With `--from`, the target version | the newest release this CLI knows |
+| `--json` | Print the releases and their classified changes as JSON | off |

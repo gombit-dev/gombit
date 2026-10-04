@@ -22,6 +22,26 @@ automatically on merge.
    [`installation.md`](installation.md).
 5. **Decide the number.** Pre-1.0, breaking changes bump the minor
    (`0.1.0` → `0.2.0`); fixes bump the patch.
+6. **Name the release in the compatibility manifest**
+   ([`upgrade/manifest.yaml`](../upgrade/manifest.yaml)). Rename its
+   `unreleased` entry to the version, or add a `- version: vX.Y.Z` entry
+   with no changes if there is none: every release is listed, or upgrades
+   from it have no known path. Check that the upgrade-relevant changes of
+   the CHANGELOG entry are there, classified (see
+   [upgrade.md](upgrade.md#the-compatibility-manifest)), then regenerate
+   [`upgrade-notes.md`](upgrade-notes.md) and preview the release body:
+
+   ```bash
+   go test ./upgrade -run TestUpgradeNotesDoc -update
+   go run ./cmd/gombit upgrade notes --release v0.1.0
+   ```
+
+   The release workflow puts these notes at the top of the GitHub release,
+   and fails, before publishing, a release the manifest does not list. From
+   the Actions tab that happens before the tag is created. **A pushed tag is
+   already public** when the check runs, and since a tag is never moved, a
+   missing entry then costs a new patch version. Run the preview above
+   before pushing one.
 
 ## Cut the release
 

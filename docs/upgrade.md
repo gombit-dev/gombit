@@ -7,8 +7,9 @@ own code, configuration, generated client or database needs. The `gombit
 upgrade` tooling works that out for you, and proposes changes for review: it
 never rewrites code you own without an explicit write action.
 
-This page grows with the UPGRADE-0 epic. Today it covers the **baseline**:
-where an application stands.
+This page grows with the UPGRADE-0 epic. Today it covers the **baseline**
+(where an application stands) and the **compatibility manifest** (what each
+release asks of an application moving to it).
 
 ## The baseline
 
@@ -77,3 +78,56 @@ nothing for an app that already records its baseline. A `gombit.yaml` the
 block cannot simply be appended to (a flow-style `{...}` mapping, or several
 YAML documents) is left alone, and the command prints the block to add by
 hand. Commit the change with the app.
+
+## The compatibility manifest
+
+Every framework release declares its upgrade-relevant changes in a
+machine-readable manifest, [`upgrade/manifest.yaml`](../upgrade/manifest.yaml),
+built into the `gombit` binary. It is the single source for:
+
+- the upgrade tooling, which plans an upgrade from it;
+- [upgrade-notes.md](upgrade-notes.md), rendered from it (a test fails when
+  the page is stale);
+- the top of each GitHub release's notes, rendered from it by the release
+  workflow.
+
+Each change is classified by what moving across it takes:
+
+| Kind | Meaning |
+| --- | --- |
+| `manual` | The developer acts; the change says how. |
+| `automatic` | The upgrade tooling applies it, as a reviewable change. It names the action that does it, and the manifest is refused if this framework does not implement that action. |
+| `informational` | Nothing to do, but worth knowing when moving across it. |
+
+A change of any kind can be `breaking`: an app can stop building, or behave
+differently, across it without acting. Each change also names the `area` it
+touches (`api`, `behavior`, `cli`, `client`, `config`, `dependency`,
+`scaffold`, `schema`, `security`), a one-line `summary`, Markdown `details`,
+and the issues or pull requests behind it.
+
+The manifest lists **every release** from the first one it covers (v0.6.1),
+including releases with nothing to declare, so a version it does not list is
+not a version with no changes. It has no known upgrade path, and the tooling
+says why instead of guessing:
+
+- a release older than the first one covered (see the
+  [changelog](../CHANGELOG.md));
+- a release newer than this `gombit` knows: upgrade the CLI first;
+- a pseudo-version or an untagged commit: use a tagged release;
+- a downgrade.
+
+Print the notes:
+
+```text
+$ gombit upgrade notes                      # every release, newest first
+$ gombit upgrade notes --release v0.7.0     # one release
+$ gombit upgrade notes --from v0.6.1        # an upgrade, to the newest release
+$ gombit upgrade notes --from v0.6.1 --to v0.7.0 --json
+```
+
+`--json` prints the releases and their changes, classified (`automatic`,
+`manual`, `informational`, and `breaking` across all three).
+
+The changes of the next release collect under an `unreleased` entry, which
+is renamed to the release's version when it is cut
+([releasing.md](releasing.md)).

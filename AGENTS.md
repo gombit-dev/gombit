@@ -67,7 +67,11 @@ widgets (upload grants, previews, cleanup after commit; STORAGE-8). The
 **UPGRADE-0** epic (#281) has started: `upgrade` detects an app's upgrade
 baseline (framework version from `go.mod`, scaffold version from the
 `gombit:` block `gombit new` writes to `gombit.yaml`, scaffold 0 for older
-apps), shown and recorded by `gombit upgrade baseline` (UPGRADE-1). The other batteries
+apps), shown and recorded by `gombit upgrade baseline` (UPGRADE-1), and the
+compatibility manifest `upgrade/manifest.yaml` (every release's changes,
+classified manual/automatic/informational; `Manifest.Path` refuses unlisted
+versions), the source of `gombit upgrade notes`, `docs/upgrade-notes.md` and
+the release body (UPGRADE-2). The other batteries
 (events, scheduler, mail, gRPC, multi-tenancy, i18n) are not here yet.
 The **CHAOS-0** resilience suite is in: `internal/faulttest` (deterministic
 fault injection: a faulting `database/sql` driver, a scripted HTTP
