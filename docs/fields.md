@@ -31,7 +31,15 @@ projections of that kind, not separate lists.
 
 `time` on the command line is a **datetime** (`time.Time`), kept as a
 compatibility alias. `date` is a calendar date (`types.Date`, JSON
-`YYYY-MM-DD`). `datetime` is a timestamp. `time_of_day` is a clock
+`YYYY-MM-DD`). `datetime` is a timestamp. A generated create body accepts a
+`datetime` (`time.Time`, `sql.NullTime` when valid) between
+`1000-01-02T00:00:00Z` and `9999-12-30T23:59:59Z` and a `date` between
+`1000-01-01` and `9999-12-31` (`types.TimeBounds`, `types.DateBounds`), and
+answers anything else with a 422 on that field: MySQL stores no earlier year,
+and a timestamp outside years 0..9999 in the time zone it is read into cannot
+be encoded as JSON (Postgres would store year 0 as 1 BC and then fail every
+read of the row). The timestamp bounds keep a day's margin for that time-zone
+conversion. The admin data plane does not apply these bounds. `time_of_day` is a clock
 (`types.TimeOfDay`, JSON `HH:MM:SS`) stored as `char(8)` so SQLite,
 PostgreSQL, and MySQL share one sortable text form. The request pattern,
 the admin write, and `types.TimeOfDay` accept the same spellings: `HH:MM`,
