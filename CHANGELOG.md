@@ -217,7 +217,9 @@ version.
     to it.
   - `storage/claims` claims record a scope (`upload.Policy.Scope`);
     `upload.Confirm` accepts only a key claimed for its policy's scope
-    (`claims.Promote` matches it, new `claims.Belongs`).
+    (`claims.Promote` matches it, new `claims.Lookup`); a key with no live
+    claim (expired, swept, discarded by a failed write, never granted) is
+    `upload.ErrExpired`, told apart from another field's key.
   - The runtime is `storage/filefield`.
   - Admin support (file widget, uploads, deletion through the claims)
     comes with STORAGE-8, below.
@@ -233,9 +235,20 @@ version.
   - an explicit `Field.Column` alone picks the model field the admin reads
     and writes (it used to race `Name` in schema order), so the file guards
     and the accessors agree on one column;
-  - an update writes a file column only when it changes its key (a
-    concurrent replacement makes it a 409, nothing written) and leaves
-    unchanged and unmapped file columns out of the write;
+  - updates and deletes are fenced on the file keys they loaded (empty ones
+    included): a concurrent attach, replacement or removal of a file makes
+    them a 409 with nothing written (a delete's 409 is no longer a 500), and
+    an update leaves unchanged and unmapped file columns out of the write;
+  - a blank key (`""`, or a file object with an empty key) is no file, so a
+    required file field refuses it on create and update;
+  - an explicit file field must be declared as its column's own kind
+    (`image` for an image column), and file fields need the host's storage;
+  - a file column the admin does not map (hidden, or left out of explicit
+    `Fields`) turns delete off, and create when it is required; asking for
+    either is a registration error;
+  - an upload a failed save discarded is reported as expired ("choose the
+    file again", `upload.ErrExpired`), not as another field's, and the SPA
+    drops such uploads from the form after a non-field failure;
   - `POST /admin/resources/{slug}/uploads/{field}` grants a direct upload,
     and needs create or update permission;
   - writes accept a key only for an upload under the field's prefix that

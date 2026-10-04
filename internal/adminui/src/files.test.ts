@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { FieldMeta, UploadGrant } from "./api/types";
-import { acceptAttribute, accepts, asFileValue, fileBodyValue, fileLabel, uploadFile } from "./files";
+import { acceptAttribute, accepts, asFileValue, fileBodyValue, fileLabel, freshFileFields, uploadFile } from "./files";
 import { emptyFormValue, formValuesToBody, formatCell, rowToFormValues } from "./fields";
 
 function field(partial: Pick<FieldMeta, "name" | "type"> & Partial<FieldMeta>): FieldMeta {
@@ -69,5 +69,23 @@ describe("uploadFile", () => {
     const client = { uploadGrant: vi.fn().mockResolvedValue({ data: grant }) };
     const send = vi.fn().mockResolvedValue(new Response(null, { status: 403 }));
     await expect(uploadFile(client, "papers", cover, new File(["x"], "c.png", { type: "image/png" }), send)).rejects.toThrow(/403/);
+  });
+});
+
+describe("freshFileFields", () => {
+  const fields = [
+    { name: "doc", type: "file" },
+    { name: "photo", type: "image" },
+    { name: "title", type: "string" },
+  ] as FieldMeta[];
+  it("names the file fields whose value is not the loaded one", () => {
+    const initial = { doc: { key: "a" }, photo: null, title: "t" };
+    const current = { doc: { key: "a" }, photo: { key: "fresh" }, title: "changed" };
+    expect(freshFileFields(fields, current, initial)).toEqual(["photo"]);
+  });
+  it("counts a replaced file and a removed one", () => {
+    const initial = { doc: { key: "a" }, photo: { key: "p" } };
+    const current = { doc: "b", photo: null };
+    expect(freshFileFields(fields, current, initial)).toEqual(["doc", "photo"]);
   });
 });

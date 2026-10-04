@@ -155,7 +155,7 @@ func TestAccept(t *testing.T) {
 	}
 	for key, want := range map[string]error{
 		"documents/cover/granted": upload.ErrNoFile,
-		"documents/cover/never":   upload.ErrMalformed,
+		"documents/cover/never":   upload.ErrExpired,
 		"other/cover/stolen":      upload.ErrMalformed,
 		"documents/cover/script":  upload.ErrType,
 	} {
@@ -367,8 +367,8 @@ func TestAFailedCreateNeedsANewUpload(t *testing.T) {
 	if err := create(1, key); err == nil {
 		t.Fatal("an insert with a taken id succeeded")
 	}
-	if err := create(2, key); !errors.Is(err, upload.ErrMalformed) {
-		t.Fatalf("resubmitting the abandoned key = %v, want ErrMalformed (it must be uploaded again)", err)
+	if err := create(2, key); !errors.Is(err, upload.ErrExpired) {
+		t.Fatalf("resubmitting the abandoned key = %v, want ErrExpired (it must be uploaded again)", err)
 	}
 	if err := create(2, newUpload()); err != nil {
 		t.Fatalf("the create with a new upload = %v", err)

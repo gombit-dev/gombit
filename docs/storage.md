@@ -247,12 +247,15 @@ never claimed, deletes nothing.
 
 **Scope.** Each key is claimed for its policy's `Scope` (a field:
 `"user.avatar"`, at most 255 bytes), and `upload.Confirm` accepts only a key
-claimed for the same scope (`claims.Promote` matches it, `claims.Belongs`
+claimed for the same scope (`claims.Promote` matches it, `claims.Lookup`
 checks a retried confirmation). So a grant from one field cannot be
 attached to another, even with the same or an overlapping prefix and a
 policy its bytes pass, which would also skip the other field's decision on
-who may upload. Give every policy sharing a store under claims its own
-scope; generated resources use `"<package>.<column>"`.
+who may upload (`upload.ErrMalformed`). A key with no live claim at all
+(an upload that expired, was swept, was discarded by a failed write, or was
+never granted) is `upload.ErrExpired`: upload the file again. Give every
+policy sharing a store under claims its own scope; generated resources use
+`"<package>.<column>"`.
 
 **Recording an upload.** Write the record with `CreateWith`. It runs your
 insert in a transaction that also moves the key from `pending` to `held`,

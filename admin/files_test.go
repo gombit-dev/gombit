@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/danielgtaylor/huma/v2"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/bcrypt"
@@ -183,7 +184,7 @@ func TestAdminFileFields(t *testing.T) {
 	junk := uploadFile(t, app, jar, "photo", []byte("<!DOCTYPE html><script>x</script>"), "image/png")
 	for body, want := range map[string]string{
 		fmt.Sprintf(`{"title":"c","doc":%q}`, doc):                  "attached to another record",
-		`{"title":"c","doc":"papers/doc/never"}`:                    "not an upload for this field", // never granted
+		`{"title":"c","doc":"papers/doc/never"}`:                    "choose the file again", // never granted
 		`{"title":"c","doc":"elsewhere/x"}`:                         "not an upload for this field",
 		fmt.Sprintf(`{"title":"c","doc":%q,"photo":%q}`, doc, junk): "",
 	} {
@@ -296,7 +297,7 @@ func TestAdminFilesOnTheVersionedPath(t *testing.T) {
 		t.Fatalf("the current file's claim = %+v, %v; want held", claim, err)
 	}
 	rec = doRequest(app, jar, http.MethodPatch, base+"/"+id, `{"scan":"ledgers/scan/never"}`)
-	if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "not an upload for this field") {
+	if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "choose the file again") {
 		t.Fatalf("versioned update with a key never uploaded = %d %s", rec.Code, rec.Body)
 	}
 }
@@ -438,5 +439,222 @@ func TestAdminReplaceLosesToAConcurrentReplacement(t *testing.T) {
 	}
 	if exists(t, app, doc2) {
 		t.Fatal("the losing write's upload was kept")
+	}
+}
+
+// afterLoad runs fn once, right after the next query on table, committing on
+// its own: another writer's change landing between an admin request's load
+// and its write.
+func afterLoad(t *testing.T, db *gorm.DB, table string, fn func(tx *gorm.DB)) {
+	t.Helper()
+	armed := true
+	name := "test:after-load-" + t.Name()
+	if err := db.Callback().Query().After("gorm:query").Register(name, func(tx *gorm.DB) {
+		if armed && tx.Statement.Table == table {
+			armed = false
+			fn(tx.Session(&gorm.Session{NewDB: true}))
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Callback().Query().Remove(name) })
+}
+
+// TestAdminFileRaces: the admin's writes are fenced on the file keys they
+// loaded, including empty ones, so a first attach or a delete that races
+// another writer's attach answers 409 and writes nothing: no file is left
+// held with no row referring to it.
+func TestAdminFileRaces(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	app := newFileApp(t)
+	jar := loginSuperuser(t, app)
+	base := apiPrefix(app) + "/admin/resources/papers"
+	doc := uploadFile(t, app, jar, "doc", pdfBytes, "application/pdf")
+	rec := doRequest(app, jar, http.MethodPost, base, fmt.Sprintf(`{"title":"a","doc":%q}`, doc))
+	var created rowEnvelope
+	_ = json.Unmarshal(rec.Body.Bytes(), &created)
+	id := asInt(created.Data["id"])
+
+	// First attach: the photo is empty; another writer attaches P1 after
+	// the admin loaded the row, while the admin attaches P2.
+	p1 := types.Image("papers/photo/p1")
+	p2 := uploadFile(t, app, jar, "photo", pngBytes, "image/png")
+	afterLoad(t, app.DB(), "papers", func(tx *gorm.DB) {
+		if err := tx.Exec("UPDATE papers SET photo = ? WHERE id = ?", string(p1), id).Error; err != nil {
+			t.Error(err)
+		}
+	})
+	rec = doRequest(app, jar, http.MethodPatch, fmt.Sprintf("%s/%d", base, id), fmt.Sprintf(`{"photo":%q}`, p2))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("a first attach racing another = %d %s, want 409", rec.Code, rec.Body)
+	}
+	var paper Paper
+	if err := app.DB().First(&paper, id).Error; err != nil || paper.Photo == nil || *paper.Photo != p1 {
+		t.Fatalf("the row = %+v, %v; want the other writer's photo", paper, err)
+	}
+	if exists(t, app, p2) {
+		t.Fatal("the losing attach's upload was kept (held by nothing)")
+	}
+
+	// Delete: the photo is cleared, the admin loads the row, another writer
+	// attaches P3, then the admin deletes.
+	if err := app.DB().Model(&Paper{}).Where("id = ?", id).Update("photo", nil).Error; err != nil {
+		t.Fatal(err)
+	}
+	p3 := types.Image("papers/photo/p3")
+	afterLoad(t, app.DB(), "papers", func(tx *gorm.DB) {
+		if err := tx.Exec("UPDATE papers SET photo = ? WHERE id = ?", string(p3), id).Error; err != nil {
+			t.Error(err)
+		}
+	})
+	rec = doRequest(app, jar, http.MethodDelete, fmt.Sprintf("%s/%d", base, id), "")
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("a delete racing an attach = %d %s, want 409", rec.Code, rec.Body)
+	}
+	var n int64
+	app.DB().Model(&Paper{}).Where("id = ?", id).Count(&n)
+	if n != 1 || !exists(t, app, doc) {
+		t.Fatalf("after the refused delete: %d rows, doc kept %v; want both", n, exists(t, app, doc))
+	}
+}
+
+// TestAdminRequiredFileRefusesTheEmptyKey: a blank key ("" or a file object
+// with an empty key) is no file. A required file field refuses it, on
+// create and on update (which would otherwise release and delete the
+// file); an optional one is cleared by it.
+func TestAdminRequiredFileRefusesTheEmptyKey(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	app := newFileApp(t)
+	jar := loginSuperuser(t, app)
+	base := apiPrefix(app) + "/admin/resources/papers"
+	for _, body := range []string{`{"title":"x","doc":""}`, `{"title":"x","doc":{"key":""}}`} {
+		if rec := doRequest(app, jar, http.MethodPost, base, body); rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "is required") {
+			t.Fatalf("create %s = %d %s, want 422 is required", body, rec.Code, rec.Body)
+		}
+	}
+	var n int64
+	app.DB().Model(&Paper{}).Count(&n)
+	if n != 0 {
+		t.Fatalf("%d papers stored with an empty key", n)
+	}
+	doc := uploadFile(t, app, jar, "doc", pdfBytes, "application/pdf")
+	photo := uploadFile(t, app, jar, "photo", pngBytes, "image/png")
+	rec := doRequest(app, jar, http.MethodPost, base, fmt.Sprintf(`{"title":"a","doc":%q,"photo":%q}`, doc, photo))
+	var created rowEnvelope
+	_ = json.Unmarshal(rec.Body.Bytes(), &created)
+	id := fmt.Sprint(asInt(created.Data["id"]))
+	for _, body := range []string{`{"doc":""}`, `{"doc":{"key":""}}`} {
+		if rec := doRequest(app, jar, http.MethodPatch, base+"/"+id, body); rec.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("update %s = %d %s, want 422", body, rec.Code, rec.Body)
+		}
+	}
+	if !exists(t, app, doc) {
+		t.Fatal("a blank key deleted the required file")
+	}
+	if rec := doRequest(app, jar, http.MethodPatch, base+"/"+id, `{"photo":""}`); rec.Code != http.StatusOK || exists(t, app, photo) {
+		t.Fatalf("clearing the optional photo = %d %s (kept %v)", rec.Code, rec.Body, exists(t, app, photo))
+	}
+}
+
+// TestAdminFileFieldKindMatchesTheColumn: an explicit field on a file or
+// image column is declared as the column's own kind. TypeFile on an image
+// column would run the generic policy (any type, HTML included) on a column
+// the model declares an image; it is a registration error, as is any other
+// type.
+func TestAdminFileFieldKindMatchesTheColumn(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	app := newFileApp(t)
+	id := admin.Field{Name: "id", Type: admin.TypeInteger, ReadOnly: true}
+	title := admin.Field{Name: "title", Type: admin.TypeString}
+	doc := admin.Field{Name: "doc", Type: admin.TypeFile}
+	for name, photo := range map[string]admin.Field{
+		"file on an image": {Name: "photo", Type: admin.TypeFile},
+		"string":           {Name: "photo", Type: admin.TypeString},
+	} {
+		err := admin.Register(app, Paper{}, admin.Options{Slug: "papers-" + strings.ReplaceAll(name, " ", "-"), Fields: []admin.Field{id, title, doc, photo}})
+		if err == nil || !strings.Contains(err.Error(), `declare it as "image"`) {
+			t.Errorf("Register() with photo as %s = %v, want an error", name, err)
+		}
+	}
+	if err := admin.Register(app, Paper{}, admin.Options{Slug: "papers-images", Fields: []admin.Field{id, title, doc, {Name: "photo", Type: admin.TypeImage}}}); err != nil {
+		t.Fatalf("Register() with photo as an image = %v", err)
+	}
+	if err := admin.Register(app, Paper{}, admin.Options{Slug: "papers-doc-image", Fields: []admin.Field{id, title, {Name: "doc", Type: admin.TypeImage}}}); err == nil {
+		t.Fatal("Register() with a file column as an image succeeded")
+	}
+}
+
+// noStore is a Host without object storage.
+type noStore struct{ app *framework.App }
+
+func (h noStore) API() huma.API         { return h.app.API() }
+func (h noStore) DB() *gorm.DB          { return h.app.DB() }
+func (h noStore) Config() config.Config { return h.app.Config() }
+func (h noStore) Router() *gin.Engine   { return h.app.Router() }
+
+// TestAdminFileFieldsNeedStorage: file fields are written through the
+// claims, over the host's store; a host without one cannot register them
+// (clearing a file or deleting a row would strand the claims).
+func TestAdminFileFieldsNeedStorage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	app := newFileApp(t)
+	if err := admin.Register(noStore{app}, Paper{}, admin.Options{Slug: "papers-nostore"}); err == nil || !strings.Contains(err.Error(), "no object storage") {
+		t.Fatalf("Register() of file fields on a host without storage = %v, want an error", err)
+	}
+}
+
+// Notice has a hidden file column (gombit:"server": the derived fields
+// leave it out), so the admin does not write it through the claims.
+type Notice struct {
+	gorm.Model
+	Title  string      `gorm:"not null"`
+	Signed *types.File `gorm:"size:512;uniqueIndex" gombit:"server" storage:"prefix=notices/signed/"`
+}
+
+// TestAdminHiddenFileColumn: a file column the admin does not map (hidden
+// here) gets no admin action it cannot honour: delete is off (meta, 403)
+// and asking for it is a registration error; an update leaves the column
+// out of its write, so a concurrent replacement of it survives a PATCH.
+func TestAdminHiddenFileColumn(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	app := newFileApp(t)
+	if err := app.DB().AutoMigrate(&Notice{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := admin.Register(app, Notice{}, admin.Options{Slug: "notices"}); err != nil {
+		t.Fatal(err)
+	}
+	explicit := admin.Options{Slug: "notices-all", Actions: admin.Actions{List: true, Detail: true, Update: true, Delete: true}}
+	if err := admin.Register(app, Notice{}, explicit); err == nil || !strings.Contains(err.Error(), "cannot delete") {
+		t.Fatalf("Register() with Delete and a hidden file column = %v, want an error", err)
+	}
+	jar := loginSuperuser(t, app)
+	meta := doRequest(app, jar, http.MethodGet, apiPrefix(app)+"/admin/meta/notices", "")
+	if !strings.Contains(meta.Body.String(), `"delete":false`) {
+		t.Fatalf("meta = %s; want delete off", meta.Body)
+	}
+	old, newer := types.File("notices/signed/old"), types.File("notices/signed/new")
+	n := Notice{Title: "a", Signed: &old}
+	if err := app.DB().Create(&n).Error; err != nil {
+		t.Fatal(err)
+	}
+	base := fmt.Sprintf("%s/admin/resources/notices/%d", apiPrefix(app), n.ID)
+	if rec := doRequest(app, jar, http.MethodDelete, base, ""); rec.Code != http.StatusForbidden {
+		t.Fatalf("DELETE = %d %s, want 403", rec.Code, rec.Body)
+	}
+	afterLoad(t, app.DB(), "notices", func(tx *gorm.DB) {
+		if err := tx.Exec("UPDATE notices SET signed = ? WHERE id = ?", string(newer), n.ID).Error; err != nil {
+			t.Error(err)
+		}
+	})
+	if rec := doRequest(app, jar, http.MethodPatch, base, `{"title":"b"}`); rec.Code != http.StatusOK {
+		t.Fatalf("PATCH = %d %s", rec.Code, rec.Body)
+	}
+	var got Notice
+	if err := app.DB().First(&got, n.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if got.Title != "b" || got.Signed == nil || *got.Signed != newer {
+		t.Fatalf("after the PATCH: %+v; want the title changed and the hidden column's replacement kept", got)
 	}
 }

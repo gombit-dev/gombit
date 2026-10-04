@@ -109,7 +109,7 @@ type Claim struct {
 	// key, and the key is written only by promotion.
 	Staged bool `gorm:"not null;default:false"`
 	// Scope names who the key was claimed for (upload.Policy.Scope: a
-	// field, say), and only that scope may confirm it (Promote, Belongs):
+	// field, say), and only that scope may confirm it (Promote, Lookup):
 	// a grant for one field cannot be attached to another, whatever their
 	// prefixes. Empty is a scope of its own.
 	Scope string `gorm:"size:255;not null;default:''"`
@@ -269,19 +269,24 @@ func (c *Claims) Promote(ctx context.Context, key, scope string, until time.Time
 	return res.RowsAffected == 1, nil
 }
 
-// Belongs reports whether key is claimed for scope, and not being deleted:
-// a confirmation of a key that is not a staged upload awaiting it (already
-// promoted or held, or stored by Save) must still belong to the scope that
-// confirms it.
-func (c *Claims) Belongs(ctx context.Context, key, scope string) (bool, error) {
-	var n int64
-	err := c.db.WithContext(ctx).Model(&Claim{}).
-		Where("object_key = ? AND scope = ? AND state IN ?", key, scope, []string{Pending, Promoting, Held}).
-		Count(&n).Error
-	if err != nil {
-		return false, fmt.Errorf("claims: %q: %w", key, err)
+// Lookup reports the scope key is claimed for, and whether that claim is
+// live (pending, promoting or held; not being deleted, nor gone): a
+// confirmation of a key that is not a staged upload awaiting it (already
+// promoted or held, or stored by Save) must still be live and belong to the
+// scope that confirms it. A key with no live claim is an upload that
+// expired, was discarded (a failed write abandons the uploads it named),
+// or was never granted.
+func (c *Claims) Lookup(ctx context.Context, key string) (scope string, live bool, err error) {
+	var found []Claim
+	if err := c.db.WithContext(ctx).
+		Where("object_key = ? AND state IN ?", key, []string{Pending, Promoting, Held}).
+		Limit(1).Find(&found).Error; err != nil {
+		return "", false, fmt.Errorf("claims: %q: %w", key, err)
 	}
-	return n > 0, nil
+	if len(found) == 0 {
+		return "", false, nil
+	}
+	return found[0].Scope, true, nil
 }
 
 // Publishing records token, the copy promotion is about to publish to key

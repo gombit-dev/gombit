@@ -151,7 +151,7 @@ func (h *handlers) createResource(ctx context.Context, input *writeInput) (*rowO
 		return nil, err
 	}
 	if err := h.writeFiles(ctx, cl, db, m, nil, inst, func(tx *gorm.DB) error {
-		return persistWithM2M(ctx, tx, m, inst, m2mIDs, true, nil)
+		return persistWithM2M(ctx, tx, m, inst, m2mIDs, true, nil, nil)
 	}); err != nil {
 		return nil, err
 	}
@@ -220,7 +220,7 @@ func (h *handlers) updateResource(ctx context.Context, input *patchInput) (*rowO
 		return nil, err
 	}
 	if err := h.writeFiles(ctx, cl, db, m, before, inst, func(tx *gorm.DB) error {
-		return persistWithM2M(ctx, tx, m, inst, m2mIDs, false, m.updateOmits(before, inst))
+		return persistWithM2M(ctx, tx, m, inst, m2mIDs, false, m.updateOmits(before, inst), m.fileFence(before))
 	}); err != nil {
 		return nil, err
 	}
@@ -260,6 +260,7 @@ func (h *handlers) updateVersioned(ctx context.Context, m *registered, inst any,
 		res := tx.WithContext(ctx).
 			Model(inst).
 			Where(clause.Eq{Column: clause.Column{Name: m.version.column}, Value: expected}).
+			Clauses(clause.Where{Exprs: m.fileFence(before)}).
 			Select("*").
 			Omit(m.updateOmits(before, inst)...).
 			Updates(inst)
@@ -267,8 +268,8 @@ func (h *handlers) updateVersioned(ctx context.Context, m *registered, inst any,
 			return database.MapPersistError(ctx, res.Error, "resource already exists", "persist resource")
 		}
 		if res.RowsAffected == 0 {
-			// Rolls back the file claims too: the new file is abandoned,
-			// the old one kept.
+			// The version moved, or a file did (the fence): rolls back the
+			// file claims too, the new file abandoned, the old one kept.
 			return contract.WithContext(ctx, contract.Conflict(
 				"The resource was modified by another request; reload and retry."))
 		}
@@ -316,11 +317,25 @@ func (h *handlers) deleteResource(ctx context.Context, input *itemInput) (*delet
 	// pre-scan to race: the invariant is the database constraint itself.
 	// The record's files are released in the delete's transaction and
 	// deleted once it has committed.
+	// The delete is fenced on the file keys it loaded: a file attached or
+	// replaced meanwhile makes it a 409 rather than strand that file.
 	before := m.fileKeys(inst)
 	if err := h.writeFiles(ctx, h.fileClaims(db), db, m, before, nil, func(tx *gorm.DB) error {
-		_, err := database.Delete(ctx, tx, inst)
+		fence := m.fileFence(before)
+		q := tx
+		if len(fence) > 0 {
+			q = tx.Clauses(clause.Where{Exprs: fence})
+		}
+		n, err := database.Delete(ctx, q, inst)
+		if err == nil && n == 0 && len(fence) > 0 {
+			return errFileRace(ctx)
+		}
 		return err
 	}); err != nil {
+		var env *contract.ErrorEnvelope
+		if errors.As(err, &env) {
+			return nil, err // a 409 the claims or the fence already decided
+		}
 		return nil, database.MapDeleteError(ctx, err, "resource is still referenced by other records", "delete resource")
 	}
 	return &deleteOutput{Body: contract.Data[deleteResult]{Data: deleteResult{OK: true}}}, nil
@@ -418,14 +433,24 @@ func splitM2M(ctx context.Context, m *registered, body map[string]any) (ids map[
 // a single transaction, so a bad related id (a 422 from the sync) rolls back the
 // parent insert/update instead of leaving an orphan row. A model with no m2m
 // fields writes directly (no transaction needed).
-// An update leaves the omit columns out of its write (registered.updateOmits).
-func persistWithM2M(ctx context.Context, db *gorm.DB, m *registered, inst any, ids map[string][]any, creating bool, omit []string) error {
+// An update leaves the omit columns out of its write (registered.updateOmits)
+// and, for a model with file fields, writes only while the record's file
+// columns still hold the keys it loaded (fence: registered.fileFence), a
+// 409 otherwise.
+func persistWithM2M(ctx context.Context, db *gorm.DB, m *registered, inst any, ids map[string][]any, creating bool, omit []string, fence []clause.Expression) error {
 	write := func(tx *gorm.DB) error {
 		var perr error
-		if creating {
+		switch {
+		case creating:
 			perr = tx.WithContext(ctx).Create(inst).Error
-		} else {
+		case len(fence) > 0:
+			perr = updateFenced(ctx, tx, m, inst, omit, fence)
+		default:
 			perr = omitted(tx.WithContext(ctx), omit).Save(inst).Error
+		}
+		var env *contract.ErrorEnvelope
+		if errors.As(perr, &env) {
+			return perr
 		}
 		if perr != nil {
 			return database.MapPersistError(ctx, perr, "resource already exists", "persist resource")
@@ -506,6 +531,12 @@ func applyWrite(ctx context.Context, m *registered, inst any, body map[string]an
 		if creating && m.meta.PK != "" && name == m.meta.PK && f.Required && blankRaw(raw) {
 			fields[name] = []string{"is required"}
 			continue
+		}
+		// A file field's blank key ("" or a file object with an empty key)
+		// is no file: null, which a required field refuses below. An empty
+		// key is never stored (nor does it clear a required file).
+		if f.Type == TypeFile || f.Type == TypeImage {
+			raw = blankFileToNil(raw)
 		}
 		// Write-only values are omitted from the row, so a blank update is
 		// "leave the stored value". Required applies on create only: an edit
@@ -705,4 +736,46 @@ func omitted(db *gorm.DB, cols []string) *gorm.DB {
 		return db
 	}
 	return db.Omit(cols...)
+}
+
+// updateFenced writes inst (every column but omit) while the record still
+// matches fence (registered.fileFence). No matching row is a 409, unless
+// the row does match and the write merely changed nothing (MySQL reports
+// such a row as unaffected).
+func updateFenced(ctx context.Context, tx *gorm.DB, m *registered, inst any, omit []string, fence []clause.Expression) error {
+	res := omitted(tx.WithContext(ctx).Model(inst).Clauses(clause.Where{Exprs: fence}), omit).Select("*").Updates(inst)
+	if res.Error != nil || res.RowsAffected > 0 {
+		return res.Error
+	}
+	pk, ok := m.fieldByName[m.meta.PK]
+	if !ok {
+		return errFileRace(ctx)
+	}
+	var n int64
+	if err := tx.WithContext(ctx).Model(inst).
+		Clauses(clause.Where{Exprs: fence}).
+		Where(clause.Eq{Column: clause.Column{Name: m.pkColumn}, Value: pk.get(inst)}).
+		Count(&n).Error; err != nil {
+		return err
+	}
+	if n == 0 {
+		return errFileRace(ctx)
+	}
+	return nil
+}
+
+// blankFileToNil is nil for a file field's blank value: "", or a file object
+// whose key is missing or empty. Anything else is returned as it is.
+func blankFileToNil(raw any) any {
+	if obj, ok := raw.(map[string]any); ok {
+		key, _ := obj["key"].(string)
+		if key == "" {
+			return nil
+		}
+		return raw
+	}
+	if s, ok := raw.(string); ok && s == "" {
+		return nil
+	}
+	return raw
 }

@@ -89,3 +89,15 @@ export async function uploadFile(
   }
   return { key: grant.key, filename: file.name, size: file.size, content_type: contentType };
 }
+
+// freshFileFields are the file fields whose value in current is not the one
+// the form loaded (initial): uploads made for this save. A save that fails
+// for any reason but a field error may have discarded them on the server
+// (a failed write abandons the uploads it named), so the form drops them
+// and asks for the files again rather than resubmit dead keys.
+export function freshFileFields(fields: FieldMeta[], current: Record<string, unknown>, initial: Record<string, unknown>): string[] {
+  return fields
+    .filter((field) => isFileField(field))
+    .filter((field) => asFileValue(current[field.name])?.key !== asFileValue(initial[field.name])?.key)
+    .map((field) => field.name);
+}

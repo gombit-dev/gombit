@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useForm, type FieldValues } from "react-hook-form";
 import { Link, Navigate, useNavigate, useParams } from "react-router";
 
@@ -12,6 +12,7 @@ import { FieldWidget } from "../components/FieldWidget";
 import { canCreate, canPopulateEditForm, canUpdate, canViewDetail } from "../capabilities";
 import { spaDetailPath, spaListPath } from "../api/paths";
 import { emptyFormValue, formValuesToBody, rowToFormValues, writableFields } from "../fields";
+import { asFileValue, freshFileFields } from "../files";
 import type { Row } from "../api/types";
 
 type Props = {
@@ -46,10 +47,15 @@ export function ResourceFormPage({ mode }: Props) {
     handleSubmit,
     reset,
     setError,
+    getValues,
+    setValue,
     formState: { isSubmitting },
   } = useForm<FieldValues>({
     defaultValues: defaults,
   });
+  // The values the form loaded (the defaults, or the row being edited):
+  // what a fresh upload is told apart from (freshFileFields).
+  const loaded = useRef<FieldValues>(defaults);
 
   useEffect(() => {
     if (mode !== "edit" || !model || !canPopulateEditForm(model)) {
@@ -65,7 +71,9 @@ export function ResourceFormPage({ mode }: Props) {
         if (cancelled) {
           return;
         }
-        reset(rowToFormValues(envelope.data, model.fields));
+        const values = rowToFormValues(envelope.data, model.fields);
+        loaded.current = values;
+        reset(values);
         setRowLoaded(true);
       })
       .catch((err: unknown) => {
@@ -143,8 +151,20 @@ export function ResourceFormPage({ mode }: Props) {
       if (orphan) {
         setStatus(orphan);
       }
-      if (!applyContractErrors(setError, err) && !orphan) {
+      const fieldErrors = applyContractErrors(setError, err);
+      if (!fieldErrors && !orphan) {
         setStatus(err instanceof Error ? err.message : "request failed");
+      }
+      if (!fieldErrors) {
+        // The write itself failed (a conflict, a stale version): the server
+        // discarded the files uploaded for it. Drop them, and ask again.
+        const current = getValues();
+        for (const name of freshFileFields(model.fields, current, loaded.current)) {
+          setValue(name, loaded.current[name] ?? null);
+          if (asFileValue(current[name])) {
+            setError(name, { type: "server", message: "The upload was discarded by the failed save; choose the file again." });
+          }
+        }
       }
     }
   }

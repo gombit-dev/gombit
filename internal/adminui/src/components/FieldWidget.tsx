@@ -670,6 +670,10 @@ function fileHint(field: FieldMeta): string {
   if (field.max_bytes) {
     parts.push(`up to ${formatBytes(field.max_bytes)}`);
   }
+  // The server checks the type from the file's contents, which must match
+  // the type the browser declares: a CSV (contents: plain text) or a DOCX
+  // (contents: a zip) may be refused after it is uploaded.
+  parts.push("type checked from the file's contents");
   return parts.join(", ");
 }
 

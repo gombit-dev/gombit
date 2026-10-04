@@ -82,6 +82,18 @@ func registerModel(host Host, model any, opts Options) error {
 	if err := fillFilePolicies(opts.Slug, opts.Fields, sch); err != nil {
 		return err
 	}
+	// A file field is written through the claims, over the host's store:
+	// without one, clearing a file or deleting a row would write past the
+	// claims and strand the files they hold. Refuse it here.
+	for _, f := range opts.Fields {
+		if f.Type != TypeFile && f.Type != TypeImage {
+			continue
+		}
+		if st, ok := host.(storer); !ok || st.Storage() == nil {
+			return fmt.Errorf("admin: field %q of %s is a file or image, and the host has no object storage to keep its files in", f.Name, opts.Slug)
+		}
+		break
+	}
 	if err := alignQuerySurface(&opts, sch, derived); err != nil {
 		return err
 	}
@@ -561,8 +573,16 @@ func resolveFields(fields []Field, sch *schema.Schema) ([]resolvedField, []*m2mB
 		// types take part in (files.go). Mapped as any other type, an
 		// explicit field would write arbitrary keys past it, and strand the
 		// claim of the key it replaced.
-		if isFileColumn(sf) && f.Type != TypeFile && f.Type != TypeImage {
-			return nil, nil, nil, fmt.Errorf("admin: field %q maps the storage-backed (file or image) column %q as %q; declare it as %q or %q, whose writes go through the upload protocol", f.Name, sf.DBName, f.Type, TypeFile, TypeImage)
+		if isFileColumn(sf) {
+			// Declared as the column's own kind: a file field's writes go
+			// through the upload protocol, and the kind sets the policy
+			// (an image column's image types). Another type would bypass
+			// the protocol; the other file kind would change the policy
+			// (TypeFile on an image column accepts any type). Narrowing
+			// belongs in the storage tag.
+			if want := inferFieldType(sf); f.Type != want {
+				return nil, nil, nil, fmt.Errorf("admin: field %q maps the storage-backed column %q, a %s, as %q; declare it as %q (its writes go through the upload protocol, under the column's own policy)", f.Name, sf.DBName, want, f.Type, want)
+			}
 		}
 		// The column is the matched schema field's, the one the accessors
 		// below read and write: never a caller string that could name

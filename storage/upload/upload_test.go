@@ -934,13 +934,14 @@ type fakeClaims struct {
 	promoting  map[string]bool
 	published  map[string]string // the publication token recorded per key
 	scopes     map[string]string // the scope each key was claimed for
+	gone       map[string]bool   // keys abandoned
 	claimed    []string
 	leases     []time.Time
 	abandoned  []string
 }
 
 func newFakeClaims(store storage.Storage) *fakeClaims {
-	return &fakeClaims{store: store, pending: map[string]bool{}, staged: map[string]bool{}, promoting: map[string]bool{}, published: map[string]string{}, scopes: map[string]string{}}
+	return &fakeClaims{store: store, pending: map[string]bool{}, staged: map[string]bool{}, promoting: map[string]bool{}, published: map[string]string{}, scopes: map[string]string{}, gone: map[string]bool{}}
 }
 
 func (c *fakeClaims) Pending(_ context.Context, key, scope string, until time.Time) error {
@@ -975,14 +976,17 @@ func (c *fakeClaims) Promote(_ context.Context, key, scope string, until time.Ti
 	return true, nil
 }
 
-// Belongs: a key is held unless pending or promoting; a key never claimed
-// through the fake counts as held for the empty scope (an existing record).
-func (c *fakeClaims) Belongs(_ context.Context, key, scope string) (bool, error) {
+// Lookup: a key the fake never claimed counts as held for the empty scope
+// (an existing record); one it abandoned is not live.
+func (c *fakeClaims) Lookup(_ context.Context, key string) (string, bool, error) {
+	if c.gone[key] {
+		return "", false, nil
+	}
 	s, claimed := c.scopes[key]
 	if !claimed {
-		return scope == "", nil
+		return "", true, nil
 	}
-	return s == scope, nil
+	return s, true, nil
 }
 
 func (c *fakeClaims) Publishing(_ context.Context, key, token string) error {
@@ -1009,6 +1013,7 @@ func (c *fakeClaims) Abandon(ctx context.Context, key string) (bool, error) {
 	}
 	delete(c.pending, key)
 	delete(c.promoting, key)
+	c.gone[key] = true
 	if c.staged[key] {
 		if err := c.store.Delete(ctx, upload.StagingKey(key)); err != nil {
 			return true, err

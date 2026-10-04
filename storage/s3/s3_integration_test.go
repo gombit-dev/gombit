@@ -410,7 +410,7 @@ func TestDirectUploads(t *testing.T) {
 type stagingClaims struct{ staged, promoted map[string]bool }
 
 func (c *stagingClaims) Pending(context.Context, string, string, time.Time) error { return nil }
-func (c *stagingClaims) Belongs(context.Context, string, string) (bool, error)    { return true, nil }
+func (c *stagingClaims) Lookup(context.Context, string) (string, bool, error)     { return "", true, nil }
 func (c *stagingClaims) Stage(_ context.Context, key, _ string, _ time.Time) error {
 	c.staged[key] = true
 	return nil

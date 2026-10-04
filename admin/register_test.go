@@ -638,11 +638,12 @@ func TestAdminCannotCreateWithARequiredFile(t *testing.T) {
 	}
 }
 
-// TestAdminUpdateLeavesFileColumnsAlone: an admin update never writes a
-// file column it does not own. Here a claims.Update replaces the file
-// between the admin's load and its write (simulated by a callback); the
-// admin's write must not put the old, released key back, on the plain and
-// the versioned paths.
+// TestAdminUpdateLeavesFileColumnsAlone: an admin update never puts back a
+// file key over a concurrent change. Here another writer replaces the file
+// between the admin's load and its write (simulated by a callback): the
+// admin's write is fenced on the keys it loaded, so it answers 409 and
+// writes nothing, and the replacement stands, on the plain and the
+// versioned paths.
 func TestAdminUpdateLeavesFileColumnsAlone(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	app, db := newMemoryFileApp(t, &Attachment{}, &Report{})
@@ -655,12 +656,13 @@ func TestAdminUpdateLeavesFileColumnsAlone(t *testing.T) {
 		}
 	}
 	jar := loginSuperuser(t, app)
-	// replace runs once, just before the admin's UPDATE, in its connection
-	// (and transaction): another writer's change landing between the
-	// admin's load and its write.
+	// replace runs once, right after the admin loads the row (a query on
+	// table), committing on its own: another writer's change landing
+	// between the admin's load and its write.
 	var replace func(tx *gorm.DB)
-	if err := db.DB.Callback().Update().Before("gorm:update").Register("test:replace-file", func(tx *gorm.DB) {
-		if replace != nil {
+	var table string
+	if err := db.DB.Callback().Query().After("gorm:query").Register("test:replace-file", func(tx *gorm.DB) {
+		if replace != nil && tx.Statement.Table == table {
 			r := replace
 			replace = nil
 			r(tx.Session(&gorm.Session{NewDB: true}))
@@ -673,20 +675,21 @@ func TestAdminUpdateLeavesFileColumnsAlone(t *testing.T) {
 	if err := db.Create(&att).Error; err != nil {
 		t.Fatal(err)
 	}
+	table = "attachments"
 	replace = func(tx *gorm.DB) {
 		if err := tx.Exec("UPDATE attachments SET file = ? WHERE id = ?", string(newer), att.ID).Error; err != nil {
 			t.Error(err)
 		}
 	}
-	if rec := doRequest(app, jar, http.MethodPatch, fmt.Sprintf("%s/admin/resources/attachments/%d", apiPrefix(app), att.ID), `{"title":"b"}`); rec.Code != http.StatusOK {
-		t.Fatalf("PATCH = %d %s", rec.Code, rec.Body)
+	if rec := doRequest(app, jar, http.MethodPatch, fmt.Sprintf("%s/admin/resources/attachments/%d", apiPrefix(app), att.ID), `{"title":"b"}`); rec.Code != http.StatusConflict {
+		t.Fatalf("PATCH racing a file replacement = %d %s, want 409", rec.Code, rec.Body)
 	}
 	var got Attachment
 	if err := db.First(&got, att.ID).Error; err != nil {
 		t.Fatal(err)
 	}
-	if got.Title != "b" || got.File == nil || *got.File != newer {
-		t.Fatalf("after the PATCH: %+v; want the title changed and the replaced file kept", got)
+	if got.Title != "a" || got.File == nil || *got.File != newer {
+		t.Fatalf("after the PATCH: %+v; want nothing written and the replaced file kept", got)
 	}
 
 	oldScan, newScan := types.Image("reports/scan/old"), types.Image("reports/scan/new")
@@ -694,19 +697,20 @@ func TestAdminUpdateLeavesFileColumnsAlone(t *testing.T) {
 	if err := db.Create(&rep).Error; err != nil {
 		t.Fatal(err)
 	}
+	table = "reports"
 	replace = func(tx *gorm.DB) {
 		if err := tx.Exec("UPDATE reports SET scan = ? WHERE id = ?", string(newScan), rep.ID).Error; err != nil {
 			t.Error(err)
 		}
 	}
-	if rec := doRequest(app, jar, http.MethodPatch, fmt.Sprintf("%s/admin/resources/reports/%d", apiPrefix(app), rep.ID), fmt.Sprintf(`{"title":"s","version":%d}`, rep.Version)); rec.Code != http.StatusOK {
-		t.Fatalf("versioned PATCH = %d %s", rec.Code, rec.Body)
+	if rec := doRequest(app, jar, http.MethodPatch, fmt.Sprintf("%s/admin/resources/reports/%d", apiPrefix(app), rep.ID), fmt.Sprintf(`{"title":"s","version":%d}`, rep.Version)); rec.Code != http.StatusConflict {
+		t.Fatalf("versioned PATCH racing a file replacement = %d %s, want 409", rec.Code, rec.Body)
 	}
 	var gotRep Report
 	if err := db.First(&gotRep, rep.ID).Error; err != nil {
 		t.Fatal(err)
 	}
-	if gotRep.Title != "s" || gotRep.Scan == nil || *gotRep.Scan != newScan {
-		t.Fatalf("after the versioned PATCH: %+v; want the title changed and the replaced file kept", gotRep)
+	if gotRep.Title != "r" || gotRep.Scan == nil || *gotRep.Scan != newScan {
+		t.Fatalf("after the versioned PATCH: %+v; want nothing written and the replaced file kept", gotRep)
 	}
 }

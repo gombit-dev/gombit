@@ -251,28 +251,40 @@ policy as hints: `accept` (media types) and `max_bytes`.
   write's check promotes the staged object to the key. The app needs the
   `storage_claims` table (apps made by `gombit new` migrate it).
 - **Writes** take the key, or the row's file object (sending it back keeps
-  the file), or `null` to remove it. A changed key is accepted only if it is:
+  the file), or `null` to remove it. A blank key (`""`, or a file object
+  with an empty key) is `null` too, so a required file field refuses it, on
+  create and on update. A changed key is accepted only if it is:
   - an upload that passes the policy by its bytes (a refused file is
     deleted, unless a record holds it);
   - under the field's prefix;
   - granted for this field: the admin's grants are claimed for
     `admin:<slug>.<field>`, so another field's grant (even under the same
-    prefix) is refused;
-  - still pending: held by no other record, and not expired and swept.
-
-  An explicit `Options.Fields` entry for a file or image column must be
-  declared `file` or `image`: mapped as any other type it would write keys
-  past the upload protocol, so registration refuses it. A file column left
-  out of explicit `Fields` cannot be written at all: delete is then off,
-  create too when the column is required (it would store an empty key),
-  and asking for either is a registration error.
-- **Concurrent writers:** an update writes a file column only when it
-  changes its key (through the claims, which fail if another writer
-  replaced that file meanwhile: a 409, nothing written); an unchanged one
-  is left out of the write, so a PATCH never puts back a key it loaded
-  over a concurrent replacement.
+    prefix) is refused ("is not an upload for this field");
+  - still live: held by no other record, and not expired, swept, or
+    discarded by a failed save ("has expired or was discarded; choose the
+    file again").
 
   Anything else is a field error: 422 with `fields.<name>`.
+- **Concurrent writers:** an update or a delete is fenced on the file keys
+  it loaded, empty ones included. If another writer attached, replaced or
+  removed a file of the row meanwhile, it matches no row: a 409, nothing
+  written, and its new uploads are discarded. The SPA then drops those
+  uploads from the form and asks for the files again. An update writes a
+  file column only when it changes its key; an unchanged one is left out of
+  the write.
+- **Fields and storage:** an explicit `Options.Fields` entry for a file or
+  image column must be declared as the column's own kind (`image` for a
+  `types.Image` column, `file` for a `types.File` one): another type would
+  write keys past the upload protocol, and the other kind would change the
+  policy (a `file` field accepts any type), so registration refuses it.
+  File fields need the host's object storage; a host without it cannot
+  register them.
+- **Unmapped file columns:** a file column the admin does not map, because
+  it is hidden (`gombit:"server"`, `gombit:"-"`) or left out of explicit
+  `Fields`, cannot be written at all. Delete is then off, and create too
+  when the column is required (it would store an empty key). Asking for
+  either is a registration error. Updates leave the column out of their
+  write.
 - **Cleanup:** a write moves the record's file claims in its own
   transaction (`claims.Update`): new keys are held, and replaced or removed
   ones released. A write that fails (a stale version, say) abandons the new
@@ -287,7 +299,12 @@ policy as hints: `accept` (media types) and `max_bytes`.
   - the list links each file;
   - the detail page and the form preview an image;
   - the form's widget uploads a chosen file at once, and offers Remove for an
-    optional field.
+    optional field;
+  - the server checks a file's type from its contents, and that must match
+    the type the browser declares: a file whose contents read as another
+    type (a CSV is plain text, a DOCX or XLSX a zip) can be refused after it
+    is uploaded, even on a field that accepts any type. The widget's hint
+    says so.
 
   The admin page's Content-Security-Policy allows the store's origin, such as
   an S3 bucket or a CDN, for images and requests, so previews and direct

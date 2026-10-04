@@ -140,11 +140,15 @@ func Confirm(ctx context.Context, store storage.Storage, key string, p Policy) (
 		// Not a staged upload of this scope awaiting confirmation: a
 		// retried confirmation, or a key stored by Save. It must still
 		// have been claimed for this scope, not another field's.
-		belongs, err := p.Claims.Belongs(ctx, key, p.Scope)
-		if err != nil {
+		scope, live, err := p.Claims.Lookup(ctx, key)
+		switch {
+		case err != nil:
 			return File{}, fmt.Errorf("upload: %q: %w", key, err)
-		}
-		if !belongs {
+		case !live:
+			// Abandoned by a failed write, swept, or never granted: the
+			// client must upload the file again.
+			return File{}, fmt.Errorf("%w: %q", ErrExpired, key)
+		case scope != p.Scope:
 			return File{}, fmt.Errorf("%w: %q was not uploaded for %q", ErrMalformed, key, p.Scope)
 		}
 		return check(ctx, store, key, p, nil)

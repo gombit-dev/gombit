@@ -85,6 +85,10 @@ var (
 	// ErrMalformed: the request is not a well-formed upload (not
 	// multipart, a broken body, or more than one file).
 	ErrMalformed = errors.New("upload: malformed request")
+	// ErrExpired: a key with no live claim under Policy.Claims (Confirm):
+	// its upload expired, was discarded (a failed write abandons the
+	// uploads it named), or was never granted. Upload the file again.
+	ErrExpired = errors.New("upload: the upload has expired or was discarded")
 )
 
 // CleanupError reports a key that may still hold a file after a failed
@@ -172,9 +176,9 @@ type Claimer interface {
 	// until, and reports whether it did: only then may Confirm copy the
 	// staged object to key.
 	Promote(ctx context.Context, key, scope string, until time.Time) (bool, error)
-	// Belongs reports whether key is claimed for scope (and not being
-	// deleted).
-	Belongs(ctx context.Context, key, scope string) (bool, error)
+	// Lookup reports the scope key is claimed for, and whether that claim
+	// is live (not being deleted, nor gone).
+	Lookup(ctx context.Context, key string) (scope string, live bool, err error)
 	// Publishing records the token of the promotion's copy on the key's
 	// promoting claim, before it is published (storage.PreparePublish).
 	Publishing(ctx context.Context, key, token string) error
@@ -772,7 +776,7 @@ func (l *limitReader) tooLarge() error {
 
 // MapError maps an upload error to a D10 error for a handler: ErrTooLarge
 // (or an http.MaxBytesError) is 413 payload_too_large; ErrType, ErrNoFile,
-// and ErrMalformed are validation errors; anything else is a storage error
+// ErrMalformed and ErrExpired are validation errors; anything else is a storage error
 // (storage.MapError).
 func MapError(ctx context.Context, err error) error {
 	var maxBytes *http.MaxBytesError
@@ -787,6 +791,8 @@ func MapError(ctx context.Context, err error) error {
 		return contract.WithContext(ctx, contract.Validation("No file was uploaded.", nil))
 	case errors.Is(err, ErrMalformed):
 		return contract.WithContext(ctx, contract.Validation("The upload could not be read.", nil))
+	case errors.Is(err, ErrExpired):
+		return contract.WithContext(ctx, contract.Validation("The upload has expired or was discarded; upload the file again.", nil))
 	}
 	return storage.MapError(ctx, err, "file not found", "could not store the file")
 }

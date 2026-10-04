@@ -8,6 +8,7 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"github.com/gombit-dev/gombit/contract"
 	"github.com/gombit-dev/gombit/storage"
@@ -154,6 +155,10 @@ func (h *handlers) acceptFiles(ctx context.Context, cl *claims.Claims, m *regist
 			errs[f.Name] = append(errs[f.Name], "is not an accepted type")
 		case errors.Is(err, upload.ErrMalformed):
 			errs[f.Name] = append(errs[f.Name], "is not an upload for this field")
+		case errors.Is(err, upload.ErrExpired):
+			// Abandoned by a failed write (a stale version, a conflict),
+			// swept, or never granted: the form must upload it again.
+			errs[f.Name] = append(errs[f.Name], "has expired or was discarded; choose the file again")
 		default:
 			return filefield.MapError(ctx, err)
 		}
@@ -202,6 +207,33 @@ func (m *registered) updateOmits(before map[string]string, inst any) []string {
 	return omit
 }
 
+// fileFence is the condition that the record's file columns still hold the
+// keys this request loaded (before): for each mapped file field, the column
+// equals the loaded key, or, when none was loaded, is NULL or empty. An
+// update or delete under it that matches no row lost a race to another
+// writer of a file (a replacement, a first attach): it writes nothing,
+// and its transaction (with the claims it moved) rolls back. The claims'
+// own check (releasing an old key fails if another writer released it)
+// covers only a column that had a key; the fence covers every one.
+func (m *registered) fileFence(before map[string]string) []clause.Expression {
+	var out []clause.Expression
+	for _, f := range m.fileFields() {
+		col := clause.Column{Name: f.column}
+		if key := before[f.Name]; key != "" {
+			out = append(out, clause.Eq{Column: col, Value: key})
+		} else {
+			out = append(out, clause.Or(clause.Eq{Column: col, Value: nil}, clause.Eq{Column: col, Value: ""}))
+		}
+	}
+	return out
+}
+
+// errFileRace is the 409 of a write that lost a race to another writer of
+// one of the record's files.
+func errFileRace(ctx context.Context) error {
+	return contract.WithContext(ctx, contract.Conflict("A file of this record was changed by another request; reload and retry."))
+}
+
 // writeFiles runs write (the record's change, in tx) with the record's file
 // claims moved in the same transaction (claims.Update): the new keys held,
 // the replaced ones released and, once it commits, deleted. Without files
@@ -215,7 +247,7 @@ func (h *handlers) writeFiles(ctx context.Context, cl *claims.Claims, db *gorm.D
 	if errors.Is(err, claims.ErrNotHeld) {
 		// A key this write replaces was released by another writer
 		// meanwhile (a concurrent replacement): nothing was written.
-		return contract.WithContext(ctx, contract.Conflict("A file of this record was changed by another request; reload and retry."))
+		return errFileRace(ctx)
 	}
 	var ke *claims.KeyError
 	if errors.As(err, &ke) && errors.Is(err, claims.ErrNotPending) {
