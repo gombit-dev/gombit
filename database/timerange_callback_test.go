@@ -355,8 +355,9 @@ func TestTimeRangeCostsNothingWithoutRangedColumns(t *testing.T) {
 		t.Fatal(err)
 	}
 	tx.Statement.Dest = &row
-	runTimeRangeCheck(tx, true) // warm the per-schema cache
-	if allocs := testing.AllocsPerRun(100, func() { runTimeRangeCheck(tx, true) }); allocs != 0 {
+	g := &timeRangeGuard{}
+	g.run(tx, true) // warm the per-schema cache
+	if allocs := testing.AllocsPerRun(100, func() { g.run(tx, true) }); allocs != 0 {
 		t.Fatalf("runTimeRangeCheck on a model without ranged columns allocates %.0f times", allocs)
 	}
 }

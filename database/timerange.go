@@ -35,22 +35,39 @@ var (
 // values, which the statement does not write, and refusing them would block
 // every other change to a row that already holds one.
 func registerTimeRangeCallback(db *gorm.DB) error {
-	create := db.Callback().Create().Before("gorm:create")
-	if err := create.Register("gombit:timerange", func(tx *gorm.DB) { runTimeRangeCheck(tx, true) }); err != nil {
-		return fmt.Errorf("database: register create time range callback: %w", err)
-	}
-	update := db.Callback().Update().Before("gorm:update")
-	if err := update.Register("gombit:timerange", func(tx *gorm.DB) { runTimeRangeCheck(tx, false) }); err != nil {
-		return fmt.Errorf("database: register update time range callback: %w", err)
+	if err := db.Use(&timeRangeGuard{}); err != nil {
+		return fmt.Errorf("database: register time range callbacks: %w", err)
 	}
 	return nil
 }
 
-func runTimeRangeCheck(db *gorm.DB, creating bool) {
+// timeRangeGuard is the gombit:timerange check as a GORM plugin, so its
+// per-schema cache of ranged columns belongs to one *gorm.DB and is released
+// with it, rather than pinning every opened database's schemas in a process
+// global.
+type timeRangeGuard struct {
+	ranged sync.Map // *schema.Schema -> map[string]*schema.Field
+}
+
+func (*timeRangeGuard) Name() string { return "gombit:timerange" }
+
+func (g *timeRangeGuard) Initialize(db *gorm.DB) error {
+	create := db.Callback().Create().Before("gorm:create")
+	if err := create.Register("gombit:timerange", func(tx *gorm.DB) { g.run(tx, true) }); err != nil {
+		return fmt.Errorf("create: %w", err)
+	}
+	update := db.Callback().Update().Before("gorm:update")
+	if err := update.Register("gombit:timerange", func(tx *gorm.DB) { g.run(tx, false) }); err != nil {
+		return fmt.Errorf("update: %w", err)
+	}
+	return nil
+}
+
+func (g *timeRangeGuard) run(db *gorm.DB, creating bool) {
 	if db.Error != nil || db.Statement == nil || db.Statement.Schema == nil {
 		return
 	}
-	targets := rangedTimeFields(db.Statement.Schema)
+	targets := g.rangedTimeFields(db.Statement.Schema)
 	if len(targets) == 0 {
 		return
 	}
@@ -103,12 +120,11 @@ func (c *timeRangeCheck) check(a assignedValue) {
 	c.fields[key] = append(c.fields[key], msg)
 }
 
-// rangedFieldsBySchema caches each schema's ranged columns, so a model with
-// none skips the check without reflecting over anything.
-var rangedFieldsBySchema sync.Map // *schema.Schema -> map[string]*schema.Field
-
-func rangedTimeFields(sch *schema.Schema) map[string]*schema.Field {
-	if cached, ok := rangedFieldsBySchema.Load(sch); ok {
+// rangedTimeFields returns sch's ranged columns by DBName, cached per schema
+// for this DB, so a model with none skips the check without reflecting over
+// anything.
+func (g *timeRangeGuard) rangedTimeFields(sch *schema.Schema) map[string]*schema.Field {
+	if cached, ok := g.ranged.Load(sch); ok {
 		return cached.(map[string]*schema.Field)
 	}
 	out := map[string]*schema.Field{}
@@ -117,7 +133,7 @@ func rangedTimeFields(sch *schema.Schema) map[string]*schema.Field {
 			out[f.DBName] = f
 		}
 	}
-	rangedFieldsBySchema.Store(sch, out)
+	g.ranged.Store(sch, out)
 	return out
 }
 
