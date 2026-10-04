@@ -557,13 +557,12 @@ func resolveFields(fields []Field, sch *schema.Schema) ([]resolvedField, []*m2mB
 		if isFileColumn(sf) {
 			return nil, nil, nil, fmt.Errorf("admin: field %q maps the storage-backed (file or image) column %q, which the admin cannot write yet (STORAGE-8); leave it out of Fields", f.Name, sf.DBName)
 		}
-		column := f.Column
-		if column == "" {
-			column = sf.DBName
-		}
+		// The column is the matched schema field's, the one the accessors
+		// below read and write: never a caller string that could name
+		// another (see matchSchemaField).
 		out = append(out, resolvedField{
 			Field:   copyRel,
-			column:  column,
+			column:  sf.DBName,
 			pointer: sf.FieldType.Kind() == reflect.Pointer,
 			get:     makeGetter(sf.StructField.Index, f.Type),
 			set:     makeSetter(sf.StructField.Index, f.Type, sf.FieldType),

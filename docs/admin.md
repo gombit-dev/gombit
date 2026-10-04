@@ -176,7 +176,10 @@ arbitrary Go types.
 
 - **`Field.Name`** is the JSON object key in meta and in data-plane rows.
   For v1, `Name` is also the GORM/SQL column unless `Field.Column` is set
-  (use that when the Go exported name or GORM column differs).
+  (use that when the Go exported name or GORM column differs). A set
+  `Column` alone picks the model field the admin reads and writes, and `Name`
+  is then only the JSON key; a `Column` the model does not have is a
+  registration error.
 - **Constraints** — `minimum`, `maximum`, `max_length`, `pattern`, `default`,
   `format`, and `choices` — appear in meta when set, and admin writes enforce
   them. A field the registrar leaves empty copies them from the model:

@@ -225,7 +225,9 @@ version.
     column is required (it would store the empty key), updates leave file
     columns out of the write, and an explicit `Actions.Delete`,
     `Actions.Create` (with a required file) or `Options.Fields` entry
-    mapping a file column is a registration error.
+    mapping a file column is a registration error. An explicit `Field.Column` alone picks the
+    model field the admin reads and writes (it used to race `Name` in
+    schema order), so the guards and the accessors agree on one column.
   - `examples/storage` gains a `Document` resource
     ([#530](https://github.com/gombit-dev/gombit/issues/530)).
 
