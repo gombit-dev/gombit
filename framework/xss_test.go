@@ -104,6 +104,20 @@ func TestStripHTML(t *testing.T) {
 		{name: "unterminated tail holding a complete tag is dropped", in: `<i>x</i> <a title="x>y`, want: "x "},
 		{name: "unterminated comment holding a tag is dropped", in: `<i>x</i> <!-- <script>alert(1)</script>`, want: "x "},
 		{name: "terminated comment is still dropped", in: `<i>x</i><!-- c --> y`, want: "x y"},
+		// The comment's own kind decides whether it ended: "<!--" closes only
+		// at "-->"/"--!>", so one ending in a bare ">" is still open, and an
+		// open doctype is a tail like any other.
+		{name: "open comment ending in > is still a tail", in: `<i>x</i> see <!-- a ->`, want: "x see <!-- a ->"},
+		{name: "open doctype after a real tag survives", in: `<i>x</i> <!DOCTYPE is old`, want: "x <!DOCTYPE is old"},
+		// What the tail guarantee is worth, pinned deliberately: the tail is
+		// returned as stripHTML returns it alone, which is only the #118
+		// regexp's judgement. An unterminated tag keeps its attributes, and a
+		// tag the regexp misses stays in, exactly as when submitted alone.
+		{name: "attribute-bearing unterminated tail is kept as it would be alone", in: `<i>x</i> a<b onclick=f() c`, want: "x a<b onclick=f() c"},
+		{name: "tail holding a tag the regexp misses is kept as it would be alone", in: `<i>x</i> <p/title="<a/b>c`, want: `x <p/title="<a/b>c`},
+		// The tail is raw input: its entities stay encoded while the text
+		// before it is decoded by the tokenizer.
+		{name: "kept tail is not entity-decoded", in: `<b>A&amp;B</b> if x<y &amp; z`, want: "A&B if x<y &amp; z"},
 		// Inside an unclosed skip element the tail is recovered markup, not
 		// submitted text, so it is not kept.
 		{name: "tail inside an unclosed skip element is not kept", in: `<object>x a<b`, want: "x a"},
@@ -528,4 +542,43 @@ func TestXSSMiddlewareRawBodyPathSkipsSanitization(t *testing.T) {
 	if *got2 == raw {
 		t.Fatalf("non-exempt path body was not sanitized: %q", *got2)
 	}
+}
+
+// FuzzStripHTMLKeptTailIsTheStandaloneAnswer pins the #433 contract. Whatever
+// stripHTML keeps beyond the plain tokenized output must be a suffix of the
+// input that stripHTML returns unchanged on its own, so a value carrying a real
+// tag never admits more than its tail submitted alone would (the #118 gate's
+// answer, no stronger). A value with no complete tag is the gate's own case.
+func FuzzStripHTMLKeptTailIsTheStandaloneAnswer(f *testing.F) {
+	for _, seed := range []string{
+		`<i>note</i>: if a<b then stop`, `I <b>love</b> you </3 forever`, `<i>x</i> <!-- open`,
+		`<i>x</i> see <!-- a ->`, `<i>x</i> <!DOCTYPE is old`, `<i>x</i> a<b onclick=f() c`,
+		`<i>x</i> <p/title="<a/b>c`, `<i>x</i> <a title="x>y`, `<object>x a<b`, `<textarea>a<b`,
+		`<script>if (a<b && c>d) return`, `<b>A&amp;B</b> if x<y &amp; z`, "<b>a</b>\r\nb c<d\r\ne",
+	} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		out := stripHTML(s)
+		if !strings.ContainsAny(s, "<>") || !completeHTMLTag.MatchString(s) {
+			if out != s {
+				t.Fatalf("stripHTML(%q) = %q, want the input unchanged (#118 gate)", s, out)
+			}
+			return
+		}
+		base := stripHTMLUnclosed(s, maxUnclosedSkipRecursion, false)
+		if !strings.HasPrefix(out, base) {
+			t.Fatalf("stripHTML(%q) = %q, want the tokenized output %q plus at most a kept tail", s, out, base)
+		}
+		kept := out[len(base):]
+		if kept == "" {
+			return
+		}
+		if !strings.HasSuffix(s, kept) {
+			t.Fatalf("stripHTML(%q) kept %q, which is not a suffix of the input", s, kept)
+		}
+		if alone := stripHTML(kept); alone != kept {
+			t.Fatalf("stripHTML(%q) kept tail %q, but alone it sanitizes to %q", s, kept, alone)
+		}
+	})
 }

@@ -138,9 +138,16 @@ Other behavior notes (they describe the opt-in layer):
   otherwise treat `"<"+letter` as a start tag and silently shorten the string.
   That holds even when the value also carries a real tag: in
   `<i>note</i>: if a<b then stop` the `<i>` tags are stripped and
-  `if a<b then stop` is kept, and so is a trailing `</3` or an unclosed
-  `<!--`. Text from a stray `<` to the end of the value is kept only when it
-  holds no complete tag, as it would be if submitted on its own.
+  `if a<b then stop` is kept, and so is a trailing `</3`, an unclosed `<!--`
+  or `<!DOCTYPE`. That tail, from the stray `<` to the end of the value, comes
+  back exactly as `SanitizeHTML` returns it on its own: verbatim when the
+  `completeHTMLTag` pattern finds no tag in it, dropped otherwise. It is the
+  same check as above, not a browser-level guarantee: an unterminated tag in
+  the tail keeps its attributes (`a<b onclick=f() c` is returned as is), and
+  becomes live markup if the value is later spliced into HTML before a `>`.
+  The tail is also raw input, so its entities stay encoded while the text
+  before it is decoded (`<b>A&amp;B</b> x<y &amp; z` gives `A&B x<y &amp; z`).
+  Escape on output; sanitization is a backstop.
   This applies to the submitted value itself, not to text recovered from
   inside an unclosed dangerous element. That text is unparsed markup rather
   than something the user typed, so it is re-parsed in full: every `"<"` +

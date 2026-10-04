@@ -269,9 +269,10 @@ version.
 - `framework.SanitizeHTML` (and `Security.SanitizeInput`) no longer deletes
   plain text after a stray `<` when the value also carries a real tag:
   `<i>note</i>: if a<b then stop` used to become `note: if a`, and a `</3`
-  or unclosed `<!--` ate the rest of the value. Text from such a `<` to the
-  end is kept when it holds no complete tag, exactly as it would be on its
-  own; complete tags are still stripped
+  or unclosed `<!--` ate the rest of the value. That tail now comes back
+  exactly as `SanitizeHTML` returns it on its own (the existing check for a
+  value with no complete tag), so it is kept as raw, undecoded input; it is
+  no safer than that check, and complete tags elsewhere are still stripped
   ([#433](https://github.com/gombit-dev/gombit/issues/433)).
 - The benchmark report no longer publishes a snapshot from a developer host
   as if it were the canonical run. A clean tree on the canonical protocol used

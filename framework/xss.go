@@ -367,14 +367,27 @@ const maxUnclosedSkipRecursion = 4
 //
 // An unterminated tail is the other way the tokenizer loses text (issue #433).
 // A "<" + letter with no ">" before EOF (`if a<b then stop`) is read as a start
-// tag that never ends and dropped, and "</" + non-letter (`</3 forever`) or an
-// open "<!--" as a comment that runs to EOF. Either way the rest of the string
-// vanishes. The #118 gate only spares a string with no complete tag at all, so
-// one earlier "<i>" used to cost everything after the stray "<". The tail is now
-// judged as if it had been submitted on its own: keepUnterminatedTail returns it
-// verbatim when it holds no complete tag, which is exactly what stripHTML
-// returns for that tail alone, so keeping it admits nothing the gate does not
-// already admit. A tail that does hold one (`<a title="x>y`) is still dropped.
+// tag that never ends and dropped, and "</" + non-letter (`</3 forever`), an
+// open "<!--" or "<!DOCTYPE" as a comment or doctype that runs to EOF. Either
+// way the rest of the string vanishes. The #118 gate only spares a string with
+// no complete tag at all, so one earlier "<i>" used to cost everything after the
+// stray "<". The tail now gets exactly the answer stripHTML gives for it on its
+// own (keepUnterminatedTail), so a tagged value admits nothing that value's
+// tail submitted alone would not.
+//
+// That is the whole guarantee, and it is only as strong as the #118 gate: the
+// gate is completeHTMLTag, the regexp this doc says above must never decide
+// what is markup. A kept tail is an unterminated tag or comment passed through
+// verbatim, attributes and all (`<i>x</i> a<b onclick=f() c` keeps
+// `a<b onclick=f() c`), and the regexp misses tags the tokenizer and a browser
+// see (`<p/title="<a/b>c` is kept whole). Spliced before a later ">", such a
+// tail is live markup, exactly as the same text submitted alone already is.
+// Sanitization is not output escaping (docs/security.md).
+//
+// The kept tail is the raw input, so unlike the tokenized text before it, its
+// entities are not decoded and its line endings are not normalized
+// (`<b>A&amp;B</b> x<y &amp; z` gives "A&B x<y &amp; z"). Decoding it would
+// turn "&lt;...&gt;" in the tail into markup.
 //
 // submitted is true only for the string the user sent, and the tail is kept
 // only there and outside any open skip element. That is the #118 gate's own
@@ -394,9 +407,12 @@ func stripHTMLUnclosed(s string, budget int, submitted bool) string {
 	tokenizer := html.NewTokenizer(strings.NewReader(s))
 	skipDepth := 0
 	for {
+		// An open comment is the tail only if it is the last token before EOF.
+		lastOpenComment := openComment
+		openComment = ""
 		switch tokenizer.Next() {
 		case html.ErrorToken:
-			tail := openComment
+			tail := lastOpenComment
 			if tokenizer.Err() == io.EOF && tail == "" {
 				// A tag still open at EOF comes back as the error token's raw bytes.
 				tail = string(tokenizer.Raw())
@@ -411,10 +427,10 @@ func stripHTMLUnclosed(s string, budget int, submitted bool) string {
 				b.WriteString(keepUnterminatedTail(tail))
 			}
 			return b.String()
-		case html.CommentToken:
-			// A terminated comment ends in ">" and is dropped as before. One that
-			// does not ran to EOF; it is the tail, decided when EOF arrives.
-			if raw := tokenizer.Raw(); !bytes.HasSuffix(raw, []byte(">")) {
+		case html.CommentToken, html.DoctypeToken:
+			// A terminated comment or doctype is dropped as before. One that ran
+			// to EOF is the tail, decided when EOF arrives.
+			if raw := tokenizer.Raw(); unterminatedAtEOF(raw) {
 				openComment = string(raw)
 			}
 		case html.TextToken:
@@ -443,10 +459,24 @@ func stripHTMLUnclosed(s string, budget int, submitted bool) string {
 	}
 }
 
-// keepUnterminatedTail decides the text the tokenizer swallowed into a tag or
-// comment that never ended (issue #433). It is kept verbatim when it holds no
-// complete tag, the same answer stripHTML gives for that text on its own (the
-// #118 gate), and dropped otherwise.
+// unterminatedAtEOF reports whether a comment or doctype token's raw text ran to
+// EOF rather than closing. A "<!--" comment closes only at "-->" or "--!>" (the
+// abrupt "<!-->" and "<!--->" end in "-->" too), so `<!-- a ->` is still open.
+// A bogus comment ("</3", "<!x", "<?", "<![CDATA[") or a doctype closes at the
+// first ">".
+func unterminatedAtEOF(raw []byte) bool {
+	if bytes.HasPrefix(raw, []byte("<!--")) {
+		return !bytes.HasSuffix(raw, []byte("-->")) && !bytes.HasSuffix(raw, []byte("--!>"))
+	}
+	return !bytes.HasSuffix(raw, []byte(">"))
+}
+
+// keepUnterminatedTail decides the text the tokenizer swallowed into a tag,
+// comment or doctype that never ended (issue #433). It returns what stripHTML
+// returns for that text on its own: the text verbatim when completeHTMLTag
+// finds no tag in it (the #118 gate), and nothing otherwise, since alone it
+// would be tokenized into an unterminated tag and dropped. It is not an
+// HTML-safety check; see stripHTMLUnclosed.
 func keepUnterminatedTail(tail string) string {
 	if tail == "" || completeHTMLTag.MatchString(tail) {
 		return ""
