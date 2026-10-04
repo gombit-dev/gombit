@@ -49,6 +49,25 @@ func ValidGroup(name string) bool {
 	return false
 }
 
+// HostClassEnv is the environment variable through which the operator declares
+// what kind of host a run measured on. Collect records it verbatim; the report
+// treats only HostClassDedicated as the canonical, publishable kind (issue #291).
+//
+// It is a declaration, not a measurement, on purpose: "dedicated benchmark
+// hardware" cannot be read from /proc. A heuristic (load average, core count,
+// throttling) would both miss contended hosts and flag quiet ones, and a wrong
+// banner is worse than none. So the safe default is the absence of a claim: a
+// unit that does not declare HostClassDedicated is reported as not measured on
+// dedicated hardware, and silence is never read as canonicity.
+const HostClassEnv = "BENCHMARK_HOST_CLASS"
+
+// The host classes an operator is expected to declare. Any other value is
+// recorded as given and, like an empty one, is not dedicated.
+const (
+	HostClassDedicated = "dedicated"
+	HostClassDeveloper = "developer"
+)
+
 // Provenance is what one measurement group can answer about itself: which
 // source state ran, when, on which machine, under which toolchain.
 //
@@ -70,7 +89,16 @@ type Provenance struct {
 	CPUModel    string `json:"cpu_model"`
 	LogicalCPUs int    `json:"logical_cpus"`
 	RAMBytes    int64  `json:"ram_bytes"`
-	GoVersion   string `json:"go_version"`
+	// HostClass is the operator's HostClassEnv declaration at collection time;
+	// empty means none was made.
+	HostClass string `json:"host_class"`
+	GoVersion string `json:"go_version"`
+}
+
+// Dedicated reports whether the unit was declared to be measured on dedicated
+// benchmark hardware. An empty or unrecognised class is not dedicated.
+func (p Provenance) Dedicated() bool {
+	return p.HostClass == HostClassDedicated
 }
 
 // Empty reports whether nothing at all was recorded — a pre-run placeholder,
@@ -129,6 +157,7 @@ type Metadata struct {
 	CPUModel    string `json:"cpu_model"`
 	LogicalCPUs int    `json:"logical_cpus"`
 	RAMBytes    int64  `json:"ram_bytes"`
+	HostClass   string `json:"host_class"`
 
 	GoVersion            string `json:"go_version"`
 	DockerVersion        string `json:"docker_version"`
@@ -191,6 +220,7 @@ func (m Metadata) Provenance() Provenance {
 		CPUModel:    m.CPUModel,
 		LogicalCPUs: m.LogicalCPUs,
 		RAMBytes:    m.RAMBytes,
+		HostClass:   m.HostClass,
 		GoVersion:   m.GoVersion,
 	}
 }
@@ -232,6 +262,7 @@ func (m Metadata) WithProvenance(prov Provenance) Metadata {
 	m.CPUModel = prov.CPUModel
 	m.LogicalCPUs = prov.LogicalCPUs
 	m.RAMBytes = prov.RAMBytes
+	m.HostClass = prov.HostClass
 	m.GoVersion = prov.GoVersion
 	return m
 }
@@ -281,6 +312,12 @@ func (m Metadata) UnitsProvenance(group string, units []string) (map[string]Prov
 // host and the toolchain; the clock is provenance to report, not a difference to
 // act on.
 //
+// HostClass is excluded too. It is the operator's declaration about the
+// machine, not a fact that moves the numbers; the machine itself is compared
+// field by field. Units whose declarations differ are judged by the report's
+// host-class banner, and a caption claiming they "mix source states" would be
+// false when commit, host and toolchain all agree.
+//
 // GitDirty is a pointer, so it is compared by what it points at: two separately
 // collected records of the same clean tree are the same state, not different
 // ones because they hold different addresses.
@@ -293,6 +330,7 @@ func (p Provenance) ComparableTo(other Provenance) bool {
 	}
 	p.GitDirty, other.GitDirty = nil, nil
 	p.Timestamp, other.Timestamp = "", ""
+	p.HostClass, other.HostClass = "", ""
 	return p == other
 }
 
@@ -314,6 +352,22 @@ func (m Metadata) AnyUnitDirty(group string, units []string) bool {
 	return false
 }
 
+// NonDedicatedUnits returns the given units of group that were not declared to
+// be measured on dedicated hardware, judged through UnitProvenance like
+// AnyUnitDirty and passed the published units for the same reason. Unlike
+// unknown dirtiness, an undeclared host class counts: the guard exists so a
+// snapshot cannot read as canonical by saying nothing, and a unit with no
+// recorded provenance at all is no more canonical than one declared otherwise.
+func (m Metadata) NonDedicatedUnits(group string, units []string) []string {
+	var out []string
+	for _, u := range units {
+		if !m.UnitProvenance(group, u).Dedicated() {
+			out = append(out, u)
+		}
+	}
+	return out
+}
+
 // Runner runs a command and returns its trimmed stdout. It exists so tests can
 // stub git/uname/docker without those tools being installed; production uses
 // execRunner.
@@ -324,6 +378,8 @@ type Runner func(ctx context.Context, name string, args ...string) (string, erro
 type Options struct {
 	Now func() time.Time
 	Run Runner
+	// Getenv reads HostClassEnv; nil uses os.Getenv.
+	Getenv func(string) string
 
 	PostgresVersion           string
 	FrameworkVersions         map[string]string
@@ -350,6 +406,10 @@ func Collect(ctx context.Context, opts Options) Metadata {
 	run := opts.Run
 	if run == nil {
 		run = execRunner
+	}
+	getenv := opts.Getenv
+	if getenv == nil {
+		getenv = os.Getenv
 	}
 
 	commit, commitErr := run(ctx, "git", "rev-parse", "HEAD")
@@ -405,6 +465,7 @@ func Collect(ctx context.Context, opts Options) Metadata {
 		CPUModel:    cpuModel(),
 		LogicalCPUs: runtime.NumCPU(),
 		RAMBytes:    ramBytes(),
+		HostClass:   strings.TrimSpace(getenv(HostClassEnv)),
 
 		GoVersion:            runtime.Version(),
 		DockerVersion:        dockerVersion,

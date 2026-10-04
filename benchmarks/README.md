@@ -70,10 +70,11 @@ the root README's `## Performance` block (and `summary.md`) from those files, an
 runs the same regenerate-then-diff on every PR. The full method and the required
 "How not to interpret these results" caveats live in
 [docs/methodology.md](docs/methodology.md). A committed `results/latest/`
-snapshot already backs the README numbers, but from **reduced runs on dev
-hosts** — each measured unit records its own commit, host and toolchain under
-`metadata.json`'s `groups` key, and the README prints it beneath that unit's
-table, so the tables need not share a host; still
+snapshot already backs the README numbers, but not from dedicated hardware — each
+measured unit records its own commit, host, declared host class and toolchain
+under `metadata.json`'s `groups` key, the README prints the host beneath that
+unit's table (so the tables need not share a host), and the block is stamped
+until every published unit declares a dedicated host; still
 scoped to later phases: the embedded-Gombit single-binary footprint variant, the
 other `make benchmark-*` workloads, extending `fairness_test.go` to all six, and
 re-running the full canonical sweep on dedicated hardware. The CI integration is
@@ -108,8 +109,9 @@ honest "not applied" default unless you pass
 ## Result schema and run metadata
 
 `go run ./benchmarks/scripts/collect-host-info` prints the reproducibility
-metadata (git SHA + dirty state, OS/kernel/arch, CPU/RAM, Go/Docker/Compose
-versions, plus the run parameters passed as flags) as `metadata.json`. It
+metadata (git SHA + dirty state, OS/kernel/arch, CPU/RAM, the
+`BENCHMARK_HOST_CLASS` declaration, Go/Docker/Compose versions, plus the run
+parameters passed as flags) as `metadata.json`. It
 measures nothing itself, so it never files per-unit provenance and never deletes
 it: each row-writer (`scripts/microbench`, `scripts/footprint`, `scripts/run-crud`)
 stamps the unit it measured under `metadata.json`'s `groups` key, and the report
@@ -133,6 +135,9 @@ docker compose --env-file benchmarks/config/versions.env -f benchmarks/compose.y
 docker compose --env-file benchmarks/config/versions.env -f benchmarks/compose.yml up -d postgres
 
 make benchmark                       # crud-all -> footprint -> micro -> report
+# Only a run declared on dedicated hardware publishes without the
+# "Not measured on dedicated hardware" banner (docs/methodology.md):
+BENCHMARK_HOST_CLASS=dedicated make benchmark
 # CRUD pins from versions.env by default (1/10/100/500/1000 × 5 × 30s, 10s
 # warm-up); cold starts default to footprint-all.sh's COLD_START_RUNS (20).
 # Narrow any on the command line for a reduced run:

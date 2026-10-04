@@ -205,15 +205,17 @@ func timestampSpan(provs map[string]metadata.Provenance, units []string) string 
 	return first + " to " + last
 }
 
-// writeStatusBanner prints, at the very top of the block, the two conditions
+// writeStatusBanner prints, at the very top of the block, the three conditions
 // that make a snapshot unfit to advertise as the canonical benchmark:
 //
 //   - a dirty working tree — the numbers aren't tied to a committed source
-//     state, so they aren't reproducible and must not be cited at all; and
+//     state, so they aren't reproducible and must not be cited at all;
 //   - a reduced protocol — a narrower sweep than the canonical dedicated-host
-//     run, i.e. a development sample, not the published result.
+//     run, i.e. a development sample, not the published result; and
+//   - a host not declared dedicated — the canonical protocol run on a
+//     developer laptop is still a development sample (issue #291).
 //
-// Both are loud, quoted callouts so a reader skimming the README can't mistake
+// All are loud, quoted callouts so a reader skimming the README can't mistake
 // a local/dev snapshot for the real thing (issue #141 §13). The dirty check
 // covers every published unit, not just the top-level record: one table's rows
 // measured against uncommitted source taint the block, because a reader
@@ -236,6 +238,43 @@ func writeStatusBanner(b *strings.Builder, meta metadata.Metadata, published map
 		b.WriteString(strings.Join(diffs, "; "))
 		b.WriteString(".\n\n")
 	}
+	if targets, classes := nonDedicatedTargets(meta, published); len(targets) > 0 {
+		b.WriteString("> ### Not measured on dedicated hardware\n>\n")
+		b.WriteString("> These tables were not all measured on a host declared as **dedicated benchmark ")
+		b.WriteString("hardware** (recorded host class: " + strings.Join(classes, ", ") + "), so they are a ")
+		b.WriteString("development sample, not the published benchmark — whatever protocol they ran. ")
+		b.WriteString("Re-run the affected group(s) on a quiet, dedicated host with `" + metadata.HostClassEnv + "=")
+		b.WriteString(metadata.HostClassDedicated + "` (`make " + strings.Join(targets, " ") + " benchmark-report`).\n\n")
+	}
+}
+
+// nonDedicatedTargets returns the make targets of every group with a published
+// unit not declared dedicated, and the distinct host classes those units
+// recorded ("undeclared" for none). Unlike dirtyTargets it never consults the
+// top-level record directly: collect-host-info rewrites it without measuring
+// anything, so its class describes no row. A snapshot that records no unit is
+// still judged by its top level, through UnitProvenance.
+func nonDedicatedTargets(meta metadata.Metadata, published map[string][]string) (targets, classes []string) {
+	seen := map[string]bool{}
+	for _, g := range metadata.KnownGroups {
+		units := meta.NonDedicatedUnits(g, published[g])
+		if len(units) == 0 {
+			continue
+		}
+		targets = append(targets, groupTargets[g])
+		for _, u := range units {
+			class := meta.UnitProvenance(g, u).HostClass
+			if class == "" {
+				class = "undeclared"
+			}
+			if !seen[class] {
+				seen[class] = true
+				classes = append(classes, "`"+class+"`")
+			}
+		}
+	}
+	sort.Strings(classes)
+	return targets, classes
 }
 
 // rerunChain is the ordered target list that regenerates a full snapshot on

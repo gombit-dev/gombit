@@ -146,6 +146,25 @@ the numbers of *that snapshot*, never assumed to be the canonical 5 × 30 s,
 1→1000 sweep. Read the metadata block, not this paragraph, for what a given
 snapshot actually ran.
 
+### Dedicated hardware is declared, not inferred
+
+The canonical protocol is not enough on its own: the full sweep run on a
+developer laptop is still a development sample. Whether a host is *dedicated
+benchmark hardware* cannot be read from `/proc`, and a heuristic (load average,
+core count, throttling) would both miss contended hosts and flag quiet ones. So
+the operator declares it, and the report fails closed (issue #291):
+
+```sh
+BENCHMARK_HOST_CLASS=dedicated make benchmark   # on a quiet, dedicated host
+```
+
+Every producer records the declaration as `host_class` in the provenance of the
+unit it measured (`dedicated`, `developer`, or empty when none was made). Unless
+every unit a README table publishes declares `dedicated`, `make
+benchmark-report` stamps the block **“Not measured on dedicated hardware”** and
+names the groups to re-run. An undeclared host is never read as a dedicated one,
+so silence is not a claim of canonicity.
+
 ## Fairness controls (issue #141 §7/§16/§18)
 
 - **Identical schema and seed.** All six use the same `users`/`projects` tables
@@ -198,8 +217,9 @@ The `metadata.json` beside the results records the host (CPU, cores, RAM),
 commit + dirty state, OS/kernel/arch, pinned versions, the applied resource
 limits (per app and for Postgres), and this run's own protocol parameters, so a
 published table always carries the conditions it was produced under — and the
-report labels it a reduced or unpublishable run when those conditions fall short
-of the canonical protocol or a clean tree.
+report labels it a reduced, unpublishable or non-dedicated run when those
+conditions fall short of the canonical protocol, a clean tree, or a declared
+dedicated host.
 
 ### Provenance is recorded per measurement group
 

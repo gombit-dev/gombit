@@ -292,6 +292,11 @@ func TestComparableToIgnoresTimestampButNotTheRest(t *testing.T) {
 	if !base.ComparableTo(later) {
 		t.Error("units of one run differing only in clock time must be comparable")
 	}
+	declared := base
+	declared.HostClass = HostClassDedicated
+	if !base.ComparableTo(declared) {
+		t.Error("units differing only in their host-class declaration must be comparable")
+	}
 	for name, other := range map[string]Provenance{
 		"commit":    {GitCommit: "bbbb2222", GitDirty: &clean, CPUModel: "Host", GoVersion: "go1.26.1"},
 		"host":      {GitCommit: "aaaa1111", GitDirty: &clean, CPUModel: "Other", GoVersion: "go1.26.1"},
@@ -381,6 +386,52 @@ func TestAnyUnitDirtyJudgesOnlyTheGivenUnits(t *testing.T) {
 	legacy := Metadata{GitDirty: &dirty}
 	if !legacy.AnyUnitDirty(GroupCRUD, []string{"rails"}) {
 		t.Error("a snapshot with no recorded unit must be judged by its dirty top level")
+	}
+}
+
+// Collect records the operator's host-class declaration verbatim (trimmed), and
+// records nothing when none was made.
+func TestCollectRecordsTheDeclaredHostClass(t *testing.T) {
+	run := func(context.Context, string, ...string) (string, error) { return "", nil }
+	for env, want := range map[string]string{" dedicated\n": HostClassDedicated, "": "", "laptop": "laptop"} {
+		m := Collect(context.Background(), Options{Run: run, Getenv: func(key string) string {
+			if key != HostClassEnv {
+				t.Errorf("Getenv(%q), want %q", key, HostClassEnv)
+			}
+			return env
+		}})
+		if m.HostClass != want || m.Provenance().HostClass != want {
+			t.Errorf("env %q: HostClass = %q / provenance %q, want %q", env, m.HostClass, m.Provenance().HostClass, want)
+		}
+	}
+	m := Metadata{}.WithProvenance(Provenance{HostClass: HostClassDeveloper})
+	if m.HostClass != HostClassDeveloper {
+		t.Errorf("WithProvenance dropped HostClass: %q", m.HostClass)
+	}
+}
+
+// Only an explicit dedicated declaration is dedicated; an unrecorded unit, an
+// empty class and any other value are not, and units outside the given set are
+// not judged.
+func TestNonDedicatedUnitsFailsClosed(t *testing.T) {
+	m := Metadata{Groups: map[string]map[string]Provenance{
+		GroupCRUD: {
+			"rails":  {HostClass: HostClassDedicated},
+			"gombit": {HostClass: HostClassDeveloper},
+			"django": {},
+			"nest":   {HostClass: "Dedicated"},
+		},
+	}}
+	got := m.NonDedicatedUnits(GroupCRUD, []string{"rails", "gombit", "django", "nest", "laravel"})
+	if strings.Join(got, ",") != "gombit,django,nest,laravel" {
+		t.Errorf("NonDedicatedUnits = %v, want gombit,django,nest,laravel", got)
+	}
+	if got := m.NonDedicatedUnits(GroupCRUD, []string{"rails"}); len(got) != 0 {
+		t.Errorf("NonDedicatedUnits(rails) = %v, want none", got)
+	}
+	legacy := Metadata{HostClass: HostClassDedicated}
+	if got := legacy.NonDedicatedUnits(GroupCRUD, []string{"rails"}); len(got) != 0 {
+		t.Errorf("a snapshot with no recorded unit is judged by its top level; got %v", got)
 	}
 }
 

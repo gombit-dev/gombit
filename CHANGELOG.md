@@ -226,6 +226,14 @@ version.
   now fails `Register` at startup instead of writing the wrong row. Give such
   a model a single-column primary key, or keep it out of the admin registry
   ([#453](https://github.com/gombit-dev/gombit/issues/453)).
+- The benchmark report no longer publishes a snapshot from a developer host
+  as if it were the canonical run. A clean tree on the canonical protocol used
+  to render with no banner whatever machine ran it. Each measured unit now
+  records the operator's `BENCHMARK_HOST_CLASS` declaration as `host_class`,
+  and `make benchmark-report` stamps the README block "Not measured on
+  dedicated hardware" unless every published unit declares `dedicated`. An
+  undeclared host counts as not dedicated, so the committed snapshot now
+  carries the banner ([#291](https://github.com/gombit-dev/gombit/issues/291)).
 
 ## [0.6.0] — 2026-09-28
 
