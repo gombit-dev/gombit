@@ -266,16 +266,16 @@ version.
   - `examples/admin` gains a `Brochure` model
     ([#330](https://github.com/gombit-dev/gombit/issues/330)).
 - The upgrade baseline (UPGRADE-1). It provides:
-  - `upgrade.Detect`, which reads an app's framework version from `go.mod`
-    (following a `replace`, or a `go.work` that uses the app; a local
-    checkout is reported as such) and its scaffold version from
-    `gombit.yaml`;
+  - `upgrade.Detect`, which reads an app's framework version from `go.mod`,
+    offline (a `replace` by the framework module is followed; a local
+    checkout, a fork, or an applying `go.work`, which is the go command's
+    answer, claim no version) and its scaffold version from `gombit.yaml`;
   - a versioned `gombit:` block (`metadata: 1`, `scaffold: 1`) that `gombit
     new` now writes to `gombit.yaml`; a newer metadata format or scaffold
     version is refused;
   - scaffold version 0 for apps generated before the block existed, which
     `gombit upgrade baseline --write` records without touching anything
-    else;
+    else (checked: every other value must decode the same) and atomically;
   - `gombit upgrade baseline [--dir] [--json] [--write]`, and
     [docs/upgrade.md](docs/upgrade.md)
     ([#341](https://github.com/gombit-dev/gombit/issues/341)).
@@ -311,6 +311,13 @@ version.
 
 ### Fixed
 
+- `gombit contract app` reports the framework version the go command would
+  use. A `replace` of a version the app does not require no longer counts,
+  and an exact-version `replace` wins over an every-version one in either
+  order (a wildcard local replace plus an exact fork used to fail as
+  unresolved). It shares its reading of `go.mod` with `gombit upgrade
+  baseline`, so the two commands agree
+  ([#341](https://github.com/gombit-dev/gombit/issues/341)).
 - `gombit make command` refuses the names `generate` and `contract`, which
   collided with framework commands; every command the root registers is now
   reserved ([#447](https://github.com/gombit-dev/gombit/pull/447)).

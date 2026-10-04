@@ -59,6 +59,9 @@ would at runtime):
   version is unresolvable for a host — error, with guidance to build against a
   published release. Pin a real release before generating a contract a host
   will consume.
+- The replace that counts is the one the go command applies: a replace of the
+  required version wins over one of every version, and a replace of another
+  version is ignored. `gombit upgrade baseline` reads `go.mod` the same way.
 
 ## Stability
 
