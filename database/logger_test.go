@@ -17,7 +17,6 @@ import (
 	"github.com/gombit-dev/gombit/config"
 	"github.com/gombit-dev/gombit/contract"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/mattn/go-sqlite3"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -223,13 +222,13 @@ func TestOpenDefaultLoggerIsQuietAndNeverPrintsValues(t *testing.T) {
 // hidden. Error text that merely mentions "unique" or "not null", from a read
 // or DDL, stays a failure.
 func TestLoggerDemotesOnlyStructuredClientErrors(t *testing.T) {
-	// A real driver error: sqlite3.Error's message text is unexported.
+	// A real driver error: the go-sqlite3 types need cgo, and its message
+	// text is unexported.
 	db := openSQLiteLoggedDB(t)
 	migrateLogged(t, db)
 	sqliteNotNull := db.Create(&loggedNote{}).Error
-	var liteErr sqlite3.Error
-	if !errors.As(sqliteNotNull, &liteErr) {
-		t.Fatalf("NULL insert = %#v, want a sqlite3.Error", sqliteNotNull)
+	if sqliteExtendedCode(sqliteNotNull) != sqliteConstraintNotNull {
+		t.Fatalf("NULL insert = %#v, want SQLite extended code %d", sqliteNotNull, sqliteConstraintNotNull)
 	}
 	for name, err := range map[string]error{
 		"translated duplicate": gorm.ErrDuplicatedKey,

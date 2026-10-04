@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -12,7 +13,6 @@ import (
 
 	mysqldriver "github.com/go-sql-driver/mysql"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/mattn/go-sqlite3"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"gorm.io/gorm"
@@ -170,11 +170,31 @@ func isNotNullViolationCode(err error) bool {
 	if errors.As(err, &myErr) {
 		return myErr.Number == 1048
 	}
-	var liteErr sqlite3.Error
-	if errors.As(err, &liteErr) {
-		return liteErr.ExtendedCode == sqlite3.ErrConstraintNotNull
+	return sqliteExtendedCode(err) == sqliteConstraintNotNull
+}
+
+// sqliteConstraintNotNull is SQLITE_CONSTRAINT_NOTNULL
+// (https://www.sqlite.org/rescode.html#constraint_notnull).
+const sqliteConstraintNotNull = 1299
+
+// sqliteExtendedCode reads a SQLite driver error's extended result code the way
+// gorm.io/driver/sqlite's translator does, through the error's exported
+// fields, so this package still builds without cgo (CGO_ENABLED=0), where the
+// go-sqlite3 types do not exist. It walks the wrap chain; 0 means none found.
+func sqliteExtendedCode(err error) int {
+	for ; err != nil; err = errors.Unwrap(err) {
+		raw, marshalErr := json.Marshal(err)
+		if marshalErr != nil {
+			continue
+		}
+		var coded struct {
+			ExtendedCode int `json:"ExtendedCode"`
+		}
+		if json.Unmarshal(raw, &coded) == nil && coded.ExtendedCode != 0 {
+			return coded.ExtendedCode
+		}
 	}
-	return false
+	return 0
 }
 
 // postgresPlaceholder matches what GORM's Explain leaves of a Postgres
