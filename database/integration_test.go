@@ -61,6 +61,26 @@ func TestMapPersistErrorMySQLConstraintViolations(t *testing.T) {
 	testForeignKeyAndNotNullViolations(t, db)
 }
 
+func TestFarPageIsEmptyOnPostgres(t *testing.T) {
+	if *postgresDSN == "" {
+		t.Skip("set -database.postgres-dsn to run Postgres integration tests")
+	}
+	testFarPageIsEmpty(t, openIntegrationDB(t, config.DatabaseConfig{
+		Driver: config.DatabaseDriverPostgres,
+		DSN:    *postgresDSN,
+	}))
+}
+
+func TestFarPageIsEmptyOnMySQL(t *testing.T) {
+	if *mysqlDSN == "" {
+		t.Skip("set -database.mysql-dsn to run MySQL integration tests")
+	}
+	testFarPageIsEmpty(t, openIntegrationDB(t, config.DatabaseConfig{
+		Driver: config.DatabaseDriverMySQL,
+		DSN:    *mysqlDSN,
+	}))
+}
+
 func TestListQueryHelpersPostgres(t *testing.T) {
 	if *postgresDSN == "" {
 		t.Skip("set -database.postgres-dsn to run Postgres integration tests")
