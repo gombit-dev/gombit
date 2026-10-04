@@ -91,6 +91,25 @@ func TestStripHTML(t *testing.T) {
 		// still survive the re-parse intact.
 		{name: "comparison before a number inside raw text survives", in: `<textarea>score <10`, want: "score <10"},
 		{name: "spaced comparison inside raw text survives", in: `<textarea>price < 10`, want: "price < 10"},
+
+		// #433: an earlier complete tag sends the whole string through the
+		// tokenizer, which used to drop everything from a "<" that never
+		// forms a tag. That tail is judged as if submitted alone.
+		{name: "comparison after a real tag survives", in: `<i>note</i>: if a<b then stop, else continue`, want: "note: if a<b then stop, else continue"},
+		{name: "comparison without spaces after a real tag survives", in: `<b>Q3</b> revenue<cost so we lost money this quarter`, want: "Q3 revenue<cost so we lost money this quarter"},
+		{name: "end-tag-like text after a real tag survives", in: `I <b>love</b> you </3 forever and ever`, want: "I love you </3 forever and ever"},
+		{name: "open comment marker after a real tag survives", in: `<i>x</i> <!-- open comment`, want: "x <!-- open comment"},
+		// The tail gets exactly the #118 gate, no more: one that holds a
+		// complete tag is dropped, as it would be on its own.
+		{name: "unterminated tail holding a complete tag is dropped", in: `<i>x</i> <a title="x>y`, want: "x "},
+		{name: "unterminated comment holding a tag is dropped", in: `<i>x</i> <!-- <script>alert(1)</script>`, want: "x "},
+		{name: "terminated comment is still dropped", in: `<i>x</i><!-- c --> y`, want: "x y"},
+		// Inside an unclosed skip element the tail is recovered markup, not
+		// submitted text, so it is not kept.
+		{name: "tail inside an unclosed skip element is not kept", in: `<object>x a<b`, want: "x a"},
+		// Complete tags are tags to the tokenizer and to a browser, whatever
+		// they were meant as; only text that never forms a tag is spared.
+		{name: "bracketed email is a complete tag and is stripped", in: `<br> email me at <john@example.com> please`, want: " email me at  please"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

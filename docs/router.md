@@ -136,6 +136,11 @@ Other behavior notes (they describe the opt-in layer):
 - Incomplete angle brackets that are not a complete HTML tag (no closing `>`,
   e.g. a product name `a<b`) are left unchanged — the HTML tokenizer would
   otherwise treat `"<"+letter` as a start tag and silently shorten the string.
+  That holds even when the value also carries a real tag: in
+  `<i>note</i>: if a<b then stop` the `<i>` tags are stripped and
+  `if a<b then stop` is kept, and so is a trailing `</3` or an unclosed
+  `<!--`. Text from a stray `<` to the end of the value is kept only when it
+  holds no complete tag, as it would be if submitted on its own.
   This applies to the submitted value itself, not to text recovered from
   inside an unclosed dangerous element. That text is unparsed markup rather
   than something the user typed, so it is re-parsed in full: every `"<"` +

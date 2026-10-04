@@ -307,7 +307,9 @@ func sanitizeJSONValue(value any, fieldName string) bool {
 // silently eat the rest of the string (issue #118).
 //
 // An unclosed dangerous element strips the tag but keeps the text that follows
-// (issue #201); stripHTMLUnclosed does that work.
+// (issue #201), and a "<" that never forms a tag before the end of the string
+// keeps its text even when an earlier complete tag sent the string through the
+// tokenizer (issue #433); stripHTMLUnclosed does that work.
 func stripHTML(s string) string {
 	if !strings.ContainsAny(s, "<>") {
 		return s
@@ -318,7 +320,7 @@ func stripHTML(s string) string {
 	if !completeHTMLTag.MatchString(s) {
 		return s
 	}
-	return stripHTMLUnclosed(s, maxUnclosedSkipRecursion)
+	return stripHTMLUnclosed(s, maxUnclosedSkipRecursion, true)
 }
 
 const maxUnclosedSkipRecursion = 4
@@ -362,7 +364,24 @@ const maxUnclosedSkipRecursion = 4
 // (`<script><script>...`) would be quadratic in input size. Past the cap the
 // tail reverts to the pre-#201 default and is discarded; legitimate content
 // does not nest this deep.
-func stripHTMLUnclosed(s string, budget int) string {
+//
+// An unterminated tail is the other way the tokenizer loses text (issue #433).
+// A "<" + letter with no ">" before EOF (`if a<b then stop`) is read as a start
+// tag that never ends and dropped, and "</" + non-letter (`</3 forever`) or an
+// open "<!--" as a comment that runs to EOF. Either way the rest of the string
+// vanishes. The #118 gate only spares a string with no complete tag at all, so
+// one earlier "<i>" used to cost everything after the stray "<". The tail is now
+// judged as if it had been submitted on its own: keepUnterminatedTail returns it
+// verbatim when it holds no complete tag, which is exactly what stripHTML
+// returns for that tail alone, so keeping it admits nothing the gate does not
+// already admit. A tail that does hold one (`<a title="x>y`) is still dropped.
+//
+// submitted is true only for the string the user sent, and the tail is kept
+// only there and outside any open skip element. That is the #118 gate's own
+// scope: text recovered from a skip element is unparsed markup, re-parsed in
+// full as described above, and a tail inside it gets no more protection than
+// the rest of it (`<textarea>a<b` still yields "a").
+func stripHTMLUnclosed(s string, budget int, submitted bool) string {
 	if !strings.ContainsAny(s, "<>") {
 		return s
 	}
@@ -371,15 +390,33 @@ func stripHTMLUnclosed(s string, budget int) string {
 	b.Grow(len(s))
 	var skipBuf []byte
 	var skipStarts []int
+	var openComment string
 	tokenizer := html.NewTokenizer(strings.NewReader(s))
 	skipDepth := 0
 	for {
 		switch tokenizer.Next() {
 		case html.ErrorToken:
-			if skipDepth > 0 && budget > 0 {
-				b.WriteString(stripHTMLUnclosed(string(skipBuf), budget-1))
+			tail := openComment
+			if tokenizer.Err() == io.EOF && tail == "" {
+				// A tag still open at EOF comes back as the error token's raw bytes.
+				tail = string(tokenizer.Raw())
+			}
+			if skipDepth > 0 {
+				if budget > 0 {
+					b.WriteString(stripHTMLUnclosed(string(skipBuf), budget-1, false))
+				}
+				return b.String()
+			}
+			if submitted {
+				b.WriteString(keepUnterminatedTail(tail))
 			}
 			return b.String()
+		case html.CommentToken:
+			// A terminated comment ends in ">" and is dropped as before. One that
+			// does not ran to EOF; it is the tail, decided when EOF arrives.
+			if raw := tokenizer.Raw(); !bytes.HasSuffix(raw, []byte(">")) {
+				openComment = string(raw)
+			}
 		case html.TextToken:
 			if skipDepth == 0 {
 				b.Write(tokenizer.Text())
@@ -404,4 +441,15 @@ func stripHTMLUnclosed(s string, budget int) string {
 			}
 		}
 	}
+}
+
+// keepUnterminatedTail decides the text the tokenizer swallowed into a tag or
+// comment that never ended (issue #433). It is kept verbatim when it holds no
+// complete tag, the same answer stripHTML gives for that text on its own (the
+// #118 gate), and dropped otherwise.
+func keepUnterminatedTail(tail string) string {
+	if tail == "" || completeHTMLTag.MatchString(tail) {
+		return ""
+	}
+	return tail
 }
