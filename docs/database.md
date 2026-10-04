@@ -94,8 +94,13 @@ encoded as JSON; PostgreSQL would store year 0 as 1 BC and then fail every
 read of the row. The timestamp bounds keep a day's margin for that time-zone
 conversion. The failure is a `*database.ValidationError` naming the field, so
 `MapPersistError` answers it with a 422 on the generated API, the admin data
-plane, and your own handlers alike. Zero values (unset), NULLs, and GORM's
-auto-managed `CreatedAt` / `UpdatedAt` are left alone.
+plane, and your own handlers alike. Only what a statement writes is checked,
+filtered by `Select` / `Omit`: an update assigning other columns of a row that
+already holds an out-of-range value is not refused. A string written to such a
+column (`Update("due", "0000-01-01T00:00:00Z")`) is read as the driver would
+read it; an expression (`gorm.Expr`) is left to the database. Zero values
+(unset), NULLs, and GORM's auto-managed `CreatedAt` / `UpdatedAt` are left
+alone.
 
 ## Deleting rows
 

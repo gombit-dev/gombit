@@ -143,3 +143,49 @@ func TestTimeRangeLeavesUnsetAndInRangeValuesAlone(t *testing.T) {
 		}
 	}
 }
+
+// The check is keyed on what a statement writes, not on the values reachable
+// from it (#560 review findings, applied here). An update's model holds the
+// row's old values, so a row that already stores an out-of-range value (from
+// before this check, or written by hand) can still have its other columns
+// changed; Select/Omit decide what is written; a string bound for a timestamp
+// or date column is read as the driver would read it; and a struct of another
+// type passed to Updates is matched to the model's columns by name.
+func TestTimeRangeChecksOnlyTheAssignmentSet(t *testing.T) {
+	db := openRangedDB(t)
+	row := rangedEvent{Name: "legacy", Due: inRange, Issued: dateFine}
+	if err := db.Create(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	// A value stored before the check existed, bypassing the callbacks.
+	if err := db.Exec("UPDATE ranged_events SET due = ? WHERE id = ?", "0000-01-01 00:00:00+00:00", row.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	var legacy rangedEvent
+	if err := db.First(&legacy, row.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	for what, err := range map[string]error{
+		"Update(other column)":       db.Model(&legacy).Update("name", "renamed").Error,
+		"Updates(map, other column)": db.Model(&legacy).Updates(map[string]any{"name": "again"}).Error,
+		"Omit the bad column":        db.Model(&legacy).Omit("due").Updates(rangedEvent{Name: "omitted", Due: yearZero}).Error,
+		"Select another column":      db.Model(&legacy).Select("name").Updates(rangedEvent{Name: "selected", Due: yearHuge}).Error,
+		"Create omitting it":         db.Omit("due").Create(&rangedEvent{Name: "c", Due: yearZero, Issued: dateFine}).Error,
+		"expression":                 db.Model(&legacy).Update("due", gorm.Expr("due")).Error,
+	} {
+		if err != nil {
+			t.Errorf("%s: %v, want the write allowed", what, err)
+		}
+	}
+
+	type dueOnly struct {
+		Due time.Time
+	}
+	wantRangeError(t, "Update(column, string)", db.Model(&legacy).Update("due", "0000-01-01T00:00:00Z").Error, "due")
+	wantRangeError(t, "Updates(map, string date)", db.Model(&legacy).Updates(map[string]any{"issued": "0999-12-31"}).Error, "issued_on")
+	wantRangeError(t, "Updates(other struct)", db.Model(&legacy).Updates(dueOnly{Due: yearZero}).Error, "due")
+	wantRangeError(t, "Select the bad column", db.Model(&legacy).Select("due").Updates(rangedEvent{Due: yearHuge}).Error, "due")
+	if err := db.Model(&legacy).Update("due", "2026-10-04T00:00:00Z").Error; err != nil {
+		t.Errorf("an in-range string: %v", err)
+	}
+}
