@@ -6,7 +6,7 @@ package types
 
 import (
 	"fmt"
-	"math/big"
+	"math"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/shopspring/decimal"
@@ -35,62 +35,117 @@ type Decimal struct {
 }
 
 // MaxDecimalDigits bounds the digits a decimal value may spell: the digits
-// before the point plus those after it, as String would write them. It is far
-// beyond any column (PostgreSQL's widest declared numeric, MySQL's
-// decimal(65,30)) and exists because a decimal's exponent is otherwise
-// unbounded: "1e1000000000" parses in microseconds, but formatting it, as
-// String and the driver.Valuer do on every write, materialises every digit and
+// String writes for it, before and after the point ("0.05" is 3). It is far
+// beyond any money column (MySQL's widest is decimal(65,30)) and exists
+// because a decimal's exponent is otherwise unbounded: "1e1000000000" parses
+// in microseconds, but formatting or comparing it materialises every digit and
 // holds a core and gigabytes of memory (issue #440 review).
+//
+// It is the one size rule for decimals: parsing (UnmarshalJSON, UnmarshalText,
+// NewDecimalFromString), reading (Scan), and the database write guard all
+// judge a value with DecimalShapeOf, so a value one of them accepts the others
+// accept too. A PostgreSQL numeric with no declared precision can hold more;
+// such a value fails to load.
 const MaxDecimalDigits = 1000
 
-// CheckDecimalSize returns an error when d's exponent is beyond
-// ±MaxDecimalDigits or d would spell more than MaxDecimalDigits digits. It
-// never formats d.
+// maxDecimalSpelling bounds the length of a decimal's text before it is
+// parsed. Parsing a long coefficient is quadratic (a million digits take about
+// a second), so a spelling no value within MaxDecimalDigits could have is
+// refused on its length alone. A database may pad a value's scale with zeros
+// (PostgreSQL writes numeric(1000,1000) values to 1000 places), so up to
+// MaxDecimalDigits padding zeros are allowed on top of the digits, plus room
+// for a sign, a point, quotes, and an exponent.
+const maxDecimalSpelling = 3*MaxDecimalDigits + 32
+
+// DecimalShape is how a decimal is written, as String writes it.
+type DecimalShape struct {
+	// Whole is the number of digits before the point, 0 for a value below 1.
+	Whole int
+	// Frac is the number of digits after the point, trailing zeros dropped.
+	Frac int
+	// Significant runs from the first non-zero digit to the last digit
+	// written, trailing integer zeros included (1000 has 4, 0.0012 has 2).
+	Significant int
+}
+
+// Digits is the number of digits String writes: the leading "0" of a value
+// below 1 included.
+func (s DecimalShape) Digits() int {
+	return max(s.Whole, 1) + s.Frac
+}
+
+// DecimalShapeOf measures d without formatting it beyond its bounded
+// coefficient, and refuses it when its exponent is beyond ±MaxDecimalDigits or
+// it spells more than MaxDecimalDigits digits.
 //
 // The exponent is bounded on its own, whatever the coefficient: formatting or
 // comparing a shopspring decimal rescales it, which computes 10^|exponent|
-// (and String repeats |exponent| zeros) before the coefficient matters, so
-// "0e1000000000" costs as much as "1e1000000000" (issue #440 review). The digit
-// count comes from the coefficient's bit length, so a hostile value is refused
-// without materialising it.
-func CheckDecimalSize(d decimal.Decimal) error {
-	if e := d.Exponent(); e > MaxDecimalDigits || e < -MaxDecimalDigits {
-		return fmt.Errorf("has more than %d digits", MaxDecimalDigits)
+// before the coefficient matters, so "0e1000000000" costs as much as
+// "1e1000000000" (issue #440 review). The coefficient's size is bounded from
+// its bit length before it is formatted.
+func DecimalShapeOf(d decimal.Decimal) (DecimalShape, error) {
+	exponent := int(d.Exponent())
+	if exponent > MaxDecimalDigits || exponent < -MaxDecimalDigits {
+		return DecimalShape{}, errDecimalTooLarge
 	}
-	if digits := decimalSpelledDigits(d); digits > MaxDecimalDigits {
-		return fmt.Errorf("has more than %d digits", MaxDecimalDigits)
-	}
-	return nil
-}
-
-// decimalSpelledDigits estimates, without formatting, how many digits d spells
-// (an upper bound tight to one digit): the coefficient's digits plus the
-// zeros its exponent adds before or after them.
-func decimalSpelledDigits(d decimal.Decimal) int {
 	c := d.Coefficient()
 	if c.Sign() == 0 {
-		return 1
+		return DecimalShape{}, nil
 	}
-	coefficient := coefficientDigits(c)
-	exponent := int(d.Exponent())
-	if exponent >= 0 {
-		return coefficient + exponent
+	c.Abs(c)
+	var n int // digits of c, trailing zeros removed
+	if c.IsUint64() {
+		v := c.Uint64()
+		for v%10 == 0 {
+			v /= 10
+			exponent++
+		}
+		for n = 1; v >= 10; v /= 10 {
+			n++
+		}
+	} else {
+		if estimate := int(float64(c.BitLen())*0.30102999566398119521) + 1; estimate > 3*MaxDecimalDigits+1 {
+			return DecimalShape{}, errDecimalTooLarge
+		}
+		digits := c.String()
+		n = len(digits)
+		for n > 1 && digits[n-1] == '0' {
+			n--
+		}
+		exponent += len(digits) - n
 	}
-	if -exponent > coefficient {
-		return -exponent + 1 // "0." and the fraction
+	var shape DecimalShape
+	if n+exponent > 0 {
+		shape.Whole = n + exponent
 	}
-	return coefficient
+	if exponent < 0 {
+		shape.Frac = -exponent
+		shape.Significant = n
+	} else {
+		shape.Significant = n + exponent
+	}
+	if shape.Digits() > MaxDecimalDigits {
+		return DecimalShape{}, errDecimalTooLarge
+	}
+	return shape, nil
 }
 
-// coefficientDigits is the decimal digit count of |c|. It is estimated from the
-// bit length (high by at most one) and formatted only when the estimate is
-// small enough for that to be cheap, so a huge coefficient is never formatted.
-func coefficientDigits(c *big.Int) int {
-	estimate := int(float64(c.BitLen())*0.30102999566398119521) + 1
-	if estimate > MaxDecimalDigits+1 {
-		return estimate
+var errDecimalTooLarge = fmt.Errorf("has more than %d digits", MaxDecimalDigits)
+
+// CheckDecimalSize returns an error when d is beyond the size rule; see
+// DecimalShapeOf.
+func CheckDecimalSize(d decimal.Decimal) error {
+	_, err := DecimalShapeOf(d)
+	return err
+}
+
+// CheckDecimalSpelling refuses decimal text too long for any value within the
+// size rule, before it is parsed (parsing a long coefficient is quadratic).
+func CheckDecimalSpelling(s string) error {
+	if len(s) > maxDecimalSpelling {
+		return errDecimalTooLarge
 	}
-	return len(new(big.Int).Abs(c).String())
+	return nil
 }
 
 // UnmarshalJSON parses a decimal and refuses one beyond MaxDecimalDigits
@@ -100,12 +155,15 @@ func (d *Decimal) UnmarshalJSON(b []byte) error {
 	if string(b) == "null" {
 		return nil
 	}
+	if err := CheckDecimalSpelling(string(b)); err != nil {
+		return fmt.Errorf("decimal %w", err)
+	}
 	var inner decimal.Decimal
 	if err := inner.UnmarshalJSON(b); err != nil {
 		return err
 	}
 	if err := CheckDecimalSize(inner); err != nil {
-		return fmt.Errorf("decimal %s", err)
+		return fmt.Errorf("decimal %w", err)
 	}
 	d.Decimal = inner
 	return nil
@@ -114,28 +172,51 @@ func (d *Decimal) UnmarshalJSON(b []byte) error {
 // UnmarshalText parses a decimal and refuses one beyond MaxDecimalDigits
 // before anything formats it.
 func (d *Decimal) UnmarshalText(b []byte) error {
+	if err := CheckDecimalSpelling(string(b)); err != nil {
+		return fmt.Errorf("decimal %w", err)
+	}
 	var inner decimal.Decimal
 	if err := inner.UnmarshalText(b); err != nil {
 		return err
 	}
 	if err := CheckDecimalSize(inner); err != nil {
-		return fmt.Errorf("decimal %s", err)
+		return fmt.Errorf("decimal %w", err)
 	}
 	d.Decimal = inner
 	return nil
 }
 
-// Scan reads a decimal from the database and refuses one beyond
-// MaxDecimalDigits, so a row stored before the bound existed (SQLite kept the
-// text "1e1000000000" as written) fails to load instead of hanging the first
-// formatting of it.
+// Scan reads a decimal from the database and refuses one beyond the size
+// rule, so a row the guard would refuse to write (stored before the guard
+// existed, or by raw SQL) fails to load with an error instead of hanging the
+// first formatting of it. A non-finite float is refused too: SQLite stores the
+// literal "1e1000000000" in a decimal column as REAL Inf, and shopspring panics
+// on it.
 func (d *Decimal) Scan(value any) error {
+	switch v := value.(type) {
+	case float64:
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return fmt.Errorf("decimal: cannot scan non-finite %v", v)
+		}
+	case float32:
+		if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
+			return fmt.Errorf("decimal: cannot scan non-finite %v", v)
+		}
+	case string:
+		if err := CheckDecimalSpelling(v); err != nil {
+			return fmt.Errorf("decimal %w", err)
+		}
+	case []byte:
+		if err := CheckDecimalSpelling(string(v)); err != nil {
+			return fmt.Errorf("decimal %w", err)
+		}
+	}
 	var inner decimal.Decimal
 	if err := inner.Scan(value); err != nil {
 		return err
 	}
 	if err := CheckDecimalSize(inner); err != nil {
-		return fmt.Errorf("decimal %s", err)
+		return fmt.Errorf("decimal %w", err)
 	}
 	d.Decimal = inner
 	return nil
@@ -149,6 +230,9 @@ func NewDecimal(d decimal.Decimal) Decimal {
 // NewDecimalFromString parses a decimal string (e.g. "19.99"), refusing one
 // beyond MaxDecimalDigits.
 func NewDecimalFromString(s string) (Decimal, error) {
+	if err := CheckDecimalSpelling(s); err != nil {
+		return Decimal{}, fmt.Errorf("decimal %w", err)
+	}
 	d, err := decimal.NewFromString(s)
 	if err != nil {
 		return Decimal{}, err

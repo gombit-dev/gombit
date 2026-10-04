@@ -126,6 +126,9 @@ func decimalValue(raw any) (decimal.Decimal, bool) {
 func parseDecimalValue(raw any) (decimal.Decimal, bool) {
 	switch v := raw.(type) {
 	case string:
+		if types.CheckDecimalSpelling(v) != nil {
+			return decimal.Decimal{}, false
+		}
 		d, err := decimal.NewFromString(strings.TrimSpace(v))
 		return d, err == nil
 	case float64:
@@ -135,6 +138,9 @@ func parseDecimalValue(raw any) (decimal.Decimal, bool) {
 	case int64:
 		return decimal.NewFromInt(v), true
 	case json.Number:
+		if types.CheckDecimalSpelling(v.String()) != nil {
+			return decimal.Decimal{}, false
+		}
 		d, err := decimal.NewFromString(v.String())
 		return d, err == nil
 	default:
@@ -264,12 +270,16 @@ func asDecimalString(raw any) (string, error) {
 	default:
 		return "", fmt.Errorf("must be a decimal")
 	}
+	// Refuse on length before parsing (a long coefficient parses in quadratic
+	// time), then bound the value before anything formats or compares it: a
+	// huge exponent would otherwise hold a core (#440).
+	if err := types.CheckDecimalSpelling(s); err != nil {
+		return "", fmt.Errorf("must be a decimal: %s", err)
+	}
 	d, err := decimal.NewFromString(s)
 	if err != nil {
 		return "", fmt.Errorf("must be a decimal")
 	}
-	// Bound the value before anything formats or compares it: a huge exponent
-	// would otherwise hold a core (#440).
 	if err := types.CheckDecimalSize(d); err != nil {
 		return "", fmt.Errorf("must be a decimal: %s", err)
 	}

@@ -2,12 +2,15 @@ package types_test
 
 import (
 	"encoding/json"
+	"math"
+	"math/big"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/shopspring/decimal"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 
@@ -147,5 +150,90 @@ func TestDecimalScanIsBounded(t *testing.T) {
 	}
 	if err := d.Scan("12.5"); err != nil || d.String() != "12.5" {
 		t.Errorf("Scan(12.5) = %s, %v, want 12.5", d, err)
+	}
+}
+
+// TestDecimalShapeMatchesString: DecimalShapeOf is the one size rule, so its
+// digit count must be exactly what String writes, for every coefficient and
+// exponent within the bound (round-4 review: the write guard and Scan counted
+// differently, so a value one accepted the other refused).
+func TestDecimalShapeMatchesString(t *testing.T) {
+	coefficients := []string{"1", "5", "10", "1500", "123456789", "18446744073709551615", "18446744073709551616", "1000000000000000000000000000", "99999999999999999999999999999999999"}
+	for _, c := range coefficients {
+		for _, exponent := range []int32{-1000, -999, -500, -30, -4, -1, 0, 1, 4, 30, 500, 965, 999, 1000} {
+			for _, sign := range []string{"", "-"} {
+				d := decimal.NewFromBigInt(mustBig(t, sign+c), exponent)
+				shape, err := types.DecimalShapeOf(d)
+				written := strings.NewReplacer("-", "", ".", "").Replace(d.String())
+				fits := len(written) <= types.MaxDecimalDigits
+				if (err == nil) != fits {
+					t.Fatalf("%se%d: DecimalShapeOf err=%v, but String writes %d digits", sign+c, exponent, err, len(written))
+				}
+				if err == nil && shape.Digits() != len(written) {
+					t.Fatalf("%se%d: Digits()=%d, String writes %d digits", sign+c, exponent, shape.Digits(), len(written))
+				}
+			}
+		}
+	}
+	// The boundary, both ways, and a value a database padded to its scale.
+	if _, err := types.DecimalShapeOf(decimal.New(1, -999)); err != nil {
+		t.Errorf("1e-999 (1000 digits written) refused: %v", err)
+	}
+	if _, err := types.DecimalShapeOf(decimal.New(1, -1000)); err == nil {
+		t.Error("1e-1000 (1001 digits written) accepted")
+	}
+	padded := "0.05" + strings.Repeat("0", 998) // numeric(1000,1000) as PostgreSQL returns it
+	var d types.Decimal
+	if err := d.Scan(padded); err != nil || d.String() != "0.05" {
+		t.Errorf("Scan(0.05 padded to 1000 places) = %s, %v, want 0.05", d, err)
+	}
+}
+
+func mustBig(t *testing.T, s string) *big.Int {
+	t.Helper()
+	n, ok := new(big.Int).SetString(s, 10)
+	if !ok {
+		t.Fatalf("bad big int %q", s)
+	}
+	return n
+}
+
+// TestDecimalScanRefusesNonFiniteFloats: SQLite stores the literal
+// "1e1000000000" in a decimal column as REAL Inf, and shopspring panics on it
+// (round-4 review); Scan refuses it instead.
+func TestDecimalScanRefusesNonFiniteFloats(t *testing.T) {
+	for _, v := range []any{math.Inf(1), math.Inf(-1), math.NaN(), float32(math.Inf(1))} {
+		var d types.Decimal
+		if err := d.Scan(v); err == nil {
+			t.Errorf("Scan(%v) accepted, want a refusal", v)
+		}
+	}
+	var d types.Decimal
+	if err := d.Scan(12.5); err != nil || d.String() != "12.5" {
+		t.Errorf("Scan(12.5) = %s, %v", d, err)
+	}
+}
+
+// TestDecimalRefusesLongSpellingBeforeParsing: parsing a long coefficient is
+// quadratic (a million digits take about a second), so a spelling no bounded
+// value could have is refused on its length first.
+func TestDecimalRefusesLongSpellingBeforeParsing(t *testing.T) {
+	long := strings.Repeat("9", 1_000_000)
+	start := time.Now()
+	var d types.Decimal
+	if err := json.Unmarshal([]byte(`"`+long+`"`), &d); err == nil {
+		t.Error("UnmarshalJSON accepted a million digits")
+	}
+	if err := d.UnmarshalText([]byte(long)); err == nil {
+		t.Error("UnmarshalText accepted a million digits")
+	}
+	if err := d.Scan(long); err == nil {
+		t.Error("Scan accepted a million digits")
+	}
+	if _, err := types.NewDecimalFromString(long); err == nil {
+		t.Error("NewDecimalFromString accepted a million digits")
+	}
+	if took := time.Since(start); took > 100*time.Millisecond {
+		t.Errorf("refusing four million-digit spellings took %s, want them refused on length", took)
 	}
 }

@@ -425,3 +425,50 @@ func TestDecimalTextLengthAndUnsigned(t *testing.T) {
 		t.Fatalf("create with fitting values: %v", err)
 	}
 }
+
+type textDecimalRow struct {
+	ID    uint          `gorm:"primaryKey"`
+	Free  types.Decimal `gorm:"type:varchar(1100)"`
+	Short types.Decimal `gorm:"type:varchar(5)"`
+}
+
+// TestDecimalTextColumnReadsBackWhatTheGuardApproved: a text column stores
+// the bytes bound for it as they are, so the guard checks those bytes, and
+// every write it approves loads again through types.Decimal (round-4 review:
+// " 1.5 " was approved, stored as written, and then failed every read).
+func TestDecimalTextColumnReadsBackWhatTheGuardApproved(t *testing.T) {
+	db := openSQLite(t)
+	if err := db.AutoMigrate(&textDecimalRow{}); err != nil {
+		t.Fatal(err)
+	}
+	row := textDecimalRow{Free: types.MustDecimal("1"), Short: types.MustDecimal("1")}
+	if err := db.Create(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	var ve *ValidationError
+	for label, write := range map[string]func() error{
+		"padded string":         func() error { return db.Model(&textDecimalRow{ID: row.ID}).Update("free", " 1.5 ").Error },
+		"trailing-zero string":  func() error { return db.Model(&textDecimalRow{ID: row.ID}).Update("free", "1.50").Error },
+		"leading-zero string":   func() error { return db.Model(&textDecimalRow{ID: row.ID}).Update("free", "01.5").Error },
+		"exponent string":       func() error { return db.Model(&textDecimalRow{ID: row.ID}).Update("free", "15e-1").Error },
+		"float":                 func() error { return db.Model(&textDecimalRow{ID: row.ID}).Update("free", 1.5).Error },
+		"too long for varchar5": func() error { return db.Model(&textDecimalRow{ID: row.ID}).Update("short", "1.50000").Error },
+	} {
+		if err := write(); !errors.As(err, &ve) {
+			t.Errorf("%s: error = %v, want a *ValidationError (422), not a stored or driver-refused value", label, err)
+		}
+	}
+	// What the guard approves round-trips, at the size boundary too.
+	for _, value := range []any{"1.5", types.MustDecimal("-0.25"), decimal.New(1, -999)} {
+		if err := db.Model(&textDecimalRow{ID: row.ID}).Update("free", value).Error; err != nil {
+			t.Fatalf("Update(free, %v): %v", value, err)
+		}
+		var loaded textDecimalRow
+		if err := db.First(&loaded, row.ID).Error; err != nil {
+			t.Fatalf("First after writing %v: %v (the guard approved a row that cannot load)", value, err)
+		}
+	}
+	if err := db.Model(&textDecimalRow{ID: row.ID}).Update("free", decimal.New(1, -1000)).Error; !errors.As(err, &ve) {
+		t.Fatalf("1e-1000 (1001 digits written): error = %v, want refused by the same rule Scan applies", err)
+	}
+}

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"math/big"
 	"reflect"
 	"regexp"
 	"strconv"
@@ -156,6 +155,14 @@ func (g *decimalGuard) check(db *gorm.DB, creating bool) {
 			}
 			return
 		}
+		if col.text {
+			// A text column stores the bytes bound for it as they are, not
+			// the parsed value: check those bytes.
+			if msg := textColumnProblem(a.Value, d, col); msg != "" {
+				report(a.Field, msg)
+			}
+			return
+		}
 		if msg := columnProblem(d, col, g.driver == DriverSQLite); msg != "" {
 			report(a.Field, msg)
 		}
@@ -241,26 +248,79 @@ func parseDecimalDDL(ddl string, mysql bool) decimalColumn {
 	return decimalColumn{unsupported: strings.TrimSpace(ddl)}
 }
 
-// columnProblem describes why d would not be stored exactly in col, or returns
-// "" when it would.
+// columnProblem describes why d would not be stored exactly in a decimal
+// column col, or returns "" when it would.
 func columnProblem(d decimal.Decimal, col decimalColumn, sqlite bool) string {
-	if col.text {
-		if err := types.CheckDecimalSize(d); err != nil {
-			return err.Error()
-		}
-		// The column stores the digits as the driver.Valuer writes them; the
-		// size bound above makes formatting them cheap.
-		if col.textLength > 0 {
-			if n := len(d.String()); n > col.textLength {
-				return fmt.Sprintf("is %d characters; the column holds %d", n, col.textLength)
-			}
-		}
-		return ""
-	}
 	if col.unsigned && d.Sign() < 0 {
 		return "must not be negative: the column is unsigned"
 	}
 	return DecimalStorageProblem(d, col.precision, col.scale, sqlite)
+}
+
+// textColumnProblem checks the bytes a text decimal column will receive. A
+// text column stores what is bound as is, so it must be the decimal's
+// canonical spelling (what types.Decimal writes and Scan reads back): a
+// decimal value is bound as that spelling; a string must already be it (no
+// spaces, padding zeros, or exponent: " 1.5 " and "1.50" would be stored as
+// written, and " 1.5 " cannot be read back); a float is refused, since the
+// driver spells it its own way (1e+21). The spelling must fit the column's
+// length.
+func textColumnProblem(v reflect.Value, d decimal.Decimal, col decimalColumn) string {
+	if err := types.CheckDecimalSize(d); err != nil {
+		return err.Error()
+	}
+	canonical := d.String() // bounded by the size rule, so cheap
+	raw, kind := boundSpelling(v)
+	switch kind {
+	case spelledFloat:
+		return "must be a decimal value or string for a text column, not a float"
+	case spelledText:
+		if raw != canonical {
+			return fmt.Sprintf("must be written as %q for a text column", canonical)
+		}
+	}
+	if col.textLength > 0 && len(canonical) > col.textLength {
+		return fmt.Sprintf("is %d characters; the column holds %d", len(canonical), col.textLength)
+	}
+	return ""
+}
+
+type spellingKind int
+
+const (
+	spelledValue spellingKind = iota // a decimal or integer: bound as its canonical spelling
+	spelledText                      // a string: bound as written
+	spelledFloat                     // a float: spelled by the driver
+)
+
+// boundSpelling reports how the value v is bound: its raw text when it is a
+// string (directly, through a pointer or named type, or a driver.Valuer).
+func boundSpelling(v reflect.Value) (string, spellingKind) {
+	for v.IsValid() && (v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface) {
+		if v.IsNil() {
+			return "", spelledValue
+		}
+		v = v.Elem()
+	}
+	if !v.IsValid() || isDecimalType(v.Type()) {
+		return "", spelledValue
+	}
+	if b, ok := v.Interface().([]byte); ok {
+		return string(b), spelledText
+	}
+	if valuer, ok := v.Interface().(driver.Valuer); ok {
+		if dv, err := valuer.Value(); err == nil && dv != nil {
+			return boundSpelling(reflect.ValueOf(dv))
+		}
+		return "", spelledValue
+	}
+	switch v.Kind() {
+	case reflect.String:
+		return v.String(), spelledText
+	case reflect.Float32, reflect.Float64:
+		return "", spelledFloat
+	}
+	return "", spelledValue
 }
 
 // isDecimalType reports whether t (through pointers) is shopspring's
@@ -396,6 +456,11 @@ func assignedDecimal(value any) (decimal.Decimal, decimalState) {
 }
 
 func parseDecimal(s string) (decimal.Decimal, decimalState) {
+	// Refuse on length before parsing: a long coefficient parses in
+	// quadratic time.
+	if types.CheckDecimalSpelling(s) != nil {
+		return decimal.Decimal{}, notDecimal
+	}
 	d, err := decimal.NewFromString(strings.TrimSpace(s))
 	if err != nil {
 		return decimal.Decimal{}, notDecimal
@@ -406,98 +471,42 @@ func parseDecimal(s string) (decimal.Decimal, decimalState) {
 // DecimalStorageProblem describes why d would not be stored exactly in a
 // decimal(precision,scale) column, or returns "" when it would (issue #440).
 // precision <= 0 means the column has no limit of its own (PostgreSQL's
-// unbounded numeric), so only the size bound and the SQLite limit apply.
+// unbounded numeric), so only the size rule and the SQLite limit apply.
 // Trailing zeros after the point are not digits that need storing: 1.5000 fits
 // decimal(5,1).
 //
-// It never formats d before bounding it. Formatting or comparing a decimal
-// rescales it to its exponent, so the exponent is bounded first, zero
-// included ("0e1000000000" costs as much as "1e1000000000"), then the
-// coefficient's size from its bit length; only then is the (bounded)
-// coefficient formatted, once, to count its digits.
+// d is measured by types.DecimalShapeOf, the one size rule types.Decimal's
+// parsing and Scan also apply, so a value accepted here can be read back. It
+// bounds the exponent and the coefficient before formatting anything, so a
+// hostile value ("0e1000000000") is refused without materialising it.
 func DecimalStorageProblem(d decimal.Decimal, precision, scale int, sqlite bool) string {
-	exponent := int(d.Exponent())
-	if exponent > types.MaxDecimalDigits || exponent < -types.MaxDecimalDigits {
-		return fmt.Sprintf("has more than %d digits", types.MaxDecimalDigits)
+	shape, err := types.DecimalShapeOf(d)
+	if err != nil {
+		return err.Error()
 	}
-	// One copy of the coefficient (shopspring has no allocation-free size
-	// accessor; NumDigits computes 10^n for a large one).
-	c := d.Coefficient()
-	if c.Sign() == 0 {
-		return ""
-	}
-	c.Abs(c)
-	var whole, frac, digits, magnitude int
-	if c.IsUint64() {
-		// The path almost every real value takes: counted, not formatted.
-		whole, frac, digits, magnitude = smallCoefficientShape(c.Uint64(), exponent)
-	} else {
-		if estimate := int(float64(c.BitLen())*0.30102999566398119521) + 1; estimate > types.MaxDecimalDigits+1 {
-			return fmt.Sprintf("has more than %d digits", types.MaxDecimalDigits)
-		}
-		whole, frac, digits, magnitude = coefficientShape(c, exponent)
-	}
-	if whole+frac > types.MaxDecimalDigits {
-		return fmt.Sprintf("has more than %d digits", types.MaxDecimalDigits)
+	if shape.Significant == 0 {
+		return "" // zero
 	}
 	if precision > 0 {
-		if whole > precision-scale {
+		if shape.Whole > precision-scale {
 			return fmt.Sprintf("does not fit decimal(%d,%d): at most %d digits before the decimal point", precision, scale, precision-scale)
 		}
-		if frac > scale {
+		if shape.Frac > scale {
 			return fmt.Sprintf("does not fit decimal(%d,%d): at most %d digits after the decimal point", precision, scale, scale)
 		}
 	}
 	if sqlite {
-		if digits > SQLiteDecimalDigits {
-			return fmt.Sprintf("has %d digits; SQLite stores at most %d exactly", digits, SQLiteDecimalDigits)
+		if shape.Significant > SQLiteDecimalDigits {
+			return fmt.Sprintf("has %d digits; SQLite stores at most %d exactly", shape.Significant, SQLiteDecimalDigits)
+		}
+		// The decimal exponent of the leading digit.
+		magnitude := shape.Whole - 1
+		if shape.Whole == 0 {
+			magnitude = shape.Significant - shape.Frac - 1
 		}
 		if magnitude > sqliteDecimalMaxExponent || magnitude < -sqliteDecimalMaxExponent {
 			return fmt.Sprintf("is outside the range SQLite stores exactly (about 1e-%d to 1e%d)", sqliteDecimalMaxExponent, sqliteDecimalMaxExponent)
 		}
 	}
 	return ""
-}
-
-// smallCoefficientShape is coefficientShape for a coefficient that fits a
-// uint64, computed without formatting it.
-func smallCoefficientShape(v uint64, exponent int) (whole, frac, digits, magnitude int) {
-	for v%10 == 0 {
-		v /= 10
-		exponent++
-	}
-	n := 1
-	for x := v; x >= 10; x /= 10 {
-		n++
-	}
-	return shape(n, exponent)
-}
-
-// coefficientShape counts the digits of the value |c| × 10^exponent (c
-// non-zero and bounded): whole and frac are the digits before and after the
-// point as written without trailing fractional zeros, digits runs from the
-// first non-zero digit to the last digit written (trailing integer zeros
-// included), and magnitude is the decimal exponent of the leading digit.
-func coefficientShape(c *big.Int, exponent int) (whole, frac, digits, magnitude int) {
-	s := c.String()
-	n := len(s)
-	for n > 1 && s[n-1] == '0' {
-		n--
-	}
-	return shape(n, exponent+len(s)-n)
-}
-
-// shape derives the digit counts from a coefficient of n digits with no
-// trailing zero, times 10^exponent.
-func shape(n, exponent int) (whole, frac, digits, magnitude int) {
-	if n+exponent > 0 {
-		whole = n + exponent
-	}
-	if exponent < 0 {
-		frac = -exponent
-		digits = n
-	} else {
-		digits = n + exponent
-	}
-	return whole, frac, digits, n + exponent - 1
 }

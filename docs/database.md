@@ -102,8 +102,11 @@ garbage write.
   must match the migrated column. A decimal type without `(p,s)` is
   `DECIMAL(10,0)` on MySQL and an unbounded `numeric` on PostgreSQL; a
   `precision:`/`scale:` tag does not reach the column for `types.Decimal`; an
-  `unsigned` column refuses a negative value; a text column stores the digits
-  as written, up to its length (`varchar(n)`); any other type (`real`,
+  `unsigned` column refuses a negative value; a text column stores the bytes
+  it is given as written, so a string bound for one must already be the
+  decimal's canonical spelling (`"1.5"`, not `" 1.5 "`, `"1.50"`, or
+  `"15e-1"`), a float is refused, and the spelling must fit the column's
+  length (`varchar(n)`); any other type (`real`,
   `double precision`, `money`, `bigint` cents) fails every write with an
   error rather than an unchecked one. Declare such a field `decimal(p,s)`.
 - **On SQLite**, which stores decimals through float64, a value with more than
@@ -111,7 +114,10 @@ garbage write.
   refused the same way.
 - **On every driver**, a value whose exponent is beyond ±1000, or that would
   spell more than `types.MaxDecimalDigits` (1000) digits, is refused before
-  anything formats or compares it. A decimal's exponent is unbounded, and
+  anything formats or compares it. This is one rule (`types.DecimalShapeOf`)
+  shared by the write guard and `types.Decimal`'s parsing and `Scan`, so a
+  value the guard approves always loads again, and text longer than any
+  bounded value could spell is refused before it is even parsed. A decimal's exponent is unbounded, and
   formatting or comparing one rescales it to that exponent, zero included:
   `"0e1000000000"` costs as much as `"1e1000000000"`. `types.Decimal` refuses
   such a value when it is unmarshalled (`UnmarshalJSON`, `UnmarshalText`,

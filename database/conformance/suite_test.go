@@ -302,6 +302,28 @@ func TestConformanceSuite(t *testing.T) {
 				t.Fatalf("untagged decimal on %s stored as %v (%v), want 1.5", db.Driver(), loaded.Loose, err)
 			}
 		}
+
+		// The write guard and types.Decimal's Scan apply one size rule, so a
+		// value the guard approves loads again (round-4 review). 1e-999 writes
+		// 1000 digits: PostgreSQL's unbounded numeric stores and returns it;
+		// MySQL's DECIMAL(10,0) and SQLite refuse it. 1e-1000 is refused
+		// everywhere, by the same rule Scan would apply on the way back.
+		tiny := types.Decimal{Decimal: decimal.New(1, -999)}
+		edge := models.Item{Code: "dec-precision-edge", Name: "decimal edge", Price: decimal.RequireFromString("1"), Discount: types.Decimal{Decimal: decimal.RequireFromString("1")}, Loose: &tiny}
+		err = db.Create(&edge).Error
+		if db.Driver() == database.DriverPostgres {
+			if err != nil {
+				t.Fatalf("Create(untagged 1e-999) on postgres: %v", err)
+			}
+			var loaded models.Item
+			if err := db.First(&loaded, edge.ID).Error; err != nil || loaded.Loose == nil || !loaded.Loose.Equal(tiny.Decimal) {
+				t.Fatalf("1e-999 on postgres read back as %v (%v): the guard approved a row that does not load", loaded.Loose, err)
+			}
+		} else {
+			refuse("Create(untagged 1e-999)", err)
+		}
+		over := types.Decimal{Decimal: decimal.New(1, -1000)}
+		refuse("Create(untagged 1e-1000)", db.Create(&models.Item{Code: "dec-precision-over", Name: "decimal over", Price: decimal.RequireFromString("1"), Discount: types.Decimal{Decimal: decimal.RequireFromString("1")}, Loose: &over}).Error)
 	})
 
 	t.Run("crud", func(t *testing.T) {
