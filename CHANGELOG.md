@@ -281,6 +281,15 @@ version.
   context (flush a buffer, close a pool) failed at once. A full shutdown can
   now take the drain delay plus up to twice the shutdown timeout
   ([#431](https://github.com/gombit-dev/gombit/issues/431)).
+- A request whose handler panics is now counted in
+  `gombit_http_requests_total` and `gombit_http_request_duration_seconds_sum`
+  with `status="500"`. The metrics layer recorded a request only after the
+  handler returned, so a panic unwound past it and the request never appeared
+  in `/metrics`. A handler that had already sent its status before panicking
+  is counted at that status; one that only set it is counted as 500, which is
+  what the client receives. A panic that aborts the connection
+  (`http.ErrAbortHandler`) before anything is sent is also counted as 500
+  ([#432](https://github.com/gombit-dev/gombit/issues/432)).
 
 ## [0.6.0] — 2026-09-28
 

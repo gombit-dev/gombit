@@ -667,6 +667,63 @@ func TestDefaultRouterMetricsEndpointRecordsRequests(t *testing.T) {
 	}
 }
 
+// A handler that panics is answered 500 by the recovery layer outside the
+// metrics layer. It must still be counted, with its duration, or error-rate
+// alerts built on these series never see the failures that matter most (#432).
+// A handler that wrote its status before panicking is counted at that status,
+// which is what the client received.
+func TestMetricsCountRequestsThatPanic(t *testing.T) {
+	app := newTestApp(t)
+	app.Router().GET("/boom", func(*gin.Context) { panic("boom") })
+	app.Router().GET("/late-boom", func(c *gin.Context) {
+		c.Status(http.StatusAccepted)
+		c.Writer.WriteHeaderNow()
+		panic("after the response")
+	})
+	// Set but not sent (Huma sets the status before marshalling the body): the
+	// client gets recovery's 500, so that is what is counted.
+	app.Router().GET("/set-then-boom", func(c *gin.Context) {
+		c.Status(http.StatusCreated)
+		panic("before the response")
+	})
+	// gin.Recovery sends nothing for an abort; the handler produced no
+	// response, which is counted as a server failure.
+	app.Router().GET("/abort", func(*gin.Context) { panic(http.ErrAbortHandler) })
+
+	for range 3 {
+		rec := httptest.NewRecorder()
+		app.Router().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/boom", nil))
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("GET /boom status = %d, want %d", rec.Code, http.StatusInternalServerError)
+		}
+	}
+	for _, path := range []string{"/late-boom", "/set-then-boom", "/abort"} {
+		app.Router().ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, path, nil))
+	}
+	rec := httptest.NewRecorder()
+	app.Router().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/set-then-boom", nil))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("GET /set-then-boom status = %d, want %d", rec.Code, http.StatusInternalServerError)
+	}
+
+	metrics := httptest.NewRecorder()
+	app.Router().ServeHTTP(metrics, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := metrics.Body.String()
+	for _, want := range []string{
+		`gombit_http_requests_total{method="GET",route="/boom",status="500"} 3`,
+		`gombit_http_request_duration_seconds_sum{method="GET",route="/boom",status="500"}`,
+		`gombit_http_requests_total{method="GET",route="/late-boom",status="202"} 1`,
+		`gombit_http_requests_total{method="GET",route="/set-then-boom",status="500"} 2`,
+		`gombit_http_requests_total{method="GET",route="/abort",status="500"} 1`,
+		// The /metrics request itself is the only one in flight.
+		"gombit_http_active_requests 1",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("GET /metrics body = %q, want it to contain %q", body, want)
+		}
+	}
+}
+
 func TestDefaultRouterMetricsUsesBoundedLabelForUnmatchedRoutes(t *testing.T) {
 	app := newTestApp(t)
 

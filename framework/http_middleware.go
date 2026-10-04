@@ -344,17 +344,33 @@ func metricsMiddleware(metrics *httpMetrics) gin.HandlerFunc {
 		metrics.addActive(1)
 		defer metrics.addActive(-1)
 
-		c.Next()
+		// The observation is deferred so a handler that panics is still
+		// counted: recovery sits outside this layer, so the panic unwinds past
+		// anything after c.Next() (issue #432). The panic is not recovered here,
+		// so recovery still answers it and logs the original stack.
+		completed := false
+		defer func() {
+			status := c.Writer.Status()
+			if !completed && !c.Writer.Written() {
+				// The handler did not complete and sent nothing: count it as a
+				// server failure. gin.Recovery answers such a panic with 500;
+				// for a broken-connection or http.ErrAbortHandler panic it
+				// sends no meaningful response, and that is a failure too.
+				status = http.StatusInternalServerError
+			}
+			route := c.FullPath()
+			if route == "" {
+				route = "unmatched"
+			}
+			metrics.observe(metricsKey{
+				method: normalizeMetricsMethod(c.Request.Method),
+				route:  route,
+				status: status,
+			}, time.Since(start))
+		}()
 
-		route := c.FullPath()
-		if route == "" {
-			route = "unmatched"
-		}
-		metrics.observe(metricsKey{
-			method: normalizeMetricsMethod(c.Request.Method),
-			route:  route,
-			status: c.Writer.Status(),
-		}, time.Since(start))
+		c.Next()
+		completed = true
 	}
 }
 
