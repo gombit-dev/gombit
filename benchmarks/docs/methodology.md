@@ -159,9 +159,10 @@ BENCHMARK_HOST_CLASS=dedicated make benchmark   # on a quiet, dedicated host
 ```
 
 The declaration must be exactly `dedicated`, `developer`, or unset. Any other
-value (`Dedicated`, a typo) is refused by the `make benchmark-*` targets and by
-every producer before anything is measured, rather than discovered in the README
-after the run. Every producer records it as `host_class` in the provenance of the
+value (`Dedicated`, a typo) is refused before anything is measured by the `make
+benchmark-*` targets and the orchestration scripts (`run-crud-all.sh`,
+`footprint-all.sh`), and again by every program that records results, rather
+than discovered in the README after the run. Every producer records it as `host_class` in the provenance of the
 unit it measured (empty when none was made). Unless
 every unit a README table publishes declares `dedicated`, `make
 benchmark-report` stamps the block **“Not measured on dedicated hardware”** and

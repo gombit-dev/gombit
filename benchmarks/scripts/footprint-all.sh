@@ -247,6 +247,10 @@ measure_container() {
 }
 
 main() {
+  # The footprint binary records the rows only after they are measured, so the
+  # declaration is checked here, before the first app (check_host_class comes
+  # from host-class.sh via the sourced run-crud-all.sh).
+  check_host_class
   echo "footprint: ensuring postgres is up"
   "${COMPOSE[@]}" up -d postgres >/dev/null
   # Pre-pull the load generator and pre-build k6load so neither an image pull

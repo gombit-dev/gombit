@@ -2,7 +2,12 @@ package metadata
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"regexp"
 	"runtime"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -603,5 +608,31 @@ func TestMetadataRunParamsReadsTheTopLevelFields(t *testing.T) {
 	m := Metadata{Concurrency: []int{10}, Trials: 2, DurationSeconds: 3, WarmupSeconds: 4, BenchmarkTool: "k6"}
 	if diffs := m.RunParams().ConflictsWith(RunParams{Concurrency: []int{10}, Trials: 2, DurationSeconds: 3, WarmupSeconds: 4, BenchmarkTool: "k6"}); diffs != nil {
 		t.Errorf("RunParams must mirror the recorded fields, got %v", diffs)
+	}
+}
+
+// The Makefile and the orchestration scripts refuse a bad declaration before
+// measuring, from host-class.sh's own copy of the set. If the two drifted, make
+// would refuse a value the producers accept, or let through one that run-crud
+// refuses only after the first app is built and seeded.
+func TestHostClassShellListMatchesGo(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("..", "..", "scripts", "host-class.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`(?m)^host_classes=\((.*)\)$`).FindSubmatch(src)
+	if m == nil {
+		t.Fatal("host-class.sh: no host_classes=(...) line")
+	}
+	var shell []string
+	for _, field := range strings.Fields(string(m[1])) {
+		unquoted, err := strconv.Unquote(field)
+		if err != nil {
+			t.Fatalf("host-class.sh: entry %s is not a double-quoted string: %v", field, err)
+		}
+		shell = append(shell, unquoted)
+	}
+	if !slices.Equal(shell, HostClasses) {
+		t.Errorf("host-class.sh allows %q, metadata.HostClasses is %q", shell, HostClasses)
 	}
 }

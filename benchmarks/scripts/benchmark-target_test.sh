@@ -101,6 +101,35 @@ for v in Dedicated dedicaed laptop; do
   [ ! -s "$REC" ] || note "BENCHMARK_HOST_CLASS='$v': a stage ran before the refusal: $(cat "$REC")"
 done
 
+# ---- 5c. every measuring stage refuses a bad class before measuring ----
+# Not only the composite target: a stage that lost its guard must fail here. The
+# footprint binary records rows only after footprint-all.sh has measured them,
+# so the stage target and the script themselves must refuse first. `docker` and
+# `go` are stubbed to record any call and fail, so a stage missing its guard
+# stops at its first tool call instead of polling a fake stack; a refused stage
+# makes none. The scripts are also run directly, as the docs allow.
+toolrec="$stubdir/toollog"
+for tool in docker go; do
+  printf '#!/usr/bin/env bash\necho "%s $*" >> "%s"\nexit 1\n' "$tool" "$toolrec" > "$stubdir/$tool"
+  chmod +x "$stubdir/$tool"
+done
+refused_before_measuring() { # LABEL CMD...
+  local label="$1" rc=0; shift
+  : > "$toolrec"
+  BENCHMARK_HOST_CLASS=Dedicated PATH="$stubdir:$PATH" "$@" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || note "$label accepted BENCHMARK_HOST_CLASS=Dedicated"
+  [ ! -s "$toolrec" ] || note "$label measured before refusing the host class: $(paste -sd';' "$toolrec")"
+}
+hcout="$(mktemp -d)"
+for target in benchmark-crud-all benchmark-footprint benchmark-micro benchmark-micro-ablation benchmark-metadata; do
+  refused_before_measuring "make $target" make "$target" OUT_DIR="$hcout"
+done
+refused_before_measuring "make benchmark-crud" make benchmark-crud OUT_DIR="$hcout" TARGET_URL=http://unused FRAMEWORK=x
+refused_before_measuring "run-crud-all.sh" env OUT_DIR="$hcout" bash benchmarks/scripts/run-crud-all.sh
+refused_before_measuring "footprint-all.sh" env OUT_DIR="$hcout" bash benchmarks/scripts/footprint-all.sh
+[ -z "$(ls -A "$hcout")" ] || note "a refused stage wrote to OUT_DIR: $(ls -A "$hcout")"
+rm -rf "$hcout" "$stubdir/docker" "$stubdir/go"
+
 # ---- 6. benchmark-smoke (issue #141 §11): build all six images, run the
 #         containerized harness for ALL SIX with a tiny deterministic seed and
 #         tiny load, into a THROWAWAY dir (never results/latest) ----
@@ -143,4 +172,4 @@ if [ "$fail" -ne 0 ]; then
   echo "benchmark-target_test: FAILED" >&2
   exit 1
 fi
-echo "benchmark-target_test: default-goal, no-prereq composition, ordered stages, pin propagation, fail-closed, host-class check, and smoke (build-6/run-6/small-seed/throwaway) all pass"
+echo "benchmark-target_test: default-goal, no-prereq composition, ordered stages, pin propagation, fail-closed, host-class checks (composite, per stage, scripts), and smoke (build-6/run-6/small-seed/throwaway) all pass"

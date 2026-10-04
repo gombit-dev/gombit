@@ -36,10 +36,9 @@ INTENDED_LIMITS ?= intended (applied only under benchmark-crud-all): app $(APP_C
 # BENCHMARK_HOST_CLASS declares the host a run measures on: dedicated, developer,
 # or unset (issue #291; benchmarks/docs/methodology.md). Every measuring target
 # checks it before its first stage, so a typo fails now rather than in the README
-# banner after the run. The Go producers enforce the same set
-# (metadata.ParseHostClass); benchmark-target_test.sh keeps the two in step.
-CHECK_HOST_CLASS = case "$${BENCHMARK_HOST_CLASS-}" in ""|dedicated|developer) ;; \
-	*) echo "error: BENCHMARK_HOST_CLASS=\"$${BENCHMARK_HOST_CLASS}\": must be \"dedicated\", \"developer\", or unset" >&2; exit 2 ;; esac
+# banner after the run. host-class.sh holds the allowed set; a Go test keeps it
+# equal to the one the producers enforce (metadata.HostClasses).
+CHECK_HOST_CLASS = bash benchmarks/scripts/host-class.sh
 
 .PHONY: help test-faults test-chaos benchmark benchmark-smoke benchmark-crud benchmark-crud-all benchmark-micro benchmark-micro-ablation benchmark-footprint benchmark-summary benchmark-metadata benchmark-report benchmark-report-check
 

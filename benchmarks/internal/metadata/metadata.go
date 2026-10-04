@@ -69,21 +69,28 @@ const (
 	HostClassDeveloper = "developer"
 )
 
-// ParseHostClass validates a HostClassEnv declaration: HostClassDedicated,
-// HostClassDeveloper, or empty for none. The match is exact, so `Dedicated` or a
-// typo is an error rather than a silently non-dedicated run.
+// HostClasses is every accepted HostClassEnv value, "" (unset) included. The
+// Makefile and the orchestration scripts check the same set before measuring,
+// from benchmarks/scripts/host-class.sh; a test keeps the two equal.
+var HostClasses = []string{"", HostClassDedicated, HostClassDeveloper}
+
+// ParseHostClass validates a HostClassEnv declaration against HostClasses. The
+// match is exact, so `Dedicated` or a typo is an error rather than a silently
+// non-dedicated run.
 func ParseHostClass(s string) (string, error) {
-	switch s {
-	case "", HostClassDedicated, HostClassDeveloper:
-		return s, nil
+	for _, class := range HostClasses {
+		if s == class {
+			return s, nil
+		}
 	}
 	return "", fmt.Errorf("%s=%q: must be %q, %q, or unset", HostClassEnv, s, HostClassDedicated, HostClassDeveloper)
 }
 
 // CheckHostClassEnv validates the process's HostClassEnv. Every producer calls
-// it before measuring: the declaration only matters once the report renders,
-// and a typo found there would cost the whole run (the Makefile's benchmark
-// targets check the same set before any stage starts).
+// it before writing anything: the declaration only matters once the report
+// renders, and a typo found there would cost the whole run. Where a producer
+// only records what a script already measured (footprint, microbench), the
+// Makefile target and the script check first (host-class.sh).
 func CheckHostClassEnv() error {
 	_, err := ParseHostClass(os.Getenv(HostClassEnv))
 	return err
