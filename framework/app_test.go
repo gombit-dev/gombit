@@ -178,8 +178,9 @@ func TestStopHooksReceiveBoundedShutdownContext(t *testing.T) {
 	app := newTestApp(t, WithShutdownTimeout(250*time.Millisecond))
 	deadlineSeen := make(chan bool, 1)
 	app.OnStop(func(ctx context.Context) error {
-		_, ok := ctx.Deadline()
-		deadlineSeen <- ok
+		deadline, ok := ctx.Deadline()
+		// Bounded, and usable: a deadline in the past is no budget at all.
+		deadlineSeen <- ok && ctx.Err() == nil && time.Until(deadline) > 0
 		return nil
 	})
 
@@ -198,10 +199,63 @@ func TestStopHooksReceiveBoundedShutdownContext(t *testing.T) {
 	select {
 	case got := <-deadlineSeen:
 		if !got {
-			t.Fatal("stop hook context had no deadline")
+			t.Fatal("stop hook context had no deadline, or one already passed")
 		}
 	default:
 		t.Fatal("stop hook did not run")
+	}
+}
+
+// TestStopHooksGetTheirOwnBudgetAfterAnOverrunDrain locks issue #431: a request
+// that outlives the shutdown timeout uses up the HTTP drain's budget, and the
+// stop hooks must still get a live context bounded by their own timeout, not
+// the drain's expired one. Shutdown still reports the cut-off drain.
+func TestStopHooksGetTheirOwnBudgetAfterAnOverrunDrain(t *testing.T) {
+	const timeout = 200 * time.Millisecond
+	app := newTestApp(t, WithShutdownTimeout(timeout))
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	app.Router().GET("/slow", func(c *gin.Context) {
+		close(entered)
+		<-release
+		c.Status(http.StatusOK)
+	})
+	t.Cleanup(func() { close(release) })
+
+	type seen struct {
+		err       error
+		remaining time.Duration
+		ok        bool
+	}
+	hook := make(chan seen, 1)
+	app.OnStop(func(ctx context.Context) error {
+		deadline, ok := ctx.Deadline()
+		hook <- seen{err: ctx.Err(), remaining: time.Until(deadline), ok: ok}
+		return nil
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- RunContext(ctx, app) }()
+	waitForHTTP(t, app, "/livez")
+	go func() {
+		if resp, err := http.Get("http://" + app.Addr() + "/slow"); err == nil {
+			_ = resp.Body.Close()
+		}
+	}()
+	<-entered
+	cancel()
+	if err := waitRun(done); err == nil || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("RunContext() error = %v, want the cut-off drain reported (context.DeadlineExceeded)", err)
+	}
+
+	s := <-hook
+	if !s.ok || s.err != nil {
+		t.Fatalf("stop hook context: deadline=%v err=%v, want a live bounded context", s.ok, s.err)
+	}
+	// The hooks' budget is their own timeout, not what the drain left over.
+	if s.remaining < timeout/2 || s.remaining > timeout {
+		t.Fatalf("stop hook had %v left, want about its own %v", s.remaining, timeout)
 	}
 }
 

@@ -22,11 +22,15 @@ return framework.Run(app)
 ```
 
 Start hooks run in registration order. Stop hooks run in reverse registration
-order so cleanup unwinds deterministically. Stop hooks receive a bounded
-shutdown context; the default timeout is 10 seconds. If `http.Server.Shutdown`
-hits that deadline while handlers are still in flight, Gombit calls
-`server.Close()` so remaining connections are dropped and `Run`/`RunContext`
-can return. Stop hooks also run after a start-hook failure, so they must
+order so cleanup unwinds deterministically. The shutdown timeout (default 10
+seconds, `WithShutdownTimeout`) bounds two phases separately. First the HTTP
+drain: if `http.Server.Shutdown` hits the timeout while handlers are still in
+flight, Gombit calls `server.Close()` so remaining connections are dropped and
+`Run`/`RunContext` can return. Then the stop hooks, which receive a fresh
+context bounded by their own timeout, so a drain that used up its budget never
+hands them an already-expired one. A full shutdown can therefore take the drain
+delay plus up to twice the shutdown timeout; give the process manager at least
+that before it kills the process. Stop hooks also run after a start-hook failure, so they must
 tolerate partial application startup and be safe to call when the resource
 they clean up was never initialized.
 

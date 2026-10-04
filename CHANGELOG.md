@@ -269,6 +269,12 @@ version.
   carries the banner. The declaration must be `dedicated`, `developer` or
   unset; the `make benchmark-*` targets and every producer refuse any other
   value before measuring ([#291](https://github.com/gombit-dev/gombit/issues/291)).
+- `OnStop` hooks get their own shutdown-timeout budget instead of what the
+  HTTP drain left over. A request that outlived the shutdown timeout used to
+  hand every stop hook an already-expired context, so a hook that honors its
+  context (flush a buffer, close a pool) failed at once. A full shutdown can
+  now take the drain delay plus up to twice the shutdown timeout
+  ([#431](https://github.com/gombit-dev/gombit/issues/431)).
 
 ## [0.6.0] — 2026-09-28
 

@@ -649,22 +649,24 @@ func (a *App) shutdown() error {
 		<-timer.C
 	}
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
+	// The HTTP drain and the stop hooks get separate budgets (issue #431). A
+	// request that outlives the drain consumes all of its context, and hooks
+	// handed that same context would start with it already expired: any hook
+	// that honors its context (flush a buffer, close a pool) would fail at once,
+	// exactly when shutdown is already going badly. runStopHooks gives them their
+	// own shutdownTimeout, as the worker's shutdown already does.
+	var drainErr error
 	if server != nil {
-		if err := server.Shutdown(shutdownCtx); err != nil {
+		drainCtx, cancel := context.WithTimeout(context.Background(), timeout)
+		err := server.Shutdown(drainCtx)
+		cancel()
+		if err != nil {
 			_ = server.Close()
-			return errors.Join(
-				fmt.Errorf("framework: shutdown: %w", err),
-				a.runStopHooksWithContext(shutdownCtx),
-				a.closeOwnedJobs(),
-				a.closeOwnedCache(),
-			)
+			drainErr = fmt.Errorf("framework: shutdown: %w", err)
 		}
 	}
 
-	return errors.Join(a.runStopHooksWithContext(shutdownCtx), a.closeOwnedJobs(), a.closeOwnedCache())
+	return errors.Join(drainErr, a.runStopHooks())
 }
 
 func (a *App) runStopHooks() error {
