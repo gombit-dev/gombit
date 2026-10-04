@@ -148,6 +148,115 @@ func CheckDecimalSpelling(s string) error {
 	return nil
 }
 
+// spellingShape measures a plain decimal spelling ([sign] digits [. digits]
+// [e [sign] digits]) as DecimalShapeOf measures the value it parses to,
+// without parsing it: the read and parse paths already hold the text, and
+// measuring the parsed value instead copies and formats its coefficient, which
+// a wide value (MySQL pads DECIMAL(65,30) to 30 places) pays for on every row.
+// ok is false for any other spelling, which the caller measures the slow way;
+// TestDecimalSpellingShapeMatchesValueShape pins the two to agree.
+func spellingShape[T ~string | ~[]byte](s T) (shape DecimalShape, ok bool, err error) {
+	i := 0
+	if i < len(s) && (s[i] == '+' || s[i] == '-') {
+		i++
+	}
+	intStart := i
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		i++
+	}
+	intEnd := i
+	fracStart, fracEnd := i, i
+	if i < len(s) && s[i] == '.' {
+		i++
+		fracStart = i
+		for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+			i++
+		}
+		fracEnd = i
+	}
+	intLen, fracLen := intEnd-intStart, fracEnd-fracStart
+	if intLen == 0 && fracLen == 0 {
+		return DecimalShape{}, false, nil
+	}
+	exp := 0
+	if i < len(s) && (s[i] == 'e' || s[i] == 'E') {
+		i++
+		negative := false
+		if i < len(s) && (s[i] == '+' || s[i] == '-') {
+			negative = s[i] == '-'
+			i++
+		}
+		expStart := i
+		for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+			if i-expStart >= 9 { // beyond any bounded exponent: the slow path refuses it
+				return DecimalShape{}, false, nil
+			}
+			exp = exp*10 + int(s[i]-'0')
+			i++
+		}
+		if i == expStart {
+			return DecimalShape{}, false, nil
+		}
+		if negative {
+			exp = -exp
+		}
+	}
+	if i != len(s) {
+		return DecimalShape{}, false, nil
+	}
+	// The parsed value's exponent keeps trailing fractional zeros, as
+	// shopspring's does, and is bounded first, zero included.
+	exponent := exp - fracLen
+	if exponent > MaxDecimalDigits || exponent < -MaxDecimalDigits {
+		return DecimalShape{}, true, errDecimalTooLarge
+	}
+	// The coefficient's digits: the integer and fraction digits run
+	// together, without leading or trailing zeros.
+	first, last := -1, -1
+	for k := 0; k < intLen+fracLen; k++ {
+		var c byte
+		if k < intLen {
+			c = s[intStart+k]
+		} else {
+			c = s[fracStart+k-intLen]
+		}
+		if c != '0' {
+			if first < 0 {
+				first = k
+			}
+			last = k
+		}
+	}
+	if first < 0 {
+		return DecimalShape{}, true, nil // zero
+	}
+	total := intLen + fracLen
+	n := last - first + 1
+	exponent += total - 1 - last // drop the trailing zeros
+	if n+exponent > 0 {
+		shape.Whole = n + exponent
+	}
+	if exponent < 0 {
+		shape.Frac = -exponent
+		shape.Significant = n
+	} else {
+		shape.Significant = n + exponent
+	}
+	if shape.Digits() > MaxDecimalDigits {
+		return DecimalShape{}, true, errDecimalTooLarge
+	}
+	return shape, true, nil
+}
+
+// checkSpelledDecimal applies the size rule to a value parsed from spelling:
+// from the text when it is a plain spelling, else from the value.
+func checkSpelledDecimal[T ~string | ~[]byte](spelling T, parsed decimal.Decimal) error {
+	if _, ok, err := spellingShape(spelling); ok {
+		return err
+	}
+	return CheckDecimalSize(parsed)
+}
+
 // UnmarshalJSON parses a decimal and refuses one beyond MaxDecimalDigits
 // before anything formats it. A JSON null leaves d unchanged, as
 // encoding/json's convention (and shopspring's own decoder) has it.
@@ -155,14 +264,18 @@ func (d *Decimal) UnmarshalJSON(b []byte) error {
 	if string(b) == "null" {
 		return nil
 	}
-	if err := CheckDecimalSpelling(string(b)); err != nil {
-		return fmt.Errorf("decimal %w", err)
+	if len(b) > maxDecimalSpelling {
+		return fmt.Errorf("decimal %w", errDecimalTooLarge)
 	}
 	var inner decimal.Decimal
 	if err := inner.UnmarshalJSON(b); err != nil {
 		return err
 	}
-	if err := CheckDecimalSize(inner); err != nil {
+	spelling := b
+	if len(spelling) >= 2 && spelling[0] == '"' && spelling[len(spelling)-1] == '"' {
+		spelling = spelling[1 : len(spelling)-1]
+	}
+	if err := checkSpelledDecimal(spelling, inner); err != nil {
 		return fmt.Errorf("decimal %w", err)
 	}
 	d.Decimal = inner
@@ -172,14 +285,14 @@ func (d *Decimal) UnmarshalJSON(b []byte) error {
 // UnmarshalText parses a decimal and refuses one beyond MaxDecimalDigits
 // before anything formats it.
 func (d *Decimal) UnmarshalText(b []byte) error {
-	if err := CheckDecimalSpelling(string(b)); err != nil {
-		return fmt.Errorf("decimal %w", err)
+	if len(b) > maxDecimalSpelling {
+		return fmt.Errorf("decimal %w", errDecimalTooLarge)
 	}
 	var inner decimal.Decimal
 	if err := inner.UnmarshalText(b); err != nil {
 		return err
 	}
-	if err := CheckDecimalSize(inner); err != nil {
+	if err := checkSpelledDecimal(b, inner); err != nil {
 		return fmt.Errorf("decimal %w", err)
 	}
 	d.Decimal = inner
@@ -203,19 +316,28 @@ func (d *Decimal) Scan(value any) error {
 			return fmt.Errorf("decimal: cannot scan non-finite %v", v)
 		}
 	case string:
-		if err := CheckDecimalSpelling(v); err != nil {
-			return fmt.Errorf("decimal %w", err)
+		if len(v) > maxDecimalSpelling {
+			return fmt.Errorf("decimal %w", errDecimalTooLarge)
 		}
 	case []byte:
-		if err := CheckDecimalSpelling(string(v)); err != nil {
-			return fmt.Errorf("decimal %w", err)
+		if len(v) > maxDecimalSpelling {
+			return fmt.Errorf("decimal %w", errDecimalTooLarge)
 		}
 	}
 	var inner decimal.Decimal
 	if err := inner.Scan(value); err != nil {
 		return err
 	}
-	if err := CheckDecimalSize(inner); err != nil {
+	var err error
+	switch v := value.(type) {
+	case string:
+		err = checkSpelledDecimal(v, inner)
+	case []byte:
+		err = checkSpelledDecimal(v, inner)
+	default:
+		err = CheckDecimalSize(inner)
+	}
+	if err != nil {
 		return fmt.Errorf("decimal %w", err)
 	}
 	d.Decimal = inner
@@ -237,8 +359,8 @@ func NewDecimalFromString(s string) (Decimal, error) {
 	if err != nil {
 		return Decimal{}, err
 	}
-	if err := CheckDecimalSize(d); err != nil {
-		return Decimal{}, fmt.Errorf("decimal %s", err)
+	if err := checkSpelledDecimal(s, d); err != nil {
+		return Decimal{}, fmt.Errorf("decimal %w", err)
 	}
 	return Decimal{Decimal: d}, nil
 }

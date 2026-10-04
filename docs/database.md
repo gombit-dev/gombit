@@ -93,9 +93,11 @@ garbage write.
   field costs nothing.
 - **Every value shape** is read: decimals, strings, numbers, `json.Number`,
   pointers (a `*string` / `*float64` PATCH field), named types, and
-  `driver.Valuer`s such as `sql.NullString`. A null is nothing to check, and a
-  SQL expression (`gorm.Expr`) or an upsert's column reference is left to the
-  database.
+  `driver.Valuer`s such as `sql.NullString`. A string may be padded with
+  ASCII whitespace, which the databases skip; any other character, Unicode
+  spaces included (`"1.5\u00a0"`), makes it not a decimal number. A null is
+  nothing to check, and a SQL expression (`gorm.Expr`) or an upsert's column
+  reference is left to the database.
 - **The column's limits** come from the type GORM emits for the model field
   (`GormDBDataType`, else the dialect's `DataTypeOf`), the same type
   `AutoMigrate` and the Atlas provider create, so the model's declared type
@@ -105,7 +107,8 @@ garbage write.
   `unsigned` column refuses a negative value; a text column stores the bytes
   it is given as written, so a string bound for one must already be the
   decimal's canonical spelling (`"1.5"`, not `" 1.5 "`, `"1.50"`, or
-  `"15e-1"`), a float is refused, and the spelling must fit the column's
+  `"15e-1"`), a plain number (integer or float) is refused, and the spelling
+  must fit the column's
   length (`varchar(n)`); any other type (`real`,
   `double precision`, `money`, `bigint` cents) fails every write with an
   error rather than an unchecked one. Declare such a field `decimal(p,s)`.

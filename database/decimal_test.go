@@ -472,3 +472,49 @@ func TestDecimalTextColumnReadsBackWhatTheGuardApproved(t *testing.T) {
 		t.Fatalf("1e-1000 (1001 digits written): error = %v, want refused by the same rule Scan applies", err)
 	}
 }
+
+// TestDecimalStringWhitespaceMatchesTheDatabases: a string bound for a decimal
+// column is trimmed only of the whitespace the databases skip (ASCII), so the
+// guard never approves a value the database cannot read as a number (round-5
+// review: "1.5 " was approved, SQLite stored it as text, and every read
+// of the table failed). ASCII padding is fine and loads; Unicode padding is a
+// 422. An integer bound for a text decimal column is refused like a float:
+// PostgreSQL cannot bind it to varchar.
+func TestDecimalStringWhitespaceMatchesTheDatabases(t *testing.T) {
+	db := openSQLite(t)
+	if err := db.AutoMigrate(&decimalRow{}, &textDecimalRow{}); err != nil {
+		t.Fatal(err)
+	}
+	row := decimalRow{Amount: types.MustDecimal("1")}
+	if err := db.Create(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	var ve *ValidationError
+	for _, padded := range []string{"1.5 ", " 1.5", "　1.5", "1.5 ", " 1.5", "1.5\u0085"} {
+		if err := db.Model(&decimalRow{ID: row.ID}).Update("amount", padded).Error; !errors.As(err, &ve) {
+			t.Errorf("Update(amount, %q): error = %v, want a 422: no database reads it as a number", padded, err)
+		}
+		if err := db.Model(&decimalRow{ID: row.ID}).Updates(map[string]any{"amount": padded}).Error; !errors.As(err, &ve) {
+			t.Errorf("Updates(map{amount: %q}): error = %v, want a 422", padded, err)
+		}
+	}
+	for _, padded := range []string{" 1.5 ", "\t1.5\n", "\v1.5", "\f1.5", "\r1.5"} {
+		if err := db.Model(&decimalRow{ID: row.ID}).Update("amount", padded).Error; err != nil {
+			t.Fatalf("Update(amount, %q): %v, want it stored (the databases skip ASCII whitespace)", padded, err)
+		}
+		var all []decimalRow
+		if err := db.Find(&all).Error; err != nil {
+			t.Fatalf("Find after writing %q: %v (the guard approved a row that cannot load)", padded, err)
+		}
+	}
+
+	text := textDecimalRow{Free: types.MustDecimal("1"), Short: types.MustDecimal("1")}
+	if err := db.Create(&text).Error; err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []any{15, int64(-3), uint8(7)} {
+		if err := db.Model(&textDecimalRow{ID: text.ID}).Update("free", n).Error; !errors.As(err, &ve) {
+			t.Errorf("Update(free, %v) on a text column: error = %v, want a 422 like a float", n, err)
+		}
+	}
+}

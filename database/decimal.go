@@ -262,9 +262,9 @@ func columnProblem(d decimal.Decimal, col decimalColumn, sqlite bool) string {
 // canonical spelling (what types.Decimal writes and Scan reads back): a
 // decimal value is bound as that spelling; a string must already be it (no
 // spaces, padding zeros, or exponent: " 1.5 " and "1.50" would be stored as
-// written, and " 1.5 " cannot be read back); a float is refused, since the
-// driver spells it its own way (1e+21). The spelling must fit the column's
-// length.
+// written, and " 1.5 " cannot be read back); a plain number is refused: the
+// driver spells a float its own way (1e+21), and PostgreSQL cannot bind an
+// integer to a text column at all. The spelling must fit the column's length.
 func textColumnProblem(v reflect.Value, d decimal.Decimal, col decimalColumn) string {
 	if err := types.CheckDecimalSize(d); err != nil {
 		return err.Error()
@@ -272,8 +272,8 @@ func textColumnProblem(v reflect.Value, d decimal.Decimal, col decimalColumn) st
 	canonical := d.String() // bounded by the size rule, so cheap
 	raw, kind := boundSpelling(v)
 	switch kind {
-	case spelledFloat:
-		return "must be a decimal value or string for a text column, not a float"
+	case spelledNumber:
+		return "must be a decimal value or string for a text column, not a number"
 	case spelledText:
 		if raw != canonical {
 			return fmt.Sprintf("must be written as %q for a text column", canonical)
@@ -288,9 +288,9 @@ func textColumnProblem(v reflect.Value, d decimal.Decimal, col decimalColumn) st
 type spellingKind int
 
 const (
-	spelledValue spellingKind = iota // a decimal or integer: bound as its canonical spelling
-	spelledText                      // a string: bound as written
-	spelledFloat                     // a float: spelled by the driver
+	spelledValue  spellingKind = iota // a decimal: bound as its canonical spelling
+	spelledText                       // a string: bound as written
+	spelledNumber                     // an integer or float: bound by the driver as a number
 )
 
 // boundSpelling reports how the value v is bound: its raw text when it is a
@@ -317,8 +317,10 @@ func boundSpelling(v reflect.Value) (string, spellingKind) {
 	switch v.Kind() {
 	case reflect.String:
 		return v.String(), spelledText
-	case reflect.Float32, reflect.Float64:
-		return "", spelledFloat
+	case reflect.Float32, reflect.Float64,
+		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		return "", spelledNumber
 	}
 	return "", spelledValue
 }
@@ -455,13 +457,21 @@ func assignedDecimal(value any) (decimal.Decimal, decimalState) {
 	return decimal.Decimal{}, notDecimal
 }
 
+// asciiSpace is the whitespace the databases skip around a number.
+const asciiSpace = " \t\n\v\f\r"
+
 func parseDecimal(s string) (decimal.Decimal, decimalState) {
 	// Refuse on length before parsing: a long coefficient parses in
 	// quadratic time.
 	if types.CheckDecimalSpelling(s) != nil {
 		return decimal.Decimal{}, notDecimal
 	}
-	d, err := decimal.NewFromString(strings.TrimSpace(s))
+	// Trim only the whitespace the databases themselves skip: SQLite,
+	// PostgreSQL and MySQL skip ASCII whitespace around a number, not
+	// Unicode's (U+00A0, U+3000, ...). strings.TrimSpace would approve
+	// "1.5\u00a0", which SQLite then stores as unreadable text and the
+	// others refuse with a driver error (#440 review, round 5).
+	d, err := decimal.NewFromString(strings.Trim(s, asciiSpace))
 	if err != nil {
 		return decimal.Decimal{}, notDecimal
 	}

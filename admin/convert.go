@@ -129,7 +129,7 @@ func parseDecimalValue(raw any) (decimal.Decimal, bool) {
 		if types.CheckDecimalSpelling(v) != nil {
 			return decimal.Decimal{}, false
 		}
-		d, err := decimal.NewFromString(strings.TrimSpace(v))
+		d, err := decimal.NewFromString(strings.Trim(v, " \t\n\v\f\r"))
 		return d, err == nil
 	case float64:
 		return decimal.NewFromFloat(v), true
@@ -262,7 +262,8 @@ func asDecimalString(raw any) (string, error) {
 	case json.Number:
 		s = v.String()
 	case string:
-		s = strings.TrimSpace(v)
+		// ASCII whitespace only: the databases do not skip Unicode's (#440).
+		s = strings.Trim(v, " \t\n\v\f\r")
 	case fmt.Stringer:
 		s = v.String()
 	case float64, float32:
