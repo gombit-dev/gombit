@@ -77,6 +77,15 @@ func TestRunRejectsBadInput(t *testing.T) {
 			t.Errorf("%s: exit=0, want non-zero", name)
 		}
 	}
+
+	t.Setenv(metadata.HostClassEnv, "laptop")
+	var so, se bytes.Buffer
+	if code := run([]string{"-framework", "x", "-variant", "container", "-cold-start-ms", "1,2,3", "-out", out}, &so, &se); code == 0 {
+		t.Error("invalid host class: exit=0, want non-zero")
+	}
+	if _, err := os.Stat(out); err == nil {
+		t.Error("a run refused for its host class must not write footprint.json")
+	}
 }
 
 // An unreadable metadata.json must fail the run before footprint.json is

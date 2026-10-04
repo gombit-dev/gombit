@@ -233,7 +233,9 @@ version.
   and `make benchmark-report` stamps the README block "Not measured on
   dedicated hardware" unless every published unit declares `dedicated`. An
   undeclared host counts as not dedicated, so the committed snapshot now
-  carries the banner ([#291](https://github.com/gombit-dev/gombit/issues/291)).
+  carries the banner. The declaration must be `dedicated`, `developer` or
+  unset; the `make benchmark-*` targets and every producer refuse any other
+  value before measuring ([#291](https://github.com/gombit-dev/gombit/issues/291)).
 
 ## [0.6.0] — 2026-09-28
 

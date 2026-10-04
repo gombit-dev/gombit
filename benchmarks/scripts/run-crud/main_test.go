@@ -268,6 +268,31 @@ func TestRunWithoutBenchmarkFailsAndWritesNothing(t *testing.T) {
 	}
 }
 
+// A mistyped host class would only surface in the README banner after the
+// sweep, so it must be refused before k6 runs, with nothing written.
+func TestRunRefusesAnInvalidHostClassBeforeMeasuring(t *testing.T) {
+	t.Setenv(metadata.HostClassEnv, "Dedicated")
+	dir := t.TempDir()
+	cfg := runConfig{
+		targetURL: "http://unused", framework: "gombit", benchmark: "crud-list",
+		concurrency: []int{10}, duration: "1s", warmup: "1s", trials: 1, outDir: dir, k6Image: "grafana/k6:0.55.0",
+	}
+	measured := false
+	k6 := func(int, string, string) error { measured = true; return nil }
+	err := run(cfg, k6)
+	if err == nil || !strings.Contains(err.Error(), metadata.HostClassEnv) {
+		t.Fatalf("run() = %v, want an error naming %s", err, metadata.HostClassEnv)
+	}
+	if measured {
+		t.Error("k6 ran despite the invalid host class")
+	}
+	for _, name := range []string{"results.json", "metadata.json"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+			t.Errorf("%s was written despite the invalid host class (stat err: %v)", name, err)
+		}
+	}
+}
+
 // The merge into the on-disk snapshot must treat the postgres verdict's two "empty-ish" states
 // differently, reading through the on-disk snapshot (not just the in-memory
 // value): an empty string means "this run did not re-verify" and keeps whatever

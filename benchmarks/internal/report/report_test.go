@@ -723,6 +723,24 @@ func TestDeveloperUnitNamesOnlyItsGroup(t *testing.T) {
 	}
 }
 
+// An unrecognised class (a hand-edited or older metadata.json) still stamps the
+// block, but is never pasted into the Markdown, where a backtick or newline
+// would break it.
+func TestUnrecognisedHostClassIsNotEchoed(t *testing.T) {
+	meta := dedicatedMeta()
+	clean := false
+	meta = metadata.StampUnit(meta, metadata.GroupMicrobench, "gin", metadata.Provenance{
+		GitCommit: "abc123def456", GitDirty: &clean, HostClass: "dedicated`\n> injected",
+	})
+	banner := bannerOf(Render(nil, nil, taxLadder(), meta))
+	if !strings.Contains(banner, "recorded host class: an unrecognised value") {
+		t.Errorf("an unrecognised class must stamp the block and be named as such:\n%s", banner)
+	}
+	if strings.Contains(banner, "injected") {
+		t.Errorf("the raw class was echoed into the Markdown:\n%s", banner)
+	}
+}
+
 // collect-host-info rewrites the top level without measuring anything, so a
 // dedicated top level must not vouch for units recorded without a class. A
 // snapshot that records no unit at all is still judged by its top level.

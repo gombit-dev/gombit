@@ -50,8 +50,8 @@ func ValidGroup(name string) bool {
 }
 
 // HostClassEnv is the environment variable through which the operator declares
-// what kind of host a run measured on. Collect records it verbatim; the report
-// treats only HostClassDedicated as the canonical, publishable kind (issue #291).
+// what kind of host a run measured on. Collect records it; the report treats
+// only HostClassDedicated as the canonical, publishable kind (issue #291).
 //
 // It is a declaration, not a measurement, on purpose: "dedicated benchmark
 // hardware" cannot be read from /proc. A heuristic (load average, core count,
@@ -61,12 +61,33 @@ func ValidGroup(name string) bool {
 // dedicated hardware, and silence is never read as canonicity.
 const HostClassEnv = "BENCHMARK_HOST_CLASS"
 
-// The host classes an operator is expected to declare. Any other value is
-// recorded as given and, like an empty one, is not dedicated.
+// The host classes an operator may declare. Leaving HostClassEnv unset is the
+// third valid choice and records nothing; any other value is refused by
+// ParseHostClass.
 const (
 	HostClassDedicated = "dedicated"
 	HostClassDeveloper = "developer"
 )
+
+// ParseHostClass validates a HostClassEnv declaration: HostClassDedicated,
+// HostClassDeveloper, or empty for none. The match is exact, so `Dedicated` or a
+// typo is an error rather than a silently non-dedicated run.
+func ParseHostClass(s string) (string, error) {
+	switch s {
+	case "", HostClassDedicated, HostClassDeveloper:
+		return s, nil
+	}
+	return "", fmt.Errorf("%s=%q: must be %q, %q, or unset", HostClassEnv, s, HostClassDedicated, HostClassDeveloper)
+}
+
+// CheckHostClassEnv validates the process's HostClassEnv. Every producer calls
+// it before measuring: the declaration only matters once the report renders,
+// and a typo found there would cost the whole run (the Makefile's benchmark
+// targets check the same set before any stage starts).
+func CheckHostClassEnv() error {
+	_, err := ParseHostClass(os.Getenv(HostClassEnv))
+	return err
+}
 
 // Provenance is what one measurement group can answer about itself: which
 // source state ran, when, on which machine, under which toolchain.
@@ -378,7 +399,9 @@ type Runner func(ctx context.Context, name string, args ...string) (string, erro
 type Options struct {
 	Now func() time.Time
 	Run Runner
-	// Getenv reads HostClassEnv; nil uses os.Getenv.
+	// Getenv reads HostClassEnv; nil uses os.Getenv. Collect has no error to
+	// return, so an invalid value is recorded as no declaration (not
+	// dedicated); producers refuse it up front with CheckHostClassEnv.
 	Getenv func(string) string
 
 	PostgresVersion           string
@@ -410,6 +433,10 @@ func Collect(ctx context.Context, opts Options) Metadata {
 	getenv := opts.Getenv
 	if getenv == nil {
 		getenv = os.Getenv
+	}
+	hostClass, err := ParseHostClass(getenv(HostClassEnv))
+	if err != nil {
+		hostClass = ""
 	}
 
 	commit, commitErr := run(ctx, "git", "rev-parse", "HEAD")
@@ -465,7 +492,7 @@ func Collect(ctx context.Context, opts Options) Metadata {
 		CPUModel:    cpuModel(),
 		LogicalCPUs: runtime.NumCPU(),
 		RAMBytes:    ramBytes(),
-		HostClass:   strings.TrimSpace(getenv(HostClassEnv)),
+		HostClass:   hostClass,
 
 		GoVersion:            runtime.Version(),
 		DockerVersion:        dockerVersion,

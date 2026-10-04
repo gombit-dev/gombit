@@ -158,8 +158,11 @@ the operator declares it, and the report fails closed (issue #291):
 BENCHMARK_HOST_CLASS=dedicated make benchmark   # on a quiet, dedicated host
 ```
 
-Every producer records the declaration as `host_class` in the provenance of the
-unit it measured (`dedicated`, `developer`, or empty when none was made). Unless
+The declaration must be exactly `dedicated`, `developer`, or unset. Any other
+value (`Dedicated`, a typo) is refused by the `make benchmark-*` targets and by
+every producer before anything is measured, rather than discovered in the README
+after the run. Every producer records it as `host_class` in the provenance of the
+unit it measured (empty when none was made). Unless
 every unit a README table publishes declares `dedicated`, `make
 benchmark-report` stamps the block **“Not measured on dedicated hardware”** and
 names the groups to re-run. An undeclared host is never read as a dedicated one,

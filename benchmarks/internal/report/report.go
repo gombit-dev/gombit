@@ -250,7 +250,10 @@ func writeStatusBanner(b *strings.Builder, meta metadata.Metadata, published map
 
 // nonDedicatedTargets returns the make targets of every group with a published
 // unit not declared dedicated, and the distinct host classes those units
-// recorded ("undeclared" for none). Unlike dirtyTargets it never consults the
+// recorded ("undeclared" for none). Only the classes metadata.ParseHostClass
+// accepts are echoed: anything else in a hand-edited or older metadata.json is
+// reported as unrecognised rather than pasted into the Markdown, where a stray
+// backtick or newline would break the block. Unlike dirtyTargets it never consults the
 // top-level record directly: collect-host-info rewrites it without measuring
 // anything, so its class describes no row. A snapshot that records no unit is
 // still judged by its top level, through UnitProvenance.
@@ -263,13 +266,16 @@ func nonDedicatedTargets(meta metadata.Metadata, published map[string][]string) 
 		}
 		targets = append(targets, groupTargets[g])
 		for _, u := range units {
-			class := meta.UnitProvenance(g, u).HostClass
-			if class == "" {
-				class = "undeclared"
+			label := "`undeclared`"
+			if class := meta.UnitProvenance(g, u).HostClass; class != "" {
+				label = "an unrecognised value"
+				if _, err := metadata.ParseHostClass(class); err == nil {
+					label = "`" + class + "`"
+				}
 			}
-			if !seen[class] {
-				seen[class] = true
-				classes = append(classes, "`"+class+"`")
+			if !seen[label] {
+				seen[label] = true
+				classes = append(classes, label)
 			}
 		}
 	}

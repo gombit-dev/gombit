@@ -84,6 +84,23 @@ if grep -qE '^(benchmark-micro|benchmark-report)' "$REC"; then
   note "a stage ran after the failed one (chain did not abort)"
 fi
 
+# ---- 5b. BENCHMARK_HOST_CLASS is checked before any stage runs ----
+# A typo would otherwise surface only in the README banner after the whole
+# multi-hour run (issue #291). Every value the Go side accepts
+# (metadata.ParseHostClass: dedicated, developer, unset) must pass here too.
+for v in "" dedicated developer; do
+  : > "$REC"
+  BENCHMARK_HOST_CLASS="$v" run_benchmark >/dev/null 2>&1 || note "BENCHMARK_HOST_CLASS='$v' was refused; the Go producers accept it"
+  [ -s "$REC" ] || note "BENCHMARK_HOST_CLASS='$v': no stage ran"
+done
+for v in Dedicated dedicaed laptop; do
+  : > "$REC"
+  rc=0
+  BENCHMARK_HOST_CLASS="$v" run_benchmark >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || note "BENCHMARK_HOST_CLASS='$v' was accepted"
+  [ ! -s "$REC" ] || note "BENCHMARK_HOST_CLASS='$v': a stage ran before the refusal: $(cat "$REC")"
+done
+
 # ---- 6. benchmark-smoke (issue #141 §11): build all six images, run the
 #         containerized harness for ALL SIX with a tiny deterministic seed and
 #         tiny load, into a THROWAWAY dir (never results/latest) ----
@@ -126,4 +143,4 @@ if [ "$fail" -ne 0 ]; then
   echo "benchmark-target_test: FAILED" >&2
   exit 1
 fi
-echo "benchmark-target_test: default-goal, no-prereq composition, ordered stages, pin propagation, fail-closed, and smoke (build-6/run-6/small-seed/throwaway) all pass"
+echo "benchmark-target_test: default-goal, no-prereq composition, ordered stages, pin propagation, fail-closed, host-class check, and smoke (build-6/run-6/small-seed/throwaway) all pass"

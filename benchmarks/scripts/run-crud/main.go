@@ -175,6 +175,11 @@ func run(cfg runConfig, k6run k6Runner) error {
 	if err := cfg.validateRunParams(); err != nil {
 		return err
 	}
+	// The host class is stamped on this unit after the sweep; a typo must fail
+	// now, not in the README banner hours later.
+	if err := metadata.CheckHostClassEnv(); err != nil {
+		return err
+	}
 	// Refuse an incompatible merge before hours of measurement, not after: every
 	// input to the check is known now. writeOutputs checks again on the snapshot it
 	// actually merges into (see refuseIncompatible).

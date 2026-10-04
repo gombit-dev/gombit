@@ -56,6 +56,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintln(stderr, "footprint: -framework and -variant are required")
 		return 2
 	}
+	if err := metadata.CheckHostClassEnv(); err != nil {
+		_, _ = fmt.Fprintf(stderr, "footprint: %v\n", err)
+		return 2
+	}
 	samples, err := parseFloats(*coldStart)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "footprint: -cold-start-ms: %v\n", err)

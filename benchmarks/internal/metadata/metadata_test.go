@@ -389,11 +389,34 @@ func TestAnyUnitDirtyJudgesOnlyTheGivenUnits(t *testing.T) {
 	}
 }
 
-// Collect records the operator's host-class declaration verbatim (trimmed), and
-// records nothing when none was made.
+// The declaration is a closed set matched exactly: a near miss is an error, so
+// it can be refused before a run rather than discovered in the banner.
+func TestParseHostClass(t *testing.T) {
+	for _, ok := range []string{"", HostClassDedicated, HostClassDeveloper} {
+		if got, err := ParseHostClass(ok); err != nil || got != ok {
+			t.Errorf("ParseHostClass(%q) = %q, %v; want it accepted", ok, got, err)
+		}
+	}
+	for _, bad := range []string{"Dedicated", "dedicaed", " dedicated", "laptop", "dedicated`", "dedicated\nx"} {
+		if _, err := ParseHostClass(bad); err == nil || !strings.Contains(err.Error(), HostClassEnv) {
+			t.Errorf("ParseHostClass(%q) err = %v, want a refusal naming %s", bad, err, HostClassEnv)
+		}
+	}
+	t.Setenv(HostClassEnv, "Dedicated")
+	if CheckHostClassEnv() == nil {
+		t.Error("CheckHostClassEnv accepted an invalid environment value")
+	}
+	t.Setenv(HostClassEnv, HostClassDeveloper)
+	if err := CheckHostClassEnv(); err != nil {
+		t.Errorf("CheckHostClassEnv(developer) = %v", err)
+	}
+}
+
+// Collect records a valid declaration, and records nothing when none was made
+// or the value is invalid (producers refuse those before measuring).
 func TestCollectRecordsTheDeclaredHostClass(t *testing.T) {
 	run := func(context.Context, string, ...string) (string, error) { return "", nil }
-	for env, want := range map[string]string{" dedicated\n": HostClassDedicated, "": "", "laptop": "laptop"} {
+	for env, want := range map[string]string{HostClassDedicated: HostClassDedicated, HostClassDeveloper: HostClassDeveloper, "": "", "laptop": ""} {
 		m := Collect(context.Background(), Options{Run: run, Getenv: func(key string) string {
 			if key != HostClassEnv {
 				t.Errorf("Getenv(%q), want %q", key, HostClassEnv)

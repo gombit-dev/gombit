@@ -70,12 +70,11 @@ the root README's `## Performance` block (and `summary.md`) from those files, an
 runs the same regenerate-then-diff on every PR. The full method and the required
 "How not to interpret these results" caveats live in
 [docs/methodology.md](docs/methodology.md). A committed `results/latest/`
-snapshot already backs the README numbers, but not from dedicated hardware — each
-measured unit records its own commit, host, declared host class and toolchain
-under `metadata.json`'s `groups` key, the README prints the host beneath that
-unit's table (so the tables need not share a host), and the block is stamped
-until every published unit declares a dedicated host; still
-scoped to later phases: the embedded-Gombit single-binary footprint variant, the
+snapshot backs the README numbers. What it is — protocol, and per measured unit
+the commit, host, declared host class and toolchain under `metadata.json`'s
+`groups` key — is stated by `metadata.json` and the generated README block (its
+captions and banners), not restated here, so this page cannot drift from it.
+Still scoped to later phases: the embedded-Gombit single-binary footprint variant, the
 other `make benchmark-*` workloads, extending `fairness_test.go` to all six, and
 re-running the full canonical sweep on dedicated hardware. The CI integration is
 in — the per-PR `benchmark-smoke` gate and the manual `benchmarks.yml` workflow
@@ -127,20 +126,23 @@ Pinned versions and limits are in
 ## Running the whole suite
 
 One command runs everything into `benchmarks/results/latest/` and regenerates
-the README `## Performance` block — the dedicated-host snapshot run:
+the README `## Performance` block. It is the canonical snapshot run only on a
+quiet, dedicated host that declares itself so with `BENCHMARK_HOST_CLASS`
+(dedicated hardware cannot be detected; see
+[methodology.md](docs/methodology.md#dedicated-hardware-is-declared-not-inferred)).
+Anywhere else, leave it unset or set `developer`, and the README block is
+stamped "Not measured on dedicated hardware":
 
 ```sh
 # fresh Postgres for clean per-app databases:
 docker compose --env-file benchmarks/config/versions.env -f benchmarks/compose.yml down -v
 docker compose --env-file benchmarks/config/versions.env -f benchmarks/compose.yml up -d postgres
 
-make benchmark                       # crud-all -> footprint -> micro -> report
-# Only a run declared on dedicated hardware publishes without the
-# "Not measured on dedicated hardware" banner (docs/methodology.md):
+# crud-all -> footprint -> micro -> report, on a dedicated host:
 BENCHMARK_HOST_CLASS=dedicated make benchmark
 # CRUD pins from versions.env by default (1/10/100/500/1000 × 5 × 30s, 10s
 # warm-up); cold starts default to footprint-all.sh's COLD_START_RUNS (20).
-# Narrow any on the command line for a reduced run:
+# Narrow any on the command line for a reduced development run:
 make benchmark CONCURRENCY=1,10,100  # e.g. if 500/1000 VUs are unsustained
 ```
 

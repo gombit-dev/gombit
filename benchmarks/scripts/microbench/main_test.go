@@ -63,6 +63,21 @@ func TestRunAccumulatesStacks(t *testing.T) {
 	}
 }
 
+func TestRunRejectsAnInvalidHostClass(t *testing.T) {
+	t.Setenv(metadata.HostClassEnv, "dedicaed")
+	out := filepath.Join(t.TempDir(), "microbench.json")
+	var so, se bytes.Buffer
+	if code := run([]string{"-stack", "gin", "-out", out}, strings.NewReader(benchAll("gin")), &so, &se); code == 0 {
+		t.Fatal("an invalid host class must fail the run")
+	}
+	if !strings.Contains(se.String(), metadata.HostClassEnv) {
+		t.Errorf("stderr = %q, want it to name %s", se.String(), metadata.HostClassEnv)
+	}
+	if _, err := os.Stat(out); err == nil {
+		t.Error("a rejected run must not have written the output file")
+	}
+}
+
 func TestRunRejectsEmptyStackOrIncompleteOutput(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "microbench.json")
 	var so, se bytes.Buffer
