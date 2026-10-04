@@ -268,6 +268,11 @@ version.
 
 ### Changed
 
+- A new app's README lists `storage/` (the local driver's files, created on
+  the first write and gitignored) and says `internal/platform` migrates the
+  framework's tables (auth, storage claims). The README, the docs index, and
+  the user guides (router, security, build, lifecycle, health, frontend,
+  contract, CLI, tutorial) now cover the shipped storage feature.
 - A new app's `.env.example` lists every `GOMBIT_*` variable the config
   package reads, including `GOMBIT_JOBS_DRIVER`, `GOMBIT_JOBS_QUEUE`,
   `GOMBIT_JOBS_NAMESPACE`, `GOMBIT_HTTP_TRUSTED_PROXIES`, and the database

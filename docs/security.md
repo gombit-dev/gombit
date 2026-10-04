@@ -41,6 +41,26 @@ It is looser than the API default so `--ui mui` + `--embed` can load Roboto and
 Emotion-injected `<style>` tags. `script-src` stays `'self'` — Vite production
 JS is hashed same-origin modules, never `'unsafe-inline'`.
 
+When the object store serves files from another origin (an S3 bucket, a CDN
+behind `GOMBIT_STORAGE_S3_PUBLIC_URL`), that origin is added to `img-src` and
+`connect-src`, so image previews and direct uploads from the browser work.
+It is worked out once, from a URL the store makes at startup. If an S3 store
+cannot make one (missing credentials, say), the app logs a warning and the
+policy stays as above, and the browser then blocks previews and uploads.
+The local and memory drivers serve their URLs from the app's own origin,
+which `'self'` already covers.
+
+## Stored files served by the app
+
+The storage route (`/_storage` by default; local and memory drivers, see
+[storage.md](storage.md#visibility-and-urls)) serves stored objects with
+`X-Content-Type-Options: nosniff` and the sandboxing policy
+`Content-Security-Policy: default-src 'none'; sandbox`. An uploaded HTML or
+SVG file opened from it cannot run script in the app's origin.
+When the object records its uploaded filename, `Content-Disposition: inline`
+carries it. A response for a signed URL may be cached privately until the
+URL expires; a public one is revalidated on each use (`no-cache`).
+
 ## Why the API default is so strict — and so small
 
 A JSON API response renders nothing and loads no sub-resources, so
