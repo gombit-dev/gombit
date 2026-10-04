@@ -231,6 +231,7 @@ func (h *handlers) updateVersioned(ctx context.Context, m *registered, inst any,
 		Model(inst).
 		Where(clause.Eq{Column: clause.Column{Name: m.version.column}, Value: expected}).
 		Select("*").
+		Omit(m.omitOnUpdate...).
 		Updates(inst)
 	if res.Error != nil {
 		return nil, database.MapPersistError(ctx, res.Error, "resource already exists", "persist resource")
@@ -381,7 +382,7 @@ func persistWithM2M(ctx context.Context, db *gorm.DB, m *registered, inst any, i
 		if creating {
 			perr = tx.WithContext(ctx).Create(inst).Error
 		} else {
-			perr = tx.WithContext(ctx).Save(inst).Error
+			perr = omitted(tx.WithContext(ctx), m.omitOnUpdate).Save(inst).Error
 		}
 		if perr != nil {
 			return database.MapPersistError(ctx, perr, "resource already exists", "persist resource")
@@ -653,4 +654,12 @@ func applyOrdering(q *gorm.DB, m *registered, ordering string) (*gorm.DB, error)
 		return nil, errors.New("ordering is not allowed for this field")
 	}
 	return q.Order(clause.OrderByColumn{Column: clause.Column{Name: col}, Desc: desc}), nil
+}
+
+// omitted is db leaving cols out of its writes (nothing to leave out: db).
+func omitted(db *gorm.DB, cols []string) *gorm.DB {
+	if len(cols) == 0 {
+		return db
+	}
+	return db.Omit(cols...)
 }

@@ -163,13 +163,18 @@ that is never attached stays stored until swept.
   key from an earlier attempt: a create that fails abandons the uploads it
   named.
 - The list links each file to its URL.
-- The admin leaves file columns out until it has a file widget (STORAGE-8).
-  Meanwhile, a required file column cannot be set there, and delete is off
-  for a model with file columns: deleting the row there would leave its
-  file held by a record that no longer exists. Asking for `Actions.Delete`
-  on such a model is a registration error, and so is an explicit
-  `Options.Fields` entry that maps a file column under any type: a key may
-  only be written through the upload protocol.
+- The admin leaves file columns out until it has a file widget (STORAGE-8),
+  and does nothing to them it cannot honour:
+  - delete is off for a model with file columns (deleting the row would
+    leave its file held by a record that no longer exists);
+  - create is off when a file column is required (a non-pointer, or
+    `not null`): it would store the empty key, with no upload behind it,
+    and every later create would collide with it in the unique index;
+  - updates leave file columns out of the write, so they never put back a
+    key a concurrent replacement released;
+  - asking for `Actions.Delete`, or `Actions.Create` with a required file,
+    is a registration error, and so is an explicit `Options.Fields` entry
+    that maps a file column under any type.
 
 [`examples/storage`](../examples/storage/internal/document/document.go) has a
 `Document` resource with both kinds.

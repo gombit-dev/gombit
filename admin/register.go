@@ -85,18 +85,9 @@ func registerModel(host Host, model any, opts Options) error {
 		opts.Search = defaultSearchFields(opts.Fields)
 	}
 
-	if opts.Actions.zero() {
+	defaultedActions := opts.Actions.zero()
+	if defaultedActions {
 		opts.Actions = defaultActions()
-		// A storage-backed column (file, image) is owned through
-		// storage/claims, and the admin does not take part in that yet
-		// (STORAGE-8): deleting the row here would leave its file held by
-		// a record that no longer exists, never reclaimed. Delete is off
-		// for such a model until the admin deletes through the claims.
-		if hasFileColumn(sch) {
-			opts.Actions.Delete = false
-		}
-	} else if opts.Actions.Delete && hasFileColumn(sch) {
-		return fmt.Errorf("admin: %s has storage-backed (file or image) fields, which the admin cannot delete yet: it would leave their files held by a record that no longer exists (STORAGE-8); leave Actions.Delete off", opts.Slug)
 	}
 	if opts.Singular == "" {
 		if name := elem.Name(); name != "" {
@@ -140,6 +131,13 @@ func registerModel(host Host, model any, opts Options) error {
 	if err != nil {
 		return err
 	}
+	// The admin performs no action on a storage-backed column it does not
+	// write through the upload protocol (storage/claims): those it does not
+	// map as a file field.
+	unownedFiles := unmappedFileColumns(sch, resolved)
+	if err := guardFileActions(opts.Slug, &opts.Actions, defaultedActions, unownedFiles); err != nil {
+		return err
+	}
 	if err := validateQueryableColumns(opts, resolved); err != nil {
 		return err
 	}
@@ -169,6 +167,7 @@ func registerModel(host Host, model any, opts Options) error {
 		m2m:            m2mBindings,
 		hasMany:        hasManyBindings,
 		serverRequired: serverRequired,
+		omitOnUpdate:   columnNames(unownedFiles),
 	}
 	for i := range m.fields {
 		m.fieldByName[m.fields[i].Name] = &m.fields[i]
@@ -573,15 +572,70 @@ func resolveFields(fields []Field, sch *schema.Schema) ([]resolvedField, []*m2mB
 	return out, bindings, hasMany, nil
 }
 
-// hasFileColumn reports whether sch has a storage-backed column (a file or
-// image field).
-func hasFileColumn(sch *schema.Schema) bool {
-	for _, sf := range sch.Fields {
-		if isFileColumn(sf) {
-			return true
+// unmappedFileColumns are sch's storage-backed columns (file, image) that
+// no resolved admin field maps: the admin cannot write them through the
+// upload protocol.
+func unmappedFileColumns(sch *schema.Schema, resolved []resolvedField) []*schema.Field {
+	mapped := map[string]bool{}
+	for _, f := range resolved {
+		if f.column != "" {
+			mapped[f.column] = true
 		}
 	}
-	return false
+	var out []*schema.Field
+	for _, sf := range sch.Fields {
+		if isFileColumn(sf) && !mapped[sf.DBName] {
+			out = append(out, sf)
+		}
+	}
+	return out
+}
+
+// guardFileActions fails closed on the actions the admin cannot honour for
+// unowned file columns (unmappedFileColumns):
+//   - delete: the row would go and its files stay held by a record that no
+//     longer exists, never reclaimed;
+//   - create, when one of them is required (a non-pointer, or NOT NULL):
+//     the row would be inserted with the empty key, no upload and no claim
+//     behind it, and every later create would collide with it in the
+//     column's unique index.
+//
+// Defaulted actions are turned off; an explicit one is a registration
+// error. (Update is safe: it leaves those columns out, see omitOnUpdate.)
+func guardFileActions(slug string, actions *Actions, defaulted bool, unowned []*schema.Field) error {
+	if len(unowned) == 0 {
+		return nil
+	}
+	required := ""
+	for _, sf := range unowned {
+		if sf.NotNull || sf.FieldType.Kind() != reflect.Pointer {
+			required = sf.DBName
+			break
+		}
+	}
+	if defaulted {
+		actions.Delete = false
+		if required != "" {
+			actions.Create = false
+		}
+		return nil
+	}
+	if actions.Delete {
+		return fmt.Errorf("admin: %s has storage-backed (file or image) columns the admin does not write through the upload protocol (%s), so it cannot delete its rows: their files would stay held by records that no longer exist; leave Actions.Delete off", slug, strings.Join(columnNames(unowned), ", "))
+	}
+	if actions.Create && required != "" {
+		return fmt.Errorf("admin: %s has the required storage-backed column %q, which the admin cannot set (it would store an empty key, no upload behind it); leave Actions.Create off", slug, required)
+	}
+	return nil
+}
+
+// columnNames are the DB names of fields.
+func columnNames(fields []*schema.Field) []string {
+	out := make([]string, len(fields))
+	for i, sf := range fields {
+		out[i] = sf.DBName
+	}
+	return out
 }
 
 // isFileColumn reports whether sf is a storage-backed column (a file or

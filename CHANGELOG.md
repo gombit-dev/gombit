@@ -219,12 +219,13 @@ version.
     `upload.Confirm` accepts only a key claimed for its policy's scope
     (`claims.Promote` matches it, new `claims.Belongs`).
   - The runtime is `storage/filefield`.
-  - The admin leaves file columns out until it has a file widget, and
-    turns delete off for such a model (an explicit `Actions.Delete` is a
-    registration error) so a deleted row cannot strand its held file; an
-    explicit `Options.Fields` entry mapping a file column under any type is
-    a registration error too, so the admin cannot write a key past the
-    upload protocol.
+  - The admin leaves file columns out until it has a file widget, and does
+    nothing to them it cannot honour: delete is off for such a model (a
+    deleted row would strand its held file), create is off when a file
+    column is required (it would store the empty key), updates leave file
+    columns out of the write, and an explicit `Actions.Delete`,
+    `Actions.Create` (with a required file) or `Options.Fields` entry
+    mapping a file column is a registration error.
   - `examples/storage` gains a `Document` resource
     ([#530](https://github.com/gombit-dev/gombit/issues/530)).
 

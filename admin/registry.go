@@ -70,6 +70,11 @@ type registered struct {
 	// They may be absent from fields when the policy hides them. Create fails
 	// only when the body did not set the column.
 	serverRequired []string
+	// omitOnUpdate names the storage-backed columns the admin does not
+	// write through the upload protocol: an update leaves them out, so it
+	// never writes back the key it loaded over one a concurrent
+	// claims.Update replaced.
+	omitOnUpdate []string
 }
 
 // versionField describes a model's integer optimistic-locking column (named
