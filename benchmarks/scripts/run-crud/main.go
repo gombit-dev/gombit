@@ -169,6 +169,9 @@ func run(cfg runConfig, k6run k6Runner) error {
 	if cfg.benchmark == "" {
 		return fmt.Errorf("no benchmark name: rows cannot be merged or attributed without one")
 	}
+	if strings.Contains(cfg.framework, "_") {
+		return fmt.Errorf("framework name %q must not contain '_': it separates framework and benchmark in raw summary names", cfg.framework)
+	}
 	if err := cfg.validateRunParams(); err != nil {
 		return err
 	}
@@ -203,7 +206,7 @@ func run(cfg runConfig, k6run k6Runner) error {
 			return fmt.Errorf("warm-up (vus=%d): %w", vus, err)
 		}
 		for trial := 1; trial <= cfg.trials; trial++ {
-			summaryPath := filepath.Join(rawDir, fmt.Sprintf("%s_c%d_t%d.json", cfg.framework, vus, trial))
+			summaryPath := rawSummaryPath(rawDir, cfg.framework, cfg.benchmark, vus, trial)
 			if err := k6run(vus, cfg.duration, summaryPath); err != nil {
 				return fmt.Errorf("k6 run (vus=%d trial=%d): %w", vus, trial, err)
 			}
@@ -458,10 +461,19 @@ func benchmarkName(workloadPath string) (string, error) {
 	if name == "" || name == "." || name == string(filepath.Separator) {
 		return "", fmt.Errorf("cannot derive a benchmark name from %q", workloadPath)
 	}
-	if strings.Contains(name, ":") {
-		return "", fmt.Errorf("benchmark name %q must not contain ':'", name)
+	if strings.ContainsAny(name, ":_") {
+		return "", fmt.Errorf("benchmark name %q must not contain ':' or '_' (they separate the provenance unit and raw summary names)", name)
 	}
 	return name, nil
+}
+
+// rawSummaryPath names one trial's raw k6 summary. Rows are keyed on
+// (framework, benchmark), so the file name is too: without the benchmark a
+// second workload for the same app would overwrite the first one's raw evidence
+// while its rows survived (#370). Neither name may contain '_' (run and
+// benchmarkName refuse it), so two keys can never share a file.
+func rawSummaryPath(rawDir, framework, benchmark string, vus, trial int) string {
+	return filepath.Join(rawDir, fmt.Sprintf("%s_%s_c%d_t%d.json", framework, benchmark, vus, trial))
 }
 
 // durationSeconds converts a k6 duration string ("30s", "1m30s") to seconds
