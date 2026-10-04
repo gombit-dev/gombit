@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"math/big"
 	"reflect"
 	"regexp"
 	"strconv"
@@ -16,6 +17,8 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 	"gorm.io/gorm/schema"
+
+	"github.com/gombit-dev/gombit/types"
 )
 
 // SQLiteDecimalDigits is the most digits a decimal value may carry when it is
@@ -447,28 +450,61 @@ func parseDecimalDDL(ddl string, mysql bool) decimalColumn {
 // precision <= 0 means the column has no limit of its own (PostgreSQL's
 // unbounded numeric), so only the SQLite limit applies. Trailing zeros after
 // the point are not digits that need storing: 1.5000 fits decimal(5,1).
+//
+// It never formats d. A decimal's exponent is unbounded and formatting one
+// materialises every digit ("1e1000000000" would hold a core indefinitely), so
+// the size is checked first, from the coefficient's bit length and the
+// exponent, against types.MaxDecimalDigits, and the digit counts are derived
+// arithmetically from the (then bounded) coefficient.
 func DecimalStorageProblem(d decimal.Decimal, precision, scale int, sqlite bool) string {
-	whole, frac, _ := strings.Cut(d.Abs().String(), ".")
-	wholeDigits := len(strings.TrimLeft(whole, "0"))
+	if err := types.CheckDecimalSize(d); err != nil {
+		return err.Error()
+	}
+	if d.IsZero() {
+		return ""
+	}
+	whole, frac, digits, magnitude := decimalDigits(d)
 	if precision > 0 {
-		if wholeDigits > precision-scale {
+		if whole > precision-scale {
 			return fmt.Sprintf("does not fit decimal(%d,%d): at most %d digits before the decimal point", precision, scale, precision-scale)
 		}
-		if len(frac) > scale {
+		if frac > scale {
 			return fmt.Sprintf("does not fit decimal(%d,%d): at most %d digits after the decimal point", precision, scale, scale)
 		}
 	}
-	if sqlite && !d.IsZero() {
-		if digits := len(strings.TrimLeft(whole+frac, "0")); digits > SQLiteDecimalDigits {
+	if sqlite {
+		if digits > SQLiteDecimalDigits {
 			return fmt.Sprintf("has %d digits; SQLite stores at most %d exactly", digits, SQLiteDecimalDigits)
 		}
-		// The decimal exponent of the leading digit.
-		coefficient := strings.TrimLeft(d.Coefficient().String(), "-")
-		if magnitude := int(d.Exponent()) + len(coefficient) - 1; magnitude > sqliteDecimalMaxExponent || magnitude < -sqliteDecimalMaxExponent {
+		if magnitude > sqliteDecimalMaxExponent || magnitude < -sqliteDecimalMaxExponent {
 			return fmt.Sprintf("is outside the range SQLite stores exactly (about 1e-%d to 1e%d)", sqliteDecimalMaxExponent, sqliteDecimalMaxExponent)
 		}
 	}
 	return ""
+}
+
+// decimalDigits counts a non-zero d's digits from its coefficient and exponent:
+// whole and frac are the digits before and after the point as written without
+// trailing fractional zeros, digits runs from the first non-zero digit to the
+// last digit written (trailing integer zeros included), and magnitude is the
+// decimal exponent of the leading digit. Callers bound d's size first
+// (types.CheckDecimalSize), so formatting the coefficient here is cheap.
+func decimalDigits(d decimal.Decimal) (whole, frac, digits, magnitude int) {
+	c := new(big.Int).Abs(d.Coefficient())
+	s := c.String()
+	trimmed := strings.TrimRight(s, "0")
+	n := len(trimmed)
+	exponent := int(d.Exponent()) + len(s) - n
+	if n+exponent > 0 {
+		whole = n + exponent
+	}
+	if exponent < 0 {
+		frac = -exponent
+		digits = n
+	} else {
+		digits = n + exponent
+	}
+	return whole, frac, digits, n + exponent - 1
 }
 
 // fieldKey names f in a ValidationError the way the API names it: its JSON

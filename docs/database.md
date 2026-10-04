@@ -107,6 +107,12 @@ garbage write.
 - **On SQLite**, which stores decimals through float64, a value with more than
   15 digits (`database.SQLiteDecimalDigits`), or outside about 1e±307, is
   refused the same way.
+- **On every driver**, a value that would spell more than
+  `types.MaxDecimalDigits` (1000) digits is refused before anything formats it.
+  A decimal's exponent is unbounded, and formatting `"1e1000000000"` would
+  materialise a billion digits. `types.Decimal` refuses such a value when it is
+  unmarshalled (`UnmarshalJSON`, `UnmarshalText`, `NewDecimalFromString`), and
+  the admin refuses it before comparing it to a bound.
 
 The check runs on the API and admin write paths alike.
 

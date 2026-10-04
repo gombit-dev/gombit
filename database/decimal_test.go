@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/shopspring/decimal"
 	"gorm.io/driver/mysql"
@@ -339,5 +340,46 @@ func TestDecimalCheckIsFreeWithoutDecimalFields(t *testing.T) {
 	decimalFieldsOf(tx.Statement.Schema) // warm the per-schema cache
 	if allocs := testing.AllocsPerRun(100, func() { runDecimalCheck(tx, DriverSQLite, true) }); allocs != 0 {
 		t.Fatalf("decimal check on a model without decimal fields = %v allocs, want 0", allocs)
+	}
+}
+
+// TestDecimalGuardRefusesUnboundedSizeQuickly: the guard never formats a value
+// before bounding it, so "1e1000000000" (13 bytes, a billion digits if
+// formatted) is refused at once on the write path, on every column kind,
+// including PostgreSQL's unbounded numeric (#440 review).
+func TestDecimalGuardRefusesUnboundedSizeQuickly(t *testing.T) {
+	within := func(label string, f func() error) error {
+		t.Helper()
+		done := make(chan error, 1)
+		go func() { done <- f() }()
+		select {
+		case err := <-done:
+			return err
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s: still running after 2s; the value is being formatted", label)
+			return nil
+		}
+	}
+	hostile := decimal.RequireFromString("1e1000000000")
+	for _, c := range []struct{ precision, scale int }{{0, 0}, {19, 4}} {
+		if got := within("DecimalStorageProblem", func() error {
+			if msg := DecimalStorageProblem(hostile, c.precision, c.scale, false); msg != "" {
+				return errors.New(msg)
+			}
+			return nil
+		}); got == nil {
+			t.Errorf("DecimalStorageProblem(1e1000000000, %d, %d) = no problem, want a refusal", c.precision, c.scale)
+		}
+	}
+	db := openSQLite(t)
+	if err := db.AutoMigrate(&decimalRow{}); err != nil {
+		t.Fatal(err)
+	}
+	err := within("update", func() error {
+		return db.Model(&decimalRow{ID: 1}).Update("amount", "1e1000000000").Error
+	})
+	var ve *ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("update with 1e1000000000: error = %v, want a *ValidationError", err)
 	}
 }

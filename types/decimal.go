@@ -6,6 +6,7 @@ package types
 
 import (
 	"fmt"
+	"math/big"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/shopspring/decimal"
@@ -33,16 +34,98 @@ type Decimal struct {
 	decimal.Decimal
 }
 
+// MaxDecimalDigits bounds the digits a decimal value may spell: the digits
+// before the point plus those after it, as String would write them. It is far
+// beyond any column (PostgreSQL's widest declared numeric, MySQL's
+// decimal(65,30)) and exists because a decimal's exponent is otherwise
+// unbounded: "1e1000000000" parses in microseconds, but formatting it, as
+// String and the driver.Valuer do on every write, materialises every digit and
+// holds a core and gigabytes of memory (issue #440 review).
+const MaxDecimalDigits = 1000
+
+// CheckDecimalSize returns an error when d would spell more than
+// MaxDecimalDigits digits. It never formats d: the count comes from the
+// coefficient's bit length and the exponent, so a hostile value is refused in
+// constant time.
+func CheckDecimalSize(d decimal.Decimal) error {
+	if digits := decimalSpelledDigits(d); digits > MaxDecimalDigits {
+		return fmt.Errorf("has more than %d digits", MaxDecimalDigits)
+	}
+	return nil
+}
+
+// decimalSpelledDigits estimates, without formatting, how many digits d spells
+// (an upper bound tight to one digit): the coefficient's digits plus the
+// zeros its exponent adds before or after them.
+func decimalSpelledDigits(d decimal.Decimal) int {
+	c := d.Coefficient()
+	if c.Sign() == 0 {
+		return 1
+	}
+	coefficient := coefficientDigits(c)
+	exponent := int(d.Exponent())
+	if exponent >= 0 {
+		return coefficient + exponent
+	}
+	if -exponent > coefficient {
+		return -exponent + 1 // "0." and the fraction
+	}
+	return coefficient
+}
+
+// coefficientDigits is the decimal digit count of |c|. It is estimated from the
+// bit length (high by at most one) and formatted only when the estimate is
+// small enough for that to be cheap, so a huge coefficient is never formatted.
+func coefficientDigits(c *big.Int) int {
+	estimate := int(float64(c.BitLen())*0.30102999566398119521) + 1
+	if estimate > MaxDecimalDigits+1 {
+		return estimate
+	}
+	return len(new(big.Int).Abs(c).String())
+}
+
+// UnmarshalJSON parses a decimal and refuses one beyond MaxDecimalDigits
+// before anything formats it.
+func (d *Decimal) UnmarshalJSON(b []byte) error {
+	var inner decimal.Decimal
+	if err := inner.UnmarshalJSON(b); err != nil {
+		return err
+	}
+	if err := CheckDecimalSize(inner); err != nil {
+		return fmt.Errorf("decimal %s", err)
+	}
+	d.Decimal = inner
+	return nil
+}
+
+// UnmarshalText parses a decimal and refuses one beyond MaxDecimalDigits
+// before anything formats it.
+func (d *Decimal) UnmarshalText(b []byte) error {
+	var inner decimal.Decimal
+	if err := inner.UnmarshalText(b); err != nil {
+		return err
+	}
+	if err := CheckDecimalSize(inner); err != nil {
+		return fmt.Errorf("decimal %s", err)
+	}
+	d.Decimal = inner
+	return nil
+}
+
 // NewDecimal wraps a shopspring decimal.
 func NewDecimal(d decimal.Decimal) Decimal {
 	return Decimal{Decimal: d}
 }
 
-// NewDecimalFromString parses a decimal string (e.g. "19.99").
+// NewDecimalFromString parses a decimal string (e.g. "19.99"), refusing one
+// beyond MaxDecimalDigits.
 func NewDecimalFromString(s string) (Decimal, error) {
 	d, err := decimal.NewFromString(s)
 	if err != nil {
 		return Decimal{}, err
+	}
+	if err := CheckDecimalSize(d); err != nil {
+		return Decimal{}, fmt.Errorf("decimal %s", err)
 	}
 	return Decimal{Decimal: d}, nil
 }

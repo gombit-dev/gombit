@@ -112,7 +112,18 @@ func formatMessage(format, s string) string {
 	}
 }
 
+// decimalValue reads raw as a decimal for a bound check, reporting false for
+// one beyond types.MaxDecimalDigits so no comparison rescales it (#440); the
+// write path then refuses it.
 func decimalValue(raw any) (decimal.Decimal, bool) {
+	d, ok := parseDecimalValue(raw)
+	if !ok || types.CheckDecimalSize(d) != nil {
+		return decimal.Decimal{}, false
+	}
+	return d, true
+}
+
+func parseDecimalValue(raw any) (decimal.Decimal, bool) {
 	switch v := raw.(type) {
 	case string:
 		d, err := decimal.NewFromString(strings.TrimSpace(v))
@@ -253,8 +264,14 @@ func asDecimalString(raw any) (string, error) {
 	default:
 		return "", fmt.Errorf("must be a decimal")
 	}
-	if _, err := decimal.NewFromString(s); err != nil {
+	d, err := decimal.NewFromString(s)
+	if err != nil {
 		return "", fmt.Errorf("must be a decimal")
+	}
+	// Bound the value before anything formats or compares it: a huge exponent
+	// would otherwise hold a core (#440).
+	if err := types.CheckDecimalSize(d); err != nil {
+		return "", fmt.Errorf("must be a decimal: %s", err)
 	}
 	return s, nil
 }
