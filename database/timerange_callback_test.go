@@ -173,9 +173,28 @@ func testTimeRangeUnsetAndInRange(t *testing.T, db *DB) {
 		"Updates(struct, zero due)":  db.Model(&row).Updates(rangedEvent{Name: "zero due is not written"}).Error,
 		"NULL":                       db.Model(&row).Updates(map[string]any{"paid": nil, "noted": sql.NullTime{}}).Error,
 		"expression":                 db.Model(&row).Update("due", gorm.Expr("due")).Error,
+		// GORM fills a zero auto timestamp and the database a zero defaulted
+		// column on a create, whatever Select says.
+		"Select(*) Create":            db.Select("*").Create(&rangedEvent{Name: "star", Due: inRange, Issued: dateFine}).Error,
+		"Select(CreatedAt) Create":    db.Select("Name", "Due", "Issued", "CreatedAt").Create(&rangedEvent{Name: "named", Due: inRange, Issued: dateFine}).Error,
+		"Select(*) Create, defaulted": db.Select("*").Create(&rangedDefault{Name: "star default"}).Error,
 	} {
 		if err != nil {
 			t.Errorf("%s: %v", what, err)
+		}
+	}
+	// The text forms PostgreSQL prints (and SQLite stores as given) pass the
+	// check; MySQL's DATETIME refuses offsets and zone names itself.
+	if db.Driver() != DriverMySQL {
+		for _, form := range []string{"2026-10-04 12:00:00+00", "2026-10-04 12:00:00+0000", "2026-10-04 12:00:00-03", "2026-10-04 12:00:00 UTC"} {
+			if err := db.Model(&row).Update("due", form).Error; err != nil {
+				t.Errorf("Update(due, %q): %v", form, err)
+			}
+		}
+	}
+	for _, form := range []string{"2026-10-04 12:00:00+00", "2026-10-04 12:00:00-0700", "2026-10-04 12:00:00 UTC"} {
+		if _, ok := parseAssignedTime(form); !ok {
+			t.Errorf("parseAssignedTime(%q) failed", form)
 		}
 	}
 }
@@ -191,15 +210,24 @@ func TestTimeRangeChecksWhatGORMWrites(t *testing.T) {
 	testTimeRangeWhatGORMWrites(t, openRangedDB(t))
 }
 
+type softEvent struct {
+	ID        uint `gorm:"primaryKey"`
+	Name      string
+	DeletedAt gorm.DeletedAt
+}
+
 func testTimeRangeWhatGORMWrites(t *testing.T, db *DB) {
 	t.Helper()
+	_ = db.Migrator().DropTable(&softEvent{})
+	if err := db.AutoMigrate(&softEvent{}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Migrator().DropTable(&softEvent{}) })
 	row := rangedEvent{Name: "base", Due: inRange, Issued: dateFine}
 	if err := db.Create(&row).Error; err != nil {
 		t.Fatal(err)
 	}
 	wantRangeError(t, "Create zero due", db.Create(&rangedEvent{Name: "z", Issued: dateFine}).Error, "due")
-	// Save selects every column, so a zero CreatedAt would overwrite the stored one.
-	wantRangeError(t, "Save zero CreatedAt", db.Save(&rangedEvent{ID: row.ID, Name: "s", Due: inRange, Issued: dateFine}).Error, "created_at")
 	wantRangeError(t, "Update(column, zero instant)", db.Model(&row).Update("due", "0001-01-01T00:00:00Z").Error, "due")
 	wantRangeError(t, "Updates(map, zero time)", db.Model(&row).Updates(map[string]any{"due": time.Time{}}).Error, "due")
 	wantRangeError(t, "Select zero due", db.Model(&row).Select("due").Updates(rangedEvent{}).Error, "due")
@@ -211,6 +239,15 @@ func testTimeRangeWhatGORMWrites(t *testing.T, db *DB) {
 		Columns:   []clause.Column{{Name: "id"}},
 		DoUpdates: clause.Assignments(map[string]any{"due": yearZero}),
 	}).Create(&rangedEvent{ID: row.ID, Name: "upsert", Due: inRange, Issued: dateFine}).Error, "due")
+	// On a create GORM always writes an auto timestamp, Select or not, so a
+	// caller-set one is checked even when Select leaves it out (#562 round 3).
+	wantRangeError(t, "Select-restricted Create, CreatedAt year 0", db.Select("Name", "Due", "Issued").Create(&rangedEvent{Name: "sel", Due: inRange, Issued: dateFine, CreatedAt: yearZero}).Error, "created_at")
+	wantRangeError(t, "Create DeletedAt year 0", db.Create(&softEvent{Name: "s", DeletedAt: gorm.DeletedAt{Time: yearZero, Valid: true}}).Error, "deleted_at")
+	soft := softEvent{Name: "soft"}
+	if err := db.Create(&soft).Error; err != nil {
+		t.Fatal(err)
+	}
+	wantRangeError(t, "Unscoped Update(deleted_at) year 0", db.Unscoped().Model(&soft).Update("deleted_at", yearZero).Error, "deleted_at")
 	wantRangeError(t, "Update(column, infinity)", db.Model(&row).Update("due", "infinity").Error, "due")
 	wantRangeError(t, "Update(column, BC)", db.Model(&row).Update("issued", "0001-01-01 BC").Error, "issued_on")
 
@@ -269,6 +306,36 @@ func TestTimeRangeChecksOnlyTheAssignmentSet(t *testing.T) {
 	}
 }
 
+// A row stored before this check with the zero instant in a non-pointer
+// column (what an unset field became on SQLite and PostgreSQL) stays editable:
+// Save and the admin data plane's Select("*").Updates write the whole row back,
+// and the stored zero is not the caller's to fix (#562 round 3).
+func TestTimeRangeKeepsRowsWithAStoredZeroEditable(t *testing.T) {
+	db := openRangedDB(t)
+	row := rangedEvent{Name: "legacy", Due: inRange, Issued: dateFine}
+	if err := db.Create(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec("UPDATE ranged_events SET due = ? WHERE id = ?", time.Time{}, row.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	var loaded rangedEvent
+	if err := db.First(&loaded, row.ID).Error; err != nil || !loaded.Due.IsZero() {
+		t.Fatalf("fixture: %v, due %v", err, loaded.Due)
+	}
+	loaded.Name = "renamed"
+	if err := db.Save(&loaded).Error; err != nil {
+		t.Errorf("Save of a row storing the zero instant: %v", err)
+	}
+	loaded.Name = "renamed again"
+	if err := db.Select("*").Updates(&loaded).Error; err != nil {
+		t.Errorf("Select(*).Updates of a row storing the zero instant: %v", err)
+	}
+	// A new zero written on purpose is still refused.
+	wantRangeError(t, "Update(column, zero)", db.Model(&loaded).Update("due", time.Time{}).Error, "due")
+	wantRangeError(t, "Select(due) zero", db.Model(&loaded).Select("due").Updates(rangedEvent{}).Error, "due")
+}
+
 type plainRow struct {
 	ID   uint `gorm:"primaryKey"`
 	Name string
@@ -318,5 +385,50 @@ func TestTimeRangeUpsertReferencesAndNamedStrings(t *testing.T) {
 	wantRangeError(t, "named string", db.Model(&row).Update("due", stampString("0000-01-01T00:00:00Z")).Error, "due")
 	if err := db.Model(&row).Update("due", stampString("2026-10-04T00:00:00Z")).Error; err != nil {
 		t.Errorf("an in-range named string: %v", err)
+	}
+}
+
+type allocStamped struct {
+	ID        uint `gorm:"primaryKey"`
+	Name      string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// The check adds no allocation to an ordinary write of a model whose only
+// time columns are GORM's timestamps, which is nearly every model (#562
+// round 3): the walker lives on the stack, reads fields in place, and builds
+// nothing unless a value is out of range.
+func TestTimeRangeAddsNoAllocationsToOrdinaryWrites(t *testing.T) {
+	open := func(withCheck bool) *DB {
+		db, err := Open(config.DatabaseConfig{Driver: config.DatabaseDriverSQLite, DSN: "file:" + filepath.Join(t.TempDir(), "alloc.db")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		if !withCheck {
+			_ = db.Callback().Create().Remove("gombit:timerange")
+			_ = db.Callback().Update().Remove("gombit:timerange")
+		}
+		if err := db.AutoMigrate(&allocStamped{}); err != nil {
+			t.Fatal(err)
+		}
+		return db
+	}
+	measure := func(db *DB) map[string]float64 {
+		row := allocStamped{Name: "x"}
+		db.Create(&row)
+		return map[string]float64{
+			"Create":          testing.AllocsPerRun(50, func() { db.Create(&allocStamped{Name: "x"}) }),
+			"Save":            testing.AllocsPerRun(50, func() { db.Save(&row) }),
+			"Updates(map)":    testing.AllocsPerRun(50, func() { db.Model(&row).Updates(map[string]any{"name": "y"}) }),
+			"Updates(struct)": testing.AllocsPerRun(50, func() { db.Model(&row).Updates(allocStamped{Name: "z"}) }),
+		}
+	}
+	without, with := measure(open(false)), measure(open(true))
+	for op, base := range without {
+		if with[op] > base+0.5 {
+			t.Errorf("%s: %.1f allocs with the check, %.1f without", op, with[op], base)
+		}
 	}
 }

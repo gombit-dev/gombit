@@ -364,12 +364,15 @@ version.
   zone a value is read into) and `1000-01-01`..`9999-12-31`
   (`types.TimeBounds`, `types.DateBounds`, `types.TimeWithin`,
   `types.DateWithin`). It covers the generated API, the admin data plane and
-  custom code alike, with no regeneration. **Behaviour change:** a zero
-  `time.Time` that GORM writes (a non-pointer field left unset on create, a
-  zero in a map or a `Select`, any column `Save` writes) is now a 422 on every
-  driver; it was stored on SQLite/PostgreSQL and a 500 on MySQL. Use a pointer
-  for an optional time. A string no Go time parses (`'infinity'`) is refused
-  too ([#443](https://github.com/gombit-dev/gombit/issues/443)).
+  custom code alike, with no regeneration, and adds no allocation to an
+  ordinary write. **Behaviour change:** a zero `time.Time` a write sets (a
+  non-pointer field left unset on create, a zero in a map, `Update` or a
+  named `Select`) is now a 422 on every driver; it was stored on
+  SQLite/PostgreSQL and a 500 on MySQL. Use a pointer for an optional time.
+  Rows that already store the zero instant stay editable (`Save`, the admin):
+  a struct update writing the stored value back is not refused. A string no Go
+  time parses (`'infinity'`) is refused too
+  ([#443](https://github.com/gombit-dev/gombit/issues/443)).
 
 ## [0.6.0] — 2026-09-28
 

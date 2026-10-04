@@ -54,46 +54,53 @@ func runTimeRangeCheck(db *gorm.DB, creating bool) {
 	if len(targets) == 0 {
 		return
 	}
-	skipHooks := db.Statement.SkipHooks
-	fields := map[string][]string{}
-	forEachAssigned(db, creating, targets, func(a assignedValue) {
-		f := a.Field
-		// GORM writes now over an auto-update timestamp on a struct update
-		// that runs hooks, whatever the struct holds.
-		if !a.Creating && a.FromStruct && !skipHooks && f.AutoUpdateTime > 0 {
-			return
-		}
-		msg := timeRangeProblem(f, a.Value, zeroIsWritten(a))
-		if msg == "" {
-			return
-		}
-		key := fieldKey(f)
-		for _, have := range fields[key] {
-			if have == msg {
-				return
-			}
-		}
-		fields[key] = append(fields[key], msg)
-	})
-	if len(fields) > 0 {
-		_ = db.AddError(NewValidationError("The request contains invalid fields.", fields))
+	c := timeRangeCheck{skipHooks: db.Statement.SkipHooks}
+	forEachAssigned(db, creating, targets, c.check)
+	if len(c.fields) > 0 {
+		_ = db.AddError(NewValidationError("The request contains invalid fields.", c.fields))
 	}
 }
 
-// zeroIsWritten reports whether a zero time in a is what reaches the column,
-// as GORM decides it. A struct field's zero is not written on an update unless
-// the column is selected, and on a create GORM fills an auto timestamp or
-// leaves a column with a default to the database. Anything the statement
-// names explicitly (a map, an upsert assignment, a Select) is written as is.
-func zeroIsWritten(a assignedValue) bool {
-	if a.Explicit || !a.FromStruct {
-		return true
-	}
-	if !a.Creating {
-		return false
-	}
+type timeRangeCheck struct {
+	skipHooks bool
+	fields    map[string][]string // allocated on the first problem
+}
+
+func (c *timeRangeCheck) check(a assignedValue) {
 	f := a.Field
-	return f.AutoCreateTime == 0 && f.AutoUpdateTime == 0 && !f.HasDefaultValue
+	if a.FromStruct {
+		// GORM writes now over an auto-update timestamp on a struct update that
+		// runs hooks, whatever the struct holds.
+		if !a.Creating && !c.skipHooks && f.AutoUpdateTime > 0 {
+			return
+		}
+		// A zero struct value GORM does not write as given is left alone: on a
+		// create GORM fills a zero auto timestamp and the database a zero
+		// defaulted column, Select or not. On an update a zero is not written
+		// (Updates), or it is the row's own stored value written back whole
+		// (Save, Select("*")): refusing it would block every edit of a row
+		// stored before this check. A Select naming the column writes it.
+		if a.Value.IsValid() && a.Value.IsZero() {
+			if f.AutoCreateTime > 0 || f.AutoUpdateTime > 0 || f.HasDefaultValue ||
+				(!a.Creating && !a.Named) {
+				return
+			}
+		}
+	}
+	msg := timeRangeProblem(f, a.Value)
+	if msg == "" {
+		return
+	}
+	key := fieldKey(f)
+	for _, have := range c.fields[key] {
+		if have == msg {
+			return
+		}
+	}
+	if c.fields == nil {
+		c.fields = map[string][]string{}
+	}
+	c.fields[key] = append(c.fields[key], msg)
 }
 
 // rangedFieldsBySchema caches each schema's ranged columns, so a model with
@@ -126,69 +133,78 @@ func isRangedTimeField(f *schema.Field) bool {
 	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
-	return t == rangeTimeType || t == rangeNullTimeType || t == rangeDateType
+	return t == rangeTimeType || t == rangeNullTimeType || t == rangeDateType ||
+		// Named time types: gorm.DeletedAt (a sql.NullTime), type Stamp time.Time.
+		(t.Kind() == reflect.Struct && (t.ConvertibleTo(rangeNullTimeType) || t.ConvertibleTo(rangeTimeType)))
 }
 
 // timeRangeProblem describes why v, assigned to column, cannot be stored and
 // returned on every driver, or returns "" when it can. A string headed for the
-// column is read as the drivers read it (RFC 3339, "YYYY-MM-DD hh:mm:ss",
-// "YYYY-MM-DD"); one that does not parse is refused too, since PostgreSQL
-// accepts forms ('infinity', '... BC') no Go time can be read back from.
-// Expressions arrive as clause values, not strings, and are left to the
-// database, as are NULL (a nil pointer, an invalid sql.NullTime) and, when
-// zeroWritten is false, a zero value GORM will not write.
-func timeRangeProblem(column *schema.Field, v reflect.Value, zeroWritten bool) string {
+// column is read as the drivers read it (RFC 3339, "YYYY-MM-DD hh:mm:ss" with
+// or without an offset, "YYYY-MM-DD"); one that does not parse is refused,
+// since PostgreSQL accepts forms ('infinity', '... BC') no Go time can be read
+// back from. Expressions arrive as clause values, not strings, and are left to
+// the database, as is NULL (a nil pointer, an invalid sql.NullTime).
+func timeRangeProblem(column *schema.Field, v reflect.Value) string {
 	for v.IsValid() && (v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface) {
 		if v.IsNil() {
 			return ""
 		}
 		v = v.Elem()
 	}
-	if !v.IsValid() || !v.CanInterface() {
+	if !v.IsValid() {
 		return ""
 	}
 	dateColumn := isRangedDateField(column)
 	var t time.Time
-	switch x := v.Interface().(type) {
-	case time.Time:
-		t = x
-	case sql.NullTime:
-		if !x.Valid {
+	switch {
+	case v.Type() == rangeDateType:
+		t = readValue[types.Date](v).Time()
+	case v.Type() == rangeTimeType:
+		t = readValue[time.Time](v)
+	case v.Kind() == reflect.Struct && v.Type().ConvertibleTo(rangeNullTimeType):
+		nt := readConverted[sql.NullTime](v, rangeNullTimeType)
+		if !nt.Valid {
 			return ""
 		}
-		t = x.Time
-	case types.Date:
-		t = x.Time()
-	case string, []byte:
-		raw := fmt.Sprint(x)
-		if b, ok := x.([]byte); ok {
-			raw = string(b)
-		}
-		parsed, ok := parseAssignedTime(raw)
-		if !ok {
-			if dateColumn {
-				return "must be a date (YYYY-MM-DD)"
-			}
-			return "must be an RFC 3339 timestamp"
-		}
-		t = parsed
+		t = nt.Time
+	case v.Kind() == reflect.Struct && v.Type().ConvertibleTo(rangeTimeType):
+		t = readConverted[time.Time](v, rangeTimeType)
+	case v.Kind() == reflect.String:
+		return parsedRangeProblem(v.String(), dateColumn)
+	case v.Kind() == reflect.Slice && v.Type().Elem().Kind() == reflect.Uint8:
+		return parsedRangeProblem(string(v.Bytes()), dateColumn)
 	default:
-		// A named string type (type Stamp string) is written as its string.
-		if v.Kind() != reflect.String {
-			return ""
-		}
-		parsed, ok := parseAssignedTime(v.String())
-		if !ok {
-			if dateColumn {
-				return "must be a date (YYYY-MM-DD)"
-			}
-			return "must be an RFC 3339 timestamp"
-		}
-		t = parsed
-	}
-	if t.IsZero() && !zeroWritten {
 		return ""
 	}
+	return rangeProblem(t, dateColumn)
+}
+
+// readValue reads v as T without boxing it when v is addressable (a struct
+// field), which is every value forEachAssigned reads from a struct.
+func readValue[T any](v reflect.Value) T {
+	if v.CanAddr() {
+		return *(v.Addr().Interface().(*T))
+	}
+	return v.Interface().(T)
+}
+
+func readConverted[T any](v reflect.Value, to reflect.Type) T {
+	return v.Convert(to).Interface().(T)
+}
+
+func parsedRangeProblem(raw string, dateColumn bool) string {
+	t, ok := parseAssignedTime(raw)
+	if !ok {
+		if dateColumn {
+			return "must be a date (YYYY-MM-DD)"
+		}
+		return "must be an RFC 3339 timestamp"
+	}
+	return rangeProblem(t, dateColumn)
+}
+
+func rangeProblem(t time.Time, dateColumn bool) string {
 	var err error
 	if dateColumn {
 		err = types.DateWithin(types.NewDate(t))
@@ -201,10 +217,27 @@ func timeRangeProblem(column *schema.Field, v reflect.Value, zeroWritten bool) s
 	return ""
 }
 
+// assignedTimeLayouts are the forms a timestamp or date string takes on its way
+// to a driver: RFC 3339, ISO without a zone, and what PostgreSQL and MySQL
+// print themselves (a space, an offset of "+00", "+0000" or "+00:00", or a zone
+// name such as UTC).
+var assignedTimeLayouts = []string{
+	time.RFC3339Nano,
+	"2006-01-02T15:04:05.999999999",
+	"2006-01-02T15:04:05.999999999-07",
+	"2006-01-02T15:04:05.999999999-0700",
+	"2006-01-02 15:04:05.999999999Z07:00",
+	"2006-01-02 15:04:05.999999999-07",
+	"2006-01-02 15:04:05.999999999-0700",
+	"2006-01-02 15:04:05.999999999 MST",
+	"2006-01-02 15:04:05.999999999",
+	time.DateOnly,
+}
+
 // parseAssignedTime reads a string assigned to a timestamp or date column in
 // the forms the drivers accept.
 func parseAssignedTime(s string) (time.Time, bool) {
-	for _, layout := range []string{time.RFC3339Nano, "2006-01-02T15:04:05.999999999", "2006-01-02 15:04:05.999999999Z07:00", "2006-01-02 15:04:05.999999999", time.DateOnly} {
+	for _, layout := range assignedTimeLayouts {
 		if t, err := time.Parse(layout, strings.TrimSpace(s)); err == nil {
 			return t, true
 		}

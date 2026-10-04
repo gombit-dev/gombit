@@ -100,23 +100,36 @@ What a statement writes is what GORM writes:
 - `Create`, `Save`, `Updates` with a map or a struct (of any type, matched to
   the model's columns by name), `Update`, `UpdateColumn(s)`, and the literal
   assignments of an upsert's `ON CONFLICT DO UPDATE`, filtered by
-  `Select` / `Omit`. An update's model is not checked unless it is what is
-  written (`Save`, `Updates(&row)`), so updating other columns of a row that
-  already holds an out-of-range value is not refused.
-- The zero instant `0001-01-01T00:00:00Z` is a value like any other wherever
-  GORM writes it: a zero non-pointer field on create (MySQL refused it with a
-  500; the others stored it), a zero value in a map or a `Select`ed column, and
-  any column `Save` writes (it selects them all). It is left alone where GORM
-  does not write it: a zero auto `CreatedAt` / `UpdatedAt` on create (GORM fills
-  it), a zero column with a `default` (the database fills it), and a zero struct
-  field on an update. Use a pointer (or `sql.NullTime`) for an optional time.
-- A caller-set `CreatedAt` / `UpdatedAt` (a hook, a seeder, a map naming the
-  column, `UpdateColumns`) is checked; a struct update that runs hooks writes
+  `Select` / `Omit` the way GORM filters them (on a create an auto
+  `CreatedAt` / `UpdatedAt` is written whatever `Select` says). An update's
+  model is not checked unless it is what is written (`Save`, `Updates(&row)`),
+  so updating other columns of a row that already holds an out-of-range value
+  is not refused.
+- Every `time.Time`, `sql.NullTime`, `types.Date` and named time type
+  (`gorm.DeletedAt`, `type Stamp time.Time`) column is checked, a caller-set
+  `CreatedAt` / `UpdatedAt` / `DeletedAt` included (a hook, a seeder, a map
+  naming the column, `UpdateColumns`). A struct update that runs hooks writes
   now over `UpdatedAt`, so that one is not.
+- The zero instant `0001-01-01T00:00:00Z` is refused where a write sets it:
+  a zero non-pointer field on create, a zero value in a map or `Update`, and a
+  zero struct field in a column `Select` names. It is left alone where GORM or
+  the database fills it (a zero auto timestamp, a zero column with a
+  `default`, on create, `Select` or not) and in a struct update that does not
+  name the column: `Updates` skips it, and `Save` / `Select("*").Updates` write
+  the row's stored value back, so a row that stored the zero instant before
+  this check (an unset field on SQLite or PostgreSQL) stays editable,
+  including in the admin. Use a pointer (or `sql.NullTime`) for an optional
+  time; to clean up such rows, make the field a pointer and
+  `UPDATE … SET col = NULL WHERE col = '0001-01-01 00:00:00'`.
 - A string written to such a column is read as the drivers read it (RFC 3339,
-  `YYYY-MM-DD hh:mm:ss`, `YYYY-MM-DD`); one that does not parse is refused,
-  since PostgreSQL accepts forms (`'infinity'`, `'… BC'`) no Go time can be read
-  back from. An expression (`gorm.Expr`) and NULL are left to the database.
+  ISO without a zone, `YYYY-MM-DD hh:mm:ss` with an offset such as `+00`,
+  `+0000`, `-03:00` or a zone name, `YYYY-MM-DD`); one that does not parse is
+  refused, since PostgreSQL accepts forms (`'infinity'`, `'… BC'`) no Go time
+  can be read back from. An expression (`gorm.Expr`) and NULL are left to the
+  database.
+
+The check costs an ordinary write nothing: it allocates only when a value is
+out of range.
 
 ## Deleting rows
 
