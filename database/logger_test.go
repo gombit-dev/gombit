@@ -12,8 +12,11 @@ import (
 	"testing"
 	"time"
 
+	mysqldriver "github.com/go-sql-driver/mysql"
 	"github.com/gombit-dev/gombit/config"
 	"github.com/gombit-dev/gombit/contract"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/mattn/go-sqlite3"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -32,10 +35,15 @@ type loggedStock struct {
 	Qty int  `gorm:"check:logged_stock_qty_positive,qty > 0"`
 }
 
+type loggedNote struct {
+	ID   uint    `gorm:"primaryKey"`
+	Body *string `gorm:"size:191;not null"`
+}
+
 const secretHash = "$2a$10$SECRET-HASH-THAT-MUST-NEVER-BE-LOGGED"
 
 // The parameter values exercise passes. None may appear in a log line.
-var loggedValues = []string{secretHash, "a@example.com", "nobody@example.com", "c@example.com", "-7"}
+var loggedValues = []string{secretHash, "a@example.com", "nobody@example.com", "c@example.com", "d@example.com", "-7"}
 
 func openSQLiteLoggedDB(t *testing.T) *DB {
 	t.Helper()
@@ -52,15 +60,17 @@ func openSQLiteLoggedDB(t *testing.T) *DB {
 
 func migrateLogged(t *testing.T, db *DB) {
 	t.Helper()
-	if err := db.AutoMigrate(&loggedUser{}, &loggedStock{}); err != nil {
+	if err := db.AutoMigrate(&loggedUser{}, &loggedStock{}, &loggedNote{}); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = db.Migrator().DropTable(&loggedUser{}, &loggedStock{}) })
+	t.Cleanup(func() { _ = db.Migrator().DropTable(&loggedUser{}, &loggedStock{}, &loggedNote{}) })
 }
 
-// exercise runs what issue #439 reproduced, plus a server-side failure: a
-// lookup that finds nothing, a duplicate insert carrying a password hash (a
-// 409), a CHECK violation (a 500), and a statement on a missing table.
+// exercise runs what issue #439 reproduced, plus server-side failures: a lookup
+// that finds nothing, a duplicate insert carrying a password hash (a 409), a
+// NOT NULL violation (a 422), a CHECK violation (a 500), a statement on a
+// missing table, and the same through Scan, which GORM traces through its
+// recorder rather than the session logger.
 func exercise(t *testing.T, db *DB) {
 	t.Helper()
 	if err := db.Create(&loggedUser{Email: "a@example.com", PasswordHash: secretHash}).Error; err != nil {
@@ -73,11 +83,22 @@ func exercise(t *testing.T, db *DB) {
 	if err := db.Create(&loggedUser{Email: "a@example.com", PasswordHash: secretHash}).Error; !IsUniqueViolation(err) {
 		t.Fatalf("duplicate Create() = %v, want a unique violation", err)
 	}
+	if err := db.Create(&loggedNote{}).Error; !IsNotNullViolation(err) {
+		t.Fatalf("NULL insert = %v, want a NOT NULL violation", err)
+	}
 	if err := db.Create(&loggedStock{Qty: -7}).Error; err == nil {
 		t.Fatal("CHECK violation was accepted")
 	}
 	if err := db.Exec("SELECT * FROM missing_table WHERE email = ?", "c@example.com").Error; err == nil {
 		t.Fatal("query on a missing table succeeded")
+	}
+	var found []loggedUser
+	if err := db.Model(&loggedUser{}).Where("password_hash = ?", secretHash).Scan(&found).Error; err != nil || len(found) != 1 {
+		t.Fatalf("Model().Scan() = %d rows, %v", len(found), err)
+	}
+	var none []loggedUser
+	if err := db.Raw("SELECT * FROM missing_scan_table WHERE email = ?", "d@example.com").Scan(&none).Error; err == nil {
+		t.Fatal("Raw().Scan() on a missing table succeeded")
 	}
 }
 
@@ -97,28 +118,41 @@ func testLoggerOnDriver(t *testing.T, db *DB) {
 		sql, _ := e.ContextMap()["sql"].(string)
 		errText, _ := e.ContextMap()["error"].(string)
 		for _, leaked := range loggedValues {
-			if strings.Contains(sql, leaked) {
-				t.Errorf("logged SQL carries the value %q: %s", leaked, sql)
+			if strings.Contains(sql, leaked) || strings.Contains(errText, leaked) {
+				t.Errorf("logged entry carries the value %q: %s %v", leaked, e.Message, e.ContextMap())
 			}
 		}
 		if strings.Contains(sql, "$1$") {
 			t.Errorf("logged SQL has a mangled Postgres placeholder: %s", sql)
 		}
-		if strings.Contains(errText, "record not found") || strings.Contains(errText, "duplicate") || strings.Contains(errText, "Duplicate") {
-			if e.Level != zapcore.DebugLevel {
-				t.Errorf("a not-found or duplicate statement is normal traffic, got %v: %v", e.Level, e.ContextMap())
-			}
+		if errText != "" && isNormalTraffic(errText) && e.Level != zapcore.DebugLevel {
+			t.Errorf("a not-found, duplicate or NOT NULL statement is normal traffic, got %v: %v", e.Level, e.ContextMap())
 		}
 		if e.Level == zapcore.ErrorLevel {
 			failures = append(failures, sql)
 		}
 	}
-	if len(failures) != 2 {
-		t.Fatalf("error entries = %q, want the CHECK violation and the missing table", failures)
+	if len(failures) != 3 ||
+		!strings.Contains(strings.ToLower(failures[0]), "logged_stocks") ||
+		!strings.Contains(failures[1], "missing_table") ||
+		!strings.Contains(failures[2], "missing_scan_table") {
+		t.Fatalf("error entries = %q, want the CHECK violation, the missing table, and the Scan on a missing table", failures)
 	}
-	if !strings.Contains(strings.ToLower(failures[0]), "logged_stocks") || !strings.Contains(failures[1], "missing_table") {
-		t.Errorf("error entries = %q, want the CHECK violation then the missing table", failures)
+	if !strings.Contains(failures[2], "?") && !strings.Contains(failures[2], "$1") {
+		t.Errorf("the Scan statement lost its placeholder: %s", failures[2])
 	}
+}
+
+// isNormalTraffic recognises the driver texts of the statements exercise
+// expects at debug: not found, duplicate key, NOT NULL.
+func isNormalTraffic(errText string) bool {
+	lower := strings.ToLower(errText)
+	for _, s := range []string{"record not found", "duplicate", "not null", "not-null", "cannot be null"} {
+		if strings.Contains(lower, s) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestNewLoggerOnSQLite(t *testing.T) {
@@ -153,26 +187,47 @@ func TestOpenDefaultLoggerIsQuietAndNeverPrintsValues(t *testing.T) {
 	}
 }
 
-// The logger's "client error" is MapPersistError's: an error it demotes to
-// debug is exactly one the API answers with a 4xx, so a 500 is never hidden.
-func TestLoggerClassifiesErrorsAsMapPersistErrorDoes(t *testing.T) {
-	for _, err := range []error{
-		gorm.ErrDuplicatedKey,
-		gorm.ErrForeignKeyViolated,
-		gorm.ErrCheckConstraintViolated,
-		errors.New("NOT NULL constraint failed: widgets.name"),
-		errors.New(`ERROR: null value in column "name" violates not-null constraint (SQLSTATE 23502)`),
-		&ValidationError{Message: "bad"},
-		errors.New("connection refused"),
-		errors.New("CHECK constraint failed: qty"),
+// The logger demotes a failure to debug only on a structured signal, and every
+// error it demotes is one MapPersistError answers with a 4xx, so a 500 is never
+// hidden. Error text that merely mentions "unique" or "not null", from a read
+// or DDL, stays a failure.
+func TestLoggerDemotesOnlyStructuredClientErrors(t *testing.T) {
+	// A real driver error: sqlite3.Error's message text is unexported.
+	db := openSQLiteLoggedDB(t)
+	migrateLogged(t, db)
+	sqliteNotNull := db.Create(&loggedNote{}).Error
+	var liteErr sqlite3.Error
+	if !errors.As(sqliteNotNull, &liteErr) {
+		t.Fatalf("NULL insert = %#v, want a sqlite3.Error", sqliteNotNull)
+	}
+	for name, err := range map[string]error{
+		"translated duplicate": gorm.ErrDuplicatedKey,
+		"translated FK":        gorm.ErrForeignKeyViolated,
+		"validation":           &ValidationError{Message: "bad"},
+		"postgres NOT NULL":    &pgconn.PgError{Code: "23502", Message: `null value in column "name" violates not-null constraint`},
+		"mysql NOT NULL":       &mysqldriver.MySQLError{Number: 1048, Message: "Column 'name' cannot be null"},
+		"sqlite NOT NULL":      sqliteNotNull,
+		"wrapped duplicate":    fmt.Errorf("create user: %w", gorm.ErrDuplicatedKey),
 	} {
-		mapped := MapPersistError(context.Background(), err, "conflict", "internal")
-		var envelope *contract.ErrorEnvelope
-		if !errors.As(mapped, &envelope) {
-			t.Fatalf("MapPersistError(%v) = %v, want a contract error", err, mapped)
+		if !isClientWriteError(err) {
+			t.Errorf("%s: not demoted", name)
 		}
-		if client := envelope.GetStatus() < http.StatusInternalServerError; isClientWriteError(err) != client {
-			t.Errorf("%v: logger client error = %v, MapPersistError status = %d", err, isClientWriteError(err), envelope.GetStatus())
+		var envelope *contract.ErrorEnvelope
+		if !errors.As(MapPersistError(context.Background(), err, "conflict", "internal"), &envelope) || envelope.GetStatus() >= http.StatusInternalServerError {
+			t.Errorf("%s: demoted, but MapPersistError answers it with a 500", name)
+		}
+	}
+	for name, err := range map[string]error{
+		"sqlite missing table":     errors.New("no such table: unique_codes"),
+		"mysql join alias":         &mysqldriver.MySQLError{Number: 1066, Message: "Not unique table/alias: 'users'"},
+		"sqlite NOT NULL DDL":      errors.New("Cannot add a NOT NULL column with default value NULL"),
+		"postgres ON CONFLICT":     &pgconn.PgError{Code: "42P10", Message: "there is no unique or exclusion constraint matching the ON CONFLICT specification"},
+		"untranslated check":       gorm.ErrCheckConstraintViolated,
+		"untranslated unique text": errors.New("UNIQUE constraint failed: users.email"),
+		"connection":               errors.New("connection refused"),
+	} {
+		if isClientWriteError(err) {
+			t.Errorf("%s: demoted to debug, but it is a server error", name)
 		}
 	}
 }

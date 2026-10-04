@@ -53,9 +53,9 @@ A database attached with `framework.WithDatabase` logs through the app's logger
 | Statement | Level |
 | --- | --- |
 | Succeeds, or finds nothing (`gorm.ErrRecordNotFound`) | `debug` |
-| Fails with an error the API answers with a 4xx: a unique, foreign-key or NOT NULL violation, or a model `Validate` error (see `database.MapPersistError`) | `debug` |
+| Fails with an error the API answers with a 4xx, identified by the driver's error code: a unique, foreign-key or NOT NULL violation, or a model `Validate` error | `debug` |
 | Slower than `database.SlowQueryThreshold` (200ms) | `warn` |
-| Fails with any other error, which the API answers with a 500 (a CHECK violation included) | `error` |
+| Fails with any other error (a CHECK violation, a missing table, a failed migration), whatever its text says | `error` |
 
 So at the default `info` level, normal traffic logs nothing and every server
 error is reported. GORM's `Debug()` raises its session's statements to `info`.
@@ -63,7 +63,10 @@ error is reported. GORM's `Debug()` raises its session's statements to `info`.
 Each entry carries the SQL with its placeholders (`sql`), `elapsed`, `rows`, the
 calling `source` line and, for a failure, the driver's `error`. The SQL never
 carries parameter values: they can be password hashes, tokens or personal data.
-The driver's error text is logged as the driver reports it.
+That covers `Scan` too, which GORM traces through its recorder: `database.Open`
+sets GORM's process-wide `logger.RecorderParamsFilter` to drop values. The
+driver's error text is logged as the driver reports it, and some drivers quote
+the offending input there (for example a malformed UUID).
 
 `database.Open` and `database.OpenConn` install a quiet logger of their own for
 code that uses them without an app, such as a command. It writes slow and

@@ -340,9 +340,11 @@ version.
   its parameter values inlined (a duplicate registration printed the user's
   bcrypt hash and email), and reported every not-found lookup as an error.
   Statements, not-found lookups and the failures the API answers with a 4xx
-  are logged at `debug`, slow statements at `warn`, and every other failure at
-  `error`; the logged SQL keeps its placeholders and never carries parameter
-  values. `database.Open` without an app installs a quiet stderr logger with
+  (identified by the driver's error code, never by text) are logged at
+  `debug`, slow statements at `warn`, and every other failure at `error`; the
+  logged SQL keeps its placeholders and never carries parameter values,
+  `Scan` included (`database.Open` sets GORM's process-wide
+  `logger.RecorderParamsFilter`). `database.Open` without an app installs a quiet stderr logger with
   the same guarantee; a GORM logger the app sets on its database is kept. New:
   `database.NewLogger`, `database.SlowQueryThreshold` and
   `(*database.DB).ReplaceDefaultLogger`

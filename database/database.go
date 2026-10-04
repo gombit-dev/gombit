@@ -113,6 +113,7 @@ func open(driver Driver, dialector gorm.Dialector) (*DB, error) {
 	// The logger is set explicitly: GORM's default writes to stdout with
 	// parameter values inlined and reports every not-found lookup as an error
 	// (issue #439). framework.New replaces it with the app's logger.
+	dropRecorderParams()
 	installed := newDefaultLogger()
 	gormDB, err := gorm.Open(dialector, &gorm.Config{TranslateError: true, Logger: installed})
 	if err != nil {

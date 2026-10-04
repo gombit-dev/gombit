@@ -7,8 +7,12 @@ import (
 	"log"
 	"os"
 	"regexp"
+	"sync"
 	"time"
 
+	mysqldriver "github.com/go-sql-driver/mysql"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/mattn/go-sqlite3"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"gorm.io/gorm"
@@ -24,9 +28,9 @@ const SlowQueryThreshold = 200 * time.Millisecond
 // follows the app's sink, level and format (issue #439):
 //
 //   - a statement that succeeds, finds nothing (gorm.ErrRecordNotFound), or
-//     fails with a client error the API answers with a 4xx (the unique,
-//     foreign-key and NOT NULL violations and the validation errors
-//     MapPersistError classifies) is logged at debug: it is normal traffic;
+//     fails with a client error the API answers with a 4xx, identified by
+//     the driver's code (a unique, foreign-key or NOT NULL violation) or a
+//     model Validate error, is logged at debug: it is normal traffic;
 //   - a slow statement (SlowQueryThreshold) at warn;
 //   - any other failed statement at error.
 //
@@ -132,12 +136,41 @@ func (zapLogger) ParamsFilter(_ context.Context, sql string, _ ...any) (string, 
 	return sql, nil
 }
 
-// isClientWriteError reports whether err is one MapPersistError answers with a
-// 4xx: a failed Validate hook, or a unique, foreign-key or NOT NULL violation.
-// Anything else it answers with a 500, and the logger reports it as a failure.
+// isClientWriteError reports whether err is, by a structured signal, one
+// MapPersistError answers with a 4xx: a failed Validate hook, a unique or
+// foreign-key violation (translated to gorm's sentinels from the driver's
+// code by TranslateError), or a NOT NULL violation (the driver's own code).
+//
+// It deliberately never matches error text. The logger applies it to every
+// statement, reads and DDL included, and text such as "no such table:
+// unique_codes" or "Not unique table/alias" is a server error that must stay
+// visible (#439 review). It is therefore a strict subset of what
+// MapPersistError answers with a 4xx, whose text fallbacks serve databases
+// opened without TranslateError.
 func isClientWriteError(err error) bool {
 	var ve *ValidationError
-	return errors.As(err, &ve) || IsUniqueViolation(err) || IsForeignKeyViolation(err) || IsNotNullViolation(err)
+	return errors.As(err, &ve) ||
+		errors.Is(err, gorm.ErrDuplicatedKey) ||
+		errors.Is(err, gorm.ErrForeignKeyViolated) ||
+		isNotNullViolationCode(err)
+}
+
+// isNotNullViolationCode reports a NOT NULL violation by the driver's error
+// code: Postgres SQLSTATE 23502, MySQL error 1048, SQLite extended code 1299.
+func isNotNullViolationCode(err error) bool {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code == "23502"
+	}
+	var myErr *mysqldriver.MySQLError
+	if errors.As(err, &myErr) {
+		return myErr.Number == 1048
+	}
+	var liteErr sqlite3.Error
+	if errors.As(err, &liteErr) {
+		return liteErr.ExtendedCode == sqlite3.ErrConstraintNotNull
+	}
+	return false
 }
 
 // postgresPlaceholder matches what GORM's Explain leaves of a Postgres
@@ -168,6 +201,26 @@ func newDefaultLogger() gormlogger.Interface {
 func (l defaultLogger) LogMode(level gormlogger.LogLevel) gormlogger.Interface {
 	return defaultLogger{l.Interface.LogMode(level)}
 }
+
+func (l defaultLogger) Trace(ctx context.Context, begin time.Time, fc func() (string, int64), err error) {
+	l.Interface.Trace(ctx, begin, func() (string, int64) {
+		sql, rows := fc()
+		return restorePlaceholders(sql), rows
+	}, err)
+}
+
+// dropRecorderParams makes GORM's trace recorder drop parameter values too.
+// Scan (db.Raw(...).Scan, db.Model(...).Scan) does not ask the session's
+// logger for ParamsFilter: it records the statement through
+// gormlogger.Recorder, whose filter is the package-wide
+// gormlogger.RecorderParamsFilter, and hands the recorded SQL to the logger
+// already built, values inlined (#439 review). The setting is process-wide;
+// Open and OpenConn make it on first use.
+var dropRecorderParams = sync.OnceFunc(func() {
+	gormlogger.RecorderParamsFilter = func(_ context.Context, sql string, _ ...any) (string, []any) {
+		return sql, nil
+	}
+})
 
 // ParamsFilter must be on the wrapper: GORM looks for it on the logger it was
 // given, not on what that logger wraps.
