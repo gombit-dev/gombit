@@ -299,6 +299,17 @@ version.
   what the client receives. A panic that aborts the connection
   (`http.ErrAbortHandler`) before anything is sent is also counted as 500
   ([#432](https://github.com/gombit-dev/gombit/issues/432)).
+- A failed `framework.New` closes the cache and job dispatcher it had already
+  opened. It returned the error without them, and the caller never received
+  the `*App` to close them, so each failure left the in-memory cache's janitor
+  goroutine (or a Redis pool) running for the life of the process. A cache or
+  dispatcher passed in with `WithCache` / `WithJobs` is still the caller's.
+  `RunContext`, `RunWorker` and `Run`'s worker mode now run the stop hooks once
+  and close those resources on every return, including the ones before
+  serving: a listener that cannot bind, a nil context, refused worker
+  options, flags or driver, and worker mode's `-h`. An `App` runs once; it
+  cannot be run again after any of them returns
+  ([#435](https://github.com/gombit-dev/gombit/issues/435)).
 
 ## [0.6.0] — 2026-09-28
 

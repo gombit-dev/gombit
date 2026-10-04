@@ -112,12 +112,24 @@ type namedMiddleware struct {
 }
 
 // New creates an application using process configuration and the default router.
-func New(options ...Option) (*App, error) {
+func New(options ...Option) (_ *App, err error) {
 	app := &App{
 		cfg:             config.Default(),
 		shutdownTimeout: defaultShutdownTimeout,
 		jobMetrics:      jobs.NewMetrics(),
 	}
+	// A failed New never hands the caller an *App, so nothing else can release
+	// what it opened: the cache (whose in-memory driver runs a janitor
+	// goroutine, and whose Redis driver holds a pool) and the job dispatcher
+	// (issue #435). Only what New opened itself is closed; a cache or
+	// dispatcher passed in with WithCache/WithJobs belongs to the caller.
+	defer func() {
+		if err != nil {
+			if releaseErr := app.releaseOwned(); releaseErr != nil {
+				err = errors.Join(err, releaseErr)
+			}
+		}
+	}()
 
 	for _, option := range options {
 		if option == nil {
@@ -554,18 +566,20 @@ func Run(app *App) error {
 	return RunContext(ctx, app)
 }
 
-// RunContext runs app until ctx is canceled or the HTTP server fails.
+// RunContext runs app until ctx is canceled or the HTTP server fails. Every
+// return runs the stop hooks and closes what the app opened, so an App runs
+// once: it cannot be run again after RunContext returns (issue #435).
 func RunContext(ctx context.Context, app *App) error {
-	if ctx == nil {
-		return errors.New("framework: nil context")
-	}
 	if app == nil {
 		return errors.New("framework: nil app")
+	}
+	if ctx == nil {
+		return errors.Join(errors.New("framework: nil context"), app.runStopHooks())
 	}
 
 	listener, err := net.Listen("tcp", app.Config().HTTP.Addr)
 	if err != nil {
-		return fmt.Errorf("framework: listen: %w", err)
+		return errors.Join(fmt.Errorf("framework: listen: %w", err), app.runStopHooks())
 	}
 
 	// The per-handler context deadline (HTTP.RequestTimeout) is opt-in and off by
@@ -693,7 +707,13 @@ func (a *App) runStopHooks() error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	return errors.Join(a.runStopHooksWithContext(ctx), a.closeOwnedJobs(), a.closeOwnedCache())
+	return errors.Join(a.runStopHooksWithContext(ctx), a.releaseOwned())
+}
+
+// releaseOwned closes the job dispatcher and cache the app opened itself, in
+// that order (see closeOwnedJobs). Each is closed at most once.
+func (a *App) releaseOwned() error {
+	return errors.Join(a.closeOwnedJobs(), a.closeOwnedCache())
 }
 
 func (a *App) closeOwnedCache() error {
