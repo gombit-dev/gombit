@@ -309,6 +309,12 @@ version.
   value with no complete tag), so it is kept as raw, undecoded input; it is
   no safer than that check, and complete tags elsewhere are still stripped
   ([#433](https://github.com/gombit-dev/gombit/issues/433)).
+- HTML documents in an embedded frontend other than the root `index.html`
+  (`/legal.html`, a multi-page build's `/about/index.html`) are served with
+  the SPA browser security policy instead of the API one, whose
+  `default-src 'none'` blocked the page's scripts, styles and images. The
+  policy now follows the served content type, not the file name
+  ([#434](https://github.com/gombit-dev/gombit/issues/434)).
 - The benchmark report no longer publishes a snapshot from a developer host
   as if it were the canonical run. A clean tree on the canonical protocol used
   to render with no banner whatever machine ran it. Each measured unit now

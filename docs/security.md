@@ -27,7 +27,11 @@ response and gets the API policy, as does any `/docs` request when docs are
 disabled. Classification follows the route that is actually served, never a URL
 prefix.
 
-The **SPA policy** (embedded frontend `index.html` and the admin SPA) is:
+The **SPA policy** applies to every HTML document the embedded frontend and the
+admin SPA serve: the root `index.html` and SPA fallback, and any other HTML file
+in the build (`/legal.html`, a multi-page build's `/about/index.html`). It is
+chosen by the served content type (`text/html`), so the build's JavaScript,
+CSS, images and SVGs keep the API policy. It is:
 
 ```
 default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'
