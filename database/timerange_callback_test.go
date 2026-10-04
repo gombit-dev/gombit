@@ -156,9 +156,13 @@ func testTimeRangeUnsetAndInRange(t *testing.T, db *DB) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Migrator().DropTable(&rangedDefault{}) })
-	if err := db.Create(&rangedDefault{Name: "defaulted"}).Error; err != nil {
+	defaulted := rangedDefault{Name: "defaulted"}
+	if err := db.Create(&defaulted).Error; err != nil {
 		t.Errorf("a zero column with a default: %v", err)
 	}
+	// The default only fills a create; an update naming the column writes
+	// the zero instant itself.
+	wantRangeError(t, "Select(At) Updates, zero", db.Model(&defaulted).Select("At").Updates(rangedDefault{}).Error, "at")
 
 	paid := inRange
 	legacy := row
@@ -242,6 +246,21 @@ func testTimeRangeWhatGORMWrites(t *testing.T, db *DB) {
 	// On a create GORM always writes an auto timestamp, Select or not, so a
 	// caller-set one is checked even when Select leaves it out (#562 round 3).
 	wantRangeError(t, "Select-restricted Create, CreatedAt year 0", db.Select("Name", "Due", "Issued").Create(&rangedEvent{Name: "sel", Due: inRange, Issued: dateFine, CreatedAt: yearZero}).Error, "created_at")
+	// Off a create the auto timestamps are written as the struct holds them:
+	// Save selects "*" and Select names the column, so a zero CreatedAt is
+	// the zero instant written over the row's (#562 round 4).
+	wantRangeError(t, "Save zero CreatedAt", db.Save(&rangedEvent{ID: row.ID, Name: "s", Due: inRange, Issued: dateFine}).Error, "created_at")
+	wantRangeError(t, "Select(CreatedAt) Updates, zero", db.Model(&row).Select("CreatedAt").Updates(rangedEvent{}).Error, "created_at")
+	// GORM skips a struct field only when reflect calls it zero, so a zero
+	// instant in any other form is written, and refused: a non-pointer time
+	// in a Location (what pgx and time.Parse return), a non-nil pointer to
+	// the zero time, a valid NullTime holding it, an auto timestamp a caller
+	// set to it.
+	zero := time.Time{}
+	wantRangeError(t, "Updates(struct), zero in Local", db.Model(&row).Updates(rangedEvent{Due: zero.Local()}).Error, "due")
+	wantRangeError(t, "Updates(struct), pointer to zero", db.Model(&row).Updates(rangedEvent{Paid: &zero}).Error, "paid")
+	wantRangeError(t, "Updates(struct), valid zero NullTime", db.Model(&row).Updates(rangedEvent{Noted: sql.NullTime{Valid: true}}).Error, "noted")
+	wantRangeError(t, "Create CreatedAt zero in Local", db.Create(&rangedEvent{Name: "l", Due: inRange, Issued: dateFine, CreatedAt: zero.Local()}).Error, "created_at")
 	wantRangeError(t, "Create DeletedAt year 0", db.Create(&softEvent{Name: "s", DeletedAt: gorm.DeletedAt{Time: yearZero, Valid: true}}).Error, "deleted_at")
 	soft := softEvent{Name: "soft"}
 	if err := db.Create(&soft).Error; err != nil {
@@ -307,11 +326,19 @@ func TestTimeRangeChecksOnlyTheAssignmentSet(t *testing.T) {
 }
 
 // A row stored before this check with the zero instant in a non-pointer
-// column (what an unset field became on SQLite and PostgreSQL) stays editable:
-// Save and the admin data plane's Select("*").Updates write the whole row back,
-// and the stored zero is not the caller's to fix (#562 round 3).
-func TestTimeRangeKeepsRowsWithAStoredZeroEditable(t *testing.T) {
-	db := openRangedDB(t)
+// column (what an unset field became on SQLite and PostgreSQL; MySQL refused
+// it) keeps its other columns editable through writes that leave the column
+// out: Updates of a struct skips the zero field, and the admin data plane
+// omits a date column the request does not set. A write of the whole row
+// (Save, Select("*").Updates) writes the zero instant back and is refused on
+// every driver: the column needs a NULL (make the field a pointer) or a real
+// value first (#562 round 4).
+func TestTimeRangeStoredZeroRows(t *testing.T) {
+	testTimeRangeStoredZero(t, openRangedDB(t))
+}
+
+func testTimeRangeStoredZero(t *testing.T, db *DB) {
+	t.Helper()
 	row := rangedEvent{Name: "legacy", Due: inRange, Issued: dateFine}
 	if err := db.Create(&row).Error; err != nil {
 		t.Fatal(err)
@@ -323,17 +350,37 @@ func TestTimeRangeKeepsRowsWithAStoredZeroEditable(t *testing.T) {
 	if err := db.First(&loaded, row.ID).Error; err != nil || !loaded.Due.IsZero() {
 		t.Fatalf("fixture: %v, due %v", err, loaded.Due)
 	}
-	loaded.Name = "renamed"
-	if err := db.Save(&loaded).Error; err != nil {
-		t.Errorf("Save of a row storing the zero instant: %v", err)
+	// GORM's own choice decides what Updates(&loaded) writes: SQLite returns
+	// the stored zero as time.Time{}, which it skips, and pgx returns it in
+	// Local, which it writes back (and is refused). A partial struct or a
+	// column update leaves the column out on every driver.
+	if err := db.Model(&loaded).Updates(rangedEvent{Name: "renamed"}).Error; err != nil {
+		t.Errorf("Updates(struct) of a row storing the zero instant: %v", err)
 	}
-	loaded.Name = "renamed again"
-	if err := db.Select("*").Updates(&loaded).Error; err != nil {
-		t.Errorf("Select(*).Updates of a row storing the zero instant: %v", err)
+	if err := db.Model(&loaded).Update("name", "renamed again").Error; err != nil {
+		t.Errorf("Update(column) of a row storing the zero instant: %v", err)
 	}
-	// A new zero written on purpose is still refused.
+	whole := loaded
+	whole.Name = "whole"
+	if err := db.Model(&whole).Updates(&whole).Error; db.Driver() == DriverPostgres {
+		wantRangeError(t, "Updates(&row) on PostgreSQL", err, "due")
+	} else if err != nil {
+		t.Errorf("Updates(&row), zero skipped by GORM: %v", err)
+	}
+	loaded.Name = "saved"
+	wantRangeError(t, "Save of a row storing the zero instant", db.Save(&loaded).Error, "due")
+	wantRangeError(t, "Select(*).Updates of a row storing the zero instant", db.Select("*").Updates(&loaded).Error, "due")
 	wantRangeError(t, "Update(column, zero)", db.Model(&loaded).Update("due", time.Time{}).Error, "due")
 	wantRangeError(t, "Select(due) zero", db.Model(&loaded).Select("due").Updates(rangedEvent{}).Error, "due")
+	// The documented repair: give the column a real value, after which Save
+	// writes the row again.
+	if err := db.Model(&loaded).Update("due", inRange).Error; err != nil {
+		t.Fatal(err)
+	}
+	loaded.Due = inRange
+	if err := db.Save(&loaded).Error; err != nil {
+		t.Errorf("Save after the repair: %v", err)
+	}
 }
 
 type plainRow struct {

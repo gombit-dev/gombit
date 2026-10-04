@@ -91,15 +91,20 @@ func (c *timeRangeCheck) check(a assignedValue) {
 		if !a.Creating && !c.skipHooks && f.AutoUpdateTime > 0 {
 			return
 		}
-		// A zero struct value GORM does not write as given is left alone: on a
+		// A zero struct value GORM does not write is left alone. GORM's zero
+		// is reflect's (field.ValueOf), not the instant's: a zero time in a
+		// Location, a non-nil pointer to one, or a valid NullTime holding
+		// one is written, and refused below as the zero instant. On a
 		// create GORM fills a zero auto timestamp and the database a zero
-		// defaulted column, Select or not. On an update a zero is not written
-		// (Updates), or it is the row's own stored value written back whole
-		// (Save, Select("*")): refusing it would block every edit of a row
-		// stored before this check. A Select naming the column writes it.
+		// defaulted column, Select or not. On an update GORM writes a zero
+		// struct field only when Select names the column or selects "*"
+		// (Save); Updates skips it.
 		if a.Value.IsValid() && a.Value.IsZero() {
-			if f.AutoCreateTime > 0 || f.AutoUpdateTime > 0 || f.HasDefaultValue ||
-				(!a.Creating && !a.Named) {
+			if a.Creating {
+				if f.AutoCreateTime > 0 || f.AutoUpdateTime > 0 || f.HasDefaultValue {
+					return
+				}
+			} else if !a.Named && !a.AllSelected {
 				return
 			}
 		}

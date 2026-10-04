@@ -197,10 +197,25 @@ func (m *registered) fileChanges(before map[string]string, inst any) (hold, rele
 // old key released in the same transaction, which fails if another writer
 // replaced it meanwhile); an unchanged one is not written at all, so the
 // update never puts back a key it loaded over a concurrent replacement.
-func (m *registered) updateOmits(before map[string]string, inst any) []string {
+func (m *registered) updateOmits(before map[string]string, inst any, body map[string]any) []string {
 	omit := append([]string(nil), m.omitOnUpdate...)
 	for _, f := range m.fileFields() {
 		if fileKey(f.get(inst)) == before[f.Name] {
+			omit = append(omit, f.column)
+		}
+	}
+	// A date or date-time the body does not set that holds the zero instant
+	// is a value stored before the database's time range check (what an
+	// unset non-pointer field used to store). Writing it back would make
+	// every edit of the row a 422 the operator cannot fix, so it is left
+	// out; one the body sets is written, and checked (issue #443). An
+	// UpdatedAt is not: GORM stamps it on the update.
+	for i := range m.fields {
+		f := &m.fields[i]
+		if f.storedZero == nil {
+			continue
+		}
+		if _, set := body[f.Name]; !set && f.storedZero(inst) {
 			omit = append(omit, f.column)
 		}
 	}

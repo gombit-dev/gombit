@@ -367,11 +367,12 @@ version.
   custom code alike, with no regeneration, and adds no allocation to an
   ordinary write. **Behaviour change:** a zero `time.Time` a write sets (a
   non-pointer field left unset on create, a zero in a map, `Update` or a
-  named `Select`) is now a 422 on every driver; it was stored on
+  named `Select`, `Save`) is now a 422 on every driver; it was stored on
   SQLite/PostgreSQL and a 500 on MySQL. Use a pointer for an optional time.
-  Rows that already store the zero instant stay editable (`Save`, the admin):
-  a struct update writing the stored value back is not refused. A string no Go
-  time parses (`'infinity'`) is refused too
+  Rows that already store the zero instant stay editable through `Update`, a
+  partial `Updates` and the admin (an edit that does not set the column
+  leaves it out), but a `Save` of one is a 422 until the column is cleaned up
+  (see docs/database.md). A string no Go time parses (`'infinity'`) is refused too
   ([#443](https://github.com/gombit-dev/gombit/issues/443)).
 
 ## [0.6.0] — 2026-09-28

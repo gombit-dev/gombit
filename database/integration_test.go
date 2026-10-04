@@ -72,6 +72,8 @@ func TestTimeRangeWritePathsOnPostgres(t *testing.T) {
 	testTimeRangeUnsetAndInRange(t, db)
 	migrateRanged(t, db)
 	testTimeRangeWhatGORMWrites(t, db)
+	migrateRanged(t, db)
+	testTimeRangeStoredZero(t, db)
 }
 
 func TestTimeRangeWritePathsOnMySQL(t *testing.T) {

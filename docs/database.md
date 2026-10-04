@@ -110,17 +110,27 @@ What a statement writes is what GORM writes:
   `CreatedAt` / `UpdatedAt` / `DeletedAt` included (a hook, a seeder, a map
   naming the column, `UpdateColumns`). A struct update that runs hooks writes
   now over `UpdatedAt`, so that one is not.
-- The zero instant `0001-01-01T00:00:00Z` is refused where a write sets it:
-  a zero non-pointer field on create, a zero value in a map or `Update`, and a
-  zero struct field in a column `Select` names. It is left alone where GORM or
-  the database fills it (a zero auto timestamp, a zero column with a
-  `default`, on create, `Select` or not) and in a struct update that does not
-  name the column: `Updates` skips it, and `Save` / `Select("*").Updates` write
-  the row's stored value back, so a row that stored the zero instant before
-  this check (an unset field on SQLite or PostgreSQL) stays editable,
-  including in the admin. Use a pointer (or `sql.NullTime`) for an optional
-  time; to clean up such rows, make the field a pointer and
-  `UPDATE … SET col = NULL WHERE col = '0001-01-01 00:00:00'`.
+- The zero instant `0001-01-01T00:00:00Z` is refused wherever a statement
+  writes it, on every driver, whatever `Location` the value carries: a zero
+  non-pointer field on create, a zero value in a map or `Update`, a non-nil
+  pointer to it or a valid `sql.NullTime` holding it, and a zero struct field
+  an update writes, which is one in a column `Select` names or under
+  `Select("*")` (`Save`). It is left alone where GORM does not write it: a
+  zero auto timestamp or a zero column with a `default` on create (GORM or the
+  database fills it, `Select` or not), and a zero struct field `Updates`
+  skips. GORM's zero is the Go zero value, `time.Time{}`: a zero time in a
+  `Location` (as `time.Parse` or pgx return it) is written, and refused. Use a
+  pointer (or `sql.NullTime`) for an optional time.
+- A row stored before this check with the zero instant in a non-pointer
+  column (an unset field on SQLite or PostgreSQL; MySQL refused it) can still
+  have its other columns changed by `Update`, a partial `Updates`, and the
+  admin, which leaves such a column out of an edit that does not set it. A
+  `Save` of the row writes the zero instant back and is a 422; so is
+  `Updates(&row)` on PostgreSQL, which reads the value back in `Local` (GORM
+  then writes it), while on SQLite GORM skips it. To clean the rows up, make
+  the field a pointer and
+  `UPDATE … SET col = NULL WHERE col = '0001-01-01 00:00:00'`, or give the
+  column a real value.
 - A string written to such a column is read as the drivers read it (RFC 3339,
   ISO without a zone, `YYYY-MM-DD hh:mm:ss` with an offset such as `+00`,
   `+0000`, `-03:00` or a zone name, `YYYY-MM-DD`); one that does not parse is
