@@ -268,3 +268,55 @@ func TestTimeRangeChecksOnlyTheAssignmentSet(t *testing.T) {
 		t.Errorf("an in-range string: %v", err)
 	}
 }
+
+type plainRow struct {
+	ID   uint `gorm:"primaryKey"`
+	Name string
+	Qty  int
+}
+
+// A model with no timestamp or date column costs the check nothing: its
+// targets are cached per schema and the walk returns before reading anything.
+func TestTimeRangeCostsNothingWithoutRangedColumns(t *testing.T) {
+	db := openRangedDB(t)
+	if err := db.AutoMigrate(&plainRow{}); err != nil {
+		t.Fatal(err)
+	}
+	row := plainRow{Name: "x", Qty: 1}
+	tx := db.Model(&row)
+	if err := tx.Statement.Parse(&row); err != nil {
+		t.Fatal(err)
+	}
+	tx.Statement.Dest = &row
+	runTimeRangeCheck(tx, true) // warm the per-schema cache
+	if allocs := testing.AllocsPerRun(100, func() { runTimeRangeCheck(tx, true) }); allocs != 0 {
+		t.Fatalf("runTimeRangeCheck on a model without ranged columns allocates %.0f times", allocs)
+	}
+}
+
+type stampString string
+
+// An upsert's DO UPDATE that refers to the inserted row (UpdateAll,
+// AssignmentColumns: excluded.x) carries no value of its own; the row is
+// checked as the Dest. A named string type is read as its string.
+func TestTimeRangeUpsertReferencesAndNamedStrings(t *testing.T) {
+	db := openRangedDB(t)
+	row := rangedEvent{Name: "base", Due: inRange, Issued: dateFine}
+	if err := db.Create(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	upsert := rangedEvent{ID: row.ID, Name: "upserted", Due: inRange, Issued: dateFine, CreatedAt: row.CreatedAt}
+	if err := db.Clauses(clause.OnConflict{UpdateAll: true}).Create(&upsert).Error; err != nil {
+		t.Fatalf("UpdateAll upsert of an in-range row: %v", err)
+	}
+	if err := db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "id"}},
+		DoUpdates: clause.AssignmentColumns([]string{"due", "name"}),
+	}).Create(&rangedEvent{ID: row.ID, Name: "again", Due: inRange, Issued: dateFine}).Error; err != nil {
+		t.Fatalf("AssignmentColumns upsert of an in-range row: %v", err)
+	}
+	wantRangeError(t, "named string", db.Model(&row).Update("due", stampString("0000-01-01T00:00:00Z")).Error, "due")
+	if err := db.Model(&row).Update("due", stampString("2026-10-04T00:00:00Z")).Error; err != nil {
+		t.Errorf("an in-range named string: %v", err)
+	}
+}

@@ -4,7 +4,6 @@ import (
 	"context"
 	"reflect"
 	"strings"
-	"sync"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -29,26 +28,27 @@ type assignedValue struct {
 	FromStruct bool
 }
 
-// assignedDestSchemas caches the parsed schema of an Updates(struct) Dest
-// whose type is not the model's, as GORM's own statement does.
-var assignedDestSchemas sync.Map
-
-// forEachAssigned calls fn for every value the statement in db writes, the
-// assignment set the write-path callbacks (gombit:timerange) check. It is the
-// one definition of "what this statement writes":
+// forEachAssigned calls fn for every value the statement in db writes to one
+// of targets, the columns a write-path callback (gombit:timerange) checks. It
+// is the one definition of "what this statement writes":
 //
 //   - the Dest: a create's rows (struct, batch) or map, an update's map
 //     (Updates(map), Update(column, value)) or struct (Save, Updates(struct),
 //     UpdateColumns), any struct type, matched to the model's columns by name;
 //   - on a create, the literal assignments of an upsert's ON CONFLICT DO
-//     UPDATE (Clauses(clause.OnConflict{DoUpdates: ...}));
+//     UPDATE (a column reference such as excluded.x, or an expression, is no
+//     value: the inserted row it refers to is checked as the Dest);
 //   - filtered by Select/Omit as GORM filters them.
 //
 // An update's model is walked only when it is the Dest (Save, Updates(&row));
 // otherwise it holds the row's old values, which the statement does not write.
-func forEachAssigned(db *gorm.DB, creating bool, fn func(assignedValue)) {
+//
+// targets are the model's columns the caller checks, keyed by DBName and
+// cached per schema by the caller; a model with none costs nothing here.
+// Only target fields are read.
+func forEachAssigned(db *gorm.DB, creating bool, targets map[string]*schema.Field, fn func(assignedValue)) {
 	stmt := db.Statement
-	if stmt == nil || stmt.Schema == nil {
+	if stmt == nil || stmt.Schema == nil || len(targets) == 0 {
 		return
 	}
 	ctx := stmt.Context
@@ -62,8 +62,17 @@ func forEachAssigned(db *gorm.DB, creating bool, fn func(assignedValue)) {
 		}
 		return !restricted, false
 	}
+	target := func(name string) *schema.Field {
+		if f, ok := targets[name]; ok {
+			return f
+		}
+		if f := stmt.Schema.LookUpField(name); f != nil {
+			return targets[f.DBName]
+		}
+		return nil
+	}
 	emit := func(f *schema.Field, v reflect.Value, explicit, fromStruct bool) {
-		if f == nil || f.DBName == "" {
+		if f == nil {
 			return
 		}
 		ok, chosen := written(f.DBName)
@@ -79,17 +88,21 @@ func forEachAssigned(db *gorm.DB, creating bool, fn func(assignedValue)) {
 			copied.Set(rv)
 			rv = copied
 		}
-		src := stmt.Schema
-		if rv.Type() != stmt.Schema.ModelType {
-			parsed, err := schema.Parse(rv.Addr().Interface(), &assignedDestSchemas, db.NamingStrategy)
-			if err != nil {
-				return
+		if rv.Type() == stmt.Schema.ModelType {
+			for _, f := range targets {
+				emit(f, f.ReflectValueOf(ctx, rv), false, true)
 			}
-			src = parsed
+			return
 		}
-		for _, f := range src.Fields {
-			if f.DBName != "" {
-				emit(stmt.Schema.LookUpField(f.DBName), f.ReflectValueOf(ctx, rv), false, true)
+		// Another struct type: parsed through the DB's own schema cache and
+		// naming strategy, and matched to the targets by column name.
+		parse := &gorm.Statement{DB: db}
+		if err := parse.Parse(rv.Addr().Interface()); err != nil || parse.Schema == nil {
+			return
+		}
+		for dbName, f := range targets {
+			if src := parse.Schema.LookUpField(dbName); src != nil && src.DBName == dbName {
+				emit(f, src.ReflectValueOf(ctx, rv), false, true)
 			}
 		}
 	}
@@ -105,7 +118,7 @@ func forEachAssigned(db *gorm.DB, creating bool, fn func(assignedValue)) {
 		case reflect.Map:
 			if m, ok := v.Interface().(map[string]any); ok {
 				for key, value := range m {
-					emit(stmt.Schema.LookUpField(key), reflect.ValueOf(value), true, false)
+					emit(target(key), reflect.ValueOf(value), true, false)
 				}
 			}
 		case reflect.Slice, reflect.Array:
@@ -122,7 +135,11 @@ func forEachAssigned(db *gorm.DB, creating bool, fn func(assignedValue)) {
 		if c, ok := stmt.Clauses["ON CONFLICT"]; ok {
 			if onConflict, ok := c.Expression.(clause.OnConflict); ok {
 				for _, a := range onConflict.DoUpdates {
-					if f := stmt.Schema.LookUpField(a.Column.Name); f != nil && f.DBName != "" {
+					switch a.Value.(type) {
+					case clause.Column, clause.Expression:
+						continue
+					}
+					if f := target(a.Column.Name); f != nil {
 						fn(assignedValue{Field: f, Value: reflect.ValueOf(a.Value), Explicit: true})
 					}
 				}

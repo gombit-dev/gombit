@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gombit-dev/gombit/types"
@@ -49,13 +50,14 @@ func runTimeRangeCheck(db *gorm.DB, creating bool) {
 	if db.Error != nil || db.Statement == nil || db.Statement.Schema == nil {
 		return
 	}
+	targets := rangedTimeFields(db.Statement.Schema)
+	if len(targets) == 0 {
+		return
+	}
 	skipHooks := db.Statement.SkipHooks
 	fields := map[string][]string{}
-	forEachAssigned(db, creating, func(a assignedValue) {
+	forEachAssigned(db, creating, targets, func(a assignedValue) {
 		f := a.Field
-		if !isRangedTimeField(f) {
-			return
-		}
 		// GORM writes now over an auto-update timestamp on a struct update
 		// that runs hooks, whatever the struct holds.
 		if !a.Creating && a.FromStruct && !skipHooks && f.AutoUpdateTime > 0 {
@@ -92,6 +94,24 @@ func zeroIsWritten(a assignedValue) bool {
 	}
 	f := a.Field
 	return f.AutoCreateTime == 0 && f.AutoUpdateTime == 0 && !f.HasDefaultValue
+}
+
+// rangedFieldsBySchema caches each schema's ranged columns, so a model with
+// none skips the check without reflecting over anything.
+var rangedFieldsBySchema sync.Map // *schema.Schema -> map[string]*schema.Field
+
+func rangedTimeFields(sch *schema.Schema) map[string]*schema.Field {
+	if cached, ok := rangedFieldsBySchema.Load(sch); ok {
+		return cached.(map[string]*schema.Field)
+	}
+	out := map[string]*schema.Field{}
+	for _, f := range sch.Fields {
+		if isRangedTimeField(f) {
+			out[f.DBName] = f
+		}
+	}
+	rangedFieldsBySchema.Store(sch, out)
+	return out
 }
 
 // isRangedTimeField reports whether f is a stored time.Time, sql.NullTime or
@@ -153,7 +173,18 @@ func timeRangeProblem(column *schema.Field, v reflect.Value, zeroWritten bool) s
 		}
 		t = parsed
 	default:
-		return ""
+		// A named string type (type Stamp string) is written as its string.
+		if v.Kind() != reflect.String {
+			return ""
+		}
+		parsed, ok := parseAssignedTime(v.String())
+		if !ok {
+			if dateColumn {
+				return "must be a date (YYYY-MM-DD)"
+			}
+			return "must be an RFC 3339 timestamp"
+		}
+		t = parsed
 	}
 	if t.IsZero() && !zeroWritten {
 		return ""
