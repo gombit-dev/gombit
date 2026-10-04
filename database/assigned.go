@@ -21,9 +21,11 @@ type assignedValue struct {
 	// element, an Updates(struct) Dest); false for a map value or an upsert
 	// literal, which the statement names explicitly and writes as given.
 	FromStruct bool
-	// Named is true when Select names the column itself, not through "*"
-	// (Save and the admin data plane select "*" to write the whole row).
+	// Named is true when Select names the column itself, not through "*".
 	Named bool
+	// AllSelected is true under Select("*") (what Save sends): GORM then
+	// writes every column of a struct, zero values included.
+	AllSelected bool
 }
 
 // forEachAssigned calls fn for every value the statement in db writes to one
@@ -87,6 +89,16 @@ func (w *assignWalker) written(f *schema.Field) bool {
 	return !w.restricted || (w.creating && (f.AutoCreateTime > 0 || f.AutoUpdateTime > 0))
 }
 
+// allSelected reports whether the statement selects "*".
+func (w *assignWalker) allSelected() bool {
+	for _, s := range w.stmt.Selects {
+		if s == "*" {
+			return true
+		}
+	}
+	return false
+}
+
 // named reports whether Select names f's column itself.
 func (w *assignWalker) named(f *schema.Field) bool {
 	for _, s := range w.stmt.Selects {
@@ -104,7 +116,7 @@ func (w *assignWalker) emit(f *schema.Field, v reflect.Value, fromStruct bool, f
 	if !w.written(f) {
 		return
 	}
-	fn(assignedValue{Field: f, Value: v, Creating: w.creating, FromStruct: fromStruct, Named: fromStruct && w.named(f)})
+	fn(assignedValue{Field: f, Value: v, Creating: w.creating, FromStruct: fromStruct, Named: fromStruct && w.named(f), AllSelected: fromStruct && w.allSelected()})
 }
 
 func (w *assignWalker) target(name string) *schema.Field {
