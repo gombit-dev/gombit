@@ -81,6 +81,22 @@ if err := db.First(&row, id).Error; err != nil {
 shared detectors behind those helpers; auth registration uses
 `IsUniqueViolation` too. See [`docs/contract.md`](contract.md#application-errors-41-categories).
 
+### Timestamp and date range
+
+`database.Open` and `OpenConn` refuse, before the SQL runs on every create and
+update (`Create`, `Save`, `Updates` with a map or a struct, `Update` of one
+column), a `time.Time`, `sql.NullTime` or `types.Date` value outside what all
+three drivers can store and return: `1000-01-02T00:00:00Z`..`9999-12-30T23:59:59Z`
+for a timestamp and `1000-01-01`..`9999-12-31` for a date
+(`types.TimeBounds`, `types.DateBounds`). MySQL stores no earlier year, and a
+timestamp outside years 0..9999 in the time zone it is read into cannot be
+encoded as JSON; PostgreSQL would store year 0 as 1 BC and then fail every
+read of the row. The timestamp bounds keep a day's margin for that time-zone
+conversion. The failure is a `*database.ValidationError` naming the field, so
+`MapPersistError` answers it with a 422 on the generated API, the admin data
+plane, and your own handlers alike. Zero values (unset), NULLs, and GORM's
+auto-managed `CreatedAt` / `UpdatedAt` are left alone.
+
 ## Deleting rows
 
 Gombit deletes rows physically: its deletion semantics are the database's

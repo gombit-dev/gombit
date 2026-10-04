@@ -351,18 +351,18 @@ version.
   options, flags or driver, and worker mode's `-h`. An `App` runs once; it
   cannot be run again after any of them returns
   ([#435](https://github.com/gombit-dev/gombit/issues/435)).
-- A generated create body rejects a `time`/`datetime` (or valid
-  `sql.NullTime`) or `date` field outside years 1000..9999 with a 422 on that
-  field, the same on every driver. Any RFC 3339 timestamp was accepted:
-  Postgres stored `0000-01-01T00:00:00Z` as 1 BC, after which the row's
-  endpoint and every list page holding it could no longer be read, and MySQL
-  refused it with a 500. The bounds are `1000-01-02T00:00:00Z`..`9999-12-30T23:59:59Z`
+- Every database write refuses a timestamp or date no supported driver can
+  store and return, with a 422 on that field. Any RFC 3339 timestamp was
+  accepted: Postgres stored `0000-01-01T00:00:00Z` as 1 BC, after which the
+  row's endpoint and every list page holding it could no longer be read, and
+  MySQL refused it with a 500. `database.Open` now registers a
+  `gombit:timerange` callback, next to the `Validate` hook, that checks every
+  `time.Time`, `sql.NullTime` and `types.Date` value on `Create`, `Save`,
+  `Updates` and `Update` against `1000-01-02T00:00:00Z`..`9999-12-30T23:59:59Z`
   (a day's margin for the time zone a value is read into) and
-  `1000-01-01`..`9999-12-31` (`types.TimeBounds`, `types.DateBounds`), checked
-  by `types.TimeWithin` / `types.DateWithin` in the DTO's `Resolve`. Run
-  `gombit generate` to pick this up in an existing app (`gombit generate
-  --check` reports the resources it changes). The admin data plane does not
-  apply these bounds yet
+  `1000-01-01`..`9999-12-31` (`types.TimeBounds`, `types.DateBounds`,
+  `types.TimeWithin`, `types.DateWithin`). It covers the generated API, the
+  admin data plane and custom code alike, with no regeneration
   ([#443](https://github.com/gombit-dev/gombit/issues/443)).
 
 ## [0.6.0] — 2026-09-28

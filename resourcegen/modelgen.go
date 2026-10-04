@@ -46,9 +46,6 @@ type modelResource struct {
 	TypeName string       // the model's exported Go type, from sch.ModelType.Name()
 	Fields   []modelField // effective persisted columns that appear in a DTO, in schema order
 	imports  []importSpec // deterministic, explicit-aliased imports the DTO field types need
-	// typesAlias is the import alias of gombit/types when a request field is
-	// checked by a types helper (bodyCheck), else "".
-	typesAlias string
 }
 
 // modelField is one effective persisted column, projected for code generation.
@@ -95,12 +92,6 @@ type modelField struct {
 	// File is set for a storage-backed column (types.File, types.Image):
 	// its upload policy, parsed from the model's storage tag.
 	File *storageField
-	// Range is "time" for a time.Time column, "nulltime" for sql.NullTime and
-	// "date" for a types.Date one (pointer or not): its request value is
-	// bounded to what every supported database can store and return
-	// (bodyCheck). Decided from the reflect type, not the rendered GoType,
-	// whose alias may be renamed on a collision.
-	Range string
 }
 
 // storageField is a storage-backed column's generation facts.
@@ -211,14 +202,6 @@ func buildModelResource(model any, pkg string) (modelResource, error) {
 			Pattern:     f.Tag.Get("pattern"),
 			Constraints: constraints,
 		}
-		switch base := f.FieldType; {
-		case base == timeType || base == reflect.PointerTo(timeType):
-			mf.Range = "time"
-		case base == nullTimeType || base == reflect.PointerTo(nullTimeType):
-			mf.Range = "nulltime"
-		case base == dateType || base == reflect.PointerTo(dateType):
-			mf.Range = "date"
-		}
 		if k := field.KindFromGo(f.FieldType, string(f.DataType)); k == field.File || k == field.Image {
 			p, err := filefield.Policy(f.Tag.Get("storage"), k, pkg+"/"+r.Column+"/")
 			if err != nil {
@@ -235,21 +218,9 @@ func buildModelResource(model any, pkg string) (modelResource, error) {
 		res.Fields = append(res.Fields, mf)
 	}
 
-	for _, f := range res.requestFields() {
-		if f.needsBodyCheck() {
-			res.typesAlias = tr.aliasFor(typesImportPath)
-			break
-		}
-	}
 	res.imports = tr.importSpecs()
 	return res, nil
 }
-
-var (
-	timeType     = reflect.TypeOf(time.Time{})
-	nullTimeType = reflect.TypeOf(sql.NullTime{})
-	dateType     = reflect.TypeOf(types.Date{})
-)
 
 // sqlNullKinds maps the database/sql nullable wrappers to the scalar kind they
 // carry, so a nullable column is classified by its underlying type — not by the
@@ -746,7 +717,7 @@ func renderModelDTOs(r modelResource) string {
 	body := r.createBodyType()
 	typ := r.TypeName
 	imports := r.imports
-	if r.hasBodyChecks() {
+	if r.hasDecimalBounds() {
 		imports = append(imports, importSpec{Alias: "huma", Path: "github.com/danielgtaylor/huma/v2"})
 	}
 	if r.hasFiles() {
@@ -810,84 +781,49 @@ func renderModelDTOs(r modelResource) string {
 		b.WriteString(f.createAssign())
 	}
 	b.WriteString("\treturn row\n}\n")
-	if src := r.bodyResolve(body); src != "" {
+	if src := r.decimalResolve(body); src != "" {
 		b.WriteString("\n" + src)
 	}
 
 	return b.String()
 }
 
-const typesImportPath = "github.com/gombit-dev/gombit/types"
-
-// needsBodyCheck reports whether f's request value is validated beyond what
-// its schema can say:
-//
-//   - a decimal with bounds: the string schema cannot honor minimum/maximum,
-//     so the magnitudes are compared;
-//   - a timestamp or a date: the date-time/date format accepts any year, but
-//     only years 1000..9999 can be stored on MySQL and read back and encoded
-//     everywhere (issue #443).
-func (f modelField) needsBodyCheck() bool {
-	return f.Range != "" || (f.isDecimal() && (f.Constraints.Min != "" || f.Constraints.Max != ""))
-}
-
-// bodyCheck is the call that runs f's check, with %s standing for the value
-// and alias the import alias of gombit/types.
-func (f modelField) bodyCheck(alias string) string {
-	switch f.Range {
-	case "time", "nulltime":
-		return alias + ".TimeWithin(%s)"
-	case "date":
-		return alias + ".DateWithin(%s)"
-	default:
-		return alias + ".DecimalWithin(%s, " + strconv.Quote(f.Constraints.Min) + ", " + strconv.Quote(f.Constraints.Max) + ")"
+func (r modelResource) hasDecimalBounds() bool {
+	for _, f := range r.requestFields() {
+		if f.isDecimal() && (f.Constraints.Min != "" || f.Constraints.Max != "") {
+			return true
+		}
 	}
+	return false
 }
 
-func (r modelResource) hasBodyChecks() bool { return r.typesAlias != "" }
-
-// bodyResolve emits a Huma resolver running each request field's bodyCheck, so
-// an out-of-range value is a 422 naming the field rather than a database
-// error or a row that can no longer be read.
-func (r modelResource) bodyResolve(body string) string {
-	if !r.hasBodyChecks() {
+// decimalResolve emits a Huma resolver that compares decimal magnitudes. The
+// string schema cannot honor minimum/maximum, so this is the check that rejects
+// an out-of-range decimal body.
+func (r modelResource) decimalResolve(body string) string {
+	if !r.hasDecimalBounds() {
 		return ""
 	}
 	var b strings.Builder
 	b.WriteString("func (b *" + body + ") Resolve(_ huma.Context) []error {\n")
 	b.WriteString("\tvar errs []error\n")
 	for _, f := range r.requestFields() {
-		if !f.needsBodyCheck() {
+		if !f.isDecimal() || (f.Constraints.Min == "" && f.Constraints.Max == "") {
 			continue
 		}
-		check := f.bodyCheck(r.typesAlias)
 		src := "b." + f.GoName
-		detail := "errs = append(errs, &huma.ErrorDetail{Message: err.Error(), Location: \"body." + f.jsonName() + "\", Value: " + src + "})"
-		if f.Range == "nulltime" {
-			// Only a Valid sql.NullTime carries a time; a pointer to one is
-			// checked when present.
-			value := src
-			if strings.HasPrefix(f.requestGoType(), "*") {
-				b.WriteString("\tif " + src + " != nil && " + src + ".Valid {\n")
-			} else {
-				b.WriteString("\tif " + src + ".Valid {\n")
-			}
-			b.WriteString("\t\tif err := " + fmt.Sprintf(check, value+".Time") + "; err != nil {\n")
-			b.WriteString("\t\t\t" + detail + "\n")
-			b.WriteString("\t\t}\n")
-			b.WriteString("\t}\n")
-			continue
-		}
+		value := src
 		if strings.HasPrefix(f.requestGoType(), "*") {
 			b.WriteString("\tif " + src + " != nil {\n")
-			b.WriteString("\t\tif err := " + fmt.Sprintf(check, "*"+src) + "; err != nil {\n")
-			b.WriteString("\t\t\t" + detail + "\n")
+			value = "*" + src
+			b.WriteString("\t\tif err := types.DecimalWithin(" + value + ", " + strconv.Quote(f.Constraints.Min) + ", " + strconv.Quote(f.Constraints.Max) + "); err != nil {\n")
+			b.WriteString("\t\t\terrs = append(errs, &huma.ErrorDetail{Message: err.Error(), Location: \"body." + f.jsonName() + "\", Value: " + src + "})\n")
 			b.WriteString("\t\t}\n")
 			b.WriteString("\t}\n")
 			continue
 		}
-		b.WriteString("\tif err := " + fmt.Sprintf(check, src) + "; err != nil {\n")
-		b.WriteString("\t\t" + detail + "\n")
+		b.WriteString("\tif err := types.DecimalWithin(" + value + ", " + strconv.Quote(f.Constraints.Min) + ", " + strconv.Quote(f.Constraints.Max) + "); err != nil {\n")
+		b.WriteString("\t\terrs = append(errs, &huma.ErrorDetail{Message: err.Error(), Location: \"body." + f.jsonName() + "\", Value: " + src + "})\n")
 		b.WriteString("\t}\n")
 	}
 	b.WriteString("\treturn errs\n}\n")

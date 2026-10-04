@@ -400,7 +400,7 @@ Modifiers are `required`, `nullable` (the opposite of `required`), `unique`,
 | --- | --- | --- |
 | `decimal` | `types.Decimal` (wraps `shopspring/decimal`) | `decimal(19,4)`; JSON string, exact — no float rounding |
 | `decimal(p,s)` | `types.Decimal` | `decimal(p,s)`, e.g. `decimal(10,2)` |
-| `time` | `time.Time` | RFC3339 date-time in JSON, `1000-01-02T00:00:00Z`..`9999-12-30T23:59:59Z` on create (see [fields.md](fields.md)) |
+| `time` | `time.Time` | RFC3339 date-time in JSON, `1000-01-02T00:00:00Z`..`9999-12-30T23:59:59Z` on every write (see [database.md](database.md#timestamp-and-date-range)) |
 | `time_of_day` | `types.TimeOfDay` | `char(8)` clock. `HH:MM`, `HH:MM:SS`, and `15:04:05+07:00` are one pattern, stored as `HH:MM:SS`. Optional is a pointer; a blank submits null |
 | `duration` | `types.Duration` | bigint nanoseconds; JSON is a Go duration (`1h30m0s`). Optional is a pointer |
 | `enum(draft=Draft)` | `string` | stored value `draft`, display label `Draft`. The API enum is the stored value |

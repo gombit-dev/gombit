@@ -115,6 +115,11 @@ func open(driver Driver, dialector gorm.Dialector) (*DB, error) {
 	if err := registerValidationCallback(gormDB); err != nil {
 		return nil, err
 	}
+	// Refuse a timestamp or date no supported driver can store and return
+	// (issue #443), on every write path.
+	if err := registerTimeRangeCallback(gormDB); err != nil {
+		return nil, err
+	}
 
 	return &DB{
 		DB:           gormDB,

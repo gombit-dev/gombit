@@ -66,4 +66,8 @@ func TestDateWithin(t *testing.T) {
 			t.Errorf("DateWithin(%s) = %v, want ok=%v", tc.d, err, tc.ok)
 		}
 	}
+	// Past the upper bound: JSON cannot carry a 5-digit year, but Go callers can.
+	if err := DateWithin(NewDate(time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC))); err == nil {
+		t.Error("DateWithin(10000-01-01) = nil, want an error")
+	}
 }

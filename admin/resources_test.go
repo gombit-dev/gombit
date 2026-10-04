@@ -522,6 +522,56 @@ func TestResourcePatchClearsNullablePointerAndJSON(t *testing.T) {
 	}
 }
 
+// The admin data plane refuses a timestamp no supported database can store
+// and return (issue #443) on create and update, through the same database
+// callback as every other write: a 422 on the field, and nothing stored. On
+// Postgres year 0 used to be kept as 1 BC, breaking every later read of the row.
+func TestResourceWritesRefuseOutOfRangeTimestamps(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	type Deadline struct {
+		ID    uint       `gorm:"primaryKey" json:"id"`
+		Title string     `json:"title"`
+		Due   *time.Time `json:"due"`
+	}
+	app := newCookieApp(t)
+	if err := app.DB().AutoMigrate(&Deadline{}); err != nil {
+		t.Fatalf("AutoMigrate: %v", err)
+	}
+	if err := admin.Register(app, Deadline{}, admin.Options{
+		Slug: "deadlines",
+		Fields: []admin.Field{
+			{Name: "id", Type: admin.TypeInteger, ReadOnly: true},
+			{Name: "title", Type: admin.TypeString, Required: true},
+			{Name: "due", Type: admin.TypeDateTime},
+		},
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	jar := loginSuperuser(t, app)
+
+	created := doRequest(app, jar, http.MethodPost, "/api/v1/admin/resources/deadlines", `{"title":"P-6","due":"0000-01-01T00:00:00Z"}`)
+	assertError(t, created, http.StatusUnprocessableEntity, contract.CodeValidationError)
+	if env := decodeError(t, created); len(env.Fields["due"]) == 0 {
+		t.Fatalf("create: fields.due missing; %#v", env.Fields)
+	}
+
+	due := time.Date(2026, 10, 4, 0, 0, 0, 0, time.UTC)
+	row := Deadline{Title: "ok", Due: &due}
+	if err := app.DB().Create(&row).Error; err != nil {
+		t.Fatalf("create fixture: %v", err)
+	}
+	patched := doRequest(app, jar, http.MethodPatch, fmt.Sprintf("/api/v1/admin/resources/deadlines/%d", row.ID), `{"due":"0000-01-01T00:00:00Z"}`)
+	assertError(t, patched, http.StatusUnprocessableEntity, contract.CodeValidationError)
+
+	var rows []Deadline
+	if err := app.DB().Find(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Due == nil || !rows[0].Due.Equal(due) {
+		t.Fatalf("a refused admin write changed the table: %+v", rows)
+	}
+}
+
 func TestResourceJSONAndUUIDWrites(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	type Token struct {
