@@ -120,6 +120,10 @@ func (h *Handler) create(ctx context.Context, input *createDocumentInput) (*crea
 	}); err != nil {
 		return nil, filefield.MapCreateError(ctx, err, "resource already exists", "create document")
 	}
+	// Respond with the stored row, as get would return it.
+	if err := h.DB.WithContext(ctx).First(&row, row.ID).Error; err != nil {
+		return nil, database.MapLoadError(ctx, err, "document not found", "reload created document")
+	}
 	item := toDocumentData(row)
 	if err := h.resolveFiles(ctx, row, &item); err != nil {
 		return nil, err

@@ -175,6 +175,55 @@ func TestConformanceSuite(t *testing.T) {
 		}
 	})
 
+	// #440: a value that fits decimal(19,4) round-trips exactly on PostgreSQL
+	// and MySQL. SQLite has no fixed-point type, so it refuses one with more
+	// than database.SQLiteDecimalDigits significant digits instead of storing
+	// it changed. Every driver refuses one over the column's scale rather than
+	// rounding it.
+	t.Run("decimal_precision", func(t *testing.T) {
+		sqlite := db.Driver() == database.DriverSQLite
+		for i, c := range []struct {
+			value        string
+			refusedLite  bool
+			refusedOther bool
+		}{
+			{"99999999999.9999", false, false},
+			{"99999999999999.9999", true, false},
+			{"123456789012345.1234", true, false},
+			{"1.00005", true, true},
+		} {
+			want := decimal.RequireFromString(c.value)
+			item := models.Item{
+				Code:     "dec-precision-" + string(rune('a'+i)),
+				Name:     "decimal precision",
+				Price:    want,
+				Discount: types.Decimal{Decimal: want},
+			}
+			err := db.Create(&item).Error
+			refused := c.refusedOther
+			if sqlite {
+				refused = c.refusedLite
+			}
+			if refused {
+				var ve *database.ValidationError
+				if !errors.As(err, &ve) {
+					t.Fatalf("Create %s on %s: error = %v, want a *database.ValidationError", c.value, db.Driver(), err)
+				}
+				continue
+			}
+			if err != nil {
+				t.Fatalf("Create %s on %s: %v", c.value, db.Driver(), err)
+			}
+			var loaded models.Item
+			if err := db.First(&loaded, item.ID).Error; err != nil {
+				t.Fatalf("First: %v", err)
+			}
+			if !loaded.Price.Equal(want) || !loaded.Discount.Equal(want) {
+				t.Fatalf("%s on %s stored as %s / %s, want it exactly", c.value, db.Driver(), loaded.Price, loaded.Discount)
+			}
+		}
+	})
+
 	t.Run("crud", func(t *testing.T) {
 		item := models.Item{
 			Code:  "crud-1",

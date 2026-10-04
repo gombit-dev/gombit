@@ -98,6 +98,10 @@ func (h *Handler) create(ctx context.Context, input *createTaskInput) (*createTa
 	if err := h.DB.WithContext(ctx).Create(&row).Error; err != nil {
 		return nil, database.MapPersistError(ctx, err, "resource already exists", "create task")
 	}
+	// Respond with the stored row, as get would return it.
+	if err := h.DB.WithContext(ctx).First(&row, row.ID).Error; err != nil {
+		return nil, database.MapLoadError(ctx, err, "task not found", "reload created task")
+	}
 	return &createTaskOutput{Body: contract.Data[taskData]{Data: toTaskData(row)}}, nil
 }
 

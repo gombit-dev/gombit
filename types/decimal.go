@@ -21,6 +21,11 @@ import (
 // an opaque object. Use the gorm tag `type:decimal(p,s)` on the model field to
 // pin precision/scale for the migration (gombit make resource emits
 // decimal(19,4) by default).
+//
+// A database opened with database.Open refuses, with a 422-mapped
+// database.ValidationError, a value its column would not store exactly: one
+// that does not fit decimal(p,s), and on SQLite, which has no fixed-point type,
+// one with more than database.SQLiteDecimalDigits significant digits.
 type Decimal struct {
 	decimal.Decimal
 }

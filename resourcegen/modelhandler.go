@@ -274,6 +274,17 @@ func renderModelHandler(r modelResource) (string, error) {
 		b.WriteString("\t\treturn nil, database.MapPersistError(ctx, err, \"resource already exists\", \"create " + singular + "\")\n")
 		b.WriteString("\t}\n")
 	}
+	// Respond with what was stored, not what was sent (#440): the database may
+	// normalize a value (a decimal's scale, a column default), and the create
+	// response must be what a later get returns.
+	b.WriteString("\t// Respond with the stored row, as get would return it.\n")
+	if uuidPK {
+		b.WriteString("\tif err := h.DB.WithContext(ctx).First(&row, \"" + pk.Column + " = ?\", row." + pk.AccessPath + ").Error; err != nil {\n")
+	} else {
+		b.WriteString("\tif err := h.DB.WithContext(ctx).First(&row, row." + pk.AccessPath + ").Error; err != nil {\n")
+	}
+	b.WriteString("\t\treturn nil, database.MapLoadError(ctx, err, \"" + singular + " not found\", \"reload created " + singular + "\")\n")
+	b.WriteString("\t}\n")
 	b.WriteString(r.respond("create"+typ+"Output", data, typ))
 	if r.hasFiles() {
 		b.WriteString(r.fileHandlers())

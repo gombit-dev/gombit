@@ -74,8 +74,16 @@ if err := db.First(&row, id).Error; err != nil {
 | Helper | Maps | Anything else |
 | --- | --- | --- |
 | `MapLoadError` | `gorm.ErrRecordNotFound` → D10 `not_found` (404) | `internal` |
-| `MapPersistError` | `*database.ValidationError` → `validation_error` (422, with its fields); unique / duplicate → `conflict` (409); foreign-key or NOT NULL violation → `validation_error` (422) | `internal` |
+| `MapPersistError` | `*database.ValidationError` → `validation_error` (422, with its fields), including a decimal the column would not store exactly (below); unique / duplicate → `conflict` (409); foreign-key or NOT NULL violation → `validation_error` (422) | `internal` |
 | `MapDeleteError` | `database.ErrReferenced` or a foreign-key violation → `conflict` (409) | `internal` |
+
+Before every create and update, `database.Open` also checks each
+`types.Decimal` / `decimal.Decimal` field against its declared `decimal(p,s)`:
+a value with more digits than the column holds, before or after the point, is
+a `*database.ValidationError` naming the field, not a rounded or truncated
+write. On SQLite, which stores decimals through float64, a value with more
+than 15 significant digits (`database.SQLiteDecimalDigits`) is refused the same
+way. The check runs on the API and admin write paths alike.
 
 `IsUniqueViolation`, `IsForeignKeyViolation`, and `IsNotNullViolation` are the
 shared detectors behind those helpers; auth registration uses
@@ -179,7 +187,9 @@ Official multi-DB support is gated by the conformance suite under
 
 - migrate up / migrate down (Gombit-owned companion downs)
 - timestamps, nullable columns, unique constraints, indexes
-- decimal round-trip
+- decimal round-trip, and precision: a `decimal(19,4)` value round-trips
+  exactly, a value over the scale is refused on every driver, and one over 15
+  significant digits is refused on SQLite
 - CRUD, transactions, pagination (`Offset` / `Limit`)
 - relation deletion (`relation_deletion`): `ON DELETE` `RESTRICT` / `CASCADE` /
   `SET NULL` through `database.Delete`

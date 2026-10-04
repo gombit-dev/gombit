@@ -398,7 +398,7 @@ Modifiers are `required`, `nullable` (the opposite of `required`), `unique`,
 
 | Type | Go type | Column / contract |
 | --- | --- | --- |
-| `decimal` | `types.Decimal` (wraps `shopspring/decimal`) | `decimal(19,4)`; JSON string, exact — no float rounding |
+| `decimal` | `types.Decimal` (wraps `shopspring/decimal`) | `decimal(19,4)`; JSON string, exact — no float rounding. A value that does not fit is a 422, never rounded; on SQLite at most 15 significant digits (see below) |
 | `decimal(p,s)` | `types.Decimal` | `decimal(p,s)`, e.g. `decimal(10,2)` |
 | `time` | `time.Time` | RFC3339 date-time in JSON |
 | `time_of_day` | `types.TimeOfDay` | `char(8)` clock. `HH:MM`, `HH:MM:SS`, and `15:04:05+07:00` are one pattern, stored as `HH:MM:SS`. Optional is a pointer; a blank submits null |
@@ -410,6 +410,18 @@ Modifiers are `required`, `nullable` (the opposite of `required`), `unique`,
 | `one_to_one:Target` | unique FK `TargetID` + `Target target.Target` | same wire as `belongs_to`; the foreign key is unique |
 | `has_many:Target` | `[]target.Target` | model-only, read via the admin; the child must carry the parent FK |
 | `many_to_many:Target` | `[]target.Target` (`many2many:` join) | model-only, edited via the admin |
+
+`types.Decimal` is exact on every driver. A value that does not fit its
+column's `decimal(p,s)` (more than `p-s` digits before the point, or more than
+`s` after it, ignoring trailing zeros) is refused with a 422 before it is
+written, rather than rounded by PostgreSQL or MySQL. SQLite has no fixed-point
+type: its `decimal` column converts through float64, which keeps 15 significant
+digits, so on SQLite a decimal may carry **at most 15 significant digits**
+(`database.SQLiteDecimalDigits`) and a longer one is a 422 instead of being
+silently changed. `99999999999.9999` round-trips on every driver;
+`99999999999999.9999` fits `decimal(19,4)` on PostgreSQL and MySQL but is
+refused on SQLite. A create responds with the row as stored, the same body a
+later get returns.
 
 `types.Decimal` is the framework money/decimal type. Because a single Go type
 flows through the model, the handler DTO, the OpenAPI/TS contract, and GORM,

@@ -315,6 +315,15 @@ version.
   `default-src 'none'` blocked the page's scripts, styles and images. The
   policy now follows the served content type, not the file name
   ([#434](https://github.com/gombit-dev/gombit/issues/434)).
+- Decimals are no longer silently changed on write. On SQLite, which stores a
+  `decimal` column through float64, `99999999999999.9999` used to become
+  `100000000000000`; PostgreSQL and MySQL rounded a value over the column's
+  scale. Every create and update now refuses, with a 422 naming the field, a
+  value that does not fit its `decimal(p,s)`, and on SQLite one with more
+  than 15 significant digits (`database.SQLiteDecimalDigits`). The generated
+  create handler now responds with the stored row, so its body is what a get
+  returns; run `gombit generate` to pick that up in an existing app
+  ([#440](https://github.com/gombit-dev/gombit/issues/440)).
 - The benchmark report no longer publishes a snapshot from a developer host
   as if it were the canonical run. A clean tree on the canonical protocol used
   to render with no banner whatever machine ran it. Each measured unit now
