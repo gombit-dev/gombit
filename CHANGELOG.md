@@ -315,6 +315,13 @@ version.
   `default-src 'none'` blocked the page's scripts, styles and images. The
   policy now follows the served content type, not the file name
   ([#434](https://github.com/gombit-dev/gombit/issues/434)).
+- Unknown paths and recovered handler panics now answer with the D10 error
+  envelope like every other framework error. A 404 used to be Gin's
+  `text/plain` "404 page not found" (or an empty body under an embedded
+  frontend), and a panic an empty 500 with no `Content-Type`, so JSON clients
+  such as the generated TypeScript client failed to parse them and got no
+  `request_id`. They are now `not_found` (404) and `internal` (500)
+  ([#438](https://github.com/gombit-dev/gombit/issues/438)).
 - The benchmark report no longer publishes a snapshot from a developer host
   as if it were the canonical run. A clean tree on the canonical protocol used
   to render with no banner whatever machine ran it. Each measured unit now

@@ -292,8 +292,13 @@ over 8MiB (see [`docs/router.md`](router.md)). The opt-in XSS sanitizer
 cap, so it never produces its own 413; cookie CSRF uses `Authorization` (403). An unsupported method on a known
 route yields `contract.MethodNotAllowed` (`error.code` `method_not_allowed`,
 HTTP 405) with an `Allow` header listing the methods the path supports — the
-router distinguishes this from a genuinely unknown path (404). Do not treat
-413 or 405 as a handler-level §41 category or add them to the table above.
+router distinguishes this from a genuinely unknown path. That unknown path
+gets the D10 `not_found` envelope (HTTP 404), with or without an embedded
+frontend (whose SPA fallback answers API and other reserved paths the same
+way), and a handler panic recovered by the runtime stack gets the D10
+`internal` envelope (HTTP 500), unless the handler had already started its
+response. Both carry `request_id`. Do not treat 413 or 405 as a handler-level
+§41 category or add them to the table above.
 
 Response bodies carry only the D10 shape (`{data, meta?}` / `{error}`). Huma's
 `$schema` link property is disabled at the adapter, so neither responses nor the
