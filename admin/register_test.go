@@ -607,6 +607,35 @@ func TestAdminCannotCreateWithARequiredFile(t *testing.T) {
 	if rec := doRequest(app, jar, http.MethodPost, base+"reports", `{"title":"r"}`); rec.Code != http.StatusOK && rec.Code != http.StatusCreated {
 		t.Fatalf("admin create with an optional file = %d %s", rec.Code, rec.Body)
 	}
+
+	// A Column naming another schema field than the Name: the field is
+	// the Column's, alone, so no Name/Column mix can make the file column
+	// look mapped while the accessors write another.
+	aliased := []admin.Field{id, {Name: "title", Type: admin.TypeString, Column: "doc"}}
+	if err := admin.Register(app, Contract{}, admin.Options{Slug: "contracts-aliased", Fields: aliased}); err == nil || !strings.Contains(err.Error(), "upload protocol") {
+		t.Fatalf("Register() with Name title, Column doc = %v, want the file column refused", err)
+	}
+	if err := admin.Register(app, Contract{}, admin.Options{Slug: "contracts-nowhere", Fields: []admin.Field{id, {Name: "title", Type: admin.TypeString, Column: "nope"}}}); err == nil {
+		t.Fatal("Register() with a Column that does not exist succeeded")
+	}
+	swapped := []admin.Field{id, {Name: "doc", Type: admin.TypeString, Column: "title"}}
+	if err := admin.Register(app, Contract{}, admin.Options{Slug: "contracts-swapped", Fields: swapped}); err != nil {
+		t.Fatalf("Register() with Name doc, Column title = %v", err)
+	}
+	meta = doRequest(app, jar, http.MethodGet, apiPrefix(app)+"/admin/meta/contracts-swapped", "")
+	if !strings.Contains(meta.Body.String(), `"create":false`) || !strings.Contains(meta.Body.String(), `"delete":false`) {
+		t.Fatalf("meta = %s; want create and delete off: the doc column is not mapped", meta.Body)
+	}
+	if rec := doRequest(app, jar, http.MethodPost, apiPrefix(app)+"/admin/resources/contracts-swapped", `{"doc":"x"}`); rec.Code != http.StatusForbidden {
+		t.Fatalf("admin create through the swapped mapping = %d %s, want 403", rec.Code, rec.Body)
+	}
+	if err := admin.Register(app, Contract{}, admin.Options{Slug: "contracts-swapped-all", Fields: swapped, Actions: admin.Actions{List: true, Create: true}}); err == nil {
+		t.Fatal("Register() with Create through the swapped mapping succeeded")
+	}
+	db.Model(&Contract{}).Count(&n)
+	if n != 0 {
+		t.Fatalf("%d contracts inserted; want none", n)
+	}
 }
 
 // TestAdminUpdateLeavesFileColumnsAlone: an admin update never writes a

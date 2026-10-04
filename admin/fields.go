@@ -375,12 +375,16 @@ func derivePK(sch *schema.Schema) (name, column string, ft FieldType, err error)
 }
 
 func matchSchemaField(sch *schema.Schema, f Field) *schema.Field {
+	// An explicit Column names the schema field, alone: the field's
+	// accessors and its SQL identity must be one schema field, so Name is
+	// not consulted (a Name matching an earlier field would otherwise bind
+	// the accessors to it while the column named another).
+	if f.Column != "" {
+		return sch.FieldsByDBName[f.Column]
+	}
 	for _, sf := range sch.Fields {
 		if sf == nil {
 			continue
-		}
-		if f.Column != "" && sf.DBName == f.Column {
-			return sf
 		}
 		if jsonFieldName(sf) == f.Name || sf.DBName == f.Name || sf.Name == f.Name {
 			return sf

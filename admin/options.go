@@ -108,7 +108,9 @@ type Field struct {
 	// when the column is not an enum.
 	Choices []Choice `json:"choices,omitempty"`
 	// Column is the GORM/SQL column name. Empty means Name == JSON key ==
-	// column (the v1 default). Not emitted in meta.
+	// column (the v1 default). When set, it alone picks the model field the
+	// admin reads and writes (Name is then only the JSON key); a column the
+	// model does not have is a registration error. Not emitted in meta.
 	Column string `json:"-"`
 	// WriteOnly matches a public create field that is omitted from the
 	// response (`gombit:"write"`). Row payloads leave it out. An update

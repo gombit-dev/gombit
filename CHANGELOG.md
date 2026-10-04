@@ -230,6 +230,9 @@ version.
   - an explicit `Options.Fields` entry for a file or image column must be
     declared `file` or `image` (any other type is a registration error, so
     no admin write bypasses the upload protocol);
+  - an explicit `Field.Column` alone picks the model field the admin reads
+    and writes (it used to race `Name` in schema order), so the file guards
+    and the accessors agree on one column;
   - an update writes a file column only when it changes its key (a
     concurrent replacement makes it a 409, nothing written) and leaves
     unchanged and unmapped file columns out of the write;
