@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -119,16 +121,75 @@ func TestMemoryIncrementValueSemantics(t *testing.T) {
 	}
 }
 
+// Memory refuses to wrap a counter past the int64 range, as Redis INCRBY
+// does ("increment or decrement would overflow"), and leaves the stored value
+// as it was, so the dev driver and the production one agree (issue #437).
+func TestMemoryIncrementRefusesToOverflow(t *testing.T) {
+	ctx := context.Background()
+	for name, tc := range map[string]struct {
+		start, delta int64
+		wantErr      bool
+		want         int64
+	}{
+		"MaxInt64 + 1":        {start: math.MaxInt64, delta: 1, wantErr: true},
+		"MinInt64 - 1":        {start: math.MinInt64, delta: -1, wantErr: true},
+		"-1 + MinInt64":       {start: -1, delta: math.MinInt64, wantErr: true},
+		"1 + MaxInt64":        {start: 1, delta: math.MaxInt64, wantErr: true},
+		"MaxInt64 + 0":        {start: math.MaxInt64, delta: 0, want: math.MaxInt64},
+		"0 + MinInt64":        {start: 0, delta: math.MinInt64, want: math.MinInt64},
+		"MaxInt64 - 1 + 1":    {start: math.MaxInt64 - 1, delta: 1, want: math.MaxInt64},
+		"MinInt64 + MaxInt64": {start: math.MinInt64, delta: math.MaxInt64, want: -1},
+		"MaxInt64 + MinInt64": {start: math.MaxInt64, delta: math.MinInt64, want: -1},
+		"MinInt64 + 1 + (-1)": {start: math.MinInt64 + 1, delta: -1, want: math.MinInt64},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := NewMemory()
+			if err := c.Set(ctx, "counter", tc.start, 0); err != nil {
+				t.Fatal(err)
+			}
+			got, err := c.Increment(ctx, "counter", tc.delta)
+			if tc.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "would overflow") {
+					t.Fatalf("Increment(%d, %d) = %d, %v; want an overflow error", tc.start, tc.delta, got, err)
+				}
+				var stored int64
+				if ok, err := c.Get(ctx, "counter", &stored); err != nil || !ok || stored != tc.start {
+					t.Fatalf("stored value = %d (found %v, err %v), want it left at %d", stored, ok, err, tc.start)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("Increment(%d, %d) = %d, %v; want %d", tc.start, tc.delta, got, err, tc.want)
+			}
+		})
+	}
+}
+
+// A stored value that is not an integer is refused and left as it was, as
+// Redis INCRBY refuses it ("value is not an integer"). A stored nil is JSON
+// null, which json.Unmarshal into an int64 silently skips; it must be refused
+// too, not overwritten with the delta.
 func TestMemoryIncrementRejectsNonIntegerValue(t *testing.T) {
 	ctx := context.Background()
-	c := NewMemory()
-	if err := c.Set(ctx, "counter", "not-an-int", 0); err != nil {
-		t.Fatalf("Set() error = %v, want nil", err)
-	}
-
-	_, err := c.Increment(ctx, "counter", 1)
-	if err == nil {
-		t.Fatal("Increment() error = nil, want error")
+	for name, value := range map[string]any{
+		"string": "not-an-int",
+		"float":  5.5,
+		"bool":   true,
+		"nil":    nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := NewMemory()
+			if err := c.Set(ctx, "counter", value, 0); err != nil {
+				t.Fatalf("Set() error = %v, want nil", err)
+			}
+			if got, err := c.Increment(ctx, "counter", 1); err == nil || !strings.Contains(err.Error(), "not an integer") {
+				t.Fatalf("Increment() = %d, %v; want a not-an-integer error", got, err)
+			}
+			var stored any
+			if ok, err := c.Get(ctx, "counter", &stored); err != nil || !ok || stored != value {
+				t.Fatalf("stored value = %v (found %v, err %v), want it left at %v", stored, ok, err, value)
+			}
+		})
 	}
 }
 

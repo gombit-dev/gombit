@@ -334,6 +334,14 @@ version.
   what the client receives. A panic that aborts the connection
   (`http.ErrAbortHandler`) before anything is sent is also counted as 500
   ([#432](https://github.com/gombit-dev/gombit/issues/432)).
+- The in-memory cache's `Increment` refuses to overflow, as Redis `INCRBY`
+  does: incrementing past `math.MaxInt64` (or below `math.MinInt64`) returns
+  an "increment or decrement would overflow" error and leaves the value as it
+  was. It used to wrap silently, so a counter that reached the top flipped to
+  a huge negative number under the memory driver and failed under Redis.
+  A stored `nil` is now refused as not an integer too, as Redis refuses it,
+  instead of being overwritten with the delta
+  ([#437](https://github.com/gombit-dev/gombit/issues/437)).
 
 ## [0.6.0] — 2026-09-28
 

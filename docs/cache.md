@@ -13,7 +13,11 @@ type Cache interface {
 ```
 
 Values are JSON encoded by the built-in drivers. `Get` returns `false, nil`
-for a cache miss.
+for a cache miss. On the memory and Redis drivers alike, `Increment` treats a
+missing key as 0, keeps the key's TTL, and returns an error, leaving the value
+unchanged, when the stored value is not an integer (`nil` included) or the
+result would leave the int64 range ("increment or decrement would overflow").
+The noop driver stores nothing, so its `Increment` always returns 0.
 
 ## Drivers
 
