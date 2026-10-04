@@ -59,7 +59,8 @@ func forEachAssigned(db *gorm.DB, creating bool, targets map[string]*schema.Fiel
 		w.ctx = context.Background()
 	}
 	// Select("*") alone (what Save sends) restricts nothing.
-	if len(stmt.Omits) > 0 || (len(stmt.Selects) > 0 && !(len(stmt.Selects) == 1 && stmt.Selects[0] == "*")) {
+	selectsAll := len(stmt.Selects) == 1 && stmt.Selects[0] == "*"
+	if len(stmt.Omits) > 0 || (len(stmt.Selects) > 0 && !selectsAll) {
 		w.selected, w.restricted = stmt.SelectAndOmitColumns(creating, !creating)
 	}
 	w.walk(reflect.ValueOf(stmt.Dest), fn)
