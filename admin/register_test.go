@@ -468,4 +468,53 @@ func TestRegisterWithAFileColumn(t *testing.T) {
 	if ok, _ := storage.Exists(ctx, app.Storage(), key); ok {
 		t.Fatal("the deleted record's file was kept")
 	}
+
+	id := admin.Field{Name: "id", Type: admin.TypeInteger, ReadOnly: true}
+	// Explicit Fields cannot map the file column as any type but file or
+	// image (whose writes go through the upload protocol): that would write
+	// arbitrary keys past it, and strand the replaced key's claim.
+	for name, fields := range map[string][]admin.Field{
+		"by name":   {id, {Name: "title", Type: admin.TypeString}, {Name: "file", Type: admin.TypeString}},
+		"by column": {id, {Name: "title", Type: admin.TypeString}, {Name: "attachment_key", Type: admin.TypeString, Column: "file"}},
+		"read-only": {id, {Name: "title", Type: admin.TypeString}, {Name: "file", Type: admin.TypeString, ReadOnly: true}},
+	} {
+		err := admin.Register(app, Attachment{}, admin.Options{Slug: "attachments-" + strings.ReplaceAll(name, " ", "-"), Fields: fields})
+		if err == nil || !strings.Contains(err.Error(), "upload protocol") {
+			t.Errorf("Register() with the file column mapped %s = %v, want an error", name, err)
+		}
+	}
+	typed := []admin.Field{id, {Name: "title", Type: admin.TypeString}, {Name: "file", Type: admin.TypeFile}}
+	if err := admin.Register(app, Attachment{}, admin.Options{Slug: "attachments-typed", Fields: typed}); err != nil {
+		t.Fatalf("Register() with the file column as a file field = %v", err)
+	}
+	if err := admin.Register(app, Attachment{}, admin.Options{Slug: "attachments-titled", Fields: []admin.Field{id, {Name: "title", Type: admin.TypeString}}}); err != nil {
+		t.Fatalf("Register() with explicit Fields leaving the file out = %v", err)
+	}
+	// A fresh record holding a file: no admin write can attach a foreign key.
+	key2 := "attachments/file/held2"
+	if err := cl.Pending(ctx, key2, "", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.Storage().Put(ctx, key2, strings.NewReader("bytes"), storage.PutOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	k2 := types.File(key2)
+	rec2 := Attachment{Title: "b", File: &k2}
+	if err := cl.CreateWith(ctx, []string{key2}, func(tx *gorm.DB) error { return tx.Create(&rec2).Error }); err != nil {
+		t.Fatal(err)
+	}
+	for _, slug := range []string{"attachments", "attachments-typed", "attachments-titled"} {
+		patch := doRequest(app, jar, http.MethodPatch, fmt.Sprintf("%s/admin/resources/%s/%d", apiPrefix(app), slug, rec2.ID), `{"title":"c","file":"some/foreign/key"}`)
+		var got Attachment
+		if err := db.First(&got, rec2.ID).Error; err != nil {
+			t.Fatal(err)
+		}
+		if got.File == nil || string(*got.File) != key2 {
+			t.Fatalf("PATCH %s (%d %s) changed the file to %v", slug, patch.Code, patch.Body, got.File)
+		}
+	}
+	var claim2 claims.Claim
+	if err := db.Where("object_key = ?", key2).Take(&claim2).Error; err != nil || claim2.State != claims.Held {
+		t.Fatalf("after the PATCHes the claim = %+v, %v; want held", claim2, err)
+	}
 }

@@ -257,6 +257,10 @@ policy as hints: `accept` (media types) and `max_bytes`.
     prefix) is refused;
   - still pending: held by no other record, and not expired and swept.
 
+  An explicit `Options.Fields` entry for a file or image column must be
+  declared `file` or `image`: mapped as any other type it would write keys
+  past the upload protocol, so registration refuses it.
+
   Anything else is a field error: 422 with `fields.<name>`.
 - **Cleanup:** a write moves the record's file claims in its own
   transaction (`claims.Update`): new keys are held, and replaced or removed

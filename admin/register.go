@@ -546,6 +546,15 @@ func resolveFields(fields []Field, sch *schema.Schema) ([]resolvedField, []*m2mB
 		if sf == nil {
 			return nil, nil, nil, fmt.Errorf("admin: field %q does not exist on the model", f.Name)
 		}
+		// A storage-backed column's key may only be written through the
+		// upload protocol (a confirmed upload, held in the record's
+		// transaction: storage/claims), which only the file and image
+		// types take part in (files.go). Mapped as any other type, an
+		// explicit field would write arbitrary keys past it, and strand the
+		// claim of the key it replaced.
+		if isFileColumn(sf) && f.Type != TypeFile && f.Type != TypeImage {
+			return nil, nil, nil, fmt.Errorf("admin: field %q maps the storage-backed (file or image) column %q as %q; declare it as %q or %q, whose writes go through the upload protocol", f.Name, sf.DBName, f.Type, TypeFile, TypeImage)
+		}
 		column := f.Column
 		if column == "" {
 			column = sf.DBName
@@ -587,4 +596,17 @@ func fillFilePolicies(slug string, fields []Field, sch *schema.Schema) error {
 		f.MaxBytes = p.MaxBytes
 	}
 	return nil
+}
+
+// isFileColumn reports whether sf is a storage-backed column (a file or
+// image field).
+func isFileColumn(sf *schema.Field) bool {
+	if sf == nil || sf.DBName == "" {
+		return false
+	}
+	switch field.KindFromGo(sf.FieldType, string(sf.DataType)) {
+	case field.File, field.Image:
+		return true
+	}
+	return false
 }

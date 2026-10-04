@@ -227,6 +227,9 @@ version.
   - `file` and `image` admin types; the meta carries each field's `accept`
     and `max_bytes`;
   - rows carry file objects with download URLs;
+  - an explicit `Options.Fields` entry for a file or image column must be
+    declared `file` or `image` (any other type is a registration error, so
+    no admin write bypasses the upload protocol);
   - `POST /admin/resources/{slug}/uploads/{field}` grants a direct upload,
     and needs create or update permission;
   - writes accept a key only for an upload under the field's prefix that
