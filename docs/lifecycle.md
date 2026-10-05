@@ -87,6 +87,15 @@ steps that need their own runtime surfaces.
 instead of the HTTP server when the process's first argument is `worker`
 (`./server worker`). See [`docs/jobs.md`](jobs.md#running-the-worker).
 
+It also opens the object store (`app.Storage()`) that `GOMBIT_STORAGE_*`
+configures, unless one is passed with `framework.WithStorage`. A storage
+configuration it refuses fails `New`. The local driver creates nothing until
+the first write. For the local and memory drivers with URLs, `New` mounts the
+storage route that serves them (see [`docs/router.md`](router.md)). A store
+has no `Close` (`storage.Storage` holds nothing to release), so shutdown
+leaves it alone. `/readyz` does
+not probe storage. See [`docs/storage.md`](storage.md).
+
 The probes are raw Gin routes with D10-style bodies and remain outside
 generated OpenAPI when Huma is mounted. `/readyz` is datastore-aware
 (HOST-2 / ADR-015); the full contract — bodies, status codes, and how a host

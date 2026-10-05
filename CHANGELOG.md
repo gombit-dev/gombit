@@ -268,6 +268,11 @@ version.
 
 ### Changed
 
+- A new app's README lists `storage/` (the local driver's files, created on
+  the first write and gitignored) and says `internal/platform` migrates the
+  framework's tables (auth, storage claims). The README, the docs index, and
+  the user guides (router, security, build, lifecycle, health, frontend,
+  contract, CLI, tutorial) now cover the shipped storage feature.
 - A new app's `.env.example` lists every `GOMBIT_*` variable the config
   package reads, including `GOMBIT_JOBS_DRIVER`, `GOMBIT_JOBS_QUEUE`,
   `GOMBIT_JOBS_NAMESPACE`, `GOMBIT_HTTP_TRUSTED_PROXIES`, and the database
@@ -322,6 +327,11 @@ version.
   such as the generated TypeScript client failed to parse them and got no
   `request_id`. They are now `not_found` (404) and `internal` (500)
   ([#438](https://github.com/gombit-dev/gombit/issues/438)).
+- `cache.WithJanitor` with a zero or negative interval no longer crashes the
+  process. The value reached `time.NewTicker` inside the janitor goroutine,
+  whose panic the caller could not recover; it now means no janitor, as if
+  the option were omitted
+  ([#436](https://github.com/gombit-dev/gombit/issues/436)).
 - The benchmark report no longer publishes a snapshot from a developer host
   as if it were the canonical run. A clean tree on the canonical protocol used
   to render with no banner whatever machine ran it. Each measured unit now
