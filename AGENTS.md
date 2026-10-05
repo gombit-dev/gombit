@@ -135,7 +135,7 @@ A change is not done unless:
 4. Any API change regenerates the OpenAPI doc + TS client in the same PR.
 5. No secrets in generated frontend source; `VITE_*` is treated as public.
 6. Scope stays inside the issue's milestone. If work starts pulling in an M6
-   "battery" (events, scheduler, mail, storage, gRPC, multi-tenancy, i18n),
+   "battery" (events, scheduler, mail, gRPC, multi-tenancy, i18n),
    stop and split it out into its own epic.
 7. The PR links its issue and states which acceptance criteria it satisfies.
 

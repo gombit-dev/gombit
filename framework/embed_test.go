@@ -3,6 +3,7 @@ package framework
 import (
 	"context"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -377,3 +378,70 @@ func serveEmbed(t *testing.T, app *App, method, path string, body io.Reader) *ht
 	app.Router().ServeHTTP(rec, req)
 	return rec
 }
+
+// TestEmbeddedFrontendHTMLPagesUseBrowserPolicy locks issue #434: every HTML
+// document in the embedded build gets the browser policy, not only the root
+// index.html. A multi-page build's /about/index.html or a static /legal.html
+// used to get the API policy (default-src 'none'), which blocks the page's own
+// scripts, styles and images. Non-HTML assets keep the API policy.
+func TestEmbeddedFrontendHTMLPagesUseBrowserPolicy(t *testing.T) {
+	const page = "<!doctype html><html><body>page</body></html>"
+	files := fstest.MapFS{
+		"index.html":       {Data: []byte(embedIndexBody)},
+		"about/index.html": {Data: []byte(page)},
+		"legal.html":       {Data: []byte(page)},
+		"terms":            {Data: []byte(page)}, // no extension: sniffed as text/html
+		"assets/app.js":    {Data: []byte("console.log(1)")},
+		"logo.svg":         {Data: []byte(`<svg xmlns="http://www.w3.org/2000/svg"></svg>`)},
+	}
+	for name, fsys := range map[string]fs.FS{"seekable": files, "non-seekable": nonSeekableFS{files}} {
+		app := newTestApp(t, WithEmbeddedFrontend(fsys))
+		for _, method := range []string{http.MethodGet, http.MethodHead} {
+			for _, p := range []string{"/about/index.html", "/legal.html", "/terms"} {
+				if name == "non-seekable" && p == "/terms" {
+					continue // without Seek there is no sniffing; the type is octet-stream
+				}
+				rec := serveEmbed(t, app, method, p, nil)
+				if rec.Code != http.StatusOK {
+					t.Fatalf("%s %s %s status = %d, want 200", name, method, p, rec.Code)
+				}
+				if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+					t.Fatalf("%s %s %s Content-Type = %q, want text/html", name, method, p, ct)
+				}
+				if csp := rec.Header().Get("Content-Security-Policy"); csp != spaContentSecurityPolicy {
+					t.Errorf("%s %s %s CSP = %q, want the browser policy %q", name, method, p, csp, spaContentSecurityPolicy)
+				}
+				if rec.Header().Get("Referrer-Policy") == "" || rec.Header().Get("X-Frame-Options") == "" {
+					t.Errorf("%s %s %s is missing Referrer-Policy/X-Frame-Options: %v", name, method, p, rec.Header())
+				}
+			}
+			for _, p := range []string{"/assets/app.js", "/logo.svg"} {
+				rec := serveEmbed(t, app, method, p, nil)
+				if rec.Code != http.StatusOK {
+					t.Fatalf("%s %s %s status = %d, want 200", name, method, p, rec.Code)
+				}
+				if csp := rec.Header().Get("Content-Security-Policy"); csp != "default-src 'none'; frame-ancestors 'none'" {
+					t.Errorf("%s %s %s CSP = %q, want the API policy for a non-HTML asset", name, method, p, csp)
+				}
+			}
+		}
+	}
+}
+
+// nonSeekableFS hides Seek from the files it opens, the shape of an fs.FS
+// whose files are plain readers, to cover serveEmbeddedFile's ReadAll path.
+type nonSeekableFS struct{ fsys fs.FS }
+
+func (n nonSeekableFS) Open(name string) (fs.File, error) {
+	f, err := n.fsys.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	return nonSeekableFile{f}, nil
+}
+
+type nonSeekableFile struct{ f fs.File }
+
+func (n nonSeekableFile) Stat() (fs.FileInfo, error) { return n.f.Stat() }
+func (n nonSeekableFile) Read(p []byte) (int, error) { return n.f.Read(p) }
+func (n nonSeekableFile) Close() error               { return n.f.Close() }

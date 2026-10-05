@@ -722,7 +722,7 @@ The FINAL STANDARD above still governs. For this repository, APPROVE also requir
 4. Generator safety (`go/ast`, idempotent, `--dry-run` / `--force`, no silent overwrite).
 5. No secrets in generated frontend; `VITE_*` is public; Appendix C prod checks still fail loudly.
 6. API changes regenerate OpenAPI + TS client in the same PR.
-7. Scope stays in-milestone; no unplanned batteries (events, scheduler, mail, storage, gRPC, multi-tenancy, i18n).
+7. Scope stays in-milestone; no unplanned batteries (events, scheduler, mail, gRPC, multi-tenancy, i18n).
 8. PR links its issue and lists satisfied AC.
 
 If the change is docs-only or pre-code, apply the subset that still makes sense (scope, decisions, AC, no invented APIs).

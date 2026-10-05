@@ -43,5 +43,5 @@ Closes #<!-- issue number -->
 - [ ] Generators are idempotent/additive, AST-safe, and never overwrite user-owned files (if this PR touches generators)
 - [ ] API changes regenerate the OpenAPI doc + TS client in this PR
 - [ ] No secrets in generated frontend source; `VITE_*` is treated as public
-- [ ] Scope stays inside this issue's milestone — no "battery" creep (events, scheduler, mail, storage, gRPC, multi-tenancy, i18n)
+- [ ] Scope stays inside this issue's milestone — no "battery" creep (events, scheduler, mail, gRPC, multi-tenancy, i18n)
 - [ ] This PR links its issue and states which acceptance criteria it satisfies

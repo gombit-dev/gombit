@@ -183,6 +183,13 @@ settings only in `--auth cookie` apps) and public `VITE_API_URL` (empty
 means same-origin for the Vite `/api` proxy). `VITE_*` is baked into the browser bundle — never put secrets there.
 Access tokens stay in memory; generated source does not use `localStorage`.
 
+Files the app stores go to `./storage` by default (the local driver,
+`GOMBIT_STORAGE_LOCAL_ROOT`). `gombit new` does not create it: the driver
+creates it on the first write, and the scaffold's `.gitignore` already
+ignores it. `internal/platform` migrates the framework's tables (auth, and
+the `storage_claims` table that file fields need) with the app's models.
+See [storage.md](storage.md).
+
 ## `gombit dev`
 
 From an application directory (the output of `gombit new`):
