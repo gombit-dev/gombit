@@ -99,17 +99,20 @@ type Framework struct {
 	Version string `json:"version,omitempty"`
 	// Required is the require directive's version.
 	Required string `json:"required"`
-	// Replace is the replace directive that applies to Required, as the go
-	// command picks it, if any.
+	// Replace is the replace directive in go.mod that applies to Required,
+	// as the go command picks it, if any. Nil when a go.work applies
+	// (Workspace): the workspace's replaces count then, and are not read.
 	Replace *Replacement `json:"replace,omitempty"`
-	// Local is true when the framework is replaced by a local directory (a
-	// framework checkout): there is no published version to upgrade from.
+	// Local is true when go.mod replaces the framework by a local directory
+	// (a framework checkout): there is no published version to upgrade
+	// from. False when a go.work applies (Workspace), which decides instead.
 	Local bool `json:"local,omitempty"`
 	// Workspace is the go.work the go command uses for the app (its own
 	// answer, `go env GOWORK`), if any. The workspace then decides the
 	// framework the app builds against: its other modules' requirements and
-	// replaces count too. This package does not resolve that, so Version is
-	// empty; with GOWORK=off the app builds from its go.mod alone.
+	// replaces count too. This package does not resolve that, so only
+	// Required (go.mod's) is set, and Version, Replace and Local are empty;
+	// with GOWORK=off the app builds from its go.mod alone.
 	Workspace string `json:"workspace,omitempty"`
 }
 
@@ -145,22 +148,20 @@ func detectFramework(workDir string) (Framework, error) {
 	case err != nil:
 		return Framework{}, fmt.Errorf("upgrade: %w", err)
 	}
-	fw := Framework{Module: FrameworkModulePath, Required: d.Required, Replace: d.Replace}
-	switch {
-	case d.Replace == nil:
-		fw.Version = d.Required
-	case d.Replace.Local():
-		fw.Local = true
-	case d.Replace.Path == FrameworkModulePath:
-		fw.Version = d.Replace.Version
-	}
 	work, err := goWork(workDir)
 	if err != nil {
 		return Framework{}, err
 	}
+	fw := Framework{Module: FrameworkModulePath, Required: d.Required}
 	if work != "" {
-		fw.Workspace, fw.Version = work, ""
+		// The workspace decides the build: go.mod's replace may not be the
+		// one that applies, so it is not reported as such.
+		fw.Workspace = work
+		return fw, nil
 	}
+	fw.Version = d.Release()
+	fw.Replace = d.Replace
+	fw.Local = d.Replace != nil && d.Replace.Local()
 	return fw, nil
 }
 

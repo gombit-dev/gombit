@@ -55,13 +55,17 @@ would at runtime):
 
 - If `go.mod` does not require `github.com/gombit-dev/gombit`, it is not a
   Gombit app — error.
-- If a **replace** directive points the framework at a local checkout, the
+- If a **replace** directive points the framework at a local checkout, or at
+  another module (a fork, whose version is not a framework release), the
   version is unresolvable for a host — error, with guidance to build against a
   published release. Pin a real release before generating a contract a host
-  will consume.
+  will consume. A replace by the framework module itself at another version
+  reports that version.
 - The replace that counts is the one the go command applies: a replace of the
   required version wins over one of every version, and a replace of another
-  version is ignored. `gombit upgrade baseline` reads `go.mod` the same way.
+  version is ignored. A `go.mod` the go command refuses (the framework
+  required twice, conflicting replaces) is an error. `gombit upgrade baseline`
+  reads `go.mod` the same way.
 
 ## Stability
 

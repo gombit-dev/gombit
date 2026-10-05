@@ -299,12 +299,16 @@ version.
 
 ### Fixed
 
-- `gombit contract app` reports the framework version the go command would
-  use. A `replace` of a version the app does not require no longer counts,
-  and an exact-version `replace` wins over an every-version one in either
-  order (a wildcard local replace plus an exact fork used to fail as
-  unresolved). It shares its reading of `go.mod` with `gombit upgrade
-  baseline`, so the two commands agree
+- `gombit contract app` reports only a framework release, picking the
+  `replace` the go command would. A `replace` of a version the app does not
+  require no longer counts, and an exact-version `replace` wins over an
+  every-version one in either order (a wildcard local replace plus an exact
+  one used to fail as unresolved). A fork (`replace` by another module) is
+  now unresolved, like a local path: its version used to be reported as the
+  framework's, which is not a release a host can find. A `go.mod` the go
+  command refuses (the framework required twice, conflicting replaces) is an
+  error. It shares this reading of `go.mod` with `gombit upgrade baseline`,
+  so for a `go.mod` the two report the same framework version
   ([#341](https://github.com/gombit-dev/gombit/issues/341)).
 - `gombit make command` refuses the names `generate` and `contract`, which
   collided with framework commands; every command the root registers is now

@@ -16,7 +16,7 @@ An application's baseline is two facts:
 
 | Fact | Where it comes from |
 | --- | --- |
-| The **framework version** it builds against | `go.mod`, read offline: the `require github.com/gombit-dev/gombit` version, or the version of a `replace` of it by the framework module (when both an exact-version and an every-version replace exist, the exact one applies, as in Go). It is never copied anywhere else, and `gombit contract app` reads it the same way. |
+| The **framework version** it builds against | `go.mod`, read offline: the `require github.com/gombit-dev/gombit` version, or the version of a `replace` of it by the framework module (when both an exact-version and an every-version replace exist, the exact one applies, as in Go). It is never copied anywhere else, and `gombit contract app` reads it the same way: both name a framework release or nothing, and both refuse a `go.mod` the go command refuses (the framework required twice, conflicting replaces). |
 | The **scaffold version**: the generation conventions it was created with (layout, framework-owned files, their contents) | `gombit.yaml`, recorded by `gombit new` |
 
 The scaffold version moves only when those conventions change in a way an
