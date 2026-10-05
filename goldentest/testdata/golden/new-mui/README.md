@@ -78,10 +78,11 @@ Runtime still reads `GOMBIT_*` environment variables, not `gombit.yaml`.
 - `cmd/server` — `config.Load`, `framework.New`, explicit `product.Register`, optional embed via `internal/web`
 - `cmd/gombit` — framework Cobra tree plus `product.RegisterCommands(root)`
 - `internal/product` — model, Huma handlers, routes (no `service.go` / `repo.go`); `RegisterCommands` for CLI hooks
-- `internal/platform` — database open + AutoMigrate for the example product
+- `internal/platform` — database open + AutoMigrate for the framework tables (auth, storage claims) and the example product
 - `internal/web` — `go:embed` hook (`static/.keep` placeholder; `gombit build --embed` collectstatics here)
 - `database/migrations`, `database/seeds` — Atlas SQL (see `gombit db`)
 - `frontend/` — Vite + React + TypeScript MUI preset (`gombit dev`)
+- `storage/` — files stored by the local driver (`GOMBIT_STORAGE_LOCAL_ROOT`; created on the first write, gitignored). Set `GOMBIT_STORAGE_DRIVER=s3` for an S3-compatible store; see `.env.example`
 
 ## Migrations
 

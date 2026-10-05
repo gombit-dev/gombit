@@ -9,10 +9,11 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gombit-dev/gombit/contract"
 )
 
 // RequestIDHeader is the HTTP header carrying a stable per-request ID.
-const RequestIDHeader = "X-Request-Id"
+const RequestIDHeader = contract.RequestIDHeader
 
 // requestIDLen is the canonical UUIDv4 textual length (8-4-4-4-12).
 const requestIDLen = 36

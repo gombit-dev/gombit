@@ -116,12 +116,24 @@ type namedMiddleware struct {
 }
 
 // New creates an application using process configuration and the default router.
-func New(options ...Option) (*App, error) {
+func New(options ...Option) (_ *App, err error) {
 	app := &App{
 		cfg:             config.Default(),
 		shutdownTimeout: defaultShutdownTimeout,
 		jobMetrics:      jobs.NewMetrics(),
 	}
+	// A failed New never hands the caller an *App, so nothing else can release
+	// what it opened: the cache (whose in-memory driver runs a janitor
+	// goroutine, and whose Redis driver holds a pool) and the job dispatcher
+	// (issue #435). Only what New opened itself is closed; a cache or
+	// dispatcher passed in with WithCache/WithJobs belongs to the caller.
+	defer func() {
+		if err != nil {
+			if releaseErr := app.releaseOwned(); releaseErr != nil {
+				err = errors.Join(err, releaseErr)
+			}
+		}
+	}()
 
 	for _, option := range options {
 		if option == nil {
@@ -172,7 +184,14 @@ func New(options ...Option) (*App, error) {
 			RequestID: GetRequestIDFromContext,
 		})
 		// OpenAPI Info.Version stays 0.0.0 until runtime versioning lands.
-		app.api = humagin.New(app.router, contract.HumaConfigFor(app.cfg.AppName, "0.0.0", app.cfg.API.DocsEnabled))
+		humaConfig := contract.HumaConfigFor(app.cfg.AppName, "0.0.0", app.cfg.API.DocsEnabled)
+		// A response that cannot be encoded is answered as a D10 500; log why
+		// through the app's logger (#442).
+		logger := app.logger
+		humaConfig.Formats = contract.JSONFormats(func(requestID string, err error) {
+			logger.Error("http: response could not be encoded", zap.String("request_id", requestID), zap.Error(err))
+		})
+		app.api = humagin.New(app.router, humaConfig)
 	}
 	if app.cache == nil {
 		store, err := cache.Open(app.cfg.Cache)
@@ -560,18 +579,20 @@ func Run(app *App) error {
 	return RunContext(ctx, app)
 }
 
-// RunContext runs app until ctx is canceled or the HTTP server fails.
+// RunContext runs app until ctx is canceled or the HTTP server fails. Every
+// return runs the stop hooks and closes what the app opened, so an App runs
+// once: it cannot be run again after RunContext returns (issue #435).
 func RunContext(ctx context.Context, app *App) error {
-	if ctx == nil {
-		return errors.New("framework: nil context")
-	}
 	if app == nil {
 		return errors.New("framework: nil app")
+	}
+	if ctx == nil {
+		return errors.Join(errors.New("framework: nil context"), app.runStopHooks())
 	}
 
 	listener, err := net.Listen("tcp", app.Config().HTTP.Addr)
 	if err != nil {
-		return fmt.Errorf("framework: listen: %w", err)
+		return errors.Join(fmt.Errorf("framework: listen: %w", err), app.runStopHooks())
 	}
 
 	// The per-handler context deadline (HTTP.RequestTimeout) is opt-in and off by
@@ -699,7 +720,13 @@ func (a *App) runStopHooks() error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	return errors.Join(a.runStopHooksWithContext(ctx), a.closeOwnedJobs(), a.closeOwnedCache())
+	return errors.Join(a.runStopHooksWithContext(ctx), a.releaseOwned())
+}
+
+// releaseOwned closes the job dispatcher and cache the app opened itself, in
+// that order (see closeOwnedJobs). Each is closed at most once.
+func (a *App) releaseOwned() error {
+	return errors.Join(a.closeOwnedJobs(), a.closeOwnedCache())
 }
 
 func (a *App) closeOwnedCache() error {
@@ -751,6 +778,10 @@ func syncLogger(logger *zap.Logger) error {
 func newRouter(cfg config.Config, csrfExemptPaths, rawBodyPaths []string, readyz gin.HandlerFunc, extraMetrics func(context.Context, io.Writer)) (*gin.Engine, *storageRoute, error) {
 	router := gin.New()
 	enableMethodNotAllowed(router)
+	// Unmatched paths get the D10 404 (issue #438). WithEmbeddedFrontend
+	// replaces this NoRoute with the SPA fallback, which answers reserved and
+	// API paths the same way.
+	router.NoRoute(abortNotFound)
 	if err := configureTrustedProxies(router, cfg.HTTP.TrustedProxies); err != nil {
 		return nil, nil, err
 	}
@@ -927,7 +958,7 @@ func configureTrustedProxies(engine *gin.Engine, proxies []string) error {
 
 func runtimeMiddlewareStack(cfg config.Config, metrics *httpMetrics, csrfExemptPaths, rawBodyPaths []string, route *storageRoute) []namedMiddleware {
 	stack := []namedMiddleware{
-		{name: "recovery", handler: gin.Recovery()},
+		{name: "recovery", handler: recoverWithEnvelope()},
 		// request_context also imposes the per-handler timeout (issue #268): the
 		// two IDs and the deadline ride one Request.WithContext, and the former
 		// standalone request_timeout layer is gone.

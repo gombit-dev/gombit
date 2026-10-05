@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"sync"
 	"time"
 )
@@ -55,8 +56,16 @@ type MemoryOption func(*Memory)
 // outside framework.App entirely), framework.App does not close a cache it
 // did not open — you are responsible for calling Close, or the goroutine
 // (and the Memory it holds) leaks for the life of the process.
+//
+// A non-positive interval means no janitor: no goroutine is started, as if the
+// option were omitted (issue #436). time.NewTicker panics on such a value, and
+// it would do so inside the janitor goroutine, where the caller cannot recover
+// it, so an unset or misparsed interval used to crash the whole process.
 func WithJanitor(interval time.Duration) MemoryOption {
 	return func(m *Memory) {
+		if interval <= 0 {
+			return
+		}
 		m.stop = make(chan struct{})
 		m.done = make(chan struct{})
 		go m.runJanitor(interval)
@@ -225,11 +234,25 @@ func (m *Memory) Increment(ctx context.Context, key string, delta int64) (int64,
 
 	var current int64
 	if item, ok := m.items[key]; ok && !item.expired(m.now()) {
-		if err := json.Unmarshal(item.payload, &current); err != nil {
+		// Decoded through a pointer so a stored nil (JSON null), which
+		// json.Unmarshal would otherwise skip and leave at 0, is refused like
+		// any other non-integer, as Redis refuses it.
+		var stored *int64
+		if err := json.Unmarshal(item.payload, &stored); err != nil {
 			return 0, fmt.Errorf("cache: increment %q: stored value is not an integer: %w", key, err)
 		}
+		if stored == nil {
+			return 0, fmt.Errorf("cache: increment %q: stored value is not an integer: null", key)
+		}
+		current = *stored
 	}
 
+	// Refuse to wrap, as Redis INCRBY does: a counter at MaxInt64 must not
+	// silently become MinInt64 in development and fail in production (issue
+	// #437). The stored value is left as it was.
+	if (delta > 0 && current > math.MaxInt64-delta) || (delta < 0 && current < math.MinInt64-delta) {
+		return 0, fmt.Errorf("cache: increment %q: increment or decrement would overflow", key)
+	}
 	current += delta
 	payload, err := encode(current)
 	if err != nil {

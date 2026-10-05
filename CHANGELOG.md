@@ -299,6 +299,11 @@ version.
 
 ### Changed
 
+- A new app's README lists `storage/` (the local driver's files, created on
+  the first write and gitignored) and says `internal/platform` migrates the
+  framework's tables (auth, storage claims). The README, the docs index, and
+  the user guides (router, security, build, lifecycle, health, frontend,
+  contract, CLI, tutorial) now cover the shipped storage feature.
 - A new app's `.env.example` lists every `GOMBIT_*` variable the config
   package reads, including `GOMBIT_JOBS_DRIVER`, `GOMBIT_JOBS_QUEUE`,
   `GOMBIT_JOBS_NAMESPACE`, `GOMBIT_HTTP_TRUSTED_PROXIES`, and the database
@@ -311,12 +316,16 @@ version.
 
 ### Fixed
 
-- `gombit contract app` reports the framework version the go command would
-  use. A `replace` of a version the app does not require no longer counts,
-  and an exact-version `replace` wins over an every-version one in either
-  order (a wildcard local replace plus an exact fork used to fail as
-  unresolved). It shares its reading of `go.mod` with `gombit upgrade
-  baseline`, so the two commands agree
+- `gombit contract app` reports only a framework release, picking the
+  `replace` the go command would. A `replace` of a version the app does not
+  require no longer counts, and an exact-version `replace` wins over an
+  every-version one in either order (a wildcard local replace plus an exact
+  one used to fail as unresolved). A fork (`replace` by another module) is
+  now unresolved, like a local path: its version used to be reported as the
+  framework's, which is not a release a host can find. A `go.mod` the go
+  command refuses (the framework required twice, conflicting replaces) is an
+  error. It shares this reading of `go.mod` with `gombit upgrade baseline`,
+  so for a `go.mod` the two report the same framework version
   ([#341](https://github.com/gombit-dev/gombit/issues/341)).
 - `gombit make command` refuses the names `generate` and `contract`, which
   collided with framework commands; every command the root registers is now
@@ -351,6 +360,24 @@ version.
   value with no complete tag), so it is kept as raw, undecoded input; it is
   no safer than that check, and complete tags elsewhere are still stripped
   ([#433](https://github.com/gombit-dev/gombit/issues/433)).
+- HTML documents in an embedded frontend other than the root `index.html`
+  (`/legal.html`, a multi-page build's `/about/index.html`) are served with
+  the SPA browser security policy instead of the API one, whose
+  `default-src 'none'` blocked the page's scripts, styles and images. The
+  policy now follows the served content type, not the file name
+  ([#434](https://github.com/gombit-dev/gombit/issues/434)).
+- Unknown paths and recovered handler panics now answer with the D10 error
+  envelope like every other framework error. A 404 used to be Gin's
+  `text/plain` "404 page not found" (or an empty body under an embedded
+  frontend), and a panic an empty 500 with no `Content-Type`, so JSON clients
+  such as the generated TypeScript client failed to parse them and got no
+  `request_id`. They are now `not_found` (404) and `internal` (500)
+  ([#438](https://github.com/gombit-dev/gombit/issues/438)).
+- `cache.WithJanitor` with a zero or negative interval no longer crashes the
+  process. The value reached `time.NewTicker` inside the janitor goroutine,
+  whose panic the caller could not recover; it now means no janitor, as if
+  the option were omitted
+  ([#436](https://github.com/gombit-dev/gombit/issues/436)).
 - The benchmark report no longer publishes a snapshot from a developer host
   as if it were the canonical run. A clean tree on the canonical protocol used
   to render with no banner whatever machine ran it. Each measured unit now
@@ -376,6 +403,37 @@ version.
   what the client receives. A panic that aborts the connection
   (`http.ErrAbortHandler`) before anything is sent is also counted as 500
   ([#432](https://github.com/gombit-dev/gombit/issues/432)).
+- The in-memory cache's `Increment` refuses to overflow, as Redis `INCRBY`
+  does: incrementing past `math.MaxInt64` (or below `math.MinInt64`) returns
+  an "increment or decrement would overflow" error and leaves the value as it
+  was. It used to wrap silently, so a counter that reached the top flipped to
+  a huge negative number under the memory driver and failed under Redis.
+  A stored `nil` is now refused as not an integer too, as Redis refuses it,
+  instead of being overwritten with the delta
+  ([#437](https://github.com/gombit-dev/gombit/issues/437)).
+- A failed `framework.New` closes the cache and job dispatcher it had already
+  opened. It returned the error without them, and the caller never received
+  the `*App` to close them, so each failure left the in-memory cache's janitor
+  goroutine (or a Redis pool) running for the life of the process. A cache or
+  dispatcher passed in with `WithCache` / `WithJobs` is still the caller's.
+  `RunContext`, `RunWorker` and `Run`'s worker mode now run the stop hooks once
+  and close those resources on every return, including the ones before
+  serving: a listener that cannot bind, a nil context, refused worker
+  options, flags or driver, and worker mode's `-h`. An `App` runs once; it
+  cannot be run again after any of them returns
+  ([#435](https://github.com/gombit-dev/gombit/issues/435)).
+- A response that cannot be encoded as JSON is answered with HTTP 500 and the
+  D10 `internal` envelope (with the request ID), and logged through the app's
+  logger. Huma decided the status before encoding, so a stored time outside
+  years 0..9999 or a float holding NaN/±Inf produced HTTP 200, a JSON content
+  type, and the plain-text body "error marshaling response", on the row's own
+  endpoint and every list page containing it. `encoding/json` writes nothing
+  until it has encoded the whole body, so Gombit's JSON format
+  (`contract.JSONFormat`) now answers such a failure itself while Gin still
+  holds the status, instead of handing it back to Huma. Outside
+  `framework.New`, `contract.HumaConfigFor` logs the failure through `slog`; a
+  writer on which the status cannot be confirmed to change gets the error back
+  to Huma as before ([#442](https://github.com/gombit-dev/gombit/issues/442)).
 
 ## [0.6.0] — 2026-09-28
 

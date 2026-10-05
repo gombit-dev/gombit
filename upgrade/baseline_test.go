@@ -235,7 +235,9 @@ func TestDetectWorkspace(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(goMod), 0o600); err != nil {
+	// go.mod's replace is not what applies in the workspace, so it is not
+	// reported (nor Local) while a go.work applies.
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(goMod+"replace github.com/gombit-dev/gombit => ../fw\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	work := filepath.Join(root, "go.work")
@@ -256,9 +258,10 @@ func TestDetectWorkspace(t *testing.T) {
 		}
 	}
 
+	offWant := upgrade.Framework{Module: upgrade.FrameworkModulePath, Required: "v0.8.2", Replace: &upgrade.Replacement{Path: "../fw"}, Local: true}
 	t.Setenv("GOWORK", "off")
-	if b, err := upgrade.Detect(dir); err != nil || b.Framework.Workspace != "" || b.Framework.Version != "v0.8.2" {
-		t.Fatalf("GOWORK=off: %+v, %v", b.Framework, err)
+	if b, err := upgrade.Detect(dir); err != nil || !sameFramework(b.Framework, offWant) {
+		t.Fatalf("GOWORK=off: %+v, %v; want %+v", b.Framework, err, offWant)
 	}
 
 	// go env -w GOWORK=off lives in the GOENV file, not the environment.
@@ -266,8 +269,8 @@ func TestDetectWorkspace(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "goenv"), []byte("GOWORK=off\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if b, err := upgrade.Detect(dir); err != nil || b.Framework.Workspace != "" || b.Framework.Version != "v0.8.2" {
-		t.Fatalf("go env -w GOWORK=off: %+v, %v", b.Framework, err)
+	if b, err := upgrade.Detect(dir); err != nil || !sameFramework(b.Framework, offWant) {
+		t.Fatalf("go env -w GOWORK=off: %+v, %v; want %+v", b.Framework, err, offWant)
 	}
 
 	t.Setenv("GOWORK", filepath.Join("..", "go.work"))

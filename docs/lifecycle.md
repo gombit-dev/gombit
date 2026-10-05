@@ -30,9 +30,17 @@ flight, Gombit calls `server.Close()` so remaining connections are dropped and
 context bounded by their own timeout, so a drain that used up its budget never
 hands them an already-expired one. A full shutdown can therefore take the drain
 delay plus up to twice the shutdown timeout; give the process manager at least
-that before it kills the process. Stop hooks also run after a start-hook failure, so they must
+that before it kills the process.
+
+Every return from `Run`, `RunContext` or `RunWorker` runs the stop hooks once
+and then closes the cache and job dispatcher the app opened: after a clean
+shutdown, and also when they fail before serving (a start hook fails, the
+listener cannot bind, the context is nil, the worker options, flags or driver
+are refused) or when worker mode only prints `-h`. Stop hooks must therefore
 tolerate partial application startup and be safe to call when the resource
-they clean up was never initialized.
+they clean up was never initialized. An `App` runs once: it cannot be run
+again after any of them returns, for whatever reason. A `framework.New` that
+fails closes what it had already opened itself before returning the error.
 
 `RunContext` binds the listener before start hooks run, which lets hooks read
 `App.Addr()` even when the configured HTTP address uses port `0`. The HTTP
@@ -43,8 +51,12 @@ required by ADR-011. Public API routes that belong in OpenAPI still need Huma
 typed handlers. `framework.WithEmbeddedFrontend` installs Gin `NoRoute` only
 when the FS has `index.html`; it does not wrap or replace `*gin.Engine`.
 
-The default router installs `gin.Recovery()` so panics in runtime probes or raw
-Gin escape-hatch handlers do not terminate the process. Production config sets
+The default router installs a recovery layer (`gin.CustomRecovery`) so panics in
+runtime probes or raw Gin escape-hatch handlers do not terminate the process; it
+answers a recovered panic with the D10 `internal` envelope (500) and logs the
+stack as `gin.Recovery` does. Unmatched paths get a D10 `not_found` (404) from
+the default `NoRoute`, which `WithEmbeddedFrontend` replaces with its SPA
+fallback. Production config sets
 Gin release mode before the default router is constructed.
 
 ## Lifecycle Ownership
@@ -74,6 +86,15 @@ steps that need their own runtime surfaces.
 `GOMBIT_JOBS_*` unless one is supplied, and `framework.Run` runs the jobs worker
 instead of the HTTP server when the process's first argument is `worker`
 (`./server worker`). See [`docs/jobs.md`](jobs.md#running-the-worker).
+
+It also opens the object store (`app.Storage()`) that `GOMBIT_STORAGE_*`
+configures, unless one is passed with `framework.WithStorage`. A storage
+configuration it refuses fails `New`. The local driver creates nothing until
+the first write. For the local and memory drivers with URLs, `New` mounts the
+storage route that serves them (see [`docs/router.md`](router.md)). A store
+has no `Close` (`storage.Storage` holds nothing to release), so shutdown
+leaves it alone. `/readyz` does
+not probe storage. See [`docs/storage.md`](storage.md).
 
 The probes are raw Gin routes with D10-style bodies and remain outside
 generated OpenAPI when Huma is mounted. `/readyz` is datastore-aware
