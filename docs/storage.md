@@ -6,10 +6,19 @@ code depends on `storage.Storage`, never on a filesystem path or an S3 SDK
 call, so moving from local development to S3-compatible storage in
 production changes configuration, not code.
 
-> **Status:** the contract, the local, in-memory, and S3-compatible
-> drivers, the upload helpers, public and signed URLs, direct uploads, and
-> metadata and cleanup semantics. Admin fields follow
-> ([epic #279](https://github.com/gombit-dev/gombit/issues/279)).
+> **Status:** complete
+> ([epic #279](https://github.com/gombit-dev/gombit/issues/279)): the
+> contract, the local, in-memory, and S3-compatible drivers, the upload
+> helpers, public and signed URLs, direct uploads, metadata and cleanup
+> semantics, storage-backed model fields, and their admin widgets.
+>
+> Most apps meet storage through a model field: `file` and `image` fields
+> (`types.File`, `types.Image`) get an upload operation, a file input in the
+> generated form, and a widget in the admin, all built on what this page
+> describes. Start at [fields.md § Storage-backed
+> fields](fields.md#storage-backed-fields) and
+> [admin.md § File and image fields](admin.md#file-and-image-fields); read on
+> here for the contract underneath, or to store files outside a model.
 
 Every app has a store: `app.Storage()` returns the driver `GOMBIT_STORAGE_DRIVER`
 names, which is local files under `./storage` by default. A runnable example
@@ -528,7 +537,7 @@ What the policy guarantees:
 | Error | Response |
 | --- | --- |
 | `ErrTooLarge` (or an `http.MaxBytesError`) | `413 payload_too_large` |
-| `ErrType`, `ErrNoFile`, `ErrMalformed` | `422 validation` |
+| `ErrType`, `ErrNoFile`, `ErrMalformed` | `422 validation_error` |
 | An invalid `Policy` | `500 internal` (the server's mistake) |
 | The request's context ended (the client went away, or it timed out), at any point of the request: during the file, a later field, or after the closing boundary | `503 dependency_unavailable`, through `storage.MapError` |
 | Anything else | `storage.MapError` |
@@ -659,8 +668,8 @@ same thing on every driver:
 | --- | --- | --- |
 | `ErrNotFound` | No object under the key | `404 not_found` (your message) |
 | `ErrInvalidKey` | The key breaks the key rules | `500 internal`: keys are built by the server, so an invalid one is a bug. Validate a key taken from a request with `ValidateKey` first, and answer 404. |
-| `ErrInvalidOptions` | A malformed content type or metadata, or a negative size or expiry | `422 validation` |
-| `ErrSizeMismatch` | The bytes read differ from the declared `Size` | `422 validation` |
+| `ErrInvalidOptions` | A malformed content type or metadata, or a negative size or expiry | `422 validation_error` |
+| `ErrSizeMismatch` | The bytes read differ from the declared `Size` | `422 validation_error` |
 | `ErrUnavailable` | The backend is unreachable or failed transiently | `503 dependency_unavailable` |
 | `ErrUnknownOutcome` | A `Put` sent the object to a remote backend and never learned whether it was stored; the key holds the old object or the new one | `503 dependency_unavailable` |
 | `ErrExists` | A `Put` with `IfAbsent` found an object already stored under the key | `409 conflict` |

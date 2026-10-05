@@ -7,7 +7,13 @@ OpenAPI routes (`/openapi.json` and siblings), `/docs` when
 `API.DocsEnabled` is true, and — when `GOMBIT_JWT_SECRET` is set and a
 database is attached — the auth routes (`<prefix>/auth/*`, `<prefix>/me`, where
 `<prefix>` is `API.Prefix`, `/api/v1` by default; cookie mode also mounts the
-admin API and `/admin/`).
+admin API and `/admin/`). For the local and memory storage drivers it also
+mounts the storage route `GOMBIT_STORAGE_LOCAL_URL/*key` (`/_storage` by
+default) when the drivers have URLs: a non-empty `GOMBIT_STORAGE_LOCAL_URL`
+and a secret to sign them with (`GOMBIT_STORAGE_URL_SECRET`, or one derived
+from `GOMBIT_JWT_SECRET`). There, `GET`/`HEAD` serve signed and public file
+URLs, and `PUT` takes direct uploads (see
+[storage.md § Visibility and URLs](storage.md#visibility-and-urls)).
 Public API handlers register on `app.API()` (see [`docs/contract.md`](contract.md));
 raw Gin routes continue to use `app.Router()`.
 
@@ -63,6 +69,15 @@ Recovery
   -> feature group middleware (if any)
     -> feature handler
 ```
+
+A direct upload to the storage route (a `PUT` under the path `New` mounted it
+at) skips three layers. It skips the body size limit, since its signed URL
+bounds the length, and sanitization, since the file is stored byte for byte.
+It also skips CSRF, because the signed URL alone authorizes it, as a
+presigned S3 URL does. Nothing else under that path is exempt. With
+`WithStorage`, `New` mounts no storage route. With `WithRouter`, it still
+mounts the route on the app's router, but the middleware is the app's own,
+so the app exempts those uploads from its own CSRF check and body limit.
 
 The **request timeout is opt-in** (issue #270 / PERF-12). The framework default
 is `0`, which disables the per-handler deadline. The deadline lives inside the
