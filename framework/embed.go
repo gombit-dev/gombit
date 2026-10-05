@@ -159,11 +159,27 @@ func serveEmbeddedFile(c *gin.Context, fsys fs.FS, name string, csp []string) bo
 		return false
 	}
 
-	if name == "index.html" {
-		applyBrowserSecurityHeaders(c, csp)
-	}
+	// The security policy follows the content type actually served, not a file
+	// name (issue #434): every HTML document in the embedded build (a
+	// multi-page Vite app's /about/index.html, a static /legal.html) is a page
+	// rendered in a browser and needs the browser policy, or the API policy's
+	// default-src 'none' blocks its scripts, styles and images. The type is
+	// decided here, the way http.ServeContent would decide it, and set on the
+	// response so ServeContent uses it unchanged.
+	ctype := mime.TypeByExtension(path.Ext(name))
 
 	if rs, ok := f.(io.ReadSeeker); ok {
+		if ctype == "" {
+			sniffed, err := sniffContentType(rs)
+			if err != nil {
+				return false
+			}
+			ctype = sniffed
+		}
+		if isHTMLContentType(ctype) {
+			applyBrowserSecurityHeaders(c, csp)
+		}
+		c.Writer.Header().Set("Content-Type", ctype)
 		http.ServeContent(c.Writer, c.Request, info.Name(), info.ModTime(), rs)
 		return true
 	}
@@ -172,8 +188,35 @@ func serveEmbeddedFile(c *gin.Context, fsys fs.FS, name string, csp []string) bo
 	if err != nil {
 		return false
 	}
-	writeBytes(c, contentTypeFor(name), data)
+	if ctype == "" {
+		ctype = "application/octet-stream"
+	}
+	if isHTMLContentType(ctype) {
+		applyBrowserSecurityHeaders(c, csp)
+	}
+	writeBytes(c, ctype, data)
 	return true
+}
+
+// sniffContentType detects the type of a file with no recognised extension
+// from its first 512 bytes, as http.ServeContent does, and rewinds it.
+func sniffContentType(rs io.ReadSeeker) (string, error) {
+	var buf [512]byte
+	n, _ := io.ReadFull(rs, buf[:])
+	if _, err := rs.Seek(0, io.SeekStart); err != nil {
+		return "", err
+	}
+	return http.DetectContentType(buf[:n]), nil
+}
+
+// isHTMLContentType reports whether ctype is an HTML document type, the
+// responses that need the browser security policy.
+func isHTMLContentType(ctype string) bool {
+	mediaType, _, err := mime.ParseMediaType(ctype)
+	if err != nil {
+		return false
+	}
+	return mediaType == "text/html" || mediaType == "application/xhtml+xml"
 }
 
 func serveIndexHTML(c *gin.Context, fsys fs.FS, apiPrefix string, csp []string) {
@@ -185,12 +228,4 @@ func serveIndexHTML(c *gin.Context, fsys fs.FS, apiPrefix string, csp []string) 
 	data = injectAPIPrefixHTML(data, apiPrefix)
 	applyBrowserSecurityHeaders(c, csp)
 	writeBytes(c, "text/html; charset=utf-8", data)
-}
-
-func contentTypeFor(name string) string {
-	ctype := mime.TypeByExtension(path.Ext(name))
-	if ctype == "" {
-		return "application/octet-stream"
-	}
-	return ctype
 }

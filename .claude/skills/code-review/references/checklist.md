@@ -9,7 +9,7 @@ This file must stay aligned with `.cursor/skills/code-review/references/checklis
 ## Working agreement (always)
 
 - [ ] Linked issue exists and the PR states which AC it satisfies
-- [ ] Scope is inside that issue's milestone; no unplanned battery (events, scheduler, mail, storage, gRPC, multi-tenancy, i18n)
+- [ ] Scope is inside that issue's milestone; no unplanned battery (events, scheduler, mail, gRPC, multi-tenancy, i18n)
 - [ ] No new issues, labels, or milestones created without asking (labels/milestones per build plan §6)
 - [ ] Locked decisions were not reopened
 

@@ -268,6 +268,11 @@ version.
 
 ### Changed
 
+- A new app's README lists `storage/` (the local driver's files, created on
+  the first write and gitignored) and says `internal/platform` migrates the
+  framework's tables (auth, storage claims). The README, the docs index, and
+  the user guides (router, security, build, lifecycle, health, frontend,
+  contract, CLI, tutorial) now cover the shipped storage feature.
 - A new app's `.env.example` lists every `GOMBIT_*` variable the config
   package reads, including `GOMBIT_JOBS_DRIVER`, `GOMBIT_JOBS_QUEUE`,
   `GOMBIT_JOBS_NAMESPACE`, `GOMBIT_HTTP_TRUSTED_PROXIES`, and the database
@@ -309,6 +314,17 @@ version.
   value with no complete tag), so it is kept as raw, undecoded input; it is
   no safer than that check, and complete tags elsewhere are still stripped
   ([#433](https://github.com/gombit-dev/gombit/issues/433)).
+- HTML documents in an embedded frontend other than the root `index.html`
+  (`/legal.html`, a multi-page build's `/about/index.html`) are served with
+  the SPA browser security policy instead of the API one, whose
+  `default-src 'none'` blocked the page's scripts, styles and images. The
+  policy now follows the served content type, not the file name
+  ([#434](https://github.com/gombit-dev/gombit/issues/434)).
+- `cache.WithJanitor` with a zero or negative interval no longer crashes the
+  process. The value reached `time.NewTicker` inside the janitor goroutine,
+  whose panic the caller could not recover; it now means no janitor, as if
+  the option were omitted
+  ([#436](https://github.com/gombit-dev/gombit/issues/436)).
 - The benchmark report no longer publishes a snapshot from a developer host
   as if it were the canonical run. A clean tree on the canonical protocol used
   to render with no banner whatever machine ran it. Each measured unit now
@@ -342,6 +358,17 @@ version.
   A stored `nil` is now refused as not an integer too, as Redis refuses it,
   instead of being overwritten with the delta
   ([#437](https://github.com/gombit-dev/gombit/issues/437)).
+- A failed `framework.New` closes the cache and job dispatcher it had already
+  opened. It returned the error without them, and the caller never received
+  the `*App` to close them, so each failure left the in-memory cache's janitor
+  goroutine (or a Redis pool) running for the life of the process. A cache or
+  dispatcher passed in with `WithCache` / `WithJobs` is still the caller's.
+  `RunContext`, `RunWorker` and `Run`'s worker mode now run the stop hooks once
+  and close those resources on every return, including the ones before
+  serving: a listener that cannot bind, a nil context, refused worker
+  options, flags or driver, and worker mode's `-h`. An `App` runs once; it
+  cannot be run again after any of them returns
+  ([#435](https://github.com/gombit-dev/gombit/issues/435)).
 
 ## [0.6.0] — 2026-09-28
 

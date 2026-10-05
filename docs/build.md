@@ -89,6 +89,9 @@ Emotion-injected `<style>` tags:
 - `font-src 'self' https://fonts.gstatic.com` — Roboto font files
 - `connect-src 'self'` — same-origin API
 - `img-src 'self' data:`
+- when the object store serves files from another origin (an S3 bucket or
+  CDN), that origin joins `img-src` and `connect-src`, for file previews and
+  direct uploads (see [security.md](security.md))
 
 plus `Referrer-Policy` and `X-Frame-Options: DENY`. `/docs` (when enabled)
 keeps Huma's own Swagger UI CSP and additionally gets the browser hardening

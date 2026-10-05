@@ -56,8 +56,16 @@ type MemoryOption func(*Memory)
 // outside framework.App entirely), framework.App does not close a cache it
 // did not open — you are responsible for calling Close, or the goroutine
 // (and the Memory it holds) leaks for the life of the process.
+//
+// A non-positive interval means no janitor: no goroutine is started, as if the
+// option were omitted (issue #436). time.NewTicker panics on such a value, and
+// it would do so inside the janitor goroutine, where the caller cannot recover
+// it, so an unset or misparsed interval used to crash the whole process.
 func WithJanitor(interval time.Duration) MemoryOption {
 	return func(m *Memory) {
+		if interval <= 0 {
+			return
+		}
 		m.stop = make(chan struct{})
 		m.done = make(chan struct{})
 		go m.runJanitor(interval)
