@@ -780,6 +780,10 @@ func syncLogger(logger *zap.Logger) error {
 func newRouter(cfg config.Config, csrfExemptPaths, rawBodyPaths []string, readyz gin.HandlerFunc, extraMetrics func(context.Context, io.Writer)) (*gin.Engine, *storageRoute, error) {
 	router := gin.New()
 	enableMethodNotAllowed(router)
+	// Unmatched paths get the D10 404 (issue #438). WithEmbeddedFrontend
+	// replaces this NoRoute with the SPA fallback, which answers reserved and
+	// API paths the same way.
+	router.NoRoute(abortNotFound)
 	if err := configureTrustedProxies(router, cfg.HTTP.TrustedProxies); err != nil {
 		return nil, nil, err
 	}
@@ -956,7 +960,7 @@ func configureTrustedProxies(engine *gin.Engine, proxies []string) error {
 
 func runtimeMiddlewareStack(cfg config.Config, metrics *httpMetrics, csrfExemptPaths, rawBodyPaths []string, route *storageRoute) []namedMiddleware {
 	stack := []namedMiddleware{
-		{name: "recovery", handler: gin.Recovery()},
+		{name: "recovery", handler: recoverWithEnvelope()},
 		// request_context also imposes the per-handler timeout (issue #268): the
 		// two IDs and the deadline ride one Request.WithContext, and the former
 		// standalone request_timeout layer is gone.
