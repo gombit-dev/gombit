@@ -58,6 +58,9 @@ An instance is **ready** when both hold:
 2. **The configured datastore is reachable.** When a database is attached
    (`framework.WithDatabase`), readiness pings it with a short timeout
    (2s). An app with no database attached is ready on criterion 1 alone.
+   The cache, the job queue, and the object store (`app.Storage()`) are not
+   probed: an unreachable store fails the requests that use it (`503
+   dependency_unavailable`), not readiness.
 
 Start hooks (`OnStart`) need no separate check: [`RunContext`](lifecycle.md)
 begins serving **only after** every start hook succeeds, so any request that

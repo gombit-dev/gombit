@@ -169,6 +169,13 @@ gombit dev
 `gombit make resource` honors `ui:` in `gombit.yaml`. Default (`minimal`
 or missing) stays headless; `ui: mui` emits MUI Table/TextField pages.
 
+A `file` or `image` field gets a file input in the generated form. On
+submit, the form asks the field's upload operation for a grant, sends the
+bytes straight to storage, and submits the returned key. The list links
+each file to its URL. With an S3 store, the bucket needs a CORS rule for the
+app's origin; see [fields.md § Storage-backed fields](fields.md#storage-backed-fields)
+and [storage.md § Direct uploads](storage.md#direct-uploads).
+
 ## Split vs embed (C5)
 
 Split deploy is the default. The Vite app is a separate origin; set

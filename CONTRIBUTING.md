@@ -276,7 +276,7 @@ short:
 - generated frontend source contains no secrets; `VITE_*` is public;
 - API changes regenerate OpenAPI and the TypeScript client in the same PR;
 - scope stays inside the issue milestone — no M6 "battery" creep (events,
-  scheduler, mail, storage, gRPC, multi-tenancy, i18n);
+  scheduler, mail, gRPC, multi-tenancy, i18n);
 - the PR links its issue and states which acceptance criteria it satisfies.
 
 ## Releasing

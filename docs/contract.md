@@ -206,6 +206,11 @@ Conventions:
 - Put validation metadata on body fields (`minLength`, `maxLength`, `format`,
   `enum`, `required`, and the other Huma tags).
 - Document fields with `doc` / `example` so they appear in OpenAPI.
+- A storage-backed field (`types.File`, `types.Image`) is written as its
+  object key, taken from an upload grant. It reads back as a file object
+  (`key`, `filename`, `size`, `content_type`, `url`, `missing`). The
+  generated handler adds one upload-grant operation per field; see
+  [fields.md § Storage-backed fields](fields.md#storage-backed-fields).
 
 ## Validation → D10 `fields`
 
@@ -292,8 +297,13 @@ over 8MiB (see [`docs/router.md`](router.md)). The opt-in XSS sanitizer
 cap, so it never produces its own 413; cookie CSRF uses `Authorization` (403). An unsupported method on a known
 route yields `contract.MethodNotAllowed` (`error.code` `method_not_allowed`,
 HTTP 405) with an `Allow` header listing the methods the path supports — the
-router distinguishes this from a genuinely unknown path (404). Do not treat
-413 or 405 as a handler-level §41 category or add them to the table above.
+router distinguishes this from a genuinely unknown path. That unknown path
+gets the D10 `not_found` envelope (HTTP 404), with or without an embedded
+frontend (whose SPA fallback answers API and other reserved paths the same
+way), and a handler panic recovered by the runtime stack gets the D10
+`internal` envelope (HTTP 500), unless the handler had already started its
+response. Both carry `request_id`. Do not treat 413 or 405 as a handler-level
+§41 category or add them to the table above.
 
 Response bodies carry only the D10 shape (`{data, meta?}` / `{error}`). Huma's
 `$schema` link property is disabled at the adapter, so neither responses nor the
@@ -309,6 +319,11 @@ the raw driver string.
 
 The `validation_error` code is preserved from M3-1 / D10 (not renamed to
 `validation`).
+
+Storage failures map the same way: `storage.MapError` turns a driver error
+into its category (`not_found`, `validation_error`, `conflict`,
+`dependency_unavailable`, or `internal` for a bug), so a handler returns it
+as is; see [storage.md § Errors](storage.md#errors).
 
 ## OpenAPI
 
