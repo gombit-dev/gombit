@@ -317,9 +317,11 @@ gombit:
 // with scaffold 0, to its gombit.yaml (creating the file if there is none).
 // Nothing else in the file changes: the result must read back as recorded,
 // with every other key meaning what it did, or nothing is written. The file
-// is replaced through a temp file and a rename (internal/atomicfile: atomic on
-// Unix and on NTFS; see that package for the volumes where Windows does not
-// promise it). It reports whether it wrote; an app that already
+// is replaced through a synced temp file and a rename (internal/atomicfile):
+// a reader sees the old file or the new, never a part, on Unix and NTFS, and
+// on Unix the replacement is also synced to disk before RecordBaseline
+// returns; see that package for the rest. It reports whether it wrote; an
+// app that already
 // records its baseline is left as it is.
 func RecordBaseline(workDir string) (Baseline, bool, error) {
 	b, err := Detect(workDir)
