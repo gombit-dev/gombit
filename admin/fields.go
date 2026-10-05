@@ -450,36 +450,6 @@ func makeGetter(index []int, ft FieldType) func(any) any {
 	}
 }
 
-// makeZeroInstant returns whether the date or date-time field at index holds
-// the zero instant, whatever Location it carries (a nil pointer and an
-// invalid sql.NullTime are NULL, not the zero instant).
-func makeZeroInstant(index []int) func(any) bool {
-	return func(inst any) bool {
-		rv := reflect.Indirect(reflect.ValueOf(inst))
-		if !rv.IsValid() {
-			return false
-		}
-		field := rv.FieldByIndex(index)
-		if field.Kind() == reflect.Pointer {
-			if field.IsNil() {
-				return false
-			}
-			field = field.Elem()
-		}
-		switch v := field.Interface().(type) {
-		case time.Time:
-			return v.IsZero()
-		case types.Date:
-			return v.IsZero()
-		case sql.NullTime:
-			return v.Valid && v.Time.IsZero()
-		case gorm.DeletedAt:
-			return v.Valid && v.Time.IsZero()
-		}
-		return false
-	}
-}
-
 func makeSetter(index []int, ft FieldType, destType reflect.Type) func(any, any) error {
 	return func(inst any, raw any) error {
 		coerced, err := coerceValue(raw, ft)

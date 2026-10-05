@@ -118,6 +118,12 @@ func testTimeRangeWritePaths(t *testing.T, db *DB) {
 	}
 }
 
+type rangedNullable struct {
+	ID  uint         `gorm:"primaryKey"`
+	Opt *time.Time   `gorm:"default:null"`
+	NT  sql.NullTime `gorm:"default:null"`
+}
+
 type rangedDefault struct {
 	ID   uint `gorm:"primaryKey"`
 	Name string
@@ -163,6 +169,40 @@ func testTimeRangeUnsetAndInRange(t *testing.T, db *DB) {
 	// The default only fills a create; an update naming the column writes
 	// the zero instant itself.
 	wantRangeError(t, "Select(At) Updates, zero", db.Model(&defaulted).Select("At").Updates(rangedDefault{}).Error, "at")
+	var before rangedDefault
+	if err := db.First(&before, defaulted.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Save(&rangedDefault{ID: defaulted.ID, Name: "saved"}).Error; err != nil {
+		t.Errorf("Save, zero defaulted column: %v", err)
+	}
+	var after rangedDefault
+	if err := db.First(&after, defaulted.ID).Error; err != nil || after.Name != "saved" || !after.At.Equal(before.At) {
+		t.Errorf("Save, zero defaulted column: %v, stored %+v, want At kept as %v", err, after, before.At)
+	}
+	// A zero the edit sets (KeepStoredZeros' edited columns) is refused, not
+	// left out.
+	wantRangeError(t, "Save, zero in an edited defaulted column", KeepStoredZeros(db.DB, &after, nil, []string{"at"}).Save(&rangedDefault{ID: defaulted.ID, Name: "edited"}).Error, "at")
+
+	// NULL is a value, not an unset column: Save clears a defaulted nullable
+	// column (#562 round 5).
+	_ = db.Migrator().DropTable(&rangedNullable{})
+	if err := db.AutoMigrate(&rangedNullable{}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Migrator().DropTable(&rangedNullable{}) })
+	set := inRange
+	nullable := rangedNullable{Opt: &set, NT: sql.NullTime{Time: inRange, Valid: true}}
+	if err := db.Create(&nullable).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Save(&rangedNullable{ID: nullable.ID}).Error; err != nil {
+		t.Errorf("Save clearing defaulted nullable columns: %v", err)
+	}
+	var cleared rangedNullable
+	if err := db.First(&cleared, nullable.ID).Error; err != nil || cleared.Opt != nil || cleared.NT.Valid {
+		t.Errorf("Save clearing defaulted nullable columns: %v, stored %+v, want NULLs", err, cleared)
+	}
 
 	paid := inRange
 	legacy := row
@@ -246,11 +286,26 @@ func testTimeRangeWhatGORMWrites(t *testing.T, db *DB) {
 	// On a create GORM always writes an auto timestamp, Select or not, so a
 	// caller-set one is checked even when Select leaves it out (#562 round 3).
 	wantRangeError(t, "Select-restricted Create, CreatedAt year 0", db.Select("Name", "Due", "Issued").Create(&rangedEvent{Name: "sel", Due: inRange, Issued: dateFine, CreatedAt: yearZero}).Error, "created_at")
-	// Off a create the auto timestamps are written as the struct holds them:
-	// Save selects "*" and Select names the column, so a zero CreatedAt is
-	// the zero instant written over the row's (#562 round 4).
-	wantRangeError(t, "Save zero CreatedAt", db.Save(&rangedEvent{ID: row.ID, Name: "s", Due: inRange, Issued: dateFine}).Error, "created_at")
+	// An update that names the column writes the zero instant over the row's,
+	// however Select spells it (GORM's own select map decides, #562 round 5).
 	wantRangeError(t, "Select(CreatedAt) Updates, zero", db.Model(&row).Select("CreatedAt").Updates(rangedEvent{}).Error, "created_at")
+	for _, sel := range []string{"ranged_events.due", "`due`", "ranged_events.*"} {
+		wantRangeError(t, "Select("+sel+") Updates, zero", db.Model(&row).Select(sel).Updates(rangedEvent{Name: "q"}).Error, "due")
+	}
+	// Save (Select("*")) of a struct that leaves CreatedAt unset keeps the
+	// row's: the zero is left out of the UPDATE rather than written over it
+	// or refused, and when no row matches, Save's insert fallback fills it.
+	if err := db.Save(&rangedEvent{ID: row.ID, Name: "s", Due: inRange, Issued: dateFine}).Error; err != nil {
+		t.Errorf("Save, zero CreatedAt: %v", err)
+	}
+	upserted := rangedEvent{ID: row.ID + 777777, Name: "new by key", Due: inRange, Issued: dateFine}
+	if err := db.Save(&upserted).Error; err != nil {
+		t.Errorf("Save of a new row by key, zero CreatedAt: %v", err)
+	}
+	var inserted rangedEvent
+	if err := db.First(&inserted, upserted.ID).Error; err != nil || inserted.CreatedAt.Year() < 2000 {
+		t.Errorf("Save's insert fallback: %v, created_at %v", err, inserted.CreatedAt)
+	}
 	// GORM skips a struct field only when reflect calls it zero, so a zero
 	// instant in any other form is written, and refused: a non-pointer time
 	// in a Location (what pgx and time.Parse return), a non-nil pointer to
@@ -372,6 +427,29 @@ func testTimeRangeStoredZero(t *testing.T, db *DB) {
 	wantRangeError(t, "Select(*).Updates of a row storing the zero instant", db.Select("*").Updates(&loaded).Error, "due")
 	wantRangeError(t, "Update(column, zero)", db.Model(&loaded).Update("due", time.Time{}).Error, "due")
 	wantRangeError(t, "Select(due) zero", db.Model(&loaded).Select("due").Updates(rangedEvent{}).Error, "due")
+	// KeepStoredZeros (what the admin's PATCH uses) leaves out a column that
+	// still holds the stored zero after the hooks, for that model only, and
+	// one the edit sets to the zero instant is refused.
+	kept := StoredZeroColumns(db.DB, &loaded)
+	if len(kept) != 1 || kept[0] != "due" {
+		t.Fatalf("StoredZeroColumns = %v, want [due]", kept)
+	}
+	loaded.Name = "kept"
+	if err := KeepStoredZeros(db.DB, &loaded, kept, nil).Save(&loaded).Error; err != nil {
+		t.Errorf("Save keeping the stored zero: %v", err)
+	}
+	q := KeepStoredZeros(db.DB, &loaded, kept, nil).Model(&loaded).Select("*")
+	if err := q.Updates(&loaded).Error; err != nil {
+		t.Errorf("Select(*).Updates keeping the stored zero: %v", err)
+	}
+	if len(q.Statement.Omits) != 0 {
+		t.Errorf("the left-out column stayed in the chain's Omits: %v", q.Statement.Omits)
+	}
+	wantRangeError(t, "KeepStoredZeros for another model", KeepStoredZeros(db.DB, &rangedDefault{}, kept, nil).Save(&loaded).Error, "due")
+	var reread rangedEvent
+	if err := db.First(&reread, loaded.ID).Error; err != nil || reread.Name != "kept" || !reread.Due.IsZero() {
+		t.Fatalf("kept save: %v, stored %+v", err, reread)
+	}
 	// The documented repair: give the column a real value, after which Save
 	// writes the row again.
 	if err := db.Model(&loaded).Update("due", inRange).Error; err != nil {

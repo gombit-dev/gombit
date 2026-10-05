@@ -114,21 +114,34 @@ What a statement writes is what GORM writes:
   writes it, on every driver, whatever `Location` the value carries: a zero
   non-pointer field on create, a zero value in a map or `Update`, a non-nil
   pointer to it or a valid `sql.NullTime` holding it, and a zero struct field
-  an update writes, which is one in a column `Select` names or under
-  `Select("*")` (`Save`). It is left alone where GORM does not write it: a
-  zero auto timestamp or a zero column with a `default` on create (GORM or the
-  database fills it, `Select` or not), and a zero struct field `Updates`
-  skips. GORM's zero is the Go zero value, `time.Time{}`: a zero time in a
-  `Location` (as `time.Parse` or pgx return it) is written, and refused. Use a
-  pointer (or `sql.NullTime`) for an optional time.
+  an update writes. GORM decides that: an update writes a zero struct field
+  only when `Select` puts its column in GORM's select map (a field or column
+  name, `table.col`, a quoted name, `*`, `table.*`), and `Updates` skips it
+  otherwise. GORM's zero is the Go zero value, `time.Time{}`; a zero time
+  carrying a `Location` (`.Local()`, a pgx read, a parse with an explicit
+  offset such as `+00:00`) is written, and refused. Use a pointer (or
+  `sql.NullTime`) for an optional time.
+- An unset auto timestamp or `default` column is not a value to refuse. On a
+  create GORM fills a zero `CreatedAt` / `UpdatedAt` and the database a zero
+  defaulted column, `Select` or not. Under `Select("*")` (`Save`) an update
+  leaves such a column out of its `SET` when it holds the zero instant, so
+  `Save` of a struct that does not carry `CreatedAt` keeps the row's, and
+  when no row matches, `Save`'s insert fallback fills it as any create does.
+  NULL (a nil pointer, an invalid `sql.NullTime`) is a value and is written.
+  Naming the column (`Select("CreatedAt")`) writes the zero, and is refused.
 - A row stored before this check with the zero instant in a non-pointer
-  column (an unset field on SQLite or PostgreSQL; MySQL refused it) can still
-  have its other columns changed by `Update`, a partial `Updates`, and the
-  admin, which leaves such a column out of an edit that does not set it. A
-  `Save` of the row writes the zero instant back and is a 422; so is
-  `Updates(&row)` on PostgreSQL, which reads the value back in `Local` (GORM
-  then writes it), while on SQLite GORM skips it. To clean the rows up, make
-  the field a pointer and
+  column (an unset field on SQLite or PostgreSQL, `'0000-00-00'` on MySQL)
+  can still have its other columns changed by `Update` and a partial
+  `Updates`. The admin's PATCH keeps such a column, mapped or not, when the
+  request does not set it: `database.StoredZeroColumns` lists the loaded
+  row's zero columns, and `database.KeepStoredZeros` scopes the update to
+  leave one out of its `SET` if it still holds the zero after the model's
+  hooks, so a hook that repairs it is written. A zero the request sets is
+  refused, in any column. In your own code a `Save` of
+  such a row writes the zero back and is a 422 unless you scope it the same
+  way; so is `Updates(&row)` on PostgreSQL, which reads the value back in
+  `Local` (GORM then writes it), while on SQLite and MySQL GORM skips it. To
+  clean the rows up, make the field a pointer and
   `UPDATE … SET col = NULL WHERE col = '0001-01-01 00:00:00'`, or give the
   column a real value.
 - A string written to such a column is read as the drivers read it (RFC 3339,

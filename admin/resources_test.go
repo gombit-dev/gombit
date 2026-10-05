@@ -572,52 +572,6 @@ func TestResourceWritesRefuseOutOfRangeTimestamps(t *testing.T) {
 	}
 }
 
-// A row stored before the range check with the zero instant in a non-pointer
-// column stays editable: a PATCH that does not set the column does not write
-// it back, while one that sets the zero instant is refused. Date columns
-// holding a real value are still written, so UpdatedAt advances (#562 round 4).
-func TestResourcePatchKeepsAStoredZeroTimestampEditable(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	type Milestone struct {
-		ID        uint      `gorm:"primaryKey" json:"id"`
-		Title     string    `json:"title"`
-		Due       time.Time `json:"due"`
-		CreatedAt time.Time `json:"created_at"`
-		UpdatedAt time.Time `json:"updated_at"`
-	}
-	app := newCookieApp(t)
-	if err := app.DB().AutoMigrate(&Milestone{}); err != nil {
-		t.Fatalf("AutoMigrate: %v", err)
-	}
-	if err := admin.Register(app, Milestone{}, admin.Options{Slug: "milestones"}); err != nil {
-		t.Fatalf("Register: %v", err)
-	}
-	jar := loginSuperuser(t, app)
-
-	row := Milestone{Title: "legacy", Due: time.Date(2026, 10, 4, 0, 0, 0, 0, time.UTC)}
-	if err := app.DB().Create(&row).Error; err != nil {
-		t.Fatalf("create fixture: %v", err)
-	}
-	old := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
-	if err := app.DB().Exec("UPDATE milestones SET due = ?, updated_at = ? WHERE id = ?", time.Time{}, old, row.ID).Error; err != nil {
-		t.Fatalf("store the zero instant: %v", err)
-	}
-	path := fmt.Sprintf("/api/v1/admin/resources/milestones/%d", row.ID)
-	if res := doRequest(app, jar, http.MethodPatch, path, `{"title":"renamed"}`); res.Code != http.StatusOK {
-		t.Fatalf("title-only PATCH of a row storing the zero instant: %d %s", res.Code, res.Body.String())
-	}
-	zeroed := doRequest(app, jar, http.MethodPatch, path, `{"due":"0001-01-01T00:00:00Z"}`)
-	assertError(t, zeroed, http.StatusUnprocessableEntity, contract.CodeValidationError)
-
-	var stored Milestone
-	if err := app.DB().First(&stored, row.ID).Error; err != nil {
-		t.Fatal(err)
-	}
-	if stored.Title != "renamed" || !stored.Due.IsZero() || !stored.UpdatedAt.After(old) || stored.CreatedAt.IsZero() {
-		t.Fatalf("stored %+v, want the title changed, due untouched, updated_at advanced", stored)
-	}
-}
-
 func TestResourceJSONAndUUIDWrites(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	type Token struct {

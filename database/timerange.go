@@ -1,6 +1,7 @@
 package database
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"reflect"
@@ -60,6 +61,10 @@ func (g *timeRangeGuard) Initialize(db *gorm.DB) error {
 	if err := update.Register("gombit:timerange", func(tx *gorm.DB) { g.run(tx, false) }); err != nil {
 		return fmt.Errorf("update: %w", err)
 	}
+	restore := db.Callback().Update().After("gorm:update")
+	if err := restore.Register("gombit:timerange_restore", restoreOmits); err != nil {
+		return fmt.Errorf("update restore: %w", err)
+	}
 	return nil
 }
 
@@ -71,16 +76,44 @@ func (g *timeRangeGuard) run(db *gorm.DB, creating bool) {
 	if len(targets) == 0 {
 		return
 	}
-	c := timeRangeCheck{skipHooks: db.Statement.SkipHooks}
+	c := timeRangeCheck{stmt: db.Statement, skipHooks: db.Statement.SkipHooks}
 	forEachAssigned(db, creating, targets, c.check)
 	if len(c.fields) > 0 {
 		_ = db.AddError(NewValidationError("The request contains invalid fields.", c.fields))
+		return
+	}
+	if len(c.leftOut) > 0 {
+		// Omit for this statement only: the full slice expression copies
+		// rather than writing into a backing array a cloned statement (Save's
+		// insert fallback) shares, and restoreOmits puts the caller's Omits
+		// back after the update, for a chain that is used again.
+		stmt := db.Statement
+		stmt.Settings.Store(savedOmitsKey, savedOmits{omits: stmt.Omits})
+		stmt.Omits = append(stmt.Omits[:len(stmt.Omits):len(stmt.Omits)], c.leftOut...)
+	}
+}
+
+const savedOmitsKey = "gombit:timerange:omits"
+
+type savedOmits struct{ omits []string }
+
+// restoreOmits undoes the Omit gombit:timerange added to an update.
+func restoreOmits(db *gorm.DB) {
+	if db.Statement == nil {
+		return
+	}
+	if v, ok := db.Statement.Settings.LoadAndDelete(savedOmitsKey); ok {
+		db.Statement.Omits = v.(savedOmits).omits
 	}
 }
 
 type timeRangeCheck struct {
+	stmt      *gorm.Statement
 	skipHooks bool
 	fields    map[string][]string // allocated on the first problem
+	leftOut   []string            // columns the update leaves out of its SET
+	scope     *storedZeros        // KeepStoredZeros, read on first need
+	scopeRead bool
 }
 
 func (c *timeRangeCheck) check(a assignedValue) {
@@ -97,20 +130,35 @@ func (c *timeRangeCheck) check(a assignedValue) {
 		// one is written, and refused below as the zero instant. On a
 		// create GORM fills a zero auto timestamp and the database a zero
 		// defaulted column, Select or not. On an update GORM writes a zero
-		// struct field only when Select names the column or selects "*"
-		// (Save); Updates skips it.
+		// struct field only when its column is in GORM's select map; Updates
+		// skips it.
 		if a.Value.IsValid() && a.Value.IsZero() {
-			if a.Creating {
-				if f.AutoCreateTime > 0 || f.AutoUpdateTime > 0 || f.HasDefaultValue {
+			autoOrDefault := f.AutoCreateTime > 0 || f.AutoUpdateTime > 0 || f.HasDefaultValue
+			switch {
+			case a.Creating:
+				if autoOrDefault {
 					return
 				}
-			} else if !a.Named && !a.AllSelected {
+			case !a.Selected:
+				return
+			case a.Wildcard && autoOrDefault && zeroInstant(a.Value) && !c.edits(f):
+				// Save (Select("*")) of a struct that leaves an auto
+				// timestamp or a defaulted column unset: the update keeps
+				// the row's value, and Save's insert fallback, when no row
+				// matched, fills it as any create does. NULL (a nil
+				// pointer, an invalid NullTime) is a value, and written; so
+				// is a zero the edit set (KeepStoredZeros), and refused.
+				c.leaveOut(f)
 				return
 			}
 		}
 	}
 	msg := timeRangeProblem(f, a.Value)
 	if msg == "" {
+		return
+	}
+	if a.FromStruct && !a.Creating && c.keepsStoredZero(f) && zeroInstant(a.Value) {
+		c.leaveOut(f)
 		return
 	}
 	key := fieldKey(f)
@@ -123,6 +171,129 @@ func (c *timeRangeCheck) check(a assignedValue) {
 		c.fields = map[string][]string{}
 	}
 	c.fields[key] = append(c.fields[key], msg)
+}
+
+func (c *timeRangeCheck) leaveOut(f *schema.Field) {
+	for _, have := range c.leftOut {
+		if have == f.DBName {
+			return
+		}
+	}
+	c.leftOut = append(c.leftOut, f.DBName)
+}
+
+// storedZeros reads the KeepStoredZeros scope for this statement's model.
+func (c *timeRangeCheck) storedZeros() *storedZeros {
+	if !c.scopeRead {
+		c.scopeRead = true
+		if v, ok := c.stmt.Settings.Load(keepStoredZerosKey); ok {
+			if k, ok := v.(storedZeros); ok && k.model == c.stmt.Schema.ModelType {
+				c.scope = &k
+			}
+		}
+	}
+	return c.scope
+}
+
+// keepsStoredZero reports whether KeepStoredZeros keeps f's stored zero.
+func (c *timeRangeCheck) keepsStoredZero(f *schema.Field) bool {
+	k := c.storedZeros()
+	return k != nil && containsColumn(k.kept, f.DBName)
+}
+
+// edits reports whether KeepStoredZeros named f's column as one the edit sets.
+func (c *timeRangeCheck) edits(f *schema.Field) bool {
+	k := c.storedZeros()
+	return k != nil && containsColumn(k.edited, f.DBName)
+}
+
+func containsColumn(columns []string, name string) bool {
+	for _, col := range columns {
+		if col == name {
+			return true
+		}
+	}
+	return false
+}
+
+const keepStoredZerosKey = "gombit:timerange:keep_stored_zeros"
+
+type storedZeros struct {
+	model  reflect.Type
+	kept   []string
+	edited []string
+}
+
+// StoredZeroColumns returns the timestamp and date columns of row, a model as
+// loaded from db, that hold the zero instant 0001-01-01T00:00:00Z: a value
+// stored before the time range check refused it (what a non-pointer field
+// left unset became on SQLite and PostgreSQL, and MySQL's '0000-00-00').
+// Pass them, less the columns an edit sets, to KeepStoredZeros.
+func StoredZeroColumns(db *gorm.DB, row any) []string {
+	rv := reflect.Indirect(reflect.ValueOf(row))
+	if rv.Kind() != reflect.Struct {
+		return nil
+	}
+	stmt := &gorm.Statement{DB: db}
+	if err := stmt.Parse(row); err != nil || stmt.Schema == nil {
+		return nil
+	}
+	ctx := context.Background()
+	var out []string
+	for _, f := range stmt.Schema.Fields {
+		if isRangedTimeField(f) && zeroInstant(f.ReflectValueOf(ctx, rv)) {
+			out = append(out, f.DBName)
+		}
+	}
+	return out
+}
+
+// KeepStoredZeros returns db scoped for an edit of row's model that sets the
+// edited columns. An update then leaves out of its SET each kept column that
+// still holds the zero instant when the statement runs, after the model's
+// hooks, instead of refusing it: writing back a zero the row already stores
+// (see StoredZeroColumns) would make every edit of the row a 422 for a value
+// the edit did not set. A kept column a hook gave a real value is written, and
+// checked. A zero in an edited column is refused, never left out, even in a
+// column Save would otherwise leave out unset (an auto timestamp, a default).
+// The admin data plane uses it for its PATCH.
+func KeepStoredZeros(db *gorm.DB, row any, kept, edited []string) *gorm.DB {
+	if len(kept) == 0 && len(edited) == 0 {
+		return db
+	}
+	t := reflect.TypeOf(row)
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	return db.Set(keepStoredZerosKey, storedZeros{model: t, kept: kept, edited: edited})
+}
+
+// zeroInstant reports whether v holds the zero instant, whatever Location it
+// carries: a time.Time or named time type for which IsZero holds, a valid
+// sql.NullTime (or gorm.DeletedAt) holding one, or the zero types.Date. A nil
+// pointer and an invalid NullTime are NULL.
+func zeroInstant(v reflect.Value) bool {
+	for v.IsValid() && (v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface) {
+		if v.IsNil() {
+			return false
+		}
+		v = v.Elem()
+	}
+	if !v.IsValid() {
+		return false
+	}
+	switch {
+	case v.Type() == rangeDateType:
+		return readValue[types.Date](v).IsZero()
+	case v.Type() == rangeTimeType:
+		return readValue[time.Time](v).IsZero()
+	case v.Kind() == reflect.Struct && v.Type().ConvertibleTo(rangeNullTimeType):
+		nt := readConverted[sql.NullTime](v, rangeNullTimeType)
+		return nt.Valid && nt.Time.IsZero()
+	case v.Kind() == reflect.Struct && v.Type().ConvertibleTo(rangeTimeType):
+		return readConverted[time.Time](v, rangeTimeType).IsZero()
+	}
+	return false
 }
 
 // rangedTimeFields returns sch's ranged columns by DBName, cached per schema

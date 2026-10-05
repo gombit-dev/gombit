@@ -212,6 +212,7 @@ func (h *handlers) updateResource(ctx context.Context, input *patchInput) (*rowO
 	if err != nil {
 		return nil, err
 	}
+	kept, edited := m.storedZeros(db, inst, body)
 	if err := applyWrite(ctx, m, inst, body, false); err != nil {
 		return nil, err
 	}
@@ -220,7 +221,7 @@ func (h *handlers) updateResource(ctx context.Context, input *patchInput) (*rowO
 		return nil, err
 	}
 	if err := h.writeFiles(ctx, cl, db, m, before, inst, func(tx *gorm.DB) error {
-		return persistWithM2M(ctx, tx, m, inst, m2mIDs, false, m.updateOmits(before, inst, body), m.fileFence(before))
+		return persistWithM2M(ctx, database.KeepStoredZeros(tx, inst, kept, edited), m, inst, m2mIDs, false, m.updateOmits(before, inst), m.fileFence(before))
 	}); err != nil {
 		return nil, err
 	}
@@ -248,6 +249,7 @@ func (h *handlers) updateVersioned(ctx context.Context, m *registered, inst any,
 		expected = cv
 		body = withoutKey(body, m.version.name)
 	}
+	kept, edited := m.storedZeros(db, inst, body)
 	if err := applyWrite(ctx, m, inst, body, false); err != nil {
 		return nil, err
 	}
@@ -257,12 +259,12 @@ func (h *handlers) updateVersioned(ctx context.Context, m *registered, inst any,
 	}
 	m.version.set(inst, expected+1)
 	if err := h.writeFiles(ctx, cl, db, m, before, inst, func(tx *gorm.DB) error {
-		res := tx.WithContext(ctx).
+		res := database.KeepStoredZeros(tx, inst, kept, edited).WithContext(ctx).
 			Model(inst).
 			Where(clause.Eq{Column: clause.Column{Name: m.version.column}, Value: expected}).
 			Clauses(clause.Where{Exprs: m.fileFence(before)}).
 			Select("*").
-			Omit(m.updateOmits(before, inst, body)...).
+			Omit(m.updateOmits(before, inst)...).
 			Updates(inst)
 		if res.Error != nil {
 			return database.MapPersistError(ctx, res.Error, "resource already exists", "persist resource")

@@ -94,9 +94,6 @@ type resolvedField struct {
 	pointer bool
 	get     func(inst any) any
 	set     func(inst any, raw any) error
-	// storedZero, set on a date or date-time field GORM does not stamp on
-	// update, reports whether the instance holds the zero instant.
-	storedZero func(inst any) bool
 }
 
 // implicitColumn is a GORM timestamp allowed in List/Ordering without a Field.

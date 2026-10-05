@@ -587,17 +587,13 @@ func resolveFields(fields []Field, sch *schema.Schema) ([]resolvedField, []*m2mB
 		// The column is the matched schema field's, the one the accessors
 		// below read and write: never a caller string that could name
 		// another (see matchSchemaField).
-		rf := resolvedField{
+		out = append(out, resolvedField{
 			Field:   copyRel,
 			column:  sf.DBName,
 			pointer: sf.FieldType.Kind() == reflect.Pointer,
 			get:     makeGetter(sf.StructField.Index, f.Type),
 			set:     makeSetter(sf.StructField.Index, f.Type, sf.FieldType),
-		}
-		if (f.Type == TypeDate || f.Type == TypeDateTime) && sf.AutoUpdateTime == 0 {
-			rf.storedZero = makeZeroInstant(sf.StructField.Index)
-		}
-		out = append(out, rf)
+		})
 	}
 	return out, bindings, hasMany, nil
 }

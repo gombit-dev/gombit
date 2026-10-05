@@ -21,11 +21,14 @@ type assignedValue struct {
 	// element, an Updates(struct) Dest); false for a map value or an upsert
 	// literal, which the statement names explicitly and writes as given.
 	FromStruct bool
-	// Named is true when Select names the column itself, not through "*".
-	Named bool
-	// AllSelected is true under Select("*") (what Save sends): GORM then
-	// writes every column of a struct, zero values included.
-	AllSelected bool
+	// Selected is true for a struct value whose column the statement's Select
+	// puts in GORM's own select map (SelectAndOmitColumns: a field or column
+	// name, "table.col", a quoted name, "*", "table.*"): on an update GORM
+	// writes such a value even when it is zero, and skips any other zero.
+	Selected bool
+	// Wildcard is true when the statement selects through "*" or "table.*"
+	// (Save sends Select("*")), rather than naming the columns it writes.
+	Wildcard bool
 }
 
 // forEachAssigned calls fn for every value the statement in db writes to one
@@ -60,9 +63,15 @@ func forEachAssigned(db *gorm.DB, creating bool, targets map[string]*schema.Fiel
 	if w.ctx == nil {
 		w.ctx = context.Background()
 	}
-	// Select("*") alone (what Save sends) restricts nothing.
-	selectsAll := len(stmt.Selects) == 1 && stmt.Selects[0] == "*"
-	if len(stmt.Omits) > 0 || (len(stmt.Selects) > 0 && !selectsAll) {
+	for _, s := range stmt.Selects {
+		if s == "*" || strings.HasSuffix(s, ".*") {
+			w.wildcard = true
+		}
+	}
+	// Select("*") alone (what Save sends) restricts nothing, and selects
+	// every column.
+	w.selectsAll = len(stmt.Selects) == 1 && stmt.Selects[0] == "*"
+	if len(stmt.Omits) > 0 || (len(stmt.Selects) > 0 && !w.selectsAll) {
 		w.selected, w.restricted = stmt.SelectAndOmitColumns(creating, !creating)
 	}
 	w.walk(reflect.ValueOf(stmt.Dest), fn)
@@ -78,6 +87,8 @@ type assignWalker struct {
 	targets    map[string]*schema.Field
 	selected   map[string]bool
 	restricted bool
+	selectsAll bool
+	wildcard   bool
 	creating   bool
 }
 
@@ -89,24 +100,14 @@ func (w *assignWalker) written(f *schema.Field) bool {
 	return !w.restricted || (w.creating && (f.AutoCreateTime > 0 || f.AutoUpdateTime > 0))
 }
 
-// allSelected reports whether the statement selects "*".
-func (w *assignWalker) allSelected() bool {
-	for _, s := range w.stmt.Selects {
-		if s == "*" {
-			return true
-		}
+// selects reports whether GORM's select map holds f's column, so an update
+// writes f's struct value even when it is zero (callbacks/update.go).
+func (w *assignWalker) selects(f *schema.Field) bool {
+	if w.selectsAll {
+		return true
 	}
-	return false
-}
-
-// named reports whether Select names f's column itself.
-func (w *assignWalker) named(f *schema.Field) bool {
-	for _, s := range w.stmt.Selects {
-		if s == f.DBName || s == f.Name {
-			return true
-		}
-	}
-	return false
+	_, ok := w.selected[f.DBName]
+	return ok
 }
 
 func (w *assignWalker) emit(f *schema.Field, v reflect.Value, fromStruct bool, fn func(assignedValue)) {
@@ -116,7 +117,7 @@ func (w *assignWalker) emit(f *schema.Field, v reflect.Value, fromStruct bool, f
 	if !w.written(f) {
 		return
 	}
-	fn(assignedValue{Field: f, Value: v, Creating: w.creating, FromStruct: fromStruct, Named: fromStruct && w.named(f), AllSelected: fromStruct && w.allSelected()})
+	fn(assignedValue{Field: f, Value: v, Creating: w.creating, FromStruct: fromStruct, Selected: fromStruct && w.selects(f), Wildcard: fromStruct && w.wildcard})
 }
 
 func (w *assignWalker) target(name string) *schema.Field {

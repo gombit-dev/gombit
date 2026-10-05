@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"slices"
 
 	"github.com/danielgtaylor/huma/v2"
 	"go.uber.org/zap"
@@ -11,6 +12,7 @@ import (
 	"gorm.io/gorm/clause"
 
 	"github.com/gombit-dev/gombit/contract"
+	"github.com/gombit-dev/gombit/database"
 	"github.com/gombit-dev/gombit/storage"
 	"github.com/gombit-dev/gombit/storage/claims"
 	"github.com/gombit-dev/gombit/storage/filefield"
@@ -197,29 +199,37 @@ func (m *registered) fileChanges(before map[string]string, inst any) (hold, rele
 // old key released in the same transaction, which fails if another writer
 // replaced it meanwhile); an unchanged one is not written at all, so the
 // update never puts back a key it loaded over a concurrent replacement.
-func (m *registered) updateOmits(before map[string]string, inst any, body map[string]any) []string {
+func (m *registered) updateOmits(before map[string]string, inst any) []string {
 	omit := append([]string(nil), m.omitOnUpdate...)
 	for _, f := range m.fileFields() {
 		if fileKey(f.get(inst)) == before[f.Name] {
 			omit = append(omit, f.column)
 		}
 	}
-	// A date or date-time the body does not set that holds the zero instant
-	// is a value stored before the database's time range check (what an
-	// unset non-pointer field used to store). Writing it back would make
-	// every edit of the row a 422 the operator cannot fix, so it is left
-	// out; one the body sets is written, and checked (issue #443). An
-	// UpdatedAt is not: GORM stamps it on the update.
-	for i := range m.fields {
-		f := &m.fields[i]
-		if f.storedZero == nil {
-			continue
-		}
-		if _, set := body[f.Name]; !set && f.storedZero(inst) {
-			omit = append(omit, f.column)
+	return omit
+}
+
+// storedZeros are the timestamp and date columns of the loaded row that hold
+// the zero instant, a value stored before the database's time range check
+// refused it (issue #443), less the ones the PATCH body sets (kept), and the
+// columns the body sets (edited). Every such column counts, mapped or not
+// (hidden, server-set, outside Fields, a named time type): Save writes the
+// whole row back. The update passes them to database.KeepStoredZeros, which
+// leaves a kept column out of the write only if it still holds the zero after
+// the model's hooks, so a hook's repair is written and an edit the operator
+// never made is not a 422, while a zero the body sets is refused.
+func (m *registered) storedZeros(db *gorm.DB, inst any, body map[string]any) (kept, edited []string) {
+	for name := range body {
+		if col, ok := m.columnFor(name); ok {
+			edited = append(edited, col)
 		}
 	}
-	return omit
+	for _, col := range database.StoredZeroColumns(db, inst) {
+		if !slices.Contains(edited, col) {
+			kept = append(kept, col)
+		}
+	}
+	return kept, edited
 }
 
 // fileFence is the condition that the record's file columns still hold the
