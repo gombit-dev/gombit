@@ -105,6 +105,53 @@ releases:
         summary: "Requests whose handler panics are counted in `gombit_http_requests_total` (as 500, or the status already sent)."
         refs: [432]
 
+      - id: contract-app-fork-unresolved
+        kind: manual
+        breaking: true
+        area: cli
+        summary: "`gombit contract app` refuses a framework replaced by a fork, and a `go.mod` the go command refuses."
+        details: |
+          A `replace` of `github.com/gombit-dev/gombit` by another module used
+          to report the fork's version as the framework's; it is now
+          unresolved, like a local path. A `go.mod` requiring the framework
+          twice, or replacing it twice with different targets, is an error.
+          Build the contract against a framework release.
+        refs: [341]
+
+      - id: d10-not-found-and-panics
+        kind: informational
+        area: behavior
+        summary: "Unknown paths and recovered panics answer with the D10 error envelope (`not_found` 404, `internal` 500)."
+        details: |
+          A 404 used to be Gin's plain-text body (or empty under an embedded
+          frontend) and a panic an empty 500. A client matching those bodies
+          sees JSON now.
+        refs: [438]
+
+      - id: unencodable-response-500
+        kind: informational
+        area: behavior
+        summary: "A response that cannot be encoded as JSON is a D10 500 instead of a 200 with a plain-text body."
+        refs: [442]
+
+      - id: embedded-html-browser-policy
+        kind: informational
+        area: security
+        summary: "Every HTML document of an embedded frontend gets the SPA browser security policy, not only the root `index.html`."
+        refs: [434]
+
+      - id: memory-cache-increment-overflow
+        kind: informational
+        area: behavior
+        summary: "The in-memory cache's `Increment` refuses to overflow, and a stored `nil`, as Redis does."
+        refs: [437]
+
+      - id: app-runs-once
+        kind: informational
+        area: api
+        summary: "A `framework.App` runs once: every return from `Run`, `RunContext` or `RunWorker` runs the stop hooks and closes what the app opened."
+        refs: [435]
+
       - id: object-storage
         kind: informational
         area: schema

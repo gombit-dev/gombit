@@ -34,6 +34,14 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   `terminationGracePeriodSeconds`, ECS `stopTimeout`) still covers
   it.
 
+- **Breaking.** `gombit contract app` refuses a framework replaced by a fork, and a `go.mod` the go command refuses. (`contract-app-fork-unresolved`, cli, [#341](https://github.com/gombit-dev/gombit/issues/341))
+
+  A `replace` of `github.com/gombit-dev/gombit` by another module used
+  to report the fork's version as the framework's; it is now
+  unresolved, like a local path. A `go.mod` requiring the framework
+  twice, or replacing it twice with different targets, is an error.
+  Build the contract against a framework release.
+
 ### Automatic: applied by the upgrade tooling
 
 - `gombit new` records the app's upgrade baseline in a `gombit:` block of `gombit.yaml`. (`record-upgrade-baseline`, scaffold, action `record-baseline`, [#341](https://github.com/gombit-dev/gombit/issues/341))
@@ -59,6 +67,20 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 - With `GOMBIT_HTTP_REQUEST_TIMEOUT` set, the 504 a timed-out handler writes reaches the client; `WriteTimeout` is the request timeout plus 5s. (`request-timeout-response-reaches-client`, behavior, [#430](https://github.com/gombit-dev/gombit/issues/430))
 
 - Requests whose handler panics are counted in `gombit_http_requests_total` (as 500, or the status already sent). (`panicking-requests-in-metrics`, behavior, [#432](https://github.com/gombit-dev/gombit/issues/432))
+
+- Unknown paths and recovered panics answer with the D10 error envelope (`not_found` 404, `internal` 500). (`d10-not-found-and-panics`, behavior, [#438](https://github.com/gombit-dev/gombit/issues/438))
+
+  A 404 used to be Gin's plain-text body (or empty under an embedded
+  frontend) and a panic an empty 500. A client matching those bodies
+  sees JSON now.
+
+- A response that cannot be encoded as JSON is a D10 500 instead of a 200 with a plain-text body. (`unencodable-response-500`, behavior, [#442](https://github.com/gombit-dev/gombit/issues/442))
+
+- Every HTML document of an embedded frontend gets the SPA browser security policy, not only the root `index.html`. (`embedded-html-browser-policy`, security, [#434](https://github.com/gombit-dev/gombit/issues/434))
+
+- The in-memory cache's `Increment` refuses to overflow, and a stored `nil`, as Redis does. (`memory-cache-increment-overflow`, behavior, [#437](https://github.com/gombit-dev/gombit/issues/437))
+
+- A `framework.App` runs once: every return from `Run`, `RunContext` or `RunWorker` runs the stop hooks and closes what the app opened. (`app-runs-once`, api, [#435](https://github.com/gombit-dev/gombit/issues/435))
 
 - Object storage (`app.Storage()`, `GOMBIT_STORAGE_*`) and storage-backed `file` / `image` model fields. (`object-storage`, schema, [#279](https://github.com/gombit-dev/gombit/issues/279))
 
