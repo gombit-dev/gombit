@@ -391,3 +391,41 @@ func rateLimiterUser(ctx context.Context, c Cache, key string, limit int64) (boo
 	}
 	return count > limit, nil
 }
+
+// TestMemoryJanitorNonPositiveIntervalIsOff locks issue #436: a zero or
+// negative interval (an unset or misparsed config value) used to reach
+// time.NewTicker inside the janitor goroutine and panic there, where the caller
+// cannot recover it, killing the process. It now means no janitor at all, as if
+// the option were omitted: the cache works, an expired key is still reclaimed
+// on Get, and Close is a no-op.
+func TestMemoryJanitorNonPositiveIntervalIsOff(t *testing.T) {
+	ctx := context.Background()
+	for _, interval := range []time.Duration{0, -time.Second} {
+		c := NewMemory(WithJanitor(interval))
+		if c.stop != nil || c.done != nil {
+			t.Fatalf("WithJanitor(%v) started a janitor, want none", interval)
+		}
+		now := time.Now()
+		c.now = func() time.Time { return now }
+		if err := c.Set(ctx, "k", "v", time.Second); err != nil {
+			t.Fatalf("WithJanitor(%v): Set() error = %v", interval, err)
+		}
+		var got string
+		if ok, err := c.Get(ctx, "k", &got); err != nil || !ok || got != "v" {
+			t.Fatalf("WithJanitor(%v): Get() = %v, %q, %v, want a hit on v", interval, ok, got, err)
+		}
+		now = now.Add(2 * time.Second)
+		if ok, err := c.Get(ctx, "k", &got); err != nil || ok {
+			t.Fatalf("WithJanitor(%v): Get() after expiry = %v, %v, want a miss", interval, ok, err)
+		}
+		c.mu.RLock()
+		_, kept := c.items["k"]
+		c.mu.RUnlock()
+		if kept {
+			t.Fatalf("WithJanitor(%v): Get() did not reclaim the expired key", interval)
+		}
+		if err := c.Close(); err != nil {
+			t.Fatalf("WithJanitor(%v): Close() error = %v, want nil", interval, err)
+		}
+	}
+}

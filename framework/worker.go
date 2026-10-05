@@ -26,13 +26,14 @@ const WorkerCommand = "worker"
 // RunWorker runs app as a jobs worker until ctx is canceled: the start
 // hooks, a jobs.Worker over App.Jobs(), then the stop hooks. It serves no
 // HTTP. opts.Queues defaults to the dispatcher's default queue and
-// opts.Logger to the app's logger.
+// opts.Logger to the app's logger. Like RunContext, every return runs the stop
+// hooks and closes what the app opened, so the App cannot be run again.
 func RunWorker(ctx context.Context, app *App, opts jobs.WorkerOptions) error {
-	if ctx == nil {
-		return errors.New("framework: nil context")
-	}
 	if app == nil {
 		return errors.New("framework: nil app")
+	}
+	if ctx == nil {
+		return errors.Join(errors.New("framework: nil context"), app.runStopHooks())
 	}
 	dispatcher := app.Jobs()
 	if len(opts.Queues) == 0 {
@@ -50,7 +51,8 @@ func RunWorker(ctx context.Context, app *App, opts jobs.WorkerOptions) error {
 	}
 	worker, err := jobs.NewWorker(dispatcher.Registry(), dispatcher.Queue(), opts)
 	if err != nil {
-		return err
+		// Released as on every other return (issue #435).
+		return errors.Join(err, app.runStopHooks())
 	}
 	if err := app.runStartHooks(ctx); err != nil {
 		return errors.Join(err, app.runStopHooks())
@@ -60,24 +62,39 @@ func RunWorker(ctx context.Context, app *App, opts jobs.WorkerOptions) error {
 }
 
 // runWorkerCommand is Run's `worker` mode: it parses the worker flags and
-// refuses a driver a separate worker process cannot consume.
+// refuses a driver a separate worker process cannot consume. Like RunWorker,
+// it releases the app on every return: once RunWorker runs, RunWorker does;
+// before that, this does, -h included (issue #435).
 func runWorkerCommand(ctx context.Context, app *App, args []string, stderr io.Writer) error {
-	flags, err := ParseWorkerFlags(args, stderr)
-	if errors.Is(err, flag.ErrHelp) {
-		return nil
-	}
+	opts, stopMetrics, err := prepareWorkerCommand(app, args, stderr)
 	if err != nil {
-		return err
+		if errors.Is(err, flag.ErrHelp) {
+			err = nil
+		}
+		return errors.Join(err, app.runStopHooks())
+	}
+	runErr := RunWorker(ctx, app, opts)
+	return errors.Join(runErr, stopMetrics())
+}
+
+// prepareWorkerCommand does everything worker mode needs before the worker
+// runs: it parses the flags, refuses a driver a worker cannot consume, and
+// starts the --metrics-addr endpoint. stopMetrics is a no-op without one.
+// flag.ErrHelp means -h printed the usage.
+func prepareWorkerCommand(app *App, args []string, stderr io.Writer) (_ jobs.WorkerOptions, stopMetrics func() error, _ error) {
+	flags, err := ParseWorkerFlags(args, stderr)
+	if err != nil {
+		return jobs.WorkerOptions{}, nil, err
 	}
 	opts := flags.WorkerOptions
 	switch app.Config().Jobs.Driver {
 	case config.JobsDriverSync:
-		return fmt.Errorf("framework: worker: GOMBIT_JOBS_DRIVER is sync, which runs every job when it is dispatched; there is no queue to work. Set GOMBIT_JOBS_DRIVER=redis")
+		return opts, nil, fmt.Errorf("framework: worker: GOMBIT_JOBS_DRIVER is sync, which runs every job when it is dispatched; there is no queue to work. Set GOMBIT_JOBS_DRIVER=redis")
 	case config.JobsDriverMemory:
-		return fmt.Errorf("framework: worker: GOMBIT_JOBS_DRIVER is memory, whose queue lives inside the process that dispatches; a separate worker process cannot see it. Set GOMBIT_JOBS_DRIVER=redis")
+		return opts, nil, fmt.Errorf("framework: worker: GOMBIT_JOBS_DRIVER is memory, whose queue lives inside the process that dispatches; a separate worker process cannot see it. Set GOMBIT_JOBS_DRIVER=redis")
 	}
 	if flags.MetricsAddr == "" {
-		return RunWorker(ctx, app, opts)
+		return opts, func() error { return nil }, nil
 	}
 	queues := opts.Queues
 	if len(queues) == 0 {
@@ -85,10 +102,9 @@ func runWorkerCommand(ctx context.Context, app *App, args []string, stderr io.Wr
 	}
 	_, stop, err := serveWorkerMetrics(flags.MetricsAddr, app, queues)
 	if err != nil {
-		return err
+		return opts, nil, err
 	}
-	runErr := RunWorker(ctx, app, opts)
-	return errors.Join(runErr, stop())
+	return opts, stop, nil
 }
 
 // serveWorkerMetrics serves a worker process's /metrics (its job outcomes,
