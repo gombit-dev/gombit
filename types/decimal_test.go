@@ -237,3 +237,19 @@ func TestDecimalRefusesLongSpellingBeforeParsing(t *testing.T) {
 		t.Errorf("refusing four million-digit spellings took %s, want them refused on length", took)
 	}
 }
+
+// TestIsPlainDecimalSpelling: the grammar every database reads as a number,
+// narrower than shopspring's parser (round-6 review: ".-5" parses there and
+// nowhere else).
+func TestIsPlainDecimalSpelling(t *testing.T) {
+	for _, s := range []string{"1", "-1.5", "+.5", "5.", ".5", "1.e5", "1e+05", "1E-3", "00.000", "-0", "123.450000000000000000000000000000"} {
+		if !types.IsPlainDecimalSpelling(s) {
+			t.Errorf("%q: not plain, want plain", s)
+		}
+	}
+	for _, s := range []string{"", ".", "-", "e5", "1e", "1e+", ".-5", ".+5", ".-5e1", "1..2", "1.5 ", " 1.5", "1_000", "0x10", "NaN", "Inf", "1e0000000005", "1,5", "１"} {
+		if types.IsPlainDecimalSpelling(s) {
+			t.Errorf("%q: plain, want not plain", s)
+		}
+	}
+}

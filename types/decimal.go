@@ -248,6 +248,19 @@ func spellingShape[T ~string | ~[]byte](s T) (shape DecimalShape, ok bool, err e
 	return shape, true, nil
 }
 
+// IsPlainDecimalSpelling reports whether s is a plain decimal spelling:
+// [sign] digits [. digits] [e [sign] digits], with at least one digit before
+// or after the point and an exponent of at most nine digits. That is the
+// grammar SQLite, PostgreSQL and MySQL all read as a number ("5.", ".5",
+// "+.5", "1.e5", "1e+05"). It is narrower than shopspring's parser, which also
+// accepts a sign after a leading point (".-5" is -0.05) that no database reads,
+// so code deciding what a database will store must check this, not only
+// whether shopspring parses it (#440 review, round 6).
+func IsPlainDecimalSpelling(s string) bool {
+	_, ok, _ := spellingShape(s)
+	return ok
+}
+
 // checkSpelledDecimal applies the size rule to a value parsed from spelling:
 // from the text when it is a plain spelling, else from the value.
 func checkSpelledDecimal[T ~string | ~[]byte](spelling T, parsed decimal.Decimal) error {

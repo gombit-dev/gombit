@@ -93,9 +93,12 @@ garbage write.
   field costs nothing.
 - **Every value shape** is read: decimals, strings, numbers, `json.Number`,
   pointers (a `*string` / `*float64` PATCH field), named types, and
-  `driver.Valuer`s such as `sql.NullString`. A string may be padded with
-  ASCII whitespace, which the databases skip; any other character, Unicode
-  spaces included (`"1.5\u00a0"`), makes it not a decimal number. A null is
+  `driver.Valuer`s such as `sql.NullString`. A string must be a plain decimal
+  (`[sign] digits [. digits] [e [sign] digits]`, `types.IsPlainDecimalSpelling`),
+  the grammar all three databases read, optionally padded with the ASCII
+  whitespace they skip; anything else, Unicode spaces (`"1.5\u00a0"`) or a
+  sign after a leading point (`".-5"`, which Go's decimal parser accepts)
+  included, is not a decimal number. A null is
   nothing to check, and a SQL expression (`gorm.Expr`) or an upsert's column
   reference is left to the database.
 - **The column's limits** come from the type GORM emits for the model field

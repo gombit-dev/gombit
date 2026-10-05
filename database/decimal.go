@@ -471,7 +471,16 @@ func parseDecimal(s string) (decimal.Decimal, decimalState) {
 	// Unicode's (U+00A0, U+3000, ...). strings.TrimSpace would approve
 	// "1.5\u00a0", which SQLite then stores as unreadable text and the
 	// others refuse with a driver error (#440 review, round 5).
-	d, err := decimal.NewFromString(strings.Trim(s, asciiSpace))
+	// And accept only the grammar the databases read as a number:
+	// shopspring also parses a sign after a leading point (".-5" is -0.05),
+	// which PostgreSQL and MySQL refuse with a driver error and SQLite stores
+	// as text that SUM, ORDER BY and WHERE then disagree with (#440 review,
+	// round 6).
+	trimmed := strings.Trim(s, asciiSpace)
+	if !types.IsPlainDecimalSpelling(trimmed) {
+		return decimal.Decimal{}, notDecimal
+	}
+	d, err := decimal.NewFromString(trimmed)
 	if err != nil {
 		return decimal.Decimal{}, notDecimal
 	}

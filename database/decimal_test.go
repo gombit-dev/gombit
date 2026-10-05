@@ -498,6 +498,30 @@ func TestDecimalStringWhitespaceMatchesTheDatabases(t *testing.T) {
 			t.Errorf("Updates(map{amount: %q}): error = %v, want a 422", padded, err)
 		}
 	}
+	// Only the grammar the databases read as a number: shopspring's parser
+	// also takes a sign after a leading point (".-5" is -0.05), which
+	// PostgreSQL and MySQL refuse and SQLite stores as text (round-6 review).
+	for _, odd := range []string{".-5", ".+5", ".-5e1", ".+5E-1", "." + "-" + strings.Repeat("5", 25)} {
+		if err := db.Model(&decimalRow{ID: row.ID}).Update("amount", odd).Error; !errors.As(err, &ve) {
+			t.Errorf("Update(amount, %q): error = %v, want a 422: no database reads it as a number", odd, err)
+		}
+		if err := db.Model(&decimalRow{ID: row.ID}).Updates(map[string]any{"amount": odd}).Error; !errors.As(err, &ve) {
+			t.Errorf("Updates(map{amount: %q}): error = %v, want a 422", odd, err)
+		}
+	}
+	for _, plain := range []string{"-.5", "+.5", "5.", "+5.", "1.e5", "1e+05", "00.000", "-0"} {
+		if err := db.Model(&decimalRow{ID: row.ID}).Update("amount", plain).Error; err != nil {
+			t.Fatalf("Update(amount, %q): %v, want it stored (every database reads it)", plain, err)
+		}
+		var all []decimalRow
+		if err := db.Find(&all).Error; err != nil {
+			t.Fatalf("Find after writing %q: %v", plain, err)
+		}
+		var typeName string
+		if err := db.Raw("SELECT typeof(amount) FROM decimal_rows WHERE id = ?", row.ID).Scan(&typeName).Error; err != nil || typeName == "text" {
+			t.Fatalf("%q stored as SQLite %s (%v), want a number", plain, typeName, err)
+		}
+	}
 	for _, padded := range []string{" 1.5 ", "\t1.5\n", "\v1.5", "\f1.5", "\r1.5"} {
 		if err := db.Model(&decimalRow{ID: row.ID}).Update("amount", padded).Error; err != nil {
 			t.Fatalf("Update(amount, %q): %v, want it stored (the databases skip ASCII whitespace)", padded, err)
