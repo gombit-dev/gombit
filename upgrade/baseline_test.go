@@ -10,6 +10,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/gombit-dev/gombit/internal/atomicfile"
+
 	"github.com/gombit-dev/gombit/upgrade"
 )
 
@@ -324,5 +326,21 @@ func TestRecordBaselineKeepsTheFileMode(t *testing.T) {
 		if strings.HasPrefix(e.Name(), ".gombit-tmp-") {
 			t.Fatalf("a temp file was left behind: %s", e.Name())
 		}
+	}
+}
+
+// TestRecordBaselineNotDurable: when gombit.yaml was replaced but the
+// directory sync failed, RecordBaseline says it wrote (the block is in the
+// file), with the error.
+func TestRecordBaselineNotDurable(t *testing.T) {
+	dir := app(t, goMod, "name: demo\n")
+	restore := atomicfile.SetSyncDirForTest(func(string) error { return errors.New("injected: fsync failed") })
+	b, wrote, err := upgrade.RecordBaseline(dir)
+	restore()
+	if !wrote || !b.Recorded || !errors.Is(err, atomicfile.ErrNotDurable) {
+		t.Fatalf("RecordBaseline = %+v, %v, %v; want wrote, recorded, and ErrNotDurable", b, wrote, err)
+	}
+	if after, err := upgrade.Detect(dir); err != nil || !after.Recorded {
+		t.Fatalf("Detect after = %+v, %v; want the block in gombit.yaml", after, err)
 	}
 }

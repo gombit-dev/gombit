@@ -28,17 +28,45 @@
 package atomicfile
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 )
+
+// ErrNotDurable: Write put the new content in place (readers see it), but
+// the directory sync that makes the replacement survive a crash failed. A
+// Write error wrapping it is a post-commit error; see Committed.
+var ErrNotDurable = errors.New("atomicfile: the file was replaced, but the replacement was not synced to disk")
+
+// Committed reports whether, after Write returned err, the target holds the
+// new content: on success, and on an ErrNotDurable failure. Any other error
+// left the target untouched. A caller that undoes its writes must treat a
+// committed write as done, whatever the error.
+func Committed(err error) bool {
+	return err == nil || errors.Is(err, ErrNotDurable)
+}
+
+// syncDirHook is the directory sync Write runs after the rename;
+// SetSyncDirForTest replaces it.
+var syncDirHook = syncDir
+
+// SetSyncDirForTest makes Write sync directories with f until the returned
+// restore is called, so that callers can test their handling of a
+// post-commit failure (ErrNotDurable). Not for concurrent use with Write.
+func SetSyncDirForTest(f func(dir string) error) (restore func()) {
+	prev := syncDirHook
+	syncDirHook = f
+	return func() { syncDirHook = prev }
+}
 
 // Write writes content, with mode, to a temp file in the target's directory,
 // fsyncs and closes it, renames it over path, and (on Unix) fsyncs the
 // directory: see the package doc for what that rename guarantees on each
 // platform. A failure anywhere before the rename, or a refused rename, leaves
-// path untouched and removes the temp file. A failed directory sync is
-// returned too: path then holds the new content, which may not survive a
-// crash.
+// path untouched and removes the temp file. A failed directory sync comes
+// after the commit: the error wraps ErrNotDurable, and path holds the new
+// content, which may not survive a crash (Committed reports true).
 func Write(path string, content []byte, mode os.FileMode) error {
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".gombit-tmp-*")
 	if err != nil {
@@ -68,5 +96,8 @@ func Write(path string, content []byte, mode os.FileMode) error {
 	if err := replace(tmpName, path); err != nil {
 		return err
 	}
-	return syncDir(filepath.Dir(path))
+	if err := syncDirHook(filepath.Dir(path)); err != nil {
+		return fmt.Errorf("%w: sync %s: %w", ErrNotDurable, filepath.Dir(path), err)
+	}
+	return nil
 }
