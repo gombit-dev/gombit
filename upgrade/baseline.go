@@ -321,8 +321,10 @@ gombit:
 // a reader sees the old file or the new, never a part, on Unix and NTFS, and
 // on Unix the replacement is also synced to disk before RecordBaseline
 // returns; see that package for the rest. It reports whether it wrote; an
-// app that already
-// records its baseline is left as it is.
+// app that already records its baseline is left as it is. wrote is true
+// whenever gombit.yaml was changed, even with an error: one wrapping
+// atomicfile.ErrNotDurable means the block is in place (and the returned
+// baseline records it), but was not synced to disk.
 func RecordBaseline(workDir string) (Baseline, bool, error) {
 	b, err := Detect(workDir)
 	if err != nil || b.Recorded {
@@ -355,10 +357,15 @@ func RecordBaseline(workDir string) (Baseline, bool, error) {
 			lastErr = errors.New("appending it would change the meaning of the file's last value")
 			continue
 		}
-		if err := atomicfile.Write(path, out, mode); err != nil {
+		err = atomicfile.Write(path, out, mode)
+		if !atomicfile.Committed(err) {
 			return b, false, fmt.Errorf("upgrade: write %s: %w", path, err)
 		}
 		b.Recorded, b.Metadata, b.Scaffold = true, meta.Metadata, meta.Scaffold
+		if err != nil {
+			// The block is in place, but not known to survive a crash.
+			return b, true, fmt.Errorf("upgrade: %s records the baseline now, but %w", path, err)
+		}
 		return b, true, nil
 	}
 	return b, false, fmt.Errorf("upgrade: %s cannot take the metadata block appended (%v); add it by hand:\n%s", path, lastErr, MetadataBlock(0))

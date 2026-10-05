@@ -29,9 +29,12 @@ type fsStep struct {
 }
 
 // write records the target's prior state, creates any missing parent directories,
-// and atomically replaces the target with content. A recorded step is appended only
-// after the rename succeeds; a failure before that never mutated the target (the
-// old bytes are intact) and undoes only the directories this call created.
+// and atomically replaces the target with content. A recorded step is appended once
+// the replacement is committed (atomicfile.Committed), even when the write still
+// returns an error after it (the directory sync failed, atomicfile.ErrNotDurable):
+// the file is then in place, and rollback must undo it like any other. A failure
+// before the commit never mutated the target (the old bytes are intact) and undoes
+// only the directories this call created.
 func (tx *fsTx) write(path string, content []byte) error {
 	info, statErr := os.Stat(path)
 	existed := statErr == nil
@@ -54,12 +57,13 @@ func (tx *fsTx) write(path string, content []byte) error {
 	if err != nil {
 		return err
 	}
-	if err := atomicfile.Write(path, content, mode); err != nil {
+	err = atomicfile.Write(path, content, mode)
+	if !atomicfile.Committed(err) {
 		removeDirs(created)
 		return err
 	}
 	tx.steps = append(tx.steps, fsStep{path: path, existed: existed, prior: prior, priorMode: mode, createdDirs: created})
-	return nil
+	return err // nil, or a post-commit error: the step above lets rollback undo it
 }
 
 // rollback undoes every applied write in reverse order: atomically restoring the

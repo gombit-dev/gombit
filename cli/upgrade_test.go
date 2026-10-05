@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/gombit-dev/gombit/internal/atomicfile"
 	"github.com/gombit-dev/gombit/upgrade"
 )
 
@@ -134,5 +136,17 @@ func TestUpgradeBaselineFrameworkLines(t *testing.T) {
 	out, err := runUpgradeCLI(t, "baseline", "--dir", dir)
 	if err != nil || !strings.Contains(out, "decided by the workspace "+work) {
 		t.Fatalf("baseline in a workspace = %q, %v", out, err)
+	}
+}
+
+// TestUpgradeBaselineWriteNotDurable: --write that changed gombit.yaml but
+// could not sync it prints what the file now records, then fails.
+func TestUpgradeBaselineWriteNotDurable(t *testing.T) {
+	dir := upgradeApp(t, "name: demo\n")
+	restore := atomicfile.SetSyncDirForTest(func(string) error { return errors.New("injected: fsync failed") })
+	out, err := runUpgradeCLI(t, "baseline", "--dir", dir, "--write")
+	restore()
+	if !strings.Contains(out, "recorded in gombit.yaml now") || !errors.Is(err, atomicfile.ErrNotDurable) {
+		t.Fatalf("baseline --write = %q, %v; want the recorded baseline and ErrNotDurable", out, err)
 	}
 }

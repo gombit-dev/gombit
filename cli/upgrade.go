@@ -74,9 +74,23 @@ func runUpgradeBaseline(stdout io.Writer, dir string, asJSON, write bool) error 
 	} else {
 		b, err = upgrade.Detect(dir)
 	}
+	if err != nil && !wrote {
+		return fmt.Errorf("gombit upgrade baseline: %w", err)
+	}
+	// An error after gombit.yaml changed (not synced to disk): report what is
+	// now in the file, then fail with it.
+	if err := printBaseline(stdout, b, asJSON, write, wrote); err != nil {
+		return err
+	}
 	if err != nil {
 		return fmt.Errorf("gombit upgrade baseline: %w", err)
 	}
+	return nil
+}
+
+// printBaseline writes the baseline, as text or JSON.
+func printBaseline(stdout io.Writer, b upgrade.Baseline, asJSON, write, wrote bool) error {
+	var err error
 	if asJSON {
 		out := struct {
 			upgrade.Baseline

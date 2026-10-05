@@ -277,7 +277,8 @@ version.
     `gombit upgrade baseline --write` records without touching anything
     else (checked: every other value must decode the same), through a synced
     temp file renamed into place: never seen half-written on Unix and NTFS,
-    and on Unix synced to disk, directory included, before it returns;
+    and on Unix synced to disk, directory included, before it returns (if
+    that sync fails, the command prints the recorded baseline and fails);
   - `gombit upgrade baseline [--dir] [--json] [--write]`, and
     [docs/upgrade.md](docs/upgrade.md)
     ([#341](https://github.com/gombit-dev/gombit/issues/341)).

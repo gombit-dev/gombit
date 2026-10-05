@@ -1,6 +1,7 @@
 package atomicfile
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -136,5 +137,34 @@ func TestSyncDir(t *testing.T) {
 		if err := syncDir(filepath.Join(t.TempDir(), "missing")); err == nil {
 			t.Fatal("syncDir of a missing directory succeeded")
 		}
+	}
+}
+
+// TestWriteNotDurable: a directory sync that fails after the rename is a
+// post-commit error: it wraps ErrNotDurable, Committed reports it, and the
+// target holds the new content. Any earlier failure is not committed.
+func TestWriteNotDurable(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "gombit.yaml")
+	if err := os.WriteFile(path, []byte("old\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	syncErr := errors.New("injected: fsync failed")
+	restore := SetSyncDirForTest(func(string) error { return syncErr })
+	err := Write(path, []byte("new\n"), 0o600)
+	restore()
+	if !errors.Is(err, ErrNotDurable) || !errors.Is(err, syncErr) || !Committed(err) {
+		t.Fatalf("Write with a failed directory sync = %v; want a committed ErrNotDurable wrapping the cause", err)
+	}
+	if got := readFile(t, path); got != "new\n" {
+		t.Fatalf("content = %q, want the new content (the rename happened)", got)
+	}
+	noTemp(t, dir)
+
+	if Committed(errors.New("rename refused")) {
+		t.Fatal("Committed reports an arbitrary error as committed")
+	}
+	if !Committed(nil) {
+		t.Fatal("Committed(nil) = false")
 	}
 }
