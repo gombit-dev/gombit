@@ -364,6 +364,21 @@ version.
   admin data plane. The offset now saturates at `math.MaxInt`, which selects
   nothing on SQLite, PostgreSQL and MySQL
   ([#441](https://github.com/gombit-dev/gombit/issues/441)).
+- Database logging goes through the app's logger instead of GORM's default
+  one, which wrote to stdout in its own coloured format, ignored
+  `GOMBIT_LOG_SINK` / `GOMBIT_LOG_LEVEL`, logged every failed statement with
+  its parameter values inlined (a duplicate registration printed the user's
+  bcrypt hash and email), and reported every not-found lookup as an error.
+  Statements, not-found lookups and the failures the API answers with a 4xx
+  (identified by the driver's error code, never by text) are logged at
+  `debug`, slow statements at `warn`, and every other failure at `error`; the
+  logged SQL keeps its placeholders and never carries parameter values,
+  `Scan` included (`database.Open` sets GORM's process-wide
+  `logger.RecorderParamsFilter`). `database.Open` without an app installs a quiet stderr logger with
+  the same guarantee; a GORM logger the app sets on its database is kept. New:
+  `database.NewLogger`, `database.SlowQueryThreshold` and
+  `(*database.DB).ReplaceDefaultLogger`
+  ([#439](https://github.com/gombit-dev/gombit/issues/439)).
 - The in-memory cache's `Increment` refuses to overflow, as Redis `INCRBY`
   does: incrementing past `math.MaxInt64` (or below `math.MinInt64`) returns
   an "increment or decrement would overflow" error and leaves the value as it
@@ -383,6 +398,18 @@ version.
   options, flags or driver, and worker mode's `-h`. An `App` runs once; it
   cannot be run again after any of them returns
   ([#435](https://github.com/gombit-dev/gombit/issues/435)).
+- A response that cannot be encoded as JSON is answered with HTTP 500 and the
+  D10 `internal` envelope (with the request ID), and logged through the app's
+  logger. Huma decided the status before encoding, so a stored time outside
+  years 0..9999 or a float holding NaN/±Inf produced HTTP 200, a JSON content
+  type, and the plain-text body "error marshaling response", on the row's own
+  endpoint and every list page containing it. `encoding/json` writes nothing
+  until it has encoded the whole body, so Gombit's JSON format
+  (`contract.JSONFormat`) now answers such a failure itself while Gin still
+  holds the status, instead of handing it back to Huma. Outside
+  `framework.New`, `contract.HumaConfigFor` logs the failure through `slog`; a
+  writer on which the status cannot be confirmed to change gets the error back
+  to Huma as before ([#442](https://github.com/gombit-dev/gombit/issues/442)).
 
 ## [0.6.0] — 2026-09-28
 

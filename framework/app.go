@@ -184,7 +184,14 @@ func New(options ...Option) (_ *App, err error) {
 			RequestID: GetRequestIDFromContext,
 		})
 		// OpenAPI Info.Version stays 0.0.0 until runtime versioning lands.
-		app.api = humagin.New(app.router, contract.HumaConfigFor(app.cfg.AppName, "0.0.0", app.cfg.API.DocsEnabled))
+		humaConfig := contract.HumaConfigFor(app.cfg.AppName, "0.0.0", app.cfg.API.DocsEnabled)
+		// A response that cannot be encoded is answered as a D10 500; log why
+		// through the app's logger (#442).
+		logger := app.logger
+		humaConfig.Formats = contract.JSONFormats(func(requestID string, err error) {
+			logger.Error("http: response could not be encoded", zap.String("request_id", requestID), zap.Error(err))
+		})
+		app.api = humagin.New(app.router, humaConfig)
 	}
 	if app.cache == nil {
 		store, err := cache.Open(app.cfg.Cache)
@@ -257,6 +264,15 @@ func New(options ...Option) (_ *App, err error) {
 	// alone.
 	if app.readyProbe == nil && app.db != nil && app.db.DB != nil {
 		app.readyProbe = app.pingDatabase
+	}
+
+	// Database logging goes through the app's logger, so it honors
+	// GOMBIT_LOG_SINK / GOMBIT_LOG_LEVEL and never prints parameter values
+	// (issue #439). Done last: the database is the caller's, and a New that
+	// fails must not leave it logging through an app that never ran. A GORM
+	// logger the caller set on it is kept.
+	if app.db != nil {
+		app.db.ReplaceDefaultLogger(database.NewLogger(app.logger.Named("database")))
 	}
 
 	return app, nil

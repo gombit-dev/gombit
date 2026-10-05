@@ -81,6 +81,29 @@ func TestFarPageIsEmptyOnMySQL(t *testing.T) {
 	}))
 }
 
+// The database logger never logs a parameter value and classifies errors as
+// MapPersistError does on every driver (issue #439); Postgres also checks its
+// $n placeholders survive.
+func TestNewLoggerOnPostgres(t *testing.T) {
+	if *postgresDSN == "" {
+		t.Skip("set -database.postgres-dsn to run Postgres integration tests")
+	}
+	testLoggerOnDriver(t, openIntegrationDB(t, config.DatabaseConfig{
+		Driver: config.DatabaseDriverPostgres,
+		DSN:    *postgresDSN,
+	}))
+}
+
+func TestNewLoggerOnMySQL(t *testing.T) {
+	if *mysqlDSN == "" {
+		t.Skip("set -database.mysql-dsn to run MySQL integration tests")
+	}
+	testLoggerOnDriver(t, openIntegrationDB(t, config.DatabaseConfig{
+		Driver: config.DatabaseDriverMySQL,
+		DSN:    *mysqlDSN,
+	}))
+}
+
 func TestListQueryHelpersPostgres(t *testing.T) {
 	if *postgresDSN == "" {
 		t.Skip("set -database.postgres-dsn to run Postgres integration tests")
