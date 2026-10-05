@@ -22,7 +22,7 @@ New here? [Install](installation.md), then work through the
 | [router.md](router.md) | Application-owned route registration and the raw `*gin.Engine` escape hatch |
 | [logging.md](logging.md) | Runtime logging |
 | [cache.md](cache.md) | Cache runtime (memory, Redis, noop) |
-| [storage.md](storage.md) | Object storage: the `storage.Storage` contract, `app.Storage()`, the local, in-memory, and S3-compatible drivers, portable keys, classified errors, the driver conformance suite |
+| [storage.md](storage.md) | Object storage: the `storage.Storage` contract, `app.Storage()`, the local, in-memory, and S3-compatible drivers, portable keys, public and signed URLs, uploads and direct uploads, claim-based cleanup (`storage/claims`), classified errors, the driver conformance suite |
 | [jobs.md](jobs.md) | Background jobs: typed jobs and payload versioning, queue drivers, the worker, retries, delayed and failed jobs, duplicate handling, metrics |
 | [security.md](security.md) | The security headers applied per response kind (API vs HTML) and why |
 
@@ -34,7 +34,7 @@ New here? [Install](installation.md), then work through the
 | [migrations.md](migrations.md) | Atlas-backed `gombit db` migrations, revisions, rollback |
 | [migration-safety.md](migration-safety.md) | Migration safety manifests + the `gombit db verify` verifier for deployment hosts |
 | [validation.md](validation.md) | Model `Validate` hooks (API + admin), `app.Tx`, and optimistic locking |
-| [fields.md](fields.md) | Field types, `make resource` tokens, constraints, and how to add a kind |
+| [fields.md](fields.md) | Field types, `make resource` tokens, constraints, storage-backed `file` / `image` fields, and how to add a kind |
 
 ## Contract
 
@@ -59,7 +59,7 @@ New here? [Install](installation.md), then work through the
 | --- | --- |
 | [auth.md](auth.md) | Bearer JWT login and refresh rotation (the API default) |
 | [auth-cookie.md](auth-cookie.md) | Cookie/session auth, CSRF double-submit, threat model |
-| [admin.md](admin.md) | The admin registry, introspection API, SPA, and permissions |
+| [admin.md](admin.md) | The admin registry, introspection API, SPA, permissions, and file and image fields |
 
 ## Testing
 

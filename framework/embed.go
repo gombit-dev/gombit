@@ -48,13 +48,13 @@ func hasIndexHTML(fsys fs.FS) bool {
 func embeddedFrontendHandler(fsys fs.FS, apiPrefix string, csp []string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead {
-			c.AbortWithStatus(http.StatusNotFound)
+			abortNotFound(c)
 			return
 		}
 
 		urlPath := path.Clean("/" + c.Request.URL.Path)
 		if isReservedFrontendPath(urlPath, apiPrefix) {
-			c.AbortWithStatus(http.StatusNotFound)
+			abortNotFound(c)
 			return
 		}
 
@@ -222,7 +222,7 @@ func isHTMLContentType(ctype string) bool {
 func serveIndexHTML(c *gin.Context, fsys fs.FS, apiPrefix string, csp []string) {
 	data, err := fs.ReadFile(fsys, "index.html")
 	if err != nil {
-		c.AbortWithStatus(http.StatusNotFound)
+		abortNotFound(c)
 		return
 	}
 	data = injectAPIPrefixHTML(data, apiPrefix)

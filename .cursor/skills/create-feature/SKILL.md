@@ -39,7 +39,7 @@ Load [references/conventions.md](references/conventions.md) for Huma, envelope, 
 
 ### 3. Implement
 
-- Keep the change inside the issue's milestone. If an unplanned battery (events, scheduler, mail, storage, gRPC, multi-tenancy, i18n) appears, stop and split it out.
+- Keep the change inside the issue's milestone. If an unplanned battery (events, scheduler, mail, gRPC, multi-tenancy, i18n) appears, stop and split it out.
 - Do not re-litigate locked decisions (AGENTS.md and the ADRs).
 - Public API behavior goes through Huma-typed handlers. Use raw `*gin.Engine` via `app.Router()` only for webhooks, SSE, or other out-of-contract routes — and test that escape hatch.
 - Validation lives on Huma input structs. Validation failures must render the D10 error envelope with `fields`.

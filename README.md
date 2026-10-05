@@ -61,9 +61,10 @@ tested and first-class.
 | **Migrations** | [Atlas](https://atlasgo.io/)-backed `gombit db makemigrations / migrate / rollback / status / seed / reset`, plus `plan`, `lint`, and `check`, which classify every change and refuse destructive or unsafe ones until acknowledged |
 | **Contract** | OpenAPI 3.1 emitted from code, interactive `/docs`, generated TypeScript client, contract drift check |
 | **Jobs** | Typed background jobs over sync, in-memory, or Redis queues; a worker with retries, backoff, timeouts, delayed and unique jobs; failed-job tooling (`gombit jobs`); job metrics and OpenTelemetry spans |
+| **Storage** | `app.Storage()` over local files, memory, or S3-compatible stores; streaming uploads with size and content-type policies; public and signed URLs; direct browser uploads; claim-based cleanup that never deletes a file a record holds; `file` / `image` model fields with generated upload operations and admin widgets |
 | **Frontend** | Vite + React + TypeScript, React Hook Form, optional Material UI CRUD preset (`--ui mui`) |
 | **Auth** | Bearer JWT with refresh rotation (token in memory, **never `localStorage`**), or first-class cookie sessions with CSRF (`--auth cookie`) |
-| **Admin** | Runtime generic admin at `/admin/` with introspection API, permissions, groups, and superuser bypass |
+| **Admin** | Runtime generic admin at `/admin/` with introspection API, permissions, groups, superuser bypass, and file and image fields (direct uploads, previews) |
 | **CLI** | Cobra tree: `new`, `dev`, `worker`, `jobs`, `build --embed`, `make resource`, `make command`, `generate`, `db`, `openapi`, `client`, `contract`, `routes`, `doctor`, `config`, `createsuperuser`, `version` |
 | **Deploy** | `gombit build --embed` — API, SPA, and admin in one binary; a machine-readable app contract (`gombit contract app`) and migration safety manifests for deployment hosts |
 
@@ -309,10 +310,11 @@ frontend, Bearer and cookie auth, the MUI preset, embedded builds, and the
 runtime admin with permissions (v0.1) · model-first resources (v0.2) and a
 wider field vocabulary (v0.3) · schema-safety tooling (`db plan`, `lint`,
 `repair`, `check`), table renames, and hard delete (v0.4) · background jobs,
-the worker, and the fault-injection and chaos suites (v0.5–v0.6). See the
-[changelog](CHANGELOG.md) for detail.
+the worker, and the fault-injection and chaos suites (v0.5–v0.6) · object
+storage, uploads, and `file` / `image` fields in resources and the admin
+(on `main`, unreleased). See the [changelog](CHANGELOG.md) for detail.
 
-**Not here yet:** events, scheduler, mail, storage, gRPC, multi-tenancy, i18n.
+**Not here yet:** events, scheduler, mail, gRPC, multi-tenancy, i18n.
 
 ## Contributing
 

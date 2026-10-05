@@ -221,12 +221,14 @@ file, so follow the steps here rather than trying to invoke one):
 ### Both lanes
 
 - **Scope.** The working agreement (`AGENTS.md` item 6) says: if work starts
-  pulling in a "battery" (events, scheduler, mail, storage, gRPC,
-  multi-tenancy, i18n), stop and split it out into its own epic. The review
-  skills phrase it as "no *unplanned* battery". Stay inside the specific
-  issue you picked — never widen a fix into battery work. An issue that
-  belongs to a battery's own epic (e.g. `[STORAGE-2]`) is planned work, not
-  creep, but it still must not pull in a *different* battery.
+  pulling in a "battery" (events, scheduler, mail, gRPC, multi-tenancy,
+  i18n), stop and split it out into its own epic. The review skills phrase
+  it as "no *unplanned* battery". Stay inside the specific issue you picked
+  — never widen a fix into battery work. An issue that belongs to a
+  battery's own epic (as `[STORAGE-2]` did, before storage shipped) is
+  planned work, not creep, but it still must not pull in a *different*
+  battery. Jobs and storage have shipped; fixing or extending them is
+  ordinary work.
 - **If something in the tracker looks missing or contradictory** (an epic
   with no root issue, an issue that conflicts with what's already shipped),
   don't add scope on your own — flag it for the user to decide.
@@ -262,8 +264,8 @@ findings from the user.
   satisfies. Most `[bug]` issues come from the bug report template and have
   no AC section: derive the criteria from the issue's expected behavior and
   say so (as #517 did), with the regression test as one of them.
-- The template's scope checkbox lists `storage` and the other batteries.
-  For an issue in a battery's own epic (e.g. `[STORAGE-2]`), check it and
+- The template's scope checkbox lists the batteries not yet built. For an
+  issue in a battery's own epic (once one exists, such as a mail epic), check it and
   add a one-line note that the battery is the issue's own epic, not creep
   (the review skills' "no *unplanned* battery" reading). If the work pulls
   in any other battery, leave it unchecked and flag it instead.
