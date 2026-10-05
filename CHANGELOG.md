@@ -275,8 +275,9 @@ version.
     version is refused;
   - scaffold version 0 for apps generated before the block existed, which
     `gombit upgrade baseline --write` records without touching anything
-    else (checked: every other value must decode the same), through a temp
-    file renamed into place (atomic on Unix and on NTFS);
+    else (checked: every other value must decode the same), through a synced
+    temp file renamed into place: never seen half-written on Unix and NTFS,
+    and on Unix synced to disk, directory included, before it returns;
   - `gombit upgrade baseline [--dir] [--json] [--write]`, and
     [docs/upgrade.md](docs/upgrade.md)
     ([#341](https://github.com/gombit-dev/gombit/issues/341)).

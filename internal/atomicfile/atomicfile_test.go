@@ -125,3 +125,16 @@ func TestWriteRefusedLeavesTheTarget(t *testing.T) {
 	}
 	noTemp(t, dir)
 }
+
+// TestSyncDir: the directory sync that makes a rename durable on Unix
+// succeeds on a directory and reports one it cannot open.
+func TestSyncDir(t *testing.T) {
+	if err := syncDir(t.TempDir()); err != nil {
+		t.Fatalf("syncDir of a directory = %v", err)
+	}
+	if runtime.GOOS != "windows" {
+		if err := syncDir(filepath.Join(t.TempDir(), "missing")); err == nil {
+			t.Fatal("syncDir of a missing directory succeeded")
+		}
+	}
+}

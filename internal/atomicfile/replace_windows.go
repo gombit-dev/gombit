@@ -33,6 +33,10 @@ func replace(src, dst string) error {
 	return nil
 }
 
+// syncDir does nothing on Windows: none of the calls replace uses makes the
+// rename durable before it returns (see the package doc).
+func syncDir(string) error { return nil }
+
 // posixUnsupported reports a filesystem (FAT, say) or Windows version
 // without POSIX rename semantics.
 func posixUnsupported(err error) bool {
