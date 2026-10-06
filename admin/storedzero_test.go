@@ -90,6 +90,14 @@ type szDefault struct {
 	Opt   *time.Time `gorm:"default:null" json:"opt"`
 }
 
+// szReadOnly has a time column the database fills (gorm:"->"), which GORM
+// never writes: creating a row is not a 422 on it.
+type szReadOnly struct {
+	ID       uint      `gorm:"primaryKey" json:"id"`
+	Title    string    `json:"title"`
+	Computed time.Time `gorm:"->" json:"computed"`
+}
+
 type szVersioned struct {
 	ID      uint      `gorm:"primaryKey" json:"id"`
 	Title   string    `json:"title"`
@@ -109,7 +117,7 @@ func TestResourcePatchKeepsStoredZeroTimestampsEditable(t *testing.T) {
 func runStoredZeroAdmin(t *testing.T, db *database.DB) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
-	models := []any{&szDerived{}, &szUnlisted{}, &szServer{}, &szHidden{}, &szNamed{}, &szHook{}, &szVersioned{}, &szDefault{}}
+	models := []any{&szDerived{}, &szUnlisted{}, &szServer{}, &szHidden{}, &szNamed{}, &szHook{}, &szVersioned{}, &szDefault{}, &szReadOnly{}}
 	_ = db.Migrator().DropTable(models...)
 	if err := db.AutoMigrate(models...); err != nil {
 		t.Fatalf("AutoMigrate: %v", err)
@@ -133,6 +141,7 @@ func runStoredZeroAdmin(t *testing.T, db *database.DB) {
 	register(szHook{}, admin.Options{Slug: "sz-hook"})
 	register(szVersioned{}, admin.Options{Slug: "sz-versioned"})
 	register(szDefault{}, admin.Options{Slug: "sz-default"})
+	register(szReadOnly{}, admin.Options{Slug: "sz-readonly"})
 	jar := loginSuperuser(t, app)
 
 	valid := time.Date(2026, 10, 4, 0, 0, 0, 0, time.UTC)
@@ -243,6 +252,10 @@ func runStoredZeroAdmin(t *testing.T, db *database.DB) {
 	mustFirst(t, db, &stored, d.ID)
 	if !stored.At.Equal(valid) || stored.Opt != nil {
 		t.Errorf("stored %+v, want at kept and opt cleared", stored)
+	}
+
+	if res := doRequest(app, jar, http.MethodPost, "/api/v1/admin/resources/sz-readonly", `{"title":"x"}`); res.Code != http.StatusOK {
+		t.Errorf("create with an unwritten read-only time column: %d %s", res.Code, res.Body.String())
 	}
 }
 

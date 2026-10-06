@@ -182,7 +182,8 @@ func testTimeRangeUnsetAndInRange(t *testing.T, db *DB) {
 	}
 	// A zero the edit sets (KeepStoredZeros' edited columns) is refused, not
 	// left out.
-	wantRangeError(t, "Save, zero in an edited defaulted column", KeepStoredZeros(db.DB, &after, nil, []string{"at"}).Save(&rangedDefault{ID: defaulted.ID, Name: "edited"}).Error, "at")
+	edit := rangedDefault{ID: defaulted.ID, Name: "edited"}
+	wantRangeError(t, "Save, zero in an edited defaulted column", KeepStoredZeros(db.DB, &edit, nil, []string{"at"}).Save(&edit).Error, "at")
 
 	// NULL is a value, not an unset column: Save clears a defaulted nullable
 	// column (#562 round 5).
@@ -260,8 +261,42 @@ type softEvent struct {
 	DeletedAt gorm.DeletedAt
 }
 
+// Time columns GORM's field permissions keep out of a statement: read-only
+// (filled by the database), create-only, update-only.
+type permEvent struct {
+	ID       uint `gorm:"primaryKey"`
+	Name     string
+	Computed time.Time `gorm:"->"`
+	Pub      time.Time `gorm:"<-:create"`
+	Edited   time.Time `gorm:"<-:update"`
+}
+
 func testTimeRangeWhatGORMWrites(t *testing.T, db *DB) {
 	t.Helper()
+	// A column GORM never writes is not checked (#562 round 6): a zero
+	// read-only or update-only column on a create, a zero create-only one
+	// on an update. Where GORM does write it, a zero is refused.
+	_ = db.Migrator().DropTable(&permEvent{})
+	if err := db.Exec(map[Driver]string{
+		DriverSQLite:   "CREATE TABLE perm_events (id integer PRIMARY KEY, name text, computed datetime, pub datetime, edited datetime)",
+		DriverPostgres: "CREATE TABLE perm_events (id serial PRIMARY KEY, name text, computed timestamptz, pub timestamptz, edited timestamptz)",
+		DriverMySQL:    "CREATE TABLE perm_events (id bigint AUTO_INCREMENT PRIMARY KEY, name varchar(64), computed datetime(3) NULL, pub datetime(3) NULL, edited datetime(3) NULL)",
+	}[db.Driver()]).Error; err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Migrator().DropTable(&permEvent{}) })
+	perm := permEvent{Name: "p", Pub: inRange}
+	if err := db.Create(&perm).Error; err != nil {
+		t.Errorf("Create, zero read-only and update-only columns: %v", err)
+	}
+	perm.Pub = time.Time{}
+	perm.Edited = inRange
+	if err := db.Save(&perm).Error; err != nil {
+		t.Errorf("Save, zero create-only and read-only columns: %v", err)
+	}
+	wantRangeError(t, "Create, zero create-only column", db.Create(&permEvent{Name: "z"}).Error, "pub")
+	wantRangeError(t, "Save, zero update-only column", db.Save(&permEvent{ID: perm.ID, Name: "z", Pub: inRange}).Error, "edited")
+
 	_ = db.Migrator().DropTable(&softEvent{})
 	if err := db.AutoMigrate(&softEvent{}); err != nil {
 		t.Fatal(err)
@@ -446,6 +481,14 @@ func testTimeRangeStoredZero(t *testing.T, db *DB) {
 		t.Errorf("the left-out column stayed in the chain's Omits: %v", q.Statement.Omits)
 	}
 	wantRangeError(t, "KeepStoredZeros for another model", KeepStoredZeros(db.DB, &rangedDefault{}, kept, nil).Save(&loaded).Error, "due")
+	// The scope is the row passed to it: another row written on the same DB
+	// with a zero set on purpose is refused (#562 round 6).
+	other := rangedEvent{Name: "other", Due: inRange, Issued: dateFine}
+	if err := db.Create(&other).Error; err != nil {
+		t.Fatal(err)
+	}
+	other.Due = time.Time{}
+	wantRangeError(t, "KeepStoredZeros for another row", KeepStoredZeros(db.DB, &loaded, kept, nil).Save(&other).Error, "due")
 	var reread rangedEvent
 	if err := db.First(&reread, loaded.ID).Error; err != nil || reread.Name != "kept" || !reread.Due.IsZero() {
 		t.Fatalf("kept save: %v, stored %+v", err, reread)

@@ -105,6 +105,9 @@ What a statement writes is what GORM writes:
   model is not checked unless it is what is written (`Save`, `Updates(&row)`),
   so updating other columns of a row that already holds an out-of-range value
   is not refused.
+- A column GORM's field permissions keep out of the statement
+  (`gorm:"->"`, `<-:create` on an update, `<-:update` on a create) is not
+  written, and not checked.
 - Every `time.Time`, `sql.NullTime`, `types.Date` and named time type
   (`gorm.DeletedAt`, `type Stamp time.Time`) column is checked, a caller-set
   `CreatedAt` / `UpdatedAt` / `DeletedAt` included (a hook, a seeder, a map
@@ -128,7 +131,8 @@ What a statement writes is what GORM writes:
   `Save` of a struct that does not carry `CreatedAt` keeps the row's, and
   when no row matches, `Save`'s insert fallback fills it as any create does.
   NULL (a nil pointer, an invalid `sql.NullTime`) is a value and is written.
-  Naming the column (`Select("CreatedAt")`) writes the zero, and is refused.
+  Naming the column without `*` (`Select("CreatedAt")`) writes the zero,
+  and is refused; under a select that includes `*` the column is left out.
 - A row stored before this check with the zero instant in a non-pointer
   column (an unset field on SQLite or PostgreSQL, `'0000-00-00'` on MySQL)
   can still have its other columns changed by `Update` and a partial
@@ -137,7 +141,8 @@ What a statement writes is what GORM writes:
   row's zero columns, and `database.KeepStoredZeros` scopes the update to
   leave one out of its `SET` if it still holds the zero after the model's
   hooks, so a hook that repairs it is written. A zero the request sets is
-  refused, in any column. In your own code a `Save` of
+  refused, in any column. The scope covers the update of that row (the
+  pointer passed to `KeepStoredZeros`) only. In your own code a `Save` of
   such a row writes the zero back and is a 422 unless you scope it the same
   way; so is `Updates(&row)` on PostgreSQL, which reads the value back in
   `Local` (GORM then writes it), while on SQLite and MySQL GORM skips it. To
