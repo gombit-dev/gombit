@@ -6,10 +6,11 @@ import (
 	"io/fs"
 	"os"
 	"runtime"
-	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/gombit-dev/gombit/internal/winfile"
 )
 
 // On Windows an open file locks its name unless every handle on it was
@@ -50,7 +51,7 @@ func createFile(name string, access, mode uint32, op string) (*os.File, error) {
 // STATUS_DELETE_PENDING; that file is gone, so it is reported as not
 // existing.
 func create(name string, access, mode uint32, op string) (windows.Handle, error) {
-	p, err := windows.UTF16PtrFromString(longPath(name))
+	p, err := windows.UTF16PtrFromString(winfile.LongPath(name))
 	if err != nil {
 		return 0, &fs.PathError{Op: op, Path: name, Err: err}
 	}
@@ -90,26 +91,12 @@ func openForDelete(name, op string) (windows.Handle, error) {
 	return create(name, windows.DELETE|windows.SYNCHRONIZE, windows.OPEN_EXISTING, op)
 }
 
-// posixUnsupported reports a filesystem (FAT, say) or Windows version
-// without POSIX rename or delete semantics.
-func posixUnsupported(err error) bool {
-	return errors.Is(err, windows.ERROR_INVALID_PARAMETER) || errors.Is(err, windows.ERROR_NOT_SUPPORTED) || errors.Is(err, windows.ERROR_INVALID_FUNCTION)
-}
-
-// fileRenameInfo is FILE_RENAME_INFO with its Flags member.
-type fileRenameInfo struct {
-	Flags          uint32
-	RootDirectory  windows.Handle
-	FileNameLength uint32
-	FileName       [1]uint16
-}
-
 // replaceFile renames src to dst, replacing dst even while readers have it
 // open. Where POSIX semantics are not available it falls back to
 // os.Rename, which fails while dst is open.
 func replaceFile(src, dst string) error {
 	err := renameByHandle(src, dst, windows.FILE_RENAME_REPLACE_IF_EXISTS|windows.FILE_RENAME_POSIX_SEMANTICS)
-	if err != nil && posixUnsupported(err) {
+	if err != nil && winfile.PosixUnsupported(err) {
 		return os.Rename(src, dst)
 	}
 	return err
@@ -121,9 +108,9 @@ func replaceFile(src, dst string) error {
 // available.
 func renameNoReplace(src, dst string) error {
 	err := renameByHandle(src, dst, windows.FILE_RENAME_POSIX_SEMANTICS)
-	if err != nil && posixUnsupported(err) {
-		from, ferr := windows.UTF16PtrFromString(longPath(src))
-		to, terr := windows.UTF16PtrFromString(longPath(dst))
+	if err != nil && winfile.PosixUnsupported(err) {
+		from, ferr := windows.UTF16PtrFromString(winfile.LongPath(src))
+		to, terr := windows.UTF16PtrFromString(winfile.LongPath(dst))
 		if ferr != nil || terr != nil {
 			return &os.LinkError{Op: "rename", Old: src, New: dst, Err: errors.Join(ferr, terr)}
 		}
@@ -135,25 +122,15 @@ func renameNoReplace(src, dst string) error {
 	return err
 }
 
-// renameByHandle renames src to dst with SetFileInformationByHandle
-// (FileRenameInfoEx) and flags.
+// renameByHandle renames src to dst with the shared POSIX-semantics rename
+// (winfile.RenameByHandle) and flags, on a handle opened with the store's
+// share mode.
 func renameByHandle(src, dst string, flags uint32) error {
-	name, err := windows.UTF16FromString(longPath(dst))
-	if err != nil {
-		return &os.LinkError{Op: "rename", Old: src, New: dst, Err: err}
-	}
 	h, err := openForDelete(src, "rename")
 	if err != nil {
 		return err
 	}
-	var info fileRenameInfo
-	nameBytes := (len(name) - 1) * 2 // without the terminating NUL
-	buf := make([]byte, int(unsafe.Offsetof(info.FileName))+len(name)*2)
-	ri := (*fileRenameInfo)(unsafe.Pointer(&buf[0])) // #nosec G103 -- FILE_RENAME_INFO over a buffer sized for its name
-	ri.Flags = flags
-	ri.FileNameLength = uint32(nameBytes)                                                            // #nosec G115 -- a path, far below 4 GiB
-	copy(unsafe.Slice(&ri.FileName[0], len(name)), name)                                             // #nosec G103 -- within buf, as above
-	err = windows.SetFileInformationByHandle(h, windows.FileRenameInfoEx, &buf[0], uint32(len(buf))) // #nosec G115 -- as above
+	err = winfile.RenameByHandle(h, dst, flags)
 	_ = windows.CloseHandle(h)
 	if err != nil {
 		return &os.LinkError{Op: "rename", Old: src, New: dst, Err: err}
@@ -172,7 +149,7 @@ func removeFile(name string) error {
 	flags := uint32(windows.FILE_DISPOSITION_DELETE | windows.FILE_DISPOSITION_POSIX_SEMANTICS)
 	err = windows.SetFileInformationByHandle(h, windows.FileDispositionInfoEx, (*byte)(unsafe.Pointer(&flags)), uint32(unsafe.Sizeof(flags))) // #nosec G103 -- FILE_DISPOSITION_INFO_EX is one DWORD
 	_ = windows.CloseHandle(h)
-	if err != nil && posixUnsupported(err) {
+	if err != nil && winfile.PosixUnsupported(err) {
 		return os.Remove(name)
 	}
 	if err != nil {
@@ -190,21 +167,4 @@ func tryLock(f *os.File) (bool, error) {
 		return false, nil
 	}
 	return err == nil, err
-}
-
-// longPath returns path in the form the raw Win32 calls above need to
-// reach it when it is long. The os package does the same for its own calls
-// (os.fixLongPath): on Windows 10 1703 and later the Go runtime opts the
-// process into long paths and neither is needed, but on the older versions
-// Go supports (Windows Server 2016, say) a path of 248 characters or more
-// works only with the extended \\?\ prefix, or \\?\UNC\ for a share. The
-// store's paths are absolute and clean, as the prefix requires.
-func longPath(path string) string {
-	if len(path) < 248 || strings.HasPrefix(path, `\\?\`) || strings.HasPrefix(path, `\\.\`) {
-		return path
-	}
-	if strings.HasPrefix(path, `\\`) {
-		return `\\?\UNC\` + path[2:]
-	}
-	return `\\?\` + path
 }

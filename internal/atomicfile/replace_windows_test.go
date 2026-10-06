@@ -34,5 +34,19 @@ func TestWriteRefusesWithoutAtomicRename(t *testing.T) {
 			t.Fatalf("%v: content = %q; want the target untouched", volumeErr, got)
 		}
 		noTemp(t, dir)
+
+		// AllowNonAtomic replaces it anyway, with os.Rename.
+		renameHook = func(src, dst string, _ uint32) error {
+			return &os.LinkError{Op: "rename", Old: src, New: dst, Err: volumeErr}
+		}
+		err = Write(path, []byte("new\n"), 0o600, AllowNonAtomic())
+		renameHook = prev
+		if err != nil {
+			t.Fatalf("%v: Write with AllowNonAtomic = %v", volumeErr, err)
+		}
+		if got := readFile(t, path); got != "new\n" {
+			t.Fatalf("%v: content = %q; want the new content", volumeErr, got)
+		}
+		noTemp(t, dir)
 	}
 }

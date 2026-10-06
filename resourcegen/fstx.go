@@ -1,7 +1,9 @@
 package resourcegen
 
 import (
+	"cmp"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -57,7 +59,7 @@ func (tx *fsTx) write(path string, content []byte) error {
 	if err != nil {
 		return err
 	}
-	err = atomicfile.Write(path, content, mode)
+	err = atomicfile.Write(path, content, mode, atomicfile.AllowNonAtomic())
 	if !atomicfile.Committed(err) {
 		removeDirs(created)
 		return err
@@ -69,21 +71,42 @@ func (tx *fsTx) write(path string, content []byte) error {
 // rollback undoes every applied write in reverse order: atomically restoring the
 // prior bytes (and mode) of files that existed, removing files this transaction
 // created, and pruning the directories it created (deepest first, only when empty).
-func (tx *fsTx) rollback() error {
-	var firstErr error
+// It reports two things apart: failed, the first undo that did not happen, and
+// notDurable, the first restore that did happen (atomicfile.Committed) but was
+// not synced to disk (atomicfile.ErrNotDurable). The tree is as it was found
+// exactly when failed is nil.
+func (tx *fsTx) rollback() (failed, notDurable error) {
 	for i := len(tx.steps) - 1; i >= 0; i-- {
 		s := tx.steps[i]
 		if s.existed {
-			if err := atomicfile.Write(s.path, s.prior, s.priorMode); err != nil && firstErr == nil {
-				firstErr = err
+			err := atomicfile.Write(s.path, s.prior, s.priorMode, atomicfile.AllowNonAtomic())
+			switch {
+			case !atomicfile.Committed(err):
+				failed = cmp.Or(failed, err)
+			case err != nil:
+				notDurable = cmp.Or(notDurable, err)
 			}
-		} else if err := os.Remove(s.path); err != nil && !errors.Is(err, os.ErrNotExist) && firstErr == nil {
-			firstErr = err
+		} else if err := os.Remove(s.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			failed = cmp.Or(failed, err)
 		}
 		removeDirs(s.createdDirs)
 	}
 	tx.steps = nil
-	return firstErr
+	return failed, notDurable
+}
+
+// rollbackNote describes, after err, what rollback did: nothing to add when it
+// restored everything durably.
+func rollbackNote(err error, tx *fsTx) error {
+	failed, notDurable := tx.rollback()
+	switch {
+	case failed != nil:
+		return fmt.Errorf("%w (rollback failed: %v)", err, failed)
+	case notDurable != nil:
+		return fmt.Errorf("%w (rolled back, but the restore was not synced to disk: %v)", err, notDurable)
+	default:
+		return err
+	}
 }
 
 // mkdirAllTracked creates dir (and any missing parents) and returns the

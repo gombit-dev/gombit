@@ -302,11 +302,13 @@ version.
 
 ### Changed
 
-- `gombit make resource` and `gombit upgrade baseline --write` replace files
-  with an atomic rename or not at all. On Windows that rename needs NTFS on
-  Windows 10 1709 or later; on a FAT or exFAT volume, or an older Windows,
-  they now refuse before changing anything, where `make resource` used to
-  replace files with a rename Windows does not document as atomic
+- On Windows, `gombit make resource` replaces files with a POSIX-semantics
+  rename (NTFS, Windows 10 1709 or later), so a file another program holds
+  open with delete sharing no longer blocks it. On a volume that refuses that
+  rename (FAT or exFAT, a network share or mapped drive, a `\\wsl$` path, or
+  an older Windows) it keeps its previous behavior, a plain rename, and its
+  rollback. `gombit upgrade baseline --write` is atomic or nothing: on such a
+  volume it refuses before changing `gombit.yaml`
   ([#341](https://github.com/gombit-dev/gombit/issues/341)).
 - A new app's README lists `storage/` (the local driver's files, created on
   the first write and gitignored) and says `internal/platform` migrates the

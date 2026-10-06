@@ -1,10 +1,8 @@
-package local_test
+package winfile
 
 import (
 	"strings"
 	"testing"
-
-	"github.com/gombit-dev/gombit/storage/local"
 )
 
 // TestLongPathForm: a path the raw Win32 calls get is in the extended form
@@ -22,7 +20,7 @@ func TestLongPathForm(t *testing.T) {
 		`C:\` + strings.Repeat("d", 244): `C:\` + strings.Repeat("d", 244),
 		`C:\` + strings.Repeat("d", 245): `\\?\C:\` + strings.Repeat("d", 245),
 	} {
-		if got := local.LongPath(in); got != want {
+		if got := LongPath(in); got != want {
 			t.Errorf("LongPath(%.40q...) = %.48q..., want %.48q...", in, got, want)
 		}
 	}
