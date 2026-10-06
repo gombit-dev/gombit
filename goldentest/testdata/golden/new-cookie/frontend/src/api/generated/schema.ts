@@ -86,6 +86,38 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/v1/auth/sessions": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get: operations["auth-list-sessions"];
+    put?: never;
+    post?: never;
+    delete: operations["auth-revoke-sessions"];
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/auth/sessions/{id}": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post?: never;
+    delete: operations["auth-revoke-session"];
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/v1/me": {
     parameters: {
       query?: never;
@@ -146,11 +178,26 @@ export interface components {
       email: string;
       password: string;
     };
+    AuthRevokeResult: {
+      ok: boolean;
+    };
+    AuthSession: {
+      current: boolean;
+      expires_at: string;
+      id: string;
+      last_refreshed_at: string;
+    };
+    DataAuthRevokeResult: {
+      data: components["schemas"]["AuthRevokeResult"];
+    };
     CsrfToken: {
       csrf_token: string;
     };
     DataCsrfToken: {
       data: components["schemas"]["CsrfToken"];
+    };
+    DataListAuthSession: {
+      data: components["schemas"]["AuthSession"][] | null;
     };
     DataLogout: {
       data: components["schemas"]["LogoutResult"];
@@ -377,6 +424,93 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["DataPublicUser"];
+        };
+      };
+      default: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorEnvelope"];
+        };
+      };
+    };
+  };
+  "auth-list-sessions": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["DataListAuthSession"];
+        };
+      };
+      default: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorEnvelope"];
+        };
+      };
+    };
+  };
+  "auth-revoke-sessions": {
+    parameters: {
+      query: {
+        scope: "others" | "all";
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      200: {
+        headers: {
+          "Set-Cookie"?: unknown;
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["DataAuthRevokeResult"];
+        };
+      };
+      default: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorEnvelope"];
+        };
+      };
+    };
+  };
+  "auth-revoke-session": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      200: {
+        headers: {
+          "Set-Cookie"?: unknown;
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["DataAuthRevokeResult"];
         };
       };
       default: {
