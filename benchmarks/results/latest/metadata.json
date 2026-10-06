@@ -9,6 +9,7 @@
   "cpu_model": "Intel(R) Core(TM) i5-8250U CPU @ 1.60GHz",
   "logical_cpus": 8,
   "ram_bytes": 7690293248,
+  "host_class": "",
   "go_version": "go1.27.0",
   "docker_version": "29.7.2",
   "docker_compose_version": "5.5.0",
@@ -61,6 +62,7 @@
         "cpu_model": "Intel(R) Core(TM) i5-8250U CPU @ 1.60GHz",
         "logical_cpus": 8,
         "ram_bytes": 7690293248,
+        "host_class": "",
         "go_version": "go1.27.0",
         "protocol": {
           "concurrency": [
@@ -86,6 +88,7 @@
         "cpu_model": "Intel(R) Core(TM) i5-8250U CPU @ 1.60GHz",
         "logical_cpus": 8,
         "ram_bytes": 7690293248,
+        "host_class": "",
         "go_version": "go1.27.0",
         "protocol": {
           "concurrency": [
@@ -111,6 +114,7 @@
         "cpu_model": "Intel(R) Core(TM) i5-8250U CPU @ 1.60GHz",
         "logical_cpus": 8,
         "ram_bytes": 7690293248,
+        "host_class": "",
         "go_version": "go1.27.0",
         "protocol": {
           "concurrency": [
@@ -136,6 +140,7 @@
         "cpu_model": "Intel(R) Core(TM) i5-8250U CPU @ 1.60GHz",
         "logical_cpus": 8,
         "ram_bytes": 7690293248,
+        "host_class": "",
         "go_version": "go1.27.0",
         "protocol": {
           "concurrency": [
@@ -161,6 +166,7 @@
         "cpu_model": "Intel(R) Core(TM) i5-8250U CPU @ 1.60GHz",
         "logical_cpus": 8,
         "ram_bytes": 7690293248,
+        "host_class": "",
         "go_version": "go1.27.0",
         "protocol": {
           "concurrency": [
@@ -186,6 +192,7 @@
         "cpu_model": "Intel(R) Core(TM) i5-8250U CPU @ 1.60GHz",
         "logical_cpus": 8,
         "ram_bytes": 7690293248,
+        "host_class": "",
         "go_version": "go1.27.0",
         "protocol": {
           "concurrency": [
@@ -213,6 +220,7 @@
         "cpu_model": "Intel(R) Core(TM) i5-8250U CPU @ 1.60GHz",
         "logical_cpus": 8,
         "ram_bytes": 7690293248,
+        "host_class": "",
         "go_version": "go1.27.0"
       },
       "gin-gorm:container": {
@@ -225,6 +233,7 @@
         "cpu_model": "Intel(R) Core(TM) i5-8250U CPU @ 1.60GHz",
         "logical_cpus": 8,
         "ram_bytes": 7690293248,
+        "host_class": "",
         "go_version": "go1.27.0"
       },
       "gombit:container": {
@@ -237,6 +246,7 @@
         "cpu_model": "Intel(R) Core(TM) i5-8250U CPU @ 1.60GHz",
         "logical_cpus": 8,
         "ram_bytes": 7690293248,
+        "host_class": "",
         "go_version": "go1.27.0"
       },
       "laravel:container": {
@@ -249,6 +259,7 @@
         "cpu_model": "Intel(R) Core(TM) i5-8250U CPU @ 1.60GHz",
         "logical_cpus": 8,
         "ram_bytes": 7690293248,
+        "host_class": "",
         "go_version": "go1.27.0"
       },
       "nestjs:container": {
@@ -261,6 +272,7 @@
         "cpu_model": "Intel(R) Core(TM) i5-8250U CPU @ 1.60GHz",
         "logical_cpus": 8,
         "ram_bytes": 7690293248,
+        "host_class": "",
         "go_version": "go1.27.0"
       },
       "rails:container": {
@@ -273,57 +285,62 @@
         "cpu_model": "Intel(R) Core(TM) i5-8250U CPU @ 1.60GHz",
         "logical_cpus": 8,
         "ram_bytes": 7690293248,
+        "host_class": "",
         "go_version": "go1.27.0"
       }
     },
     "microbench": {
       "gin": {
-        "timestamp": "2026-09-15T15:54:57Z",
-        "git_commit": "e9a98f7ca8394a35eb108e8889c5efecd5e823fa",
+        "timestamp": "2026-10-06T04:32:20Z",
+        "git_commit": "6b4e38d3cce3bb5430308955a1b7f9015299eab8",
         "git_dirty": false,
         "os": "linux",
-        "kernel": "7.1.1-76070101-generic",
+        "kernel": "7.0.0-34-generic",
         "arch": "amd64",
-        "cpu_model": "11th Gen Intel(R) Core(TM) i5-11400H @ 2.70GHz",
-        "logical_cpus": 12,
-        "ram_bytes": 8087666688,
-        "go_version": "go1.26.1"
+        "cpu_model": "Intel(R) Core(TM) i5-8250U CPU @ 1.60GHz",
+        "logical_cpus": 8,
+        "ram_bytes": 7690297344,
+        "host_class": "",
+        "go_version": "go1.27.0"
       },
       "gombit": {
-        "timestamp": "2026-09-15T15:58:07Z",
-        "git_commit": "e9a98f7ca8394a35eb108e8889c5efecd5e823fa",
+        "timestamp": "2026-10-06T04:36:51Z",
+        "git_commit": "6b4e38d3cce3bb5430308955a1b7f9015299eab8",
         "git_dirty": false,
         "os": "linux",
-        "kernel": "7.1.1-76070101-generic",
+        "kernel": "7.0.0-34-generic",
         "arch": "amd64",
-        "cpu_model": "11th Gen Intel(R) Core(TM) i5-11400H @ 2.70GHz",
-        "logical_cpus": 12,
-        "ram_bytes": 8087666688,
-        "go_version": "go1.26.1"
+        "cpu_model": "Intel(R) Core(TM) i5-8250U CPU @ 1.60GHz",
+        "logical_cpus": 8,
+        "ram_bytes": 7690297344,
+        "host_class": "",
+        "go_version": "go1.27.0"
       },
       "huma": {
-        "timestamp": "2026-09-15T15:56:34Z",
-        "git_commit": "e9a98f7ca8394a35eb108e8889c5efecd5e823fa",
+        "timestamp": "2026-10-06T04:33:52Z",
+        "git_commit": "6b4e38d3cce3bb5430308955a1b7f9015299eab8",
         "git_dirty": false,
         "os": "linux",
-        "kernel": "7.1.1-76070101-generic",
+        "kernel": "7.0.0-34-generic",
         "arch": "amd64",
-        "cpu_model": "11th Gen Intel(R) Core(TM) i5-11400H @ 2.70GHz",
-        "logical_cpus": 12,
-        "ram_bytes": 8087666688,
-        "go_version": "go1.26.1"
+        "cpu_model": "Intel(R) Core(TM) i5-8250U CPU @ 1.60GHz",
+        "logical_cpus": 8,
+        "ram_bytes": 7690297344,
+        "host_class": "",
+        "go_version": "go1.27.0"
       },
       "nethttp": {
-        "timestamp": "2026-09-15T15:53:16Z",
-        "git_commit": "e9a98f7ca8394a35eb108e8889c5efecd5e823fa",
+        "timestamp": "2026-10-06T04:30:16Z",
+        "git_commit": "6b4e38d3cce3bb5430308955a1b7f9015299eab8",
         "git_dirty": false,
         "os": "linux",
-        "kernel": "7.1.1-76070101-generic",
+        "kernel": "7.0.0-34-generic",
         "arch": "amd64",
-        "cpu_model": "11th Gen Intel(R) Core(TM) i5-11400H @ 2.70GHz",
-        "logical_cpus": 12,
-        "ram_bytes": 8087666688,
-        "go_version": "go1.26.1"
+        "cpu_model": "Intel(R) Core(TM) i5-8250U CPU @ 1.60GHz",
+        "logical_cpus": 8,
+        "ram_bytes": 7690297344,
+        "host_class": "",
+        "go_version": "go1.27.0"
       }
     }
   }
