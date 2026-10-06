@@ -109,11 +109,13 @@ Each change is classified by what moving across it takes:
 | Kind | Meaning |
 | --- | --- |
 | `manual` | The developer acts; the change says how. |
-| `automatic` | The upgrade tooling applies it, as a reviewable change. It names the action that does it, and the manifest is refused if this framework does not implement that action. |
+| `automatic` | The upgrade tooling applies it, as a reviewable change. It names the action that does it (`upgrade.LookupAction`: an action carries its implementation), and the manifest is refused if this framework does not implement that action. |
 | `informational` | Nothing to do, but worth knowing when moving across it. |
 
-A change of any kind can be `breaking`: an app can stop building, or behave
-differently, across it without acting. Each change also names the `area` it
+A change of any kind can be `breaking`: an app that relies on documented (or
+reasonably relied-on) behavior can stop building, starting or working across
+it until it acts. A fix that only code matching undocumented output notices
+is not breaking. Each change also names the `area` it
 touches (`api`, `behavior`, `cli`, `client`, `config`, `dependency`,
 `scaffold`, `schema`, `security`), a one-line `summary`, Markdown `details`,
 and the issues or pull requests behind it.
@@ -126,8 +128,15 @@ says why instead of guessing:
 - a release older than the first one covered (see the
   [changelog](../CHANGELOG.md));
 - a release newer than this `gombit` knows: upgrade the CLI first;
-- a pseudo-version or an untagged commit: use a tagged release;
+- a pseudo-version (an untagged commit, as an app on a branch has) or a
+  pre-release the manifest does not list, whatever it sorts after: use a
+  release it lists;
+- a release within the manifest's range that is missing from it;
 - a downgrade.
+
+Planning from an application (`Manifest.PathFrom`, from the baseline
+`upgrade.Detect` reports) also refuses a baseline that names no framework
+release: a `go.work` that decides the build, a local checkout, or a fork.
 
 Print the notes:
 
@@ -143,4 +152,8 @@ $ gombit upgrade notes --from v0.6.1 --to v0.7.0 --json
 
 The changes of the next release collect under an `unreleased` entry, which
 is renamed to the release's version when it is cut
-([releasing.md](releasing.md)).
+([releasing.md](releasing.md)). The release workflow refuses a stable tag
+the manifest is not closed at: the tag must be listed, be its newest
+release, and leave nothing under `unreleased`. A test checks that every
+issue the changelog's Unreleased section links is declared in the
+manifest, or exempt with a reason.

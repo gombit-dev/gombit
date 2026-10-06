@@ -137,9 +137,10 @@ jobs:
               echo "Bump: $BUMP -> $next"
             fi
 
-            # The compatibility manifest must list the release before it is
-            # tagged (docs/releasing.md): fail here, before anything is pushed.
-            go run ./cmd/gombit upgrade notes --release "$next" >/dev/null
+            # The compatibility manifest must be closed at the release before
+            # it is tagged: listed, the newest, nothing left under unreleased
+            # (docs/releasing.md). Fail here, before anything is pushed.
+            go run ./cmd/gombit upgrade notes --release "$next" --release-gate >/dev/null
 
             # A tag pushed with GITHUB_TOKEN does not start another workflow
             # run, so this cannot recurse into the push trigger above.
@@ -157,8 +158,9 @@ jobs:
 
       # The release body opens with the release's upgrade notes, rendered
       # from the compatibility manifest (upgrade/manifest.yaml) the upgrade
-      # tooling plans from. A release the manifest does not list fails here,
-      # before anything is published. A pre-release uses its own entry if
+      # tooling plans from. A stable release the manifest is not closed at
+      # (unlisted, not the newest, or changes left under unreleased) fails
+      # here, before anything is published. A pre-release uses its own entry if
       # the manifest has one, else the unreleased changes it previews.
       - name: Render upgrade notes
         env:
@@ -170,7 +172,7 @@ jobs:
           mkdir -p upgrade-notes
           notes=upgrade-notes/UPGRADE_NOTES.md
           if [ "$PRERELEASE" != "true" ]; then
-            "$RUNNER_TEMP/gombit" upgrade notes --release "$TAG" > "$notes"
+            "$RUNNER_TEMP/gombit" upgrade notes --release "$TAG" --release-gate > "$notes"
           elif ! "$RUNNER_TEMP/gombit" upgrade notes --release "$TAG" > "$notes" 2>/dev/null; then
             "$RUNNER_TEMP/gombit" upgrade notes --release unreleased > "$notes" 2>/dev/null || : > "$notes"
           fi

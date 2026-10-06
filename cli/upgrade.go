@@ -145,6 +145,19 @@ across; a version the manifest does not list fails, rather than guessing.`,
 			from, _ := flags.GetString("from")
 			to, _ := flags.GetString("to")
 			asJSON, _ := flags.GetBool("json")
+			gate, _ := flags.GetBool("release-gate")
+			if gate {
+				if release == "" {
+					return errors.New("gombit upgrade notes: --release-gate needs --release")
+				}
+				m, err := upgrade.LoadManifest()
+				if err != nil {
+					return fmt.Errorf("gombit upgrade notes: %w", err)
+				}
+				if err := m.CheckRelease(release); err != nil {
+					return fmt.Errorf("gombit upgrade notes: %w", err)
+				}
+			}
 			return runUpgradeNotes(stdout, release, from, to, asJSON)
 		},
 	})
@@ -152,6 +165,10 @@ across; a version the manifest does not list fails, rather than guessing.`,
 	cmd.Flags().String("from", "", "the notes of an upgrade from this version")
 	cmd.Flags().String("to", "", "with --from: the target version (default: the newest release this gombit knows)")
 	cmd.Flags().Bool("json", false, "print the releases and their classified changes as JSON")
+	// The release workflow's gate for a stable tag (docs/releasing.md): the
+	// manifest must be closed at --release (Manifest.CheckRelease).
+	cmd.Flags().Bool("release-gate", false, "fail unless the manifest is ready to ship as the --release stable tag")
+	_ = cmd.Flags().MarkHidden("release-gate")
 	return cmd
 }
 

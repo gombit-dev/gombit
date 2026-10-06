@@ -204,3 +204,22 @@ func TestUpgradeBaselineWriteNotDurable(t *testing.T) {
 		t.Fatalf("baseline --write = %q, %v; want the recorded baseline and ErrNotDurable", out, err)
 	}
 }
+
+// TestUpgradeNotesReleaseGate: the release workflow's gate fails a stable
+// tag the manifest is not closed at (here, the embedded manifest still has
+// changes under unreleased), and needs --release.
+func TestUpgradeNotesReleaseGate(t *testing.T) {
+	m, err := upgrade.LoadManifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r, err := m.Release(upgrade.Unreleased); err != nil || len(r.Changes) == 0 {
+		t.Skip("the embedded manifest has nothing under unreleased")
+	}
+	if _, err := runUpgradeCLI(t, "notes", "--release", m.Latest(), "--release-gate"); err == nil || !strings.Contains(err.Error(), "still under unreleased") {
+		t.Fatalf("notes --release %s --release-gate = %v; want the unreleased changes refused", m.Latest(), err)
+	}
+	if _, err := runUpgradeCLI(t, "notes", "--release-gate"); err == nil || !strings.Contains(err.Error(), "--release-gate needs --release") {
+		t.Fatalf("notes --release-gate = %v", err)
+	}
+}

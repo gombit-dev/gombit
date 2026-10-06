@@ -40,7 +40,26 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   to report the fork's version as the framework's; it is now
   unresolved, like a local path. A `go.mod` requiring the framework
   twice, or replacing it twice with different targets, is an error.
-  Build the contract against a framework release.
+  The replace that counts is the one the go command applies to the
+  required version (an exact-version replace over an every-version
+  one; a replace of another version does not apply), so a go.mod
+  carrying several replaces can report a different version, or
+  resolve where it used to fail. Build the contract against a
+  framework release.
+
+- **Breaking.** A `framework.App` runs once: every return from `Run`, `RunContext` or `RunWorker` runs the stop hooks and closes what the app opened. (`app-runs-once`, api, [#435](https://github.com/gombit-dev/gombit/issues/435))
+
+  That includes the returns before serving (a listener that cannot
+  bind, refused worker options). Code that retried `RunContext` with
+  the same `*App` after such an error now runs against a closed cache
+  and job dispatcher: build a new `App` (`framework.New`) to retry.
+
+- **Breaking.** Production refuses `GOMBIT_HTTP_TRUSTED_PROXIES` values that trust every peer: a zero-length prefix in any spelling, or ranges that together cover all addresses. (`trusted-proxies-trust-all`, security, [#500](https://github.com/gombit-dev/gombit/issues/500))
+
+  `10.0.0.0/0`, `::0/0` or `0.0.0.0/1,128.0.0.0/1` used to start;
+  `Config.Validate` now refuses them in production, since trusting
+  every peer lets any client spoof its forwarded IP. List only the
+  addresses of the proxies you control.
 
 ### Automatic: applied by the upgrade tooling
 
@@ -78,7 +97,8 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
   A 404 used to be Gin's plain-text body (or empty under an embedded
   frontend) and a panic an empty 500. A client matching those bodies
-  sees JSON now.
+  sees JSON now; the documented error contract was already D10, so
+  this is not marked breaking.
 
 - A response that cannot be encoded as JSON is a D10 500 instead of a 200 with a plain-text body. (`unencodable-response-500`, behavior, [#442](https://github.com/gombit-dev/gombit/issues/442))
 
@@ -86,9 +106,26 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 - The in-memory cache's `Increment` refuses to overflow, and a stored `nil`, as Redis does. (`memory-cache-increment-overflow`, behavior, [#437](https://github.com/gombit-dev/gombit/issues/437))
 
-- A `framework.App` runs once: every return from `Run`, `RunContext` or `RunWorker` runs the stop hooks and closes what the app opened. (`app-runs-once`, api, [#435](https://github.com/gombit-dev/gombit/issues/435))
+- `cache.WithJanitor` with a zero or negative interval means no janitor, instead of crashing the process. (`cache-janitor-non-positive`, behavior, [#436](https://github.com/gombit-dev/gombit/issues/436))
 
-- Object storage (`app.Storage()`, `GOMBIT_STORAGE_*`) and storage-backed `file` / `image` model fields. (`object-storage`, schema, [#279](https://github.com/gombit-dev/gombit/issues/279))
+- A job whose worker died mid-attempt is no longer redelivered past `MaxAttempts`: it moves to the failed jobs as exhausted. (`jobs-crash-redelivery-max-attempts`, behavior, [#494](https://github.com/gombit-dev/gombit/issues/494))
+
+  An attempt interrupted by `Release` or worker shutdown may still run
+  once more past `MaxAttempts`, as before.
+
+- `gombit jobs retry --all` retries each failed job at most once per invocation. (`jobs-retry-all-once`, cli, [#493](https://github.com/gombit-dev/gombit/issues/493))
+
+  A job that fails again while the command runs is left for the next
+  invocation, instead of being retried until the command times out.
+
+- The framework requires newer database drivers: `github.com/go-sql-driver/mysql` v1.10.1 and `github.com/mattn/go-sqlite3` v1.14.52. (`database-driver-updates`, dependency, [#536](https://github.com/gombit-dev/gombit/issues/536), [#540](https://github.com/gombit-dev/gombit/issues/540))
+
+  Go's minimal version selection moves an app's build to them with the
+  framework upgrade. The framework also newly requires the AWS SDK
+  for Go v2 (the S3 storage driver), `golang.org/x/mod`,
+  `golang.org/x/sys` and `gopkg.in/yaml.v3`.
+
+- Object storage (`app.Storage()`, `GOMBIT_STORAGE_*`) and storage-backed `file` / `image` model fields. (`object-storage`, schema, [#279](https://github.com/gombit-dev/gombit/issues/279), [#323](https://github.com/gombit-dev/gombit/issues/323), [#324](https://github.com/gombit-dev/gombit/issues/324), [#325](https://github.com/gombit-dev/gombit/issues/325), [#326](https://github.com/gombit-dev/gombit/issues/326), [#327](https://github.com/gombit-dev/gombit/issues/327), [#328](https://github.com/gombit-dev/gombit/issues/328), [#329](https://github.com/gombit-dev/gombit/issues/329), [#530](https://github.com/gombit-dev/gombit/issues/530))
 
   File fields record ownership in a framework table, `storage_claims`,
   which new apps' migrations create. An existing app that adopts file

@@ -5,7 +5,9 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -50,7 +52,9 @@ func TestUpgradeNotesDoc(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(got) != b.String() {
+	// A Windows checkout may convert the doc to CRLF; its content is what
+	// counts.
+	if strings.ReplaceAll(string(got), "\r\n", "\n") != b.String() {
 		t.Fatalf("docs/upgrade-notes.md is stale: regenerate it with\n  go test ./upgrade -run TestUpgradeNotesDoc -update")
 	}
 }
@@ -133,10 +137,15 @@ func TestManifestPath(t *testing.T) {
 	for _, tc := range []struct{ from, to, msg string }{
 		{"v0.5.0", "v0.8.0", "older than v0.6.1, the first release"},
 		{"v0.6.1", "v0.9.0", "newer than this gombit knows (its manifest covers v0.6.1 to v0.8.0); upgrade the gombit CLI"},
-		{"v0.7.2-0.20261001120000-abcdefabcdef", "v0.8.0", "not a release the compatibility manifest lists: a pseudo-version"},
-		{"v0.6.1", "v0.7.5", "not a release the compatibility manifest lists"},
+		// A pseudo-version or pre-release is classified before it is
+		// placed: newer than the newest release (the first commit after it,
+		// as on @main), it is still not a reason to upgrade the CLI.
+		{"v0.7.2-0.20261001120000-abcdefabcdef", "v0.8.0", "is a pseudo-version (an untagged commit)"},
+		{"v0.8.1-0.20261001120000-abcdefabcdef", "v0.8.0", "is a pseudo-version (an untagged commit)"},
+		{"v0.6.1", "v0.9.0-rc.1", "is a pre-release the compatibility manifest does not list"},
+		{"v0.6.1", "v0.7.5", "within the releases the compatibility manifest covers (v0.6.1 to v0.8.0) but missing from it"},
 		{"v0.8.0", "v0.7.0", "downgrades are not supported"},
-		{"", "v0.8.0", "current version is unknown"},
+		{"", "v0.8.0", "no current version (a framework release) was given"},
 		{"v0.6.1", "unreleased", "unreleased is not a release"},
 		{"0.7.0", "v0.8.0", "not a semantic version"},
 	} {
@@ -272,5 +281,141 @@ func TestReleaseWithoutChangesIsAnEmptyList(t *testing.T) {
 	r, err := fixtureManifest(t).Release("v0.7.1")
 	if err != nil || r.Changes == nil {
 		t.Fatalf("Release(v0.7.1) = %+v, %v; want an empty, non-nil change list", r, err)
+	}
+}
+
+// TestCheckRelease: the release gate wants the tag listed, the newest
+// release, and nothing left under unreleased; listing the tag alone is not
+// enough.
+func TestCheckRelease(t *testing.T) {
+	parse := func(data string) *upgrade.Manifest {
+		t.Helper()
+		m, err := upgrade.ParseManifest([]byte(data))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return m
+	}
+	const change = "      - {id: x, kind: informational, area: api, summary: s}\n"
+	closed := parse("format: 1\nreleases:\n  - version: v0.1.0\n  - version: v0.2.0\n    changes:\n" + change)
+	if err := closed.CheckRelease("v0.2.0"); err != nil {
+		t.Fatalf("closed at v0.2.0: %v", err)
+	}
+	emptyUnreleased := parse("format: 1\nreleases:\n  - version: v0.1.0\n  - version: v0.2.0\n  - version: unreleased\n")
+	if err := emptyUnreleased.CheckRelease("v0.2.0"); err != nil {
+		t.Fatalf("an empty unreleased entry: %v", err)
+	}
+	for name, tc := range map[string]struct {
+		m        *upgrade.Manifest
+		tag, msg string
+	}{
+		"changes left under unreleased": {
+			parse("format: 1\nreleases:\n  - version: v0.1.0\n  - version: v0.2.0\n  - version: unreleased\n    changes:\n" + change),
+			"v0.2.0", "1 change(s) are still under unreleased",
+		},
+		"a newer release listed": {closed, "v0.1.0", "v0.1.0 is not the newest release it lists (v0.2.0 is)"},
+		"unlisted":               {closed, "v0.3.0", "has no release v0.3.0"},
+	} {
+		if err := tc.m.CheckRelease(tc.tag); err == nil || !strings.Contains(err.Error(), tc.msg) {
+			t.Errorf("%s: CheckRelease(%s) = %v; want an error mentioning %q", name, tc.tag, err, tc.msg)
+		}
+	}
+}
+
+// TestPathFrom: planning from an application's baseline refuses one that
+// names no framework release, with the reason, and is Path otherwise.
+func TestPathFrom(t *testing.T) {
+	m := fixtureManifest(t)
+	const fw = upgrade.FrameworkModulePath
+	got, err := m.PathFrom(upgrade.Framework{Module: fw, Version: "v0.7.0", Required: "v0.7.0"}, "v0.8.0")
+	if err != nil || !slices.Equal(versions(got), []string{"v0.7.1", "v0.8.0"}) {
+		t.Fatalf("PathFrom a release = %v, %v", versions(got), err)
+	}
+	for name, tc := range map[string]struct {
+		fw  upgrade.Framework
+		msg string
+	}{
+		"workspace": {upgrade.Framework{Module: fw, Required: "v0.7.0", Workspace: "/w/go.work"}, "a go.work (/w/go.work) decides"},
+		"local":     {upgrade.Framework{Module: fw, Required: "v0.7.0", Replace: &upgrade.Replacement{Path: "../gombit"}, Local: true}, "the local directory ../gombit"},
+		"fork":      {upgrade.Framework{Module: fw, Required: "v0.7.0", Replace: &upgrade.Replacement{Path: "github.com/me/gombit", Version: "v0.7.0"}}, "another module, github.com/me/gombit v0.7.0 (a fork)"},
+	} {
+		if _, err := m.PathFrom(tc.fw, "v0.8.0"); !errors.Is(err, upgrade.ErrNoUpgradePath) || !strings.Contains(err.Error(), tc.msg) {
+			t.Errorf("%s: PathFrom = %v; want ErrNoUpgradePath mentioning %q", name, err, tc.msg)
+		}
+	}
+}
+
+// TestActionsAreImplemented: every action an automatic change can name
+// carries its implementation, and record-baseline's records the baseline.
+func TestActionsAreImplemented(t *testing.T) {
+	a, ok := upgrade.LookupAction("record-baseline")
+	if !ok || a.Description == "" {
+		t.Fatalf("LookupAction(record-baseline) = %+v, %v", a, ok)
+	}
+	if _, ok := upgrade.LookupAction("rename-foo"); ok {
+		t.Fatal("LookupAction found an action nothing implements")
+	}
+	dir := app(t, goMod, "name: demo\n")
+	if changed, err := a.Apply(dir); err != nil || !changed {
+		t.Fatalf("record-baseline Apply = %v, %v", changed, err)
+	}
+	if b, err := upgrade.Detect(dir); err != nil || !b.Recorded {
+		t.Fatalf("after record-baseline: %+v, %v", b, err)
+	}
+	if changed, err := a.Apply(dir); err != nil || changed {
+		t.Fatalf("record-baseline Apply again = %v, %v; want nothing changed", changed, err)
+	}
+}
+
+// changelogExempt are the issues the CHANGELOG's Unreleased section links
+// that the manifest does not declare, each with the reason.
+var changelogExempt = map[int]string{
+	291: "benchmark tooling: nothing in an application",
+	342: "the compatibility manifest and gombit upgrade notes themselves: new, nothing to act on",
+	447: "shipped in v0.6.1 (the CHANGELOG has no 0.6.1 section yet)",
+}
+
+var changelogIssueLink = regexp.MustCompile(`github\.com/gombit-dev/gombit/(?:issues|pull)/(\d+)`)
+
+// TestChangelogIsDeclared: every issue the CHANGELOG's Unreleased section
+// links is declared by some change of the manifest (in its refs), or exempt
+// above with a reason, so a change the CHANGELOG records cannot be left out
+// of the upgrade notes and plans.
+func TestChangelogIsDeclared(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "CHANGELOG.md")) // #nosec G304 -- the committed changelog
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := strings.ReplaceAll(string(data), "\r\n", "\n")
+	start := strings.Index(text, "\n## [Unreleased]\n")
+	if start < 0 {
+		t.Fatal("CHANGELOG.md has no [Unreleased] section")
+	}
+	unreleased := text[start+1:]
+	if end := strings.Index(unreleased[1:], "\n## ["); end >= 0 {
+		unreleased = unreleased[:end+1]
+	}
+	m, err := upgrade.LoadManifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	declared := map[int]bool{}
+	for _, r := range m.Releases {
+		for _, c := range r.Changes {
+			for _, ref := range c.Refs {
+				declared[ref] = true
+			}
+		}
+	}
+	for _, match := range changelogIssueLink.FindAllStringSubmatch(unreleased, -1) {
+		n, _ := strconv.Atoi(match[1])
+		if !declared[n] && changelogExempt[n] == "" {
+			t.Errorf("CHANGELOG.md's Unreleased section links #%d, which no change in upgrade/manifest.yaml declares (refs) and changelogExempt does not exempt", n)
+		}
+	}
+	for n := range changelogExempt {
+		if declared[n] {
+			t.Errorf("#%d is exempt but also declared; drop the exemption", n)
+		}
 	}
 }

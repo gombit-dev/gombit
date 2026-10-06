@@ -7,15 +7,19 @@
 # Every release from the first one covered is listed, even with no changes: an
 # unlisted version has no known upgrade path. The next release's changes
 # collect under `unreleased`, renamed to its version when it is cut
-# (docs/releasing.md).
+# (docs/releasing.md). Audit `git log vPREVIOUS..HEAD`, not only the
+# CHANGELOG; TestChangelogIsDeclared checks that every issue the CHANGELOG's
+# Unreleased section links is in some change's refs, or exempt with a reason.
 #
 # A change has:
 #   id        kebab-case, unique across the manifest
 #   kind      automatic (the tooling applies it: names an `action`),
 #             manual (the developer acts: `details` says how), or
 #             informational (nothing to do, worth knowing)
-#   breaking  whether an app can stop building or behave differently without
-#             acting
+#   breaking  whether an app that relies on documented (or reasonably
+#             relied-on) behavior can stop building, starting or working
+#             until it acts; a fix only code matching undocumented output
+#             notices is not breaking
 #   area      api, behavior, cli, client, config, dependency, scaffold, schema
 #             or security
 #   summary   one line; details: Markdown; refs: issue/PR numbers
@@ -115,7 +119,12 @@ releases:
           to report the fork's version as the framework's; it is now
           unresolved, like a local path. A `go.mod` requiring the framework
           twice, or replacing it twice with different targets, is an error.
-          Build the contract against a framework release.
+          The replace that counts is the one the go command applies to the
+          required version (an exact-version replace over an every-version
+          one; a replace of another version does not apply), so a go.mod
+          carrying several replaces can report a different version, or
+          resolve where it used to fail. Build the contract against a
+          framework release.
         refs: [341]
 
       - id: make-resource-windows-posix-rename
@@ -135,7 +144,8 @@ releases:
         details: |
           A 404 used to be Gin's plain-text body (or empty under an embedded
           frontend) and a panic an empty 500. A client matching those bodies
-          sees JSON now.
+          sees JSON now; the documented error contract was already D10, so
+          this is not marked breaking.
         refs: [438]
 
       - id: unencodable-response-500
@@ -157,10 +167,63 @@ releases:
         refs: [437]
 
       - id: app-runs-once
-        kind: informational
+        kind: manual
+        breaking: true
         area: api
         summary: "A `framework.App` runs once: every return from `Run`, `RunContext` or `RunWorker` runs the stop hooks and closes what the app opened."
+        details: |
+          That includes the returns before serving (a listener that cannot
+          bind, refused worker options). Code that retried `RunContext` with
+          the same `*App` after such an error now runs against a closed cache
+          and job dispatcher: build a new `App` (`framework.New`) to retry.
         refs: [435]
+
+      - id: trusted-proxies-trust-all
+        kind: manual
+        breaking: true
+        area: security
+        summary: "Production refuses `GOMBIT_HTTP_TRUSTED_PROXIES` values that trust every peer: a zero-length prefix in any spelling, or ranges that together cover all addresses."
+        details: |
+          `10.0.0.0/0`, `::0/0` or `0.0.0.0/1,128.0.0.0/1` used to start;
+          `Config.Validate` now refuses them in production, since trusting
+          every peer lets any client spoof its forwarded IP. List only the
+          addresses of the proxies you control.
+        refs: [500]
+
+      - id: cache-janitor-non-positive
+        kind: informational
+        area: behavior
+        summary: "`cache.WithJanitor` with a zero or negative interval means no janitor, instead of crashing the process."
+        refs: [436]
+
+      - id: jobs-crash-redelivery-max-attempts
+        kind: informational
+        area: behavior
+        summary: "A job whose worker died mid-attempt is no longer redelivered past `MaxAttempts`: it moves to the failed jobs as exhausted."
+        details: |
+          An attempt interrupted by `Release` or worker shutdown may still run
+          once more past `MaxAttempts`, as before.
+        refs: [494]
+
+      - id: jobs-retry-all-once
+        kind: informational
+        area: cli
+        summary: "`gombit jobs retry --all` retries each failed job at most once per invocation."
+        details: |
+          A job that fails again while the command runs is left for the next
+          invocation, instead of being retried until the command times out.
+        refs: [493]
+
+      - id: database-driver-updates
+        kind: informational
+        area: dependency
+        summary: "The framework requires newer database drivers: `github.com/go-sql-driver/mysql` v1.10.1 and `github.com/mattn/go-sqlite3` v1.14.52."
+        details: |
+          Go's minimal version selection moves an app's build to them with the
+          framework upgrade. The framework also newly requires the AWS SDK
+          for Go v2 (the S3 storage driver), `golang.org/x/mod`,
+          `golang.org/x/sys` and `gopkg.in/yaml.v3`.
+        refs: [536, 540]
 
       - id: object-storage
         kind: informational
@@ -171,4 +234,4 @@ releases:
           which new apps' migrations create. An existing app that adopts file
           fields adds the table to its migrations (`claims.Models()`; see
           docs/storage.md, "Setup").
-        refs: [279]
+        refs: [279, 323, 324, 325, 326, 327, 328, 329, 530]

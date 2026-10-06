@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	"golang.org/x/mod/module"
 	"golang.org/x/mod/semver"
 	"gopkg.in/yaml.v3"
 )
@@ -68,17 +69,33 @@ var areas = map[Area]bool{
 	"security":   true, // security-sensitive behavior or defaults
 }
 
-// actions are the automatic changes this framework knows how to apply, by
-// name: a manifest change of kind automatic names one of them.
-var actions = map[string]string{
-	"record-baseline": "record the upgrade baseline in gombit.yaml (gombit upgrade baseline --write)",
+// Action is an automatic change this framework implements: Apply carries
+// it out on the application in workDir, reporting whether it changed
+// anything. A manifest change of kind automatic names one, so "automatic"
+// always has code behind it.
+type Action struct {
+	// Description says what Apply does.
+	Description string
+	// Apply applies the change to the application in workDir.
+	Apply func(workDir string) (changed bool, err error)
 }
 
-// ActionDescription describes the automatic action name, and reports whether
-// this framework implements it.
-func ActionDescription(name string) (string, bool) {
-	d, ok := actions[name]
-	return d, ok
+// actions are the automatic changes this framework implements, by name.
+var actions = map[string]Action{
+	"record-baseline": {
+		Description: "record the upgrade baseline in gombit.yaml (gombit upgrade baseline --write)",
+		Apply: func(workDir string) (bool, error) {
+			_, wrote, err := RecordBaseline(workDir)
+			return wrote, err
+		},
+	},
+}
+
+// LookupAction returns the automatic action name, and reports whether this
+// framework implements it (it has an Apply).
+func LookupAction(name string) (Action, bool) {
+	a, ok := actions[name]
+	return a, ok && a.Apply != nil
 }
 
 // Change is one upgrade-relevant change of a release.
@@ -226,7 +243,7 @@ func (c Change) validate() error {
 	}
 	switch c.Kind {
 	case KindAutomatic:
-		if _, ok := actions[c.Action]; !ok {
+		if _, ok := LookupAction(c.Action); !ok {
 			return fmt.Errorf("change %s: automatic, but action %q is not one this gombit implements", c.ID, c.Action)
 		}
 	case KindManual, KindInformational:
@@ -253,6 +270,25 @@ func (m *Manifest) Release(version string) (Release, error) {
 	return Release{}, fmt.Errorf("%w: the compatibility manifest has no release %s (it covers %s)", ErrNoUpgradePath, version, m.coverage())
 }
 
+// CheckRelease reports whether the manifest is ready to ship as the stable
+// release tag: the tag is listed, it is the newest release (Latest), and no
+// change is left under Unreleased (absent, or empty). A manifest that lists
+// the tag but keeps the tag's changes under Unreleased, or lists releases
+// past it, would ship notes and an upgrade plan saying the release changes
+// nothing; the release workflow refuses it.
+func (m *Manifest) CheckRelease(tag string) error {
+	if _, err := m.Release(tag); err != nil {
+		return err
+	}
+	if latest := m.Latest(); latest != tag {
+		return fmt.Errorf("upgrade: manifest: %s is not the newest release it lists (%s is)", tag, latest)
+	}
+	if r, err := m.Release(Unreleased); err == nil && len(r.Changes) > 0 {
+		return fmt.Errorf("upgrade: manifest: %d change(s) are still under %s; move them to %s", len(r.Changes), Unreleased, tag)
+	}
+	return nil
+}
+
 // Latest is the newest release the manifest describes (never Unreleased).
 func (m *Manifest) Latest() string {
 	for i := len(m.Releases) - 1; i >= 0; i-- {
@@ -271,12 +307,32 @@ func (m *Manifest) coverage() string {
 	return first + " to " + latest
 }
 
+// PathFrom is Path from the framework an application builds against (as
+// Detect reports it), refusing with the reason a baseline that names no
+// framework release: a go.work decides the build, or go.mod replaces the
+// framework by a local directory or by another module (a fork). Planning
+// from an application goes through here, so no caller can plan from a
+// version that is not the framework's.
+func (m *Manifest) PathFrom(fw Framework, to string) ([]Release, error) {
+	switch {
+	case fw.Workspace != "":
+		return nil, fmt.Errorf("%w: a go.work (%s) decides the framework the app builds against; run with GOWORK=off to plan from its go.mod", ErrNoUpgradePath, fw.Workspace)
+	case fw.Local && fw.Replace != nil:
+		return nil, fmt.Errorf("%w: go.mod replaces the framework by the local directory %s, which is no release", ErrNoUpgradePath, fw.Replace.Path)
+	case fw.Replace != nil && fw.Version == "":
+		return nil, fmt.Errorf("%w: go.mod replaces the framework by another module, %s %s (a fork); the manifest describes the framework's own releases", ErrNoUpgradePath, fw.Replace.Path, fw.Replace.Version)
+	}
+	return m.Path(fw.Version, to)
+}
+
 // Path returns the releases an upgrade from version from to version to moves
 // across, in order: every release after from, up to and including to. It
 // returns none when from and to are the same, and ErrNoUpgradePath, saying
 // why, when the manifest cannot describe the upgrade: a version it does not
 // list (before the first release it covers, newer than this framework, a
-// pseudo-version, or Unreleased), or a downgrade.
+// pseudo-version or unlisted pre-release, or Unreleased), or a downgrade.
+// It trusts that the versions are the framework's; PathFrom plans from an
+// application's baseline.
 func (m *Manifest) Path(from, to string) ([]Release, error) {
 	i, err := m.index(from, "current")
 	if err != nil {
@@ -297,7 +353,7 @@ func (m *Manifest) Path(from, to string) ([]Release, error) {
 func (m *Manifest) index(version, role string) (int, error) {
 	switch {
 	case version == "":
-		return 0, fmt.Errorf("%w: the %s version is unknown (a local framework checkout has none)", ErrNoUpgradePath, role)
+		return 0, fmt.Errorf("%w: no %s version (a framework release) was given", ErrNoUpgradePath, role)
 	case version == Unreleased:
 		return 0, fmt.Errorf("%w: %s is not a release", ErrNoUpgradePath, Unreleased)
 	case !semver.IsValid(version):
@@ -310,12 +366,19 @@ func (m *Manifest) index(version, role string) (int, error) {
 	}
 	first, latest := m.Releases[0].Version, m.Latest()
 	switch {
+	// What the version is comes before where it sorts: the first commit
+	// after the newest release is a pseudo-version newer than it, and
+	// "upgrade the CLI" would be no help.
+	case module.IsPseudoVersion(version):
+		return 0, fmt.Errorf("%w: the %s version %s is a pseudo-version (an untagged commit); the compatibility manifest describes tagged releases only, so use one", ErrNoUpgradePath, role, version)
+	case semver.Prerelease(version) != "":
+		return 0, fmt.Errorf("%w: the %s version %s is a pre-release the compatibility manifest does not list; use a release it lists (%s)", ErrNoUpgradePath, role, version, m.coverage())
 	case semver.Compare(version, first) < 0:
 		return 0, fmt.Errorf("%w: the %s version %s is older than %s, the first release the compatibility manifest covers; see CHANGELOG.md for earlier releases", ErrNoUpgradePath, role, version, first)
 	case semver.Compare(version, latest) > 0:
 		return 0, fmt.Errorf("%w: the %s version %s is newer than this gombit knows (its manifest covers %s); upgrade the gombit CLI", ErrNoUpgradePath, role, version, m.coverage())
 	default:
-		return 0, fmt.Errorf("%w: the %s version %s is not a release the compatibility manifest lists: a pseudo-version or untagged commit (use a tagged release), or a release missing from the manifest", ErrNoUpgradePath, role, version)
+		return 0, fmt.Errorf("%w: the %s version %s is within the releases the compatibility manifest covers (%s) but missing from it", ErrNoUpgradePath, role, version, m.coverage())
 	}
 }
 

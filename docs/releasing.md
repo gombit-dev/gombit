@@ -24,20 +24,24 @@ automatically on merge.
    (`0.1.0` → `0.2.0`); fixes bump the patch.
 6. **Name the release in the compatibility manifest**
    ([`upgrade/manifest.yaml`](../upgrade/manifest.yaml)). Rename its
-   `unreleased` entry to the version, or add a `- version: vX.Y.Z` entry
-   with no changes if there is none: every release is listed, or upgrades
-   from it have no known path. Check that the upgrade-relevant changes of
-   the CHANGELOG entry are there, classified (see
+   `unreleased` entry to the version, or, only when there is no `unreleased`
+   entry (no upgrade-relevant change), add a `- version: vX.Y.Z` entry with
+   no changes: every release is listed, or upgrades from it have no known
+   path. Check that the upgrade-relevant changes since the last release are
+   there, classified: audit `git log vPREVIOUS..HEAD`, not only the CHANGELOG
+   (see
    [upgrade.md](upgrade.md#the-compatibility-manifest)), then regenerate
    [`upgrade-notes.md`](upgrade-notes.md) and preview the release body:
 
    ```bash
    go test ./upgrade -run TestUpgradeNotesDoc -update
-   go run ./cmd/gombit upgrade notes --release v0.1.0
+   go run ./cmd/gombit upgrade notes --release v0.1.0 --release-gate
    ```
 
    The release workflow puts these notes at the top of the GitHub release,
-   and fails, before publishing, a release the manifest does not list. From
+   and fails, before publishing, a stable release the manifest is not
+   closed at: the version must be listed, be the newest release it lists,
+   and leave no change under `unreleased` (`--release-gate`, as above). From
    the Actions tab that happens before the tag is created. **A pushed tag is
    already public** when the check runs, and since a tag is never moved, a
    missing entry then costs a new patch version. Run the preview above

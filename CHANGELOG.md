@@ -285,19 +285,24 @@ version.
 - The compatibility manifest (UPGRADE-2). It provides:
   - `upgrade/manifest.yaml`, built into `gombit`, which lists every release
     from v0.6.1 and its upgrade-relevant changes. Each change is classified
-    `manual`, `automatic` (it names an action this framework implements) or
+    `manual`, `automatic` (it names an action that carries its
+    implementation, `upgrade.LookupAction`) or
     `informational`, can be marked `breaking`, and names its area. The
     manifest is validated strictly.
-  - `upgrade.LoadManifest`, `Manifest.Path`, and `Classify`. A version the
-    manifest does not list fails with `ErrNoUpgradePath` and the reason
-    (older than its first release, newer than the CLI, a pseudo-version, a
-    downgrade); it never guesses.
+  - `upgrade.LoadManifest`, `Manifest.Path`, `Manifest.PathFrom` (from an
+    app's baseline: refuses a workspace, a local checkout or a fork), and
+    `Classify`. A version the manifest does not list fails with
+    `ErrNoUpgradePath` and the reason (older than its first release, newer
+    than the CLI, a pseudo-version or unlisted pre-release, a release missing
+    from it, a downgrade); it never guesses.
   - `gombit upgrade notes [--release | --from [--to]] [--json]`.
   - Upgrade notes rendered from the manifest:
     [docs/upgrade-notes.md](docs/upgrade-notes.md), checked for drift, and
     the top of each GitHub release body. The release workflow fails before
-    publishing a release the manifest does not list
-    ([docs/releasing.md](docs/releasing.md))
+    publishing a stable release the manifest is not closed at (unlisted, not
+    its newest release, or changes left under `unreleased`), and a test
+    checks every issue the changelog's Unreleased section links against the
+    manifest ([docs/releasing.md](docs/releasing.md))
     ([#342](https://github.com/gombit-dev/gombit/issues/342)).
 
 ### Changed
@@ -327,6 +332,21 @@ version.
 
 ### Fixed
 
+- Production configuration refuses `GOMBIT_HTTP_TRUSTED_PROXIES` values that
+  trust every peer in any spelling: a zero-length prefix (`10.0.0.0/0`,
+  `::0/0`) or ranges that together cover every IPv4 or IPv6 address
+  (`0.0.0.0/1,128.0.0.0/1`). Only the literal `0.0.0.0/0` forms were refused
+  before, so a trust-all list could still start and let clients spoof their
+  forwarded IP ([#500](https://github.com/gombit-dev/gombit/issues/500)).
+- A job whose worker died mid-attempt is no longer redelivered past its
+  `MaxAttempts`: the redelivery that would exceed it moves the job to the
+  failed jobs as exhausted. An attempt interrupted by `Release` or worker
+  shutdown may still run once more, as before
+  ([#494](https://github.com/gombit-dev/gombit/issues/494)).
+- `gombit jobs retry --all` retries each failed job at most once per
+  invocation. A job that a live worker failed again went back to the head of
+  the failed set and was retried until the command timed out
+  ([#493](https://github.com/gombit-dev/gombit/issues/493)).
 - `gombit contract app` reports only a framework release, picking the
   `replace` the go command would. A `replace` of a version the app does not
   require no longer counts, and an exact-version `replace` wins over an
