@@ -8,8 +8,9 @@ import (
 	"syscall"
 )
 
-// replace renames src over dst: rename(2), which replaces dst atomically.
-func replace(src, dst string) error { return os.Rename(src, dst) }
+// replace renames src over dst: rename(2), which replaces dst atomically
+// (so AllowNonAtomic changes nothing here).
+func replace(src, dst string, _ options) error { return os.Rename(src, dst) }
 
 // syncDir fsyncs dir, so that a rename in it reaches stable storage
 // (fsync(2): syncing a file does not sync the entry naming it). A

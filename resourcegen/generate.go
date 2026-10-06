@@ -466,18 +466,14 @@ func applyWrites(opts Options, planned []plannedFile) error {
 	var tx fsTx
 	for _, item := range planned {
 		if _, err := fmt.Fprintf(opts.Stdout, "%s %s\n", item.action, item.display); err != nil {
-			_ = tx.rollback()
-			return err
+			return rollbackNote(err, &tx)
 		}
 		if !item.write {
 			continue
 		}
 		full := filepath.Join(opts.WorkDir, filepath.FromSlash(item.relPath))
 		if err := tx.write(full, item.content); err != nil {
-			if rbErr := tx.rollback(); rbErr != nil {
-				return fmt.Errorf("resourcegen: write %s: %w (rollback failed: %v)", item.display, err, rbErr)
-			}
-			return fmt.Errorf("resourcegen: write %s: %w", item.display, err)
+			return rollbackNote(fmt.Errorf("resourcegen: write %s: %w", item.display, err), &tx)
 		}
 	}
 	return nil
