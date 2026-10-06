@@ -132,6 +132,8 @@ func TestOpenAPIIncludesAuthRoutes(t *testing.T) {
 		"/api/v1/auth/refresh",
 		"/api/v1/auth/logout",
 		"/api/v1/auth/register",
+		"/api/v1/auth/sessions",
+		"/api/v1/auth/sessions/{id}",
 		"/api/v1/me",
 		"bearerAuth",
 	} {

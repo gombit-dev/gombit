@@ -111,13 +111,19 @@ func (s *Service) requireBearer() func(ctx huma.Context, next func(huma.Context)
 			writeAuthError(ctx, contract.WithContext(ctx.Context(), contract.Authentication("missing bearer token")))
 			return
 		}
-		user, err := s.ParseAccess(ctx.Context(), raw)
+		user, refreshID, err := s.parseAccess(ctx.Context(), raw)
 		if err != nil {
 			writeAuthError(ctx, contract.WithContext(ctx.Context(), contract.Authentication("invalid access token")))
 			return
 		}
-		next(huma.WithValue(ctx, userContextKey{}, user))
+		next(withSession(ctx, user, refreshID))
 	}
+}
+
+// withSession stores the authenticated user and the refresh token row id of
+// the request's session.
+func withSession(ctx huma.Context, user User, refreshID uint) huma.Context {
+	return huma.WithValue(huma.WithValue(ctx, userContextKey{}, user), sessionContextKey{}, refreshID)
 }
 
 func bearerToken(header string) (string, bool) {
@@ -169,6 +175,8 @@ func mapServiceError(ctx context.Context, err error) error {
 		return contract.WithContext(ctx, contract.Validation("The request contains invalid fields.", map[string][]string{
 			"password": {err.Error()},
 		}))
+	case errors.Is(err, errSessionNotFound):
+		return contract.WithContext(ctx, contract.NotFound("session not found"))
 	case errors.Is(err, errUserNotFound):
 		return contract.WithContext(ctx, contract.Authentication("invalid access token"))
 	default:
@@ -186,4 +194,14 @@ func UserFromContext(ctx context.Context) (User, bool) {
 	}
 	user, ok := ctx.Value(userContextKey{}).(User)
 	return user, ok
+}
+
+type sessionContextKey struct{}
+
+// sessionFromContext returns the refresh token row id of the request's
+// session, stored alongside the user by requireBearer or
+// RequireCookieSession.
+func sessionFromContext(ctx context.Context) (uint, bool) {
+	id, ok := ctx.Value(sessionContextKey{}).(uint)
+	return id, ok && id != 0
 }

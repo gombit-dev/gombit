@@ -26,6 +26,10 @@ func TestE2EPostgres(t *testing.T) {
 	db := openDriver(t, config.DatabaseDriverPostgres, *postgresDSN)
 	app := newAuthAppWithDB(t, db)
 	runBearerE2E(t, app)
+	runBearerSessions(t, app)
+	runCookieSessions(t, newCookieAuthAppWithDB(t, db))
+	runSessionExpiryGates(t, db)
+	runSessionsService(t, db)
 	runPermissionPersistence(t, db)
 }
 
@@ -37,6 +41,10 @@ func TestE2EMySQL(t *testing.T) {
 	db := openDriver(t, config.DatabaseDriverMySQL, *mysqlDSN)
 	app := newAuthAppWithDB(t, db)
 	runBearerE2E(t, app)
+	runBearerSessions(t, app)
+	runCookieSessions(t, newCookieAuthAppWithDB(t, db))
+	runSessionExpiryGates(t, db)
+	runSessionsService(t, db)
 	runPermissionPersistence(t, db)
 }
 
