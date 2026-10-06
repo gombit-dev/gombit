@@ -4,7 +4,8 @@
 # harness runs whole, every package declaring a TestFault_ test is found,
 # database runs happen only with a DSN and only for packages that define the
 # flag (each with its own prefix), DSNs are masked in the output, FAULT_COUNT
-# reaches every run, and any failing `go test` fails the script, never
+# reaches every run, each run's -timeout grows with FAULT_COUNT (or is
+# FAULT_TIMEOUT), and any failing `go test` fails the script, never
 # silently.
 #
 #   bash scripts/test-faults_test.sh
@@ -54,15 +55,15 @@ newlog() {
   CALL_LOG="$(mktemp)"
   export CALL_LOG
 }
-unset FAULT_POSTGRES_DSN FAULT_MYSQL_DSN FAULT_COUNT
+unset FAULT_POSTGRES_DSN FAULT_MYSQL_DSN FAULT_COUNT FAULT_TIMEOUT
 
 # ---- SQLite only: the harness whole, then every TestFault_ package ----
 newlog
 out="$(suite)" || note "suite without DSNs failed: $out"
 calls="$(cat "$CALL_LOG")"
-grep -qx 'test -race -count=1 -run . ./internal/faulttest' <<<"$calls" || note "the harness does not run whole: $calls"
+grep -qx 'test -race -count=1 -timeout=600s -run . ./internal/faulttest' <<<"$calls" || note "the harness does not run whole: $calls"
 for pkg in ./framework ./auth ./admin ./cli ./dev; do
-  grep -E '^test -race -count=1 -run \^TestFault_ ' <<<"$calls" | grep -qw -- "$pkg" ||
+  grep -E '^test -race -count=1 -timeout=600s -run \^TestFault_ ' <<<"$calls" | grep -qw -- "$pkg" ||
     note "TestFault_ package $pkg not selected: $calls"
 done
 if grep -q 'integration' <<<"$calls"; then
@@ -79,7 +80,7 @@ for prefix in framework auth admin faulttest; do
   grep -qF -- "-$prefix.postgres-dsn $pg -$prefix.mysql-dsn $my" <<<"$calls" ||
     note "no database run with -$prefix.* flags: $calls"
 done
-grep -qF -- '-tags integration -race -count=7 -run . ./internal/faulttest' <<<"$calls" ||
+grep -qF -- '-tags integration -race -count=7 -timeout=600s -run . ./internal/faulttest' <<<"$calls" ||
   note "the harness's database tests do not run whole: $calls"
 for pkg in ./cli ./dev; do
   if grep 'integration' <<<"$calls" | grep -qw -- "$pkg"; then
@@ -148,6 +149,64 @@ for bad in zero 0 00 010 -1 ''; do
   fi
 done
 
+# ---- every run's timeout grows with FAULT_COUNT; FAULT_TIMEOUT overrides it ----
+# (go test's default -timeout, 10m, covers all the repetitions of a package in
+# one binary, and the x100 soak outgrew it)
+newlog
+FAULT_POSTGRES_DSN="$pg" FAULT_COUNT=14 suite >/dev/null || note "suite with FAULT_COUNT=14 failed"
+if grep -vF -- '-count=14 -timeout=600s ' "$CALL_LOG" | grep -q .; then
+  note "FAULT_COUNT=14 (40s each, under 10m) did not keep the 10m floor on every run: $(cat "$CALL_LOG")"
+fi
+newlog
+FAULT_POSTGRES_DSN="$pg" FAULT_COUNT=100 suite >/dev/null || note "suite with FAULT_COUNT=100 failed"
+if grep -vF -- '-count=100 -timeout=4000s ' "$CALL_LOG" | grep -q .; then
+  note "FAULT_COUNT=100 did not give every run 4000s: $(cat "$CALL_LOG")"
+fi
+# FAULT_TIMEOUT is whole hours, minutes and seconds, passed on in seconds.
+for good in 90m:5400s 1h30m:5400s 4000s:4000s 1h0m1s:3601s; do
+  newlog
+  FAULT_POSTGRES_DSN="$pg" FAULT_COUNT=100 FAULT_TIMEOUT="${good%%:*}" suite >/dev/null ||
+    note "suite with FAULT_TIMEOUT=${good%%:*} failed"
+  if grep -vF -- "-count=100 -timeout=${good#*:} " "$CALL_LOG" | grep -q .; then
+    note "FAULT_TIMEOUT=${good%%:*} did not reach every run as -timeout=${good#*:}: $(cat "$CALL_LOG")"
+  fi
+done
+# Refused before any test runs: zero (0.1ns is zero to go test, which turns
+# the timeout off), fractions, a unit below a second, no unit, a leading zero
+# (octal to bash), a sign, more than a Go duration holds, and anything else.
+for bad in 0 0s 0m0s 00m 010m 0.1ns 1.5h .5h 1us 90 m 1h- -1h -5m +1h \
+  2562048h 9223372037s 99999999999s 'ten minutes' 1x; do
+  newlog
+  status=0
+  FAULT_TIMEOUT="$bad" suite >/dev/null 2>&1 || status=$?
+  if [ "$status" -ne 2 ]; then
+    note "FAULT_TIMEOUT='$bad' exited $status, want 2 (refused)"
+  fi
+  if [ -s "$CALL_LOG" ]; then
+    note "FAULT_TIMEOUT='$bad' still ran tests: $(cat "$CALL_LOG")"
+  fi
+done
+newlog
+FAULT_TIMEOUT=9223372036s suite >/dev/null || note "the longest Go duration, in seconds, was refused"
+# A FAULT_COUNT whose timeout (40s each) would not fit a Go duration is
+# refused, never wrapped around by bash's arithmetic into a short one.
+for bad in 230584301 999999999 230584300921369411; do
+  newlog
+  status=0
+  FAULT_COUNT="$bad" suite >/dev/null 2>&1 || status=$?
+  if [ "$status" -ne 2 ]; then
+    note "FAULT_COUNT=$bad exited $status, want 2 (refused: its timeout overflows)"
+  fi
+  if [ -s "$CALL_LOG" ]; then
+    note "FAULT_COUNT=$bad still ran tests: $(cat "$CALL_LOG")"
+  fi
+done
+newlog
+FAULT_COUNT=230584300 suite >/dev/null || note "FAULT_COUNT=230584300, the largest whose timeout fits, was refused"
+if grep -vF -- '-count=230584300 -timeout=9223372000s ' "$CALL_LOG" | grep -q .; then
+  note "FAULT_COUNT=230584300 did not get 9223372000s: $(cat "$CALL_LOG")"
+fi
+
 # ---- shards partition the packages: every one runs, exactly once ----
 newlog
 FAULT_POSTGRES_DSN="$pg" suite >/dev/null || note "unsharded suite failed"
@@ -173,13 +232,13 @@ done
 # ---- compile-only builds the same binaries and runs no test ----
 newlog
 FAULT_POSTGRES_DSN="$pg" suite >/dev/null || note "suite failed"
-full="$(sed -E 's/-run [^ ]+ //; s/-count=[0-9]+ //' "$CALL_LOG")"
+full="$(sed -E 's/-run [^ ]+ //; s/-count=[0-9]+ //; s/-timeout=[^ ]+ //' "$CALL_LOG")"
 newlog
 FAULT_POSTGRES_DSN="$pg" FAULT_COMPILE_ONLY=1 FAULT_COUNT=9 suite >/dev/null || note "compile-only failed"
 if grep -v -- "-run ^\$ " "$CALL_LOG" | grep -q .; then
   note "compile-only ran tests: $(cat "$CALL_LOG")"
 fi
-if [ "$(sed -E 's/-run [^ ]+ //; s/-count=[0-9]+ //' "$CALL_LOG")" != "$full" ]; then
+if [ "$(sed -E 's/-run [^ ]+ //; s/-count=[0-9]+ //; s/-timeout=[^ ]+ //' "$CALL_LOG")" != "$full" ]; then
   note "compile-only did not build what the run uses:
 run:     $full
 compile: $(cat "$CALL_LOG")"
