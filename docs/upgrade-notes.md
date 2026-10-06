@@ -68,6 +68,12 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 - Requests whose handler panics are counted in `gombit_http_requests_total` (as 500, or the status already sent). (`panicking-requests-in-metrics`, behavior, [#432](https://github.com/gombit-dev/gombit/issues/432))
 
+- On Windows, `gombit make resource` replaces files with a POSIX-semantics rename, so a file open with delete sharing no longer blocks it. (`make-resource-windows-posix-rename`, cli, [#341](https://github.com/gombit-dev/gombit/issues/341))
+
+  On a volume that refuses that rename (FAT or exFAT, a network share
+  or mapped drive, a `\\wsl$` path, or Windows before 10 1709) it keeps
+  its previous plain rename and its rollback.
+
 - Unknown paths and recovered panics answer with the D10 error envelope (`not_found` 404, `internal` 500). (`d10-not-found-and-panics`, behavior, [#438](https://github.com/gombit-dev/gombit/issues/438))
 
   A 404 used to be Gin's plain-text body (or empty under an embedded

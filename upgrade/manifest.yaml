@@ -118,6 +118,16 @@ releases:
           Build the contract against a framework release.
         refs: [341]
 
+      - id: make-resource-windows-posix-rename
+        kind: informational
+        area: cli
+        summary: "On Windows, `gombit make resource` replaces files with a POSIX-semantics rename, so a file open with delete sharing no longer blocks it."
+        details: |
+          On a volume that refuses that rename (FAT or exFAT, a network share
+          or mapped drive, a `\\wsl$` path, or Windows before 10 1709) it keeps
+          its previous plain rename and its rollback.
+        refs: [341]
+
       - id: d10-not-found-and-panics
         kind: informational
         area: behavior
