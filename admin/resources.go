@@ -81,11 +81,9 @@ func (h *handlers) listResources(ctx context.Context, input *listInput) (*listOu
 	page, perPage := contract.ClampPage(input.Page, input.PerPage)
 
 	q := db.WithContext(ctx).Model(m.newInstance())
-	q, err = applySearch(q, m, input.Search)
+	q, err = applySearch(ctx, q, m, input.Search)
 	if err != nil {
-		return nil, contract.WithContext(ctx, contract.Validation("The request contains invalid fields.", map[string][]string{
-			"search": {err.Error()},
-		}))
+		return nil, err
 	}
 	q, err = applyFilters(ctx, q, m, queryValues(ctx))
 	if err != nil {
@@ -669,7 +667,7 @@ func (f *resolvedField) blankToNull() bool {
 	return patternRejectsEmpty(f.Pattern)
 }
 
-func applySearch(q *gorm.DB, m *registered, term string) (*gorm.DB, error) {
+func applySearch(ctx context.Context, q *gorm.DB, m *registered, term string) (*gorm.DB, error) {
 	// Resolve the registered search field names to columns, then delegate the
 	// LIKE building to the shared database.Search so the admin and the generated
 	// list handler cannot drift on search behavior.
@@ -679,7 +677,7 @@ func applySearch(q *gorm.DB, m *registered, term string) (*gorm.DB, error) {
 			cols = append(cols, col)
 		}
 	}
-	return database.Search(q, cols, term), nil
+	return database.Search(ctx, q, cols, term)
 }
 
 func applyFilters(ctx context.Context, q *gorm.DB, m *registered, values interface{ Get(string) string }) (*gorm.DB, error) {

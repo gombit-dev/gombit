@@ -358,6 +358,25 @@ version.
   error. It shares this reading of `go.mod` with `gombit upgrade baseline`,
   so for a `go.mod` the two report the same framework version
   ([#341](https://github.com/gombit-dev/gombit/issues/341)).
+- Client values the database rejects were a 500 on PostgreSQL and MySQL and
+  stored on SQLite: a NUL byte or invalid UTF-8 in a string (PostgreSQL),
+  text over 65,535 bytes in a `text` column (MySQL), more characters than a
+  `varchar(n)` holds (PostgreSQL and MySQL), and a NUL byte in a list filter
+  or search term (PostgreSQL, from any unauthenticated GET). `database.Open`
+  now registers a `gombit:text` callback, next to the time range check, that
+  refuses each with a 422 naming the field on every driver, on every write
+  path (`database.TextProblem`, `database.TextMaxBytes`); `FilterEq`,
+  `Search` and the admin's filters and search refuse such terms with a 422.
+  `MapPersistError` and `MapLoadError` answer a remaining driver data
+  exception a client value causes (PostgreSQL 22001, 22003, 22007, 22008,
+  22021, 22P05; MySQL 1264, 1265, 1292, 1366, 1406) with a 422 instead of a
+  500 (`database.IsDataException`), and a uint filter over `MaxInt64` is a
+  422; a decimal over its precision is #440's. **Behaviour change:** text a column cannot
+  hold on every driver is now refused on SQLite (and on PostgreSQL for a
+  `text` column over 65,535 bytes), where it was stored; and
+  `database.Search` takes a context and returns an error, like `FilterEq`,
+  so run `gombit generate` to update an app's `handler.gen.go`
+  ([#444](https://github.com/gombit-dev/gombit/issues/444)).
 - `gombit make command` refuses the names `generate` and `contract`, which
   collided with framework commands; every command the root registers is now
   reserved ([#447](https://github.com/gombit-dev/gombit/pull/447)).

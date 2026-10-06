@@ -2,6 +2,7 @@ package admin
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"regexp"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/shopspring/decimal"
 
+	"github.com/gombit-dev/gombit/database"
 	"github.com/gombit-dev/gombit/field"
 	"github.com/gombit-dev/gombit/types"
 )
@@ -160,6 +162,11 @@ func coerceValue(raw any, ft FieldType) (any, error) {
 		}
 		if ft == TypeUUID && !validUUID(s) {
 			return nil, fmt.Errorf("must be a UUID")
+		}
+		// A NUL byte or invalid UTF-8 is no text any driver stores or
+		// compares the same way (issue #444).
+		if msg := database.TextProblem(s); msg != "" {
+			return nil, errors.New(msg)
 		}
 		return s, nil
 	case TypeInteger:

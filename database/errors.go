@@ -3,9 +3,12 @@ package database
 import (
 	"context"
 	"errors"
+	"regexp"
 	"strings"
 
+	mysqldriver "github.com/go-sql-driver/mysql"
 	"github.com/gombit-dev/gombit/contract"
+	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
 )
 
@@ -56,9 +59,59 @@ func IsNotNullViolation(err error) bool {
 	return strings.Contains(msg, "not null") || strings.Contains(msg, "not-null") || strings.Contains(msg, "cannot be null")
 }
 
+// IsDataException reports a value the database refused as data that a
+// client sends and can fix by sending another (issue #444): PostgreSQL's
+// string too long (22001), numeric out of range (22003), invalid datetime
+// format or field overflow (22007, 22008), and a NUL byte or invalid UTF-8
+// (22021, 22P05); MySQL's out-of-range (1264), truncated (1265), too-long
+// (1406) and incorrect-string (1366) errors, and an incorrect date or time
+// literal (1292). MapPersistError and MapLoadError answer it with a 422.
+//
+// It is an allowlist: the rest of PostgreSQL's class 22 (division by zero,
+// a cast in server-side SQL) and MySQL's "Truncated incorrect ... value" on
+// an expression are server faults, and stay 500s.
+func IsDataException(err error) bool {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		switch pgErr.Code {
+		case "22001", "22003", "22007", "22008", "22021", "22P05":
+			return true
+		}
+		return false
+	}
+	var myErr *mysqldriver.MySQLError
+	if errors.As(err, &myErr) {
+		switch myErr.Number {
+		case 1264, 1265, 1366, 1406:
+			return true
+		case 1292:
+			return strings.HasPrefix(myErr.Message, "Incorrect ")
+		}
+	}
+	return false
+}
+
+// dataExceptionColumn matches the column MySQL names in a data exception
+// ("... for column 'notes' at row 1").
+var dataExceptionColumn = regexp.MustCompile("for column '([^']+)'")
+
+// dataExceptionError is the 422 for a data exception: keyed on the column
+// when the driver names it (MySQL does, PostgreSQL does not).
+func dataExceptionError(ctx context.Context, err error) error {
+	var fields map[string][]string
+	var myErr *mysqldriver.MySQLError
+	if errors.As(err, &myErr) {
+		if m := dataExceptionColumn.FindStringSubmatch(myErr.Message); m != nil {
+			fields = map[string][]string{m[1]: {"cannot be stored in this column"}}
+		}
+	}
+	return contract.WithContext(ctx, contract.Validation("The request contains a value the database cannot store.", fields))
+}
+
 // MapLoadError maps a GORM read/load error to a D10 category error:
-// record-not-found becomes not_found; any other driver failure becomes
-// internal. Unique/duplicate is not treated as conflict on load.
+// record-not-found becomes not_found; a data exception (a filter value the
+// column type cannot hold) becomes validation; any other driver failure
+// becomes internal. Unique/duplicate is not treated as conflict on load.
 func MapLoadError(ctx context.Context, err error, notFound, internal string) error {
 	if err == nil {
 		return nil
@@ -66,14 +119,22 @@ func MapLoadError(ctx context.Context, err error, notFound, internal string) err
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return contract.WithContext(ctx, contract.NotFound(notFound))
 	}
+	var ve *ValidationError
+	if errors.As(err, &ve) {
+		return contract.WithContext(ctx, contract.Validation(ve.Message, ve.Fields))
+	}
+	if IsDataException(err) {
+		return dataExceptionError(ctx, err)
+	}
 	return contract.WithContext(ctx, contract.Internal(internal))
 }
 
 // MapPersistError maps a GORM write error to a D10 category error:
-// unique/duplicate becomes conflict; a foreign-key or NOT NULL violation
-// becomes validation, since both mean the client submitted a value that
-// references or omits something invalid, not that the server failed; any
-// other failure becomes internal.
+// unique/duplicate becomes conflict; a foreign-key or NOT NULL violation, or
+// a data exception (a value the column cannot hold), becomes validation,
+// since each means the client submitted a value that references, omits or
+// spells something invalid, not that the server failed; any other failure
+// becomes internal.
 func MapPersistError(ctx context.Context, err error, conflict, internal string) error {
 	if err == nil {
 		return nil
@@ -92,6 +153,9 @@ func MapPersistError(ctx context.Context, err error, conflict, internal string) 
 	}
 	if IsNotNullViolation(err) {
 		return contract.WithContext(ctx, contract.Validation("The request is missing a required value.", nil))
+	}
+	if IsDataException(err) {
+		return dataExceptionError(ctx, err)
 	}
 	return contract.WithContext(ctx, contract.Internal(internal))
 }

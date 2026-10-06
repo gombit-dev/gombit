@@ -73,8 +73,8 @@ if err := db.First(&row, id).Error; err != nil {
 
 | Helper | Maps | Anything else |
 | --- | --- | --- |
-| `MapLoadError` | `gorm.ErrRecordNotFound` → D10 `not_found` (404) | `internal` |
-| `MapPersistError` | `*database.ValidationError` → `validation_error` (422, with its fields), including a decimal the column would not store exactly (below); unique / duplicate → `conflict` (409); foreign-key or NOT NULL violation → `validation_error` (422) | `internal` |
+| `MapLoadError` | `gorm.ErrRecordNotFound` → D10 `not_found` (404); `*database.ValidationError` or a data exception → `validation_error` (422) | `internal` |
+| `MapPersistError` | `*database.ValidationError` → `validation_error` (422, with its fields), including a decimal the column would not store exactly (below); unique / duplicate → `conflict` (409); foreign-key or NOT NULL violation, or a data exception → `validation_error` (422) | `internal` |
 | `MapDeleteError` | `database.ErrReferenced` or a foreign-key violation → `conflict` (409) | `internal` |
 
 Before every create and update, `database.Open` also checks each value the
@@ -132,9 +132,22 @@ garbage write.
 
 The check runs on the API and admin write paths alike.
 
-`IsUniqueViolation`, `IsForeignKeyViolation`, and `IsNotNullViolation` are the
-shared detectors behind those helpers; auth registration uses
-`IsUniqueViolation` too. See [`docs/contract.md`](contract.md#application-errors-41-categories).
+`IsUniqueViolation`, `IsForeignKeyViolation`, `IsNotNullViolation`, and
+`IsDataException` are the shared detectors behind those helpers; auth
+registration uses `IsUniqueViolation` too. A data exception is one of the
+codes a value the client sends can cause, which the client fixes by sending
+another value: PostgreSQL's string too long (22001), numeric out of range
+(22003), invalid datetime (22007, 22008), NUL byte or invalid UTF-8 (22021,
+22P05), and MySQL's out-of-range (1264), truncated (1265), incorrect string
+(1366), too long (1406) and incorrect date or time literal (1292). A code does
+not say what caused it, so the same code raised by server-side SQL (an
+expression overflowing a column, `n + 1` past an `int4`) is a 422 too; the
+rest of PostgreSQL's class 22 (division by zero, an invalid cast) stays a 500,
+and the database logger keeps logging data exceptions at error level. The
+422 carries no `fields`: the driver names a column, if at all, not the field
+the API names. The write checks below refuse most of these before the SQL
+runs, with the field named, so the driver's refusal is the backstop. See
+[`docs/contract.md`](contract.md#application-errors-41-categories).
 
 ### Timestamp and date range
 
@@ -213,6 +226,44 @@ What a statement writes is what GORM writes:
 
 The check costs an ordinary write nothing: it allocates only when a value is
 out of range.
+
+### Text
+
+`database.Open` also refuses, before the SQL runs on every create and update,
+a string a text column cannot store the same way on every driver (issue
+#444), with a `*database.ValidationError` naming the field (a 422 through
+`MapPersistError`). What a statement writes is decided as for the time range
+check, and every string column the Go value is written to as is gets
+checked: a `string` or named string type, `*string`, `sql.NullString`. A
+field whose value is converted on the way (a GORM `serializer`, a type with
+its own `driver.Valuer`) writes something else and is not checked, nor is a
+column declared binary (`blob`, `bytea`).
+
+- A NUL byte or invalid UTF-8 (`database.TextProblem`): PostgreSQL refused
+  them with a 500, SQLite stored them.
+- More than the column holds, from its declared `type:`, else its `size:`.
+  `size:n`, `varchar(n)` and `char(n)` hold n characters (PostgreSQL and
+  MySQL refused more, or silently cut trailing spaces past n; SQLite stored
+  them). `text` holds `database.TextMaxBytes` (65,535) bytes, MySQL's
+  `TEXT`, on every driver (MySQL refused more with a 500); `tinytext` and
+  `mediumtext` hold MySQL's capacity too. A string column with neither is
+  unlimited text, except that MySQL makes a primary key, indexed, unique or
+  defaulted one `varchar(191)`, so it holds 191 characters everywhere. A
+  generated `string` field is `size:255` (or its `max_length`), a `text`
+  field `type:text`.
+
+NULL (a nil pointer, an invalid `NullString`) and an expression are left to
+the database. The check allocates only when a value is refused, or when
+`Updates` is given a struct of a type other than the model, which is parsed
+to match its fields to the model's columns.
+
+The list helpers apply the same rule to what a client sends: `FilterEq` on a
+string column and `Search` refuse a NUL byte or invalid UTF-8 with a 422
+(keyed on the column, and on `search`), which PostgreSQL refused to compare
+with a 500, and `FilterEq` on a uint column refuses a value over
+`math.MaxInt64`, which PostgreSQL's bigint cannot bind. `Search` therefore takes a context and returns an error, like
+`FilterEq`; `gombit generate` emits the new call. The admin data plane
+refuses them in its filters, search and writes alike.
 
 ## Deleting rows
 

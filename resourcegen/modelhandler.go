@@ -169,7 +169,13 @@ func renderModelHandler(r modelResource) (string, error) {
 		b.WriteString("\tif err != nil {\n\t\treturn nil, err\n\t}\n")
 	}
 	if len(searchCols) > 0 {
-		b.WriteString("\tq = database.Search(q, []string{\"" + strings.Join(searchCols, "\", \"") + "\"}, input.Search)\n")
+		assign := "="
+		if !errDeclared {
+			assign = ":="
+			errDeclared = true
+		}
+		b.WriteString("\tq, err " + assign + " database.Search(ctx, q, []string{\"" + strings.Join(searchCols, "\", \"") + "\"}, input.Search)\n")
+		b.WriteString("\tif err != nil {\n\t\treturn nil, err\n\t}\n")
 	}
 	b.WriteString("\tvar total int64\n")
 	b.WriteString("\tif err := q.Session(&gorm.Session{}).Count(&total).Error; err != nil {\n")
