@@ -358,3 +358,82 @@ releases:
           fields adds the table to its migrations (`claims.Models()`; see
           docs/storage.md, "Setup").
         refs: [279, 323, 324, 325, 326, 327, 328, 329, 530]
+
+      - id: auth-session-management
+        kind: informational
+        area: api
+        summary: "Session management in both auth modes: `GET {prefix}/auth/sessions` lists the user's active sessions; `DELETE {prefix}/auth/sessions/{id}` and `DELETE {prefix}/auth/sessions?scope=others|all` revoke them."
+        details: |
+          `auth.Service` gains `ListSessions` (returning `[]auth.AuthSession`),
+          `RevokeSession`, `RevokeAllSessions` and `ErrSessionNotFound`. Cookie
+          mode clears the session cookies when a request ends its own session
+          (docs/auth.md § Sessions).
+        refs: [335]
+
+      - id: auth-session-names-reserved
+        kind: manual
+        breaking: true
+        area: api
+        summary: "With auth enabled, an app that registers the session routes, the `auth-*` session operation IDs or the `AuthSession` / `AuthRevokeResult` schema names fails at startup: the framework registers them."
+        details: |
+          With `GOMBIT_JWT_SECRET` set, registering a route at `GET` or
+          `DELETE {prefix}/auth/sessions` or `DELETE {prefix}/auth/sessions/{id}`
+          (through Huma or the raw Gin router), an operation
+          `auth-list-sessions`, `auth-revoke-session` or `auth-revoke-sessions`,
+          or a type Huma names `AuthSession`, `DataListAuthSession`,
+          `AuthRevokeResult` or `DataAuthRevokeResult` now panics when the app
+          starts. Drop the app's own session routes, which the framework's
+          replace, or rename them. A resource named `Session`
+          (`gombit make resource Session`) does not collide.
+        refs: [335]
+
+      - id: refresh-reuse-only-rotated-tokens
+        kind: informational
+        area: security
+        summary: "A refresh token revoked by logout or session revocation is a 401 that no longer revokes the user's other sessions; only an already-rotated token counts as reuse."
+        refs: [335]
+
+      - id: access-token-ends-with-session
+        kind: manual
+        area: security
+        summary: "An access JWT stops authenticating when its session expires, even when `GOMBIT_JWT_ACCESS_TTL` is longer than `GOMBIT_JWT_REFRESH_TTL`."
+        details: |
+          Nothing changes unless the access TTL is the longer one, which the
+          config accepts: a session then ends when its refresh token expires,
+          and its access token no longer outlives it. If that is too soon,
+          raise `GOMBIT_JWT_REFRESH_TTL` to at least `GOMBIT_JWT_ACCESS_TTL`.
+        refs: [335]
+
+      - id: refresh-lock-failure-is-500
+        kind: informational
+        area: behavior
+        summary: "`POST /auth/refresh` answers 500, not 401, when the database fails while the rotation locks the user's row (a deadlock, a lock timeout, a lost connection)."
+        details: |
+          Only a user that no longer exists is a 401 there, so a client can
+          retry instead of treating the failure as a dead credential.
+        refs: [335]
+
+      - id: auth-user-row-lock
+        kind: informational
+        area: behavior
+        summary: "Refresh-token rotation and the session revocations lock the user's row for their transaction (`FOR NO KEY UPDATE` on PostgreSQL, `FOR UPDATE` on MySQL), so they run one at a time per user."
+        details: |
+          Application code that holds a lock on a user's row in a long
+          transaction now delays that user's refreshes and revocations. Code
+          that also writes a user's refresh tokens should lock the user's row
+          first, as the framework does.
+        refs: [335]
+
+      - id: refresh-reuse-cascade-takes-user-lock
+        kind: informational
+        area: security
+        summary: "The refresh-token reuse cascade takes the user's row lock, like rotation, so it also revokes the token a concurrent rotation of another of the user's sessions issues."
+        details: |
+          On PostgreSQL that token could survive the cascade.
+        refs: [335]
+
+      - id: client-schema-session-operations
+        kind: informational
+        area: client
+        summary: "A new app's placeholder `schema.ts` includes the session operations; an existing app's generated client gets them from `gombit client generate`."
+        refs: [335]

@@ -304,6 +304,19 @@ version.
     checks every issue the changelog's Unreleased section links against the
     manifest ([docs/releasing.md](docs/releasing.md))
     ([#342](https://github.com/gombit-dev/gombit/issues/342)).
+- [Session management](docs/auth.md#sessions) in both auth modes:
+  `GET /auth/sessions` lists the user's active sessions with an opaque id,
+  `last_refreshed_at`, `expires_at`, and a `current` flag;
+  `DELETE /auth/sessions/{id}` revokes one; and
+  `DELETE /auth/sessions?scope=others|all` revokes every other session or
+  every session. Cookie mode clears the session cookies when a request ends
+  its own session. `auth.Service` gains `ListSessions` (returning
+  `[]auth.AuthSession`), `RevokeSession`, `RevokeAllSessions`, and
+  `ErrSessionNotFound`. The operation IDs (`auth-list-sessions`, ...) and
+  schema names (`AuthSession`, ...) carry an `auth` prefix, which leaves
+  `Session` free for an application's own type and for
+  `gombit make resource Session` (Huma panics at boot on a duplicate)
+  ([#335](https://github.com/gombit-dev/gombit/issues/335)).
 
 ### Changed
 
@@ -320,6 +333,21 @@ version.
   framework's tables (auth, storage claims). The README, the docs index, and
   the user guides (router, security, build, lifecycle, health, frontend,
   contract, CLI, tutorial) now cover the shipped storage feature.
+- Presenting a refresh token that was revoked by logout or session
+  revocation now returns 401 without revoking the user's other sessions.
+  Only an already-rotated refresh token counts as reuse and revokes all of
+  them, as before ([#335](https://github.com/gombit-dev/gombit/issues/335)).
+- An access JWT now stops authenticating when its session expires, not only
+  when it is revoked, so a token never outlives a session that has dropped
+  out of `GET /auth/sessions` and can no longer be revoked. This only changes
+  anything when `GOMBIT_JWT_ACCESS_TTL` is longer than `GOMBIT_JWT_REFRESH_TTL`,
+  which the config accepts ([#335](https://github.com/gombit-dev/gombit/issues/335)).
+- `make test-faults` gives every `go test` a per-binary `-timeout` that grows
+  with `FAULT_COUNT`: 40 seconds a repetition, never under `go test`'s own
+  10 minutes. Every repetition of a package runs in one test binary, so the
+  weekly x100 soak is not cut off by that default. `FAULT_TIMEOUT`, in whole
+  hours, minutes and seconds (`90m`, `1h30m`), sets it instead
+  ([#335](https://github.com/gombit-dev/gombit/issues/335)).
 - A new app's `.env.example` lists every `GOMBIT_*` variable the config
   package reads, including `GOMBIT_JOBS_DRIVER`, `GOMBIT_JOBS_QUEUE`,
   `GOMBIT_JOBS_NAMESPACE`, `GOMBIT_HTTP_TRUSTED_PROXIES`, and the database
@@ -403,6 +431,15 @@ version.
   `handler.gen.go`; an app's own scaffolded `internal/product/handler.go`
   needs the 63-bit id parse by hand
   ([#444](https://github.com/gombit-dev/gombit/issues/444)).
+- `POST /auth/refresh` answers 500, not 401, when the database fails while
+  the rotation locks the user's row (a deadlock, a lock timeout, a lost
+  connection). Only a user that no longer exists is a 401, so a client can
+  retry instead of treating the failure as a dead credential
+  ([#335](https://github.com/gombit-dev/gombit/issues/335)).
+- The refresh-token reuse cascade takes the user's row lock, like rotation,
+  so it also revokes the token a concurrent rotation of another of the
+  user's sessions issues. On PostgreSQL that token could survive the cascade
+  ([#335](https://github.com/gombit-dev/gombit/issues/335)).
 - `gombit make command` refuses the names `generate` and `contract`, which
   collided with framework commands; every command the root registers is now
   reserved ([#447](https://github.com/gombit-dev/gombit/pull/447)).

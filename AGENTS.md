@@ -79,6 +79,11 @@ dependency, a TCP fault proxy, the retry-policy check), `TestFault_*` tests
 run by `make test-faults` (a sharded PR check), and the seeded stochastic
 suite `internal/chaos` (`make test-chaos`, nightly `chaos.yml`, never a PR
 check). See `docs/testing/fault-injection.md`.
+The **AUTH-0** epic (#280) has started with AUTH-5 (#335): session
+management in both auth modes (`GET` / `DELETE {prefix}/auth/sessions`,
+`auth.Service.ListSessions` / `RevokeSession` / `RevokeAllSessions`), with
+token rotation and the session revocations serialized per user on a lock of
+the user's row; see `docs/auth.md`.
 Don't assume generated apps are committed in-tree; `gombit new` writes them
 on demand. Check `git log` / `ls` before describing "how the code works."
 
