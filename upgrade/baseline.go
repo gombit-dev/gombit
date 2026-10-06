@@ -318,7 +318,9 @@ gombit:
 // Nothing else in the file changes: the result must read back as recorded,
 // with every other key meaning what it did, or nothing is written. The file
 // is replaced through a synced temp file and a rename (internal/atomicfile):
-// a reader sees the old file or the new, never a part, on Unix and NTFS, and
+// a reader sees the old file or the new, never a part (on Unix, and on
+// Windows NTFS; a Windows volume without an atomic rename is refused with
+// atomicfile.ErrNoAtomicRename and nothing written), and
 // on Unix the replacement is also synced to disk before RecordBaseline
 // returns; see that package for the rest. It reports whether it wrote; an
 // app that already records its baseline is left as it is. wrote is true
