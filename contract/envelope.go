@@ -1,6 +1,10 @@
 package contract
 
-import "github.com/gombit-dev/gombit/types"
+import (
+	"math"
+
+	"github.com/gombit-dev/gombit/types"
+)
 
 // Data is the D10 success envelope without meta: {"data": ...}.
 type Data[T any] struct {
@@ -81,6 +85,18 @@ func ClampPage(page, perPage int) (int, int) {
 
 // PageOffset returns the 0-based OFFSET for a 1-based page and per-page size.
 // Callers should pass values already returned by ClampPage.
+//
+// A page so far out that the offset would overflow saturates at math.MaxInt
+// rather than wrapping: a wrapped, negative offset is "no offset" to GORM, so
+// ?page=9223372036854775807 used to return the first page's rows (issue #441).
+// On the 64-bit platforms Gombit ships for, math.MaxInt is past any table, so
+// the page is empty on every driver.
 func PageOffset(page, perPage int) int {
+	if page <= 1 || perPage <= 0 {
+		return 0
+	}
+	if page-1 > math.MaxInt/perPage {
+		return math.MaxInt
+	}
 	return (page - 1) * perPage
 }

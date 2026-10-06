@@ -883,6 +883,17 @@ func TestResourceListPaginationSearchOrderFilter(t *testing.T) {
 		t.Fatalf("page data len = %d, want 2", len(paged.Data))
 	}
 
+	// A page so far out that its offset would overflow is empty, not the
+	// first page under a wrapped offset (issue #441).
+	far := doRequest(app, jar, http.MethodGet, "/api/v1/admin/resources/widgets?page=9223372036854775807&per_page=2", "")
+	var farPaged listEnvelope
+	if err := json.Unmarshal(far.Body.Bytes(), &farPaged); err != nil || far.Code != http.StatusOK {
+		t.Fatalf("far page status = %d, err %v; body: %s", far.Code, err, far.Body.String())
+	}
+	if len(farPaged.Data) != 0 || farPaged.Meta == nil || farPaged.Meta.Total != 3 {
+		t.Fatalf("far page = %+v, want no rows and total 3", farPaged)
+	}
+
 	search := doRequest(app, jar, http.MethodGet, "/api/v1/admin/resources/widgets?search=Beta", "")
 	var found listEnvelope
 	if err := json.Unmarshal(search.Body.Bytes(), &found); err != nil {

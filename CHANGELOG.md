@@ -357,6 +357,13 @@ version.
   what the client receives. A panic that aborts the connection
   (`http.ErrAbortHandler`) before anything is sent is also counted as 500
   ([#432](https://github.com/gombit-dev/gombit/issues/432)).
+- A list page so far out that its offset overflows is empty. `contract.PageOffset`
+  computed `(page - 1) * per_page` unchecked, so `?page=9223372036854775807`
+  wrapped to a negative offset, which GORM ignores, and returned the first
+  page's rows under that page number on every generated list endpoint and the
+  admin data plane. The offset now saturates at `math.MaxInt`, which selects
+  nothing on SQLite, PostgreSQL and MySQL
+  ([#441](https://github.com/gombit-dev/gombit/issues/441)).
 - Database logging goes through the app's logger instead of GORM's default
   one, which wrote to stdout in its own coloured format, ignored
   `GOMBIT_LOG_SINK` / `GOMBIT_LOG_LEVEL`, logged every failed statement with
