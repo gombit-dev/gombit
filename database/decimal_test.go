@@ -542,3 +542,47 @@ func TestDecimalStringWhitespaceMatchesTheDatabases(t *testing.T) {
 		}
 	}
 }
+
+type permissionDecimalRow struct {
+	ID         uint          `gorm:"primaryKey"`
+	ReadOnly   types.Decimal `gorm:"->;type:decimal(19,4)" json:"read_only"`
+	CreateOnly types.Decimal `gorm:"<-:create;type:decimal(19,4)" json:"create_only"`
+	UpdateOnly types.Decimal `gorm:"<-:update;type:decimal(19,4)" json:"update_only"`
+}
+
+// TestDecimalCallbackHonoursFieldPermissions: GORM never writes a column its
+// field permissions exclude (`->` on any write, `<-:create` on update,
+// `<-:update` on create), so the guard does not judge it either; a value a
+// statement will not write cannot be stored changed (the shared walker's
+// round-6 fix, which must hold for gombit:decimal too).
+func TestDecimalCallbackHonoursFieldPermissions(t *testing.T) {
+	db := openSQLite(t)
+	if err := db.Exec("CREATE TABLE permission_decimal_rows (id integer PRIMARY KEY, read_only decimal(19,4), create_only decimal(19,4), update_only decimal(19,4))").Error; err != nil {
+		t.Fatal(err)
+	}
+	bad := types.MustDecimal("1.00005")
+	good := types.MustDecimal("2.5")
+
+	// On create: the read-only and update-only columns are not written.
+	row := permissionDecimalRow{ReadOnly: bad, CreateOnly: good, UpdateOnly: bad}
+	if err := db.Create(&row).Error; err != nil {
+		t.Fatalf("Create with bad values only in unwritten columns: %v", err)
+	}
+	var ve *ValidationError
+	if err := db.Create(&permissionDecimalRow{CreateOnly: bad}).Error; !errors.As(err, &ve) || len(ve.Fields["create_only"]) == 0 {
+		t.Fatalf("Create with a bad create-only value: error = %v, want a refusal of create_only", err)
+	}
+
+	// On update: the read-only and create-only columns are not written.
+	row.ReadOnly, row.CreateOnly, row.UpdateOnly = bad, bad, good
+	if err := db.Save(&row).Error; err != nil {
+		t.Fatalf("Save with bad values only in unwritten columns: %v", err)
+	}
+	if err := db.Model(&permissionDecimalRow{ID: row.ID}).Updates(map[string]any{"read_only": "1.00005", "create_only": "1.00005"}).Error; err != nil {
+		t.Fatalf("Updates(map) naming only unwritable columns: %v", err)
+	}
+	row.UpdateOnly = bad
+	if err := db.Save(&row).Error; !errors.As(err, &ve) || len(ve.Fields["update_only"]) == 0 {
+		t.Fatalf("Save with a bad update-only value: error = %v, want a refusal of update_only", err)
+	}
+}

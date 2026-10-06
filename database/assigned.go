@@ -42,8 +42,9 @@ type assignedValue struct {
 //   - on a create, the literal assignments of an upsert's ON CONFLICT DO
 //     UPDATE (a column reference such as excluded.x, or an expression, is no
 //     value: the inserted row it refers to is checked as the Dest);
-//   - filtered by Select/Omit as GORM filters them; on a create, an auto
-//     create/update timestamp column is always in the INSERT, as GORM has it.
+//   - filtered by the fields' write permissions and by Select/Omit as GORM
+//     filters them; on a create, an auto create/update timestamp column is
+//     always in the INSERT, as GORM has it.
 //
 // An update's model is walked only when it is the Dest (Save, Updates(&row));
 // otherwise it holds the row's old values, which the statement does not write.
@@ -92,8 +93,14 @@ type assignWalker struct {
 	creating   bool
 }
 
-// written reports whether GORM writes f's column.
+// written reports whether GORM writes f's column. A column the field's
+// permissions keep out of the statement (gorm:"->", "<-:create" on an
+// update, "<-:update" on a create) never is, whatever Select says:
+// SelectAndOmitColumns forces it false.
 func (w *assignWalker) written(f *schema.Field) bool {
+	if (w.creating && !f.Creatable) || (!w.creating && !f.Updatable) {
+		return false
+	}
 	if v, ok := w.selected[f.DBName]; ok {
 		return v
 	}
