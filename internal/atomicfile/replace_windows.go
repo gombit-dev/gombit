@@ -2,6 +2,7 @@ package atomicfile
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,27 +12,24 @@ import (
 )
 
 // replace renames src over dst with POSIX semantics, which replace dst in
-// one step; where the volume or Windows version has none, with MoveFileEx
-// (see the package doc).
+// one step. A volume or Windows version without them refuses the rename
+// with dst unchanged, and replace refuses too (ErrNoAtomicRename) rather
+// than fall back to a rename Windows does not document as atomic.
 func replace(src, dst string) error {
 	abs, err := filepath.Abs(dst)
 	if err != nil {
 		return &os.LinkError{Op: "rename", Old: src, New: dst, Err: err}
 	}
-	err = renameByHandle(src, abs, windows.FILE_RENAME_REPLACE_IF_EXISTS|windows.FILE_RENAME_POSIX_SEMANTICS)
-	if err == nil || !posixUnsupported(err) {
-		return err
+	err = renameHook(src, abs, windows.FILE_RENAME_REPLACE_IF_EXISTS|windows.FILE_RENAME_POSIX_SEMANTICS)
+	if err != nil && posixUnsupported(err) {
+		return &os.LinkError{Op: "rename", Old: src, New: dst, Err: fmt.Errorf("%w (%w)", ErrNoAtomicRename, err)}
 	}
-	from, ferr := windows.UTF16PtrFromString(longPath(src))
-	to, terr := windows.UTF16PtrFromString(longPath(abs))
-	if ferr != nil || terr != nil {
-		return &os.LinkError{Op: "rename", Old: src, New: dst, Err: errors.Join(ferr, terr)}
-	}
-	if err := windows.MoveFileEx(from, to, windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH); err != nil {
-		return &os.LinkError{Op: "rename", Old: src, New: dst, Err: err}
-	}
-	return nil
+	return err
 }
+
+// renameHook is renameByHandle; a test replaces it to play a volume
+// without POSIX rename semantics.
+var renameHook = renameByHandle
 
 // syncDir does nothing on Windows: none of the calls replace uses makes the
 // rename durable before it returns (see the package doc).

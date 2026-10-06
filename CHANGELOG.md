@@ -285,6 +285,12 @@ version.
 
 ### Changed
 
+- `gombit make resource` and `gombit upgrade baseline --write` replace files
+  with an atomic rename or not at all. On Windows that rename needs NTFS on
+  Windows 10 1709 or later; on a FAT or exFAT volume, or an older Windows,
+  they now refuse before changing anything, where `make resource` used to
+  replace files with a rename Windows does not document as atomic
+  ([#341](https://github.com/gombit-dev/gombit/issues/341)).
 - A new app's README lists `storage/` (the local driver's files, created on
   the first write and gitignored) and says `internal/platform` migrates the
   framework's tables (auth, storage claims). The README, the docs index, and

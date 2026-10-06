@@ -1,8 +1,10 @@
 // Package atomicfile replaces a file's content so that it is never seen
 // truncated or half-written: a reader finds the old content or the new,
-// whole. That is the guarantee on every platform (atomic visibility).
-// Surviving a crash (durability) is promised only where the code below asks
-// the filesystem for it: on Unix, not on Windows.
+// whole (atomic visibility). Write gives that guarantee or does nothing:
+// where the platform has no atomic rename for the target's volume, it
+// refuses (ErrNoAtomicRename) before touching the target. Surviving a crash
+// (durability) is promised only where the code below asks the filesystem
+// for it: on Unix, not on Windows.
 //
 // The new content, with its mode, goes to a temp file in the target's
 // directory and is synced; the temp file is then renamed over the target.
@@ -19,9 +21,9 @@
 // FileRenameInfoEx with FILE_RENAME_POSIX_SEMANTICS and
 // FILE_RENAME_REPLACE_IF_EXISTS, NTFS on Windows 10 1709 or later), the same
 // primitive storage/local's writes rest on. A volume without it (FAT, exFAT,
-// an older Windows) falls back to MoveFileEx(MOVEFILE_REPLACE_EXISTING |
-// MOVEFILE_WRITE_THROUGH), which Windows does not document as atomic: there
-// the old-or-new guarantee is the filesystem's, not this package's. Nothing
+// an older Windows) refuses that rename without changing anything, and
+// Write then fails with ErrNoAtomicRename: no rename Windows offers there
+// (MoveFileEx included) is documented as atomic, so none is used. Nothing
 // here makes the POSIX-semantics rename durable before Write returns, so on
 // Windows a power loss right after a successful Write may still leave the
 // old content.
@@ -33,6 +35,11 @@ import (
 	"os"
 	"path/filepath"
 )
+
+// ErrNoAtomicRename: the target's volume (or the Windows version) has no
+// atomic rename, so Write refused before changing the target. It wraps
+// errors.ErrUnsupported. Only Windows returns it (see the package doc).
+var ErrNoAtomicRename = fmt.Errorf("atomicfile: the volume has no atomic rename (Windows: NTFS on Windows 10 1709 or later), so the file was not replaced: %w", errors.ErrUnsupported)
 
 // ErrNotDurable: Write put the new content in place (readers see it), but
 // the directory sync that makes the replacement survive a crash failed. A
