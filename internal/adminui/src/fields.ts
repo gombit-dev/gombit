@@ -193,13 +193,22 @@ export function changedFieldNames(values: Row, loaded: Row, fields: FieldMeta[])
 
 /**
  * sameFormValue compares a field's form value with the loaded one. A number
- * input holds what was typed as a string and the loaded value as a number, so
- * numbers compare by value: an edit typed back to the loaded value is no
- * change (past 2^53 the loaded value is already rounded, and sending it back
- * would write the rounded neighbor).
+ * input holds what was typed as a string and the loaded value as a number.
+ * An integer compares exactly (BigInt) with the value the form showed: past
+ * 2^53 the loaded number is already rounded, so typing it back is no change
+ * (sending it would write the rounded neighbor), while any other digits are
+ * one, even digits a float would round onto the same number. A float
+ * compares by value.
  */
 function sameFormValue(field: FieldMeta, value: unknown, loaded: unknown): boolean {
-  if ((field.type === "integer" || field.type === "float") && !isEmptyFormValue(value) && !isEmptyFormValue(loaded)) {
+  if (field.type === "integer") {
+    const a = exactInteger(value);
+    const b = exactInteger(loaded);
+    if (a !== null && b !== null) {
+      return a === b;
+    }
+  }
+  if (field.type === "float" && !isEmptyFormValue(value) && !isEmptyFormValue(loaded)) {
     const a = Number(value);
     const b = Number(loaded);
     if (!Number.isNaN(a) && !Number.isNaN(b)) {
@@ -207,6 +216,36 @@ function sameFormValue(field: FieldMeta, value: unknown, loaded: unknown): boole
     }
   }
   return JSON.stringify(value ?? null) === JSON.stringify(loaded ?? null);
+}
+
+/** exactInteger is an integer form value as a BigInt, or null if it is none. */
+function exactInteger(v: unknown): bigint | null {
+  if (typeof v === "number") {
+    return Number.isInteger(v) ? BigInt(v) : null;
+  }
+  if (typeof v === "string" && /^\s*-?\d+\s*$/.test(v)) {
+    return BigInt(v.trim());
+  }
+  return null;
+}
+
+/**
+ * editBody is the PATCH an edit sends: the fields it changed
+ * (changedFieldNames), plus the model's optimistic-lock version as the form
+ * loaded it, whether or not the version field is writable. The server guards
+ * the update on that version, so a concurrent edit is a 409, not a silent
+ * overwrite (issue #454).
+ */
+export function editBody(values: Row, loaded: Row, model: { fields: FieldMeta[]; version?: string }): {
+  body: Row;
+  jsonErrors: Record<string, string>;
+} {
+  const only = changedFieldNames(values, loaded, model.fields);
+  const out = formValuesToBody(values, model.fields, only);
+  if (model.version && loaded[model.version] !== undefined && loaded[model.version] !== null) {
+    out.body[model.version] = loaded[model.version];
+  }
+  return out;
 }
 
 export function formValuesToBody(

@@ -103,8 +103,8 @@ it loaded): an untouched field is not written back through the form, which
 shows a datetime to the minute and reads an integer past 2^53 rounded. An
 integer typed past 2^53 is sent as a string, which the server reads exactly.
 Empty optional (non-boolean) inputs — string, text, date, datetime, json,
-number, relation — are sent as JSON `null` so a partial PATCH can clear
-them. On create, booleans and numeric `0` are always included; an edit sends
+number, relation — are sent as JSON `null` (on an edit, a field changed to
+empty), so a partial PATCH can clear them. On create, booleans and numeric `0` are always included; an edit sends
 the fields it changed, plus the model's optimistic-lock `version` (meta
 `version`) as loaded, so a concurrent edit is a 409.
 401 (including session expiry on list/detail/edit) returns to login;

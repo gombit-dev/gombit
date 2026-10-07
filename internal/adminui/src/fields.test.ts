@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { FieldMeta } from "./api/types";
-import { changedFieldNames, compareDecimal, emptyFormValue, formPattern, formValuesToBody, formatCell, relationListQuery, relationOptions, rowToFormValues } from "./fields";
+import { changedFieldNames, compareDecimal, editBody, emptyFormValue, formPattern, formValuesToBody, formatCell, relationListQuery, relationOptions, rowToFormValues } from "./fields";
 
 function field(partial: Pick<FieldMeta, "name" | "type"> & Partial<FieldMeta>): FieldMeta {
   return {
@@ -313,6 +313,26 @@ describe("edit round trip (issue #454)", () => {
     const values = { ...loaded, big: String(loaded.big) };
     expect([...changedFieldNames(values, loaded, fields)]).toEqual([]);
     expect([...changedFieldNames({ ...loaded, big: "1" }, loaded, fields)]).toEqual(["big"]);
+  });
+
+  it("sends a big integer whose float rounds onto the loaded one", () => {
+    // Stored 9007199254740995 loads as ...996; typing ...997 (which Number()
+    // also reads as ...996) is a change, sent as its digits.
+    const big = [f("big", "integer")];
+    const loaded = rowToFormValues(JSON.parse('{"big":9007199254740995}'), big);
+    const values = { big: "9007199254740997" };
+    expect([...changedFieldNames(values, loaded, big)]).toEqual(["big"]);
+    expect(editBody(values, loaded, { fields: big }).body).toEqual({ big: "9007199254740997" });
+    expect(editBody({ big: "9007199254740996" }, loaded, { fields: big }).body).toEqual({});
+  });
+
+  it("always sends the loaded version, even a read-only one", () => {
+    const versioned = [f("title", "string"), { ...f("version", "integer"), readonly: true } as FieldMeta];
+    const loaded = rowToFormValues({ title: "a", version: 3 }, versioned);
+    const { body } = editBody({ ...loaded, title: "b" }, loaded, { fields: versioned, version: "version" });
+    expect(body).toEqual({ title: "b", version: 3 });
+    // An unchanged save still carries the guard.
+    expect(editBody({ ...loaded }, loaded, { fields: versioned, version: "version" }).body).toEqual({ version: 3 });
   });
 
   it("sends an integer past 2^53 as its digits", () => {
