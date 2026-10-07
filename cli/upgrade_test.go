@@ -103,6 +103,60 @@ func TestUpgradeRefuses(t *testing.T) {
 	}
 }
 
+// TestUpgradeNotes: the notes come from the embedded manifest; a path the
+// manifest does not describe fails rather than guessing.
+func TestUpgradeNotes(t *testing.T) {
+	m, err := upgrade.LoadManifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, latest := m.Releases[0].Version, m.Latest()
+
+	out, err := runUpgradeCLI(t, "notes")
+	if err != nil || !strings.Contains(out, "## "+latest+"\n") || !strings.Contains(out, "The first release the compatibility manifest covers") {
+		t.Fatalf("notes = %q, %v", out, err)
+	}
+	var want strings.Builder
+	r, err := m.Release(latest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.RenderNotes(&want, []upgrade.Release{r}); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := runUpgradeCLI(t, "notes", "--release", latest); err != nil || out != want.String() {
+		t.Fatalf("notes --release %s = %q, %v; want %q", latest, out, err, want.String())
+	}
+
+	out, err = runUpgradeCLI(t, "notes", "--from", first, "--json")
+	var got struct {
+		Releases       []upgrade.Release      `json:"releases"`
+		Classification upgrade.Classification `json:"classification"`
+	}
+	if err != nil || json.Unmarshal([]byte(out), &got) != nil || got.Classification.Manual == nil {
+		t.Fatalf("notes --from %s --json = %s, %v", first, out, err)
+	}
+	path, _ := m.Path(first, latest)
+	if len(got.Releases) != len(path) {
+		t.Fatalf("notes --from %s: %d releases, want %d", first, len(got.Releases), len(path))
+	}
+
+	for _, tc := range []struct {
+		args []string
+		msg  string
+	}{
+		{[]string{"notes", "--from", "v0.0.1"}, "no upgrade path"},
+		{[]string{"notes", "--from", first, "--to", "v99.0.0"}, "upgrade the gombit CLI"},
+		{[]string{"notes", "--release", "v99.0.0"}, "no release v99.0.0"},
+		{[]string{"notes", "--to", latest}, "--to needs --from"},
+		{[]string{"notes", "--release", latest, "--from", first}, "cannot be combined"},
+	} {
+		if _, err := runUpgradeCLI(t, tc.args...); err == nil || !strings.Contains(err.Error(), tc.msg) {
+			t.Fatalf("%v = %v; want an error mentioning %q", tc.args, err, tc.msg)
+		}
+	}
+}
+
 // TestUpgradeBaselineFrameworkLines: a fork, a local checkout and a
 // workspace claim no framework version, and say why.
 func TestUpgradeBaselineFrameworkLines(t *testing.T) {
@@ -148,5 +202,24 @@ func TestUpgradeBaselineWriteNotDurable(t *testing.T) {
 	restore()
 	if !strings.Contains(out, "recorded in gombit.yaml now") || !errors.Is(err, atomicfile.ErrNotDurable) {
 		t.Fatalf("baseline --write = %q, %v; want the recorded baseline and ErrNotDurable", out, err)
+	}
+}
+
+// TestUpgradeNotesReleaseGate: the release workflow's gate fails a stable
+// tag the manifest is not closed at (here, the embedded manifest still has
+// changes under unreleased), and needs --release.
+func TestUpgradeNotesReleaseGate(t *testing.T) {
+	m, err := upgrade.LoadManifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r, err := m.Release(upgrade.Unreleased); err != nil || len(r.Changes) == 0 {
+		t.Skip("the embedded manifest has nothing under unreleased")
+	}
+	if _, err := runUpgradeCLI(t, "notes", "--release", m.Latest(), "--release-gate"); err == nil || !strings.Contains(err.Error(), "still under unreleased") {
+		t.Fatalf("notes --release %s --release-gate = %v; want the unreleased changes refused", m.Latest(), err)
+	}
+	if _, err := runUpgradeCLI(t, "notes", "--release-gate"); err == nil || !strings.Contains(err.Error(), "--release-gate needs --release") {
+		t.Fatalf("notes --release-gate = %v", err)
 	}
 }

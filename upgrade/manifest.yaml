@@ -1,0 +1,283 @@
+# Gombit's compatibility manifest (docs/upgrade.md § The compatibility
+# manifest): every upgrade-relevant change of each release, classified. The
+# upgrade tooling plans from it, and the upgrade notes (docs/upgrade-notes.md,
+# the GitHub release body) are rendered from it. Regenerate the notes with
+#   go test ./upgrade -run TestUpgradeNotesDoc -update
+#
+# Every release from the first one covered is listed, even with no changes: an
+# unlisted version has no known upgrade path. The next release's changes
+# collect under `unreleased`, renamed to its version when it is cut
+# (docs/releasing.md). Audit `git log vPREVIOUS..HEAD`, not only the
+# CHANGELOG; TestChangelogIsDeclared checks that every issue the CHANGELOG's
+# Unreleased section links is in some change's refs, or exempt with a reason.
+#
+# A change has:
+#   id        kebab-case, unique across the manifest
+#   kind      automatic (the tooling applies it: names an `action`),
+#             manual (the developer acts: `details` says how), or
+#             informational (nothing to do, worth knowing)
+#   breaking  whether an app that relies on documented (or reasonably
+#             relied-on) behavior can stop building, starting or working
+#             until it acts; a fix only code matching undocumented output
+#             notices is not breaking
+#   area      api, behavior, cli, client, config, dependency, scaffold, schema
+#             or security
+#   summary   one line; details: Markdown; refs: issue/PR numbers
+format: 1
+releases:
+  - version: v0.6.1
+    # The first release the manifest covers: upgrades are described from here.
+
+  - version: unreleased
+    changes:
+      - id: reserved-upgrade-command
+        kind: manual
+        breaking: true
+        area: cli
+        summary: "`upgrade` is a framework command, and a reserved management-command name."
+        details: |
+          An app that registers its own `upgrade` command loses it: the
+          framework's is added first, and Cobra resolves to it. Rename the
+          app's command (and its `internal/<pkg>/commands.go` registration).
+        refs: [341]
+
+      - id: record-upgrade-baseline
+        kind: automatic
+        action: record-baseline
+        area: scaffold
+        summary: "`gombit new` records the app's upgrade baseline in a `gombit:` block of `gombit.yaml`."
+        details: |
+          An app generated before records none, and is detected as scaffold
+          version 0. `gombit upgrade baseline --write` records it.
+        refs: [341]
+
+      - id: admin-composite-primary-keys
+        kind: manual
+        breaking: true
+        area: api
+        summary: "`admin.Register` refuses a model whose primary key spans several columns."
+        details: |
+          Such a model used to register, and the admin addressed its rows by
+          the first key column alone. Startup now fails with `admin: <Model>
+          has a composite primary key, which is not supported`. Give the
+          model a single-column primary key, or keep it out of the admin
+          registry.
+        refs: [453]
+
+      - id: stop-hook-shutdown-budget
+        kind: manual
+        area: behavior
+        summary: "`OnStop` hooks get their own shutdown-timeout budget, so a full shutdown can take longer."
+        details: |
+          A shutdown can now take the drain delay plus up to twice the
+          shutdown timeout (`framework.WithShutdownTimeout`, 10s by default).
+          Check that the orchestrator's termination grace period (Kubernetes
+          `terminationGracePeriodSeconds`, ECS `stopTimeout`) still covers
+          it.
+        refs: [431]
+
+      - id: sanitize-html-stray-angle-bracket
+        kind: informational
+        area: security
+        summary: "`framework.SanitizeHTML` keeps text after a stray `<` when the value also has a real tag."
+        details: |
+          That tail comes back as `SanitizeHTML` returns a value with no
+          complete tag: raw, undecoded input. It is no safer than that case;
+          escape on output as before.
+        refs: [433]
+
+      - id: admin-csp-allows-storage-origin
+        kind: informational
+        area: security
+        summary: "The admin and embedded SPA pages' Content-Security-Policy allows the object store's origin for images and requests."
+        details: |
+          With a remote store (an S3 bucket, a CDN), its origin joins the
+          policy's `img-src` and `connect-src`, so file previews and direct
+          uploads work. Review it if the store's origin is shared with
+          content you do not control.
+        refs: [330]
+
+      - id: request-timeout-response-reaches-client
+        kind: informational
+        area: behavior
+        summary: "With `GOMBIT_HTTP_REQUEST_TIMEOUT` set, the 504 a timed-out handler writes reaches the client; `WriteTimeout` is the request timeout plus 5s."
+        refs: [430]
+
+      - id: panicking-requests-in-metrics
+        kind: informational
+        area: behavior
+        summary: "Requests whose handler panics are counted in `gombit_http_requests_total` (as 500, or the status already sent)."
+        refs: [432]
+
+      - id: contract-app-fork-unresolved
+        kind: manual
+        breaking: true
+        area: cli
+        summary: "`gombit contract app` refuses a framework replaced by a fork, and a `go.mod` the go command refuses."
+        details: |
+          A `replace` of `github.com/gombit-dev/gombit` by another module used
+          to report the fork's version as the framework's; it is now
+          unresolved, like a local path. A `go.mod` requiring the framework
+          twice, or replacing it twice with different targets, is an error.
+          The replace that counts is the one the go command applies to the
+          required version (an exact-version replace over an every-version
+          one; a replace of another version does not apply), so a go.mod
+          carrying several replaces can report a different version, or
+          resolve where it used to fail. Build the contract against a
+          framework release.
+        refs: [341]
+
+      - id: make-resource-windows-posix-rename
+        kind: informational
+        area: cli
+        summary: "On Windows, `gombit make resource` replaces files with a POSIX-semantics rename, so a file open with delete sharing no longer blocks it."
+        details: |
+          On a volume that refuses that rename (FAT or exFAT, a network share
+          or mapped drive, a `\\wsl$` path, or Windows before 10 1709) it keeps
+          its previous plain rename and its rollback.
+        refs: [341]
+
+      - id: d10-not-found-and-panics
+        kind: informational
+        area: behavior
+        summary: "Unknown paths and recovered panics answer with the D10 error envelope (`not_found` 404, `internal` 500)."
+        details: |
+          A 404 used to be Gin's plain-text body (or empty under an embedded
+          frontend) and a panic an empty 500. A client matching those bodies
+          sees JSON now; the documented error contract was already D10, so
+          this is not marked breaking.
+        refs: [438]
+
+      - id: unencodable-response-500
+        kind: informational
+        area: behavior
+        summary: "A response that cannot be encoded as JSON is a D10 500 instead of a 200 with a plain-text body."
+        refs: [442]
+
+      - id: embedded-html-browser-policy
+        kind: informational
+        area: security
+        summary: "Every HTML document of an embedded frontend gets the SPA browser security policy, not only the root `index.html`."
+        refs: [434]
+
+      - id: memory-cache-increment-overflow
+        kind: informational
+        area: behavior
+        summary: "The in-memory cache's `Increment` refuses to overflow, and a stored `nil`, as Redis does."
+        refs: [437]
+
+      - id: app-runs-once
+        kind: manual
+        breaking: true
+        area: api
+        summary: "A `framework.App` runs once: every return from `Run`, `RunContext` or `RunWorker` runs the stop hooks and closes what the app opened."
+        details: |
+          That includes the returns before serving (a listener that cannot
+          bind, refused worker options). Code that retried `RunContext` with
+          the same `*App` after such an error now runs against a closed cache
+          and job dispatcher: build a new `App` (`framework.New`) to retry.
+        refs: [435]
+
+      - id: trusted-proxies-trust-all
+        kind: manual
+        breaking: true
+        area: security
+        summary: "Production refuses `GOMBIT_HTTP_TRUSTED_PROXIES` values that trust every peer: a zero-length prefix in any spelling, or ranges that together cover all addresses."
+        details: |
+          `10.0.0.0/0`, `::0/0` or `0.0.0.0/1,128.0.0.0/1` used to start;
+          `Config.Validate` now refuses them in production, since trusting
+          every peer lets any client spoof its forwarded IP. List only the
+          addresses of the proxies you control.
+        refs: [500]
+
+      - id: cache-janitor-non-positive
+        kind: informational
+        area: behavior
+        summary: "`cache.WithJanitor` with a zero or negative interval means no janitor, instead of crashing the process."
+        refs: [436]
+
+      - id: jobs-crash-redelivery-max-attempts
+        kind: informational
+        area: behavior
+        summary: "A job whose worker died mid-attempt is no longer redelivered past `MaxAttempts`: it moves to the failed jobs as exhausted."
+        details: |
+          An attempt interrupted by `Release` or worker shutdown may still run
+          once more past `MaxAttempts`, as before.
+        refs: [494]
+
+      - id: jobs-retry-all-once
+        kind: informational
+        area: cli
+        summary: "`gombit jobs retry --all` retries each failed job at most once per invocation."
+        details: |
+          A job that fails again while the command runs is left for the next
+          invocation, instead of being retried until the command times out.
+        refs: [493]
+
+      - id: database-driver-updates
+        kind: informational
+        area: dependency
+        summary: "The framework requires newer database drivers: `github.com/go-sql-driver/mysql` v1.10.1 and `github.com/mattn/go-sqlite3` v1.14.52."
+        details: |
+          Go's minimal version selection moves an app's build to them with the
+          framework upgrade. The framework also newly requires the AWS SDK
+          for Go v2 (the S3 storage driver), `golang.org/x/mod`,
+          `golang.org/x/sys` and `gopkg.in/yaml.v3`.
+        refs: [536, 540]
+
+      - id: decimals-never-changed-on-write
+        kind: manual
+        breaking: true
+        area: behavior
+        summary: "A decimal is never stored changed: a value that does not fit its column's `decimal(p,s)` (or, on SQLite, has more than 15 digits) is a 422 instead of being rounded."
+        details: |
+          A decimal field whose column type is neither decimal nor text
+          (`type:real`, `type:double precision`, `type:money`, `type:bigint`)
+          now fails every write: declare it `decimal(p,s)`. A string written to
+          a text decimal column must be the canonical spelling (`"1.5"`, not
+          `"1.50"`). The generated create handler now responds with the stored
+          row: run `gombit generate` to pick that up in an existing app.
+        refs: [440]
+
+      - id: timestamps-in-storable-range
+        kind: manual
+        breaking: true
+        area: behavior
+        summary: "Every write refuses a timestamp or date no supported driver can store and return (outside 1000..9999), with a 422 on that field."
+        details: |
+          That includes a zero `time.Time` a write sets (a non-pointer field
+          left unset on create, a zero in a map or `Update`): it was stored on
+          SQLite and PostgreSQL and was a 500 on MySQL. Use a pointer for an
+          optional time. Rows that already store the zero instant stay editable
+          through `Update`, a partial `Updates` and the admin; a generic `Save`
+          of one is a 422 until the column is cleaned up (docs/database.md).
+        refs: [443]
+
+      - id: database-logging-through-app-logger
+        kind: informational
+        area: security
+        summary: "Database logging goes through the app's logger, at its level and sink, and never carries parameter values."
+        details: |
+          GORM's default logger wrote to stdout in its own format and inlined
+          parameter values into failed statements (a password hash, an
+          email). Statements and 4xx failures now log at `debug`, slow
+          statements at `warn`, other failures at `error`. A GORM logger the
+          app sets on its database is kept.
+        refs: [439]
+
+      - id: page-offset-saturates
+        kind: informational
+        area: behavior
+        summary: "A list page so far out that its offset overflows is empty, instead of returning the first page's rows."
+        refs: [441]
+
+      - id: object-storage
+        kind: informational
+        area: schema
+        summary: "Object storage (`app.Storage()`, `GOMBIT_STORAGE_*`) and storage-backed `file` / `image` model fields."
+        details: |
+          File fields record ownership in a framework table, `storage_claims`,
+          which new apps' migrations create. An existing app that adopts file
+          fields adds the table to its migrations (`claims.Models()`; see
+          docs/storage.md, "Setup").
+        refs: [279, 323, 324, 325, 326, 327, 328, 329, 530]

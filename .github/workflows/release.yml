@@ -137,6 +137,11 @@ jobs:
               echo "Bump: $BUMP -> $next"
             fi
 
+            # The compatibility manifest must be closed at the release before
+            # it is tagged: listed, the newest, nothing left under unreleased
+            # (docs/releasing.md). Fail here, before anything is pushed.
+            go run ./cmd/gombit upgrade notes --release "$next" --release-gate >/dev/null
+
             # A tag pushed with GITHUB_TOKEN does not start another workflow
             # run, so this cannot recurse into the push trigger above.
             git tag -a "$next" -m "$next"
@@ -150,6 +155,35 @@ jobs:
             echo "prerelease=true" >> "$GITHUB_OUTPUT"
           fi
           echo "tag=$next" >> "$GITHUB_OUTPUT"
+
+      # The release body opens with the release's upgrade notes, rendered
+      # from the compatibility manifest (upgrade/manifest.yaml) the upgrade
+      # tooling plans from. A stable release the manifest is not closed at
+      # (unlisted, not the newest, or changes left under unreleased) fails
+      # here, before anything is published. A pre-release uses its own entry if
+      # the manifest has one, else the unreleased changes it previews.
+      - name: Render upgrade notes
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          go build -o "$RUNNER_TEMP/gombit" ./cmd/gombit
+          mkdir -p upgrade-notes
+          notes=upgrade-notes/UPGRADE_NOTES.md
+          if [ "$PRERELEASE" != "true" ]; then
+            "$RUNNER_TEMP/gombit" upgrade notes --release "$TAG" --release-gate > "$notes"
+          elif ! "$RUNNER_TEMP/gombit" upgrade notes --release "$TAG" > "$notes" 2>/dev/null; then
+            "$RUNNER_TEMP/gombit" upgrade notes --release unreleased > "$notes" 2>/dev/null || : > "$notes"
+          fi
+          cat "$notes"
+
+      - name: Upload upgrade notes
+        uses: actions/upload-artifact@v7
+        with:
+          name: upgrade-notes
+          path: upgrade-notes/UPGRADE_NOTES.md
+          if-no-files-found: error
 
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
@@ -284,6 +318,7 @@ jobs:
             dist/*.tar.gz
             dist/*.zip
             dist/SHA256SUMS.txt
+          body_path: artifacts/upgrade-notes/UPGRADE_NOTES.md
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

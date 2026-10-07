@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 
 	"github.com/spf13/cobra"
 
@@ -25,6 +26,7 @@ func newUpgradeCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
 		},
 	})
 	cmd.AddCommand(newUpgradeBaselineCommand(stdout))
+	cmd.AddCommand(newUpgradeNotesCommand(stdout))
 	return cmd
 }
 
@@ -122,6 +124,100 @@ func printBaseline(stdout io.Writer, b upgrade.Baseline, asJSON, write, wrote bo
 	return err
 }
 
+func newUpgradeNotesCommand(stdout io.Writer) *cobra.Command {
+	cmd := silence(&cobra.Command{
+		Use:   "notes",
+		Short: "Print upgrade notes from the compatibility manifest",
+		Long: `Print the upgrade notes of framework releases, from the compatibility
+manifest built into this gombit: each release's upgrade-relevant changes,
+classified as manual, automatic, or informational, breaking ones marked.
+The release notes and docs/upgrade-notes.md are rendered from the same
+manifest.
+
+With no flags, every release the manifest covers, newest first. --release
+prints one release (or "unreleased"). --from (and --to, by default the
+newest release this gombit knows) prints the releases an upgrade moves
+across; a version the manifest does not list fails, rather than guessing.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			flags := cmd.Flags()
+			release, _ := flags.GetString("release")
+			from, _ := flags.GetString("from")
+			to, _ := flags.GetString("to")
+			asJSON, _ := flags.GetBool("json")
+			gate, _ := flags.GetBool("release-gate")
+			if gate {
+				if release == "" {
+					return errors.New("gombit upgrade notes: --release-gate needs --release")
+				}
+				m, err := upgrade.LoadManifest()
+				if err != nil {
+					return fmt.Errorf("gombit upgrade notes: %w", err)
+				}
+				if err := m.CheckRelease(release); err != nil {
+					return fmt.Errorf("gombit upgrade notes: %w", err)
+				}
+			}
+			return runUpgradeNotes(stdout, release, from, to, asJSON)
+		},
+	})
+	cmd.Flags().String("release", "", `one release's notes (a version, or "unreleased")`)
+	cmd.Flags().String("from", "", "the notes of an upgrade from this version")
+	cmd.Flags().String("to", "", "with --from: the target version (default: the newest release this gombit knows)")
+	cmd.Flags().Bool("json", false, "print the releases and their classified changes as JSON")
+	// The release workflow's gate for a stable tag (docs/releasing.md): the
+	// manifest must be closed at --release (Manifest.CheckRelease).
+	cmd.Flags().Bool("release-gate", false, "fail unless the manifest is ready to ship as the --release stable tag")
+	_ = cmd.Flags().MarkHidden("release-gate")
+	return cmd
+}
+
+func runUpgradeNotes(stdout io.Writer, release, from, to string, asJSON bool) error {
+	m, err := upgrade.LoadManifest()
+	if err != nil {
+		return fmt.Errorf("gombit upgrade notes: %w", err)
+	}
+	var releases []upgrade.Release
+	switch {
+	case release != "" && (from != "" || to != ""):
+		return errors.New("gombit upgrade notes: --release cannot be combined with --from/--to")
+	case to != "" && from == "":
+		return errors.New("gombit upgrade notes: --to needs --from")
+	case release != "":
+		r, err := m.Release(release)
+		if err != nil {
+			return fmt.Errorf("gombit upgrade notes: %w", err)
+		}
+		releases = []upgrade.Release{r}
+	case from != "":
+		if to == "" {
+			to = m.Latest()
+		}
+		if releases, err = m.Path(from, to); err != nil {
+			return fmt.Errorf("gombit upgrade notes: %w", err)
+		}
+	default:
+		releases = slices.Clone(m.Releases)
+		slices.Reverse(releases)
+	}
+	if asJSON {
+		data, err := json.MarshalIndent(struct {
+			Releases       []upgrade.Release      `json:"releases"`
+			Classification upgrade.Classification `json:"classification"`
+		}{releases, upgrade.Classify(releases)}, "", "  ")
+		if err != nil {
+			return fmt.Errorf("gombit upgrade notes: %w", err)
+		}
+		_, err = fmt.Fprintf(stdout, "%s\n", data)
+		return err
+	}
+	if len(releases) == 0 {
+		_, err = fmt.Fprintf(stdout, "%s is already %s: no releases to move across.\n", from, to)
+		return err
+	}
+	return m.RenderNotes(stdout, releases)
+}
+
 // printFramework writes the Framework line of the baseline.
 func printFramework(stdout io.Writer, fw upgrade.Framework) error {
 	var replaced string
@@ -150,4 +246,5 @@ func printFramework(stdout io.Writer, fw upgrade.Framework) error {
 func upgradeUsage(stderr io.Writer) {
 	_, _ = fmt.Fprintln(stderr, "Usage: gombit upgrade <subcommand>")
 	_, _ = fmt.Fprintln(stderr, "  baseline    Show (or record) the app's upgrade baseline")
+	_, _ = fmt.Fprintln(stderr, "  notes       Print upgrade notes from the compatibility manifest")
 }
