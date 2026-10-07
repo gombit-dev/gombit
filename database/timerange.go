@@ -112,7 +112,7 @@ type timeRangeCheck struct {
 	skipHooks bool
 	fields    map[string][]string // allocated on the first problem
 	leftOut   []string            // columns the update leaves out of its SET
-	scope     *storedZeros        // KeepStoredZeros, read on first need
+	scope     *StoredRow          // ScopeEdit, read on first need
 	scopeRead bool
 }
 
@@ -147,7 +147,7 @@ func (c *timeRangeCheck) check(a assignedValue) {
 				// the row's value, and Save's insert fallback, when no row
 				// matched, fills it as any create does. NULL (a nil
 				// pointer, an invalid NullTime) is a value, and written; so
-				// is a zero the edit set (KeepStoredZeros), and refused.
+				// is a zero the edit set (ScopeEdit), and refused.
 				c.leaveOut(f)
 				return
 			}
@@ -182,30 +182,34 @@ func (c *timeRangeCheck) leaveOut(f *schema.Field) {
 	c.leftOut = append(c.leftOut, f.DBName)
 }
 
-// storedZeros reads the KeepStoredZeros scope when this statement writes its
-// row.
-func (c *timeRangeCheck) storedZeros() *storedZeros {
+// storedZeros reads the ScopeEdit scope when this statement writes its row.
+func (c *timeRangeCheck) storedZeros() *StoredRow {
 	if !c.scopeRead {
 		c.scopeRead = true
-		if v, ok := c.stmt.Settings.Load(keepStoredZerosKey); ok {
-			if k, ok := v.(storedZeros); ok && c.stmt.Dest == k.row {
-				c.scope = &k
-			}
-		}
+		c.scope = editScopeOf(c.stmt)
 	}
 	return c.scope
 }
 
-// keepsStoredZero reports whether KeepStoredZeros keeps f's stored zero.
+// keepsStoredZero reports whether the row ScopeEdit scopes stored the zero
+// instant in f's column.
 func (c *timeRangeCheck) keepsStoredZero(f *schema.Field) bool {
 	k := c.storedZeros()
-	return k != nil && containsColumn(k.kept, f.DBName)
+	return k != nil && containsColumn(k.zeroTimes, f.DBName)
 }
 
-// edits reports whether KeepStoredZeros named f's column as one the edit sets.
+// edits reports whether the edit ScopeEdit scopes changed f's column: its
+// stored value was not the zero instant (StoredValues), or the edit named it
+// (the deprecated KeepStoredZeros).
 func (c *timeRangeCheck) edits(f *schema.Field) bool {
 	k := c.storedZeros()
-	return k != nil && containsColumn(k.edited, f.DBName)
+	if k == nil {
+		return false
+	}
+	if k.complete {
+		return !containsColumn(k.zeroTimes, f.DBName)
+	}
+	return containsColumn(k.edited, f.DBName)
 }
 
 func containsColumn(columns []string, name string) bool {
@@ -217,19 +221,11 @@ func containsColumn(columns []string, name string) bool {
 	return false
 }
 
-const keepStoredZerosKey = "gombit:timerange:keep_stored_zeros"
-
-type storedZeros struct {
-	row    any // the pointer the update writes
-	kept   []string
-	edited []string
-}
-
 // StoredZeroColumns returns the timestamp and date columns of row, a model as
 // loaded from db, that hold the zero instant 0001-01-01T00:00:00Z: a value
 // stored before the time range check refused it (what a non-pointer field
 // left unset became on SQLite and PostgreSQL, and MySQL's '0000-00-00').
-// Pass them, less the columns an edit sets, to KeepStoredZeros.
+// StoredValues records them, with the row's text, for ScopeEdit.
 func StoredZeroColumns(db *gorm.DB, row any) []string {
 	rv := reflect.Indirect(reflect.ValueOf(row))
 	if rv.Kind() != reflect.Struct {
@@ -247,27 +243,6 @@ func StoredZeroColumns(db *gorm.DB, row any) []string {
 		}
 	}
 	return out
-}
-
-// KeepStoredZeros returns db scoped for an edit of row's model that sets the
-// edited columns. An update then leaves out of its SET each kept column that
-// still holds the zero instant when the statement runs, after the model's
-// hooks, instead of refusing it: writing back a zero the row already stores
-// (see StoredZeroColumns) would make every edit of the row a 422 for a value
-// the edit did not set. A kept column a hook gave a real value is written, and
-// checked. A zero in an edited column is refused, never left out, even in a
-// column Save would otherwise leave out unset (an auto timestamp, a default).
-// The scope covers an update whose value is row itself, the pointer passed to
-// Save or Updates; any other write on the returned DB is checked as usual.
-// The admin data plane uses it for its PATCH.
-func KeepStoredZeros(db *gorm.DB, row any, kept, edited []string) *gorm.DB {
-	if len(kept) == 0 && len(edited) == 0 {
-		return db
-	}
-	if rv := reflect.ValueOf(row); rv.Kind() != reflect.Pointer || rv.IsNil() {
-		return db
-	}
-	return db.Set(keepStoredZerosKey, storedZeros{row: row, kept: kept, edited: edited})
 }
 
 // zeroInstant reports whether v holds the zero instant, whatever Location it

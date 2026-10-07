@@ -334,6 +334,28 @@ type queryModel struct {
 	Amount types.Decimal `gombit:"read,write,aggregatable"`
 }
 
+// searchOnlyModel has a search surface and no filter, so the generated list
+// handler declares err at its Search call.
+type searchOnlyModel struct {
+	gorm.Model
+	Title string `gombit:"read,write,searchable"`
+}
+
+func TestRenderModelHandlerSearchOnly(t *testing.T) {
+	res, err := buildModelResource(&searchOnlyModel{}, "searchonlymodel")
+	if err != nil {
+		t.Fatalf("buildModelResource: %v", err)
+	}
+	src, err := renderModelHandler(res)
+	if err != nil {
+		t.Fatalf("renderModelHandler: %v", err)
+	}
+	assertParses(t, src)
+	if !strings.Contains(src, "q, err := database.Search(ctx, q, []string{\"title\"}, input.Search)") {
+		t.Fatalf("search-only handler must declare err at Search:\n%s", src)
+	}
+}
+
 func TestRenderModelHandlerQuerySurface(t *testing.T) {
 	res, err := buildModelResource(&queryModel{}, "querymodel")
 	if err != nil {
@@ -360,7 +382,11 @@ func TestRenderModelHandlerQuerySurface(t *testing.T) {
 		"database.FilterEq(ctx, q, \"genre\", database.FilterString, input.Genre)",
 		"database.FilterEq(ctx, q, \"price\", database.FilterInt64, input.Price)",
 		"database.FilterEq(ctx, q, \"active\", database.FilterBool, input.Active)",
-		"database.Search(q, []string{\"title\"}, input.Search)",
+		"database.Search(ctx, q, []string{\"title\"}, input.Search)",
+		// An id over MaxInt64 fails to parse (a 404): PostgreSQL's bigint
+		// cannot bind it, and SQLite answers not-found either way, so the
+		// run test below cannot tell.
+		"strconv.ParseUint(input.ID, 10, 63)",
 		"database.ParseAggregates(ctx, input.Aggregate,",
 		"database.Ordering(ctx, q, input.Ordering, []string{\"title\", \"genre\"}, \"id\")",
 		"Aggregates: aggregates",
@@ -450,9 +476,12 @@ const queryRunTest = `package item
 
 import (
 	"context"
+	"errors"
+	"net/http"
 	"path/filepath"
 	"testing"
 
+	"github.com/gombit-dev/gombit/contract"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
@@ -493,6 +522,26 @@ func TestQuery(t *testing.T) {
 	}
 	if len(s.Body.Data) != 1 || s.Body.Data[0].Name != "apple" {
 		t.Fatalf("search app: %+v", s.Body.Data)
+	}
+
+	// A search term or string filter no text column can hold (a NUL byte) is
+	// a 422, not a PostgreSQL 500 (issue #444).
+	for name, in := range map[string]*listItemsInput{
+		"search": {Page: 1, PerPage: 50, Search: "a\x00b"},
+		"filter": {Page: 1, PerPage: 50, Kind: "a\x00b"},
+	} {
+		_, err := h.list(ctx, in)
+		var env *contract.ErrorEnvelope
+		if !errors.As(err, &env) || env.GetStatus() != http.StatusUnprocessableEntity {
+			t.Fatalf("%s with a NUL byte: %v, want a 422", name, err)
+		}
+	}
+
+	// An id over MaxInt64 is no row's: a 404, not PostgreSQL's 500.
+	if _, err := h.get(ctx, &getItemInput{ID: "18446744073709551615"}); err == nil {
+		t.Fatal("get of an id over MaxInt64 succeeded")
+	} else if env := (*contract.ErrorEnvelope)(nil); !errors.As(err, &env) || env.GetStatus() != http.StatusNotFound {
+		t.Fatalf("get of an id over MaxInt64: %v, want a 404", err)
 	}
 
 	// ordering: -price -> banana (20) first.

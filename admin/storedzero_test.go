@@ -108,8 +108,9 @@ type szVersioned struct {
 // A row storing the zero instant stays editable through the admin, whatever
 // the column is to the admin (mapped, outside Fields, server-set, hidden, a
 // named time type, on a versioned model): a PATCH that does not set it does
-// not write it back. A hook that repairs it is written; a PATCH setting the
-// zero instant is refused; UpdatedAt advances (#562 rounds 4-5).
+// not write it back, nor does one that sends it back unchanged. A hook that
+// repairs it is written; a PATCH writing the zero instant over a real value is
+// refused; UpdatedAt advances (#562 rounds 4-5, #564 round 2).
 func TestResourcePatchKeepsStoredZeroTimestampsEditable(t *testing.T) {
 	runStoredZeroAdmin(t, openSQLite(t))
 }
@@ -222,14 +223,25 @@ func runStoredZeroAdmin(t *testing.T, db *database.DB) {
 		})
 	}
 
-	// A PATCH that sets the zero instant is refused, however it is spelled,
-	// on a mapped column of a row that already stores it.
+	// A PATCH that sends the stored zero back as the API returns it
+	// (0001-01-01T00:00:00Z on these drivers in UTC) keeps it (#564 review
+	// round 2); a PATCH that writes the zero instant over a real value is
+	// refused, however it is spelled. (The admin SPA's datetime input does
+	// not send year 1 back in this form; that is the SPA's to fix.)
 	var r szDerived
 	if err := db.Where("title = ?", "renamed").First(&r).Error; err != nil {
 		t.Fatal(err)
 	}
+	full := `{"title":"form","due":"0001-01-01T00:00:00Z"}`
+	if res := doRequest(app, jar, http.MethodPatch, fmt.Sprintf("/api/v1/admin/resources/sz-derived/%d", r.ID), full); res.Code != http.StatusOK {
+		t.Fatalf("full-form PATCH resending the stored zero: %d %s", res.Code, res.Body.String())
+	}
+	live := szDerived{Title: "live", Due: valid, Issued: types.NewDate(valid)}
+	if err := db.Create(&live).Error; err != nil {
+		t.Fatal(err)
+	}
 	for _, due := range []string{"0001-01-01T00:00:00Z", "0001-01-01T00:00:00+00:00"} {
-		res := doRequest(app, jar, http.MethodPatch, fmt.Sprintf("/api/v1/admin/resources/sz-derived/%d", r.ID), `{"due":"`+due+`"}`)
+		res := doRequest(app, jar, http.MethodPatch, fmt.Sprintf("/api/v1/admin/resources/sz-derived/%d", live.ID), `{"due":"`+due+`"}`)
 		assertError(t, res, http.StatusUnprocessableEntity, contract.CodeValidationError)
 	}
 

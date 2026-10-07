@@ -72,7 +72,9 @@ func (h *Handler) list(ctx context.Context, input *listProductsInput) (*listProd
 }
 
 func (h *Handler) get(ctx context.Context, input *getProductInput) (*getProductOutput, error) {
-	id, err := strconv.ParseUint(input.ID, 10, 64)
+	// 63 bits: an id over MaxInt64 is no row's, and PostgreSQL's bigint
+	// cannot even bind it, so it is a 404 with the other bad ids.
+	id, err := strconv.ParseUint(input.ID, 10, 63)
 	if err != nil {
 		return nil, contract.WithContext(ctx, contract.NotFound("product not found"))
 	}

@@ -179,7 +179,8 @@ func coerceM2MIDs(raw any, pkType FieldType) ([]any, error) {
 	}
 	out := make([]any, 0, rv.Len())
 	for i := 0; i < rv.Len(); i++ {
-		v, err := coerceValue(rv.Index(i).Interface(), pkType)
+		// Ids are compared (WHERE pk IN ?), never stored as given.
+		v, err := coerceText(rv.Index(i).Interface(), pkType)
 		if err != nil {
 			return nil, err
 		}

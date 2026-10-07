@@ -73,8 +73,8 @@ if err := db.First(&row, id).Error; err != nil {
 
 | Helper | Maps | Anything else |
 | --- | --- | --- |
-| `MapLoadError` | `gorm.ErrRecordNotFound` → D10 `not_found` (404) | `internal` |
-| `MapPersistError` | `*database.ValidationError` → `validation_error` (422, with its fields), including a decimal the column would not store exactly (below); unique / duplicate → `conflict` (409); foreign-key or NOT NULL violation → `validation_error` (422) | `internal` |
+| `MapLoadError` | `gorm.ErrRecordNotFound` → D10 `not_found` (404); `*database.ValidationError` or a data exception → `validation_error` (422) | `internal` |
+| `MapPersistError` | `*database.ValidationError` → `validation_error` (422, with its fields), including a decimal the column would not store exactly (below); unique / duplicate → `conflict` (409); foreign-key or NOT NULL violation, or a data exception → `validation_error` (422) | `internal` |
 | `MapDeleteError` | `database.ErrReferenced` or a foreign-key violation → `conflict` (409) | `internal` |
 
 Before every create and update, `database.Open` also checks each value the
@@ -132,9 +132,22 @@ garbage write.
 
 The check runs on the API and admin write paths alike.
 
-`IsUniqueViolation`, `IsForeignKeyViolation`, and `IsNotNullViolation` are the
-shared detectors behind those helpers; auth registration uses
-`IsUniqueViolation` too. See [`docs/contract.md`](contract.md#application-errors-41-categories).
+`IsUniqueViolation`, `IsForeignKeyViolation`, `IsNotNullViolation`, and
+`IsDataException` are the shared detectors behind those helpers; auth
+registration uses `IsUniqueViolation` too. A data exception is one of the
+codes a value the client sends can cause, which the client fixes by sending
+another value: PostgreSQL's string too long (22001), numeric out of range
+(22003), invalid datetime (22007, 22008), NUL byte or invalid UTF-8 (22021,
+22P05), and MySQL's out-of-range (1264), truncated (1265), incorrect string
+(1366), too long (1406) and incorrect date or time literal (1292). A code does
+not say what caused it, so the same code raised by server-side SQL (an
+expression overflowing a column, `n + 1` past an `int4`) is a 422 too; the
+rest of PostgreSQL's class 22 (division by zero, an invalid cast) stays a 500,
+and the database logger keeps logging data exceptions at error level. The
+422 carries no `fields`: the driver names a column, if at all, not the field
+the API names. The write checks below refuse most of these before the SQL
+runs, with the field named, so the driver's refusal is the backstop. See
+[`docs/contract.md`](contract.md#application-errors-41-categories).
 
 ### Timestamp and date range
 
@@ -192,14 +205,16 @@ What a statement writes is what GORM writes:
   column (an unset field on SQLite or PostgreSQL, `'0000-00-00'` on MySQL)
   can still have its other columns changed by `Update` and a partial
   `Updates`. The admin's PATCH keeps such a column, mapped or not, when the
-  request does not set it: `database.StoredZeroColumns` lists the loaded
-  row's zero columns, and `database.KeepStoredZeros` scopes the update to
-  leave one out of its `SET` if it still holds the zero after the model's
-  hooks, so a hook that repairs it is written. A zero the request sets is
-  refused, in any column. The scope covers the update of that row (the
-  pointer passed to `KeepStoredZeros`) only. In your own code a `Save` of
-  such a row writes the zero back and is a 422 unless you scope it the same
-  way; so is `Updates(&row)` on PostgreSQL, which reads the value back in
+  edit leaves it as stored, whether the request omits it or sends the stored
+  value back: `database.StoredValues` records the loaded row, and
+  `database.ScopeEdit` scopes the update to leave a column out of its `SET`
+  if it still holds the zero after the model's hooks, so a hook that repairs
+  it is written. A zero instant written over a real value is refused, in any
+  column. The scope covers the update of that row (the pointer passed to
+  `ScopeEdit`) only. (`StoredZeroColumns` lists a row's zero columns;
+  `KeepStoredZeros` is the deprecated form of the scope.) In your own code a
+  `Save` of such a row writes the zero back and is a 422 unless you scope it
+  the same way; so is `Updates(&row)` on PostgreSQL, which reads the value back in
   `Local` (GORM then writes it), while on SQLite and MySQL GORM skips it. To
   clean the rows up, make the field a pointer and
   `UPDATE … SET col = NULL WHERE col = '0001-01-01 00:00:00'`, or give the
@@ -213,6 +228,68 @@ What a statement writes is what GORM writes:
 
 The check costs an ordinary write nothing: it allocates only when a value is
 out of range.
+
+### Text
+
+`database.Open` also refuses, before the SQL runs on every create and update,
+a string a text column cannot store the same way on every driver (issue
+#444), with a `*database.ValidationError` naming the field (a 422 through
+`MapPersistError`). What a statement writes is decided as for the time range
+check, and every string column the Go value is written to as is gets
+checked: a `string` or named string type, `*string`, `sql.NullString`. A
+field whose value is converted on the way (a GORM `serializer`, a type with
+its own `driver.Valuer`) writes something else and is not checked, nor is a
+column declared binary (`blob`, `bytea`).
+
+- A NUL byte or invalid UTF-8 (`database.TextProblem`): PostgreSQL refused
+  them with a 500; SQLite and MySQL stored a NUL byte.
+- More than the column holds, from its declared `type:`, else its `size:`.
+  `size:n`, `varchar(n)` and `char(n)` hold n characters (PostgreSQL and
+  MySQL refused more, or silently cut trailing spaces past n; SQLite stored
+  them). `text` holds `database.TextMaxBytes` (65,535) bytes, MySQL's
+  `TEXT`, on every driver (MySQL refused more with a 500); `tinytext` and
+  `mediumtext` hold MySQL's capacity too. A string column with neither is
+  unlimited text, except that MySQL makes a primary key, indexed, unique or
+  defaulted one `varchar(191)`: the check enforces 191 characters for such a
+  column on every driver, though PostgreSQL and SQLite would store more. A
+  generated `string` field is `size:255` (or its `max_length`), a `text`
+  field `type:text`.
+
+NULL (a nil pointer, an invalid `NullString`) and an expression are left to
+the database. The check allocates only when a value is refused, or when
+`Updates` is given a struct of a type other than the model, which is parsed
+to match its fields to the model's columns.
+
+**Rows stored before the check.** A row may already hold text the check now
+refuses: more than a `text` or a 191-character column holds (PostgreSQL,
+SQLite), more than a `size:n` column holds or invalid UTF-8 (SQLite), a NUL
+byte (MySQL, SQLite). An edit scoped to the row
+(`database.ScopeEdit` with the row's `database.StoredValues`, taken when it
+was loaded) does not judge text the row still stores, compared after the
+model's hooks run; text the edit or a hook changed is checked. The admin's
+PATCH does this, so such a row stays editable there, including from the
+admin's form, which sends every field back; setting the column to other
+refused text is a 422. A partial update (`Update`, `Updates` of a map or
+struct) does not write the column. A generic `Save` of the row writes the
+stored value back and is a 422 on that field: shorten or clean the value, or
+scope the save. Invalid UTF-8 does not survive a round trip through JSON: the
+API returns it with U+FFFD in place of each invalid byte, so a form that sends
+the field back writes that replacement (a change, which is valid text), while
+a PATCH that omits the field keeps the stored bytes.
+
+The list helpers apply the same rule to what a client sends: `FilterEq` on a
+string column and `Search` refuse a NUL byte or invalid UTF-8 with a 422
+(keyed on the column, and on `search`), which PostgreSQL refused to compare
+with a 500, and `FilterEq` on a uint column refuses a value over
+`math.MaxInt64`, which PostgreSQL's bigint cannot bind; for the same reason a
+generated `get`, and the product handler `gombit new` scaffolds, answer an id
+over `math.MaxInt64` with a 404. `Search`
+therefore takes a context and returns an error, like `FilterEq`; `gombit
+generate` emits the new call. The admin data plane refuses them in its
+filters, search, many-to-many id lists and writes alike, the last unless the
+value is the one the row already stores (sent back unchanged by its form);
+its write check also covers a string type with its own `driver.Valuer`,
+which the database's text check does not see as text.
 
 ## Deleting rows
 
