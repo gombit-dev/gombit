@@ -577,6 +577,14 @@ func applyWrite(ctx context.Context, m *registered, inst any, body map[string]an
 			fields[name] = []string{"is required"}
 			continue
 		}
+		// The admin's form sends an integer as a JSON number, which beyond
+		// ±(2^53-1) arrives rounded and is refused. One equal to the row's
+		// stored value rounded the same way is the form sending it back
+		// unchanged: the stored value is kept (issue #448).
+		if !creating && unchangedRoundedInteger(f, inst, raw) {
+			seen[name] = struct{}{}
+			continue
+		}
 		if msg := constraintMessage(f.Field, raw); msg != "" {
 			fields[name] = []string{msg}
 			continue

@@ -476,6 +476,55 @@ func makeSetter(index []int, ft FieldType, destType reflect.Type) func(any, any)
 	}
 }
 
+func isIntegerKind(k reflect.Kind) bool {
+	switch k {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return true
+	}
+	return false
+}
+
+// integerFits refuses an integer the destination's Go kind cannot hold, which
+// reflect.Value.Convert would wrap: 300 into an int8 became 44, -5 into a uint
+// 18446744073709551611, a value the database then could not read back
+// (issue #448).
+func integerFits(src reflect.Value, dest reflect.Type) error {
+	var n int64
+	switch src.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		n = src.Int()
+	case reflect.Float32, reflect.Float64:
+		// A field declared float (or json) over an integer Go field: Convert
+		// would truncate 3.7 to 3 and wrap 300 into an int8.
+		if !isIntegerKind(dest.Kind()) {
+			return nil
+		}
+		v, err := floatToInt64(src.Float())
+		if err != nil {
+			return err
+		}
+		n = v
+	default:
+		return nil
+	}
+	switch dest.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		if reflect.Zero(dest).OverflowInt(n) {
+			bits := dest.Bits()
+			return fmt.Errorf("must be between %d and %d", int64(-1)<<(bits-1), int64(1)<<(bits-1)-1)
+		}
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		if n < 0 || reflect.Zero(dest).OverflowUint(uint64(n)) {
+			if bits := dest.Bits(); bits < 64 {
+				return fmt.Errorf("must be between 0 and %d", uint64(1)<<bits-1)
+			}
+			return fmt.Errorf("must not be negative")
+		}
+	}
+	return nil
+}
+
 func convertTo(val any, dest reflect.Type) (reflect.Value, error) {
 	if val == nil {
 		return reflect.Zero(dest), nil
@@ -495,6 +544,9 @@ func convertTo(val any, dest reflect.Type) (reflect.Value, error) {
 	}
 	if src.Type().AssignableTo(dest) {
 		return src, nil
+	}
+	if err := integerFits(src, dest); err != nil {
+		return reflect.Value{}, err
 	}
 	// A named []byte that unmarshals JSON (types.JSON) is convertible from a
 	// string and is a byte slice, so the shortcuts below would store the raw
@@ -733,4 +785,22 @@ func validSlug(slug string) bool {
 		}
 	}
 	return true
+}
+
+// unchangedRoundedInteger reports whether raw, a JSON number beyond what a
+// float64 keeps exactly, is the integer field's stored value as the admin's
+// form rounds it, so it is the value sent back, not an edit.
+func unchangedRoundedInteger(f *resolvedField, inst any, raw any) bool {
+	v, ok := raw.(float64)
+	if !ok || f.Type != TypeInteger || (v <= maxExactJSONInt && v >= -maxExactJSONInt) {
+		return false
+	}
+	cur := reflect.ValueOf(f.get(inst))
+	switch cur.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return float64(cur.Int()) == v
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return float64(cur.Uint()) == v
+	}
+	return false
 }

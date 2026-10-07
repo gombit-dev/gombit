@@ -126,6 +126,13 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 ### Informational
 
+- Admin writes refuse an integer the field's Go type cannot hold, and a JSON number from 2^53 on, with a 422 on that field. (`admin-integers-must-fit`, behavior, [#448](https://github.com/gombit-dev/gombit/issues/448))
+
+  They were stored wrapped (`300` into an `int8` became `44`; `-5` into
+  a `uint` made the list endpoint a 500). A client that sends a large
+  integer sends it as a string (`"9007199254740993"`), which is read
+  exactly.
+
 - `framework.SanitizeHTML` keeps text after a stray `<` when the value also has a real tag. (`sanitize-html-stray-angle-bracket`, security, [#433](https://github.com/gombit-dev/gombit/issues/433))
 
   That tail comes back as `SanitizeHTML` returns a value with no
