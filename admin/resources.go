@@ -581,6 +581,10 @@ func applyWrite(ctx context.Context, m *registered, inst any, body map[string]an
 			fields[name] = []string{msg}
 			continue
 		}
+		if msg := writtenTextProblem(f, inst, raw, creating); msg != "" {
+			fields[name] = []string{msg}
+			continue
+		}
 		if err := f.set(inst, raw); err != nil {
 			fields[name] = []string{err.Error()}
 			continue
@@ -630,6 +634,27 @@ func applyWrite(ctx context.Context, m *registered, inst any, body map[string]an
 		return contract.WithContext(ctx, contract.Validation("The request contains invalid fields.", fields))
 	}
 	return nil
+}
+
+// writtenTextProblem refuses a NUL byte or invalid UTF-8 in a string the
+// request writes (database.TextProblem; issue #444). The database's text check
+// refuses it too, but only in a column whose Go value it sees as text: not in
+// a type with its own driver.Valuer, which this check still covers. A value
+// the row already stores, sent back unchanged by the admin's form, is not
+// judged again (database.ScopeEdit's rule).
+func writtenTextProblem(f *resolvedField, inst any, raw any, creating bool) string {
+	s, ok := raw.(string)
+	if !ok || (f.Type != TypeString && f.Type != TypeText) {
+		return ""
+	}
+	msg := database.TextProblem(s)
+	if msg == "" || creating {
+		return msg
+	}
+	if same, err := sameAsStored(f, inst, raw); err == nil && same {
+		return ""
+	}
+	return msg
 }
 
 func blankRaw(raw any) bool {

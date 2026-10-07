@@ -261,8 +261,9 @@ the database. The check allocates only when a value is refused, or when
 to match its fields to the model's columns.
 
 **Rows stored before the check.** A row may already hold text the check now
-refuses (more than a `text` or a 191-character column holds on PostgreSQL or
-SQLite, a NUL byte on MySQL or SQLite). An edit scoped to the row
+refuses: more than a `text` or a 191-character column holds (PostgreSQL,
+SQLite), more than a `size:n` column holds or invalid UTF-8 (SQLite), a NUL
+byte (MySQL, SQLite). An edit scoped to the row
 (`database.ScopeEdit` with the row's `database.StoredValues`, taken when it
 was loaded) does not judge text the row still stores, compared after the
 model's hooks run; text the edit or a hook changed is checked. The admin's
@@ -271,7 +272,10 @@ admin's form, which sends every field back; setting the column to other
 refused text is a 422. A partial update (`Update`, `Updates` of a map or
 struct) does not write the column. A generic `Save` of the row writes the
 stored value back and is a 422 on that field: shorten or clean the value, or
-scope the save.
+scope the save. Invalid UTF-8 does not survive a round trip through JSON: the
+API returns it with U+FFFD in place of each invalid byte, so a form that sends
+the field back writes that replacement (a change, which is valid text), while
+a PATCH that omits the field keeps the stored bytes.
 
 The list helpers apply the same rule to what a client sends: `FilterEq` on a
 string column and `Search` refuse a NUL byte or invalid UTF-8 with a 422
@@ -282,7 +286,10 @@ generated `get`, and the product handler `gombit new` scaffolds, answer an id
 over `math.MaxInt64` with a 404. `Search`
 therefore takes a context and returns an error, like `FilterEq`; `gombit
 generate` emits the new call. The admin data plane refuses them in its
-filters, search and writes alike.
+filters, search, many-to-many id lists and writes alike, the last unless the
+value is the one the row already stores (sent back unchanged by its form);
+its write check also covers a string type with its own `driver.Valuer`,
+which the database's text check does not see as text.
 
 ## Deleting rows
 

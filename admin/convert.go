@@ -230,12 +230,11 @@ func coerceFilter(raw string, ft FieldType) (any, error) {
 	return coerceText(raw, ft)
 }
 
-// coerceText coerces a filter or path value, which the database compares
-// rather than stores: a NUL byte or invalid UTF-8 is no text any driver
-// compares the same way (PostgreSQL refused it with a 500; issue #444). A
-// written value is judged by the database's text check instead, which leaves
-// text the row already stores alone (database.ScopeEdit).
-func coerceText(raw string, ft FieldType) (any, error) {
+// coerceText coerces a value the database compares rather than stores (a
+// filter, a path id, a many-to-many id): a NUL byte or invalid UTF-8 is no
+// text any driver compares the same way (PostgreSQL refused it with a 500;
+// issue #444). A written value is judged by writtenTextProblem.
+func coerceText(raw any, ft FieldType) (any, error) {
 	v, err := coerceValue(raw, ft)
 	if err != nil {
 		return nil, err

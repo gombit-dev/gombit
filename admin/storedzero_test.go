@@ -223,10 +223,11 @@ func runStoredZeroAdmin(t *testing.T, db *database.DB) {
 		})
 	}
 
-	// The admin's form sends every field back, so a PATCH that resends the
-	// stored zero unchanged keeps it (#564 review round 2); a PATCH that
-	// writes the zero instant over a real value is refused, however it is
-	// spelled.
+	// A PATCH that sends the stored zero back as the API returns it
+	// (0001-01-01T00:00:00Z on these drivers in UTC) keeps it (#564 review
+	// round 2); a PATCH that writes the zero instant over a real value is
+	// refused, however it is spelled. (The admin SPA's datetime input does
+	// not send year 1 back in this form; that is the SPA's to fix.)
 	var r szDerived
 	if err := db.Where("title = ?", "renamed").First(&r).Error; err != nil {
 		t.Fatal(err)
