@@ -397,6 +397,29 @@ version.
   `default-src 'none'` blocked the page's scripts, styles and images. The
   policy now follows the served content type, not the file name
   ([#434](https://github.com/gombit-dev/gombit/issues/434)).
+- Decimals are no longer silently changed on write. On SQLite, which stores a
+  `decimal` column through float64, `99999999999999.9999` used to become
+  `100000000000000`; PostgreSQL and MySQL rounded a value over the column's
+  scale. Every create, upsert, and update now refuses, with a 422 naming the
+  field, a value written to a decimal column (in any Go shape: decimal,
+  string, number, pointer, named type, `sql.Null*`) that does not fit the
+  column's `decimal(p,s)` as GORM emits it (MySQL's `DECIMAL(10,0)` when
+  none is declared), that is not a decimal number, or on SQLite that has
+  more than 15 digits (`database.SQLiteDecimalDigits`). An update that does
+  not write a decimal column is not affected by the row's existing value. A
+  decimal whose exponent is beyond ±1000 or that spells more than 1000 digits
+  (`types.MaxDecimalDigits`, e.g. `"1e1000000000"` or `"0e1000000000"`) is
+  refused when parsed, scanned, and before any write, instead of pinning a CPU
+  while it is formatted. **Behavior change:** a decimal field whose column type
+  is neither decimal nor text (`type:real`, `type:double precision`,
+  `type:money`, `type:bigint`) now fails every write with an error; declare it
+  `decimal(p,s)`. A string written to a text decimal column must be the
+  canonical spelling (`"1.5"`, not `" 1.5 "` or `"1.50"`). A `types.Decimal`
+  now refuses to load a stored value over 1000 digits (possible in an
+  unbounded PostgreSQL `numeric`), and a non-finite float. The generated
+  create handler now responds with the stored row, so its body is what a get
+  returns; run `gombit generate` to pick that up in an existing app
+  ([#440](https://github.com/gombit-dev/gombit/issues/440)).
 - Unknown paths and recovered handler panics now answer with the D10 error
   envelope like every other framework error. A 404 used to be Gin's
   `text/plain` "404 page not found" (or an empty body under an embedded
@@ -434,6 +457,28 @@ version.
   what the client receives. A panic that aborts the connection
   (`http.ErrAbortHandler`) before anything is sent is also counted as 500
   ([#432](https://github.com/gombit-dev/gombit/issues/432)).
+- A list page so far out that its offset overflows is empty. `contract.PageOffset`
+  computed `(page - 1) * per_page` unchecked, so `?page=9223372036854775807`
+  wrapped to a negative offset, which GORM ignores, and returned the first
+  page's rows under that page number on every generated list endpoint and the
+  admin data plane. The offset now saturates at `math.MaxInt`, which selects
+  nothing on SQLite, PostgreSQL and MySQL
+  ([#441](https://github.com/gombit-dev/gombit/issues/441)).
+- Database logging goes through the app's logger instead of GORM's default
+  one, which wrote to stdout in its own coloured format, ignored
+  `GOMBIT_LOG_SINK` / `GOMBIT_LOG_LEVEL`, logged every failed statement with
+  its parameter values inlined (a duplicate registration printed the user's
+  bcrypt hash and email), and reported every not-found lookup as an error.
+  Statements, not-found lookups and the failures the API answers with a 4xx
+  (identified by the driver's error code, never by text) are logged at
+  `debug`, slow statements at `warn`, and every other failure at `error`; the
+  logged SQL keeps its placeholders and never carries parameter values,
+  `Scan` included (`database.Open` sets GORM's process-wide
+  `logger.RecorderParamsFilter`). `database.Open` without an app installs a quiet stderr logger with
+  the same guarantee; a GORM logger the app sets on its database is kept. New:
+  `database.NewLogger`, `database.SlowQueryThreshold` and
+  `(*database.DB).ReplaceDefaultLogger`
+  ([#439](https://github.com/gombit-dev/gombit/issues/439)).
 - The in-memory cache's `Increment` refuses to overflow, as Redis `INCRBY`
   does: incrementing past `math.MaxInt64` (or below `math.MinInt64`) returns
   an "increment or decrement would overflow" error and leaves the value as it
@@ -453,6 +498,33 @@ version.
   options, flags or driver, and worker mode's `-h`. An `App` runs once; it
   cannot be run again after any of them returns
   ([#435](https://github.com/gombit-dev/gombit/issues/435)).
+- Every database write refuses a timestamp or date no supported driver can
+  store and return, with a 422 on that field. Any RFC 3339 timestamp was
+  accepted: Postgres stored `0000-01-01T00:00:00Z` as 1 BC, after which the
+  row's endpoint and every list page holding it could no longer be read, and
+  MySQL refused it with a 500. `database.Open` now registers a
+  `gombit:timerange` callback, next to the `Validate` hook, that checks every
+  `time.Time`, `sql.NullTime` and `types.Date` value a create or update writes
+  (`Create`, `Save`, `Updates`, `Update`, `UpdateColumns`, upsert
+  `DO UPDATE` literals, honouring `Select`/`Omit`) against
+  `1000-01-02T00:00:00Z`..`9999-12-30T23:59:59Z` (a day's margin for the time
+  zone a value is read into) and `1000-01-01`..`9999-12-31`
+  (`types.TimeBounds`, `types.DateBounds`, `types.TimeWithin`,
+  `types.DateWithin`). It covers the generated API, the admin data plane and
+  custom code alike, with no regeneration, and adds no allocation to an
+  ordinary write. **Behaviour change:** a zero `time.Time` a write sets (a
+  non-pointer field left unset on create, a zero in a map, `Update` or a
+  `Select` naming the column) is now a 422 on every driver; it was stored on
+  SQLite/PostgreSQL and a 500 on MySQL. Use a pointer for an optional time.
+  `Save` of a struct with an unset `CreatedAt` or defaulted column leaves
+  that column out of its update (the row's value stays; the insert fallback
+  fills it). Rows that already store the zero instant stay editable through
+  `Update`, a partial `Updates` and the admin, which keeps a stored zero in
+  any column a PATCH does not set unless a hook repairs it
+  (`database.StoredZeroColumns`, `database.KeepStoredZeros`); a generic
+  `Save` of one is a 422 until the column is cleaned up
+  (see docs/database.md). A string no Go time parses (`'infinity'`) is refused too
+  ([#443](https://github.com/gombit-dev/gombit/issues/443)).
 - A response that cannot be encoded as JSON is answered with HTTP 500 and the
   D10 `internal` envelope (with the request ID), and logged through the app's
   logger. Huma decided the status before encoding, so a stored time outside

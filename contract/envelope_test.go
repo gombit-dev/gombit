@@ -3,6 +3,7 @@ package contract
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -122,6 +123,16 @@ func TestPageOffset(t *testing.T) {
 		{1, 20, 0},
 		{2, 20, 20},
 		{3, 10, 20},
+		// An offset that would overflow saturates instead of wrapping to a
+		// negative number GORM reads as "no offset" (issue #441).
+		{math.MaxInt, 100, math.MaxInt},
+		{math.MaxInt/100 + 2, 100, math.MaxInt},
+		{math.MaxInt/100 + 1, 100, math.MaxInt / 100 * 100},
+		{math.MaxInt, 1, math.MaxInt - 1},
+		// Unclamped input never panics or goes negative.
+		{0, 20, 0},
+		{-5, 20, 0},
+		{3, 0, 0},
 	}
 	for _, tt := range tests {
 		t.Run(fmt.Sprintf("page=%d,per_page=%d", tt.page, tt.perPage), func(t *testing.T) {

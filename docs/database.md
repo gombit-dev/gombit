@@ -74,12 +74,145 @@ if err := db.First(&row, id).Error; err != nil {
 | Helper | Maps | Anything else |
 | --- | --- | --- |
 | `MapLoadError` | `gorm.ErrRecordNotFound` → D10 `not_found` (404) | `internal` |
-| `MapPersistError` | `*database.ValidationError` → `validation_error` (422, with its fields); unique / duplicate → `conflict` (409); foreign-key or NOT NULL violation → `validation_error` (422) | `internal` |
+| `MapPersistError` | `*database.ValidationError` → `validation_error` (422, with its fields), including a decimal the column would not store exactly (below); unique / duplicate → `conflict` (409); foreign-key or NOT NULL violation → `validation_error` (422) | `internal` |
 | `MapDeleteError` | `database.ErrReferenced` or a foreign-key violation → `conflict` (409) | `internal` |
+
+Before every create and update, `database.Open` also checks each value the
+statement assigns to a decimal column (a `types.Decimal` / `decimal.Decimal`
+field): a value with more digits than the column holds, before or after the
+point, or one that is not a decimal number at all, is a
+`*database.ValidationError` naming the field, not a rounded, truncated, or
+garbage write.
+
+- **What is checked** is the assignment set, the columns the statement writes:
+  a create's rows (or map) and an upsert's explicit `ON CONFLICT DO UPDATE`
+  values; an update's map (`Updates(map)`, `Update(column, value)`) or the
+  struct it writes (`Save`, `Updates(struct)`, any struct type, by column
+  name), honoring `Select` and `Omit`. An update that does not write a decimal
+  column is never refused for the row's old value, and a model with no decimal
+  field costs nothing.
+- **Every value shape** is read: decimals, strings, numbers, `json.Number`,
+  pointers (a `*string` / `*float64` PATCH field), named types, and
+  `driver.Valuer`s such as `sql.NullString`. A string must be a plain decimal
+  (`[sign] digits [. digits] [e [sign] digits]`, `types.IsPlainDecimalSpelling`),
+  the grammar all three databases read, optionally padded with the ASCII
+  whitespace they skip; anything else, Unicode spaces (`"1.5\u00a0"`) or a
+  sign after a leading point (`".-5"`, which Go's decimal parser accepts)
+  included, is not a decimal number. A null is
+  nothing to check, and a SQL expression (`gorm.Expr`) or an upsert's column
+  reference is left to the database.
+- **The column's limits** come from the type GORM emits for the model field
+  (`GormDBDataType`, else the dialect's `DataTypeOf`), the same type
+  `AutoMigrate` and the Atlas provider create, so the model's declared type
+  must match the migrated column. A decimal type without `(p,s)` is
+  `DECIMAL(10,0)` on MySQL and an unbounded `numeric` on PostgreSQL; a
+  `precision:`/`scale:` tag does not reach the column for `types.Decimal`; an
+  `unsigned` column refuses a negative value; a text column stores the bytes
+  it is given as written, so a string bound for one must already be the
+  decimal's canonical spelling (`"1.5"`, not `" 1.5 "`, `"1.50"`, or
+  `"15e-1"`), a plain number (integer or float) is refused, and the spelling
+  must fit the column's
+  length (`varchar(n)`); any other type (`real`,
+  `double precision`, `money`, `bigint` cents) fails every write with an
+  error rather than an unchecked one. Declare such a field `decimal(p,s)`.
+- **On SQLite**, which stores decimals through float64, a value with more than
+  15 digits (`database.SQLiteDecimalDigits`), or outside about 1e±307, is
+  refused the same way.
+- **On every driver**, a value whose exponent is beyond ±1000, or that would
+  spell more than `types.MaxDecimalDigits` (1000) digits, is refused before
+  anything formats or compares it. This is one rule (`types.DecimalShapeOf`)
+  shared by the write guard and `types.Decimal`'s parsing and `Scan`, so a
+  value the guard approves always loads again, and text longer than any
+  bounded value could spell is refused before it is even parsed. A decimal's exponent is unbounded, and
+  formatting or comparing one rescales it to that exponent, zero included:
+  `"0e1000000000"` costs as much as `"1e1000000000"`. `types.Decimal` refuses
+  such a value when it is unmarshalled (`UnmarshalJSON`, `UnmarshalText`,
+  `NewDecimalFromString`) or scanned, and the admin refuses it before comparing
+  it to a bound.
+
+The check runs on the API and admin write paths alike.
 
 `IsUniqueViolation`, `IsForeignKeyViolation`, and `IsNotNullViolation` are the
 shared detectors behind those helpers; auth registration uses
 `IsUniqueViolation` too. See [`docs/contract.md`](contract.md#application-errors-41-categories).
+
+### Timestamp and date range
+
+`database.Open` and `OpenConn` refuse, before the SQL runs on every create and
+update, a `time.Time`, `sql.NullTime` or `types.Date` value the statement writes
+that is outside what all three drivers can store and return:
+`1000-01-02T00:00:00Z`..`9999-12-30T23:59:59Z` for a timestamp and
+`1000-01-01`..`9999-12-31` for a date (`types.TimeBounds`, `types.DateBounds`).
+MySQL stores no earlier year, and a timestamp outside years 0..9999 in the time
+zone it is read into cannot be encoded as JSON; PostgreSQL would store year 0
+as 1 BC and then fail every read of the row. The timestamp bounds keep a day's
+margin for that time-zone conversion. The failure is a
+`*database.ValidationError` naming the field, so `MapPersistError` answers it
+with a 422 on the generated API, the admin data plane, and your own code alike.
+
+What a statement writes is what GORM writes:
+
+- `Create`, `Save`, `Updates` with a map or a struct (of any type, matched to
+  the model's columns by name), `Update`, `UpdateColumn(s)`, and the literal
+  assignments of an upsert's `ON CONFLICT DO UPDATE`, filtered by
+  `Select` / `Omit` the way GORM filters them (on a create an auto
+  `CreatedAt` / `UpdatedAt` is written whatever `Select` says). An update's
+  model is not checked unless it is what is written (`Save`, `Updates(&row)`),
+  so updating other columns of a row that already holds an out-of-range value
+  is not refused.
+- A column GORM's field permissions keep out of the statement
+  (`gorm:"->"`, `<-:create` on an update, `<-:update` on a create) is not
+  written, and not checked.
+- Every `time.Time`, `sql.NullTime`, `types.Date` and named time type
+  (`gorm.DeletedAt`, `type Stamp time.Time`) column is checked, a caller-set
+  `CreatedAt` / `UpdatedAt` / `DeletedAt` included (a hook, a seeder, a map
+  naming the column, `UpdateColumns`). A struct update that runs hooks writes
+  now over `UpdatedAt`, so that one is not.
+- The zero instant `0001-01-01T00:00:00Z` is refused wherever a statement
+  writes it, on every driver, whatever `Location` the value carries: a zero
+  non-pointer field on create, a zero value in a map or `Update`, a non-nil
+  pointer to it or a valid `sql.NullTime` holding it, and a zero struct field
+  an update writes. GORM decides that: an update writes a zero struct field
+  only when `Select` puts its column in GORM's select map (a field or column
+  name, `table.col`, a quoted name, `*`, `table.*`), and `Updates` skips it
+  otherwise. GORM's zero is the Go zero value, `time.Time{}`; a zero time
+  carrying a `Location` (`.Local()`, a pgx read, a parse with an explicit
+  offset such as `+00:00`) is written, and refused. Use a pointer (or
+  `sql.NullTime`) for an optional time.
+- An unset auto timestamp or `default` column is not a value to refuse. On a
+  create GORM fills a zero `CreatedAt` / `UpdatedAt` and the database a zero
+  defaulted column, `Select` or not. Under `Select("*")` (`Save`) an update
+  leaves such a column out of its `SET` when it holds the zero instant, so
+  `Save` of a struct that does not carry `CreatedAt` keeps the row's, and
+  when no row matches, `Save`'s insert fallback fills it as any create does.
+  NULL (a nil pointer, an invalid `sql.NullTime`) is a value and is written.
+  Naming the column without `*` (`Select("CreatedAt")`) writes the zero,
+  and is refused; under a select that includes `*` the column is left out.
+- A row stored before this check with the zero instant in a non-pointer
+  column (an unset field on SQLite or PostgreSQL, `'0000-00-00'` on MySQL)
+  can still have its other columns changed by `Update` and a partial
+  `Updates`. The admin's PATCH keeps such a column, mapped or not, when the
+  request does not set it: `database.StoredZeroColumns` lists the loaded
+  row's zero columns, and `database.KeepStoredZeros` scopes the update to
+  leave one out of its `SET` if it still holds the zero after the model's
+  hooks, so a hook that repairs it is written. A zero the request sets is
+  refused, in any column. The scope covers the update of that row (the
+  pointer passed to `KeepStoredZeros`) only. In your own code a `Save` of
+  such a row writes the zero back and is a 422 unless you scope it the same
+  way; so is `Updates(&row)` on PostgreSQL, which reads the value back in
+  `Local` (GORM then writes it), while on SQLite and MySQL GORM skips it. To
+  clean the rows up, make the field a pointer and
+  `UPDATE … SET col = NULL WHERE col = '0001-01-01 00:00:00'`, or give the
+  column a real value.
+- A string written to such a column is read as the drivers read it (RFC 3339,
+  ISO without a zone, `YYYY-MM-DD hh:mm:ss` with an offset such as `+00`,
+  `+0000`, `-03:00` or a zone name, `YYYY-MM-DD`); one that does not parse is
+  refused, since PostgreSQL accepts forms (`'infinity'`, `'… BC'`) no Go time
+  can be read back from. An expression (`gorm.Expr`) and NULL are left to the
+  database.
+
+The check costs an ordinary write nothing: it allocates only when a value is
+out of range.
 
 ## Deleting rows
 
@@ -179,7 +312,11 @@ Official multi-DB support is gated by the conformance suite under
 
 - migrate up / migrate down (Gombit-owned companion downs)
 - timestamps, nullable columns, unique constraints, indexes
-- decimal round-trip
+- decimal round-trip, and precision: a `decimal(19,4)` value round-trips
+  exactly, a value over the scale or not a decimal at all is refused on every
+  driver (on create, upsert, and the update paths, whatever Go value carries
+  it), one over 15 digits is refused on SQLite, and an undeclared-precision
+  decimal is MySQL's `DECIMAL(10,0)`
 - CRUD, transactions, pagination (`Offset` / `Limit`)
 - relation deletion (`relation_deletion`): `ON DELETE` `RESTRICT` / `CASCADE` /
   `SET NULL` through `database.Delete`

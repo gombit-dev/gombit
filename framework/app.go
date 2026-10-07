@@ -266,6 +266,15 @@ func New(options ...Option) (_ *App, err error) {
 		app.readyProbe = app.pingDatabase
 	}
 
+	// Database logging goes through the app's logger, so it honors
+	// GOMBIT_LOG_SINK / GOMBIT_LOG_LEVEL and never prints parameter values
+	// (issue #439). Done last: the database is the caller's, and a New that
+	// fails must not leave it logging through an app that never ran. A GORM
+	// logger the caller set on it is kept.
+	if app.db != nil {
+		app.db.ReplaceDefaultLogger(database.NewLogger(app.logger.Named("database")))
+	}
+
 	return app, nil
 }
 

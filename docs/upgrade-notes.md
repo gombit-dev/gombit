@@ -61,6 +61,24 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   every peer lets any client spoof its forwarded IP. List only the
   addresses of the proxies you control.
 
+- **Breaking.** A decimal is never stored changed: a value that does not fit its column's `decimal(p,s)` (or, on SQLite, has more than 15 digits) is a 422 instead of being rounded. (`decimals-never-changed-on-write`, behavior, [#440](https://github.com/gombit-dev/gombit/issues/440))
+
+  A decimal field whose column type is neither decimal nor text
+  (`type:real`, `type:double precision`, `type:money`, `type:bigint`)
+  now fails every write: declare it `decimal(p,s)`. A string written to
+  a text decimal column must be the canonical spelling (`"1.5"`, not
+  `"1.50"`). The generated create handler now responds with the stored
+  row: run `gombit generate` to pick that up in an existing app.
+
+- **Breaking.** Every write refuses a timestamp or date no supported driver can store and return (outside 1000..9999), with a 422 on that field. (`timestamps-in-storable-range`, behavior, [#443](https://github.com/gombit-dev/gombit/issues/443))
+
+  That includes a zero `time.Time` a write sets (a non-pointer field
+  left unset on create, a zero in a map or `Update`): it was stored on
+  SQLite and PostgreSQL and was a 500 on MySQL. Use a pointer for an
+  optional time. Rows that already store the zero instant stay editable
+  through `Update`, a partial `Updates` and the admin; a generic `Save`
+  of one is a 422 until the column is cleaned up (docs/database.md).
+
 ### Automatic: applied by the upgrade tooling
 
 - `gombit new` records the app's upgrade baseline in a `gombit:` block of `gombit.yaml`. (`record-upgrade-baseline`, scaffold, action `record-baseline`, [#341](https://github.com/gombit-dev/gombit/issues/341))
@@ -124,6 +142,16 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   framework upgrade. The framework also newly requires the AWS SDK
   for Go v2 (the S3 storage driver), `golang.org/x/mod`,
   `golang.org/x/sys` and `gopkg.in/yaml.v3`.
+
+- Database logging goes through the app's logger, at its level and sink, and never carries parameter values. (`database-logging-through-app-logger`, security, [#439](https://github.com/gombit-dev/gombit/issues/439))
+
+  GORM's default logger wrote to stdout in its own format and inlined
+  parameter values into failed statements (a password hash, an
+  email). Statements and 4xx failures now log at `debug`, slow
+  statements at `warn`, other failures at `error`. A GORM logger the
+  app sets on its database is kept.
+
+- A list page so far out that its offset overflows is empty, instead of returning the first page's rows. (`page-offset-saturates`, behavior, [#441](https://github.com/gombit-dev/gombit/issues/441))
 
 - Object storage (`app.Storage()`, `GOMBIT_STORAGE_*`) and storage-backed `file` / `image` model fields. (`object-storage`, schema, [#279](https://github.com/gombit-dev/gombit/issues/279), [#323](https://github.com/gombit-dev/gombit/issues/323), [#324](https://github.com/gombit-dev/gombit/issues/324), [#325](https://github.com/gombit-dev/gombit/issues/325), [#326](https://github.com/gombit-dev/gombit/issues/326), [#327](https://github.com/gombit-dev/gombit/issues/327), [#328](https://github.com/gombit-dev/gombit/issues/328), [#329](https://github.com/gombit-dev/gombit/issues/329), [#530](https://github.com/gombit-dev/gombit/issues/530))
 

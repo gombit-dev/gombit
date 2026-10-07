@@ -31,7 +31,11 @@ projections of that kind, not separate lists.
 
 `time` on the command line is a **datetime** (`time.Time`), kept as a
 compatibility alias. `date` is a calendar date (`types.Date`, JSON
-`YYYY-MM-DD`). `datetime` is a timestamp. `time_of_day` is a clock
+`YYYY-MM-DD`). `datetime` is a timestamp. Every write refuses a `datetime`
+outside `1000-01-02T00:00:00Z`..`9999-12-30T23:59:59Z` and a `date` outside
+`1000-01-01`..`9999-12-31` with a 422 on that field, the range all three
+drivers can store and return (see [database.md § Timestamp and date
+range](database.md#timestamp-and-date-range)). `time_of_day` is a clock
 (`types.TimeOfDay`, JSON `HH:MM:SS`) stored as `char(8)` so SQLite,
 PostgreSQL, and MySQL share one sortable text form. The request pattern,
 the admin write, and `types.TimeOfDay` accept the same spellings: `HH:MM`,

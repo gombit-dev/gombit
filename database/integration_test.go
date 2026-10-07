@@ -61,6 +61,97 @@ func TestMapPersistErrorMySQLConstraintViolations(t *testing.T) {
 	testForeignKeyAndNotNullViolations(t, db)
 }
 
+func TestTimeRangeWritePathsOnPostgres(t *testing.T) {
+	if *postgresDSN == "" {
+		t.Skip("set -database.postgres-dsn to run Postgres integration tests")
+	}
+	db := openIntegrationDB(t, config.DatabaseConfig{Driver: config.DatabaseDriverPostgres, DSN: *postgresDSN})
+	migrateRanged(t, db)
+	testTimeRangeWritePaths(t, db)
+	migrateRanged(t, db)
+	testTimeRangeUnsetAndInRange(t, db)
+	migrateRanged(t, db)
+	testTimeRangeWhatGORMWrites(t, db)
+	migrateRanged(t, db)
+	testTimeRangeStoredZero(t, db)
+}
+
+func TestTimeRangeWritePathsOnMySQL(t *testing.T) {
+	if *mysqlDSN == "" {
+		t.Skip("set -database.mysql-dsn to run MySQL integration tests")
+	}
+	db := openIntegrationDB(t, config.DatabaseConfig{Driver: config.DatabaseDriverMySQL, DSN: *mysqlDSN})
+	migrateRanged(t, db)
+	testTimeRangeWritePaths(t, db)
+	migrateRanged(t, db)
+	testTimeRangeUnsetAndInRange(t, db)
+	migrateRanged(t, db)
+	testTimeRangeWhatGORMWrites(t, db)
+}
+
+func TestTimeBoundsRoundTripOnPostgres(t *testing.T) {
+	if *postgresDSN == "" {
+		t.Skip("set -database.postgres-dsn to run Postgres integration tests")
+	}
+	testTimeBoundsRoundTrip(t, openIntegrationDB(t, config.DatabaseConfig{
+		Driver: config.DatabaseDriverPostgres,
+		DSN:    *postgresDSN,
+	}))
+}
+
+func TestTimeBoundsRoundTripOnMySQL(t *testing.T) {
+	if *mysqlDSN == "" {
+		t.Skip("set -database.mysql-dsn to run MySQL integration tests")
+	}
+	testTimeBoundsRoundTrip(t, openIntegrationDB(t, config.DatabaseConfig{
+		Driver: config.DatabaseDriverMySQL,
+		DSN:    *mysqlDSN,
+	}))
+}
+
+func TestFarPageIsEmptyOnPostgres(t *testing.T) {
+	if *postgresDSN == "" {
+		t.Skip("set -database.postgres-dsn to run Postgres integration tests")
+	}
+	testFarPageIsEmpty(t, openIntegrationDB(t, config.DatabaseConfig{
+		Driver: config.DatabaseDriverPostgres,
+		DSN:    *postgresDSN,
+	}))
+}
+
+func TestFarPageIsEmptyOnMySQL(t *testing.T) {
+	if *mysqlDSN == "" {
+		t.Skip("set -database.mysql-dsn to run MySQL integration tests")
+	}
+	testFarPageIsEmpty(t, openIntegrationDB(t, config.DatabaseConfig{
+		Driver: config.DatabaseDriverMySQL,
+		DSN:    *mysqlDSN,
+	}))
+}
+
+// The database logger never logs a parameter value and classifies errors as
+// MapPersistError does on every driver (issue #439); Postgres also checks its
+// $n placeholders survive.
+func TestNewLoggerOnPostgres(t *testing.T) {
+	if *postgresDSN == "" {
+		t.Skip("set -database.postgres-dsn to run Postgres integration tests")
+	}
+	testLoggerOnDriver(t, openIntegrationDB(t, config.DatabaseConfig{
+		Driver: config.DatabaseDriverPostgres,
+		DSN:    *postgresDSN,
+	}))
+}
+
+func TestNewLoggerOnMySQL(t *testing.T) {
+	if *mysqlDSN == "" {
+		t.Skip("set -database.mysql-dsn to run MySQL integration tests")
+	}
+	testLoggerOnDriver(t, openIntegrationDB(t, config.DatabaseConfig{
+		Driver: config.DatabaseDriverMySQL,
+		DSN:    *mysqlDSN,
+	}))
+}
+
 func TestListQueryHelpersPostgres(t *testing.T) {
 	if *postgresDSN == "" {
 		t.Skip("set -database.postgres-dsn to run Postgres integration tests")

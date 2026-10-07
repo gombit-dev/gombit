@@ -407,9 +407,9 @@ Modifiers are `required`, `nullable` (the opposite of `required`), `unique`,
 
 | Type | Go type | Column / contract |
 | --- | --- | --- |
-| `decimal` | `types.Decimal` (wraps `shopspring/decimal`) | `decimal(19,4)`; JSON string, exact — no float rounding |
+| `decimal` | `types.Decimal` (wraps `shopspring/decimal`) | `decimal(19,4)`; JSON string, exact — no float rounding. A value that does not fit is a 422, never rounded; on SQLite at most 15 significant digits (see below) |
 | `decimal(p,s)` | `types.Decimal` | `decimal(p,s)`, e.g. `decimal(10,2)` |
-| `time` | `time.Time` | RFC3339 date-time in JSON |
+| `time` | `time.Time` | RFC3339 date-time in JSON, `1000-01-02T00:00:00Z`..`9999-12-30T23:59:59Z` on every write (see [database.md](database.md#timestamp-and-date-range)) |
 | `time_of_day` | `types.TimeOfDay` | `char(8)` clock. `HH:MM`, `HH:MM:SS`, and `15:04:05+07:00` are one pattern, stored as `HH:MM:SS`. Optional is a pointer; a blank submits null |
 | `duration` | `types.Duration` | bigint nanoseconds; JSON is a Go duration (`1h30m0s`). Optional is a pointer |
 | `enum(draft=Draft)` | `string` | stored value `draft`, display label `Draft`. The API enum is the stored value |
@@ -419,6 +419,26 @@ Modifiers are `required`, `nullable` (the opposite of `required`), `unique`,
 | `one_to_one:Target` | unique FK `TargetID` + `Target target.Target` | same wire as `belongs_to`; the foreign key is unique |
 | `has_many:Target` | `[]target.Target` | model-only, read via the admin; the child must carry the parent FK |
 | `many_to_many:Target` | `[]target.Target` (`many2many:` join) | model-only, edited via the admin |
+
+A decimal column never stores a value changed. Any value written to one is
+checked first: a `types.Decimal`, or the string, number, pointer, named type, or
+`sql.Null*` value a map, a struct field, or an upsert carries. One that does not
+fit the column's `decimal(p,s)` (more than `p-s` digits before the point, or
+more than `s` after it, ignoring trailing zeros) is refused with a 422 rather
+than rounded by PostgreSQL or MySQL, and one that is not a decimal number at
+all (`"1,5"`, `"NaN"`, `""`) is refused too. The column type is the one GORM
+emits for the model, which must match the migrated column: `type:decimal(p,s)`.
+A `precision:`/`scale:` tag does not reach the column for `types.Decimal`, and a
+type without `(p,s)`, such as an untagged `types.Decimal`, is MySQL's
+`DECIMAL(10,0)` there (whole numbers only, so pin `type:decimal(p,s)` for money)
+and an unbounded `numeric` on PostgreSQL. SQLite has no fixed-point type: its
+`decimal` column converts through float64, which keeps 15 significant digits,
+so on SQLite a decimal may carry **at most 15 digits**
+(`database.SQLiteDecimalDigits`) and a longer one is a 422 instead of being
+silently changed. `99999999999.9999` round-trips on every driver;
+`99999999999999.9999` fits `decimal(19,4)` on PostgreSQL and MySQL but is
+refused on SQLite. A create responds with the row as stored, the same body a
+later get returns.
 
 `types.Decimal` is the framework money/decimal type. Because a single Go type
 flows through the model, the handler DTO, the OpenAPI/TS contract, and GORM,

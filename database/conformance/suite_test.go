@@ -4,6 +4,7 @@ package conformance_test
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"testing"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/gombit-dev/gombit/types"
 	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 func TestConformanceSuite(t *testing.T) {
@@ -173,6 +175,155 @@ func TestConformanceSuite(t *testing.T) {
 		if !loaded.Discount.Equal(wantDiscount.Decimal) {
 			t.Fatalf("Discount = %s, want %s", loaded.Discount.StringFixed(4), wantDiscount.StringFixed(4))
 		}
+	})
+
+	// #440: a value that fits decimal(19,4) round-trips exactly on PostgreSQL
+	// and MySQL. SQLite has no fixed-point type, so it refuses one with more
+	// than database.SQLiteDecimalDigits significant digits instead of storing
+	// it changed. Every driver refuses one over the column's scale rather than
+	// rounding it.
+	t.Run("decimal_precision", func(t *testing.T) {
+		sqlite := db.Driver() == database.DriverSQLite
+		for i, c := range []struct {
+			value        string
+			refusedLite  bool
+			refusedOther bool
+		}{
+			{"99999999999.9999", false, false},
+			{"99999999999999.9999", true, false},
+			{"123456789012345.1234", true, false},
+			{"1.00005", true, true},
+		} {
+			want := decimal.RequireFromString(c.value)
+			item := models.Item{
+				Code:     "dec-precision-" + string(rune('a'+i)),
+				Name:     "decimal precision",
+				Price:    want,
+				Discount: types.Decimal{Decimal: want},
+			}
+			err := db.Create(&item).Error
+			refused := c.refusedOther
+			if sqlite {
+				refused = c.refusedLite
+			}
+			if refused {
+				var ve *database.ValidationError
+				if !errors.As(err, &ve) {
+					t.Fatalf("Create %s on %s: error = %v, want a *database.ValidationError", c.value, db.Driver(), err)
+				}
+				continue
+			}
+			if err != nil {
+				t.Fatalf("Create %s on %s: %v", c.value, db.Driver(), err)
+			}
+			var loaded models.Item
+			if err := db.First(&loaded, item.ID).Error; err != nil {
+				t.Fatalf("First: %v", err)
+			}
+			if !loaded.Price.Equal(want) || !loaded.Discount.Equal(want) {
+				t.Fatalf("%s on %s stored as %s / %s, want it exactly", c.value, db.Driver(), loaded.Price, loaded.Discount)
+			}
+		}
+
+		// The update paths are checked by the column they assign, whatever Go
+		// value carries it: a string, a float, a struct of another type.
+		base := models.Item{Code: "dec-precision-update", Name: "decimal update", Price: decimal.RequireFromString("1"), Discount: types.Decimal{Decimal: decimal.RequireFromString("1")}}
+		if err := db.Create(&base).Error; err != nil {
+			t.Fatalf("Create base: %v", err)
+		}
+		refuse := func(label string, err error) {
+			t.Helper()
+			var ve *database.ValidationError
+			if !errors.As(err, &ve) {
+				t.Fatalf("%s on %s: error = %v, want a *database.ValidationError", label, db.Driver(), err)
+			}
+		}
+		target := db.Model(&models.Item{}).Where("id = ?", base.ID)
+		refuse("Update(price, string over scale)", target.Session(&gorm.Session{}).Update("price", "1.00005").Error)
+		refuse("Update(price, float over scale)", target.Session(&gorm.Session{}).Update("price", 3.00005).Error)
+		type priceDTO struct{ Price types.Decimal }
+		refuse("Updates(non-model struct over scale)", target.Session(&gorm.Session{}).Updates(priceDTO{Price: types.MustDecimal("2.00005")}).Error)
+		// Coercion is total: pointers, named types, Valuers, and strings that
+		// are not plain decimals are checked (PostgreSQL would accept the digit
+		// separator and round 1.000_05 to 1.0001).
+		str := "1.00005"
+		type amountText string
+		type patchDTO struct{ Price *string }
+		for label, value := range map[string]any{
+			"*string":          &str,
+			"named type":       amountText("1.00005"),
+			"sql.NullString":   sql.NullString{String: "1.00005", Valid: true},
+			"digit separators": "1.000_05",
+			"NaN":              "NaN",
+		} {
+			refuse("Update(price, "+label+")", target.Session(&gorm.Session{}).Update("price", value).Error)
+		}
+		refuse("Updates(pointer-field PATCH DTO)", target.Session(&gorm.Session{}).Updates(patchDTO{Price: &str}).Error)
+		// An upsert's explicit DO UPDATE value is checked like an update.
+		refuse("upsert DoUpdates", db.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "id"}},
+			DoUpdates: clause.Assignments(map[string]any{"price": "1.00005"}),
+		}).Create(&models.Item{Model: gorm.Model{ID: base.ID}, Code: base.Code, Name: base.Name, Price: decimal.RequireFromString("1"), Discount: types.Decimal{Decimal: decimal.RequireFromString("1")}}).Error)
+		var unchanged models.Item
+		if err := db.First(&unchanged, base.ID).Error; err != nil || !unchanged.Price.Equal(decimal.RequireFromString("1")) {
+			t.Fatalf("price after refused writes on %s = %s (%v), want 1 untouched", db.Driver(), unchanged.Price, err)
+		}
+
+		wide := "99999999999999.9999"
+		err := target.Session(&gorm.Session{}).Updates(map[string]any{"discount": wide}).Error
+		if sqlite {
+			refuse("Updates(map, 19 digits)", err)
+		} else {
+			if err != nil {
+				t.Fatalf("Updates(map, %s) on %s: %v", wide, db.Driver(), err)
+			}
+			var loaded models.Item
+			if err := db.First(&loaded, base.ID).Error; err != nil {
+				t.Fatalf("First: %v", err)
+			}
+			if !loaded.Discount.Equal(decimal.RequireFromString(wide)) {
+				t.Fatalf("discount on %s stored as %s, want %s exactly", db.Driver(), loaded.Discount, wide)
+			}
+		}
+
+		// A decimal with no declared precision is MySQL's DECIMAL(10,0): 1.5
+		// would be stored as 2 there, so it is refused; elsewhere it fits.
+		half := types.MustDecimal("1.5")
+		loose := models.Item{Code: "dec-precision-loose", Name: "decimal loose", Price: decimal.RequireFromString("1"), Discount: types.Decimal{Decimal: decimal.RequireFromString("1")}, Loose: &half}
+		err = db.Create(&loose).Error
+		if db.Driver() == database.DriverMySQL {
+			refuse("Create(untagged decimal 1.5)", err)
+		} else {
+			if err != nil {
+				t.Fatalf("Create(untagged decimal 1.5) on %s: %v", db.Driver(), err)
+			}
+			var loaded models.Item
+			if err := db.First(&loaded, loose.ID).Error; err != nil || loaded.Loose == nil || !loaded.Loose.Equal(half.Decimal) {
+				t.Fatalf("untagged decimal on %s stored as %v (%v), want 1.5", db.Driver(), loaded.Loose, err)
+			}
+		}
+
+		// The write guard and types.Decimal's Scan apply one size rule, so a
+		// value the guard approves loads again (round-4 review). 1e-999 writes
+		// 1000 digits: PostgreSQL's unbounded numeric stores and returns it;
+		// MySQL's DECIMAL(10,0) and SQLite refuse it. 1e-1000 is refused
+		// everywhere, by the same rule Scan would apply on the way back.
+		tiny := types.Decimal{Decimal: decimal.New(1, -999)}
+		edge := models.Item{Code: "dec-precision-edge", Name: "decimal edge", Price: decimal.RequireFromString("1"), Discount: types.Decimal{Decimal: decimal.RequireFromString("1")}, Loose: &tiny}
+		err = db.Create(&edge).Error
+		if db.Driver() == database.DriverPostgres {
+			if err != nil {
+				t.Fatalf("Create(untagged 1e-999) on postgres: %v", err)
+			}
+			var loaded models.Item
+			if err := db.First(&loaded, edge.ID).Error; err != nil || loaded.Loose == nil || !loaded.Loose.Equal(tiny.Decimal) {
+				t.Fatalf("1e-999 on postgres read back as %v (%v): the guard approved a row that does not load", loaded.Loose, err)
+			}
+		} else {
+			refuse("Create(untagged 1e-999)", err)
+		}
+		over := types.Decimal{Decimal: decimal.New(1, -1000)}
+		refuse("Create(untagged 1e-1000)", db.Create(&models.Item{Code: "dec-precision-over", Name: "decimal over", Price: decimal.RequireFromString("1"), Discount: types.Decimal{Decimal: decimal.RequireFromString("1")}, Loose: &over}).Error)
 	})
 
 	t.Run("crud", func(t *testing.T) {

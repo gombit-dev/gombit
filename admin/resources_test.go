@@ -522,6 +522,56 @@ func TestResourcePatchClearsNullablePointerAndJSON(t *testing.T) {
 	}
 }
 
+// The admin data plane refuses a timestamp no supported database can store
+// and return (issue #443) on create and update, through the same database
+// callback as every other write: a 422 on the field, and nothing stored. On
+// Postgres year 0 used to be kept as 1 BC, breaking every later read of the row.
+func TestResourceWritesRefuseOutOfRangeTimestamps(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	type Deadline struct {
+		ID    uint       `gorm:"primaryKey" json:"id"`
+		Title string     `json:"title"`
+		Due   *time.Time `json:"due"`
+	}
+	app := newCookieApp(t)
+	if err := app.DB().AutoMigrate(&Deadline{}); err != nil {
+		t.Fatalf("AutoMigrate: %v", err)
+	}
+	if err := admin.Register(app, Deadline{}, admin.Options{
+		Slug: "deadlines",
+		Fields: []admin.Field{
+			{Name: "id", Type: admin.TypeInteger, ReadOnly: true},
+			{Name: "title", Type: admin.TypeString, Required: true},
+			{Name: "due", Type: admin.TypeDateTime},
+		},
+	}); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	jar := loginSuperuser(t, app)
+
+	created := doRequest(app, jar, http.MethodPost, "/api/v1/admin/resources/deadlines", `{"title":"P-6","due":"0000-01-01T00:00:00Z"}`)
+	assertError(t, created, http.StatusUnprocessableEntity, contract.CodeValidationError)
+	if env := decodeError(t, created); len(env.Fields["due"]) == 0 {
+		t.Fatalf("create: fields.due missing; %#v", env.Fields)
+	}
+
+	due := time.Date(2026, 10, 4, 0, 0, 0, 0, time.UTC)
+	row := Deadline{Title: "ok", Due: &due}
+	if err := app.DB().Create(&row).Error; err != nil {
+		t.Fatalf("create fixture: %v", err)
+	}
+	patched := doRequest(app, jar, http.MethodPatch, fmt.Sprintf("/api/v1/admin/resources/deadlines/%d", row.ID), `{"due":"0000-01-01T00:00:00Z"}`)
+	assertError(t, patched, http.StatusUnprocessableEntity, contract.CodeValidationError)
+
+	var rows []Deadline
+	if err := app.DB().Find(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Due == nil || !rows[0].Due.Equal(due) {
+		t.Fatalf("a refused admin write changed the table: %+v", rows)
+	}
+}
+
 func TestResourceJSONAndUUIDWrites(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	type Token struct {
@@ -831,6 +881,17 @@ func TestResourceListPaginationSearchOrderFilter(t *testing.T) {
 	}
 	if len(paged.Data) != 2 {
 		t.Fatalf("page data len = %d, want 2", len(paged.Data))
+	}
+
+	// A page so far out that its offset would overflow is empty, not the
+	// first page under a wrapped offset (issue #441).
+	far := doRequest(app, jar, http.MethodGet, "/api/v1/admin/resources/widgets?page=9223372036854775807&per_page=2", "")
+	var farPaged listEnvelope
+	if err := json.Unmarshal(far.Body.Bytes(), &farPaged); err != nil || far.Code != http.StatusOK {
+		t.Fatalf("far page status = %d, err %v; body: %s", far.Code, err, far.Body.String())
+	}
+	if len(farPaged.Data) != 0 || farPaged.Meta == nil || farPaged.Meta.Total != 3 {
+		t.Fatalf("far page = %+v, want no rows and total 3", farPaged)
 	}
 
 	search := doRequest(app, jar, http.MethodGet, "/api/v1/admin/resources/widgets?search=Beta", "")

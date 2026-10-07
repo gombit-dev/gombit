@@ -225,6 +225,52 @@ releases:
           `golang.org/x/sys` and `gopkg.in/yaml.v3`.
         refs: [536, 540]
 
+      - id: decimals-never-changed-on-write
+        kind: manual
+        breaking: true
+        area: behavior
+        summary: "A decimal is never stored changed: a value that does not fit its column's `decimal(p,s)` (or, on SQLite, has more than 15 digits) is a 422 instead of being rounded."
+        details: |
+          A decimal field whose column type is neither decimal nor text
+          (`type:real`, `type:double precision`, `type:money`, `type:bigint`)
+          now fails every write: declare it `decimal(p,s)`. A string written to
+          a text decimal column must be the canonical spelling (`"1.5"`, not
+          `"1.50"`). The generated create handler now responds with the stored
+          row: run `gombit generate` to pick that up in an existing app.
+        refs: [440]
+
+      - id: timestamps-in-storable-range
+        kind: manual
+        breaking: true
+        area: behavior
+        summary: "Every write refuses a timestamp or date no supported driver can store and return (outside 1000..9999), with a 422 on that field."
+        details: |
+          That includes a zero `time.Time` a write sets (a non-pointer field
+          left unset on create, a zero in a map or `Update`): it was stored on
+          SQLite and PostgreSQL and was a 500 on MySQL. Use a pointer for an
+          optional time. Rows that already store the zero instant stay editable
+          through `Update`, a partial `Updates` and the admin; a generic `Save`
+          of one is a 422 until the column is cleaned up (docs/database.md).
+        refs: [443]
+
+      - id: database-logging-through-app-logger
+        kind: informational
+        area: security
+        summary: "Database logging goes through the app's logger, at its level and sink, and never carries parameter values."
+        details: |
+          GORM's default logger wrote to stdout in its own format and inlined
+          parameter values into failed statements (a password hash, an
+          email). Statements and 4xx failures now log at `debug`, slow
+          statements at `warn`, other failures at `error`. A GORM logger the
+          app sets on its database is kept.
+        refs: [439]
+
+      - id: page-offset-saturates
+        kind: informational
+        area: behavior
+        summary: "A list page so far out that its offset overflows is empty, instead of returning the first page's rows."
+        refs: [441]
+
       - id: object-storage
         kind: informational
         area: schema

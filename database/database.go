@@ -11,6 +11,7 @@ import (
 	"gorm.io/driver/postgres"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
 )
 
 // Driver names a supported database driver.
@@ -42,6 +43,9 @@ type DB struct {
 
 	driver       Driver
 	capabilities Capabilities
+	// installedLogger is the GORM logger open installed, so
+	// ReplaceDefaultLogger can tell it from one the caller set.
+	installedLogger gormlogger.Interface
 }
 
 // Open opens a GORM database for a supported config.DatabaseConfig.
@@ -105,21 +109,38 @@ func open(driver Driver, dialector gorm.Dialector) (*DB, error) {
 	// to portable gorm.ErrXxx sentinels, so database/errors.go can classify
 	// unique/foreign-key violations by errors.Is instead of driver-specific
 	// message text.
-	gormDB, err := gorm.Open(dialector, &gorm.Config{TranslateError: true})
+	//
+	// The logger is set explicitly: GORM's default writes to stdout with
+	// parameter values inlined and reports every not-found lookup as an error
+	// (issue #439). framework.New replaces it with the app's logger.
+	dropRecorderParams()
+	installed := newDefaultLogger()
+	gormDB, err := gorm.Open(dialector, &gorm.Config{TranslateError: true, Logger: installed})
 	if err != nil {
 		return nil, fmt.Errorf("database: open %s: %w", driver, err)
 	}
 
+	// Reject a decimal the column would not store exactly (issue #440) before
+	// the Validate hooks run, on the same create/update chains.
+	if err := registerDecimalCallback(gormDB, driver); err != nil {
+		return nil, err
+	}
 	// Run model Validate hooks on every create/update, so a domain invariant
 	// enforced once is enforced on both the API and admin write paths.
 	if err := registerValidationCallback(gormDB); err != nil {
 		return nil, err
 	}
+	// Refuse a timestamp or date no supported driver can store and return
+	// (issue #443), on every write path.
+	if err := registerTimeRangeCallback(gormDB); err != nil {
+		return nil, err
+	}
 
 	return &DB{
-		DB:           gormDB,
-		driver:       driver,
-		capabilities: CapabilitiesFor(driver),
+		DB:              gormDB,
+		driver:          driver,
+		capabilities:    CapabilitiesFor(driver),
+		installedLogger: installed,
 	}, nil
 }
 

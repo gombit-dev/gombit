@@ -60,6 +60,13 @@ jobs:
       - name: Build packages
         run: go build ./...
 
+      # Static Postgres/MySQL binaries are built without cgo (scratch and
+      # distroless images, the benchmark harness), so no package may need a
+      # cgo-only identifier to compile; the SQLite driver alone needs cgo, at
+      # run time (#439 review).
+      - name: Build packages without cgo
+        run: CGO_ENABLED=0 go build ./... && CGO_ENABLED=0 go vet ./database/...
+
       # Docs promise these compile. The tutorial example in particular is the
       # committed output of docs/tutorial.md and must not rot.
       - name: Build examples
