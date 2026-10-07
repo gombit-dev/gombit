@@ -1,9 +1,13 @@
 package resourcegen
 
 import (
+	"cmp"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/gombit-dev/gombit/internal/atomicfile"
 )
 
 // fsTx applies a sequence of file writes that can be undone. Each write goes to a
@@ -27,9 +31,12 @@ type fsStep struct {
 }
 
 // write records the target's prior state, creates any missing parent directories,
-// and atomically replaces the target with content. A recorded step is appended only
-// after the rename succeeds; a failure before that never mutated the target (the
-// old bytes are intact) and undoes only the directories this call created.
+// and atomically replaces the target with content. A recorded step is appended once
+// the replacement is committed (atomicfile.Committed), even when the write still
+// returns an error after it (the directory sync failed, atomicfile.ErrNotDurable):
+// the file is then in place, and rollback must undo it like any other. A failure
+// before the commit never mutated the target (the old bytes are intact) and undoes
+// only the directories this call created.
 func (tx *fsTx) write(path string, content []byte) error {
 	info, statErr := os.Stat(path)
 	existed := statErr == nil
@@ -52,63 +59,54 @@ func (tx *fsTx) write(path string, content []byte) error {
 	if err != nil {
 		return err
 	}
-	if err := writeFileAtomic(path, content, mode); err != nil {
+	err = atomicfile.Write(path, content, mode, atomicfile.AllowNonAtomic())
+	if !atomicfile.Committed(err) {
 		removeDirs(created)
 		return err
 	}
 	tx.steps = append(tx.steps, fsStep{path: path, existed: existed, prior: prior, priorMode: mode, createdDirs: created})
-	return nil
+	return err // nil, or a post-commit error: the step above lets rollback undo it
 }
 
 // rollback undoes every applied write in reverse order: atomically restoring the
 // prior bytes (and mode) of files that existed, removing files this transaction
 // created, and pruning the directories it created (deepest first, only when empty).
-func (tx *fsTx) rollback() error {
-	var firstErr error
+// It reports two things apart: failed, the first undo that did not happen, and
+// notDurable, the first restore that did happen (atomicfile.Committed) but was
+// not synced to disk (atomicfile.ErrNotDurable). The tree is as it was found
+// exactly when failed is nil.
+func (tx *fsTx) rollback() (failed, notDurable error) {
 	for i := len(tx.steps) - 1; i >= 0; i-- {
 		s := tx.steps[i]
 		if s.existed {
-			if err := writeFileAtomic(s.path, s.prior, s.priorMode); err != nil && firstErr == nil {
-				firstErr = err
+			err := atomicfile.Write(s.path, s.prior, s.priorMode, atomicfile.AllowNonAtomic())
+			switch {
+			case !atomicfile.Committed(err):
+				failed = cmp.Or(failed, err)
+			case err != nil:
+				notDurable = cmp.Or(notDurable, err)
 			}
-		} else if err := os.Remove(s.path); err != nil && !errors.Is(err, os.ErrNotExist) && firstErr == nil {
-			firstErr = err
+		} else if err := os.Remove(s.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			failed = cmp.Or(failed, err)
 		}
 		removeDirs(s.createdDirs)
 	}
 	tx.steps = nil
-	return firstErr
+	return failed, notDurable
 }
 
-// writeFileAtomic writes content to a temp file in the target's directory, fsyncs
-// and closes it, sets mode, then renames it over path. The rename is atomic on the
-// same filesystem, so path is never observed truncated; a failure anywhere before
-// the rename leaves path untouched and removes the temp file.
-func writeFileAtomic(path string, content []byte, mode os.FileMode) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".gombit-tmp-*")
-	if err != nil {
+// rollbackNote describes, after err, what rollback did: nothing to add when it
+// restored everything durably.
+func rollbackNote(err error, tx *fsTx) error {
+	failed, notDurable := tx.rollback()
+	switch {
+	case failed != nil:
+		return fmt.Errorf("%w (rollback failed: %v)", err, failed)
+	case notDurable != nil:
+		return fmt.Errorf("%w (rolled back, but the restore was not synced to disk: %v)", err, notDurable)
+	default:
 		return err
 	}
-	tmpName := tmp.Name()
-	// If we return before the rename, the temp file must not linger. After a
-	// successful rename tmpName no longer exists and this is a harmless no-op.
-	defer func() { _ = os.Remove(tmpName) }()
-	if _, err := tmp.Write(content); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Chmod(tmpName, mode); err != nil {
-		return err
-	}
-	return os.Rename(tmpName, path)
 }
 
 // mkdirAllTracked creates dir (and any missing parents) and returns the

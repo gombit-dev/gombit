@@ -75,7 +75,9 @@ jobs:
   # The storage drivers promise the same semantics on every platform the
   # release ships for, and Windows is the one whose file sharing and rename
   # rules differ (an open file can lock its name). Everything else runs on
-  # Ubuntu only, so the storage packages run here too.
+  # Ubuntu only, so the storage packages run here too, and so do the other
+  # packages whose file-replacement guarantee rests on a Windows-specific
+  # rename: internal/atomicfile, and upgrade (gombit.yaml's --write).
   storage-windows:
     name: Storage (Windows)
     needs: build
@@ -97,6 +99,9 @@ jobs:
         env:
           CGO_ENABLED: "1"
         run: go test -count=1 ./storage/...
+
+      - name: Run file-replacement tests
+        run: go test -count=1 ./internal/atomicfile/... ./upgrade/...
 
   ci-scripts:
     name: CI script tests

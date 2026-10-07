@@ -265,9 +265,34 @@ version.
     Content-Security-Policy;
   - `examples/admin` gains a `Brochure` model
     ([#330](https://github.com/gombit-dev/gombit/issues/330)).
+- The upgrade baseline (UPGRADE-1). It provides:
+  - `upgrade.Detect`, which reads an app's framework version from `go.mod`,
+    offline (a `replace` by the framework module is followed; a local
+    checkout, a fork, or an applying `go.work`, which is the go command's
+    answer, claim no version) and its scaffold version from `gombit.yaml`;
+  - a versioned `gombit:` block (`metadata: 1`, `scaffold: 1`) that `gombit
+    new` now writes to `gombit.yaml`; a newer metadata format or scaffold
+    version is refused;
+  - scaffold version 0 for apps generated before the block existed, which
+    `gombit upgrade baseline --write` records without touching anything
+    else (checked: every other value must decode the same), through a synced
+    temp file renamed into place: never seen half-written on Unix and NTFS,
+    and on Unix synced to disk, directory included, before it returns (if
+    that sync fails, the command prints the recorded baseline and fails);
+  - `gombit upgrade baseline [--dir] [--json] [--write]`, and
+    [docs/upgrade.md](docs/upgrade.md)
+    ([#341](https://github.com/gombit-dev/gombit/issues/341)).
 
 ### Changed
 
+- On Windows, `gombit make resource` replaces files with a POSIX-semantics
+  rename (NTFS, Windows 10 1709 or later), so a file another program holds
+  open with delete sharing no longer blocks it. On a volume that refuses that
+  rename (FAT or exFAT, a network share or mapped drive, a `\\wsl$` path, or
+  an older Windows) it keeps its previous behavior, a plain rename, and its
+  rollback. `gombit upgrade baseline --write` is atomic or nothing: on such a
+  volume it refuses before changing `gombit.yaml`
+  ([#341](https://github.com/gombit-dev/gombit/issues/341)).
 - A new app's README lists `storage/` (the local driver's files, created on
   the first write and gitignored) and says `internal/platform` migrates the
   framework's tables (auth, storage claims). The README, the docs index, and
@@ -278,9 +303,24 @@ version.
   `GOMBIT_JOBS_NAMESPACE`, `GOMBIT_HTTP_TRUSTED_PROXIES`, and the database
   pool settings, commented out with their defaults
   ([#447](https://github.com/gombit-dev/gombit/pull/447)).
+- `upgrade` is a framework command now, and `gombit make command` refuses
+  it. An app that already registers its own `upgrade` command should rename
+  it: the framework's is added first and Cobra resolves to it
+  ([#341](https://github.com/gombit-dev/gombit/issues/341)).
 
 ### Fixed
 
+- `gombit contract app` reports only a framework release, picking the
+  `replace` the go command would. A `replace` of a version the app does not
+  require no longer counts, and an exact-version `replace` wins over an
+  every-version one in either order (a wildcard local replace plus an exact
+  one used to fail as unresolved). A fork (`replace` by another module) is
+  now unresolved, like a local path: its version used to be reported as the
+  framework's, which is not a release a host can find. A `go.mod` the go
+  command refuses (the framework required twice, conflicting replaces) is an
+  error. It shares this reading of `go.mod` with `gombit upgrade baseline`,
+  so for a `go.mod` the two report the same framework version
+  ([#341](https://github.com/gombit-dev/gombit/issues/341)).
 - `gombit make command` refuses the names `generate` and `contract`, which
   collided with framework commands; every command the root registers is now
   reserved ([#447](https://github.com/gombit-dev/gombit/pull/447)).

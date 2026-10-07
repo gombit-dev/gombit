@@ -12,3 +12,10 @@ auth: cookie
 # preset (ThemeProvider, AppBar, Table, TextField). See docs/frontend-mui.md.
 ui: minimal
 api_prefix: /api/v1
+
+# Upgrade baseline (gombit upgrade): the format of this block, and the
+# scaffold conventions the app was generated with. The framework version is
+# go.mod's, and is not repeated here.
+gombit:
+  metadata: 1
+  scaffold: 1
