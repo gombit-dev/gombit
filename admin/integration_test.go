@@ -66,6 +66,20 @@ func TestStoredZeroAdminMySQL(t *testing.T) {
 	runStoredZeroAdmin(t, openAdminDriver(t, config.DatabaseDriverMySQL, *mysqlDSN))
 }
 
+func TestPartialPatchAdminPostgres(t *testing.T) {
+	if *postgresDSN == "" {
+		t.Skip("set -admin.postgres-dsn to run Postgres admin integration tests")
+	}
+	runPartialPatchAdmin(t, openAdminDriver(t, config.DatabaseDriverPostgres, *postgresDSN))
+}
+
+func TestPartialPatchAdminMySQL(t *testing.T) {
+	if *mysqlDSN == "" {
+		t.Skip("set -admin.mysql-dsn to run MySQL admin integration tests")
+	}
+	runPartialPatchAdmin(t, openAdminDriver(t, config.DatabaseDriverMySQL, *mysqlDSN))
+}
+
 func TestFloatAdminPostgres(t *testing.T) {
 	if *postgresDSN == "" {
 		t.Skip("set -admin.postgres-dsn to run Postgres admin integration tests")

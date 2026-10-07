@@ -120,6 +120,11 @@ func open(driver Driver, dialector gorm.Dialector) (*DB, error) {
 		return nil, fmt.Errorf("database: open %s: %w", driver, err)
 	}
 
+	// Narrow a scoped edit of a loaded row (ScopeEdit) to the columns it
+	// changed, before the write checks judge what is written (issue #450).
+	if err := registerEditColumnsCallback(gormDB); err != nil {
+		return nil, err
+	}
 	// Reject a decimal the column would not store exactly (issue #440) before
 	// the Validate hooks run, on the same create/update chains.
 	if err := registerDecimalCallback(gormDB, driver); err != nil {
