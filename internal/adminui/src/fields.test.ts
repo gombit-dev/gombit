@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { FieldMeta } from "./api/types";
-import { compareDecimal, emptyFormValue, formPattern, formValuesToBody, formatCell, relationListQuery, relationOptions } from "./fields";
+import { compareDecimal, emptyFormValue, formPattern, formValuesToBody, formatCell, relationListQuery, relationOptions, toIdList, toRelId } from "./fields";
 
 function field(partial: Pick<FieldMeta, "name" | "type"> & Partial<FieldMeta>): FieldMeta {
   return {
@@ -207,9 +207,11 @@ describe("belongs_to fields", () => {
     related: { slug: "warehouses", kind: "belongs_to", label_field: "name" },
   });
 
-  it("sends the selected foreign key, preserving numeric type", () => {
+  it("sends the selected foreign key as given (the server coerces it to the key type)", () => {
     const { body } = formValuesToBody({ warehouse_id: "7" }, [rel()]);
-    expect(body.warehouse_id).toBe(7);
+    expect(body.warehouse_id).toBe("7");
+    expect(formValuesToBody({ warehouse_id: "007" }, [rel()]).body.warehouse_id).toBe("007");
+    expect(formValuesToBody({ warehouse_id: 7 }, [rel()]).body.warehouse_id).toBe(7);
   });
 
   it("keeps a uuid / string foreign key as a string", () => {
@@ -227,7 +229,7 @@ describe("belongs_to fields", () => {
     const field = rel();
     field.related = { slug: "profiles", kind: "one_to_one", label_field: "name" };
     const { body } = formValuesToBody({ warehouse_id: "7" }, [field]);
-    expect(body.warehouse_id).toBe(7);
+    expect(body.warehouse_id).toBe("7");
     const cleared = formValuesToBody({ warehouse_id: "" }, [field]);
     expect(cleared.body.warehouse_id).toBeNull();
   });
@@ -242,9 +244,9 @@ describe("many_to_many fields", () => {
     related: { slug: "warehouses", kind: "many_to_many", label_field: "name" },
   });
 
-  it("submits the selected ids as a numeric list", () => {
+  it("submits the selected ids as given", () => {
     const { body } = formValuesToBody({ warehouses: ["1", "2", "3"] }, [rel()]);
-    expect(body.warehouses).toEqual([1, 2, 3]);
+    expect(body.warehouses).toEqual(["1", "2", "3"]);
   });
 
   it("submits an empty list to clear the relation", () => {
@@ -260,7 +262,7 @@ describe("many_to_many fields", () => {
 
   it("drops only null / undefined / empty entries", () => {
     const { body } = formValuesToBody({ warehouses: ["4", "", null, 5] }, [rel()]);
-    expect(body.warehouses).toEqual([4, 5]);
+    expect(body.warehouses).toEqual(["4", 5]);
   });
 });
 
@@ -281,5 +283,23 @@ describe("clock and enum labels", () => {
     expect(body.opens).toBe("09:05:00");
     expect(formatCell("draft", fields[1])).toBe("Draft (draft)");
     expect(formatCell("published", fields[1])).toBe("Published (published)");
+  });
+});
+
+describe("relation ids (issue #452)", () => {
+  it("keeps a string key byte for byte", () => {
+    expect(toRelId("007")).toBe("007");
+    expect(toRelId("123")).toBe("123");
+    expect(toRelId("1e3")).toBe("1e3");
+    expect(toRelId("0x10")).toBe("0x10");
+    expect(toRelId("Infinity")).toBe("Infinity");
+    expect(toRelId(" US ")).toBe("US");
+  });
+  it("keeps a number a number", () => {
+    expect(toRelId(5)).toBe(5);
+  });
+  it("keeps many_to_many ids as given", () => {
+    expect(toIdList(["007", 5, "", null, "a-b"])).toEqual(["007", 5, "a-b"]);
+    expect(toIdList("nope")).toEqual([]);
   });
 });
