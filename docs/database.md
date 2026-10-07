@@ -214,6 +214,27 @@ What a statement writes is what GORM writes:
 The check costs an ordinary write nothing: it allocates only when a value is
 out of range.
 
+### Floats
+
+`database.Open` also refuses, before the SQL runs on every create and update,
+a float a statement writes that is not finite: `+Inf`, `-Inf` or `NaN`
+(issue #449), or that a `float32` field cannot hold, with a
+`*database.ValidationError` naming the field (a 422 through
+`MapPersistError`). PostgreSQL and SQLite stored them (SQLite `NaN` as
+NULL) and MySQL refused them with a 500, and a stored one has no JSON form,
+so every response holding the row failed to encode. A `float32` or `float64`
+field (or a named float type), a pointer to one and an `sql.NullFloat64` are
+checked, as is a string written to such a column, read as the drivers read it
+(`"Inf"`, `"NaN"`, and `"1e400"`, which overflows to `+Inf`). NULL, an
+expression and a type with its own `driver.Valuer` are left to the database.
+What a statement writes is decided as for the time range check: a write
+through a model, not a schema-less `db.Table(...)` map. The check allocates
+only when a value is refused. A row that already stores a non-finite value
+(PostgreSQL, SQLite) cannot be returned as JSON either way; a partial update
+of its other columns works, a `Save` of the row (and an admin edit, which
+writes the whole row) is a 422 on that field until the column is set to a
+finite value or NULL.
+
 ## Deleting rows
 
 Gombit deletes rows physically: its deletion semantics are the database's

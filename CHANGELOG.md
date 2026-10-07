@@ -332,6 +332,14 @@ version.
 
 ### Fixed
 
+- A float a write through a model sets to `+Inf`, `-Inf` or `NaN`, or beyond
+  a `float32` field's range, is a 422 naming the field on every driver, the
+  admin's writes included (`"Inf"`, `"NaN"`, a `float32` overflow). It was stored on PostgreSQL and SQLite and a 500 on
+  MySQL, and a stored one broke every response holding the row, the admin's
+  list page included, until it was repaired by hand. `database.Open`
+  registers a `gombit:float` callback next to the time range check
+  ([#449](https://github.com/gombit-dev/gombit/issues/449)).
+
 - Production configuration refuses `GOMBIT_HTTP_TRUSTED_PROXIES` values that
   trust every peer in any spelling: a zero-length prefix (`10.0.0.0/0`,
   `::0/0`) or ranges that together cover every IPv4 or IPv6 address

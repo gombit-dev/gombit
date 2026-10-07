@@ -135,6 +135,10 @@ func open(driver Driver, dialector gorm.Dialector) (*DB, error) {
 	if err := registerTimeRangeCallback(gormDB); err != nil {
 		return nil, err
 	}
+	// Refuse a float no response can encode: +Inf, -Inf, NaN (issue #449).
+	if err := registerFloatCallback(gormDB); err != nil {
+		return nil, err
+	}
 
 	return &DB{
 		DB:              gormDB,

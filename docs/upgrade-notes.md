@@ -12,6 +12,16 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 ### Manual: action required
 
+- **Breaking.** Every write refuses a float that is not finite (`+Inf`, `-Inf`, `NaN`), or beyond a `float32` field's range, with a 422 on that field. (`floats-must-be-finite`, behavior, [#449](https://github.com/gombit-dev/gombit/issues/449))
+
+  It was stored on PostgreSQL and SQLite (and a 500 on MySQL). Code
+  that stored a non-finite float on purpose in a column it never
+  returns as JSON now gets a `*database.ValidationError`: store NULL
+  (a pointer or `sql.NullFloat64`) instead. A row that already stores
+  one keeps working for partial updates of other columns, but a `Save`
+  of it (and an admin edit) is a 422 on that field until the column is
+  set to a finite value or NULL (docs/database.md § Floats).
+
 - **Breaking.** `upgrade` is a framework command, and a reserved management-command name. (`reserved-upgrade-command`, cli, [#341](https://github.com/gombit-dev/gombit/issues/341))
 
   An app that registers its own `upgrade` command loses it: the
