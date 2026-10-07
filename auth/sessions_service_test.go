@@ -10,11 +10,13 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 	_ "time/tzdata" // America/New_York must load on a machine without zone data
 
 	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
 
 	"github.com/gombit-dev/gombit/auth"
 	"github.com/gombit-dev/gombit/config"
@@ -608,6 +610,97 @@ func runSessionsService(t *testing.T, db *database.DB) {
 				t.Fatalf("listed %q then %q; want the later session %q first, then %q", sessions[0].ID, sessions[1].ID, secondID, firstID)
 			}
 		})
+	})
+
+	// The farthest apart two UTC offsets get, 26 hours: a session written with
+	// the clock at UTC-12 and listed a minute before it expires with the clock
+	// at UTC+14. SQLite compares the two times as text, with each one's
+	// offset, so a prefilter in SQL with too little slack would leave out a
+	// session that is still active.
+	t.Run("times at the farthest UTC offsets", func(t *testing.T) {
+		e := newEnv(t)
+		west, east := time.FixedZone("UTC-12", -12*3600), time.FixedZone("UTC+14", 14*3600)
+		clock := &stepClock{now: time.Date(2026, time.October, 7, 12, 0, 0, 0, time.UTC).In(west)}
+		auth.SetClock(e.svc, clock)
+		ada, a := e.user(t, "ada", 1)
+		id := e.sessionID(t, a[0])
+		clock.now = clock.now.Add(time.Hour - time.Minute).In(east) // a minute before it expires
+		sessions, err := e.svc.ListSessions(e.ctx, ada.ID)
+		if err != nil || len(sessions) != 1 || sessions[0].ID != id {
+			t.Fatalf("ListSessions a minute before the session expires = %v, %v; want it listed as %q", sessions, err, id)
+		}
+		if err := e.svc.RevokeSession(e.ctx, ada.ID, id); err != nil {
+			t.Fatalf("RevokeSession of an active session = %v", err)
+		}
+	})
+
+	// Nothing prunes expired rows yet, so a list or a revocation must not
+	// read every row the user ever had: the rows that expired more than 48
+	// hours ago stay in the database, unread. GORM's RowsAffected for a query
+	// is the number of rows it read.
+	t.Run("sessions that expired long ago are not read", func(t *testing.T) {
+		e := newEnv(t)
+		var reading atomic.Bool
+		var read atomic.Int64
+		if err := db.Callback().Query().After("gorm:query").Register("auth_test:count_refresh_token_rows", func(tx *gorm.DB) {
+			if reading.Load() && tx.Statement.Table == "refresh_tokens" {
+				read.Add(tx.RowsAffected)
+			}
+		}); err != nil {
+			t.Fatal(err)
+		}
+		clock := &stepClock{now: time.Now()}
+		auth.SetClock(e.svc, clock)
+		ada, _ := e.user(t, "ada", 5)
+		clock.now = clock.now.Add(time.Hour + 48*time.Hour + time.Minute) // they expired 48h and a minute ago
+		if _, err := e.svc.IssueTokens(e.ctx, ada); err != nil {
+			t.Fatal(err)
+		}
+		reading.Store(true)
+		sessions, err := e.svc.ListSessions(e.ctx, ada.ID)
+		reading.Store(false)
+		if err != nil || len(sessions) != 1 {
+			t.Fatalf("ListSessions = %v, %v; want the one active session", sessions, err)
+		}
+		if n := read.Load(); n != 1 {
+			t.Fatalf("ListSessions read %d refresh token rows, want 1: the five sessions that expired more than 48 hours ago were read too", n)
+		}
+	})
+
+	// The prefilter is for reads only: revoking the others, or every session,
+	// still revokes a row that expired long ago, so a revocation leaves no
+	// unrevoked row behind however old it is.
+	t.Run("revocations reach sessions that expired long ago", func(t *testing.T) {
+		for _, scope := range []string{"others", "all"} {
+			t.Run(scope, func(t *testing.T) {
+				e := newEnv(t)
+				clock := &stepClock{now: time.Now()}
+				auth.SetClock(e.svc, clock)
+				ada, old := e.user(t, "ada", 1)
+				oldRow, err := auth.AuthenticatedRow(e.ctx, e.svc, old[0].AccessToken)
+				if err != nil {
+					t.Fatal(err)
+				}
+				clock.now = clock.now.Add(time.Hour + 48*time.Hour + time.Minute) // it expired 48h and a minute ago
+				current, err := e.svc.IssueTokens(e.ctx, ada)
+				if err != nil {
+					t.Fatal(err)
+				}
+				requester, err := auth.AuthenticatedRow(e.ctx, e.svc, current.AccessToken)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if scope == "others" {
+					err = auth.RevokeOtherSessionsKeeping(e.ctx, e.svc, ada.ID, requester)
+				} else {
+					err = auth.RevokeAllSessionsAs(e.ctx, e.svc, ada.ID, requester)
+				}
+				if err != nil {
+					t.Fatalf("revoke %s = %v", scope, err)
+				}
+				revokedAt(t, db, oldRow)
+			})
+		}
 	})
 
 	// Config.Validate accepts an access TTL above the refresh TTL; the access

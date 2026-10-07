@@ -62,19 +62,32 @@ func (s *Service) sessionID(refreshID uint) string {
 	return hex.EncodeToString(mac.Sum(nil)[:16])
 }
 
+// expiryPrefilterSlack sets how far before now the SQL in activeSessionRows
+// cuts off expires_at; its loop makes the exact cut. It is more than any two
+// UTC offsets differ (26h, UTC-12 to UTC+14), the most SQLite's comparison of
+// times as text can be off by, so the cut never leaves out an active session.
+// On SQLite the cut itself moves by that error: it can leave out a row that
+// expired a day ago, or read one that expired three days ago.
+const expiryPrefilterSlack = 48 * time.Hour
+
 // activeSessionRows returns the user's active sessions, most recently
-// refreshed first. Expiry and order are decided here, on instants, not in SQL:
-// SQLite stores a time as text carrying the offset it was written with, so
-// comparing or sorting those strings goes wrong when the clock's offset
-// changed between two writes (a daylight-saving change).
+// refreshed first. The SQL leaves out the rows that expired well before now
+// (expiryPrefilterSlack), on the index on expires_at, since nothing prunes
+// expired rows yet; the exact expiry and the order are decided here, on
+// instants. SQLite stores a time as text carrying the offset it was written
+// with and compares or sorts those strings, which is off by the difference
+// between the two offsets, in either direction, when the clock's offset
+// changed between two writes (a daylight-saving change): a bare
+// expires_at > now could leave out a session that is still active.
 func (s *Service) activeSessionRows(tx *gorm.DB, userID uint) ([]RefreshToken, error) {
-	var unrevoked []RefreshToken
-	if err := tx.Where("user_id = ? AND revoked_at IS NULL", userID).Find(&unrevoked).Error; err != nil {
+	now := s.now()
+	var candidates []RefreshToken
+	if err := tx.Where("user_id = ? AND revoked_at IS NULL AND expires_at > ?", userID, now.Add(-expiryPrefilterSlack)).
+		Find(&candidates).Error; err != nil {
 		return nil, err
 	}
-	now := s.now()
-	rows := unrevoked[:0]
-	for _, row := range unrevoked {
+	rows := candidates[:0]
+	for _, row := range candidates {
 		if row.ExpiresAt.After(now) {
 			rows = append(rows, row)
 		}
