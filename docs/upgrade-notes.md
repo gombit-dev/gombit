@@ -79,6 +79,25 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   through `Update`, a partial `Updates` and the admin; a generic `Save`
   of one is a 422 until the column is cleaned up (docs/database.md).
 
+- **Breaking.** Every write refuses text a column cannot store the same way on every driver (a NUL byte, invalid UTF-8, more than the column holds), with a 422 on that field. (`text-storable-on-every-driver`, behavior, [#444](https://github.com/gombit-dev/gombit/issues/444))
+
+  It was a 500 on PostgreSQL or MySQL and stored on SQLite. A
+  `size:n` / `varchar(n)` column holds n characters, a `text` column
+  65,535 bytes (MySQL's `TEXT`), and an unsized primary-key, indexed,
+  unique or defaulted string 191 characters (MySQL's `varchar(191)`),
+  now on every driver: PostgreSQL and SQLite stored more. A row that
+  already stores such text stays editable through the admin and
+  partial updates (`database.ScopeEdit` checks only what an edit
+  sets); a generic `Save` of it is a 422 on that field until the value
+  is shortened or cleaned (docs/database.md § Text).
+
+- **Breaking.** `database.Search` takes a context and returns an error, like `FilterEq`: a search term with a NUL byte or invalid UTF-8 is a 422. (`database-search-takes-context`, api, [#444](https://github.com/gombit-dev/gombit/issues/444))
+
+  Code calling `database.Search(q, columns, term)` no longer builds:
+  call `database.Search(ctx, q, columns, term)` and return its error.
+  Run `gombit generate` to update an app's generated `handler.gen.go`,
+  which also answers a `get` of an id over `MaxInt64` with a 404.
+
 ### Automatic: applied by the upgrade tooling
 
 - `gombit new` records the app's upgrade baseline in a `gombit:` block of `gombit.yaml`. (`record-upgrade-baseline`, scaffold, action `record-baseline`, [#341](https://github.com/gombit-dev/gombit/issues/341))
@@ -142,6 +161,12 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   framework upgrade. The framework also newly requires the AWS SDK
   for Go v2 (the S3 storage driver), `golang.org/x/mod`,
   `golang.org/x/sys` and `gopkg.in/yaml.v3`.
+
+- `MapPersistError` and `MapLoadError` answer a database data exception (a value too long or out of range for its column) with a 422 instead of a 500. (`data-exceptions-are-422`, behavior, [#444](https://github.com/gombit-dev/gombit/issues/444))
+
+  PostgreSQL 22001, 22003, 22007, 22008, 22021, 22P05 and MySQL 1264,
+  1265, 1292, 1366, 1406 (`database.IsDataException`). A uint list
+  filter over `MaxInt64` is a 422 too.
 
 - Database logging goes through the app's logger, at its level and sink, and never carries parameter values. (`database-logging-through-app-logger`, security, [#439](https://github.com/gombit-dev/gombit/issues/439))
 
