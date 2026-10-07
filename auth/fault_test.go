@@ -3,6 +3,7 @@ package auth_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -15,6 +16,7 @@ import (
 	"github.com/gombit-dev/gombit/auth"
 	"github.com/gombit-dev/gombit/config"
 	"github.com/gombit-dev/gombit/database"
+	"github.com/gombit-dev/gombit/framework"
 	"github.com/gombit-dev/gombit/internal/faulttest"
 )
 
@@ -508,4 +510,114 @@ func TestFault_HTTP_SessionRevocationLockFailure(t *testing.T) {
 			})
 		})
 	}
+}
+
+// TestFault_Database_SessionChainStepFailure: a step of the walk along the
+// request's session chain, the SELECT of one of its refresh_tokens rows by
+// id, fails (partial-operation). The walk decides which session is the
+// request's, so the failure must be reported as itself, never taken for the
+// end of the chain (an ended session, or no session current): revoking the
+// others, revoking all, and revoking one on behalf of a session that
+// refreshed after its request was authenticated return it and revoke
+// nothing, and a list for such a request returns it rather than a list with
+// no session current. Over the routes, DELETE /auth/sessions?scope=others and
+// ?scope=all answer 500 with the internal error envelope and revoke nothing.
+//
+// The cases share one database, each with a user of its own: R, refreshed
+// once into H, and another session O. The first step of every walk is the
+// one that fails: the requester's row.
+func TestFault_Database_SessionChainStepFailure(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const sessions = "/api/v1/auth/sessions"
+	type chainCase struct {
+		user    auth.User
+		r, o, h auth.TokenPair
+		rRow    uint
+		otherID string
+	}
+	tests := []struct {
+		name string
+		// call runs the walk on behalf of c's session and returns its error.
+		call func(t *testing.T, ctx context.Context, f rotationFixture, app *framework.App, c chainCase) error
+	}{
+		{"others", func(_ *testing.T, ctx context.Context, f rotationFixture, _ *framework.App, c chainCase) error {
+			return auth.RevokeOtherSessionsKeeping(ctx, f.svc, c.user.ID, c.rRow)
+		}},
+		{"all", func(_ *testing.T, ctx context.Context, f rotationFixture, _ *framework.App, c chainCase) error {
+			return auth.RevokeAllSessionsAs(ctx, f.svc, c.user.ID, c.rRow)
+		}},
+		{"one", func(_ *testing.T, ctx context.Context, f rotationFixture, _ *framework.App, c chainCase) error {
+			_, err := auth.RevokeSessionAs(ctx, f.svc, c.user.ID, c.rRow, c.otherID)
+			return err
+		}},
+		{"list", func(_ *testing.T, ctx context.Context, f rotationFixture, _ *framework.App, c chainCase) error {
+			_, err := f.svc.ListSessions(auth.ContextWithSession(ctx, c.user, c.rRow), c.user.ID)
+			return err
+		}},
+		{"route others", func(t *testing.T, _ context.Context, _ rotationFixture, app *framework.App, c chainCase) error {
+			assertError(t, bearerRequest(app, http.MethodDelete, sessions+"?scope=others", c.h.AccessToken), http.StatusInternalServerError, "internal")
+			return faulttest.ErrInjected
+		}},
+		{"route all", func(t *testing.T, _ context.Context, _ rotationFixture, app *framework.App, c chainCase) error {
+			assertError(t, bearerRequest(app, http.MethodDelete, sessions+"?scope=all", c.h.AccessToken), http.StatusInternalServerError, "internal")
+			return faulttest.ErrInjected
+		}},
+	}
+	faulttest.ForEachDB(t, faultDBs, func(t *testing.T, kind database.Driver, dsn string) {
+		step := faulttest.FailOnce(faulttest.ErrInjected)
+		faults := &faulttest.DBFaults{Statement: step, Match: readsChainRow}
+		f := newRotationFixture(t, kind, dsn, faults)
+		ctx := context.Background()
+		faults.Disarm()
+		app := newAuthAppWithDB(t, f.db)
+		cases := make([]chainCase, len(tests))
+		for k := range cases {
+			user, err := f.svc.Register(ctx, fmt.Sprintf("chain-step-%d@example.com", k), "correct horse battery")
+			if err != nil {
+				t.Fatal(err)
+			}
+			c := chainCase{user: user}
+			if c.r, err = f.svc.IssueTokens(ctx, user); err != nil {
+				t.Fatal(err)
+			}
+			if c.o, err = f.svc.IssueTokens(ctx, user); err != nil {
+				t.Fatal(err)
+			}
+			if c.rRow, err = auth.AuthenticatedRow(ctx, f.svc, c.r.AccessToken); err != nil {
+				t.Fatal(err)
+			}
+			if c.otherID, err = auth.SessionIDOf(ctx, f.svc, c.o.AccessToken); err != nil {
+				t.Fatal(err)
+			}
+			// Over the routes the gate refuses R's access token, so those
+			// requests authenticate as H, and their walk starts there.
+			if c.h, err = f.svc.RotateRefresh(ctx, c.r.RefreshToken); err != nil {
+				t.Fatal(err)
+			}
+			cases[k] = c
+		}
+
+		for k, tt := range tests {
+			c := cases[k]
+			t.Run(tt.name, func(t *testing.T) {
+				faults.Arm() // the next step of a walk is call 1, and fails
+				err := tt.call(t, ctx, f, app, c)
+				faults.Disarm()
+				if !errors.Is(err, faulttest.ErrInjected) {
+					t.Fatalf("%s with a failing step of the walk = %v, want the injected fault", tt.name, err)
+				}
+				if n := step.Calls(); n != 1 {
+					t.Fatalf("%d steps of the walk after arming, want 1, the one that failed", n)
+				}
+				faulttest.Idle(t, f.db)
+				listed, err := f.svc.ListSessions(ctx, c.user.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(listed) != 2 {
+					t.Fatalf("after the failed walk: %d active sessions, want H and O", len(listed))
+				}
+			})
+		}
+	})
 }

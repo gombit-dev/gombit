@@ -118,6 +118,11 @@ the same moment:
   the same session that lands while the revocation runs also makes it a 404
   (the session has already ended), so a success always means the revocation
   ended the session itself.
+- **A revocation from a session that has ended** answers 401 and revokes
+  nothing. The request's own session is checked again once the revocation
+  holds the lock, so a session that another request revoked, or that
+  expired, while its request waited for the lock cannot go on to revoke
+  anything.
 - **Logout** (`POST /auth/logout`, `RevokeRefresh`) is **not** serialized: it
   does not take the lock and revokes only the refresh token it is given. A
   logout that races a refresh of the same token can therefore leave the
@@ -132,8 +137,9 @@ the same moment:
 
 The `auth.Service` methods `ListSessions`, `RevokeSession`, and
 `RevokeAllSessions` are exported for application code (for example, an admin
-action that signs a user out everywhere). Revoking "the others" is not
-exported: it needs the request's current session, which only the HTTP
+action that signs a user out everywhere). They do not check the caller's own
+session; the routes check the request's, as above. Revoking "the others" is
+not exported: it needs the request's current session, which only the HTTP
 handlers know. Revoked and expired refresh rows are kept; nothing prunes them yet.
 
 `User.IsSuperuser` bypasses all permission checks.

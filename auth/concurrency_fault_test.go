@@ -3,6 +3,7 @@ package auth_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -487,6 +488,294 @@ func TestFault_Concurrency_RevokeOthersDuringOwnRotation(t *testing.T) {
 			t.Fatal("the other session still authenticates after the others were revoked")
 		}
 	})
+}
+
+// TestFault_Concurrency_RevokeFromSessionRevokedWhileWaiting: a request of
+// session T to revoke sessions (another session V by its id, the others, or
+// all) has passed the auth gate and is held just before it takes the user's
+// lock when V revokes T and commits. Expected outcome: once T's request holds
+// the lock it finds its own session ended and answers 401 with the
+// authentication error envelope, revoking nothing: V and the user's third
+// session W still authenticate, and only T has left the list. A request that
+// did not check its session under the lock, or checked it before taking the
+// lock (T was still active then), would go on to revoke V, or V and W. It runs
+// in both auth modes.
+//
+// The cases share one database and its apps, each with a user of its own, so
+// they do not pay for the tables each time. SQLite is skipped like the tests
+// above: T's held transaction keeps its only connection, which V's
+// revocation needs.
+func TestFault_Concurrency_RevokeFromSessionRevokedWhileWaiting(t *testing.T) {
+	dbs := nonSQLite()
+	if len(dbs) == 0 {
+		t.Skip("needs PostgreSQL or MySQL (-auth.postgres-dsn / -auth.mysql-dsn)")
+	}
+	actions := []struct {
+		name string
+		path func(vID string) string
+	}{
+		{"one", func(vID string) string { return "/api/v1/auth/sessions/" + vID }},
+		{"others", func(string) string { return "/api/v1/auth/sessions?scope=others" }},
+		{"all", func(string) string { return "/api/v1/auth/sessions?scope=all" }},
+	}
+	type revokeCase struct {
+		name    string
+		app     *framework.App
+		send    func(*http.Request)
+		path    string
+		tID     string
+		v       auth.TokenPair
+		user    auth.User
+		before  []auth.AuthSession
+		release chan struct{}
+	}
+	faulttest.ForEachDB(t, dbs, func(t *testing.T, kind database.Driver, dsn string) {
+		cases := make([]*revokeCase, 0, len(sessionsRevokeModes)*len(actions))
+		var steps []faulttest.Step
+		for range len(sessionsRevokeModes) * len(actions) {
+			release := make(chan struct{})
+			cases = append(cases, &revokeCase{release: release})
+			// Case k's matched statements are 2k+1, the user lock of T's
+			// request (held, past the gate, which locks nothing), and 2k+2,
+			// the lock of V's revocation of T.
+			steps = append(steps, faulttest.Block(release), faulttest.Success())
+		}
+		defer func() {
+			for _, c := range cases {
+				select {
+				case <-c.release:
+				default:
+					close(c.release)
+				}
+			}
+		}()
+		lock := faulttest.Sequence(steps...)
+		faults := &faulttest.DBFaults{Statement: lock, Match: locksUserRow}
+		f := newRotationFixture(t, kind, dsn, faults)
+		ctx := context.Background()
+		faults.Disarm()
+		k := 0
+		for _, mode := range sessionsRevokeModes {
+			app := mode.app(t, f.db)
+			for _, action := range actions {
+				c := cases[k]
+				k++
+				c.name, c.app = mode.name+"/"+action.name, app
+				user, err := f.svc.Register(ctx, fmt.Sprintf("revoked-while-waiting-%d@example.com", k), "correct horse battery")
+				if err != nil {
+					t.Fatal(err)
+				}
+				c.user = user
+				// W, then T, which asks, then V, which revokes T.
+				var pairs [3]auth.TokenPair
+				for i := range pairs {
+					if pairs[i], err = f.svc.IssueTokens(ctx, user); err != nil {
+						t.Fatal(err)
+					}
+				}
+				c.v = pairs[2]
+				if c.tID, err = auth.SessionIDOf(ctx, f.svc, pairs[1].AccessToken); err != nil {
+					t.Fatal(err)
+				}
+				vID, err := auth.SessionIDOf(ctx, f.svc, c.v.AccessToken)
+				if err != nil {
+					t.Fatal(err)
+				}
+				c.path = action.path(vID)
+				if c.before, err = f.svc.ListSessions(ctx, user.ID); err != nil || len(c.before) != 3 {
+					t.Fatalf("ListSessions = %v, %v; want the three sessions", c.before, err)
+				}
+				c.send = mode.prepare(t, app, pairs[1].AccessToken)
+			}
+		}
+		faults.Arm()
+
+		for k, c := range cases {
+			t.Run(c.name, func(t *testing.T) {
+				done := make(chan *httptest.ResponseRecorder, 1)
+				go func() {
+					rec := httptest.NewRecorder()
+					req := httptest.NewRequest(http.MethodDelete, c.path, nil)
+					c.send(req)
+					c.app.Router().ServeHTTP(rec, req)
+					done <- rec
+				}()
+				wait(t, lock.Reached(2*k+1), "T's request never reached the user's lock")
+				if err := f.svc.RevokeSession(ctx, c.user.ID, c.tID); err != nil {
+					t.Fatalf("V's RevokeSession(T) = %v", err)
+				}
+				close(c.release) // T's request takes the lock
+
+				var rec *httptest.ResponseRecorder
+				select {
+				case rec = <-done:
+				case <-time.After(5 * time.Second):
+					t.Fatal("T's request is wedged")
+				}
+				assertError(t, rec, http.StatusUnauthorized, "authentication")
+				faulttest.Idle(t, f.db)
+				if _, err := f.svc.ParseAccess(ctx, c.v.AccessToken); err != nil {
+					t.Fatalf("V does not authenticate (%v): a session revoked while its request waited went on to revoke", err)
+				}
+				after, err := f.svc.ListSessions(ctx, c.user.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := map[string]bool{}
+				for _, s := range c.before {
+					if s.ID != c.tID {
+						want[s.ID] = true
+					}
+				}
+				for _, s := range after {
+					if !want[s.ID] {
+						t.Fatalf("session %q listed after the refused request; want only V and W", s.ID)
+					}
+					delete(want, s.ID)
+				}
+				if len(want) != 0 {
+					t.Fatalf("%d of V and W left the list: a session revoked while its request waited went on to revoke", len(want))
+				}
+			})
+		}
+	})
+}
+
+// TestFault_Concurrency_RevokeFromSessionExpiredWhileWaiting: a revocation
+// on behalf of session R (another session O by its id, the others, or all)
+// is held just before it takes the user's lock while R expires. Expected
+// outcome: the revocation reads the clock once it holds the lock, finds R
+// ended, and returns ErrSessionEnded (a 401 over the routes) without
+// writing: R's and O's revoked_at stay NULL. A revocation that read the clock
+// before the lock, or took any unrevoked row for an active one, would end O.
+//
+// The fault holds the SELECT on users (selectsUsers), as in
+// TestFault_Database_RotationReadsClockAfterUserLock, so the test runs on all
+// three databases: with no gate in front, a revocation's first SELECT on
+// users is its lock. The cases share one database, each with a user of its
+// own, set up before the fault is armed.
+func TestFault_Concurrency_RevokeFromSessionExpiredWhileWaiting(t *testing.T) {
+	actions := []struct {
+		name   string
+		revoke func(ctx context.Context, svc *auth.Service, userID, requester uint, otherID string) error
+	}{
+		{"one", func(ctx context.Context, svc *auth.Service, userID, requester uint, otherID string) error {
+			_, err := auth.RevokeSessionAs(ctx, svc, userID, requester, otherID)
+			return err
+		}},
+		{"others", func(ctx context.Context, svc *auth.Service, userID, requester uint, _ string) error {
+			return auth.RevokeOtherSessionsKeeping(ctx, svc, userID, requester)
+		}},
+		{"all", func(ctx context.Context, svc *auth.Service, userID, requester uint, _ string) error {
+			return auth.RevokeAllSessionsAs(ctx, svc, userID, requester)
+		}},
+	}
+	faulttest.ForEachDB(t, faultDBs, func(t *testing.T, kind database.Driver, dsn string) {
+		releases := make([]chan struct{}, len(actions))
+		steps := make([]faulttest.Step, len(actions))
+		for k := range releases {
+			releases[k] = make(chan struct{})
+			// Case k's lock is matched statement k+1 (held).
+			steps[k] = faulttest.Block(releases[k])
+		}
+		defer func() {
+			for _, release := range releases {
+				select {
+				case <-release:
+				default:
+					close(release)
+				}
+			}
+		}()
+		lock := faulttest.Sequence(steps...)
+		faults := &faulttest.DBFaults{Statement: lock, Match: selectsUsers}
+		f := newRotationFixture(t, kind, dsn, faults)
+		ctx := context.Background()
+		faults.Disarm()
+		start := time.Now().Truncate(time.Second)
+		clock := &syncClock{now: start}
+		auth.SetClock(f.svc, clock)
+		type expiryCase struct {
+			user    auth.User
+			r, o    auth.RefreshToken
+			otherID string
+		}
+		cases := make([]expiryCase, len(actions))
+		for k := range cases {
+			user, err := f.svc.Register(ctx, fmt.Sprintf("expired-while-waiting-%d@example.com", k), "correct horse battery")
+			if err != nil {
+				t.Fatal(err)
+			}
+			// R signs in an hour before O, so R expires an hour before O does.
+			clock.set(start)
+			if _, err := f.svc.IssueTokens(ctx, user); err != nil {
+				t.Fatal(err)
+			}
+			clock.set(start.Add(time.Hour))
+			o, err := f.svc.IssueTokens(ctx, user)
+			if err != nil {
+				t.Fatal(err)
+			}
+			otherID, err := auth.SessionIDOf(ctx, f.svc, o.AccessToken)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var rows []auth.RefreshToken
+			if err := f.db.Where("user_id = ?", user.ID).Order("id").Find(&rows).Error; err != nil || len(rows) != 2 {
+				t.Fatalf("the user's refresh tokens = %v, %v; want R and O", rows, err)
+			}
+			cases[k] = expiryCase{user: user, r: rows[0], o: rows[1], otherID: otherID}
+		}
+		faults.Arm()
+
+		for k, action := range actions {
+			c := cases[k]
+			t.Run(action.name, func(t *testing.T) {
+				clock.set(c.r.ExpiresAt.Add(-time.Minute)) // both sessions are active
+				revokeErr := make(chan error, 1)
+				go func() { revokeErr <- action.revoke(ctx, f.svc, c.user.ID, c.r.ID, c.otherID) }()
+				wait(t, lock.Reached(k+1), "the revocation never reached the user's lock")
+				clock.set(c.r.ExpiresAt.Add(time.Second)) // R expires during the wait
+				close(releases[k])
+
+				if err := waitErr(t, revokeErr, "revocation"); !errors.Is(err, auth.ErrSessionEnded) {
+					t.Fatalf("revoke on behalf of a session that expired while it waited for the user's lock = %v, want ErrSessionEnded", err)
+				}
+				faulttest.Idle(t, f.db)
+				for name, id := range map[string]uint{"R": c.r.ID, "O": c.o.ID} {
+					var row auth.RefreshToken
+					if err := f.db.First(&row, id).Error; err != nil {
+						t.Fatal(err)
+					}
+					if row.RevokedAt != nil {
+						t.Fatalf("%s was revoked on behalf of a session that had expired before the revocation held the user's lock", name)
+					}
+				}
+			})
+		}
+	})
+}
+
+// sessionsRevokeModes send a revocation with an access token the way each
+// auth mode does: a Bearer header, or the access cookie with the CSRF cookie
+// and header. prepare runs on the test's goroutine (cookie mode fetches its
+// CSRF token there) and returns what sets a request's credentials.
+var sessionsRevokeModes = []struct {
+	name    string
+	app     func(*testing.T, *database.DB) *framework.App
+	prepare func(t *testing.T, app *framework.App, access string) func(*http.Request)
+}{
+	{"bearer", newAuthAppWithDB, func(_ *testing.T, _ *framework.App, access string) func(*http.Request) {
+		return func(req *http.Request) { req.Header.Set("Authorization", "Bearer "+access) }
+	}},
+	{"cookie", newCookieAuthAppWithDB, func(t *testing.T, app *framework.App, access string) func(*http.Request) {
+		jar := fetchCSRF(t, app)
+		jar.cookies[auth.AccessCookieName] = &http.Cookie{Name: auth.AccessCookieName, Value: access}
+		return func(req *http.Request) {
+			jar.attach(req)
+			req.Header.Set(auth.CSRFHeaderName, jar.value(auth.CSRFCookieName))
+		}
+	}},
 }
 
 // TestFault_Concurrency_ListCurrentDuringOwnRotation: a request that lists

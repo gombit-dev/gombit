@@ -175,6 +175,8 @@ func mapServiceError(ctx context.Context, err error) error {
 		return contract.WithContext(ctx, contract.Validation("The request contains invalid fields.", map[string][]string{
 			"password": {err.Error()},
 		}))
+	case errors.Is(err, errSessionEnded):
+		return contract.WithContext(ctx, contract.Authentication("session has ended"))
 	case errors.Is(err, errSessionNotFound):
 		return contract.WithContext(ctx, contract.NotFound("session not found"))
 	case errors.Is(err, errUserNotFound):

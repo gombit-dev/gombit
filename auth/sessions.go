@@ -21,6 +21,13 @@ import (
 
 var errSessionNotFound = errors.New("auth: session not found")
 
+// errSessionEnded is returned by the revocations the sessions routes run on
+// behalf of a request when the request's own session has ended by the time
+// the revocation holds the user's lock: another request revoked it, or it
+// expired, while this one waited. The gate authenticated the session before
+// that wait, so the request must not act on it; the routes answer 401.
+var errSessionEnded = errors.New("auth: the request's session has ended")
+
 // ErrSessionNotFound is returned by RevokeSession when the id names no
 // active session of the user, including a session that has refreshed since
 // its id was listed or that a logout ended while the revocation ran, and by
@@ -109,16 +116,23 @@ func (s *Service) ListSessions(ctx context.Context, userID uint) ([]AuthSession,
 
 // currentSessionRow returns the id of the row among rows that is the
 // request's session, or 0 when ctx carries no session or rows do not include
-// it. The middleware recorded the row the request's access token names; the
-// session may have refreshed since (the request raced its own refresh), so
-// when that row is not listed, the listed row further along its chain is the
-// session's. rows are read before the chain: a rotation after that only
-// extends the chain past the listed row, which stays on it.
+// it (sessionRow, from the row the middleware recorded).
 func currentSessionRow(ctx context.Context, tx *gorm.DB, userID uint, rows []RefreshToken) (uint, error) {
 	rid, ok := sessionFromContext(ctx)
 	if !ok {
 		return 0, nil
 	}
+	return sessionRow(tx, userID, rid, rows)
+}
+
+// sessionRow returns the id of the row among rows that is the session of the
+// refresh token row rid, or 0 when rows do not include it. rid is the row a
+// request's access token names; the session may have refreshed since (the
+// request raced its own refresh), so when rid is not listed, the listed row
+// further along its chain is the session's. rows are read before the chain:
+// a rotation after that only extends the chain past the listed row, which
+// stays on it.
+func sessionRow(tx *gorm.DB, userID, rid uint, rows []RefreshToken) (uint, error) {
 	listed := make(map[uint]bool, len(rows))
 	for _, row := range rows {
 		if row.ID == rid {
@@ -126,7 +140,7 @@ func currentSessionRow(ctx context.Context, tx *gorm.DB, userID uint, rows []Ref
 		}
 		listed[row.ID] = true
 	}
-	chain, err := sessionChain(tx, userID, rid)
+	chain, _, err := sessionChain(tx, userID, rid)
 	if err != nil {
 		return 0, err
 	}
@@ -145,15 +159,41 @@ func currentSessionRow(ctx context.Context, tx *gorm.DB, userID uint, rows []Ref
 // ErrSessionNotFound when the session's row turns out revoked by the time it
 // is updated (a logout, which does not take the user's lock, ended it
 // first), so a success always means this call ended the session. A user that
-// does not exist also yields ErrSessionNotFound.
+// does not exist also yields ErrSessionNotFound. It does not look at the
+// caller's own session, which application code (an admin action revoking
+// another user's session, say) does not have; the route checks the
+// request's (revokeSessionAs).
 func (s *Service) RevokeSession(ctx context.Context, userID uint, id string) error {
-	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	_, err := s.revokeSessionAs(ctx, userID, 0, id)
+	return err
+}
+
+// revokeSessionAs is RevokeSession on behalf of the request's session,
+// authenticated as the refresh token row requester, or of no session when
+// requester is 0. Under the user's lock it first finds the requester's
+// session among the active ones, as ListSessions marks it current
+// (sessionRow), and returns errSessionEnded, ending nothing, when it is not
+// there: the session ended while the request waited for the lock. That
+// comes before id is looked up, so a request from an ended session gets a
+// 401, not a 404. endedCurrent reports whether the session it ended is the
+// requester's own.
+func (s *Service) revokeSessionAs(ctx context.Context, userID, requester uint, id string) (endedCurrent bool, err error) {
+	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if _, err := lockUserTx(tx, userID); err != nil {
 			return lockSessionsError(err)
 		}
 		rows, err := s.activeSessionRows(tx, userID)
 		if err != nil {
 			return err
+		}
+		var own uint
+		if requester != 0 {
+			if own, err = sessionRow(tx, userID, requester, rows); err != nil {
+				return err
+			}
+			if own == 0 {
+				return errSessionEnded
+			}
 		}
 		for _, row := range rows {
 			if hmac.Equal([]byte(s.sessionID(row.ID)), []byte(id)) {
@@ -166,21 +206,43 @@ func (s *Service) RevokeSession(ctx context.Context, userID uint, id string) err
 				if result.RowsAffected == 0 {
 					return errSessionNotFound
 				}
+				endedCurrent = row.ID == own
 				return nil
 			}
 		}
 		return errSessionNotFound
 	})
+	if err != nil {
+		return false, err
+	}
+	return endedCurrent, nil
 }
 
 // RevokeAllSessions ends every active session of the user. It returns
-// ErrSessionNotFound when the user does not exist.
+// ErrSessionNotFound when the user does not exist. Like RevokeSession, it
+// does not look at the caller's own session; the route checks the request's
+// (revokeAllSessionsAs).
 func (s *Service) RevokeAllSessions(ctx context.Context, userID uint) error {
+	return s.revokeAllSessionsAs(ctx, userID, 0)
+}
+
+// revokeAllSessionsAs is RevokeAllSessions on behalf of the request's
+// session, authenticated as the refresh token row requester, or of no
+// session when requester is 0. With a requester it returns errSessionEnded,
+// and ends nothing, when that session has ended by the time it holds the
+// user's lock (requesterChain).
+func (s *Service) revokeAllSessionsAs(ctx context.Context, userID, requester uint) error {
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if _, err := lockUserTx(tx, userID); err != nil {
 			return lockSessionsError(err)
 		}
-		return revokeAllTx(tx, userID, s.now())
+		now := s.now()
+		if requester != 0 {
+			if _, err := requesterChain(tx, userID, requester, now); err != nil {
+				return err
+			}
+		}
+		return revokeAllTx(tx, userID, now)
 	})
 }
 
@@ -199,14 +261,16 @@ func lockSessionsError(err error) error {
 // reaches.
 const maxChainHops = 1000
 
-// sessionChain returns the ids of the user's refresh token rows from fromID
-// along its session's chain: fromID, the row that replaced it, the row that
-// replaced that one, and so on to the row nothing has replaced yet. A cycle
+// sessionChain follows the chain of the user's refresh token rows from
+// fromID: fromID, the row that replaced it, the row that replaced that one,
+// and so on to the row nothing has replaced yet. It returns the ids it
+// followed and the last row it read, which is that row, or the last one it
+// could reach; last is nil when fromID names no row of the user. A cycle
 // (which rotation never writes) or an over-long chain stops the walk rather
 // than looping.
-func sessionChain(tx *gorm.DB, userID, fromID uint) ([]uint, error) {
+func sessionChain(tx *gorm.DB, userID, fromID uint) (ids []uint, last *RefreshToken, err error) {
 	seen := map[uint]bool{fromID: true}
-	ids := []uint{fromID}
+	ids = []uint{fromID}
 	next := fromID
 	for hop := 0; hop < maxChainHops; hop++ {
 		var row RefreshToken
@@ -215,14 +279,32 @@ func sessionChain(tx *gorm.DB, userID, fromID uint) ([]uint, error) {
 			break
 		}
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
+		last = &row
 		if row.ReplacedBy == nil || seen[*row.ReplacedBy] {
 			break
 		}
 		next = *row.ReplacedBy
 		seen[next] = true
 		ids = append(ids, next)
+	}
+	return ids, last, nil
+}
+
+// requesterChain is sessionChain for the request's own session, from the row
+// rid the gate authenticated, and fails with errSessionEnded unless the last
+// row it reads, the session's head, is active at now (unrevoked and
+// unexpired). The gate checked the session before the revocation waited for
+// the user's lock, and another revocation, or the clock, may have ended it
+// during that wait: tx must hold lockUserTx, and now be read after it.
+func requesterChain(tx *gorm.DB, userID, rid uint, now time.Time) ([]uint, error) {
+	ids, head, err := sessionChain(tx, userID, rid)
+	if err != nil {
+		return nil, err
+	}
+	if head == nil || head.RevokedAt != nil || !head.ExpiresAt.After(now) {
+		return nil, errSessionEnded
 	}
 	return ids, nil
 }
@@ -232,18 +314,20 @@ func sessionChain(tx *gorm.DB, userID, fromID uint) ([]uint, error) {
 // access token named, which may have rotated any number of times since the
 // middleware checked it. With the user lock held no further rotation can
 // start, so it keeps every row of the chain from keepID on, the session's
-// current head included.
+// current head included. It returns errSessionEnded, and ends nothing, when
+// that session has itself ended by then (requesterChain).
 func (s *Service) revokeOtherSessions(ctx context.Context, userID, keepID uint) error {
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if _, err := lockUserTx(tx, userID); err != nil {
 			return lockSessionsError(err)
 		}
-		keepIDs, err := sessionChain(tx, userID, keepID)
+		now := s.now()
+		keepIDs, err := requesterChain(tx, userID, keepID, now)
 		if err != nil {
 			return err
 		}
 		return tx.Model(&RefreshToken{}).
 			Where("user_id = ? AND revoked_at IS NULL AND id NOT IN ?", userID, keepIDs).
-			Update("revoked_at", s.now()).Error
+			Update("revoked_at", now).Error
 	})
 }

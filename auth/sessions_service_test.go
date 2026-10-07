@@ -349,6 +349,150 @@ func runSessionsService(t *testing.T, db *database.DB) {
 		}
 	})
 
+	// A route that revokes one session reports whether it ended the
+	// request's own: the session's current row, reached along its chain from
+	// the row the request was authenticated as, as ListSessions marks it
+	// current. A request authenticated as R, whose session has refreshed into
+	// H since, ends its own session when it revokes H, and not when it
+	// revokes another.
+	t.Run("revoke one ends the requester's session along its chain", func(t *testing.T) {
+		e := newEnv(t)
+		ada, a := e.user(t, "ada", 2)
+		requester, err := auth.AuthenticatedRow(e.ctx, e.svc, a[0].AccessToken)
+		if err != nil {
+			t.Fatal(err)
+		}
+		head := e.rotate(t, a[0])
+		headID, otherID := e.sessionID(t, head), e.sessionID(t, a[1])
+		if ended, err := auth.RevokeSessionAs(e.ctx, e.svc, ada.ID, requester, otherID); err != nil || ended {
+			t.Fatalf("revoking another session on behalf of R = %v, %v; want it ended, not the requester's own", ended, err)
+		}
+		if e.authenticates(a[1]) {
+			t.Fatal("the other session still authenticates")
+		}
+		if ended, err := auth.RevokeSessionAs(e.ctx, e.svc, ada.ID, requester, headID); err != nil || !ended {
+			t.Fatalf("revoking H on behalf of R = %v, %v; want the requester's own session ended", ended, err)
+		}
+		if e.authenticates(head) {
+			t.Fatal("H still authenticates")
+		}
+	})
+
+	// RevokeSession and RevokeAllSessions do not look at the caller's own
+	// session. Application code that revokes a user's sessions, an admin
+	// action say, runs with its own request's session in its context: one of
+	// another user, maybe ended by now. They revoke all the same.
+	t.Run("exported revocations ignore the caller's session", func(t *testing.T) {
+		for _, callerEnded := range []bool{false, true} {
+			t.Run(fmt.Sprintf("caller's session ended %v", callerEnded), func(t *testing.T) {
+				e := newEnv(t)
+				admin, adminPairs := e.user(t, "admin", 1)
+				adminRow, err := auth.AuthenticatedRow(e.ctx, e.svc, adminPairs[0].AccessToken)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if callerEnded {
+					if err := e.svc.RevokeAllSessions(e.ctx, admin.ID); err != nil {
+						t.Fatal(err)
+					}
+				}
+				ada, a := e.user(t, "ada", 2)
+				ctx := auth.ContextWithSession(e.ctx, admin, adminRow)
+				if err := e.svc.RevokeSession(ctx, ada.ID, e.sessionID(t, a[0])); err != nil {
+					t.Fatalf("RevokeSession with the admin's session in ctx = %v", err)
+				}
+				if e.authenticates(a[0]) {
+					t.Fatal("the session RevokeSession named still authenticates")
+				}
+				if err := e.svc.RevokeAllSessions(ctx, ada.ID); err != nil {
+					t.Fatalf("RevokeAllSessions with the admin's session in ctx = %v", err)
+				}
+				if e.authenticates(a[1]) {
+					t.Fatal("a session still authenticates after RevokeAllSessions")
+				}
+			})
+		}
+	})
+
+	// A revocation on behalf of a session that has ended refuses before it
+	// looks the target up: ErrSessionEnded (a 401 over the routes), whatever
+	// the id names, an unknown id and the stale id of a session that has
+	// refreshed included, and nothing is revoked. Here the session ended
+	// before the call, revoked or expired; the fault tests end it while the
+	// call waits for the user's lock.
+	t.Run("revocations on behalf of an ended session", func(t *testing.T) {
+		for _, ending := range []string{"revoked", "expired"} {
+			t.Run(ending, func(t *testing.T) {
+				e := newEnv(t)
+				start := time.Now().Truncate(time.Second)
+				clock := &stepClock{now: start}
+				auth.SetClock(e.svc, clock)
+				// R asks. O and S sign in half an hour later, so they outlive R,
+				// and S refreshes, which leaves its first id stale.
+				ada, r := e.user(t, "ada", 1)
+				requester, err := auth.AuthenticatedRow(e.ctx, e.svc, r[0].AccessToken)
+				if err != nil {
+					t.Fatal(err)
+				}
+				rID := e.sessionID(t, r[0])
+				clock.now = start.Add(30 * time.Minute)
+				o, err := e.svc.IssueTokens(e.ctx, ada)
+				if err != nil {
+					t.Fatal(err)
+				}
+				s, err := e.svc.IssueTokens(e.ctx, ada)
+				if err != nil {
+					t.Fatal(err)
+				}
+				oID, staleID := e.sessionID(t, o), e.sessionID(t, s)
+				headID := e.sessionID(t, e.rotate(t, s))
+				if ending == "revoked" {
+					if err := e.svc.RevokeSession(e.ctx, ada.ID, rID); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					clock.now = start.Add(time.Hour + time.Second) // R's refresh TTL is an hour
+				}
+				calls := map[string]func() error{
+					"revoke an unknown id": func() error {
+						_, err := auth.RevokeSessionAs(e.ctx, e.svc, ada.ID, requester, "00000000000000000000000000000000")
+						return err
+					},
+					"revoke a stale id": func() error {
+						_, err := auth.RevokeSessionAs(e.ctx, e.svc, ada.ID, requester, staleID)
+						return err
+					},
+					"revoke an active session": func() error {
+						_, err := auth.RevokeSessionAs(e.ctx, e.svc, ada.ID, requester, oID)
+						return err
+					},
+					"revoke the others": func() error {
+						return auth.RevokeOtherSessionsKeeping(e.ctx, e.svc, ada.ID, requester)
+					},
+					"revoke all": func() error {
+						return auth.RevokeAllSessionsAs(e.ctx, e.svc, ada.ID, requester)
+					},
+				}
+				for name, call := range calls {
+					if err := call(); !errors.Is(err, auth.ErrSessionEnded) {
+						t.Errorf("%s on behalf of a %s session = %v, want ErrSessionEnded", name, ending, err)
+					}
+				}
+				sessions, err := e.svc.ListSessions(e.ctx, ada.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				listed := map[string]bool{}
+				for _, session := range sessions {
+					listed[session.ID] = true
+				}
+				if len(sessions) != 2 || !listed[oID] || !listed[headID] {
+					t.Fatalf("after the refused revocations the user has %d active sessions %v; want only O and S's head", len(sessions), listed)
+				}
+			})
+		}
+	})
+
 	// Only a rotated refresh token is evidence of theft. One revoked by
 	// logout or session revocation is simply invalid.
 	t.Run("reuse rule", func(t *testing.T) {

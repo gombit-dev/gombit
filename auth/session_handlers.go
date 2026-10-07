@@ -2,7 +2,6 @@ package auth
 
 import (
 	"context"
-	"crypto/hmac"
 	"net/http"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -111,21 +110,24 @@ func (s *Service) listSessions(ctx context.Context, _ *struct{}) (*listSessionsO
 	return &listSessionsOutput{Body: contract.Data[[]AuthSession]{Data: sessions}}, nil
 }
 
-// endSession revokes the session id and reports whether it was the
-// request's own.
+// endSession revokes the session id on behalf of the request's session and
+// reports whether it was the request's own: the session's row reached along
+// the chain from the row the request authenticated as, in the revocation's
+// transaction, the row ListSessions marks current (revokeSessionAs).
 func (s *Service) endSession(ctx context.Context, id string) (bool, error) {
 	user, refreshID, err := requestSession(ctx)
 	if err != nil {
 		return false, err
 	}
-	if err := s.RevokeSession(ctx, user.ID, id); err != nil {
+	endedCurrent, err := s.revokeSessionAs(ctx, user.ID, refreshID, id)
+	if err != nil {
 		return false, mapServiceError(ctx, err)
 	}
-	return hmac.Equal([]byte(s.sessionID(refreshID)), []byte(id)), nil
+	return endedCurrent, nil
 }
 
-// endSessions revokes the sessions scope selects and reports whether that
-// included the request's own.
+// endSessions revokes the sessions scope selects on behalf of the request's
+// session and reports whether that included the request's own.
 func (s *Service) endSessions(ctx context.Context, scope string) (bool, error) {
 	user, refreshID, err := requestSession(ctx)
 	if err != nil {
@@ -133,7 +135,7 @@ func (s *Service) endSessions(ctx context.Context, scope string) (bool, error) {
 	}
 	endsCurrent := scope == revokeScopeAll
 	if endsCurrent {
-		err = s.RevokeAllSessions(ctx, user.ID)
+		err = s.revokeAllSessionsAs(ctx, user.ID, refreshID)
 	} else {
 		err = s.revokeOtherSessions(ctx, user.ID, refreshID)
 	}

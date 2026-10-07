@@ -51,6 +51,33 @@ func RevokeOtherSessionsKeeping(ctx context.Context, s *Service, userID, refresh
 	return s.revokeOtherSessions(ctx, userID, refreshID)
 }
 
+// RevokeSessionAs revokes the session id on behalf of the session a request
+// was authenticated as, the refresh token row requester (AuthenticatedRow),
+// and reports whether the session it ended is the requester's own: what
+// DELETE /auth/sessions/{id} does. A requester of 0 is no session, as
+// RevokeSession.
+func RevokeSessionAs(ctx context.Context, s *Service, userID, requester uint, id string) (bool, error) {
+	return s.revokeSessionAs(ctx, userID, requester, id)
+}
+
+// RevokeAllSessionsAs revokes every session of the user on behalf of the
+// session a request was authenticated as, the refresh token row requester:
+// what DELETE /auth/sessions?scope=all does. A requester of 0 is no session,
+// as RevokeAllSessions.
+func RevokeAllSessionsAs(ctx context.Context, s *Service, userID, requester uint) error {
+	return s.revokeAllSessionsAs(ctx, userID, requester)
+}
+
+// ErrSessionEnded is the error the revocations a request runs return when
+// the request's own session has ended by the time they hold the user's lock.
+var ErrSessionEnded = errSessionEnded
+
+// ContextWithSession returns ctx carrying what the auth middlewares store for
+// a request authenticated as user with the refresh token row refreshID.
+func ContextWithSession(ctx context.Context, user User, refreshID uint) context.Context {
+	return context.WithValue(context.WithValue(ctx, userContextKey{}, user), sessionContextKey{}, refreshID)
+}
+
 // RequireBearer is the gate the Bearer-mode auth routes sit behind (the
 // cookie-mode one is exported as RequireCookieSession).
 func RequireBearer(s *Service) func(huma.Context, func(huma.Context)) {
