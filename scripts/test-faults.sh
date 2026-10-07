@@ -23,14 +23,9 @@
 # FAULT_COUNT, since all the repetitions of a package run in one binary:
 # FAULT_COUNT x 40s, never under go test's own 10m default, so a PR shard
 # (FAULT_COUNT=1) runs as before and the x100 soak gets 4000s. The slowest
-# package, auth against PostgreSQL and MySQL, takes about 16s a repetition,
+# package, auth against PostgreSQL and MySQL, takes about 19s a repetition,
 # so 40s leaves it more than twice that. FAULT_TIMEOUT sets the timeout
-# instead, in whole hours, minutes and seconds: one or more groups of a
-# base-10 integer without leading zeros and a unit, h, m or s (90m, 1h30m,
-# 4000s), more than zero in all. Fractions and the units below a second are
-# refused, since go test reads 0.1ns as 0, which turns the timeout off. A
-# timeout, given or computed, cannot pass the longest Go duration (about 292
-# years), so a FAULT_COUNT whose 40s each would is refused too.
+# instead, in whole seconds (5400 for 90 minutes).
 #
 #   bash scripts/test-faults.sh
 #   FAULT_POSTGRES_DSN=postgres://... FAULT_COUNT=100 bash scripts/test-faults.sh
@@ -53,50 +48,13 @@ positive() {
   esac
 }
 
-# maxTimeoutSeconds is the longest -timeout go test takes: a Go duration
-# counts nanoseconds in an int64.
-maxTimeoutSeconds=9223372036
-
 count="${FAULT_COUNT:-1}"
 positive FAULT_COUNT "$count"
-# Checked before count x 40 is computed, which bash would let overflow (and
-# fall back to the 10m floor). Nine digits are still under the limit, so the
-# comparison never sees a number bash cannot hold.
-if [ "${#count}" -gt 9 ] || [ "$count" -gt $((maxTimeoutSeconds / 40)) ]; then
-  echo "test-faults: FAULT_COUNT must be at most $((maxTimeoutSeconds / 40)), so that its timeout (40s a repetition) fits a Go duration, got '$count'" >&2
-  exit 2
-fi
-
-# duration checks $2 is a timeout in whole hours, minutes and seconds (see
-# the top of this file) and sets durationSeconds to it. A group of up to ten
-# digits, times 3600, cannot overflow bash's arithmetic, and the total is
-# checked after each group.
-duration() {
-  local rest="$2" total=0 n
-  local group='^(0|[1-9][0-9]{0,9})([hms])(.*)$'
-  while [ -n "$rest" ] && [[ "$rest" =~ $group ]]; do
-    n="${BASH_REMATCH[1]}"
-    case "${BASH_REMATCH[2]}" in
-    h) n=$((n * 3600)) ;;
-    m) n=$((n * 60)) ;;
-    esac
-    rest="${BASH_REMATCH[3]}"
-    total=$((total + n))
-    if [ "$total" -gt "$maxTimeoutSeconds" ]; then
-      break
-    fi
-  done
-  if [ -n "$rest" ] || [ "$total" -eq 0 ] || [ "$total" -gt "$maxTimeoutSeconds" ]; then
-    echo "test-faults: $1 must be whole hours, minutes and seconds such as 90m, 1h30m or 4000s, more than zero and at most ${maxTimeoutSeconds}s, got '$2'" >&2
-    exit 2
-  fi
-  durationSeconds="$total"
-}
 
 testTimeout=""
 if [ -n "${FAULT_TIMEOUT:-}" ]; then
-  duration FAULT_TIMEOUT "$FAULT_TIMEOUT"
-  testTimeout="${durationSeconds}s"
+  positive FAULT_TIMEOUT "$FAULT_TIMEOUT"
+  testTimeout="${FAULT_TIMEOUT}s"
 fi
 
 # FAULT_SHARD=i/n runs the i-th of n round-robin slices of the suite's

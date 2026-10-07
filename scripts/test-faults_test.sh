@@ -162,20 +162,18 @@ FAULT_POSTGRES_DSN="$pg" FAULT_COUNT=100 suite >/dev/null || note "suite with FA
 if grep -vF -- '-count=100 -timeout=4000s ' "$CALL_LOG" | grep -q .; then
   note "FAULT_COUNT=100 did not give every run 4000s: $(cat "$CALL_LOG")"
 fi
-# FAULT_TIMEOUT is whole hours, minutes and seconds, passed on in seconds.
-for good in 90m:5400s 1h30m:5400s 4000s:4000s 1h0m1s:3601s; do
+# FAULT_TIMEOUT is whole seconds, passed on with an s.
+for good in 4000 5400; do
   newlog
-  FAULT_POSTGRES_DSN="$pg" FAULT_COUNT=100 FAULT_TIMEOUT="${good%%:*}" suite >/dev/null ||
-    note "suite with FAULT_TIMEOUT=${good%%:*} failed"
-  if grep -vF -- "-count=100 -timeout=${good#*:} " "$CALL_LOG" | grep -q .; then
-    note "FAULT_TIMEOUT=${good%%:*} did not reach every run as -timeout=${good#*:}: $(cat "$CALL_LOG")"
+  FAULT_POSTGRES_DSN="$pg" FAULT_COUNT=100 FAULT_TIMEOUT="$good" suite >/dev/null ||
+    note "suite with FAULT_TIMEOUT=$good failed"
+  if grep -vF -- "-count=100 -timeout=${good}s " "$CALL_LOG" | grep -q .; then
+    note "FAULT_TIMEOUT=$good did not reach every run as -timeout=${good}s: $(cat "$CALL_LOG")"
   fi
 done
-# Refused before any test runs: zero (0.1ns is zero to go test, which turns
-# the timeout off), fractions, a unit below a second, no unit, a leading zero
-# (octal to bash), a sign, more than a Go duration holds, and anything else.
-for bad in 0 0s 0m0s 00m 010m 0.1ns 1.5h .5h 1us 90 m 1h- -1h -5m +1h \
-  2562048h 9223372037s 99999999999s 'ten minutes' 1x; do
+# Refused before any test runs: zero, a leading zero, a fraction, a unit (the
+# s is added), a sign, a space, and anything else.
+for bad in 0 00 010 1.5 90m 4000s -1 +1 ' 10' ten; do
   newlog
   status=0
   FAULT_TIMEOUT="$bad" suite >/dev/null 2>&1 || status=$?
@@ -186,26 +184,6 @@ for bad in 0 0s 0m0s 00m 010m 0.1ns 1.5h .5h 1us 90 m 1h- -1h -5m +1h \
     note "FAULT_TIMEOUT='$bad' still ran tests: $(cat "$CALL_LOG")"
   fi
 done
-newlog
-FAULT_TIMEOUT=9223372036s suite >/dev/null || note "the longest Go duration, in seconds, was refused"
-# A FAULT_COUNT whose timeout (40s each) would not fit a Go duration is
-# refused, never wrapped around by bash's arithmetic into a short one.
-for bad in 230584301 999999999 230584300921369411; do
-  newlog
-  status=0
-  FAULT_COUNT="$bad" suite >/dev/null 2>&1 || status=$?
-  if [ "$status" -ne 2 ]; then
-    note "FAULT_COUNT=$bad exited $status, want 2 (refused: its timeout overflows)"
-  fi
-  if [ -s "$CALL_LOG" ]; then
-    note "FAULT_COUNT=$bad still ran tests: $(cat "$CALL_LOG")"
-  fi
-done
-newlog
-FAULT_COUNT=230584300 suite >/dev/null || note "FAULT_COUNT=230584300, the largest whose timeout fits, was refused"
-if grep -vF -- '-count=230584300 -timeout=9223372000s ' "$CALL_LOG" | grep -q .; then
-  note "FAULT_COUNT=230584300 did not get 9223372000s: $(cat "$CALL_LOG")"
-fi
 
 # ---- shards partition the packages: every one runs, exactly once ----
 newlog

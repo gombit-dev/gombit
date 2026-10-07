@@ -346,7 +346,7 @@ version.
   with `FAULT_COUNT`: 40 seconds a repetition, never under `go test`'s own
   10 minutes. Every repetition of a package runs in one test binary, so the
   weekly x100 soak is not cut off by that default. `FAULT_TIMEOUT`, in whole
-  hours, minutes and seconds (`90m`, `1h30m`), sets it instead
+  seconds (`5400`), sets it instead
   ([#335](https://github.com/gombit-dev/gombit/issues/335)).
 - A new app's `.env.example` lists every `GOMBIT_*` variable the config
   package reads, including `GOMBIT_JOBS_DRIVER`, `GOMBIT_JOBS_QUEUE`,
