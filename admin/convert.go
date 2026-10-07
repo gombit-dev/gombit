@@ -2,6 +2,7 @@ package admin
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"regexp"
@@ -316,15 +317,9 @@ func asInt64(raw any) (int64, error) {
 		}
 		return int64(v), nil
 	case float32:
-		if float32(int64(v)) != v {
-			return 0, fmt.Errorf("must be an integer")
-		}
-		return int64(v), nil
+		return floatToInt64(float64(v))
 	case float64:
-		if v != math.Trunc(v) {
-			return 0, fmt.Errorf("must be an integer")
-		}
-		return int64(v), nil
+		return floatToInt64(v)
 	case json.Number:
 		n, err := v.Int64()
 		if err != nil {
@@ -333,6 +328,9 @@ func asInt64(raw any) (int64, error) {
 		return n, nil
 	case string:
 		n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+		if errors.Is(err, strconv.ErrRange) {
+			return 0, fmt.Errorf("must be between %d and %d", int64(math.MinInt64), int64(math.MaxInt64))
+		}
 		if err != nil {
 			return 0, fmt.Errorf("must be an integer")
 		}
@@ -340,6 +338,26 @@ func asInt64(raw any) (int64, error) {
 	default:
 		return 0, fmt.Errorf("must be an integer")
 	}
+}
+
+// maxExactJSONInt is the largest integer a JSON number decoded as float64 is
+// sure to have kept (2^53-1, JavaScript's MAX_SAFE_INTEGER): from 2^53 on, a
+// decoded value may be a rounded neighbor (9007199254740993 arrives as
+// 9007199254740992).
+const maxExactJSONInt = 1<<53 - 1
+
+// floatToInt64 reads an integer sent as a JSON number (decoded as float64).
+// One outside int64 would wrap (1e30 became MinInt64), and one from 2^53 on
+// may already have lost digits, so both are refused: a large integer is sent
+// as a string, which is read exactly (issue #448).
+func floatToInt64(v float64) (int64, error) {
+	if v != math.Trunc(v) || math.IsInf(v, 0) || math.IsNaN(v) {
+		return 0, fmt.Errorf("must be an integer")
+	}
+	if v > maxExactJSONInt || v < -maxExactJSONInt {
+		return 0, fmt.Errorf("must be sent as a string: a JSON number beyond ±(2^53 - 1) may have lost digits")
+	}
+	return int64(v), nil
 }
 
 func asFloat64(raw any) (float64, error) {

@@ -229,6 +229,16 @@ Closed field types: `string`, `text`, `integer`, `float`, `decimal`,
 `boolean`, `datetime`, `date`, `time`, `duration`, `uuid`, `json`, `file`, `image`, `relation`. These strings are
 the admin projection of the shared vocabulary in [fields.md](fields.md).
 
+An integer value must fit the model field's Go type, and the int64 range
+(the column is a signed bigint on PostgreSQL and SQLite): 300 for an `int8`,
+-5 for a `uint`, or 2^63 for a `uint64` is a 422 on that field, never a
+wrapped value, whatever admin type the field is declared as. A JSON number is
+decoded as a float64, which keeps integers exactly only within ±(2^53 - 1),
+so a larger integer is sent as a string (`"9007199254740993"`), which is read
+exactly; as a JSON number it is a 422. The bundled admin UI sends integers as
+JSON numbers, so it cannot save a row holding an integer beyond that range
+(an int64 counter, a snowflake id) until it sends such values as strings.
+
 ### File and image fields
 
 A `types.File` or `types.Image` column (see

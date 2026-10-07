@@ -332,6 +332,14 @@ version.
 
 ### Fixed
 
+- Admin writes refuse an integer the field's Go type cannot hold with a 422
+  on that field. `300` into an `int8` was stored as `44`, `3000000000` into
+  an `int32` wrapped, and `-5` into a `uint` was stored as a value the list
+  endpoint could not read back, a `500` for everyone until the row was fixed
+  by hand. A JSON number from 2^53 on (or `1e30`), which has lost digits by
+  the time it is decoded, is refused too: send a large integer as a string
+  ([#448](https://github.com/gombit-dev/gombit/issues/448)).
+
 - Production configuration refuses `GOMBIT_HTTP_TRUSTED_PROXIES` values that
   trust every peer in any spelling: a zero-length prefix (`10.0.0.0/0`,
   `::0/0`) or ranges that together cover every IPv4 or IPv6 address
