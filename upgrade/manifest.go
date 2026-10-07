@@ -78,6 +78,12 @@ type Action struct {
 	Description string
 	// Apply applies the change to the application in workDir.
 	Apply func(workDir string) (changed bool, err error)
+	// Check reports, reading only, whether the application in workDir,
+	// whose baseline is b, needs the change (Apply would change something).
+	// Nil means it always does. The upgrade plan counts only the automatic
+	// changes an app needs, and must write nothing: TestActionChecksWriteNothing
+	// runs every Check against an app and compares its files.
+	Check func(workDir string, b Baseline) (needed bool, err error)
 }
 
 // actions are the automatic changes this framework implements, by name.
@@ -87,6 +93,9 @@ var actions = map[string]Action{
 		Apply: func(workDir string) (bool, error) {
 			_, wrote, err := RecordBaseline(workDir)
 			return wrote, err
+		},
+		Check: func(_ string, b Baseline) (bool, error) {
+			return !b.Recorded, nil
 		},
 	},
 }

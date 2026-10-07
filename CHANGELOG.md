@@ -304,6 +304,16 @@ version.
     checks every issue the changelog's Unreleased section links against the
     manifest ([docs/releasing.md](docs/releasing.md))
     ([#342](https://github.com/gombit-dev/gombit/issues/342)).
+- `gombit upgrade --dry-run [--to vX.Y.Z] [--dir] [--json]` (UPGRADE-3) plans
+  upgrading an application to a framework release, from its baseline and the
+  compatibility manifest, and writes nothing: the current and target
+  versions, the dependency change, the automatic changes the app needs (an
+  action can report it is not needed), every manual action with what to do,
+  the breaking and informational changes. A version the manifest does not
+  list, a downgrade, or a baseline that names no framework release fails
+  with the reason. It never prompts, so it runs in CI. `upgrade.PlanUpgrade`
+  is the API; `upgrade.Action` gains a read-only `Check`
+  ([#343](https://github.com/gombit-dev/gombit/issues/343)).
 
 ### Changed
 
