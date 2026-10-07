@@ -173,10 +173,92 @@ export function rowToFormValues(row: Row, fields: FieldMeta[]): Row {
   return values;
 }
 
-export function formValuesToBody(values: Row, fields: FieldMeta[]): { body: Row; jsonErrors: Record<string, string> } {
+/**
+ * changedFieldNames are the writable fields whose form value differs from the
+ * value the form was loaded with: what an edit changed, however the value was
+ * set (typed, picked, uploaded). An edit sends only these, so a field the
+ * operator did not touch is not written back through the form's lossy
+ * representation (a datetime to the minute, an integer past 2^53 rounded by
+ * JSON.parse; issue #454).
+ */
+export function changedFieldNames(values: Row, loaded: Row, fields: FieldMeta[]): Set<string> {
+  const changed = new Set<string>();
+  for (const field of writableFields(fields)) {
+    if (!sameFormValue(field, values[field.name], loaded[field.name])) {
+      changed.add(field.name);
+    }
+  }
+  return changed;
+}
+
+/**
+ * sameFormValue compares a field's form value with the loaded one. A number
+ * input holds what was typed as a string and the loaded value as a number.
+ * An integer compares exactly (BigInt) with the value the form showed: past
+ * 2^53 the loaded number is already rounded, so typing it back is no change
+ * (sending it would write the rounded neighbor), while any other digits are
+ * one, even digits a float would round onto the same number. A float
+ * compares by value.
+ */
+function sameFormValue(field: FieldMeta, value: unknown, loaded: unknown): boolean {
+  if (field.type === "integer") {
+    const a = exactInteger(value);
+    const b = exactInteger(loaded);
+    if (a !== null && b !== null) {
+      return a === b;
+    }
+  }
+  if (field.type === "float" && !isEmptyFormValue(value) && !isEmptyFormValue(loaded)) {
+    const a = Number(value);
+    const b = Number(loaded);
+    if (!Number.isNaN(a) && !Number.isNaN(b)) {
+      return a === b;
+    }
+  }
+  return JSON.stringify(value ?? null) === JSON.stringify(loaded ?? null);
+}
+
+/** exactInteger is an integer form value as a BigInt, or null if it is none. */
+function exactInteger(v: unknown): bigint | null {
+  if (typeof v === "number") {
+    return Number.isInteger(v) ? BigInt(v) : null;
+  }
+  if (typeof v === "string" && /^\s*-?\d+\s*$/.test(v)) {
+    return BigInt(v.trim());
+  }
+  return null;
+}
+
+/**
+ * editBody is the PATCH an edit sends: the fields it changed
+ * (changedFieldNames), plus the model's optimistic-lock version as the form
+ * loaded it, whether or not the version field is writable. The server guards
+ * the update on that version, so a concurrent edit is a 409, not a silent
+ * overwrite (issue #454).
+ */
+export function editBody(values: Row, loaded: Row, model: { fields: FieldMeta[]; version?: string }): {
+  body: Row;
+  jsonErrors: Record<string, string>;
+} {
+  const only = changedFieldNames(values, loaded, model.fields);
+  const out = formValuesToBody(values, model.fields, only);
+  if (model.version && loaded[model.version] !== undefined && loaded[model.version] !== null) {
+    out.body[model.version] = loaded[model.version];
+  }
+  return out;
+}
+
+export function formValuesToBody(
+  values: Row,
+  fields: FieldMeta[],
+  only?: Set<string>,
+): { body: Row; jsonErrors: Record<string, string> } {
   const body: Row = {};
   const jsonErrors: Record<string, string> = {};
   for (const field of writableFields(fields)) {
+    if (only && !only.has(field.name)) {
+      continue; // an edit sends what it changed (changedFieldNames)
+    }
     const raw = values[field.name];
     if (field.writeonly && field.type === "boolean") {
       if (raw !== true && raw !== false) {
@@ -249,6 +331,13 @@ export function formValuesToBody(values: Row, fields: FieldMeta[]): { body: Row;
       const n = Number(raw);
       if (Number.isNaN(n)) {
         jsonErrors[field.name] = "must be a number";
+        continue;
+      }
+      // An integer past 2^53 has no exact JSON number: send its digits, which
+      // the server reads exactly (issue #454).
+      const digits = String(raw).trim();
+      if (field.type === "integer" && /^-?\d+$/.test(digits) && !Number.isSafeInteger(n)) {
+        body[field.name] = digits;
         continue;
       }
       body[field.name] = field.type === "integer" ? Math.trunc(n) : n;

@@ -97,10 +97,16 @@ beyond the first page) and the local filter is off; otherwise it filters the
 loaded page client-side. A model registered without a `Search` defaults it to
 its text columns (an explicit empty `Search` opts out), so pickers search out of
 the box.
-`datetime-local` values are converted to RFC3339 before POST/PATCH.
+`datetime-local` values are converted to RFC3339 before POST/PATCH. The edit
+form PATCHes only the fields the operator changed (compared with the values
+it loaded): an untouched field is not written back through the form, which
+shows a datetime to the minute and reads an integer past 2^53 rounded. An
+integer typed past 2^53 is sent as a string, which the server reads exactly.
 Empty optional (non-boolean) inputs — string, text, date, datetime, json,
-number, relation — are sent as JSON `null` so a partial PATCH can clear
-them. Booleans and numeric `0` are always included.
+number, relation — are sent as JSON `null` (on an edit, a field changed to
+empty), so a partial PATCH can clear them. On create, booleans and numeric `0` are always included; an edit sends
+the fields it changed, plus the model's optimistic-lock `version` (meta
+`version`) as loaded, so a concurrent edit is a 409.
 401 (including session expiry on list/detail/edit) returns to login;
 catalog 403 shows a forbidden page; other catalog errors show the D10
 message. Silent `POST /auth/refresh` after a 401 **awaits** CSRF bootstrap

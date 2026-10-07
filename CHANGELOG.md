@@ -332,6 +332,14 @@ version.
 
 ### Fixed
 
+- Saving the admin edit form no longer rewrites fields the operator did not
+  touch: it sent every field back, so each save truncated a datetime to the
+  minute (`12:30:45.123456` became `12:30:00`) and an integer past 2^53 to
+  its rounded neighbor. The form now PATCHes only the fields that changed,
+  plus the model's optimistic-lock version as loaded (the admin meta names it
+  in a new `version` key), so a concurrent edit is still a 409; it sends an
+  integer past 2^53 as a string
+  ([#454](https://github.com/gombit-dev/gombit/issues/454)).
 - An admin `PATCH` writes only the columns the request (or a model hook)
   changed. It loaded the row and saved the whole snapshot back, so it reverted
   another request's change to a column it never mentioned, re-inserted a row

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { FieldMeta } from "./api/types";
-import { compareDecimal, emptyFormValue, formPattern, formValuesToBody, formatCell, relationListQuery, relationOptions } from "./fields";
+import { changedFieldNames, compareDecimal, editBody, emptyFormValue, formPattern, formValuesToBody, formatCell, relationListQuery, relationOptions, rowToFormValues } from "./fields";
 
 function field(partial: Pick<FieldMeta, "name" | "type"> & Partial<FieldMeta>): FieldMeta {
   return {
@@ -281,5 +281,68 @@ describe("clock and enum labels", () => {
     expect(body.opens).toBe("09:05:00");
     expect(formatCell("draft", fields[1])).toBe("Draft (draft)");
     expect(formatCell("published", fields[1])).toBe("Published (published)");
+  });
+});
+
+describe("edit round trip (issue #454)", () => {
+  const f = (name: string, type: string): FieldMeta =>
+    ({ name, type, required: false, readonly: false }) as FieldMeta;
+  const fields = [f("name", "string"), f("published_at", "datetime"), f("big", "integer")];
+  const row = JSON.parse('{"name":"x","published_at":"2026-08-18T12:30:45.123456Z","big":9007199254740993}');
+
+  it("sends only what the edit changed", () => {
+    const loaded = rowToFormValues(row, fields);
+    const values = { ...loaded, name: "renamed" };
+    const only = changedFieldNames(values, loaded, fields);
+    expect([...only]).toEqual(["name"]);
+    const { body } = formValuesToBody(values, fields, only);
+    // The datetime (minute precision in the form) and the integer (rounded
+    // by JSON.parse) are not written back.
+    expect(body).toEqual({ name: "renamed" });
+  });
+
+  it("sends nothing for an unchanged save", () => {
+    const loaded = rowToFormValues(row, fields);
+    const only = changedFieldNames({ ...loaded }, loaded, fields);
+    expect(formValuesToBody({ ...loaded }, fields, only).body).toEqual({});
+  });
+
+  it("does not send a number typed back to the loaded value", () => {
+    const loaded = rowToFormValues(row, fields);
+    // The number input holds strings; past 2^53 the loaded value is rounded.
+    const values = { ...loaded, big: String(loaded.big) };
+    expect([...changedFieldNames(values, loaded, fields)]).toEqual([]);
+    expect([...changedFieldNames({ ...loaded, big: "1" }, loaded, fields)]).toEqual(["big"]);
+  });
+
+  it("sends a big integer whose float rounds onto the loaded one", () => {
+    // Stored 9007199254740995 loads as ...996; typing ...997 (which Number()
+    // also reads as ...996) is a change, sent as its digits.
+    const big = [f("big", "integer")];
+    const loaded = rowToFormValues(JSON.parse('{"big":9007199254740995}'), big);
+    const values = { big: "9007199254740997" };
+    expect([...changedFieldNames(values, loaded, big)]).toEqual(["big"]);
+    expect(editBody(values, loaded, { fields: big }).body).toEqual({ big: "9007199254740997" });
+    expect(editBody({ big: "9007199254740996" }, loaded, { fields: big }).body).toEqual({});
+  });
+
+  it("always sends the loaded version, even a read-only one", () => {
+    const versioned = [f("title", "string"), { ...f("version", "integer"), readonly: true } as FieldMeta];
+    const loaded = rowToFormValues({ title: "a", version: 3 }, versioned);
+    const { body } = editBody({ ...loaded, title: "b" }, loaded, { fields: versioned, version: "version" });
+    expect(body).toEqual({ title: "b", version: 3 });
+    // An unchanged save still carries the guard.
+    expect(editBody({ ...loaded }, loaded, { fields: versioned, version: "version" }).body).toEqual({ version: 3 });
+  });
+
+  it("sends an integer past 2^53 as its digits", () => {
+    const { body } = formValuesToBody({ big: "9007199254740993" }, [f("big", "integer")]);
+    expect(body.big).toBe("9007199254740993");
+    expect(formValuesToBody({ big: "42" }, [f("big", "integer")]).body.big).toBe(42);
+  });
+
+  it("sends every field on create (no only set)", () => {
+    const { body } = formValuesToBody({ name: "a", published_at: "", big: "" }, fields);
+    expect(Object.keys(body).sort()).toEqual(["big", "name", "published_at"]);
   });
 });
