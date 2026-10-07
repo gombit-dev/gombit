@@ -260,6 +260,22 @@ the database. The check allocates only when a value is refused, or when
 `Updates` is given a struct of a type other than the model, which is parsed
 to match its fields to the model's columns.
 
+**Editing a loaded row.** `database.StoredValues(db, &row)` records what a
+loaded row stores; `database.ScopeEdit(db, &row, stored)` scopes the update
+that writes it back with `Select("*")` (`Save`, or
+`Model(&row).Select("*").Updates(&row)`) to the columns whose value the edit,
+or a model hook, changed, compared after the hooks run (and an auto-update
+timestamp, which GORM stamps). The others are not written, so a concurrent
+change to them is kept, and the write checks judge only what is written
+(a model hook's in-place change to a slice or map included). An edit that
+changes nothing writes no column, but an auto-update timestamp. Use
+`Updates`: `Save` falls back to inserting every column when its update
+affects no row, which is the case for a row deleted meanwhile (it comes back)
+and for an unchanged edit of a model without an auto-update timestamp (the
+whole row is written). With `Updates`, `RowsAffected` 0 means the row is gone,
+or, on MySQL, matched but unchanged. The admin's PATCH uses `Updates` and
+answers 404 for a deleted row.
+
 **Rows stored before the check.** A row may already hold text the check now
 refuses: more than a `text` or a 191-character column holds (PostgreSQL,
 SQLite), more than a `size:n` column holds or invalid UTF-8 (SQLite), a NUL

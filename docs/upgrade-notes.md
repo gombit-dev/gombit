@@ -116,6 +116,13 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 ### Informational
 
+- An admin PATCH writes only the columns it (or a model hook) changed, never associations, and answers 404 for a row deleted meanwhile. (`admin-patch-writes-changes-only`, behavior, [#450](https://github.com/gombit-dev/gombit/issues/450))
+
+  It used to save the whole loaded row: a concurrent change to another
+  column was reverted, a deleted row came back, and `has_many`
+  children were written back. `database.ScopeEdit` now narrows any
+  `Select("*")` update of the scoped row the same way.
+
 - `framework.SanitizeHTML` keeps text after a stray `<` when the value also has a real tag. (`sanitize-html-stray-angle-bracket`, security, [#433](https://github.com/gombit-dev/gombit/issues/433))
 
   That tail comes back as `SanitizeHTML` returns a value with no

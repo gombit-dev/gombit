@@ -30,6 +30,17 @@ releases:
 
   - version: unreleased
     changes:
+      - id: admin-patch-writes-changes-only
+        kind: informational
+        area: behavior
+        summary: "An admin PATCH writes only the columns it (or a model hook) changed, never associations, and answers 404 for a row deleted meanwhile."
+        details: |
+          It used to save the whole loaded row: a concurrent change to another
+          column was reverted, a deleted row came back, and `has_many`
+          children were written back. `database.ScopeEdit` now narrows any
+          `Select("*")` update of the scoped row the same way.
+        refs: [450]
+
       - id: reserved-upgrade-command
         kind: manual
         breaking: true

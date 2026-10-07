@@ -332,6 +332,15 @@ version.
 
 ### Fixed
 
+- An admin `PATCH` writes only the columns the request (or a model hook)
+  changed. It loaded the row and saved the whole snapshot back, so it reverted
+  another request's change to a column it never mentioned, re-inserted a row
+  deleted meanwhile (now a 404), and re-wrote `has_many` children, pulling a
+  moved child back and recreating a deleted one (associations are no longer
+  written). The response is the row as stored. `database.ScopeEdit` narrows
+  any `Select("*")` update of the scoped row to its changed columns
+  ([#450](https://github.com/gombit-dev/gombit/issues/450)).
+
 - `gombit make resource` answers a field written `notes:text,searchable`
   with the spelling the grammar wants (`notes:text:searchable`: modifiers
   follow a second colon) instead of an unknown type `"text,searchable"`;

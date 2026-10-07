@@ -108,6 +108,20 @@ func TestTextWritesOnMySQL(t *testing.T) {
 	testDataExceptionsOnDriver(t, db)
 }
 
+func TestScopeEditColumnsOnPostgres(t *testing.T) {
+	if *postgresDSN == "" {
+		t.Skip("set -database.postgres-dsn to run Postgres integration tests")
+	}
+	testScopeEditColumns(t, openIntegrationDB(t, config.DatabaseConfig{Driver: config.DatabaseDriverPostgres, DSN: *postgresDSN}))
+}
+
+func TestScopeEditColumnsOnMySQL(t *testing.T) {
+	if *mysqlDSN == "" {
+		t.Skip("set -database.mysql-dsn to run MySQL integration tests")
+	}
+	testScopeEditColumns(t, openIntegrationDB(t, config.DatabaseConfig{Driver: config.DatabaseDriverMySQL, DSN: *mysqlDSN}))
+}
+
 func TestTimeBoundsRoundTripOnPostgres(t *testing.T) {
 	if *postgresDSN == "" {
 		t.Skip("set -database.postgres-dsn to run Postgres integration tests")
