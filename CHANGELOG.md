@@ -332,6 +332,11 @@ version.
 
 ### Fixed
 
+- `gombit make resource` answers a field written `notes:text,searchable`
+  with the spelling the grammar wants (`notes:text:searchable`: modifiers
+  follow a second colon) instead of an unknown type `"text,searchable"`;
+  commas inside a type's arguments (`enum(a,b)`, `decimal(10,2)`) are
+  unaffected ([#446](https://github.com/gombit-dev/gombit/issues/446)).
 - Production configuration refuses `GOMBIT_HTTP_TRUSTED_PROXIES` values that
   trust every peer in any spelling: a zero-length prefix (`10.0.0.0/0`,
   `::0/0`) or ranges that together cover every IPv4 or IPv6 address
