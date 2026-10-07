@@ -173,10 +173,53 @@ export function rowToFormValues(row: Row, fields: FieldMeta[]): Row {
   return values;
 }
 
-export function formValuesToBody(values: Row, fields: FieldMeta[]): { body: Row; jsonErrors: Record<string, string> } {
+/**
+ * changedFieldNames are the writable fields whose form value differs from the
+ * value the form was loaded with: what an edit changed, however the value was
+ * set (typed, picked, uploaded). An edit sends only these, so a field the
+ * operator did not touch is not written back through the form's lossy
+ * representation (a datetime to the minute, an integer past 2^53 rounded by
+ * JSON.parse; issue #454).
+ */
+export function changedFieldNames(values: Row, loaded: Row, fields: FieldMeta[]): Set<string> {
+  const changed = new Set<string>();
+  for (const field of writableFields(fields)) {
+    if (!sameFormValue(field, values[field.name], loaded[field.name])) {
+      changed.add(field.name);
+    }
+  }
+  return changed;
+}
+
+/**
+ * sameFormValue compares a field's form value with the loaded one. A number
+ * input holds what was typed as a string and the loaded value as a number, so
+ * numbers compare by value: an edit typed back to the loaded value is no
+ * change (past 2^53 the loaded value is already rounded, and sending it back
+ * would write the rounded neighbor).
+ */
+function sameFormValue(field: FieldMeta, value: unknown, loaded: unknown): boolean {
+  if ((field.type === "integer" || field.type === "float") && !isEmptyFormValue(value) && !isEmptyFormValue(loaded)) {
+    const a = Number(value);
+    const b = Number(loaded);
+    if (!Number.isNaN(a) && !Number.isNaN(b)) {
+      return a === b;
+    }
+  }
+  return JSON.stringify(value ?? null) === JSON.stringify(loaded ?? null);
+}
+
+export function formValuesToBody(
+  values: Row,
+  fields: FieldMeta[],
+  only?: Set<string>,
+): { body: Row; jsonErrors: Record<string, string> } {
   const body: Row = {};
   const jsonErrors: Record<string, string> = {};
   for (const field of writableFields(fields)) {
+    if (only && !only.has(field.name)) {
+      continue; // an edit sends what it changed (changedFieldNames)
+    }
     const raw = values[field.name];
     if (field.writeonly && field.type === "boolean") {
       if (raw !== true && raw !== false) {
@@ -249,6 +292,13 @@ export function formValuesToBody(values: Row, fields: FieldMeta[]): { body: Row;
       const n = Number(raw);
       if (Number.isNaN(n)) {
         jsonErrors[field.name] = "must be a number";
+        continue;
+      }
+      // An integer past 2^53 has no exact JSON number: send its digits, which
+      // the server reads exactly (issue #454).
+      const digits = String(raw).trim();
+      if (field.type === "integer" && /^-?\d+$/.test(digits) && !Number.isSafeInteger(n)) {
+        body[field.name] = digits;
         continue;
       }
       body[field.name] = field.type === "integer" ? Math.trunc(n) : n;

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { FieldMeta } from "./api/types";
-import { compareDecimal, emptyFormValue, formPattern, formValuesToBody, formatCell, relationListQuery, relationOptions } from "./fields";
+import { changedFieldNames, compareDecimal, emptyFormValue, formPattern, formValuesToBody, formatCell, relationListQuery, relationOptions, rowToFormValues } from "./fields";
 
 function field(partial: Pick<FieldMeta, "name" | "type"> & Partial<FieldMeta>): FieldMeta {
   return {
@@ -281,5 +281,48 @@ describe("clock and enum labels", () => {
     expect(body.opens).toBe("09:05:00");
     expect(formatCell("draft", fields[1])).toBe("Draft (draft)");
     expect(formatCell("published", fields[1])).toBe("Published (published)");
+  });
+});
+
+describe("edit round trip (issue #454)", () => {
+  const f = (name: string, type: string): FieldMeta =>
+    ({ name, type, required: false, readonly: false }) as FieldMeta;
+  const fields = [f("name", "string"), f("published_at", "datetime"), f("big", "integer")];
+  const row = JSON.parse('{"name":"x","published_at":"2026-08-18T12:30:45.123456Z","big":9007199254740993}');
+
+  it("sends only what the edit changed", () => {
+    const loaded = rowToFormValues(row, fields);
+    const values = { ...loaded, name: "renamed" };
+    const only = changedFieldNames(values, loaded, fields);
+    expect([...only]).toEqual(["name"]);
+    const { body } = formValuesToBody(values, fields, only);
+    // The datetime (minute precision in the form) and the integer (rounded
+    // by JSON.parse) are not written back.
+    expect(body).toEqual({ name: "renamed" });
+  });
+
+  it("sends nothing for an unchanged save", () => {
+    const loaded = rowToFormValues(row, fields);
+    const only = changedFieldNames({ ...loaded }, loaded, fields);
+    expect(formValuesToBody({ ...loaded }, fields, only).body).toEqual({});
+  });
+
+  it("does not send a number typed back to the loaded value", () => {
+    const loaded = rowToFormValues(row, fields);
+    // The number input holds strings; past 2^53 the loaded value is rounded.
+    const values = { ...loaded, big: String(loaded.big) };
+    expect([...changedFieldNames(values, loaded, fields)]).toEqual([]);
+    expect([...changedFieldNames({ ...loaded, big: "1" }, loaded, fields)]).toEqual(["big"]);
+  });
+
+  it("sends an integer past 2^53 as its digits", () => {
+    const { body } = formValuesToBody({ big: "9007199254740993" }, [f("big", "integer")]);
+    expect(body.big).toBe("9007199254740993");
+    expect(formValuesToBody({ big: "42" }, [f("big", "integer")]).body.big).toBe(42);
+  });
+
+  it("sends every field on create (no only set)", () => {
+    const { body } = formValuesToBody({ name: "a", published_at: "", big: "" }, fields);
+    expect(Object.keys(body).sort()).toEqual(["big", "name", "published_at"]);
   });
 });

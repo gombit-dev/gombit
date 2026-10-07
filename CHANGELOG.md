@@ -332,6 +332,15 @@ version.
 
 ### Fixed
 
+- Saving the admin edit form no longer rewrites fields the operator did not
+  touch: it sent every field back, so each save truncated a datetime to the
+  minute (`12:30:45.123456` became `12:30:00`) and an integer past 2^53 to
+  its rounded neighbor. The form now PATCHes only the fields that changed,
+  plus the model's optimistic-lock version as loaded (the admin meta names it
+  in a new `version` key), so a concurrent edit is still a 409; it sends an
+  integer past 2^53 as a string
+  ([#454](https://github.com/gombit-dev/gombit/issues/454)).
+
 - A float a write through a model sets to `+Inf`, `-Inf` or `NaN`, or beyond
   a `float32` field's range, is a 422 naming the field on every driver, the
   admin's writes included (`"Inf"`, `"NaN"`, a `float32` overflow). It was stored on PostgreSQL and SQLite and a 500 on
