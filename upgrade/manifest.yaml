@@ -40,6 +40,21 @@ releases:
           children were written back. `database.ScopeEdit` now narrows any
           `Select("*")` update of the scoped row the same way.
         refs: [450]
+      - id: floats-must-be-finite
+        kind: manual
+        breaking: true
+        area: behavior
+        summary: "Every write refuses a float that is not finite (`+Inf`, `-Inf`, `NaN`), or beyond a `float32` field's range, with a 422 on that field."
+        details: |
+          It was stored on PostgreSQL and SQLite (and a 500 on MySQL). Code
+          that stored a non-finite float on purpose in a column it never
+          returns as JSON now gets a `*database.ValidationError`: store NULL
+          (a pointer or `sql.NullFloat64`) instead. A row that already stores
+          one keeps working for partial updates of other columns and for an
+          admin edit that leaves the column alone, but a generic `Save` of it
+          is a 422 on that field until the column is set to a finite value or
+          NULL (docs/database.md § Floats).
+        refs: [449]
 
       - id: reserved-upgrade-command
         kind: manual

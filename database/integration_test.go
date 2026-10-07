@@ -90,6 +90,20 @@ func TestTimeRangeWritePathsOnMySQL(t *testing.T) {
 	testTimeRangeWhatGORMWrites(t, db)
 }
 
+func TestFloatWritesOnPostgres(t *testing.T) {
+	if *postgresDSN == "" {
+		t.Skip("set -database.postgres-dsn to run Postgres integration tests")
+	}
+	testFloatWrites(t, openIntegrationDB(t, config.DatabaseConfig{Driver: config.DatabaseDriverPostgres, DSN: *postgresDSN}))
+}
+
+func TestFloatWritesOnMySQL(t *testing.T) {
+	if *mysqlDSN == "" {
+		t.Skip("set -database.mysql-dsn to run MySQL integration tests")
+	}
+	testFloatWrites(t, openIntegrationDB(t, config.DatabaseConfig{Driver: config.DatabaseDriverMySQL, DSN: *mysqlDSN}))
+}
+
 func TestTextWritesOnPostgres(t *testing.T) {
 	if *postgresDSN == "" {
 		t.Skip("set -database.postgres-dsn to run Postgres integration tests")
