@@ -601,7 +601,16 @@ func TestTimeRangeAddsNoAllocationsToOrdinaryWrites(t *testing.T) {
 			"Updates(struct)": testing.AllocsPerRun(50, func() { db.Model(&row).Updates(allocStamped{Name: "z"}) }),
 		}
 	}
-	without, with := measure(open(false)), measure(open(true))
+	// The database measured second now and then counts one allocation more,
+	// whichever it is: measure in both orders and keep the least of each.
+	dbWithout, dbWith := open(false), open(true)
+	without, with := measure(dbWithout), measure(dbWith)
+	for op, n := range measure(dbWith) {
+		with[op] = min(with[op], n)
+	}
+	for op, n := range measure(dbWithout) {
+		without[op] = min(without[op], n)
+	}
 	for op, base := range without {
 		if with[op] > base+0.5 {
 			t.Errorf("%s: %.1f allocs with the check, %.1f without", op, with[op], base)

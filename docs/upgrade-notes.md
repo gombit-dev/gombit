@@ -18,9 +18,10 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   that stored a non-finite float on purpose in a column it never
   returns as JSON now gets a `*database.ValidationError`: store NULL
   (a pointer or `sql.NullFloat64`) instead. A row that already stores
-  one keeps working for partial updates of other columns, but a `Save`
-  of it (and an admin edit) is a 422 on that field until the column is
-  set to a finite value or NULL (docs/database.md § Floats).
+  one keeps working for partial updates of other columns and for an
+  admin edit that leaves the column alone, but a generic `Save` of it
+  is a 422 on that field until the column is set to a finite value or
+  NULL (docs/database.md § Floats).
 
 - **Breaking.** `upgrade` is a framework command, and a reserved management-command name. (`reserved-upgrade-command`, cli, [#341](https://github.com/gombit-dev/gombit/issues/341))
 
@@ -125,6 +126,13 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   version 0. `gombit upgrade baseline --write` records it.
 
 ### Informational
+
+- An admin PATCH writes only the columns it (or a model hook) changed, never associations, and answers 404 for a row deleted meanwhile. (`admin-patch-writes-changes-only`, behavior, [#450](https://github.com/gombit-dev/gombit/issues/450))
+
+  It used to save the whole loaded row: a concurrent change to another
+  column was reverted, a deleted row came back, and `has_many`
+  children were written back. `database.ScopeEdit` now narrows any
+  `Select("*")` update of the scoped row the same way.
 
 - `framework.SanitizeHTML` keeps text after a stray `<` when the value also has a real tag. (`sanitize-html-stray-angle-bracket`, security, [#433](https://github.com/gombit-dev/gombit/issues/433))
 
