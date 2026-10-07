@@ -180,10 +180,12 @@ func testTimeRangeUnsetAndInRange(t *testing.T, db *DB) {
 	if err := db.First(&after, defaulted.ID).Error; err != nil || after.Name != "saved" || !after.At.Equal(before.At) {
 		t.Errorf("Save, zero defaulted column: %v, stored %+v, want At kept as %v", err, after, before.At)
 	}
-	// A zero the edit sets (ScopeEdit's edited columns) is refused, not
-	// left out.
-	edit := rangedDefault{ID: defaulted.ID, Name: "edited"}
-	wantRangeError(t, "Save, zero in an edited defaulted column", ScopeEdit(db.DB, &edit, []string{"at"}, nil).Save(&edit).Error, "at")
+	// A zero an edit of the loaded row writes over its real value is
+	// refused, not left out (ScopeEdit).
+	editStored := StoredValues(db.DB, &after)
+	edit := after
+	edit.Name, edit.At = "edited", time.Time{}
+	wantRangeError(t, "Save, zero over a real value in a defaulted column", ScopeEdit(db.DB, &edit, editStored).Save(&edit).Error, "at")
 
 	// NULL is a value, not an unset column: Save clears a defaulted nullable
 	// column (#562 round 5).
@@ -469,18 +471,23 @@ func testTimeRangeStoredZero(t *testing.T, db *DB) {
 	if len(kept) != 1 || kept[0] != "due" {
 		t.Fatalf("StoredZeroColumns = %v, want [due]", kept)
 	}
+	stored := StoredValues(db.DB, &loaded)
 	loaded.Name = "kept"
-	if err := ScopeEdit(db.DB, &loaded, nil, kept).Save(&loaded).Error; err != nil {
+	if err := ScopeEdit(db.DB, &loaded, stored).Save(&loaded).Error; err != nil {
 		t.Errorf("Save keeping the stored zero: %v", err)
 	}
-	q := ScopeEdit(db.DB, &loaded, nil, kept).Model(&loaded).Select("*")
+	// The deprecated KeepStoredZeros still scopes the same way.
+	if err := KeepStoredZeros(db.DB, &loaded, kept, nil).Save(&loaded).Error; err != nil {
+		t.Errorf("KeepStoredZeros: %v", err)
+	}
+	q := ScopeEdit(db.DB, &loaded, stored).Model(&loaded).Select("*")
 	if err := q.Updates(&loaded).Error; err != nil {
 		t.Errorf("Select(*).Updates keeping the stored zero: %v", err)
 	}
 	if len(q.Statement.Omits) != 0 {
 		t.Errorf("the left-out column stayed in the chain's Omits: %v", q.Statement.Omits)
 	}
-	wantRangeError(t, "ScopeEdit for another model", ScopeEdit(db.DB, &rangedDefault{}, nil, kept).Save(&loaded).Error, "due")
+	wantRangeError(t, "ScopeEdit for another model", ScopeEdit(db.DB, &rangedDefault{}, stored).Save(&loaded).Error, "due")
 	// The scope is the row passed to it: another row written on the same DB
 	// with a zero set on purpose is refused (#562 round 6).
 	other := rangedEvent{Name: "other", Due: inRange, Issued: dateFine}
@@ -488,7 +495,7 @@ func testTimeRangeStoredZero(t *testing.T, db *DB) {
 		t.Fatal(err)
 	}
 	other.Due = time.Time{}
-	wantRangeError(t, "ScopeEdit for another row", ScopeEdit(db.DB, &loaded, nil, kept).Save(&other).Error, "due")
+	wantRangeError(t, "ScopeEdit for another row", ScopeEdit(db.DB, &loaded, stored).Save(&other).Error, "due")
 	var reread rangedEvent
 	if err := db.First(&reread, loaded.ID).Error; err != nil || reread.Name != "kept" || !reread.Due.IsZero() {
 		t.Fatalf("kept save: %v, stored %+v", err, reread)

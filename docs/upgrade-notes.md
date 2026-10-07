@@ -86,10 +86,11 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   65,535 bytes (MySQL's `TEXT`), and an unsized primary-key, indexed,
   unique or defaulted string 191 characters (MySQL's `varchar(191)`),
   now on every driver: PostgreSQL and SQLite stored more. A row that
-  already stores such text stays editable through the admin and
-  partial updates (`database.ScopeEdit` checks only what an edit
-  sets); a generic `Save` of it is a 422 on that field until the value
-  is shortened or cleaned (docs/database.md § Text).
+  already stores such text stays editable through the admin, its form
+  included, and partial updates (`database.ScopeEdit` with
+  `database.StoredValues` judges only what an edit changes); a generic
+  `Save` of it is a 422 on that field until the value is shortened or
+  cleaned (docs/database.md § Text).
 
 - **Breaking.** `database.Search` takes a context and returns an error, like `FilterEq`: a search term with a NUL byte or invalid UTF-8 is a 422. (`database-search-takes-context`, api, [#444](https://github.com/gombit-dev/gombit/issues/444))
 
@@ -97,6 +98,14 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   call `database.Search(ctx, q, columns, term)` and return its error.
   Run `gombit generate` to update an app's generated `handler.gen.go`,
   which also answers a `get` of an id over `MaxInt64` with a 404.
+
+- A scaffolded `internal/product/handler.go` answers an id over `MaxInt64` with a 404; an app scaffolded before answers a 500 on PostgreSQL. (`scaffolded-get-id-over-maxint64`, scaffold, [#444](https://github.com/gombit-dev/gombit/issues/444))
+
+  The handler is app-owned, so `gombit generate` does not update it. In
+  its `get`, parse the id with `strconv.ParseUint(input.ID, 10, 63)`
+  instead of `64`: PostgreSQL's bigint cannot bind a larger id, and no
+  row holds one. Apply the same to any hand-written handler that
+  parses a uint id.
 
 ### Automatic: applied by the upgrade tooling
 
@@ -161,6 +170,12 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   framework upgrade. The framework also newly requires the AWS SDK
   for Go v2 (the S3 storage driver), `golang.org/x/mod`,
   `golang.org/x/sys` and `gopkg.in/yaml.v3`.
+
+- `database.KeepStoredZeros` is deprecated: use `database.ScopeEdit` with `database.StoredValues`. (`keep-stored-zeros-deprecated`, api, [#444](https://github.com/gombit-dev/gombit/issues/444))
+
+  `ScopeEdit` judges an edit of a loaded row on what it changes,
+  compared after the model's hooks, for the text check as well as
+  stored zero instants. `KeepStoredZeros` keeps working.
 
 - `MapPersistError` and `MapLoadError` answer a database data exception (a value too long or out of range for its column) with a 422 instead of a 500. (`data-exceptions-are-422`, behavior, [#444](https://github.com/gombit-dev/gombit/issues/444))
 

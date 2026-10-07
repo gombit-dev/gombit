@@ -368,23 +368,29 @@ version.
   with a 422 naming the field on every driver, on every write path
   (`database.TextProblem`, `database.TextMaxBytes`); `FilterEq`, `Search`
   and the admin's filters and search refuse such terms with a 422, and a
-  generated `get` answers such an id with a 404. `MapPersistError` and
+  generated `get` and a newly scaffolded product handler answer such an id
+  with a 404. `MapPersistError` and
   `MapLoadError` answer a remaining driver data exception (PostgreSQL 22001,
   22003, 22007, 22008, 22021, 22P05; MySQL 1264, 1265, 1292, 1366, 1406)
   with a 422 without fields instead of a 500 (`database.IsDataException`),
   and a uint filter over `MaxInt64` is a 422; a decimal over its precision
-  is #440's. `database.KeepStoredZeros` is now `database.ScopeEdit(db, row,
-  edited, storedZeros)`, and also limits the text check to the columns an
-  edit sets. **Behaviour change:** text a column cannot hold on every driver
+  is #440's. An edit of a loaded row is judged on what it changes:
+  `database.StoredValues` records the row, and `database.ScopeEdit` scopes
+  the update so text and a zero instant the row still stores, after the
+  model's hooks, are not judged again (`database.KeepStoredZeros` is
+  deprecated in its favour). **Behaviour change:** text a column cannot hold on every driver
   is now refused where it was stored: on SQLite; on PostgreSQL a `text`
   value over 65,535 bytes and an unsized primary-key, indexed, unique or
   defaulted string over 191 characters (MySQL's `varchar(191)`); on MySQL
   and SQLite a NUL byte. **Upgrading:** a row that already stores such text
-  stays editable through the admin and partial updates, but a generic
+  stays editable through the admin (its form included) and partial updates,
+  but a generic
   `Save` of it is a 422 on that field until the value is cleaned up (see
   docs/database.md). `database.Search` takes a context and returns an error,
   like `FilterEq`, so run `gombit generate` to update an app's
-  `handler.gen.go` ([#444](https://github.com/gombit-dev/gombit/issues/444)).
+  `handler.gen.go`; an app's own scaffolded `internal/product/handler.go`
+  needs the 63-bit id parse by hand
+  ([#444](https://github.com/gombit-dev/gombit/issues/444)).
 - `gombit make command` refuses the names `generate` and `contract`, which
   collided with framework commands; every command the root registers is now
   reserved ([#447](https://github.com/gombit-dev/gombit/pull/447)).
@@ -547,8 +553,8 @@ version.
   that column out of its update (the row's value stays; the insert fallback
   fills it). Rows that already store the zero instant stay editable through
   `Update`, a partial `Updates` and the admin, which keeps a stored zero in
-  any column a PATCH does not set unless a hook repairs it
-  (`database.StoredZeroColumns`, `database.ScopeEdit`); a generic
+  any column a PATCH leaves as stored unless a hook repairs it
+  (`database.StoredValues`, `database.ScopeEdit`); a generic
   `Save` of one is a 422 until the column is cleaned up
   (see docs/database.md). A string no Go time parses (`'infinity'`) is refused too
   ([#443](https://github.com/gombit-dev/gombit/issues/443)).

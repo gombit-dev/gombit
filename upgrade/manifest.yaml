@@ -264,10 +264,11 @@ releases:
           65,535 bytes (MySQL's `TEXT`), and an unsized primary-key, indexed,
           unique or defaulted string 191 characters (MySQL's `varchar(191)`),
           now on every driver: PostgreSQL and SQLite stored more. A row that
-          already stores such text stays editable through the admin and
-          partial updates (`database.ScopeEdit` checks only what an edit
-          sets); a generic `Save` of it is a 422 on that field until the value
-          is shortened or cleaned (docs/database.md § Text).
+          already stores such text stays editable through the admin, its form
+          included, and partial updates (`database.ScopeEdit` with
+          `database.StoredValues` judges only what an edit changes); a generic
+          `Save` of it is a 422 on that field until the value is shortened or
+          cleaned (docs/database.md § Text).
         refs: [444]
 
       - id: database-search-takes-context
@@ -280,6 +281,28 @@ releases:
           call `database.Search(ctx, q, columns, term)` and return its error.
           Run `gombit generate` to update an app's generated `handler.gen.go`,
           which also answers a `get` of an id over `MaxInt64` with a 404.
+        refs: [444]
+
+      - id: scaffolded-get-id-over-maxint64
+        kind: manual
+        area: scaffold
+        summary: "A scaffolded `internal/product/handler.go` answers an id over `MaxInt64` with a 404; an app scaffolded before answers a 500 on PostgreSQL."
+        details: |
+          The handler is app-owned, so `gombit generate` does not update it. In
+          its `get`, parse the id with `strconv.ParseUint(input.ID, 10, 63)`
+          instead of `64`: PostgreSQL's bigint cannot bind a larger id, and no
+          row holds one. Apply the same to any hand-written handler that
+          parses a uint id.
+        refs: [444]
+
+      - id: keep-stored-zeros-deprecated
+        kind: informational
+        area: api
+        summary: "`database.KeepStoredZeros` is deprecated: use `database.ScopeEdit` with `database.StoredValues`."
+        details: |
+          `ScopeEdit` judges an edit of a loaded row on what it changes,
+          compared after the model's hooks, for the text check as well as
+          stored zero instants. `KeepStoredZeros` keeps working.
         refs: [444]
 
       - id: data-exceptions-are-422

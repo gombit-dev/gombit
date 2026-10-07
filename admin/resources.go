@@ -210,7 +210,11 @@ func (h *handlers) updateResource(ctx context.Context, input *patchInput) (*rowO
 	if err != nil {
 		return nil, err
 	}
-	kept, edited := m.storedZeros(db, inst, body)
+	// What the row stores before the PATCH: the write checks judge only the
+	// columns the PATCH (or a model hook) changes, so a row holding a value
+	// stored before a check (a zero instant, over-long text) stays editable,
+	// whatever fields the form sends back unchanged (issues #443, #444).
+	stored := database.StoredValues(db, inst)
 	if err := applyWrite(ctx, m, inst, body, false); err != nil {
 		return nil, err
 	}
@@ -219,7 +223,7 @@ func (h *handlers) updateResource(ctx context.Context, input *patchInput) (*rowO
 		return nil, err
 	}
 	if err := h.writeFiles(ctx, cl, db, m, before, inst, func(tx *gorm.DB) error {
-		return persistWithM2M(ctx, database.ScopeEdit(tx, inst, edited, kept), m, inst, m2mIDs, false, m.updateOmits(before, inst), m.fileFence(before))
+		return persistWithM2M(ctx, database.ScopeEdit(tx, inst, stored), m, inst, m2mIDs, false, m.updateOmits(before, inst), m.fileFence(before))
 	}); err != nil {
 		return nil, err
 	}
@@ -247,7 +251,11 @@ func (h *handlers) updateVersioned(ctx context.Context, m *registered, inst any,
 		expected = cv
 		body = withoutKey(body, m.version.name)
 	}
-	kept, edited := m.storedZeros(db, inst, body)
+	// What the row stores before the PATCH: the write checks judge only the
+	// columns the PATCH (or a model hook) changes, so a row holding a value
+	// stored before a check (a zero instant, over-long text) stays editable,
+	// whatever fields the form sends back unchanged (issues #443, #444).
+	stored := database.StoredValues(db, inst)
 	if err := applyWrite(ctx, m, inst, body, false); err != nil {
 		return nil, err
 	}
@@ -257,7 +265,7 @@ func (h *handlers) updateVersioned(ctx context.Context, m *registered, inst any,
 	}
 	m.version.set(inst, expected+1)
 	if err := h.writeFiles(ctx, cl, db, m, before, inst, func(tx *gorm.DB) error {
-		res := database.ScopeEdit(tx, inst, edited, kept).WithContext(ctx).
+		res := database.ScopeEdit(tx, inst, stored).WithContext(ctx).
 			Model(inst).
 			Where(clause.Eq{Column: clause.Column{Name: m.version.column}, Value: expected}).
 			Clauses(clause.Where{Exprs: m.fileFence(before)}).

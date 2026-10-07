@@ -35,6 +35,21 @@ type textItem struct {
 	Meta string `gorm:"serializer:json"`
 }
 
+// hookedText derives Slug in a hook, which writes a NUL byte when Name is
+// "hook".
+type hookedText struct {
+	ID   uint   `gorm:"primaryKey"`
+	Name string `gorm:"size:10"`
+	Slug string
+}
+
+func (h *hookedText) BeforeSave(*gorm.DB) error {
+	if h.Name == "hook" {
+		h.Slug = "hook\x00slug"
+	}
+	return nil
+}
+
 // hexText writes its string hex-encoded.
 type hexText string
 
@@ -177,8 +192,9 @@ func testTextStoredBeforeTheCheck(t *testing.T, db *DB) {
 	if err := db.First(&loaded, row.ID).Error; err != nil || loaded.Notes != legacy {
 		t.Fatalf("fixture: %v", err)
 	}
+	stored := StoredValues(db.DB, &loaded)
 	loaded.Name = "renamed"
-	if err := ScopeEdit(db.DB, &loaded, []string{"name"}, nil).Save(&loaded).Error; err != nil {
+	if err := ScopeEdit(db.DB, &loaded, stored).Save(&loaded).Error; err != nil {
 		t.Errorf("scoped Save of a row storing legacy text: %v", err)
 	}
 	if err := db.Model(&loaded).Updates(map[string]any{"name": "again"}).Error; err != nil {
@@ -186,7 +202,28 @@ func testTextStoredBeforeTheCheck(t *testing.T, db *DB) {
 	}
 	wantTextError(t, "unscoped Save of a row storing legacy text", db.Save(&loaded).Error, "notes")
 	loaded.Name = "a\x00b"
-	wantTextError(t, "scoped Save, NUL in an edited column", ScopeEdit(db.DB, &loaded, []string{"name"}, nil).Save(&loaded).Error, "name")
+	wantTextError(t, "scoped Save, NUL in an edited column", ScopeEdit(db.DB, &loaded, stored).Save(&loaded).Error, "name")
+	// Changing the legacy column itself to other refused text is refused.
+	loaded.Name = "again"
+	loaded.Notes = legacy + "x"
+	wantTextError(t, "scoped Save, legacy column changed", ScopeEdit(db.DB, &loaded, stored).Save(&loaded).Error, "notes")
+	loaded.Notes = legacy
+
+	// A model hook that writes refused text into a column the edit did not
+	// touch is judged like any change: the scope exempts only text the row
+	// still stores (#564 review round 2).
+	_ = db.Migrator().DropTable(&hookedText{})
+	if err := db.AutoMigrate(&hookedText{}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Migrator().DropTable(&hookedText{}) })
+	h := hookedText{Name: "plain"}
+	if err := db.Create(&h).Error; err != nil {
+		t.Fatal(err)
+	}
+	hs := StoredValues(db.DB, &h)
+	h.Name = "hook"
+	wantTextError(t, "scoped Save, hook writes NUL", ScopeEdit(db.DB, &h, hs).Save(&h).Error, "slug")
 	var reread textItem
 	if err := db.First(&reread, row.ID).Error; err != nil || reread.Name != "again" || reread.Notes != legacy {
 		t.Fatalf("stored name %q, notes kept %v: %v", reread.Name, reread.Notes == legacy, err)

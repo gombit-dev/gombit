@@ -205,14 +205,16 @@ What a statement writes is what GORM writes:
   column (an unset field on SQLite or PostgreSQL, `'0000-00-00'` on MySQL)
   can still have its other columns changed by `Update` and a partial
   `Updates`. The admin's PATCH keeps such a column, mapped or not, when the
-  request does not set it: `database.StoredZeroColumns` lists the loaded
-  row's zero columns, and `database.ScopeEdit` scopes the update to
-  leave one out of its `SET` if it still holds the zero after the model's
-  hooks, so a hook that repairs it is written. A zero the request sets is
-  refused, in any column. The scope covers the update of that row (the
-  pointer passed to `ScopeEdit`) only. In your own code a `Save` of
-  such a row writes the zero back and is a 422 unless you scope it the same
-  way; so is `Updates(&row)` on PostgreSQL, which reads the value back in
+  edit leaves it as stored, whether the request omits it or sends the stored
+  value back: `database.StoredValues` records the loaded row, and
+  `database.ScopeEdit` scopes the update to leave a column out of its `SET`
+  if it still holds the zero after the model's hooks, so a hook that repairs
+  it is written. A zero instant written over a real value is refused, in any
+  column. The scope covers the update of that row (the pointer passed to
+  `ScopeEdit`) only. (`StoredZeroColumns` lists a row's zero columns;
+  `KeepStoredZeros` is the deprecated form of the scope.) In your own code a
+  `Save` of such a row writes the zero back and is a 422 unless you scope it
+  the same way; so is `Updates(&row)` on PostgreSQL, which reads the value back in
   `Local` (GORM then writes it), while on SQLite and MySQL GORM skips it. To
   clean the rows up, make the field a pointer and
   `UPDATE … SET col = NULL WHERE col = '0001-01-01 00:00:00'`, or give the
@@ -260,20 +262,24 @@ to match its fields to the model's columns.
 
 **Rows stored before the check.** A row may already hold text the check now
 refuses (more than a `text` or a 191-character column holds on PostgreSQL or
-SQLite, a NUL byte on MySQL or SQLite). An edit scoped to the row with
-`database.ScopeEdit` checks only the columns the edit sets, and writes the
-others back as the row stores them; the admin's PATCH does this, so such a row
-stays editable there, and setting the column to refused text is a 422. A
-partial update (`Update`, `Updates` of a map or struct) does not write the
-column. A generic `Save` of the row writes the stored value back and is a 422
-on that field: shorten or clean the value, or scope the save.
+SQLite, a NUL byte on MySQL or SQLite). An edit scoped to the row
+(`database.ScopeEdit` with the row's `database.StoredValues`, taken when it
+was loaded) does not judge text the row still stores, compared after the
+model's hooks run; text the edit or a hook changed is checked. The admin's
+PATCH does this, so such a row stays editable there, including from the
+admin's form, which sends every field back; setting the column to other
+refused text is a 422. A partial update (`Update`, `Updates` of a map or
+struct) does not write the column. A generic `Save` of the row writes the
+stored value back and is a 422 on that field: shorten or clean the value, or
+scope the save.
 
 The list helpers apply the same rule to what a client sends: `FilterEq` on a
 string column and `Search` refuse a NUL byte or invalid UTF-8 with a 422
 (keyed on the column, and on `search`), which PostgreSQL refused to compare
 with a 500, and `FilterEq` on a uint column refuses a value over
 `math.MaxInt64`, which PostgreSQL's bigint cannot bind; for the same reason a
-generated `get` answers an id over `math.MaxInt64` with a 404. `Search`
+generated `get`, and the product handler `gombit new` scaffolds, answer an id
+over `math.MaxInt64` with a 404. `Search`
 therefore takes a context and returns an error, like `FilterEq`; `gombit
 generate` emits the new call. The admin data plane refuses them in its
 filters, search and writes alike.

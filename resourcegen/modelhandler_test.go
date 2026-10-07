@@ -383,6 +383,10 @@ func TestRenderModelHandlerQuerySurface(t *testing.T) {
 		"database.FilterEq(ctx, q, \"price\", database.FilterInt64, input.Price)",
 		"database.FilterEq(ctx, q, \"active\", database.FilterBool, input.Active)",
 		"database.Search(ctx, q, []string{\"title\"}, input.Search)",
+		// An id over MaxInt64 fails to parse (a 404): PostgreSQL's bigint
+		// cannot bind it, and SQLite answers not-found either way, so the
+		// run test below cannot tell.
+		"strconv.ParseUint(input.ID, 10, 63)",
 		"database.ParseAggregates(ctx, input.Aggregate,",
 		"database.Ordering(ctx, q, input.Ordering, []string{\"title\", \"genre\"}, \"id\")",
 		"Aggregates: aggregates",

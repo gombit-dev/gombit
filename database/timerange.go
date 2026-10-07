@@ -112,7 +112,7 @@ type timeRangeCheck struct {
 	skipHooks bool
 	fields    map[string][]string // allocated on the first problem
 	leftOut   []string            // columns the update leaves out of its SET
-	scope     *editScope          // ScopeEdit, read on first need
+	scope     *StoredRow          // ScopeEdit, read on first need
 	scopeRead bool
 }
 
@@ -183,7 +183,7 @@ func (c *timeRangeCheck) leaveOut(f *schema.Field) {
 }
 
 // storedZeros reads the ScopeEdit scope when this statement writes its row.
-func (c *timeRangeCheck) storedZeros() *editScope {
+func (c *timeRangeCheck) storedZeros() *StoredRow {
 	if !c.scopeRead {
 		c.scopeRead = true
 		c.scope = editScopeOf(c.stmt)
@@ -191,16 +191,25 @@ func (c *timeRangeCheck) storedZeros() *editScope {
 	return c.scope
 }
 
-// keepsStoredZero reports whether ScopeEdit keeps f's stored zero.
+// keepsStoredZero reports whether the row ScopeEdit scopes stored the zero
+// instant in f's column.
 func (c *timeRangeCheck) keepsStoredZero(f *schema.Field) bool {
 	k := c.storedZeros()
-	return k != nil && containsColumn(k.kept, f.DBName)
+	return k != nil && containsColumn(k.zeroTimes, f.DBName)
 }
 
-// edits reports whether ScopeEdit named f's column as one the edit sets.
+// edits reports whether the edit ScopeEdit scopes changed f's column: its
+// stored value was not the zero instant (StoredValues), or the edit named it
+// (the deprecated KeepStoredZeros).
 func (c *timeRangeCheck) edits(f *schema.Field) bool {
 	k := c.storedZeros()
-	return k != nil && containsColumn(k.edited, f.DBName)
+	if k == nil {
+		return false
+	}
+	if k.complete {
+		return !containsColumn(k.zeroTimes, f.DBName)
+	}
+	return containsColumn(k.edited, f.DBName)
 }
 
 func containsColumn(columns []string, name string) bool {
@@ -212,32 +221,11 @@ func containsColumn(columns []string, name string) bool {
 	return false
 }
 
-const editScopeKey = "gombit:edit_scope"
-
-// editScope is what ScopeEdit records about an edit of one row.
-type editScope struct {
-	row    any      // the pointer the update writes
-	edited []string // the columns the edit sets
-	kept   []string // stored zero instants the update leaves out
-}
-
-// editScopeOf returns the ScopeEdit scope of stmt when stmt writes its row.
-func editScopeOf(stmt *gorm.Statement) *editScope {
-	v, ok := stmt.Settings.Load(editScopeKey)
-	if !ok {
-		return nil
-	}
-	if k, ok := v.(editScope); ok && stmt.Dest == k.row {
-		return &k
-	}
-	return nil
-}
-
 // StoredZeroColumns returns the timestamp and date columns of row, a model as
 // loaded from db, that hold the zero instant 0001-01-01T00:00:00Z: a value
 // stored before the time range check refused it (what a non-pointer field
 // left unset became on SQLite and PostgreSQL, and MySQL's '0000-00-00').
-// Pass them, less the columns an edit sets, to ScopeEdit.
+// StoredValues records them, with the row's text, for ScopeEdit.
 func StoredZeroColumns(db *gorm.DB, row any) []string {
 	rv := reflect.Indirect(reflect.ValueOf(row))
 	if rv.Kind() != reflect.Struct {
@@ -255,31 +243,6 @@ func StoredZeroColumns(db *gorm.DB, row any) []string {
 		}
 	}
 	return out
-}
-
-// ScopeEdit returns db scoped for an edit of row, a model loaded from the
-// database, that sets the edited columns. An update that writes row back
-// (Save, Updates of the row pointer) writes the values the edit did not set as
-// the row stores them, so the write checks judge only what the edit sets:
-//
-//   - the text check (gombit:text) checks only the edited columns: text the
-//     row already stores is written back as it is, even if it predates the
-//     check (a NUL byte, more than the column now allows);
-//   - each storedZeros column (see StoredZeroColumns) that still holds the
-//     zero instant when the statement runs, after the model's hooks, is left
-//     out of the SET instead of refused, so a zero the row already stores is
-//     not a 422 for a value the edit did not set. One a hook gave a real value
-//     is written, and checked.
-//
-// A zero or other refused value in an edited column is refused, never left
-// out, even in a column Save would otherwise leave out unset (an auto
-// timestamp, a default). Any other write on the returned DB is checked as
-// usual. The admin data plane uses it for its PATCH.
-func ScopeEdit(db *gorm.DB, row any, edited, storedZeros []string) *gorm.DB {
-	if rv := reflect.ValueOf(row); rv.Kind() != reflect.Pointer || rv.IsNil() {
-		return db
-	}
-	return db.Set(editScopeKey, editScope{row: row, edited: edited, kept: storedZeros})
 }
 
 // zeroInstant reports whether v holds the zero instant, whatever Location it

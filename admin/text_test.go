@@ -1,6 +1,7 @@
 package admin_test
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -55,9 +56,11 @@ func runTextAdmin(t *testing.T, db *database.DB) {
 	if err := admin.Register(app, legacyNote{}, admin.Options{Slug: "legacy-notes"}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	legacy := strings.Repeat("b", database.TextMaxBytes+10)
-	if db.Driver() == database.DriverMySQL {
-		legacy = "legacy\x00body"
+	// A NUL byte where the driver stored one (SQLite, MySQL); PostgreSQL
+	// refused it, so there the legacy value is text over 65,535 bytes.
+	legacy := "legacy\x00body"
+	if db.Driver() == database.DriverPostgres {
+		legacy = strings.Repeat("b", database.TextMaxBytes+10)
 	}
 	row := legacyNote{Title: "t", Body: "b"}
 	if err := db.Create(&row).Error; err != nil {
@@ -70,10 +73,19 @@ func runTextAdmin(t *testing.T, db *database.DB) {
 	if res := doRequest(app, jar, http.MethodPatch, path, `{"title":"renamed"}`); res.Code != http.StatusOK {
 		t.Fatalf("title-only PATCH of a row storing legacy text: %d %s", res.Code, res.Body.String())
 	}
+	// The admin's form sends every writable field back: the legacy body,
+	// unchanged, is not judged again (#564 review round 2).
+	form, err := json.Marshal(map[string]any{"title": "from the form", "body": legacy})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res := doRequest(app, jar, http.MethodPatch, path, string(form)); res.Code != http.StatusOK {
+		t.Fatalf("full-form PATCH of a row storing legacy text: %d %s", res.Code, res.Body.String())
+	}
 	res := doRequest(app, jar, http.MethodPatch, path, `{"body":"a\u0000b"}`)
 	assertError(t, res, http.StatusUnprocessableEntity, contract.CodeValidationError)
 	var stored legacyNote
-	if err := db.First(&stored, row.ID).Error; err != nil || stored.Title != "renamed" || stored.Body != legacy {
+	if err := db.First(&stored, row.ID).Error; err != nil || stored.Title != "from the form" || stored.Body != legacy {
 		t.Fatalf("stored title %q, body kept %v: %v", stored.Title, stored.Body == legacy, err)
 	}
 }

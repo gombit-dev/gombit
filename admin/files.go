@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"slices"
 
 	"github.com/danielgtaylor/huma/v2"
 	"go.uber.org/zap"
@@ -12,7 +11,6 @@ import (
 	"gorm.io/gorm/clause"
 
 	"github.com/gombit-dev/gombit/contract"
-	"github.com/gombit-dev/gombit/database"
 	"github.com/gombit-dev/gombit/storage"
 	"github.com/gombit-dev/gombit/storage/claims"
 	"github.com/gombit-dev/gombit/storage/filefield"
@@ -207,29 +205,6 @@ func (m *registered) updateOmits(before map[string]string, inst any) []string {
 		}
 	}
 	return omit
-}
-
-// storedZeros are the timestamp and date columns of the loaded row that hold
-// the zero instant, a value stored before the database's time range check
-// refused it (issue #443), less the ones the PATCH body sets (kept), and the
-// columns the body sets (edited). Every such column counts, mapped or not
-// (hidden, server-set, outside Fields, a named time type): Save writes the
-// whole row back. The update passes them to database.ScopeEdit, which
-// leaves a kept column out of the write only if it still holds the zero after
-// the model's hooks, so a hook's repair is written and an edit the operator
-// never made is not a 422, while a zero the body sets is refused.
-func (m *registered) storedZeros(db *gorm.DB, inst any, body map[string]any) (kept, edited []string) {
-	for name := range body {
-		if col, ok := m.columnFor(name); ok {
-			edited = append(edited, col)
-		}
-	}
-	for _, col := range database.StoredZeroColumns(db, inst) {
-		if !slices.Contains(edited, col) {
-			kept = append(kept, col)
-		}
-	}
-	return kept, edited
 }
 
 // fileFence is the condition that the record's file columns still hold the

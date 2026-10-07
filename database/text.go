@@ -86,7 +86,8 @@ func (g *textGuard) run(db *gorm.DB, creating bool) {
 	}
 	c := textCheck{guard: g}
 	if !creating {
-		// An edit of a loaded row checks only what the edit sets (ScopeEdit).
+		// An edit of a loaded row does not judge text it leaves as the row
+		// stores it (ScopeEdit).
 		c.scope = editScopeOf(db.Statement)
 	}
 	forEachAssigned(db, creating, targets, c.check)
@@ -97,15 +98,15 @@ func (g *textGuard) run(db *gorm.DB, creating bool) {
 
 type textCheck struct {
 	guard  *textGuard
-	scope  *editScope
+	scope  *StoredRow
 	fields map[string][]string // allocated on the first problem
 }
 
 func (c *textCheck) check(a assignedValue) {
-	if c.scope != nil && a.FromStruct && !containsColumn(c.scope.edited, a.Field.DBName) {
+	s, ok := textValue(a.Value)
+	if c.scope != nil && a.FromStruct && c.scope.storesText(a.Field.DBName, s, ok) {
 		return
 	}
-	s, ok := textValue(a.Value)
 	if !ok {
 		return
 	}
