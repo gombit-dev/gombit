@@ -1,9 +1,14 @@
 package database
 
 import (
+	"database/sql"
+	"math"
+	"reflect"
 	"sort"
 	"testing"
+	"time"
 
+	"github.com/gombit-dev/gombit/types"
 	"gorm.io/gorm"
 )
 
@@ -116,6 +121,39 @@ func testScopeEditColumns(t *testing.T, db *DB) {
 		t.Errorf("hook's in-place edits were not written: tags %v, meta %v", hr.Tags, hr.Meta)
 	}
 
+	// PostgreSQL stores NaN: one left as it is is no change, so a concurrent
+	// change to the column is kept rather than reverted to the NaN.
+	if db.Driver() == DriverPostgres {
+		_ = db.Migrator().DropTable(&nanRow{})
+		if err := db.AutoMigrate(&nanRow{}); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = db.Migrator().DropTable(&nanRow{}) })
+		created := nanRow{Name: "nan"}
+		if err := db.Create(&created).Error; err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Exec("UPDATE nan_rows SET score = 'NaN' WHERE id = ?", created.ID).Error; err != nil {
+			t.Fatal(err)
+		}
+		var nl nanRow
+		if err := db.First(&nl, created.ID).Error; err != nil || !math.IsNaN(nl.Score) {
+			t.Fatalf("NaN fixture: %v, %v", err, nl.Score)
+		}
+		ns := StoredValues(db.DB, &nl)
+		if err := db.Exec("UPDATE nan_rows SET score = 42 WHERE id = ?", created.ID).Error; err != nil {
+			t.Fatal(err)
+		}
+		nl.Name = "nan edited"
+		if err := ScopeEdit(db.DB, &nl, ns).Model(&nl).Select("*").Updates(&nl).Error; err != nil {
+			t.Fatalf("scoped Updates of a NaN row: %v", err)
+		}
+		var after nanRow
+		if err := db.First(&after, created.ID).Error; err != nil || after.Score != 42 || after.Name != "nan edited" {
+			t.Errorf("NaN row after the edit: %+v (%v), want score 42 kept", after, err)
+		}
+	}
+
 	// An edit that changes nothing writes no column: a concurrent change is
 	// kept.
 	none := StoredValues(db.DB, &final)
@@ -128,5 +166,40 @@ func testScopeEditColumns(t *testing.T, db *DB) {
 	var kept editRow
 	if err := db.First(&kept, row.ID).Error; err != nil || kept.Price != 900 {
 		t.Errorf("an unchanged scoped Updates wrote the row: price %d (%v), want 900", kept.Price, err)
+	}
+}
+
+type nanRow struct {
+	ID    uint `gorm:"primaryKey"`
+	Name  string
+	Score float64
+}
+
+// valuesEqual compares column values, not Go representations.
+func TestValuesEqual(t *testing.T) {
+	at := time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
+	nan := math.NaN()
+	one, other := "a", "a"
+	dec1, _ := types.NewDecimalFromString("1.5")
+	dec2, _ := types.NewDecimalFromString("1.50")
+	for name, c := range map[string]struct {
+		a, b any
+		want bool
+	}{
+		"NaN equals NaN":           {nan, nan, true},
+		"NaN is not 1":             {nan, 1.0, false},
+		"same instant, other zone": {at, at.In(time.FixedZone("x", -3*3600)), true},
+		"other instant":            {at, at.Add(time.Second), false},
+		"NullTime, other zone":     {sql.NullTime{Time: at, Valid: true}, sql.NullTime{Time: at.Local(), Valid: true}, true},
+		"NullFloat64 NaN":          {sql.NullFloat64{Float64: nan, Valid: true}, sql.NullFloat64{Float64: nan, Valid: true}, true},
+		"pointers by target":       {&one, &other, true},
+		"nil pointer and value":    {(*string)(nil), &one, false},
+		"decimal by value":         {dec1, dec2, true},
+		"slices":                   {[]string{"a"}, []string{"a"}, true},
+		"slices differ":            {[]string{"a"}, []string{"b"}, false},
+	} {
+		if got := valuesEqual(reflect.ValueOf(c.a), reflect.ValueOf(c.b)); got != c.want {
+			t.Errorf("%s: %v, want %v", name, got, c.want)
+		}
 	}
 }

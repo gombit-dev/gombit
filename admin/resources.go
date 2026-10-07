@@ -228,7 +228,8 @@ func (h *handlers) updateResource(ctx context.Context, input *patchInput) (*rowO
 		return nil, err
 	}
 	// The PATCH wrote the columns it changed; the row may hold another
-	// request's change to the rest, so the response is the row as stored.
+	// request's change to the rest, so the response is the row as read back
+	// after the write (a delete landing in between makes it a 404).
 	fresh, err := h.loadByID(ctx, m, input.ID)
 	if err != nil {
 		return nil, err
@@ -282,6 +283,10 @@ func (h *handlers) updateVersioned(ctx context.Context, m *registered, inst any,
 			return database.MapPersistError(ctx, res.Error, "resource already exists", "persist resource")
 		}
 		if res.RowsAffected == 0 {
+			// The row was deleted since the load: a 404.
+			if err := rowGone(ctx, tx, m, inst); err != nil {
+				return err
+			}
 			// The version moved, or a file did (the fence): rolls back the
 			// file claims too, the new file abandoned, the old one kept.
 			return contract.WithContext(ctx, contract.Conflict(
@@ -773,10 +778,6 @@ func applyOrdering(q *gorm.DB, m *registered, ordering string) (*gorm.DB, error)
 	return q.Order(clause.OrderByColumn{Column: clause.Column{Name: col}, Desc: desc}), nil
 }
 
-// updateFenced writes inst (every column but omit) while the record still
-// matches fence (registered.fileFence). No matching row is a 409, unless
-// the row does match and the write merely changed nothing (MySQL reports
-// such a row as unaffected).
 // updateRow writes an edit of a loaded row (issue #450). Under the PATCH's
 // database.ScopeEdit only the columns the edit, or a model hook, changed are
 // written, so a concurrent change to another column is not reverted, and
@@ -790,6 +791,12 @@ func updateRow(ctx context.Context, tx *gorm.DB, m *registered, inst any, omit [
 	}
 	// No row updated: deleted since the load, or matched but left unchanged
 	// (MySQL counts such a row as not affected).
+	return rowGone(ctx, tx, m, inst)
+}
+
+// rowGone is the 404 for an update that found no row because the row was
+// deleted since it was loaded; nil when the row is still there.
+func rowGone(ctx context.Context, tx *gorm.DB, m *registered, inst any) error {
 	pk, ok := m.fieldByName[m.meta.PK]
 	if !ok {
 		return contract.WithContext(ctx, contract.NotFound("unknown resource"))
@@ -812,10 +819,19 @@ func withAssociations(omit []string) []string {
 	return append(append(make([]string, 0, len(omit)+1), omit...), clause.Associations)
 }
 
+// updateFenced writes inst (the columns the edit changed, never its
+// associations; see updateRow) while the record still matches fence
+// (registered.fileFence). No matching row is a 404 when the row was deleted,
+// else a 409, unless the row does match and the write merely changed nothing
+// (MySQL reports such a row as unaffected).
 func updateFenced(ctx context.Context, tx *gorm.DB, m *registered, inst any, omit []string, fence []clause.Expression) error {
 	res := tx.WithContext(ctx).Model(inst).Clauses(clause.Where{Exprs: fence}).Select("*").Omit(withAssociations(omit)...).Updates(inst)
 	if res.Error != nil || res.RowsAffected > 0 {
 		return res.Error
+	}
+	// A row deleted since the load is a 404, not a file race.
+	if err := rowGone(ctx, tx, m, inst); err != nil {
+		return err
 	}
 	pk, ok := m.fieldByName[m.meta.PK]
 	if !ok {

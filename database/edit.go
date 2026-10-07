@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"fmt"
+	"math"
 	"reflect"
 
 	"gorm.io/gorm"
@@ -71,8 +72,10 @@ func StoredValues(db *gorm.DB, row any) StoredRow {
 // database whose stored values StoredValues recorded before the edit. An
 // update that writes row back with Select("*") (Save, or
 // Model(row).Select("*").Updates(row)) writes only the columns whose value the
-// edit, or a model hook, changed, compared after the hooks run (and an
-// auto-update timestamp, as GORM stamps it): the others keep what the row
+// edit, a model hook or a GORM callback (Statement.SetColumn) changed, as
+// values (NaN equals NaN; a time, a decimal with Equal), judged just before
+// the SQL runs (and an auto-update timestamp, as GORM stamps it): the others
+// keep what the row
 // holds now, so a concurrent change to a column the edit did not touch is
 // not reverted (issue #450). An update that changes nothing writes no column
 // (but an auto-update timestamp, which GORM stamps). The write checks judge
@@ -89,8 +92,9 @@ func StoredValues(db *gorm.DB, row any) StoredRow {
 //
 // Use Updates. Save keeps GORM's fallback for an update that affected no row,
 // an insert that writes (and checks) every column: it fires for a row deleted
-// meanwhile, which comes back, and for an edit that changed nothing on a
-// model without an auto-update timestamp, which writes the whole row. With
+// meanwhile, which comes back; for an edit that changed nothing on a model
+// without an auto-update timestamp; and on MySQL for an edit whose columns
+// already held the new values, each of which writes the whole row. With
 // Updates, RowsAffected 0 means the row is gone, or, as MySQL counts, matched
 // but left unchanged. Any other write on the
 // returned DB, another row included, is written and checked as usual. The
@@ -140,7 +144,9 @@ func snapshotValue(v reflect.Value) any {
 
 // deepCopy copies pointers, slices, maps and the exported fields of structs
 // recursively. Unexported fields are copied as they are (a time.Time's
-// Location, a decimal's big.Int), which no hook edits in place.
+// Location, a decimal's big.Int): a hook that changes a map or slice held in
+// an unexported field in place is not seen as a change, and its write is not
+// made. Assign a new value instead.
 func deepCopy(v reflect.Value) reflect.Value {
 	switch v.Kind() {
 	case reflect.Pointer:
@@ -189,41 +195,91 @@ func deepCopy(v reflect.Value) reflect.Value {
 	return v
 }
 
-// registerEditColumnsCallback narrows a scoped whole-row update to the columns
-// the edit changed (ScopeEdit). It is registered before the write checks, so
-// they judge only what is written.
-func registerEditColumnsCallback(db *gorm.DB) error {
-	narrow := db.Callback().Update().Before("gorm:update")
-	if err := narrow.Register("gombit:edit_columns", narrowToChanged); err != nil {
-		return fmt.Errorf("database: register edit columns callback: %w", err)
+// unchanged reports whether v, a column's value now, equals what the row
+// stored in it (StoredValues): the edit, its hooks and its callbacks left it.
+func (r *StoredRow) unchanged(column string, v reflect.Value) bool {
+	stored, known := r.values[column]
+	return known && valuesEqual(v, reflect.ValueOf(stored))
+}
+
+// valuesEqual compares two values of a column as values, not as Go
+// representations: NaN equals NaN (a stored NaN left alone is not a change),
+// and a type with an Equal method (time.Time, whatever Location it was read
+// in; a decimal, whatever its exponent) is compared with it. Pointers are
+// compared by target, structs with exported fields field by field, anything
+// else with reflect.DeepEqual.
+func valuesEqual(a, b reflect.Value) bool {
+	if !a.IsValid() || !b.IsValid() {
+		return a.IsValid() == b.IsValid()
 	}
-	restore := db.Callback().Update().After("gorm:update")
-	if err := restore.Register("gombit:edit_columns_restore", restoreSelects); err != nil {
-		return fmt.Errorf("database: register edit columns restore: %w", err)
+	if a.Type() != b.Type() {
+		return false
+	}
+	switch a.Kind() {
+	case reflect.Pointer, reflect.Interface:
+		if a.IsNil() || b.IsNil() {
+			return a.IsNil() == b.IsNil()
+		}
+		return valuesEqual(a.Elem(), b.Elem())
+	case reflect.Float32, reflect.Float64:
+		x, y := a.Float(), b.Float()
+		return x == y || (math.IsNaN(x) && math.IsNaN(y))
+	case reflect.Struct:
+		if eq := a.MethodByName("Equal"); eq.IsValid() && eq.Type().NumIn() == 1 && eq.Type().In(0) == a.Type() &&
+			eq.Type().NumOut() == 1 && eq.Type().Out(0).Kind() == reflect.Bool {
+			return eq.Call([]reflect.Value{b})[0].Bool()
+		}
+		for i := 0; i < a.NumField(); i++ {
+			if !a.Type().Field(i).IsExported() {
+				return reflect.DeepEqual(a.Interface(), b.Interface())
+			}
+		}
+		for i := 0; i < a.NumField(); i++ {
+			if !valuesEqual(a.Field(i), b.Field(i)) {
+				return false
+			}
+		}
+		return true
+	}
+	return reflect.DeepEqual(a.Interface(), b.Interface())
+}
+
+// registerEditColumnsCallback narrows a scoped whole-row update to the columns
+// the edit changed (ScopeEdit). It wraps gorm:update, so it judges the row
+// after every hook and every callback that runs before the SQL, a callback
+// that sets a column with Statement.SetColumn included.
+func registerEditColumnsCallback(db *gorm.DB) error {
+	update := db.Callback().Update()
+	write := update.Get("gorm:update")
+	if write == nil {
+		return fmt.Errorf("database: register edit columns callback: no gorm:update callback")
+	}
+	if err := update.Replace("gorm:update", func(tx *gorm.DB) {
+		restore := narrowToChanged(tx)
+		write(tx)
+		restore()
+	}); err != nil {
+		return fmt.Errorf("database: register edit columns callback: %w", err)
 	}
 	return nil
 }
 
-const savedSelectsKey = "gombit:edit_columns:selects"
-
-type savedSelects struct{ selects []string }
-
 // narrowToChanged replaces a scoped update's Select("*") with the columns
-// whose value differs from what the row stored (StoredValues), after the
-// model's hooks have run.
-func narrowToChanged(db *gorm.DB) {
+// whose value differs from what the row stored (StoredValues), and returns
+// what puts the Select back, for a chain that is used again.
+func narrowToChanged(db *gorm.DB) (restore func()) {
 	stmt := db.Statement
 	if db.Error != nil || stmt == nil || stmt.Schema == nil ||
 		len(stmt.Selects) != 1 || stmt.Selects[0] != "*" {
-		return
+		return func() {}
 	}
 	scope := editScopeOf(stmt)
 	if scope == nil || scope.values == nil {
-		return
+		return func() {}
 	}
 	rv := reflect.Indirect(reflect.ValueOf(stmt.Dest))
 	if rv.Kind() != reflect.Struct {
-		return
+		return func() {}
 	}
 	ctx := stmt.Context
 	if ctx == nil {
@@ -231,11 +287,7 @@ func narrowToChanged(db *gorm.DB) {
 	}
 	var changed []string
 	for _, f := range stmt.Schema.Fields {
-		if f.DBName == "" || !f.Updatable {
-			continue
-		}
-		stored, known := scope.values[f.DBName]
-		if known && reflect.DeepEqual(f.ReflectValueOf(ctx, rv).Interface(), stored) {
+		if f.DBName == "" || !f.Updatable || scope.unchanged(f.DBName, f.ReflectValueOf(ctx, rv)) {
 			continue
 		}
 		changed = append(changed, f.DBName)
@@ -245,17 +297,7 @@ func narrowToChanged(db *gorm.DB) {
 			changed = append(changed, pf.DBName)
 		}
 	}
-	stmt.Settings.Store(savedSelectsKey, savedSelects{selects: stmt.Selects})
+	selects := stmt.Selects
 	stmt.Selects = changed
-}
-
-// restoreSelects puts back the Select narrowToChanged replaced, for a chain
-// that is used again.
-func restoreSelects(db *gorm.DB) {
-	if db.Statement == nil {
-		return
-	}
-	if v, ok := db.Statement.Settings.LoadAndDelete(savedSelectsKey); ok {
-		db.Statement.Selects = v.(savedSelects).selects
-	}
+	return func() { stmt.Selects = selects }
 }

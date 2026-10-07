@@ -400,10 +400,10 @@ Row JSON is keyed by registered field names, plus implicit `created_at` /
 `updated_at` when the GORM model has them and they were omitted from
 `Fields`. Create/update accept only writable (non-readonly) fields.
 `PATCH` is partial: omitted keys are left unchanged. The update writes only
-the columns whose value the request, or a model hook, changed from the row
-as loaded (`database.ScopeEdit`), so another request's change to a column
-this one did not touch is kept, and the response is the row as stored after
-the write. It never writes the row's associations: a `has_many` child moved
+the columns whose value the request, a model hook or a GORM callback
+changed from the row as loaded (`database.ScopeEdit`), so another request's
+change to a column this one did not touch is kept, and the response is the
+row read back after the write (a delete landing in between makes it a 404). It never writes the row's associations: a `has_many` child moved
 or deleted meanwhile stays so, and `many_to_many` ids are synced only when the
 request sends them. A row deleted since it was loaded is a 404, not inserted
 again. (Two edits of the same column still race: the last one wins, except

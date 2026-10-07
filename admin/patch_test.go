@@ -19,7 +19,15 @@ type ppRow struct {
 	Price     int       `json:"price"`
 	Note      string    `json:"note"`
 	Slug      string    `json:"slug"`
+	UpdatedBy string    `json:"updated_by"`
 	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// ppVersioned takes the version-guarded update path.
+type ppVersioned struct {
+	ID      uint   `gorm:"primaryKey" json:"id"`
+	Title   string `json:"title"`
+	Version int64  `json:"version"`
 }
 
 // BeforeSave derives Slug from Name: a column the PATCH does not send, which
@@ -52,7 +60,7 @@ func TestAdminPatchWritesOnlyWhatChanged(t *testing.T) {
 func runPartialPatchAdmin(t *testing.T, db *database.DB) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
-	models := []any{&ppRow{}, &ppChild{}, &ppParent{}}
+	models := []any{&ppRow{}, &ppChild{}, &ppParent{}, &ppVersioned{}}
 	_ = db.Migrator().DropTable(models...)
 	if err := db.AutoMigrate(models...); err != nil {
 		t.Fatal(err)
@@ -63,6 +71,9 @@ func runPartialPatchAdmin(t *testing.T, db *database.DB) {
 		t.Fatal(err)
 	}
 	if err := admin.Register(app, ppParent{}, admin.Options{Slug: "pp-parents"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := admin.Register(app, ppVersioned{}, admin.Options{Slug: "pp-versioned"}); err != nil {
 		t.Fatal(err)
 	}
 	jar := loginSuperuser(t, app)
@@ -114,6 +125,28 @@ func runPartialPatchAdmin(t *testing.T, db *database.DB) {
 		}
 	})
 
+	// A column an app's GORM callback sets with SetColumn, registered the
+	// usual way (Before("gorm:update")), is written (#574 review).
+	t.Run("callback column", func(t *testing.T) {
+		const name = "test:audit"
+		if err := db.Callback().Update().Before("gorm:update").Register(name, func(tx *gorm.DB) {
+			if tx.Statement.Table == "pp_rows" {
+				tx.Statement.SetColumn("UpdatedBy", "auditor")
+			}
+		}); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = db.Callback().Update().Remove(name) })
+		if res := doRequest(app, jar, http.MethodPatch, path, `{"name":"Audited"}`); res.Code != http.StatusOK {
+			t.Fatalf("PATCH: %d %s", res.Code, res.Body.String())
+		}
+		var stored ppRow
+		mustFirst(t, db, &stored, row.ID)
+		if stored.UpdatedBy != "auditor" || stored.Name != "Audited" {
+			t.Errorf("stored %+v, want the callback's updated_by written", stored)
+		}
+	})
+
 	// An unchanged PATCH is a 200: MySQL reports no row affected for it.
 	t.Run("unchanged", func(t *testing.T) {
 		if res := doRequest(app, jar, http.MethodPatch, path, `{"note":"only the note"}`); res.Code != http.StatusOK {
@@ -135,6 +168,18 @@ func runPartialPatchAdmin(t *testing.T, db *database.DB) {
 		if err := db.Model(&ppRow{}).Where("id = ?", victim.ID).Count(&n).Error; err != nil || n != 0 {
 			t.Fatalf("rows with the deleted id: %d (%v), want 0", n, err)
 		}
+	})
+
+	// A versioned row deleted between the load and the write is a 404 too,
+	// not a version conflict.
+	t.Run("versioned concurrent delete", func(t *testing.T) {
+		v := ppVersioned{Title: "v"}
+		if err := db.Create(&v).Error; err != nil {
+			t.Fatal(err)
+		}
+		concurrently(t, "pp_versioneds", "DELETE FROM pp_versioneds WHERE id = ?", v.ID)
+		res := doRequest(app, jar, http.MethodPatch, fmt.Sprintf("/api/v1/admin/resources/pp-versioned/%d", v.ID), `{"title":"edited"}`)
+		assertError(t, res, http.StatusNotFound, "not_found")
 	})
 
 	// (c) has_many children are not written back: one moved to another
