@@ -332,6 +332,14 @@ version.
 
 ### Fixed
 
+- CI rebuilds the embedded admin SPA and fails when the committed
+  `internal/adminui/dist` differs from a fresh build of `internal/adminui/src`.
+  Nothing enforced the rebuild, so source changes (the #250 CSRF fix among
+  them) were missing from released binaries for weeks. `dist/` was brought
+  up to date by STORAGE-8 (released in v0.7.0) and matches its source; the
+  release workflow refuses to tag a stale one too
+  ([#451](https://github.com/gombit-dev/gombit/issues/451)).
+
 - A float a write through a model sets to `+Inf`, `-Inf` or `NaN`, or beyond
   a `float32` field's range, is a 422 naming the field on every driver, the
   admin's writes included (`"Inf"`, `"NaN"`, a `float32` overflow). It was stored on PostgreSQL and SQLite and a 500 on

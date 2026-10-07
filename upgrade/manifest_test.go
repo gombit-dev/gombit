@@ -374,6 +374,7 @@ var changelogExempt = map[int]string{
 	342: "the compatibility manifest and gombit upgrade notes themselves: new, nothing to act on",
 	446: "a gombit make resource error message: nothing in an application",
 	447: "shipped in v0.6.1 (the CHANGELOG has no 0.6.1 section yet)",
+	451: "a CI gate on the committed admin build: nothing in an application",
 }
 
 var changelogIssueLink = regexp.MustCompile(`github\.com/gombit-dev/gombit/(?:issues|pull)/(\d+)`)
