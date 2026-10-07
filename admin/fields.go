@@ -786,3 +786,21 @@ func validSlug(slug string) bool {
 	}
 	return true
 }
+
+// unchangedRoundedInteger reports whether raw, a JSON number beyond what a
+// float64 keeps exactly, is the integer field's stored value as the admin's
+// form rounds it, so it is the value sent back, not an edit.
+func unchangedRoundedInteger(f *resolvedField, inst any, raw any) bool {
+	v, ok := raw.(float64)
+	if !ok || f.Type != TypeInteger || (v <= maxExactJSONInt && v >= -maxExactJSONInt) {
+		return false
+	}
+	cur := reflect.ValueOf(f.get(inst))
+	switch cur.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return float64(cur.Int()) == v
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return float64(cur.Uint()) == v
+	}
+	return false
+}

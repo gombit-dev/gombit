@@ -337,7 +337,9 @@ version.
   an `int32` wrapped, and `-5` into a `uint` was stored as a value the list
   endpoint could not read back, a `500` for everyone until the row was fixed
   by hand. A JSON number from 2^53 on (or `1e30`), which has lost digits by
-  the time it is decoded, is refused too: send a large integer as a string
+  the time it is decoded, is refused too: send a large integer as a string.
+  One equal to the stored value rounded the same way (the admin UI sending
+  the field back) keeps the stored value
   ([#448](https://github.com/gombit-dev/gombit/issues/448)).
 - A float a write through a model sets to `+Inf`, `-Inf` or `NaN`, or beyond
   a `float32` field's range, is a 422 naming the field on every driver, the

@@ -347,7 +347,12 @@ func asInt64(raw any) (int64, error) {
 	case string:
 		n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
 		if errors.Is(err, strconv.ErrRange) {
-			return 0, fmt.Errorf("must be between %d and %d", int64(math.MinInt64), int64(math.MaxInt64))
+			// The admin stores integers within int64 (a signed bigint on
+			// PostgreSQL and SQLite), whatever the field's own type.
+			if strings.HasPrefix(strings.TrimSpace(v), "-") {
+				return 0, fmt.Errorf("must be at least %d", int64(math.MinInt64))
+			}
+			return 0, fmt.Errorf("must be at most %d", int64(math.MaxInt64))
 		}
 		if err != nil {
 			return 0, fmt.Errorf("must be an integer")

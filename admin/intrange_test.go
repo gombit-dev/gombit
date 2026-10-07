@@ -122,9 +122,29 @@ func runIntRangeAdmin(t *testing.T, db *database.DB) {
 			t.Errorf("%s: fields %v, want %q", body, env.Fields, field)
 		}
 	}
+	// The message names the admin's limit, not the int64 range: a uint64
+	// takes no negative value (#568 review).
+	wide := doRequest(app, jar, http.MethodPost, "/api/v1/admin/resources/int-declared", `{"wide":"18446744073709551615"}`)
+	if env := decodeError(t, wide); strings.Join(env.Fields["wide"], " ") != "must be at most 9223372036854775807" {
+		t.Errorf("wide: fields %v", env.Fields)
+	}
 	if res := doRequest(app, jar, http.MethodPost, "/api/v1/admin/resources/int-declared", `{"as_float":-128,"as_json":127,"wide":"9223372036854775807"}`); res.Code != http.StatusOK {
 		t.Fatalf("in-range declared create: %d %s", res.Code, res.Body.String())
 	}
+
+	// The admin's form sends a stored integer beyond 2^53 back as a rounded
+	// JSON number: that keeps the stored value; another rounded number is
+	// still refused (#568 review).
+	formPath := fmt.Sprintf("%s/%d", base, row.ID)
+	if res := doRequest(app, jar, http.MethodPatch, formPath, `{"name":"from the form","big":9007199254740992}`); res.Code != http.StatusOK {
+		t.Fatalf("form resending the stored big integer: %d %s", res.Code, res.Body.String())
+	}
+	var kept intRange
+	if err := db.First(&kept, row.ID).Error; err != nil || kept.Big != 9007199254740993 || kept.Name != "from the form" {
+		t.Fatalf("stored %+v (%v), want big 9007199254740993 kept and the name written", kept, err)
+	}
+	res := doRequest(app, jar, http.MethodPatch, formPath, `{"big":9007199254740996}`)
+	assertError(t, res, http.StatusUnprocessableEntity, contract.CodeValidationError)
 
 	// Nothing refused was written, and the list still reads every row.
 	if list := doRequest(app, jar, http.MethodGet, base, ""); list.Code != http.StatusOK {

@@ -235,9 +235,12 @@ An integer value must fit the model field's Go type, and the int64 range
 wrapped value, whatever admin type the field is declared as. A JSON number is
 decoded as a float64, which keeps integers exactly only within ±(2^53 - 1),
 so a larger integer is sent as a string (`"9007199254740993"`), which is read
-exactly; as a JSON number it is a 422. The bundled admin UI sends integers as
-JSON numbers, so it cannot save a row holding an integer beyond that range
-(an int64 counter, a snowflake id) until it sends such values as strings.
+exactly; as a JSON number it is a 422, unless it is the row's stored value
+rounded the same way, which is the bundled admin UI sending a field back
+unchanged (it sends integers as JSON numbers): the stored value is kept. The
+UI cannot set such an integer to another value; send it as a string through
+the API. The admin stores integers within int64, so a `uint64` above
+9223372036854775807 is a 422 too.
 
 ### File and image fields
 
