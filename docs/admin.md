@@ -318,7 +318,14 @@ create/update. `one_to_one` is the unique foreign key. Auto-derivation
 (`FieldsFrom`) renders the FK column as a relation field (target `slug` = the
 related table, label = the field name of its `name` column when present) so
 the SPA shows a picker instead of a
-bare integer, and the picker submits the selected primary key. **`has_many` is
+bare integer, and the picker submits the selected primary key. The value is
+coerced as the foreign-key column's Go type: a string key (a country code, a
+SKU) is the string sent, byte for byte (`"007"` stays `"007"`; a JSON number
+is refused, as for any string field), an integer key accepts a number or its
+digits as a string (`"7"`), and a uuid key a uuid in its canonical form, as a
+`uuid` field does. A primary key declared as a relation (a shared-key
+`one_to_one`) is read the same way in the path. Filters on the field read
+the value the same way. **`has_many` is
 read-only**: auto-derivation emits it, and when it maps to a real GORM has_many
 association the list/detail responses preload it and return the related
 children's primary keys (the SPA shows them as read-only chips); a `has_many`

@@ -332,6 +332,17 @@ version.
 
 ### Fixed
 
+- An admin relation field on a string key (a country code, a SKU) stores the
+  value sent, byte for byte: anything numeric-looking was parsed as an integer
+  and converted back as a rune, so `"123"` was stored as `"{"` and `"007"` as
+  `"\a"`, and a filter on `"007"` found nothing. A belongs_to value is now
+  coerced as its key column's type, on writes and filters, and the admin SPA
+  sends relation ids as given instead of turning `"007"` into `7`, `"1e3"` into
+  `1000`, or `"Infinity"` into a cleared key. A JSON number for a string key,
+  and a uuid key in a non-canonical form (no hyphens, braces), are now a 422,
+  as for a plain string or `uuid` field
+  ([#452](https://github.com/gombit-dev/gombit/issues/452)).
+
 - A float a write through a model sets to `+Inf`, `-Inf` or `NaN`, or beyond
   a `float32` field's range, is a 422 naming the field on every driver, the
   admin's writes included (`"Inf"`, `"NaN"`, a `float32` overflow). It was stored on PostgreSQL and SQLite and a 500 on

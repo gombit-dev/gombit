@@ -673,7 +673,7 @@ func sameAsStored(f *resolvedField, inst any, raw any) (bool, error) {
 	if f == nil || f.get == nil {
 		return false, nil
 	}
-	coerced, err := coerceValue(raw, f.Type)
+	coerced, err := coerceValue(raw, f.valueType())
 	if err != nil {
 		return false, err
 	}
@@ -726,7 +726,7 @@ func applyFilters(ctx context.Context, q *gorm.DB, m *registered, values interfa
 		if !ok || f.column == "" {
 			continue
 		}
-		val, err := coerceFilter(raw, f.Type)
+		val, err := coerceFilter(raw, f.valueType())
 		if err != nil {
 			return nil, contract.WithContext(ctx, contract.Validation("The request contains invalid fields.", map[string][]string{
 				name: {err.Error()},

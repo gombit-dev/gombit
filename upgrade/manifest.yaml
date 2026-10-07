@@ -30,6 +30,18 @@ releases:
 
   - version: unreleased
     changes:
+      - id: admin-relation-string-keys
+        kind: informational
+        area: behavior
+        summary: "An admin relation field on a string key stores the string sent, byte for byte; a JSON number for it is a 422."
+        details: |
+          A numeric-looking key (`"123"`, `"007"`) was stored corrupted. A
+          client that sends a string key as a JSON number now gets a 422 on the
+          field, as for any string field: send it as a string. A uuid key must
+          be the canonical form, as a `uuid` field (no braces, with hyphens).
+          An integer key still accepts a number or its digits as a string.
+        refs: [452]
+
       - id: floats-must-be-finite
         kind: manual
         breaking: true
