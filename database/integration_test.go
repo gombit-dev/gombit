@@ -363,8 +363,6 @@ func testDataExceptionsOnDriver(t *testing.T, db *DB) {
 			t.Errorf("%s: MapPersistError = %+v, want a 422", what, env)
 			continue
 		}
-		if db.Driver() == DriverMySQL && len(env.Body.Fields[c.field]) == 0 {
-			t.Errorf("%s: fields %v, want %q", what, env.Body.Fields, c.field)
-		}
+
 	}
 }

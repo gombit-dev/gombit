@@ -214,7 +214,7 @@ func (m *registered) updateOmits(before map[string]string, inst any) []string {
 // refused it (issue #443), less the ones the PATCH body sets (kept), and the
 // columns the body sets (edited). Every such column counts, mapped or not
 // (hidden, server-set, outside Fields, a named time type): Save writes the
-// whole row back. The update passes them to database.KeepStoredZeros, which
+// whole row back. The update passes them to database.ScopeEdit, which
 // leaves a kept column out of the write only if it still holds the zero after
 // the model's hooks, so a hook's repair is written and an edit the operator
 // never made is not a 422, while a zero the body sets is refused.

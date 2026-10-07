@@ -149,6 +149,48 @@ func testTextWrites(t *testing.T, db *DB) {
 	if err := db.Model(&stored).Update("name", "renamed").Error; err != nil {
 		t.Errorf("an ordinary update: %v", err)
 	}
+	testTextStoredBeforeTheCheck(t, db)
+}
+
+// testTextStoredBeforeTheCheck: text a row stored before the check (more than
+// the column now allows, a NUL byte a driver kept) does not make every edit of
+// the row a 422 (#564 review). An edit scoped to the row (ScopeEdit, what the
+// admin's PATCH uses) checks only the columns it sets; a partial update does
+// not write the column. A generic Save writes the stored value back, and is
+// refused, as a stored zero instant is.
+func testTextStoredBeforeTheCheck(t *testing.T, db *DB) {
+	t.Helper()
+	// What each driver stored before: PostgreSQL refuses a NUL byte, MySQL's
+	// TEXT holds 65,535 bytes and its varchar(191) 191 characters.
+	column, legacy := "notes", strings.Repeat("n", TextMaxBytes+10)
+	if db.Driver() == DriverMySQL {
+		column, legacy = "notes", "legacy\x00notes"
+	}
+	row := textItem{Name: "legacy", Notes: "n"}
+	if err := db.Create(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec("UPDATE text_items SET "+column+" = ? WHERE id = ?", legacy, row.ID).Error; err != nil {
+		t.Fatalf("store the legacy value: %v", err)
+	}
+	var loaded textItem
+	if err := db.First(&loaded, row.ID).Error; err != nil || loaded.Notes != legacy {
+		t.Fatalf("fixture: %v", err)
+	}
+	loaded.Name = "renamed"
+	if err := ScopeEdit(db.DB, &loaded, []string{"name"}, nil).Save(&loaded).Error; err != nil {
+		t.Errorf("scoped Save of a row storing legacy text: %v", err)
+	}
+	if err := db.Model(&loaded).Updates(map[string]any{"name": "again"}).Error; err != nil {
+		t.Errorf("Updates(map) of a row storing legacy text: %v", err)
+	}
+	wantTextError(t, "unscoped Save of a row storing legacy text", db.Save(&loaded).Error, "notes")
+	loaded.Name = "a\x00b"
+	wantTextError(t, "scoped Save, NUL in an edited column", ScopeEdit(db.DB, &loaded, []string{"name"}, nil).Save(&loaded).Error, "name")
+	var reread textItem
+	if err := db.First(&reread, row.ID).Error; err != nil || reread.Name != "again" || reread.Notes != legacy {
+		t.Fatalf("stored name %q, notes kept %v: %v", reread.Name, reread.Notes == legacy, err)
+	}
 }
 
 func wantTextError(t *testing.T, what string, err error, field string) {
@@ -218,33 +260,26 @@ func TestTextLimitOf(t *testing.T) {
 	}
 }
 
-// A value the database itself refuses as data is the client's to fix: 422,
-// keyed on the column when the driver names it (issue #444), on the write
-// and the read path alike. A server fault stays a 500.
+// A value the database itself refuses as data is the client's to fix: 422
+// (issue #444), on the write and the read path alike, with no fields (the
+// driver names a column, not the API's field). A server fault stays a 500.
 func TestDataExceptionsAreValidationErrors(t *testing.T) {
 	ctx := context.Background()
-	for name, c := range map[string]struct {
-		err   error
-		field string
-	}{
-		"pg numeric overflow":   {&pgconn.PgError{Code: "22003", Message: "numeric field overflow"}, ""},
-		"pg NUL byte":           {&pgconn.PgError{Code: "22021", Message: `invalid byte sequence for encoding "UTF8": 0x00`}, ""},
-		"pg value too long":     {&pgconn.PgError{Code: "22001", Message: "value too long for type character varying(10)"}, ""},
-		"mysql out of range":    {&mysqldriver.MySQLError{Number: 1264, Message: "Out of range value for column 'amount' at row 1"}, "amount"},
-		"mysql data too long":   {&mysqldriver.MySQLError{Number: 1406, Message: "Data too long for column 'notes' at row 1"}, "notes"},
-		"mysql incorrect value": {&mysqldriver.MySQLError{Number: 1292, Message: "Incorrect datetime value: '0000-00-00' for column 'due' at row 1"}, "due"},
+	for name, err := range map[string]error{
+		"pg numeric overflow":   &pgconn.PgError{Code: "22003", Message: "numeric field overflow"},
+		"pg NUL byte":           &pgconn.PgError{Code: "22021", Message: `invalid byte sequence for encoding "UTF8": 0x00`},
+		"pg value too long":     &pgconn.PgError{Code: "22001", Message: "value too long for type character varying(10)"},
+		"mysql out of range":    &mysqldriver.MySQLError{Number: 1264, Message: "Out of range value for column 'amount' at row 1"},
+		"mysql data too long":   &mysqldriver.MySQLError{Number: 1406, Message: "Data too long for column 'notes' at row 1"},
+		"mysql incorrect value": &mysqldriver.MySQLError{Number: 1292, Message: "Incorrect datetime value: '0000-00-00' for column 'due' at row 1"},
 	} {
 		for path, mapped := range map[string]error{
-			"persist": MapPersistError(ctx, c.err, "conflict", "internal"),
-			"load":    MapLoadError(ctx, c.err, "not found", "internal"),
+			"persist": MapPersistError(ctx, err, "conflict", "internal"),
+			"load":    MapLoadError(ctx, err, "not found", "internal"),
 		} {
 			var env *contract.ErrorEnvelope
-			if !errors.As(mapped, &env) || env.GetStatus() != http.StatusUnprocessableEntity {
-				t.Errorf("%s (%s): %+v, want a 422", name, path, mapped)
-				continue
-			}
-			if c.field != "" && len(env.Body.Fields[c.field]) == 0 {
-				t.Errorf("%s (%s): fields %v, want %q", name, path, env.Body.Fields, c.field)
+			if !errors.As(mapped, &env) || env.GetStatus() != http.StatusUnprocessableEntity || len(env.Body.Fields) != 0 {
+				t.Errorf("%s (%s): %+v, want a 422 with no fields", name, path, mapped)
 			}
 		}
 	}

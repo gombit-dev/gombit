@@ -233,7 +233,9 @@ func renderModelHandler(r modelResource) (string, error) {
 	if uuidPK {
 		b.WriteString("\tid, err := uuid.Parse(input.ID)\n")
 	} else {
-		b.WriteString("\tid, err := strconv.ParseUint(input.ID, 10, 64)\n")
+		// 63 bits: an id over MaxInt64 is no row's (PostgreSQL's bigint could
+		// not even bind it, a 500), so it is a 404 with the other bad ids.
+		b.WriteString("\tid, err := strconv.ParseUint(input.ID, 10, 63)\n")
 	}
 	b.WriteString("\tif err != nil {\n")
 	b.WriteString("\t\treturn nil, contract.WithContext(ctx, contract.NotFound(\"" + singular + " not found\"))\n")

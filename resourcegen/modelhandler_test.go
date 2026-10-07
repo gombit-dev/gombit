@@ -533,6 +533,13 @@ func TestQuery(t *testing.T) {
 		}
 	}
 
+	// An id over MaxInt64 is no row's: a 404, not PostgreSQL's 500.
+	if _, err := h.get(ctx, &getItemInput{ID: "18446744073709551615"}); err == nil {
+		t.Fatal("get of an id over MaxInt64 succeeded")
+	} else if env := (*contract.ErrorEnvelope)(nil); !errors.As(err, &env) || env.GetStatus() != http.StatusNotFound {
+		t.Fatalf("get of an id over MaxInt64: %v, want a 404", err)
+	}
+
 	// ordering: -price -> banana (20) first.
 	o, err := h.list(ctx, &listItemsInput{Page: 1, PerPage: 50, Ordering: "-price"})
 	if err != nil {

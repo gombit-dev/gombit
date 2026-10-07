@@ -3,7 +3,6 @@ package database
 import (
 	"context"
 	"errors"
-	"regexp"
 	"strings"
 
 	mysqldriver "github.com/go-sql-driver/mysql"
@@ -67,9 +66,11 @@ func IsNotNullViolation(err error) bool {
 // (1406) and incorrect-string (1366) errors, and an incorrect date or time
 // literal (1292). MapPersistError and MapLoadError answer it with a 422.
 //
-// It is an allowlist: the rest of PostgreSQL's class 22 (division by zero,
-// a cast in server-side SQL) and MySQL's "Truncated incorrect ... value" on
-// an expression are server faults, and stay 500s.
+// It is an allowlist of the codes a value the client sends can cause. A code
+// does not say what caused it, so the same code raised by server-side SQL (an
+// expression overflowing its column) is a 422 too. The rest of PostgreSQL's
+// class 22 (division by zero, an invalid cast) and MySQL's "Truncated
+// incorrect ... value" on an expression stay 500s.
 func IsDataException(err error) bool {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
@@ -91,21 +92,11 @@ func IsDataException(err error) bool {
 	return false
 }
 
-// dataExceptionColumn matches the column MySQL names in a data exception
-// ("... for column 'notes' at row 1").
-var dataExceptionColumn = regexp.MustCompile("for column '([^']+)'")
-
-// dataExceptionError is the 422 for a data exception: keyed on the column
-// when the driver names it (MySQL does, PostgreSQL does not).
-func dataExceptionError(ctx context.Context, err error) error {
-	var fields map[string][]string
-	var myErr *mysqldriver.MySQLError
-	if errors.As(err, &myErr) {
-		if m := dataExceptionColumn.FindStringSubmatch(myErr.Message); m != nil {
-			fields = map[string][]string{m[1]: {"cannot be stored in this column"}}
-		}
-	}
-	return contract.WithContext(ctx, contract.Validation("The request contains a value the database cannot store.", fields))
+// dataExceptionError is the 422 for a data exception. It names no field: a
+// driver names a column, if at all, not the field the API names, and the
+// write checks that run before the SQL name the field where they can.
+func dataExceptionError(ctx context.Context) error {
+	return contract.WithContext(ctx, contract.Validation("The request contains a value the database cannot store.", nil))
 }
 
 // MapLoadError maps a GORM read/load error to a D10 category error:
@@ -124,7 +115,7 @@ func MapLoadError(ctx context.Context, err error, notFound, internal string) err
 		return contract.WithContext(ctx, contract.Validation(ve.Message, ve.Fields))
 	}
 	if IsDataException(err) {
-		return dataExceptionError(ctx, err)
+		return dataExceptionError(ctx)
 	}
 	return contract.WithContext(ctx, contract.Internal(internal))
 }
@@ -155,7 +146,7 @@ func MapPersistError(ctx context.Context, err error, conflict, internal string) 
 		return contract.WithContext(ctx, contract.Validation("The request is missing a required value.", nil))
 	}
 	if IsDataException(err) {
-		return dataExceptionError(ctx, err)
+		return dataExceptionError(ctx)
 	}
 	return contract.WithContext(ctx, contract.Internal(internal))
 }

@@ -206,11 +206,11 @@ What a statement writes is what GORM writes:
   can still have its other columns changed by `Update` and a partial
   `Updates`. The admin's PATCH keeps such a column, mapped or not, when the
   request does not set it: `database.StoredZeroColumns` lists the loaded
-  row's zero columns, and `database.KeepStoredZeros` scopes the update to
+  row's zero columns, and `database.ScopeEdit` scopes the update to
   leave one out of its `SET` if it still holds the zero after the model's
   hooks, so a hook that repairs it is written. A zero the request sets is
   refused, in any column. The scope covers the update of that row (the
-  pointer passed to `KeepStoredZeros`) only. In your own code a `Save` of
+  pointer passed to `ScopeEdit`) only. In your own code a `Save` of
   such a row writes the zero back and is a 422 unless you scope it the same
   way; so is `Updates(&row)` on PostgreSQL, which reads the value back in
   `Local` (GORM then writes it), while on SQLite and MySQL GORM skips it. To
@@ -240,7 +240,7 @@ its own `driver.Valuer`) writes something else and is not checked, nor is a
 column declared binary (`blob`, `bytea`).
 
 - A NUL byte or invalid UTF-8 (`database.TextProblem`): PostgreSQL refused
-  them with a 500, SQLite stored them.
+  them with a 500; SQLite and MySQL stored a NUL byte.
 - More than the column holds, from its declared `type:`, else its `size:`.
   `size:n`, `varchar(n)` and `char(n)` hold n characters (PostgreSQL and
   MySQL refused more, or silently cut trailing spaces past n; SQLite stored
@@ -248,7 +248,8 @@ column declared binary (`blob`, `bytea`).
   `TEXT`, on every driver (MySQL refused more with a 500); `tinytext` and
   `mediumtext` hold MySQL's capacity too. A string column with neither is
   unlimited text, except that MySQL makes a primary key, indexed, unique or
-  defaulted one `varchar(191)`, so it holds 191 characters everywhere. A
+  defaulted one `varchar(191)`: the check enforces 191 characters for such a
+  column on every driver, though PostgreSQL and SQLite would store more. A
   generated `string` field is `size:255` (or its `max_length`), a `text`
   field `type:text`.
 
@@ -257,13 +258,25 @@ the database. The check allocates only when a value is refused, or when
 `Updates` is given a struct of a type other than the model, which is parsed
 to match its fields to the model's columns.
 
+**Rows stored before the check.** A row may already hold text the check now
+refuses (more than a `text` or a 191-character column holds on PostgreSQL or
+SQLite, a NUL byte on MySQL or SQLite). An edit scoped to the row with
+`database.ScopeEdit` checks only the columns the edit sets, and writes the
+others back as the row stores them; the admin's PATCH does this, so such a row
+stays editable there, and setting the column to refused text is a 422. A
+partial update (`Update`, `Updates` of a map or struct) does not write the
+column. A generic `Save` of the row writes the stored value back and is a 422
+on that field: shorten or clean the value, or scope the save.
+
 The list helpers apply the same rule to what a client sends: `FilterEq` on a
 string column and `Search` refuse a NUL byte or invalid UTF-8 with a 422
 (keyed on the column, and on `search`), which PostgreSQL refused to compare
 with a 500, and `FilterEq` on a uint column refuses a value over
-`math.MaxInt64`, which PostgreSQL's bigint cannot bind. `Search` therefore takes a context and returns an error, like
-`FilterEq`; `gombit generate` emits the new call. The admin data plane
-refuses them in its filters, search and writes alike.
+`math.MaxInt64`, which PostgreSQL's bigint cannot bind; for the same reason a
+generated `get` answers an id over `math.MaxInt64` with a 404. `Search`
+therefore takes a context and returns an error, like `FilterEq`; `gombit
+generate` emits the new call. The admin data plane refuses them in its
+filters, search and writes alike.
 
 ## Deleting rows
 

@@ -85,6 +85,10 @@ func (g *textGuard) run(db *gorm.DB, creating bool) {
 		return
 	}
 	c := textCheck{guard: g}
+	if !creating {
+		// An edit of a loaded row checks only what the edit sets (ScopeEdit).
+		c.scope = editScopeOf(db.Statement)
+	}
 	forEachAssigned(db, creating, targets, c.check)
 	if len(c.fields) > 0 {
 		_ = db.AddError(NewValidationError("The request contains invalid fields.", c.fields))
@@ -93,10 +97,14 @@ func (g *textGuard) run(db *gorm.DB, creating bool) {
 
 type textCheck struct {
 	guard  *textGuard
+	scope  *editScope
 	fields map[string][]string // allocated on the first problem
 }
 
 func (c *textCheck) check(a assignedValue) {
+	if c.scope != nil && a.FromStruct && !containsColumn(c.scope.edited, a.Field.DBName) {
+		return
+	}
 	s, ok := textValue(a.Value)
 	if !ok {
 		return
