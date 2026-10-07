@@ -89,7 +89,7 @@ func (h *Handler) list(ctx context.Context, input *listDocumentsInput) (*listDoc
 }
 
 func (h *Handler) get(ctx context.Context, input *getDocumentInput) (*getDocumentOutput, error) {
-	id, err := strconv.ParseUint(input.ID, 10, 64)
+	id, err := strconv.ParseUint(input.ID, 10, 63)
 	if err != nil {
 		return nil, contract.WithContext(ctx, contract.NotFound("document not found"))
 	}

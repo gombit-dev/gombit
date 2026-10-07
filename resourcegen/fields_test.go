@@ -770,3 +770,33 @@ func TestTimeOfDayDefaultUsesTheTypeGrammar(t *testing.T) {
 		t.Fatal("default=nope was accepted")
 	}
 }
+
+// A comma after the type reads as a modifier list, but modifiers follow a
+// second colon: the error spells the field the grammar wants instead of
+// reporting an unknown type "text,searchable" (issue #446). Commas inside a
+// type's own arguments are not modifiers.
+func TestCommaModifierHint(t *testing.T) {
+	for spec, want := range map[string]string{
+		"notes:text,searchable":                "notes:text:searchable",
+		"notes:text,searchable,sortable":       "notes:text:searchable,sortable",
+		"notes:text,searchable:required":       "notes:text:searchable,required",
+		"price:decimal(10,2),required":         "price:decimal(10,2):required",
+		"state:enum(a,b),filterable":           "state:enum(a,b):filterable",
+		"owner:belongs_to,nullable:User":       "name:belongs_to:Target",
+		"notes:txt,searchable":                 `unknown type "txt" (supported: string,`,
+		"site:url,default=https://example.com": "site:url:default=https://example.com",
+	} {
+		_, err := parseFields([]string{spec}, "probe")
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: error %v, want it to contain %q", spec, err, want)
+		}
+	}
+	// Every suggestion parses, and a spec the parser accepts is never refused
+	// for a comma: an enum label may hold an unbalanced parenthesis.
+	for _, spec := range []string{"notes:text:searchable", "notes:text:searchable,required", "price:decimal(10,2):required",
+		"state:enum(a,b):filterable", "label:enum(x=X,y=Y)", "label:enum(a=x),b=y)", "site:url:default=https://example.com"} {
+		if _, err := parseFields([]string{spec}, "probe"); err != nil {
+			t.Errorf("%s: %v", spec, err)
+		}
+	}
+}

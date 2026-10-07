@@ -268,6 +268,68 @@ releases:
           of one is a 422 until the column is cleaned up (docs/database.md).
         refs: [443]
 
+      - id: text-storable-on-every-driver
+        kind: manual
+        breaking: true
+        area: behavior
+        summary: "Every write refuses text a column cannot store the same way on every driver (a NUL byte, invalid UTF-8, more than the column holds), with a 422 on that field."
+        details: |
+          It was a 500 on PostgreSQL or MySQL and stored on SQLite. A
+          `size:n` / `varchar(n)` column holds n characters, a `text` column
+          65,535 bytes (MySQL's `TEXT`), and an unsized primary-key, indexed,
+          unique or defaulted string 191 characters (MySQL's `varchar(191)`),
+          now on every driver: PostgreSQL and SQLite stored more. A row that
+          already stores such text stays editable through the admin, its form
+          included, and partial updates (`database.ScopeEdit` with
+          `database.StoredValues` judges only what an edit changes); a generic
+          `Save` of it is a 422 on that field until the value is shortened or
+          cleaned (docs/database.md § Text).
+        refs: [444]
+
+      - id: database-search-takes-context
+        kind: manual
+        breaking: true
+        area: api
+        summary: "`database.Search` takes a context and returns an error, like `FilterEq`: a search term with a NUL byte or invalid UTF-8 is a 422."
+        details: |
+          Code calling `database.Search(q, columns, term)` no longer builds:
+          call `database.Search(ctx, q, columns, term)` and return its error.
+          Run `gombit generate` to update an app's generated `handler.gen.go`,
+          which also answers a `get` of an id over `MaxInt64` with a 404.
+        refs: [444]
+
+      - id: scaffolded-get-id-over-maxint64
+        kind: manual
+        area: scaffold
+        summary: "A scaffolded `internal/product/handler.go` answers an id over `MaxInt64` with a 404; an app scaffolded before answers a 500 on PostgreSQL."
+        details: |
+          The handler is app-owned, so `gombit generate` does not update it. In
+          its `get`, parse the id with `strconv.ParseUint(input.ID, 10, 63)`
+          instead of `64`: PostgreSQL's bigint cannot bind a larger id, and no
+          row holds one. Apply the same to any hand-written handler that
+          parses a uint id.
+        refs: [444]
+
+      - id: keep-stored-zeros-deprecated
+        kind: informational
+        area: api
+        summary: "`database.KeepStoredZeros` is deprecated: use `database.ScopeEdit` with `database.StoredValues`."
+        details: |
+          `ScopeEdit` judges an edit of a loaded row on what it changes,
+          compared after the model's hooks, for the text check as well as
+          stored zero instants. `KeepStoredZeros` keeps working.
+        refs: [444]
+
+      - id: data-exceptions-are-422
+        kind: informational
+        area: behavior
+        summary: "`MapPersistError` and `MapLoadError` answer a database data exception (a value too long or out of range for its column) with a 422 instead of a 500."
+        details: |
+          PostgreSQL 22001, 22003, 22007, 22008, 22021, 22P05 and MySQL 1264,
+          1265, 1292, 1366, 1406 (`database.IsDataException`). A uint list
+          filter over `MaxInt64` is a 422 too.
+        refs: [444]
+
       - id: database-logging-through-app-logger
         kind: informational
         area: security

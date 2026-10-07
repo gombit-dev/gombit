@@ -323,8 +323,9 @@ traceable to a log line.
 Errors are constructed with `contract` helpers rather than raw status codes.
 Generated get/create handlers classify GORM errors through
 `database.MapLoadError` / `database.MapPersistError`: a missing row is D10
-`not_found`, a unique violation is `conflict`, and any other driver failure
-is `internal`.
+`not_found`, a unique violation is `conflict`, a value the database refuses
+as data (out of range, too long) is `validation_error`, and any other driver
+failure is `internal`.
 
 ```go
 return nil, contract.WithContext(ctx, contract.NotFound("task not found"))

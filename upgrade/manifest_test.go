@@ -372,6 +372,7 @@ func TestActionsAreImplemented(t *testing.T) {
 var changelogExempt = map[int]string{
 	291: "benchmark tooling: nothing in an application",
 	342: "the compatibility manifest and gombit upgrade notes themselves: new, nothing to act on",
+	446: "a gombit make resource error message: nothing in an application",
 	447: "shipped in v0.6.1 (the CHANGELOG has no 0.6.1 section yet)",
 }
 

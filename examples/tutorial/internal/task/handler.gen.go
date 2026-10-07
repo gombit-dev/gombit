@@ -76,7 +76,7 @@ func (h *Handler) list(ctx context.Context, input *listTasksInput) (*listTasksOu
 }
 
 func (h *Handler) get(ctx context.Context, input *getTaskInput) (*getTaskOutput, error) {
-	id, err := strconv.ParseUint(input.ID, 10, 64)
+	id, err := strconv.ParseUint(input.ID, 10, 63)
 	if err != nil {
 		return nil, contract.WithContext(ctx, contract.NotFound("task not found"))
 	}
