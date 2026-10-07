@@ -339,7 +339,18 @@ version.
   by hand. A JSON number from 2^53 on (or `1e30`), which has lost digits by
   the time it is decoded, is refused too: send a large integer as a string
   ([#448](https://github.com/gombit-dev/gombit/issues/448)).
-
+- A float a write through a model sets to `+Inf`, `-Inf` or `NaN`, or beyond
+  a `float32` field's range, is a 422 naming the field on every driver, the
+  admin's writes included (`"Inf"`, `"NaN"`, a `float32` overflow). It was stored on PostgreSQL and SQLite and a 500 on
+  MySQL, and a stored one broke every response holding the row, the admin's
+  list page included, until it was repaired by hand. `database.Open`
+  registers a `gombit:float` callback next to the time range check
+  ([#449](https://github.com/gombit-dev/gombit/issues/449)).
+- `gombit make resource` answers a field written `notes:text,searchable`
+  with the spelling the grammar wants (`notes:text:searchable`: modifiers
+  follow a second colon) instead of an unknown type `"text,searchable"`;
+  commas inside a type's arguments (`enum(a,b)`, `decimal(10,2)`) are
+  unaffected ([#446](https://github.com/gombit-dev/gombit/issues/446)).
 - Production configuration refuses `GOMBIT_HTTP_TRUSTED_PROXIES` values that
   trust every peer in any spelling: a zero-length prefix (`10.0.0.0/0`,
   `::0/0`) or ranges that together cover every IPv4 or IPv6 address
@@ -366,6 +377,39 @@ version.
   error. It shares this reading of `go.mod` with `gombit upgrade baseline`,
   so for a `go.mod` the two report the same framework version
   ([#341](https://github.com/gombit-dev/gombit/issues/341)).
+- Client values the database rejects were a 500 on PostgreSQL and MySQL and
+  stored on SQLite: a NUL byte or invalid UTF-8 in a string (PostgreSQL),
+  text over 65,535 bytes in a `text` column (MySQL), more characters than a
+  `varchar(n)` holds (PostgreSQL and MySQL), and a NUL byte in a list filter
+  or search term, or an id over `MaxInt64` on a generated `get` (PostgreSQL,
+  from any unauthenticated GET). `database.Open` now registers a
+  `gombit:text` callback, next to the time range check, that refuses each
+  with a 422 naming the field on every driver, on every write path
+  (`database.TextProblem`, `database.TextMaxBytes`); `FilterEq`, `Search`
+  and the admin's filters and search refuse such terms with a 422, and a
+  generated `get` and a newly scaffolded product handler answer such an id
+  with a 404. `MapPersistError` and
+  `MapLoadError` answer a remaining driver data exception (PostgreSQL 22001,
+  22003, 22007, 22008, 22021, 22P05; MySQL 1264, 1265, 1292, 1366, 1406)
+  with a 422 without fields instead of a 500 (`database.IsDataException`),
+  and a uint filter over `MaxInt64` is a 422; a decimal over its precision
+  is #440's. An edit of a loaded row is judged on what it changes:
+  `database.StoredValues` records the row, and `database.ScopeEdit` scopes
+  the update so text and a zero instant the row still stores, after the
+  model's hooks, are not judged again (`database.KeepStoredZeros` is
+  deprecated in its favour). **Behaviour change:** text a column cannot hold on every driver
+  is now refused where it was stored: on SQLite; on PostgreSQL a `text`
+  value over 65,535 bytes and an unsized primary-key, indexed, unique or
+  defaulted string over 191 characters (MySQL's `varchar(191)`); on MySQL
+  and SQLite a NUL byte. **Upgrading:** a row that already stores such text
+  stays editable through the admin (its form included) and partial updates,
+  but a generic
+  `Save` of it is a 422 on that field until the value is cleaned up (see
+  docs/database.md). `database.Search` takes a context and returns an error,
+  like `FilterEq`, so run `gombit generate` to update an app's
+  `handler.gen.go`; an app's own scaffolded `internal/product/handler.go`
+  needs the 63-bit id parse by hand
+  ([#444](https://github.com/gombit-dev/gombit/issues/444)).
 - `gombit make command` refuses the names `generate` and `contract`, which
   collided with framework commands; every command the root registers is now
   reserved ([#447](https://github.com/gombit-dev/gombit/pull/447)).
@@ -528,8 +572,8 @@ version.
   that column out of its update (the row's value stays; the insert fallback
   fills it). Rows that already store the zero instant stay editable through
   `Update`, a partial `Updates` and the admin, which keeps a stored zero in
-  any column a PATCH does not set unless a hook repairs it
-  (`database.StoredZeroColumns`, `database.KeepStoredZeros`); a generic
+  any column a PATCH leaves as stored unless a hook repairs it
+  (`database.StoredValues`, `database.ScopeEdit`); a generic
   `Save` of one is a 422 until the column is cleaned up
   (see docs/database.md). A string no Go time parses (`'infinity'`) is refused too
   ([#443](https://github.com/gombit-dev/gombit/issues/443)).

@@ -13,6 +13,7 @@ import (
 
 	"github.com/shopspring/decimal"
 
+	"github.com/gombit-dev/gombit/database"
 	"github.com/gombit-dev/gombit/field"
 	"github.com/gombit-dev/gombit/types"
 )
@@ -226,7 +227,24 @@ func coerceFilter(raw string, ft FieldType) (any, error) {
 	if raw == "" {
 		return nil, nil
 	}
-	return coerceValue(raw, ft)
+	return coerceText(raw, ft)
+}
+
+// coerceText coerces a value the database compares rather than stores (a
+// filter, a path id, a many-to-many id): a NUL byte or invalid UTF-8 is no
+// text any driver compares the same way (PostgreSQL refused it with a 500;
+// issue #444). A written value is judged by writtenTextProblem.
+func coerceText(raw any, ft FieldType) (any, error) {
+	v, err := coerceValue(raw, ft)
+	if err != nil {
+		return nil, err
+	}
+	if s, ok := v.(string); ok {
+		if msg := database.TextProblem(s); msg != "" {
+			return nil, errors.New(msg)
+		}
+	}
+	return v, nil
 }
 
 func coercePathID(id string, ft FieldType) (any, error) {
@@ -237,7 +255,7 @@ func coercePathID(id string, ft FieldType) (any, error) {
 	if ft == "" {
 		ft = TypeString
 	}
-	return coerceValue(id, ft)
+	return coerceText(id, ft)
 }
 
 func asString(raw any) (string, error) {

@@ -281,6 +281,7 @@ plane) go through `database.MapLoadError` / `database.MapPersistError`:
 | --- | --- | --- |
 | Missing row (`gorm.ErrRecordNotFound`) | `not_found` | 404 |
 | Unique / duplicate key | `conflict` | 409 |
+| A value the database refuses as data (out of range, too long, a NUL byte; [`docs/database.md`](database.md#error-mapping)) | `validation_error` | 422 |
 | Any other database error | `internal` | 500 |
 
 `database.IsUniqueViolation` is the portable detector (`gorm.ErrDuplicatedKey`

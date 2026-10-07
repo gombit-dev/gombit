@@ -81,11 +81,9 @@ func (h *handlers) listResources(ctx context.Context, input *listInput) (*listOu
 	page, perPage := contract.ClampPage(input.Page, input.PerPage)
 
 	q := db.WithContext(ctx).Model(m.newInstance())
-	q, err = applySearch(q, m, input.Search)
+	q, err = applySearch(ctx, q, m, input.Search)
 	if err != nil {
-		return nil, contract.WithContext(ctx, contract.Validation("The request contains invalid fields.", map[string][]string{
-			"search": {err.Error()},
-		}))
+		return nil, err
 	}
 	q, err = applyFilters(ctx, q, m, queryValues(ctx))
 	if err != nil {
@@ -212,7 +210,11 @@ func (h *handlers) updateResource(ctx context.Context, input *patchInput) (*rowO
 	if err != nil {
 		return nil, err
 	}
-	kept, edited := m.storedZeros(db, inst, body)
+	// What the row stores before the PATCH: the write checks judge only the
+	// columns the PATCH (or a model hook) changes, so a row holding a value
+	// stored before a check (a zero instant, over-long text) stays editable,
+	// whatever fields the form sends back unchanged (issues #443, #444).
+	stored := database.StoredValues(db, inst)
 	if err := applyWrite(ctx, m, inst, body, false); err != nil {
 		return nil, err
 	}
@@ -221,7 +223,7 @@ func (h *handlers) updateResource(ctx context.Context, input *patchInput) (*rowO
 		return nil, err
 	}
 	if err := h.writeFiles(ctx, cl, db, m, before, inst, func(tx *gorm.DB) error {
-		return persistWithM2M(ctx, database.KeepStoredZeros(tx, inst, kept, edited), m, inst, m2mIDs, false, m.updateOmits(before, inst), m.fileFence(before))
+		return persistWithM2M(ctx, database.ScopeEdit(tx, inst, stored), m, inst, m2mIDs, false, m.updateOmits(before, inst), m.fileFence(before))
 	}); err != nil {
 		return nil, err
 	}
@@ -249,7 +251,11 @@ func (h *handlers) updateVersioned(ctx context.Context, m *registered, inst any,
 		expected = cv
 		body = withoutKey(body, m.version.name)
 	}
-	kept, edited := m.storedZeros(db, inst, body)
+	// What the row stores before the PATCH: the write checks judge only the
+	// columns the PATCH (or a model hook) changes, so a row holding a value
+	// stored before a check (a zero instant, over-long text) stays editable,
+	// whatever fields the form sends back unchanged (issues #443, #444).
+	stored := database.StoredValues(db, inst)
 	if err := applyWrite(ctx, m, inst, body, false); err != nil {
 		return nil, err
 	}
@@ -259,7 +265,7 @@ func (h *handlers) updateVersioned(ctx context.Context, m *registered, inst any,
 	}
 	m.version.set(inst, expected+1)
 	if err := h.writeFiles(ctx, cl, db, m, before, inst, func(tx *gorm.DB) error {
-		res := database.KeepStoredZeros(tx, inst, kept, edited).WithContext(ctx).
+		res := database.ScopeEdit(tx, inst, stored).WithContext(ctx).
 			Model(inst).
 			Where(clause.Eq{Column: clause.Column{Name: m.version.column}, Value: expected}).
 			Clauses(clause.Where{Exprs: m.fileFence(before)}).
@@ -575,6 +581,10 @@ func applyWrite(ctx context.Context, m *registered, inst any, body map[string]an
 			fields[name] = []string{msg}
 			continue
 		}
+		if msg := writtenTextProblem(f, inst, raw, creating); msg != "" {
+			fields[name] = []string{msg}
+			continue
+		}
 		if err := f.set(inst, raw); err != nil {
 			fields[name] = []string{err.Error()}
 			continue
@@ -626,6 +636,27 @@ func applyWrite(ctx context.Context, m *registered, inst any, body map[string]an
 	return nil
 }
 
+// writtenTextProblem refuses a NUL byte or invalid UTF-8 in a string the
+// request writes (database.TextProblem; issue #444). The database's text check
+// refuses it too, but only in a column whose Go value it sees as text: not in
+// a type with its own driver.Valuer, which this check still covers. A value
+// the row already stores, sent back unchanged by the admin's form, is not
+// judged again (database.ScopeEdit's rule).
+func writtenTextProblem(f *resolvedField, inst any, raw any, creating bool) string {
+	s, ok := raw.(string)
+	if !ok || (f.Type != TypeString && f.Type != TypeText) {
+		return ""
+	}
+	msg := database.TextProblem(s)
+	if msg == "" || creating {
+		return msg
+	}
+	if same, err := sameAsStored(f, inst, raw); err == nil && same {
+		return ""
+	}
+	return msg
+}
+
 func blankRaw(raw any) bool {
 	if raw == nil {
 		return true
@@ -669,7 +700,7 @@ func (f *resolvedField) blankToNull() bool {
 	return patternRejectsEmpty(f.Pattern)
 }
 
-func applySearch(q *gorm.DB, m *registered, term string) (*gorm.DB, error) {
+func applySearch(ctx context.Context, q *gorm.DB, m *registered, term string) (*gorm.DB, error) {
 	// Resolve the registered search field names to columns, then delegate the
 	// LIKE building to the shared database.Search so the admin and the generated
 	// list handler cannot drift on search behavior.
@@ -679,7 +710,7 @@ func applySearch(q *gorm.DB, m *registered, term string) (*gorm.DB, error) {
 			cols = append(cols, col)
 		}
 	}
-	return database.Search(q, cols, term), nil
+	return database.Search(ctx, q, cols, term)
 }
 
 func applyFilters(ctx context.Context, q *gorm.DB, m *registered, values interface{ Get(string) string }) (*gorm.DB, error) {
