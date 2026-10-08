@@ -10,6 +10,7 @@ import (
 	"github.com/gombit-dev/gombit/config"
 	"github.com/gombit-dev/gombit/database"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // Service is the runtime auth implementation: users, password hashes,
@@ -123,6 +124,7 @@ func (s *Service) issueTokens(tx *gorm.DB, user User, now time.Time) (TokenPair,
 		UserID:    user.ID,
 		TokenHash: hashRefreshToken(raw),
 		ExpiresAt: now.Add(s.cfg.RefreshTokenTTL),
+		CreatedAt: now,
 	}
 	if err := tx.Create(&row).Error; err != nil {
 		return TokenPair{}, err
@@ -141,7 +143,8 @@ func (s *Service) issueTokens(tx *gorm.DB, user User, now time.Time) (TokenPair,
 
 // RotateRefresh validates the current refresh token, revokes it, and issues a
 // new pair. Reuse of an already-rotated token revokes the user's remaining
-// tokens. Concurrent callers with the same still-valid token share one
+// tokens; a token revoked by logout or session revocation is just invalid.
+// Concurrent callers with the same still-valid token share one
 // rotation so a lost race cannot family-revoke the winner's new session.
 func (s *Service) RotateRefresh(ctx context.Context, raw string) (TokenPair, error) {
 	raw = strings.TrimSpace(raw)
@@ -176,9 +179,14 @@ func (s *Service) RotateRefresh(ctx context.Context, raw string) (TokenPair, err
 	return pair, err
 }
 
+// rotateRefreshOnce runs one rotation in a transaction. Lock order: the
+// user's row (lockUserTx) comes before any write to a refresh_tokens row,
+// the same order every revocation uses; the compare-and-swap below must stay
+// after it. The initial read of the token takes no lock. The rotation's
+// instant is read once the lock is held: the lock can wait behind another
+// rotation or a revocation, and a token that expired during that wait must
+// not rotate, nor its successor's lifetime start before the wait.
 func (s *Service) rotateRefreshOnce(ctx context.Context, raw, hash string) (TokenPair, error) {
-	now := s.now()
-
 	var pair TokenPair
 	var reuse bool
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -189,7 +197,23 @@ func (s *Service) rotateRefreshOnce(ctx context.Context, raw, hash string) (Toke
 			}
 			return err
 		}
+		user, err := lockUserTx(tx, row.UserID)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errUserNotFound
+			}
+			// A deadlock, lock timeout or lost connection is a server
+			// failure, not a dead credential: it must not read as a 401.
+			return err
+		}
+		now := s.now()
 		if row.RevokedAt != nil {
+			if row.ReplacedBy == nil {
+				// Revoked by logout or session revocation, not by rotation:
+				// presenting it again is a dead credential, not evidence of
+				// theft, so it must not end the user's other sessions.
+				return errInvalidRefreshToken
+			}
 			if err := revokeAllTx(tx, row.UserID, now); err != nil {
 				return err
 			}
@@ -213,10 +237,6 @@ func (s *Service) rotateRefreshOnce(ctx context.Context, raw, hash string) (Toke
 			return errInvalidRefreshToken
 		}
 
-		var user User
-		if err := tx.First(&user, row.UserID).Error; err != nil {
-			return errUserNotFound
-		}
 		issued, err := s.issueTokens(tx, user, now)
 		if err != nil {
 			return err
@@ -253,30 +273,80 @@ func (s *Service) RevokeRefresh(ctx context.Context, raw string) error {
 		Update("revoked_at", now).Error
 }
 
-// ParseAccess validates a Bearer access JWT and loads the user.
+// ParseAccess validates an access JWT, from the Bearer header or the session
+// cookie, and loads its user. It fails when the token's session has ended:
+// its refresh token row was revoked or has expired.
 func (s *Service) ParseAccess(ctx context.Context, token string) (User, error) {
+	user, _, err := s.parseAccess(ctx, token)
+	return user, err
+}
+
+// parseAccess is ParseAccess plus the id of the refresh token row the access
+// token is bound to, which identifies the request's session. The token stops
+// authenticating when its session ends: revoked or expired.
+func (s *Service) parseAccess(ctx context.Context, token string) (User, uint, error) {
 	claims, err := parseAccessToken(s.secret, token, s.now())
 	if err != nil {
-		return User{}, err
+		return User{}, 0, err
 	}
 	id, err := userIDFromSubject(claims.Subject)
 	if err != nil {
-		return User{}, err
+		return User{}, 0, err
 	}
 	var user User
 	if err := s.db.WithContext(ctx).First(&user, id).Error; err != nil {
-		return User{}, errInvalidAccessToken
+		return User{}, 0, errInvalidAccessToken
 	}
 	var row RefreshToken
 	if err := s.db.WithContext(ctx).Where("id = ?", claims.RefreshID).First(&row).Error; err != nil {
-		return User{}, errInvalidAccessToken
+		return User{}, 0, errInvalidAccessToken
 	}
-	if row.UserID != user.ID || row.RevokedAt != nil {
-		return User{}, errInvalidAccessToken
+	// One definition of an active session, shared with the sessions API: an
+	// unrevoked refresh token row that has not expired. An access JWT that
+	// outlives its session (AccessTokenTTL above RefreshTokenTTL) would
+	// authenticate while the session is gone from the list and cannot be
+	// revoked.
+	if row.UserID != user.ID || row.RevokedAt != nil || !row.ExpiresAt.After(s.now()) {
+		return User{}, 0, errInvalidAccessToken
 	}
-	return user, nil
+	return user, row.ID, nil
 }
 
+// lockUserTx loads the user and locks its row for the rest of tx. Token
+// rotation (its reuse cascade included) and the three session revocations
+// (one, the others, all) take this lock first, so they run one at a time per
+// user. Login (IssueTokens) and logout (RevokeRefresh) do not take it, so
+// they are not serialized with those (docs/auth.md documents it for logout).
+// Without the lock, on PostgreSQL a revocation that waits on a row a
+// concurrent rotation holds re-checks only that row and never sees the
+// replacement the rotation inserts, so the session survives. SQLite has no
+// row locks (the dialect drops FOR UPDATE); its single writer already
+// serializes these transactions.
+//
+// Lock order: user before token, always. Whatever takes this lock must take
+// it before it reads-to-modify or writes any refresh_tokens row, because the
+// other path may already hold the user and be about to update a token. Taking
+// the token first would deadlock against it.
+//
+// PostgreSQL gets FOR NO KEY UPDATE rather than FOR UPDATE. Inserting a row
+// that references the user (a group membership, or any application table
+// with a foreign key to users) takes FOR KEY SHARE on the user's row, which
+// FOR UPDATE blocks for the whole transaction, so a login-time write would
+// wait behind every rotation of that user. FOR NO KEY UPDATE conflicts with
+// itself, which is all the serialization needs, but not with FOR KEY SHARE.
+// MySQL has no such lock mode, so it keeps FOR UPDATE.
+func lockUserTx(tx *gorm.DB, userID uint) (User, error) {
+	strength := clause.LockingStrengthUpdate
+	if tx.Name() == "postgres" { // the dialector's name
+		strength = "NO KEY UPDATE"
+	}
+	var user User
+	err := tx.Clauses(clause.Locking{Strength: strength}).First(&user, userID).Error
+	return user, err
+}
+
+// revokeAllTx revokes every active refresh token of the user. tx must hold
+// lockUserTx.
 func revokeAllTx(tx *gorm.DB, userID uint, now time.Time) error {
 	return tx.Model(&RefreshToken{}).
 		Where("user_id = ? AND revoked_at IS NULL", userID).

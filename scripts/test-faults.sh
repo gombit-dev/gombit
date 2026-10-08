@@ -19,6 +19,14 @@
 # FAULT_BUDGET_SECONDS fails a run that takes longer. Nothing here reaches the internet or needs credentials beyond the
 # test databases; plain `go test ./...` is unchanged by it.
 #
+# Every `go test` gets a -timeout per test binary that grows with
+# FAULT_COUNT, since all the repetitions of a package run in one binary:
+# FAULT_COUNT x 40s, never under go test's own 10m default, so a PR shard
+# (FAULT_COUNT=1) runs as before and the x100 soak gets 4000s. The slowest
+# package, auth against PostgreSQL and MySQL, takes about 19s a repetition,
+# so 40s leaves it more than twice that. FAULT_TIMEOUT sets the timeout
+# instead, in whole seconds (5400 for 90 minutes).
+#
 #   bash scripts/test-faults.sh
 #   FAULT_POSTGRES_DSN=postgres://... FAULT_COUNT=100 bash scripts/test-faults.sh
 set -euo pipefail
@@ -42,6 +50,12 @@ positive() {
 
 count="${FAULT_COUNT:-1}"
 positive FAULT_COUNT "$count"
+
+testTimeout=""
+if [ -n "${FAULT_TIMEOUT:-}" ]; then
+  positive FAULT_TIMEOUT "$FAULT_TIMEOUT"
+  testTimeout="${FAULT_TIMEOUT}s"
+fi
 
 # FAULT_SHARD=i/n runs the i-th of n round-robin slices of the suite's
 # packages (CI runs the slices as parallel jobs, since compiling every test
@@ -129,16 +143,25 @@ if [ -n "$compileOnly" ]; then
   count=1
 fi
 
+# The per-binary timeout (see the top of this file).
+if [ -z "$testTimeout" ]; then
+  timeoutSeconds=$((count * 40))
+  if [ "$timeoutSeconds" -lt 600 ]; then
+    timeoutSeconds=600
+  fi
+  testTimeout="${timeoutSeconds}s"
+fi
+
 faultPkgs=()
 for pkg in ${mine[@]+"${mine[@]}"}; do
   if [ "$pkg" = "$harness" ]; then
-    run go test -race -count="$count" -run "$harnessRun" "$harness"
+    run go test -race -count="$count" -timeout="$testTimeout" -run "$harnessRun" "$harness"
   else
     faultPkgs+=("$pkg")
   fi
 done
 if [ "${#faultPkgs[@]}" -gt 0 ]; then
-  run go test -race -count="$count" -run "$faultRun" "${faultPkgs[@]}"
+  run go test -race -count="$count" -timeout="$testTimeout" -run "$faultRun" "${faultPkgs[@]}"
 fi
 
 if [ -n "${FAULT_POSTGRES_DSN:-}${FAULT_MYSQL_DSN:-}${FAULT_REDIS_ADDR:-}" ]; then
@@ -170,7 +193,7 @@ if [ -n "${FAULT_POSTGRES_DSN:-}${FAULT_MYSQL_DSN:-}${FAULT_REDIS_ADDR:-}" ]; th
     if [ "$pkg" = "$harness" ]; then
       filter="$harnessRun" # the harness's database tests run whole
     fi
-    run go test -tags integration -race -count="$count" -run "$filter" "$pkg" "${args[@]}"
+    run go test -tags integration -race -count="$count" -timeout="$testTimeout" -run "$filter" "$pkg" "${args[@]}"
   done
 fi
 

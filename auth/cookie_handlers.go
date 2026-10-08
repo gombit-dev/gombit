@@ -114,11 +114,11 @@ func (s *Service) requireCookieSession() func(ctx huma.Context, next func(huma.C
 			writeCookieAuthError(ctx, contract.WithContext(ctx.Context(), contract.Authentication("missing session cookie")))
 			return
 		}
-		user, err := s.ParseAccess(ctx.Context(), cookie.Value)
+		user, refreshID, err := s.parseAccess(ctx.Context(), cookie.Value)
 		if err != nil {
 			writeCookieAuthError(ctx, contract.WithContext(ctx.Context(), contract.Authentication("invalid session cookie")))
 			return
 		}
-		next(huma.WithValue(ctx, userContextKey{}, user))
+		next(withSession(ctx, user, refreshID))
 	}
 }

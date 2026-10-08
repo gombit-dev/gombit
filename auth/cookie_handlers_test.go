@@ -12,6 +12,7 @@ import (
 	"github.com/gombit-dev/gombit/auth"
 	"github.com/gombit-dev/gombit/config"
 	"github.com/gombit-dev/gombit/contract"
+	"github.com/gombit-dev/gombit/database"
 	"github.com/gombit-dev/gombit/framework"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -50,7 +51,11 @@ func (j *cookieJar) value(name string) string {
 
 func newCookieAuthApp(t *testing.T) *framework.App {
 	t.Helper()
-	db := openSQLite(t)
+	return newCookieAuthAppWithDB(t, openSQLite(t))
+}
+
+func newCookieAuthAppWithDB(t *testing.T, db *database.DB) *framework.App {
+	t.Helper()
 	if err := auth.Migrate(db.DB); err != nil {
 		t.Fatalf("auth.Migrate() error = %v", err)
 	}

@@ -2,8 +2,9 @@
 
 Minimal `framework.App` with `Config.Auth.Mode = config.AuthModeCookie` +
 SQLite. `framework.New` mounts `GET /api/v1/auth/csrf`,
-`POST /api/v1/auth/{register,login,refresh,logout}`, and `GET /api/v1/me`,
-plus the global CSRF middleware. See [`docs/auth-cookie.md`](../../docs/auth-cookie.md)
+`POST /api/v1/auth/{register,login,refresh,logout}`, `GET /api/v1/me`, and
+the session-management routes under `/api/v1/auth/sessions`, plus the global
+CSRF middleware. See [`docs/auth-cookie.md`](../../docs/auth-cookie.md)
 for the threat model.
 
 ## Run
@@ -41,6 +42,13 @@ curl -sS -c "$JAR" -b "$JAR" http://127.0.0.1:8081/api/v1/me
 
 # rotate the session (reads gombit_refresh from $JAR; no request body)
 curl -sS -c "$JAR" -b "$JAR" -X POST http://127.0.0.1:8081/api/v1/auth/refresh \
+  -H "X-CSRF-Token: $CSRF"
+
+# list sessions ("current": true marks this jar's session), then revoke every
+# other session; revoking is CSRF-protected like any DELETE
+curl -sS -c "$JAR" -b "$JAR" http://127.0.0.1:8081/api/v1/auth/sessions
+curl -sS -c "$JAR" -b "$JAR" -X DELETE \
+  "http://127.0.0.1:8081/api/v1/auth/sessions?scope=others" \
   -H "X-CSRF-Token: $CSRF"
 
 # logout (revokes the refresh token and clears both session cookies)
