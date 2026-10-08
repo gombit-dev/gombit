@@ -71,6 +71,21 @@ jobs:
         working-directory: internal/adminui
         run: npm ci && npm test
 
+      # A tag ships the committed dist/ (go:embed): refuse to tag one that is
+      # not the build of its src/, as ci.yml's test job does (issue #451).
+      - name: Rebuild the admin UI
+        working-directory: internal/adminui
+        run: npm run build
+
+      - name: Fail on admin UI dist drift
+        run: |
+          if [ -n "$(git status --porcelain -- internal/adminui/dist)" ]; then
+            git status --porcelain -- internal/adminui/dist
+            git diff --stat -- internal/adminui/dist
+            echo "::error::internal/adminui/dist is stale: run 'npm run build' in internal/adminui and commit dist/ with the source change"
+            exit 1
+          fi
+
       # Parallel packages all shell out to npx; a cold _npx extract races
       # (TAR_ENTRY_ERROR / missing json-schema-traverse) and fails client
       # generation tests.
