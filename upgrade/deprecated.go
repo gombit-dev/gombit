@@ -8,15 +8,12 @@ import (
 	"go/token"
 	"go/types"
 	"io"
-	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 
 	"golang.org/x/tools/go/packages"
-	"golang.org/x/tools/go/types/objectpath"
 )
 
 // DeprecatedUse is one use, in the application, of a framework API that the
@@ -43,10 +40,12 @@ type DeprecatedUse struct {
 // errors first.
 var ErrDoesNotLoad = errors.New("upgrade: the application does not type-check")
 
-// loadMode is what a scan needs of a package: its syntax with full type
-// information.
+// loadMode is what a scan needs: every package of the app and of its
+// dependencies, with syntax and full type information, type-checked from
+// source in one go/types universe (NeedDeps), so that a framework
+// declaration and the app's use of it are the same object.
 const loadMode = packages.NeedName | packages.NeedFiles | packages.NeedSyntax |
-	packages.NeedTypes | packages.NeedTypesInfo | packages.NeedModule | packages.NeedImports
+	packages.NeedTypes | packages.NeedTypesInfo | packages.NeedModule | packages.NeedImports | packages.NeedDeps
 
 // ScanDeprecated finds every use, in the application in workDir (all its
 // packages, tests included), of a framework API whose doc comment carries a
@@ -77,32 +76,28 @@ func ScanDeprecated(ctx context.Context, workDir string) ([]DeprecatedUse, error
 	if err != nil {
 		return nil, err
 	}
-	var apps []*packages.Package
-	framework := map[string]bool{}
-	for _, p := range pkgs {
-		if p.Module != nil && p.Module.Path == FrameworkModulePath {
-			continue // the framework's own packages
+	// Every framework package anywhere in the graph, not only the ones the
+	// app imports: a dependency can hand the app a framework type whose
+	// (promoted) members the app then uses.
+	idx := &index{objects: map[types.Object]declDoc{}, packages: map[string]declDoc{}, indexed: map[*types.Package]bool{}}
+	var indexErr error
+	packages.Visit(pkgs, nil, func(p *packages.Package) {
+		if indexErr == nil && isFrameworkPath(p.PkgPath) && p.Types != nil && !idx.indexed[p.Types] {
+			indexErr = idx.add(p)
 		}
-		apps = append(apps, p)
-		for path := range p.Imports {
-			if isFrameworkPath(path) {
-				framework[path] = true
-			}
-		}
-	}
-	if len(framework) == 0 {
-		return nil, nil
-	}
-	deprecated, err := frameworkDeprecations(cfg, framework)
-	if err != nil {
-		return nil, err
+	})
+	if indexErr != nil {
+		return nil, indexErr
 	}
 	root, err := filepath.Abs(workDir)
 	if err != nil {
 		return nil, fmt.Errorf("upgrade: %w", err)
 	}
-	s := &scan{root: root, deprecated: deprecated, seen: map[string]bool{}}
-	for _, p := range apps {
+	s := &scan{root: root, idx: idx, seen: map[string]bool{}}
+	for _, p := range pkgs {
+		if p.Module != nil && p.Module.Path == FrameworkModulePath {
+			continue // the framework's own packages
+		}
 		if err := s.pkg(p); err != nil {
 			return nil, err
 		}
@@ -115,25 +110,21 @@ func ScanDeprecated(ctx context.Context, workDir string) ([]DeprecatedUse, error
 		if a.Line != b.Line {
 			return a.Line < b.Line
 		}
-		return a.Column < b.Column
+		if a.Column != b.Column {
+			return a.Column < b.Column
+		}
+		return a.Symbol < b.Symbol
 	})
 	return s.uses, nil
 }
 
-// scanConfig is the load configuration for the app in workDir. Export data
-// names a dependency's files as the build did, which -trimpath (in GOFLAGS,
-// as CI often sets it) leaves unusable for anything reading them; load
-// without it. GOFLAGS set in the environment wins over go env -w settings,
-// so the effective value is extended.
+// scanConfig is the load configuration for the app in workDir. Every
+// package is type-checked from source (loadMode), so no export data, and no
+// file name it records (which -trimpath would change), takes part.
 func scanConfig(ctx context.Context, workDir string) (*packages.Config, error) {
-	goflags, err := goEnv(ctx, workDir, "GOFLAGS")
-	if err != nil {
-		return nil, err
-	}
 	return &packages.Config{
 		Context: ctx,
 		Dir:     workDir,
-		Env:     append(os.Environ(), "GOFLAGS="+strings.TrimSpace(goflags+" -trimpath=false")),
 		Mode:    loadMode,
 		Tests:   true,
 	}, nil
@@ -168,70 +159,46 @@ type declDoc struct {
 	deprecation string
 }
 
-// frameworkDeprecations loads the framework packages paths from source, the
-// way the app builds them (cfg), and returns their deprecated declarations
-// by object key (objectKey), and a deprecated package by its path alone.
-func frameworkDeprecations(cfg *packages.Config, paths map[string]bool) (map[string]declDoc, error) {
-	fw := *cfg
-	fw.Tests = false
-	patterns := make([]string, 0, len(paths))
-	for p := range paths {
-		patterns = append(patterns, p)
-	}
-	sort.Strings(patterns)
-	pkgs, err := loadPackages(&fw, patterns...)
-	if err != nil {
-		return nil, err
-	}
-	out := map[string]declDoc{}
-	for _, p := range pkgs {
-		for _, f := range p.Syntax {
-			var walkErr error
-			walkDocs(p.Name, f, func(name *ast.Ident, symbol string, docs []*ast.CommentGroup) {
-				dep := firstDeprecation(docs)
-				if dep == "" || walkErr != nil {
-					return
-				}
-				if name == nil { // the package clause
-					out[p.PkgPath] = declDoc{symbol: p.PkgPath, deprecation: dep}
-					return
-				}
-				obj := p.TypesInfo.Defs[name]
-				if obj == nil {
-					walkErr = fmt.Errorf("upgrade: %s: no object for the deprecated %s", p.PkgPath, symbol)
-					return
-				}
-				key, err := objectKey(obj)
-				if err != nil {
-					walkErr = err
-					return
-				}
-				out[key] = declDoc{symbol: symbol, deprecation: dep}
-			})
-			if walkErr != nil {
-				return nil, walkErr
-			}
-		}
-	}
-	return out, nil
+// index is the deprecated declarations of the framework packages in the
+// graph: by the object each defines, and a deprecated package by its path.
+type index struct {
+	objects  map[types.Object]declDoc
+	packages map[string]declDoc
+	indexed  map[*types.Package]bool
 }
 
-// objectKey is obj's identity across source and export data: its package
-// path and object path.
-func objectKey(obj types.Object) (string, error) {
-	path, err := objectpath.For(obj)
-	if err != nil {
-		return "", fmt.Errorf("upgrade: resolve %s.%s: %w", obj.Pkg().Path(), obj.Name(), err)
+// add indexes the deprecated declarations of the framework package p,
+// tying each to the object it defines (TypesInfo.Defs).
+func (x *index) add(p *packages.Package) error {
+	x.indexed[p.Types] = true
+	var err error
+	for _, f := range p.Syntax {
+		walkDocs(p.Name, f, func(name *ast.Ident, symbol string, docs []*ast.CommentGroup) {
+			dep := firstDeprecation(docs)
+			if dep == "" || err != nil {
+				return
+			}
+			if name == nil { // the package clause
+				x.packages[p.PkgPath] = declDoc{symbol: p.PkgPath, deprecation: dep}
+				return
+			}
+			obj := p.TypesInfo.Defs[name]
+			if obj == nil {
+				err = fmt.Errorf("upgrade: %s: no object for the deprecated %s", p.PkgPath, symbol)
+				return
+			}
+			x.objects[obj] = declDoc{symbol: symbol, deprecation: dep}
+		})
 	}
-	return obj.Pkg().Path() + "\x00" + string(path), nil
+	return err
 }
 
 // scan collects the uses in the app's packages.
 type scan struct {
-	root       string
-	deprecated map[string]declDoc
-	seen       map[string]bool // positions already reported
-	uses       []DeprecatedUse
+	root string
+	idx  *index
+	seen map[string]bool // uses already reported: position and declaration
+	uses []DeprecatedUse
 }
 
 func (s *scan) pkg(p *packages.Package) error {
@@ -246,7 +213,7 @@ func (s *scan) pkg(p *packages.Package) error {
 			if err != nil {
 				continue
 			}
-			if d, ok := s.deprecated[path]; ok {
+			if d, ok := s.idx.packages[path]; ok {
 				s.add(p, spec.Path.Pos(), path, d)
 			}
 		}
@@ -292,9 +259,10 @@ func structOf(info *types.Info, lit *ast.CompositeLit) (*types.Struct, bool) {
 }
 
 // object records a use of obj at pos when obj is a deprecated framework
-// declaration. Every object of the framework's API has an object path; one
-// without (a framework-local declaration) is not API, and cannot be used
-// from the app.
+// declaration. obj and the indexed declarations come from one type-checked
+// graph, so a deprecated declaration is found by identity; a framework
+// object from a package the index never saw cannot be judged, and stops the
+// scan rather than pass as "not deprecated".
 func (s *scan) object(p *packages.Package, pos token.Pos, obj types.Object) error {
 	obj = origin(obj)
 	if !isFrameworkObject(obj) {
@@ -303,11 +271,10 @@ func (s *scan) object(p *packages.Package, pos token.Pos, obj types.Object) erro
 	if _, isPkg := obj.(*types.PkgName); isPkg {
 		return nil // a package name: its import is checked instead
 	}
-	key, err := objectKey(obj)
-	if err != nil {
-		return err
+	if !s.idx.indexed[obj.Pkg()] {
+		return fmt.Errorf("upgrade: %s.%s comes from a framework package outside the loaded graph; cannot judge it", obj.Pkg().Path(), obj.Name())
 	}
-	if d, ok := s.deprecated[key]; ok {
+	if d, ok := s.idx.objects[obj]; ok {
 		s.add(p, pos, obj.Pkg().Path(), d)
 	}
 	return nil
@@ -315,8 +282,11 @@ func (s *scan) object(p *packages.Package, pos token.Pos, obj types.Object) erro
 
 func (s *scan) add(p *packages.Package, pos token.Pos, pkgPath string, d declDoc) {
 	at := p.Fset.Position(pos)
-	key := fmt.Sprintf("%s:%d:%d", at.Filename, at.Line, at.Column)
-	if s.seen[key] { // a package and its test variant share files
+	// A use is a position and the declaration it uses: one token can use
+	// two (an unkeyed element that is itself a deprecated name), while a
+	// package and its test variant report the same pair.
+	key := fmt.Sprintf("%s:%d:%d\x00%s", at.Filename, at.Line, at.Column, d.symbol)
+	if s.seen[key] {
 		return
 	}
 	s.seen[key] = true
@@ -340,18 +310,6 @@ func origin(obj types.Object) types.Object {
 		return o.Origin()
 	}
 	return obj
-}
-
-// goEnv is the go command's value of the variable name in dir.
-func goEnv(ctx context.Context, dir, name string) (string, error) {
-	cmd := exec.CommandContext(ctx, "go", "env", name) // #nosec G204 -- go env with a fixed variable name
-	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "GOTOOLCHAIN=local")
-	out, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("upgrade: go env %s: %w", name, err)
-	}
-	return strings.TrimSpace(string(out)), nil
 }
 
 func isFrameworkPath(path string) bool {

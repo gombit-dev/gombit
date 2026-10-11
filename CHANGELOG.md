@@ -333,12 +333,14 @@ version.
   type, a constant, a variable, a struct field (named or embedded) or an
   interface method: file, line and column, the symbol, and what to use
   instead. Uses are resolved from type information (`go/packages`,
-  `go/types`), every package and test included, and matched to the
-  framework's declarations, loaded from source, by object identity
-  (`go/types/objectpath`); an import of a deprecated package and an element
-  of an unkeyed struct literal count too. A matching name, a comment or a
-  string is never reported; an app that does not type-check, or an object
-  that cannot be resolved, is an error, never a clean result. It exits 1
+  `go/types`), every package, test and dependency type-checked from source
+  as one graph, so a use and the framework declaration it uses are one
+  object; every framework package in the graph is read, also one reached
+  only through another dependency, and an import of a deprecated package
+  and an element of an unkeyed struct literal count too. A matching name, a
+  comment or a string is never reported; an app that does not type-check,
+  or a framework object outside the loaded graph, is an error, never a
+  clean result. It exits 1
   when there is any use.
   `upgrade.ScanDeprecated` is the API, and a test requires every
   `Deprecated:` paragraph in the framework to name its replacement. The

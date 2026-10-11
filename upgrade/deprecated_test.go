@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -260,7 +261,7 @@ func main() { _ = database.KeepStoredZeros(nil, nil, nil, nil) }
 		t.Fatal(err)
 	}
 	if len(uses) != 1 || uses[0].Symbol != "database.KeepStoredZeros" || !strings.Contains(uses[0].Deprecation, "use ScopeEdit with StoredValues") {
-		t.Fatalf("uses = %+v; want database.KeepStoredZeros with its replacement", uses)
+		t.Fatalf("uses = %+v; want database.KeepStoredZeros with its replacement\n%s", uses, goDiagnostics(app))
 	}
 }
 
@@ -358,5 +359,86 @@ func Blocky() int { return 0 }
 	}
 	if uses[0].Deprecation != "Deprecated: use package opts instead." {
 		t.Fatalf("package deprecation = %q", uses[0].Deprecation)
+	}
+}
+
+// goDiagnostics is what the go command sees in dir: its environment and
+// the framework packages in the build, for a failure message.
+func goDiagnostics(dir string) string {
+	var b strings.Builder
+	for _, args := range [][]string{
+		{"env", "GOFLAGS", "GOWORK", "GOPROXY", "GOMODCACHE", "GOVERSION"},
+		{"list", "-deps", "-f", "{{.ImportPath}} {{.Dir}} {{.Error}}", "./..."},
+	} {
+		cmd := exec.Command("go", args...) // #nosec G204 -- fixed go subcommands, for diagnostics
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		fmt.Fprintf(&b, "$ go %s (%v)\n", strings.Join(args, " "), err)
+		for _, line := range strings.Split(string(out), "\n") {
+			if args[0] == "env" || strings.Contains(line, "gombit-dev/gombit") || strings.Contains(line, "example.com") {
+				b.WriteString(line + "\n")
+			}
+		}
+	}
+	return b.String()
+}
+
+// TestScanDeprecatedThroughADependency: a framework API the app reaches
+// only through a non-framework package (a wrapper embedding a framework
+// type, whose promoted method the app calls) is found, though the app
+// imports no framework package.
+func TestScanDeprecatedThroughADependency(t *testing.T) {
+	app := scanApp(t, map[string]string{"main.go": `package main
+
+import "example.com/wrap"
+
+func main() { wrap.New().Get() }
+`})
+	root := filepath.Join(app, "..")
+	writeTree(t, filepath.Join(root, "wrap"), map[string]string{
+		"go.mod":  "module example.com/wrap\n\ngo 1.21\n\nrequire github.com/gombit-dev/gombit v0.0.0\n\nreplace github.com/gombit-dev/gombit => ../fw\n",
+		"wrap.go": "package wrap\n\nimport \"github.com/gombit-dev/gombit/db\"\n\n// W wraps a store.\ntype W struct{ *db.Store }\n\n// New returns a wrapper.\nfunc New() W { return W{} }\n",
+	})
+	goMod := filepath.Join(app, "go.mod")
+	data, err := os.ReadFile(goMod) // #nosec G304 -- under t.TempDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = append(data, "require example.com/wrap v0.0.0\n\nreplace example.com/wrap => ../wrap\n"...)
+	if err := os.WriteFile(goMod, data, 0o600); err != nil { // #nosec G703 -- under t.TempDir()
+		t.Fatal(err)
+	}
+	uses, err := upgrade.ScanDeprecated(context.Background(), app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(uses) != 1 || uses[0].Symbol != "(*db.Store).Get" || uses[0].Line != 5 {
+		t.Fatalf("uses = %+v; want the promoted (*db.Store).Get", uses)
+	}
+}
+
+// TestScanDeprecatedTwoUsesAtOneToken: an unkeyed element that is itself a
+// deprecated name uses two deprecated declarations at one position, the
+// field it fills and the name; both are reported.
+func TestScanDeprecatedTwoUsesAtOneToken(t *testing.T) {
+	app := scanApp(t, map[string]string{"main.go": `package main
+
+import . "github.com/gombit-dev/gombit/db"
+
+func main() { _ = Store{OldName, ""} }
+`})
+	writeTree(t, filepath.Join(app, "..", "fw"), map[string]string{"db/extra.go": "package db\n\n// OldName is an old name.\n//\n// Deprecated: use Label.\nconst OldName = \"x\"\n"})
+	uses, err := upgrade.ScanDeprecated(context.Background(), app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, u := range uses {
+		got = append(got, fmt.Sprintf("%d:%d %s", u.Line, u.Column, u.Symbol))
+	}
+	// Store's first field is Name (deprecated); OldName is a deprecated
+	// const.
+	if strings.Join(got, "|") != "5:25 db.OldName|5:25 db.Store.Name" {
+		t.Fatalf("uses = %v; want db.OldName and db.Store.Name at the same token", got)
 	}
 }

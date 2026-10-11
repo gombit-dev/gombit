@@ -161,20 +161,24 @@ Deprecated framework APIs used: 1
 - **What can be deprecated:** a package (its package doc), a function, a
   method, a type, a constant, a variable, a struct field (named or embedded)
   or an interface method, documented with a line or a block comment.
-- **How uses are found:** from type information, not text. Every package of
-  the app, tests included, is loaded and type-checked (`go/packages`), and
-  so are the framework packages it imports, from source. A deprecated
-  declaration is tied to the object it defines, every use in the app to the
-  object it denotes, and the two meet by object identity (the object path
-  gopls uses), never by file positions. A use is a name resolving to such an
-  object (a call, a selector, a composite literal key, a dot-imported name),
-  an element of an unkeyed struct literal (`db.Options{"x", 0}` uses the
-  first field), or the import of a deprecated package. So a local name that
+- **How uses are found:** from type information, not text. The app's
+  packages, tests included, and everything they depend on are loaded and
+  type-checked from source as one graph (`go/packages`), so a framework
+  declaration and the app's use of it are the same `go/types` object: a
+  deprecated declaration is tied to the object it defines, and every use in
+  the app resolved to the object it denotes, never matched by file
+  positions. Every framework package in that graph is read, including one
+  the app reaches only through another dependency (a wrapper embedding a
+  framework type, whose promoted method the app calls). A use is a name
+  resolving to such an object (a call, a selector, a composite literal key,
+  a dot-imported name), an element of an unkeyed struct literal
+  (`db.Options{"x", 0}` uses the first field), or the import of a
+  deprecated package; one token can be two uses. So a local name that
   happens to match, a comment or a string is never reported.
-- **Never a false clean:** the app (and the framework packages it imports)
-  must type-check, and a framework object whose identity cannot be resolved
-  stops the scan; either is an error, with Go's diagnostics, rather than a
-  scan that misses uses.
+- **Never a false clean:** the app and its dependencies must type-check, and
+  a framework object from a package outside the loaded graph stops the scan;
+  either is an error, with Go's diagnostics, rather than a scan that misses
+  uses.
 - **Output:** file, line and column, the symbol (`pkg.Name`,
   `pkg.Type.Field`, `(*pkg.Type).Method`) and the deprecation; `--json`
   prints them as a list. It exits 1 when there is any use, so a CI job can

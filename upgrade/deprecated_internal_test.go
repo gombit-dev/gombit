@@ -139,15 +139,15 @@ func TestDeprecatedReplacementRule(t *testing.T) {
 	}
 }
 
-// TestScanFailsClosedOnAnUnresolvableObject: a framework object whose
-// identity cannot be resolved stops the scan with an error; it is never
-// taken for "not deprecated".
-func TestScanFailsClosedOnAnUnresolvableObject(t *testing.T) {
+// TestScanFailsClosedOnAnUnindexedPackage: a framework object whose
+// package the index never saw cannot be judged, and stops the scan with an
+// error; it is never taken for "not deprecated".
+func TestScanFailsClosedOnAnUnindexedPackage(t *testing.T) {
 	pkg := types.NewPackage(FrameworkModulePath+"/db", "db")
-	local := types.NewVar(token.NoPos, pkg, "Local", types.Typ[types.Int]) // in no scope: no object path
-	s := &scan{deprecated: map[string]declDoc{}, seen: map[string]bool{}}
-	if err := s.object(&packages.Package{Fset: token.NewFileSet()}, token.NoPos, local); err == nil || !strings.Contains(err.Error(), "resolve "+FrameworkModulePath+"/db.Local") {
-		t.Fatalf("object = %v; want an error resolving it", err)
+	obj := types.NewFunc(token.NoPos, pkg, "Old", types.NewSignatureType(nil, nil, nil, nil, nil, false))
+	s := &scan{idx: &index{objects: map[types.Object]declDoc{}, packages: map[string]declDoc{}, indexed: map[*types.Package]bool{}}, seen: map[string]bool{}}
+	if err := s.object(&packages.Package{Fset: token.NewFileSet()}, token.NoPos, obj); err == nil || !strings.Contains(err.Error(), FrameworkModulePath+"/db.Old comes from a framework package outside the loaded graph") {
+		t.Fatalf("object = %v; want an error", err)
 	}
 	if len(s.uses) != 0 {
 		t.Fatalf("uses = %+v", s.uses)
