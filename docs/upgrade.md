@@ -8,9 +8,10 @@ upgrade` tooling works that out for you, and proposes changes for review: it
 never rewrites code you own without an explicit write action.
 
 This page grows with the UPGRADE-0 epic. Today it covers **planning an
-upgrade** (`gombit upgrade --dry-run`), the **baseline** (where an
-application stands) and the **compatibility manifest** (what each release
-asks of an application moving to it).
+upgrade** (`gombit upgrade --dry-run`), **applying its dependency changes**
+(`gombit upgrade --to`), the **baseline** (where an application stands) and
+the **compatibility manifest** (what each release asks of an application
+moving to it).
 
 ## Planning an upgrade
 
@@ -90,8 +91,52 @@ actions:
 gombit upgrade --dry-run --to v0.8.0 --json | jq -e '.breaking == [] and .manual == []'
 ```
 
-Applying the plan is not here yet: `gombit upgrade --to` without `--dry-run`
-refuses.
+## Applying the dependency changes
+
+`gombit upgrade --to vX.Y.Z` (without `--dry-run`) carries out the plan's
+dependency changes with the go command, and nothing else:
+
+```text
+$ gombit upgrade --to v0.7.1
+Gombit upgrade v0.7.0 -> v0.7.1
+
+Dependency changes:
+  github.com/gombit-dev/gombit v0.7.0 -> v0.7.1 (require)
+
+Go commands run:
+  go get github.com/gombit-dev/gombit@v0.7.1
+
+go.mod:
+  - require github.com/gombit-dev/gombit v0.7.0
+  + require github.com/gombit-dev/gombit v0.7.1
+go.sum: 2 line(s) added, 0 removed
+
+Review them with `git diff go.mod go.sum`. Still to do (not applied):
+...
+```
+
+- **Target:** `--to` is required: nothing is applied to a default target.
+  It plans first, so the plan's refusals stand (an unlisted version, a
+  downgrade, a workspace, a local checkout, a fork).
+- **The go command does the work.** Each `replace` the plan names is edited
+  first (`go mod edit -dropreplace`, or `-replace`), then `go get
+  github.com/gombit-dev/gombit@vX.Y.Z` moves the require and records the sums
+  it needs. The resolution is Go's own (minimal version selection), so the
+  same go.mod, module sources and go command give the same result (your
+  `GOFLAGS`, `GOPROXY` and toolchain take part, as for any `go get`, and the
+  go command may update the `go` or `toolchain` line); `go get` keeps the old
+  version's sums, which a later `go mod tidy` prunes. In a vendored app it
+  leaves `vendor/` as it was, and says to run `go mod vendor` before
+  building.
+- **Visible:** every go command is printed, with the `go.mod` lines it
+  removed and added and the `go.sum` line counts (`--json` has them all,
+  with each command's output). Commit them after review.
+- **Never masked:** a go command that fails is reported as it is: the
+  command, its exit status, and everything Go printed. A result whose build
+  is not the target release (another directive deciding it) is refused too.
+  Either way `go.mod` and `go.sum` get back the bytes they had.
+- **Only the dependencies.** The plan's automatic and manual changes are
+  printed as still to do; they are not applied.
 
 ## The baseline
 

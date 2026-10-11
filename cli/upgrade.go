@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,7 +16,7 @@ import (
 func newUpgradeCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
 	cmd := silence(&cobra.Command{
 		Use:   "upgrade",
-		Short: "Plan a framework upgrade (--dry-run), and upgrade tooling",
+		Short: "Upgrade the framework dependency (--to), plan it (--dry-run), and upgrade tooling",
 		Long: `Plan upgrading the application to a framework release, from the
 compatibility manifest built into this gombit, without changing anything:
 
@@ -28,7 +29,17 @@ release this gombit knows). A version the manifest does not list, or an app
 whose baseline names no framework release (a go.work, a local checkout, a
 fork), fails with the reason. It never prompts, so it runs in CI as is.
 
-Applying an upgrade is not here yet; only --dry-run plans one.`,
+Apply the plan's dependency changes:
+
+  gombit upgrade --to vX.Y.Z [--dir .] [--json]
+
+It edits the replaces of the framework the plan names (go mod edit), then
+runs go get github.com/gombit-dev/gombit@vX.Y.Z, prints every go command and
+the go.mod and go.sum lines they changed, and leaves them for review. A go
+command that fails is shown with its full output, and go.mod and go.sum are
+restored. The plan's automatic and manual changes are printed as still to
+do: they are not applied. --to is required here: nothing is applied to a
+default target.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) > 0 {
@@ -40,18 +51,19 @@ Applying an upgrade is not here yet; only --dry-run plans one.`,
 			to, _ := flags.GetString("to")
 			dir, _ := flags.GetString("dir")
 			asJSON, _ := flags.GetBool("json")
-			if !dryRun {
+			switch {
+			case dryRun:
+				return runUpgradePlan(stdout, dir, to, asJSON)
+			case to != "":
+				return runUpgradeApply(cmd.Context(), stdout, dir, to, asJSON)
+			default:
 				upgradeUsage(stderr)
-				if to != "" {
-					return errors.New("gombit upgrade: applying an upgrade is not supported yet; plan it with --dry-run")
-				}
-				return errors.New("gombit upgrade: --dry-run or a subcommand is required")
+				return errors.New("gombit upgrade: --to (apply) or --dry-run (plan) or a subcommand is required")
 			}
-			return runUpgradePlan(stdout, dir, to, asJSON)
 		},
 	})
 	cmd.Flags().Bool("dry-run", false, "plan the upgrade and print it; change nothing")
-	cmd.Flags().String("to", "", "target framework release (default: the newest release this gombit knows)")
+	cmd.Flags().String("to", "", "target framework release: applied without --dry-run; with it, planned (default: the newest release this gombit knows)")
 	cmd.Flags().String("dir", ".", "application directory (go.mod and gombit.yaml)")
 	cmd.Flags().Bool("json", false, "print the plan as JSON")
 	cmd.AddCommand(newUpgradeBaselineCommand(stdout))
@@ -293,8 +305,31 @@ func runUpgradePlan(stdout io.Writer, dir, to string, asJSON bool) error {
 	return plan.Render(stdout)
 }
 
+// runUpgradeApply applies the dependency changes of upgrading the app in
+// dir to to, and prints what it did and what is still to do.
+func runUpgradeApply(ctx context.Context, stdout io.Writer, dir, to string, asJSON bool) error {
+	m, err := upgrade.LoadManifest()
+	if err != nil {
+		return fmt.Errorf("gombit upgrade: %w", err)
+	}
+	applied, err := upgrade.ApplyDependencies(ctx, dir, m, to)
+	if err != nil {
+		return fmt.Errorf("gombit upgrade: %w", err)
+	}
+	if asJSON {
+		data, err := json.MarshalIndent(applied, "", "  ")
+		if err != nil {
+			return fmt.Errorf("gombit upgrade: %w", err)
+		}
+		_, err = fmt.Fprintf(stdout, "%s\n", data)
+		return err
+	}
+	return applied.Render(stdout)
+}
+
 func upgradeUsage(stderr io.Writer) {
-	_, _ = fmt.Fprintln(stderr, "Usage: gombit upgrade --dry-run [--to vX.Y.Z] [--dir .] [--json]")
+	_, _ = fmt.Fprintln(stderr, "Usage: gombit upgrade --to vX.Y.Z [--dir .] [--json]")
+	_, _ = fmt.Fprintln(stderr, "       gombit upgrade --dry-run [--to vX.Y.Z] [--dir .] [--json]")
 	_, _ = fmt.Fprintln(stderr, "       gombit upgrade <subcommand>")
 	_, _ = fmt.Fprintln(stderr, "  baseline    Show (or record) the app's upgrade baseline")
 	_, _ = fmt.Fprintln(stderr, "  notes       Print upgrade notes from the compatibility manifest")

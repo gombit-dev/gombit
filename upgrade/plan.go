@@ -196,35 +196,8 @@ func (p Plan) Render(w io.Writer) error {
 		return err
 	}
 	b.WriteString("\nDependency changes:\n")
-	for _, d := range p.Dependencies {
-		switch {
-		case d.Directive == "require":
-			fmt.Fprintf(&b, "  %s %s -> %s (require)\n", d.Module, d.From, d.To)
-		case d.To == "":
-			fmt.Fprintf(&b, "  replace %s => %s: drop it\n", strings.TrimSpace(d.Module+" "+d.ForVersion), d.From)
-		default:
-			fmt.Fprintf(&b, "  replace %s => %s -> %s\n", strings.TrimSpace(d.Module+" "+d.ForVersion), d.From, d.To)
-		}
-		if d.Note != "" {
-			fmt.Fprintf(&b, "    (%s)\n", d.Note)
-		}
-	}
-	fmt.Fprintf(&b, "\nAutomatic changes available: %d\n", len(p.Automatic))
-	for _, a := range p.Automatic {
-		fmt.Fprintf(&b, "  - %s: %s\n    (%s)\n", a.Change.ID, a.Change.Summary, a.Description)
-	}
-	fmt.Fprintf(&b, "\nManual actions: %d\n", len(p.Manual))
-	for _, c := range p.Manual {
-		renderPlannedChange(&b, c, true)
-	}
-	fmt.Fprintf(&b, "\nBreaking behavior changes: %d\n", len(p.Breaking))
-	for _, c := range p.Breaking {
-		fmt.Fprintf(&b, "  - %s (%s): %s\n", c.ID, c.Kind, c.Summary)
-	}
-	fmt.Fprintf(&b, "\nInformational: %d\n", len(p.Informational))
-	for _, c := range p.Informational {
-		renderPlannedChange(&b, c, false)
-	}
+	p.renderDependencies(&b)
+	p.renderToDo(&b)
 	b.WriteString("\nNo files changed.\n")
 	_, err := io.WriteString(w, b.String())
 	return err
@@ -247,5 +220,43 @@ func renderPlannedChange(b *strings.Builder, c Change, details bool) {
 			continue
 		}
 		b.WriteString("      " + line + "\n")
+	}
+}
+
+// renderDependencies writes the plan's dependency changes, one a line.
+func (p Plan) renderDependencies(b *strings.Builder) {
+	for _, d := range p.Dependencies {
+		switch {
+		case d.Directive == "require":
+			fmt.Fprintf(b, "  %s %s -> %s (require)\n", d.Module, d.From, d.To)
+		case d.To == "":
+			fmt.Fprintf(b, "  replace %s => %s: drop it\n", strings.TrimSpace(d.Module+" "+d.ForVersion), d.From)
+		default:
+			fmt.Fprintf(b, "  replace %s => %s -> %s\n", strings.TrimSpace(d.Module+" "+d.ForVersion), d.From, d.To)
+		}
+		if d.Note != "" {
+			fmt.Fprintf(b, "    (%s)\n", d.Note)
+		}
+	}
+}
+
+// renderToDo writes the plan's changes beyond its dependencies: the
+// automatic, manual, breaking and informational ones.
+func (p Plan) renderToDo(b *strings.Builder) {
+	fmt.Fprintf(b, "\nAutomatic changes available: %d\n", len(p.Automatic))
+	for _, a := range p.Automatic {
+		fmt.Fprintf(b, "  - %s: %s\n    (%s)\n", a.Change.ID, a.Change.Summary, a.Description)
+	}
+	fmt.Fprintf(b, "\nManual actions: %d\n", len(p.Manual))
+	for _, c := range p.Manual {
+		renderPlannedChange(b, c, true)
+	}
+	fmt.Fprintf(b, "\nBreaking behavior changes: %d\n", len(p.Breaking))
+	for _, c := range p.Breaking {
+		fmt.Fprintf(b, "  - %s (%s): %s\n", c.ID, c.Kind, c.Summary)
+	}
+	fmt.Fprintf(b, "\nInformational: %d\n", len(p.Informational))
+	for _, c := range p.Informational {
+		renderPlannedChange(b, c, false)
 	}
 }

@@ -40,6 +40,7 @@ go run ./cmd/gombit --help
 | `gombit jobs …` | Inspect, retry, and delete failed jobs | JOBS-6 |
 | `gombit version` | Print version and build metadata | REL-4 |
 | `gombit upgrade --dry-run` | Plan an upgrade to a framework release, changing nothing | UPGRADE-3 |
+| `gombit upgrade --to` | Apply an upgrade's dependency changes (go.mod, go.sum) with the go command | UPGRADE-4 |
 | `gombit upgrade baseline` | Show (or record) the app's upgrade baseline: framework and scaffold versions | UPGRADE-1 |
 | `gombit upgrade notes` | Print upgrade notes from the compatibility manifest | UPGRADE-2 |
 
@@ -864,15 +865,23 @@ the app needs, every manual action with what to do, the breaking changes,
 and the informational ones. A version the manifest does not list, a
 downgrade, or an app whose baseline names no framework release (a `go.work`,
 a local checkout, a fork) fails with the reason. It never prompts, so it
-runs in CI. Applying an upgrade is not supported yet: `--to` without
-`--dry-run` refuses. See [upgrade.md](upgrade.md#planning-an-upgrade).
+runs in CI. See [upgrade.md](upgrade.md#planning-an-upgrade).
+
+Without `--dry-run`, `--to vX.Y.Z` applies the plan's dependency changes:
+it edits the framework's replaces the plan names (`go mod edit`), runs `go
+get github.com/gombit-dev/gombit@vX.Y.Z`, and prints every go command and the
+`go.mod` and `go.sum` lines they changed. A go command that fails is shown
+with its full output, a result that does not build the target is refused,
+and either way `go.mod` and `go.sum` are restored. The plan's automatic and
+manual changes are printed as still to do. `--to` is required there. See
+[upgrade.md](upgrade.md#applying-the-dependency-changes).
 
 | Flag | Meaning | Default |
 | --- | --- | --- |
-| `--dry-run` | Plan the upgrade and print it | off (required) |
-| `--to` | Target framework release | the newest release this CLI knows |
+| `--dry-run` | Plan the upgrade and print it | off |
+| `--to` | Target framework release: applied without `--dry-run`, planned with it | with `--dry-run`, the newest release this CLI knows; required to apply |
 | `--dir` | Application directory (`go.mod`, `gombit.yaml`) | `.` |
-| `--json` | Print the plan as JSON | off |
+| `--json` | Print the plan (or what was applied) as JSON | off |
 
 ## `gombit upgrade baseline`
 

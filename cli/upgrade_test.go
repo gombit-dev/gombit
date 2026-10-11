@@ -98,7 +98,7 @@ func TestUpgradeRefuses(t *testing.T) {
 	if _, err := runUpgradeCLI(t, "baseline", "--dir", t.TempDir()); err == nil || !strings.Contains(err.Error(), "not a Gombit application") {
 		t.Fatalf("baseline outside an app = %v", err)
 	}
-	if _, err := runUpgradeCLI(t); err == nil || !strings.Contains(err.Error(), "--dry-run or a subcommand is required") {
+	if _, err := runUpgradeCLI(t); err == nil || !strings.Contains(err.Error(), "--to (apply) or --dry-run (plan) or a subcommand is required") {
 		t.Fatalf("upgrade without a subcommand = %v", err)
 	}
 }
@@ -249,6 +249,10 @@ func TestUpgradeDryRun(t *testing.T) {
 	if err != nil || json.Unmarshal([]byte(out), &plan) != nil || plan.Current != latest || plan.Target != latest || plan.Dependencies == nil {
 		t.Fatalf("upgrade --dry-run --json = %s, %v", out, err)
 	}
+	// Applying to the release the app is at already changes nothing.
+	if out, err := runUpgradeCLI(t, "--to", latest, "--dir", dir); err != nil || !strings.Contains(out, "Already at "+latest) {
+		t.Fatalf("upgrade --to %s at %s = %q, %v", latest, latest, out, err)
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil || len(entries) != 1 {
 		t.Fatalf("the dry run left %d entries in the app (want only go.mod): %v", len(entries), err)
@@ -259,7 +263,6 @@ func TestUpgradeDryRun(t *testing.T) {
 		msg  string
 	}{
 		{[]string{"--dry-run", "--dir", dir, "--to", "v99.0.0"}, "upgrade the gombit CLI"},
-		{[]string{"--to", latest, "--dir", dir}, "applying an upgrade is not supported yet"},
 		{[]string{"--dry-run", "--dir", t.TempDir()}, "not a Gombit application"},
 		{[]string{"nonsense"}, `unknown subcommand "nonsense"`},
 	} {

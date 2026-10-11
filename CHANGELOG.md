@@ -317,6 +317,16 @@ version.
   with the reason. It never prompts, so it runs in CI. `upgrade.PlanUpgrade`
   is the API; `upgrade.Action` gains a read-only `Check`
   ([#343](https://github.com/gombit-dev/gombit/issues/343)).
+- `gombit upgrade --to vX.Y.Z` (UPGRADE-4) applies an upgrade's dependency
+  changes with the go command: it edits the framework replaces the plan
+  names (`go mod edit -dropreplace` / `-replace`), then runs `go get
+  github.com/gombit-dev/gombit@vX.Y.Z`, and prints every command with the
+  `go.mod` and `go.sum` lines it changed. A go command that fails is
+  reported with its full output, and a result that does not build the
+  target is refused; either way `go.mod` and `go.sum` are restored. The
+  plan's automatic and manual changes are reported as still to do.
+  `--to` is required to apply; `upgrade.ApplyDependencies` is the API
+  ([#344](https://github.com/gombit-dev/gombit/issues/344)).
 
 ### Changed
 
