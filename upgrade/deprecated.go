@@ -35,9 +35,10 @@ type DeprecatedUse struct {
 	Deprecation string `json:"deprecation"`
 }
 
-// ErrDoesNotLoad: the application's packages (or the framework packages
-// they import) do not load or type-check, so a scan would miss uses; fix the
-// errors first.
+// ErrDoesNotLoad: a package of the scanned graph (the application's
+// packages, their tests, or any package they depend on, directly or not,
+// framework or not) does not load or type-check, so a scan would miss uses;
+// fix the errors first.
 var ErrDoesNotLoad = errors.New("upgrade: the application does not type-check")
 
 // loadMode is what a scan needs: every package of the app and of its
@@ -54,19 +55,26 @@ const loadMode = packages.NeedName | packages.NeedFiles | packages.NeedSyntax |
 // function, method, type, constant, variable, struct field (named or
 // embedded) or interface method.
 //
-// It works on type information, never text. The framework packages the app
-// imports are loaded from source, and each deprecated declaration is tied
-// to the object it defines (go/types); every use in the app is resolved to
-// its object, and the two meet by their object path (go/types/objectpath),
-// the identity gopls also uses across source and export data, never by file
-// positions. A use is an identifier denoting such an object (a call, a
-// selector, a composite literal key, a dot-imported name), an element of an
-// unkeyed struct literal (which names no field), or the import of a
-// deprecated package. So a name that merely matches, a local declaration of
-// the same name, a comment or a string never counts. The framework's own
-// packages are not scanned. Whatever does not load or type-check, or a
-// framework API object whose identity cannot be resolved, is an error,
-// never a clean result.
+// It works on type information, never text, in one graph: the app's
+// packages, their tests and every package they depend on are loaded and
+// type-checked from source together (go/packages with NeedDeps; no export
+// data), so a framework declaration and the app's use of it are the same
+// go/types object. Every framework package anywhere in that graph is
+// indexed, including one the app reaches only through another dependency
+// (a promoted method of an embedded framework type): each deprecated
+// declaration under the object it defines (TypesInfo.Defs). A use is found
+// by that object's identity, never by name, key or file position: an
+// identifier denoting it (a call, a selector, a composite literal key, a
+// dot-imported name), an element of an unkeyed struct literal (which names
+// no field), or the import of a deprecated package. One token can be two
+// uses (an unkeyed element that is itself a deprecated name). So a name
+// that merely matches, a local declaration of the same name, a comment or a
+// string never counts. The framework's own packages are not scanned.
+//
+// It never returns a clean result it cannot vouch for: a package anywhere
+// in the graph that does not load or type-check is ErrDoesNotLoad, and a
+// used framework object from a package outside the indexed graph is an
+// error.
 func ScanDeprecated(ctx context.Context, workDir string) ([]DeprecatedUse, error) {
 	cfg, err := scanConfig(ctx, workDir)
 	if err != nil {

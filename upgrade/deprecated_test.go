@@ -266,8 +266,9 @@ func main() { _ = database.KeepStoredZeros(nil, nil, nil, nil) }
 }
 
 // TestScanDeprecatedGroupedDeclarationsAndTrimpath: a deprecated type or
-// var in a parenthesized group is found, and so is every use when GOFLAGS
-// has -trimpath (which would otherwise leave the declarations unreadable).
+// var in a parenthesized group is found, and GOFLAGS=-trimpath changes
+// nothing: the scan type-checks from source and reads no file name a build
+// records.
 func TestScanDeprecatedGroupedDeclarationsAndTrimpath(t *testing.T) {
 	app := scanApp(t, map[string]string{"main.go": "package main\n\nimport \"github.com/gombit-dev/gombit/grp\"\n\nfunc main() { _ = grp.Old{}; _ = grp.V; _ = grp.Fine{} }\n"})
 	writeTree(t, filepath.Join(app, "..", "fw"), map[string]string{"grp/grp.go": "package grp\n\ntype (\n\t// Fine is fine.\n\tFine struct{}\n\n\t// Old is old.\n\t//\n\t// Deprecated: use Fine.\n\tOld struct{}\n)\n\nvar (\n\t// V is v.\n\t//\n\t// Deprecated: use W.\n\tV = 1\n\tW = 2\n)\n"})
