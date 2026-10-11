@@ -81,11 +81,9 @@ func (h *handlers) listResources(ctx context.Context, input *listInput) (*listOu
 	page, perPage := contract.ClampPage(input.Page, input.PerPage)
 
 	q := db.WithContext(ctx).Model(m.newInstance())
-	q, err = applySearch(q, m, input.Search)
+	q, err = applySearch(ctx, q, m, input.Search)
 	if err != nil {
-		return nil, contract.WithContext(ctx, contract.Validation("The request contains invalid fields.", map[string][]string{
-			"search": {err.Error()},
-		}))
+		return nil, err
 	}
 	q, err = applyFilters(ctx, q, m, queryValues(ctx))
 	if err != nil {
@@ -212,7 +210,11 @@ func (h *handlers) updateResource(ctx context.Context, input *patchInput) (*rowO
 	if err != nil {
 		return nil, err
 	}
-	kept, edited := m.storedZeros(db, inst, body)
+	// What the row stores before the PATCH: the write checks judge only the
+	// columns the PATCH (or a model hook) changes, so a row holding a value
+	// stored before a check (a zero instant, over-long text) stays editable,
+	// whatever fields the form sends back unchanged (issues #443, #444).
+	stored := database.StoredValues(db, inst)
 	if err := applyWrite(ctx, m, inst, body, false); err != nil {
 		return nil, err
 	}
@@ -221,11 +223,18 @@ func (h *handlers) updateResource(ctx context.Context, input *patchInput) (*rowO
 		return nil, err
 	}
 	if err := h.writeFiles(ctx, cl, db, m, before, inst, func(tx *gorm.DB) error {
-		return persistWithM2M(ctx, database.KeepStoredZeros(tx, inst, kept, edited), m, inst, m2mIDs, false, m.updateOmits(before, inst), m.fileFence(before))
+		return persistWithM2M(ctx, database.ScopeEdit(tx, inst, stored), m, inst, m2mIDs, false, m.updateOmits(before, inst), m.fileFence(before))
 	}); err != nil {
 		return nil, err
 	}
-	return h.respond(ctx, m, rowWithM2M(m, inst, m2mIDs))
+	// The PATCH wrote the columns it changed; the row may hold another
+	// request's change to the rest, so the response is the row as read back
+	// after the write (a delete landing in between makes it a 404).
+	fresh, err := h.loadByID(ctx, m, input.ID)
+	if err != nil {
+		return nil, err
+	}
+	return h.respond(ctx, m, rowWithM2M(m, fresh, m2mIDs))
 }
 
 // updateVersioned performs an optimistic-locking update for a model that carries
@@ -249,7 +258,11 @@ func (h *handlers) updateVersioned(ctx context.Context, m *registered, inst any,
 		expected = cv
 		body = withoutKey(body, m.version.name)
 	}
-	kept, edited := m.storedZeros(db, inst, body)
+	// What the row stores before the PATCH: the write checks judge only the
+	// columns the PATCH (or a model hook) changes, so a row holding a value
+	// stored before a check (a zero instant, over-long text) stays editable,
+	// whatever fields the form sends back unchanged (issues #443, #444).
+	stored := database.StoredValues(db, inst)
 	if err := applyWrite(ctx, m, inst, body, false); err != nil {
 		return nil, err
 	}
@@ -259,17 +272,21 @@ func (h *handlers) updateVersioned(ctx context.Context, m *registered, inst any,
 	}
 	m.version.set(inst, expected+1)
 	if err := h.writeFiles(ctx, cl, db, m, before, inst, func(tx *gorm.DB) error {
-		res := database.KeepStoredZeros(tx, inst, kept, edited).WithContext(ctx).
+		res := database.ScopeEdit(tx, inst, stored).WithContext(ctx).
 			Model(inst).
 			Where(clause.Eq{Column: clause.Column{Name: m.version.column}, Value: expected}).
 			Clauses(clause.Where{Exprs: m.fileFence(before)}).
 			Select("*").
-			Omit(m.updateOmits(before, inst)...).
+			Omit(withAssociations(m.updateOmits(before, inst))...).
 			Updates(inst)
 		if res.Error != nil {
 			return database.MapPersistError(ctx, res.Error, "resource already exists", "persist resource")
 		}
 		if res.RowsAffected == 0 {
+			// The row was deleted since the load: a 404.
+			if err := rowGone(ctx, tx, m, inst); err != nil {
+				return err
+			}
 			// The version moved, or a file did (the fence): rolls back the
 			// file claims too, the new file abandoned, the old one kept.
 			return contract.WithContext(ctx, contract.Conflict(
@@ -279,7 +296,11 @@ func (h *handlers) updateVersioned(ctx context.Context, m *registered, inst any,
 	}); err != nil {
 		return nil, err
 	}
-	return h.respond(ctx, m, m.toRow(inst))
+	fresh, err := h.loadByID(ctx, m, input.ID)
+	if err != nil {
+		return nil, err
+	}
+	return h.respond(ctx, m, m.toRow(fresh))
 }
 
 // withoutKey returns a shallow copy of body without key.
@@ -448,7 +469,7 @@ func persistWithM2M(ctx context.Context, db *gorm.DB, m *registered, inst any, i
 		case len(fence) > 0:
 			perr = updateFenced(ctx, tx, m, inst, omit, fence)
 		default:
-			perr = omitted(tx.WithContext(ctx), omit).Save(inst).Error
+			perr = updateRow(ctx, tx, m, inst, omit)
 		}
 		var env *contract.ErrorEnvelope
 		if errors.As(perr, &env) {
@@ -575,6 +596,10 @@ func applyWrite(ctx context.Context, m *registered, inst any, body map[string]an
 			fields[name] = []string{msg}
 			continue
 		}
+		if msg := writtenTextProblem(f, inst, raw, creating); msg != "" {
+			fields[name] = []string{msg}
+			continue
+		}
 		if err := f.set(inst, raw); err != nil {
 			fields[name] = []string{err.Error()}
 			continue
@@ -626,6 +651,27 @@ func applyWrite(ctx context.Context, m *registered, inst any, body map[string]an
 	return nil
 }
 
+// writtenTextProblem refuses a NUL byte or invalid UTF-8 in a string the
+// request writes (database.TextProblem; issue #444). The database's text check
+// refuses it too, but only in a column whose Go value it sees as text: not in
+// a type with its own driver.Valuer, which this check still covers. A value
+// the row already stores, sent back unchanged by the admin's form, is not
+// judged again (database.ScopeEdit's rule).
+func writtenTextProblem(f *resolvedField, inst any, raw any, creating bool) string {
+	s, ok := raw.(string)
+	if !ok || (f.Type != TypeString && f.Type != TypeText) {
+		return ""
+	}
+	msg := database.TextProblem(s)
+	if msg == "" || creating {
+		return msg
+	}
+	if same, err := sameAsStored(f, inst, raw); err == nil && same {
+		return ""
+	}
+	return msg
+}
+
 func blankRaw(raw any) bool {
 	if raw == nil {
 		return true
@@ -669,7 +715,7 @@ func (f *resolvedField) blankToNull() bool {
 	return patternRejectsEmpty(f.Pattern)
 }
 
-func applySearch(q *gorm.DB, m *registered, term string) (*gorm.DB, error) {
+func applySearch(ctx context.Context, q *gorm.DB, m *registered, term string) (*gorm.DB, error) {
 	// Resolve the registered search field names to columns, then delegate the
 	// LIKE building to the shared database.Search so the admin and the generated
 	// list handler cannot drift on search behavior.
@@ -679,7 +725,7 @@ func applySearch(q *gorm.DB, m *registered, term string) (*gorm.DB, error) {
 			cols = append(cols, col)
 		}
 	}
-	return database.Search(q, cols, term), nil
+	return database.Search(ctx, q, cols, term)
 }
 
 func applyFilters(ctx context.Context, q *gorm.DB, m *registered, values interface{ Get(string) string }) (*gorm.DB, error) {
@@ -732,22 +778,60 @@ func applyOrdering(q *gorm.DB, m *registered, ordering string) (*gorm.DB, error)
 	return q.Order(clause.OrderByColumn{Column: clause.Column{Name: col}, Desc: desc}), nil
 }
 
-// omitted is db leaving cols out of its writes (nothing to leave out: db).
-func omitted(db *gorm.DB, cols []string) *gorm.DB {
-	if len(cols) == 0 {
-		return db
-	}
-	return db.Omit(cols...)
-}
-
-// updateFenced writes inst (every column but omit) while the record still
-// matches fence (registered.fileFence). No matching row is a 409, unless
-// the row does match and the write merely changed nothing (MySQL reports
-// such a row as unaffected).
-func updateFenced(ctx context.Context, tx *gorm.DB, m *registered, inst any, omit []string, fence []clause.Expression) error {
-	res := omitted(tx.WithContext(ctx).Model(inst).Clauses(clause.Where{Exprs: fence}), omit).Select("*").Updates(inst)
+// updateRow writes an edit of a loaded row (issue #450). Under the PATCH's
+// database.ScopeEdit only the columns the edit, or a model hook, changed are
+// written, so a concurrent change to another column is not reverted, and
+// never the row's associations (a has_many child moved or deleted meanwhile
+// is not written back; many-to-many ids are synced by syncM2M). A row deleted
+// since it was loaded is a 404, where Save would have inserted it again.
+func updateRow(ctx context.Context, tx *gorm.DB, m *registered, inst any, omit []string) error {
+	res := tx.WithContext(ctx).Model(inst).Select("*").Omit(withAssociations(omit)...).Updates(inst)
 	if res.Error != nil || res.RowsAffected > 0 {
 		return res.Error
+	}
+	// No row updated: deleted since the load, or matched but left unchanged
+	// (MySQL counts such a row as not affected).
+	return rowGone(ctx, tx, m, inst)
+}
+
+// rowGone is the 404 for an update that found no row because the row was
+// deleted since it was loaded; nil when the row is still there.
+func rowGone(ctx context.Context, tx *gorm.DB, m *registered, inst any) error {
+	pk, ok := m.fieldByName[m.meta.PK]
+	if !ok {
+		return contract.WithContext(ctx, contract.NotFound("unknown resource"))
+	}
+	var n int64
+	if err := tx.WithContext(ctx).Model(inst).
+		Where(clause.Eq{Column: clause.Column{Name: m.pkColumn}, Value: pk.get(inst)}).
+		Count(&n).Error; err != nil {
+		return err
+	}
+	if n == 0 {
+		return contract.WithContext(ctx, contract.NotFound("unknown resource"))
+	}
+	return nil
+}
+
+// withAssociations adds clause.Associations to an update's omitted columns:
+// an admin edit writes the row's own columns only.
+func withAssociations(omit []string) []string {
+	return append(append(make([]string, 0, len(omit)+1), omit...), clause.Associations)
+}
+
+// updateFenced writes inst (the columns the edit changed, never its
+// associations; see updateRow) while the record still matches fence
+// (registered.fileFence). No matching row is a 404 when the row was deleted,
+// else a 409, unless the row does match and the write merely changed nothing
+// (MySQL reports such a row as unaffected).
+func updateFenced(ctx context.Context, tx *gorm.DB, m *registered, inst any, omit []string, fence []clause.Expression) error {
+	res := tx.WithContext(ctx).Model(inst).Clauses(clause.Where{Exprs: fence}).Select("*").Omit(withAssociations(omit)...).Updates(inst)
+	if res.Error != nil || res.RowsAffected > 0 {
+		return res.Error
+	}
+	// A row deleted since the load is a 404, not a file race.
+	if err := rowGone(ctx, tx, m, inst); err != nil {
+		return err
 	}
 	pk, ok := m.fieldByName[m.meta.PK]
 	if !ok {

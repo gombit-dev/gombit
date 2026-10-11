@@ -63,9 +63,17 @@ func assertListQueryHelpers(t *testing.T, db *DB) {
 		assertValidationField(t, err, "author_id")
 	})
 
+	search := func(t *testing.T, term string) *gorm.DB {
+		t.Helper()
+		q, err := Search(context.Background(), db.Model(&lqItem{}), []string{"title"}, term)
+		if err != nil {
+			t.Fatalf("Search(%q): %v", term, err)
+		}
+		return q
+	}
 	t.Run("SearchEscapesWildcards", func(t *testing.T) {
 		var matches []lqItem
-		if err := Search(db.Model(&lqItem{}), []string{"title"}, "report").Find(&matches).Error; err != nil {
+		if err := search(t, "report").Find(&matches).Error; err != nil {
 			t.Fatalf("search: %v", err)
 		}
 		if len(matches) != 1 || matches[0].Title != "Alpha report" {
@@ -73,7 +81,7 @@ func assertListQueryHelpers(t *testing.T, db *DB) {
 		}
 		// A literal "%" must not act as a wildcard.
 		var literal []lqItem
-		if err := Search(db.Model(&lqItem{}), []string{"title"}, "50%").Find(&literal).Error; err != nil {
+		if err := search(t, "50%").Find(&literal).Error; err != nil {
 			t.Fatalf("search literal percent: %v", err)
 		}
 		if len(literal) != 1 || literal[0].Title != "Beta 50% off" {
@@ -81,11 +89,29 @@ func assertListQueryHelpers(t *testing.T, db *DB) {
 		}
 		// Empty term is a no-op.
 		var none []lqItem
-		if err := Search(db.Model(&lqItem{}), []string{"title"}, "  ").Find(&none).Error; err != nil {
+		if err := search(t, "  ").Find(&none).Error; err != nil {
 			t.Fatalf("empty search: %v", err)
 		}
 		if len(none) != 3 {
 			t.Fatalf("empty search returned %d rows, want 3 (no-op)", len(none))
+		}
+	})
+
+	// A term or string filter no text column can hold is a 422 on every
+	// driver, not a PostgreSQL 500 (issue #444).
+	t.Run("RefusesTermsNoTextColumnHolds", func(t *testing.T) {
+		ctx := context.Background()
+		for _, bad := range []string{"a\x00b", "a\xffb"} {
+			_, err := Search(ctx, db.Model(&lqItem{}), []string{"title"}, bad)
+			assertValidationField(t, err, "search")
+			_, err = FilterEq(ctx, db.Model(&lqItem{}), "title", FilterString, bad)
+			assertValidationField(t, err, "title")
+		}
+		// A uint over MaxInt64 cannot be bound to PostgreSQL's bigint.
+		_, err := FilterEq(ctx, db.Model(&lqItem{}), "author_id", FilterUint, "18446744073709551615")
+		assertValidationField(t, err, "author_id")
+		if _, err := FilterEq(ctx, db.Model(&lqItem{}), "author_id", FilterUint, "9223372036854775807"); err != nil {
+			t.Fatalf("MaxInt64 filter: %v", err)
 		}
 	})
 
@@ -224,7 +250,10 @@ func TestGeneratedListContractRuntime(t *testing.T) {
 		if err != nil {
 			return nil, err
 		}
-		q = Search(q, []string{"title"}, in.Search)
+		q, err = Search(ctx, q, []string{"title"}, in.Search)
+		if err != nil {
+			return nil, err
+		}
 		var total int64
 		if err := q.Session(&gorm.Session{}).Count(&total).Error; err != nil {
 			return nil, contract.WithContext(ctx, contract.Internal("count"))

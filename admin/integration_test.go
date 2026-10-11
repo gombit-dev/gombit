@@ -38,6 +38,20 @@ func TestResourceMySQL(t *testing.T) {
 	runResourceDriver(t, config.DatabaseDriverMySQL, *mysqlDSN)
 }
 
+func TestTextAdminPostgres(t *testing.T) {
+	if *postgresDSN == "" {
+		t.Skip("set -admin.postgres-dsn to run Postgres admin integration tests")
+	}
+	runTextAdmin(t, openAdminDriver(t, config.DatabaseDriverPostgres, *postgresDSN))
+}
+
+func TestTextAdminMySQL(t *testing.T) {
+	if *mysqlDSN == "" {
+		t.Skip("set -admin.mysql-dsn to run MySQL admin integration tests")
+	}
+	runTextAdmin(t, openAdminDriver(t, config.DatabaseDriverMySQL, *mysqlDSN))
+}
+
 func TestStoredZeroAdminPostgres(t *testing.T) {
 	if *postgresDSN == "" {
 		t.Skip("set -admin.postgres-dsn to run Postgres admin integration tests")
@@ -50,6 +64,34 @@ func TestStoredZeroAdminMySQL(t *testing.T) {
 		t.Skip("set -admin.mysql-dsn to run MySQL admin integration tests")
 	}
 	runStoredZeroAdmin(t, openAdminDriver(t, config.DatabaseDriverMySQL, *mysqlDSN))
+}
+
+func TestPartialPatchAdminPostgres(t *testing.T) {
+	if *postgresDSN == "" {
+		t.Skip("set -admin.postgres-dsn to run Postgres admin integration tests")
+	}
+	runPartialPatchAdmin(t, openAdminDriver(t, config.DatabaseDriverPostgres, *postgresDSN))
+}
+
+func TestPartialPatchAdminMySQL(t *testing.T) {
+	if *mysqlDSN == "" {
+		t.Skip("set -admin.mysql-dsn to run MySQL admin integration tests")
+	}
+	runPartialPatchAdmin(t, openAdminDriver(t, config.DatabaseDriverMySQL, *mysqlDSN))
+}
+
+func TestFloatAdminPostgres(t *testing.T) {
+	if *postgresDSN == "" {
+		t.Skip("set -admin.postgres-dsn to run Postgres admin integration tests")
+	}
+	runFloatAdmin(t, openAdminDriver(t, config.DatabaseDriverPostgres, *postgresDSN))
+}
+
+func TestFloatAdminMySQL(t *testing.T) {
+	if *mysqlDSN == "" {
+		t.Skip("set -admin.mysql-dsn to run MySQL admin integration tests")
+	}
+	runFloatAdmin(t, openAdminDriver(t, config.DatabaseDriverMySQL, *mysqlDSN))
 }
 
 func runResourceDriver(t *testing.T, driver config.DatabaseDriver, dsn string) {

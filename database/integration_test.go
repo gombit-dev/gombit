@@ -4,6 +4,7 @@ package database
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"net/http"
 	"testing"
@@ -87,6 +88,52 @@ func TestTimeRangeWritePathsOnMySQL(t *testing.T) {
 	testTimeRangeUnsetAndInRange(t, db)
 	migrateRanged(t, db)
 	testTimeRangeWhatGORMWrites(t, db)
+}
+
+func TestFloatWritesOnPostgres(t *testing.T) {
+	if *postgresDSN == "" {
+		t.Skip("set -database.postgres-dsn to run Postgres integration tests")
+	}
+	testFloatWrites(t, openIntegrationDB(t, config.DatabaseConfig{Driver: config.DatabaseDriverPostgres, DSN: *postgresDSN}))
+}
+
+func TestFloatWritesOnMySQL(t *testing.T) {
+	if *mysqlDSN == "" {
+		t.Skip("set -database.mysql-dsn to run MySQL integration tests")
+	}
+	testFloatWrites(t, openIntegrationDB(t, config.DatabaseConfig{Driver: config.DatabaseDriverMySQL, DSN: *mysqlDSN}))
+}
+
+func TestTextWritesOnPostgres(t *testing.T) {
+	if *postgresDSN == "" {
+		t.Skip("set -database.postgres-dsn to run Postgres integration tests")
+	}
+	db := openIntegrationDB(t, config.DatabaseConfig{Driver: config.DatabaseDriverPostgres, DSN: *postgresDSN})
+	testTextWrites(t, db)
+	testDataExceptionsOnDriver(t, db)
+}
+
+func TestTextWritesOnMySQL(t *testing.T) {
+	if *mysqlDSN == "" {
+		t.Skip("set -database.mysql-dsn to run MySQL integration tests")
+	}
+	db := openIntegrationDB(t, config.DatabaseConfig{Driver: config.DatabaseDriverMySQL, DSN: *mysqlDSN})
+	testTextWrites(t, db)
+	testDataExceptionsOnDriver(t, db)
+}
+
+func TestScopeEditColumnsOnPostgres(t *testing.T) {
+	if *postgresDSN == "" {
+		t.Skip("set -database.postgres-dsn to run Postgres integration tests")
+	}
+	testScopeEditColumns(t, openIntegrationDB(t, config.DatabaseConfig{Driver: config.DatabaseDriverPostgres, DSN: *postgresDSN}))
+}
+
+func TestScopeEditColumnsOnMySQL(t *testing.T) {
+	if *mysqlDSN == "" {
+		t.Skip("set -database.mysql-dsn to run MySQL integration tests")
+	}
+	testScopeEditColumns(t, openIntegrationDB(t, config.DatabaseConfig{Driver: config.DatabaseDriverMySQL, DSN: *mysqlDSN}))
 }
 
 func TestTimeBoundsRoundTripOnPostgres(t *testing.T) {
@@ -306,5 +353,44 @@ func testOpenRoundTrip(t *testing.T, cfg config.DatabaseConfig, wantDriver Drive
 	}
 	if count != 1 {
 		t.Fatalf("count = %d, want 1", count)
+	}
+}
+
+// testDataExceptionsOnDriver writes past the GORM callbacks (raw SQL), so the
+// database itself refuses the value, and checks MapPersistError answers 422:
+// PostgreSQL's NUL byte (22021) and numeric overflow (22003), MySQL's data
+// too long (1406, keyed on the column) and out of range (1264).
+func testDataExceptionsOnDriver(t *testing.T, db *DB) {
+	t.Helper()
+	migrateText(t, db)
+	_ = db.Exec("DROP TABLE IF EXISTS data_exceptions").Error
+	if err := db.Exec("CREATE TABLE data_exceptions (name varchar(10), amount decimal(5,2))").Error; err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Exec("DROP TABLE IF EXISTS data_exceptions").Error })
+	cases := map[string]struct {
+		err   error
+		field string
+	}{
+		"numeric overflow": {db.Exec("INSERT INTO data_exceptions (amount) VALUES (?)", "123456.7").Error, "amount"},
+		"too long":         {db.Exec("INSERT INTO data_exceptions (name) VALUES (?)", "elevenchars").Error, "name"},
+	}
+	if db.Driver() == DriverPostgres {
+		cases["NUL byte"] = struct {
+			err   error
+			field string
+		}{db.Exec("INSERT INTO data_exceptions (name) VALUES (?)", "a\x00b").Error, ""}
+	}
+	for what, c := range cases {
+		if !IsDataException(c.err) {
+			t.Errorf("%s: %v is not a data exception", what, c.err)
+			continue
+		}
+		var env *contract.ErrorEnvelope
+		if !errors.As(MapPersistError(context.Background(), c.err, "conflict", "internal"), &env) || env.GetStatus() != http.StatusUnprocessableEntity {
+			t.Errorf("%s: MapPersistError = %+v, want a 422", what, env)
+			continue
+		}
+
 	}
 }

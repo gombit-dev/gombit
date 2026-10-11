@@ -2,6 +2,8 @@ package database
 
 import (
 	"context"
+	"errors"
+	"math"
 	"strconv"
 	"strings"
 
@@ -37,9 +39,10 @@ const (
 // FilterEq adds an exact-match `column = <raw coerced to kind>` predicate. An
 // empty (or whitespace-only) raw value is a no-op — the filter was not supplied
 // — so callers can chain one FilterEq per declared filterable field. A raw value
-// that does not parse as kind returns a D10 validation error (422) keyed on
-// column. The column name is generator-controlled (a declared field's DB
-// column); only raw is user input.
+// that does not parse as kind, or a string one no text column can hold (a NUL
+// byte, invalid UTF-8: TextProblem), returns a D10 validation error (422)
+// keyed on column. The column name is generator-controlled (a declared
+// field's DB column); only raw is user input.
 func FilterEq(ctx context.Context, q *gorm.DB, column string, kind FilterKind, raw string) (*gorm.DB, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -55,8 +58,13 @@ func FilterEq(ctx context.Context, q *gorm.DB, column string, kind FilterKind, r
 	case FilterInt64:
 		value, err = strconv.ParseInt(raw, 10, 64)
 	case FilterUint:
+		// A uint column is a signed bigint on PostgreSQL, so a value over
+		// MaxInt64 cannot be bound there (a 500); no row holds one anywhere.
 		var u uint64
 		u, err = strconv.ParseUint(raw, 10, 64)
+		if err == nil && u > math.MaxInt64 {
+			err = errInvalidFilter
+		}
 		value = uint(u)
 	case FilterBool:
 		value, err = strconv.ParseBool(raw)
@@ -67,6 +75,9 @@ func FilterEq(ctx context.Context, q *gorm.DB, column string, kind FilterKind, r
 			value = id.String()
 		}
 	default: // FilterString
+		if TextProblem(raw) != "" {
+			err = errInvalidFilter
+		}
 		value = raw
 	}
 	if err != nil {
@@ -78,15 +89,26 @@ func FilterEq(ctx context.Context, q *gorm.DB, column string, kind FilterKind, r
 	return q.Where(clause.Eq{Column: clause.Column{Name: column}, Value: value}), nil
 }
 
+var errInvalidFilter = errors.New("invalid filter value")
+
 // Search adds a case-insensitive OR of `LOWER(col) LIKE LOWER(%term%)` across
 // the given columns. An empty (or whitespace-only) term, or an empty column
 // list, is a no-op. The term is treated as a literal: LIKE wildcards in it are
 // escaped, so a user searching for "50%" matches the literal text, not a
-// prefix. Columns are generator-controlled; only the term is user input.
-func Search(q *gorm.DB, columns []string, term string) *gorm.DB {
+// prefix. A term no text column can hold (a NUL byte, invalid UTF-8:
+// TextProblem), which PostgreSQL refuses to compare, is a D10 validation error
+// (422) on "search" (issue #444). Columns are generator-controlled; only the
+// term is user input.
+func Search(ctx context.Context, q *gorm.DB, columns []string, term string) (*gorm.DB, error) {
 	term = strings.TrimSpace(term)
 	if term == "" || len(columns) == 0 {
-		return q
+		return q, nil
+	}
+	if msg := TextProblem(term); msg != "" {
+		return nil, contract.WithContext(ctx, contract.Validation(
+			"The request contains invalid fields.",
+			map[string][]string{"search": {msg}},
+		))
 	}
 	pattern := "%" + escapeLike(term) + "%"
 	ors := make([]clause.Expression, 0, len(columns))
@@ -96,7 +118,7 @@ func Search(q *gorm.DB, columns []string, term string) *gorm.DB {
 			Vars: []any{pattern, `\`},
 		})
 	}
-	return q.Where(clause.Or(ors...))
+	return q.Where(clause.Or(ors...)), nil
 }
 
 // ParseOrdering splits a Django-style `?ordering=` token into its field name and
