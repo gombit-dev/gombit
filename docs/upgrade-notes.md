@@ -79,6 +79,14 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 ### Informational
 
+- An admin relation field on a string key stores the string sent, byte for byte; a JSON number for it is a 422. (`admin-relation-string-keys`, behavior, [#452](https://github.com/gombit-dev/gombit/issues/452))
+
+  A numeric-looking key (`"123"`, `"007"`) was stored corrupted. A
+  client that sends a string key as a JSON number now gets a 422 on the
+  field, as for any string field: send it as a string. A uuid key must
+  be the canonical form, as a `uuid` field (no braces, with hyphens).
+  An integer key still accepts a number or its digits as a string.
+
 - An admin PATCH writes only the columns it (or a model hook) changed, never associations, and answers 404 for a row deleted meanwhile. (`admin-patch-writes-changes-only`, behavior, [#450](https://github.com/gombit-dev/gombit/issues/450))
 
   It used to save the whole loaded row: a concurrent change to another

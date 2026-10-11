@@ -355,6 +355,17 @@ version.
 
 ### Fixed
 
+- An admin relation field on a string key (a country code, a SKU) stores the
+  value sent, byte for byte: anything numeric-looking was parsed as an integer
+  and converted back as a rune, so `"123"` was stored as `"{"` and `"007"` as
+  `"\a"`, and a filter on `"007"` found nothing. A belongs_to value is now
+  coerced as its key column's type, on writes and filters, and the admin SPA
+  sends relation ids as given instead of turning `"007"` into `7`, `"1e3"` into
+  `1000`, or `"Infinity"` into a cleared key. A JSON number for a string key,
+  and a uuid key in a non-canonical form (no hyphens, braces), are now a 422,
+  as for a plain string or `uuid` field
+  ([#452](https://github.com/gombit-dev/gombit/issues/452)).
+
 - CI rebuilds the embedded admin SPA and fails when the committed
   `internal/adminui/dist` differs from a fresh build of `internal/adminui/src`.
   Nothing enforced the rebuild, so source changes (the #250 CSRF fix among
