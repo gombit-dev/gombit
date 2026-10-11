@@ -4,10 +4,13 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/mod/semver"
 
 	"github.com/gombit-dev/gombit/upgrade"
 )
@@ -324,5 +327,66 @@ func TestPlanUpgradeBreakingFollowsAutomatic(t *testing.T) {
 	}
 	if len(p.Automatic) != 1 || strings.Join(ids(p.Breaking), ",") != "record-upgrade-baseline,rename-setting" {
 		t.Fatalf("old app: Automatic = %d, Breaking = %v; want record-upgrade-baseline counted in both", len(p.Automatic), ids(p.Breaking))
+	}
+}
+
+// published are the framework releases already tagged from the manifest's
+// baseline on: the embedded manifest must list every one, or apps on it
+// have no upgrade path. Add each new tag here when it is cut
+// (TestEmbeddedManifestListsPublishedTags checks the repo's tags too).
+var published = []string{"v0.6.1", "v0.7.0", "v0.7.1"}
+
+// TestEmbeddedManifestPlansFromPublishedReleases: the manifest built into
+// this gombit lists every published release, and plans an upgrade from
+// each to the newest.
+func TestEmbeddedManifestPlansFromPublishedReleases(t *testing.T) {
+	m, err := upgrade.LoadManifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range published {
+		if _, err := m.Release(v); err != nil {
+			t.Errorf("the embedded manifest does not list the published release %s: %v", v, err)
+		}
+	}
+	latest := m.Latest()
+	for _, r := range m.Releases {
+		if r.Version == upgrade.Unreleased {
+			continue
+		}
+		dir := app(t, strings.Replace(planGoMod, "v0.6.1", r.Version, 1), "")
+		p, err := upgrade.PlanUpgrade(dir, m, "")
+		if err != nil {
+			t.Fatalf("plan from %s: %v", r.Version, err)
+		}
+		if p.Target != latest {
+			t.Fatalf("plan from %s targets %s, want the newest release %s", r.Version, p.Target, latest)
+		}
+		if r.Version != latest && len(p.Releases) == 0 {
+			t.Fatalf("plan from %s to %s crosses no release", r.Version, latest)
+		}
+	}
+}
+
+// TestEmbeddedManifestListsPublishedTags: where the repository's tags are
+// at hand (not in a shallow CI checkout), every stable release tag from the
+// manifest's baseline on is listed.
+func TestEmbeddedManifestListsPublishedTags(t *testing.T) {
+	out, err := exec.Command("git", "tag", "--list", "v*").Output()
+	if err != nil || len(strings.TrimSpace(string(out))) == 0 {
+		t.Skip("no git tags here (a shallow checkout)")
+	}
+	m, err := upgrade.LoadManifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := m.Releases[0].Version
+	for _, tag := range strings.Fields(string(out)) {
+		if !semver.IsValid(tag) || semver.Prerelease(tag) != "" || semver.Build(tag) != "" || semver.Compare(tag, first) < 0 {
+			continue
+		}
+		if _, err := m.Release(tag); err != nil {
+			t.Errorf("the release %s is tagged but not in upgrade/manifest.yaml", tag)
+		}
 	}
 }
