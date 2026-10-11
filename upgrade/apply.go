@@ -127,15 +127,17 @@ func ApplyDependencies(ctx context.Context, workDir string, m *Manifest, to stri
 	}
 	now, err := snapshotFiles(goMod, goSum)
 	if err != nil {
-		return applied, err
+		// The upgrade is done, but cannot be reported: not done, then.
+		return fail(err)
 	}
 	applied.GoMod = lineChange(before.data[0], now.data[0])
 	applied.GoSum = lineChange(before.data[1], now.data[1])
 	// go get does not touch a vendor directory, and the go command builds
-	// from it (-mod=vendor is the default when it is there), so it must be
+	// from it (-mod=vendor is the default when a top-level vendor/ is there,
+	// with modules.txt or not: a missing one is just as stale), so it must be
 	// refreshed before the app builds again. That rewrites the whole tree,
 	// which is the developer's call, not this command's.
-	if _, err := os.Stat(filepath.Join(workDir, "vendor", "modules.txt")); err == nil {
+	if info, err := os.Stat(filepath.Join(workDir, "vendor")); err == nil && info.IsDir() {
 		applied.FollowUp = append(applied.FollowUp, "vendor/ still holds the old modules: run `go mod vendor` before building")
 	}
 	return applied, nil
@@ -143,7 +145,12 @@ func ApplyDependencies(ctx context.Context, workDir string, m *Manifest, to stri
 
 // dependencyCommands are the go commands carrying out plan's dependency
 // changes: the replace edits, then go get of the target, which moves the
-// require and records the sums it needs.
+// require and records the sums it needs. Each is pinned to the module's own
+// go.mod (and so go.sum): an inherited -modfile (GOFLAGS, or go env -w)
+// would make it write an alternate .mod and .sum that the snapshot, the
+// verification and the rollback never see. go mod edit takes the file as
+// its argument; go get takes -modfile, which the command line sets over
+// GOFLAGS.
 func dependencyCommands(plan Plan) [][]string {
 	var cmds [][]string
 	for _, d := range plan.Dependencies {
@@ -155,12 +162,12 @@ func dependencyCommands(plan Plan) [][]string {
 			old += "@" + d.ForVersion
 		}
 		if d.To == "" {
-			cmds = append(cmds, []string{"mod", "edit", "-dropreplace=" + old})
+			cmds = append(cmds, []string{"mod", "edit", "-dropreplace=" + old, "go.mod"})
 		} else {
-			cmds = append(cmds, []string{"mod", "edit", "-replace=" + old + "=" + d.Module + "@" + d.To})
+			cmds = append(cmds, []string{"mod", "edit", "-replace=" + old + "=" + d.Module + "@" + d.To, "go.mod"})
 		}
 	}
-	return append(cmds, []string{"get", FrameworkModulePath + "@" + plan.Target})
+	return append(cmds, []string{"get", "-modfile=go.mod", FrameworkModulePath + "@" + plan.Target})
 }
 
 // fileSnapshot is the bytes of some files (nil for one that does not exist).

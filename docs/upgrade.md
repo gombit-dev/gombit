@@ -125,8 +125,11 @@ Review them with `git diff go.mod go.sum`. Still to do (not applied):
   same go.mod, module sources and go command give the same result (your
   `GOFLAGS`, `GOPROXY` and toolchain take part, as for any `go get`, and the
   go command may update the `go` or `toolchain` line); `go get` keeps the old
-  version's sums, which a later `go mod tidy` prunes. In a vendored app it
-  leaves `vendor/` as it was, and says to run `go mod vendor` before
+  version's sums, which a later `go mod tidy` prunes. Every command is
+  pinned to the module's own `go.mod` and `go.sum` (a `-modfile` in
+  `GOFLAGS`, or set with `go env -w`, is overridden), so no other file is
+  written. In a vendored app (a top-level `vendor/`, with `modules.txt` or
+  not) it leaves `vendor/` as it was, and says to run `go mod vendor` before
   building.
 - **Visible:** every go command is printed, with the `go.mod` lines it
   removed and added and the `go.sum` line counts (`--json` has them all,

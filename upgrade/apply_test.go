@@ -145,7 +145,7 @@ func TestApplyDependenciesWithTheGoCommand(t *testing.T) {
 	goSum, _ := os.ReadFile(filepath.Join(dir, "go.sum")) // #nosec G304 -- as above
 	_, err = upgrade.ApplyDependencies(context.Background(), dir, m, "v0.7.2")
 	var goErr *upgrade.GoCommandError
-	if !errors.As(err, &goErr) || !strings.Contains(err.Error(), "go get github.com/gombit-dev/gombit@v0.7.2") ||
+	if !errors.As(err, &goErr) || !strings.Contains(err.Error(), "go get -modfile=go.mod github.com/gombit-dev/gombit@v0.7.2") ||
 		!strings.Contains(goErr.Output, "v0.7.2") || !strings.Contains(err.Error(), "(go.mod and go.sum are restored)") {
 		t.Fatalf("upgrade to a version no source has = %v; want the go command's own failure, restored", err)
 	}
@@ -236,5 +236,50 @@ func TestApplyDependenciesVendoredApp(t *testing.T) {
 	var out strings.Builder
 	if err := a.Render(&out); err != nil || !strings.Contains(out.String(), "Next: vendor/ still holds the old modules") {
 		t.Fatalf("Render = %q, %v", out.String(), err)
+	}
+}
+
+// TestApplyDependenciesIgnoresAnInheritedModfile: with GOFLAGS naming an
+// alternate -modfile, the go commands still edit the module's go.mod and
+// go.sum (the ones snapshotted, verified and restored), and the alternate
+// pair is left exactly as it was.
+func TestApplyDependenciesIgnoresAnInheritedModfile(t *testing.T) {
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("no go command")
+	}
+	offlineGo(t, goProxy(t, "v0.7.0", "v0.7.1"))
+	m, err := upgrade.ParseManifest([]byte(goFixture))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := goApp(t, "v0.7.0")
+	// Both files carry a dormant replace of the target, so the plan edits a
+	// replace (go mod edit) as well as the require (go get).
+	goMod := filepath.Join(dir, "go.mod")
+	alternate := filepath.Join(dir, "alternate.mod")
+	data, err := os.ReadFile(goMod) // #nosec G304 -- under t.TempDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = append(data, "replace github.com/gombit-dev/gombit v0.7.1 => ../next\n"...)
+	for _, path := range []string{goMod, alternate} {
+		if err := os.WriteFile(path, data, 0o600); err != nil { // #nosec G703 -- under t.TempDir()
+			t.Fatal(err)
+		}
+	}
+	altBefore, _ := os.ReadFile(alternate) // #nosec G304 -- as above
+	t.Setenv("GOFLAGS", "-mod=mod -modcacherw -modfile=alternate.mod")
+
+	if _, err := upgrade.ApplyDependencies(context.Background(), dir, m, "v0.7.1"); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := upgrade.Detect(dir); err != nil || b.Framework.Version != "v0.7.1" || b.Framework.Replace != nil {
+		t.Fatalf("go.mod after the upgrade: %+v, %v; want v0.7.1 with the replace dropped", b.Framework, err)
+	}
+	if altAfter, _ := os.ReadFile(alternate); !bytes.Equal(altAfter, altBefore) { // #nosec G304 -- as above
+		t.Fatalf("the upgrade changed alternate.mod:\n%s", altAfter)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "alternate.sum")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the upgrade wrote alternate.sum (%v)", err)
 	}
 }

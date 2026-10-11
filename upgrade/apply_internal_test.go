@@ -30,6 +30,9 @@ type fakeGo struct {
 	calls [][]string
 	fail  string
 	noop  bool // go get changes nothing
+	// unreadableSum makes go get leave go.sum unreadable (a directory), so
+	// the final report cannot be read after the upgrade itself succeeded.
+	unreadableSum bool
 }
 
 func (f *fakeGo) run(_ context.Context, dir string, args ...string) ([]byte, error) {
@@ -41,13 +44,20 @@ func (f *fakeGo) run(_ context.Context, dir string, args ...string) ([]byte, err
 	}
 	s := string(data)
 	switch {
-	case len(args) == 3 && args[0] == "mod" && strings.HasPrefix(args[2], "-dropreplace="):
+	case len(args) == 4 && args[0] == "mod" && strings.HasPrefix(args[2], "-dropreplace=") && args[3] == "go.mod":
 		old := strings.Replace(strings.TrimPrefix(args[2], "-dropreplace="), "@", " ", 1)
 		s = regexp.MustCompile(`(?m)^replace `+regexp.QuoteMeta(old)+` =>.*\n`).ReplaceAllString(s, "")
 	case args[0] == "get" && !f.noop:
-		mod, v, _ := strings.Cut(args[1], "@")
+		if args[1] != "-modfile=go.mod" {
+			f.t.Fatalf("go get is not pinned to go.mod: %v", args)
+		}
+		mod, v, _ := strings.Cut(args[2], "@")
 		s = regexp.MustCompile(`(?m)^require `+regexp.QuoteMeta(mod)+` \S+`).ReplaceAllString(s, "require "+mod+" "+v)
-		if err := os.WriteFile(filepath.Join(dir, "go.sum"), []byte(mod+" "+v+" h1:fake=\n"), 0o600); err != nil {
+		if f.unreadableSum {
+			if err := os.Mkdir(filepath.Join(dir, "go.sum"), 0o750); err != nil {
+				f.t.Fatal(err)
+			}
+		} else if err := os.WriteFile(filepath.Join(dir, "go.sum"), []byte(mod+" "+v+" h1:fake=\n"), 0o600); err != nil {
 			f.t.Fatal(err)
 		}
 	}
@@ -96,8 +106,8 @@ func TestApplyDependenciesRunsTheReplaceEditsThenGoGet(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := [][]string{
-		{"mod", "edit", "-dropreplace=github.com/gombit-dev/gombit@v0.8.0"},
-		{"get", "github.com/gombit-dev/gombit@v0.8.0"},
+		{"mod", "edit", "-dropreplace=github.com/gombit-dev/gombit@v0.8.0", "go.mod"},
+		{"get", "-modfile=go.mod", "github.com/gombit-dev/gombit@v0.8.0"},
 	}
 	if len(f.calls) != len(want) || strings.Join(f.calls[0], " ") != strings.Join(want[0], " ") || strings.Join(f.calls[1], " ") != strings.Join(want[1], " ") {
 		t.Fatalf("go commands = %v; want %v", f.calls, want)
@@ -115,7 +125,7 @@ func TestApplyDependenciesRunsTheReplaceEditsThenGoGet(t *testing.T) {
 	}
 	for _, s := range []string{
 		"Gombit upgrade v0.6.1 -> v0.8.0\n",
-		"  go mod edit -dropreplace=github.com/gombit-dev/gombit@v0.8.0\n  go get github.com/gombit-dev/gombit@v0.8.0\n",
+		"  go mod edit -dropreplace=github.com/gombit-dev/gombit@v0.8.0 go.mod\n  go get -modfile=go.mod github.com/gombit-dev/gombit@v0.8.0\n",
 		"  - require github.com/gombit-dev/gombit v0.6.1\n",
 		"  + require github.com/gombit-dev/gombit v0.8.0\n",
 		"go.sum: 1 line(s) added, 0 removed\n",
@@ -136,7 +146,11 @@ func TestApplyDependenciesRestoresOnFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for name, f := range map[string]*fakeGo{"go get fails": {fail: "get"}, "go get changes nothing": {noop: true}} {
+	for name, f := range map[string]*fakeGo{
+		"go get fails":                   {fail: "get"},
+		"go get changes nothing":         {noop: true},
+		"the result cannot be read back": {unreadableSum: true},
+	} {
 		t.Run(name, func(t *testing.T) {
 			withFakeGo(t, f)
 			original := applyGoMod + "replace github.com/gombit-dev/gombit v0.8.0 => ../gombit\n"
@@ -147,10 +161,10 @@ func TestApplyDependenciesRestoresOnFailure(t *testing.T) {
 			}
 			if f.fail != "" {
 				var goErr *GoCommandError
-				if !errors.As(err, &goErr) || !strings.Contains(err.Error(), "go get github.com/gombit-dev/gombit@v0.8.0: exit status 1\ngo: github.com/gombit-dev/gombit@v0.8.0: reading file:///proxy: 404 Not Found") {
+				if !errors.As(err, &goErr) || !strings.Contains(err.Error(), "go get -modfile=go.mod github.com/gombit-dev/gombit@v0.8.0: exit status 1\ngo: github.com/gombit-dev/gombit@v0.8.0: reading file:///proxy: 404 Not Found") {
 					t.Fatalf("error = %v; want the go command and its output, verbatim", err)
 				}
-			} else if !strings.Contains(err.Error(), `builds against "v0.6.1", not v0.8.0`) {
+			} else if f.noop && !strings.Contains(err.Error(), `builds against "v0.6.1", not v0.8.0`) {
 				t.Fatalf("error = %v; want the result's build named", err)
 			}
 			if got, _ := os.ReadFile(filepath.Join(dir, "go.mod")); string(got) != original { // #nosec G304 -- under t.TempDir()
@@ -183,5 +197,27 @@ func TestApplyDependenciesNeedsATargetAndAPath(t *testing.T) {
 	a, err := ApplyDependencies(context.Background(), at, m, "v0.8.0")
 	if err != nil || len(a.Commands) != 0 || len(f.calls) != 0 {
 		t.Fatalf("at the target = %+v, %v, %d go calls; want nothing run", a, err, len(f.calls))
+	}
+}
+
+// TestApplyDependenciesVendorDirectory: a top-level vendor/ makes the go
+// command build from it whether or not it has modules.txt (a missing one is
+// just as stale), so either way the upgrade says to refresh it.
+func TestApplyDependenciesVendorDirectory(t *testing.T) {
+	m, err := ParseManifest([]byte(applyFixture))
+	if err != nil {
+		t.Fatal(err)
+	}
+	withFakeGo(t, &fakeGo{})
+	dir := applyApp(t, applyGoMod)
+	if err := os.Mkdir(filepath.Join(dir, "vendor"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	a, err := ApplyDependencies(context.Background(), dir, m, "v0.8.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(a.FollowUp) != 1 || !strings.Contains(a.FollowUp[0], "go mod vendor") {
+		t.Fatalf("FollowUp = %v; want the vendor refresh for a vendor/ without modules.txt", a.FollowUp)
 	}
 }
