@@ -67,6 +67,7 @@ default target.`,
 	cmd.Flags().String("dir", ".", "application directory (go.mod and gombit.yaml)")
 	cmd.Flags().Bool("json", false, "print the plan as JSON")
 	cmd.AddCommand(newUpgradeBaselineCommand(stdout))
+	cmd.AddCommand(newUpgradeCheckCommand(stdout))
 	cmd.AddCommand(newUpgradeNotesCommand(stdout))
 	return cmd
 }
@@ -327,10 +328,61 @@ func runUpgradeApply(ctx context.Context, stdout io.Writer, dir, to string, asJS
 	return applied.Render(stdout)
 }
 
+func newUpgradeCheckCommand(stdout io.Writer) *cobra.Command {
+	cmd := silence(&cobra.Command{
+		Use:   "check",
+		Short: "Report uses of deprecated framework APIs",
+		Long: `Report every use, in the application, of a framework API marked deprecated
+(a "Deprecated:" paragraph in its doc comment, the Go convention): file,
+line and column, the symbol, and what to use instead. Uses are found from
+type information (go/packages, go/types), not by matching text, in every
+package of the app, tests included. The app must type-check.
+
+It exits 1 when it finds any, so a CI job can gate on it.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			dir, _ := cmd.Flags().GetString("dir")
+			asJSON, _ := cmd.Flags().GetBool("json")
+			return runUpgradeCheck(cmd.Context(), stdout, dir, asJSON)
+		},
+	})
+	cmd.Flags().String("dir", ".", "application directory")
+	cmd.Flags().Bool("json", false, "print the uses as JSON")
+	return cmd
+}
+
+// runUpgradeCheck reports the app's uses of deprecated framework APIs, and
+// fails when there are any.
+func runUpgradeCheck(ctx context.Context, stdout io.Writer, dir string, asJSON bool) error {
+	uses, err := upgrade.ScanDeprecated(ctx, dir)
+	if err != nil {
+		return fmt.Errorf("gombit upgrade check: %w", err)
+	}
+	if asJSON {
+		if uses == nil {
+			uses = []upgrade.DeprecatedUse{}
+		}
+		data, err := json.MarshalIndent(uses, "", "  ")
+		if err != nil {
+			return fmt.Errorf("gombit upgrade check: %w", err)
+		}
+		if _, err := fmt.Fprintf(stdout, "%s\n", data); err != nil {
+			return err
+		}
+	} else if err := upgrade.RenderDeprecated(stdout, uses); err != nil {
+		return err
+	}
+	if len(uses) > 0 {
+		return fmt.Errorf("gombit upgrade check: %d use(s) of deprecated framework APIs", len(uses))
+	}
+	return nil
+}
+
 func upgradeUsage(stderr io.Writer) {
 	_, _ = fmt.Fprintln(stderr, "Usage: gombit upgrade --to vX.Y.Z [--dir .] [--json]")
 	_, _ = fmt.Fprintln(stderr, "       gombit upgrade --dry-run [--to vX.Y.Z] [--dir .] [--json]")
 	_, _ = fmt.Fprintln(stderr, "       gombit upgrade <subcommand>")
 	_, _ = fmt.Fprintln(stderr, "  baseline    Show (or record) the app's upgrade baseline")
+	_, _ = fmt.Fprintln(stderr, "  check       Report uses of deprecated framework APIs")
 	_, _ = fmt.Fprintln(stderr, "  notes       Print upgrade notes from the compatibility manifest")
 }

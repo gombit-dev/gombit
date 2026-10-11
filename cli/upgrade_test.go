@@ -271,3 +271,44 @@ func TestUpgradeDryRun(t *testing.T) {
 		}
 	}
 }
+
+// TestUpgradeCheck: gombit upgrade check reports the uses of deprecated
+// framework APIs (text or JSON) and exits non-zero when there are any.
+func TestUpgradeCheck(t *testing.T) {
+	t.Setenv("GOWORK", "off")
+	t.Setenv("GOFLAGS", "-mod=mod")
+	t.Setenv("GOPROXY", "off")
+	t.Setenv("GOTOOLCHAIN", "local")
+	root := t.TempDir()
+	files := map[string]string{
+		"fw/go.mod":   "module github.com/gombit-dev/gombit\n\ngo 1.21\n",
+		"fw/db/db.go": "package db\n\n// Old.\n//\n// Deprecated: use New.\nfunc Old() int { return 1 }\n\n// New.\nfunc New() int { return 2 }\n",
+		"app/go.mod":  "module example.com/app\n\ngo 1.21\n\nrequire github.com/gombit-dev/gombit v0.0.0\n\nreplace github.com/gombit-dev/gombit => ../fw\n",
+		"app/main.go": "package main\n\nimport \"github.com/gombit-dev/gombit/db\"\n\nfunc main() { _ = db.Old() }\n",
+		"ok/go.mod":   "module example.com/ok\n\ngo 1.21\n\nrequire github.com/gombit-dev/gombit v0.0.0\n\nreplace github.com/gombit-dev/gombit => ../fw\n",
+		"ok/main.go":  "package main\n\nimport \"github.com/gombit-dev/gombit/db\"\n\nfunc main() { _ = db.New() }\n",
+	}
+	for name, content := range files {
+		path := filepath.Join(root, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil { // #nosec G703 -- under t.TempDir()
+			t.Fatal(err)
+		}
+	}
+	out, err := runUpgradeCLI(t, "check", "--dir", filepath.Join(root, "app"))
+	if err == nil || !strings.Contains(err.Error(), "1 use(s) of deprecated framework APIs") ||
+		!strings.Contains(out, "main.go:5:22: db.Old\n      Deprecated: use New.") {
+		t.Fatalf("upgrade check = %q, %v", out, err)
+	}
+	out, err = runUpgradeCLI(t, "check", "--dir", filepath.Join(root, "app"), "--json")
+	var uses []upgrade.DeprecatedUse
+	if err == nil || json.Unmarshal([]byte(out), &uses) != nil || len(uses) != 1 || uses[0].Symbol != "db.Old" {
+		t.Fatalf("upgrade check --json = %s, %v", out, err)
+	}
+	out, err = runUpgradeCLI(t, "check", "--dir", filepath.Join(root, "ok"), "--json")
+	if err != nil || strings.TrimSpace(out) != "[]" {
+		t.Fatalf("upgrade check --json on a clean app = %q, %v", out, err)
+	}
+}

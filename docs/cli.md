@@ -41,6 +41,7 @@ go run ./cmd/gombit --help
 | `gombit version` | Print version and build metadata | REL-4 |
 | `gombit upgrade --dry-run` | Plan an upgrade to a framework release, changing nothing | UPGRADE-3 |
 | `gombit upgrade --to` | Apply an upgrade's dependency changes (go.mod, go.sum) with the go command | UPGRADE-4 |
+| `gombit upgrade check` | Report uses of deprecated framework APIs (from type information); exits 1 when there are any | UPGRADE-5 |
 | `gombit upgrade baseline` | Show (or record) the app's upgrade baseline: framework and scaffold versions | UPGRADE-1 |
 | `gombit upgrade notes` | Print upgrade notes from the compatibility manifest | UPGRADE-2 |
 
@@ -882,6 +883,20 @@ manual changes are printed as still to do. `--to` is required there. See
 | `--to` | Target framework release: applied without `--dry-run`, planned with it | with `--dry-run`, the newest release this CLI knows; required to apply |
 | `--dir` | Application directory (`go.mod`, `gombit.yaml`) | `.` |
 | `--json` | Print the plan (or what was applied) as JSON | off |
+
+## `gombit upgrade check`
+
+Reports every use, in the application (every package, tests included), of a
+framework API whose doc comment has a `Deprecated:` paragraph: file, line
+and column, the symbol, and what to use instead. Uses are resolved from type
+information (`go/packages`, `go/types`), never by matching text; the app
+must type-check. It exits 1 when there is any use. See
+[upgrade.md](upgrade.md#checking-for-deprecated-apis).
+
+| Flag | Meaning | Default |
+| --- | --- | --- |
+| `--dir` | Application directory | `.` |
+| `--json` | Print the uses as JSON | off |
 
 ## `gombit upgrade baseline`
 

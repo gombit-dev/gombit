@@ -9,9 +9,10 @@ never rewrites code you own without an explicit write action.
 
 This page grows with the UPGRADE-0 epic. Today it covers **planning an
 upgrade** (`gombit upgrade --dry-run`), **applying its dependency changes**
-(`gombit upgrade --to`), the **baseline** (where an application stands) and
-the **compatibility manifest** (what each release asks of an application
-moving to it).
+(`gombit upgrade --to`), **checking for deprecated APIs** (`gombit upgrade
+check`), the **baseline** (where an application stands) and the
+**compatibility manifest** (what each release asks of an application moving
+to it).
 
 ## Planning an upgrade
 
@@ -140,6 +141,34 @@ Review them with `git diff go.mod go.sum`. Still to do (not applied):
   Either way `go.mod` and `go.sum` get back the bytes they had.
 - **Only the dependencies.** The plan's automatic and manual changes are
   printed as still to do; they are not applied.
+
+## Checking for deprecated APIs
+
+`gombit upgrade check` reports every use, in the application, of a framework
+API marked deprecated, with what to use instead:
+
+```text
+$ gombit upgrade check
+Deprecated framework APIs used: 1
+  internal/book/hooks.go:21:18: database.KeepStoredZeros
+      Deprecated: use ScopeEdit with StoredValues, which also keeps the row's stored text editable and judges columns by whether their value changed.
+```
+
+- **What is deprecated** is what the framework's doc comments say, with the
+  Go convention: a paragraph starting `Deprecated:` (the one `go doc`,
+  gopls and pkg.go.dev show). Every such paragraph names its replacement; a
+  test fails one that does not.
+- **How uses are found:** from type information, not text. Every package of
+  the app, tests included, is loaded and type-checked (`go/packages`), and
+  each identifier is resolved to the object it denotes. So a local name
+  that happens to match, a comment or a string is never reported, while a
+  method call, a field, a composite literal key or an interface method is.
+  The app must type-check: one that does not is an error, with Go's
+  diagnostics, rather than a scan that misses uses.
+- **Output:** file, line and column, the symbol (`pkg.Name`,
+  `pkg.Type.Field`, `(*pkg.Type).Method`) and the deprecation; `--json`
+  prints them as a list. It exits 1 when there is any use, so a CI job can
+  gate on it; `--dir` selects the application directory.
 
 ## The baseline
 
