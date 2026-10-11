@@ -101,7 +101,7 @@ func TestPlanUpgrade(t *testing.T) {
 	if p.Current != "v0.6.1" || p.Target != "v0.8.0" || len(p.Releases) != 2 {
 		t.Fatalf("plan = %s -> %s over %d releases", p.Current, p.Target, len(p.Releases))
 	}
-	if len(p.Dependencies) != 1 || p.Dependencies[0] != (upgrade.DependencyChange{Module: upgrade.FrameworkModulePath, From: "v0.6.1", To: "v0.8.0"}) {
+	if len(p.Dependencies) != 1 || p.Dependencies[0] != (upgrade.DependencyChange{Module: upgrade.FrameworkModulePath, Directive: "require", From: "v0.6.1", To: "v0.8.0"}) {
 		t.Fatalf("Dependencies = %+v", p.Dependencies)
 	}
 	if len(p.Automatic) != 1 || p.Automatic[0].Change.ID != "record-upgrade-baseline" || p.Automatic[0].Description == "" {
@@ -123,7 +123,7 @@ func TestPlanUpgrade(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Current: v0.6.1\nTarget:  v0.8.0\n",
-		"  github.com/gombit-dev/gombit v0.6.1 -> v0.8.0\n",
+		"  github.com/gombit-dev/gombit v0.6.1 -> v0.8.0 (require)\n",
 		"Automatic changes available: 1\n  - record-upgrade-baseline: Record the baseline.\n",
 		"Manual actions: 2\n  - rename-setting [breaking]: A setting is renamed.\n      Rename GOMBIT_OLD to GOMBIT_NEW.\n",
 		"  - review-timeouts: Review the shutdown timeout.\n      Check the orchestrator's grace period.\n",
@@ -199,5 +199,84 @@ func TestPlanUpgradeRefuses(t *testing.T) {
 	}
 	if _, err := upgrade.PlanUpgrade(t.TempDir(), m, ""); !errors.Is(err, upgrade.ErrNotGombitApp) {
 		t.Fatalf("PlanUpgrade outside an app = %v", err)
+	}
+}
+
+// TestPlanUpgradeSelfReplace: a replace of the framework by the framework
+// module itself decides the build, so the plan names it as well as the
+// require. One of every version keeps pinning the build when the require
+// moves, so it moves too; one of the required version stops applying, so
+// it is dropped.
+func TestPlanUpgradeSelfReplace(t *testing.T) {
+	m := planManifest(t)
+	const require = "module example.com/demo\n\ngo 1.26\n\nrequire github.com/gombit-dev/gombit v0.6.0\n"
+	for name, tc := range map[string]struct {
+		replace string
+		want    []upgrade.DependencyChange
+		render  string
+	}{
+		"of every version": {
+			"replace github.com/gombit-dev/gombit => github.com/gombit-dev/gombit v0.6.1\n",
+			[]upgrade.DependencyChange{
+				{Module: upgrade.FrameworkModulePath, Directive: "require", From: "v0.6.0", To: "v0.8.0"},
+				{Module: upgrade.FrameworkModulePath, Directive: "replace", From: "v0.6.1", To: "v0.8.0", Note: "it replaces every version of the framework, so it keeps the build on v0.6.1 until it moves (or is dropped)"},
+			},
+			"  github.com/gombit-dev/gombit v0.6.1 -> v0.8.0 (replace)\n    (it replaces every version",
+		},
+		"of the required version": {
+			"replace github.com/gombit-dev/gombit v0.6.0 => github.com/gombit-dev/gombit v0.6.1\n",
+			[]upgrade.DependencyChange{
+				{Module: upgrade.FrameworkModulePath, Directive: "require", From: "v0.6.0", To: "v0.8.0"},
+				{Module: upgrade.FrameworkModulePath, Directive: "replace", From: "v0.6.1", Note: "it replaces v0.6.0 only, so it stops applying once the require moves: drop it"},
+			},
+			"  github.com/gombit-dev/gombit v0.6.1: drop the replace\n",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p, err := upgrade.PlanUpgrade(app(t, require+tc.replace, ""), m, "v0.8.0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if p.Current != "v0.6.1" || len(p.Dependencies) != len(tc.want) {
+				t.Fatalf("plan from %s: Dependencies = %+v; want %+v", p.Current, p.Dependencies, tc.want)
+			}
+			for i := range tc.want {
+				if p.Dependencies[i] != tc.want[i] {
+					t.Fatalf("Dependencies[%d] = %+v; want %+v", i, p.Dependencies[i], tc.want[i])
+				}
+			}
+			var out strings.Builder
+			if err := p.Render(&out); err != nil || !strings.Contains(out.String(), tc.render) {
+				t.Fatalf("Render = %q, %v; want it to contain %q", out.String(), err, tc.render)
+			}
+		})
+	}
+}
+
+// TestPlanUpgradeBreakingFollowsAutomatic: a breaking automatic change the
+// app does not need is left out of Breaking as it is of Automatic, so the
+// plan does not count a change the app has absorbed (and a CI gate on
+// .breaking does not fail on it).
+func TestPlanUpgradeBreakingFollowsAutomatic(t *testing.T) {
+	data := strings.Replace(planFixture, "        action: record-baseline\n", "        action: record-baseline\n        breaking: true\n", 1)
+	m, err := upgrade.ParseManifest([]byte(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorded := app(t, planGoMod, "name: demo\n"+upgrade.MetadataBlock(upgrade.ScaffoldVersion))
+	p, err := upgrade.PlanUpgrade(recorded, m, "v0.7.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Automatic) != 0 || strings.Join(ids(p.Breaking), ",") != "rename-setting" {
+		t.Fatalf("recorded app: Automatic = %d, Breaking = %v; want none, and only rename-setting", len(p.Automatic), ids(p.Breaking))
+	}
+	old := app(t, planGoMod, "name: demo\n")
+	p, err = upgrade.PlanUpgrade(old, m, "v0.7.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Automatic) != 1 || strings.Join(ids(p.Breaking), ",") != "record-upgrade-baseline,rename-setting" {
+		t.Fatalf("old app: Automatic = %d, Breaking = %v; want record-upgrade-baseline counted in both", len(p.Automatic), ids(p.Breaking))
 	}
 }

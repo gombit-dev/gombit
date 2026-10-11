@@ -26,7 +26,7 @@ Current: v0.6.1
 Target:  v0.8.0
 
 Dependency changes:
-  github.com/gombit-dev/gombit v0.6.1 -> v0.8.0
+  github.com/gombit-dev/gombit v0.6.1 -> v0.8.0 (require)
 
 Automatic changes available: 1
   - record-upgrade-baseline: gombit new records the app's upgrade baseline ...
@@ -52,12 +52,20 @@ It plans from the [baseline](#the-baseline) and the
 
 - **Target:** `--to` selects it; by default, the newest release this
   `gombit` knows.
+- **Dependency changes:** the go.mod directives about the framework that
+  change: the `require`, and a `replace` of the framework by the framework
+  module itself, which decides the build too. One that replaces every
+  version keeps pinning the build when the require moves, so it moves as
+  well; one that replaces only the required version stops applying, so the
+  plan says to drop it.
 - **Automatic changes:** only those the application needs (each automatic
   action can say whether an app needs it; recording the baseline is not
   needed once it is recorded).
 - **Manual actions:** every one the manifest declares on the way, with what
   to do.
-- **Breaking changes** of every kind, and the informational ones.
+- **Breaking changes** this app faces, of every kind (a breaking automatic
+  change the app does not need is left out, as it is of the automatic
+  ones), and the informational changes.
 - **Refusals:** a target or current version the manifest does not list, a
   downgrade, or an application whose baseline names no framework release (a
   `go.work` decides the build, a local checkout, a fork) fails with the

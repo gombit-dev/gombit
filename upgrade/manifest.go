@@ -82,7 +82,11 @@ type Action struct {
 	// whose baseline is b, needs the change (Apply would change something).
 	// Nil means it always does. The upgrade plan counts only the automatic
 	// changes an app needs, and must write nothing: TestActionChecksWriteNothing
-	// runs every Check against an app and compares its files.
+	// runs every Check against an app and compares its files. Check sees the
+	// application as it is before the upgrade (b is that baseline), not as
+	// the plan's earlier steps would leave it, and a step's need can change
+	// once earlier steps apply: whatever applies a plan must re-check each
+	// action right before its Apply, not trust the planned list.
 	Check func(workDir string, b Baseline) (needed bool, err error)
 }
 

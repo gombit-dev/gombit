@@ -15,8 +15,10 @@ type Plan struct {
 	Current string `json:"current"`
 	// Target is the framework release the plan moves it to.
 	Target string `json:"target"`
-	// Dependencies are the module requirement changes the upgrade makes;
-	// none when the application is already at Target.
+	// Dependencies are the go.mod directives about the framework module the
+	// upgrade changes: its require, and a replace of it by the framework
+	// module itself, which decides the build too. None when the application
+	// already builds against Target.
 	Dependencies []DependencyChange `json:"dependencies"`
 	// Releases are the releases the upgrade moves across, in order.
 	Releases []Release `json:"releases"`
@@ -27,17 +29,31 @@ type Plan struct {
 	// Manual are the changes the developer must act on: every one the
 	// manifest declares between Current and Target, with what to do.
 	Manual []Change `json:"manual"`
-	// Breaking are the breaking changes of any kind.
+	// Breaking are the breaking changes this application faces: every
+	// breaking manual and informational change, and the breaking automatic
+	// changes it needs. An automatic change its action reports the app does
+	// not need is left out here too, as in Automatic, so the plan never
+	// counts a change the app has already absorbed.
 	Breaking []Change `json:"breaking"`
 	// Informational are the changes worth knowing, with nothing to do.
 	Informational []Change `json:"informational"`
 }
 
-// DependencyChange is a module requirement the upgrade changes.
+// DependencyChange is a go.mod directive about a module that the upgrade
+// changes.
 type DependencyChange struct {
 	Module string `json:"module"`
-	From   string `json:"from"`
-	To     string `json:"to"`
+	// Directive is the directive that changes: "require", or "replace" (a
+	// replace of the framework by the framework module itself).
+	Directive string `json:"directive"`
+	// From is the directive's version now.
+	From string `json:"from"`
+	// To is the version it moves to; empty for a replace that must be
+	// dropped instead.
+	To string `json:"to,omitempty"`
+	// Note says why the directive must change, when the reason is not
+	// plain.
+	Note string `json:"note,omitempty"`
 }
 
 // PlannedAction is an automatic change an application needs, and the
@@ -76,10 +92,11 @@ func PlanUpgrade(workDir string, m *Manifest, to string) (Plan, error) {
 		Automatic:    []PlannedAction{},
 	}
 	if p.Current != p.Target {
-		p.Dependencies = append(p.Dependencies, DependencyChange{Module: FrameworkModulePath, From: p.Current, To: p.Target})
+		p.Dependencies = frameworkDirectives(b.Framework, p.Target)
 	}
 	c := Classify(releases)
-	p.Manual, p.Breaking, p.Informational = c.Manual, c.Breaking, c.Informational
+	p.Manual, p.Informational = c.Manual, c.Informational
+	notNeeded := map[string]bool{}
 	for _, ch := range c.Automatic {
 		a, ok := LookupAction(ch.Action)
 		if !ok {
@@ -93,12 +110,42 @@ func PlanUpgrade(workDir string, m *Manifest, to string) (Plan, error) {
 				return Plan{}, fmt.Errorf("upgrade: check %s: %w", ch.ID, err)
 			}
 			if !needed {
+				notNeeded[ch.ID] = true
 				continue
 			}
 		}
 		p.Automatic = append(p.Automatic, PlannedAction{Change: ch, Description: a.Description})
 	}
+	p.Breaking = []Change{}
+	for _, ch := range c.Breaking {
+		if !notNeeded[ch.ID] {
+			p.Breaking = append(p.Breaking, ch)
+		}
+	}
 	return p, nil
+}
+
+// frameworkDirectives are the go.mod directives about the framework that
+// moving fw to target changes. The require moves. A replace by the
+// framework module itself decides the build as well: one of every version
+// keeps pinning it after the require moves, so it moves too; one of the
+// required version only stops applying once the require moves, so it is
+// dropped. (PathFrom has refused a local checkout and a fork already.)
+func frameworkDirectives(fw Framework, target string) []DependencyChange {
+	var changes []DependencyChange
+	if fw.Required != target {
+		changes = append(changes, DependencyChange{Module: FrameworkModulePath, Directive: "require", From: fw.Required, To: target})
+	}
+	if r := fw.Replace; r != nil && r.Path == FrameworkModulePath && !r.Local() && r.Version != target {
+		if r.ForVersion == "" {
+			changes = append(changes, DependencyChange{Module: FrameworkModulePath, Directive: "replace", From: r.Version, To: target,
+				Note: "it replaces every version of the framework, so it keeps the build on " + r.Version + " until it moves (or is dropped)"})
+		} else {
+			changes = append(changes, DependencyChange{Module: FrameworkModulePath, Directive: "replace", From: r.Version,
+				Note: "it replaces " + r.ForVersion + " only, so it stops applying once the require moves: drop it"})
+		}
+	}
+	return changes
 }
 
 // Render writes the plan as text, for a terminal or a CI log.
@@ -114,7 +161,14 @@ func (p Plan) Render(w io.Writer) error {
 	}
 	b.WriteString("\nDependency changes:\n")
 	for _, d := range p.Dependencies {
-		fmt.Fprintf(&b, "  %s %s -> %s\n", d.Module, d.From, d.To)
+		if d.To == "" {
+			fmt.Fprintf(&b, "  %s %s: drop the %s\n", d.Module, d.From, d.Directive)
+		} else {
+			fmt.Fprintf(&b, "  %s %s -> %s (%s)\n", d.Module, d.From, d.To, d.Directive)
+		}
+		if d.Note != "" {
+			fmt.Fprintf(&b, "    (%s)\n", d.Note)
+		}
 	}
 	fmt.Fprintf(&b, "\nAutomatic changes available: %d\n", len(p.Automatic))
 	for _, a := range p.Automatic {
