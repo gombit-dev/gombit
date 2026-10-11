@@ -307,8 +307,9 @@ version.
 - `gombit upgrade --dry-run [--to vX.Y.Z] [--dir] [--json]` (UPGRADE-3) plans
   upgrading an application to a framework release, from its baseline and the
   compatibility manifest, and writes nothing: the current and target
-  versions, the go.mod directives that change (the require, and a replace
-  of the framework by itself, which decides the build too), the automatic
+  versions, every go.mod directive that must change for the upgraded build
+  to be the target release (the require, and each replace that would decide
+  that build, active today or dormant, resolved at the target), the automatic
   changes the app needs (an action can report it is not needed), every
   manual action with what to do, the breaking changes the app faces and the
   informational ones. A version the manifest does not

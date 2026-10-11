@@ -3,7 +3,10 @@ package upgrade
 import (
 	"fmt"
 	"io"
+	"slices"
 	"strings"
+
+	"github.com/gombit-dev/gombit/internal/frameworkmod"
 )
 
 // Plan is what upgrading an application to a target framework release
@@ -43,10 +46,13 @@ type Plan struct {
 // changes.
 type DependencyChange struct {
 	Module string `json:"module"`
-	// Directive is the directive that changes: "require", or "replace" (a
-	// replace of the framework by the framework module itself).
+	// Directive is the directive that changes: "require" or "replace".
 	Directive string `json:"directive"`
-	// From is the directive's version now.
+	// ForVersion is, for a replace, the version it replaces (its left
+	// side); empty for a replace of every version.
+	ForVersion string `json:"for_version,omitempty"`
+	// From is the directive's right side now: the required version, or the
+	// replacement as go.mod writes it ("path version", or a directory).
 	From string `json:"from"`
 	// To is the version it moves to; empty for a replace that must be
 	// dropped instead.
@@ -92,7 +98,13 @@ func PlanUpgrade(workDir string, m *Manifest, to string) (Plan, error) {
 		Automatic:    []PlannedAction{},
 	}
 	if p.Current != p.Target {
-		p.Dependencies = frameworkDirectives(b.Framework, p.Target)
+		// The baseline keeps only the replace active today; moving the
+		// require needs every one (frameworkDirectives).
+		d, err := frameworkmod.Read(workDir)
+		if err != nil {
+			return Plan{}, fmt.Errorf("upgrade: %w", err)
+		}
+		p.Dependencies = frameworkDirectives(d, p.Target)
 	}
 	c := Classify(releases)
 	p.Manual, p.Informational = c.Manual, c.Informational
@@ -126,24 +138,48 @@ func PlanUpgrade(workDir string, m *Manifest, to string) (Plan, error) {
 }
 
 // frameworkDirectives are the go.mod directives about the framework that
-// moving fw to target changes. The require moves. A replace by the
-// framework module itself decides the build as well: one of every version
-// keeps pinning it after the require moves, so it moves too; one of the
-// required version only stops applying once the require moves, so it is
-// dropped. (PathFrom has refused a local checkout and a fork already.)
-func frameworkDirectives(fw Framework, target string) []DependencyChange {
+// moving d's app to target changes, so that the upgraded build is the
+// target release. The require moves. Then every replace of the framework,
+// active or not, is resolved at the target as the go command would, once
+// the require has moved: a replace that would decide the build there and is
+// not the target release itself is moved (a replace of every version by
+// the framework module, which would keep pinning the build) or dropped
+// (anything else: a replace of the target version itself, a local
+// checkout, a fork), and the set is resolved again, since dropping an
+// exact replace can expose one of every version it shadowed. Last, a
+// replace of the current required version only, active today, stops
+// applying once the require moves, and is dropped as dead.
+func frameworkDirectives(d frameworkmod.Declaration, target string) []DependencyChange {
 	var changes []DependencyChange
-	if fw.Required != target {
-		changes = append(changes, DependencyChange{Module: FrameworkModulePath, Directive: "require", From: fw.Required, To: target})
+	if d.Required != target {
+		changes = append(changes, DependencyChange{Module: FrameworkModulePath, Directive: "require", From: d.Required, To: target})
 	}
-	if r := fw.Replace; r != nil && r.Path == FrameworkModulePath && !r.Local() && r.Version != target {
-		if r.ForVersion == "" {
-			changes = append(changes, DependencyChange{Module: FrameworkModulePath, Directive: "replace", From: r.Version, To: target,
-				Note: "it replaces every version of the framework, so it keeps the build on " + r.Version + " until it moves (or is dropped)"})
-		} else {
-			changes = append(changes, DependencyChange{Module: FrameworkModulePath, Directive: "replace", From: r.Version,
-				Note: "it replaces " + r.ForVersion + " only, so it stops applying once the require moves: drop it"})
+	replaces := slices.Clone(d.Replaces)
+	reported := map[frameworkmod.Replacement]bool{}
+	for {
+		r := frameworkmod.Resolve(replaces, target)
+		if r == nil || (r.Path == FrameworkModulePath && r.Version == target) {
+			break
 		}
+		was := *r
+		reported[was] = true
+		if was.ForVersion == "" && was.Path == FrameworkModulePath && !was.Local() {
+			changes = append(changes, DependencyChange{Module: FrameworkModulePath, Directive: "replace", From: was.String(), To: target,
+				Note: "it replaces every version of the framework, so it would keep the build on " + was.Version + " (move it, or drop it)"})
+			r.Version = target
+			continue
+		}
+		for_ := "every version of the framework"
+		if was.ForVersion != "" {
+			for_ = was.ForVersion
+		}
+		changes = append(changes, DependencyChange{Module: FrameworkModulePath, Directive: "replace", ForVersion: was.ForVersion, From: was.String(),
+			Note: "it replaces " + for_ + ", so once the require is at " + target + " the build would use " + was.String() + ", not the release: drop it"})
+		replaces = slices.DeleteFunc(replaces, func(x frameworkmod.Replacement) bool { return x == was })
+	}
+	if a := frameworkmod.Resolve(d.Replaces, d.Required); a != nil && a.ForVersion == d.Required && d.Required != target && !reported[*a] {
+		changes = append(changes, DependencyChange{Module: FrameworkModulePath, Directive: "replace", ForVersion: a.ForVersion, From: a.String(),
+			Note: "it replaces " + a.ForVersion + " only, so it stops applying once the require moves: drop it"})
 	}
 	return changes
 }
@@ -161,10 +197,13 @@ func (p Plan) Render(w io.Writer) error {
 	}
 	b.WriteString("\nDependency changes:\n")
 	for _, d := range p.Dependencies {
-		if d.To == "" {
-			fmt.Fprintf(&b, "  %s %s: drop the %s\n", d.Module, d.From, d.Directive)
-		} else {
-			fmt.Fprintf(&b, "  %s %s -> %s (%s)\n", d.Module, d.From, d.To, d.Directive)
+		switch {
+		case d.Directive == "require":
+			fmt.Fprintf(&b, "  %s %s -> %s (require)\n", d.Module, d.From, d.To)
+		case d.To == "":
+			fmt.Fprintf(&b, "  replace %s => %s: drop it\n", strings.TrimSpace(d.Module+" "+d.ForVersion), d.From)
+		default:
+			fmt.Fprintf(&b, "  replace %s => %s -> %s\n", strings.TrimSpace(d.Module+" "+d.ForVersion), d.From, d.To)
 		}
 		if d.Note != "" {
 			fmt.Fprintf(&b, "    (%s)\n", d.Note)

@@ -202,43 +202,84 @@ func TestPlanUpgradeRefuses(t *testing.T) {
 	}
 }
 
-// TestPlanUpgradeSelfReplace: a replace of the framework by the framework
-// module itself decides the build, so the plan names it as well as the
-// require. One of every version keeps pinning the build when the require
-// moves, so it moves too; one of the required version stops applying, so
-// it is dropped.
-func TestPlanUpgradeSelfReplace(t *testing.T) {
+// TestPlanUpgradeReplaces: the plan resolves every replace of the
+// framework at the target, as the go command would once the require moves,
+// and reports what keeps the upgraded build from being the target release:
+// an active replace, a dormant replace of the target version that would
+// start to apply, and a replace of every version an exact one shadows today.
+func TestPlanUpgradeReplaces(t *testing.T) {
 	m := planManifest(t)
-	const require = "module example.com/demo\n\ngo 1.26\n\nrequire github.com/gombit-dev/gombit v0.6.0\n"
+	const fw = upgrade.FrameworkModulePath
+	const require060 = "module example.com/demo\n\ngo 1.26\n\nrequire github.com/gombit-dev/gombit v0.6.0\n"
+	require := func(from string) upgrade.DependencyChange {
+		return upgrade.DependencyChange{Module: fw, Directive: "require", From: from, To: "v0.8.0"}
+	}
 	for name, tc := range map[string]struct {
-		replace string
-		want    []upgrade.DependencyChange
-		render  string
+		goMod  string
+		want   []upgrade.DependencyChange
+		render []string
 	}{
-		"of every version": {
-			"replace github.com/gombit-dev/gombit => github.com/gombit-dev/gombit v0.6.1\n",
+		"a self-replace of every version moves": {
+			require060 + "replace github.com/gombit-dev/gombit => github.com/gombit-dev/gombit v0.6.1\n",
 			[]upgrade.DependencyChange{
-				{Module: upgrade.FrameworkModulePath, Directive: "require", From: "v0.6.0", To: "v0.8.0"},
-				{Module: upgrade.FrameworkModulePath, Directive: "replace", From: "v0.6.1", To: "v0.8.0", Note: "it replaces every version of the framework, so it keeps the build on v0.6.1 until it moves (or is dropped)"},
+				require("v0.6.0"),
+				{Module: fw, Directive: "replace", From: fw + " v0.6.1", To: "v0.8.0", Note: "it replaces every version of the framework, so it would keep the build on v0.6.1 (move it, or drop it)"},
 			},
-			"  github.com/gombit-dev/gombit v0.6.1 -> v0.8.0 (replace)\n    (it replaces every version",
+			[]string{"  replace github.com/gombit-dev/gombit => github.com/gombit-dev/gombit v0.6.1 -> v0.8.0\n"},
 		},
-		"of the required version": {
-			"replace github.com/gombit-dev/gombit v0.6.0 => github.com/gombit-dev/gombit v0.6.1\n",
+		"a self-replace of the required version is dropped": {
+			require060 + "replace github.com/gombit-dev/gombit v0.6.0 => github.com/gombit-dev/gombit v0.6.1\n",
 			[]upgrade.DependencyChange{
-				{Module: upgrade.FrameworkModulePath, Directive: "require", From: "v0.6.0", To: "v0.8.0"},
-				{Module: upgrade.FrameworkModulePath, Directive: "replace", From: "v0.6.1", Note: "it replaces v0.6.0 only, so it stops applying once the require moves: drop it"},
+				require("v0.6.0"),
+				{Module: fw, Directive: "replace", ForVersion: "v0.6.0", From: fw + " v0.6.1", Note: "it replaces v0.6.0 only, so it stops applying once the require moves: drop it"},
 			},
-			"  github.com/gombit-dev/gombit v0.6.1: drop the replace\n",
+			[]string{"  replace github.com/gombit-dev/gombit v0.6.0 => github.com/gombit-dev/gombit v0.6.1: drop it\n"},
+		},
+		// Inactive today, it would decide the build once the require is at
+		// v0.8.0.
+		"a dormant replace of the target version is dropped": {
+			planGoMod + "replace github.com/gombit-dev/gombit v0.8.0 => ../gombit\n",
+			[]upgrade.DependencyChange{
+				require("v0.6.1"),
+				{Module: fw, Directive: "replace", ForVersion: "v0.8.0", From: "../gombit", Note: "it replaces v0.8.0, so once the require is at v0.8.0 the build would use ../gombit, not the release: drop it"},
+			},
+			[]string{"  replace github.com/gombit-dev/gombit v0.8.0 => ../gombit: drop it\n"},
+		},
+		// The exact replace of v0.6.1 shadows the local one of every version
+		// today; once the require moves, that one would apply.
+		"a replace of every version an exact one shadows is dropped": {
+			planGoMod + "replace github.com/gombit-dev/gombit v0.6.1 => github.com/gombit-dev/gombit v0.6.1\nreplace github.com/gombit-dev/gombit => ../every\n",
+			[]upgrade.DependencyChange{
+				require("v0.6.1"),
+				{Module: fw, Directive: "replace", From: "../every", Note: "it replaces every version of the framework, so once the require is at v0.8.0 the build would use ../every, not the release: drop it"},
+				{Module: fw, Directive: "replace", ForVersion: "v0.6.1", From: fw + " v0.6.1", Note: "it replaces v0.6.1 only, so it stops applying once the require moves: drop it"},
+			},
+			[]string{"  replace github.com/gombit-dev/gombit => ../every: drop it\n"},
+		},
+		// Dropping the exact replace of the target exposes the one of every
+		// version, which moves.
+		"dropping an exact replace exposes one of every version": {
+			planGoMod + "replace github.com/gombit-dev/gombit v0.8.0 => ../next\nreplace github.com/gombit-dev/gombit => github.com/gombit-dev/gombit v0.6.1\n",
+			[]upgrade.DependencyChange{
+				require("v0.6.1"),
+				{Module: fw, Directive: "replace", ForVersion: "v0.8.0", From: "../next", Note: "it replaces v0.8.0, so once the require is at v0.8.0 the build would use ../next, not the release: drop it"},
+				{Module: fw, Directive: "replace", From: fw + " v0.6.1", To: "v0.8.0", Note: "it replaces every version of the framework, so it would keep the build on v0.6.1 (move it, or drop it)"},
+			},
+			nil,
+		},
+		"a replace that already names the target changes nothing": {
+			planGoMod + "replace github.com/gombit-dev/gombit v0.8.0 => github.com/gombit-dev/gombit v0.8.0\n",
+			[]upgrade.DependencyChange{require("v0.6.1")},
+			nil,
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			p, err := upgrade.PlanUpgrade(app(t, require+tc.replace, ""), m, "v0.8.0")
+			p, err := upgrade.PlanUpgrade(app(t, tc.goMod, ""), m, "v0.8.0")
 			if err != nil {
 				t.Fatal(err)
 			}
-			if p.Current != "v0.6.1" || len(p.Dependencies) != len(tc.want) {
-				t.Fatalf("plan from %s: Dependencies = %+v; want %+v", p.Current, p.Dependencies, tc.want)
+			if len(p.Dependencies) != len(tc.want) {
+				t.Fatalf("Dependencies = %+v; want %+v", p.Dependencies, tc.want)
 			}
 			for i := range tc.want {
 				if p.Dependencies[i] != tc.want[i] {
@@ -246,8 +287,13 @@ func TestPlanUpgradeSelfReplace(t *testing.T) {
 				}
 			}
 			var out strings.Builder
-			if err := p.Render(&out); err != nil || !strings.Contains(out.String(), tc.render) {
-				t.Fatalf("Render = %q, %v; want it to contain %q", out.String(), err, tc.render)
+			if err := p.Render(&out); err != nil {
+				t.Fatal(err)
+			}
+			for _, want := range tc.render {
+				if !strings.Contains(out.String(), want) {
+					t.Fatalf("Render lacks %q:\n%s", want, out.String())
+				}
 			}
 		})
 	}

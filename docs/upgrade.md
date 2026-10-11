@@ -52,12 +52,19 @@ It plans from the [baseline](#the-baseline) and the
 
 - **Target:** `--to` selects it; by default, the newest release this
   `gombit` knows.
-- **Dependency changes:** the go.mod directives about the framework that
-  change: the `require`, and a `replace` of the framework by the framework
-  module itself, which decides the build too. One that replaces every
-  version keeps pinning the build when the require moves, so it moves as
-  well; one that replaces only the required version stops applying, so the
-  plan says to drop it.
+- **Dependency changes:** every go.mod directive about the framework that
+  must change for the upgraded build to be the target release. The
+  `require` moves. Then every `replace` of the framework, active today or
+  not, is resolved at the target as the go command would once the require
+  has moved, and whatever would decide that build without being the target
+  release is reported:
+  - a replace of every version by the framework module would keep pinning
+    the build, so it moves to the target;
+  - a dormant replace of the target version itself, or a replace of every
+    version that an exact replace shadows today (a local checkout, a fork),
+    would start to apply, so the plan says to drop it;
+  - a replace of only today's required version stops applying, so it is
+    dropped as dead.
 - **Automatic changes:** only those the application needs (each automatic
   action can say whether an app needs it; recording the baseline is not
   needed once it is recorded).
