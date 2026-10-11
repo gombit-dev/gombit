@@ -114,11 +114,11 @@ func TestDetectFrameworkReplaces(t *testing.T) {
 		// version, in either order.
 		"exact version replace first": {
 			"replace github.com/gombit-dev/gombit v0.8.2 => ../exact\nreplace github.com/gombit-dev/gombit => ../wildcard\n",
-			upgrade.Framework{Module: fw, Required: "v0.8.2", Replace: &upgrade.Replacement{Path: "../exact"}, Local: true},
+			upgrade.Framework{Module: fw, Required: "v0.8.2", Replace: &upgrade.Replacement{Path: "../exact", ForVersion: "v0.8.2"}, Local: true},
 		},
 		"exact version replace last": {
 			"replace github.com/gombit-dev/gombit => ../wildcard\nreplace github.com/gombit-dev/gombit v0.8.2 => ../exact\n",
-			upgrade.Framework{Module: fw, Required: "v0.8.2", Replace: &upgrade.Replacement{Path: "../exact"}, Local: true},
+			upgrade.Framework{Module: fw, Required: "v0.8.2", Replace: &upgrade.Replacement{Path: "../exact", ForVersion: "v0.8.2"}, Local: true},
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

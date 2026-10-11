@@ -304,6 +304,19 @@ version.
     checks every issue the changelog's Unreleased section links against the
     manifest ([docs/releasing.md](docs/releasing.md))
     ([#342](https://github.com/gombit-dev/gombit/issues/342)).
+- `gombit upgrade --dry-run [--to vX.Y.Z] [--dir] [--json]` (UPGRADE-3) plans
+  upgrading an application to a framework release, from its baseline and the
+  compatibility manifest, and writes nothing: the current and target
+  versions, every go.mod directive that must change for the upgraded build
+  to be the target release (the require, and each replace that would decide
+  that build, active today or dormant, resolved at the target), the automatic
+  changes the app needs (an action can report it is not needed), every
+  manual action with what to do, the breaking changes the app faces and the
+  informational ones. A version the manifest does not
+  list, a downgrade, or a baseline that names no framework release fails
+  with the reason. It never prompts, so it runs in CI. `upgrade.PlanUpgrade`
+  is the API; `upgrade.Action` gains a read-only `Check`
+  ([#343](https://github.com/gombit-dev/gombit/issues/343)).
 
 ### Changed
 
@@ -343,6 +356,21 @@ version.
   as for a plain string or `uuid` field
   ([#452](https://github.com/gombit-dev/gombit/issues/452)).
 
+- CI rebuilds the embedded admin SPA and fails when the committed
+  `internal/adminui/dist` differs from a fresh build of `internal/adminui/src`.
+  Nothing enforced the rebuild, so source changes (the #250 CSRF fix among
+  them) were missing from released binaries for weeks. `dist/` was brought
+  up to date by STORAGE-8 (released in v0.7.0) and matches its source; the
+  release workflow refuses to tag a stale one too
+  ([#451](https://github.com/gombit-dev/gombit/issues/451)).
+- An admin `PATCH` writes only the columns the request (or a model hook)
+  changed. It loaded the row and saved the whole snapshot back, so it reverted
+  another request's change to a column it never mentioned, re-inserted a row
+  deleted meanwhile (now a 404), and re-wrote `has_many` children, pulling a
+  moved child back and recreating a deleted one (associations are no longer
+  written). The response is the row as stored. `database.ScopeEdit` narrows
+  any `Select("*")` update of the scoped row to its changed columns
+  ([#450](https://github.com/gombit-dev/gombit/issues/450)).
 - A float a write through a model sets to `+Inf`, `-Inf` or `NaN`, or beyond
   a `float32` field's range, is a 422 naming the field on every driver, the
   admin's writes included (`"Inf"`, `"NaN"`, a `float32` overflow). It was stored on PostgreSQL and SQLite and a 500 on

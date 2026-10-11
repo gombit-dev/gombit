@@ -71,7 +71,9 @@ apps), shown and recorded by `gombit upgrade baseline` (UPGRADE-1), and the
 compatibility manifest `upgrade/manifest.yaml` (every release's changes,
 classified manual/automatic/informational; `Manifest.Path` refuses unlisted
 versions), the source of `gombit upgrade notes`, `docs/upgrade-notes.md` and
-the release body (UPGRADE-2). The other batteries
+the release body (UPGRADE-2), and `gombit upgrade --dry-run`, which plans an
+upgrade to a target release from both and writes nothing
+(`upgrade.PlanUpgrade`; UPGRADE-3). The other batteries
 (events, scheduler, mail, gRPC, multi-tenancy, i18n) are not here yet.
 The **CHAOS-0** resilience suite is in: `internal/faulttest` (deterministic
 fault injection: a faulting `database/sql` driver, a scripted HTTP

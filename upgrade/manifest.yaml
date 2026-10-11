@@ -28,56 +28,8 @@ releases:
   - version: v0.6.1
     # The first release the manifest covers: upgrades are described from here.
 
-  - version: unreleased
+  - version: v0.7.0
     changes:
-      - id: admin-relation-string-keys
-        kind: informational
-        area: behavior
-        summary: "An admin relation field on a string key stores the string sent, byte for byte; a JSON number for it is a 422."
-        details: |
-          A numeric-looking key (`"123"`, `"007"`) was stored corrupted. A
-          client that sends a string key as a JSON number now gets a 422 on the
-          field, as for any string field: send it as a string. A uuid key must
-          be the canonical form, as a `uuid` field (no braces, with hyphens).
-          An integer key still accepts a number or its digits as a string.
-        refs: [452]
-
-      - id: floats-must-be-finite
-        kind: manual
-        breaking: true
-        area: behavior
-        summary: "Every write refuses a float that is not finite (`+Inf`, `-Inf`, `NaN`), or beyond a `float32` field's range, with a 422 on that field."
-        details: |
-          It was stored on PostgreSQL and SQLite (and a 500 on MySQL). Code
-          that stored a non-finite float on purpose in a column it never
-          returns as JSON now gets a `*database.ValidationError`: store NULL
-          (a pointer or `sql.NullFloat64`) instead. A row that already stores
-          one keeps working for partial updates of other columns, but a `Save`
-          of it (and an admin edit) is a 422 on that field until the column is
-          set to a finite value or NULL (docs/database.md § Floats).
-        refs: [449]
-
-      - id: reserved-upgrade-command
-        kind: manual
-        breaking: true
-        area: cli
-        summary: "`upgrade` is a framework command, and a reserved management-command name."
-        details: |
-          An app that registers its own `upgrade` command loses it: the
-          framework's is added first, and Cobra resolves to it. Rename the
-          app's command (and its `internal/<pkg>/commands.go` registration).
-        refs: [341]
-
-      - id: record-upgrade-baseline
-        kind: automatic
-        action: record-baseline
-        area: scaffold
-        summary: "`gombit new` records the app's upgrade baseline in a `gombit:` block of `gombit.yaml`."
-        details: |
-          An app generated before records none, and is detected as scaffold
-          version 0. `gombit upgrade baseline --write` records it.
-        refs: [341]
-
       - id: admin-composite-primary-keys
         kind: manual
         breaking: true
@@ -136,62 +88,11 @@ releases:
         summary: "Requests whose handler panics are counted in `gombit_http_requests_total` (as 500, or the status already sent)."
         refs: [432]
 
-      - id: contract-app-fork-unresolved
-        kind: manual
-        breaking: true
-        area: cli
-        summary: "`gombit contract app` refuses a framework replaced by a fork, and a `go.mod` the go command refuses."
-        details: |
-          A `replace` of `github.com/gombit-dev/gombit` by another module used
-          to report the fork's version as the framework's; it is now
-          unresolved, like a local path. A `go.mod` requiring the framework
-          twice, or replacing it twice with different targets, is an error.
-          The replace that counts is the one the go command applies to the
-          required version (an exact-version replace over an every-version
-          one; a replace of another version does not apply), so a go.mod
-          carrying several replaces can report a different version, or
-          resolve where it used to fail. Build the contract against a
-          framework release.
-        refs: [341]
-
-      - id: make-resource-windows-posix-rename
-        kind: informational
-        area: cli
-        summary: "On Windows, `gombit make resource` replaces files with a POSIX-semantics rename, so a file open with delete sharing no longer blocks it."
-        details: |
-          On a volume that refuses that rename (FAT or exFAT, a network share
-          or mapped drive, a `\\wsl$` path, or Windows before 10 1709) it keeps
-          its previous plain rename and its rollback.
-        refs: [341]
-
-      - id: d10-not-found-and-panics
-        kind: informational
-        area: behavior
-        summary: "Unknown paths and recovered panics answer with the D10 error envelope (`not_found` 404, `internal` 500)."
-        details: |
-          A 404 used to be Gin's plain-text body (or empty under an embedded
-          frontend) and a panic an empty 500. A client matching those bodies
-          sees JSON now; the documented error contract was already D10, so
-          this is not marked breaking.
-        refs: [438]
-
-      - id: unencodable-response-500
-        kind: informational
-        area: behavior
-        summary: "A response that cannot be encoded as JSON is a D10 500 instead of a 200 with a plain-text body."
-        refs: [442]
-
       - id: embedded-html-browser-policy
         kind: informational
         area: security
         summary: "Every HTML document of an embedded frontend gets the SPA browser security policy, not only the root `index.html`."
         refs: [434]
-
-      - id: memory-cache-increment-overflow
-        kind: informational
-        area: behavior
-        summary: "The in-memory cache's `Increment` refuses to overflow, and a stored `nil`, as Redis does."
-        refs: [437]
 
       - id: app-runs-once
         kind: manual
@@ -216,12 +117,6 @@ releases:
           every peer lets any client spoof its forwarded IP. List only the
           addresses of the proxies you control.
         refs: [500]
-
-      - id: cache-janitor-non-positive
-        kind: informational
-        area: behavior
-        summary: "`cache.WithJanitor` with a zero or negative interval means no janitor, instead of crashing the process."
-        refs: [436]
 
       - id: jobs-crash-redelivery-max-attempts
         kind: informational
@@ -248,9 +143,50 @@ releases:
         details: |
           Go's minimal version selection moves an app's build to them with the
           framework upgrade. The framework also newly requires the AWS SDK
-          for Go v2 (the S3 storage driver), `golang.org/x/mod`,
-          `golang.org/x/sys` and `gopkg.in/yaml.v3`.
+          for Go v2 (the S3 storage driver) and `golang.org/x/sys` directly.
         refs: [536, 540]
+
+      - id: object-storage
+        kind: informational
+        area: schema
+        summary: "Object storage (`app.Storage()`, `GOMBIT_STORAGE_*`) and storage-backed `file` / `image` model fields."
+        details: |
+          File fields record ownership in a framework table, `storage_claims`,
+          which new apps' migrations create. An existing app that adopts file
+          fields adds the table to its migrations (`claims.Models()`; see
+          docs/storage.md, "Setup").
+        refs: [279, 323, 324, 325, 326, 327, 328, 329, 530]
+
+  - version: v0.7.1
+    changes:
+      - id: d10-not-found-and-panics
+        kind: informational
+        area: behavior
+        summary: "Unknown paths and recovered panics answer with the D10 error envelope (`not_found` 404, `internal` 500)."
+        details: |
+          A 404 used to be Gin's plain-text body (or empty under an embedded
+          frontend) and a panic an empty 500. A client matching those bodies
+          sees JSON now; the documented error contract was already D10, so
+          this is not marked breaking.
+        refs: [438]
+
+      - id: unencodable-response-500
+        kind: informational
+        area: behavior
+        summary: "A response that cannot be encoded as JSON is a D10 500 instead of a 200 with a plain-text body."
+        refs: [442]
+
+      - id: memory-cache-increment-overflow
+        kind: informational
+        area: behavior
+        summary: "The in-memory cache's `Increment` refuses to overflow, and a stored `nil`, as Redis does."
+        refs: [437]
+
+      - id: cache-janitor-non-positive
+        kind: informational
+        area: behavior
+        summary: "`cache.WithJanitor` with a zero or negative interval means no janitor, instead of crashing the process."
+        refs: [436]
 
       - id: decimals-never-changed-on-write
         kind: manual
@@ -279,6 +215,114 @@ releases:
           through `Update`, a partial `Updates` and the admin; a generic `Save`
           of one is a 422 until the column is cleaned up (docs/database.md).
         refs: [443]
+
+      - id: database-logging-through-app-logger
+        kind: informational
+        area: security
+        summary: "Database logging goes through the app's logger, at its level and sink, and never carries parameter values."
+        details: |
+          GORM's default logger wrote to stdout in its own format and inlined
+          parameter values into failed statements (a password hash, an
+          email). Statements and 4xx failures now log at `debug`, slow
+          statements at `warn`, other failures at `error`. A GORM logger the
+          app sets on its database is kept.
+        refs: [439]
+
+      - id: page-offset-saturates
+        kind: informational
+        area: behavior
+        summary: "A list page so far out that its offset overflows is empty, instead of returning the first page's rows."
+        refs: [441]
+
+  - version: unreleased
+    changes:
+      - id: admin-relation-string-keys
+        kind: informational
+        area: behavior
+        summary: "An admin relation field on a string key stores the string sent, byte for byte; a JSON number for it is a 422."
+        details: |
+          A numeric-looking key (`"123"`, `"007"`) was stored corrupted. A
+          client that sends a string key as a JSON number now gets a 422 on the
+          field, as for any string field: send it as a string. A uuid key must
+          be the canonical form, as a `uuid` field (no braces, with hyphens).
+          An integer key still accepts a number or its digits as a string.
+        refs: [452]
+
+      - id: admin-patch-writes-changes-only
+        kind: informational
+        area: behavior
+        summary: "An admin PATCH writes only the columns it (or a model hook) changed, never associations, and answers 404 for a row deleted meanwhile."
+        details: |
+          It used to save the whole loaded row: a concurrent change to another
+          column was reverted, a deleted row came back, and `has_many`
+          children were written back. `database.ScopeEdit` now narrows any
+          `Select("*")` update of the scoped row the same way.
+        refs: [450]
+
+      - id: floats-must-be-finite
+        kind: manual
+        breaking: true
+        area: behavior
+        summary: "Every write refuses a float that is not finite (`+Inf`, `-Inf`, `NaN`), or beyond a `float32` field's range, with a 422 on that field."
+        details: |
+          It was stored on PostgreSQL and SQLite (and a 500 on MySQL). Code
+          that stored a non-finite float on purpose in a column it never
+          returns as JSON now gets a `*database.ValidationError`: store NULL
+          (a pointer or `sql.NullFloat64`) instead. A row that already stores
+          one keeps working for partial updates of other columns and for an
+          admin edit that leaves the column alone, but a generic `Save` of it
+          is a 422 on that field until the column is set to a finite value or
+          NULL (docs/database.md § Floats).
+        refs: [449]
+
+      - id: reserved-upgrade-command
+        kind: manual
+        breaking: true
+        area: cli
+        summary: "`upgrade` is a framework command, and a reserved management-command name."
+        details: |
+          An app that registers its own `upgrade` command loses it: the
+          framework's is added first, and Cobra resolves to it. Rename the
+          app's command (and its `internal/<pkg>/commands.go` registration).
+        refs: [341]
+
+      - id: record-upgrade-baseline
+        kind: automatic
+        action: record-baseline
+        area: scaffold
+        summary: "`gombit new` records the app's upgrade baseline in a `gombit:` block of `gombit.yaml`."
+        details: |
+          An app generated before records none, and is detected as scaffold
+          version 0. `gombit upgrade baseline --write` records it.
+        refs: [341]
+
+      - id: contract-app-fork-unresolved
+        kind: manual
+        breaking: true
+        area: cli
+        summary: "`gombit contract app` refuses a framework replaced by a fork, and a `go.mod` the go command refuses."
+        details: |
+          A `replace` of `github.com/gombit-dev/gombit` by another module used
+          to report the fork's version as the framework's; it is now
+          unresolved, like a local path. A `go.mod` requiring the framework
+          twice, or replacing it twice with different targets, is an error.
+          The replace that counts is the one the go command applies to the
+          required version (an exact-version replace over an every-version
+          one; a replace of another version does not apply), so a go.mod
+          carrying several replaces can report a different version, or
+          resolve where it used to fail. Build the contract against a
+          framework release.
+        refs: [341]
+
+      - id: make-resource-windows-posix-rename
+        kind: informational
+        area: cli
+        summary: "On Windows, `gombit make resource` replaces files with a POSIX-semantics rename, so a file open with delete sharing no longer blocks it."
+        details: |
+          On a volume that refuses that rename (FAT or exFAT, a network share
+          or mapped drive, a `\\wsl$` path, or Windows before 10 1709) it keeps
+          its previous plain rename and its rollback.
+        refs: [341]
 
       - id: text-storable-on-every-driver
         kind: manual
@@ -341,32 +385,3 @@ releases:
           1265, 1292, 1366, 1406 (`database.IsDataException`). A uint list
           filter over `MaxInt64` is a 422 too.
         refs: [444]
-
-      - id: database-logging-through-app-logger
-        kind: informational
-        area: security
-        summary: "Database logging goes through the app's logger, at its level and sink, and never carries parameter values."
-        details: |
-          GORM's default logger wrote to stdout in its own format and inlined
-          parameter values into failed statements (a password hash, an
-          email). Statements and 4xx failures now log at `debug`, slow
-          statements at `warn`, other failures at `error`. A GORM logger the
-          app sets on its database is kept.
-        refs: [439]
-
-      - id: page-offset-saturates
-        kind: informational
-        area: behavior
-        summary: "A list page so far out that its offset overflows is empty, instead of returning the first page's rows."
-        refs: [441]
-
-      - id: object-storage
-        kind: informational
-        area: schema
-        summary: "Object storage (`app.Storage()`, `GOMBIT_STORAGE_*`) and storage-backed `file` / `image` model fields."
-        details: |
-          File fields record ownership in a framework table, `storage_claims`,
-          which new apps' migrations create. An existing app that adopts file
-          fields adds the table to its migrations (`claims.Models()`; see
-          docs/storage.md, "Setup").
-        refs: [279, 323, 324, 325, 326, 327, 328, 329, 530]
