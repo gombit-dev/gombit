@@ -34,6 +34,11 @@ type Replacement struct {
 	Path string `json:"path"`
 	// Version is the replacement module's version; empty for a directory.
 	Version string `json:"version,omitempty"`
+	// ForVersion is the framework version the replace applies to (its left
+	// side's version), or empty when it applies to every version. A replace
+	// of every version keeps pinning the build when the require moves; one of
+	// the required version stops applying.
+	ForVersion string `json:"for_version,omitempty"`
 }
 
 // Local reports whether the replacement is a local directory.
@@ -98,7 +103,7 @@ func Parse(path string, data []byte) (Declaration, error) {
 		return Declaration{}, fmt.Errorf("%s: %w", path, err)
 	}
 	if r != nil {
-		d.Replace = &Replacement{Path: r.New.Path, Version: r.New.Version}
+		d.Replace = &Replacement{Path: r.New.Path, Version: r.New.Version, ForVersion: r.Old.Version}
 	}
 	return d, nil
 }

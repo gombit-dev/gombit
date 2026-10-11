@@ -98,7 +98,7 @@ func TestUpgradeRefuses(t *testing.T) {
 	if _, err := runUpgradeCLI(t, "baseline", "--dir", t.TempDir()); err == nil || !strings.Contains(err.Error(), "not a Gombit application") {
 		t.Fatalf("baseline outside an app = %v", err)
 	}
-	if _, err := runUpgradeCLI(t); err == nil || !strings.Contains(err.Error(), "subcommand is required") {
+	if _, err := runUpgradeCLI(t); err == nil || !strings.Contains(err.Error(), "--dry-run or a subcommand is required") {
 		t.Fatalf("upgrade without a subcommand = %v", err)
 	}
 }
@@ -221,5 +221,50 @@ func TestUpgradeNotesReleaseGate(t *testing.T) {
 	}
 	if _, err := runUpgradeCLI(t, "notes", "--release-gate"); err == nil || !strings.Contains(err.Error(), "--release-gate needs --release") {
 		t.Fatalf("notes --release-gate = %v", err)
+	}
+}
+
+// TestUpgradeDryRun: gombit upgrade --dry-run prints the plan from the
+// embedded manifest (text or JSON), writes nothing, needs no input, and
+// refuses an unlisted target; applying an upgrade is not offered yet.
+func TestUpgradeDryRun(t *testing.T) {
+	m, err := upgrade.LoadManifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	latest := m.Latest()
+	goMod := "module example.com/demo\n\ngo 1.26\n\nrequire github.com/gombit-dev/gombit " + latest + "\n"
+	dir := t.TempDir()
+	t.Setenv("GOWORK", "off")
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(goMod), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := runUpgradeCLI(t, "--dry-run", "--dir", dir)
+	if err != nil || !strings.Contains(out, "Target:  "+latest) || !strings.Contains(out, "nothing to upgrade") {
+		t.Fatalf("upgrade --dry-run = %q, %v", out, err)
+	}
+	out, err = runUpgradeCLI(t, "--dry-run", "--dir", dir, "--to", latest, "--json")
+	var plan upgrade.Plan
+	if err != nil || json.Unmarshal([]byte(out), &plan) != nil || plan.Current != latest || plan.Target != latest || plan.Dependencies == nil {
+		t.Fatalf("upgrade --dry-run --json = %s, %v", out, err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("the dry run left %d entries in the app (want only go.mod): %v", len(entries), err)
+	}
+
+	for _, tc := range []struct {
+		args []string
+		msg  string
+	}{
+		{[]string{"--dry-run", "--dir", dir, "--to", "v99.0.0"}, "upgrade the gombit CLI"},
+		{[]string{"--to", latest, "--dir", dir}, "applying an upgrade is not supported yet"},
+		{[]string{"--dry-run", "--dir", t.TempDir()}, "not a Gombit application"},
+		{[]string{"nonsense"}, `unknown subcommand "nonsense"`},
+	} {
+		if _, err := runUpgradeCLI(t, tc.args...); err == nil || !strings.Contains(err.Error(), tc.msg) {
+			t.Errorf("upgrade %v = %v; want an error mentioning %q", tc.args, err, tc.msg)
+		}
 	}
 }

@@ -15,17 +15,17 @@ func TestParse(t *testing.T) {
 	}{
 		"require only":  {require, Declaration{Required: "v0.8.2"}},
 		"local replace": {require + "replace github.com/gombit-dev/gombit => ../gombit\n", Declaration{"v0.8.2", &Replacement{Path: "../gombit"}}},
-		"fork replace":  {require + "replace github.com/gombit-dev/gombit => github.com/me/gombit v0.8.3-fork\n", Declaration{"v0.8.2", &Replacement{"github.com/me/gombit", "v0.8.3-fork"}}},
+		"fork replace":  {require + "replace github.com/gombit-dev/gombit => github.com/me/gombit v0.8.3-fork\n", Declaration{"v0.8.2", &Replacement{Path: "github.com/me/gombit", Version: "v0.8.3-fork"}}},
 		// The go command applies a replace of the required version only, and
 		// prefers it to a replace of every version, in either order.
 		"replace of another version": {require + "replace github.com/gombit-dev/gombit v0.7.0 => github.com/fork/gombit v1.2.3\n", Declaration{Required: "v0.8.2"}},
 		"exact over wildcard, wildcard first": {
 			require + "replace github.com/gombit-dev/gombit => ../wildcard\nreplace github.com/gombit-dev/gombit v0.8.2 => github.com/fork/gombit v1.2.3\n",
-			Declaration{"v0.8.2", &Replacement{"github.com/fork/gombit", "v1.2.3"}},
+			Declaration{"v0.8.2", &Replacement{Path: "github.com/fork/gombit", Version: "v1.2.3", ForVersion: "v0.8.2"}},
 		},
 		"exact over wildcard, exact first": {
 			require + "replace (\n\tgithub.com/gombit-dev/gombit v0.8.2 => ../exact\n\tgithub.com/gombit-dev/gombit => ../wildcard\n)\n",
-			Declaration{"v0.8.2", &Replacement{Path: "../exact"}},
+			Declaration{"v0.8.2", &Replacement{Path: "../exact", ForVersion: "v0.8.2"}},
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -87,8 +87,8 @@ func TestRelease(t *testing.T) {
 		want string
 	}{
 		"required":          {Declaration{Required: "v0.8.2"}, "v0.8.2"},
-		"framework replace": {Declaration{"v0.8.2", &Replacement{ModulePath, "v0.9.0"}}, "v0.9.0"},
-		"fork":              {Declaration{"v0.8.2", &Replacement{"github.com/fork/gombit", "v1.2.3"}}, ""},
+		"framework replace": {Declaration{"v0.8.2", &Replacement{Path: ModulePath, Version: "v0.9.0"}}, "v0.9.0"},
+		"fork":              {Declaration{"v0.8.2", &Replacement{Path: "github.com/fork/gombit", Version: "v1.2.3"}}, ""},
 		"local":             {Declaration{"v0.8.2", &Replacement{Path: "../gombit"}}, ""},
 	} {
 		if got := tc.d.Release(); got != tc.want {

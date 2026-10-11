@@ -39,6 +39,7 @@ go run ./cmd/gombit --help
 | `gombit worker` | Run the app's background-job worker | JOBS-3 |
 | `gombit jobs …` | Inspect, retry, and delete failed jobs | JOBS-6 |
 | `gombit version` | Print version and build metadata | REL-4 |
+| `gombit upgrade --dry-run` | Plan an upgrade to a framework release, changing nothing | UPGRADE-3 |
 | `gombit upgrade baseline` | Show (or record) the app's upgrade baseline: framework and scaffold versions | UPGRADE-1 |
 | `gombit upgrade notes` | Print upgrade notes from the compatibility manifest | UPGRADE-2 |
 
@@ -853,6 +854,25 @@ config and `go.mod`, never inferred from the source tree. Writes JSON to stdout
 or `--out`; `--dir` selects the project directory. Fails loudly when the
 framework version is missing or replaced by a local checkout. See
 [app-contract.md](app-contract.md).
+
+## `gombit upgrade --dry-run`
+
+Plans upgrading the application to a framework release from the
+compatibility manifest built into this `gombit`, and changes nothing: the
+current and target versions, the dependency change, the automatic changes
+the app needs, every manual action with what to do, the breaking changes,
+and the informational ones. A version the manifest does not list, a
+downgrade, or an app whose baseline names no framework release (a `go.work`,
+a local checkout, a fork) fails with the reason. It never prompts, so it
+runs in CI. Applying an upgrade is not supported yet: `--to` without
+`--dry-run` refuses. See [upgrade.md](upgrade.md#planning-an-upgrade).
+
+| Flag | Meaning | Default |
+| --- | --- | --- |
+| `--dry-run` | Plan the upgrade and print it | off (required) |
+| `--to` | Target framework release | the newest release this CLI knows |
+| `--dir` | Application directory (`go.mod`, `gombit.yaml`) | `.` |
+| `--json` | Print the plan as JSON | off |
 
 ## `gombit upgrade baseline`
 
