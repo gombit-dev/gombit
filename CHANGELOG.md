@@ -329,11 +329,17 @@ version.
   ([#344](https://github.com/gombit-dev/gombit/issues/344)).
 - `gombit upgrade check [--dir] [--json]` (UPGRADE-5) reports every use, in
   the application, of a framework API whose doc comment has a `Deprecated:`
-  paragraph (the Go convention): file, line and column, the symbol, and what
-  to use instead. Uses are resolved from type information (`go/packages`,
-  `go/types`), every package and test included, so a matching name, a
-  comment or a string is never reported; an app that does not type-check is
-  an error with Go's diagnostics. It exits 1 when there is any use.
+  paragraph (the Go convention), whether a package, a function, a method, a
+  type, a constant, a variable, a struct field (named or embedded) or an
+  interface method: file, line and column, the symbol, and what to use
+  instead. Uses are resolved from type information (`go/packages`,
+  `go/types`), every package and test included, and matched to the
+  framework's declarations, loaded from source, by object identity
+  (`go/types/objectpath`); an import of a deprecated package and an element
+  of an unkeyed struct literal count too. A matching name, a comment or a
+  string is never reported; an app that does not type-check, or an object
+  that cannot be resolved, is an error, never a clean result. It exits 1
+  when there is any use.
   `upgrade.ScanDeprecated` is the API, and a test requires every
   `Deprecated:` paragraph in the framework to name its replacement. The
   framework now requires `golang.org/x/tools` directly

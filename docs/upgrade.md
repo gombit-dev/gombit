@@ -158,13 +158,23 @@ Deprecated framework APIs used: 1
   Go convention: a paragraph starting `Deprecated:` (the one `go doc`,
   gopls and pkg.go.dev show). Every such paragraph names its replacement; a
   test fails one that does not.
+- **What can be deprecated:** a package (its package doc), a function, a
+  method, a type, a constant, a variable, a struct field (named or embedded)
+  or an interface method, documented with a line or a block comment.
 - **How uses are found:** from type information, not text. Every package of
   the app, tests included, is loaded and type-checked (`go/packages`), and
-  each identifier is resolved to the object it denotes. So a local name
-  that happens to match, a comment or a string is never reported, while a
-  method call, a field, a composite literal key or an interface method is.
-  The app must type-check: one that does not is an error, with Go's
-  diagnostics, rather than a scan that misses uses.
+  so are the framework packages it imports, from source. A deprecated
+  declaration is tied to the object it defines, every use in the app to the
+  object it denotes, and the two meet by object identity (the object path
+  gopls uses), never by file positions. A use is a name resolving to such an
+  object (a call, a selector, a composite literal key, a dot-imported name),
+  an element of an unkeyed struct literal (`db.Options{"x", 0}` uses the
+  first field), or the import of a deprecated package. So a local name that
+  happens to match, a comment or a string is never reported.
+- **Never a false clean:** the app (and the framework packages it imports)
+  must type-check, and a framework object whose identity cannot be resolved
+  stops the scan; either is an error, with Go's diagnostics, rather than a
+  scan that misses uses.
 - **Output:** file, line and column, the symbol (`pkg.Name`,
   `pkg.Type.Field`, `(*pkg.Type).Method`) and the deprecation; `--json`
   prints them as a list. It exits 1 when there is any use, so a CI job can

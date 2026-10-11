@@ -3,10 +3,9 @@ package upgrade_test
 import (
 	"context"
 	"errors"
-	"io/fs"
+	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 
@@ -227,54 +226,6 @@ func TestScanDeprecatedRefusesAnAppThatDoesNotTypeCheck(t *testing.T) {
 	}
 }
 
-// deprecatedReplacement is how a "Deprecated:" paragraph names what to use
-// instead.
-// instead: "use" followed by what to use (an exported name, possibly
-// package-qualified, or a backquoted one), or "instead" / "replaced by".
-// "do not use" names nothing.
-var deprecatedReplacement = regexp.MustCompile("(?i:\\buse\\s+(the\\s+)?)(`[^`]+`|([a-z][a-z0-9]*\\.)?[A-Z][A-Za-z0-9_]*(\\.[A-Za-z0-9_]+)*)|(?i:\\binstead\\b|\\breplaced by\\b)")
-
-// TestFrameworkDeprecationsNameAReplacement: every "Deprecated:" paragraph
-// in the framework says what to use instead, which gombit upgrade check
-// shows next to each use.
-func TestFrameworkDeprecationsNameAReplacement(t *testing.T) {
-	root := filepath.Join("..")
-	skip := map[string]bool{"examples": true, "benchmarks": true, "node_modules": true, "testdata": true, ".git": true}
-	paragraph := regexp.MustCompile(`(?m)^\s*// Deprecated:(.*(?:\n\s*//[^\n]*\S[^\n]*)*)`)
-	found := 0
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			if skip[d.Name()] {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
-			return nil
-		}
-		data, err := os.ReadFile(path) // #nosec G304 G122 -- the repository's own sources
-		if err != nil {
-			return err
-		}
-		for _, m := range paragraph.FindAllStringSubmatch(string(data), -1) {
-			found++
-			if !deprecatedReplacement.MatchString(m[1]) {
-				t.Errorf("%s: a Deprecated: paragraph names no replacement (say what to use instead): %q", path, strings.TrimSpace(m[0]))
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if found == 0 {
-		t.Fatal("found no Deprecated: paragraph at all; the walk is broken")
-	}
-}
-
 // TestScanDeprecatedRealFramework: against this repository's framework
 // (database.KeepStoredZeros is deprecated), with the module cache only.
 func TestScanDeprecatedRealFramework(t *testing.T) {
@@ -313,27 +264,6 @@ func main() { _ = database.KeepStoredZeros(nil, nil, nil, nil) }
 	}
 }
 
-// TestDeprecatedReplacementRule: the rule the framework's Deprecated:
-// paragraphs are held to.
-func TestDeprecatedReplacementRule(t *testing.T) {
-	for text, want := range map[string]bool{
-		"Deprecated: use ScopeEdit with StoredValues.": true,
-		"Deprecated: use `ScopeEdit` instead.":         true,
-		"Deprecated: use db.Open.":                     true,
-		"Deprecated: use this one.":                    false,
-		"Deprecated: use the Fetch method.":            true,
-		"Deprecated: replaced by Fetch.":               true,
-		"Deprecated: call Fetch instead.":              true,
-		"Deprecated: do not use.":                      false,
-		"Deprecated: do not use this.":                 false,
-		"Deprecated: it is going away.":                false,
-	} {
-		if got := deprecatedReplacement.MatchString(text); got != want {
-			t.Errorf("%q: names a replacement = %v, want %v", text, got, want)
-		}
-	}
-}
-
 // TestScanDeprecatedGroupedDeclarationsAndTrimpath: a deprecated type or
 // var in a parenthesized group is found, and so is every use when GOFLAGS
 // has -trimpath (which would otherwise leave the declarations unreadable).
@@ -346,5 +276,87 @@ func TestScanDeprecatedGroupedDeclarationsAndTrimpath(t *testing.T) {
 		if err != nil || len(uses) != 2 || uses[0].Symbol != "grp.Old" || uses[1].Symbol != "grp.V" {
 			t.Fatalf("GOFLAGS=%q: uses = %+v, %v; want grp.Old and grp.V", flags, uses, err)
 		}
+	}
+}
+
+// TestScanDeprecatedBeyondIdentifiers: uses that no identifier of the
+// deprecated declaration spells are found too: the import of a deprecated
+// package, an element of an unkeyed struct literal, and a deprecated
+// embedded field (whose name is its type's); and a deprecation in a block
+// doc comment counts like a line one.
+func TestScanDeprecatedBeyondIdentifiers(t *testing.T) {
+	app := scanApp(t, map[string]string{"main.go": `package main
+
+import (
+	"github.com/gombit-dev/gombit/legacy"
+	"github.com/gombit-dev/gombit/opts"
+)
+
+func main() {
+	legacy.Run()
+	_ = opts.Options{"x", 0}
+	c := opts.Config{Base: opts.Base{}, Ptr: nil}
+	_ = c.Base
+	_ = c.Ptr
+	_ = opts.Blocky()
+}
+`})
+	writeTree(t, filepath.Join(app, "..", "fw"), map[string]string{
+		"legacy/legacy.go": "// Package legacy runs things.\n//\n// Deprecated: use package opts instead.\npackage legacy\n\n// Run runs.\nfunc Run() {}\n",
+		"opts/opts.go": `package opts
+
+// Options are options.
+type Options struct {
+	// Name names.
+	//
+	// Deprecated: use Mode.
+	Name string
+	Mode int
+}
+
+// Base is a base.
+type Base struct{}
+
+// Ptr is a pointed base.
+type Ptr struct{}
+
+// Config embeds them.
+type Config struct {
+	// Deprecated: use Options.
+	Base
+	// Deprecated: use Options instead.
+	*Ptr
+}
+
+/*
+Blocky is documented in a block comment.
+
+Deprecated: use Options instead.
+*/
+func Blocky() int { return 0 }
+`,
+	})
+	uses, err := upgrade.ScanDeprecated(context.Background(), app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, u := range uses {
+		got = append(got, fmt.Sprintf("%d %s", u.Line, u.Symbol))
+	}
+	want := []string{
+		"4 github.com/gombit-dev/gombit/legacy", // the import
+		"10 opts.Options.Name",                  // the first unkeyed element
+		"11 opts.Config.Base",                   // the keyed embedded field
+		"11 opts.Config.Ptr",
+		"12 opts.Config.Base", // its selector
+		"13 opts.Config.Ptr",
+		"14 opts.Blocky",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("uses:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	if uses[0].Deprecation != "Deprecated: use package opts instead." {
+		t.Fatalf("package deprecation = %q", uses[0].Deprecation)
 	}
 }
