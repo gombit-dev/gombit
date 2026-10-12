@@ -299,8 +299,8 @@ func (s *scan) add(p *packages.Package, pos token.Pos, pkgPath string, d declDoc
 	}
 	s.seen[key] = true
 	file := at.Filename
-	if rel, err := filepath.Rel(s.root, file); err == nil && !strings.HasPrefix(rel, "..") {
-		file = filepath.ToSlash(rel)
+	if rel, inside := relTo(s.root, file); inside {
+		file = rel
 	}
 	s.uses = append(s.uses, DeprecatedUse{
 		File: file, Line: at.Line, Column: at.Column,

@@ -42,6 +42,7 @@ go run ./cmd/gombit --help
 | `gombit upgrade --dry-run` | Plan an upgrade to a framework release, changing nothing | UPGRADE-3 |
 | `gombit upgrade --to` | Apply an upgrade's dependency changes (go.mod, go.sum) with the go command | UPGRADE-4 |
 | `gombit upgrade check` | Report uses of deprecated framework APIs (from type information); exits 1 when there are any | UPGRADE-5 |
+| `gombit upgrade fix` | Run the framework's codemods: print the patch (default), `--patch FILE`, or `--write` | UPGRADE-6 |
 | `gombit upgrade baseline` | Show (or record) the app's upgrade baseline: framework and scaffold versions | UPGRADE-1 |
 | `gombit upgrade notes` | Print upgrade notes from the compatibility manifest | UPGRADE-2 |
 
@@ -897,6 +898,27 @@ must type-check. It exits 1 when there is any use. See
 | --- | --- | --- |
 | `--dir` | Application directory | `.` |
 | `--json` | Print the uses as JSON | off |
+
+## `gombit upgrade fix`
+
+Runs the framework's **codemods**: mechanical rewrites of the app's uses of
+framework APIs that a release renamed, moved or reshaped. Uses are resolved
+from type information and rewritten in the syntax tree, never as text.
+Changed files are gofmt-formatted, and the rewrite is type-checked before
+it is proposed. By default it writes nothing: it prints the patch (a
+unified diff, for `git apply`) on stdout and a summary on stderr.
+`--write` rewrites the files atomically, and a second run changes nothing.
+A use a codemod cannot rewrite safely is left unchanged and listed, with
+the reason, and the command exits 1. This gombit ships no codemods yet. See
+[upgrade.md](upgrade.md#rewriting-with-codemods).
+
+| Flag | Meaning | Default |
+| --- | --- | --- |
+| `--dir` | Application directory | `.` |
+| `--only` | Run only these codemods (IDs, comma-separated) | all |
+| `--patch` | Write the patch to this file instead of stdout | — |
+| `--write` | Rewrite the files in place (not with `--patch`) | off |
+| `--json` | Print the result, patch included, as JSON | off |
 
 ## `gombit upgrade baseline`
 

@@ -40,7 +40,13 @@ func TestActionChecksWriteNothing(t *testing.T) {
 			t.Fatal(err)
 		}
 		before := files(t, dir)
-		for name, a := range actions {
+		all := maps.Clone(actions)
+		codemods["check-reads-only"] = Codemod{ID: "check-reads-only", Description: "d", Package: FrameworkModulePath + "/db", Symbol: "Old", Rename: "New"}
+		for id := range codemods {
+			all[codemodActionPrefix+id], _ = LookupAction(codemodActionPrefix + id)
+		}
+		delete(codemods, "check-reads-only")
+		for name, a := range all {
 			if a.Check == nil {
 				continue
 			}
@@ -74,4 +80,51 @@ func files(t *testing.T, dir string) map[string]string {
 		out[e.Name()] = info.ModTime().String() + "\x00" + string(data)
 	}
 	return out
+}
+
+// TestCodemodAction: a registered codemod is the action "codemod:<id>",
+// which an automatic manifest change can name; its Check and Apply run the
+// codemod (here on an app that does not use its API: nothing to do).
+func TestCodemodAction(t *testing.T) {
+	codemods["rename-x"] = Codemod{ID: "rename-x", Description: "db.Old is db.New", Package: FrameworkModulePath + "/db", Symbol: "Old", Rename: "New"}
+	defer delete(codemods, "rename-x")
+	a, ok := LookupAction("codemod:rename-x")
+	if !ok || !strings.Contains(a.Description, "gombit upgrade fix --only rename-x") {
+		t.Fatalf("LookupAction = %+v, %v", a, ok)
+	}
+	if _, ok := LookupAction("codemod:missing"); ok {
+		t.Fatal("LookupAction found an unregistered codemod")
+	}
+	data := "format: 1\nreleases:\n  - version: v0.1.0\n  - version: v0.2.0\n    changes:\n      - {id: x, kind: automatic, action: \"codemod:rename-x\", area: api, summary: s}\n"
+	if _, err := ParseManifest([]byte(data)); err != nil {
+		t.Fatalf("ParseManifest = %v", err)
+	}
+	t.Setenv("GOWORK", "off")
+	t.Setenv("GOFLAGS", "-mod=mod")
+	t.Setenv("GOPROXY", "off")
+	dir := t.TempDir()
+	for name, content := range map[string]string{"go.mod": "module example.com/x\n\ngo 1.21\n", "main.go": "package main\n\nfunc main() {}\n"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if needed, err := a.Check(dir, Baseline{}); err != nil || needed {
+		t.Fatalf("Check = %v, %v", needed, err)
+	}
+	if changed, err := a.Apply(dir); err != nil || changed {
+		t.Fatalf("Apply = %v, %v", changed, err)
+	}
+}
+
+// TestShippedCodemodsAreValid: every codemod this framework ships is well
+// formed and registered under its ID.
+func TestShippedCodemodsAreValid(t *testing.T) {
+	for id, c := range codemods {
+		if c.ID != id {
+			t.Errorf("codemod %s registered as %s", c.ID, id)
+		}
+		if err := c.validate(); err != nil {
+			t.Error(err)
+		}
+	}
 }

@@ -105,8 +105,16 @@ var actions = map[string]Action{
 }
 
 // LookupAction returns the automatic action name, and reports whether this
-// framework implements it (it has an Apply).
+// framework implements it (it has an Apply). "codemod:<id>" names the
+// codemod id (Codemods).
 func LookupAction(name string) (Action, bool) {
+	if id, ok := strings.CutPrefix(name, codemodActionPrefix); ok {
+		c, ok := codemods[id]
+		if !ok {
+			return Action{}, false
+		}
+		return c.action(), true
+	}
 	a, ok := actions[name]
 	return a, ok && a.Apply != nil
 }

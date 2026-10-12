@@ -79,7 +79,11 @@ framework's replaces, then `go get`), restoring go.mod and go.sum on any
 failure (`upgrade.ApplyDependencies`; UPGRADE-4), and `gombit upgrade check`,
 which reports uses of framework APIs whose doc has a `Deprecated:` paragraph,
 resolved from type information (`upgrade.ScanDeprecated`, `go/packages`;
-UPGRADE-5). The other batteries
+UPGRADE-5), and `gombit upgrade fix`, which runs codemods: rewrites of an
+app's uses of changed framework APIs, done on the syntax tree with type
+information, gofmt-formatted and type-checked again, printed as a patch
+unless `--write` (`upgrade.RunCodemods`, manifest action `codemod:<id>`;
+none ship yet; UPGRADE-6). The other batteries
 (events, scheduler, mail, gRPC, multi-tenancy, i18n) are not here yet.
 The **CHAOS-0** resilience suite is in: `internal/faulttest` (deterministic
 fault injection: a faulting `database/sql` driver, a scripted HTTP
