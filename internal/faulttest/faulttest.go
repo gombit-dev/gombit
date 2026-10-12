@@ -246,6 +246,9 @@ func (i *Injector) Failures() int {
 // injector, before its step runs: a test waits on it to know a blocked call
 // is in flight.
 func (i *Injector) Reached(n int) <-chan struct{} {
+	if i == nil {
+		return make(chan struct{})
+	}
 	if n < 1 {
 		panic(fmt.Sprintf("faulttest: Reached(%d): calls are numbered from 1", n))
 	}

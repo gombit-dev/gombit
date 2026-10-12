@@ -81,6 +81,11 @@ func TestANilInjectorLetsEverythingThrough(t *testing.T) {
 	if err := inj.Hit(context.Background()); err != nil || inj.Calls() != 0 || inj.Failures() != 0 {
 		t.Fatalf("nil injector: Hit = %v, Calls %d, Failures %d", err, inj.Calls(), inj.Failures())
 	}
+	select {
+	case <-inj.Reached(1):
+		t.Fatal("nil injector: Reached(1) is closed")
+	default:
+	}
 	inj.Reset()
 }
 
