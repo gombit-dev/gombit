@@ -277,9 +277,14 @@ proposed `upgrade.Fix` (`Patch`, `Write`, `Left`, `Unchecked`).
   identifier, the expression, the enclosing call, and `Import`/`Skip`
   helpers.
 
-Its target is `Package` and `Symbol`, where `Symbol` is `Name` or `Type.Name`
-for a method or field that `Type` declares itself. A member that `Type` only
-promotes is refused, naming the type that declares it.
+Its target is `Package` and `Symbol`, where `Symbol` is `Name` or
+`Type.Name` for a method or field that `Type`'s own declaration declares.
+
+A member that `Type` only reaches is refused, naming the type that
+declares it. That covers a member promoted from an embedded type or
+interface, and `Base`'s member when `Type` is defined from `Base`
+(`type Type Base`) or is an alias of it. Uses are matched by the
+declaration, so such a codemod would rewrite every use of `Base`'s member.
 
 ## The baseline
 

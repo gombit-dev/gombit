@@ -44,10 +44,12 @@ type Codemod struct {
 	// API it rewrites.
 	Package string
 	// Symbol is that API in Package: Name for a function, type, constant
-	// or variable, Type.Name for a method or a struct field that Type
-	// declares itself. A member Type only promotes (from an embedded type
-	// or interface) is refused: it is the declaring type's, and every use
-	// of it would be rewritten, however reached.
+	// or variable, Type.Name for a method or a struct field that Type's own
+	// declaration declares. A member Type only reaches is refused: one
+	// promoted from an embedded type or interface, or Base's when Type is
+	// defined from it (type Type Base) or an alias of it. It is the
+	// declaring type's, and every use of it would be rewritten, however
+	// reached.
 	Symbol string
 
 	// Rename renames each use to this name. With MoveTo, the empty Rename
@@ -746,6 +748,7 @@ type rewriter struct {
 	root   string
 	graph  map[string]*packages.Package // the framework packages loaded with the app
 	loaded map[string]*types.Package    // others, loaded on demand (nil: does not load)
+	owners map[*packages.Package]map[types.Object]string
 }
 
 // target is a codemod's API, resolved in the loaded graph.
@@ -775,18 +778,24 @@ func (r *rewriter) targets(mods []Codemod, withNew bool) (map[types.Object]*targ
 		if p == nil {
 			continue
 		}
-		obj, direct := lookupSymbol(p.Types, c.Symbol)
+		obj := lookupSymbol(p.Types, c.Symbol)
 		if obj == nil {
 			continue
 		}
-		if !direct {
-			owner := "an embedded type"
-			if obj.Pkg() != nil {
-				if recv := declaringType(obj); recv != "" {
-					owner = recv
-				}
+		if typ, _, isMember := strings.Cut(c.Symbol, "."); isMember {
+			if r.owners == nil {
+				r.owners = map[*packages.Package]map[types.Object]string{}
 			}
-			return nil, fmt.Errorf("upgrade: codemod %s: %s.%s is not declared by %s but promoted from %s; name the type that declares it", c.ID, c.Package, c.Symbol, strings.Split(c.Symbol, ".")[0], owner)
+			if r.owners[p] == nil {
+				r.owners[p] = owners(p)
+			}
+			if owner := r.owners[p][obj]; owner != typ {
+				by := "an unnamed type"
+				if owner != "" {
+					by = c.Package + "." + owner
+				}
+				return nil, fmt.Errorf("upgrade: codemod %s: %s.%s is declared by %s, not %s (promoted through it, or %s is defined from or an alias of that type); name the type that declares it", c.ID, c.Package, c.Symbol, by, typ, typ)
+			}
 		}
 		t := &target{mod: c, obj: obj}
 		parts := strings.Split(c.Symbol, ".")
@@ -804,7 +813,7 @@ func (r *rewriter) targets(mods []Codemod, withNew bool) (map[types.Object]*targ
 				newSymbol = parts[0] + "." + t.newName
 			}
 			if np := r.types(t.newPkg); np != nil {
-				t.newObj, _ = lookupSymbol(np, newSymbol)
+				t.newObj = lookupSymbol(np, newSymbol)
 			}
 			if t.newObj == nil {
 				t.missing = fmt.Sprintf("%s.%s does not exist in the framework version the app builds against: upgrade it first (gombit upgrade --to)", t.newPkg, newSymbol)
@@ -815,68 +824,88 @@ func (r *rewriter) targets(mods []Codemod, withNew bool) (map[types.Object]*targ
 	return out, nil
 }
 
-// declaringType names the type declaring a method or field: a method's
-// receiver type, or the struct type holding a field (when it is named).
-func declaringType(obj types.Object) string {
-	if fn, ok := obj.(*types.Func); ok {
-		if sig, ok := fn.Type().(*types.Signature); ok && sig.Recv() != nil {
-			t := sig.Recv().Type()
-			if ptr, ok := t.(*types.Pointer); ok {
-				t = ptr.Elem()
-			}
-			if named, ok := t.(*types.Named); ok {
-				return named.Obj().Pkg().Path() + "." + named.Obj().Name()
-			}
-		}
-		return ""
+// lookupSymbol is Name or Type.Name in pkg, or nil: for Type.Name, the
+// member a selector Type.Name reaches (declared by Type, or not).
+func lookupSymbol(pkg *types.Package, symbol string) types.Object {
+	parts := strings.Split(symbol, ".")
+	obj := pkg.Scope().Lookup(parts[0])
+	if obj == nil || len(parts) == 1 {
+		return obj
 	}
-	if v, ok := obj.(*types.Var); ok && v.IsField() && v.Pkg() != nil {
-		scope := v.Pkg().Scope()
-		for _, name := range scope.Names() {
-			tn, ok := scope.Lookup(name).(*types.TypeName)
-			if !ok {
-				continue
-			}
-			if st, ok := tn.Type().Underlying().(*types.Struct); ok {
-				for i := 0; i < st.NumFields(); i++ {
-					if st.Field(i) == v {
-						return v.Pkg().Path() + "." + name
+	tn, ok := obj.(*types.TypeName)
+	if !ok {
+		return nil
+	}
+	member, _, _ := types.LookupFieldOrMethod(tn.Type(), true, pkg, parts[1])
+	if member == nil {
+		return nil
+	}
+	return origin(member)
+}
+
+// owners maps each member p declares (a struct field, named or embedded;
+// an interface method; a method) to the name of the type whose declaration
+// declares it, from the syntax: a field or an interface method to its
+// enclosing type spec, a method to its receiver's type. A type defined from
+// another (type Copy Base) or an alias of it (type A = Base) declares
+// nothing (its spec has no struct or interface of its own): Base's members
+// stay Base's.
+func owners(p *packages.Package) map[types.Object]string {
+	out := map[types.Object]string{}
+	def := func(id *ast.Ident, owner string) {
+		if id == nil {
+			return
+		}
+		if obj := p.TypesInfo.Defs[id]; obj != nil {
+			out[obj] = owner
+		}
+	}
+	for _, f := range p.Syntax {
+		for _, decl := range f.Decls {
+			switch decl := decl.(type) {
+			case *ast.FuncDecl:
+				if decl.Recv == nil || len(decl.Recv.List) == 0 {
+					continue
+				}
+				recv := decl.Recv.List[0].Type
+				if star, ok := recv.(*ast.StarExpr); ok {
+					recv = star.X
+				}
+				if id := embeddedName(recv); id != nil {
+					def(decl.Name, id.Name)
+				}
+			case *ast.GenDecl:
+				for _, spec := range decl.Specs {
+					ts, ok := spec.(*ast.TypeSpec)
+					if !ok {
+						continue
+					}
+					var fields *ast.FieldList
+					_, isStruct := ts.Type.(*ast.StructType)
+					switch t := ts.Type.(type) {
+					case *ast.StructType:
+						fields = t.Fields
+					case *ast.InterfaceType:
+						fields = t.Methods
+					default:
+						continue
+					}
+					for _, field := range fields.List {
+						if len(field.Names) == 0 {
+							if isStruct { // an embedded field; an embedded interface declares nothing
+								def(embeddedName(field.Type), ts.Name.Name)
+							}
+							continue
+						}
+						for _, name := range field.Names {
+							def(name, ts.Name.Name)
+						}
 					}
 				}
 			}
 		}
 	}
-	return ""
-}
-
-// lookupSymbol is Name or Type.Name in pkg, or nil, and for a member
-// whether Type declares it itself: a field or method promoted through an
-// embedded type, or a method of an embedded interface, is another type's
-// member, reachable through Type but not Type's.
-func lookupSymbol(pkg *types.Package, symbol string) (obj types.Object, direct bool) {
-	parts := strings.Split(symbol, ".")
-	obj = pkg.Scope().Lookup(parts[0])
-	if obj == nil || len(parts) == 1 {
-		return obj, true
-	}
-	tn, ok := obj.(*types.TypeName)
-	if !ok {
-		return nil, false
-	}
-	member, index, _ := types.LookupFieldOrMethod(tn.Type(), true, pkg, parts[1])
-	if member == nil {
-		return nil, false
-	}
-	direct = len(index) == 1
-	if iface, ok := tn.Type().Underlying().(*types.Interface); ok && direct {
-		direct = false
-		for i := 0; i < iface.NumExplicitMethods(); i++ {
-			if iface.ExplicitMethod(i) == member {
-				direct = true
-			}
-		}
-	}
-	return origin(member), direct
+	return out
 }
 
 // types is the framework package at path, from the graph or loaded on its

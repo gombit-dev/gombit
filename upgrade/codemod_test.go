@@ -100,6 +100,15 @@ type Loud interface {
 	Greeter
 	Shout()
 }
+
+// Copy is defined from Wide: it shares Wide's fields, declaring none.
+type Copy Wide
+
+// Same is an alias of Wide.
+type Same = Wide
+
+// Hi is defined from Greeter: it shares Greeter's method.
+type Hi Greeter
 `,
 	"store/store.go": `package store
 
@@ -979,13 +988,15 @@ func TestCodemodActionCoverage(t *testing.T) {
 	}
 }
 
-// TestRunCodemodsRefusesAPromotedTarget: a member target must be declared
-// by the type its Symbol names. Wrapper.Hello is Base's Hello, promoted:
-// matched by object, it would rewrite every use of Base.Hello, so the
-// codemod is refused, before any Rewrite runs, naming the declaring type.
-// The same for a promoted field and an embedded interface's method; the
-// declared member itself is a fine target.
-func TestRunCodemodsRefusesAPromotedTarget(t *testing.T) {
+// TestRunCodemodsRefusesAMemberTypeDoesNotDeclare: a member target must be
+// declared by the type its Symbol names, by its declaration. Matched by
+// object, a member reached through another type (Wrapper.Hello is Base's
+// promoted Hello; Copy.Old, from type Copy Wide, is Wide's field; an alias,
+// a type defined from an interface) would rewrite every use of the
+// declaring type's member, so the codemod is refused before any Rewrite
+// runs, naming the declaring type. The declared member itself is a fine
+// target, and matches its uses through every such type.
+func TestRunCodemodsRefusesAMemberTypeDoesNotDeclare(t *testing.T) {
 	const src = `package main
 
 import "github.com/gombit-dev/gombit/db"
@@ -994,8 +1005,13 @@ func main() {
 	db.Base{}.Hello()
 	db.Wrapper{}.Hello()
 	var g db.Loud
-	_ = g
+	var h db.Hi
+	_, _ = g, h
 	_ = db.Wide{}.New
+	_ = db.Wide{}.Old
+	_ = db.Copy{}.Old
+	_ = db.Same{}.Old
+	_ = db.Wrapper{}.Base
 }
 `
 	app := codemodApp(t, map[string]string{"main.go": src})
@@ -1008,22 +1024,28 @@ func main() {
 			}}
 	}
 	for symbol, declaredBy := range map[string]string{
-		"Wrapper.Hello": dbPath + ".Base",
-		"Wide.New":      dbPath + ".Inner",
-		"Loud.Hello":    dbPath + ".Greeter",
+		"Wrapper.Hello": "Base",
+		"Wide.New":      "Inner",
+		"Loud.Hello":    "Greeter",
+		"Hi.Hello":      "Greeter",
+		"Copy.Old":      "Wide",
+		"Same.Old":      "Wide",
 	} {
 		_, err := upgrade.RunCodemods(context.Background(), app, []upgrade.Codemod{probe(symbol)})
-		if err == nil || !strings.Contains(err.Error(), "promoted from "+declaredBy) {
-			t.Errorf("%s: RunCodemods = %v; want it refused as promoted from %s", symbol, err, declaredBy)
+		if want := "is declared by " + dbPath + "." + declaredBy + ", not "; err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: RunCodemods = %v; want it refused (%s)", symbol, err, want)
 		}
 	}
 	if len(seen) != 0 {
 		t.Fatalf("a refused codemod's Rewrite ran: %v", seen)
 	}
-	// Base.Hello is Base's own: both calls are its uses (one promoted).
-	fix, err := upgrade.RunCodemods(context.Background(), app, []upgrade.Codemod{probe("Base.Hello")})
-	if err != nil || len(seen) != 2 || len(fix.Left) != 2 {
-		t.Fatalf("Base.Hello: %v, seen %v, left %+v", err, seen, fix)
+	// The declaring types' own members: every use, however reached.
+	for symbol, uses := range map[string]int{"Base.Hello": 2, "Wide.Old": 3, "Wrapper.Base": 1} {
+		seen = nil
+		fix, err := upgrade.RunCodemods(context.Background(), app, []upgrade.Codemod{probe(symbol)})
+		if err != nil || len(seen) != uses || len(fix.Left) != uses {
+			t.Fatalf("%s: %v, seen %v, fix %+v", symbol, err, seen, fix)
+		}
 	}
 	if read(t, filepath.Join(app, "main.go")) != src {
 		t.Fatal("main.go changed")
