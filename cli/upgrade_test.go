@@ -361,6 +361,18 @@ func TestUpgradeFix(t *testing.T) {
 	if out, errOut, err := run("--dir", filepath.Join(root, "app")); err != nil || out != "" || !strings.Contains(errOut, "this gombit ships none") {
 		t.Fatalf("no codemods: %q, %q, %v", out, errOut, err)
 	}
+	// --patch with no codemods (what this gombit ships) still empties the
+	// file: no stale patch survives.
+	stalePatch := filepath.Join(root, "none.patch")
+	if err := os.WriteFile(stalePatch, []byte("old patch\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, _, err := run("--dir", filepath.Join(root, "app"), "--patch", stalePatch); err != nil || !strings.Contains(out, "ships none") || !strings.Contains(out, stalePatch+" is empty.") || readApp("none.patch") != "" {
+		t.Fatalf("no codemods, --patch: %q, %v (file %q)", out, err, readApp("none.patch"))
+	}
+	if out, _, err := run("--dir", filepath.Join(root, "app"), "--json"); err != nil || !strings.Contains(out, `"codemods": []`) {
+		t.Fatalf("no codemods, --json: %q, %v", out, err)
+	}
 
 	upgradeCodemods = func() []upgrade.Codemod {
 		return []upgrade.Codemod{{ID: "old-to-new", Description: "db.Old is db.New", Package: "github.com/gombit-dev/gombit/db", Symbol: "Old", Rename: "New"}}

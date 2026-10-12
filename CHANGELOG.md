@@ -359,7 +359,8 @@ version.
   ([#346](https://github.com/gombit-dev/gombit/issues/346)).
   - By default it writes nothing: it prints a unified diff for `git apply`.
     `--patch FILE` saves it to a file instead, and `--write` rewrites the
-    files atomically, refusing any file that changed since it was read.
+    files atomically. It writes nothing when a file no longer holds the
+    exact bytes the codemods parsed.
   - A use it cannot rewrite safely is left unchanged and listed with the
     reason, and the command exits 1.
   - `upgrade.RunCodemods` and `upgrade.Codemod` are the API. An automatic

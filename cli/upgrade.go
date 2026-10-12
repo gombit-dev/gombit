@@ -407,8 +407,9 @@ upgrade.patch), and the summary on stderr.
   gombit upgrade fix --write                            rewrite the files
 
 --patch always writes the file, empty when there is nothing to rewrite.
---write rewrites the files in place, each atomically, and refuses when a
-file changed since the codemods read it. Running it again changes nothing.
+--write rewrites the files in place, each atomically, and writes nothing
+when a file no longer holds exactly the bytes the codemods parsed (it is
+a check, not a lock). Running it again changes nothing.
 A use a codemod cannot rewrite safely (the new name would not resolve to
 the new API there, a generated file, an embedded field) is left unchanged
 and listed, and the command exits 1 so a CI job sees it. Files excluded by
@@ -475,21 +476,21 @@ func runUpgradeFix(ctx context.Context, stdout, stderr io.Writer, o upgradeFixOp
 	if o.asJSON || o.write || o.patchFile != "" {
 		summary = stdout
 	}
-	if len(mods) == 0 {
-		if o.asJSON {
-			return printFixJSON(stdout, res)
+	// No codemods is an empty fix, through the same output: --patch still
+	// empties its file.
+	fix := &upgrade.Fix{}
+	if len(mods) > 0 {
+		var err error
+		if fix, err = upgrade.RunCodemods(ctx, o.dir, mods); err != nil {
+			return fmt.Errorf("gombit upgrade fix: %w", err)
 		}
-		_, err := fmt.Fprintln(summary, "No codemods: this gombit ships none. gombit upgrade check lists the deprecated APIs to change by hand.")
-		return err
-	}
-	fix, err := upgrade.RunCodemods(ctx, o.dir, mods)
-	if err != nil {
-		return fmt.Errorf("gombit upgrade fix: %w", err)
 	}
 	for _, f := range fix.Files {
 		res.Files = append(res.Files, f.Path)
 	}
-	res.Patch, res.Left, res.Unchecked = fix.Patch(), fix.Left, fix.Unchecked
+	res.Patch = fix.Patch()
+	res.Left = append(res.Left, fix.Left...)
+	res.Unchecked = append(res.Unchecked, fix.Unchecked...)
 	var writeErr error
 	switch {
 	case o.write:
@@ -537,7 +538,13 @@ func printFixJSON(stdout io.Writer, res upgradeFixResult) error {
 // renderFix is the summary of a gombit upgrade fix run.
 func renderFix(w io.Writer, o upgradeFixOptions, res upgradeFixResult) error {
 	var b strings.Builder
+	if len(res.Codemods) == 0 {
+		b.WriteString("No codemods: this gombit ships none. gombit upgrade check lists the deprecated APIs to change by hand.\n")
+	}
 	switch {
+	case len(res.Codemods) == 0 && o.patchFile != "":
+		fmt.Fprintf(&b, "%s is empty.\n", o.patchFile)
+	case len(res.Codemods) == 0:
 	case len(res.Files) == 0 && o.patchFile != "":
 		fmt.Fprintf(&b, "Nothing to rewrite; %s is empty.\n", o.patchFile)
 	case len(res.Files) == 0:

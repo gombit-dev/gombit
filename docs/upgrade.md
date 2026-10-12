@@ -224,9 +224,17 @@ upgrade fix` says there is nothing to run.
   settles, is refused, and nothing is proposed.
 - **Idempotent.** The run ends only when the codemods change nothing more,
   so running them again on the result changes nothing.
-- **Never silently.** Without `--write` nothing is changed. `--write`
-  writes each file atomically, and refuses when a file changed since the
-  codemods read it.
+- **Never silently.** Without `--write` nothing is changed.
+  - The rewrite is computed from the exact bytes the type checker parsed,
+    never a second read.
+  - `--write` writes each file atomically. It writes nothing if any file's
+    content is not exactly those bytes, because a file edited during the
+    run would otherwise be reverted.
+  - A file changed between passes fails the run.
+  - The check is not a lock: an edit made in the instant between it and
+    the write is lost, so don't run `--write` while editing.
+- **Calls through wrappers.** A call through parentheses or type arguments
+  (`(db.F)(x)`, `db.F[T](x)`) is still a call of the API.
 - **Left for you.** A use a codemod cannot rewrite safely is left as it was
   and listed with the reason, and the command exits 1. Its position is in
   the file as the patch leaves it. Such uses include:

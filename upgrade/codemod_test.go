@@ -68,6 +68,18 @@ type Wide struct {
 
 // Inner is embedded in Wide.
 type Inner struct{ New int }
+
+// Pair returns v, named.
+func Pair[K comparable, V any](name K, v V) V { return v }
+
+// Pairs is Pair, renamed.
+func Pairs[K comparable, V any](name K, v V) V { return v }
+
+// Swap is Pair, its arguments the other way around.
+func Swap[K comparable, V any](v V, name K) V { return v }
+
+// Table holds openers.
+var Table = map[string]func(string, int) *Store{}
 `,
 	"store/store.go": `package store
 
@@ -392,7 +404,7 @@ var reorder = upgrade.Codemod{
 			return u.Skip("db is shadowed")
 		}
 		call := *u.Call
-		call.Fun = &ast.SelectorExpr{X: &ast.Ident{NamePos: u.Expr.Pos(), Name: name}, Sel: &ast.Ident{NamePos: u.Ident.Pos(), Name: "Connect"}}
+		call.Fun = u.CallFun(&ast.SelectorExpr{X: &ast.Ident{NamePos: u.Expr.Pos(), Name: name}, Sel: &ast.Ident{NamePos: u.Ident.Pos(), Name: "Connect"}})
 		call.Args = []ast.Expr{u.Call.Args[1], u.Call.Args[0]}
 		return &call
 	},
@@ -409,6 +421,7 @@ import "github.com/gombit-dev/gombit/db"
 func main() {
 	_ = db.Old("a", 1)
 	_ = db.Old(db.Old("b", 2).Name, 3)
+	_ = (db.Old)("p", 9)
 	f := db.Old
 	_ = f
 }
@@ -424,6 +437,7 @@ import "github.com/gombit-dev/gombit/db"
 func main() {
 	_ = db.Connect(1, "a")
 	_ = db.Connect(3, db.Connect(2, "b").Name)
+	_ = (db.Connect)(9, "p")
 	f := db.Old
 	_ = f
 }
@@ -431,7 +445,7 @@ func main() {
 	if len(fix.Files) != 1 || string(fix.Files[0].After) != want {
 		t.Fatalf("files: %+v\n%s", fix.Files, fix.Files[0].After)
 	}
-	if len(fix.Left) != 1 || fix.Left[0].Line != 8 || fix.Left[0].Reason != "not a call with two arguments" || fix.Left[0].Codemod != "old-to-connect" || fix.Left[0].Symbol != dbPath+".Old" {
+	if len(fix.Left) != 1 || fix.Left[0].Line != 9 || fix.Left[0].Reason != "not a call with two arguments" || fix.Left[0].Codemod != "old-to-connect" || fix.Left[0].Symbol != dbPath+".Old" {
 		t.Fatalf("left = %+v", fix.Left)
 	}
 	// What is left is left on every run: idempotent.
@@ -714,16 +728,123 @@ func TestRunCodemodsKeyNeedsADirectField(t *testing.T) {
 	}
 }
 
-// TestRunCodemodsRefusesAFileChangedWhileRunning: a file that changes
-// between the load and the read of its content would be reverted by the
-// patch; the run is refused instead.
-func TestRunCodemodsRefusesAFileChangedWhileRunning(t *testing.T) {
-	app := codemodApp(t, map[string]string{"main.go": "package main\n\nimport \"github.com/gombit-dev/gombit/db\"\n\nfunc main() { _ = db.Max }\n"})
-	defer upgrade.SetLoadedHookForTest(func() {
-		writeTree(t, app, map[string]string{"main.go": "package main\n\nimport \"github.com/gombit-dev/gombit/db\"\n\nfunc main() { _ = db.Max + 1 }\n"})
-	})()
-	if _, err := upgrade.RunCodemods(context.Background(), app, renames[4:]); !errors.Is(err, upgrade.ErrChangedSinceRun) {
-		t.Fatalf("RunCodemods = %v; want ErrChangedSinceRun", err)
+// TestRunCodemodsSnapshotsWhatItParsed: the rewrite is of the exact bytes
+// go/packages parsed, never a second read. A file edited after the load,
+// even to content of the same length, is not what the patch was computed
+// from: Write refuses it, writing nothing. A file edited between passes
+// fails the run.
+func TestRunCodemodsSnapshotsWhatItParsed(t *testing.T) {
+	const parsed = "package main\n\nimport \"github.com/gombit-dev/gombit/db\"\n\nfunc main() { _ = db.Max }\n"
+	for name, edit := range map[string]string{
+		"same length":  strings.Replace(parsed, "db.Max", "db.Min", 1),
+		"other length": strings.Replace(parsed, "db.Max", "db.Max + 1", 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			app := codemodApp(t, map[string]string{"main.go": parsed})
+			defer upgrade.SetLoadedHookForTest(func() { writeTree(t, app, map[string]string{"main.go": edit}) })()
+			fix, err := upgrade.RunCodemods(context.Background(), app, renames[4:])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(fix.Files) != 1 || string(fix.Files[0].Before) != parsed {
+				t.Fatalf("Before is not what was parsed: %+v", fix.Files)
+			}
+			if written, err := fix.Write(); !errors.Is(err, upgrade.ErrChangedSinceRun) || len(written) != 0 {
+				t.Fatalf("Write = %v, %v; want ErrChangedSinceRun", written, err)
+			}
+			if read(t, filepath.Join(app, "main.go")) != edit {
+				t.Fatal("Write overwrote the edit")
+			}
+		})
+	}
+	t.Run("between passes", func(t *testing.T) {
+		app := codemodApp(t, map[string]string{"main.go": parsed, "other.go": "package main\n\nvar x = 1\n"})
+		defer upgrade.SetLoadedHookForTest(func() { writeTree(t, app, map[string]string{"other.go": "package main\n\nvar x = 2\n"}) })()
+		if _, err := upgrade.RunCodemods(context.Background(), app, renames[4:]); !errors.Is(err, upgrade.ErrChangedSinceRun) || !strings.Contains(err.Error(), "other.go") {
+			t.Fatalf("RunCodemods = %v; want ErrChangedSinceRun for other.go", err)
+		}
+	})
+}
+
+// TestRunCodemodsRefusesAFreshSelfRewrite: a Rewrite that rebuilds its
+// own target from fresh nodes (no type information, so not caught as a
+// reuse), printing byte-identical source, never settles: refused, not a
+// clean result.
+func TestRunCodemodsRefusesAFreshSelfRewrite(t *testing.T) {
+	app := codemodApp(t, map[string]string{"main.go": "package main\n\nimport \"github.com/gombit-dev/gombit/db\"\n\nfunc main() { _ = db.Old(\"a\", 1) }\n"})
+	fresh := upgrade.Codemod{ID: "fresh", Description: "rebuilds db.Old", Package: dbPath, Symbol: "Old",
+		Rewrite: func(u *upgrade.Use) ast.Expr {
+			call := *u.Call
+			call.Fun = &ast.SelectorExpr{X: &ast.Ident{NamePos: u.Expr.Pos(), Name: "db"}, Sel: &ast.Ident{NamePos: u.Ident.Pos(), Name: "Old"}}
+			return &call
+		}}
+	fix, err := upgrade.RunCodemods(context.Background(), app, []upgrade.Codemod{fresh})
+	if err == nil || !strings.Contains(err.Error(), "do not settle") {
+		t.Fatalf("RunCodemods = %+v, %v; want it refused", fix, err)
+	}
+}
+
+// TestRunCodemodsGenericAndParenthesizedCalls: a call through parentheses
+// or type arguments (one or several) is still a call: a Rewrite gets it as
+// u.Call, CallFun keeps the wrappers, and a rename keeps them too. An
+// instantiation that is not called is not a call.
+func TestRunCodemodsGenericAndParenthesizedCalls(t *testing.T) {
+	const src = `package main
+
+import "github.com/gombit-dev/gombit/db"
+
+func main() {
+	_ = db.Pair[string, int]("a", 1)
+	_ = db.Pair[string]("b", 2)
+	_ = (db.Pair[string, int])("c", 3)
+	_ = db.Pair("e", 5)
+	f := db.Pair[string, int]
+	_ = f
+}
+`
+	swap := upgrade.Codemod{ID: "pair-to-swap", Description: "db.Pair(name, v) is db.Swap(v, name)", Package: dbPath, Symbol: "Pair",
+		Rewrite: func(u *upgrade.Use) ast.Expr {
+			if u.Call == nil || len(u.Call.Args) != 2 {
+				return u.Skip("not a call with two arguments")
+			}
+			sel := u.Expr.(*ast.SelectorExpr)
+			call := *u.Call
+			call.Fun = u.CallFun(&ast.SelectorExpr{X: sel.X, Sel: &ast.Ident{NamePos: sel.Sel.Pos(), Name: "Swap"}})
+			call.Args = []ast.Expr{u.Call.Args[1], u.Call.Args[0]}
+			return &call
+		}}
+	app := codemodApp(t, map[string]string{"main.go": src})
+	fix, err := upgrade.RunCodemods(context.Background(), app, []upgrade.Codemod{swap})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `package main
+
+import "github.com/gombit-dev/gombit/db"
+
+func main() {
+	_ = db.Swap[string, int](1, "a")
+	_ = db.Swap[string](2, "b")
+	_ = (db.Swap[string, int])(3, "c")
+	_ = db.Swap(5, "e")
+	f := db.Pair[string, int]
+	_ = f
+}
+`
+	if len(fix.Files) != 1 || string(fix.Files[0].After) != want {
+		t.Fatalf("swap:\n%s", fix.Files[0].After)
+	}
+	if len(fix.Left) != 1 || fix.Left[0].Line != 10 {
+		t.Fatalf("left = %+v", fix.Left)
+	}
+
+	rename := upgrade.Codemod{ID: "pair-to-pairs", Description: "db.Pair is db.Pairs", Package: dbPath, Symbol: "Pair", Rename: "Pairs"}
+	fix, err = upgrade.RunCodemods(context.Background(), app, []upgrade.Codemod{rename})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := strings.ReplaceAll(src, "db.Pair", "db.Pairs"); len(fix.Files) != 1 || string(fix.Files[0].After) != want || len(fix.Left) != 0 {
+		t.Fatalf("rename:\n%s\nleft %+v", fix.Files[0].After, fix.Left)
 	}
 }
 
@@ -738,5 +859,23 @@ func TestRunCodemodsRefusesARewriteThatDoesNotSettle(t *testing.T) {
 	}
 	if _, err := upgrade.RunCodemods(context.Background(), app, loop); err == nil || !strings.Contains(err.Error(), "do not settle") {
 		t.Fatalf("RunCodemods = %v; want it refused", err)
+	}
+}
+
+// TestRunCodemodsIndexIsNotAnInstantiation: indexing a value and calling
+// the result (db.Table["k"](x)) is not a call of the API: u.Call is nil.
+func TestRunCodemodsIndexIsNotAnInstantiation(t *testing.T) {
+	app := codemodApp(t, map[string]string{"main.go": "package main\n\nimport \"github.com/gombit-dev/gombit/db\"\n\nfunc main() { _ = db.Table[\"k\"](\"a\", 1) }\n"})
+	var calls []bool
+	probe := upgrade.Codemod{ID: "probe", Description: "records calls", Package: dbPath, Symbol: "Table",
+		Rewrite: func(u *upgrade.Use) ast.Expr {
+			calls = append(calls, u.Call != nil)
+			return u.Skip("probe")
+		}}
+	if _, err := upgrade.RunCodemods(context.Background(), app, []upgrade.Codemod{probe}); err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 1 || calls[0] {
+		t.Fatalf("calls = %v; want one use, not a call", calls)
 	}
 }

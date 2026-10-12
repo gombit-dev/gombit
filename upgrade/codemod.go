@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"golang.org/x/tools/go/ast/astutil"
 	"golang.org/x/tools/go/packages"
@@ -157,8 +158,9 @@ type Use struct {
 	// Expr is the use: pkg.Name; x.Name (a method, a field, a method
 	// expression); or a bare Name (a dot import, a composite literal key).
 	Expr ast.Expr
-	// Call is the call, or conversion, whose function Expr is; nil when
-	// Expr is not called.
+	// Call is the call, or conversion, whose function Expr is, possibly
+	// parenthesized and instantiated ((f)(x), f[T](x)); nil when Expr is
+	// not called. CallFun builds a new call's Fun keeping those wrappers.
 	Call *ast.CallExpr
 	// Path is the enclosing nodes, Ident first and the file last.
 	Path []ast.Node
@@ -174,6 +176,72 @@ type Use struct {
 	recv        types.Type
 	addressable bool
 	key         bool // a composite literal key: only a direct field
+}
+
+// callOf is the call whose function is u.Expr, possibly parenthesized
+// ((f)(x)) and instantiated (f[T](x), f[K, V](x)), or nil.
+func callOf(u *Use) *ast.CallExpr {
+	_, generic := u.Info.Instances[u.Ident]
+	fun := u.Expr
+	for i := 0; i+1 < len(u.Path); i++ {
+		if u.Path[i] != fun {
+			continue
+		}
+		switch n := u.Path[i+1].(type) {
+		case *ast.ParenExpr:
+			fun = n
+		case *ast.IndexExpr: // an instantiation, not an index into a value
+			if !generic || n.X != fun {
+				return nil
+			}
+			fun = n
+		case *ast.IndexListExpr:
+			if n.X != fun {
+				return nil
+			}
+			fun = n
+		case *ast.CallExpr:
+			if n.Fun == fun {
+				return n
+			}
+			return nil
+		default:
+			return nil
+		}
+	}
+	return nil
+}
+
+// CallFun is u.Call's function with Expr replaced by e, keeping the
+// parentheses and type arguments around it: the Fun of a Rewrite's new
+// call. Without a call, it is e.
+func (u *Use) CallFun(e ast.Expr) ast.Expr {
+	if u.Call == nil {
+		return e
+	}
+	return rewrap(u.Call.Fun, u.Expr, e)
+}
+
+// rewrap is fun with old (inside its parentheses and instantiations)
+// replaced by e, the wrappers copied.
+func rewrap(fun, old, e ast.Expr) ast.Expr {
+	switch f := fun.(type) {
+	case *ast.ParenExpr:
+		if fun != old {
+			c := *f
+			c.X = rewrap(f.X, old, e)
+			return &c
+		}
+	case *ast.IndexExpr:
+		c := *f
+		c.X = rewrap(f.X, old, e)
+		return &c
+	case *ast.IndexListExpr:
+		c := *f
+		c.X = rewrap(f.X, old, e)
+		return &c
+	}
+	return e
 }
 
 // Node is what a Rewrite replaces: Call when Expr is called, else Expr.
@@ -265,9 +333,11 @@ var ErrChangedSinceRun = errors.New("upgrade: a file changed since the codemods 
 
 // Write writes the rewrite, each file atomically (whole or not at all), and
 // returns the paths it wrote. It first checks that every file still holds
-// what the codemods read, and writes nothing otherwise (ErrChangedSinceRun).
-// A failure writing one file leaves the ones before it written: the
-// returned paths say which.
+// exactly the bytes the codemods parsed, and writes nothing otherwise
+// (ErrChangedSinceRun). That check is not a lock: Write does not
+// coordinate with other writers, so a change made between it and a file's
+// rename is lost. A failure writing one file leaves the ones before it
+// written: the returned paths say which.
 func (f *Fix) Write() ([]string, error) {
 	modes := make([]os.FileMode, len(f.Files))
 	for i, file := range f.Files {
@@ -333,7 +403,8 @@ func RunCodemods(ctx context.Context, workDir string, mods []Codemod) (*Fix, err
 		return nil, err
 	}
 	r := &rewriter{ctx: ctx, root: root, loaded: map[string]*types.Package{}}
-	src := &sources{original: map[string][]byte{}, current: map[string][]byte{}}
+	src := &sources{root: root, current: map[string][]byte{}}
+	cfg.ParseFile = src.parseFile
 	var unseen []string
 	// One codemod's output can be another's input (a rename of a rename),
 	// so the codemods run until a pass changes nothing. That last pass, on
@@ -345,11 +416,15 @@ func RunCodemods(ctx context.Context, workDir string, mods []Codemod) (*Fix, err
 			return nil, fmt.Errorf("upgrade: the codemods do not settle after %d passes (a rewrite brings back what one rewrites, a codemod bug); none is proposed", pass)
 		}
 		cfg.Overlay = maps.Clone(src.current)
+		src.parsed = map[string][]byte{}
 		pkgs, err := loadPackages(cfg, "./...")
 		if err != nil {
 			if pass > 0 {
 				return nil, fmt.Errorf("upgrade: the codemods' rewrite does not type-check, so none is proposed (a codemod bug): %w", err)
 			}
+			return nil, err
+		}
+		if err := src.settle(pass); err != nil {
 			return nil, err
 		}
 		if pass == 0 {
@@ -361,14 +436,18 @@ func RunCodemods(ctx context.Context, workDir string, mods []Codemod) (*Fix, err
 		left := []LeftUse{}
 		changed := false
 		for _, af := range appFiles(pkgs) {
-			after, l, err := r.file(af, targets, src)
+			after, replaced, l, err := r.file(af, targets, src)
 			if err != nil {
 				return nil, err
 			}
 			left = append(left, l...)
+			// A pass that replaced anything is followed by another, even
+			// when the output is byte-identical (a Rewrite rebuilding its
+			// target from fresh nodes): only a pass with nothing to replace
+			// ends the run, so such a rewrite never settles.
+			changed = changed || replaced
 			if after != nil {
 				src.current[af.name] = after
-				changed = true
 			}
 		}
 		if !changed {
@@ -381,29 +460,59 @@ func RunCodemods(ctx context.Context, workDir string, mods []Codemod) (*Fix, err
 // there).
 var loadedHookForTest = func() {}
 
-// sources are the content of the files the codemods rewrite: as first read
-// from disk, and as the latest pass left it.
+// sources are the exact bytes of the application's files the passes
+// parsed (go/packages hands them to Config.ParseFile, once per file, from
+// the disk or the overlay): never a second read, so a syntax tree and the
+// content it is rewritten against are always the same version.
 type sources struct {
+	root string
+	mu   sync.Mutex
+	// parsed is this pass's: by file, inside root.
+	parsed map[string][]byte
+	// original is the first pass's: the content a rewrite starts from,
+	// and that Write requires the disk to still hold.
 	original map[string][]byte
-	current  map[string][]byte
+	// current is the latest rewrite of each file a pass rewrote (the next
+	// pass's overlay).
+	current map[string][]byte
 }
 
-// read is the content of the file go/packages parsed as af: the latest
-// rewrite of it, or the disk's, which must be what was parsed (its size,
-// at least): a file changing under the run would be reverted by the patch.
+// parseFile is the loader's ParseFile (its default parse), recording the
+// bytes of each file of the application.
+func (s *sources) parseFile(fset *token.FileSet, filename string, src []byte) (*ast.File, error) {
+	if _, inside := relTo(s.root, filename); inside {
+		s.mu.Lock()
+		s.parsed[filename] = src
+		s.mu.Unlock()
+	}
+	return parser.ParseFile(fset, filename, src, parser.AllErrors|parser.ParseComments)
+}
+
+// settle records the first pass's bytes, and refuses a later pass that
+// read a file other than the first pass did (not an overlay of a rewrite):
+// it changed during the run.
+func (s *sources) settle(pass int) error {
+	if pass == 0 {
+		s.original = s.parsed
+		return nil
+	}
+	for name, data := range s.parsed {
+		if _, rewritten := s.current[name]; rewritten {
+			continue
+		}
+		if before, ok := s.original[name]; !ok || !bytes.Equal(before, data) {
+			rel, _ := relTo(s.root, name)
+			return fmt.Errorf("%w: %s (while they ran)", ErrChangedSinceRun, rel)
+		}
+	}
+	return nil
+}
+
+// read is the content of the file go/packages parsed as af.
 func (s *sources) read(af appFile, rel string) ([]byte, error) {
-	if data, ok := s.current[af.name]; ok {
-		return data, nil
-	}
-	data, err := os.ReadFile(af.name) // #nosec G304 -- a file of the application's packages, as go/packages listed it
-	if err != nil {
-		return nil, fmt.Errorf("upgrade: %w", err)
-	}
-	if len(data) != af.pkg.Fset.File(af.file.FileStart).Size() {
-		return nil, fmt.Errorf("%w: %s (while they ran)", ErrChangedSinceRun, rel)
-	}
-	if _, ok := s.original[af.name]; !ok {
-		s.original[af.name] = data
+	data, ok := s.parsed[af.name]
+	if !ok {
+		return nil, fmt.Errorf("upgrade: %s: no source recorded for it", rel)
 	}
 	return data, nil
 }
@@ -674,12 +783,12 @@ type fileRewrite struct {
 	parenthesized map[*ast.GenDecl]bool
 }
 
-// file rewrites af's uses of targets: its new content (nil when unchanged)
-// and the uses left.
-func (r *rewriter) file(af appFile, targets map[types.Object]*target, src *sources) ([]byte, []LeftUse, error) {
+// file rewrites af's uses of targets: its new content (nil when the bytes
+// are unchanged), whether any use was replaced, and the uses left.
+func (r *rewriter) file(af appFile, targets map[types.Object]*target, src *sources) (after []byte, replaced bool, left []LeftUse, err error) {
 	ids := af.uses(targets)
 	if len(ids) == 0 {
-		return nil, nil, nil
+		return nil, false, nil, nil
 	}
 	p, f := af.pkg, af.file
 	fr := &fileRewrite{r: r, pkg: p, variants: af.variants, file: f, added: map[string]string{}, parenthesized: map[*ast.GenDecl]bool{}}
@@ -698,7 +807,6 @@ func (r *rewriter) file(af appFile, targets map[types.Object]*target, src *sourc
 	case ast.IsGenerated(f):
 		notEditable = "in a generated file: regenerate it instead"
 	}
-	var left []LeftUse
 	leave := func(t *target, id *ast.Ident, reason string) {
 		at := p.Fset.Position(id.Pos())
 		file := rel
@@ -724,14 +832,7 @@ func (r *rewriter) file(af appFile, targets map[types.Object]*target, src *sourc
 		if sel, ok := path[1].(*ast.SelectorExpr); ok && sel.Sel == id {
 			u.Expr = sel
 		}
-		for i, n := range path {
-			if n == u.Expr && i+1 < len(path) {
-				if call, ok := path[i+1].(*ast.CallExpr); ok && call.Fun == u.Expr {
-					u.Call = call
-				}
-				break
-			}
-		}
+		u.Call = callOf(u)
 		if t.member {
 			u.recv, u.addressable = memberOperand(u)
 			_, u.key = u.Expr.(*ast.Ident)
@@ -740,7 +841,7 @@ func (r *rewriter) file(af appFile, targets map[types.Object]*target, src *sourc
 		owner[u] = t
 	}
 	if len(nodes) == 0 {
-		return nil, left, nil
+		return nil, false, left, nil
 	}
 	changed := false
 	var rewriteErr error
@@ -780,28 +881,28 @@ func (r *rewriter) file(af appFile, targets map[types.Object]*target, src *sourc
 		})
 	}()
 	if rewriteErr != nil {
-		return nil, nil, rewriteErr
+		return nil, false, nil, rewriteErr
 	}
 	if !changed {
-		return nil, left, nil
+		return nil, false, left, nil
 	}
 	fr.dropUnusedImports()
 	var out bytes.Buffer
 	if err := format.Node(&out, p.Fset, f); err != nil {
-		return nil, nil, fmt.Errorf("upgrade: format %s: %w", rel, err)
+		return nil, false, nil, fmt.Errorf("upgrade: format %s: %w", rel, err)
 	}
 	before, err := src.read(af, rel)
 	if err != nil {
-		return nil, nil, err
+		return nil, false, nil, err
 	}
-	after := out.Bytes()
+	after = out.Bytes()
 	if n := bytes.Count(before, []byte("\n")); n > 0 && bytes.Count(before, []byte("\r\n")) == n {
 		after = bytes.ReplaceAll(after, []byte("\n"), []byte("\r\n"))
 	}
 	if bytes.Equal(before, after) {
-		return nil, left, nil
+		return nil, true, left, nil
 	}
-	return after, left, nil
+	return after, true, left, nil
 }
 
 // usesTarget reports whether e holds an identifier of the original source
@@ -875,7 +976,7 @@ func (t *target) rename(u *Use) ast.Expr {
 	}
 	if u.Call != nil {
 		call := *u.Call
-		call.Fun = repl
+		call.Fun = u.CallFun(repl)
 		return &call
 	}
 	return repl
