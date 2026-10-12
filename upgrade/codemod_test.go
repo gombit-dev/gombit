@@ -3,10 +3,12 @@ package upgrade_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"go/ast"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -601,19 +603,39 @@ func TestRunCodemodsKeepsCRLF(t *testing.T) {
 }
 
 // TestRunCodemodsUnchecked: a file the build configuration excludes is not
-// type-checked, so not rewritten, and is listed when it mentions the API.
+// type-checked, so not rewritten, and is listed when it mentions the API,
+// also in a directory where every file is excluded (which yields no
+// package to load: a platform-only directory). What ./... never matches
+// (testdata, vendor, "." and "_" names, a nested module) is not listed.
 func TestRunCodemodsUnchecked(t *testing.T) {
+	other := "windows"
+	if runtime.GOOS == "windows" {
+		other = "linux"
+	}
+	const uses = "package %s\n\nimport \"github.com/gombit-dev/gombit/db\"\n\nvar _ = db.Max\n"
 	app := codemodApp(t, map[string]string{
-		"main.go":  "package main\n\nfunc main() {}\n",
-		"other.go": "//go:build never\n\npackage main\n\nimport \"github.com/gombit-dev/gombit/db\"\n\nvar _ = db.Max\n",
-		"quiet.go": "//go:build never\n\npackage main\n\nvar _ = 1\n",
+		"main.go":                            "package main\n\nfunc main() {}\n",
+		"used.go":                            fmt.Sprintf(uses, "main"),
+		"other.go":                           "//go:build never\n\n" + fmt.Sprintf(uses, "main"),
+		"quiet.go":                           "//go:build never\n\npackage main\n\nvar _ = 1\n",
+		"internal/plat/api_" + other + ".go": fmt.Sprintf(uses, "plat"),
+		"internal/never/a/b.go":              "//go:build never\n\n" + fmt.Sprintf(uses, "b"),
+		"internal/broken/x.go":               "//go:build never\n\npackage x\n\nfunc {\n",
+		"testdata/t.go":                      fmt.Sprintf(uses, "t"),
+		"_skip/s.go":                         fmt.Sprintf(uses, "s"),
+		".hidden/h.go":                       fmt.Sprintf(uses, "h"),
+		"vendor/example.com/v/v.go":          fmt.Sprintf(uses, "v"),
+		"_x.go":                              fmt.Sprintf(uses, "main"),
+		"nested/go.mod":                      "module example.com/nested\n\ngo 1.21\n",
+		"nested/n_" + other + ".go":          fmt.Sprintf(uses, "nested"),
 	})
 	fix, err := upgrade.RunCodemods(context.Background(), app, renames[4:])
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(fix.Unchecked, ",") != "other.go" || len(fix.Files) != 0 {
-		t.Fatalf("fix = %+v", fix)
+	want := "internal/broken/x.go,internal/never/a/b.go,internal/plat/api_" + other + ".go,other.go"
+	if got := strings.Join(fix.Unchecked, ","); got != want || len(fix.Files) != 1 || fix.Files[0].Path != "used.go" {
+		t.Fatalf("unchecked = %s, want %s (files %v)", got, want, fix.Files)
 	}
 }
 

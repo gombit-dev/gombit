@@ -414,7 +414,9 @@ A use a codemod cannot rewrite safely (the new name would not resolve to
 the new API there, a generated file, an embedded field) is left unchanged
 and listed, and the command exits 1 so a CI job sees it. Files excluded by
 build constraints are not type-checked, so not rewritten: those that
-mention a codemod's API are listed (rerun with their GOOS, GOARCH or tags).`,
+mention a codemod's API are listed (rerun with their GOOS, GOARCH or tags),
+found by walking the tree as ./... does, so a directory whose every file
+is excluded is covered too.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			flags := cmd.Flags()

@@ -246,8 +246,14 @@ upgrade fix` says there is nothing to run.
   - an API the app's framework version does not have yet (run `gombit
     upgrade --to` first).
 - **Build constraints.** Files the current build excludes are not
-  type-checked, so not rewritten. Those that mention a codemod's API are
-  listed: rerun with their `GOOS`, `GOARCH` or `-tags` (through `GOFLAGS`).
+  type-checked, so not rewritten. Those that mention a codemod's API by
+  name are listed: rerun with their `GOOS`, `GOARCH` or `-tags` (through
+  `GOFLAGS`).
+  - They are found by walking the directory tree the way `./...` matches
+    it, so a platform-only directory (every file excluded, so no package
+    to load) is covered too.
+  - The walk skips `testdata`, `vendor`, names starting with `.` or `_`,
+    and nested modules.
 - **Uses, not declarations.** A codemod rewrites the app's uses of the API.
   Renaming an interface method that the app implements still means
   renaming the app's own methods by hand.

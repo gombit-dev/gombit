@@ -10,6 +10,7 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
+	"io/fs"
 	"maps"
 	"os"
 	"path/filepath"
@@ -286,10 +287,12 @@ type Fix struct {
 	// Left are the uses no codemod could rewrite: the developer changes
 	// them.
 	Left []LeftUse `json:"left"`
-	// Unchecked are the application's files the build configuration
-	// excludes (build constraints) that may use a codemod's API: they are
-	// not type-checked, so not rewritten. Rerun with their GOOS, GOARCH or
-	// -tags (GOFLAGS) to cover them.
+	// Unchecked are the application's Go files the build configuration
+	// excludes (build constraints) that may use a codemod's API (they
+	// mention its name): they are not type-checked, so not rewritten. They
+	// are found by walking the tree as ./... does, so a directory whose
+	// every file is excluded is covered too. Rerun with their GOOS, GOARCH
+	// or -tags (GOFLAGS) to cover them.
 	Unchecked []string `json:"unchecked"`
 }
 
@@ -428,7 +431,9 @@ func RunCodemods(ctx context.Context, workDir string, mods []Codemod) (*Fix, err
 			return nil, err
 		}
 		if pass == 0 {
-			unseen = unchecked(root, pkgs, mods)
+			if unseen, err = unchecked(root, pkgs, mods); err != nil {
+				return nil, err
+			}
 			loadedHookForTest()
 		}
 		r.graph = frameworkPackages(pkgs)
@@ -622,45 +627,76 @@ func (af appFile) uses(targets map[types.Object]*target) []*ast.Ident {
 	return ids
 }
 
-// unchecked are the application's files its build configuration excludes
-// that mention a codemod's API by name: they may use it, unseen.
-func unchecked(root string, pkgs []*packages.Package, mods []Codemod) []string {
+// unchecked are the application's Go files the load did not type-check
+// (excluded by build constraints) that mention a codemod's API by name:
+// they may use it, unseen. They are found by walking the directory tree as
+// the go command matches ./... (skipping testdata, vendor, names starting
+// with "." or "_", and nested modules the load does not cover), not from
+// the loaded packages: a directory whose every file is excluded yields no
+// package at all, and its files would go unseen.
+func unchecked(root string, pkgs []*packages.Package, mods []Codemod) ([]string, error) {
 	names := map[string]bool{}
 	for _, c := range mods {
 		parts := strings.Split(c.Symbol, ".")
 		names[parts[len(parts)-1]] = true
 	}
-	out := []string{}
-	seen := map[string]bool{}
+	checked := map[string]bool{}
+	modules := map[string]bool{} // module roots the load covers
 	for _, p := range pkgs {
 		if p.Module != nil && p.Module.Path == FrameworkModulePath {
 			continue
 		}
-		for _, name := range p.IgnoredFiles {
-			rel, inside := relTo(root, name)
-			if seen[name] || !inside || !strings.HasSuffix(name, ".go") {
-				continue
-			}
-			seen[name] = true
-			f, err := parser.ParseFile(token.NewFileSet(), name, nil, parser.SkipObjectResolution)
-			if err != nil {
-				out = append(out, rel) // cannot tell: say so
-				continue
-			}
-			mentions := false
-			ast.Inspect(f, func(n ast.Node) bool {
-				if id, ok := n.(*ast.Ident); ok && names[id.Name] {
-					mentions = true
-				}
-				return !mentions
-			})
-			if mentions {
-				out = append(out, rel)
-			}
+		for _, f := range p.GoFiles {
+			checked[filepath.Clean(f)] = true
+		}
+		if p.Module != nil && p.Module.Dir != "" {
+			modules[filepath.Clean(p.Module.Dir)] = true
 		}
 	}
+	out := []string{}
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		name := d.Name()
+		if d.IsDir() {
+			if path == root {
+				return nil
+			}
+			if strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") || name == "testdata" || name == "vendor" {
+				return filepath.SkipDir
+			}
+			if _, err := os.Stat(filepath.Join(path, "go.mod")); err == nil && !modules[filepath.Clean(path)] {
+				return filepath.SkipDir // another module
+			}
+			return nil
+		}
+		if !strings.HasSuffix(name, ".go") || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") || checked[filepath.Clean(path)] {
+			return nil
+		}
+		rel, _ := relTo(root, path)
+		f, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.SkipObjectResolution)
+		if err != nil {
+			out = append(out, rel) // cannot tell: say so
+			return nil
+		}
+		mentions := false
+		ast.Inspect(f, func(n ast.Node) bool {
+			if id, ok := n.(*ast.Ident); ok && names[id.Name] {
+				mentions = true
+			}
+			return !mentions
+		})
+		if mentions {
+			out = append(out, rel)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("upgrade: list the application's files: %w", err)
+	}
 	sort.Strings(out)
-	return out
+	return out, nil
 }
 
 // relTo is file relative to root, with forward slashes, and whether it is
