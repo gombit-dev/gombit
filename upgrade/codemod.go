@@ -83,9 +83,17 @@ func Codemods() []Codemod {
 	return out
 }
 
-// action is the codemod as an automatic change: Check reports whether the
-// app has uses to rewrite, Apply writes the rewrite and fails when uses
-// remain that it could not rewrite.
+// ErrCodemodIncomplete: a codemod applied as an automatic change wrote
+// what it could, but did not cover the whole application: uses it left for
+// the developer, or files the build configuration excludes that mention
+// its API (rerun under their GOOS, GOARCH or tags). The change is not done.
+var ErrCodemodIncomplete = errors.New("upgrade: the codemod did not cover the whole application")
+
+// action is the codemod as an automatic change. Check reports whether the
+// app may need it: uses to rewrite, or files the build excludes that
+// mention its API. Apply writes the rewrite, and fails
+// (ErrCodemodIncomplete) when uses remain that it could not rewrite or
+// excluded files mention the API: either way the change is not complete.
 func (c Codemod) action() Action {
 	return Action{
 		Description: fmt.Sprintf("%s (gombit upgrade fix --only %s)", c.Description, c.ID),
@@ -95,13 +103,21 @@ func (c Codemod) action() Action {
 				return false, err
 			}
 			written, err := fix.Write()
+			changed := len(written) > 0
 			if err != nil {
-				return len(written) > 0, err
+				return changed, err
 			}
+			var gaps []string
 			if len(fix.Left) > 0 {
-				return len(written) > 0, fmt.Errorf("upgrade: codemod %s left %d use(s) to change by hand (gombit upgrade fix --only %s lists them)", c.ID, len(fix.Left), c.ID)
+				gaps = append(gaps, fmt.Sprintf("%d use(s) left to change by hand", len(fix.Left)))
 			}
-			return len(written) > 0, nil
+			if len(fix.Unchecked) > 0 {
+				gaps = append(gaps, fmt.Sprintf("not checked, excluded by this build: %s (rerun under their GOOS, GOARCH or tags)", strings.Join(fix.Unchecked, ", ")))
+			}
+			if len(gaps) > 0 {
+				return changed, fmt.Errorf("%w: codemod %s: %s; gombit upgrade fix --only %s lists them", ErrCodemodIncomplete, c.ID, strings.Join(gaps, "; "), c.ID)
+			}
+			return changed, nil
 		},
 		Check: func(workDir string, _ Baseline) (bool, error) {
 			return hasUses(context.Background(), workDir, c)
@@ -545,8 +561,9 @@ func (s *sources) fix(root string, left []LeftUse, unseen []string) *Fix {
 	return fix
 }
 
-// hasUses reports whether the application in workDir uses c's API: one
-// load, no rewrite.
+// hasUses reports whether the application in workDir uses c's API, or has
+// files its build configuration excludes that mention it (they may use
+// it): one load, no rewrite.
 func hasUses(ctx context.Context, workDir string, c Codemod) (bool, error) {
 	if err := c.validate(); err != nil {
 		return false, err
@@ -566,7 +583,12 @@ func hasUses(ctx context.Context, workDir string, c Codemod) (bool, error) {
 			return true, nil
 		}
 	}
-	return false, nil
+	root, err := filepath.Abs(workDir)
+	if err != nil {
+		return false, fmt.Errorf("upgrade: %w", err)
+	}
+	unseen, err := unchecked(root, pkgs, []Codemod{c})
+	return len(unseen) > 0, err
 }
 
 // frameworkPackages are the framework packages in the graph, by path.

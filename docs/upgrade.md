@@ -259,8 +259,16 @@ upgrade fix` says there is nothing to run.
   renaming the app's own methods by hand.
 
 In the compatibility manifest, an `automatic` change applies a codemod as
-the action `codemod:<id>`. Its check is whether the app has uses to
-rewrite. In Go, `upgrade.RunCodemods` runs codemods and returns the
+the action `codemod:<id>`.
+
+- **Its check** reports the change as needed when the app has uses to
+  rewrite, or when files its build excludes mention the API.
+- **Applying it** writes the rewrite. It then fails with
+  `upgrade.ErrCodemodIncomplete`, naming what remains, if uses were left
+  for the developer or excluded files mention the API: the change is not
+  done until a run under those files' `GOOS`, `GOARCH` or tags is clean.
+
+In Go, `upgrade.RunCodemods` runs codemods and returns the
 proposed `upgrade.Fix` (`Patch`, `Write`, `Left`, `Unchecked`).
 `upgrade.Codemod` declares one:
 

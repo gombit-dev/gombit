@@ -364,7 +364,10 @@ version.
   - A use it cannot rewrite safely is left unchanged and listed with the
     reason, and the command exits 1.
   - `upgrade.RunCodemods` and `upgrade.Codemod` are the API. An automatic
-    manifest change applies a codemod as the action `codemod:<id>`.
+    manifest change applies a codemod as the action `codemod:<id>`. Its
+    check counts build-excluded files that mention the API, and applying
+    it fails with `upgrade.ErrCodemodIncomplete` while any use or such
+    file remains.
   - No codemods ship yet: the only deprecated API,
     `database.KeepStoredZeros`, has no mechanical replacement.
 
