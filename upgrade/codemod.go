@@ -44,7 +44,10 @@ type Codemod struct {
 	// API it rewrites.
 	Package string
 	// Symbol is that API in Package: Name for a function, type, constant
-	// or variable, Type.Name for a method or a struct field.
+	// or variable, Type.Name for a method or a struct field that Type
+	// declares itself. A member Type only promotes (from an embedded type
+	// or interface) is refused: it is the declaring type's, and every use
+	// of it would be rewritten, however reached.
 	Symbol string
 
 	// Rename renames each use to this name. With MoveTo, the empty Rename
@@ -453,7 +456,10 @@ func RunCodemods(ctx context.Context, workDir string, mods []Codemod) (*Fix, err
 			loadedHookForTest()
 		}
 		r.graph = frameworkPackages(pkgs)
-		targets := r.targets(mods, true)
+		targets, err := r.targets(mods, true)
+		if err != nil {
+			return nil, err
+		}
 		left := []LeftUse{}
 		changed := false
 		for _, af := range appFiles(pkgs) {
@@ -577,7 +583,10 @@ func hasUses(ctx context.Context, workDir string, c Codemod) (bool, error) {
 		return false, err
 	}
 	r := &rewriter{graph: frameworkPackages(pkgs)}
-	targets := r.targets([]Codemod{c}, false)
+	targets, err := r.targets([]Codemod{c}, false)
+	if err != nil {
+		return false, err
+	}
 	for _, af := range appFiles(pkgs) {
 		if len(af.uses(targets)) > 0 {
 			return true, nil
@@ -754,8 +763,11 @@ type target struct {
 // targets resolves each codemod's API in the graph, and with withNew the
 // API a rename or a move replaces it with. One whose package the app does
 // not reach, or that this framework version does not declare, has no uses
-// to rewrite.
-func (r *rewriter) targets(mods []Codemod, withNew bool) map[types.Object]*target {
+// to rewrite. A member target must be declared by the type its Symbol
+// names: uses are matched by object, so a member Type only promotes would
+// rewrite every use of the declaring type's member, wherever it is
+// reached from. The replacement may be promoted (it only has to resolve).
+func (r *rewriter) targets(mods []Codemod, withNew bool) (map[types.Object]*target, error) {
 	out := map[types.Object]*target{}
 	for i := range mods {
 		c := &mods[i]
@@ -763,9 +775,18 @@ func (r *rewriter) targets(mods []Codemod, withNew bool) map[types.Object]*targe
 		if p == nil {
 			continue
 		}
-		obj := lookupSymbol(p.Types, c.Symbol)
+		obj, direct := lookupSymbol(p.Types, c.Symbol)
 		if obj == nil {
 			continue
+		}
+		if !direct {
+			owner := "an embedded type"
+			if obj.Pkg() != nil {
+				if recv := declaringType(obj); recv != "" {
+					owner = recv
+				}
+			}
+			return nil, fmt.Errorf("upgrade: codemod %s: %s.%s is not declared by %s but promoted from %s; name the type that declares it", c.ID, c.Package, c.Symbol, strings.Split(c.Symbol, ".")[0], owner)
 		}
 		t := &target{mod: c, obj: obj}
 		parts := strings.Split(c.Symbol, ".")
@@ -783,7 +804,7 @@ func (r *rewriter) targets(mods []Codemod, withNew bool) map[types.Object]*targe
 				newSymbol = parts[0] + "." + t.newName
 			}
 			if np := r.types(t.newPkg); np != nil {
-				t.newObj = lookupSymbol(np, newSymbol)
+				t.newObj, _ = lookupSymbol(np, newSymbol)
 			}
 			if t.newObj == nil {
 				t.missing = fmt.Sprintf("%s.%s does not exist in the framework version the app builds against: upgrade it first (gombit upgrade --to)", t.newPkg, newSymbol)
@@ -791,25 +812,71 @@ func (r *rewriter) targets(mods []Codemod, withNew bool) map[types.Object]*targe
 		}
 		out[obj] = t
 	}
-	return out
+	return out, nil
 }
 
-// lookupSymbol is Name or Type.Name in pkg, or nil.
-func lookupSymbol(pkg *types.Package, symbol string) types.Object {
+// declaringType names the type declaring a method or field: a method's
+// receiver type, or the struct type holding a field (when it is named).
+func declaringType(obj types.Object) string {
+	if fn, ok := obj.(*types.Func); ok {
+		if sig, ok := fn.Type().(*types.Signature); ok && sig.Recv() != nil {
+			t := sig.Recv().Type()
+			if ptr, ok := t.(*types.Pointer); ok {
+				t = ptr.Elem()
+			}
+			if named, ok := t.(*types.Named); ok {
+				return named.Obj().Pkg().Path() + "." + named.Obj().Name()
+			}
+		}
+		return ""
+	}
+	if v, ok := obj.(*types.Var); ok && v.IsField() && v.Pkg() != nil {
+		scope := v.Pkg().Scope()
+		for _, name := range scope.Names() {
+			tn, ok := scope.Lookup(name).(*types.TypeName)
+			if !ok {
+				continue
+			}
+			if st, ok := tn.Type().Underlying().(*types.Struct); ok {
+				for i := 0; i < st.NumFields(); i++ {
+					if st.Field(i) == v {
+						return v.Pkg().Path() + "." + name
+					}
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// lookupSymbol is Name or Type.Name in pkg, or nil, and for a member
+// whether Type declares it itself: a field or method promoted through an
+// embedded type, or a method of an embedded interface, is another type's
+// member, reachable through Type but not Type's.
+func lookupSymbol(pkg *types.Package, symbol string) (obj types.Object, direct bool) {
 	parts := strings.Split(symbol, ".")
-	obj := pkg.Scope().Lookup(parts[0])
+	obj = pkg.Scope().Lookup(parts[0])
 	if obj == nil || len(parts) == 1 {
-		return obj
+		return obj, true
 	}
 	tn, ok := obj.(*types.TypeName)
 	if !ok {
-		return nil
+		return nil, false
 	}
-	member, _, _ := types.LookupFieldOrMethod(tn.Type(), true, pkg, parts[1])
+	member, index, _ := types.LookupFieldOrMethod(tn.Type(), true, pkg, parts[1])
 	if member == nil {
-		return nil
+		return nil, false
 	}
-	return origin(member)
+	direct = len(index) == 1
+	if iface, ok := tn.Type().Underlying().(*types.Interface); ok && direct {
+		direct = false
+		for i := 0; i < iface.NumExplicitMethods(); i++ {
+			if iface.ExplicitMethod(i) == member {
+				direct = true
+			}
+		}
+	}
+	return origin(member), direct
 }
 
 // types is the framework package at path, from the graph or loaded on its

@@ -277,6 +277,10 @@ proposed `upgrade.Fix` (`Patch`, `Write`, `Left`, `Unchecked`).
   identifier, the expression, the enclosing call, and `Import`/`Skip`
   helpers.
 
+Its target is `Package` and `Symbol`, where `Symbol` is `Name` or `Type.Name`
+for a method or field that `Type` declares itself. A member that `Type` only
+promotes is refused, naming the type that declares it.
+
 ## The baseline
 
 An application's baseline is two facts:
