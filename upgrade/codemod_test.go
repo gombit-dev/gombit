@@ -109,6 +109,23 @@ type Same = Wide
 
 // Hi is defined from Greeter: it shares Greeter's method.
 type Hi Greeter
+
+// Paren declares its struct in parentheses: its fields are its own.
+type Paren (struct {
+	Old int
+})
+
+// Peek is Paren's, through a parenthesized receiver type.
+func (p (*Paren)) Peek() {}
+
+// PI declares its interface in parentheses.
+type PI (interface{ Hi() })
+
+// PC is defined from Wide, in parentheses: it declares nothing.
+type PC (Wide)
+
+// PP declares its struct in nested parentheses.
+type PP ((struct{ Old int }))
 `,
 	"store/store.go": `package store
 
@@ -1012,6 +1029,11 @@ func main() {
 	_ = db.Copy{}.Old
 	_ = db.Same{}.Old
 	_ = db.Wrapper{}.Base
+	p := db.Paren{Old: 1}
+	p.Peek()
+	var pi db.PI
+	pi.Hi()
+	_ = db.PP{}.Old
 }
 `
 	app := codemodApp(t, map[string]string{"main.go": src})
@@ -1030,6 +1052,7 @@ func main() {
 		"Hi.Hello":      "Greeter",
 		"Copy.Old":      "Wide",
 		"Same.Old":      "Wide",
+		"PC.Old":        "Wide",
 	} {
 		_, err := upgrade.RunCodemods(context.Background(), app, []upgrade.Codemod{probe(symbol)})
 		if want := "is declared by " + dbPath + "." + declaredBy + ", not "; err == nil || !strings.Contains(err.Error(), want) {
@@ -1040,7 +1063,7 @@ func main() {
 		t.Fatalf("a refused codemod's Rewrite ran: %v", seen)
 	}
 	// The declaring types' own members: every use, however reached.
-	for symbol, uses := range map[string]int{"Base.Hello": 2, "Wide.Old": 3, "Wrapper.Base": 1} {
+	for symbol, uses := range map[string]int{"Base.Hello": 2, "Wide.Old": 3, "Wrapper.Base": 1, "Paren.Old": 1, "Paren.Peek": 1, "PI.Hi": 1, "PP.Old": 1} {
 		seen = nil
 		fix, err := upgrade.RunCodemods(context.Background(), app, []upgrade.Codemod{probe(symbol)})
 		if err != nil || len(seen) != uses || len(fix.Left) != uses {

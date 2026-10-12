@@ -91,6 +91,22 @@ type Box[T any] struct{ v T }
 //
 // Deprecated: use Value.
 func (b Box[T]) Peek() T { return b.v }
+
+// Wrapped declares its struct and interface in parentheses.
+type Wrapped (struct {
+	// Tag tags.
+	//
+	// Deprecated: use Label.
+	Tag string
+})
+
+// Pinger pings.
+type Pinger (interface {
+	// Ping pings.
+	//
+	// Deprecated: use Fetch.
+	Ping()
+})
 `,
 }
 
@@ -441,5 +457,32 @@ func main() { _ = Store{OldName, ""} }
 	// const.
 	if strings.Join(got, "|") != "5:25 db.OldName|5:25 db.Store.Name" {
 		t.Fatalf("uses = %v; want db.OldName and db.Store.Name at the same token", got)
+	}
+}
+
+// TestScanDeprecatedParenthesizedDeclarations: a struct or interface
+// declared in parentheses (type T (struct{...})) has its members' docs
+// read like any other.
+func TestScanDeprecatedParenthesizedDeclarations(t *testing.T) {
+	app := scanApp(t, map[string]string{"main.go": `package main
+
+import "github.com/gombit-dev/gombit/db"
+
+func main() {
+	_ = db.Wrapped{}.Tag
+	var p db.Pinger
+	p.Ping()
+}
+`})
+	uses, err := upgrade.ScanDeprecated(context.Background(), app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, u := range uses {
+		got = append(got, u.Symbol)
+	}
+	if strings.Join(got, ",") != "db.Wrapped.Tag,db.Pinger.Ping" {
+		t.Fatalf("uses = %v", got)
 	}
 }

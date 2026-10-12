@@ -369,6 +369,7 @@ func walkDocs(pkg string, f *ast.File, fn func(name *ast.Ident, symbol string, d
 // walkMembers calls fn for the fields of a struct type, or the methods of
 // an interface type, named owner.
 func walkMembers(owner string, typ ast.Expr, fn func(name *ast.Ident, symbol string, docs []*ast.CommentGroup)) {
+	typ = ast.Unparen(typ) // type T (struct{...}): parentheses change nothing
 	var fields *ast.FieldList
 	switch t := typ.(type) {
 	case *ast.StructType:

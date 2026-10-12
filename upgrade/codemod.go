@@ -880,9 +880,10 @@ func owners(p *packages.Package) map[types.Object]string {
 					if !ok {
 						continue
 					}
+					typ := ast.Unparen(ts.Type) // type T (struct{...}): parentheses change nothing
 					var fields *ast.FieldList
-					_, isStruct := ts.Type.(*ast.StructType)
-					switch t := ts.Type.(type) {
+					_, isStruct := typ.(*ast.StructType)
+					switch t := typ.(type) {
 					case *ast.StructType:
 						fields = t.Fields
 					case *ast.InterfaceType:
