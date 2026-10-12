@@ -65,6 +65,48 @@ func TestTCPProxyForwards(t *testing.T) {
 	}
 }
 
+func TestTCPProxyForwardsHalfClose(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer func() { _ = conn.Close() }()
+				body, _ := io.ReadAll(conn) // until the client's FIN
+				_, _ = conn.Write([]byte("echo:" + string(body)))
+			}()
+		}
+	}()
+	roundTrip := func(addr string) string {
+		conn, err := net.Dial("tcp", addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = conn.Close() }()
+		_, _ = conn.Write([]byte("hello"))
+		_ = conn.(*net.TCPConn).CloseWrite()
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		reply, _ := io.ReadAll(conn)
+		return string(reply)
+	}
+	direct := roundTrip(ln.Addr().String())
+	proxy := faulttest.NewTCPProxy(t, ln.Addr().String())
+	via := roundTrip(proxy.Addr())
+	if direct != "echo:hello" {
+		t.Fatalf("exchange with the upstream directly = %q, want echo of the body", direct)
+	}
+	if via != direct {
+		t.Errorf("no fault armed, but the proxy changed the exchange: direct %q, via proxy %q", direct, via)
+	}
+}
+
 func TestTCPProxyHoldStallsUntilHeal(t *testing.T) {
 	proxy := faulttest.NewTCPProxy(t, echoServer(t))
 	conn := dial(t, proxy.Addr())
