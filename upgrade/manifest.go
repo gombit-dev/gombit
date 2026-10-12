@@ -139,6 +139,12 @@ type Change struct {
 	Action string `yaml:"action,omitempty" json:"action,omitempty"`
 	// Refs are the GitHub issues or pull requests of the change.
 	Refs []int `yaml:"refs,omitempty" json:"refs,omitempty"`
+	// Config are the configuration variables the change renames, removes,
+	// re-defaults, requires or newly refuses values of: what the upgrade
+	// tooling checks the application's environment files against
+	// (AnalyzeConfig). A change in the security area makes each of them a
+	// security review.
+	Config []ConfigChange `yaml:"config,omitempty" json:"config,omitempty"`
 }
 
 // Release is the changes of moving to one release from the one before it.
@@ -183,6 +189,7 @@ func (m *Manifest) clone() *Manifest {
 		r.Changes = slices.Clone(r.Changes)
 		for j := range r.Changes {
 			r.Changes[j].Refs = slices.Clone(r.Changes[j].Refs)
+			r.Changes[j].Config = slices.Clone(r.Changes[j].Config)
 		}
 		c.Releases[i] = r
 	}
@@ -260,6 +267,14 @@ func (c Change) validate() error {
 	for _, ref := range c.Refs {
 		if ref <= 0 {
 			return fmt.Errorf("change %s: ref %d is not an issue or pull request number", c.ID, ref)
+		}
+	}
+	if len(c.Config) > 0 && c.Area != "config" && c.Area != "security" {
+		return fmt.Errorf("change %s: lists configuration variables, so its area is config or security, not %s", c.ID, c.Area)
+	}
+	for _, cc := range c.Config {
+		if err := cc.validate(); err != nil {
+			return fmt.Errorf("change %s: %w", c.ID, err)
 		}
 	}
 	switch c.Kind {

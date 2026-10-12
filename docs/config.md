@@ -89,6 +89,14 @@ recognizes:
 | `GOMBIT_COOKIE_SAMESITE` | `Config.Auth.CookieSameSite` | `lax` |
 | `GOMBIT_SECURITY_SANITIZE_INPUT` | `Config.Security.SanitizeInput` | `false` (opt-in) |
 
+`config.Variables()` lists these variables in code: each one's name,
+whether its value is a secret (a credential, or a DSN that may embed one),
+and its development, test and production defaults. It is the configuration
+surface the upgrade tooling compares across releases. A test holds it to
+every variable `LoadFromEnv` reads, and another fails when a variable is
+removed or a default changes without the compatibility manifest declaring
+it (see [upgrade.md](upgrade.md#configuration-changes)).
+
 `GOMBIT_API_PREFIX` is a live setting (D8). Go routes, Huma, and the admin
 SPA honor it. The generated application SPA honors it when the prefix is
 injected into `index.html`: `gombit build --embed` (Gin) and `gombit dev`

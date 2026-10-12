@@ -439,3 +439,67 @@ func TestUpgradeFix(t *testing.T) {
 		}
 	}
 }
+
+// TestUpgradeConfig: gombit upgrade config reports the configuration
+// changes between the app's framework version and the target, from the
+// built-in manifest, exits 1 while one needs review (the production
+// refusal of trust-all GOMBIT_HTTP_TRUSTED_PROXIES is a security change),
+// and never prints a value from the app's environment files.
+func TestUpgradeConfig(t *testing.T) {
+	t.Setenv("GOWORK", "off")
+	dir := t.TempDir()
+	for name, content := range map[string]string{
+		"go.mod":       "module example.com/demo\n\ngo 1.26\n\nrequire github.com/gombit-dev/gombit v0.6.1\n",
+		".env.example": "GOMBIT_HTTP_TRUSTED_PROXIES=10.0.0.1\n",
+		".env":         "GOMBIT_JWT_SECRET=do-not-print-this-value\nGOMBIT_HTTP_TRUSTED_PROXIES=0.0.0.0/0\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out, err := runUpgradeCLI(t, "config", "--dir", dir, "--to", "v0.7.1")
+	if err == nil || !strings.Contains(err.Error(), "need action or review") {
+		t.Fatalf("upgrade config = %v", err)
+	}
+	for _, want := range []string{
+		"Upgrade v0.6.1 -> v0.7.1\n",
+		"[security review] `GOMBIT_HTTP_TRUSTED_PROXIES`: some values are now refused in production (v0.7.0, trusted-proxies-trust-all)",
+		"against trusted-proxies-trust-all (in .env, .env.example and the deployment's environment)",
+		".env (names only), .env.example (template)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+	for _, secret := range []string{"do-not-print-this-value", "0.0.0.0/0", "10.0.0.1"} {
+		if strings.Contains(out, secret) {
+			t.Fatalf("printed a value from an environment file (%s):\n%s", secret, out)
+		}
+	}
+	out, _ = runUpgradeCLI(t, "config", "--dir", dir, "--to", "v0.7.1", "--json")
+	var res upgradeConfigResult
+	if err := json.Unmarshal([]byte(out), &res); err != nil || res.From != "v0.6.1" || len(res.Findings) != 1 || res.Findings[0].Category != upgrade.ConfigCategorySecurityReview || strings.Contains(out, "do-not-print") {
+		t.Fatalf("--json: %s (%v)", out, err)
+	}
+	// --write: nothing to rename on this path; still a review.
+	before := map[string]string{}
+	for _, name := range []string{".env", ".env.example"} {
+		data, _ := os.ReadFile(filepath.Join(dir, name)) // #nosec G304 -- under t.TempDir()
+		before[name] = string(data)
+	}
+	if out, err := runUpgradeCLI(t, "config", "--dir", dir, "--to", "v0.7.1", "--write"); err == nil || !strings.Contains(out, "No template needed upgrading.") {
+		t.Fatalf("--write: %q, %v", out, err)
+	}
+	for name, content := range before {
+		if data, _ := os.ReadFile(filepath.Join(dir, name)); string(data) != content { // #nosec G304 -- under t.TempDir()
+			t.Fatalf("%s changed", name)
+		}
+	}
+	// From past the change: nothing to do, exit 0.
+	if out, err := runUpgradeCLI(t, "config", "--dir", dir, "--from", "v0.7.0", "--to", "v0.7.1"); err != nil || !strings.Contains(out, "Configuration changes: 0\n") {
+		t.Fatalf("--from v0.7.0: %q, %v", out, err)
+	}
+	if _, err := runUpgradeCLI(t, "config", "--dir", dir, "--from", "v0.0.1"); err == nil {
+		t.Fatal("an unlisted --from was accepted")
+	}
+}

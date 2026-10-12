@@ -188,6 +188,8 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 - **Breaking.** Production refuses `GOMBIT_HTTP_TRUSTED_PROXIES` values that trust every peer: a zero-length prefix in any spelling, or ranges that together cover all addresses. (`trusted-proxies-trust-all`, security, [#500](https://github.com/gombit-dev/gombit/issues/500))
 
+  - Configuration: `GOMBIT_HTTP_TRUSTED_PROXIES`: some values are now refused in production.
+
   `10.0.0.0/0`, `::0/0` or `0.0.0.0/1,128.0.0.0/1` used to start;
   `Config.Validate` now refuses them in production, since trusting
   every peer lets any client spoof its forwarded IP. List only the

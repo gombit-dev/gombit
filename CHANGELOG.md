@@ -370,6 +370,29 @@ version.
     file remains.
   - No codemods ship yet: the only deprecated API,
     `database.KeepStoredZeros`, has no mechanical replacement.
+- `gombit upgrade config [--from] [--to] [--write] [--json]` (UPGRADE-7)
+  reports what an upgrade's configuration changes mean for the
+  application. It covers each variable the releases on the path rename,
+  remove, re-default, newly require, or newly refuse values of, by
+  category (renamed, default changed, action required, security review),
+  with the environment files that set it and what to do. It exits 1 while
+  any needs action or review, and `gombit upgrade --dry-run` shows the
+  same section
+  ([#347](https://github.com/gombit-dev/gombit/issues/347)).
+  - It never prints a value from the app's `.env` files: from a file that
+    is not a template, only the names it sets are read.
+  - Every rename and removal is reported even when no file sets the
+    variable.
+  - `--write` upgrades `.env.example` and the other templates (renames,
+    removed variables commented out, each with a note). The files are
+    written atomically and idempotently, and `.env` is never written.
+  - Manifest changes list their configuration variables (`config:`
+    entries).
+  - `config.Variables()` catalogs every variable with its secrecy and
+    defaults. A snapshot test fails when a variable is removed or
+    re-defaulted without a manifest declaration.
+  - `trusted-proxies-trust-all` (v0.7.0) now declares its
+    `GOMBIT_HTTP_TRUSTED_PROXIES` refusal.
 
 ### Changed
 
