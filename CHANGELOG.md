@@ -674,6 +674,19 @@ version.
   `framework.New`, `contract.HumaConfigFor` logs the failure through `slog`; a
   writer on which the status cannot be confirmed to change gets the error back
   to Huma as before ([#442](https://github.com/gombit-dev/gombit/issues/442)).
+- The `.env` loader parses a real dotenv file. A line over 64 KiB (a long
+  base64 key is easy to hit) stopped the scan there with the error dropped, so
+  every key after it was silently missing and the app started with framework
+  defaults instead of its own settings; a line now buffers up to 1 MiB, and a
+  `.env` that still cannot be read in full fails `config.Load` and
+  `config.LoadFromDir` rather than loading part of it. A UTF-8 byte order mark
+  hid the first key (`\ufeffGOMBIT_JWT_SECRET` matches no variable), a leading
+  `export ` made the key `export GOMBIT_HTTP_ADDR`, and a trailing comment was
+  stored as part of the value, so `GOMBIT_LOG_LEVEL="debug" # local` set the
+  level to `"debug" # local`. The mark and `export ` are removed, and a `#`
+  outside quotes and preceded by whitespace starts a comment; a `#` with no
+  space before it stays in the value
+  ([#507](https://github.com/gombit-dev/gombit/issues/507)).
 
 ## [0.6.0] — 2026-09-28
 

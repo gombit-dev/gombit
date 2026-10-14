@@ -1,12 +1,18 @@
 package config
 
 import (
+	"bufio"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
 func TestParseDotEnvLine(t *testing.T) {
+	// Written as a code point rather than an escape so the byte order mark stays
+	// visible to whoever reads this test later.
+	bom := string(rune(0xFEFF))
 	tests := []struct {
 		name      string
 		line      string
@@ -23,6 +29,14 @@ func TestParseDotEnvLine(t *testing.T) {
 		{name: "double quoted", line: `GOMBIT_APP_NAME="my app"`, wantKey: "GOMBIT_APP_NAME", wantValue: "my app", wantOK: true},
 		{name: "single quoted", line: `GOMBIT_APP_NAME='my app'`, wantKey: "GOMBIT_APP_NAME", wantValue: "my app", wantOK: true},
 		{name: "surrounding whitespace", line: "  GOMBIT_HTTP_ADDR = :8080  ", wantKey: "GOMBIT_HTTP_ADDR", wantValue: ":8080", wantOK: true},
+		{name: "inline comment", line: "GOMBIT_APP_NAME=my app # trailing note", wantKey: "GOMBIT_APP_NAME", wantValue: "my app", wantOK: true},
+		{name: "hash without a space is part of the value", line: "GOMBIT_APP_NAME=abc#def", wantKey: "GOMBIT_APP_NAME", wantValue: "abc#def", wantOK: true},
+		{name: "hash inside double quotes", line: `GOMBIT_APP_NAME="a # b"`, wantKey: "GOMBIT_APP_NAME", wantValue: "a # b", wantOK: true},
+		{name: "hash inside single quotes", line: `GOMBIT_APP_NAME='a # b'`, wantKey: "GOMBIT_APP_NAME", wantValue: "a # b", wantOK: true},
+		{name: "export prefix", line: "export GOMBIT_HTTP_ADDR=:8080", wantKey: "GOMBIT_HTTP_ADDR", wantValue: ":8080", wantOK: true},
+		{name: "export prefix with comment", line: "export GOMBIT_DOCS_ENABLED=true # on", wantKey: "GOMBIT_DOCS_ENABLED", wantValue: "true", wantOK: true},
+		{name: "byte order mark", line: bom + "GOMBIT_APP_NAME=afterbom", wantKey: "GOMBIT_APP_NAME", wantValue: "afterbom", wantOK: true},
+		{name: "only a comment after the value", line: "GOMBIT_DOCS_ENABLED= # empty plus comment", wantKey: "GOMBIT_DOCS_ENABLED", wantValue: "", wantOK: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -56,7 +70,9 @@ func TestLoadDotEnvAppliesUnsetVariables(t *testing.T) {
 		_ = os.Unsetenv(envHTTPAddr)
 	})
 
-	loadDotEnv()
+	if err := loadDotEnv(); err != nil {
+		t.Fatalf("loadDotEnv() = %v, want nil", err)
+	}
 
 	if got := os.Getenv(envAppName); got != "fromdotenv" {
 		t.Fatalf("GOMBIT_APP_NAME = %q, want %q", got, "fromdotenv")
@@ -77,7 +93,9 @@ func TestLoadDotEnvDoesNotOverwriteProcessEnvironment(t *testing.T) {
 
 	t.Setenv(envAppName, "fromprocess")
 
-	loadDotEnv()
+	if err := loadDotEnv(); err != nil {
+		t.Fatalf("loadDotEnv() = %v, want nil", err)
+	}
 
 	if got := os.Getenv(envAppName); got != "fromprocess" {
 		t.Fatalf("GOMBIT_APP_NAME = %q, want %q (process env must win)", got, "fromprocess")
@@ -89,7 +107,82 @@ func TestLoadDotEnvNoFileIsNoop(t *testing.T) {
 	t.Chdir(dir)
 
 	// Should not panic or error when .env does not exist.
-	loadDotEnv()
+	if err := loadDotEnv(); err != nil {
+		t.Fatalf("loadDotEnv() with no .env = %v, want nil", err)
+	}
+}
+
+func TestDotEnvValuesMissingFileIsNotAnError(t *testing.T) {
+	values, err := dotEnvValues(filepath.Join(t.TempDir(), dotEnvFile))
+	if err != nil {
+		t.Fatalf("dotEnvValues() = %v, want nil for a missing file", err)
+	}
+	if values != nil {
+		t.Fatalf("dotEnvValues() = %v, want nil map", values)
+	}
+}
+
+func TestDotEnvValuesReadsKeysAfterALongLine(t *testing.T) {
+	path := filepath.Join(t.TempDir(), dotEnvFile)
+	// Over bufio.Scanner's 64 KiB token default: the old scanner stopped here and
+	// every key after it — including GOMBIT_JWT_SECRET — silently vanished.
+	long := strings.Repeat("x", 70*1024)
+	content := "GOMBIT_APP_NAME=first\nGOMBIT_LONG_VALUE=" + long + "\nGOMBIT_HTTP_ADDR=:8080\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write .env: %v", err)
+	}
+
+	values, err := dotEnvValues(path)
+	if err != nil {
+		t.Fatalf("dotEnvValues() = %v, want nil", err)
+	}
+	if values["GOMBIT_LONG_VALUE"] != long {
+		t.Fatalf("GOMBIT_LONG_VALUE length = %d, want %d", len(values["GOMBIT_LONG_VALUE"]), len(long))
+	}
+	if got := values["GOMBIT_HTTP_ADDR"]; got != ":8080" {
+		t.Fatalf("GOMBIT_HTTP_ADDR = %q, want :8080 (keys after a long line must still load)", got)
+	}
+}
+
+func TestDotEnvValuesReportsALineOverTheCap(t *testing.T) {
+	path := filepath.Join(t.TempDir(), dotEnvFile)
+	content := "GOMBIT_APP_NAME=ok\nGOMBIT_LONG_VALUE=" + strings.Repeat("y", maxDotEnvLineBytes+1) + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write .env: %v", err)
+	}
+
+	_, err := dotEnvValues(path)
+	if err == nil {
+		t.Fatal("dotEnvValues() = nil, want an error instead of silently dropping the rest")
+	}
+	if !errors.Is(err, bufio.ErrTooLong) {
+		t.Fatalf("dotEnvValues() error = %v, want it to wrap bufio.ErrTooLong", err)
+	}
+}
+
+func TestLoadFailsOnATruncatedDotEnv(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	content := "GOMBIT_APP_NAME=ok\nGOMBIT_LONG_VALUE=" + strings.Repeat("z", maxDotEnvLineBytes+1) + "\n"
+	if err := os.WriteFile(filepath.Join(dir, dotEnvFile), []byte(content), 0o600); err != nil {
+		t.Fatalf("write .env: %v", err)
+	}
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() with a .env it cannot read = nil error, want failure")
+	}
+}
+
+func TestLoadFromDirReportsATruncatedDotEnv(t *testing.T) {
+	dir := t.TempDir()
+	content := "GOMBIT_LONG_VALUE=" + strings.Repeat("w", maxDotEnvLineBytes+1) + "\n"
+	if err := os.WriteFile(filepath.Join(dir, dotEnvFile), []byte(content), 0o600); err != nil {
+		t.Fatalf("write .env: %v", err)
+	}
+
+	if _, err := LoadFromDir(dir); err == nil {
+		t.Fatal("LoadFromDir() with a truncated .env = nil error, want failure")
+	}
 }
 
 func TestLoadAppliesDotEnvJWTSecret(t *testing.T) {
