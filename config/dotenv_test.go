@@ -37,6 +37,10 @@ func TestParseDotEnvLine(t *testing.T) {
 		{name: "export prefix with comment", line: "export GOMBIT_DOCS_ENABLED=true # on", wantKey: "GOMBIT_DOCS_ENABLED", wantValue: "true", wantOK: true},
 		{name: "byte order mark", line: bom + "GOMBIT_APP_NAME=afterbom", wantKey: "GOMBIT_APP_NAME", wantValue: "afterbom", wantOK: true},
 		{name: "only a comment after the value", line: "GOMBIT_DOCS_ENABLED= # empty plus comment", wantKey: "GOMBIT_DOCS_ENABLED", wantValue: "", wantOK: true},
+		{name: "apostrophe inside the value opens no quote", line: "GOMBIT_APP_NAME=O'Malley app # prod", wantKey: "GOMBIT_APP_NAME", wantValue: "O'Malley app", wantOK: true},
+		{name: "comment after a quoted value that holds a hash", line: `GOMBIT_APP_NAME="a # b" # prod`, wantKey: "GOMBIT_APP_NAME", wantValue: "a # b", wantOK: true},
+		{name: "quote that is not the first character", line: `GOMBIT_APP_NAME=say "hi" # loud`, wantKey: "GOMBIT_APP_NAME", wantValue: `say "hi"`, wantOK: true},
+		{name: "unterminated leading quote is plain text", line: `GOMBIT_APP_NAME='unclosed # tail`, wantKey: "GOMBIT_APP_NAME", wantValue: "'unclosed", wantOK: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -170,6 +174,8 @@ func TestLoadFailsOnATruncatedDotEnv(t *testing.T) {
 
 	if _, err := Load(); err == nil {
 		t.Fatal("Load() with a .env it cannot read = nil error, want failure")
+	} else if !errors.Is(err, bufio.ErrTooLong) {
+		t.Fatalf("Load() error = %v, want it to come from the truncated .env", err)
 	}
 }
 
@@ -182,6 +188,45 @@ func TestLoadFromDirReportsATruncatedDotEnv(t *testing.T) {
 
 	if _, err := LoadFromDir(dir); err == nil {
 		t.Fatal("LoadFromDir() with a truncated .env = nil error, want failure")
+	} else if !errors.Is(err, bufio.ErrTooLong) {
+		t.Fatalf("LoadFromDir() error = %v, want it to come from the truncated .env", err)
+	}
+}
+
+// A .env that exists but cannot be read — here a directory in its place — is an
+// error, unlike the missing file that stays a silent no-op. This is the
+// non-ErrNotExist os.Open/scan path the issue lists.
+func TestDotEnvValuesReportsAnUnreadableFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), dotEnvFile)
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatalf("mkdir .env: %v", err)
+	}
+
+	values, err := dotEnvValues(path)
+	if err == nil {
+		t.Fatal("dotEnvValues() = nil error, want failure for a .env that cannot be read")
+	}
+	if values != nil {
+		t.Fatalf("dotEnvValues() = %v, want no values alongside the error", values)
+	}
+}
+
+// Repeated keys take the first value, which is what dotEnvValues has always
+// done. Note this diverges from `set -a; . ./.env`, where the last assignment
+// wins; a .env should not repeat a key.
+func TestDotEnvValuesFirstOccurrenceWins(t *testing.T) {
+	path := filepath.Join(t.TempDir(), dotEnvFile)
+	content := "GOMBIT_APP_NAME=first\nGOMBIT_APP_NAME=second\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write .env: %v", err)
+	}
+
+	values, err := dotEnvValues(path)
+	if err != nil {
+		t.Fatalf("dotEnvValues() = %v, want nil", err)
+	}
+	if got := values["GOMBIT_APP_NAME"]; got != "first" {
+		t.Fatalf("GOMBIT_APP_NAME = %q, want first (the first occurrence wins)", got)
 	}
 }
 

@@ -116,35 +116,43 @@ func parseDotEnvLine(line string) (key, value string, ok bool) {
 		return "", "", false
 	}
 	v = strings.TrimSpace(stripInlineComment(strings.TrimSpace(v)))
-	if len(v) >= 2 {
-		if (v[0] == '"' && v[len(v)-1] == '"') || (v[0] == '\'' && v[len(v)-1] == '\'') {
-			v = v[1 : len(v)-1]
-		}
+	if isQuoted(v) {
+		v = v[1 : len(v)-1]
 	}
 	return k, v, true
 }
 
-// stripInlineComment removes a trailing `# ...` comment. A `#` only starts one
-// when it is outside quotes and preceded by whitespace, so a value like
-// `PASS=abc#def` keeps its hash while `PASS=abc # note` does not swallow the
-// rest of the line into the secret.
+// stripInlineComment removes a trailing `# ...` comment. A `#` starts one only
+// outside a quoted region and preceded by whitespace, so `PASS=abc#def` keeps
+// its hash while `PASS=abc # note` does not swallow the rest of the line into
+// the secret. A quoted region is what this parser takes a value to be: a quote
+// at the very first byte, closed by the next matching quote (see isQuoted). An
+// apostrophe anywhere else opens nothing, so `O'Malley app # prod` loses its
+// comment. Escaped quotes inside a quoted value are not supported.
 func stripInlineComment(v string) string {
-	var quote rune
-	for i, r := range v {
-		if quote != 0 {
-			if r == quote {
-				quote = 0
-			}
+	from := 0
+	if len(v) > 0 && (v[0] == '"' || v[0] == '\'') {
+		if end := strings.IndexByte(v[1:], v[0]); end >= 0 {
+			from = end + 2
+		}
+	}
+	for i := from; i < len(v); i++ {
+		if v[i] != '#' {
 			continue
 		}
-		switch r {
-		case '"', '\'':
-			quote = r
-		case '#':
-			if i == 0 || v[i-1] == ' ' || v[i-1] == '\t' {
-				return strings.TrimRight(v[:i], " \t")
-			}
+		if i == 0 || v[i-1] == ' ' || v[i-1] == '\t' {
+			return strings.TrimRight(v[:i], " \t")
 		}
 	}
 	return v
+}
+
+// isQuoted reports whether the value is wrapped in one layer of matching
+// single or double quotes — the only quoting a gombit-generated .env file
+// uses, and the shape parseDotEnvLine unwraps.
+func isQuoted(v string) bool {
+	if len(v) < 2 {
+		return false
+	}
+	return (v[0] == '"' && v[len(v)-1] == '"') || (v[0] == '\'' && v[len(v)-1] == '\'')
 }
