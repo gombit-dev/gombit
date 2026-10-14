@@ -41,6 +41,10 @@ func TestParseDotEnvLine(t *testing.T) {
 		{name: "comment after a quoted value that holds a hash", line: `GOMBIT_APP_NAME="a # b" # prod`, wantKey: "GOMBIT_APP_NAME", wantValue: "a # b", wantOK: true},
 		{name: "quote that is not the first character", line: `GOMBIT_APP_NAME=say "hi" # loud`, wantKey: "GOMBIT_APP_NAME", wantValue: `say "hi"`, wantOK: true},
 		{name: "unterminated leading quote is plain text", line: `GOMBIT_APP_NAME='unclosed # tail`, wantKey: "GOMBIT_APP_NAME", wantValue: "'unclosed", wantOK: true},
+		// Escapes are not part of this parser. The value below is read as a quote
+		// closed by the escaped one, so the rest is a comment: pinned so the
+		// limitation is visible here rather than only in docs/config.md.
+		{name: "escaped quote is not supported", line: `GOMBIT_APP_NAME="a\" # b"`, wantKey: "GOMBIT_APP_NAME", wantValue: `a\`, wantOK: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
