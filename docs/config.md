@@ -39,8 +39,8 @@ line by line: blank lines and `#` comments are skipped, a leading `export `
 and a UTF-8 byte order mark are removed, a `#` preceded by whitespace outside
 quotes ends the value, and the first value for a repeated key wins. A line may
 be up to 1 MiB; a `.env` that cannot be read in full — a longer line, or any
-other read error — fails `config.Load()` with the reason instead of applying
-part of the file. The M1-1 boundary recognizes:
+other read error — fails `config.Load()` and `config.LoadFromDir()` with the
+reason instead of applying part of the file. The M1-1 boundary recognizes:
 
 | Variable | Field | Default |
 | --- | --- | --- |
