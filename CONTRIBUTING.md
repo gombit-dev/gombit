@@ -218,6 +218,35 @@ Review the resulting diff before committing — an unreviewed `-update` defeats
 the point. Never commit `replace` directives or machine-specific paths into the
 goldens.
 
+### Changelog and upgrade notes
+
+A change an application can notice gets a `CHANGELOG.md` entry under
+`[Unreleased]`, linking its issue. That entry must also be classified in the
+compatibility manifest, [`upgrade/manifest.yaml`](upgrade/manifest.yaml), which
+the upgrade notes and `gombit upgrade` plans are built from. Add a change under
+`- version: unreleased` whose `refs` name the issue:
+
+```yaml
+      - id: jobs-inspect-exact-payload     # kebab-case, unique
+        kind: informational                # manual if the app must act (then add details:)
+        area: cli                          # api, behavior, cli, client, config, dependency, scaffold, schema, security
+        summary: "`gombit jobs inspect` prints the payload exactly as the queue holds it."
+        refs: [497]
+```
+
+Then regenerate the notes:
+
+```bash
+go test ./upgrade -run TestUpgradeNotesDoc -update
+```
+
+`TestChangelogIsDeclared` fails, with this snippet, when an issue the
+changelog links is neither declared nor exempt. A change that means nothing
+for an application (CI, tests, tooling, docs only) goes in `changelogExempt`
+in `upgrade/manifest_test.go` instead, with the reason. See
+[docs/upgrade.md](docs/upgrade.md#the-compatibility-manifest) for the kinds,
+areas and `breaking`.
+
 ### Contract drift
 
 Any API change must regenerate the OpenAPI document and the TypeScript client
