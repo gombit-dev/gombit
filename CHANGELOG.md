@@ -10,6 +10,363 @@ version.
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-10-15
+
+### Added
+
+- The upgrade baseline (UPGRADE-1). It provides:
+  - `upgrade.Detect`, which reads an app's framework version from `go.mod`,
+    offline (a `replace` by the framework module is followed; a local
+    checkout, a fork, or an applying `go.work`, which is the go command's
+    answer, claim no version) and its scaffold version from `gombit.yaml`;
+  - a versioned `gombit:` block (`metadata: 1`, `scaffold: 1`) that `gombit
+    new` now writes to `gombit.yaml`; a newer metadata format or scaffold
+    version is refused;
+  - scaffold version 0 for apps generated before the block existed, which
+    `gombit upgrade baseline --write` records without touching anything
+    else (checked: every other value must decode the same), through a synced
+    temp file renamed into place: never seen half-written on Unix and NTFS,
+    and on Unix synced to disk, directory included, before it returns (if
+    that sync fails, the command prints the recorded baseline and fails);
+  - `gombit upgrade baseline [--dir] [--json] [--write]`, and
+    [docs/upgrade.md](docs/upgrade.md)
+    ([#341](https://github.com/gombit-dev/gombit/issues/341)).
+
+- The compatibility manifest (UPGRADE-2). It provides:
+  - `upgrade/manifest.yaml`, built into `gombit`, which lists every release
+    from v0.6.1 and its upgrade-relevant changes. Each change is classified
+    `manual`, `automatic` (it names an action that carries its
+    implementation, `upgrade.LookupAction`) or
+    `informational`, can be marked `breaking`, and names its area. The
+    manifest is validated strictly.
+  - `upgrade.LoadManifest`, `Manifest.Path`, `Manifest.PathFrom` (from an
+    app's baseline: refuses a workspace, a local checkout or a fork), and
+    `Classify`. A version the manifest does not list fails with
+    `ErrNoUpgradePath` and the reason (older than its first release, newer
+    than the CLI, a pseudo-version or unlisted pre-release, a release missing
+    from it, a downgrade); it never guesses.
+  - `gombit upgrade notes [--release | --from [--to]] [--json]`.
+  - Upgrade notes rendered from the manifest:
+    [docs/upgrade-notes.md](docs/upgrade-notes.md), checked for drift, and
+    the top of each GitHub release body. The release workflow fails before
+    publishing a stable release the manifest is not closed at (unlisted, not
+    its newest release, or changes left under `unreleased`), and a test
+    checks every issue the changelog's Unreleased section links against the
+    manifest ([docs/releasing.md](docs/releasing.md))
+    ([#342](https://github.com/gombit-dev/gombit/issues/342)).
+
+- `gombit upgrade --dry-run [--to vX.Y.Z] [--dir] [--json]` (UPGRADE-3) plans
+  upgrading an application to a framework release, from its baseline and the
+  compatibility manifest, and writes nothing: the current and target
+  versions, every go.mod directive that must change for the upgraded build
+  to be the target release (the require, and each replace that would decide
+  that build, active today or dormant, resolved at the target), the automatic
+  changes the app needs (an action can report it is not needed), every
+  manual action with what to do, the breaking changes the app faces and the
+  informational ones. A version the manifest does not
+  list, a downgrade, or a baseline that names no framework release fails
+  with the reason. It never prompts, so it runs in CI. `upgrade.PlanUpgrade`
+  is the API; `upgrade.Action` gains a read-only `Check`
+  ([#343](https://github.com/gombit-dev/gombit/issues/343)).
+
+- `gombit upgrade --to vX.Y.Z` (UPGRADE-4) applies an upgrade's dependency
+  changes with the go command: it edits the framework replaces the plan
+  names (`go mod edit -dropreplace` / `-replace`), then runs `go get
+  github.com/gombit-dev/gombit@vX.Y.Z`, and prints every command with the
+  `go.mod` and `go.sum` lines it changed. A go command that fails is
+  reported with its full output, and a result that does not build the
+  target is refused; either way `go.mod` and `go.sum` are restored. The
+  plan's automatic and manual changes are reported as still to do.
+  `--to` is required to apply; `upgrade.ApplyDependencies` is the API
+  ([#344](https://github.com/gombit-dev/gombit/issues/344)).
+
+- `gombit upgrade check [--dir] [--json]` (UPGRADE-5) reports every use, in
+  the application, of a framework API whose doc comment has a `Deprecated:`
+  paragraph (the Go convention), whether a package, a function, a method, a
+  type, a constant, a variable, a struct field (named or embedded) or an
+  interface method: file, line and column, the symbol, and what to use
+  instead. Uses are resolved from type information (`go/packages`,
+  `go/types`), every package, test and dependency type-checked from source
+  as one graph, so a use and the framework declaration it uses are one
+  object; every framework package in the graph is read, also one reached
+  only through another dependency, and an import of a deprecated package
+  and an element of an unkeyed struct literal count too. A matching name, a
+  comment or a string is never reported; an app that does not type-check,
+  or a framework object outside the loaded graph, is an error, never a
+  clean result. It exits 1
+  when there is any use.
+  `upgrade.ScanDeprecated` is the API, and a test requires every
+  `Deprecated:` paragraph in the framework to name its replacement. The
+  framework now requires `golang.org/x/tools` directly
+  ([#345](https://github.com/gombit-dev/gombit/issues/345)).
+
+- `gombit upgrade fix` (UPGRADE-6) runs the framework's codemods:
+  rewrites of an application's uses of framework APIs, for changes with a
+  mechanical replacement (a rename, a move, a reshaped call). Uses are
+  found from type information, as `gombit upgrade check` finds them, and
+  rewritten in the syntax tree, never as text. Imports are added and
+  dropped as needed, and files are printed gofmt-formatted with their line
+  endings kept. The codemods run in passes on their own output (one may
+  rewrite another's) until a pass changes nothing, and that pass
+  type-checks the result, so a proposed rewrite compiles and running it
+  twice changes nothing
+  ([#346](https://github.com/gombit-dev/gombit/issues/346)).
+  - By default it writes nothing: it prints a unified diff for `git apply`.
+    `--patch FILE` saves it to a file instead, and `--write` rewrites the
+    files atomically. It writes nothing when a file no longer holds the
+    exact bytes the codemods parsed.
+  - A use it cannot rewrite safely is left unchanged and listed with the
+    reason, and the command exits 1.
+  - `upgrade.RunCodemods` and `upgrade.Codemod` are the API. An automatic
+    manifest change applies a codemod as the action `codemod:<id>`. Its
+    check counts build-excluded files that mention the API, and applying
+    it fails with `upgrade.ErrCodemodIncomplete` while any use or such
+    file remains.
+  - No codemods ship yet: the only deprecated API,
+    `database.KeepStoredZeros`, has no mechanical replacement.
+
+### Changed
+
+- On Windows, `gombit make resource` replaces files with a POSIX-semantics
+  rename (NTFS, Windows 10 1709 or later), so a file another program holds
+  open with delete sharing no longer blocks it. On a volume that refuses that
+  rename (FAT or exFAT, a network share or mapped drive, a `\\wsl$` path, or
+  an older Windows) it keeps its previous behavior, a plain rename, and its
+  rollback. `gombit upgrade baseline --write` is atomic or nothing: on such a
+  volume it refuses before changing `gombit.yaml`
+  ([#341](https://github.com/gombit-dev/gombit/issues/341)).
+
+- `upgrade` is a framework command now, and `gombit make command` refuses
+  it. An app that already registers its own `upgrade` command should rename
+  it: the framework's is added first and Cobra resolves to it
+  ([#341](https://github.com/gombit-dev/gombit/issues/341)).
+
+### Fixed
+
+- An admin relation field on a string key (a country code, a SKU) stores the
+  value sent, byte for byte: anything numeric-looking was parsed as an integer
+  and converted back as a rune, so `"123"` was stored as `"{"` and `"007"` as
+  `"\a"`, and a filter on `"007"` found nothing. A belongs_to value is now
+  coerced as its key column's type, on writes and filters, and the admin SPA
+  sends relation ids as given instead of turning `"007"` into `7`, `"1e3"` into
+  `1000`, or `"Infinity"` into a cleared key. A JSON number for a string key,
+  and a uuid key in a non-canonical form (no hyphens, braces), are now a 422,
+  as for a plain string or `uuid` field
+  ([#452](https://github.com/gombit-dev/gombit/issues/452)).
+
+- CI rebuilds the embedded admin SPA and fails when the committed
+  `internal/adminui/dist` differs from a fresh build of `internal/adminui/src`.
+  Nothing enforced the rebuild, so source changes (the #250 CSRF fix among
+  them) were missing from released binaries for weeks. `dist/` was brought
+  up to date by STORAGE-8 (released in v0.7.0) and matches its source; the
+  release workflow refuses to tag a stale one too
+  ([#451](https://github.com/gombit-dev/gombit/issues/451)).
+
+- An admin `PATCH` writes only the columns the request (or a model hook)
+  changed. It loaded the row and saved the whole snapshot back, so it reverted
+  another request's change to a column it never mentioned, re-inserted a row
+  deleted meanwhile (now a 404), and re-wrote `has_many` children, pulling a
+  moved child back and recreating a deleted one (associations are no longer
+  written). The response is the row as stored. `database.ScopeEdit` narrows
+  any `Select("*")` update of the scoped row to its changed columns
+  ([#450](https://github.com/gombit-dev/gombit/issues/450)).
+
+- A float a write through a model sets to `+Inf`, `-Inf` or `NaN`, or beyond
+  a `float32` field's range, is a 422 naming the field on every driver, the
+  admin's writes included (`"Inf"`, `"NaN"`, a `float32` overflow). It was stored on PostgreSQL and SQLite and a 500 on
+  MySQL, and a stored one broke every response holding the row, the admin's
+  list page included, until it was repaired by hand. `database.Open`
+  registers a `gombit:float` callback next to the time range check
+  ([#449](https://github.com/gombit-dev/gombit/issues/449)).
+
+- `gombit make resource` answers a field written `notes:text,searchable`
+  with the spelling the grammar wants (`notes:text:searchable`: modifiers
+  follow a second colon) instead of an unknown type `"text,searchable"`;
+  commas inside a type's arguments (`enum(a,b)`, `decimal(10,2)`) are
+  unaffected ([#446](https://github.com/gombit-dev/gombit/issues/446)).
+
+- Production configuration refuses `GOMBIT_HTTP_TRUSTED_PROXIES` values that
+  trust every peer in any spelling: a zero-length prefix (`10.0.0.0/0`,
+  `::0/0`) or ranges that together cover every IPv4 or IPv6 address
+  (`0.0.0.0/1,128.0.0.0/1`). Only the literal `0.0.0.0/0` forms were refused
+  before, so a trust-all list could still start and let clients spoof their
+  forwarded IP ([#500](https://github.com/gombit-dev/gombit/issues/500)).
+
+- A job whose worker died mid-attempt is no longer redelivered past its
+  `MaxAttempts`: the redelivery that would exceed it moves the job to the
+  failed jobs as exhausted. An attempt interrupted by `Release` or worker
+  shutdown may still run once more, as before
+  ([#494](https://github.com/gombit-dev/gombit/issues/494)).
+
+- `gombit jobs retry --all` retries each failed job at most once per
+  invocation. A job that a live worker failed again went back to the head of
+  the failed set and was retried until the command timed out
+  ([#493](https://github.com/gombit-dev/gombit/issues/493)).
+
+- `gombit contract app` reports only a framework release, picking the
+  `replace` the go command would. A `replace` of a version the app does not
+  require no longer counts, and an exact-version `replace` wins over an
+  every-version one in either order (a wildcard local replace plus an exact
+  one used to fail as unresolved). A fork (`replace` by another module) is
+  now unresolved, like a local path: its version used to be reported as the
+  framework's, which is not a release a host can find. A `go.mod` the go
+  command refuses (the framework required twice, conflicting replaces) is an
+  error. It shares this reading of `go.mod` with `gombit upgrade baseline`,
+  so for a `go.mod` the two report the same framework version
+  ([#341](https://github.com/gombit-dev/gombit/issues/341)).
+
+- Client values the database rejects were a 500 on PostgreSQL and MySQL and
+  stored on SQLite: a NUL byte or invalid UTF-8 in a string (PostgreSQL),
+  text over 65,535 bytes in a `text` column (MySQL), more characters than a
+  `varchar(n)` holds (PostgreSQL and MySQL), and a NUL byte in a list filter
+  or search term, or an id over `MaxInt64` on a generated `get` (PostgreSQL,
+  from any unauthenticated GET). `database.Open` now registers a
+  `gombit:text` callback, next to the time range check, that refuses each
+  with a 422 naming the field on every driver, on every write path
+  (`database.TextProblem`, `database.TextMaxBytes`); `FilterEq`, `Search`
+  and the admin's filters and search refuse such terms with a 422, and a
+  generated `get` and a newly scaffolded product handler answer such an id
+  with a 404. `MapPersistError` and
+  `MapLoadError` answer a remaining driver data exception (PostgreSQL 22001,
+  22003, 22007, 22008, 22021, 22P05; MySQL 1264, 1265, 1292, 1366, 1406)
+  with a 422 without fields instead of a 500 (`database.IsDataException`),
+  and a uint filter over `MaxInt64` is a 422; a decimal over its precision
+  is #440's. An edit of a loaded row is judged on what it changes:
+  `database.StoredValues` records the row, and `database.ScopeEdit` scopes
+  the update so text and a zero instant the row still stores, after the
+  model's hooks, are not judged again (`database.KeepStoredZeros` is
+  deprecated in its favour). **Behaviour change:** text a column cannot hold on every driver
+  is now refused where it was stored: on SQLite; on PostgreSQL a `text`
+  value over 65,535 bytes and an unsized primary-key, indexed, unique or
+  defaulted string over 191 characters (MySQL's `varchar(191)`); on MySQL
+  and SQLite a NUL byte. **Upgrading:** a row that already stores such text
+  stays editable through the admin (its form included) and partial updates,
+  but a generic
+  `Save` of it is a 422 on that field until the value is cleaned up (see
+  docs/database.md). `database.Search` takes a context and returns an error,
+  like `FilterEq`, so run `gombit generate` to update an app's
+  `handler.gen.go`; an app's own scaffolded `internal/product/handler.go`
+  needs the 63-bit id parse by hand
+  ([#444](https://github.com/gombit-dev/gombit/issues/444)).
+
+## [0.7.1] — 2026-10-06
+
+### Fixed
+
+- Decimals are no longer silently changed on write. On SQLite, which stores a
+  `decimal` column through float64, `99999999999999.9999` used to become
+  `100000000000000`; PostgreSQL and MySQL rounded a value over the column's
+  scale. Every create, upsert, and update now refuses, with a 422 naming the
+  field, a value written to a decimal column (in any Go shape: decimal,
+  string, number, pointer, named type, `sql.Null*`) that does not fit the
+  column's `decimal(p,s)` as GORM emits it (MySQL's `DECIMAL(10,0)` when
+  none is declared), that is not a decimal number, or on SQLite that has
+  more than 15 digits (`database.SQLiteDecimalDigits`). An update that does
+  not write a decimal column is not affected by the row's existing value. A
+  decimal whose exponent is beyond ±1000 or that spells more than 1000 digits
+  (`types.MaxDecimalDigits`, e.g. `"1e1000000000"` or `"0e1000000000"`) is
+  refused when parsed, scanned, and before any write, instead of pinning a CPU
+  while it is formatted. **Behavior change:** a decimal field whose column type
+  is neither decimal nor text (`type:real`, `type:double precision`,
+  `type:money`, `type:bigint`) now fails every write with an error; declare it
+  `decimal(p,s)`. A string written to a text decimal column must be the
+  canonical spelling (`"1.5"`, not `" 1.5 "` or `"1.50"`). A `types.Decimal`
+  now refuses to load a stored value over 1000 digits (possible in an
+  unbounded PostgreSQL `numeric`), and a non-finite float. The generated
+  create handler now responds with the stored row, so its body is what a get
+  returns; run `gombit generate` to pick that up in an existing app
+  ([#440](https://github.com/gombit-dev/gombit/issues/440)).
+
+- Unknown paths and recovered handler panics now answer with the D10 error
+  envelope like every other framework error. A 404 used to be Gin's
+  `text/plain` "404 page not found" (or an empty body under an embedded
+  frontend), and a panic an empty 500 with no `Content-Type`, so JSON clients
+  such as the generated TypeScript client failed to parse them and got no
+  `request_id`. They are now `not_found` (404) and `internal` (500)
+  ([#438](https://github.com/gombit-dev/gombit/issues/438)).
+
+- `cache.WithJanitor` with a zero or negative interval no longer crashes the
+  process. The value reached `time.NewTicker` inside the janitor goroutine,
+  whose panic the caller could not recover; it now means no janitor, as if
+  the option were omitted
+  ([#436](https://github.com/gombit-dev/gombit/issues/436)).
+
+- A list page so far out that its offset overflows is empty. `contract.PageOffset`
+  computed `(page - 1) * per_page` unchecked, so `?page=9223372036854775807`
+  wrapped to a negative offset, which GORM ignores, and returned the first
+  page's rows under that page number on every generated list endpoint and the
+  admin data plane. The offset now saturates at `math.MaxInt`, which selects
+  nothing on SQLite, PostgreSQL and MySQL
+  ([#441](https://github.com/gombit-dev/gombit/issues/441)).
+
+- Database logging goes through the app's logger instead of GORM's default
+  one, which wrote to stdout in its own coloured format, ignored
+  `GOMBIT_LOG_SINK` / `GOMBIT_LOG_LEVEL`, logged every failed statement with
+  its parameter values inlined (a duplicate registration printed the user's
+  bcrypt hash and email), and reported every not-found lookup as an error.
+  Statements, not-found lookups and the failures the API answers with a 4xx
+  (identified by the driver's error code, never by text) are logged at
+  `debug`, slow statements at `warn`, and every other failure at `error`; the
+  logged SQL keeps its placeholders and never carries parameter values,
+  `Scan` included (`database.Open` sets GORM's process-wide
+  `logger.RecorderParamsFilter`). `database.Open` without an app installs a quiet stderr logger with
+  the same guarantee; a GORM logger the app sets on its database is kept. New:
+  `database.NewLogger`, `database.SlowQueryThreshold` and
+  `(*database.DB).ReplaceDefaultLogger`
+  ([#439](https://github.com/gombit-dev/gombit/issues/439)).
+
+- The in-memory cache's `Increment` refuses to overflow, as Redis `INCRBY`
+  does: incrementing past `math.MaxInt64` (or below `math.MinInt64`) returns
+  an "increment or decrement would overflow" error and leaves the value as it
+  was. It used to wrap silently, so a counter that reached the top flipped to
+  a huge negative number under the memory driver and failed under Redis.
+  A stored `nil` is now refused as not an integer too, as Redis refuses it,
+  instead of being overwritten with the delta
+  ([#437](https://github.com/gombit-dev/gombit/issues/437)).
+
+- Every database write refuses a timestamp or date no supported driver can
+  store and return, with a 422 on that field. Any RFC 3339 timestamp was
+  accepted: Postgres stored `0000-01-01T00:00:00Z` as 1 BC, after which the
+  row's endpoint and every list page holding it could no longer be read, and
+  MySQL refused it with a 500. `database.Open` now registers a
+  `gombit:timerange` callback, next to the `Validate` hook, that checks every
+  `time.Time`, `sql.NullTime` and `types.Date` value a create or update writes
+  (`Create`, `Save`, `Updates`, `Update`, `UpdateColumns`, upsert
+  `DO UPDATE` literals, honouring `Select`/`Omit`) against
+  `1000-01-02T00:00:00Z`..`9999-12-30T23:59:59Z` (a day's margin for the time
+  zone a value is read into) and `1000-01-01`..`9999-12-31`
+  (`types.TimeBounds`, `types.DateBounds`, `types.TimeWithin`,
+  `types.DateWithin`). It covers the generated API, the admin data plane and
+  custom code alike, with no regeneration, and adds no allocation to an
+  ordinary write. **Behaviour change:** a zero `time.Time` a write sets (a
+  non-pointer field left unset on create, a zero in a map, `Update` or a
+  `Select` naming the column) is now a 422 on every driver; it was stored on
+  SQLite/PostgreSQL and a 500 on MySQL. Use a pointer for an optional time.
+  `Save` of a struct with an unset `CreatedAt` or defaulted column leaves
+  that column out of its update (the row's value stays; the insert fallback
+  fills it). Rows that already store the zero instant stay editable through
+  `Update`, a partial `Updates` and the admin, which keeps a stored zero in
+  any column a PATCH leaves as stored unless a hook repairs it
+  (`database.StoredValues`, `database.ScopeEdit`); a generic
+  `Save` of one is a 422 until the column is cleaned up
+  (see docs/database.md). A string no Go time parses (`'infinity'`) is refused too
+  ([#443](https://github.com/gombit-dev/gombit/issues/443)).
+
+- A response that cannot be encoded as JSON is answered with HTTP 500 and the
+  D10 `internal` envelope (with the request ID), and logged through the app's
+  logger. Huma decided the status before encoding, so a stored time outside
+  years 0..9999 or a float holding NaN/±Inf produced HTTP 200, a JSON content
+  type, and the plain-text body "error marshaling response", on the row's own
+  endpoint and every list page containing it. `encoding/json` writes nothing
+  until it has encoded the whole body, so Gombit's JSON format
+  (`contract.JSONFormat`) now answers such a failure itself while Gin still
+  holds the status, instead of handing it back to Huma. Outside
+  `framework.New`, `contract.HumaConfigFor` logs the failure through `slog`; a
+  writer on which the status cannot be confirmed to change gets the error back
+  to Huma as before ([#442](https://github.com/gombit-dev/gombit/issues/442)).
+
+## [0.7.0] — 2026-10-04
+
 ### Added
 
 - `storage`, the object storage contract (STORAGE-1). It provides:
@@ -28,6 +385,7 @@ version.
   - `storage/storagetest`, the conformance suite every driver must pass.
 
   ([#323](https://github.com/gombit-dev/gombit/issues/323)).
+
 - Storage drivers and `app.Storage()` (STORAGE-2):
   - `storage/local` streams files to disk under `GOMBIT_STORAGE_LOCAL_ROOT`
     (default `./storage`, created on the first write, gitignored in new
@@ -43,6 +401,7 @@ version.
     `memory`), and `framework.WithStorage` attaches your own.
   - `examples/storage` shows upload, download and delete handlers
     ([#324](https://github.com/gombit-dev/gombit/issues/324)).
+
 - The S3-compatible storage driver, `storage/s3` (STORAGE-3), for AWS S3,
   Cloudflare R2, MinIO and others:
   - configured with `GOMBIT_STORAGE_DRIVER=s3` and the
@@ -70,6 +429,7 @@ version.
 
   Its conformance suite runs against MinIO in CI
   ([#325](https://github.com/gombit-dev/gombit/issues/325)).
+
 - Upload helpers, `storage/upload` (STORAGE-4):
   - `upload.Receive` (multipart forms), `upload.ReceiveBody` (a raw body),
     and `upload.Save` (any reader) stream a file into a store under a
@@ -88,6 +448,7 @@ version.
   - `upload.MapError` maps the errors to D10 responses;
   - `examples/storage` gains `POST /uploads`
     ([#326](https://github.com/gombit-dev/gombit/issues/326)).
+
 - Object visibility and URLs (STORAGE-5):
   - an object is public when its key is under `GOMBIT_STORAGE_PUBLIC_PREFIX`
     (`public/` by default) and private otherwise;
@@ -110,6 +471,7 @@ version.
   - authorization stays with the application, before it asks for a URL;
   - `examples/storage` gains `GET /uploads/:id/link`
     ([#327](https://github.com/gombit-dev/gombit/issues/327)).
+
 - Direct uploads (STORAGE-6):
   - `upload.Authorize` grants a client one signed upload: a `PUT` of
     exactly the declared size and type, with the metadata, under a generated
@@ -134,6 +496,7 @@ version.
   - `examples/storage` gains `POST /uploads/direct` and
     `POST /uploads/direct/:id/confirm`
     ([#328](https://github.com/gombit-dev/gombit/issues/328)).
+
 - Object metadata and cleanup semantics (STORAGE-7):
   - `ObjectInfo` documents what each field means (an opaque `ETag`, never a
     checksum to compute; `ModTime`), and gains `StoredFilename()`;
@@ -197,6 +560,7 @@ version.
   - `examples/storage` records its uploads in SQLite under claims, deletes
     them with their records, and sweeps the rest
     ([#329](https://github.com/gombit-dev/gombit/issues/329)).
+
 - Storage-backed model fields (MODEL-8):
   - `file` and `image` field kinds (`types.File`, `types.Image`) store an
     object key, never bytes. The column has a unique index, so one record
@@ -225,6 +589,7 @@ version.
     comes with STORAGE-8, below.
   - `examples/storage` gains a `Document` resource
     ([#530](https://github.com/gombit-dev/gombit/issues/530)).
+
 - Admin support for storage-backed fields (STORAGE-8):
   - `file` and `image` admin types; the meta carries each field's `accept`
     and `max_bytes`;
@@ -265,243 +630,17 @@ version.
     Content-Security-Policy;
   - `examples/admin` gains a `Brochure` model
     ([#330](https://github.com/gombit-dev/gombit/issues/330)).
-- The upgrade baseline (UPGRADE-1). It provides:
-  - `upgrade.Detect`, which reads an app's framework version from `go.mod`,
-    offline (a `replace` by the framework module is followed; a local
-    checkout, a fork, or an applying `go.work`, which is the go command's
-    answer, claim no version) and its scaffold version from `gombit.yaml`;
-  - a versioned `gombit:` block (`metadata: 1`, `scaffold: 1`) that `gombit
-    new` now writes to `gombit.yaml`; a newer metadata format or scaffold
-    version is refused;
-  - scaffold version 0 for apps generated before the block existed, which
-    `gombit upgrade baseline --write` records without touching anything
-    else (checked: every other value must decode the same), through a synced
-    temp file renamed into place: never seen half-written on Unix and NTFS,
-    and on Unix synced to disk, directory included, before it returns (if
-    that sync fails, the command prints the recorded baseline and fails);
-  - `gombit upgrade baseline [--dir] [--json] [--write]`, and
-    [docs/upgrade.md](docs/upgrade.md)
-    ([#341](https://github.com/gombit-dev/gombit/issues/341)).
-- The compatibility manifest (UPGRADE-2). It provides:
-  - `upgrade/manifest.yaml`, built into `gombit`, which lists every release
-    from v0.6.1 and its upgrade-relevant changes. Each change is classified
-    `manual`, `automatic` (it names an action that carries its
-    implementation, `upgrade.LookupAction`) or
-    `informational`, can be marked `breaking`, and names its area. The
-    manifest is validated strictly.
-  - `upgrade.LoadManifest`, `Manifest.Path`, `Manifest.PathFrom` (from an
-    app's baseline: refuses a workspace, a local checkout or a fork), and
-    `Classify`. A version the manifest does not list fails with
-    `ErrNoUpgradePath` and the reason (older than its first release, newer
-    than the CLI, a pseudo-version or unlisted pre-release, a release missing
-    from it, a downgrade); it never guesses.
-  - `gombit upgrade notes [--release | --from [--to]] [--json]`.
-  - Upgrade notes rendered from the manifest:
-    [docs/upgrade-notes.md](docs/upgrade-notes.md), checked for drift, and
-    the top of each GitHub release body. The release workflow fails before
-    publishing a stable release the manifest is not closed at (unlisted, not
-    its newest release, or changes left under `unreleased`), and a test
-    checks every issue the changelog's Unreleased section links against the
-    manifest ([docs/releasing.md](docs/releasing.md))
-    ([#342](https://github.com/gombit-dev/gombit/issues/342)).
-- `gombit upgrade --dry-run [--to vX.Y.Z] [--dir] [--json]` (UPGRADE-3) plans
-  upgrading an application to a framework release, from its baseline and the
-  compatibility manifest, and writes nothing: the current and target
-  versions, every go.mod directive that must change for the upgraded build
-  to be the target release (the require, and each replace that would decide
-  that build, active today or dormant, resolved at the target), the automatic
-  changes the app needs (an action can report it is not needed), every
-  manual action with what to do, the breaking changes the app faces and the
-  informational ones. A version the manifest does not
-  list, a downgrade, or a baseline that names no framework release fails
-  with the reason. It never prompts, so it runs in CI. `upgrade.PlanUpgrade`
-  is the API; `upgrade.Action` gains a read-only `Check`
-  ([#343](https://github.com/gombit-dev/gombit/issues/343)).
-- `gombit upgrade --to vX.Y.Z` (UPGRADE-4) applies an upgrade's dependency
-  changes with the go command: it edits the framework replaces the plan
-  names (`go mod edit -dropreplace` / `-replace`), then runs `go get
-  github.com/gombit-dev/gombit@vX.Y.Z`, and prints every command with the
-  `go.mod` and `go.sum` lines it changed. A go command that fails is
-  reported with its full output, and a result that does not build the
-  target is refused; either way `go.mod` and `go.sum` are restored. The
-  plan's automatic and manual changes are reported as still to do.
-  `--to` is required to apply; `upgrade.ApplyDependencies` is the API
-  ([#344](https://github.com/gombit-dev/gombit/issues/344)).
-- `gombit upgrade check [--dir] [--json]` (UPGRADE-5) reports every use, in
-  the application, of a framework API whose doc comment has a `Deprecated:`
-  paragraph (the Go convention), whether a package, a function, a method, a
-  type, a constant, a variable, a struct field (named or embedded) or an
-  interface method: file, line and column, the symbol, and what to use
-  instead. Uses are resolved from type information (`go/packages`,
-  `go/types`), every package, test and dependency type-checked from source
-  as one graph, so a use and the framework declaration it uses are one
-  object; every framework package in the graph is read, also one reached
-  only through another dependency, and an import of a deprecated package
-  and an element of an unkeyed struct literal count too. A matching name, a
-  comment or a string is never reported; an app that does not type-check,
-  or a framework object outside the loaded graph, is an error, never a
-  clean result. It exits 1
-  when there is any use.
-  `upgrade.ScanDeprecated` is the API, and a test requires every
-  `Deprecated:` paragraph in the framework to name its replacement. The
-  framework now requires `golang.org/x/tools` directly
-  ([#345](https://github.com/gombit-dev/gombit/issues/345)).
-- `gombit upgrade fix` (UPGRADE-6) runs the framework's codemods:
-  rewrites of an application's uses of framework APIs, for changes with a
-  mechanical replacement (a rename, a move, a reshaped call). Uses are
-  found from type information, as `gombit upgrade check` finds them, and
-  rewritten in the syntax tree, never as text. Imports are added and
-  dropped as needed, and files are printed gofmt-formatted with their line
-  endings kept. The codemods run in passes on their own output (one may
-  rewrite another's) until a pass changes nothing, and that pass
-  type-checks the result, so a proposed rewrite compiles and running it
-  twice changes nothing
-  ([#346](https://github.com/gombit-dev/gombit/issues/346)).
-  - By default it writes nothing: it prints a unified diff for `git apply`.
-    `--patch FILE` saves it to a file instead, and `--write` rewrites the
-    files atomically. It writes nothing when a file no longer holds the
-    exact bytes the codemods parsed.
-  - A use it cannot rewrite safely is left unchanged and listed with the
-    reason, and the command exits 1.
-  - `upgrade.RunCodemods` and `upgrade.Codemod` are the API. An automatic
-    manifest change applies a codemod as the action `codemod:<id>`. Its
-    check counts build-excluded files that mention the API, and applying
-    it fails with `upgrade.ErrCodemodIncomplete` while any use or such
-    file remains.
-  - No codemods ship yet: the only deprecated API,
-    `database.KeepStoredZeros`, has no mechanical replacement.
 
 ### Changed
 
-- On Windows, `gombit make resource` replaces files with a POSIX-semantics
-  rename (NTFS, Windows 10 1709 or later), so a file another program holds
-  open with delete sharing no longer blocks it. On a volume that refuses that
-  rename (FAT or exFAT, a network share or mapped drive, a `\\wsl$` path, or
-  an older Windows) it keeps its previous behavior, a plain rename, and its
-  rollback. `gombit upgrade baseline --write` is atomic or nothing: on such a
-  volume it refuses before changing `gombit.yaml`
-  ([#341](https://github.com/gombit-dev/gombit/issues/341)).
 - A new app's README lists `storage/` (the local driver's files, created on
   the first write and gitignored) and says `internal/platform` migrates the
   framework's tables (auth, storage claims). The README, the docs index, and
   the user guides (router, security, build, lifecycle, health, frontend,
   contract, CLI, tutorial) now cover the shipped storage feature.
-- A new app's `.env.example` lists every `GOMBIT_*` variable the config
-  package reads, including `GOMBIT_JOBS_DRIVER`, `GOMBIT_JOBS_QUEUE`,
-  `GOMBIT_JOBS_NAMESPACE`, `GOMBIT_HTTP_TRUSTED_PROXIES`, and the database
-  pool settings, commented out with their defaults
-  ([#447](https://github.com/gombit-dev/gombit/pull/447)).
-- `upgrade` is a framework command now, and `gombit make command` refuses
-  it. An app that already registers its own `upgrade` command should rename
-  it: the framework's is added first and Cobra resolves to it
-  ([#341](https://github.com/gombit-dev/gombit/issues/341)).
 
 ### Fixed
 
-- An admin relation field on a string key (a country code, a SKU) stores the
-  value sent, byte for byte: anything numeric-looking was parsed as an integer
-  and converted back as a rune, so `"123"` was stored as `"{"` and `"007"` as
-  `"\a"`, and a filter on `"007"` found nothing. A belongs_to value is now
-  coerced as its key column's type, on writes and filters, and the admin SPA
-  sends relation ids as given instead of turning `"007"` into `7`, `"1e3"` into
-  `1000`, or `"Infinity"` into a cleared key. A JSON number for a string key,
-  and a uuid key in a non-canonical form (no hyphens, braces), are now a 422,
-  as for a plain string or `uuid` field
-  ([#452](https://github.com/gombit-dev/gombit/issues/452)).
-
-- CI rebuilds the embedded admin SPA and fails when the committed
-  `internal/adminui/dist` differs from a fresh build of `internal/adminui/src`.
-  Nothing enforced the rebuild, so source changes (the #250 CSRF fix among
-  them) were missing from released binaries for weeks. `dist/` was brought
-  up to date by STORAGE-8 (released in v0.7.0) and matches its source; the
-  release workflow refuses to tag a stale one too
-  ([#451](https://github.com/gombit-dev/gombit/issues/451)).
-- An admin `PATCH` writes only the columns the request (or a model hook)
-  changed. It loaded the row and saved the whole snapshot back, so it reverted
-  another request's change to a column it never mentioned, re-inserted a row
-  deleted meanwhile (now a 404), and re-wrote `has_many` children, pulling a
-  moved child back and recreating a deleted one (associations are no longer
-  written). The response is the row as stored. `database.ScopeEdit` narrows
-  any `Select("*")` update of the scoped row to its changed columns
-  ([#450](https://github.com/gombit-dev/gombit/issues/450)).
-- A float a write through a model sets to `+Inf`, `-Inf` or `NaN`, or beyond
-  a `float32` field's range, is a 422 naming the field on every driver, the
-  admin's writes included (`"Inf"`, `"NaN"`, a `float32` overflow). It was stored on PostgreSQL and SQLite and a 500 on
-  MySQL, and a stored one broke every response holding the row, the admin's
-  list page included, until it was repaired by hand. `database.Open`
-  registers a `gombit:float` callback next to the time range check
-  ([#449](https://github.com/gombit-dev/gombit/issues/449)).
-- `gombit make resource` answers a field written `notes:text,searchable`
-  with the spelling the grammar wants (`notes:text:searchable`: modifiers
-  follow a second colon) instead of an unknown type `"text,searchable"`;
-  commas inside a type's arguments (`enum(a,b)`, `decimal(10,2)`) are
-  unaffected ([#446](https://github.com/gombit-dev/gombit/issues/446)).
-- Production configuration refuses `GOMBIT_HTTP_TRUSTED_PROXIES` values that
-  trust every peer in any spelling: a zero-length prefix (`10.0.0.0/0`,
-  `::0/0`) or ranges that together cover every IPv4 or IPv6 address
-  (`0.0.0.0/1,128.0.0.0/1`). Only the literal `0.0.0.0/0` forms were refused
-  before, so a trust-all list could still start and let clients spoof their
-  forwarded IP ([#500](https://github.com/gombit-dev/gombit/issues/500)).
-- A job whose worker died mid-attempt is no longer redelivered past its
-  `MaxAttempts`: the redelivery that would exceed it moves the job to the
-  failed jobs as exhausted. An attempt interrupted by `Release` or worker
-  shutdown may still run once more, as before
-  ([#494](https://github.com/gombit-dev/gombit/issues/494)).
-- `gombit jobs retry --all` retries each failed job at most once per
-  invocation. A job that a live worker failed again went back to the head of
-  the failed set and was retried until the command timed out
-  ([#493](https://github.com/gombit-dev/gombit/issues/493)).
-- `gombit contract app` reports only a framework release, picking the
-  `replace` the go command would. A `replace` of a version the app does not
-  require no longer counts, and an exact-version `replace` wins over an
-  every-version one in either order (a wildcard local replace plus an exact
-  one used to fail as unresolved). A fork (`replace` by another module) is
-  now unresolved, like a local path: its version used to be reported as the
-  framework's, which is not a release a host can find. A `go.mod` the go
-  command refuses (the framework required twice, conflicting replaces) is an
-  error. It shares this reading of `go.mod` with `gombit upgrade baseline`,
-  so for a `go.mod` the two report the same framework version
-  ([#341](https://github.com/gombit-dev/gombit/issues/341)).
-- Client values the database rejects were a 500 on PostgreSQL and MySQL and
-  stored on SQLite: a NUL byte or invalid UTF-8 in a string (PostgreSQL),
-  text over 65,535 bytes in a `text` column (MySQL), more characters than a
-  `varchar(n)` holds (PostgreSQL and MySQL), and a NUL byte in a list filter
-  or search term, or an id over `MaxInt64` on a generated `get` (PostgreSQL,
-  from any unauthenticated GET). `database.Open` now registers a
-  `gombit:text` callback, next to the time range check, that refuses each
-  with a 422 naming the field on every driver, on every write path
-  (`database.TextProblem`, `database.TextMaxBytes`); `FilterEq`, `Search`
-  and the admin's filters and search refuse such terms with a 422, and a
-  generated `get` and a newly scaffolded product handler answer such an id
-  with a 404. `MapPersistError` and
-  `MapLoadError` answer a remaining driver data exception (PostgreSQL 22001,
-  22003, 22007, 22008, 22021, 22P05; MySQL 1264, 1265, 1292, 1366, 1406)
-  with a 422 without fields instead of a 500 (`database.IsDataException`),
-  and a uint filter over `MaxInt64` is a 422; a decimal over its precision
-  is #440's. An edit of a loaded row is judged on what it changes:
-  `database.StoredValues` records the row, and `database.ScopeEdit` scopes
-  the update so text and a zero instant the row still stores, after the
-  model's hooks, are not judged again (`database.KeepStoredZeros` is
-  deprecated in its favour). **Behaviour change:** text a column cannot hold on every driver
-  is now refused where it was stored: on SQLite; on PostgreSQL a `text`
-  value over 65,535 bytes and an unsized primary-key, indexed, unique or
-  defaulted string over 191 characters (MySQL's `varchar(191)`); on MySQL
-  and SQLite a NUL byte. **Upgrading:** a row that already stores such text
-  stays editable through the admin (its form included) and partial updates,
-  but a generic
-  `Save` of it is a 422 on that field until the value is cleaned up (see
-  docs/database.md). `database.Search` takes a context and returns an error,
-  like `FilterEq`, so run `gombit generate` to update an app's
-  `handler.gen.go`; an app's own scaffolded `internal/product/handler.go`
-  needs the 63-bit id parse by hand
-  ([#444](https://github.com/gombit-dev/gombit/issues/444)).
-- `gombit make command` refuses the names `generate` and `contract`, which
-  collided with framework commands; every command the root registers is now
-  reserved ([#447](https://github.com/gombit-dev/gombit/pull/447)).
-- `gombit --help` lists every command family and `db` subcommand,
-  `gombit make resource --help` describes the model-first layout and every
-  field kind, and `gombit worker --help` shows `--metrics-addr`
-  ([#447](https://github.com/gombit-dev/gombit/pull/447)).
 - `admin.Register` refuses a model whose primary key spans several columns
   (`admin: Membership has a composite primary key, which is not supported`).
   Such a model used to register without error, and the data plane then
@@ -513,6 +652,7 @@ version.
   now fails `Register` at startup instead of writing the wrong row. Give such
   a model a single-column primary key, or keep it out of the admin registry
   ([#453](https://github.com/gombit-dev/gombit/issues/453)).
+
 - With `GOMBIT_HTTP_REQUEST_TIMEOUT` set, the response a handler writes when
   its request deadline fires (a 504 with the D10 envelope) now reaches the
   client. The `http.Server` `WriteTimeout` equalled the request timeout and
@@ -520,6 +660,7 @@ version.
   first and the client saw the connection close (`EOF`). `WriteTimeout` is now
   the request timeout plus 5s; with the timeout unset the server timeouts are
   unchanged ([#430](https://github.com/gombit-dev/gombit/issues/430)).
+
 - `framework.SanitizeHTML` (and `Security.SanitizeInput`) no longer deletes
   plain text after a stray `<` when the value also carries a real tag:
   `<i>note</i>: if a<b then stop` used to become `note: if a`, and a `</3`
@@ -528,47 +669,14 @@ version.
   value with no complete tag), so it is kept as raw, undecoded input; it is
   no safer than that check, and complete tags elsewhere are still stripped
   ([#433](https://github.com/gombit-dev/gombit/issues/433)).
+
 - HTML documents in an embedded frontend other than the root `index.html`
   (`/legal.html`, a multi-page build's `/about/index.html`) are served with
   the SPA browser security policy instead of the API one, whose
   `default-src 'none'` blocked the page's scripts, styles and images. The
   policy now follows the served content type, not the file name
   ([#434](https://github.com/gombit-dev/gombit/issues/434)).
-- Decimals are no longer silently changed on write. On SQLite, which stores a
-  `decimal` column through float64, `99999999999999.9999` used to become
-  `100000000000000`; PostgreSQL and MySQL rounded a value over the column's
-  scale. Every create, upsert, and update now refuses, with a 422 naming the
-  field, a value written to a decimal column (in any Go shape: decimal,
-  string, number, pointer, named type, `sql.Null*`) that does not fit the
-  column's `decimal(p,s)` as GORM emits it (MySQL's `DECIMAL(10,0)` when
-  none is declared), that is not a decimal number, or on SQLite that has
-  more than 15 digits (`database.SQLiteDecimalDigits`). An update that does
-  not write a decimal column is not affected by the row's existing value. A
-  decimal whose exponent is beyond ±1000 or that spells more than 1000 digits
-  (`types.MaxDecimalDigits`, e.g. `"1e1000000000"` or `"0e1000000000"`) is
-  refused when parsed, scanned, and before any write, instead of pinning a CPU
-  while it is formatted. **Behavior change:** a decimal field whose column type
-  is neither decimal nor text (`type:real`, `type:double precision`,
-  `type:money`, `type:bigint`) now fails every write with an error; declare it
-  `decimal(p,s)`. A string written to a text decimal column must be the
-  canonical spelling (`"1.5"`, not `" 1.5 "` or `"1.50"`). A `types.Decimal`
-  now refuses to load a stored value over 1000 digits (possible in an
-  unbounded PostgreSQL `numeric`), and a non-finite float. The generated
-  create handler now responds with the stored row, so its body is what a get
-  returns; run `gombit generate` to pick that up in an existing app
-  ([#440](https://github.com/gombit-dev/gombit/issues/440)).
-- Unknown paths and recovered handler panics now answer with the D10 error
-  envelope like every other framework error. A 404 used to be Gin's
-  `text/plain` "404 page not found" (or an empty body under an embedded
-  frontend), and a panic an empty 500 with no `Content-Type`, so JSON clients
-  such as the generated TypeScript client failed to parse them and got no
-  `request_id`. They are now `not_found` (404) and `internal` (500)
-  ([#438](https://github.com/gombit-dev/gombit/issues/438)).
-- `cache.WithJanitor` with a zero or negative interval no longer crashes the
-  process. The value reached `time.NewTicker` inside the janitor goroutine,
-  whose panic the caller could not recover; it now means no janitor, as if
-  the option were omitted
-  ([#436](https://github.com/gombit-dev/gombit/issues/436)).
+
 - The benchmark report no longer publishes a snapshot from a developer host
   as if it were the canonical run. A clean tree on the canonical protocol used
   to render with no banner whatever machine ran it. Each measured unit now
@@ -579,12 +687,14 @@ version.
   carries the banner. The declaration must be `dedicated`, `developer` or
   unset; the `make benchmark-*` targets and every producer refuse any other
   value before measuring ([#291](https://github.com/gombit-dev/gombit/issues/291)).
+
 - `OnStop` hooks get their own shutdown-timeout budget instead of what the
   HTTP drain left over. A request that outlived the shutdown timeout used to
   hand every stop hook an already-expired context, so a hook that honors its
   context (flush a buffer, close a pool) failed at once. A full shutdown can
   now take the drain delay plus up to twice the shutdown timeout
   ([#431](https://github.com/gombit-dev/gombit/issues/431)).
+
 - A request whose handler panics is now counted in
   `gombit_http_requests_total` and `gombit_http_request_duration_seconds_sum`
   with `status="500"`. The metrics layer recorded a request only after the
@@ -594,36 +704,7 @@ version.
   what the client receives. A panic that aborts the connection
   (`http.ErrAbortHandler`) before anything is sent is also counted as 500
   ([#432](https://github.com/gombit-dev/gombit/issues/432)).
-- A list page so far out that its offset overflows is empty. `contract.PageOffset`
-  computed `(page - 1) * per_page` unchecked, so `?page=9223372036854775807`
-  wrapped to a negative offset, which GORM ignores, and returned the first
-  page's rows under that page number on every generated list endpoint and the
-  admin data plane. The offset now saturates at `math.MaxInt`, which selects
-  nothing on SQLite, PostgreSQL and MySQL
-  ([#441](https://github.com/gombit-dev/gombit/issues/441)).
-- Database logging goes through the app's logger instead of GORM's default
-  one, which wrote to stdout in its own coloured format, ignored
-  `GOMBIT_LOG_SINK` / `GOMBIT_LOG_LEVEL`, logged every failed statement with
-  its parameter values inlined (a duplicate registration printed the user's
-  bcrypt hash and email), and reported every not-found lookup as an error.
-  Statements, not-found lookups and the failures the API answers with a 4xx
-  (identified by the driver's error code, never by text) are logged at
-  `debug`, slow statements at `warn`, and every other failure at `error`; the
-  logged SQL keeps its placeholders and never carries parameter values,
-  `Scan` included (`database.Open` sets GORM's process-wide
-  `logger.RecorderParamsFilter`). `database.Open` without an app installs a quiet stderr logger with
-  the same guarantee; a GORM logger the app sets on its database is kept. New:
-  `database.NewLogger`, `database.SlowQueryThreshold` and
-  `(*database.DB).ReplaceDefaultLogger`
-  ([#439](https://github.com/gombit-dev/gombit/issues/439)).
-- The in-memory cache's `Increment` refuses to overflow, as Redis `INCRBY`
-  does: incrementing past `math.MaxInt64` (or below `math.MinInt64`) returns
-  an "increment or decrement would overflow" error and leaves the value as it
-  was. It used to wrap silently, so a counter that reached the top flipped to
-  a huge negative number under the memory driver and failed under Redis.
-  A stored `nil` is now refused as not an integer too, as Redis refuses it,
-  instead of being overwritten with the delta
-  ([#437](https://github.com/gombit-dev/gombit/issues/437)).
+
 - A failed `framework.New` closes the cache and job dispatcher it had already
   opened. It returned the error without them, and the caller never received
   the `*App` to close them, so each failure left the in-memory cache's janitor
@@ -635,46 +716,27 @@ version.
   options, flags or driver, and worker mode's `-h`. An `App` runs once; it
   cannot be run again after any of them returns
   ([#435](https://github.com/gombit-dev/gombit/issues/435)).
-- Every database write refuses a timestamp or date no supported driver can
-  store and return, with a 422 on that field. Any RFC 3339 timestamp was
-  accepted: Postgres stored `0000-01-01T00:00:00Z` as 1 BC, after which the
-  row's endpoint and every list page holding it could no longer be read, and
-  MySQL refused it with a 500. `database.Open` now registers a
-  `gombit:timerange` callback, next to the `Validate` hook, that checks every
-  `time.Time`, `sql.NullTime` and `types.Date` value a create or update writes
-  (`Create`, `Save`, `Updates`, `Update`, `UpdateColumns`, upsert
-  `DO UPDATE` literals, honouring `Select`/`Omit`) against
-  `1000-01-02T00:00:00Z`..`9999-12-30T23:59:59Z` (a day's margin for the time
-  zone a value is read into) and `1000-01-01`..`9999-12-31`
-  (`types.TimeBounds`, `types.DateBounds`, `types.TimeWithin`,
-  `types.DateWithin`). It covers the generated API, the admin data plane and
-  custom code alike, with no regeneration, and adds no allocation to an
-  ordinary write. **Behaviour change:** a zero `time.Time` a write sets (a
-  non-pointer field left unset on create, a zero in a map, `Update` or a
-  `Select` naming the column) is now a 422 on every driver; it was stored on
-  SQLite/PostgreSQL and a 500 on MySQL. Use a pointer for an optional time.
-  `Save` of a struct with an unset `CreatedAt` or defaulted column leaves
-  that column out of its update (the row's value stays; the insert fallback
-  fills it). Rows that already store the zero instant stay editable through
-  `Update`, a partial `Updates` and the admin, which keeps a stored zero in
-  any column a PATCH leaves as stored unless a hook repairs it
-  (`database.StoredValues`, `database.ScopeEdit`); a generic
-  `Save` of one is a 422 until the column is cleaned up
-  (see docs/database.md). A string no Go time parses (`'infinity'`) is refused too
-  ([#443](https://github.com/gombit-dev/gombit/issues/443)).
-- A response that cannot be encoded as JSON is answered with HTTP 500 and the
-  D10 `internal` envelope (with the request ID), and logged through the app's
-  logger. Huma decided the status before encoding, so a stored time outside
-  years 0..9999 or a float holding NaN/±Inf produced HTTP 200, a JSON content
-  type, and the plain-text body "error marshaling response", on the row's own
-  endpoint and every list page containing it. `encoding/json` writes nothing
-  until it has encoded the whole body, so Gombit's JSON format
-  (`contract.JSONFormat`) now answers such a failure itself while Gin still
-  holds the status, instead of handing it back to Huma. Outside
-  `framework.New`, `contract.HumaConfigFor` logs the failure through `slog`; a
-  writer on which the status cannot be confirmed to change gets the error back
-  to Huma as before ([#442](https://github.com/gombit-dev/gombit/issues/442)).
 
+## [0.6.1] — 2026-09-29
+
+### Changed
+
+- A new app's `.env.example` lists every `GOMBIT_*` variable the config
+  package reads, including `GOMBIT_JOBS_DRIVER`, `GOMBIT_JOBS_QUEUE`,
+  `GOMBIT_JOBS_NAMESPACE`, `GOMBIT_HTTP_TRUSTED_PROXIES`, and the database
+  pool settings, commented out with their defaults
+  ([#447](https://github.com/gombit-dev/gombit/pull/447)).
+
+### Fixed
+
+- `gombit make command` refuses the names `generate` and `contract`, which
+  collided with framework commands; every command the root registers is now
+  reserved ([#447](https://github.com/gombit-dev/gombit/pull/447)).
+
+- `gombit --help` lists every command family and `db` subcommand,
+  `gombit make resource --help` describes the model-first layout and every
+  field kind, and `gombit worker --help` shows `--metrics-addr`
+  ([#447](https://github.com/gombit-dev/gombit/pull/447)).
 ## [0.6.0] — 2026-09-28
 
 ### Added
@@ -1567,7 +1629,11 @@ First tagged release. Milestones M0–M5 plus ADMIN-1 through ADMIN-3.
   multi-tenancy, i18n — are **not** included. See
   [the build plan](docs/GOMBIT_BUILD_PLAN.md).
 
-[Unreleased]: https://github.com/gombit-dev/gombit/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/gombit-dev/gombit/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/gombit-dev/gombit/compare/v0.7.1...v0.8.0
+[0.7.1]: https://github.com/gombit-dev/gombit/compare/v0.7.0...v0.7.1
+[0.7.0]: https://github.com/gombit-dev/gombit/compare/v0.6.1...v0.7.0
+[0.6.1]: https://github.com/gombit-dev/gombit/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/gombit-dev/gombit/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/gombit-dev/gombit/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/gombit-dev/gombit/compare/v0.3.1...v0.4.0

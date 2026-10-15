@@ -8,7 +8,7 @@ What each release asks of an application moving to it, newest first. This
 page, the release notes, and the upgrade tooling all come from the same
 compatibility manifest (see [upgrade.md](upgrade.md)).
 
-## Unreleased
+## v0.8.0
 
 ### Manual: action required
 
