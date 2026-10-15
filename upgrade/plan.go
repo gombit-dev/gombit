@@ -40,6 +40,10 @@ type Plan struct {
 	Breaking []Change `json:"breaking"`
 	// Informational are the changes worth knowing, with nothing to do.
 	Informational []Change `json:"informational"`
+	// Config is what the upgrade's configuration changes mean for the
+	// application's environment files (AnalyzeConfig): names only, never
+	// a value.
+	Config ConfigReport `json:"config"`
 }
 
 // DependencyChange is a go.mod directive about a module that the upgrade
@@ -108,6 +112,9 @@ func PlanUpgrade(workDir string, m *Manifest, to string) (Plan, error) {
 	}
 	c := Classify(releases)
 	p.Manual, p.Informational = c.Manual, c.Informational
+	if p.Config, err = AnalyzeConfig(workDir, releases); err != nil {
+		return Plan{}, err
+	}
 	notNeeded := map[string]bool{}
 	for _, ch := range c.Automatic {
 		a, ok := LookupAction(ch.Action)
@@ -259,4 +266,6 @@ func (p Plan) renderToDo(b *strings.Builder) {
 	for _, c := range p.Informational {
 		renderPlannedChange(b, c, false)
 	}
+	b.WriteString("\n")
+	p.Config.render(b)
 }

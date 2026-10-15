@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -109,5 +110,57 @@ func TestLoadAppliesDotEnvJWTSecret(t *testing.T) {
 	}
 	if cfg.Auth.JWTSecret != "from-dotenv-secret-32-bytes-min!!" {
 		t.Fatalf("Auth.JWTSecret = %q, want value from .env", cfg.Auth.JWTSecret)
+	}
+}
+
+// TestDotEnvKeyIsTheLoadersGrammar: DotEnvKey names exactly the key the
+// loader assigns from a line, or none when the loader assigns nothing.
+func TestDotEnvKeyIsTheLoadersGrammar(t *testing.T) {
+	for _, line := range []string{
+		"GOMBIT_X=1", "  GOMBIT_X = 1 ", "export GOMBIT_X=1", "# GOMBIT_X=1", "#GOMBIT_X=1", "", "   ",
+		"GOMBIT_X", "=1", " = 1", "GOMBIT_X=", "GOMBIT_X='a=b'", "lower=1", "\tGOMBIT_X=1\r",
+	} {
+		key, value, ok := parseDotEnvLine(line)
+		got, gotOK := DotEnvKey([]byte(line))
+		if gotOK != ok || got != key {
+			t.Errorf("%q: DotEnvKey = %q, %v; the loader assigns %q (%q), %v", line, got, gotOK, key, value, ok)
+		}
+	}
+}
+
+// TestDotEnvGrammar: what the grammar itself assigns, pinned.
+func TestDotEnvGrammar(t *testing.T) {
+	for line, want := range map[string]string{
+		"GOMBIT_X=1":        "GOMBIT_X",
+		"  GOMBIT_X = 1 ":   "GOMBIT_X",
+		"export GOMBIT_X=1": "export GOMBIT_X",
+		"# GOMBIT_X=1":      "",
+		"#GOMBIT_X=1":       "",
+		"":                  "",
+		"GOMBIT_X":          "",
+		"=1":                "",
+	} {
+		got, ok := DotEnvKey([]byte(line))
+		if got != want || ok != (want != "") {
+			t.Errorf("%q: DotEnvKey = %q, %v; want %q", line, got, ok, want)
+		}
+	}
+}
+
+// TestDotEnvLongLine: a line longer than a line scanner's buffer (64 KiB)
+// neither stops the loader nor hides the assignments after it, and
+// DotEnvKeys, the tooling's view, agrees.
+func TestDotEnvLongLine(t *testing.T) {
+	dir := t.TempDir()
+	content := "GOMBIT_LONG=" + strings.Repeat("x", 100<<10) + "\nGOMBIT_AFTER=yes\r\n"
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	values := dotEnvValues(filepath.Join(dir, ".env"))
+	if values["GOMBIT_AFTER"] != "yes" || len(values["GOMBIT_LONG"]) != 100<<10 {
+		t.Fatalf("loaded %d keys; GOMBIT_AFTER = %q", len(values), values["GOMBIT_AFTER"])
+	}
+	if got := strings.Join(DotEnvKeys([]byte(content)), ","); got != "GOMBIT_LONG,GOMBIT_AFTER" {
+		t.Fatalf("DotEnvKeys = %s", got)
 	}
 }

@@ -32,6 +32,8 @@ releases:
         summary: A setting is renamed.
         details: |
           Rename GOMBIT_OLD to GOMBIT_NEW.
+        config:
+          - {var: GOMBIT_OLD, change: renamed, to: GOMBIT_NEW}
       - id: faster-lists
         kind: informational
         area: behavior
@@ -119,6 +121,9 @@ func TestPlanUpgrade(t *testing.T) {
 	if got := strings.Join(ids(p.Informational), ","); got != "faster-lists" {
 		t.Fatalf("Informational = %s", got)
 	}
+	if f := p.Config.Findings; len(f) != 1 || f[0].Var != "GOMBIT_OLD" || f[0].Category != upgrade.ConfigCategoryRenamed || !f[0].NeedsAction || len(p.Config.Files) != 0 {
+		t.Fatalf("Config = %+v", p.Config)
+	}
 
 	var out strings.Builder
 	if err := p.Render(&out); err != nil {
@@ -132,6 +137,8 @@ func TestPlanUpgrade(t *testing.T) {
 		"  - review-timeouts: Review the shutdown timeout.\n      Check the orchestrator's grace period.\n",
 		"Breaking behavior changes: 1\n  - rename-setting (manual): A setting is renamed.\n",
 		"Informational: 1\n  - faster-lists: Lists are faster.\n",
+		"Configuration changes: 1\n  - [renamed] `GOMBIT_OLD` is renamed `GOMBIT_NEW` (v0.7.0, rename-setting)\n",
+		"Environment files read: none",
 		"No files changed.\n",
 	} {
 		if !strings.Contains(out.String(), want) {
