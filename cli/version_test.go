@@ -149,6 +149,10 @@ func TestVersionCommandOfAnAppBinaryNamesTheFramework(t *testing.T) {
 	stubBuild(t, "", "", "", &debug.BuildInfo{
 		Main: debug.Module{Path: "github.com/example/rel", Version: "(devel)"},
 		Deps: []*debug.Module{{Path: frameworkmod.ModulePath, Version: "v0.6.0"}},
+		Settings: []debug.BuildSetting{
+			{Key: "vcs.revision", Value: "ba8fc61f2a66"},
+			{Key: "vcs.time", Value: "2026-10-15T01:33:37Z"},
+		},
 	})
 
 	stdout := new(bytes.Buffer)
@@ -156,17 +160,19 @@ func TestVersionCommandOfAnAppBinaryNamesTheFramework(t *testing.T) {
 		t.Fatalf("version: %v", err)
 	}
 	out := stdout.String()
-	if !strings.Contains(out, "gombit:   v0.6.0") {
-		t.Fatalf("version output does not name the framework version:\n%s", out)
+	for _, want := range []string{"gombit:   v0.6.0", "commit:   unknown", "built:    unknown"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("version output missing %q:\n%s", want, out)
+		}
 	}
-	if strings.Contains(out, "devel") {
+	if strings.Contains(out, "devel") || strings.Contains(out, "ba8fc61f2a66") {
 		t.Fatalf("version output leaks the app module's build info:\n%s", out)
 	}
 }
 
 func TestResolveCommitAndDateFromVCSSettings(t *testing.T) {
 	stubBuild(t, "", "", "", &debug.BuildInfo{
-		Main: debug.Module{Version: "v0.4.0"},
+		Main: debug.Module{Path: frameworkmod.ModulePath, Version: "v0.4.0"},
 		Settings: []debug.BuildSetting{
 			{Key: "vcs.revision", Value: "abc1234"},
 			{Key: "vcs.time", Value: "2026-08-18T00:00:00Z"},
@@ -177,6 +183,29 @@ func TestResolveCommitAndDateFromVCSSettings(t *testing.T) {
 	}
 	if got := resolveBuildDate(); got != "2026-08-18T00:00:00Z" {
 		t.Fatalf("resolveBuildDate() = %q, want 2026-08-18T00:00:00Z", got)
+	}
+}
+
+// `vcs.revision` and `vcs.time` are recorded for the main module, so in an
+// app's own `cmd/gombit` they name no Gombit commit and must not be printed as
+// if they did.
+func TestResolveCommitAndDateOfAnAppBinaryAreNotAttributedToGombit(t *testing.T) {
+	stubBuild(t, "", "", "", &debug.BuildInfo{
+		Main: debug.Module{Path: "github.com/example/rel", Version: "(devel)"},
+		Deps: []*debug.Module{{Path: frameworkmod.ModulePath, Version: "v0.7.1"}},
+		Settings: []debug.BuildSetting{
+			{Key: "vcs.revision", Value: "ba8fc61f2a66"},
+			{Key: "vcs.time", Value: "2026-10-15T01:33:37Z"},
+		},
+	})
+	if got := resolveVersion(); got != "v0.7.1" {
+		t.Fatalf("resolveVersion() = %q, want v0.7.1", got)
+	}
+	if got := resolveCommit(); got != "" {
+		t.Fatalf("resolveCommit() = %q, want the app's commit withheld", got)
+	}
+	if got := resolveBuildDate(); got != "" {
+		t.Fatalf("resolveBuildDate() = %q, want the app's build date withheld", got)
 	}
 }
 

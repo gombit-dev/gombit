@@ -34,45 +34,76 @@ func resolveVersion() string {
 	if Version != "" {
 		return Version
 	}
-	if info, ok := readBuildInfo(); ok && info != nil {
-		if v := frameworkVersion(info); v != "" {
-			return v
-		}
+	if v := readFrameworkBuild().version; v != "" {
+		return v
 	}
 	return DevVersion
 }
 
-// frameworkVersion is the version of the framework code this binary was built
-// with. A scaffolded app ships its own `cmd/gombit`, where the main module is
-// the application and Gombit is a dependency, so the main module's version —
-// "(devel)", or an app tag — says nothing about Gombit and the framework's
-// dependency entry is read instead.
-func frameworkVersion(info *debug.BuildInfo) string {
-	mod := info.Main
-	if mod.Path != frameworkmod.ModulePath {
-		mod = debug.Module{}
-		for _, dep := range info.Deps {
-			if dep != nil && dep.Path == frameworkmod.ModulePath {
-				mod = *dep
-				break
-			}
+// frameworkBuild is what this binary's module build info says about Gombit.
+type frameworkBuild struct {
+	version string
+	commit  string
+	built   string
+}
+
+// readFrameworkBuild resolves the framework release this binary was built with,
+// alongside the build metadata that can honestly be attributed to it.
+func readFrameworkBuild() frameworkBuild {
+	info, ok := readBuildInfo()
+	if !ok || info == nil {
+		return frameworkBuild{}
+	}
+	mod := &info.Main
+	// A scaffolded app ships its own `cmd/gombit`, where the main module is the
+	// application and Gombit is a dependency, so the main module's version —
+	// "(devel)", or an app tag or pseudo-version — says nothing about Gombit.
+	fromApp := mod.Path != frameworkmod.ModulePath
+	if fromApp {
+		mod = frameworkDependency(info)
+	}
+	build := frameworkBuild{version: moduleRelease(mod)}
+	// The `vcs.*` settings are recorded for the main module: in an app's binary
+	// they describe the app's repository, and pairing a Gombit release with a
+	// commit no one can find in the Gombit repository is the same misleading
+	// claim as printing the app's version.
+	if !fromApp {
+		build.commit = buildSetting(info, "vcs.revision")
+		build.built = buildSetting(info, "vcs.time")
+	}
+	return build
+}
+
+// frameworkDependency is the framework entry an app binary was built with, or
+// nil. Build info lists every module once, so the first match is the only one.
+func frameworkDependency(info *debug.BuildInfo) *debug.Module {
+	for _, dep := range info.Deps {
+		if dep.Path == frameworkmod.ModulePath {
+			return dep
 		}
 	}
-	// A replace ships someone else's code, so its version is the one that
-	// built the binary — except that only a replace by the framework module
-	// itself names a framework release. A local checkout has no version and a
-	// fork's is not Gombit's, matching internal/frameworkmod's reading of
-	// go.mod: neither is resolvable, and "dev" sends the user to a replace
-	// directive or to --framework-version.
+	return nil
+}
+
+// moduleRelease is the framework release a module entry names. A replace ships
+// someone else's code, and only a replace by the framework module itself at
+// another version names a framework release: a local checkout has no version
+// and a fork's is not Gombit's, which is how internal/frameworkmod reads the
+// same directives out of a go.mod. Neither is resolvable from the module proxy,
+// so they report no version and the command falls back to "dev", which sends
+// the user to a replace directive or to --framework-version. A module built
+// from a checkout reports "(devel)", less useful to a bug reporter than the
+// honest "dev".
+func moduleRelease(mod *debug.Module) string {
+	if mod == nil {
+		return ""
+	}
 	if replace := mod.Replace; replace != nil {
-		if replace.Path == frameworkmod.ModulePath {
-			mod.Version = replace.Version
-		} else {
-			mod.Version = ""
+		if replace.Path != frameworkmod.ModulePath {
+			return ""
 		}
+		mod = replace
 	}
-	// Modules built from a checkout report "(devel)", which is less useful
-	// to a bug reporter than the honest "dev".
 	if mod.Version == "" || mod.Version == "(devel)" {
 		return ""
 	}
@@ -83,21 +114,17 @@ func resolveCommit() string {
 	if Commit != "" {
 		return Commit
 	}
-	return buildSetting("vcs.revision")
+	return readFrameworkBuild().commit
 }
 
 func resolveBuildDate() string {
 	if BuildDate != "" {
 		return BuildDate
 	}
-	return buildSetting("vcs.time")
+	return readFrameworkBuild().built
 }
 
-func buildSetting(key string) string {
-	info, ok := readBuildInfo()
-	if !ok || info == nil {
-		return ""
-	}
+func buildSetting(info *debug.BuildInfo, key string) string {
 	for _, setting := range info.Settings {
 		if setting.Key == key {
 			return setting.Value
