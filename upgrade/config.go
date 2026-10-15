@@ -33,9 +33,10 @@ const (
 	// (in Environment, or everywhere); the change's details say which.
 	ConfigRefused ConfigChangeKind = "refused"
 	// ConfigAdded: the variable is new, read from this release on. It is
-	// declared only when a later declaration (a requirement, a refusal, a
-	// default change, a rename) needs it to exist: an addition alone asks
-	// nothing of an application.
+	// declared when a later declaration (a requirement, a refusal, a
+	// default change, a rename) needs it to exist, or when a security
+	// change introduces it. An ordinary addition asks nothing of an
+	// application; a security one is a security review.
 	ConfigAdded ConfigChangeKind = "added"
 )
 
@@ -340,7 +341,7 @@ func AnalyzeConfig(workDir string, releases []Release) (ConfigReport, error) {
 	for _, r := range releases {
 		for _, c := range r.Changes {
 			for _, cc := range c.Config {
-				if cc.Change == ConfigAdded {
+				if cc.Change == ConfigAdded && c.Area != "security" {
 					continue // nothing to do: what follows it, if anything, is
 				}
 				report.Findings = append(report.Findings, finding(r.Version, c, cc, files))
@@ -410,6 +411,9 @@ func finding(release string, c Change, cc ConfigChange, files []*envFile) Config
 	case ConfigRefused:
 		f.Category, f.NeedsAction = ConfigCategoryActionRequired, true
 		f.Advice = fmt.Sprintf("Check the value of %s%s against %s (in %s).", cc.Var, scope, c.ID, where)
+	case ConfigAdded: // reported only for a security change
+		f.Category, f.NeedsAction = ConfigCategoryActionRequired, true
+		f.Advice = fmt.Sprintf("%s is new from %s: review what it controls and how the app sets it (in %s).", cc.Var, releaseName(release), where)
 	}
 	if c.Area == "security" {
 		f.Category, f.NeedsAction = ConfigCategorySecurityReview, true

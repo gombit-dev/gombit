@@ -533,3 +533,34 @@ func TestConfigAdditions(t *testing.T) {
 		t.Fatalf("Describe = %q", got)
 	}
 }
+
+// TestConfigSecurityAdditionsAreReviewed: an addition in a security change
+// is not silent. The manifest refuses it as anything but manual, and the
+// analysis reports it as a security review needing action (what makes
+// gombit upgrade config exit 1).
+func TestConfigSecurityAdditionsAreReviewed(t *testing.T) {
+	data := "format: 1\nreleases:\n  - version: v0.1.0\n  - version: v0.2.0\n    changes:\n      - id: x\n        kind: informational\n        area: security\n        summary: A new auth setting.\n        config:\n          - {var: GOMBIT_AUTH_MODE, change: added}\n"
+	if _, err := upgrade.ParseManifest([]byte(data)); err == nil || !strings.Contains(err.Error(), "so it is manual") {
+		t.Fatalf("an informational security addition: %v", err)
+	}
+	manual := strings.Replace(strings.Replace(data, "kind: informational", "kind: manual", 1), "summary: A new auth setting.\n", "summary: A new auth setting.\n        details: Review it.\n", 1)
+	m, err := upgrade.ParseManifest([]byte(manual))
+	if err != nil {
+		t.Fatalf("a manual security addition: %v", err)
+	}
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{".env": "GOMBIT_AUTH_MODE=cookie\n"})
+	r, err := upgrade.AnalyzeConfig(dir, m.Releases[1:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Findings) != 1 || r.Findings[0].Category != upgrade.ConfigCategorySecurityReview || !r.Findings[0].NeedsAction || !r.NeedsAction() ||
+		!strings.Contains(r.Findings[0].Advice, "GOMBIT_AUTH_MODE is new from v0.2.0") || strings.Join(r.Findings[0].SetIn, ",") != ".env" {
+		t.Fatalf("report = %+v", r)
+	}
+	var text strings.Builder
+	_ = r.Render(&text)
+	if !strings.Contains(text.String(), "[security review] `GOMBIT_AUTH_MODE` is new") || strings.Contains(text.String(), "cookie") {
+		t.Fatalf("report:\n%s", text.String())
+	}
+}

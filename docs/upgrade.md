@@ -484,7 +484,10 @@ config:
   - {var: GOMBIT_NEW, change: required, environment: production}
 ```
 
-A change that lists variables beyond additions is `manual`. Any of them can need the
+In a `security` change, an addition is a security review like any other
+entry: the analysis reports it and needs action. A change that lists
+variables beyond ordinary additions, or any variable in the `security`
+area, is `manual`. Any of them can need the
 developer: a default only some environments override, a security review. So
 the notes and the plan never call such a change nothing to do, or something
 the tooling applies, while the analysis asks for action.

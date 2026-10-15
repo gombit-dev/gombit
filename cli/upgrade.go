@@ -435,8 +435,12 @@ type upgradeConfigResult struct {
 	upgrade.ConfigReport
 }
 
+// upgradeConfigManifest is the manifest gombit upgrade config reads (a
+// test replaces it).
+var upgradeConfigManifest = upgrade.LoadManifest
+
 func runUpgradeConfig(stdout io.Writer, dir, from, to string, write, asJSON bool) error {
-	m, err := upgrade.LoadManifest()
+	m, err := upgradeConfigManifest()
 	if err != nil {
 		return fmt.Errorf("gombit upgrade config: %w", err)
 	}

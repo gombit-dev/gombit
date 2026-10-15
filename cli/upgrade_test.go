@@ -503,3 +503,27 @@ func TestUpgradeConfig(t *testing.T) {
 		t.Fatal("an unlisted --from was accepted")
 	}
 }
+
+// TestUpgradeConfigSecurityAddition: a variable a security change adds is
+// a security review: gombit upgrade config lists it and exits 1, without
+// printing the value the app sets.
+func TestUpgradeConfigSecurityAddition(t *testing.T) {
+	m, err := upgrade.ParseManifest([]byte("format: 1\nreleases:\n  - version: v0.1.0\n  - version: v0.2.0\n    changes:\n      - id: new-auth-setting\n        kind: manual\n        area: security\n        summary: A new auth setting.\n        details: Review it.\n        config:\n          - {var: GOMBIT_AUTH_MODE, change: added}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := upgradeConfigManifest
+	defer func() { upgradeConfigManifest = old }()
+	upgradeConfigManifest = func() (*upgrade.Manifest, error) { return m, nil }
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("GOMBIT_AUTH_MODE=cookie-secret-value\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runUpgradeCLI(t, "config", "--dir", dir, "--from", "v0.1.0", "--to", "v0.2.0")
+	if err == nil || !strings.Contains(err.Error(), "need action or review") {
+		t.Fatalf("upgrade config = %v; want exit 1", err)
+	}
+	if !strings.Contains(out, "[security review] `GOMBIT_AUTH_MODE` is new (v0.2.0, new-auth-setting)") || strings.Contains(out, "cookie-secret-value") {
+		t.Fatalf("output:\n%s", out)
+	}
+}
