@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"sort"
 	"strings"
 
@@ -147,10 +146,10 @@ type ConfigFinding struct {
 	// rename, removal, requirement, refusal and security change, and a
 	// default change the application's files do not override.
 	NeedsAction bool `json:"needs_action"`
-	// SetIn are the runtime environment files (not templates) that set
-	// the variable; TemplateSetIn the templates that set it, and
-	// DocumentedIn those that mention it commented out. A template is
-	// never a runtime override.
+	// SetIn are the environment files (not templates) that set the
+	// variable; TemplateSetIn the templates that set it, and DocumentedIn
+	// those that mention it commented out. They are mentions: only .env,
+	// for local development runs, is a runtime override gombit loads.
 	SetIn         []string `json:"set_in"`
 	TemplateSetIn []string `json:"template_set_in"`
 	DocumentedIn  []string `json:"documented_in"`
@@ -379,17 +378,17 @@ func finding(release string, c Change, cc ConfigChange, files []*envFile) Config
 		}
 		var covered, uncovered []string
 		for _, env := range affected {
-			if setFor(files, cc.Var, env) {
+			if overridesFor(files, cc.Var, env) {
 				covered = append(covered, env)
 			} else {
 				uncovered = append(uncovered, env)
 			}
 		}
 		if len(uncovered) == 0 {
-			f.Advice = fmt.Sprintf("Set for %s by %s, so unaffected there; wherever else it is unset, it now defaults to %s.", strings.Join(covered, ", "), strings.Join(f.SetIn, ", "), quoteDefault(cc.To))
+			f.Advice = fmt.Sprintf("Set in .env, which gombit loads for local runs (%s), so unaffected there; wherever else it is unset, it now defaults to %s.", strings.Join(covered, ", "), quoteDefault(cc.To))
 		} else {
 			f.NeedsAction = true
-			f.Advice = fmt.Sprintf("No runtime environment file sets it for %s (templates, and files for other environments, do not count): where it is unset there it now defaults to %s; set %s=%s to keep the old behavior.", strings.Join(uncovered, ", "), quoteDefault(cc.To), cc.Var, cc.From)
+			f.Advice = fmt.Sprintf("Nothing in the application directory proves it set for %s: .env covers only local development runs, and other files (templates, .env.*) are not loaded by gombit. Where it is unset it now defaults to %s; set %s=%s there to keep the old behavior.", strings.Join(uncovered, ", "), quoteDefault(cc.To), cc.Var, cc.From)
 		}
 	case ConfigRequired:
 		f.Category, f.NeedsAction = ConfigCategoryActionRequired, true
@@ -405,27 +404,20 @@ func finding(release string, c Change, cc ConfigChange, files []*envFile) Config
 	return f
 }
 
-// fileEnvironments are the runtime environments an environment file
-// configures: .env.<env> (and .env.<env>.local) its own; .env and
-// .env.local local runs (development and test), never production, where
-// no .env ships; any other name none that is known.
-func fileEnvironments(name string) []string {
-	if name == ".env" || name == ".env.local" {
-		return []string{"development", "test"}
+// overridesFor reports whether the application's files prove name set in
+// env, for runs the framework configures from them. The only file gombit
+// loads is .env, from the directory a process runs in (config.Load), and
+// only a run from the application directory reads this one: a local run,
+// in development. Test binaries run in their package directories, and a
+// deployment sets its own environment, so no file here proves test or
+// production; other .env.* files are loaded by nothing in gombit, and a
+// template is copied, not loaded.
+func overridesFor(files []*envFile, name, env string) bool {
+	if env != "development" {
+		return false
 	}
-	env := strings.TrimSuffix(strings.TrimPrefix(name, ".env."), ".local")
-	switch env {
-	case "development", "test", "production":
-		return []string{env}
-	}
-	return nil
-}
-
-// setFor reports whether a runtime environment file (not a template) that
-// configures env sets name.
-func setFor(files []*envFile, name, env string) bool {
 	for _, f := range files {
-		if !f.Template && f.set[name] && slices.Contains(fileEnvironments(f.Path), env) {
+		if f.Path == ".env" && f.set[name] {
 			return true
 		}
 	}

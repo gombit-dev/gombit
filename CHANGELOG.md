@@ -387,11 +387,15 @@ version.
     removed variables commented out, each with a note). The files are
     written atomically and idempotently, and `.env` is never written.
   - Manual manifest changes list their configuration variables (`config:`
-    entries). A default change counts as overridden only by a runtime
-    `.env` file for each environment it applies to; templates never count.
+    entries). A default change counts as overridden only where a file
+    gombit loads proves it: `.env`, for local development runs. Templates
+    and other `.env.*` files are mentions, and nothing proves test or
+    production.
   - `config.Variables()` catalogs every variable with its secrecy and
-    defaults. A snapshot test fails when a variable is removed or
-    re-defaulted without a manifest declaration.
+    defaults. A snapshot of it as of a release fails a test on any
+    removal, default move or declassification since then that the
+    manifest does not declare, and on any declaration that is no real
+    transition.
   - `trusted-proxies-trust-all` (v0.7.0) now declares its
     `GOMBIT_HTTP_TRUSTED_PROXIES` refusal.
 

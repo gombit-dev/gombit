@@ -42,6 +42,15 @@ automatically on merge.
    go run ./cmd/gombit upgrade notes --release v0.1.0 --release-gate
    ```
 
+   Then move the configuration snapshot
+   ([`upgrade/testdata/config-variables.json`](../upgrade/testdata/config-variables.json))
+   to the release, so the next cycle's configuration changes are checked
+   from it:
+
+   ```bash
+   go test ./upgrade -run TestConfigVariablesAreDeclared -update
+   ```
+
    The release workflow puts these notes at the top of the GitHub release,
    and fails, before publishing, a stable release the manifest is not
    closed at: the version must be listed, be the newest release it lists,

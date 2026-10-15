@@ -317,13 +317,15 @@ Configuration changes: 1
   environment elsewhere. The report says which files set it.
 - **Cannot pass silently.** The command exits 1 while any change needs
   action or review.
-  - A default change needs no action only when, for every environment it
-    applies to, a runtime file for that environment sets the variable.
-  - `.env.production` covers production, and likewise `.env.development`
-    and `.env.test` (and their `.local` forms).
-  - `.env` and `.env.local` cover local runs (development and test), never
-    production, where no `.env` ships.
-  - A template never counts: it is copied, not loaded.
+  - A default change needs no action only when files prove the variable
+    set wherever the change applies, and files can prove little. The only
+    file gombit loads is `.env`, from the directory a process runs in, so
+    this one covers local development runs.
+  - Test binaries run in their package directories, and a deployment sets
+    its own environment, so no file proves test or production.
+  - Other `.env.*` files (`.env.production`) are loaded by nothing in
+    gombit, and templates are copied, not loaded.
+  - All of these are reported as mentions, never as overrides.
 - **Never a secret.** It reads the app's `.env` and `.env.*` files, through
   a symlink. From a file that is not a template (`.env`, `.env.production`),
   only the names it sets are read, over its bytes, which are then zeroed.
@@ -474,16 +476,22 @@ the tooling applies, while the analysis asks for action.
 
 Configuration changes are detected, not only declared:
 - [`upgrade/testdata/config-variables.json`](../upgrade/testdata/config-variables.json)
-  is a snapshot of `config.Variables()`.
-- A test fails when the code stops reading a variable, or changes a
-  default (development, test or production), until the manifest's
-  `unreleased` entry declares it (`removed` or `renamed`; `default` with the
-  old and new values).
-- A variable that stops being secret fails it too, unless the test's
-  `declassified` list names it with the reason.
-- The same test checks those declarations against the code.
-- `go test ./upgrade -run TestConfigVariablesAreDeclared -update`
-  refreshes the snapshot, and refuses to while anything is undeclared.
+  is `config.Variables()` as of a release (its `version`).
+- `TestConfigVariablesAreDeclared` holds the code to that snapshot through
+  what the manifest's later releases, `unreleased` included, declare. It
+  fails until these are declared:
+  - a variable the code stops reading (`removed` or `renamed`);
+  - a default that moves, in development, test or production (`default`
+    declarations, chaining from the snapshot's value to the code's across
+    releases);
+  - a variable that stops being secret (the test's `declassified` list,
+    with the reason).
+- The test also fails on any declaration that describes no real change: a
+  `from` that was not the old value, a "change" where nothing moved, or a
+  removal of a variable still read.
+- When a release is cut, `go test ./upgrade -run
+  TestConfigVariablesAreDeclared -update` moves the snapshot to it. It
+  refuses while `unreleased` still declares configuration changes.
 
 A change of any kind can be `breaking`: an app that relies on documented (or
 reasonably relied-on) behavior can stop building, starting or working across

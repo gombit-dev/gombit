@@ -84,19 +84,20 @@ func TestAnalyzeConfig(t *testing.T) {
 	for i, w := range []want{
 		{upgrade.ConfigCategoryRenamed, true, ".env", ".env.example", "", true, []string{"Rename GOMBIT_OLD to GOMBIT_NEW in .env, .env.example and the deployment's environment"}},
 		{upgrade.ConfigCategoryActionRequired, true, ".env", "", ".env.example", true, []string{"Remove GOMBIT_GONE"}},
-		// Every environment: .env.production covers production only.
-		{upgrade.ConfigCategoryDefaultChanged, true, ".env.production", "", "", false, []string{"No runtime environment file sets it for development, test"}},
-		{upgrade.ConfigCategoryDefaultChanged, true, "", "", "", false, []string{"No runtime environment file sets it for production", "set GOMBIT_UNSET=x"}},
+		// .env.production is a mention, not something gombit loads.
+		{upgrade.ConfigCategoryDefaultChanged, true, ".env.production", "", "", false, []string{"Nothing in the application directory proves it set for development, test, production"}},
+		{upgrade.ConfigCategoryDefaultChanged, true, "", "", "", false, []string{"Nothing in the application directory proves it set for production", "set GOMBIT_UNSET=x"}},
 		{upgrade.ConfigCategorySecurityReview, true, "", "", "", false, []string{"Check the value of GOMBIT_HTTP_TRUSTED_PROXIES in production", "Security review: Production refuses trust-all proxies."}},
 		{upgrade.ConfigCategoryActionRequired, true, "", "", "", false, []string{"Set GOMBIT_REQ in production"}},
 		// A template is not a runtime override.
-		{upgrade.ConfigCategoryDefaultChanged, true, "", ".env.example", "", false, []string{"No runtime environment file sets it for production (templates, and files for other environments, do not count)"}},
-		// Nor is a file for another environment.
-		{upgrade.ConfigCategoryDefaultChanged, true, ".env.development", "", "", false, []string{"No runtime environment file sets it for production"}},
-		// The production file overrides a production default.
-		{upgrade.ConfigCategoryDefaultChanged, false, ".env.production", "", "", false, []string{"Set for production by .env.production, so unaffected there"}},
-		// .env configures local runs: development (and test).
-		{upgrade.ConfigCategoryDefaultChanged, false, ".env", "", "", false, []string{"Set for development by .env"}},
+		{upgrade.ConfigCategoryDefaultChanged, true, "", ".env.example", "", false, []string{"Nothing in the application directory proves it set for production", "other files (templates, .env.*) are not loaded by gombit"}},
+		// Nor is a file named for an environment.
+		{upgrade.ConfigCategoryDefaultChanged, true, ".env.development", "", "", false, []string{"Nothing in the application directory proves it set for production"}},
+		// An unused .env.production proves nothing about production: a
+		// production default change still needs action.
+		{upgrade.ConfigCategoryDefaultChanged, true, ".env.production", "", "", false, []string{"Nothing in the application directory proves it set for production"}},
+		// .env, which gombit loads, covers local development runs.
+		{upgrade.ConfigCategoryDefaultChanged, false, ".env", "", "", false, []string{"Set in .env, which gombit loads for local runs (development), so unaffected there"}},
 	} {
 		if i >= len(r.Findings) {
 			t.Fatalf("findings = %+v", r.Findings)
@@ -417,5 +418,22 @@ func TestWriteConfigTemplatesCountsACommittedWrite(t *testing.T) {
 	}
 	if !strings.Contains(read(t, filepath.Join(dir, ".env.example")), "GOMBIT_NEW=1") {
 		t.Fatal("the template does not have its new content")
+	}
+}
+
+// TestAnalyzeConfigDotEnvIsLocalOnly: .env, the file gombit loads, proves a
+// variable set for local development runs only. An unscoped default change
+// it sets still needs action: test binaries run elsewhere, and a
+// deployment sets its own environment.
+func TestAnalyzeConfigDotEnvIsLocalOnly(t *testing.T) {
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{".env": "GOMBIT_X=old\n"})
+	r, err := upgrade.AnalyzeConfig(dir, []upgrade.Release{{Version: "v0.8.0", Changes: []upgrade.Change{{ID: "d", Area: "config", Summary: "d",
+		Config: []upgrade.ConfigChange{{Var: "GOMBIT_X", Change: upgrade.ConfigDefault, From: "old", To: "new"}}}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f := r.Findings[0]; !f.NeedsAction || !strings.Contains(f.Advice, "proves it set for test, production") || strings.Join(f.SetIn, ",") != ".env" {
+		t.Fatalf("finding = %+v", f)
 	}
 }
