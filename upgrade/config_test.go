@@ -83,7 +83,9 @@ func TestAnalyzeConfig(t *testing.T) {
 	}
 	for i, w := range []want{
 		{upgrade.ConfigCategoryRenamed, true, ".env", ".env.example", "", true, []string{"Rename GOMBIT_OLD to GOMBIT_NEW in .env, .env.example and the deployment's environment"}},
-		{upgrade.ConfigCategoryActionRequired, true, ".env", "", ".env.example", true, []string{"Remove GOMBIT_GONE"}},
+		// .env's `export GOMBIT_GONE=1` sets "export GOMBIT_GONE" for the
+		// loader, not GOMBIT_GONE: not a mention.
+		{upgrade.ConfigCategoryActionRequired, true, "", "", ".env.example", true, []string{"Remove GOMBIT_GONE"}},
 		// .env.production is a mention, not something gombit loads.
 		{upgrade.ConfigCategoryDefaultChanged, true, ".env.production", "", "", false, []string{"Nothing in the application directory proves it set for development, test, production"}},
 		{upgrade.ConfigCategoryDefaultChanged, true, "", "", "", false, []string{"Nothing in the application directory proves it set for production", "set GOMBIT_UNSET=x"}},
@@ -435,5 +437,55 @@ func TestAnalyzeConfigDotEnvIsLocalOnly(t *testing.T) {
 	}
 	if f := r.Findings[0]; !f.NeedsAction || !strings.Contains(f.Advice, "proves it set for test, production") || strings.Join(f.SetIn, ",") != ".env" {
 		t.Fatalf("finding = %+v", f)
+	}
+}
+
+// loadAppName loads dir/.env through the runtime loader (as gombit does)
+// and returns the app name it configures.
+func loadAppName(t *testing.T, dir string) string {
+	t.Helper()
+	if old, set := os.LookupEnv("GOMBIT_APP_NAME"); set {
+		_ = os.Unsetenv("GOMBIT_APP_NAME")
+		t.Cleanup(func() { _ = os.Setenv("GOMBIT_APP_NAME", old) })
+	}
+	cfg, err := config.LoadFromDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg.AppName
+}
+
+// TestConfigUsesTheLoaderGrammar: the analysis and the template writer read
+// a line as the runtime loader does. `export GOMBIT_APP_NAME=x` in .env
+// does not set GOMBIT_APP_NAME for gombit (config.LoadFromDir keeps the
+// default), so it is no override of a development default change; and in a
+// template it is not the rename's new name already set, so the old line is
+// renamed, not commented out, and the upgraded template, loaded as .env,
+// still sets the value.
+func TestConfigUsesTheLoaderGrammar(t *testing.T) {
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{".env": "export GOMBIT_APP_NAME=exported\n"})
+	if got := loadAppName(t, dir); got != "Gombit" {
+		t.Fatalf("the loader set GOMBIT_APP_NAME = %q from an export line; the test's premise is wrong", got)
+	}
+	r, err := upgrade.AnalyzeConfig(dir, []upgrade.Release{{Version: "v0.8.0", Changes: []upgrade.Change{{ID: "d", Area: "config", Summary: "d",
+		Config: []upgrade.ConfigChange{{Var: "GOMBIT_APP_NAME", Change: upgrade.ConfigDefault, From: "Gombit", To: "App", Environment: "development"}}}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f := r.Findings[0]; !f.NeedsAction || len(f.SetIn) != 0 {
+		t.Fatalf("an export line counted as an override: %+v", f)
+	}
+
+	tmpl := t.TempDir()
+	writeTree(t, tmpl, map[string]string{".env.example": "GOMBIT_OLD_NAME=demo-app\nexport GOMBIT_APP_NAME=ignored\n"})
+	if _, err := upgrade.WriteConfigTemplates(tmpl, rename("GOMBIT_OLD_NAME", "GOMBIT_APP_NAME")); err != nil {
+		t.Fatal(err)
+	}
+	upgraded := read(t, filepath.Join(tmpl, ".env.example"))
+	app := t.TempDir()
+	writeTree(t, app, map[string]string{".env": upgraded})
+	if got := loadAppName(t, app); got != "demo-app" {
+		t.Fatalf("the upgraded template, loaded as .env, sets AppName %q; want demo-app:\n%s", got, upgraded)
 	}
 }

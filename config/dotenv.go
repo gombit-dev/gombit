@@ -2,9 +2,9 @@ package config
 
 import (
 	"bufio"
+	"bytes"
 	"os"
 	"path/filepath"
-	"strings"
 )
 
 // dotEnvFile is the file Load looks for in the current working directory.
@@ -69,27 +69,51 @@ func dotEnvValues(path string) map[string]string {
 	return values
 }
 
+// splitDotEnvLine is the .env grammar, shared by the loader and DotEnvKey:
+// a line, trimmed, that is not blank, does not start with '#', and has an
+// '=', assigns its trimmed left side (non-empty) the rest. A key is taken
+// as written: "export KEY" is not KEY.
+func splitDotEnvLine(line []byte) (key, value []byte, ok bool) {
+	line = bytes.TrimSpace(line)
+	if len(line) == 0 || line[0] == '#' {
+		return nil, nil, false
+	}
+	k, v, found := bytes.Cut(line, []byte("="))
+	if !found {
+		return nil, nil, false
+	}
+	k = bytes.TrimSpace(k)
+	if len(k) == 0 {
+		return nil, nil, false
+	}
+	return k, bytes.TrimSpace(v), true
+}
+
 // parseDotEnvLine parses a single KEY=VALUE line, skipping blanks and `#`
 // comments. It strips one layer of matching single or double quotes from
 // the value, the same convention every gombit-generated .env file follows.
 func parseDotEnvLine(line string) (key, value string, ok bool) {
-	line = strings.TrimSpace(line)
-	if line == "" || strings.HasPrefix(line, "#") {
+	k, v, ok := splitDotEnvLine([]byte(line))
+	if !ok {
 		return "", "", false
 	}
-	k, v, found := strings.Cut(line, "=")
-	if !found {
-		return "", "", false
-	}
-	k = strings.TrimSpace(k)
-	if k == "" {
-		return "", "", false
-	}
-	v = strings.TrimSpace(v)
 	if len(v) >= 2 {
 		if (v[0] == '"' && v[len(v)-1] == '"') || (v[0] == '\'' && v[len(v)-1] == '\'') {
 			v = v[1 : len(v)-1]
 		}
 	}
-	return k, v, true
+	return string(k), string(v), true
+}
+
+// DotEnvKey is the variable a line of a .env file sets when Load reads it,
+// by the loader's own grammar, and whether it sets one: never for a blank
+// line or a comment, and "export KEY=..." sets "export KEY", not KEY. It
+// reads the line's bytes and copies out only the key, so tooling can learn
+// what a file sets without its values becoming strings.
+func DotEnvKey(line []byte) (string, bool) {
+	k, _, ok := splitDotEnvLine(line)
+	if !ok {
+		return "", false
+	}
+	return string(k), true
 }

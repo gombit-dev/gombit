@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/gombit-dev/gombit/config"
 	"github.com/gombit-dev/gombit/internal/atomicfile"
 )
 
@@ -223,26 +224,22 @@ type envFile struct {
 	mode       os.FileMode
 }
 
-// envAssignment parses an environment file line: the variable it assigns,
-// and whether it is commented out ("# KEY=..."). It works on the line's
-// bytes and copies out the name only: values are never looked at, and
-// never become strings.
+// envAssignment is the variable an environment file line assigns, by the
+// loader's grammar (config.DotEnvKey: "export KEY=" assigns no KEY), and
+// whether the line is a commented-out assignment ("# KEY=...", documenting
+// it). It works on the line's bytes and copies out the name only, so no
+// value becomes a string.
 func envAssignment(line []byte) (key string, commented, ok bool) {
 	s := bytes.TrimSpace(line)
 	if bytes.HasPrefix(s, []byte("#")) {
 		commented = true
 		s = bytes.TrimSpace(s[1:])
 	}
-	s = bytes.TrimPrefix(s, []byte("export "))
-	eq := bytes.IndexByte(s, '=')
-	if eq <= 0 {
+	key, ok = config.DotEnvKey(s)
+	if !ok || !configVar.MatchString(key) {
 		return "", false, false
 	}
-	name := bytes.TrimSpace(s[:eq])
-	if !configVar.Match(name) {
-		return "", false, false
-	}
-	return string(name), commented, true
+	return key, commented, true
 }
 
 // lineKey is envAssignment of a template's line.

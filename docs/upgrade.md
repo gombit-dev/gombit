@@ -326,6 +326,10 @@ Configuration changes: 1
   - Other `.env.*` files (`.env.production`) are loaded by nothing in
     gombit, and templates are copied, not loaded.
   - All of these are reported as mentions, never as overrides.
+- **The loader's grammar.** Files are read by the same `.env` grammar
+  `config.Load` uses (`config.DotEnvKey`). So `export GOMBIT_X=1`, which the
+  loader takes as a variable named `export GOMBIT_X`, does not set
+  `GOMBIT_X` here either.
 - **Never a secret.** It reads the app's `.env` and `.env.*` files, through
   a symlink. From a file that is not a template (`.env`, `.env.production`),
   only the names it sets are read, over its bytes, which are then zeroed.
@@ -486,6 +490,10 @@ Configuration changes are detected, not only declared:
     releases);
   - a variable that stops being secret (the test's `declassified` list,
     with the reason).
+- The declarations are replayed on a copy of the snapshot. A rename moves
+  the variable, defaults and secrecy included, to its new name, so a
+  default or secrecy change that comes with a rename is still compared,
+  and a default declaration can name the variable before or after it.
 - The test also fails on any declaration that describes no real change: a
   `from` that was not the old value, a "change" where nothing moved, or a
   removal of a variable still read.

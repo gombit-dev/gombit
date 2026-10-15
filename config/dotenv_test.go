@@ -111,3 +111,37 @@ func TestLoadAppliesDotEnvJWTSecret(t *testing.T) {
 		t.Fatalf("Auth.JWTSecret = %q, want value from .env", cfg.Auth.JWTSecret)
 	}
 }
+
+// TestDotEnvKeyIsTheLoadersGrammar: DotEnvKey names exactly the key the
+// loader assigns from a line, or none when the loader assigns nothing.
+func TestDotEnvKeyIsTheLoadersGrammar(t *testing.T) {
+	for _, line := range []string{
+		"GOMBIT_X=1", "  GOMBIT_X = 1 ", "export GOMBIT_X=1", "# GOMBIT_X=1", "#GOMBIT_X=1", "", "   ",
+		"GOMBIT_X", "=1", " = 1", "GOMBIT_X=", "GOMBIT_X='a=b'", "lower=1", "\tGOMBIT_X=1\r",
+	} {
+		key, value, ok := parseDotEnvLine(line)
+		got, gotOK := DotEnvKey([]byte(line))
+		if gotOK != ok || got != key {
+			t.Errorf("%q: DotEnvKey = %q, %v; the loader assigns %q (%q), %v", line, got, gotOK, key, value, ok)
+		}
+	}
+}
+
+// TestDotEnvGrammar: what the grammar itself assigns, pinned.
+func TestDotEnvGrammar(t *testing.T) {
+	for line, want := range map[string]string{
+		"GOMBIT_X=1":        "GOMBIT_X",
+		"  GOMBIT_X = 1 ":   "GOMBIT_X",
+		"export GOMBIT_X=1": "export GOMBIT_X",
+		"# GOMBIT_X=1":      "",
+		"#GOMBIT_X=1":       "",
+		"":                  "",
+		"GOMBIT_X":          "",
+		"=1":                "",
+	} {
+		got, ok := DotEnvKey([]byte(line))
+		if got != want || ok != (want != "") {
+			t.Errorf("%q: DotEnvKey = %q, %v; want %q", line, got, ok, want)
+		}
+	}
+}
