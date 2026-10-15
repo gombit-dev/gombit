@@ -194,6 +194,18 @@ version.
   Form as field paths. The dependent-required message (`expected property zip
   to be present when city is present`) keys the same way
   ([#503](https://github.com/gombit-dev/gombit/issues/503)).
+- `gombit version` and `gombit new` from a scaffolded app's own `cmd/gombit`
+  report the framework it was built against, not the application. The version
+  logic read `debug.BuildInfo.Main` unconditionally, which is the framework in
+  its own binary but the *app* in a generated one: an app built from a checkout
+  printed `dev` while its `go.mod` required
+  `github.com/gombit-dev/gombit v0.6.0`, an app tagged `v3.4.5` printed
+  `v3.4.5`, and `gombit new` from that binary pinned the framework to `v0.0.0`
+  and warned. When the main module is not `github.com/gombit-dev/gombit`, the
+  framework's entry in `BuildInfo.Deps` is used instead. A replace by a local
+  checkout or by a fork names no framework release, so those still report
+  `dev` — the reading `internal/frameworkmod` already applies to `go.mod`
+  ([#512](https://github.com/gombit-dev/gombit/issues/512)).
 
 ### Changed
 
