@@ -680,12 +680,16 @@ version.
   its own binary but the *app* in a generated one: an app built from a checkout
   printed `dev` while its `go.mod` required
   `github.com/gombit-dev/gombit v0.6.0`, an app tagged `v3.4.5` printed
-  `v3.4.5`, and `gombit new` from that binary pinned the framework to `v0.0.0`
-  and warned. When the main module is not `github.com/gombit-dev/gombit`, the
-  framework's entry in `BuildInfo.Deps` is used instead. A replace by a local
-  checkout or by a fork names no framework release, so those still report
-  `dev` — the reading `internal/frameworkmod` already applies to `go.mod`
-  ([#512](https://github.com/gombit-dev/gombit/issues/512)).
+  `v3.4.5`, and `gombit new` from that binary pinned the framework to the app's
+  version — `v0.0.0` with a warning for a checkout, or, worse, the app's own
+  pseudo-version silently, since one is a valid module version. When the main
+  module is not `github.com/gombit-dev/gombit`, the framework's entry in
+  `BuildInfo.Deps` is used instead. A replace by a local checkout or by a fork
+  names no framework release, so those still report `dev` — the same rule
+  `internal/frameworkmod` applies to a `go.mod`, read from build info. An app
+  binary also stops printing `commit` and `built`: those settings are recorded
+  for the main module, so they would name the app's repository beside a Gombit
+  release ([#512](https://github.com/gombit-dev/gombit/issues/512)).
 
 ## [0.6.0] — 2026-09-28
 

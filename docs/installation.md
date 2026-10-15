@@ -208,7 +208,8 @@ That's the right behaviour for framework development — see
 [CONTRIBUTING.md](../CONTRIBUTING.md).
 
 An app's own `cmd/gombit` resolves the same way, from the framework
-*dependency* it was built with: an app requiring
+*dependency* its binary was built with — build info, not the `go.mod` of the
+directory you are standing in. An app built against
 `github.com/gombit-dev/gombit v0.6.0` reports and pins `v0.6.0` whatever tag
 the app itself carries, and an app that replaces the framework with a checkout
 reports `dev`, so generating from it takes the `v0.0.0` + `replace` route
