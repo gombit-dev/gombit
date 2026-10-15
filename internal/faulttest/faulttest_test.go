@@ -202,6 +202,8 @@ func TestMisuseIsRefused(t *testing.T) {
 		"Wait(-1)":        func() { faulttest.Wait(-time.Second) },
 		"Block(nil)":      func() { faulttest.Block(nil) },
 		"Reached(0)":      func() { faulttest.Sequence().Reached(0) },
+		"nil Reached(0)":  func() { (*faulttest.Injector)(nil).Reached(0) },
+		"nil Reached(-1)": func() { (*faulttest.Injector)(nil).Reached(-1) },
 		"FailAlways(nil)": func() { faulttest.FailAlways(nil) },
 	} {
 		t.Run(name, func(t *testing.T) {
