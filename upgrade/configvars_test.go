@@ -122,9 +122,21 @@ func configProblems(old, current []config.Variable, declared []upgrade.ConfigCha
 	var problems []string
 	add := func(format string, args ...any) { problems = append(problems, fmt.Sprintf(format, args...)) }
 	gone := map[string]bool{} // removed or renamed away
+	// unknown are, per added variable, the environments whose first
+	// default the addition did not state (nor needs to). It enters as not
+	// secret: it was never printed-protected, so it cannot be declassified.
+	unknown := map[string]map[string]bool{}
 	for _, cc := range declared {
 		v, has := replay[cc.Var]
 		switch cc.Change {
+		case upgrade.ConfigAdded:
+			if has {
+				add("%s is declared added, but it is already read at that point", cc.Var)
+				continue
+			}
+			replay[cc.Var] = config.Variable{Name: cc.Var}
+			unknown[cc.Var] = map[string]bool{"development": true, "test": true, "production": true}
+			delete(gone, cc.Var)
 		case upgrade.ConfigRenamed, upgrade.ConfigRemoved:
 			if !has {
 				add("%s is declared %s, but it is not read at that point", cc.Var, cc.Change)
@@ -132,12 +144,17 @@ func configProblems(old, current []config.Variable, declared []upgrade.ConfigCha
 			}
 			delete(replay, cc.Var)
 			gone[cc.Var] = true
+			u := unknown[cc.Var]
+			delete(unknown, cc.Var)
 			if cc.Change == upgrade.ConfigRenamed {
 				if _, taken := replay[cc.To]; taken {
 					add("%s is declared renamed %s, which is already read at that point", cc.Var, cc.To)
 				}
 				v.Name = cc.To
 				replay[cc.To] = v
+				if u != nil {
+					unknown[cc.To] = u
+				}
 			}
 		case upgrade.ConfigDefault:
 			if !has {
@@ -148,7 +165,9 @@ func configProblems(old, current []config.Variable, declared []upgrade.ConfigCha
 				if cc.Environment != "" && cc.Environment != env {
 					continue
 				}
-				if was := envDefault(v, env); was != cc.From {
+				if unknown[cc.Var][env] {
+					delete(unknown[cc.Var], env) // an addition's first default: from is its word
+				} else if was := envDefault(v, env); was != cc.From {
 					add("%s's %s default is declared to change from %q, but it was %q", cc.Var, env, cc.From, was)
 				}
 				setEnvDefault(&v, env, cc.To)
@@ -168,6 +187,9 @@ func configProblems(old, current []config.Variable, declared []upgrade.ConfigCha
 			continue
 		}
 		for _, env := range configEnvs {
+			if unknown[name][env] {
+				continue // an addition's default, never stated: nothing to compare
+			}
 			if from, to := envDefault(v, env), envDefault(n, env); from != to {
 				add("%s's %s default changed from %q to %q: declare it (change: default, from, to, environment: %s or none)", name, env, from, to, env)
 			}
@@ -300,6 +322,42 @@ func TestConfigProblems(t *testing.T) {
 			[]config.Variable{v("GOMBIT_A", "1", "1")}, []config.Variable{v("GOMBIT_C", "1", "1")},
 			[]upgrade.ConfigChange{{Var: "GOMBIT_A", Change: upgrade.ConfigRenamed, To: "GOMBIT_B"}},
 			[]string{"GOMBIT_B is read after the declarations"},
+		},
+		// A new variable enters the replay by an addition, at its release:
+		// then it can be required, refused, re-defaulted or renamed.
+		"a new variable required across the snapshot": {
+			[]config.Variable{v("GOMBIT_A", "1", "1")}, []config.Variable{v("GOMBIT_A", "1", "1"), v("GOMBIT_NEW", "dev-default", "")},
+			[]upgrade.ConfigChange{{Var: "GOMBIT_NEW", Change: upgrade.ConfigAdded}, {Var: "GOMBIT_NEW", Change: upgrade.ConfigRequired, Environment: "production"}},
+			nil,
+		},
+		"a new variable required without its addition": {
+			[]config.Variable{v("GOMBIT_A", "1", "1")}, []config.Variable{v("GOMBIT_A", "1", "1"), v("GOMBIT_NEW", "", "")},
+			[]upgrade.ConfigChange{{Var: "GOMBIT_NEW", Change: upgrade.ConfigRequired, Environment: "production"}},
+			[]string{"GOMBIT_NEW is declared required, but it is not read at that point"},
+		},
+		"an added variable re-defaulted, then renamed": {
+			nil, []config.Variable{v("GOMBIT_FINAL", "b", "b")},
+			[]upgrade.ConfigChange{
+				{Var: "GOMBIT_NEW", Change: upgrade.ConfigAdded},
+				{Var: "GOMBIT_NEW", Change: upgrade.ConfigDefault, From: "a", To: "b"},
+				{Var: "GOMBIT_NEW", Change: upgrade.ConfigRenamed, To: "GOMBIT_FINAL"},
+			},
+			nil,
+		},
+		"an added variable whose default moved again undeclared": {
+			nil, []config.Variable{v("GOMBIT_NEW", "c", "c")},
+			[]upgrade.ConfigChange{{Var: "GOMBIT_NEW", Change: upgrade.ConfigAdded}, {Var: "GOMBIT_NEW", Change: upgrade.ConfigDefault, From: "a", To: "b"}},
+			[]string{`GOMBIT_NEW's development default changed from "b" to "c"`, `GOMBIT_NEW's test default changed from "b" to "c"`, `GOMBIT_NEW's production default changed from "b" to "c"`},
+		},
+		"an addition of a variable already read": {
+			[]config.Variable{v("GOMBIT_A", "1", "1")}, []config.Variable{v("GOMBIT_A", "1", "1")},
+			[]upgrade.ConfigChange{{Var: "GOMBIT_A", Change: upgrade.ConfigAdded}},
+			[]string{"GOMBIT_A is declared added, but it is already read at that point"},
+		},
+		"an addition the code does not read": {
+			nil, nil,
+			[]upgrade.ConfigChange{{Var: "GOMBIT_GHOST", Change: upgrade.ConfigAdded}},
+			[]string{"GOMBIT_GHOST is read after the declarations"},
 		},
 		"a rename onto a variable already read": {
 			[]config.Variable{v("GOMBIT_OLD", "1", "1"), v("GOMBIT_NEW", "1", "1")}, []config.Variable{v("GOMBIT_NEW", "1", "1")},

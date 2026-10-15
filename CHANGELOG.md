@@ -387,7 +387,7 @@ version.
     removed variables commented out, each with a note). The files are
     written atomically and idempotently, and `.env` is never written.
   - Manual manifest changes list their configuration variables (`config:`
-    entries). A default change counts as overridden only where a file
+    entries; `added` introduces a new variable a later entry requires). A default change counts as overridden only where a file
     gombit loads proves it: `.env`, for local development runs. Templates
     and other `.env.*` files are mentions, and nothing proves test or
     production.

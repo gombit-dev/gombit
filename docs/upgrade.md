@@ -467,13 +467,24 @@ config:
   - {var: GOMBIT_X, change: default, from: "a", to: "b", environment: production}
   - {var: GOMBIT_Y, change: required, environment: production}
   - {var: GOMBIT_Z, change: refused, environment: production}
+  - {var: GOMBIT_NEW, change: added}
 ```
 
 `environment` limits a default change, a requirement or a refusal to one
 runtime environment. The notes list each entry, and `gombit upgrade config`
 checks the app against them.
 
-A change that lists variables is `manual`. Any of them can need the
+A new variable needs no entry: an addition asks nothing of an application.
+Declare it `added` only when another entry needs it to exist, such as a
+newly required production setting:
+
+```yaml
+config:
+  - {var: GOMBIT_NEW, change: added}
+  - {var: GOMBIT_NEW, change: required, environment: production}
+```
+
+A change that lists variables beyond additions is `manual`. Any of them can need the
 developer: a default only some environments override, a security review. So
 the notes and the plan never call such a change nothing to do, or something
 the tooling applies, while the analysis asks for action.
@@ -490,7 +501,9 @@ Configuration changes are detected, not only declared:
     releases);
   - a variable that stops being secret (the test's `declassified` list,
     with the reason).
-- The declarations are replayed on a copy of the snapshot. A rename moves
+- The declarations are replayed on a copy of the snapshot. An `added`
+  variable enters at its release; its first defaults need no declaration,
+  but a later default change is checked from the one it declares. A rename moves
   the variable, defaults and secrecy included, to its new name, so a
   default or secrecy change that comes with a rename is still compared,
   and a default declaration can name the variable before or after it.

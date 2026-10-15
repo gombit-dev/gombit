@@ -32,6 +32,11 @@ const (
 	// ConfigRefused: values the variable accepted before are now refused
 	// (in Environment, or everywhere); the change's details say which.
 	ConfigRefused ConfigChangeKind = "refused"
+	// ConfigAdded: the variable is new, read from this release on. It is
+	// declared only when a later declaration (a requirement, a refusal, a
+	// default change, a rename) needs it to exist: an addition alone asks
+	// nothing of an application.
+	ConfigAdded ConfigChangeKind = "added"
 )
 
 // ConfigChange is one configuration variable a release changes.
@@ -82,8 +87,12 @@ func (cc ConfigChange) validate() error {
 		if cc.To != "" || cc.From != "" {
 			return fmt.Errorf("config %s: %s has no to or from", cc.Var, cc.Change)
 		}
+	case ConfigAdded:
+		if cc.To != "" || cc.From != "" || cc.Environment != "" {
+			return fmt.Errorf("config %s: an addition has no to, from or environment", cc.Var)
+		}
 	default:
-		return fmt.Errorf("config %s: change %q, want renamed, removed, default, required or refused", cc.Var, cc.Change)
+		return fmt.Errorf("config %s: change %q, want added, renamed, removed, default, required or refused", cc.Var, cc.Change)
 	}
 	return nil
 }
@@ -106,6 +115,8 @@ func (cc ConfigChange) Describe() string {
 		return fmt.Sprintf("`%s` must be set%s", cc.Var, where)
 	case ConfigRefused:
 		return fmt.Sprintf("`%s`: some values are now refused%s", cc.Var, where)
+	case ConfigAdded:
+		return fmt.Sprintf("`%s` is new", cc.Var)
 	}
 	return "`" + cc.Var + "`"
 }
@@ -329,6 +340,9 @@ func AnalyzeConfig(workDir string, releases []Release) (ConfigReport, error) {
 	for _, r := range releases {
 		for _, c := range r.Changes {
 			for _, cc := range c.Config {
+				if cc.Change == ConfigAdded {
+					continue // nothing to do: what follows it, if anything, is
+				}
 				report.Findings = append(report.Findings, finding(r.Version, c, cc, files))
 			}
 		}

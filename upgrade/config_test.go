@@ -229,6 +229,7 @@ func TestConfigChangesValidate(t *testing.T) {
 		"{var: GOMBIT_A, change: default, from: a}",
 		"{var: GOMBIT_A, change: required, environment: production}",
 		"{var: GOMBIT_A, change: refused}",
+		"{var: GOMBIT_A, change: added}",
 	}
 	for _, entry := range ok {
 		if _, err := upgrade.ParseManifest([]byte(fmt.Sprintf(head, "config", entry))); err != nil {
@@ -247,6 +248,8 @@ func TestConfigChangesValidate(t *testing.T) {
 		"{var: GOMBIT_A, change: refused, environment: staging}":    "config",
 		"{var: GOMBIT_A, change: removed, extra: 1}":                "config",
 		"{var: GOMBIT_A, change: removed} ":                         "behavior",
+		"{var: GOMBIT_A, change: added, to: x}":                     "config",
+		"{var: GOMBIT_A, change: added, environment: production}":   "config",
 	} {
 		if _, err := upgrade.ParseManifest([]byte(fmt.Sprintf(head, area, entry))); err == nil {
 			t.Errorf("%s (area %s): accepted", entry, area)
@@ -506,5 +509,27 @@ func TestConfigReadsTheWholeFileAsTheLoaderDoes(t *testing.T) {
 	}
 	if f := r.Findings[0]; f.NeedsAction || strings.Join(f.SetIn, ",") != ".env" {
 		t.Fatalf("finding = %+v", f)
+	}
+}
+
+// TestConfigAdditions: an addition asks nothing of an application, so a
+// change that only adds variables may be informational, the analysis
+// reports nothing for it, and the notes say the variable is new; a change
+// that also requires one is manual.
+func TestConfigAdditions(t *testing.T) {
+	head := "format: 1\nreleases:\n  - version: v0.1.0\n  - version: v0.2.0\n    changes:\n      - id: x\n        kind: informational\n        area: config\n        summary: s\n        config:\n"
+	if _, err := upgrade.ParseManifest([]byte(head + "          - {var: GOMBIT_NEW, change: added}\n")); err != nil {
+		t.Fatalf("an informational addition: %v", err)
+	}
+	if _, err := upgrade.ParseManifest([]byte(head + "          - {var: GOMBIT_NEW, change: added}\n          - {var: GOMBIT_NEW, change: required, environment: production}\n")); err == nil || !strings.Contains(err.Error(), "so it is manual") {
+		t.Fatalf("an informational addition and requirement: %v", err)
+	}
+	r, err := upgrade.AnalyzeConfig(t.TempDir(), []upgrade.Release{{Version: "v0.2.0", Changes: []upgrade.Change{{ID: "x", Kind: upgrade.KindManual, Area: "config", Summary: "s",
+		Config: []upgrade.ConfigChange{{Var: "GOMBIT_NEW", Change: upgrade.ConfigAdded}, {Var: "GOMBIT_NEW", Change: upgrade.ConfigRequired, Environment: "production"}}}}}})
+	if err != nil || len(r.Findings) != 1 || r.Findings[0].Change != upgrade.ConfigRequired {
+		t.Fatalf("findings = %+v, %v", r.Findings, err)
+	}
+	if got := (upgrade.ConfigChange{Var: "GOMBIT_NEW", Change: upgrade.ConfigAdded}).Describe(); got != "`GOMBIT_NEW` is new" {
+		t.Fatalf("Describe = %q", got)
 	}
 }
