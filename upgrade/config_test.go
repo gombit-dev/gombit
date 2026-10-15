@@ -2,6 +2,7 @@ package upgrade_test
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +10,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gombit-dev/gombit/config"
+	"github.com/gombit-dev/gombit/internal/atomicfile"
 	"github.com/gombit-dev/gombit/upgrade"
 )
 
@@ -26,6 +29,12 @@ var configReleases = []upgrade.Release{
 	{Version: "v0.9.0", Changes: []upgrade.Change{
 		{ID: "proxies", Area: "security", Summary: "Production refuses trust-all proxies.", Config: []upgrade.ConfigChange{{Var: "GOMBIT_HTTP_TRUSTED_PROXIES", Change: upgrade.ConfigRefused, Environment: "production"}}},
 		{ID: "need-req", Area: "config", Summary: "required", Config: []upgrade.ConfigChange{{Var: "GOMBIT_REQ", Change: upgrade.ConfigRequired, Environment: "production"}}},
+		{ID: "scoped", Area: "config", Summary: "scoped defaults", Config: []upgrade.ConfigChange{
+			{Var: "GOMBIT_TMPL", Change: upgrade.ConfigDefault, From: "old", To: "new", Environment: "production"},
+			{Var: "GOMBIT_OPP", Change: upgrade.ConfigDefault, From: "old", To: "new", Environment: "production"},
+			{Var: "GOMBIT_PRODSET", Change: upgrade.ConfigDefault, From: "old", To: "new", Environment: "production"},
+			{Var: "GOMBIT_DEVSET", Change: upgrade.ConfigDefault, From: "old", To: "new", Environment: "development"},
+		}},
 	}},
 }
 
@@ -37,10 +46,11 @@ func configApp(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	writeTree(t, dir, map[string]string{
-		".env.example":    "# Copy to .env.\nGOMBIT_OLD=tmpl-placeholder-value\n# GOMBIT_GONE=1\nGOMBIT_KEEP=1\n",
-		".env":            "GOMBIT_OLD=s3cr3t-dotenv-old\nGOMBIT_JWT_SECRET=s3cr3t-jwt\nexport GOMBIT_GONE=1\n",
-		".env.production": "GOMBIT_DEF=prod-def-value\n",
-		"env.example":     "GOMBIT_UNSET=1\n", // not an environment file (no leading dot)
+		".env.example":     "# Copy to .env.\nGOMBIT_OLD=tmpl-placeholder-value\n# GOMBIT_GONE=1\nGOMBIT_KEEP=1\nGOMBIT_TMPL=old\n",
+		".env":             "GOMBIT_OLD=s3cr3t-dotenv-old\nGOMBIT_JWT_SECRET=s3cr3t-jwt\nexport GOMBIT_GONE=1\nGOMBIT_DEVSET=old\n",
+		".env.production":  "GOMBIT_DEF=prod-def-value\nGOMBIT_PRODSET=old\n",
+		".env.development": "GOMBIT_OPP=old\n",
+		"env.example":      "GOMBIT_UNSET=1\n", // not an environment file (no leading dot)
 	})
 	return dir
 }
@@ -59,30 +69,40 @@ func TestAnalyzeConfig(t *testing.T) {
 	for _, f := range r.Files {
 		files[f.Path] = f.Template
 	}
-	if len(files) != 3 || !files[".env.example"] || files[".env"] || files[".env.production"] {
+	if len(files) != 4 || !files[".env.example"] || files[".env"] || files[".env.production"] {
 		t.Fatalf("files = %+v", r.Files)
 	}
 	type want struct {
 		category    upgrade.ConfigCategory
 		action      bool
 		setIn       string
+		templateIn  string
 		documented  string
 		fixable     bool
 		adviceHints []string
 	}
 	for i, w := range []want{
-		{upgrade.ConfigCategoryRenamed, true, ".env, .env.example", "", true, []string{"Rename GOMBIT_OLD to GOMBIT_NEW in .env, .env.example and the deployment's environment"}},
-		{upgrade.ConfigCategoryActionRequired, true, ".env", ".env.example", true, []string{"Remove GOMBIT_GONE"}},
-		{upgrade.ConfigCategoryDefaultChanged, false, ".env.production", "", false, []string{"Set in .env.production, so unaffected there"}},
-		{upgrade.ConfigCategoryDefaultChanged, true, "", "", false, []string{"No environment file sets it", "in production", "set GOMBIT_UNSET=x"}},
-		{upgrade.ConfigCategorySecurityReview, true, "", "", false, []string{"Check the value of GOMBIT_HTTP_TRUSTED_PROXIES in production", "Security review: Production refuses trust-all proxies."}},
-		{upgrade.ConfigCategoryActionRequired, true, "", "", false, []string{"Set GOMBIT_REQ in production"}},
+		{upgrade.ConfigCategoryRenamed, true, ".env", ".env.example", "", true, []string{"Rename GOMBIT_OLD to GOMBIT_NEW in .env, .env.example and the deployment's environment"}},
+		{upgrade.ConfigCategoryActionRequired, true, ".env", "", ".env.example", true, []string{"Remove GOMBIT_GONE"}},
+		// Every environment: .env.production covers production only.
+		{upgrade.ConfigCategoryDefaultChanged, true, ".env.production", "", "", false, []string{"No runtime environment file sets it for development, test"}},
+		{upgrade.ConfigCategoryDefaultChanged, true, "", "", "", false, []string{"No runtime environment file sets it for production", "set GOMBIT_UNSET=x"}},
+		{upgrade.ConfigCategorySecurityReview, true, "", "", "", false, []string{"Check the value of GOMBIT_HTTP_TRUSTED_PROXIES in production", "Security review: Production refuses trust-all proxies."}},
+		{upgrade.ConfigCategoryActionRequired, true, "", "", "", false, []string{"Set GOMBIT_REQ in production"}},
+		// A template is not a runtime override.
+		{upgrade.ConfigCategoryDefaultChanged, true, "", ".env.example", "", false, []string{"No runtime environment file sets it for production (templates, and files for other environments, do not count)"}},
+		// Nor is a file for another environment.
+		{upgrade.ConfigCategoryDefaultChanged, true, ".env.development", "", "", false, []string{"No runtime environment file sets it for production"}},
+		// The production file overrides a production default.
+		{upgrade.ConfigCategoryDefaultChanged, false, ".env.production", "", "", false, []string{"Set for production by .env.production, so unaffected there"}},
+		// .env configures local runs: development (and test).
+		{upgrade.ConfigCategoryDefaultChanged, false, ".env", "", "", false, []string{"Set for development by .env"}},
 	} {
 		if i >= len(r.Findings) {
 			t.Fatalf("findings = %+v", r.Findings)
 		}
 		f := r.Findings[i]
-		if f.Category != w.category || f.NeedsAction != w.action || strings.Join(f.SetIn, ", ") != w.setIn || strings.Join(f.DocumentedIn, ", ") != w.documented || f.Fixable != w.fixable {
+		if f.Category != w.category || f.NeedsAction != w.action || strings.Join(f.SetIn, ", ") != w.setIn || strings.Join(f.TemplateSetIn, ", ") != w.templateIn || strings.Join(f.DocumentedIn, ", ") != w.documented || f.Fixable != w.fixable {
 			t.Errorf("finding %d (%s): %+v, want %+v", i, f.Var, f, w)
 		}
 		for _, h := range w.adviceHints {
@@ -91,7 +111,7 @@ func TestAnalyzeConfig(t *testing.T) {
 			}
 		}
 	}
-	if len(r.Findings) != 6 || !r.NeedsAction() {
+	if len(r.Findings) != 10 || !r.NeedsAction() {
 		t.Fatalf("findings = %d, needs action %v", len(r.Findings), r.NeedsAction())
 	}
 }
@@ -147,7 +167,8 @@ func TestWriteConfigTemplates(t *testing.T) {
 		"GOMBIT_NEW=tmpl-placeholder-value\n" +
 		"# GOMBIT_GONE is no longer read from v0.8.0 (drop-gone).\n" +
 		"# GOMBIT_GONE=1\n" +
-		"GOMBIT_KEEP=1\n"
+		"GOMBIT_KEEP=1\n" +
+		"GOMBIT_TMPL=old\n"
 	if got := read(t, filepath.Join(dir, ".env.example")); got != want {
 		t.Errorf(".env.example:\n%s\nwant:\n%s", got, want)
 	}
@@ -172,7 +193,7 @@ func TestWriteConfigTemplates(t *testing.T) {
 		}
 	}
 	// A rename is still reported: the deployment's environment is not ours.
-	if f := r.Findings[0]; !f.NeedsAction || strings.Join(f.SetIn, ",") != ".env" {
+	if f := r.Findings[0]; !f.NeedsAction || strings.Join(f.SetIn, ",") != ".env" || len(f.TemplateSetIn) != 0 {
 		t.Errorf("rename after the write: %+v", f)
 	}
 }
@@ -197,7 +218,7 @@ func TestWriteConfigTemplatesKeepsMode(t *testing.T) {
 
 // TestConfigChangesValidate: a manifest's config entries are checked.
 func TestConfigChangesValidate(t *testing.T) {
-	head := "format: 1\nreleases:\n  - version: v0.1.0\n  - version: v0.2.0\n    changes:\n      - id: x\n        kind: informational\n        area: %s\n        summary: s\n        config:\n          - %s\n"
+	head := "format: 1\nreleases:\n  - version: v0.1.0\n  - version: v0.2.0\n    changes:\n      - id: x\n        kind: manual\n        area: %s\n        summary: s\n        details: d\n        config:\n          - %s\n"
 	ok := []string{
 		"{var: GOMBIT_A, change: renamed, to: GOMBIT_B}",
 		"{var: GOMBIT_A, change: removed}",
@@ -228,6 +249,15 @@ func TestConfigChangesValidate(t *testing.T) {
 			t.Errorf("%s (area %s): accepted", entry, area)
 		}
 	}
+	// A change listing variables is manual: the notes and the plan must
+	// not call it nothing to do (informational) or something the tooling
+	// applies (automatic) while the analysis asks the developer to act.
+	for _, kind := range []string{"informational", "automatic\n        action: record-baseline"} {
+		data := strings.Replace(fmt.Sprintf(head, "security", "{var: GOMBIT_A, change: refused}"), "kind: manual", "kind: "+kind, 1)
+		if _, err := upgrade.ParseManifest([]byte(data)); err == nil || !strings.Contains(err.Error(), "so it is manual") {
+			t.Errorf("kind %s with config entries: %v", kind, err)
+		}
+	}
 }
 
 func rename(from, to string) []upgrade.Release {
@@ -250,7 +280,7 @@ func TestWriteConfigTemplatesRenameOntoDocumentedName(t *testing.T) {
 	if _, err := upgrade.WriteConfigTemplates(dir, rename("GOMBIT_OLD", "GOMBIT_NEW")); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := read(t, filepath.Join(dir, ".env.example")), "# GOMBIT_OLD was renamed GOMBIT_NEW in v0.8.0 (r).\n\ufeffGOMBIT_NEW=x\n# GOMBIT_NEW=\n"; got != want {
+	if got, want := read(t, filepath.Join(dir, ".env.example")), "\ufeff# GOMBIT_OLD was renamed GOMBIT_NEW in v0.8.0 (r).\nGOMBIT_NEW=x\n# GOMBIT_NEW=\n"; got != want {
 		t.Errorf(".env.example = %q, want %q", got, want)
 	}
 	if got, want := read(t, filepath.Join(dir, ".env.b.example")), "# GOMBIT_OLD is no longer read from v0.8.0 (r).\n# GOMBIT_OLD=1\n# GOMBIT_NEW=2\n"; got != want {
@@ -291,7 +321,7 @@ func TestAnalyzeConfigUnreadableAndSymlinked(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(r.Unreadable, ",") != ".env.production" || strings.Join(r.Findings[0].SetIn, ",") != ".env,.env.example" || !r.NeedsAction() {
+	if strings.Join(r.Unreadable, ",") != ".env.production" || strings.Join(r.Findings[0].SetIn, ",") != ".env" || strings.Join(r.Findings[0].TemplateSetIn, ",") != ".env.example" || !r.NeedsAction() {
 		t.Fatalf("report = %+v", r)
 	}
 	var text strings.Builder
@@ -302,7 +332,7 @@ func TestAnalyzeConfigUnreadableAndSymlinked(t *testing.T) {
 	// A default the readable files override needs no action, but the
 	// unreadable file may not override it: review.
 	redefault := []upgrade.Release{{Version: "v0.8.0", Changes: []upgrade.Change{{ID: "d", Area: "config", Summary: "d",
-		Config: []upgrade.ConfigChange{{Var: "GOMBIT_OLD", Change: upgrade.ConfigDefault, From: "a", To: "b"}}}}}}
+		Config: []upgrade.ConfigChange{{Var: "GOMBIT_OLD", Change: upgrade.ConfigDefault, From: "a", To: "b", Environment: "development"}}}}}}
 	if r, err := upgrade.AnalyzeConfig(dir, redefault); err != nil || r.Findings[0].NeedsAction || !r.NeedsAction() {
 		t.Fatalf("default overridden, a file unreadable: %+v, %v", r, err)
 	}
@@ -342,5 +372,50 @@ func TestConfigUnreleasedIsTheNextRelease(t *testing.T) {
 	}
 	if got := read(t, filepath.Join(dir, ".env.example")); !strings.HasPrefix(got, "# GOMBIT_OLD was renamed GOMBIT_NEW in the next release (r).\n") {
 		t.Fatalf("template = %q", got)
+	}
+}
+
+// TestWriteConfigTemplatesBOMRoundTrip: a template's byte order mark stays
+// the file's first bytes after the rewrite (a note line inserted above the
+// first assignment goes after it), so the upgraded template, copied to
+// .env, still loads: the renamed variable is read.
+func TestWriteConfigTemplatesBOMRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{".env.example": "\ufeffGOMBIT_OLD_NAME=demo-app\n"})
+	if _, err := upgrade.WriteConfigTemplates(dir, rename("GOMBIT_OLD_NAME", "GOMBIT_APP_NAME")); err != nil {
+		t.Fatal(err)
+	}
+	upgraded := read(t, filepath.Join(dir, ".env.example"))
+	if !strings.HasPrefix(upgraded, "\ufeff# GOMBIT_OLD_NAME was renamed") || strings.Count(upgraded, "\ufeff") != 1 {
+		t.Fatalf("upgraded = %q", upgraded)
+	}
+	app := t.TempDir()
+	writeTree(t, app, map[string]string{".env": upgraded})
+	if old, set := os.LookupEnv("GOMBIT_APP_NAME"); set {
+		_ = os.Unsetenv("GOMBIT_APP_NAME")
+		defer func() { _ = os.Setenv("GOMBIT_APP_NAME", old) }()
+	}
+	cfg, err := config.LoadFromDir(app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AppName != "demo-app" {
+		t.Fatalf("the upgraded template, loaded as .env, gives AppName %q; want demo-app", cfg.AppName)
+	}
+}
+
+// TestWriteConfigTemplatesCountsACommittedWrite: a template whose new
+// content is in place, but whose directory sync failed (not durable), is
+// reported written, with the error.
+func TestWriteConfigTemplatesCountsACommittedWrite(t *testing.T) {
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{".env.example": "GOMBIT_OLD=1\n"})
+	defer atomicfile.SetSyncDirForTest(func(string) error { return errors.New("sync failed") })()
+	written, err := upgrade.WriteConfigTemplates(dir, rename("GOMBIT_OLD", "GOMBIT_NEW"))
+	if !errors.Is(err, atomicfile.ErrNotDurable) || strings.Join(written, ",") != ".env.example" {
+		t.Fatalf("WriteConfigTemplates = %v, %v; want .env.example written and ErrNotDurable", written, err)
+	}
+	if !strings.Contains(read(t, filepath.Join(dir, ".env.example")), "GOMBIT_NEW=1") {
+		t.Fatal("the template does not have its new content")
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -146,10 +147,13 @@ type ConfigFinding struct {
 	// rename, removal, requirement, refusal and security change, and a
 	// default change the application's files do not override.
 	NeedsAction bool `json:"needs_action"`
-	// SetIn are the environment files that set the variable, and
-	// DocumentedIn the templates that mention it commented out.
-	SetIn        []string `json:"set_in"`
-	DocumentedIn []string `json:"documented_in"`
+	// SetIn are the runtime environment files (not templates) that set
+	// the variable; TemplateSetIn the templates that set it, and
+	// DocumentedIn those that mention it commented out. A template is
+	// never a runtime override.
+	SetIn         []string `json:"set_in"`
+	TemplateSetIn []string `json:"template_set_in"`
+	DocumentedIn  []string `json:"documented_in"`
 	// Fixable is whether WriteConfigTemplates would change a template for
 	// it (false once it has).
 	Fixable bool `json:"fixable"`
@@ -193,6 +197,8 @@ func (r ConfigReport) NeedsAction() bool {
 	return false
 }
 
+var utf8BOM = []byte("\ufeff")
+
 // templateSuffixes mark an environment file as a template: committed,
 // placeholders only.
 var templateSuffixes = []string{".example", ".sample", ".template", ".dist"}
@@ -214,15 +220,16 @@ type envFile struct {
 	set        map[string]bool
 	documented map[string]bool
 	lines      []string // templates only: what WriteConfigTemplates rewrites
+	bom        bool     // a template starting with a UTF-8 byte order mark
 	mode       os.FileMode
 }
 
 // envAssignment parses an environment file line: the variable it assigns,
 // and whether it is commented out ("# KEY=..."). It works on the line's
 // bytes and copies out the name only: values are never looked at, and
-// never become strings. A leading UTF-8 byte order mark is skipped.
+// never become strings.
 func envAssignment(line []byte) (key string, commented, ok bool) {
-	s := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("\ufeff")))
+	s := bytes.TrimSpace(line)
 	if bytes.HasPrefix(s, []byte("#")) {
 		commented = true
 		s = bytes.TrimSpace(s[1:])
@@ -274,7 +281,14 @@ func readEnvFiles(workDir string) (files []*envFile, unreadable []string, err er
 			unreadable = append(unreadable, name)
 			continue
 		}
-		for _, line := range bytes.SplitAfter(data, []byte("\n")) {
+		body := data
+		if f.Template {
+			// A byte order mark belongs to the file, not its first line:
+			// kept apart, and written back first.
+			f.bom = bytes.HasPrefix(data, utf8BOM)
+			body = bytes.TrimPrefix(data, utf8BOM)
+		}
+		for _, line := range bytes.SplitAfter(body, []byte("\n")) {
 			if key, commented, ok := envAssignment(line); ok {
 				if commented {
 					f.documented[key] = true
@@ -284,7 +298,7 @@ func readEnvFiles(workDir string) (files []*envFile, unreadable []string, err er
 			}
 		}
 		if f.Template {
-			f.lines = strings.SplitAfter(string(data), "\n")
+			f.lines = strings.SplitAfter(string(body), "\n")
 			if f.lines[len(f.lines)-1] == "" {
 				f.lines = f.lines[:len(f.lines)-1]
 			}
@@ -324,9 +338,12 @@ func AnalyzeConfig(workDir string, releases []Release) (ConfigReport, error) {
 }
 
 func finding(release string, c Change, cc ConfigChange, files []*envFile) ConfigFinding {
-	f := ConfigFinding{ConfigChange: cc, Release: release, ChangeID: c.ID, SetIn: []string{}, DocumentedIn: []string{}}
+	f := ConfigFinding{ConfigChange: cc, Release: release, ChangeID: c.ID, SetIn: []string{}, TemplateSetIn: []string{}, DocumentedIn: []string{}}
 	for _, file := range files {
-		if file.set[cc.Var] {
+		switch {
+		case file.set[cc.Var] && file.Template:
+			f.TemplateSetIn = append(f.TemplateSetIn, file.Path)
+		case file.set[cc.Var]:
 			f.SetIn = append(f.SetIn, file.Path)
 		}
 		if file.Template && file.documented[cc.Var] {
@@ -338,8 +355,8 @@ func finding(release string, c Change, cc ConfigChange, files []*envFile) Config
 		}
 	}
 	where := "the deployment's environment"
-	if len(f.SetIn) > 0 {
-		where = strings.Join(f.SetIn, ", ") + " and the deployment's environment"
+	if mentioned := append(append([]string{}, f.SetIn...), f.TemplateSetIn...); len(mentioned) > 0 {
+		where = strings.Join(mentioned, ", ") + " and the deployment's environment"
 	}
 	scope := ""
 	if cc.Environment != "" {
@@ -354,11 +371,25 @@ func finding(release string, c Change, cc ConfigChange, files []*envFile) Config
 		f.Advice = fmt.Sprintf("Remove %s from %s: from %s it has no effect.", cc.Var, where, releaseName(release))
 	case ConfigDefault:
 		f.Category = ConfigCategoryDefaultChanged
-		if len(f.SetIn) > 0 {
-			f.Advice = fmt.Sprintf("Set in %s, so unaffected there; where it is unset%s, it now defaults to %s.", strings.Join(f.SetIn, ", "), scope, quoteDefault(cc.To))
+		// Unaffected only where a runtime file for that environment sets
+		// it: every environment the change applies to must be covered.
+		affected := []string{"development", "test", "production"}
+		if cc.Environment != "" {
+			affected = []string{cc.Environment}
+		}
+		var covered, uncovered []string
+		for _, env := range affected {
+			if setFor(files, cc.Var, env) {
+				covered = append(covered, env)
+			} else {
+				uncovered = append(uncovered, env)
+			}
+		}
+		if len(uncovered) == 0 {
+			f.Advice = fmt.Sprintf("Set for %s by %s, so unaffected there; wherever else it is unset, it now defaults to %s.", strings.Join(covered, ", "), strings.Join(f.SetIn, ", "), quoteDefault(cc.To))
 		} else {
 			f.NeedsAction = true
-			f.Advice = fmt.Sprintf("No environment file sets it: where it is unset%s it now defaults to %s; set %s=%s to keep the old behavior.", scope, quoteDefault(cc.To), cc.Var, cc.From)
+			f.Advice = fmt.Sprintf("No runtime environment file sets it for %s (templates, and files for other environments, do not count): where it is unset there it now defaults to %s; set %s=%s to keep the old behavior.", strings.Join(uncovered, ", "), quoteDefault(cc.To), cc.Var, cc.From)
 		}
 	case ConfigRequired:
 		f.Category, f.NeedsAction = ConfigCategoryActionRequired, true
@@ -372,6 +403,33 @@ func finding(release string, c Change, cc ConfigChange, files []*envFile) Config
 		f.Advice += " Security review: " + strings.TrimSpace(c.Summary)
 	}
 	return f
+}
+
+// fileEnvironments are the runtime environments an environment file
+// configures: .env.<env> (and .env.<env>.local) its own; .env and
+// .env.local local runs (development and test), never production, where
+// no .env ships; any other name none that is known.
+func fileEnvironments(name string) []string {
+	if name == ".env" || name == ".env.local" {
+		return []string{"development", "test"}
+	}
+	env := strings.TrimSuffix(strings.TrimPrefix(name, ".env."), ".local")
+	switch env {
+	case "development", "test", "production":
+		return []string{env}
+	}
+	return nil
+}
+
+// setFor reports whether a runtime environment file (not a template) that
+// configures env sets name.
+func setFor(files []*envFile, name, env string) bool {
+	for _, f := range files {
+		if !f.Template && f.set[name] && slices.Contains(fileEnvironments(f.Path), env) {
+			return true
+		}
+	}
+	return false
 }
 
 // WriteConfigTemplates upgrades the application's environment templates
@@ -411,12 +469,19 @@ func WriteConfigTemplates(workDir string, releases []Release) ([]string, error) 
 		if after == before {
 			continue
 		}
+		if f.bom {
+			after = string(utf8BOM) + after
+		}
 		// A symlinked template is written through: the link stays.
 		target, err := filepath.EvalSymlinks(f.abs)
 		if err != nil {
 			return written, fmt.Errorf("upgrade: %w", err)
 		}
 		if err := atomicfile.Write(target, []byte(after), f.mode); err != nil {
+			if atomicfile.Committed(err) { // its new content is in place
+				written = append(written, f.Path)
+			}
+			sort.Strings(written)
 			return written, fmt.Errorf("upgrade: write %s: %w", f.Path, err)
 		}
 		written = append(written, f.Path)

@@ -272,6 +272,13 @@ func (c Change) validate() error {
 	if len(c.Config) > 0 && c.Area != "config" && c.Area != "security" {
 		return fmt.Errorf("change %s: lists configuration variables, so its area is config or security, not %s", c.ID, c.Area)
 	}
+	if len(c.Config) > 0 && c.Kind != KindManual {
+		// The config analysis can ask the developer to act on any of them
+		// (a default only some environments override, a security review),
+		// so the notes and the plan must not call the change nothing to
+		// do, or something the tooling applies.
+		return fmt.Errorf("change %s: lists configuration variables, so it is manual (the developer checks them: gombit upgrade config), not %s", c.ID, c.Kind)
+	}
 	for _, cc := range c.Config {
 		if err := cc.validate(); err != nil {
 			return fmt.Errorf("change %s: %w", c.ID, err)

@@ -386,8 +386,9 @@ version.
   - `--write` upgrades `.env.example` and the other templates (renames,
     removed variables commented out, each with a note). The files are
     written atomically and idempotently, and `.env` is never written.
-  - Manifest changes list their configuration variables (`config:`
-    entries).
+  - Manual manifest changes list their configuration variables (`config:`
+    entries). A default change counts as overridden only by a runtime
+    `.env` file for each environment it applies to; templates never count.
   - `config.Variables()` catalogs every variable with its secrecy and
     defaults. A snapshot test fails when a variable is removed or
     re-defaulted without a manifest declaration.

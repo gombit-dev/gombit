@@ -316,8 +316,14 @@ Configuration changes: 1
   not a file mentions the variable, since a deployment sets its
   environment elsewhere. The report says which files set it.
 - **Cannot pass silently.** The command exits 1 while any change needs
-  action or review. A default change needs action only when no environment
-  file sets the variable.
+  action or review.
+  - A default change needs no action only when, for every environment it
+    applies to, a runtime file for that environment sets the variable.
+  - `.env.production` covers production, and likewise `.env.development`
+    and `.env.test` (and their `.local` forms).
+  - `.env` and `.env.local` cover local runs (development and test), never
+    production, where no `.env` ships.
+  - A template never counts: it is copied, not loaded.
 - **Never a secret.** It reads the app's `.env` and `.env.*` files, through
   a symlink. From a file that is not a template (`.env`, `.env.production`),
   only the names it sets are read, over its bytes, which are then zeroed.
@@ -460,6 +466,11 @@ config:
 `environment` limits a default change, a requirement or a refusal to one
 runtime environment. The notes list each entry, and `gombit upgrade config`
 checks the app against them.
+
+A change that lists variables is `manual`. Any of them can need the
+developer: a default only some environments override, a security review. So
+the notes and the plan never call such a change nothing to do, or something
+the tooling applies, while the analysis asks for action.
 
 Configuration changes are detected, not only declared:
 - [`upgrade/testdata/config-variables.json`](../upgrade/testdata/config-variables.json)
