@@ -4,6 +4,9 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/go-sql-driver/mysql"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func TestRedactDSNHidesURLPassword(t *testing.T) {
@@ -85,8 +88,431 @@ func TestRedactDSNHidesQuotedLibpqPassword(t *testing.T) {
 	}
 }
 
+// The drivers' own readings of a DSN are the contract: whatever password
+// go-sql-driver/mysql or pgconn would send is what a printed DSN must not
+// contain. mysql splits userinfo at the last '@' before the last '/' and reads
+// no escaping at all, while libpq — whose parser pgconn mirrors — allows
+// whitespace around '=', ends an unquoted value only at whitespace (so '&', '"'
+// and '?' are ordinary data), and escapes with backslashes. A first '@' split
+// and a strict `key=` match leave part of the password in the open (#486).
+func TestRedactDSNHidesPasswordsTheDriversAccept(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct{ name, dsn, want string }{
+		{
+			name: "mysql password with an at sign",
+			dsn:  "app:p@ssw0rd-tail@tcp(db.internal:3306)/app?parseTime=true",
+			want: "app:" + RedactedSecret + "@tcp(db.internal:3306)/app?parseTime=true",
+		},
+		{
+			name: "mysql at sign in a query parameter",
+			dsn:  "app:secret@tcp(db.internal:3306)/app?name=a@b",
+			want: "app:" + RedactedSecret + "@tcp(db.internal:3306)/app?name=a@b",
+		},
+		{
+			name: "mysql password with a slash and an at sign",
+			dsn:  "app:p/sa@ss@tcp(db.internal:3306)/app",
+			want: "app:" + RedactedSecret + "@tcp(db.internal:3306)/app",
+		},
+		{
+			name: "mysql password with an equals sign",
+			dsn:  "app:pa=ss@tcp(db.internal:3306)/app",
+			want: "app:" + RedactedSecret + "@tcp(db.internal:3306)/app",
+		},
+		{
+			name: "libpq whitespace around the equals sign",
+			dsn:  "host=db user=app password = s3cr3t-value dbname=app",
+			want: "host=db user=app password = " + RedactedSecret + " dbname=app",
+		},
+		{
+			name: "libpq vertical tab around the equals sign",
+			dsn:  "host=db user=app password\x0b=s3cr3t-value dbname=app",
+			want: "host=db user=app password\x0b=" + RedactedSecret + " dbname=app",
+		},
+		{
+			name: "libpq quoted password with an escaped quote",
+			dsn:  `host=db user=app password='it\'s-a-s3cr3t tail' dbname=app`,
+			want: "host=db user=app password=" + RedactedSecret + " dbname=app",
+		},
+		{
+			name: "libpq unquoted password with an escaped space",
+			dsn:  `host=db password=s3cr3t\ value dbname=app`,
+			want: "host=db password=" + RedactedSecret + " dbname=app",
+		},
+		{
+			name: "libpq password with an at sign and a port in the host",
+			dsn:  "host=localhost:5432 user=app password=p@ss dbname=app",
+			want: "host=localhost:5432 user=app password=" + RedactedSecret + " dbname=app",
+		},
+		{
+			name: "libpq password with an ampersand",
+			dsn:  "host=db user=app password=s3cr3t&more dbname=app",
+			want: "host=db user=app password=" + RedactedSecret + " dbname=app",
+		},
+		{
+			name: "libpq password in double quotes",
+			dsn:  `host=db user=app password="s3cr3t"&more dbname=app`,
+			want: "host=db user=app password=" + RedactedSecret + " dbname=app",
+		},
+		{
+			name: "the pwd and pass look-alikes",
+			dsn:  "host=db user=app pwd=s3cr3t pass=tail dbname=app",
+			want: "host=db user=app pwd=" + RedactedSecret + " pass=" + RedactedSecret + " dbname=app",
+		},
+		{
+			name: "an ampersand still ends a query parameter",
+			dsn:  "file:gombit.db?cache=shared&password=query-secret&sslmode=disable",
+			want: "file:gombit.db?cache=shared&password=" + RedactedSecret + "&sslmode=disable",
+		},
+		{
+			// pgconn ends a value at whitespace, so a keyword list carries a '?' as
+			// ordinary data: the parameter reading must not cut the password there.
+			name: "a question mark inside a libpq password",
+			dsn:  "host=db user=app password=pa/ss?word dbname=app",
+			want: "host=db user=app password=" + RedactedSecret + " dbname=app",
+		},
+		{
+			name: "a question mark inside a quoted libpq password",
+			dsn:  "host=db user=app password='pa/ss?word' dbname=app",
+			want: "host=db user=app password=" + RedactedSecret + " dbname=app",
+		},
+		{
+			name: "a socket path and a question mark in a libpq password",
+			dsn:  "host=/var/run/postgresql password=s3cr3t?x dbname=app",
+			want: "host=/var/run/postgresql password=" + RedactedSecret + " dbname=app",
+		},
+		{
+			name: "a libpq password ending the DSN",
+			dsn:  "dbname=mydb password=pa/ss?word",
+			want: "dbname=mydb password=" + RedactedSecret,
+		},
+		{
+			name: "an equals sign in the user name of a mysql net dsn",
+			dsn:  "a=b:p@ssw0rd@tcp(db.internal:3306)/app",
+			want: "a=b:" + RedactedSecret + "@tcp(db.internal:3306)/app",
+		},
+		{
+			name: "a space inside a mysql userinfo",
+			dsn:  "app:my pass@tcp(db.internal:3306)/db",
+			want: "app:" + RedactedSecret + "@tcp(db.internal:3306)/db",
+		},
+		{
+			// A keyword reading that matched `pass=` wherever it appears would
+			// take the address with it. pgconn reads the key of that token as
+			// `app:pass`, which is not a password key, so only the MySQL
+			// userinfo goes.
+			name: "a password-like key inside a mysql userinfo",
+			dsn:  "app:pass=word@tcp(db.internal:3306)/db",
+			want: "app:" + RedactedSecret + "@tcp(db.internal:3306)/db",
+		},
+		{
+			name: "a password-like key inside a mysql userinfo, spelled with the key's own name",
+			dsn:  "app:password=word@tcp(db.internal:3306)/db",
+			want: "app:" + RedactedSecret + "@tcp(db.internal:3306)/db",
+		},
+		{
+			// An unencoded "://" in a MySQL password makes url.Parse read the
+			// user name as a scheme and the whole DSN as an opaque URL, which
+			// leaves no userinfo for the URL branch to mask and nothing to
+			// print: go-sql-driver/mysql ignores "://" and wants its range.
+			name: "a double slash inside a mysql password",
+			dsn:  "app:x://y@tcp(db.internal:3306)/db",
+			want: "app:" + RedactedSecret + "@tcp(db.internal:3306)/db",
+		},
+		{
+			name: "an at sign and a double slash inside a mysql password",
+			dsn:  "root:p@ss://w0rd@tcp(db.internal:3306)/db",
+			want: "root:" + RedactedSecret + "@tcp(db.internal:3306)/db",
+		},
+		{
+			// pgconn separates keyword tokens on whitespace and never cuts a
+			// value at '?', so a parameter reading may add a range but may not
+			// end the keyword reading where the '?' falls.
+			name: "a question mark inside a libpq password of a socket dsn with an at sign",
+			dsn:  "user=app@corp host=/tmp password=Sup3r?Secret?2026 dbname=app",
+			want: "user=app@corp host=/tmp password=" + RedactedSecret + " dbname=app",
+		},
+		{
+			// A connection URI's parameter key is decoded before it is compared,
+			// because that is how pgconn decides what the parameter is.
+			name: "a percent-encoded password key in a URL parameter",
+			dsn:  "postgres://app@h:5432/db?pass%77ord=s3cr3t-tail&sslmode=disable",
+			want: "postgres://app@h:5432/db?pass%77ord=" + RedactedSecret + "&sslmode=disable",
+		},
+		{
+			name: "an sslpassword key of a libpq dsn",
+			dsn:  "host=db user=app sslpassword=tls-s3cr3t dbname=app sslmode=disable",
+			want: "host=db user=app sslpassword=" + RedactedSecret + " dbname=app sslmode=disable",
+		},
+		{
+			name: "an sslpassword URL parameter",
+			dsn:  "postgres://app@h:5432/db?sslpassword=tls-s3cr3t&sslmode=disable",
+			want: "postgres://app@h:5432/db?sslpassword=" + RedactedSecret + "&sslmode=disable",
+		},
+		{
+			// passfile names the file a password is read from, not a secret.
+			name: "a passfile path",
+			dsn:  "host=db user=app passfile=/home/deploy/.pgpass dbname=app",
+			want: "host=db user=app passfile=/home/deploy/.pgpass dbname=app",
+		},
+		{
+			// Whitespace around '=' is a separator to pgconn, and after the '='
+			// it trims the leading whitespace off the value before it reads it:
+			// an empty password is the next token, which is what the driver
+			// sends.
+			name: "a libpq password that is empty up to the next token",
+			dsn:  "host=db user=app password= dbname=x sslmode=disable",
+			want: "host=db user=app password= " + RedactedSecret + " sslmode=disable",
+		},
+		{
+			name: "a password parameter of a mysql net dsn with no userinfo",
+			dsn:  "tcp(db.internal:3306)/db?password=s3cr3t&parseTime=true",
+			want: "tcp(db.internal:3306)/db?password=" + RedactedSecret + "&parseTime=true",
+		},
+		{
+			// A URI scheme is compared without regard to case.
+			name: "an upper-case file scheme with a password parameter",
+			dsn:  "FILE:gombit.db?password=s3cr3t&x=1",
+			want: "FILE:gombit.db?password=" + RedactedSecret + "&x=1",
+		},
+		{
+			// Go splits a URL userinfo at its last '@' and pgconn at its first,
+			// so the wider reading is hidden and the address goes with it.
+			name: "an unencoded at sign in a URL password",
+			dsn:  "postgres://app:sup3r@ss@h:5432/db?sslmode=disable",
+			want: "postgres://app:" + RedactedSecret + "@h:5432/db?sslmode=disable",
+		},
+		{
+			name: "a password-like query parameter of a mysql net dsn",
+			dsn:  "app:secret@tcp(db.internal:3306)/db?password=a&other=1",
+			want: "app:" + RedactedSecret + "@tcp(db.internal:3306)/db?password=" + RedactedSecret + "&other=1",
+		},
+		{
+			name: "a percent-escaped password in a URL parameter",
+			dsn:  "postgres://app@h:5432/db?password=a%40b%20c&sslmode=disable",
+			want: "postgres://app@h:5432/db?password=" + RedactedSecret + "&sslmode=disable",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := RedactDSN(tt.dsn); got != tt.want {
+				t.Fatalf("RedactDSN(%q) = %q, want %q", tt.dsn, got, tt.want)
+			}
+		})
+	}
+}
+
+// driverCheckedDSNs is the corpus both helpers are checked against: every string
+// is one a driver reads a password out of, and every one of them came from the
+// parsers' own rules rather than from the redaction's. An entry must parse
+// without touching the filesystem — no sslrootcert, sslkey, passfile or service
+// path — because pgconn opens what those name, and a corpus that passed on one
+// machine and failed on the next would check nothing.
+var driverCheckedDSNs = []string{
+	"app:p@ssw0rd-tail@tcp(db.internal:3306)/app?parseTime=true",
+	"app:p/sa@ss@tcp(db.internal:3306)/app",
+	"app:pa=ss@tcp(db.internal:3306)/app",
+	"app:secret@tcp(db.internal:3306)/app?parseTime=true&charset=utf8mb4",
+	"app:pass=word@tcp(db.internal:3306)/db",
+	"app:password=s3cr3t@tcp(db.internal:3306)/db",
+	"app:my pass@tcp(db.internal:3306)/db",
+	"app:x://y@tcp(db.internal:3306)/db",
+	"root:p@ss://w0rd@tcp(db.internal:3306)/db",
+	"a=b:p@ssw0rd@tcp(db.internal:3306)/app",
+	"app:secret@tcp(db.internal:3306)/db?password=a&other=1",
+	"host=db.internal user=app password = s3cr3t-value dbname=app",
+	"host=db.internal user=app password\x0b=s3cr3t-value dbname=app",
+	`host=db.internal user=app password='it\'s-a-s3cr3t tail' dbname=app`,
+	`host=db.internal password=s3cr3t\ value dbname=app`,
+	"host=localhost:5432 user=app password=p@ss dbname=app",
+	"host=localhost:5432 password=s3cr3t@tcp(db.internal:3306)/db",
+	"host=db.internal user=app password=s3cr3t&more dbname=app",
+	`host=db.internal user=app password="s3cr3t"&more dbname=app`,
+	"host=db user=app password=pa/ss?word dbname=app",
+	"host=db user=app password='pa/ss?word' dbname=app",
+	"user=app@corp host=/tmp password=Sup3r?Secret?2026 dbname=app",
+	"host=db.internal user=app password= dbname=x sslmode=disable",
+	"host=/var/run/postgresql password=s3cr3t?x dbname=app",
+	"dbname=mydb password=pa/ss?word",
+	"postgres://app:s3cr3t%40tail@db.internal:5432/app?sslmode=disable",
+	"postgres://app:sup3r@ss@h/db?sslmode=disable",
+	"postgres://app@h:5432/db?pass%77ord=s3cr3t-tail&sslmode=disable",
+	"postgres://app@h:5432/db?password=a%40b%20c&sslmode=disable",
+}
+
+// Redaction is checked against the parsers that build the connection, not
+// against a reading of the DSN by hand: whatever password the driver takes from
+// a string it accepts must be gone from RedactDSN's output — its tail as well as
+// its whole.
+func TestRedactDSNHidesWhatTheDriversParse(t *testing.T) {
+	t.Parallel()
+
+	for _, dsn := range driverCheckedDSNs {
+		dsn := dsn
+		t.Run(dsn, func(t *testing.T) {
+			t.Parallel()
+			assertNoDriverPassword(t, dsn, "RedactDSN", RedactDSN(dsn))
+		})
+	}
+}
+
+// A message that quotes a DSN, or the password the server rejected out of it,
+// is sanitised from the same readings: the escapes the DSN spells stand for the
+// password the driver sends (#486).
+func TestSanitizeErrorHidesWhatTheDriversParse(t *testing.T) {
+	t.Parallel()
+
+	for _, dsn := range driverCheckedDSNs {
+		dsn := dsn
+		t.Run(dsn, func(t *testing.T) {
+			t.Parallel()
+			cfg := Default()
+			cfg.Database.DSN = dsn // #nosec G101 -- fake local test DSN.
+			for _, password := range mustDriverPasswords(t, dsn) {
+				// The prose is kept free of the password's own letters: the
+				// check below looks for fragments, and a word like "password"
+				// would answer it on its own.
+				err := errors.New("ping failed for " + dsn + " [" + password + "]")
+				assertNoDriverPassword(t, dsn, "SanitizeError", SanitizeError(err, cfg))
+			}
+		})
+	}
+}
+
+// assertNoDriverPassword fails unless every password a driver reads out of dsn
+// is absent from printed. The tail is checked apart from the whole: a redaction
+// that rewrites the head of a password and leaves the rest visible hides
+// nothing that matters.
+func assertNoDriverPassword(t *testing.T, dsn, helper string, printed string) {
+	t.Helper()
+	for _, password := range mustDriverPasswords(t, dsn) {
+		fragments := []string{password}
+		switch {
+		case len(password) >= 8:
+			fragments = append(fragments, password[len(password)/2:])
+		case len(password) >= 4:
+			// A password cut at the wrong separator leaves its end behind, and
+			// the shortest leak of that shape is the last three bytes: without
+			// this a four-character password passes on its whole alone.
+			fragments = append(fragments, password[len(password)-3:])
+		}
+		for _, fragment := range fragments {
+			if strings.Contains(printed, fragment) {
+				t.Errorf("%s(%q) = %q, still contains %q of the driver's password %q", helper, dsn, printed, fragment, password)
+			}
+		}
+	}
+}
+
+// driverPasswords returns the passwords the database drivers take from dsn, one
+// per driver that reads a password out of it. A DSN that no driver reads a
+// password from is not a leak to check: `pwd=` is a runtime parameter to
+// pgconn, not a password, and the MySQL driver wants a database name.
+func driverPasswords(dsn string) []string {
+	var out []string
+	if cfg, err := mysql.ParseDSN(dsn); err == nil && cfg.Passwd != "" {
+		out = append(out, cfg.Passwd)
+	}
+	if cfg, err := pgconn.ParseConfig(dsn); err == nil && cfg.Password != "" {
+		out = append(out, cfg.Password)
+	}
+	return out
+}
+
+func mustDriverPasswords(t *testing.T, dsn string) []string {
+	t.Helper()
+	passwords := driverPasswords(dsn)
+	if len(passwords) == 0 {
+		t.Fatalf("no driver takes a password from %q, so this case checks nothing", dsn)
+	}
+	return passwords
+}
+
+func TestSanitizeErrorHidesAMySQLPasswordWithAnAtSign(t *testing.T) {
+	t.Parallel()
+
+	cfg := Default()
+	cfg.Database.DSN = "app:p@ssw0rd-tail@tcp(db.internal:3306)/app?parseTime=true" // #nosec G101 -- fake local test DSN.
+
+	got := SanitizeError(errors.New("connect failed for dsn "+cfg.Database.DSN), cfg)
+	want := "connect failed for dsn app:" + RedactedSecret + "@tcp(db.internal:3306)/app?parseTime=true"
+	if got != want {
+		t.Fatalf("SanitizeError() = %q, want %q", got, want)
+	}
+}
+
+func TestSanitizeErrorHidesALibpqPasswordWithSpacesAroundEquals(t *testing.T) {
+	t.Parallel()
+
+	cfg := Default()
+	cfg.Database.DSN = "host=db user=app password = s3cr3t-value dbname=app" // #nosec G101 -- fake local test DSN.
+
+	got := SanitizeError(errors.New(`startup packet rejected s3cr3t-value`), cfg)
+	if strings.Contains(got, "s3cr3t") {
+		t.Fatalf("SanitizeError() = %q, still contains the libpq password", got)
+	}
+	if !strings.Contains(got, RedactedSecret) {
+		t.Fatalf("SanitizeError() = %q, want the password redacted", got)
+	}
+}
+
+// pgconn puts a URL parameter's password on the wire percent-decoded, so a
+// message naming what the server rejected names bytes the DSN never spells:
+// both spellings have to go (#486).
+func TestSanitizeErrorHidesTheDecodedPasswordOfAURLParameter(t *testing.T) {
+	t.Parallel()
+
+	cfg := Default()
+	cfg.Database.DSN = "postgres://app@h:5432/db?password=a%40b%20c&sslmode=disable" // #nosec G101 -- fake local test DSN.
+
+	got := SanitizeError(errors.New("handshake failed for postgres://app@h:5432/db?password=a%40b%20c&sslmode=disable: password a@b c rejected"), cfg)
+	for _, fragment := range []string{"a@b c", "a%40b%20c", "b c"} {
+		if strings.Contains(got, fragment) {
+			t.Fatalf("SanitizeError() = %q, still contains %q", got, fragment)
+		}
+	}
+	if !strings.Contains(got, "sslmode=disable") {
+		t.Fatalf("SanitizeError() = %q, want the rest of the message readable", got)
+	}
+}
+
+// A backslash escapes the next byte whatever it is, and pgconn does not consult
+// a character class before deciding which byte that is: an escaped newline stays
+// inside the value, so a reading that stops at the newline leaves the rest of the
+// password printed (#486).
+func TestRedactDSNHidesABackslashEscapedNewline(t *testing.T) {
+	t.Parallel()
+
+	dsn := "host=db.internal password=abc\\\ndef=1 dbname=x sslmode=disable"
+	if passwords := driverPasswords(dsn); len(passwords) != 1 || passwords[0] != "abc\ndef=1" {
+		t.Fatalf("the drivers take %q as the password of %q, want it to hold the escaped newline", passwords, dsn)
+	}
+	got := RedactDSN(dsn)
+	assertNoDriverPassword(t, dsn, "RedactDSN", got)
+	if want := "host=db.internal password=" + RedactedSecret + " dbname=x sslmode=disable"; got != want {
+		t.Fatalf("RedactDSN(%q) = %q, want %q", dsn, got, want)
+	}
+}
+
+// Each password is replaced as a literal, so a spelling the driver never sends
+// must not join the list: a keyword/value string is unescaped by backslash rules
+// only, and decoding its `%20` would stand for a space — which every message
+// holds, and which would then be deleted wherever it appears (#486).
+func TestSanitizeErrorKeepsAKeywordPasswordSpellingThatOnlyAURLDecodes(t *testing.T) {
+	t.Parallel()
+
+	cfg := Default()
+	cfg.Database.DSN = `host=db user=app password=%20 dbname=x sslmode=disable` // #nosec G101 -- fake local test DSN.
+
+	message := `pq: FATAL: password authentication failed for user "app" on db.internal:5432`
+	if got := SanitizeError(errors.New(message), cfg); got != message {
+		t.Fatalf("SanitizeError() = %q, want the message untouched", got)
+	}
+}
+
 func TestConfigRedactedHidesTheS3SecretKey(t *testing.T) {
 	t.Parallel()
+
 	cfg := Default()
 	cfg.Storage.S3.AccessKeyID = "AKIAEXAMPLE"
 	cfg.Storage.S3.SecretAccessKey = "s3-super-secret" // #nosec G101 -- fake test secret.
