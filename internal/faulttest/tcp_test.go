@@ -84,26 +84,30 @@ func TestTCPProxyForwardsHalfClose(t *testing.T) {
 			}()
 		}
 	}()
-	roundTrip := func(addr string) string {
+	roundTrip := func(addr string) (string, error) {
 		conn, err := net.Dial("tcp", addr)
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer func() { _ = conn.Close() }()
-		_, _ = conn.Write([]byte("hello"))
-		_ = conn.(*net.TCPConn).CloseWrite()
+		if _, err := conn.Write([]byte("hello")); err != nil {
+			t.Fatal(err)
+		}
+		if err := conn.(*net.TCPConn).CloseWrite(); err != nil {
+			t.Fatal(err)
+		}
 		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-		reply, _ := io.ReadAll(conn)
-		return string(reply)
+		reply, err := io.ReadAll(conn)
+		return string(reply), err
 	}
-	direct := roundTrip(ln.Addr().String())
+	direct, err := roundTrip(ln.Addr().String())
+	if err != nil || direct != "echo:hello" {
+		t.Fatalf("exchange with the upstream directly = %q, %v, want echo of the body", direct, err)
+	}
 	proxy := faulttest.NewTCPProxy(t, ln.Addr().String())
-	via := roundTrip(proxy.Addr())
-	if direct != "echo:hello" {
-		t.Fatalf("exchange with the upstream directly = %q, want echo of the body", direct)
-	}
-	if via != direct {
-		t.Errorf("no fault armed, but the proxy changed the exchange: direct %q, via proxy %q", direct, via)
+	via, err := roundTrip(proxy.Addr())
+	if err != nil || via != "echo:hello" {
+		t.Errorf("no fault armed, but the proxy changed the exchange: %q, %v, want echo of the body", via, err)
 	}
 }
 
