@@ -152,6 +152,14 @@ type HTTPConfig struct {
 
 // APIConfig contains public API configuration.
 type APIConfig struct {
+	// Prefix is where the API is served ("/api/v1"). Load puts
+	// GOMBIT_API_PREFIX through the rule of internal/urlbase: no trailing
+	// '/', one separator between segments, no '.' or '..' segment. Generated
+	// resources and the OpenAPI document concatenate it with a route, and the
+	// client is built from that document. Set this field in code to a value
+	// that is not already in that form — "api", "/svc/", "/", "/a b" — and
+	// Validate rejects it rather than start an app whose document no route
+	// answers.
 	Prefix string
 	// DocsEnabled serves the FastAPI-style UI at /docs.
 	// Default() (development) leaves this true. Changing Environment on a
@@ -572,6 +580,14 @@ func LoadFromEnv(lookup EnvLookup) (Config, error) {
 	applyString(lookup, envHTTPAddr, &cfg.HTTP.Addr)
 	applyStringList(lookup, envHTTPTrustedProxies, &cfg.HTTP.TrustedProxies)
 	applyString(lookup, envAPIPrefix, &cfg.API.Prefix)
+	// A prefix ending in '/' is dropped here rather than left for each
+	// consumer to trim, because generated resources and the OpenAPI document
+	// concatenate it with a route while Gin serves the cleaned one, so
+	// "/svc/" would advertise a path that answers 404. A value with no
+	// canonical form is left as read so Validate reports it.
+	if canonical := urlbase.CanonicalAPIPrefix(cfg.API.Prefix); canonical != "" {
+		cfg.API.Prefix = canonical
+	}
 	_, docsEnabledSet := lookup(envDocsEnabled)
 
 	var errs FieldErrors
@@ -729,12 +745,17 @@ func (c Config) Validate() error {
 		})
 	}
 
-	if !strings.HasPrefix(c.API.Prefix, "/") {
+	// The same rule Load normalises by (internal/urlbase), so a prefix that
+	// validates is already in the form the routes and the OpenAPI document
+	// are built from. A Config assembled in code reaches no loader, which is
+	// why a value with a canonical form but not in it, "/svc/" say, is an
+	// error here instead of a quiet fix.
+	if problem := urlbase.APIPrefixProblem(c.API.Prefix); problem != "" {
 		errs = append(errs, FieldError{
 			Field:   "API.Prefix",
 			Env:     envAPIPrefix,
 			Value:   c.API.Prefix,
-			Message: "must start with /",
+			Message: problem,
 		})
 	}
 
