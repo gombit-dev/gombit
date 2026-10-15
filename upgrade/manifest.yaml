@@ -234,7 +234,7 @@ releases:
         summary: "A list page so far out that its offset overflows is empty, instead of returning the first page's rows."
         refs: [441]
 
-  - version: unreleased
+  - version: v0.8.0
     changes:
       - id: admin-relation-string-keys
         kind: informational

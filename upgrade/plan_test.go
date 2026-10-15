@@ -334,7 +334,7 @@ func TestPlanUpgradeBreakingFollowsAutomatic(t *testing.T) {
 // baseline on: the embedded manifest must list every one, or apps on it
 // have no upgrade path. Add each new tag here when it is cut
 // (TestEmbeddedManifestListsPublishedTags checks the repo's tags too).
-var published = []string{"v0.6.1", "v0.7.0", "v0.7.1"}
+var published = []string{"v0.6.1", "v0.7.0", "v0.7.1", "v0.8.0"}
 
 // TestEmbeddedManifestPlansFromPublishedReleases: the manifest built into
 // this gombit lists every published release, and plans an upgrade from
