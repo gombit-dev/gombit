@@ -245,7 +245,10 @@ Admin        http://127.0.0.1:8080/admin/
 `frontend/package.json` is required. A missing file is an error — backend-only
 mode is not supported. Node.js is required for Vite.
 
-`--http` and the Vite proxy origin are written into the child environment
+`--http` is normalised before anything starts: a bare port (`8080`) becomes
+`:8080`, and a port outside 1–65535 is refused up front instead of leaving
+Vite running with a backend that cannot bind. `--http` and the Vite proxy
+origin are written into the child environment
 (`GOMBIT_HTTP_ADDR`, `GOMBIT_DEV_BACKEND`, `GOMBIT_API_PREFIX`,
 `VITE_API_URL=`), replacing any parent values so a shell-exported
 `.env.example` cannot keep the API on `:8080` while the service table
