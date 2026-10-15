@@ -200,6 +200,42 @@ func TestNormalizeRejectsAPortTheBackendCannotBind(t *testing.T) {
 	}
 }
 
+// The issue's second route: the address arrives from GOMBIT_HTTP_ADDR through
+// config instead of --http, and reaches the child the same normalised way.
+func TestNormalizeKeepsTheConfiguredHTTPAddrListenable(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "bare port", in: "8080", want: ":8080"},
+		{name: "unset", in: "", want: DefaultHTTPAddr},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			opts := Options{HTTPAddr: HTTPAddrFromConfig(config.Config{HTTP: config.HTTPConfig{Addr: tt.in}})}
+			if err := opts.normalize(); err != nil {
+				t.Fatalf("normalize() = %v, want nil", err)
+			}
+			got := envKeyValues(childEnv(nil, opts, originFromAddr(opts.HTTPAddr)), "GOMBIT_HTTP_ADDR")
+			if len(got) != 1 || got[0] != tt.want {
+				t.Fatalf("child GOMBIT_HTTP_ADDR = %v, want exactly [%s]", got, tt.want)
+			}
+			if _, _, err := net.SplitHostPort(got[0]); err != nil {
+				t.Fatalf("child GOMBIT_HTTP_ADDR = %q, the backend cannot listen on it: %v", got[0], err)
+			}
+		})
+	}
+
+	bad := Options{HTTPAddr: HTTPAddrFromConfig(config.Config{HTTP: config.HTTPConfig{Addr: "99999"}})}
+	if err := bad.normalize(); err == nil || !strings.Contains(err.Error(), "--http") {
+		t.Fatalf("normalize(GOMBIT_HTTP_ADDR=99999) = %v, want an error naming --http", err)
+	}
+}
+
 func TestAPIPrefixFromConfig(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
