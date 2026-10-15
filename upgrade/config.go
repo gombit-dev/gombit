@@ -284,13 +284,16 @@ func readEnvFiles(workDir string) (files []*envFile, unreadable []string, err er
 			f.bom = bytes.HasPrefix(data, utf8BOM)
 			body = bytes.TrimPrefix(data, utf8BOM)
 		}
-		for _, line := range bytes.SplitAfter(body, []byte("\n")) {
-			if key, commented, ok := envAssignment(line); ok {
-				if commented {
-					f.documented[key] = true
-				} else {
-					f.set[key] = true
-				}
+		// What the file sets is what the loader would read from it: its
+		// own traversal (the whole file) and grammar.
+		for _, key := range config.DotEnvKeys(body) {
+			if configVar.MatchString(key) {
+				f.set[key] = true
+			}
+		}
+		for _, line := range bytes.Split(body, []byte("\n")) {
+			if key, commented, ok := envAssignment(line); ok && commented {
+				f.documented[key] = true
 			}
 		}
 		if f.Template {

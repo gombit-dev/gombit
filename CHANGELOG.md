@@ -426,6 +426,11 @@ version.
 
 ### Fixed
 
+- `config.Load` and `config.LoadFromDir` read a `.env` file whole. A line
+  longer than 64 KiB used to end the read silently, dropping every
+  assignment after it; they now apply. The upgrade tooling reads `.env`
+  files with the same traversal and grammar (`config.DotEnvKeys`).
+
 - An admin relation field on a string key (a country code, a SKU) stores the
   value sent, byte for byte: anything numeric-looking was parsed as an integer
   and converted back as a rune, so `"123"` was stored as `"{"` and `"007"` as

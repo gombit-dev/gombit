@@ -79,6 +79,13 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 ### Informational
 
+- `config.Load` reads a `.env` file whole: a line longer than 64 KiB no longer silently stops it, so the assignments after one now apply. (`dotenv-long-lines`, config)
+
+  Before, the first line over 64 KiB ended the read without an
+  error, and every variable after it kept its process-environment
+  or default value. If a `.env` has such a line, check the values
+  set after it.
+
 - An admin relation field on a string key stores the string sent, byte for byte; a JSON number for it is a 422. (`admin-relation-string-keys`, behavior, [#452](https://github.com/gombit-dev/gombit/issues/452))
 
   A numeric-looking key (`"123"`, `"007"`) was stored corrupted. A

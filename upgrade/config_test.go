@@ -489,3 +489,22 @@ func TestConfigUsesTheLoaderGrammar(t *testing.T) {
 		t.Fatalf("the upgraded template, loaded as .env, sets AppName %q; want demo-app:\n%s", got, upgraded)
 	}
 }
+
+// TestConfigReadsTheWholeFileAsTheLoaderDoes: an assignment after a line
+// longer than 64 KiB is read by the loader (config.LoadFromDir) and by
+// the analysis alike: the development override it makes is one.
+func TestConfigReadsTheWholeFileAsTheLoaderDoes(t *testing.T) {
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{".env": "GOMBIT_PAD=" + strings.Repeat("p", 100<<10) + "\nGOMBIT_APP_NAME=after-long\n"})
+	if got := loadAppName(t, dir); got != "after-long" {
+		t.Fatalf("the loader gives AppName %q", got)
+	}
+	r, err := upgrade.AnalyzeConfig(dir, []upgrade.Release{{Version: "v0.8.0", Changes: []upgrade.Change{{ID: "d", Area: "config", Summary: "d",
+		Config: []upgrade.ConfigChange{{Var: "GOMBIT_APP_NAME", Change: upgrade.ConfigDefault, From: "Gombit", To: "App", Environment: "development"}}}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f := r.Findings[0]; f.NeedsAction || strings.Join(f.SetIn, ",") != ".env" {
+		t.Fatalf("finding = %+v", f)
+	}
+}

@@ -155,8 +155,8 @@ func configProblems(old, current []config.Variable, declared []upgrade.ConfigCha
 			}
 			replay[cc.Var] = v
 		case upgrade.ConfigRequired, upgrade.ConfigRefused:
-			if _, read := now[cc.Var]; !read {
-				add("%s is declared %s but the code does not read it", cc.Var, cc.Change)
+			if !has {
+				add("%s is declared %s, but it is not read at that point", cc.Var, cc.Change)
 			}
 		}
 	}
@@ -164,10 +164,7 @@ func configProblems(old, current []config.Variable, declared []upgrade.ConfigCha
 		v := replay[name]
 		n, read := now[name]
 		if !read {
-			if gone[name] {
-				continue
-			}
-			add("%s is no longer read: declare it removed, or renamed (to its new name)", name)
+			add("%s is read after the declarations (by the snapshot's release, or as a rename's new name) but not by the code: declare it removed, or renamed to what the code reads", name)
 			continue
 		}
 		for _, env := range configEnvs {
@@ -184,11 +181,6 @@ func configProblems(old, current []config.Variable, declared []upgrade.ConfigCha
 			if _, read := now[name]; read {
 				add("%s is declared removed or renamed but the code still reads it", name)
 			}
-		}
-	}
-	for _, cc := range declared {
-		if _, read := now[cc.To]; cc.Change == upgrade.ConfigRenamed && !read {
-			add("%s is declared renamed %s, which the code does not read", cc.Var, cc.To)
 		}
 	}
 	return problems
@@ -244,7 +236,7 @@ func TestConfigProblems(t *testing.T) {
 		declared     []upgrade.ConfigChange
 		want         []string
 	}{
-		"nothing declared": {old, current, nil, []string{"GOMBIT_A is no longer read", "GOMBIT_B is no longer read", secretS, `GOMBIT_C's production default changed from "off" to "on"`, `GOMBIT_T's test default changed from "a" to "b"`}},
+		"nothing declared": {old, current, nil, []string{"GOMBIT_A is read after the declarations", "GOMBIT_B is read after the declarations", secretS, `GOMBIT_C's production default changed from "off" to "on"`, `GOMBIT_T's test default changed from "a" to "b"`}},
 		"all declared":     {old, current, all, []string{secretS}},
 		"fabricated transition": {old, current, with(upgrade.ConfigChange{Var: "GOMBIT_U", Change: upgrade.ConfigDefault, From: "off", To: "on", Environment: "production"}),
 			[]string{secretS, `GOMBIT_U's production default is declared to change from "off", but it was "on"`}},
@@ -267,9 +259,8 @@ func TestConfigProblems(t *testing.T) {
 			secretS,
 			"GOMBIT_U is declared removed or renamed but the code still reads it",
 			"GOMBIT_ZZ is declared renamed, but it is not read at that point",
-			"GOMBIT_ZZ is declared renamed GOMBIT_Z, which the code does not read",
 			"GOMBIT_NEW's default change is declared, but it is not read at that point",
-			"GOMBIT_Q is declared required but the code does not read it",
+			"GOMBIT_Q is declared required, but it is not read at that point",
 		}},
 		// A rename keeps the variable's identity: what else changes with it
 		// is still compared, and can be declared.
@@ -287,6 +278,28 @@ func TestConfigProblems(t *testing.T) {
 			[]config.Variable{v("GOMBIT_OLD", "off", "off")}, []config.Variable{v("GOMBIT_NEW", "on", "on")},
 			[]upgrade.ConfigChange{{Var: "GOMBIT_OLD", Change: upgrade.ConfigDefault, From: "off", To: "on"}, {Var: "GOMBIT_OLD", Change: upgrade.ConfigRenamed, To: "GOMBIT_NEW"}},
 			nil,
+		},
+		// Each declaration is judged at its point in the releases, the end
+		// state only after all of them.
+		"a rename chain": {
+			[]config.Variable{v("GOMBIT_A", "1", "1")}, []config.Variable{v("GOMBIT_C", "1", "1")},
+			[]upgrade.ConfigChange{{Var: "GOMBIT_A", Change: upgrade.ConfigRenamed, To: "GOMBIT_B"}, {Var: "GOMBIT_B", Change: upgrade.ConfigRenamed, To: "GOMBIT_C"}},
+			nil,
+		},
+		"a refusal on the name active then, renamed later": {
+			[]config.Variable{v("GOMBIT_A", "1", "1")}, []config.Variable{v("GOMBIT_B", "1", "1")},
+			[]upgrade.ConfigChange{{Var: "GOMBIT_A", Change: upgrade.ConfigRefused, Environment: "production"}, {Var: "GOMBIT_A", Change: upgrade.ConfigRenamed, To: "GOMBIT_B"}},
+			nil,
+		},
+		"a refusal on a name before it exists": {
+			[]config.Variable{v("GOMBIT_A", "1", "1")}, []config.Variable{v("GOMBIT_B", "1", "1")},
+			[]upgrade.ConfigChange{{Var: "GOMBIT_B", Change: upgrade.ConfigRefused}, {Var: "GOMBIT_A", Change: upgrade.ConfigRenamed, To: "GOMBIT_B"}},
+			[]string{"GOMBIT_B is declared refused, but it is not read at that point"},
+		},
+		"a rename to a name the code does not read": {
+			[]config.Variable{v("GOMBIT_A", "1", "1")}, []config.Variable{v("GOMBIT_C", "1", "1")},
+			[]upgrade.ConfigChange{{Var: "GOMBIT_A", Change: upgrade.ConfigRenamed, To: "GOMBIT_B"}},
+			[]string{"GOMBIT_B is read after the declarations"},
 		},
 		"a rename onto a variable already read": {
 			[]config.Variable{v("GOMBIT_OLD", "1", "1"), v("GOMBIT_NEW", "1", "1")}, []config.Variable{v("GOMBIT_NEW", "1", "1")},

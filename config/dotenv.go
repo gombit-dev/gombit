@@ -1,7 +1,6 @@
 package config
 
 import (
-	"bufio"
 	"bytes"
 	"os"
 	"path/filepath"
@@ -46,27 +45,43 @@ func LoadFromDir(dir string) (Config, error) {
 }
 
 // dotEnvValues parses KEY=VALUE pairs from the .env file at path, first
-// occurrence winning. A missing file yields nil. It never touches the process
+// occurrence winning. A missing (or unreadable) file yields nil. It reads
+// the whole file, lines of any length (a line scanner would stop at a long
+// one and drop every assignment after it), and never touches the process
 // environment.
 func dotEnvValues(path string) map[string]string {
-	f, err := os.Open(path) // #nosec G304 -- .env at a caller-provided project dir
+	data, err := os.ReadFile(path) // #nosec G304 -- .env at a caller-provided project dir
 	if err != nil {
 		return nil
 	}
-	defer func() { _ = f.Close() }()
-
 	values := map[string]string{}
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		key, value, ok := parseDotEnvLine(scanner.Text())
-		if !ok {
-			continue
+	scanDotEnv(data, func(key, value []byte) {
+		if _, exists := values[string(key)]; !exists {
+			values[string(key)] = string(unquoteDotEnv(value))
 		}
-		if _, exists := values[key]; !exists {
-			values[key] = value
+	})
+	return values
+}
+
+// scanDotEnv calls fn for each assignment of a .env file's content, in
+// order: every line (split at '\n', a trailing '\r' trimmed with the
+// rest of the space), by splitDotEnvLine. The loader and DotEnvKeys read
+// files through it, so they agree on the whole file, not only on a line.
+func scanDotEnv(data []byte, fn func(key, value []byte)) {
+	for _, line := range bytes.Split(data, []byte("\n")) {
+		if k, v, ok := splitDotEnvLine(line); ok {
+			fn(k, v)
 		}
 	}
-	return values
+}
+
+// DotEnvKeys are the variables a .env file's content assigns when Load
+// reads it, in order (repeats included): the loader's own traversal and
+// grammar, the keys copied out and the values never turned into strings.
+func DotEnvKeys(data []byte) []string {
+	var keys []string
+	scanDotEnv(data, func(key, _ []byte) { keys = append(keys, string(key)) })
+	return keys
 }
 
 // splitDotEnvLine is the .env grammar, shared by the loader and DotEnvKey:
@@ -97,12 +112,17 @@ func parseDotEnvLine(line string) (key, value string, ok bool) {
 	if !ok {
 		return "", "", false
 	}
+	return string(k), string(unquoteDotEnv(v)), true
+}
+
+// unquoteDotEnv strips one layer of matching single or double quotes.
+func unquoteDotEnv(v []byte) []byte {
 	if len(v) >= 2 {
 		if (v[0] == '"' && v[len(v)-1] == '"') || (v[0] == '\'' && v[len(v)-1] == '\'') {
-			v = v[1 : len(v)-1]
+			return v[1 : len(v)-1]
 		}
 	}
-	return string(k), string(v), true
+	return v
 }
 
 // DotEnvKey is the variable a line of a .env file sets when Load reads it,
