@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"runtime/debug"
 
+	"github.com/gombit-dev/gombit/internal/frameworkmod"
 	"github.com/spf13/cobra"
 )
 
@@ -34,13 +35,48 @@ func resolveVersion() string {
 		return Version
 	}
 	if info, ok := readBuildInfo(); ok && info != nil {
-		// Modules built from a checkout report "(devel)", which is less useful
-		// to a bug reporter than the honest "dev".
-		if v := info.Main.Version; v != "" && v != "(devel)" {
+		if v := frameworkVersion(info); v != "" {
 			return v
 		}
 	}
 	return DevVersion
+}
+
+// frameworkVersion is the version of the framework code this binary was built
+// with. A scaffolded app ships its own `cmd/gombit`, where the main module is
+// the application and Gombit is a dependency, so the main module's version —
+// "(devel)", or an app tag — says nothing about Gombit and the framework's
+// dependency entry is read instead.
+func frameworkVersion(info *debug.BuildInfo) string {
+	mod := info.Main
+	if mod.Path != frameworkmod.ModulePath {
+		mod = debug.Module{}
+		for _, dep := range info.Deps {
+			if dep != nil && dep.Path == frameworkmod.ModulePath {
+				mod = *dep
+				break
+			}
+		}
+	}
+	// A replace ships someone else's code, so its version is the one that
+	// built the binary — except that only a replace by the framework module
+	// itself names a framework release. A local checkout has no version and a
+	// fork's is not Gombit's, matching internal/frameworkmod's reading of
+	// go.mod: neither is resolvable, and "dev" sends the user to a replace
+	// directive or to --framework-version.
+	if replace := mod.Replace; replace != nil {
+		if replace.Path == frameworkmod.ModulePath {
+			mod.Version = replace.Version
+		} else {
+			mod.Version = ""
+		}
+	}
+	// Modules built from a checkout report "(devel)", which is less useful
+	// to a bug reporter than the honest "dev".
+	if mod.Version == "" || mod.Version == "(devel)" {
+		return ""
+	}
+	return mod.Version
 }
 
 func resolveCommit() string {

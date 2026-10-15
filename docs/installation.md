@@ -207,6 +207,13 @@ go mod tidy
 That's the right behaviour for framework development — see
 [CONTRIBUTING.md](../CONTRIBUTING.md).
 
+An app's own `cmd/gombit` resolves the same way, from the framework
+*dependency* it was built with: an app requiring
+`github.com/gombit-dev/gombit v0.6.0` reports and pins `v0.6.0` whatever tag
+the app itself carries, and an app that replaces the framework with a checkout
+reports `dev`, so generating from it takes the `v0.0.0` + `replace` route
+above.
+
 ## Platform notes
 
 ### Linux

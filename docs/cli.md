@@ -832,6 +832,14 @@ Version resolution has three tiers, in order:
    carries no ldflags, so the version comes from
    `runtime/debug.ReadBuildInfo()`. `commit` and `built` come from the
    embedded `vcs.revision` / `vcs.time` settings when the build had them.
+
+   A scaffolded app ships its own `cmd/gombit`, and in that binary the main
+   module is the application while Gombit is a dependency, so the version is
+   that dependency's entry in the build info: an app tagged `v1.2.0` still
+   reports the Gombit it was built with, not `v1.2.0`. When the app replaces
+   the framework with a local checkout (or with a fork), no Gombit release is
+   named, so `dev` is reported — the same reading of a replace that
+   `gombit contract app` and `gombit upgrade` use for `go.mod`.
 3. **`dev`.** A local `go run ./cmd/gombit` or a build from a checkout
    reports `dev` rather than Go's `(devel)`, with `unknown` for the fields
    that have no source.
