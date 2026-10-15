@@ -194,6 +194,19 @@ version.
   Form as field paths. The dependent-required message (`expected property zip
   to be present when city is present`) keys the same way
   ([#503](https://github.com/gombit-dev/gombit/issues/503)).
+- `GOMBIT_API_PREFIX=/svc/` no longer advertises routes that answer 404.
+  `config.Load` now puts the prefix in one canonical form, dropping a trailing
+  `/`: generated resources and the OpenAPI document concatenate it with a route
+  while Gin answers the cleaned one, so a prefix of `/svc/` served
+  `/svc/widgets` but listed `/svc//widgets` in the document, and every client
+  built from that document asked for a URL that 404s. `Validate` applies the
+  same rule to every prefix, however it was set, and rejects one that is not
+  already canonical rather than start an app whose document no route answers:
+  one with no canonical form at all (`api`, `/` alone, an empty segment such as
+  `/svc//api`, a `.` or `..` segment, or a character a route cannot be built
+  from — a space, `%`, `{`, `}`, or Gin's `:` and `*` wildcards), or one `Load`
+  would have rewritten, such as a `/svc/` set on a `Config` in code
+  ([#501](https://github.com/gombit-dev/gombit/issues/501)).
 
 ### Changed
 

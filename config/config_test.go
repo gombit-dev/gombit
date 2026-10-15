@@ -1306,3 +1306,102 @@ func TestPasswordResetConfig(t *testing.T) {
 		t.Fatalf("defaults = %v keep=%v; want 1h, sessions revoked", def.PasswordResetTTL, def.PasswordResetKeepSessions)
 	}
 }
+
+// The rule of internal/urlbase, spelled the way config reports it.
+const (
+	apiPrefixSegmentRule = `must be '/' followed by segments of a-z, A-Z, 0-9, . _ - ~ separated by a single '/'`
+	apiPrefixDotRule     = `must not contain a '.' or '..' segment`
+)
+
+// The generated resources and the OpenAPI document concatenate the prefix with
+// every route, while Gin cleans a doubled slash out of the route it registers
+// and matches requests as sent. What Load stores has to be the one form they
+// agree on: a trailing '/' is normalised away, and a value with no canonical
+// form is the error the app answers with.
+func TestLoadNormalisesTheAPIPrefix(t *testing.T) {
+	tests := []struct{ name, env, want, wantErr string }{
+		{name: "trailing slash", env: "/svc/", want: "/svc"},
+		{name: "several trailing slashes", env: "/svc//", want: "/svc"},
+		{name: "space around it", env: " /svc/ ", want: "/svc"},
+		{name: "already canonical", env: "/api/v1", want: "/api/v1"},
+		{name: "only a slash", env: "/", wantErr: `must not be empty or only '/'`},
+		{name: "a space inside", env: "/a b", wantErr: apiPrefixSegmentRule},
+		{name: "an empty segment", env: "/svc//api", wantErr: apiPrefixSegmentRule},
+		{name: "a parent segment", env: "/api/../v1", wantErr: apiPrefixDotRule},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := LoadFromEnv(mapLookup(map[string]string{envAPIPrefix: tt.env}))
+			if tt.wantErr != "" {
+				assertAPIPrefixError(t, err, tt.env, tt.wantErr)
+				return
+			}
+			if err != nil {
+				t.Fatalf("LoadFromEnv(%q) error = %v, want nil", tt.env, err)
+			}
+			if cfg.API.Prefix != tt.want {
+				t.Fatalf("API.Prefix = %q, want %q", cfg.API.Prefix, tt.want)
+			}
+		})
+	}
+}
+
+// The same rule as it reaches a prefix set in code, where nothing normalises
+// it: a configuration that validates is one whose document its own routes
+// answer.
+func TestValidateAPIPrefix(t *testing.T) {
+	tests := []struct{ name, prefix, want string }{
+		{name: "default", prefix: "/api/v1"},
+		{name: "one segment", prefix: "/svc"},
+		{name: "punctuation a path allows", prefix: "/a.b_c-~d"},
+		{name: "trailing slash", prefix: "/svc/", want: "must not end with '/'"},
+		{name: "only a slash", prefix: "/", want: `must not be empty or only '/'`},
+		{name: "no leading slash", prefix: "api", want: "must start with /"},
+		{name: "empty", prefix: "", want: "must start with /"},
+		{name: "a space inside", prefix: "/a b", want: apiPrefixSegmentRule},
+		{name: "braces", prefix: "/api/{id}", want: apiPrefixSegmentRule},
+		{name: "a gin parameter", prefix: "/api/:id", want: apiPrefixSegmentRule},
+		{name: "an empty segment", prefix: "/svc//api", want: apiPrefixSegmentRule},
+		{name: "a percent escape", prefix: "/a%20b", want: apiPrefixSegmentRule},
+		{name: "a parent segment", prefix: "/api/../v1", want: apiPrefixDotRule},
+		{name: "a current segment", prefix: "/.", want: apiPrefixDotRule},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.API.Prefix = tt.prefix
+
+			err := cfg.Validate()
+			if tt.want == "" {
+				if err != nil {
+					t.Fatalf("Validate() with prefix %q = %v, want nil", tt.prefix, err)
+				}
+				return
+			}
+			assertAPIPrefixError(t, err, tt.prefix, tt.want)
+		})
+	}
+}
+
+// assertAPIPrefixError checks that err carries exactly this API.Prefix field
+// error.
+func assertAPIPrefixError(t *testing.T, err error, prefix, message string) {
+	t.Helper()
+
+	var errs FieldErrors
+	if !errors.As(err, &errs) {
+		t.Fatalf("error = %v, want FieldErrors", err)
+	}
+	for _, field := range errs {
+		if field.Field != "API.Prefix" {
+			continue
+		}
+		if field.Message != message || field.Value != prefix || field.Env != envAPIPrefix {
+			t.Fatalf("API.Prefix error = %+v, want message %q for value %q", field, message, prefix)
+		}
+		return
+	}
+	t.Fatalf("errors = %#v, want one for API.Prefix", []FieldError(errs))
+}

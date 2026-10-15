@@ -117,6 +117,20 @@ the placeholder alone falls back to `/api/v1`. `gombit client generate`
 normalizes OpenAPI path keys to `/api/v1` so page source does not need
 regenerating. See [frontend.md](frontend.md#talking-to-the-api).
 
+`Load` puts the prefix in one canonical form before anything reads it, because
+generated resources and the OpenAPI document concatenate it with a route while
+Gin answers the cleaned one, and the client is generated from that document: a
+trailing `/` is dropped, so `GOMBIT_API_PREFIX=/svc/` serves and advertises
+`/svc/widgets`. A prefix with no canonical form is a validation error naming
+`API.Prefix` — `api` (no leading `/`), `/` alone, an empty segment
+(`/svc//api`), a `.` or `..` segment (`/api/../v1`, which `path.Clean` collapses
+to `/v1`), or a character a route cannot be built from (a space, `%`, `{`, `}`,
+or Gin's `:` and `*` wildcards). The form is `/` followed by one or more
+segments of `a-z`, `A-Z`, `0-9`, `.`, `_`, `-`, `~` separated by a single `/`,
+none of them only dots. Set `Config.API.Prefix` in code to a value that is not
+already in that form — `/svc/`, say — and `Validate` rejects it rather than
+start an app whose document no route answers.
+
 `GOMBIT_ENV` accepts the exact lowercase values `development`, `test`, and
 `production`.
 `GOMBIT_DATABASE_DRIVER` accepts `sqlite`, `postgres`, and `mysql`.
