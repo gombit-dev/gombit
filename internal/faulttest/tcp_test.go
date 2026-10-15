@@ -65,6 +65,52 @@ func TestTCPProxyForwards(t *testing.T) {
 	}
 }
 
+func TestTCPProxyForwardsHalfClose(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer func() { _ = conn.Close() }()
+				body, _ := io.ReadAll(conn) // until the client's FIN
+				_, _ = conn.Write([]byte("echo:" + string(body)))
+			}()
+		}
+	}()
+	roundTrip := func(addr string) (string, error) {
+		conn, err := net.Dial("tcp", addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = conn.Close() }()
+		if _, err := conn.Write([]byte("hello")); err != nil {
+			t.Fatal(err)
+		}
+		if err := conn.(*net.TCPConn).CloseWrite(); err != nil {
+			t.Fatal(err)
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		reply, err := io.ReadAll(conn)
+		return string(reply), err
+	}
+	direct, err := roundTrip(ln.Addr().String())
+	if err != nil || direct != "echo:hello" {
+		t.Fatalf("exchange with the upstream directly = %q, %v, want echo of the body", direct, err)
+	}
+	proxy := faulttest.NewTCPProxy(t, ln.Addr().String())
+	via, err := roundTrip(proxy.Addr())
+	if err != nil || via != "echo:hello" {
+		t.Errorf("no fault armed, but the proxy changed the exchange: %q, %v, want echo of the body", via, err)
+	}
+}
+
 func TestTCPProxyHoldStallsUntilHeal(t *testing.T) {
 	proxy := faulttest.NewTCPProxy(t, echoServer(t))
 	conn := dial(t, proxy.Addr())
