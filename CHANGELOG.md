@@ -674,6 +674,15 @@ version.
   `framework.New`, `contract.HumaConfigFor` logs the failure through `slog`; a
   writer on which the status cannot be confirmed to change gets the error back
   to Huma as before ([#442](https://github.com/gombit-dev/gombit/issues/442)).
+- `gombit dev --http` normalises the address it validates, instead of checking
+  one value and passing another to the backend. A bare port (`8080`) now reaches
+  `GOMBIT_HTTP_ADDR` as `:8080`, and a port outside 1–65535 (`:99999`, `:-1`,
+  `:0`) is refused before anything starts. `parseListenAddr` normalised only for
+  its own check and `childEnv` forwarded the raw flag value, so the service
+  table advertised `http://127.0.0.1:8080` while the backend died on
+  `listen tcp: address 8080: missing port in address` and `gombit dev` kept
+  running with only Vite up
+  ([#513](https://github.com/gombit-dev/gombit/issues/513)).
 
 ## [0.6.0] — 2026-09-28
 
