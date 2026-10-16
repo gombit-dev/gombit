@@ -90,6 +90,8 @@ func mountBearerRoutes(api huma.API, svc *Service, prefix string) {
 		Security:    []map[string][]string{{bearerSecurityName: {}}},
 		Middlewares: huma.Middlewares{svc.requireBearer()},
 	}, svc.me)
+
+	registerSessionRoutes(api, svc, prefix, bearerSecurityName, svc.requireBearer(), false)
 }
 
 func mountCookieRoutes(api huma.API, svc *Service, prefix string) {
@@ -136,6 +138,8 @@ func mountCookieRoutes(api huma.API, svc *Service, prefix string) {
 		Security:    []map[string][]string{{cookieSecurityName: {}}},
 		Middlewares: huma.Middlewares{svc.requireCookieSession()},
 	}, svc.me)
+
+	registerSessionRoutes(api, svc, prefix, cookieSecurityName, svc.requireCookieSession(), true)
 }
 
 func installBearerScheme(api huma.API) {

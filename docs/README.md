@@ -59,7 +59,7 @@ New here? [Install](installation.md), then work through the
 
 | Doc | What it covers |
 | --- | --- |
-| [auth.md](auth.md) | Bearer JWT login and refresh rotation (the API default) |
+| [auth.md](auth.md) | Bearer JWT login, refresh rotation, and session management (the API default) |
 | [auth-cookie.md](auth-cookie.md) | Cookie/session auth, CSRF double-submit, threat model |
 | [admin.md](admin.md) | The admin registry, introspection API, SPA, permissions, and file and image fields |
 
