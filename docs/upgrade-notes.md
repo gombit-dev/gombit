@@ -213,6 +213,16 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   `config.DotEnvKeys` reports to this tooling's own configuration
   analysis.
 
+- **Breaking.** `GOMBIT_API_PREFIX` (or a `Config.Prefix` in code) must be in one canonical form: `Load` drops a trailing `/`, and `Validate` refuses a prefix it would have rewritten or that has no canonical form at all. (`api-prefix-canonical-form`, config, [#501](https://github.com/gombit-dev/gombit/issues/501))
+
+  A prefix of `/svc/` served `/svc/widgets` but listed
+  `/svc//widgets` in the OpenAPI document, so every client generated
+  from it asked for a URL that 404s. Such a prefix now starts no app:
+  write it without the trailing slash. `Validate` also refuses `/`, a
+  segment that is empty (`/svc//api`), `.` or `..`, a space, `%`,
+  `{`, `}`, and Gin's `:` and `*`, which no route can be built from.
+  A prefix that already has its canonical form is untouched.
+
 ### Informational
 
 - A refresh that joins another request's rotation of the same token no longer fails with that request's `context canceled` (a 500) when its client disconnects: the shared rotation runs detached from every caller's cancellation and deadline, its transaction bounded by a 10-second timeout. (`refresh-follower-not-cancelled-by-leader`, behavior, [#462](https://github.com/gombit-dev/gombit/issues/462))
