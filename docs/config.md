@@ -148,10 +148,27 @@ environment variable, the invalid value, and the validation message.
 
 `gombit config show` prints this typed result as aligned key/value lines.
 DSN userinfo/passwords (URL form, MySQL `user:pass@tcp`, libpq
-`password=`/`pwd=`/`pass=` keywords, and `?password=` query params), the Redis
-password, and the JWT secret are redacted (`*****`); `Config.Redacted()` /
-`RedactDSN` / `SanitizeError` are the helpers. Do not log raw DSNs or JWT
-secrets.
+`password=`/`sslpassword=` keywords and the `pwd=`/`pass=` look-alikes, and
+`?password=` query params), the Redis password, and the JWT secret are redacted
+(`*****`); `Config.Redacted()` / `RedactDSN` / `SanitizeError` are the helpers.
+Redaction follows how the drivers read a DSN. MySQL userinfo runs to the last `@`
+before the last `/`, so a password holding an `@`, a `=` or a `//` disappears
+whole. A libpq value ends only at the ASCII whitespace pgconn separates on, so
+`&`, `"` and `?` are part of it; whitespace may surround `=`, a value quoted with
+`'` may hold a space, and a backslash escapes the next byte whatever it is,
+newline included — which is why `password = s3cr3t`, `password=s3cr3t&more` and
+`password='it\'s-a-s3cr3t tail'` are redacted to their end. A parameter's key is
+decoded and matched whole, so `?pass%77ord=`, which is how pgconn reads a
+`password` parameter out of a URI, is redacted too, while `passfile=`, which
+names a file rather than a secret, is left alone. Each reading runs over the
+unmodified DSN and the ranges it names are merged before anything is replaced, so
+a string two grammars read has both of its passwords hidden and, where they
+disagree about where the value ends, the wider range wins: that can redact past
+the end of the narrower password. `SanitizeError` replaces each password as a
+literal, so a very short one blanks that same text elsewhere in the message, and
+it replaces only the spellings the DSN's own grammar stands for — the percent
+escapes a keyword value writes are left as written, because no driver decodes
+them. Do not log raw DSNs or JWT secrets.
 
 Appendix C production checks fail loudly for a **non-empty** JWT secret
 shorter than 32 characters, for the generated-app development placeholder,
