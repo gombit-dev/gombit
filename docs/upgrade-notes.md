@@ -83,6 +83,14 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 - In cookie mode, a `POST /auth/refresh` that fails loading the session user rolls the token rotation back with it, instead of answering 500 after the rotation already committed. (`cookie-refresh-loads-user-before-commit`, behavior, [#606](https://github.com/gombit-dev/gombit/issues/606))
 
+- `gombit jobs inspect` prints a job's payload as the queue holds it: an int64 above 2^53 keeps its digits, and key order, `<`, `>` and `&` stay as the handler wrote them. (`jobs-inspect-keeps-payload-bytes`, cli, [#497](https://github.com/gombit-dev/gombit/issues/497))
+
+  The human-readable block was re-encoded through `any`, so a snowflake
+  id or an int64 primary key showed a neighbouring value the job never
+  carried, keys came back sorted, and `1e3` became `1000`. `inspect
+  --json` was already faithful. Nothing to change: the printed value is
+  now the stored one, and `json.Indent` moves only whitespace.
+
 ## v0.8.0
 
 ### Manual: action required

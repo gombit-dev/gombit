@@ -89,6 +89,17 @@ version.
   refresh cookie stays valid for the retry, which no longer reads as reuse
   and revokes every session of the user
   ([#606](https://github.com/gombit-dev/gombit/issues/606)).
+- `gombit jobs inspect` re-encoded the payload it prints through `any`, so every
+  number went through `float64` and an id above 2^53 — a snowflake, an int64
+  primary key, exactly the value an operator reads out of that block to go and
+  find the row — printed as a neighbouring value the job never carried; object
+  keys came back sorted rather than in the order the handler wrote them, `<`,
+  `>` and `&` came back as `\u003c`, `\u003e` and `\u0026`, and `1e3` came back
+  as `1000`, while `inspect --json` beside it kept the id and the key order (it
+  writes markup escaped, which parses back to the same text). `indentJSON` now
+  lays the stored bytes out with `json.Indent`, which moves only the whitespace
+  between the JSON tokens
+  ([#497](https://github.com/gombit-dev/gombit/issues/497)).
 
 ### Changed
 
@@ -563,17 +574,6 @@ version.
   `framework.New`, `contract.HumaConfigFor` logs the failure through `slog`; a
   writer on which the status cannot be confirmed to change gets the error back
   to Huma as before ([#442](https://github.com/gombit-dev/gombit/issues/442)).
-- `gombit jobs inspect` re-encoded the payload it prints through `any`, so every
-  number went through `float64` and an id above 2^53 — a snowflake, an int64
-  primary key, exactly the value an operator reads out of that block to go and
-  find the row — printed as a neighbouring value the job never carried; object
-  keys came back sorted rather than in the order the handler wrote them, `<`,
-  `>` and `&` came back as `\u003c`, `\u003e` and `\u0026`, and `1e3` came back
-  as `1000`, while `inspect --json` beside it kept the id and the key order (it
-  writes markup escaped, which parses back to the same text). `indentJSON` now
-  lays the stored bytes out with `json.Indent`, which moves only the whitespace
-  between the JSON tokens
-  ([#497](https://github.com/gombit-dev/gombit/issues/497)).
 
 ## [0.7.0] — 2026-10-04
 
