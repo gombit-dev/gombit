@@ -70,6 +70,20 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   row holds one. Apply the same to any hand-written handler that
   parses a uint id.
 
+- The `.env` loader parses a real dotenv file, and a `.env` it cannot read in full fails `config.Load` instead of loading part of it. (`dotenv-parses-a-real-file`, config, [#507](https://github.com/gombit-dev/gombit/issues/507))
+
+  A line over 64 KiB (a long base64 key) stopped the scan with the
+  error dropped, so every key after it was missing and the app started
+  on framework defaults; a line now buffers up to 1 MiB, and a file
+  still longer than that is a `config.Load` error. A byte order mark
+  hid the first key, a leading `export ` made the key `export NAME`,
+  and a trailing comment was stored inside the value, so
+  `GOMBIT_LOG_LEVEL="debug" # local` set the level to
+  `"debug" # local`. The mark and `export ` are removed, and a `#`
+  preceded by whitespace outside quotes starts a comment. A value that
+  must keep a ` #` in it needs double or single quotes; a `#` with no
+  space before it (`COLOR=#fff`) already stays in the value.
+
 ### Automatic: applied by the upgrade tooling
 
 - `gombit new` records the app's upgrade baseline in a `gombit:` block of `gombit.yaml`. (`record-upgrade-baseline`, scaffold, action `record-baseline`, [#341](https://github.com/gombit-dev/gombit/issues/341))

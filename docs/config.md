@@ -34,8 +34,18 @@ directory if one exists — `gombit new` writes one with a per-project random
 `GOMBIT_JWT_SECRET`, and `.env` values never override a variable the process
 environment already sets. A real deployment sets configuration through its
 own environment and does not ship a `.env` file (it is gitignored by every
-`gombit new` scaffold), so this is a no-op in production. The M1-1 boundary
-recognizes:
+`gombit new` scaffold), so this is a no-op in production. A `.env` is parsed
+line by line: blank lines and `#` comments are skipped, a leading `export `
+and a UTF-8 byte order mark are removed, and one layer of matching quotes is
+stripped from a value. A `#` preceded by whitespace ends the value unless it
+sits inside a quoted value — quoting only counts when the value starts with the
+quote, so `O'Malley app # prod` is `O'Malley app`; escaped quotes inside a
+quoted value are not supported. The first value for a repeated key wins, which
+differs from `set -a; . ./.env` (the last assignment wins there), so a `.env`
+should not repeat a key. A line may be up to 1 MiB; a `.env` that cannot be
+read in full — a longer line, or any other read error — fails `config.Load()`
+and `config.LoadFromDir()` with the reason instead of applying part of the
+file. The M1-1 boundary recognizes:
 
 | Variable | Field | Default |
 | --- | --- | --- |
