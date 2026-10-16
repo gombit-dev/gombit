@@ -112,6 +112,19 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   1265, 1292, 1366, 1406 (`database.IsDataException`). A uint list
   filter over `MaxInt64` is a 422 too.
 
+- An app's own `cmd/gombit` reports the framework it was built against, not the application: `gombit version` prints that release and `gombit new` pins it, instead of the app's version. (`app-binary-reports-framework-version`, cli, [#512](https://github.com/gombit-dev/gombit/issues/512))
+
+  It read `debug.BuildInfo.Main`, the framework in the framework's
+  binary but the app in a generated one, so an app tagged `v3.4.5`
+  printed `v3.4.5` and `gombit new` from it pinned the framework to
+  that (or to `v0.0.0` for a checkout). The framework's
+  `BuildInfo.Deps` entry is used when the main module is not
+  `github.com/gombit-dev/gombit`; a replace by a local checkout or a
+  fork names no release, so those report `dev`, as a `go.mod` read the
+  same way does. An app binary also stops printing `commit` and
+  `built`, which describe the main module. A script that parsed the
+  old app-version output reads a different string now.
+
 ## v0.7.1
 
 ### Manual: action required
