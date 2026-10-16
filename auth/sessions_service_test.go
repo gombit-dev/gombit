@@ -703,17 +703,27 @@ func runSessionsService(t *testing.T, db *database.DB) {
 		}
 	})
 
-	// Config.Validate accepts an access TTL above the refresh TTL; the access
-	// token must not outlive the session it belongs to.
+	// The refresh TTL is at least the access TTL, so a token issued now does
+	// not outlive its session; a token issued before that rule, or one whose
+	// session row's expiry changed, could. The row is shortened here to end
+	// before the access token does: the token must end with its session.
 	t.Run("access token ends with its session", func(t *testing.T) {
-		e := newSessionsEnv(t, db, fmt.Sprintf("a2-%d", time.Now().UnixNano()), time.Hour, time.Minute)
+		e := newSessionsEnv(t, db, fmt.Sprintf("a2-%d", time.Now().UnixNano()), time.Minute, time.Hour)
 		clock := &stepClock{now: time.Now()}
 		auth.SetClock(e.svc, clock)
 		ada, a := e.user(t, "ada", 1)
 		if !e.authenticates(a[0]) {
 			t.Fatal("the access token is rejected while its session is active")
 		}
-		clock.now = clock.now.Add(2 * time.Minute)
+		row, err := auth.AuthenticatedRow(e.ctx, e.svc, a[0].AccessToken)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Model(&auth.RefreshToken{}).Where("id = ?", row).
+			Update("expires_at", clock.now.Add(30*time.Second)).Error; err != nil {
+			t.Fatal(err)
+		}
+		clock.now = clock.now.Add(31 * time.Second) // the session has expired; the access token has not
 		if _, err := e.svc.ParseAccess(e.ctx, a[0].AccessToken); !errors.Is(err, auth.ErrInvalidAccessToken) {
 			t.Fatalf("ParseAccess after the session expired = %v, want ErrInvalidAccessToken", err)
 		}

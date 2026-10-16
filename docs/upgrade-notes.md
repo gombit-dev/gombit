@@ -82,12 +82,18 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   replace, or rename them. A resource named `Session`
   (`gombit make resource Session`) does not collide.
 
-- An access JWT stops authenticating when its session expires, even when `GOMBIT_JWT_ACCESS_TTL` is longer than `GOMBIT_JWT_REFRESH_TTL`. (`access-token-ends-with-session`, security, [#335](https://github.com/gombit-dev/gombit/issues/335))
+- **Breaking.** With auth enabled, a `GOMBIT_JWT_REFRESH_TTL` shorter than `GOMBIT_JWT_ACCESS_TTL` fails config validation, so the app does not start. (`refresh-ttl-at-least-access-ttl`, config, [#335](https://github.com/gombit-dev/gombit/issues/335))
 
-  Nothing changes unless the access TTL is the longer one, which the
-  config accepts: a session then ends when its refresh token expires,
-  and its access token no longer outlives it. If that is too soon,
-  raise `GOMBIT_JWT_REFRESH_TTL` to at least `GOMBIT_JWT_ACCESS_TTL`.
+  The refresh token's lifetime is the session's, and an access token
+  must not outlive its session: it would stop authenticating when the
+  session ends while its `exp`, `expires_in` and access cookie still
+  promised more. Config validation (`config.Load` / `Validate`) and
+  `auth.NewService` refuse that pair; equal TTLs are fine. Raise
+  `GOMBIT_JWT_REFRESH_TTL` to at least `GOMBIT_JWT_ACCESS_TTL`, or
+  lower `GOMBIT_JWT_ACCESS_TTL`. An access token also ends with its
+  session: it stops authenticating when the session expires, not only
+  when it is revoked, so a token issued before the upgrade under the
+  old TTLs stops at its session's expiry, before its `exp`.
 
 ### Automatic: applied by the upgrade tooling
 

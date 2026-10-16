@@ -420,15 +420,22 @@ releases:
         summary: "A refresh token revoked by logout or session revocation is a 401 that no longer revokes the user's other sessions; only an already-rotated token counts as reuse."
         refs: [335]
 
-      - id: access-token-ends-with-session
+      - id: refresh-ttl-at-least-access-ttl
         kind: manual
-        area: security
-        summary: "An access JWT stops authenticating when its session expires, even when `GOMBIT_JWT_ACCESS_TTL` is longer than `GOMBIT_JWT_REFRESH_TTL`."
+        breaking: true
+        area: config
+        summary: "With auth enabled, a `GOMBIT_JWT_REFRESH_TTL` shorter than `GOMBIT_JWT_ACCESS_TTL` fails config validation, so the app does not start."
         details: |
-          Nothing changes unless the access TTL is the longer one, which the
-          config accepts: a session then ends when its refresh token expires,
-          and its access token no longer outlives it. If that is too soon,
-          raise `GOMBIT_JWT_REFRESH_TTL` to at least `GOMBIT_JWT_ACCESS_TTL`.
+          The refresh token's lifetime is the session's, and an access token
+          must not outlive its session: it would stop authenticating when the
+          session ends while its `exp`, `expires_in` and access cookie still
+          promised more. Config validation (`config.Load` / `Validate`) and
+          `auth.NewService` refuse that pair; equal TTLs are fine. Raise
+          `GOMBIT_JWT_REFRESH_TTL` to at least `GOMBIT_JWT_ACCESS_TTL`, or
+          lower `GOMBIT_JWT_ACCESS_TTL`. An access token also ends with its
+          session: it stops authenticating when the session expires, not only
+          when it is revoked, so a token issued before the upgrade under the
+          old TTLs stops at its session's expiry, before its `exp`.
         refs: [335]
 
       - id: refresh-lock-failure-is-500

@@ -156,8 +156,9 @@ differs: tokens travel in cookies, not JSON.
 
 `GOMBIT_JWT_SECRET` / `GOMBIT_JWT_ACCESS_TTL` / `GOMBIT_JWT_REFRESH_TTL` are
 shared with Bearer mode (same access-JWT format; the secret also signs the
-CSRF token). See [`docs/auth.md`](auth.md#config) for those and the
-production JWT-secret-strength check.
+CSRF token). See [`docs/auth.md`](auth.md#config) for those, the rule that
+the refresh TTL is at least the access TTL, and the production
+JWT-secret-strength check.
 
 `gombit new --auth cookie` records the choice in `gombit.yaml` and writes
 `GOMBIT_AUTH_MODE=cookie` / `GOMBIT_COOKIE_SECURE=true` /

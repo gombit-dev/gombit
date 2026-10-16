@@ -203,6 +203,31 @@ func newAuthAppWithDB(t *testing.T, db *database.DB) *framework.App {
 	return app
 }
 
+// newAuthAppWithTTLs is newAuthAppWithDB in the given auth mode, with the
+// given token TTLs.
+func newAuthAppWithTTLs(t *testing.T, db *database.DB, mode config.AuthMode, access, refresh time.Duration) *framework.App {
+	t.Helper()
+	if err := auth.Migrate(db.DB); err != nil {
+		t.Fatalf("auth.Migrate() error = %v", err)
+	}
+	cfg := config.DefaultFor(config.EnvironmentTest)
+	cfg.HTTP.Addr = "127.0.0.1:0"
+	cfg.Auth.JWTSecret = testJWTSecret
+	cfg.Auth.BcryptCost = bcrypt.MinCost
+	cfg.Auth.AccessTokenTTL = access
+	cfg.Auth.RefreshTokenTTL = refresh
+	cfg.Auth.Mode = mode
+	app, err := framework.New(
+		framework.WithConfig(cfg),
+		framework.WithDatabase(db),
+		framework.WithLogger(zap.NewNop()),
+	)
+	if err != nil {
+		t.Fatalf("framework.New() error = %v", err)
+	}
+	return app
+}
+
 func openSQLite(t *testing.T) *database.DB {
 	t.Helper()
 	db, err := database.Open(config.DatabaseConfig{

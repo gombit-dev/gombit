@@ -47,6 +47,9 @@ func NewService(db *gorm.DB, cfg config.Config) (*Service, error) {
 	if cfg.Auth.AccessTokenTTL <= 0 || cfg.Auth.RefreshTokenTTL <= 0 {
 		return nil, errors.New("auth: token TTLs must be positive")
 	}
+	if cfg.Auth.RefreshTokenTTL < cfg.Auth.AccessTokenTTL {
+		return nil, errors.New("auth: the refresh token TTL must be at least the access token TTL")
+	}
 	s := &Service{
 		db:     db,
 		cfg:    cfg.Auth,
@@ -302,10 +305,13 @@ func (s *Service) parseAccess(ctx context.Context, token string) (User, uint, er
 		return User{}, 0, errInvalidAccessToken
 	}
 	// One definition of an active session, shared with the sessions API: an
-	// unrevoked refresh token row that has not expired. An access JWT that
-	// outlives its session (AccessTokenTTL above RefreshTokenTTL) would
-	// authenticate while the session is gone from the list and cannot be
-	// revoked.
+	// unrevoked refresh token row that has not expired. The refresh TTL is
+	// at least the access TTL (config validation and NewService), so a token
+	// issued now never outlives its row. The expiry check stays for the ones
+	// that can: a token issued before that rule, or before the operator
+	// raised the refresh TTL, and one whose row's expiry has changed. It
+	// would authenticate while its session is gone from the list and cannot
+	// be revoked.
 	if row.UserID != user.ID || row.RevokedAt != nil || !row.ExpiresAt.After(s.now()) {
 		return User{}, 0, errInvalidAccessToken
 	}

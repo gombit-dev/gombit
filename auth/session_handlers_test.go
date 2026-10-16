@@ -2,10 +2,12 @@ package auth_test
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +15,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/gombit-dev/gombit/auth"
+	"github.com/gombit-dev/gombit/config"
 	"github.com/gombit-dev/gombit/contract"
 	"github.com/gombit-dev/gombit/database"
 	"github.com/gombit-dev/gombit/framework"
@@ -292,10 +295,7 @@ func runCookieSessions(t *testing.T, app *framework.App) {
 	})
 }
 
-// TestSessionsOpenAPI: in each auth mode the session operations carry their
-// operation IDs and that mode's security scheme (bearerAuth or cookieAuth,
-// never both), and DELETE /auth/sessions requires a scope of exactly others
-// or all.
+// TestSessionExpiryGates runs runSessionExpiryGates on SQLite.
 func TestSessionExpiryGates(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	runSessionExpiryGates(t, openSQLite(t))
@@ -304,11 +304,12 @@ func TestSessionExpiryGates(t *testing.T) {
 // runSessionExpiryGates checks the gates every authenticated route sits
 // behind, the Bearer one and the cookie one (RequireCookieSession, which the
 // admin mounts too): an access token that is still live does not outlive its
-// session. Config.Validate accepts an access TTL above the refresh TTL, so
-// with a 1h access token and a 1m session, two minutes on the session has
-// expired: the gate answers 401 and the route's handler does not run, as
-// ParseAccess refuses the token. The integration tests run it against
-// PostgreSQL and MySQL.
+// session. The refresh TTL is at least the access TTL, so only a token issued
+// before that rule, or one whose session row's expiry changed, can; the
+// test shortens the row to 30 seconds and moves on 31, with the 1m access
+// token still live: the gate answers 401 and the route's handler does not
+// run, as ParseAccess refuses the token. The integration tests run it
+// against PostgreSQL and MySQL.
 func runSessionExpiryGates(t *testing.T, db *database.DB) {
 	t.Helper()
 	tests := []struct {
@@ -339,7 +340,7 @@ func runSessionExpiryGates(t *testing.T, db *database.DB) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			app := tt.app(t, db)
-			e := newSessionsEnv(t, db, fmt.Sprintf("gate-%s-%d", tt.name, time.Now().UnixNano()), time.Hour, time.Minute)
+			e := newSessionsEnv(t, db, fmt.Sprintf("gate-%s-%d", tt.name, time.Now().UnixNano()), time.Minute, time.Hour)
 			clock := &stepClock{now: time.Now()}
 			auth.SetClock(e.svc, clock)
 			_, pairs := e.user(t, "gate", 1)
@@ -366,7 +367,15 @@ func runSessionExpiryGates(t *testing.T, db *database.DB) {
 				t.Fatalf("active session: status %d, handler ran %v; want it through; body: %s", rec.Code, ran, rec.Body.String())
 			}
 			ran = false
-			clock.now = clock.now.Add(2 * time.Minute) // the session expires; the access token does not
+			row, err := auth.AuthenticatedRow(e.ctx, e.svc, pairs[0].AccessToken)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Model(&auth.RefreshToken{}).Where("id = ?", row).
+				Update("expires_at", clock.now.Add(30*time.Second)).Error; err != nil {
+				t.Fatal(err)
+			}
+			clock.now = clock.now.Add(31 * time.Second) // the session expires; the access token does not
 			rec := request()
 			assertError(t, rec, http.StatusUnauthorized, "authentication")
 			if ran {
@@ -379,6 +388,208 @@ func runSessionExpiryGates(t *testing.T, db *database.DB) {
 	}
 }
 
+// TestIssuedAccessLifetime: login and refresh describe one access-token
+// lifetime, the access TTL, in everything they issue (expires_in, the JWT's
+// exp, the access cookie's Max-Age); the token's session lasts at least as
+// long; and the gate accepts the token up to that exp and refuses it after.
+func TestIssuedAccessLifetime(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	runIssuedAccessLifetime(t, openSQLite(t))
+}
+
+// issuedAccess is what a login or a refresh issued: the access token and the
+// lifetimes the response gave it (expires_in in Bearer mode, the session
+// cookies' Max-Age in cookie mode; zero where the mode has none).
+type issuedAccess struct {
+	token         string
+	expiresIn     int
+	accessMaxAge  int
+	refreshMaxAge int
+}
+
+// runIssuedAccessLifetime logs in and refreshes over HTTP in both auth modes,
+// with an access TTL below the refresh TTL and equal to it, and checks what
+// each issued against the gate. The app's own Service runs on the system
+// clock and is not reachable from a test, so the gate is a second Service
+// over the same database and config, on a clock the test sets, mounted on a
+// route of the app, as in runSessionExpiryGates: it validates the issued
+// token as the app's gate does. The integration tests run it against
+// PostgreSQL and MySQL.
+func runIssuedAccessLifetime(t *testing.T, db *database.DB) {
+	t.Helper()
+	modes := []struct {
+		name  string
+		mode  config.AuthMode
+		gate  func(*auth.Service) func(huma.Context, func(huma.Context))
+		send  func(req *http.Request, access string)
+		login func(t *testing.T, app *framework.App, email string) (issuedAccess, func(*testing.T) issuedAccess)
+	}{
+		{
+			name: "bearer",
+			mode: config.AuthModeJWT,
+			gate: auth.RequireBearer,
+			send: func(req *http.Request, access string) {
+				req.Header.Set("Authorization", "Bearer "+access)
+			},
+			login: func(t *testing.T, app *framework.App, email string) (issuedAccess, func(*testing.T) issuedAccess) {
+				registerUser(t, app, email, testPassword)
+				pair := loginUser(t, app, email, testPassword)
+				refresh := func(t *testing.T) issuedAccess {
+					next := refreshUser(t, app, pair.RefreshToken)
+					return issuedAccess{token: next.AccessToken, expiresIn: next.ExpiresIn}
+				}
+				return issuedAccess{token: pair.AccessToken, expiresIn: pair.ExpiresIn}, refresh
+			},
+		},
+		{
+			name: "cookie",
+			mode: config.AuthModeCookie,
+			gate: (*auth.Service).RequireCookieSession,
+			send: func(req *http.Request, access string) {
+				req.AddCookie(&http.Cookie{Name: auth.AccessCookieName, Value: access}) //nolint:gosec // G124: request Cookie header only carries name/value.
+			},
+			login: func(t *testing.T, app *framework.App, email string) (issuedAccess, func(*testing.T) issuedAccess) {
+				jar := fetchCSRF(t, app)
+				registerCookieUser(t, app, jar, email, testPassword)
+				login := sessionCookiesOf(t, loginCookieUser(t, app, jar, email, testPassword))
+				refresh := func(t *testing.T) issuedAccess {
+					return sessionCookiesOf(t, doRequest(app, jar, http.MethodPost, "/api/v1/auth/refresh", ""))
+				}
+				return login, refresh
+			},
+		},
+	}
+	ttls := []struct{ access, refresh time.Duration }{
+		{access: time.Minute, refresh: time.Hour},
+		{access: 10 * time.Minute, refresh: 10 * time.Minute},
+	}
+	for _, mode := range modes {
+		for _, ttl := range ttls {
+			t.Run(fmt.Sprintf("%s access %s refresh %s", mode.name, ttl.access, ttl.refresh), func(t *testing.T) {
+				app := newAuthAppWithTTLs(t, db, mode.mode, ttl.access, ttl.refresh)
+				tag := fmt.Sprintf("lifetime-%s-%d", mode.name, time.Now().UnixNano())
+				gate := newSessionsEnv(t, db, tag, ttl.access, ttl.refresh)
+				clock := &stepClock{}
+				auth.SetClock(gate.svc, clock)
+				ran := false
+				path := "/issued-lifetime-gate"
+				huma.Register(app.API(), huma.Operation{
+					OperationID: "issued-lifetime-gate",
+					Method:      http.MethodGet,
+					Path:        path,
+					Middlewares: huma.Middlewares{mode.gate(gate.svc)},
+				}, func(context.Context, *struct{}) (*struct{}, error) {
+					ran = true
+					return nil, nil
+				})
+				request := func(access string, at time.Time) *httptest.ResponseRecorder {
+					clock.now = at
+					ran = false
+					rec := httptest.NewRecorder()
+					req := httptest.NewRequest(http.MethodGet, path, nil)
+					mode.send(req, access)
+					app.Router().ServeHTTP(rec, req)
+					return rec
+				}
+				check := func(t *testing.T, step string, got issuedAccess) {
+					t.Helper()
+					claims := accessClaimsOf(t, got.token)
+					accessSeconds, refreshSeconds := int(ttl.access/time.Second), int(ttl.refresh/time.Second)
+					if lifetime := claims.Exp - claims.Iat; lifetime != int64(accessSeconds) {
+						t.Fatalf("%s: the JWT's exp - iat = %ds, want the access TTL, %ds", step, lifetime, accessSeconds)
+					}
+					if mode.mode == config.AuthModeCookie {
+						if got.accessMaxAge != accessSeconds || got.refreshMaxAge != refreshSeconds {
+							t.Fatalf("%s: cookie Max-Age access %d, refresh %d; want the TTLs, %d and %d",
+								step, got.accessMaxAge, got.refreshMaxAge, accessSeconds, refreshSeconds)
+						}
+					} else if got.expiresIn != accessSeconds {
+						t.Fatalf("%s: expires_in = %d, want the access TTL, %d", step, got.expiresIn, accessSeconds)
+					}
+					exp := time.Unix(claims.Exp, 0)
+					var row auth.RefreshToken
+					if err := db.First(&row, claims.Rid).Error; err != nil {
+						t.Fatalf("%s: load the token's session row %d: %v", step, claims.Rid, err)
+					}
+					if exp.After(row.ExpiresAt) {
+						t.Fatalf("%s: the access token expires at %v, after its session (%v)", step, exp, row.ExpiresAt)
+					}
+					if rec := request(got.token, exp.Add(-time.Second)); rec.Code >= http.StatusMultipleChoices || !ran {
+						t.Fatalf("%s: a second before exp: status %d, handler ran %v; want it through; body: %s",
+							step, rec.Code, ran, rec.Body.String())
+					}
+					rec := request(got.token, exp.Add(time.Second))
+					assertError(t, rec, http.StatusUnauthorized, "authentication")
+					if ran {
+						t.Fatalf("%s: the handler ran a second after the access token's exp", step)
+					}
+				}
+
+				login, refresh := mode.login(t, app, tag+"@example.com")
+				check(t, "login", login)
+				check(t, "refresh", refresh(t))
+			})
+		}
+	}
+}
+
+// sessionCookiesOf reads the session cookies a cookie-mode login or refresh
+// set.
+func sessionCookiesOf(t *testing.T, rec *httptest.ResponseRecorder) issuedAccess {
+	t.Helper()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; body: %s", rec.Code, rec.Body.String())
+	}
+	var got issuedAccess
+	var access, refresh bool
+	for _, c := range rec.Result().Cookies() {
+		switch c.Name {
+		case auth.AccessCookieName:
+			got.token, got.accessMaxAge, access = c.Value, c.MaxAge, true
+		case auth.RefreshCookieName:
+			got.refreshMaxAge, refresh = c.MaxAge, true
+		}
+	}
+	if !access || !refresh {
+		t.Fatalf("the response did not set both session cookies; headers: %v", rec.Header())
+	}
+	return got
+}
+
+// accessClaims is the part of an access JWT's payload the lifetime checks
+// read.
+type accessClaims struct {
+	Iat int64 `json:"iat"`
+	Exp int64 `json:"exp"`
+	Rid uint  `json:"rid"`
+}
+
+// accessClaimsOf decodes an access JWT's payload; the gate verifies the
+// signature.
+func accessClaimsOf(t *testing.T, token string) accessClaims {
+	t.Helper()
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		t.Fatalf("access token %q is not a JWT", token)
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatalf("decode the JWT payload: %v", err)
+	}
+	var claims accessClaims
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		t.Fatalf("decode the JWT payload %s: %v", payload, err)
+	}
+	if claims.Iat == 0 || claims.Exp == 0 || claims.Rid == 0 {
+		t.Fatalf("the JWT payload %s lacks iat, exp or rid", payload)
+	}
+	return claims
+}
+
+// TestSessionsOpenAPI: in each auth mode the session operations carry their
+// operation IDs and that mode's security scheme (bearerAuth or cookieAuth,
+// never both), and DELETE /auth/sessions requires a scope of exactly others
+// or all.
 func TestSessionsOpenAPI(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	modes := []struct {

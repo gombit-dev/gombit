@@ -403,11 +403,17 @@ version.
   revocation now returns 401 without revoking the user's other sessions.
   Only an already-rotated refresh token counts as reuse and revokes all of
   them, as before ([#335](https://github.com/gombit-dev/gombit/issues/335)).
-- An access JWT now stops authenticating when its session expires, not only
-  when it is revoked, so a token never outlives a session that has dropped
-  out of `GET /auth/sessions` and can no longer be revoked. This only changes
-  anything when `GOMBIT_JWT_ACCESS_TTL` is longer than `GOMBIT_JWT_REFRESH_TTL`,
-  which the config accepts ([#335](https://github.com/gombit-dev/gombit/issues/335)).
+- **Breaking (config):** with auth enabled, config validation refuses a
+  `GOMBIT_JWT_REFRESH_TTL` shorter than `GOMBIT_JWT_ACCESS_TTL` (equal is
+  fine), and `auth.NewService` refuses the same pair: an app configured that
+  way no longer starts until it raises `GOMBIT_JWT_REFRESH_TTL` to at least
+  `GOMBIT_JWT_ACCESS_TTL` or lowers the access TTL. The refresh token's
+  lifetime is the session's, so the access token's `exp`, `expires_in` and
+  access cookie never outlast the session. An access JWT also stops
+  authenticating when its session expires, not only when it is revoked, so a
+  token issued before the upgrade does not outlive a session that has dropped
+  out of `GET /auth/sessions` and can no longer be revoked
+  ([#335](https://github.com/gombit-dev/gombit/issues/335)).
 - `make test-faults` gives every `go test` a per-binary `-timeout` that grows
   with `FAULT_COUNT`: 40 seconds a repetition, never under `go test`'s own
   10 minutes. Every repetition of a package runs in one test binary, so the

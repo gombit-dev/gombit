@@ -92,10 +92,12 @@ for `gombit make resource Session`.
 
 Revocation takes effect on the revoked session's next request. A session is
 active while its refresh row is unrevoked and unexpired, and the access JWT
-follows that: it also stops authenticating when its session expires, even if
-the JWT's own lifetime (`GOMBIT_JWT_ACCESS_TTL`) is longer than the
-refresh token's, so a token never outlives a session that has left the list
-and can no longer be revoked.
+follows that. With auth on, config validation (and `auth.NewService`)
+requires `GOMBIT_JWT_REFRESH_TTL` to be at least `GOMBIT_JWT_ACCESS_TTL`, so
+a token issued now never outlives its session. The gate still checks the
+session's expiry, as a defense for a token issued before that rule or whose
+session's expiry changed: a token never authenticates a session that has
+left the list and can no longer be revoked.
 
 What is serialized: token rotation (`POST /auth/refresh`), revoking one
 session, revoking the others, and revoking all of a user's sessions each lock
@@ -155,6 +157,11 @@ ADMIN-3 assignment helpers and admin enforcement rules.
 | `GOMBIT_JWT_SECRET` | `Config.Auth.JWTSecret` | empty (auth unmounted) |
 | `GOMBIT_JWT_ACCESS_TTL` | `Config.Auth.AccessTokenTTL` | `15m` |
 | `GOMBIT_JWT_REFRESH_TTL` | `Config.Auth.RefreshTokenTTL` | `168h` (7 days) |
+
+With auth on, `config.Load` / `Validate` refuse a `GOMBIT_JWT_REFRESH_TTL`
+shorter than `GOMBIT_JWT_ACCESS_TTL` (equal is fine): the refresh token's
+lifetime is the session's, and an access token must not outlive its session
+([Sessions](#sessions)).
 
 Production rejects a **non-empty** JWT secret shorter than 32 characters, and
 the generated-app development placeholder, at `config.Load` / `Validate` and
