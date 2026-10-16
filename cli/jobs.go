@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -341,16 +342,19 @@ func writeFailedJob(w io.Writer, f jobs.FailedJob) error {
 	return err
 }
 
+// indentJSON lays a job's stored payload out for the terminal. It copies the
+// payload's own bytes and only moves the whitespace between them, so the
+// numbers, key order and string contents an operator reads are the ones the
+// queue holds. Re-encoding through any instead sends every number through
+// float64 (an id above 2^53 comes back as a neighbouring value the job never
+// carried), sorts the keys, escapes '<', '>' and '&', and rewrites 1e3 as 1000.
+// A payload that is not JSON is returned as stored.
 func indentJSON(raw json.RawMessage) string {
-	var v any
-	if err := json.Unmarshal(raw, &v); err != nil {
+	var out bytes.Buffer
+	if err := json.Indent(&out, raw, "  ", "  "); err != nil {
 		return string(raw)
 	}
-	out, err := json.MarshalIndent(v, "  ", "  ")
-	if err != nil {
-		return string(raw)
-	}
-	return "  " + string(out)
+	return "  " + out.String()
 }
 
 func writeJSON(w io.Writer, v any) error {

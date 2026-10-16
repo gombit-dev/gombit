@@ -407,6 +407,11 @@ the same job (ID, payload) back on its queue. So the ID stays taken, and
 dispatching a new job with it onto the same queue fails, until the job is
 forgotten or purged while failed, or its retried run is acknowledged.
 
+`inspect` re-indents the payload it prints instead of re-encoding it, so only the
+whitespace between the JSON tokens moves: an id above 2^53 is the id the job
+carries, the keys stay in the order the handler wrote them, and `<`, `>` and `&`
+print as stored, so what an operator reads is what the queue holds.
+
 **Payloads and personal data.** A failed job's payload stays in Redis until
 someone forgets or purges it. Retrying does not remove it: the payload goes
 back on the queue and leaves when that run is acknowledged (or, if it fails
