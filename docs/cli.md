@@ -39,6 +39,10 @@ go run ./cmd/gombit --help
 | `gombit worker` | Run the app's background-job worker | JOBS-3 |
 | `gombit jobs …` | Inspect, retry, and delete failed jobs | JOBS-6 |
 | `gombit version` | Print version and build metadata | REL-4 |
+| `gombit upgrade --dry-run` | Plan an upgrade to a framework release, changing nothing | UPGRADE-3 |
+| `gombit upgrade --to` | Apply an upgrade's dependency changes (go.mod, go.sum) with the go command | UPGRADE-4 |
+| `gombit upgrade check` | Report uses of deprecated framework APIs (from type information); exits 1 when there are any | UPGRADE-5 |
+| `gombit upgrade fix` | Run the framework's codemods: print the patch (default), `--patch FILE`, or `--write` | UPGRADE-6 |
 | `gombit upgrade baseline` | Show (or record) the app's upgrade baseline: framework and scaffold versions | UPGRADE-1 |
 | `gombit upgrade notes` | Print upgrade notes from the compatibility manifest | UPGRADE-2 |
 
@@ -853,6 +857,68 @@ config and `go.mod`, never inferred from the source tree. Writes JSON to stdout
 or `--out`; `--dir` selects the project directory. Fails loudly when the
 framework version is missing or replaced by a local checkout. See
 [app-contract.md](app-contract.md).
+
+## `gombit upgrade --dry-run`
+
+Plans upgrading the application to a framework release from the
+compatibility manifest built into this `gombit`, and changes nothing: the
+current and target versions, the dependency change, the automatic changes
+the app needs, every manual action with what to do, the breaking changes,
+and the informational ones. A version the manifest does not list, a
+downgrade, or an app whose baseline names no framework release (a `go.work`,
+a local checkout, a fork) fails with the reason. It never prompts, so it
+runs in CI. See [upgrade.md](upgrade.md#planning-an-upgrade).
+
+Without `--dry-run`, `--to vX.Y.Z` applies the plan's dependency changes:
+it edits the framework's replaces the plan names (`go mod edit`), runs `go
+get github.com/gombit-dev/gombit@vX.Y.Z`, and prints every go command and the
+`go.mod` and `go.sum` lines they changed. A go command that fails is shown
+with its full output, a result that does not build the target is refused,
+and either way `go.mod` and `go.sum` are restored. The plan's automatic and
+manual changes are printed as still to do. `--to` is required there. See
+[upgrade.md](upgrade.md#applying-the-dependency-changes).
+
+| Flag | Meaning | Default |
+| --- | --- | --- |
+| `--dry-run` | Plan the upgrade and print it | off |
+| `--to` | Target framework release: applied without `--dry-run`, planned with it | with `--dry-run`, the newest release this CLI knows; required to apply |
+| `--dir` | Application directory (`go.mod`, `gombit.yaml`) | `.` |
+| `--json` | Print the plan (or what was applied) as JSON | off |
+
+## `gombit upgrade check`
+
+Reports every use, in the application (every package, tests included), of a
+framework API whose doc comment has a `Deprecated:` paragraph: file, line
+and column, the symbol, and what to use instead. Uses are resolved from type
+information (`go/packages`, `go/types`), never by matching text; the app
+must type-check. It exits 1 when there is any use. See
+[upgrade.md](upgrade.md#checking-for-deprecated-apis).
+
+| Flag | Meaning | Default |
+| --- | --- | --- |
+| `--dir` | Application directory | `.` |
+| `--json` | Print the uses as JSON | off |
+
+## `gombit upgrade fix`
+
+Runs the framework's **codemods**: mechanical rewrites of the app's uses of
+framework APIs that a release renamed, moved or reshaped. Uses are resolved
+from type information and rewritten in the syntax tree, never as text.
+Changed files are gofmt-formatted, and the rewrite is type-checked before
+it is proposed. By default it writes nothing: it prints the patch (a
+unified diff, for `git apply`) on stdout and a summary on stderr.
+`--write` rewrites the files atomically, and a second run changes nothing.
+A use a codemod cannot rewrite safely is left unchanged and listed, with
+the reason, and the command exits 1. This gombit ships no codemods yet. See
+[upgrade.md](upgrade.md#rewriting-with-codemods).
+
+| Flag | Meaning | Default |
+| --- | --- | --- |
+| `--dir` | Application directory | `.` |
+| `--only` | Run only these codemods (IDs, comma-separated) | all |
+| `--patch` | Write the patch to this file instead of stdout | — |
+| `--write` | Rewrite the files in place (not with `--patch`) | off |
+| `--json` | Print the result, patch included, as JSON | off |
 
 ## `gombit upgrade baseline`
 

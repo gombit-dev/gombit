@@ -34,10 +34,42 @@ type Replacement struct {
 	Path string `json:"path"`
 	// Version is the replacement module's version; empty for a directory.
 	Version string `json:"version,omitempty"`
+	// ForVersion is the framework version the replace applies to (its left
+	// side's version), or empty when it applies to every version. A replace
+	// of every version keeps pinning the build when the require moves; one of
+	// the required version stops applying.
+	ForVersion string `json:"for_version,omitempty"`
 }
 
 // Local reports whether the replacement is a local directory.
 func (r Replacement) Local() bool { return r.Version == "" }
+
+// String is the replacement as go.mod writes it: "path version", or the
+// directory.
+func (r Replacement) String() string {
+	if r.Local() {
+		return r.Path
+	}
+	return r.Path + " " + r.Version
+}
+
+// Resolve is the replacement in replaces that applies to the framework at
+// version, as the go command resolves it: a replace of that exact version
+// wins over one of every version, and a replace of another version does not
+// apply. Nil when none applies. A planner that edits the set (moves the
+// require, drops a replace) resolves again with it.
+func Resolve(replaces []Replacement, version string) *Replacement {
+	var wildcard *Replacement
+	for i := range replaces {
+		switch replaces[i].ForVersion {
+		case version:
+			return &replaces[i]
+		case "":
+			wildcard = &replaces[i]
+		}
+	}
+	return wildcard
+}
 
 // Declaration is what go.mod declares about the framework module.
 type Declaration struct {
@@ -45,6 +77,12 @@ type Declaration struct {
 	Required string
 	// Replace is the replace directive that applies to Required, or nil.
 	Replace *Replacement
+	// Replaces is every replace of the framework module in go.mod, applying
+	// or not, in file order (an exact repeat counted once). Planning a move
+	// of the require needs them all: a replace of the target version, or one
+	// of every version an exact replace shadows today, decides the build
+	// after the move (Resolve).
+	Replaces []Replacement
 }
 
 // Release is the framework release go.mod names: the required version, or
@@ -93,41 +131,41 @@ func Parse(path string, data []byte) (Declaration, error) {
 	if d.Required == "" {
 		return Declaration{}, fmt.Errorf("%s: %w", path, ErrNotRequired)
 	}
-	r, err := replacementFor(f.Replace, d.Required)
-	if err != nil {
+	if d.Replaces, err = frameworkReplaces(f.Replace); err != nil {
 		return Declaration{}, fmt.Errorf("%s: %w", path, err)
 	}
-	if r != nil {
-		d.Replace = &Replacement{Path: r.New.Path, Version: r.New.Version}
+	if r := Resolve(d.Replaces, d.Required); r != nil {
+		rc := *r
+		d.Replace = &rc
 	}
 	return d, nil
 }
 
-// replacementFor is the replace directive that applies to the framework at
-// version required, as the go command resolves it: a replace of that exact
-// version wins over one of every version, whatever their order, and a
-// replace of another version does not apply. Two replaces of the same
+// frameworkReplaces are the replace directives of the framework module, in
+// file order, an exact repeat counted once. Two replaces of the same
 // framework version (or two of every version) with different targets are
 // an error, as they are to the go command.
-func replacementFor(replaces []*modfile.Replace, required string) (*modfile.Replace, error) {
+func frameworkReplaces(replaces []*modfile.Replace) ([]Replacement, error) {
 	byOld := map[string]*modfile.Replace{}
+	var out []Replacement
 	for _, r := range replaces {
 		if r.Old.Path != ModulePath {
 			continue
 		}
-		if prev, ok := byOld[r.Old.Version]; ok && prev.New != r.New {
-			old := ModulePath
-			if r.Old.Version != "" {
-				old += "@" + r.Old.Version
+		if prev, ok := byOld[r.Old.Version]; ok {
+			if prev.New != r.New {
+				old := ModulePath
+				if r.Old.Version != "" {
+					old += "@" + r.Old.Version
+				}
+				return nil, fmt.Errorf("conflicting replacements for %s (%s and %s), which the go command refuses", old, target(prev), target(r))
 			}
-			return nil, fmt.Errorf("conflicting replacements for %s (%s and %s), which the go command refuses", old, target(prev), target(r))
+			continue
 		}
 		byOld[r.Old.Version] = r
+		out = append(out, Replacement{Path: r.New.Path, Version: r.New.Version, ForVersion: r.Old.Version})
 	}
-	if r, ok := byOld[required]; ok {
-		return r, nil
-	}
-	return byOld[""], nil
+	return out, nil
 }
 
 func target(r *modfile.Replace) string {

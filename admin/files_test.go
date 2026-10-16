@@ -670,3 +670,34 @@ func TestAdminHiddenFileColumn(t *testing.T) {
 		t.Fatalf("after the PATCH: %+v; want the title changed and the hidden column's replacement kept", got)
 	}
 }
+
+// A record with a file field deleted between the PATCH's load and its write
+// is a 404, not a file race (issue #450).
+func TestFencedPatchOfADeletedRowIs404(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	app := newFileApp(t)
+	jar := loginSuperuser(t, app)
+	base := apiPrefix(app) + "/admin/resources/papers"
+	doc := uploadFile(t, app, jar, "doc", pdfBytes, "application/pdf")
+	rec := doRequest(app, jar, http.MethodPost, base, fmt.Sprintf(`{"title":"a","doc":%q}`, doc))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create = %d %s", rec.Code, rec.Body)
+	}
+	var created rowEnvelope
+	_ = json.Unmarshal(rec.Body.Bytes(), &created)
+	id := asInt(created.Data["id"])
+	fired := false
+	if err := app.DB().Callback().Update().Before("gorm:update").Register("test:delete_paper", func(tx *gorm.DB) {
+		if fired || tx.Statement.Table != "papers" {
+			return
+		}
+		fired = true
+		if err := tx.Session(&gorm.Session{NewDB: true}).Exec("DELETE FROM papers WHERE id = ?", id).Error; err != nil {
+			t.Errorf("concurrent delete: %v", err)
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	res := doRequest(app, jar, http.MethodPatch, fmt.Sprintf("%s/%d", base, id), `{"title":"edited"}`)
+	assertError(t, res, http.StatusNotFound, "not_found")
+}

@@ -246,9 +246,10 @@ What a statement writes is decided as for the time range check: a write
 through a model, not a schema-less `db.Table(...)` map. The check allocates
 only when a value is refused. A row that already stores a non-finite value
 (PostgreSQL, SQLite) cannot be returned as JSON either way; a partial update
-of its other columns works, a `Save` of the row (and an admin edit, which
-writes the whole row) is a 422 on that field until the column is set to a
-finite value or NULL.
+of its other columns works, and so does an edit scoped to the row
+(`database.ScopeEdit`, the admin's PATCH), which leaves the column out while
+the edit does not change it. A generic `Save` of the row is a 422 on that
+field until the column is set to a finite value or NULL.
 
 ### Text
 
@@ -280,6 +281,25 @@ NULL (a nil pointer, an invalid `NullString`) and an expression are left to
 the database. The check allocates only when a value is refused, or when
 `Updates` is given a struct of a type other than the model, which is parsed
 to match its fields to the model's columns.
+
+**Editing a loaded row.** `database.StoredValues(db, &row)` records what a
+loaded row stores; `database.ScopeEdit(db, &row, stored)` scopes the update
+that writes it back with `Select("*")` (`Save`, or
+`Model(&row).Select("*").Updates(&row)`) to the columns whose value the edit,
+a model hook or a GORM callback (`Statement.SetColumn`) changed, judged just
+before the SQL runs (and an auto-update timestamp, which GORM stamps). Values
+are compared as values: NaN equals NaN, and a time or a decimal with its
+`Equal` (an instant read back in another time zone is no change). The others
+are not written, so a concurrent change to them is kept, and the write checks
+judge only what is written (a hook's in-place change to a slice or map
+included; one held in an unexported field is not seen). An edit that changes
+nothing writes no column, but an auto-update timestamp. Use `Updates`: `Save`
+falls back to inserting every column when its update affects no row, which is
+the case for a row deleted meanwhile (it comes back), for an unchanged edit of
+a model without an auto-update timestamp, and on MySQL for an edit whose
+columns already held the new values (the whole row is written). With `Updates`, `RowsAffected` 0 means the row is gone,
+or, on MySQL, matched but unchanged. The admin's PATCH uses `Updates` and
+answers 404 for a deleted row.
 
 **Rows stored before the check.** A row may already hold text the check now
 refuses: more than a `text` or a 191-character column holds (PostgreSQL,
