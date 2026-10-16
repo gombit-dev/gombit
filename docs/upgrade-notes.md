@@ -112,6 +112,18 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   1265, 1292, 1366, 1406 (`database.IsDataException`). A uint list
   filter over `MaxInt64` is a 422 too.
 
+- `config.RedactDSN` and `config.SanitizeError` hide every password a driver reads out of a DSN, so a redacted string no longer carries part of a secret. (`dsn-passwords-cut-where-drivers-read`, behavior, [#486](https://github.com/gombit-dev/gombit/issues/486))
+
+  A MySQL userinfo password containing `@` printed its tail
+  (`app:p@ss@tcp(host:3306)/db`), and a libpq `password=` value ended
+  at a space, `&` or `"` where pgconn keeps reading, so each leaked the
+  rest of the secret into a log; `SanitizeError` also blanked single
+  characters of a message instead of the password. Redaction now takes
+  the same ranges the drivers do, merged before one pass replaces them.
+  A percent-escaped key (`?pass%77ord=`) and `sslpassword=` are hidden
+  now too; `passfile=` is a path and stays visible. Nothing to change:
+  an app that redacts a DSN sees the same key, fully hidden.
+
 ## v0.7.1
 
 ### Manual: action required
