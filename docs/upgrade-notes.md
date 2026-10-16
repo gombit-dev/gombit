@@ -70,6 +70,16 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   row holds one. Apply the same to any hand-written handler that
   parses a uint id.
 
+- **Breaking.** `GOMBIT_API_PREFIX` (or a `Config.Prefix` in code) must be in one canonical form: `Load` drops a trailing `/`, and `Validate` refuses a prefix it would have rewritten or that has no canonical form at all. (`api-prefix-canonical-form`, config, [#501](https://github.com/gombit-dev/gombit/issues/501))
+
+  A prefix of `/svc/` served `/svc/widgets` but listed
+  `/svc//widgets` in the OpenAPI document, so every client generated
+  from it asked for a URL that 404s. Such a prefix now starts no app:
+  write it without the trailing slash. `Validate` also refuses `/`, a
+  segment that is empty (`/svc//api`), `.` or `..`, a space, `%`,
+  `{`, `}`, and Gin's `:` and `*`, which no route can be built from.
+  A prefix that already has its canonical form is untouched.
+
 ### Automatic: applied by the upgrade tooling
 
 - `gombit new` records the app's upgrade baseline in a `gombit:` block of `gombit.yaml`. (`record-upgrade-baseline`, scaffold, action `record-baseline`, [#341](https://github.com/gombit-dev/gombit/issues/341))
