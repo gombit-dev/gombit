@@ -385,3 +385,15 @@ releases:
           1265, 1292, 1366, 1406 (`database.IsDataException`). A uint list
           filter over `MaxInt64` is a 422 too.
         refs: [444]
+
+      - id: jobs-inspect-keeps-payload-bytes
+        kind: informational
+        area: cli
+        summary: "`gombit jobs inspect` prints a job's payload as the queue holds it: an int64 above 2^53 keeps its digits, and key order, `<`, `>` and `&` stay as the handler wrote them."
+        details: |
+          The human-readable block was re-encoded through `any`, so a snowflake
+          id or an int64 primary key showed a neighbouring value the job never
+          carried, keys came back sorted, and `1e3` became `1000`. `inspect
+          --json` was already faithful. Nothing to change: the printed value is
+          now the stored one, and `json.Indent` moves only whitespace.
+        refs: [497]
