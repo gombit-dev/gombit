@@ -12,7 +12,10 @@ var requiredPropertyRE = regexp.MustCompile(`(?i)^expected required property (\S
 // FieldsFromErrors maps Huma validation detail errors into D10 field errors.
 //
 // Body locations lose the leading "body." prefix so JSON field names match the
-// request body. Query, path, and header locations keep their prefixes.
+// request body. Query, path, and header locations keep their prefixes. A
+// missing required property is reported against the object that lacks it, so
+// the property named in its message is what keys the error: `title` at the top
+// level, `address.city` under a nested body object.
 func FieldsFromErrors(errs ...error) map[string][]string {
 	if len(errs) == 0 {
 		return nil
@@ -45,12 +48,7 @@ func fieldFromError(err error) (key, message string) {
 		if message == "" {
 			message = strings.TrimSpace(detail.Error())
 		}
-		key = fieldKey(detail.Location)
-		if key == "_error" {
-			if inferred := fieldFromMessage(message); inferred != "" {
-				key = inferred
-			}
-		}
+		key = fieldKey(detail.Location, message)
 		return key, message
 	}
 
@@ -67,18 +65,35 @@ func fieldFromError(err error) (key, message string) {
 	return "", ""
 }
 
-func fieldKey(location string) string {
+// fieldKey maps a Huma validation location to a D10 field key. Body locations
+// lose the "body." prefix so keys name request-body fields; query, path and
+// header locations keep theirs. A missing required property is reported against
+// the object that lacks it, with the property only in the message, so the
+// message's property names the field: alone it is the key, and under a nested
+// body location it grows that path into `address.city` / `items[0].name`, the
+// shape every other nested body error already has and the field path a form
+// binds. Only a body location names such a field, so a query, path or header
+// key stays as it is.
+func fieldKey(location, message string) string {
 	location = strings.TrimSpace(location)
-	if location == "" {
-		return "_error"
+	nested := strings.HasPrefix(location, "body.")
+	key := location
+	if nested {
+		key = strings.TrimPrefix(location, "body.")
+	} else if location == "body" || location == "" {
+		key = "_error"
 	}
-	if strings.HasPrefix(location, "body.") {
-		return strings.TrimPrefix(location, "body.")
+	prop := fieldFromMessage(message)
+	if prop == "" {
+		return key
 	}
-	if location == "body" {
-		return "_error"
+	if key == "_error" {
+		return prop
 	}
-	return location
+	if nested {
+		return key + "." + prop
+	}
+	return key
 }
 
 func fieldFromMessage(message string) string {
