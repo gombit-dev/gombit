@@ -7,12 +7,21 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 )
 
-var requiredPropertyRE = regexp.MustCompile(`(?i)^expected required property (\S+) to be present$`)
+var (
+	requiredPropertyRE          = regexp.MustCompile(`(?i)^expected required property (\S+) to be present$`)
+	dependentRequiredPropertyRE = regexp.MustCompile(`(?i)^expected property (\S+) to be present when \S+ is present$`)
+)
 
 // FieldsFromErrors maps Huma validation detail errors into D10 field errors.
 //
 // Body locations lose the leading "body." prefix so JSON field names match the
-// request body. Query, path, and header locations keep their prefixes.
+// request body. Query, path, and header locations keep their prefixes. A
+// missing property — required, or pulled in by `dependentRequired` — is
+// reported against the object that lacks it, whatever kind of location that
+// object sits at, so the property named in the message is what the key grows
+// with: `title` at the request root, `address.city` under a nested body
+// object, `body[1].sku` under a top-level array body, `query.filter.kind`
+// under a deepObject query param.
 func FieldsFromErrors(errs ...error) map[string][]string {
 	if len(errs) == 0 {
 		return nil
@@ -45,12 +54,7 @@ func fieldFromError(err error) (key, message string) {
 		if message == "" {
 			message = strings.TrimSpace(detail.Error())
 		}
-		key = fieldKey(detail.Location)
-		if key == "_error" {
-			if inferred := fieldFromMessage(message); inferred != "" {
-				key = inferred
-			}
-		}
+		key = fieldKey(detail.Location, message)
 		return key, message
 	}
 
@@ -67,24 +71,40 @@ func fieldFromError(err error) (key, message string) {
 	return "", ""
 }
 
-func fieldKey(location string) string {
+// fieldKey maps a Huma validation location to a D10 field key. Body locations
+// lose the "body." prefix so keys name request-body fields; query, path and
+// header locations keep theirs. Both of Huma's missing-property messages —
+// `expected required property %s to be present` and `expected property %s to
+// be present when %s is present` (dependentRequired) — are added at the path
+// of the object that lacks the property, and that object can sit anywhere:
+// a nested body object, a top-level array-body item (`body[1]`, where Huma's
+// PushIndex appends `[i]` without a dot), a deepObject query param, or a form
+// object. So the property named in the message grows the location's key into
+// the full field path: `title` alone at the request root, `address.city` under
+// a nested body object, `body[1].sku`, `query.filter.kind`. Every other
+// message keeps the location's key as it is.
+func fieldKey(location, message string) string {
 	location = strings.TrimSpace(location)
-	if location == "" {
-		return "_error"
+	key := strings.TrimPrefix(location, "body.")
+	if location == "" || location == "body" {
+		key = "_error"
 	}
-	if strings.HasPrefix(location, "body.") {
-		return strings.TrimPrefix(location, "body.")
+	prop := fieldFromMessage(message)
+	if prop == "" {
+		return key
 	}
-	if location == "body" {
-		return "_error"
+	if key == "_error" {
+		return prop
 	}
-	return location
+	return key + "." + prop
 }
 
 func fieldFromMessage(message string) string {
-	matches := requiredPropertyRE.FindStringSubmatch(strings.TrimSpace(message))
-	if len(matches) != 2 {
-		return ""
+	message = strings.TrimSpace(message)
+	for _, re := range []*regexp.Regexp{requiredPropertyRE, dependentRequiredPropertyRE} {
+		if matches := re.FindStringSubmatch(message); len(matches) == 2 {
+			return matches[1]
+		}
 	}
-	return matches[1]
+	return ""
 }

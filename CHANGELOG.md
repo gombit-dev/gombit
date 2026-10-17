@@ -89,6 +89,16 @@ version.
   refresh cookie stays valid for the retry, which no longer reads as reuse
   and revokes every session of the user
   ([#606](https://github.com/gombit-dev/gombit/issues/606)).
+- A 422 keys a missing property by that property's own path instead of by the
+  object that lacks it (`address.city`, `lines[1].sku`, `body[1].sku` for a
+  top-level array body, `query.filter.kind` for a deepObject query param), the
+  shape every other nested error already has. Huma reports the property only in
+  the message, so the key was that object and it carried every property the
+  object was missing, which a form cannot put on the right input: the
+  scaffold's `applyContractErrors` passes these keys straight to React Hook
+  Form as field paths. The dependent-required message (`expected property zip
+  to be present when city is present`) keys the same way
+  ([#503](https://github.com/gombit-dev/gombit/issues/503)).
 
 ### Changed
 
@@ -563,7 +573,6 @@ version.
   `framework.New`, `contract.HumaConfigFor` logs the failure through `slog`; a
   writer on which the status cannot be confirmed to change gets the error back
   to Huma as before ([#442](https://github.com/gombit-dev/gombit/issues/442)).
-
 ## [0.7.0] — 2026-10-04
 
 ### Added

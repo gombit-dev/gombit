@@ -240,8 +240,15 @@ Huma `ErrorDetail.Location` values:
 | `query.limit` | `query.limit` |
 | `path.widget-id` | `path.widget-id` |
 
-When Huma omits a location for a missing required property, Gombit infers the
-field name from messages like `expected required property name to be present`.
+A missing property — required, or pulled in by `dependentRequired` — is reported
+by Huma against the object that lacks it, and the property is named in the
+message instead of the location, so Gombit appends it whatever kind of location
+the object sits at: the top-level body yields just the property (`title`), a
+nested body location grows into a field path (`address.city`, `lines[1].sku`),
+a top-level array body item keys its item (`body[1]`) and grows the same way
+(`body[1].sku`), and a deepObject query param grows its object key
+(`query.filter.kind`) — the same shape as every other nested error, and the
+path a form's field binding uses.
 
 `request_id` comes from the runtime request-ID middleware
 (`X-Request-Id` / `framework.GetRequestIDFromContext`).
