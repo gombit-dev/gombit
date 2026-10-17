@@ -674,6 +674,14 @@ version.
   `framework.New`, `contract.HumaConfigFor` logs the failure through `slog`; a
   writer on which the status cannot be confirmed to change gets the error back
   to Huma as before ([#442](https://github.com/gombit-dev/gombit/issues/442)).
+- A 422 keys a missing required property of a nested request body object by
+  that property's own path (`address.city`, `lines[1].sku`), the shape every
+  other nested body error already had. Huma reports such a property against the
+  object that lacks it, so the key was that object (`address`, `lines[1]`) and
+  it carried every property the object was missing, which a form cannot put on
+  the right input: the scaffold's `applyContractErrors` passes these keys
+  straight to React Hook Form as field paths
+  ([#503](https://github.com/gombit-dev/gombit/issues/503)).
 
 ## [0.6.0] — 2026-09-28
 

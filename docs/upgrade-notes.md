@@ -112,6 +112,14 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   1265, 1292, 1366, 1406 (`database.IsDataException`). A uint list
   filter over `MaxInt64` is a 422 too.
 
+- A 422 keys a missing required property of a nested request body object by that property's own path (`address.city`, `lines[1].sku`) instead of by the object. (`nested-required-property-keyed-by-its-path`, behavior, [#503](https://github.com/gombit-dev/gombit/issues/503))
+
+  Huma reports a missing property against the object that lacks it, so
+  the parent key (`address`, `lines[1]`) carried every property the
+  object was missing. A form that passes `error.fields` to React Hook
+  Form field paths needs no change — that is the key it always wanted;
+  code that read the parent key reads the property path now.
+
 ## v0.7.1
 
 ### Manual: action required
