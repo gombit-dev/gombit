@@ -140,10 +140,11 @@ type Change struct {
 	// Refs are the GitHub issues or pull requests of the change.
 	Refs []int `yaml:"refs,omitempty" json:"refs,omitempty"`
 	// Config are the configuration variables the change renames, removes,
-	// re-defaults, requires or newly refuses values of: what the upgrade
-	// tooling checks the application's environment files against
-	// (AnalyzeConfig). A change in the security area makes each of them a
-	// security review.
+	// re-defaults, requires or newly refuses values of, and those it adds
+	// that another entry needs or that a security change introduces: what
+	// the upgrade tooling checks the application's environment files
+	// against (AnalyzeConfig). A change in the security area makes each of
+	// them, an addition included, a security review.
 	Config []ConfigChange `yaml:"config,omitempty" json:"config,omitempty"`
 }
 

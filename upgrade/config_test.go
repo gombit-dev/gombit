@@ -298,6 +298,42 @@ func TestWriteConfigTemplatesRenameOntoDocumentedName(t *testing.T) {
 	}
 }
 
+// TestAnalyzeConfigChainedRenames: each change is judged against the files
+// as the path's earlier changes leave them, the order WriteConfigTemplates
+// applies them in. Renaming A to B, then B to C (in a later release), a
+// template and a .env setting A set B for the second rename, the template
+// is fixable for both, and writing it settles both.
+func TestAnalyzeConfigChainedRenames(t *testing.T) {
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{".env.example": "GOMBIT_A=1\n", ".env": "GOMBIT_A=2\n"})
+	path := append(rename("GOMBIT_A", "GOMBIT_B"), upgrade.Release{Version: "v0.9.0", Changes: []upgrade.Change{
+		{ID: "b-to-c", Area: "config", Summary: "renamed", Config: []upgrade.ConfigChange{{Var: "GOMBIT_B", Change: upgrade.ConfigRenamed, To: "GOMBIT_C"}}},
+	}})
+	r, err := upgrade.AnalyzeConfig(dir, path)
+	if err != nil || len(r.Findings) != 2 {
+		t.Fatalf("AnalyzeConfig = %+v, %v", r, err)
+	}
+	for _, f := range r.Findings {
+		if !f.Fixable || strings.Join(f.TemplateSetIn, ", ") != ".env.example" || strings.Join(f.SetIn, ", ") != ".env" {
+			t.Errorf("%s: fixable %v, template_set_in %v, set_in %v; want fixable, in .env.example and .env", f.ChangeID, f.Fixable, f.TemplateSetIn, f.SetIn)
+		}
+	}
+	if _, err := upgrade.WriteConfigTemplates(dir, path); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(read(t, filepath.Join(dir, ".env.example")), "\nGOMBIT_C=1\n") {
+		t.Errorf(".env.example = %q, want GOMBIT_C set", read(t, filepath.Join(dir, ".env.example")))
+	}
+	if r, err = upgrade.AnalyzeConfig(dir, path); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range r.Findings {
+		if f.Fixable {
+			t.Errorf("%s still fixable after the write", f.ChangeID)
+		}
+	}
+}
+
 // TestAnalyzeConfigUnreadableAndSymlinked: a symlinked environment file is
 // read through; one that cannot be read is listed as unchecked (the
 // analysis goes on, and a change on the path then needs review), and a

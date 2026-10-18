@@ -161,7 +161,8 @@ type ConfigFinding struct {
 	NeedsAction bool `json:"needs_action"`
 	// SetIn are the environment files (not templates) that set the
 	// variable; TemplateSetIn the templates that set it, and DocumentedIn
-	// those that mention it commented out. They are mentions: only .env,
+	// those that mention it commented out, each file as the path's earlier
+	// changes leave it (see AnalyzeConfig). They are mentions: only .env,
 	// for local development runs, is a runtime override gombit loads.
 	SetIn         []string `json:"set_in"`
 	TemplateSetIn []string `json:"template_set_in"`
@@ -236,6 +237,42 @@ type envFile struct {
 	mode       os.FileMode
 }
 
+// readNames records the variables body sets and documents. What a file
+// sets is what the loader would read from it: its own traversal (the whole
+// file) and grammar.
+func (f *envFile) readNames(body []byte) {
+	f.set, f.documented = map[string]bool{}, map[string]bool{}
+	for _, key := range config.DotEnvKeys(body) {
+		if configVar.MatchString(key) {
+			f.set[key] = true
+		}
+	}
+	for _, line := range bytes.Split(body, []byte("\n")) {
+		if key, commented, ok := envAssignment(line); ok && commented {
+			f.documented[key] = true
+		}
+	}
+}
+
+// advance makes the file what an upgrade that has made cc leaves it: a
+// template as WriteConfigTemplates rewrites it, and another file as the
+// developer would, following the finding (a renamed variable is then set
+// under its new name). The findings for later changes are about the files
+// as the earlier ones leave them, the order WriteConfigTemplates applies
+// them in: renaming A to B, then B to C, a template setting A is fixable
+// for both.
+func (f *envFile) advance(release, changeID string, cc ConfigChange) {
+	if f.Template {
+		f.lines = upgradeTemplate(f.lines, release, changeID, cc)
+		f.readNames([]byte(strings.Join(f.lines, "")))
+		return
+	}
+	if cc.Change == ConfigRenamed && f.set[cc.Var] {
+		delete(f.set, cc.Var)
+		f.set[cc.To] = true
+	}
+}
+
 // envAssignment is the variable an environment file line assigns, by the
 // loader's grammar (config.DotEnvKey: "export KEY=" assigns no KEY), and
 // whether the line is a commented-out assignment ("# KEY=...", documenting
@@ -296,18 +333,7 @@ func readEnvFiles(workDir string) (files []*envFile, unreadable []string, err er
 			f.bom = bytes.HasPrefix(data, utf8BOM)
 			body = bytes.TrimPrefix(data, utf8BOM)
 		}
-		// What the file sets is what the loader would read from it: its
-		// own traversal (the whole file) and grammar.
-		for _, key := range config.DotEnvKeys(body) {
-			if configVar.MatchString(key) {
-				f.set[key] = true
-			}
-		}
-		for _, line := range bytes.Split(body, []byte("\n")) {
-			if key, commented, ok := envAssignment(line); ok && commented {
-				f.documented[key] = true
-			}
-		}
+		f.readNames(body)
 		if f.Template {
 			f.lines = strings.SplitAfter(string(body), "\n")
 			if f.lines[len(f.lines)-1] == "" {
@@ -328,7 +354,9 @@ func readEnvFiles(workDir string) (files []*envFile, unreadable []string, err er
 // from a file that is not a template, only the names it sets are read.
 // Every rename and removal is reported whether or not a file mentions the
 // variable (a deployment sets its environment elsewhere), and every change
-// of a security change is a security review.
+// of a security change is a security review. Each change is judged
+// against the files as the path's earlier changes leave them, in the order
+// WriteConfigTemplates applies them.
 func AnalyzeConfig(workDir string, releases []Release) (ConfigReport, error) {
 	files, unreadable, err := readEnvFiles(workDir)
 	if err != nil {
@@ -341,10 +369,14 @@ func AnalyzeConfig(workDir string, releases []Release) (ConfigReport, error) {
 	for _, r := range releases {
 		for _, c := range r.Changes {
 			for _, cc := range c.Config {
-				if cc.Change == ConfigAdded && c.Area != "security" {
-					continue // nothing to do: what follows it, if anything, is
+				// An ordinary addition needs nothing: what follows it, if
+				// anything, does.
+				if cc.Change != ConfigAdded || c.Area == "security" {
+					report.Findings = append(report.Findings, finding(r.Version, c, cc, files))
 				}
-				report.Findings = append(report.Findings, finding(r.Version, c, cc, files))
+				for _, f := range files {
+					f.advance(r.Version, c.ID, cc)
+				}
 			}
 		}
 	}

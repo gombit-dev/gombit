@@ -474,9 +474,10 @@ config:
 runtime environment. The notes list each entry, and `gombit upgrade config`
 checks the app against them.
 
-A new variable needs no entry: an addition asks nothing of an application.
-Declare it `added` only when another entry needs it to exist, such as a
-newly required production setting:
+An ordinary new variable needs no entry: an addition asks nothing of an
+application. Declare it `added` when another entry needs it to exist, such
+as a newly required production setting, or when the change is in the
+`security` area, which makes the addition a security review:
 
 ```yaml
 config:
