@@ -674,6 +674,35 @@ version.
   `framework.New`, `contract.HumaConfigFor` logs the failure through `slog`; a
   writer on which the status cannot be confirmed to change gets the error back
   to Huma as before ([#442](https://github.com/gombit-dev/gombit/issues/442)).
+- `config.RedactDSN` and `config.SanitizeError` now cut a DSN password where the
+  database drivers read it. MySQL userinfo was split at the *first* `@`, so
+  `app:p@ss@tcp(host:3306)/db` printed `app:*****@ss@tcp(host:3306)/db`, and the
+  same split made `SanitizeError` take the single character `p` as the secret,
+  blanking every other `p` in the message while leaving the password. The libpq
+  keyword pass matched `password=` only with no space around `=`, ended a value
+  at the first space, and ended it at `&` and `"` too — which pgconn does not,
+  since it separates on the ASCII whitespace class, vertical tab included, so
+  `password = s3cr3t`, `password='it\'s-a-secret tail'`,
+  `password=s3cr3t\ value`, `password=s3cr3t&more` and `password="s3cr3t"&more`
+  each leaked the rest of the password. Redaction now asks each grammar
+  separately which bytes of the unmodified DSN are the password: the MySQL
+  driver indexes its userinfo between the first `:` and the last `@` before the
+  last `/`, pgconn reads a keyword as the token before `=` and ends its value
+  only at whitespace, and a `&`-separated parameter list exists only where a
+  driver separates parameters with `&`. The ranges they name are merged before
+  one pass replaces them, so a string readable two ways hides both of its
+  passwords, a `?` or a `://` inside a value no longer ends one, and a `pass=`
+  that is only part of a MySQL userinfo hides that field rather than the address
+  after it. A parameter key is decoded and matched whole, which catches
+  `?pass%77ord=` the way pgconn does, and `sslpassword=` is now named as a
+  secret instead of hidden by accident; `passfile=` is left alone.
+  `SanitizeError` hides each password in the spellings its grammar stands for,
+  including the percent escapes a URL parameter stands for, which is what pgconn
+  puts in the startup packet.
+  `config` tests compare the result against the password `mysql.ParseDSN` and
+  `pgconn.ParseConfig` take from the same string and against the end of it,
+  through both helpers
+  ([#486](https://github.com/gombit-dev/gombit/issues/486)).
 
 ## [0.6.0] — 2026-09-28
 
