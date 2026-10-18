@@ -92,10 +92,17 @@ var runGo = func(ctx context.Context, dir string, args ...string) ([]byte, error
 // either way go.mod and go.sum are restored to the bytes they had. The
 // plan's automatic and manual changes are left to do.
 func ApplyDependencies(ctx context.Context, workDir string, m *Manifest, to string) (Applied, error) {
+	return ApplyDependenciesWith(ctx, workDir, m, to, PlanOptions{})
+}
+
+// ApplyDependenciesWith is ApplyDependencies with the plan's options: the
+// plan, the framework-schema analysis included, is made before anything
+// is changed.
+func ApplyDependenciesWith(ctx context.Context, workDir string, m *Manifest, to string, opts PlanOptions) (Applied, error) {
 	if to == "" {
 		return Applied{}, ErrNoTarget
 	}
-	plan, err := PlanUpgrade(workDir, m, to)
+	plan, err := PlanUpgradeWith(workDir, m, to, opts)
 	if err != nil {
 		return Applied{}, err
 	}

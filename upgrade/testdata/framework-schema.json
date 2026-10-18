@@ -4,6 +4,7 @@
     {
       "table": "auth_group_permissions",
       "model": "auth.Group",
+      "join": true,
       "columns": [
         {
           "name": "group_id",
@@ -16,11 +17,28 @@
           "primary_key": true
         }
       ],
-      "indexes": []
+      "indexes": [],
+      "constraints": [
+        {
+          "name": "fk_auth_group_permissions_group",
+          "columns": [
+            "group_id"
+          ],
+          "references": "groups(id)"
+        },
+        {
+          "name": "fk_auth_group_permissions_permission",
+          "columns": [
+            "permission_id"
+          ],
+          "references": "permissions(id)"
+        }
+      ]
     },
     {
       "table": "auth_user_groups",
       "model": "auth.User",
+      "join": true,
       "columns": [
         {
           "name": "user_id",
@@ -33,11 +51,28 @@
           "primary_key": true
         }
       ],
-      "indexes": []
+      "indexes": [],
+      "constraints": [
+        {
+          "name": "fk_auth_user_groups_group",
+          "columns": [
+            "group_id"
+          ],
+          "references": "groups(id)"
+        },
+        {
+          "name": "fk_auth_user_groups_user",
+          "columns": [
+            "user_id"
+          ],
+          "references": "users(id)"
+        }
+      ]
     },
     {
       "table": "auth_user_permissions",
       "model": "auth.User",
+      "join": true,
       "columns": [
         {
           "name": "user_id",
@@ -50,7 +85,23 @@
           "primary_key": true
         }
       ],
-      "indexes": []
+      "indexes": [],
+      "constraints": [
+        {
+          "name": "fk_auth_user_permissions_permission",
+          "columns": [
+            "permission_id"
+          ],
+          "references": "permissions(id)"
+        },
+        {
+          "name": "fk_auth_user_permissions_user",
+          "columns": [
+            "user_id"
+          ],
+          "references": "users(id)"
+        }
+      ]
     },
     {
       "table": "groups",
@@ -78,12 +129,15 @@
       "indexes": [
         {
           "name": "idx_groups_name",
-          "unique": true,
+          "class": "UNIQUE",
           "columns": [
-            "name"
+            {
+              "name": "name"
+            }
           ]
         }
-      ]
+      ],
+      "constraints": []
     },
     {
       "table": "permissions",
@@ -115,12 +169,15 @@
       "indexes": [
         {
           "name": "idx_permissions_key",
-          "unique": true,
+          "class": "UNIQUE",
           "columns": [
-            "permission_key"
+            {
+              "name": "permission_key"
+            }
           ]
         }
-      ]
+      ],
+      "constraints": []
     },
     {
       "table": "refresh_tokens",
@@ -163,29 +220,38 @@
         {
           "name": "idx_refresh_tokens_expires_at",
           "columns": [
-            "expires_at"
+            {
+              "name": "expires_at"
+            }
           ]
         },
         {
           "name": "idx_refresh_tokens_revoked_at",
           "columns": [
-            "revoked_at"
+            {
+              "name": "revoked_at"
+            }
           ]
         },
         {
           "name": "idx_refresh_tokens_token_hash",
-          "unique": true,
+          "class": "UNIQUE",
           "columns": [
-            "token_hash"
+            {
+              "name": "token_hash"
+            }
           ]
         },
         {
           "name": "idx_refresh_tokens_user_id",
           "columns": [
-            "user_id"
+            {
+              "name": "user_id"
+            }
           ]
         }
-      ]
+      ],
+      "constraints": []
     },
     {
       "table": "storage_claims",
@@ -233,11 +299,16 @@
         {
           "name": "idx_storage_claims_sweep",
           "columns": [
-            "state",
-            "created_at"
+            {
+              "name": "state"
+            },
+            {
+              "name": "created_at"
+            }
           ]
         }
-      ]
+      ],
+      "constraints": []
     },
     {
       "table": "users",
@@ -276,12 +347,15 @@
       "indexes": [
         {
           "name": "idx_users_email",
-          "unique": true,
+          "class": "UNIQUE",
           "columns": [
-            "email"
+            {
+              "name": "email"
+            }
           ]
         }
-      ]
+      ],
+      "constraints": []
     }
   ]
 }

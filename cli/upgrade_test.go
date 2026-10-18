@@ -590,4 +590,16 @@ func TestUpgradeDryRunMigrationDir(t *testing.T) {
 	if err != nil || !strings.Contains(out, "Nothing to migrate unless the application adopts it") {
 		t.Fatalf("default migration directory: %v\n%s", err, out)
 	}
+	// --to reads the registry in --migrations as part of the plan, before
+	// go.mod changes: an unreadable one stops it with go.mod untouched.
+	if err := os.WriteFile(filepath.Join(dir, "db", "migrations", "models.json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(filepath.Join(dir, "go.mod")) // #nosec G304 -- under t.TempDir()
+	if _, err := runUpgradeCLI(t, "--dir", dir, "--to", "v0.7.0", "--migrations", "db/migrations"); err == nil || !strings.Contains(err.Error(), "model registry") {
+		t.Fatalf("--to with an unreadable registry: %v", err)
+	}
+	if after, _ := os.ReadFile(filepath.Join(dir, "go.mod")); string(after) != string(before) { // #nosec G304 -- under t.TempDir()
+		t.Fatal("go.mod changed")
+	}
 }

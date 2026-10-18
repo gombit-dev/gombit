@@ -431,10 +431,10 @@ generates, reviews and applies. The plan lists them, and the steps:
 ```text
 Framework schema changes: 1
   - [migration required] `auth.RefreshToken` (`refresh_tokens`): altered (v0.9.0, refresh-device-name)
-      The registry lists auth.RefreshToken, so the next migration carries the new refresh_tokens.
+      The registry lists auth.RefreshToken, so the next migration carries its altered refresh_tokens.
 Required migration steps (the upgrade is not complete until they are done):
-  1. After the dependency change, review what the migration will do: gombit db plan (a destructive or unsafe step needs --allow).
-  2. Generate it: gombit db makemigrations upgrade_framework_schema.
+  1. After the dependency change, review what the migration will do: gombit db plan.
+  2. Generate it, with the same flags: gombit db makemigrations upgrade_framework_schema. If it reports a destructive or unsafe step, handle its data first and add --allow <its id>.
   3. Apply it in each environment with gombit db migrate, as a reviewed deploy step. gombit upgrade never applies a migration.
 ```
 
@@ -448,8 +448,18 @@ Required migration steps (the upgrade is not complete until they are done):
   - a new framework model the release requires is added to the app's
     models (its `AutoMigrate` in `internal/platform/database.go`) and
     generated with `--model`;
-  - a model the framework drops is forgotten with `--forget-model`, once
-    its data is no longer needed.
+  - a model the framework drops (its own table removed) is forgotten with
+    `--forget-model`, once its data is no longer needed;
+  - a join table a model declares (`join: true`) changing, appearing or
+    going away alters that model, as a column would: it never adds or
+    removes the model.
+
+  The steps carry one set of flags (`--dir` for another migration
+  directory, `--model`, `--forget-model`) on `gombit db plan`, `gombit db
+  makemigrations` and `gombit db migrate`, so the plan you review is the
+  migration you generate, in the app's own directory. The analysis runs
+  as part of the plan, before `--to` changes `go.mod`: a registry it cannot
+  read stops the upgrade with nothing changed.
 
   A table that belongs to an optional feature (the storage claims, for
   file fields) is listed as nothing to migrate unless the app adopts it.
@@ -465,10 +475,16 @@ Required migration steps (the upgrade is not complete until they are done):
 - **Declared, and detected.** A manifest change lists the tables it
   touches (`schema`, below), and
   [`upgrade/testdata/framework-schema.json`](../upgrade/testdata/framework-schema.json)
-  holds the framework's tables as of a release (their columns, types and
-  indexes, as GORM reads the models). `TestFrameworkSchemaIsDeclared`
-  fails when a table is new, changed or gone since then without a
-  declaration, or a declaration describes no change.
+  holds the framework's tables as of a release, as GORM (and so the Atlas
+  GORM provider) reads the models: columns (types, keys, defaults),
+  indexes (class, type, where, option, and per column sort, collation,
+  length or expression), foreign keys with their delete and update rules,
+  and CHECK constraints. `TestFrameworkSchemaIsDeclared` fails when a
+  table is new, changed or gone since then without a declaration, a
+  declaration describes no change, a change that loses data (a table or
+  column gone, a type changed other than widened) is not declared
+  `destructive`, or an entry's `model` and `join` do not say whose table
+  it is.
   `TestFrameworkModelsAreTheFrameworksTables` keeps the catalog
   (`upgrade.FrameworkModels`) equal to every `Models()` the framework
   exports, and `TestManifestSchemaModelsAreFrameworkModels` holds each
@@ -652,13 +668,17 @@ touches (`schema`), each with what happens to it (`added`, `altered` or
 ```yaml
 schema:
   - {model: auth.RefreshToken, table: refresh_tokens, change: altered}
+  - {model: auth.User, table: auth_user_groups, join: true, change: removed, destructive: true}
 ```
 
 `model` is the framework package and type, as the app's registry names it
-under the framework module. In a `manual` change the entries are migrations
-the app needs; in an `informational` one, they are for an app that adopts
-the feature (`object-storage` adds `storage_claims` that way). A change that
-lists tables is never `automatic`: the developer migrates.
+under the framework module, and `table` its own table, or, with `join:
+true`, a join table it declares. In a `manual` change the entries are
+migrations the app needs. An `informational` change may only add a new
+model's own table, for an app that adopts the feature (`object-storage`
+adds `storage_claims` that way): anything else changes a table an app may
+have, so the parser makes the change manual. A change that lists tables is
+never `automatic`: the developer migrates.
 
 A change of any kind can be `breaking`: an app that relies on documented (or
 reasonably relied-on) behavior can stop building, starting or working across

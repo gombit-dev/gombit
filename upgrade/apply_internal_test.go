@@ -278,3 +278,43 @@ releases:
 		t.Fatalf("Render:\n%s", out.String())
 	}
 }
+
+// TestApplyDependenciesReadsTheRegistryFirst: the framework-schema
+// analysis, in the migration directory asked for, runs as part of the plan,
+// before go.mod is touched: a registry that cannot be read stops the
+// upgrade with nothing changed, and only the directory asked for is read.
+func TestApplyDependenciesReadsTheRegistryFirst(t *testing.T) {
+	m, err := ParseManifest([]byte(applyFixture))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeGo{}
+	withFakeGo(t, f)
+	dir := applyApp(t, applyGoMod)
+	for name, content := range map[string]string{"db/migrations/models.json": "{", "database/migrations/models.json": "{"} {
+		path := filepath.Join(dir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := ApplyDependenciesWith(context.Background(), dir, m, "v0.8.0", PlanOptions{MigrationDir: "db/migrations"}); err == nil || !strings.Contains(err.Error(), "model registry") {
+		t.Fatalf("an unreadable registry = %v", err)
+	}
+	if len(f.calls) != 0 {
+		t.Fatalf("go commands ran before the registry was read: %v", f.calls)
+	}
+	if data, _ := os.ReadFile(filepath.Join(dir, "go.mod")); string(data) != applyGoMod { // #nosec G304 -- under t.TempDir()
+		t.Fatal("go.mod changed")
+	}
+	// The directory asked for is the one read: a broken default one does
+	// not matter.
+	if err := os.WriteFile(filepath.Join(dir, "db", "migrations", "models.json"), []byte(`{"models": []}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ApplyDependenciesWith(context.Background(), dir, m, "v0.8.0", PlanOptions{MigrationDir: "db/migrations"}); err != nil {
+		t.Fatalf("with db/migrations readable: %v", err)
+	}
+}

@@ -35,10 +35,13 @@ type schemaSnapshot struct {
 }
 
 type schemaTable struct {
-	Table   string         `json:"table"`
-	Model   string         `json:"model"`
-	Columns []schemaColumn `json:"columns"`
-	Indexes []schemaIndex  `json:"indexes"`
+	Table string `json:"table"`
+	Model string `json:"model"`
+	// Join: a many-to-many join table Model declares.
+	Join        bool               `json:"join,omitempty"`
+	Columns     []schemaColumn     `json:"columns"`
+	Indexes     []schemaIndex      `json:"indexes"`
+	Constraints []schemaConstraint `json:"constraints"`
 }
 
 type schemaColumn struct {
@@ -51,9 +54,31 @@ type schemaColumn struct {
 }
 
 type schemaIndex struct {
-	Name    string   `json:"name"`
-	Unique  bool     `json:"unique,omitempty"`
-	Columns []string `json:"columns"`
+	Name    string              `json:"name"`
+	Class   string              `json:"class,omitempty"` // UNIQUE, FULLTEXT, SPATIAL
+	Type    string              `json:"type,omitempty"`  // btree, hash, gin...
+	Where   string              `json:"where,omitempty"`
+	Option  string              `json:"option,omitempty"`
+	Columns []schemaIndexColumn `json:"columns"`
+}
+
+type schemaIndexColumn struct {
+	Name       string `json:"name,omitempty"`
+	Expression string `json:"expression,omitempty"`
+	Sort       string `json:"sort,omitempty"`
+	Collate    string `json:"collate,omitempty"`
+	Length     int    `json:"length,omitempty"`
+}
+
+// schemaConstraint is a foreign key (its columns, the table and columns it
+// references, its delete and update rules) or a CHECK constraint.
+type schemaConstraint struct {
+	Name       string   `json:"name"`
+	Check      string   `json:"check,omitempty"`
+	Columns    []string `json:"columns,omitempty"`
+	References string   `json:"references,omitempty"`
+	OnDelete   string   `json:"on_delete,omitempty"`
+	OnUpdate   string   `json:"on_update,omitempty"`
 }
 
 // frameworkModels are the framework's own Models(), the ones the catalog
@@ -62,11 +87,14 @@ func frameworkModels() []any { return append(auth.Models(), claims.Models()...) 
 
 // currentFrameworkSchema is the framework-owned schema the code defines, as
 // GORM (and so the Atlas GORM provider) reads the models: each model's
-// table, and each many-to-many join table it declares.
+// table and each many-to-many join table it declares, with their columns,
+// indexes (every attribute GORM reads), foreign keys (with their rules)
+// and CHECK constraints.
 func currentFrameworkSchema(t *testing.T) map[string]schemaTable {
 	t.Helper()
 	cache := &sync.Map{}
 	tables := map[string]schemaTable{}
+	var parsed []*schema.Schema
 	for _, m := range frameworkModels() {
 		s, err := schema.Parse(m, cache, schema.NamingStrategy{})
 		if err != nil {
@@ -74,8 +102,8 @@ func currentFrameworkSchema(t *testing.T) map[string]schemaTable {
 		}
 		typ := reflect.TypeOf(m).Elem()
 		model := strings.TrimPrefix(typ.PkgPath(), "github.com/gombit-dev/gombit/") + "." + typ.Name()
-		add := func(s *schema.Schema) {
-			st := schemaTable{Table: s.Table, Model: model, Columns: []schemaColumn{}, Indexes: []schemaIndex{}}
+		add := func(s *schema.Schema, join bool) {
+			st := schemaTable{Table: s.Table, Model: model, Join: join, Columns: []schemaColumn{}, Indexes: []schemaIndex{}, Constraints: []schemaConstraint{}}
 			for _, f := range s.Fields {
 				if f.DBName == "" {
 					continue
@@ -94,19 +122,58 @@ func currentFrameworkSchema(t *testing.T) map[string]schemaTable {
 				st.Columns = append(st.Columns, schemaColumn{Name: f.DBName, Type: typ, PrimaryKey: f.PrimaryKey, NotNull: f.NotNull, Unique: f.Unique, Default: def})
 			}
 			for _, idx := range s.ParseIndexes() {
-				si := schemaIndex{Name: idx.Name, Unique: idx.Class == "UNIQUE", Columns: []string{}}
+				si := schemaIndex{Name: idx.Name, Class: idx.Class, Type: idx.Type, Where: idx.Where, Option: idx.Option, Columns: []schemaIndexColumn{}}
 				for _, o := range idx.Fields {
-					si.Columns = append(si.Columns, o.DBName)
+					c := schemaIndexColumn{Expression: o.Expression, Sort: o.Sort, Collate: o.Collate, Length: o.Length}
+					if o.Field != nil {
+						c.Name = o.DBName
+					}
+					si.Columns = append(si.Columns, c)
 				}
 				st.Indexes = append(st.Indexes, si)
 			}
 			slices.SortFunc(st.Indexes, func(a, b schemaIndex) int { return strings.Compare(a.Name, b.Name) })
+			for _, chk := range s.ParseCheckConstraints() {
+				st.Constraints = append(st.Constraints, schemaConstraint{Name: chk.Name, Check: chk.Constraint})
+			}
 			tables[st.Table] = st
+			parsed = append(parsed, s)
 		}
-		add(s)
+		add(s, false)
 		for _, rel := range s.Relationships.Many2Many {
-			add(rel.JoinTable)
+			add(rel.JoinTable, true)
 		}
+	}
+	// Foreign keys, on the table that holds them, as the migrator creates
+	// them from each schema's relationships.
+	for _, s := range parsed {
+		for _, rel := range s.Relationships.Relations {
+			// As the migrator: a schema creates the constraints that are
+			// its own (a many-to-many's are its join table's).
+			c := rel.ParseConstraint()
+			if c == nil || c.Schema != s {
+				continue
+			}
+			st, ok := tables[c.Schema.Table]
+			if !ok || slices.ContainsFunc(st.Constraints, func(x schemaConstraint) bool { return x.Name == c.Name }) {
+				continue
+			}
+			sc := schemaConstraint{Name: c.Name, OnDelete: c.OnDelete, OnUpdate: c.OnUpdate}
+			for _, f := range c.ForeignKeys {
+				sc.Columns = append(sc.Columns, f.DBName)
+			}
+			var refs []string
+			for _, f := range c.References {
+				refs = append(refs, f.DBName)
+			}
+			sc.References = c.ReferenceSchema.Table + "(" + strings.Join(refs, ",") + ")"
+			st.Constraints = append(st.Constraints, sc)
+			tables[c.Schema.Table] = st
+		}
+	}
+	for name, st := range tables {
+		slices.SortFunc(st.Constraints, func(a, b schemaConstraint) int { return strings.Compare(a.Name, b.Name) })
+		tables[name] = st
 	}
 	return tables
 }
@@ -206,13 +273,13 @@ func TestFrameworkSchemaIsDeclared(t *testing.T) {
 	if _, err := m.Release(snap.Version); err != nil {
 		t.Fatalf("the snapshot's version: %v", err)
 	}
-	declared := map[string][]upgrade.SchemaChangeKind{}
+	declared := map[string][]upgrade.SchemaChange{}
 	after := false
 	for _, r := range m.Releases {
 		if after {
 			for _, c := range r.Changes {
 				for _, sc := range c.Schema {
-					declared[sc.Table] = append(declared[sc.Table], sc.Change)
+					declared[sc.Table] = append(declared[sc.Table], sc)
 				}
 			}
 		}
@@ -228,42 +295,118 @@ func TestFrameworkSchemaIsDeclared(t *testing.T) {
 }
 
 // schemaProblems compares the snapshot's tables with the code's, given the
-// kinds of change declared for each table since.
-func schemaProblems(old, current map[string]schemaTable, declared map[string][]upgrade.SchemaChangeKind) []string {
+// changes declared for each table since. A change that loses data (a table
+// or column gone, a column's type changed other than widened) must be
+// declared destructive, and a join table's entries must say join, as the
+// planner reads them.
+func schemaProblems(old, current map[string]schemaTable, declared map[string][]upgrade.SchemaChange) []string {
 	var problems []string
-	has := func(table string, k upgrade.SchemaChangeKind) bool { return slices.Contains(declared[table], k) }
-	declare := func(st schemaTable, k upgrade.SchemaChangeKind) string {
-		return fmt.Sprintf("under unreleased in upgrade/manifest.yaml, a manual change in the schema area with\n        schema:\n          - {model: %s, table: %s, change: %s}", st.Model, st.Table, k)
+	has := func(table string, k upgrade.SchemaChangeKind) bool {
+		return slices.ContainsFunc(declared[table], func(sc upgrade.SchemaChange) bool { return sc.Change == k })
+	}
+	declare := func(st schemaTable, k upgrade.SchemaChangeKind, destructive bool) string {
+		entry := fmt.Sprintf("{model: %s, table: %s", st.Model, st.Table)
+		if st.Join {
+			entry += ", join: true"
+		}
+		entry += fmt.Sprintf(", change: %s", k)
+		if destructive {
+			entry += ", destructive: true"
+		}
+		return fmt.Sprintf("under unreleased in upgrade/manifest.yaml, a manual change in the schema area with\n        schema:\n          - %s}", entry)
 	}
 	for _, table := range sortedTables(current) {
 		cur := current[table]
 		prev, existed := old[table]
+		lossy := existed && dataLoss(prev, cur)
 		switch {
 		case !existed && !has(table, upgrade.SchemaAdded):
-			problems = append(problems, fmt.Sprintf("framework table %s (%s) is new since the snapshot; declare it %s", table, cur.Model, declare(cur, upgrade.SchemaAdded)))
+			problems = append(problems, fmt.Sprintf("framework table %s (%s) is new since the snapshot; declare it %s", table, cur.Model, declare(cur, upgrade.SchemaAdded, false)))
 		case existed && !reflect.DeepEqual(prev, cur) && !has(table, upgrade.SchemaAltered) && !has(table, upgrade.SchemaAdded):
-			problems = append(problems, fmt.Sprintf("framework table %s (%s) changed since the snapshot (%s); declare it %s", table, cur.Model, tableDiff(prev, cur), declare(cur, upgrade.SchemaAltered)))
+			problems = append(problems, fmt.Sprintf("framework table %s (%s) changed since the snapshot (%s); declare it %s", table, cur.Model, tableDiff(prev, cur), declare(cur, upgrade.SchemaAltered, lossy)))
 		case existed && reflect.DeepEqual(prev, cur) && (has(table, upgrade.SchemaAltered) || has(table, upgrade.SchemaAdded)) && !has(table, upgrade.SchemaRemoved):
-			problems = append(problems, fmt.Sprintf("framework table %s is declared %v, but it is as the snapshot has it: the declaration describes no change", table, declared[table]))
+			problems = append(problems, fmt.Sprintf("framework table %s is declared %v, but it is as the snapshot has it: the declaration describes no change", table, kindsOf(declared[table])))
+		case lossy && !slices.ContainsFunc(declared[table], func(sc upgrade.SchemaChange) bool { return sc.Destructive }):
+			problems = append(problems, fmt.Sprintf("framework table %s (%s) loses data since the snapshot (%s); declare the change destructive: true", table, cur.Model, tableDiff(prev, cur)))
 		}
 		if has(table, upgrade.SchemaRemoved) && !has(table, upgrade.SchemaAdded) {
 			problems = append(problems, fmt.Sprintf("framework table %s is declared removed, but the framework still defines it (%s)", table, cur.Model))
 		}
+		for _, sc := range declared[table] {
+			if sc.Join != cur.Join || sc.Model != cur.Model {
+				problems = append(problems, fmt.Sprintf("framework table %s is declared as {model: %s, join: %v}, but it is %s's (join: %v): the planner would misread it", table, sc.Model, sc.Join, cur.Model, cur.Join))
+			}
+		}
 	}
 	for _, table := range sortedTables(old) {
-		if _, ok := current[table]; !ok && !has(table, upgrade.SchemaRemoved) {
-			problems = append(problems, fmt.Sprintf("framework table %s (%s) is gone since the snapshot; declare it %s", table, old[table].Model, declare(old[table], upgrade.SchemaRemoved)))
+		if _, ok := current[table]; ok {
+			continue
+		}
+		switch {
+		case !has(table, upgrade.SchemaRemoved):
+			problems = append(problems, fmt.Sprintf("framework table %s (%s) is gone since the snapshot; declare it %s", table, old[table].Model, declare(old[table], upgrade.SchemaRemoved, true)))
+		case !slices.ContainsFunc(declared[table], func(sc upgrade.SchemaChange) bool { return sc.Destructive }):
+			problems = append(problems, fmt.Sprintf("framework table %s is removed, which drops its data; declare it destructive: true", table))
+		}
+		for _, sc := range declared[table] {
+			if sc.Join != old[table].Join || sc.Model != old[table].Model {
+				problems = append(problems, fmt.Sprintf("framework table %s is declared as {model: %s, join: %v}, but it was %s's (join: %v): the planner would misread it", table, sc.Model, sc.Join, old[table].Model, old[table].Join))
+			}
 		}
 	}
 	for table := range declared {
 		if _, ok := current[table]; !ok && (!has(table, upgrade.SchemaAdded) || !has(table, upgrade.SchemaRemoved)) {
 			if _, was := old[table]; !was {
-				problems = append(problems, fmt.Sprintf("framework table %s is declared %v, but no framework model defines it, now or in the snapshot", table, declared[table]))
+				problems = append(problems, fmt.Sprintf("framework table %s is declared %v, but no framework model defines it, now or in the snapshot", table, kindsOf(declared[table])))
 			}
 		}
 	}
 	slices.Sort(problems)
 	return problems
+}
+
+func kindsOf(changes []upgrade.SchemaChange) []upgrade.SchemaChangeKind {
+	var out []upgrade.SchemaChangeKind
+	for _, sc := range changes {
+		out = append(out, sc.Change)
+	}
+	return out
+}
+
+// dataLoss reports whether moving from prev to cur loses data: a column
+// gone, or one whose type changed other than by widening its size.
+func dataLoss(prev, cur schemaTable) bool {
+	now := map[string]schemaColumn{}
+	for _, c := range cur.Columns {
+		now[c.Name] = c
+	}
+	for _, c := range prev.Columns {
+		n, ok := now[c.Name]
+		if !ok {
+			return true
+		}
+		if n.Type != c.Type && !widened(c.Type, n.Type) {
+			return true
+		}
+	}
+	return false
+}
+
+// widened reports whether type to is from with a larger size ("string(64)"
+// to "string(255)", or to no size limit).
+func widened(from, to string) bool {
+	base := func(t string) (string, int) {
+		name, size, ok := strings.Cut(strings.TrimSuffix(t, ")"), "(")
+		if !ok || strings.Contains(size, ",") {
+			return t, 0
+		}
+		n := 0
+		_, _ = fmt.Sscanf(size, "%d", &n)
+		return name, n
+	}
+	fb, fn := base(from)
+	tb, tn := base(to)
+	return fb == tb && fn > 0 && (tn == 0 || tn >= fn)
 }
 
 func sortedTables(m map[string]schemaTable) []string {
@@ -276,7 +419,7 @@ func sortedTables(m map[string]schemaTable) []string {
 }
 
 // tableDiff names what changed in a table: columns added, removed or
-// changed, and indexes.
+// changed, indexes and constraints.
 func tableDiff(prev, cur schemaTable) string {
 	var parts []string
 	cols := func(st schemaTable) map[string]schemaColumn {
@@ -303,17 +446,25 @@ func tableDiff(prev, cur schemaTable) string {
 	if !reflect.DeepEqual(prev.Indexes, cur.Indexes) {
 		parts = append(parts, "indexes changed")
 	}
-	if prev.Model != cur.Model {
-		parts = append(parts, "model "+prev.Model+" -> "+cur.Model)
+	if !reflect.DeepEqual(prev.Constraints, cur.Constraints) {
+		parts = append(parts, "constraints changed")
+	}
+	if prev.Model != cur.Model || prev.Join != cur.Join {
+		parts = append(parts, "owner changed")
 	}
 	return strings.Join(parts, ", ")
 }
 
 // TestSchemaProblems: the guard's rules, on fixed tables.
 func TestSchemaProblems(t *testing.T) {
-	a := schemaTable{Table: "a", Model: "auth.A", Columns: []schemaColumn{{Name: "id", Type: "uint", PrimaryKey: true}}}
-	a2 := schemaTable{Table: "a", Model: "auth.A", Columns: []schemaColumn{{Name: "id", Type: "uint", PrimaryKey: true}, {Name: "x", Type: "string"}}}
+	a := schemaTable{Table: "a", Model: "auth.A", Columns: []schemaColumn{{Name: "id", Type: "uint", PrimaryKey: true}, {Name: "s", Type: "string(64)"}}}
+	a2 := schemaTable{Table: "a", Model: "auth.A", Columns: []schemaColumn{{Name: "id", Type: "uint", PrimaryKey: true}, {Name: "s", Type: "string(64)"}, {Name: "x", Type: "string"}}}
+	aWider := schemaTable{Table: "a", Model: "auth.A", Columns: []schemaColumn{{Name: "id", Type: "uint", PrimaryKey: true}, {Name: "s", Type: "string(255)"}}}
+	aNarrower := schemaTable{Table: "a", Model: "auth.A", Columns: []schemaColumn{{Name: "id", Type: "uint", PrimaryKey: true}, {Name: "s", Type: "string(16)"}}}
+	aDropped := schemaTable{Table: "a", Model: "auth.A", Columns: []schemaColumn{{Name: "id", Type: "uint", PrimaryKey: true}}}
+	aChecked := schemaTable{Table: "a", Model: "auth.A", Columns: a.Columns, Constraints: []schemaConstraint{{Name: "chk_a_s", Check: "s <> ''"}}}
 	b := schemaTable{Table: "b", Model: "auth.B", Columns: []schemaColumn{}}
+	j := schemaTable{Table: "a_bs", Model: "auth.A", Join: true, Columns: []schemaColumn{{Name: "a_id", Type: "uint", PrimaryKey: true}}}
 	tables := func(ts ...schemaTable) map[string]schemaTable {
 		out := map[string]schemaTable{}
 		for _, st := range ts {
@@ -321,33 +472,82 @@ func TestSchemaProblems(t *testing.T) {
 		}
 		return out
 	}
-	kinds := func(pairs ...string) map[string][]upgrade.SchemaChangeKind {
-		out := map[string][]upgrade.SchemaChangeKind{}
-		for i := 0; i+1 < len(pairs); i += 2 {
-			out[pairs[i]] = append(out[pairs[i]], upgrade.SchemaChangeKind(pairs[i+1]))
+	// decl: table, change, then optional "destructive" / "join" flags,
+	// entries separated by ";".
+	decl := func(spec string) map[string][]upgrade.SchemaChange {
+		out := map[string][]upgrade.SchemaChange{}
+		if spec == "" {
+			return out
+		}
+		for _, e := range strings.Split(spec, ";") {
+			f := strings.Fields(e)
+			sc := upgrade.SchemaChange{Table: f[0], Change: upgrade.SchemaChangeKind(f[1]), Model: map[string]string{"a": "auth.A", "b": "auth.B", "a_bs": "auth.A", "zz": "auth.Z"}[f[0]]}
+			sc.Destructive = slices.Contains(f, "destructive")
+			sc.Join = slices.Contains(f, "join")
+			out[sc.Table] = append(out[sc.Table], sc)
 		}
 		return out
 	}
 	for name, tc := range map[string]struct {
 		old, cur map[string]schemaTable
-		declared map[string][]upgrade.SchemaChangeKind
+		declared string
 		want     string
 	}{
-		"unchanged":               {tables(a), tables(a), kinds(), ""},
-		"new table":               {tables(a), tables(a, b), kinds(), "framework table b (auth.B) is new"},
-		"new table, declared":     {tables(a), tables(a, b), kinds("b", "added"), ""},
-		"altered":                 {tables(a), tables(a2), kinds(), "column x added"},
-		"altered, declared":       {tables(a), tables(a2), kinds("a", "altered"), ""},
-		"gone":                    {tables(a, b), tables(a), kinds(), "framework table b (auth.B) is gone"},
-		"gone, declared":          {tables(a, b), tables(a), kinds("b", "removed"), ""},
-		"altered, but no change":  {tables(a), tables(a), kinds("a", "altered"), "describes no change"},
-		"removed, still there":    {tables(a), tables(a), kinds("a", "removed"), "still defines it"},
-		"declared, no such table": {tables(a), tables(a), kinds("zz", "added"), "no framework model defines it"},
-		"added, then removed":     {tables(a), tables(a), kinds("zz", "added", "zz", "removed"), ""},
+		"unchanged":                 {tables(a), tables(a), "", ""},
+		"new table":                 {tables(a), tables(a, b), "", "framework table b (auth.B) is new"},
+		"new table, declared":       {tables(a), tables(a, b), "b added", ""},
+		"altered":                   {tables(a), tables(a2), "", "column x added"},
+		"altered, declared":         {tables(a), tables(a2), "a altered", ""},
+		"widened, not destructive":  {tables(a), tables(aWider), "a altered", ""},
+		"narrowed, not destructive": {tables(a), tables(aNarrower), "a altered", "declare the change destructive: true"},
+		"narrowed, destructive":     {tables(a), tables(aNarrower), "a altered destructive", ""},
+		"column dropped":            {tables(a), tables(aDropped), "a altered", "loses data"},
+		"check added":               {tables(a), tables(aChecked), "", "constraints changed"},
+		"gone":                      {tables(a, b), tables(a), "", "framework table b (auth.B) is gone"},
+		"gone, not destructive":     {tables(a, b), tables(a), "b removed", "declare it destructive: true"},
+		"gone, declared":            {tables(a, b), tables(a), "b removed destructive", ""},
+		"join gone, as a join":      {tables(a, j), tables(a), "a_bs removed destructive join", ""},
+		"join gone, as a model":     {tables(a, j), tables(a), "a_bs removed destructive", "the planner would misread it"},
+		"join new, paste says join": {tables(a), tables(a, j), "", "join: true, change: added"},
+		"altered, but no change":    {tables(a), tables(a), "a altered", "describes no change"},
+		"removed, still there":      {tables(a), tables(a), "a removed", "still defines it"},
+		"declared, no such table":   {tables(a), tables(a), "zz added", "no framework model defines it"},
+		"added, then removed":       {tables(a), tables(a), "zz added;zz removed destructive", ""},
 	} {
-		got := strings.Join(schemaProblems(tc.old, tc.cur, tc.declared), "\n")
+		got := strings.Join(schemaProblems(tc.old, tc.cur, decl(tc.declared)), "\n")
 		if (tc.want == "") != (got == "") || !strings.Contains(got, tc.want) {
 			t.Errorf("%s: problems %q, want %q", name, got, tc.want)
+		}
+	}
+}
+
+// TestFrameworkTablesAreTheModelsOwn: a schema entry's model and table
+// must match the framework's models as GORM reads them: the planner reads
+// an entry on a model's own table as the model (added or removed), and one
+// on a join table (join: true) as a change to the model. Every manifest
+// entry for a model the framework still has says which, truthfully.
+func TestFrameworkTablesAreTheModelsOwn(t *testing.T) {
+	current := currentFrameworkSchema(t)
+	m, err := upgrade.LoadManifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range m.Releases {
+		for _, c := range r.Changes {
+			for _, sc := range c.Schema {
+				st, ok := current[sc.Table]
+				if !ok {
+					continue // gone since: TestFrameworkSchemaIsDeclared holds it to the snapshot
+				}
+				if st.Model != sc.Model || st.Join != sc.Join {
+					t.Errorf("release %s, change %s: %s is declared {model: %s, join: %v}, but it is %s's (join: %v)", r.Version, c.ID, sc.Table, sc.Model, sc.Join, st.Model, st.Join)
+				}
+			}
+		}
+	}
+	for _, st := range current {
+		if !st.Join && upgrade.FrameworkTable(st.Model) != st.Table {
+			t.Errorf("%s's own table is %s, but the catalog says %q", st.Model, st.Table, upgrade.FrameworkTable(st.Model))
 		}
 	}
 }
@@ -503,6 +703,100 @@ func TestManifestSchemaModelsAreFrameworkModels(t *testing.T) {
 					t.Errorf("release %s, change %s: %s is not in upgrade.FrameworkModels, and no later release removes it", m.Releases[i].Version, c.ID, sc.Model)
 				}
 			}
+		}
+	}
+}
+
+// TestAnalyzeSchemaJoinTables: a join table's entry alters its model, never
+// adds or removes it. When the framework drops auth.Permission (its own
+// table and the join tables auth.User and auth.Group declare for it), only
+// auth.Permission is forgotten: users and groups are altered, and a later
+// change to users still finds the model registered.
+func TestAnalyzeSchemaJoinTables(t *testing.T) {
+	model := func(typ string) migrations.Model {
+		return migrations.Model{ImportPath: "github.com/gombit-dev/gombit/auth", TypeName: typ}
+	}
+	dir := registryApp(t, model("User"), model("Group"), model("Permission"))
+	r, err := upgrade.AnalyzeSchema(dir, "", []upgrade.Release{
+		schemaRelease("v1.0.0", "manual",
+			upgrade.SchemaChange{Model: "auth.Permission", Table: "permissions", Change: upgrade.SchemaRemoved, Destructive: true},
+			upgrade.SchemaChange{Model: "auth.User", Table: "auth_user_permissions", Join: true, Change: upgrade.SchemaRemoved, Destructive: true},
+			upgrade.SchemaChange{Model: "auth.Group", Table: "auth_group_permissions", Join: true, Change: upgrade.SchemaRemoved, Destructive: true},
+		),
+		schemaRelease("v1.1.0", "manual", upgrade.SchemaChange{Model: "auth.User", Table: "users", Change: upgrade.SchemaAltered}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	steps := strings.Join(r.Steps, "\n")
+	if !strings.Contains(steps, "--forget-model github.com/gombit-dev/gombit/auth.Permission") || strings.Contains(steps, "auth.User") || strings.Contains(steps, "auth.Group") {
+		t.Fatalf("steps forget the wrong models:\n%s", steps)
+	}
+	for _, f := range r.Findings[1:3] {
+		if !f.Required || !strings.Contains(f.Advice, "carries its removed join table") {
+			t.Errorf("join table finding = %+v", f)
+		}
+	}
+	if users := r.Findings[3]; !users.Required || !users.Registered {
+		t.Fatalf("users after the join tables went: %+v", users)
+	}
+	var out strings.Builder
+	_ = r.Render(&out)
+	if !strings.Contains(out.String(), "`auth.User` (join table `auth_user_permissions`): removed, destructive") {
+		t.Fatalf("render:\n%s", out.String())
+	}
+}
+
+// TestAnalyzeSchemaStepsAgree: the review, generate and apply steps carry
+// one set of flags (the migration directory, the models added and
+// forgotten), so the plan reviewed is the migration generated, in the
+// application's own directory; a destructive change says --allow.
+func TestAnalyzeSchemaStepsAgree(t *testing.T) {
+	dir := t.TempDir()
+	migrationDir := filepath.Join(dir, "db", "migrations")
+	if err := os.MkdirAll(migrationDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrations.SaveRegistry(migrationDir, []migrations.Model{{ImportPath: "github.com/gombit-dev/gombit/auth", TypeName: "RefreshToken"}}); err != nil {
+		t.Fatal(err)
+	}
+	r, err := upgrade.AnalyzeSchema(dir, "db/migrations", []upgrade.Release{schemaRelease("v0.9.0", "manual",
+		upgrade.SchemaChange{Model: "storage/claims.Claim", Table: "storage_claims", Change: upgrade.SchemaAdded},
+		upgrade.SchemaChange{Model: "auth.RefreshToken", Table: "refresh_tokens", Change: upgrade.SchemaAltered, Destructive: true},
+	)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	flags := " --dir db/migrations --model github.com/gombit-dev/gombit/storage/claims.Claim"
+	steps := strings.Join(r.Steps, "\n")
+	for _, want := range []string{
+		"gombit db plan" + flags + ".",
+		"gombit db makemigrations upgrade_framework_schema" + flags + ".",
+		"This upgrade declares a destructive change",
+		"--allow <its id>",
+		"gombit db migrate --dir db/migrations,",
+	} {
+		if !strings.Contains(steps, want) {
+			t.Errorf("steps lack %q:\n%s", want, steps)
+		}
+	}
+	if r.Registry != "db/migrations/models.json" || !r.RegistryFound {
+		t.Fatalf("registry = %q, %v", r.Registry, r.RegistryFound)
+	}
+}
+
+// TestInformationalSchemaChangesOnlyAdd: an informational change may only
+// add an optional feature's table; altering or removing one an application
+// may have needs a migration, so the change must be manual.
+func TestInformationalSchemaChangesOnlyAdd(t *testing.T) {
+	for _, entry := range []string{
+		"{model: auth.User, table: users, change: altered}",
+		"{model: auth.User, table: users, change: removed, destructive: true}",
+		"{model: auth.User, table: auth_user_groups, join: true, change: added}",
+	} {
+		manifest := "format: 1\nreleases:\n  - version: v0.1.0\n  - version: v0.2.0\n    changes:\n      - {id: x, kind: informational, area: schema, summary: s, schema: [" + entry + "]}\n"
+		if _, err := upgrade.ParseManifest([]byte(manifest)); err == nil || !strings.Contains(err.Error(), "so the change is manual") {
+			t.Errorf("informational %s: %v", entry, err)
 		}
 	}
 }

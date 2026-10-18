@@ -303,10 +303,7 @@ func runUpgradePlan(stdout io.Writer, dir, migrationDir, to string, asJSON bool)
 	if err != nil {
 		return fmt.Errorf("gombit upgrade: %w", err)
 	}
-	plan, err := upgrade.PlanUpgrade(dir, m, to)
-	if err == nil {
-		err = plan.UseMigrationDir(dir, migrationDir)
-	}
+	plan, err := upgrade.PlanUpgradeWith(dir, m, to, upgrade.PlanOptions{MigrationDir: migrationDir})
 	if err != nil {
 		return fmt.Errorf("gombit upgrade: %w", err)
 	}
@@ -328,14 +325,10 @@ func runUpgradeApply(ctx context.Context, stdout io.Writer, dir, migrationDir, t
 	if err != nil {
 		return fmt.Errorf("gombit upgrade: %w", err)
 	}
-	applied, err := upgrade.ApplyDependencies(ctx, dir, m, to)
+	// The plan, the registry read included, is made before go.mod changes.
+	applied, err := upgrade.ApplyDependenciesWith(ctx, dir, m, to, upgrade.PlanOptions{MigrationDir: migrationDir})
 	if err != nil {
 		return fmt.Errorf("gombit upgrade: %w", err)
-	}
-	// The dependencies are applied: a failure to read the registry is
-	// reported, not hidden, and the steps are never taken as done.
-	if err := applied.UseMigrationDir(dir, migrationDir); err != nil {
-		return fmt.Errorf("gombit upgrade: the dependency changes are applied, but the framework-schema check failed (the upgrade may need a migration): %w", err)
 	}
 	if asJSON {
 		data, err := json.MarshalIndent(applied, "", "  ")

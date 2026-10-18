@@ -93,6 +93,20 @@ type PlannedAction struct {
 // m does not list, and asks each automatic action whether the
 // application needs it.
 func PlanUpgrade(workDir string, m *Manifest, to string) (Plan, error) {
+	return PlanUpgradeWith(workDir, m, to, PlanOptions{})
+}
+
+// PlanOptions configures PlanUpgradeWith.
+type PlanOptions struct {
+	// MigrationDir is the application's migration directory, which holds
+	// its model registry, relative to its directory unless absolute (as
+	// gombit db --dir; default database/migrations). The framework-schema
+	// section is judged against it, and its steps act on it.
+	MigrationDir string
+}
+
+// PlanUpgradeWith is PlanUpgrade with options.
+func PlanUpgradeWith(workDir string, m *Manifest, to string, opts PlanOptions) (Plan, error) {
 	b, err := Detect(workDir)
 	if err != nil {
 		return Plan{}, err
@@ -134,7 +148,7 @@ func PlanUpgrade(workDir string, m *Manifest, to string) (Plan, error) {
 	if p.Config, err = AnalyzeConfig(workDir, releases); err != nil {
 		return Plan{}, err
 	}
-	if p.Schema, err = AnalyzeSchema(workDir, "", releases); err != nil {
+	if p.Schema, err = AnalyzeSchema(workDir, opts.MigrationDir, releases); err != nil {
 		return Plan{}, err
 	}
 	notNeeded := map[string]bool{}

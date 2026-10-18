@@ -25,8 +25,10 @@
 #   summary   one line; details: Markdown; refs: issue/PR numbers
 #   schema    (area schema) the framework-owned tables it adds, alters or
 #             removes: {model: auth.RefreshToken, table: refresh_tokens,
-#             change: altered}; TestFrameworkSchemaIsDeclared holds the
-#             framework's models to them (docs/upgrade.md)
+#             change: altered}; a join table a model declares says
+#             join: true, a change that loses data destructive: true;
+#             TestFrameworkSchemaIsDeclared holds the framework's models
+#             to them (docs/upgrade.md)
 format: 1
 releases:
   - version: v0.6.1

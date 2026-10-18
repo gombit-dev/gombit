@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/gombit-dev/gombit/internal/frameworkmod"
@@ -31,7 +32,31 @@ var FrameworkModels = []migrations.Model{
 	{ImportPath: frameworkmod.ModulePath + "/storage/claims", TypeName: "Claim"},
 }
 
+// frameworkTables are the framework models' own tables (not the join
+// tables they declare), by model as a schema entry names it. A test holds
+// them to what GORM reads from the models.
+var frameworkTables = map[string]string{
+	"auth.User":            "users",
+	"auth.RefreshToken":    "refresh_tokens",
+	"auth.Group":           "groups",
+	"auth.Permission":      "permissions",
+	"storage/claims.Claim": "storage_claims",
+}
+
+// FrameworkTable is a framework model's own table ("" for a model this
+// gombit does not have), by model as a schema entry names it
+// (auth.RefreshToken).
+func FrameworkTable(model string) string { return frameworkTables[model] }
+
+// defaultMigrationDir is gombit db's migration directory (--dir).
+const defaultMigrationDir = "database/migrations"
+
 // SchemaChangeKind is how a release changes a framework-owned table.
+//
+// An entry is about one table. Only the model's own table being added or
+// removed adds or removes the model (the registry's --model and
+// --forget-model); a join table it declares (Join) changing, appearing or
+// going away alters the model, as a column would.
 type SchemaChangeKind string
 
 const (
@@ -50,8 +75,12 @@ type SchemaChange struct {
 	// Model is the framework model, by its package within the framework
 	// module and its type: auth.RefreshToken, storage/claims.Claim.
 	Model string `yaml:"model" json:"model"`
-	// Table is its table (a many-to-many join table is its own entry).
+	// Table is the table: the model's own, or a many-to-many join table
+	// the model declares (Join).
 	Table string `yaml:"table" json:"table"`
+	// Join: Table is a join table Model declares (auth_user_groups for
+	// auth.User). Its change alters Model; it never adds or removes it.
+	Join bool `yaml:"join,omitempty" json:"join,omitempty"`
 	// Change is what happens to it.
 	Change SchemaChangeKind `yaml:"change" json:"change"`
 	// Destructive: the change drops or narrows something, so the migration
@@ -92,6 +121,9 @@ func (sc SchemaChange) RegistryModel() migrations.Model {
 // Describe is the change in one phrase: "auth.RefreshToken (refresh_tokens): altered".
 func (sc SchemaChange) Describe() string {
 	d := fmt.Sprintf("`%s` (`%s`): %s", sc.Model, sc.Table, sc.Change)
+	if sc.Join {
+		d = fmt.Sprintf("`%s` (join table `%s`): %s", sc.Model, sc.Table, sc.Change)
+	}
 	if sc.Destructive {
 		d += ", destructive"
 	}
@@ -140,13 +172,14 @@ func (r SchemaReport) MigrationRequired() bool { return len(r.Steps) > 0 }
 // AnalyzeSchema reports what the framework-schema changes of releases (an
 // upgrade's path, in order) mean for the application in workDir, whose
 // migrations are in migrationDir (relative to workDir unless absolute;
-// default database/migrations): per change, whether the application's
-// model registry lists the model and what to do, and the migration steps
-// the upgrade needs. It reads the registry only, and never touches a
-// database.
+// default database/migrations, as gombit db --dir): per change, whether
+// the application's model registry lists the model and what to do, and the
+// migration steps the upgrade needs, each command with the flags the next
+// one needs to act on the same schema. It reads the registry only, and
+// never touches a database.
 func AnalyzeSchema(workDir, migrationDir string, releases []Release) (SchemaReport, error) {
 	if migrationDir == "" {
-		migrationDir = filepath.Join("database", "migrations")
+		migrationDir = defaultMigrationDir
 	}
 	abs := migrationDir
 	if !filepath.IsAbs(abs) {
@@ -168,11 +201,11 @@ func AnalyzeSchema(workDir, migrationDir string, releases []Release) (SchemaRepo
 		return SchemaReport{}, fmt.Errorf("upgrade: %w", err)
 	}
 	// Without a registry, which framework tables the application has is
-	// unknown (its AutoMigrate decides): a change to one it may have is
-	// reported as needing a migration, never as not its table.
-	has := func(m migrations.Model) bool { return registered[m] || !report.RegistryFound }
+	// its AutoMigrate's call: a change to one it may have is reported as
+	// needing a migration, never as not its table.
+	mayHave := func(m migrations.Model) bool { return registered[m] || !report.RegistryFound }
 	var add, forget []string
-	migrate := false
+	migrate, destructive := false, false
 	for _, r := range releases {
 		for _, c := range r.Changes {
 			for _, sc := range c.Schema {
@@ -180,43 +213,45 @@ func AnalyzeSchema(workDir, migrationDir string, releases []Release) (SchemaRepo
 				model := sc.RegistryModel()
 				f.Registered = registered[model]
 				name := model.ImportPath + "." + model.TypeName
+				what := sc.Table
+				if sc.Join {
+					what = "join table " + sc.Table
+				}
 				switch {
-				case c.Kind != KindManual:
-					f.Advice = fmt.Sprintf("Nothing to migrate unless the application adopts it: then add %s to its models (AutoMigrate in internal/platform) and generate the migration (gombit db makemigrations upgrade_framework_schema --model %s).", sc.Model, name)
+				case c.Kind != KindManual: // an optional feature's new table (validated: added, not a join table)
+					f.Advice = fmt.Sprintf("Nothing to migrate unless the application adopts it: then add %s to its models (AutoMigrate in internal/platform) and generate its migration with --model %s.", sc.Model, name)
 					if f.Registered {
-						f.Advice = fmt.Sprintf("The registry lists %s, so its next migration carries the table (gombit db makemigrations).", sc.Model)
+						f.Advice = fmt.Sprintf("The registry lists %s, so the application's migrations carry %s.", sc.Model, sc.Table)
 					}
-				case sc.Change == SchemaAdded && !f.Registered:
+				case sc.Join || sc.Change == SchemaAltered || (sc.Change == SchemaAdded && f.Registered):
+					// The model changes: its next migration carries it.
+					if !mayHave(model) {
+						f.Advice = fmt.Sprintf("The registry does not list %s: the application has no %s to migrate.", sc.Model, what)
+						break
+					}
+					f.Required, migrate = true, true
+					f.Advice = fmt.Sprintf("The registry lists %s, so the next migration carries its %s %s.", sc.Model, sc.Change, what)
+					if !f.Registered {
+						f.Advice = fmt.Sprintf("With no model registry, whether the application has %s is its AutoMigrate's call: if it lists %s, the next migration carries its %s %s.", what, sc.Model, sc.Change, what)
+					}
+				case sc.Change == SchemaAdded:
 					f.Required = true
-					add = append(add, name)
+					add = appendOnce(add, name)
+					registered[model] = true
 					f.Advice = fmt.Sprintf("Add %s to the application's models (AutoMigrate in internal/platform), and generate its table's migration with --model %s.", sc.Model, name)
-				case sc.Change == SchemaRemoved && has(model):
+				case mayHave(model): // the model's own table is removed: the model is gone
 					f.Required = true
-					forget = append(forget, name)
+					forget = appendOnce(forget, name)
+					delete(registered, model)
 					f.Advice = fmt.Sprintf("Remove %s from the application's models, and generate the migration that drops %s with --forget-model %s, once its data is no longer needed.", sc.Model, sc.Table, name)
-				case sc.Change == SchemaRemoved:
+				default:
 					f.Advice = fmt.Sprintf("The registry does not list %s: no table to drop.", sc.Model)
-				case f.Registered: // added or altered, and in the registry
-					f.Required = true
-					migrate = true
-					f.Advice = fmt.Sprintf("The registry lists %s, so the next migration carries the new %s.", sc.Model, sc.Table)
-				case has(model): // altered, and no registry to say
-					f.Required = true
-					migrate = true
-					f.Advice = fmt.Sprintf("With no model registry, whether the application has %s is its AutoMigrate's call: if it lists %s, the next migration carries the new %s.", sc.Table, sc.Model, sc.Table)
-				default: // altered, not registered: the application does not have it
-					f.Advice = fmt.Sprintf("The registry does not list %s: the application has no %s to migrate.", sc.Model, sc.Table)
 				}
 				if f.Required && sc.Destructive {
+					destructive = true
 					f.Advice += " Destructive: back up or move the data first; gombit db plan asks for --allow."
 				}
 				report.Findings = append(report.Findings, f)
-				// Later changes on the path see the registry as the steps
-				// leave it: an added model is registered, a removed one
-				// forgotten.
-				if f.Required {
-					registered[model] = sc.Change != SchemaRemoved
-				}
 			}
 		}
 	}
@@ -226,12 +261,18 @@ func AnalyzeSchema(workDir, migrationDir string, releases []Release) (SchemaRepo
 	if !report.RegistryFound {
 		report.Steps = append(report.Steps, fmt.Sprintf("The application has no model registry (%s): it has generated no migration, so its tables come from AutoMigrate alone. Generate its first migration (gombit db makemigrations) before deploying with migrations.", report.Registry))
 	}
-	cmd := "gombit db makemigrations upgrade_framework_schema"
+	// One set of flags for every command, so the plan reviewed is the
+	// migration generated, in the application's own directory.
+	dir := ""
+	if filepath.ToSlash(migrationDir) != defaultMigrationDir {
+		dir = " --dir " + migrationDir
+	}
+	flags := dir
 	for _, name := range add {
-		cmd += " --model " + name
+		flags += " --model " + name
 	}
 	for _, name := range forget {
-		cmd += " --forget-model " + name
+		flags += " --forget-model " + name
 	}
 	if len(add) > 0 {
 		report.Steps = append(report.Steps, "Add the new framework models to the application's AutoMigrate (internal/platform/database.go): "+strings.Join(add, ", ")+".")
@@ -239,12 +280,23 @@ func AnalyzeSchema(workDir, migrationDir string, releases []Release) (SchemaRepo
 	if len(forget) > 0 {
 		report.Steps = append(report.Steps, "Remove the framework models the release drops from the application's AutoMigrate: "+strings.Join(forget, ", ")+".")
 	}
+	allow := "If it reports a destructive or unsafe step, handle its data first and add --allow <its id>."
+	if destructive {
+		allow = "This upgrade declares a destructive change: gombit db plan reports its step; handle the data first, then add --allow <its id>."
+	}
 	report.Steps = append(report.Steps,
-		"After the dependency change, review what the migration will do: gombit db plan (a destructive or unsafe step needs --allow).",
-		"Generate it: "+cmd+".",
-		"Apply it in each environment with gombit db migrate, as a reviewed deploy step. gombit upgrade never applies a migration.",
+		"After the dependency change, review what the migration will do: gombit db plan"+flags+".",
+		"Generate it, with the same flags: gombit db makemigrations upgrade_framework_schema"+flags+". "+allow,
+		"Apply it in each environment with gombit db migrate"+dir+", as a reviewed deploy step. gombit upgrade never applies a migration.",
 	)
 	return report, nil
+}
+
+func appendOnce(list []string, s string) []string {
+	if slices.Contains(list, s) {
+		return list
+	}
+	return append(list, s)
 }
 
 // render writes the report for the plan.
@@ -290,32 +342,16 @@ func (c Change) validateSchema() error {
 		if err := sc.validate(); err != nil {
 			return fmt.Errorf("change %s: %w", c.ID, err)
 		}
+		// Informational is for a table an application adopts with a
+		// feature: a new model's own table. Anything else changes a table
+		// an application may have, which the plan must ask it to migrate.
+		if c.Kind == KindInformational && (sc.Change != SchemaAdded || sc.Join) {
+			return fmt.Errorf("change %s: %s: an informational change only adds an optional feature's table; a %s %s needs a migration, so the change is manual", c.ID, sc.Model, sc.Change, sc.Table)
+		}
 		if seen[sc.Table] {
 			return fmt.Errorf("change %s: table %s is listed twice", c.ID, sc.Table)
 		}
 		seen[sc.Table] = true
 	}
-	return nil
-}
-
-// UseMigrationDir judges the plan's framework-schema changes against the
-// application's migrations in migrationDir (relative to workDir unless
-// absolute), for an application that keeps them elsewhere than
-// database/migrations (gombit db --dir).
-func (p *Plan) UseMigrationDir(workDir, migrationDir string) error {
-	s, err := AnalyzeSchema(workDir, migrationDir, p.Releases)
-	if err != nil {
-		return err
-	}
-	p.Schema = s
-	return nil
-}
-
-// UseMigrationDir is Plan.UseMigrationDir for what an upgrade applied.
-func (a *Applied) UseMigrationDir(workDir, migrationDir string) error {
-	if err := a.Plan.UseMigrationDir(workDir, migrationDir); err != nil {
-		return err
-	}
-	a.MigrationRequired = a.Plan.Schema.MigrationRequired()
 	return nil
 }
