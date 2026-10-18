@@ -67,9 +67,9 @@
     {
       "name": "GOMBIT_DATABASE_DSN",
       "secret": true,
-      "default": "file:gombit.db?cache=shared\u0026_fk=1",
-      "test_default": "file:gombit.db?cache=shared\u0026_fk=1",
-      "production_default": "file:gombit.db?cache=shared\u0026_fk=1"
+      "default": "file:gombit.db?cache=shared&_fk=1",
+      "test_default": "file:gombit.db?cache=shared&_fk=1",
+      "production_default": "file:gombit.db?cache=shared&_fk=1"
     },
     {
       "name": "GOMBIT_DATABASE_MAX_IDLE_CONNS",
