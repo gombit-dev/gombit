@@ -12,7 +12,9 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/gombit-dev/gombit/client"
 	"github.com/gombit-dev/gombit/upgrade"
+	"github.com/gombit-dev/gombit/upgrade/contractcheck"
 )
 
 func newUpgradeCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
@@ -70,6 +72,8 @@ default target.`,
 	cmd.Flags().Bool("json", false, "print the plan as JSON")
 	cmd.AddCommand(newUpgradeBaselineCommand(stdout))
 	cmd.AddCommand(newUpgradeCheckCommand(stdout))
+	cmd.AddCommand(newUpgradeConfigCommand(stdout))
+	cmd.AddCommand(newUpgradeContractCommand(stdout, stderr))
 	cmd.AddCommand(newUpgradeFixCommand(stdout, stderr))
 	cmd.AddCommand(newUpgradeNotesCommand(stdout))
 	return cmd
@@ -381,6 +385,215 @@ func runUpgradeCheck(ctx context.Context, stdout io.Writer, dir string, asJSON b
 	return nil
 }
 
+func newUpgradeConfigCommand(stdout io.Writer) *cobra.Command {
+	cmd := silence(&cobra.Command{
+		Use:   "config",
+		Short: "Report the upgrade's configuration changes; --write upgrades .env templates",
+		Long: `Report what an upgrade's configuration changes mean for the application:
+each variable the releases between the app's framework version (or --from)
+and the target (--to, default the newest release this gombit knows) rename,
+remove, re-default, newly require or newly refuse values of, by category
+(renamed, default changed, action required, security review), with the
+environment files that set it and what to do.
+
+It reads the app's .env and .env.* files and never prints a value from
+them: from a file that is not a template (.env, .env.production), only the
+names it sets are read. Every rename and removal is reported even when no
+file sets the variable (a deployment's environment is set elsewhere), and
+every change marked security-sensitive is a security review.
+
+--write upgrades the templates (.env.example, .env.*.example, .sample,
+.template, .dist): a renamed variable is renamed where a template sets or
+documents it, a removed one commented out, each with a note; nothing else
+in the file changes, and a file that is not a template is never written.
+Running it again changes nothing.
+
+It exits 1 while any change needs action or review, so a CI job sees it.
+--from analyzes from a release other than the app's (after gombit upgrade
+--to has already moved go.mod).`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			flags := cmd.Flags()
+			dir, _ := flags.GetString("dir")
+			from, _ := flags.GetString("from")
+			to, _ := flags.GetString("to")
+			write, _ := flags.GetBool("write")
+			asJSON, _ := flags.GetBool("json")
+			return runUpgradeConfig(stdout, dir, from, to, write, asJSON)
+		},
+	})
+	cmd.Flags().String("dir", ".", "application directory")
+	cmd.Flags().String("from", "", "release to analyze from (default: the framework version the app builds against)")
+	cmd.Flags().String("to", "", "target release (default: the newest release this gombit knows)")
+	cmd.Flags().Bool("write", false, "upgrade the environment templates (.env.example and the like); never .env")
+	cmd.Flags().Bool("json", false, "print the report as JSON")
+	return cmd
+}
+
+// upgradeConfigResult is gombit upgrade config --json.
+type upgradeConfigResult struct {
+	From    string   `json:"from"`
+	To      string   `json:"to"`
+	Written []string `json:"written"`
+	upgrade.ConfigReport
+}
+
+// upgradeConfigManifest is the manifest gombit upgrade config reads (a
+// test replaces it).
+var upgradeConfigManifest = upgrade.LoadManifest
+
+func runUpgradeConfig(stdout io.Writer, dir, from, to string, write, asJSON bool) error {
+	m, err := upgradeConfigManifest()
+	if err != nil {
+		return fmt.Errorf("gombit upgrade config: %w", err)
+	}
+	if to == "" {
+		to = m.Latest()
+	}
+	var releases []upgrade.Release
+	if from != "" {
+		releases, err = m.Path(from, to)
+	} else {
+		var b upgrade.Baseline
+		if b, err = upgrade.Detect(dir); err == nil {
+			from = b.Framework.Version
+			releases, err = m.PathFrom(b.Framework, to)
+		}
+	}
+	if err != nil {
+		return fmt.Errorf("gombit upgrade config: %w", err)
+	}
+	res := upgradeConfigResult{From: from, To: to, Written: []string{}}
+	if write {
+		written, err := upgrade.WriteConfigTemplates(dir, releases)
+		res.Written = append(res.Written, written...)
+		if err != nil {
+			if len(written) > 0 { // say what did change before the failure
+				_, _ = fmt.Fprintf(stdout, "Upgraded templates before the failure: %s\n", strings.Join(written, ", "))
+			}
+			return fmt.Errorf("gombit upgrade config: %w", err)
+		}
+	}
+	if res.ConfigReport, err = upgrade.AnalyzeConfig(dir, releases); err != nil {
+		return fmt.Errorf("gombit upgrade config: %w", err)
+	}
+	if asJSON {
+		data, err := json.MarshalIndent(res, "", "  ")
+		if err != nil {
+			return fmt.Errorf("gombit upgrade config: %w", err)
+		}
+		if _, err := fmt.Fprintf(stdout, "%s\n", data); err != nil {
+			return err
+		}
+	} else {
+		var b strings.Builder
+		fmt.Fprintf(&b, "Upgrade %s -> %s\n", from, to)
+		if write {
+			if len(res.Written) == 0 {
+				b.WriteString("No template needed upgrading.\n")
+			} else {
+				fmt.Fprintf(&b, "Upgraded templates: %s\n", strings.Join(res.Written, ", "))
+			}
+		}
+		if _, err := io.WriteString(stdout, b.String()); err != nil {
+			return err
+		}
+		if err := res.Render(stdout); err != nil {
+			return err
+		}
+	}
+	if res.NeedsAction() {
+		return errors.New("gombit upgrade config: configuration changes need action or review")
+	}
+	return nil
+}
+
+func newUpgradeContractCommand(stdout, stderr io.Writer) *cobra.Command {
+	cmd := silence(&cobra.Command{
+		Use:   "contract",
+		Short: "Report stale generated contract artifacts; --write regenerates them",
+		Long: `Report whether the application's generated contract artifacts are what
+generation produces now, as an upgrade can change it: run it after
+gombit upgrade --to. Each check is the one the existing drift gates make,
+so it agrees with them:
+
+  resources  the generator-owned *.gen.go files, rendered as gombit
+             generate --check renders them, inside the app's module (so
+             with the framework version its go.mod requires)
+  openapi    the committed OpenAPI document, against the running app's
+             (--url); unchecked without it, since the app derives it
+  client     the generated TypeScript client (frontend/src/api/generated),
+             regenerated as gombit client generate does from the --url
+             document or the committed one, through npx openapi-typescript
+
+--write regenerates what is stale with that same generation: gombit
+generate, the live document, gombit client generate. It writes only
+generator-owned files: never a resource's hooks file, nor a file of the
+client directory gombit did not generate (that is reported, not
+overwritten).
+
+While the resource files are not current, the checks against --url are
+unchecked: the running app was built from them, so rebuild and restart it,
+then rerun. --write never writes the document or the client from it then.
+
+It exits 1 while anything is left stale. An artifact it could not check is
+reported with the reason and does not fail it (without --url the document
+is always unchecked); --strict fails on it too. A CI gate runs it with
+--strict and --url, against an app built from the committed resources.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			flags := cmd.Flags()
+			dir, _ := flags.GetString("dir")
+			rawURL, _ := flags.GetString("url")
+			spec, _ := flags.GetString("spec")
+			out, _ := flags.GetString("out")
+			write, _ := flags.GetBool("write")
+			npx, _ := flags.GetString("npx")
+			asJSON, _ := flags.GetBool("json")
+			strict, _ := flags.GetBool("strict")
+			opts := contractcheck.Options{SpecPath: spec, OutDir: out, Write: write, NPXBinary: npx, Stderr: stderr}
+			if rawURL != "" {
+				live, err := fetchOpenAPI(cmd.Context(), rawURL)
+				if err != nil {
+					return fmt.Errorf("gombit upgrade contract: %w", err)
+				}
+				opts.LiveSpec = live
+			}
+			report, err := contractcheck.Check(cmd.Context(), dir, opts)
+			if err != nil {
+				return fmt.Errorf("gombit upgrade contract: %w", err)
+			}
+			if asJSON {
+				data, err := json.MarshalIndent(report, "", "  ")
+				if err != nil {
+					return fmt.Errorf("gombit upgrade contract: %w", err)
+				}
+				if _, err := fmt.Fprintf(stdout, "%s\n", data); err != nil {
+					return err
+				}
+			} else if err := report.Render(stdout); err != nil {
+				return err
+			}
+			switch {
+			case report.Stale():
+				return errors.New("gombit upgrade contract: generated contract artifacts are stale")
+			case strict && report.Unchecked():
+				return errors.New("gombit upgrade contract: some generated contract artifacts could not be checked (--strict)")
+			}
+			return nil
+		},
+	})
+	cmd.Flags().String("dir", ".", "application directory")
+	cmd.Flags().String("url", "", "the running app's OpenAPI document (e.g. http://127.0.0.1:8080/openapi.json), to check the committed one and generate the client from")
+	cmd.Flags().String("spec", client.DefaultSpecPath, "committed OpenAPI document, relative to --dir")
+	cmd.Flags().String("out", client.DefaultOutDir, "generated TypeScript client directory, relative to --dir")
+	cmd.Flags().Bool("write", false, "regenerate stale artifacts (generator-owned files only)")
+	cmd.Flags().String("npx", "npx", "npx binary used to run openapi-typescript")
+	cmd.Flags().Bool("json", false, "print the report as JSON")
+	cmd.Flags().Bool("strict", false, "also exit 1 when an artifact could not be checked (for a CI gate)")
+	return cmd
+}
+
 // upgradeCodemods are the codemods gombit upgrade fix runs (a test
 // replaces them).
 var upgradeCodemods = upgrade.Codemods
@@ -583,6 +796,8 @@ func upgradeUsage(stderr io.Writer) {
 	_, _ = fmt.Fprintln(stderr, "       gombit upgrade <subcommand>")
 	_, _ = fmt.Fprintln(stderr, "  baseline    Show (or record) the app's upgrade baseline")
 	_, _ = fmt.Fprintln(stderr, "  check       Report uses of deprecated framework APIs")
+	_, _ = fmt.Fprintln(stderr, "  config      Report the upgrade's configuration changes; --write upgrades .env templates")
+	_, _ = fmt.Fprintln(stderr, "  contract    Report stale generated contract artifacts; --write regenerates them")
 	_, _ = fmt.Fprintln(stderr, "  fix         Rewrite uses of changed framework APIs (codemods): print the patch, or --write it")
 	_, _ = fmt.Fprintln(stderr, "  notes       Print upgrade notes from the compatibility manifest")
 }

@@ -15,7 +15,7 @@ import (
 	"github.com/gombit-dev/gombit/upgrade"
 )
 
-var update = flag.Bool("update", false, "rewrite docs/upgrade-notes.md from the manifest")
+var update = flag.Bool("update", false, "rewrite docs/upgrade-notes.md from the manifest, and upgrade/testdata/config-variables.json from the config package (when its changes are declared)")
 
 // TestEmbeddedManifest: the manifest this framework ships is valid, and
 // describes releases.
@@ -377,6 +377,8 @@ var changelogExempt = map[int]string{
 	344: "gombit upgrade --to itself: new, nothing to act on",
 	345: "gombit upgrade check itself: new, nothing to act on",
 	346: "gombit upgrade fix itself: new, nothing to act on",
+	347: "gombit upgrade config itself: new, nothing to act on",
+	348: "gombit upgrade contract itself: new, nothing to act on",
 	350: "the compatibility policy itself: documents and enforces release rules, nothing in an application",
 	446: "a gombit make resource error message: nothing in an application",
 	447: "shipped in v0.6.1 (the CHANGELOG has no 0.6.1 section yet)",

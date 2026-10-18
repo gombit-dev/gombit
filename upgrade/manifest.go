@@ -139,6 +139,13 @@ type Change struct {
 	Action string `yaml:"action,omitempty" json:"action,omitempty"`
 	// Refs are the GitHub issues or pull requests of the change.
 	Refs []int `yaml:"refs,omitempty" json:"refs,omitempty"`
+	// Config are the configuration variables the change renames, removes,
+	// re-defaults, requires or newly refuses values of, and those it adds
+	// that another entry needs or that a security change introduces: what
+	// the upgrade tooling checks the application's environment files
+	// against (AnalyzeConfig). A change in the security area makes each of
+	// them, an addition included, a security review.
+	Config []ConfigChange `yaml:"config,omitempty" json:"config,omitempty"`
 	// Deprecates are the framework APIs the change deprecates, each named
 	// as gombit upgrade check names it (database.KeepStoredZeros). A
 	// "Deprecated: since vX.Y.Z" paragraph must name a release with a
@@ -189,6 +196,8 @@ func (m *Manifest) clone() *Manifest {
 		r.Changes = slices.Clone(r.Changes)
 		for j := range r.Changes {
 			r.Changes[j].Refs = slices.Clone(r.Changes[j].Refs)
+			r.Changes[j].Config = slices.Clone(r.Changes[j].Config)
+			r.Changes[j].Deprecates = slices.Clone(r.Changes[j].Deprecates)
 		}
 		c.Releases[i] = r
 	}
@@ -266,6 +275,22 @@ func (c Change) validate() error {
 	for _, ref := range c.Refs {
 		if ref <= 0 {
 			return fmt.Errorf("change %s: ref %d is not an issue or pull request number", c.ID, ref)
+		}
+	}
+	if len(c.Config) > 0 && c.Area != "config" && c.Area != "security" {
+		return fmt.Errorf("change %s: lists configuration variables, so its area is config or security, not %s", c.ID, c.Area)
+	}
+	if c.Kind != KindManual && len(c.Config) > 0 && (c.Area == "security" || slices.ContainsFunc(c.Config, func(cc ConfigChange) bool { return cc.Change != ConfigAdded })) {
+		// The config analysis can ask the developer to act on any of them
+		// but an ordinary addition (a default only some environments
+		// override; any entry of a security change, an addition included,
+		// is a security review), so the notes and the plan must not call
+		// the change nothing to do, or something the tooling applies.
+		return fmt.Errorf("change %s: lists configuration variables the developer must check (beyond additions, or in the security area), so it is manual (gombit upgrade config), not %s", c.ID, c.Kind)
+	}
+	for _, cc := range c.Config {
+		if err := cc.validate(); err != nil {
+			return fmt.Errorf("change %s: %w", c.ID, err)
 		}
 	}
 	for _, symbol := range c.Deprecates {

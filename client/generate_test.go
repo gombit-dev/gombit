@@ -3,6 +3,7 @@ package client
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -213,6 +214,9 @@ func TestGenerateRefusesUserOwnedFile(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("Generate() error = nil, want refuse overwrite")
+	}
+	if !errors.Is(err, ErrNotGenerated) {
+		t.Fatalf("Generate() error = %v, want ErrNotGenerated", err)
 	}
 	if !strings.Contains(err.Error(), "--force") {
 		t.Fatalf("Generate() error = %q, want --force", err)
