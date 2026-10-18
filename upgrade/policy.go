@@ -95,8 +95,8 @@ func (m *Manifest) CheckPolicy(version string) error {
 	}
 	need, breaking := RequiredBump(prev, m.shippedSince(prev, i+1))
 	if got := bumpBetween(prev, version); got < need {
-		return fmt.Errorf("upgrade: manifest: release %s is a %s release after %s, but declares breaking changes (%s): the compatibility policy needs a %s release (%s); see docs/compatibility.md",
-			version, got, prev, strings.Join(breaking, ", "), need, nextRelease(prev, need))
+		return fmt.Errorf("upgrade: manifest: release %s is a %s release after %s, but ships breaking changes (%s): the compatibility policy needs a %s release (%s); see docs/compatibility.md",
+			version, got, prev, m.locate(breaking, version), need, nextRelease(prev, need))
 	}
 	return nil
 }
@@ -112,9 +112,25 @@ func (m *Manifest) shippedSince(prev string, end int) []Change {
 	return changes
 }
 
+// locate lists the change IDs, each naming the release that declares it
+// when that is not version (a pre-release it ships, say).
+func (m *Manifest) locate(ids []string, version string) string {
+	out := make([]string, len(ids))
+	for k, id := range ids {
+		out[k] = id
+		for _, r := range m.Releases {
+			if r.Version != version && slices.ContainsFunc(r.Changes, func(c Change) bool { return c.ID == id }) {
+				out[k] = id + " in " + r.Version
+			}
+		}
+	}
+	return strings.Join(out, ", ")
+}
+
 // checkFirstMajor holds v1.0.0 to the deprecation window across 1.0: it may
-// remove what the 0.y releases deprecated, so the minor line before it
-// deprecates nothing, and every pre-1.0 deprecation got its next minor.
+// remove what the 0.y releases deprecated, so the minor line of the latest
+// stable release before it, and every pre-release after it, deprecate
+// nothing, and every pre-1.0 deprecation got a stable minor line after it.
 func (m *Manifest) checkFirstMajor(tag string) error {
 	if tag != "v1.0.0" {
 		return nil
@@ -122,13 +138,13 @@ func (m *Manifest) checkFirstMajor(tag string) error {
 	i := slices.IndexFunc(m.Releases, func(r Release) bool { return r.Version == tag })
 	line := semver.MajorMinor(m.stableBefore(i))
 	for _, r := range m.Releases[:i] {
-		if semver.MajorMinor(r.Version) != line {
+		if r.Version == Unreleased || semver.Compare(semver.MajorMinor(r.Version), line) < 0 {
 			continue
 		}
 		for _, c := range r.Changes {
 			if len(c.Deprecates) > 0 {
-				return fmt.Errorf("upgrade: manifest: v1.0.0 follows %s.x, which deprecates %s (%s in %s): the compatibility policy needs another 0.y minor release first, so the deprecation gets its window; see docs/compatibility.md",
-					line, strings.Join(c.Deprecates, ", "), c.ID, r.Version)
+				return fmt.Errorf("upgrade: manifest: v1.0.0 follows %s, which deprecates %s (%s): the compatibility policy needs another stable 0.y minor release first, so the deprecation gets its window; see docs/compatibility.md",
+					r.Version, strings.Join(c.Deprecates, ", "), c.ID)
 			}
 		}
 	}

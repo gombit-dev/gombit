@@ -319,7 +319,7 @@ func (m *Manifest) CheckRelease(tag string) error {
 			latest := m.latestStable()
 			need, breaking := RequiredBump(latest, m.shippedSince(latest, len(m.Releases)))
 			if len(breaking) > 0 {
-				return fmt.Errorf("%w; rename its %s entry to the release (it declares breaking changes, %s, so the compatibility policy needs a %s release after %s: %s)", err, Unreleased, strings.Join(breaking, ", "), need, latest, nextRelease(latest, need))
+				return fmt.Errorf("%w; rename its %s entry to the release (it ships breaking changes, %s, so the compatibility policy needs a %s release after %s: %s)", err, Unreleased, m.locate(breaking, Unreleased), need, latest, nextRelease(latest, need))
 			}
 			return fmt.Errorf("%w; rename its %s entry to the release", err, Unreleased)
 		}

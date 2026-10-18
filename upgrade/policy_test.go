@@ -65,7 +65,7 @@ func change(format, id string) string { return strings.Replace(format, "%s", id,
 func TestCheckPolicy(t *testing.T) {
 	security := "      - {id: %s, kind: manual, breaking: true, area: security, summary: s, details: d}\n"
 	err := policyOf(t, rel("v0.8.0")+rel("v0.8.1", change(breakingAPI, "patch-break")))
-	if err == nil || !strings.Contains(err.Error(), "release v0.8.1 is a patch release after v0.8.0, but declares breaking changes (patch-break)") || !strings.Contains(err.Error(), "needs a minor release (v0.9.0)") {
+	if err == nil || !strings.Contains(err.Error(), "release v0.8.1 is a patch release after v0.8.0, but ships breaking changes (patch-break)") || !strings.Contains(err.Error(), "needs a minor release (v0.9.0)") {
 		t.Errorf("a breaking patch: %v", err)
 	}
 	if err := policyOf(t, rel("v0.8.0")+rel("v0.8.1", change(security, "fix-hole"))); err != nil {
@@ -208,14 +208,14 @@ func TestReleaseShipsItsPreReleases(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := m.CheckRelease("v0.8.1"); err == nil || !strings.Contains(err.Error(), "declares breaking changes (rc-break)") {
+	if err := m.CheckRelease("v0.8.1"); err == nil || !strings.Contains(err.Error(), "ships breaking changes (rc-break in v0.8.1-rc.1)") {
 		t.Fatalf("CheckRelease(v0.8.1) after a breaking rc = %v", err)
 	}
 	m, err = upgrade.ParseManifest([]byte("format: 1\nreleases:\n" + rel("v0.8.0") + rel("v0.8.1-rc.1", change(breakingAPI, "rc-break")) + rel("unreleased", "      - {id: small, kind: informational, area: behavior, summary: s}\n")))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := m.CheckRelease("v0.8.1"); err == nil || !strings.Contains(err.Error(), "needs a minor release after v0.8.0: v0.9.0") {
+	if err := m.CheckRelease("v0.8.1"); err == nil || !strings.Contains(err.Error(), "ships breaking changes, rc-break in v0.8.1-rc.1, so the compatibility policy needs a minor release after v0.8.0: v0.9.0") {
 		t.Fatalf("the hint after a breaking rc = %v", err)
 	}
 }
@@ -229,8 +229,16 @@ func TestFirstMajorFollowsAQuietMinor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := m.CheckRelease("v1.0.0"); err == nil || !strings.Contains(err.Error(), "v1.0.0 follows v0.9.x, which deprecates db.Old") {
+	if err := m.CheckRelease("v1.0.0"); err == nil || !strings.Contains(err.Error(), "v1.0.0 follows v0.9.1, which deprecates db.Old") {
 		t.Fatalf("CheckRelease(v1.0.0) after a deprecating minor = %v", err)
+	}
+	// A deprecation in a pre-release of a minor that never went stable.
+	m, err = upgrade.ParseManifest([]byte("format: 1\nreleases:\n" + rel("v0.8.0") + rel("v0.9.0") + rel("v0.10.0-rc.1", change(deprecation, "old-deprecated")) + rel("v1.0.0", change(breakingAPI, "one-oh"))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.CheckRelease("v1.0.0"); err == nil || !strings.Contains(err.Error(), "v1.0.0 follows v0.10.0-rc.1, which deprecates db.Old") {
+		t.Fatalf("CheckRelease(v1.0.0) after a deprecating rc = %v", err)
 	}
 	m, err = upgrade.ParseManifest([]byte("format: 1\nreleases:\n" + rel("v0.8.0") + rel("v0.9.0", change(deprecation, "old-deprecated")) + rel("v0.10.0") + rel("v1.0.0", change(breakingAPI, "one-oh"))))
 	if err != nil {
