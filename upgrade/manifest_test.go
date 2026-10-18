@@ -369,18 +369,11 @@ func TestActionsAreImplemented(t *testing.T) {
 }
 
 // changelogExempt are the issues the CHANGELOG's Unreleased section links
-// that the manifest does not declare, each with the reason.
-var changelogExempt = map[int]string{
-	291: "benchmark tooling: nothing in an application",
-	342: "the compatibility manifest and gombit upgrade notes themselves: new, nothing to act on",
-	343: "gombit upgrade --dry-run itself: new, nothing to act on",
-	344: "gombit upgrade --to itself: new, nothing to act on",
-	345: "gombit upgrade check itself: new, nothing to act on",
-	346: "gombit upgrade fix itself: new, nothing to act on",
-	446: "a gombit make resource error message: nothing in an application",
-	447: "shipped in v0.6.1 (the CHANGELOG has no 0.6.1 section yet)",
-	451: "a CI gate on the committed admin build: nothing in an application",
-}
+// that the manifest does not declare, each with the reason. An exemption
+// covers the Unreleased entries it was written for: the map is emptied when
+// a release is cut (docs/releasing.md), and one that matches nothing in
+// Unreleased fails the gate.
+var changelogExempt = map[int]string{}
 
 // changelogUndeclaredHelp says what to do about CHANGELOG issues the
 // manifest does not classify: the entry to add, or the exemption.
@@ -425,44 +418,119 @@ func TestChangelogIsDeclared(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	text := strings.ReplaceAll(string(data), "\r\n", "\n")
-	start := strings.Index(text, "\n## [Unreleased]\n")
-	if start < 0 {
+	unreleased, ok := changelogSections(string(data))["Unreleased"]
+	if !ok {
 		t.Fatal("CHANGELOG.md has no [Unreleased] section")
 	}
-	unreleased := text[start+1:]
-	if end := strings.Index(unreleased[1:], "\n## ["); end >= 0 {
-		unreleased = unreleased[:end+1]
-	}
-	m, err := upgrade.LoadManifest()
-	if err != nil {
-		t.Fatal(err)
-	}
 	declared := map[int]bool{}
-	for _, r := range m.Releases {
-		for _, c := range r.Changes {
-			for _, ref := range c.Refs {
-				declared[ref] = true
-			}
-		}
+	for ref := range manifestRefs(t) {
+		declared[ref] = true
 	}
 	var missing []int
 	seen := map[int]bool{}
-	for _, match := range changelogIssueLink.FindAllStringSubmatch(unreleased, -1) {
-		n, _ := strconv.Atoi(match[1])
+	for _, n := range changelogRefs(unreleased) {
 		if !declared[n] && changelogExempt[n] == "" && !seen[n] {
-			seen[n] = true
 			missing = append(missing, n)
 		}
+		seen[n] = true
 	}
 	if len(missing) > 0 {
 		t.Error(changelogUndeclaredHelp(missing))
 	}
 	for n := range changelogExempt {
-		if declared[n] {
+		switch {
+		case declared[n]:
 			t.Errorf("#%d is exempt but also declared; drop the exemption", n)
+		case !seen[n]:
+			t.Errorf("#%d is exempt but the CHANGELOG's Unreleased section does not link it; drop the exemption (the map is emptied when a release is cut)", n)
 		}
 	}
+}
+
+// TestChangelogReleasesMatchManifest: each released CHANGELOG section the
+// manifest covers (0.6.1 on) links only issues the manifest declares under
+// that release, or not at all. The CHANGELOG and the upgrade notes cannot
+// date one change differently: a fix whose entry was written after it
+// shipped still goes under the release that shipped it.
+func TestChangelogReleasesMatchManifest(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "CHANGELOG.md")) // #nosec G304 -- the committed changelog
+	if err != nil {
+		t.Fatal(err)
+	}
+	refs := manifestRefs(t)
+	m, err := upgrade.LoadManifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sections := changelogSections(string(data))
+	checked := 0
+	for _, r := range m.Releases {
+		if r.Version == upgrade.Unreleased {
+			continue
+		}
+		section, ok := sections[strings.TrimPrefix(r.Version, "v")]
+		if !ok {
+			continue // listed, not released yet: the release cut adds it
+		}
+		checked++
+		reported := map[int]bool{}
+		for _, n := range changelogRefs(section) {
+			in := refs[n]
+			if len(in) == 0 || slices.Contains(in, r.Version) || reported[n] {
+				continue
+			}
+			reported[n] = true
+			t.Errorf("CHANGELOG.md's [%s] links #%d, which upgrade/manifest.yaml declares under %s: move the entry to the release that shipped it",
+				strings.TrimPrefix(r.Version, "v"), n, strings.Join(in, ", "))
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no released CHANGELOG section matched a manifest release")
+	}
+}
+
+// changelogSections are CHANGELOG.md's sections by heading ("Unreleased",
+// "0.8.0"), each its text up to the next.
+func changelogSections(text string) map[string]string {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	sections := map[string]string{}
+	parts := strings.Split(text, "\n## [")
+	for _, part := range parts[1:] {
+		name, body, _ := strings.Cut(part, "]")
+		sections[name] = body
+	}
+	return sections
+}
+
+// changelogRefs are the issues and pull requests text links, in order.
+func changelogRefs(text string) []int {
+	var refs []int
+	for _, match := range changelogIssueLink.FindAllStringSubmatch(text, -1) {
+		n, _ := strconv.Atoi(match[1])
+		refs = append(refs, n)
+	}
+	return refs
+}
+
+// manifestRefs are the releases that declare each ref of the embedded
+// manifest.
+func manifestRefs(t *testing.T) map[int][]string {
+	t.Helper()
+	m, err := upgrade.LoadManifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	refs := map[int][]string{}
+	for _, r := range m.Releases {
+		for _, c := range r.Changes {
+			for _, ref := range c.Refs {
+				if !slices.Contains(refs[ref], r.Version) {
+					refs[ref] = append(refs[ref], r.Version)
+				}
+			}
+		}
+	}
+	return refs
 }
 
 // TestChangelogUndeclaredHelpIsAValidChange: the change the gate's failure

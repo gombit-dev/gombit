@@ -10,7 +10,7 @@ version.
 
 ## [Unreleased]
 
-## [0.8.0] — 2026-10-15
+## [0.8.0] — 2026-10-18
 
 ### Added
 
@@ -168,6 +168,13 @@ version.
   weekly x100 soak is not cut off by that default. `FAULT_TIMEOUT`, in whole
   seconds (`5400`), sets it instead
   ([#335](https://github.com/gombit-dev/gombit/issues/335)).
+- The framework requires newer AWS SDK for Go v2 modules (the S3 storage
+  driver): `github.com/aws/aws-sdk-go-v2` v1.47.3,
+  `github.com/aws/aws-sdk-go-v2/service/s3` v1.114.0 and
+  `github.com/aws/smithy-go` v1.28.5. Minimal version selection moves an
+  app's build to them with the framework upgrade
+  ([#570](https://github.com/gombit-dev/gombit/pull/570),
+  [#590](https://github.com/gombit-dev/gombit/pull/590)).
 
 ### Fixed
 
@@ -217,21 +224,6 @@ version.
   follow a second colon) instead of an unknown type `"text,searchable"`;
   commas inside a type's arguments (`enum(a,b)`, `decimal(10,2)`) are
   unaffected ([#446](https://github.com/gombit-dev/gombit/issues/446)).
-- Production configuration refuses `GOMBIT_HTTP_TRUSTED_PROXIES` values that
-  trust every peer in any spelling: a zero-length prefix (`10.0.0.0/0`,
-  `::0/0`) or ranges that together cover every IPv4 or IPv6 address
-  (`0.0.0.0/1,128.0.0.0/1`). Only the literal `0.0.0.0/0` forms were refused
-  before, so a trust-all list could still start and let clients spoof their
-  forwarded IP ([#500](https://github.com/gombit-dev/gombit/issues/500)).
-- A job whose worker died mid-attempt is no longer redelivered past its
-  `MaxAttempts`: the redelivery that would exceed it moves the job to the
-  failed jobs as exhausted. An attempt interrupted by `Release` or worker
-  shutdown may still run once more, as before
-  ([#494](https://github.com/gombit-dev/gombit/issues/494)).
-- `gombit jobs retry --all` retries each failed job at most once per
-  invocation. A job that a live worker failed again went back to the head of
-  the failed set and was retried until the command timed out
-  ([#493](https://github.com/gombit-dev/gombit/issues/493)).
 - `gombit contract app` reports only a framework release, picking the
   `replace` the go command would. A `replace` of a version the app does not
   require no longer counts, and an exact-version `replace` wins over an
@@ -744,6 +736,21 @@ version.
   options, flags or driver, and worker mode's `-h`. An `App` runs once; it
   cannot be run again after any of them returns
   ([#435](https://github.com/gombit-dev/gombit/issues/435)).
+- Production configuration refuses `GOMBIT_HTTP_TRUSTED_PROXIES` values that
+  trust every peer in any spelling: a zero-length prefix (`10.0.0.0/0`,
+  `::0/0`) or ranges that together cover every IPv4 or IPv6 address
+  (`0.0.0.0/1,128.0.0.0/1`). Only the literal `0.0.0.0/0` forms were refused
+  before, so a trust-all list could still start and let clients spoof their
+  forwarded IP ([#500](https://github.com/gombit-dev/gombit/issues/500)).
+- A job whose worker died mid-attempt is no longer redelivered past its
+  `MaxAttempts`: the redelivery that would exceed it moves the job to the
+  failed jobs as exhausted. An attempt interrupted by `Release` or worker
+  shutdown may still run once more, as before
+  ([#494](https://github.com/gombit-dev/gombit/issues/494)).
+- `gombit jobs retry --all` retries each failed job at most once per
+  invocation. A job that a live worker failed again went back to the head of
+  the failed set and was retried until the command timed out
+  ([#493](https://github.com/gombit-dev/gombit/issues/493)).
 
 ## [0.6.1] — 2026-09-29
 

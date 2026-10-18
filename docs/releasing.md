@@ -16,8 +16,16 @@ automatically on merge.
    ```
 
 3. **Update [`CHANGELOG.md`](../CHANGELOG.md).** Move `[Unreleased]` entries
-   under a new version heading with today's date, and refresh the link
-   definitions at the bottom.
+   under a new version heading, and refresh the link definitions at the
+   bottom. The date is the day the release is tagged: if the release PR
+   waits, update it in the commit that is merged and tagged. An entry goes
+   under the release that shipped its change, which is the one the manifest
+   declares it in, even when the entry was written later
+   (`TestChangelogReleasesMatchManifest` checks every released section
+   against the manifest). Empty `changelogExempt` in
+   [`upgrade/manifest_test.go`](../upgrade/manifest_test.go): its
+   exemptions covered the entries just moved, and one that matches nothing
+   in `[Unreleased]` fails the gate.
 4. **Sanity-check the docs** that name a version — mainly
    [`installation.md`](installation.md).
 5. **Decide the number.** Pre-1.0, breaking changes bump the minor
