@@ -447,11 +447,13 @@ func TestChangelogIsDeclared(t *testing.T) {
 	}
 }
 
-// TestChangelogReleasesMatchManifest: each released CHANGELOG section the
-// manifest covers (0.6.1 on) links only issues the manifest declares under
-// that release, or not at all. The CHANGELOG and the upgrade notes cannot
-// date one change differently: a fix whose entry was written after it
-// shipped still goes under the release that shipped it.
+// TestChangelogReleasesMatchManifest: each CHANGELOG section the manifest
+// covers (0.6.1 on, and [Unreleased] as its unreleased entry) links only
+// issues the manifest declares under that release, or not at all. The
+// CHANGELOG and the upgrade notes cannot date one change differently: a
+// fix whose entry was written after it shipped still goes under the
+// release that shipped it, and a follow-up to an issue an earlier release
+// declares is declared again, under unreleased, by the PR that makes it.
 func TestChangelogReleasesMatchManifest(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "CHANGELOG.md")) // #nosec G304 -- the committed changelog
 	if err != nil {
@@ -463,12 +465,19 @@ func TestChangelogReleasesMatchManifest(t *testing.T) {
 		t.Fatal(err)
 	}
 	sections := changelogSections(string(data))
-	checked := 0
+	versions := []string{upgrade.Unreleased} // [Unreleased], whether or not the manifest has the entry
 	for _, r := range m.Releases {
-		if r.Version == upgrade.Unreleased {
-			continue
+		if r.Version != upgrade.Unreleased {
+			versions = append(versions, r.Version)
 		}
-		section, ok := sections[strings.TrimPrefix(r.Version, "v")]
+	}
+	checked := 0
+	for _, version := range versions {
+		heading := strings.TrimPrefix(version, "v")
+		if version == upgrade.Unreleased {
+			heading = "Unreleased"
+		}
+		section, ok := sections[heading]
 		if !ok {
 			continue // listed, not released yet: the release cut adds it
 		}
@@ -476,12 +485,12 @@ func TestChangelogReleasesMatchManifest(t *testing.T) {
 		reported := map[int]bool{}
 		for _, n := range changelogRefs(section) {
 			in := refs[n]
-			if len(in) == 0 || slices.Contains(in, r.Version) || reported[n] {
+			if len(in) == 0 || slices.Contains(in, version) || reported[n] {
 				continue
 			}
 			reported[n] = true
-			t.Errorf("CHANGELOG.md's [%s] links #%d, which upgrade/manifest.yaml declares under %s: move the entry to the release that shipped it",
-				strings.TrimPrefix(r.Version, "v"), n, strings.Join(in, ", "))
+			t.Errorf("CHANGELOG.md's [%s] links #%d, which upgrade/manifest.yaml declares under %s only. If the entry's change ships in %s (a follow-up to that issue, say), declare it there too: a change under %q in upgrade/manifest.yaml whose refs include %d. If it shipped in %s, move the entry to that section.",
+				heading, n, strings.Join(in, ", "), version, version, n, strings.Join(in, " or "))
 		}
 	}
 	if checked == 0 {
