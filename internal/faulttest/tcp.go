@@ -2,9 +2,11 @@ package faulttest
 
 import (
 	"errors"
+	"io"
 	"net"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -41,6 +43,7 @@ type proxyPair struct {
 	client, upstream net.Conn
 	done             chan struct{}
 	once             sync.Once
+	ends             atomic.Int32
 }
 
 func (p *proxyPair) close(reset bool) {
@@ -113,6 +116,7 @@ func (p *TCPProxy) connect(client net.Conn) {
 	}
 	p.conns[pair] = struct{}{}
 	p.wg.Add(2)
+	pair.ends.Add(2)
 	p.mu.Unlock()
 	go p.pipe(pair, client, upstream)
 	go p.pipe(pair, upstream, client)
@@ -122,11 +126,20 @@ func (p *TCPProxy) connect(client net.Conn) {
 // while the proxy is held.
 func (p *TCPProxy) pipe(pair *proxyPair, src, dst net.Conn) {
 	defer p.wg.Done()
+	clean := false
 	defer func() {
-		pair.close(false)
-		p.mu.Lock()
-		delete(p.conns, pair)
-		p.mu.Unlock()
+		if clean {
+			// A clean EOF is a half-close: forward the FIN and keep the
+			// other direction relaying until it ends too.
+			if tcp, ok := dst.(*net.TCPConn); ok {
+				_ = tcp.CloseWrite()
+			}
+			if pair.ends.Add(-1) == 0 {
+				p.unpair(pair)
+			}
+			return
+		}
+		p.unpair(pair)
 	}()
 	buf := make([]byte, 32<<10)
 	for {
@@ -140,9 +153,20 @@ func (p *TCPProxy) pipe(pair *proxyPair, src, dst net.Conn) {
 			}
 		}
 		if err != nil {
-			return // EOF or error on either side ends the connection pair
+			clean = err == io.EOF
+			return
 		}
 	}
+}
+
+// unpair closes the connection pair in both directions and forgets it.
+func (p *TCPProxy) unpair(pair *proxyPair) {
+	defer func() {
+		p.mu.Lock()
+		delete(p.conns, pair)
+		p.mu.Unlock()
+	}()
+	pair.close(false)
 }
 
 // wait blocks while the proxy is held, reporting false when the connection

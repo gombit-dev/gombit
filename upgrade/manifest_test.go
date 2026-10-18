@@ -15,7 +15,7 @@ import (
 	"github.com/gombit-dev/gombit/upgrade"
 )
 
-var update = flag.Bool("update", false, "rewrite docs/upgrade-notes.md from the manifest")
+var update = flag.Bool("update", false, "rewrite docs/upgrade-notes.md from the manifest, and upgrade/testdata/config-variables.json from the config package (when its changes are declared)")
 
 // TestEmbeddedManifest: the manifest this framework ships is valid, and
 // describes releases.

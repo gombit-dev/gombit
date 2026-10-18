@@ -117,6 +117,8 @@ releases:
           every peer lets any client spoof its forwarded IP. List only the
           addresses of the proxies you control.
         refs: [500]
+        config:
+          - {var: GOMBIT_HTTP_TRUSTED_PROXIES, change: refused, environment: production}
 
       - id: jobs-crash-redelivery-max-attempts
         kind: informational
@@ -236,6 +238,15 @@ releases:
 
   - version: v0.8.0
     changes:
+      - id: dotenv-long-lines
+        kind: informational
+        area: config
+        summary: "`config.Load` reads a `.env` file whole: a line longer than 64 KiB no longer silently stops it, so the assignments after one now apply."
+        details: |
+          Before, the first line over 64 KiB ended the read without an
+          error, and every variable after it kept its process-environment
+          or default value. If a `.env` has such a line, check the values
+          set after it.
       - id: admin-relation-string-keys
         kind: informational
         area: behavior
@@ -436,6 +447,9 @@ releases:
           session: it stops authenticating when the session expires, not only
           when it is revoked, so a token issued before the upgrade under the
           old TTLs stops at its session's expiry, before its `exp`.
+        config:
+          - {var: GOMBIT_JWT_REFRESH_TTL, change: refused}
+          - {var: GOMBIT_JWT_ACCESS_TTL, change: refused}
         refs: [335]
 
       - id: refresh-lock-failure-is-500

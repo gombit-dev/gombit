@@ -249,6 +249,9 @@ func (i *Injector) Reached(n int) <-chan struct{} {
 	if n < 1 {
 		panic(fmt.Sprintf("faulttest: Reached(%d): calls are numbered from 1", n))
 	}
+	if i == nil {
+		return make(chan struct{})
+	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	ch := make(chan struct{})

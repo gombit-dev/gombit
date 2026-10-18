@@ -119,6 +119,53 @@ version.
     file remains.
   - No codemods ship yet: the only deprecated API,
     `database.KeepStoredZeros`, has no mechanical replacement.
+- `gombit upgrade config [--from] [--to] [--write] [--json]` (UPGRADE-7)
+  reports what an upgrade's configuration changes mean for the
+  application. It covers each variable the releases on the path rename,
+  remove, re-default, newly require, or newly refuse values of, by
+  category (renamed, default changed, action required, security review),
+  with the environment files that set it and what to do. It exits 1 while
+  any needs action or review, and `gombit upgrade --dry-run` shows the
+  same section
+  ([#347](https://github.com/gombit-dev/gombit/issues/347)).
+  - It never prints a value from the app's `.env` files: from a file that
+    is not a template, only the names it sets are read.
+  - Every rename and removal is reported even when no file sets the
+    variable.
+  - `--write` upgrades `.env.example` and the other templates (renames,
+    removed variables commented out, each with a note). The files are
+    written atomically and idempotently, and `.env` is never written.
+  - Manual manifest changes list their configuration variables (`config:`
+    entries; `added` introduces a new variable a later entry requires). A
+    default change counts as overridden only where a file gombit loads
+    proves it: `.env`, for local development runs. Templates
+    and other `.env.*` files are mentions, and nothing proves test or
+    production.
+  - `config.Variables()` catalogs every variable with its secrecy and
+    defaults. A snapshot of it as of a release fails a test on any
+    removal, default move or declassification since then that the
+    manifest does not declare, and on any declaration that is no real
+    transition.
+  - `trusted-proxies-trust-all` (v0.7.0) now declares its
+    `GOMBIT_HTTP_TRUSTED_PROXIES` refusal.
+- `gombit upgrade contract [--url] [--write] [--json]` (UPGRADE-8) reports
+  which generated contract artifacts are stale after an upgrade, each by
+  the check the existing drift gates make:
+  - the resource `*.gen.go`, as `gombit generate --check` renders them
+    with the app's framework version;
+  - the committed `openapi.json`, against the running app's (`--url`);
+  - the TypeScript client, as `gombit client check` compares it.
+
+  While the resource files are not current, the checks against the running
+  app's document are unchecked (rebuild and rerun). `--write` regenerates
+  the stale ones with the same generation, writing generator-owned files
+  only (never `hooks.go`, nor a client-directory file gombit did not
+  generate). It exits 1 while anything is stale; `--strict` also fails on
+  an artifact it could not check, for a CI gate. `gombit upgrade --dry-run`
+  now points to it after the dependency change. `contractcheck.Check`,
+  `generate.Stale`, `generate.Update`, `client.ClientDrift` and
+  `client.SpecEqual` are the API
+  ([#348](https://github.com/gombit-dev/gombit/issues/348)).
 - [Session management](docs/auth.md#sessions) in both auth modes:
   `GET /auth/sessions` lists the user's active sessions with an opaque id,
   `last_refreshed_at`, `expires_at`, and a `current` flag;
@@ -187,6 +234,10 @@ version.
   so it also revokes the token a concurrent rotation of another of the
   user's sessions issues. On PostgreSQL that token could survive the cascade
   ([#335](https://github.com/gombit-dev/gombit/issues/335)).
+- `config.Load` and `config.LoadFromDir` read a `.env` file whole. A line
+  longer than 64 KiB used to end the read silently, dropping every
+  assignment after it; they now apply. The upgrade tooling reads `.env`
+  files with the same traversal and grammar (`config.DotEnvKeys`).
 - An admin relation field on a string key (a country code, a SKU) stores the
   value sent, byte for byte: anything numeric-looking was parsed as an integer
   and converted back as a rune, so `"123"` was stored as `"{"` and `"007"` as
