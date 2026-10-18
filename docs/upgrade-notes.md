@@ -84,6 +84,9 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 - **Breaking.** With auth enabled, a `GOMBIT_JWT_REFRESH_TTL` shorter than `GOMBIT_JWT_ACCESS_TTL` fails config validation, so the app does not start. (`refresh-ttl-at-least-access-ttl`, config, [#335](https://github.com/gombit-dev/gombit/issues/335))
 
+  - Configuration: `GOMBIT_JWT_REFRESH_TTL`: some values are now refused.
+  - Configuration: `GOMBIT_JWT_ACCESS_TTL`: some values are now refused.
+
   The refresh token's lifetime is the session's, and an access token
   must not outlive its session: it would stop authenticating when the
   session ends while its `exp`, `expires_in` and access cookie still
@@ -103,6 +106,13 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   version 0. `gombit upgrade baseline --write` records it.
 
 ### Informational
+
+- `config.Load` reads a `.env` file whole: a line longer than 64 KiB no longer silently stops it, so the assignments after one now apply. (`dotenv-long-lines`, config)
+
+  Before, the first line over 64 KiB ended the read without an
+  error, and every variable after it kept its process-environment
+  or default value. If a `.env` has such a line, check the values
+  set after it.
 
 - An admin relation field on a string key stores the string sent, byte for byte; a JSON number for it is a 422. (`admin-relation-string-keys`, behavior, [#452](https://github.com/gombit-dev/gombit/issues/452))
 
@@ -239,6 +249,8 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   and job dispatcher: build a new `App` (`framework.New`) to retry.
 
 - **Breaking.** Production refuses `GOMBIT_HTTP_TRUSTED_PROXIES` values that trust every peer: a zero-length prefix in any spelling, or ranges that together cover all addresses. (`trusted-proxies-trust-all`, security, [#500](https://github.com/gombit-dev/gombit/issues/500))
+
+  - Configuration: `GOMBIT_HTTP_TRUSTED_PROXIES`: some values are now refused in production.
 
   `10.0.0.0/0`, `::0/0` or `0.0.0.0/1,128.0.0.0/1` used to start;
   `Config.Validate` now refuses them in production, since trusting

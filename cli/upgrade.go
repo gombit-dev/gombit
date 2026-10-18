@@ -72,6 +72,7 @@ default target.`,
 	cmd.Flags().Bool("json", false, "print the plan as JSON")
 	cmd.AddCommand(newUpgradeBaselineCommand(stdout))
 	cmd.AddCommand(newUpgradeCheckCommand(stdout))
+	cmd.AddCommand(newUpgradeConfigCommand(stdout))
 	cmd.AddCommand(newUpgradeContractCommand(stdout, stderr))
 	cmd.AddCommand(newUpgradeFixCommand(stdout, stderr))
 	cmd.AddCommand(newUpgradeNotesCommand(stdout))
@@ -384,6 +385,129 @@ func runUpgradeCheck(ctx context.Context, stdout io.Writer, dir string, asJSON b
 	return nil
 }
 
+func newUpgradeConfigCommand(stdout io.Writer) *cobra.Command {
+	cmd := silence(&cobra.Command{
+		Use:   "config",
+		Short: "Report the upgrade's configuration changes; --write upgrades .env templates",
+		Long: `Report what an upgrade's configuration changes mean for the application:
+each variable the releases between the app's framework version (or --from)
+and the target (--to, default the newest release this gombit knows) rename,
+remove, re-default, newly require or newly refuse values of, by category
+(renamed, default changed, action required, security review), with the
+environment files that set it and what to do.
+
+It reads the app's .env and .env.* files and never prints a value from
+them: from a file that is not a template (.env, .env.production), only the
+names it sets are read. Every rename and removal is reported even when no
+file sets the variable (a deployment's environment is set elsewhere), and
+every change marked security-sensitive is a security review.
+
+--write upgrades the templates (.env.example, .env.*.example, .sample,
+.template, .dist): a renamed variable is renamed where a template sets or
+documents it, a removed one commented out, each with a note; nothing else
+in the file changes, and a file that is not a template is never written.
+Running it again changes nothing.
+
+It exits 1 while any change needs action or review, so a CI job sees it.
+--from analyzes from a release other than the app's (after gombit upgrade
+--to has already moved go.mod).`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			flags := cmd.Flags()
+			dir, _ := flags.GetString("dir")
+			from, _ := flags.GetString("from")
+			to, _ := flags.GetString("to")
+			write, _ := flags.GetBool("write")
+			asJSON, _ := flags.GetBool("json")
+			return runUpgradeConfig(stdout, dir, from, to, write, asJSON)
+		},
+	})
+	cmd.Flags().String("dir", ".", "application directory")
+	cmd.Flags().String("from", "", "release to analyze from (default: the framework version the app builds against)")
+	cmd.Flags().String("to", "", "target release (default: the newest release this gombit knows)")
+	cmd.Flags().Bool("write", false, "upgrade the environment templates (.env.example and the like); never .env")
+	cmd.Flags().Bool("json", false, "print the report as JSON")
+	return cmd
+}
+
+// upgradeConfigResult is gombit upgrade config --json.
+type upgradeConfigResult struct {
+	From    string   `json:"from"`
+	To      string   `json:"to"`
+	Written []string `json:"written"`
+	upgrade.ConfigReport
+}
+
+// upgradeConfigManifest is the manifest gombit upgrade config reads (a
+// test replaces it).
+var upgradeConfigManifest = upgrade.LoadManifest
+
+func runUpgradeConfig(stdout io.Writer, dir, from, to string, write, asJSON bool) error {
+	m, err := upgradeConfigManifest()
+	if err != nil {
+		return fmt.Errorf("gombit upgrade config: %w", err)
+	}
+	if to == "" {
+		to = m.Latest()
+	}
+	var releases []upgrade.Release
+	if from != "" {
+		releases, err = m.Path(from, to)
+	} else {
+		var b upgrade.Baseline
+		if b, err = upgrade.Detect(dir); err == nil {
+			from = b.Framework.Version
+			releases, err = m.PathFrom(b.Framework, to)
+		}
+	}
+	if err != nil {
+		return fmt.Errorf("gombit upgrade config: %w", err)
+	}
+	res := upgradeConfigResult{From: from, To: to, Written: []string{}}
+	if write {
+		written, err := upgrade.WriteConfigTemplates(dir, releases)
+		res.Written = append(res.Written, written...)
+		if err != nil {
+			if len(written) > 0 { // say what did change before the failure
+				_, _ = fmt.Fprintf(stdout, "Upgraded templates before the failure: %s\n", strings.Join(written, ", "))
+			}
+			return fmt.Errorf("gombit upgrade config: %w", err)
+		}
+	}
+	if res.ConfigReport, err = upgrade.AnalyzeConfig(dir, releases); err != nil {
+		return fmt.Errorf("gombit upgrade config: %w", err)
+	}
+	if asJSON {
+		data, err := json.MarshalIndent(res, "", "  ")
+		if err != nil {
+			return fmt.Errorf("gombit upgrade config: %w", err)
+		}
+		if _, err := fmt.Fprintf(stdout, "%s\n", data); err != nil {
+			return err
+		}
+	} else {
+		var b strings.Builder
+		fmt.Fprintf(&b, "Upgrade %s -> %s\n", from, to)
+		if write {
+			if len(res.Written) == 0 {
+				b.WriteString("No template needed upgrading.\n")
+			} else {
+				fmt.Fprintf(&b, "Upgraded templates: %s\n", strings.Join(res.Written, ", "))
+			}
+		}
+		if _, err := io.WriteString(stdout, b.String()); err != nil {
+			return err
+		}
+		if err := res.Render(stdout); err != nil {
+			return err
+		}
+	}
+	if res.NeedsAction() {
+		return errors.New("gombit upgrade config: configuration changes need action or review")
+	}
+	return nil
+}
+
 func newUpgradeContractCommand(stdout, stderr io.Writer) *cobra.Command {
 	cmd := silence(&cobra.Command{
 		Use:   "contract",
@@ -672,6 +796,7 @@ func upgradeUsage(stderr io.Writer) {
 	_, _ = fmt.Fprintln(stderr, "       gombit upgrade <subcommand>")
 	_, _ = fmt.Fprintln(stderr, "  baseline    Show (or record) the app's upgrade baseline")
 	_, _ = fmt.Fprintln(stderr, "  check       Report uses of deprecated framework APIs")
+	_, _ = fmt.Fprintln(stderr, "  config      Report the upgrade's configuration changes; --write upgrades .env templates")
 	_, _ = fmt.Fprintln(stderr, "  contract    Report stale generated contract artifacts; --write regenerates them")
 	_, _ = fmt.Fprintln(stderr, "  fix         Rewrite uses of changed framework APIs (codemods): print the patch, or --write it")
 	_, _ = fmt.Fprintln(stderr, "  notes       Print upgrade notes from the compatibility manifest")
