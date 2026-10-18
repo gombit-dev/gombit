@@ -143,10 +143,11 @@ func Stale(ctx context.Context, opts Options) (stale []StaleFile, resources int,
 }
 
 // Update renders the resource files once, as Stale does, and writes only
-// the stale generator-owned ones (and seed-once files that are absent, as
-// Generate does; never one that exists). It returns the files it wrote, a
-// seeded one as Missing, and how many resources the application has; when
-// a write fails, the ones written before it, with the error.
+// the stale generator-owned ones: never a seed-once file (hooks.go), which
+// Stale does not check either. Seeding one where the resource declares its
+// hooks in another file would redeclare them. It returns the files it
+// wrote, and how many resources the application has; when a write fails,
+// the ones written before it, with the error.
 func Update(ctx context.Context, opts Options) (written []StaleFile, resources int, err error) {
 	opts.withDefaults()
 	absWorkDir, models, artifacts, err := prepare(ctx, opts)
@@ -154,7 +155,7 @@ func Update(ctx context.Context, opts Options) (written []StaleFile, resources i
 		return nil, 0, err
 	}
 	stale, err := staleArtifacts(absWorkDir, artifacts)
-	if err != nil {
+	if err != nil || len(stale) == 0 {
 		return nil, len(models), err
 	}
 	byPath := map[string]StaleFile{}
@@ -163,18 +164,7 @@ func Update(ctx context.Context, opts Options) (written []StaleFile, resources i
 	}
 	for _, a := range artifacts {
 		f, isStale := byPath[a.Path]
-		if a.Ownership == resourcegen.SeedOnce {
-			// Seeded only when absent, as Generate does.
-			_, err := os.Stat(filepath.Join(absWorkDir, filepath.FromSlash(a.Path)))
-			if err == nil {
-				continue
-			}
-			if !errors.Is(err, os.ErrNotExist) {
-				return written, len(models), fmt.Errorf("generate: stat %s: %w", a.Path, err)
-			}
-			f, isStale = StaleFile{Path: a.Path, Missing: true}, true
-		}
-		if !isStale {
+		if a.Ownership != resourcegen.GeneratorOwned || !isStale {
 			continue
 		}
 		if err := applyArtifacts(opts, absWorkDir, []resourcegen.GeneratedArtifact{a}); err != nil {

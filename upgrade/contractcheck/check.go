@@ -339,24 +339,17 @@ func statusOf(stale []string) Status {
 
 // writeClient regenerates a stale document (from the live one) and a stale
 // client, through gombit client generate's own code, which refuses to
-// overwrite a file it did not generate.
+// overwrite a file it did not generate: that refusal (before anything is
+// written) leaves the client stale, with the reason. Any other failure is
+// an error naming what was written before it.
 func writeClient(ctx context.Context, workDir string, opts Options, spec, cl Result) (Result, Result, error) {
 	specPath := filepath.Join(workDir, filepath.FromSlash(opts.SpecPath))
-	if spec.Status == Stale {
-		// As gombit openapi generate writes it.
-		if err := contract.WriteOpenAPIFile(specPath, opts.LiveSpec); err != nil {
-			return spec, cl, fmt.Errorf("contractcheck: write %s: %w", opts.SpecPath, err)
-		}
-		spec.Status = Written
-	}
-	if cl.Status != Stale {
-		return spec, cl, nil
-	}
-	// Generate from the document the client was checked against: the live
-	// one when given (the committed file may not exist: gombit dev writes
-	// it, and an app need not commit it), else the committed one.
+	// Generate the client from the document it was checked against: the
+	// live one when given (the committed file may not exist: gombit dev
+	// writes it, and an app need not commit it), else the committed one.
+	// The live one is staged first, so nothing is written if that fails.
 	source := specPath
-	if opts.LiveSpec != nil {
+	if cl.Status == Stale && opts.LiveSpec != nil {
 		tmp, err := os.MkdirTemp("", "gombit-contract-*")
 		if err != nil {
 			return spec, cl, fmt.Errorf("contractcheck: %w", err)
@@ -367,17 +360,34 @@ func writeClient(ctx context.Context, workDir string, opts Options, spec, cl Res
 			return spec, cl, fmt.Errorf("contractcheck: %w", err)
 		}
 	}
+	if spec.Status == Stale {
+		// As gombit openapi generate writes it.
+		if err := contract.WriteOpenAPIFile(specPath, opts.LiveSpec); err != nil {
+			return spec, cl, fmt.Errorf("contractcheck: write %s: %w", opts.SpecPath, err)
+		}
+		spec.Status = Written
+	}
+	if cl.Status != Stale {
+		return spec, cl, nil
+	}
 	var out strings.Builder
 	err := client.Generate(ctx, client.Options{
 		WorkDir: workDir, SpecPath: source, OutDir: filepath.Join(workDir, filepath.FromSlash(opts.OutDir)),
 		NPXBinary: opts.NPXBinary, Stdout: &out, Stderr: opts.Stderr,
 	})
-	if err != nil {
-		// A file there that gombit did not generate: left as it is.
+	switch {
+	case errors.Is(err, client.ErrNotGenerated):
+		// A file there that gombit did not generate: nothing was written.
 		cl.Reason = "not written: " + err.Error()
-		return spec, cl, nil
+	case err != nil:
+		wrote := ""
+		if spec.Status == Written {
+			wrote = " (" + opts.SpecPath + " was written first)"
+		}
+		return spec, cl, fmt.Errorf("contractcheck: regenerate the client, whose files may be partly written%s: %w", wrote, err)
+	default:
+		cl.Status = Written
 	}
-	cl.Status = Written
 	return spec, cl, nil
 }
 

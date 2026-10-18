@@ -132,4 +132,15 @@ func TestUpgradeContractResources(t *testing.T) {
 	if out, err := contractRun(); err != nil || !strings.Contains(out, "resources: current") {
 		t.Fatalf("second check: %v\n%s", err, out)
 	}
+	// Hooks declared in another file: current, and --write seeds no
+	// hooks.go beside them (that would redeclare Hooks).
+	if err := os.Rename(hooks, filepath.Join(dest, "internal", "book", "myhooks.go")); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := contractRun("--write"); err != nil || !strings.Contains(out, "resources: current") {
+		t.Fatalf("--write with hooks in another file: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(hooks); !os.IsNotExist(err) {
+		t.Fatalf("--write seeded hooks.go (%v)", err)
+	}
 }

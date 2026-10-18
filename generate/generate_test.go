@@ -575,19 +575,20 @@ func TestUpdateReportsWhatAFailedWriteLeft(t *testing.T) {
 	}
 }
 
-// TestUpdateReportsSeededFiles: a seed-once file that is absent is seeded,
-// as Generate does, and reported (Missing); one that exists is not.
-func TestUpdateReportsSeededFiles(t *testing.T) {
+// TestUpdateNeverSeeds: a seed-once file that is absent (a resource that
+// declares its hooks in another file) is not written, so --write never
+// redeclares them; with nothing stale, nothing is written at all.
+func TestUpdateNeverSeeds(t *testing.T) {
 	dir := newAppLayout(t)
 	arts := bookArtifacts()
 	for _, a := range arts[:2] {
 		writeFile(t, filepath.Join(dir, filepath.FromSlash(a.Path)), string(a.Content))
 	}
 	written, _, err := Update(context.Background(), Options{WorkDir: dir, Stdout: io.Discard, Stderr: io.Discard, runner: &fakeRunner{out: artifactsJSON(t, arts)}})
-	if err != nil || len(written) != 1 || written[0] != (StaleFile{Path: "internal/book/hooks.go", Missing: true}) {
-		t.Fatalf("Update = %+v, %v; want the seeded hooks.go", written, err)
+	if err != nil || len(written) != 0 {
+		t.Fatalf("Update = %+v, %v; want nothing written", written, err)
 	}
-	if written, _, err := Update(context.Background(), Options{WorkDir: dir, Stdout: io.Discard, Stderr: io.Discard, runner: &fakeRunner{out: artifactsJSON(t, arts)}}); err != nil || len(written) != 0 {
-		t.Fatalf("Update again = %+v, %v; want nothing written", written, err)
+	if _, err := os.Stat(filepath.Join(dir, "internal", "book", "hooks.go")); !os.IsNotExist(err) {
+		t.Fatalf("hooks.go was seeded (%v)", err)
 	}
 }
