@@ -2,6 +2,7 @@ package contractcheck_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -99,7 +100,7 @@ func TestCheckContractClient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c := check(r, contractcheck.Client); c.Status != contractcheck.Stale || strings.Join(c.Stale, ",") != client.DefaultOutDir+"/client.ts" || !r.Stale() {
+	if c := check(r, contractcheck.Client); c.Status != contractcheck.Stale || strings.Join(c.Files, ",") != client.DefaultOutDir+"/client.ts" || !r.Stale() {
 		t.Fatalf("client = %+v", c)
 	}
 	r, err = contractcheck.Check(context.Background(), dir, contractcheck.Options{Write: true})
@@ -207,7 +208,7 @@ func TestCheckMissingClientFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c := check(r, contractcheck.Client); c.Status != contractcheck.Stale || strings.Join(c.Stale, ",") != client.DefaultOutDir+"/error.ts (missing)" {
+	if c := check(r, contractcheck.Client); c.Status != contractcheck.Stale || strings.Join(c.Files, ",") != client.DefaultOutDir+"/error.ts (missing)" {
 		t.Fatalf("client = %+v", c)
 	}
 	if _, err := contractcheck.Check(context.Background(), dir, contractcheck.Options{Write: true}); err != nil || read(t, errorTS) != want {
@@ -217,7 +218,9 @@ func TestCheckMissingClientFile(t *testing.T) {
 
 // TestCheckResourceLoaderFailure: when the resource loader cannot run (the
 // models do not compile, as after a breaking upgrade), the resources are
-// unchecked, with the reason, and the other checks still report.
+// unchecked, with the reason, and the other checks still report. The
+// running app's document is then unchecked too: the app was not built from
+// resources known to be current.
 func TestCheckResourceLoaderFailure(t *testing.T) {
 	t.Setenv("GOWORK", "off")
 	t.Setenv("GOFLAGS", "-mod=mod")
@@ -230,16 +233,54 @@ func TestCheckResourceLoaderFailure(t *testing.T) {
 		"internal/platform/database.go":  "package platform\n\nimport \"testapp/internal/book\"\n\nfunc AutoMigrate(db anyDB) error { return db.AutoMigrate(&book.Book{}) }\n",
 		"internal/book/.gombit-resource": "",
 		"internal/book/book.go":          "package book\n\ntype Book struct{ Title string }\n",
+		"openapi.json":                   `{"openapi":"3.1.0"}`,
 	})
-	r, err := contractcheck.Check(context.Background(), dir, contractcheck.Options{})
+	r, err := contractcheck.Check(context.Background(), dir, contractcheck.Options{LiveSpec: []byte(`{"openapi":"3.1.0","x":1}`), Write: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c := check(r, contractcheck.Resources); c.Status != contractcheck.Unchecked || !strings.Contains(c.Reason, "resource loader failed") {
+	if c := check(r, contractcheck.Resources); c.Status != contractcheck.Unchecked || !strings.Contains(c.Reason, "resource loader failed") || !r.Unchecked() || r.Stale() {
 		t.Fatalf("resources = %+v", c)
+	}
+	if c := check(r, contractcheck.OpenAPI); c.Status != contractcheck.Unchecked || !strings.Contains(c.Reason, "rebuild and restart the app") {
+		t.Fatalf("openapi = %+v; the live document predates resources that are not current", c)
+	}
+	if read(t, filepath.Join(dir, "openapi.json")) != `{"openapi":"3.1.0"}` {
+		t.Fatal("--write wrote the document of an app built before its resources were current")
 	}
 	if len(r.Checks) != 3 {
 		t.Fatalf("checks = %+v", r.Checks)
+	}
+}
+
+// TestCheckMalformedDocument: a committed document that is not JSON is a
+// stale document, with the reason (the rest of the report stands), and
+// --write replaces it with the live one; a live document that is not JSON
+// is an error, before anything is written.
+func TestCheckMalformedDocument(t *testing.T) {
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{"openapi.json": "{not json"})
+	live := []byte(`{"openapi":"3.1.0"}`)
+	r, err := contractcheck.Check(context.Background(), dir, contractcheck.Options{LiveSpec: live})
+	if err != nil || len(r.Checks) != 3 {
+		t.Fatalf("Check = %+v, %v", r, err)
+	}
+	if c := check(r, contractcheck.OpenAPI); c.Status != contractcheck.Stale || strings.Join(c.Files, ",") != "openapi.json" || !strings.Contains(c.Reason, "parse committed spec") {
+		t.Fatalf("openapi = %+v", c)
+	}
+	if _, err := contractcheck.Check(context.Background(), dir, contractcheck.Options{LiveSpec: []byte("<html>"), Write: true}); err == nil || read(t, filepath.Join(dir, "openapi.json")) != "{not json" {
+		t.Fatalf("a live document that is not JSON: %v", err)
+	}
+	r, err = contractcheck.Check(context.Background(), dir, contractcheck.Options{LiveSpec: live, Write: true})
+	if c := check(r, contractcheck.OpenAPI); err != nil || c.Status != contractcheck.Written || !strings.Contains(read(t, filepath.Join(dir, "openapi.json")), `"openapi"`) {
+		t.Fatalf("--write: %+v, %v", c, err)
+	}
+	// Without the live document, a client generated from a committed one
+	// that is not JSON is unchecked.
+	writeTree(t, dir, map[string]string{"openapi.json": "{not json", client.DefaultOutDir + "/schema.ts": "// Code generated by gombit client generate. DO NOT EDIT.\n"})
+	r, err = contractcheck.Check(context.Background(), dir, contractcheck.Options{})
+	if c := check(r, contractcheck.Client); err != nil || c.Status != contractcheck.Unchecked || !strings.Contains(c.Reason, "not JSON") {
+		t.Fatalf("client = %+v, %v", c, err)
 	}
 }
 
@@ -262,6 +303,43 @@ func TestCheckContractAgreesWithTheDriftGate(t *testing.T) {
 	}
 	if err := client.CheckDrift(context.Background(), client.DriftOptions{WorkDir: filepath.Join("..", "..")}); err != nil {
 		t.Fatalf("the drift gate itself: %v", err)
+	}
+
+	// Drifted: a copy of the fixture with a changed document and client
+	// file. The gate and the check name the same files.
+	dir := t.TempDir()
+	spec := sampleSpec(t)
+	writeTree(t, dir, map[string]string{client.SampleSpecPath: strings.Replace(string(spec), `"title":`, `"x-drift": true, "title":`, 1)})
+	for _, name := range client.GeneratedFiles() {
+		content := read(t, filepath.Join("..", "..", filepath.FromSlash(client.SampleOutDir), name))
+		if name == "client.ts" {
+			content += "// drifted\n"
+		}
+		writeTree(t, dir, map[string]string{client.SampleOutDir + "/" + name: content})
+	}
+	gate := client.CheckDrift(context.Background(), client.DriftOptions{WorkDir: dir})
+	if !errors.Is(gate, client.ErrDrift) {
+		t.Fatalf("the drift gate on the drifted copy: %v", gate)
+	}
+	r, err = contractcheck.Check(context.Background(), dir, contractcheck.Options{SpecPath: client.SampleSpecPath, OutDir: client.SampleOutDir, LiveSpec: spec})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var named []string
+	for _, a := range []contractcheck.Artifact{contractcheck.OpenAPI, contractcheck.Client} {
+		c := check(r, a)
+		if c.Status != contractcheck.Stale {
+			t.Errorf("%s = %+v; the gate fails on the drifted copy", a, c)
+		}
+		named = append(named, c.Files...)
+	}
+	if want := []string{client.SampleSpecPath, client.SampleOutDir + "/client.ts"}; strings.Join(named, ",") != strings.Join(want, ",") {
+		t.Fatalf("the check names %v, want %v", named, want)
+	}
+	for _, f := range named {
+		if !strings.Contains(gate.Error(), filepath.FromSlash(f)) {
+			t.Errorf("the gate (%v) does not name %s", gate, f)
+		}
 	}
 }
 

@@ -5,7 +5,6 @@
 package contractcheck
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -42,13 +41,15 @@ const (
 	// Current: the committed artifacts are what generation
 	// produces.
 	Current Status = "current"
-	// Stale: some differ (Stale lists them).
+	// Stale: some differ (Files lists them).
 	Stale Status = "stale"
 	// Written: they were stale, and regenerated (Write).
 	Written Status = "written"
 	// Absent: the application has none of them.
 	Absent Status = "absent"
-	// Unchecked: they could not be checked (Reason says why).
+	// Unchecked: they could not be checked (Reason says why). A gate
+	// that must not pass on what it could not see fails on it too
+	// (Report.Unchecked; gombit upgrade contract --strict).
 	Unchecked Status = "unchecked"
 )
 
@@ -56,10 +57,12 @@ const (
 type Result struct {
 	Artifact Artifact `json:"artifact"`
 	Status   Status   `json:"status"`
-	// Stale are the stale files, relative to the application directory
-	// (with Write: the ones regenerated).
-	Stale []string `json:"stale"`
-	// Reason says why it is unchecked, or what a refused write left.
+	// Files are the files the status is about, relative to the
+	// application directory: the stale ones, or (Written) the ones
+	// regenerated.
+	Files []string `json:"files"`
+	// Reason says why it is unchecked; for a stale one, what else there is
+	// to know: why the document is stale, or why a write was refused.
 	Reason string `json:"reason,omitempty"`
 	// Regenerate is the command that regenerates them.
 	Regenerate string `json:"regenerate"`
@@ -81,7 +84,17 @@ func (r Report) Stale() bool {
 	return false
 }
 
-// Options configures CheckContract.
+// Unchecked reports whether any check could not be made.
+func (r Report) Unchecked() bool {
+	for _, c := range r.Checks {
+		if c.Status == Unchecked {
+			return true
+		}
+	}
+	return false
+}
+
+// Options configures Check.
 type Options struct {
 	// SpecPath is the committed OpenAPI document and OutDir the generated
 	// client directory, relative to the application directory: by default
@@ -106,16 +119,17 @@ type Options struct {
 	Stderr    io.Writer
 }
 
-// CheckContract reports whether the generated contract artifacts of the
-// application in workDir are what generation produces now, which an upgrade
-// can change: the framework renders the resource files and the client, and
-// the running app derives the OpenAPI document. Each check is the same one
-// the existing drift gates make (gombit generate --check, gombit client
-// check), so it agrees with them:
+// Check reports whether the generated contract artifacts of the application
+// in workDir are what generation produces now, which an upgrade can change:
+// the framework renders the resource files and the client, and the running
+// app derives the OpenAPI document. Each check is the same one the existing
+// drift gates make (gombit generate --check, gombit client check), so it
+// agrees with them:
 //
 //   - the resource files are rendered as gombit generate --check renders
 //     them, by a loader run inside the application's module, so with the
-//     framework version its go.mod requires;
+//     framework version its go.mod requires; they are unchecked when the
+//     loader fails (the models do not compile);
 //   - the OpenAPI document is compared with LiveSpec (semantically), and
 //     is unchecked without it;
 //   - the client is regenerated, as gombit client generate does, from
@@ -123,8 +137,16 @@ type Options struct {
 //     it is unchecked when there is no document, or no npx to run
 //     openapi-typescript.
 //
+// The artifacts depend on each other: the running app is built from the
+// resource files, and serves the document the client is generated from. So
+// while the resources are not current (stale, just regenerated, or
+// unchecked), the checks against LiveSpec are unchecked: the app must be
+// rebuilt first.
+//
 // With Write it regenerates what is stale, through the same generation,
-// and reports what it wrote.
+// and reports what it wrote; it never writes the document or the client
+// from an app built before the resources were. A failed write is an error,
+// naming the files written before it.
 func Check(ctx context.Context, workDir string, opts Options) (Report, error) {
 	if opts.SpecPath == "" {
 		opts.SpecPath = client.DefaultSpecPath
@@ -138,11 +160,14 @@ func Check(ctx context.Context, workDir string, opts Options) (Report, error) {
 	if opts.Stderr == nil {
 		opts.Stderr = io.Discard
 	}
+	if opts.LiveSpec != nil && !json.Valid(opts.LiveSpec) {
+		return Report{}, errors.New("contractcheck: the live OpenAPI document is not JSON")
+	}
 	resources, err := checkResources(ctx, workDir, opts)
 	if err != nil {
 		return Report{}, err
 	}
-	spec, cl, err := checkClient(ctx, workDir, opts)
+	spec, cl, err := checkClient(ctx, workDir, opts, resources)
 	if err != nil {
 		return Report{}, err
 	}
@@ -150,7 +175,7 @@ func Check(ctx context.Context, workDir string, opts Options) (Report, error) {
 }
 
 func checkResources(ctx context.Context, workDir string, opts Options) (Result, error) {
-	c := Result{Artifact: Resources, Stale: []string{}, Regenerate: "gombit generate"}
+	c := Result{Artifact: Resources, Files: []string{}, Regenerate: "gombit generate"}
 	if resourcegen.ValidateAppLayout(workDir) != nil {
 		c.Status = Absent // not a gombit new application: no resources
 		return c, nil
@@ -161,19 +186,23 @@ func checkResources(ctx context.Context, workDir string, opts Options) (Result, 
 		check = generate.Update // renders once, writes only the stale files
 	}
 	stale, resources, err := check(ctx, gen)
-	if err != nil {
+	var loaderErr *generate.LoaderError
+	switch {
+	case errors.As(err, &loaderErr):
 		// The loader compiles the app's models: after an upgrade with
 		// breaking changes they may not compile yet. Say so, and go on.
 		c.Status, c.Reason = Unchecked, "the resource loader failed (fix the build first): "+err.Error()
 		return c, nil
+	case err != nil && len(stale) > 0: // Update wrote these, then failed
+		return c, fmt.Errorf("contractcheck: regenerate the resources: wrote %s, then: %w", strings.Join(paths(stale), ", "), err)
+	case err != nil:
+		return c, fmt.Errorf("contractcheck: check the resources: %w", err)
 	}
 	if resources == 0 {
 		c.Status = Absent
 		return c, nil
 	}
-	for _, f := range stale {
-		c.Stale = append(c.Stale, f.Path)
-	}
+	c.Files = paths(stale)
 	switch {
 	case len(stale) == 0:
 		c.Status = Current
@@ -185,12 +214,21 @@ func checkResources(ctx context.Context, workDir string, opts Options) (Result, 
 	return c, nil
 }
 
+func paths(files []generate.StaleFile) []string {
+	out := []string{}
+	for _, f := range files {
+		out = append(out, f.Path)
+	}
+	return out
+}
+
 // checkClient checks the committed OpenAPI document (against the live one)
 // and the generated client (against what the live, or else the committed,
-// document generates).
-func checkClient(ctx context.Context, workDir string, opts Options) (spec, cl Result, err error) {
-	spec = Result{Artifact: OpenAPI, Stale: []string{}, Regenerate: "gombit openapi generate --url <the running app>/openapi.json --out " + opts.SpecPath}
-	cl = Result{Artifact: Client, Stale: []string{}, Regenerate: "gombit client generate --spec " + opts.SpecPath + " --out " + opts.OutDir}
+// document generates), given the resources' result: the live document is
+// the app's as built from them.
+func checkClient(ctx context.Context, workDir string, opts Options, resources Result) (spec, cl Result, err error) {
+	spec = Result{Artifact: OpenAPI, Files: []string{}, Regenerate: "gombit openapi generate --url <the running app>/openapi.json --out " + opts.SpecPath}
+	cl = Result{Artifact: Client, Files: []string{}, Regenerate: "gombit client generate --spec " + opts.SpecPath + " --out " + opts.OutDir}
 	specPath := filepath.Join(workDir, filepath.FromSlash(opts.SpecPath))
 	outDir := filepath.Join(workDir, filepath.FromSlash(opts.OutDir))
 	committedSpec, specErr := os.ReadFile(specPath) // #nosec G304 -- the application's committed OpenAPI document
@@ -205,11 +243,24 @@ func checkClient(ctx context.Context, workDir string, opts Options) (spec, cl Re
 		}
 	}
 
+	// The running app was built from the resource files: unless they are
+	// current, its document is not the one it will serve once rebuilt.
+	rebuild := ""
+	switch resources.Status {
+	case Stale:
+		rebuild = "the resource files are stale, so the running app's document is not the one it will serve: regenerate them (gombit generate), rebuild and restart the app, then rerun"
+	case Written:
+		rebuild = "the resource files were just regenerated, so the running app's document predates them: rebuild and restart the app, then rerun"
+	case Unchecked:
+		rebuild = "the resource files could not be checked, so the running app's document may not be current: fix the build, rebuild and restart the app, then rerun"
+	}
 	switch {
 	case !hasSpec: // not committed (gombit dev writes it): not the app's artifact
 		spec.Status = Absent
 	case opts.LiveSpec == nil:
 		spec.Status, spec.Reason = Unchecked, "it is derived from the running app: pass its document (gombit upgrade contract --url http://127.0.0.1:8080/openapi.json)"
+	case rebuild != "":
+		spec.Status, spec.Reason = Unchecked, rebuild
 	}
 	source := opts.LiveSpec
 	if source == nil {
@@ -220,23 +271,27 @@ func checkClient(ctx context.Context, workDir string, opts Options) (spec, cl Re
 		cl.Status = Absent
 	case source == nil:
 		cl.Status, cl.Reason = Unchecked, "there is no OpenAPI document to generate it from ("+opts.SpecPath+", or --url)"
+	case opts.LiveSpec != nil && rebuild != "":
+		cl.Status, cl.Reason = Unchecked, rebuild
+	case !json.Valid(source):
+		cl.Status, cl.Reason = Unchecked, "the OpenAPI document it is generated from ("+opts.SpecPath+") is not JSON"
 	}
 	if _, err := exec.LookPath(opts.NPXBinary); err != nil && cl.Status == "" {
 		cl.Status, cl.Reason = Unchecked, "openapi-typescript runs through npx, which is not installed: "+err.Error()
 	}
 
-	// The document against the live one; the client against what the
-	// source document generates (client.Drift, the comparison gombit client
-	// check makes, given that document as both the committed and the
-	// current one, so only the client can differ).
+	// The document against the live one, semantically; the client against
+	// what the source document generates, byte for byte (the comparisons
+	// gombit client check makes).
 	if spec.Status == "" {
-		equal, err := jsonEqual(committedSpec, opts.LiveSpec)
-		if err != nil {
-			return spec, cl, err
-		}
-		spec.Status = Current
-		if !equal {
-			spec.Status, spec.Stale = Stale, []string{opts.SpecPath}
+		equal, err := client.SpecEqual(committedSpec, opts.LiveSpec)
+		switch {
+		case err != nil: // the committed one is not JSON: regenerating fixes it
+			spec.Status, spec.Files, spec.Reason = Stale, []string{opts.SpecPath}, err.Error()
+		case equal:
+			spec.Status = Current
+		default:
+			spec.Status, spec.Files = Stale, []string{opts.SpecPath}
 		}
 	}
 	if cl.Status == "" {
@@ -244,7 +299,7 @@ func checkClient(ctx context.Context, workDir string, opts Options) (spec, cl Re
 		if err != nil {
 			return spec, cl, err
 		}
-		cl.Stale, cl.Status = stale, statusOf(stale)
+		cl.Files, cl.Status = stale, statusOf(stale)
 	}
 	if !opts.Write {
 		return spec, cl, nil
@@ -254,17 +309,8 @@ func checkClient(ctx context.Context, workDir string, opts Options) (spec, cl Re
 
 // clientDrift are the client files that differ from what source generates.
 func clientDrift(ctx context.Context, workDir string, opts Options, source []byte) ([]string, error) {
-	tmp, err := os.MkdirTemp("", "gombit-contract-*")
-	if err != nil {
-		return nil, fmt.Errorf("contractcheck: %w", err)
-	}
-	defer func() { _ = os.RemoveAll(tmp) }()
-	specPath := filepath.Join(tmp, "openapi.json")
-	if err := os.WriteFile(specPath, source, 0o600); err != nil { // #nosec G703 -- a file in this function's own temporary directory
-		return nil, fmt.Errorf("contractcheck: %w", err)
-	}
-	drifted, err := client.Drift(ctx, client.DriftOptions{
-		WorkDir: workDir, SpecPath: specPath, OutDir: opts.OutDir, SpecBytes: source,
+	drifted, err := client.ClientDrift(ctx, client.DriftOptions{
+		WorkDir: workDir, OutDir: opts.OutDir, SpecBytes: source,
 		NPXBinary: opts.NPXBinary, Stderr: opts.Stderr,
 	})
 	if err != nil {
@@ -272,9 +318,6 @@ func clientDrift(ctx context.Context, workDir string, opts Options, source []byt
 	}
 	stale := []string{}
 	for _, d := range drifted {
-		if d.Spec {
-			continue
-		}
 		name := filepath.ToSlash(d.Path)
 		if d.Missing {
 			name += " (missing)"
@@ -282,19 +325,6 @@ func clientDrift(ctx context.Context, workDir string, opts Options, source []byt
 		stale = append(stale, name)
 	}
 	return stale, nil
-}
-
-func jsonEqual(a, b []byte) (bool, error) {
-	var x, y any
-	if err := json.Unmarshal(a, &x); err != nil {
-		return false, fmt.Errorf("contractcheck: the committed OpenAPI document is not JSON: %w", err)
-	}
-	if err := json.Unmarshal(b, &y); err != nil {
-		return false, fmt.Errorf("contractcheck: the live OpenAPI document is not JSON: %w", err)
-	}
-	xa, _ := json.Marshal(x)
-	ya, _ := json.Marshal(y)
-	return bytes.Equal(xa, ya), nil
 }
 
 func statusOf(stale []string) Status {
@@ -341,7 +371,7 @@ func writeClient(ctx context.Context, workDir string, opts Options, spec, cl Res
 	})
 	if err != nil {
 		// A file there that gombit did not generate: left as it is.
-		cl.Reason = err.Error()
+		cl.Reason = "not written: " + err.Error()
 		return spec, cl, nil
 	}
 	cl.Status = Written
@@ -356,16 +386,16 @@ func (r Report) Render(w io.Writer) error {
 		fmt.Fprintf(&b, "  %-9s %s", c.Artifact+":", c.Status)
 		switch c.Status {
 		case Stale:
-			fmt.Fprintf(&b, ": %s\n      regenerate: %s (or gombit upgrade contract --write)\n", strings.Join(c.Stale, ", "), c.Regenerate)
+			fmt.Fprintf(&b, ": %s\n      regenerate: %s (or gombit upgrade contract --write)\n", strings.Join(c.Files, ", "), c.Regenerate)
 		case Written:
-			fmt.Fprintf(&b, ": %s\n", strings.Join(c.Stale, ", "))
+			fmt.Fprintf(&b, ": %s\n", strings.Join(c.Files, ", "))
 		case Unchecked:
 			fmt.Fprintf(&b, ": %s\n", c.Reason)
 		default:
 			b.WriteString("\n")
 		}
 		if c.Status == Stale && c.Reason != "" {
-			fmt.Fprintf(&b, "      not written: %s\n", c.Reason)
+			fmt.Fprintf(&b, "      %s\n", c.Reason)
 		}
 	}
 	_, err := io.WriteString(w, b.String())

@@ -378,11 +378,15 @@ version.
   - the committed `openapi.json`, against the running app's (`--url`);
   - the TypeScript client, as `gombit client check` compares it.
 
-  `--write` regenerates the stale ones with the same generation, writing
-  generator-owned files only (never `hooks.go`, nor a client-directory
-  file gombit did not generate). It exits 1 while anything is stale, and
-  `gombit upgrade --dry-run` now points to it after the dependency change.
-  `contractcheck.Check`, `generate.Stale` and `client.Drift` are the API
+  While the resource files are not current, the checks against the running
+  app's document are unchecked (rebuild and rerun). `--write` regenerates
+  the stale ones with the same generation, writing generator-owned files
+  only (never `hooks.go`, nor a client-directory file gombit did not
+  generate). It exits 1 while anything is stale; `--strict` also fails on
+  an artifact it could not check, for a CI gate. `gombit upgrade --dry-run`
+  now points to it after the dependency change. `contractcheck.Check`,
+  `generate.Stale`, `generate.Update`, `client.ClientDrift` and
+  `client.SpecEqual` are the API
   ([#348](https://github.com/gombit-dev/gombit/issues/348)).
 - [Session management](docs/auth.md#sessions) in both auth modes:
   `GET /auth/sessions` lists the user's active sessions with an opaque id,

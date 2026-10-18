@@ -408,7 +408,14 @@ generator-owned files: never a resource's hooks file, nor a file of the
 client directory gombit did not generate (that is reported, not
 overwritten).
 
-It exits 1 while anything is left stale, so a CI job can gate on it.`,
+While the resource files are not current, the checks against --url are
+unchecked: the running app was built from them, so rebuild and restart it,
+then rerun. --write never writes the document or the client from it then.
+
+It exits 1 while anything is left stale. An artifact it could not check is
+reported with the reason and does not fail it (without --url the document
+is always unchecked); --strict fails on it too. A CI gate runs it with
+--strict and --url, against an app built from the committed resources.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			flags := cmd.Flags()
@@ -419,6 +426,7 @@ It exits 1 while anything is left stale, so a CI job can gate on it.`,
 			write, _ := flags.GetBool("write")
 			npx, _ := flags.GetString("npx")
 			asJSON, _ := flags.GetBool("json")
+			strict, _ := flags.GetBool("strict")
 			opts := contractcheck.Options{SpecPath: spec, OutDir: out, Write: write, NPXBinary: npx, Stderr: stderr}
 			if rawURL != "" {
 				live, err := fetchOpenAPI(cmd.Context(), rawURL)
@@ -442,8 +450,11 @@ It exits 1 while anything is left stale, so a CI job can gate on it.`,
 			} else if err := report.Render(stdout); err != nil {
 				return err
 			}
-			if report.Stale() {
+			switch {
+			case report.Stale():
 				return errors.New("gombit upgrade contract: generated contract artifacts are stale")
+			case strict && report.Unchecked():
+				return errors.New("gombit upgrade contract: some generated contract artifacts could not be checked (--strict)")
 			}
 			return nil
 		},
@@ -455,6 +466,7 @@ It exits 1 while anything is left stale, so a CI job can gate on it.`,
 	cmd.Flags().Bool("write", false, "regenerate stale artifacts (generator-owned files only)")
 	cmd.Flags().String("npx", "npx", "npx binary used to run openapi-typescript")
 	cmd.Flags().Bool("json", false, "print the report as JSON")
+	cmd.Flags().Bool("strict", false, "also exit 1 when an artifact could not be checked (for a CI gate)")
 	return cmd
 }
 

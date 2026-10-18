@@ -546,3 +546,31 @@ func TestUpdateWritesOnlyStaleFiles(t *testing.T) {
 		}
 	}
 }
+
+// TestUpdateReportsWhatAFailedWriteLeft: a write failure returns the stale
+// files written before it, with the write error, which is not a
+// LoaderError; a loader failure is one.
+func TestUpdateReportsWhatAFailedWriteLeft(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs unix permissions, as a user they bind")
+	}
+	dir := newAppLayout(t)
+	arts := append(bookArtifacts()[:1], resourcegen.GeneratedArtifact{Path: "internal/locked/x.gen.go", Content: []byte("package locked\n"), Ownership: resourcegen.GeneratorOwned})
+	locked := filepath.Join(dir, "internal", "locked")
+	if err := os.MkdirAll(locked, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(locked, 0o500); err != nil { // #nosec G302 -- a test directory made read-only
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) }) // #nosec G302 -- restored for cleanup
+	written, _, err := Update(context.Background(), Options{WorkDir: dir, Stdout: io.Discard, Stderr: io.Discard, runner: &fakeRunner{out: artifactsJSON(t, arts)}})
+	var loaderErr *LoaderError
+	if err == nil || errors.As(err, &loaderErr) || len(written) != 1 || written[0].Path != "internal/book/dto.gen.go" {
+		t.Fatalf("Update = %+v, %v; want dto.gen.go written, then the write error", written, err)
+	}
+	_, _, err = Stale(context.Background(), Options{WorkDir: dir, Stdout: io.Discard, Stderr: io.Discard, runner: &fakeRunner{err: errors.New("models do not compile")}})
+	if !errors.As(err, &loaderErr) || !strings.Contains(err.Error(), "models do not compile") {
+		t.Fatalf("a loader failure = %v; want a LoaderError", err)
+	}
+}

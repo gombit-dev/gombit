@@ -121,32 +121,32 @@ type DriftedFile struct {
 	Missing bool `json:"missing,omitempty"`
 }
 
-// Drift reports the committed contract artifacts that differ from what the
-// contract (opts.SpecBytes, or the in-process API, as CheckDrift takes it)
-// produces, by the same comparison CheckDrift fails on: the document
-// semantically, the generated client files byte for byte. It writes
-// nothing outside a temporary directory; Write is ignored.
-func Drift(ctx context.Context, opts DriftOptions) ([]DriftedFile, error) {
+// ClientDrift reports the generated client files in opts.OutDir that differ
+// from what opts.SpecBytes generates, by the comparison CheckDrift fails on
+// (byte for byte; a file that is not there is Missing). Only the client is
+// compared: opts.SpecPath is not read, and the document is the caller's to
+// compare (SpecEqual). It writes nothing outside a temporary directory;
+// Write and API are ignored.
+func ClientDrift(ctx context.Context, opts DriftOptions) ([]DriftedFile, error) {
 	if ctx == nil {
 		return nil, errors.New("client: nil context")
 	}
-	opts = normalizeDriftOptions(opts)
-	spec := opts.SpecBytes
-	if spec == nil {
-		api := opts.API
-		if api == nil {
-			app, err := SampleApp()
-			if err != nil {
-				return nil, fmt.Errorf("client: sample app: %w", err)
-			}
-			api = app.API()
-		}
-		var err error
-		if spec, err = contract.OpenAPIJSON(api); err != nil {
-			return nil, err
-		}
+	if opts.SpecBytes == nil {
+		return nil, errors.New("client: ClientDrift needs SpecBytes")
 	}
-	return driftedArtifacts(ctx, opts, spec)
+	opts = normalizeDriftOptions(opts)
+	tmpDir, err := os.MkdirTemp("", "gombit-drift-*")
+	if err != nil {
+		return nil, fmt.Errorf("client: temp dir: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+	return clientFilesDrift(ctx, opts, tmpDir, opts.SpecBytes)
+}
+
+// SpecEqual reports whether two OpenAPI documents are the same JSON value,
+// the comparison CheckDrift makes: whitespace and key order do not count.
+func SpecEqual(committed, current []byte) (bool, error) {
+	return jsonEqual(committed, current)
 }
 
 // GeneratedFiles are the files of a generated client directory that
@@ -208,11 +208,6 @@ func driftedArtifacts(ctx context.Context, opts DriftOptions, generatedSpec []by
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	generatedSpecPath := filepath.Join(tmpDir, "openapi.json")
-	if err := contract.WriteOpenAPIFile(generatedSpecPath, generatedSpec); err != nil {
-		return nil, err
-	}
-
 	specPath := resolvePath(opts.WorkDir, opts.SpecPath)
 	// #nosec G304 -- spec path is a user-supplied committed fixture
 	committedSpec, err := os.ReadFile(specPath)
@@ -229,6 +224,21 @@ func driftedArtifacts(ctx context.Context, opts DriftOptions, generatedSpec []by
 		drifted = append(drifted, DriftedFile{Path: opts.SpecPath, Spec: true})
 	}
 
+	files, err := clientFilesDrift(ctx, opts, tmpDir, generatedSpec)
+	if err != nil {
+		return nil, err
+	}
+	return append(drifted, files...), nil
+}
+
+// clientFilesDrift generates the client from spec under tmpDir and compares
+// it with the committed one, file by file.
+func clientFilesDrift(ctx context.Context, opts DriftOptions, tmpDir string, spec []byte) ([]DriftedFile, error) {
+	generatedSpecPath := filepath.Join(tmpDir, "openapi.json")
+	if err := contract.WriteOpenAPIFile(generatedSpecPath, spec); err != nil {
+		return nil, err
+	}
+	var drifted []DriftedFile
 	generatedOut := filepath.Join(tmpDir, "generated")
 	if err := Generate(ctx, Options{
 		WorkDir:   tmpDir,

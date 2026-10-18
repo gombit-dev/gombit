@@ -106,6 +106,19 @@ func Generate(ctx context.Context, opts Options) error {
 	return applyArtifacts(opts, absWorkDir, artifacts)
 }
 
+// LoaderError is a failure to run the resource loader: the go run, inside
+// the application's module, that compiles its models and renders their
+// files. After an upgrade with breaking changes the models may not compile
+// yet; every other error of Stale and Update is about the application's
+// layout or files.
+type LoaderError struct {
+	Err error
+}
+
+func (e *LoaderError) Error() string { return "generate: run resource loader: " + e.Err.Error() }
+
+func (e *LoaderError) Unwrap() error { return e.Err }
+
 // StaleFile is a generator-owned file that differs from what the models
 // produce, or is missing.
 type StaleFile struct {
@@ -131,8 +144,9 @@ func Stale(ctx context.Context, opts Options) (stale []StaleFile, resources int,
 
 // Update renders the resource files once, as Stale does, and writes only
 // the stale generator-owned ones (and seed-once files that are absent, as
-// Generate does; never one that exists). It returns what it wrote, and how
-// many resources the application has.
+// Generate does; never one that exists). It returns the stale files it
+// wrote, and how many resources the application has; when a write fails,
+// the ones written before it, with the error.
 func Update(ctx context.Context, opts Options) (written []StaleFile, resources int, err error) {
 	opts.withDefaults()
 	absWorkDir, models, artifacts, err := prepare(ctx, opts)
@@ -143,20 +157,24 @@ func Update(ctx context.Context, opts Options) (written []StaleFile, resources i
 	if err != nil || len(stale) == 0 {
 		return nil, len(models), err
 	}
-	isStale := map[string]bool{}
+	byPath := map[string]StaleFile{}
 	for _, f := range stale {
-		isStale[f.Path] = true
+		byPath[f.Path] = f
 	}
-	var write []resourcegen.GeneratedArtifact
 	for _, a := range artifacts {
-		if a.Ownership == resourcegen.SeedOnce || isStale[a.Path] {
-			write = append(write, a)
+		f, isStale := byPath[a.Path]
+		if a.Ownership != resourcegen.SeedOnce && !isStale {
+			continue
+		}
+		if err := applyArtifacts(opts, absWorkDir, []resourcegen.GeneratedArtifact{a}); err != nil {
+			return written, len(models), err
+		}
+		if isStale {
+			written = append(written, f)
 		}
 	}
-	if err := applyArtifacts(opts, absWorkDir, write); err != nil {
-		return nil, len(models), err
-	}
-	return stale, len(models), nil
+	sort.Slice(written, func(i, j int) bool { return written[i].Path < written[j].Path })
+	return written, len(models), nil
 }
 
 // prepare finds the application's model-first resources and renders their
@@ -450,7 +468,7 @@ func loadArtifacts(ctx context.Context, opts Options, absWorkDir string, models 
 	goArgs = append(goArgs, overlayArg...)
 	goArgs = append(goArgs, "./"+filepath.ToSlash(loaderRel))
 	if err := opts.runner.Run(ctx, absWorkDir, "go", goArgs, &stdout, opts.Stderr); err != nil {
-		return nil, fmt.Errorf("generate: run resource loader: %w", err)
+		return nil, &LoaderError{Err: err}
 	}
 
 	var artifacts []resourcegen.GeneratedArtifact

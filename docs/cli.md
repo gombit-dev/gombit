@@ -912,7 +912,12 @@ generation produces now; run it after `gombit upgrade --to`.
 - **`--write`:** regenerates stale artifacts with that same generation,
   generator-owned files only. A handwritten file is reported, never
   overwritten.
-- **Exit status:** 1 while anything is left stale.
+- **Dependencies:** while the resource files are not current, the checks
+  against `--url` are unchecked (rebuild and restart the app, then rerun),
+  and `--write` does not write the document or the client.
+- **Exit status:** 1 while anything is left stale, or on a failed write.
+  An artifact it could not check does not fail it unless `--strict`, which
+  a CI gate uses (with `--url`).
 
 See [upgrade.md](upgrade.md#generated-contract-artifacts).
 
@@ -925,6 +930,7 @@ See [upgrade.md](upgrade.md#generated-contract-artifacts).
 | `--write` | Regenerate stale artifacts (generator-owned files only) | off |
 | `--npx` | npx binary that runs openapi-typescript | `npx` |
 | `--json` | Print the report as JSON | off |
+| `--strict` | Also exit 1 when an artifact could not be checked | off |
 
 ## `gombit upgrade fix`
 
