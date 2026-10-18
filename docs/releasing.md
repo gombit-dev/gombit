@@ -20,8 +20,15 @@ automatically on merge.
    definitions at the bottom.
 4. **Sanity-check the docs** that name a version — mainly
    [`installation.md`](installation.md).
-5. **Decide the number.** Pre-1.0, breaking changes bump the minor
-   (`0.1.0` → `0.2.0`); fixes bump the patch.
+5. **Decide the number** by the
+   [compatibility policy](compatibility.md):
+   - Pre-1.0, a breaking change bumps the minor (`0.1.0` → `0.2.0`), and a
+     release with only fixes bumps the patch.
+   - The security exception lets a breaking `security` change ship in a
+     patch.
+   - The release gate (step 6) refuses a smaller bump than the manifest's
+     changes need, and names the release it needs. Dispatch the Release
+     workflow with that bump.
 6. **Name the release in the compatibility manifest**
    ([`upgrade/manifest.yaml`](../upgrade/manifest.yaml)). Rename its
    `unreleased` entry to the version, or, only when there is no `unreleased`

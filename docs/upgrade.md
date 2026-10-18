@@ -15,6 +15,11 @@ check`), **rewriting them with codemods** (`gombit upgrade fix`), the
 **compatibility manifest** (what each release asks of an application moving
 to it).
 
+
+Which releases may break, and how long a deprecated API stays, is set by
+the [compatibility and deprecation policy](compatibility.md). The tooling
+follows that policy.
+
 ## Planning an upgrade
 
 `gombit upgrade --dry-run` works out what moving the application to a

@@ -126,5 +126,9 @@ func TestShippedCodemodsAreValid(t *testing.T) {
 		if err := c.validate(); err != nil {
 			t.Error(err)
 		}
+		// The policy's support window starts at the release that ships it.
+		if c.Since == "" {
+			t.Errorf("codemod %s: Since names no release (the compatibility policy keeps it until RemovableFrom(Since))", id)
+		}
 	}
 }

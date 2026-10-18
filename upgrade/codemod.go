@@ -20,6 +20,7 @@ import (
 	"strings"
 	"sync"
 
+	"golang.org/x/mod/semver"
 	"golang.org/x/tools/go/ast/astutil"
 	"golang.org/x/tools/go/packages"
 
@@ -40,6 +41,10 @@ type Codemod struct {
 	ID string
 	// Description says what it rewrites, in one line.
 	Description string
+	// Since is the release that ships it. The compatibility policy keeps
+	// it registered at least until RemovableFrom(Since), so an app that
+	// skips releases still has it (docs/compatibility.md).
+	Since string
 	// Package is the import path of the framework package declaring the
 	// API it rewrites.
 	Package string
@@ -136,6 +141,9 @@ func (c Codemod) validate() error {
 	}
 	if strings.TrimSpace(c.Description) == "" || strings.Contains(c.Description, "\n") {
 		return fmt.Errorf("upgrade: codemod %s: description must be one non-empty line", c.ID)
+	}
+	if c.Since != "" && (!semver.IsValid(c.Since) || semver.Canonical(c.Since) != c.Since) {
+		return fmt.Errorf("upgrade: codemod %s: since %q, want a release (vX.Y.Z)", c.ID, c.Since)
 	}
 	if !isFrameworkPath(c.Package) {
 		return fmt.Errorf("upgrade: codemod %s: package %q is not a framework package", c.ID, c.Package)

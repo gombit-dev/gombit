@@ -219,6 +219,7 @@ func (m *Manifest) validate() error {
 		return errors.New("no releases")
 	}
 	ids := map[string]string{}
+	stable := "" // the latest stable release so far: what the policy judges a release against
 	for i, r := range m.Releases {
 		switch {
 		case i == 0 && (r.Version == Unreleased || len(r.Changes) > 0):
@@ -233,6 +234,14 @@ func (m *Manifest) validate() error {
 			return fmt.Errorf("release %q: not a canonical semantic version (vMAJOR.MINOR.PATCH)", r.Version)
 		case i > 0 && semver.Compare(m.Releases[i-1].Version, r.Version) >= 0:
 			return fmt.Errorf("release %s: releases must be in ascending order, without repeats (after %s)", r.Version, m.Releases[i-1].Version)
+		}
+		if stable != "" {
+			if err := checkPolicy(stable, r); err != nil {
+				return err
+			}
+		}
+		if r.Version != Unreleased && semver.Prerelease(r.Version) == "" {
+			stable = r.Version
 		}
 		for _, c := range r.Changes {
 			if err := c.validate(); err != nil {
@@ -299,6 +308,16 @@ func (m *Manifest) Release(version string) (Release, error) {
 // nothing; the release workflow refuses it.
 func (m *Manifest) CheckRelease(tag string) error {
 	if _, err := m.Release(tag); err != nil {
+		// The usual miss: the unreleased entry is not named yet. Say which
+		// release the compatibility policy needs it to be.
+		if r, uerr := m.Release(Unreleased); uerr == nil && len(r.Changes) > 0 {
+			latest := m.Latest()
+			need, breaking := RequiredBump(latest, r.Changes)
+			if len(breaking) > 0 {
+				return fmt.Errorf("%w; rename its %s entry to the release (it declares breaking changes, %s, so the compatibility policy needs a %s release after %s: %s)", err, Unreleased, strings.Join(breaking, ", "), need, latest, nextRelease(latest, need))
+			}
+			return fmt.Errorf("%w; rename its %s entry to the release", err, Unreleased)
+		}
 		return err
 	}
 	if latest := m.Latest(); latest != tag {

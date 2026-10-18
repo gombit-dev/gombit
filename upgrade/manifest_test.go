@@ -377,6 +377,7 @@ var changelogExempt = map[int]string{
 	344: "gombit upgrade --to itself: new, nothing to act on",
 	345: "gombit upgrade check itself: new, nothing to act on",
 	346: "gombit upgrade fix itself: new, nothing to act on",
+	350: "the compatibility policy itself: documents and enforces release rules, nothing in an application",
 	446: "a gombit make resource error message: nothing in an application",
 	447: "shipped in v0.6.1 (the CHANGELOG has no 0.6.1 section yet)",
 	451: "a CI gate on the committed admin build: nothing in an application",

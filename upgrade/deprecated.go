@@ -33,6 +33,12 @@ type DeprecatedUse struct {
 	// Deprecation is the declaration's "Deprecated:" paragraph, which names
 	// what to use instead.
 	Deprecation string `json:"deprecation"`
+	// Since is the release that deprecated it, as the paragraph says
+	// ("Deprecated: since vX.Y.Z, ..."), and RemovableFrom the first
+	// release the compatibility policy lets remove it; both empty when the
+	// paragraph names no release.
+	Since         string `json:"since,omitempty"`
+	RemovableFrom string `json:"removable_from,omitempty"`
 }
 
 // ErrDoesNotLoad: a package of the scanned graph (the application's
@@ -302,10 +308,14 @@ func (s *scan) add(p *packages.Package, pos token.Pos, pkgPath string, d declDoc
 	if rel, inside := relTo(s.root, file); inside {
 		file = rel
 	}
-	s.uses = append(s.uses, DeprecatedUse{
+	use := DeprecatedUse{
 		File: file, Line: at.Line, Column: at.Column,
 		Symbol: d.symbol, Package: pkgPath, Deprecation: d.deprecation,
-	})
+	}
+	if use.Since = DeprecationSince(d.deprecation); use.Since != "" {
+		use.RemovableFrom = RemovableFrom(use.Since)
+	}
+	s.uses = append(s.uses, use)
 }
 
 // origin is the generic declaration an instantiated method or field comes
@@ -474,6 +484,9 @@ func RenderDeprecated(w io.Writer, uses []DeprecatedUse) error {
 		fmt.Fprintf(&b, "Deprecated framework APIs used: %d\n", len(uses))
 		for _, u := range uses {
 			fmt.Fprintf(&b, "  %s:%d:%d: %s\n      %s\n", u.File, u.Line, u.Column, u.Symbol, u.Deprecation)
+			if u.RemovableFrom != "" {
+				fmt.Fprintf(&b, "      (deprecated in %s; the compatibility policy lets %s remove it)\n", u.Since, u.RemovableFrom)
+			}
 		}
 	}
 	_, err := io.WriteString(w, b.String())

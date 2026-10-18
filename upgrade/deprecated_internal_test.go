@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -151,5 +152,55 @@ func TestScanFailsClosedOnAnUnindexedPackage(t *testing.T) {
 	}
 	if len(s.uses) != 0 {
 		t.Fatalf("uses = %+v", s.uses)
+	}
+}
+
+// TestFrameworkDeprecationsNameTheirRelease: every Deprecated: paragraph in
+// the framework names the release that deprecated the API ("Deprecated:
+// since vX.Y.Z, ..."), so the compatibility policy's window (RemovableFrom)
+// starts somewhere: a release the manifest lists, or the upcoming one.
+func TestFrameworkDeprecationsNameTheirRelease(t *testing.T) {
+	m, err := LoadManifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	skip := map[string]bool{"examples": true, "benchmarks": true, "node_modules": true, "testdata": true, ".git": true}
+	fset := token.NewFileSet()
+	found := 0
+	err = filepath.WalkDir("..", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if skip[d.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		f, err := parser.ParseFile(fset, path, nil, parser.ParseComments|parser.SkipObjectResolution)
+		if err != nil {
+			return err
+		}
+		for _, dep := range deprecationsOf(f) {
+			found++
+			since := DeprecationSince(dep)
+			if since == "" {
+				t.Errorf("%s: a Deprecated: paragraph names no release (\"Deprecated: since vX.Y.Z, use ...\"): %q", path, dep)
+				continue
+			}
+			if _, err := m.Release(since); err != nil && !slices.Contains(UpcomingReleases(m.Latest()), since) {
+				t.Errorf("%s: deprecated since %s, which is neither a release the manifest lists nor the next one (%v)", path, since, UpcomingReleases(m.Latest()))
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if found == 0 {
+		t.Fatal("found no Deprecated: paragraph at all; the walk is broken")
 	}
 }

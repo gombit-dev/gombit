@@ -83,7 +83,12 @@ UPGRADE-5), and `gombit upgrade fix`, which runs codemods: rewrites of an
 app's uses of changed framework APIs, done on the syntax tree with type
 information, gofmt-formatted and type-checked again, printed as a patch
 unless `--write` (`upgrade.RunCodemods`, manifest action `codemod:<id>`;
-none ship yet; UPGRADE-6). The other batteries
+none ship yet; UPGRADE-6), and the compatibility and deprecation policy
+(`docs/compatibility.md`, enforced from v0.8.0: breaking changes only in
+minors pre-1.0 and majors from 1.0, with a security exception, refused by
+the manifest and the release gate; deprecations name their release, with a
+window `gombit upgrade check` shows; `upgrade/policy.go`; UPGRADE-10). The
+other batteries
 (events, scheduler, mail, gRPC, multi-tenancy, i18n) are not here yet.
 The **CHAOS-0** resilience suite is in: `internal/faulttest` (deterministic
 fault injection: a faulting `database/sql` driver, a scripted HTTP
