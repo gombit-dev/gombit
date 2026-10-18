@@ -29,6 +29,9 @@ automatically on merge.
    - The release gate (step 6) refuses a smaller bump than the manifest's
      changes need, and names the release it needs. Dispatch the Release
      workflow with that bump.
+   - v1.0.0 follows a minor line that deprecates nothing, so every pre-1.0
+     deprecation gets its window
+     ([across 1.0](compatibility.md#deprecations)).
 6. **Name the release in the compatibility manifest**
    ([`upgrade/manifest.yaml`](../upgrade/manifest.yaml)). Rename its
    `unreleased` entry to the version, or, only when there is no `unreleased`

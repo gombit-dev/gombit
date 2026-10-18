@@ -891,8 +891,11 @@ Reports every use, in the application (every package, tests included), of a
 framework API whose doc comment has a `Deprecated:` paragraph: file, line
 and column, the symbol, and what to use instead. Uses are resolved from type
 information (`go/packages`, `go/types`), never by matching text; the app
-must type-check. It exits 1 when there is any use. See
-[upgrade.md](upgrade.md#checking-for-deprecated-apis).
+must type-check. When the deprecation names its release (`Deprecated: since
+vX.Y.Z, ...`), a line shows the first release the
+[compatibility policy](compatibility.md#deprecations) lets remove the API,
+and `--json` adds `since` and `removable_from`. It exits 1 when there is
+any use. See [upgrade.md](upgrade.md#checking-for-deprecated-apis).
 
 | Flag | Meaning | Default |
 | --- | --- | --- |

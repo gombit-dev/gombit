@@ -117,8 +117,21 @@ func TestCodemodAction(t *testing.T) {
 }
 
 // TestShippedCodemodsAreValid: every codemod this framework ships is well
-// formed and registered under its ID.
+// formed, registered under its ID, and named by a change of the manifest
+// (codemod:<id>): the release of that change ships it, which starts the
+// compatibility policy's support window, so the manifest is the one
+// record of it.
 func TestShippedCodemodsAreValid(t *testing.T) {
+	m, err := LoadManifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	named := map[string]bool{}
+	for _, r := range m.Releases {
+		for _, c := range r.Changes {
+			named[c.Action] = true
+		}
+	}
 	for id, c := range codemods {
 		if c.ID != id {
 			t.Errorf("codemod %s registered as %s", c.ID, id)
@@ -126,9 +139,8 @@ func TestShippedCodemodsAreValid(t *testing.T) {
 		if err := c.validate(); err != nil {
 			t.Error(err)
 		}
-		// The policy's support window starts at the release that ships it.
-		if c.Since == "" {
-			t.Errorf("codemod %s: Since names no release (the compatibility policy keeps it until RemovableFrom(Since))", id)
+		if !named[codemodActionPrefix+id] {
+			t.Errorf("codemod %s: no manifest change names %s%s, so no release ships it", id, codemodActionPrefix, id)
 		}
 	}
 }

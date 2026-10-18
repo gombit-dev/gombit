@@ -377,15 +377,19 @@ version.
     1.0, only in majors.
   - **Security exception:** a breaking `security` change may ship in any
     release.
-  - **Enforcement:** the manifest refuses a release smaller than its
-    changes need (`upgrade.RequiredBump`), and the release gate names the
-    release it needs.
+  - **Enforcement:** the release gate refuses a release smaller than its
+    changes need (`upgrade.RequiredBump`, `Manifest.CheckPolicy`) and names
+    the release it needs. A repository test holds every listed release to
+    it, with recorded exceptions (v0.7.1), so a published release can be
+    corrected truthfully.
   - **Deprecation window:** before 1.0, a deprecated API stays through the
     next minor; from 1.0, until the next major (`upgrade.RemovableFrom`).
-    Every `Deprecated:` paragraph names its release ("since vX.Y.Z"), and
-    `gombit upgrade check` shows when each API it reports may be removed.
-  - **Support:** every release stays in the manifest, and codemods stay
-    for their API's window
+    Every `Deprecated:` paragraph names its release ("since vX.Y.Z"), which
+    declares the deprecation in the manifest, and `gombit upgrade check`
+    shows when each API it reports may be removed (`since` and
+    `removable_from` in `--json`).
+  - **Support:** every release stays in the manifest, and a codemod stays
+    as long as the manifest change of its release names it
   ([#350](https://github.com/gombit-dev/gombit/issues/350)).
 - [Session management](docs/auth.md#sessions) in both auth modes:
   `GET /auth/sessions` lists the user's active sessions with an opaque id,

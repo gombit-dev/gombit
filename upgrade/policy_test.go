@@ -36,10 +36,15 @@ func TestRequiredBump(t *testing.T) {
 	}
 }
 
-func manifestOf(t *testing.T, releases string) error {
+// policyOf parses a manifest of releases and judges its last named release
+// by the policy.
+func policyOf(t *testing.T, releases string) error {
 	t.Helper()
-	_, err := upgrade.ParseManifest([]byte("format: 1\nreleases:\n" + releases))
-	return err
+	m, err := upgrade.ParseManifest([]byte("format: 1\nreleases:\n" + releases))
+	if err != nil {
+		t.Fatalf("the manifest does not parse: %v", err)
+	}
+	return m.CheckPolicy(m.Latest())
 }
 
 const breakingAPI = "      - {id: %s, kind: manual, breaking: true, area: api, summary: s, details: d}\n"
@@ -54,41 +59,73 @@ func rel(version string, changes ...string) string {
 
 func change(format, id string) string { return strings.Replace(format, "%s", id, 1) }
 
-// TestManifestFollowsThePolicy: a listed release from v0.8.0 on that is a
-// smaller version change than its changes need is refused, naming the
-// release the policy needs; the security exception and the releases
-// before the policy pass.
-func TestManifestFollowsThePolicy(t *testing.T) {
+// TestCheckPolicy: a release that is a smaller version change than its
+// changes need is refused, naming the release the policy needs; the
+// security exception passes.
+func TestCheckPolicy(t *testing.T) {
 	security := "      - {id: %s, kind: manual, breaking: true, area: security, summary: s, details: d}\n"
-	if err := manifestOf(t, rel("v0.7.0")+rel("v0.7.1", change(breakingAPI, "old-break"))); err != nil {
-		t.Errorf("a release before the policy: %v", err)
-	}
-	err := manifestOf(t, rel("v0.8.0")+rel("v0.8.1", change(breakingAPI, "patch-break")))
+	err := policyOf(t, rel("v0.8.0")+rel("v0.8.1", change(breakingAPI, "patch-break")))
 	if err == nil || !strings.Contains(err.Error(), "release v0.8.1 is a patch release after v0.8.0, but declares breaking changes (patch-break)") || !strings.Contains(err.Error(), "needs a minor release (v0.9.0)") {
 		t.Errorf("a breaking patch: %v", err)
 	}
-	if err := manifestOf(t, rel("v0.8.0")+rel("v0.8.1", change(security, "fix-hole"))); err != nil {
+	if err := policyOf(t, rel("v0.8.0")+rel("v0.8.1", change(security, "fix-hole"))); err != nil {
 		t.Errorf("a breaking security patch (the exception): %v", err)
 	}
-	if err := manifestOf(t, rel("v0.8.0")+rel("v0.9.0", change(breakingAPI, "minor-break"))); err != nil {
+	if err := policyOf(t, rel("v0.8.0")+rel("v0.9.0", change(breakingAPI, "minor-break"))); err != nil {
 		t.Errorf("a breaking minor before 1.0: %v", err)
 	}
-	err = manifestOf(t, rel("v1.0.0")+rel("v1.1.0", change(breakingAPI, "minor-break")))
+	err = policyOf(t, rel("v1.0.0")+rel("v1.1.0", change(breakingAPI, "minor-break")))
 	if err == nil || !strings.Contains(err.Error(), "needs a major release (v2.0.0)") {
 		t.Errorf("a breaking minor from 1.0: %v", err)
 	}
-	if err := manifestOf(t, rel("v1.0.0")+rel("v2.0.0", change(breakingAPI, "major-break"))); err != nil {
+	if err := policyOf(t, rel("v1.0.0")+rel("v2.0.0", change(breakingAPI, "major-break"))); err != nil {
 		t.Errorf("a breaking major: %v", err)
 	}
-	// Unreleased is not judged until it is named.
-	if err := manifestOf(t, rel("v0.8.0")+rel("unreleased", change(breakingAPI, "pending-break"))); err != nil {
-		t.Errorf("unreleased: %v", err)
+	if err := policyOf(t, rel("v0.8.0")); err != nil {
+		t.Errorf("the first release: %v", err)
+	}
+}
+
+// TestPublishedReleaseCanBeCorrected: a published patch found to have
+// broken something is recorded truthfully (breaking: true). The manifest
+// still parses, so every gombit upgrade command keeps working; only the
+// policy check, the release gate's and the repository test's, refuses it
+// until an exception says why it stands.
+func TestPublishedReleaseCanBeCorrected(t *testing.T) {
+	m, err := upgrade.ParseManifest([]byte("format: 1\nreleases:\n" + rel("v0.8.0") + rel("v0.8.1", change(breakingAPI, "found-to-break")) + rel("v0.8.2")))
+	if err != nil {
+		t.Fatalf("a corrected published release does not parse: %v", err)
+	}
+	if err := m.CheckPolicy("v0.8.1"); err == nil {
+		t.Fatal("the policy passed a breaking patch")
+	}
+	if err := m.CheckPolicy("v0.8.2"); err != nil {
+		t.Fatalf("the release after it: %v", err)
+	}
+}
+
+// TestEmbeddedManifestFollowsThePolicy: every release the manifest lists
+// is the version change its changes need, or a recorded exception.
+func TestEmbeddedManifestFollowsThePolicy(t *testing.T) {
+	m, err := upgrade.LoadManifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range m.Releases {
+		if r.Version == upgrade.Unreleased {
+			continue
+		}
+		if err := m.CheckPolicy(r.Version); err != nil {
+			t.Error(err)
+		}
 	}
 }
 
 // TestReleaseGateNamesTheRelease: the gate, asked for a release the
 // manifest does not list while unreleased declares breaking changes, says
-// which release the policy needs (the 2026-10-14 v0.7.2 dispatch).
+// which release the policy needs (the 2026-10-14 v0.7.2 dispatch), after
+// the latest stable release, as the policy judges it: a listed pre-release
+// is not one. Asked for a listed release, it applies the policy.
 func TestReleaseGateNamesTheRelease(t *testing.T) {
 	m, err := upgrade.ParseManifest([]byte("format: 1\nreleases:\n" + rel("v0.7.0") + rel("v0.7.1") + rel("unreleased", change(breakingAPI, "big-change"))))
 	if err != nil {
@@ -104,6 +141,20 @@ func TestReleaseGateNamesTheRelease(t *testing.T) {
 	}
 	if err := m.CheckRelease("v0.7.2"); err == nil || !strings.Contains(err.Error(), "rename its unreleased entry") || strings.Contains(err.Error(), "needs") {
 		t.Fatalf("CheckRelease without breaking changes = %v", err)
+	}
+	m, err = upgrade.ParseManifest([]byte("format: 1\nreleases:\n" + rel("v0.8.0") + rel("v0.9.0-rc.1", change(breakingAPI, "rc-break")) + rel("unreleased", change(breakingAPI, "final-break"))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.CheckRelease("v0.9.0"); err == nil || !strings.Contains(err.Error(), "needs a minor release after v0.8.0: v0.9.0") {
+		t.Fatalf("CheckRelease(v0.9.0) with an rc listed = %v", err)
+	}
+	m, err = upgrade.ParseManifest([]byte("format: 1\nreleases:\n" + rel("v0.8.0") + rel("v0.8.1", change(breakingAPI, "patch-break"))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.CheckRelease("v0.8.1"); err == nil || !strings.Contains(err.Error(), "needs a minor release (v0.9.0)") {
+		t.Fatalf("CheckRelease(v0.8.1), a breaking patch = %v", err)
 	}
 }
 
@@ -143,7 +194,7 @@ func TestScanDeprecatedShowsTheWindow(t *testing.T) {
 	if err := upgrade.RenderDeprecated(&out, uses); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), "(deprecated in v0.8.0; the compatibility policy lets v0.10.0 remove it)") {
+	if !strings.Contains(out.String(), "(deprecated in v0.8.0; the compatibility policy lets v0.10.0 (or v1.0.0, if it comes first) remove it)") {
 		t.Fatalf("report:\n%s", out.String())
 	}
 }
@@ -152,10 +203,10 @@ func TestScanDeprecatedShowsTheWindow(t *testing.T) {
 // pre-release is judged against the stable release before both, so
 // v0.9.0 after v0.9.0-rc.1 is a minor release after v0.8.0.
 func TestPolicyJudgesAgainstTheLastStableRelease(t *testing.T) {
-	if err := manifestOf(t, rel("v0.8.0")+rel("v0.9.0-rc.1", change(breakingAPI, "rc-break"))+rel("v0.9.0", change(breakingAPI, "final-break"))); err != nil {
+	if err := policyOf(t, rel("v0.8.0")+rel("v0.9.0-rc.1", change(breakingAPI, "rc-break"))+rel("v0.9.0", change(breakingAPI, "final-break"))); err != nil {
 		t.Fatalf("a minor after its rc: %v", err)
 	}
-	err := manifestOf(t, rel("v0.8.0")+rel("v0.8.1-rc.1")+rel("v0.8.1", change(breakingAPI, "patch-break")))
+	err := policyOf(t, rel("v0.8.0")+rel("v0.8.1-rc.1")+rel("v0.8.1", change(breakingAPI, "patch-break")))
 	if err == nil || !strings.Contains(err.Error(), "patch release after v0.8.0") {
 		t.Fatalf("a breaking patch after its rc: %v", err)
 	}

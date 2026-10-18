@@ -3,6 +3,7 @@ package upgrade
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 
 	"golang.org/x/mod/semver"
@@ -11,9 +12,14 @@ import (
 // The compatibility policy (docs/compatibility.md), as code: the release
 // gate and the upgrade tooling apply it, rather than deciding per release.
 
-// PolicySince is the first release the policy governs. Earlier releases
-// predate it (v0.7.1, a patch, has breaking fixes) and are not judged.
-const PolicySince = "v0.8.0"
+// policyExceptions are the listed releases that are a smaller version
+// change than their changes need, each with the reason it stands. A
+// published release is never retagged: when one turns out to have broken
+// something, the manifest says so truthfully (breaking: true), and the
+// exception records it here instead of the policy refusing the truth.
+var policyExceptions = map[string]string{
+	"v0.7.1": "a patch release with breaking fixes, cut before the compatibility policy (v0.8.0)",
+}
 
 // Bump is the size of a version change.
 type Bump int
@@ -71,21 +77,44 @@ func RequiredBump(prev string, changes []Change) (Bump, []string) {
 	return BumpMajor, breaking
 }
 
-// checkPolicy refuses a release, from PolicySince on, that is a smaller
-// version change than its changes need from prev, the latest stable
-// release before it (a pre-release of the same version is not one: v0.9.0
-// after v0.9.0-rc.1 is still a minor release after v0.8.x).
-func checkPolicy(prev string, r Release) error {
-	if r.Version == Unreleased || semver.Compare(r.Version, PolicySince) < 0 {
-		return nil
+// CheckPolicy reports whether the listed release version is at least the
+// version change its changes need (RequiredBump) after the latest stable
+// release before it (a pre-release is not one: v0.9.0 after v0.9.0-rc.1 is
+// still a minor release after v0.8.x). The release gate (CheckRelease)
+// holds the release being cut to it, and a repository test every listed
+// release but the exceptions. Parsing the manifest does not: a correction
+// to a published release must stay representable.
+func (m *Manifest) CheckPolicy(version string) error {
+	i := slices.IndexFunc(m.Releases, func(r Release) bool { return r.Version == version })
+	if i < 0 || version == Unreleased {
+		return fmt.Errorf("upgrade: manifest: %s is not a release it lists", version)
 	}
-	need, breaking := RequiredBump(prev, r.Changes)
-	if got := bumpBetween(prev, r.Version); got < need {
-		return fmt.Errorf("release %s is a %s release after %s, but declares breaking changes (%s): the compatibility policy needs a %s release (%s); see docs/compatibility.md",
-			r.Version, got, prev, strings.Join(breaking, ", "), need, nextRelease(prev, need))
+	prev := m.stableBefore(i)
+	if prev == "" || policyExceptions[version] != "" {
+		return nil // the first release judges nothing; an exception stands
+	}
+	need, breaking := RequiredBump(prev, m.Releases[i].Changes)
+	if got := bumpBetween(prev, version); got < need {
+		return fmt.Errorf("upgrade: manifest: release %s is a %s release after %s, but declares breaking changes (%s): the compatibility policy needs a %s release (%s); see docs/compatibility.md",
+			version, got, prev, strings.Join(breaking, ", "), need, nextRelease(prev, need))
 	}
 	return nil
 }
+
+// stableBefore is the latest stable release listed before the i-th: what
+// the policy judges that release against.
+func (m *Manifest) stableBefore(i int) string {
+	for j := i - 1; j >= 0; j-- {
+		if v := m.Releases[j].Version; v != Unreleased && semver.Prerelease(v) == "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// latestStable is the latest stable release the manifest lists: the one the
+// next release follows, under the policy.
+func (m *Manifest) latestStable() string { return m.stableBefore(len(m.Releases)) }
 
 // nextRelease is the release a bump of prev makes.
 func nextRelease(prev string, b Bump) string {
@@ -109,7 +138,11 @@ func UpcomingReleases(latest string) []string {
 // RemovableFrom is the first release that may remove an API deprecated in
 // since: before 1.0, a deprecated API stays through the next minor release
 // (deprecated in v0.8.x, still there in v0.9.x, removable from v0.10.0);
-// from 1.0 on, until the next major.
+// from 1.0 on, until the next major. Across 1.0: v1.0.0, a major release,
+// may remove what an earlier 0.y deprecated, and it follows a minor line
+// that deprecates nothing, so every pre-1.0 deprecation still gets its
+// next minor line. For a pre-1.0 since, the release is the one returned or
+// v1.0.0, whichever comes first.
 func RemovableFrom(since string) string {
 	var major, minor, patch int
 	_, _ = fmt.Sscanf(since, "v%d.%d.%d", &major, &minor, &patch)

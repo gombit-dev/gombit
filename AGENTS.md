@@ -86,7 +86,7 @@ unless `--write` (`upgrade.RunCodemods`, manifest action `codemod:<id>`;
 none ship yet; UPGRADE-6), and the compatibility and deprecation policy
 (`docs/compatibility.md`, enforced from v0.8.0: breaking changes only in
 minors pre-1.0 and majors from 1.0, with a security exception, refused by
-the manifest and the release gate; deprecations name their release, with a
+the release gate; deprecations name their release, with a
 window `gombit upgrade check` shows; `upgrade/policy.go`; UPGRADE-10). The
 other batteries
 (events, scheduler, mail, gRPC, multi-tenancy, i18n) are not here yet.

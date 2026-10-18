@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 
+	"golang.org/x/mod/semver"
 	"golang.org/x/tools/go/packages"
 )
 
@@ -485,7 +486,11 @@ func RenderDeprecated(w io.Writer, uses []DeprecatedUse) error {
 		for _, u := range uses {
 			fmt.Fprintf(&b, "  %s:%d:%d: %s\n      %s\n", u.File, u.Line, u.Column, u.Symbol, u.Deprecation)
 			if u.RemovableFrom != "" {
-				fmt.Fprintf(&b, "      (deprecated in %s; the compatibility policy lets %s remove it)\n", u.Since, u.RemovableFrom)
+				removable := u.RemovableFrom
+				if semver.Major(removable) == "v0" {
+					removable += " (or v1.0.0, if it comes first)"
+				}
+				fmt.Fprintf(&b, "      (deprecated in %s; the compatibility policy lets %s remove it)\n", u.Since, removable)
 			}
 		}
 	}

@@ -1074,11 +1074,3 @@ func main() {
 		t.Fatal("main.go changed")
 	}
 }
-
-// TestCodemodSinceIsARelease: a codemod's Since, when set, is a release.
-func TestCodemodSinceIsARelease(t *testing.T) {
-	c := upgrade.Codemod{ID: "x", Description: "d", Package: dbPath, Symbol: "Old", Rename: "New", Since: "0.8"}
-	if _, err := upgrade.RunCodemods(context.Background(), t.TempDir(), []upgrade.Codemod{c}); err == nil || !strings.Contains(err.Error(), "want a release") {
-		t.Fatalf("RunCodemods = %v", err)
-	}
-}

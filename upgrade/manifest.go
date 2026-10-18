@@ -219,7 +219,6 @@ func (m *Manifest) validate() error {
 		return errors.New("no releases")
 	}
 	ids := map[string]string{}
-	stable := "" // the latest stable release so far: what the policy judges a release against
 	for i, r := range m.Releases {
 		switch {
 		case i == 0 && (r.Version == Unreleased || len(r.Changes) > 0):
@@ -234,14 +233,6 @@ func (m *Manifest) validate() error {
 			return fmt.Errorf("release %q: not a canonical semantic version (vMAJOR.MINOR.PATCH)", r.Version)
 		case i > 0 && semver.Compare(m.Releases[i-1].Version, r.Version) >= 0:
 			return fmt.Errorf("release %s: releases must be in ascending order, without repeats (after %s)", r.Version, m.Releases[i-1].Version)
-		}
-		if stable != "" {
-			if err := checkPolicy(stable, r); err != nil {
-				return err
-			}
-		}
-		if r.Version != Unreleased && semver.Prerelease(r.Version) == "" {
-			stable = r.Version
 		}
 		for _, c := range r.Changes {
 			if err := c.validate(); err != nil {
@@ -302,7 +293,8 @@ func (m *Manifest) Release(version string) (Release, error) {
 
 // CheckRelease reports whether the manifest is ready to ship as the stable
 // release tag: the tag is listed, it is the newest release (Latest), and no
-// change is left under Unreleased (absent, or empty). A manifest that lists
+// change is left under Unreleased (absent, or empty), and the release is
+// the version change its changes need (CheckPolicy). A manifest that lists
 // the tag but keeps the tag's changes under Unreleased, or lists releases
 // past it, would ship notes and an upgrade plan saying the release changes
 // nothing; the release workflow refuses it.
@@ -311,7 +303,7 @@ func (m *Manifest) CheckRelease(tag string) error {
 		// The usual miss: the unreleased entry is not named yet. Say which
 		// release the compatibility policy needs it to be.
 		if r, uerr := m.Release(Unreleased); uerr == nil && len(r.Changes) > 0 {
-			latest := m.Latest()
+			latest := m.latestStable()
 			need, breaking := RequiredBump(latest, r.Changes)
 			if len(breaking) > 0 {
 				return fmt.Errorf("%w; rename its %s entry to the release (it declares breaking changes, %s, so the compatibility policy needs a %s release after %s: %s)", err, Unreleased, strings.Join(breaking, ", "), need, latest, nextRelease(latest, need))
@@ -326,7 +318,7 @@ func (m *Manifest) CheckRelease(tag string) error {
 	if r, err := m.Release(Unreleased); err == nil && len(r.Changes) > 0 {
 		return fmt.Errorf("upgrade: manifest: %d change(s) are still under %s; move them to %s", len(r.Changes), Unreleased, tag)
 	}
-	return nil
+	return m.CheckPolicy(tag)
 }
 
 // Latest is the newest release the manifest describes (never Unreleased).
