@@ -126,7 +126,7 @@ go mod tidy
 | `--auth` | `jwt`, `cookie` | `jwt` |
 | `--ui` | `minimal`, `mui` | `minimal` |
 | `--module` | Go module path | `github.com/example/<name>` |
-| `--framework-version` | gombit version the generated `go.mod` requires | this binary's version |
+| `--framework-version` | gombit version the generated `go.mod` requires | the gombit version this binary reports |
 | `--skip-tidy` | | do not run `go mod tidy` (offline); also skips seeding the bootstrap migration, which needs a tidied module |
 | `--dry-run` | | print the file list without writing |
 | `--force` | | required to write into a non-empty destination |
@@ -832,6 +832,22 @@ Version resolution has three tiers, in order:
    carries no ldflags, so the version comes from
    `runtime/debug.ReadBuildInfo()`. `commit` and `built` come from the
    embedded `vcs.revision` / `vcs.time` settings when the build had them.
+
+   A scaffolded app ships its own `cmd/gombit`, and in that binary the main
+   module is the application while Gombit is a dependency, so the version is
+   that dependency's entry in the build info: an app tagged `v1.2.0` still
+   reports the Gombit it was built with, not `v1.2.0`. When the app replaces
+   the framework with a local checkout (or with a fork), no Gombit release is
+   named, so `dev` is reported — the same rule `gombit contract app` and
+   `gombit upgrade` apply to a `go.mod`, read from a different source: this
+   command describes the binary you are holding, those commands the `go.mod`
+   in the current directory (`internal/frameworkmod` reads `go.mod` alone and
+   deliberately knows nothing of a `go.work`).
+   The `vcs.revision` and `vcs.time` settings are recorded for the main module
+   only, so an app's binary reports `unknown` for `commit` and `built` instead
+   of the app's own commit: pairing a Gombit release with a commit nobody can
+   find in the Gombit repository is the same misleading artifact the version
+   line used to be.
 3. **`dev`.** A local `go run ./cmd/gombit` or a build from a checkout
    reports `dev` rather than Go's `(devel)`, with `unknown` for the fields
    that have no source.
