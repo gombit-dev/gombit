@@ -253,6 +253,24 @@ func TestCheckResourceLoaderFailure(t *testing.T) {
 	}
 }
 
+// TestCheckCancelled: a cancelled check is an error, not resources
+// "unchecked" because the loader could not run.
+func TestCheckCancelled(t *testing.T) {
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{
+		"go.mod":                         "module testapp\n\ngo 1.23\n",
+		"cmd/server/main.go":             "package main\n\nfunc main() {}\n",
+		"internal/platform/database.go":  "package platform\n\nimport \"testapp/internal/book\"\n\nfunc AutoMigrate(db anyDB) error { return db.AutoMigrate(&book.Book{}) }\n",
+		"internal/book/.gombit-resource": "",
+		"internal/book/book.go":          "package book\n\ntype Book struct{ Title string }\n",
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if r, err := contractcheck.Check(ctx, dir, contractcheck.Options{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Check with a cancelled context = %+v, %v; want context.Canceled", r, err)
+	}
+}
+
 // TestCheckMalformedDocument: a committed document that is not JSON is a
 // stale document, with the reason (the rest of the report stands), and
 // --write replaces it with the live one; a live document that is not JSON

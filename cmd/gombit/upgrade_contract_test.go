@@ -103,6 +103,18 @@ func TestUpgradeContractResources(t *testing.T) {
 	if readFileString(t, filepath.Join(dest, "openapi.json")) != committedSpec {
 		t.Fatal("--write wrote the document of an app built from the stale resources")
 	}
+	// A failure after the resources are written (here, openapi-typescript
+	// fails checking the client) names what was written.
+	if falseBin, err := exec.LookPath("false"); err == nil {
+		writeFile(dto, generated+"\n// drifted again\n")
+		_, err := contractRun("--write", "--npx", falseBin)
+		if err == nil || !strings.Contains(err.Error(), "the resources were regenerated first: internal/book/dto.gen.go") {
+			t.Fatalf("a failure after the resource write: %v", err)
+		}
+		if readFileString(t, dto) != generated {
+			t.Fatal("dto.gen.go was not regenerated before the failure")
+		}
+	}
 	if err := os.Remove(filepath.Join(dest, "openapi.json")); err != nil { // gombit new commits none
 		t.Fatal(err)
 	}

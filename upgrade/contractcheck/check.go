@@ -169,6 +169,9 @@ func Check(ctx context.Context, workDir string, opts Options) (Report, error) {
 	}
 	spec, cl, err := checkClient(ctx, workDir, opts, resources)
 	if err != nil {
+		if resources.Status == Written {
+			err = fmt.Errorf("%w (the resources were regenerated first: %s)", err, strings.Join(resources.Files, ", "))
+		}
 		return Report{}, err
 	}
 	return Report{Checks: []Result{resources, spec, cl}}, nil
@@ -188,7 +191,7 @@ func checkResources(ctx context.Context, workDir string, opts Options) (Result, 
 	stale, resources, err := check(ctx, gen)
 	var loaderErr *generate.LoaderError
 	switch {
-	case errors.As(err, &loaderErr):
+	case errors.As(err, &loaderErr) && ctx.Err() == nil: // not a cancellation
 		// The loader compiles the app's models: after an upgrade with
 		// breaking changes they may not compile yet. Say so, and go on.
 		c.Status, c.Reason = Unchecked, "the resource loader failed (fix the build first): "+err.Error()

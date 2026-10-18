@@ -574,3 +574,20 @@ func TestUpdateReportsWhatAFailedWriteLeft(t *testing.T) {
 		t.Fatalf("a loader failure = %v; want a LoaderError", err)
 	}
 }
+
+// TestUpdateReportsSeededFiles: a seed-once file that is absent is seeded,
+// as Generate does, and reported (Missing); one that exists is not.
+func TestUpdateReportsSeededFiles(t *testing.T) {
+	dir := newAppLayout(t)
+	arts := bookArtifacts()
+	for _, a := range arts[:2] {
+		writeFile(t, filepath.Join(dir, filepath.FromSlash(a.Path)), string(a.Content))
+	}
+	written, _, err := Update(context.Background(), Options{WorkDir: dir, Stdout: io.Discard, Stderr: io.Discard, runner: &fakeRunner{out: artifactsJSON(t, arts)}})
+	if err != nil || len(written) != 1 || written[0] != (StaleFile{Path: "internal/book/hooks.go", Missing: true}) {
+		t.Fatalf("Update = %+v, %v; want the seeded hooks.go", written, err)
+	}
+	if written, _, err := Update(context.Background(), Options{WorkDir: dir, Stdout: io.Discard, Stderr: io.Discard, runner: &fakeRunner{out: artifactsJSON(t, arts)}}); err != nil || len(written) != 0 {
+		t.Fatalf("Update again = %+v, %v; want nothing written", written, err)
+	}
+}
