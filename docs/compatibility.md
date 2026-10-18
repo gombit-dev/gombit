@@ -97,8 +97,8 @@ A repository test holds every deprecation in the framework to all of this.
 - **across 1.0**: v1.0.0 is a major release, and may remove an API any 0.y
   release deprecated. It follows a minor line that deprecates nothing: a
   0.y line that deprecates an API is followed by another 0.y before 1.0, and
-  the release gate refuses v1.0.0 right after a minor line whose changes
-  deprecate anything. So every pre-1.0 deprecation still gets its next
+  the release gate refuses v1.0.0 when the latest stable minor line, or a
+  pre-release after it, deprecates anything. So every pre-1.0 deprecation still gets its next
   minor line, and an API deprecated in v0.9.x may be removed from v0.11.0
   or from v1.0.0, whichever comes first.
 
