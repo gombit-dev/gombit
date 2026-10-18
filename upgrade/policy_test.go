@@ -187,7 +187,7 @@ func TestScanDeprecatedShowsTheWindow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(uses) != 1 || uses[0].Since != "v0.8.0" || uses[0].RemovableFrom != "v0.10.0" {
+	if len(uses) != 1 || uses[0].Since != "v0.8.0" || uses[0].RemovableFrom != "v0.10.0" || uses[0].RemovableFromMajor != "v1.0.0" {
 		t.Fatalf("uses = %+v", uses)
 	}
 	var out strings.Builder
@@ -196,6 +196,51 @@ func TestScanDeprecatedShowsTheWindow(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "(deprecated in v0.8.0; the compatibility policy lets v0.10.0 (or v1.0.0, if it comes first) remove it)") {
 		t.Fatalf("report:\n%s", out.String())
+	}
+}
+
+// TestReleaseShipsItsPreReleases: a release ships the changes of every
+// pre-release listed since the stable release before it, so a breaking
+// change in v0.8.1-rc.1 makes v0.8.1 a breaking patch, at the gate and in
+// its hint.
+func TestReleaseShipsItsPreReleases(t *testing.T) {
+	m, err := upgrade.ParseManifest([]byte("format: 1\nreleases:\n" + rel("v0.8.0") + rel("v0.8.1-rc.1", change(breakingAPI, "rc-break")) + rel("v0.8.1")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.CheckRelease("v0.8.1"); err == nil || !strings.Contains(err.Error(), "declares breaking changes (rc-break)") {
+		t.Fatalf("CheckRelease(v0.8.1) after a breaking rc = %v", err)
+	}
+	m, err = upgrade.ParseManifest([]byte("format: 1\nreleases:\n" + rel("v0.8.0") + rel("v0.8.1-rc.1", change(breakingAPI, "rc-break")) + rel("unreleased", "      - {id: small, kind: informational, area: behavior, summary: s}\n")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.CheckRelease("v0.8.1"); err == nil || !strings.Contains(err.Error(), "needs a minor release after v0.8.0: v0.9.0") {
+		t.Fatalf("the hint after a breaking rc = %v", err)
+	}
+}
+
+// TestFirstMajorFollowsAQuietMinor: v1.0.0 may remove what 0.y deprecated,
+// so the gate refuses it right after a minor line that deprecates
+// something; another minor first gives the deprecation its window.
+func TestFirstMajorFollowsAQuietMinor(t *testing.T) {
+	deprecation := "      - {id: %s, kind: informational, area: api, summary: s, deprecates: [db.Old]}\n"
+	m, err := upgrade.ParseManifest([]byte("format: 1\nreleases:\n" + rel("v0.8.0") + rel("v0.9.0") + rel("v0.9.1", change(deprecation, "old-deprecated")) + rel("v1.0.0", change(breakingAPI, "one-oh"))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.CheckRelease("v1.0.0"); err == nil || !strings.Contains(err.Error(), "v1.0.0 follows v0.9.x, which deprecates db.Old") {
+		t.Fatalf("CheckRelease(v1.0.0) after a deprecating minor = %v", err)
+	}
+	m, err = upgrade.ParseManifest([]byte("format: 1\nreleases:\n" + rel("v0.8.0") + rel("v0.9.0", change(deprecation, "old-deprecated")) + rel("v0.10.0") + rel("v1.0.0", change(breakingAPI, "one-oh"))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.CheckRelease("v1.0.0"); err != nil {
+		t.Fatalf("CheckRelease(v1.0.0) after a quiet minor = %v", err)
+	}
+	if _, err := upgrade.ParseManifest([]byte("format: 1\nreleases:\n" + rel("v0.8.0") + rel("v0.9.0", change("      - {id: %s, kind: informational, area: api, summary: s, deprecates: [Old]}\n", "bad")))); err == nil || !strings.Contains(err.Error(), "want an API") {
+		t.Fatalf("a deprecates entry that is not pkg.Name = %v", err)
 	}
 }
 

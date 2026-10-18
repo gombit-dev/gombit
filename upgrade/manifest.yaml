@@ -23,6 +23,9 @@
 #   area      api, behavior, cli, client, config, dependency, scaffold, schema
 #             or security
 #   summary   one line; details: Markdown; refs: issue/PR numbers
+#   deprecates  the framework APIs it deprecates, as gombit upgrade check
+#             names them (database.KeepStoredZeros): a "Deprecated: since
+#             vX.Y.Z" paragraph must name the release that declares it
 format: 1
 releases:
   - version: v0.6.1
@@ -375,6 +378,7 @@ releases:
           compared after the model's hooks, for the text check as well as
           stored zero instants. `KeepStoredZeros` keeps working.
         refs: [444]
+        deprecates: [database.KeepStoredZeros]
 
       - id: data-exceptions-are-422
         kind: informational

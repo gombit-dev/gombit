@@ -93,10 +93,44 @@ func (m *Manifest) CheckPolicy(version string) error {
 	if prev == "" || policyExceptions[version] != "" {
 		return nil // the first release judges nothing; an exception stands
 	}
-	need, breaking := RequiredBump(prev, m.Releases[i].Changes)
+	need, breaking := RequiredBump(prev, m.shippedSince(prev, i+1))
 	if got := bumpBetween(prev, version); got < need {
 		return fmt.Errorf("upgrade: manifest: release %s is a %s release after %s, but declares breaking changes (%s): the compatibility policy needs a %s release (%s); see docs/compatibility.md",
 			version, got, prev, strings.Join(breaking, ", "), need, nextRelease(prev, need))
+	}
+	return nil
+}
+
+// shippedSince are the changes of the releases listed after prev and before
+// the end-th: what a release at end-1 ships over prev, its own entry and
+// every pre-release between them (v0.8.1 ships v0.8.1-rc.1's changes too).
+func (m *Manifest) shippedSince(prev string, end int) []Change {
+	var changes []Change
+	for j := end - 1; j >= 0 && m.Releases[j].Version != prev; j-- {
+		changes = append(changes, m.Releases[j].Changes...)
+	}
+	return changes
+}
+
+// checkFirstMajor holds v1.0.0 to the deprecation window across 1.0: it may
+// remove what the 0.y releases deprecated, so the minor line before it
+// deprecates nothing, and every pre-1.0 deprecation got its next minor.
+func (m *Manifest) checkFirstMajor(tag string) error {
+	if tag != "v1.0.0" {
+		return nil
+	}
+	i := slices.IndexFunc(m.Releases, func(r Release) bool { return r.Version == tag })
+	line := semver.MajorMinor(m.stableBefore(i))
+	for _, r := range m.Releases[:i] {
+		if semver.MajorMinor(r.Version) != line {
+			continue
+		}
+		for _, c := range r.Changes {
+			if len(c.Deprecates) > 0 {
+				return fmt.Errorf("upgrade: manifest: v1.0.0 follows %s.x, which deprecates %s (%s in %s): the compatibility policy needs another 0.y minor release first, so the deprecation gets its window; see docs/compatibility.md",
+					line, strings.Join(c.Deprecates, ", "), c.ID, r.Version)
+			}
+		}
 	}
 	return nil
 }
@@ -142,7 +176,7 @@ func UpcomingReleases(latest string) []string {
 // may remove what an earlier 0.y deprecated, and it follows a minor line
 // that deprecates nothing, so every pre-1.0 deprecation still gets its
 // next minor line. For a pre-1.0 since, the release is the one returned or
-// v1.0.0, whichever comes first.
+// v1.0.0, whichever comes first (RemovableFromMajor).
 func RemovableFrom(since string) string {
 	var major, minor, patch int
 	_, _ = fmt.Sscanf(since, "v%d.%d.%d", &major, &minor, &patch)
@@ -150,6 +184,16 @@ func RemovableFrom(since string) string {
 		return fmt.Sprintf("v0.%d.0", minor+2)
 	}
 	return fmt.Sprintf("v%d.0.0", major+1)
+}
+
+// RemovableFromMajor is the major release that may remove an API
+// deprecated in since if it comes before RemovableFrom(since): v1.0.0 for a
+// pre-1.0 deprecation (see RemovableFrom), and "" from 1.0 on.
+func RemovableFromMajor(since string) string {
+	if semver.Major(since) == "v0" {
+		return "v1.0.0"
+	}
+	return ""
 }
 
 // deprecatedSince matches the release a "Deprecated:" paragraph says the

@@ -191,7 +191,8 @@ Deprecated framework APIs used: 1
   framework deprecation does), a line follows with the deprecation window:
   the first release the [compatibility policy](compatibility.md#deprecations)
   lets remove the API. `--json` prints the uses as a list, with `since` and
-  `removable_from` when the release is named. It exits 1 when there is any
+  `removable_from` (and `removable_from_major`, v1.0.0 for a pre-1.0
+  deprecation) when the release is named. It exits 1 when there is any
   use, so a CI job can gate on it; `--dir` selects the application
   directory.
 
@@ -403,7 +404,10 @@ it until it acts. A fix that only code matching undocumented output notices
 is not breaking. Each change also names the `area` it
 touches (`api`, `behavior`, `cli`, `client`, `config`, `dependency`,
 `scaffold`, `schema`, `security`), a one-line `summary`, Markdown `details`,
-and the issues or pull requests behind it.
+and the issues or pull requests behind it. A change that deprecates
+framework APIs lists them in `deprecates`, named as `gombit upgrade check`
+names them; a `Deprecated: since vX.Y.Z` paragraph must name a release that
+declares its API there ([the policy](compatibility.md#deprecations)).
 
 The manifest lists **every release** from the first one it covers (v0.6.1),
 including releases with nothing to declare, so a version it does not list is

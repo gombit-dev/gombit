@@ -894,7 +894,7 @@ information (`go/packages`, `go/types`), never by matching text; the app
 must type-check. When the deprecation names its release (`Deprecated: since
 vX.Y.Z, ...`), a line shows the first release the
 [compatibility policy](compatibility.md#deprecations) lets remove the API,
-and `--json` adds `since` and `removable_from`. It exits 1 when there is
+and `--json` adds `since`, `removable_from` and `removable_from_major`. It exits 1 when there is
 any use. See [upgrade.md](upgrade.md#checking-for-deprecated-apis).
 
 | Flag | Meaning | Default |

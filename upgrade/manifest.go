@@ -139,6 +139,12 @@ type Change struct {
 	Action string `yaml:"action,omitempty" json:"action,omitempty"`
 	// Refs are the GitHub issues or pull requests of the change.
 	Refs []int `yaml:"refs,omitempty" json:"refs,omitempty"`
+	// Deprecates are the framework APIs the change deprecates, each named
+	// as gombit upgrade check names it (database.KeepStoredZeros). A
+	// "Deprecated: since vX.Y.Z" paragraph must name a release with a
+	// change declaring its API here, so its window (RemovableFrom) starts
+	// where the deprecation was announced.
+	Deprecates []string `yaml:"deprecates,omitempty" json:"deprecates,omitempty"`
 }
 
 // Release is the changes of moving to one release from the one before it.
@@ -262,6 +268,11 @@ func (c Change) validate() error {
 			return fmt.Errorf("change %s: ref %d is not an issue or pull request number", c.ID, ref)
 		}
 	}
+	for _, symbol := range c.Deprecates {
+		if symbol == "" || strings.ContainsAny(symbol, " \t\n`") || !strings.Contains(symbol, ".") {
+			return fmt.Errorf("change %s: deprecates %q, want an API as gombit upgrade check names it (pkg.Name)", c.ID, symbol)
+		}
+	}
 	switch c.Kind {
 	case KindAutomatic:
 		if _, ok := LookupAction(c.Action); !ok {
@@ -303,8 +314,10 @@ func (m *Manifest) CheckRelease(tag string) error {
 		// The usual miss: the unreleased entry is not named yet. Say which
 		// release the compatibility policy needs it to be.
 		if r, uerr := m.Release(Unreleased); uerr == nil && len(r.Changes) > 0 {
+			// What the release ships: unreleased, and every pre-release
+			// listed since the latest stable release.
 			latest := m.latestStable()
-			need, breaking := RequiredBump(latest, r.Changes)
+			need, breaking := RequiredBump(latest, m.shippedSince(latest, len(m.Releases)))
 			if len(breaking) > 0 {
 				return fmt.Errorf("%w; rename its %s entry to the release (it declares breaking changes, %s, so the compatibility policy needs a %s release after %s: %s)", err, Unreleased, strings.Join(breaking, ", "), need, latest, nextRelease(latest, need))
 			}
@@ -318,7 +331,10 @@ func (m *Manifest) CheckRelease(tag string) error {
 	if r, err := m.Release(Unreleased); err == nil && len(r.Changes) > 0 {
 		return fmt.Errorf("upgrade: manifest: %d change(s) are still under %s; move them to %s", len(r.Changes), Unreleased, tag)
 	}
-	return m.CheckPolicy(tag)
+	if err := m.CheckPolicy(tag); err != nil {
+		return err
+	}
+	return m.checkFirstMajor(tag)
 }
 
 // Latest is the newest release the manifest describes (never Unreleased).

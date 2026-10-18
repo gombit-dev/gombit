@@ -68,14 +68,22 @@ application. The paragraph names:
 - **the release that deprecated it**, as `Deprecated: since vX.Y.Z, …`. For
   a deprecation not released yet, that is the upcoming release: the next
   patch, minor or major of the latest stable release. That release declares
-  the deprecation in the manifest, with a change naming the API (under
-  `unreleased` until it is cut), so the window cannot start before the
-  deprecation was announced;
+  the deprecation in the manifest: a change lists the API in `deprecates`
+  (under `unreleased` until it is cut, or in a release candidate of it), so
+  the window cannot start before the deprecation was announced;
 - **what to use instead.**
 
 ```go
 // Deprecated: since v0.8.0, use ScopeEdit with StoredValues, which also
 // keeps the row's stored text editable.
+```
+
+```yaml
+      - id: keep-stored-zeros-deprecated
+        kind: informational
+        area: api
+        summary: "`database.KeepStoredZeros` is deprecated: use ..."
+        deprecates: [database.KeepStoredZeros]
 ```
 
 A repository test holds every deprecation in the framework to all of this.
@@ -88,14 +96,16 @@ A repository test holds every deprecation in the framework to all of this.
   removed from v2.0.0;
 - **across 1.0**: v1.0.0 is a major release, and may remove an API any 0.y
   release deprecated. It follows a minor line that deprecates nothing: a
-  0.y line that deprecates an API is followed by another 0.y before 1.0. So
-  every pre-1.0 deprecation still gets its next minor line, and an API
-  deprecated in v0.9.x may be removed from v0.11.0 or from v1.0.0,
-  whichever comes first.
+  0.y line that deprecates an API is followed by another 0.y before 1.0, and
+  the release gate refuses v1.0.0 right after a minor line whose changes
+  deprecate anything. So every pre-1.0 deprecation still gets its next
+  minor line, and an API deprecated in v0.9.x may be removed from v0.11.0
+  or from v1.0.0, whichever comes first.
 
 `gombit upgrade check` shows the first release that may remove each API it
 reports (`upgrade.RemovableFrom`; for a pre-1.0 deprecation, "or v1.0.0, if
-it comes first"). Removing an API is a breaking change, declared in the
+it comes first", `upgrade.RemovableFromMajor`). `--json` carries both, as
+`removable_from` and `removable_from_major`. Removing an API is a breaking change, declared in the
 manifest of the release that removes it.
 
 ## Upgrade rules and codemods
@@ -125,9 +135,10 @@ manifest of the release that removes it.
 
 | Rule | Check |
 | --- | --- |
-| A release is at least the version change its changes need | the release gate (`Manifest.CheckRelease`, through `CheckPolicy`), and `TestEmbeddedManifestFollowsThePolicy` for every listed release, with `policyExceptions` |
+| A release is at least the version change its changes need (its own and every pre-release's since the last stable release) | the release gate (`Manifest.CheckRelease`, through `CheckPolicy`), and `TestEmbeddedManifestFollowsThePolicy` for every listed release, with `policyExceptions` |
 | Breaking security changes may ship in any release | `RequiredBump` (the `security` area) |
-| A deprecation names its release, declared in the manifest, and a replacement | `TestFrameworkDeprecationsNameTheirRelease`, `TestFrameworkDeprecationsNameAReplacement` |
+| A deprecation names its release, which declares it (`deprecates`), and a replacement | `TestFrameworkDeprecationsNameTheirRelease`, `TestFrameworkDeprecationsNameAReplacement` |
+| v1.0.0 follows a minor line that deprecates nothing | the release gate (`CheckRelease` for `v1.0.0`) |
 | A shipped codemod is named by the manifest change of its release | `TestShippedCodemodsAreValid` |
 | The window an application sees | `gombit upgrade check` (`RemovableFrom`) |
 | Every published release stays in the manifest | `TestEmbeddedManifestListsPublishedTags` |

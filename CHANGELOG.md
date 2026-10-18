@@ -385,9 +385,11 @@ version.
   - **Deprecation window:** before 1.0, a deprecated API stays through the
     next minor; from 1.0, until the next major (`upgrade.RemovableFrom`).
     Every `Deprecated:` paragraph names its release ("since vX.Y.Z"), which
-    declares the deprecation in the manifest, and `gombit upgrade check`
-    shows when each API it reports may be removed (`since` and
-    `removable_from` in `--json`).
+    declares the deprecation in the manifest (a change's new `deprecates`
+    list), and `gombit upgrade check` shows when each API it reports may be
+    removed (`since`, `removable_from` and `removable_from_major` in
+    `--json`). The release gate refuses v1.0.0 right after a minor line
+    that deprecates anything.
   - **Support:** every release stays in the manifest, and a codemod stays
     as long as the manifest change of its release names it
   ([#350](https://github.com/gombit-dev/gombit/issues/350)).

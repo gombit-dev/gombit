@@ -1,7 +1,6 @@
 package upgrade
 
 import (
-	"cmp"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -160,8 +159,9 @@ func TestScanFailsClosedOnAnUnindexedPackage(t *testing.T) {
 // the framework names the release that deprecated the API ("Deprecated:
 // since vX.Y.Z, ..."), so the compatibility policy's window (RemovableFrom)
 // starts somewhere: a release the manifest lists, or the upcoming one. That
-// release declares the deprecation (a change naming the API; the unreleased
-// entry for the upcoming release), so the window cannot be backdated.
+// release declares the deprecation (a change whose deprecates names the
+// API, in its entry, a pre-release of it, or the unreleased entry for the
+// upcoming release), so the window cannot be backdated.
 func TestFrameworkDeprecationsNameTheirRelease(t *testing.T) {
 	m, err := LoadManifest()
 	if err != nil {
@@ -196,17 +196,18 @@ func TestFrameworkDeprecationsNameTheirRelease(t *testing.T) {
 				t.Errorf("%s: a Deprecated: paragraph names no release (\"Deprecated: since vX.Y.Z, use ...\"): %q", path, dep)
 				continue
 			}
-			r, err := m.Release(since)
-			switch {
-			case err == nil:
-			case slices.Contains(upcoming, since):
-				r, _ = m.Release(Unreleased)
-			default:
+			_, err := m.Release(since)
+			if err != nil && !slices.Contains(upcoming, since) {
 				t.Errorf("%s: deprecated since %s, which is neither a release the manifest lists nor the next one (%v)", path, since, upcoming)
 				continue
 			}
-			if !slices.ContainsFunc(r.Changes, func(c Change) bool { return strings.Contains(c.Summary+c.Details, symbol) }) {
-				t.Errorf("%s: %s is deprecated since %s, but no change of that release (%s in the manifest) names %s", path, symbol, since, cmp.Or(r.Version, Unreleased), symbol)
+			// The release, its pre-releases, and (not cut yet) unreleased.
+			declared := slices.ContainsFunc(m.Releases, func(r Release) bool {
+				ships := r.Version == since || strings.HasPrefix(r.Version, since+"-") || (err != nil && r.Version == Unreleased)
+				return ships && slices.ContainsFunc(r.Changes, func(c Change) bool { return slices.Contains(c.Deprecates, symbol) })
+			})
+			if !declared {
+				t.Errorf("%s: %s is deprecated since %s, but no change of that release declares it (deprecates: [%s] in upgrade/manifest.yaml)", path, symbol, since, symbol)
 			}
 		}
 		return nil

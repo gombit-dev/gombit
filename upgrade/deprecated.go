@@ -13,7 +13,6 @@ import (
 	"strconv"
 	"strings"
 
-	"golang.org/x/mod/semver"
 	"golang.org/x/tools/go/packages"
 )
 
@@ -36,10 +35,13 @@ type DeprecatedUse struct {
 	Deprecation string `json:"deprecation"`
 	// Since is the release that deprecated it, as the paragraph says
 	// ("Deprecated: since vX.Y.Z, ..."), and RemovableFrom the first
-	// release the compatibility policy lets remove it; both empty when the
+	// release of its line the compatibility policy lets remove it;
+	// RemovableFromMajor is the major release that may remove it if it
+	// comes first (v1.0.0, for a pre-1.0 deprecation). All empty when the
 	// paragraph names no release.
-	Since         string `json:"since,omitempty"`
-	RemovableFrom string `json:"removable_from,omitempty"`
+	Since              string `json:"since,omitempty"`
+	RemovableFrom      string `json:"removable_from,omitempty"`
+	RemovableFromMajor string `json:"removable_from_major,omitempty"`
 }
 
 // ErrDoesNotLoad: a package of the scanned graph (the application's
@@ -314,7 +316,7 @@ func (s *scan) add(p *packages.Package, pos token.Pos, pkgPath string, d declDoc
 		Symbol: d.symbol, Package: pkgPath, Deprecation: d.deprecation,
 	}
 	if use.Since = DeprecationSince(d.deprecation); use.Since != "" {
-		use.RemovableFrom = RemovableFrom(use.Since)
+		use.RemovableFrom, use.RemovableFromMajor = RemovableFrom(use.Since), RemovableFromMajor(use.Since)
 	}
 	s.uses = append(s.uses, use)
 }
@@ -487,8 +489,8 @@ func RenderDeprecated(w io.Writer, uses []DeprecatedUse) error {
 			fmt.Fprintf(&b, "  %s:%d:%d: %s\n      %s\n", u.File, u.Line, u.Column, u.Symbol, u.Deprecation)
 			if u.RemovableFrom != "" {
 				removable := u.RemovableFrom
-				if semver.Major(removable) == "v0" {
-					removable += " (or v1.0.0, if it comes first)"
+				if u.RemovableFromMajor != "" {
+					removable += " (or " + u.RemovableFromMajor + ", if it comes first)"
 				}
 				fmt.Fprintf(&b, "      (deprecated in %s; the compatibility policy lets %s remove it)\n", u.Since, removable)
 			}
