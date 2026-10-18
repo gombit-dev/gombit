@@ -240,6 +240,15 @@ func TestFirstMajorFollowsAQuietMinor(t *testing.T) {
 	if err := m.CheckRelease("v1.0.0"); err == nil || !strings.Contains(err.Error(), "v1.0.0 follows v0.10.0-rc.1, which deprecates db.Old") {
 		t.Fatalf("CheckRelease(v1.0.0) after a deprecating rc = %v", err)
 	}
+	// A deprecation in v1.0.0's own pre-release is a 1.x one (removable
+	// from v2.0.0): it does not hold v1.0.0 back.
+	m, err = upgrade.ParseManifest([]byte("format: 1\nreleases:\n" + rel("v0.8.0") + rel("v0.9.0") + rel("v1.0.0-rc.1", change(deprecation, "old-deprecated")) + rel("v1.0.0", change(breakingAPI, "one-oh"))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.CheckRelease("v1.0.0"); err != nil {
+		t.Fatalf("CheckRelease(v1.0.0) after its own deprecating rc = %v", err)
+	}
 	m, err = upgrade.ParseManifest([]byte("format: 1\nreleases:\n" + rel("v0.8.0") + rel("v0.9.0", change(deprecation, "old-deprecated")) + rel("v0.10.0") + rel("v1.0.0", change(breakingAPI, "one-oh"))))
 	if err != nil {
 		t.Fatal(err)

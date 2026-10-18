@@ -138,7 +138,9 @@ func (m *Manifest) checkFirstMajor(tag string) error {
 	i := slices.IndexFunc(m.Releases, func(r Release) bool { return r.Version == tag })
 	line := semver.MajorMinor(m.stableBefore(i))
 	for _, r := range m.Releases[:i] {
-		if r.Version == Unreleased || semver.Compare(semver.MajorMinor(r.Version), line) < 0 {
+		// The 0.y releases since that line; v1.0.0's own pre-releases
+		// deprecate for 1.x, removable from v2.0.0.
+		if r.Version == Unreleased || semver.Major(r.Version) != "v0" || semver.Compare(semver.MajorMinor(r.Version), line) < 0 {
 			continue
 		}
 		for _, c := range r.Changes {
