@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gombit-dev/gombit/migrations"
 	"github.com/gombit-dev/gombit/resourcegen"
@@ -476,4 +477,72 @@ func moduleRoot(t *testing.T) string {
 		t.Fatalf("module root %s: %v", root, err)
 	}
 	return root
+}
+
+// TestStaleReportsStaleAndMissingFiles: Stale lists, by path, what Check
+// fails on (a generator-owned file that differs, one that is missing),
+// never a seed-once file, and how many resources there are; it writes
+// nothing.
+func TestStaleReportsStaleAndMissingFiles(t *testing.T) {
+	dir := newAppLayout(t)
+	arts := bookArtifacts()
+	writeFile(t, filepath.Join(dir, "internal", "book", "dto.gen.go"), "package book\n\n// stale dto\n")
+	writeFile(t, filepath.Join(dir, "internal", "book", "hooks.go"), "package book\n\n// my own hooks\n")
+	stale, resources, err := Stale(context.Background(), Options{WorkDir: dir, Stdout: io.Discard, Stderr: io.Discard, runner: &fakeRunner{out: artifactsJSON(t, arts)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resources != 1 || len(stale) != 2 || stale[0] != (StaleFile{Path: "internal/book/dto.gen.go"}) || stale[1] != (StaleFile{Path: "internal/book/handler.gen.go", Missing: true}) {
+		t.Fatalf("Stale = %+v, %d", stale, resources)
+	}
+	if got, _ := os.ReadFile(filepath.Join(dir, "internal", "book", "dto.gen.go")); string(got) != "package book\n\n// stale dto\n" { // #nosec G304 -- under t.TempDir()
+		t.Fatal("Stale wrote a file")
+	}
+	// No resources: nothing rendered.
+	empty := t.TempDir()
+	writeFile(t, filepath.Join(empty, "go.mod"), "module testapp\n\ngo 1.23\n")
+	writeFile(t, filepath.Join(empty, "cmd", "server", "main.go"), "package main\n\nfunc main() {}\n")
+	writeFile(t, filepath.Join(empty, "internal", "platform", "database.go"), "package platform\n")
+	runner := &fakeRunner{}
+	if stale, resources, err := Stale(context.Background(), Options{WorkDir: empty, Stdout: io.Discard, Stderr: io.Discard, runner: runner}); err != nil || resources != 0 || len(stale) != 0 || runner.ran {
+		t.Fatalf("no resources: %+v, %d, %v, ran %v", stale, resources, err, runner.ran)
+	}
+}
+
+// TestUpdateWritesOnlyStaleFiles: Update renders once and writes the stale
+// generator-owned file only: a current one is left as it is (its
+// modification time too), and an existing hooks file is never written.
+func TestUpdateWritesOnlyStaleFiles(t *testing.T) {
+	dir := newAppLayout(t)
+	arts := bookArtifacts()
+	for _, a := range arts {
+		writeFile(t, filepath.Join(dir, filepath.FromSlash(a.Path)), string(a.Content))
+	}
+	handler := filepath.Join(dir, "internal", "book", "handler.gen.go")
+	dto := filepath.Join(dir, "internal", "book", "dto.gen.go")
+	hooks := filepath.Join(dir, "internal", "book", "hooks.go")
+	writeFile(t, dto, "package book\n\n// stale dto\n")
+	writeFile(t, hooks, "package book\n\n// my hooks\n")
+	old := time.Now().Add(-time.Hour).Truncate(time.Second)
+	if err := os.Chtimes(handler, old, old); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{out: artifactsJSON(t, arts)}
+	written, resources, err := Update(context.Background(), Options{WorkDir: dir, Stdout: io.Discard, Stderr: io.Discard, runner: runner})
+	if err != nil || resources != 1 || len(written) != 1 || written[0].Path != "internal/book/dto.gen.go" {
+		t.Fatalf("Update = %+v, %d, %v", written, resources, err)
+	}
+	if info, err := os.Stat(handler); err != nil || !info.ModTime().Equal(old) {
+		t.Fatalf("the current handler.gen.go was rewritten (%v)", err)
+	}
+	if got, _ := os.ReadFile(hooks); string(got) != "package book\n\n// my hooks\n" { // #nosec G304 -- under t.TempDir()
+		t.Fatal("hooks.go was written")
+	}
+	for _, a := range arts {
+		if a.Path == "internal/book/dto.gen.go" {
+			if got, _ := os.ReadFile(dto); string(got) != string(a.Content) { // #nosec G304 -- under t.TempDir()
+				t.Fatal("dto.gen.go was not regenerated")
+			}
+		}
+	}
 }

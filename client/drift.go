@@ -96,8 +96,63 @@ func CheckDrift(ctx context.Context, opts DriftOptions) error {
 	if opts.Write {
 		return writeSampleFixtures(ctx, opts, spec)
 	}
-	return compareSampleFixtures(ctx, opts, spec)
+	drifted, err := driftedArtifacts(ctx, opts, spec)
+	if err != nil {
+		return err
+	}
+	if len(drifted) > 0 {
+		names := make([]string, len(drifted))
+		for i, d := range drifted {
+			names[i] = displayPath(opts.WorkDir, resolvePath(opts.WorkDir, d.Path))
+		}
+		return fmt.Errorf("%w in %s; regenerate with gombit client check --write", ErrDrift, strings.Join(names, ", "))
+	}
+	_, err = fmt.Fprintln(opts.Stdout, "no contract drift")
+	return err
 }
+
+// DriftedFile is a committed contract artifact that differs from what the
+// contract produces: the OpenAPI document (Spec) or a generated client file.
+type DriftedFile struct {
+	// Path is as given (SpecPath, or OutDir joined with the file name).
+	Path string `json:"path"`
+	Spec bool   `json:"spec,omitempty"`
+	// Missing is a generated client file that is not committed at all.
+	Missing bool `json:"missing,omitempty"`
+}
+
+// Drift reports the committed contract artifacts that differ from what the
+// contract (opts.SpecBytes, or the in-process API, as CheckDrift takes it)
+// produces, by the same comparison CheckDrift fails on: the document
+// semantically, the generated client files byte for byte. It writes
+// nothing outside a temporary directory; Write is ignored.
+func Drift(ctx context.Context, opts DriftOptions) ([]DriftedFile, error) {
+	if ctx == nil {
+		return nil, errors.New("client: nil context")
+	}
+	opts = normalizeDriftOptions(opts)
+	spec := opts.SpecBytes
+	if spec == nil {
+		api := opts.API
+		if api == nil {
+			app, err := SampleApp()
+			if err != nil {
+				return nil, fmt.Errorf("client: sample app: %w", err)
+			}
+			api = app.API()
+		}
+		var err error
+		if spec, err = contract.OpenAPIJSON(api); err != nil {
+			return nil, err
+		}
+	}
+	return driftedArtifacts(ctx, opts, spec)
+}
+
+// GeneratedFiles are the files of a generated client directory that
+// Generate writes and the drift check compares: the only ones gombit owns
+// there.
+func GeneratedFiles() []string { return append([]string(nil), sampleClientFiles...) }
 
 func normalizeDriftOptions(opts DriftOptions) DriftOptions {
 	if opts.WorkDir == "" {
@@ -146,32 +201,32 @@ func writeSampleFixtures(ctx context.Context, opts DriftOptions, spec []byte) er
 	})
 }
 
-func compareSampleFixtures(ctx context.Context, opts DriftOptions, generatedSpec []byte) error {
+func driftedArtifacts(ctx context.Context, opts DriftOptions, generatedSpec []byte) ([]DriftedFile, error) {
 	tmpDir, err := os.MkdirTemp("", "gombit-drift-*")
 	if err != nil {
-		return fmt.Errorf("client: temp dir: %w", err)
+		return nil, fmt.Errorf("client: temp dir: %w", err)
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	generatedSpecPath := filepath.Join(tmpDir, "openapi.json")
 	if err := contract.WriteOpenAPIFile(generatedSpecPath, generatedSpec); err != nil {
-		return err
+		return nil, err
 	}
 
 	specPath := resolvePath(opts.WorkDir, opts.SpecPath)
 	// #nosec G304 -- spec path is a user-supplied committed fixture
 	committedSpec, err := os.ReadFile(specPath)
 	if err != nil {
-		return fmt.Errorf("client: read committed spec: %w", err)
+		return nil, fmt.Errorf("client: read committed spec: %w", err)
 	}
 
-	var drifted []string
+	var drifted []DriftedFile
 	equal, err := jsonEqual(committedSpec, generatedSpec)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if !equal {
-		drifted = append(drifted, displayPath(opts.WorkDir, specPath))
+		drifted = append(drifted, DriftedFile{Path: opts.SpecPath, Spec: true})
 	}
 
 	generatedOut := filepath.Join(tmpDir, "generated")
@@ -183,7 +238,7 @@ func compareSampleFixtures(ctx context.Context, opts DriftOptions, generatedSpec
 		Stdout:    io.Discard,
 		Stderr:    opts.Stderr,
 	}); err != nil {
-		return err
+		return nil, err
 	}
 
 	committedOut := resolvePath(opts.WorkDir, opts.OutDir)
@@ -192,24 +247,23 @@ func compareSampleFixtures(ctx context.Context, opts DriftOptions, generatedSpec
 		generatedPath := filepath.Join(generatedOut, name)
 		// #nosec G304 -- committedPath is the checked-in generated client file
 		committed, readErr := os.ReadFile(committedPath)
+		if errors.Is(readErr, os.ErrNotExist) {
+			drifted = append(drifted, DriftedFile{Path: filepath.Join(opts.OutDir, name), Missing: true})
+			continue
+		}
 		if readErr != nil {
-			return fmt.Errorf("client: read committed %s: %w", displayPath(opts.WorkDir, committedPath), readErr)
+			return nil, fmt.Errorf("client: read committed %s: %w", displayPath(opts.WorkDir, committedPath), readErr)
 		}
 		// #nosec G304 -- generatedPath is created in this function
 		generated, readErr := os.ReadFile(generatedPath)
 		if readErr != nil {
-			return fmt.Errorf("client: read generated %s: %w", name, readErr)
+			return nil, fmt.Errorf("client: read generated %s: %w", name, readErr)
 		}
 		if !bytes.Equal(committed, generated) {
-			drifted = append(drifted, displayPath(opts.WorkDir, committedPath))
+			drifted = append(drifted, DriftedFile{Path: filepath.Join(opts.OutDir, name)})
 		}
 	}
-
-	if len(drifted) > 0 {
-		return fmt.Errorf("%w in %s; regenerate with gombit client check --write", ErrDrift, strings.Join(drifted, ", "))
-	}
-	_, err = fmt.Fprintln(opts.Stdout, "no contract drift")
-	return err
+	return drifted, nil
 }
 
 func jsonEqual(left, right []byte) (bool, error) {

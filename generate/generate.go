@@ -88,20 +88,7 @@ var ErrStale = errors.New("generate: generated files are stale")
 // Generate regenerates (or, with Check, verifies) the model-first resource files.
 func Generate(ctx context.Context, opts Options) error {
 	opts.withDefaults()
-
-	absWorkDir, err := filepath.Abs(opts.WorkDir)
-	if err != nil {
-		return fmt.Errorf("generate: resolve work dir: %w", err)
-	}
-	if err := resourcegen.ValidateAppLayout(absWorkDir); err != nil {
-		return err
-	}
-	module, err := resourcegen.ReadModulePath(absWorkDir)
-	if err != nil {
-		return err
-	}
-
-	models, err := discoverResources(absWorkDir, module)
+	absWorkDir, models, artifacts, err := prepare(ctx, opts)
 	if err != nil {
 		return err
 	}
@@ -109,12 +96,95 @@ func Generate(ctx context.Context, opts Options) error {
 		_, _ = fmt.Fprintln(opts.Stdout, "generate: no model-first resources found; nothing to do")
 		return nil
 	}
+	if opts.Check {
+		stale, err := staleArtifacts(absWorkDir, artifacts)
+		if err != nil {
+			return err
+		}
+		return staleError(stale)
+	}
+	return applyArtifacts(opts, absWorkDir, artifacts)
+}
+
+// StaleFile is a generator-owned file that differs from what the models
+// produce, or is missing.
+type StaleFile struct {
+	// Path is relative to the application directory, with forward slashes.
+	Path    string `json:"path"`
+	Missing bool   `json:"missing,omitempty"`
+}
+
+// Stale reports the generator-owned resource files that are stale (what
+// Generate with Check fails on), and how many model-first resources the
+// application has. It renders exactly as Generate does, through a loader
+// run inside the application's module (so with the framework version its
+// go.mod requires), and never writes.
+func Stale(ctx context.Context, opts Options) (stale []StaleFile, resources int, err error) {
+	opts.withDefaults()
+	absWorkDir, models, artifacts, err := prepare(ctx, opts)
+	if err != nil || len(models) == 0 {
+		return nil, 0, err
+	}
+	stale, err = staleArtifacts(absWorkDir, artifacts)
+	return stale, len(models), err
+}
+
+// Update renders the resource files once, as Stale does, and writes only
+// the stale generator-owned ones (and seed-once files that are absent, as
+// Generate does; never one that exists). It returns what it wrote, and how
+// many resources the application has.
+func Update(ctx context.Context, opts Options) (written []StaleFile, resources int, err error) {
+	opts.withDefaults()
+	absWorkDir, models, artifacts, err := prepare(ctx, opts)
+	if err != nil || len(models) == 0 {
+		return nil, 0, err
+	}
+	stale, err := staleArtifacts(absWorkDir, artifacts)
+	if err != nil || len(stale) == 0 {
+		return nil, len(models), err
+	}
+	isStale := map[string]bool{}
+	for _, f := range stale {
+		isStale[f.Path] = true
+	}
+	var write []resourcegen.GeneratedArtifact
+	for _, a := range artifacts {
+		if a.Ownership == resourcegen.SeedOnce || isStale[a.Path] {
+			write = append(write, a)
+		}
+	}
+	if err := applyArtifacts(opts, absWorkDir, write); err != nil {
+		return nil, len(models), err
+	}
+	return stale, len(models), nil
+}
+
+// prepare finds the application's model-first resources and renders their
+// artifacts (none, and no loader run, when it has no resource), refusing
+// the layouts generation must not touch.
+func prepare(ctx context.Context, opts Options) (absWorkDir string, models []migrations.Model, artifacts []resourcegen.GeneratedArtifact, err error) {
+	absWorkDir, err = filepath.Abs(opts.WorkDir)
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("generate: resolve work dir: %w", err)
+	}
+	if err := resourcegen.ValidateAppLayout(absWorkDir); err != nil {
+		return "", nil, nil, err
+	}
+	module, err := resourcegen.ReadModulePath(absWorkDir)
+	if err != nil {
+		return "", nil, nil, err
+	}
+
+	models, err = discoverResources(absWorkDir, module)
+	if err != nil || len(models) == 0 {
+		return absWorkDir, nil, nil, err
+	}
 	// Fail closed on the legacy layout BEFORE running the loader or writing
 	// anything: a package that still has the human-owned handler.go would get a
 	// second, generated Handler/Register and stop compiling. It must be migrated
 	// first, not half-converted.
 	if err := ensureNoLegacyLayout(absWorkDir, models); err != nil {
-		return err
+		return "", nil, nil, err
 	}
 	// Also fail closed if a resource directory's files declare a package name
 	// different from the directory basename we render the *.gen.go under: writing
@@ -122,18 +192,14 @@ func Generate(ctx context.Context, opts Options) error {
 	// reporting success. reflect gives the import path, not the declared name, so
 	// the basename is only a heuristic — verify it against what is on disk.
 	if err := ensurePackageMatchesDir(absWorkDir, models); err != nil {
-		return err
+		return "", nil, nil, err
 	}
 
-	artifacts, err := loadArtifacts(ctx, opts, absWorkDir, models, nil)
+	artifacts, err = loadArtifacts(ctx, opts, absWorkDir, models, nil)
 	if err != nil {
-		return err
+		return "", nil, nil, err
 	}
-
-	if opts.Check {
-		return checkArtifacts(absWorkDir, artifacts)
-	}
-	return applyArtifacts(opts, absWorkDir, artifacts)
+	return absWorkDir, models, artifacts, nil
 }
 
 // PlanResource runs the Program-Mode phase-2 render for a single pending
@@ -469,11 +535,11 @@ func loaderSource(models []migrations.Model) string {
 	return b.String()
 }
 
-// checkArtifacts compares generator-owned artifacts against the committed files
-// and returns a non-nil error listing every stale/missing one. Seed-once files
+// staleArtifacts compares generator-owned artifacts against the committed
+// files and returns every stale or missing one, by path. Seed-once files
 // are human-owned and never compared. It never writes.
-func checkArtifacts(absWorkDir string, artifacts []resourcegen.GeneratedArtifact) error {
-	var stale []string
+func staleArtifacts(absWorkDir string, artifacts []resourcegen.GeneratedArtifact) ([]StaleFile, error) {
+	var stale []StaleFile
 	for _, a := range artifacts {
 		if a.Ownership != resourcegen.GeneratorOwned {
 			continue
@@ -483,20 +549,32 @@ func checkArtifacts(absWorkDir string, artifacts []resourcegen.GeneratedArtifact
 		existing, err := os.ReadFile(abs)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
-				stale = append(stale, a.Path+" (missing)")
+				stale = append(stale, StaleFile{Path: a.Path, Missing: true})
 				continue
 			}
-			return fmt.Errorf("generate: read %s: %w", a.Path, err)
+			return nil, fmt.Errorf("generate: read %s: %w", a.Path, err)
 		}
 		if !bytes.Equal(existing, a.Content) {
-			stale = append(stale, a.Path)
+			stale = append(stale, StaleFile{Path: a.Path})
 		}
 	}
-	if len(stale) > 0 {
-		sort.Strings(stale)
-		return fmt.Errorf("%w; run `gombit generate`:\n\t%s", ErrStale, strings.Join(stale, "\n\t"))
+	sort.Slice(stale, func(i, j int) bool { return stale[i].Path < stale[j].Path })
+	return stale, nil
+}
+
+// staleError is the --check failure for stale files, or nil.
+func staleError(stale []StaleFile) error {
+	if len(stale) == 0 {
+		return nil
 	}
-	return nil
+	lines := make([]string, len(stale))
+	for i, f := range stale {
+		lines[i] = f.Path
+		if f.Missing {
+			lines[i] += " (missing)"
+		}
+	}
+	return fmt.Errorf("%w; run `gombit generate`:\n\t%s", ErrStale, strings.Join(lines, "\n\t"))
 }
 
 // applyArtifacts writes generator-owned files (always) and seeds seed-once files

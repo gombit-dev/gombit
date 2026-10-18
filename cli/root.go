@@ -125,7 +125,7 @@ func rootLongHelp() string {
 		"  config    Show typed configuration (config show)",
 		"  createsuperuser  Create a superuser (admin) account",
 		"  version   Print the gombit version and build metadata",
-		"  upgrade   Upgrade the framework (upgrade --to), plan it (--dry-run); upgrade baseline, check, fix, notes",
+		"  upgrade   Upgrade the framework (upgrade --to), plan it (--dry-run); upgrade baseline, check, contract, fix, notes",
 	}, "\n")
 }
 
@@ -154,6 +154,7 @@ func usage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "  upgrade --dry-run [--to vX.Y.Z] [--dir .] [--json]")
 	_, _ = fmt.Fprintln(w, "  upgrade baseline [--dir .] [--json] [--write]")
 	_, _ = fmt.Fprintln(w, "  upgrade check [--dir .] [--json]")
+	_, _ = fmt.Fprintln(w, "  upgrade contract [--dir .] [--url URL] [--write] [--json]")
 	_, _ = fmt.Fprintln(w, "  upgrade fix [--dir .] [--only id,...] [--write | --patch FILE] [--json]")
 	_, _ = fmt.Fprintln(w, "  upgrade notes [--release v | --from v [--to v]] [--json]")
 }

@@ -370,6 +370,20 @@ version.
     file remains.
   - No codemods ship yet: the only deprecated API,
     `database.KeepStoredZeros`, has no mechanical replacement.
+- `gombit upgrade contract [--url] [--write] [--json]` (UPGRADE-8) reports
+  which generated contract artifacts are stale after an upgrade, each by
+  the check the existing drift gates make:
+  - the resource `*.gen.go`, as `gombit generate --check` renders them
+    with the app's framework version;
+  - the committed `openapi.json`, against the running app's (`--url`);
+  - the TypeScript client, as `gombit client check` compares it.
+
+  `--write` regenerates the stale ones with the same generation, writing
+  generator-owned files only (never `hooks.go`, nor a client-directory
+  file gombit did not generate). It exits 1 while anything is stale, and
+  `gombit upgrade --dry-run` now points to it after the dependency change.
+  `contractcheck.Check`, `generate.Stale` and `client.Drift` are the API
+  ([#348](https://github.com/gombit-dev/gombit/issues/348)).
 
 ### Changed
 

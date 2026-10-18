@@ -12,6 +12,7 @@ import (
 
 	"github.com/gombit-dev/gombit/internal/atomicfile"
 	"github.com/gombit-dev/gombit/upgrade"
+	"github.com/gombit-dev/gombit/upgrade/contractcheck"
 )
 
 func upgradeApp(t *testing.T, gombitYAML string) string {
@@ -437,5 +438,28 @@ func TestUpgradeFix(t *testing.T) {
 		if _, _, err := run(tc.args...); err == nil || !strings.Contains(err.Error(), tc.msg) {
 			t.Errorf("fix %v = %v; want %q", tc.args, err, tc.msg)
 		}
+	}
+}
+
+// TestUpgradeContract: gombit upgrade contract on a directory with no
+// generated contract artifacts reports each absent (JSON or text) and
+// exits 0; a stale one fails it.
+func TestUpgradeContract(t *testing.T) {
+	dir := t.TempDir()
+	out, err := runUpgradeCLI(t, "contract", "--dir", dir, "--json")
+	var report contractcheck.Report
+	if err != nil || json.Unmarshal([]byte(out), &report) != nil || len(report.Checks) != 3 {
+		t.Fatalf("--json: %q, %v", out, err)
+	}
+	for _, c := range report.Checks {
+		if c.Status != contractcheck.Absent {
+			t.Errorf("%s = %s, want absent", c.Artifact, c.Status)
+		}
+	}
+	if out, err := runUpgradeCLI(t, "contract", "--dir", dir); err != nil || !strings.Contains(out, "Generated contract artifacts:\n  resources: absent\n  openapi:  absent\n  client:   absent\n") {
+		t.Fatalf("text: %q, %v", out, err)
+	}
+	if _, err := runUpgradeCLI(t, "contract", "--dir", dir, "--url", "http://127.0.0.1:1/openapi.json"); err == nil {
+		t.Fatal("an unreachable --url was accepted")
 	}
 }

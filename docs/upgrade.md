@@ -10,7 +10,8 @@ never rewrites code you own without an explicit write action.
 This page grows with the UPGRADE-0 epic. Today it covers **planning an
 upgrade** (`gombit upgrade --dry-run`), **applying its dependency changes**
 (`gombit upgrade --to`), **checking for deprecated APIs** (`gombit upgrade
-check`), **rewriting them with codemods** (`gombit upgrade fix`), the
+check`), **rewriting them with codemods** (`gombit upgrade fix`),
+**generated contract artifacts** (`gombit upgrade contract`), the
 **baseline** (where an application stands) and the
 **compatibility manifest** (what each release asks of an application moving
 to it).
@@ -285,6 +286,49 @@ declares it. That covers a member promoted from an embedded type or
 interface, and `Base`'s member when `Type` is defined from `Base`
 (`type Type Base`) or is an alias of it. Uses are matched by the
 declaration, so such a codemod would rewrite every use of `Base`'s member.
+
+## Generated contract artifacts
+
+An upgrade can change what generation produces: the framework renders the
+resource files and the TypeScript client, and the running app derives the
+OpenAPI document. Run `gombit upgrade contract` after `gombit upgrade --to`
+(the plan says so) to see which committed artifacts are stale:
+
+```text
+$ gombit upgrade contract --url http://127.0.0.1:8080/openapi.json
+Generated contract artifacts:
+  resources: stale: internal/book/dto.gen.go
+      regenerate: gombit generate (or gombit upgrade contract --write)
+  openapi:  current
+  client:   current
+```
+
+Each check is the one the existing drift gates make, so it agrees with them
+(and they keep working unchanged across an upgrade):
+
+| Artifact | Check | Regenerate |
+| --- | --- | --- |
+| `resources`: the generator-owned `*.gen.go` | rendered as `gombit generate --check` renders them, by a loader run inside the app's module, so with the framework version its `go.mod` requires | `gombit generate` |
+| `openapi`: the committed `openapi.json` | compared semantically with the running app's (`--url`); unchecked without it, since the app derives it; absent when not committed (`gombit dev` writes it) | `gombit openapi generate` |
+| `client`: `frontend/src/api/generated` | regenerated as `gombit client generate` does, from the `--url` document or the committed one, and compared byte for byte (`gombit client check`'s comparison); unchecked without a document or without npx (openapi-typescript) | `gombit client generate` |
+
+- **`--write` regenerates what is stale** with that same generation and
+  writes only the stale files. The resources are rendered once, and only the
+  stale `*.gen.go` are written. The document is written as `gombit openapi
+  generate` writes it, and the client is regenerated from the document it
+  was checked against. A current artifact is left alone.
+- **When the models don't compile** (a breaking upgrade not yet fixed), the
+  resources are unchecked, with the loader's error, and the other checks
+  still report.
+- **Generator-owned files only.** `--write` never touches a resource's
+  `hooks.go`, any other handwritten frontend file, or a file in the client
+  directory that gombit did not generate (no generated banner). Such a file
+  is reported instead, and the artifact stays stale.
+- **Exit status.** The command exits 1 while anything is left stale, so a CI
+  job can gate on it. `--spec` and `--out` select other paths, and `--json`
+  prints the report.
+
+`contractcheck.Check` (package `upgrade/contractcheck`) is the API.
 
 ## The baseline
 
