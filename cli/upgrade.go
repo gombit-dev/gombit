@@ -28,7 +28,8 @@ compatibility manifest built into this gombit, without changing anything:
 
 The plan reports the current and target versions, the dependency change,
 the automatic changes the app needs, every manual action with what to do,
-and the breaking changes. --to selects the target (default: the newest
+the breaking changes, and the framework schema changes (auth tables,
+storage claims) with the migration steps they need for this app. --to selects the target (default: the newest
 release this gombit knows). A version the manifest does not list, or an app
 whose baseline names no framework release (a go.work, a local checkout, a
 fork), fails with the reason. It never prompts, so it runs in CI as is.
@@ -42,7 +43,9 @@ runs go get github.com/gombit-dev/gombit@vX.Y.Z, prints every go command and
 the go.mod and go.sum lines they changed, and leaves them for review. A go
 command that fails is shown with its full output, and go.mod and go.sum are
 restored. The plan's automatic and manual changes are printed as still to
-do: they are not applied. --to is required here: nothing is applied to a
+do: they are not applied. No migration is run: when the framework's tables
+change, it says the upgrade is not complete until the listed migration
+steps are done. --to is required here: nothing is applied to a
 default target.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -55,11 +58,12 @@ default target.`,
 			to, _ := flags.GetString("to")
 			dir, _ := flags.GetString("dir")
 			asJSON, _ := flags.GetBool("json")
+			migrationDir, _ := flags.GetString("migrations")
 			switch {
 			case dryRun:
-				return runUpgradePlan(stdout, dir, to, asJSON)
+				return runUpgradePlan(stdout, dir, migrationDir, to, asJSON)
 			case to != "":
-				return runUpgradeApply(cmd.Context(), stdout, dir, to, asJSON)
+				return runUpgradeApply(cmd.Context(), stdout, dir, migrationDir, to, asJSON)
 			default:
 				upgradeUsage(stderr)
 				return errors.New("gombit upgrade: --to (apply) or --dry-run (plan) or a subcommand is required")
@@ -70,6 +74,7 @@ default target.`,
 	cmd.Flags().String("to", "", "target framework release: applied without --dry-run; with it, planned (default: the newest release this gombit knows)")
 	cmd.Flags().String("dir", ".", "application directory (go.mod and gombit.yaml)")
 	cmd.Flags().Bool("json", false, "print the plan as JSON")
+	cmd.Flags().String("migrations", "database/migrations", "the app's migration directory (its model registry), relative to --dir, as gombit db --dir")
 	cmd.AddCommand(newUpgradeBaselineCommand(stdout))
 	cmd.AddCommand(newUpgradeCheckCommand(stdout))
 	cmd.AddCommand(newUpgradeConfigCommand(stdout))
@@ -293,12 +298,15 @@ func printFramework(stdout io.Writer, fw upgrade.Framework) error {
 }
 
 // runUpgradePlan prints the plan for upgrading the app in dir to to.
-func runUpgradePlan(stdout io.Writer, dir, to string, asJSON bool) error {
+func runUpgradePlan(stdout io.Writer, dir, migrationDir, to string, asJSON bool) error {
 	m, err := upgrade.LoadManifest()
 	if err != nil {
 		return fmt.Errorf("gombit upgrade: %w", err)
 	}
 	plan, err := upgrade.PlanUpgrade(dir, m, to)
+	if err == nil {
+		err = plan.UseMigrationDir(dir, migrationDir)
+	}
 	if err != nil {
 		return fmt.Errorf("gombit upgrade: %w", err)
 	}
@@ -315,7 +323,7 @@ func runUpgradePlan(stdout io.Writer, dir, to string, asJSON bool) error {
 
 // runUpgradeApply applies the dependency changes of upgrading the app in
 // dir to to, and prints what it did and what is still to do.
-func runUpgradeApply(ctx context.Context, stdout io.Writer, dir, to string, asJSON bool) error {
+func runUpgradeApply(ctx context.Context, stdout io.Writer, dir, migrationDir, to string, asJSON bool) error {
 	m, err := upgrade.LoadManifest()
 	if err != nil {
 		return fmt.Errorf("gombit upgrade: %w", err)
@@ -323,6 +331,11 @@ func runUpgradeApply(ctx context.Context, stdout io.Writer, dir, to string, asJS
 	applied, err := upgrade.ApplyDependencies(ctx, dir, m, to)
 	if err != nil {
 		return fmt.Errorf("gombit upgrade: %w", err)
+	}
+	// The dependencies are applied: a failure to read the registry is
+	// reported, not hidden, and the steps are never taken as done.
+	if err := applied.UseMigrationDir(dir, migrationDir); err != nil {
+		return fmt.Errorf("gombit upgrade: the dependency changes are applied, but the framework-schema check failed (the upgrade may need a migration): %w", err)
 	}
 	if asJSON {
 		data, err := json.MarshalIndent(applied, "", "  ")

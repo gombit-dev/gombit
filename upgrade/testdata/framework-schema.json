@@ -1,0 +1,287 @@
+{
+  "version": "v0.7.1",
+  "tables": [
+    {
+      "table": "auth_group_permissions",
+      "model": "auth.Group",
+      "columns": [
+        {
+          "name": "group_id",
+          "type": "uint(64)",
+          "primary_key": true
+        },
+        {
+          "name": "permission_id",
+          "type": "uint(64)",
+          "primary_key": true
+        }
+      ],
+      "indexes": []
+    },
+    {
+      "table": "auth_user_groups",
+      "model": "auth.User",
+      "columns": [
+        {
+          "name": "user_id",
+          "type": "uint(64)",
+          "primary_key": true
+        },
+        {
+          "name": "group_id",
+          "type": "uint(64)",
+          "primary_key": true
+        }
+      ],
+      "indexes": []
+    },
+    {
+      "table": "auth_user_permissions",
+      "model": "auth.User",
+      "columns": [
+        {
+          "name": "user_id",
+          "type": "uint(64)",
+          "primary_key": true
+        },
+        {
+          "name": "permission_id",
+          "type": "uint(64)",
+          "primary_key": true
+        }
+      ],
+      "indexes": []
+    },
+    {
+      "table": "groups",
+      "model": "auth.Group",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uint(64)",
+          "primary_key": true
+        },
+        {
+          "name": "name",
+          "type": "string(100)",
+          "not_null": true
+        },
+        {
+          "name": "created_at",
+          "type": "time"
+        },
+        {
+          "name": "updated_at",
+          "type": "time"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_groups_name",
+          "unique": true,
+          "columns": [
+            "name"
+          ]
+        }
+      ]
+    },
+    {
+      "table": "permissions",
+      "model": "auth.Permission",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uint(64)",
+          "primary_key": true
+        },
+        {
+          "name": "permission_key",
+          "type": "string(120)",
+          "not_null": true
+        },
+        {
+          "name": "description",
+          "type": "string(255)"
+        },
+        {
+          "name": "created_at",
+          "type": "time"
+        },
+        {
+          "name": "updated_at",
+          "type": "time"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_permissions_key",
+          "unique": true,
+          "columns": [
+            "permission_key"
+          ]
+        }
+      ]
+    },
+    {
+      "table": "refresh_tokens",
+      "model": "auth.RefreshToken",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uint(64)",
+          "primary_key": true
+        },
+        {
+          "name": "user_id",
+          "type": "uint(64)",
+          "not_null": true
+        },
+        {
+          "name": "token_hash",
+          "type": "string(64)",
+          "not_null": true
+        },
+        {
+          "name": "expires_at",
+          "type": "time",
+          "not_null": true
+        },
+        {
+          "name": "revoked_at",
+          "type": "time"
+        },
+        {
+          "name": "replaced_by",
+          "type": "uint(64)"
+        },
+        {
+          "name": "created_at",
+          "type": "time"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_refresh_tokens_expires_at",
+          "columns": [
+            "expires_at"
+          ]
+        },
+        {
+          "name": "idx_refresh_tokens_revoked_at",
+          "columns": [
+            "revoked_at"
+          ]
+        },
+        {
+          "name": "idx_refresh_tokens_token_hash",
+          "unique": true,
+          "columns": [
+            "token_hash"
+          ]
+        },
+        {
+          "name": "idx_refresh_tokens_user_id",
+          "columns": [
+            "user_id"
+          ]
+        }
+      ]
+    },
+    {
+      "table": "storage_claims",
+      "model": "storage/claims.Claim",
+      "columns": [
+        {
+          "name": "object_key",
+          "type": "string(512)",
+          "primary_key": true
+        },
+        {
+          "name": "state",
+          "type": "string(16)",
+          "not_null": true
+        },
+        {
+          "name": "created_at",
+          "type": "time"
+        },
+        {
+          "name": "lease_until",
+          "type": "time"
+        },
+        {
+          "name": "staged",
+          "type": "bool",
+          "not_null": true,
+          "default": "false"
+        },
+        {
+          "name": "scope",
+          "type": "string(255)",
+          "not_null": true
+        },
+        {
+          "name": "publication",
+          "type": "text"
+        },
+        {
+          "name": "updated_at",
+          "type": "time"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_storage_claims_sweep",
+          "columns": [
+            "state",
+            "created_at"
+          ]
+        }
+      ]
+    },
+    {
+      "table": "users",
+      "model": "auth.User",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uint(64)",
+          "primary_key": true
+        },
+        {
+          "name": "email",
+          "type": "string(255)",
+          "not_null": true
+        },
+        {
+          "name": "password_hash",
+          "type": "string",
+          "not_null": true
+        },
+        {
+          "name": "is_superuser",
+          "type": "bool",
+          "not_null": true,
+          "default": "false"
+        },
+        {
+          "name": "created_at",
+          "type": "time"
+        },
+        {
+          "name": "updated_at",
+          "type": "time"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_users_email",
+          "unique": true,
+          "columns": [
+            "email"
+          ]
+        }
+      ]
+    }
+  ]
+}

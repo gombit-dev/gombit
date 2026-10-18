@@ -52,7 +52,7 @@ func renderRelease(b *strings.Builder, r Release) {
 		for _, c := range r.Changes {
 			if c.Kind == kind {
 				items = append(items, renderChange(c))
-				loose = loose || strings.TrimSpace(c.Details) != "" || len(c.Config) > 0
+				loose = loose || strings.TrimSpace(c.Details) != "" || len(c.Config) > 0 || len(c.Schema) > 0
 			}
 		}
 		if len(items) == 0 {
@@ -83,10 +83,13 @@ func renderChange(c Change) string {
 		tags = append(tags, fmt.Sprintf("[#%d](https://github.com/gombit-dev/gombit/issues/%d)", ref, ref))
 	}
 	fmt.Fprintf(&b, " (%s)\n", strings.Join(tags, ", "))
-	if len(c.Config) > 0 {
+	if len(c.Config) > 0 || len(c.Schema) > 0 {
 		b.WriteString("\n")
 		for _, cc := range c.Config {
 			b.WriteString("  - Configuration: " + cc.Describe() + ".\n")
+		}
+		for _, sc := range c.Schema {
+			b.WriteString("  - Framework schema: " + sc.Describe() + ".\n")
 		}
 	}
 	if details := strings.TrimSpace(c.Details); details != "" {

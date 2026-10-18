@@ -436,3 +436,55 @@ releases:
 		t.Fatalf("no contract changes: %+v, %v", p.Contract, err)
 	}
 }
+
+// TestPlanUpgradeSchema: the plan includes the framework-schema changes on
+// the path and the migration steps they need for this app, from its model
+// registry; a path without one lists none, and says so.
+func TestPlanUpgradeSchema(t *testing.T) {
+	m, err := upgrade.ParseManifest([]byte(`format: 1
+releases:
+  - version: v0.6.1
+  - version: v0.7.0
+    changes:
+      - id: claims-table
+        kind: manual
+        area: schema
+        summary: File fields need the storage claims table.
+        details: Add claims.Models() to the app's models.
+        schema:
+          - {model: storage/claims.Claim, table: storage_claims, change: added}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := app(t, planGoMod, "")
+	p, err := upgrade.PlanUpgrade(dir, m, "v0.7.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Schema.Findings) != 1 || !p.Schema.MigrationRequired() {
+		t.Fatalf("Schema = %+v", p.Schema)
+	}
+	var out strings.Builder
+	if err := p.Render(&out); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"Framework schema changes: 1\n  - [migration required] `storage/claims.Claim` (`storage_claims`): added (v0.7.0, claims-table)",
+		"Required migration steps (the upgrade is not complete until they are done):",
+		"gombit db makemigrations upgrade_framework_schema --model github.com/gombit-dev/gombit/storage/claims.Claim",
+		"gombit upgrade never applies a migration",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("plan lacks %q:\n%s", want, out.String())
+		}
+	}
+	p, err = upgrade.PlanUpgrade(app(t, planGoMod, ""), planManifest(t), "v0.8.0")
+	if err != nil || len(p.Schema.Findings) != 0 || p.Schema.MigrationRequired() {
+		t.Fatalf("no schema changes: %+v, %v", p.Schema, err)
+	}
+	out.Reset()
+	if err := p.Render(&out); err != nil || !strings.Contains(out.String(), "Framework schema changes: 0\n") || strings.Contains(out.String(), "Required migration steps") {
+		t.Fatalf("plan without schema changes:\n%s", out.String())
+	}
+}

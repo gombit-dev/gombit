@@ -866,7 +866,8 @@ Plans upgrading the application to a framework release from the
 compatibility manifest built into this `gombit`, and changes nothing: the
 current and target versions, the dependency change, the automatic changes
 the app needs, every manual action with what to do, the breaking changes,
-and the informational ones. A version the manifest does not list, a
+the informational ones, and the framework schema changes with the
+migration steps they need for this app (from its model registry). A version the manifest does not list, a
 downgrade, or an app whose baseline names no framework release (a `go.work`,
 a local checkout, a fork) fails with the reason. It never prompts, so it
 runs in CI. See [upgrade.md](upgrade.md#planning-an-upgrade).
@@ -877,7 +878,10 @@ get github.com/gombit-dev/gombit@vX.Y.Z`, and prints every go command and the
 `go.mod` and `go.sum` lines they changed. A go command that fails is shown
 with its full output, a result that does not build the target is refused,
 and either way `go.mod` and `go.sum` are restored. The plan's automatic and
-manual changes are printed as still to do. `--to` is required there. See
+manual changes are printed as still to do. It never runs a migration: when
+the framework's tables change, it says the upgrade is not complete and
+lists the migration steps (`migration_required` in `--json`). `--to` is
+required there. See
 [upgrade.md](upgrade.md#applying-the-dependency-changes).
 
 | Flag | Meaning | Default |
@@ -886,6 +890,7 @@ manual changes are printed as still to do. `--to` is required there. See
 | `--to` | Target framework release: applied without `--dry-run`, planned with it | with `--dry-run`, the newest release this CLI knows; required to apply |
 | `--dir` | Application directory (`go.mod`, `gombit.yaml`) | `.` |
 | `--json` | Print the plan (or what was applied) as JSON | off |
+| `--migrations` | The app's migration directory (its model registry), relative to `--dir`, as `gombit db --dir` | `database/migrations` |
 
 ## `gombit upgrade check`
 

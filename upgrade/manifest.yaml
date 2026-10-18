@@ -23,6 +23,10 @@
 #   area      api, behavior, cli, client, config, dependency, scaffold, schema
 #             or security
 #   summary   one line; details: Markdown; refs: issue/PR numbers
+#   schema    (area schema) the framework-owned tables it adds, alters or
+#             removes: {model: auth.RefreshToken, table: refresh_tokens,
+#             change: altered}; TestFrameworkSchemaIsDeclared holds the
+#             framework's models to them (docs/upgrade.md)
 format: 1
 releases:
   - version: v0.6.1
@@ -157,6 +161,8 @@ releases:
           which new apps' migrations create. An existing app that adopts file
           fields adds the table to its migrations (`claims.Models()`; see
           docs/storage.md, "Setup").
+        schema:
+          - {model: storage/claims.Claim, table: storage_claims, change: added}
         refs: [279, 323, 324, 325, 326, 327, 328, 329, 530]
 
   - version: v0.7.1

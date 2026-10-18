@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/gombit-dev/gombit/migrations"
 )
 
 const applyFixture = `format: 1
@@ -219,5 +221,60 @@ func TestApplyDependenciesVendorDirectory(t *testing.T) {
 	}
 	if len(a.FollowUp) != 1 || !strings.Contains(a.FollowUp[0], "go mod vendor") {
 		t.Fatalf("FollowUp = %v; want the vendor refresh for a vendor/ without modules.txt", a.FollowUp)
+	}
+}
+
+// TestApplyDependenciesNeverMigrates: an upgrade across a framework-schema
+// change runs the go commands only, never a migration, and says the
+// upgrade is not complete: the migration steps are listed, and
+// migration_required is set, before anything counts the dependency change
+// as done.
+func TestApplyDependenciesNeverMigrates(t *testing.T) {
+	m, err := ParseManifest([]byte(`format: 1
+releases:
+  - version: v0.6.1
+  - version: v0.8.0
+    changes:
+      - id: refresh-device
+        kind: manual
+        area: schema
+        summary: s
+        details: d
+        schema:
+          - {model: auth.RefreshToken, table: refresh_tokens, change: altered}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeGo{}
+	withFakeGo(t, f)
+	dir := applyApp(t, applyGoMod)
+	migrationDir := filepath.Join(dir, "database", "migrations")
+	if err := os.MkdirAll(migrationDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrations.SaveRegistry(migrationDir, []migrations.Model{{ImportPath: "github.com/gombit-dev/gombit/auth", TypeName: "RefreshToken"}}); err != nil {
+		t.Fatal(err)
+	}
+	a, err := ApplyDependencies(context.Background(), dir, m, "v0.8.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, call := range f.calls {
+		if call[0] != "mod" && call[0] != "get" {
+			t.Fatalf("ran go %v; the upgrade runs only go mod edit and go get", call)
+		}
+	}
+	if !a.MigrationRequired || !a.Plan.Schema.MigrationRequired() {
+		t.Fatalf("Applied = %+v; want the migration required", a)
+	}
+	var out strings.Builder
+	if err := a.Render(&out); err != nil {
+		t.Fatal(err)
+	}
+	notDone := strings.Index(out.String(), "Not complete yet")
+	steps := strings.Index(out.String(), "Required migration steps")
+	if notDone < 0 || steps < notDone || !strings.Contains(out.String(), "No migration was run.") || !strings.Contains(out.String(), "gombit db migrate") {
+		t.Fatalf("Render:\n%s", out.String())
 	}
 }

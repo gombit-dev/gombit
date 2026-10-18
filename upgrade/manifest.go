@@ -146,6 +146,12 @@ type Change struct {
 	// against (AnalyzeConfig). A change in the security area makes each of
 	// them, an addition included, a security review.
 	Config []ConfigChange `yaml:"config,omitempty" json:"config,omitempty"`
+	// Schema are the framework-owned tables the change adds, alters or
+	// removes (area schema): the migrations an application generates,
+	// reviews and applies for it (AnalyzeSchema). In a manual change they
+	// are required; in an informational one, they are for an application
+	// that adopts the feature.
+	Schema []SchemaChange `yaml:"schema,omitempty" json:"schema,omitempty"`
 }
 
 // Release is the changes of moving to one release from the one before it.
@@ -191,6 +197,7 @@ func (m *Manifest) clone() *Manifest {
 		for j := range r.Changes {
 			r.Changes[j].Refs = slices.Clone(r.Changes[j].Refs)
 			r.Changes[j].Config = slices.Clone(r.Changes[j].Config)
+			r.Changes[j].Schema = slices.Clone(r.Changes[j].Schema)
 		}
 		c.Releases[i] = r
 	}
@@ -285,6 +292,9 @@ func (c Change) validate() error {
 		if err := cc.validate(); err != nil {
 			return fmt.Errorf("change %s: %w", c.ID, err)
 		}
+	}
+	if err := c.validateSchema(); err != nil {
+		return err
 	}
 	switch c.Kind {
 	case KindAutomatic:

@@ -44,6 +44,12 @@ type Plan struct {
 	// application's environment files (AnalyzeConfig): names only, never
 	// a value.
 	Config ConfigReport `json:"config"`
+	// Schema is what the upgrade's framework-schema changes (auth tables,
+	// storage claims) mean for the application's migrations
+	// (AnalyzeSchema, from its model registry in database/migrations): the
+	// migration steps the upgrade is not complete without. The upgrade
+	// tooling never generates or applies a migration.
+	Schema SchemaReport `json:"schema"`
 	// Contract are the changes on the path to the generated contract (the
 	// OpenAPI document and TypeScript client: area client). Whatever they
 	// are, the framework renders the generated artifacts, so after the
@@ -126,6 +132,9 @@ func PlanUpgrade(workDir string, m *Manifest, to string) (Plan, error) {
 		}
 	}
 	if p.Config, err = AnalyzeConfig(workDir, releases); err != nil {
+		return Plan{}, err
+	}
+	if p.Schema, err = AnalyzeSchema(workDir, "", releases); err != nil {
 		return Plan{}, err
 	}
 	notNeeded := map[string]bool{}
@@ -281,6 +290,8 @@ func (p Plan) renderToDo(b *strings.Builder) {
 	}
 	b.WriteString("\n")
 	p.Config.render(b)
+	b.WriteString("\n")
+	p.Schema.render(b)
 	b.WriteString("\nGenerated contract artifacts (resource *.gen.go, OpenAPI document, TypeScript client):\n")
 	b.WriteString("  After the dependency change, check them: gombit upgrade contract [--url <the running app>/openapi.json]; --write regenerates them.\n")
 	if len(p.Contract) > 0 {

@@ -28,6 +28,10 @@ type Applied struct {
 	// FollowUp are steps the dependency change leaves to the developer
 	// before the app builds again, such as refreshing a vendor directory.
 	FollowUp []string `json:"follow_up"`
+	// MigrationRequired is whether the upgrade is not complete until the
+	// application migrates its database for the framework-schema changes
+	// (Plan.Schema.Steps). ApplyDependencies never runs a migration.
+	MigrationRequired bool `json:"migration_required"`
 }
 
 // GoCommand is one go command run for an upgrade.
@@ -95,7 +99,7 @@ func ApplyDependencies(ctx context.Context, workDir string, m *Manifest, to stri
 	if err != nil {
 		return Applied{}, err
 	}
-	applied := Applied{Plan: plan, Commands: []GoCommand{}, FollowUp: []string{}}
+	applied := Applied{Plan: plan, Commands: []GoCommand{}, FollowUp: []string{}, MigrationRequired: plan.Schema.MigrationRequired()}
 	if plan.Current == plan.Target {
 		return applied, nil
 	}
@@ -279,6 +283,9 @@ func (a Applied) Render(w io.Writer) error {
 	fmt.Fprintf(&b, "go.sum: %d line(s) added, %d removed\n", len(a.GoSum.Added), len(a.GoSum.Removed))
 	for _, f := range a.FollowUp {
 		fmt.Fprintf(&b, "\nNext: %s.\n", f)
+	}
+	if p.Schema.MigrationRequired() {
+		b.WriteString("\nNot complete yet: the framework schema changed, so the database needs a migration the application generates, reviews and applies (the steps are below). No migration was run.\n")
 	}
 	b.WriteString("\nReview them with `git diff go.mod go.sum`. Still to do (not applied):\n")
 	p.renderToDo(&b)

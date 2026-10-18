@@ -417,6 +417,21 @@ version.
   `generate.Stale`, `generate.Update`, `client.ClientDrift` and
   `client.SpecEqual` are the API
   ([#348](https://github.com/gombit-dev/gombit/issues/348)).
+- Framework-schema upgrade planning (UPGRADE-9). `gombit upgrade --dry-run`
+  lists the framework-owned tables (the auth tables, `storage_claims`) the
+  releases on the path add, alter or remove, and the migration steps the
+  app needs for them, from its model registry: add a new framework model,
+  review with `gombit db plan`, generate with `gombit db makemigrations`,
+  apply with `gombit db migrate`. A table the app does not have, or one an
+  optional feature adds, needs nothing. `gombit upgrade --to` never runs a
+  migration: it says the upgrade is not complete until the steps are done
+  (`migration_required` in `--json`). Manifest changes list the tables
+  (`schema:` entries; `object-storage`, v0.7.0, now declares
+  `storage_claims`), and a snapshot of the framework's tables as of a
+  release fails a test on any table added, changed or removed since then
+  that the manifest does not declare. `upgrade.AnalyzeSchema` and
+  `upgrade.FrameworkModels` are the API
+  ([#349](https://github.com/gombit-dev/gombit/issues/349)).
 - [Session management](docs/auth.md#sessions) in both auth modes:
   `GET /auth/sessions` lists the user's active sessions with an opaque id,
   `last_refreshed_at`, `expires_at`, and a `current` flag;
