@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -168,6 +170,12 @@ type ConfigFinding struct {
 	SetIn         []string `json:"set_in"`
 	TemplateSetIn []string `json:"template_set_in"`
 	DocumentedIn  []string `json:"documented_in"`
+	// SetAs are the files (not templates) that set the variable under an
+	// earlier name of a rename on the path, each with that name: renaming
+	// A to B, then B to C, a .env setting A is listed for B. It proves
+	// nothing about the new name (a default change still needs action),
+	// but the file needs the renames.
+	SetAs map[string]string `json:"set_as,omitempty"`
 	// Fixable is whether WriteConfigTemplates would change a template for
 	// it (false once it has).
 	Fixable bool `json:"fixable"`
@@ -233,8 +241,9 @@ type envFile struct {
 	abs        string
 	set        map[string]bool
 	documented map[string]bool
-	lines      []string // templates only: what WriteConfigTemplates rewrites
-	bom        bool     // a template starting with a UTF-8 byte order mark
+	lines      []string          // templates only: what WriteConfigTemplates rewrites
+	setAs      map[string]string // not templates: a later name of a rename -> the one the file sets
+	bom        bool              // a template starting with a UTF-8 byte order mark
 	mode       os.FileMode
 }
 
@@ -260,9 +269,23 @@ func (f *envFile) readNames(body []byte) {
 // the earlier ones leave them, the order WriteConfigTemplates applies them
 // in: renaming A to B, then B to C, a template setting A is fixable for
 // both. Another file is never written, so it stays as it is: what it sets
-// is what it proves.
+// is what it proves. It only remembers, for a renamed variable it sets,
+// the later names (SetAs), so the findings that follow still point at it.
 func (f *envFile) advance(release, changeID string, cc ConfigChange) {
 	if !f.Template {
+		if cc.Change != ConfigRenamed {
+			return
+		}
+		name := f.setAs[cc.Var]
+		if f.set[cc.Var] {
+			name = cc.Var
+		}
+		if name != "" {
+			if f.setAs == nil {
+				f.setAs = map[string]string{}
+			}
+			f.setAs[cc.To] = name
+		}
 		return
 	}
 	f.lines = upgradeTemplate(f.lines, release, changeID, cc)
@@ -388,6 +411,11 @@ func finding(release string, c Change, cc ConfigChange, files []*envFile) Config
 			f.TemplateSetIn = append(f.TemplateSetIn, file.Path)
 		case file.set[cc.Var]:
 			f.SetIn = append(f.SetIn, file.Path)
+		case file.setAs[cc.Var] != "":
+			if f.SetAs == nil {
+				f.SetAs = map[string]string{}
+			}
+			f.SetAs[file.Path] = file.setAs[cc.Var]
 		}
 		if file.Template && file.documented[cc.Var] {
 			f.DocumentedIn = append(f.DocumentedIn, file.Path)
@@ -443,6 +471,9 @@ func finding(release string, c Change, cc ConfigChange, files []*envFile) Config
 	case ConfigAdded: // reported only for a security change
 		f.Category, f.NeedsAction = ConfigCategoryActionRequired, true
 		f.Advice = fmt.Sprintf("%s is new from %s: review what it controls and how the app sets it (in %s).", cc.Var, releaseName(release), where)
+	}
+	for _, path := range slices.Sorted(maps.Keys(f.SetAs)) {
+		f.Advice += fmt.Sprintf(" %s sets it as %s, its name before an earlier rename on this path: rename that line too.", path, f.SetAs[path])
 	}
 	if c.Area == "security" {
 		f.Category, f.NeedsAction = ConfigCategorySecurityReview, true

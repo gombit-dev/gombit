@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -382,11 +383,14 @@ func TestConfigProblems(t *testing.T) {
 }
 
 // TestBreakingConfigChangesNameTheirVariables: a breaking change in the
-// config area lists the variables it concerns (config:), so gombit upgrade
-// config reports it. The drift guard above sees renames, removals and
-// default changes in the code; a newly refused value (a validation rule)
-// it cannot, and an entry without its variables would pass the analysis
-// silently.
+// config area, or a breaking security change that names a GOMBIT_
+// variable (trusted-proxies-trust-all: a refusal closing a hole), lists
+// the variables it concerns (config:), so gombit upgrade config reports
+// it. The drift guard above sees renames, removals and default changes in
+// the code; a newly refused value (a validation rule) it cannot, and an
+// entry without its variables would pass the analysis silently.
+var gombitVar = regexp.MustCompile(`\bGOMBIT_[A-Z0-9_]+`)
+
 func TestBreakingConfigChangesNameTheirVariables(t *testing.T) {
 	m, err := upgrade.LoadManifest()
 	if err != nil {
@@ -394,8 +398,9 @@ func TestBreakingConfigChangesNameTheirVariables(t *testing.T) {
 	}
 	for _, r := range m.Releases {
 		for _, c := range r.Changes {
-			if c.Area == "config" && c.Breaking && len(c.Config) == 0 {
-				t.Errorf("release %s: change %s is a breaking config change with no config: list; declare the variables it renames, removes, re-defaults, requires or refuses", r.Version, c.ID)
+			concerns := c.Area == "config" || (c.Area == "security" && gombitVar.MatchString(c.Summary+c.Details))
+			if concerns && c.Breaking && len(c.Config) == 0 {
+				t.Errorf("release %s: change %s is a breaking %s change with no config: list; declare the variables it renames, removes, re-defaults, requires or refuses", r.Version, c.ID, c.Area)
 			}
 		}
 	}

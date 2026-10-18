@@ -314,7 +314,10 @@ Configuration changes: 1
     security-sensitive (the manifest's `security` area).
 - **Clearly reported.** Every rename and removal is reported whether or
   not a file mentions the variable, since a deployment sets its
-  environment elsewhere. The report says which files set it.
+  environment elsewhere. The report says which files set it. Across a chain
+  of renames (A to B, then B to C), a `.env` that sets A is named for every
+  later name too (`set_as` in `--json`), so the advice reaches the final
+  name, but it proves nothing about B or C.
 - **Cannot pass silently.** The command exits 1 while any change needs
   action or review.
   - A default change needs no action only when files prove the variable
@@ -517,7 +520,8 @@ Configuration changes are detected, not only declared:
 - A newly refused value (a validation rule) leaves no trace in
   `config.Variables()`, so no snapshot can detect it. Instead,
   `TestBreakingConfigChangesNameTheirVariables` fails on a breaking change
-  in the `config` area that lists no variables. Declare them `refused`.
+  that lists no variables when it is in the `config` area, or in the
+  `security` area and names a `GOMBIT_` variable. Declare them `refused`.
 - When a release is cut, `go test ./upgrade -run
   TestConfigVariablesAreDeclared -update` moves the snapshot to it. It
   refuses while `unreleased` still declares configuration changes.

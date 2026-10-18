@@ -321,11 +321,15 @@ func TestAnalyzeConfigChainedRenames(t *testing.T) {
 			t.Errorf("%s: fixable %v, template_set_in %v, set_in %v; want fixable, in .env.example, set_in %q", f.ChangeID, f.Fixable, f.TemplateSetIn, f.SetIn, wantSetIn)
 		}
 	}
+	// .env still sets the chain's first name: the second rename says so.
+	if b := r.Findings[1]; b.SetAs[".env"] != "GOMBIT_A" || !strings.Contains(b.Advice, ".env sets it as GOMBIT_A") {
+		t.Errorf("b-to-c: set_as %v, advice %q; want .env setting it as GOMBIT_A", b.SetAs, b.Advice)
+	}
 	// A default change of B after the rename: .env still sets A only.
 	withDefault := append(path[:1:1], upgrade.Release{Version: "v0.9.0", Changes: []upgrade.Change{
 		{ID: "b-default", Area: "config", Summary: "default", Config: []upgrade.ConfigChange{{Var: "GOMBIT_B", Change: upgrade.ConfigDefault, From: "1", To: "2", Environment: "development"}}},
 	}})
-	if r, err := upgrade.AnalyzeConfig(dir, withDefault); err != nil || len(r.Findings) != 2 || !r.Findings[1].NeedsAction || len(r.Findings[1].SetIn) != 0 {
+	if r, err := upgrade.AnalyzeConfig(dir, withDefault); err != nil || len(r.Findings) != 2 || !r.Findings[1].NeedsAction || len(r.Findings[1].SetIn) != 0 || r.Findings[1].SetAs[".env"] != "GOMBIT_A" {
 		t.Fatalf("a default change after the rename = %+v, %v; .env does not set GOMBIT_B", r.Findings, err)
 	}
 	if _, err := upgrade.WriteConfigTemplates(dir, path); err != nil {
