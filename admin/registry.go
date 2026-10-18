@@ -92,8 +92,12 @@ type resolvedField struct {
 	Field
 	column  string
 	pointer bool
-	get     func(inst any) any
-	set     func(inst any, raw any) error
+	// coerceType is the type a written or filtered value is coerced as: the
+	// field's Type, except for a belongs_to relation, whose value is coerced
+	// as its key column's type (a string key stays a string, issue #452).
+	coerceType FieldType
+	get        func(inst any) any
+	set        func(inst any, raw any) error
 }
 
 // implicitColumn is a GORM timestamp allowed in List/Ordering without a Field.
@@ -158,4 +162,12 @@ func registryFor(api huma.API) (*registry, bool) {
 func storeRegistry(api huma.API, reg *registry) bool {
 	_, loaded := registries.LoadOrStore(api, reg)
 	return !loaded
+}
+
+// valueType is the type a value for f is coerced as (see coerceType).
+func (f *resolvedField) valueType() FieldType {
+	if f.coerceType != "" {
+		return f.coerceType
+	}
+	return f.Type
 }

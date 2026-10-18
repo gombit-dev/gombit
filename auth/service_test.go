@@ -119,6 +119,33 @@ func TestConcurrentRotateRefreshDoesNotRevokeWinner(t *testing.T) {
 	}
 }
 
+// TestNewServiceRequiresRefreshTTLAtLeastAccessTTL: NewService refuses what
+// config validation refuses, an access TTL above the refresh TTL, so a
+// config.Config built without Validate cannot issue an access token that
+// outlives its session either. Equal TTLs are fine.
+func TestNewServiceRequiresRefreshTTLAtLeastAccessTTL(t *testing.T) {
+	db, err := database.Open(config.DatabaseConfig{
+		Driver: config.DatabaseDriverSQLite,
+		DSN:    "file:" + filepath.Join(t.TempDir(), "auth.db") + "?cache=shared&_fk=1",
+	})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	cfg := config.DefaultFor(config.EnvironmentTest)
+	cfg.Auth.JWTSecret = "test-jwt-secret-32-bytes-minimum!"
+	cfg.Auth.AccessTokenTTL = time.Hour
+	cfg.Auth.RefreshTokenTTL = time.Minute
+	if _, err := NewService(db.DB, cfg); err == nil {
+		t.Fatal("NewService with an access TTL above the refresh TTL succeeded, want an error")
+	}
+	cfg.Auth.RefreshTokenTTL = time.Hour
+	if _, err := NewService(db.DB, cfg); err != nil {
+		t.Fatalf("NewService with equal TTLs: %v", err)
+	}
+}
+
 func newTestService(t *testing.T) *Service {
 	t.Helper()
 	db, err := database.Open(config.DatabaseConfig{

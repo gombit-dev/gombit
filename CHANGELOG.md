@@ -304,6 +304,85 @@ version.
     checks every issue the changelog's Unreleased section links against the
     manifest ([docs/releasing.md](docs/releasing.md))
     ([#342](https://github.com/gombit-dev/gombit/issues/342)).
+- `gombit upgrade --dry-run [--to vX.Y.Z] [--dir] [--json]` (UPGRADE-3) plans
+  upgrading an application to a framework release, from its baseline and the
+  compatibility manifest, and writes nothing: the current and target
+  versions, every go.mod directive that must change for the upgraded build
+  to be the target release (the require, and each replace that would decide
+  that build, active today or dormant, resolved at the target), the automatic
+  changes the app needs (an action can report it is not needed), every
+  manual action with what to do, the breaking changes the app faces and the
+  informational ones. A version the manifest does not
+  list, a downgrade, or a baseline that names no framework release fails
+  with the reason. It never prompts, so it runs in CI. `upgrade.PlanUpgrade`
+  is the API; `upgrade.Action` gains a read-only `Check`
+  ([#343](https://github.com/gombit-dev/gombit/issues/343)).
+- `gombit upgrade --to vX.Y.Z` (UPGRADE-4) applies an upgrade's dependency
+  changes with the go command: it edits the framework replaces the plan
+  names (`go mod edit -dropreplace` / `-replace`), then runs `go get
+  github.com/gombit-dev/gombit@vX.Y.Z`, and prints every command with the
+  `go.mod` and `go.sum` lines it changed. A go command that fails is
+  reported with its full output, and a result that does not build the
+  target is refused; either way `go.mod` and `go.sum` are restored. The
+  plan's automatic and manual changes are reported as still to do.
+  `--to` is required to apply; `upgrade.ApplyDependencies` is the API
+  ([#344](https://github.com/gombit-dev/gombit/issues/344)).
+- `gombit upgrade check [--dir] [--json]` (UPGRADE-5) reports every use, in
+  the application, of a framework API whose doc comment has a `Deprecated:`
+  paragraph (the Go convention), whether a package, a function, a method, a
+  type, a constant, a variable, a struct field (named or embedded) or an
+  interface method: file, line and column, the symbol, and what to use
+  instead. Uses are resolved from type information (`go/packages`,
+  `go/types`), every package, test and dependency type-checked from source
+  as one graph, so a use and the framework declaration it uses are one
+  object; every framework package in the graph is read, also one reached
+  only through another dependency, and an import of a deprecated package
+  and an element of an unkeyed struct literal count too. A matching name, a
+  comment or a string is never reported; an app that does not type-check,
+  or a framework object outside the loaded graph, is an error, never a
+  clean result. It exits 1
+  when there is any use.
+  `upgrade.ScanDeprecated` is the API, and a test requires every
+  `Deprecated:` paragraph in the framework to name its replacement. The
+  framework now requires `golang.org/x/tools` directly
+  ([#345](https://github.com/gombit-dev/gombit/issues/345)).
+- `gombit upgrade fix` (UPGRADE-6) runs the framework's codemods:
+  rewrites of an application's uses of framework APIs, for changes with a
+  mechanical replacement (a rename, a move, a reshaped call). Uses are
+  found from type information, as `gombit upgrade check` finds them, and
+  rewritten in the syntax tree, never as text. Imports are added and
+  dropped as needed, and files are printed gofmt-formatted with their line
+  endings kept. The codemods run in passes on their own output (one may
+  rewrite another's) until a pass changes nothing, and that pass
+  type-checks the result, so a proposed rewrite compiles and running it
+  twice changes nothing
+  ([#346](https://github.com/gombit-dev/gombit/issues/346)).
+  - By default it writes nothing: it prints a unified diff for `git apply`.
+    `--patch FILE` saves it to a file instead, and `--write` rewrites the
+    files atomically. It writes nothing when a file no longer holds the
+    exact bytes the codemods parsed.
+  - A use it cannot rewrite safely is left unchanged and listed with the
+    reason, and the command exits 1.
+  - `upgrade.RunCodemods` and `upgrade.Codemod` are the API. An automatic
+    manifest change applies a codemod as the action `codemod:<id>`. Its
+    check counts build-excluded files that mention the API, and applying
+    it fails with `upgrade.ErrCodemodIncomplete` while any use or such
+    file remains.
+  - No codemods ship yet: the only deprecated API,
+    `database.KeepStoredZeros`, has no mechanical replacement.
+- [Session management](docs/auth.md#sessions) in both auth modes:
+  `GET /auth/sessions` lists the user's active sessions with an opaque id,
+  `last_refreshed_at`, `expires_at`, and a `current` flag;
+  `DELETE /auth/sessions/{id}` revokes one; and
+  `DELETE /auth/sessions?scope=others|all` revokes every other session or
+  every session. Cookie mode clears the session cookies when a request ends
+  its own session. `auth.Service` gains `ListSessions` (returning
+  `[]auth.AuthSession`), `RevokeSession`, `RevokeAllSessions`, and
+  `ErrSessionNotFound`. The operation IDs (`auth-list-sessions`, ...) and
+  schema names (`AuthSession`, ...) carry an `auth` prefix, which leaves
+  `Session` free for an application's own type and for
+  `gombit make resource Session` (Huma panics at boot on a duplicate)
+  ([#335](https://github.com/gombit-dev/gombit/issues/335)).
 
 ### Changed
 
@@ -320,6 +399,27 @@ version.
   framework's tables (auth, storage claims). The README, the docs index, and
   the user guides (router, security, build, lifecycle, health, frontend,
   contract, CLI, tutorial) now cover the shipped storage feature.
+- Presenting a refresh token that was revoked by logout or session
+  revocation now returns 401 without revoking the user's other sessions.
+  Only an already-rotated refresh token counts as reuse and revokes all of
+  them, as before ([#335](https://github.com/gombit-dev/gombit/issues/335)).
+- **Breaking (config):** with auth enabled, config validation refuses a
+  `GOMBIT_JWT_REFRESH_TTL` shorter than `GOMBIT_JWT_ACCESS_TTL` (equal is
+  fine), and `auth.NewService` refuses the same pair: an app configured that
+  way no longer starts until it raises `GOMBIT_JWT_REFRESH_TTL` to at least
+  `GOMBIT_JWT_ACCESS_TTL` or lowers the access TTL. The refresh token's
+  lifetime is the session's, so the access token's `exp`, `expires_in` and
+  access cookie never outlast the session. An access JWT also stops
+  authenticating when its session expires, not only when it is revoked, so a
+  token issued before the upgrade does not outlive a session that has dropped
+  out of `GET /auth/sessions` and can no longer be revoked
+  ([#335](https://github.com/gombit-dev/gombit/issues/335)).
+- `make test-faults` gives every `go test` a per-binary `-timeout` that grows
+  with `FAULT_COUNT`: 40 seconds a repetition, never under `go test`'s own
+  10 minutes. Every repetition of a package runs in one test binary, so the
+  weekly x100 soak is not cut off by that default. `FAULT_TIMEOUT`, in whole
+  seconds (`5400`), sets it instead
+  ([#335](https://github.com/gombit-dev/gombit/issues/335)).
 - A new app's `.env.example` lists every `GOMBIT_*` variable the config
   package reads, including `GOMBIT_JOBS_DRIVER`, `GOMBIT_JOBS_QUEUE`,
   `GOMBIT_JOBS_NAMESPACE`, `GOMBIT_HTTP_TRUSTED_PROXIES`, and the database
@@ -340,6 +440,25 @@ version.
   in a new `version` key), so a concurrent edit is still a 409; it sends an
   integer past 2^53 as a string
   ([#454](https://github.com/gombit-dev/gombit/issues/454)).
+
+- An admin relation field on a string key (a country code, a SKU) stores the
+  value sent, byte for byte: anything numeric-looking was parsed as an integer
+  and converted back as a rune, so `"123"` was stored as `"{"` and `"007"` as
+  `"\a"`, and a filter on `"007"` found nothing. A belongs_to value is now
+  coerced as its key column's type, on writes and filters, and the admin SPA
+  sends relation ids as given instead of turning `"007"` into `7`, `"1e3"` into
+  `1000`, or `"Infinity"` into a cleared key. A JSON number for a string key,
+  and a uuid key in a non-canonical form (no hyphens, braces), are now a 422,
+  as for a plain string or `uuid` field
+  ([#452](https://github.com/gombit-dev/gombit/issues/452)).
+
+- CI rebuilds the embedded admin SPA and fails when the committed
+  `internal/adminui/dist` differs from a fresh build of `internal/adminui/src`.
+  Nothing enforced the rebuild, so source changes (the #250 CSRF fix among
+  them) were missing from released binaries for weeks. `dist/` was brought
+  up to date by STORAGE-8 (released in v0.7.0) and matches its source; the
+  release workflow refuses to tag a stale one too
+  ([#451](https://github.com/gombit-dev/gombit/issues/451)).
 - An admin `PATCH` writes only the columns the request (or a model hook)
   changed. It loaded the row and saved the whole snapshot back, so it reverted
   another request's change to a column it never mentioned, re-inserted a row
@@ -419,6 +538,15 @@ version.
   `handler.gen.go`; an app's own scaffolded `internal/product/handler.go`
   needs the 63-bit id parse by hand
   ([#444](https://github.com/gombit-dev/gombit/issues/444)).
+- `POST /auth/refresh` answers 500, not 401, when the database fails while
+  the rotation locks the user's row (a deadlock, a lock timeout, a lost
+  connection). Only a user that no longer exists is a 401, so a client can
+  retry instead of treating the failure as a dead credential
+  ([#335](https://github.com/gombit-dev/gombit/issues/335)).
+- The refresh-token reuse cascade takes the user's row lock, like rotation,
+  so it also revokes the token a concurrent rotation of another of the
+  user's sessions issues. On PostgreSQL that token could survive the cascade
+  ([#335](https://github.com/gombit-dev/gombit/issues/335)).
 - `gombit make command` refuses the names `generate` and `contract`, which
   collided with framework commands; every command the root registers is now
   reserved ([#447](https://github.com/gombit-dev/gombit/pull/447)).

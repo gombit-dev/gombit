@@ -873,6 +873,20 @@ func validateAuthConfig(errs *FieldErrors, env Environment, cfg AuthConfig) {
 				Message: "must be greater than zero when a JWT secret is set",
 			})
 		}
+		// The refresh token's lifetime is the session's. An access token
+		// that outlived it would be refused once its session ended, while
+		// its exp, expires_in and the access cookie still promised it.
+		if cfg.AccessTokenTTL > 0 && cfg.RefreshTokenTTL > 0 && cfg.RefreshTokenTTL < cfg.AccessTokenTTL {
+			*errs = append(*errs, FieldError{
+				Field: "Auth.RefreshTokenTTL",
+				Env:   envJWTRefreshTTL,
+				Value: cfg.RefreshTokenTTL.String(),
+				Message: fmt.Sprintf(
+					"must be at least %s (%s), so that an access token never outlives the session it belongs to",
+					envJWTAccessTTL, cfg.AccessTokenTTL,
+				),
+			})
+		}
 
 		switch cfg.EffectiveMode() {
 		case AuthModeJWT, AuthModeCookie:

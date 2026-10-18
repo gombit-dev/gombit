@@ -18,23 +18,24 @@ export function isBelongsTo(field: FieldMeta): boolean {
  * string PK). */
 export type RelId = number | string;
 
-/** toRelId coerces a single related primary key, preserving its type (a numeric
- * id stays a number; a uuid / string id stays a string). */
+/** toRelId keeps a related primary key as it was given: a number stays a
+ * number, and a string (the picker's option value, a uuid, a string key such
+ * as "007" or "US") stays that string. The server coerces it to the key
+ * column's type; parsing a numeric-looking string here turned "007" into 7
+ * and "1e3" into 1000 for a string key (issue #452). */
 export function toRelId(raw: unknown): RelId {
   if (typeof raw === "number") {
     return raw;
   }
-  const s = String(raw).trim();
-  const n = Number(s);
-  return s !== "" && !Number.isNaN(n) ? n : s;
+  return String(raw).trim();
 }
 
 /**
- * toIdList coerces a form value into the id list a many_to_many field submits.
- * It preserves the related primary key type: a numeric id stays a number, a
- * non-numeric id (uuid / string PK) stays a string. Only null / undefined /
- * empty entries are dropped — a string id is never silently coerced away (which
- * would wipe the join table for string-keyed related models).
+ * toIdList turns a form value into the id list a many_to_many field submits,
+ * each id kept as given (see toRelId): the server coerces it to the related
+ * key's type. Only null / undefined / empty entries are dropped — a string id
+ * is never silently coerced away (which would wipe the join table for
+ * string-keyed related models).
  */
 export function toIdList(raw: unknown): RelId[] {
   if (!Array.isArray(raw)) {
@@ -55,8 +56,7 @@ export function toIdList(raw: unknown): RelId[] {
     if (s === "") {
       continue;
     }
-    const n = Number(s);
-    out.push(Number.isNaN(n) ? s : n);
+    out.push(s); // kept as given; the server coerces it to the key type
   }
   return out;
 }

@@ -8,6 +8,7 @@ import (
 	"math"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/gombit-dev/gombit/field"
 	"github.com/gombit-dev/gombit/resourcepolicy"
 	"github.com/gombit-dev/gombit/types"
+	"github.com/google/uuid"
 )
 
 // FieldsFrom derives a default []Field from model at registration time.
@@ -502,6 +504,16 @@ func convertTo(val any, dest reflect.Type) (reflect.Value, error) {
 	if out, err, ok := unmarshalDocument(val, src, dest); ok {
 		return out, err
 	}
+	// Go converts an integer to a string as the rune with that code point
+	// (123 becomes "{"); a number written to a string column is its digits.
+	if dest.Kind() == reflect.String {
+		switch src.Kind() {
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			return reflect.ValueOf(strconv.FormatInt(src.Int(), 10)).Convert(dest), nil
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+			return reflect.ValueOf(strconv.FormatUint(src.Uint(), 10)).Convert(dest), nil
+		}
+	}
 	if src.Type().ConvertibleTo(dest) {
 		return src.Convert(dest), nil
 	}
@@ -733,4 +745,27 @@ func validSlug(slug string) bool {
 		}
 	}
 	return true
+}
+
+// coerceTypeFor is the type a value for a field declared ft over a Go field of
+// type t is coerced as. A relation (belongs_to) value is its key column's: a
+// string key ("US", "007", "123") stays the string sent, byte for byte, where
+// parsing anything numeric-looking as an integer turned "123" into "{"
+// (issue #452); an integer key is an integer, a uuid key a uuid.
+func coerceTypeFor(ft FieldType, t reflect.Type) FieldType {
+	if ft != TypeRelation {
+		return ft
+	}
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	switch {
+	case t == reflect.TypeOf(uuid.UUID{}):
+		return TypeUUID
+	case t.Kind() == reflect.String:
+		return TypeString
+	case t.Kind() >= reflect.Int && t.Kind() <= reflect.Uint64:
+		return TypeInteger
+	}
+	return ft
 }

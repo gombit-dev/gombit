@@ -229,6 +229,26 @@ func TestMetaAnonymousUnauthorized(t *testing.T) {
 	assertError(t, rec, http.StatusUnauthorized, "authentication")
 }
 
+// An access cookie that is still live does not outlive its session: once the
+// session's refresh token has expired, the admin answers as it does without a
+// cookie.
+func TestMetaExpiredSessionUnauthorized(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	app := newCookieApp(t)
+	registerWidgets(t, app)
+	jar := loginSuperuser(t, app)
+	if rec := doRequest(app, jar, http.MethodGet, "/api/v1/admin/meta", ""); rec.Code != http.StatusOK {
+		t.Fatalf("meta with an active session: status = %d; body: %s", rec.Code, rec.Body.String())
+	}
+	// The session expires; the access cookie, a minute long, is still live.
+	if err := app.DB().Model(&auth.RefreshToken{}).Where("revoked_at IS NULL").
+		Update("expires_at", time.Now().Add(-time.Minute)).Error; err != nil {
+		t.Fatal(err)
+	}
+	rec := doRequest(app, jar, http.MethodGet, "/api/v1/admin/meta", "")
+	assertError(t, rec, http.StatusUnauthorized, "authentication")
+}
+
 func TestMetaNonSuperuserForbidden(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	app := newCookieApp(t)
