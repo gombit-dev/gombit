@@ -514,6 +514,10 @@ Configuration changes are detected, not only declared:
 - The test also fails on any declaration that describes no real change: a
   `from` that was not the old value, a "change" where nothing moved, or a
   removal of a variable still read.
+- A newly refused value (a validation rule) leaves no trace in
+  `config.Variables()`, so no snapshot can detect it. Instead,
+  `TestBreakingConfigChangesNameTheirVariables` fails on a breaking change
+  in the `config` area that lists no variables. Declare them `refused`.
 - When a release is cut, `go test ./upgrade -run
   TestConfigVariablesAreDeclared -update` moves the snapshot to it. It
   refuses while `unreleased` still declares configuration changes.

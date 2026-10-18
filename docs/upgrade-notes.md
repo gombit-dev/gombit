@@ -84,6 +84,9 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 - **Breaking.** With auth enabled, a `GOMBIT_JWT_REFRESH_TTL` shorter than `GOMBIT_JWT_ACCESS_TTL` fails config validation, so the app does not start. (`refresh-ttl-at-least-access-ttl`, config, [#335](https://github.com/gombit-dev/gombit/issues/335))
 
+  - Configuration: `GOMBIT_JWT_REFRESH_TTL`: some values are now refused.
+  - Configuration: `GOMBIT_JWT_ACCESS_TTL`: some values are now refused.
+
   The refresh token's lifetime is the session's, and an access token
   must not outlive its session: it would stop authenticating when the
   session ends while its `exp`, `expires_in` and access cookie still

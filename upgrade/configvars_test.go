@@ -380,3 +380,23 @@ func TestConfigProblems(t *testing.T) {
 		}
 	}
 }
+
+// TestBreakingConfigChangesNameTheirVariables: a breaking change in the
+// config area lists the variables it concerns (config:), so gombit upgrade
+// config reports it. The drift guard above sees renames, removals and
+// default changes in the code; a newly refused value (a validation rule)
+// it cannot, and an entry without its variables would pass the analysis
+// silently.
+func TestBreakingConfigChangesNameTheirVariables(t *testing.T) {
+	m, err := upgrade.LoadManifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range m.Releases {
+		for _, c := range r.Changes {
+			if c.Area == "config" && c.Breaking && len(c.Config) == 0 {
+				t.Errorf("release %s: change %s is a breaking config change with no config: list; declare the variables it renames, removes, re-defaults, requires or refuses", r.Version, c.ID)
+			}
+		}
+	}
+}

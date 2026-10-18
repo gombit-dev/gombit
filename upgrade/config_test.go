@@ -298,11 +298,13 @@ func TestWriteConfigTemplatesRenameOntoDocumentedName(t *testing.T) {
 	}
 }
 
-// TestAnalyzeConfigChainedRenames: each change is judged against the files
-// as the path's earlier changes leave them, the order WriteConfigTemplates
-// applies them in. Renaming A to B, then B to C (in a later release), a
-// template and a .env setting A set B for the second rename, the template
-// is fixable for both, and writing it settles both.
+// TestAnalyzeConfigChainedRenames: each change is judged against the
+// templates as the path's earlier changes leave them, the order
+// WriteConfigTemplates applies them in, and against the other files as
+// they are. Renaming A to B, then B to C (in a later release), a template
+// setting A sets B for the second rename and is fixable for both, and
+// writing it settles both; a .env setting A proves nothing about B, so a
+// later default change of B still needs action.
 func TestAnalyzeConfigChainedRenames(t *testing.T) {
 	dir := t.TempDir()
 	writeTree(t, dir, map[string]string{".env.example": "GOMBIT_A=1\n", ".env": "GOMBIT_A=2\n"})
@@ -313,10 +315,18 @@ func TestAnalyzeConfigChainedRenames(t *testing.T) {
 	if err != nil || len(r.Findings) != 2 {
 		t.Fatalf("AnalyzeConfig = %+v, %v", r, err)
 	}
-	for _, f := range r.Findings {
-		if !f.Fixable || strings.Join(f.TemplateSetIn, ", ") != ".env.example" || strings.Join(f.SetIn, ", ") != ".env" {
-			t.Errorf("%s: fixable %v, template_set_in %v, set_in %v; want fixable, in .env.example and .env", f.ChangeID, f.Fixable, f.TemplateSetIn, f.SetIn)
+	for i, f := range r.Findings {
+		wantSetIn := []string{".env", ""}[i]
+		if !f.Fixable || strings.Join(f.TemplateSetIn, ", ") != ".env.example" || strings.Join(f.SetIn, ", ") != wantSetIn {
+			t.Errorf("%s: fixable %v, template_set_in %v, set_in %v; want fixable, in .env.example, set_in %q", f.ChangeID, f.Fixable, f.TemplateSetIn, f.SetIn, wantSetIn)
 		}
+	}
+	// A default change of B after the rename: .env still sets A only.
+	withDefault := append(path[:1:1], upgrade.Release{Version: "v0.9.0", Changes: []upgrade.Change{
+		{ID: "b-default", Area: "config", Summary: "default", Config: []upgrade.ConfigChange{{Var: "GOMBIT_B", Change: upgrade.ConfigDefault, From: "1", To: "2", Environment: "development"}}},
+	}})
+	if r, err := upgrade.AnalyzeConfig(dir, withDefault); err != nil || len(r.Findings) != 2 || !r.Findings[1].NeedsAction || len(r.Findings[1].SetIn) != 0 {
+		t.Fatalf("a default change after the rename = %+v, %v; .env does not set GOMBIT_B", r.Findings, err)
 	}
 	if _, err := upgrade.WriteConfigTemplates(dir, path); err != nil {
 		t.Fatal(err)

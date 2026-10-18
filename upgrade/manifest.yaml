@@ -447,6 +447,9 @@ releases:
           session: it stops authenticating when the session expires, not only
           when it is revoked, so a token issued before the upgrade under the
           old TTLs stops at its session's expiry, before its `exp`.
+        config:
+          - {var: GOMBIT_JWT_REFRESH_TTL, change: refused}
+          - {var: GOMBIT_JWT_ACCESS_TTL, change: refused}
         refs: [335]
 
       - id: refresh-lock-failure-is-500

@@ -161,9 +161,10 @@ type ConfigFinding struct {
 	NeedsAction bool `json:"needs_action"`
 	// SetIn are the environment files (not templates) that set the
 	// variable; TemplateSetIn the templates that set it, and DocumentedIn
-	// those that mention it commented out, each file as the path's earlier
-	// changes leave it (see AnalyzeConfig). They are mentions: only .env,
-	// for local development runs, is a runtime override gombit loads.
+	// those that mention it commented out: each template as the path's
+	// earlier changes leave it (WriteConfigTemplates rewrites it), every
+	// other file as it is (see AnalyzeConfig). They are mentions: only
+	// .env, for local development runs, is a runtime override gombit loads.
 	SetIn         []string `json:"set_in"`
 	TemplateSetIn []string `json:"template_set_in"`
 	DocumentedIn  []string `json:"documented_in"`
@@ -254,23 +255,18 @@ func (f *envFile) readNames(body []byte) {
 	}
 }
 
-// advance makes the file what an upgrade that has made cc leaves it: a
-// template as WriteConfigTemplates rewrites it, and another file as the
-// developer would, following the finding (a renamed variable is then set
-// under its new name). The findings for later changes are about the files
-// as the earlier ones leave them, the order WriteConfigTemplates applies
-// them in: renaming A to B, then B to C, a template setting A is fixable
-// for both.
+// advance makes a template what WriteConfigTemplates leaves it once it has
+// applied cc, so the findings for later changes are about the templates as
+// the earlier ones leave them, the order WriteConfigTemplates applies them
+// in: renaming A to B, then B to C, a template setting A is fixable for
+// both. Another file is never written, so it stays as it is: what it sets
+// is what it proves.
 func (f *envFile) advance(release, changeID string, cc ConfigChange) {
-	if f.Template {
-		f.lines = upgradeTemplate(f.lines, release, changeID, cc)
-		f.readNames([]byte(strings.Join(f.lines, "")))
+	if !f.Template {
 		return
 	}
-	if cc.Change == ConfigRenamed && f.set[cc.Var] {
-		delete(f.set, cc.Var)
-		f.set[cc.To] = true
-	}
+	f.lines = upgradeTemplate(f.lines, release, changeID, cc)
+	f.readNames([]byte(strings.Join(f.lines, "")))
 }
 
 // envAssignment is the variable an environment file line assigns, by the
@@ -355,8 +351,9 @@ func readEnvFiles(workDir string) (files []*envFile, unreadable []string, err er
 // Every rename and removal is reported whether or not a file mentions the
 // variable (a deployment sets its environment elsewhere), and every change
 // of a security change is a security review. Each change is judged
-// against the files as the path's earlier changes leave them, in the order
-// WriteConfigTemplates applies them.
+// against the templates as the path's earlier changes leave them, in the
+// order WriteConfigTemplates applies them, and against the other files as
+// they are, since nothing writes them.
 func AnalyzeConfig(workDir string, releases []Release) (ConfigReport, error) {
 	files, unreadable, err := readEnvFiles(workDir)
 	if err != nil {
