@@ -369,10 +369,13 @@ func TestActionsAreImplemented(t *testing.T) {
 }
 
 // changelogExempt are the issues the CHANGELOG's Unreleased section links
-// that the manifest does not declare, each with the reason. An exemption
-// covers the Unreleased entries it was written for: the map is emptied when
-// a release is cut (docs/releasing.md), and one that matches nothing in
-// Unreleased fails the gate.
+// that no release of the manifest declares, each with the reason. An
+// exemption covers the Unreleased entries it was written for: the map is
+// emptied when a release is cut (docs/releasing.md), which is harmless
+// because a released section may link an issue the manifest never
+// declares, and one that matches nothing in Unreleased fails the gate. A
+// follow-up to an issue a release declares cannot be exempt: if it means
+// nothing for an app, its entry links its own pull request instead.
 var changelogExempt = map[int]string{}
 
 // changelogUndeclaredHelp says what to do about CHANGELOG issues the
@@ -437,11 +440,10 @@ func TestChangelogIsDeclared(t *testing.T) {
 	if len(missing) > 0 {
 		t.Error(changelogUndeclaredHelp(missing))
 	}
-	unreleasedRefs := manifestRefs(t)
 	for n := range changelogExempt {
 		switch {
-		case slices.Contains(unreleasedRefs[n], upgrade.Unreleased):
-			t.Errorf("#%d is exempt but also declared under unreleased; drop the exemption", n)
+		case declared[n]:
+			t.Errorf("#%d is exempt but also declared; drop the exemption (a follow-up that means nothing for an app links its own pull request instead)", n)
 		case !seen[n]:
 			t.Errorf("#%d is exempt but the CHANGELOG's Unreleased section does not link it; drop the exemption (the map is emptied when a release is cut)", n)
 		}
@@ -488,15 +490,12 @@ func TestChangelogReleasesMatchManifest(t *testing.T) {
 		reported := map[int]bool{}
 		for _, n := range changelogRefs(section) {
 			in := refs[n]
-			// An exemption (a follow-up that means nothing for an app)
-			// covers an [Unreleased] link to an issue declared earlier.
-			exempt := version == upgrade.Unreleased && changelogExempt[n] != ""
-			if len(in) == 0 || slices.Contains(in, version) || reported[n] || exempt {
+			if len(in) == 0 || slices.Contains(in, version) || reported[n] {
 				continue
 			}
 			reported[n] = true
-			t.Errorf("CHANGELOG.md's [%s] links #%d, which upgrade/manifest.yaml declares under %s only. If the entry's change ships in %s (a follow-up to that issue, say), declare it there too: a change under %q in upgrade/manifest.yaml whose refs include %d. If it shipped in %s, move the entry to that section.",
-				heading, n, strings.Join(in, ", "), version, version, n, strings.Join(in, " or "))
+			t.Errorf("CHANGELOG.md's [%s] links #%d, which upgrade/manifest.yaml declares under %s only. If the entry's change ships in %s (a follow-up to that issue, say), declare it there too: a change under %q in upgrade/manifest.yaml whose refs include %d; if it means nothing for an app, link its own pull request instead of #%d. If it shipped in %s, move the entry to that section.",
+				heading, n, strings.Join(in, ", "), version, version, n, n, strings.Join(in, " or "))
 		}
 	}
 	if checked == 0 {

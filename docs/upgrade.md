@@ -431,7 +431,9 @@ is renamed to the release's version when it is cut
 the manifest is not closed at: the tag must be listed, be its newest
 release, and leave nothing under `unreleased`. Tests check that every
 issue the changelog's Unreleased section links is declared under
-`unreleased`, even a follow-up to an issue an earlier release declares, or
-exempt with a reason, and that every released section links only issues
-the manifest declares under that release (`TestChangelogIsDeclared`,
-`TestChangelogReleasesMatchManifest`).
+`unreleased` (a follow-up to an issue an earlier release declares too), or,
+if no release declares it, exempt with a reason. They also check that every
+released section links only issues the manifest declares under that
+release (`TestChangelogIsDeclared`, `TestChangelogReleasesMatchManifest`).
+A follow-up that means nothing for an app links its own pull request, not
+the earlier issue.
