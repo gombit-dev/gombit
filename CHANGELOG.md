@@ -31,7 +31,6 @@ version.
   - `gombit upgrade baseline [--dir] [--json] [--write]`, and
     [docs/upgrade.md](docs/upgrade.md)
     ([#341](https://github.com/gombit-dev/gombit/issues/341)).
-
 - The compatibility manifest (UPGRADE-2). It provides:
   - `upgrade/manifest.yaml`, built into `gombit`, which lists every release
     from v0.6.1 and its upgrade-relevant changes. Each change is classified
@@ -54,7 +53,6 @@ version.
     checks every issue the changelog's Unreleased section links against the
     manifest ([docs/releasing.md](docs/releasing.md))
     ([#342](https://github.com/gombit-dev/gombit/issues/342)).
-
 - `gombit upgrade --dry-run [--to vX.Y.Z] [--dir] [--json]` (UPGRADE-3) plans
   upgrading an application to a framework release, from its baseline and the
   compatibility manifest, and writes nothing: the current and target
@@ -68,7 +66,6 @@ version.
   with the reason. It never prompts, so it runs in CI. `upgrade.PlanUpgrade`
   is the API; `upgrade.Action` gains a read-only `Check`
   ([#343](https://github.com/gombit-dev/gombit/issues/343)).
-
 - `gombit upgrade --to vX.Y.Z` (UPGRADE-4) applies an upgrade's dependency
   changes with the go command: it edits the framework replaces the plan
   names (`go mod edit -dropreplace` / `-replace`), then runs `go get
@@ -79,7 +76,6 @@ version.
   plan's automatic and manual changes are reported as still to do.
   `--to` is required to apply; `upgrade.ApplyDependencies` is the API
   ([#344](https://github.com/gombit-dev/gombit/issues/344)).
-
 - `gombit upgrade check [--dir] [--json]` (UPGRADE-5) reports every use, in
   the application, of a framework API whose doc comment has a `Deprecated:`
   paragraph (the Go convention), whether a package, a function, a method, a
@@ -99,7 +95,6 @@ version.
   `Deprecated:` paragraph in the framework to name its replacement. The
   framework now requires `golang.org/x/tools` directly
   ([#345](https://github.com/gombit-dev/gombit/issues/345)).
-
 - `gombit upgrade fix` (UPGRADE-6) runs the framework's codemods:
   rewrites of an application's uses of framework APIs, for changes with a
   mechanical replacement (a rename, a move, a reshaped call). Uses are
@@ -124,6 +119,19 @@ version.
     file remains.
   - No codemods ship yet: the only deprecated API,
     `database.KeepStoredZeros`, has no mechanical replacement.
+- [Session management](docs/auth.md#sessions) in both auth modes:
+  `GET /auth/sessions` lists the user's active sessions with an opaque id,
+  `last_refreshed_at`, `expires_at`, and a `current` flag;
+  `DELETE /auth/sessions/{id}` revokes one; and
+  `DELETE /auth/sessions?scope=others|all` revokes every other session or
+  every session. Cookie mode clears the session cookies when a request ends
+  its own session. `auth.Service` gains `ListSessions` (returning
+  `[]auth.AuthSession`), `RevokeSession`, `RevokeAllSessions`, and
+  `ErrSessionNotFound`. The operation IDs (`auth-list-sessions`, ...) and
+  schema names (`AuthSession`, ...) carry an `auth` prefix, which leaves
+  `Session` free for an application's own type and for
+  `gombit make resource Session` (Huma panics at boot on a duplicate)
+  ([#335](https://github.com/gombit-dev/gombit/issues/335)).
 
 ### Changed
 
@@ -135,14 +143,43 @@ version.
   rollback. `gombit upgrade baseline --write` is atomic or nothing: on such a
   volume it refuses before changing `gombit.yaml`
   ([#341](https://github.com/gombit-dev/gombit/issues/341)).
-
 - `upgrade` is a framework command now, and `gombit make command` refuses
   it. An app that already registers its own `upgrade` command should rename
   it: the framework's is added first and Cobra resolves to it
   ([#341](https://github.com/gombit-dev/gombit/issues/341)).
+- Presenting a refresh token that was revoked by logout or session
+  revocation now returns 401 without revoking the user's other sessions.
+  Only an already-rotated refresh token counts as reuse and revokes all of
+  them, as before ([#335](https://github.com/gombit-dev/gombit/issues/335)).
+- **Breaking (config):** with auth enabled, config validation refuses a
+  `GOMBIT_JWT_REFRESH_TTL` shorter than `GOMBIT_JWT_ACCESS_TTL` (equal is
+  fine), and `auth.NewService` refuses the same pair: an app configured that
+  way no longer starts until it raises `GOMBIT_JWT_REFRESH_TTL` to at least
+  `GOMBIT_JWT_ACCESS_TTL` or lowers the access TTL. The refresh token's
+  lifetime is the session's, so the access token's `exp`, `expires_in` and
+  access cookie never outlast the session. An access JWT also stops
+  authenticating when its session expires, not only when it is revoked, so a
+  token issued before the upgrade does not outlive a session that has dropped
+  out of `GET /auth/sessions` and can no longer be revoked
+  ([#335](https://github.com/gombit-dev/gombit/issues/335)).
+- `make test-faults` gives every `go test` a per-binary `-timeout` that grows
+  with `FAULT_COUNT`: 40 seconds a repetition, never under `go test`'s own
+  10 minutes. Every repetition of a package runs in one test binary, so the
+  weekly x100 soak is not cut off by that default. `FAULT_TIMEOUT`, in whole
+  seconds (`5400`), sets it instead
+  ([#335](https://github.com/gombit-dev/gombit/issues/335)).
 
 ### Fixed
 
+- `POST /auth/refresh` answers 500, not 401, when the database fails while
+  the rotation locks the user's row (a deadlock, a lock timeout, a lost
+  connection). Only a user that no longer exists is a 401, so a client can
+  retry instead of treating the failure as a dead credential
+  ([#335](https://github.com/gombit-dev/gombit/issues/335)).
+- The refresh-token reuse cascade takes the user's row lock, like rotation,
+  so it also revokes the token a concurrent rotation of another of the
+  user's sessions issues. On PostgreSQL that token could survive the cascade
+  ([#335](https://github.com/gombit-dev/gombit/issues/335)).
 - An admin relation field on a string key (a country code, a SKU) stores the
   value sent, byte for byte: anything numeric-looking was parsed as an integer
   and converted back as a rune, so `"123"` was stored as `"{"` and `"007"` as
@@ -153,7 +190,6 @@ version.
   and a uuid key in a non-canonical form (no hyphens, braces), are now a 422,
   as for a plain string or `uuid` field
   ([#452](https://github.com/gombit-dev/gombit/issues/452)).
-
 - CI rebuilds the embedded admin SPA and fails when the committed
   `internal/adminui/dist` differs from a fresh build of `internal/adminui/src`.
   Nothing enforced the rebuild, so source changes (the #250 CSRF fix among
@@ -161,7 +197,6 @@ version.
   up to date by STORAGE-8 (released in v0.7.0) and matches its source; the
   release workflow refuses to tag a stale one too
   ([#451](https://github.com/gombit-dev/gombit/issues/451)).
-
 - An admin `PATCH` writes only the columns the request (or a model hook)
   changed. It loaded the row and saved the whole snapshot back, so it reverted
   another request's change to a column it never mentioned, re-inserted a row
@@ -170,7 +205,6 @@ version.
   written). The response is the row as stored. `database.ScopeEdit` narrows
   any `Select("*")` update of the scoped row to its changed columns
   ([#450](https://github.com/gombit-dev/gombit/issues/450)).
-
 - A float a write through a model sets to `+Inf`, `-Inf` or `NaN`, or beyond
   a `float32` field's range, is a 422 naming the field on every driver, the
   admin's writes included (`"Inf"`, `"NaN"`, a `float32` overflow). It was stored on PostgreSQL and SQLite and a 500 on
@@ -178,31 +212,26 @@ version.
   list page included, until it was repaired by hand. `database.Open`
   registers a `gombit:float` callback next to the time range check
   ([#449](https://github.com/gombit-dev/gombit/issues/449)).
-
 - `gombit make resource` answers a field written `notes:text,searchable`
   with the spelling the grammar wants (`notes:text:searchable`: modifiers
   follow a second colon) instead of an unknown type `"text,searchable"`;
   commas inside a type's arguments (`enum(a,b)`, `decimal(10,2)`) are
   unaffected ([#446](https://github.com/gombit-dev/gombit/issues/446)).
-
 - Production configuration refuses `GOMBIT_HTTP_TRUSTED_PROXIES` values that
   trust every peer in any spelling: a zero-length prefix (`10.0.0.0/0`,
   `::0/0`) or ranges that together cover every IPv4 or IPv6 address
   (`0.0.0.0/1,128.0.0.0/1`). Only the literal `0.0.0.0/0` forms were refused
   before, so a trust-all list could still start and let clients spoof their
   forwarded IP ([#500](https://github.com/gombit-dev/gombit/issues/500)).
-
 - A job whose worker died mid-attempt is no longer redelivered past its
   `MaxAttempts`: the redelivery that would exceed it moves the job to the
   failed jobs as exhausted. An attempt interrupted by `Release` or worker
   shutdown may still run once more, as before
   ([#494](https://github.com/gombit-dev/gombit/issues/494)).
-
 - `gombit jobs retry --all` retries each failed job at most once per
   invocation. A job that a live worker failed again went back to the head of
   the failed set and was retried until the command timed out
   ([#493](https://github.com/gombit-dev/gombit/issues/493)).
-
 - `gombit contract app` reports only a framework release, picking the
   `replace` the go command would. A `replace` of a version the app does not
   require no longer counts, and an exact-version `replace` wins over an
@@ -214,7 +243,6 @@ version.
   error. It shares this reading of `go.mod` with `gombit upgrade baseline`,
   so for a `go.mod` the two report the same framework version
   ([#341](https://github.com/gombit-dev/gombit/issues/341)).
-
 - Client values the database rejects were a 500 on PostgreSQL and MySQL and
   stored on SQLite: a NUL byte or invalid UTF-8 in a string (PostgreSQL),
   text over 65,535 bytes in a `text` column (MySQL), more characters than a

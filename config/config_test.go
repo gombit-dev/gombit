@@ -889,6 +889,56 @@ func TestValidateRejectsUnknownCookieSameSite(t *testing.T) {
 	}
 }
 
+// TestValidateRequiresRefreshTTLAtLeastAccessTTL: the refresh token's lifetime
+// is the session's, so with auth enabled an access TTL above the refresh TTL
+// is refused (an access token would outlive its session); equal TTLs are
+// fine, and nothing is checked with auth disabled.
+func TestValidateRequiresRefreshTTLAtLeastAccessTTL(t *testing.T) {
+	const secret = "test-jwt-secret-32-bytes-minimum!"
+	tests := []struct {
+		name            string
+		secret          string
+		access, refresh time.Duration
+		wantErr         bool
+	}{
+		{name: "access above refresh", secret: secret, access: time.Hour, refresh: time.Minute, wantErr: true},
+		{name: "equal", secret: secret, access: 10 * time.Minute, refresh: 10 * time.Minute},
+		{name: "auth disabled", access: time.Hour, refresh: time.Minute},
+		{name: "defaults", secret: secret, access: DefaultAccessTokenTTL, refresh: DefaultRefreshTokenTTL},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultFor(EnvironmentTest)
+			cfg.Auth.JWTSecret = tt.secret
+			cfg.Auth.AccessTokenTTL = tt.access
+			cfg.Auth.RefreshTokenTTL = tt.refresh
+			err := cfg.Validate()
+			if !tt.wantErr {
+				if err != nil {
+					t.Fatalf("Validate() error = %v, want nil", err)
+				}
+				return
+			}
+			var fieldErrors FieldErrors
+			if !errors.As(err, &fieldErrors) {
+				t.Fatalf("Validate() error = %v (%T), want FieldErrors", err, err)
+			}
+			if len(fieldErrors) != 1 {
+				t.Fatalf("Validate() field errors = %#v, want only Auth.RefreshTokenTTL", []FieldError(fieldErrors))
+			}
+			got := fieldErrors[0]
+			if got.Field != "Auth.RefreshTokenTTL" || got.Env != envJWTRefreshTTL || got.Value != "1m0s" {
+				t.Fatalf("field error = %#v, want Auth.RefreshTokenTTL (%s) with value 1m0s", got, envJWTRefreshTTL)
+			}
+			for _, want := range []string{envJWTRefreshTTL, envJWTAccessTTL, "1h0m0s"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("Validate() error = %q, want it to name %s", err, want)
+				}
+			}
+		})
+	}
+}
+
 // TestValidateIgnoresAuthModeWhenAuthDisabled matches
 // TestValidateReportsExplicitFieldErrors: a zero-value AuthConfig (no JWT
 // secret) must not produce Auth.Mode/CookieSameSite errors, since no auth
