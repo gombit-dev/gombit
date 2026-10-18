@@ -1,5 +1,5 @@
 {
-  "version": "v0.7.1",
+  "version": "v0.8.0",
   "variables": [
     {
       "name": "GOMBIT_API_PREFIX",
@@ -67,9 +67,9 @@
     {
       "name": "GOMBIT_DATABASE_DSN",
       "secret": true,
-      "default": "file:gombit.db?cache=shared&_fk=1",
-      "test_default": "file:gombit.db?cache=shared&_fk=1",
-      "production_default": "file:gombit.db?cache=shared&_fk=1"
+      "default": "file:gombit.db?cache=shared\u0026_fk=1",
+      "test_default": "file:gombit.db?cache=shared\u0026_fk=1",
+      "production_default": "file:gombit.db?cache=shared\u0026_fk=1"
     },
     {
       "name": "GOMBIT_DATABASE_MAX_IDLE_CONNS",

@@ -1,6 +1,7 @@
 package upgrade_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -81,11 +82,15 @@ func TestConfigVariablesAreDeclared(t *testing.T) {
 	if unreleasedDeclares {
 		t.Fatalf("not moving %s to %s: the unreleased entry declares configuration changes, so the code is not that release's; update it when the release is cut", configSnapshot, m.Latest())
 	}
-	out, err := json.MarshalIndent(configSnapshotFile{Version: m.Latest(), Variables: current}, "", "  ")
-	if err != nil {
+	// Written as it reads: a DSN's "&" stays "&", not "\u0026".
+	var out bytes.Buffer
+	enc := json.NewEncoder(&out)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(configSnapshotFile{Version: m.Latest(), Variables: current}); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.FromSlash(configSnapshot), append(out, '\n'), 0o600); err != nil {
+	if err := os.WriteFile(filepath.FromSlash(configSnapshot), out.Bytes(), 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
