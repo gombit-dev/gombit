@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -66,6 +67,95 @@ func TestValidationReturnsD10FieldErrors(t *testing.T) {
 	}
 	if len(body.Body.Fields["name"]) == 0 {
 		t.Fatalf("fields.name missing; fields=%#v body=%s", body.Body.Fields, rec.Body.String())
+	}
+}
+
+// A missing required property of a nested object is reported by Huma against
+// the object that lacks it, so the D10 key must name the property: the
+// scaffold's applyContractErrors feeds keys straight into react-hook-form's
+// setError, whose field paths are `address.city` and `lines[1].sku`.
+func TestValidationKeysNestedRequiredProperties(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	api := humagin.New(router, contract.HumaConfig("contract-test", "0.0.0"))
+
+	type address struct {
+		City string `json:"city" minLength:"1"`
+		Zip  string `json:"zip"`
+	}
+	type line struct {
+		SKU string `json:"sku" minLength:"1"`
+	}
+	type createOrderInput struct {
+		Body struct {
+			Title   string  `json:"title"`
+			Address address `json:"address"`
+			Lines   []line  `json:"lines"`
+		}
+	}
+
+	huma.Register(api, huma.Operation{
+		OperationID: "create-order",
+		Method:      http.MethodPost,
+		Path:        "/orders",
+	}, func(ctx context.Context, input *createOrderInput) (*struct{}, error) {
+		return nil, nil
+	})
+
+	cases := []struct {
+		name string
+		body string
+		want map[string][]string
+	}{
+		{
+			name: "present but empty nested object",
+			body: `{"title":"t","address":{"city":"","zip":"z"},"lines":[{"sku":"s"}]}`,
+			want: map[string][]string{"address.city": {"expected length >= 1"}},
+		},
+		{
+			name: "nested object without its properties",
+			body: `{"title":"t","address":{},"lines":[{"sku":"s"}]}`,
+			want: map[string][]string{
+				"address.city": {"expected required property city to be present"},
+				"address.zip":  {"expected required property zip to be present"},
+			},
+		},
+		{
+			name: "array item without its property",
+			body: `{"title":"t","address":{"city":"c","zip":"z"},"lines":[{"sku":"s"},{}]}`,
+			want: map[string][]string{
+				"lines[1].sku": {"expected required property sku to be present"},
+			},
+		},
+		{
+			name: "top-level property stays keyed on its own name",
+			body: `{"address":{"city":"c","zip":"z"},"lines":[{"sku":"s"}]}`,
+			want: map[string][]string{
+				"title": {"expected required property title to be present"},
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/orders", strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			router.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusUnprocessableEntity, rec.Body.String())
+			}
+			var envelope contract.ErrorEnvelope
+			if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+				t.Fatalf("decode error envelope: %v; body: %s", err, rec.Body.String())
+			}
+			for key, want := range tc.want {
+				if got := envelope.Body.Fields[key]; !reflect.DeepEqual(got, want) {
+					t.Fatalf("fields[%q] = %#v, want %#v; fields=%#v", key, got, want, envelope.Body.Fields)
+				}
+			}
+		})
 	}
 }
 

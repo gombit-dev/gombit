@@ -67,6 +67,35 @@ func TestFieldsFromErrors(t *testing.T) {
 			},
 			want: map[string][]string{"name": {"expected required property name to be present"}},
 		},
+		{
+			name: "required property extends a nested body path",
+			errs: []error{
+				&huma.ErrorDetail{Location: "body.address", Message: "expected required property city to be present"},
+				&huma.ErrorDetail{Location: "body.address", Message: "expected required property zip to be present"},
+			},
+			want: map[string][]string{
+				"address.city": {"expected required property city to be present"},
+				"address.zip":  {"expected required property zip to be present"},
+			},
+		},
+		{
+			name: "required property in an array item",
+			errs: []error{
+				&huma.ErrorDetail{Location: "body.items[1]", Message: "expected required property name to be present"},
+			},
+			want: map[string][]string{
+				"items[1].name": {"expected required property name to be present"},
+			},
+		},
+		{
+			name: "required property does not extend a non-body location",
+			errs: []error{
+				&huma.ErrorDetail{Location: "query.filter", Message: "expected required property name to be present"},
+			},
+			want: map[string][]string{
+				"query.filter": {"expected required property name to be present"},
+			},
+		},
 	}
 
 	for _, tt := range tests {
