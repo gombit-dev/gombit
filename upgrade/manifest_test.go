@@ -3,6 +3,7 @@ package upgrade_test
 import (
 	"errors"
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -372,8 +373,45 @@ func TestActionsAreImplemented(t *testing.T) {
 var changelogExempt = map[int]string{
 	291: "benchmark tooling: nothing in an application",
 	342: "the compatibility manifest and gombit upgrade notes themselves: new, nothing to act on",
+	343: "gombit upgrade --dry-run itself: new, nothing to act on",
+	344: "gombit upgrade --to itself: new, nothing to act on",
+	345: "gombit upgrade check itself: new, nothing to act on",
+	346: "gombit upgrade fix itself: new, nothing to act on",
 	446: "a gombit make resource error message: nothing in an application",
 	447: "shipped in v0.6.1 (the CHANGELOG has no 0.6.1 section yet)",
+	451: "a CI gate on the committed admin build: nothing in an application",
+}
+
+// changelogUndeclaredHelp says what to do about CHANGELOG issues the
+// manifest does not classify: the entry to add, or the exemption.
+func changelogUndeclaredHelp(missing []int) string {
+	var refs []string
+	for _, n := range missing {
+		refs = append(refs, "#"+strconv.Itoa(n))
+	}
+	example := missing[0]
+	return fmt.Sprintf(`CHANGELOG.md's Unreleased section links %s, which upgrade/manifest.yaml does not classify.
+
+Every change the CHANGELOG records must say what it means for an app upgrading
+across it (docs/upgrade.md#the-compatibility-manifest). For each issue, add a
+change under "- version: unreleased" in upgrade/manifest.yaml (if there is no
+such entry, add "  - version: unreleased" and "    changes:" last), e.g.:
+
+      - id: short-kebab-case-name          # unique across the manifest
+        kind: informational                # nothing to do; manual if the app must act
+        area: behavior                     # api, behavior, cli, client, config, dependency, scaffold, schema or security
+        summary: "One line: what changed, as an app sees it."
+        refs: [%d]
+
+A manual change also needs "details:" (what to do), and "breaking: true" if an
+app can stop building or behave differently without acting. Then regenerate
+docs/upgrade-notes.md:
+
+    go test ./upgrade -run TestUpgradeNotesDoc -update
+
+If the change means nothing for an application (CI, tests, tooling, docs only),
+exempt it instead: add it to changelogExempt in upgrade/manifest_test.go with the
+reason, e.g.  %d: "a CI-only change: nothing in an application",`, strings.Join(refs, ", "), example, example)
 }
 
 var changelogIssueLink = regexp.MustCompile(`github\.com/gombit-dev/gombit/(?:issues|pull)/(\d+)`)
@@ -408,15 +446,37 @@ func TestChangelogIsDeclared(t *testing.T) {
 			}
 		}
 	}
+	var missing []int
+	seen := map[int]bool{}
 	for _, match := range changelogIssueLink.FindAllStringSubmatch(unreleased, -1) {
 		n, _ := strconv.Atoi(match[1])
-		if !declared[n] && changelogExempt[n] == "" {
-			t.Errorf("CHANGELOG.md's Unreleased section links #%d, which no change in upgrade/manifest.yaml declares (refs) and changelogExempt does not exempt", n)
+		if !declared[n] && changelogExempt[n] == "" && !seen[n] {
+			seen[n] = true
+			missing = append(missing, n)
 		}
+	}
+	if len(missing) > 0 {
+		t.Error(changelogUndeclaredHelp(missing))
 	}
 	for n := range changelogExempt {
 		if declared[n] {
 			t.Errorf("#%d is exempt but also declared; drop the exemption", n)
 		}
+	}
+}
+
+// TestChangelogUndeclaredHelpIsAValidChange: the change the gate's failure
+// tells a contributor to paste is one the manifest accepts as is.
+func TestChangelogUndeclaredHelpIsAValidChange(t *testing.T) {
+	help := changelogUndeclaredHelp([]int{497, 501})
+	if !strings.Contains(help, "#497, #501") || !strings.Contains(help, "refs: [497]") {
+		t.Fatalf("help:\n%s", help)
+	}
+	start := strings.Index(help, "      - id:")
+	end := strings.Index(help[start:], "\n\n")
+	snippet := help[start : start+end]
+	manifest := "format: 1\nreleases:\n  - version: v0.1.0\n  - version: unreleased\n    changes:\n" + snippet + "\n"
+	if _, err := upgrade.ParseManifest([]byte(manifest)); err != nil {
+		t.Fatalf("the suggested change does not parse: %v\n%s", err, manifest)
 	}
 }

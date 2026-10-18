@@ -156,6 +156,23 @@ jobs:
         working-directory: internal/adminui
         run: npm ci && npm test
 
+      # The admin SPA ships as the committed dist/ (go:embed), so a source
+      # change that was not rebuilt never reaches a binary (issue #451: the
+      # #250 CSRF fix sat in src/ for weeks). Rebuild and fail on any
+      # difference, untracked hashed assets included, like contract-drift.
+      - name: Rebuild the admin UI
+        working-directory: internal/adminui
+        run: npm run build
+
+      - name: Fail on admin UI dist drift
+        run: |
+          if [ -n "$(git status --porcelain -- internal/adminui/dist)" ]; then
+            git status --porcelain -- internal/adminui/dist
+            git diff --stat -- internal/adminui/dist
+            echo "::error::internal/adminui/dist is stale: run 'npm run build' in internal/adminui and commit dist/ with the source change"
+            exit 1
+          fi
+
       # Parallel packages all shell out to npx; a cold _npx extract races
       # (TAR_ENTRY_ERROR / missing js-yaml) and fails client generation tests.
       - name: Warm npx openapi-typescript cache

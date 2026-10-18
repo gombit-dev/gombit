@@ -33,6 +33,10 @@ automatically on merge.
    [upgrade.md](upgrade.md#the-compatibility-manifest)), then regenerate
    [`upgrade-notes.md`](upgrade-notes.md) and preview the release body:
 
+   Add the version to `published` in
+   [`upgrade/plan_test.go`](../upgrade/plan_test.go), which checks that the
+   manifest lists, and plans from, every release already tagged.
+
    ```bash
    go test ./upgrade -run TestUpgradeNotesDoc -update
    go run ./cmd/gombit upgrade notes --release v0.1.0 --release-gate

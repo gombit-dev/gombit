@@ -1,11 +1,14 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"slices"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -15,17 +18,59 @@ import (
 func newUpgradeCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
 	cmd := silence(&cobra.Command{
 		Use:   "upgrade",
-		Short: "Framework upgrade commands",
-		Args:  cobra.ArbitraryArgs,
+		Short: "Upgrade the framework dependency (--to), plan it (--dry-run), and upgrade tooling",
+		Long: `Plan upgrading the application to a framework release, from the
+compatibility manifest built into this gombit, without changing anything:
+
+  gombit upgrade --dry-run [--to vX.Y.Z] [--dir .] [--json]
+
+The plan reports the current and target versions, the dependency change,
+the automatic changes the app needs, every manual action with what to do,
+and the breaking changes. --to selects the target (default: the newest
+release this gombit knows). A version the manifest does not list, or an app
+whose baseline names no framework release (a go.work, a local checkout, a
+fork), fails with the reason. It never prompts, so it runs in CI as is.
+
+Apply the plan's dependency changes:
+
+  gombit upgrade --to vX.Y.Z [--dir .] [--json]
+
+It edits the replaces of the framework the plan names (go mod edit), then
+runs go get github.com/gombit-dev/gombit@vX.Y.Z, prints every go command and
+the go.mod and go.sum lines they changed, and leaves them for review. A go
+command that fails is shown with its full output, and go.mod and go.sum are
+restored. The plan's automatic and manual changes are printed as still to
+do: they are not applied. --to is required here: nothing is applied to a
+default target.`,
+		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			upgradeUsage(stderr)
-			if len(args) == 0 {
-				return errors.New("gombit upgrade: subcommand is required")
+			if len(args) > 0 {
+				upgradeUsage(stderr)
+				return fmt.Errorf("gombit upgrade: unknown subcommand %q", args[0])
 			}
-			return fmt.Errorf("gombit upgrade: unknown subcommand %q", args[0])
+			flags := cmd.Flags()
+			dryRun, _ := flags.GetBool("dry-run")
+			to, _ := flags.GetString("to")
+			dir, _ := flags.GetString("dir")
+			asJSON, _ := flags.GetBool("json")
+			switch {
+			case dryRun:
+				return runUpgradePlan(stdout, dir, to, asJSON)
+			case to != "":
+				return runUpgradeApply(cmd.Context(), stdout, dir, to, asJSON)
+			default:
+				upgradeUsage(stderr)
+				return errors.New("gombit upgrade: --to (apply) or --dry-run (plan) or a subcommand is required")
+			}
 		},
 	})
+	cmd.Flags().Bool("dry-run", false, "plan the upgrade and print it; change nothing")
+	cmd.Flags().String("to", "", "target framework release: applied without --dry-run; with it, planned (default: the newest release this gombit knows)")
+	cmd.Flags().String("dir", ".", "application directory (go.mod and gombit.yaml)")
+	cmd.Flags().Bool("json", false, "print the plan as JSON")
 	cmd.AddCommand(newUpgradeBaselineCommand(stdout))
+	cmd.AddCommand(newUpgradeCheckCommand(stdout))
+	cmd.AddCommand(newUpgradeFixCommand(stdout, stderr))
 	cmd.AddCommand(newUpgradeNotesCommand(stdout))
 	return cmd
 }
@@ -243,8 +288,301 @@ func printFramework(stdout io.Writer, fw upgrade.Framework) error {
 	return err
 }
 
+// runUpgradePlan prints the plan for upgrading the app in dir to to.
+func runUpgradePlan(stdout io.Writer, dir, to string, asJSON bool) error {
+	m, err := upgrade.LoadManifest()
+	if err != nil {
+		return fmt.Errorf("gombit upgrade: %w", err)
+	}
+	plan, err := upgrade.PlanUpgrade(dir, m, to)
+	if err != nil {
+		return fmt.Errorf("gombit upgrade: %w", err)
+	}
+	if asJSON {
+		data, err := json.MarshalIndent(plan, "", "  ")
+		if err != nil {
+			return fmt.Errorf("gombit upgrade: %w", err)
+		}
+		_, err = fmt.Fprintf(stdout, "%s\n", data)
+		return err
+	}
+	return plan.Render(stdout)
+}
+
+// runUpgradeApply applies the dependency changes of upgrading the app in
+// dir to to, and prints what it did and what is still to do.
+func runUpgradeApply(ctx context.Context, stdout io.Writer, dir, to string, asJSON bool) error {
+	m, err := upgrade.LoadManifest()
+	if err != nil {
+		return fmt.Errorf("gombit upgrade: %w", err)
+	}
+	applied, err := upgrade.ApplyDependencies(ctx, dir, m, to)
+	if err != nil {
+		return fmt.Errorf("gombit upgrade: %w", err)
+	}
+	if asJSON {
+		data, err := json.MarshalIndent(applied, "", "  ")
+		if err != nil {
+			return fmt.Errorf("gombit upgrade: %w", err)
+		}
+		_, err = fmt.Fprintf(stdout, "%s\n", data)
+		return err
+	}
+	return applied.Render(stdout)
+}
+
+func newUpgradeCheckCommand(stdout io.Writer) *cobra.Command {
+	cmd := silence(&cobra.Command{
+		Use:   "check",
+		Short: "Report uses of deprecated framework APIs",
+		Long: `Report every use, in the application, of a framework API marked deprecated
+(a "Deprecated:" paragraph in its doc comment, the Go convention): file,
+line and column, the symbol, and what to use instead. Uses are found from
+type information (go/packages, go/types), not by matching text, in every
+package of the app, tests included. The app must type-check.
+
+It exits 1 when it finds any, so a CI job can gate on it.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			dir, _ := cmd.Flags().GetString("dir")
+			asJSON, _ := cmd.Flags().GetBool("json")
+			return runUpgradeCheck(cmd.Context(), stdout, dir, asJSON)
+		},
+	})
+	cmd.Flags().String("dir", ".", "application directory")
+	cmd.Flags().Bool("json", false, "print the uses as JSON")
+	return cmd
+}
+
+// runUpgradeCheck reports the app's uses of deprecated framework APIs, and
+// fails when there are any.
+func runUpgradeCheck(ctx context.Context, stdout io.Writer, dir string, asJSON bool) error {
+	uses, err := upgrade.ScanDeprecated(ctx, dir)
+	if err != nil {
+		return fmt.Errorf("gombit upgrade check: %w", err)
+	}
+	if asJSON {
+		if uses == nil {
+			uses = []upgrade.DeprecatedUse{}
+		}
+		data, err := json.MarshalIndent(uses, "", "  ")
+		if err != nil {
+			return fmt.Errorf("gombit upgrade check: %w", err)
+		}
+		if _, err := fmt.Fprintf(stdout, "%s\n", data); err != nil {
+			return err
+		}
+	} else if err := upgrade.RenderDeprecated(stdout, uses); err != nil {
+		return err
+	}
+	if len(uses) > 0 {
+		return fmt.Errorf("gombit upgrade check: %d use(s) of deprecated framework APIs", len(uses))
+	}
+	return nil
+}
+
+// upgradeCodemods are the codemods gombit upgrade fix runs (a test
+// replaces them).
+var upgradeCodemods = upgrade.Codemods
+
+func newUpgradeFixCommand(stdout, stderr io.Writer) *cobra.Command {
+	cmd := silence(&cobra.Command{
+		Use:   "fix",
+		Short: "Rewrite uses of changed framework APIs (codemods): print the patch, or --write it",
+		Long: `Run the framework's codemods on the application: mechanical rewrites of
+its uses of framework APIs a release renamed, moved or reshaped. Uses are
+found from type information (go/packages, go/types) in every package of
+the app, tests included, and rewritten in the syntax tree, never as text;
+changed files are printed gofmt-formatted. The app must type-check, and so
+must the rewrite: the codemods run in passes on their own output (one may
+rewrite another's) until a pass changes nothing, and that pass type-checks
+the rewritten app before anything is proposed.
+
+By default it writes nothing: it prints the rewrite as a unified diff on
+stdout, for review (gombit upgrade fix > upgrade.patch, then git apply
+upgrade.patch), and the summary on stderr.
+
+  gombit upgrade fix [--dir .] [--only id,...]          print the patch
+  gombit upgrade fix --patch upgrade.patch              write it to a file
+  gombit upgrade fix --write                            rewrite the files
+
+--patch always writes the file, empty when there is nothing to rewrite.
+--write rewrites the files in place, each atomically, and writes nothing
+when a file no longer holds exactly the bytes the codemods parsed (it is
+a check, not a lock). Running it again changes nothing.
+A use a codemod cannot rewrite safely (the new name would not resolve to
+the new API there, a generated file, an embedded field) is left unchanged
+and listed, and the command exits 1 so a CI job sees it. Files excluded by
+build constraints are not type-checked, so not rewritten: those that
+mention a codemod's API are listed (rerun with their GOOS, GOARCH or tags),
+found by walking the tree as ./... does, so a directory whose every file
+is excluded is covered too.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			flags := cmd.Flags()
+			dir, _ := flags.GetString("dir")
+			only, _ := flags.GetStringSlice("only")
+			write, _ := flags.GetBool("write")
+			patchFile, _ := flags.GetString("patch")
+			asJSON, _ := flags.GetBool("json")
+			return runUpgradeFix(cmd.Context(), stdout, stderr, upgradeFixOptions{dir: dir, only: only, write: write, patchFile: patchFile, asJSON: asJSON})
+		},
+	})
+	cmd.Flags().String("dir", ".", "application directory")
+	cmd.Flags().StringSlice("only", nil, "run only these codemods (by ID)")
+	cmd.Flags().Bool("write", false, "rewrite the files in place instead of printing the patch")
+	cmd.Flags().String("patch", "", "write the patch to this file instead of stdout")
+	cmd.Flags().Bool("json", false, "print the result (patch included) as JSON")
+	return cmd
+}
+
+type upgradeFixOptions struct {
+	dir       string
+	only      []string
+	write     bool
+	patchFile string
+	asJSON    bool
+}
+
+// upgradeFixResult is gombit upgrade fix --json.
+type upgradeFixResult struct {
+	Codemods  []string          `json:"codemods"`
+	Files     []string          `json:"files"`
+	Patch     string            `json:"patch"`
+	Written   []string          `json:"written"`
+	Left      []upgrade.LeftUse `json:"left"`
+	Unchecked []string          `json:"unchecked"`
+}
+
+func runUpgradeFix(ctx context.Context, stdout, stderr io.Writer, o upgradeFixOptions) error {
+	if o.write && o.patchFile != "" {
+		return errors.New("gombit upgrade fix: --write or --patch, not both")
+	}
+	all := upgradeCodemods()
+	mods := all
+	if len(o.only) > 0 {
+		mods = nil
+		for _, id := range o.only {
+			i := slices.IndexFunc(all, func(c upgrade.Codemod) bool { return c.ID == id })
+			if i < 0 {
+				return fmt.Errorf("gombit upgrade fix: no codemod %q in this gombit", id)
+			}
+			mods = append(mods, all[i])
+		}
+	}
+	res := upgradeFixResult{Codemods: []string{}, Files: []string{}, Written: []string{}, Left: []upgrade.LeftUse{}, Unchecked: []string{}}
+	for _, c := range mods {
+		res.Codemods = append(res.Codemods, c.ID)
+	}
+	summary := stderr
+	if o.asJSON || o.write || o.patchFile != "" {
+		summary = stdout
+	}
+	// No codemods is an empty fix, through the same output: --patch still
+	// empties its file.
+	fix := &upgrade.Fix{}
+	if len(mods) > 0 {
+		var err error
+		if fix, err = upgrade.RunCodemods(ctx, o.dir, mods); err != nil {
+			return fmt.Errorf("gombit upgrade fix: %w", err)
+		}
+	}
+	for _, f := range fix.Files {
+		res.Files = append(res.Files, f.Path)
+	}
+	res.Patch = fix.Patch()
+	res.Left = append(res.Left, fix.Left...)
+	res.Unchecked = append(res.Unchecked, fix.Unchecked...)
+	var writeErr error
+	switch {
+	case o.write:
+		res.Written, writeErr = fix.Write()
+		if res.Written == nil {
+			res.Written = []string{}
+		}
+	case o.patchFile != "":
+		// Always written, empty when there is nothing to rewrite: the file
+		// never holds an earlier run's patch.
+		// #nosec G306 -- a patch for the developer to review, not a secret
+		if err := os.WriteFile(o.patchFile, []byte(res.Patch), 0o644); err != nil {
+			return fmt.Errorf("gombit upgrade fix: %w", err)
+		}
+	case !o.asJSON:
+		if _, err := io.WriteString(stdout, res.Patch); err != nil {
+			return err
+		}
+	}
+	if o.asJSON {
+		if err := printFixJSON(stdout, res); err != nil {
+			return err
+		}
+	} else if err := renderFix(summary, o, res); err != nil {
+		return err
+	}
+	if writeErr != nil {
+		return fmt.Errorf("gombit upgrade fix: %w", writeErr)
+	}
+	if len(res.Left) > 0 {
+		return fmt.Errorf("gombit upgrade fix: %d use(s) left to change by hand", len(res.Left))
+	}
+	return nil
+}
+
+func printFixJSON(stdout io.Writer, res upgradeFixResult) error {
+	data, err := json.MarshalIndent(res, "", "  ")
+	if err != nil {
+		return fmt.Errorf("gombit upgrade fix: %w", err)
+	}
+	_, err = fmt.Fprintf(stdout, "%s\n", data)
+	return err
+}
+
+// renderFix is the summary of a gombit upgrade fix run.
+func renderFix(w io.Writer, o upgradeFixOptions, res upgradeFixResult) error {
+	var b strings.Builder
+	if len(res.Codemods) == 0 {
+		b.WriteString("No codemods: this gombit ships none. gombit upgrade check lists the deprecated APIs to change by hand.\n")
+	}
+	switch {
+	case len(res.Codemods) == 0 && o.patchFile != "":
+		fmt.Fprintf(&b, "%s is empty.\n", o.patchFile)
+	case len(res.Codemods) == 0:
+	case len(res.Files) == 0 && o.patchFile != "":
+		fmt.Fprintf(&b, "Nothing to rewrite; %s is empty.\n", o.patchFile)
+	case len(res.Files) == 0:
+		b.WriteString("Nothing to rewrite.\n")
+	case o.write:
+		fmt.Fprintf(&b, "Rewrote %d of %d file(s):\n", len(res.Written), len(res.Files))
+		for _, f := range res.Written {
+			fmt.Fprintf(&b, "  %s\n", f)
+		}
+	case o.patchFile != "":
+		fmt.Fprintf(&b, "Wrote the patch for %d file(s) to %s; nothing else was changed. Review it, then: git apply %s\n", len(res.Files), o.patchFile, o.patchFile)
+	default:
+		fmt.Fprintf(&b, "The patch above rewrites %d file(s); nothing was changed. Review it, then apply it (git apply) or rerun with --write.\n", len(res.Files))
+	}
+	if len(res.Left) > 0 {
+		fmt.Fprintf(&b, "Left for you to change: %d\n", len(res.Left))
+		for _, l := range res.Left {
+			fmt.Fprintf(&b, "  %s:%d:%d: %s (%s)\n      %s\n", l.File, l.Line, l.Column, l.Symbol, l.Codemod, l.Reason)
+		}
+	}
+	if len(res.Unchecked) > 0 {
+		b.WriteString("Not checked (excluded by build constraints; rerun with their GOOS, GOARCH or tags):\n")
+		for _, f := range res.Unchecked {
+			fmt.Fprintf(&b, "  %s\n", f)
+		}
+	}
+	_, err := io.WriteString(w, b.String())
+	return err
+}
+
 func upgradeUsage(stderr io.Writer) {
-	_, _ = fmt.Fprintln(stderr, "Usage: gombit upgrade <subcommand>")
+	_, _ = fmt.Fprintln(stderr, "Usage: gombit upgrade --to vX.Y.Z [--dir .] [--json]")
+	_, _ = fmt.Fprintln(stderr, "       gombit upgrade --dry-run [--to vX.Y.Z] [--dir .] [--json]")
+	_, _ = fmt.Fprintln(stderr, "       gombit upgrade <subcommand>")
 	_, _ = fmt.Fprintln(stderr, "  baseline    Show (or record) the app's upgrade baseline")
+	_, _ = fmt.Fprintln(stderr, "  check       Report uses of deprecated framework APIs")
+	_, _ = fmt.Fprintln(stderr, "  fix         Rewrite uses of changed framework APIs (codemods): print the patch, or --write it")
 	_, _ = fmt.Fprintln(stderr, "  notes       Print upgrade notes from the compatibility manifest")
 }

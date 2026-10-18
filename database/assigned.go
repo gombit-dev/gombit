@@ -75,6 +75,14 @@ func forEachAssigned(db *gorm.DB, creating bool, targets map[string]*schema.Fiel
 	if len(stmt.Omits) > 0 || (len(stmt.Selects) > 0 && !w.selectsAll) {
 		w.selected, w.restricted = stmt.SelectAndOmitColumns(creating, !creating)
 	}
+	// An edit of a loaded row (ScopeEdit) writes only the columns whose value
+	// changed (narrowToChanged), so a column it leaves as stored is not one
+	// the statement writes.
+	if !creating && w.selectsAll {
+		if scope := editScopeOf(stmt); scope != nil && scope.values != nil {
+			w.edit = scope
+		}
+	}
 	w.walk(reflect.ValueOf(stmt.Dest), fn)
 	if creating {
 		w.upsertLiterals(fn)
@@ -91,6 +99,7 @@ type assignWalker struct {
 	selectsAll bool
 	wildcard   bool
 	creating   bool
+	edit       *StoredRow // ScopeEdit's snapshot of the row this update writes
 }
 
 // written reports whether GORM writes f's column. A column the field's
@@ -122,6 +131,9 @@ func (w *assignWalker) emit(f *schema.Field, v reflect.Value, fromStruct bool, f
 		return
 	}
 	if !w.written(f) {
+		return
+	}
+	if fromStruct && w.edit != nil && w.edit.unchanged(f.DBName, v) {
 		return
 	}
 	fn(assignedValue{Field: f, Value: v, Creating: w.creating, FromStruct: fromStruct, Selected: fromStruct && w.selects(f), Wildcard: fromStruct && w.wildcard})

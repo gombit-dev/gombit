@@ -208,8 +208,9 @@ func coerceValue(raw any, ft FieldType) (any, error) {
 		}
 		return asString(raw)
 	case TypeRelation:
-		// belongs_to stores the FK as integer or string, whichever the
-		// payload used. The setter converts to the Go field type.
+		// A relation over a string, integer or uuid key is coerced as that
+		// type (coerceTypeFor); this is the fallback for any other key type
+		// (a struct such as uuid.NullUUID): an integer or the string sent.
 		if s, err := asString(raw); err == nil {
 			if n, nerr := strconv.ParseInt(s, 10, 64); nerr == nil {
 				return n, nil
