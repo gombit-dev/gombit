@@ -437,10 +437,11 @@ func TestChangelogIsDeclared(t *testing.T) {
 	if len(missing) > 0 {
 		t.Error(changelogUndeclaredHelp(missing))
 	}
+	unreleasedRefs := manifestRefs(t)
 	for n := range changelogExempt {
 		switch {
-		case declared[n]:
-			t.Errorf("#%d is exempt but also declared; drop the exemption", n)
+		case slices.Contains(unreleasedRefs[n], upgrade.Unreleased):
+			t.Errorf("#%d is exempt but also declared under unreleased; drop the exemption", n)
 		case !seen[n]:
 			t.Errorf("#%d is exempt but the CHANGELOG's Unreleased section does not link it; drop the exemption (the map is emptied when a release is cut)", n)
 		}
@@ -481,11 +482,16 @@ func TestChangelogReleasesMatchManifest(t *testing.T) {
 		if !ok {
 			continue // listed, not released yet: the release cut adds it
 		}
-		checked++
+		if version != upgrade.Unreleased {
+			checked++
+		}
 		reported := map[int]bool{}
 		for _, n := range changelogRefs(section) {
 			in := refs[n]
-			if len(in) == 0 || slices.Contains(in, version) || reported[n] {
+			// An exemption (a follow-up that means nothing for an app)
+			// covers an [Unreleased] link to an issue declared earlier.
+			exempt := version == upgrade.Unreleased && changelogExempt[n] != ""
+			if len(in) == 0 || slices.Contains(in, version) || reported[n] || exempt {
 				continue
 			}
 			reported[n] = true

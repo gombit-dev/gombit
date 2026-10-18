@@ -429,6 +429,9 @@ The changes of the next release collect under an `unreleased` entry, which
 is renamed to the release's version when it is cut
 ([releasing.md](releasing.md)). The release workflow refuses a stable tag
 the manifest is not closed at: the tag must be listed, be its newest
-release, and leave nothing under `unreleased`. A test checks that every
-issue the changelog's Unreleased section links is declared in the
-manifest, or exempt with a reason.
+release, and leave nothing under `unreleased`. Tests check that every
+issue the changelog's Unreleased section links is declared under
+`unreleased`, even a follow-up to an issue an earlier release declares, or
+exempt with a reason, and that every released section links only issues
+the manifest declares under that release (`TestChangelogIsDeclared`,
+`TestChangelogReleasesMatchManifest`).

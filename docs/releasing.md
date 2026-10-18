@@ -21,8 +21,8 @@ automatically on merge.
    waits, update it in the commit that is merged and tagged. An entry goes
    under the release that shipped its change, which is the one the manifest
    declares it in, even when the entry was written later
-   (`TestChangelogReleasesMatchManifest` checks every released section
-   against the manifest). Empty `changelogExempt` in
+   (`TestChangelogReleasesMatchManifest` checks every section, `[Unreleased]`
+   included, against the manifest release it covers). Empty `changelogExempt` in
    [`upgrade/manifest_test.go`](../upgrade/manifest_test.go): its
    exemptions covered the entries just moved, and one that matches nothing
    in `[Unreleased]` fails the gate.

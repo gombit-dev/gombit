@@ -243,9 +243,11 @@ go test ./upgrade -run TestUpgradeNotesDoc -update
 `TestChangelogIsDeclared` fails, with this snippet, when an issue the
 changelog links is neither declared nor exempt. A change that means nothing
 for an application (CI, tests, tooling, docs only) goes in `changelogExempt`
-in `upgrade/manifest_test.go` instead, with the reason. A follow-up to an
-issue an earlier release already declares still needs its own change under
-`unreleased` that refs the issue (`TestChangelogReleasesMatchManifest`). See
+in `upgrade/manifest_test.go` instead, with the reason. That holds for a
+follow-up to an issue an earlier release already declares too: a follow-up
+an app notices needs its own change under `unreleased` that refs the issue
+(`TestChangelogReleasesMatchManifest`), and one that means nothing for an
+app is exempt. See
 [docs/upgrade.md](docs/upgrade.md#the-compatibility-manifest) for the kinds,
 areas and `breaking`.
 
