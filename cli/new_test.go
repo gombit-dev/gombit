@@ -81,6 +81,7 @@ func TestNewFromAnAppBinaryPinsTheFramework(t *testing.T) {
 				[]string{"new", "demo", "--skip-tidy"}); err != nil {
 				t.Fatalf("gombit new: %v\n%s\n%s", err, stdout.String(), stderr.String())
 			}
+			// #nosec G304 -- test-controlled path under t.TempDir()
 			data, err := os.ReadFile(filepath.Join(dir, "demo", "go.mod"))
 			if err != nil {
 				t.Fatalf("read the generated go.mod: %v", err)
