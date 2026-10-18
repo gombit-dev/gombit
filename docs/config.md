@@ -82,8 +82,8 @@ recognizes:
 | `GOMBIT_LOG_LEVEL` | `Config.Logging.Level` | `info` |
 | `GOMBIT_LOG_SINK` | `Config.Logging.Sink` | `stderr` |
 | `GOMBIT_JWT_SECRET` | `Config.Auth.JWTSecret` | empty (auth unmounted) |
-| `GOMBIT_JWT_ACCESS_TTL` | `Config.Auth.AccessTokenTTL` | `15m` |
-| `GOMBIT_JWT_REFRESH_TTL` | `Config.Auth.RefreshTokenTTL` | `168h` |
+| `GOMBIT_JWT_ACCESS_TTL` | `Config.Auth.AccessTokenTTL` | `15m`; with auth on, at most `GOMBIT_JWT_REFRESH_TTL` |
+| `GOMBIT_JWT_REFRESH_TTL` | `Config.Auth.RefreshTokenTTL` | `168h`; with auth on, at least `GOMBIT_JWT_ACCESS_TTL` (validation fails otherwise) |
 | `GOMBIT_AUTH_MODE` | `Config.Auth.Mode` | `jwt` |
 | `GOMBIT_COOKIE_SECURE` | `Config.Auth.CookieSecure` | `true` |
 | `GOMBIT_COOKIE_SAMESITE` | `Config.Auth.CookieSameSite` | `lax` |

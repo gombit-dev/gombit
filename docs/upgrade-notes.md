@@ -70,6 +70,31 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   row holds one. Apply the same to any hand-written handler that
   parses a uint id.
 
+- **Breaking.** With auth enabled, an app that registers the session routes, the `auth-*` session operation IDs or the `AuthSession` / `AuthRevokeResult` schema names fails at startup: the framework registers them. (`auth-session-names-reserved`, api, [#335](https://github.com/gombit-dev/gombit/issues/335))
+
+  With `GOMBIT_JWT_SECRET` set, registering a route at `GET` or
+  `DELETE {prefix}/auth/sessions` or `DELETE {prefix}/auth/sessions/{id}`
+  (through Huma or the raw Gin router), an operation
+  `auth-list-sessions`, `auth-revoke-session` or `auth-revoke-sessions`,
+  or a type Huma names `AuthSession`, `DataListAuthSession`,
+  `AuthRevokeResult` or `DataAuthRevokeResult` now panics when the app
+  starts. Drop the app's own session routes, which the framework's
+  replace, or rename them. A resource named `Session`
+  (`gombit make resource Session`) does not collide.
+
+- **Breaking.** With auth enabled, a `GOMBIT_JWT_REFRESH_TTL` shorter than `GOMBIT_JWT_ACCESS_TTL` fails config validation, so the app does not start. (`refresh-ttl-at-least-access-ttl`, config, [#335](https://github.com/gombit-dev/gombit/issues/335))
+
+  The refresh token's lifetime is the session's, and an access token
+  must not outlive its session: it would stop authenticating when the
+  session ends while its `exp`, `expires_in` and access cookie still
+  promised more. Config validation (`config.Load` / `Validate`) and
+  `auth.NewService` refuse that pair; equal TTLs are fine. Raise
+  `GOMBIT_JWT_REFRESH_TTL` to at least `GOMBIT_JWT_ACCESS_TTL`, or
+  lower `GOMBIT_JWT_ACCESS_TTL`. An access token also ends with its
+  session: it stops authenticating when the session expires, not only
+  when it is revoked, so a token issued before the upgrade under the
+  old TTLs stops at its session's expiry, before its `exp`.
+
 ### Automatic: applied by the upgrade tooling
 
 - `gombit new` records the app's upgrade baseline in a `gombit:` block of `gombit.yaml`. (`record-upgrade-baseline`, scaffold, action `record-baseline`, [#341](https://github.com/gombit-dev/gombit/issues/341))
@@ -118,6 +143,33 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   PostgreSQL 22001, 22003, 22007, 22008, 22021, 22P05 and MySQL 1264,
   1265, 1292, 1366, 1406 (`database.IsDataException`). A uint list
   filter over `MaxInt64` is a 422 too.
+
+- Session management in both auth modes: `GET {prefix}/auth/sessions` lists the user's active sessions; `DELETE {prefix}/auth/sessions/{id}` and `DELETE {prefix}/auth/sessions?scope=others|all` revoke them. (`auth-session-management`, api, [#335](https://github.com/gombit-dev/gombit/issues/335))
+
+  `auth.Service` gains `ListSessions` (returning `[]auth.AuthSession`),
+  `RevokeSession`, `RevokeAllSessions` and `ErrSessionNotFound`. Cookie
+  mode clears the session cookies when a request ends its own session
+  (docs/auth.md § Sessions).
+
+- A refresh token revoked by logout or session revocation is a 401 that no longer revokes the user's other sessions; only an already-rotated token counts as reuse. (`refresh-reuse-only-rotated-tokens`, security, [#335](https://github.com/gombit-dev/gombit/issues/335))
+
+- `POST /auth/refresh` answers 500, not 401, when the database fails while the rotation locks the user's row (a deadlock, a lock timeout, a lost connection). (`refresh-lock-failure-is-500`, behavior, [#335](https://github.com/gombit-dev/gombit/issues/335))
+
+  Only a user that no longer exists is a 401 there, so a client can
+  retry instead of treating the failure as a dead credential.
+
+- Refresh-token rotation and the session revocations lock the user's row for their transaction (`FOR NO KEY UPDATE` on PostgreSQL, `FOR UPDATE` on MySQL), so they run one at a time per user. (`auth-user-row-lock`, behavior, [#335](https://github.com/gombit-dev/gombit/issues/335))
+
+  Application code that holds a lock on a user's row in a long
+  transaction now delays that user's refreshes and revocations. Code
+  that also writes a user's refresh tokens should lock the user's row
+  first, as the framework does.
+
+- The refresh-token reuse cascade takes the user's row lock, like rotation, so it also revokes the token a concurrent rotation of another of the user's sessions issues. (`refresh-reuse-cascade-takes-user-lock`, security, [#335](https://github.com/gombit-dev/gombit/issues/335))
+
+  On PostgreSQL that token could survive the cascade.
+
+- A new app's placeholder `schema.ts` includes the session operations; an existing app's generated client gets them from `gombit client generate`. (`client-schema-session-operations`, client, [#335](https://github.com/gombit-dev/gombit/issues/335))
 
 ## v0.7.1
 
