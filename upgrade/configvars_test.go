@@ -1,0 +1,412 @@
+package upgrade_test
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"slices"
+	"sort"
+	"strings"
+	"testing"
+
+	"github.com/gombit-dev/gombit/config"
+	"github.com/gombit-dev/gombit/upgrade"
+)
+
+// configSnapshot is the configuration surface (config.Variables) of a
+// release the manifest lists: what the code's variables are compared with,
+// through the configuration changes the releases after it declare.
+const configSnapshot = "testdata/config-variables.json"
+
+type configSnapshotFile struct {
+	// Version is the release whose variables these are.
+	Version   string            `json:"version"`
+	Variables []config.Variable `json:"variables"`
+}
+
+// declassified are the variables that stopped being secret on purpose, each
+// with the reason: a secret's value is never printed, so turning that off
+// is reviewed here, not just declared.
+var declassified = map[string]string{}
+
+// TestConfigVariablesAreDeclared: the configuration surface moves from the
+// snapshot's release to the code's only through what the manifest's later
+// releases (unreleased included) declare. A variable the code stops
+// reading needs a removal or a rename; a default that changes, in any
+// environment, needs default declarations whose from is the snapshot's
+// value and whose to is the code's (several releases chain, each from the
+// last one's to). And every declaration must describe a real transition:
+// one whose from is not the old value, or that changes nothing, fails, as
+// does a removal of a variable still read. -update moves the snapshot to
+// the newest release when it is cut (unreleased declares nothing left).
+func TestConfigVariablesAreDeclared(t *testing.T) {
+	data, err := os.ReadFile(configSnapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snap configSnapshotFile
+	if err := json.Unmarshal(data, &snap); err != nil {
+		t.Fatal(err)
+	}
+	m, err := upgrade.LoadManifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	after := -1
+	for i, r := range m.Releases {
+		if r.Version == snap.Version {
+			after = i
+		}
+	}
+	if after < 0 {
+		t.Fatalf("%s is of release %q, which the manifest does not list", configSnapshot, snap.Version)
+	}
+	var declared []upgrade.ConfigChange
+	unreleasedDeclares := false
+	for _, r := range m.Releases[after+1:] {
+		for _, c := range r.Changes {
+			declared = append(declared, c.Config...)
+			unreleasedDeclares = unreleasedDeclares || r.Version == upgrade.Unreleased && len(c.Config) > 0
+		}
+	}
+	current := config.Variables()
+	if problems := configProblems(snap.Variables, current, declared); len(problems) > 0 {
+		t.Fatalf("the configuration changes since %s and the manifest's declarations after it (upgrade/manifest.yaml, a change's config list) disagree:\n  %s", snap.Version, strings.Join(problems, "\n  "))
+	}
+	if !*update || snap.Version == m.Latest() {
+		return
+	}
+	if unreleasedDeclares {
+		t.Fatalf("not moving %s to %s: the unreleased entry declares configuration changes, so the code is not that release's; update it when the release is cut", configSnapshot, m.Latest())
+	}
+	// Written as it reads: a DSN's "&" stays "&", not "\u0026".
+	var out bytes.Buffer
+	enc := json.NewEncoder(&out)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(configSnapshotFile{Version: m.Latest(), Variables: current}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.FromSlash(configSnapshot), out.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+var configEnvs = []string{"development", "test", "production"}
+
+func envDefault(v config.Variable, env string) string {
+	switch env {
+	case "test":
+		return v.TestDefault
+	case "production":
+		return v.ProductionDefault
+	}
+	return v.Default
+}
+
+// configProblems are where the declarations (in release order) and the
+// move from the old variables to the current ones disagree. The
+// declarations are replayed on a copy of the old catalog: a rename moves a
+// variable's descriptor (defaults, secrecy) to its new name, a removal
+// drops it, and a default change moves one default, from the value it
+// has at that point. Each must find its variable in the state it claims.
+// The replayed catalog must then be the code's: a variable it still has
+// that the code does not read, a default it has otherwise, or a secret
+// the code no longer treats as one is a change nothing declares.
+func configProblems(old, current []config.Variable, declared []upgrade.ConfigChange) []string {
+	now := map[string]config.Variable{}
+	for _, v := range current {
+		now[v.Name] = v
+	}
+	replay := map[string]config.Variable{}
+	for _, v := range old {
+		replay[v.Name] = v
+	}
+	var problems []string
+	add := func(format string, args ...any) { problems = append(problems, fmt.Sprintf(format, args...)) }
+	gone := map[string]bool{} // removed or renamed away
+	// unknown are, per added variable, the environments whose first
+	// default the addition did not state (nor needs to). It enters as not
+	// secret: it was never printed-protected, so it cannot be declassified.
+	unknown := map[string]map[string]bool{}
+	for _, cc := range declared {
+		v, has := replay[cc.Var]
+		switch cc.Change {
+		case upgrade.ConfigAdded:
+			if has {
+				add("%s is declared added, but it is already read at that point", cc.Var)
+				continue
+			}
+			replay[cc.Var] = config.Variable{Name: cc.Var}
+			unknown[cc.Var] = map[string]bool{"development": true, "test": true, "production": true}
+			delete(gone, cc.Var)
+		case upgrade.ConfigRenamed, upgrade.ConfigRemoved:
+			if !has {
+				add("%s is declared %s, but it is not read at that point", cc.Var, cc.Change)
+				continue
+			}
+			delete(replay, cc.Var)
+			gone[cc.Var] = true
+			u := unknown[cc.Var]
+			delete(unknown, cc.Var)
+			if cc.Change == upgrade.ConfigRenamed {
+				if _, taken := replay[cc.To]; taken {
+					add("%s is declared renamed %s, which is already read at that point", cc.Var, cc.To)
+				}
+				v.Name = cc.To
+				replay[cc.To] = v
+				if u != nil {
+					unknown[cc.To] = u
+				}
+			}
+		case upgrade.ConfigDefault:
+			if !has {
+				add("%s's default change is declared, but it is not read at that point (a new variable needs no declaration)", cc.Var)
+				continue
+			}
+			for _, env := range configEnvs {
+				if cc.Environment != "" && cc.Environment != env {
+					continue
+				}
+				if unknown[cc.Var][env] {
+					delete(unknown[cc.Var], env) // an addition's first default: from is its word
+				} else if was := envDefault(v, env); was != cc.From {
+					add("%s's %s default is declared to change from %q, but it was %q", cc.Var, env, cc.From, was)
+				}
+				setEnvDefault(&v, env, cc.To)
+			}
+			replay[cc.Var] = v
+		case upgrade.ConfigRequired, upgrade.ConfigRefused:
+			if !has {
+				add("%s is declared %s, but it is not read at that point", cc.Var, cc.Change)
+			}
+		}
+	}
+	for _, name := range sortedNames(replay) {
+		v := replay[name]
+		n, read := now[name]
+		if !read {
+			add("%s is read after the declarations (by the snapshot's release, or as a rename's new name) but not by the code: declare it removed, or renamed to what the code reads", name)
+			continue
+		}
+		for _, env := range configEnvs {
+			if unknown[name][env] {
+				continue // an addition's default, never stated: nothing to compare
+			}
+			if from, to := envDefault(v, env), envDefault(n, env); from != to {
+				add("%s's %s default changed from %q to %q: declare it (change: default, from, to, environment: %s or none)", name, env, from, to, env)
+			}
+		}
+		if v.Secret && !n.Secret && declassified[name] == "" {
+			add("%s is no longer secret: the tooling would print its value; if that is right, add it to declassified with the reason", name)
+		}
+	}
+	for name := range gone {
+		if _, back := replay[name]; !back {
+			if _, read := now[name]; read {
+				add("%s is declared removed or renamed but the code still reads it", name)
+			}
+		}
+	}
+	return problems
+}
+
+func setEnvDefault(v *config.Variable, env, value string) {
+	switch env {
+	case "test":
+		v.TestDefault = value
+	case "production":
+		v.ProductionDefault = value
+	default:
+		v.Default = value
+	}
+}
+
+func sortedNames(m map[string]config.Variable) []string {
+	names := make([]string, 0, len(m))
+	for name := range m {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// TestConfigProblems: the rule itself, on made-up surfaces. Problems are
+// matched as a set (each wanted text in one problem, and no others).
+func TestConfigProblems(t *testing.T) {
+	v := func(name, dev, prod string) config.Variable {
+		return config.Variable{Name: name, Default: dev, TestDefault: dev, ProductionDefault: prod}
+	}
+	secret := func(v config.Variable) config.Variable { v.Secret = true; return v }
+	testOnly := v("GOMBIT_T", "a", "a")
+	testOnly.TestDefault = "b"
+	old := []config.Variable{v("GOMBIT_A", "1", "1"), v("GOMBIT_B", "x", "x"), v("GOMBIT_C", "on", "off"), secret(v("GOMBIT_S", "", "")), v("GOMBIT_T", "a", "a"), v("GOMBIT_U", "on", "on")}
+	current := []config.Variable{v("GOMBIT_A2", "1", "1"), v("GOMBIT_C", "on", "on"), v("GOMBIT_S", "", ""), testOnly, v("GOMBIT_U", "on", "on"), v("GOMBIT_NEW", "z", "z")}
+	all := []upgrade.ConfigChange{
+		{Var: "GOMBIT_A", Change: upgrade.ConfigRenamed, To: "GOMBIT_A2"},
+		{Var: "GOMBIT_B", Change: upgrade.ConfigRemoved},
+		{Var: "GOMBIT_C", Change: upgrade.ConfigDefault, From: "off", To: "on", Environment: "production"},
+		{Var: "GOMBIT_T", Change: upgrade.ConfigDefault, From: "a", To: "b", Environment: "test"},
+	}
+	without := func(i int, extra ...upgrade.ConfigChange) []upgrade.ConfigChange {
+		out := append(append([]upgrade.ConfigChange{}, all[:i]...), all[i+1:]...)
+		return append(out, extra...)
+	}
+	with := func(extra ...upgrade.ConfigChange) []upgrade.ConfigChange {
+		return append(append([]upgrade.ConfigChange{}, all...), extra...)
+	}
+	const secretS = "GOMBIT_S is no longer secret" // #nosec G101 -- a problem message, not a credential
+	for name, tc := range map[string]struct {
+		old, current []config.Variable
+		declared     []upgrade.ConfigChange
+		want         []string
+	}{
+		"nothing declared": {old, current, nil, []string{"GOMBIT_A is read after the declarations", "GOMBIT_B is read after the declarations", secretS, `GOMBIT_C's production default changed from "off" to "on"`, `GOMBIT_T's test default changed from "a" to "b"`}},
+		"all declared":     {old, current, all, []string{secretS}},
+		"fabricated transition": {old, current, with(upgrade.ConfigChange{Var: "GOMBIT_U", Change: upgrade.ConfigDefault, From: "off", To: "on", Environment: "production"}),
+			[]string{secretS, `GOMBIT_U's production default is declared to change from "off", but it was "on"`}},
+		"wrong from": {old, current, without(2, upgrade.ConfigChange{Var: "GOMBIT_C", Change: upgrade.ConfigDefault, From: "maybe", To: "on", Environment: "production"}),
+			[]string{secretS, `GOMBIT_C's production default is declared to change from "maybe", but it was "off"`}},
+		"wrong to": {old, current, without(2, upgrade.ConfigChange{Var: "GOMBIT_C", Change: upgrade.ConfigDefault, From: "off", To: "auto", Environment: "production"}),
+			[]string{secretS, `GOMBIT_C's production default changed from "auto" to "on"`}},
+		"unscoped where one environment moved": {old, current, without(2, upgrade.ConfigChange{Var: "GOMBIT_C", Change: upgrade.ConfigDefault, From: "off", To: "on"}),
+			[]string{secretS, `GOMBIT_C's development default is declared to change from "off", but it was "on"`, `GOMBIT_C's test default is declared to change from "off", but it was "on"`}},
+		"chained across releases": {old, current, without(2,
+			upgrade.ConfigChange{Var: "GOMBIT_C", Change: upgrade.ConfigDefault, From: "off", To: "auto", Environment: "production"},
+			upgrade.ConfigChange{Var: "GOMBIT_C", Change: upgrade.ConfigDefault, From: "auto", To: "on", Environment: "production"},
+		), []string{secretS}},
+		"contradicted": {old, current, with(
+			upgrade.ConfigChange{Var: "GOMBIT_U", Change: upgrade.ConfigRemoved},
+			upgrade.ConfigChange{Var: "GOMBIT_ZZ", Change: upgrade.ConfigRenamed, To: "GOMBIT_Z"},
+			upgrade.ConfigChange{Var: "GOMBIT_NEW", Change: upgrade.ConfigDefault, From: "y", To: "z"},
+			upgrade.ConfigChange{Var: "GOMBIT_Q", Change: upgrade.ConfigRequired},
+		), []string{
+			secretS,
+			"GOMBIT_U is declared removed or renamed but the code still reads it",
+			"GOMBIT_ZZ is declared renamed, but it is not read at that point",
+			"GOMBIT_NEW's default change is declared, but it is not read at that point",
+			"GOMBIT_Q is declared required, but it is not read at that point",
+		}},
+		// A rename keeps the variable's identity: what else changes with it
+		// is still compared, and can be declared.
+		"rename with an undeclared default and declassification": {
+			[]config.Variable{secret(v("GOMBIT_OLD", "off", "off"))}, []config.Variable{v("GOMBIT_NEW", "on", "on")},
+			[]upgrade.ConfigChange{{Var: "GOMBIT_OLD", Change: upgrade.ConfigRenamed, To: "GOMBIT_NEW"}},
+			[]string{`GOMBIT_NEW's development default changed from "off" to "on"`, `GOMBIT_NEW's test default changed from "off" to "on"`, `GOMBIT_NEW's production default changed from "off" to "on"`, "GOMBIT_NEW is no longer secret"},
+		},
+		"rename then a default on the new name": {
+			[]config.Variable{v("GOMBIT_OLD", "off", "off")}, []config.Variable{v("GOMBIT_NEW", "on", "on")},
+			[]upgrade.ConfigChange{{Var: "GOMBIT_OLD", Change: upgrade.ConfigRenamed, To: "GOMBIT_NEW"}, {Var: "GOMBIT_NEW", Change: upgrade.ConfigDefault, From: "off", To: "on"}},
+			nil,
+		},
+		"a default on the old name, then the rename": {
+			[]config.Variable{v("GOMBIT_OLD", "off", "off")}, []config.Variable{v("GOMBIT_NEW", "on", "on")},
+			[]upgrade.ConfigChange{{Var: "GOMBIT_OLD", Change: upgrade.ConfigDefault, From: "off", To: "on"}, {Var: "GOMBIT_OLD", Change: upgrade.ConfigRenamed, To: "GOMBIT_NEW"}},
+			nil,
+		},
+		// Each declaration is judged at its point in the releases, the end
+		// state only after all of them.
+		"a rename chain": {
+			[]config.Variable{v("GOMBIT_A", "1", "1")}, []config.Variable{v("GOMBIT_C", "1", "1")},
+			[]upgrade.ConfigChange{{Var: "GOMBIT_A", Change: upgrade.ConfigRenamed, To: "GOMBIT_B"}, {Var: "GOMBIT_B", Change: upgrade.ConfigRenamed, To: "GOMBIT_C"}},
+			nil,
+		},
+		"a refusal on the name active then, renamed later": {
+			[]config.Variable{v("GOMBIT_A", "1", "1")}, []config.Variable{v("GOMBIT_B", "1", "1")},
+			[]upgrade.ConfigChange{{Var: "GOMBIT_A", Change: upgrade.ConfigRefused, Environment: "production"}, {Var: "GOMBIT_A", Change: upgrade.ConfigRenamed, To: "GOMBIT_B"}},
+			nil,
+		},
+		"a refusal on a name before it exists": {
+			[]config.Variable{v("GOMBIT_A", "1", "1")}, []config.Variable{v("GOMBIT_B", "1", "1")},
+			[]upgrade.ConfigChange{{Var: "GOMBIT_B", Change: upgrade.ConfigRefused}, {Var: "GOMBIT_A", Change: upgrade.ConfigRenamed, To: "GOMBIT_B"}},
+			[]string{"GOMBIT_B is declared refused, but it is not read at that point"},
+		},
+		"a rename to a name the code does not read": {
+			[]config.Variable{v("GOMBIT_A", "1", "1")}, []config.Variable{v("GOMBIT_C", "1", "1")},
+			[]upgrade.ConfigChange{{Var: "GOMBIT_A", Change: upgrade.ConfigRenamed, To: "GOMBIT_B"}},
+			[]string{"GOMBIT_B is read after the declarations"},
+		},
+		// A new variable enters the replay by an addition, at its release:
+		// then it can be required, refused, re-defaulted or renamed.
+		"a new variable required across the snapshot": {
+			[]config.Variable{v("GOMBIT_A", "1", "1")}, []config.Variable{v("GOMBIT_A", "1", "1"), v("GOMBIT_NEW", "dev-default", "")},
+			[]upgrade.ConfigChange{{Var: "GOMBIT_NEW", Change: upgrade.ConfigAdded}, {Var: "GOMBIT_NEW", Change: upgrade.ConfigRequired, Environment: "production"}},
+			nil,
+		},
+		"a new variable required without its addition": {
+			[]config.Variable{v("GOMBIT_A", "1", "1")}, []config.Variable{v("GOMBIT_A", "1", "1"), v("GOMBIT_NEW", "", "")},
+			[]upgrade.ConfigChange{{Var: "GOMBIT_NEW", Change: upgrade.ConfigRequired, Environment: "production"}},
+			[]string{"GOMBIT_NEW is declared required, but it is not read at that point"},
+		},
+		"an added variable re-defaulted, then renamed": {
+			nil, []config.Variable{v("GOMBIT_FINAL", "b", "b")},
+			[]upgrade.ConfigChange{
+				{Var: "GOMBIT_NEW", Change: upgrade.ConfigAdded},
+				{Var: "GOMBIT_NEW", Change: upgrade.ConfigDefault, From: "a", To: "b"},
+				{Var: "GOMBIT_NEW", Change: upgrade.ConfigRenamed, To: "GOMBIT_FINAL"},
+			},
+			nil,
+		},
+		"an added variable whose default moved again undeclared": {
+			nil, []config.Variable{v("GOMBIT_NEW", "c", "c")},
+			[]upgrade.ConfigChange{{Var: "GOMBIT_NEW", Change: upgrade.ConfigAdded}, {Var: "GOMBIT_NEW", Change: upgrade.ConfigDefault, From: "a", To: "b"}},
+			[]string{`GOMBIT_NEW's development default changed from "b" to "c"`, `GOMBIT_NEW's test default changed from "b" to "c"`, `GOMBIT_NEW's production default changed from "b" to "c"`},
+		},
+		"an addition of a variable already read": {
+			[]config.Variable{v("GOMBIT_A", "1", "1")}, []config.Variable{v("GOMBIT_A", "1", "1")},
+			[]upgrade.ConfigChange{{Var: "GOMBIT_A", Change: upgrade.ConfigAdded}},
+			[]string{"GOMBIT_A is declared added, but it is already read at that point"},
+		},
+		"an addition the code does not read": {
+			nil, nil,
+			[]upgrade.ConfigChange{{Var: "GOMBIT_GHOST", Change: upgrade.ConfigAdded}},
+			[]string{"GOMBIT_GHOST is read after the declarations"},
+		},
+		"a rename onto a variable already read": {
+			[]config.Variable{v("GOMBIT_OLD", "1", "1"), v("GOMBIT_NEW", "1", "1")}, []config.Variable{v("GOMBIT_NEW", "1", "1")},
+			[]upgrade.ConfigChange{{Var: "GOMBIT_OLD", Change: upgrade.ConfigRenamed, To: "GOMBIT_NEW"}},
+			[]string{"GOMBIT_OLD is declared renamed GOMBIT_NEW, which is already read at that point"},
+		},
+	} {
+		got := configProblems(tc.old, tc.current, tc.declared)
+		unmatched := append([]string{}, got...)
+		for _, w := range tc.want {
+			i := slices.IndexFunc(unmatched, func(p string) bool { return strings.Contains(p, w) })
+			if i < 0 {
+				t.Errorf("%s: no problem mentions %q; problems: %q", name, w, got)
+				continue
+			}
+			unmatched = slices.Delete(unmatched, i, i+1)
+		}
+		if len(unmatched) > 0 {
+			t.Errorf("%s: unexpected problems %q", name, unmatched)
+		}
+	}
+}
+
+// TestBreakingConfigChangesNameTheirVariables: a breaking change in the
+// config area, or a breaking security change that names a GOMBIT_
+// variable (trusted-proxies-trust-all: a refusal closing a hole), lists
+// the variables it concerns (config:), so gombit upgrade config reports
+// it. The drift guard above sees renames, removals and default changes in
+// the code; a newly refused value (a validation rule) it cannot, and an
+// entry without its variables would pass the analysis silently.
+var gombitVar = regexp.MustCompile(`\bGOMBIT_[A-Z0-9_]+`)
+
+func TestBreakingConfigChangesNameTheirVariables(t *testing.T) {
+	m, err := upgrade.LoadManifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range m.Releases {
+		for _, c := range r.Changes {
+			concerns := c.Area == "config" || (c.Area == "security" && gombitVar.MatchString(c.Summary+c.Details))
+			if concerns && c.Breaking && len(c.Config) == 0 {
+				t.Errorf("release %s: change %s is a breaking %s change with no config: list; declare the variables it renames, removes, re-defaults, requires or refuses", r.Version, c.ID, c.Area)
+			}
+		}
+	}
+}

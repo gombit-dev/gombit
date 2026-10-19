@@ -92,6 +92,11 @@ type Box[T any] struct{ v T }
 // Deprecated: use Value.
 func (b Box[T]) Peek() T { return b.v }
 
+// Dated opens a store.
+//
+// Deprecated: since v0.8.0, use Open.
+func Dated() *Store { return nil }
+
 // Wrapped declares its struct and interface in parentheses.
 type Wrapped (struct {
 	// Tag tags.

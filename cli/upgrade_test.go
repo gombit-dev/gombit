@@ -11,7 +11,9 @@ import (
 	"testing"
 
 	"github.com/gombit-dev/gombit/internal/atomicfile"
+	"github.com/gombit-dev/gombit/migrations"
 	"github.com/gombit-dev/gombit/upgrade"
+	"github.com/gombit-dev/gombit/upgrade/contractcheck"
 )
 
 func upgradeApp(t *testing.T, gombitYAML string) string {
@@ -437,5 +439,167 @@ func TestUpgradeFix(t *testing.T) {
 		if _, _, err := run(tc.args...); err == nil || !strings.Contains(err.Error(), tc.msg) {
 			t.Errorf("fix %v = %v; want %q", tc.args, err, tc.msg)
 		}
+	}
+}
+
+// TestUpgradeConfig: gombit upgrade config reports the configuration
+// changes between the app's framework version and the target, from the
+// built-in manifest, exits 1 while one needs review (the production
+// refusal of trust-all GOMBIT_HTTP_TRUSTED_PROXIES is a security change),
+// and never prints a value from the app's environment files.
+func TestUpgradeConfig(t *testing.T) {
+	t.Setenv("GOWORK", "off")
+	dir := t.TempDir()
+	for name, content := range map[string]string{
+		"go.mod":       "module example.com/demo\n\ngo 1.26\n\nrequire github.com/gombit-dev/gombit v0.6.1\n",
+		".env.example": "GOMBIT_HTTP_TRUSTED_PROXIES=10.0.0.1\n",
+		".env":         "GOMBIT_JWT_SECRET=do-not-print-this-value\nGOMBIT_HTTP_TRUSTED_PROXIES=0.0.0.0/0\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out, err := runUpgradeCLI(t, "config", "--dir", dir, "--to", "v0.7.1")
+	if err == nil || !strings.Contains(err.Error(), "need action or review") {
+		t.Fatalf("upgrade config = %v", err)
+	}
+	for _, want := range []string{
+		"Upgrade v0.6.1 -> v0.7.1\n",
+		"[security review] `GOMBIT_HTTP_TRUSTED_PROXIES`: some values are now refused in production (v0.7.0, trusted-proxies-trust-all)",
+		"against trusted-proxies-trust-all (in .env, .env.example and the deployment's environment)",
+		".env (names only), .env.example (template)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+	for _, secret := range []string{"do-not-print-this-value", "0.0.0.0/0", "10.0.0.1"} {
+		if strings.Contains(out, secret) {
+			t.Fatalf("printed a value from an environment file (%s):\n%s", secret, out)
+		}
+	}
+	out, _ = runUpgradeCLI(t, "config", "--dir", dir, "--to", "v0.7.1", "--json")
+	var res upgradeConfigResult
+	if err := json.Unmarshal([]byte(out), &res); err != nil || res.From != "v0.6.1" || len(res.Findings) != 1 || res.Findings[0].Category != upgrade.ConfigCategorySecurityReview || strings.Contains(out, "do-not-print") {
+		t.Fatalf("--json: %s (%v)", out, err)
+	}
+	// --write: nothing to rename on this path; still a review.
+	before := map[string]string{}
+	for _, name := range []string{".env", ".env.example"} {
+		data, _ := os.ReadFile(filepath.Join(dir, name)) // #nosec G304 -- under t.TempDir()
+		before[name] = string(data)
+	}
+	if out, err := runUpgradeCLI(t, "config", "--dir", dir, "--to", "v0.7.1", "--write"); err == nil || !strings.Contains(out, "No template needed upgrading.") {
+		t.Fatalf("--write: %q, %v", out, err)
+	}
+	for name, content := range before {
+		if data, _ := os.ReadFile(filepath.Join(dir, name)); string(data) != content { // #nosec G304 -- under t.TempDir()
+			t.Fatalf("%s changed", name)
+		}
+	}
+	// From past the change: nothing to do, exit 0.
+	if out, err := runUpgradeCLI(t, "config", "--dir", dir, "--from", "v0.7.0", "--to", "v0.7.1"); err != nil || !strings.Contains(out, "Configuration changes: 0\n") {
+		t.Fatalf("--from v0.7.0: %q, %v", out, err)
+	}
+	if _, err := runUpgradeCLI(t, "config", "--dir", dir, "--from", "v0.0.1"); err == nil {
+		t.Fatal("an unlisted --from was accepted")
+	}
+}
+
+// TestUpgradeConfigSecurityAddition: a variable a security change adds is
+// a security review: gombit upgrade config lists it and exits 1, without
+// printing the value the app sets.
+func TestUpgradeConfigSecurityAddition(t *testing.T) {
+	m, err := upgrade.ParseManifest([]byte("format: 1\nreleases:\n  - version: v0.1.0\n  - version: v0.2.0\n    changes:\n      - id: new-auth-setting\n        kind: manual\n        area: security\n        summary: A new auth setting.\n        details: Review it.\n        config:\n          - {var: GOMBIT_AUTH_MODE, change: added}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := upgradeConfigManifest
+	defer func() { upgradeConfigManifest = old }()
+	upgradeConfigManifest = func() (*upgrade.Manifest, error) { return m, nil }
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("GOMBIT_AUTH_MODE=cookie-secret-value\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runUpgradeCLI(t, "config", "--dir", dir, "--from", "v0.1.0", "--to", "v0.2.0")
+	if err == nil || !strings.Contains(err.Error(), "need action or review") {
+		t.Fatalf("upgrade config = %v; want exit 1", err)
+	}
+	if !strings.Contains(out, "[security review] `GOMBIT_AUTH_MODE` is new (v0.2.0, new-auth-setting)") || strings.Contains(out, "cookie-secret-value") {
+		t.Fatalf("output:\n%s", out)
+	}
+}
+
+// TestUpgradeContract: gombit upgrade contract on a directory with no
+// generated contract artifacts reports each absent (JSON or text) and
+// exits 0. One it cannot check exits 0, unless --strict.
+func TestUpgradeContract(t *testing.T) {
+	dir := t.TempDir()
+	out, err := runUpgradeCLI(t, "contract", "--dir", dir, "--json")
+	var report contractcheck.Report
+	if err != nil || json.Unmarshal([]byte(out), &report) != nil || len(report.Checks) != 3 {
+		t.Fatalf("--json: %q, %v", out, err)
+	}
+	for _, c := range report.Checks {
+		if c.Status != contractcheck.Absent {
+			t.Errorf("%s = %s, want absent", c.Artifact, c.Status)
+		}
+	}
+	if out, err := runUpgradeCLI(t, "contract", "--dir", dir); err != nil || !strings.Contains(out, "Generated contract artifacts:\n  resources: absent\n  openapi:  absent\n  client:   absent\n") {
+		t.Fatalf("text: %q, %v", out, err)
+	}
+	if _, err := runUpgradeCLI(t, "contract", "--dir", dir, "--url", "http://127.0.0.1:1/openapi.json"); err == nil {
+		t.Fatal("an unreachable --url was accepted")
+	}
+	// A client with no document to generate it from: unchecked.
+	generated := filepath.Join(dir, "frontend", "src", "api", "generated")
+	if err := os.MkdirAll(generated, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(generated, "schema.ts"), []byte("// Code generated by gombit client generate. DO NOT EDIT.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := runUpgradeCLI(t, "contract", "--dir", dir); err != nil || !strings.Contains(out, "client:   unchecked") {
+		t.Fatalf("unchecked: %q, %v; want reported, exit 0", out, err)
+	}
+	if out, err := runUpgradeCLI(t, "contract", "--dir", dir, "--strict"); err == nil || !strings.Contains(err.Error(), "could not be checked") {
+		t.Fatalf("unchecked --strict: %q, %v; want a failure", out, err)
+	}
+}
+
+// TestUpgradeDryRunMigrationDir: the plan's framework-schema section reads
+// the app's model registry in --migrations (as gombit db --dir), here one
+// that lists the storage claims object-storage (v0.7.0) adds.
+func TestUpgradeDryRunMigrationDir(t *testing.T) {
+	t.Setenv("GOWORK", "off")
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/demo\n\ngo 1.26\n\nrequire github.com/gombit-dev/gombit v0.6.1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "db", "migrations"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrations.SaveRegistry(filepath.Join(dir, "db", "migrations"), []migrations.Model{{ImportPath: "github.com/gombit-dev/gombit/storage/claims", TypeName: "Claim"}}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runUpgradeCLI(t, "--dry-run", "--dir", dir, "--to", "v0.7.0", "--migrations", "db/migrations")
+	if err != nil || !strings.Contains(out, "The registry lists storage/claims.Claim") {
+		t.Fatalf("--migrations db/migrations: %v\n%s", err, out)
+	}
+	out, err = runUpgradeCLI(t, "--dry-run", "--dir", dir, "--to", "v0.7.0")
+	if err != nil || !strings.Contains(out, "Nothing to migrate unless the application adopts it") {
+		t.Fatalf("default migration directory: %v\n%s", err, out)
+	}
+	// --to reads the registry in --migrations as part of the plan, before
+	// go.mod changes: an unreadable one stops it with go.mod untouched.
+	if err := os.WriteFile(filepath.Join(dir, "db", "migrations", "models.json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(filepath.Join(dir, "go.mod")) // #nosec G304 -- under t.TempDir()
+	if _, err := runUpgradeCLI(t, "--dir", dir, "--to", "v0.7.0", "--migrations", "db/migrations"); err == nil || !strings.Contains(err.Error(), "model registry") {
+		t.Fatalf("--to with an unreadable registry: %v", err)
+	}
+	if after, _ := os.ReadFile(filepath.Join(dir, "go.mod")); string(after) != string(before) { // #nosec G304 -- under t.TempDir()
+		t.Fatal("go.mod changed")
 	}
 }

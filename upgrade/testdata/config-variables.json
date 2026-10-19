@@ -1,0 +1,348 @@
+{
+  "version": "v0.8.0",
+  "variables": [
+    {
+      "name": "GOMBIT_API_PREFIX",
+      "secret": false,
+      "default": "/api/v1",
+      "test_default": "/api/v1",
+      "production_default": "/api/v1"
+    },
+    {
+      "name": "GOMBIT_APP_NAME",
+      "secret": false,
+      "default": "Gombit",
+      "test_default": "Gombit",
+      "production_default": "Gombit"
+    },
+    {
+      "name": "GOMBIT_AUTH_MODE",
+      "secret": false,
+      "default": "jwt",
+      "test_default": "jwt",
+      "production_default": "jwt"
+    },
+    {
+      "name": "GOMBIT_CACHE_DRIVER",
+      "secret": false,
+      "default": "memory",
+      "test_default": "memory",
+      "production_default": "memory"
+    },
+    {
+      "name": "GOMBIT_CACHE_NAMESPACE",
+      "secret": false,
+      "default": "gombit:development",
+      "test_default": "gombit:test",
+      "production_default": "gombit:production"
+    },
+    {
+      "name": "GOMBIT_COOKIE_SAMESITE",
+      "secret": false,
+      "default": "lax",
+      "test_default": "lax",
+      "production_default": "lax"
+    },
+    {
+      "name": "GOMBIT_COOKIE_SECURE",
+      "secret": false,
+      "default": "true",
+      "test_default": "true",
+      "production_default": "true"
+    },
+    {
+      "name": "GOMBIT_DATABASE_CONN_MAX_LIFETIME",
+      "secret": false,
+      "default": "0",
+      "test_default": "0",
+      "production_default": "0"
+    },
+    {
+      "name": "GOMBIT_DATABASE_DRIVER",
+      "secret": false,
+      "default": "sqlite",
+      "test_default": "sqlite",
+      "production_default": "sqlite"
+    },
+    {
+      "name": "GOMBIT_DATABASE_DSN",
+      "secret": true,
+      "default": "file:gombit.db?cache=shared&_fk=1",
+      "test_default": "file:gombit.db?cache=shared&_fk=1",
+      "production_default": "file:gombit.db?cache=shared&_fk=1"
+    },
+    {
+      "name": "GOMBIT_DATABASE_MAX_IDLE_CONNS",
+      "secret": false,
+      "default": "0",
+      "test_default": "0",
+      "production_default": "0"
+    },
+    {
+      "name": "GOMBIT_DATABASE_MAX_OPEN_CONNS",
+      "secret": false,
+      "default": "0",
+      "test_default": "0",
+      "production_default": "0"
+    },
+    {
+      "name": "GOMBIT_DATABASE_REQUIRED",
+      "secret": false,
+      "default": "true",
+      "test_default": "true",
+      "production_default": "true"
+    },
+    {
+      "name": "GOMBIT_DOCS_ENABLED",
+      "secret": false,
+      "default": "true",
+      "test_default": "true",
+      "production_default": "false"
+    },
+    {
+      "name": "GOMBIT_ENV",
+      "secret": false,
+      "default": "development",
+      "test_default": "test",
+      "production_default": "production"
+    },
+    {
+      "name": "GOMBIT_HTTP_ADDR",
+      "secret": false,
+      "default": ":8080",
+      "test_default": ":8080",
+      "production_default": ":8080"
+    },
+    {
+      "name": "GOMBIT_HTTP_REQUEST_TIMEOUT",
+      "secret": false,
+      "default": "0",
+      "test_default": "0",
+      "production_default": "0"
+    },
+    {
+      "name": "GOMBIT_HTTP_TRUSTED_PROXIES",
+      "secret": false,
+      "default": "",
+      "test_default": "",
+      "production_default": ""
+    },
+    {
+      "name": "GOMBIT_JOBS_DRIVER",
+      "secret": false,
+      "default": "sync",
+      "test_default": "sync",
+      "production_default": "sync"
+    },
+    {
+      "name": "GOMBIT_JOBS_NAMESPACE",
+      "secret": false,
+      "default": "gombit:development",
+      "test_default": "gombit:test",
+      "production_default": "gombit:production"
+    },
+    {
+      "name": "GOMBIT_JOBS_QUEUE",
+      "secret": false,
+      "default": "default",
+      "test_default": "default",
+      "production_default": "default"
+    },
+    {
+      "name": "GOMBIT_JWT_ACCESS_TTL",
+      "secret": false,
+      "default": "15m0s",
+      "test_default": "15m0s",
+      "production_default": "15m0s"
+    },
+    {
+      "name": "GOMBIT_JWT_REFRESH_TTL",
+      "secret": false,
+      "default": "168h0m0s",
+      "test_default": "168h0m0s",
+      "production_default": "168h0m0s"
+    },
+    {
+      "name": "GOMBIT_JWT_SECRET",
+      "secret": true,
+      "default": "",
+      "test_default": "",
+      "production_default": ""
+    },
+    {
+      "name": "GOMBIT_LOG_LEVEL",
+      "secret": false,
+      "default": "info",
+      "test_default": "info",
+      "production_default": "info"
+    },
+    {
+      "name": "GOMBIT_LOG_SINK",
+      "secret": false,
+      "default": "stderr",
+      "test_default": "stderr",
+      "production_default": "stderr"
+    },
+    {
+      "name": "GOMBIT_REDIS_ADDR",
+      "secret": false,
+      "default": "127.0.0.1:6379",
+      "test_default": "127.0.0.1:6379",
+      "production_default": "127.0.0.1:6379"
+    },
+    {
+      "name": "GOMBIT_REDIS_DB",
+      "secret": false,
+      "default": "0",
+      "test_default": "0",
+      "production_default": "0"
+    },
+    {
+      "name": "GOMBIT_REDIS_DIAL_TIMEOUT",
+      "secret": false,
+      "default": "5s",
+      "test_default": "5s",
+      "production_default": "5s"
+    },
+    {
+      "name": "GOMBIT_REDIS_PASSWORD",
+      "secret": true,
+      "default": "",
+      "test_default": "",
+      "production_default": ""
+    },
+    {
+      "name": "GOMBIT_REDIS_READ_TIMEOUT",
+      "secret": false,
+      "default": "3s",
+      "test_default": "3s",
+      "production_default": "3s"
+    },
+    {
+      "name": "GOMBIT_REDIS_TLS",
+      "secret": false,
+      "default": "false",
+      "test_default": "false",
+      "production_default": "false"
+    },
+    {
+      "name": "GOMBIT_REDIS_TLS_INSECURE",
+      "secret": false,
+      "default": "false",
+      "test_default": "false",
+      "production_default": "false"
+    },
+    {
+      "name": "GOMBIT_REDIS_USERNAME",
+      "secret": false,
+      "default": "",
+      "test_default": "",
+      "production_default": ""
+    },
+    {
+      "name": "GOMBIT_REDIS_WRITE_TIMEOUT",
+      "secret": false,
+      "default": "3s",
+      "test_default": "3s",
+      "production_default": "3s"
+    },
+    {
+      "name": "GOMBIT_SECURITY_SANITIZE_INPUT",
+      "secret": false,
+      "default": "false",
+      "test_default": "false",
+      "production_default": "false"
+    },
+    {
+      "name": "GOMBIT_STORAGE_DRIVER",
+      "secret": false,
+      "default": "local",
+      "test_default": "local",
+      "production_default": "local"
+    },
+    {
+      "name": "GOMBIT_STORAGE_LOCAL_ROOT",
+      "secret": false,
+      "default": "storage",
+      "test_default": "storage",
+      "production_default": "storage"
+    },
+    {
+      "name": "GOMBIT_STORAGE_LOCAL_URL",
+      "secret": false,
+      "default": "/_storage",
+      "test_default": "/_storage",
+      "production_default": "/_storage"
+    },
+    {
+      "name": "GOMBIT_STORAGE_PUBLIC_PREFIX",
+      "secret": false,
+      "default": "public/",
+      "test_default": "public/",
+      "production_default": "public/"
+    },
+    {
+      "name": "GOMBIT_STORAGE_S3_ACCESS_KEY_ID",
+      "secret": true,
+      "default": "",
+      "test_default": "",
+      "production_default": ""
+    },
+    {
+      "name": "GOMBIT_STORAGE_S3_BUCKET",
+      "secret": false,
+      "default": "",
+      "test_default": "",
+      "production_default": ""
+    },
+    {
+      "name": "GOMBIT_STORAGE_S3_ENDPOINT",
+      "secret": false,
+      "default": "",
+      "test_default": "",
+      "production_default": ""
+    },
+    {
+      "name": "GOMBIT_STORAGE_S3_FORCE_PATH_STYLE",
+      "secret": false,
+      "default": "false",
+      "test_default": "false",
+      "production_default": "false"
+    },
+    {
+      "name": "GOMBIT_STORAGE_S3_PREFIX",
+      "secret": false,
+      "default": "",
+      "test_default": "",
+      "production_default": ""
+    },
+    {
+      "name": "GOMBIT_STORAGE_S3_PUBLIC_URL",
+      "secret": false,
+      "default": "",
+      "test_default": "",
+      "production_default": ""
+    },
+    {
+      "name": "GOMBIT_STORAGE_S3_REGION",
+      "secret": false,
+      "default": "us-east-1",
+      "test_default": "us-east-1",
+      "production_default": "us-east-1"
+    },
+    {
+      "name": "GOMBIT_STORAGE_S3_SECRET_ACCESS_KEY",
+      "secret": true,
+      "default": "",
+      "test_default": "",
+      "production_default": ""
+    },
+    {
+      "name": "GOMBIT_STORAGE_URL_SECRET",
+      "secret": true,
+      "default": "",
+      "test_default": "",
+      "production_default": ""
+    }
+  ]
+}

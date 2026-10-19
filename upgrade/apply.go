@@ -28,6 +28,10 @@ type Applied struct {
 	// FollowUp are steps the dependency change leaves to the developer
 	// before the app builds again, such as refreshing a vendor directory.
 	FollowUp []string `json:"follow_up"`
+	// MigrationRequired is whether the upgrade is not complete until the
+	// application migrates its database for the framework-schema changes
+	// (Plan.Schema.Steps). ApplyDependencies never runs a migration.
+	MigrationRequired bool `json:"migration_required"`
 }
 
 // GoCommand is one go command run for an upgrade.
@@ -88,14 +92,21 @@ var runGo = func(ctx context.Context, dir string, args ...string) ([]byte, error
 // either way go.mod and go.sum are restored to the bytes they had. The
 // plan's automatic and manual changes are left to do.
 func ApplyDependencies(ctx context.Context, workDir string, m *Manifest, to string) (Applied, error) {
+	return ApplyDependenciesWith(ctx, workDir, m, to, PlanOptions{})
+}
+
+// ApplyDependenciesWith is ApplyDependencies with the plan's options: the
+// plan, the framework-schema analysis included, is made before anything
+// is changed.
+func ApplyDependenciesWith(ctx context.Context, workDir string, m *Manifest, to string, opts PlanOptions) (Applied, error) {
 	if to == "" {
 		return Applied{}, ErrNoTarget
 	}
-	plan, err := PlanUpgrade(workDir, m, to)
+	plan, err := PlanUpgradeWith(workDir, m, to, opts)
 	if err != nil {
 		return Applied{}, err
 	}
-	applied := Applied{Plan: plan, Commands: []GoCommand{}, FollowUp: []string{}}
+	applied := Applied{Plan: plan, Commands: []GoCommand{}, FollowUp: []string{}, MigrationRequired: plan.Schema.MigrationRequired()}
 	if plan.Current == plan.Target {
 		return applied, nil
 	}
@@ -279,6 +290,9 @@ func (a Applied) Render(w io.Writer) error {
 	fmt.Fprintf(&b, "go.sum: %d line(s) added, %d removed\n", len(a.GoSum.Added), len(a.GoSum.Removed))
 	for _, f := range a.FollowUp {
 		fmt.Fprintf(&b, "\nNext: %s.\n", f)
+	}
+	if p.Schema.MigrationRequired() {
+		b.WriteString("\nNot complete yet: the framework schema changed, so the database needs a migration the application generates, reviews and applies (the steps are below). No migration was run.\n")
 	}
 	b.WriteString("\nReview them with `git diff go.mod go.sum`. Still to do (not applied):\n")
 	p.renderToDo(&b)

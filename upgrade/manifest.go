@@ -139,6 +139,25 @@ type Change struct {
 	Action string `yaml:"action,omitempty" json:"action,omitempty"`
 	// Refs are the GitHub issues or pull requests of the change.
 	Refs []int `yaml:"refs,omitempty" json:"refs,omitempty"`
+	// Config are the configuration variables the change renames, removes,
+	// re-defaults, requires or newly refuses values of, and those it adds
+	// that another entry needs or that a security change introduces: what
+	// the upgrade tooling checks the application's environment files
+	// against (AnalyzeConfig). A change in the security area makes each of
+	// them, an addition included, a security review.
+	Config []ConfigChange `yaml:"config,omitempty" json:"config,omitempty"`
+	// Schema are the framework-owned tables the change adds, alters or
+	// removes (area schema): the migrations an application generates,
+	// reviews and applies for it (AnalyzeSchema). In a manual change they
+	// are required; in an informational one, they are for an application
+	// that adopts the feature.
+	Schema []SchemaChange `yaml:"schema,omitempty" json:"schema,omitempty"`
+	// Deprecates are the framework APIs the change deprecates, each named
+	// as gombit upgrade check names it (database.KeepStoredZeros). A
+	// "Deprecated: since vX.Y.Z" paragraph must name a release with a
+	// change declaring its API here, so its window (RemovableFrom) starts
+	// where the deprecation was announced.
+	Deprecates []string `yaml:"deprecates,omitempty" json:"deprecates,omitempty"`
 }
 
 // Release is the changes of moving to one release from the one before it.
@@ -183,6 +202,9 @@ func (m *Manifest) clone() *Manifest {
 		r.Changes = slices.Clone(r.Changes)
 		for j := range r.Changes {
 			r.Changes[j].Refs = slices.Clone(r.Changes[j].Refs)
+			r.Changes[j].Config = slices.Clone(r.Changes[j].Config)
+			r.Changes[j].Schema = slices.Clone(r.Changes[j].Schema)
+			r.Changes[j].Deprecates = slices.Clone(r.Changes[j].Deprecates)
 		}
 		c.Releases[i] = r
 	}
@@ -262,6 +284,30 @@ func (c Change) validate() error {
 			return fmt.Errorf("change %s: ref %d is not an issue or pull request number", c.ID, ref)
 		}
 	}
+	if len(c.Config) > 0 && c.Area != "config" && c.Area != "security" {
+		return fmt.Errorf("change %s: lists configuration variables, so its area is config or security, not %s", c.ID, c.Area)
+	}
+	if c.Kind != KindManual && len(c.Config) > 0 && (c.Area == "security" || slices.ContainsFunc(c.Config, func(cc ConfigChange) bool { return cc.Change != ConfigAdded })) {
+		// The config analysis can ask the developer to act on any of them
+		// but an ordinary addition (a default only some environments
+		// override; any entry of a security change, an addition included,
+		// is a security review), so the notes and the plan must not call
+		// the change nothing to do, or something the tooling applies.
+		return fmt.Errorf("change %s: lists configuration variables the developer must check (beyond additions, or in the security area), so it is manual (gombit upgrade config), not %s", c.ID, c.Kind)
+	}
+	for _, cc := range c.Config {
+		if err := cc.validate(); err != nil {
+			return fmt.Errorf("change %s: %w", c.ID, err)
+		}
+	}
+	if err := c.validateSchema(); err != nil {
+		return err
+	}
+	for _, symbol := range c.Deprecates {
+		if symbol == "" || strings.ContainsAny(symbol, " \t\n`") || !strings.Contains(symbol, ".") {
+			return fmt.Errorf("change %s: deprecates %q, want an API as gombit upgrade check names it (pkg.Name)", c.ID, symbol)
+		}
+	}
 	switch c.Kind {
 	case KindAutomatic:
 		if _, ok := LookupAction(c.Action); !ok {
@@ -293,12 +339,25 @@ func (m *Manifest) Release(version string) (Release, error) {
 
 // CheckRelease reports whether the manifest is ready to ship as the stable
 // release tag: the tag is listed, it is the newest release (Latest), and no
-// change is left under Unreleased (absent, or empty). A manifest that lists
+// change is left under Unreleased (absent, or empty), and the release is
+// the version change its changes need (CheckPolicy). A manifest that lists
 // the tag but keeps the tag's changes under Unreleased, or lists releases
 // past it, would ship notes and an upgrade plan saying the release changes
 // nothing; the release workflow refuses it.
 func (m *Manifest) CheckRelease(tag string) error {
 	if _, err := m.Release(tag); err != nil {
+		// The usual miss: the unreleased entry is not named yet. Say which
+		// release the compatibility policy needs it to be.
+		if r, uerr := m.Release(Unreleased); uerr == nil && len(r.Changes) > 0 {
+			// What the release ships: unreleased, and every pre-release
+			// listed since the latest stable release.
+			latest := m.latestStable()
+			need, breaking := RequiredBump(latest, m.shippedSince(latest, len(m.Releases)))
+			if len(breaking) > 0 {
+				return fmt.Errorf("%w; rename its %s entry to the release (it ships breaking changes, %s, so the compatibility policy needs a %s release after %s: %s)", err, Unreleased, m.locate(breaking, Unreleased), need, latest, nextRelease(latest, need))
+			}
+			return fmt.Errorf("%w; rename its %s entry to the release", err, Unreleased)
+		}
 		return err
 	}
 	if latest := m.Latest(); latest != tag {
@@ -307,7 +366,10 @@ func (m *Manifest) CheckRelease(tag string) error {
 	if r, err := m.Release(Unreleased); err == nil && len(r.Changes) > 0 {
 		return fmt.Errorf("upgrade: manifest: %d change(s) are still under %s; move them to %s", len(r.Changes), Unreleased, tag)
 	}
-	return nil
+	if err := m.CheckPolicy(tag); err != nil {
+		return err
+	}
+	return m.checkFirstMajor(tag)
 }
 
 // Latest is the newest release the manifest describes (never Unreleased).

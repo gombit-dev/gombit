@@ -12,6 +12,7 @@ New here? [Install](installation.md), then work through the
 | [cli.md](cli.md) | Every command and flag: `new`, `dev`, `worker`, `jobs`, `build`, `make`, `generate`, `db`, `openapi`, `client`, `contract`, `routes`, `doctor`, `config`, `createsuperuser`, `version`, `upgrade` |
 | [upgrade.md](upgrade.md) | Upgrading an application between framework versions: planning an upgrade (`gombit upgrade --dry-run`), the upgrade baseline (`gombit upgrade baseline`) and the compatibility manifest (`gombit upgrade notes`) |
 | [upgrade-notes.md](upgrade-notes.md) | What each release asks of an application moving to it, rendered from the compatibility manifest |
+| [compatibility.md](compatibility.md) | The compatibility and deprecation policy: what each kind of release may change, the security exception, the deprecation window, and how long upgrade rules and codemods are supported |
 | [migration-model-first-resources.md](migration-model-first-resources.md) | Migrating resources from the old human-owned `handler.go` to the model-first, generator-owned layout (ADR-016) |
 
 ## Runtime
@@ -59,7 +60,7 @@ New here? [Install](installation.md), then work through the
 
 | Doc | What it covers |
 | --- | --- |
-| [auth.md](auth.md) | Bearer JWT login and refresh rotation (the API default) |
+| [auth.md](auth.md) | Bearer JWT login, refresh rotation, and session management (the API default) |
 | [auth-cookie.md](auth-cookie.md) | Cookie/session auth, CSRF double-submit, threat model |
 | [admin.md](admin.md) | The admin registry, introspection API, SPA, permissions, and file and image fields |
 

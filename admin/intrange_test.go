@@ -155,3 +155,52 @@ func runIntRangeAdmin(t *testing.T, db *database.DB) {
 		t.Fatalf("rows = %d (%v), want only the in-range one", count, err)
 	}
 }
+
+type intRangeOwned struct {
+	ID      uint   `gorm:"primaryKey" json:"id"`
+	Name    string `json:"name"`
+	OwnerID int64  `json:"owner_id"`
+}
+
+// A belongs_to over an integer key beyond 2^53 (a snowflake id) is sent back
+// by the admin form rounded, like an integer field: the rounded number equal
+// to the stored value keeps it, a different one is refused (#568 review).
+func TestAdminRelationIntegerKeyKeepsItsRoundedStoredValue(t *testing.T) {
+	db := openSQLite(t)
+	gin.SetMode(gin.TestMode)
+	models := []any{&intRangeOwned{}, &relWarehouse{}}
+	_ = db.Migrator().DropTable(models...)
+	if err := db.AutoMigrate(models...); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Migrator().DropTable(models...) })
+	app := newCookieAppWithDB(t, db)
+	if err := admin.Register(app, relWarehouse{}, admin.Options{Slug: "warehouses", Fields: []admin.Field{
+		{Name: "id", Type: admin.TypeInteger, ReadOnly: true},
+		{Name: "name", Type: admin.TypeString},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := admin.Register(app, intRangeOwned{}, admin.Options{Slug: "owned", Fields: []admin.Field{
+		{Name: "id", Type: admin.TypeInteger, ReadOnly: true},
+		{Name: "name", Type: admin.TypeString},
+		{Name: "owner_id", Type: admin.TypeRelation, Related: &admin.Relation{Kind: admin.RelBelongsTo, Slug: "warehouses", LabelField: "name"}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	jar := loginSuperuser(t, app)
+	row := intRangeOwned{Name: "x", OwnerID: 9007199254740993}
+	if err := db.Create(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	path := fmt.Sprintf("/api/v1/admin/resources/owned/%d", row.ID)
+	if res := doRequest(app, jar, http.MethodPatch, path, `{"name":"y","owner_id":9007199254740992}`); res.Code != http.StatusOK {
+		t.Fatalf("form resending the stored key: %d %s", res.Code, res.Body.String())
+	}
+	var kept intRangeOwned
+	if err := db.First(&kept, row.ID).Error; err != nil || kept.OwnerID != 9007199254740993 || kept.Name != "y" {
+		t.Fatalf("stored %+v (%v), want the key kept and the name written", kept, err)
+	}
+	res := doRequest(app, jar, http.MethodPatch, path, `{"owner_id":9007199254740996}`)
+	assertError(t, res, http.StatusUnprocessableEntity, contract.CodeValidationError)
+}

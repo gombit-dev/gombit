@@ -1,5 +1,9 @@
 package upgrade
 
+// FrameworkTableForTest is a framework model's own table, as the catalog
+// says ("" for a model this gombit does not have).
+func FrameworkTableForTest(model string) string { return frameworkTables[model] }
+
 // SetLoadedHookForTest runs f after RunCodemods' first load, and returns
 // the restore.
 func SetLoadedHookForTest(f func()) (restore func()) {

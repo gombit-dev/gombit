@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -151,5 +152,70 @@ func TestScanFailsClosedOnAnUnindexedPackage(t *testing.T) {
 	}
 	if len(s.uses) != 0 {
 		t.Fatalf("uses = %+v", s.uses)
+	}
+}
+
+// TestFrameworkDeprecationsNameTheirRelease: every Deprecated: paragraph in
+// the framework names the release that deprecated the API ("Deprecated:
+// since vX.Y.Z, ..."), so the compatibility policy's window (RemovableFrom)
+// starts somewhere: a release the manifest lists, or the upcoming one. That
+// release declares the deprecation (a change whose deprecates names the
+// API, in its entry, a pre-release of it, or the unreleased entry for the
+// upcoming release), so the window cannot be backdated.
+func TestFrameworkDeprecationsNameTheirRelease(t *testing.T) {
+	m, err := LoadManifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	skip := map[string]bool{"examples": true, "benchmarks": true, "node_modules": true, "testdata": true, ".git": true}
+	fset := token.NewFileSet()
+	found := 0
+	err = filepath.WalkDir("..", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if skip[d.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		f, err := parser.ParseFile(fset, path, nil, parser.ParseComments|parser.SkipObjectResolution)
+		if err != nil {
+			return err
+		}
+		upcoming := UpcomingReleases(m.latestStable())
+		for _, dep := range deprecationsOf(f) {
+			found++
+			symbol, _, _ := strings.Cut(dep, ": ")
+			since := DeprecationSince(dep)
+			if since == "" {
+				t.Errorf("%s: a Deprecated: paragraph names no release (\"Deprecated: since vX.Y.Z, use ...\"): %q", path, dep)
+				continue
+			}
+			_, err := m.Release(since)
+			if err != nil && !slices.Contains(upcoming, since) {
+				t.Errorf("%s: deprecated since %s, which is neither a release the manifest lists nor the next one (%v)", path, since, upcoming)
+				continue
+			}
+			// The release, its pre-releases, and (not cut yet) unreleased.
+			declared := slices.ContainsFunc(m.Releases, func(r Release) bool {
+				ships := r.Version == since || strings.HasPrefix(r.Version, since+"-") || (err != nil && r.Version == Unreleased)
+				return ships && slices.ContainsFunc(r.Changes, func(c Change) bool { return slices.Contains(c.Deprecates, symbol) })
+			})
+			if !declared {
+				t.Errorf("%s: %s is deprecated since %s, but no change of that release declares it (deprecates: [%s] in upgrade/manifest.yaml)", path, symbol, since, symbol)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if found == 0 {
+		t.Fatal("found no Deprecated: paragraph at all; the walk is broken")
 	}
 }

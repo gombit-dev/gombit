@@ -42,7 +42,9 @@ go run ./cmd/gombit --help
 | `gombit upgrade --dry-run` | Plan an upgrade to a framework release, changing nothing | UPGRADE-3 |
 | `gombit upgrade --to` | Apply an upgrade's dependency changes (go.mod, go.sum) with the go command | UPGRADE-4 |
 | `gombit upgrade check` | Report uses of deprecated framework APIs (from type information); exits 1 when there are any | UPGRADE-5 |
+| `gombit upgrade config` | Report an upgrade's configuration changes for the app (never a value from its env files); `--write` upgrades `.env` templates | UPGRADE-7 |
 | `gombit upgrade fix` | Run the framework's codemods: print the patch (default), `--patch FILE`, or `--write` | UPGRADE-6 |
+| `gombit upgrade contract` | Report stale generated contract artifacts (resource `*.gen.go`, OpenAPI document, TypeScript client); `--write` regenerates them | UPGRADE-8 |
 | `gombit upgrade baseline` | Show (or record) the app's upgrade baseline: framework and scaffold versions | UPGRADE-1 |
 | `gombit upgrade notes` | Print upgrade notes from the compatibility manifest | UPGRADE-2 |
 
@@ -864,7 +866,8 @@ Plans upgrading the application to a framework release from the
 compatibility manifest built into this `gombit`, and changes nothing: the
 current and target versions, the dependency change, the automatic changes
 the app needs, every manual action with what to do, the breaking changes,
-and the informational ones. A version the manifest does not list, a
+the informational ones, and the framework schema changes with the
+migration steps they need for this app (from its model registry). A version the manifest does not list, a
 downgrade, or an app whose baseline names no framework release (a `go.work`,
 a local checkout, a fork) fails with the reason. It never prompts, so it
 runs in CI. See [upgrade.md](upgrade.md#planning-an-upgrade).
@@ -875,7 +878,10 @@ get github.com/gombit-dev/gombit@vX.Y.Z`, and prints every go command and the
 `go.mod` and `go.sum` lines they changed. A go command that fails is shown
 with its full output, a result that does not build the target is refused,
 and either way `go.mod` and `go.sum` are restored. The plan's automatic and
-manual changes are printed as still to do. `--to` is required there. See
+manual changes are printed as still to do. It never runs a migration: when
+the framework's tables change, it says the upgrade is not complete and
+lists the migration steps (`migration_required` in `--json`). `--to` is
+required there. See
 [upgrade.md](upgrade.md#applying-the-dependency-changes).
 
 | Flag | Meaning | Default |
@@ -884,6 +890,7 @@ manual changes are printed as still to do. `--to` is required there. See
 | `--to` | Target framework release: applied without `--dry-run`, planned with it | with `--dry-run`, the newest release this CLI knows; required to apply |
 | `--dir` | Application directory (`go.mod`, `gombit.yaml`) | `.` |
 | `--json` | Print the plan (or what was applied) as JSON | off |
+| `--migrations` | The app's migration directory (its model registry), relative to `--dir`, as `gombit db --dir` | `database/migrations` |
 
 ## `gombit upgrade check`
 
@@ -891,13 +898,76 @@ Reports every use, in the application (every package, tests included), of a
 framework API whose doc comment has a `Deprecated:` paragraph: file, line
 and column, the symbol, and what to use instead. Uses are resolved from type
 information (`go/packages`, `go/types`), never by matching text; the app
-must type-check. It exits 1 when there is any use. See
-[upgrade.md](upgrade.md#checking-for-deprecated-apis).
+must type-check. When the deprecation names its release (`Deprecated: since
+vX.Y.Z, ...`), a line shows the first release the
+[compatibility policy](compatibility.md#deprecations) lets remove the API,
+and `--json` adds `since`, `removable_from` and `removable_from_major`. It exits 1 when there is
+any use. See [upgrade.md](upgrade.md#checking-for-deprecated-apis).
 
 | Flag | Meaning | Default |
 | --- | --- | --- |
 | `--dir` | Application directory | `.` |
 | `--json` | Print the uses as JSON | off |
+
+## `gombit upgrade config`
+
+Reports what an upgrade's configuration changes mean for the application,
+from the compatibility manifest:
+- **What it covers:** each variable the releases between the app's
+  framework version (or `--from`) and the target rename, remove,
+  re-default, newly require, or newly refuse values of.
+- **Categories:** renamed, default changed, action required, or security
+  review.
+- **For each change:** the app's environment files that set it, and what
+  to do.
+- **Never a secret:** it reads `.env` and `.env.*` and never prints a value
+  from them. Only names are read from files that are not templates.
+- **`--write`:** upgrades the templates (`.env.example` and the like),
+  renaming renamed variables and commenting out removed ones, each with a
+  note. It never writes `.env`.
+- **Exit status:** 1 while any change needs action or review.
+
+See [upgrade.md](upgrade.md#configuration-changes).
+
+| Flag | Meaning | Default |
+| --- | --- | --- |
+| `--dir` | Application directory | `.` |
+| `--from` | Release to analyze from | the framework version the app builds against |
+| `--to` | Target release | the newest release this CLI knows |
+| `--write` | Upgrade the environment templates (never `.env`) | off |
+| `--json` | Print the report as JSON | off |
+
+## `gombit upgrade contract`
+
+Reports whether the application's generated contract artifacts are what
+generation produces now; run it after `gombit upgrade --to`.
+- **Resource files:** the generator-owned `*.gen.go`, rendered as `gombit
+  generate --check` renders them, with the app's framework version.
+- **OpenAPI document:** the committed `openapi.json`, compared with the
+  running app's (`--url`).
+- **TypeScript client:** compared as `gombit client check` compares it.
+- **`--write`:** regenerates stale artifacts with that same generation,
+  generator-owned files only. A handwritten file is reported, never
+  overwritten.
+- **Dependencies:** while the resource files are not current, the checks
+  against `--url` are unchecked (rebuild and restart the app, then rerun),
+  and `--write` does not write the document or the client.
+- **Exit status:** 1 while anything is left stale, or on a failed write.
+  An artifact it could not check does not fail it unless `--strict`, which
+  a CI gate uses (with `--url`).
+
+See [upgrade.md](upgrade.md#generated-contract-artifacts).
+
+| Flag | Meaning | Default |
+| --- | --- | --- |
+| `--dir` | Application directory | `.` |
+| `--url` | The running app's OpenAPI document, to check the committed one and generate the client from | — |
+| `--spec` | Committed OpenAPI document, relative to `--dir` | `openapi.json` |
+| `--out` | Generated client directory, relative to `--dir` | `frontend/src/api/generated` |
+| `--write` | Regenerate stale artifacts (generator-owned files only) | off |
+| `--npx` | npx binary that runs openapi-typescript | `npx` |
+| `--json` | Print the report as JSON | off |
+| `--strict` | Also exit 1 when an artifact could not be checked | off |
 
 ## `gombit upgrade fix`
 

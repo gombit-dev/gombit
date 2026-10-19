@@ -32,6 +32,8 @@ releases:
         summary: A setting is renamed.
         details: |
           Rename GOMBIT_OLD to GOMBIT_NEW.
+        config:
+          - {var: GOMBIT_OLD, change: renamed, to: GOMBIT_NEW}
       - id: faster-lists
         kind: informational
         area: behavior
@@ -119,6 +121,9 @@ func TestPlanUpgrade(t *testing.T) {
 	if got := strings.Join(ids(p.Informational), ","); got != "faster-lists" {
 		t.Fatalf("Informational = %s", got)
 	}
+	if f := p.Config.Findings; len(f) != 1 || f[0].Var != "GOMBIT_OLD" || f[0].Category != upgrade.ConfigCategoryRenamed || !f[0].NeedsAction || len(p.Config.Files) != 0 {
+		t.Fatalf("Config = %+v", p.Config)
+	}
 
 	var out strings.Builder
 	if err := p.Render(&out); err != nil {
@@ -132,6 +137,8 @@ func TestPlanUpgrade(t *testing.T) {
 		"  - review-timeouts: Review the shutdown timeout.\n      Check the orchestrator's grace period.\n",
 		"Breaking behavior changes: 1\n  - rename-setting (manual): A setting is renamed.\n",
 		"Informational: 1\n  - faster-lists: Lists are faster.\n",
+		"Configuration changes: 1\n  - [renamed] `GOMBIT_OLD` is renamed `GOMBIT_NEW` (v0.7.0, rename-setting)\n",
+		"Environment files read: none",
 		"No files changed.\n",
 	} {
 		if !strings.Contains(out.String(), want) {
@@ -334,7 +341,7 @@ func TestPlanUpgradeBreakingFollowsAutomatic(t *testing.T) {
 // baseline on: the embedded manifest must list every one, or apps on it
 // have no upgrade path. Add each new tag here when it is cut
 // (TestEmbeddedManifestListsPublishedTags checks the repo's tags too).
-var published = []string{"v0.6.1", "v0.7.0", "v0.7.1"}
+var published = []string{"v0.6.1", "v0.7.0", "v0.7.1", "v0.8.0"}
 
 // TestEmbeddedManifestPlansFromPublishedReleases: the manifest built into
 // this gombit lists every published release, and plans an upgrade from
@@ -388,5 +395,96 @@ func TestEmbeddedManifestListsPublishedTags(t *testing.T) {
 		if _, err := m.Release(tag); err != nil {
 			t.Errorf("the release %s is tagged but not in upgrade/manifest.yaml", tag)
 		}
+	}
+}
+
+// TestPlanUpgradeContract: the plan tells the developer to check the
+// generated contract artifacts after the dependency change, and names the
+// path's contract (client area) changes.
+func TestPlanUpgradeContract(t *testing.T) {
+	m, err := upgrade.ParseManifest([]byte(`format: 1
+releases:
+  - version: v0.6.1
+  - version: v0.7.0
+    changes:
+      - id: client-error-type
+        kind: informational
+        area: client
+        summary: The generated client types errors more precisely.
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := upgrade.PlanUpgrade(app(t, planGoMod, ""), m, "v0.7.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Contract) != 1 || p.Contract[0].ID != "client-error-type" {
+		t.Fatalf("Contract = %+v", p.Contract)
+	}
+	var out strings.Builder
+	if err := p.Render(&out); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"After the dependency change, check them: gombit upgrade contract", "Contract changes on this path: client-error-type."} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("plan lacks %q:\n%s", want, out.String())
+		}
+	}
+	p, err = upgrade.PlanUpgrade(app(t, planGoMod, ""), planManifest(t), "v0.8.0")
+	if err != nil || len(p.Contract) != 0 {
+		t.Fatalf("no contract changes: %+v, %v", p.Contract, err)
+	}
+}
+
+// TestPlanUpgradeSchema: the plan includes the framework-schema changes on
+// the path and the migration steps they need for this app, from its model
+// registry; a path without one lists none, and says so.
+func TestPlanUpgradeSchema(t *testing.T) {
+	m, err := upgrade.ParseManifest([]byte(`format: 1
+releases:
+  - version: v0.6.1
+  - version: v0.7.0
+    changes:
+      - id: claims-table
+        kind: manual
+        area: schema
+        summary: File fields need the storage claims table.
+        details: Add claims.Models() to the app's models.
+        schema:
+          - {model: storage/claims.Claim, table: storage_claims, change: added}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := app(t, planGoMod, "")
+	p, err := upgrade.PlanUpgrade(dir, m, "v0.7.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Schema.Findings) != 1 || !p.Schema.MigrationRequired() {
+		t.Fatalf("Schema = %+v", p.Schema)
+	}
+	var out strings.Builder
+	if err := p.Render(&out); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"Framework schema changes: 1\n  - [migration required] `storage/claims.Claim` (`storage_claims`): added (v0.7.0, claims-table)",
+		"Required migration steps (the upgrade is not complete until they are done):",
+		"gombit db makemigrations upgrade_framework_schema --model github.com/gombit-dev/gombit/storage/claims.Claim",
+		"gombit upgrade never applies a migration",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("plan lacks %q:\n%s", want, out.String())
+		}
+	}
+	p, err = upgrade.PlanUpgrade(app(t, planGoMod, ""), planManifest(t), "v0.8.0")
+	if err != nil || len(p.Schema.Findings) != 0 || p.Schema.MigrationRequired() {
+		t.Fatalf("no schema changes: %+v, %v", p.Schema, err)
+	}
+	out.Reset()
+	if err := p.Render(&out); err != nil || !strings.Contains(out.String(), "Framework schema changes: 0\n") || strings.Contains(out.String(), "Required migration steps") {
+		t.Fatalf("plan without schema changes:\n%s", out.String())
 	}
 }

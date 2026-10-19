@@ -313,8 +313,10 @@ func TestGenerateWritesFeaturePackageLayout(t *testing.T) {
 	if !strings.Contains(schema, `"/api/v1/products"`) {
 		t.Fatal("placeholder schema.ts missing product path")
 	}
-	if !strings.Contains(schema, `"/api/v1/auth/login"`) || !strings.Contains(schema, `"/api/v1/me"`) {
-		t.Fatal("placeholder schema.ts missing auth paths")
+	for _, path := range []string{`"/api/v1/auth/login"`, `"/api/v1/auth/sessions"`, `"/api/v1/auth/sessions/{id}"`, `"/api/v1/me"`} {
+		if !strings.Contains(schema, path) {
+			t.Fatalf("placeholder schema.ts missing auth path %s", path)
+		}
 	}
 	if !strings.Contains(schema, "per_page?: number") {
 		t.Fatal("placeholder schema.ts missing list-products per_page query param")
@@ -446,6 +448,32 @@ func TestGenerateFlagValidation(t *testing.T) {
 				t.Fatalf("Generate() error = %q, want %q", err, tt.want)
 			}
 		})
+	}
+}
+
+func TestGenerateDevNullIsNonInteractive(t *testing.T) {
+	devNull, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatalf("open %s: %v", os.DevNull, err)
+	}
+	defer func() { _ = devNull.Close() }()
+
+	stdout := new(bytes.Buffer)
+	err = Generate(context.Background(), Options{
+		Database: "sqlite",
+		WorkDir:  t.TempDir(),
+		Stdin:    devNull,
+		Stdout:   stdout,
+	})
+	if err == nil {
+		t.Fatal("Generate() error = nil, want non-interactive project-name error")
+	}
+	want := "project name is required (pass a name or run interactively on a TTY)"
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("Generate() error = %q, want %q", err, want)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want no interactive prompt", stdout.String())
 	}
 }
 
