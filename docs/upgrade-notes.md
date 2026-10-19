@@ -174,6 +174,13 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 - A new app's placeholder `schema.ts` includes the session operations; an existing app's generated client gets them from `gombit client generate`. (`client-schema-session-operations`, client, [#335](https://github.com/gombit-dev/gombit/issues/335))
 
+- The framework requires Go 1.26.9 (`go 1.26.9` in go.mod), and `gombit new` pins it. (`go-1-26-9`, dependency, [#602](https://github.com/gombit-dev/gombit/issues/602))
+
+  An app's `go` line is raised to 1.26.9 by `go get` or `go mod tidy`
+  when it moves to this release. With the default `GOTOOLCHAIN=auto`
+  the go command downloads that toolchain; with `GOTOOLCHAIN=local`,
+  or in a build image, install Go 1.26.9 or later first.
+
 ## v0.7.1
 
 ### Manual: action required

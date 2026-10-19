@@ -471,6 +471,13 @@ version.
 
 ### Changed
 
+- The framework requires **Go 1.26.9** (`go 1.26.9` in `go.mod`, up from
+  `go 1.26.0`), and `gombit new` pins it in a new app's `go.mod`. An app that
+  moves to this release gets its `go` line raised by `go get` or `go mod
+  tidy`: with the default `GOTOOLCHAIN=auto` the go command downloads the
+  toolchain, and with `GOTOOLCHAIN=local` (or in a build image) Go 1.26.9 or
+  later must be installed first. The benchmark Docker images build with Go
+  1.26.9 ([#602](https://github.com/gombit-dev/gombit/pull/602)).
 - On Windows, `gombit make resource` replaces files with a POSIX-semantics
   rename (NTFS, Windows 10 1709 or later), so a file another program holds
   open with delete sharing no longer blocks it. On a volume that refuses that

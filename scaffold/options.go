@@ -24,7 +24,7 @@ const (
 	// DefaultModulePrefix is the module path used when --module is omitted.
 	DefaultModulePrefix = "github.com/example"
 
-	generatedGoVersion = "1.26.0"
+	generatedGoVersion = "1.26.9"
 )
 
 var (
