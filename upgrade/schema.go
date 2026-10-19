@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"strings"
 
 	"github.com/gombit-dev/gombit/internal/frameworkmod"
@@ -74,7 +73,9 @@ type SchemaChange struct {
 	// the model declares (Join).
 	Table string `yaml:"table" json:"table"`
 	// Join: Table is a join table Model declares (auth_user_groups for
-	// auth.User). Its change alters Model; it never adds or removes it.
+	// auth.User). Its change alters Model; it never adds or removes it. A
+	// table that is not the own table of a model this gombit has is read
+	// as a join table even without the flag.
 	Join bool `yaml:"join,omitempty" json:"join,omitempty"`
 	// Change is what happens to it.
 	Change SchemaChangeKind `yaml:"change" json:"change"`
@@ -195,79 +196,124 @@ func AnalyzeSchema(workDir, migrationDir string, releases []Release) (SchemaRepo
 	case !errors.Is(err, os.ErrNotExist):
 		return SchemaReport{}, fmt.Errorf("upgrade: %w", err)
 	}
-	// Without a registry, which framework tables the application has is
-	// its AutoMigrate's call: a change to one it may have is reported as
-	// needing a migration, never as not its table.
-	mayHave := func(m migrations.Model) bool { return registered[m] || !report.RegistryFound }
-	var add, forget []string
-	added := map[string]int{} // a model added on the path -> its finding
-	migrate, destructive := false, false
+
+	// Each model's entries on the path, in order (an informational one is
+	// an optional feature's table, which no step adds).
+	type entry struct {
+		finding int
+		sc      SchemaChange
+	}
+	byModel := map[migrations.Model][]entry{}
+	var order []migrations.Model
 	for _, r := range releases {
 		for _, c := range r.Changes {
 			for _, sc := range c.Schema {
-				f := SchemaFinding{SchemaChange: sc, Release: r.Version, ChangeID: c.ID}
 				model := sc.RegistryModel()
-				f.Registered = registered[model]
-				name := model.ImportPath + "." + model.TypeName
-				// A join table alters its model. An entry that leaves out
-				// join: true on a table that is not the own table of a
-				// model this gombit has is read as one too: the planner
-				// never forgets a model the framework still has.
-				join := sc.Join || (frameworkTables[sc.Model] != "" && sc.Table != frameworkTables[sc.Model])
-				what := sc.Table
-				if join {
-					what = "join table " + sc.Table
-				}
-				switch {
-				case c.Kind != KindManual: // an optional feature's new table (validated: added, not a join table)
-					f.Advice = fmt.Sprintf("Nothing to migrate unless the application adopts it: then add %s to its models (AutoMigrate in internal/platform) and generate its migration with --model %s.", sc.Model, name)
+				f := SchemaFinding{SchemaChange: sc, Release: r.Version, ChangeID: c.ID, Registered: registered[model]}
+				if c.Kind != KindManual {
+					f.Advice = fmt.Sprintf("Nothing to migrate unless the application adopts it: then add %s to its models (AutoMigrate in internal/platform) and generate its migration with --model %s.", sc.Model, modelName(model))
 					if f.Registered {
 						f.Advice = fmt.Sprintf("The registry lists %s, so the application's migrations carry %s.", sc.Model, sc.Table)
 					}
-				case join || sc.Change == SchemaAltered || (sc.Change == SchemaAdded && f.Registered):
-					// The model changes: its next migration carries it.
-					if !mayHave(model) {
-						f.Advice = fmt.Sprintf("The registry does not list %s: the application has no %s to migrate.", sc.Model, what)
-						break
-					}
-					f.Required, migrate = true, true
-					f.Advice = fmt.Sprintf("The registry lists %s, so the next migration carries its %s %s.", sc.Model, sc.Change, what)
-					if !f.Registered {
-						f.Advice = fmt.Sprintf("With no model registry, whether the application has %s is its AutoMigrate's call: if it lists %s, the next migration carries its %s %s.", what, sc.Model, sc.Change, what)
-					}
-				case sc.Change == SchemaAdded:
-					f.Required = true
-					add = appendOnce(add, name)
-					registered[model] = true
-					added[name] = len(report.Findings)
-					f.Advice = fmt.Sprintf("Add %s to the application's models (AutoMigrate in internal/platform), and generate its table's migration with --model %s.", sc.Model, name)
-				case slices.Contains(add, name):
-					// Added earlier on this path, and gone again: the
-					// application never had it, so there is nothing to add,
-					// forget or migrate.
-					add = slices.DeleteFunc(add, func(s string) bool { return s == name })
-					delete(registered, model)
-					first := &report.Findings[added[name]]
-					first.Required = false
-					first.Advice = fmt.Sprintf("%s comes and goes on this path (removed again in %s): nothing to add or migrate.", sc.Model, r.Version)
-					f.Advice = fmt.Sprintf("%s was added earlier on this path, and the application never had it: no table to drop.", sc.Model)
-				case mayHave(model): // the model's own table is removed: the model is gone
-					f.Required = true
-					forget = appendOnce(forget, name)
-					delete(registered, model)
-					f.Advice = fmt.Sprintf("Remove %s from the application's models, and generate the migration that drops %s with --forget-model %s, once its data is no longer needed.", sc.Model, sc.Table, name)
-				default:
-					f.Advice = fmt.Sprintf("The registry does not list %s: no table to drop.", sc.Model)
+					report.Findings = append(report.Findings, f)
+					continue
 				}
-				if f.Required && sc.Destructive {
-					destructive = true
-					f.Advice += " Destructive: back up or move the data first; gombit db plan asks for --allow."
+				if _, seen := byModel[model]; !seen {
+					order = append(order, model)
 				}
+				byModel[model] = append(byModel[model], entry{finding: len(report.Findings), sc: sc})
 				report.Findings = append(report.Findings, f)
 			}
 		}
 	}
-	if len(add) == 0 && len(forget) == 0 && !migrate {
+
+	// Each model's state at the end of the path decides its steps: from
+	// what the application has (its registry; without one, any model the
+	// framework had before the path), through every entry in order.
+	var add, forget []string
+	migrate, destructive := false, false
+	for _, model := range order {
+		entries := byModel[model]
+		name := modelName(model)
+		first := entries[0].sc
+		// A model whose first entry adds its own table did not exist
+		// before the path: the application cannot have it unregistered.
+		had := registered[model] || (!report.RegistryFound && !(first.Change == SchemaAdded && !first.joinTable()))
+		present, changed := had, false
+		var removedIn, addedIn string
+		for _, e := range entries {
+			f := report.Findings[e.finding]
+			switch {
+			case e.sc.joinTable() || e.sc.Change == SchemaAltered:
+				changed = changed || present
+			case e.sc.Change == SchemaAdded:
+				if !present {
+					addedIn = f.Release
+				}
+				present, changed = true, changed || had
+			case e.sc.Change == SchemaRemoved:
+				if present {
+					removedIn = f.Release
+				}
+				present = false
+			}
+		}
+		var outcome string
+		switch {
+		case !had && present:
+			outcome = "add"
+			add = append(add, name)
+		case had && !present:
+			outcome = "forget"
+			forget = append(forget, name)
+		case had && present && changed:
+			outcome = "migrate"
+		default:
+			outcome = "none"
+		}
+		for _, e := range entries {
+			f := &report.Findings[e.finding]
+			sc := e.sc
+			what := sc.Table
+			if sc.joinTable() {
+				what = "join table " + sc.Table
+			}
+			f.Required = outcome != "none"
+			switch outcome {
+			case "add":
+				f.Advice = fmt.Sprintf("%s is new to the application on this path: its migration (--model %s) carries %s.", sc.Model, name, what)
+				if !sc.joinTable() && sc.Change == SchemaAdded && f.Release == addedIn {
+					f.Advice = fmt.Sprintf("Add %s to the application's models (AutoMigrate in internal/platform), and generate its table's migration with --model %s.", sc.Model, name)
+				}
+			case "forget":
+				f.Advice = fmt.Sprintf("%s is removed on this path (%s): its tables go with it, %s included.", sc.Model, removedIn, what)
+				if !sc.joinTable() && sc.Change == SchemaRemoved && f.Release == removedIn {
+					f.Advice = fmt.Sprintf("Remove %s from the application's models, and generate the migration that drops %s with --forget-model %s, once its data is no longer needed.", sc.Model, sc.Table, name)
+				}
+			case "migrate":
+				f.Advice = fmt.Sprintf("The registry lists %s, so the next migration carries its %s %s.", sc.Model, sc.Change, what)
+				if !registered[model] {
+					f.Advice = fmt.Sprintf("With no model registry, whether the application has %s is its AutoMigrate's call: if it lists %s, the next migration carries its %s %s.", what, sc.Model, sc.Change, what)
+				}
+				if removedIn != "" {
+					f.Advice += fmt.Sprintf(" %s is removed and added back on this path: it stays, and the migration carries only what changed.", sc.Model)
+				}
+			default:
+				f.Advice = fmt.Sprintf("The registry does not list %s: the application has no %s to migrate.", sc.Model, what)
+				if removedIn != "" || addedIn != "" {
+					f.Advice = fmt.Sprintf("%s comes and goes on this path: the application never has it, so nothing to add or migrate.", sc.Model)
+				}
+			}
+			// A model removed and added back stays: its removal drops
+			// nothing for the application, only the net change counts.
+			if f.Required && sc.Destructive && (outcome != "migrate" || sc.joinTable() || sc.Change != SchemaRemoved) {
+				destructive = true
+				f.Advice += " Destructive: back up or move the data first; gombit db plan asks for --allow."
+			}
+		}
+		migrate = migrate || outcome != "none"
+	}
+	if !migrate {
 		return report, nil
 	}
 	if !report.RegistryFound {
@@ -304,11 +350,16 @@ func AnalyzeSchema(workDir, migrationDir string, releases []Release) (SchemaRepo
 	return report, nil
 }
 
-func appendOnce(list []string, s string) []string {
-	if slices.Contains(list, s) {
-		return list
-	}
-	return append(list, s)
+func modelName(m migrations.Model) string { return m.ImportPath + "." + m.TypeName }
+
+// joinTable reports whether the entry is about a join table its model
+// declares, which alters the model and never adds or removes it: join:
+// true, or a table that is not the own table of a model this gombit has
+// (so a missing flag never makes the planner forget a model the framework
+// still has). The parser and the planner both decide by it.
+func (sc SchemaChange) joinTable() bool {
+	own := frameworkTables[sc.Model]
+	return sc.Join || (own != "" && sc.Table != own)
 }
 
 // render writes the report for the plan.
@@ -357,7 +408,7 @@ func (c Change) validateSchema() error {
 		// Informational is for a table an application adopts with a
 		// feature: a new model's own table. Anything else changes a table
 		// an application may have, which the plan must ask it to migrate.
-		if c.Kind == KindInformational && (sc.Change != SchemaAdded || sc.Join) {
+		if c.Kind == KindInformational && (sc.Change != SchemaAdded || sc.joinTable()) {
 			return fmt.Errorf("change %s: %s: an informational change only adds an optional feature's table; a %s %s needs a migration, so the change is manual", c.ID, sc.Model, sc.Change, sc.Table)
 		}
 		if seen[sc.Table] {

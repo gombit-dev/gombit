@@ -466,8 +466,10 @@ Required migration steps (the upgrade is not complete until they are done):
   An app with no registry has generated no migration yet, and the plan
   says so first; which framework tables it has is then its `AutoMigrate`'s
   call, so every change to one it may have counts as needing a migration.
-  Each change is judged against the registry as the path's earlier steps
-  leave it (a model added on the way is the app's for the next change).
+  The steps come from each model's state at the end of the path, through
+  every entry in order: a model added and removed again on the way needs
+  nothing, one removed and added back stays (the migration carries the
+  net change), and one added and then altered is added once.
 - **Never silent.** No upgrade command generates or applies a migration.
   `gombit db plan` classifies what the migration does (a destructive or
   unsafe step needs `--allow`), and `gombit db migrate` applies it, in each
@@ -673,7 +675,9 @@ schema:
 
 `model` is the framework package and type, as the app's registry names it
 under the framework module, and `table` its own table, or, with `join:
-true`, a join table it declares. In a `manual` change the entries are
+true`, a join table it declares (a table that is not the own table of a
+model this `gombit` has is read as a join table even without the flag; the
+drift guard requires the flag anyway). In a `manual` change the entries are
 migrations the app needs. An `informational` change may only add a new
 model's own table, for an app that adopts the feature (`object-storage`
 adds `storage_claims` that way): anything else changes a table an app may

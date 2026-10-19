@@ -636,12 +636,12 @@ func TestAnalyzeSchema(t *testing.T) {
 	if err != nil || r.RegistryFound || !r.Findings[0].Required || !strings.Contains(r.Steps[0], "has no model registry") || !strings.Contains(r.Findings[0].Advice, "AutoMigrate's call") {
 		t.Fatalf("no registry = %+v, %v", r, err)
 	}
-	// Later changes see the registry as the earlier steps leave it: a
-	// model added on the path, then altered, needs no second "not its
-	// table".
+	// Steps follow each model's state at the end of the path: a model
+	// added on the path, then altered, is added once (its migration carries
+	// both), never "not its table".
 	claimAltered := upgrade.SchemaChange{Model: "storage/claims.Claim", Table: "storage_claims", Change: upgrade.SchemaAltered}
 	r, err = upgrade.AnalyzeSchema(registryApp(t, authRefresh), "", []upgrade.Release{schemaRelease("v0.9.0", "manual", claim), schemaRelease("v0.10.0", "manual", claimAltered)})
-	if err != nil || len(r.Findings) != 2 || !r.Findings[1].Required || !r.Findings[1].Registered {
+	if err != nil || len(r.Findings) != 2 || !r.Findings[1].Required || !strings.Contains(r.Findings[1].Advice, "new to the application on this path") || strings.Count(strings.Join(r.Steps, "\n"), "--model ") != 2 {
 		t.Fatalf("added, then altered = %+v, %v", r, err)
 	}
 	// No schema change on the path: nothing.
@@ -836,5 +836,65 @@ func TestAnalyzeSchemaJoinWithoutTheFlag(t *testing.T) {
 	}
 	if steps := strings.Join(r.Steps, "\n"); strings.Contains(steps, "--forget-model") || !r.Findings[0].Required {
 		t.Fatalf("a join table without the flag = %+v", r)
+	}
+}
+
+// TestAnalyzeSchemaReconcilesPerModel: steps come from each model's state
+// at the end of the path, through every entry: a new model's join table
+// that comes and goes with it needs nothing; added, altered, then removed
+// needs nothing; a model removed and added back stays (no --model, no
+// --forget-model), and the migration carries the net change.
+func TestAnalyzeSchemaReconcilesPerModel(t *testing.T) {
+	user := migrations.Model{ImportPath: "github.com/gombit-dev/gombit/auth", TypeName: "User"}
+	device := func(table string, join bool, k upgrade.SchemaChangeKind) upgrade.SchemaChange {
+		return upgrade.SchemaChange{Model: "auth.Device", Table: table, Join: join, Change: k, Destructive: k == upgrade.SchemaRemoved}
+	}
+	for name, path := range map[string][]upgrade.Release{
+		"with its join table": {
+			schemaRelease("v1.1.0", "manual", device("devices", false, upgrade.SchemaAdded), device("device_users", true, upgrade.SchemaAdded)),
+			schemaRelease("v1.3.0", "manual", device("devices", false, upgrade.SchemaRemoved), device("device_users", true, upgrade.SchemaRemoved)),
+		},
+		"added, altered, removed": {
+			schemaRelease("v1.1.0", "manual", device("devices", false, upgrade.SchemaAdded)),
+			schemaRelease("v1.2.0", "manual", device("devices", false, upgrade.SchemaAltered)),
+			schemaRelease("v1.3.0", "manual", device("devices", false, upgrade.SchemaRemoved)),
+		},
+	} {
+		r, err := upgrade.AnalyzeSchema(registryApp(t, user), "", path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.MigrationRequired() {
+			t.Errorf("%s: steps %v", name, r.Steps)
+		}
+		for _, f := range r.Findings {
+			if f.Required || !strings.Contains(f.Advice, "comes and goes") {
+				t.Errorf("%s: finding %+v", name, f)
+			}
+		}
+	}
+	r, err := upgrade.AnalyzeSchema(registryApp(t, user), "", []upgrade.Release{
+		schemaRelease("v1.1.0", "manual", upgrade.SchemaChange{Model: "auth.User", Table: "users", Change: upgrade.SchemaRemoved, Destructive: true}),
+		schemaRelease("v1.3.0", "manual", upgrade.SchemaChange{Model: "auth.User", Table: "users", Change: upgrade.SchemaAdded}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	steps := strings.Join(r.Steps, "\n")
+	if !r.MigrationRequired() || strings.Contains(steps, "--model") || strings.Contains(steps, "--forget-model") || strings.Contains(steps, "AutoMigrate (") || strings.Contains(steps, "declares a destructive change") {
+		t.Fatalf("removed, then added back:\n%s", steps)
+	}
+	if !strings.Contains(r.Findings[0].Advice, "removed and added back") {
+		t.Fatalf("advice = %q", r.Findings[0].Advice)
+	}
+}
+
+// TestInformationalJoinTableWithoutTheFlag: the parser decides join-ness
+// as the planner does, so an informational change adding a join table
+// without join: true is refused too.
+func TestInformationalJoinTableWithoutTheFlag(t *testing.T) {
+	manifest := "format: 1\nreleases:\n  - version: v0.1.0\n  - version: v0.2.0\n    changes:\n      - {id: x, kind: informational, area: schema, summary: s, schema: [{model: auth.User, table: auth_user_devices, change: added}]}\n"
+	if _, err := upgrade.ParseManifest([]byte(manifest)); err == nil || !strings.Contains(err.Error(), "so the change is manual") {
+		t.Fatalf("an informational join table without the flag: %v", err)
 	}
 }
