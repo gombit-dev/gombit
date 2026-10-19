@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/gombit-dev/gombit/internal/atomicfile"
+	"github.com/gombit-dev/gombit/migrations"
 	"github.com/gombit-dev/gombit/upgrade"
 	"github.com/gombit-dev/gombit/upgrade/contractcheck"
 )
@@ -563,5 +564,42 @@ func TestUpgradeContract(t *testing.T) {
 	}
 	if out, err := runUpgradeCLI(t, "contract", "--dir", dir, "--strict"); err == nil || !strings.Contains(err.Error(), "could not be checked") {
 		t.Fatalf("unchecked --strict: %q, %v; want a failure", out, err)
+	}
+}
+
+// TestUpgradeDryRunMigrationDir: the plan's framework-schema section reads
+// the app's model registry in --migrations (as gombit db --dir), here one
+// that lists the storage claims object-storage (v0.7.0) adds.
+func TestUpgradeDryRunMigrationDir(t *testing.T) {
+	t.Setenv("GOWORK", "off")
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/demo\n\ngo 1.26\n\nrequire github.com/gombit-dev/gombit v0.6.1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "db", "migrations"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrations.SaveRegistry(filepath.Join(dir, "db", "migrations"), []migrations.Model{{ImportPath: "github.com/gombit-dev/gombit/storage/claims", TypeName: "Claim"}}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runUpgradeCLI(t, "--dry-run", "--dir", dir, "--to", "v0.7.0", "--migrations", "db/migrations")
+	if err != nil || !strings.Contains(out, "The registry lists storage/claims.Claim") {
+		t.Fatalf("--migrations db/migrations: %v\n%s", err, out)
+	}
+	out, err = runUpgradeCLI(t, "--dry-run", "--dir", dir, "--to", "v0.7.0")
+	if err != nil || !strings.Contains(out, "Nothing to migrate unless the application adopts it") {
+		t.Fatalf("default migration directory: %v\n%s", err, out)
+	}
+	// --to reads the registry in --migrations as part of the plan, before
+	// go.mod changes: an unreadable one stops it with go.mod untouched.
+	if err := os.WriteFile(filepath.Join(dir, "db", "migrations", "models.json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(filepath.Join(dir, "go.mod")) // #nosec G304 -- under t.TempDir()
+	if _, err := runUpgradeCLI(t, "--dir", dir, "--to", "v0.7.0", "--migrations", "db/migrations"); err == nil || !strings.Contains(err.Error(), "model registry") {
+		t.Fatalf("--to with an unreadable registry: %v", err)
+	}
+	if after, _ := os.ReadFile(filepath.Join(dir, "go.mod")); string(after) != string(before) { // #nosec G304 -- under t.TempDir()
+		t.Fatal("go.mod changed")
 	}
 }

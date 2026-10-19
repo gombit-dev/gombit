@@ -146,6 +146,12 @@ type Change struct {
 	// against (AnalyzeConfig). A change in the security area makes each of
 	// them, an addition included, a security review.
 	Config []ConfigChange `yaml:"config,omitempty" json:"config,omitempty"`
+	// Schema are the framework-owned tables the change adds, alters or
+	// removes (area schema): the migrations an application generates,
+	// reviews and applies for it (AnalyzeSchema). In a manual change they
+	// are required; in an informational one, they are for an application
+	// that adopts the feature.
+	Schema []SchemaChange `yaml:"schema,omitempty" json:"schema,omitempty"`
 	// Deprecates are the framework APIs the change deprecates, each named
 	// as gombit upgrade check names it (database.KeepStoredZeros). A
 	// "Deprecated: since vX.Y.Z" paragraph must name a release with a
@@ -197,6 +203,7 @@ func (m *Manifest) clone() *Manifest {
 		for j := range r.Changes {
 			r.Changes[j].Refs = slices.Clone(r.Changes[j].Refs)
 			r.Changes[j].Config = slices.Clone(r.Changes[j].Config)
+			r.Changes[j].Schema = slices.Clone(r.Changes[j].Schema)
 			r.Changes[j].Deprecates = slices.Clone(r.Changes[j].Deprecates)
 		}
 		c.Releases[i] = r
@@ -292,6 +299,9 @@ func (c Change) validate() error {
 		if err := cc.validate(); err != nil {
 			return fmt.Errorf("change %s: %w", c.ID, err)
 		}
+	}
+	if err := c.validateSchema(); err != nil {
+		return err
 	}
 	for _, symbol := range c.Deprecates {
 		if symbol == "" || strings.ContainsAny(symbol, " \t\n`") || !strings.Contains(symbol, ".") {
