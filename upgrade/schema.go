@@ -238,7 +238,7 @@ func AnalyzeSchema(workDir, migrationDir string, releases []Release) (SchemaRepo
 		first := entries[0].sc
 		// A model whose first entry adds its own table did not exist
 		// before the path: the application cannot have it unregistered.
-		had := registered[model] || (!report.RegistryFound && !(first.Change == SchemaAdded && !first.joinTable()))
+		had := registered[model] || (!report.RegistryFound && (first.Change != SchemaAdded || first.joinTable()))
 		present, changed := had, false
 		var removedIn, addedIn string
 		for _, e := range entries {
