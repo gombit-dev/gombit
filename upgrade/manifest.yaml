@@ -506,3 +506,16 @@ releases:
           Go's minimal version selection moves an app's build to them with the
           framework upgrade.
         refs: [570, 590]
+
+  - version: unreleased
+    changes:
+      - id: go-1-26-9
+        kind: informational
+        area: dependency
+        summary: "The framework requires Go 1.26.9 (`go 1.26.9` in go.mod), and `gombit new` pins it."
+        details: |
+          An app's `go` line is raised to 1.26.9 by `go get` or `go mod tidy`
+          when it moves to this release. With the default `GOTOOLCHAIN=auto`
+          the go command downloads that toolchain; with `GOTOOLCHAIN=local`,
+          or in a build image, install Go 1.26.9 or later first.
+        refs: [602]

@@ -21,6 +21,16 @@ version.
   integer past 2^53 as a string
   ([#454](https://github.com/gombit-dev/gombit/issues/454)).
 
+### Changed
+
+- The framework requires **Go 1.26.9** (`go 1.26.9` in `go.mod`, up from
+  `go 1.26.0`), and `gombit new` pins it in a new app's `go.mod`. An app that
+  moves to this release gets its `go` line raised by `go get` or `go mod
+  tidy`: with the default `GOTOOLCHAIN=auto` the go command downloads the
+  toolchain, and with `GOTOOLCHAIN=local` (or in a build image) Go 1.26.9 or
+  later must be installed first. The benchmark Docker images build with Go
+  1.26.9 ([#602](https://github.com/gombit-dev/gombit/pull/602)).
+
 ## [0.8.0] — 2026-10-18
 
 ### Added

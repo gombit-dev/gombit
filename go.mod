@@ -1,6 +1,6 @@
 module github.com/gombit-dev/gombit
 
-go 1.26.0
+go 1.26.9
 
 require (
 	ariga.io/atlas v0.36.2-0.20250806044935-5bb51a0a956e
