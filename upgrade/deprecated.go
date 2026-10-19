@@ -33,6 +33,15 @@ type DeprecatedUse struct {
 	// Deprecation is the declaration's "Deprecated:" paragraph, which names
 	// what to use instead.
 	Deprecation string `json:"deprecation"`
+	// Since is the release that deprecated it, as the paragraph says
+	// ("Deprecated: since vX.Y.Z, ..."), and RemovableFrom the first
+	// release of its line the compatibility policy lets remove it;
+	// RemovableFromMajor is the major release that may remove it if it
+	// comes first (v1.0.0, for a pre-1.0 deprecation). All empty when the
+	// paragraph names no release.
+	Since              string `json:"since,omitempty"`
+	RemovableFrom      string `json:"removable_from,omitempty"`
+	RemovableFromMajor string `json:"removable_from_major,omitempty"`
 }
 
 // ErrDoesNotLoad: a package of the scanned graph (the application's
@@ -302,10 +311,14 @@ func (s *scan) add(p *packages.Package, pos token.Pos, pkgPath string, d declDoc
 	if rel, inside := relTo(s.root, file); inside {
 		file = rel
 	}
-	s.uses = append(s.uses, DeprecatedUse{
+	use := DeprecatedUse{
 		File: file, Line: at.Line, Column: at.Column,
 		Symbol: d.symbol, Package: pkgPath, Deprecation: d.deprecation,
-	})
+	}
+	if use.Since = DeprecationSince(d.deprecation); use.Since != "" {
+		use.RemovableFrom, use.RemovableFromMajor = RemovableFrom(use.Since), RemovableFromMajor(use.Since)
+	}
+	s.uses = append(s.uses, use)
 }
 
 // origin is the generic declaration an instantiated method or field comes
@@ -474,6 +487,13 @@ func RenderDeprecated(w io.Writer, uses []DeprecatedUse) error {
 		fmt.Fprintf(&b, "Deprecated framework APIs used: %d\n", len(uses))
 		for _, u := range uses {
 			fmt.Fprintf(&b, "  %s:%d:%d: %s\n      %s\n", u.File, u.Line, u.Column, u.Symbol, u.Deprecation)
+			if u.RemovableFrom != "" {
+				removable := u.RemovableFrom
+				if u.RemovableFromMajor != "" {
+					removable += " (or " + u.RemovableFromMajor + ", if it comes first)"
+				}
+				fmt.Fprintf(&b, "      (deprecated in %s; the compatibility policy lets %s remove it)\n", u.Since, removable)
+			}
 		}
 	}
 	_, err := io.WriteString(w, b.String())

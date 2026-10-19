@@ -28,8 +28,18 @@ automatically on merge.
    in `[Unreleased]` fails the gate.
 4. **Sanity-check the docs** that name a version — mainly
    [`installation.md`](installation.md).
-5. **Decide the number.** Pre-1.0, breaking changes bump the minor
-   (`0.1.0` → `0.2.0`); fixes bump the patch.
+5. **Decide the number** by the
+   [compatibility policy](compatibility.md):
+   - Pre-1.0, a breaking change bumps the minor (`0.1.0` → `0.2.0`), and a
+     release with only fixes bumps the patch.
+   - The security exception lets a breaking `security` change ship in a
+     patch.
+   - The release gate (step 6) refuses a smaller bump than the manifest's
+     changes need, and names the release it needs. Dispatch the Release
+     workflow with that bump.
+   - v1.0.0 follows a minor line that deprecates nothing, so every pre-1.0
+     deprecation gets its window
+     ([across 1.0](compatibility.md#deprecations)).
 6. **Name the release in the compatibility manifest**
    ([`upgrade/manifest.yaml`](../upgrade/manifest.yaml)). Rename its
    `unreleased` entry to the version, or, only when there is no `unreleased`
@@ -50,13 +60,13 @@ automatically on merge.
    go run ./cmd/gombit upgrade notes --release v0.1.0 --release-gate
    ```
 
-   Then move the configuration snapshot
-   ([`upgrade/testdata/config-variables.json`](../upgrade/testdata/config-variables.json))
-   to the release, so the next cycle's configuration changes are checked
-   from it:
+   Then move the configuration and framework-schema snapshots
+   ([`upgrade/testdata/config-variables.json`](../upgrade/testdata/config-variables.json),
+   [`upgrade/testdata/framework-schema.json`](../upgrade/testdata/framework-schema.json))
+   to the release, so the next cycle's changes are checked from it:
 
    ```bash
-   go test ./upgrade -run TestConfigVariablesAreDeclared -update
+   go test ./upgrade -run 'TestConfigVariablesAreDeclared|TestFrameworkSchemaIsDeclared' -update
    ```
 
    The release workflow puts these notes at the top of the GitHub release,

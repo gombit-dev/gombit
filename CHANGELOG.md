@@ -166,6 +166,44 @@ version.
   `generate.Stale`, `generate.Update`, `client.ClientDrift` and
   `client.SpecEqual` are the API
   ([#348](https://github.com/gombit-dev/gombit/issues/348)).
+- Framework-schema upgrade planning (UPGRADE-9). `gombit upgrade --dry-run`
+  lists the framework-owned tables (the auth tables, `storage_claims`) the
+  releases on the path add, alter or remove, and the migration steps the
+  app needs for them, from its model registry: add a new framework model,
+  review with `gombit db plan`, generate with `gombit db makemigrations`,
+  apply with `gombit db migrate`. A table the app does not have, or one an
+  optional feature adds, needs nothing. `gombit upgrade --to` never runs a
+  migration: it says the upgrade is not complete until the steps are done
+  (`migration_required` in `--json`). Manifest changes list the tables
+  (`schema:` entries; `object-storage`, v0.7.0, now declares
+  `storage_claims`), and a snapshot of the framework's tables as of a
+  release fails a test on any table added, changed or removed since then
+  that the manifest does not declare. `upgrade.AnalyzeSchema` and
+  `upgrade.FrameworkModels` are the API
+  ([#349](https://github.com/gombit-dev/gombit/issues/349)).
+- The compatibility and deprecation policy (UPGRADE-10,
+  [docs/compatibility.md](docs/compatibility.md)). From v0.8.0 the upgrade
+  tooling follows it rather than deciding per release:
+  - **Bumps:** before 1.0, breaking changes only in minor releases; from
+    1.0, only in majors.
+  - **Security exception:** a breaking `security` change may ship in any
+    release.
+  - **Enforcement:** the release gate refuses a release smaller than its
+    changes need (`upgrade.RequiredBump`, `Manifest.CheckPolicy`) and names
+    the release it needs. A repository test holds every listed release to
+    it, with recorded exceptions (v0.7.1), so a published release can be
+    corrected truthfully.
+  - **Deprecation window:** before 1.0, a deprecated API stays through the
+    next minor; from 1.0, until the next major (`upgrade.RemovableFrom`).
+    Every `Deprecated:` paragraph names its release ("since vX.Y.Z"), which
+    declares the deprecation in the manifest (a change's new `deprecates`
+    list), and `gombit upgrade check` shows when each API it reports may be
+    removed (`since`, `removable_from` and `removable_from_major` in
+    `--json`). The release gate refuses v1.0.0 right after a minor line
+    that deprecates anything.
+  - **Support:** every release stays in the manifest, and a codemod stays
+    as long as the manifest change of its release names it
+  ([#350](https://github.com/gombit-dev/gombit/issues/350)).
 - [Session management](docs/auth.md#sessions) in both auth modes:
   `GET /auth/sessions` lists the user's active sessions with an opaque id,
   `last_refreshed_at`, `expires_at`, and a `current` flag;

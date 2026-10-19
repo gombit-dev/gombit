@@ -301,6 +301,8 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 - Object storage (`app.Storage()`, `GOMBIT_STORAGE_*`) and storage-backed `file` / `image` model fields. (`object-storage`, schema, [#279](https://github.com/gombit-dev/gombit/issues/279), [#323](https://github.com/gombit-dev/gombit/issues/323), [#324](https://github.com/gombit-dev/gombit/issues/324), [#325](https://github.com/gombit-dev/gombit/issues/325), [#326](https://github.com/gombit-dev/gombit/issues/326), [#327](https://github.com/gombit-dev/gombit/issues/327), [#328](https://github.com/gombit-dev/gombit/issues/328), [#329](https://github.com/gombit-dev/gombit/issues/329), [#530](https://github.com/gombit-dev/gombit/issues/530))
 
+  - Framework schema: `storage/claims.Claim` (`storage_claims`): added.
+
   File fields record ownership in a framework table, `storage_claims`,
   which new apps' migrations create. An existing app that adopts file
   fields adds the table to its migrations (`claims.Models()`; see
