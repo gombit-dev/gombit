@@ -235,10 +235,18 @@ func AnalyzeSchema(workDir, migrationDir string, releases []Release) (SchemaRepo
 	for _, model := range order {
 		entries := byModel[model]
 		name := modelName(model)
-		first := entries[0].sc
-		// A model whose first entry adds its own table did not exist
-		// before the path: the application cannot have it unregistered.
-		had := registered[model] || (!report.RegistryFound && (first.Change != SchemaAdded || first.joinTable()))
+		// Without a registry, the model existed before the path (so the
+		// application may have it) unless its first own-table entry adds
+		// it; join-table entries say nothing about that, whatever their
+		// order in the change.
+		existed := true
+		for _, e := range entries {
+			if !e.sc.joinTable() {
+				existed = e.sc.Change != SchemaAdded
+				break
+			}
+		}
+		had := registered[model] || (!report.RegistryFound && existed)
 		present, changed := had, false
 		var removedIn, addedIn string
 		for _, e := range entries {
@@ -304,9 +312,11 @@ func AnalyzeSchema(workDir, migrationDir string, releases []Release) (SchemaRepo
 					f.Advice = fmt.Sprintf("%s comes and goes on this path: the application never has it, so nothing to add or migrate.", sc.Model)
 				}
 			}
-			// A model removed and added back stays: its removal drops
-			// nothing for the application, only the net change counts.
-			if f.Required && sc.Destructive && (outcome != "migrate" || sc.joinTable() || sc.Change != SchemaRemoved) {
+			// Only data the application has can be lost: a model new to it
+			// (add) has no rows, and one removed and added back stays (its
+			// removal drops nothing; the migration carries the net change).
+			lossy := outcome == "forget" || (outcome == "migrate" && (sc.joinTable() || sc.Change != SchemaRemoved))
+			if f.Required && sc.Destructive && lossy {
 				destructive = true
 				f.Advice += " Destructive: back up or move the data first; gombit db plan asks for --allow."
 			}

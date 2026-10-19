@@ -898,3 +898,30 @@ func TestInformationalJoinTableWithoutTheFlag(t *testing.T) {
 		t.Fatalf("an informational join table without the flag: %v", err)
 	}
 }
+
+// TestAnalyzeSchemaOrderAndData: without a registry, a new model is new
+// whatever the order of its entries (a join table listed first included);
+// and a model new to the application has no data, so a destructive change
+// to it on the way warns nothing.
+func TestAnalyzeSchemaOrderAndData(t *testing.T) {
+	r, err := upgrade.AnalyzeSchema(registryApp(t), "", []upgrade.Release{schemaRelease("v1.1.0", "manual",
+		upgrade.SchemaChange{Model: "auth.Device", Table: "device_users", Join: true, Change: upgrade.SchemaAdded},
+		upgrade.SchemaChange{Model: "auth.Device", Table: "devices", Change: upgrade.SchemaAdded},
+	)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if steps := strings.Join(r.Steps, "\n"); !strings.Contains(steps, "AutoMigrate (internal/platform/database.go): github.com/gombit-dev/gombit/auth.Device") || !strings.Contains(steps, "--model github.com/gombit-dev/gombit/auth.Device") {
+		t.Fatalf("join table first, no registry:\n%s", steps)
+	}
+	r, err = upgrade.AnalyzeSchema(registryApp(t, migrations.Model{ImportPath: "github.com/gombit-dev/gombit/auth", TypeName: "User"}), "", []upgrade.Release{
+		schemaRelease("v1.1.0", "manual", upgrade.SchemaChange{Model: "auth.Device", Table: "devices", Change: upgrade.SchemaAdded}),
+		schemaRelease("v1.2.0", "manual", upgrade.SchemaChange{Model: "auth.Device", Table: "devices", Change: upgrade.SchemaAltered, Destructive: true}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if steps := strings.Join(r.Steps, "\n"); strings.Contains(steps, "declares a destructive change") || strings.Contains(r.Findings[1].Advice, "Destructive") {
+		t.Fatalf("a destructive change to a model new to the app:\n%s\n%s", steps, r.Findings[1].Advice)
+	}
+}
