@@ -10,6 +10,17 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 ## Unreleased
 
+### Informational
+
+- The framework requires Go 1.26.9 (`go 1.26.9` in go.mod), and `gombit new` pins it. (`go-1-26-9`, dependency, [#602](https://github.com/gombit-dev/gombit/issues/602))
+
+  An app's `go` line is raised to 1.26.9 by `go get` or `go mod tidy`
+  when it moves to this release. With the default `GOTOOLCHAIN=auto`
+  the go command downloads that toolchain; with `GOTOOLCHAIN=local`,
+  or in a build image, install Go 1.26.9 or later first.
+
+## v0.8.0
+
 ### Manual: action required
 
 - **Breaking.** Every write refuses a float that is not finite (`+Inf`, `-Inf`, `NaN`), or beyond a `float32` field's range, with a 422 on that field. (`floats-must-be-finite`, behavior, [#449](https://github.com/gombit-dev/gombit/issues/449))
@@ -174,12 +185,10 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 - A new app's placeholder `schema.ts` includes the session operations; an existing app's generated client gets them from `gombit client generate`. (`client-schema-session-operations`, client, [#335](https://github.com/gombit-dev/gombit/issues/335))
 
-- The framework requires Go 1.26.9 (`go 1.26.9` in go.mod), and `gombit new` pins it. (`go-1-26-9`, dependency, [#602](https://github.com/gombit-dev/gombit/issues/602))
+- The framework requires newer AWS SDK for Go v2 modules (the S3 storage driver): `github.com/aws/aws-sdk-go-v2` v1.47.3, `github.com/aws/aws-sdk-go-v2/service/s3` v1.114.0 and `github.com/aws/smithy-go` v1.28.5. (`aws-sdk-updates`, dependency, [#570](https://github.com/gombit-dev/gombit/issues/570), [#590](https://github.com/gombit-dev/gombit/issues/590))
 
-  An app's `go` line is raised to 1.26.9 by `go get` or `go mod tidy`
-  when it moves to this release. With the default `GOTOOLCHAIN=auto`
-  the go command downloads that toolchain; with `GOTOOLCHAIN=local`,
-  or in a build image, install Go 1.26.9 or later first.
+  Go's minimal version selection moves an app's build to them with the
+  framework upgrade.
 
 ## v0.7.1
 
