@@ -62,6 +62,14 @@ version.
   One equal to the stored value rounded the same way (the admin UI sending
   the field back, an integer field or a belongs_to key alike) keeps the
   stored value ([#448](https://github.com/gombit-dev/gombit/issues/448)).
+- The generated TypeScript client's `unwrap()` resolves `undefined` for a
+  successful `204 No Content` instead of throwing `ContractError` with code
+  `empty_response`. A Huma handler whose output struct has no `Body` answers
+  204, and openapi-fetch reports `data: undefined` for it, so a delete or an
+  action endpoint looked like a failure to the caller and the UI. A 2xx without
+  content that is not 204 still throws `empty_response`, and non-2xx still
+  throws the D10 `ContractError`
+  ([#505](https://github.com/gombit-dev/gombit/issues/505)).
 
 ### Changed
 

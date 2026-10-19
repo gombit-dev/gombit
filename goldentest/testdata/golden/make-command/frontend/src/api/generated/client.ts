@@ -42,6 +42,11 @@ export async function unwrap<T>(result: {
     throw ContractError.fromResponse(result.response, result.error);
   }
   if (result.data === undefined) {
+    // A 204 carries no body by definition, so openapi-fetch reports
+    // data: undefined for an output with no Body. That is the success value.
+    if (result.response.status === 204) {
+      return undefined as T;
+    }
     throw new ContractError("empty_response", "Empty response", result.response.status);
   }
   return result.data;
