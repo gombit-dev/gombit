@@ -43,11 +43,6 @@ var frameworkTables = map[string]string{
 	"storage/claims.Claim": "storage_claims",
 }
 
-// FrameworkTable is a framework model's own table ("" for a model this
-// gombit does not have), by model as a schema entry names it
-// (auth.RefreshToken).
-func FrameworkTable(model string) string { return frameworkTables[model] }
-
 // defaultMigrationDir is gombit db's migration directory (--dir).
 const defaultMigrationDir = "database/migrations"
 
@@ -205,6 +200,7 @@ func AnalyzeSchema(workDir, migrationDir string, releases []Release) (SchemaRepo
 	// needing a migration, never as not its table.
 	mayHave := func(m migrations.Model) bool { return registered[m] || !report.RegistryFound }
 	var add, forget []string
+	added := map[string]int{} // a model added on the path -> its finding
 	migrate, destructive := false, false
 	for _, r := range releases {
 		for _, c := range r.Changes {
@@ -213,8 +209,13 @@ func AnalyzeSchema(workDir, migrationDir string, releases []Release) (SchemaRepo
 				model := sc.RegistryModel()
 				f.Registered = registered[model]
 				name := model.ImportPath + "." + model.TypeName
+				// A join table alters its model. An entry that leaves out
+				// join: true on a table that is not the own table of a
+				// model this gombit has is read as one too: the planner
+				// never forgets a model the framework still has.
+				join := sc.Join || (frameworkTables[sc.Model] != "" && sc.Table != frameworkTables[sc.Model])
 				what := sc.Table
-				if sc.Join {
+				if join {
 					what = "join table " + sc.Table
 				}
 				switch {
@@ -223,7 +224,7 @@ func AnalyzeSchema(workDir, migrationDir string, releases []Release) (SchemaRepo
 					if f.Registered {
 						f.Advice = fmt.Sprintf("The registry lists %s, so the application's migrations carry %s.", sc.Model, sc.Table)
 					}
-				case sc.Join || sc.Change == SchemaAltered || (sc.Change == SchemaAdded && f.Registered):
+				case join || sc.Change == SchemaAltered || (sc.Change == SchemaAdded && f.Registered):
 					// The model changes: its next migration carries it.
 					if !mayHave(model) {
 						f.Advice = fmt.Sprintf("The registry does not list %s: the application has no %s to migrate.", sc.Model, what)
@@ -238,7 +239,18 @@ func AnalyzeSchema(workDir, migrationDir string, releases []Release) (SchemaRepo
 					f.Required = true
 					add = appendOnce(add, name)
 					registered[model] = true
+					added[name] = len(report.Findings)
 					f.Advice = fmt.Sprintf("Add %s to the application's models (AutoMigrate in internal/platform), and generate its table's migration with --model %s.", sc.Model, name)
+				case slices.Contains(add, name):
+					// Added earlier on this path, and gone again: the
+					// application never had it, so there is nothing to add,
+					// forget or migrate.
+					add = slices.DeleteFunc(add, func(s string) bool { return s == name })
+					delete(registered, model)
+					first := &report.Findings[added[name]]
+					first.Required = false
+					first.Advice = fmt.Sprintf("%s comes and goes on this path (removed again in %s): nothing to add or migrate.", sc.Model, r.Version)
+					f.Advice = fmt.Sprintf("%s was added earlier on this path, and the application never had it: no table to drop.", sc.Model)
 				case mayHave(model): // the model's own table is removed: the model is gone
 					f.Required = true
 					forget = appendOnce(forget, name)

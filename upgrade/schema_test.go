@@ -546,8 +546,8 @@ func TestFrameworkTablesAreTheModelsOwn(t *testing.T) {
 		}
 	}
 	for _, st := range current {
-		if !st.Join && upgrade.FrameworkTable(st.Model) != st.Table {
-			t.Errorf("%s's own table is %s, but the catalog says %q", st.Model, st.Table, upgrade.FrameworkTable(st.Model))
+		if !st.Join && upgrade.FrameworkTableForTest(st.Model) != st.Table {
+			t.Errorf("%s's own table is %s, but the catalog says %q", st.Model, st.Table, upgrade.FrameworkTableForTest(st.Model))
 		}
 	}
 }
@@ -798,5 +798,43 @@ func TestInformationalSchemaChangesOnlyAdd(t *testing.T) {
 		if _, err := upgrade.ParseManifest([]byte(manifest)); err == nil || !strings.Contains(err.Error(), "so the change is manual") {
 			t.Errorf("informational %s: %v", entry, err)
 		}
+	}
+}
+
+// TestAnalyzeSchemaAddedThenRemoved: a model a release adds and a later one
+// on the path removes never reaches the application: nothing to add,
+// forget or migrate.
+func TestAnalyzeSchemaAddedThenRemoved(t *testing.T) {
+	device := func(k upgrade.SchemaChangeKind, destructive bool) upgrade.SchemaChange {
+		return upgrade.SchemaChange{Model: "auth.Device", Table: "devices", Change: k, Destructive: destructive}
+	}
+	r, err := upgrade.AnalyzeSchema(registryApp(t, migrations.Model{ImportPath: "github.com/gombit-dev/gombit/auth", TypeName: "User"}), "", []upgrade.Release{
+		schemaRelease("v1.1.0", "manual", device(upgrade.SchemaAdded, false)),
+		schemaRelease("v1.2.0", "manual", device(upgrade.SchemaRemoved, true)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.MigrationRequired() || r.Findings[0].Required || r.Findings[1].Required || strings.Contains(r.Findings[1].Advice, "Destructive") {
+		t.Fatalf("added, then removed = %+v", r)
+	}
+	if !strings.Contains(r.Findings[0].Advice, "comes and goes on this path") {
+		t.Fatalf("advice = %q", r.Findings[0].Advice)
+	}
+}
+
+// TestAnalyzeSchemaJoinWithoutTheFlag: an entry on a table that is not the
+// own table of a model this gombit has is read as a join table even
+// without join: true, so the planner never forgets a model the framework
+// still has.
+func TestAnalyzeSchemaJoinWithoutTheFlag(t *testing.T) {
+	r, err := upgrade.AnalyzeSchema(registryApp(t, migrations.Model{ImportPath: "github.com/gombit-dev/gombit/auth", TypeName: "User"}), "", []upgrade.Release{
+		schemaRelease("v1.0.0", "manual", upgrade.SchemaChange{Model: "auth.User", Table: "auth_user_permissions", Change: upgrade.SchemaRemoved, Destructive: true}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if steps := strings.Join(r.Steps, "\n"); strings.Contains(steps, "--forget-model") || !r.Findings[0].Required {
+		t.Fatalf("a join table without the flag = %+v", r)
 	}
 }

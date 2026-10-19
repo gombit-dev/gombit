@@ -677,7 +677,7 @@ true`, a join table it declares. In a `manual` change the entries are
 migrations the app needs. An `informational` change may only add a new
 model's own table, for an app that adopts the feature (`object-storage`
 adds `storage_claims` that way): anything else changes a table an app may
-have, so the parser makes the change manual. A change that lists tables is
+have, so the parser rejects it: the change must be manual. A change that lists tables is
 never `automatic`: the developer migrates.
 
 A change of any kind can be `breaking`: an app that relies on documented (or
