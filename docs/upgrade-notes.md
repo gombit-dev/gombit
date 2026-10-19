@@ -8,7 +8,7 @@ What each release asks of an application moving to it, newest first. This
 page, the release notes, and the upgrade tooling all come from the same
 compatibility manifest (see [upgrade.md](upgrade.md)).
 
-## Unreleased
+## v0.8.0
 
 ### Manual: action required
 
@@ -84,6 +84,9 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 - **Breaking.** With auth enabled, a `GOMBIT_JWT_REFRESH_TTL` shorter than `GOMBIT_JWT_ACCESS_TTL` fails config validation, so the app does not start. (`refresh-ttl-at-least-access-ttl`, config, [#335](https://github.com/gombit-dev/gombit/issues/335))
 
+  - Configuration: `GOMBIT_JWT_REFRESH_TTL`: some values are now refused.
+  - Configuration: `GOMBIT_JWT_ACCESS_TTL`: some values are now refused.
+
   The refresh token's lifetime is the session's, and an access token
   must not outlive its session: it would stop authenticating when the
   session ends while its `exp`, `expires_in` and access cookie still
@@ -103,6 +106,13 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   version 0. `gombit upgrade baseline --write` records it.
 
 ### Informational
+
+- `config.Load` reads a `.env` file whole: a line longer than 64 KiB no longer silently stops it, so the assignments after one now apply. (`dotenv-long-lines`, config)
+
+  Before, the first line over 64 KiB ended the read without an
+  error, and every variable after it kept its process-environment
+  or default value. If a `.env` has such a line, check the values
+  set after it.
 
 - An admin relation field on a string key stores the string sent, byte for byte; a JSON number for it is a 422. (`admin-relation-string-keys`, behavior, [#452](https://github.com/gombit-dev/gombit/issues/452))
 
@@ -163,6 +173,11 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   On PostgreSQL that token could survive the cascade.
 
 - A new app's placeholder `schema.ts` includes the session operations; an existing app's generated client gets them from `gombit client generate`. (`client-schema-session-operations`, client, [#335](https://github.com/gombit-dev/gombit/issues/335))
+
+- The framework requires newer AWS SDK for Go v2 modules (the S3 storage driver): `github.com/aws/aws-sdk-go-v2` v1.47.3, `github.com/aws/aws-sdk-go-v2/service/s3` v1.114.0 and `github.com/aws/smithy-go` v1.28.5. (`aws-sdk-updates`, dependency, [#570](https://github.com/gombit-dev/gombit/issues/570), [#590](https://github.com/gombit-dev/gombit/issues/590))
+
+  Go's minimal version selection moves an app's build to them with the
+  framework upgrade.
 
 ## v0.7.1
 
@@ -240,6 +255,8 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 - **Breaking.** Production refuses `GOMBIT_HTTP_TRUSTED_PROXIES` values that trust every peer: a zero-length prefix in any spelling, or ranges that together cover all addresses. (`trusted-proxies-trust-all`, security, [#500](https://github.com/gombit-dev/gombit/issues/500))
 
+  - Configuration: `GOMBIT_HTTP_TRUSTED_PROXIES`: some values are now refused in production.
+
   `10.0.0.0/0`, `::0/0` or `0.0.0.0/1,128.0.0.0/1` used to start;
   `Config.Validate` now refuses them in production, since trusting
   every peer lets any client spoof its forwarded IP. List only the
@@ -283,6 +300,8 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   for Go v2 (the S3 storage driver) and `golang.org/x/sys` directly.
 
 - Object storage (`app.Storage()`, `GOMBIT_STORAGE_*`) and storage-backed `file` / `image` model fields. (`object-storage`, schema, [#279](https://github.com/gombit-dev/gombit/issues/279), [#323](https://github.com/gombit-dev/gombit/issues/323), [#324](https://github.com/gombit-dev/gombit/issues/324), [#325](https://github.com/gombit-dev/gombit/issues/325), [#326](https://github.com/gombit-dev/gombit/issues/326), [#327](https://github.com/gombit-dev/gombit/issues/327), [#328](https://github.com/gombit-dev/gombit/issues/328), [#329](https://github.com/gombit-dev/gombit/issues/329), [#530](https://github.com/gombit-dev/gombit/issues/530))
+
+  - Framework schema: `storage/claims.Claim` (`storage_claims`): added.
 
   File fields record ownership in a framework table, `storage_claims`,
   which new apps' migrations create. An existing app that adopts file

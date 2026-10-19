@@ -109,8 +109,9 @@ func ScopeEdit(db *gorm.DB, row any, stored StoredRow) *gorm.DB {
 // KeepStoredZeros scopes an edit of row that sets the edited columns, leaving
 // out each kept column (StoredZeroColumns) that still holds the zero instant.
 //
-// Deprecated: use ScopeEdit with StoredValues, which also keeps the row's
-// stored text editable and judges columns by whether their value changed.
+// Deprecated: since v0.8.0, use ScopeEdit with StoredValues, which also keeps
+// the row's stored text editable and judges columns by whether their value
+// changed.
 func KeepStoredZeros(db *gorm.DB, row any, kept, edited []string) *gorm.DB {
 	return ScopeEdit(db, row, StoredRow{zeroTimes: kept, edited: edited})
 }

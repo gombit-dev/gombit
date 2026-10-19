@@ -198,9 +198,19 @@ export function changedFieldNames(values: Row, loaded: Row, fields: FieldMeta[])
  * 2^53 the loaded number is already rounded, so typing it back is no change
  * (sending it would write the rounded neighbor), while any other digits are
  * one, even digits a float would round onto the same number. A float
- * compares by value.
+ * compares by value. A relation compares by key as the picker matches it
+ * (the string form, so a loaded 5 and a picked "5" are the same), a
+ * many_to_many as a set of keys, order aside.
  */
 function sameFormValue(field: FieldMeta, value: unknown, loaded: unknown): boolean {
+  if (isBelongsTo(field)) {
+    return relIdKey(value) === relIdKey(loaded);
+  }
+  if (isManyToMany(field)) {
+    const a = relIdKeys(value);
+    const b = relIdKeys(loaded);
+    return a.length === b.length && a.every((id, i) => id === b[i]);
+  }
   if (field.type === "integer") {
     const a = exactInteger(value);
     const b = exactInteger(loaded);
@@ -216,6 +226,23 @@ function sameFormValue(field: FieldMeta, value: unknown, loaded: unknown): boole
     }
   }
   return JSON.stringify(value ?? null) === JSON.stringify(loaded ?? null);
+}
+
+/**
+ * relIdKey is a related key as the picker matches on it: the string form,
+ * so the number a row loads (5) and the string option the picker emits ("5",
+ * kept as given since #452) are the same key. Empty is "".
+ */
+function relIdKey(v: unknown): string {
+  return v === null || v === undefined ? "" : String(v).trim();
+}
+
+/** relIdKeys is a many_to_many value as a sorted set of keys: order is no change. */
+function relIdKeys(v: unknown): string[] {
+  if (!Array.isArray(v)) {
+    return [];
+  }
+  return [...new Set(v.map(relIdKey).filter((k) => k !== ""))].sort();
 }
 
 /** exactInteger is an integer form value as a BigInt, or null if it is none. */

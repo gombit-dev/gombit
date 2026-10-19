@@ -61,7 +61,7 @@ go install github.com/gombit-dev/gombit/cmd/gombit@latest
 Pin a version instead of tracking `@latest`:
 
 ```bash
-go install github.com/gombit-dev/gombit/cmd/gombit@v0.6.0
+go install github.com/gombit-dev/gombit/cmd/gombit@v0.8.0
 ```
 
 The binary lands in `$(go env GOBIN)`, or `$(go env GOPATH)/bin` when `GOBIN`
@@ -75,7 +75,7 @@ Add that line to `~/.bashrc`, `~/.zshrc`, or your shell's equivalent to make it
 permanent.
 
 Binaries installed this way carry no ldflags, so `gombit version` reads the
-module version recorded by Go — `@v0.6.0` reports `v0.6.0`, while `@latest` on
+module version recorded by Go — `@v0.8.0` reports `v0.8.0`, while `@latest` on
 an untagged commit may report a pseudo-version.
 
 ### Option 2 — release archive
@@ -85,7 +85,7 @@ Archives are published for `linux/amd64`, `linux/arm64`, `darwin/amd64`,
 `darwin/arm64`, and `windows/amd64`.
 
 ```bash
-# Latest release; set VERSION=v0.6.0 (for example) to pin one instead.
+# Latest release; set VERSION=v0.8.0 (for example) to pin one instead.
 VERSION=$(basename "$(curl -fsSLo /dev/null -w '%{url_effective}' https://github.com/gombit-dev/gombit/releases/latest)")
 OS=linux      # or darwin
 ARCH=amd64    # or arm64
@@ -106,7 +106,7 @@ On macOS `sha256sum` may not exist; use `shasum -a 256 -c SHA256SUMS.txt
 Windows (PowerShell):
 
 ```powershell
-# Latest release; set $Version = "v0.6.0" (for example) to pin one instead.
+# Latest release; set $Version = "v0.8.0" (for example) to pin one instead.
 $Version = (Invoke-RestMethod https://api.github.com/repos/gombit-dev/gombit/releases/latest).tag_name
 Invoke-WebRequest -Uri "https://github.com/gombit-dev/gombit/releases/download/$Version/gombit-$Version-windows-amd64.zip" -OutFile gombit.zip
 Expand-Archive gombit.zip -DestinationPath "$env:LOCALAPPDATA\gombit"
@@ -287,7 +287,7 @@ The framework module version used by *your application* is independent of the
 CLI, and is upgraded in the app:
 
 ```bash
-go get github.com/gombit-dev/gombit@v0.6.0
+go get github.com/gombit-dev/gombit@v0.8.0
 go mod tidy
 ```
 

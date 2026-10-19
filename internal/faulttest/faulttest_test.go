@@ -81,6 +81,11 @@ func TestANilInjectorLetsEverythingThrough(t *testing.T) {
 	if err := inj.Hit(context.Background()); err != nil || inj.Calls() != 0 || inj.Failures() != 0 {
 		t.Fatalf("nil injector: Hit = %v, Calls %d, Failures %d", err, inj.Calls(), inj.Failures())
 	}
+	select {
+	case <-inj.Reached(1):
+		t.Fatal("nil injector: Reached(1) is closed")
+	default:
+	}
 	inj.Reset()
 }
 
@@ -197,6 +202,8 @@ func TestMisuseIsRefused(t *testing.T) {
 		"Wait(-1)":        func() { faulttest.Wait(-time.Second) },
 		"Block(nil)":      func() { faulttest.Block(nil) },
 		"Reached(0)":      func() { faulttest.Sequence().Reached(0) },
+		"nil Reached(0)":  func() { (*faulttest.Injector)(nil).Reached(0) },
+		"nil Reached(-1)": func() { (*faulttest.Injector)(nil).Reached(-1) },
 		"FailAlways(nil)": func() { faulttest.FailAlways(nil) },
 	} {
 		t.Run(name, func(t *testing.T) {

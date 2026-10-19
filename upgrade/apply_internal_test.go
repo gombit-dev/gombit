@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/gombit-dev/gombit/migrations"
 )
 
 const applyFixture = `format: 1
@@ -219,5 +221,100 @@ func TestApplyDependenciesVendorDirectory(t *testing.T) {
 	}
 	if len(a.FollowUp) != 1 || !strings.Contains(a.FollowUp[0], "go mod vendor") {
 		t.Fatalf("FollowUp = %v; want the vendor refresh for a vendor/ without modules.txt", a.FollowUp)
+	}
+}
+
+// TestApplyDependenciesNeverMigrates: an upgrade across a framework-schema
+// change runs the go commands only, never a migration, and says the
+// upgrade is not complete: the migration steps are listed, and
+// migration_required is set, before anything counts the dependency change
+// as done.
+func TestApplyDependenciesNeverMigrates(t *testing.T) {
+	m, err := ParseManifest([]byte(`format: 1
+releases:
+  - version: v0.6.1
+  - version: v0.8.0
+    changes:
+      - id: refresh-device
+        kind: manual
+        area: schema
+        summary: s
+        details: d
+        schema:
+          - {model: auth.RefreshToken, table: refresh_tokens, change: altered}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeGo{}
+	withFakeGo(t, f)
+	dir := applyApp(t, applyGoMod)
+	migrationDir := filepath.Join(dir, "database", "migrations")
+	if err := os.MkdirAll(migrationDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrations.SaveRegistry(migrationDir, []migrations.Model{{ImportPath: "github.com/gombit-dev/gombit/auth", TypeName: "RefreshToken"}}); err != nil {
+		t.Fatal(err)
+	}
+	a, err := ApplyDependencies(context.Background(), dir, m, "v0.8.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, call := range f.calls {
+		if call[0] != "mod" && call[0] != "get" {
+			t.Fatalf("ran go %v; the upgrade runs only go mod edit and go get", call)
+		}
+	}
+	if !a.MigrationRequired || !a.Plan.Schema.MigrationRequired() {
+		t.Fatalf("Applied = %+v; want the migration required", a)
+	}
+	var out strings.Builder
+	if err := a.Render(&out); err != nil {
+		t.Fatal(err)
+	}
+	notDone := strings.Index(out.String(), "Not complete yet")
+	steps := strings.Index(out.String(), "Required migration steps")
+	if notDone < 0 || steps < notDone || !strings.Contains(out.String(), "No migration was run.") || !strings.Contains(out.String(), "gombit db migrate") {
+		t.Fatalf("Render:\n%s", out.String())
+	}
+}
+
+// TestApplyDependenciesReadsTheRegistryFirst: the framework-schema
+// analysis, in the migration directory asked for, runs as part of the plan,
+// before go.mod is touched: a registry that cannot be read stops the
+// upgrade with nothing changed, and only the directory asked for is read.
+func TestApplyDependenciesReadsTheRegistryFirst(t *testing.T) {
+	m, err := ParseManifest([]byte(applyFixture))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeGo{}
+	withFakeGo(t, f)
+	dir := applyApp(t, applyGoMod)
+	for name, content := range map[string]string{"db/migrations/models.json": "{", "database/migrations/models.json": "{"} {
+		path := filepath.Join(dir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := ApplyDependenciesWith(context.Background(), dir, m, "v0.8.0", PlanOptions{MigrationDir: "db/migrations"}); err == nil || !strings.Contains(err.Error(), "model registry") {
+		t.Fatalf("an unreadable registry = %v", err)
+	}
+	if len(f.calls) != 0 {
+		t.Fatalf("go commands ran before the registry was read: %v", f.calls)
+	}
+	if data, _ := os.ReadFile(filepath.Join(dir, "go.mod")); string(data) != applyGoMod { // #nosec G304 -- under t.TempDir()
+		t.Fatal("go.mod changed")
+	}
+	// The directory asked for is the one read: a broken default one does
+	// not matter.
+	if err := os.WriteFile(filepath.Join(dir, "db", "migrations", "models.json"), []byte(`{"models": []}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ApplyDependenciesWith(context.Background(), dir, m, "v0.8.0", PlanOptions{MigrationDir: "db/migrations"}); err != nil {
+		t.Fatalf("with db/migrations readable: %v", err)
 	}
 }

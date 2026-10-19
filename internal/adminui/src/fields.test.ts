@@ -337,6 +337,25 @@ describe("edit round trip (issue #454)", () => {
     expect(editBody({ ...loaded }, loaded, { fields: versioned, version: "version" }).body).toEqual({ version: 3 });
   });
 
+  it("treats a re-picked relation key as no change (issue #452 keeps the picker's strings)", () => {
+    // An integer-keyed belongs_to and many_to_many load as numbers; the
+    // picker emits the string ids of the same keys. That is no change, nor
+    // is a reordered or removed-and-re-added tag.
+    const rel = (name: string, kind: string) =>
+      ({ ...f(name, "relation"), related: { kind, slug: "x", label_field: "name" } }) as unknown as FieldMeta;
+    const relFields = [f("name", "string"), rel("author_id", "belongs_to"), rel("tags", "many_to_many")];
+    const loaded = rowToFormValues({ name: "x", author_id: 5, tags: [1, 2] }, relFields);
+    expect([...changedFieldNames({ ...loaded, author_id: "5", tags: ["1", "2"] }, loaded, relFields)]).toEqual([]);
+    expect([...changedFieldNames({ ...loaded, tags: ["2", "1"] }, loaded, relFields)]).toEqual([]);
+    expect(editBody({ ...loaded, author_id: "5", tags: ["1", "2"] }, loaded, { fields: relFields }).body).toEqual({});
+    // A different key, or a different set, is a change.
+    expect([...changedFieldNames({ ...loaded, author_id: "6", tags: ["1", "2", "3"] }, loaded, relFields)].sort()).toEqual(["author_id", "tags"]);
+    // Clearing a relation is a change; two empties are not.
+    expect([...changedFieldNames({ ...loaded, author_id: "" }, loaded, relFields)]).toEqual(["author_id"]);
+    const none = rowToFormValues({ name: "x", author_id: null, tags: [] }, relFields);
+    expect([...changedFieldNames({ ...none, author_id: "", tags: [] }, none, relFields)]).toEqual([]);
+  });
+
   it("sends an integer past 2^53 as its digits", () => {
     const { body } = formValuesToBody({ big: "9007199254740993" }, [f("big", "integer")]);
     expect(body.big).toBe("9007199254740993");
