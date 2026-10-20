@@ -43,7 +43,13 @@ type GenerateFunc func(ctx context.Context, spec []byte) error
 
 // Options configures `gombit dev`.
 type Options struct {
-	WorkDir      string
+	WorkDir string
+	// HTTPAddr is the Go API listen address. Run normalises it before anything
+	// is started, so its consumers — the child's GOMBIT_HTTP_ADDR and the
+	// service table's origin — read the same host:port form. An Options built
+	// outside Run has not been normalised; bare ports stay bare there. A value
+	// Run had to rewrite is reported on Stderr, because outside dev the app
+	// reads its GOMBIT_HTTP_ADDR verbatim.
 	HTTPAddr     string
 	APIPrefix    string
 	FrontendHost string
@@ -89,6 +95,21 @@ func (opts *Options) normalize() error {
 	if opts.HTTPAddr == "" {
 		opts.HTTPAddr = DefaultHTTPAddr
 	}
+	// The child backend reads this value as GOMBIT_HTTP_ADDR verbatim, so the
+	// normalisation validation performs has to be the value that is kept:
+	// `--http 8080` means `:8080`, not a bare port the Go API cannot listen on.
+	httpAddr, err := parseListenAddr(opts.HTTPAddr)
+	if err != nil {
+		return fmt.Errorf("dev: --http: %w", err)
+	}
+	if httpAddr != opts.HTTPAddr {
+		// The rewrite is only safe here. An app started without `gombit dev`
+		// reads its config address verbatim, so say out loud that the value
+		// the user wrote is the one that has to change.
+		fmt.Fprintf(opts.Stderr, "gombit dev: normalised the API address %q to %q; keep the %q form in .env — go run ./cmd/server and a deployed binary read GOMBIT_HTTP_ADDR verbatim\n",
+			opts.HTTPAddr, httpAddr, httpAddr)
+	}
+	opts.HTTPAddr = httpAddr
 	if opts.APIPrefix == "" {
 		opts.APIPrefix = "/api/v1"
 	}
@@ -177,13 +198,20 @@ func parseListenAddr(addr string) (hostPort string, err error) {
 	if err != nil {
 		return "", err
 	}
-	if _, err := strconv.Atoi(port); err != nil {
+	n, err := strconv.Atoi(port)
+	if err != nil {
 		return "", fmt.Errorf("invalid port %q", port)
 	}
-	if host == "" && port == "" {
-		return "", errors.New("address must not be empty")
+	// A port strconv.Atoi accepts is not necessarily one net.Listen accepts:
+	// 99999 and -1 parse fine and fail only in the child, after the frontend is
+	// already up.
+	if n < 1 || n > 65535 {
+		return "", fmt.Errorf("port %q must be between 1 and 65535", port)
 	}
-	return addr, nil
+	// Return the reconstructed address rather than the input: Atoi is lenient
+	// about a form the next parser is not, so `+8080` would validate here and
+	// then fail in net/url, leaving the watcher with an origin it cannot fetch.
+	return net.JoinHostPort(host, strconv.Itoa(n)), nil
 }
 
 func originFromAddr(addr string) string {
