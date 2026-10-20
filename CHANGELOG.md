@@ -205,6 +205,21 @@ version.
   later must be installed first. The benchmark Docker images build with Go
   1.26.9 ([#602](https://github.com/gombit-dev/gombit/pull/602)).
 
+### Fixed
+
+- `gombit dev --http` normalises the address it validates, instead of checking
+  one value and passing another to the backend. A bare port (`8080`) now reaches
+  `GOMBIT_HTTP_ADDR` as `:8080`, and a port outside 1–65535 (`:99999`, `:-1`,
+  `:0`) is refused before anything starts. `parseListenAddr` normalised only for
+  its own check and `childEnv` forwarded the raw flag value, so the service
+  table advertised `http://127.0.0.1:8080` while the backend died on
+  `listen tcp: address 8080: missing port in address` and `gombit dev` kept
+  running with only Vite up. The canonical form is what is kept, so `+8080`
+  cannot reach `net/url` as a port it rejects. A rewrite is reported on stderr:
+  dev only fixes the copy it hands the child, so a `.env` value of
+  `GOMBIT_HTTP_ADDR=8080` still fails outside dev
+  ([#513](https://github.com/gombit-dev/gombit/issues/513)).
+
 ## [0.8.0] — 2026-10-18
 
 ### Added
@@ -668,15 +683,6 @@ version.
   `framework.New`, `contract.HumaConfigFor` logs the failure through `slog`; a
   writer on which the status cannot be confirmed to change gets the error back
   to Huma as before ([#442](https://github.com/gombit-dev/gombit/issues/442)).
-- `gombit dev --http` normalises the address it validates, instead of checking
-  one value and passing another to the backend. A bare port (`8080`) now reaches
-  `GOMBIT_HTTP_ADDR` as `:8080`, and a port outside 1–65535 (`:99999`, `:-1`,
-  `:0`) is refused before anything starts. `parseListenAddr` normalised only for
-  its own check and `childEnv` forwarded the raw flag value, so the service
-  table advertised `http://127.0.0.1:8080` while the backend died on
-  `listen tcp: address 8080: missing port in address` and `gombit dev` kept
-  running with only Vite up
-  ([#513](https://github.com/gombit-dev/gombit/issues/513)).
 
 ## [0.7.0] — 2026-10-04
 
