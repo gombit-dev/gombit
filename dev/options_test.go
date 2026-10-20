@@ -1,7 +1,10 @@
 package dev
 
 import (
+	"bytes"
 	"net"
+	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -157,6 +160,8 @@ func TestNormalizeKeepsTheHTTPAddrTheChildCanListenOn(t *testing.T) {
 	}{
 		{name: "bare port", in: "8080", want: ":8080"},
 		{name: "already normalised", in: ":8080", want: ":8080"},
+		{name: "signed port", in: "+8080", want: ":8080"},
+		{name: "zero-padded port", in: "08080", want: ":8080"},
 		{name: "with a host", in: "127.0.0.1:9090", want: "127.0.0.1:9090"},
 		{name: "ipv6", in: "[::1]:8080", want: "[::1]:8080"},
 		{name: "surrounding whitespace", in: " 8080 ", want: ":8080"},
@@ -178,10 +183,87 @@ func TestNormalizeKeepsTheHTTPAddrTheChildCanListenOn(t *testing.T) {
 			if len(got) != 1 || got[0] != tt.want {
 				t.Fatalf("child GOMBIT_HTTP_ADDR = %v, want exactly [%s]", got, tt.want)
 			}
-			if _, _, err := net.SplitHostPort(got[0]); err != nil {
-				t.Fatalf("child GOMBIT_HTTP_ADDR = %q, the backend cannot listen on it: %v", got[0], err)
-			}
+			assertAddrUsable(t, got[0])
 		})
+	}
+}
+
+// assertAddrUsable checks the address the way each consumer reads it: the
+// backend binds it with net.Listen, and the service table, GOMBIT_DEV_BACKEND
+// and the OpenAPI watcher all hand the origin built from it to net/url.
+// net.SplitHostPort alone would pass on ":99999" and ":+8080" — both parse
+// there and neither survives the second hop.
+func assertAddrUsable(t *testing.T, addr string) {
+	t.Helper()
+
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("the backend cannot listen on %q: %v", addr, err)
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 1 || n > 65535 {
+		t.Fatalf("port %q of %q is not one net.Listen can bind: %v", port, addr, err)
+	}
+	// Bind the same host on an ephemeral port: 8080 is not free on every
+	// runner, and the host form is what this assertion can prove.
+	ln, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
+	if err != nil {
+		t.Fatalf("the backend cannot listen on %q: %v", addr, err)
+	}
+	defer func() {
+		_ = ln.Close()
+	}()
+
+	origin := originFromAddr(addr)
+	u, err := url.Parse(origin + "/openapi.json")
+	if err != nil {
+		t.Fatalf("originFromAddr(%q) = %q, which the OpenAPI watcher cannot fetch: %v", addr, origin, err)
+	}
+	if u.Host == "" || u.Path != "/openapi.json" {
+		t.Fatalf("originFromAddr(%q) = %q, want a host and the polled path", addr, origin)
+	}
+	backend := envKeyValues(childEnv(nil, Options{HTTPAddr: addr}, origin), "GOMBIT_DEV_BACKEND")
+	if len(backend) != 1 {
+		t.Fatalf("child GOMBIT_DEV_BACKEND = %v, want exactly one value", backend)
+	}
+	if _, err := url.Parse(backend[0]); err != nil {
+		t.Fatalf("child GOMBIT_DEV_BACKEND = %q, which Vite cannot parse as a proxy target: %v", backend[0], err)
+	}
+}
+
+// A rewritten address is the case dev must not keep quiet about: dev can hand
+// the child ":8080" for a value written as "8080", but the same .env read by
+// go run ./cmd/server is not a listen address at all. normalize says the
+// rewrite out loud so the user fixes the value rather than the symptom.
+func TestNormalizeReportsAnAddrItHadToRewrite(t *testing.T) {
+	t.Parallel()
+
+	var stderr bytes.Buffer
+	opts := Options{
+		HTTPAddr: HTTPAddrFromConfig(config.Config{HTTP: config.HTTPConfig{Addr: "8080"}}),
+		Stderr:   &stderr,
+	}
+	if err := opts.normalize(); err != nil {
+		t.Fatalf("normalize() = %v, want nil", err)
+	}
+	if opts.HTTPAddr != ":8080" {
+		t.Fatalf("opts.HTTPAddr = %q, want %q", opts.HTTPAddr, ":8080")
+	}
+	got := stderr.String()
+	if !strings.Contains(got, `"8080"`) || !strings.Contains(got, `":8080"`) {
+		t.Fatalf("stderr = %q, want it to name both the value written and the one dev used", got)
+	}
+	if !strings.Contains(got, "GOMBIT_HTTP_ADDR") {
+		t.Fatalf("stderr = %q, want it to point at the config key to fix", got)
+	}
+
+	stderr.Reset()
+	already := Options{HTTPAddr: ":8080", Stderr: &stderr}
+	if err := already.normalize(); err != nil {
+		t.Fatalf("normalize() = %v, want nil", err)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want nothing for an address dev did not have to rewrite", stderr.String())
 	}
 }
 
@@ -224,9 +306,7 @@ func TestNormalizeKeepsTheConfiguredHTTPAddrListenable(t *testing.T) {
 			if len(got) != 1 || got[0] != tt.want {
 				t.Fatalf("child GOMBIT_HTTP_ADDR = %v, want exactly [%s]", got, tt.want)
 			}
-			if _, _, err := net.SplitHostPort(got[0]); err != nil {
-				t.Fatalf("child GOMBIT_HTTP_ADDR = %q, the backend cannot listen on it: %v", got[0], err)
-			}
+			assertAddrUsable(t, got[0])
 		})
 	}
 
