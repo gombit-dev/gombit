@@ -12,6 +12,13 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 ### Informational
 
+- The framework requires Go 1.26.9 (`go 1.26.9` in go.mod), and `gombit new` pins it. (`go-1-26-9`, dependency, [#602](https://github.com/gombit-dev/gombit/issues/602))
+
+  An app's `go` line is raised to 1.26.9 by `go get` or `go mod tidy`
+  when it moves to this release. With the default `GOTOOLCHAIN=auto`
+  the go command downloads that toolchain; with `GOTOOLCHAIN=local`,
+  or in a build image, install Go 1.26.9 or later first.
+
 - Admin writes refuse an integer the field's Go type cannot hold, and a JSON number from 2^53 on, with a 422 on that field. (`admin-integers-must-fit`, behavior, [#448](https://github.com/gombit-dev/gombit/issues/448))
 
   They were stored wrapped (`300` into an `int8` became `44`; `-5` into

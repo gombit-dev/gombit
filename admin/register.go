@@ -192,6 +192,9 @@ func registerModel(host Host, model any, opts Options) error {
 		}
 	}
 	m.version = detectVersionField(sch)
+	if m.version != nil {
+		m.meta.Version = m.version.name
+	}
 	// The optimistic-lock update path (updateVersioned) and the many-to-many
 	// join sync are separate write paths; combining them on one model would
 	// silently drop the m2m write on a versioned PATCH. Refuse the combination

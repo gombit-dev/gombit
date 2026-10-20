@@ -12,6 +12,14 @@ version.
 
 ### Fixed
 
+- Saving the admin edit form no longer rewrites fields the operator did not
+  touch: it sent every field back, so each save truncated a datetime to the
+  minute (`12:30:45.123456` became `12:30:00`) and an integer past 2^53 to
+  its rounded neighbor. The form now PATCHes only the fields that changed,
+  plus the model's optimistic-lock version as loaded (the admin meta names it
+  in a new `version` key), so a concurrent edit is still a 409; it sends an
+  integer past 2^53 as a string
+  ([#454](https://github.com/gombit-dev/gombit/issues/454)).
 - Admin writes refuse an integer the field's Go type cannot hold with a 422
   on that field. `300` into an `int8` was stored as `44`, `3000000000` into
   an `int32` wrapped, and `-5` into a `uint` was stored as a value the list
@@ -21,6 +29,16 @@ version.
   One equal to the stored value rounded the same way (the admin UI sending
   the field back, an integer field or a belongs_to key alike) keeps the
   stored value ([#448](https://github.com/gombit-dev/gombit/issues/448)).
+
+### Changed
+
+- The framework requires **Go 1.26.9** (`go 1.26.9` in `go.mod`, up from
+  `go 1.26.0`), and `gombit new` pins it in a new app's `go.mod`. An app that
+  moves to this release gets its `go` line raised by `go get` or `go mod
+  tidy`: with the default `GOTOOLCHAIN=auto` the go command downloads the
+  toolchain, and with `GOTOOLCHAIN=local` (or in a build image) Go 1.26.9 or
+  later must be installed first. The benchmark Docker images build with Go
+  1.26.9 ([#602](https://github.com/gombit-dev/gombit/pull/602)).
 
 ## [0.8.0] — 2026-10-18
 

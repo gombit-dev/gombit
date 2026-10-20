@@ -87,6 +87,8 @@ export type ModelMeta = {
   singular: string;
   plural: string;
   pk: string;
+  /** The optimistic-lock field an update guards on, when the model has one. */
+  version?: string;
   fields: FieldMeta[];
   list: string[];
   search: string[];

@@ -376,7 +376,9 @@ func TestActionsAreImplemented(t *testing.T) {
 // declares, and one that matches nothing in Unreleased fails the gate. A
 // follow-up to an issue a release declares cannot be exempt: if it means
 // nothing for an app, its entry links its own pull request instead.
-var changelogExempt = map[int]string{}
+var changelogExempt = map[int]string{
+	454: "the bundled admin UI (internal/adminui): nothing in an application",
+}
 
 // changelogUndeclaredHelp says what to do about CHANGELOG issues the
 // manifest does not classify: the entry to add, or the exemption.

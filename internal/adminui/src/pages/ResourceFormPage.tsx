@@ -11,7 +11,7 @@ import { ContractError } from "../api/error";
 import { FieldWidget } from "../components/FieldWidget";
 import { canCreate, canPopulateEditForm, canUpdate, canViewDetail } from "../capabilities";
 import { spaDetailPath, spaListPath } from "../api/paths";
-import { emptyFormValue, formValuesToBody, rowToFormValues, writableFields } from "../fields";
+import { editBody, emptyFormValue, formValuesToBody, rowToFormValues, writableFields } from "../fields";
 import { uploadsToDrop } from "../files";
 import type { Row } from "../api/types";
 
@@ -109,7 +109,11 @@ export function ResourceFormPage({ mode }: Props) {
       return;
     }
     setStatus("");
-    const { body, jsonErrors } = formValuesToBody(values, model.fields);
+    // An edit sends only the fields it changed (an untouched field is not
+    // written back through the form's lossy representation), plus the
+    // optimistic-lock version it loaded (issue #454).
+    const { body, jsonErrors } =
+      mode === "edit" ? editBody(values, loaded.current, model) : formValuesToBody(values, model.fields);
     if (Object.keys(jsonErrors).length > 0) {
       for (const [name, message] of Object.entries(jsonErrors)) {
         setError(name, { type: "validate", message });
