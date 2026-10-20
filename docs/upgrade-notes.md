@@ -27,7 +27,10 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   address 8080: missing port in address`, and `gombit dev` kept
   running with only Vite up. `:0`, `:-1` and `:99999` are refused now
   instead of failing the same way mid-run. An address already in
-  `host:port` form is untouched.
+  `host:port` form is untouched. A value dev had to rewrite is printed
+  on stderr, because only the child sees the rewrite: an app reading
+  `GOMBIT_HTTP_ADDR=8080` from `.env` still fails under
+  `go run ./cmd/server`, so keep the `:8080` form in the config.
 
 ## v0.8.0
 
