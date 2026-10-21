@@ -1,7 +1,9 @@
 package admin
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -22,8 +24,9 @@ type handlers struct {
 
 // Mount registers the admin Huma routes on host.API() when cookie auth is on.
 // The catalog is empty until Register is called. framework.New calls Mount
-// automatically in cookie mode; JWT-only apps must not call it.
-func Mount(host Host) error {
+// automatically in cookie mode, with the app's auth options (its Auditor,
+// which records the admin's writes); JWT-only apps must not call it.
+func Mount(host Host, opts ...auth.Option) error {
 	if host == nil {
 		return errors.New("admin: nil host")
 	}
@@ -37,7 +40,7 @@ func Mount(host Host) error {
 	if host.DB() == nil {
 		return errors.New("admin: nil database")
 	}
-	svc, err := auth.NewService(host.DB(), cfg)
+	svc, err := auth.NewService(host.DB(), cfg, opts...)
 	if err != nil {
 		return err
 	}
@@ -55,7 +58,7 @@ func mountRoutes(host Host, reg *registry, svc *auth.Service) {
 		prefix = "/api/v1"
 	}
 	h := &handlers{reg: reg, host: host}
-	gates := huma.Middlewares{svc.RequireCookieSession(), attachQuery}
+	gates := huma.Middlewares{auth.CaptureRequestInfo(), svc.RequireCookieSession(), attachQuery}
 	security := []map[string][]string{{cookieSecurityName: {}}}
 	tags := []string{"Admin"}
 
@@ -97,7 +100,9 @@ func mountRoutes(host Host, reg *registry, svc *auth.Service) {
 		Tags:        tags,
 		Security:    security,
 		Middlewares: gates,
-	}, h.createResource)
+	}, auditedWrite(svc, auth.AuditAdminCreated, h.createResource, func(in *writeInput, out *rowOutput) (string, string) {
+		return in.Slug, h.pkOf(in.Slug, out)
+	}))
 
 	huma.Register(host.API(), huma.Operation{
 		OperationID: "admin-resource-get",
@@ -117,7 +122,9 @@ func mountRoutes(host Host, reg *registry, svc *auth.Service) {
 		Tags:        tags,
 		Security:    security,
 		Middlewares: gates,
-	}, h.updateResource)
+	}, auditedWrite(svc, auth.AuditAdminUpdated, h.updateResource, func(in *patchInput, _ *rowOutput) (string, string) {
+		return in.Slug, in.ID
+	}))
 
 	huma.Register(host.API(), huma.Operation{
 		OperationID: "admin-resource-delete",
@@ -127,7 +134,9 @@ func mountRoutes(host Host, reg *registry, svc *auth.Service) {
 		Tags:        tags,
 		Security:    security,
 		Middlewares: gates,
-	}, h.deleteResource)
+	}, auditedWrite(svc, auth.AuditAdminDeleted, h.deleteResource, func(in *itemInput, _ *deleteOutput) (string, string) {
+		return in.Slug, in.ID
+	}))
 
 	mountFileRoutes(host.API(), h, prefix, gates, security, tags)
 }
@@ -140,4 +149,34 @@ func attachQuery(ctx huma.Context, next func(huma.Context)) {
 func queryValues(ctx interface{ Value(any) any }) url.Values {
 	v, _ := ctx.Value(queryValuesKey{}).(url.Values)
 	return v
+}
+
+// auditedWrite records a successful admin write in the security audit
+// trail (AUTH-7), through the Service's Auditor: the admin who made it (the
+// session's user), the model's slug and the record's primary key, and the
+// request. The write has committed by then, so a failure to record it is
+// logged, and is not the request's.
+func auditedWrite[I, O any](svc *auth.Service, action auth.AuditAction, handler func(context.Context, *I) (*O, error), target func(*I, *O) (slug, id string)) func(context.Context, *I) (*O, error) {
+	return func(ctx context.Context, in *I) (*O, error) {
+		out, err := handler(ctx, in)
+		if err != nil {
+			return out, err
+		}
+		slug, id := target(in, out)
+		svc.Audit(ctx, auth.AuditEvent{Action: action, TargetType: slug, TargetID: id})
+		return out, nil
+	}
+}
+
+// pkOf is the primary key of a written row, as the API shows it.
+func (h *handlers) pkOf(slug string, out *rowOutput) string {
+	m, ok := h.reg.get(slug)
+	if !ok || out == nil {
+		return ""
+	}
+	v, ok := out.Body.Data[m.meta.PK]
+	if !ok || v == nil {
+		return ""
+	}
+	return fmt.Sprint(v)
 }

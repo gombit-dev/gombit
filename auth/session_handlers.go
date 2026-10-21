@@ -56,7 +56,7 @@ func registerSessionRoutes(api huma.API, svc *Service, prefix, security string, 
 		Middlewares: huma.Middlewares{gate},
 	}, svc.listSessions)
 
-	revokeOne := huma.Operation{
+	revokeOne := withRequestInfo(huma.Operation{
 		OperationID: "auth-revoke-session",
 		Method:      http.MethodDelete,
 		Path:        prefix + "/auth/sessions/{id}",
@@ -65,8 +65,8 @@ func registerSessionRoutes(api huma.API, svc *Service, prefix, security string, 
 		Tags:        []string{"Auth"},
 		Security:    secured,
 		Middlewares: huma.Middlewares{gate},
-	}
-	revokeMany := huma.Operation{
+	})
+	revokeMany := withRequestInfo(huma.Operation{
 		OperationID: "auth-revoke-sessions",
 		Method:      http.MethodDelete,
 		Path:        prefix + "/auth/sessions",
@@ -74,7 +74,7 @@ func registerSessionRoutes(api huma.API, svc *Service, prefix, security string, 
 		Tags:        []string{"Auth"},
 		Security:    secured,
 		Middlewares: huma.Middlewares{gate},
-	}
+	})
 	if cookieMode {
 		huma.Register(api, revokeOne, svc.revokeSessionCookie)
 		huma.Register(api, revokeMany, svc.revokeSessionsCookie)

@@ -39,13 +39,13 @@ func Mount(api huma.API, db *gorm.DB, cfg config.Config, opts ...Option) error {
 		prefix = "/api/v1"
 	}
 
-	huma.Register(api, huma.Operation{
+	huma.Register(api, withRequestInfo(huma.Operation{
 		OperationID: "register",
 		Method:      http.MethodPost,
 		Path:        prefix + "/auth/register",
 		Summary:     "Register a user",
 		Tags:        []string{"Auth"},
-	}, svc.register)
+	}), svc.register)
 
 	if cfg.Auth.EffectiveMode() == config.AuthModeCookie {
 		mountCookieRoutes(api, svc, prefix)
@@ -58,29 +58,29 @@ func Mount(api huma.API, db *gorm.DB, cfg config.Config, opts ...Option) error {
 func mountBearerRoutes(api huma.API, svc *Service, prefix string) {
 	installBearerScheme(api)
 
-	huma.Register(api, huma.Operation{
+	huma.Register(api, withRequestInfo(huma.Operation{
 		OperationID: "login",
 		Method:      http.MethodPost,
 		Path:        prefix + "/auth/login",
 		Summary:     "Log in and issue Bearer tokens",
 		Tags:        []string{"Auth"},
-	}, svc.login)
+	}), svc.login)
 
-	huma.Register(api, huma.Operation{
+	huma.Register(api, withRequestInfo(huma.Operation{
 		OperationID: "refresh",
 		Method:      http.MethodPost,
 		Path:        prefix + "/auth/refresh",
 		Summary:     "Rotate the refresh token and issue a new access token",
 		Tags:        []string{"Auth"},
-	}, svc.refresh)
+	}), svc.refresh)
 
-	huma.Register(api, huma.Operation{
+	huma.Register(api, withRequestInfo(huma.Operation{
 		OperationID: "logout",
 		Method:      http.MethodPost,
 		Path:        prefix + "/auth/logout",
 		Summary:     "Revoke the current refresh token",
 		Tags:        []string{"Auth"},
-	}, svc.logout)
+	}), svc.logout)
 
 	huma.Register(api, huma.Operation{
 		OperationID: "get-me",
@@ -107,29 +107,29 @@ func mountCookieRoutes(api huma.API, svc *Service, prefix string) {
 		Tags:        []string{"Auth"},
 	}, svc.issueCSRFToken)
 
-	huma.Register(api, huma.Operation{
+	huma.Register(api, withRequestInfo(huma.Operation{
 		OperationID: "login",
 		Method:      http.MethodPost,
 		Path:        prefix + "/auth/login",
 		Summary:     "Log in and start an HttpOnly cookie session",
 		Tags:        []string{"Auth"},
-	}, svc.loginCookie)
+	}), svc.loginCookie)
 
-	huma.Register(api, huma.Operation{
+	huma.Register(api, withRequestInfo(huma.Operation{
 		OperationID: "refresh",
 		Method:      http.MethodPost,
 		Path:        prefix + "/auth/refresh",
 		Summary:     "Rotate the session cookies",
 		Tags:        []string{"Auth"},
-	}, svc.refreshCookie)
+	}), svc.refreshCookie)
 
-	huma.Register(api, huma.Operation{
+	huma.Register(api, withRequestInfo(huma.Operation{
 		OperationID: "logout",
 		Method:      http.MethodPost,
 		Path:        prefix + "/auth/logout",
 		Summary:     "Revoke the current session and clear cookies",
 		Tags:        []string{"Auth"},
-	}, svc.logoutCookie)
+	}), svc.logoutCookie)
 
 	huma.Register(api, huma.Operation{
 		OperationID: "get-me",

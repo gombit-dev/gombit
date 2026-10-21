@@ -107,7 +107,11 @@ func AddUserToGroup(ctx context.Context, db *gorm.DB, user *User, group *Group) 
 	if err := validateAssociation(db, user != nil && user.ID != 0, group != nil && group.ID != 0); err != nil {
 		return err
 	}
-	return db.WithContext(ctx).Model(user).Association("Groups").Append(group)
+	if err := db.WithContext(ctx).Model(user).Association("Groups").Append(group); err != nil {
+		return err
+	}
+	recordHelperEvent(ctx, db, AuditEvent{Action: AuditGroupMemberAdded, TargetUserID: uintPtr(user.ID), Details: details("group", group.Name)})
+	return nil
 }
 
 // GrantPermissionToGroup grants a persisted permission to a persisted group.
@@ -115,7 +119,11 @@ func GrantPermissionToGroup(ctx context.Context, db *gorm.DB, group *Group, perm
 	if err := validateAssociation(db, group != nil && group.ID != 0, permission != nil && permission.ID != 0); err != nil {
 		return err
 	}
-	return db.WithContext(ctx).Model(group).Association("Permissions").Append(permission)
+	if err := db.WithContext(ctx).Model(group).Association("Permissions").Append(permission); err != nil {
+		return err
+	}
+	recordHelperEvent(ctx, db, AuditEvent{Action: AuditPermissionGranted, TargetType: "group", TargetID: group.Name, Details: details("group", group.Name, "permission", permission.Key)})
+	return nil
 }
 
 // GrantPermissionToUser grants a persisted permission directly to a user.
@@ -123,7 +131,18 @@ func GrantPermissionToUser(ctx context.Context, db *gorm.DB, user *User, permiss
 	if err := validateAssociation(db, user != nil && user.ID != 0, permission != nil && permission.ID != 0); err != nil {
 		return err
 	}
-	return db.WithContext(ctx).Model(user).Association("Permissions").Append(permission)
+	if err := db.WithContext(ctx).Model(user).Association("Permissions").Append(permission); err != nil {
+		return err
+	}
+	recordHelperEvent(ctx, db, AuditEvent{Action: AuditPermissionGranted, TargetUserID: uintPtr(user.ID), Details: details("permission", permission.Key)})
+	return nil
+}
+
+// recordHelperEvent records a grant made through the helpers above. It does
+// not fail the grant, which has already happened: an application that has
+// not migrated auth_audit_events keeps granting.
+func recordHelperEvent(ctx context.Context, db *gorm.DB, event AuditEvent) {
+	_ = RecordAuditEvent(ctx, db, event)
 }
 
 func validateAssociation(db *gorm.DB, owners ...bool) error {

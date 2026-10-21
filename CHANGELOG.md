@@ -12,6 +12,19 @@ version.
 
 ### Added
 
+- A [security audit trail](docs/auth.md#audit-trail) (AUTH-7): logins
+  (succeeded and failed), logouts, registrations, superuser creation,
+  refresh-token reuse, session revocations, email verification, group and
+  permission grants, and admin writes each record the actor, the target, the
+  time, and the request (request id, client IP, user agent) in a new table,
+  `auth_audit_events`, never a secret. `auth.ListAuditEvents` reads it;
+  `framework.WithAuthAuditor` sends the events to the app's own
+  `auth.Auditor`; `auth.RecordAuditEvent` and `auth.CaptureRequestInfo`
+  record an app's own operations. Migrate the new framework model
+  `auth.AuditEvent` (`gombit upgrade --dry-run` lists the steps); until then
+  each event is a logged warning and the operations still succeed.
+  `admin.Mount` takes auth options
+  ([#337](https://github.com/gombit-dev/gombit/issues/337)).
 - [Email verification](docs/auth.md#email-verification) (AUTH-1), in both
   auth modes. Registration mails a verification message; `POST
   /auth/verify-email` consumes its token and marks the email verified, and

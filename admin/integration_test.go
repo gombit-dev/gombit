@@ -38,6 +38,20 @@ func TestResourceMySQL(t *testing.T) {
 	runResourceDriver(t, config.DatabaseDriverMySQL, *mysqlDSN)
 }
 
+func TestAdminAuditPostgres(t *testing.T) {
+	if *postgresDSN == "" {
+		t.Skip("set -admin.postgres-dsn to run Postgres admin integration tests")
+	}
+	runAdminAudit(t, openAdminDriver(t, config.DatabaseDriverPostgres, *postgresDSN))
+}
+
+func TestAdminAuditMySQL(t *testing.T) {
+	if *mysqlDSN == "" {
+		t.Skip("set -admin.mysql-dsn to run MySQL admin integration tests")
+	}
+	runAdminAudit(t, openAdminDriver(t, config.DatabaseDriverMySQL, *mysqlDSN))
+}
+
 func TestTextAdminPostgres(t *testing.T) {
 	if *postgresDSN == "" {
 		t.Skip("set -admin.postgres-dsn to run Postgres admin integration tests")
