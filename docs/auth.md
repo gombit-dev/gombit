@@ -73,10 +73,23 @@ curl -sX POST localhost:8080/api/v1/auth/verify-email \
   `token`; the cases are not told apart.
 - **Resending.** `POST /auth/verify-email/resend` (authenticated) mails a new
   token and **supersedes** the earlier ones: only the latest link works. A
-  user may ask once a minute (429 with `Retry-After`); a verified user gets a
-  409. A message the mailer could not send is withdrawn (503): the earlier
-  link keeps working, and the user can ask again at once. On SQLite, which
-  has no row locks, two resends at the very same moment can both be sent.
+  user may ask once a minute (429 with `Retry-After`), counted from the
+  latest message delivered or still being sent; a verified user gets a 409.
+  On SQLite, which has no row locks, two resends at the very same moment can
+  both be sent.
+- **Failures.** A new token is written *pending*, and does not work until
+  its message was delivered: the mailer's `Send` returned nil. Delivery then
+  activates it and supersedes the earlier tokens in one transaction. So
+  whatever fails, either the new link works and no earlier one does, or
+  nothing changed and the earlier link keeps working. A message the mailer
+  could not send (503), or whose token could not be activated (500), is
+  withdrawn, and the user can ask again at once; if withdrawing it fails
+  too, the token stays pending (it never works) and counts as a message in
+  flight until the minute is up.
+- **Bound to the address.** A verification is for the address it proved
+  (`User.VerifiedEmail`): once the user's email is another one, by any path
+  (a GORM update, the admin), `User.EmailVerified()` is false and
+  `RequireVerifiedEmail` denies until the new address is verified.
 - **The link.** `GOMBIT_AUTH_EMAIL_VERIFICATION_URL` is the page the message
   links to, with `{token}` where the token goes
   (`https://app.example.com/verify-email?token={token}`); that page posts the
@@ -97,7 +110,9 @@ curl -sX POST localhost:8080/api/v1/auth/verify-email \
   In cookie mode the gate is `svc.RequireCookieSession()`. Login does not
   require a verified email: an app decides which actions do.
 - **Superusers.** `gombit createsuperuser` creates a verified user, and sends
-  nothing. Users that existed before this release start unverified.
+  nothing. Users that existed before this release start unverified; to mark
+  one verified, set both `email_verified_at` and `verified_email` (to its
+  `email`).
 
 ### Sending the messages
 
@@ -119,9 +134,12 @@ app, err := framework.New(framework.WithAuthMailer(smtpMailer{}))
 `msg.Token` is a credential: never log it. Without a mailer, development and
 test apps log each message, link and token included (`auth.LogMailer`), so the
 flow works locally; a production app sends none (registration still succeeds,
-a resend is a 503) and logs a warning at startup. Registration sends its
-message on the request: a mailer that is slow makes registration slow (queue
-the delivery in the mailer to avoid it).
+a resend is a 503) and logs a warning at startup. `Send` is synchronous: it
+returns nil once the provider accepted the message, because that is when its
+link starts working and the earlier ones stop. Don't return nil after only
+queueing the message: the earlier link would be superseded before the new
+one arrives. Registration sends its message on the request, so a slow mailer
+makes registration slow.
 
 Tests use `authtest.Mailer`, which records the messages instead of sending
 them:

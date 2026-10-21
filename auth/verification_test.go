@@ -299,6 +299,60 @@ func runEmailVerificationService(t *testing.T, db *database.DB) {
 		}
 	})
 
+	t.Run("a verification lapses when the email changes", func(t *testing.T) {
+		e := newVerificationEnv(t, db)
+		user, token := e.register(t, "lapse")
+		if _, err := e.svc.VerifyEmail(ctx, token); err != nil {
+			t.Fatal(err)
+		}
+		// An ordinary update, outside the framework: the new address is not
+		// proven, so the user is not verified.
+		moved := "moved-" + user.Email
+		if err := e.db.Model(&auth.User{}).Where("id = ?", user.ID).Update("email", moved).Error; err != nil {
+			t.Fatal(err)
+		}
+		var reloaded auth.User
+		if err := e.db.First(&reloaded, user.ID).Error; err != nil {
+			t.Fatal(err)
+		}
+		if reloaded.EmailVerified() {
+			t.Fatal("the user is verified for an address nobody proved")
+		}
+		e.clock.now = e.clock.now.Add(time.Minute)
+		if err := e.svc.SendEmailVerification(ctx, reloaded); err != nil {
+			t.Fatalf("a resend for the new address: %v", err)
+		}
+		msg, ok := e.mail.Last(moved)
+		if !ok {
+			t.Fatal("no message to the new address")
+		}
+		verified, err := e.svc.VerifyEmail(ctx, msg.Token)
+		if err != nil || !verified.EmailVerified() || verified.VerifiedEmail != moved {
+			t.Fatalf("verifying the new address = %+v, %v", verified, err)
+		}
+	})
+
+	t.Run("a message in flight holds the wait", func(t *testing.T) {
+		// The second resend finds the first's pending token: it waits out the
+		// interval instead of mailing again while the first is sending.
+		e := newVerificationEnv(t, db)
+		user, _ := e.register(t, "inflight")
+		e.clock.now = e.clock.now.Add(time.Minute)
+		gate := &gateMailer{inner: e.mail, entered: make(chan struct{}), release: make(chan struct{})}
+		auth.SetMailer(e.svc, gate)
+		done := make(chan error, 1)
+		go func() { done <- e.svc.SendEmailVerification(ctx, user) }()
+		<-gate.entered
+		err := e.svc.SendEmailVerification(ctx, user)
+		close(gate.release)
+		if !auth.IsResendTooSoon(err) {
+			t.Fatalf("a resend while another is sending = %v, want the resend wait", err)
+		}
+		if err := <-done; err != nil {
+			t.Fatalf("the resend in flight: %v", err)
+		}
+	})
+
 	t.Run("a failed send is withdrawn", func(t *testing.T) {
 		e := newVerificationEnv(t, db)
 		e.mail.Err = errors.New("smtp down")
@@ -382,6 +436,22 @@ func runEmailVerificationService(t *testing.T, db *database.DB) {
 	})
 }
 
+// gateMailer holds its first Send until release, then sends through inner.
+type gateMailer struct {
+	inner   auth.Mailer
+	once    sync.Once
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (m *gateMailer) Send(ctx context.Context, msg auth.Message) error {
+	m.once.Do(func() {
+		close(m.entered)
+		<-m.release
+	})
+	return m.inner.Send(ctx, msg)
+}
+
 // TestRequireVerifiedEmail: an application's own operation behind the
 // Bearer gate and RequireVerifiedEmail answers 403 for an unverified user,
 // 200 once verified, and 401 without the gate's user.
@@ -427,6 +497,11 @@ func TestRequireVerifiedEmail(t *testing.T) {
 	if rec := bearerPost(app, "/api/v1/verified-only", pair.AccessToken, ""); rec.Code != http.StatusOK {
 		t.Fatalf("verified user = %d %s, want 200", rec.Code, rec.Body.String())
 	}
+	// The email changes outside the framework: the gate denies again.
+	if err := db.Model(&auth.User{}).Where("email = ?", email).Update("email", "other-"+email).Error; err != nil {
+		t.Fatal(err)
+	}
+	assertError(t, bearerPost(app, "/api/v1/verified-only", pair.AccessToken, ""), http.StatusForbidden, "authorization")
 	assertError(t, bearerPost(app, "/api/v1/ungated", pair.AccessToken, ""), http.StatusUnauthorized, "authentication")
 }
 

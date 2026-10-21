@@ -12,12 +12,13 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 ### Manual: action required
 
-- **Breaking.** Email verification adds `users.email_verified_at` and a table, `auth_one_time_tokens`, which registration and `gombit createsuperuser` write: an app migrates before it runs this release. (`email-verification-schema`, schema, [#331](https://github.com/gombit-dev/gombit/issues/331))
+- **Breaking.** Email verification adds `users.email_verified_at` and `users.verified_email`, and a table, `auth_one_time_tokens`, which registration and `gombit createsuperuser` write: an app migrates before it runs this release. (`email-verification-schema`, schema, [#331](https://github.com/gombit-dev/gombit/issues/331))
 
   - Framework schema: `auth.User` (`users`): altered.
   - Framework schema: `auth.OneTimeToken` (`auth_one_time_tokens`): added.
 
-  `auth.User` gains `EmailVerifiedAt`, and the new framework model
+  `auth.User` gains `EmailVerifiedAt` and `VerifiedEmail` (the
+  address the verification is for), and the new framework model
   `auth.OneTimeToken` holds the hashed, single-use tokens the account
   lifecycle mails. Until the database has both, registering a user and
   `gombit createsuperuser` fail. Add `&auth.OneTimeToken{}` to the
@@ -26,7 +27,8 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   github.com/gombit-dev/gombit/auth.OneTimeToken`, `gombit db
   migrate`); `gombit upgrade --dry-run` lists the steps. Existing users
   start unverified; mark the ones you trust by setting
-  `email_verified_at` yourself.
+  `email_verified_at` and `verified_email` (to the user's `email`)
+  yourself.
 
 - **Breaking.** With auth enabled, an app that registers the email verification routes, their `auth-*` operation IDs or the `AuthVerifyEmailBody` / `AuthVerificationResult` schema names fails at startup: the framework registers them. (`email-verification-names-reserved`, api, [#331](https://github.com/gombit-dev/gombit/issues/331))
 

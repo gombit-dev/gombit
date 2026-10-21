@@ -29,7 +29,8 @@ version.
   (`auth.LogMailer`), production apps without one send none (a resend is a
   503), and `authtest.Mailer` records them for tests. `gombit
   createsuperuser` creates verified users.
-  - **Breaking (schema):** `users` gains `email_verified_at`, and
+  - **Breaking (schema):** `users` gains `email_verified_at` and
+    `verified_email` (a verification holds only for the address it proved), and
     `auth.OneTimeToken` is a new framework model: add it to the app's
     `AutoMigrate` and migrate before running this release, or registration
     and `gombit createsuperuser` fail. `gombit upgrade --dry-run` lists the

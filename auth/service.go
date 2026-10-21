@@ -134,6 +134,7 @@ func (s *Service) createUser(ctx context.Context, email, password string, superu
 	if superuser {
 		now := s.now()
 		user.EmailVerifiedAt = &now
+		user.VerifiedEmail = email
 	}
 	if err := s.db.WithContext(ctx).Create(&user).Error; err != nil {
 		if database.IsUniqueViolation(err) {

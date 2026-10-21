@@ -18,9 +18,10 @@ import (
 // Email verification (AUTH-1, #331). A token proves its holder received
 // mail at the address it was issued for. Each is random (32 bytes), stored
 // as its SHA-256, expires after AuthConfig.EmailVerificationTTL, and is
-// consumed by its first use. Sending a new one supersedes every earlier one
-// for the user: only the latest link works. A user may ask for a new one
-// once every verificationResendInterval.
+// consumed by its first use. It is pending until its message was delivered
+// to the Mailer; delivery activates it and supersedes every earlier one for
+// the user, in one transaction: only the latest delivered link works. A
+// user may ask for a new one once every verificationResendInterval.
 
 // verificationResendInterval is how long a user waits between two
 // verification messages.
@@ -30,6 +31,7 @@ var (
 	errInvalidOneTimeToken = errors.New("auth: invalid or expired token")
 	errAlreadyVerified     = errors.New("auth: email is already verified")
 	errMailNotSent         = errors.New("auth: the message could not be sent")
+	errTokenNotPending     = errors.New("auth: the one-time token is no longer pending")
 )
 
 // resendTooSoonError is a verification message asked for within
@@ -41,8 +43,9 @@ func (e resendTooSoonError) Error() string {
 }
 
 // ErrInvalidToken is returned by VerifyEmail for a token that is unknown,
-// expired, already used, superseded by a newer one, or issued for an
-// address the user no longer has. The cases are not told apart.
+// expired, already used, superseded by a newer one, never delivered, or
+// issued for an address the user no longer has. The cases are not told
+// apart.
 var ErrInvalidToken = errInvalidOneTimeToken
 
 // ErrAlreadyVerified is returned by SendEmailVerification for a user whose
@@ -50,22 +53,50 @@ var ErrInvalidToken = errInvalidOneTimeToken
 var ErrAlreadyVerified = errAlreadyVerified
 
 // SendEmailVerification issues a new verification token for user's email
-// and mails it, superseding the user's earlier verification tokens. It
-// returns ErrAlreadyVerified for a verified user, an error naming the wait
-// when the previous message went out less than a minute ago, and the
-// Mailer's error (ErrNoMailer when none is configured) when the message
-// could not be sent; the new token is then withdrawn, so the user can ask
-// again at once.
+// and mails it. It returns ErrAlreadyVerified for a verified user, an error
+// naming the wait when the previous message went out (or is going out) less
+// than a minute ago, and the Mailer's error (ErrNoMailer when none is
+// configured) when the message could not be sent.
+//
+// The token is written pending, mailed, then activated: activating it and
+// superseding the earlier tokens is one transaction. Whatever fails, the
+// earlier links keep working unless the new one does instead. A message
+// that could not be sent is withdrawn, so the user can ask again at once;
+// if withdrawing it fails too, the pending token still does not work, and
+// counts as a message in flight until the interval has passed.
 func (s *Service) SendEmailVerification(ctx context.Context, user User) error {
-	var now time.Time
+	raw, token, err := s.issueVerificationToken(ctx, user)
+	if err != nil {
+		return err
+	}
+	if err := s.mailer.Send(ctx, s.verificationMessage(token, raw)); err != nil {
+		s.withdrawToken(ctx, token)
+		if errors.Is(err, ErrNoMailer) {
+			return err
+		}
+		return fmt.Errorf("%w: %w", errMailNotSent, err)
+	}
+	if err := s.activateToken(ctx, token); err != nil {
+		// Delivered, but its link does not work: withdraw it, so the user is
+		// not made to wait for a message that is no use.
+		s.withdrawToken(ctx, token)
+		return err
+	}
+	return nil
+}
+
+// issueVerificationToken writes a pending verification token for user, once
+// the resend wait allows one.
+func (s *Service) issueVerificationToken(ctx context.Context, user User) (string, OneTimeToken, error) {
 	var raw string
 	var token OneTimeToken
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// The user's row lock serializes two resends of one user (on SQLite,
-		// which has no row locks, two at once can both pass the wait below:
-		// both are sent, and the later supersedes the earlier). The clock is
-		// read after it, so a resend that waited compares the instant it
-		// runs at.
+		// The user's row lock serializes two resends of one user: the second
+		// finds the first's token (pending: in flight) and waits out the
+		// interval (on SQLite, which has no row locks, two at once can both
+		// pass: both are sent, and the later activated supersedes the
+		// earlier). The clock is read after it, so a resend that waited
+		// compares the instant it runs at.
 		locked, err := lockUserTx(tx, user.ID)
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return errUserNotFound
@@ -73,18 +104,14 @@ func (s *Service) SendEmailVerification(ctx context.Context, user User) error {
 		if err != nil {
 			return err
 		}
-		now = s.now()
+		now := s.now()
 		if locked.EmailVerified() {
 			return errAlreadyVerified
 		}
-		var last OneTimeToken
-		err = tx.Where("user_id = ? AND purpose = ?", locked.ID, PurposeVerifyEmail).Order("id DESC").Limit(1).Find(&last).Error
-		if err != nil {
+		if wait, err := verificationWait(tx, locked.ID, now); err != nil {
 			return err
-		}
-		// Compared here, on instants: SQLite compares times as text.
-		if last.ID != 0 && now.Sub(last.CreatedAt) < verificationResendInterval {
-			return resendTooSoonError{retryAfter: verificationResendInterval - now.Sub(last.CreatedAt)}
+		} else if wait > 0 {
+			return resendTooSoonError{retryAfter: wait}
 		}
 		if raw, err = newOpaqueToken(); err != nil {
 			return err
@@ -99,28 +126,63 @@ func (s *Service) SendEmailVerification(ctx context.Context, user User) error {
 		}
 		return tx.Create(&token).Error
 	})
+	return raw, token, err
+}
+
+// verificationWait is how long the user must still wait before another
+// verification message: the interval runs from the latest message
+// delivered, or from the latest one still in flight (a pending token, which
+// another request is mailing).
+func verificationWait(tx *gorm.DB, userID uint, now time.Time) (time.Duration, error) {
+	var sent, pending OneTimeToken
+	err := tx.Where("user_id = ? AND purpose = ? AND sent_at IS NOT NULL", userID, PurposeVerifyEmail).Order("id DESC").Limit(1).Find(&sent).Error
 	if err != nil {
-		return err
+		return 0, err
 	}
-	if err := s.mailer.Send(ctx, s.verificationMessage(token, raw)); err != nil {
-		// Not sent: withdraw it, so the wait does not apply to a message the
-		// user never got, and leave the earlier links working.
-		if derr := s.db.WithContext(context.WithoutCancel(ctx)).Delete(&OneTimeToken{}, token.ID).Error; derr != nil {
-			s.logger.Warn("auth: withdraw an unsent verification token", zap.Error(derr))
-		}
-		if errors.Is(err, ErrNoMailer) {
+	err = tx.Where("user_id = ? AND purpose = ? AND sent_at IS NULL", userID, PurposeVerifyEmail).Order("id DESC").Limit(1).Find(&pending).Error
+	if err != nil {
+		return 0, err
+	}
+	// Compared here, on instants: SQLite compares times as text.
+	var wait time.Duration
+	if sent.SentAt != nil {
+		wait = verificationResendInterval - now.Sub(*sent.SentAt)
+	}
+	if pending.ID != 0 {
+		wait = max(wait, verificationResendInterval-now.Sub(pending.CreatedAt))
+	}
+	return max(wait, 0), nil
+}
+
+// activateToken makes a delivered token work and supersedes the user's
+// earlier delivered tokens for its purpose, in one transaction: either the
+// new link works and no earlier one does, or nothing changed. The user's
+// row first, as VerifyEmail takes it, so the two never deadlock.
+func (s *Service) activateToken(ctx context.Context, token OneTimeToken) error {
+	return s.db.WithContext(context.WithoutCancel(ctx)).Transaction(func(tx *gorm.DB) error {
+		if _, err := lockUserTx(tx, token.UserID); err != nil {
 			return err
 		}
-		return fmt.Errorf("%w: %w", errMailNotSent, err)
+		now := s.now()
+		activated := tx.Model(&OneTimeToken{}).Where("id = ? AND sent_at IS NULL AND used_at IS NULL", token.ID).Update("sent_at", now)
+		if activated.Error != nil {
+			return activated.Error
+		}
+		if activated.RowsAffected != 1 {
+			return errTokenNotPending
+		}
+		return tx.Model(&OneTimeToken{}).
+			Where("user_id = ? AND purpose = ? AND sent_at IS NOT NULL AND used_at IS NULL AND id <> ?", token.UserID, token.Purpose, token.ID).
+			Update("used_at", now).Error
+	})
+}
+
+// withdrawToken deletes a pending token whose message is no use. Best
+// effort: a pending token left behind does not work anyway.
+func (s *Service) withdrawToken(ctx context.Context, token OneTimeToken) {
+	if err := s.db.WithContext(context.WithoutCancel(ctx)).Where("id = ? AND sent_at IS NULL", token.ID).Delete(&OneTimeToken{}).Error; err != nil {
+		s.logger.Warn("auth: withdraw an undelivered one-time token", zap.Error(err))
 	}
-	// Sent: it supersedes the earlier links. One statement on the token rows
-	// alone, so it takes no lock VerifyEmail could hold in the other order.
-	if err := s.db.WithContext(context.WithoutCancel(ctx)).Model(&OneTimeToken{}).
-		Where("user_id = ? AND purpose = ? AND used_at IS NULL AND id <> ?", token.UserID, PurposeVerifyEmail, token.ID).
-		Update("used_at", now).Error; err != nil {
-		return err
-	}
-	return nil
 }
 
 func (s *Service) verificationTTL() time.Duration {
@@ -150,8 +212,8 @@ func (s *Service) verificationMessage(token OneTimeToken, raw string) Message {
 
 // VerifyEmail consumes a verification token and marks the email it was
 // issued for verified. It returns ErrInvalidToken for a token that is
-// unknown, expired, used, superseded, or for an address the user no longer
-// has. Concurrent uses of one token: exactly one succeeds.
+// unknown, expired, used, superseded, never delivered, or for an address the
+// user no longer has. Concurrent uses of one token: exactly one succeeds.
 func (s *Service) VerifyEmail(ctx context.Context, raw string) (User, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -178,11 +240,11 @@ func (s *Service) VerifyEmail(ctx context.Context, raw string) (User, error) {
 		}
 		now := s.now()
 		// Expiry on instants, here: SQLite compares times as text.
-		if token.UsedAt != nil || !now.Before(token.ExpiresAt) {
+		if token.SentAt == nil || token.UsedAt != nil || !now.Before(token.ExpiresAt) {
 			return errInvalidOneTimeToken
 		}
 		// Consume it: the first use wins, a concurrent one finds it used.
-		used := tx.Model(&OneTimeToken{}).Where("id = ? AND used_at IS NULL", token.ID).Update("used_at", now)
+		used := tx.Model(&OneTimeToken{}).Where("id = ? AND sent_at IS NOT NULL AND used_at IS NULL", token.ID).Update("used_at", now)
 		if used.Error != nil {
 			return used.Error
 		}
@@ -193,11 +255,14 @@ func (s *Service) VerifyEmail(ctx context.Context, raw string) (User, error) {
 		if locked.Email != token.Email {
 			return errInvalidOneTimeToken
 		}
-		if locked.EmailVerifiedAt == nil {
-			if err := tx.Model(&User{}).Where("id = ?", locked.ID).Update("email_verified_at", now).Error; err != nil {
+		// The verification is bound to the address: it lapses if Email
+		// changes (User.EmailVerified).
+		if !locked.EmailVerified() {
+			if err := tx.Model(&User{}).Where("id = ?", locked.ID).
+				Updates(map[string]any{"email_verified_at": now, "verified_email": token.Email}).Error; err != nil {
 				return err
 			}
-			locked.EmailVerifiedAt = &now
+			locked.EmailVerifiedAt, locked.VerifiedEmail = &now, token.Email
 		}
 		user = locked
 		return nil
@@ -259,7 +324,7 @@ func registerVerificationRoutes(api huma.API, svc *Service, prefix, security str
 		Method:      http.MethodPost,
 		Path:        prefix + "/auth/verify-email/resend",
 		Summary:     "Send a new email verification message",
-		Description: "Supersedes the earlier verification tokens: only the new one works. At most one message a minute (429 with Retry-After); 409 when the email is already verified.",
+		Description: "Once delivered, the new token supersedes the earlier ones: only the latest works. At most one message a minute (429 with Retry-After); 409 when the email is already verified.",
 		Tags:        []string{"Auth"},
 		Security:    []map[string][]string{{security: {}}},
 		Middlewares: huma.Middlewares{gate},

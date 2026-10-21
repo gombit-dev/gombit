@@ -14,18 +14,26 @@ type User struct {
 	Email        string `gorm:"uniqueIndex;size:255;not null"`
 	PasswordHash string `gorm:"not null"`
 	IsSuperuser  bool   `gorm:"not null;default:false"`
-	// EmailVerifiedAt is when the user proved they own Email (POST
-	// /auth/verify-email); nil while it is unverified. A superuser created by
-	// gombit createsuperuser starts verified.
+	// EmailVerifiedAt is when the user proved they own VerifiedEmail (POST
+	// /auth/verify-email); nil while no address is verified. A superuser
+	// created by gombit createsuperuser starts verified.
 	EmailVerifiedAt *time.Time
-	Groups          []Group      `gorm:"many2many:auth_user_groups;"`
-	Permissions     []Permission `gorm:"many2many:auth_user_permissions;"`
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	// VerifiedEmail is the address that proof was for. The verification
+	// holds only while it is Email: changing Email, by any path (an update
+	// through GORM, the admin), makes the user unverified until the new
+	// address is proven.
+	VerifiedEmail string       `gorm:"size:255;not null;default:''"`
+	Groups        []Group      `gorm:"many2many:auth_user_groups;"`
+	Permissions   []Permission `gorm:"many2many:auth_user_permissions;"`
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
 }
 
-// EmailVerified reports whether the user has verified their current email.
-func (u User) EmailVerified() bool { return u.EmailVerifiedAt != nil }
+// EmailVerified reports whether the user has verified their current email:
+// a verification exists, and it is for the address the user has now.
+func (u User) EmailVerified() bool {
+	return u.EmailVerifiedAt != nil && u.VerifiedEmail != "" && normalizeEmail(u.VerifiedEmail) == normalizeEmail(u.Email)
+}
 
 // Group collects permissions that can be assigned to users.
 type Group struct {
@@ -70,6 +78,11 @@ const (
 // the row keeps its SHA-256. Email is the address it was issued for: a token
 // proves ownership of that address only, so it stops working once the
 // user's email is another one.
+//
+// A token is pending until the message carrying it was delivered to the
+// Mailer (SentAt): a pending token does not work. Delivery activates it and
+// supersedes the user's earlier tokens for the purpose in one transaction,
+// so no failure leaves an undelivered token working, or two delivered ones.
 type OneTimeToken struct {
 	ID        uint         `gorm:"primaryKey"`
 	UserID    uint         `gorm:"not null;index:idx_auth_one_time_tokens_user_purpose,priority:1"`
@@ -77,6 +90,9 @@ type OneTimeToken struct {
 	TokenHash string       `gorm:"uniqueIndex;size:64;not null"`
 	Email     string       `gorm:"size:255;not null"`
 	ExpiresAt time.Time    `gorm:"index;not null"`
+	// SentAt is when the message carrying the token was delivered to the
+	// Mailer; nil while it is pending.
+	SentAt *time.Time
 	// UsedAt is when the token was consumed, or superseded by a newer one
 	// for the same purpose; nil while it can still be used.
 	UsedAt    *time.Time

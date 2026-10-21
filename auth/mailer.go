@@ -11,13 +11,19 @@ import (
 // Mailer delivers the messages of the account lifecycle (AUTH-1): the email
 // verification link, and later password reset and email change. It is the
 // one seam to an email provider: the application implements it over its own
-// (SMTP, an API), or a job queue, and passes it with WithMailer (or
-// framework.WithAuthMailer). Tests use authtest.Mailer, which records the
-// messages instead of sending them.
+// (SMTP, an API) and passes it with WithMailer (or framework.WithAuthMailer).
+// Tests use authtest.Mailer, which records the messages instead of sending
+// them.
 //
-// Send is called on the request that needs the message. An error is the
-// message not going out: the request reports it where the message is the
-// point (a resend), and logs it where it is a side effect (registration).
+// Send is synchronous: it returns nil only once the provider accepted the
+// message (the SMTP server took it, the API answered), because that is when
+// the message's token starts working and the user's earlier ones stop. A
+// Mailer that only enqueues the message would supersede the earlier links
+// before the new one is delivered, and a delivery that then failed could
+// not undo it. Send is called on the request that needs the message. An
+// error is the message not going out: the request reports it where the
+// message is the point (a resend), and logs it where it is a side effect
+// (registration).
 type Mailer interface {
 	Send(ctx context.Context, msg Message) error
 }

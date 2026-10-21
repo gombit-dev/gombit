@@ -85,13 +85,20 @@ Registration mails a verification message. This example sets no mailer
 instead, token included (`auth: email not sent (development LogMailer)`):
 
 ```bash
-# GET /me says "email_verified": false until the token is posted
-curl -sS -X POST http://127.0.0.1:8080/api/v1/auth/verify-email \
-  -H 'Content-Type: application/json' -d '{"token":"<token from the log>"}'
+# the sessions above were revoked: log in again
+LOGIN=$(curl -sS -X POST http://127.0.0.1:8080/api/v1/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"ada@example.com","password":"correct-horse"}')
+ACCESS=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["access_token"])' <<<"$LOGIN")
 
 # ask for a new link (once a minute; supersedes the earlier one)
 curl -sS -X POST http://127.0.0.1:8080/api/v1/auth/verify-email/resend \
   -H "Authorization: Bearer $ACCESS"
+
+# post the latest token in the log; GET /me says "email_verified": false
+# until then
+curl -sS -X POST http://127.0.0.1:8080/api/v1/auth/verify-email \
+  -H 'Content-Type: application/json' -d '{"token":"<token from the log>"}'
 ```
 
 See [`docs/auth.md`](../../docs/auth.md#email-verification) for the token

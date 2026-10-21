@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 
 	"github.com/danielgtaylor/huma/v2"
 )
@@ -83,3 +84,13 @@ func ContextWithSession(ctx context.Context, user User, refreshID uint) context.
 func RequireBearer(s *Service) func(huma.Context, func(huma.Context)) {
 	return s.requireBearer()
 }
+
+// IsResendTooSoon reports whether err is SendEmailVerification refusing a
+// message within the resend interval of the previous one (a 429).
+func IsResendTooSoon(err error) bool {
+	var tooSoon resendTooSoonError
+	return errors.As(err, &tooSoon)
+}
+
+// SetMailer replaces the service's Mailer.
+func SetMailer(s *Service, m Mailer) { s.mailer = m }
