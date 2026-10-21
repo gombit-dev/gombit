@@ -10,6 +10,34 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 ## Unreleased
 
+### Manual: action required
+
+- **Breaking.** Email verification adds `users.email_verified_at` and a table, `auth_one_time_tokens`, which registration and `gombit createsuperuser` write: an app migrates before it runs this release. (`email-verification-schema`, schema, [#331](https://github.com/gombit-dev/gombit/issues/331))
+
+  - Framework schema: `auth.User` (`users`): altered.
+  - Framework schema: `auth.OneTimeToken` (`auth_one_time_tokens`): added.
+
+  `auth.User` gains `EmailVerifiedAt`, and the new framework model
+  `auth.OneTimeToken` holds the hashed, single-use tokens the account
+  lifecycle mails. Until the database has both, registering a user and
+  `gombit createsuperuser` fail. Add `&auth.OneTimeToken{}` to the
+  app's `AutoMigrate` (`internal/platform/database.go`), then generate
+  and apply the migration (`gombit db makemigrations --model
+  github.com/gombit-dev/gombit/auth.OneTimeToken`, `gombit db
+  migrate`); `gombit upgrade --dry-run` lists the steps. Existing users
+  start unverified; mark the ones you trust by setting
+  `email_verified_at` yourself.
+
+- **Breaking.** With auth enabled, an app that registers the email verification routes, their `auth-*` operation IDs or the `AuthVerifyEmailBody` / `AuthVerificationResult` schema names fails at startup: the framework registers them. (`email-verification-names-reserved`, api, [#331](https://github.com/gombit-dev/gombit/issues/331))
+
+  With `GOMBIT_JWT_SECRET` set, registering `POST
+  {prefix}/auth/verify-email` or `POST {prefix}/auth/verify-email/resend`,
+  an operation `auth-verify-email` or `auth-resend-email-verification`,
+  or a type Huma names `AuthVerifyEmailBody`, `AuthVerificationResult`
+  or `DataAuthVerificationResult` now panics when the app starts. Drop
+  the app's own verification routes, which the framework's replace, or
+  rename them.
+
 ### Informational
 
 - The framework requires Go 1.26.9 (`go 1.26.9` in go.mod), and `gombit new` pins it. (`go-1-26-9`, dependency, [#602](https://github.com/gombit-dev/gombit/issues/602))
@@ -25,6 +53,16 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   a `uint` made the list endpoint a 500). A client that sends a large
   integer sends it as a string (`"9007199254740993"`), which is read
   exactly.
+
+- Email verification: registration mails a single-use, expiring link (through `framework.WithAuthMailer`), `POST {prefix}/auth/verify-email` consumes it, `POST {prefix}/auth/verify-email/resend` sends a new one, and `auth.RequireVerifiedEmail` gates an app's own operations. (`email-verification`, api, [#331](https://github.com/gombit-dev/gombit/issues/331))
+
+  A production app with no mailer sends no message (registration still
+  succeeds; a resend is a 503); development and test apps log each
+  message instead. `GET /me` and registration report `email_verified`.
+  `GOMBIT_AUTH_EMAIL_VERIFICATION_TTL` (24h) and
+  `GOMBIT_AUTH_EMAIL_VERIFICATION_URL` configure the link.
+
+- A new app's placeholder `schema.ts` includes the verification operations and `PublicUser.email_verified`; an existing app's generated client gets them from `gombit client generate`. (`client-schema-email-verified`, client, [#331](https://github.com/gombit-dev/gombit/issues/331))
 
 ## v0.8.0
 

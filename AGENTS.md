@@ -114,7 +114,12 @@ The **AUTH-0** epic (#280) has started with AUTH-5 (#335): session
 management in both auth modes (`GET` / `DELETE {prefix}/auth/sessions`,
 `auth.Service.ListSessions` / `RevokeSession` / `RevokeAllSessions`), with
 token rotation and the session revocations serialized per user on a lock of
-the user's row; see `docs/auth.md`.
+the user's row, and AUTH-1 (#331): email verification (single-use,
+expiring, hashed tokens in `auth_one_time_tokens`; `POST
+{prefix}/auth/verify-email` and `/resend`; `auth.RequireVerifiedEmail`), with
+mail behind the `auth.Mailer` interface (`framework.WithAuthMailer`,
+`auth.LogMailer` in development, `authtest.Mailer` for tests); see
+`docs/auth.md`.
 Don't assume generated apps are committed in-tree; `gombit new` writes them
 on demand. Check `git log` / `ls` before describing "how the code works."
 

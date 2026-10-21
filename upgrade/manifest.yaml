@@ -530,3 +530,57 @@ releases:
           integer sends it as a string (`"9007199254740993"`), which is read
           exactly.
         refs: [448]
+
+      - id: email-verification-schema
+        kind: manual
+        breaking: true
+        area: schema
+        summary: "Email verification adds `users.email_verified_at` and a table, `auth_one_time_tokens`, which registration and `gombit createsuperuser` write: an app migrates before it runs this release."
+        details: |
+          `auth.User` gains `EmailVerifiedAt`, and the new framework model
+          `auth.OneTimeToken` holds the hashed, single-use tokens the account
+          lifecycle mails. Until the database has both, registering a user and
+          `gombit createsuperuser` fail. Add `&auth.OneTimeToken{}` to the
+          app's `AutoMigrate` (`internal/platform/database.go`), then generate
+          and apply the migration (`gombit db makemigrations --model
+          github.com/gombit-dev/gombit/auth.OneTimeToken`, `gombit db
+          migrate`); `gombit upgrade --dry-run` lists the steps. Existing users
+          start unverified; mark the ones you trust by setting
+          `email_verified_at` yourself.
+        schema:
+          - {model: auth.User, table: users, change: altered}
+          - {model: auth.OneTimeToken, table: auth_one_time_tokens, change: added}
+        refs: [331]
+
+      - id: email-verification-names-reserved
+        kind: manual
+        breaking: true
+        area: api
+        summary: "With auth enabled, an app that registers the email verification routes, their `auth-*` operation IDs or the `AuthVerifyEmailBody` / `AuthVerificationResult` schema names fails at startup: the framework registers them."
+        details: |
+          With `GOMBIT_JWT_SECRET` set, registering `POST
+          {prefix}/auth/verify-email` or `POST {prefix}/auth/verify-email/resend`,
+          an operation `auth-verify-email` or `auth-resend-email-verification`,
+          or a type Huma names `AuthVerifyEmailBody`, `AuthVerificationResult`
+          or `DataAuthVerificationResult` now panics when the app starts. Drop
+          the app's own verification routes, which the framework's replace, or
+          rename them.
+        refs: [331]
+
+      - id: email-verification
+        kind: informational
+        area: api
+        summary: "Email verification: registration mails a single-use, expiring link (through `framework.WithAuthMailer`), `POST {prefix}/auth/verify-email` consumes it, `POST {prefix}/auth/verify-email/resend` sends a new one, and `auth.RequireVerifiedEmail` gates an app's own operations."
+        details: |
+          A production app with no mailer sends no message (registration still
+          succeeds; a resend is a 503); development and test apps log each
+          message instead. `GET /me` and registration report `email_verified`.
+          `GOMBIT_AUTH_EMAIL_VERIFICATION_TTL` (24h) and
+          `GOMBIT_AUTH_EMAIL_VERIFICATION_URL` configure the link.
+        refs: [331]
+
+      - id: client-schema-email-verified
+        kind: informational
+        area: client
+        summary: "A new app's placeholder `schema.ts` includes the verification operations and `PublicUser.email_verified`; an existing app's generated client gets them from `gombit client generate`."
+        refs: [331]

@@ -10,6 +10,38 @@ version.
 
 ## [Unreleased]
 
+### Added
+
+- [Email verification](docs/auth.md#email-verification) (AUTH-1), in both
+  auth modes. Registration mails a verification message; `POST
+  /auth/verify-email` consumes its token and marks the email verified, and
+  `POST /auth/verify-email/resend` mails a new one (at most once a minute,
+  429 with `Retry-After`; it supersedes the earlier tokens). A token is 32
+  random bytes stored as its SHA-256 in a new table, `auth_one_time_tokens`,
+  expires after `GOMBIT_AUTH_EMAIL_VERIFICATION_TTL` (24h), works once, and
+  stops working once the user's email is another one.
+  `GOMBIT_AUTH_EMAIL_VERIFICATION_URL` is the link the message carries, with
+  `{token}` where the token goes. `GET /me` and registration report
+  `email_verified`; `auth.RequireVerifiedEmail()` gates an app's own
+  operations (403), after `Service.RequireBearer()` (new) or
+  `RequireCookieSession()`. Mail goes through `auth.Mailer`, set with
+  `framework.WithAuthMailer`: development and test apps log each message
+  (`auth.LogMailer`), production apps without one send none (a resend is a
+  503), and `authtest.Mailer` records them for tests. `gombit
+  createsuperuser` creates verified users.
+  - **Breaking (schema):** `users` gains `email_verified_at`, and
+    `auth.OneTimeToken` is a new framework model: add it to the app's
+    `AutoMigrate` and migrate before running this release, or registration
+    and `gombit createsuperuser` fail. `gombit upgrade --dry-run` lists the
+    steps.
+  - **Breaking (api):** the framework now registers the verification routes,
+    the `auth-verify-email` and `auth-resend-email-verification` operation
+    IDs, and the `AuthVerifyEmailBody` / `AuthVerificationResult` schemas;
+    an app that registers its own panics at startup.
+  - `auth.NewService` and `auth.Mount` take options (`auth.WithMailer`,
+    `auth.WithLogger`)
+  ([#331](https://github.com/gombit-dev/gombit/issues/331)).
+
 ### Fixed
 
 - Saving the admin edit form no longer rewrites fields the operator did not

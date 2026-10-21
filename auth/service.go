@@ -9,6 +9,7 @@ import (
 
 	"github.com/gombit-dev/gombit/config"
 	"github.com/gombit-dev/gombit/database"
+	"go.uber.org/zap"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -21,6 +22,8 @@ type Service struct {
 	secret      []byte
 	hasher      Hasher
 	clock       Clock
+	mailer      Mailer
+	logger      *zap.Logger
 	dummyOnce   sync.Once
 	dummyHash   string
 	rotateMu    sync.Mutex
@@ -36,8 +39,33 @@ type rotateCall struct {
 	err  error
 }
 
+// Option configures a Service (NewService) or the routes Mount registers.
+type Option func(*Service)
+
+// WithMailer sets the Mailer the account lifecycle's messages go through
+// (email verification). Without one, sending a message fails with
+// ErrNoMailer, and registration sends none.
+func WithMailer(m Mailer) Option {
+	return func(s *Service) {
+		if m != nil {
+			s.mailer = m
+		}
+	}
+}
+
+// WithLogger sets the logger for what the service reports without failing
+// the request (a verification message that could not be sent at
+// registration). Default: none.
+func WithLogger(l *zap.Logger) Option {
+	return func(s *Service) {
+		if l != nil {
+			s.logger = l
+		}
+	}
+}
+
 // NewService constructs a Service. cfg.Auth.JWTSecret must be set.
-func NewService(db *gorm.DB, cfg config.Config) (*Service, error) {
+func NewService(db *gorm.DB, cfg config.Config, opts ...Option) (*Service, error) {
 	if db == nil {
 		return nil, errors.New("auth: nil database")
 	}
@@ -56,6 +84,11 @@ func NewService(db *gorm.DB, cfg config.Config) (*Service, error) {
 		secret: []byte(cfg.Auth.JWTSecret),
 		hasher: newBcryptHasher(cfg.Auth.BcryptCost),
 		clock:  systemClock{},
+		mailer: noMailer{},
+		logger: zap.NewNop(),
+	}
+	for _, opt := range opts {
+		opt(s)
 	}
 	return s, nil
 }
@@ -67,14 +100,23 @@ func (s *Service) now() time.Time {
 	return s.clock.Now()
 }
 
-// Register creates a user. Duplicate emails return errEmailTaken.
+// Register creates a user, with an unverified email, and mails them a
+// verification link when a Mailer is configured (a failure to send is
+// logged, not returned: POST /auth/verify-email/resend asks again).
+// Duplicate emails return errEmailTaken.
 func (s *Service) Register(ctx context.Context, email, password string) (User, error) {
-	return s.createUser(ctx, email, password, false)
+	user, err := s.createUser(ctx, email, password, false)
+	if err != nil {
+		return User{}, err
+	}
+	s.sendVerificationOnRegister(ctx, user)
+	return user, nil
 }
 
 // CreateSuperuser creates a user with IsSuperuser set, for gombit
 // createsuperuser (M4-6). It shares Register's hasher and uniqueness path;
-// duplicate emails return errEmailTaken.
+// duplicate emails return errEmailTaken. The operator who creates it vouches
+// for the address, so its email starts verified, and no message is sent.
 func (s *Service) CreateSuperuser(ctx context.Context, email, password string) (User, error) {
 	return s.createUser(ctx, email, password, true)
 }
@@ -89,6 +131,10 @@ func (s *Service) createUser(ctx context.Context, email, password string, superu
 		return User{}, err
 	}
 	user := User{Email: email, PasswordHash: hash, IsSuperuser: superuser}
+	if superuser {
+		now := s.now()
+		user.EmailVerifiedAt = &now
+	}
 	if err := s.db.WithContext(ctx).Create(&user).Error; err != nil {
 		if database.IsUniqueViolation(err) {
 			return User{}, errEmailTaken
@@ -383,10 +429,11 @@ type TokenPair struct {
 
 // PublicUser is the safe user representation returned by register and /me.
 type PublicUser struct {
-	ID    uint   `json:"id" example:"1" doc:"User identifier"`
-	Email string `json:"email" example:"ada@example.com" format:"email" doc:"Normalized email"`
+	ID            uint   `json:"id" example:"1" doc:"User identifier"`
+	Email         string `json:"email" example:"ada@example.com" format:"email" doc:"Normalized email"`
+	EmailVerified bool   `json:"email_verified" example:"false" doc:"True once the user has confirmed they own email (POST /auth/verify-email)"`
 }
 
 func toPublicUser(user User) PublicUser {
-	return PublicUser{ID: user.ID, Email: user.Email}
+	return PublicUser{ID: user.ID, Email: user.Email, EmailVerified: user.EmailVerified()}
 }

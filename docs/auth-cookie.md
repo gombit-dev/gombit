@@ -145,6 +145,8 @@ differs: tokens travel in cookies, not JSON.
 | `GET` | `/auth/sessions` | Cookie (`gombit_access`), safe | Same sessions and response as Bearer mode; see [Sessions](auth.md#sessions). |
 | `DELETE` | `/auth/sessions/{id}` | Cookie (`gombit_access`), CSRF-protected | Revokes one session; 404 if `id` names no active session of the user. Revoking the current session also clears both session cookies. |
 | `DELETE` | `/auth/sessions?scope=others\|all` | Cookie (`gombit_access`), CSRF-protected | `others` keeps the current session and its cookies; `all` revokes every session and clears both session cookies. |
+| `POST` | `/auth/verify-email` | Public, CSRF-protected | Consumes the token from the verification message; see [Email verification](auth.md#email-verification). |
+| `POST` | `/auth/verify-email/resend` | Cookie (`gombit_access`), CSRF-protected | Mails a new verification link, at most once a minute. |
 
 ## Config
 

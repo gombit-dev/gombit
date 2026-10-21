@@ -102,6 +102,38 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/v1/auth/verify-email": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post: operations["auth-verify-email"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/auth/verify-email/resend": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post: operations["auth-resend-email-verification"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/v1/me": {
     parameters: {
       query?: never;
@@ -171,8 +203,17 @@ export interface components {
       id: string;
       last_refreshed_at: string;
     };
+    AuthVerificationResult: {
+      sent: boolean;
+    };
+    AuthVerifyEmailBody: {
+      token: string;
+    };
     DataAuthRevokeResult: {
       data: components["schemas"]["AuthRevokeResult"];
+    };
+    DataAuthVerificationResult: {
+      data: components["schemas"]["AuthVerificationResult"];
     };
     DataListAuthSession: {
       data: components["schemas"]["AuthSession"][] | null;
@@ -210,6 +251,7 @@ export interface components {
     };
     PublicUser: {
       email: string;
+      email_verified: boolean;
       id: number;
     };
     RefreshRequest: {
@@ -379,6 +421,64 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["DataPublicUser"];
+        };
+      };
+      default: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorEnvelope"];
+        };
+      };
+    };
+  };
+  "auth-verify-email": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["AuthVerifyEmailBody"];
+      };
+    };
+    responses: {
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["DataPublicUser"];
+        };
+      };
+      default: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorEnvelope"];
+        };
+      };
+    };
+  };
+  "auth-resend-email-verification": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["DataAuthVerificationResult"];
         };
       };
       default: {

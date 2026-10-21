@@ -31,6 +31,9 @@ func TestE2EPostgres(t *testing.T) {
 	runSessionExpiryGates(t, db)
 	runIssuedAccessLifetime(t, db)
 	runSessionsService(t, db)
+	runEmailVerificationBearer(t, db)
+	runEmailVerificationCookie(t, db)
+	runEmailVerificationService(t, db)
 	runPermissionPersistence(t, db)
 }
 
@@ -47,6 +50,9 @@ func TestE2EMySQL(t *testing.T) {
 	runSessionExpiryGates(t, db)
 	runIssuedAccessLifetime(t, db)
 	runSessionsService(t, db)
+	runEmailVerificationBearer(t, db)
+	runEmailVerificationCookie(t, db)
+	runEmailVerificationService(t, db)
 	runPermissionPersistence(t, db)
 }
 
