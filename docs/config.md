@@ -89,11 +89,16 @@ recognizes:
 | `GOMBIT_COOKIE_SAMESITE` | `Config.Auth.CookieSameSite` | `lax` |
 | `GOMBIT_SECURITY_SANITIZE_INPUT` | `Config.Security.SanitizeInput` | `false` (opt-in) |
 
-`.env` is read whole, lines of any length. A line assigns as written:
-`KEY=value`, trimmed, with `#` lines skipped; `export KEY=value` assigns
-`export KEY`, not `KEY`. `config.DotEnvKeys` (a file's content) and
-`config.DotEnvKey` (a line) expose that traversal and grammar to tooling,
-without values.
+`.env` is read whole, lines of any length, and a file that exists but cannot be
+read fails `Load` rather than applying part of it. A line assigns as written:
+`KEY=value`, trimmed, with a UTF-8 byte order mark dropped from the start of the
+file (the only place one can be) and `#` lines skipped; one layer of matching
+quotes is stripped from the value, and a `#` with whitespace before it — outside
+those quotes — starts a comment that is dropped, so `KEY=abc # note` assigns
+`abc` while `KEY=#fff` keeps `#fff`, which is what `set -a; . ./.env` gives for
+the same two lines. `export KEY=value` assigns `export KEY`, not `KEY`.
+`config.DotEnvKeys` (a file's content) and `config.DotEnvKey` (a line) expose
+that traversal and grammar to tooling, without values.
 
 `config.Variables()` lists these variables in code: each one's name,
 whether its value is a secret (a credential, or a DSN that may embed one),
