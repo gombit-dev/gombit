@@ -133,9 +133,16 @@ func (s *Service) issueVerificationToken(ctx context.Context, user User) (string
 // verification message: the interval runs from the latest message
 // delivered, or from the latest one still in flight (a pending token, which
 // another request is mailing).
+//
+// "Latest delivered" is by activation, not by issuance: two sends can
+// overlap and finish out of order, and the later activation is the link
+// that works (activateToken), so it is the one the interval runs from.
+// sent_at orders that in SQL on SQLite too, which stores times as text:
+// activation writes it in UTC, so every value has the same layout and
+// offset, and the text order is the time order.
 func verificationWait(tx *gorm.DB, userID uint, now time.Time) (time.Duration, error) {
 	var sent, pending OneTimeToken
-	err := tx.Where("user_id = ? AND purpose = ? AND sent_at IS NOT NULL", userID, PurposeVerifyEmail).Order("id DESC").Limit(1).Find(&sent).Error
+	err := tx.Where("user_id = ? AND purpose = ? AND sent_at IS NOT NULL", userID, PurposeVerifyEmail).Order("sent_at DESC, id DESC").Limit(1).Find(&sent).Error
 	if err != nil {
 		return 0, err
 	}
@@ -163,7 +170,8 @@ func (s *Service) activateToken(ctx context.Context, token OneTimeToken) error {
 		if _, err := lockUserTx(tx, token.UserID); err != nil {
 			return err
 		}
-		now := s.now()
+		// UTC: verificationWait orders by sent_at.
+		now := s.now().UTC()
 		activated := tx.Model(&OneTimeToken{}).Where("id = ? AND sent_at IS NULL AND used_at IS NULL", token.ID).Update("sent_at", now)
 		if activated.Error != nil {
 			return activated.Error
