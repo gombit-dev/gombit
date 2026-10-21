@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -353,6 +354,51 @@ func runEmailVerificationService(t *testing.T, db *database.DB) {
 		}
 	})
 
+	t.Run("overlapping sends: the wait runs from the latest activation", func(t *testing.T) {
+		// A is issued, and its mailer is slow past the interval; B is issued
+		// then, delivered and activated at +60s; A is delivered at +70s and
+		// supersedes B. The interval runs from A's activation, not from B,
+		// the later-issued one: a resend at +120s waits, one at +130s goes.
+		e := newVerificationEnv(t, db)
+		user, _ := e.register(t, "overlap")
+		start := e.clock.now.Add(time.Minute)
+		clock := &syncClock{now: start}
+		auth.SetClock(e.svc, clock)
+		gate := &gateMailer{inner: e.mail, entered: make(chan struct{}), release: make(chan struct{})}
+		auth.SetMailer(e.svc, gate)
+
+		doneA := make(chan error, 1)
+		go func() { doneA <- e.svc.SendEmailVerification(ctx, user) }()
+		<-gate.entered
+		clock.set(start.Add(time.Minute))
+		if err := e.svc.SendEmailVerification(ctx, user); err != nil {
+			close(gate.release)
+			t.Fatalf("B, issued once A's pending interval passed: %v", err)
+		}
+		b, _ := e.mail.Last(user.Email)
+		clock.set(start.Add(70 * time.Second))
+		close(gate.release)
+		if err := <-doneA; err != nil {
+			t.Fatalf("A, delivered after B: %v", err)
+		}
+		a, _ := e.mail.Last(user.Email)
+		if a.Token == b.Token {
+			t.Fatal("A's message was not the last one delivered")
+		}
+
+		clock.set(start.Add(2 * time.Minute))
+		if err := e.svc.SendEmailVerification(ctx, user); !auth.IsResendTooSoon(err) {
+			t.Fatalf("a resend 50s after A's activation = %v, want the resend wait", err)
+		}
+		if _, err := e.svc.VerifyEmail(ctx, b.Token); !errors.Is(err, auth.ErrInvalidToken) {
+			t.Fatalf("B, superseded by the later activation = %v, want ErrInvalidToken", err)
+		}
+		clock.set(start.Add(130 * time.Second))
+		if err := e.svc.SendEmailVerification(ctx, user); err != nil {
+			t.Fatalf("a resend a minute after A's activation: %v", err)
+		}
+	})
+
 	t.Run("a failed send is withdrawn", func(t *testing.T) {
 		e := newVerificationEnv(t, db)
 		e.mail.Err = errors.New("smtp down")
@@ -436,19 +482,20 @@ func runEmailVerificationService(t *testing.T, db *database.DB) {
 	})
 }
 
-// gateMailer holds its first Send until release, then sends through inner.
+// gateMailer holds its first Send until release, then sends through inner;
+// later Sends go straight through, while the first is still held.
 type gateMailer struct {
 	inner   auth.Mailer
-	once    sync.Once
+	held    atomic.Bool
 	entered chan struct{}
 	release chan struct{}
 }
 
 func (m *gateMailer) Send(ctx context.Context, msg auth.Message) error {
-	m.once.Do(func() {
+	if m.held.CompareAndSwap(false, true) {
 		close(m.entered)
 		<-m.release
-	})
+	}
 	return m.inner.Send(ctx, msg)
 }
 
