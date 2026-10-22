@@ -32,8 +32,9 @@ type meView struct {
 	EmailVerified bool   `json:"email_verified"`
 }
 
-// newVerificationApp is an auth app in mode whose messages go to mail.
-func newVerificationApp(t *testing.T, db *database.DB, mode config.AuthMode, mail auth.Mailer, env config.Environment) *framework.App {
+// newVerificationApp is an auth app in mode whose messages go to mail;
+// tweaks adjust its auth config.
+func newVerificationApp(t *testing.T, db *database.DB, mode config.AuthMode, mail auth.Mailer, env config.Environment, tweaks ...func(*config.AuthConfig)) *framework.App {
 	t.Helper()
 	if err := auth.Migrate(db.DB); err != nil {
 		t.Fatalf("auth.Migrate() error = %v", err)
@@ -46,6 +47,9 @@ func newVerificationApp(t *testing.T, db *database.DB, mode config.AuthMode, mai
 	cfg.Auth.RefreshTokenTTL = time.Hour
 	cfg.Auth.Mode = mode
 	cfg.Auth.EmailVerificationURL = "https://app.example.com/verify-email?token={token}"
+	for _, tweak := range tweaks {
+		tweak(&cfg.Auth)
+	}
 	opts := []framework.Option{framework.WithConfig(cfg), framework.WithDatabase(db), framework.WithLogger(zap.NewNop())}
 	if mail != nil {
 		opts = append(opts, framework.WithAuthMailer(mail))

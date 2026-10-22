@@ -615,3 +615,39 @@ releases:
           `auth.CaptureRequestInfo` and `auth.RecordAuditEvent` record an
           app's own sensitive operations; `admin.Mount` takes auth options.
         refs: [337]
+
+      - id: password-reset-names-reserved
+        kind: manual
+        breaking: true
+        area: api
+        summary: "With auth enabled, an app that registers the password reset routes, their `auth-*` operation IDs or the `AuthPasswordForgotBody` / `AuthPasswordResetBody` / `AuthPasswordResetRequested` / `AuthPasswordResetResult` schema names fails at startup: the framework registers them."
+        details: |
+          With `GOMBIT_JWT_SECRET` set, registering `POST
+          {prefix}/auth/password/forgot` or `POST {prefix}/auth/password/reset`,
+          an operation `auth-request-password-reset` or `auth-reset-password`,
+          or a type Huma names `AuthPasswordForgotBody`,
+          `AuthPasswordResetBody`, `AuthPasswordResetRequested`,
+          `AuthPasswordResetResult`, `DataAuthPasswordResetRequested` or
+          `DataAuthPasswordResetResult` now panics when the app starts. Drop
+          the app's own reset routes, which the framework's replace, or rename
+          them.
+        refs: [332]
+
+      - id: password-reset
+        kind: informational
+        area: api
+        summary: "Password reset: `POST {prefix}/auth/password/forgot` mails a single-use, expiring link and answers the same 202 whether or not the email is an account; `POST {prefix}/auth/password/reset` sets the new password and revokes every session of the user."
+        details: |
+          `GOMBIT_AUTH_PASSWORD_RESET_TTL` (1h) and
+          `GOMBIT_AUTH_PASSWORD_RESET_URL` configure the link;
+          `GOMBIT_AUTH_PASSWORD_RESET_KEEP_SESSIONS=true` keeps the sessions.
+          `auth.Service.RequestPasswordReset` and `ResetPassword` are the same
+          flow for an app's own code. A production app with no mailer sends
+          no message.
+        refs: [332]
+
+      - id: client-schema-password-reset
+        kind: informational
+        area: client
+        summary: "A new app's placeholder `schema.ts` includes the password reset operations; an existing app's generated client gets them from `gombit client generate`."
+        refs: [332]

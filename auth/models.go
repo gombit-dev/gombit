@@ -70,6 +70,8 @@ type TokenPurpose string
 const (
 	// PurposeVerifyEmail proves the user owns the token's email (AUTH-1).
 	PurposeVerifyEmail TokenPurpose = "verify_email"
+	// PurposeResetPassword lets the holder set a new password (AUTH-2).
+	PurposeResetPassword TokenPurpose = "reset_password"
 )
 
 // OneTimeToken is a hashed, expiring, single-use token the account

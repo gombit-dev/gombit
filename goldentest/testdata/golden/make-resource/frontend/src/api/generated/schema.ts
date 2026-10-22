@@ -134,6 +134,38 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/v1/auth/password/forgot": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post: operations["auth-request-password-reset"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/auth/password/reset": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post: operations["auth-reset-password"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/v1/me": {
     parameters: {
       query?: never;
@@ -194,6 +226,20 @@ export interface components {
       email: string;
       password: string;
     };
+    AuthPasswordForgotBody: {
+      email: string;
+    };
+    AuthPasswordResetBody: {
+      password: string;
+      token: string;
+    };
+    AuthPasswordResetRequested: {
+      accepted: boolean;
+    };
+    AuthPasswordResetResult: {
+      ok: boolean;
+      sessions_revoked: boolean;
+    };
     AuthRevokeResult: {
       ok: boolean;
     };
@@ -208,6 +254,12 @@ export interface components {
     };
     AuthVerifyEmailBody: {
       token: string;
+    };
+    DataAuthPasswordResetRequested: {
+      data: components["schemas"]["AuthPasswordResetRequested"];
+    };
+    DataAuthPasswordResetResult: {
+      data: components["schemas"]["AuthPasswordResetResult"];
     };
     DataAuthRevokeResult: {
       data: components["schemas"]["AuthRevokeResult"];
@@ -479,6 +531,68 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["DataAuthVerificationResult"];
+        };
+      };
+      default: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorEnvelope"];
+        };
+      };
+    };
+  };
+  "auth-request-password-reset": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["AuthPasswordForgotBody"];
+      };
+    };
+    responses: {
+      202: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["DataAuthPasswordResetRequested"];
+        };
+      };
+      default: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorEnvelope"];
+        };
+      };
+    };
+  };
+  "auth-reset-password": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["AuthPasswordResetBody"];
+      };
+    };
+    responses: {
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["DataAuthPasswordResetResult"];
         };
       };
       default: {

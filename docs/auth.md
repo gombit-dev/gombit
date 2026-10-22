@@ -40,6 +40,8 @@ All paths use `config.API.Prefix` (default `/api/v1`). D10 envelopes.
 | `DELETE` | `/auth/sessions?scope=others\|all` | Bearer access JWT. `others` revokes every session except the current one; `all` revokes every session, the current one included. |
 | `POST` | `/auth/verify-email` | Public. Body `{ "token" }` from the verification message; marks the email verified. See [Email verification](#email-verification). |
 | `POST` | `/auth/verify-email/resend` | Bearer access JWT. Mails a new verification link (at most one a minute). |
+| `POST` | `/auth/password/forgot` | Public. Body `{ "email" }`. Always 202 `{"data":{"accepted":true}}`; mails a reset link when the email is an account. See [Password reset](#password-reset). |
+| `POST` | `/auth/password/reset` | Public. Body `{ "token", "password" }`. Sets the new password and revokes every session of the user. |
 
 Passwords are hashed with bcrypt. Access JWTs are HS256, bound to the refresh
 row so logout, session revocation, and reuse of a rotated refresh token 401
@@ -151,6 +153,57 @@ app, _ := framework.New(framework.WithAuthMailer(mail) /* ... */)
 msg, _ := mail.Last("ada@example.com")
 // POST msg.Token to /api/v1/auth/verify-email
 ```
+
+## Password reset
+
+A user who forgot their password asks for a reset link, and sets a new
+password with the token it carries:
+
+```sh
+curl -sX POST localhost:8080/api/v1/auth/password/forgot \
+  -H 'Content-Type: application/json' -d '{"email":"ada@example.com"}'
+# 202 {"data":{"accepted":true}}
+curl -sX POST localhost:8080/api/v1/auth/password/reset \
+  -H 'Content-Type: application/json' \
+  -d '{"token":"<token from the message>","password":"a-new-password"}'
+# {"data":{"ok":true,"sessions_revoked":true}}
+```
+
+- **No enumeration.** `POST /auth/password/forgot` answers the same 202,
+  body and headers whether or not the email is an account, and answers
+  before that is known: the lookup and the message run in the background,
+  so the timing does not tell either. Only an account gets a message. Its
+  outcome (sent, the one-a-minute wait, a mailer failure) is logged, never
+  answered. At most 16 requests are handled at once; one beyond that is
+  dropped and logged (per-client rate limits are AUTH-8's).
+- **The token** is a [one-time token](#email-verification) like the
+  verification one, for its own purpose (a verification token never resets
+  a password, nor the reverse): random, stored hashed, pending until its
+  message was delivered, works **once**, expires after
+  `GOMBIT_AUTH_PASSWORD_RESET_TTL` (1h), and a newer one supersedes it. It
+  proves the address it was sent to: once the user's email is another one,
+  it fails. A bad token is a 422 on `token`, and a password outside the
+  policy (8 to 72 bytes, as registration) a 422 on `password`; a refused
+  password leaves the token usable.
+- **Sessions.** A reset revokes every session and refresh token of the user
+  in the same transaction as the new password: whoever knew the old one is
+  signed out (`sessions_revoked: true`). `GOMBIT_AUTH_PASSWORD_RESET_KEEP_SESSIONS=true`
+  keeps them. In cookie mode a reset that revoked the sessions also clears
+  the browser's session cookies.
+- **The link.** `GOMBIT_AUTH_PASSWORD_RESET_URL` is the page the message
+  links to, with `{token}` where the token goes
+  (`https://app.example.com/reset-password?token={token}`); that page asks for
+  the new password and posts both to `POST /auth/password/reset`. Unset, the
+  message carries the bare token.
+- **Mail** goes through the same `auth.Mailer` ([Sending the
+  messages](#sending-the-messages)), with `msg.Kind` `reset_password`.
+- **Audit.** `auth.password.reset_requested` when a message is sent (a
+  request for an address that is no account records nothing) and
+  `auth.password.reset` when the password is set.
+- **From Go.** `svc.RequestPasswordReset(ctx, email)` and
+  `svc.ResetPassword(ctx, token, password)` are the same flow. The first
+  returns nil for an address that is no account, but an error for an account
+  in its wait: don't show its result to the person asking.
 
 ## Sessions
 
@@ -265,6 +318,7 @@ The framework records every security-sensitive operation in
 | `auth.refresh.reuse_detected` | A rotated-away refresh token came back: every session of the user was revoked. |
 | `auth.session.revoked` | `DELETE /auth/sessions…` (`details.scope`: `one`, `others` or `all`). |
 | `auth.email.verified` | `POST /auth/verify-email`. |
+| `auth.password.reset_requested` / `auth.password.reset` | A reset message sent to an account; a password set with its token (`details.sessions_revoked`). |
 | `auth.group.member_added` / `auth.permission.granted` | `auth.AddUserToGroup`, `GrantPermissionToGroup`, `GrantPermissionToUser`. |
 | `admin.record.created` / `updated` / `deleted` | A write through the admin data plane (`target_type` the model's slug, `target_id` the record's key). A write that fails records nothing. |
 

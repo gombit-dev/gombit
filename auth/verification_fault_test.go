@@ -208,3 +208,38 @@ func TestFault_Database_ResendWithdrawalFails(t *testing.T) {
 		}
 	})
 }
+
+// TestFault_Database_PasswordResetRevocationFails: revoking the sessions
+// fails after the new password was written, in the same transaction. The
+// reset fails whole: the old password still works, the sessions stay, and
+// the token is not used up.
+func TestFault_Database_PasswordResetRevocationFails(t *testing.T) {
+	faulttest.ForEachDB(t, faultDBs, func(t *testing.T, kind database.Driver, dsn string) {
+		faults := &faulttest.DBFaults{Statement: faulttest.FailOnce(faulttest.ErrInjected), Match: updatesRefreshTokens}
+		f := newResendFixture(t, kind, dsn, faults)
+		faults.Disarm()
+		ctx := context.Background()
+		pair, err := f.svc.IssueTokens(ctx, f.user)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := f.svc.RequestPasswordReset(ctx, f.user.Email); err != nil {
+			t.Fatal(err)
+		}
+		token := f.mail.last().Token
+		faults.Arm()
+		if _, err := f.svc.ResetPassword(ctx, token, "brand-new-horse"); !errors.Is(err, faulttest.ErrInjected) {
+			t.Fatalf("ResetPassword = %v, want the injected fault", err)
+		}
+		faulttest.Idle(t, f.db)
+		if _, err := f.svc.Authenticate(ctx, f.user.Email, testPassword); err != nil {
+			t.Fatalf("the old password after a failed reset: %v", err)
+		}
+		if _, err := f.svc.RotateRefresh(ctx, pair.RefreshToken); err != nil {
+			t.Fatalf("a session after a failed reset: %v", err)
+		}
+		if _, err := f.svc.ResetPassword(ctx, token, "brand-new-horse"); err != nil {
+			t.Fatalf("the token after a failed reset: %v", err)
+		}
+	})
+}

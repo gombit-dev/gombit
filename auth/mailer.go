@@ -35,6 +35,8 @@ type MessageKind string
 const (
 	// MessageVerifyEmail asks the user to confirm they own the address.
 	MessageVerifyEmail MessageKind = "verify_email"
+	// MessageResetPassword carries a link to set a new password.
+	MessageResetPassword MessageKind = "reset_password"
 )
 
 // Message is one lifecycle email. Subject and Text are a plain default a
@@ -48,8 +50,8 @@ type Message struct {
 	Subject string
 	Text    string
 	// Token is the single-use token the message carries, and URL the link
-	// with it (config.AuthConfig.EmailVerificationURL; empty when none is
-	// configured).
+	// with it (config.AuthConfig.EmailVerificationURL or PasswordResetURL;
+	// empty when none is configured).
 	Token string
 	URL   string
 	// ExpiresAt is when the token stops working.

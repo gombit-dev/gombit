@@ -193,6 +193,7 @@ func TestLoadFromEnv(t *testing.T) {
 			CookieSameSite:  CookieSameSiteStrict,
 
 			EmailVerificationTTL: DefaultEmailVerificationTTL,
+			PasswordResetTTL:     DefaultPasswordResetTTL,
 		},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -372,6 +373,7 @@ func TestLoadUsesProcessEnvironment(t *testing.T) {
 			CookieSameSite:  CookieSameSiteLax,
 
 			EmailVerificationTTL: DefaultEmailVerificationTTL,
+			PasswordResetTTL:     DefaultPasswordResetTTL,
 		},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -1266,5 +1268,41 @@ func TestValidateEmailVerification(t *testing.T) {
 	}
 	if DefaultFor(EnvironmentProduction).Auth.EmailVerificationTTL != DefaultEmailVerificationTTL {
 		t.Fatal("the default TTL is not 24h")
+	}
+}
+
+// TestPasswordResetConfig: the reset link's TTL and URL validate like the
+// verification ones, and sessions are revoked unless the app keeps them.
+func TestPasswordResetConfig(t *testing.T) {
+	fieldsOf := func(cfg Config) map[string]FieldError {
+		out := map[string]FieldError{}
+		var fe FieldErrors
+		if err := cfg.Validate(); errors.As(err, &fe) {
+			for _, f := range fe {
+				out[f.Field] = f
+			}
+		}
+		return out
+	}
+	cfg := DefaultFor(EnvironmentDevelopment)
+	cfg.Auth.PasswordResetURL = "https://app.example.com/reset"
+	cfg.Auth.PasswordResetTTL = -time.Second
+	got := fieldsOf(cfg)
+	if f, ok := got["Auth.PasswordResetURL"]; !ok || f.Env != envPasswordResetURL || !strings.Contains(f.Message, PasswordResetURLToken) {
+		t.Errorf("a URL without {token}: %+v", got)
+	}
+	if f, ok := got["Auth.PasswordResetTTL"]; !ok || f.Env != envPasswordResetTTL {
+		t.Errorf("a negative TTL: %+v", got)
+	}
+	loaded, err := LoadFromEnv(func(k string) (string, bool) {
+		v, ok := map[string]string{envPasswordResetTTL: "15m", envPasswordResetURL: "https://x/r?t={token}", envPasswordResetKeep: "true"}[k] // #nosec G101 -- variable names, not credentials.
+		return v, ok
+	})
+	if err != nil || loaded.Auth.PasswordResetTTL != 15*time.Minute || loaded.Auth.PasswordResetURL != "https://x/r?t={token}" || !loaded.Auth.PasswordResetKeepSessions {
+		t.Fatalf("LoadFromEnv = %+v, %v", loaded.Auth, err)
+	}
+	def := DefaultFor(EnvironmentProduction).Auth
+	if def.PasswordResetTTL != DefaultPasswordResetTTL || def.PasswordResetKeepSessions {
+		t.Fatalf("defaults = %v keep=%v; want 1h, sessions revoked", def.PasswordResetTTL, def.PasswordResetKeepSessions)
 	}
 }

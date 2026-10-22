@@ -107,10 +107,31 @@ rules, the mailer, and `auth.RequireVerifiedEmail`.
 The development JWT secret in `main.go` is not a production secret.
 Production config rejects secrets shorter than 32 characters.
 
+## Password reset
+
+Ask for a reset link; the answer is the same whether or not the email is an
+account, and the development server logs the message (`auth: email not sent
+(development LogMailer)`):
+
+```bash
+curl -sS -X POST http://127.0.0.1:8080/api/v1/auth/password/forgot \
+  -H 'Content-Type: application/json' -d '{"email":"ada@example.com"}'
+# 202 {"data":{"accepted":true}}
+
+# set a new password with the token in the log: every session of ada ends
+curl -sS -X POST http://127.0.0.1:8080/api/v1/auth/password/reset \
+  -H 'Content-Type: application/json' \
+  -d '{"token":"<token from the log>","password":"correct-horse-2"}'
+# {"data":{"ok":true,"sessions_revoked":true}}
+```
+
+See [`docs/auth.md`](../../docs/auth.md#password-reset) for the rules.
+
 ## Audit trail
 
 Every step above was recorded in `auth_audit_events`: the registration, the
-logins, the logout, the session revocations, the verification, each with
+logins, the logout, the session revocations, the verification, the password
+reset, each with
 the user, the time, and the request (`X-Request-Id`, client IP, user agent).
 A failed login is recorded too:
 

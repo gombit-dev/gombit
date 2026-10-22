@@ -92,5 +92,26 @@ func IsResendTooSoon(err error) bool {
 	return errors.As(err, &tooSoon)
 }
 
+// RequestPasswordResetInBackground is what POST /auth/password/forgot runs.
+func RequestPasswordResetInBackground(ctx context.Context, s *Service, email string) {
+	s.requestPasswordResetInBackground(ctx, email)
+}
+
+// FillResetSlots takes every background password reset slot, as that many
+// requests in flight would; release gives them back.
+func FillResetSlots(s *Service) (release func()) {
+	for range cap(s.resetSlots) {
+		s.resetSlots <- struct{}{}
+	}
+	return func() {
+		for range cap(s.resetSlots) {
+			<-s.resetSlots
+		}
+	}
+}
+
 // SetMailer replaces the service's Mailer.
 func SetMailer(s *Service, m Mailer) { s.mailer = m }
+
+// SetHasher replaces the service's password Hasher.
+func SetHasher(s *Service, h Hasher) { s.hasher = h }

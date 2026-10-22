@@ -25,6 +25,9 @@ type Service struct {
 	mailer      Mailer
 	logger      *zap.Logger
 	auditor     Auditor
+	// resetSlots bounds the password reset requests handled in the
+	// background at once (passwordResetSlots).
+	resetSlots  chan struct{}
 	dummyOnce   sync.Once
 	dummyHash   string
 	rotateMu    sync.Mutex
@@ -89,6 +92,7 @@ func NewService(db *gorm.DB, cfg config.Config, opts ...Option) (*Service, error
 		logger: zap.NewNop(),
 	}
 	s.auditor = DBAuditor(db)
+	s.resetSlots = make(chan struct{}, passwordResetSlots)
 	for _, opt := range opts {
 		opt(s)
 	}

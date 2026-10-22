@@ -21,8 +21,9 @@ const (
 // tokens); AuthModeCookie mounts the same operation IDs and paths but
 // exchanges HttpOnly session cookies instead, plus GET /auth/csrf. The two
 // modes are mutually exclusive per app — see docs/auth-cookie.md for the
-// cookie/CSRF threat model. Both modes mount email verification (AUTH-1);
-// opts configure the Service the routes use (WithMailer, WithLogger).
+// cookie/CSRF threat model. Both modes mount email verification (AUTH-1)
+// and password reset (AUTH-2); opts configure the Service the routes use
+// (WithMailer, WithLogger, WithAuditor).
 func Mount(api huma.API, db *gorm.DB, cfg config.Config, opts ...Option) error {
 	if api == nil {
 		return errors.New("auth: nil API")
@@ -94,6 +95,7 @@ func mountBearerRoutes(api huma.API, svc *Service, prefix string) {
 
 	registerSessionRoutes(api, svc, prefix, bearerSecurityName, svc.requireBearer(), false)
 	registerVerificationRoutes(api, svc, prefix, bearerSecurityName, svc.requireBearer())
+	registerPasswordResetRoutes(api, svc, prefix, false)
 }
 
 func mountCookieRoutes(api huma.API, svc *Service, prefix string) {
@@ -143,6 +145,7 @@ func mountCookieRoutes(api huma.API, svc *Service, prefix string) {
 
 	registerSessionRoutes(api, svc, prefix, cookieSecurityName, svc.requireCookieSession(), true)
 	registerVerificationRoutes(api, svc, prefix, cookieSecurityName, svc.requireCookieSession())
+	registerPasswordResetRoutes(api, svc, prefix, true)
 }
 
 func installBearerScheme(api huma.API) {

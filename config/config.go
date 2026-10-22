@@ -63,6 +63,9 @@ const (
 	envAuthMode                = "GOMBIT_AUTH_MODE"
 	envEmailVerificationTTL    = "GOMBIT_AUTH_EMAIL_VERIFICATION_TTL"
 	envEmailVerificationURL    = "GOMBIT_AUTH_EMAIL_VERIFICATION_URL"
+	envPasswordResetTTL        = "GOMBIT_AUTH_PASSWORD_RESET_TTL"           // #nosec G101 -- environment variable name, not a credential.
+	envPasswordResetURL        = "GOMBIT_AUTH_PASSWORD_RESET_URL"           // #nosec G101 -- environment variable name, not a credential.
+	envPasswordResetKeep       = "GOMBIT_AUTH_PASSWORD_RESET_KEEP_SESSIONS" // #nosec G101 -- environment variable name, not a credential.
 	envCookieSecure            = "GOMBIT_COOKIE_SECURE"
 	envCookieSameSite          = "GOMBIT_COOKIE_SAMESITE"
 	envSecuritySanitizeInput   = "GOMBIT_SECURITY_SANITIZE_INPUT"
@@ -96,6 +99,13 @@ const (
 	// EmailVerificationURLToken is the placeholder an email verification
 	// URL carries where the token goes.
 	EmailVerificationURLToken = "{token}"
+
+	// DefaultPasswordResetTTL is how long a password reset link stays valid.
+	DefaultPasswordResetTTL = time.Hour
+
+	// PasswordResetURLToken is the placeholder a password reset URL carries
+	// where the token goes.
+	PasswordResetURLToken = "{token}"
 )
 
 // Environment is the runtime environment name.
@@ -440,6 +450,19 @@ type AuthConfig struct {
 	// ("https://app.example.com/verify-email?token={token}"): the page that
 	// posts it to POST /auth/verify-email. Empty sends the token alone.
 	EmailVerificationURL string
+	// PasswordResetTTL is how long a password reset token stays valid
+	// (AUTH-2).
+	PasswordResetTTL time.Duration
+	// PasswordResetURL is the link a password reset message carries, with
+	// PasswordResetURLToken where the token goes
+	// ("https://app.example.com/reset-password?token={token}"): the page that
+	// posts it, with the new password, to POST /auth/password/reset. Empty
+	// sends the token alone.
+	PasswordResetURL string
+	// PasswordResetKeepSessions keeps the user's sessions when they reset
+	// their password. By default (false) a reset revokes every session and
+	// refresh token of the user: whoever knew the old password is signed out.
+	PasswordResetKeepSessions bool
 }
 
 // Enabled reports whether auth routes should be mounted (JWT secret is set).
@@ -553,6 +576,7 @@ func defaultAuthConfig() AuthConfig {
 		CookieSameSite:  CookieSameSiteLax,
 
 		EmailVerificationTTL: DefaultEmailVerificationTTL,
+		PasswordResetTTL:     DefaultPasswordResetTTL,
 	}
 }
 
@@ -659,6 +683,9 @@ func LoadFromEnv(lookup EnvLookup) (Config, error) {
 	applyCookieSameSite(lookup, envCookieSameSite, &cfg.Auth.CookieSameSite)
 	applyDuration(lookup, envEmailVerificationTTL, "Auth.EmailVerificationTTL", &cfg.Auth.EmailVerificationTTL, &errs)
 	applyString(lookup, envEmailVerificationURL, &cfg.Auth.EmailVerificationURL)
+	applyDuration(lookup, envPasswordResetTTL, "Auth.PasswordResetTTL", &cfg.Auth.PasswordResetTTL, &errs)
+	applyString(lookup, envPasswordResetURL, &cfg.Auth.PasswordResetURL)
+	applyBool(lookup, envPasswordResetKeep, "Auth.PasswordResetKeepSessions", &cfg.Auth.PasswordResetKeepSessions, &errs)
 	applyBool(lookup, envSecuritySanitizeInput, "Security.SanitizeInput", &cfg.Security.SanitizeInput, &errs)
 	if docsEnabledSet {
 		applyBool(lookup, envDocsEnabled, "API.DocsEnabled", &cfg.API.DocsEnabled, &errs)
@@ -873,6 +900,22 @@ func validateAuthConfig(errs *FieldErrors, env Environment, cfg AuthConfig) {
 			Env:     envEmailVerificationURL,
 			Value:   u,
 			Message: "must contain " + EmailVerificationURLToken + " where the verification token goes",
+		})
+	}
+	if cfg.PasswordResetTTL < 0 {
+		*errs = append(*errs, FieldError{
+			Field:   "Auth.PasswordResetTTL",
+			Env:     envPasswordResetTTL,
+			Value:   cfg.PasswordResetTTL.String(),
+			Message: "must be greater than or equal to zero",
+		})
+	}
+	if u := strings.TrimSpace(cfg.PasswordResetURL); u != "" && !strings.Contains(u, PasswordResetURLToken) {
+		*errs = append(*errs, FieldError{
+			Field:   "Auth.PasswordResetURL",
+			Env:     envPasswordResetURL,
+			Value:   u,
+			Message: "must contain " + PasswordResetURLToken + " where the reset token goes",
 		})
 	}
 	if env == EnvironmentProduction && cfg.JWTSecret != "" {

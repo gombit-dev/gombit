@@ -53,6 +53,18 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   logins, registrations and the other recorded operations still work,
   and log a warning for each event they could not write.
 
+- **Breaking.** With auth enabled, an app that registers the password reset routes, their `auth-*` operation IDs or the `AuthPasswordForgotBody` / `AuthPasswordResetBody` / `AuthPasswordResetRequested` / `AuthPasswordResetResult` schema names fails at startup: the framework registers them. (`password-reset-names-reserved`, api, [#332](https://github.com/gombit-dev/gombit/issues/332))
+
+  With `GOMBIT_JWT_SECRET` set, registering `POST
+  {prefix}/auth/password/forgot` or `POST {prefix}/auth/password/reset`,
+  an operation `auth-request-password-reset` or `auth-reset-password`,
+  or a type Huma names `AuthPasswordForgotBody`,
+  `AuthPasswordResetBody`, `AuthPasswordResetRequested`,
+  `AuthPasswordResetResult`, `DataAuthPasswordResetRequested` or
+  `DataAuthPasswordResetResult` now panics when the app starts. Drop
+  the app's own reset routes, which the framework's replace, or rename
+  them.
+
 ### Informational
 
 - The framework requires Go 1.26.9 (`go 1.26.9` in go.mod), and `gombit new` pins it. (`go-1-26-9`, dependency, [#602](https://github.com/gombit-dev/gombit/issues/602))
@@ -86,6 +98,17 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   (`framework.WithAuthAuditor`), for the auth routes and the admin.
   `auth.CaptureRequestInfo` and `auth.RecordAuditEvent` record an
   app's own sensitive operations; `admin.Mount` takes auth options.
+
+- Password reset: `POST {prefix}/auth/password/forgot` mails a single-use, expiring link and answers the same 202 whether or not the email is an account; `POST {prefix}/auth/password/reset` sets the new password and revokes every session of the user. (`password-reset`, api, [#332](https://github.com/gombit-dev/gombit/issues/332))
+
+  `GOMBIT_AUTH_PASSWORD_RESET_TTL` (1h) and
+  `GOMBIT_AUTH_PASSWORD_RESET_URL` configure the link;
+  `GOMBIT_AUTH_PASSWORD_RESET_KEEP_SESSIONS=true` keeps the sessions.
+  `auth.Service.RequestPasswordReset` and `ResetPassword` are the same
+  flow for an app's own code. A production app with no mailer sends
+  no message.
+
+- A new app's placeholder `schema.ts` includes the password reset operations; an existing app's generated client gets them from `gombit client generate`. (`client-schema-password-reset`, client, [#332](https://github.com/gombit-dev/gombit/issues/332))
 
 ## v0.8.0
 

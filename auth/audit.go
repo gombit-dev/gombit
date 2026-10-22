@@ -47,6 +47,13 @@ const (
 	// AuditEmailVerified: a user verified their email (POST
 	// /auth/verify-email).
 	AuditEmailVerified AuditAction = "auth.email.verified"
+	// AuditPasswordResetRequested: a password reset message was sent to the
+	// user (POST /auth/password/forgot). A request for an address that is no
+	// account records nothing.
+	AuditPasswordResetRequested AuditAction = "auth.password.reset_requested"
+	// AuditPasswordReset: a user set a new password with a reset token
+	// (Details "sessions_revoked").
+	AuditPasswordReset AuditAction = "auth.password.reset"
 	// AuditGroupMemberAdded: a user was added to a group (Details "group").
 	AuditGroupMemberAdded AuditAction = "auth.group.member_added"
 	// AuditPermissionGranted: a permission was granted to a user or a group
