@@ -45,6 +45,9 @@ version.
 
 ### Fixed
 
+- The OpenAPI contract for `POST /auth/verify-email/resend` now declares its
+  429 response and integer `Retry-After` header, matching the response already
+  sent at runtime ([#611](https://github.com/gombit-dev/gombit/issues/611)).
 - Saving the admin edit form no longer rewrites fields the operator did not
   touch: it sent every field back, so each save truncated a datetime to the
   minute (`12:30:45.123456` became `12:30:00`) and an integer past 2^53 to

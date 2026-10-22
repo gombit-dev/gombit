@@ -509,6 +509,12 @@ releases:
 
   - version: unreleased
     changes:
+      - id: verification-resend-rate-limit-contract
+        kind: informational
+        area: api
+        summary: "The email-verification resend operation's OpenAPI contract declares its 429 response and integer `Retry-After` header."
+        refs: [611]
+
       - id: go-1-26-9
         kind: informational
         area: dependency

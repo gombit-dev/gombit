@@ -42,6 +42,8 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 ### Informational
 
+- The email-verification resend operation's OpenAPI contract declares its 429 response and integer `Retry-After` header. (`verification-resend-rate-limit-contract`, api, [#611](https://github.com/gombit-dev/gombit/issues/611))
+
 - The framework requires Go 1.26.9 (`go 1.26.9` in go.mod), and `gombit new` pins it. (`go-1-26-9`, dependency, [#602](https://github.com/gombit-dev/gombit/issues/602))
 
   An app's `go` line is raised to 1.26.9 by `go get` or `go mod tidy`
