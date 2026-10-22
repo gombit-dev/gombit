@@ -79,12 +79,16 @@ if (isD10ErrorBody(body)) {
 | Response | `unwrap` result |
 | --- | --- |
 | 2xx with content | resolves the parsed `data` |
-| `204 No Content` | resolves `undefined` — a 204 carries no body, so `openapi-fetch` reports `data: undefined` for a handler whose output struct has no `Body` |
-| another 2xx with no content | throws `ContractError` with code `empty_response` |
+| 2xx with no content — `204 No Content`, a `HEAD`, a zero-length body | resolves `undefined`, because that is what `openapi-fetch` reports as the success value |
 | non-2xx | throws `ContractError` carrying the D10 `code`, `fields`, `request_id` and the HTTP status |
 
-A handler whose output struct has no `Body` answers `204`, so its caller awaits
-`unwrap` and ignores the resolved `undefined`.
+`unwrap` does not re-derive the contract from the status: once the call
+succeeded, the result is what the client parsed, `undefined` included. A handler
+whose output struct has no `Body` answers `204`, so its caller awaits `unwrap`
+and ignores the resolved `undefined`. If an endpoint promises a body and gets
+none, that is a contract violation to catch where it is known — check the field
+you expect — not something the wrapper's status can tell apart from a legitimate
+no-content success.
 
 ## Example
 
