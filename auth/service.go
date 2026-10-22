@@ -192,24 +192,27 @@ func (s *Service) Login(ctx context.Context, email, password string) (User, Toke
 	if s.onLoginAuthenticated != nil {
 		s.onLoginAuthenticated()
 	}
-	return s.startSession(ctx, user, true)
+	return s.startSession(ctx, user)
 }
 
 // IssueTokens returns a new access JWT and a rotating refresh token for
 // user: it starts a session, so it records the login as succeeded
-// (Authenticate records the failures). It trusts the caller to have
-// authenticated user; a login by password goes through Login, which also
-// refuses a password that changed meanwhile.
+// (Authenticate records the failures). user is a snapshot, as Authenticate
+// returned it or as loaded from the database: its PasswordHash must still
+// be the user's when the session starts, or IssueTokens fails as invalid
+// credentials (ErrInvalidCredentials). So Authenticate followed by
+// IssueTokens is as safe as Login: a password reset that commits between
+// the two leaves the old password's snapshot unable to start a session.
 func (s *Service) IssueTokens(ctx context.Context, user User) (TokenPair, error) {
-	_, pair, err := s.startSession(ctx, user, false)
+	_, pair, err := s.startSession(ctx, user)
 	return pair, err
 }
 
 // startSession issues a session for user under the user's row lock, the lock
 // a password reset and the session revocations take, so it is ordered
-// against them. With samePassword, the stored hash must still be the one
-// user was authenticated with.
-func (s *Service) startSession(ctx context.Context, user User, samePassword bool) (User, TokenPair, error) {
+// against them, and only if the stored password hash is still the one in
+// user's snapshot.
+func (s *Service) startSession(ctx context.Context, user User) (User, TokenPair, error) {
 	var pair TokenPair
 	var locked User
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -221,7 +224,7 @@ func (s *Service) startSession(ctx context.Context, user User, samePassword bool
 		if err != nil {
 			return err
 		}
-		if samePassword && locked.PasswordHash != user.PasswordHash {
+		if locked.PasswordHash != user.PasswordHash {
 			return errPasswordChanged
 		}
 		pair, err = s.issueTokens(tx, locked, s.now())

@@ -31,6 +31,11 @@ version.
   `GOMBIT_AUTH_PASSWORD_RESET_URL` is the link. Both are audited.
   `auth.Service.RequestPasswordReset` / `ResetPassword` are the same flow
   from Go.
+  - **Breaking (api):** `auth.Service.IssueTokens` starts a session only if
+    the given user's `PasswordHash` is still the stored one (a snapshot from
+    before a password change, or a hand-built `User` without it, is refused
+    as invalid credentials), so `Authenticate` + `IssueTokens` cannot outlive
+    a reset that commits in between; `auth.Service.Login` does both.
   - **Breaking (api):** `auth.Mount` returns the `*auth.Service` it builds
     (`svc, err := auth.Mount(...)`): the caller owns it and calls
     `svc.Close(ctx)` on shutdown, which drains its background work.

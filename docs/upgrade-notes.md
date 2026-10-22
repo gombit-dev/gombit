@@ -65,6 +65,15 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   the app's own reset routes, which the framework's replace, or rename
   them.
 
+- **Breaking.** `auth.Service.IssueTokens(ctx, user)` refuses (invalid credentials) a `user` whose `PasswordHash` is not the stored one: a snapshot from before a password change, or a `User` built by hand without it. (`issue-tokens-checks-password-snapshot`, api, [#332](https://github.com/gombit-dev/gombit/issues/332))
+
+  Pass the `User` that `Authenticate` returned, or one loaded from the
+  database with its `PasswordHash`. A session then starts only if that
+  password is still the user's, so a password reset committing between
+  `Authenticate` and `IssueTokens` leaves the old password unable to
+  start one. `auth.Service.Login` does both steps. A `User{ID: id}` built
+  by hand, which used to start a session, now fails: load the user.
+
 - **Breaking.** `auth.Mount` returns the `*auth.Service` it builds; an app that calls it directly keeps it and closes it on shutdown. (`auth-mount-returns-service`, api, [#332](https://github.com/gombit-dev/gombit/issues/332))
 
   `err := auth.Mount(api, db, cfg)` no longer compiles: write `svc,

@@ -91,7 +91,12 @@ func (s *Service) ResetPassword(ctx context.Context, raw, password string) (User
 		if err := tx.Model(&User{}).Where("id = ?", locked.ID).Update("password_hash", hash).Error; err != nil {
 			return err
 		}
-		if err := supersedeTokensTx(tx, locked.ID, PurposeResetPassword, token.ID, now); err != nil {
+		// Every other reset token of the user stops working, the pending ones
+		// too: a message still being sent must not activate a link to the
+		// password just replaced (activateToken needs used_at NULL).
+		if err := tx.Model(&OneTimeToken{}).
+			Where("user_id = ? AND purpose = ? AND used_at IS NULL AND id <> ?", locked.ID, PurposeResetPassword, token.ID).
+			Update("used_at", now).Error; err != nil {
 			return err
 		}
 		if revoke {

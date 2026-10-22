@@ -660,6 +660,20 @@ releases:
           its session under the user's row lock (`auth.Service.Login`).
         refs: [332]
 
+      - id: issue-tokens-checks-password-snapshot
+        kind: manual
+        breaking: true
+        area: api
+        summary: "`auth.Service.IssueTokens(ctx, user)` refuses (invalid credentials) a `user` whose `PasswordHash` is not the stored one: a snapshot from before a password change, or a `User` built by hand without it."
+        details: |
+          Pass the `User` that `Authenticate` returned, or one loaded from the
+          database with its `PasswordHash`. A session then starts only if that
+          password is still the user's, so a password reset committing between
+          `Authenticate` and `IssueTokens` leaves the old password unable to
+          start one. `auth.Service.Login` does both steps. A `User{ID: id}` built
+          by hand, which used to start a session, now fails: load the user.
+        refs: [332]
+
       - id: auth-mount-returns-service
         kind: manual
         breaking: true

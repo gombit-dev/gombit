@@ -565,6 +565,87 @@ func runPasswordResetService(t *testing.T, db *database.DB) {
 		}
 	})
 
+	t.Run("Authenticate then IssueTokens around a reset: no session", func(t *testing.T) {
+		// The public two-call login, with the reset committing between the
+		// calls: the old password's snapshot cannot start a session.
+		e := newVerificationEnv(t, db)
+		user, _ := e.register(t, "reset-twocall")
+		token := e.resetToken(t, user)
+		snapshot, err := e.svc.Authenticate(ctx, user.Email, testPassword)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := e.svc.ResetPassword(ctx, token, "brand-new-horse"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := e.svc.IssueTokens(ctx, snapshot); !errors.Is(err, auth.ErrInvalidCredentials) {
+			t.Fatalf("IssueTokens with the pre-reset snapshot = %v, want invalid credentials", err)
+		}
+		var live int64
+		e.db.Model(&auth.RefreshToken{}).Where("user_id = ? AND revoked_at IS NULL", user.ID).Count(&live)
+		if live != 0 {
+			t.Fatalf("%d live sessions after the reset, want none", live)
+		}
+		fresh, err := e.svc.Authenticate(ctx, user.Email, "brand-new-horse")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := e.svc.IssueTokens(ctx, fresh); err != nil {
+			t.Fatalf("IssueTokens with the new password's snapshot: %v", err)
+		}
+	})
+
+	t.Run("a reset voids the reset message still being sent", func(t *testing.T) {
+		// A is delivered; B is issued and its mailer is slow; the user resets
+		// with A while B is pending. B's link must not work once delivered:
+		// it would reset the password just set.
+		e := newVerificationEnv(t, db)
+		user, _ := e.register(t, "reset-pending")
+		first := e.resetToken(t, user)
+		e.clock.now = e.clock.now.Add(time.Minute)
+		gate := &gateMailer{inner: e.mail, entered: make(chan struct{}), release: make(chan struct{})}
+		auth.SetMailer(e.svc, gate)
+		if err := auth.RequestPasswordResetInBackground(ctx, e.svc, user.Email); err != nil {
+			t.Fatal(err)
+		}
+		<-gate.entered
+		if _, err := e.svc.ResetPassword(ctx, first, "brand-new-horse"); err != nil {
+			close(gate.release)
+			t.Fatalf("the reset with A while B is pending: %v", err)
+		}
+		close(gate.release)
+		var second auth.Message
+		for wait := time.Now().Add(5 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+			if msg, ok := e.mail.Last(user.Email); ok && msg.Kind == auth.MessageResetPassword && msg.Token != first {
+				second = msg
+				break
+			}
+			if time.Now().After(wait) {
+				t.Fatal("B's message was never delivered")
+			}
+		}
+		// B's activation has run (or been refused) once no reset token of
+		// the user is pending any more.
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			var pending int64
+			e.db.Model(&auth.OneTimeToken{}).Where("user_id = ? AND purpose = ? AND sent_at IS NULL", user.ID, auth.PurposeResetPassword).Count(&pending)
+			if pending == 0 {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("B's token is still pending")
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		if _, err := e.svc.ResetPassword(ctx, second.Token, "attacker-horse"); !errors.Is(err, auth.ErrInvalidToken) {
+			t.Fatalf("B's link after the reset = %v, want ErrInvalidToken", err)
+		}
+		if _, err := e.svc.Authenticate(ctx, user.Email, "brand-new-horse"); err != nil {
+			t.Fatalf("the password set with A: %v", err)
+		}
+	})
+
 	t.Run("concurrent uses: one wins", func(t *testing.T) {
 		e := newVerificationEnv(t, db)
 		user, _ := e.register(t, "reset-race")

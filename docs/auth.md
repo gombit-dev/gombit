@@ -207,7 +207,9 @@ curl -sX POST localhost:8080/api/v1/auth/password/reset \
   password just before the reset cannot start a session after it: a login
   starts its session under the user's lock and only if the password it
   checked is still the user's ([Sessions](#sessions)), so it is either
-  revoked by the reset or refused. `GOMBIT_AUTH_PASSWORD_RESET_KEEP_SESSIONS=true`
+  revoked by the reset or refused. The reset also voids every other reset
+  token of the user, a message still being sent included: its link never
+  works. `GOMBIT_AUTH_PASSWORD_RESET_KEEP_SESSIONS=true`
   keeps them. In cookie mode a reset that revoked the sessions also clears
   the browser's session cookies.
 - **The link.** `GOMBIT_AUTH_PASSWORD_RESET_URL` is the page the message
@@ -307,7 +309,10 @@ the same moment:
   is signed out everywhere, revoke all their sessions.
 - **Login** checks the password without the lock (bcrypt is slow), then
   starts its session under it, and only if the password hash it checked is
-  still the user's (`Service.Login`). A login in flight when a password
+  still the user's (`Service.Login`). Every session start makes that check:
+  `Service.IssueTokens(ctx, user)` compares `user.PasswordHash`, the
+  snapshot the caller authenticated or loaded, with the stored one, so an
+  app's own `Authenticate` + `IssueTokens` login is as safe as `Login`. A login in flight when a password
   reset commits is therefore either revoked by the reset or refused (401):
   the old password never outlives the reset. Against a plain revocation
   (`RevokeAllSessions`, `DELETE /auth/sessions?scope=all`), which does not
