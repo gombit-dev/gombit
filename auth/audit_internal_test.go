@@ -22,25 +22,32 @@ func TestRemoteHost(t *testing.T) {
 	}
 }
 
-// TestCompleteAuditEventBounds: the request's own values are cut to the
-// columns' sizes, and Details is always a JSON object.
+// TestCompleteAuditEventBounds: identifiers are kept whole, and an event
+// one does not fit is refused, not cut; only the User-Agent (free text) is
+// cut to its column. Details is always a JSON object.
 func TestCompleteAuditEventBounds(t *testing.T) {
 	ctx := context.WithValue(context.Background(), requestInfoKey{}, requestInfo{
-		ip:        strings.Repeat("1", 100),
+		ip:        "2001:db8::1",
 		userAgent: strings.Repeat("u", 1000),
 	})
 	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
-	e := completeAuditEvent(ctx, AuditEvent{
-		Action:     AuditAction("app." + strings.Repeat("a", 100)),
-		TargetType: strings.Repeat("t", 100),
-		TargetID:   strings.Repeat("k", 300),
-		RequestID:  strings.Repeat("r", 200),
-	}, now)
-	if len(e.IP) != 64 || len(e.UserAgent) != 255 || len(e.RequestID) != 64 {
-		t.Fatalf("lengths ip=%d ua=%d request=%d, want 64/255/64", len(e.IP), len(e.UserAgent), len(e.RequestID))
+	longKey := strings.Repeat("k", 300)
+	e := completeAuditEvent(ctx, AuditEvent{Action: AuditAdminUpdated, TargetType: "widgets", TargetID: longKey, RequestID: strings.Repeat("r", 128)}, now)
+	if e.TargetID != longKey || len(e.RequestID) != 128 || e.IP != "2001:db8::1" || len(e.UserAgent) != 255 {
+		t.Fatalf("completed: target_id %d bytes, request_id %d, ip %q, user_agent %d", len(e.TargetID), len(e.RequestID), e.IP, len(e.UserAgent))
 	}
-	if len(e.Action) != 64 || len(e.TargetType) != 64 || len(e.TargetID) != 128 {
-		t.Fatalf("lengths action=%d target_type=%d target_id=%d, want 64/64/128", len(e.Action), len(e.TargetType), len(e.TargetID))
+	if err := validateAuditEvent(e); err != nil {
+		t.Fatalf("an event whose identifiers fit = %v", err)
+	}
+	for name, bad := range map[string]AuditEvent{
+		"action":      {Action: AuditAction("app." + strings.Repeat("a", 100))},
+		"target_type": {Action: AuditLogout, TargetType: strings.Repeat("t", 65)},
+		"request_id":  {Action: AuditLogout, RequestID: strings.Repeat("r", 129)},
+		"ip":          {Action: AuditLogout, IP: strings.Repeat("1", 65)},
+	} {
+		if err := validateAuditEvent(bad); err == nil || !strings.Contains(err.Error(), name) {
+			t.Errorf("an over-long %s = %v, want it refused", name, err)
+		}
 	}
 	if e.Details != "{}" || !e.OccurredAt.Equal(now) || e.ActorUserID != nil {
 		t.Fatalf("completed = %+v", e)

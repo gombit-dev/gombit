@@ -16,6 +16,7 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
 
 	"github.com/gombit-dev/gombit/auth"
 	"github.com/gombit-dev/gombit/auth/authtest"
@@ -55,11 +56,43 @@ func TestAuditTrail(t *testing.T) {
 	runAuditGrantInTransaction(t, db)
 }
 
+// warnLogger is a GORM logger that records its warnings.
+type warnLogger struct {
+	gormlogger.Interface
+	mu    sync.Mutex
+	warns []string
+}
+
+func (l *warnLogger) LogMode(gormlogger.LogLevel) gormlogger.Interface { return l }
+
+func (l *warnLogger) Warn(_ context.Context, msg string, data ...any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.warns = append(l.warns, fmt.Sprintf(msg, data...))
+}
+
 // runAuditGrantInTransaction: a grant helper given the caller's transaction
 // records in a savepoint, so an audit insert that fails (the table not
 // migrated yet) does not abort the transaction on PostgreSQL: the grant
-// commits.
+// commits, whether or not GORM's nested transactions are disabled, and the
+// lost event is logged as a warning through the database's logger.
 func runAuditGrantInTransaction(t *testing.T, db *database.DB) {
+	t.Helper()
+	for _, nested := range []string{"nested transactions", "nested transactions disabled"} {
+		t.Run(nested, func(t *testing.T) {
+			logs := &warnLogger{Interface: gormlogger.Discard}
+			session := db.Session(&gorm.Session{Logger: logs, DisableNestedTransaction: nested != "nested transactions"})
+			auditGrantInTransaction(t, db, session)
+			logs.mu.Lock()
+			defer logs.mu.Unlock()
+			if len(logs.warns) != 1 || !strings.Contains(logs.warns[0], string(auth.AuditPermissionGranted)) {
+				t.Fatalf("warnings = %q, want the lost %s event", logs.warns, auth.AuditPermissionGranted)
+			}
+		})
+	}
+}
+
+func auditGrantInTransaction(t *testing.T, db *database.DB, session *gorm.DB) {
 	t.Helper()
 	ctx := context.Background()
 	if err := auth.Migrate(db.DB); err != nil {
@@ -77,7 +110,7 @@ func runAuditGrantInTransaction(t *testing.T, db *database.DB) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = auth.Migrate(db.DB) })
-	err = db.Transaction(func(tx *gorm.DB) error {
+	err = session.Transaction(func(tx *gorm.DB) error {
 		if err := auth.GrantPermissionToUser(ctx, tx, &user, &perm); err != nil {
 			return err
 		}
@@ -203,6 +236,20 @@ func runAuditTrail(t *testing.T, db *database.DB) {
 	}
 	if anon.TargetUserID != nil || anon.ActorUserID != nil || strings.Contains(fmt.Sprintf("%+v", anon), unknown) {
 		t.Fatalf("unknown-account login = %+v", anon)
+	}
+
+	// An inbound request id too long to keep whole is replaced at the
+	// boundary: the event carries exactly the id the response and the logs
+	// do, never a cut prefix of the inbound one.
+	longID := strings.Repeat("x", 200)
+	longReq := auditRequest(app, "/api/v1/auth/login", "", cred("wrong-password-y"), longID)
+	answered := longReq.Header().Get(framework.RequestIDHeader)
+	if answered == "" || strings.HasPrefix(longID, answered) {
+		t.Fatalf("the response's request id = %q, want a generated one", answered)
+	}
+	var correlated auth.AuditEvent
+	if err := db.Where("request_id = ?", answered).First(&correlated).Error; err != nil || correlated.Action != auth.AuditLoginFailed {
+		t.Fatalf("the event for request %q = %+v, %v", answered, correlated, err)
 	}
 
 	listed, err := auth.ListAuditEvents(context.Background(), db.DB, auth.AuditQuery{TargetUserID: user.ID, Action: auth.AuditLoginSucceeded})

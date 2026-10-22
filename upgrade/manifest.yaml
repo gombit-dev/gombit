@@ -616,6 +616,17 @@ releases:
           app's own sensitive operations; `admin.Mount` takes auth options.
         refs: [337]
 
+      - id: request-id-bounded
+        kind: informational
+        area: behavior
+        summary: "An inbound `X-Request-Id` longer than 128 bytes, or holding a space or a control character, is replaced by a generated ID instead of being echoed, logged and stored as sent."
+        details: |
+          A caller that sends a valid ID (at most `contract.MaxRequestIDLength`
+          bytes of visible ASCII: a UUID, a trace-style hex ID) sees it back
+          unchanged, as before. Every consumer (response header, logs, error
+          envelopes, the audit trail) carries the one accepted ID.
+        refs: [337]
+
       - id: password-reset-names-reserved
         kind: manual
         breaking: true

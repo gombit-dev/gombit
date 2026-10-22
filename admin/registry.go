@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"fmt"
 	"sync"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -122,6 +123,16 @@ func (m *registered) columnFor(name string) (string, bool) {
 		return col.column, true
 	}
 	return "", false
+}
+
+// pkString is inst's primary key, as the API shows it (the {id} a detail,
+// update or delete path names it by).
+func (m *registered) pkString(inst any) string {
+	v, ok := m.toRow(inst)[m.meta.PK]
+	if !ok || v == nil {
+		return ""
+	}
+	return fmt.Sprint(v)
 }
 
 func (m *registered) toRow(inst any) row {

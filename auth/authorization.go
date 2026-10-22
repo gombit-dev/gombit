@@ -139,10 +139,14 @@ func GrantPermissionToUser(ctx context.Context, db *gorm.DB, user *User, permiss
 }
 
 // recordHelperEvent records a grant made through the helpers above. It does
-// not fail the grant, which has already happened: an application that has
-// not migrated auth_audit_events keeps granting.
+// not fail the grant, which has already happened (an application that has
+// not migrated auth_audit_events keeps granting); an event it could not
+// write is logged as a warning through db's logger, the application's
+// database logger.
 func recordHelperEvent(ctx context.Context, db *gorm.DB, event AuditEvent) {
-	_ = RecordAuditEvent(ctx, db, event)
+	if err := RecordAuditEvent(ctx, db, event); err != nil && db.Logger != nil {
+		db.Logger.Warn(ctx, "auth: record an audit event (%s): %v", event.Action, err)
+	}
 }
 
 func validateAssociation(db *gorm.DB, owners ...bool) error {

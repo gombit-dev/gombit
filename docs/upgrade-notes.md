@@ -99,6 +99,13 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   `auth.CaptureRequestInfo` and `auth.RecordAuditEvent` record an
   app's own sensitive operations; `admin.Mount` takes auth options.
 
+- An inbound `X-Request-Id` longer than 128 bytes, or holding a space or a control character, is replaced by a generated ID instead of being echoed, logged and stored as sent. (`request-id-bounded`, behavior, [#337](https://github.com/gombit-dev/gombit/issues/337))
+
+  A caller that sends a valid ID (at most `contract.MaxRequestIDLength`
+  bytes of visible ASCII: a UUID, a trace-style hex ID) sees it back
+  unchanged, as before. Every consumer (response header, logs, error
+  envelopes, the audit trail) carries the one accepted ID.
+
 - Password reset: `POST {prefix}/auth/password/forgot` mails a single-use, expiring link and answers the same 202 whether or not the email is an account; `POST {prefix}/auth/password/reset` sets the new password and revokes every session of the user. (`password-reset`, api, [#332](https://github.com/gombit-dev/gombit/issues/332))
 
   `GOMBIT_AUTH_PASSWORD_RESET_TTL` (1h) and

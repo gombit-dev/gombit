@@ -77,6 +77,12 @@ version.
 
 ### Fixed
 
+- An inbound `X-Request-Id` longer than 128 bytes
+  (`contract.MaxRequestIDLength`), or holding a space or a control
+  character, is replaced by a generated ID instead of being echoed, logged
+  and stored as sent: every consumer (the response header, the logs, error
+  envelopes, the audit trail) carries the same, whole ID
+  ([#337](https://github.com/gombit-dev/gombit/issues/337)).
 - Saving the admin edit form no longer rewrites fields the operator did not
   touch: it sent every field back, so each save truncated a datetime to the
   minute (`12:30:45.123456` became `12:30:00`) and an integer past 2^53 to
