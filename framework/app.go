@@ -247,11 +247,8 @@ func New(options ...Option) (_ *App, err error) {
 			return nil, errors.New("framework: JWT secret is set but no database is attached")
 		}
 		authOpts := app.authOptions()
-		svc, err := auth.NewService(app.db.DB, app.cfg, authOpts...)
+		svc, err := auth.Mount(app.api, app.db.DB, app.cfg, authOpts...)
 		if err != nil {
-			return nil, err
-		}
-		if err := auth.MountService(app.api, svc, app.cfg); err != nil {
 			return nil, err
 		}
 		// The App owns the Service: runStopHooks closes it (its background

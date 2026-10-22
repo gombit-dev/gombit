@@ -65,6 +65,17 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   the app's own reset routes, which the framework's replace, or rename
   them.
 
+- **Breaking.** `auth.Mount` returns the `*auth.Service` it builds; an app that calls it directly keeps it and closes it on shutdown. (`auth-mount-returns-service`, api, [#332](https://github.com/gombit-dev/gombit/issues/332))
+
+  `err := auth.Mount(api, db, cfg)` no longer compiles: write `svc,
+  err := auth.Mount(api, db, cfg)`, and call `svc.Close(ctx)` when the
+  app stops, before it closes the database. The Service runs
+  background work (password reset messages) that Close drains, then
+  cancels; a Service nobody closes leaves that work running against a
+  closed database. With auth disabled, Mount returns a nil Service.
+  An app on `framework.App` does not call `auth.Mount` and changes
+  nothing.
+
 ### Informational
 
 - The framework requires Go 1.26.9 (`go 1.26.9` in go.mod), and `gombit new` pins it. (`go-1-26-9`, dependency, [#602](https://github.com/gombit-dev/gombit/issues/602))
@@ -115,11 +126,8 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   flow for an app's own code. A production app with no mailer sends
   no message. The messages are sent by the auth Service's bounded
   background workers (a request they cannot admit is a 503);
-  `framework.App` closes the Service when it stops. An app that mounts
-  the auth routes itself and stops gracefully switches from
-  `auth.Mount` to `auth.NewService` + `auth.MountService` and calls
-  `Service.Close` on shutdown. A login now starts its session under
-  the user's row lock (`auth.Service.Login`).
+  `framework.App` closes the Service when it stops. A login now starts
+  its session under the user's row lock (`auth.Service.Login`).
 
 - A new app's placeholder `schema.ts` includes the password reset operations; an existing app's generated client gets them from `gombit client generate`. (`client-schema-password-reset`, client, [#332](https://github.com/gombit-dev/gombit/issues/332))
 

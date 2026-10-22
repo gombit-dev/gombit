@@ -165,7 +165,9 @@ func oneTimeWait(tx *gorm.DB, userID uint, purpose TokenPurpose, now time.Time) 
 // new link works and no earlier one does, or nothing changed. The user's
 // row first, as consumeOneTimeToken takes it, so the two never deadlock.
 func (s *Service) activateToken(ctx context.Context, token OneTimeToken) error {
-	return s.db.WithContext(context.WithoutCancel(ctx)).Transaction(func(tx *gorm.DB) error {
+	ctx, cancel := s.detach(ctx, tailTimeout)
+	defer cancel()
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if _, err := lockUserTx(tx, token.UserID); err != nil {
 			return err
 		}
@@ -193,7 +195,9 @@ func supersedeTokensTx(tx *gorm.DB, userID uint, purpose TokenPurpose, keep uint
 // withdrawToken deletes a pending token whose message is no use. Best
 // effort: a pending token left behind does not work anyway.
 func (s *Service) withdrawToken(ctx context.Context, token OneTimeToken) {
-	if err := s.db.WithContext(context.WithoutCancel(ctx)).Where("id = ? AND sent_at IS NULL", token.ID).Delete(&OneTimeToken{}).Error; err != nil {
+	ctx, cancel := s.detach(ctx, tailTimeout)
+	defer cancel()
+	if err := s.db.WithContext(ctx).Where("id = ? AND sent_at IS NULL", token.ID).Delete(&OneTimeToken{}).Error; err != nil {
 		s.logger.Warn("auth: withdraw an undelivered one-time token", zap.Error(err))
 	}
 }

@@ -98,16 +98,35 @@ func RequestPasswordResetInBackground(ctx context.Context, s *Service, email str
 	return s.requestPasswordResetInBackground(ctx, email)
 }
 
-// FillBackground occupies every background worker and queue slot with a
-// task that waits for release, as that much work in flight would.
+// FillBackground occupies every background worker and every waiting slot
+// with a task that waits for release, as that much work in flight would.
+// It first fills the workers and waits until each is running its task, then
+// the queue to its capacity: a full queue that the workers were about to
+// drain would not be full for long.
 func FillBackground(s *Service) (release func()) {
 	gate := make(chan struct{})
-	for s.background.submit(context.Background(), func(ctx context.Context) {
+	block := func(ctx context.Context) {
 		select {
 		case <-gate:
 		case <-ctx.Done():
 		}
-	}) == nil {
+	}
+	running := make(chan struct{}, backgroundWorkers)
+	for range backgroundWorkers {
+		if err := s.background.submit(context.Background(), func(ctx context.Context) {
+			running <- struct{}{}
+			block(ctx)
+		}); err != nil {
+			panic(err)
+		}
+	}
+	for range backgroundWorkers {
+		<-running
+	}
+	for range backgroundQueue {
+		if err := s.background.submit(context.Background(), block); err != nil {
+			panic(err)
+		}
 	}
 	return func() { close(gate) }
 }

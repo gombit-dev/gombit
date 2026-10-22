@@ -30,8 +30,11 @@ version.
   address), expiring after `GOMBIT_AUTH_PASSWORD_RESET_TTL` (1h);
   `GOMBIT_AUTH_PASSWORD_RESET_URL` is the link. Both are audited.
   `auth.Service.RequestPasswordReset` / `ResetPassword` are the same flow
-  from Go; `auth.MountService` mounts the routes over a Service the caller
-  owns and closes (`Service.Close`).
+  from Go.
+  - **Breaking (api):** `auth.Mount` returns the `*auth.Service` it builds
+    (`svc, err := auth.Mount(...)`): the caller owns it and calls
+    `svc.Close(ctx)` on shutdown, which drains its background work.
+    `framework.App` does this itself.
   - **Breaking (api):** the framework now registers the reset routes, the
     `auth-request-password-reset` and `auth-reset-password` operation IDs,
     and the `AuthPasswordForgotBody` / `AuthPasswordResetBody` /

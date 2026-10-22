@@ -134,11 +134,29 @@ func (r *backgroundRunner) close(ctx context.Context) error {
 	}
 }
 
+// tailTimeout bounds one piece of work that must outlive its request: a
+// token's activation or withdrawal after its message (detach).
+const tailTimeout = 5 * time.Second
+
+// detach is the context for work that must outlive the request that
+// started it (the operation happened; the client hanging up must not stop
+// its bookkeeping): ctx's values without its cancellation, a deadline of
+// timeout, and cancelled when the Service is closed (Close, once draining
+// runs out), so it never outlives its owner either.
+func (s *Service) detach(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
+	unhook := context.AfterFunc(s.background.stop, cancel)
+	return dctx, func() {
+		unhook()
+		cancel()
+	}
+}
+
 // Close finishes the Service's background work (the password reset
 // messages POST /auth/password/forgot accepted): it stops admitting more,
 // waits for the admitted work until ctx is done, then cancels what is left.
 // framework.App calls it when it stops; an application that mounts the
-// routes itself (NewService, MountService) calls it on shutdown. Close is
+// routes itself calls it, on the Service Mount returned, on shutdown. Close is
 // idempotent; after it, the routes answer background requests with 503.
 func (s *Service) Close(ctx context.Context) error {
 	return s.background.close(ctx)

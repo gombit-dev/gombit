@@ -347,7 +347,9 @@ func (s *Service) Audit(ctx context.Context, event AuditEvent) {
 	event = completeAuditEvent(ctx, event, s.now())
 	err := validateAuditEvent(event)
 	if err == nil {
-		actx, cancel := auditContext(ctx)
+		// The Service's own detach: bounded like auditContext, and also
+		// cancelled when the Service is closed.
+		actx, cancel := s.detach(ctx, auditTimeout)
 		err = s.auditor.Record(actx, event)
 		cancel()
 	}

@@ -267,3 +267,76 @@ func TestFault_Database_PasswordResetScreenFailsClosed(t *testing.T) {
 		}
 	})
 }
+
+// assertCloseBounded closes f's Service with a short deadline while its
+// background reset is stuck in a tail step, and fails t unless Close ends
+// that work (it returns its deadline, not "did not stop") within its grace.
+func (f resendFixture) assertCloseBounded(t *testing.T) {
+	t.Helper()
+	closeCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err := f.svc.Close(closeCtx)
+	if !errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "did not stop") {
+		t.Fatalf("Close with a stuck tail step = %v, want its deadline and the work stopped", err)
+	}
+	if took := time.Since(start); took > 2*time.Second {
+		t.Fatalf("Close took %v: the stuck step outlived the Service's cancellation", took)
+	}
+}
+
+// TestFault_Database_CloseCancelsBlockedWithdrawal: Close cancels a send
+// waiting on its context; the send's failure withdraws the token, and that
+// DELETE never comes back. The withdrawal is bounded by the Service's
+// lifetime, not detached from it: Close still ends the work.
+func TestFault_Database_CloseCancelsBlockedWithdrawal(t *testing.T) {
+	faulttest.ForEachDB(t, faultDBs, func(t *testing.T, kind database.Driver, dsn string) {
+		never := make(chan struct{})
+		f := newResendFixture(t, kind, dsn, &faulttest.DBFaults{Statement: faulttest.BlockUntil(never), Match: deletesTokens})
+		mailer := newCtxMailer()
+		auth.SetMailer(f.svc, mailer)
+		if err := auth.RequestPasswordResetInBackground(context.Background(), f.svc, f.user.Email); err != nil {
+			t.Fatal(err)
+		}
+		<-mailer.entered
+		f.assertCloseBounded(t)
+	})
+}
+
+// TestFault_Database_CloseCancelsBlockedActivation: the message went out,
+// and activating its token never comes back.
+func TestFault_Database_CloseCancelsBlockedActivation(t *testing.T) {
+	faulttest.ForEachDB(t, faultDBs, func(t *testing.T, kind database.Driver, dsn string) {
+		never := make(chan struct{})
+		stall := faulttest.BlockUntil(never)
+		f := newResendFixture(t, kind, dsn, &faulttest.DBFaults{Statement: stall, Match: updatesTokenSentAt})
+		if err := auth.RequestPasswordResetInBackground(context.Background(), f.svc, f.user.Email); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-stall.Reached(1):
+		case <-time.After(5 * time.Second):
+			t.Fatal("the activation never ran")
+		}
+		f.assertCloseBounded(t)
+	})
+}
+
+// TestFault_Database_CloseCancelsBlockedAudit: the reset was sent and
+// activated, and its audit insert never comes back.
+func TestFault_Database_CloseCancelsBlockedAudit(t *testing.T) {
+	faulttest.ForEachDB(t, faultDBs, func(t *testing.T, kind database.Driver, dsn string) {
+		never := make(chan struct{})
+		stall := faulttest.BlockUntil(never)
+		f := newResendFixture(t, kind, dsn, &faulttest.DBFaults{Statement: stall, Match: faulttest.Inserts("auth_audit_events")})
+		if err := auth.RequestPasswordResetInBackground(context.Background(), f.svc, f.user.Email); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-stall.Reached(1):
+		case <-time.After(5 * time.Second):
+			t.Fatal("the audit insert never ran")
+		}
+		f.assertCloseBounded(t)
+	})
+}
