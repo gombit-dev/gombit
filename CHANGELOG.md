@@ -45,6 +45,10 @@ version.
 
 ### Fixed
 
+- Bearer-mode session revocation errors now include the
+  `WWW-Authenticate: Bearer realm="api"` challenge when the authenticated
+  session ends between the request gate and the handler. Cookie-mode 401
+  responses remain unchanged ([#604](https://github.com/gombit-dev/gombit/issues/604)).
 - Saving the admin edit form no longer rewrites fields the operator did not
   touch: it sent every field back, so each save truncated a datetime to the
   minute (`12:30:45.123456` became `12:30:00`) and an integer past 2^53 to
