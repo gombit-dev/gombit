@@ -159,9 +159,9 @@ func writeAuthError(ctx huma.Context, env *contract.ErrorEnvelope) {
 func withBearerChallenge(err error) error {
 	var statusErr huma.StatusError
 	if errors.As(err, &statusErr) && statusErr.GetStatus() == http.StatusUnauthorized {
-		return huma.ErrorWithHeaders(err, http.Header{
-			"WWW-Authenticate": {`Bearer realm="api"`},
-		})
+		headers := make(http.Header)
+		headers.Set("WWW-Authenticate", `Bearer realm="api"`)
+		return huma.ErrorWithHeaders(err, headers)
 	}
 	return err
 }
