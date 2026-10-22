@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -74,13 +75,17 @@ type AuditEvent struct {
 	// one.
 	TargetUserID *uint `gorm:"index"`
 	// TargetType and TargetID name any other target: an admin model's slug
-	// and a record's primary key.
+	// and a record's primary key, stored whole (a string key has no length
+	// bound).
 	TargetType string `gorm:"size:64"`
-	TargetID   string `gorm:"size:128"`
+	TargetID   string `gorm:"type:text"`
 	// RequestID, IP and UserAgent correlate it with the request, where there
-	// was one: the X-Request-Id the logs carry, the client address (trusted
-	// proxies respected), and the User-Agent, cut to 255 bytes.
-	RequestID string `gorm:"size:64;index"`
+	// was one: the X-Request-Id the logs carry (at most
+	// contract.MaxRequestIDLength, which framework.App enforces where it
+	// accepts one), the client address (trusted proxies respected), and the
+	// User-Agent, the one value cut (to 255 bytes): free text, not an
+	// identifier.
+	RequestID string `gorm:"size:128;index"`
 	IP        string `gorm:"size:64"`
 	UserAgent string `gorm:"size:255"`
 	// Details is a JSON object of names and ids (never a secret).
@@ -117,17 +122,37 @@ func (a dbAuditor) Record(ctx context.Context, event AuditEvent) error {
 	if a.db == nil {
 		return errors.New("auth: nil audit database")
 	}
-	// The operation's own context may be cancelled once it answered; the
-	// record of it must still be written.
-	db := a.db.WithContext(context.WithoutCancel(ctx))
-	if committer, ok := db.Statement.ConnPool.(gorm.TxCommitter); ok && committer != nil {
-		// Inside the caller's transaction (a grant helper given a tx): a
-		// savepoint, so a failed insert (the table not migrated yet) does
-		// not abort the caller's transaction on PostgreSQL.
-		return db.Transaction(func(tx *gorm.DB) error { return tx.Create(&event).Error })
+	if err := validateAuditEvent(event); err != nil {
+		return err
 	}
-	return db.Create(&event).Error
+	// The operation's own context may be cancelled once it answered; the
+	// record of it must still be written. Each statement gets its own
+	// session: GORM keeps a statement's error on the session that ran it.
+	ctx = context.WithoutCancel(ctx)
+	session := func() *gorm.DB { return a.db.WithContext(ctx) }
+	if committer, ok := a.db.Statement.ConnPool.(gorm.TxCommitter); !ok || committer == nil {
+		return session().Create(&event).Error
+	}
+	// Inside the caller's transaction (a grant helper given a tx): an
+	// explicit savepoint, so a failed insert (the table not migrated yet)
+	// does not abort the caller's transaction on PostgreSQL. Not
+	// db.Transaction, which writes straight into the outer transaction
+	// when GORM's DisableNestedTransaction is set.
+	if err := session().SavePoint(auditSavepoint).Error; err != nil {
+		return err
+	}
+	if err := session().Create(&event).Error; err != nil {
+		if rerr := session().RollbackTo(auditSavepoint).Error; rerr != nil {
+			return errors.Join(err, rerr)
+		}
+		return err
+	}
+	return nil
 }
+
+// auditSavepoint is the savepoint an audit insert inside a caller's
+// transaction rolls back to when it fails.
+const auditSavepoint = "gombit_audit_event"
 
 // requestInfo is what the audit trail correlates an event with.
 type requestInfo struct {
@@ -205,16 +230,36 @@ func completeAuditEvent(ctx context.Context, event AuditEvent, now time.Time) Au
 			event.UserAgent = info.userAgent
 		}
 	}
-	event.Action = AuditAction(truncate(string(event.Action), 64))
-	event.TargetType = truncate(event.TargetType, 64)
-	event.TargetID = truncate(event.TargetID, 128)
 	event.UserAgent = truncate(event.UserAgent, 255)
-	event.IP = truncate(event.IP, 64)
-	event.RequestID = truncate(event.RequestID, 64)
 	if event.Details == "" {
 		event.Details = "{}"
 	}
 	return event
+}
+
+// auditIdentifierLimits are the identifier columns' sizes. An event whose
+// identifier does not fit is refused, not cut: a cut identifier would name
+// another target, or another request.
+var auditIdentifierLimits = []struct {
+	name  string
+	limit int
+	value func(AuditEvent) string
+}{
+	{"action", 64, func(e AuditEvent) string { return string(e.Action) }},
+	{"target_type", 64, func(e AuditEvent) string { return e.TargetType }},
+	{"request_id", contract.MaxRequestIDLength, func(e AuditEvent) string { return e.RequestID }},
+	{"ip", 64, func(e AuditEvent) string { return e.IP }},
+}
+
+// validateAuditEvent refuses an event an identifier column cannot hold
+// whole.
+func validateAuditEvent(event AuditEvent) error {
+	for _, f := range auditIdentifierLimits {
+		if n := len(f.value(event)); n > f.limit {
+			return fmt.Errorf("auth: audit event %s is %d bytes, longer than %d: refused, not cut", f.name, n, f.limit)
+		}
+	}
+	return nil
 }
 
 // truncate cuts s to at most n bytes, on a character boundary: PostgreSQL
@@ -254,7 +299,11 @@ func uintPtr(v uint) *uint {
 // operation it records has happened.
 func (s *Service) Audit(ctx context.Context, event AuditEvent) {
 	event = completeAuditEvent(ctx, event, s.now())
-	if err := s.auditor.Record(ctx, event); err != nil {
+	err := validateAuditEvent(event)
+	if err == nil {
+		err = s.auditor.Record(ctx, event)
+	}
+	if err != nil {
 		s.logger.Warn("auth: record an audit event", zap.String("action", string(event.Action)), zap.Error(err))
 	}
 }

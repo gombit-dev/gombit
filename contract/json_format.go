@@ -15,6 +15,13 @@ import (
 // framework's request-context middleware sets it on every response.
 const RequestIDHeader = "X-Request-Id"
 
+// MaxRequestIDLength is the longest inbound X-Request-Id framework.App
+// honors (in bytes, visible ASCII only); a longer or otherwise invalid one
+// is replaced by a generated ID. Every consumer (the logs, the response
+// header, error envelopes, the audit trail) sees the same accepted value,
+// never a cut one.
+const MaxRequestIDLength = 128
+
 // encodeFailedMessage is the message of the 500 a response that cannot be
 // encoded becomes.
 const encodeFailedMessage = "The server could not encode the response."

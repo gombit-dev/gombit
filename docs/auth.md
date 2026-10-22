@@ -266,7 +266,7 @@ The framework records every security-sensitive operation in
 | `auth.session.revoked` | `DELETE /auth/sessions…` (`details.scope`: `one`, `others` or `all`). |
 | `auth.email.verified` | `POST /auth/verify-email`. |
 | `auth.group.member_added` / `auth.permission.granted` | `auth.AddUserToGroup`, `GrantPermissionToGroup`, `GrantPermissionToUser`. |
-| `admin.record.created` / `updated` / `deleted` | A write through the admin data plane (`target_type` the model's slug, `target_id` the record's key). A write that fails records nothing. |
+| `admin.record.created` / `updated` / `deleted` | A write through the admin data plane (`target_type` the model's slug, `target_id` the record's key). Recorded where the write commits: a write that fails records nothing, and one that committed is recorded even if its response then fails. |
 
 Each row has the **actor** (`actor_user_id`: the request's user, or the
 user signing in), the **target** (`target_user_id`, or `target_type` /
@@ -275,8 +275,22 @@ user signing in), the **target** (`target_user_id`, or `target_type` /
 respected) and `user_agent`. `details` is a JSON object of names and ids. No
 row ever holds a password, a token, or a hash of either.
 
+Identifiers are stored **whole**: `target_id` has no length bound (a long
+string primary key is kept exactly), and `request_id` holds up to
+`contract.MaxRequestIDLength` (128) bytes, the bound the framework enforces
+on an inbound `X-Request-Id` ([router.md](router.md)). An event whose
+`action`, `target_type`, `request_id` or `ip` does not fit its column is
+refused, not cut, since a cut identifier would name something else. Only
+`user_agent`, free text, is cut (to 255 bytes).
+
 Recording is best effort: an event that cannot be written is logged as a
-warning, and the operation it records still succeeds.
+warning, and the operation it records still succeeds. The Service's events
+and the admin's are logged through the Service's logger; the group and
+permission helpers, which take a database and no Service, log through that
+database's logger. Inside a caller's transaction the event is written under
+an explicit savepoint, so a failed insert (the table not migrated yet) rolls
+back to it and the caller's transaction goes on, even with GORM's
+`DisableNestedTransaction` set.
 
 - **Reading it.** `auth.ListAuditEvents(ctx, db, auth.AuditQuery{TargetUserID: id})`
   returns events newest first (filters: actor, target, action; 100 by

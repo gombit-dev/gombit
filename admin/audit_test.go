@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 
@@ -12,6 +13,7 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/crypto/bcrypt"
 
+	"github.com/gombit-dev/gombit/admin"
 	"github.com/gombit-dev/gombit/auth"
 	"github.com/gombit-dev/gombit/config"
 	"github.com/gombit-dev/gombit/database"
@@ -20,7 +22,66 @@ import (
 
 func TestAdminAudit(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	runAdminAudit(t, openSQLite(t))
+	db := openSQLite(t)
+	runAdminAudit(t, db)
+	t.Run("long string key", func(t *testing.T) { runAdminAuditLongKey(t, db) })
+}
+
+// auditKeyed is a model with a long string primary key.
+type auditKeyed struct {
+	Key  string `gorm:"primaryKey;size:300" json:"key"`
+	Name string `json:"name"`
+}
+
+// runAdminAuditLongKey: a string primary key is audited whole, however long:
+// two keys that share their first 128 bytes are two targets.
+func runAdminAuditLongKey(t *testing.T, db *database.DB) {
+	t.Helper()
+	if err := db.AutoMigrate(&auditKeyed{}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Migrator().DropTable(&auditKeyed{}) })
+	app := newCookieAppWithDB(t, db)
+	if err := admin.Register(app, auditKeyed{}, admin.Options{
+		Slug: "audit-keyed",
+		PK:   "key",
+		Fields: []admin.Field{
+			{Name: "key", Type: admin.TypeString, Required: true},
+			{Name: "name", Type: admin.TypeString},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	jar := loginSuperuser(t, app)
+	prefix := strings.Repeat("k", 200)
+	keys := []string{prefix + "-first", prefix + "-second"}
+	for _, key := range keys {
+		if rec := doRequest(app, jar, http.MethodPost, "/api/v1/admin/resources/audit-keyed", `{"key":"`+key+`","name":"n"}`); rec.Code != http.StatusOK {
+			t.Fatalf("create %d-byte key = %d %s", len(key), rec.Code, rec.Body.String())
+		}
+	}
+	if rec := doRequest(app, jar, http.MethodPatch, "/api/v1/admin/resources/audit-keyed/"+keys[1], `{"name":"m"}`); rec.Code != http.StatusOK {
+		t.Fatalf("patch = %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := doRequest(app, jar, http.MethodDelete, "/api/v1/admin/resources/audit-keyed/"+keys[0], ""); rec.Code != http.StatusOK {
+		t.Fatalf("delete = %d %s", rec.Code, rec.Body.String())
+	}
+	var events []auth.AuditEvent
+	if err := db.Where("target_type = ?", "audit-keyed").Order("id").Find(&events).Error; err != nil {
+		t.Fatal(err)
+	}
+	want := []struct {
+		action auth.AuditAction
+		key    string
+	}{{auth.AuditAdminCreated, keys[0]}, {auth.AuditAdminCreated, keys[1]}, {auth.AuditAdminUpdated, keys[1]}, {auth.AuditAdminDeleted, keys[0]}}
+	if len(events) != len(want) {
+		t.Fatalf("events = %d, want %d", len(events), len(want))
+	}
+	for i, w := range want {
+		if events[i].Action != w.action || events[i].TargetID != w.key {
+			t.Errorf("event %d = %s %d-byte target %q..., want %s %q", i, events[i].Action, len(events[i].TargetID), events[i].TargetID[max(0, len(events[i].TargetID)-8):], w.action, w.key[len(w.key)-8:])
+		}
+	}
 }
 
 // runAdminAudit: every write through the admin data plane leaves one audit
