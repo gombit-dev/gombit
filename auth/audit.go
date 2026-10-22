@@ -19,8 +19,10 @@ import (
 // The security audit trail (AUTH-7, #337): one row per security-sensitive
 // operation, in auth_audit_events. A row says who acted (the actor), what
 // they did (the action), to what (the target), when, and which request did
-// it (request id, client IP, user agent). It never holds a password, a
-// token, or a hash of either: Details carries only names and ids.
+// it (request id, client IP, user agent). The events the framework records
+// never hold a password, a token, or a hash of either: their Details carry
+// only names and ids. An application recording its own events
+// (RecordAuditEvent, Service.Audit) is responsible for what it puts in them.
 
 // AuditAction names a security-sensitive operation.
 type AuditAction string
@@ -88,7 +90,8 @@ type AuditEvent struct {
 	RequestID string `gorm:"size:128;index"`
 	IP        string `gorm:"size:64"`
 	UserAgent string `gorm:"size:255"`
-	// Details is a JSON object of names and ids (never a secret).
+	// Details is a JSON object of names and ids: "{}" when empty, and an
+	// event whose Details is not a JSON object is refused.
 	Details string `gorm:"type:text"`
 }
 
@@ -98,8 +101,11 @@ func (AuditEvent) TableName() string { return "auth_audit_events" }
 // Auditor records audit events. The default writes them to
 // auth_audit_events in the service's database; an application may send
 // them elsewhere as well (a SIEM) with WithAuditor. Record is called on the
-// request, after the operation succeeded or failed; an error is logged, and
-// does not fail the operation.
+// request, after the operation succeeded or failed, with a context that
+// keeps the request's values but not its cancellation (the operation has
+// happened; a client that hung up must not cancel its record) and carries
+// its own deadline (auditTimeout), which Record must honor: the request
+// waits for it. An error is logged, and does not fail the operation.
 type Auditor interface {
 	Record(ctx context.Context, event AuditEvent) error
 }
@@ -125,34 +131,39 @@ func (a dbAuditor) Record(ctx context.Context, event AuditEvent) error {
 	if err := validateAuditEvent(event); err != nil {
 		return err
 	}
-	// The operation's own context may be cancelled once it answered; the
-	// record of it must still be written. Each statement gets its own
-	// session: GORM keeps a statement's error on the session that ran it.
-	ctx = context.WithoutCancel(ctx)
-	session := func() *gorm.DB { return a.db.WithContext(ctx) }
-	if committer, ok := a.db.Statement.ConnPool.(gorm.TxCommitter); !ok || committer == nil {
-		return session().Create(&event).Error
+	// ctx is the bounded, detached audit context (auditContext) when the
+	// event comes through Service.Audit or RecordAuditEvent. Each statement
+	// gets its own session: GORM keeps a statement's error on the session
+	// that ran it.
+	return insertSafely(ctx, a.db, auditSavepoint, func(tx *gorm.DB) error { return tx.Create(&event).Error })
+}
+
+// auditSavepoint is the savepoint an audit insert inside a caller's
+// transaction rolls back to when it fails.
+const auditSavepoint = "gombit_audit_event"
+
+// insertSafely runs insert on db. Inside a transaction it runs under an
+// explicit savepoint, rolled back to if insert fails, so a failed statement
+// does not abort the caller's transaction on PostgreSQL. Not db.Transaction,
+// which writes straight into the outer transaction when GORM's
+// DisableNestedTransaction is set. Each statement gets its own session:
+// GORM keeps a statement's error on the session that ran it.
+func insertSafely(ctx context.Context, db *gorm.DB, savepoint string, insert func(*gorm.DB) error) error {
+	session := func() *gorm.DB { return db.WithContext(ctx) }
+	if committer, ok := db.Statement.ConnPool.(gorm.TxCommitter); !ok || committer == nil {
+		return insert(session())
 	}
-	// Inside the caller's transaction (a grant helper given a tx): an
-	// explicit savepoint, so a failed insert (the table not migrated yet)
-	// does not abort the caller's transaction on PostgreSQL. Not
-	// db.Transaction, which writes straight into the outer transaction
-	// when GORM's DisableNestedTransaction is set.
-	if err := session().SavePoint(auditSavepoint).Error; err != nil {
+	if err := session().SavePoint(savepoint).Error; err != nil {
 		return err
 	}
-	if err := session().Create(&event).Error; err != nil {
-		if rerr := session().RollbackTo(auditSavepoint).Error; rerr != nil {
+	if err := insert(session()); err != nil {
+		if rerr := session().RollbackTo(savepoint).Error; rerr != nil {
 			return errors.Join(err, rerr)
 		}
 		return err
 	}
 	return nil
 }
-
-// auditSavepoint is the savepoint an audit insert inside a caller's
-// transaction rolls back to when it fails.
-const auditSavepoint = "gombit_audit_event"
 
 // requestInfo is what the audit trail correlates an event with.
 type requestInfo struct {
@@ -206,7 +217,26 @@ func remoteHost(addr string) string {
 // application's own sensitive operations. It writes to the table whatever
 // Auditor a Service has; Service.Audit goes through that Auditor.
 func RecordAuditEvent(ctx context.Context, db *gorm.DB, event AuditEvent) error {
-	return DBAuditor(db).Record(ctx, completeAuditEvent(ctx, event, time.Now()))
+	event = completeAuditEvent(ctx, event, time.Now())
+	if err := validateAuditEvent(event); err != nil {
+		return err
+	}
+	actx, cancel := auditContext(ctx)
+	defer cancel()
+	return DBAuditor(db).Record(actx, event)
+}
+
+// auditTimeout bounds one audit write. The write is best effort, but the
+// request waits for it: an insert stalled in the driver must not hold a
+// committed operation's answer, or its goroutine and connection, past this.
+var auditTimeout = 5 * time.Second
+
+// auditContext is the context an audit write runs under: ctx's values (the
+// request id, the client address) without its cancellation (the operation
+// committed; the record of it must still be written when the client has
+// hung up), and a deadline of its own, auditTimeout.
+func auditContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), auditTimeout)
 }
 
 func completeAuditEvent(ctx context.Context, event AuditEvent, now time.Time) AuditEvent {
@@ -254,6 +284,15 @@ var auditIdentifierLimits = []struct {
 // validateAuditEvent refuses an event an identifier column cannot hold
 // whole.
 func validateAuditEvent(event AuditEvent) error {
+	// What every row must say: what happened, and details that are a JSON
+	// object (completeAuditEvent turns empty details into "{}").
+	if strings.TrimSpace(string(event.Action)) == "" {
+		return errors.New("auth: audit event without an action: refused")
+	}
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(event.Details), &obj); err != nil || obj == nil {
+		return errors.New("auth: audit event details are not a JSON object: refused")
+	}
 	for _, f := range auditIdentifierLimits {
 		if n := len(f.value(event)); n > f.limit {
 			return fmt.Errorf("auth: audit event %s is %d bytes, longer than %d: refused, not cut", f.name, n, f.limit)
@@ -301,7 +340,9 @@ func (s *Service) Audit(ctx context.Context, event AuditEvent) {
 	event = completeAuditEvent(ctx, event, s.now())
 	err := validateAuditEvent(event)
 	if err == nil {
-		err = s.auditor.Record(ctx, event)
+		actx, cancel := auditContext(ctx)
+		err = s.auditor.Record(actx, event)
+		cancel()
 	}
 	if err != nil {
 		s.logger.Warn("auth: record an audit event", zap.String("action", string(event.Action)), zap.Error(err))

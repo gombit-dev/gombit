@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 )
@@ -94,3 +95,10 @@ func IsResendTooSoon(err error) bool {
 
 // SetMailer replaces the service's Mailer.
 func SetMailer(s *Service, m Mailer) { s.mailer = m }
+
+// SetAuditTimeout replaces the bound on one audit write until the test ends.
+func SetAuditTimeout(t interface{ Cleanup(func()) }, d time.Duration) {
+	old := auditTimeout
+	auditTimeout = d
+	t.Cleanup(func() { auditTimeout = old })
+}

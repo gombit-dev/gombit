@@ -308,44 +308,64 @@ func TestAuditorIsReplaceable(t *testing.T) {
 // TestAuditGrants: the group and permission helpers record what they
 // granted, with the actor the context carries.
 func TestAuditGrants(t *testing.T) {
-	db := openSQLite(t)
+	runAuditGrants(t, openSQLite(t))
+}
+
+// runAuditGrants: each grant helper records its event when it changed
+// something, and only then: granting what is already granted is a no-op
+// (nil, no event), however many times.
+func runAuditGrants(t *testing.T, db *database.DB) {
+	t.Helper()
 	if err := auth.Migrate(db.DB); err != nil {
 		t.Fatal(err)
 	}
+	n := time.Now().UnixNano()
 	ctx := context.Background()
-	admin := auth.User{Email: "admin-grants@example.com", PasswordHash: "x"}
-	user := auth.User{Email: "grants@example.com", PasswordHash: "x"}
+	admin := auth.User{Email: fmt.Sprintf("admin-grants-%d@example.com", n), PasswordHash: "x"}
+	user := auth.User{Email: fmt.Sprintf("grants-%d@example.com", n), PasswordHash: "x"}
 	db.Create(&admin)
 	db.Create(&user)
 	ctx = auth.ContextWithSession(ctx, admin, 1)
-	group, _ := auth.EnsureGroup(ctx, db.DB, "editors")
-	perm, _ := auth.EnsurePermission(ctx, db.DB, "posts.publish", "Publish posts")
-	if err := auth.AddUserToGroup(ctx, db.DB, &user, &group); err != nil {
-		t.Fatal(err)
-	}
-	if err := auth.GrantPermissionToGroup(ctx, db.DB, &group, &perm); err != nil {
-		t.Fatal(err)
-	}
-	if err := auth.GrantPermissionToUser(ctx, db.DB, &user, &perm); err != nil {
-		t.Fatal(err)
+	group, _ := auth.EnsureGroup(ctx, db.DB, fmt.Sprintf("editors-%d", n))
+	perm, _ := auth.EnsurePermission(ctx, db.DB, fmt.Sprintf("posts.publish.%d", n), "Publish posts")
+	for range 2 {
+		if err := auth.AddUserToGroup(ctx, db.DB, &user, &group); err != nil {
+			t.Fatal(err)
+		}
+		if err := auth.GrantPermissionToGroup(ctx, db.DB, &group, &perm); err != nil {
+			t.Fatal(err)
+		}
+		if err := auth.GrantPermissionToUser(ctx, db.DB, &user, &perm); err != nil {
+			t.Fatal(err)
+		}
 	}
 	var events []auth.AuditEvent
-	db.Order("id").Find(&events)
+	db.Where("actor_user_id = ?", admin.ID).Order("id").Find(&events)
 	if len(events) != 3 {
-		t.Fatalf("events = %+v", events)
+		t.Fatalf("%d events for three grants each made twice, want 3 (the repeats change nothing): %+v", len(events), events)
 	}
 	for _, e := range events {
 		if e.ActorUserID == nil || *e.ActorUserID != admin.ID {
 			t.Errorf("%s: actor %v, want the admin", e.Action, e.ActorUserID)
 		}
 	}
-	if events[0].Action != auth.AuditGroupMemberAdded || *events[0].TargetUserID != user.ID || !strings.Contains(events[0].Details, "editors") {
+	if events[0].Action != auth.AuditGroupMemberAdded || *events[0].TargetUserID != user.ID || !strings.Contains(events[0].Details, group.Name) {
 		t.Errorf("member added = %+v", events[0])
 	}
-	if events[1].Action != auth.AuditPermissionGranted || events[1].TargetType != "group" || !strings.Contains(events[1].Details, "posts.publish") {
+	if events[1].Action != auth.AuditPermissionGranted || events[1].TargetType != "group" || !strings.Contains(events[1].Details, perm.Key) {
 		t.Errorf("group grant = %+v", events[1])
 	}
 	if events[2].Action != auth.AuditPermissionGranted || *events[2].TargetUserID != user.ID {
 		t.Errorf("user grant = %+v", events[2])
+	}
+	if ok, err := auth.HasPermission(ctx, db.DB, user, perm.Key); err != nil || !ok {
+		t.Fatalf("HasPermission after the grants = %v, %v", ok, err)
+	}
+	// The public entry point refuses a row that says nothing.
+	if err := auth.RecordAuditEvent(ctx, db.DB, auth.AuditEvent{}); err == nil {
+		t.Fatal("RecordAuditEvent(AuditEvent{}) was accepted")
+	}
+	if err := auth.RecordAuditEvent(ctx, db.DB, auth.AuditEvent{Action: "app.exported", Details: "not JSON"}); err == nil {
+		t.Fatal("RecordAuditEvent with non-JSON details was accepted")
 	}
 }

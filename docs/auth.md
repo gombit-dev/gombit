@@ -265,15 +265,19 @@ The framework records every security-sensitive operation in
 | `auth.refresh.reuse_detected` | A rotated-away refresh token came back: every session of the user was revoked. |
 | `auth.session.revoked` | `DELETE /auth/sessions…` (`details.scope`: `one`, `others` or `all`). |
 | `auth.email.verified` | `POST /auth/verify-email`. |
-| `auth.group.member_added` / `auth.permission.granted` | `auth.AddUserToGroup`, `GrantPermissionToGroup`, `GrantPermissionToUser`. |
+| `auth.group.member_added` / `auth.permission.granted` | `auth.AddUserToGroup`, `GrantPermissionToGroup`, `GrantPermissionToUser`, when they changed something: granting what is already granted returns nil and records nothing. |
 | `admin.record.created` / `updated` / `deleted` | A write through the admin data plane (`target_type` the model's slug, `target_id` the record's key). Recorded where the write commits: a write that fails records nothing, and one that committed is recorded even if its response then fails. |
 
 Each row has the **actor** (`actor_user_id`: the request's user, or the
 user signing in), the **target** (`target_user_id`, or `target_type` /
 `target_id`), `occurred_at`, and the **request**: `request_id` (the
 `X-Request-Id` the logs carry), `ip` (the client address, trusted proxies
-respected) and `user_agent`. `details` is a JSON object of names and ids. No
-row ever holds a password, a token, or a hash of either.
+respected) and `user_agent`. `details` is a JSON object of names and ids.
+The events the framework records never hold a password, a token, or a hash
+of either; an application recording its own (`auth.RecordAuditEvent`,
+`Service.Audit`) is responsible for what it puts in them. Every event must
+have an `action`, and `details` that are a JSON object (`{}` when empty):
+one that does not is refused before any Auditor sees it.
 
 Identifiers are stored **whole**: `target_id` has no length bound (a long
 string primary key is kept exactly), and `request_id` holds up to
@@ -284,7 +288,11 @@ refused, not cut, since a cut identifier would name something else. Only
 `user_agent`, free text, is cut (to 255 bytes).
 
 Recording is best effort: an event that cannot be written is logged as a
-warning, and the operation it records still succeeds. The Service's events
+warning, and the operation it records still succeeds. The write is not
+cancelled by the request (the operation committed; a client that hung up
+still gets its record), but has a deadline of its own (5s), so an audit
+insert stalled in the database delays the answer by at most that, never
+holds it. An Auditor gets that bounded context, and must honor it. The Service's events
 and the admin's are logged through the Service's logger; the group and
 permission helpers, which take a database and no Service, log through that
 database's logger. Inside a caller's transaction the event is written under
