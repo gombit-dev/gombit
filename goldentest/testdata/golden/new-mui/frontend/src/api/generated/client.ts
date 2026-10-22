@@ -41,8 +41,9 @@ export async function unwrap<T>(result: {
   if (result.error !== undefined || !result.response.ok) {
     throw ContractError.fromResponse(result.response, result.error);
   }
-  if (result.data === undefined) {
-    throw new ContractError("empty_response", "Empty response", result.response.status);
-  }
-  return result.data;
+  // The success variant is whatever openapi-fetch parsed. A 204, a HEAD and a
+  // zero-length 2xx all report data: undefined, and the status alone cannot
+  // tell those apart from a body that was promised and never sent, so the
+  // wrapper trusts the client's own result instead of second-guessing it.
+  return result.data as T;
 }

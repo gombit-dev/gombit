@@ -74,6 +74,22 @@ if (isD10ErrorBody(body)) {
 
 `VITE_API_URL` is public. Do not put secrets in `VITE_*` values.
 
+### unwrap
+
+| Response | `unwrap` result |
+| --- | --- |
+| 2xx with content | resolves the parsed `data` |
+| 2xx with no content — `204 No Content`, a `HEAD`, a zero-length body | resolves `undefined`, because that is what `openapi-fetch` reports as the success value |
+| non-2xx | throws `ContractError` carrying the D10 `code`, `fields`, `request_id` and the HTTP status |
+
+`unwrap` does not re-derive the contract from the status: once the call
+succeeded, the result is what the client parsed, `undefined` included. A handler
+whose output struct has no `Body` answers `204`, so its caller awaits `unwrap`
+and ignores the resolved `undefined`. If an endpoint promises a body and gets
+none, that is a contract violation to catch where it is known — check the field
+you expect — not something the wrapper's status can tell apart from a legitimate
+no-content success.
+
 ## Example
 
 `examples/client` ships a sample spec (the contract widget API) and the
