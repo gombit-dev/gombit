@@ -355,10 +355,11 @@ func WithAuthMailer(m auth.Mailer) Option {
 	}
 }
 
-// WithAuthAuditor sets where the framework-owned auth routes record the
-// security audit trail (AUTH-7). Default: auth.DBAuditor over the app's
-// database (the auth_audit_events table). The admin data plane, and the
-// group and permission helpers, write to that table either way.
+// WithAuthAuditor sets where the framework-owned auth routes and the admin
+// data plane record the security audit trail (AUTH-7). Default:
+// auth.DBAuditor over the app's database (the auth_audit_events table). The
+// group and permission helpers, which take a database and no Service,
+// write to that database's table either way.
 func WithAuthAuditor(a auth.Auditor) Option {
 	return func(app *App) error {
 		if a == nil {

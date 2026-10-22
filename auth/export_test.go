@@ -131,3 +131,10 @@ func SetLoginAuthenticatedHook(s *Service, fn func()) { s.onLoginAuthenticated =
 // ErrInvalidCredentials is the error Authenticate and Login return for a
 // wrong email or password.
 var ErrInvalidCredentials = errInvalidCredentials
+
+// SetAuditTimeout replaces the bound on one audit write until the test ends.
+func SetAuditTimeout(t interface{ Cleanup(func()) }, d time.Duration) {
+	old := auditTimeout
+	auditTimeout = d
+	t.Cleanup(func() { auditTimeout = old })
+}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 
+	"github.com/gombit-dev/gombit/database"
 	"gorm.io/gorm"
 )
 
@@ -107,9 +108,11 @@ func AddUserToGroup(ctx context.Context, db *gorm.DB, user *User, group *Group) 
 	if err := validateAssociation(db, user != nil && user.ID != 0, group != nil && group.ID != 0); err != nil {
 		return err
 	}
-	if err := db.WithContext(ctx).Model(user).Association("Groups").Append(group); err != nil {
+	added, err := insertJoinRow(ctx, db, "auth_user_groups", map[string]any{"user_id": user.ID, "group_id": group.ID})
+	if err != nil || !added {
 		return err
 	}
+	user.Groups = append(user.Groups, *group)
 	recordHelperEvent(ctx, db, AuditEvent{Action: AuditGroupMemberAdded, TargetUserID: uintPtr(user.ID), Details: details("group", group.Name)})
 	return nil
 }
@@ -119,9 +122,11 @@ func GrantPermissionToGroup(ctx context.Context, db *gorm.DB, group *Group, perm
 	if err := validateAssociation(db, group != nil && group.ID != 0, permission != nil && permission.ID != 0); err != nil {
 		return err
 	}
-	if err := db.WithContext(ctx).Model(group).Association("Permissions").Append(permission); err != nil {
+	added, err := insertJoinRow(ctx, db, "auth_group_permissions", map[string]any{"group_id": group.ID, "permission_id": permission.ID})
+	if err != nil || !added {
 		return err
 	}
+	group.Permissions = append(group.Permissions, *permission)
 	recordHelperEvent(ctx, db, AuditEvent{Action: AuditPermissionGranted, TargetType: "group", TargetID: group.Name, Details: details("group", group.Name, "permission", permission.Key)})
 	return nil
 }
@@ -131,11 +136,29 @@ func GrantPermissionToUser(ctx context.Context, db *gorm.DB, user *User, permiss
 	if err := validateAssociation(db, user != nil && user.ID != 0, permission != nil && permission.ID != 0); err != nil {
 		return err
 	}
-	if err := db.WithContext(ctx).Model(user).Association("Permissions").Append(permission); err != nil {
+	added, err := insertJoinRow(ctx, db, "auth_user_permissions", map[string]any{"user_id": user.ID, "permission_id": permission.ID})
+	if err != nil || !added {
 		return err
 	}
+	user.Permissions = append(user.Permissions, *permission)
 	recordHelperEvent(ctx, db, AuditEvent{Action: AuditPermissionGranted, TargetUserID: uintPtr(user.ID), Details: details("permission", permission.Key)})
 	return nil
+}
+
+// insertJoinRow inserts one many-to-many row into table and reports whether
+// it did: a row already there (the join table's primary key) is no change,
+// and nothing to record. One INSERT decides, atomically: no read first,
+// which another grant could race. Inside a caller's transaction the
+// conflict is rolled back to a savepoint (insertSafely), so the
+// transaction goes on.
+func insertJoinRow(ctx context.Context, db *gorm.DB, table string, row map[string]any) (bool, error) {
+	err := insertSafely(ctx, db, "gombit_auth_grant", func(tx *gorm.DB) error {
+		return tx.Table(table).Create(row).Error
+	})
+	if database.IsUniqueViolation(err) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 // recordHelperEvent records a grant made through the helpers above. It does

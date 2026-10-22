@@ -40,10 +40,10 @@ func TestCompleteAuditEventBounds(t *testing.T) {
 		t.Fatalf("an event whose identifiers fit = %v", err)
 	}
 	for name, bad := range map[string]AuditEvent{
-		"action":      {Action: AuditAction("app." + strings.Repeat("a", 100))},
-		"target_type": {Action: AuditLogout, TargetType: strings.Repeat("t", 65)},
-		"request_id":  {Action: AuditLogout, RequestID: strings.Repeat("r", 129)},
-		"ip":          {Action: AuditLogout, IP: strings.Repeat("1", 65)},
+		"action":      {Action: AuditAction("app." + strings.Repeat("a", 100)), Details: "{}"},
+		"target_type": {Action: AuditLogout, TargetType: strings.Repeat("t", 65), Details: "{}"},
+		"request_id":  {Action: AuditLogout, RequestID: strings.Repeat("r", 129), Details: "{}"},
+		"ip":          {Action: AuditLogout, IP: strings.Repeat("1", 65), Details: "{}"},
 	} {
 		if err := validateAuditEvent(bad); err == nil || !strings.Contains(err.Error(), name) {
 			t.Errorf("an over-long %s = %v, want it refused", name, err)
@@ -58,5 +58,29 @@ func TestCompleteAuditEventBounds(t *testing.T) {
 	}
 	if got := details("scope", "all", "dangling"); got != `{"scope":"all"}` {
 		t.Fatalf("details = %s", got)
+	}
+}
+
+// TestValidateAuditEventShape: every row says what happened, and its
+// details are a JSON object; anything else is refused before any sink.
+func TestValidateAuditEventShape(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now()
+	if err := validateAuditEvent(completeAuditEvent(ctx, AuditEvent{Action: "app.exported"}, now)); err != nil {
+		t.Fatalf("an action with empty details (completed to {}) = %v", err)
+	}
+	for name, e := range map[string]AuditEvent{
+		"zero event":      {},
+		"blank action":    {Action: "   "},
+		"scalar details":  {Action: "app.x", Details: `"a string"`},
+		"number details":  {Action: "app.x", Details: `42`},
+		"array details":   {Action: "app.x", Details: `[1,2]`},
+		"null details":    {Action: "app.x", Details: `null`},
+		"malformed JSON":  {Action: "app.x", Details: `{"a":`},
+		"not JSON at all": {Action: "app.x", Details: `not JSON`},
+	} {
+		if err := validateAuditEvent(completeAuditEvent(ctx, e, now)); err == nil {
+			t.Errorf("%s was accepted", name)
+		}
 	}
 }

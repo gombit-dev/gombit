@@ -43,7 +43,7 @@ version.
   refresh-token reuse, session revocations, email verification, group and
   permission grants, and admin writes each record the actor, the target, the
   time, and the request (request id, client IP, user agent) in a new table,
-  `auth_audit_events`, never a secret. `auth.ListAuditEvents` reads it;
+  `auth_audit_events`; the framework's events never hold a secret. `auth.ListAuditEvents` reads it;
   `framework.WithAuthAuditor` sends the events to the app's own
   `auth.Auditor`; `auth.RecordAuditEvent` and `auth.CaptureRequestInfo`
   record an app's own operations. Migrate the new framework model
