@@ -113,7 +113,13 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   `GOMBIT_AUTH_PASSWORD_RESET_KEEP_SESSIONS=true` keeps the sessions.
   `auth.Service.RequestPasswordReset` and `ResetPassword` are the same
   flow for an app's own code. A production app with no mailer sends
-  no message.
+  no message. The messages are sent by the auth Service's bounded
+  background workers (a request they cannot admit is a 503);
+  `framework.App` closes the Service when it stops. An app that mounts
+  the auth routes itself and stops gracefully switches from
+  `auth.Mount` to `auth.NewService` + `auth.MountService` and calls
+  `Service.Close` on shutdown. A login now starts its session under
+  the user's row lock (`auth.Service.Login`).
 
 - A new app's placeholder `schema.ts` includes the password reset operations; an existing app's generated client gets them from `gombit client generate`. (`client-schema-password-reset`, client, [#332](https://github.com/gombit-dev/gombit/issues/332))
 

@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 )
@@ -93,25 +94,40 @@ func IsResendTooSoon(err error) bool {
 }
 
 // RequestPasswordResetInBackground is what POST /auth/password/forgot runs.
-func RequestPasswordResetInBackground(ctx context.Context, s *Service, email string) {
-	s.requestPasswordResetInBackground(ctx, email)
+func RequestPasswordResetInBackground(ctx context.Context, s *Service, email string) error {
+	return s.requestPasswordResetInBackground(ctx, email)
 }
 
-// FillResetSlots takes every background password reset slot, as that many
-// requests in flight would; release gives them back.
-func FillResetSlots(s *Service) (release func()) {
-	for range cap(s.resetSlots) {
-		s.resetSlots <- struct{}{}
-	}
-	return func() {
-		for range cap(s.resetSlots) {
-			<-s.resetSlots
+// FillBackground occupies every background worker and queue slot with a
+// task that waits for release, as that much work in flight would.
+func FillBackground(s *Service) (release func()) {
+	gate := make(chan struct{})
+	for s.background.submit(context.Background(), func(ctx context.Context) {
+		select {
+		case <-gate:
+		case <-ctx.Done():
 		}
+	}) == nil {
 	}
+	return func() { close(gate) }
 }
+
+// SetBackgroundTimeout replaces the deadline of each background task.
+func SetBackgroundTimeout(s *Service, d time.Duration) { s.background.timeout = d }
+
+// IsBackgroundBusy reports whether err is a background task not admitted.
+func IsBackgroundBusy(err error) bool { return errors.Is(err, errBackgroundBusy) }
 
 // SetMailer replaces the service's Mailer.
 func SetMailer(s *Service, m Mailer) { s.mailer = m }
 
 // SetHasher replaces the service's password Hasher.
 func SetHasher(s *Service, h Hasher) { s.hasher = h }
+
+// SetLoginAuthenticatedHook makes fn run in Login between the password
+// check and the session. Set it before the service is used.
+func SetLoginAuthenticatedHook(s *Service, fn func()) { s.onLoginAuthenticated = fn }
+
+// ErrInvalidCredentials is the error Authenticate and Login return for a
+// wrong email or password.
+var ErrInvalidCredentials = errInvalidCredentials

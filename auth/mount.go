@@ -24,6 +24,11 @@ const (
 // cookie/CSRF threat model. Both modes mount email verification (AUTH-1)
 // and password reset (AUTH-2); opts configure the Service the routes use
 // (WithMailer, WithLogger, WithAuditor).
+//
+// The Service Mount creates is not reachable afterwards, so its background
+// work (password reset messages) is never drained: an application that
+// mounts the routes itself and stops gracefully uses NewService and
+// MountService, and calls Service.Close on shutdown. framework.App does.
 func Mount(api huma.API, db *gorm.DB, cfg config.Config, opts ...Option) error {
 	if api == nil {
 		return errors.New("auth: nil API")
@@ -34,6 +39,23 @@ func Mount(api huma.API, db *gorm.DB, cfg config.Config, opts ...Option) error {
 	svc, err := NewService(db, cfg, opts...)
 	if err != nil {
 		return err
+	}
+	return MountService(api, svc, cfg)
+}
+
+// MountService registers the auth routes, as Mount does, over svc: the
+// caller owns svc, and closes it (Service.Close) when it stops. cfg is the
+// configuration svc was built with (the mode and the API prefix come from
+// it); a config with auth disabled mounts nothing.
+func MountService(api huma.API, svc *Service, cfg config.Config) error {
+	if api == nil {
+		return errors.New("auth: nil API")
+	}
+	if svc == nil {
+		return errors.New("auth: nil service")
+	}
+	if !cfg.Auth.Enabled() {
+		return nil
 	}
 	prefix := strings.TrimSuffix(cfg.API.Prefix, "/")
 	if prefix == "" {

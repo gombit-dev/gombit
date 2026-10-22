@@ -174,8 +174,18 @@ curl -sX POST localhost:8080/api/v1/auth/password/reset \
   before that is known: the lookup and the message run in the background,
   so the timing does not tell either. Only an account gets a message. Its
   outcome (sent, the one-a-minute wait, a mailer failure) is logged, never
-  answered. At most 16 requests are handled at once; one beyond that is
-  dropped and logged (per-client rate limits are AUTH-8's).
+  answered.
+- **Background work.** The message is sent by the auth Service's own
+  workers: 4 at once, 64 admitted requests waiting, each with a 30s
+  deadline (a Mailer that never returns is cancelled). A request the
+  Service cannot admit (the queue full, or the app stopping) is a **503**
+  with `Retry-After`, decided before the lookup, so it too is the same for
+  any address; a 202 always means the work was taken. `framework.App`
+  closes the Service when it stops, before its stop hooks run: admitted
+  messages are sent until the shutdown timeout, then cancelled. An app
+  that mounts the routes itself builds its Service (`auth.NewService`),
+  mounts it (`auth.MountService`) and calls `svc.Close(ctx)` on shutdown.
+  Per-client rate limits are AUTH-8's.
 - **The token** is a [one-time token](#email-verification) like the
   verification one, for its own purpose (a verification token never resets
   a password, nor the reverse): random, stored hashed, pending until its
@@ -184,10 +194,17 @@ curl -sX POST localhost:8080/api/v1/auth/password/reset \
   proves the address it was sent to: once the user's email is another one,
   it fails. A bad token is a 422 on `token`, and a password outside the
   policy (8 to 72 bytes, as registration) a 422 on `password`; a refused
-  password leaves the token usable.
+  password leaves the token usable. A token that cannot work (unknown,
+  used, expired, or for an address the user no longer has) is refused
+  before bcrypt runs, and a database that cannot answer that check fails
+  the request (500), not open.
 - **Sessions.** A reset revokes every session and refresh token of the user
   in the same transaction as the new password: whoever knew the old one is
-  signed out (`sessions_revoked: true`). `GOMBIT_AUTH_PASSWORD_RESET_KEEP_SESSIONS=true`
+  signed out (`sessions_revoked: true`). A login that checked the old
+  password just before the reset cannot start a session after it: a login
+  starts its session under the user's lock and only if the password it
+  checked is still the user's ([Sessions](#sessions)), so it is either
+  revoked by the reset or refused. `GOMBIT_AUTH_PASSWORD_RESET_KEEP_SESSIONS=true`
   keeps them. In cookie mode a reset that revoked the sessions also clears
   the browser's session cookies.
 - **The link.** `GOMBIT_AUTH_PASSWORD_RESET_URL` is the page the message
@@ -285,12 +302,14 @@ the same moment:
   logout that races a refresh of the same token can therefore leave the
   refresh's new session alive. That is a known limitation; to be sure a user
   is signed out everywhere, revoke all their sessions.
-- **Login** does not take the lock either. A login that completes while a
-  revocation runs starts a session the revocation does not cover, even if it
-  checked the password before the revocation began. Revoking all of a user's
-  sessions ends the sessions that exist at that moment; an application that
-  must also exclude a login in flight (a password reset, say) needs more than
-  `RevokeAllSessions`.
+- **Login** checks the password without the lock (bcrypt is slow), then
+  starts its session under it, and only if the password hash it checked is
+  still the user's (`Service.Login`). A login in flight when a password
+  reset commits is therefore either revoked by the reset or refused (401):
+  the old password never outlives the reset. Against a plain revocation
+  (`RevokeAllSessions`, `DELETE /auth/sessions?scope=all`), which does not
+  change the password, a login that completes after it starts a new
+  session: revoking all sessions ends the ones that exist at that moment.
 
 The `auth.Service` methods `ListSessions`, `RevokeSession`, and
 `RevokeAllSessions` are exported for application code (for example, an admin

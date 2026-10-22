@@ -89,6 +89,9 @@ type App struct {
 	api                huma.API
 	startHooks         []Hook
 	stopHooks          []Hook
+	// authService is the auth Service the App mounted (auth enabled); it is
+	// closed when the App stops.
+	authService        *auth.Service
 	shutdownTimeout    time.Duration
 	shutdownDrainDelay time.Duration
 	embeddedFrontend   fs.FS
@@ -244,9 +247,16 @@ func New(options ...Option) (_ *App, err error) {
 			return nil, errors.New("framework: JWT secret is set but no database is attached")
 		}
 		authOpts := app.authOptions()
-		if err := auth.Mount(app.api, app.db.DB, app.cfg, authOpts...); err != nil {
+		svc, err := auth.NewService(app.db.DB, app.cfg, authOpts...)
+		if err != nil {
 			return nil, err
 		}
+		if err := auth.MountService(app.api, svc, app.cfg); err != nil {
+			return nil, err
+		}
+		// The App owns the Service: runStopHooks closes it (its background
+		// work drained, then cancelled) before any stop hook runs.
+		app.authService = svc
 		// Admin introspection + data plane mount only in cookie mode
 		// (ADR-013). JWT-only apps do not grow admin routes.
 		if app.cfg.Auth.EffectiveMode() == config.AuthModeCookie {
@@ -779,7 +789,25 @@ func (a *App) runStopHooks() error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	return errors.Join(a.runStopHooksWithContext(ctx), a.releaseOwned())
+	// The auth Service first: its background work (a password reset
+	// message) still uses the database and the mailer the stop hooks close.
+	authErr := a.closeAuthService(ctx)
+	return errors.Join(authErr, a.runStopHooksWithContext(ctx), a.releaseOwned())
+}
+
+// closeAuthService closes the auth Service the App mounted, at most once.
+func (a *App) closeAuthService(ctx context.Context) error {
+	a.mu.Lock()
+	svc := a.authService
+	a.authService = nil
+	a.mu.Unlock()
+	if svc == nil {
+		return nil
+	}
+	if err := svc.Close(ctx); err != nil {
+		return fmt.Errorf("framework: close auth: %w", err)
+	}
+	return nil
 }
 
 // releaseOwned closes the job dispatcher and cache the app opened itself, in

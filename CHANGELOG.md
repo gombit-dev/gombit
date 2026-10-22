@@ -15,16 +15,23 @@ version.
 - [Password reset](docs/auth.md#password-reset) (AUTH-2), in both auth
   modes. `POST /auth/password/forgot` mails a single-use reset link and
   answers the same 202 whether or not the email is an account, before that
-  is known (the message is sent in the background); `POST
+  is known (the message is sent by the auth Service's bounded, deadlined
+  background workers, which `framework.App` drains and cancels when it
+  stops; a request they cannot admit is a 503, also before the lookup);
+  `POST
   /auth/password/reset` sets the new password (registration's policy) and
   revokes every session and refresh token of the user, unless
-  `GOMBIT_AUTH_PASSWORD_RESET_KEEP_SESSIONS=true`. The token is a one-time
+  `GOMBIT_AUTH_PASSWORD_RESET_KEEP_SESSIONS=true`; a login that checked the
+  old password cannot start a session after the reset (login now starts its
+  session under the user's lock, only if the checked password is still
+  current: `auth.Service.Login`). The token is a one-time
   token like the verification one (pending until delivered, used once, at
   most one message a minute, superseded by a newer one, bound to the
   address), expiring after `GOMBIT_AUTH_PASSWORD_RESET_TTL` (1h);
   `GOMBIT_AUTH_PASSWORD_RESET_URL` is the link. Both are audited.
   `auth.Service.RequestPasswordReset` / `ResetPassword` are the same flow
-  from Go.
+  from Go; `auth.MountService` mounts the routes over a Service the caller
+  owns and closes (`Service.Close`).
   - **Breaking (api):** the framework now registers the reset routes, the
     `auth-request-password-reset` and `auth-reset-password` operation IDs,
     and the `AuthPasswordForgotBody` / `AuthPasswordResetBody` /

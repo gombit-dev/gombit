@@ -38,6 +38,25 @@ func (h *countingHasher) Compare(hash, password string) error {
 	return nil
 }
 
+// ctxMailer is a Mailer that sends nothing and returns only when its
+// context is done, reporting why on returned.
+type ctxMailer struct {
+	once     sync.Once
+	entered  chan struct{}
+	returned chan error
+}
+
+func newCtxMailer() *ctxMailer {
+	return &ctxMailer{entered: make(chan struct{}), returned: make(chan error, 1)}
+}
+
+func (m *ctxMailer) Send(ctx context.Context, _ auth.Message) error {
+	m.once.Do(func() { close(m.entered) })
+	<-ctx.Done()
+	m.returned <- ctx.Err()
+	return ctx.Err()
+}
+
 // awaitMail waits for a message of kind to address: POST
 // /auth/password/forgot sends in the background.
 func awaitMail(t *testing.T, mail *authtest.Mailer, address string, kind auth.MessageKind) auth.Message {
@@ -379,8 +398,16 @@ func runPasswordResetService(t *testing.T, db *database.DB) {
 		if err := e.db.Model(&auth.User{}).Where("id = ?", user.ID).Update("email", "moved-"+user.Email).Error; err != nil {
 			t.Fatal(err)
 		}
-		if _, err := e.svc.ResetPassword(ctx, token, "brand-new-horse"); !errors.Is(err, auth.ErrInvalidToken) {
-			t.Fatalf("a token for the old address = %v, want ErrInvalidToken", err)
+		// Refused before bcrypt, every time: the token can never work.
+		hasher := &countingHasher{}
+		auth.SetHasher(e.svc, hasher)
+		for range 3 {
+			if _, err := e.svc.ResetPassword(ctx, token, "brand-new-horse"); !errors.Is(err, auth.ErrInvalidToken) {
+				t.Fatalf("a token for the old address = %v, want ErrInvalidToken", err)
+			}
+		}
+		if n := hasher.hashes.Load(); n != 0 {
+			t.Fatalf("bcrypt ran %d times for a token bound to an address the user no longer has", n)
 		}
 	})
 
@@ -397,27 +424,88 @@ func runPasswordResetService(t *testing.T, db *database.DB) {
 		}
 	})
 
-	t.Run("a full background is dropped, not waited on", func(t *testing.T) {
+	t.Run("a full background refuses at once, and admits again when free", func(t *testing.T) {
 		e := newVerificationEnv(t, db)
 		user, _ := e.register(t, "reset-full")
-		release := auth.FillResetSlots(e.svc)
-		done := make(chan struct{})
-		go func() {
-			auth.RequestPasswordResetInBackground(ctx, e.svc, user.Email)
-			close(done)
-		}()
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
+		release := auth.FillBackground(e.svc)
+		if err := auth.RequestPasswordResetInBackground(ctx, e.svc, user.Email); !auth.IsBackgroundBusy(err) {
 			release()
-			t.Fatal("a reset request waited for a free slot")
+			t.Fatalf("a request with no room = %v, want it refused (a 503), not dropped behind a 202", err)
 		}
 		release()
-		if msg, _ := e.mail.Last(user.Email); msg.Kind == auth.MessageResetPassword {
-			t.Fatal("the dropped request was sent")
+		deadline := time.Now().Add(5 * time.Second)
+		for auth.IsBackgroundBusy(auth.RequestPasswordResetInBackground(ctx, e.svc, user.Email)) {
+			if time.Now().After(deadline) {
+				t.Fatal("the background never admitted a request again")
+			}
+			time.Sleep(5 * time.Millisecond)
 		}
-		auth.RequestPasswordResetInBackground(ctx, e.svc, user.Email)
 		awaitMail(t, e.mail, user.Email, auth.MessageResetPassword)
+	})
+
+	t.Run("a task that never returns is cancelled at its deadline", func(t *testing.T) {
+		e := newVerificationEnv(t, db)
+		user, _ := e.register(t, "reset-deadline")
+		auth.SetBackgroundTimeout(e.svc, 50*time.Millisecond)
+		mailer := newCtxMailer()
+		auth.SetMailer(e.svc, mailer)
+		if err := auth.RequestPasswordResetInBackground(ctx, e.svc, user.Email); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case err := <-mailer.returned:
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("the hung send ended with %v, want its deadline", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("a send that waits for its context was never cancelled")
+		}
+	})
+
+	t.Run("Close drains the admitted work", func(t *testing.T) {
+		e := newVerificationEnv(t, db)
+		user, _ := e.register(t, "reset-drain")
+		gate := &gateMailer{inner: e.mail, entered: make(chan struct{}), release: make(chan struct{})}
+		auth.SetMailer(e.svc, gate)
+		if err := auth.RequestPasswordResetInBackground(ctx, e.svc, user.Email); err != nil {
+			t.Fatal(err)
+		}
+		<-gate.entered
+		time.AfterFunc(20*time.Millisecond, func() { close(gate.release) })
+		closeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		if err := e.svc.Close(closeCtx); err != nil {
+			t.Fatalf("Close with time to drain = %v", err)
+		}
+		if msg, ok := e.mail.Last(user.Email); !ok || msg.Kind != auth.MessageResetPassword {
+			t.Fatal("Close returned before the in-flight message was sent")
+		}
+		if err := auth.RequestPasswordResetInBackground(ctx, e.svc, user.Email); !auth.IsBackgroundBusy(err) {
+			t.Fatalf("a request after Close = %v, want it refused", err)
+		}
+	})
+
+	t.Run("Close cancels what outlives its context", func(t *testing.T) {
+		e := newVerificationEnv(t, db)
+		user, _ := e.register(t, "reset-cancel")
+		mailer := newCtxMailer()
+		auth.SetMailer(e.svc, mailer)
+		if err := auth.RequestPasswordResetInBackground(ctx, e.svc, user.Email); err != nil {
+			t.Fatal(err)
+		}
+		<-mailer.entered
+		closeCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+		defer cancel()
+		start := time.Now()
+		if err := e.svc.Close(closeCtx); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Close past its deadline = %v, want the deadline", err)
+		}
+		if took := time.Since(start); took > 2*time.Second {
+			t.Fatalf("Close took %v with a send waiting on its context", took)
+		}
+		if err := <-mailer.returned; !errors.Is(err, context.Canceled) {
+			t.Fatalf("the in-flight send ended with %v, want it cancelled by Close", err)
+		}
 	})
 
 	t.Run("a made-up token is refused before hashing", func(t *testing.T) {
@@ -429,6 +517,51 @@ func runPasswordResetService(t *testing.T, db *database.DB) {
 		}
 		if hasher.hashes.Load() != 0 {
 			t.Fatal("bcrypt ran for a token that cannot work")
+		}
+	})
+
+	t.Run("a login in flight when the reset commits does not survive it", func(t *testing.T) {
+		// The login has checked the old password and is about to start its
+		// session when the reset commits: the session must not start.
+		e := newVerificationEnv(t, db)
+		user, _ := e.register(t, "reset-inflight")
+		token := e.resetToken(t, user)
+		entered, release := make(chan struct{}), make(chan struct{})
+		var once sync.Once
+		auth.SetLoginAuthenticatedHook(e.svc, func() {
+			once.Do(func() {
+				close(entered)
+				<-release
+			})
+		})
+		type result struct {
+			pair auth.TokenPair
+			err  error
+		}
+		done := make(chan result, 1)
+		go func() {
+			_, pair, err := e.svc.Login(ctx, user.Email, testPassword)
+			done <- result{pair, err}
+		}()
+		<-entered
+		if _, err := e.svc.ResetPassword(ctx, token, "brand-new-horse"); err != nil {
+			close(release)
+			t.Fatalf("the reset while a login is in flight: %v", err)
+		}
+		close(release)
+		got := <-done
+		if !errors.Is(got.err, auth.ErrInvalidCredentials) {
+			t.Fatalf("the old-password login after the reset = %v (pair issued: %v), want invalid credentials", got.err, got.pair.RefreshToken != "")
+		}
+		var live int64
+		e.db.Model(&auth.RefreshToken{}).Where("user_id = ? AND revoked_at IS NULL", user.ID).Count(&live)
+		if live != 0 {
+			t.Fatalf("%d live sessions after the reset, want none", live)
+		}
+		var refused auth.AuditEvent
+		e.db.Where("target_user_id = ? AND action = ?", user.ID, auth.AuditLoginFailed).Order("id DESC").First(&refused)
+		if !strings.Contains(refused.Details, "password_changed") {
+			t.Fatalf("the refused login's event = %+v", refused)
 		}
 	})
 

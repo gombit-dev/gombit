@@ -243,3 +243,27 @@ func TestFault_Database_PasswordResetRevocationFails(t *testing.T) {
 		}
 	})
 }
+
+// selectsResetTokens matches the reset's token lookup.
+func selectsResetTokens(query string) bool {
+	return strings.HasPrefix(strings.TrimSpace(strings.ToUpper(query)), "SELECT") && strings.Contains(query, "auth_one_time_tokens")
+}
+
+// TestFault_Database_PasswordResetScreenFailsClosed: the database fails the
+// token lookup that screens a reset. The reset fails with that error, and
+// bcrypt never runs: an outage does not open the CPU-heavy path to
+// made-up tokens.
+func TestFault_Database_PasswordResetScreenFailsClosed(t *testing.T) {
+	faulttest.ForEachDB(t, faultDBs, func(t *testing.T, kind database.Driver, dsn string) {
+		faults := &faulttest.DBFaults{Statement: faulttest.FailOnce(faulttest.ErrInjected), Match: selectsResetTokens}
+		f := newResendFixture(t, kind, dsn, faults)
+		hasher := &countingHasher{}
+		auth.SetHasher(f.svc, hasher)
+		if _, err := f.svc.ResetPassword(context.Background(), "made-up-token", "brand-new-horse"); !errors.Is(err, faulttest.ErrInjected) {
+			t.Fatalf("ResetPassword = %v, want the injected lookup failure", err)
+		}
+		if n := hasher.hashes.Load(); n != 0 {
+			t.Fatalf("bcrypt ran %d times while the database failed the screen", n)
+		}
+	})
+}

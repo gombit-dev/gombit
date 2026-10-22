@@ -22,11 +22,6 @@ import (
 // account. POST /auth/password/reset consumes the token, sets the new
 // password, and by default revokes every session of the user.
 
-// passwordResetSlots is how many password reset requests run in the
-// background at once. A request beyond it is dropped (and logged): the
-// endpoint is unauthenticated, and its answer cannot say so.
-const passwordResetSlots = 16
-
 // RequestPasswordReset mails a password reset token to the account whose
 // email is email. For an address that is no account it does nothing and
 // returns nil. Otherwise it returns what sending returns: an error naming
@@ -72,9 +67,12 @@ func (s *Service) ResetPassword(ctx context.Context, raw, password string) (User
 		return User{}, errInvalidOneTimeToken
 	}
 	// A token that cannot work is refused before bcrypt runs, so a stream
-	// of made-up tokens costs one indexed lookup each, not a hash. The
-	// transaction below decides; this only screens.
-	if !s.resetTokenMayWork(ctx, raw) {
+	// of made-up (or permanently dead) tokens costs two indexed lookups
+	// each, not a hash, and a database that cannot answer fails the request
+	// before any hashing. The transaction below decides; this only screens.
+	if ok, err := s.resetTokenMayWork(ctx, raw); err != nil {
+		return User{}, err
+	} else if !ok {
 		return User{}, errInvalidOneTimeToken
 	}
 	// Hashed before the transaction: bcrypt is slow, and must not run under
@@ -113,33 +111,36 @@ func (s *Service) ResetPassword(ctx context.Context, raw, password string) (User
 }
 
 // resetTokenMayWork reports whether raw names a delivered, unused,
-// unexpired reset token. A database error says yes: the transaction will
-// meet it and report it.
-func (s *Service) resetTokenMayWork(ctx context.Context, raw string) bool {
+// unexpired reset token issued for the address its user has now: what
+// consumeOneTimeToken will accept, short of a race. A database error is
+// returned, not taken for a yes.
+func (s *Service) resetTokenMayWork(ctx context.Context, raw string) (bool, error) {
+	db := s.db.WithContext(ctx)
 	var token OneTimeToken
-	err := s.db.WithContext(ctx).Where("token_hash = ? AND purpose = ?", hashOpaqueToken(raw), PurposeResetPassword).Limit(1).Find(&token).Error
-	if err != nil {
-		return true
+	if err := db.Where("token_hash = ? AND purpose = ?", hashOpaqueToken(raw), PurposeResetPassword).Limit(1).Find(&token).Error; err != nil {
+		return false, err
 	}
 	// Expiry on instants, here: SQLite compares times as text.
-	return token.ID != 0 && token.SentAt != nil && token.UsedAt == nil && s.now().Before(token.ExpiresAt)
+	if token.ID == 0 || token.SentAt == nil || token.UsedAt != nil || !s.now().Before(token.ExpiresAt) {
+		return false, nil
+	}
+	var user User
+	if err := db.Select("id", "email").Where("id = ?", token.UserID).Limit(1).Find(&user).Error; err != nil {
+		return false, err
+	}
+	return user.ID != 0 && user.Email == token.Email, nil
 }
 
-// requestPasswordResetInBackground runs RequestPasswordReset off the
-// request, so the answer is the same, and as fast, for an account and for
-// an address that is none. Its outcome is logged, never returned.
-func (s *Service) requestPasswordResetInBackground(ctx context.Context, email string) {
-	select {
-	case s.resetSlots <- struct{}{}:
-	default:
-		s.logger.Warn("auth: too many password reset requests at once; one was dropped")
-		return
-	}
-	// The request's values (its id, client address) stay, for the audit
-	// event; its cancellation does not: the answer is sent at once.
-	ctx = context.WithoutCancel(ctx)
-	go func() {
-		defer func() { <-s.resetSlots }()
+// requestPasswordResetInBackground hands RequestPasswordReset to the
+// Service's background runner (background.go), so the answer is the same,
+// and as fast, for an account and for an address that is none. The task
+// keeps the request's values (its id, client address, for the audit event)
+// but runs under the runner's deadline and shutdown; its outcome is logged,
+// never answered. It returns errBackgroundBusy when the runner did not admit
+// it (a full queue, or a closed Service): decided before the lookup, so it
+// is the same for any address.
+func (s *Service) requestPasswordResetInBackground(ctx context.Context, email string) error {
+	return s.background.submit(ctx, func(ctx context.Context) {
 		err := s.RequestPasswordReset(ctx, email)
 		var tooSoon resendTooSoonError
 		switch {
@@ -149,7 +150,7 @@ func (s *Service) requestPasswordResetInBackground(ctx context.Context, email st
 		default:
 			s.logger.Warn("auth: send a password reset message", zap.Error(err))
 		}
-	}()
+	})
 }
 
 func (s *Service) passwordResetTTL() time.Duration {
@@ -219,7 +220,7 @@ func registerPasswordResetRoutes(api huma.API, svc *Service, prefix string, cook
 		Method:        http.MethodPost,
 		Path:          prefix + "/auth/password/forgot",
 		Summary:       "Mail a password reset link to an account",
-		Description:   "Always 202 with the same body, whether or not the email is an account, and before that is known: the message is sent in the background. At most one message a minute per account; the link works once, until it expires.",
+		Description:   "202 with the same body whether or not the email is an account, answered before that is known: the message is sent in the background. 503 (Retry-After) when the server cannot take more background work at once, also before the lookup. At most one message a minute per account; the link works once, until it expires.",
 		Tags:          []string{"Auth"},
 		DefaultStatus: http.StatusAccepted,
 	}), svc.forgotPassword)
@@ -240,7 +241,9 @@ func registerPasswordResetRoutes(api huma.API, svc *Service, prefix string, cook
 }
 
 func (s *Service) forgotPassword(ctx context.Context, input *passwordForgotInput) (*passwordForgotOutput, error) {
-	s.requestPasswordResetInBackground(ctx, input.Body.Email)
+	if err := s.requestPasswordResetInBackground(ctx, input.Body.Email); err != nil {
+		return nil, mapServiceError(ctx, err)
+	}
 	return &passwordForgotOutput{Body: contract.Data[authPasswordResetRequested]{Data: authPasswordResetRequested{Accepted: true}}}, nil
 }
 
