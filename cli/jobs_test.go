@@ -36,6 +36,14 @@ func jobsFixture(t *testing.T) *jobs.MemoryQueue {
 			t.Fatal(err)
 		}
 	}
+	stubJobsQueue(t, q)
+	return q
+}
+
+// stubJobsQueue points the `gombit jobs` commands at q under a redis-driver
+// config, so they read a queue with nothing running behind them.
+func stubJobsQueue(t *testing.T, q jobs.Queue) {
+	t.Helper()
 	cfg := config.Default()
 	cfg.Jobs.Driver = config.JobsDriverRedis
 	cfg.Jobs.Queue = "mail"
@@ -43,7 +51,39 @@ func jobsFixture(t *testing.T) *jobs.MemoryQueue {
 	t.Cleanup(func() { LoadConfig, openJobsQueue = prevCfg, prevOpen })
 	LoadConfig = func() (config.Config, error) { return cfg, nil }
 	openJobsQueue = func(config.Config) (jobs.Queue, func() error, error) { return q, func() error { return nil }, nil }
-	return q
+}
+
+// jobsPayloadFixture stubs `gombit jobs` with a memory queue holding one failed
+// job for the payload raw. The envelope goes through Envelope.Marshal and
+// UnmarshalEnvelope first, because that is what a driver stores (jobs/redis.go
+// writes env.Marshal()): json.Marshal runs the RawMessage payload through
+// compact with HTML escaping on, so the queue keeps the bytes a real Redis queue
+// would keep rather than a state only a hand-poked memory queue can hold.
+func jobsPayloadFixture(t *testing.T, id, raw string) {
+	t.Helper()
+	q := jobs.NewMemoryQueue()
+	ctx := context.Background()
+	at := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+	env := jobs.Envelope{ID: id, Name: "charge", Version: 1, Payload: json.RawMessage(raw), EnqueuedAt: at}
+	data, err := env.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err = jobs.UnmarshalEnvelope(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Push(ctx, "mail", env, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	d, err := q.Reserve(ctx, []string{"mail"}, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Bury(ctx, d, jobs.Failure{Reason: jobs.ReasonExhausted, Kind: jobs.KindHandler, Error: "gateway declined", At: at}); err != nil {
+		t.Fatal(err)
+	}
+	stubJobsQueue(t, q)
 }
 
 func runJobs(t *testing.T, args ...string) (string, error) {
@@ -79,6 +119,81 @@ func TestJobsFailedAndInspect(t *testing.T) {
 	}
 	if out, err := runJobs(t, "failed", "--queue", "other"); err != nil || !strings.Contains(out, "No failed jobs on other.") {
 		t.Fatalf("jobs failed --queue other = %v:\n%s", err, out)
+	}
+}
+
+// The payload `gombit jobs inspect` prints is the one the queue holds: an
+// operator reads an id out of it and goes to look for that row. Re-encoding it
+// through any turns every number into a float64, so an id above 2^53 comes back
+// rounded and 1e3 comes back as 1000, and the keys come back sorted rather than
+// in the order the handler wrote them. The fixture stored this payload through
+// the envelope encoding a driver uses, so what is at rest here is what is at
+// rest in Redis — including the \u003c, \u003e and \u0026 that json.Marshal
+// wrote on the way in, which inspect prints as stored and did before this fix.
+func TestJobsInspectPrintsTheStoredPayload(t *testing.T) {
+	const raw = `{"user_id":1234567890123456789,"z":1,"a":2,"note":"a<b>&c","ratio":1e3,"nested":{"deep":true}}`
+	jobsPayloadFixture(t, "job-payload", raw)
+
+	out, err := runJobs(t, "inspect", "job-payload")
+	if err != nil {
+		t.Fatalf("jobs inspect = %v:\n%s", err, out)
+	}
+	want := `Payload:
+  {
+    "user_id": 1234567890123456789,
+    "z": 1,
+    "a": 2,
+    "note": "a\u003cb\u003e\u0026c",
+    "ratio": 1e3,
+    "nested": {
+      "deep": true
+    }
+  }`
+	if !strings.Contains(out, want) {
+		t.Fatalf("jobs inspect:\n%s\nwant this block in it:\n%s", out, want)
+	}
+
+	// --json never re-encoded the payload, so it has always shown the stored id
+	// and key order; its strings are escaped the JSON way, which parses back to
+	// the same text. Pinned beside the human view so the two cannot drift.
+	jsonOut, err := runJobs(t, "inspect", "job-payload", "--json")
+	if err != nil {
+		t.Fatalf("jobs inspect --json = %v:\n%s", err, jsonOut)
+	}
+	if !strings.Contains(jsonOut, `"user_id": 1234567890123456789`) || !strings.Contains(jsonOut, `"z": 1,`) {
+		t.Fatalf("jobs inspect --json lost the stored payload:\n%s", jsonOut)
+	}
+}
+
+func TestIndentJSON(t *testing.T) {
+	tests := []struct{ name, raw, want string }{
+		{"an object", `{"user_id":1234567890123456789,"z":1,"a":2,"note":"a<b>&c","ratio":1e3,"nested":{"deep":true}}`,
+			`  {
+    "user_id": 1234567890123456789,
+    "z": 1,
+    "a": 2,
+    "note": "a<b>&c",
+    "ratio": 1e3,
+    "nested": {
+      "deep": true
+    }
+  }`},
+		{"an array", `[1234567890123456789,"a<b>"]`, "  [\n    1234567890123456789,\n    \"a<b>\"\n  ]"},
+		{"a bare number", `1234567890123456789`, `  1234567890123456789`},
+		{"a bare string", `"a<b>&c"`, `  "a<b>&c"`},
+		{"null", `null`, `  null`},
+		{"whitespace between tokens", `{ "a" : 1e3 , "b" : 2 }`, "  {\n    \"a\": 1e3,\n    \"b\": 2\n  }"},
+		{"a newline inside a string", `{"s":"a\nb"}`, "  {\n    \"s\": \"a\\nb\"\n  }"},
+		{"no payload", ``, ``},
+		{"not JSON", `not json`, `not json`},
+		{"trailing garbage", `{"a":1}oops`, `{"a":1}oops`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := indentJSON(json.RawMessage(tt.raw)); got != tt.want {
+				t.Fatalf("indentJSON(%q) =\n%s\nwant\n%s", tt.raw, got, tt.want)
+			}
+		})
 	}
 }
 

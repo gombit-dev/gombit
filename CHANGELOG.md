@@ -89,6 +89,20 @@ version.
   refresh cookie stays valid for the retry, which no longer reads as reuse
   and revokes every session of the user
   ([#606](https://github.com/gombit-dev/gombit/issues/606)).
+- `gombit jobs inspect` re-encoded the payload it prints through `any`, so every
+  number went through `float64` and an id above 2^53 — a snowflake, an int64
+  primary key, exactly the value an operator reads out of that block to go and
+  find the row — printed as a neighbouring value the job never carried; object
+  keys came back sorted rather than in the order the handler wrote them, and a
+  number the producer wrote non-canonically (`1e3`) came back as `1000`, while
+  `inspect --json` beside it kept the id and the key order. `indentJSON` now
+  lays the stored bytes out with `json.Indent`, which moves only the whitespace
+  between the JSON tokens. String contents are unchanged either way: `Registry`
+  and `Envelope.Marshal` encode with `json.Marshal`, which escapes `<`, `>` and
+  `&` as `\u003c`, `\u003e` and `\u0026` before the job reaches the queue, so
+  `inspect` shows those escapes as the bytes at rest and did so before this fix
+  too
+  ([#497](https://github.com/gombit-dev/gombit/issues/497)).
 
 ### Changed
 

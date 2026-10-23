@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -341,16 +342,22 @@ func writeFailedJob(w io.Writer, f jobs.FailedJob) error {
 	return err
 }
 
+// indentJSON lays a job's stored payload out for the terminal. It copies the
+// payload's own bytes and only moves the whitespace between them, so the
+// numbers and the key order an operator reads are the ones the queue holds.
+// Re-encoding through any instead sends every number through float64 (an id
+// above 2^53 comes back as a neighbouring value the job never carried, 1e3 as
+// 1000) and sorts the keys. Markup is not such a casualty, and this helper does
+// not keep '<', '>' and '&' readable: Registry and Envelope.Marshal encode the
+// payload with json.Marshal, so the bytes at rest already hold \u003c, \u003e
+// and \u0026, and printing what is stored prints those.
+// A payload that is not JSON is returned as stored.
 func indentJSON(raw json.RawMessage) string {
-	var v any
-	if err := json.Unmarshal(raw, &v); err != nil {
+	var out bytes.Buffer
+	if err := json.Indent(&out, raw, "  ", "  "); err != nil {
 		return string(raw)
 	}
-	out, err := json.MarshalIndent(v, "  ", "  ")
-	if err != nil {
-		return string(raw)
-	}
-	return "  " + string(out)
+	return "  " + out.String()
 }
 
 func writeJSON(w io.Writer, v any) error {
