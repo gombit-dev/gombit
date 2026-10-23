@@ -87,6 +87,10 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 ### Informational
 
+- Bearer-mode session revocation errors include the `WWW-Authenticate: Bearer realm="api"` challenge when the handler returns 401. (`bearer-handler-401-challenge`, api, [#604](https://github.com/gombit-dev/gombit/issues/604))
+
+  Cookie-mode 401 responses still omit a Bearer challenge.
+
 - The email-verification resend operation's OpenAPI contract declares its 429 response and integer `Retry-After` header. (`verification-resend-rate-limit-contract`, api, [#611](https://github.com/gombit-dev/gombit/issues/611))
 
 - The framework requires Go 1.26.9 (`go 1.26.9` in go.mod), and `gombit new` pins it. (`go-1-26-9`, dependency, [#602](https://github.com/gombit-dev/gombit/issues/602))
