@@ -144,7 +144,7 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   `framework.App` closes the Service when it stops. A login now starts
   its session under the user's row lock (`auth.Service.Login`).
 
-- A new app's placeholder `schema.ts` includes the password reset operations; an existing app's generated client gets them from `gombit client generate`. (`client-schema-password-reset`, client, [#332](https://github.com/gombit-dev/gombit/issues/332))
+- A new app's placeholder `schema.ts` includes the password reset operations (and the forgot route's 503 with `Retry-After`); an existing app's generated client gets them from `gombit client generate`. (`client-schema-password-reset`, client, [#332](https://github.com/gombit-dev/gombit/issues/332))
 
 - An already-rotated refresh token that has expired is a 401 and no longer revokes the user's sessions. (`expired-rotated-refresh-token-no-cascade`, security, [#458](https://github.com/gombit-dev/gombit/issues/458))
 

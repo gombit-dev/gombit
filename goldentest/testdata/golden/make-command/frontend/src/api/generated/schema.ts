@@ -572,6 +572,14 @@ export interface operations {
           "application/json": components["schemas"]["DataAuthPasswordResetRequested"];
         };
       };
+      503: {
+        headers: {
+          "Retry-After": number;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorEnvelope"];
+        };
+      };
       default: {
         headers: {
           [name: string]: unknown;

@@ -707,7 +707,7 @@ releases:
       - id: client-schema-password-reset
         kind: informational
         area: client
-        summary: "A new app's placeholder `schema.ts` includes the password reset operations; an existing app's generated client gets them from `gombit client generate`."
+        summary: "A new app's placeholder `schema.ts` includes the password reset operations (and the forgot route's 503 with `Retry-After`); an existing app's generated client gets them from `gombit client generate`."
         refs: [332]
 
       - id: expired-rotated-refresh-token-no-cascade

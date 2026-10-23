@@ -141,9 +141,10 @@ func (s *Service) resetTokenMayWork(ctx context.Context, raw string) (bool, erro
 // and as fast, for an account and for an address that is none. The task
 // keeps the request's values (its id, client address, for the audit event)
 // but runs under the runner's deadline and shutdown; its outcome is logged,
-// never answered. It returns errBackgroundBusy when the runner did not admit
-// it (a full queue, or a closed Service): decided before the lookup, so it
-// is the same for any address.
+// never answered. It returns a backgroundBusyError when the runner did not
+// admit it (its admission bucket empty, or the Service closed): decided
+// before the lookup, from request arrivals alone, so it is the same for any
+// address, and does not depend on how long earlier requests' work runs.
 func (s *Service) requestPasswordResetInBackground(ctx context.Context, email string) error {
 	return s.background.submit(ctx, func(ctx context.Context) {
 		err := s.RequestPasswordReset(ctx, email)
@@ -220,15 +221,18 @@ type cookiePasswordResetOutput struct {
 }
 
 func registerPasswordResetRoutes(api huma.API, svc *Service, prefix string, cookieMode bool) {
+	forgotPath := prefix + "/auth/password/forgot"
 	huma.Register(api, withRequestInfo(huma.Operation{
 		OperationID:   "auth-request-password-reset",
 		Method:        http.MethodPost,
-		Path:          prefix + "/auth/password/forgot",
+		Path:          forgotPath,
 		Summary:       "Mail a password reset link to an account",
-		Description:   "202 with the same body whether or not the email is an account, answered before that is known: the message is sent in the background. 503 (Retry-After) when the server cannot take more background work at once, also before the lookup. At most one message a minute per account; the link works once, until it expires.",
+		Description:   "202 with the same body whether or not the email is an account, answered before that is known: the message is sent in the background. 503 (Retry-After) when the server is taking no more reset requests for now, decided from request arrivals alone, also before the lookup. At most one message a minute per account; the link works once, until it expires.",
 		Tags:          []string{"Auth"},
 		DefaultStatus: http.StatusAccepted,
+		Errors:        []int{http.StatusServiceUnavailable},
 	}), svc.forgotPassword)
+	declareRetryAfter(api, forgotPath, http.StatusServiceUnavailable, "Seconds until the server takes a password reset request again")
 
 	reset := withRequestInfo(huma.Operation{
 		OperationID: "auth-reset-password",

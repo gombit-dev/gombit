@@ -119,44 +119,25 @@ func RequestPasswordResetInBackground(ctx context.Context, s *Service, email str
 	return s.requestPasswordResetInBackground(ctx, email)
 }
 
-// FillBackground occupies every background worker and every waiting slot
-// with a task that waits for release, as that much work in flight would.
-// It first fills the workers and waits until each is running its task, then
-// the queue to its capacity: a full queue that the workers were about to
-// drain would not be full for long.
-func FillBackground(s *Service) (release func()) {
-	gate := make(chan struct{})
-	block := func(ctx context.Context) {
-		select {
-		case <-gate:
-		case <-ctx.Done():
-		}
-	}
-	running := make(chan struct{}, backgroundWorkers)
-	for range backgroundWorkers {
-		if err := s.background.submit(context.Background(), func(ctx context.Context) {
-			running <- struct{}{}
-			block(ctx)
-		}); err != nil {
-			panic(err)
-		}
-	}
-	for range backgroundWorkers {
-		<-running
-	}
-	for range backgroundQueue {
-		if err := s.background.submit(context.Background(), block); err != nil {
-			panic(err)
-		}
-	}
-	return func() { close(gate) }
+// SetBackgroundAdmission replaces the background runner's admission
+// bucket (burst, refill per second, clock) and worker count. Set it before
+// the service is used.
+func SetBackgroundAdmission(s *Service, burst, perSecond float64, workers int, now func() time.Time) {
+	r := s.background
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.burst, r.rate, r.tokens, r.now, r.workerCount = burst, perSecond, burst, now, workers
+	r.last = now()
 }
 
 // SetBackgroundTimeout replaces the deadline of each background task.
 func SetBackgroundTimeout(s *Service, d time.Duration) { s.background.timeout = d }
 
 // IsBackgroundBusy reports whether err is a background task not admitted.
-func IsBackgroundBusy(err error) bool { return errors.Is(err, errBackgroundBusy) }
+func IsBackgroundBusy(err error) bool {
+	var busy backgroundBusyError
+	return errors.As(err, &busy)
+}
 
 // SetMailer replaces the service's Mailer.
 func SetMailer(s *Service, m Mailer) { s.mailer = m }

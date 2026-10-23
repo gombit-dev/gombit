@@ -424,23 +424,61 @@ func runPasswordResetService(t *testing.T, db *database.DB) {
 		}
 	})
 
-	t.Run("a full background refuses at once, and admits again when free", func(t *testing.T) {
+	t.Run("admission is a token bucket: refused at once when empty, admitted again as it refills", func(t *testing.T) {
 		e := newVerificationEnv(t, db)
-		user, _ := e.register(t, "reset-full")
-		release := auth.FillBackground(e.svc)
-		if err := auth.RequestPasswordResetInBackground(ctx, e.svc, user.Email); !auth.IsBackgroundBusy(err) {
-			release()
-			t.Fatalf("a request with no room = %v, want it refused (a 503), not dropped behind a 202", err)
-		}
-		release()
-		deadline := time.Now().Add(5 * time.Second)
-		for auth.IsBackgroundBusy(auth.RequestPasswordResetInBackground(ctx, e.svc, user.Email)) {
-			if time.Now().After(deadline) {
-				t.Fatal("the background never admitted a request again")
+		clock := &syncClock{now: time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)}
+		auth.SetBackgroundAdmission(e.svc, 3, 1, 2, clock.Now)
+		for i := range 3 {
+			if err := auth.RequestPasswordResetInBackground(ctx, e.svc, fmt.Sprintf("bucket-%d-%d@example.com", i, time.Now().UnixNano())); err != nil {
+				t.Fatalf("request %d of a burst of 3 = %v", i+1, err)
 			}
-			time.Sleep(5 * time.Millisecond)
 		}
-		awaitMail(t, e.mail, user.Email, auth.MessageResetPassword)
+		if err := auth.RequestPasswordResetInBackground(ctx, e.svc, "bucket-x@example.com"); !auth.IsBackgroundBusy(err) {
+			t.Fatalf("a request past the burst = %v, want it refused (a 503)", err)
+		}
+		clock.set(clock.Now().Add(time.Second))
+		if err := auth.RequestPasswordResetInBackground(ctx, e.svc, "bucket-y@example.com"); err != nil {
+			t.Fatalf("a request once a token refilled = %v", err)
+		}
+	})
+
+	t.Run("admission does not depend on whether the address is an account", func(t *testing.T) {
+		// The probe: one candidate address, then requests until refused. A
+		// known account's send holds its worker (its mailer never returns
+		// here); an unknown address frees its worker at once. Admission by
+		// queue room would refuse sooner after a known candidate; the bucket
+		// answers the same sequence either way.
+		probe := func(candidateKnown bool) []bool {
+			e := newVerificationEnv(t, db)
+			user, _ := e.register(t, "oracle")
+			mailer := newCtxMailer()
+			auth.SetMailer(e.svc, mailer)
+			clock := &syncClock{now: time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)}
+			auth.SetBackgroundAdmission(e.svc, 6, 1e-9, 1, clock.Now)
+			candidate := "nobody-" + user.Email
+			if candidateKnown {
+				candidate = user.Email
+			}
+			var answers []bool
+			answers = append(answers, auth.RequestPasswordResetInBackground(ctx, e.svc, candidate) == nil)
+			if candidateKnown {
+				<-mailer.entered // the one worker is now held
+			} else {
+				time.Sleep(50 * time.Millisecond) // the unknown address has come and gone
+			}
+			for i := range 10 {
+				err := auth.RequestPasswordResetInBackground(ctx, e.svc, fmt.Sprintf("probe-%d-%d@example.com", i, time.Now().UnixNano()))
+				answers = append(answers, err == nil)
+			}
+			closeCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+			defer cancel()
+			_ = e.svc.Close(closeCtx)
+			return answers
+		}
+		known, unknown := probe(true), probe(false)
+		if fmt.Sprint(known) != fmt.Sprint(unknown) {
+			t.Fatalf("admissions after a known candidate %v differ from after an unknown one %v: an account-existence oracle", known, unknown)
+		}
 	})
 
 	t.Run("a task that never returns is cancelled at its deadline", func(t *testing.T) {
@@ -673,4 +711,62 @@ func runPasswordResetService(t *testing.T, db *database.DB) {
 			t.Fatalf("%d concurrent resets succeeded, want 1", won)
 		}
 	})
+}
+
+// TestPasswordForgotOpenAPI: the forgot operation's contract declares what
+// the runtime answers: 202, the 503 with its integer Retry-After header, and
+// the catch-all error response, in both auth modes.
+func TestPasswordForgotOpenAPI(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	modes := []struct {
+		name string
+		app  func(*testing.T) *framework.App
+	}{
+		{"bearer", newAuthApp},
+		{"cookie", newCookieAuthApp},
+	}
+	for _, mode := range modes {
+		t.Run(mode.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			mode.app(t).Router().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/openapi.json", nil))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("GET /openapi.json = %d", rec.Code)
+			}
+			var spec struct {
+				Paths map[string]map[string]struct {
+					Responses map[string]struct {
+						Content map[string]struct {
+							Schema struct {
+								Ref string `json:"$ref"`
+							} `json:"schema"`
+						} `json:"content"`
+						Headers map[string]struct {
+							Required bool `json:"required"`
+							Schema   struct {
+								Type    string  `json:"type"`
+								Minimum float64 `json:"minimum"`
+							} `json:"schema"`
+						} `json:"headers"`
+					} `json:"responses"`
+				} `json:"paths"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &spec); err != nil {
+				t.Fatal(err)
+			}
+			responses := spec.Paths["/api/v1/auth/password/forgot"]["post"].Responses
+			for _, code := range []string{"202", "503", "default"} {
+				if _, ok := responses[code]; !ok {
+					t.Fatalf("forgot declares no %s response: %v", code, responses)
+				}
+			}
+			unavailable := responses["503"]
+			retryAfter, ok := unavailable.Headers["Retry-After"]
+			if !ok || !retryAfter.Required || retryAfter.Schema.Type != "integer" || retryAfter.Schema.Minimum != 1 {
+				t.Fatalf("503 Retry-After = %+v (declared: %v), want a required integer, minimum 1", retryAfter, ok)
+			}
+			if ref := unavailable.Content["application/json"].Schema.Ref; !strings.HasSuffix(ref, "/ErrorEnvelope") {
+				t.Fatalf("503 body = %q, want the D10 ErrorEnvelope", ref)
+			}
+		})
+	}
 }

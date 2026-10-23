@@ -8,30 +8,48 @@ import (
 )
 
 // Background work the auth routes accept and finish after answering (the
-// password reset message, AUTH-2). It is owned by the Service: a bounded
-// queue (admission is decided before the work starts, and a request that
-// is not admitted is answered as such), a fixed set of workers, a deadline
-// on every task, and Close, which drains and then cancels. framework.App
-// closes its Service when it stops, before its stop hooks run.
+// password reset message, AUTH-2). It is owned by the Service: admission
+// decided before the work starts (a request that is not admitted is
+// answered as such), a fixed set of workers, a deadline on every task, and
+// Close, which drains and then cancels. framework.App closes its Service
+// when it stops, before its stop hooks run.
+//
+// Admission is a token bucket, and only that: it depends on when requests
+// arrived, never on how busy the workers are. A known account's task holds
+// a worker longer than an unknown address's, so admission by queue room
+// would let a client tell them apart by saturating the queue; the bucket
+// spends one token per request either way. Its rate is what the workers
+// finish in the worst case (backgroundWorkers tasks every
+// backgroundWorstCase), so the admitted work never outgrows them, and the
+// queue behind it is unbounded: an admitted task is never dropped.
 
 const (
 	// backgroundWorkers is how many background tasks run at once.
-	backgroundWorkers = 4
-	// backgroundQueue is how many admitted tasks may wait for a worker.
-	backgroundQueue = 64
+	backgroundWorkers = 16
+	// backgroundBurst is how many requests the bucket admits at once.
+	backgroundBurst = 32
 	// backgroundTaskTimeout bounds one task: a Mailer that never returns
 	// is cancelled, and its worker freed.
 	backgroundTaskTimeout = 30 * time.Second
+	// backgroundWorstCase is the longest a task can hold a worker: its
+	// deadline, then its tail steps (activation, withdrawal, the audit
+	// event), each under its own tailTimeout.
+	backgroundWorstCase = backgroundTaskTimeout + 3*tailTimeout
 	// backgroundCloseGrace is how long Close waits for the tasks it
 	// cancelled to return.
 	backgroundCloseGrace = 5 * time.Second
-	// backgroundRetryAfter is the Retry-After of a request not admitted.
-	backgroundRetryAfter = 5 * time.Second
+	// backgroundClosedRetryAfter is the Retry-After of a request a closed
+	// Service refuses.
+	backgroundClosedRetryAfter = 5 * time.Second
 )
 
-// errBackgroundBusy is a task the Service did not admit: its queue is full,
-// or it is closed.
-var errBackgroundBusy = errors.New("auth: too much background work at once; try again shortly")
+// backgroundBusyError is a task the Service did not admit: the bucket is
+// empty (retryAfter until its next token), or the Service is closed.
+type backgroundBusyError struct{ retryAfter time.Duration }
+
+func (backgroundBusyError) Error() string {
+	return "auth: too much background work at once; try again shortly"
+}
 
 type backgroundTask struct {
 	// values is the request's context, cancellation removed: its values (the
@@ -42,7 +60,8 @@ type backgroundTask struct {
 
 type backgroundRunner struct {
 	mu      sync.Mutex
-	queue   chan backgroundTask
+	ready   *sync.Cond
+	pending []backgroundTask
 	started bool
 	closed  bool
 	workers sync.WaitGroup
@@ -51,45 +70,95 @@ type backgroundRunner struct {
 	stop    context.Context
 	cancel  context.CancelFunc
 	timeout time.Duration
+
+	// The admission bucket: tokens, refilled at rate per second up to
+	// burst, as of last (read from now).
+	burst, rate, tokens float64
+	last                time.Time
+	now                 func() time.Time
+	workerCount         int
 }
 
 func newBackgroundRunner() *backgroundRunner {
 	stop, cancel := context.WithCancel(context.Background()) // #nosec G118 -- cancel is kept on the runner and called by close.
-	return &backgroundRunner{
-		queue:   make(chan backgroundTask, backgroundQueue),
-		stop:    stop,
-		cancel:  cancel,
-		timeout: backgroundTaskTimeout,
+	r := &backgroundRunner{
+		stop:        stop,
+		cancel:      cancel,
+		timeout:     backgroundTaskTimeout,
+		burst:       backgroundBurst,
+		rate:        float64(backgroundWorkers) / backgroundWorstCase.Seconds(),
+		tokens:      backgroundBurst,
+		now:         time.Now,
+		workerCount: backgroundWorkers,
 	}
+	r.ready = sync.NewCond(&r.mu)
+	r.last = r.now()
+	return r
+}
+
+// admit takes a token, or reports how long until the next one. r.mu held.
+func (r *backgroundRunner) admit() (time.Duration, bool) {
+	now := r.now()
+	if elapsed := now.Sub(r.last).Seconds(); elapsed > 0 {
+		r.tokens = min(r.burst, r.tokens+elapsed*r.rate)
+	}
+	r.last = now
+	if r.tokens >= 1 {
+		r.tokens--
+		return 0, true
+	}
+	return time.Duration((1 - r.tokens) / r.rate * float64(time.Second)), false
 }
 
 // submit admits run, to be called with a context carrying ctx's values, a
-// deadline, and the runner's cancellation. It returns errBackgroundBusy,
-// and does not run it, when the queue is full or the runner closed.
+// deadline, and the runner's cancellation. It returns a
+// backgroundBusyError, and does not run it, when the bucket is empty or the
+// runner closed: nothing else, so the answer never depends on the work
+// already admitted.
 func (r *backgroundRunner) submit(ctx context.Context, run func(context.Context)) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
-		return errBackgroundBusy
+		return backgroundBusyError{retryAfter: backgroundClosedRetryAfter}
+	}
+	if wait, ok := r.admit(); !ok {
+		return backgroundBusyError{retryAfter: wait}
 	}
 	if !r.started {
 		r.started = true
-		for range backgroundWorkers {
+		for range r.workerCount {
 			r.workers.Add(1)
 			go r.work()
 		}
 	}
-	select {
-	case r.queue <- backgroundTask{values: context.WithoutCancel(ctx), run: run}:
-		return nil
-	default:
-		return errBackgroundBusy
+	r.pending = append(r.pending, backgroundTask{values: context.WithoutCancel(ctx), run: run})
+	r.ready.Signal()
+	return nil
+}
+
+// next waits for a task; false once the runner is closed and drained.
+func (r *backgroundRunner) next() (backgroundTask, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for len(r.pending) == 0 && !r.closed {
+		r.ready.Wait()
 	}
+	if len(r.pending) == 0 {
+		return backgroundTask{}, false
+	}
+	task := r.pending[0]
+	r.pending[0] = backgroundTask{}
+	r.pending = r.pending[1:]
+	return task, true
 }
 
 func (r *backgroundRunner) work() {
 	defer r.workers.Done()
-	for task := range r.queue {
+	for {
+		task, ok := r.next()
+		if !ok {
+			return
+		}
 		ctx, cancel := context.WithTimeout(task.values, r.timeout)
 		unhook := context.AfterFunc(r.stop, cancel)
 		task.run(ctx)
@@ -109,7 +178,7 @@ func (r *backgroundRunner) close(ctx context.Context) error {
 		return nil
 	}
 	r.closed = true
-	close(r.queue)
+	r.ready.Broadcast()
 	r.mu.Unlock()
 
 	done := make(chan struct{})

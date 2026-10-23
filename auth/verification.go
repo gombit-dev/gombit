@@ -159,27 +159,7 @@ func registerVerificationRoutes(api huma.API, svc *Service, prefix, security str
 		Middlewares: huma.Middlewares{gate},
 		Errors:      []int{http.StatusTooManyRequests},
 	}, svc.resendVerification)
-
-	// Declaring a specific Huma error suppresses its automatic default error
-	// response, so retain the catch-all response and describe the header the
-	// rate-limited runtime response already sends.
-	responses := api.OpenAPI().Paths[resendPath].Post.Responses
-	rateLimited := responses["429"]
-	minimum := 1.0
-	rateLimited.Headers = map[string]*huma.Param{
-		"Retry-After": {
-			Description: "Seconds until another verification message may be requested",
-			Required:    true,
-			Schema: &huma.Schema{
-				Type:    "integer",
-				Minimum: &minimum,
-			},
-		},
-	}
-	responses["default"] = &huma.Response{
-		Description: "Error",
-		Content:     rateLimited.Content,
-	}
+	declareRetryAfter(api, resendPath, http.StatusTooManyRequests, "Seconds until another verification message may be requested")
 }
 
 func (s *Service) verifyEmail(ctx context.Context, input *verifyEmailInput) (*verifyEmailOutput, error) {

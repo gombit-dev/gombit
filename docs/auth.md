@@ -180,19 +180,25 @@ curl -sX POST localhost:8080/api/v1/auth/password/reset \
   outcome (sent, the one-a-minute wait, a mailer failure) is logged, never
   answered.
 - **Background work.** The message is sent by the auth Service's own
-  workers: 4 at once, 64 admitted requests waiting, each with a 30s
-  deadline (a Mailer that never returns is cancelled). The bookkeeping
-  after the message (activating or withdrawing its token, the audit event)
-  has its own 5s deadline and is cancelled by `Close` too: nothing the
-  Service started outlives it. A request the
-  Service cannot admit (the queue full, or the app stopping) is a **503**
-  with `Retry-After`, decided before the lookup, so it too is the same for
-  any address; a 202 always means the work was taken. `framework.App`
-  closes the Service when it stops, before its stop hooks run: admitted
-  messages are sent until the shutdown timeout, then cancelled. An app
-  that mounts the routes itself keeps the Service `auth.Mount` returns and
-  calls `svc.Close(ctx)` on shutdown, before closing its database.
-  Per-client rate limits are AUTH-8's.
+  workers (16), each task with a 30s deadline (a Mailer that never returns
+  is cancelled); the bookkeeping after the message (activating or
+  withdrawing its token, the audit event) has its own 5s deadline and is
+  cancelled by `Close` too: nothing the Service started outlives it.
+- **Admission.** Whether a request is taken depends on when requests
+  arrived, nothing else: a token bucket (a burst of 32, refilled at the rate
+  the workers finish tasks in the worst case, 16 per 45s) spends one token
+  per request, an account or not. A request the bucket refuses, or one
+  arriving while the app stops, is a **503** with `Retry-After` (declared
+  in the OpenAPI document), decided before the lookup. How long earlier
+  requests' work runs (an account's send takes longer than an address that
+  is none) never changes the answer, so saturating the endpoint tells
+  nothing about which addresses are accounts. A 202 always means the work
+  was taken; the queue behind the bucket is unbounded, and never drops it.
+  `framework.App` closes the Service when it stops, before its stop hooks
+  run: admitted messages are sent until the shutdown timeout, then
+  cancelled. An app that mounts the routes itself keeps the Service
+  `auth.Mount` returns and calls `svc.Close(ctx)` on shutdown, before
+  closing its database. Per-client rate limits are AUTH-8's.
 - **The token** is a [one-time token](#email-verification) like the
   verification one, for its own purpose (a verification token never resets
   a password, nor the reverse): random, stored hashed, pending until its
