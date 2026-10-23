@@ -64,6 +64,9 @@ version.
   and stored as sent: every consumer (the response header, the logs, error
   envelopes, the audit trail) carries the same, whole ID
   ([#337](https://github.com/gombit-dev/gombit/issues/337)).
+- The OpenAPI contract for `POST /auth/verify-email/resend` now declares its
+  429 response and integer `Retry-After` header, matching the response already
+  sent at runtime ([#611](https://github.com/gombit-dev/gombit/issues/611)).
 - Saving the admin edit form no longer rewrites fields the operator did not
   touch: it sent every field back, so each save truncated a datetime to the
   minute (`12:30:45.123456` became `12:30:00`) and an integer past 2^53 to
@@ -94,6 +97,13 @@ version.
   instance, or whose token expired with a successor), since that rotation's
   response sets the session's new cookies
   ([#458](https://github.com/gombit-dev/gombit/issues/458)).
+- In cookie mode, `POST /auth/refresh` loads the session user inside the
+  rotation's own transaction instead of in a separate read afterwards. A
+  failure loading the user now rolls the rotation back with it, rather than
+  surfacing as a 500 after the rotation already committed: the browser's
+  refresh cookie stays valid for the retry, which no longer reads as reuse
+  and revokes every session of the user
+  ([#606](https://github.com/gombit-dev/gombit/issues/606)).
 
 ### Changed
 

@@ -71,6 +71,52 @@ func TestEmailVerificationBearer(t *testing.T) {
 	runEmailVerificationBearer(t, openSQLite(t))
 }
 
+func TestEmailVerificationResendOpenAPI(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	modes := []struct {
+		name string
+		app  func(*testing.T) *framework.App
+	}{
+		{"bearer", newAuthApp},
+		{"cookie", newCookieAuthApp},
+	}
+	for _, mode := range modes {
+		t.Run(mode.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			mode.app(t).Router().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/openapi.json", nil))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("GET /openapi.json status = %d; body: %s", rec.Code, rec.Body.String())
+			}
+			var spec struct {
+				Paths map[string]map[string]struct {
+					Responses map[string]struct {
+						Headers map[string]struct {
+							Schema struct {
+								Type    string  `json:"type"`
+								Minimum float64 `json:"minimum"`
+							} `json:"schema"`
+						} `json:"headers"`
+					} `json:"responses"`
+				} `json:"paths"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &spec); err != nil {
+				t.Fatalf("decode OpenAPI: %v", err)
+			}
+			responses := spec.Paths["/api/v1/auth/verify-email/resend"]["post"].Responses
+			if _, ok := responses["default"]; !ok {
+				t.Fatal("resend operation has no default error response")
+			}
+			retryAfter, ok := responses["429"].Headers["Retry-After"]
+			if !ok {
+				t.Fatal("resend 429 does not declare Retry-After")
+			}
+			if retryAfter.Schema.Type != "integer" || retryAfter.Schema.Minimum != 1 {
+				t.Fatalf("Retry-After schema = %+v, want integer with minimum 1", retryAfter.Schema)
+			}
+		})
+	}
+}
+
 // runEmailVerificationBearer: registration mails a verification link (the
 // configured URL with the token); /me says unverified until the token is
 // posted; the token works once; a resend within a minute is a 429 with

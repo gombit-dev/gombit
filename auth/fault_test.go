@@ -278,6 +278,47 @@ func TestFault_HTTP_CookieRefreshRereadFailure(t *testing.T) {
 	})
 }
 
+// TestFault_HTTP_CookieRefreshUserLookupFailure is #606: a rotation that
+// commits, then fails loading the session user, must not leave the browser
+// holding a refresh cookie that its next refresh presents as reuse — that
+// would revoke every session of the user, including a second, independent
+// one (a phone) that had nothing to do with the failure. rotateRefresh now
+// loads the user inside the rotation's transaction (the same lockUserTx read
+// the lock already takes), so the second, post-commit lookup this fault
+// targets (the one ParseAccess used to make) no longer exists: the fault
+// never fires past the lock, and the refresh just succeeds. Either way, the
+// cookie the browser ends up holding must keep working, not cascade.
+func TestFault_HTTP_CookieRefreshUserLookupFailure(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	faulttest.ForEachDB(t, faultDBs, func(t *testing.T, kind database.Driver, dsn string) {
+		lookup := faulttest.FailOnCall(2, faulttest.ErrInjected)
+		faults := &faulttest.DBFaults{Statement: lookup, Match: selectsUsers}
+		db, app, jar := newFaultedCookieSession(t, kind, dsn, faults, "lookup-cookie@example.com")
+
+		phone := fetchCSRF(t, app)
+		if rec := loginCookieUser(t, app, phone, "lookup-cookie@example.com", testPassword); rec.Code != http.StatusOK {
+			t.Fatalf("phone login status = %d; body: %s", rec.Code, rec.Body.String())
+		}
+		faults.Arm()
+
+		rec := doRequest(app, jar, http.MethodPost, "/api/v1/auth/refresh", "")
+		if rec.Code != http.StatusOK && rec.Code != http.StatusInternalServerError {
+			t.Fatalf("refresh with the lookup fault armed status = %d, want 200 (the user loaded inside the rotation) or 500 (a post-commit lookup failing)", rec.Code)
+		}
+		faults.Disarm()
+		faulttest.Idle(t, db)
+
+		// The browser's jar now holds whichever refresh cookie is valid for
+		// it: the one the rotation already rotated, if loading the user
+		// failed after commit with no Set-Cookie, or the fresh one a clean
+		// success set. Presenting it again must never end every session.
+		doRequest(app, jar, http.MethodPost, "/api/v1/auth/refresh", "")
+		if status := getMeCookie(app, phone); status != http.StatusOK {
+			t.Fatalf("phone GET /me after the retry = %d, want 200: a failed user lookup after the rotation committed must not run the reuse cascade", status)
+		}
+	})
+}
+
 // syncClock is an auth.Clock a test moves while the service reads it from
 // another goroutine.
 type syncClock struct {

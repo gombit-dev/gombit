@@ -535,6 +535,14 @@ export interface operations {
           "application/json": components["schemas"]["DataAuthVerificationResult"];
         };
       };
+      429: {
+        headers: {
+          "Retry-After": number;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorEnvelope"];
+        };
+      };
       default: {
         headers: {
           [name: string]: unknown;

@@ -37,6 +37,7 @@ type Service struct {
 type rotateCall struct {
 	wg   sync.WaitGroup
 	pair TokenPair
+	user User
 	err  error
 }
 
@@ -216,9 +217,19 @@ func (s *Service) issueTokens(tx *gorm.DB, user User, now time.Time) (TokenPair,
 // still-valid token share one rotation so a lost race cannot family-revoke
 // the winner's new session.
 func (s *Service) RotateRefresh(ctx context.Context, raw string) (TokenPair, error) {
+	pair, _, err := s.rotateRefresh(ctx, raw)
+	return pair, err
+}
+
+// rotateRefresh is RotateRefresh, plus the session's user as rotateRefreshOnce
+// loaded it inside the rotation's transaction. refreshCookie uses it instead
+// of a second, post-commit lookup: a failure loading the user would otherwise
+// surface after the rotation already committed, leaving the browser's old
+// refresh cookie rotated with no way to tell it (#606).
+func (s *Service) rotateRefresh(ctx context.Context, raw string) (TokenPair, User, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return TokenPair{}, errInvalidRefreshToken
+		return TokenPair{}, User{}, errInvalidRefreshToken
 	}
 	hash := hashRefreshToken(raw)
 
@@ -232,20 +243,20 @@ func (s *Service) RotateRefresh(ctx context.Context, raw string) (TokenPair, err
 			s.onRotateJoin()
 		}
 		call.wg.Wait()
-		return call.pair, call.err
+		return call.pair, call.user, call.err
 	}
 	call := &rotateCall{}
 	call.wg.Add(1)
 	s.rotateCalls[hash] = call
 	s.rotateMu.Unlock()
 
-	pair, err := s.rotateRefreshOnce(ctx, raw, hash)
-	call.pair, call.err = pair, err
+	pair, user, err := s.rotateRefreshOnce(ctx, raw, hash)
+	call.pair, call.user, call.err = pair, user, err
 	s.rotateMu.Lock()
 	delete(s.rotateCalls, hash)
 	s.rotateMu.Unlock()
 	call.wg.Done()
-	return pair, err
+	return pair, user, err
 }
 
 // rotateRefreshOnce runs one rotation in a transaction. Lock order: the
@@ -256,8 +267,9 @@ func (s *Service) RotateRefresh(ctx context.Context, raw string) (TokenPair, err
 // instant is read once the lock is held: the lock can wait behind another
 // rotation or a revocation, and a token that expired during that wait must
 // not rotate, nor its successor's lifetime start before the wait.
-func (s *Service) rotateRefreshOnce(ctx context.Context, raw, hash string) (TokenPair, error) {
+func (s *Service) rotateRefreshOnce(ctx context.Context, raw, hash string) (TokenPair, User, error) {
 	var pair TokenPair
+	var user User
 	var reuse bool
 	var reuseUser uint
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -268,7 +280,8 @@ func (s *Service) rotateRefreshOnce(ctx context.Context, raw, hash string) (Toke
 			}
 			return err
 		}
-		user, err := lockUserTx(tx, row.UserID)
+		var err error
+		user, err = lockUserTx(tx, row.UserID)
 		if err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return errUserNotFound
@@ -379,13 +392,13 @@ func (s *Service) rotateRefreshOnce(ctx context.Context, raw, hash string) (Toke
 		return nil
 	})
 	if err != nil {
-		return TokenPair{}, err
+		return TokenPair{}, User{}, err
 	}
 	if reuse {
 		s.Audit(ctx, AuditEvent{Action: AuditRefreshReuse, TargetUserID: uintPtr(reuseUser)})
-		return TokenPair{}, errRefreshReuse
+		return TokenPair{}, User{}, errRefreshReuse
 	}
-	return pair, nil
+	return pair, user, nil
 }
 
 // hasSuccessorTx re-reads the refresh token row id in tx, which holds the

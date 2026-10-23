@@ -54,13 +54,9 @@ func (s *Service) refreshCookie(ctx context.Context, input *cookieRefreshInput) 
 	if input.RefreshToken.Value == "" {
 		return nil, s.rejectRefreshCookie(nil, contract.WithContext(ctx, contract.Authentication("missing session cookie")))
 	}
-	pair, err := s.RotateRefresh(ctx, input.RefreshToken.Value)
+	pair, user, err := s.rotateRefresh(ctx, input.RefreshToken.Value)
 	if err != nil {
 		return nil, s.rejectRefreshCookie(err, mapServiceError(ctx, err))
-	}
-	user, err := s.ParseAccess(ctx, pair.AccessToken)
-	if err != nil {
-		return nil, contract.WithContext(ctx, contract.Internal("load session user"))
 	}
 	return &cookieSessionOutput{
 		SetCookie: s.sessionCookies(pair),

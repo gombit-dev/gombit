@@ -55,6 +55,8 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 ### Informational
 
+- The email-verification resend operation's OpenAPI contract declares its 429 response and integer `Retry-After` header. (`verification-resend-rate-limit-contract`, api, [#611](https://github.com/gombit-dev/gombit/issues/611))
+
 - The framework requires Go 1.26.9 (`go 1.26.9` in go.mod), and `gombit new` pins it. (`go-1-26-9`, dependency, [#602](https://github.com/gombit-dev/gombit/issues/602))
 
   An app's `go` line is raised to 1.26.9 by `go get` or `go mod tidy`
@@ -102,6 +104,8 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   operation, with its `Set-Cookie` header and the D10 error envelope.
 
 - A new cookie-mode app's placeholder `schema.ts` includes the refresh's 401 response; an existing app's generated client gets it from `gombit client generate`. (`client-schema-cookie-refresh-401`, client, [#458](https://github.com/gombit-dev/gombit/issues/458))
+
+- In cookie mode, a `POST /auth/refresh` that fails loading the session user rolls the token rotation back with it, instead of answering 500 after the rotation already committed. (`cookie-refresh-loads-user-before-commit`, behavior, [#606](https://github.com/gombit-dev/gombit/issues/606))
 
 ## v0.8.0
 

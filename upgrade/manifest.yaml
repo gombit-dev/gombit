@@ -509,6 +509,12 @@ releases:
 
   - version: unreleased
     changes:
+      - id: verification-resend-rate-limit-contract
+        kind: informational
+        area: api
+        summary: "The email-verification resend operation's OpenAPI contract declares its 429 response and integer `Retry-After` header."
+        refs: [611]
+
       - id: go-1-26-9
         kind: informational
         area: dependency
@@ -647,3 +653,9 @@ releases:
         area: client
         summary: "A new cookie-mode app's placeholder `schema.ts` includes the refresh's 401 response; an existing app's generated client gets it from `gombit client generate`."
         refs: [458]
+
+      - id: cookie-refresh-loads-user-before-commit
+        kind: informational
+        area: behavior
+        summary: "In cookie mode, a `POST /auth/refresh` that fails loading the session user rolls the token rotation back with it, instead of answering 500 after the rotation already committed."
+        refs: [606]
