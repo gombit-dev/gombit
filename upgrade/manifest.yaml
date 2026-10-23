@@ -509,6 +509,14 @@ releases:
 
   - version: unreleased
     changes:
+      - id: bearer-handler-401-challenge
+        kind: informational
+        area: api
+        summary: "Bearer-mode session revocation errors include the `WWW-Authenticate: Bearer realm=\"api\"` challenge when the handler returns 401."
+        details: |
+          Cookie-mode 401 responses still omit a Bearer challenge.
+        refs: [604]
+
       - id: verification-resend-rate-limit-contract
         kind: informational
         area: api

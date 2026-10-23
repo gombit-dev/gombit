@@ -147,14 +147,14 @@ func (s *Service) endSessions(ctx context.Context, scope string) (bool, error) {
 
 func (s *Service) revokeSession(ctx context.Context, input *revokeSessionInput) (*revokeOutput, error) {
 	if _, err := s.endSession(ctx, input.ID); err != nil {
-		return nil, err
+		return nil, withBearerChallenge(err)
 	}
 	return &revokeOutput{Body: contract.Data[authRevokeResult]{Data: authRevokeResult{OK: true}}}, nil
 }
 
 func (s *Service) revokeSessions(ctx context.Context, input *revokeSessionsInput) (*revokeOutput, error) {
 	if _, err := s.endSessions(ctx, input.Scope); err != nil {
-		return nil, err
+		return nil, withBearerChallenge(err)
 	}
 	return &revokeOutput{Body: contract.Data[authRevokeResult]{Data: authRevokeResult{OK: true}}}, nil
 }
