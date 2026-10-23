@@ -18,6 +18,12 @@ import (
 // just expired.
 const savepointCleanupTimeout = 5 * time.Second
 
+// The savepoint statements are written out, not GORM's SavePoint and
+// RollbackTo: the PostgreSQL and SQLite dialectors run those on a cloned
+// session and return nil, so a SAVEPOINT that failed would look made, and a
+// ROLLBACK TO it would then abort the transaction unseen. The SQL is the
+// same on the three databases; savepoint is a constant name.
+
 // errTransactionLost is an insert inside a caller's transaction that failed
 // when rolling back to its savepoint failed too: the caller's transaction
 // is unusable (on PostgreSQL it stays aborted; a dropped connection takes
@@ -49,7 +55,11 @@ func insertUnderSavepoint(ctx context.Context, db *gorm.DB, savepoint string, be
 	if committer, ok := db.Statement.ConnPool.(gorm.TxCommitter); !ok || committer == nil {
 		return insert(db.WithContext(ctx))
 	}
-	stmtCtx := ctx
+	// setupCtx carries ctx's deadline: the savepoint and the timeout setup
+	// are bounded by it, and a setup cancelled in flight costs the
+	// connection (errTransactionLost below), not an unbounded wait. Only the
+	// insert, whose bound the database enforces, runs without cancellation.
+	setupCtx, stmtCtx := ctx, ctx
 	var limit time.Duration
 	if bestEffort {
 		if deadline, ok := ctx.Deadline(); ok {
@@ -57,30 +67,35 @@ func insertUnderSavepoint(ctx context.Context, db *gorm.DB, savepoint string, be
 		}
 		stmtCtx = context.WithoutCancel(ctx)
 	}
-	session := func() *gorm.DB { return db.WithContext(stmtCtx) }
 	cleanup := func() (*gorm.DB, context.CancelFunc) {
 		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), savepointCleanupTimeout)
 		return db.WithContext(cctx), cancel
 	}
-	if err := session().SavePoint(savepoint).Error; err != nil {
-		return err
+	if err := db.WithContext(setupCtx).Exec("SAVEPOINT " + savepoint).Error; err != nil {
+		// No savepoint to go back to: whatever the failure did to the
+		// transaction (PostgreSQL aborts it; a cancelled statement drops its
+		// connection) cannot be undone here.
+		return errors.Join(err, errTransactionLost)
 	}
 	restore := func(*gorm.DB) error { return nil }
-	err := error(nil)
+	var err error
 	if limit > 0 {
-		restore, err = boundStatements(session(), limit)
-	}
-	if err == nil {
-		err = insert(session())
-	}
-	if err == nil {
-		if err = restore(session()); err == nil {
-			return nil
+		var installed func(*gorm.DB) error
+		if installed, err = boundStatements(db.WithContext(setupCtx), limit); err == nil {
+			restore = installed
 		}
+	}
+	if err == nil {
+		err = insert(db.WithContext(stmtCtx))
 	}
 	tx, cancel := cleanup()
 	defer cancel()
-	if rerr := tx.RollbackTo(savepoint).Error; rerr != nil {
+	if err == nil {
+		if err = restore(tx); err == nil {
+			return nil
+		}
+	}
+	if rerr := tx.Exec("ROLLBACK TO SAVEPOINT " + savepoint).Error; rerr != nil {
 		return errors.Join(err, rerr, errTransactionLost)
 	}
 	// A rollback to the savepoint undoes PostgreSQL's SET LOCAL, not
