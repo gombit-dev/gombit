@@ -607,3 +607,9 @@ releases:
         area: client
         summary: "A new cookie-mode app's placeholder `schema.ts` includes the refresh's 401 response; an existing app's generated client gets it from `gombit client generate`."
         refs: [458]
+
+      - id: cookie-refresh-loads-user-before-commit
+        kind: informational
+        area: behavior
+        summary: "In cookie mode, a `POST /auth/refresh` that fails loading the session user rolls the token rotation back with it, instead of answering 500 after the rotation already committed."
+        refs: [606]

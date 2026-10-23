@@ -75,6 +75,13 @@ version.
   instance, or whose token expired with a successor), since that rotation's
   response sets the session's new cookies
   ([#458](https://github.com/gombit-dev/gombit/issues/458)).
+- In cookie mode, `POST /auth/refresh` loads the session user inside the
+  rotation's own transaction instead of in a separate read afterwards. A
+  failure loading the user now rolls the rotation back with it, rather than
+  surfacing as a 500 after the rotation already committed: the browser's
+  refresh cookie stays valid for the retry, which no longer reads as reuse
+  and revokes every session of the user
+  ([#606](https://github.com/gombit-dev/gombit/issues/606)).
 
 ### Changed
 
