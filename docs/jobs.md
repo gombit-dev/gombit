@@ -409,8 +409,11 @@ forgotten or purged while failed, or its retried run is acknowledged.
 
 `inspect` re-indents the payload it prints instead of re-encoding it, so only the
 whitespace between the JSON tokens moves: an id above 2^53 is the id the job
-carries, the keys stay in the order the handler wrote them, and `<`, `>` and `&`
-print as stored, so what an operator reads is what the queue holds.
+carries and the keys stay in the order the handler wrote them, so what an
+operator reads is what the queue holds. Markup is part of what the queue holds:
+`Registry` and `Envelope.Marshal` encode with `json.Marshal`, which stores `<`,
+`>` and `&` as `\u003c`, `\u003e` and `\u0026` before the job is even queued, and
+`inspect` prints them that way.
 
 **Payloads and personal data.** A failed job's payload stays in Redis until
 someone forgets or purges it. Retrying does not remove it: the payload goes

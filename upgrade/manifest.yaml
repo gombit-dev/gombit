@@ -631,11 +631,16 @@ releases:
       - id: jobs-inspect-keeps-payload-bytes
         kind: informational
         area: cli
-        summary: "`gombit jobs inspect` prints a job's payload as the queue holds it: an int64 above 2^53 keeps its digits, and key order, `<`, `>` and `&` stay as the handler wrote them."
+        summary: "`gombit jobs inspect` prints a job's payload as the queue holds it: an int64 above 2^53 keeps its digits and object keys keep the order the handler wrote them."
         details: |
           The human-readable block was re-encoded through `any`, so a snowflake
           id or an int64 primary key showed a neighbouring value the job never
-          carried, keys came back sorted, and `1e3` became `1000`. `inspect
-          --json` was already faithful. Nothing to change: the printed value is
-          now the stored one, and `json.Indent` moves only whitespace.
+          carried, keys came back sorted, and a number the producer wrote
+          non-canonically (`1e3`) was rewritten as `1000`. `inspect --json` was
+          already faithful. Nothing to change: the printed value is now the
+          stored one, and `json.Indent` moves only whitespace. Markup is not
+          part of that change, and cannot be: `Registry` and `Envelope.Marshal`
+          encode with `json.Marshal`, which escapes `<`, `>` and `&` as
+          `\u003c`, `\u003e` and `\u0026` on the way into the queue, so
+          `inspect` prints those escapes as stored before and after.
         refs: [497]

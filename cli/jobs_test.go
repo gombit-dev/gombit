@@ -54,14 +54,25 @@ func stubJobsQueue(t *testing.T, q jobs.Queue) {
 }
 
 // jobsPayloadFixture stubs `gombit jobs` with a memory queue holding one failed
-// job whose payload is exactly raw, so a command reads back the bytes a queue
-// keeps for it.
+// job for the payload raw. The envelope goes through Envelope.Marshal and
+// UnmarshalEnvelope first, because that is what a driver stores (jobs/redis.go
+// writes env.Marshal()): json.Marshal runs the RawMessage payload through
+// compact with HTML escaping on, so the queue keeps the bytes a real Redis queue
+// would keep rather than a state only a hand-poked memory queue can hold.
 func jobsPayloadFixture(t *testing.T, id, raw string) {
 	t.Helper()
 	q := jobs.NewMemoryQueue()
 	ctx := context.Background()
 	at := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
 	env := jobs.Envelope{ID: id, Name: "charge", Version: 1, Payload: json.RawMessage(raw), EnqueuedAt: at}
+	data, err := env.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err = jobs.UnmarshalEnvelope(data)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := q.Push(ctx, "mail", env, time.Time{}); err != nil {
 		t.Fatal(err)
 	}
@@ -114,8 +125,11 @@ func TestJobsFailedAndInspect(t *testing.T) {
 // The payload `gombit jobs inspect` prints is the one the queue holds: an
 // operator reads an id out of it and goes to look for that row. Re-encoding it
 // through any turns every number into a float64, so an id above 2^53 comes back
-// rounded, sorts the keys away from the order the handler wrote, escapes '<',
-// '>' and '&', and rewrites 1e3 as 1000.
+// rounded and 1e3 comes back as 1000, and the keys come back sorted rather than
+// in the order the handler wrote them. The fixture stored this payload through
+// the envelope encoding a driver uses, so what is at rest here is what is at
+// rest in Redis — including the \u003c, \u003e and \u0026 that json.Marshal
+// wrote on the way in, which inspect prints as stored and did before this fix.
 func TestJobsInspectPrintsTheStoredPayload(t *testing.T) {
 	const raw = `{"user_id":1234567890123456789,"z":1,"a":2,"note":"a<b>&c","ratio":1e3,"nested":{"deep":true}}`
 	jobsPayloadFixture(t, "job-payload", raw)
@@ -129,7 +143,7 @@ func TestJobsInspectPrintsTheStoredPayload(t *testing.T) {
     "user_id": 1234567890123456789,
     "z": 1,
     "a": 2,
-    "note": "a<b>&c",
+    "note": "a\u003cb\u003e\u0026c",
     "ratio": 1e3,
     "nested": {
       "deep": true
