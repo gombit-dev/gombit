@@ -3,7 +3,7 @@ module github.com/gombit-dev/gombit
 go 1.26.9
 
 require (
-	ariga.io/atlas v0.36.2-0.20250806044935-5bb51a0a956e
+	ariga.io/atlas v1.3.0
 	ariga.io/atlas-provider-gorm v0.6.1
 	github.com/aws/aws-sdk-go-v2 v1.47.3
 	github.com/aws/aws-sdk-go-v2/config v1.33.6
