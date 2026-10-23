@@ -94,6 +94,15 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   unchanged, as before. Every consumer (response header, logs, error
   envelopes, the audit trail) carries the one accepted ID.
 
+- An already-rotated refresh token that has expired is a 401 and no longer revokes the user's sessions. (`expired-rotated-refresh-token-no-cascade`, security, [#458](https://github.com/gombit-dev/gombit/issues/458))
+
+- In cookie mode, a refresh rejected with a 401 clears the `gombit_access` and `gombit_refresh` cookies. (`cookie-refresh-401-clears-session-cookies`, behavior, [#458](https://github.com/gombit-dev/gombit/issues/458))
+
+  The OpenAPI document declares that 401 on the cookie-mode `refresh`
+  operation, with its `Set-Cookie` header and the D10 error envelope.
+
+- A new cookie-mode app's placeholder `schema.ts` includes the refresh's 401 response; an existing app's generated client gets it from `gombit client generate`. (`client-schema-cookie-refresh-401`, client, [#458](https://github.com/gombit-dev/gombit/issues/458))
+
 ## v0.8.0
 
 ### Manual: action required

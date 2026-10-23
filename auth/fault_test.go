@@ -157,6 +157,127 @@ func TestFault_Database_RotationUserLockFailure(t *testing.T) {
 	})
 }
 
+// TestFault_HTTP_CookieRefreshLockFailure is that failure through the cookie
+// route: POST /auth/refresh answers 500 with the internal error envelope and
+// sets no cookie. Only a 401 clears the session cookies; here the refresh
+// token is still valid, so the browser keeps it and its next refresh
+// rotates.
+func TestFault_HTTP_CookieRefreshLockFailure(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	faulttest.ForEachDB(t, faultDBs, func(t *testing.T, kind database.Driver, dsn string) {
+		lock := faulttest.FailOnce(faulttest.ErrInjected)
+		faults := &faulttest.DBFaults{Statement: lock, Match: selectsUsers}
+		db, app, jar := newFaultedCookieSession(t, kind, dsn, faults, "locked-cookie@example.com")
+		refresh := jar.value(auth.RefreshCookieName)
+		faults.Arm()
+
+		rec := doRequest(app, jar, http.MethodPost, "/api/v1/auth/refresh", "")
+		assertError(t, rec, http.StatusInternalServerError, "internal")
+		if n := lock.Calls(); n != 1 {
+			t.Fatalf("%d SELECTs on users, want 1: the rotation's user lock", n)
+		}
+		if got := rec.Header().Values("Set-Cookie"); len(got) != 0 {
+			t.Fatalf("the failed refresh set cookies %q, want none: the refresh token is still valid", got)
+		}
+		faults.Disarm()
+		faulttest.Idle(t, db)
+		if next := doRequest(app, jar, http.MethodPost, "/api/v1/auth/refresh", ""); next.Code != http.StatusOK {
+			t.Fatalf("refresh once the fault cleared status = %d; body: %s", next.Code, next.Body.String())
+		}
+		if jar.value(auth.RefreshCookieName) == refresh {
+			t.Fatal("the refresh once the fault cleared did not rotate the refresh cookie")
+		}
+		if status := getMeCookie(app, jar); status != http.StatusOK {
+			t.Fatalf("GET /me after the refresh = %d, want 200", status)
+		}
+	})
+}
+
+// newFaultedCookieSession is a cookie app over kind's database at dsn,
+// wrapped with faults (left disarmed), and a browser signed in to it as a new
+// user with email. The auth tables are dropped before and after.
+func newFaultedCookieSession(t *testing.T, kind database.Driver, dsn string, faults *faulttest.DBFaults, email string) (*database.DB, *framework.App, *cookieJar) {
+	t.Helper()
+	faults.Disarm()
+	db, err := faulttest.OpenDB(kind, dsn, faults)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dropAuthTables := func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		m := db.WithContext(ctx).Migrator()
+		_ = m.DropTable("auth_user_permissions", "auth_user_groups", "auth_group_permissions")
+		_ = m.DropTable(auth.Models()...)
+	}
+	t.Cleanup(func() {
+		faults.Disarm()
+		dropAuthTables()
+		_ = db.Close()
+	})
+	dropAuthTables()
+	app := newCookieAuthAppWithDB(t, db)
+	jar := fetchCSRF(t, app)
+	registerCookieUser(t, app, jar, email, testPassword)
+	if rec := loginCookieUser(t, app, jar, email, testPassword); rec.Code != http.StatusOK {
+		t.Fatalf("login status = %d; body: %s", rec.Code, rec.Body.String())
+	}
+	return db, app, jar
+}
+
+// rereadsRefreshToken matches the locked re-read of a token's row, after the
+// token was found expired and unrevoked or after a lost compare-and-swap: a
+// SELECT on refresh_tokens by primary key in GORM's First(&row, id) form
+// (WHERE refresh_tokens.id = ?). It carries FOR SHARE, which SQLite's
+// dialect drops, so the match does not look for it. Nothing else a cookie
+// refresh runs has that form: its first read of the token is by hash, and
+// ParseAccess reads the row with WHERE id = ?.
+func rereadsRefreshToken(query string) bool {
+	unquoted := strings.NewReplacer("`", "", `"`, "").Replace(query)
+	return strings.HasPrefix(strings.TrimSpace(strings.ToUpper(query)), "SELECT") &&
+		strings.Contains(unquoted, "WHERE refresh_tokens.id = ")
+}
+
+// TestFault_HTTP_CookieRefreshRereadFailure: a cookie refresh finds its token
+// expired and unrevoked, and the re-read of the row under the user's lock,
+// which tells whether a concurrent rotation left the token a successor,
+// fails for an infrastructure reason. Expected outcome: a server failure,
+// 500 with no cookie, as when the lock itself fails: whether the browser
+// holds a live successor's cookies is not known. Once the fault clears, the
+// next refresh finds the token expired with no successor and clears the
+// session cookies.
+func TestFault_HTTP_CookieRefreshRereadFailure(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	faulttest.ForEachDB(t, faultDBs, func(t *testing.T, kind database.Driver, dsn string) {
+		reread := faulttest.FailOnce(faulttest.ErrInjected)
+		faults := &faulttest.DBFaults{Statement: reread, Match: rereadsRefreshToken}
+		db, app, jar := newFaultedCookieSession(t, kind, dsn, faults, "reread-cookie@example.com")
+		row := accessClaimsOf(t, jar.value(auth.AccessCookieName)).Rid
+		if err := db.Model(&auth.RefreshToken{}).Where("id = ?", row).
+			Update("expires_at", time.Now().Add(-time.Minute)).Error; err != nil {
+			t.Fatal(err)
+		}
+		faults.Arm()
+
+		rec := doRequest(app, jar, http.MethodPost, "/api/v1/auth/refresh", "")
+		assertError(t, rec, http.StatusInternalServerError, "internal")
+		if n := reread.Calls(); n != 1 {
+			t.Fatalf("%d SELECTs of a refresh token by id, want 1: the re-read", n)
+		}
+		if got := rec.Header().Values("Set-Cookie"); len(got) != 0 {
+			t.Fatalf("the failed refresh set cookies %q, want none: a server failure leaves them", got)
+		}
+		faults.Disarm()
+		faulttest.Idle(t, db)
+		next := doRequest(app, jar, http.MethodPost, "/api/v1/auth/refresh", "")
+		assertError(t, next, http.StatusUnauthorized, "authentication")
+		assertClearsSessionCookies(t, next)
+		if status := getMeCookie(app, jar); status != http.StatusUnauthorized {
+			t.Fatalf("GET /me after the refresh cleared the cookies = %d, want 401", status)
+		}
+	})
+}
+
 // syncClock is an auth.Clock a test moves while the service reads it from
 // another goroutine.
 type syncClock struct {
