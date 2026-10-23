@@ -412,6 +412,15 @@ export interface operations {
           "application/json": components["schemas"]["DataPublicUser"];
         };
       };
+      401: {
+        headers: {
+          "Set-Cookie"?: unknown;
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorEnvelope"];
+        };
+      };
       default: {
         headers: {
           [name: string]: unknown;
@@ -524,6 +533,14 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["DataAuthVerificationResult"];
+        };
+      };
+      429: {
+        headers: {
+          "Retry-After": number;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorEnvelope"];
         };
       };
       default: {

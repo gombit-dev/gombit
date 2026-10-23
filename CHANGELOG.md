@@ -49,6 +49,9 @@ version.
   `WWW-Authenticate: Bearer realm="api"` challenge when the authenticated
   session ends between the request gate and the handler. Cookie-mode 401
   responses remain unchanged ([#604](https://github.com/gombit-dev/gombit/issues/604)).
+- The OpenAPI contract for `POST /auth/verify-email/resend` now declares its
+  429 response and integer `Retry-After` header, matching the response already
+  sent at runtime ([#611](https://github.com/gombit-dev/gombit/issues/611)).
 - Saving the admin edit form no longer rewrites fields the operator did not
   touch: it sent every field back, so each save truncated a datetime to the
   minute (`12:30:45.123456` became `12:30:00`) and an integer past 2^53 to
@@ -66,6 +69,26 @@ version.
   One equal to the stored value rounded the same way (the admin UI sending
   the field back, an integer field or a belongs_to key alike) keeps the
   stored value ([#448](https://github.com/gombit-dev/gombit/issues/448)).
+- An already-rotated refresh token that has expired is now a 401 that leaves
+  the user's other sessions alone. Presenting a rotated token again still
+  revokes all of them while it is unexpired, so a stolen token is detected
+  only within its lifetime
+  ([#458](https://github.com/gombit-dev/gombit/issues/458)).
+- In cookie mode, a `POST /auth/refresh` rejected with a 401 clears the
+  `gombit_access` and `gombit_refresh` cookies, as logout does, instead of
+  leaving the browser to send a dead refresh cookie until its Max-Age. A 5xx
+  leaves them, and so does a refresh of a token that another rotation already
+  replaced (one that lost the race to a rotation of the same token on another
+  instance, or whose token expired with a successor), since that rotation's
+  response sets the session's new cookies
+  ([#458](https://github.com/gombit-dev/gombit/issues/458)).
+- In cookie mode, `POST /auth/refresh` loads the session user inside the
+  rotation's own transaction instead of in a separate read afterwards. A
+  failure loading the user now rolls the rotation back with it, rather than
+  surfacing as a 500 after the rotation already committed: the browser's
+  refresh cookie stays valid for the retry, which no longer reads as reuse
+  and revokes every session of the user
+  ([#606](https://github.com/gombit-dev/gombit/issues/606)).
 
 ### Changed
 

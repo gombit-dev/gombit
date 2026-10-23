@@ -44,10 +44,14 @@ All paths use `config.API.Prefix` (default `/api/v1`). D10 envelopes.
 Passwords are hashed with bcrypt. Access JWTs are HS256, bound to the refresh
 row so logout, session revocation, and reuse of a rotated refresh token 401
 `/me` immediately, not when the access JWT expires. Presenting an
-**already-rotated** refresh token again is treated as theft and revokes all of
-that user's sessions. A refresh token revoked by logout or session revocation
-is just invalid (401): a revoked device retrying its refresh must not end the
-session that revoked it.
+**already-rotated** refresh token again before it expires is treated as theft
+and revokes all of that user's sessions. Once it has expired it is just invalid
+(401), so a stale copy cannot end the user's live sessions. The trade-off: a
+stolen refresh token is detected only while the rotated token is unexpired; a
+thief who rotated it first keeps the session if the legitimate client comes
+back after that, until the user revokes it from the sessions list. A refresh
+token revoked by logout or session revocation is just invalid (401): a revoked
+device retrying its refresh must not end the session that revoked it.
 Concurrent refresh of the **current** still-valid token (two tabs, parallel
 `POST /auth/refresh`) shares one rotation and does not family-revoke the
 winner.
@@ -205,7 +209,8 @@ What is serialized: token rotation (`POST /auth/refresh`), revoking one
 session, revoking the others, and revoking all of a user's sessions each lock
 the user's row first, so they run one at a time per user. The refresh-token
 reuse cascade, which ends all of a user's sessions when an already-rotated
-token is presented again, runs inside the rotation and takes the same lock.
+token is presented again before it expires, runs inside the rotation and takes
+the same lock.
 What that guarantees depends on the operation, when a session refreshes at
 the same moment:
 
