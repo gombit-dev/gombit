@@ -509,6 +509,12 @@ releases:
 
   - version: unreleased
     changes:
+      - id: verification-resend-rate-limit-contract
+        kind: informational
+        area: api
+        summary: "The email-verification resend operation's OpenAPI contract declares its 429 response and integer `Retry-After` header."
+        refs: [611]
+
       - id: go-1-26-9
         kind: informational
         area: dependency
@@ -695,3 +701,30 @@ releases:
         area: client
         summary: "A new app's placeholder `schema.ts` includes the password reset operations; an existing app's generated client gets them from `gombit client generate`."
         refs: [332]
+
+      - id: expired-rotated-refresh-token-no-cascade
+        kind: informational
+        area: security
+        summary: "An already-rotated refresh token that has expired is a 401 and no longer revokes the user's sessions."
+        refs: [458]
+
+      - id: cookie-refresh-401-clears-session-cookies
+        kind: informational
+        area: behavior
+        summary: "In cookie mode, a refresh rejected with a 401 clears the `gombit_access` and `gombit_refresh` cookies."
+        details: |
+          The OpenAPI document declares that 401 on the cookie-mode `refresh`
+          operation, with its `Set-Cookie` header and the D10 error envelope.
+        refs: [458]
+
+      - id: client-schema-cookie-refresh-401
+        kind: informational
+        area: client
+        summary: "A new cookie-mode app's placeholder `schema.ts` includes the refresh's 401 response; an existing app's generated client gets it from `gombit client generate`."
+        refs: [458]
+
+      - id: cookie-refresh-loads-user-before-commit
+        kind: informational
+        area: behavior
+        summary: "In cookie mode, a `POST /auth/refresh` that fails loading the session user rolls the token rotation back with it, instead of answering 500 after the rotation already committed."
+        refs: [606]

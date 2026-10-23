@@ -27,14 +27,18 @@ func TestAdminAudit(t *testing.T) {
 	t.Run("long string key", func(t *testing.T) { runAdminAuditLongKey(t, db) })
 }
 
+// longSlug is a valid admin slug well past 64 bytes.
+var longSlug = "audit-keyed-" + strings.Repeat("x", 100)
+
 // auditKeyed is a model with a long string primary key.
 type auditKeyed struct {
 	Key  string `gorm:"primaryKey;size:300" json:"key"`
 	Name string `json:"name"`
 }
 
-// runAdminAuditLongKey: a string primary key is audited whole, however long:
-// two keys that share their first 128 bytes are two targets.
+// runAdminAuditLongKey: a string primary key and a model slug are audited
+// whole, however long: two keys that share their first 128 bytes are two
+// targets, and a slug past 64 bytes (admin sets no bound) is recorded.
 func runAdminAuditLongKey(t *testing.T, db *database.DB) {
 	t.Helper()
 	if err := db.AutoMigrate(&auditKeyed{}); err != nil {
@@ -43,7 +47,7 @@ func runAdminAuditLongKey(t *testing.T, db *database.DB) {
 	t.Cleanup(func() { _ = db.Migrator().DropTable(&auditKeyed{}) })
 	app := newCookieAppWithDB(t, db)
 	if err := admin.Register(app, auditKeyed{}, admin.Options{
-		Slug: "audit-keyed",
+		Slug: longSlug,
 		PK:   "key",
 		Fields: []admin.Field{
 			{Name: "key", Type: admin.TypeString, Required: true},
@@ -56,18 +60,18 @@ func runAdminAuditLongKey(t *testing.T, db *database.DB) {
 	prefix := strings.Repeat("k", 200)
 	keys := []string{prefix + "-first", prefix + "-second"}
 	for _, key := range keys {
-		if rec := doRequest(app, jar, http.MethodPost, "/api/v1/admin/resources/audit-keyed", `{"key":"`+key+`","name":"n"}`); rec.Code != http.StatusOK {
+		if rec := doRequest(app, jar, http.MethodPost, "/api/v1/admin/resources/"+longSlug, `{"key":"`+key+`","name":"n"}`); rec.Code != http.StatusOK {
 			t.Fatalf("create %d-byte key = %d %s", len(key), rec.Code, rec.Body.String())
 		}
 	}
-	if rec := doRequest(app, jar, http.MethodPatch, "/api/v1/admin/resources/audit-keyed/"+keys[1], `{"name":"m"}`); rec.Code != http.StatusOK {
+	if rec := doRequest(app, jar, http.MethodPatch, "/api/v1/admin/resources/"+longSlug+"/"+keys[1], `{"name":"m"}`); rec.Code != http.StatusOK {
 		t.Fatalf("patch = %d %s", rec.Code, rec.Body.String())
 	}
-	if rec := doRequest(app, jar, http.MethodDelete, "/api/v1/admin/resources/audit-keyed/"+keys[0], ""); rec.Code != http.StatusOK {
+	if rec := doRequest(app, jar, http.MethodDelete, "/api/v1/admin/resources/"+longSlug+"/"+keys[0], ""); rec.Code != http.StatusOK {
 		t.Fatalf("delete = %d %s", rec.Code, rec.Body.String())
 	}
 	var events []auth.AuditEvent
-	if err := db.Where("target_type = ?", "audit-keyed").Order("id").Find(&events).Error; err != nil {
+	if err := db.Where("target_type = ?", longSlug).Order("id").Find(&events).Error; err != nil {
 		t.Fatal(err)
 	}
 	want := []struct {

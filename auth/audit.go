@@ -84,9 +84,9 @@ type AuditEvent struct {
 	// one.
 	TargetUserID *uint `gorm:"index"`
 	// TargetType and TargetID name any other target: an admin model's slug
-	// and a record's primary key, stored whole (a string key has no length
-	// bound).
-	TargetType string `gorm:"size:64"`
+	// and a record's primary key, stored whole (neither a slug nor a string
+	// key has a length bound).
+	TargetType string `gorm:"type:text"`
 	TargetID   string `gorm:"type:text"`
 	// RequestID, IP and UserAgent correlate it with the request, where there
 	// was one: the X-Request-Id the logs carry (at most
@@ -142,35 +142,12 @@ func (a dbAuditor) Record(ctx context.Context, event AuditEvent) error {
 	// event comes through Service.Audit or RecordAuditEvent. Each statement
 	// gets its own session: GORM keeps a statement's error on the session
 	// that ran it.
-	return insertSafely(ctx, a.db, auditSavepoint, func(tx *gorm.DB) error { return tx.Create(&event).Error })
+	return insertUnderSavepoint(ctx, a.db, auditSavepoint, true, func(tx *gorm.DB) error { return tx.Create(&event).Error })
 }
 
 // auditSavepoint is the savepoint an audit insert inside a caller's
 // transaction rolls back to when it fails.
 const auditSavepoint = "gombit_audit_event"
-
-// insertSafely runs insert on db. Inside a transaction it runs under an
-// explicit savepoint, rolled back to if insert fails, so a failed statement
-// does not abort the caller's transaction on PostgreSQL. Not db.Transaction,
-// which writes straight into the outer transaction when GORM's
-// DisableNestedTransaction is set. Each statement gets its own session:
-// GORM keeps a statement's error on the session that ran it.
-func insertSafely(ctx context.Context, db *gorm.DB, savepoint string, insert func(*gorm.DB) error) error {
-	session := func() *gorm.DB { return db.WithContext(ctx) }
-	if committer, ok := db.Statement.ConnPool.(gorm.TxCommitter); !ok || committer == nil {
-		return insert(session())
-	}
-	if err := session().SavePoint(savepoint).Error; err != nil {
-		return err
-	}
-	if err := insert(session()); err != nil {
-		if rerr := session().RollbackTo(savepoint).Error; rerr != nil {
-			return errors.Join(err, rerr)
-		}
-		return err
-	}
-	return nil
-}
 
 // requestInfo is what the audit trail correlates an event with.
 type requestInfo struct {
@@ -250,6 +227,9 @@ func completeAuditEvent(ctx context.Context, event AuditEvent, now time.Time) Au
 	if event.OccurredAt.IsZero() {
 		event.OccurredAt = now
 	}
+	// UTC: ListAuditEvents orders by occurred_at, which SQLite compares as
+	// text; one layout and offset make the text order the time order.
+	event.OccurredAt = event.OccurredAt.UTC()
 	if event.ActorUserID == nil {
 		if user, ok := UserFromContext(ctx); ok && user.ID != 0 {
 			id := user.ID
@@ -283,7 +263,6 @@ var auditIdentifierLimits = []struct {
 	value func(AuditEvent) string
 }{
 	{"action", 64, func(e AuditEvent) string { return string(e.Action) }},
-	{"target_type", 64, func(e AuditEvent) string { return e.TargetType }},
 	{"request_id", contract.MaxRequestIDLength, func(e AuditEvent) string { return e.RequestID }},
 	{"ip", 64, func(e AuditEvent) string { return e.IP }},
 }
@@ -389,7 +368,8 @@ func ListAuditEvents(ctx context.Context, db *gorm.DB, q AuditQuery) ([]AuditEve
 		tx = tx.Where("action = ?", q.Action)
 	}
 	var events []AuditEvent
-	// By id: rows are inserted in order, and SQLite compares times as text.
-	err := tx.Order("id DESC").Limit(limit).Find(&events).Error
+	// By when the operation ran, not when its row was inserted (a delayed
+	// write, an application's own OccurredAt); id breaks ties.
+	err := tx.Order("occurred_at DESC, id DESC").Limit(limit).Find(&events).Error
 	return events, err
 }

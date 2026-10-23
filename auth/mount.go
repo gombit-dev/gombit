@@ -3,9 +3,11 @@ package auth
 import (
 	"errors"
 	"net/http"
+	"reflect"
 	"strings"
 
 	"github.com/gombit-dev/gombit/config"
+	"github.com/gombit-dev/gombit/contract"
 	"github.com/danielgtaylor/huma/v2"
 	"gorm.io/gorm"
 )
@@ -130,6 +132,7 @@ func mountCookieRoutes(api huma.API, svc *Service, prefix string) {
 		Path:        prefix + "/auth/refresh",
 		Summary:     "Rotate the session cookies",
 		Tags:        []string{"Auth"},
+		Responses:   cookieRefreshErrorResponses(api),
 	}), svc.refreshCookie)
 
 	huma.Register(api, withRequestInfo(huma.Operation{
@@ -153,6 +156,34 @@ func mountCookieRoutes(api huma.API, svc *Service, prefix string) {
 	registerSessionRoutes(api, svc, prefix, cookieSecurityName, svc.requireCookieSession(), true)
 	registerVerificationRoutes(api, svc, prefix, cookieSecurityName, svc.requireCookieSession())
 	registerPasswordResetRoutes(api, svc, prefix, true)
+}
+
+// cookieRefreshErrorResponses declares the cookie refresh's error responses.
+// A 401 also clears the session cookies (rejectRefreshCookie); Huma does not
+// document headers attached to an error at runtime, so the 401 is declared
+// with its Set-Cookie header. Huma adds its default error response only to an
+// operation that declares no other response besides the success one, so the
+// default is declared here too, as Huma would. Both carry the D10 envelope.
+func cookieRefreshErrorResponses(api huma.API) map[string]*huma.Response {
+	envelope := api.OpenAPI().Components.Schemas.Schema(reflect.TypeOf(contract.ErrorEnvelope{}), true, "Error")
+	return map[string]*huma.Response{
+		"401": {
+			Description: "No refresh cookie, or a refresh token that is unknown, revoked, expired or reused, or whose user is gone.",
+			Headers: map[string]*huma.Header{
+				"Set-Cookie": {
+					Description: "Clears " + AccessCookieName + " and " + RefreshCookieName + " (empty value, Max-Age=0), " +
+						"as logout does, unless another rotation already gave the refresh token a successor: " +
+						"that rotation's response sets the session's new cookies in the same browser.",
+					Schema: &huma.Schema{Type: huma.TypeString},
+				},
+			},
+			Content: map[string]*huma.MediaType{"application/json": {Schema: envelope}},
+		},
+		"default": {
+			Description: "Error",
+			Content:     map[string]*huma.MediaType{"application/json": {Schema: envelope}},
+		},
+	}
 }
 
 func installBearerScheme(api huma.API) {

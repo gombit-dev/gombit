@@ -113,8 +113,7 @@ func AddUserToGroup(ctx context.Context, db *gorm.DB, user *User, group *Group) 
 		return err
 	}
 	user.Groups = append(user.Groups, *group)
-	recordHelperEvent(ctx, db, AuditEvent{Action: AuditGroupMemberAdded, TargetUserID: uintPtr(user.ID), Details: details("group", group.Name)})
-	return nil
+	return recordHelperEvent(ctx, db, AuditEvent{Action: AuditGroupMemberAdded, TargetUserID: uintPtr(user.ID), Details: details("group", group.Name)})
 }
 
 // GrantPermissionToGroup grants a persisted permission to a persisted group.
@@ -127,8 +126,7 @@ func GrantPermissionToGroup(ctx context.Context, db *gorm.DB, group *Group, perm
 		return err
 	}
 	group.Permissions = append(group.Permissions, *permission)
-	recordHelperEvent(ctx, db, AuditEvent{Action: AuditPermissionGranted, TargetType: "group", TargetID: group.Name, Details: details("group", group.Name, "permission", permission.Key)})
-	return nil
+	return recordHelperEvent(ctx, db, AuditEvent{Action: AuditPermissionGranted, TargetType: "group", TargetID: group.Name, Details: details("group", group.Name, "permission", permission.Key)})
 }
 
 // GrantPermissionToUser grants a persisted permission directly to a user.
@@ -141,8 +139,7 @@ func GrantPermissionToUser(ctx context.Context, db *gorm.DB, user *User, permiss
 		return err
 	}
 	user.Permissions = append(user.Permissions, *permission)
-	recordHelperEvent(ctx, db, AuditEvent{Action: AuditPermissionGranted, TargetUserID: uintPtr(user.ID), Details: details("permission", permission.Key)})
-	return nil
+	return recordHelperEvent(ctx, db, AuditEvent{Action: AuditPermissionGranted, TargetUserID: uintPtr(user.ID), Details: details("permission", permission.Key)})
 }
 
 // insertJoinRow inserts one many-to-many row into table and reports whether
@@ -165,11 +162,21 @@ func insertJoinRow(ctx context.Context, db *gorm.DB, table string, row map[strin
 // not fail the grant, which has already happened (an application that has
 // not migrated auth_audit_events keeps granting); an event it could not
 // write is logged as a warning through db's logger, the application's
-// database logger.
-func recordHelperEvent(ctx context.Context, db *gorm.DB, event AuditEvent) {
-	if err := RecordAuditEvent(ctx, db, event); err != nil && db.Logger != nil {
+// database logger. The one failure it returns is a caller's transaction the
+// failed write left unusable (errTransactionLost): the grant in it will not
+// commit, and the caller must know now.
+func recordHelperEvent(ctx context.Context, db *gorm.DB, event AuditEvent) error {
+	err := RecordAuditEvent(ctx, db, event)
+	if err == nil {
+		return nil
+	}
+	if db.Logger != nil {
 		db.Logger.Warn(ctx, "auth: record an audit event (%s): %v", event.Action, err)
 	}
+	if errors.Is(err, errTransactionLost) {
+		return err
+	}
+	return nil
 }
 
 func validateAssociation(db *gorm.DB, owners ...bool) error {

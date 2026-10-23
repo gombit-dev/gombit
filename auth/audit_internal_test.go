@@ -39,9 +39,12 @@ func TestCompleteAuditEventBounds(t *testing.T) {
 	if err := validateAuditEvent(e); err != nil {
 		t.Fatalf("an event whose identifiers fit = %v", err)
 	}
+	long := completeAuditEvent(ctx, AuditEvent{Action: AuditAdminCreated, TargetType: strings.Repeat("s", 300)}, now)
+	if err := validateAuditEvent(long); err != nil || len(long.TargetType) != 300 {
+		t.Fatalf("a 300-byte target type = %v (kept %d bytes), want it accepted whole", err, len(long.TargetType))
+	}
 	for name, bad := range map[string]AuditEvent{
 		"action":      {Action: AuditAction("app." + strings.Repeat("a", 100)), Details: "{}"},
-		"target_type": {Action: AuditLogout, TargetType: strings.Repeat("t", 65), Details: "{}"},
 		"request_id":  {Action: AuditLogout, RequestID: strings.Repeat("r", 129), Details: "{}"},
 		"ip":          {Action: AuditLogout, IP: strings.Repeat("1", 65), Details: "{}"},
 	} {
