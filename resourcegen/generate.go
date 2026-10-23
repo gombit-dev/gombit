@@ -126,6 +126,14 @@ func Plan(ctx context.Context, opts Options) (*ResourcePlan, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Refuse a name whose generated operation IDs the framework already
+	// registers (#579): Huma keys operations by ID and panics at boot on a
+	// duplicate, so the app would build and then die on start. Checked here,
+	// with the name and fields resolved and before anything is written, so the
+	// failure is atomic like every other planning check.
+	if err := checkReservedOperationIDs(name, fields); err != nil {
+		return nil, err
+	}
 	// Fail closed on a missing Atlas here, in the library, not in a caller: whether
 	// Atlas happens to be on PATH must never change what make resource commits
 	// (#300). It runs after the input checks above, so a bad name or field is

@@ -310,15 +310,16 @@ func renderModelHandler(r modelResource) (string, error) {
 	b.WriteString("\tprefix := app.Config().API.Prefix\n")
 	b.WriteString("\tapi := app.API()\n\n")
 	// Operation IDs match the legacy path: list is plural (list-books), get/create
-	// singular (get-book, create-book).
-	writeHumaOp(&b, "list-"+name.Kebab, "http.MethodGet", "prefix + \""+name.HTTPPath+"\"", "List "+strings.ToLower(name.Tag), name.Tag, "h.list")
-	writeHumaOp(&b, "get-"+name.Package, "http.MethodGet", "prefix + \""+name.HTTPPath+"/{id}\"", "Get a "+singular, name.Tag, "h.get")
-	writeHumaOp(&b, "create-"+name.Package, "http.MethodPost", "prefix + \""+name.HTTPPath+"\"", "Create a "+singular, name.Tag, "h.create")
+	// singular (get-book, create-book). They come from reserved.go so the
+	// generator and the framework-collision check cannot drift apart.
+	writeHumaOp(&b, listOperationID(name), "http.MethodGet", "prefix + \""+name.HTTPPath+"\"", "List "+strings.ToLower(name.Tag), name.Tag, "h.list")
+	writeHumaOp(&b, getOperationID(name), "http.MethodGet", "prefix + \""+name.HTTPPath+"/{id}\"", "Get a "+singular, name.Tag, "h.get")
+	writeHumaOp(&b, createOperationID(name), "http.MethodPost", "prefix + \""+name.HTTPPath+"\"", "Create a "+singular, name.Tag, "h.create")
 	for _, f := range r.fileFields() {
 		if !f.InRequest {
 			continue
 		}
-		writeHumaOp(&b, "upload-"+name.Package+"-"+strings.ReplaceAll(f.jsonName(), "_", "-"), "http.MethodPost",
+		writeHumaOp(&b, uploadOperationID(name, f.jsonName()), "http.MethodPost",
 			"prefix + \""+name.HTTPPath+"/uploads/"+f.jsonName()+"\"",
 			"Grant an upload of a "+singular+" "+strings.ReplaceAll(f.jsonName(), "_", " "), name.Tag, "h.upload"+f.GoName)
 	}
