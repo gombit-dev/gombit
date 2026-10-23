@@ -256,6 +256,20 @@ func runAuditTrail(t *testing.T, db *database.DB) {
 	if err != nil || len(listed) != 3 || listed[0].ID < listed[2].ID {
 		t.Fatalf("ListAuditEvents = %d events (%v), want the 3 logins, newest first", len(listed), err)
 	}
+
+	// Newest first means by when the operation ran, not by insertion: the
+	// newer event is inserted first, and the older one in another zone.
+	base := time.Now().UTC().Truncate(time.Second)
+	east := time.FixedZone("UTC+5", 5*60*60)
+	for _, at := range []time.Time{base.Add(time.Hour), base.Add(-time.Hour).In(east)} {
+		if err := auth.RecordAuditEvent(context.Background(), db.DB, auth.AuditEvent{Action: "app.ordered", TargetUserID: &user.ID, OccurredAt: at}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ordered, err := auth.ListAuditEvents(context.Background(), db.DB, auth.AuditQuery{TargetUserID: user.ID, Action: "app.ordered"})
+	if err != nil || len(ordered) != 2 || !ordered[0].OccurredAt.After(ordered[1].OccurredAt) || ordered[0].ID > ordered[1].ID {
+		t.Fatalf("ListAuditEvents over inverted inserts = %+v, %v; want the later occurrence first", ordered, err)
+	}
 }
 
 type recordingAuditor struct {

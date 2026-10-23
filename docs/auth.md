@@ -284,12 +284,13 @@ of either; an application recording its own (`auth.RecordAuditEvent`,
 have an `action`, and `details` that are a JSON object (`{}` when empty):
 one that does not is refused before any Auditor sees it.
 
-Identifiers are stored **whole**: `target_id` has no length bound (a long
-string primary key is kept exactly), and `request_id` holds up to
-`contract.MaxRequestIDLength` (128) bytes, the bound the framework enforces
-on an inbound `X-Request-Id` ([router.md](router.md)). An event whose
-`action`, `target_type`, `request_id` or `ip` does not fit its column is
-refused, not cut, since a cut identifier would name something else. Only
+Identifiers are stored **whole**: `target_type` and `target_id` have no
+length bound (an admin slug and a string primary key have none either), and
+`request_id` holds up to `contract.MaxRequestIDLength` (128) bytes, the
+bound the framework enforces on an inbound `X-Request-Id`
+([router.md](router.md)). An event whose `action`, `request_id` or `ip`
+does not fit its column is refused, not cut, since a cut identifier would
+name something else. Only
 `user_agent`, free text, is cut (to 255 bytes).
 
 Recording is best effort: an event that cannot be written is logged as a
@@ -297,7 +298,13 @@ warning, and the operation it records still succeeds. The write is not
 cancelled by the request (the operation committed; a client that hung up
 still gets its record), but has a deadline of its own (5s), so an audit
 insert stalled in the database delays the answer by at most that, never
-holds it. An Auditor gets that bounded context, and must honor it. The Service's events
+holds it. An Auditor gets that bounded context, and must honor it. Inside
+a caller's transaction (a grant helper given a `tx`) the database enforces
+that deadline (`statement_timeout` on PostgreSQL, the lock wait timeouts on
+MySQL), not a context cancellation, which would drop the connection and the
+caller's transaction with it; the timed-out insert rolls back to its
+savepoint and the transaction goes on. If even that rollback fails, the
+helper returns the error: the transaction is unusable. The Service's events
 and the admin's are logged through the Service's logger; the group and
 permission helpers, which take a database and no Service, log through that
 database's logger. Inside a caller's transaction the event is written under
@@ -306,8 +313,9 @@ back to it and the caller's transaction goes on, even with GORM's
 `DisableNestedTransaction` set.
 
 - **Reading it.** `auth.ListAuditEvents(ctx, db, auth.AuditQuery{TargetUserID: id})`
-  returns events newest first (filters: actor, target, action; 100 by
-  default, at most 1000). To browse it in the admin, register
+  returns events newest first by `occurred_at` (when the operation ran,
+  stored in UTC; the row id breaks ties). Filters: actor, target, action;
+  100 by default, at most 1000. To browse it in the admin, register
   `auth.AuditEvent` and grant staff only its view permission
   (`admin.<slug>.view`, see [admin.md](admin.md)); a superuser can still
   edit any model.
