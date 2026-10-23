@@ -9,6 +9,7 @@ import (
 	"strings"
 	"unicode"
 
+	"golang.org/x/mod/module"
 	"golang.org/x/term"
 )
 
@@ -167,17 +168,23 @@ func validateName(name string) error {
 	return nil
 }
 
-func validateModule(module string) error {
-	if module == "" {
+func validateModule(modulePath string) error {
+	if modulePath == "" {
 		return errors.New("scaffold: module path is required")
 	}
-	if strings.Contains(module, "\\") || strings.Contains(module, " ") {
-		return fmt.Errorf("scaffold: invalid module path %q", module)
-	}
-	for _, part := range strings.Split(module, "/") {
-		if part == "" || part == "." || part == ".." {
-			return fmt.Errorf("scaffold: invalid module path %q", module)
+	if err := module.CheckImportPath(modulePath); err != nil {
+		var invalid *module.InvalidPathError
+		if errors.As(err, &invalid) {
+			return fmt.Errorf("scaffold: invalid module path %q: %v", modulePath, invalid.Err)
 		}
+		return fmt.Errorf("scaffold: invalid module path %q: %w", modulePath, err)
+	}
+	// Go 1.26 reserves these virtual module paths for toolchain directives.
+	if modulePath == "go" || modulePath == "toolchain" {
+		return fmt.Errorf("scaffold: invalid module path %q: module path is reserved", modulePath)
+	}
+	if _, _, ok := module.SplitPathVersion(modulePath); !ok {
+		return fmt.Errorf("scaffold: invalid module path %q: invalid version", modulePath)
 	}
 	return nil
 }
