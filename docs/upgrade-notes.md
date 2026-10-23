@@ -75,6 +75,8 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 - A new cookie-mode app's placeholder `schema.ts` includes the refresh's 401 response; an existing app's generated client gets it from `gombit client generate`. (`client-schema-cookie-refresh-401`, client, [#458](https://github.com/gombit-dev/gombit/issues/458))
 
+- In cookie mode, a `POST /auth/refresh` that fails loading the session user rolls the token rotation back with it, instead of answering 500 after the rotation already committed. (`cookie-refresh-loads-user-before-commit`, behavior, [#606](https://github.com/gombit-dev/gombit/issues/606))
+
 ## v0.8.0
 
 ### Manual: action required
