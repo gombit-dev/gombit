@@ -107,6 +107,25 @@ rules, the mailer, and `auth.RequireVerifiedEmail`.
 The development JWT secret in `main.go` is not a production secret.
 Production config rejects secrets shorter than 32 characters.
 
+## Audit trail
+
+Every step above was recorded in `auth_audit_events`: the registration, the
+logins, the logout, the session revocations, the verification, each with
+the user, the time, and the request (`X-Request-Id`, client IP, user agent).
+A failed login is recorded too:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8080/api/v1/auth/login \
+  -H 'Content-Type: application/json' -H 'X-Request-Id: audit-demo-1' \
+  -d '{"email":"ada@example.com","password":"wrong-password"}'
+# auth.login.failed, request_id audit-demo-1, details {"reason":"wrong_password"}
+```
+
+Read them in Go with `auth.ListAuditEvents(ctx, db.DB,
+auth.AuditQuery{Action: auth.AuditLoginFailed})`. See
+[`docs/auth.md`](../../docs/auth.md#audit-trail) for what is recorded and
+how to send the events elsewhere.
+
 ## Create an admin account (`gombit createsuperuser`)
 
 The example uses an in-memory SQLite database, so point `gombit

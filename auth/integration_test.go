@@ -36,6 +36,9 @@ func TestE2EPostgres(t *testing.T) {
 	runEmailVerificationBearer(t, db)
 	runEmailVerificationCookie(t, db)
 	runEmailVerificationService(t, db)
+	runAuditTrail(t, db)
+	runAuditGrantInTransaction(t, db)
+	runAuditGrants(t, db)
 	runPermissionPersistence(t, db)
 }
 
@@ -57,6 +60,9 @@ func TestE2EMySQL(t *testing.T) {
 	runEmailVerificationBearer(t, db)
 	runEmailVerificationCookie(t, db)
 	runEmailVerificationService(t, db)
+	runAuditTrail(t, db)
+	runAuditGrantInTransaction(t, db)
+	runAuditGrants(t, db)
 	runPermissionPersistence(t, db)
 }
 
