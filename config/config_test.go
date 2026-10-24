@@ -1268,3 +1268,125 @@ func TestValidateEmailVerification(t *testing.T) {
 		t.Fatal("the default TTL is not 24h")
 	}
 }
+
+// The rule of internal/urlbase, spelled the way config reports it.
+const (
+	apiPrefixSegmentRule = `must be '/' followed by segments of URI path characters (letters, digits, - . _ ~ ! $ & ' ( ) + , ; = @, or non-ASCII) separated by a single '/'`
+	apiPrefixDotRule     = `must not contain a '.' or '..' segment`
+)
+
+// The generated resources and the OpenAPI document concatenate the prefix with
+// every route, while Gin cleans a doubled slash out of the route it registers
+// and matches requests as sent. What Load stores has to be the one form they
+// agree on: a trailing '/' is normalised away, and a value with no canonical
+// form is the error the app answers with.
+func TestLoadNormalisesTheAPIPrefix(t *testing.T) {
+	tests := []struct{ name, env, want, wantErr string }{
+		{name: "trailing slash", env: "/svc/", want: "/svc"},
+		{name: "several trailing slashes", env: "/svc//", want: "/svc"},
+		{name: "space around it", env: " /svc/ ", want: "/svc"},
+		{name: "already canonical", env: "/api/v1", want: "/api/v1"},
+		{name: "only a slash", env: "/", wantErr: `must not be empty or only '/'`},
+		{name: "a space inside", env: "/a b", wantErr: apiPrefixSegmentRule},
+		{name: "an empty segment", env: "/svc//api", wantErr: apiPrefixSegmentRule},
+		{name: "a parent segment", env: "/api/../v1", wantErr: apiPrefixDotRule},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := LoadFromEnv(mapLookup(map[string]string{envAPIPrefix: tt.env}))
+			if tt.wantErr != "" {
+				assertAPIPrefixError(t, err, tt.env, tt.wantErr)
+				return
+			}
+			if err != nil {
+				t.Fatalf("LoadFromEnv(%q) error = %v, want nil", tt.env, err)
+			}
+			if cfg.API.Prefix != tt.want {
+				t.Fatalf("API.Prefix = %q, want %q", cfg.API.Prefix, tt.want)
+			}
+		})
+	}
+}
+
+// The same rule as it reaches a prefix set in code, where nothing normalises
+// it: a configuration that validates is one whose document its own routes
+// answer.
+//
+// The accepted cases are prefixes that work on main and keep working here (see
+// internal/urlbase for how each refused character fails); the refused ones are
+// every character measured not to round-trip between the document and the route.
+func TestValidateAPIPrefix(t *testing.T) {
+	tests := []struct{ name, prefix, want string }{
+		{name: "default", prefix: "/api/v1"},
+		{name: "one segment", prefix: "/svc"},
+		{name: "punctuation a path allows", prefix: "/a.b_c-~d"},
+		{name: "sub-delimiters", prefix: "/api/v1+beta"},
+		{name: "an at sign", prefix: "/@acme/api"},
+		{name: "a parameter-looking segment", prefix: "/api;v=1"},
+		{name: "a comma", prefix: "/api/v1,2"},
+		{name: "parentheses", prefix: "/api/(v1)"},
+		{name: "the rest of the sub-delimiters", prefix: `/api/!$&'x`},
+		{name: "non-ASCII", prefix: "/café"},
+		{name: "a segment of only dots", prefix: "/..."},
+		{name: "trailing slash", prefix: "/svc/", want: "must not end with '/'"},
+		{name: "only a slash", prefix: "/", want: `must not be empty or only '/'`},
+		{name: "no leading slash", prefix: "api", want: "must start with /"},
+		{name: "empty", prefix: "", want: "must start with /"},
+		{name: "a space inside", prefix: "/a b", want: apiPrefixSegmentRule},
+		{name: "braces", prefix: "/api/{id}", want: apiPrefixSegmentRule},
+		{name: "a gin parameter", prefix: "/api/:id", want: apiPrefixSegmentRule},
+		{name: "a gin wildcard", prefix: "/api/*id", want: apiPrefixSegmentRule},
+		{name: "an empty segment", prefix: "/svc//api", want: apiPrefixSegmentRule},
+		{name: "a percent escape", prefix: "/a%20b", want: apiPrefixSegmentRule},
+		{name: "a query delimiter", prefix: "/api?v=1", want: apiPrefixSegmentRule},
+		{name: "a fragment delimiter", prefix: "/api#v1", want: apiPrefixSegmentRule},
+		{name: "a backslash", prefix: `/api\v1`, want: apiPrefixSegmentRule},
+		{name: "square brackets", prefix: "/api[v1]", want: apiPrefixSegmentRule},
+		{name: "a pipe", prefix: "/api|v1", want: apiPrefixSegmentRule},
+		{name: "markup", prefix: "/api<v1>", want: apiPrefixSegmentRule},
+		{name: "a quote", prefix: `/api"v1`, want: apiPrefixSegmentRule},
+		{name: "a caret and a backtick", prefix: "/api^v1`", want: apiPrefixSegmentRule},
+		{name: "a control character", prefix: "/api\x01v1", want: apiPrefixSegmentRule},
+		{name: "a C1 control character", prefix: "/api\u0085v1", want: apiPrefixSegmentRule},
+		{name: "a parent segment", prefix: "/api/../v1", want: apiPrefixDotRule},
+		{name: "a current segment", prefix: "/.", want: apiPrefixDotRule},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.API.Prefix = tt.prefix
+
+			err := cfg.Validate()
+			if tt.want == "" {
+				if err != nil {
+					t.Fatalf("Validate() with prefix %q = %v, want nil", tt.prefix, err)
+				}
+				return
+			}
+			assertAPIPrefixError(t, err, tt.prefix, tt.want)
+		})
+	}
+}
+
+// assertAPIPrefixError checks that err carries exactly this API.Prefix field
+// error.
+func assertAPIPrefixError(t *testing.T, err error, prefix, message string) {
+	t.Helper()
+
+	var errs FieldErrors
+	if !errors.As(err, &errs) {
+		t.Fatalf("error = %v, want FieldErrors", err)
+	}
+	for _, field := range errs {
+		if field.Field != "API.Prefix" {
+			continue
+		}
+		if field.Message != message || field.Value != prefix || field.Env != envAPIPrefix {
+			t.Fatalf("API.Prefix error = %+v, want message %q for value %q", field, message, prefix)
+		}
+		return
+	}
+	t.Fatalf("errors = %#v, want one for API.Prefix", []FieldError(errs))
+}
