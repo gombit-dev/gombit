@@ -294,23 +294,27 @@ name something else. Only
 `user_agent`, free text, is cut (to 255 bytes).
 
 Recording is best effort: an event that cannot be written is logged as a
-warning, and the operation it records still succeeds. The write is not
-cancelled by the request (the operation committed; a client that hung up
-still gets its record), but has a deadline of its own (5s), so an audit
-insert stalled in the database delays the answer by at most that, never
-holds it. An Auditor gets that bounded context, and must honor it. Inside
-a caller's transaction (a grant helper given a `tx`) the database enforces
-that deadline (`statement_timeout` on PostgreSQL, the lock wait timeouts on
-MySQL), not a context cancellation, which would drop the connection and the
-caller's transaction with it; the timed-out insert rolls back to its
-savepoint and the transaction goes on. If even that rollback fails, the
-helper returns the error: the transaction is unusable. The Service's events
+warning, and the operation it records still succeeds. The Service's events
 and the admin's are logged through the Service's logger; the group and
 permission helpers, which take a database and no Service, log through that
-database's logger. Inside a caller's transaction the event is written under
-an explicit savepoint, so a failed insert (the table not migrated yet) rolls
-back to it and the caller's transaction goes on, even with GORM's
-`DisableNestedTransaction` set.
+database's logger. The write is not cancelled by the request (the
+operation committed; a client that hung up still gets its record), but has
+a deadline of its own (5s), so an audit insert stalled in the database
+delays the answer by at most that, never holds it. An Auditor gets that
+bounded context, and must honor it.
+
+Inside a caller's transaction (a grant helper given a `tx`) the event is
+written under an explicit savepoint, so a failed insert (the table not
+migrated yet) rolls back to it and the transaction goes on, even with
+GORM's `DisableNestedTransaction` set. The same 5s is one absolute budget
+for the savepoint, the insert and the rollback: the database's own limit
+(`statement_timeout` on PostgreSQL, the lock wait timeouts on MySQL), set
+from what is left of it, ends a lock wait first, and the insert rolls back
+to its savepoint. A stall the database cannot end (an unresponsive
+connection) meets the client-side deadline instead; cancelling a statement
+in flight drops its connection, so the caller's transaction is lost then,
+and the helper returns that error rather than call the audit failure
+harmless.
 
 - **Reading it.** `auth.ListAuditEvents(ctx, db, auth.AuditQuery{TargetUserID: id})`
   returns events newest first by `occurred_at` (when the operation ran,
