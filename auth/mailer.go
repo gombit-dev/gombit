@@ -20,7 +20,9 @@ import (
 // the message's token starts working and the user's earlier ones stop. A
 // Mailer that only enqueues the message would supersede the earlier links
 // before the new one is delivered, and a delivery that then failed could
-// not undo it. Send is called on the request that needs the message. An
+// not undo it. Send must also return once ctx is done: the background work
+// that calls it (a password reset) is cancelled at its deadline and on
+// shutdown, and a Send that ignores that keeps its worker for good. Send is called on the request that needs the message. An
 // error is the message not going out: the request reports it where the
 // message is the point (a resend), and logs it where it is a side effect
 // (registration).

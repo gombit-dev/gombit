@@ -770,3 +770,65 @@ func TestPasswordForgotOpenAPI(t *testing.T) {
 		})
 	}
 }
+
+// stuckMailer never returns until released, whatever its context says: a
+// Mailer that ignores cancellation, which Go cannot stop.
+type stuckMailer struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (m *stuckMailer) Send(context.Context, auth.Message) error {
+	m.entered <- struct{}{}
+	<-m.release
+	return nil
+}
+
+// TestPasswordResetWedgedMailer: every worker is stuck in a Mailer that
+// ignores its context. Admission still answers by the bucket alone (no
+// oracle), but what is retained stays bounded: the queue never grows past
+// its cap (later admitted requests are discarded before any lookup, and
+// answered as admitted), and Close returns within its grace, releasing the
+// waiting work, though it cannot stop the stuck goroutines.
+func TestPasswordResetWedgedMailer(t *testing.T) {
+	db := openSQLite(t)
+	e := newVerificationEnv(t, db)
+	ctx := context.Background()
+	first, _ := e.register(t, "wedged-a")
+	second, _ := e.register(t, "wedged-b")
+	mailer := &stuckMailer{entered: make(chan struct{}, 8), release: make(chan struct{})}
+	defer close(mailer.release)
+	auth.SetMailer(e.svc, mailer)
+	auth.SetBackgroundAdmission(e.svc, 1000, 1000, 2, time.Now)
+	auth.SetBackgroundLimits(e.svc, 3, 100*time.Millisecond)
+	auth.SetBackgroundTimeout(e.svc, 50*time.Millisecond)
+
+	for _, user := range []auth.User{first, second} {
+		if err := auth.RequestPasswordResetInBackground(ctx, e.svc, user.Email); err != nil {
+			t.Fatal(err)
+		}
+		<-mailer.entered // this worker is stuck for good
+	}
+	for i := range 50 {
+		if err := auth.RequestPasswordResetInBackground(ctx, e.svc, fmt.Sprintf("flood-%d@example.com", i)); err != nil {
+			t.Fatalf("request %d with stuck workers = %v, want it answered as admitted", i, err)
+		}
+	}
+	if n := auth.PendingBackground(e.svc); n > 3 {
+		t.Fatalf("%d tasks retained with every worker stuck, want at most the cap of 3", n)
+	}
+
+	closeCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err := e.svc.Close(closeCtx)
+	if took := time.Since(start); took > 2*time.Second {
+		t.Fatalf("Close took %v with workers that ignore cancellation", took)
+	}
+	if err == nil || !strings.Contains(err.Error(), "did not stop") {
+		t.Fatalf("Close = %v, want it to report the work that did not stop", err)
+	}
+	if n := auth.PendingBackground(e.svc); n != 0 {
+		t.Fatalf("%d tasks still retained after Close", n)
+	}
+}

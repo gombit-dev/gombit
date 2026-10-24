@@ -20,16 +20,30 @@ import (
 // would let a client tell them apart by saturating the queue; the bucket
 // spends one token per request either way. Its rate is what the workers
 // finish in the worst case (backgroundWorkers tasks every
-// backgroundWorstCase), so the admitted work never outgrows them, and the
-// queue behind it is unbounded: an admitted task is never dropped.
+// backgroundWorstCase), so while tasks keep to their deadlines the admitted
+// work never outgrows them.
+//
+// Go cannot stop a task that ignores its context (a Mailer that never
+// returns): its worker is gone for good. So the resources stay hard-bounded
+// whatever the work does: never more than backgroundWorkers goroutines, and
+// never more than backgroundQueue tasks waiting. A task admitted when the
+// queue is full, which keeping to the deadlines never causes (the bucket's
+// burst plus what the workers hold fits in it), is discarded before any
+// lookup and logged, and answered as admitted all the same: the answer
+// never depends on the work already admitted, so an admission is a
+// best-effort acceptance, not a promise.
 
 const (
 	// backgroundWorkers is how many background tasks run at once.
 	backgroundWorkers = 16
 	// backgroundBurst is how many requests the bucket admits at once.
 	backgroundBurst = 32
-	// backgroundTaskTimeout bounds one task: a Mailer that never returns
-	// is cancelled, and its worker freed.
+	// backgroundQueue bounds the tasks waiting for a worker: room for the
+	// burst and the workers' share of refills, so only workers stuck past
+	// their deadlines can fill it.
+	backgroundQueue = 64
+	// backgroundTaskTimeout bounds one task: its context is cancelled
+	// then, which frees its worker if the task honors it (a Mailer must).
 	backgroundTaskTimeout = 30 * time.Second
 	// backgroundWorstCase is the longest a task can hold a worker: its
 	// deadline, then its tail steps (activation, withdrawal, the audit
@@ -42,6 +56,11 @@ const (
 	// Service refuses.
 	backgroundClosedRetryAfter = 5 * time.Second
 )
+
+// errBackgroundDiscarded is a task the bucket admitted and the full queue
+// could not take (workers stuck past their deadlines): dropped before it
+// ran, to be logged, and answered as admitted.
+var errBackgroundDiscarded = errors.New("auth: background work queue full (workers stuck past their deadlines); a request was discarded")
 
 // backgroundBusyError is a task the Service did not admit: the bucket is
 // empty (retryAfter until its next token), or the Service is closed.
@@ -70,6 +89,10 @@ type backgroundRunner struct {
 	stop    context.Context
 	cancel  context.CancelFunc
 	timeout time.Duration
+	// queueCap and closeGrace are backgroundQueue and backgroundCloseGrace
+	// (tests shorten them).
+	queueCap   int
+	closeGrace time.Duration
 
 	// The admission bucket: tokens, refilled at rate per second up to
 	// burst, as of last (read from now).
@@ -90,6 +113,8 @@ func newBackgroundRunner() *backgroundRunner {
 		tokens:      backgroundBurst,
 		now:         time.Now,
 		workerCount: backgroundWorkers,
+		queueCap:    backgroundQueue,
+		closeGrace:  backgroundCloseGrace,
 	}
 	r.ready = sync.NewCond(&r.mu)
 	r.last = r.now()
@@ -114,7 +139,8 @@ func (r *backgroundRunner) admit() (time.Duration, bool) {
 // deadline, and the runner's cancellation. It returns a
 // backgroundBusyError, and does not run it, when the bucket is empty or the
 // runner closed: nothing else, so the answer never depends on the work
-// already admitted.
+// already admitted. An admitted task the full queue cannot take is dropped:
+// errBackgroundDiscarded, which the caller logs and answers as admitted.
 func (r *backgroundRunner) submit(ctx context.Context, run func(context.Context)) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -130,6 +156,9 @@ func (r *backgroundRunner) submit(ctx context.Context, run func(context.Context)
 			r.workers.Add(1)
 			go r.work()
 		}
+	}
+	if len(r.pending) >= r.queueCap {
+		return errBackgroundDiscarded
 	}
 	r.pending = append(r.pending, backgroundTask{values: context.WithoutCancel(ctx), run: run})
 	r.ready.Signal()
@@ -168,9 +197,11 @@ func (r *backgroundRunner) work() {
 }
 
 // close stops admitting work, lets the admitted tasks finish until ctx is
-// done, then cancels the rest and waits a short grace for them. It returns
-// ctx's error when it had to cancel, and an error naming the tasks that
-// still had not returned after the grace.
+// done, then cancels the rest, drops the ones still waiting, and waits a
+// short grace for the running ones. It returns ctx's error when it had to
+// cancel, and an error naming the tasks that still had not returned after
+// the grace: a task that ignores its context keeps its goroutine, which Go
+// cannot stop, but nothing else; close returns all the same.
 func (r *backgroundRunner) close(ctx context.Context) error {
 	r.mu.Lock()
 	if r.closed {
@@ -193,7 +224,11 @@ func (r *backgroundRunner) close(ctx context.Context) error {
 	case <-ctx.Done():
 	}
 	r.cancel()
-	timer := time.NewTimer(backgroundCloseGrace)
+	// What has not started will not: release it now.
+	r.mu.Lock()
+	r.pending = nil
+	r.mu.Unlock()
+	timer := time.NewTimer(r.closeGrace)
 	defer timer.Stop()
 	select {
 	case <-done:

@@ -159,3 +159,20 @@ func SetAuditTimeout(t interface{ Cleanup(func()) }, d time.Duration) {
 	auditTimeout = d
 	t.Cleanup(func() { auditTimeout = old })
 }
+
+// SetBackgroundLimits replaces the background runner's queue bound and
+// Close's grace. Set it before the service is used.
+func SetBackgroundLimits(s *Service, queue int, closeGrace time.Duration) {
+	r := s.background
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.queueCap, r.closeGrace = queue, closeGrace
+}
+
+// PendingBackground is how many admitted tasks wait for a worker.
+func PendingBackground(s *Service) int {
+	r := s.background
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.pending)
+}

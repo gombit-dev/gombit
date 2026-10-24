@@ -180,10 +180,12 @@ curl -sX POST localhost:8080/api/v1/auth/password/reset \
   outcome (sent, the one-a-minute wait, a mailer failure) is logged, never
   answered.
 - **Background work.** The message is sent by the auth Service's own
-  workers (16), each task with a 30s deadline (a Mailer that never returns
-  is cancelled); the bookkeeping after the message (activating or
-  withdrawing its token, the audit event) has its own 5s deadline and is
-  cancelled by `Close` too: nothing the Service started outlives it.
+  workers (16), each task with a 30s deadline; the bookkeeping after the
+  message (activating or withdrawing its token, the audit event) has its
+  own 5s deadline and is cancelled by `Close` too. A Mailer must return
+  once its context is done: Go cannot stop one that does not, and its
+  worker is gone. Even then what the Service holds stays bounded: never
+  more than 16 workers and 64 waiting requests.
 - **Admission.** Whether a request is taken depends on when requests
   arrived, nothing else: a token bucket (a burst of 32, refilled at the rate
   the workers finish tasks in the worst case, 16 per 45s) spends one token
@@ -192,8 +194,12 @@ curl -sX POST localhost:8080/api/v1/auth/password/reset \
   in the OpenAPI document), decided before the lookup. How long earlier
   requests' work runs (an account's send takes longer than an address that
   is none) never changes the answer, so saturating the endpoint tells
-  nothing about which addresses are accounts. A 202 always means the work
-  was taken; the queue behind the bucket is unbounded, and never drops it.
+  nothing about which addresses are accounts. A 202 is a best-effort
+  acceptance: while the workers keep to their deadlines the 64-request
+  queue behind the bucket always has room, and every admitted request is
+  sent; if they do not (a Mailer that ignores cancellation), a request the
+  full queue cannot take is discarded before any lookup and logged, still
+  answered with the same 202.
   `framework.App` closes the Service when it stops, before its stop hooks
   run: admitted messages are sent until the shutdown timeout, then
   cancelled. An app that mounts the routes itself keeps the Service

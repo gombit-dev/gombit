@@ -146,7 +146,7 @@ func (s *Service) resetTokenMayWork(ctx context.Context, raw string) (bool, erro
 // before the lookup, from request arrivals alone, so it is the same for any
 // address, and does not depend on how long earlier requests' work runs.
 func (s *Service) requestPasswordResetInBackground(ctx context.Context, email string) error {
-	return s.background.submit(ctx, func(ctx context.Context) {
+	err := s.background.submit(ctx, func(ctx context.Context) {
 		err := s.RequestPasswordReset(ctx, email)
 		var tooSoon resendTooSoonError
 		switch {
@@ -157,6 +157,13 @@ func (s *Service) requestPasswordResetInBackground(ctx context.Context, email st
 			s.logger.Warn("auth: send a password reset message", zap.Error(err))
 		}
 	})
+	if errors.Is(err, errBackgroundDiscarded) {
+		// Admitted, then dropped before the lookup: answered as admitted, so
+		// the answer stays the same for any address.
+		s.logger.Warn("auth: a password reset request was discarded", zap.Error(err))
+		return nil
+	}
+	return err
 }
 
 func (s *Service) passwordResetTTL() time.Duration {
