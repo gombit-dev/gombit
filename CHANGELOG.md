@@ -197,15 +197,23 @@ version.
 - `GOMBIT_API_PREFIX=/svc/` no longer advertises routes that answer 404.
   `config.Load` now puts the prefix in one canonical form, dropping a trailing
   `/`: generated resources and the OpenAPI document concatenate it with a route
-  while Gin answers the cleaned one, so a prefix of `/svc/` served
+  while Gin builds its route with `path.Join`, so a prefix of `/svc/` served
   `/svc/widgets` but listed `/svc//widgets` in the document, and every client
   built from that document asked for a URL that 404s. `Validate` applies the
   same rule to every prefix, however it was set, and rejects one that is not
   already canonical rather than start an app whose document no route answers:
   one with no canonical form at all (`api`, `/` alone, an empty segment such as
-  `/svc//api`, a `.` or `..` segment, or a character a route cannot be built
-  from — a space, `%`, `{`, `}`, or Gin's `:` and `*` wildcards), or one `Load`
-  would have rewritten, such as a `/svc/` set on a `Config` in code
+  `/svc//api`, a `.` or `..` segment, which Gin collapses into a prefix no route
+  is registered under, or a character the document and the routes cannot agree
+  on — `%`, `?`, `#` or a control character, which make the advertised path one
+  no client can send as it is written; Gin's `:` and `{name}` parameters and its
+  `*` catch-all, which answer paths the document never lists (a `*` or `\` in
+  mid-path panics at registration); and a space with the other US-ASCII
+  characters RFC 3986 keeps out of a URI), or one `Load` would have rewritten,
+  such as a `/svc/` set on a `Config.API.Prefix` in code. Every prefix a route
+  could already be built from still starts an app: the sub-delimiters `! $ & '
+  ( ) + , ; =`, `@`, and non-ASCII, so `/api/v1+beta`, `/@acme/api`, `/api;v=1`
+  and `/café` are accepted
   ([#501](https://github.com/gombit-dev/gombit/issues/501)).
 
 ### Changed
