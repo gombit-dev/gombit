@@ -5,6 +5,7 @@ package auth_test
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/gombit-dev/gombit/auth"
 	"github.com/gombit-dev/gombit/config"
 	"github.com/gombit-dev/gombit/database"
+	"github.com/gombit-dev/gombit/internal/faulttest"
 )
 
 // TestAuditStallInTransactionPostgres: inside a caller's transaction, a
@@ -26,7 +28,7 @@ func TestAuditStallInTransactionPostgres(t *testing.T) {
 		t.Skip("set -auth.postgres-dsn to run Postgres auth integration tests")
 	}
 	db := openDriver(t, config.DatabaseDriverPostgres, *postgresDSN)
-	runAuditStallInTransaction(t, db, func() (release func()) {
+	runAuditStallInTransaction(t, db, 200*time.Millisecond, func() (release func()) {
 		lock := db.Begin()
 		if err := lock.Exec("LOCK TABLE auth_audit_events IN ACCESS EXCLUSIVE MODE").Error; err != nil {
 			t.Fatal(err)
@@ -43,7 +45,9 @@ func TestAuditStallInTransactionMySQL(t *testing.T) {
 		t.Skip("set -auth.mysql-dsn to run MySQL auth integration tests")
 	}
 	db := openDriver(t, config.DatabaseDriverMySQL, *mysqlDSN)
-	runAuditStallInTransaction(t, db, func() (release func()) {
+	// MySQL's lock wait timeouts count whole seconds: a budget whose work
+	// window leaves at least one, so the database ends the wait.
+	runAuditStallInTransaction(t, db, 3*time.Second, func() (release func()) {
 		sqlDB, err := db.DB.DB()
 		if err != nil {
 			t.Fatal(err)
@@ -62,12 +66,12 @@ func TestAuditStallInTransactionMySQL(t *testing.T) {
 	})
 }
 
-func runAuditStallInTransaction(t *testing.T, db *database.DB, lockAuditTable func() (release func())) {
+func runAuditStallInTransaction(t *testing.T, db *database.DB, budget time.Duration, lockAuditTable func() (release func())) {
 	t.Helper()
 	if err := auth.Migrate(db.DB); err != nil {
 		t.Fatal(err)
 	}
-	auth.SetAuditTimeout(t, 200*time.Millisecond)
+	auth.SetAuditTimeout(t, budget)
 	ctx := context.Background()
 	n := time.Now().UnixNano()
 	user := auth.User{Email: fmt.Sprintf("stall-tx-%d@example.com", n), PasswordHash: "x"}
@@ -104,5 +108,43 @@ func runAuditStallInTransaction(t *testing.T, db *database.DB, lockAuditTable fu
 	db.Table("auth_user_groups").Where("user_id = ? AND group_id = ?", user.ID, group.ID).Count(&granted)
 	if granted != 1 {
 		t.Fatal("the grant did not commit")
+	}
+}
+
+// TestAuditNetworkStallInTransactionPostgres: the audit insert's bytes are
+// sent and the connection stops answering (a TCP proxy holds them); no
+// database setting can end that. The grant still returns within the audit
+// budget, and, the connection lost to the cancellation, reports the
+// caller's transaction lost instead of calling the audit failure harmless.
+func TestAuditNetworkStallInTransactionPostgres(t *testing.T) {
+	if *postgresDSN == "" {
+		t.Skip("set -auth.postgres-dsn to run Postgres auth integration tests")
+	}
+	upstream, err := faulttest.PostgresHostPort(*postgresDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := faulttest.NewTCPProxy(t, upstream)
+	dsn, err := faulttest.PostgresDSNVia(*postgresDSN, proxy.Addr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = proxy.Heal() }()
+	const budget = 300 * time.Millisecond
+	auth.SetAuditTimeout(t, budget)
+	// The audit insert's arrival holds the proxy: its bytes go out, and no
+	// answer comes back.
+	faults := &faulttest.DBFaults{
+		Statement: faulttest.Sequence(faulttest.Do(proxy.Hold)),
+		Match:     faulttest.Inserts("auth_audit_events"),
+	}
+	f := newRotationFixture(t, database.DriverPostgres, dsn, faults)
+	took, grantErr, txErr := grantInTransaction(t, f, faults)
+	_ = proxy.Heal()
+	if took > budget+2*time.Second {
+		t.Fatalf("a network stall held the grant %v, past its %v budget", took, budget)
+	}
+	if grantErr == nil || !strings.Contains(grantErr.Error(), "could not be recovered") || txErr == nil {
+		t.Fatalf("grant = %v, transaction = %v; want the lost transaction reported", grantErr, txErr)
 	}
 }

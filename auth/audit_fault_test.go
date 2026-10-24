@@ -138,3 +138,29 @@ func TestFault_Database_AuditSavepointStalls(t *testing.T) {
 		}
 	})
 }
+
+// TestFault_Database_AuditBudgetIsAbsolute: a slow but successful
+// SAVEPOINT spends most of the audit budget, then the insert stalls. The
+// insert gets what is left of the one budget, not a fresh one: the grant
+// returns within the budget (plus scheduling slack), not after it again.
+func TestFault_Database_AuditBudgetIsAbsolute(t *testing.T) {
+	faulttest.ForEachDB(t, faultDBs, func(t *testing.T, kind database.Driver, dsn string) {
+		const budget = 300 * time.Millisecond
+		auth.SetAuditTimeout(t, budget)
+		never := make(chan struct{})
+		faults := &faulttest.DBFaults{
+			// Call 1: the audit SAVEPOINT, slow; call 2: the insert, stalled.
+			Statement: faulttest.Sequence(faulttest.Wait(200*time.Millisecond), faulttest.Block(never)),
+			Match: func(q string) bool {
+				q = strings.TrimSpace(q)
+				return (strings.HasPrefix(strings.ToUpper(q), "SAVEPOINT") && strings.Contains(q, "gombit_audit_event")) ||
+					faulttest.Inserts("auth_audit_events")(q)
+			},
+		}
+		f := newRotationFixture(t, kind, dsn, faults)
+		took, _, _ := grantInTransaction(t, f, faults)
+		if took > budget+500*time.Millisecond {
+			t.Fatalf("the grant took %v: the insert got a budget the savepoint had already spent (%v in all)", took, budget)
+		}
+	})
+}

@@ -34,11 +34,13 @@ import (
 // error.
 var ErrInjected = errors.New("faulttest: injected fault")
 
-// Step is what one call does: succeed, fail with an error, wait, or block.
+// Step is what one call does: succeed, fail with an error, wait, block, or
+// run a hook first.
 type Step struct {
 	err     error
 	wait    time.Duration
 	release <-chan struct{}
+	do      func()
 }
 
 // Success lets the call through.
@@ -50,6 +52,16 @@ func Failure(err error) Step {
 		panic("faulttest: Failure needs an error")
 	}
 	return Step{err: err}
+}
+
+// Do runs fn as the call arrives, then lets it through: a fault toggled at
+// the exact call (a TCPProxy held as one statement is sent), where the other
+// steps act on the call itself.
+func Do(fn func()) Step {
+	if fn == nil {
+		panic("faulttest: Do needs a function")
+	}
+	return Step{do: fn}
 }
 
 // Wait holds the call for d, then lets it through. A context that ends first
@@ -83,6 +95,10 @@ func BlockThenFail(release <-chan struct{}, err error) Step {
 
 // run applies the step to one call.
 func (s Step) run(ctx context.Context) error {
+	if s.do != nil {
+		s.do()
+		return nil
+	}
 	switch {
 	case s.release != nil:
 		select {
