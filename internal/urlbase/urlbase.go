@@ -14,18 +14,36 @@ import (
 )
 
 // The canonical form of an API prefix (config.API.Prefix, GOMBIT_API_PREFIX):
-// '/' followed by segments of letters, digits, '.', '_', '-' or '~',
-// separated by a single '/' and with no trailing '/'.
+// '/' followed by segments of the characters a URI path segment holds,
+// separated by a single '/' and with no trailing '/'. That set is RFC 3986's
+// unreserved characters (letters, digits, - . _ ~) plus its sub-delimiters
+// except Gin's catch-all '*', plus '@', plus any non-ASCII rune.
 //
-// That form is what the value has to be. Generated resources and the tutorial
-// example concatenate prefix + "/widgets" into the routes they register and
-// into the OpenAPI document, while Gin cleans a doubled slash out of the route
-// it registers but matches requests as sent: a prefix ending in '/' serves
-// /svc/widgets and advertises /svc//widgets, so every client built from that
-// document asks for a URL that answers 404. Characters a route cannot be built
-// from — spaces, '%', '}' or Gin's ':' and '*' wildcards — are reported rather
-// than left to produce a document no server matches, and so is a '.' or '..'
-// segment, which path.Clean collapses to a prefix no route is registered under.
+// That form is what the value has to be because generated resources and the
+// tutorial example concatenate prefix + "/widgets" into the routes they register
+// and into the OpenAPI document, and the two agree only for a prefix in it:
+//
+//   - A prefix ending in '/' serves /svc/widgets and advertises /svc//widgets,
+//     so every client built from that document asks for a URL that answers 404.
+//   - Gin builds a route with path.Join, so a '.' or '..' segment goes the same
+//     way: the app registers the collapsed /v1/widgets while the document lists
+//     the uncollapsed /api/../v1/widgets.
+//   - ':' and '{name}' are Gin's parameter syntax, so such a prefix registers a
+//     route that answers paths the document never lists: measured against this
+//     module's gin v1.12.0, both /api/:v1/widgets and /api/{v1}/widgets serve
+//     /api/zz/widgets. '*' is Gin's catch-all, which it refuses unless the path
+//     ends with it, and it reads a '\' as a malformed escape; either one panics
+//     at registration.
+//   - '%', '?', '#', and a control character give the document a path key no
+//     client can parse as a URL, and '?' and '#' cut the path short on the way
+//     to the server, so the route the document lists answers 404.
+//   - The rest of what is refused — space and the US-ASCII set RFC 3986 keeps
+//     out of a URI (" < > [ ] | ^ `) — a client has to percent-encode to send at
+//     all, so the bytes on the wire are never the document's key as written.
+//
+// What is left is accepted, including the prefixes an earlier draft of this rule
+// refused: /api/v1+beta, /@acme/api, /api;v=1, /api/v1,2, /api/(v1) and /café
+// each register, advertise that same path key, and answer it.
 
 // CanonicalAPIPrefix returns the canonical form of an API prefix, or "" when
 // it has none, which APIPrefixProblem explains.
@@ -68,7 +86,7 @@ func apiPrefix(prefix string) (canonical, problem string) {
 			return "", `must not contain a '.' or '..' segment`
 		}
 		if !isPrefixSegment(segment) {
-			return "", `must be '/' followed by segments of a-z, A-Z, 0-9, . _ - ~ separated by a single '/'`
+			return "", "must be '/' followed by segments of URI path characters (letters, digits, - . _ ~ ! $ & ' ( ) + , ; = @, or non-ASCII) separated by a single '/'"
 		}
 	}
 	return canonical, ""
@@ -81,7 +99,10 @@ func isPrefixSegment(segment string) bool {
 	for _, r := range segment {
 		switch {
 		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r >= 0xA0: // non-ASCII: percent-encoded in UTF-8 on the way, decoded by Gin on arrival
 		case r == '.', r == '_', r == '-', r == '~':
+		case r == '!', r == '$', r == '&', r == '\'', r == '(', r == ')':
+		case r == '+', r == ',', r == ';', r == '=', r == '@':
 		default:
 			return false
 		}
