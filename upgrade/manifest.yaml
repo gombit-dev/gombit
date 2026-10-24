@@ -632,13 +632,28 @@ releases:
         kind: manual
         breaking: true
         area: config
-        summary: "`GOMBIT_API_PREFIX` (or a `Config.Prefix` in code) must be in one canonical form: `Load` drops a trailing `/`, and `Validate` refuses a prefix it would have rewritten or that has no canonical form at all."
+        summary: "`GOMBIT_API_PREFIX` and `Config.API.Prefix` have one canonical form: `Load` drops a trailing `/` from the environment value, and `Validate` refuses a prefix that is not already canonical — one `Load` would have rewritten, or one whose OpenAPI document its own routes cannot answer."
         details: |
           A prefix of `/svc/` served `/svc/widgets` but listed
           `/svc//widgets` in the OpenAPI document, so every client generated
-          from it asked for a URL that 404s. Such a prefix now starts no app:
-          write it without the trailing slash. `Validate` also refuses `/`, a
-          segment that is empty (`/svc//api`), `.` or `..`, a space, `%`,
-          `{`, `}`, and Gin's `:` and `*`, which no route can be built from.
-          A prefix that already has its canonical form is untouched.
+          from it asked for a URL that 404s. Nothing changes for a prefix set
+          through `GOMBIT_API_PREFIX`: `Load` rewrites `/svc/` to `/svc`, which
+          is what it always served, and the app starts. A prefix set in code is
+          not rewritten, so `Config.API.Prefix = "/svc/"` now fails `Validate`
+          with a field error naming `API.Prefix`; write it without the trailing
+          slash.
+          A segment of a prefix may hold the characters a URI path segment
+          holds, so every prefix that started an app before still does: letters,
+          digits, `- . _ ~`, the sub-delimiters `! $ & ' ( ) + , ; =`, `@`, and
+          non-ASCII (`/api/v1+beta`, `/@acme/api`, `/api;v=1`, `/café`).
+          `Validate` refuses what the document and the routes measurably cannot
+          agree on: `%`, `?`, `#` and control characters, which make the
+          advertised path one no client can send as it is written; Gin's `:` and
+          `{name}` parameters and its `*` catch-all, whose routes answer paths
+          the document never lists (a `*` or `\` mid-path panics at
+          registration); a space with the other US-ASCII characters RFC 3986
+          keeps out of a URI (`" < > [ ] | ^ \``); an empty segment
+          (`/svc//api`); and a `.` or `..` segment, which Gin collapses into a
+          prefix no route is registered under while the document advertises the
+          path it was given.
         refs: [501]
