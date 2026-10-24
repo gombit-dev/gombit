@@ -39,6 +39,9 @@ func TestE2EPostgres(t *testing.T) {
 	runAuditTrail(t, db)
 	runAuditGrantInTransaction(t, db)
 	runAuditGrants(t, db)
+	runPasswordResetBearer(t, db)
+	runPasswordResetCookie(t, db)
+	runPasswordResetService(t, db)
 	runPermissionPersistence(t, db)
 }
 
@@ -63,6 +66,9 @@ func TestE2EMySQL(t *testing.T) {
 	runAuditTrail(t, db)
 	runAuditGrantInTransaction(t, db)
 	runAuditGrants(t, db)
+	runPasswordResetBearer(t, db)
+	runPasswordResetCookie(t, db)
+	runPasswordResetService(t, db)
 	runPermissionPersistence(t, db)
 }
 

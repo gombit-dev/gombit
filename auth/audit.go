@@ -50,6 +50,13 @@ const (
 	// AuditEmailVerified: a user verified their email (POST
 	// /auth/verify-email).
 	AuditEmailVerified AuditAction = "auth.email.verified"
+	// AuditPasswordResetRequested: a password reset message was sent to the
+	// user (POST /auth/password/forgot). A request for an address that is no
+	// account records nothing.
+	AuditPasswordResetRequested AuditAction = "auth.password.reset_requested"
+	// AuditPasswordReset: a user set a new password with a reset token
+	// (Details "sessions_revoked").
+	AuditPasswordReset AuditAction = "auth.password.reset"
 	// AuditGroupMemberAdded: a user was added to a group (Details "group").
 	AuditGroupMemberAdded AuditAction = "auth.group.member_added"
 	// AuditPermissionGranted: a permission was granted to a user or a group
@@ -319,7 +326,9 @@ func (s *Service) Audit(ctx context.Context, event AuditEvent) {
 	event = completeAuditEvent(ctx, event, s.now())
 	err := validateAuditEvent(event)
 	if err == nil {
-		actx, cancel := auditContext(ctx)
+		// The Service's own detach: bounded like auditContext, and also
+		// cancelled when the Service is closed.
+		actx, cancel := s.detach(ctx, auditTimeout)
 		err = s.auditor.Record(actx, event)
 		cancel()
 	}

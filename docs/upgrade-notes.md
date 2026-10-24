@@ -53,6 +53,38 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   logins, registrations and the other recorded operations still work,
   and log a warning for each event they could not write.
 
+- **Breaking.** With auth enabled, an app that registers the password reset routes, their `auth-*` operation IDs or the `AuthPasswordForgotBody` / `AuthPasswordResetBody` / `AuthPasswordResetRequested` / `AuthPasswordResetResult` schema names fails at startup: the framework registers them. (`password-reset-names-reserved`, api, [#332](https://github.com/gombit-dev/gombit/issues/332))
+
+  With `GOMBIT_JWT_SECRET` set, registering `POST
+  {prefix}/auth/password/forgot` or `POST {prefix}/auth/password/reset`,
+  an operation `auth-request-password-reset` or `auth-reset-password`,
+  or a type Huma names `AuthPasswordForgotBody`,
+  `AuthPasswordResetBody`, `AuthPasswordResetRequested`,
+  `AuthPasswordResetResult`, `DataAuthPasswordResetRequested` or
+  `DataAuthPasswordResetResult` now panics when the app starts. Drop
+  the app's own reset routes, which the framework's replace, or rename
+  them.
+
+- **Breaking.** `auth.Service.IssueTokens(ctx, user)` refuses (invalid credentials) a `user` whose `PasswordHash` is not the stored one: a snapshot from before a password change, or a `User` built by hand without it. (`issue-tokens-checks-password-snapshot`, api, [#332](https://github.com/gombit-dev/gombit/issues/332))
+
+  Pass the `User` that `Authenticate` returned, or one loaded from the
+  database with its `PasswordHash`. A session then starts only if that
+  password is still the user's, so a password reset committing between
+  `Authenticate` and `IssueTokens` leaves the old password unable to
+  start one. `auth.Service.Login` does both steps. A `User{ID: id}` built
+  by hand, which used to start a session, now fails: load the user.
+
+- **Breaking.** `auth.Mount` returns the `*auth.Service` it builds; an app that calls it directly keeps it and closes it on shutdown. (`auth-mount-returns-service`, api, [#332](https://github.com/gombit-dev/gombit/issues/332))
+
+  `err := auth.Mount(api, db, cfg)` no longer compiles: write `svc,
+  err := auth.Mount(api, db, cfg)`, and call `svc.Close(ctx)` when the
+  app stops, before it closes the database. The Service runs
+  background work (password reset messages) that Close drains, then
+  cancels; a Service nobody closes leaves that work running against a
+  closed database. With auth disabled, Mount returns a nil Service.
+  An app on `framework.App` does not call `auth.Mount` and changes
+  nothing.
+
 ### Informational
 
 - Bearer-mode session revocation errors include the `WWW-Authenticate: Bearer realm="api"` challenge when the handler returns 401. (`bearer-handler-401-challenge`, api, [#604](https://github.com/gombit-dev/gombit/issues/604))
@@ -99,6 +131,20 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   bytes of visible ASCII: a UUID, a trace-style hex ID) sees it back
   unchanged, as before. Every consumer (response header, logs, error
   envelopes, the audit trail) carries the one accepted ID.
+
+- Password reset: `POST {prefix}/auth/password/forgot` mails a single-use, expiring link and answers the same 202 whether or not the email is an account; `POST {prefix}/auth/password/reset` sets the new password and revokes every session of the user. (`password-reset`, api, [#332](https://github.com/gombit-dev/gombit/issues/332))
+
+  `GOMBIT_AUTH_PASSWORD_RESET_TTL` (1h) and
+  `GOMBIT_AUTH_PASSWORD_RESET_URL` configure the link;
+  `GOMBIT_AUTH_PASSWORD_RESET_KEEP_SESSIONS=true` keeps the sessions.
+  `auth.Service.RequestPasswordReset` and `ResetPassword` are the same
+  flow for an app's own code. A production app with no mailer sends
+  no message. The messages are sent by the auth Service's bounded
+  background workers (a request they cannot admit is a 503);
+  `framework.App` closes the Service when it stops. A login now starts
+  its session under the user's row lock (`auth.Service.Login`).
+
+- A new app's placeholder `schema.ts` includes the password reset operations (and the forgot route's 503 with `Retry-After`); an existing app's generated client gets them from `gombit client generate`. (`client-schema-password-reset`, client, [#332](https://github.com/gombit-dev/gombit/issues/332))
 
 - An already-rotated refresh token that has expired is a 401 and no longer revokes the user's sessions. (`expired-rotated-refresh-token-no-cascade`, security, [#458](https://github.com/gombit-dev/gombit/issues/458))
 

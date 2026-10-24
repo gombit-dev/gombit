@@ -23,18 +23,26 @@ const (
 // tokens); AuthModeCookie mounts the same operation IDs and paths but
 // exchanges HttpOnly session cookies instead, plus GET /auth/csrf. The two
 // modes are mutually exclusive per app — see docs/auth-cookie.md for the
-// cookie/CSRF threat model. Both modes mount email verification (AUTH-1);
-// opts configure the Service the routes use (WithMailer, WithLogger).
-func Mount(api huma.API, db *gorm.DB, cfg config.Config, opts ...Option) error {
+// cookie/CSRF threat model. Both modes mount email verification (AUTH-1)
+// and password reset (AUTH-2); opts configure the Service the routes use
+// (WithMailer, WithLogger, WithAuditor).
+//
+// Mount returns the Service the routes use, built from cfg (so the routes
+// and the Service share one configuration), and the caller owns it: the
+// Service runs background work (password reset messages) that Close
+// drains and cancels, and the caller closes it on shutdown, before what
+// the work uses (the database, the mailer). framework.App does. With auth
+// disabled, Mount mounts nothing and returns a nil Service.
+func Mount(api huma.API, db *gorm.DB, cfg config.Config, opts ...Option) (*Service, error) {
 	if api == nil {
-		return errors.New("auth: nil API")
+		return nil, errors.New("auth: nil API")
 	}
 	if !cfg.Auth.Enabled() {
-		return nil
+		return nil, nil
 	}
 	svc, err := NewService(db, cfg, opts...)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	prefix := strings.TrimSuffix(cfg.API.Prefix, "/")
 	if prefix == "" {
@@ -51,10 +59,10 @@ func Mount(api huma.API, db *gorm.DB, cfg config.Config, opts ...Option) error {
 
 	if cfg.Auth.EffectiveMode() == config.AuthModeCookie {
 		mountCookieRoutes(api, svc, prefix)
-		return nil
+		return svc, nil
 	}
 	mountBearerRoutes(api, svc, prefix)
-	return nil
+	return svc, nil
 }
 
 func mountBearerRoutes(api huma.API, svc *Service, prefix string) {
@@ -96,6 +104,7 @@ func mountBearerRoutes(api huma.API, svc *Service, prefix string) {
 
 	registerSessionRoutes(api, svc, prefix, bearerSecurityName, svc.requireBearer(), false)
 	registerVerificationRoutes(api, svc, prefix, bearerSecurityName, svc.requireBearer())
+	registerPasswordResetRoutes(api, svc, prefix, false)
 }
 
 func mountCookieRoutes(api huma.API, svc *Service, prefix string) {
@@ -146,6 +155,7 @@ func mountCookieRoutes(api huma.API, svc *Service, prefix string) {
 
 	registerSessionRoutes(api, svc, prefix, cookieSecurityName, svc.requireCookieSession(), true)
 	registerVerificationRoutes(api, svc, prefix, cookieSecurityName, svc.requireCookieSession())
+	registerPasswordResetRoutes(api, svc, prefix, true)
 }
 
 // cookieRefreshErrorResponses declares the cookie refresh's error responses.

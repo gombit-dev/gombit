@@ -123,7 +123,11 @@ mail behind the `auth.Mailer` interface (`framework.WithAuthMailer`,
 logins, logouts, registrations, refresh reuse, session revocations,
 verification, grants and admin writes, with actor, target and request, never
 a secret; `auth.Auditor` / `framework.WithAuthAuditor`,
-`auth.ListAuditEvents`, `auth.RecordAuditEvent`); see `docs/auth.md`.
+`auth.ListAuditEvents`, `auth.RecordAuditEvent`), and AUTH-2 (#332):
+password reset (`POST {prefix}/auth/password/forgot`, non-enumerating and
+answered before the lookup; `POST {prefix}/auth/password/reset`, revoking
+the user's sessions unless `GOMBIT_AUTH_PASSWORD_RESET_KEEP_SESSIONS`), on
+the shared one-time-token flow (`auth/onetime.go`); see `docs/auth.md`.
 Don't assume generated apps are committed in-tree; `gombit new` writes them
 on demand. Check `git log` / `ls` before describing "how the code works."
 
