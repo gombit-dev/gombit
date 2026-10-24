@@ -164,12 +164,14 @@ type HTTPConfig struct {
 type APIConfig struct {
 	// Prefix is where the API is served ("/api/v1"). Load puts
 	// GOMBIT_API_PREFIX through the rule of internal/urlbase: no trailing
-	// '/', one separator between segments, no '.' or '..' segment. Generated
-	// resources and the OpenAPI document concatenate it with a route, and the
-	// client is built from that document. Set this field in code to a value
-	// that is not already in that form — "api", "/svc/", "/", "/a b" — and
-	// Validate rejects it rather than start an app whose document no route
-	// answers.
+	// '/', one separator between segments, no '.' or '..' segment, and
+	// segments built from the characters a URI path segment holds (letters,
+	// digits, - . _ ~, the sub-delimiters ! $ & ' ( ) + , ; =, @, and
+	// non-ASCII). Generated resources and the OpenAPI document concatenate it
+	// with a route, and the client is built from that document. Set this field
+	// in code to a value that is not already in that form — "api", "/svc/",
+	// "/a b" — and Validate rejects it rather than start an app whose document
+	// no route answers.
 	Prefix string
 	// DocsEnabled serves the FastAPI-style UI at /docs.
 	// Default() (development) leaves this true. Changing Environment on a

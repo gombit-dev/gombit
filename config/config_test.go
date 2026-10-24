@@ -1271,7 +1271,7 @@ func TestValidateEmailVerification(t *testing.T) {
 
 // The rule of internal/urlbase, spelled the way config reports it.
 const (
-	apiPrefixSegmentRule = `must be '/' followed by segments of a-z, A-Z, 0-9, . _ - ~ separated by a single '/'`
+	apiPrefixSegmentRule = `must be '/' followed by segments of URI path characters (letters, digits, - . _ ~ ! $ & ' ( ) + , ; = @, or non-ASCII) separated by a single '/'`
 	apiPrefixDotRule     = `must not contain a '.' or '..' segment`
 )
 
@@ -1312,11 +1312,23 @@ func TestLoadNormalisesTheAPIPrefix(t *testing.T) {
 // The same rule as it reaches a prefix set in code, where nothing normalises
 // it: a configuration that validates is one whose document its own routes
 // answer.
+//
+// The accepted cases are prefixes that work on main and keep working here (see
+// internal/urlbase for how each refused character fails); the refused ones are
+// every character measured not to round-trip between the document and the route.
 func TestValidateAPIPrefix(t *testing.T) {
 	tests := []struct{ name, prefix, want string }{
 		{name: "default", prefix: "/api/v1"},
 		{name: "one segment", prefix: "/svc"},
 		{name: "punctuation a path allows", prefix: "/a.b_c-~d"},
+		{name: "sub-delimiters", prefix: "/api/v1+beta"},
+		{name: "an at sign", prefix: "/@acme/api"},
+		{name: "a parameter-looking segment", prefix: "/api;v=1"},
+		{name: "a comma", prefix: "/api/v1,2"},
+		{name: "parentheses", prefix: "/api/(v1)"},
+		{name: "the rest of the sub-delimiters", prefix: `/api/!$&'x`},
+		{name: "non-ASCII", prefix: "/café"},
+		{name: "a segment of only dots", prefix: "/..."},
 		{name: "trailing slash", prefix: "/svc/", want: "must not end with '/'"},
 		{name: "only a slash", prefix: "/", want: `must not be empty or only '/'`},
 		{name: "no leading slash", prefix: "api", want: "must start with /"},
@@ -1324,8 +1336,19 @@ func TestValidateAPIPrefix(t *testing.T) {
 		{name: "a space inside", prefix: "/a b", want: apiPrefixSegmentRule},
 		{name: "braces", prefix: "/api/{id}", want: apiPrefixSegmentRule},
 		{name: "a gin parameter", prefix: "/api/:id", want: apiPrefixSegmentRule},
+		{name: "a gin wildcard", prefix: "/api/*id", want: apiPrefixSegmentRule},
 		{name: "an empty segment", prefix: "/svc//api", want: apiPrefixSegmentRule},
 		{name: "a percent escape", prefix: "/a%20b", want: apiPrefixSegmentRule},
+		{name: "a query delimiter", prefix: "/api?v=1", want: apiPrefixSegmentRule},
+		{name: "a fragment delimiter", prefix: "/api#v1", want: apiPrefixSegmentRule},
+		{name: "a backslash", prefix: `/api\v1`, want: apiPrefixSegmentRule},
+		{name: "square brackets", prefix: "/api[v1]", want: apiPrefixSegmentRule},
+		{name: "a pipe", prefix: "/api|v1", want: apiPrefixSegmentRule},
+		{name: "markup", prefix: "/api<v1>", want: apiPrefixSegmentRule},
+		{name: "a quote", prefix: `/api"v1`, want: apiPrefixSegmentRule},
+		{name: "a caret and a backtick", prefix: "/api^v1`", want: apiPrefixSegmentRule},
+		{name: "a control character", prefix: "/api\x01v1", want: apiPrefixSegmentRule},
+		{name: "a C1 control character", prefix: "/api\u0085v1", want: apiPrefixSegmentRule},
 		{name: "a parent segment", prefix: "/api/../v1", want: apiPrefixDotRule},
 		{name: "a current segment", prefix: "/.", want: apiPrefixDotRule},
 	}
