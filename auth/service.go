@@ -9,6 +9,7 @@ import (
 
 	"github.com/gombit-dev/gombit/config"
 	"github.com/gombit-dev/gombit/database"
+	"go.uber.org/zap"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -21,6 +22,9 @@ type Service struct {
 	secret      []byte
 	hasher      Hasher
 	clock       Clock
+	mailer      Mailer
+	logger      *zap.Logger
+	auditor     Auditor
 	dummyOnce   sync.Once
 	dummyHash   string
 	rotateMu    sync.Mutex
@@ -33,11 +37,37 @@ type Service struct {
 type rotateCall struct {
 	wg   sync.WaitGroup
 	pair TokenPair
+	user User
 	err  error
 }
 
+// Option configures a Service (NewService) or the routes Mount registers.
+type Option func(*Service)
+
+// WithMailer sets the Mailer the account lifecycle's messages go through
+// (email verification). Without one, sending a message fails with
+// ErrNoMailer, and registration sends none.
+func WithMailer(m Mailer) Option {
+	return func(s *Service) {
+		if m != nil {
+			s.mailer = m
+		}
+	}
+}
+
+// WithLogger sets the logger for what the service reports without failing
+// the request (a verification message that could not be sent at
+// registration). Default: none.
+func WithLogger(l *zap.Logger) Option {
+	return func(s *Service) {
+		if l != nil {
+			s.logger = l
+		}
+	}
+}
+
 // NewService constructs a Service. cfg.Auth.JWTSecret must be set.
-func NewService(db *gorm.DB, cfg config.Config) (*Service, error) {
+func NewService(db *gorm.DB, cfg config.Config, opts ...Option) (*Service, error) {
 	if db == nil {
 		return nil, errors.New("auth: nil database")
 	}
@@ -56,6 +86,12 @@ func NewService(db *gorm.DB, cfg config.Config) (*Service, error) {
 		secret: []byte(cfg.Auth.JWTSecret),
 		hasher: newBcryptHasher(cfg.Auth.BcryptCost),
 		clock:  systemClock{},
+		mailer: noMailer{},
+		logger: zap.NewNop(),
+	}
+	s.auditor = DBAuditor(db)
+	for _, opt := range opts {
+		opt(s)
 	}
 	return s, nil
 }
@@ -67,16 +103,31 @@ func (s *Service) now() time.Time {
 	return s.clock.Now()
 }
 
-// Register creates a user. Duplicate emails return errEmailTaken.
+// Register creates a user, with an unverified email, and mails them a
+// verification link when a Mailer is configured (a failure to send is
+// logged, not returned: POST /auth/verify-email/resend asks again).
+// Duplicate emails return errEmailTaken.
 func (s *Service) Register(ctx context.Context, email, password string) (User, error) {
-	return s.createUser(ctx, email, password, false)
+	user, err := s.createUser(ctx, email, password, false)
+	if err != nil {
+		return User{}, err
+	}
+	s.Audit(ctx, AuditEvent{Action: AuditRegistered, ActorUserID: uintPtr(user.ID), TargetUserID: uintPtr(user.ID)})
+	s.sendVerificationOnRegister(ctx, user)
+	return user, nil
 }
 
 // CreateSuperuser creates a user with IsSuperuser set, for gombit
 // createsuperuser (M4-6). It shares Register's hasher and uniqueness path;
-// duplicate emails return errEmailTaken.
+// duplicate emails return errEmailTaken. The operator who creates it vouches
+// for the address, so its email starts verified, and no message is sent.
 func (s *Service) CreateSuperuser(ctx context.Context, email, password string) (User, error) {
-	return s.createUser(ctx, email, password, true)
+	user, err := s.createUser(ctx, email, password, true)
+	if err != nil {
+		return User{}, err
+	}
+	s.Audit(ctx, AuditEvent{Action: AuditSuperuserCreated, TargetUserID: uintPtr(user.ID)})
+	return user, nil
 }
 
 func (s *Service) createUser(ctx context.Context, email, password string, superuser bool) (User, error) {
@@ -89,6 +140,11 @@ func (s *Service) createUser(ctx context.Context, email, password string, superu
 		return User{}, err
 	}
 	user := User{Email: email, PasswordHash: hash, IsSuperuser: superuser}
+	if superuser {
+		now := s.now()
+		user.EmailVerifiedAt = &now
+		user.VerifiedEmail = email
+	}
 	if err := s.db.WithContext(ctx).Create(&user).Error; err != nil {
 		if database.IsUniqueViolation(err) {
 			return User{}, errEmailTaken
@@ -105,17 +161,27 @@ func (s *Service) Authenticate(ctx context.Context, email, password string) (Use
 	err := s.db.WithContext(ctx).Where("email = ?", email).First(&user).Error
 	if err != nil {
 		s.compareDummy(password)
+		// No target: the attempted address is not recorded.
+		s.Audit(ctx, AuditEvent{Action: AuditLoginFailed, Details: details("reason", "unknown_account")})
 		return User{}, errInvalidCredentials
 	}
 	if err := s.hasher.Compare(user.PasswordHash, password); err != nil {
+		s.Audit(ctx, AuditEvent{Action: AuditLoginFailed, TargetUserID: uintPtr(user.ID), Details: details("reason", "wrong_password")})
 		return User{}, errInvalidCredentials
 	}
 	return user, nil
 }
 
-// IssueTokens returns a new access JWT and a rotating refresh token.
+// IssueTokens returns a new access JWT and a rotating refresh token: it
+// starts a session, so it records the login as succeeded (Authenticate
+// records the failures).
 func (s *Service) IssueTokens(ctx context.Context, user User) (TokenPair, error) {
-	return s.issueTokens(s.db.WithContext(ctx), user, s.now())
+	pair, err := s.issueTokens(s.db.WithContext(ctx), user, s.now())
+	if err != nil {
+		return TokenPair{}, err
+	}
+	s.Audit(ctx, AuditEvent{Action: AuditLoginSucceeded, ActorUserID: uintPtr(user.ID), TargetUserID: uintPtr(user.ID)})
+	return pair, nil
 }
 
 func (s *Service) issueTokens(tx *gorm.DB, user User, now time.Time) (TokenPair, error) {
@@ -145,14 +211,25 @@ func (s *Service) issueTokens(tx *gorm.DB, user User, now time.Time) (TokenPair,
 }
 
 // RotateRefresh validates the current refresh token, revokes it, and issues a
-// new pair. Reuse of an already-rotated token revokes the user's remaining
-// tokens; a token revoked by logout or session revocation is just invalid.
-// Concurrent callers with the same still-valid token share one
-// rotation so a lost race cannot family-revoke the winner's new session.
+// new pair. Reuse of an already-rotated token before it expires revokes the
+// user's remaining tokens; a token revoked by logout or session revocation,
+// and any expired token, is just invalid. Concurrent callers with the same
+// still-valid token share one rotation so a lost race cannot family-revoke
+// the winner's new session.
 func (s *Service) RotateRefresh(ctx context.Context, raw string) (TokenPair, error) {
+	pair, _, err := s.rotateRefresh(ctx, raw)
+	return pair, err
+}
+
+// rotateRefresh is RotateRefresh, plus the session's user as rotateRefreshOnce
+// loaded it inside the rotation's transaction. refreshCookie uses it instead
+// of a second, post-commit lookup: a failure loading the user would otherwise
+// surface after the rotation already committed, leaving the browser's old
+// refresh cookie rotated with no way to tell it (#606).
+func (s *Service) rotateRefresh(ctx context.Context, raw string) (TokenPair, User, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return TokenPair{}, errInvalidRefreshToken
+		return TokenPair{}, User{}, errInvalidRefreshToken
 	}
 	hash := hashRefreshToken(raw)
 
@@ -166,32 +243,35 @@ func (s *Service) RotateRefresh(ctx context.Context, raw string) (TokenPair, err
 			s.onRotateJoin()
 		}
 		call.wg.Wait()
-		return call.pair, call.err
+		return call.pair, call.user, call.err
 	}
 	call := &rotateCall{}
 	call.wg.Add(1)
 	s.rotateCalls[hash] = call
 	s.rotateMu.Unlock()
 
-	pair, err := s.rotateRefreshOnce(ctx, raw, hash)
-	call.pair, call.err = pair, err
+	pair, user, err := s.rotateRefreshOnce(ctx, raw, hash)
+	call.pair, call.user, call.err = pair, user, err
 	s.rotateMu.Lock()
 	delete(s.rotateCalls, hash)
 	s.rotateMu.Unlock()
 	call.wg.Done()
-	return pair, err
+	return pair, user, err
 }
 
 // rotateRefreshOnce runs one rotation in a transaction. Lock order: the
-// user's row (lockUserTx) comes before any write to a refresh_tokens row,
-// the same order every revocation uses; the compare-and-swap below must stay
-// after it. The initial read of the token takes no lock. The rotation's
+// user's row (lockUserTx) comes before any write to or locking read of a
+// refresh_tokens row, the same order every revocation uses; the
+// compare-and-swap and the re-reads below (hasSuccessorTx) must stay after
+// it. The initial read of the token takes no lock. The rotation's
 // instant is read once the lock is held: the lock can wait behind another
 // rotation or a revocation, and a token that expired during that wait must
 // not rotate, nor its successor's lifetime start before the wait.
-func (s *Service) rotateRefreshOnce(ctx context.Context, raw, hash string) (TokenPair, error) {
+func (s *Service) rotateRefreshOnce(ctx context.Context, raw, hash string) (TokenPair, User, error) {
 	var pair TokenPair
+	var user User
 	var reuse bool
+	var reuseUser uint
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var row RefreshToken
 		if err := tx.Where("token_hash = ?", hash).First(&row).Error; err != nil {
@@ -200,7 +280,8 @@ func (s *Service) rotateRefreshOnce(ctx context.Context, raw, hash string) (Toke
 			}
 			return err
 		}
-		user, err := lockUserTx(tx, row.UserID)
+		var err error
+		user, err = lockUserTx(tx, row.UserID)
 		if err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return errUserNotFound
@@ -210,6 +291,47 @@ func (s *Service) rotateRefreshOnce(ctx context.Context, raw, hash string) (Toke
 			return err
 		}
 		now := s.now()
+		// Expiry comes before the reuse check: an expired token is a plain
+		// 401, rotated or not (#458). A rotated row keeps its original
+		// expires_at; past it the token cannot refresh anyone, and in cookie
+		// mode the browser has already dropped it with the cookie's Max-Age,
+		// so a stale copy (a lost rotation response, a restored backup) must
+		// not end every live session. The cost: theft is detected only while
+		// the rotated token is unexpired. If a thief rotated it first and the
+		// legitimate client comes back only after it expired, the thief's
+		// session survives this 401; the sessions list is how the user finds
+		// and revokes it.
+		if !row.ExpiresAt.After(now) {
+			// An expired token that has a successor was rotated, perhaps by
+			// another tab of the same browser whose new session is live: it
+			// is errRotationRaced, still a 401, so that refreshCookie does
+			// not clear that session's cookies. Only a rotation leaves a
+			// successor; a token revoked by logout, a session revocation or
+			// the reuse cascade has none, and its 401 clears them. If the
+			// successor was revoked since, the cookies stay this time, and a
+			// refresh with the successor's cookie clears them.
+			rotated := row.ReplacedBy != nil
+			if row.RevokedAt == nil {
+				// The read above took no lock, and a rotation of this token
+				// may have committed while this one waited for the user's
+				// lock: re-read the row, with a locking read
+				// (hasSuccessorTx). SQLite's dialect drops the clause. Within
+				// one process this race cannot happen: the process joins
+				// concurrent rotations of a token into one. Several
+				// processes sharing one database file are not covered: in
+				// WAL mode another process's rotation can commit while this
+				// transaction reads from its older snapshot, and this
+				// refresh then finds no successor and clears the cookies.
+				if rotated, err = hasSuccessorTx(tx, row.ID); err != nil {
+					// A server failure, like the lock's: not a 401.
+					return err
+				}
+			}
+			if rotated {
+				return errRotationRaced
+			}
+			return errInvalidRefreshToken
+		}
 		if row.RevokedAt != nil {
 			if row.ReplacedBy == nil {
 				// Revoked by logout or session revocation, not by rotation:
@@ -217,14 +339,12 @@ func (s *Service) rotateRefreshOnce(ctx context.Context, raw, hash string) (Toke
 				// theft, so it must not end the user's other sessions.
 				return errInvalidRefreshToken
 			}
+			// Rotated, and presented again before it expired: reuse.
 			if err := revokeAllTx(tx, row.UserID, now); err != nil {
 				return err
 			}
-			reuse = true
+			reuse, reuseUser = true, row.UserID
 			return nil
-		}
-		if !row.ExpiresAt.After(now) {
-			return errInvalidRefreshToken
 		}
 
 		result := tx.Model(&RefreshToken{}).
@@ -234,9 +354,26 @@ func (s *Service) rotateRefreshOnce(ctx context.Context, raw, hash string) (Toke
 			return result.Error
 		}
 		if result.RowsAffected != 1 {
-			// Lost the compare-and-swap: another caller already rotated this
-			// still-valid token. That is not reuse-as-theft; do not revoke the
-			// winner's new session.
+			// Lost the compare-and-swap: the token was revoked after the
+			// unlocked read above. Either a rotation of the same token on
+			// another instance won and gave it a successor, or something
+			// revoked it with none: a logout (which takes no user lock), a
+			// session revocation that committed while this rotation waited
+			// for the user's lock, or the reuse cascade. None of them is
+			// reuse-as-theft; do not revoke anything. The re-read tells them
+			// apart, as for an expired token above. A successor means a
+			// rotation won: errRotationRaced, and refreshCookie leaves the
+			// cookies the winner's response sets. None means the token was
+			// revoked: a plain invalid token, whose 401 clears the dead
+			// cookies.
+			rotated, err := hasSuccessorTx(tx, row.ID)
+			if err != nil {
+				// A server failure, like the lock's: not a 401.
+				return err
+			}
+			if rotated {
+				return errRotationRaced
+			}
 			return errInvalidRefreshToken
 		}
 
@@ -255,12 +392,29 @@ func (s *Service) rotateRefreshOnce(ctx context.Context, raw, hash string) (Toke
 		return nil
 	})
 	if err != nil {
-		return TokenPair{}, err
+		return TokenPair{}, User{}, err
 	}
 	if reuse {
-		return TokenPair{}, errRefreshReuse
+		s.Audit(ctx, AuditEvent{Action: AuditRefreshReuse, TargetUserID: uintPtr(reuseUser)})
+		return TokenPair{}, User{}, errRefreshReuse
 	}
-	return pair, nil
+	return pair, user, nil
+}
+
+// hasSuccessorTx re-reads the refresh token row id in tx, which holds the
+// user's lock (lockUserTx), and reports whether a rotation has given it a
+// successor. It is a locking read: on MySQL (REPEATABLE READ) a plain read
+// sees the snapshot this transaction's first read took, from before a
+// rotation that committed while it waited for the user's lock, and an UPDATE
+// that matched no row does not move that snapshot; a locking read sees the
+// latest committed row. PostgreSQL (READ COMMITTED) would see it either way.
+func hasSuccessorTx(tx *gorm.DB, id uint) (bool, error) {
+	var current RefreshToken
+	if err := tx.Clauses(clause.Locking{Strength: clause.LockingStrengthShare}).
+		First(&current, id).Error; err != nil {
+		return false, err
+	}
+	return current.ReplacedBy != nil, nil
 }
 
 // RevokeRefresh invalidates one refresh token. Missing/already-revoked tokens
@@ -271,9 +425,25 @@ func (s *Service) RevokeRefresh(ctx context.Context, raw string) error {
 		return errInvalidRefreshToken
 	}
 	now := s.now()
-	return s.db.WithContext(ctx).Model(&RefreshToken{}).
-		Where("token_hash = ? AND revoked_at IS NULL", hashRefreshToken(raw)).
-		Update("revoked_at", now).Error
+	hash := hashRefreshToken(raw)
+	var row RefreshToken
+	if err := s.db.WithContext(ctx).Where("token_hash = ? AND revoked_at IS NULL", hash).Limit(1).Find(&row).Error; err != nil {
+		return err
+	}
+	if row.ID == 0 {
+		return nil
+	}
+	result := s.db.WithContext(ctx).Model(&RefreshToken{}).
+		Where("id = ? AND revoked_at IS NULL", row.ID).
+		Update("revoked_at", now)
+	if result.Error != nil {
+		return result.Error
+	}
+	// RowsAffected: a concurrent logout of the same token records it once.
+	if result.RowsAffected == 1 {
+		s.Audit(ctx, AuditEvent{Action: AuditLogout, ActorUserID: uintPtr(row.UserID), TargetUserID: uintPtr(row.UserID)})
+	}
+	return nil
 }
 
 // ParseAccess validates an access JWT, from the Bearer header or the session
@@ -383,10 +553,11 @@ type TokenPair struct {
 
 // PublicUser is the safe user representation returned by register and /me.
 type PublicUser struct {
-	ID    uint   `json:"id" example:"1" doc:"User identifier"`
-	Email string `json:"email" example:"ada@example.com" format:"email" doc:"Normalized email"`
+	ID            uint   `json:"id" example:"1" doc:"User identifier"`
+	Email         string `json:"email" example:"ada@example.com" format:"email" doc:"Normalized email"`
+	EmailVerified bool   `json:"email_verified" example:"false" doc:"True once the user has confirmed they own email (POST /auth/verify-email)"`
 }
 
 func toPublicUser(user User) PublicUser {
-	return PublicUser{ID: user.ID, Email: user.Email}
+	return PublicUser{ID: user.ID, Email: user.Email, EmailVerified: user.EmailVerified()}
 }

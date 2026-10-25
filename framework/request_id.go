@@ -60,6 +60,9 @@ type requestMetaKey struct{}
 func requestContextMiddleware(timeout time.Duration) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		requestID := strings.TrimSpace(c.GetHeader(RequestIDHeader))
+		if !validInboundRequestID(requestID) {
+			requestID = "" // generated below, like a missing one
+		}
 		traceID := traceIDFromTraceparent(c.GetHeader(TraceparentHeader))
 
 		meta := &requestMeta{}
@@ -107,6 +110,22 @@ func requestContextMiddleware(timeout time.Duration) gin.HandlerFunc {
 
 		c.Next()
 	}
+}
+
+// validInboundRequestID reports whether an inbound X-Request-Id is honored:
+// at most contract.MaxRequestIDLength bytes of visible ASCII. Anything else
+// (too long to store whole, control characters a log line would carry) is
+// replaced, so the ID every consumer sees is the one accepted, exactly.
+func validInboundRequestID(id string) bool {
+	if len(id) > contract.MaxRequestIDLength {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		if id[i] < 0x21 || id[i] > 0x7e {
+			return false
+		}
+	}
+	return true
 }
 
 // GetRequestID returns the request ID for the current request. It reads the

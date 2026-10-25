@@ -509,6 +509,20 @@ releases:
 
   - version: unreleased
     changes:
+      - id: bearer-handler-401-challenge
+        kind: informational
+        area: api
+        summary: "Bearer-mode session revocation errors include the `WWW-Authenticate: Bearer realm=\"api\"` challenge when the handler returns 401."
+        details: |
+          Cookie-mode 401 responses still omit a Bearer challenge.
+        refs: [604]
+
+      - id: verification-resend-rate-limit-contract
+        kind: informational
+        area: api
+        summary: "The email-verification resend operation's OpenAPI contract declares its 429 response and integer `Retry-After` header."
+        refs: [611]
+
       - id: go-1-26-9
         kind: informational
         area: dependency
@@ -519,3 +533,137 @@ releases:
           the go command downloads that toolchain; with `GOTOOLCHAIN=local`,
           or in a build image, install Go 1.26.9 or later first.
         refs: [602]
+
+      - id: admin-integers-must-fit
+        kind: informational
+        area: behavior
+        summary: "Admin writes refuse an integer the field's Go type cannot hold, and a JSON number from 2^53 on, with a 422 on that field."
+        details: |
+          They were stored wrapped (`300` into an `int8` became `44`; `-5` into
+          a `uint` made the list endpoint a 500). A client that sends a large
+          integer sends it as a string (`"9007199254740993"`), which is read
+          exactly.
+        refs: [448]
+
+      - id: email-verification-schema
+        kind: manual
+        breaking: true
+        area: schema
+        summary: "Email verification adds `users.email_verified_at` and `users.verified_email`, and a table, `auth_one_time_tokens`, which registration and `gombit createsuperuser` write: an app migrates before it runs this release."
+        details: |
+          `auth.User` gains `EmailVerifiedAt` and `VerifiedEmail` (the
+          address the verification is for), and the new framework model
+          `auth.OneTimeToken` holds the hashed, single-use tokens the account
+          lifecycle mails. Until the database has both, registering a user and
+          `gombit createsuperuser` fail. Add `&auth.OneTimeToken{}` to the
+          app's `AutoMigrate` (`internal/platform/database.go`), then generate
+          and apply the migration (`gombit db makemigrations --model
+          github.com/gombit-dev/gombit/auth.OneTimeToken`, `gombit db
+          migrate`); `gombit upgrade --dry-run` lists the steps. Existing users
+          start unverified; mark the ones you trust by setting
+          `email_verified_at` and `verified_email` (to the user's `email`)
+          yourself.
+        schema:
+          - {model: auth.User, table: users, change: altered}
+          - {model: auth.OneTimeToken, table: auth_one_time_tokens, change: added}
+        refs: [331]
+
+      - id: email-verification-names-reserved
+        kind: manual
+        breaking: true
+        area: api
+        summary: "With auth enabled, an app that registers the email verification routes, their `auth-*` operation IDs or the `AuthVerifyEmailBody` / `AuthVerificationResult` schema names fails at startup: the framework registers them."
+        details: |
+          With `GOMBIT_JWT_SECRET` set, registering `POST
+          {prefix}/auth/verify-email` or `POST {prefix}/auth/verify-email/resend`,
+          an operation `auth-verify-email` or `auth-resend-email-verification`,
+          or a type Huma names `AuthVerifyEmailBody`, `AuthVerificationResult`
+          or `DataAuthVerificationResult` now panics when the app starts. Drop
+          the app's own verification routes, which the framework's replace, or
+          rename them.
+        refs: [331]
+
+      - id: email-verification
+        kind: informational
+        area: api
+        summary: "Email verification: registration mails a single-use, expiring link (through `framework.WithAuthMailer`), `POST {prefix}/auth/verify-email` consumes it, `POST {prefix}/auth/verify-email/resend` sends a new one, and `auth.RequireVerifiedEmail` gates an app's own operations."
+        details: |
+          A production app with no mailer sends no message (registration still
+          succeeds; a resend is a 503); development and test apps log each
+          message instead. `GET /me` and registration report `email_verified`.
+          `GOMBIT_AUTH_EMAIL_VERIFICATION_TTL` (24h) and
+          `GOMBIT_AUTH_EMAIL_VERIFICATION_URL` configure the link.
+        refs: [331]
+
+      - id: client-schema-email-verified
+        kind: informational
+        area: client
+        summary: "A new app's placeholder `schema.ts` includes the verification operations and `PublicUser.email_verified`; an existing app's generated client gets them from `gombit client generate`."
+        refs: [331]
+
+      - id: audit-trail-schema
+        kind: manual
+        area: schema
+        summary: "The security audit trail adds a table, `auth_audit_events`: migrate it, or the events are not recorded (each failure is logged, and the operation still succeeds)."
+        details: |
+          The new framework model `auth.AuditEvent` holds one row per
+          security-sensitive operation. Add `&auth.AuditEvent{}` to the app's
+          `AutoMigrate` (`internal/platform/database.go`), then generate and
+          apply the migration (`gombit db makemigrations --model
+          github.com/gombit-dev/gombit/auth.AuditEvent`, `gombit db
+          migrate`); `gombit upgrade --dry-run` lists the steps. Until then,
+          logins, registrations and the other recorded operations still work,
+          and log a warning for each event they could not write.
+        schema:
+          - {model: auth.AuditEvent, table: auth_audit_events, change: added}
+        refs: [337]
+
+      - id: audit-trail
+        kind: informational
+        area: api
+        summary: "A security audit trail: logins (succeeded and failed), logouts, registrations, superuser creation, refresh-token reuse, session revocations, email verification, group and permission grants, and admin writes each record who, what, when and which request, never a secret."
+        details: |
+          Events go to `auth_audit_events` (`auth.ListAuditEvents` reads
+          them), or to the app's own `auth.Auditor`
+          (`framework.WithAuthAuditor`), for the auth routes and the admin.
+          `auth.CaptureRequestInfo` and `auth.RecordAuditEvent` record an
+          app's own sensitive operations; `admin.Mount` takes auth options.
+        refs: [337]
+
+      - id: request-id-bounded
+        kind: informational
+        area: behavior
+        summary: "An inbound `X-Request-Id` longer than 128 bytes, or holding a space or a control character, is replaced by a generated ID instead of being echoed, logged and stored as sent."
+        details: |
+          A caller that sends a valid ID (at most `contract.MaxRequestIDLength`
+          bytes of visible ASCII: a UUID, a trace-style hex ID) sees it back
+          unchanged, as before. Every consumer (response header, logs, error
+          envelopes, the audit trail) carries the one accepted ID.
+        refs: [337]
+
+      - id: expired-rotated-refresh-token-no-cascade
+        kind: informational
+        area: security
+        summary: "An already-rotated refresh token that has expired is a 401 and no longer revokes the user's sessions."
+        refs: [458]
+
+      - id: cookie-refresh-401-clears-session-cookies
+        kind: informational
+        area: behavior
+        summary: "In cookie mode, a refresh rejected with a 401 clears the `gombit_access` and `gombit_refresh` cookies."
+        details: |
+          The OpenAPI document declares that 401 on the cookie-mode `refresh`
+          operation, with its `Set-Cookie` header and the D10 error envelope.
+        refs: [458]
+
+      - id: client-schema-cookie-refresh-401
+        kind: informational
+        area: client
+        summary: "A new cookie-mode app's placeholder `schema.ts` includes the refresh's 401 response; an existing app's generated client gets it from `gombit client generate`."
+        refs: [458]
+
+      - id: cookie-refresh-loads-user-before-commit
+        kind: informational
+        area: behavior
+        summary: "In cookie mode, a `POST /auth/refresh` that fails loading the session user rolls the token rotation back with it, instead of answering 500 after the rotation already committed."
+        refs: [606]

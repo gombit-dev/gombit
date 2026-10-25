@@ -15,8 +15,9 @@ func OpenDatabase(cfg config.DatabaseConfig) (*database.DB, error) {
 	return database.Open(cfg)
 }
 
-// AutoMigrate runs GORM AutoMigrate for the framework's tables (auth, and
-// the storage claims that file uploads are owned through) and
+// AutoMigrate runs GORM AutoMigrate for the framework's tables (auth, its
+// one-time tokens, and the storage claims that file uploads are owned
+// through) and
 // feature-package models so the example API can serve before Atlas
 // migrations. Framework models must stay in this call: gombit make resource
 // collects every AutoMigrate argument as the entire desired Atlas schema.
@@ -29,6 +30,8 @@ func AutoMigrate(db *database.DB) error {
 		&auth.RefreshToken{},
 		&auth.Group{},
 		&auth.Permission{},
+		&auth.OneTimeToken{},
+		&auth.AuditEvent{},
 		&claims.Claim{},
 		&product.Product{}, &book.Book{},
 	)

@@ -97,10 +97,16 @@ beyond the first page) and the local filter is off; otherwise it filters the
 loaded page client-side. A model registered without a `Search` defaults it to
 its text columns (an explicit empty `Search` opts out), so pickers search out of
 the box.
-`datetime-local` values are converted to RFC3339 before POST/PATCH.
+`datetime-local` values are converted to RFC3339 before POST/PATCH. The edit
+form PATCHes only the fields the operator changed (compared with the values
+it loaded): an untouched field is not written back through the form, which
+shows a datetime to the minute and reads an integer past 2^53 rounded. An
+integer typed past 2^53 is sent as a string, which the server reads exactly.
 Empty optional (non-boolean) inputs — string, text, date, datetime, json,
-number, relation — are sent as JSON `null` so a partial PATCH can clear
-them. Booleans and numeric `0` are always included.
+number, relation — are sent as JSON `null` (on an edit, a field changed to
+empty), so a partial PATCH can clear them. On create, booleans and numeric `0` are always included; an edit sends
+the fields it changed, plus the model's optimistic-lock `version` (meta
+`version`) as loaded, so a concurrent edit is a 409.
 401 (including session expiry on list/detail/edit) returns to login;
 catalog 403 shows a forbidden page; other catalog errors show the D10
 message. Silent `POST /auth/refresh` after a 401 **awaits** CSRF bootstrap
@@ -228,6 +234,19 @@ arbitrary Go types.
 Closed field types: `string`, `text`, `integer`, `float`, `decimal`,
 `boolean`, `datetime`, `date`, `time`, `duration`, `uuid`, `json`, `file`, `image`, `relation`. These strings are
 the admin projection of the shared vocabulary in [fields.md](fields.md).
+
+An integer value must fit the model field's Go type, and the int64 range
+(the column is a signed bigint on PostgreSQL and SQLite): 300 for an `int8`,
+-5 for a `uint`, or 2^63 for a `uint64` is a 422 on that field, never a
+wrapped value, whatever admin type the field is declared as. A JSON number is
+decoded as a float64, which keeps integers exactly only within ±(2^53 - 1),
+so a larger integer is sent as a string (`"9007199254740993"`), which is read
+exactly; as a JSON number it is a 422, unless it is the row's stored value
+rounded the same way, which is the bundled admin UI sending a field back
+unchanged (it sends integers as JSON numbers): the stored value is kept. The
+UI cannot set such an integer to another value; send it as a string through
+the API. The admin stores integers within int64, so a `uint64` above
+9223372036854775807 is a 422 too.
 
 ### File and image fields
 

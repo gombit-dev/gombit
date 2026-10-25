@@ -94,6 +94,8 @@ type App struct {
 	embeddedFrontend   fs.FS
 	csrfExemptPaths    []string
 	rawBodyPaths       []string
+	authMailer         auth.Mailer
+	authAuditor        auth.Auditor
 
 	mu     sync.RWMutex
 	server *http.Server
@@ -241,13 +243,14 @@ func New(options ...Option) (_ *App, err error) {
 		if app.db == nil || app.db.DB == nil {
 			return nil, errors.New("framework: JWT secret is set but no database is attached")
 		}
-		if err := auth.Mount(app.api, app.db.DB, app.cfg); err != nil {
+		authOpts := app.authOptions()
+		if err := auth.Mount(app.api, app.db.DB, app.cfg, authOpts...); err != nil {
 			return nil, err
 		}
 		// Admin introspection + data plane mount only in cookie mode
 		// (ADR-013). JWT-only apps do not grow admin routes.
 		if app.cfg.Auth.EffectiveMode() == config.AuthModeCookie {
-			if err := admin.Mount(app); err != nil {
+			if err := admin.Mount(app, authOpts...); err != nil {
 				return nil, err
 			}
 			// Framework-owned admin SPA (ADMIN-2 / ADR-013). Explicit Gin
@@ -324,6 +327,54 @@ func WithJobs(dispatcher *jobs.Dispatcher) Option {
 		app.jobsOwned = false
 		return nil
 	}
+}
+
+// WithAuthMailer sets the Mailer that the framework-owned auth routes send
+// the account lifecycle's messages through (email verification): the
+// application's email provider. Without one, development and test apps log
+// each message (auth.LogMailer, the link included), and production apps
+// send none: registration sends no verification message, and POST
+// /auth/verify-email/resend answers 503.
+func WithAuthMailer(m auth.Mailer) Option {
+	return func(app *App) error {
+		if m == nil {
+			return errors.New("framework: nil auth mailer")
+		}
+		app.authMailer = m
+		return nil
+	}
+}
+
+// WithAuthAuditor sets where the framework-owned auth routes and the admin
+// data plane record the security audit trail (AUTH-7). Default:
+// auth.DBAuditor over the app's database (the auth_audit_events table). The
+// group and permission helpers, which take a database and no Service,
+// write to that database's table either way.
+func WithAuthAuditor(a auth.Auditor) Option {
+	return func(app *App) error {
+		if a == nil {
+			return errors.New("framework: nil auth auditor")
+		}
+		app.authAuditor = a
+		return nil
+	}
+}
+
+// authOptions configure the framework-owned auth routes' Service.
+func (app *App) authOptions() []auth.Option {
+	opts := []auth.Option{auth.WithLogger(app.logger.Named("auth"))}
+	if app.authAuditor != nil {
+		opts = append(opts, auth.WithAuditor(app.authAuditor))
+	}
+	switch {
+	case app.authMailer != nil:
+		opts = append(opts, auth.WithMailer(app.authMailer))
+	case app.cfg.Environment != config.EnvironmentProduction:
+		opts = append(opts, auth.WithMailer(auth.LogMailer(app.logger.Named("auth.mail"))))
+	default:
+		app.logger.Warn("auth: no mailer is configured (framework.WithAuthMailer), so verification emails are not sent")
+	}
+	return opts
 }
 
 // WithStorage attaches an object store the caller opened (a driver, or a

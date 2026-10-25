@@ -17,6 +17,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gombit-dev/gombit/config"
+	"github.com/gombit-dev/gombit/contract"
 )
 
 func TestDefaultRuntimeMiddlewareOrder(t *testing.T) {
@@ -112,6 +113,31 @@ func TestDefaultRouterPreservesRequestID(t *testing.T) {
 	}
 	if got := rec.Header().Get(RequestIDHeader); got != "req-123" {
 		t.Fatalf("%s = %q, want req-123", RequestIDHeader, got)
+	}
+}
+
+// TestDefaultRouterBoundsInboundRequestID: an inbound X-Request-Id is
+// honored whole up to contract.MaxRequestIDLength bytes of visible ASCII;
+// a longer one, or one with a space or a control character, is replaced by
+// a generated ID, so no consumer ever sees a cut one.
+func TestDefaultRouterBoundsInboundRequestID(t *testing.T) {
+	app := newTestApp(t)
+	get := func(id string) string {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/livez", nil)
+		req.Header.Set(RequestIDHeader, id)
+		app.Router().ServeHTTP(rec, req)
+		return rec.Header().Get(RequestIDHeader)
+	}
+	longest := strings.Repeat("r", contract.MaxRequestIDLength)
+	if got := get(longest); got != longest {
+		t.Fatalf("a %d-byte request id = %q, want it honored whole", len(longest), got)
+	}
+	for _, bad := range []string{longest + "r", "has space", "tab\there", "nul\x01"} {
+		got := get(bad)
+		if got == "" || got == bad || strings.HasPrefix(bad, got) || len(got) > contract.MaxRequestIDLength {
+			t.Errorf("request id %q answered as %q, want a generated one", bad, got)
+		}
 	}
 }
 
