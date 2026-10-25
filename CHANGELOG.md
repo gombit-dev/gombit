@@ -194,6 +194,48 @@ version.
   Form as field paths. The dependent-required message (`expected property zip
   to be present when city is present`) keys the same way
   ([#503](https://github.com/gombit-dev/gombit/issues/503)).
+- `config.RedactDSN` and `config.SanitizeError` now cut a DSN password where the
+  database drivers read it. MySQL userinfo was split at the *first* `@`, so
+  `app:p@ss@tcp(host:3306)/db` printed `app:*****@ss@tcp(host:3306)/db`, and the
+  same split made `SanitizeError` take the single character `p` as the secret,
+  blanking every other `p` in the message while leaving the password. The libpq
+  keyword pass matched `password=` only with no space around `=`, ended a value
+  at the first space, and ended it at `&` and `"` too — which pgconn does not,
+  since it separates on the ASCII whitespace class, vertical tab included, so
+  `password = s3cr3t`, `password='it\'s-a-secret tail'`,
+  `password=s3cr3t\ value`, `password=s3cr3t&more` and `password="s3cr3t"&more`
+  each leaked the rest of the password. Redaction now asks each grammar
+  separately which bytes of the unmodified DSN are the password. A
+  `postgres://` or `postgresql://` URI — those spellings exactly — is read by
+  pgconn's own libpq-matching parser, not by `net/url`: the userinfo runs to
+  the first `@` with no `/` before it, so `?` and `#` are data and
+  `postgres://app:?pw@h/db` no longer prints its password whole; `net/url`
+  keeps the other schemes. The MySQL driver indexes its userinfo between the
+  first `:` and the last `@` before the last `/`, and is asked only where it
+  accepts the string at all. pgconn reads a keyword as the trimmed token
+  before `=`, ends its value only at whitespace, and resumes AT the value's
+  end, so in `host='db'password=x` the next key is `password`; where it
+  rejects a string it reads nothing, and nothing is spelled on its behalf. A
+  `&`-separated parameter list exists only where a driver separates parameters
+  with `&`. The ranges they name are merged before one pass replaces them, so
+  a string readable two ways hides both of its passwords, a `?` or a `://`
+  inside a value no longer ends one, and a `pass=` that is only part of a
+  MySQL userinfo hides that field rather than the address after it. A parameter
+  key is decoded and matched whole, which catches `?pass%77ord=` the way pgconn
+  does, and `sslpassword=` is now named as a secret instead of hidden by
+  accident; `passfile=` is left alone. `SanitizeError` hides each password in
+  the spellings its grammar stands for — a keyword value's quotes and backslash
+  escapes are unwound, a URI value is percent-decoded, a MySQL value is
+  replaced as written — and only for keys a driver reads: a look-alike such as
+  `pwd=` or `PASSWORD=` is hidden in the DSN itself and spelled no further,
+  because a spelling for a value no driver sends rewrites words that hold no
+  secret.
+  `config` tests compare the result against the password `mysql.ParseDSN` and
+  `pgconn.ParseConfig` take from the same string and against the end of it,
+  through both helpers, and fuzz both helpers against generated inputs with
+  the drivers as oracle — an inverse property holds a message that names no
+  spelling of a secret unchanged
+  ([#486](https://github.com/gombit-dev/gombit/issues/486)).
 
 ### Changed
 
