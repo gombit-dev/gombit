@@ -218,11 +218,24 @@ func (r *backgroundRunner) close(ctx context.Context) error {
 	if r.closing != nil {
 		done := r.closing
 		r.mu.Unlock()
+		// A finished shutdown's result comes first: when both are ready, a
+		// select would pick at random, and a caller whose ctx is already
+		// done would sometimes get that instead.
+		select {
+		case <-done:
+			return r.closeErr
+		default:
+		}
 		select {
 		case <-done:
 			return r.closeErr
 		case <-ctx.Done():
-			return ctx.Err()
+			select {
+			case <-done: // finished as ctx ended: the result still wins
+				return r.closeErr
+			default:
+				return ctx.Err()
+			}
 		}
 	}
 	r.closed = true

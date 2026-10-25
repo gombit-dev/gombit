@@ -831,9 +831,18 @@ func TestPasswordResetWedgedMailer(t *testing.T) {
 	if n := auth.PendingBackground(e.svc); n != 0 {
 		t.Fatalf("%d tasks still retained after Close", n)
 	}
-	// The shutdown failed: a later Close says so too, not nil.
+	// The shutdown failed: a later Close says so too, not nil, whatever its
+	// own context (one already cancelled included: many tries, since a
+	// random choice would show up in some).
 	if again := e.svc.Close(ctx); again == nil || again.Error() != err.Error() {
 		t.Fatalf("a Close after a failed one = %v, want the same failure %v", again, err)
+	}
+	cancelled, cancelNow := context.WithCancel(ctx)
+	cancelNow()
+	for range 200 {
+		if again := e.svc.Close(cancelled); again == nil || again.Error() != err.Error() {
+			t.Fatalf("a Close with a cancelled context after a failed one = %v, want the same failure %v", again, err)
+		}
 	}
 }
 
@@ -889,5 +898,12 @@ func TestPasswordResetCloseIsJoined(t *testing.T) {
 	}
 	if err := e.svc.Close(ctx); err != nil {
 		t.Fatalf("a Close after a successful one = %v", err)
+	}
+	cancelled, cancelNow := context.WithCancel(ctx)
+	cancelNow()
+	for range 200 {
+		if err := e.svc.Close(cancelled); err != nil {
+			t.Fatalf("a Close with a cancelled context after a successful one = %v, want its nil", err)
+		}
 	}
 }
