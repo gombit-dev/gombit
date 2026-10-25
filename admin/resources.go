@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/gombit-dev/gombit/auth"
 	"github.com/gombit-dev/gombit/contract"
 	"github.com/gombit-dev/gombit/database"
 	"github.com/gombit-dev/gombit/field"
@@ -153,6 +154,7 @@ func (h *handlers) createResource(ctx context.Context, input *writeInput) (*rowO
 	}); err != nil {
 		return nil, err
 	}
+	h.recordWrite(ctx, auth.AuditAdminCreated, m, m.pkString(inst))
 	return h.respond(ctx, m, rowWithM2M(m, inst, m2mIDs))
 }
 
@@ -227,6 +229,7 @@ func (h *handlers) updateResource(ctx context.Context, input *patchInput) (*rowO
 	}); err != nil {
 		return nil, err
 	}
+	h.recordWrite(ctx, auth.AuditAdminUpdated, m, input.ID)
 	// The PATCH wrote the columns it changed; the row may hold another
 	// request's change to the rest, so the response is the row as read back
 	// after the write (a delete landing in between makes it a 404).
@@ -296,6 +299,7 @@ func (h *handlers) updateVersioned(ctx context.Context, m *registered, inst any,
 	}); err != nil {
 		return nil, err
 	}
+	h.recordWrite(ctx, auth.AuditAdminUpdated, m, input.ID)
 	fresh, err := h.loadByID(ctx, m, input.ID)
 	if err != nil {
 		return nil, err
@@ -361,7 +365,21 @@ func (h *handlers) deleteResource(ctx context.Context, input *itemInput) (*delet
 		}
 		return nil, database.MapDeleteError(ctx, err, "resource is still referenced by other records", "delete resource")
 	}
+	h.recordWrite(ctx, auth.AuditAdminDeleted, m, input.ID)
 	return &deleteOutput{Body: contract.Data[deleteResult]{Data: deleteResult{OK: true}}}, nil
+}
+
+// recordWrite records a committed admin write in the security audit trail
+// (AUTH-7): the admin who made it (the session's user), the model's slug
+// and the record's primary key, and the request. It runs where the write
+// committed, before any read-back or response work, so a failure after the
+// commit (a reload, file URLs, a cancelled request) does not lose the
+// event; a failure to record it is logged, and is not the request's.
+func (h *handlers) recordWrite(ctx context.Context, action auth.AuditAction, m *registered, id string) {
+	if h.audit == nil {
+		return
+	}
+	h.audit(ctx, auth.AuditEvent{Action: action, TargetType: m.meta.Slug, TargetID: id})
 }
 
 func (h *handlers) modelForAction(

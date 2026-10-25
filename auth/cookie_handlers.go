@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"net/http"
 
 	"github.com/gombit-dev/gombit/contract"
@@ -51,15 +52,11 @@ func (s *Service) loginCookie(ctx context.Context, input *cookieLoginInput) (*co
 
 func (s *Service) refreshCookie(ctx context.Context, input *cookieRefreshInput) (*cookieSessionOutput, error) {
 	if input.RefreshToken.Value == "" {
-		return nil, contract.WithContext(ctx, contract.Authentication("missing session cookie"))
+		return nil, s.rejectRefreshCookie(nil, contract.WithContext(ctx, contract.Authentication("missing session cookie")))
 	}
-	pair, err := s.RotateRefresh(ctx, input.RefreshToken.Value)
+	pair, user, err := s.rotateRefresh(ctx, input.RefreshToken.Value)
 	if err != nil {
-		return nil, mapServiceError(ctx, err)
-	}
-	user, err := s.ParseAccess(ctx, pair.AccessToken)
-	if err != nil {
-		return nil, contract.WithContext(ctx, contract.Internal("load session user"))
+		return nil, s.rejectRefreshCookie(err, mapServiceError(ctx, err))
 	}
 	return &cookieSessionOutput{
 		SetCookie: s.sessionCookies(pair),
@@ -79,6 +76,31 @@ func (s *Service) logoutCookie(ctx context.Context, input *cookieRefreshInput) (
 	}, nil
 }
 
+// rejectRefreshCookie is the error response to a cookie refresh that failed
+// with cause (nil when there was no refresh cookie), mapped to resp. A 401
+// means the browser's refresh cookie can no longer be used, so the response
+// also clears both session cookies, as logout does: otherwise the browser
+// sends the dead cookie until its Max-Age, and every page load repeats the
+// failed refresh. Anything else leaves them. A 5xx is a server failure, and
+// the refresh token may still be valid for the client's retry. A refresh that
+// lost to another rotation of the token (errRotationRaced: the token has a
+// successor, whether it lost the compare-and-swap or found the token
+// expired) is a 401, but the winner's response sets the session's new
+// cookies in the same browser, and clearing them would end a live session.
+// A refresh that lost the compare-and-swap to a session revocation finds no
+// successor: its 401 clears the cookies.
+func (s *Service) rejectRefreshCookie(cause, resp error) error {
+	var env *contract.ErrorEnvelope
+	if errors.Is(cause, errRotationRaced) || !errors.As(resp, &env) || env.GetStatus() != http.StatusUnauthorized {
+		return resp
+	}
+	cleared := make(http.Header)
+	for _, c := range s.expiredSessionCookies() {
+		cleared.Add("Set-Cookie", c.String())
+	}
+	return huma.ErrorWithHeaders(resp, cleared)
+}
+
 // sessionCookies builds the Set-Cookie values for a fresh token pair.
 func (s *Service) sessionCookies(pair TokenPair) []http.Cookie {
 	return []http.Cookie{
@@ -87,7 +109,8 @@ func (s *Service) sessionCookies(pair TokenPair) []http.Cookie {
 	}
 }
 
-// expiredSessionCookies clears both session cookies (logout).
+// expiredSessionCookies clears both session cookies (logout, and a cookie
+// refresh rejected with a 401).
 func (s *Service) expiredSessionCookies() []http.Cookie {
 	return []http.Cookie{
 		expiredSessionCookie(AccessCookieName, s.cfg),

@@ -313,7 +313,7 @@ func TestGenerateWritesFeaturePackageLayout(t *testing.T) {
 	if !strings.Contains(schema, `"/api/v1/products"`) {
 		t.Fatal("placeholder schema.ts missing product path")
 	}
-	for _, path := range []string{`"/api/v1/auth/login"`, `"/api/v1/auth/sessions"`, `"/api/v1/auth/sessions/{id}"`, `"/api/v1/me"`} {
+	for _, path := range []string{`"/api/v1/auth/login"`, `"/api/v1/auth/sessions"`, `"/api/v1/auth/sessions/{id}"`, `"/api/v1/auth/verify-email"`, `"/api/v1/auth/verify-email/resend"`, `"/api/v1/me"`} {
 		if !strings.Contains(schema, path) {
 			t.Fatalf("placeholder schema.ts missing auth path %s", path)
 		}

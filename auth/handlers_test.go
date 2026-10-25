@@ -174,6 +174,19 @@ func runBearerE2E(t *testing.T, app *framework.App) {
 	}
 	oldRefresh := postJSON(t, app, "/api/v1/auth/refresh", `{"refresh_token":"`+pair.RefreshToken+`"}`)
 	assertError(t, oldRefresh, http.StatusUnauthorized, "authentication")
+
+	// Bearer mode has no session cookies, so a rejected refresh clears none.
+	for name, refresh := range map[string]string{
+		"rotated":    pair.RefreshToken,
+		"logged-out": rotated.RefreshToken,
+		"unknown":    strings.Repeat("ab", 32),
+	} {
+		rec := postJSON(t, app, "/api/v1/auth/refresh", `{"refresh_token":"`+refresh+`"}`)
+		assertError(t, rec, http.StatusUnauthorized, "authentication")
+		if got := rec.Header().Values("Set-Cookie"); len(got) != 0 {
+			t.Fatalf("a Bearer refresh with the %s token set cookies %q, want none", name, got)
+		}
+	}
 }
 
 func newAuthApp(t *testing.T) *framework.App {

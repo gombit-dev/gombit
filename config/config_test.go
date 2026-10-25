@@ -191,6 +191,8 @@ func TestLoadFromEnv(t *testing.T) {
 			Mode:            AuthModeCookie,
 			CookieSecure:    false,
 			CookieSameSite:  CookieSameSiteStrict,
+
+			EmailVerificationTTL: DefaultEmailVerificationTTL,
 		},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -368,6 +370,8 @@ func TestLoadUsesProcessEnvironment(t *testing.T) {
 			Mode:            AuthModeJWT,
 			CookieSecure:    true,
 			CookieSameSite:  CookieSameSiteLax,
+
+			EmailVerificationTTL: DefaultEmailVerificationTTL,
 		},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -1221,5 +1225,46 @@ func TestStorageURLSettings(t *testing.T) {
 	}
 	if err := ValidateStorage(StorageConfig{Driver: StorageDriverMemory, URLSecret: "short"}); err != nil && strings.Contains(err.Error(), "short") {
 		t.Fatalf("the URL secret was echoed: %v", err)
+	}
+}
+
+// TestValidateEmailVerification: a verification URL must say where the
+// token goes, and its TTL cannot be negative; from the environment, both
+// load as written.
+func TestValidateEmailVerification(t *testing.T) {
+	fieldsOf := func(cfg Config) map[string]FieldError {
+		out := map[string]FieldError{}
+		var fe FieldErrors
+		if err := cfg.Validate(); errors.As(err, &fe) {
+			for _, f := range fe {
+				out[f.Field] = f
+			}
+		}
+		return out
+	}
+	cfg := DefaultFor(EnvironmentDevelopment)
+	cfg.Auth.EmailVerificationURL = "https://app.example.com/verify"
+	cfg.Auth.EmailVerificationTTL = -time.Second
+	got := fieldsOf(cfg)
+	if f, ok := got["Auth.EmailVerificationURL"]; !ok || f.Env != envEmailVerificationURL || !strings.Contains(f.Message, EmailVerificationURLToken) {
+		t.Errorf("a URL without {token}: %+v", got)
+	}
+	if f, ok := got["Auth.EmailVerificationTTL"]; !ok || f.Env != envEmailVerificationTTL {
+		t.Errorf("a negative TTL: %+v", got)
+	}
+	cfg.Auth.EmailVerificationURL = "https://app.example.com/verify?token={token}"
+	cfg.Auth.EmailVerificationTTL = time.Hour
+	if got := fieldsOf(cfg); len(got) != 0 {
+		t.Errorf("a valid verification config: %+v", got)
+	}
+	loaded, err := LoadFromEnv(func(k string) (string, bool) {
+		v, ok := map[string]string{envEmailVerificationTTL: "2h", envEmailVerificationURL: "https://x/v?t={token}"}[k]
+		return v, ok
+	})
+	if err != nil || loaded.Auth.EmailVerificationTTL != 2*time.Hour || loaded.Auth.EmailVerificationURL != "https://x/v?t={token}" {
+		t.Fatalf("LoadFromEnv = %+v, %v", loaded.Auth, err)
+	}
+	if DefaultFor(EnvironmentProduction).Auth.EmailVerificationTTL != DefaultEmailVerificationTTL {
+		t.Fatal("the default TTL is not 24h")
 	}
 }

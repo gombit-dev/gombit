@@ -26,15 +26,22 @@ type accessClaims struct {
 	jwt.RegisteredClaims
 }
 
-func hashRefreshToken(token string) string {
+func hashRefreshToken(token string) string { return hashOpaqueToken(token) }
+
+func newRefreshToken() (string, error) { return newOpaqueToken() }
+
+// hashOpaqueToken is the SHA-256 a random token is stored as: refresh
+// tokens, and the account lifecycle's one-time tokens.
+func hashOpaqueToken(token string) string {
 	sum := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(sum[:])
 }
 
-func newRefreshToken() (string, error) {
+// newOpaqueToken is 32 random bytes, hex-encoded.
+func newOpaqueToken() (string, error) {
 	buf := make([]byte, refreshTokenBytes)
 	if _, err := rand.Read(buf); err != nil {
-		return "", fmt.Errorf("auth: generate refresh token: %w", err)
+		return "", fmt.Errorf("auth: generate token: %w", err)
 	}
 	return hex.EncodeToString(buf), nil
 }

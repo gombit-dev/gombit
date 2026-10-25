@@ -77,6 +77,7 @@ func TestVariablesReadBackWhatLoadFromEnvSets(t *testing.T) {
 		envRedisTLSInsecure: "true", envLogLevel: "debug", envLogSink: "stdout",
 		envJWTSecret: strings.Repeat("j", 32), envJWTAccessTTL: "5m0s", envJWTRefreshTTL: "24h0m0s",
 		envAuthMode: "cookie", envCookieSecure: "false", envCookieSameSite: "strict",
+		envEmailVerificationTTL: "1h0m0s", envEmailVerificationURL: "https://app.example.com/verify?token={token}",
 		envSecuritySanitizeInput: "true",
 	}
 	base := map[string]string{envEnv: "test", envJWTSecret: strings.Repeat("j", 32)}

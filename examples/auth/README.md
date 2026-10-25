@@ -78,8 +78,53 @@ curl -sS -X DELETE "http://127.0.0.1:8080/api/v1/auth/sessions?scope=all" \
 
 See [`docs/auth.md`](../../docs/auth.md#sessions) for the semantics.
 
+## Email verification
+
+Registration mails a verification message. This example sets no mailer
+(`framework.WithAuthMailer`), so in development the server logs the message
+instead, token included (`auth: email not sent (development LogMailer)`):
+
+```bash
+# the sessions above were revoked: log in again
+LOGIN=$(curl -sS -X POST http://127.0.0.1:8080/api/v1/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"ada@example.com","password":"correct-horse"}')
+ACCESS=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["access_token"])' <<<"$LOGIN")
+
+# ask for a new link (once a minute; supersedes the earlier one)
+curl -sS -X POST http://127.0.0.1:8080/api/v1/auth/verify-email/resend \
+  -H "Authorization: Bearer $ACCESS"
+
+# post the latest token in the log; GET /me says "email_verified": false
+# until then
+curl -sS -X POST http://127.0.0.1:8080/api/v1/auth/verify-email \
+  -H 'Content-Type: application/json' -d '{"token":"<token from the log>"}'
+```
+
+See [`docs/auth.md`](../../docs/auth.md#email-verification) for the token
+rules, the mailer, and `auth.RequireVerifiedEmail`.
+
 The development JWT secret in `main.go` is not a production secret.
 Production config rejects secrets shorter than 32 characters.
+
+## Audit trail
+
+Every step above was recorded in `auth_audit_events`: the registration, the
+logins, the logout, the session revocations, the verification, each with
+the user, the time, and the request (`X-Request-Id`, client IP, user agent).
+A failed login is recorded too:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8080/api/v1/auth/login \
+  -H 'Content-Type: application/json' -H 'X-Request-Id: audit-demo-1' \
+  -d '{"email":"ada@example.com","password":"wrong-password"}'
+# auth.login.failed, request_id audit-demo-1, details {"reason":"wrong_password"}
+```
+
+Read them in Go with `auth.ListAuditEvents(ctx, db.DB,
+auth.AuditQuery{Action: auth.AuditLoginFailed})`. See
+[`docs/auth.md`](../../docs/auth.md#audit-trail) for what is recorded and
+how to send the events elsewhere.
 
 ## Create an admin account (`gombit createsuperuser`)
 

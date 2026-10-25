@@ -228,6 +228,7 @@ func (s *Service) revokeSessionAs(ctx context.Context, userID, requester uint, i
 	if err != nil {
 		return false, err
 	}
+	s.Audit(ctx, AuditEvent{Action: AuditSessionRevoked, TargetUserID: uintPtr(userID), Details: details("scope", "one")})
 	return endedCurrent, nil
 }
 
@@ -245,7 +246,7 @@ func (s *Service) RevokeAllSessions(ctx context.Context, userID uint) error {
 // and ends nothing, when that session has ended by the time it holds the
 // user's lock (requesterChain).
 func (s *Service) revokeAllSessionsAs(ctx context.Context, userID, requester uint) error {
-	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if _, err := lockUserTx(tx, userID); err != nil {
 			return lockSessionsError(err)
 		}
@@ -257,6 +258,10 @@ func (s *Service) revokeAllSessionsAs(ctx context.Context, userID, requester uin
 		}
 		return revokeAllTx(tx, userID, now)
 	})
+	if err == nil {
+		s.Audit(ctx, AuditEvent{Action: AuditSessionRevoked, TargetUserID: uintPtr(userID), Details: details("scope", "all")})
+	}
+	return err
 }
 
 // lockSessionsError maps a failed lockUserTx in a revocation: a user that
@@ -330,7 +335,7 @@ func requesterChain(tx *gorm.DB, userID, rid uint, now time.Time) ([]uint, error
 // current head included. It returns errSessionEnded, and ends nothing, when
 // that session has itself ended by then (requesterChain).
 func (s *Service) revokeOtherSessions(ctx context.Context, userID, keepID uint) error {
-	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if _, err := lockUserTx(tx, userID); err != nil {
 			return lockSessionsError(err)
 		}
@@ -343,4 +348,8 @@ func (s *Service) revokeOtherSessions(ctx context.Context, userID, keepID uint) 
 			Where("user_id = ? AND revoked_at IS NULL AND id NOT IN ?", userID, keepIDs).
 			Update("revoked_at", now).Error
 	})
+	if err == nil {
+		s.Audit(ctx, AuditEvent{Action: AuditSessionRevoked, TargetUserID: uintPtr(userID), Details: details("scope", "others")})
+	}
+	return err
 }

@@ -2,6 +2,9 @@ package auth
 
 import (
 	"context"
+	"errors"
+	"net/http"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 )
@@ -35,6 +38,26 @@ var ErrInvalidAccessToken = errInvalidAccessToken
 // ErrRefreshReuse is the error RotateRefresh returns for the reuse of an
 // already-rotated refresh token.
 var ErrRefreshReuse = errRefreshReuse
+
+// ErrRotationRaced is the error RotateRefresh returns when another rotation
+// gave the token it read a successor: it lost the compare-and-swap to a
+// rotation of the same token on another instance, or found the token expired
+// with a successor. A token a session revocation ended before the
+// compare-and-swap has none and is a plain ErrInvalidRefreshToken. It wraps
+// ErrInvalidRefreshToken.
+var ErrRotationRaced = errRotationRaced
+
+// MountCookieRefresh registers s's cookie-mode refresh handler on api at
+// path. A cookie app over the same database serves it, so a test runs the
+// cookie refresh of a second instance, one whose clock it sets, through the
+// app's middleware and error responses.
+func MountCookieRefresh(api huma.API, s *Service, path string) {
+	huma.Register(api, huma.Operation{
+		OperationID: "test-cookie-refresh",
+		Method:      http.MethodPost,
+		Path:        path,
+	}, s.refreshCookie)
+}
 
 // AuthenticatedRow is the id of the refresh token row the access token is
 // bound to, as the middlewares record it for the request.
@@ -82,4 +105,21 @@ func ContextWithSession(ctx context.Context, user User, refreshID uint) context.
 // cookie-mode one is exported as RequireCookieSession).
 func RequireBearer(s *Service) func(huma.Context, func(huma.Context)) {
 	return s.requireBearer()
+}
+
+// IsResendTooSoon reports whether err is SendEmailVerification refusing a
+// message within the resend interval of the previous one (a 429).
+func IsResendTooSoon(err error) bool {
+	var tooSoon resendTooSoonError
+	return errors.As(err, &tooSoon)
+}
+
+// SetMailer replaces the service's Mailer.
+func SetMailer(s *Service, m Mailer) { s.mailer = m }
+
+// SetAuditTimeout replaces the bound on one audit write until the test ends.
+func SetAuditTimeout(t interface{ Cleanup(func()) }, d time.Duration) {
+	old := auditTimeout
+	auditTimeout = d
+	t.Cleanup(func() { auditTimeout = old })
 }

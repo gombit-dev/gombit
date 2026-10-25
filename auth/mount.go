@@ -3,9 +3,11 @@ package auth
 import (
 	"errors"
 	"net/http"
+	"reflect"
 	"strings"
 
 	"github.com/gombit-dev/gombit/config"
+	"github.com/gombit-dev/gombit/contract"
 	"github.com/danielgtaylor/huma/v2"
 	"gorm.io/gorm"
 )
@@ -21,15 +23,16 @@ const (
 // tokens); AuthModeCookie mounts the same operation IDs and paths but
 // exchanges HttpOnly session cookies instead, plus GET /auth/csrf. The two
 // modes are mutually exclusive per app — see docs/auth-cookie.md for the
-// cookie/CSRF threat model.
-func Mount(api huma.API, db *gorm.DB, cfg config.Config) error {
+// cookie/CSRF threat model. Both modes mount email verification (AUTH-1);
+// opts configure the Service the routes use (WithMailer, WithLogger).
+func Mount(api huma.API, db *gorm.DB, cfg config.Config, opts ...Option) error {
 	if api == nil {
 		return errors.New("auth: nil API")
 	}
 	if !cfg.Auth.Enabled() {
 		return nil
 	}
-	svc, err := NewService(db, cfg)
+	svc, err := NewService(db, cfg, opts...)
 	if err != nil {
 		return err
 	}
@@ -38,13 +41,13 @@ func Mount(api huma.API, db *gorm.DB, cfg config.Config) error {
 		prefix = "/api/v1"
 	}
 
-	huma.Register(api, huma.Operation{
+	huma.Register(api, withRequestInfo(huma.Operation{
 		OperationID: "register",
 		Method:      http.MethodPost,
 		Path:        prefix + "/auth/register",
 		Summary:     "Register a user",
 		Tags:        []string{"Auth"},
-	}, svc.register)
+	}), svc.register)
 
 	if cfg.Auth.EffectiveMode() == config.AuthModeCookie {
 		mountCookieRoutes(api, svc, prefix)
@@ -57,29 +60,29 @@ func Mount(api huma.API, db *gorm.DB, cfg config.Config) error {
 func mountBearerRoutes(api huma.API, svc *Service, prefix string) {
 	installBearerScheme(api)
 
-	huma.Register(api, huma.Operation{
+	huma.Register(api, withRequestInfo(huma.Operation{
 		OperationID: "login",
 		Method:      http.MethodPost,
 		Path:        prefix + "/auth/login",
 		Summary:     "Log in and issue Bearer tokens",
 		Tags:        []string{"Auth"},
-	}, svc.login)
+	}), svc.login)
 
-	huma.Register(api, huma.Operation{
+	huma.Register(api, withRequestInfo(huma.Operation{
 		OperationID: "refresh",
 		Method:      http.MethodPost,
 		Path:        prefix + "/auth/refresh",
 		Summary:     "Rotate the refresh token and issue a new access token",
 		Tags:        []string{"Auth"},
-	}, svc.refresh)
+	}), svc.refresh)
 
-	huma.Register(api, huma.Operation{
+	huma.Register(api, withRequestInfo(huma.Operation{
 		OperationID: "logout",
 		Method:      http.MethodPost,
 		Path:        prefix + "/auth/logout",
 		Summary:     "Revoke the current refresh token",
 		Tags:        []string{"Auth"},
-	}, svc.logout)
+	}), svc.logout)
 
 	huma.Register(api, huma.Operation{
 		OperationID: "get-me",
@@ -92,6 +95,7 @@ func mountBearerRoutes(api huma.API, svc *Service, prefix string) {
 	}, svc.me)
 
 	registerSessionRoutes(api, svc, prefix, bearerSecurityName, svc.requireBearer(), false)
+	registerVerificationRoutes(api, svc, prefix, bearerSecurityName, svc.requireBearer())
 }
 
 func mountCookieRoutes(api huma.API, svc *Service, prefix string) {
@@ -105,29 +109,30 @@ func mountCookieRoutes(api huma.API, svc *Service, prefix string) {
 		Tags:        []string{"Auth"},
 	}, svc.issueCSRFToken)
 
-	huma.Register(api, huma.Operation{
+	huma.Register(api, withRequestInfo(huma.Operation{
 		OperationID: "login",
 		Method:      http.MethodPost,
 		Path:        prefix + "/auth/login",
 		Summary:     "Log in and start an HttpOnly cookie session",
 		Tags:        []string{"Auth"},
-	}, svc.loginCookie)
+	}), svc.loginCookie)
 
-	huma.Register(api, huma.Operation{
+	huma.Register(api, withRequestInfo(huma.Operation{
 		OperationID: "refresh",
 		Method:      http.MethodPost,
 		Path:        prefix + "/auth/refresh",
 		Summary:     "Rotate the session cookies",
 		Tags:        []string{"Auth"},
-	}, svc.refreshCookie)
+		Responses:   cookieRefreshErrorResponses(api),
+	}), svc.refreshCookie)
 
-	huma.Register(api, huma.Operation{
+	huma.Register(api, withRequestInfo(huma.Operation{
 		OperationID: "logout",
 		Method:      http.MethodPost,
 		Path:        prefix + "/auth/logout",
 		Summary:     "Revoke the current session and clear cookies",
 		Tags:        []string{"Auth"},
-	}, svc.logoutCookie)
+	}), svc.logoutCookie)
 
 	huma.Register(api, huma.Operation{
 		OperationID: "get-me",
@@ -140,6 +145,35 @@ func mountCookieRoutes(api huma.API, svc *Service, prefix string) {
 	}, svc.me)
 
 	registerSessionRoutes(api, svc, prefix, cookieSecurityName, svc.requireCookieSession(), true)
+	registerVerificationRoutes(api, svc, prefix, cookieSecurityName, svc.requireCookieSession())
+}
+
+// cookieRefreshErrorResponses declares the cookie refresh's error responses.
+// A 401 also clears the session cookies (rejectRefreshCookie); Huma does not
+// document headers attached to an error at runtime, so the 401 is declared
+// with its Set-Cookie header. Huma adds its default error response only to an
+// operation that declares no other response besides the success one, so the
+// default is declared here too, as Huma would. Both carry the D10 envelope.
+func cookieRefreshErrorResponses(api huma.API) map[string]*huma.Response {
+	envelope := api.OpenAPI().Components.Schemas.Schema(reflect.TypeOf(contract.ErrorEnvelope{}), true, "Error")
+	return map[string]*huma.Response{
+		"401": {
+			Description: "No refresh cookie, or a refresh token that is unknown, revoked, expired or reused, or whose user is gone.",
+			Headers: map[string]*huma.Header{
+				"Set-Cookie": {
+					Description: "Clears " + AccessCookieName + " and " + RefreshCookieName + " (empty value, Max-Age=0), " +
+						"as logout does, unless another rotation already gave the refresh token a successor: " +
+						"that rotation's response sets the session's new cookies in the same browser.",
+					Schema: &huma.Schema{Type: huma.TypeString},
+				},
+			},
+			Content: map[string]*huma.MediaType{"application/json": {Schema: envelope}},
+		},
+		"default": {
+			Description: "Error",
+			Content:     map[string]*huma.MediaType{"application/json": {Schema: envelope}},
+		},
+	}
 }
 
 func installBearerScheme(api huma.API) {
