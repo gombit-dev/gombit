@@ -104,11 +104,11 @@ func (OneTimeToken) TableName() string { return "auth_one_time_tokens" }
 
 // Models returns GORM models for Atlas / AutoMigrate.
 func Models() []any {
-	return []any{&User{}, &RefreshToken{}, &Group{}, &Permission{}, &OneTimeToken{}}
+	return []any{&User{}, &RefreshToken{}, &Group{}, &Permission{}, &OneTimeToken{}, &AuditEvent{}}
 }
 
-// Migrate creates the auth identity, token, group, permission and one-time
-// token tables.
+// Migrate creates the auth identity, token, group, permission, one-time
+// token and audit tables.
 func Migrate(db *gorm.DB) error {
 	if db == nil {
 		return errors.New("auth: nil database")

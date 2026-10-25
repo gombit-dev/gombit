@@ -10,6 +10,10 @@
     },
     {
       "import_path": "github.com/gombit-dev/gombit/auth",
+      "type_name": "AuditEvent"
+    },
+    {
+      "import_path": "github.com/gombit-dev/gombit/auth",
       "type_name": "Group"
     },
     {

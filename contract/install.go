@@ -51,6 +51,20 @@ func Install(opts InstallOptions) {
 	})
 }
 
+// RequestIDFromContext returns the active request's ID through Install's
+// RequestID reader ("" when none is installed or the context has none):
+// the X-Request-Id framework.App assigns, for runtime packages that cannot
+// import framework.
+func RequestIDFromContext(ctx context.Context) string {
+	requestIDMu.RLock()
+	fn := requestIDFrom
+	requestIDMu.RUnlock()
+	if fn == nil || ctx == nil {
+		return ""
+	}
+	return fn(ctx)
+}
+
 // WithContext returns err with request_id filled from Install's RequestID
 // reader when available. Application handlers should wrap category errors:
 //

@@ -198,9 +198,12 @@ auth context; those remain deferred. The request body size limit above is the
 fixed 8MiB default cap — a first-class, per-route configurable body-size
 middleware is still future work, and would slot in at the same position.
 
-Request IDs use the `X-Request-Id` header. If the caller provides one, the
-runtime preserves it; otherwise it generates one and stores it on both Gin's
-context and `c.Request.Context()` for downstream code:
+Request IDs use the `X-Request-Id` header. If the caller provides one of at
+most `contract.MaxRequestIDLength` (128) bytes of visible ASCII, the runtime
+preserves it exactly; otherwise (none, longer, a space or a control
+character) it generates one. Either way the one ID is what the response
+header, the logs, error envelopes and the audit trail carry, and it is
+stored on both Gin's context and `c.Request.Context()` for downstream code:
 
 ```go
 requestID := framework.GetRequestID(c)

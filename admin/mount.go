@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/url"
@@ -18,12 +19,15 @@ type queryValuesKey struct{}
 type handlers struct {
 	reg  *registry
 	host Host
+	// audit records an event through the auth Service's Auditor (AUTH-7).
+	audit func(context.Context, auth.AuditEvent)
 }
 
 // Mount registers the admin Huma routes on host.API() when cookie auth is on.
 // The catalog is empty until Register is called. framework.New calls Mount
-// automatically in cookie mode; JWT-only apps must not call it.
-func Mount(host Host) error {
+// automatically in cookie mode, with the app's auth options (its Auditor,
+// which records the admin's writes); JWT-only apps must not call it.
+func Mount(host Host, opts ...auth.Option) error {
 	if host == nil {
 		return errors.New("admin: nil host")
 	}
@@ -37,7 +41,7 @@ func Mount(host Host) error {
 	if host.DB() == nil {
 		return errors.New("admin: nil database")
 	}
-	svc, err := auth.NewService(host.DB(), cfg)
+	svc, err := auth.NewService(host.DB(), cfg, opts...)
 	if err != nil {
 		return err
 	}
@@ -54,8 +58,8 @@ func mountRoutes(host Host, reg *registry, svc *auth.Service) {
 	if prefix == "" {
 		prefix = "/api/v1"
 	}
-	h := &handlers{reg: reg, host: host}
-	gates := huma.Middlewares{svc.RequireCookieSession(), attachQuery}
+	h := &handlers{reg: reg, host: host, audit: svc.Audit}
+	gates := huma.Middlewares{auth.CaptureRequestInfo(), svc.RequireCookieSession(), attachQuery}
 	security := []map[string][]string{{cookieSecurityName: {}}}
 	tags := []string{"Admin"}
 

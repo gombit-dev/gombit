@@ -24,6 +24,7 @@ type Service struct {
 	clock       Clock
 	mailer      Mailer
 	logger      *zap.Logger
+	auditor     Auditor
 	dummyOnce   sync.Once
 	dummyHash   string
 	rotateMu    sync.Mutex
@@ -88,6 +89,7 @@ func NewService(db *gorm.DB, cfg config.Config, opts ...Option) (*Service, error
 		mailer: noMailer{},
 		logger: zap.NewNop(),
 	}
+	s.auditor = DBAuditor(db)
 	for _, opt := range opts {
 		opt(s)
 	}
@@ -110,6 +112,7 @@ func (s *Service) Register(ctx context.Context, email, password string) (User, e
 	if err != nil {
 		return User{}, err
 	}
+	s.Audit(ctx, AuditEvent{Action: AuditRegistered, ActorUserID: uintPtr(user.ID), TargetUserID: uintPtr(user.ID)})
 	s.sendVerificationOnRegister(ctx, user)
 	return user, nil
 }
@@ -119,7 +122,12 @@ func (s *Service) Register(ctx context.Context, email, password string) (User, e
 // duplicate emails return errEmailTaken. The operator who creates it vouches
 // for the address, so its email starts verified, and no message is sent.
 func (s *Service) CreateSuperuser(ctx context.Context, email, password string) (User, error) {
-	return s.createUser(ctx, email, password, true)
+	user, err := s.createUser(ctx, email, password, true)
+	if err != nil {
+		return User{}, err
+	}
+	s.Audit(ctx, AuditEvent{Action: AuditSuperuserCreated, TargetUserID: uintPtr(user.ID)})
+	return user, nil
 }
 
 func (s *Service) createUser(ctx context.Context, email, password string, superuser bool) (User, error) {
@@ -153,17 +161,27 @@ func (s *Service) Authenticate(ctx context.Context, email, password string) (Use
 	err := s.db.WithContext(ctx).Where("email = ?", email).First(&user).Error
 	if err != nil {
 		s.compareDummy(password)
+		// No target: the attempted address is not recorded.
+		s.Audit(ctx, AuditEvent{Action: AuditLoginFailed, Details: details("reason", "unknown_account")})
 		return User{}, errInvalidCredentials
 	}
 	if err := s.hasher.Compare(user.PasswordHash, password); err != nil {
+		s.Audit(ctx, AuditEvent{Action: AuditLoginFailed, TargetUserID: uintPtr(user.ID), Details: details("reason", "wrong_password")})
 		return User{}, errInvalidCredentials
 	}
 	return user, nil
 }
 
-// IssueTokens returns a new access JWT and a rotating refresh token.
+// IssueTokens returns a new access JWT and a rotating refresh token: it
+// starts a session, so it records the login as succeeded (Authenticate
+// records the failures).
 func (s *Service) IssueTokens(ctx context.Context, user User) (TokenPair, error) {
-	return s.issueTokens(s.db.WithContext(ctx), user, s.now())
+	pair, err := s.issueTokens(s.db.WithContext(ctx), user, s.now())
+	if err != nil {
+		return TokenPair{}, err
+	}
+	s.Audit(ctx, AuditEvent{Action: AuditLoginSucceeded, ActorUserID: uintPtr(user.ID), TargetUserID: uintPtr(user.ID)})
+	return pair, nil
 }
 
 func (s *Service) issueTokens(tx *gorm.DB, user User, now time.Time) (TokenPair, error) {
@@ -253,6 +271,7 @@ func (s *Service) rotateRefreshOnce(ctx context.Context, raw, hash string) (Toke
 	var pair TokenPair
 	var user User
 	var reuse bool
+	var reuseUser uint
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var row RefreshToken
 		if err := tx.Where("token_hash = ?", hash).First(&row).Error; err != nil {
@@ -324,7 +343,7 @@ func (s *Service) rotateRefreshOnce(ctx context.Context, raw, hash string) (Toke
 			if err := revokeAllTx(tx, row.UserID, now); err != nil {
 				return err
 			}
-			reuse = true
+			reuse, reuseUser = true, row.UserID
 			return nil
 		}
 
@@ -376,6 +395,7 @@ func (s *Service) rotateRefreshOnce(ctx context.Context, raw, hash string) (Toke
 		return TokenPair{}, User{}, err
 	}
 	if reuse {
+		s.Audit(ctx, AuditEvent{Action: AuditRefreshReuse, TargetUserID: uintPtr(reuseUser)})
 		return TokenPair{}, User{}, errRefreshReuse
 	}
 	return pair, user, nil
@@ -405,9 +425,25 @@ func (s *Service) RevokeRefresh(ctx context.Context, raw string) error {
 		return errInvalidRefreshToken
 	}
 	now := s.now()
-	return s.db.WithContext(ctx).Model(&RefreshToken{}).
-		Where("token_hash = ? AND revoked_at IS NULL", hashRefreshToken(raw)).
-		Update("revoked_at", now).Error
+	hash := hashRefreshToken(raw)
+	var row RefreshToken
+	if err := s.db.WithContext(ctx).Where("token_hash = ? AND revoked_at IS NULL", hash).Limit(1).Find(&row).Error; err != nil {
+		return err
+	}
+	if row.ID == 0 {
+		return nil
+	}
+	result := s.db.WithContext(ctx).Model(&RefreshToken{}).
+		Where("id = ? AND revoked_at IS NULL", row.ID).
+		Update("revoked_at", now)
+	if result.Error != nil {
+		return result.Error
+	}
+	// RowsAffected: a concurrent logout of the same token records it once.
+	if result.RowsAffected == 1 {
+		s.Audit(ctx, AuditEvent{Action: AuditLogout, ActorUserID: uintPtr(row.UserID), TargetUserID: uintPtr(row.UserID)})
+	}
+	return nil
 }
 
 // ParseAccess validates an access JWT, from the Bearer header or the session

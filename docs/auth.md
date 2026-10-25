@@ -257,6 +257,85 @@ handlers know. Revoked and expired refresh rows are kept; nothing prunes them ye
 directly or through `Group` membership. See [admin.md](admin.md) for the
 ADMIN-3 assignment helpers and admin enforcement rules.
 
+## Audit trail
+
+The framework records every security-sensitive operation in
+`auth_audit_events` (`auth.AuditEvent`), one row each:
+
+| Action | When |
+| --- | --- |
+| `auth.login.succeeded` / `auth.login.failed` | A sign-in. A failure names the account when the email is one (a wrong password, `details.reason` `wrong_password`), and no account when it is not: the attempted address is not recorded. |
+| `auth.logout` | `POST /auth/logout` ended a session. |
+| `auth.user.registered` / `auth.superuser.created` | `POST /auth/register`; `gombit createsuperuser`. |
+| `auth.refresh.reuse_detected` | A rotated-away refresh token came back: every session of the user was revoked. |
+| `auth.session.revoked` | `DELETE /auth/sessions…` (`details.scope`: `one`, `others` or `all`). |
+| `auth.email.verified` | `POST /auth/verify-email`. |
+| `auth.group.member_added` / `auth.permission.granted` | `auth.AddUserToGroup`, `GrantPermissionToGroup`, `GrantPermissionToUser`, when they changed something: granting what is already granted returns nil and records nothing. |
+| `admin.record.created` / `updated` / `deleted` | A write through the admin data plane (`target_type` the model's slug, `target_id` the record's key). Recorded where the write commits: a write that fails records nothing, and one that committed is recorded even if its response then fails. |
+
+Each row has the **actor** (`actor_user_id`: the request's user, or the
+user signing in), the **target** (`target_user_id`, or `target_type` /
+`target_id`), `occurred_at`, and the **request**: `request_id` (the
+`X-Request-Id` the logs carry), `ip` (the client address, trusted proxies
+respected) and `user_agent`. `details` is a JSON object of names and ids.
+The events the framework records never hold a password, a token, or a hash
+of either; an application recording its own (`auth.RecordAuditEvent`,
+`Service.Audit`) is responsible for what it puts in them. Every event must
+have an `action`, and `details` that are a JSON object (`{}` when empty):
+one that does not is refused before any Auditor sees it.
+
+Identifiers are stored **whole**: `target_type` and `target_id` have no
+length bound (an admin slug and a string primary key have none either), and
+`request_id` holds up to `contract.MaxRequestIDLength` (128) bytes, the
+bound the framework enforces on an inbound `X-Request-Id`
+([router.md](router.md)). An event whose `action`, `request_id` or `ip`
+does not fit its column is refused, not cut, since a cut identifier would
+name something else. Only
+`user_agent`, free text, is cut (to 255 bytes).
+
+Recording is best effort: an event that cannot be written is logged as a
+warning, and the operation it records still succeeds. The Service's events
+and the admin's are logged through the Service's logger; the group and
+permission helpers, which take a database and no Service, log through that
+database's logger. The write is not cancelled by the request (the
+operation committed; a client that hung up still gets its record), but has
+a deadline of its own (5s), so an audit insert stalled in the database
+delays the answer by at most that, never holds it. An Auditor gets that
+bounded context, and must honor it.
+
+Inside a caller's transaction (a grant helper given a `tx`) the event is
+written under an explicit savepoint, so a failed insert (the table not
+migrated yet) rolls back to it and the transaction goes on, even with
+GORM's `DisableNestedTransaction` set. The same 5s is one absolute budget
+for the savepoint, the insert and the rollback: the database's own limit
+(`statement_timeout` on PostgreSQL, the lock wait timeouts on MySQL), set
+from what is left of it, ends a lock wait first, and the insert rolls back
+to its savepoint. A stall the database cannot end (an unresponsive
+connection) meets the client-side deadline instead; cancelling a statement
+in flight drops its connection, so the caller's transaction is lost then,
+and the helper returns that error rather than call the audit failure
+harmless.
+
+- **Reading it.** `auth.ListAuditEvents(ctx, db, auth.AuditQuery{TargetUserID: id})`
+  returns events newest first by `occurred_at` (when the operation ran,
+  stored in UTC; the row id breaks ties). Filters: actor, target, action;
+  100 by default, at most 1000. To browse it in the admin, register
+  `auth.AuditEvent` and grant staff only its view permission
+  (`admin.<slug>.view`, see [admin.md](admin.md)); a superuser can still
+  edit any model.
+- **Sending it elsewhere.** `framework.WithAuthAuditor(a)` replaces where the
+  auth routes and the admin record (`auth.Auditor`:
+  `Record(ctx, auth.AuditEvent) error`), for a SIEM or a log pipeline; the
+  event arrives complete. The group and permission helpers take a database,
+  not a Service, and always write to its `auth_audit_events`.
+- **Your own operations.** `auth.RecordAuditEvent(ctx, db, event)` records an
+  app's own sensitive operation, with the actor and request taken from the
+  context; put `auth.CaptureRequestInfo()` first in the operation's
+  middlewares so the IP and user agent are known. `Service.Audit` does the
+  same through the Service's Auditor.
+- **Retention.** Nothing prunes the table; delete old rows on your own
+  schedule.
+
 ## Config
 
 | Variable | Field | Default |

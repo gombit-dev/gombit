@@ -40,6 +40,19 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   the app's own verification routes, which the framework's replace, or
   rename them.
 
+- The security audit trail adds a table, `auth_audit_events`: migrate it, or the events are not recorded (each failure is logged, and the operation still succeeds). (`audit-trail-schema`, schema, [#337](https://github.com/gombit-dev/gombit/issues/337))
+
+  - Framework schema: `auth.AuditEvent` (`auth_audit_events`): added.
+
+  The new framework model `auth.AuditEvent` holds one row per
+  security-sensitive operation. Add `&auth.AuditEvent{}` to the app's
+  `AutoMigrate` (`internal/platform/database.go`), then generate and
+  apply the migration (`gombit db makemigrations --model
+  github.com/gombit-dev/gombit/auth.AuditEvent`, `gombit db
+  migrate`); `gombit upgrade --dry-run` lists the steps. Until then,
+  logins, registrations and the other recorded operations still work,
+  and log a warning for each event they could not write.
+
 ### Informational
 
 - Bearer-mode session revocation errors include the `WWW-Authenticate: Bearer realm="api"` challenge when the handler returns 401. (`bearer-handler-401-challenge`, api, [#604](https://github.com/gombit-dev/gombit/issues/604))
@@ -71,6 +84,21 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   `GOMBIT_AUTH_EMAIL_VERIFICATION_URL` configure the link.
 
 - A new app's placeholder `schema.ts` includes the verification operations and `PublicUser.email_verified`; an existing app's generated client gets them from `gombit client generate`. (`client-schema-email-verified`, client, [#331](https://github.com/gombit-dev/gombit/issues/331))
+
+- A security audit trail: logins (succeeded and failed), logouts, registrations, superuser creation, refresh-token reuse, session revocations, email verification, group and permission grants, and admin writes each record who, what, when and which request, never a secret. (`audit-trail`, api, [#337](https://github.com/gombit-dev/gombit/issues/337))
+
+  Events go to `auth_audit_events` (`auth.ListAuditEvents` reads
+  them), or to the app's own `auth.Auditor`
+  (`framework.WithAuthAuditor`), for the auth routes and the admin.
+  `auth.CaptureRequestInfo` and `auth.RecordAuditEvent` record an
+  app's own sensitive operations; `admin.Mount` takes auth options.
+
+- An inbound `X-Request-Id` longer than 128 bytes, or holding a space or a control character, is replaced by a generated ID instead of being echoed, logged and stored as sent. (`request-id-bounded`, behavior, [#337](https://github.com/gombit-dev/gombit/issues/337))
+
+  A caller that sends a valid ID (at most `contract.MaxRequestIDLength`
+  bytes of visible ASCII: a UUID, a trace-style hex ID) sees it back
+  unchanged, as before. Every consumer (response header, logs, error
+  envelopes, the audit trail) carries the one accepted ID.
 
 - An already-rotated refresh token that has expired is a 401 and no longer revokes the user's sessions. (`expired-rotated-refresh-token-no-cascade`, security, [#458](https://github.com/gombit-dev/gombit/issues/458))
 
