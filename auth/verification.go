@@ -278,6 +278,7 @@ func (s *Service) VerifyEmail(ctx context.Context, raw string) (User, error) {
 	if err != nil {
 		return User{}, err
 	}
+	s.Audit(ctx, AuditEvent{Action: AuditEmailVerified, ActorUserID: uintPtr(user.ID), TargetUserID: uintPtr(user.ID)})
 	return user, nil
 }
 
@@ -318,14 +319,14 @@ type resendVerificationOutput struct {
 }
 
 func registerVerificationRoutes(api huma.API, svc *Service, prefix, security string, gate func(huma.Context, func(huma.Context))) {
-	huma.Register(api, huma.Operation{
+	huma.Register(api, withRequestInfo(huma.Operation{
 		OperationID: "auth-verify-email",
 		Method:      http.MethodPost,
 		Path:        prefix + "/auth/verify-email",
 		Summary:     "Verify the user's email address with the token mailed to it",
 		Description: "Consumes the token: it works once. An unknown, expired, used or superseded token, or one sent to an address the user no longer has, is a 422 on token.",
 		Tags:        []string{"Auth"},
-	}, svc.verifyEmail)
+	}), svc.verifyEmail)
 
 	resendPath := prefix + "/auth/verify-email/resend"
 	huma.Register(api, huma.Operation{

@@ -12,6 +12,19 @@ version.
 
 ### Added
 
+- A [security audit trail](docs/auth.md#audit-trail) (AUTH-7): logins
+  (succeeded and failed), logouts, registrations, superuser creation,
+  refresh-token reuse, session revocations, email verification, group and
+  permission grants, and admin writes each record the actor, the target, the
+  time, and the request (request id, client IP, user agent) in a new table,
+  `auth_audit_events`; the framework's events never hold a secret. `auth.ListAuditEvents` reads it;
+  `framework.WithAuthAuditor` sends the events to the app's own
+  `auth.Auditor`; `auth.RecordAuditEvent` and `auth.CaptureRequestInfo`
+  record an app's own operations. Migrate the new framework model
+  `auth.AuditEvent` (`gombit upgrade --dry-run` lists the steps); until then
+  each event is a logged warning and the operations still succeed.
+  `admin.Mount` takes auth options
+  ([#337](https://github.com/gombit-dev/gombit/issues/337)).
 - [Email verification](docs/auth.md#email-verification) (AUTH-1), in both
   auth modes. Registration mails a verification message; `POST
   /auth/verify-email` consumes its token and marks the email verified, and
@@ -45,6 +58,12 @@ version.
 
 ### Fixed
 
+- An inbound `X-Request-Id` longer than 128 bytes
+  (`contract.MaxRequestIDLength`), or holding a space or a control
+  character, is replaced by a generated ID instead of being echoed, logged
+  and stored as sent: every consumer (the response header, the logs, error
+  envelopes, the audit trail) carries the same, whole ID
+  ([#337](https://github.com/gombit-dev/gombit/issues/337)).
 - Bearer-mode session revocation errors now include the
   `WWW-Authenticate: Bearer realm="api"` challenge when the authenticated
   session ends between the request gate and the handler. Cookie-mode 401
@@ -103,6 +122,16 @@ version.
   `inspect` shows those escapes as the bytes at rest and did so before this fix
   too
   ([#497](https://github.com/gombit-dev/gombit/issues/497)).
+- A 422 keys a missing property by that property's own path instead of by the
+  object that lacks it (`address.city`, `lines[1].sku`, `body[1].sku` for a
+  top-level array body, `query.filter.kind` for a deepObject query param), the
+  shape every other nested error already has. Huma reports the property only in
+  the message, so the key was that object and it carried every property the
+  object was missing, which a form cannot put on the right input: the
+  scaffold's `applyContractErrors` passes these keys straight to React Hook
+  Form as field paths. The dependent-required message (`expected property zip
+  to be present when city is present`) keys the same way
+  ([#503](https://github.com/gombit-dev/gombit/issues/503)).
 
 ### Changed
 
@@ -577,7 +606,6 @@ version.
   `framework.New`, `contract.HumaConfigFor` logs the failure through `slog`; a
   writer on which the status cannot be confirmed to change gets the error back
   to Huma as before ([#442](https://github.com/gombit-dev/gombit/issues/442)).
-
 ## [0.7.0] — 2026-10-04
 
 ### Added

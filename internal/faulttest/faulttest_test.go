@@ -276,3 +276,16 @@ func TestBlockThenFailAndSequenceThen(t *testing.T) {
 	}()
 	faulttest.BlockThenFail(nil, nil)
 }
+
+func TestDoStepRunsItsHookThenLetsTheCallThrough(t *testing.T) {
+	var ran []int
+	inj := faulttest.Sequence(faulttest.Success(), faulttest.Do(func() { ran = append(ran, 2) }))
+	for call := 1; call <= 3; call++ {
+		if err := inj.Hit(context.Background()); err != nil {
+			t.Fatalf("call %d = %v, want it through", call, err)
+		}
+	}
+	if len(ran) != 1 || ran[0] != 2 {
+		t.Fatalf("the hook ran on %v, want call 2 only", ran)
+	}
+}
