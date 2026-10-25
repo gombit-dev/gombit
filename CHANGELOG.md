@@ -10,8 +10,67 @@ version.
 
 ## [Unreleased]
 
+### Added
+
+- A [security audit trail](docs/auth.md#audit-trail) (AUTH-7): logins
+  (succeeded and failed), logouts, registrations, superuser creation,
+  refresh-token reuse, session revocations, email verification, group and
+  permission grants, and admin writes each record the actor, the target, the
+  time, and the request (request id, client IP, user agent) in a new table,
+  `auth_audit_events`; the framework's events never hold a secret. `auth.ListAuditEvents` reads it;
+  `framework.WithAuthAuditor` sends the events to the app's own
+  `auth.Auditor`; `auth.RecordAuditEvent` and `auth.CaptureRequestInfo`
+  record an app's own operations. Migrate the new framework model
+  `auth.AuditEvent` (`gombit upgrade --dry-run` lists the steps); until then
+  each event is a logged warning and the operations still succeed.
+  `admin.Mount` takes auth options
+  ([#337](https://github.com/gombit-dev/gombit/issues/337)).
+- [Email verification](docs/auth.md#email-verification) (AUTH-1), in both
+  auth modes. Registration mails a verification message; `POST
+  /auth/verify-email` consumes its token and marks the email verified, and
+  `POST /auth/verify-email/resend` mails a new one (at most once a minute,
+  429 with `Retry-After`; it supersedes the earlier tokens). A token is 32
+  random bytes stored as its SHA-256 in a new table, `auth_one_time_tokens`,
+  expires after `GOMBIT_AUTH_EMAIL_VERIFICATION_TTL` (24h), works once, and
+  stops working once the user's email is another one.
+  `GOMBIT_AUTH_EMAIL_VERIFICATION_URL` is the link the message carries, with
+  `{token}` where the token goes. `GET /me` and registration report
+  `email_verified`; `auth.RequireVerifiedEmail()` gates an app's own
+  operations (403), after `Service.RequireBearer()` (new) or
+  `RequireCookieSession()`. Mail goes through `auth.Mailer`, set with
+  `framework.WithAuthMailer`: development and test apps log each message
+  (`auth.LogMailer`), production apps without one send none (a resend is a
+  503), and `authtest.Mailer` records them for tests. `gombit
+  createsuperuser` creates verified users.
+  - **Breaking (schema):** `users` gains `email_verified_at` and
+    `verified_email` (a verification holds only for the address it proved), and
+    `auth.OneTimeToken` is a new framework model: add it to the app's
+    `AutoMigrate` and migrate before running this release, or registration
+    and `gombit createsuperuser` fail. `gombit upgrade --dry-run` lists the
+    steps.
+  - **Breaking (api):** the framework now registers the verification routes,
+    the `auth-verify-email` and `auth-resend-email-verification` operation
+    IDs, and the `AuthVerifyEmailBody` / `AuthVerificationResult` schemas;
+    an app that registers its own panics at startup.
+  - `auth.NewService` and `auth.Mount` take options (`auth.WithMailer`,
+    `auth.WithLogger`)
+  ([#331](https://github.com/gombit-dev/gombit/issues/331)).
+
 ### Fixed
 
+- An inbound `X-Request-Id` longer than 128 bytes
+  (`contract.MaxRequestIDLength`), or holding a space or a control
+  character, is replaced by a generated ID instead of being echoed, logged
+  and stored as sent: every consumer (the response header, the logs, error
+  envelopes, the audit trail) carries the same, whole ID
+  ([#337](https://github.com/gombit-dev/gombit/issues/337)).
+- Bearer-mode session revocation errors now include the
+  `WWW-Authenticate: Bearer realm="api"` challenge when the authenticated
+  session ends between the request gate and the handler. Cookie-mode 401
+  responses remain unchanged ([#604](https://github.com/gombit-dev/gombit/issues/604)).
+- The OpenAPI contract for `POST /auth/verify-email/resend` now declares its
+  429 response and integer `Retry-After` header, matching the response already
+  sent at runtime ([#611](https://github.com/gombit-dev/gombit/issues/611)).
 - Saving the admin edit form no longer rewrites fields the operator did not
   touch: it sent every field back, so each save truncated a datetime to the
   minute (`12:30:45.123456` became `12:30:00`) and an integer past 2^53 to
@@ -29,6 +88,26 @@ version.
   One equal to the stored value rounded the same way (the admin UI sending
   the field back, an integer field or a belongs_to key alike) keeps the
   stored value ([#448](https://github.com/gombit-dev/gombit/issues/448)).
+- An already-rotated refresh token that has expired is now a 401 that leaves
+  the user's other sessions alone. Presenting a rotated token again still
+  revokes all of them while it is unexpired, so a stolen token is detected
+  only within its lifetime
+  ([#458](https://github.com/gombit-dev/gombit/issues/458)).
+- In cookie mode, a `POST /auth/refresh` rejected with a 401 clears the
+  `gombit_access` and `gombit_refresh` cookies, as logout does, instead of
+  leaving the browser to send a dead refresh cookie until its Max-Age. A 5xx
+  leaves them, and so does a refresh of a token that another rotation already
+  replaced (one that lost the race to a rotation of the same token on another
+  instance, or whose token expired with a successor), since that rotation's
+  response sets the session's new cookies
+  ([#458](https://github.com/gombit-dev/gombit/issues/458)).
+- In cookie mode, `POST /auth/refresh` loads the session user inside the
+  rotation's own transaction instead of in a separate read afterwards. A
+  failure loading the user now rolls the rotation back with it, rather than
+  surfacing as a 500 after the rotation already committed: the browser's
+  refresh cookie stays valid for the retry, which no longer reads as reuse
+  and revokes every session of the user
+  ([#606](https://github.com/gombit-dev/gombit/issues/606)).
 
 ### Changed
 

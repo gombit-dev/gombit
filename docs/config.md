@@ -87,6 +87,8 @@ recognizes:
 | `GOMBIT_AUTH_MODE` | `Config.Auth.Mode` | `jwt` |
 | `GOMBIT_COOKIE_SECURE` | `Config.Auth.CookieSecure` | `true` |
 | `GOMBIT_COOKIE_SAMESITE` | `Config.Auth.CookieSameSite` | `lax` |
+| `GOMBIT_AUTH_EMAIL_VERIFICATION_TTL` | `Config.Auth.EmailVerificationTTL` | `24h` |
+| `GOMBIT_AUTH_EMAIL_VERIFICATION_URL` | `Config.Auth.EmailVerificationURL` | empty; when set, must contain `{token}` |
 | `GOMBIT_SECURITY_SANITIZE_INPUT` | `Config.Security.SanitizeInput` | `false` (opt-in) |
 
 `.env` is read whole, lines of any length. A line assigns as written:

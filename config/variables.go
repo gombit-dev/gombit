@@ -81,6 +81,8 @@ var variables = []variable{
 	{envAuthMode, false, func(c Config) string { return string(c.Auth.Mode) }},
 	{envCookieSecure, false, func(c Config) string { return strconv.FormatBool(c.Auth.CookieSecure) }},
 	{envCookieSameSite, false, func(c Config) string { return string(c.Auth.CookieSameSite) }},
+	{envEmailVerificationTTL, false, func(c Config) string { return duration(c.Auth.EmailVerificationTTL) }},
+	{envEmailVerificationURL, false, func(c Config) string { return c.Auth.EmailVerificationURL }},
 	{envSecuritySanitizeInput, false, func(c Config) string { return strconv.FormatBool(c.Security.SanitizeInput) }},
 }
 

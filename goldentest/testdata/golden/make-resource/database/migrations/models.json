@@ -10,7 +10,15 @@
     },
     {
       "import_path": "github.com/gombit-dev/gombit/auth",
+      "type_name": "AuditEvent"
+    },
+    {
+      "import_path": "github.com/gombit-dev/gombit/auth",
       "type_name": "Group"
+    },
+    {
+      "import_path": "github.com/gombit-dev/gombit/auth",
+      "type_name": "OneTimeToken"
     },
     {
       "import_path": "github.com/gombit-dev/gombit/auth",
