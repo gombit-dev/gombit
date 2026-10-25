@@ -114,12 +114,73 @@ func IsResendTooSoon(err error) bool {
 	return errors.As(err, &tooSoon)
 }
 
+// RequestPasswordResetInBackground is what POST /auth/password/forgot runs.
+func RequestPasswordResetInBackground(ctx context.Context, s *Service, email string) error {
+	return s.requestPasswordResetInBackground(ctx, email)
+}
+
+// SetBackgroundAdmission replaces the background runner's admission
+// bucket (burst, refill per second, clock) and worker count. Set it before
+// the service is used.
+func SetBackgroundAdmission(s *Service, burst, perSecond float64, workers int, now func() time.Time) {
+	r := s.background
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.burst, r.rate, r.tokens, r.now, r.workerCount = burst, perSecond, burst, now, workers
+	r.last = now()
+}
+
+// SetBackgroundTimeout replaces the deadline of each background task.
+func SetBackgroundTimeout(s *Service, d time.Duration) { s.background.timeout = d }
+
+// IsBackgroundBusy reports whether err is a background task not admitted.
+func IsBackgroundBusy(err error) bool {
+	var busy backgroundBusyError
+	return errors.As(err, &busy)
+}
+
 // SetMailer replaces the service's Mailer.
 func SetMailer(s *Service, m Mailer) { s.mailer = m }
+
+// SetHasher replaces the service's password Hasher.
+func SetHasher(s *Service, h Hasher) { s.hasher = h }
+
+// SetLoginAuthenticatedHook makes fn run in Login between the password
+// check and the session. Set it before the service is used.
+func SetLoginAuthenticatedHook(s *Service, fn func()) { s.onLoginAuthenticated = fn }
+
+// ErrInvalidCredentials is the error Authenticate and Login return for a
+// wrong email or password.
+var ErrInvalidCredentials = errInvalidCredentials
 
 // SetAuditTimeout replaces the bound on one audit write until the test ends.
 func SetAuditTimeout(t interface{ Cleanup(func()) }, d time.Duration) {
 	old := auditTimeout
 	auditTimeout = d
 	t.Cleanup(func() { auditTimeout = old })
+}
+
+// SetBackgroundLimits replaces the background runner's queue bound and
+// Close's grace. Set it before the service is used.
+func SetBackgroundLimits(s *Service, queue int, closeGrace time.Duration) {
+	r := s.background
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.queueCap, r.closeGrace = queue, closeGrace
+}
+
+// PendingBackground is how many admitted tasks wait for a worker.
+func PendingBackground(s *Service) int {
+	r := s.background
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.pending)
+}
+
+// IsClosing reports whether a Close of the service has begun.
+func IsClosing(s *Service) bool {
+	r := s.background
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.closing != nil
 }

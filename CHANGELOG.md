@@ -12,6 +12,40 @@ version.
 
 ### Added
 
+- [Password reset](docs/auth.md#password-reset) (AUTH-2), in both auth
+  modes. `POST /auth/password/forgot` mails a single-use reset link and
+  answers the same 202 whether or not the email is an account, before that
+  is known (the message is sent by the auth Service's bounded, deadlined
+  background workers, which `framework.App` drains and cancels when it
+  stops; a request they cannot admit is a 503, also before the lookup);
+  `POST
+  /auth/password/reset` sets the new password (registration's policy) and
+  revokes every session and refresh token of the user, unless
+  `GOMBIT_AUTH_PASSWORD_RESET_KEEP_SESSIONS=true`; a login that checked the
+  old password cannot start a session after the reset (login now starts its
+  session under the user's lock, only if the checked password is still
+  current: `auth.Service.Login`). The token is a one-time
+  token like the verification one (pending until delivered, used once, at
+  most one message a minute, superseded by a newer one, bound to the
+  address), expiring after `GOMBIT_AUTH_PASSWORD_RESET_TTL` (1h);
+  `GOMBIT_AUTH_PASSWORD_RESET_URL` is the link. Both are audited.
+  `auth.Service.RequestPasswordReset` / `ResetPassword` are the same flow
+  from Go.
+  - **Breaking (api):** `auth.Service.IssueTokens` starts a session only if
+    the given user's `PasswordHash` is still the stored one (a snapshot from
+    before a password change, or a hand-built `User` without it, is refused
+    as invalid credentials), so `Authenticate` + `IssueTokens` cannot outlive
+    a reset that commits in between; `auth.Service.Login` does both.
+  - **Breaking (api):** `auth.Mount` returns the `*auth.Service` it builds
+    (`svc, err := auth.Mount(...)`): the caller owns it and calls
+    `svc.Close(ctx)` on shutdown, which drains its background work.
+    `framework.App` does this itself.
+  - **Breaking (api):** the framework now registers the reset routes, the
+    `auth-request-password-reset` and `auth-reset-password` operation IDs,
+    and the `AuthPasswordForgotBody` / `AuthPasswordResetBody` /
+    `AuthPasswordResetRequested` / `AuthPasswordResetResult` schemas; an app
+    that registers its own panics at startup
+  ([#332](https://github.com/gombit-dev/gombit/issues/332)).
 - A [security audit trail](docs/auth.md#audit-trail) (AUTH-7): logins
   (succeeded and failed), logouts, registrations, superuser creation,
   refresh-token reuse, session revocations, email verification, group and

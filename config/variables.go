@@ -83,6 +83,9 @@ var variables = []variable{
 	{envCookieSameSite, false, func(c Config) string { return string(c.Auth.CookieSameSite) }},
 	{envEmailVerificationTTL, false, func(c Config) string { return duration(c.Auth.EmailVerificationTTL) }},
 	{envEmailVerificationURL, false, func(c Config) string { return c.Auth.EmailVerificationURL }},
+	{envPasswordResetTTL, false, func(c Config) string { return duration(c.Auth.PasswordResetTTL) }},
+	{envPasswordResetURL, false, func(c Config) string { return c.Auth.PasswordResetURL }},
+	{envPasswordResetKeep, false, func(c Config) string { return strconv.FormatBool(c.Auth.PasswordResetKeepSessions) }},
 	{envSecuritySanitizeInput, false, func(c Config) string { return strconv.FormatBool(c.Security.SanitizeInput) }},
 }
 

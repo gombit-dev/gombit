@@ -3,7 +3,6 @@ package auth
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -21,32 +20,9 @@ import (
 // consumed by its first use. It is pending until its message was delivered
 // to the Mailer; delivery activates it and supersedes every earlier one for
 // the user, in one transaction: only the latest delivered link works. A
-// user may ask for a new one once every verificationResendInterval.
+// user may ask for a new one once every resendInterval (onetime.go).
 
-// verificationResendInterval is how long a user waits between two
-// verification messages.
-const verificationResendInterval = time.Minute
-
-var (
-	errInvalidOneTimeToken = errors.New("auth: invalid or expired token")
-	errAlreadyVerified     = errors.New("auth: email is already verified")
-	errMailNotSent         = errors.New("auth: the message could not be sent")
-	errTokenNotPending     = errors.New("auth: the one-time token is no longer pending")
-)
-
-// resendTooSoonError is a verification message asked for within
-// verificationResendInterval of the previous one.
-type resendTooSoonError struct{ retryAfter time.Duration }
-
-func (e resendTooSoonError) Error() string {
-	return fmt.Sprintf("auth: a verification message was sent less than %s ago", verificationResendInterval)
-}
-
-// ErrInvalidToken is returned by VerifyEmail for a token that is unknown,
-// expired, already used, superseded by a newer one, never delivered, or
-// issued for an address the user no longer has. The cases are not told
-// apart.
-var ErrInvalidToken = errInvalidOneTimeToken
+var errAlreadyVerified = errors.New("auth: email is already verified")
 
 // ErrAlreadyVerified is returned by SendEmailVerification for a user whose
 // email is verified.
@@ -56,141 +32,21 @@ var ErrAlreadyVerified = errAlreadyVerified
 // and mails it. It returns ErrAlreadyVerified for a verified user, an error
 // naming the wait when the previous message went out (or is going out) less
 // than a minute ago, and the Mailer's error (ErrNoMailer when none is
-// configured) when the message could not be sent.
-//
-// The token is written pending, mailed, then activated: activating it and
-// superseding the earlier tokens is one transaction. Whatever fails, the
-// earlier links keep working unless the new one does instead. A message
-// that could not be sent is withdrawn, so the user can ask again at once;
-// if withdrawing it fails too, the pending token still does not work, and
-// counts as a message in flight until the interval has passed.
+// configured) when the message could not be sent. The token is pending
+// until the message was delivered, then supersedes the earlier ones
+// (sendOneTimeToken).
 func (s *Service) SendEmailVerification(ctx context.Context, user User) error {
-	raw, token, err := s.issueVerificationToken(ctx, user)
-	if err != nil {
-		return err
-	}
-	if err := s.mailer.Send(ctx, s.verificationMessage(token, raw)); err != nil {
-		s.withdrawToken(ctx, token)
-		if errors.Is(err, ErrNoMailer) {
-			return err
-		}
-		return fmt.Errorf("%w: %w", errMailNotSent, err)
-	}
-	if err := s.activateToken(ctx, token); err != nil {
-		// Delivered, but its link does not work: withdraw it, so the user is
-		// not made to wait for a message that is no use.
-		s.withdrawToken(ctx, token)
-		return err
-	}
-	return nil
-}
-
-// issueVerificationToken writes a pending verification token for user, once
-// the resend wait allows one.
-func (s *Service) issueVerificationToken(ctx context.Context, user User) (string, OneTimeToken, error) {
-	var raw string
-	var token OneTimeToken
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// The user's row lock serializes two resends of one user: the second
-		// finds the first's token (pending: in flight) and waits out the
-		// interval (on SQLite, which has no row locks, two at once can both
-		// pass: both are sent, and the later activated supersedes the
-		// earlier). The clock is read after it, so a resend that waited
-		// compares the instant it runs at.
-		locked, err := lockUserTx(tx, user.ID)
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return errUserNotFound
-		}
-		if err != nil {
-			return err
-		}
-		now := s.now()
-		if locked.EmailVerified() {
-			return errAlreadyVerified
-		}
-		if wait, err := verificationWait(tx, locked.ID, now); err != nil {
-			return err
-		} else if wait > 0 {
-			return resendTooSoonError{retryAfter: wait}
-		}
-		if raw, err = newOpaqueToken(); err != nil {
-			return err
-		}
-		token = OneTimeToken{
-			UserID:    locked.ID,
-			Purpose:   PurposeVerifyEmail,
-			TokenHash: hashOpaqueToken(raw),
-			Email:     locked.Email,
-			ExpiresAt: now.Add(s.verificationTTL()),
-			CreatedAt: now,
-		}
-		return tx.Create(&token).Error
+	return s.sendOneTimeToken(ctx, user, oneTimeFlow{
+		purpose: PurposeVerifyEmail,
+		ttl:     s.verificationTTL(),
+		check: func(u User) error {
+			if u.EmailVerified() {
+				return errAlreadyVerified
+			}
+			return nil
+		},
+		message: s.verificationMessage,
 	})
-	return raw, token, err
-}
-
-// verificationWait is how long the user must still wait before another
-// verification message: the interval runs from the latest message
-// delivered, or from the latest one still in flight (a pending token, which
-// another request is mailing).
-//
-// "Latest delivered" is by activation, not by issuance: two sends can
-// overlap and finish out of order, and the later activation is the link
-// that works (activateToken), so it is the one the interval runs from.
-// sent_at orders that in SQL on SQLite too, which stores times as text:
-// activation writes it in UTC, so every value has the same layout and
-// offset, and the text order is the time order.
-func verificationWait(tx *gorm.DB, userID uint, now time.Time) (time.Duration, error) {
-	var sent, pending OneTimeToken
-	err := tx.Where("user_id = ? AND purpose = ? AND sent_at IS NOT NULL", userID, PurposeVerifyEmail).Order("sent_at DESC, id DESC").Limit(1).Find(&sent).Error
-	if err != nil {
-		return 0, err
-	}
-	err = tx.Where("user_id = ? AND purpose = ? AND sent_at IS NULL", userID, PurposeVerifyEmail).Order("id DESC").Limit(1).Find(&pending).Error
-	if err != nil {
-		return 0, err
-	}
-	// Compared here, on instants: SQLite compares times as text.
-	var wait time.Duration
-	if sent.SentAt != nil {
-		wait = verificationResendInterval - now.Sub(*sent.SentAt)
-	}
-	if pending.ID != 0 {
-		wait = max(wait, verificationResendInterval-now.Sub(pending.CreatedAt))
-	}
-	return max(wait, 0), nil
-}
-
-// activateToken makes a delivered token work and supersedes the user's
-// earlier delivered tokens for its purpose, in one transaction: either the
-// new link works and no earlier one does, or nothing changed. The user's
-// row first, as VerifyEmail takes it, so the two never deadlock.
-func (s *Service) activateToken(ctx context.Context, token OneTimeToken) error {
-	return s.db.WithContext(context.WithoutCancel(ctx)).Transaction(func(tx *gorm.DB) error {
-		if _, err := lockUserTx(tx, token.UserID); err != nil {
-			return err
-		}
-		// UTC: verificationWait orders by sent_at.
-		now := s.now().UTC()
-		activated := tx.Model(&OneTimeToken{}).Where("id = ? AND sent_at IS NULL AND used_at IS NULL", token.ID).Update("sent_at", now)
-		if activated.Error != nil {
-			return activated.Error
-		}
-		if activated.RowsAffected != 1 {
-			return errTokenNotPending
-		}
-		return tx.Model(&OneTimeToken{}).
-			Where("user_id = ? AND purpose = ? AND sent_at IS NOT NULL AND used_at IS NULL AND id <> ?", token.UserID, token.Purpose, token.ID).
-			Update("used_at", now).Error
-	})
-}
-
-// withdrawToken deletes a pending token whose message is no use. Best
-// effort: a pending token left behind does not work anyway.
-func (s *Service) withdrawToken(ctx context.Context, token OneTimeToken) {
-	if err := s.db.WithContext(context.WithoutCancel(ctx)).Where("id = ? AND sent_at IS NULL", token.ID).Delete(&OneTimeToken{}).Error; err != nil {
-		s.logger.Warn("auth: withdraw an undelivered one-time token", zap.Error(err))
-	}
 }
 
 func (s *Service) verificationTTL() time.Duration {
@@ -201,21 +57,14 @@ func (s *Service) verificationTTL() time.Duration {
 }
 
 func (s *Service) verificationMessage(token OneTimeToken, raw string) Message {
-	msg := Message{
-		Kind:      MessageVerifyEmail,
-		To:        token.Email,
-		Subject:   "Verify your email address",
-		Token:     raw,
-		ExpiresAt: token.ExpiresAt,
-	}
-	expires := token.ExpiresAt.UTC().Format(time.RFC1123)
-	if tmpl := strings.TrimSpace(s.cfg.EmailVerificationURL); tmpl != "" {
-		msg.URL = strings.ReplaceAll(tmpl, config.EmailVerificationURLToken, raw)
-		msg.Text = fmt.Sprintf("Confirm that this is your email address:\n\n%s\n\nThe link works once, until %s. If you did not ask for it, ignore this message.\n", msg.URL, expires)
-		return msg
-	}
-	msg.Text = fmt.Sprintf("Confirm that this is your email address with this code:\n\n%s\n\nIt works once, until %s. If you did not ask for it, ignore this message.\n", raw, expires)
-	return msg
+	return linkMessage(token, raw, linkTemplate{
+		kind:        MessageVerifyEmail,
+		subject:     "Verify your email address",
+		url:         s.cfg.EmailVerificationURL,
+		placeholder: config.EmailVerificationURLToken,
+		withURL:     "Confirm that this is your email address:",
+		withRaw:     "Confirm that this is your email address with this code:",
+	})
 }
 
 // VerifyEmail consumes a verification token and marks the email it was
@@ -229,39 +78,9 @@ func (s *Service) VerifyEmail(ctx context.Context, raw string) (User, error) {
 	}
 	var user User
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var token OneTimeToken
-		err := tx.Where("token_hash = ? AND purpose = ?", hashOpaqueToken(raw), PurposeVerifyEmail).First(&token).Error
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return errInvalidOneTimeToken
-		}
+		token, locked, now, err := s.consumeOneTimeToken(tx, raw, PurposeVerifyEmail)
 		if err != nil {
 			return err
-		}
-		// The user's row first, as SendEmailVerification takes it: the same
-		// order, so the two never deadlock. Then the clock.
-		locked, err := lockUserTx(tx, token.UserID)
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return errInvalidOneTimeToken
-		}
-		if err != nil {
-			return err
-		}
-		now := s.now()
-		// Expiry on instants, here: SQLite compares times as text.
-		if token.SentAt == nil || token.UsedAt != nil || !now.Before(token.ExpiresAt) {
-			return errInvalidOneTimeToken
-		}
-		// Consume it: the first use wins, a concurrent one finds it used.
-		used := tx.Model(&OneTimeToken{}).Where("id = ? AND sent_at IS NOT NULL AND used_at IS NULL", token.ID).Update("used_at", now)
-		if used.Error != nil {
-			return used.Error
-		}
-		if used.RowsAffected != 1 {
-			return errInvalidOneTimeToken
-		}
-		// The token proves the address it was sent to, not the account.
-		if locked.Email != token.Email {
-			return errInvalidOneTimeToken
 		}
 		// The verification is bound to the address: it lapses if Email
 		// changes (User.EmailVerified).
@@ -340,27 +159,7 @@ func registerVerificationRoutes(api huma.API, svc *Service, prefix, security str
 		Middlewares: huma.Middlewares{gate},
 		Errors:      []int{http.StatusTooManyRequests},
 	}, svc.resendVerification)
-
-	// Declaring a specific Huma error suppresses its automatic default error
-	// response, so retain the catch-all response and describe the header the
-	// rate-limited runtime response already sends.
-	responses := api.OpenAPI().Paths[resendPath].Post.Responses
-	rateLimited := responses["429"]
-	minimum := 1.0
-	rateLimited.Headers = map[string]*huma.Param{
-		"Retry-After": {
-			Description: "Seconds until another verification message may be requested",
-			Required:    true,
-			Schema: &huma.Schema{
-				Type:    "integer",
-				Minimum: &minimum,
-			},
-		},
-	}
-	responses["default"] = &huma.Response{
-		Description: "Error",
-		Content:     rateLimited.Content,
-	}
+	declareRetryAfter(api, resendPath, http.StatusTooManyRequests, "Seconds until another verification message may be requested")
 }
 
 func (s *Service) verifyEmail(ctx context.Context, input *verifyEmailInput) (*verifyEmailOutput, error) {
