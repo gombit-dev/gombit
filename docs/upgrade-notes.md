@@ -111,6 +111,17 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 - In cookie mode, a `POST /auth/refresh` that fails loading the session user rolls the token rotation back with it, instead of answering 500 after the rotation already committed. (`cookie-refresh-loads-user-before-commit`, behavior, [#606](https://github.com/gombit-dev/gombit/issues/606))
 
+- A 422 keys a missing property by that property's own path at every location Huma reports it (`address.city`, `body[1].sku`, `query.filter.kind`), including a `dependentRequired` property, instead of by the object. (`nested-required-property-keyed-by-its-path`, behavior, [#503](https://github.com/gombit-dev/gombit/issues/503))
+
+  Huma reports a missing property — required, or pulled in by
+  `dependentRequired` — against the object that lacks it, whether that
+  is a nested body object, a top-level array-body item (`body[1]`), a
+  deepObject query param or a form object, so the parent key carried
+  every property the object was missing. A form that passes
+  `error.fields` to React Hook Form field paths needs no change — that
+  is the key it always wanted; code that read the parent key reads the
+  property path now.
+
 ## v0.8.0
 
 ### Manual: action required
