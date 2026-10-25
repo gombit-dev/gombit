@@ -495,45 +495,125 @@ func runSessionsService(t *testing.T, db *database.DB) {
 		}
 	})
 
-	// Only a rotated refresh token is evidence of theft. One revoked by
-	// logout or session revocation is simply invalid.
+	// Only a rotated refresh token counts as reuse, and only until it
+	// expires. One revoked by logout or session revocation is simply invalid,
+	// and so is any token past its expiry.
 	t.Run("reuse rule", func(t *testing.T) {
+		// rowOf is the refresh token row of pair's session, read while pair
+		// still authenticates.
+		rowOf := func(t *testing.T, e sessionsEnv, pair auth.TokenPair) uint {
+			t.Helper()
+			id, err := auth.AuthenticatedRow(e.ctx, e.svc, pair.AccessToken)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return id
+		}
+		// expire moves the expiry of row id to a minute ago and leaves every
+		// other row as it is. A rotation keeps the rotated row's expires_at,
+		// so this is that row once its own lifetime is over, while the
+		// successor, issued later with a lifetime of its own, is still
+		// active. The env's service reads the system clock.
+		expire := func(t *testing.T, id uint) {
+			t.Helper()
+			if err := db.Model(&auth.RefreshToken{}).Where("id = ?", id).
+				Update("expires_at", time.Now().Add(-time.Minute)).Error; err != nil {
+				t.Fatal(err)
+			}
+		}
 		tests := []struct {
-			name      string
-			present   func(t *testing.T, e sessionsEnv, ada auth.User, b auth.TokenPair)
+			name string
+			// present ends b's token and returns what it issued in its place
+			// (a rotation's successor), which must survive, or not, along
+			// with ada's other session.
+			present func(t *testing.T, e sessionsEnv, ada auth.User, b auth.TokenPair) *auth.TokenPair
+			// wantErr is exact: errRotationRaced also is ErrInvalidRefreshToken,
+			// so a case that wants ErrInvalidRefreshToken must not get it.
 			wantErr   error
-			wantAlive bool // whether ada's other session survives
+			wantAlive bool // whether ada's other session and b's successor survive
 		}{
-			{"logged-out token", func(t *testing.T, e sessionsEnv, _ auth.User, b auth.TokenPair) {
+			{"logged-out token", func(t *testing.T, e sessionsEnv, _ auth.User, b auth.TokenPair) *auth.TokenPair {
 				if err := e.svc.RevokeRefresh(e.ctx, b.RefreshToken); err != nil {
 					t.Fatal(err)
 				}
+				return nil
 			}, auth.ErrInvalidRefreshToken, true},
-			{"token of a revoked session", func(t *testing.T, e sessionsEnv, ada auth.User, b auth.TokenPair) {
+			{"token of a revoked session", func(t *testing.T, e sessionsEnv, ada auth.User, b auth.TokenPair) *auth.TokenPair {
 				if err := e.svc.RevokeSession(e.ctx, ada.ID, e.sessionID(t, b)); err != nil {
 					t.Fatal(err)
 				}
+				return nil
 			}, auth.ErrInvalidRefreshToken, true},
-			{"already-rotated token", func(t *testing.T, e sessionsEnv, _ auth.User, b auth.TokenPair) {
-				e.rotate(t, b)
+			{"already-rotated token", func(t *testing.T, e sessionsEnv, _ auth.User, b auth.TokenPair) *auth.TokenPair {
+				next := e.rotate(t, b)
+				return &next
 			}, auth.ErrRefreshReuse, false},
+			// Past its expiry a rotated token is just invalid: no cascade
+			// (#458). It has a successor, so it is errRotationRaced.
+			{"expired already-rotated token", func(t *testing.T, e sessionsEnv, _ auth.User, b auth.TokenPair) *auth.TokenPair {
+				id := rowOf(t, e, b)
+				next := e.rotate(t, b)
+				expire(t, id)
+				return &next
+			}, auth.ErrRotationRaced, true},
+			{"expired logged-out token", func(t *testing.T, e sessionsEnv, _ auth.User, b auth.TokenPair) *auth.TokenPair {
+				id := rowOf(t, e, b)
+				if err := e.svc.RevokeRefresh(e.ctx, b.RefreshToken); err != nil {
+					t.Fatal(err)
+				}
+				expire(t, id)
+				return nil
+			}, auth.ErrInvalidRefreshToken, true},
 		}
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
 				e := newEnv(t)
 				ada, a := e.user(t, "ada", 2)
 				_, g := e.user(t, "grace", 1)
-				tt.present(t, e, ada, a[1])
-				if _, err := e.svc.RotateRefresh(e.ctx, a[1].RefreshToken); !errors.Is(err, tt.wantErr) {
-					t.Fatalf("RotateRefresh(presented again) = %v, want %v", err, tt.wantErr)
+				alive := map[string]auth.TokenPair{"ada's other session": a[0]}
+				if next := tt.present(t, e, ada, a[1]); next != nil {
+					alive["the presented token's successor"] = *next
 				}
-				if got := e.authenticates(a[0]); got != tt.wantAlive {
-					t.Fatalf("ada's other session authenticates = %v, want %v", got, tt.wantAlive)
+				_, err := e.svc.RotateRefresh(e.ctx, a[1].RefreshToken)
+				if !errors.Is(err, tt.wantErr) || (tt.wantErr != auth.ErrRotationRaced && errors.Is(err, auth.ErrRotationRaced)) {
+					t.Errorf("RotateRefresh(presented again) = %v, want %v", err, tt.wantErr)
+				}
+				for name, pair := range alive {
+					if got := e.authenticates(pair); got != tt.wantAlive {
+						t.Errorf("%s authenticates = %v, want %v", name, got, tt.wantAlive)
+					}
 				}
 				if !e.authenticates(g[0]) {
 					t.Fatal("another user's session was revoked")
 				}
 			})
+		}
+	})
+
+	// A token is expired from its expires_at on: at that instant it does not
+	// rotate, and with no successor it is a plain invalid refresh token.
+	t.Run("a token at its expiry instant", func(t *testing.T) {
+		e := newEnv(t)
+		ada, a := e.user(t, "ada", 1)
+		id, err := auth.AuthenticatedRow(e.ctx, e.svc, a[0].AccessToken)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var row auth.RefreshToken
+		if err := db.First(&row, id).Error; err != nil {
+			t.Fatal(err)
+		}
+		auth.SetClock(e.svc, &stepClock{now: row.ExpiresAt})
+		if _, err := e.svc.RotateRefresh(e.ctx, a[0].RefreshToken); !errors.Is(err, auth.ErrInvalidRefreshToken) || errors.Is(err, auth.ErrRotationRaced) {
+			t.Fatalf("RotateRefresh at the token's expires_at = %v, want an invalid refresh token, not errRotationRaced", err)
+		}
+		var rows []auth.RefreshToken
+		if err := db.Where("user_id = ?", ada.ID).Find(&rows).Error; err != nil {
+			t.Fatal(err)
+		}
+		if len(rows) != 1 || rows[0].RevokedAt != nil || rows[0].ReplacedBy != nil {
+			t.Fatalf("after the rotation at expires_at: %d tokens (first revoked: %v); want the one, untouched",
+				len(rows), len(rows) > 0 && rows[0].RevokedAt != nil)
 		}
 	})
 

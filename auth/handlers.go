@@ -153,6 +153,19 @@ func writeAuthError(ctx huma.Context, env *contract.ErrorEnvelope) {
 	writeAuthChallenge(ctx, env, `Bearer realm="api"`)
 }
 
+// withBearerChallenge makes a handler-produced 401 conform to the Bearer
+// challenge used by the authentication gate. Keep this at the Bearer route
+// boundary: cookie-mode routes intentionally do not advertise HTTP Bearer.
+func withBearerChallenge(err error) error {
+	var statusErr huma.StatusError
+	if errors.As(err, &statusErr) && statusErr.GetStatus() == http.StatusUnauthorized {
+		headers := make(http.Header)
+		headers.Set("WWW-Authenticate", `Bearer realm="api"`)
+		return huma.ErrorWithHeaders(err, headers)
+	}
+	return err
+}
+
 // writeCookieAuthError is the cookie-mode counterpart: RFC 7235 says a 401
 // challenge must name the scheme the resource uses. Cookie apps register
 // cookieAuth (apiKey in gombit_access), not HTTP Bearer.

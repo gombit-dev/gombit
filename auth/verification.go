@@ -278,6 +278,7 @@ func (s *Service) VerifyEmail(ctx context.Context, raw string) (User, error) {
 	if err != nil {
 		return User{}, err
 	}
+	s.Audit(ctx, AuditEvent{Action: AuditEmailVerified, ActorUserID: uintPtr(user.ID), TargetUserID: uintPtr(user.ID)})
 	return user, nil
 }
 
@@ -318,25 +319,48 @@ type resendVerificationOutput struct {
 }
 
 func registerVerificationRoutes(api huma.API, svc *Service, prefix, security string, gate func(huma.Context, func(huma.Context))) {
-	huma.Register(api, huma.Operation{
+	huma.Register(api, withRequestInfo(huma.Operation{
 		OperationID: "auth-verify-email",
 		Method:      http.MethodPost,
 		Path:        prefix + "/auth/verify-email",
 		Summary:     "Verify the user's email address with the token mailed to it",
 		Description: "Consumes the token: it works once. An unknown, expired, used or superseded token, or one sent to an address the user no longer has, is a 422 on token.",
 		Tags:        []string{"Auth"},
-	}, svc.verifyEmail)
+	}), svc.verifyEmail)
 
+	resendPath := prefix + "/auth/verify-email/resend"
 	huma.Register(api, huma.Operation{
 		OperationID: "auth-resend-email-verification",
 		Method:      http.MethodPost,
-		Path:        prefix + "/auth/verify-email/resend",
+		Path:        resendPath,
 		Summary:     "Send a new email verification message",
 		Description: "Once delivered, the new token supersedes the earlier ones: only the latest works. At most one message a minute (429 with Retry-After); 409 when the email is already verified.",
 		Tags:        []string{"Auth"},
 		Security:    []map[string][]string{{security: {}}},
 		Middlewares: huma.Middlewares{gate},
+		Errors:      []int{http.StatusTooManyRequests},
 	}, svc.resendVerification)
+
+	// Declaring a specific Huma error suppresses its automatic default error
+	// response, so retain the catch-all response and describe the header the
+	// rate-limited runtime response already sends.
+	responses := api.OpenAPI().Paths[resendPath].Post.Responses
+	rateLimited := responses["429"]
+	minimum := 1.0
+	rateLimited.Headers = map[string]*huma.Param{
+		"Retry-After": {
+			Description: "Seconds until another verification message may be requested",
+			Required:    true,
+			Schema: &huma.Schema{
+				Type:    "integer",
+				Minimum: &minimum,
+			},
+		},
+	}
+	responses["default"] = &huma.Response{
+		Description: "Error",
+		Content:     rateLimited.Content,
+	}
 }
 
 func (s *Service) verifyEmail(ctx context.Context, input *verifyEmailInput) (*verifyEmailOutput, error) {

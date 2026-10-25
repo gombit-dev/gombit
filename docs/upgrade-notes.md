@@ -40,7 +40,26 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   the app's own verification routes, which the framework's replace, or
   rename them.
 
+- The security audit trail adds a table, `auth_audit_events`: migrate it, or the events are not recorded (each failure is logged, and the operation still succeeds). (`audit-trail-schema`, schema, [#337](https://github.com/gombit-dev/gombit/issues/337))
+
+  - Framework schema: `auth.AuditEvent` (`auth_audit_events`): added.
+
+  The new framework model `auth.AuditEvent` holds one row per
+  security-sensitive operation. Add `&auth.AuditEvent{}` to the app's
+  `AutoMigrate` (`internal/platform/database.go`), then generate and
+  apply the migration (`gombit db makemigrations --model
+  github.com/gombit-dev/gombit/auth.AuditEvent`, `gombit db
+  migrate`); `gombit upgrade --dry-run` lists the steps. Until then,
+  logins, registrations and the other recorded operations still work,
+  and log a warning for each event they could not write.
+
 ### Informational
+
+- Bearer-mode session revocation errors include the `WWW-Authenticate: Bearer realm="api"` challenge when the handler returns 401. (`bearer-handler-401-challenge`, api, [#604](https://github.com/gombit-dev/gombit/issues/604))
+
+  Cookie-mode 401 responses still omit a Bearer challenge.
+
+- The email-verification resend operation's OpenAPI contract declares its 429 response and integer `Retry-After` header. (`verification-resend-rate-limit-contract`, api, [#611](https://github.com/gombit-dev/gombit/issues/611))
 
 - The framework requires Go 1.26.9 (`go 1.26.9` in go.mod), and `gombit new` pins it. (`go-1-26-9`, dependency, [#602](https://github.com/gombit-dev/gombit/issues/602))
 
@@ -78,6 +97,32 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   except that a `catch` added to swallow `empty_response` around a
   no-content call can go, and code that relied on that throw to notice
   a missing body has to check the field it expects instead.
+
+- A security audit trail: logins (succeeded and failed), logouts, registrations, superuser creation, refresh-token reuse, session revocations, email verification, group and permission grants, and admin writes each record who, what, when and which request, never a secret. (`audit-trail`, api, [#337](https://github.com/gombit-dev/gombit/issues/337))
+
+  Events go to `auth_audit_events` (`auth.ListAuditEvents` reads
+  them), or to the app's own `auth.Auditor`
+  (`framework.WithAuthAuditor`), for the auth routes and the admin.
+  `auth.CaptureRequestInfo` and `auth.RecordAuditEvent` record an
+  app's own sensitive operations; `admin.Mount` takes auth options.
+
+- An inbound `X-Request-Id` longer than 128 bytes, or holding a space or a control character, is replaced by a generated ID instead of being echoed, logged and stored as sent. (`request-id-bounded`, behavior, [#337](https://github.com/gombit-dev/gombit/issues/337))
+
+  A caller that sends a valid ID (at most `contract.MaxRequestIDLength`
+  bytes of visible ASCII: a UUID, a trace-style hex ID) sees it back
+  unchanged, as before. Every consumer (response header, logs, error
+  envelopes, the audit trail) carries the one accepted ID.
+
+- An already-rotated refresh token that has expired is a 401 and no longer revokes the user's sessions. (`expired-rotated-refresh-token-no-cascade`, security, [#458](https://github.com/gombit-dev/gombit/issues/458))
+
+- In cookie mode, a refresh rejected with a 401 clears the `gombit_access` and `gombit_refresh` cookies. (`cookie-refresh-401-clears-session-cookies`, behavior, [#458](https://github.com/gombit-dev/gombit/issues/458))
+
+  The OpenAPI document declares that 401 on the cookie-mode `refresh`
+  operation, with its `Set-Cookie` header and the D10 error envelope.
+
+- A new cookie-mode app's placeholder `schema.ts` includes the refresh's 401 response; an existing app's generated client gets it from `gombit client generate`. (`client-schema-cookie-refresh-401`, client, [#458](https://github.com/gombit-dev/gombit/issues/458))
+
+- In cookie mode, a `POST /auth/refresh` that fails loading the session user rolls the token rotation back with it, instead of answering 500 after the rotation already committed. (`cookie-refresh-loads-user-before-commit`, behavior, [#606](https://github.com/gombit-dev/gombit/issues/606))
 
 ## v0.8.0
 

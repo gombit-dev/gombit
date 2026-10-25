@@ -29,6 +29,7 @@ var FrameworkModels = []migrations.Model{
 	{ImportPath: frameworkmod.ModulePath + "/auth", TypeName: "Group"},
 	{ImportPath: frameworkmod.ModulePath + "/auth", TypeName: "Permission"},
 	{ImportPath: frameworkmod.ModulePath + "/auth", TypeName: "OneTimeToken"},
+	{ImportPath: frameworkmod.ModulePath + "/auth", TypeName: "AuditEvent"},
 	{ImportPath: frameworkmod.ModulePath + "/storage/claims", TypeName: "Claim"},
 }
 
@@ -41,6 +42,7 @@ var frameworkTables = map[string]string{
 	"auth.Group":           "groups",
 	"auth.Permission":      "permissions",
 	"auth.OneTimeToken":    "auth_one_time_tokens", // #nosec G101 -- a table name, not a credential.
+	"auth.AuditEvent":      "auth_audit_events",
 	"storage/claims.Claim": "storage_claims",
 }
 

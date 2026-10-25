@@ -12,6 +12,19 @@ version.
 
 ### Added
 
+- A [security audit trail](docs/auth.md#audit-trail) (AUTH-7): logins
+  (succeeded and failed), logouts, registrations, superuser creation,
+  refresh-token reuse, session revocations, email verification, group and
+  permission grants, and admin writes each record the actor, the target, the
+  time, and the request (request id, client IP, user agent) in a new table,
+  `auth_audit_events`; the framework's events never hold a secret. `auth.ListAuditEvents` reads it;
+  `framework.WithAuthAuditor` sends the events to the app's own
+  `auth.Auditor`; `auth.RecordAuditEvent` and `auth.CaptureRequestInfo`
+  record an app's own operations. Migrate the new framework model
+  `auth.AuditEvent` (`gombit upgrade --dry-run` lists the steps); until then
+  each event is a logged warning and the operations still succeed.
+  `admin.Mount` takes auth options
+  ([#337](https://github.com/gombit-dev/gombit/issues/337)).
 - [Email verification](docs/auth.md#email-verification) (AUTH-1), in both
   auth modes. Registration mails a verification message; `POST
   /auth/verify-email` consumes its token and marks the email verified, and
@@ -45,6 +58,19 @@ version.
 
 ### Fixed
 
+- An inbound `X-Request-Id` longer than 128 bytes
+  (`contract.MaxRequestIDLength`), or holding a space or a control
+  character, is replaced by a generated ID instead of being echoed, logged
+  and stored as sent: every consumer (the response header, the logs, error
+  envelopes, the audit trail) carries the same, whole ID
+  ([#337](https://github.com/gombit-dev/gombit/issues/337)).
+- Bearer-mode session revocation errors now include the
+  `WWW-Authenticate: Bearer realm="api"` challenge when the authenticated
+  session ends between the request gate and the handler. Cookie-mode 401
+  responses remain unchanged ([#604](https://github.com/gombit-dev/gombit/issues/604)).
+- The OpenAPI contract for `POST /auth/verify-email/resend` now declares its
+  429 response and integer `Retry-After` header, matching the response already
+  sent at runtime ([#611](https://github.com/gombit-dev/gombit/issues/611)).
 - Saving the admin edit form no longer rewrites fields the operator did not
   touch: it sent every field back, so each save truncated a datetime to the
   minute (`12:30:45.123456` became `12:30:00`) and an integer past 2^53 to
@@ -72,6 +98,26 @@ version.
   resolves its `data`, `undefined` included, and a non-2xx, or a result
   carrying an `error`, still throws the D10 `ContractError`
   ([#505](https://github.com/gombit-dev/gombit/issues/505)).
+- An already-rotated refresh token that has expired is now a 401 that leaves
+  the user's other sessions alone. Presenting a rotated token again still
+  revokes all of them while it is unexpired, so a stolen token is detected
+  only within its lifetime
+  ([#458](https://github.com/gombit-dev/gombit/issues/458)).
+- In cookie mode, a `POST /auth/refresh` rejected with a 401 clears the
+  `gombit_access` and `gombit_refresh` cookies, as logout does, instead of
+  leaving the browser to send a dead refresh cookie until its Max-Age. A 5xx
+  leaves them, and so does a refresh of a token that another rotation already
+  replaced (one that lost the race to a rotation of the same token on another
+  instance, or whose token expired with a successor), since that rotation's
+  response sets the session's new cookies
+  ([#458](https://github.com/gombit-dev/gombit/issues/458)).
+- In cookie mode, `POST /auth/refresh` loads the session user inside the
+  rotation's own transaction instead of in a separate read afterwards. A
+  failure loading the user now rolls the rotation back with it, rather than
+  surfacing as a 500 after the rotation already committed: the browser's
+  refresh cookie stays valid for the retry, which no longer reads as reuse
+  and revokes every session of the user
+  ([#606](https://github.com/gombit-dev/gombit/issues/606)).
 
 ### Changed
 
