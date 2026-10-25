@@ -216,9 +216,7 @@ func TestGeneratedHandlerCompilesAndRuns(t *testing.T) {
 	// hooks.go, setting the server column the request body cannot carry.
 	writeFile(t, filepath.Join(pkgDir, "run_test.go"), handlerRunTest)
 
-	tidy := exec.Command("go", "mod", "tidy")
-	tidy.Dir = dir
-	if out, err := tidy.CombinedOutput(); err != nil {
+	if out, err := tidyThrowawayModule(dir); err != nil {
 		t.Fatalf("go mod tidy: %v\n%s", err, out)
 	}
 	cmd := exec.Command("go", "test", "./...")
@@ -460,9 +458,7 @@ func TestGeneratedQueryHandlerCompilesAndRuns(t *testing.T) {
 	writeFile(t, filepath.Join(pkgDir, "hooks.go"), hooks)
 	writeFile(t, filepath.Join(pkgDir, "run_test.go"), queryRunTest)
 
-	tidy := exec.Command("go", "mod", "tidy")
-	tidy.Dir = dir
-	if out, err := tidy.CombinedOutput(); err != nil {
+	if out, err := tidyThrowawayModule(dir); err != nil {
 		t.Fatalf("go mod tidy: %v\n%s", err, out)
 	}
 	cmd := exec.Command("go", "test", "./...")
