@@ -49,9 +49,7 @@ func TestGeneratedCreateRespondsWithStoredDecimal(t *testing.T) {
 	writeFile(t, filepath.Join(pkgDir, "hooks.go"), string(mustFormatGo(renderModelHooks(res))))
 	writeFile(t, filepath.Join(pkgDir, "run_test.go"), decimalCreateRunTest)
 
-	tidy := exec.Command("go", "mod", "tidy")
-	tidy.Dir = dir
-	if out, err := tidy.CombinedOutput(); err != nil {
+	if out, err := tidyThrowawayModule(dir); err != nil {
 		t.Fatalf("go mod tidy: %v\n%s", err, out)
 	}
 	cmd := exec.Command("go", "test", "./...")
