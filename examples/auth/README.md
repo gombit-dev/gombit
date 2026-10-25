@@ -127,6 +127,26 @@ curl -sS -X POST http://127.0.0.1:8080/api/v1/auth/password/reset \
 
 See [`docs/auth.md`](../../docs/auth.md#password-reset) for the rules.
 
+## Password change
+
+Signed in, change the password with the current one; every other session
+of the user is signed out, this one stays:
+
+```bash
+# the reset above signed every session out: log in with its password
+LOGIN=$(curl -sS -X POST http://127.0.0.1:8080/api/v1/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"ada@example.com","password":"correct-horse-2"}')
+ACCESS=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["access_token"])' <<<"$LOGIN")
+
+curl -sS -X POST http://127.0.0.1:8080/api/v1/auth/password/change \
+  -H "Authorization: Bearer $ACCESS" -H 'Content-Type: application/json' \
+  -d '{"current_password":"correct-horse-2","new_password":"correct-horse-3"}'
+# {"data":{"ok":true,"other_sessions_revoked":true}}
+```
+
+See [`docs/auth.md`](../../docs/auth.md#password-change).
+
 ## Audit trail
 
 Every step above was recorded in `auth_audit_events`: the registration, the

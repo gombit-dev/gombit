@@ -227,6 +227,12 @@ func mapServiceError(ctx context.Context, err error) error {
 		}))
 	case errors.Is(err, errSessionEnded):
 		return contract.WithContext(ctx, contract.Authentication("session has ended"))
+	case errors.Is(err, errWrongCurrentPassword):
+		return contract.WithContext(ctx, contract.Validation("The request contains invalid fields.", map[string][]string{
+			"current_password": {"incorrect password"},
+		}))
+	case errors.Is(err, errPasswordChanged):
+		return contract.WithContext(ctx, contract.Conflict("the password changed meanwhile; try again with the current one"))
 	case errors.Is(err, errSessionNotFound):
 		return contract.WithContext(ctx, contract.NotFound("session not found"))
 	case errors.Is(err, errUserNotFound):

@@ -38,6 +38,9 @@ type Service struct {
 	// onLoginAuthenticated, when set (tests only), runs in Login between the
 	// password check and the session.
 	onLoginAuthenticated func()
+	// onPasswordChangeVerified, when set (tests only), runs in
+	// ChangePassword between the current-password check and the transaction.
+	onPasswordChangeVerified func()
 }
 
 type rotateCall struct {

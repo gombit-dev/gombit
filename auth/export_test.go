@@ -184,3 +184,15 @@ func IsClosing(s *Service) bool {
 	defer r.mu.Unlock()
 	return r.closing != nil
 }
+
+// SetPasswordChangeVerifiedHook makes fn run in ChangePassword between the
+// current-password check and the transaction.
+func SetPasswordChangeVerifiedHook(s *Service, fn func()) { s.onPasswordChangeVerified = fn }
+
+// ErrWrongCurrentPassword is ChangePassword's error for a wrong current
+// password.
+var ErrWrongCurrentPassword = errWrongCurrentPassword
+
+// ErrPasswordChanged is ChangePassword's error when the password changed
+// between its check and its transaction.
+var ErrPasswordChanged = errPasswordChanged

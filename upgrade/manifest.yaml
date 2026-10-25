@@ -710,6 +710,35 @@ releases:
         summary: "A new app's placeholder `schema.ts` includes the password reset operations (and the forgot route's 503 with `Retry-After`); an existing app's generated client gets them from `gombit client generate`."
         refs: [332]
 
+      - id: password-change-names-reserved
+        kind: manual
+        breaking: true
+        area: api
+        summary: "With auth enabled, an app that registers `POST {prefix}/auth/password/change`, an `auth-change-password` operation, or the `AuthPasswordChangeBody` / `AuthPasswordChangeResult` schema names fails at startup: the framework registers them."
+        details: |
+          Drop the app's own password-change route, which the framework's
+          replaces, or rename it; the same goes for a type Huma names
+          `AuthPasswordChangeBody`, `AuthPasswordChangeResult` or
+          `DataAuthPasswordChangeResult`.
+        refs: [333]
+
+      - id: password-change
+        kind: informational
+        area: api
+        summary: "Password change: `POST {prefix}/auth/password/change` sets a signed-in user's password given the current one, signs out their other sessions (unless `keep_other_sessions`), voids outstanding reset links, and is audited."
+        details: |
+          A wrong current password is a 422 on `current_password` and an
+          `auth.password.change_failed` audit event; a change is
+          `auth.password.changed`. `auth.Service.ChangePassword` is the same
+          flow for an app's own code.
+        refs: [333]
+
+      - id: client-schema-password-change
+        kind: informational
+        area: client
+        summary: "A new app's placeholder `schema.ts` includes the password change operation; an existing app's generated client gets it from `gombit client generate`."
+        refs: [333]
+
       - id: expired-rotated-refresh-token-no-cascade
         kind: informational
         area: security

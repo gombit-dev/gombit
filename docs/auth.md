@@ -42,6 +42,7 @@ All paths use `config.API.Prefix` (default `/api/v1`). D10 envelopes.
 | `POST` | `/auth/verify-email/resend` | Bearer access JWT. Mails a new verification link (at most one a minute). |
 | `POST` | `/auth/password/forgot` | Public. Body `{ "email" }`. Always 202 `{"data":{"accepted":true}}`; mails a reset link when the email is an account. See [Password reset](#password-reset). |
 | `POST` | `/auth/password/reset` | Public. Body `{ "token", "password" }`. Sets the new password and revokes every session of the user. |
+| `POST` | `/auth/password/change` | Bearer access JWT. Body `{ "current_password", "new_password", "keep_other_sessions"? }`. See [Password change](#password-change). |
 
 Passwords are hashed with bcrypt. Access JWTs are HS256, bound to the refresh
 row so logout, session revocation, and reuse of a rotated refresh token 401
@@ -243,6 +244,41 @@ curl -sX POST localhost:8080/api/v1/auth/password/reset \
   returns nil for an address that is no account, but an error for an account
   in its wait: don't show its result to the person asking.
 
+## Password change
+
+A signed-in user changes their password by giving the current one:
+
+```sh
+curl -sX POST localhost:8080/api/v1/auth/password/change \
+  -H "Authorization: Bearer $ACCESS" -H 'Content-Type: application/json' \
+  -d '{"current_password":"correct-horse","new_password":"correct-horse-2"}'
+# {"data":{"ok":true,"other_sessions_revoked":true}}
+```
+
+- **The current password is required.** A wrong one is a 422 on
+  `current_password` (not a 401: the session is fine) and an
+  `auth.password.change_failed` audit event; the password stays. bcrypt
+  checks it outside any lock.
+- **The new password** follows registration's policy (8 to 72 bytes, the
+  Service's `Hasher`).
+- **Sessions.** Every other session of the user is signed out, in the same
+  transaction as the new password; the session that asked stays signed in.
+  `"keep_other_sessions": true` keeps them. In cookie mode the browser keeps
+  its cookies (its session is the one kept), and the route sits behind CSRF
+  like every unsafe request.
+- **Reset links** mailed before the change stop working: one must not undo
+  it.
+- **Races.** The change is written under the user's row lock, and only if
+  the stored password is still the one checked: a reset or another change
+  that commits in between wins, and this one is a 409 (try again with the
+  current password). A login that checked the old password just before the
+  change cannot start a session after it ([Sessions](#sessions)).
+- **Audit.** `auth.password.changed` (`details.other_sessions_revoked`). No
+  log line or audit row holds a password.
+- **From Go.** `svc.ChangePassword(ctx, userID, current, next,
+  auth.PasswordChange{Session: rowID})`; with no `Session`, unless
+  `KeepOtherSessions`, every session of the user ends.
+
 ## Sessions
 
 A session is one sign-in: the chain of refresh tokens a login starts and each
@@ -363,6 +399,7 @@ The framework records every security-sensitive operation in
 | `auth.session.revoked` | `DELETE /auth/sessions…` (`details.scope`: `one`, `others` or `all`). |
 | `auth.email.verified` | `POST /auth/verify-email`. |
 | `auth.password.reset_requested` / `auth.password.reset` | A reset message sent to an account; a password set with its token (`details.sessions_revoked`). |
+| `auth.password.changed` / `auth.password.change_failed` | A signed-in user's password change (`details.other_sessions_revoked`); one refused for a wrong current password. |
 | `auth.group.member_added` / `auth.permission.granted` | `auth.AddUserToGroup`, `GrantPermissionToGroup`, `GrantPermissionToUser`, when they changed something: granting what is already granted returns nil and records nothing. |
 | `admin.record.created` / `updated` / `deleted` | A write through the admin data plane (`target_type` the model's slug, `target_id` the record's key). Recorded where the write commits: a write that fails records nothing, and one that committed is recorded even if its response then fails. |
 

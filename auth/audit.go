@@ -57,6 +57,12 @@ const (
 	// AuditPasswordReset: a user set a new password with a reset token
 	// (Details "sessions_revoked").
 	AuditPasswordReset AuditAction = "auth.password.reset"
+	// AuditPasswordChanged: a signed-in user changed their password with
+	// their current one (Details "other_sessions_revoked").
+	AuditPasswordChanged AuditAction = "auth.password.changed"
+	// AuditPasswordChangeFailed: a password change was refused because the
+	// current password given was wrong.
+	AuditPasswordChangeFailed AuditAction = "auth.password.change_failed"
 	// AuditGroupMemberAdded: a user was added to a group (Details "group").
 	AuditGroupMemberAdded AuditAction = "auth.group.member_added"
 	// AuditPermissionGranted: a permission was granted to a user or a group
