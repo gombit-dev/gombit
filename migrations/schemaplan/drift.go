@@ -55,7 +55,7 @@ func DatabaseDrift(driver config.DatabaseDriver, expected, live []byte, ignore [
 			}
 		}
 		s.Tables = tables
-		if s.Name == atlasRevisionsSchema && len(s.Tables) == 0 && len(s.Views) == 0 && len(s.Funcs) == 0 && len(s.Procs) == 0 {
+		if s.Name == atlasRevisionsSchema && len(s.Tables) == 0 && len(s.Views) == 0 && len(s.Objects) == 0 {
 			continue
 		}
 		kept = append(kept, s)
