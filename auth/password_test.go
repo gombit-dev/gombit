@@ -831,4 +831,63 @@ func TestPasswordResetWedgedMailer(t *testing.T) {
 	if n := auth.PendingBackground(e.svc); n != 0 {
 		t.Fatalf("%d tasks still retained after Close", n)
 	}
+	// The shutdown failed: a later Close says so too, not nil.
+	if again := e.svc.Close(ctx); again == nil || again.Error() != err.Error() {
+		t.Fatalf("a Close after a failed one = %v, want the same failure %v", again, err)
+	}
+}
+
+// TestPasswordResetCloseIsJoined: caller A's Close is draining (a reset
+// message held at the mailer) when B and C call Close. B, whose own context
+// ends first, gets that error, not success; C waits and gets A's result; no
+// caller sees nil before the message was sent.
+func TestPasswordResetCloseIsJoined(t *testing.T) {
+	db := openSQLite(t)
+	e := newVerificationEnv(t, db)
+	ctx := context.Background()
+	user, _ := e.register(t, "close-joined")
+	gate := &gateMailer{inner: e.mail, entered: make(chan struct{}), release: make(chan struct{})}
+	auth.SetMailer(e.svc, gate)
+	if err := auth.RequestPasswordResetInBackground(ctx, e.svc, user.Email); err != nil {
+		t.Fatal(err)
+	}
+	<-gate.entered
+
+	resultA := make(chan error, 1)
+	go func() { resultA <- e.svc.Close(ctx) }()
+	for !auth.IsClosing(e.svc) {
+		time.Sleep(time.Millisecond)
+	}
+	resultC := make(chan error, 1)
+	go func() { resultC <- e.svc.Close(ctx) }()
+
+	shortCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+	if err := e.svc.Close(shortCtx); !errors.Is(err, context.DeadlineExceeded) {
+		close(gate.release)
+		t.Fatalf("B's Close while A drains = %v, want its own deadline, not success", err)
+	}
+	select {
+	case err := <-resultC:
+		close(gate.release)
+		t.Fatalf("C's Close returned %v while the message was still held", err)
+	case err := <-resultA:
+		close(gate.release)
+		t.Fatalf("A's Close returned %v while the message was still held", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(gate.release)
+	if err := <-resultA; err != nil {
+		t.Fatalf("A's Close = %v, want the drain to finish", err)
+	}
+	if err := <-resultC; err != nil {
+		t.Fatalf("C's Close = %v, want A's result", err)
+	}
+	if msg, ok := e.mail.Last(user.Email); !ok || msg.Kind != auth.MessageResetPassword {
+		t.Fatal("the message the drain waited for was never sent")
+	}
+	if err := e.svc.Close(ctx); err != nil {
+		t.Fatalf("a Close after a successful one = %v", err)
+	}
 }

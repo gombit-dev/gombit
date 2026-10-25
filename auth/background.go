@@ -83,7 +83,11 @@ type backgroundRunner struct {
 	pending []backgroundTask
 	started bool
 	closed  bool
-	workers sync.WaitGroup
+	// closing is made by the first close and closed when its shutdown
+	// returned; closeErr is that shutdown's result.
+	closing  chan struct{}
+	closeErr error
+	workers  sync.WaitGroup
 	// stop cancels every task, queued or running (Close, once draining
 	// runs out of time).
 	stop    context.Context
@@ -196,22 +200,44 @@ func (r *backgroundRunner) work() {
 	}
 }
 
-// close stops admitting work, lets the admitted tasks finish until ctx is
-// done, then cancels the rest, drops the ones still waiting, and waits a
-// short grace for the running ones. It returns ctx's error when it had to
-// cancel, and an error naming the tasks that still had not returned after
-// the grace: a task that ignores its context keeps its goroutine, which Go
-// cannot stop, but nothing else; close returns all the same.
+// close shuts the runner down once, whoever asks and however often. The
+// first call runs the shutdown: it stops admitting work, lets the admitted
+// tasks finish until its ctx is done, then cancels the rest, drops the ones
+// still waiting, and waits a short grace for the running ones. Its result
+// is the shutdown's: nil when every admitted task finished, ctx's error
+// when it had to cancel, joined with an error naming the tasks that still
+// had not returned after the grace (a task that ignores its context keeps
+// its goroutine, which Go cannot stop; close returns all the same).
+//
+// A call while the shutdown runs joins it: it returns the shutdown's
+// result once that is known, or its own ctx's error if that ends first,
+// never nil before the shutdown succeeded. A call after it returns the same
+// result: a shutdown that failed stays failed.
 func (r *backgroundRunner) close(ctx context.Context) error {
 	r.mu.Lock()
-	if r.closed {
+	if r.closing != nil {
+		done := r.closing
 		r.mu.Unlock()
-		return nil
+		select {
+		case <-done:
+			return r.closeErr
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 	r.closed = true
+	r.closing = make(chan struct{})
 	r.ready.Broadcast()
 	r.mu.Unlock()
 
+	err := r.shutdown(ctx)
+	r.closeErr = err // published by closing's close, read only after it
+	close(r.closing)
+	return err
+}
+
+// shutdown drains, then cancels, as close describes.
+func (r *backgroundRunner) shutdown(ctx context.Context) error {
 	done := make(chan struct{})
 	go func() {
 		r.workers.Wait()
@@ -260,8 +286,11 @@ func (s *Service) detach(ctx context.Context, timeout time.Duration) (context.Co
 // messages POST /auth/password/forgot accepted): it stops admitting more,
 // waits for the admitted work until ctx is done, then cancels what is left.
 // framework.App calls it when it stops; an application that mounts the
-// routes itself calls it, on the Service Mount returned, on shutdown. Close is
-// idempotent; after it, the routes answer background requests with 503.
+// routes itself calls it, on the Service Mount returned, on shutdown. The
+// shutdown runs once: a Close while another runs waits for it (or for its
+// own ctx), and every Close returns its result, so none reports success
+// before the work is done. After Close, the routes answer background
+// requests with 503.
 func (s *Service) Close(ctx context.Context) error {
 	return s.background.close(ctx)
 }

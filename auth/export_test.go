@@ -176,3 +176,11 @@ func PendingBackground(s *Service) int {
 	defer r.mu.Unlock()
 	return len(r.pending)
 }
+
+// IsClosing reports whether a Close of the service has begun.
+func IsClosing(s *Service) bool {
+	r := s.background
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.closing != nil
+}
