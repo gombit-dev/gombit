@@ -14,7 +14,10 @@ import (
 // Password change (AUTH-3, #333): a signed-in user sets a new password by
 // giving their current one. POST /auth/password/change.
 
-var errWrongCurrentPassword = errors.New("auth: the current password is incorrect")
+var (
+	errWrongCurrentPassword = errors.New("auth: the current password is incorrect")
+	errPasswordChanged      = errors.New("auth: the password changed meanwhile (a reset or another change); retry with the current one")
+)
 
 // ErrWrongCurrentPassword is ChangePassword's error for a current password
 // that is not the user's (the route's 422 on current_password).
@@ -129,7 +132,9 @@ func (s *Service) ChangePassword(ctx context.Context, userID uint, current, newP
 	if err != nil {
 		return false, err
 	}
-	s.Audit(ctx, AuditEvent{Action: AuditPasswordChanged, ActorUserID: uintPtr(user.ID), TargetUserID: uintPtr(user.ID), Details: details("other_sessions_revoked", strconv.FormatBool(revoke))})
+	// The actor is whoever ctx's request is signed in as (Service.Audit
+	// derives it): the user, another user's request, or none for a command.
+	s.Audit(ctx, AuditEvent{Action: AuditPasswordChanged, TargetUserID: uintPtr(user.ID), Details: details("other_sessions_revoked", strconv.FormatBool(revoke))})
 	return revoke, nil
 }
 

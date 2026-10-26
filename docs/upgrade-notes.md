@@ -151,7 +151,10 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   `GOMBIT_AUTH_PASSWORD_RESET_URL` configure the link;
   `GOMBIT_AUTH_PASSWORD_RESET_KEEP_SESSIONS=true` keeps the sessions.
   `auth.Service.RequestPasswordReset` and `ResetPassword` are the same
-  flow for an app's own code. A production app with no mailer sends
+  flow for an app's own code; `ResetPassword` enforces the password
+  policy itself (at least 8 characters, at most 72 bytes, a
+  `auth.PasswordPolicyError` on `password`), whatever its caller
+  validated. A production app with no mailer sends
   no message. The messages are sent by the auth Service's bounded
   background workers (a request they cannot admit is a 503);
   `framework.App` closes the Service when it stops. A login now starts

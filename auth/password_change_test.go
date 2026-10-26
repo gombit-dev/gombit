@@ -96,6 +96,54 @@ func runPasswordChangeService(t *testing.T, db *database.DB) {
 		}
 	})
 
+	t.Run("the audit actor is who asked, not who was changed", func(t *testing.T) {
+		e := newVerificationEnv(t, db)
+		changed := func(user auth.User) auth.AuditEvent {
+			var ev auth.AuditEvent
+			e.db.Where("target_user_id = ? AND action = ?", user.ID, auth.AuditPasswordChanged).Order("id DESC").First(&ev)
+			if ev.ID == 0 {
+				t.Fatalf("no %s event for user %d", auth.AuditPasswordChanged, user.ID)
+			}
+			return ev
+		}
+		// A command: no request, no actor.
+		byCommand, _ := e.register(t, "actor-command")
+		if _, err := e.svc.ChangePassword(ctx, byCommand.ID, testPassword, changedPassword, auth.PasswordChange{}); err != nil {
+			t.Fatal(err)
+		}
+		if ev := changed(byCommand); ev.ActorUserID != nil {
+			t.Fatalf("a change from a command recorded actor %d, want none", *ev.ActorUserID)
+		}
+		// Another user's request: that user acted, and the target's sessions
+		// all end (the request's session is not one of theirs).
+		admin, _ := e.register(t, "actor-admin")
+		adminPair, _ := e.svc.IssueTokens(ctx, admin)
+		target, _ := e.register(t, "actor-target")
+		targetPair, _ := e.svc.IssueTokens(ctx, target)
+		asAdmin := auth.ContextWithSession(ctx, admin, sessionOf(t, e.svc, adminPair.AccessToken))
+		if _, err := e.svc.ChangePassword(asAdmin, target.ID, testPassword, changedPassword, auth.PasswordChange{}); err != nil {
+			t.Fatal(err)
+		}
+		if ev := changed(target); ev.ActorUserID == nil || *ev.ActorUserID != admin.ID {
+			t.Fatalf("a change by another user's request recorded actor %v, want %d", ev.ActorUserID, admin.ID)
+		}
+		if _, err := e.svc.RotateRefresh(ctx, targetPair.RefreshToken); err == nil {
+			t.Fatal("the target kept a session through a change another user asked for")
+		}
+		if _, err := e.svc.RotateRefresh(ctx, adminPair.RefreshToken); err != nil {
+			t.Fatalf("the asking user's own session: %v", err)
+		}
+		// The user's own request: the user acted.
+		self, _ := e.register(t, "actor-self")
+		selfPair, _ := e.svc.IssueTokens(ctx, self)
+		if _, err := e.svc.ChangePassword(auth.ContextWithSession(ctx, self, sessionOf(t, e.svc, selfPair.AccessToken)), self.ID, testPassword, changedPassword, auth.PasswordChange{}); err != nil {
+			t.Fatal(err)
+		}
+		if ev := changed(self); ev.ActorUserID == nil || *ev.ActorUserID != self.ID {
+			t.Fatalf("the user's own change recorded actor %v, want %d", ev.ActorUserID, self.ID)
+		}
+	})
+
 	t.Run("keeps the other sessions when asked", func(t *testing.T) {
 		e := newVerificationEnv(t, db)
 		user, _ := e.register(t, "change-keep")
@@ -197,8 +245,12 @@ func runPasswordChangeService(t *testing.T, db *database.DB) {
 				t.Errorf("the reset during the change: %v", err)
 			}
 		})
-		if _, err := e.svc.ChangePassword(ctx, user.ID, testPassword, changedPassword, auth.PasswordChange{}); !errors.Is(err, auth.ErrPasswordChanged) {
+		_, err := e.svc.ChangePassword(ctx, user.ID, testPassword, changedPassword, auth.PasswordChange{})
+		if !errors.Is(err, auth.ErrPasswordChanged) {
 			t.Fatalf("ChangePassword across a reset = %v, want ErrPasswordChanged", err)
+		}
+		if strings.Contains(err.Error(), "login") {
+			t.Fatalf("a racing change reports %q: no login happened", err)
 		}
 		if _, err := e.svc.Authenticate(ctx, user.Email, "reset-horse"); err != nil {
 			t.Fatalf("the reset's password: %v", err)
