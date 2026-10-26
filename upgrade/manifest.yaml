@@ -522,6 +522,15 @@ releases:
         area: api
         summary: "The email-verification resend operation's OpenAPI contract declares its 429 response and integer `Retry-After` header."
         refs: [611]
+      - id: resource-operation-id-collision
+        kind: informational
+        area: cli
+        summary: "`gombit make resource` refuses a name whose generated operation IDs the framework already registers, such as `Me`, whose `get-me` collides with auth's."
+        details: |
+          The scaffolded app used to build and then panic at boot on Huma's
+          `duplicate operation ID`. Run `gombit make resource` under a
+          different name; nothing is written when the name is refused.
+        refs: [579]
 
       - id: go-1-26-9
         kind: informational
