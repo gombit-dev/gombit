@@ -72,7 +72,8 @@ func runPasswordChangeService(t *testing.T, db *database.DB) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		revoked, err := e.svc.ChangePassword(ctx, user.ID, testPassword, changedPassword, auth.PasswordChange{Session: sessionOf(t, e.svc, mine.AccessToken)})
+		asked := auth.ContextWithSession(ctx, user, sessionOf(t, e.svc, mine.AccessToken))
+		revoked, err := e.svc.ChangePassword(asked, user.ID, testPassword, changedPassword, auth.PasswordChange{})
 		if err != nil || !revoked {
 			t.Fatalf("ChangePassword = %v, %v; want the others revoked", revoked, err)
 		}
@@ -100,7 +101,8 @@ func runPasswordChangeService(t *testing.T, db *database.DB) {
 		user, _ := e.register(t, "change-keep")
 		mine, _ := e.svc.IssueTokens(ctx, user)
 		other, _ := e.svc.IssueTokens(ctx, user)
-		revoked, err := e.svc.ChangePassword(ctx, user.ID, testPassword, changedPassword, auth.PasswordChange{KeepOtherSessions: true, Session: sessionOf(t, e.svc, mine.AccessToken)})
+		asked := auth.ContextWithSession(ctx, user, sessionOf(t, e.svc, mine.AccessToken))
+		revoked, err := e.svc.ChangePassword(asked, user.ID, testPassword, changedPassword, auth.PasswordChange{KeepOtherSessions: true})
 		if err != nil || revoked {
 			t.Fatalf("ChangePassword(keep) = %v, %v", revoked, err)
 		}
@@ -137,8 +139,9 @@ func runPasswordChangeService(t *testing.T, db *database.DB) {
 		e := newVerificationEnv(t, db)
 		user, _ := e.register(t, "change-min")
 		_, err := e.svc.ChangePassword(ctx, user.ID, testPassword, "seven77", auth.PasswordChange{})
-		if field, ok := auth.PasswordPolicyField(err); !errors.Is(err, auth.ErrPasswordTooShort) || !ok || field != "new_password" {
-			t.Fatalf("ChangePassword(7 characters) = %v (field %q), want the minimum refused on new_password", err, field)
+		var policy auth.PasswordPolicyError
+		if !errors.As(err, &policy) || !errors.Is(err, auth.ErrPasswordTooShort) || policy.Field != "new_password" {
+			t.Fatalf("ChangePassword(7 characters) = %v (field %q), want the minimum refused on new_password", err, policy.Field)
 		}
 		if _, err := e.svc.Authenticate(ctx, user.Email, testPassword); err != nil {
 			t.Fatalf("the password after a refused change: %v", err)
@@ -172,7 +175,7 @@ func runPasswordChangeService(t *testing.T, db *database.DB) {
 		// Whatever it asks for the other sessions: the requester's validity
 		// is not a revocation-policy matter.
 		for _, keepOthers := range []bool{false, true} {
-			_, err := e.svc.ChangePassword(ctx, user.ID, testPassword, changedPassword, auth.PasswordChange{Session: row, KeepOtherSessions: keepOthers})
+			_, err := e.svc.ChangePassword(auth.ContextWithSession(ctx, user, row), user.ID, testPassword, changedPassword, auth.PasswordChange{KeepOtherSessions: keepOthers})
 			if !errors.Is(err, auth.ErrSessionEnded) {
 				t.Fatalf("ChangePassword from an ended session (keep others: %v) = %v, want ErrSessionEnded", keepOthers, err)
 			}

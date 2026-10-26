@@ -212,7 +212,7 @@ func declareRetryAfter(api huma.API, path string, status int, description string
 func mapServiceError(ctx context.Context, err error) error {
 	var tooSoon resendTooSoonError
 	var busy backgroundBusyError
-	var policy passwordPolicyError
+	var policy PasswordPolicyError
 	switch {
 	case errors.Is(err, errInvalidCredentials):
 		return contract.WithContext(ctx, contract.Authentication("invalid email or password"))
@@ -224,7 +224,7 @@ func mapServiceError(ctx context.Context, err error) error {
 		return contract.WithContext(ctx, contract.Conflict("email already registered"))
 	case errors.As(err, &policy):
 		return contract.WithContext(ctx, contract.Validation("The request contains invalid fields.", map[string][]string{
-			policy.field: {policy.err.Error()},
+			policy.Field: {policy.Err.Error()},
 		}))
 	case errors.Is(err, errPasswordTooLong), errors.Is(err, errPasswordRequired):
 		return contract.WithContext(ctx, contract.Validation("The request contains invalid fields.", map[string][]string{

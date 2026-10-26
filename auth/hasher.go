@@ -46,16 +46,25 @@ func (h bcryptHasher) Compare(hash, password string) error {
 // clients; this is the rule).
 const minPasswordLength = 8
 
-// passwordPolicyError is a new password the policy refuses, for the request
-// field it came in (new_password for a change, password for a reset), so the
-// error is reported where the form put it.
-type passwordPolicyError struct {
-	field string
-	err   error
+// PasswordPolicyError is a new password the policy refuses (ChangePassword,
+// ResetPassword): Err is the reason (ErrPasswordTooShort,
+// ErrPasswordTooLong, ErrPasswordRequired), Field the request field the
+// password came in ("new_password" for a change, "password" for a reset),
+// so the error is reported where the form put it.
+type PasswordPolicyError struct {
+	Field string
+	Err   error
 }
 
-func (e passwordPolicyError) Error() string { return e.err.Error() }
-func (e passwordPolicyError) Unwrap() error { return e.err }
+func (e PasswordPolicyError) Error() string { return e.Err.Error() }
+func (e PasswordPolicyError) Unwrap() error { return e.Err }
+
+// The password policy's reasons (PasswordPolicyError.Err).
+var (
+	ErrPasswordTooShort = errPasswordTooShort
+	ErrPasswordTooLong  = errPasswordTooLong
+	ErrPasswordRequired = errPasswordRequired
+)
 
 // checkNewPassword is the policy for a password a user sets themselves (a
 // change, a reset): at least minPasswordLength characters, and what the
@@ -68,7 +77,7 @@ func checkNewPassword(password, field string) error {
 		err = errPasswordTooShort
 	}
 	if err != nil {
-		return passwordPolicyError{field: field, err: err}
+		return PasswordPolicyError{Field: field, Err: err}
 	}
 	return nil
 }

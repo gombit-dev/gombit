@@ -23,7 +23,11 @@ version.
   working. Concurrent with a reset or another change, the first to commit
   wins (409 for the other). Audited as `auth.password.changed` /
   `auth.password.change_failed`; no password is ever logged.
-  `auth.Service.ChangePassword` is the same flow from Go.
+  `auth.Service.ChangePassword` is the same flow from Go: it keeps the
+  session the request's context carries, and its errors are exported
+  (`auth.ErrWrongCurrentPassword`, `ErrPasswordChanged`, `ErrSessionEnded`,
+  `ErrUserNotFound`, and `auth.PasswordPolicyError` with
+  `ErrPasswordTooShort` / `TooLong` / `Required`).
   - **Breaking (api):** the framework registers `POST
     /auth/password/change`, the `auth-change-password` operation ID and the
     `AuthPasswordChangeBody` / `AuthPasswordChangeResult` schemas; an app

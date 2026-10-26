@@ -91,9 +91,6 @@ func RevokeAllSessionsAs(ctx context.Context, s *Service, userID, requester uint
 	return s.revokeAllSessionsAs(ctx, userID, requester)
 }
 
-// ErrSessionEnded is the error the revocations a request runs return when
-// the request's own session has ended by the time they hold the user's lock.
-var ErrSessionEnded = errSessionEnded
 
 // ContextWithSession returns ctx carrying what the auth middlewares store for
 // a request authenticated as user with the refresh token row refreshID.
@@ -189,24 +186,6 @@ func IsClosing(s *Service) bool {
 // current-password check and the transaction.
 func SetPasswordChangeVerifiedHook(s *Service, fn func()) { s.onPasswordChangeVerified = fn }
 
-// ErrWrongCurrentPassword is ChangePassword's error for a wrong current
-// password.
-var ErrWrongCurrentPassword = errWrongCurrentPassword
 
-// ErrPasswordChanged is ChangePassword's error when the password changed
-// between its check and its transaction.
-var ErrPasswordChanged = errPasswordChanged
 
-// ErrPasswordTooShort is the policy's error for a new password under eight
-// characters.
-var ErrPasswordTooShort = errPasswordTooShort
 
-// PasswordPolicyField is the request field a policy refusal names, and
-// whether err is one.
-func PasswordPolicyField(err error) (string, bool) {
-	var policy passwordPolicyError
-	if !errors.As(err, &policy) {
-		return "", false
-	}
-	return policy.field, true
-}

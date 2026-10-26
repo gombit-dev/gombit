@@ -416,8 +416,9 @@ func runPasswordResetService(t *testing.T, db *database.DB) {
 		user, _ := e.register(t, "reset-min")
 		token := e.resetToken(t, user)
 		_, err := e.svc.ResetPassword(ctx, token, "seven77")
-		if field, ok := auth.PasswordPolicyField(err); !errors.Is(err, auth.ErrPasswordTooShort) || !ok || field != "password" {
-			t.Fatalf("ResetPassword(7 characters) = %v (field %q), want the minimum refused on password", err, field)
+		var policy auth.PasswordPolicyError
+		if !errors.As(err, &policy) || !errors.Is(err, auth.ErrPasswordTooShort) || policy.Field != "password" {
+			t.Fatalf("ResetPassword(7 characters) = %v (field %q), want the minimum refused on password", err, policy.Field)
 		}
 		if _, err := e.svc.ResetPassword(ctx, token, "brand-new-horse"); err != nil {
 			t.Fatalf("the token after a refused password: %v", err)

@@ -279,8 +279,28 @@ curl -sX POST localhost:8080/api/v1/auth/password/change \
 - **Audit.** `auth.password.changed` (`details.other_sessions_revoked`). No
   log line or audit row holds a password.
 - **From Go.** `svc.ChangePassword(ctx, userID, current, next,
-  auth.PasswordChange{Session: rowID})`; with no `Session`, unless
-  `KeepOtherSessions`, every session of the user ends.
+  auth.PasswordChange{})` is the same flow for an app's own operation. The
+  requesting session is the one `ctx` carries: an operation behind the auth
+  gate (`svc.RequireBearer()`, `RequireCookieSession()`) runs with the
+  signed-in user's session in its context, and when that user is `userID`
+  it stays signed in. With none (a command, another user's request),
+  unless `KeepOtherSessions`, every session of the user ends. Its errors
+  are for `errors.Is` / `errors.As`:
+
+  ```go
+  revoked, err := svc.ChangePassword(ctx, user.ID, current, next, auth.PasswordChange{})
+  var policy auth.PasswordPolicyError
+  switch {
+  case errors.Is(err, auth.ErrWrongCurrentPassword): // 422 on the current password
+  case errors.As(err, &policy): // policy.Field, policy.Err: ErrPasswordTooShort / TooLong / Required
+  case errors.Is(err, auth.ErrPasswordChanged): // 409: a reset or another change won; retry
+  case errors.Is(err, auth.ErrSessionEnded): // the request's session ended meanwhile
+  case errors.Is(err, auth.ErrUserNotFound):
+  case err != nil: // the database
+  }
+  ```
+
+  None of those errors changes anything.
 
 ## Sessions
 
