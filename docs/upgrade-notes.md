@@ -100,6 +100,12 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 - The email-verification resend operation's OpenAPI contract declares its 429 response and integer `Retry-After` header. (`verification-resend-rate-limit-contract`, api, [#611](https://github.com/gombit-dev/gombit/issues/611))
 
+- `gombit make resource` refuses a name whose generated operation IDs the framework already registers, such as `Me`, whose `get-me` collides with auth's. (`resource-operation-id-collision`, cli, [#579](https://github.com/gombit-dev/gombit/issues/579))
+
+  The scaffolded app used to build and then panic at boot on Huma's
+  `duplicate operation ID`. Run `gombit make resource` under a
+  different name; nothing is written when the name is refused.
+
 - The framework requires Go 1.26.9 (`go 1.26.9` in go.mod), and `gombit new` pins it. (`go-1-26-9`, dependency, [#602](https://github.com/gombit-dev/gombit/issues/602))
 
   An app's `go` line is raised to 1.26.9 by `go get` or `go mod tidy`
