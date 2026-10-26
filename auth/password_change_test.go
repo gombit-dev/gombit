@@ -153,11 +153,16 @@ func runPasswordChangeService(t *testing.T, db *database.DB) {
 		if err := e.svc.RevokeAllSessions(ctx, user.ID); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := e.svc.ChangePassword(ctx, user.ID, testPassword, changedPassword, auth.PasswordChange{Session: row}); !errors.Is(err, auth.ErrSessionEnded) {
-			t.Fatalf("ChangePassword from an ended session = %v, want ErrSessionEnded", err)
-		}
-		if _, err := e.svc.Authenticate(ctx, user.Email, testPassword); err != nil {
-			t.Fatalf("the password after a change from an ended session: %v (it must be unchanged)", err)
+		// Whatever it asks for the other sessions: the requester's validity
+		// is not a revocation-policy matter.
+		for _, keepOthers := range []bool{false, true} {
+			_, err := e.svc.ChangePassword(ctx, user.ID, testPassword, changedPassword, auth.PasswordChange{Session: row, KeepOtherSessions: keepOthers})
+			if !errors.Is(err, auth.ErrSessionEnded) {
+				t.Fatalf("ChangePassword from an ended session (keep others: %v) = %v, want ErrSessionEnded", keepOthers, err)
+			}
+			if _, err := e.svc.Authenticate(ctx, user.Email, testPassword); err != nil {
+				t.Fatalf("the password after a change from an ended session (keep others: %v): %v (it must be unchanged)", keepOthers, err)
+			}
 		}
 	})
 

@@ -337,8 +337,14 @@ func revokeOtherSessionsTx(tx *gorm.DB, userID, keepID uint, now time.Time) erro
 	if err != nil {
 		return err
 	}
+	return revokeSessionsButTx(tx, userID, keepIDs, now)
+}
+
+// revokeSessionsButTx ends every active refresh token row of the user but
+// the rows keep (a session's chain, from requesterChain).
+func revokeSessionsButTx(tx *gorm.DB, userID uint, keep []uint, now time.Time) error {
 	return tx.Model(&RefreshToken{}).
-		Where("user_id = ? AND revoked_at IS NULL AND id NOT IN ?", userID, keepIDs).
+		Where("user_id = ? AND revoked_at IS NULL AND id NOT IN ?", userID, keep).
 		Update("revoked_at", now).Error
 }
 

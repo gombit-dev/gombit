@@ -73,6 +73,16 @@ func (s *Service) ChangePassword(ctx context.Context, userID uint, current, newP
 			return errPasswordChanged
 		}
 		now := s.now()
+		// The requesting session must still be signed in, whatever happens
+		// to the others: one that ended while this waited for the lock (a
+		// revocation, its expiry) changes nothing (errSessionEnded). Checked
+		// before any credential is written.
+		var keep []uint
+		if change.Session != 0 {
+			if keep, err = requesterChain(tx, user.ID, change.Session, now); err != nil {
+				return err
+			}
+		}
 		if err := tx.Model(&User{}).Where("id = ?", user.ID).Update("password_hash", hash).Error; err != nil {
 			return err
 		}
@@ -82,11 +92,8 @@ func (s *Service) ChangePassword(ctx context.Context, userID uint, current, newP
 		switch {
 		case !revoke:
 			return nil
-		case change.Session != 0:
-			// errSessionEnded when the requester's session ended while this
-			// waited for the lock: the transaction, new password included,
-			// rolls back.
-			return revokeOtherSessionsTx(tx, user.ID, change.Session, now)
+		case len(keep) > 0:
+			return revokeSessionsButTx(tx, user.ID, keep, now)
 		default:
 			return revokeAllTx(tx, user.ID, now)
 		}
