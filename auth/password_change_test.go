@@ -133,6 +133,22 @@ func runPasswordChangeService(t *testing.T, db *database.DB) {
 		}
 	})
 
+	t.Run("the service enforces the minimum, whatever the transport checked", func(t *testing.T) {
+		e := newVerificationEnv(t, db)
+		user, _ := e.register(t, "change-min")
+		_, err := e.svc.ChangePassword(ctx, user.ID, testPassword, "seven77", auth.PasswordChange{})
+		if field, ok := auth.PasswordPolicyField(err); !errors.Is(err, auth.ErrPasswordTooShort) || !ok || field != "new_password" {
+			t.Fatalf("ChangePassword(7 characters) = %v (field %q), want the minimum refused on new_password", err, field)
+		}
+		if _, err := e.svc.Authenticate(ctx, user.Email, testPassword); err != nil {
+			t.Fatalf("the password after a refused change: %v", err)
+		}
+		// Eight characters are enough, however many bytes they take.
+		if _, err := e.svc.ChangePassword(ctx, user.ID, testPassword, strings.Repeat("é", 8), auth.PasswordChange{}); err != nil {
+			t.Fatalf("ChangePassword(8 two-byte characters) = %v", err)
+		}
+	})
+
 	t.Run("the password policy applies", func(t *testing.T) {
 		e := newVerificationEnv(t, db)
 		user, _ := e.register(t, "change-policy")
@@ -270,6 +286,18 @@ func runPasswordChangeBearer(t *testing.T, db *database.DB) {
 		t.Fatalf("a wrong current password names no field: %s", wrong.Body.String())
 	}
 	assertError(t, changeRequest(app, mine.AccessToken, `{"current_password":"`+testPassword+`","new_password":"short"}`), http.StatusUnprocessableEntity, "validation_error")
+	// 40 characters pass the schema's 72-character limit, but are 80 bytes:
+	// the service refuses them, on the field they came in.
+	multibyte := changeRequest(app, mine.AccessToken, `{"current_password":"`+testPassword+`","new_password":"`+strings.Repeat("é", 40)+`"}`)
+	var refused struct {
+		Error struct {
+			Code   string              `json:"code"`
+			Fields map[string][]string `json:"fields"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(multibyte.Body.Bytes(), &refused); err != nil || multibyte.Code != http.StatusUnprocessableEntity || len(refused.Error.Fields["new_password"]) == 0 || refused.Error.Fields["password"] != nil {
+		t.Fatalf("an 80-byte new_password = %d %s, want a 422 on new_password", multibyte.Code, multibyte.Body.String())
+	}
 
 	rec := changeRequest(app, mine.AccessToken, `{"current_password":"`+testPassword+`","new_password":"`+changedPassword+`"}`)
 	if rec.Code != http.StatusOK {

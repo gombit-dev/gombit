@@ -411,6 +411,19 @@ func runPasswordResetService(t *testing.T, db *database.DB) {
 		}
 	})
 
+	t.Run("the service enforces the minimum for a reset too", func(t *testing.T) {
+		e := newVerificationEnv(t, db)
+		user, _ := e.register(t, "reset-min")
+		token := e.resetToken(t, user)
+		_, err := e.svc.ResetPassword(ctx, token, "seven77")
+		if field, ok := auth.PasswordPolicyField(err); !errors.Is(err, auth.ErrPasswordTooShort) || !ok || field != "password" {
+			t.Fatalf("ResetPassword(7 characters) = %v (field %q), want the minimum refused on password", err, field)
+		}
+		if _, err := e.svc.ResetPassword(ctx, token, "brand-new-horse"); err != nil {
+			t.Fatalf("the token after a refused password: %v", err)
+		}
+	})
+
 	t.Run("the password policy applies", func(t *testing.T) {
 		e := newVerificationEnv(t, db)
 		user, _ := e.register(t, "reset-policy")

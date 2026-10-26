@@ -49,6 +49,10 @@ func (s *Service) ChangePassword(ctx context.Context, userID uint, current, newP
 	if user.ID == 0 {
 		return false, errUserNotFound
 	}
+	// The policy first: refusing a new password costs no bcrypt.
+	if err := checkNewPassword(newPassword, "new_password"); err != nil {
+		return false, err
+	}
 	if err := s.hasher.Compare(user.PasswordHash, current); err != nil {
 		s.Audit(ctx, AuditEvent{Action: AuditPasswordChangeFailed, TargetUserID: uintPtr(user.ID), Details: details("reason", "wrong_current_password")})
 		return false, errWrongCurrentPassword

@@ -15,7 +15,9 @@ version.
 - [Password change](docs/auth.md#password-change) (AUTH-3), in both auth
   modes. `POST /auth/password/change` sets a signed-in user's password
   given the current one (a wrong one is a 422 on `current_password`),
-  under registration's password policy; every other session of the user is
+  under the password policy (at least 8 characters, at most 72 bytes,
+  enforced by the service; a refusal is a 422 on `new_password`; a reset
+  now enforces the same minimum in `ResetPassword` too); every other session of the user is
   signed out in the same transaction unless `keep_other_sessions`, the
   session that asked stays, and outstanding password reset links stop
   working. Concurrent with a reset or another change, the first to commit

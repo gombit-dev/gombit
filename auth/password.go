@@ -75,6 +75,9 @@ func (s *Service) ResetPassword(ctx context.Context, raw, password string) (User
 	} else if !ok {
 		return User{}, errInvalidOneTimeToken
 	}
+	if err := checkNewPassword(password, "password"); err != nil {
+		return User{}, err
+	}
 	// Hashed before the transaction: bcrypt is slow, and must not run under
 	// the user's lock.
 	hash, err := s.hasher.Hash(password)

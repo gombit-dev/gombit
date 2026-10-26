@@ -213,8 +213,9 @@ curl -sX POST localhost:8080/api/v1/auth/password/reset \
   `GOMBIT_AUTH_PASSWORD_RESET_TTL` (1h), and a newer one supersedes it. It
   proves the address it was sent to: once the user's email is another one,
   it fails. A bad token is a 422 on `token`, and a password outside the
-  policy (8 to 72 bytes, as registration) a 422 on `password`; a refused
-  password leaves the token usable. A token that cannot work (unknown,
+  policy (at least 8 characters, at most 72 bytes, enforced by
+  `ResetPassword` itself) a 422 on `password`; a refused password leaves
+  the token usable. A token that cannot work (unknown,
   used, expired, or for an address the user no longer has) is refused
   before bcrypt runs, and a database that cannot answer that check fails
   the request (500), not open.
@@ -259,8 +260,10 @@ curl -sX POST localhost:8080/api/v1/auth/password/change \
   `current_password` (not a 401: the session is fine) and an
   `auth.password.change_failed` audit event; the password stays. bcrypt
   checks it outside any lock.
-- **The new password** follows registration's policy (8 to 72 bytes, the
-  Service's `Hasher`).
+- **The new password** must have at least 8 characters and at most 72
+  bytes (bcrypt's limit: a multibyte password reaches it in fewer
+  characters). `ChangePassword` enforces that itself, not only the route's
+  schema; a refused one is a 422 on `new_password`.
 - **Sessions.** Every other session of the user is signed out, in the same
   transaction as the new password; the session that asked stays signed in.
   `"keep_other_sessions": true` keeps them. In cookie mode the browser keeps
