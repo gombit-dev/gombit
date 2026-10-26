@@ -601,9 +601,7 @@ func TestRun(t *testing.T) {
 	}
 }
 `)
-	tidy := exec.Command("go", "mod", "tidy")
-	tidy.Dir = dir
-	if out, err := tidy.CombinedOutput(); err != nil {
+	if out, err := tidyThrowawayModule(dir); err != nil {
 		t.Fatalf("go mod tidy: %v\n%s", err, out)
 	}
 	cmd := exec.Command("go", "test", "./...")
@@ -896,9 +894,7 @@ func TestRun(t *testing.T) {
 	}
 }
 `)
-	tidy := exec.Command("go", "mod", "tidy")
-	tidy.Dir = dir
-	if out, err := tidy.CombinedOutput(); err != nil {
+	if out, err := tidyThrowawayModule(dir); err != nil {
 		t.Fatalf("go mod tidy: %v\n%s\n--- generated ---\n%s", err, out, dto)
 	}
 	cmd := exec.Command("go", "test", "./...")
@@ -1111,9 +1107,7 @@ func TestGeneratedDTOsWithImportsCompileAndRun(t *testing.T) {
 			"\t\tt.Fatalf(\"create mapper: %+v\", built)\n\t}\n"+
 			"}\n")
 
-	tidy := exec.Command("go", "mod", "tidy")
-	tidy.Dir = dir
-	if out, err := tidy.CombinedOutput(); err != nil {
+	if out, err := tidyThrowawayModule(dir); err != nil {
 		t.Fatalf("go mod tidy: %v\n%s", err, out)
 	}
 	cmd := exec.Command("go", "test", "./...")
