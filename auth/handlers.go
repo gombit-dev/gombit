@@ -212,6 +212,7 @@ func declareRetryAfter(api huma.API, path string, status int, description string
 func mapServiceError(ctx context.Context, err error) error {
 	var tooSoon resendTooSoonError
 	var busy backgroundBusyError
+	var policy PasswordPolicyError
 	switch {
 	case errors.Is(err, errInvalidCredentials):
 		return contract.WithContext(ctx, contract.Authentication("invalid email or password"))
@@ -221,12 +222,22 @@ func mapServiceError(ctx context.Context, err error) error {
 		return contract.WithContext(ctx, contract.Authentication("invalid access token"))
 	case errors.Is(err, errEmailTaken):
 		return contract.WithContext(ctx, contract.Conflict("email already registered"))
+	case errors.As(err, &policy):
+		return contract.WithContext(ctx, contract.Validation("The request contains invalid fields.", map[string][]string{
+			policy.Field: {policy.Err.Error()},
+		}))
 	case errors.Is(err, errPasswordTooLong), errors.Is(err, errPasswordRequired):
 		return contract.WithContext(ctx, contract.Validation("The request contains invalid fields.", map[string][]string{
 			"password": {err.Error()},
 		}))
 	case errors.Is(err, errSessionEnded):
 		return contract.WithContext(ctx, contract.Authentication("session has ended"))
+	case errors.Is(err, errWrongCurrentPassword):
+		return contract.WithContext(ctx, contract.Validation("The request contains invalid fields.", map[string][]string{
+			"current_password": {"incorrect password"},
+		}))
+	case errors.Is(err, errPasswordChanged):
+		return contract.WithContext(ctx, contract.Conflict("the password changed meanwhile; try again with the current one"))
 	case errors.Is(err, errSessionNotFound):
 		return contract.WithContext(ctx, contract.NotFound("session not found"))
 	case errors.Is(err, errUserNotFound):

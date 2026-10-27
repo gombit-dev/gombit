@@ -327,6 +327,27 @@ func requesterChain(tx *gorm.DB, userID, rid uint, now time.Time) ([]uint, error
 	return ids, nil
 }
 
+// revokeOtherSessionsTx ends, in tx, every active session of the user but
+// the one whose chain includes the refresh token row keepID
+// (requesterChain): tx must hold lockUserTx, and now be read after it. It
+// returns errSessionEnded, and ends nothing, when that session has itself
+// ended.
+func revokeOtherSessionsTx(tx *gorm.DB, userID, keepID uint, now time.Time) error {
+	keepIDs, err := requesterChain(tx, userID, keepID, now)
+	if err != nil {
+		return err
+	}
+	return revokeSessionsButTx(tx, userID, keepIDs, now)
+}
+
+// revokeSessionsButTx ends every active refresh token row of the user but
+// the rows keep (a session's chain, from requesterChain).
+func revokeSessionsButTx(tx *gorm.DB, userID uint, keep []uint, now time.Time) error {
+	return tx.Model(&RefreshToken{}).
+		Where("user_id = ? AND revoked_at IS NULL AND id NOT IN ?", userID, keep).
+		Update("revoked_at", now).Error
+}
+
 // revokeOtherSessions ends every active session of the user except the one
 // whose chain includes the refresh token row keepID: the row the request's
 // access token named, which may have rotated any number of times since the
@@ -339,14 +360,7 @@ func (s *Service) revokeOtherSessions(ctx context.Context, userID, keepID uint) 
 		if _, err := lockUserTx(tx, userID); err != nil {
 			return lockSessionsError(err)
 		}
-		now := s.now()
-		keepIDs, err := requesterChain(tx, userID, keepID, now)
-		if err != nil {
-			return err
-		}
-		return tx.Model(&RefreshToken{}).
-			Where("user_id = ? AND revoked_at IS NULL AND id NOT IN ?", userID, keepIDs).
-			Update("revoked_at", now).Error
+		return revokeOtherSessionsTx(tx, userID, keepID, s.now())
 	})
 	if err == nil {
 		s.Audit(ctx, AuditEvent{Action: AuditSessionRevoked, TargetUserID: uintPtr(userID), Details: details("scope", "others")})

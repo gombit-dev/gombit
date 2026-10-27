@@ -38,6 +38,9 @@ type Service struct {
 	// onLoginAuthenticated, when set (tests only), runs in Login between the
 	// password check and the session.
 	onLoginAuthenticated func()
+	// onPasswordChangeVerified, when set (tests only), runs in
+	// ChangePassword between the current-password check and the transaction.
+	onPasswordChangeVerified func()
 }
 
 type rotateCall struct {
@@ -226,12 +229,12 @@ func (s *Service) startSession(ctx context.Context, user User) (User, TokenPair,
 			return err
 		}
 		if locked.PasswordHash != user.PasswordHash {
-			return errPasswordChanged
+			return errLoginPasswordChanged
 		}
 		pair, err = s.issueTokens(tx, locked, s.now())
 		return err
 	})
-	if errors.Is(err, errPasswordChanged) {
+	if errors.Is(err, errLoginPasswordChanged) {
 		s.Audit(ctx, AuditEvent{Action: AuditLoginFailed, TargetUserID: uintPtr(user.ID), Details: details("reason", "password_changed")})
 		return User{}, TokenPair{}, errInvalidCredentials
 	}
@@ -242,9 +245,9 @@ func (s *Service) startSession(ctx context.Context, user User) (User, TokenPair,
 	return locked, pair, nil
 }
 
-// errPasswordChanged is a login whose verified password was replaced before
-// its session started.
-var errPasswordChanged = errors.New("auth: the password changed during the login")
+// errLoginPasswordChanged is a login whose verified password was replaced
+// before its session started (Login answers it as invalid credentials).
+var errLoginPasswordChanged = errors.New("auth: the password changed during the login")
 
 func (s *Service) issueTokens(tx *gorm.DB, user User, now time.Time) (TokenPair, error) {
 	raw, err := newRefreshToken()

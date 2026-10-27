@@ -75,6 +75,9 @@ func (s *Service) ResetPassword(ctx context.Context, raw, password string) (User
 	} else if !ok {
 		return User{}, errInvalidOneTimeToken
 	}
+	if err := checkNewPassword(password, "password"); err != nil {
+		return User{}, err
+	}
 	// Hashed before the transaction: bcrypt is slow, and must not run under
 	// the user's lock.
 	hash, err := s.hasher.Hash(password)
@@ -91,12 +94,7 @@ func (s *Service) ResetPassword(ctx context.Context, raw, password string) (User
 		if err := tx.Model(&User{}).Where("id = ?", locked.ID).Update("password_hash", hash).Error; err != nil {
 			return err
 		}
-		// Every other reset token of the user stops working, the pending ones
-		// too: a message still being sent must not activate a link to the
-		// password just replaced (activateToken needs used_at NULL).
-		if err := tx.Model(&OneTimeToken{}).
-			Where("user_id = ? AND purpose = ? AND used_at IS NULL AND id <> ?", locked.ID, PurposeResetPassword, token.ID).
-			Update("used_at", now).Error; err != nil {
+		if err := voidResetTokensTx(tx, locked.ID, token.ID, now); err != nil {
 			return err
 		}
 		if revoke {
@@ -113,6 +111,16 @@ func (s *Service) ResetPassword(ctx context.Context, raw, password string) (User
 	}
 	s.Audit(ctx, AuditEvent{Action: AuditPasswordReset, ActorUserID: uintPtr(user.ID), TargetUserID: uintPtr(user.ID), Details: details("sessions_revoked", strconv.FormatBool(revoke))})
 	return user, nil
+}
+
+// voidResetTokensTx makes every unused password reset token of the user but
+// except stop working, the pending ones too: a message still being sent must
+// not activate a link to the password just replaced (activateToken needs
+// used_at NULL). Zero excepts none.
+func voidResetTokensTx(tx *gorm.DB, userID, except uint, now time.Time) error {
+	return tx.Model(&OneTimeToken{}).
+		Where("user_id = ? AND purpose = ? AND used_at IS NULL AND id <> ?", userID, PurposeResetPassword, except).
+		Update("used_at", now).Error
 }
 
 // resetTokenMayWork reports whether raw names a delivered, unused,

@@ -105,6 +105,7 @@ func mountBearerRoutes(api huma.API, svc *Service, prefix string) {
 	registerSessionRoutes(api, svc, prefix, bearerSecurityName, svc.requireBearer(), false)
 	registerVerificationRoutes(api, svc, prefix, bearerSecurityName, svc.requireBearer())
 	registerPasswordResetRoutes(api, svc, prefix, false)
+	registerPasswordChangeRoutes(api, svc, prefix, bearerSecurityName, svc.requireBearer())
 }
 
 func mountCookieRoutes(api huma.API, svc *Service, prefix string) {
@@ -156,6 +157,7 @@ func mountCookieRoutes(api huma.API, svc *Service, prefix string) {
 	registerSessionRoutes(api, svc, prefix, cookieSecurityName, svc.requireCookieSession(), true)
 	registerVerificationRoutes(api, svc, prefix, cookieSecurityName, svc.requireCookieSession())
 	registerPasswordResetRoutes(api, svc, prefix, true)
+	registerPasswordChangeRoutes(api, svc, prefix, cookieSecurityName, svc.requireCookieSession())
 }
 
 // cookieRefreshErrorResponses declares the cookie refresh's error responses.

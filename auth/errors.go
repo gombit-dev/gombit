@@ -9,6 +9,7 @@ import (
 var (
 	errPasswordRequired   = errors.New("password is required")
 	errPasswordTooLong    = errors.New("password must be at most 72 bytes")
+	errPasswordTooShort   = errors.New("password must be at least 8 characters")
 	errInvalidCredentials = errors.New("invalid email or password")
 	errEmailTaken         = errors.New("email already registered")
 	errUserNotFound       = errors.New("user not found")

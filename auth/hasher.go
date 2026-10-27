@@ -2,6 +2,7 @@ package auth
 
 import (
 	"fmt"
+	"unicode/utf8"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -38,6 +39,47 @@ func (h bcryptHasher) Hash(password string) (string, error) {
 
 func (h bcryptHasher) Compare(hash, password string) error {
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
+}
+
+// minPasswordLength is the fewest characters a password a user sets
+// themselves may have (MinLength in the routes' schemas is the same, for
+// clients; this is the rule).
+const minPasswordLength = 8
+
+// PasswordPolicyError is a new password the policy refuses (ChangePassword,
+// ResetPassword): Err is the reason (ErrPasswordTooShort,
+// ErrPasswordTooLong, ErrPasswordRequired), Field the request field the
+// password came in ("new_password" for a change, "password" for a reset),
+// so the error is reported where the form put it.
+type PasswordPolicyError struct {
+	Field string
+	Err   error
+}
+
+func (e PasswordPolicyError) Error() string { return e.Err.Error() }
+func (e PasswordPolicyError) Unwrap() error { return e.Err }
+
+// The password policy's reasons (PasswordPolicyError.Err).
+var (
+	ErrPasswordTooShort = errPasswordTooShort
+	ErrPasswordTooLong  = errPasswordTooLong
+	ErrPasswordRequired = errPasswordRequired
+)
+
+// checkNewPassword is the policy for a password a user sets themselves (a
+// change, a reset): at least minPasswordLength characters, and what the
+// hasher can take (at most 72 bytes; a multibyte password reaches that in
+// fewer characters). It is enforced here, at the service, whatever the
+// transport validated; field names the request field for errors.
+func checkNewPassword(password, field string) error {
+	err := checkPasswordLength(password)
+	if err == nil && utf8.RuneCountInString(password) < minPasswordLength {
+		err = errPasswordTooShort
+	}
+	if err != nil {
+		return PasswordPolicyError{Field: field, Err: err}
+	}
+	return nil
 }
 
 func checkPasswordLength(password string) error {

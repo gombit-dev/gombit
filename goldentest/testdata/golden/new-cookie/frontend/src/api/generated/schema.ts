@@ -150,6 +150,22 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/v1/auth/password/change": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post: operations["auth-change-password"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/v1/auth/password/forgot": {
     parameters: {
       query?: never;
@@ -242,6 +258,15 @@ export interface components {
       email: string;
       password: string;
     };
+    AuthPasswordChangeBody: {
+      current_password: string;
+      keep_other_sessions?: boolean;
+      new_password: string;
+    };
+    AuthPasswordChangeResult: {
+      ok: boolean;
+      other_sessions_revoked: boolean;
+    };
     AuthPasswordForgotBody: {
       email: string;
     };
@@ -270,6 +295,9 @@ export interface components {
     };
     AuthVerifyEmailBody: {
       token: string;
+    };
+    DataAuthPasswordChangeResult: {
+      data: components["schemas"]["AuthPasswordChangeResult"];
     };
     DataAuthPasswordResetRequested: {
       data: components["schemas"]["AuthPasswordResetRequested"];
@@ -593,6 +621,37 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["ErrorEnvelope"];
+        };
+      };
+      default: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorEnvelope"];
+        };
+      };
+    };
+  };
+  "auth-change-password": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["AuthPasswordChangeBody"];
+      };
+    };
+    responses: {
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["DataAuthPasswordChangeResult"];
         };
       };
       default: {

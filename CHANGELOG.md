@@ -12,6 +12,28 @@ version.
 
 ### Added
 
+- [Password change](docs/auth.md#password-change) (AUTH-3), in both auth
+  modes. `POST /auth/password/change` sets a signed-in user's password
+  given the current one (a wrong one is a 422 on `current_password`),
+  under the password policy (at least 8 characters, at most 72 bytes,
+  enforced by the service; a refusal is a 422 on `new_password`; a reset
+  now enforces the same minimum in `ResetPassword` too); every other session of the user is
+  signed out in the same transaction unless `keep_other_sessions`, the
+  session that asked stays, and outstanding password reset links stop
+  working. Concurrent with a reset or another change, the first to commit
+  wins (409 for the other). Audited as `auth.password.changed` /
+  `auth.password.change_failed`; no password is ever logged.
+  `auth.Service.ChangePassword` is the same flow from Go: it keeps the
+  session the request's context carries, and its errors are exported
+  (`auth.ErrWrongCurrentPassword`, `ErrPasswordChanged`, `ErrSessionEnded`,
+  `ErrUserNotFound`, and `auth.PasswordPolicyError` with
+  `ErrPasswordTooShort` / `TooLong` / `Required`).
+  - **Breaking (api):** the framework registers `POST
+    /auth/password/change`, the `auth-change-password` operation ID and the
+    `AuthPasswordChangeBody` / `AuthPasswordChangeResult` schemas; an app
+    that registers its own panics at startup
+  ([#333](https://github.com/gombit-dev/gombit/issues/333)).
+
 - [Password reset](docs/auth.md#password-reset) (AUTH-2), in both auth
   modes. `POST /auth/password/forgot` mails a single-use reset link and
   answers the same 202 whether or not the email is an account, before that

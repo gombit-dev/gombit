@@ -91,9 +91,6 @@ func RevokeAllSessionsAs(ctx context.Context, s *Service, userID, requester uint
 	return s.revokeAllSessionsAs(ctx, userID, requester)
 }
 
-// ErrSessionEnded is the error the revocations a request runs return when
-// the request's own session has ended by the time they hold the user's lock.
-var ErrSessionEnded = errSessionEnded
 
 // ContextWithSession returns ctx carrying what the auth middlewares store for
 // a request authenticated as user with the refresh token row refreshID.
@@ -184,3 +181,11 @@ func IsClosing(s *Service) bool {
 	defer r.mu.Unlock()
 	return r.closing != nil
 }
+
+// SetPasswordChangeVerifiedHook makes fn run in ChangePassword between the
+// current-password check and the transaction.
+func SetPasswordChangeVerifiedHook(s *Service, fn func()) { s.onPasswordChangeVerified = fn }
+
+
+
+

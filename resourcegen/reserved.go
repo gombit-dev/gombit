@@ -7,8 +7,8 @@ import (
 
 // reservedOperationIDs are the Huma operation IDs the framework registers on
 // the app's API before any generated resource mounts: auth in both modes, email
-// verification, session management and password reset, and the admin data plane
-// (cookie mode).
+// verification, session management, password reset and change, and the admin
+// data plane (cookie mode).
 //
 // Huma keys operations by ID and panics at boot on a duplicate, so a resource
 // that emits one of these produces an app that builds cleanly and then dies on
@@ -23,8 +23,9 @@ var reservedOperationIDs = map[string]struct{}{
 	// Auth: email verification (AUTH-1) and session management (AUTH-5).
 	"auth-verify-email": {}, "auth-resend-email-verification": {},
 	"auth-list-sessions": {}, "auth-revoke-session": {}, "auth-revoke-sessions": {},
-	// Auth: password reset (AUTH-2).
+	// Auth: password reset (AUTH-2) and password change (AUTH-3).
 	"auth-request-password-reset": {}, "auth-reset-password": {},
+	"auth-change-password": {},
 	// Admin data plane (cookie mode).
 	"admin-meta-list": {}, "admin-meta-get": {},
 	"admin-resource-list": {}, "admin-resource-create": {}, "admin-resource-get": {},

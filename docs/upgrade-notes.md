@@ -85,6 +85,13 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   An app on `framework.App` does not call `auth.Mount` and changes
   nothing.
 
+- **Breaking.** With auth enabled, an app that registers `POST {prefix}/auth/password/change`, an `auth-change-password` operation, or the `AuthPasswordChangeBody` / `AuthPasswordChangeResult` schema names fails at startup: the framework registers them. (`password-change-names-reserved`, api, [#333](https://github.com/gombit-dev/gombit/issues/333))
+
+  Drop the app's own password-change route, which the framework's
+  replaces, or rename it; the same goes for a type Huma names
+  `AuthPasswordChangeBody`, `AuthPasswordChangeResult` or
+  `DataAuthPasswordChangeResult`.
+
 ### Informational
 
 - Bearer-mode session revocation errors include the `WWW-Authenticate: Bearer realm="api"` challenge when the handler returns 401. (`bearer-handler-401-challenge`, api, [#604](https://github.com/gombit-dev/gombit/issues/604))
@@ -144,13 +151,25 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   `GOMBIT_AUTH_PASSWORD_RESET_URL` configure the link;
   `GOMBIT_AUTH_PASSWORD_RESET_KEEP_SESSIONS=true` keeps the sessions.
   `auth.Service.RequestPasswordReset` and `ResetPassword` are the same
-  flow for an app's own code. A production app with no mailer sends
+  flow for an app's own code; `ResetPassword` enforces the password
+  policy itself (at least 8 characters, at most 72 bytes, a
+  `auth.PasswordPolicyError` on `password`), whatever its caller
+  validated. A production app with no mailer sends
   no message. The messages are sent by the auth Service's bounded
   background workers (a request they cannot admit is a 503);
   `framework.App` closes the Service when it stops. A login now starts
   its session under the user's row lock (`auth.Service.Login`).
 
 - A new app's placeholder `schema.ts` includes the password reset operations (and the forgot route's 503 with `Retry-After`); an existing app's generated client gets them from `gombit client generate`. (`client-schema-password-reset`, client, [#332](https://github.com/gombit-dev/gombit/issues/332))
+
+- Password change: `POST {prefix}/auth/password/change` sets a signed-in user's password given the current one, signs out their other sessions (unless `keep_other_sessions`), voids outstanding reset links, and is audited. (`password-change`, api, [#333](https://github.com/gombit-dev/gombit/issues/333))
+
+  A wrong current password is a 422 on `current_password` and an
+  `auth.password.change_failed` audit event; a change is
+  `auth.password.changed`. `auth.Service.ChangePassword` is the same
+  flow for an app's own code.
+
+- A new app's placeholder `schema.ts` includes the password change operation; an existing app's generated client gets it from `gombit client generate`. (`client-schema-password-change`, client, [#333](https://github.com/gombit-dev/gombit/issues/333))
 
 - An already-rotated refresh token that has expired is a 401 and no longer revokes the user's sessions. (`expired-rotated-refresh-token-no-cascade`, security, [#458](https://github.com/gombit-dev/gombit/issues/458))
 

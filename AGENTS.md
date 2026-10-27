@@ -127,7 +127,10 @@ a secret; `auth.Auditor` / `framework.WithAuthAuditor`,
 password reset (`POST {prefix}/auth/password/forgot`, non-enumerating and
 answered before the lookup; `POST {prefix}/auth/password/reset`, revoking
 the user's sessions unless `GOMBIT_AUTH_PASSWORD_RESET_KEEP_SESSIONS`), on
-the shared one-time-token flow (`auth/onetime.go`); see `docs/auth.md`.
+the shared one-time-token flow (`auth/onetime.go`), and AUTH-3 (#333):
+password change (`POST {prefix}/auth/password/change`, the current password
+required, the other sessions signed out unless `keep_other_sessions`,
+reset links voided; `auth.Service.ChangePassword`); see `docs/auth.md`.
 Don't assume generated apps are committed in-tree; `gombit new` writes them
 on demand. Check `git log` / `ls` before describing "how the code works."
 
