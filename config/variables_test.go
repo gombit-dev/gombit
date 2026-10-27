@@ -61,7 +61,7 @@ func TestVariablesCoverEveryEnvConstant(t *testing.T) {
 // its default changes exactly that entry's reading, so a binding to the
 // wrong field fails.
 func TestVariablesReadBackWhatLoadFromEnvSets(t *testing.T) {
-	samples := map[string]string{
+	samples := map[string]string{ // #nosec G101 -- fake test values keyed by variable name.
 		envAppName: "demo", envEnv: "test", envHTTPAddr: ":9090", envHTTPTrustedProxies: "10.0.0.1",
 		envHTTPRequestTimeout: "7s", envAPIPrefix: "/api/v2", envDocsEnabled: "false",
 		envDatabaseDriver: "postgres", envDatabaseRequired: "false", envDatabaseDSN: "postgres://db.example.com/app",
@@ -78,6 +78,8 @@ func TestVariablesReadBackWhatLoadFromEnvSets(t *testing.T) {
 		envJWTSecret: strings.Repeat("j", 32), envJWTAccessTTL: "5m0s", envJWTRefreshTTL: "24h0m0s",
 		envAuthMode: "cookie", envCookieSecure: "false", envCookieSameSite: "strict",
 		envEmailVerificationTTL: "1h0m0s", envEmailVerificationURL: "https://app.example.com/verify?token={token}",
+		envPasswordResetTTL: "30m0s", envPasswordResetURL: "https://app.example.com/reset?token={token}",
+		envPasswordResetKeep:     "true",
 		envSecuritySanitizeInput: "true",
 	}
 	base := map[string]string{envEnv: "test", envJWTSecret: strings.Repeat("j", 32)}

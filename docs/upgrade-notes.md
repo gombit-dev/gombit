@@ -53,6 +53,38 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   logins, registrations and the other recorded operations still work,
   and log a warning for each event they could not write.
 
+- **Breaking.** With auth enabled, an app that registers the password reset routes, their `auth-*` operation IDs or the `AuthPasswordForgotBody` / `AuthPasswordResetBody` / `AuthPasswordResetRequested` / `AuthPasswordResetResult` schema names fails at startup: the framework registers them. (`password-reset-names-reserved`, api, [#332](https://github.com/gombit-dev/gombit/issues/332))
+
+  With `GOMBIT_JWT_SECRET` set, registering `POST
+  {prefix}/auth/password/forgot` or `POST {prefix}/auth/password/reset`,
+  an operation `auth-request-password-reset` or `auth-reset-password`,
+  or a type Huma names `AuthPasswordForgotBody`,
+  `AuthPasswordResetBody`, `AuthPasswordResetRequested`,
+  `AuthPasswordResetResult`, `DataAuthPasswordResetRequested` or
+  `DataAuthPasswordResetResult` now panics when the app starts. Drop
+  the app's own reset routes, which the framework's replace, or rename
+  them.
+
+- **Breaking.** `auth.Service.IssueTokens(ctx, user)` refuses (invalid credentials) a `user` whose `PasswordHash` is not the stored one: a snapshot from before a password change, or a `User` built by hand without it. (`issue-tokens-checks-password-snapshot`, api, [#332](https://github.com/gombit-dev/gombit/issues/332))
+
+  Pass the `User` that `Authenticate` returned, or one loaded from the
+  database with its `PasswordHash`. A session then starts only if that
+  password is still the user's, so a password reset committing between
+  `Authenticate` and `IssueTokens` leaves the old password unable to
+  start one. `auth.Service.Login` does both steps. A `User{ID: id}` built
+  by hand, which used to start a session, now fails: load the user.
+
+- **Breaking.** `auth.Mount` returns the `*auth.Service` it builds; an app that calls it directly keeps it and closes it on shutdown. (`auth-mount-returns-service`, api, [#332](https://github.com/gombit-dev/gombit/issues/332))
+
+  `err := auth.Mount(api, db, cfg)` no longer compiles: write `svc,
+  err := auth.Mount(api, db, cfg)`, and call `svc.Close(ctx)` when the
+  app stops, before it closes the database. The Service runs
+  background work (password reset messages) that Close drains, then
+  cancels; a Service nobody closes leaves that work running against a
+  closed database. With auth disabled, Mount returns a nil Service.
+  An app on `framework.App` does not call `auth.Mount` and changes
+  nothing.
+
 ### Informational
 
 - Bearer-mode session revocation errors include the `WWW-Authenticate: Bearer realm="api"` challenge when the handler returns 401. (`bearer-handler-401-challenge`, api, [#604](https://github.com/gombit-dev/gombit/issues/604))
@@ -60,6 +92,12 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   Cookie-mode 401 responses still omit a Bearer challenge.
 
 - The email-verification resend operation's OpenAPI contract declares its 429 response and integer `Retry-After` header. (`verification-resend-rate-limit-contract`, api, [#611](https://github.com/gombit-dev/gombit/issues/611))
+
+- `gombit make resource` refuses a name whose generated operation IDs the framework already registers, such as `Me`, whose `get-me` collides with auth's. (`resource-operation-id-collision`, cli, [#579](https://github.com/gombit-dev/gombit/issues/579))
+
+  The scaffolded app used to build and then panic at boot on Huma's
+  `duplicate operation ID`. Run `gombit make resource` under a
+  different name; nothing is written when the name is refused.
 
 - The framework requires Go 1.26.9 (`go 1.26.9` in go.mod), and `gombit new` pins it. (`go-1-26-9`, dependency, [#602](https://github.com/gombit-dev/gombit/issues/602))
 
@@ -100,6 +138,20 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   unchanged, as before. Every consumer (response header, logs, error
   envelopes, the audit trail) carries the one accepted ID.
 
+- Password reset: `POST {prefix}/auth/password/forgot` mails a single-use, expiring link and answers the same 202 whether or not the email is an account; `POST {prefix}/auth/password/reset` sets the new password and revokes every session of the user. (`password-reset`, api, [#332](https://github.com/gombit-dev/gombit/issues/332))
+
+  `GOMBIT_AUTH_PASSWORD_RESET_TTL` (1h) and
+  `GOMBIT_AUTH_PASSWORD_RESET_URL` configure the link;
+  `GOMBIT_AUTH_PASSWORD_RESET_KEEP_SESSIONS=true` keeps the sessions.
+  `auth.Service.RequestPasswordReset` and `ResetPassword` are the same
+  flow for an app's own code. A production app with no mailer sends
+  no message. The messages are sent by the auth Service's bounded
+  background workers (a request they cannot admit is a 503);
+  `framework.App` closes the Service when it stops. A login now starts
+  its session under the user's row lock (`auth.Service.Login`).
+
+- A new app's placeholder `schema.ts` includes the password reset operations (and the forgot route's 503 with `Retry-After`); an existing app's generated client gets them from `gombit client generate`. (`client-schema-password-reset`, client, [#332](https://github.com/gombit-dev/gombit/issues/332))
+
 - An already-rotated refresh token that has expired is a 401 and no longer revokes the user's sessions. (`expired-rotated-refresh-token-no-cascade`, security, [#458](https://github.com/gombit-dev/gombit/issues/458))
 
 - In cookie mode, a refresh rejected with a 401 clears the `gombit_access` and `gombit_refresh` cookies. (`cookie-refresh-401-clears-session-cookies`, behavior, [#458](https://github.com/gombit-dev/gombit/issues/458))
@@ -110,6 +162,30 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 - A new cookie-mode app's placeholder `schema.ts` includes the refresh's 401 response; an existing app's generated client gets it from `gombit client generate`. (`client-schema-cookie-refresh-401`, client, [#458](https://github.com/gombit-dev/gombit/issues/458))
 
 - In cookie mode, a `POST /auth/refresh` that fails loading the session user rolls the token rotation back with it, instead of answering 500 after the rotation already committed. (`cookie-refresh-loads-user-before-commit`, behavior, [#606](https://github.com/gombit-dev/gombit/issues/606))
+
+- `gombit jobs inspect` prints a job's payload as the queue holds it: an int64 above 2^53 keeps its digits and object keys keep the order the handler wrote them. (`jobs-inspect-keeps-payload-bytes`, cli, [#497](https://github.com/gombit-dev/gombit/issues/497))
+
+  The human-readable block was re-encoded through `any`, so a snowflake
+  id or an int64 primary key showed a neighbouring value the job never
+  carried, keys came back sorted, and a number the producer wrote
+  non-canonically (`1e3`) was rewritten as `1000`. `inspect --json` was
+  already faithful. Nothing to change: the printed value is now the
+  stored one, and `json.Indent` moves only whitespace. Markup is not
+  part of that change, and cannot be: `Registry` and `Envelope.Marshal`
+  encode with `json.Marshal`, which escapes `<`, `>` and `&` as
+  `\u003c`, `\u003e` and `\u0026` on the way into the queue, so
+  `inspect` prints those escapes as stored before and after.
+
+- A 422 keys a missing property by that property's own path at every location Huma reports it (`address.city`, `body[1].sku`, `query.filter.kind`), including a `dependentRequired` property, instead of by the object. (`nested-required-property-keyed-by-its-path`, behavior, [#503](https://github.com/gombit-dev/gombit/issues/503))
+
+  Huma reports a missing property — required, or pulled in by
+  `dependentRequired` — against the object that lacks it, whether that
+  is a nested body object, a top-level array-body item (`body[1]`), a
+  deepObject query param or a form object, so the parent key carried
+  every property the object was missing. A form that passes
+  `error.fields` to React Hook Form field paths needs no change — that
+  is the key it always wanted; code that read the parent key reads the
+  property path now.
 
 ## v0.8.0
 

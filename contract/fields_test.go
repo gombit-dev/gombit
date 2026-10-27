@@ -67,6 +67,71 @@ func TestFieldsFromErrors(t *testing.T) {
 			},
 			want: map[string][]string{"name": {"expected required property name to be present"}},
 		},
+		{
+			name: "required property extends a nested body path",
+			errs: []error{
+				&huma.ErrorDetail{Location: "body.address", Message: "expected required property city to be present"},
+				&huma.ErrorDetail{Location: "body.address", Message: "expected required property zip to be present"},
+			},
+			want: map[string][]string{
+				"address.city": {"expected required property city to be present"},
+				"address.zip":  {"expected required property zip to be present"},
+			},
+		},
+		{
+			name: "required property in an array item",
+			errs: []error{
+				&huma.ErrorDetail{Location: "body.items[1]", Message: "expected required property name to be present"},
+			},
+			want: map[string][]string{
+				"items[1].name": {"expected required property name to be present"},
+			},
+		},
+		{
+			name: "required property extends a top-level array body item",
+			errs: []error{
+				&huma.ErrorDetail{Location: "body[1]", Message: "expected required property sku to be present"},
+			},
+			want: map[string][]string{
+				"body[1].sku": {"expected required property sku to be present"},
+			},
+		},
+		{
+			name: "required property extends a deepObject query path",
+			errs: []error{
+				&huma.ErrorDetail{Location: "query.filter", Message: "expected required property kind to be present"},
+			},
+			want: map[string][]string{
+				"query.filter.kind": {"expected required property kind to be present"},
+			},
+		},
+		{
+			name: "required property extends a form object path",
+			errs: []error{
+				&huma.ErrorDetail{Location: "form.data", Message: "expected required property title to be present"},
+			},
+			want: map[string][]string{
+				"form.data.title": {"expected required property title to be present"},
+			},
+		},
+		{
+			name: "dependent required property extends an object path",
+			errs: []error{
+				&huma.ErrorDetail{Location: "body.address", Message: "expected property zip to be present when city is present"},
+			},
+			want: map[string][]string{
+				"address.zip": {"expected property zip to be present when city is present"},
+			},
+		},
+		{
+			name: "dependent required property at the body root",
+			errs: []error{
+				&huma.ErrorDetail{Location: "body", Message: "expected property zip to be present when city is present"},
+			},
+			want: map[string][]string{
+				"zip": {"expected property zip to be present when city is present"},
+			},
+		},
 	}
 
 	for _, tt := range tests {

@@ -17,14 +17,17 @@ import (
 // Service is the runtime auth implementation: users, password hashes,
 // access JWTs, and rotating refresh tokens.
 type Service struct {
-	db          *gorm.DB
-	cfg         config.AuthConfig
-	secret      []byte
-	hasher      Hasher
-	clock       Clock
-	mailer      Mailer
-	logger      *zap.Logger
-	auditor     Auditor
+	db      *gorm.DB
+	cfg     config.AuthConfig
+	secret  []byte
+	hasher  Hasher
+	clock   Clock
+	mailer  Mailer
+	logger  *zap.Logger
+	auditor Auditor
+	// background runs the work the routes accept and finish after
+	// answering (background.go); Close drains it.
+	background  *backgroundRunner
 	dummyOnce   sync.Once
 	dummyHash   string
 	rotateMu    sync.Mutex
@@ -32,6 +35,9 @@ type Service struct {
 	// onRotateJoin, when set (tests only), runs when a caller joins another
 	// caller's in-flight rotation, just before it waits for the result.
 	onRotateJoin func()
+	// onLoginAuthenticated, when set (tests only), runs in Login between the
+	// password check and the session.
+	onLoginAuthenticated func()
 }
 
 type rotateCall struct {
@@ -90,6 +96,7 @@ func NewService(db *gorm.DB, cfg config.Config, opts ...Option) (*Service, error
 		logger: zap.NewNop(),
 	}
 	s.auditor = DBAuditor(db)
+	s.background = newBackgroundRunner()
 	for _, opt := range opts {
 		opt(s)
 	}
@@ -172,17 +179,72 @@ func (s *Service) Authenticate(ctx context.Context, email, password string) (Use
 	return user, nil
 }
 
-// IssueTokens returns a new access JWT and a rotating refresh token: it
-// starts a session, so it records the login as succeeded (Authenticate
-// records the failures).
-func (s *Service) IssueTokens(ctx context.Context, user User) (TokenPair, error) {
-	pair, err := s.issueTokens(s.db.WithContext(ctx), user, s.now())
+// Login verifies email and password and starts a session, as POST
+// /auth/login does. The session is created under the user's row lock, and
+// only if the password hash it verified is still the user's: a password
+// reset (or any change of the hash) that commits between the check and the
+// session either finds the session and revokes it, or makes this login fail
+// as invalid credentials. The old password never outlives its change.
+func (s *Service) Login(ctx context.Context, email, password string) (User, TokenPair, error) {
+	user, err := s.Authenticate(ctx, email, password)
 	if err != nil {
-		return TokenPair{}, err
+		return User{}, TokenPair{}, err
 	}
-	s.Audit(ctx, AuditEvent{Action: AuditLoginSucceeded, ActorUserID: uintPtr(user.ID), TargetUserID: uintPtr(user.ID)})
-	return pair, nil
+	if s.onLoginAuthenticated != nil {
+		s.onLoginAuthenticated()
+	}
+	return s.startSession(ctx, user)
 }
+
+// IssueTokens returns a new access JWT and a rotating refresh token for
+// user: it starts a session, so it records the login as succeeded
+// (Authenticate records the failures). user is a snapshot, as Authenticate
+// returned it or as loaded from the database: its PasswordHash must still
+// be the user's when the session starts, or IssueTokens fails as invalid
+// credentials (ErrInvalidCredentials). So Authenticate followed by
+// IssueTokens is as safe as Login: a password reset that commits between
+// the two leaves the old password's snapshot unable to start a session.
+func (s *Service) IssueTokens(ctx context.Context, user User) (TokenPair, error) {
+	_, pair, err := s.startSession(ctx, user)
+	return pair, err
+}
+
+// startSession issues a session for user under the user's row lock, the lock
+// a password reset and the session revocations take, so it is ordered
+// against them, and only if the stored password hash is still the one in
+// user's snapshot.
+func (s *Service) startSession(ctx context.Context, user User) (User, TokenPair, error) {
+	var pair TokenPair
+	var locked User
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var err error
+		locked, err = lockUserTx(tx, user.ID)
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return errUserNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if locked.PasswordHash != user.PasswordHash {
+			return errPasswordChanged
+		}
+		pair, err = s.issueTokens(tx, locked, s.now())
+		return err
+	})
+	if errors.Is(err, errPasswordChanged) {
+		s.Audit(ctx, AuditEvent{Action: AuditLoginFailed, TargetUserID: uintPtr(user.ID), Details: details("reason", "password_changed")})
+		return User{}, TokenPair{}, errInvalidCredentials
+	}
+	if err != nil {
+		return User{}, TokenPair{}, err
+	}
+	s.Audit(ctx, AuditEvent{Action: AuditLoginSucceeded, ActorUserID: uintPtr(locked.ID), TargetUserID: uintPtr(locked.ID)})
+	return locked, pair, nil
+}
+
+// errPasswordChanged is a login whose verified password was replaced before
+// its session started.
+var errPasswordChanged = errors.New("auth: the password changed during the login")
 
 func (s *Service) issueTokens(tx *gorm.DB, user User, now time.Time) (TokenPair, error) {
 	raw, err := newRefreshToken()

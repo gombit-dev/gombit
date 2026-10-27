@@ -89,6 +89,9 @@ recognizes:
 | `GOMBIT_COOKIE_SAMESITE` | `Config.Auth.CookieSameSite` | `lax` |
 | `GOMBIT_AUTH_EMAIL_VERIFICATION_TTL` | `Config.Auth.EmailVerificationTTL` | `24h` |
 | `GOMBIT_AUTH_EMAIL_VERIFICATION_URL` | `Config.Auth.EmailVerificationURL` | empty; when set, must contain `{token}` |
+| `GOMBIT_AUTH_PASSWORD_RESET_TTL` | `Config.Auth.PasswordResetTTL` | `1h` |
+| `GOMBIT_AUTH_PASSWORD_RESET_URL` | `Config.Auth.PasswordResetURL` | empty; when set, must contain `{token}` |
+| `GOMBIT_AUTH_PASSWORD_RESET_KEEP_SESSIONS` | `Config.Auth.PasswordResetKeepSessions` | `false`: a reset revokes every session of the user |
 | `GOMBIT_SECURITY_SANITIZE_INPUT` | `Config.Security.SanitizeInput` | `false` (opt-in) |
 
 `.env` is read whole, lines of any length. A line assigns as written:

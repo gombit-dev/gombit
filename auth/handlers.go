@@ -72,11 +72,10 @@ func (s *Service) register(ctx context.Context, input *registerInput) (*register
 }
 
 func (s *Service) login(ctx context.Context, input *loginInput) (*tokenOutput, error) {
-	user, err := s.Authenticate(ctx, input.Body.Email, input.Body.Password)
-	if err != nil {
+	_, pair, err := s.Login(ctx, input.Body.Email, input.Body.Password)
+	if errors.Is(err, errInvalidCredentials) {
 		return nil, mapServiceError(ctx, err)
 	}
-	pair, err := s.IssueTokens(ctx, user)
 	if err != nil {
 		return nil, contract.WithContext(ctx, contract.Internal("issue tokens"))
 	}
@@ -185,8 +184,34 @@ func writeAuthChallenge(ctx huma.Context, env *contract.ErrorEnvelope, challenge
 	_ = json.NewEncoder(ctx.BodyWriter()).Encode(env)
 }
 
+// declareRetryAfter documents, on the POST operation at path, the error
+// response status (declared in the operation's Errors) with the integer
+// Retry-After header the runtime response sends. Declaring a specific Huma
+// error suppresses the automatic default error response, so it puts the
+// catch-all back.
+func declareRetryAfter(api huma.API, path string, status int, description string) {
+	responses := api.OpenAPI().Paths[path].Post.Responses
+	declared := responses[strconv.Itoa(status)]
+	minimum := 1.0
+	declared.Headers = map[string]*huma.Param{
+		"Retry-After": {
+			Description: description,
+			Required:    true,
+			Schema: &huma.Schema{
+				Type:    "integer",
+				Minimum: &minimum,
+			},
+		},
+	}
+	responses["default"] = &huma.Response{
+		Description: "Error",
+		Content:     declared.Content,
+	}
+}
+
 func mapServiceError(ctx context.Context, err error) error {
 	var tooSoon resendTooSoonError
+	var busy backgroundBusyError
 	switch {
 	case errors.Is(err, errInvalidCredentials):
 		return contract.WithContext(ctx, contract.Authentication("invalid email or password"))
@@ -215,6 +240,10 @@ func mapServiceError(ctx context.Context, err error) error {
 	case errors.As(err, &tooSoon):
 		secs := int(math.Ceil(tooSoon.retryAfter.Seconds()))
 		return huma.ErrorWithHeaders(contract.WithContext(ctx, contract.RateLimited("a verification message was sent less than a minute ago")),
+			http.Header{"Retry-After": []string{strconv.Itoa(max(secs, 1))}})
+	case errors.As(err, &busy):
+		secs := int(math.Ceil(busy.retryAfter.Seconds()))
+		return huma.ErrorWithHeaders(contract.WithContext(ctx, contract.DependencyUnavailable("the server is busy; try again shortly")),
 			http.Header{"Retry-After": []string{strconv.Itoa(max(secs, 1))}})
 	case errors.Is(err, ErrNoMailer):
 		return contract.WithContext(ctx, contract.DependencyUnavailable("email delivery is not configured"))

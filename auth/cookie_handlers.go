@@ -36,11 +36,10 @@ type cookieLogoutOutput struct {
 }
 
 func (s *Service) loginCookie(ctx context.Context, input *cookieLoginInput) (*cookieSessionOutput, error) {
-	user, err := s.Authenticate(ctx, input.Body.Email, input.Body.Password)
-	if err != nil {
+	user, pair, err := s.Login(ctx, input.Body.Email, input.Body.Password)
+	if errors.Is(err, errInvalidCredentials) {
 		return nil, mapServiceError(ctx, err)
 	}
-	pair, err := s.IssueTokens(ctx, user)
 	if err != nil {
 		return nil, contract.WithContext(ctx, contract.Internal("issue tokens"))
 	}

@@ -12,6 +12,40 @@ version.
 
 ### Added
 
+- [Password reset](docs/auth.md#password-reset) (AUTH-2), in both auth
+  modes. `POST /auth/password/forgot` mails a single-use reset link and
+  answers the same 202 whether or not the email is an account, before that
+  is known (the message is sent by the auth Service's bounded, deadlined
+  background workers, which `framework.App` drains and cancels when it
+  stops; a request they cannot admit is a 503, also before the lookup);
+  `POST
+  /auth/password/reset` sets the new password (registration's policy) and
+  revokes every session and refresh token of the user, unless
+  `GOMBIT_AUTH_PASSWORD_RESET_KEEP_SESSIONS=true`; a login that checked the
+  old password cannot start a session after the reset (login now starts its
+  session under the user's lock, only if the checked password is still
+  current: `auth.Service.Login`). The token is a one-time
+  token like the verification one (pending until delivered, used once, at
+  most one message a minute, superseded by a newer one, bound to the
+  address), expiring after `GOMBIT_AUTH_PASSWORD_RESET_TTL` (1h);
+  `GOMBIT_AUTH_PASSWORD_RESET_URL` is the link. Both are audited.
+  `auth.Service.RequestPasswordReset` / `ResetPassword` are the same flow
+  from Go.
+  - **Breaking (api):** `auth.Service.IssueTokens` starts a session only if
+    the given user's `PasswordHash` is still the stored one (a snapshot from
+    before a password change, or a hand-built `User` without it, is refused
+    as invalid credentials), so `Authenticate` + `IssueTokens` cannot outlive
+    a reset that commits in between; `auth.Service.Login` does both.
+  - **Breaking (api):** `auth.Mount` returns the `*auth.Service` it builds
+    (`svc, err := auth.Mount(...)`): the caller owns it and calls
+    `svc.Close(ctx)` on shutdown, which drains its background work.
+    `framework.App` does this itself.
+  - **Breaking (api):** the framework now registers the reset routes, the
+    `auth-request-password-reset` and `auth-reset-password` operation IDs,
+    and the `AuthPasswordForgotBody` / `AuthPasswordResetBody` /
+    `AuthPasswordResetRequested` / `AuthPasswordResetResult` schemas; an app
+    that registers its own panics at startup
+  ([#332](https://github.com/gombit-dev/gombit/issues/332)).
 - A [security audit trail](docs/auth.md#audit-trail) (AUTH-7): logins
   (succeeded and failed), logouts, registrations, superuser creation,
   refresh-token reuse, session revocations, email verification, group and
@@ -71,6 +105,12 @@ version.
 - The OpenAPI contract for `POST /auth/verify-email/resend` now declares its
   429 response and integer `Retry-After` header, matching the response already
   sent at runtime ([#611](https://github.com/gombit-dev/gombit/issues/611)).
+- `gombit make resource` refuses a name whose generated operation IDs the
+  framework already registers, instead of scaffolding an app that builds and
+  then panics at boot on Huma's duplicate operation ID: `gombit make resource
+  Me` generated `get-me`, which auth registers in both modes. The check runs
+  while the resource is planned, so nothing is written
+  ([#579](https://github.com/gombit-dev/gombit/issues/579)).
 - Saving the admin edit form no longer rewrites fields the operator did not
   touch: it sent every field back, so each save truncated a datetime to the
   minute (`12:30:45.123456` became `12:30:00`) and an integer past 2^53 to
@@ -108,6 +148,30 @@ version.
   refresh cookie stays valid for the retry, which no longer reads as reuse
   and revokes every session of the user
   ([#606](https://github.com/gombit-dev/gombit/issues/606)).
+- `gombit jobs inspect` re-encoded the payload it prints through `any`, so every
+  number went through `float64` and an id above 2^53 — a snowflake, an int64
+  primary key, exactly the value an operator reads out of that block to go and
+  find the row — printed as a neighbouring value the job never carried; object
+  keys came back sorted rather than in the order the handler wrote them, and a
+  number the producer wrote non-canonically (`1e3`) came back as `1000`, while
+  `inspect --json` beside it kept the id and the key order. `indentJSON` now
+  lays the stored bytes out with `json.Indent`, which moves only the whitespace
+  between the JSON tokens. String contents are unchanged either way: `Registry`
+  and `Envelope.Marshal` encode with `json.Marshal`, which escapes `<`, `>` and
+  `&` as `\u003c`, `\u003e` and `\u0026` before the job reaches the queue, so
+  `inspect` shows those escapes as the bytes at rest and did so before this fix
+  too
+  ([#497](https://github.com/gombit-dev/gombit/issues/497)).
+- A 422 keys a missing property by that property's own path instead of by the
+  object that lacks it (`address.city`, `lines[1].sku`, `body[1].sku` for a
+  top-level array body, `query.filter.kind` for a deepObject query param), the
+  shape every other nested error already has. Huma reports the property only in
+  the message, so the key was that object and it carried every property the
+  object was missing, which a form cannot put on the right input: the
+  scaffold's `applyContractErrors` passes these keys straight to React Hook
+  Form as field paths. The dependent-required message (`expected property zip
+  to be present when city is present`) keys the same way
+  ([#503](https://github.com/gombit-dev/gombit/issues/503)).
 
 ### Changed
 
@@ -582,7 +646,6 @@ version.
   `framework.New`, `contract.HumaConfigFor` logs the failure through `slog`; a
   writer on which the status cannot be confirmed to change gets the error back
   to Huma as before ([#442](https://github.com/gombit-dev/gombit/issues/442)).
-
 ## [0.7.0] — 2026-10-04
 
 ### Added
