@@ -94,6 +94,8 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 - **Breaking.** `GOMBIT_API_PREFIX` and `Config.API.Prefix` have one canonical form: `Load` drops a trailing `/` from the environment value, and `Validate` refuses a prefix that is not already canonical — one `Load` would have rewritten, or one whose OpenAPI document its own routes cannot answer. (`api-prefix-canonical-form`, config, [#501](https://github.com/gombit-dev/gombit/issues/501))
 
+  - Configuration: `GOMBIT_API_PREFIX`: some values are now refused.
+
   A prefix of `/svc/` served `/svc/widgets` but listed
   `/svc//widgets` in the OpenAPI document, so every client generated
   from it asked for a URL that 404s. Nothing changes for a prefix set
