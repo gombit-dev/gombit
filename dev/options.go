@@ -106,7 +106,7 @@ func (opts *Options) normalize() error {
 		// The rewrite is only safe here. An app started without `gombit dev`
 		// reads its config address verbatim, so say out loud that the value
 		// the user wrote is the one that has to change.
-		fmt.Fprintf(opts.Stderr, "gombit dev: normalised the API address %q to %q; keep the %q form in .env — go run ./cmd/server and a deployed binary read GOMBIT_HTTP_ADDR verbatim\n",
+		_, _ = fmt.Fprintf(opts.Stderr, "gombit dev: normalised the API address %q to %q; keep the %q form in .env — go run ./cmd/server and a deployed binary read GOMBIT_HTTP_ADDR verbatim\n",
 			opts.HTTPAddr, httpAddr, httpAddr)
 	}
 	opts.HTTPAddr = httpAddr
