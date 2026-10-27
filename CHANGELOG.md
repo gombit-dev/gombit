@@ -229,7 +229,11 @@ version.
   replaced as written — and only for keys a driver reads: a look-alike such as
   `pwd=` or `PASSWORD=` is hidden in the DSN itself and spelled no further,
   because a spelling for a value no driver sends rewrites words that hold no
-  secret.
+  secret. A PostgreSQL URI is read whole or not at all, so one `pgconn` refuses
+  — a query pair with no `=` or a second one, a percent escape it cannot
+  decode, a NUL — sends no password either, and none of its bytes is spelled
+  into a message; the mirror of its parser is pinned to `pgconn.ParseConfig`
+  itself, case by case.
   `config` tests compare the result against the password `mysql.ParseDSN` and
   `pgconn.ParseConfig` take from the same string and against the end of it,
   through both helpers, and fuzz both helpers against generated inputs with
