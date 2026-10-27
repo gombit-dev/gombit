@@ -646,7 +646,7 @@ func TestSanitizeErrorSpellsNoPasswordFromAURITheDriverRefuses(t *testing.T) {
 			dsn:  "postgres://h/db?password=status=failed",
 			text: "connection status=failed",
 		},
-		{
+		{ // #nosec G101 -- fake local test DSNs.
 			name: "a query pair with no equals sign",
 			dsn:  "postgres://app:Sup3r@h/db?password=Secret2&broken",
 			text: "login Secret2 as app with Sup3r failed",
@@ -656,7 +656,7 @@ func TestSanitizeErrorSpellsNoPasswordFromAURITheDriverRefuses(t *testing.T) {
 			dsn:  "postgres://app:Sup3r@h%zz/db?password=Secret2",
 			text: "password Secret2 rejected for host h%zz",
 		},
-		{
+		{ // #nosec G101 -- fake local test DSN.
 			name: "a database name with an interior space",
 			dsn:  "postgres://app:Sup3r@h/my db?password=Secret2",
 			text: "Secret2 opened my db as app with Sup3r",
@@ -989,9 +989,7 @@ func FuzzSanitizeErrorLeavesOtherTextAlone(f *testing.F) {
 		for _, r := range secretRanges(dsn) {
 			secrets = append(secrets, dsn[r.start:r.end])
 		}
-		for _, password := range driverPasswords(dsn) {
-			secrets = append(secrets, password)
-		}
+		secrets = append(secrets, driverPasswords(dsn)...)
 		for _, secret := range secrets {
 			if secret != "" && strings.Contains(text, secret) {
 				return
