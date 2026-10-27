@@ -118,8 +118,14 @@ func (s *Service) ResetPassword(ctx context.Context, raw, password string) (User
 // not activate a link to the password just replaced (activateToken needs
 // used_at NULL). Zero excepts none.
 func voidResetTokensTx(tx *gorm.DB, userID, except uint, now time.Time) error {
+	return voidTokensTx(tx, userID, PurposeResetPassword, except, now)
+}
+
+// voidTokensTx makes every unused token of purpose of the user but except
+// stop working, the pending ones included. Zero excepts none.
+func voidTokensTx(tx *gorm.DB, userID uint, purpose TokenPurpose, except uint, now time.Time) error {
 	return tx.Model(&OneTimeToken{}).
-		Where("user_id = ? AND purpose = ? AND used_at IS NULL AND id <> ?", userID, PurposeResetPassword, except).
+		Where("user_id = ? AND purpose = ? AND used_at IS NULL AND id <> ?", userID, purpose, except).
 		Update("used_at", now).Error
 }
 

@@ -63,6 +63,15 @@ const (
 	// AuditPasswordChangeFailed: a password change was refused because the
 	// current password given was wrong.
 	AuditPasswordChangeFailed AuditAction = "auth.password.change_failed"
+	// AuditEmailChangeRequested: a confirmation link was mailed to the new
+	// address a signed-in user asked for (the addresses are not recorded).
+	AuditEmailChangeRequested AuditAction = "auth.email.change_requested"
+	// AuditEmailChangeFailed: an email change was refused because the
+	// current password given was wrong.
+	AuditEmailChangeFailed AuditAction = "auth.email.change_failed"
+	// AuditEmailChanged: the user confirmed the new address; it is now their
+	// email, verified.
+	AuditEmailChanged AuditAction = "auth.email.changed"
 	// AuditGroupMemberAdded: a user was added to a group (Details "group").
 	AuditGroupMemberAdded AuditAction = "auth.group.member_added"
 	// AuditPermissionGranted: a permission was granted to a user or a group

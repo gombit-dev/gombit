@@ -43,6 +43,8 @@ All paths use `config.API.Prefix` (default `/api/v1`). D10 envelopes.
 | `POST` | `/auth/password/forgot` | Public. Body `{ "email" }`. Always 202 `{"data":{"accepted":true}}`; mails a reset link when the email is an account. See [Password reset](#password-reset). |
 | `POST` | `/auth/password/reset` | Public. Body `{ "token", "password" }`. Sets the new password and revokes every session of the user. |
 | `POST` | `/auth/password/change` | Bearer access JWT. Body `{ "current_password", "new_password", "keep_other_sessions"? }`. See [Password change](#password-change). |
+| `POST` | `/auth/email/change` | Bearer access JWT. Body `{ "current_password", "new_email" }`. Mails a confirmation link to the new address. See [Email change](#email-change). |
+| `POST` | `/auth/email/change/confirm` | Public. Body `{ "token" }` from that link; makes the new address the account's email, verified. |
 
 Passwords are hashed with bcrypt. Access JWTs are HS256, bound to the refresh
 row so logout, session revocation, and reuse of a rotated refresh token 401
@@ -302,6 +304,60 @@ curl -sX POST localhost:8080/api/v1/auth/password/change \
 
   None of those errors changes anything.
 
+## Email change
+
+A signed-in user asks for a new address with their current password; it
+becomes the account's email only once the link mailed to it is confirmed:
+
+```sh
+curl -sX POST localhost:8080/api/v1/auth/email/change \
+  -H "Authorization: Bearer $ACCESS" -H 'Content-Type: application/json' \
+  -d '{"current_password":"correct-horse","new_email":"ada@new.example.com"}'
+# 202 {"data":{"sent":true}}
+curl -sX POST localhost:8080/api/v1/auth/email/change/confirm \
+  -H 'Content-Type: application/json' -d '{"token":"<token from the message>"}'
+# {"data":{"id":1,"email":"ada@new.example.com","email_verified":true}}
+```
+
+- **The new address is not trusted before it is proven.** Asking changes
+  nothing: the account's email, its sign-in, and every link bound to it
+  stay the old address until the token mailed to the new one is posted.
+  Then the new address is the account's email, and verified (the token
+  proved it).
+- **Asking** requires the current password (a wrong one is a 422 on
+  `current_password` and an `auth.email.change_failed` audit event); a new
+  address that is no address, or the account's own, is a 422 on
+  `new_email`; one another account has is a 409 (as registration answers).
+  At most one message a minute (429 with `Retry-After`); a newer request
+  supersedes the earlier link. A request racing another change of the
+  account's email (one that committed while it ran) is a 409: it was for
+  the old address; ask again.
+- **Confirming** is public (the link may open signed out). The token works
+  once, expires as a verification link does
+  (`GOMBIT_AUTH_EMAIL_VERIFICATION_TTL`), and only while the account's
+  email is still the one the change was asked from: once it is another
+  (another change, an admin), the link is a 422 on `token`. An address
+  another account took between the request and the confirmation is a 409,
+  and nothing changes: the unique email decides who has it, so racing
+  changes cannot hijack an account.
+- **The old address** gets a security notification once the change is
+  confirmed (`msg.Kind` `email_changed`, through the app's `auth.Mailer`),
+  naming no new address. It is sent in the background, best effort: a
+  failure is logged and does not undo the change, and a slow mailer does
+  not hold up the confirmation (when the background work is busy, it is
+  sent with the confirmation instead). Links mailed to the old address (verification,
+  password reset) stop working.
+- **The link.** `GOMBIT_AUTH_EMAIL_CHANGE_URL` is the page the confirmation
+  links to, with `{token}` where the token goes. Unset, the message carries
+  the bare token. `msg.Kind` is `change_email`.
+- **Audit.** `auth.email.change_requested`, `auth.email.changed`, and
+  `auth.email.change_failed`; no address is recorded.
+- **From Go.** `svc.RequestEmailChange(ctx, userID, current, newEmail)` and
+  `svc.ConfirmEmailChange(ctx, token)` are the same flow. Errors:
+  `auth.ErrInvalidEmail`, `ErrEmailUnchanged`, `ErrWrongCurrentPassword`,
+  `ErrEmailTaken`, `ErrEmailChangedMeanwhile`, `ErrInvalidToken`,
+  `ErrUserNotFound`.
+
 ## Sessions
 
 A session is one sign-in: the chain of refresh tokens a login starts and each
@@ -423,6 +479,7 @@ The framework records every security-sensitive operation in
 | `auth.email.verified` | `POST /auth/verify-email`. |
 | `auth.password.reset_requested` / `auth.password.reset` | A reset message sent to an account; a password set with its token (`details.sessions_revoked`). |
 | `auth.password.changed` / `auth.password.change_failed` | A signed-in user's password change (`details.other_sessions_revoked`); one refused for a wrong current password. |
+| `auth.email.change_requested` / `auth.email.changed` / `auth.email.change_failed` | An email change asked (a link mailed to the new address), confirmed (the account's email is the new one), or refused for a wrong current password. No address is recorded. |
 | `auth.group.member_added` / `auth.permission.granted` | `auth.AddUserToGroup`, `GrantPermissionToGroup`, `GrantPermissionToUser`, when they changed something: granting what is already granted returns nil and records nothing. |
 | `admin.record.created` / `updated` / `deleted` | A write through the admin data plane (`target_type` the model's slug, `target_id` the record's key). Recorded where the write commits: a write that fails records nothing, and one that committed is recorded even if its response then fails. |
 

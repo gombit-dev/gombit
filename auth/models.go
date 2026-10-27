@@ -72,14 +72,18 @@ const (
 	PurposeVerifyEmail TokenPurpose = "verify_email"
 	// PurposeResetPassword lets the holder set a new password (AUTH-2).
 	PurposeResetPassword TokenPurpose = "reset_password"
+	// PurposeChangeEmail proves the user owns the new address they asked to
+	// change their email to (AUTH-4).
+	PurposeChangeEmail TokenPurpose = "change_email"
 )
 
 // OneTimeToken is a hashed, expiring, single-use token the account
 // lifecycle mails to a user: email verification (AUTH-1), and the reset and
 // change flows that build on it. The raw token exists only in the message;
-// the row keeps its SHA-256. Email is the address it was issued for: a token
-// proves ownership of that address only, so it stops working once the
-// user's email is another one.
+// the row keeps its SHA-256. Email is the address it was mailed to, the one
+// it proves; FromEmail is the user's email when it was issued (the same for
+// every purpose but an email change, whose token goes to the new address).
+// A token stops working once the user's email is no longer FromEmail.
 //
 // A token is pending until the message carrying it was delivered to the
 // Mailer (SentAt): a pending token does not work. Delivery activates it and
@@ -91,6 +95,7 @@ type OneTimeToken struct {
 	Purpose   TokenPurpose `gorm:"size:32;not null;index:idx_auth_one_time_tokens_user_purpose,priority:2"`
 	TokenHash string       `gorm:"uniqueIndex;size:64;not null"`
 	Email     string       `gorm:"size:255;not null"`
+	FromEmail string       `gorm:"size:255;not null;default:''"`
 	ExpiresAt time.Time    `gorm:"index;not null"`
 	// SentAt is when the message carrying the token was delivered to the
 	// Mailer; nil while it is pending.

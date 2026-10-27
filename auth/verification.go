@@ -39,7 +39,7 @@ func (s *Service) SendEmailVerification(ctx context.Context, user User) error {
 	return s.sendOneTimeToken(ctx, user, oneTimeFlow{
 		purpose: PurposeVerifyEmail,
 		ttl:     s.verificationTTL(),
-		check: func(u User) error {
+		check: func(_ *gorm.DB, u User) error {
 			if u.EmailVerified() {
 				return errAlreadyVerified
 			}

@@ -12,6 +12,28 @@ version.
 
 ### Added
 
+- [Email change](docs/auth.md#email-change) (AUTH-4), in both auth modes. A
+  signed-in user asks for a new address with their current password (`POST
+  /auth/email/change`: a 422 on `current_password` for a wrong one, a 409
+  for an address another account has, at most one message a minute), and a
+  single-use link goes to the new address; posting it (`POST
+  /auth/email/change/confirm`, public) makes the new address the account's
+  email, verified. Until then nothing changes: the new address is never
+  trusted before it is proven. A link works only while the account's email
+  is the one it was asked from, the unique email settles racing changes
+  (409 for the loser), links bound to the old address stop working, and the
+  old address gets a security notification. Audited
+  (`auth.email.change_requested` / `changed` / `change_failed`).
+  `GOMBIT_AUTH_EMAIL_CHANGE_URL` is the confirmation page.
+  `auth.Service.RequestEmailChange` / `ConfirmEmailChange` are the same flow
+  from Go.
+  - **Breaking (api):** the framework registers the two routes, their
+    `auth-request-email-change` / `auth-confirm-email-change` operation IDs
+    and the `AuthEmailChangeBody` / `AuthEmailChangeConfirmBody` /
+    `AuthEmailChangeRequested` schemas; an app that registers its own panics
+    at startup
+  ([#334](https://github.com/gombit-dev/gombit/issues/334)).
+
 - [Password change](docs/auth.md#password-change) (AUTH-3), in both auth
   modes. `POST /auth/password/change` sets a signed-in user's password
   given the current one (a wrong one is a 422 on `current_password`),
