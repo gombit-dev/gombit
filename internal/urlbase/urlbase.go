@@ -11,13 +11,15 @@ package urlbase
 import (
 	"net/url"
 	"strings"
+	"unicode/utf8"
 )
 
 // The canonical form of an API prefix (config.API.Prefix, GOMBIT_API_PREFIX):
 // '/' followed by segments of the characters a URI path segment holds,
 // separated by a single '/' and with no trailing '/'. That set is RFC 3986's
 // unreserved characters (letters, digits, - . _ ~) plus its sub-delimiters
-// except Gin's catch-all '*', plus '@', plus any non-ASCII rune.
+// except Gin's catch-all '*', plus '@', plus any non-ASCII rune of a value that
+// is valid UTF-8.
 //
 // That form is what the value has to be because generated resources and the
 // tutorial example concatenate prefix + "/widgets" into the routes they register
@@ -40,6 +42,11 @@ import (
 //   - The rest of what is refused — space and the US-ASCII set RFC 3986 keeps
 //     out of a URI (" < > [ ] | ^ `) — a client has to percent-encode to send at
 //     all, so the bytes on the wire are never the document's key as written.
+//   - Bytes that are not valid UTF-8 go the other way round: nothing rejects
+//     them on the wire, but encoding/json replaces each with U+FFFD when it
+//     writes the document, so the served key differs from the route Gin
+//     registered. Measured: /api/<ff>/widgets answers 200 while the document's
+//     /api/<U+FFFD>/widgets answers 404.
 //
 // What is left is accepted, including the prefixes an earlier draft of this rule
 // refused: /api/v1+beta, /@acme/api, /api;v=1, /api/v1,2, /api/(v1) and /café
@@ -80,6 +87,15 @@ func apiPrefix(prefix string) (canonical, problem string) {
 	canonical = strings.TrimRight(prefix, "/")
 	if canonical == "" {
 		return "", `must not be empty or only '/'`
+	}
+	// Checked before the runes, because the rune loop cannot see it: ranging over
+	// a string decodes each undecodable byte as U+FFFD, which is non-ASCII and
+	// would pass. Gin registers the raw bytes, while encoding/json writes the
+	// document with U+FFFD in them, so the served key is not the route — measured
+	// on a prefix of "/api/\xff": the route answered /api/<ff>/widgets with 200 and
+	// the document's /api/<U+FFFD>/widgets with 404.
+	if !utf8.ValidString(canonical) {
+		return "", "must be valid UTF-8: an undecodable byte reaches the document as U+FFFD"
 	}
 	for _, segment := range strings.Split(canonical[1:], "/") {
 		if segment == "." || segment == ".." {

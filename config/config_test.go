@@ -1311,6 +1311,7 @@ func TestPasswordResetConfig(t *testing.T) {
 const (
 	apiPrefixSegmentRule = `must be '/' followed by segments of URI path characters (letters, digits, - . _ ~ ! $ & ' ( ) + , ; = @, or non-ASCII) separated by a single '/'`
 	apiPrefixDotRule     = `must not contain a '.' or '..' segment`
+	apiPrefixUTF8Rule    = `must be valid UTF-8: an undecodable byte reaches the document as U+FFFD`
 )
 
 // The generated resources and the OpenAPI document concatenate the prefix with
@@ -1328,6 +1329,7 @@ func TestLoadNormalisesTheAPIPrefix(t *testing.T) {
 		{name: "a space inside", env: "/a b", wantErr: apiPrefixSegmentRule},
 		{name: "an empty segment", env: "/svc//api", wantErr: apiPrefixSegmentRule},
 		{name: "a parent segment", env: "/api/../v1", wantErr: apiPrefixDotRule},
+		{name: "a byte the decoder cannot read", env: "/api/\xff", wantErr: apiPrefixUTF8Rule},
 	}
 
 	for _, tt := range tests {
@@ -1387,6 +1389,8 @@ func TestValidateAPIPrefix(t *testing.T) {
 		{name: "a caret and a backtick", prefix: "/api^v1`", want: apiPrefixSegmentRule},
 		{name: "a control character", prefix: "/api\x01v1", want: apiPrefixSegmentRule},
 		{name: "a C1 control character", prefix: "/api\u0085v1", want: apiPrefixSegmentRule},
+		{name: "a byte that is not UTF-8", prefix: "/api/\xff", want: apiPrefixUTF8Rule},
+		{name: "a truncated sequence", prefix: "/caf\xc3", want: apiPrefixUTF8Rule},
 		{name: "a parent segment", prefix: "/api/../v1", want: apiPrefixDotRule},
 		{name: "a current segment", prefix: "/.", want: apiPrefixDotRule},
 	}

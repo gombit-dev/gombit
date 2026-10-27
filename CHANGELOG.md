@@ -208,11 +208,14 @@ version.
   on — `%`, `?`, `#` or a control character, which make the advertised path one
   no client can send as it is written; Gin's `:` and `{name}` parameters and its
   `*` catch-all, which answer paths the document never lists (a `*` or `\` in
-  mid-path panics at registration); and a space with the other US-ASCII
-  characters RFC 3986 keeps out of a URI), or one `Load` would have rewritten,
+  mid-path panics at registration); a space with the other US-ASCII
+  characters RFC 3986 keeps out of a URI; and bytes that are not valid UTF-8,
+  which Gin registers as written while `encoding/json` writes the document with
+  `U+FFFD` in their place), or one `Load` would have rewritten,
   such as a `/svc/` set on a `Config.API.Prefix` in code. Every prefix a route
   could already be built from still starts an app: the sub-delimiters `! $ & '
-  ( ) + , ; =`, `@`, and non-ASCII, so `/api/v1+beta`, `/@acme/api`, `/api;v=1`
+  ( ) + , ; =`, `@`, and non-ASCII that decodes as UTF-8, so `/api/v1+beta`,
+  `/@acme/api`, `/api;v=1`
   and `/café` are accepted
   ([#501](https://github.com/gombit-dev/gombit/issues/501)).
 
