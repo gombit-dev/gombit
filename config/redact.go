@@ -117,11 +117,189 @@ func secretRanges(dsn string) []secretRange {
 	if r, ok := mysqlPassword(dsn); ok {
 		out = append(out, r)
 	}
-	out = append(out, uriRanges(dsn)...)
+	uri := uriRanges(dsn)
 	if query := paramListStart(dsn); query >= 0 {
-		out = append(out, paramRanges(dsn, query+1)...)
+		uri = append(uri, paramRanges(dsn, query+1)...)
 	}
-	return out
+	// pgconn answers with a URI's settings or with none: the first component it
+	// refuses fails the whole parse, so a URI it rejects sends no password, from
+	// its userinfo or its query. The ranges still describe bytes an operator
+	// wrote a secret into — RedactDSN hides them — but no spelling of them is
+	// derived, because no driver ever puts one on the wire.
+	if isPostgresScheme(dsn) && pgURIRejected(dsn) {
+		for i := range uri {
+			uri[i].driver = false
+		}
+	}
+	return append(out, uri...)
+}
+
+// pgURIRejected reports whether pgconn's parseURLSettings refuses connString
+// outright, mirroring the reject conditions it reaches before it stores any
+// setting. It is mirrored by hand rather than asked of ParseConfig for the same
+// reason mysqlPassword asks ParseDSN and this does not: ParseConfig opens the
+// files a passfile or ssl setting names. TestPgURIRejectedAgreesWithTheDriver
+// pins the mirror to the parser, subtest by subtest, so a rule pgconn changes
+// cannot drift out of it silently. The rules followed here are pgconn's own, in
+// its order — a NUL anywhere; a userinfo, host list, port list or database name
+// whose percent-escapes it cannot decode; a malformed IPv6 host; and a query
+// pair with no '=' or with a second raw one, or a key or value it cannot
+// decode. Anything it accepts is read the way paramRanges and uriRanges already
+// describe.
+func pgURIRejected(connString string) bool {
+	if strings.IndexByte(connString, 0) >= 0 {
+		return true
+	}
+	rest, ok := strings.CutPrefix(connString, "postgresql://")
+	if !ok {
+		if rest, ok = strings.CutPrefix(connString, "postgres://"); !ok {
+			return true // pgconn reads no URI under another scheme.
+		}
+	}
+
+	// The userinfo runs to the first '@' provided no '/' comes before it, and
+	// both halves are decoded before they are stored.
+	if i := strings.IndexAny(rest, "@/"); i >= 0 && rest[i] == '@' {
+		user, password, hasPassword := strings.Cut(rest[:i], ":")
+		rest = rest[i+1:]
+		if user != "" && pgURIDecodeFails(user) {
+			return true
+		}
+		if hasPassword && password != "" && pgURIDecodeFails(password) {
+			return true
+		}
+	}
+
+	// The host and port lists are decoded as units, commas and all.
+	var hosts, ports strings.Builder
+	for {
+		if peekByte(rest) == '[' {
+			end := strings.IndexByte(rest, ']')
+			if end < 0 || end == 1 {
+				return true
+			}
+			hosts.WriteString(rest[1:end])
+			rest = rest[end+1:]
+			if c := peekByte(rest); c != 0 && c != ':' && c != '/' && c != '?' && c != ',' {
+				return true
+			}
+		} else {
+			i := strings.IndexAny(rest, ":/?,")
+			if i < 0 {
+				i = len(rest)
+			}
+			hosts.WriteString(rest[:i])
+			rest = rest[i:]
+		}
+		if peekByte(rest) == ':' {
+			rest = rest[1:]
+			i := strings.IndexAny(rest, "/?,")
+			if i < 0 {
+				i = len(rest)
+			}
+			ports.WriteString(rest[:i])
+			rest = rest[i:]
+		}
+		if peekByte(rest) != ',' {
+			break
+		}
+		rest = rest[1:]
+		hosts.WriteByte(',')
+		ports.WriteByte(',')
+	}
+	if hosts.Len() > 0 && pgURIDecodeFails(hosts.String()) {
+		return true
+	}
+	if ports.Len() > 0 && pgURIDecodeFails(ports.String()) {
+		return true
+	}
+
+	if peekByte(rest) == '/' {
+		database := rest[1:]
+		rest = ""
+		if i := strings.IndexByte(database, '?'); i >= 0 {
+			rest = database[i:]
+			database = database[:i]
+		}
+		if database != "" && pgURIDecodeFails(database) {
+			return true
+		}
+	}
+
+	if peekByte(rest) == '?' {
+		for params := rest[1:]; params != ""; {
+			pair := params
+			if i := strings.IndexByte(params, '&'); i >= 0 {
+				pair, params = params[:i], params[i+1:]
+			} else {
+				params = ""
+			}
+			key, value, found := strings.Cut(pair, "=")
+			if !found || strings.IndexByte(value, '=') >= 0 {
+				return true
+			}
+			if pgURIDecodeFails(key) || pgURIDecodeFails(value) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// pgURIDecodeFails reports what pgconn's uriDecode refuses in a URI component:
+// a '%' that is not followed by two hex digits, an escape decoding to a NUL, or
+// a space between two runs of bytes. Its leading and trailing spaces are not a
+// failure, and no other byte is.
+func pgURIDecodeFails(raw string) bool {
+	i := 0
+	for i < len(raw) && raw[i] == ' ' {
+		i++
+	}
+	for i < len(raw) && raw[i] != ' ' {
+		if raw[i] != '%' {
+			i++
+			continue
+		}
+		if i+2 >= len(raw) {
+			return true
+		}
+		hi, okHi := hexDigit(raw[i+1])
+		lo, okLo := hexDigit(raw[i+2])
+		if !okHi || !okLo {
+			return true
+		}
+		if hi<<4|lo == 0 {
+			return true
+		}
+		i += 3
+	}
+	for i < len(raw) && raw[i] == ' ' {
+		i++
+	}
+	return i < len(raw)
+}
+
+// hexDigit is pgconn's own: '0'-'9' and both cases of 'a'-'f' stand for a
+// nibble, and nothing else does.
+func hexDigit(c byte) (byte, bool) {
+	switch {
+	case c >= '0' && c <= '9':
+		return c - '0', true
+	case c >= 'a' && c <= 'f':
+		return c - 'a' + 10, true
+	case c >= 'A' && c <= 'F':
+		return c - 'A' + 10, true
+	}
+	return 0, false
+}
+
+// peekByte is pgconn's: the first byte of s, or 0 when s is empty — safe
+// because a literal NUL is refused before any of this runs.
+func peekByte(s string) byte {
+	if len(s) == 0 {
+		return 0
+	}
+	return s[0]
 }
 
 // driverKeywordRanges walks dsn token by token the way pgconn's

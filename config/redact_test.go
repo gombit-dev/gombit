@@ -630,6 +630,131 @@ func TestSanitizeErrorLeavesTextThatHoldsNoSpellingOfThePasswordAlone(t *testing
 	}
 }
 
+// pgconn reads a connection URI's settings or none of them: a pair with a second
+// raw '=' or no '=' at all, a bad percent escape, a decoded NUL, an interior space
+// — anywhere in the URI, userinfo, host, port or path included — fails
+// parseURLSettings and the settings map comes back empty. A password written in a
+// URI the driver refuses therefore reaches no wire, so no spelling of it may be
+// derived from it: the DSN still hides it fail-closed, and a message that happens
+// to hold those bytes is left alone.
+func TestSanitizeErrorSpellsNoPasswordFromAURITheDriverRefuses(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct{ name, dsn, text string }{
+		{
+			name: "a query pair with a second equals sign",
+			dsn:  "postgres://h/db?password=status=failed",
+			text: "connection status=failed",
+		},
+		{
+			name: "a query pair with no equals sign",
+			dsn:  "postgres://app:Sup3r@h/db?password=Secret2&broken",
+			text: "login Secret2 as app with Sup3r failed",
+		},
+		{
+			name: "a host with a bad percent escape",
+			dsn:  "postgres://app:Sup3r@h%zz/db?password=Secret2",
+			text: "password Secret2 rejected for host h%zz",
+		},
+		{
+			name: "a database name with an interior space",
+			dsn:  "postgres://app:Sup3r@h/my db?password=Secret2",
+			text: "Secret2 opened my db as app with Sup3r",
+		},
+		{
+			name: "a query value decoding to a NUL",
+			dsn:  "postgres://h/db?password=%00Sup3r",
+			text: "login %00Sup3r failed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := Default()
+			cfg.Database.DSN = tt.dsn // #nosec G101 -- fake local test DSN.
+
+			if got := SanitizeError(errors.New(tt.text), cfg); got != tt.text {
+				t.Fatalf("SanitizeError() = %q, want the message untouched: pgconn reads no setting out of %q", got, tt.dsn)
+			}
+			// Hidden in the dsn itself, however: the bytes are still a password
+			// as an operator wrote it, whatever the driver makes of the string.
+			redacted := RedactDSN(tt.dsn)
+			for _, secret := range []string{"Secret2", "Sup3r", "%00Sup3r"} {
+				if strings.Contains(redacted, secret) {
+					t.Fatalf("RedactDSN() = %q, still shows %q", redacted, secret)
+				}
+			}
+		})
+	}
+}
+
+// pgURICheckedDSNs are URIs from both sides of the line pgURIRejected draws:
+// every one refused by pgconn's own parser for a reason the mirror claims to
+// follow — a bad percent escape or an interior space in a component before the
+// query, a pair with no '=' or with a second raw one, a NUL — and every one
+// accepted with a secret in its userinfo or its query, so the check cannot pass
+// by calling everything rejected.
+var pgURICheckedDSNs = []string{
+	"postgres://h/db?password=status=failed",
+	"postgres://app:Sup3r@h/db?password=Secret2&broken",
+	"postgres://app:Sup3r@h%zz/db?password=Secret2",
+	"postgres://app:Sup3r@h/my db?password=Secret2",
+	"postgres://h/db?password=%00Sup3r",
+	"postgres://app:%zzSup3r@h/db?password=Secret2",
+	"postgres://[::1/db?password=Secret2",
+	"postgres://[]:5432/db?password=Secret2",
+	"postgres://h:5%zz0/db?password=Secret2",
+	"postgres://h/db?%zzpassword=Secret2",
+	"postgres://h/db?password=Secret2\x00",
+	"postgres://app:Sup3r@h:5432/db?password=Secret2&sslmode=disable",
+	"postgres://app:Sup3r@[::1]:5432/db?sslmode=disable",
+	"postgres://app:Sup3r@h1,h2:5432/db",
+	"postgresql://app@h/db?password=Sup3r%40tail",
+}
+
+// The mirror is pinned to the parser it mirrors: pgURIRejected answers what it
+// would have to answer for the redaction to derive a password's spellings from a
+// URI — the driver read a setting out of it, or it read none.
+func TestPgURIRejectedAgreesWithTheDriver(t *testing.T) {
+	t.Parallel()
+
+	for _, dsn := range pgURICheckedDSNs {
+		dsn := dsn
+		t.Run(dsn, func(t *testing.T) {
+			t.Parallel()
+			_, err := pgconn.ParseConfig(dsn) // #nosec G101 -- fake local test DSN.
+			// Only the URI's own grammar is in question: a config that fails
+			// for anything later is one pgconn read settings out of, and the
+			// corpus names no file a later step would open.
+			refused := err != nil && strings.Contains(err.Error(), "failed to parse as URL")
+			if got := pgURIRejected(dsn); got != refused {
+				t.Fatalf("pgURIRejected(%q) = %v, the driver says %v (err = %v)", dsn, got, refused, err)
+			}
+		})
+	}
+}
+
+// The URI that the driver corpus holds — every one a password is read from — is
+// one the mirror must not call rejected: that would hide nothing and rewrite a
+// message that holds no spelling of the secret.
+func TestPgURIRejectedAcceptsWhatTheDriversParse(t *testing.T) {
+	t.Parallel()
+
+	for _, dsn := range driverCheckedDSNs {
+		dsn := dsn
+		if !isPostgresScheme(dsn) {
+			continue
+		}
+		t.Run(dsn, func(t *testing.T) {
+			t.Parallel()
+			if pgURIRejected(dsn) {
+				t.Fatalf("pgURIRejected(%q) = true, but the drivers read a password from it", dsn)
+			}
+		})
+	}
+}
+
 func TestConfigRedactedHidesTheS3SecretKey(t *testing.T) {
 	t.Parallel()
 
