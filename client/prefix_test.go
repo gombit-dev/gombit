@@ -1,6 +1,7 @@
 package client
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -50,12 +51,12 @@ func TestServedRoutesAnswerEveryDocumentedPath(t *testing.T) {
 			registerSampleWidgetRoutes(app.API(), app.Config().API.Prefix)
 
 			widgets := tt.wantPrefix + "/widgets"
-			paths := app.API().OpenAPI().Paths
+			paths := servedDocument(t, app)
 			if _, ok := paths[widgets]; !ok {
 				t.Fatalf("document paths = %v, want %q", paths, widgets)
 			}
 			for path, item := range paths {
-				if item == nil || item.Get == nil {
+				if item.Get == nil {
 					continue
 				}
 				request := fillPathParams(path)
@@ -69,6 +70,33 @@ func TestServedRoutesAnswerEveryDocumentedPath(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A path as the served document lists it, keeping only enough of an operation to
+// tell a GET from the rest.
+type servedPathItem struct {
+	Get *json.RawMessage `json:"get"`
+}
+
+// servedDocument reads the OpenAPI document over the endpoint that serves it, so
+// the paths it returns are the keys a client actually reads: written by
+// encoding/json from the registered routes, which is where a prefix's bytes can
+// change on the way to the page advertising them.
+func servedDocument(t *testing.T, app *framework.App) map[string]servedPathItem {
+	t.Helper()
+
+	rec := httptest.NewRecorder()
+	app.Router().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/openapi.json", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /openapi.json = %d, want 200", rec.Code)
+	}
+	var doc struct {
+		Paths map[string]servedPathItem `json:"paths"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &doc); err != nil {
+		t.Fatalf("the served document does not decode: %v", err)
+	}
+	return doc.Paths
 }
 
 // fillPathParams substitutes the sample widget's id for every {parameter} in a
@@ -109,6 +137,7 @@ func TestNewRefusesAPrefixNoRouteAnswers(t *testing.T) {
 		{prefix: "/api/v1#x", why: "the fragment never reaches the server"},
 		{prefix: "/api/v 1", why: "a client has to encode a space to send it"},
 		{prefix: "/api/v1\x01", why: "net/url refuses to parse the key"},
+		{prefix: "/api/\xff", why: "the route keeps the byte while the served document writes U+FFFD"},
 		{prefix: "/api/v1+beta", accepted: true, why: "registers, advertises and answers it"},
 		{prefix: "/café", accepted: true, why: "the same, through UTF-8 percent-encoding"},
 	}
