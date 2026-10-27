@@ -1183,4 +1183,6 @@ releases:
           (`/svc//api`); and a `.` or `..` segment, which Gin collapses into a
           prefix no route is registered under while the document advertises the
           path it was given.
+        config:
+          - {var: GOMBIT_API_PREFIX, change: refused}
         refs: [501]
