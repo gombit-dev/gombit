@@ -199,10 +199,13 @@ version.
   logic read `debug.BuildInfo.Main` unconditionally, which is the framework in
   its own binary but the *app* in a generated one: an app built from a checkout
   printed `dev` while its `go.mod` required
-  `github.com/gombit-dev/gombit v0.6.0`, an app tagged `v3.4.5` printed
-  `v3.4.5`, and `gombit new` from that binary pinned the framework to the app's
-  version — `v0.0.0` with a warning for a checkout, or, worse, the app's own
-  pseudo-version silently, since one is a valid module version. When the main
+  `github.com/gombit-dev/gombit v0.6.0`, an app tagged `v1.4.5` printed
+  `v1.4.5` and `gombit new` from that binary pinned the framework to that
+  release — and an app's own pseudo-version pinned it silently, since one is a
+  valid module version. A `v2` or later app tag printed the app's version too,
+  but never pinned it: `ResolveFrameworkVersion` refuses a major the
+  framework's module path could not carry, so `gombit new` warned and wrote
+  `v0.0.0`, as it did for a checkout. When the main
   module is not `github.com/gombit-dev/gombit`, the framework's entry in
   `BuildInfo.Deps` is used instead. A replace by a local checkout or by a fork
   names no framework release, so those still report `dev` — the same rule
