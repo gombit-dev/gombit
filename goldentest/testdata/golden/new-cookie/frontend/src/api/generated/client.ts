@@ -33,16 +33,24 @@ export function createGombitClient(options: GombitClientOptions) {
   return client;
 }
 
+/**
+ * unwrap turns one openapi-fetch result into its success value or a
+ * ContractError. A response whose contract declares no body — 204, HEAD, a
+ * zero-length 2xx — has no success value, so it resolves undefined and the
+ * signature says so; a caller whose operation does promise a body narrows the
+ * undefined away where it can see the field it expects.
+ */
 export async function unwrap<T>(result: {
   data?: T;
   error?: unknown;
   response: Response;
-}): Promise<T> {
+}): Promise<T | undefined> {
   if (result.error !== undefined || !result.response.ok) {
     throw ContractError.fromResponse(result.response, result.error);
   }
-  if (result.data === undefined) {
-    throw new ContractError("empty_response", "Empty response", result.response.status);
-  }
+  // The success variant is whatever openapi-fetch parsed. A 204, a HEAD and a
+  // zero-length 2xx all report data: undefined, and the status alone cannot
+  // tell those apart from a body that was promised and never sent, so the
+  // wrapper returns what the client parsed instead of second-guessing it.
   return result.data;
 }

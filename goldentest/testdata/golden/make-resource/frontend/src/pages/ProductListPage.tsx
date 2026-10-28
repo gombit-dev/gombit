@@ -22,7 +22,7 @@ export function ProductListPage() {
         if (cancelled) {
           return;
         }
-        const data = Array.isArray(listed.data) ? listed.data : [];
+        const data = listed && Array.isArray(listed.data) ? listed.data : [];
         setRows(data);
         setStatus(data.length === 0 ? "No products yet." : "");
       } catch (err: unknown) {

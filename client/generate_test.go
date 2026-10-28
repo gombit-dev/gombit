@@ -421,6 +421,51 @@ export async function createWidget() {
     body: { name: "Second widget", color: "green" },
   }));
 }
+
+// unwrap's declared type is part of the contract, and tsc is the only harness
+// that can read it: the runtime harnesses in client/testdata run the same
+// bytes and see the same undefined either way.
+type Exact<A, B> = [A] extends [B]
+  ? [B] extends [A]
+    ? true
+    : false
+  : false;
+
+// A response whose contract declares no body has a data type no value
+// inhabits, so the success value unwrap resolves is undefined, and nothing
+// else.
+declare const noContentResult: {
+  data: never;
+  error?: never;
+  response: Response;
+};
+async function resolvedNoContent() {
+  return unwrap(noContentResult);
+}
+const noContentIsUndefined: Exact<
+  Awaited<ReturnType<typeof resolvedNoContent>>,
+  undefined
+> = true;
+void noContentIsUndefined;
+
+export async function bodyWasWithheld() {
+  const result = await unwrap<{ id: number }>({
+    response: new Response(null, { status: 200 }),
+  });
+  // @ts-expect-error — unwrap cannot hand back a data type it never received.
+  const promised: { id: number } = result;
+  void promised;
+}
+
+// The row a scaffolded list page reads off the result, typechecked against
+// the client this generator emits rather than a copy of its types: narrowing
+// the undefined is what leaves the array usable.
+export async function listWidgetRows() {
+  const listed = await unwrap(await client.GET("/api/v1/widgets"));
+  const rows: { color?: string; id: string; name: string }[] =
+    listed && Array.isArray(listed.data) ? listed.data : [];
+  return rows;
+}
 `)
 
 	install := exec.Command("npm", "install", "--no-fund", "--no-audit")
