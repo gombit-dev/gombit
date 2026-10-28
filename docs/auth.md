@@ -272,7 +272,7 @@ curl -sX POST localhost:8080/api/v1/auth/password/change \
   its cookies (its session is the one kept), and the route sits behind CSRF
   like every unsafe request.
 - **Reset links** mailed before the change stop working: one must not undo
-  it.
+  it. So do email change links, asked with the old password.
 - **Races.** The change is written under the user's row lock, and only if
   the stored password is still the one checked: a reset or another change
   that commits in between wins, and this one is a 409 (try again with the
@@ -329,9 +329,16 @@ curl -sX POST localhost:8080/api/v1/auth/email/change/confirm \
   address that is no address, or the account's own, is a 422 on
   `new_email`; one another account has is a 409 (as registration answers).
   At most one message a minute (429 with `Retry-After`); a newer request
-  supersedes the earlier link. A request racing another change of the
-  account's email (one that committed while it ran) is a 409: it was for
-  the old address; ask again.
+  supersedes the earlier link. The address is checked by the service as
+  the route's schema checks it (a bare address of at most 255 characters),
+  so a Go caller gets the same answer. A request racing another change of
+  the account's email, or of its password (a reset, a password change,
+  committed while it ran), is a 409: the old password authorizes nothing
+  after a reset; ask again.
+- **A reset or a password change** voids the outstanding email change
+  links, the pending ones too: a link asked with the old password, by
+  whoever knew it, dies with it, so recovering the account also stops a
+  change it had asked for.
 - **Confirming** is public (the link may open signed out). The token works
   once, expires as a verification link does
   (`GOMBIT_AUTH_EMAIL_VERIFICATION_TTL`), and only while the account's
@@ -345,8 +352,11 @@ curl -sX POST localhost:8080/api/v1/auth/email/change/confirm \
   naming no new address. It is sent in the background, best effort: a
   failure is logged and does not undo the change, and a slow mailer does
   not hold up the confirmation (when the background work is busy, it is
-  sent with the confirmation instead). Links mailed to the old address (verification,
-  password reset) stop working.
+  sent with the confirmation instead).
+- **Every other link stops for good.** Confirming voids every unused
+  one-time link of the user, whatever its purpose (verification, password
+  reset, other email changes), pending ones included. None comes back if
+  the email is later changed back to the old address.
 - **The link.** `GOMBIT_AUTH_EMAIL_CHANGE_URL` is the page the confirmation
   links to, with `{token}` where the token goes. Unset, the message carries
   the bare token. `msg.Kind` is `change_email`.

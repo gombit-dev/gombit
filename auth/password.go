@@ -58,7 +58,8 @@ func (s *Service) RequestPasswordReset(ctx context.Context, email string) error 
 // password to password, hashed as registration hashes it (the Hasher's
 // limits apply). It returns ErrInvalidToken for a token that is unknown,
 // expired, used, superseded, never delivered, or issued for an address the
-// user no longer has. The user's other reset tokens stop working, and
+// user no longer has. The user's other reset tokens and their email change
+// links (asked with the old password) stop working, and
 // unless AuthConfig.PasswordResetKeepSessions, so do all of the user's
 // sessions and refresh tokens, in the same transaction.
 func (s *Service) ResetPassword(ctx context.Context, raw, password string) (User, error) {
@@ -94,7 +95,7 @@ func (s *Service) ResetPassword(ctx context.Context, raw, password string) (User
 		if err := tx.Model(&User{}).Where("id = ?", locked.ID).Update("password_hash", hash).Error; err != nil {
 			return err
 		}
-		if err := voidResetTokensTx(tx, locked.ID, token.ID, now); err != nil {
+		if err := voidPasswordBoundTokensTx(tx, locked.ID, token.ID, now); err != nil {
 			return err
 		}
 		if revoke {
@@ -113,20 +114,24 @@ func (s *Service) ResetPassword(ctx context.Context, raw, password string) (User
 	return user, nil
 }
 
-// voidResetTokensTx makes every unused password reset token of the user but
-// except stop working, the pending ones too: a message still being sent must
-// not activate a link to the password just replaced (activateToken needs
-// used_at NULL). Zero excepts none.
-func voidResetTokensTx(tx *gorm.DB, userID, except uint, now time.Time) error {
-	return voidTokensTx(tx, userID, PurposeResetPassword, except, now)
+// voidPasswordBoundTokensTx makes the links a password change outdates
+// stop working: the reset links, and the email change links, asked with
+// the old password (they must not outlive a reset or a change). The
+// pending ones too: a message still being sent must not activate a link
+// the change voided (activateToken needs used_at NULL). Zero excepts none.
+func voidPasswordBoundTokensTx(tx *gorm.DB, userID, except uint, now time.Time) error {
+	return voidTokensTx(tx, userID, except, now, PurposeResetPassword, PurposeChangeEmail)
 }
 
-// voidTokensTx makes every unused token of purpose of the user but except
-// stop working, the pending ones included. Zero excepts none.
-func voidTokensTx(tx *gorm.DB, userID uint, purpose TokenPurpose, except uint, now time.Time) error {
-	return tx.Model(&OneTimeToken{}).
-		Where("user_id = ? AND purpose = ? AND used_at IS NULL AND id <> ?", userID, purpose, except).
-		Update("used_at", now).Error
+// voidTokensTx makes every unused token of the user but except stop
+// working, the pending ones included: those of purposes, or of every
+// purpose when none is given. Zero excepts none.
+func voidTokensTx(tx *gorm.DB, userID, except uint, now time.Time, purposes ...TokenPurpose) error {
+	q := tx.Model(&OneTimeToken{}).Where("user_id = ? AND used_at IS NULL AND id <> ?", userID, except)
+	if len(purposes) > 0 {
+		q = q.Where("purpose IN ?", purposes)
+	}
+	return q.Update("used_at", now).Error
 }
 
 // resetTokenMayWork reports whether raw names a delivered, unused,

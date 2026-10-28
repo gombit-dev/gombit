@@ -21,7 +21,10 @@ version.
   email, verified. Until then nothing changes: the new address is never
   trusted before it is proven. A link works only while the account's email
   is the one it was asked from, the unique email settles racing changes
-  (409 for the loser), links bound to the old address stop working, and the
+  (409 for the loser), a request racing a password reset or change is
+  refused and a reset or change voids outstanding change links, confirming
+  stops every other link of the user for good (an email changed back
+  revives none), the service validates the address as the route does, and the
   old address gets a security notification. Audited
   (`auth.email.change_requested` / `changed` / `change_failed`).
   `GOMBIT_AUTH_EMAIL_CHANGE_URL` is the confirmation page.

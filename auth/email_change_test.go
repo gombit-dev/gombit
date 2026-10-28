@@ -150,6 +150,87 @@ func runEmailChangeService(t *testing.T, db *database.DB) {
 		}
 	})
 
+	t.Run("a request racing a password change is refused", func(t *testing.T) {
+		e := newVerificationEnv(t, db)
+		user, _ := e.register(t, "change-email-reset-race")
+		// A reset commits after the request checked the old password, before
+		// its lock: the old password must not authorize anything after it.
+		auth.SetHasher(e.svc, hookHasher{Hasher: auth.HasherOf(e.svc), before: func() {
+			if err := e.db.Model(&auth.User{}).Where("id = ?", user.ID).Update("password_hash", "$2a$04$replacedbyaresetmeanwhile....................").Error; err != nil {
+				t.Error(err)
+			}
+		}})
+		newEmail := fresh("reset-race")
+		if err := e.svc.RequestEmailChange(ctx, user.ID, testPassword, newEmail); !errors.Is(err, auth.ErrPasswordChanged) {
+			t.Fatalf("a request racing a reset = %v, want ErrPasswordChanged", err)
+		}
+		if _, ok := e.mail.Last(newEmail); ok {
+			t.Fatal("a link went out on the old password")
+		}
+	})
+
+	t.Run("a password reset or change voids the change links", func(t *testing.T) {
+		e := newVerificationEnv(t, db)
+		user, _ := e.register(t, "change-email-recovered")
+		// Asked with the password a change replaces: the link dies with it.
+		changed := e.changeToken(t, user, fresh("before-change"))
+		if _, err := e.svc.ChangePassword(ctx, user.ID, testPassword, "a-changed-horse", auth.PasswordChange{}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := e.svc.ConfirmEmailChange(ctx, changed); !errors.Is(err, auth.ErrInvalidToken) {
+			t.Fatalf("a change link after a password change = %v, want ErrInvalidToken", err)
+		}
+		// Asked before a reset (the account recovered from whoever asked):
+		// the link dies with the reset.
+		e.clock.now = e.clock.now.Add(2 * time.Minute)
+		target := fresh("before-reset")
+		if err := e.svc.RequestEmailChange(ctx, user.ID, "a-changed-horse", target); err != nil {
+			t.Fatal(err)
+		}
+		msg, _ := e.mail.Last(target)
+		if _, err := e.svc.ResetPassword(ctx, e.resetToken(t, user), "a-recovered-horse"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := e.svc.ConfirmEmailChange(ctx, msg.Token); !errors.Is(err, auth.ErrInvalidToken) {
+			t.Fatalf("a change link after a reset = %v, want ErrInvalidToken", err)
+		}
+		if got := e.reload(t, user.ID); got.Email != user.Email {
+			t.Fatalf("the account's email = %q, want %q", got.Email, user.Email)
+		}
+	})
+
+	t.Run("links stay stopped when the email changes back", func(t *testing.T) {
+		e := newVerificationEnv(t, db)
+		user, verify := e.register(t, "change-email-back")
+		reset := e.resetToken(t, user)
+		if _, err := e.svc.ConfirmEmailChange(ctx, e.changeToken(t, user, fresh("away"))); err != nil {
+			t.Fatal(err)
+		}
+		// A -> B -> A: the account's email is A again.
+		e.clock.now = e.clock.now.Add(2 * time.Minute)
+		if err := e.svc.RequestEmailChange(ctx, user.ID, testPassword, user.Email); err != nil {
+			t.Fatal(err)
+		}
+		back, ok := e.mail.Last(user.Email)
+		if !ok || back.Kind != auth.MessageChangeEmail {
+			t.Fatalf("no change link back to %s (last %+v)", user.Email, back)
+		}
+		if _, err := e.svc.ConfirmEmailChange(ctx, back.Token); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := e.svc.ResetPassword(ctx, reset, "a-revived-horse"); !errors.Is(err, auth.ErrInvalidToken) {
+			t.Fatalf("a reset link from before A -> B -> A = %v, want ErrInvalidToken", err)
+		}
+		if _, err := e.svc.VerifyEmail(ctx, verify); !errors.Is(err, auth.ErrInvalidToken) {
+			t.Fatalf("a verification link from before A -> B -> A = %v, want ErrInvalidToken", err)
+		}
+		var open int64
+		e.db.Model(&auth.OneTimeToken{}).Where("user_id = ? AND used_at IS NULL", user.ID).Count(&open)
+		if open != 0 {
+			t.Fatalf("unused tokens after the change back = %d, want 0", open)
+		}
+	})
+
 	t.Run("the current password is required", func(t *testing.T) {
 		e := newVerificationEnv(t, db)
 		user, _ := e.register(t, "change-email-wrong")
@@ -165,8 +246,15 @@ func runEmailChangeService(t *testing.T, db *database.DB) {
 	t.Run("refused: no address, the same address", func(t *testing.T) {
 		e := newVerificationEnv(t, db)
 		user, _ := e.register(t, "change-email-bad")
-		if err := e.svc.RequestEmailChange(ctx, user.ID, testPassword, "not-an-address"); !errors.Is(err, auth.ErrInvalidEmail) {
-			t.Fatalf("no address = %v", err)
+		// The service checks what the route's schema does: a bare address
+		// that fits the column, for a Go caller too.
+		for _, bad := range []string{"not-an-address", "@", "ada@", "@example.com", "ada@b@example.com", "ada lovelace@example.com", "Ada <ada@example.com>", strings.Repeat("a", 244) + "@example.com"} {
+			if err := e.svc.RequestEmailChange(ctx, user.ID, testPassword, bad); !errors.Is(err, auth.ErrInvalidEmail) {
+				t.Fatalf("RequestEmailChange(%q) = %v, want ErrInvalidEmail", bad, err)
+			}
+		}
+		if len(e.mail.Messages()) != 1 {
+			t.Fatalf("messages after refused requests = %d, want the registration's only", len(e.mail.Messages()))
 		}
 		if err := e.svc.RequestEmailChange(ctx, user.ID, testPassword, strings.ToUpper(user.Email)); !errors.Is(err, auth.ErrEmailUnchanged) {
 			t.Fatalf("the same address = %v", err)

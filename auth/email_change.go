@@ -45,16 +45,19 @@ var ErrEmailChangedMeanwhile = errEmailChangedMeanwhile
 // RequestEmailChange mails a confirmation link to newEmail, the address
 // userID asks to change their email to, once current is their password. The
 // account's email does not change here; ConfirmEmailChange does it, with the
-// link. It returns ErrInvalidEmail or ErrEmailUnchanged for a new address
-// that is no address or the account's own, ErrWrongCurrentPassword
+// link. It returns ErrInvalidEmail for a new address that is not a bare
+// address of at most 255 characters (what the route's schema accepts),
+// ErrEmailUnchanged for the account's own, ErrWrongCurrentPassword
 // (audited), ErrEmailTaken when another account has the address,
-// ErrEmailChangedMeanwhile when another change committed meanwhile, the
+// ErrPasswordChanged when a reset or a password change committed after
+// current was checked (the old password authorizes nothing after it),
+// ErrEmailChangedMeanwhile when another email change did, the
 // resend wait (one message a minute) or the Mailer's error, and
 // ErrUserNotFound for an unknown userID. A newer request supersedes the
 // earlier link: only the latest delivered one works.
 func (s *Service) RequestEmailChange(ctx context.Context, userID uint, current, newEmail string) error {
 	newEmail = normalizeEmail(newEmail)
-	if newEmail == "" || !strings.Contains(newEmail, "@") {
+	if !validEmail(newEmail) {
 		return errInvalidEmail
 	}
 	var user User
@@ -76,8 +79,13 @@ func (s *Service) RequestEmailChange(ctx context.Context, userID uint, current, 
 		ttl:     s.verificationTTL(),
 		to:      newEmail,
 		check: func(tx *gorm.DB, locked User) error {
-			// Under the user's lock: the request was for this email; another
-			// change that committed meanwhile makes it stale.
+			// Under the user's lock: the request was for this email, and
+			// authorized by this password. A change of either that
+			// committed meanwhile makes it stale: a reset must not be
+			// outlived by a request the old password authorized.
+			if locked.PasswordHash != user.PasswordHash {
+				return errPasswordChanged
+			}
 			if locked.Email != user.Email {
 				return errEmailChangedMeanwhile
 			}
@@ -105,10 +113,11 @@ func (s *Service) RequestEmailChange(ctx context.Context, userID uint, current, 
 // from: once that changed (another change, an admin), the token is
 // ErrInvalidToken, like an unknown, expired, used or superseded one. An
 // address another account took meanwhile is ErrEmailTaken (first come,
-// first served: the unique email decides), and changes nothing. The other
-// email change links stop working; links bound to the old address
-// (verification, password reset) stop too, since the email they were
-// issued for is gone. The old address is told, best effort.
+// first served: the unique email decides), and changes nothing. Every
+// other one-time link of the user stops working for good, whatever its
+// purpose (verification, password reset, other email changes), so none
+// comes back if the email changes back. The old address is told, best
+// effort.
 func (s *Service) ConfirmEmailChange(ctx context.Context, raw string) (User, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -130,7 +139,10 @@ func (s *Service) ConfirmEmailChange(ctx context.Context, raw string) (User, err
 		if err != nil {
 			return err
 		}
-		if err := voidTokensTx(tx, locked.ID, PurposeChangeEmail, token.ID, now); err != nil {
+		// Every other link of the user stops for good, whatever its purpose,
+		// the pending ones too: the FromEmail binding alone would revive one
+		// if the email changed back.
+		if err := voidTokensTx(tx, locked.ID, token.ID, now); err != nil {
 			return err
 		}
 		locked.Email, locked.EmailVerifiedAt, locked.VerifiedEmail = token.Email, &now, token.Email
