@@ -452,7 +452,7 @@ func checkClient(ctx context.Context, o checkOptions) checkLayer {
 	var out bytes.Buffer
 	err = checkClientDrift(ctx, client.DriftOptions{
 		WorkDir: o.dir.WorkDir, SpecPath: client.DefaultSpecPath, OutDir: client.DefaultOutDir,
-		SpecBytes: spec, Stdout: &out, Stderr: &out,
+		SpecBytes: spec, APIPrefix: liveAPIPrefix("", o.dir.WorkDir), Stdout: &out, Stderr: &out,
 	})
 	switch {
 	case errors.Is(err, client.ErrDrift):

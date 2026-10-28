@@ -46,6 +46,61 @@ func TestClientCheckURLFetchesLiveSpecInsteadOfSampleApp(t *testing.T) {
 	}
 }
 
+// The prefix the typed client keys are rewritten from is the application's own
+// configuration: --api-prefix for a caller that passes one, else what the
+// project directory's .env says (#506). Nothing here runs openapi-typescript,
+// so it needs no Node.js.
+func TestLiveAPIPrefixComesFromTheApplicationConfiguration(t *testing.T) {
+	dir := t.TempDir()
+	// #nosec G304 -- test-controlled path under t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("GOMBIT_API_PREFIX=/svc\n"), 0o600); err != nil {
+		t.Fatalf("write .env: %v", err)
+	}
+	if got := liveAPIPrefix("", dir); got != "/svc" {
+		t.Fatalf(`liveAPIPrefix("") = %q, want /svc from the project's .env`, got)
+	}
+	if got := liveAPIPrefix("/flag", dir); got != "/flag" {
+		t.Fatalf(`liveAPIPrefix("/flag") = %q, want the flag to win over .env`, got)
+	}
+}
+
+// Configuration that cannot be read is reported as none rather than as
+// D8's default: the generator then infers the prefix from the document, which
+// is what it did before the prefix became an input.
+func TestLiveAPIPrefixIsUnsetWhenTheConfigurationIsInvalid(t *testing.T) {
+	dir := t.TempDir()
+	// #nosec G304 -- test-controlled path under t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("GOMBIT_HTTP_REQUEST_TIMEOUT=not-a-duration\n"), 0o600); err != nil {
+		t.Fatalf("write .env: %v", err)
+	}
+	if got := liveAPIPrefix("", dir); got != "" {
+		t.Fatalf("liveAPIPrefix() = %q, want the empty string for unreadable configuration", got)
+	}
+}
+
+func TestClientCommandsTakeAnAPIPrefixFlag(t *testing.T) {
+	tests := []struct {
+		name string
+		cmd  []string
+	}{
+		{name: "generate", cmd: []string{"client", "generate", "--help"}},
+		{name: "check", cmd: []string{"client", "check", "--help"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stdout := new(bytes.Buffer)
+			stderr := new(bytes.Buffer)
+			if err := ExecuteRoot(context.Background(), NewRoot(stdout, stderr), tt.cmd); err != nil {
+				t.Fatalf("gombit %v: %v", tt.cmd, err)
+			}
+			out := stdout.String() + stderr.String()
+			if !strings.Contains(out, "--api-prefix") {
+				t.Fatalf("gombit %s --help has no --api-prefix flag:\n%s", tt.name, out)
+			}
+		})
+	}
+}
+
 func TestClientCheckDefaultsMatchGenerateNotExamplesClient(t *testing.T) {
 	stdout := new(bytes.Buffer)
 	stderr := new(bytes.Buffer)

@@ -26,9 +26,15 @@ const (
 
 // Options configures TypeScript client generation.
 type Options struct {
-	WorkDir   string
-	SpecPath  string
-	OutDir    string
+	WorkDir  string
+	SpecPath string
+	OutDir   string
+	// APIPrefix is the live prefix the document's paths are mounted under,
+	// which the application's GOMBIT_API_PREFIX decides. Left empty, it is
+	// inferred from the document, and that is a guess no path list can settle
+	// (see rewriteSpecPathsForTypedClient); a caller that knows the
+	// application's configuration passes it (#506).
+	APIPrefix string
 	DryRun    bool
 	Force     bool
 	NPXBinary string
@@ -77,9 +83,11 @@ func Generate(ctx context.Context, opts Options) error {
 	}
 	// Normalize path keys to TypedAPIPrefix (/api/v1) for openapi-typescript.
 	// Scaffolded pages call client.GET("/api/v1/..."); rewriteAPIRequest maps
-	// those keys to the live prefix on the wire. The on-disk spec is unchanged
-	// so examples/client contract-drift still compares live Huma paths.
-	spec, err = rewriteSpecPathsForTypedClient(spec)
+	// those keys to the live prefix on the wire. The live prefix is the app's
+	// configuration (opts.APIPrefix), not something to read off its paths; the
+	// on-disk spec is unchanged so examples/client contract-drift still
+	// compares live Huma paths.
+	spec, err = rewriteSpecPathsForTypedClient(spec, opts.APIPrefix)
 	if err != nil {
 		return err
 	}

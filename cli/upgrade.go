@@ -557,7 +557,10 @@ is always unchecked); --strict fails on it too. A CI gate runs it with
 			npx, _ := flags.GetString("npx")
 			asJSON, _ := flags.GetBool("json")
 			strict, _ := flags.GetBool("strict")
-			opts := contractcheck.Options{SpecPath: spec, OutDir: out, Write: write, NPXBinary: npx, Stderr: stderr}
+			opts := contractcheck.Options{
+				SpecPath: spec, OutDir: out, Write: write, NPXBinary: npx, Stderr: stderr,
+				APIPrefix: liveAPIPrefix("", dir),
+			}
 			if rawURL != "" {
 				live, err := fetchOpenAPI(cmd.Context(), rawURL)
 				if err != nil {
