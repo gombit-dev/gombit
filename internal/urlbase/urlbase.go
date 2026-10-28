@@ -1,15 +1,131 @@
-// Package urlbase holds the rules for the URLs storage serves objects
-// under, for the packages that must apply them without depending on each
-// other: config validates GOMBIT_STORAGE_LOCAL_URL and
-// GOMBIT_STORAGE_S3_PUBLIC_URL with the same functions storage/presign
-// and storage/s3 use, so a configuration that validates is one they
-// accept.
+// Package urlbase holds the rules for the URLs an app is served under, for
+// the packages that must apply them without depending on each other: config
+// validates GOMBIT_STORAGE_LOCAL_URL and GOMBIT_STORAGE_S3_PUBLIC_URL with
+// the same functions storage/presign and storage/s3 use, so a configuration
+// that validates is one they accept, and it normalises and validates
+// GOMBIT_API_PREFIX with the two APIPrefix functions below, so the prefix a
+// loaded configuration stores is the form its routes, its OpenAPI document
+// and the client generated from that document are all built from.
 package urlbase
 
 import (
 	"net/url"
 	"strings"
+	"unicode/utf8"
 )
+
+// The canonical form of an API prefix (config.API.Prefix, GOMBIT_API_PREFIX):
+// '/' followed by segments of the characters a URI path segment holds,
+// separated by a single '/' and with no trailing '/'. That set is RFC 3986's
+// unreserved characters (letters, digits, - . _ ~) plus its sub-delimiters
+// except Gin's catch-all '*', plus '@', plus any non-ASCII rune of a value that
+// is valid UTF-8.
+//
+// That form is what the value has to be because generated resources and the
+// tutorial example concatenate prefix + "/widgets" into the routes they register
+// and into the OpenAPI document, and the two agree only for a prefix in it:
+//
+//   - A prefix ending in '/' serves /svc/widgets and advertises /svc//widgets,
+//     so every client built from that document asks for a URL that answers 404.
+//   - Gin builds a route with path.Join, so a '.' or '..' segment goes the same
+//     way: the app registers the collapsed /v1/widgets while the document lists
+//     the uncollapsed /api/../v1/widgets.
+//   - ':' and '{name}' are Gin's parameter syntax, so such a prefix registers a
+//     route that answers paths the document never lists: measured against this
+//     module's gin v1.12.0, both /api/:v1/widgets and /api/{v1}/widgets serve
+//     /api/zz/widgets. '*' is Gin's catch-all, which it refuses unless the path
+//     ends with it, and it reads a '\' as a malformed escape; either one panics
+//     at registration.
+//   - '%', '?', '#', and a control character give the document a path key no
+//     client can parse as a URL, and '?' and '#' cut the path short on the way
+//     to the server, so the route the document lists answers 404.
+//   - The rest of what is refused is a policy line rather than a failure
+//     measured here: space and the US-ASCII characters RFC 3986 keeps out of a
+//     URI (" < > [ ] | ^ `) are not path characters, so a prefix held to what a
+//     path segment is defined to hold does not admit them either.
+//   - Bytes that are not valid UTF-8 go the other way round: nothing rejects
+//     them on the wire, but encoding/json replaces each with U+FFFD when it
+//     writes the document, so the served key differs from the route Gin
+//     registered. Measured: /api/<ff>/widgets answers 200 while the document's
+//     /api/<U+FFFD>/widgets answers 404.
+//
+// What is left is accepted, including the prefixes an earlier draft of this rule
+// refused: /api/v1+beta, /@acme/api, /api;v=1, /api/v1,2, /api/(v1) and /café
+// each register, advertise that same path key, and answer it.
+
+// CanonicalAPIPrefix returns the canonical form of an API prefix, or "" when
+// it has none, which APIPrefixProblem explains.
+func CanonicalAPIPrefix(prefix string) string {
+	canonical, problem := apiPrefix(prefix)
+	if problem != "" {
+		return ""
+	}
+	return canonical
+}
+
+// APIPrefixProblem reports why prefix cannot be served as an API prefix, or
+// "" when it can. A prefix that has a canonical form but is not already it is
+// still a problem: the callers that read config.API.Prefix get the field, not
+// this function, so only a canonical value reaches all of them unchanged.
+func APIPrefixProblem(prefix string) string {
+	canonical, problem := apiPrefix(prefix)
+	switch {
+	case problem != "":
+		return problem
+	case canonical != prefix:
+		return "must not end with '/'"
+	}
+	return ""
+}
+
+func apiPrefix(prefix string) (canonical, problem string) {
+	if !strings.HasPrefix(prefix, "/") {
+		return "", "must start with /"
+	}
+	// A trailing '/' is all that is canonicalised away: config's loader has
+	// already trimmed surrounding space, and a space inside a prefix is a
+	// mistake to report, not to hide.
+	canonical = strings.TrimRight(prefix, "/")
+	if canonical == "" {
+		return "", `must not be empty or only '/'`
+	}
+	// Checked before the runes, because the rune loop cannot see it: ranging over
+	// a string decodes each undecodable byte as U+FFFD, which is non-ASCII and
+	// would pass. Gin registers the raw bytes, while encoding/json writes the
+	// document with U+FFFD in them, so the served key is not the route — measured
+	// on a prefix of "/api/\xff": the route answered /api/<ff>/widgets with 200 and
+	// the document's /api/<U+FFFD>/widgets with 404.
+	if !utf8.ValidString(canonical) {
+		return "", "must be valid UTF-8: an undecodable byte reaches the document as U+FFFD"
+	}
+	for _, segment := range strings.Split(canonical[1:], "/") {
+		if segment == "." || segment == ".." {
+			return "", `must not contain a '.' or '..' segment`
+		}
+		if !isPrefixSegment(segment) {
+			return "", "must be '/' followed by segments of URI path characters (letters, digits, - . _ ~ ! $ & ' ( ) + , ; = @, or non-ASCII) separated by a single '/'"
+		}
+	}
+	return canonical, ""
+}
+
+func isPrefixSegment(segment string) bool {
+	if segment == "" {
+		return false
+	}
+	for _, r := range segment {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r >= 0xA0: // non-ASCII: percent-encoded in UTF-8 on the way, decoded by Gin on arrival
+		case r == '.', r == '_', r == '-', r == '~':
+		case r == '!', r == '$', r == '&', r == '\'', r == '(', r == ')':
+		case r == '+', r == ',', r == ';', r == '=', r == '@':
+		default:
+			return false
+		}
+	}
+	return true
+}
 
 // Base checks where a store's URLs are served (presign.Config.Base): a
 // path ("/_storage") or an http(s) URL with one

@@ -117,6 +117,31 @@ the placeholder alone falls back to `/api/v1`. `gombit client generate`
 normalizes OpenAPI path keys to `/api/v1` so page source does not need
 regenerating. See [frontend.md](frontend.md#talking-to-the-api).
 
+`Load` puts the prefix in one canonical form before anything reads it, because
+generated resources and the OpenAPI document concatenate it with a route while
+Gin builds its route with `path.Join`, and the client is generated from that
+document: a trailing `/` is dropped, so `GOMBIT_API_PREFIX=/svc/` serves and
+advertises `/svc/widgets`. A prefix with no canonical form is a validation error
+naming `API.Prefix` — `api` (no leading `/`), `/` alone, an empty segment
+(`/svc//api`), a `.` or `..` segment (`/api/../v1`: Gin registers the collapsed
+`/v1/widgets` while the document advertises `/api/../v1/widgets`), or a character
+that does not survive the two agreeing — `%`, `?` and `#` (the document's path key
+is then no URL a client can parse, and a query or fragment never reaches the
+path), `{`, `}`, `:` and `*` (Gin's parameter syntax, so the route answers paths
+the document never lists; a `*` or `\` mid-path panics at registration), space and
+the other US-ASCII characters RFC 3986 keeps out of a URI (`" < > [ ] | ^ \``),
+and control characters. Bytes that are not valid UTF-8 are refused too: Gin
+registers the prefix's raw bytes, while the document is written by `encoding/json`,
+which replaces each undecodable byte with `U+FFFD`, so `/api/<ff>/widgets` answers
+while the `/api/<U+FFFD>/widgets` it advertises does not. The accepted form is `/`
+followed by one or more segments of the characters a path segment holds — `A-Z`,
+`a-z`, `0-9`, `-`, `.`, `_`, `~`, the sub-delimiters `! $ & ' ( ) + , ; =`, `@`, and
+any non-ASCII rune of a value that is valid UTF-8, which a client sends
+percent-encoded and Gin matches once decoded — separated by a single `/`, none of
+them `.` or `..`. Set `Config.API.Prefix` in code to a value that is
+not already in that form — `/svc/`, say — and `Validate` rejects it rather than
+start an app whose document no route answers.
+
 `GOMBIT_ENV` accepts the exact lowercase values `development`, `test`, and
 `production`.
 `GOMBIT_DATABASE_DRIVER` accepts `sqlite`, `postgres`, and `mysql`.
