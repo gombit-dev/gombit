@@ -100,14 +100,20 @@ func (opts *Options) normalize() error {
 	// `--http 8080` means `:8080`, not a bare port the Go API cannot listen on.
 	httpAddr, err := parseListenAddr(opts.HTTPAddr)
 	if err != nil {
-		return fmt.Errorf("dev: --http: %w", err)
+		// normalize cannot tell a flag value from GOMBIT_HTTP_ADDR, so the error
+		// names the address rather than the route it came by. `gombit dev`
+		// checks the flag itself first, and that error does name --http.
+		return fmt.Errorf("dev: API address %q is not usable: %w", opts.HTTPAddr, err)
 	}
 	if httpAddr != opts.HTTPAddr {
 		// The rewrite is only safe here. An app started without `gombit dev`
-		// reads its config address verbatim, so say out loud that the value
-		// the user wrote is the one that has to change.
-		_, _ = fmt.Fprintf(opts.Stderr, "gombit dev: normalised the API address %q to %q; keep the %q form in .env — go run ./cmd/server and a deployed binary read GOMBIT_HTTP_ADDR verbatim\n",
-			opts.HTTPAddr, httpAddr, httpAddr)
+		// reads its config address verbatim, so say what the address became and
+		// where the written form would still be read — without claiming which of
+		// the two this value came from: `--http 8080` is a documented form, and a
+		// notice blaming .env for it sends the user to edit a file they did not
+		// write (#513 review).
+		_, _ = fmt.Fprintf(opts.Stderr, "gombit dev: using API address %q for %q; if it came from GOMBIT_HTTP_ADDR, write %q there — go run ./cmd/server and a deployed binary read that value verbatim\n",
+			httpAddr, opts.HTTPAddr, httpAddr)
 	}
 	opts.HTTPAddr = httpAddr
 	if opts.APIPrefix == "" {

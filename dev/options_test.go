@@ -256,6 +256,15 @@ func TestNormalizeReportsAnAddrItHadToRewrite(t *testing.T) {
 	if !strings.Contains(got, "GOMBIT_HTTP_ADDR") {
 		t.Fatalf("stderr = %q, want it to point at the config key to fix", got)
 	}
+	// The same normalize runs for `--http 8080`, which docs/cli.md recommends.
+	// A notice that reads as an instruction to edit .env sends the user to a file
+	// they never wrote, so it has to stay conditional and name no file (#513 review).
+	if strings.Contains(got, ".env") {
+		t.Fatalf("stderr = %q, want no instruction to edit a file dev did not read", got)
+	}
+	if !strings.Contains(got, "if it came from") {
+		t.Fatalf("stderr = %q, want it to condition the advice on where the value came from", got)
+	}
 
 	stderr.Reset()
 	already := Options{HTTPAddr: ":8080", Stderr: &stderr}
@@ -276,8 +285,8 @@ func TestNormalizeRejectsAPortTheBackendCannotBind(t *testing.T) {
 		if err == nil {
 			t.Fatalf("normalize(%q) = nil, want an error before anything starts", addr)
 		}
-		if !strings.Contains(err.Error(), "--http") {
-			t.Fatalf("normalize(%q) = %v, want it to name --http", addr, err)
+		if !strings.Contains(err.Error(), addr) {
+			t.Fatalf("normalize(%q) = %v, want it to name the address it rejected", addr, err)
 		}
 	}
 }
@@ -311,8 +320,17 @@ func TestNormalizeKeepsTheConfiguredHTTPAddrListenable(t *testing.T) {
 	}
 
 	bad := Options{HTTPAddr: HTTPAddrFromConfig(config.Config{HTTP: config.HTTPConfig{Addr: "99999"}})}
-	if err := bad.normalize(); err == nil || !strings.Contains(err.Error(), "--http") {
-		t.Fatalf("normalize(GOMBIT_HTTP_ADDR=99999) = %v, want an error naming --http", err)
+	err := bad.normalize()
+	if err == nil {
+		t.Fatal("normalize(GOMBIT_HTTP_ADDR=99999) = nil, want an error before anything starts")
+	}
+	if !strings.Contains(err.Error(), "99999") {
+		t.Fatalf("normalize(GOMBIT_HTTP_ADDR=99999) = %v, want it to name the address", err)
+	}
+	// The value arrived through config, not the flag: an error that reads "pass
+	// --http" describes a route this call did not take (#513 review).
+	if strings.Contains(err.Error(), "--http") {
+		t.Fatalf("normalize(GOMBIT_HTTP_ADDR=99999) = %v, want no claim about a flag that was not used", err)
 	}
 }
 
