@@ -818,26 +818,38 @@ releases:
         details: |
           A prefix of `/svc/` served `/svc/widgets` but listed
           `/svc//widgets` in the OpenAPI document, so every client generated
-          from it asked for a URL that 404s. Nothing changes for a prefix set
-          through `GOMBIT_API_PREFIX`: `Load` rewrites `/svc/` to `/svc`, which
-          is what it always served, and the app starts. A prefix set in code is
-          not rewritten, so `Config.API.Prefix = "/svc/"` now fails `Validate`
-          with a field error naming `API.Prefix`; write it without the trailing
-          slash.
-          A segment of a prefix may hold the characters a URI path segment
-          holds, so every prefix that started an app before still does: letters,
-          digits, `- . _ ~`, the sub-delimiters `! $ & ' ( ) + , ; =`, `@`, and
-          non-ASCII (`/api/v1+beta`, `/@acme/api`, `/api;v=1`, `/café`).
-          `Validate` refuses what the document and the routes measurably cannot
-          agree on: `%`, `?`, `#` and control characters, which make the
-          advertised path one no client can send as it is written; Gin's `:` and
-          `{name}` parameters and its `*` catch-all, whose routes answer paths
-          the document never lists (a `*` or `\` mid-path panics at
-          registration); a space with the other US-ASCII characters RFC 3986
-          keeps out of a URI (`" < > [ ] | ^ \``); an empty segment
-          (`/svc//api`); and a `.` or `..` segment, which Gin collapses into a
-          prefix no route is registered under while the document advertises the
-          path it was given.
+          from it asked for a URL that 404s. `Load` normalises a trailing
+          slash away, so `GOMBIT_API_PREFIX=/svc/` still starts the app and
+          serves what it always served. That is the only environment value
+          that changes nothing: `main` checked a prefix for no more than a
+          leading `/`, so a value the rules below refuse started an app and
+          now fails `Load` from the environment — `GOMBIT_API_PREFIX=/api/v 1`
+          is one. A prefix set in code is never rewritten, so
+          `Config.API.Prefix = "/svc/"` now fails `Validate` with a field error
+          naming `API.Prefix`; write it without the trailing slash.
+          What still works is what a URI path segment holds: letters, digits,
+          `- . _ ~`, the sub-delimiters `! $ & ' ( ) + , ; =`, `@`, and
+          non-ASCII in valid UTF-8 — `/api/v1+beta`, `/@acme/api`, `/api;v=1`
+          and `/café` each register, advertise and answer the same path key.
+          `Validate` refuses each prefix below; for all but the last, the
+          document and the routes measurably disagree. `%`, `?`, `#` and
+          control characters, which make the advertised path one no client
+          can send as it is written; Gin's `:` and `{name}` parameters and
+          its `*` catch-all, whose routes answer paths the document never
+          lists (a `*` or `\` mid-path panics at registration); a `.` or
+          `..` segment, which Gin's `path.Join`
+          collapses, so the app registers the collapsed route — `/api/../v1`
+          plus `/widgets` answers `/v1/widgets` — while the document
+          advertises the uncollapsed path it was given, and that advertised
+          path is the one with no route; an empty segment (`/svc//api`), the
+          double slash being what makes a prefix non-canonical; and bytes that
+          are not valid UTF-8 (`/api/\xff`), which encoding/json replaces with
+          U+FFFD while writing the document, so the advertised key 404s while
+          the route answers 200. Space and the other US-ASCII characters RFC
+          3986 keeps out of a URI (`" < > [ ] | ^ \``) are refused on purpose,
+          not because anything was measured failing with them: the canonical
+          form stays inside the characters that specification gives a path
+          segment.
         config:
           - {var: GOMBIT_API_PREFIX, change: refused}
         refs: [501]

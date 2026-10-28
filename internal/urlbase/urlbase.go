@@ -39,9 +39,10 @@ import (
 //   - '%', '?', '#', and a control character give the document a path key no
 //     client can parse as a URL, and '?' and '#' cut the path short on the way
 //     to the server, so the route the document lists answers 404.
-//   - The rest of what is refused — space and the US-ASCII set RFC 3986 keeps
-//     out of a URI (" < > [ ] | ^ `) — a client has to percent-encode to send at
-//     all, so the bytes on the wire are never the document's key as written.
+//   - The rest of what is refused is a policy line rather than a failure
+//     measured here: space and the US-ASCII characters RFC 3986 keeps out of a
+//     URI (" < > [ ] | ^ `) are not path characters, so a prefix held to what a
+//     path segment is defined to hold does not admit them either.
 //   - Bytes that are not valid UTF-8 go the other way round: nothing rejects
 //     them on the wire, but encoding/json replaces each with U+FFFD when it
 //     writes the document, so the served key differs from the route Gin
