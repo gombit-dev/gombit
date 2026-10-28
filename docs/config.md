@@ -167,10 +167,39 @@ environment variable, the invalid value, and the validation message.
 
 `gombit config show` prints this typed result as aligned key/value lines.
 DSN userinfo/passwords (URL form, MySQL `user:pass@tcp`, libpq
-`password=`/`pwd=`/`pass=` keywords, and `?password=` query params), the Redis
-password, and the JWT secret are redacted (`*****`); `Config.Redacted()` /
-`RedactDSN` / `SanitizeError` are the helpers. Do not log raw DSNs or JWT
-secrets.
+`password=`/`sslpassword=` keywords and the `pwd=`/`pass=` look-alikes, and
+`?password=` query params), the Redis password, and the JWT secret are redacted
+(`*****`); `Config.Redacted()` / `RedactDSN` / `SanitizeError` are the helpers.
+Redaction follows how the drivers read a DSN. `postgres://` and
+`postgresql://` — those spellings exactly — are read by pgconn's own
+libpq-matching parser, not by `net/url`: the userinfo runs to the *first* `@`
+with no `/` before it, so `?` and `#` are data and
+`postgres://app:?pw@h/db` hides `?pw`; `net/url`, which ends the authority at
+either, would print it whole. Every other `scheme://` keeps the `net/url`
+reading. MySQL userinfo runs to the last `@` before the last `/`, so a password
+holding an `@`, a `=` or a `//` disappears whole — read only where the driver
+accepts the string at all, since `postgres://app:pw@h:5432/db` is no MySQL DSN
+to hide a username from. A libpq value ends only at the ASCII whitespace pgconn
+separates on, so `&`, `"` and `?` are part of it; whitespace may surround `=`, a
+value quoted with `'` may hold a space, and a backslash escapes the next byte
+whatever it is, newline included — which is why `password = s3cr3t`,
+`password=s3cr3t&more` and `password='it\'s-a-s3cr3t tail'` are redacted to
+their end. The keyword walk resumes at the value's end the way pgconn does, so
+in `host='db'password=x` the next key is `password`: no separator is needed
+after a quoted value. A parameter's key is decoded and matched whole, so
+`?pass%77ord=`, which is how pgconn reads a `password` parameter out of a URI,
+is redacted too, while `passfile=`, which names a file rather than a secret, is
+left alone. Each reading runs over the unmodified DSN and the ranges it names
+are merged before anything is replaced, so a string two grammars read has both
+of its passwords hidden and, where they disagree about where the value ends,
+the wider range wins: that can redact past the end of the narrower password.
+`SanitizeError` replaces each password as a literal, so a very short one blanks
+that same text elsewhere in the message, and it replaces only the spellings the
+DSN's own grammar stands for — a keyword value's quotes and backslash escapes
+are unwound, a URI value is percent-decoded, and a MySQL value is replaced as
+written, because go-sql-driver applies no quoting or escaping at all: unquoting
+a MySQL password would blank every letter of a message instead of the secret.
+Do not log raw DSNs or JWT secrets.
 
 Appendix C production checks fail loudly for a **non-empty** JWT secret
 shorter than 32 characters, for the generated-app development placeholder,

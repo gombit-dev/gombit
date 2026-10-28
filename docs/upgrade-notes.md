@@ -206,6 +206,26 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   is the key it always wanted; code that read the parent key reads the
   property path now.
 
+- `config.RedactDSN` and `config.SanitizeError` hide every password a driver reads out of a DSN, so a redacted string no longer carries part of a secret. (`dsn-passwords-cut-where-drivers-read`, behavior, [#486](https://github.com/gombit-dev/gombit/issues/486))
+
+  A MySQL userinfo password containing `@` printed its tail
+  (`app:p@ss@tcp(host:3306)/db`), a libpq `password=` value ended at a
+  space, `&` or `"` where pgconn keeps reading, a `postgres://` URI
+  whose password holds `?` or `#` printed whole because `net/url` ends
+  the authority where pgconn does not, and a key set right after a
+  closing quote (`host='db'password=x`) was never seen, so each leaked
+  the rest of the secret into a log; `SanitizeError` also blanked
+  single characters of a message instead of the password. Redaction now
+  takes the same ranges the drivers do — pgconn reads its own URI
+  grammar, its keyword walk resumes at the value's end, the MySQL
+  reading is taken only where the driver accepts the string — merged
+  before one pass replaces them. A percent-escaped key
+  (`?pass%77ord=`) and `sslpassword=` are hidden now too;
+  `passfile=` is a path and stays visible, and a look-alike key such as
+  `pwd=` is hidden in the DSN but spelled no further in a message.
+  Nothing to change: an app that redacts a DSN sees the same key, fully
+  hidden.
+
 ## v0.8.0
 
 ### Manual: action required
