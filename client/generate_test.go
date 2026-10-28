@@ -150,10 +150,6 @@ func TestGenerateNormalizesConfiguredPrefixPathKeys(t *testing.T) {
 	if strings.Contains(schema, "/svc/") {
 		t.Fatalf("schema.ts still has the live prefix: %s", truncate(schema, 400))
 	}
-	// The int64 bound of the contract reaches the generated types as written.
-	if !strings.Contains(schema, "9223372036854775807") {
-		t.Fatalf("schema.ts altered the int64 maximum; head=%s", truncate(schema, 400))
-	}
 }
 
 // A configured prefix the document does not use is refused before the
@@ -185,8 +181,10 @@ func TestGenerateRefusesAConfiguredPrefixTheDocumentDoesNotUse(t *testing.T) {
 }
 
 // authOnlySpec is an OpenAPI document whose operations all sit under one group
-// of one prefix, the shape no path list can resolve (#506). Its int64 maximum
-// is written as the largest int64, which a float64 round trip cannot keep.
+// of one prefix, the shape no path list can resolve (#506). Its int64 maximum is
+// the largest int64, so the spec rewrite the generator runs has a number a
+// float64 round trip could not keep; openapi-typescript emits no bounds at all
+// (`id?: number`), so client/paths_test.go is where that fidelity is asserted.
 func authOnlySpec(t *testing.T, prefix string) string {
 	t.Helper()
 	spec := `{
