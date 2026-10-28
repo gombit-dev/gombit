@@ -183,8 +183,8 @@ func openapiUsage(w io.Writer) {
 
 func clientUsage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "available client subcommands:")
-	_, _ = fmt.Fprintln(w, "  generate [--spec openapi.json] [--out frontend/src/api/generated] [--dry-run] [--force] [--npx npx]")
-	_, _ = fmt.Fprintln(w, "  check [--write] [--spec openapi.json] [--out frontend/src/api/generated] [--url http://127.0.0.1:8080/openapi.json] [--npx npx]")
+	_, _ = fmt.Fprintln(w, "  generate [--spec openapi.json] [--out frontend/src/api/generated] [--api-prefix /api/v1] [--dry-run] [--force] [--npx npx]")
+	_, _ = fmt.Fprintln(w, "  check [--write] [--spec openapi.json] [--out frontend/src/api/generated] [--api-prefix /api/v1] [--url http://127.0.0.1:8080/openapi.json] [--npx npx]")
 }
 
 func configUsage(w io.Writer) {

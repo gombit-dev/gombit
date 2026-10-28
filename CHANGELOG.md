@@ -194,6 +194,20 @@ version.
   Form as field paths. The dependent-required message (`expected property zip
   to be present when city is present`) keys the same way
   ([#503](https://github.com/gombit-dev/gombit/issues/503)).
+- `gombit client generate` takes the live API prefix it rewrites OpenAPI path
+  keys from from the application's configuration (`--api-prefix`, else the
+  `GOMBIT_API_PREFIX` of the directory it runs in; `gombit dev` passes the
+  prefix it started with) instead of guessing it as the longest prefix the
+  paths share. The guess was wrong for every app whose routes share a first
+  segment: mounted at `/svc` with only `auth` routes, its paths are also the
+  paths of an app mounted at `/svc/auth`, and the client came out with
+  `/api/v1/login` keys, which `rewriteAPIRequest` sends to `/svc/login` — a
+  route that does not exist. A document that does not live under the configured
+  prefix is now refused rather than rewritten wrongly. The rewrite keeps every
+  number as the document wrote it, so an `int64` bound such as
+  `"maximum": 9223372036854775807` no longer arrives as
+  `9223372036854776000`
+  ([#506](https://github.com/gombit-dev/gombit/issues/506)).
 
 ### Changed
 
