@@ -194,6 +194,23 @@ version.
   Form as field paths. The dependent-required message (`expected property zip
   to be present when city is present`) keys the same way
   ([#503](https://github.com/gombit-dev/gombit/issues/503)).
+- **Breaking (.env parsing):** A trailing comment is no longer part of a
+  `.env` value. The grammar had no comment rule at all, so
+  `GOMBIT_LOG_LEVEL="debug" # local` set the level to `"debug" # local` —
+  quotes kept, so an invalid level — and `KEY=abc # note` stored the note
+  inside the value. A `#` with whitespace before it now starts a comment
+  outside quotes, so those two read as `debug` and `abc`; a `#` with none
+  before it stays in the value, so `COLOR=#fff` is still `#fff` and a
+  `#`-prefixed `GOMBIT_JWT_SECRET` is not lost. Quote a value that really
+  contains ` #`. A UTF-8 byte order mark, which only the start of a file can
+  carry, no longer hides the first key (`\ufeffGOMBIT_JWT_SECRET` matches no
+  variable). And a `.env` that exists but cannot be read now fails
+  `config.Load` and `config.LoadFromDir` instead of silently contributing
+  nothing, which could boot an app with auth unmounted. `export KEY=v` still
+  assigns a key literally named `export KEY`: that literal grammar is what
+  `config.DotEnvKeys` reports to the upgrade analysis, so matching `sh` there
+  is a separate decision
+  ([#507](https://github.com/gombit-dev/gombit/issues/507)).
 
 ### Changed
 

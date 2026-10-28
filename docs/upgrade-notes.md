@@ -92,6 +92,25 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   `AuthPasswordChangeBody`, `AuthPasswordChangeResult` or
   `DataAuthPasswordChangeResult`.
 
+- **Breaking.** A `.env` value no longer swallows a trailing comment, a byte order mark no longer hides the first key, and a `.env` that cannot be read fails the load. (`dotenv-comments-and-byte-order-mark`, behavior, [#507](https://github.com/gombit-dev/gombit/issues/507))
+
+  Check a `.env` you already run with. A `#` with whitespace before it
+  now starts a comment outside quotes, so `KEY=abc # note` reads as
+  `abc` and `GOMBIT_LOG_LEVEL="debug" # local` as `debug`; a value that
+  really contains ` #` needs double or single quotes, and a `#` with no
+  whitespace before it is still part of the value (`COLOR=#fff`, and a
+  `#`-prefixed `GOMBIT_JWT_SECRET`). These matched `set -a; . ./.env`,
+  which the scaffold's own `.env` documents as an alternative way to
+  start the app. A UTF-8 byte order mark is dropped from the start of
+  the file, where alone it can be; there it made the first key match no
+  variable. And a `.env` that exists but cannot be read now fails
+  `config.Load` and `config.LoadFromDir` instead of contributing
+  nothing silently, which could boot an app with no JWT secret and so
+  with auth unmounted. `export KEY=v` is unchanged: it assigns a key
+  literally named `export KEY`, because that literal grammar is the one
+  `config.DotEnvKeys` reports to this tooling's own configuration
+  analysis.
+
 ### Informational
 
 - Bearer-mode session revocation errors include the `WWW-Authenticate: Bearer realm="api"` challenge when the handler returns 401. (`bearer-handler-401-challenge`, api, [#604](https://github.com/gombit-dev/gombit/issues/604))
