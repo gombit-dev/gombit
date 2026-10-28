@@ -403,6 +403,14 @@ var driverCheckedDSNs = []string{
 	// pgconn needs no separator after a quoted value, so the next key begins
 	// right at the closing quote.
 	"host='db'password=s3cr3tvalue dbname=app",
+	// uriDecode skips a component's leading and trailing raw spaces before it
+	// decodes it, so `password ` is the key pgconn compares and `s3cr3t ` is the
+	// password it stores. A decoder that keeps those spaces — url.PathUnescape
+	// does — reads neither, and the password reaches a message (#486 review).
+	"postgres://h/db?password =s3cr3tvalue",
+	"postgres://h/db? password=s3cr3tvalue",
+	"postgres://h/db?sslmode=disable&password  =s3cr3tvalue",
+	"postgres://app:s3cr3tvalue @h/db",
 }
 
 // Redaction is checked against the parsers that build the connection, not
@@ -684,6 +692,73 @@ func TestSanitizeErrorSpellsNoPasswordFromAURITheDriverRefuses(t *testing.T) {
 				if strings.Contains(redacted, secret) {
 					t.Fatalf("RedactDSN() = %q, still shows %q", redacted, secret)
 				}
+			}
+		})
+	}
+}
+
+// pgURIDecodeAgreesWithTheDriver pins the one decoder this file uses for URI
+// components to pgconn's uriDecode. The rule is the raw bytes': leading and
+// trailing spaces are skipped before anything is decoded, so `%20password` is
+// the value ` password` — which pgconn stores, and which is not a key it reads
+// a password under — while an interior space is refused. url.PathUnescape
+// disagrees on both points, and every disagreement is a password: a key it
+// leaves as `password ` names no secret here while pgconn stores the value
+// behind it, and a value it leaves as `s3cr3t ` spells no message while pgconn
+// sends `s3cr3t`. Each accepted component is also asked of the driver itself.
+func TestPgURIDecodeAgreesWithTheDriver(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		raw     string
+		want    string
+		refused bool
+	}{
+		{raw: "password ", want: "password"},
+		{raw: " password", want: "password"},
+		{raw: "password  ", want: "password"},
+		{raw: "s3cr3t ", want: "s3cr3t"},
+		{raw: "a%40b", want: "a@b"},
+		{raw: "pass%77ord", want: "password"},
+		{raw: "%20password", want: " password"},
+		{raw: "password%20", want: "password "},
+		{raw: "s3cr3t value", refused: true},
+		{raw: "s3cr3t%zzvalue", refused: true},
+		{raw: "s3cr3t%00value", refused: true},
+		{raw: "s3cr3t%4", refused: true},
+		{raw: "%", refused: true},
+	}
+
+	for _, tt := range tests {
+		name := tt.raw
+		if name == "" {
+			name = "(empty)"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			got, ok := pgURIDecode(tt.raw)
+			if ok == tt.refused || got != tt.want {
+				t.Fatalf("pgURIDecode(%q) = (%q, %t), want (%q, %t)", tt.raw, got, ok, tt.want, !tt.refused)
+			}
+			if tt.refused {
+				return
+			}
+
+			// The same component as a URI password: whatever the driver stores is
+			// what the decoder claims. A component decoding to empty is skipped --
+			// pgconn would go looking for a passfile, and the oracle stops being
+			// hermetic.
+			if tt.want == "" {
+				return
+			}
+			dsn := "postgres://h/db?password=" + tt.raw // #nosec G101 -- fake local test DSN.
+			cfg, err := pgconn.ParseConfig(dsn)
+			if err != nil {
+				t.Fatalf("pgconn.ParseConfig(%q): %v, want it to accept a component pgURIDecode accepts", dsn, err)
+			}
+			if cfg.Password != tt.want {
+				t.Fatalf("pgconn stores %q for %q, pgURIDecode says %q", cfg.Password, tt.raw, tt.want)
 			}
 		})
 	}

@@ -96,7 +96,13 @@ const (
 type secretRange struct {
 	start, end int
 	grammar    grammar
-	driver     bool
+	// driver reports that a driver's own parser stores this range's value as a
+	// password, so a message built from the connection attempt can quote it and
+	// a spelling of it has to be replaced. It is a claim about the parser, not
+	// about a live connection: dsnSecretValues reads the value the way that
+	// parser reads it, and a range it refuses or does not treat as a password
+	// spells nothing.
+	driver bool
 }
 
 // passwordRanges returns the byte ranges of dsn that a driver reads as a
@@ -121,11 +127,15 @@ func secretRanges(dsn string) []secretRange {
 	if query := paramListStart(dsn); query >= 0 {
 		uri = append(uri, paramRanges(dsn, query+1)...)
 	}
-	// pgconn answers with a URI's settings or with none: the first component it
-	// refuses fails the whole parse, so a URI it rejects sends no password, from
-	// its userinfo or its query. The ranges still describe bytes an operator
-	// wrote a secret into — RedactDSN hides them — but no spelling of them is
-	// derived, because no driver ever puts one on the wire.
+	// pgconn answers with a URI's settings or with none: the first component its
+	// parser refuses fails the whole parse, so a URI it rejects stores no
+	// password, from its userinfo or its query. The ranges still describe bytes
+	// an operator wrote a secret into — RedactDSN hides them — but no spelling of
+	// them is derived, because the driver never stores one to send. The line is
+	// the parser's, not ParseConfig's: a URI that parses but fails a later check
+	// (`?password=status` names a port-shaped value) stores its password all the
+	// same, and is spelled as one. Syntactic acceptance is the stable boundary;
+	// semantic validation changes with every pgconn release.
 	if isPostgresScheme(dsn) && pgURIRejected(dsn) {
 		for i := range uri {
 			uri[i].driver = false
@@ -246,37 +256,61 @@ func pgURIRejected(connString string) bool {
 	return false
 }
 
-// pgURIDecodeFails reports what pgconn's uriDecode refuses in a URI component:
-// a '%' that is not followed by two hex digits, an escape decoding to a NUL, or
-// a space between two runs of bytes. Its leading and trailing spaces are not a
-// failure, and no other byte is.
-func pgURIDecodeFails(raw string) bool {
+// pgURIDecode is pgconn's uriDecode: the bytes a URI component stands for, as
+// the driver stores them. Leading and trailing raw spaces are skipped before
+// anything is decoded, so `password ` is the key `password` and `s3cr3t ` is the
+// password `s3cr3t`; a '%' must be followed by two hex digits; an escape
+// decoding to a NUL and a space between two runs of bytes are both refused. ok
+// is false exactly where uriDecode returns an error; no other byte is a failure.
+//
+// This is the one decoder for URI components here. A second hand-written rule —
+// matching a key with url.PathUnescape, say, which keeps the spaces pgconn
+// drops — reopens the hole it closes: the key still names a password to the
+// driver, so the driver puts that password in an error message, and a spelling
+// derived from a component the decoder misread is not in the message
+// (#486 review).
+func pgURIDecode(raw string) (decoded string, ok bool) {
 	i := 0
 	for i < len(raw) && raw[i] == ' ' {
 		i++
 	}
+	var b strings.Builder
+	b.Grow(len(raw))
 	for i < len(raw) && raw[i] != ' ' {
 		if raw[i] != '%' {
+			b.WriteByte(raw[i])
 			i++
 			continue
 		}
 		if i+2 >= len(raw) {
-			return true
+			return "", false
 		}
 		hi, okHi := hexDigit(raw[i+1])
 		lo, okLo := hexDigit(raw[i+2])
 		if !okHi || !okLo {
-			return true
+			return "", false
 		}
 		if hi<<4|lo == 0 {
-			return true
+			return "", false
 		}
+		b.WriteByte(hi<<4 | lo)
 		i += 3
 	}
 	for i < len(raw) && raw[i] == ' ' {
 		i++
 	}
-	return i < len(raw)
+	if i < len(raw) {
+		return "", false
+	}
+	return b.String(), true
+}
+
+// pgURIDecodeFails reports that pgURIDecode refuses a URI component. It is the
+// question pgURIRejected asks: a component the parser refuses fails the whole
+// parse, so nothing of that DSN reaches a message.
+func pgURIDecodeFails(raw string) bool {
+	_, ok := pgURIDecode(raw)
+	return !ok
 }
 
 // hexDigit is pgconn's own: '0'-'9' and both cases of 'a'-'f' stand for a
@@ -578,10 +612,10 @@ func isFileURI(dsn string) bool {
 // '&' separated list that begins at offset. A key is the bytes before the first
 // '=' of a parameter, and the grammar follows the string's: pgconn decodes a
 // key out of a connection URI before it compares it, so an encoded spelling
-// such as `pass%77ord` names the password that goes on the wire, while
-// go-sql-driver/mysql takes its parameters raw and reads no password out of
-// any of them, and a SQLite URI decodes them its own way; the value is
-// everything to the next '&', whatever bytes it holds.
+// such as `pass%77ord` or a raw space such as `password ` names the password the
+// driver stores, while go-sql-driver/mysql takes its parameters raw and reads no
+// password out of any of them, and a SQLite URI decodes them its own way; the
+// value is everything to the next '&', whatever bytes it holds.
 func paramRanges(dsn string, offset int) []secretRange {
 	g := uriGrammar
 	driver := true
@@ -621,21 +655,24 @@ func isDriverConnKey(key string) bool {
 }
 
 // isDriverSecretKey reports whether a URI parameter key is one pgconn reads a
-// password under: the key is compared only after it is decoded, so
-// `pass%77ord` names the password and `PASSWORD` does not.
+// password under: the key is compared only after it is decoded, so `pass%77ord`
+// and `password ` name the password while `PASSWORD` does not. Decoding is
+// pgURIDecode's, because that is the decoder that reads the key the driver reads.
 func isDriverSecretKey(key string) bool {
-	decoded, err := url.PathUnescape(key)
-	if err != nil {
-		return false
-	}
-	return isDriverConnKey(decoded)
+	decoded, ok := pgURIDecode(key)
+	return ok && isDriverConnKey(decoded)
 }
 
 // isSecretConnKey reports whether a parameter key names a password. It is decoded
 // and compared without regard to case: pgconn decodes it but does not lower it,
-// so both departures hide more than the driver would have read.
+// so both departures hide more than the driver would have read. The decode is
+// pgURIDecode's where it succeeds — a key with the spaces pgconn drops is a
+// password key to pgconn — and url.PathUnescape's otherwise, so a component
+// pgconn refuses still hides its value fail-closed.
 func isSecretConnKey(key string) bool {
-	if decoded, err := url.PathUnescape(key); err == nil {
+	if decoded, ok := pgURIDecode(key); ok {
+		key = decoded
+	} else if decoded, err := url.PathUnescape(key); err == nil {
 		key = decoded
 	}
 	_, ok := secretConnKeys[strings.ToLower(key)]
@@ -737,9 +774,10 @@ func dsnSecretValues(dsn string) []string {
 	}
 	for _, r := range secretRanges(dsn) {
 		if !r.driver {
-			// A look-alike key no driver reads: the value is hidden in the DSN
-			// itself, and nothing of it reaches a message, because no driver
-			// sends it — replacing it would rewrite text that holds no secret.
+			// A value no driver's parser stores as a password: it is hidden in
+			// the DSN itself, and nothing of it reaches a message, because the
+			// parser keeps no password to send — replacing it would rewrite text
+			// that holds no secret.
 			continue
 		}
 		value := dsn[r.start:r.end]
@@ -753,17 +791,17 @@ func dsnSecretValues(dsn string) []string {
 			add(stored)
 			add(unescapeDSNValue(stored))
 		case uriGrammar:
-			// pgconn puts the percent-decoded bytes on the wire. A decoded
-			// spelling shorter than four bytes is dropped: that is the length
-			// at which a value like `%20` becomes a space, and replacing a
-			// space rewrites the whole sentence rather than the secret it
+			// A decoded spelling shorter than four bytes is dropped: that is the
+			// length at which a value like `%20` becomes a space, and replacing
+			// a space rewrites the whole sentence rather than the secret it
 			// stands for. The value as the dsn writes it is always replaced,
-			// however short, because that is what the dsn itself prints. The
-			// decoding also refuses what pgconn's uriDecode refuses — a raw
-			// space and a NUL — because a value it would reject reads nothing
-			// to the wire, so no spelling of it is sent either.
-			if spelling, err := url.PathUnescape(value); err == nil && len(spelling) >= minDecodedSecretLen &&
-				!strings.ContainsAny(value, " ") && !strings.ContainsRune(spelling, 0) {
+			// however short, because that is what the dsn itself prints.
+			//
+			// The decoding is pgURIDecode's, so the spelling is by construction
+			// what pgconn stores: `postgres://app:s3cr3t @h/db` is the password
+			// `s3cr3t`, not `s3cr3t `, and a component pgconn refuses stores
+			// nothing, so nothing is spelled from it.
+			if spelling, ok := pgURIDecode(value); ok && len(spelling) >= minDecodedSecretLen {
 				add(spelling)
 			}
 		case mysqlGrammar:
