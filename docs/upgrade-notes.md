@@ -40,6 +40,28 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   the app's own verification routes, which the framework's replace, or
   rename them.
 
+- **Breaking.** The generated client's `unwrap` resolves the success `openapi-fetch` reports, including a response with no body, instead of throwing `empty_response`; its result is now `T | undefined`, so a caller that reads a field off it has to narrow first. (`client-unwrap-no-content`, client, [#505](https://github.com/gombit-dev/gombit/issues/505))
+
+  A handler whose output struct has no `Body` answers 204, and every
+  bodyless success — 204, a HEAD, a zero-length 2xx — reaches the
+  wrapper as `data: undefined`, which it used to reject. `unwrap` now
+  resolves that value and reads the status only to decide success: a
+  non-2xx, or a result carrying an `error`, still throws the D10
+  `ContractError`.
+
+  The signature moves with it: `unwrap<T>(...)` is
+  `Promise<T | undefined>`, because `undefined` is a value it resolves
+  and a declaration that hid it told the caller to read a field of a
+  response that had none. An app picks this up with
+  `gombit client generate` (or `gombit client check --write`), then
+  narrows wherever it consumes the result: a list page reads
+  `listed && Array.isArray(listed.data) ? listed.data : []` rather
+  than `listed.data`, and code that promises a body — a token pair
+  from a login, an upload grant — throws or bails on `undefined`
+  before using it. A `catch` added to swallow `empty_response` around
+  a no-content call can go; code that relied on that throw to notice
+  a missing body has to check the field it expects instead.
+
 - The security audit trail adds a table, `auth_audit_events`: migrate it, or the events are not recorded (each failure is logged, and the operation still succeeds). (`audit-trail-schema`, schema, [#337](https://github.com/gombit-dev/gombit/issues/337))
 
   - Framework schema: `auth.AuditEvent` (`auth_audit_events`): added.
@@ -84,19 +106,6 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   `GOMBIT_AUTH_EMAIL_VERIFICATION_URL` configure the link.
 
 - A new app's placeholder `schema.ts` includes the verification operations and `PublicUser.email_verified`; an existing app's generated client gets them from `gombit client generate`. (`client-schema-email-verified`, client, [#331](https://github.com/gombit-dev/gombit/issues/331))
-
-- The generated client's `unwrap` resolves the success `openapi-fetch` reports, including a response with no body, instead of throwing `empty_response`. (`client-unwrap-no-content`, client, [#505](https://github.com/gombit-dev/gombit/issues/505))
-
-  A handler whose output struct has no `Body` answers 204, and every
-  bodyless success — 204, a HEAD, a zero-length 2xx — reaches the
-  wrapper as `data: undefined`, which it used to reject. `unwrap` now
-  resolves that value and reads the status only to decide success: a
-  non-2xx, or a result carrying an `error`, still throws the D10
-  `ContractError`. An app picks this up with `gombit client generate`
-  (or `gombit client check --write`); its own source does not change,
-  except that a `catch` added to swallow `empty_response` around a
-  no-content call can go, and code that relied on that throw to notice
-  a missing body has to check the field it expects instead.
 
 - A security audit trail: logins (succeeded and failed), logouts, registrations, superuser creation, refresh-token reuse, session revocations, email verification, group and permission grants, and admin writes each record who, what, when and which request, never a secret. (`audit-trail`, api, [#337](https://github.com/gombit-dev/gombit/issues/337))
 

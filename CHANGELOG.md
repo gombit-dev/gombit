@@ -96,7 +96,11 @@ version.
   delete or an action endpoint looked like a failure to the caller and the UI.
   `unwrap` no longer reads the status to second-guess the client: a 2xx
   resolves its `data`, `undefined` included, and a non-2xx, or a result
-  carrying an `error`, still throws the D10 `ContractError`
+  carrying an `error`, still throws the D10 `ContractError`. The generated
+  signature moves with the behavior — `unwrap<T>` is now
+  `Promise<T | undefined>` — so a caller reads a field of the success value
+  only after narrowing the `undefined` a bodyless response resolves, the way
+  the scaffolded pages and resource forms do
   ([#505](https://github.com/gombit-dev/gombit/issues/505)).
 - An already-rotated refresh token that has expired is now a 401 that leaves
   the user's other sessions alone. Presenting a rotated token again still

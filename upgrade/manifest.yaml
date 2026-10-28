@@ -602,19 +602,29 @@ releases:
         refs: [331]
 
       - id: client-unwrap-no-content
-        kind: informational
+        kind: manual
+        breaking: true
         area: client
-        summary: "The generated client's `unwrap` resolves the success `openapi-fetch` reports, including a response with no body, instead of throwing `empty_response`."
+        summary: "The generated client's `unwrap` resolves the success `openapi-fetch` reports, including a response with no body, instead of throwing `empty_response`; its result is now `T | undefined`, so a caller that reads a field off it has to narrow first."
         details: |
           A handler whose output struct has no `Body` answers 204, and every
           bodyless success — 204, a HEAD, a zero-length 2xx — reaches the
           wrapper as `data: undefined`, which it used to reject. `unwrap` now
           resolves that value and reads the status only to decide success: a
           non-2xx, or a result carrying an `error`, still throws the D10
-          `ContractError`. An app picks this up with `gombit client generate`
-          (or `gombit client check --write`); its own source does not change,
-          except that a `catch` added to swallow `empty_response` around a
-          no-content call can go, and code that relied on that throw to notice
+          `ContractError`.
+
+          The signature moves with it: `unwrap<T>(...)` is
+          `Promise<T | undefined>`, because `undefined` is a value it resolves
+          and a declaration that hid it told the caller to read a field of a
+          response that had none. An app picks this up with
+          `gombit client generate` (or `gombit client check --write`), then
+          narrows wherever it consumes the result: a list page reads
+          `listed && Array.isArray(listed.data) ? listed.data : []` rather
+          than `listed.data`, and code that promises a body — a token pair
+          from a login, an upload grant — throws or bails on `undefined`
+          before using it. A `catch` added to swallow `empty_response` around
+          a no-content call can go; code that relied on that throw to notice
           a missing body has to check the field it expects instead.
         refs: [505]
 

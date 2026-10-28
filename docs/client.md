@@ -76,11 +76,30 @@ if (isD10ErrorBody(body)) {
 
 ### unwrap
 
+```ts
+unwrap<T>(result: {
+  data?: T;
+  error?: unknown;
+  response: Response;
+}): Promise<T | undefined>
+```
+
 | Response | `unwrap` result |
 | --- | --- |
 | 2xx with content | resolves the parsed `data` |
 | 2xx with no content — `204 No Content`, a `HEAD`, a zero-length body | resolves `undefined`, because that is what `openapi-fetch` reports as the success value |
 | non-2xx | throws `ContractError` carrying the D10 `code`, `fields`, `request_id` and the HTTP status |
+
+The signature keeps that `undefined`: a bodyless success has no value to
+hand back, so `unwrap` promises `T | undefined` rather than talking the
+`undefined` out of existence at the one boundary that knows it happened.
+A caller whose operation does declare a body checks it where it can see the
+field it expects:
+
+```ts
+const listed = await unwrap(await client.GET("/api/v1/widgets"));
+const widgets = listed && Array.isArray(listed.data) ? listed.data : [];
+```
 
 `unwrap` does not re-derive the contract from the status: once the call
 succeeded, the result is what the client parsed, `undefined` included. A handler
