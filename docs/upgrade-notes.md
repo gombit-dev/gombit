@@ -92,7 +92,7 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   `AuthPasswordChangeBody`, `AuthPasswordChangeResult` or
   `DataAuthPasswordChangeResult`.
 
-- **Breaking.** A `.env` value no longer swallows a trailing comment, a byte order mark no longer hides the first key, and a `.env` that cannot be read fails the load. (`dotenv-comments-and-byte-order-mark`, config, [#507](https://github.com/gombit-dev/gombit/issues/507))
+- **Breaking.** A `.env` value no longer swallows a trailing comment, a byte order mark no longer hides the first key, and a `.env` that cannot be read fails the load. (`dotenv-comments-and-byte-order-mark`, behavior, [#507](https://github.com/gombit-dev/gombit/issues/507))
 
   Check a `.env` you already run with. A `#` with whitespace before it
   now starts a comment outside quotes, so `KEY=abc # note` reads as

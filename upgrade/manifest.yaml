@@ -813,7 +813,7 @@ releases:
       - id: dotenv-comments-and-byte-order-mark
         kind: manual
         breaking: true
-        area: config
+        area: behavior
         summary: "A `.env` value no longer swallows a trailing comment, a byte order mark no longer hides the first key, and a `.env` that cannot be read fails the load."
         details: |
           Check a `.env` you already run with. A `#` with whitespace before it

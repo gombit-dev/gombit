@@ -14,7 +14,8 @@ import (
 const dotEnvFile = ".env"
 
 // utf8BOM is what an editor on Windows can leave at the very start of a
-// hand-written .env. See scanDotEnv.
+// hand-written .env. See scanDotEnv. upgrade/config.go keeps its own copy of
+// this rule for the files it rewrites; keep the two in step.
 var utf8BOM = []byte("\ufeff")
 
 // loadDotEnv reads KEY=VALUE pairs from .env in the current working

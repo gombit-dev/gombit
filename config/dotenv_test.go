@@ -71,8 +71,11 @@ func TestParseDotEnvLine(t *testing.T) {
 }
 
 // A UTF-8 BOM is a property of the file, not of a line: only the first line can
-// carry one, and there it hides the first key (`GOMBIT_APP_NAME` matches
-// no variable). `set -a; . ./.env` accepts the marked file.
+// carry one, and there it hides the first key, so the key `"\ufeffGOMBIT_APP_NAME"`
+// matches no variable. The rule this test pins matches the dotenv loaders, not
+// the shell: `set -a; . ./.env` fails on a marked file (`command not found` for
+// the first line in bash and dash), so a marked file is something only the
+// reader can rescue.
 func TestDotEnvValuesStripsOnlyALeadingByteOrderMark(t *testing.T) {
 	// Written as a code point rather than an escape so the byte order mark stays
 	// visible to whoever reads this test later.
