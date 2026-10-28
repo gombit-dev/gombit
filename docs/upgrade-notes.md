@@ -206,6 +206,21 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   is the key it always wanted; code that read the parent key reads the
   property path now.
 
+- `gombit dev --http` validates the address it hands the backend: a bare port (`8080`) reaches `GOMBIT_HTTP_ADDR` as `:8080`, and a port outside 1–65535 is refused before anything starts. (`dev-http-addr-normalised`, cli, [#513](https://github.com/gombit-dev/gombit/issues/513))
+
+  The check normalised only for itself and the child environment got
+  the raw flag, so the service table advertised
+  `http://127.0.0.1:8080` while the backend died on `listen tcp:
+  address 8080: missing port in address`, and `gombit dev` kept
+  running with only Vite up. `:0`, `:-1` and `:99999` are refused now
+  instead of failing the same way mid-run. An address already in
+  `host:port` form is untouched. A value dev had to rewrite is printed
+  on stderr with both forms, naming no file: dev cannot tell a `--http`
+  flag from `GOMBIT_HTTP_ADDR`, and `--http 8080` is the documented
+  shorthand that needs no change. What the notice does say is that only
+  the child sees the rewrite, so a bare port written in the config is
+  still read verbatim by `go run ./cmd/server`.
+
 ## v0.8.0
 
 ### Manual: action required

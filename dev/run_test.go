@@ -48,6 +48,51 @@ func TestRunMissingServer(t *testing.T) {
 	}
 }
 
+// A --http the backend cannot bind is reported before any process starts, so
+// `gombit dev` never leaves Vite up on its own.
+func TestRunRejectsAnUnlistenableHTTPAddrBeforeStartingAnything(t *testing.T) {
+	t.Parallel()
+
+	workDir := writeDevApp(t)
+	var started atomic.Int32
+	counting := func(string, ...string) *exec.Cmd {
+		started.Add(1)
+		return exec.Command("true")
+	}
+	available := func(string) (string, error) { return "/usr/bin/fake", nil }
+
+	for _, addr := range []string{":99999", ":-1", ":0", "not-an-addr"} {
+		started.Store(0)
+		err := Run(context.Background(), Options{
+			WorkDir:      workDir,
+			HTTPAddr:     addr,
+			FrontendHost: DefaultFrontendHost,
+			FrontendPort: DefaultFrontendPort,
+			PollInterval: DefaultPollInterval,
+			ClientOut:    DefaultClientOut,
+			Stdout:       &syncBuffer{},
+			Stderr:       &syncBuffer{},
+			LookPath:     available,
+			Command:      counting,
+		})
+		if err == nil {
+			t.Fatalf("Run(--http %q) = nil, want an error", addr)
+		}
+		if !strings.Contains(err.Error(), addr) {
+			t.Fatalf("Run(--http %q) error = %q, want it to name the address it rejected", addr, err)
+		}
+		// Run cannot know whether its Options came from a flag or from config, so
+		// it names neither. `gombit dev` checks the flag itself through
+		// ValidateFlags first, and that error does name --http (#513 review).
+		if strings.Contains(err.Error(), "--http") {
+			t.Fatalf("Run(--http %q) error = %q, want no claim about a flag Run did not see", addr, err)
+		}
+		if n := started.Load(); n != 0 {
+			t.Fatalf("Run(--http %q) started %d processes, want none", addr, n)
+		}
+	}
+}
+
 func TestRunPrintsServiceTableAndShutsDown(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX sh process-group shutdown")

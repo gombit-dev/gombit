@@ -122,6 +122,7 @@ func TestOriginFromAddr(t *testing.T) {
 		{addr: "127.0.0.1:8080", want: "http://127.0.0.1:8080"},
 		{addr: "0.0.0.0:9000", want: "http://127.0.0.1:9000"},
 		{addr: "8080", want: "http://127.0.0.1:8080"},
+		{addr: "+8080", want: "http://127.0.0.1:8080"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.addr, func(t *testing.T) {
