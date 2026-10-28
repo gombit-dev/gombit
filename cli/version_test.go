@@ -143,6 +143,52 @@ func TestResolveVersionOfAnAppBinary(t *testing.T) {
 	}
 }
 
+// The other cases above reach moduleRelease through a dependency entry; the
+// framework's own binary reaches it through `info.Main`, where a replace is just
+// as much a claim that the code is not a Gombit release. This pins that door so
+// dropping the rule for the main module cannot pass the suite quietly.
+func TestResolveVersionOfTheFrameworkBinaryReadsItsOwnReplacement(t *testing.T) {
+	tests := []struct {
+		name string
+		main debug.Module
+		want string
+	}{
+		{
+			name: "main replaced by a local checkout",
+			main: debug.Module{
+				Path: frameworkmod.ModulePath, Version: "v0.6.0",
+				Replace: &debug.Module{Path: "../gombit"},
+			},
+			want: DevVersion,
+		},
+		{
+			name: "main replaced by a fork",
+			main: debug.Module{
+				Path: frameworkmod.ModulePath, Version: "v0.6.0",
+				Replace: &debug.Module{Path: "github.com/acme/gombit", Version: "v1.2.3"},
+			},
+			want: DevVersion,
+		},
+		{
+			name: "main replaced by the framework at another release",
+			main: debug.Module{
+				Path: frameworkmod.ModulePath, Version: "v0.6.0",
+				Replace: &debug.Module{Path: frameworkmod.ModulePath, Version: "v0.5.0"},
+			},
+			want: "v0.5.0",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stubBuild(t, "", "", "", &debug.BuildInfo{Main: tt.main})
+			if got := resolveVersion(); got != tt.want {
+				t.Fatalf("resolveVersion() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 // The bug report users paste is `gombit version` from the app's own CLI, so
 // the app's dependency is what that output has to name.
 func TestVersionCommandOfAnAppBinaryNamesTheFramework(t *testing.T) {
