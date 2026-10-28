@@ -116,6 +116,11 @@ type Options struct {
 	// NPXBinary runs openapi-typescript, as gombit client generate does.
 	// Default: npx.
 	NPXBinary string
+	// APIPrefix is the live prefix the document's paths are mounted under, as
+	// gombit client generate's option is: the check and the write must use the
+	// same prefix the committed client was generated with, or an app is
+	// reported stale for a difference it never had (#506).
+	APIPrefix string
 	Stderr    io.Writer
 }
 
@@ -313,7 +318,7 @@ func checkClient(ctx context.Context, workDir string, opts Options, resources Re
 // clientDrift are the client files that differ from what source generates.
 func clientDrift(ctx context.Context, workDir string, opts Options, source []byte) ([]string, error) {
 	drifted, err := client.ClientDrift(ctx, client.DriftOptions{
-		WorkDir: workDir, OutDir: opts.OutDir, SpecBytes: source,
+		WorkDir: workDir, OutDir: opts.OutDir, SpecBytes: source, APIPrefix: opts.APIPrefix,
 		NPXBinary: opts.NPXBinary, Stderr: opts.Stderr,
 	})
 	if err != nil {
@@ -373,6 +378,7 @@ func writeClient(ctx context.Context, workDir string, opts Options, spec, cl Res
 	var out strings.Builder
 	err := client.Generate(ctx, client.Options{
 		WorkDir: workDir, SpecPath: source, OutDir: filepath.Join(workDir, filepath.FromSlash(opts.OutDir)),
+		APIPrefix: opts.APIPrefix,
 		NPXBinary: opts.NPXBinary, Stdout: &out, Stderr: opts.Stderr,
 	})
 	switch {

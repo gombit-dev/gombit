@@ -68,11 +68,12 @@ func generateClient(ctx context.Context, opts Options, spec []byte) error {
 		return fmt.Errorf("write spec: %w", err)
 	}
 	return client.Generate(ctx, client.Options{
-		WorkDir:  opts.WorkDir,
-		SpecPath: specPath,
-		OutDir:   opts.ClientOut,
-		Stdout:   opts.Stdout,
-		Stderr:   opts.Stderr,
+		WorkDir:   opts.WorkDir,
+		SpecPath:  specPath,
+		OutDir:    opts.ClientOut,
+		APIPrefix: opts.APIPrefix,
+		Stdout:    opts.Stdout,
+		Stderr:    opts.Stderr,
 	})
 }
 

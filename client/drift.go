@@ -45,6 +45,11 @@ type DriftOptions struct {
 	SpecBytes []byte
 	// Write regenerates committed fixtures instead of comparing them.
 	Write bool
+	// APIPrefix is the live prefix of the document being compared, as
+	// Generate's is. A check that guessed a different prefix from the paths
+	// than the generation that wrote the committed client would report drift
+	// the application never had (#506).
+	APIPrefix string
 	// NPXBinary is the npx executable used by Generate. Default: npx.
 	NPXBinary string
 	Stdout    io.Writer
@@ -195,6 +200,7 @@ func writeSampleFixtures(ctx context.Context, opts DriftOptions, spec []byte) er
 		WorkDir:   opts.WorkDir,
 		SpecPath:  specPath,
 		OutDir:    resolvePath(opts.WorkDir, opts.OutDir),
+		APIPrefix: opts.APIPrefix,
 		NPXBinary: opts.NPXBinary,
 		Stdout:    opts.Stdout,
 		Stderr:    opts.Stderr,
@@ -244,6 +250,7 @@ func clientFilesDrift(ctx context.Context, opts DriftOptions, tmpDir string, spe
 		WorkDir:   tmpDir,
 		SpecPath:  generatedSpecPath,
 		OutDir:    generatedOut,
+		APIPrefix: opts.APIPrefix,
 		NPXBinary: opts.NPXBinary,
 		Stdout:    io.Discard,
 		Stderr:    opts.Stderr,

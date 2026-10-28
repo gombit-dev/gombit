@@ -173,3 +173,27 @@ func TestWatchOpenAPIDoesNotRetryFailedGenerateUntilSpecChanges(t *testing.T) {
 		t.Fatalf("generation error logged %d times, want once per distinct spec", got)
 	}
 }
+
+// The regenerated client's path keys come from the prefix gombit dev was given,
+// which is the application's own configuration: without it the generator has
+// only the document's paths to go by, and /svc/auth/login and /svc/auth/me do
+// not say whether the mount is /svc or /svc/auth (#506). A prefix that does not
+// match the document is refused before openapi-typescript runs, so reporting it
+// here needs no Node.js.
+func TestGenerateClientPassesTheLiveAPIPrefix(t *testing.T) {
+	t.Parallel()
+
+	spec := []byte(`{"openapi":"3.1.0","info":{"title":"auth only","version":"0.0.0"},` +
+		`"paths":{"/svc/auth/login":{"post":{"responses":{"204":{"description":"no content"}}}}}}`)
+	err := generateClient(context.Background(), Options{
+		WorkDir:   t.TempDir(),
+		ClientOut: "frontend/src/api/generated",
+		APIPrefix: "/other",
+	}, spec)
+	if err == nil {
+		t.Fatal("generateClient() error = nil, want the configured prefix reported")
+	}
+	if !strings.Contains(err.Error(), "/other") {
+		t.Fatalf("generateClient() error = %v, want it to name the prefix it was given", err)
+	}
+}
