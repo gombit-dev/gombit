@@ -215,9 +215,11 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   running with only Vite up. `:0`, `:-1` and `:99999` are refused now
   instead of failing the same way mid-run. An address already in
   `host:port` form is untouched. A value dev had to rewrite is printed
-  on stderr, because only the child sees the rewrite: an app reading
-  `GOMBIT_HTTP_ADDR=8080` from `.env` still fails under
-  `go run ./cmd/server`, so keep the `:8080` form in the config.
+  on stderr with both forms, naming no file: dev cannot tell a `--http`
+  flag from `GOMBIT_HTTP_ADDR`, and `--http 8080` is the documented
+  shorthand that needs no change. What the notice does say is that only
+  the child sees the rewrite, so a bare port written in the config is
+  still read verbatim by `go run ./cmd/server`.
 
 ## v0.8.0
 

@@ -248,10 +248,13 @@ mode is not supported. Node.js is required for Vite.
 `--http` is normalised before anything starts: a bare port (`8080`) becomes
 `:8080`, and a port outside 1–65535 is refused up front instead of leaving
 Vite running with a backend that cannot bind. An address that had to be
-rewritten is reported on stderr: `gombit dev` can only fix the copy it hands
-the child, so an app that reads `GOMBIT_HTTP_ADDR=8080` from `.env` still fails
-outside dev — `go run ./cmd/server`, `gombit doctor` and a deployed binary use
-the value verbatim. Write the `:8080` form in `.env`.
+rewritten is reported on stderr with both forms — `using API address ":8080"
+for "8080"` — and points at `GOMBIT_HTTP_ADDR` only as the place a value would
+still be read unrewritten: `gombit dev` can only fix the copy it hands the
+child, so `go run ./cmd/server`, `gombit doctor` and a deployed binary use what
+the config holds verbatim. A bare port passed as `--http 8080` needs no change
+at all, and the notice says no file, because dev cannot tell the two routes
+apart.
 `--http` and the Vite proxy
 origin are written into the child environment
 (`GOMBIT_HTTP_ADDR`, `GOMBIT_DEV_BACKEND`, `GOMBIT_API_PREFIX`,
