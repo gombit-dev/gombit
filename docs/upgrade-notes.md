@@ -206,6 +206,24 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   is the key it always wanted; code that read the parent key reads the
   property path now.
 
+- An app's own `cmd/gombit` reports the framework it was built against, not the application: `gombit version` prints that release and `gombit new` pins it, instead of the app's version. (`app-binary-reports-framework-version`, cli, [#512](https://github.com/gombit-dev/gombit/issues/512))
+
+  It read `debug.BuildInfo.Main`, the framework in the framework's
+  binary but the app in a generated one, so an app tagged `v1.4.5`
+  printed `v1.4.5` and `gombit new` from it pinned the framework to
+  that release; an app's own pseudo-version pinned one the proxy
+  resolves to unrelated commits, silently, because a pseudo-version is
+  a valid module version. A `v2` or later app tag printed too but never
+  pinned the app's version: `ResolveFrameworkVersion` refuses a major
+  the framework's module path could not carry, so `gombit new` warned
+  and wrote `v0.0.0`, as it did for a source build. The framework's
+  `BuildInfo.Deps` entry is used when the main module is not
+  `github.com/gombit-dev/gombit`; a replace by a local checkout or a
+  fork names no release, so those report `dev`, as a `go.mod` read the
+  same way does. An app binary also stops printing `commit` and
+  `built`, which describe the main module. A script that parsed the
+  old app-version output reads a different string now.
+
 ## v0.8.0
 
 ### Manual: action required

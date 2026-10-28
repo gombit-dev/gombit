@@ -7,6 +7,8 @@ import (
 	"runtime/debug"
 	"strings"
 	"testing"
+
+	"github.com/gombit-dev/gombit/internal/frameworkmod"
 )
 
 // stubBuild swaps the build-info source and the ldflags vars for one test, so
@@ -29,7 +31,9 @@ func TestResolveVersionPrefersLdflags(t *testing.T) {
 }
 
 func TestResolveVersionFallsBackToBuildInfo(t *testing.T) {
-	stubBuild(t, "", "", "", &debug.BuildInfo{Main: debug.Module{Version: "v0.4.0"}})
+	stubBuild(t, "", "", "", &debug.BuildInfo{
+		Main: debug.Module{Path: frameworkmod.ModulePath, Version: "v0.4.0"},
+	})
 	if got := resolveVersion(); got != "v0.4.0" {
 		t.Fatalf("resolveVersion() = %q, want v0.4.0", got)
 	}
@@ -38,8 +42,8 @@ func TestResolveVersionFallsBackToBuildInfo(t *testing.T) {
 func TestResolveVersionDevWhenUnstamped(t *testing.T) {
 	for name, info := range map[string]*debug.BuildInfo{
 		"no build info": nil,
-		"devel module":  {Main: debug.Module{Version: "(devel)"}},
-		"empty module":  {Main: debug.Module{Version: ""}},
+		"devel module":  {Main: debug.Module{Path: frameworkmod.ModulePath, Version: "(devel)"}},
+		"empty module":  {Main: debug.Module{Path: frameworkmod.ModulePath, Version: ""}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			stubBuild(t, "", "", "", info)
@@ -50,9 +54,171 @@ func TestResolveVersionDevWhenUnstamped(t *testing.T) {
 	}
 }
 
+// An app's own `cmd/gombit` builds the framework in as a dependency, so its
+// main module is the application: neither "(devel)" nor an app tag is a
+// framework version, and the dependency entry has to be read instead.
+func TestResolveVersionOfAnAppBinary(t *testing.T) {
+	appFrameworkDep := func(mainVersion string, dep debug.Module) *debug.BuildInfo {
+		return &debug.BuildInfo{
+			Main: debug.Module{Path: "github.com/example/rel", Version: mainVersion},
+			Deps: []*debug.Module{&dep},
+		}
+	}
+
+	tests := []struct {
+		name string
+		info *debug.BuildInfo
+		want string
+	}{
+		{
+			name: "app from a checkout, framework released",
+			info: appFrameworkDep("(devel)", debug.Module{Path: frameworkmod.ModulePath, Version: "v0.6.0"}),
+			want: "v0.6.0",
+		},
+		{
+			name: "a tagged app does not report its own version",
+			info: appFrameworkDep("v3.4.5", debug.Module{Path: frameworkmod.ModulePath, Version: "v0.6.0"}),
+			want: "v0.6.0",
+		},
+		{
+			// `go version -m` on an app's cmd/gombit built against the
+			// released framework, captured from a real build.
+			name: "an app's own pseudo-version is not the framework's",
+			info: appFrameworkDep("v0.0.0-20261015013337-ba8fc61f2a66", debug.Module{Path: frameworkmod.ModulePath, Version: "v0.7.1"}),
+			want: "v0.7.1",
+		},
+		{
+			name: "framework pseudo-version",
+			info: appFrameworkDep("(devel)", debug.Module{
+				Path: frameworkmod.ModulePath, Version: "v0.0.0-20260818193315-9abb3c6ecc8c",
+			}),
+			want: "v0.0.0-20260818193315-9abb3c6ecc8c",
+		},
+		{
+			name: "framework replaced by a local checkout is a source build",
+			info: appFrameworkDep("(devel)", debug.Module{
+				Path: frameworkmod.ModulePath, Version: "v0.6.0",
+				Replace: &debug.Module{Path: "../gombit"},
+			}),
+			want: DevVersion,
+		},
+		{
+			name: "framework replaced by a fork is not a framework release",
+			info: appFrameworkDep("(devel)", debug.Module{
+				Path: frameworkmod.ModulePath, Version: "v0.6.0",
+				Replace: &debug.Module{Path: "github.com/acme/gombit", Version: "v1.2.3"},
+			}),
+			want: DevVersion,
+		},
+		{
+			name: "framework replaced by itself at another version",
+			info: appFrameworkDep("(devel)", debug.Module{
+				Path: frameworkmod.ModulePath, Version: "v0.6.0",
+				Replace: &debug.Module{Path: frameworkmod.ModulePath, Version: "v0.5.0"},
+			}),
+			want: "v0.5.0",
+		},
+		{
+			name: "framework dependency built from a checkout",
+			info: appFrameworkDep("(devel)", debug.Module{Path: frameworkmod.ModulePath, Version: "(devel)"}),
+			want: DevVersion,
+		},
+		{
+			name: "app binary with no framework dependency",
+			info: &debug.BuildInfo{
+				Main: debug.Module{Path: "github.com/example/rel", Version: "v1.0.0"},
+				Deps: []*debug.Module{{Path: "github.com/go-gorm/gorm", Version: "v1.25.5"}},
+			},
+			want: DevVersion,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stubBuild(t, "", "", "", tt.info)
+			if got := resolveVersion(); got != tt.want {
+				t.Fatalf("resolveVersion() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// The other cases above reach moduleRelease through a dependency entry; the
+// framework's own binary reaches it through `info.Main`, where a replace is just
+// as much a claim that the code is not a Gombit release. This pins that door so
+// dropping the rule for the main module cannot pass the suite quietly.
+func TestResolveVersionOfTheFrameworkBinaryReadsItsOwnReplacement(t *testing.T) {
+	tests := []struct {
+		name string
+		main debug.Module
+		want string
+	}{
+		{
+			name: "main replaced by a local checkout",
+			main: debug.Module{
+				Path: frameworkmod.ModulePath, Version: "v0.6.0",
+				Replace: &debug.Module{Path: "../gombit"},
+			},
+			want: DevVersion,
+		},
+		{
+			name: "main replaced by a fork",
+			main: debug.Module{
+				Path: frameworkmod.ModulePath, Version: "v0.6.0",
+				Replace: &debug.Module{Path: "github.com/acme/gombit", Version: "v1.2.3"},
+			},
+			want: DevVersion,
+		},
+		{
+			name: "main replaced by the framework at another release",
+			main: debug.Module{
+				Path: frameworkmod.ModulePath, Version: "v0.6.0",
+				Replace: &debug.Module{Path: frameworkmod.ModulePath, Version: "v0.5.0"},
+			},
+			want: "v0.5.0",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stubBuild(t, "", "", "", &debug.BuildInfo{Main: tt.main})
+			if got := resolveVersion(); got != tt.want {
+				t.Fatalf("resolveVersion() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// The bug report users paste is `gombit version` from the app's own CLI, so
+// the app's dependency is what that output has to name.
+func TestVersionCommandOfAnAppBinaryNamesTheFramework(t *testing.T) {
+	stubBuild(t, "", "", "", &debug.BuildInfo{
+		Main: debug.Module{Path: "github.com/example/rel", Version: "(devel)"},
+		Deps: []*debug.Module{{Path: frameworkmod.ModulePath, Version: "v0.6.0"}},
+		Settings: []debug.BuildSetting{
+			{Key: "vcs.revision", Value: "ba8fc61f2a66"},
+			{Key: "vcs.time", Value: "2026-10-15T01:33:37Z"},
+		},
+	})
+
+	stdout := new(bytes.Buffer)
+	if err := ExecuteRoot(context.Background(), NewRoot(stdout, new(bytes.Buffer)), []string{"version"}); err != nil {
+		t.Fatalf("version: %v", err)
+	}
+	out := stdout.String()
+	for _, want := range []string{"gombit:   v0.6.0", "commit:   unknown", "built:    unknown"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("version output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "devel") || strings.Contains(out, "ba8fc61f2a66") {
+		t.Fatalf("version output leaks the app module's build info:\n%s", out)
+	}
+}
+
 func TestResolveCommitAndDateFromVCSSettings(t *testing.T) {
 	stubBuild(t, "", "", "", &debug.BuildInfo{
-		Main: debug.Module{Version: "v0.4.0"},
+		Main: debug.Module{Path: frameworkmod.ModulePath, Version: "v0.4.0"},
 		Settings: []debug.BuildSetting{
 			{Key: "vcs.revision", Value: "abc1234"},
 			{Key: "vcs.time", Value: "2026-08-18T00:00:00Z"},
@@ -63,6 +229,29 @@ func TestResolveCommitAndDateFromVCSSettings(t *testing.T) {
 	}
 	if got := resolveBuildDate(); got != "2026-08-18T00:00:00Z" {
 		t.Fatalf("resolveBuildDate() = %q, want 2026-08-18T00:00:00Z", got)
+	}
+}
+
+// `vcs.revision` and `vcs.time` are recorded for the main module, so in an
+// app's own `cmd/gombit` they name no Gombit commit and must not be printed as
+// if they did.
+func TestResolveCommitAndDateOfAnAppBinaryAreNotAttributedToGombit(t *testing.T) {
+	stubBuild(t, "", "", "", &debug.BuildInfo{
+		Main: debug.Module{Path: "github.com/example/rel", Version: "(devel)"},
+		Deps: []*debug.Module{{Path: frameworkmod.ModulePath, Version: "v0.7.1"}},
+		Settings: []debug.BuildSetting{
+			{Key: "vcs.revision", Value: "ba8fc61f2a66"},
+			{Key: "vcs.time", Value: "2026-10-15T01:33:37Z"},
+		},
+	})
+	if got := resolveVersion(); got != "v0.7.1" {
+		t.Fatalf("resolveVersion() = %q, want v0.7.1", got)
+	}
+	if got := resolveCommit(); got != "" {
+		t.Fatalf("resolveCommit() = %q, want the app's commit withheld", got)
+	}
+	if got := resolveBuildDate(); got != "" {
+		t.Fatalf("resolveBuildDate() = %q, want the app's build date withheld", got)
 	}
 }
 
