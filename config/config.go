@@ -63,6 +63,7 @@ const (
 	envAuthMode                = "GOMBIT_AUTH_MODE"
 	envEmailVerificationTTL    = "GOMBIT_AUTH_EMAIL_VERIFICATION_TTL"
 	envEmailVerificationURL    = "GOMBIT_AUTH_EMAIL_VERIFICATION_URL"
+	envEmailChangeURL          = "GOMBIT_AUTH_EMAIL_CHANGE_URL"
 	envPasswordResetTTL        = "GOMBIT_AUTH_PASSWORD_RESET_TTL"           // #nosec G101 -- environment variable name, not a credential.
 	envPasswordResetURL        = "GOMBIT_AUTH_PASSWORD_RESET_URL"           // #nosec G101 -- environment variable name, not a credential.
 	envPasswordResetKeep       = "GOMBIT_AUTH_PASSWORD_RESET_KEEP_SESSIONS" // #nosec G101 -- environment variable name, not a credential.
@@ -99,6 +100,10 @@ const (
 	// EmailVerificationURLToken is the placeholder an email verification
 	// URL carries where the token goes.
 	EmailVerificationURLToken = "{token}"
+
+	// EmailChangeURLToken is the placeholder an email change URL carries
+	// where the token goes.
+	EmailChangeURLToken = "{token}"
 
 	// DefaultPasswordResetTTL is how long a password reset link stays valid.
 	DefaultPasswordResetTTL = time.Hour
@@ -450,6 +455,13 @@ type AuthConfig struct {
 	// ("https://app.example.com/verify-email?token={token}"): the page that
 	// posts it to POST /auth/verify-email. Empty sends the token alone.
 	EmailVerificationURL string
+	// EmailChangeURL is the link an email change confirmation carries, to
+	// the new address, with EmailChangeURLToken where the token goes
+	// ("https://app.example.com/confirm-email?token={token}"): the page that
+	// posts it to POST /auth/email/change/confirm (AUTH-4). Empty sends the
+	// token alone. The link works as long as a verification link
+	// (EmailVerificationTTL).
+	EmailChangeURL string
 	// PasswordResetTTL is how long a password reset token stays valid
 	// (AUTH-2).
 	PasswordResetTTL time.Duration
@@ -685,6 +697,7 @@ func LoadFromEnv(lookup EnvLookup) (Config, error) {
 	applyString(lookup, envEmailVerificationURL, &cfg.Auth.EmailVerificationURL)
 	applyDuration(lookup, envPasswordResetTTL, "Auth.PasswordResetTTL", &cfg.Auth.PasswordResetTTL, &errs)
 	applyString(lookup, envPasswordResetURL, &cfg.Auth.PasswordResetURL)
+	applyString(lookup, envEmailChangeURL, &cfg.Auth.EmailChangeURL)
 	applyBool(lookup, envPasswordResetKeep, "Auth.PasswordResetKeepSessions", &cfg.Auth.PasswordResetKeepSessions, &errs)
 	applyBool(lookup, envSecuritySanitizeInput, "Security.SanitizeInput", &cfg.Security.SanitizeInput, &errs)
 	if docsEnabledSet {
@@ -900,6 +913,14 @@ func validateAuthConfig(errs *FieldErrors, env Environment, cfg AuthConfig) {
 			Env:     envEmailVerificationURL,
 			Value:   u,
 			Message: "must contain " + EmailVerificationURLToken + " where the verification token goes",
+		})
+	}
+	if u := strings.TrimSpace(cfg.EmailChangeURL); u != "" && !strings.Contains(u, EmailChangeURLToken) {
+		*errs = append(*errs, FieldError{
+			Field:   "Auth.EmailChangeURL",
+			Env:     envEmailChangeURL,
+			Value:   u,
+			Message: "must contain " + EmailChangeURLToken + " where the confirmation token goes",
 		})
 	}
 	if cfg.PasswordResetTTL < 0 {

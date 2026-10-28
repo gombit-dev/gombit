@@ -62,7 +62,8 @@ type PasswordChange struct {
 // session must still be signed in (ErrSessionEnded otherwise); the stored
 // hash must still be the one checked (ErrPasswordChanged otherwise); the new
 // hash is written; every outstanding password reset token of the user stops
-// working (a reset link mailed before the change must not undo it); and,
+// working (a reset link mailed before the change must not undo it), and so
+// does every email change link (asked with the old password); and,
 // unless change.KeepOtherSessions, the user's other sessions end. Any of
 // those errors changes nothing. It returns whether other sessions were
 // revoked; an unknown userID is ErrUserNotFound, and any other error a
@@ -117,7 +118,7 @@ func (s *Service) ChangePassword(ctx context.Context, userID uint, current, newP
 		if err := tx.Model(&User{}).Where("id = ?", user.ID).Update("password_hash", hash).Error; err != nil {
 			return err
 		}
-		if err := voidResetTokensTx(tx, user.ID, 0, now); err != nil {
+		if err := voidPasswordBoundTokensTx(tx, user.ID, 0, now); err != nil {
 			return err
 		}
 		switch {

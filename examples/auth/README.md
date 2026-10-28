@@ -147,18 +147,37 @@ curl -sS -X POST http://127.0.0.1:8080/api/v1/auth/password/change \
 
 See [`docs/auth.md`](../../docs/auth.md#password-change).
 
+## Email change
+
+Signed in, ask for a new address with the current password; it becomes the
+account's email once the link mailed to it (logged in development) is
+confirmed, and the old address is notified:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8080/api/v1/auth/email/change \
+  -H "Authorization: Bearer $ACCESS" -H 'Content-Type: application/json' \
+  -d '{"current_password":"correct-horse-3","new_email":"ada@new.example.com"}'
+# 202 {"data":{"sent":true}}
+
+curl -sS -X POST http://127.0.0.1:8080/api/v1/auth/email/change/confirm \
+  -H 'Content-Type: application/json' -d '{"token":"<token from the log>"}'
+# {"data":{"id":1,"email":"ada@new.example.com","email_verified":true}}
+```
+
+See [`docs/auth.md`](../../docs/auth.md#email-change).
+
 ## Audit trail
 
 Every step above was recorded in `auth_audit_events`: the registration, the
 logins, the logout, the session revocations, the verification, the password
-reset, each with
+reset and change, the email change, each with
 the user, the time, and the request (`X-Request-Id`, client IP, user agent).
 A failed login is recorded too:
 
 ```bash
 curl -sS -X POST http://127.0.0.1:8080/api/v1/auth/login \
   -H 'Content-Type: application/json' -H 'X-Request-Id: audit-demo-1' \
-  -d '{"email":"ada@example.com","password":"wrong-password"}'
+  -d '{"email":"ada@new.example.com","password":"wrong-password"}'
 # auth.login.failed, request_id audit-demo-1, details {"reason":"wrong_password"}
 ```
 

@@ -134,6 +134,38 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/v1/auth/email/change": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post: operations["auth-request-email-change"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/auth/email/change/confirm": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post: operations["auth-confirm-email-change"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/v1/auth/password/change": {
     parameters: {
       query?: never;
@@ -242,6 +274,16 @@ export interface components {
       email: string;
       password: string;
     };
+    AuthEmailChangeBody: {
+      current_password: string;
+      new_email: string;
+    };
+    AuthEmailChangeConfirmBody: {
+      token: string;
+    };
+    AuthEmailChangeRequested: {
+      sent: boolean;
+    };
     AuthPasswordChangeBody: {
       current_password: string;
       keep_other_sessions?: boolean;
@@ -279,6 +321,9 @@ export interface components {
     };
     AuthVerifyEmailBody: {
       token: string;
+    };
+    DataAuthEmailChangeRequested: {
+      data: components["schemas"]["AuthEmailChangeRequested"];
     };
     DataAuthPasswordChangeResult: {
       data: components["schemas"]["AuthPasswordChangeResult"];
@@ -579,6 +624,92 @@ export interface operations {
       };
     };
   };
+  "auth-request-email-change": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["AuthEmailChangeBody"];
+      };
+    };
+    responses: {
+      202: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["DataAuthEmailChangeRequested"];
+        };
+      };
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorEnvelope"];
+        };
+      };
+      429: {
+        headers: {
+          "Retry-After": number;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorEnvelope"];
+        };
+      };
+      500: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorEnvelope"];
+        };
+      };
+      default: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorEnvelope"];
+        };
+      };
+    };
+  };
+  "auth-confirm-email-change": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["AuthEmailChangeConfirmBody"];
+      };
+    };
+    responses: {
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["DataPublicUser"];
+        };
+      };
+      default: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorEnvelope"];
+        };
+      };
+    };
+  };
   "auth-change-password": {
     parameters: {
       query?: never;
@@ -631,9 +762,25 @@ export interface operations {
           "application/json": components["schemas"]["DataAuthPasswordResetRequested"];
         };
       };
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorEnvelope"];
+        };
+      };
       503: {
         headers: {
           "Retry-After": number;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorEnvelope"];
+        };
+      };
+      500: {
+        headers: {
+          [name: string]: unknown;
         };
         content: {
           "application/json": components["schemas"]["ErrorEnvelope"];

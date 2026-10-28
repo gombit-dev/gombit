@@ -296,7 +296,8 @@ func (s *Service) detach(ctx context.Context, timeout time.Duration) (context.Co
 }
 
 // Close finishes the Service's background work (the password reset
-// messages POST /auth/password/forgot accepted): it stops admitting more,
+// messages POST /auth/password/forgot accepted, the email-changed
+// notifications): it stops admitting more,
 // waits for the admitted work until ctx is done, then cancels what is left.
 // framework.App calls it when it stops; an application that mounts the
 // routes itself calls it, on the Service Mount returned, on shutdown. The
