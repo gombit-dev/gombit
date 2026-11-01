@@ -610,6 +610,33 @@ releases:
         summary: "A new app's placeholder `schema.ts` includes the verification operations and `PublicUser.email_verified`; an existing app's generated client gets them from `gombit client generate`."
         refs: [331]
 
+      - id: client-unwrap-no-content
+        kind: manual
+        breaking: true
+        area: client
+        summary: "The generated client's `unwrap` resolves the success `openapi-fetch` reports, including a response with no body, instead of throwing `empty_response`; its result is now `T | undefined`, so a caller that reads a field off it has to narrow first."
+        details: |
+          A handler whose output struct has no `Body` answers 204, and every
+          bodyless success — 204, a HEAD, a zero-length 2xx — reaches the
+          wrapper as `data: undefined`, which it used to reject. `unwrap` now
+          resolves that value and reads the status only to decide success: a
+          non-2xx, or a result carrying an `error`, still throws the D10
+          `ContractError`.
+
+          The signature moves with it: `unwrap<T>(...)` is
+          `Promise<T | undefined>`, because `undefined` is a value it resolves
+          and a declaration that hid it told the caller to read a field of a
+          response that had none. An app picks this up with
+          `gombit client generate` (or `gombit client check --write`), then
+          narrows wherever it consumes the result: a list page reads
+          `listed && Array.isArray(listed.data) ? listed.data : []` rather
+          than `listed.data`, and code that promises a body — a token pair
+          from a login, an upload grant — throws or bails on `undefined`
+          before using it. A `catch` added to swallow `empty_response` around
+          a no-content call can go; code that relied on that throw to notice
+          a missing body has to check the field it expects instead.
+        refs: [505]
+
       - id: audit-trail-schema
         kind: manual
         area: schema
@@ -751,6 +778,38 @@ releases:
         summary: "A new app's placeholder `schema.ts` includes the password change operation; an existing app's generated client gets it from `gombit client generate`."
         refs: [333]
 
+      - id: email-change-names-reserved
+        kind: manual
+        breaking: true
+        area: api
+        summary: "With auth enabled, an app that registers `POST {prefix}/auth/email/change` or `/auth/email/change/confirm`, the `auth-request-email-change` / `auth-confirm-email-change` operations, or the `AuthEmailChangeBody` / `AuthEmailChangeConfirmBody` / `AuthEmailChangeRequested` schema names fails at startup: the framework registers them."
+        details: |
+          Drop the app's own email-change routes, which the framework's
+          replace, or rename them; the same goes for a type Huma names
+          `AuthEmailChangeBody`, `AuthEmailChangeConfirmBody`,
+          `AuthEmailChangeRequested` or `DataAuthEmailChangeRequested`.
+        refs: [334]
+
+      - id: email-change
+        kind: informational
+        area: api
+        summary: "Email change: a signed-in user asks for a new address with their current password (`POST {prefix}/auth/email/change`), and it becomes the account's email, verified, only once the link mailed to it is confirmed (`POST {prefix}/auth/email/change/confirm`); the old address is notified."
+        details: |
+          Until the confirmation the account's email, and every link bound to
+          it, is the old one; a link stops working once the account's email
+          is no longer the one it was asked from, and an address another
+          account took meanwhile is a 409. `GOMBIT_AUTH_EMAIL_CHANGE_URL` is
+          the confirmation page (`{token}`); the link works as long as a
+          verification link. `auth.Service.RequestEmailChange` and
+          `ConfirmEmailChange` are the same flow for an app's own code.
+        refs: [334]
+
+      - id: client-schema-email-change
+        kind: informational
+        area: client
+        summary: "A new app's placeholder `schema.ts` includes the email change operations (and declares the forgot route's 422 and 500 responses); an existing app's generated client gets them from `gombit client generate`."
+        refs: [334]
+
       - id: expired-rotated-refresh-token-no-cascade
         kind: informational
         area: security
@@ -833,3 +892,25 @@ releases:
           `config.DotEnvKeys` reports to this tooling's own configuration
           analysis.
         refs: [507]
+
+      - id: app-binary-reports-framework-version
+        kind: informational
+        area: cli
+        summary: "An app's own `cmd/gombit` reports the framework it was built against, not the application: `gombit version` prints that release and `gombit new` pins it, instead of the app's version."
+        details: |
+          It read `debug.BuildInfo.Main`, the framework in the framework's
+          binary but the app in a generated one, so an app tagged `v1.4.5`
+          printed `v1.4.5` and `gombit new` from it pinned the framework to
+          that release; an app's own pseudo-version pinned one the proxy
+          resolves to unrelated commits, silently, because a pseudo-version is
+          a valid module version. A `v2` or later app tag printed too but never
+          pinned the app's version: `ResolveFrameworkVersion` refuses a major
+          the framework's module path could not carry, so `gombit new` warned
+          and wrote `v0.0.0`, as it did for a source build. The framework's
+          `BuildInfo.Deps` entry is used when the main module is not
+          `github.com/gombit-dev/gombit`; a replace by a local checkout or a
+          fork names no release, so those report `dev`, as a `go.mod` read the
+          same way does. An app binary also stops printing `commit` and
+          `built`, which describe the main module. A script that parsed the
+          old app-version output reads a different string now.
+        refs: [512]

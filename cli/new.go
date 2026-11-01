@@ -84,7 +84,7 @@ at your framework checkout. Override with --framework-version.`,
 	cmd.Flags().StringVar(&ui, "ui", scaffold.DefaultUI, "UI preset: minimal (headless default) or mui (MUI CRUD screens)")
 	cmd.Flags().StringVar(&module, "module", "", "Go module path (default github.com/example/<name>)")
 	cmd.Flags().StringVar(&frameworkVersion, "framework-version", "",
-		"gombit version the generated go.mod requires (default: this binary's version)")
+		"gombit version the generated go.mod requires (default: the gombit version this binary reports)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print files that would be written without writing")
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite files in a non-empty destination")
 	cmd.Flags().BoolVar(&skipTidy, "skip-tidy", false, "do not run go mod tidy in the generated app (no network)")

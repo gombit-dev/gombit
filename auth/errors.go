@@ -3,7 +3,9 @@ package auth
 import (
 	"errors"
 	"fmt"
+	"net/mail"
 	"strings"
+	"unicode/utf8"
 )
 
 var (
@@ -36,4 +38,19 @@ var ErrEmailTaken = errEmailTaken
 
 func normalizeEmail(email string) string {
 	return strings.ToLower(strings.TrimSpace(email))
+}
+
+// maxEmailLength is the users.email column's size, in characters.
+const maxEmailLength = 255
+
+// validEmail reports whether email is a bare RFC 5322 address (no display
+// name, nothing around it) that fits the email column: what the routes'
+// format:"email" and maxLength check, so a Go caller of the service gets
+// the same answer as the API, on every database.
+func validEmail(email string) bool {
+	if email == "" || utf8.RuneCountInString(email) > maxEmailLength {
+		return false
+	}
+	addr, err := mail.ParseAddress(email)
+	return err == nil && addr.Name == "" && addr.Address == email
 }

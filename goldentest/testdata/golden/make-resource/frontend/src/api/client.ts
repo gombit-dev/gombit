@@ -54,6 +54,10 @@ export function createAppClient(): ApiClient {
             body: { refresh_token: currentRefresh },
           }),
         );
+        if (!rotated) {
+          clearSession();
+          return false;
+        }
         applyTokenPair(rotated.data);
         return true;
       } catch {

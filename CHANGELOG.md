@@ -12,6 +12,31 @@ version.
 
 ### Added
 
+- [Email change](docs/auth.md#email-change) (AUTH-4), in both auth modes. A
+  signed-in user asks for a new address with their current password (`POST
+  /auth/email/change`: a 422 on `current_password` for a wrong one, a 409
+  for an address another account has, at most one message a minute), and a
+  single-use link goes to the new address; posting it (`POST
+  /auth/email/change/confirm`, public) makes the new address the account's
+  email, verified. Until then nothing changes: the new address is never
+  trusted before it is proven. A link works only while the account's email
+  is the one it was asked from, the unique email settles racing changes
+  (409 for the loser), a request racing a password reset or change is
+  refused and a reset or change voids outstanding change links, confirming
+  stops every other link of the user for good (an email changed back
+  revives none), the service validates the address as the route does, and the
+  old address gets a security notification. Audited
+  (`auth.email.change_requested` / `changed` / `change_failed`).
+  `GOMBIT_AUTH_EMAIL_CHANGE_URL` is the confirmation page.
+  `auth.Service.RequestEmailChange` / `ConfirmEmailChange` are the same flow
+  from Go.
+  - **Breaking (api):** the framework registers the two routes, their
+    `auth-request-email-change` / `auth-confirm-email-change` operation IDs
+    and the `AuthEmailChangeBody` / `AuthEmailChangeConfirmBody` /
+    `AuthEmailChangeRequested` schemas; an app that registers its own panics
+    at startup
+  ([#334](https://github.com/gombit-dev/gombit/issues/334)).
+
 - [Password change](docs/auth.md#password-change) (AUTH-3), in both auth
   modes. `POST /auth/password/change` sets a signed-in user's password
   given the current one (a wrong one is a 422 on `current_password`),
@@ -150,6 +175,20 @@ version.
   One equal to the stored value rounded the same way (the admin UI sending
   the field back, an integer field or a belongs_to key alike) keeps the
   stored value ([#448](https://github.com/gombit-dev/gombit/issues/448)).
+- The generated TypeScript client's `unwrap()` resolves the success value
+  `openapi-fetch` parsed instead of throwing `ContractError` with code
+  `empty_response` when that value is `undefined`. A Huma handler whose output
+  struct has no `Body` answers `204`, and every bodyless success — `204`, a
+  `HEAD`, a zero-length `2xx` — reaches the wrapper as `data: undefined`, so a
+  delete or an action endpoint looked like a failure to the caller and the UI.
+  `unwrap` no longer reads the status to second-guess the client: a 2xx
+  resolves its `data`, `undefined` included, and a non-2xx, or a result
+  carrying an `error`, still throws the D10 `ContractError`. The generated
+  signature moves with the behavior — `unwrap<T>` is now
+  `Promise<T | undefined>` — so a caller reads a field of the success value
+  only after narrowing the `undefined` a bodyless response resolves, the way
+  the scaffolded pages and resource forms do
+  ([#505](https://github.com/gombit-dev/gombit/issues/505)).
 - An already-rotated refresh token that has expired is now a 401 that leaves
   the user's other sessions alone. Presenting a rotated token again still
   revokes all of them while it is unexpired, so a stolen token is detected
@@ -211,6 +250,25 @@ version.
   `config.DotEnvKeys` reports to the upgrade analysis, so matching `sh` there
   is a separate decision
   ([#507](https://github.com/gombit-dev/gombit/issues/507)).
+- `gombit version` and `gombit new` from a scaffolded app's own `cmd/gombit`
+  report the framework it was built against, not the application. The version
+  logic read `debug.BuildInfo.Main` unconditionally, which is the framework in
+  its own binary but the *app* in a generated one: an app built from a checkout
+  printed `dev` while its `go.mod` required
+  `github.com/gombit-dev/gombit v0.6.0`, an app tagged `v1.4.5` printed
+  `v1.4.5` and `gombit new` from that binary pinned the framework to that
+  release — and an app's own pseudo-version pinned it silently, since one is a
+  valid module version. A `v2` or later app tag printed the app's version too,
+  but never pinned it: `ResolveFrameworkVersion` refuses a major the
+  framework's module path could not carry, so `gombit new` warned and wrote
+  `v0.0.0`, as it did for a checkout. When the main
+  module is not `github.com/gombit-dev/gombit`, the framework's entry in
+  `BuildInfo.Deps` is used instead. A replace by a local checkout or by a fork
+  names no framework release, so those still report `dev` — the same rule
+  `internal/frameworkmod` applies to a `go.mod`, read from build info. An app
+  binary also stops printing `commit` and `built`: those settings are recorded
+  for the main module, so they would name the app's repository beside a Gombit
+  release ([#512](https://github.com/gombit-dev/gombit/issues/512)).
 
 ### Changed
 

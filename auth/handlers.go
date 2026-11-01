@@ -209,6 +209,11 @@ func declareRetryAfter(api huma.API, path string, status int, description string
 	}
 }
 
+// invalidField is the D10 validation error for one field's one message.
+func invalidField(ctx context.Context, field, msg string) error {
+	return contract.WithContext(ctx, contract.Validation("The request contains invalid fields.", map[string][]string{field: {msg}}))
+}
+
 func mapServiceError(ctx context.Context, err error) error {
 	var tooSoon resendTooSoonError
 	var busy backgroundBusyError
@@ -223,19 +228,13 @@ func mapServiceError(ctx context.Context, err error) error {
 	case errors.Is(err, errEmailTaken):
 		return contract.WithContext(ctx, contract.Conflict("email already registered"))
 	case errors.As(err, &policy):
-		return contract.WithContext(ctx, contract.Validation("The request contains invalid fields.", map[string][]string{
-			policy.Field: {policy.Err.Error()},
-		}))
+		return invalidField(ctx, policy.Field, policy.Err.Error())
 	case errors.Is(err, errPasswordTooLong), errors.Is(err, errPasswordRequired):
-		return contract.WithContext(ctx, contract.Validation("The request contains invalid fields.", map[string][]string{
-			"password": {err.Error()},
-		}))
+		return invalidField(ctx, "password", err.Error())
 	case errors.Is(err, errSessionEnded):
 		return contract.WithContext(ctx, contract.Authentication("session has ended"))
 	case errors.Is(err, errWrongCurrentPassword):
-		return contract.WithContext(ctx, contract.Validation("The request contains invalid fields.", map[string][]string{
-			"current_password": {"incorrect password"},
-		}))
+		return invalidField(ctx, "current_password", "incorrect password")
 	case errors.Is(err, errPasswordChanged):
 		return contract.WithContext(ctx, contract.Conflict("the password changed meanwhile; try again with the current one"))
 	case errors.Is(err, errSessionNotFound):
@@ -243,9 +242,7 @@ func mapServiceError(ctx context.Context, err error) error {
 	case errors.Is(err, errUserNotFound):
 		return contract.WithContext(ctx, contract.Authentication("invalid access token"))
 	case errors.Is(err, errInvalidOneTimeToken):
-		return contract.WithContext(ctx, contract.Validation("The request contains invalid fields.", map[string][]string{
-			"token": {"invalid or expired token"},
-		}))
+		return invalidField(ctx, "token", "invalid or expired token")
 	case errors.Is(err, errAlreadyVerified):
 		return contract.WithContext(ctx, contract.Conflict("email address is already verified"))
 	case errors.As(err, &tooSoon):

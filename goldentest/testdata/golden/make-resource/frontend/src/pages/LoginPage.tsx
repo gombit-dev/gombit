@@ -33,6 +33,9 @@ export function LoginPage() {
           body: { email: values.email, password: values.password },
         }),
       );
+      if (!result) {
+        throw new Error("login returned no token pair");
+      }
       applyTokenPair(result.data);
       navigate("/");
     } catch (err: unknown) {

@@ -189,3 +189,6 @@ func SetPasswordChangeVerifiedHook(s *Service, fn func()) { s.onPasswordChangeVe
 
 
 
+
+// HasherOf is s's password hasher.
+func HasherOf(s *Service) Hasher { return s.hasher }

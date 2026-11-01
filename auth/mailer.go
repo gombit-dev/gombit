@@ -39,6 +39,12 @@ const (
 	MessageVerifyEmail MessageKind = "verify_email"
 	// MessageResetPassword carries a link to set a new password.
 	MessageResetPassword MessageKind = "reset_password"
+	// MessageChangeEmail, to the new address, carries the link that
+	// confirms an email change.
+	MessageChangeEmail MessageKind = "change_email"
+	// MessageEmailChanged, to the old address, tells its owner the
+	// account's email was changed (a security notification, no token).
+	MessageEmailChanged MessageKind = "email_changed"
 )
 
 // Message is one lifecycle email. Subject and Text are a plain default a
