@@ -88,6 +88,11 @@ func runEmailChangeService(t *testing.T, db *database.DB) {
 		if !ok || note.Kind != auth.MessageEmailChanged || note.Token != "" || strings.Contains(note.Text, newEmail) {
 			t.Fatalf("the old address's notification = %+v", note)
 		}
+		// It advises nothing the old address cannot do: a reset looks the
+		// account up by its current email, so it would never arrive.
+		if strings.Contains(strings.ToLower(note.Text), "reset") || !strings.Contains(note.Text, "support") {
+			t.Fatalf("the notification's advice = %q, want support, not a reset", note.Text)
+		}
 		if _, err := e.svc.ConfirmEmailChange(ctx, token); !errors.Is(err, auth.ErrInvalidToken) {
 			t.Fatalf("the token again = %v, want ErrInvalidToken", err)
 		}

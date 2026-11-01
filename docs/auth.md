@@ -349,7 +349,11 @@ curl -sX POST localhost:8080/api/v1/auth/email/change/confirm \
   changes cannot hijack an account.
 - **The old address** gets a security notification once the change is
   confirmed (`msg.Kind` `email_changed`, through the app's `auth.Mailer`),
-  naming no new address. It is sent in the background, best effort: a
+  naming no new address. It says that the old address no longer signs in
+  to the account and cannot recover it (a password reset looks the account
+  up by its current email), and points to the site's support: there is no
+  revert link. An app's `auth.Mailer` can replace the text by `msg.Kind`,
+  with its own support contact. It is sent in the background, best effort: a
   failure is logged and does not undo the change, and a slow mailer does
   not hold up the confirmation (when the background work is busy, it is
   sent with the confirmation instead).

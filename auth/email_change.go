@@ -109,9 +109,11 @@ func (s *Service) RequestEmailChange(ctx context.Context, userID uint, current, 
 
 // ConfirmEmailChange consumes an email change token and makes the address
 // it was mailed to the user's email, verified (the token proves it). It
-// works only while the user's email is still the one the change was asked
-// from: once that changed (another change, an admin), the token is
-// ErrInvalidToken, like an unknown, expired, used or superseded one. An
+// works only while the user's email is the one the change was asked from
+// (FromEmail): while it is another, the token is ErrInvalidToken, like an
+// unknown, expired, used or superseded one. That check alone is reversible
+// (an email written back by another path matches again); the voiding below
+// is what stops links for good, on this path. An
 // address another account took meanwhile is ErrEmailTaken (first come,
 // first served: the unique email decides), and changes nothing. Every
 // other one-time link of the user stops working for good, whatever its
@@ -169,7 +171,7 @@ func (s *Service) notifyEmailChanged(ctx context.Context, oldEmail string) {
 		Kind:    MessageEmailChanged,
 		To:      oldEmail,
 		Subject: "Your account's email address was changed",
-		Text:    "The email address of the account that used this address was changed. If you did not change it, reset your password and contact the site's support.\n",
+		Text:    "The email address of the account that used this address was changed. This address no longer signs in to the account and cannot recover it: if you did not make this change, contact the site's support.\n",
 	}
 	send := func(ctx context.Context) {
 		err := s.mailer.Send(ctx, msg)

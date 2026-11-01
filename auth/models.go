@@ -83,7 +83,11 @@ const (
 // the row keeps its SHA-256. Email is the address it was mailed to, the one
 // it proves; FromEmail is the user's email when it was issued (the same for
 // every purpose but an email change, whose token goes to the new address).
-// A token stops working once the user's email is no longer FromEmail.
+// A token works only while the user's email is FromEmail: a check that
+// holds again if the email is written back to it. Only ConfirmEmailChange
+// (which voids the user's other tokens) and the password flows (which void
+// the reset and change links) stop tokens for good; an Email written by
+// another path (an app's own update) is guarded by this check alone.
 //
 // A token is pending until the message carrying it was delivered to the
 // Mailer (SentAt): a pending token does not work. Delivery activates it and
