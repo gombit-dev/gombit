@@ -114,6 +114,13 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   `AuthPasswordChangeBody`, `AuthPasswordChangeResult` or
   `DataAuthPasswordChangeResult`.
 
+- **Breaking.** With auth enabled, an app that registers `POST {prefix}/auth/email/change` or `/auth/email/change/confirm`, the `auth-request-email-change` / `auth-confirm-email-change` operations, or the `AuthEmailChangeBody` / `AuthEmailChangeConfirmBody` / `AuthEmailChangeRequested` schema names fails at startup: the framework registers them. (`email-change-names-reserved`, api, [#334](https://github.com/gombit-dev/gombit/issues/334))
+
+  Drop the app's own email-change routes, which the framework's
+  replace, or rename them; the same goes for a type Huma names
+  `AuthEmailChangeBody`, `AuthEmailChangeConfirmBody`,
+  `AuthEmailChangeRequested` or `DataAuthEmailChangeRequested`.
+
 - **Breaking.** A `.env` value no longer swallows a trailing comment, a byte order mark no longer hides the first key, and a `.env` that cannot be read fails the load. (`dotenv-comments-and-byte-order-mark`, behavior, [#507](https://github.com/gombit-dev/gombit/issues/507))
 
   Check a `.env` you already run with. A `#` with whitespace before it
@@ -132,13 +139,6 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   literally named `export KEY`, because that literal grammar is the one
   `config.DotEnvKeys` reports to this tooling's own configuration
   analysis.
-
-- **Breaking.** With auth enabled, an app that registers `POST {prefix}/auth/email/change` or `/auth/email/change/confirm`, the `auth-request-email-change` / `auth-confirm-email-change` operations, or the `AuthEmailChangeBody` / `AuthEmailChangeConfirmBody` / `AuthEmailChangeRequested` schema names fails at startup: the framework registers them. (`email-change-names-reserved`, api, [#334](https://github.com/gombit-dev/gombit/issues/334))
-
-  Drop the app's own email-change routes, which the framework's
-  replace, or rename them; the same goes for a type Huma names
-  `AuthEmailChangeBody`, `AuthEmailChangeConfirmBody`,
-  `AuthEmailChangeRequested` or `DataAuthEmailChangeRequested`.
 
 ### Informational
 
