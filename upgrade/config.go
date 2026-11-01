@@ -348,7 +348,9 @@ func readEnvFiles(workDir string) (files []*envFile, unreadable []string, err er
 		body := data
 		if f.Template {
 			// A byte order mark belongs to the file, not its first line:
-			// kept apart, and written back first.
+			// kept apart, and written back first. config.scanDotEnv applies
+			// the same rule when it reads keys, so only this file's own body
+			// and rewrite depend on the split here.
 			f.bom = bytes.HasPrefix(data, utf8BOM)
 			body = bytes.TrimPrefix(data, utf8BOM)
 		}
