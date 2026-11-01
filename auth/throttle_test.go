@@ -106,6 +106,37 @@ func runThrottleService(t *testing.T, db *database.DB) {
 		}
 	})
 
+	t.Run("a spelling the database folds is not the account", func(t *testing.T) {
+		// MySQL's default collation (utf8mb4_0900_ai_ci) finds the account
+		// for these; the throttle counts each as another email. Only the
+		// account's own email may authenticate, or every variant would be
+		// a fresh allowance of guesses against it.
+		e := newThrottleEnv(t, db, nil)
+		user, _ := e.register(t, "throttle-folded")
+		local, domain, _ := strings.Cut(user.Email, "@")
+		variants := []string{
+			local[:1] + "\u200b" + local[1:] + "@" + domain, // zero-width space
+			local[:1] + "\u00ad" + local[1:] + "@" + domain, // soft hyphen
+			local + "@" + strings.Replace(domain, "e", "\u00e9", 1),
+			"\uff54" + local[1:] + "@" + domain, // fullwidth t
+		}
+		for _, variant := range variants {
+			if _, err := e.svc.Authenticate(from("198.51.100.50"), variant, testPassword); !errors.Is(err, auth.ErrInvalidCredentials) {
+				t.Fatalf("Authenticate(%q) with the right password = %v, want invalid credentials", variant, err)
+			}
+			e.mail.Reset()
+			if err := e.svc.RequestPasswordReset(ctx, variant); err != nil {
+				t.Fatal(err)
+			}
+			if msgs := e.mail.Messages(); len(msgs) != 0 {
+				t.Fatalf("a reset for %q mailed %+v", variant, msgs)
+			}
+		}
+		if _, err := e.svc.Authenticate(from("198.51.100.50"), user.Email, testPassword); err != nil {
+			t.Fatalf("the account's own email = %v", err)
+		}
+	})
+
 	t.Run("an account and an address that is none are throttled alike", func(t *testing.T) {
 		e := newThrottleEnv(t, db, nil)
 		attacker := from("198.51.100.8")
@@ -341,6 +372,102 @@ func runThrottleService(t *testing.T, db *database.DB) {
 		throttled(t, err, "LoginPerAccountAddress")
 	})
 
+	t.Run("a refused request writes no counter", func(t *testing.T) {
+		p := auth.DefaultThrottlePolicy()
+		p.LoginPerAddress = auth.ThrottleLimit{Limit: 10, Window: 15 * time.Minute}
+		store := &keyCounter{Cache: cache.NewMemory()}
+		e := newThrottleEnv(t, db, nil, auth.WithThrottlePolicy(p), auth.WithThrottleStore(store))
+		attacker := from("198.51.100.60")
+		refusals := 0
+		for i := range 500 {
+			_, err := e.svc.Authenticate(attacker, fmt.Sprintf("spray-%d@example.com", i), "x")
+			if errors.Is(err, auth.ErrTooManyAttempts) {
+				refusals++
+			}
+		}
+		// The ten accepted attempts wrote three counters each (the
+		// address's one shared); the 490 refused ones, none.
+		if refusals != 490 || store.keys() > 21 {
+			t.Fatalf("refusals = %d, counter keys written = %d; want 490 and at most 21", refusals, store.keys())
+		}
+		// Refused by a later rule (LoginPerAccount, after the address and
+		// pair rules): every request a fresh address, none of them writes
+		// the address or pair counters it names.
+		p.LoginPerAccount = auth.ThrottleLimit{Limit: 3, Window: time.Hour}
+		spread := &keyCounter{Cache: cache.NewMemory()}
+		e = newThrottleEnv(t, db, nil, auth.WithThrottlePolicy(p), auth.WithThrottleStore(spread))
+		for i := range 300 {
+			_, _ = e.svc.Authenticate(from(fmt.Sprintf("10.%d.%d.1", i/250, i%250)), "spread@example.com", "x")
+		}
+		if spread.keys() > 7 {
+			t.Fatalf("counter keys written by a spread refused per account = %d, want at most 7 (the 3 accepted attempts')", spread.keys())
+		}
+	})
+
+	t.Run("a known client is not held by LoginPerAccount", func(t *testing.T) {
+		p := auth.DefaultThrottlePolicy()
+		p.LoginPerAccount = auth.ThrottleLimit{Limit: 3, Window: time.Hour}
+		e := newThrottleEnv(t, db, nil, auth.WithThrottlePolicy(p))
+		user, _ := e.register(t, "throttle-known")
+		home := from("203.0.113.70")
+		if _, err := e.svc.Authenticate(home, user.Email, testPassword); err != nil {
+			t.Fatal(err)
+		}
+		// Others fill the account's rule from addresses of their own.
+		for i := range 3 {
+			_, _ = e.svc.Authenticate(from(fmt.Sprintf("198.51.100.%d", 70+i)), user.Email, "guess")
+		}
+		_, err := e.svc.Authenticate(from("198.51.100.79"), user.Email, testPassword)
+		throttled(t, err, "LoginPerAccount")
+		// The owner's own address signed in before: it still may.
+		if _, err := e.svc.Authenticate(home, user.Email, testPassword); err != nil {
+			t.Fatalf("the known address = %v", err)
+		}
+		// A reset empties the rule: a new address may try again.
+		e.clock.now = e.clock.now.Add(2 * time.Minute)
+		if _, err := e.svc.ResetPassword(ctx, e.resetToken(t, user), "a-reset-horse"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := e.svc.Authenticate(from("198.51.100.80"), user.Email, "a-reset-horse"); err != nil {
+			t.Fatalf("a new address after the reset = %v", err)
+		}
+	})
+
+	t.Run("registrations from one address", func(t *testing.T) {
+		p := auth.DefaultThrottlePolicy()
+		p.RegisterPerAddress = auth.ThrottleLimit{Limit: 2, Window: time.Hour}
+		e := newThrottleEnv(t, db, nil, auth.WithThrottlePolicy(p))
+		hasher := &countingHasher{}
+		auth.SetHasher(e.svc, hasher)
+		signup := from("198.51.100.90")
+		for i := range 2 {
+			if _, err := e.svc.Register(signup, fmt.Sprintf("signup-%d-%d@example.com", i, time.Now().UnixNano()), testPassword); err != nil {
+				t.Fatal(err)
+			}
+		}
+		_, err := e.svc.Register(signup, fmt.Sprintf("signup-x-%d@example.com", time.Now().UnixNano()), testPassword)
+		throttled(t, err, "RegisterPerAddress")
+		if hasher.hashes.Load() != 2 {
+			t.Fatalf("passwords hashed = %d, want 2: a refused registration hashes nothing", hasher.hashes.Load())
+		}
+		// A Go caller (no address) and another address are not held.
+		if _, err := e.svc.Register(ctx, fmt.Sprintf("signup-go-%d@example.com", time.Now().UnixNano()), testPassword); err != nil {
+			t.Fatalf("a Go caller = %v", err)
+		}
+	})
+
+	t.Run("a cache that keeps nothing still throttles", func(t *testing.T) {
+		e := newThrottleEnv(t, db, nil, auth.WithThrottleStore(cache.Namespace("app", cache.Noop{})))
+		attacker := from("198.51.100.95")
+		for range 5 {
+			if _, err := e.svc.Authenticate(attacker, "noop-store@example.com", "x"); !errors.Is(err, auth.ErrInvalidCredentials) {
+				t.Fatal(err)
+			}
+		}
+		_, err := e.svc.Authenticate(attacker, "noop-store@example.com", "x")
+		throttled(t, err, "LoginPerAccountAddress")
+	})
+
 	t.Run("instances sharing a cache share the counts", func(t *testing.T) {
 		shared := cache.NewMemory()
 		a := newThrottleEnv(t, db, nil, auth.WithThrottleStore(shared))
@@ -359,6 +486,38 @@ func runThrottleService(t *testing.T, db *database.DB) {
 		_, err := b.svc.Authenticate(attacker, "shared@example.com", "x")
 		throttled(t, err, "LoginPerAccountAddress")
 	})
+}
+
+// keyCounter records the distinct keys written to a cache.
+type keyCounter struct {
+	cache.Cache
+	mu      sync.Mutex
+	written map[string]bool
+}
+
+func (k *keyCounter) note(key string) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.written == nil {
+		k.written = map[string]bool{}
+	}
+	k.written[key] = true
+}
+
+func (k *keyCounter) keys() int {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return len(k.written)
+}
+
+func (k *keyCounter) Set(ctx context.Context, key string, value any, ttl time.Duration) error {
+	k.note(key)
+	return k.Cache.Set(ctx, key, value, ttl)
+}
+
+func (k *keyCounter) IncrementTTL(ctx context.Context, key string, delta int64, ttl time.Duration) (int64, error) {
+	k.note(key)
+	return cache.IncrementTTL(ctx, k.Cache, key, delta, ttl)
 }
 
 // failingCache fails every call: a cache that is down.
@@ -465,6 +624,7 @@ func TestThrottleIgnoresUntrustedForwardedFor(t *testing.T) {
 func TestThrottledRoutesOpenAPI(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	paths := []string{
+		"/api/v1/auth/register",
 		"/api/v1/auth/login",
 		"/api/v1/auth/password/forgot",
 		"/api/v1/auth/password/reset",

@@ -126,6 +126,10 @@ func (s *Service) now() time.Time {
 // logged, not returned: POST /auth/verify-email/resend asks again).
 // Duplicate emails return errEmailTaken.
 func (s *Service) Register(ctx context.Context, email, password string) (User, error) {
+	// Every registration counts (RegisterPerAddress), before the hash.
+	if _, err := s.throttle.reserve(ctx, throttleRule{name: "RegisterPerAddress", limit: s.throttle.policy.RegisterPerAddress, subject: requestAddress(ctx)}); err != nil {
+		return User{}, err
+	}
 	user, err := s.createUser(ctx, email, password, false)
 	if err != nil {
 		return User{}, err
@@ -183,9 +187,8 @@ func (s *Service) Authenticate(ctx context.Context, email, password string) (Use
 	if err != nil {
 		return User{}, err
 	}
-	var user User
-	err = s.db.WithContext(ctx).Where("email = ?", email).First(&user).Error
-	if err != nil {
+	user, err := findUserByEmail(s.db.WithContext(ctx), email)
+	if err != nil || user.ID == 0 {
 		s.compareDummy(password)
 		// No target: the attempted address is not recorded.
 		s.Audit(ctx, AuditEvent{Action: AuditLoginFailed, Details: details("reason", "unknown_account")})
@@ -197,6 +200,7 @@ func (s *Service) Authenticate(ctx context.Context, email, password string) (Use
 	}
 	res.refundExcept(pair.name)
 	s.throttle.clear(ctx, pair)
+	s.throttle.markKnown(ctx, pair)
 	return user, nil
 }
 

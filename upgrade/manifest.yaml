@@ -813,16 +813,21 @@ releases:
       - id: credential-throttles
         kind: manual
         area: security
-        summary: "The credential endpoints are throttled by default: logins, password reset requests, one-time tokens, current-password checks and verification messages answer 429 with `Retry-After` past their limits."
+        summary: "The credential endpoints are throttled by default: registrations, logins, password reset requests, one-time tokens, current-password checks and verification messages answer 429 with `Retry-After` past their limits."
         details: |
           Each rule counts one subject in a sliding window (docs/auth.md,
           "Abuse protection"): failed logins per email and client address
-          (5 / 15 min), per address (100 / 15 min) and per email (100 / hour),
-          reset requests per address, invalid tokens per address, wrong
+          (5 / 15 min), per address (100 / 15 min) and per email (100 / hour;
+          an address that signed in to the account before is exempt),
+          registrations and reset requests per address, invalid tokens per
+          address, wrong
           current passwords and verification messages per user. Behind a
           proxy or load balancer, list it in `GOMBIT_HTTP_TRUSTED_PROXIES`:
           otherwise every client counts as the proxy's address. A client
-          should honor `Retry-After`. The counts live in the app's cache
+          should honor `Retry-After`. A login or reset request now needs the
+          account's exact email: on MySQL, a spelling the column's collation
+          folds (a zero-width character, an accent) no longer signs in to
+          the account. The counts live in the app's cache
           (`GOMBIT_CACHE_DRIVER=redis` shares them between instances).
           `auth.WithThrottlePolicy` changes the limits;
           `GOMBIT_AUTH_THROTTLE_DISABLED=true` turns them off.

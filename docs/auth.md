@@ -387,25 +387,42 @@ bcrypt, the token's transaction):
 | `LoginPerAccountAddress` | failed logins for one email from one client address | 5 / 15 min |
 | `LoginPerAddress` | failed logins from one client address, any email (credential stuffing) | 100 / 15 min |
 | `LoginPerAccount` | failed logins for one email, any address (guessing spread over addresses) | 100 / hour |
+| `RegisterPerAddress` | `POST /auth/register` from one client address, every request (each hashes a password and mails a verification link) | 20 / hour |
 | `PasswordResetPerAddress` | `POST /auth/password/forgot` from one client address, any email | 20 / 15 min |
 | `TokenPerAddress` | invalid tokens posted to `/auth/verify-email`, `/auth/password/reset`, `/auth/email/change/confirm` from one client address | 30 / 15 min |
 | `CurrentPasswordPerUser` | wrong current passwords of one user (`/auth/password/change`, `/auth/email/change`) | 5 / 15 min |
 | `VerificationPerUser` | verification messages sent to one user (on top of the one-a-minute resend wait) | 10 / hour |
 
-- **Nothing to enumerate.** A login is counted by the email as typed,
-  whether or not it is an account, and a reset request by the client
-  address alone: a 429 says nothing about which addresses have accounts.
+- **Nothing to enumerate.** A login is counted by the email as typed
+  (normalized), whether or not it is an account, and a reset request by
+  the client address alone: a 429 says nothing about which addresses have
+  accounts.
+- **One email, one identity.** Only the account's own email signs in or
+  asks for a reset, exactly as stored: on a database whose collation folds
+  more (MySQL's default ignores zero-width characters and accents, and
+  folds fullwidth letters), a spelling it folds is not the account, so it
+  cannot be a fresh allowance of guesses against it.
 - **No bans.** No rule shuts an address out: the per-address limits are
   wide, for the users behind one NAT or proxy, and count failures only; the
   tight one is per address *and* email. A successful login does not count,
-  and clears that address's failures for the email. `LoginPerAccount` can
-  be spent by anyone, so the owner of an account under attack may wait too,
-  at most a window or two; it bounds a guessing that rotates addresses.
+  and clears that address's failures for the email.
+- **`LoginPerAccount` can be filled by anyone.** It bounds a guessing that
+  rotates addresses, but a handful of addresses failing at their own limit
+  (five, with the defaults) keep it full for as long as they go on, and
+  every client is then refused for that account. Except a **known client**:
+  an address that signed in to the account within `KnownClientTTL` (30
+  days, renewed by each login) is not held by it, so the owner signs in
+  from where they did before. Only the password makes an address known, so
+  this is no oracle. A password reset empties the rule. A new address of the
+  owner's waits until the attack stops (and the window or two after it).
 - **Concurrent attempts** cannot get past a limit together: an attempt
   takes its place before the work, atomically, and gives it back when it
   did not count (a success, a valid token). So attempts still in flight
   count too: a burst of more concurrent logins from one address than its
   limit can see the last ones refused until the first finish.
+- **A refused request writes nothing.** Every rule is read before any is
+  counted: a request refused by one allocates no counter for the subjects
+  it named (the emails an attacker sprays, the addresses it rotates).
 - **The window slides.** The count is the current fixed bucket plus the
   previous one weighted by how much of it the window still covers, so a
   burst at a bucket's edge does not double the limit; `Retry-After` is when
@@ -425,12 +442,14 @@ bcrypt, the token's transaction):
   their own (`cache.Counter`); emails and addresses are hashed into the
   keys, never stored. A cache that fails does not lock anyone out: the
   attempt goes on unthrottled and a warning is logged (at most once a
-  minute).
+  minute). A cache that answers but keeps nothing (a noop one, however
+  wrapped) is noticed on its first count: the Service warns and counts in
+  its own memory instead.
 - **Configuration.** `auth.WithThrottlePolicy(p)` replaces the limits (start
   from `auth.DefaultThrottlePolicy()`; a zero `Limit` turns a rule off).
   `GOMBIT_AUTH_THROTTLE_DISABLED=true` turns them all off, for an app whose
   gateway already limits these routes.
-- **From Go.** `Authenticate` / `Login`, `ResetPassword`, `VerifyEmail`,
+- **From Go.** `Register`, `Authenticate` / `Login`, `ResetPassword`, `VerifyEmail`,
   `ConfirmEmailChange`, `ChangePassword`, `RequestEmailChange` and
   `SendEmailVerification` apply the same rules and return a
   `*auth.ThrottleError` (`errors.Is(err, auth.ErrTooManyAttempts)`, with

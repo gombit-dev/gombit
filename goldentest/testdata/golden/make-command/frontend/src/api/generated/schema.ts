@@ -427,6 +427,31 @@ export interface operations {
           "application/json": components["schemas"]["DataPublicUser"];
         };
       };
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorEnvelope"];
+        };
+      };
+      429: {
+        headers: {
+          "Retry-After": number;
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorEnvelope"];
+        };
+      };
+      500: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorEnvelope"];
+        };
+      };
       default: {
         headers: {
           [name: string]: unknown;

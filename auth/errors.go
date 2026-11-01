@@ -6,6 +6,8 @@ import (
 	"net/mail"
 	"strings"
 	"unicode/utf8"
+
+	"gorm.io/gorm"
 )
 
 var (
@@ -38,6 +40,24 @@ var ErrEmailTaken = errEmailTaken
 
 func normalizeEmail(email string) string {
 	return strings.ToLower(strings.TrimSpace(email))
+}
+
+// findUserByEmail loads the user whose email is email (normalized), exactly:
+// the indexed lookup may match more on a database whose collation folds
+// (MySQL's default, utf8mb4_0900_ai_ci, ignores zero-width characters and
+// accents, and folds fullwidth letters), and a spelling the database folds
+// is another email to everything else (the throttles count it as one). The
+// unique index holds one row per folded email, so the exact check decides.
+// A user of ID 0 is no account.
+func findUserByEmail(db *gorm.DB, email string) (User, error) {
+	var user User
+	if err := db.Where("email = ?", email).Limit(1).Find(&user).Error; err != nil {
+		return User{}, err
+	}
+	if user.Email != email {
+		return User{}, nil
+	}
+	return user, nil
 }
 
 // maxEmailLength is the users.email column's size, in characters.

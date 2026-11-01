@@ -29,7 +29,10 @@ import (
 // login, a valid token) are refunded after. A rule over its limit answers
 // ErrTooManyAttempts with the wait, before any of that work, and the same
 // for an email that has an account and one that has none: the subject is
-// what was typed, never the account.
+// what was typed (normalized), and only the account's exact email is the
+// account (findUserByEmail), so a spelling a database's collation folds is
+// no fresh allowance. Every rule is read before any is counted, so a
+// refused request writes nothing for the subjects it chose.
 //
 // The client address is the request's (gin's ClientIP, so
 // GOMBIT_HTTP_TRUSTED_PROXIES decides which forwarding headers count). No
@@ -39,7 +42,9 @@ import (
 // has no address, and only the other rules apply.
 //
 // A cache that fails does not lock users out: the attempt goes on, as if
-// unthrottled, and a warning is logged (at most once a minute).
+// unthrottled, and a warning is logged (at most once a minute). A cache
+// that keeps nothing (an increment answering 0) is replaced by the own
+// memory cache, with a warning.
 
 // ThrottleLimit allows Limit attempts in any Window. A zero Limit or Window
 // turns the rule off.
@@ -60,9 +65,20 @@ type ThrottlePolicy struct {
 	// email: credential stuffing. Wide, for many users behind one address.
 	LoginPerAddress ThrottleLimit
 	// LoginPerAccount bounds failed logins for one email from any address: a
-	// guessing spread over many addresses. Wide, since anyone can spend it
-	// (the account's owner then waits too, for at most its window).
+	// guessing spread over many addresses. Anyone can spend it: a handful of
+	// addresses failing at their own limit keep it full for as long as they
+	// go on, and then every client is refused for the account but the known
+	// ones (an address that signed in to it before: KnownClientTTL). A
+	// password reset empties it.
 	LoginPerAccount ThrottleLimit
+	// KnownClientTTL is how long a successful login exempts its client
+	// address from LoginPerAccount for that email, renewed by each one.
+	// Zero exempts no client.
+	KnownClientTTL time.Duration
+	// RegisterPerAddress bounds registrations (POST /auth/register) from one
+	// client address, every request counted: each one hashes a password and
+	// mails a verification message to the address it names.
+	RegisterPerAddress ThrottleLimit
 	// PasswordResetPerAddress bounds password reset requests (POST
 	// /auth/password/forgot) from one client address, whatever the email:
 	// mail sent to many addresses. Each address gets one message a minute
@@ -87,6 +103,8 @@ func DefaultThrottlePolicy() ThrottlePolicy {
 		LoginPerAccountAddress:  ThrottleLimit{Limit: 5, Window: 15 * time.Minute},
 		LoginPerAddress:         ThrottleLimit{Limit: 100, Window: 15 * time.Minute},
 		LoginPerAccount:         ThrottleLimit{Limit: 100, Window: time.Hour},
+		KnownClientTTL:          30 * 24 * time.Hour,
+		RegisterPerAddress:      ThrottleLimit{Limit: 20, Window: time.Hour},
 		PasswordResetPerAddress: ThrottleLimit{Limit: 20, Window: 15 * time.Minute},
 		TokenPerAddress:         ThrottleLimit{Limit: 30, Window: 15 * time.Minute},
 		CurrentPasswordPerUser:  ThrottleLimit{Limit: 5, Window: 15 * time.Minute},
@@ -149,6 +167,10 @@ type throttler struct {
 	ownMu     sync.Mutex
 	own       *cache.Memory
 	ownClosed bool
+	// storeBroken is set when store answered a count it cannot have (0
+	// after an increment: it keeps nothing); the counts move to the own
+	// memory cache.
+	storeBroken atomic.Bool
 	// warned is when a store failure was last logged (unix seconds).
 	warned atomic.Int64
 	// refusing is, per rule, when a refusal was last logged.
@@ -157,7 +179,7 @@ type throttler struct {
 }
 
 func (t *throttler) cache() cache.Cache {
-	if t.store != nil {
+	if t.store != nil && !t.storeBroken.Load() {
 		return t.store
 	}
 	t.ownMu.Lock()
@@ -195,38 +217,130 @@ type reservedKey struct {
 	ttl  time.Duration
 }
 
-// reserve takes a place in every rule that is on and has a subject. When a
-// rule is over its limit it refunds them all and returns a *ThrottleError
-// with the longest wait.
+// reserve takes a place in every rule that is on and has a subject, in two
+// steps. First it reads them all: a rule already at its limit refuses the
+// attempt with nothing written, so a refused request (the attacker's, at
+// full rate) allocates no counter for the subjects it chose. Then it
+// counts the attempt in each, atomically: one that went over meanwhile (a
+// concurrent attempt took the last place) refunds them all and refuses.
+// The refusal names the first rule that refused, with its wait.
 func (t *throttler) reserve(ctx context.Context, rules ...throttleRule) (*reservation, error) {
 	res := &reservation{t: t}
 	if t.disabled {
 		return res, nil
 	}
-	var refused *ThrottleError
+	var active []throttleRule
 	for _, rule := range rules {
-		if !rule.limit.on() || rule.subject == "" {
+		if rule.limit.on() && rule.subject != "" {
+			active = append(active, rule)
+		}
+	}
+	previous := make([]int64, len(active))
+	for i, rule := range active {
+		window, err := t.read(ctx, rule)
+		if err != nil {
+			t.warn(err)
 			continue
 		}
-		key, wait, err := t.take(ctx, rule)
+		previous[i] = window.previous
+		if wait := window.wait(window.current + 1); wait > 0 {
+			return nil, t.refuse(rule, wait)
+		}
+	}
+	for i, rule := range active {
+		key, wait, err := t.take(ctx, rule, previous[i])
 		if err != nil {
 			t.warn(err)
 			continue
 		}
 		if wait > 0 {
-			if refused == nil || wait > refused.RetryAfter {
-				refused = &ThrottleError{Rule: rule.name, RetryAfter: wait}
-			}
-			continue
+			res.refund()
+			return nil, t.refuse(rule, wait)
 		}
 		res.keys = append(res.keys, key)
 	}
-	if refused != nil {
-		res.refund()
-		t.logRefusal(refused.Rule)
-		return nil, refused
-	}
 	return res, nil
+}
+
+func (t *throttler) refuse(rule throttleRule, wait time.Duration) *ThrottleError {
+	t.logRefusal(rule.name)
+	return &ThrottleError{Rule: rule.name, RetryAfter: wait}
+}
+
+// slidingWindow is a rule's two buckets at an instant: the current one's
+// count, the previous one's, and how much of the current one has passed.
+type slidingWindow struct {
+	limit             ThrottleLimit
+	current, previous int64
+	elapsed           float64
+}
+
+// wait is how long until an attempt that makes the current bucket count
+// fits the limit; 0 when it fits now. The window's count is the current
+// bucket plus the previous one weighted by how much of it the window
+// still covers.
+func (w slidingWindow) wait(count int64) time.Duration {
+	previous, limit := float64(max(w.previous, 0)), float64(w.limit.Limit)
+	if previous*(1-w.elapsed)+float64(count) <= limit {
+		return 0
+	}
+	return throttleWait(previous, float64(count-1), limit, w.elapsed, w.limit.Window)
+}
+
+// buckets names rule's current and previous bucket keys at now, and how
+// much of the current one has passed.
+func (t *throttler) buckets(rule throttleRule) (current, previous string, elapsed float64) {
+	window := rule.limit.Window
+	now := t.now()
+	index := now.UnixNano() / int64(window)
+	base := throttleKeyBase(rule)
+	elapsed = float64(now.UnixNano()-index*int64(window)) / float64(window)
+	return base + strconv.FormatInt(index, 10), base + strconv.FormatInt(index-1, 10), elapsed
+}
+
+// read loads rule's window without writing.
+func (t *throttler) read(ctx context.Context, rule throttleRule) (slidingWindow, error) {
+	currentKey, previousKey, elapsed := t.buckets(rule)
+	w := slidingWindow{limit: rule.limit, elapsed: elapsed}
+	store := t.cache()
+	if _, err := store.Get(ctx, currentKey, &w.current); err != nil {
+		return slidingWindow{}, err
+	}
+	if _, err := store.Get(ctx, previousKey, &w.previous); err != nil {
+		return slidingWindow{}, err
+	}
+	return w, nil
+}
+
+// errThrottleStoreKeepsNothing is a store whose increment answered a count
+// it cannot have.
+var errThrottleStoreKeepsNothing = errors.New("auth: the throttle's cache keeps no counts (a noop cache?); counting in process memory instead")
+
+// take counts one attempt for rule in the current bucket, with previous
+// (read just before) for the window's estimate. Over the limit, it takes
+// the attempt back and returns the wait.
+func (t *throttler) take(ctx context.Context, rule throttleRule, previous int64) (reservedKey, time.Duration, error) {
+	currentKey, _, elapsed := t.buckets(rule)
+	current := reservedKey{rule: rule.name, key: currentKey, ttl: 2 * rule.limit.Window}
+	count, err := cache.IncrementTTL(ctx, t.cache(), current.key, 1, current.ttl)
+	if err != nil {
+		return reservedKey{}, 0, err
+	}
+	if count < 1 {
+		// A store that counts nothing would turn every rule off without a
+		// word: count in the own memory cache from now on.
+		if t.store == nil || !t.storeBroken.CompareAndSwap(false, true) {
+			return reservedKey{}, 0, errThrottleStoreKeepsNothing
+		}
+		t.logger().Warn(errThrottleStoreKeepsNothing.Error())
+		return t.take(ctx, rule, 0)
+	}
+	w := slidingWindow{limit: rule.limit, previous: previous, elapsed: elapsed}
+	if wait := w.wait(count); wait > 0 {
+		t.refundKey(current)
+		return reservedKey{}, wait, nil
+	}
+	return current, 0, nil
 }
 
 // logRefusal says, at most once a minute per rule, that a rule is refusing
@@ -249,35 +363,6 @@ func (t *throttler) logRefusal(rule string) {
 	}
 }
 
-// take counts one attempt for rule in the current window's bucket and
-// estimates the sliding window's count from it and the previous bucket,
-// weighted by how much of that one the window still covers. Over the limit,
-// it takes the attempt back and returns the wait.
-func (t *throttler) take(ctx context.Context, rule throttleRule) (reservedKey, time.Duration, error) {
-	window := rule.limit.Window
-	now := t.now()
-	index := now.UnixNano() / int64(window)
-	base := throttleKeyBase(rule)
-	current := reservedKey{rule: rule.name, key: base + strconv.FormatInt(index, 10), ttl: 2 * window}
-	store := t.cache()
-	count, err := cache.IncrementTTL(ctx, store, current.key, 1, current.ttl)
-	if err != nil {
-		return reservedKey{}, 0, err
-	}
-	var previous int64
-	if _, err := store.Get(ctx, base+strconv.FormatInt(index-1, 10), &previous); err != nil {
-		t.refundKey(current)
-		return reservedKey{}, 0, err
-	}
-	elapsed := float64(now.UnixNano()-index*int64(window)) / float64(window)
-	limit := float64(rule.limit.Limit)
-	if float64(max(previous, 0))*(1-elapsed)+float64(count) <= limit {
-		return current, 0, nil
-	}
-	t.refundKey(current)
-	return reservedKey{}, throttleWait(float64(max(previous, 0)), float64(count-1), limit, elapsed, window), nil
-}
-
 // throttleWait is how long until one more attempt fits: previous decays as
 // the window slides past its bucket; current becomes the previous bucket in
 // the next window.
@@ -297,11 +382,10 @@ func (t *throttler) clear(ctx context.Context, rule throttleRule) {
 	if t.disabled || !rule.limit.on() || rule.subject == "" {
 		return
 	}
-	index := t.now().UnixNano() / int64(rule.limit.Window)
-	base := throttleKeyBase(rule)
+	current, previous, _ := t.buckets(rule)
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), throttleRefundTimeout)
 	defer cancel()
-	if err := t.cache().Delete(ctx, base+strconv.FormatInt(index, 10), base+strconv.FormatInt(index-1, 10)); err != nil {
+	if err := t.cache().Delete(ctx, current, previous); err != nil {
 		t.warn(err)
 	}
 }
@@ -384,7 +468,10 @@ func addressSubject(ip string) string {
 
 func userSubject(id uint) string { return "user:" + strconv.FormatUint(uint64(id), 10) }
 
-// loginRules are the rules a login attempt for email counts in.
+// loginRules are the rules a login attempt for email counts in: the
+// address first (a subject the attacker cannot vary per request), then the
+// address and email, then the email, unless this address is a known client
+// of it (markKnown).
 func (s *Service) loginRules(ctx context.Context, email string) (pair throttleRule, all []throttleRule) {
 	p, address := s.throttle.policy, requestAddress(ctx)
 	if email == "" {
@@ -394,10 +481,48 @@ func (s *Service) loginRules(ctx context.Context, email string) (pair throttleRu
 	if address != "" {
 		pair.subject = address + "\x00" + email
 	}
-	return pair, []throttleRule{
-		pair,
-		{name: "LoginPerAddress", limit: p.LoginPerAddress, subject: address},
-		{name: "LoginPerAccount", limit: p.LoginPerAccount, subject: email},
+	all = []throttleRule{{name: "LoginPerAddress", limit: p.LoginPerAddress, subject: address}, pair}
+	if !s.throttle.known(ctx, pair) {
+		all = append(all, accountLoginRule(p, email))
+	}
+	return pair, all
+}
+
+func accountLoginRule(p ThrottlePolicy, email string) throttleRule {
+	return throttleRule{name: "LoginPerAccount", limit: p.LoginPerAccount, subject: email}
+}
+
+// knownKey names the mark a successful login leaves for its address and
+// email (pair's subject), hashed like the counters.
+func knownKey(pair throttleRule) string {
+	return throttleKeyBase(throttleRule{name: "KnownClient", subject: pair.subject}) + "known"
+}
+
+// known reports whether pair's address signed in to its email within
+// KnownClientTTL: it may then try past LoginPerAccount, which anyone can
+// fill. Only the password mints the mark, so it is no oracle.
+func (t *throttler) known(ctx context.Context, pair throttleRule) bool {
+	if t.disabled || t.policy.KnownClientTTL <= 0 || pair.subject == "" {
+		return false
+	}
+	var mark bool
+	found, err := t.cache().Get(ctx, knownKey(pair), &mark)
+	if err != nil {
+		t.warn(err)
+		return false
+	}
+	return found && mark
+}
+
+// markKnown records a successful login of pair's address to its email.
+func (t *throttler) markKnown(ctx context.Context, pair throttleRule) {
+	if t.disabled || t.policy.KnownClientTTL <= 0 || pair.subject == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), throttleRefundTimeout)
+	defer cancel()
+	if err := t.cache().Set(ctx, knownKey(pair), true, t.policy.KnownClientTTL); err != nil {
+		t.warn(err)
 	}
 }
 

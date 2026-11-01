@@ -34,8 +34,7 @@ func (s *Service) RequestPasswordReset(ctx context.Context, email string) error 
 	if email == "" {
 		return nil
 	}
-	var user User
-	err := s.db.WithContext(ctx).Where("email = ?", email).Limit(1).Find(&user).Error
+	user, err := findUserByEmail(s.db.WithContext(ctx), email)
 	if err != nil {
 		return err
 	}
@@ -63,7 +62,13 @@ func (s *Service) RequestPasswordReset(ctx context.Context, email string) error 
 // unless AuthConfig.PasswordResetKeepSessions, so do all of the user's
 // sessions and refresh tokens, in the same transaction.
 func (s *Service) ResetPassword(ctx context.Context, raw, password string) (User, error) {
-	return throttleTokenUse(ctx, s, func() (User, error) { return s.consumeReset(ctx, raw, password) })
+	user, err := throttleTokenUse(ctx, s, func() (User, error) { return s.consumeReset(ctx, raw, password) })
+	if err == nil {
+		// The owner recovered the account: whatever filled its
+		// LoginPerAccount (an attack on it, likely) no longer holds them.
+		s.throttle.clear(ctx, accountLoginRule(s.throttle.policy, user.Email))
+	}
+	return user, err
 }
 
 func (s *Service) consumeReset(ctx context.Context, raw, password string) (User, error) {

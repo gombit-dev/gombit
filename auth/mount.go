@@ -54,8 +54,11 @@ func Mount(api huma.API, db *gorm.DB, cfg config.Config, opts ...Option) (*Servi
 		Method:      http.MethodPost,
 		Path:        prefix + "/auth/register",
 		Summary:     "Register a user",
+		Description: "Too many registrations from this client address is a 429 (Retry-After), before the password is hashed.",
 		Tags:        []string{"Auth"},
+		Errors:      []int{http.StatusTooManyRequests},
 	}), svc.register)
+	declareRetryAfter(api, prefix+"/auth/register", http.StatusTooManyRequests, throttleRetryAfterDoc)
 
 	if cfg.Auth.EffectiveMode() == config.AuthModeCookie {
 		mountCookieRoutes(api, svc, prefix)
