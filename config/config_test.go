@@ -1306,3 +1306,23 @@ func TestPasswordResetConfig(t *testing.T) {
 		t.Fatalf("defaults = %v keep=%v; want 1h, sessions revoked", def.PasswordResetTTL, def.PasswordResetKeepSessions)
 	}
 }
+
+// TestEmailChangeURLConfig: the email change link must say where the token
+// goes; from the environment it loads as written.
+func TestEmailChangeURLConfig(t *testing.T) {
+	cfg := DefaultFor(EnvironmentDevelopment)
+	cfg.Auth.EmailChangeURL = "https://app.example.com/confirm-email"
+	var fe FieldErrors
+	if err := cfg.Validate(); !errors.As(err, &fe) || !strings.Contains(err.Error(), EmailChangeURLToken) {
+		t.Fatalf("a URL without {token} = %v", err)
+	}
+	loaded, err := LoadFromEnv(func(k string) (string, bool) {
+		if k == envEmailChangeURL { // #nosec G101 -- a variable name, not a credential.
+			return "https://x/c?t={token}", true
+		}
+		return "", false
+	})
+	if err != nil || loaded.Auth.EmailChangeURL != "https://x/c?t={token}" {
+		t.Fatalf("LoadFromEnv = %q, %v", loaded.Auth.EmailChangeURL, err)
+	}
+}

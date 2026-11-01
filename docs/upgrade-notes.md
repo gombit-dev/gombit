@@ -92,6 +92,13 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   `AuthPasswordChangeBody`, `AuthPasswordChangeResult` or
   `DataAuthPasswordChangeResult`.
 
+- **Breaking.** With auth enabled, an app that registers `POST {prefix}/auth/email/change` or `/auth/email/change/confirm`, the `auth-request-email-change` / `auth-confirm-email-change` operations, or the `AuthEmailChangeBody` / `AuthEmailChangeConfirmBody` / `AuthEmailChangeRequested` schema names fails at startup: the framework registers them. (`email-change-names-reserved`, api, [#334](https://github.com/gombit-dev/gombit/issues/334))
+
+  Drop the app's own email-change routes, which the framework's
+  replace, or rename them; the same goes for a type Huma names
+  `AuthEmailChangeBody`, `AuthEmailChangeConfirmBody`,
+  `AuthEmailChangeRequested` or `DataAuthEmailChangeRequested`.
+
 ### Informational
 
 - Bearer-mode session revocation errors include the `WWW-Authenticate: Bearer realm="api"` challenge when the handler returns 401. (`bearer-handler-401-challenge`, api, [#604](https://github.com/gombit-dev/gombit/issues/604))
@@ -170,6 +177,18 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   flow for an app's own code.
 
 - A new app's placeholder `schema.ts` includes the password change operation; an existing app's generated client gets it from `gombit client generate`. (`client-schema-password-change`, client, [#333](https://github.com/gombit-dev/gombit/issues/333))
+
+- Email change: a signed-in user asks for a new address with their current password (`POST {prefix}/auth/email/change`), and it becomes the account's email, verified, only once the link mailed to it is confirmed (`POST {prefix}/auth/email/change/confirm`); the old address is notified. (`email-change`, api, [#334](https://github.com/gombit-dev/gombit/issues/334))
+
+  Until the confirmation the account's email, and every link bound to
+  it, is the old one; a link stops working once the account's email
+  is no longer the one it was asked from, and an address another
+  account took meanwhile is a 409. `GOMBIT_AUTH_EMAIL_CHANGE_URL` is
+  the confirmation page (`{token}`); the link works as long as a
+  verification link. `auth.Service.RequestEmailChange` and
+  `ConfirmEmailChange` are the same flow for an app's own code.
+
+- A new app's placeholder `schema.ts` includes the email change operations (and declares the forgot route's 422 and 500 responses); an existing app's generated client gets them from `gombit client generate`. (`client-schema-email-change`, client, [#334](https://github.com/gombit-dev/gombit/issues/334))
 
 - An already-rotated refresh token that has expired is a 401 and no longer revokes the user's sessions. (`expired-rotated-refresh-token-no-cascade`, security, [#458](https://github.com/gombit-dev/gombit/issues/458))
 

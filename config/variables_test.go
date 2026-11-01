@@ -78,6 +78,7 @@ func TestVariablesReadBackWhatLoadFromEnvSets(t *testing.T) {
 		envJWTSecret: strings.Repeat("j", 32), envJWTAccessTTL: "5m0s", envJWTRefreshTTL: "24h0m0s",
 		envAuthMode: "cookie", envCookieSecure: "false", envCookieSameSite: "strict",
 		envEmailVerificationTTL: "1h0m0s", envEmailVerificationURL: "https://app.example.com/verify?token={token}",
+		envEmailChangeURL:   "https://app.example.com/confirm-email?token={token}",
 		envPasswordResetTTL: "30m0s", envPasswordResetURL: "https://app.example.com/reset?token={token}",
 		envPasswordResetKeep:     "true",
 		envSecuritySanitizeInput: "true",

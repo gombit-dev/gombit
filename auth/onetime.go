@@ -49,8 +49,11 @@ type oneTimeFlow struct {
 	purpose TokenPurpose
 	ttl     time.Duration
 	// check refuses the message for the locked user (nil: always sent).
-	check   func(User) error
+	check   func(tx *gorm.DB, user User) error
 	message func(token OneTimeToken, raw string) Message
+	// to is the address the token is mailed to and proves; empty is the
+	// user's own email.
+	to string
 }
 
 // sendOneTimeToken issues a token of f's purpose for user's email and
@@ -103,7 +106,7 @@ func (s *Service) issueOneTimeToken(ctx context.Context, user User, f oneTimeFlo
 		}
 		now := s.now()
 		if f.check != nil {
-			if err := f.check(locked); err != nil {
+			if err := f.check(tx, locked); err != nil {
 				return err
 			}
 		}
@@ -115,11 +118,16 @@ func (s *Service) issueOneTimeToken(ctx context.Context, user User, f oneTimeFlo
 		if raw, err = newOpaqueToken(); err != nil {
 			return err
 		}
+		to := f.to
+		if to == "" {
+			to = locked.Email
+		}
 		token = OneTimeToken{
 			UserID:    locked.ID,
 			Purpose:   f.purpose,
 			TokenHash: hashOpaqueToken(raw),
-			Email:     locked.Email,
+			Email:     to,
+			FromEmail: locked.Email,
 			ExpiresAt: now.Add(f.ttl),
 			CreatedAt: now,
 		}
@@ -238,8 +246,14 @@ func (s *Service) consumeOneTimeToken(tx *gorm.DB, raw string, purpose TokenPurp
 	if used.RowsAffected != 1 {
 		return OneTimeToken{}, User{}, time.Time{}, errInvalidOneTimeToken
 	}
-	// The token proves the address it was sent to, not the account.
-	if locked.Email != token.Email {
+	// The token belongs to the account as it was when it was issued: once the
+	// user's email is another one, it fails. (A token from before FromEmail
+	// existed was issued to, and for, Email.)
+	from := token.FromEmail
+	if from == "" {
+		from = token.Email
+	}
+	if locked.Email != from {
 		return OneTimeToken{}, User{}, time.Time{}, errInvalidOneTimeToken
 	}
 	return token, locked, now, nil

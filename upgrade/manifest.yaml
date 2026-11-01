@@ -751,6 +751,38 @@ releases:
         summary: "A new app's placeholder `schema.ts` includes the password change operation; an existing app's generated client gets it from `gombit client generate`."
         refs: [333]
 
+      - id: email-change-names-reserved
+        kind: manual
+        breaking: true
+        area: api
+        summary: "With auth enabled, an app that registers `POST {prefix}/auth/email/change` or `/auth/email/change/confirm`, the `auth-request-email-change` / `auth-confirm-email-change` operations, or the `AuthEmailChangeBody` / `AuthEmailChangeConfirmBody` / `AuthEmailChangeRequested` schema names fails at startup: the framework registers them."
+        details: |
+          Drop the app's own email-change routes, which the framework's
+          replace, or rename them; the same goes for a type Huma names
+          `AuthEmailChangeBody`, `AuthEmailChangeConfirmBody`,
+          `AuthEmailChangeRequested` or `DataAuthEmailChangeRequested`.
+        refs: [334]
+
+      - id: email-change
+        kind: informational
+        area: api
+        summary: "Email change: a signed-in user asks for a new address with their current password (`POST {prefix}/auth/email/change`), and it becomes the account's email, verified, only once the link mailed to it is confirmed (`POST {prefix}/auth/email/change/confirm`); the old address is notified."
+        details: |
+          Until the confirmation the account's email, and every link bound to
+          it, is the old one; a link stops working once the account's email
+          is no longer the one it was asked from, and an address another
+          account took meanwhile is a 409. `GOMBIT_AUTH_EMAIL_CHANGE_URL` is
+          the confirmation page (`{token}`); the link works as long as a
+          verification link. `auth.Service.RequestEmailChange` and
+          `ConfirmEmailChange` are the same flow for an app's own code.
+        refs: [334]
+
+      - id: client-schema-email-change
+        kind: informational
+        area: client
+        summary: "A new app's placeholder `schema.ts` includes the email change operations (and declares the forgot route's 422 and 500 responses); an existing app's generated client gets them from `gombit client generate`."
+        refs: [334]
+
       - id: expired-rotated-refresh-token-no-cascade
         kind: informational
         area: security

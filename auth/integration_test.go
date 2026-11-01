@@ -45,6 +45,9 @@ func TestE2EPostgres(t *testing.T) {
 	runPasswordChangeBearer(t, db)
 	runPasswordChangeCookie(t, db)
 	runPasswordChangeService(t, db)
+	runEmailChangeBearer(t, db)
+	runEmailChangeCookie(t, db)
+	runEmailChangeService(t, db)
 	runPermissionPersistence(t, db)
 }
 
@@ -75,6 +78,9 @@ func TestE2EMySQL(t *testing.T) {
 	runPasswordChangeBearer(t, db)
 	runPasswordChangeCookie(t, db)
 	runPasswordChangeService(t, db)
+	runEmailChangeBearer(t, db)
+	runEmailChangeCookie(t, db)
+	runEmailChangeService(t, db)
 	runPermissionPersistence(t, db)
 }
 
