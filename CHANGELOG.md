@@ -12,6 +12,26 @@ version.
 
 ### Added
 
+- [Abuse protection](docs/auth.md#abuse-protection) for the credential
+  endpoints (AUTH-8), in both auth modes, on by default. Sliding-window
+  throttles count failed logins per email and client address (5 / 15 min),
+  per address (100 / 15 min, credential stuffing) and per email (100 /
+  hour), password reset requests per address, invalid one-time tokens per
+  address, wrong current passwords and verification messages per user;
+  past a limit the endpoint answers 429 with `Retry-After`, before the
+  lookup or bcrypt. Logins are counted by the email as typed, so a 429
+  reveals no account; no rule bans an address. Attempts reserve their place
+  atomically (concurrent requests cannot exceed a limit) and successes are
+  refunded. The client address respects `GOMBIT_HTTP_TRUSTED_PROXIES`. The
+  counts live in the app's cache (Redis shares them between instances) via
+  the new `cache.Counter` / `cache.IncrementTTL` (counters that expire); a
+  failing cache fails open, with a warning. `auth.ThrottlePolicy` /
+  `auth.WithThrottlePolicy` / `auth.WithThrottleStore`, `auth.ErrTooManyAttempts`
+  / `*auth.ThrottleError`; `GOMBIT_AUTH_THROTTLE_DISABLED=true` turns them
+  off. The throttled operations declare their 429 in OpenAPI and in a new
+  app's placeholder client. Behind a proxy, set `GOMBIT_HTTP_TRUSTED_PROXIES`,
+  or every client counts as the proxy's address.
+
 - [Email change](docs/auth.md#email-change) (AUTH-4), in both auth modes. A
   signed-in user asks for a new address with their current password (`POST
   /auth/email/change`: a 422 on `current_password` for a wrong one, a 409
@@ -175,20 +195,6 @@ version.
   One equal to the stored value rounded the same way (the admin UI sending
   the field back, an integer field or a belongs_to key alike) keeps the
   stored value ([#448](https://github.com/gombit-dev/gombit/issues/448)).
-- The generated TypeScript client's `unwrap()` resolves the success value
-  `openapi-fetch` parsed instead of throwing `ContractError` with code
-  `empty_response` when that value is `undefined`. A Huma handler whose output
-  struct has no `Body` answers `204`, and every bodyless success — `204`, a
-  `HEAD`, a zero-length `2xx` — reaches the wrapper as `data: undefined`, so a
-  delete or an action endpoint looked like a failure to the caller and the UI.
-  `unwrap` no longer reads the status to second-guess the client: a 2xx
-  resolves its `data`, `undefined` included, and a non-2xx, or a result
-  carrying an `error`, still throws the D10 `ContractError`. The generated
-  signature moves with the behavior — `unwrap<T>` is now
-  `Promise<T | undefined>` — so a caller reads a field of the success value
-  only after narrowing the `undefined` a bodyless response resolves, the way
-  the scaffolded pages and resource forms do
-  ([#505](https://github.com/gombit-dev/gombit/issues/505)).
 - An already-rotated refresh token that has expired is now a 401 that leaves
   the user's other sessions alone. Presenting a rotated token again still
   revokes all of them while it is unexpired, so a stolen token is detected
@@ -233,25 +239,6 @@ version.
   Form as field paths. The dependent-required message (`expected property zip
   to be present when city is present`) keys the same way
   ([#503](https://github.com/gombit-dev/gombit/issues/503)).
-- `gombit version` and `gombit new` from a scaffolded app's own `cmd/gombit`
-  report the framework it was built against, not the application. The version
-  logic read `debug.BuildInfo.Main` unconditionally, which is the framework in
-  its own binary but the *app* in a generated one: an app built from a checkout
-  printed `dev` while its `go.mod` required
-  `github.com/gombit-dev/gombit v0.6.0`, an app tagged `v1.4.5` printed
-  `v1.4.5` and `gombit new` from that binary pinned the framework to that
-  release — and an app's own pseudo-version pinned it silently, since one is a
-  valid module version. A `v2` or later app tag printed the app's version too,
-  but never pinned it: `ResolveFrameworkVersion` refuses a major the
-  framework's module path could not carry, so `gombit new` warned and wrote
-  `v0.0.0`, as it did for a checkout. When the main
-  module is not `github.com/gombit-dev/gombit`, the framework's entry in
-  `BuildInfo.Deps` is used instead. A replace by a local checkout or by a fork
-  names no framework release, so those still report `dev` — the same rule
-  `internal/frameworkmod` applies to a `go.mod`, read from build info. An app
-  binary also stops printing `commit` and `built`: those settings are recorded
-  for the main module, so they would name the app's repository beside a Gombit
-  release ([#512](https://github.com/gombit-dev/gombit/issues/512)).
 
 ### Changed
 

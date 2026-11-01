@@ -225,6 +225,20 @@ func (m *Memory) Delete(ctx context.Context, keys ...string) error {
 
 // Increment implements Cache.
 func (m *Memory) Increment(ctx context.Context, key string, delta int64) (int64, error) {
+	return m.increment(ctx, key, delta, 0)
+}
+
+// IncrementTTL implements Counter.
+func (m *Memory) IncrementTTL(ctx context.Context, key string, delta int64, ttl time.Duration) (int64, error) {
+	if err := validateCounterTTL(ttl); err != nil {
+		return 0, err
+	}
+	return m.increment(ctx, key, delta, ttl)
+}
+
+// increment adds delta to key under the lock; a positive ttl is the expiry
+// of a key that has none.
+func (m *Memory) increment(ctx context.Context, key string, delta int64, ttl time.Duration) (int64, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
@@ -258,9 +272,13 @@ func (m *Memory) Increment(ctx context.Context, key string, delta int64) (int64,
 	if err != nil {
 		return 0, err
 	}
+	now := m.now()
 	expiresAt := time.Time{}
-	if item, ok := m.items[key]; ok && !item.expired(m.now()) {
+	if item, ok := m.items[key]; ok && !item.expired(now) {
 		expiresAt = item.expiresAt
+	}
+	if expiresAt.IsZero() && ttl > 0 {
+		expiresAt = now.Add(ttl)
 	}
 	m.items[key] = memoryItem{payload: payload, expiresAt: expiresAt}
 	return current, nil

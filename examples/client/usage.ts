@@ -21,9 +21,7 @@ export async function listWidgets() {
     }
     throw ContractError.fromResponse(result.response, result.error);
   }
-  // A bodyless success resolves `undefined`, so the rows come after narrowing.
-  const listed = await unwrap(result);
-  return listed && Array.isArray(listed.data) ? listed.data : [];
+  return unwrap(result);
 }
 
 export async function createWidget() {

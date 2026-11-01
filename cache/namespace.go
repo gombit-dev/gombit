@@ -40,6 +40,11 @@ func (n namespaced) Increment(ctx context.Context, key string, delta int64) (int
 	return n.next.Increment(ctx, n.key(key), delta)
 }
 
+// IncrementTTL implements Counter, through next's when it has one.
+func (n namespaced) IncrementTTL(ctx context.Context, key string, delta int64, ttl time.Duration) (int64, error) {
+	return IncrementTTL(ctx, n.next, n.key(key), delta, ttl)
+}
+
 func (n namespaced) key(key string) string {
 	return n.namespace + ":" + key
 }

@@ -70,11 +70,17 @@ func (s *Service) RequestEmailChange(ctx context.Context, userID uint, current, 
 	if newEmail == user.Email {
 		return errEmailUnchanged
 	}
+	// Only a wrong current password counts (CurrentPasswordPerUser).
+	res, err := s.throttle.reserve(ctx, s.currentPasswordRule(user.ID))
+	if err != nil {
+		return err
+	}
 	if err := s.hasher.Compare(user.PasswordHash, current); err != nil {
 		s.Audit(ctx, AuditEvent{Action: AuditEmailChangeFailed, TargetUserID: uintPtr(user.ID), Details: details("reason", "wrong_current_password")})
 		return errWrongCurrentPassword
 	}
-	err := s.sendOneTimeToken(ctx, user, oneTimeFlow{
+	res.refund()
+	err = s.sendOneTimeToken(ctx, user, oneTimeFlow{
 		purpose: PurposeChangeEmail,
 		ttl:     s.verificationTTL(),
 		to:      newEmail,
@@ -121,6 +127,10 @@ func (s *Service) RequestEmailChange(ctx context.Context, userID uint, current, 
 // comes back if the email changes back. The old address is told, best
 // effort.
 func (s *Service) ConfirmEmailChange(ctx context.Context, raw string) (User, error) {
+	return throttleTokenUse(ctx, s, func() (User, error) { return s.consumeEmailChange(ctx, raw) })
+}
+
+func (s *Service) consumeEmailChange(ctx context.Context, raw string) (User, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return User{}, errInvalidOneTimeToken
@@ -234,7 +244,7 @@ func registerEmailChangeRoutes(api huma.API, svc *Service, prefix, security stri
 		Method:        http.MethodPost,
 		Path:          changePath,
 		Summary:       "Ask to change the signed-in user's email",
-		Description:   "Requires the current password (a wrong one is a 422 on current_password). Mails a confirmation link to the new address; the account's email changes only once it is confirmed. 409 when another account has the address; at most one message a minute (429 with Retry-After).",
+		Description:   "Requires the current password (a wrong one is a 422 on current_password). Mails a confirmation link to the new address; the account's email changes only once it is confirmed. 409 when another account has the address; at most one message a minute, and too many wrong current passwords (429 with Retry-After either way).",
 		Tags:          []string{"Auth"},
 		Security:      []map[string][]string{{security: {}}},
 		Middlewares:   huma.Middlewares{gate},
@@ -248,9 +258,11 @@ func registerEmailChangeRoutes(api huma.API, svc *Service, prefix, security stri
 		Method:      http.MethodPost,
 		Path:        prefix + "/auth/email/change/confirm",
 		Summary:     "Confirm an email change with the token mailed to the new address",
-		Description: "Consumes the token: it works once, and only while the account's email is the one the change was asked from. The new address becomes the account's email, verified. An unknown, expired, used or superseded token is a 422 on token; an address another account took meanwhile is a 409.",
+		Description: "Consumes the token: it works once, and only while the account's email is the one the change was asked from. The new address becomes the account's email, verified. An unknown, expired, used or superseded token is a 422 on token; an address another account took meanwhile is a 409. Too many invalid tokens from one client address is a 429 (Retry-After).",
 		Tags:        []string{"Auth"},
+		Errors:      []int{http.StatusTooManyRequests},
 	}), svc.confirmEmailChange)
+	declareRetryAfter(api, prefix+"/auth/email/change/confirm", http.StatusTooManyRequests, throttleRetryAfterDoc)
 }
 
 func (s *Service) requestEmailChange(ctx context.Context, input *emailChangeInput) (*emailChangeOutput, error) {

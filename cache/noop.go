@@ -36,3 +36,11 @@ func (Noop) Increment(ctx context.Context, key string, delta int64) (int64, erro
 	}
 	return 0, nil
 }
+
+// IncrementTTL implements Counter: it keeps nothing, as Increment.
+func (Noop) IncrementTTL(ctx context.Context, key string, delta int64, ttl time.Duration) (int64, error) {
+	if err := validateCounterTTL(ttl); err != nil {
+		return 0, err
+	}
+	return Noop{}.Increment(ctx, key, delta)
+}

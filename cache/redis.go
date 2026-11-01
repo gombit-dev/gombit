@@ -73,3 +73,28 @@ func (r *Redis) Increment(ctx context.Context, key string, delta int64) (int64, 
 	}
 	return value, nil
 }
+
+// incrementTTLScript increments KEYS[1] by ARGV[1] and, when the key has no
+// expiry (PTTL -1: just created, or written without one), gives it ARGV[2]
+// milliseconds: one atomic step on the server.
+var incrementTTLScript = redis.NewScript(`
+local value = redis.call('INCRBY', KEYS[1], ARGV[1])
+if redis.call('PTTL', KEYS[1]) == -1 then
+	redis.call('PEXPIRE', KEYS[1], ARGV[2])
+end
+return value
+`)
+
+// IncrementTTL implements Counter.
+func (r *Redis) IncrementTTL(ctx context.Context, key string, delta int64, ttl time.Duration) (int64, error) {
+	if err := validateCounterTTL(ttl); err != nil {
+		return 0, err
+	}
+	// PEXPIRE takes whole milliseconds; less than one would expire at once.
+	ms := max(ttl.Milliseconds(), 1)
+	value, err := incrementTTLScript.Run(ctx, r.client, []string{key}, delta, ms).Int64()
+	if err != nil {
+		return 0, fmt.Errorf("cache: redis increment %q: %w", key, err)
+	}
+	return value, nil
+}

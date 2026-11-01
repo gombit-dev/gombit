@@ -26,7 +26,9 @@ transport does not mix with `--auth cookie`'s HttpOnly session cookies
 
 ## Endpoints
 
-All paths use `config.API.Prefix` (default `/api/v1`). D10 envelopes.
+All paths use `config.API.Prefix` (default `/api/v1`). D10 envelopes. The
+credential endpoints are throttled (429 with `Retry-After`); see
+[Abuse protection](#abuse-protection).
 
 | Method | Path | Auth |
 | --- | --- | --- |
@@ -372,6 +374,71 @@ curl -sX POST localhost:8080/api/v1/auth/email/change/confirm \
   `ErrEmailTaken`, `ErrEmailChangedMeanwhile`, `ErrInvalidToken`,
   `ErrUserNotFound`.
 
+## Abuse protection
+
+The credential endpoints bound how often they may be tried, in both auth
+modes (AUTH-8). Each rule counts one subject's attempts in a sliding window;
+over its limit the endpoint answers **429** (`rate_limited`) with
+`Retry-After` (seconds), before it does any of the work (the lookup,
+bcrypt, the token's transaction):
+
+| Rule (`auth.ThrottlePolicy` field) | Counts | Default |
+| --- | --- | --- |
+| `LoginPerAccountAddress` | failed logins for one email from one client address | 5 / 15 min |
+| `LoginPerAddress` | failed logins from one client address, any email (credential stuffing) | 100 / 15 min |
+| `LoginPerAccount` | failed logins for one email, any address (guessing spread over addresses) | 100 / hour |
+| `PasswordResetPerAddress` | `POST /auth/password/forgot` from one client address, any email | 20 / 15 min |
+| `TokenPerAddress` | invalid tokens posted to `/auth/verify-email`, `/auth/password/reset`, `/auth/email/change/confirm` from one client address | 30 / 15 min |
+| `CurrentPasswordPerUser` | wrong current passwords of one user (`/auth/password/change`, `/auth/email/change`) | 5 / 15 min |
+| `VerificationPerUser` | verification messages sent to one user (on top of the one-a-minute resend wait) | 10 / hour |
+
+- **Nothing to enumerate.** A login is counted by the email as typed,
+  whether or not it is an account, and a reset request by the client
+  address alone: a 429 says nothing about which addresses have accounts.
+- **No bans.** No rule shuts an address out: the per-address limits are
+  wide, for the users behind one NAT or proxy, and count failures only; the
+  tight one is per address *and* email. A successful login does not count,
+  and clears that address's failures for the email. `LoginPerAccount` can
+  be spent by anyone, so the owner of an account under attack may wait too,
+  at most a window or two; it bounds a guessing that rotates addresses.
+- **Concurrent attempts** cannot get past a limit together: an attempt
+  takes its place before the work, atomically, and gives it back when it
+  did not count (a success, a valid token). So attempts still in flight
+  count too: a burst of more concurrent logins from one address than its
+  limit can see the last ones refused until the first finish.
+- **The window slides.** The count is the current fixed bucket plus the
+  previous one weighted by how much of it the window still covers, so a
+  burst at a bucket's edge does not double the limit; `Retry-After` is when
+  one more attempt fits, at most two windows.
+- **The client address** is gin's `ClientIP`: behind a proxy or load
+  balancer, list it in `GOMBIT_HTTP_TRUSTED_PROXIES` so the forwarded
+  client is counted, not the proxy (and so that a client cannot pick its
+  own address with `X-Forwarded-For` when no proxy is trusted). An IPv6
+  client is counted by its /64, one host's usual allocation, so it cannot
+  take a fresh address per attempt. A call from Go with no request has no
+  address: only the other rules apply.
+- **Where the counts live.** Under `framework.App`, in the app's cache
+  (`GOMBIT_CACHE_DRIVER`): with `redis` every instance shares them; with
+  `memory` each process counts alone. With `noop`, or for an
+  `auth.NewService` without `auth.WithThrottleStore`, the Service keeps
+  them in a memory cache of its own (`Close` stops it). Counters expire on
+  their own (`cache.Counter`); emails and addresses are hashed into the
+  keys, never stored. A cache that fails does not lock anyone out: the
+  attempt goes on unthrottled and a warning is logged (at most once a
+  minute).
+- **Configuration.** `auth.WithThrottlePolicy(p)` replaces the limits (start
+  from `auth.DefaultThrottlePolicy()`; a zero `Limit` turns a rule off).
+  `GOMBIT_AUTH_THROTTLE_DISABLED=true` turns them all off, for an app whose
+  gateway already limits these routes.
+- **From Go.** `Authenticate` / `Login`, `ResetPassword`, `VerifyEmail`,
+  `ConfirmEmailChange`, `ChangePassword`, `RequestEmailChange` and
+  `SendEmailVerification` apply the same rules and return a
+  `*auth.ThrottleError` (`errors.Is(err, auth.ErrTooManyAttempts)`, with
+  `Rule` and `RetryAfter`). A throttled attempt is not written to the audit
+  trail (under attack that would be a write per request); a rule that is
+  refusing attempts is logged instead, at most once a minute per rule,
+  without its subject.
+
 ## Sessions
 
 A session is one sign-in: the chain of refresh tokens a login starts and each
@@ -569,6 +636,7 @@ harmless.
 | `GOMBIT_JWT_REFRESH_TTL` | `Config.Auth.RefreshTokenTTL` | `168h` (7 days) |
 | `GOMBIT_AUTH_EMAIL_VERIFICATION_TTL` | `Config.Auth.EmailVerificationTTL` | `24h` |
 | `GOMBIT_AUTH_EMAIL_VERIFICATION_URL` | `Config.Auth.EmailVerificationURL` | empty (the message carries the bare token); must contain `{token}` |
+| `GOMBIT_AUTH_THROTTLE_DISABLED` | `Config.Auth.ThrottleDisabled` | `false` (the credential endpoints are throttled; see [Abuse protection](#abuse-protection)) |
 
 With auth on, `config.Load` / `Validate` refuse a `GOMBIT_JWT_REFRESH_TTL`
 shorter than `GOMBIT_JWT_ACCESS_TTL` (equal is fine): the refresh token's

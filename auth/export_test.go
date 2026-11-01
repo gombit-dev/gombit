@@ -192,3 +192,9 @@ func SetPasswordChangeVerifiedHook(s *Service, fn func()) { s.onPasswordChangeVe
 
 // HasherOf is s's password hasher.
 func HasherOf(s *Service) Hasher { return s.hasher }
+
+// ContextWithAddress is ctx as a request from the client address ip carries
+// it (CaptureRequestInfo).
+func ContextWithAddress(ctx context.Context, ip string) context.Context {
+	return context.WithValue(ctx, requestInfoKey{}, requestInfo{ip: ip})
+}

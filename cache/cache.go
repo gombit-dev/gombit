@@ -21,6 +21,43 @@ type Cache interface {
 	Increment(ctx context.Context, key string, delta int64) (int64, error)
 }
 
+// Counter is implemented by caches whose counters can expire: rate limits,
+// attempt counters. IncrementTTL increments key by delta, as Increment does,
+// and gives the key ttl when it has no expiry (it was just created, or
+// written without one); a key that already expires keeps its deadline, so
+// a fixed window is not stretched by every hit. Atomic: concurrent calls
+// never lose an increment or leave a counter without its expiry. ttl must
+// be positive: a counter that never expires is what Increment is for.
+//
+// The built-in drivers (memory, redis, noop) and Namespace implement it;
+// IncrementTTL (the function) falls back for a Cache that does not.
+type Counter interface {
+	IncrementTTL(ctx context.Context, key string, delta int64, ttl time.Duration) (int64, error)
+}
+
+// IncrementTTL increments key in c by delta and gives it ttl when it has no
+// expiry, through c's Counter when it has one. For a Cache without one it
+// increments, then sets the counter again with ttl when the increment
+// created it: not atomic, so an increment by another caller between the
+// two can be lost (an undercount at the start of a window, never a counter
+// that lives forever). ttl must be positive.
+func IncrementTTL(ctx context.Context, c Cache, key string, delta int64, ttl time.Duration) (int64, error) {
+	if err := validateCounterTTL(ttl); err != nil {
+		return 0, err
+	}
+	if counter, ok := c.(Counter); ok {
+		return counter.IncrementTTL(ctx, key, delta, ttl)
+	}
+	value, err := c.Increment(ctx, key, delta)
+	if err != nil || value != delta {
+		return value, err
+	}
+	if err := c.Set(ctx, key, value, ttl); err != nil {
+		return 0, err
+	}
+	return value, nil
+}
+
 // Driver names an opened cache driver.
 type Driver string
 
@@ -171,6 +208,14 @@ func (s *Store) Increment(ctx context.Context, key string, delta int64) (int64, 
 	return s.impl.Increment(ctx, key, delta)
 }
 
+// IncrementTTL implements Counter.
+func (s *Store) IncrementTTL(ctx context.Context, key string, delta int64, ttl time.Duration) (int64, error) {
+	if s == nil || s.impl == nil {
+		return 0, errors.New("cache: nil store")
+	}
+	return IncrementTTL(ctx, s.impl, key, delta, ttl)
+}
+
 func encode(value any) ([]byte, error) {
 	payload, err := json.Marshal(value)
 	if err != nil {
@@ -185,6 +230,14 @@ func decode(payload []byte, dst any) error {
 	}
 	if err := json.Unmarshal(payload, dst); err != nil {
 		return fmt.Errorf("cache: unmarshal value: %w", err)
+	}
+	return nil
+}
+
+// validateCounterTTL refuses an IncrementTTL ttl that would not expire.
+func validateCounterTTL(ttl time.Duration) error {
+	if ttl <= 0 {
+		return fmt.Errorf("cache: increment ttl must be positive, got %s", ttl)
 	}
 	return nil
 }

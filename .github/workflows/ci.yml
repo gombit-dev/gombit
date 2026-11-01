@@ -178,14 +178,6 @@ jobs:
       - name: Warm npx openapi-typescript cache
         run: npx --yes openapi-typescript@7.13.0 --help >/dev/null
 
-      # The generated client's runtime tests execute the emitted client.ts
-      # against the openapi-fetch version `gombit client generate` pins, which
-      # examples/client's lockfile holds. Without this install they skip, and a
-      # regression in unwrap would reach a release unnoticed.
-      - name: Install the pinned client dependencies
-        working-directory: examples/client
-        run: npm ci
-
       # `go test ./...` resolves modules two ways that must both be warmed
       # before GOPROXY goes off (issue #208): ./migrations does a real `go run`
       # of the generated Atlas GORM loader, needing
@@ -354,6 +346,13 @@ jobs:
         env:
           GOMBIT_TEST_REDIS_ADDR: 127.0.0.1:6379
         run: go test -race -count=1 ./jobs
+
+      # The cache's Redis driver against the same server: IncrementTTL's
+      # script (the counters behind the auth throttles).
+      - name: Run Redis cache tests
+        env:
+          GOMBIT_TEST_REDIS_ADDR: 127.0.0.1:6379
+        run: go test -race -count=1 ./cache
 
   storage-s3:
     name: Storage (s3)

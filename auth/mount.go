@@ -73,8 +73,11 @@ func mountBearerRoutes(api huma.API, svc *Service, prefix string) {
 		Method:      http.MethodPost,
 		Path:        prefix + "/auth/login",
 		Summary:     "Log in and issue Bearer tokens",
+		Description: "Too many failed attempts for the email from this client address, from this address, or for the email is a 429 (Retry-After), the same whether or not the email is an account.",
 		Tags:        []string{"Auth"},
+		Errors:      []int{http.StatusTooManyRequests},
 	}), svc.login)
+	declareRetryAfter(api, prefix+"/auth/login", http.StatusTooManyRequests, throttleRetryAfterDoc)
 
 	huma.Register(api, withRequestInfo(huma.Operation{
 		OperationID: "refresh",
@@ -125,8 +128,11 @@ func mountCookieRoutes(api huma.API, svc *Service, prefix string) {
 		Method:      http.MethodPost,
 		Path:        prefix + "/auth/login",
 		Summary:     "Log in and start an HttpOnly cookie session",
+		Description: "Too many failed attempts for the email from this client address, from this address, or for the email is a 429 (Retry-After), the same whether or not the email is an account.",
 		Tags:        []string{"Auth"},
+		Errors:      []int{http.StatusTooManyRequests},
 	}), svc.loginCookie)
+	declareRetryAfter(api, prefix+"/auth/login", http.StatusTooManyRequests, throttleRetryAfterDoc)
 
 	huma.Register(api, withRequestInfo(huma.Operation{
 		OperationID: "refresh",

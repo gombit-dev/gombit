@@ -80,10 +80,16 @@ func (s *Service) ChangePassword(ctx context.Context, userID uint, current, newP
 	if err := checkNewPassword(newPassword, "new_password"); err != nil {
 		return false, err
 	}
+	// Only a wrong current password counts (CurrentPasswordPerUser).
+	res, err := s.throttle.reserve(ctx, s.currentPasswordRule(user.ID))
+	if err != nil {
+		return false, err
+	}
 	if err := s.hasher.Compare(user.PasswordHash, current); err != nil {
 		s.Audit(ctx, AuditEvent{Action: AuditPasswordChangeFailed, TargetUserID: uintPtr(user.ID), Details: details("reason", "wrong_current_password")})
 		return false, errWrongCurrentPassword
 	}
+	res.refund()
 	hash, err := s.hasher.Hash(newPassword)
 	if err != nil {
 		return false, err
@@ -179,11 +185,13 @@ func registerPasswordChangeRoutes(api huma.API, svc *Service, prefix, security s
 		Method:      http.MethodPost,
 		Path:        prefix + "/auth/password/change",
 		Summary:     "Change the signed-in user's password",
-		Description: "Requires the current password (a wrong one is a 422 on current_password). Signs out every other session of the user unless keep_other_sessions; this session stays. Outstanding password reset links stop working.",
+		Description: "Requires the current password (a wrong one is a 422 on current_password). Signs out every other session of the user unless keep_other_sessions; this session stays. Outstanding password reset links stop working. Too many wrong current passwords is a 429 (Retry-After).",
 		Tags:        []string{"Auth"},
 		Security:    []map[string][]string{{security: {}}},
 		Middlewares: huma.Middlewares{gate},
+		Errors:      []int{http.StatusTooManyRequests},
 	}), svc.changePassword)
+	declareRetryAfter(api, prefix+"/auth/password/change", http.StatusTooManyRequests, throttleRetryAfterDoc)
 }
 
 func (s *Service) changePassword(ctx context.Context, input *passwordChangeInput) (*passwordChangeOutput, error) {
