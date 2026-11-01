@@ -269,6 +269,15 @@ outside this repository it also needs `--url` to fetch a live spec, since a
 separately compiled `gombit` binary has no Go-level `huma.API` to compare
 against. See [`docs/client.md`](docs/client.md).
 
+`./client` also executes the emitted client in node. One test runs `unwrap`
+against a stub `openapi-fetch`; the other drives it through the version the
+generator pins, which `examples/client`'s lockfile holds, so install it to get
+that coverage (CI does, and the test skips without it):
+
+```bash
+cd examples/client && npm ci
+```
+
 ### Admin UI
 
 ```bash
