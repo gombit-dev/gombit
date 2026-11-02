@@ -27,7 +27,9 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   successor's session and whose details say whether it was live. The
   cost: if a thief rotates a stolen token first and the legitimate
   client's refresh lands within the grace, the client gets a 401 and
-  the thief's session is not revoked; that event names it.
+  the thief's session is not revoked; that event names it, by the
+  session id of the moment (it changes when the session next
+  refreshes, so act on it promptly).
 
 - **Breaking.** Email verification adds `users.email_verified_at` and `users.verified_email`, and a table, `auth_one_time_tokens`, which registration and `gombit createsuperuser` write: an app migrates before it runs this release. (`email-verification-schema`, schema, [#331](https://github.com/gombit-dev/gombit/issues/331))
 

@@ -522,6 +522,7 @@ func runSessionsService(t *testing.T, db *database.DB) {
 		e := newEnv(t)
 		ada, pairs := e.user(t, "graceaudit", 1)
 		next := e.rotate(t, pairs[0])
+		successor := e.sessionID(t, next) // read while the successor is live
 		if err := e.svc.RevokeRefresh(e.ctx, next.RefreshToken); err != nil {
 			t.Fatal(err)
 		}
@@ -532,8 +533,8 @@ func runSessionsService(t *testing.T, db *database.DB) {
 		if err := db.Where("action = ? AND target_user_id = ?", auth.AuditRefreshReuseWithinGrace, ada.ID).First(&ev).Error; err != nil {
 			t.Fatalf("no %s event: %v", auth.AuditRefreshReuseWithinGrace, err)
 		}
-		if ev.TargetType != "session" || ev.TargetID == "" || !strings.Contains(ev.Details, `"successor":"ended"`) {
-			t.Fatalf("event = %+v, want the successor's session, ended", ev)
+		if ev.TargetType != "session" || ev.TargetID != successor || !strings.Contains(ev.Details, `"successor":"ended"`) {
+			t.Fatalf("event = %+v, want the successor's session %s, ended", ev, successor)
 		}
 	})
 

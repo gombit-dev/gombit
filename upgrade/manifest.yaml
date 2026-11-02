@@ -525,7 +525,9 @@ releases:
           successor's session and whose details say whether it was live. The
           cost: if a thief rotates a stolen token first and the legitimate
           client's refresh lands within the grace, the client gets a 401 and
-          the thief's session is not revoked; that event names it.
+          the thief's session is not revoked; that event names it, by the
+          session id of the moment (it changes when the session next
+          refreshes, so act on it promptly).
         config:
           - {var: GOMBIT_AUTH_REFRESH_REUSE_GRACE, change: added}
         refs: [459]
