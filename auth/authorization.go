@@ -10,7 +10,7 @@ import (
 )
 
 // HasPermission reports whether user has key directly, through a group, or
-// through the Django-style superuser bypass.
+// through the Django-style superuser bypass. A disabled account has none.
 func HasPermission(ctx context.Context, db *gorm.DB, user User, key string) (bool, error) {
 	grants, err := HasPermissions(ctx, db, user, key)
 	if err != nil {
@@ -20,11 +20,16 @@ func HasPermission(ctx context.Context, db *gorm.DB, user User, key string) (boo
 }
 
 // HasPermissions checks several keys while loading the user's associations
-// once. Missing users and unassigned keys are reported as false.
+// once. Missing users and unassigned keys are reported as false, and so is
+// every key of a disabled account (User.Disabled), a superuser's too: as
+// the snapshot says, and as the row reloaded here says.
 func HasPermissions(ctx context.Context, db *gorm.DB, user User, keys ...string) (map[string]bool, error) {
 	grants := make(map[string]bool, len(keys))
 	for _, key := range keys {
 		grants[key] = false
+	}
+	if user.Disabled() {
+		return grants, nil
 	}
 	if user.IsSuperuser {
 		for key := range grants {
@@ -49,6 +54,9 @@ func HasPermissions(ctx context.Context, db *gorm.DB, user User, keys ...string)
 	}
 	if err != nil {
 		return nil, err
+	}
+	if loaded.Disabled() {
+		return grants, nil
 	}
 	if loaded.IsSuperuser {
 		for key := range grants {

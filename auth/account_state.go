@@ -31,6 +31,23 @@ const PermissionManageUsers = "auth.users.manage"
 // unknown userID. It checks no permission: it is for an app's own code and
 // commands; the HTTP route checks PermissionManageUsers.
 func (s *Service) DisableUser(ctx context.Context, userID uint) (User, error) {
+	return s.setUserState(ctx, userID, true, nil)
+}
+
+// EnableUser makes userID's disabled account active again: the user may
+// sign in. The sessions and links revoked when it was disabled stay
+// revoked. Enabling an active account changes nothing. It returns the user,
+// and ErrUserNotFound for an unknown userID. Like DisableUser, it checks no
+// permission.
+func (s *Service) EnableUser(ctx context.Context, userID uint) (User, error) {
+	return s.setUserState(ctx, userID, false, nil)
+}
+
+// setUserState disables or enables userID's account under its row lock,
+// after check (when given) accepted the locked row: a rule on the account
+// (who may change it) is decided on the row the change is made to, never on
+// an earlier read.
+func (s *Service) setUserState(ctx context.Context, userID uint, disable bool, check func(locked User) error) (User, error) {
 	var user User
 	changed := false
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -41,8 +58,21 @@ func (s *Service) DisableUser(ctx context.Context, userID uint) (User, error) {
 		if err != nil {
 			return err
 		}
+		if check != nil {
+			if err := check(locked); err != nil {
+				return err
+			}
+		}
 		user = locked
-		if locked.Disabled() {
+		if locked.Disabled() == disable {
+			return nil
+		}
+		if !disable {
+			if err := tx.Model(&User{}).Where("id = ?", userID).Update("disabled_at", nil).Error; err != nil {
+				return err
+			}
+			user.DisabledAt = nil
+			changed = true
 			return nil
 		}
 		now := s.now()
@@ -63,46 +93,19 @@ func (s *Service) DisableUser(ctx context.Context, userID uint) (User, error) {
 		return User{}, err
 	}
 	if changed {
-		s.Audit(ctx, AuditEvent{Action: AuditUserDisabled, TargetUserID: uintPtr(user.ID)})
+		action := AuditUserEnabled
+		if disable {
+			action = AuditUserDisabled
+		}
+		s.Audit(ctx, AuditEvent{Action: action, TargetUserID: uintPtr(user.ID)})
 	}
 	return user, nil
 }
 
-// EnableUser makes userID's disabled account active again: the user may
-// sign in. The sessions and links revoked when it was disabled stay
-// revoked. Enabling an active account changes nothing. It returns the user,
-// and ErrUserNotFound for an unknown userID. Like DisableUser, it checks no
-// permission.
-func (s *Service) EnableUser(ctx context.Context, userID uint) (User, error) {
-	var user User
-	changed := false
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		locked, err := lockUserTx(tx, userID)
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return errUserNotFound
-		}
-		if err != nil {
-			return err
-		}
-		user = locked
-		if !locked.Disabled() {
-			return nil
-		}
-		if err := tx.Model(&User{}).Where("id = ?", userID).Update("disabled_at", nil).Error; err != nil {
-			return err
-		}
-		user.DisabledAt = nil
-		changed = true
-		return nil
-	})
-	if err != nil {
-		return User{}, err
-	}
-	if changed {
-		s.Audit(ctx, AuditEvent{Action: AuditUserEnabled, TargetUserID: uintPtr(user.ID)})
-	}
-	return user, nil
-}
+var (
+	errSuperuserOnly     = errors.New("auth: only a superuser may change a superuser's account")
+	errCannotDisableSelf = errors.New("auth: an account cannot disable itself")
+)
 
 type userStateInput struct {
 	ID uint `path:"id" minimum:"1" doc:"The user's id"`
@@ -158,7 +161,9 @@ func (s *Service) enableUserRoute(ctx context.Context, input *userStateInput) (*
 }
 
 // changeUserState checks the signed-in user may change target's state, then
-// changes it.
+// changes it. The permission is the actor's, checked first; the rules on the
+// target (a superuser's account is a superuser's to change, no one disables
+// themselves) are decided under the target's row lock.
 func (s *Service) changeUserState(ctx context.Context, targetID uint, disable bool) (*userStateOutput, error) {
 	actor, _, err := requestSession(ctx)
 	if err != nil {
@@ -171,31 +176,24 @@ func (s *Service) changeUserState(ctx context.Context, targetID uint, disable bo
 	if !allowed {
 		return nil, contract.WithContext(ctx, contract.Authorization("permission denied: "+PermissionManageUsers))
 	}
-	var target User
-	if err := s.db.WithContext(ctx).Where("id = ?", targetID).Limit(1).Find(&target).Error; err != nil {
-		return nil, contract.WithContext(ctx, contract.Internal("load user"))
-	}
-	if target.ID == 0 {
+	user, err := s.setUserState(ctx, targetID, disable, func(locked User) error {
+		// The permission must not reach above the one who holds it.
+		if locked.IsSuperuser && !actor.IsSuperuser {
+			return errSuperuserOnly
+		}
+		if disable && locked.ID == actor.ID {
+			return errCannotDisableSelf
+		}
+		return nil
+	})
+	switch {
+	case errors.Is(err, errUserNotFound):
 		return nil, contract.WithContext(ctx, contract.NotFound("user not found"))
-	}
-	// A superuser's account is changed by a superuser only: the
-	// permission must not reach above the one who holds it.
-	if target.IsSuperuser && !actor.IsSuperuser {
+	case errors.Is(err, errSuperuserOnly):
 		return nil, contract.WithContext(ctx, contract.Authorization("only a superuser may change a superuser's account"))
-	}
-	if disable && target.ID == actor.ID {
+	case errors.Is(err, errCannotDisableSelf):
 		return nil, contract.WithContext(ctx, contract.Conflict("an account cannot disable itself"))
-	}
-	var user User
-	if disable {
-		user, err = s.DisableUser(ctx, target.ID)
-	} else {
-		user, err = s.EnableUser(ctx, target.ID)
-	}
-	if errors.Is(err, errUserNotFound) {
-		return nil, contract.WithContext(ctx, contract.NotFound("user not found"))
-	}
-	if err != nil {
+	case err != nil:
 		return nil, mapServiceError(ctx, err)
 	}
 	return &userStateOutput{Body: contract.Data[authUserState]{Data: authUserState{ID: user.ID, Disabled: user.Disabled()}}}, nil

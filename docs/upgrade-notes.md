@@ -159,16 +159,18 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   `auth.WithThrottlePolicy` changes the limits;
   `GOMBIT_AUTH_THROTTLE_DISABLED=true` turns them off.
 
-- Account state adds `users.disabled_at`: an app migrates before it disables an account. (`account-state-schema`, schema, [#336](https://github.com/gombit-dev/gombit/issues/336))
+- **Breaking.** Account state adds `users.disabled_at`, which registration and `gombit createsuperuser` write: an app migrates before it runs this release. (`account-state-schema`, schema, [#336](https://github.com/gombit-dev/gombit/issues/336))
 
   - Framework schema: `auth.User` (`users`): altered.
 
   `auth.User` gains `DisabledAt` (nil while the account is active).
-  Until the column exists, everything else works (a user row read
-  without it is active), but disabling or enabling an account fails.
-  Generate and apply the migration (`gombit db makemigrations`,
-  `gombit db migrate`); `gombit upgrade --dry-run` lists the steps.
-  Existing users start active.
+  Until the column exists, registering a user and `gombit
+  createsuperuser` fail (the insert names every column of the
+  model), and so do disabling and enabling an account; reading a
+  user works (a row read without the column is active). Generate and
+  apply the migration (`gombit db makemigrations`, `gombit db
+  migrate`) before deploying; `gombit upgrade --dry-run` lists the
+  steps. Existing users start active.
 
 - **Breaking.** With auth enabled, an app that registers `POST {prefix}/auth/users/{id}/disable` or `/enable`, the `auth-disable-user` / `auth-enable-user` operations, or the `AuthUserState` schema name fails at startup: the framework registers them. (`account-state-names-reserved`, api, [#336](https://github.com/gombit-dev/gombit/issues/336))
 
@@ -333,7 +335,8 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   disables their own account. `auth.Service.DisableUser` /
   `EnableUser` are the same for an app's own code. A login with the
   right password of a disabled account is a 403; a wrong password
-  answers as before.
+  answers as before. `auth.HasPermission` / `HasPermissions` grant a
+  disabled account nothing, a superuser's included.
 
 - A new app's placeholder `schema.ts` includes the account state operations; an existing app's generated client gets them from `gombit client generate`. (`client-schema-account-state`, client, [#336](https://github.com/gombit-dev/gombit/issues/336))
 

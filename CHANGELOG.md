@@ -23,10 +23,12 @@ version.
   was revoked stays revoked. The routes need the `auth.users.manage`
   permission (`auth.PermissionManageUsers`; superusers bypass); a
   superuser's account is a superuser's to change, and no one disables
-  themselves. Audited (`auth.user.disabled` / `enabled`). `users` gains
-  `disabled_at`: migrate before disabling an account (everything else works
-  without it). **Breaking (api):** the framework registers the two routes
-  and the `AuthUserState` schema name.
+  themselves. `auth.HasPermission` grants a disabled account nothing.
+  Audited (`auth.user.disabled` / `enabled`). **Breaking (schema):**
+  `users` gains `disabled_at`, which registration and `gombit
+  createsuperuser` write: migrate before running this release.
+  **Breaking (api):** the framework registers the two routes and the
+  `AuthUserState` schema name.
 
 - [Abuse protection](docs/auth.md#abuse-protection) for the credential
   endpoints (AUTH-8), in both auth modes, on by default. Sliding-window

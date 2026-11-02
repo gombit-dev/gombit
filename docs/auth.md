@@ -427,8 +427,14 @@ curl -sX POST localhost:8080/api/v1/auth/users/42/enable -H "Authorization: Bear
   ```
 
   A superuser's account is changed by a superuser only (403 otherwise), and
-  no one disables their own account (409). An unknown id is a 404. Both
-  are idempotent.
+  no one disables their own account (409), both decided on the target's row
+  under its lock. An unknown id is a 404. Both are idempotent. Nothing keeps
+  the last superuser active: two superusers who disable each other at once
+  both succeed. Recover with `gombit createsuperuser` (another address) or
+  `svc.EnableUser` from code.
+- **Permissions.** `auth.HasPermission` / `HasPermissions` grant a disabled
+  account nothing, a superuser's included, so app code that authorizes a
+  loaded user (a job, a webhook) does not trust a disabled one.
 - **From Go.** `svc.DisableUser(ctx, userID)` / `svc.EnableUser(ctx, userID)`
   do the same and check no permission: for an app's own code and commands.
   `auth.ErrAccountDisabled` is the error of a disabled account's login,

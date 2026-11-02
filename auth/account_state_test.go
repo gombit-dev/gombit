@@ -155,6 +155,104 @@ func runAccountStateService(t *testing.T, db *database.DB) {
 		}
 	})
 
+	t.Run("links mailed before a disable stay dead after an enable", func(t *testing.T) {
+		e := newVerificationEnv(t, db)
+		user, _ := e.register(t, "disable-links")
+		reset := e.resetToken(t, user)
+		change := e.changeToken(t, user, fmt.Sprintf("taken-over-%d@example.com", time.Now().UnixNano()))
+		if _, err := e.svc.DisableUser(ctx, user.ID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := e.svc.EnableUser(ctx, user.ID); err != nil {
+			t.Fatal(err)
+		}
+		// Active again, the account still refuses what was voided: an email
+		// change link to an address a thief chose must not move the account.
+		if _, err := e.svc.ConfirmEmailChange(ctx, change); !errors.Is(err, auth.ErrInvalidToken) {
+			t.Fatalf("an email change link from before the disable = %v, want ErrInvalidToken", err)
+		}
+		if _, err := e.svc.ResetPassword(ctx, reset, "new-horse-3"); !errors.Is(err, auth.ErrInvalidToken) {
+			t.Fatalf("a reset link from before the disable = %v, want ErrInvalidToken", err)
+		}
+	})
+
+	t.Run("a link being sent when the account is disabled never works", func(t *testing.T) {
+		e := newVerificationEnv(t, db)
+		user, _ := e.register(t, "disable-pending")
+		e.clock.now = e.clock.now.Add(2 * time.Minute)
+		// The token is pending while its message is sent; the disable
+		// lands then.
+		auth.SetMailer(e.svc, sendHook{inner: e.mail, before: func(msg auth.Message) {
+			if msg.Kind == auth.MessageResetPassword {
+				if _, err := e.svc.DisableUser(ctx, user.ID); err != nil {
+					t.Error(err)
+				}
+			}
+		}})
+		if err := e.svc.RequestPasswordReset(ctx, user.Email); err == nil {
+			t.Fatal("a reset whose token was voided while pending reported success")
+		}
+		msg, ok := e.mail.Last(user.Email)
+		if !ok || msg.Kind != auth.MessageResetPassword {
+			t.Fatalf("no reset message went out (last %+v)", msg)
+		}
+		if _, err := e.svc.EnableUser(ctx, user.ID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := e.svc.ResetPassword(ctx, msg.Token, "new-horse-4"); !errors.Is(err, auth.ErrInvalidToken) {
+			t.Fatalf("the link sent during the disable = %v, want ErrInvalidToken", err)
+		}
+	})
+
+	t.Run("a link revived behind the Service's back is refused while disabled", func(t *testing.T) {
+		e := newVerificationEnv(t, db)
+		user, verify := e.register(t, "disable-revived-link")
+		reset := e.resetToken(t, user)
+		if _, err := e.svc.DisableUser(ctx, user.ID); err != nil {
+			t.Fatal(err)
+		}
+		if err := e.db.Model(&auth.OneTimeToken{}).Where("user_id = ?", user.ID).Update("used_at", nil).Error; err != nil {
+			t.Fatal(err)
+		}
+		if _, err := e.svc.ResetPassword(ctx, reset, "new-horse-5"); !errors.Is(err, auth.ErrInvalidToken) {
+			t.Fatalf("a revived reset link = %v, want ErrInvalidToken", err)
+		}
+		if _, err := e.svc.VerifyEmail(ctx, verify); !errors.Is(err, auth.ErrInvalidToken) {
+			t.Fatalf("a revived verification link = %v, want ErrInvalidToken", err)
+		}
+	})
+
+	t.Run("a disabled account has no permission", func(t *testing.T) {
+		e := newVerificationEnv(t, db)
+		user, _ := e.register(t, "disable-perms")
+		permission, err := auth.EnsurePermission(ctx, e.db.DB, "test.disabled.perm", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := auth.GrantPermissionToUser(ctx, e.db.DB, &user, &permission); err != nil {
+			t.Fatal(err)
+		}
+		if ok, err := auth.HasPermission(ctx, e.db.DB, user, permission.Key); err != nil || !ok {
+			t.Fatalf("granted, active = %v, %v", ok, err)
+		}
+		disabled, err := e.svc.DisableUser(ctx, user.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The snapshot says disabled; so does the row behind an old one.
+		if ok, _ := auth.HasPermission(ctx, e.db.DB, disabled, permission.Key); ok {
+			t.Fatal("a disabled account has its permission")
+		}
+		if ok, _ := auth.HasPermission(ctx, e.db.DB, user, permission.Key); ok {
+			t.Fatal("an active snapshot of a disabled account has its permission")
+		}
+		super := disabled
+		super.IsSuperuser = true
+		if ok, _ := auth.HasPermission(ctx, e.db.DB, super, "anything"); ok {
+			t.Fatal("a disabled superuser has every permission")
+		}
+	})
+
 	t.Run("an unknown user", func(t *testing.T) {
 		e := newVerificationEnv(t, db)
 		if _, err := e.svc.DisableUser(ctx, 1<<30); !errors.Is(err, auth.ErrUserNotFound) {
@@ -290,5 +388,38 @@ func runAccountStateCookie(t *testing.T, db *database.DB) {
 	other := fetchCSRF(t, app)
 	if rec := loginCookieUser(t, app, other, plain.Email, testPassword); rec.Code != http.StatusForbidden {
 		t.Fatalf("a disabled account's cookie login = %d, want 403", rec.Code)
+	}
+}
+
+// sendHook runs before ahead of each message, then hands it to inner.
+type sendHook struct {
+	inner  auth.Mailer
+	before func(auth.Message)
+}
+
+func (h sendHook) Send(ctx context.Context, msg auth.Message) error {
+	h.before(msg)
+	return h.inner.Send(ctx, msg)
+}
+
+// TestRegisterNeedsTheDisabledAtColumn holds the upgrade note to the ORM:
+// registration writes users.disabled_at, so an unmigrated database refuses
+// it (manifest account-state-schema, breaking).
+func TestRegisterNeedsTheDisabledAtColumn(t *testing.T) {
+	db := openSQLite(t)
+	if err := auth.Migrate(db.DB); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec("ALTER TABLE users DROP COLUMN disabled_at").Error; err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.DefaultFor(config.EnvironmentTest)
+	cfg.Auth.JWTSecret = testJWTSecret
+	svc, err := auth.NewService(db.DB, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Register(context.Background(), "unmigrated@example.com", testPassword); err == nil {
+		t.Fatal("Register on a users table without disabled_at succeeded: the manifest's breaking note is wrong")
 	}
 }
