@@ -154,6 +154,11 @@ func runAuditTrail(t *testing.T, db *database.DB) {
 		t.Fatalf("verify = %d", rec.Code)
 	}
 	rotated := refreshUser(t, app, pair.Data.RefreshToken)
+	// The rotated-away token at once, within the grace: a lost race, a 401
+	// that revokes nothing, but recorded.
+	if rec := auditRequest(app, "/api/v1/auth/refresh", "", `{"refresh_token":"`+pair.Data.RefreshToken+`"}`, "req-race"); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("within-grace replay = %d", rec.Code)
+	}
 	ageRotations(t, db.DB)
 	// The rotated-away token again, past the grace: reuse, every session revoked.
 	if rec := auditRequest(app, "/api/v1/auth/refresh", "", `{"refresh_token":"`+pair.Data.RefreshToken+`"}`, "req-reuse"); rec.Code != http.StatusUnauthorized {
@@ -184,7 +189,7 @@ func runAuditTrail(t *testing.T, db *database.DB) {
 	}
 	want := []string{
 		"auth.user.registered", "auth.login.failed", "auth.login.succeeded", "auth.email.verified",
-		"auth.refresh.reuse_detected", "auth.login.succeeded", "auth.logout", "auth.login.succeeded", "auth.session.revoked",
+		"auth.refresh.reuse_within_grace", "auth.refresh.reuse_detected", "auth.login.succeeded", "auth.logout", "auth.login.succeeded", "auth.session.revoked",
 	}
 	if strings.Join(got, " ") != strings.Join(want, " ") {
 		t.Fatalf("events = %v\nwant %v", got, want)
@@ -205,6 +210,9 @@ func runAuditTrail(t *testing.T, db *database.DB) {
 	ok := byRequest["req-login"]
 	if ok.ActorUserID == nil || *ok.ActorUserID != user.ID || ok.IP == "" {
 		t.Errorf("login = %+v", ok)
+	}
+	if race := byRequest["req-race"]; race.Action != auth.AuditRefreshReuseWithinGrace || race.ActorUserID != nil || race.IP == "" {
+		t.Errorf("within-grace replay = %+v", race)
 	}
 	revoked := byRequest["req-revoke-all"]
 	if revoked.Action != auth.AuditSessionRevoked || revoked.ActorUserID == nil || *revoked.ActorUserID != user.ID || !strings.Contains(revoked.Details, `"scope":"all"`) {

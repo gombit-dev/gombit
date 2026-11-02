@@ -352,12 +352,12 @@ func assertError(t *testing.T, rec *httptest.ResponseRecorder, status int, code 
 	}
 }
 
-// ageRotations moves every rotation in db past auth.RefreshReuseGrace, so a
+// ageRotations moves every rotation in db past config.DefaultRefreshReuseGrace, so a
 // rotated token presented again is reuse rather than a lost race (#459).
 func ageRotations(t *testing.T, db *gorm.DB) {
 	t.Helper()
 	if err := db.Model(&auth.RefreshToken{}).Where("replaced_by IS NOT NULL").
-		Update("revoked_at", time.Now().Add(-auth.RefreshReuseGrace-time.Second)).Error; err != nil {
+		Update("revoked_at", time.Now().Add(-config.DefaultRefreshReuseGrace-time.Second)).Error; err != nil {
 		t.Fatal(err)
 	}
 }

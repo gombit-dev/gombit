@@ -142,12 +142,16 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 ### Informational
 
-- A refresh with a token rotated less than `auth.RefreshReuseGrace` (30 seconds) ago is a plain 401, no longer reuse that revokes every session of the user. (`refresh-reuse-grace`, security, [#459](https://github.com/gombit-dev/gombit/issues/459))
+- A refresh with a token rotated less than `config.AuthConfig.RefreshReuseGrace` (30 seconds by default) ago, whose successor is still live, is a plain 401, audited as `auth.refresh.reuse_within_grace`, no longer reuse that revokes every session of the user. (`refresh-reuse-grace`, security, [#459](https://github.com/gombit-dev/gombit/issues/459))
 
   Two tabs sharing one refresh token no longer sign each other out
   when their refreshes arrive a round trip apart. The reuse cascade
-  still runs for a rotated token presented after the grace and before
-  it expires; within it nothing is issued for the old token. The
+  still runs for a rotated token presented after the grace, or whose
+  successor was rotated again, before it expires; within it nothing is
+  issued for the old token. Set `RefreshReuseGrace` to zero to keep
+  the strict rule (an app with no clients sharing a refresh token
+  across tabs). An audit consumer sees the new
+  `auth.refresh.reuse_within_grace` action. The
   cost: if a thief rotates a stolen token first and the legitimate
   client's refresh lands within those 30 seconds, the client gets a
   401 and the thief's session is not revoked.

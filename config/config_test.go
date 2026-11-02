@@ -194,6 +194,7 @@ func TestLoadFromEnv(t *testing.T) {
 
 			EmailVerificationTTL: DefaultEmailVerificationTTL,
 			PasswordResetTTL:     DefaultPasswordResetTTL,
+			RefreshReuseGrace:    DefaultRefreshReuseGrace,
 		},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -374,6 +375,7 @@ func TestLoadUsesProcessEnvironment(t *testing.T) {
 
 			EmailVerificationTTL: DefaultEmailVerificationTTL,
 			PasswordResetTTL:     DefaultPasswordResetTTL,
+			RefreshReuseGrace:    DefaultRefreshReuseGrace,
 		},
 	}
 	if !reflect.DeepEqual(got, want) {

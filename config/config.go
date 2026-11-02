@@ -107,6 +107,8 @@ const (
 
 	// DefaultPasswordResetTTL is how long a password reset link stays valid.
 	DefaultPasswordResetTTL = time.Hour
+	// DefaultRefreshReuseGrace is AuthConfig.RefreshReuseGrace's default.
+	DefaultRefreshReuseGrace = 30 * time.Second
 
 	// PasswordResetURLToken is the placeholder a password reset URL carries
 	// where the token goes.
@@ -475,6 +477,15 @@ type AuthConfig struct {
 	// their password. By default (false) a reset revokes every session and
 	// refresh token of the user: whoever knew the old password is signed out.
 	PasswordResetKeepSessions bool
+	// RefreshReuseGrace is how long after a rotation the rotated refresh
+	// token, presented again while its successor is still live, is a lost
+	// race (another tab of the same browser sent it a round trip late) and
+	// not reuse: a 401 that issues and revokes nothing (#459). Zero (or less)
+	// is strict: any rotated token presented again before it expires revokes
+	// every session of the user. DefaultFor and Load set
+	// DefaultRefreshReuseGrace; an app that has no clients sharing a refresh
+	// token across tabs can set zero.
+	RefreshReuseGrace time.Duration
 }
 
 // Enabled reports whether auth routes should be mounted (JWT secret is set).
@@ -589,6 +600,7 @@ func defaultAuthConfig() AuthConfig {
 
 		EmailVerificationTTL: DefaultEmailVerificationTTL,
 		PasswordResetTTL:     DefaultPasswordResetTTL,
+		RefreshReuseGrace:    DefaultRefreshReuseGrace,
 	}
 }
 

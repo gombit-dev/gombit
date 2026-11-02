@@ -275,19 +275,11 @@ func (s *Service) issueTokens(tx *gorm.DB, user User, now time.Time) (TokenPair,
 	}, nil
 }
 
-// RefreshReuseGrace is how long after a rotation the rotated refresh token is
-// a lost race rather than reuse: presenting it again within this interval is
-// a plain 401 (no new pair, nothing revoked), so two tabs that send the same
-// token a round trip apart do not sign each other out (issue #459). Past it,
-// reuse before the token expires revokes every session of the user. Within it
-// nothing is issued for the old token. The cost: a thief who rotates a stolen
-// token first is not caught by a legitimate refresh landing within the grace.
-const RefreshReuseGrace = 30 * time.Second
-
 // RotateRefresh validates the current refresh token, revokes it, and issues a
 // new pair. Reuse of an already-rotated token before it expires revokes the
-// user's remaining tokens, unless it comes within RefreshReuseGrace of the
-// rotation, a lost race that is just invalid; a token revoked by logout or
+// user's remaining tokens, unless it comes within the configured
+// RefreshReuseGrace of the rotation while the successor is still live, a lost
+// race that is just invalid (and audited); a token revoked by logout or
 // session revocation, and any expired token, is just invalid. Concurrent
 // callers with the same still-valid token share one rotation so a lost race
 // cannot family-revoke the winner's new session.
@@ -345,7 +337,7 @@ func (s *Service) rotateRefresh(ctx context.Context, raw string) (TokenPair, Use
 func (s *Service) rotateRefreshOnce(ctx context.Context, raw, hash string) (TokenPair, User, error) {
 	var pair TokenPair
 	var user User
-	var reuse bool
+	var reuse, withinGrace bool
 	var reuseUser uint
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var row RefreshToken
@@ -414,15 +406,33 @@ func (s *Service) rotateRefreshOnce(ctx context.Context, raw, hash string) (Toke
 				// theft, so it must not end the user's other sessions.
 				return errInvalidRefreshToken
 			}
-			// Rotated moments ago: another tab or client of the same browser
-			// sent this token before the winner's response came back, and its
-			// refresh was on the wire for a round trip, not merely overlapping
-			// inside this process (which the single-flight above joins). It is
-			// a lost race, errRotationRaced: a 401 that issues nothing and
-			// revokes nothing, so the winner's new session survives and, in
-			// cookie mode, keeps the cookies it was just sent (issue #459).
-			if row.RevokedAt.After(now.Add(-RefreshReuseGrace)) {
-				return errRotationRaced
+			// Rotated moments ago, and its successor is still the live head:
+			// another tab of the same browser sent this token before the
+			// winner's response came back, its refresh on the wire for a
+			// round trip, not merely overlapping inside this process (which
+			// the single-flight above joins). A lost race, errRotationRaced:
+			// a 401 that issues and revokes nothing, so the winner's new
+			// session survives and, in cookie mode, keeps the cookies it was
+			// just sent (issue #459). A successor revoked since (a logout)
+			// leaves nothing to race: a plain invalid token. One rotated
+			// again has moved past any sibling tab: reuse. Either way short
+			// of the cascade is audited, since it is also all a thief who
+			// rotated first leaves when the legitimate client comes back.
+			if grace := s.cfg.RefreshReuseGrace; grace > 0 && row.RevokedAt.After(now.Add(-grace)) {
+				successor, err := lockRefreshRowTx(tx, *row.ReplacedBy)
+				if err != nil {
+					return err
+				}
+				switch {
+				case successor.ReplacedBy != nil:
+					// Rotated again: fall through to the cascade.
+				case successor.RevokedAt == nil && successor.ExpiresAt.After(now):
+					withinGrace, reuseUser = true, row.UserID
+					return errRotationRaced
+				default:
+					withinGrace, reuseUser = true, row.UserID
+					return errInvalidRefreshToken
+				}
 			}
 			// Rotated, and presented again later, before it expired: reuse.
 			if err := revokeAllTx(tx, row.UserID, now); err != nil {
@@ -476,6 +486,9 @@ func (s *Service) rotateRefreshOnce(ctx context.Context, raw, hash string) (Toke
 		pair = issued
 		return nil
 	})
+	if withinGrace {
+		s.Audit(ctx, AuditEvent{Action: AuditRefreshReuseWithinGrace, TargetUserID: uintPtr(reuseUser)})
+	}
 	if err != nil {
 		return TokenPair{}, User{}, err
 	}
@@ -500,6 +513,15 @@ func hasSuccessorTx(tx *gorm.DB, id uint) (bool, error) {
 		return false, err
 	}
 	return current.ReplacedBy != nil, nil
+}
+
+// lockRefreshRowTx reads refresh token row id in tx, which holds the user's
+// lock, with a locking read for the same reason as hasSuccessorTx: the latest
+// committed row, not this transaction's snapshot.
+func lockRefreshRowTx(tx *gorm.DB, id uint) (RefreshToken, error) {
+	var row RefreshToken
+	err := tx.Clauses(clause.Locking{Strength: clause.LockingStrengthShare}).First(&row, id).Error
+	return row, err
 }
 
 // RevokeRefresh invalidates one refresh token. Missing/already-revoked tokens
