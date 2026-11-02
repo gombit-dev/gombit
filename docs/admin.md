@@ -442,7 +442,10 @@ D10 `validation_error` with `fields`. JSON object/array values populate
 `json.RawMessage`, `[]byte`, and nested structs (`json.Unmarshal` /
 `json.Unmarshaler`). UUID strings populate `uuid.UUID`
 (`encoding.TextUnmarshaler` / `sql.Scanner`). `FieldsFrom` infers
-`uuid.UUID` as `uuid`, not `json`.
+`uuid.UUID` as `uuid`, not `json`. A `uuid` value, written, filtered or named
+in the path, is case-insensitive: the admin uses its canonical lower case, the
+form `uuid.UUID` stores, so `/resources/docs/3F2B8C1A-…` finds the row a
+`char(36)` column holds as `3f2b8c1a-…` on every driver.
 
 The application's public CRUD API stays the feature's own typed Huma
 routes. Admin does not replace them.

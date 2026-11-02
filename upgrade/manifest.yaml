@@ -509,6 +509,17 @@ releases:
 
   - version: unreleased
     changes:
+      - id: admin-uuid-case-insensitive
+        kind: informational
+        area: behavior
+        summary: "The admin reads a `uuid` path id, filter or written value in its canonical lower case, so an upper-case UUID finds its row on every driver."
+        details: |
+          A `uuid` field that is a Go `string` (declared `Type: admin.TypeUUID`)
+          is written in lower case now, as a `uuid.UUID` field always was; a
+          row written in upper case by other code is found only by its exact
+          spelling until it is rewritten.
+        refs: [457]
+
       - id: bearer-handler-401-challenge
         kind: informational
         area: api

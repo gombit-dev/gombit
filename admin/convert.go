@@ -160,8 +160,16 @@ func coerceValue(raw any, ft FieldType) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		if ft == TypeUUID && !validUUID(s) {
-			return nil, fmt.Errorf("must be a UUID")
+		if ft == TypeUUID {
+			if !validUUID(s) {
+				return nil, fmt.Errorf("must be a UUID")
+			}
+			// UUIDs are case-insensitive (RFC 9562 §4), but SQLite and MySQL
+			// compare their char(36) text byte for byte. The canonical lower
+			// case, which uuid.UUID writes, is what a path id, a filter and a
+			// written value use, so an upper-case spelling finds the row
+			// (issue #457), as the generated plane's uuid.Parse does.
+			return strings.ToLower(s), nil
 		}
 		return s, nil
 	case TypeInteger:

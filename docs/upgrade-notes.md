@@ -142,6 +142,13 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 ### Informational
 
+- The admin reads a `uuid` path id, filter or written value in its canonical lower case, so an upper-case UUID finds its row on every driver. (`admin-uuid-case-insensitive`, behavior, [#457](https://github.com/gombit-dev/gombit/issues/457))
+
+  A `uuid` field that is a Go `string` (declared `Type: admin.TypeUUID`)
+  is written in lower case now, as a `uuid.UUID` field always was; a
+  row written in upper case by other code is found only by its exact
+  spelling until it is rewritten.
+
 - Bearer-mode session revocation errors include the `WWW-Authenticate: Bearer realm="api"` challenge when the handler returns 401. (`bearer-handler-401-challenge`, api, [#604](https://github.com/gombit-dev/gombit/issues/604))
 
   Cookie-mode 401 responses still omit a Bearer challenge.

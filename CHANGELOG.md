@@ -139,6 +139,12 @@ version.
 
 ### Fixed
 
+- The admin finds a row by a UUID spelled in upper case: the detail, update
+  and delete paths and the `uuid` filters (`?id=3F2B8C1A-…`) returned 404 or
+  an empty list on SQLite and PostgreSQL, whose `char(36)` uuid columns
+  compare text byte for byte. The admin now uses a `uuid` value's canonical
+  lower case, as the generated list handlers already did
+  ([#457](https://github.com/gombit-dev/gombit/issues/457)).
 - An inbound `X-Request-Id` longer than 128 bytes
   (`contract.MaxRequestIDLength`), or holding a space or a control
   character, is replaced by a generated ID instead of being echoed, logged

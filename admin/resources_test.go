@@ -20,6 +20,7 @@ import (
 	"github.com/gombit-dev/gombit/admin"
 	"github.com/gombit-dev/gombit/auth"
 	"github.com/gombit-dev/gombit/contract"
+	"github.com/gombit-dev/gombit/database"
 	"github.com/gombit-dev/gombit/framework"
 	"github.com/gombit-dev/gombit/types"
 	"github.com/google/uuid"
@@ -1463,5 +1464,75 @@ func assertCreatedAtPresent(t *testing.T, row map[string]any) {
 	s := fmt.Sprint(v)
 	if s == "" || strings.HasPrefix(s, "0001-01-01") {
 		t.Fatalf("created_at is empty/zero: %#v", v)
+	}
+}
+
+// uuidDoc keys by a char(36) uuid, as `gombit make resource --id uuid`
+// scaffolds it: text on every driver, compared byte for byte on SQLite and
+// PostgreSQL.
+type uuidDoc struct {
+	ID    uuid.UUID `gorm:"type:char(36);primaryKey" json:"id"`
+	Title string    `json:"title"`
+	Ref   uuid.UUID `gorm:"type:char(36)" json:"ref"`
+}
+
+// TestResourceUUIDIsCaseInsensitive: a UUID spelled in upper case finds the
+// row it names, as a path id and as a filter, where the column is char(36)
+// text (issue #457). TestUUIDCaseAdminPostgres / MySQL run it on the matrix.
+func TestResourceUUIDIsCaseInsensitive(t *testing.T) {
+	runUUIDCaseAdmin(t, openSQLite(t))
+}
+
+func runUUIDCaseAdmin(t *testing.T, db *database.DB) {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	_ = db.Migrator().DropTable(&uuidDoc{})
+	t.Cleanup(func() { _ = db.Migrator().DropTable(&uuidDoc{}) })
+	app := newCookieAppWithDB(t, db)
+	if err := db.AutoMigrate(&uuidDoc{}); err != nil {
+		t.Fatalf("AutoMigrate(uuidDoc): %v", err)
+	}
+	if err := admin.Register(app, uuidDoc{}, admin.Options{Slug: "uuid-docs", Filter: []string{"id", "ref"}}); err != nil {
+		t.Fatalf("admin.Register: %v", err)
+	}
+	jar := loginSuperuser(t, app)
+	id := "3f2b8c1a-9d4e-4f6a-8b7c-1a2b3c4d5e6f"
+	ref := "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d"
+	upper, upperRef := strings.ToUpper(id), strings.ToUpper(ref)
+
+	create := doRequest(app, jar, http.MethodPost, "/api/v1/admin/resources/uuid-docs",
+		`{"id":"`+upper+`","title":"t","ref":"`+upperRef+`"}`)
+	if create.Code != http.StatusOK {
+		t.Fatalf("create status = %d; body: %s", create.Code, create.Body.String())
+	}
+	var stored uuidDoc
+	if err := app.DB().First(&stored).Error; err != nil || stored.ID.String() != id || stored.Ref.String() != ref {
+		t.Fatalf("stored row = %+v (err %v), want id %s ref %s", stored, err, id, ref)
+	}
+
+	for _, path := range []string{id, upper} {
+		if rec := doRequest(app, jar, http.MethodGet, "/api/v1/admin/resources/uuid-docs/"+path, ""); rec.Code != http.StatusOK {
+			t.Errorf("GET %s status = %d; body: %s", path, rec.Code, rec.Body.String())
+		}
+	}
+	for _, query := range []string{"id=" + upper, "ref=" + upperRef, "id=" + id} {
+		rec := doRequest(app, jar, http.MethodGet, "/api/v1/admin/resources/uuid-docs?"+query, "")
+		var env listEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil || rec.Code != http.StatusOK || env.Meta == nil || env.Meta.Total != 1 {
+			t.Errorf("list ?%s status = %d, err %v; body: %s", query, rec.Code, err, rec.Body.String())
+		}
+	}
+	if rec := doRequest(app, jar, http.MethodPatch, "/api/v1/admin/resources/uuid-docs/"+upper, `{"title":"u"}`); rec.Code != http.StatusOK {
+		t.Fatalf("PATCH %s status = %d; body: %s", upper, rec.Code, rec.Body.String())
+	}
+	if err := app.DB().First(&stored).Error; err != nil || stored.Title != "u" {
+		t.Fatalf("patched row = %+v (err %v), want title u", stored, err)
+	}
+	if rec := doRequest(app, jar, http.MethodDelete, "/api/v1/admin/resources/uuid-docs/"+upper, ""); rec.Code != http.StatusOK {
+		t.Fatalf("DELETE %s status = %d; body: %s", upper, rec.Code, rec.Body.String())
+	}
+	var n int64
+	if err := app.DB().Model(&uuidDoc{}).Count(&n).Error; err != nil || n != 0 {
+		t.Fatalf("rows after delete = %d (err %v), want 0", n, err)
 	}
 }
