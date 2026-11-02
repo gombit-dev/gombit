@@ -2,11 +2,15 @@ package auth_test
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gombit-dev/gombit/auth"
+	"github.com/gombit-dev/gombit/database"
+	"gorm.io/gorm"
 	"gorm.io/gorm/schema"
 )
 
@@ -189,4 +193,80 @@ func TestPermissionKeyColumnAvoidsMySQLReservedWord(t *testing.T) {
 	if strings.EqualFold(field.DBName, "key") {
 		t.Fatalf("Permission.Key column %q is a reserved MySQL identifier", field.DBName)
 	}
+}
+
+// TestEnsureConcurrentFirstUse: concurrent first callers of EnsurePermission
+// and EnsureGroup for one key all get the one row and no error (#463).
+// runConcurrentEnsure also runs on PostgreSQL and MySQL (integration_test.go).
+func TestEnsureConcurrentFirstUse(t *testing.T) {
+	runConcurrentEnsure(t, openSQLite(t))
+}
+
+func runConcurrentEnsure(t *testing.T, db *database.DB) {
+	t.Helper()
+	if err := auth.Migrate(db.DB); err != nil {
+		t.Fatal(err)
+	}
+	const callers = 16
+	// race runs callers concurrent ensure calls, released together, and
+	// checks they all got one row with the same id.
+	race := func(t *testing.T, ensure func() (uint, error)) {
+		t.Helper()
+		ids := make([]uint, callers)
+		errs := make([]error, callers)
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for i := range callers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				ids[i], errs[i] = ensure()
+			}()
+		}
+		close(start)
+		wg.Wait()
+		for i := range callers {
+			if errs[i] != nil {
+				t.Fatalf("caller %d: %v, want the row", i, errs[i])
+			}
+			if ids[i] == 0 || ids[i] != ids[0] {
+				t.Fatalf("callers got ids %v, want one row", ids)
+			}
+		}
+	}
+	tag := strconv.FormatInt(time.Now().UnixNano(), 36)
+	ctx := context.Background()
+
+	t.Run("permission", func(t *testing.T) {
+		race(t, func() (uint, error) {
+			p, err := auth.EnsurePermission(ctx, db.DB, "concurrent.permission."+tag, "Concurrent")
+			return p.ID, err
+		})
+	})
+	t.Run("group", func(t *testing.T) {
+		race(t, func() (uint, error) {
+			g, err := auth.EnsureGroup(ctx, db.DB, "concurrent-group-"+tag)
+			return g.ID, err
+		})
+	})
+	// Each caller inside its own transaction: the loser's failed insert
+	// must not abort it (PostgreSQL), and it must see the winner's row
+	// although its snapshot predates it (MySQL REPEATABLE READ). SQLite's
+	// single writer serializes the transactions, so there is no race to
+	// lose there.
+	t.Run("in a transaction", func(t *testing.T) {
+		if db.Name() == "sqlite" {
+			t.Skip("SQLite serializes writing transactions")
+		}
+		race(t, func() (uint, error) {
+			var id uint
+			err := db.Transaction(func(tx *gorm.DB) error {
+				p, err := auth.EnsurePermission(ctx, tx, "concurrent.tx."+tag, "Concurrent in a transaction")
+				id = p.ID
+				return err
+			})
+			return id, err
+		})
+	})
 }

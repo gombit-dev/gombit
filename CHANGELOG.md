@@ -165,6 +165,13 @@ version.
 
 ### Fixed
 
+- `auth.EnsurePermission` and `auth.EnsureGroup` no longer fail with
+  "duplicated key not allowed" when several callers ensure the same new
+  permission or group at once (replicas booting together, concurrent
+  requests): the callers that lose the insert race read the winner's row and
+  return it. A lost race inside the caller's transaction no longer aborts
+  that transaction on PostgreSQL
+  ([#463](https://github.com/gombit-dev/gombit/issues/463)).
 - The admin finds a `uuid.UUID`-keyed row by a UUID spelled in upper case:
   the detail, update and delete paths and the `uuid` filters
   (`?id=3F2B8C1A-…`) returned 404 or an empty list on SQLite and PostgreSQL,

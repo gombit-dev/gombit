@@ -50,6 +50,7 @@ func TestE2EPostgres(t *testing.T) {
 	runEmailChangeService(t, db)
 	runThrottleService(t, db)
 	runPermissionPersistence(t, db)
+	runConcurrentEnsure(t, db)
 }
 
 func TestE2EMySQL(t *testing.T) {
@@ -84,6 +85,7 @@ func TestE2EMySQL(t *testing.T) {
 	runEmailChangeService(t, db)
 	runThrottleService(t, db)
 	runPermissionPersistence(t, db)
+	runConcurrentEnsure(t, db)
 }
 
 func openDriver(t *testing.T, driver config.DatabaseDriver, dsn string) *database.DB {

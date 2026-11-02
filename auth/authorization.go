@@ -7,6 +7,7 @@ import (
 
 	"github.com/gombit-dev/gombit/database"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // HasPermission reports whether user has key directly, through a group, or
@@ -73,6 +74,9 @@ func HasPermissions(ctx context.Context, db *gorm.DB, user User, keys ...string)
 }
 
 // EnsurePermission returns the permission for key, creating it when needed.
+// Concurrent first calls for one key (replicas seeding at boot) all get the
+// one row, not a unique violation (#463); inside a caller's transaction a
+// lost race does not abort it.
 func EnsurePermission(ctx context.Context, db *gorm.DB, key, description string) (Permission, error) {
 	if db == nil {
 		return Permission{}, errors.New("auth: nil database")
@@ -81,15 +85,11 @@ func EnsurePermission(ctx context.Context, db *gorm.DB, key, description string)
 	if key == "" {
 		return Permission{}, errors.New("auth: permission key is required")
 	}
-	permission := Permission{Key: key}
-	err := db.WithContext(ctx).
-		Where(&Permission{Key: key}).
-		Attrs(Permission{Description: strings.TrimSpace(description)}).
-		FirstOrCreate(&permission).Error
-	return permission, err
+	return ensureRow(ctx, db, "permission_key = ?", key, &Permission{Key: key, Description: strings.TrimSpace(description)})
 }
 
-// EnsureGroup returns the group with name, creating it when needed.
+// EnsureGroup returns the group with name, creating it when needed, with
+// EnsurePermission's guarantee for concurrent first calls (#463).
 func EnsureGroup(ctx context.Context, db *gorm.DB, name string) (Group, error) {
 	if db == nil {
 		return Group{}, errors.New("auth: nil database")
@@ -98,9 +98,36 @@ func EnsureGroup(ctx context.Context, db *gorm.DB, name string) (Group, error) {
 	if name == "" {
 		return Group{}, errors.New("auth: group name is required")
 	}
-	group := Group{Name: name}
-	err := db.WithContext(ctx).Where("name = ?", name).FirstOrCreate(&group).Error
-	return group, err
+	return ensureRow(ctx, db, "name = ?", name, &Group{Name: name})
+}
+
+// ensureRow returns the row of T where query matches value, inserting fresh
+// when there is none. GORM's FirstOrCreate is a read then an insert, so two
+// first callers both find nothing and the second insert is a unique
+// violation (#463). Here the insert runs under insertSafely's savepoint, so
+// losing that race inside a caller's transaction does not abort it, and the
+// loser reads the winner's row instead. That read locks (FOR SHARE; SQLite's
+// dialect drops it): on MySQL (REPEATABLE READ) a plain read inside a
+// transaction sees the snapshot from before the winner committed, and would
+// find nothing.
+func ensureRow[T any](ctx context.Context, db *gorm.DB, query string, value string, fresh *T) (T, error) {
+	var row T
+	found := db.WithContext(ctx).Where(query, value).Limit(1).Find(&row)
+	if found.Error != nil || found.RowsAffected > 0 {
+		return row, found.Error
+	}
+	err := insertSafely(ctx, db, "gombit_auth_ensure", func(tx *gorm.DB) error {
+		return tx.Create(fresh).Error
+	})
+	if err == nil {
+		return *fresh, nil
+	}
+	if !database.IsUniqueViolation(err) {
+		return row, err
+	}
+	err = db.WithContext(ctx).Clauses(clause.Locking{Strength: clause.LockingStrengthShare}).
+		Where(query, value).First(&row).Error
+	return row, err
 }
 
 // AddUserToGroup adds a persisted user to a persisted group.

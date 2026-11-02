@@ -342,6 +342,18 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   `built`, which describe the main module. A script that parsed the
   old app-version output reads a different string now.
 
+- `auth.EnsurePermission` and `auth.EnsureGroup` return the one row to every concurrent first caller instead of failing the race's losers with a duplicate-key error. (`ensure-permission-group-concurrent-first-use`, behavior, [#463](https://github.com/gombit-dev/gombit/issues/463))
+
+  Each checked for the row and inserted it when missing, so callers
+  ensuring the same new key at once all inserted, and every one but
+  the first got `duplicated key not allowed`: an app seeding its
+  permissions at boot could fail to start on all but one replica. The
+  insert now runs under a savepoint and a unique violation re-reads
+  the winner's row (with a shared lock, so a caller inside a MySQL
+  REPEATABLE READ transaction sees it); inside a transaction the lost
+  race no longer aborts it on PostgreSQL. Nothing to change; a retry
+  an app wrapped around these calls for this error can go.
+
 ## v0.8.0
 
 ### Manual: action required
