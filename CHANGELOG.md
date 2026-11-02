@@ -144,8 +144,11 @@ version.
   no order without `ORDER BY` and none among rows with equal sort keys. The
   admin list orders by the primary key by default, where it had no `ORDER
   BY` at all, and the admin and generated list endpoints both end a
-  requested `?ordering=` on the primary key as the tiebreaker
-  (`database.Ordering` appends its `fallback`)
+  requested `?ordering=` on the primary key, in the requested direction, as
+  the tiebreaker (`database.Ordering` appends its `fallback`). Generated list
+  handlers name the model's primary-key column rather than a literal `id`,
+  so the list of a model whose `gorm:"primaryKey"` field is, say, `Code`
+  is no longer a 500; run `gombit generate` to regenerate them
   ([#455](https://github.com/gombit-dev/gombit/issues/455)).
 - An inbound `X-Request-Id` longer than 128 bytes
   (`contract.MaxRequestIDLength`), or holding a space or a control

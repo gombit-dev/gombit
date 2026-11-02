@@ -152,16 +152,17 @@ func assertListQueryHelpers(t *testing.T, db *DB) {
 		}
 	})
 
-	// A requested ordering ends on the fallback, so rows with equal sort keys
-	// keep one order across pages (issue #455); ordering by the fallback itself
-	// does not repeat it.
+	// A requested ordering ends on the fallback, in its direction, so rows with
+	// equal sort keys keep one order across pages (issue #455); ordering by the
+	// fallback itself does not repeat it. The fallback is a parameter, not "id":
+	// a resource whose key column is "code" passes "code".
 	t.Run("OrderingTiebreaksOnFallback", func(t *testing.T) {
 		ctx := context.Background()
 		allowed := []string{"author_id", "id"}
 		for ordering, want := range map[string][]clause.OrderByColumn{
 			"":           {{Column: clause.Column{Name: "id"}}},
 			"author_id":  {{Column: clause.Column{Name: "author_id"}}, {Column: clause.Column{Name: "id"}}},
-			"-author_id": {{Column: clause.Column{Name: "author_id"}, Desc: true}, {Column: clause.Column{Name: "id"}}},
+			"-author_id": {{Column: clause.Column{Name: "author_id"}, Desc: true}, {Column: clause.Column{Name: "id"}, Desc: true}},
 			"-id":        {{Column: clause.Column{Name: "id"}, Desc: true}},
 		} {
 			q, err := Ordering(ctx, db.Model(&lqItem{}), ordering, allowed, "id")
@@ -175,7 +176,16 @@ func assertListQueryHelpers(t *testing.T, db *DB) {
 				t.Errorf("Ordering(%q) ORDER BY = %+v, want %+v", ordering, got.Columns, want)
 			}
 		}
-		q, err := Ordering(ctx, db.Model(&lqItem{}), "-author_id", allowed, "id")
+		q, err := Ordering(ctx, db.Model(&lqItem{}), "-author_id", allowed, "title")
+		if err != nil {
+			t.Fatalf("Ordering error = %v", err)
+		}
+		var titled []lqItem
+		got, _ := q.Session(&gorm.Session{DryRun: true}).Find(&titled).Statement.Clauses["ORDER BY"].Expression.(clause.OrderBy)
+		if want := []clause.OrderByColumn{{Column: clause.Column{Name: "author_id"}, Desc: true}, {Column: clause.Column{Name: "title"}, Desc: true}}; !reflect.DeepEqual(got.Columns, want) {
+			t.Fatalf("fallback title ORDER BY = %+v, want %+v", got.Columns, want)
+		}
+		q, err = Ordering(ctx, db.Model(&lqItem{}), "-author_id", allowed, "id")
 		if err != nil {
 			t.Fatalf("Ordering error = %v", err)
 		}
@@ -183,8 +193,8 @@ func assertListQueryHelpers(t *testing.T, db *DB) {
 		if err := q.Find(&rows).Error; err != nil {
 			t.Fatalf("find: %v", err)
 		}
-		if len(rows) != 3 || rows[0].AuthorID != 2 || rows[1].ID >= rows[2].ID {
-			t.Fatalf("-author_id rows = %+v, want author 2 first, then author 1 by ascending id", rows)
+		if len(rows) != 3 || rows[0].AuthorID != 2 || rows[1].ID <= rows[2].ID {
+			t.Fatalf("-author_id rows = %+v, want author 2 first, then author 1 by descending id", rows)
 		}
 	})
 
