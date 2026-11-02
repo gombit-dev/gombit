@@ -728,12 +728,39 @@ func runCookieRefreshRejected(t *testing.T, db *database.DB) {
 		if rec := doRequest(app, laptop, http.MethodPost, "/api/v1/auth/refresh", ""); rec.Code != http.StatusOK {
 			t.Fatalf("refresh status = %d; body: %s", rec.Code, rec.Body.String())
 		}
+		ageRotations(t, db.DB)
 		rejected(t, withRefresh(fetchCSRF(t, app), stale))
 		if status := getMeCookie(app, phone); status != http.StatusUnauthorized {
 			t.Fatalf("phone GET /me after the reuse = %d, want 401: the cascade ends every session", status)
 		}
 		if status := getMeCookie(app, laptop); status != http.StatusUnauthorized {
 			t.Fatalf("laptop GET /me after the reuse = %d, want 401: the cascade ends every session", status)
+		}
+	})
+
+	// Within the grace of its rotation the stale cookie is another tab's
+	// lost race (#459): a 401 that sets no cookie, so the browser keeps the
+	// ones the winner was just sent, and ends no session.
+	t.Run("token rotated within the grace", func(t *testing.T) {
+		email := register(t)
+		laptop, _ := signIn(t, email)
+		phone, _ := signIn(t, email)
+		stale := laptop.value(auth.RefreshCookieName)
+		if rec := doRequest(app, laptop, http.MethodPost, "/api/v1/auth/refresh", ""); rec.Code != http.StatusOK {
+			t.Fatalf("refresh status = %d; body: %s", rec.Code, rec.Body.String())
+		}
+		rec := doRequest(app, withRefresh(fetchCSRF(t, app), stale), http.MethodPost, "/api/v1/auth/refresh", "")
+		assertError(t, rec, http.StatusUnauthorized, "authentication")
+		if got := rec.Header().Values("Set-Cookie"); len(got) != 0 {
+			t.Fatalf("Set-Cookie = %q, want none: the winner's cookies stay", got)
+		}
+		for name, jar := range map[string]*cookieJar{"laptop": laptop, "phone": phone} {
+			if status := getMeCookie(app, jar); status != http.StatusOK {
+				t.Fatalf("%s GET /me after the lost race = %d, want 200", name, status)
+			}
+		}
+		if rec := doRequest(app, laptop, http.MethodPost, "/api/v1/auth/refresh", ""); rec.Code != http.StatusOK {
+			t.Fatalf("laptop refresh with the winner's cookie = %d; body: %s", rec.Code, rec.Body.String())
 		}
 	})
 

@@ -174,10 +174,23 @@ version.
   bounded by its own 10-second timeout, and cancelled when the auth service
   closes), and every caller gets its one result. The trade: a rotation
   whose first client has gone still commits, so that client's retry with
-  the old token is treated as reuse, which revokes every session, and
-  `auth.Service.RotateRefresh` no longer returns early when its context is
-  done
+  the old token is a plain `401` within `GOMBIT_AUTH_REFRESH_REUSE_GRACE`
+  while the new session is live, and reuse after it, which revokes every
+  session, and `auth.Service.RotateRefresh` no longer returns early when
+  its context is done
   ([#462](https://github.com/gombit-dev/gombit/issues/462)).
+- Two tabs refreshing the same refresh token a network round trip apart no
+  longer sign the user out of every session. A refresh with a token rotated
+  less than `GOMBIT_AUTH_REFRESH_REUSE_GRACE` (`Config.Auth.RefreshReuseGrace`,
+  30 seconds by default; `0` keeps the strict rule) ago, whose successor is
+  still live, is a lost race, not reuse: a plain 401 that issues no tokens,
+  revokes nothing and, in cookie mode, keeps the session cookies the winning
+  tab was just sent; it is audited as `auth.refresh.reuse_within_grace`,
+  naming the successor's session. The #127 fix covered only
+  refreshes overlapping inside one process. Presenting a rotated token after
+  the grace, or one whose successor was rotated again, still revokes all of
+  the user's sessions
+  ([#459](https://github.com/gombit-dev/gombit/issues/459)).
 - The admin finds a `uuid.UUID`-keyed row by a UUID spelled in upper case:
   the detail, update and delete paths and the `uuid` filters
   (`?id=3F2B8C1A-…`) returned 404 or an empty list on SQLite and PostgreSQL,

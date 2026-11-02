@@ -184,10 +184,20 @@ func TestFault_Concurrency_RotationLeaderCancelled(t *testing.T) {
 		}
 		// The trade of the detach, documented on rotateRefresh: the rotation
 		// committed although the leader's client was gone, so that client's
-		// retry with the old token finds it rotated: reuse, which revokes
-		// every session, the one it never received included.
+		// retry with the old token finds it rotated. Within RefreshReuseGrace,
+		// while the new session is live, that is a lost race (#459): a 401
+		// that revokes nothing.
+		if _, err := f.svc.RotateRefresh(context.Background(), f.refresh); !errors.Is(err, auth.ErrRotationRaced) {
+			t.Fatalf("the gone client's prompt retry with the old token = %v, want a lost race", err)
+		}
+		if _, err := f.svc.ParseAccess(context.Background(), results[0].pair.AccessToken); err != nil {
+			t.Fatalf("the lost race revoked the rotation's new session: %v", err)
+		}
+		// Past the grace it is reuse, which revokes every session, the one
+		// the client never received included.
+		ageRotations(t, f.db.DB)
 		if _, err := f.svc.RotateRefresh(context.Background(), f.refresh); !errors.Is(err, auth.ErrRefreshReuse) {
-			t.Fatalf("the gone client's retry with the old token = %v, want reuse", err)
+			t.Fatalf("the gone client's late retry with the old token = %v, want reuse", err)
 		}
 		if _, err := f.svc.RotateRefresh(context.Background(), results[0].pair.RefreshToken); err == nil {
 			t.Fatal("the rotation's new session still refreshes after the reuse: the cascade did not revoke it")
@@ -1386,6 +1396,7 @@ func TestFault_Concurrency_ReuseCascadeDuringRotation(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		ageRotations(t, f.db.DB) // past the grace: A's token coming back is reuse (#459)
 		faults.Arm()
 
 		rotated := make(chan auth.TokenPair, 1)

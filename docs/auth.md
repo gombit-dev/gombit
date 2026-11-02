@@ -61,7 +61,22 @@ token revoked by logout or session revocation is just invalid (401): a revoked
 device retrying its refresh must not end the session that revoked it.
 Concurrent refresh of the **current** still-valid token (two tabs, parallel
 `POST /auth/refresh`) shares one rotation and does not family-revoke the
-winner.
+winner. Neither does a refresh with a token rotated less than
+`RefreshReuseGrace` ago (`config.AuthConfig`, 30 seconds by default) whose
+successor is still live: the second tab's request was on the wire when the
+first tab's rotation committed, a lost race rather than theft. It is a plain
+401 that issues no tokens and revokes nothing, so the winner's new session
+stays signed in, and it is audited (`auth.refresh.reuse_within_grace`). A
+successor already rotated again is reuse, and one logged out leaves a plain
+401. The cascade runs for a rotated token presented after that grace and
+before it expires. The cost: if a thief rotates a stolen token first and the
+legitimate client's refresh lands within the grace, that client gets the 401
+and the thief's session is not revoked; the `auth.refresh.reuse_within_grace`
+event, naming the thief's session by its id of the moment, is the trace it
+leaves (that id changes when the session next refreshes, so act on it
+promptly), and past the grace the cascade catches it as before. An app with no clients sharing a refresh
+token across tabs can set `GOMBIT_AUTH_REFRESH_REUSE_GRACE=0` for the strict
+rule.
 
 ## Email verification
 
@@ -514,8 +529,9 @@ What is serialized: token rotation (`POST /auth/refresh`), revoking one
 session, revoking the others, and revoking all of a user's sessions each lock
 the user's row first, so they run one at a time per user. The refresh-token
 reuse cascade, which ends all of a user's sessions when an already-rotated
-token is presented again before it expires, runs inside the rotation and takes
-the same lock.
+token is presented again before it expires (past `RefreshReuseGrace`, or
+within it once the successor has been rotated again), runs inside the rotation
+and takes the same lock.
 What that guarantees depends on the operation, when a session refreshes at
 the same moment:
 
@@ -577,7 +593,8 @@ The framework records every security-sensitive operation in
 | `auth.login.succeeded` / `auth.login.failed` | A sign-in. A failure names the account when the email is one (a wrong password, `details.reason` `wrong_password`), and no account when it is not: the attempted address is not recorded. |
 | `auth.logout` | `POST /auth/logout` ended a session. |
 | `auth.user.registered` / `auth.superuser.created` | `POST /auth/register`; `gombit createsuperuser`. |
-| `auth.refresh.reuse_detected` | A rotated-away refresh token came back: every session of the user was revoked. |
+| `auth.refresh.reuse_detected` | A rotated-away refresh token came back past `RefreshReuseGrace`, or within it once its successor had been rotated again: every session of the user was revoked. |
+| `auth.refresh.reuse_within_grace` | A rotated-away refresh token came back within `RefreshReuseGrace` of its rotation: a 401, nothing revoked. Target type `session` names the successor's session by the id `GET /auth/sessions` showed for it at the time; that id changes when the session next refreshes (in an access TTL at most), so act on it promptly (revoke it, or revoke all); details `successor` is `live` (a sibling tab's session, or a thief's who rotated a stolen token first: the one trace of that) or `ended` (signed out before the request came). |
 | `auth.session.revoked` | `DELETE /auth/sessions…` (`details.scope`: `one`, `others` or `all`). |
 | `auth.email.verified` | `POST /auth/verify-email`. |
 | `auth.password.reset_requested` / `auth.password.reset` | A reset message sent to an account; a password set with its token (`details.sessions_revoked`). |
