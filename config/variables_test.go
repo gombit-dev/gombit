@@ -81,6 +81,7 @@ func TestVariablesReadBackWhatLoadFromEnvSets(t *testing.T) {
 		envEmailChangeURL:   "https://app.example.com/confirm-email?token={token}",
 		envPasswordResetTTL: "30m0s", envPasswordResetURL: "https://app.example.com/reset?token={token}",
 		envPasswordResetKeep:     "true",
+		envRefreshReuseGrace:     "10s",
 		envAuthThrottleDisabled:  "true",
 		envSecuritySanitizeInput: "true",
 	}

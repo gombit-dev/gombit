@@ -50,13 +50,16 @@ type sessionsEnv struct {
 	tag string
 }
 
-func newSessionsEnv(t *testing.T, db *database.DB, tag string, access, refresh time.Duration) sessionsEnv {
+func newSessionsEnv(t *testing.T, db *database.DB, tag string, access, refresh time.Duration, tweaks ...func(*config.AuthConfig)) sessionsEnv {
 	t.Helper()
 	cfg := config.DefaultFor(config.EnvironmentTest)
 	cfg.Auth.JWTSecret = testJWTSecret
 	cfg.Auth.BcryptCost = bcrypt.MinCost
 	cfg.Auth.AccessTokenTTL = access
 	cfg.Auth.RefreshTokenTTL = refresh
+	for _, tweak := range tweaks {
+		tweak(&cfg.Auth)
+	}
 	svc, err := auth.NewService(db.DB, cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -519,6 +522,45 @@ func runSessionsService(t *testing.T, db *database.DB) {
 		}
 	})
 
+	// A zero RefreshReuseGrace is strict, as before #459: a rotated token
+	// presented again at once is reuse.
+	t.Run("zero grace is strict", func(t *testing.T) {
+		e := newSessionsEnv(t, db, fmt.Sprintf("strict-%d", time.Now().UnixNano()), time.Minute, time.Hour,
+			func(c *config.AuthConfig) { c.RefreshReuseGrace = 0 })
+		_, pairs := e.user(t, "strict", 2)
+		next := e.rotate(t, pairs[1])
+		if _, err := e.svc.RotateRefresh(e.ctx, pairs[1].RefreshToken); !errors.Is(err, auth.ErrRefreshReuse) {
+			t.Fatalf("RotateRefresh(rotated token, zero grace) = %v, want ErrRefreshReuse", err)
+		}
+		for name, pair := range map[string]auth.TokenPair{"the other session": pairs[0], "the successor": next} {
+			if e.authenticates(pair) {
+				t.Errorf("%s still authenticates after the reuse cascade", name)
+			}
+		}
+	})
+
+	// A within-grace replay whose successor was signed out is audited as
+	// such: the event names the successor's session and says it ended.
+	t.Run("within-grace audit says the successor ended", func(t *testing.T) {
+		e := newEnv(t)
+		ada, pairs := e.user(t, "graceaudit", 1)
+		next := e.rotate(t, pairs[0])
+		successor := e.sessionID(t, next) // read while the successor is live
+		if err := e.svc.RevokeRefresh(e.ctx, next.RefreshToken); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := e.svc.RotateRefresh(e.ctx, pairs[0].RefreshToken); !errors.Is(err, auth.ErrInvalidRefreshToken) || errors.Is(err, auth.ErrRotationRaced) {
+			t.Fatalf("RotateRefresh(rotated token, successor logged out) = %v, want a plain ErrInvalidRefreshToken", err)
+		}
+		var ev auth.AuditEvent
+		if err := db.Where("action = ? AND target_user_id = ?", auth.AuditRefreshReuseWithinGrace, ada.ID).First(&ev).Error; err != nil {
+			t.Fatalf("no %s event: %v", auth.AuditRefreshReuseWithinGrace, err)
+		}
+		if ev.TargetType != "session" || ev.TargetID != successor || !strings.Contains(ev.Details, `"successor":"ended"`) {
+			t.Fatalf("event = %+v, want the successor's session %s, ended", ev, successor)
+		}
+	})
+
 	// Only a rotated refresh token counts as reuse, and only until it
 	// expires. One revoked by logout or session revocation is simply invalid,
 	// and so is any token past its expiry.
@@ -570,8 +612,32 @@ func runSessionsService(t *testing.T, db *database.DB) {
 			}, auth.ErrInvalidRefreshToken, true},
 			{"already-rotated token", func(t *testing.T, e sessionsEnv, _ auth.User, b auth.TokenPair) *auth.TokenPair {
 				next := e.rotate(t, b)
+				ageRotations(t, db.DB)
 				return &next
 			}, auth.ErrRefreshReuse, false},
+			// Within the grace of its rotation a rotated token is a lost race
+			// (another tab sent it a round trip late): a plain 401, nothing
+			// revoked (#459).
+			{"token rotated within the grace", func(t *testing.T, e sessionsEnv, _ auth.User, b auth.TokenPair) *auth.TokenPair {
+				next := e.rotate(t, b)
+				return &next
+			}, auth.ErrRotationRaced, true},
+			// A successor rotated again has moved past any sibling tab still
+			// holding the old token: reuse, within the grace or not.
+			{"token whose successor rotated within the grace", func(t *testing.T, e sessionsEnv, _ auth.User, b auth.TokenPair) *auth.TokenPair {
+				next := e.rotate(t, b)
+				head := e.rotate(t, next)
+				return &head
+			}, auth.ErrRefreshReuse, false},
+			// A successor logged out leaves no live session to race: a plain
+			// invalid token, nothing else revoked.
+			{"token whose successor logged out within the grace", func(t *testing.T, e sessionsEnv, _ auth.User, b auth.TokenPair) *auth.TokenPair {
+				next := e.rotate(t, b)
+				if err := e.svc.RevokeRefresh(e.ctx, next.RefreshToken); err != nil {
+					t.Fatal(err)
+				}
+				return nil
+			}, auth.ErrInvalidRefreshToken, true},
 			// Past its expiry a rotated token is just invalid: no cascade
 			// (#458). It has a successor, so it is errRotationRaced.
 			{"expired already-rotated token", func(t *testing.T, e sessionsEnv, _ auth.User, b auth.TokenPair) *auth.TokenPair {

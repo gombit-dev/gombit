@@ -19,13 +19,15 @@ var (
 	errUserNotFound       = errors.New("user not found")
 	errRefreshReuse       = errors.New("refresh token reuse detected")
 	// errRotationRaced is a rotation that lost to another rotation of its
-	// token, which gave the token a successor. Either it lost the
-	// compare-and-swap to a rotation of the same token that another
-	// instance ran (one instance joins its concurrent callers of a token to
-	// one rotation), or it found the token expired and already given a
-	// successor. It is an invalid refresh token, a 401; refreshCookie leaves
-	// the cookies alone for it, because the winning rotation's response sets
-	// the session's new ones in the same browser. A token revoked with no
+	// token, which gave the token a successor. It lost the compare-and-swap
+	// to a rotation of the same token that another instance ran (one
+	// instance joins its concurrent callers of a token to one rotation), or
+	// it found the token expired and already given a successor, or it found
+	// the token rotated within config.AuthConfig.RefreshReuseGrace with its
+	// successor still live (another tab's refresh a round trip late, #459).
+	// It is an invalid refresh token, a 401; refreshCookie leaves the
+	// cookies alone for it, because the winning rotation's response sets the
+	// session's new ones in the same browser. A token revoked with no
 	// successor (logout, a session revocation, the reuse cascade) is a plain
 	// errInvalidRefreshToken, even when the revocation won the
 	// compare-and-swap.

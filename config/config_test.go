@@ -194,6 +194,7 @@ func TestLoadFromEnv(t *testing.T) {
 
 			EmailVerificationTTL: DefaultEmailVerificationTTL,
 			PasswordResetTTL:     DefaultPasswordResetTTL,
+			RefreshReuseGrace:    DefaultRefreshReuseGrace,
 		},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -374,6 +375,7 @@ func TestLoadUsesProcessEnvironment(t *testing.T) {
 
 			EmailVerificationTTL: DefaultEmailVerificationTTL,
 			PasswordResetTTL:     DefaultPasswordResetTTL,
+			RefreshReuseGrace:    DefaultRefreshReuseGrace,
 		},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -1347,5 +1349,29 @@ func TestEmailChangeURLConfig(t *testing.T) {
 	})
 	if err != nil || loaded.Auth.EmailChangeURL != "https://x/c?t={token}" {
 		t.Fatalf("LoadFromEnv = %q, %v", loaded.Auth.EmailChangeURL, err)
+	}
+}
+
+// TestRefreshReuseGraceConfig: the grace defaults to 30s, loads from the
+// environment, keeps zero (the strict rule, never defaulted), and refuses a
+// negative value (#459).
+func TestRefreshReuseGraceConfig(t *testing.T) {
+	if got := DefaultFor(EnvironmentProduction).Auth.RefreshReuseGrace; got != DefaultRefreshReuseGrace {
+		t.Fatalf("default = %v, want %v", got, DefaultRefreshReuseGrace)
+	}
+	for raw, want := range map[string]time.Duration{"10s": 10 * time.Second, "0": 0} {
+		loaded, err := LoadFromEnv(func(k string) (string, bool) {
+			v, ok := map[string]string{envRefreshReuseGrace: raw}[k]
+			return v, ok
+		})
+		if err != nil || loaded.Auth.RefreshReuseGrace != want {
+			t.Fatalf("%s=%s: grace %v, err %v; want %v", envRefreshReuseGrace, raw, loaded.Auth.RefreshReuseGrace, err, want)
+		}
+	}
+	cfg := DefaultFor(EnvironmentDevelopment)
+	cfg.Auth.RefreshReuseGrace = -30 * time.Second
+	var fe FieldErrors
+	if err := cfg.Validate(); !errors.As(err, &fe) || !strings.Contains(err.Error(), envRefreshReuseGrace) {
+		t.Fatalf("a negative grace = %v, want a field error naming %s", err, envRefreshReuseGrace)
 	}
 }
