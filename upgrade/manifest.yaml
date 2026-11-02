@@ -519,9 +519,10 @@ releases:
           it, the first included, instead of being cancelled with that
           caller's request. The trade: the rotation commits although that
           first client is gone and never receives the new pair, so its retry
-          with the old token is reuse (every session revoked) or, within the
-          refresh-reuse grace, a plain 401; and a timeout that expires after
-          COMMIT was sent can still report failure for an applied rotation.
+          with the old token is reuse (every session revoked); and a timeout
+          or an `auth.Service.Close` that lands after COMMIT was sent can
+          still report failure for an applied rotation. After `Close`, a
+          rotation in flight is cancelled and later ones fail at once.
           A Go caller of `auth.Service.RotateRefresh` waits for the shared
           rotation instead of returning when its context is done.
         refs: [462]

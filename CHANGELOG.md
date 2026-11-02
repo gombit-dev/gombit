@@ -174,9 +174,9 @@ version.
   bounded by its own 10-second timeout, and cancelled when the auth service
   closes), and every caller gets its one result. The trade: a rotation
   whose first client has gone still commits, so that client's retry with
-  the old token is treated as reuse (or, within the refresh-reuse grace, a
-  plain 401), and `auth.Service.RotateRefresh` no longer returns early when
-  its context is done
+  the old token is treated as reuse, which revokes every session, and
+  `auth.Service.RotateRefresh` no longer returns early when its context is
+  done
   ([#462](https://github.com/gombit-dev/gombit/issues/462)).
 - The admin finds a `uuid.UUID`-keyed row by a UUID spelled in upper case:
   the detail, update and delete paths and the `uuid` filters

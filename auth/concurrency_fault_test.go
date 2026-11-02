@@ -184,11 +184,17 @@ func TestFault_Concurrency_RotationLeaderCancelled(t *testing.T) {
 		}
 		// The trade of the detach, documented on rotateRefresh: the rotation
 		// committed although the leader's client was gone, so that client's
-		// retry with the old token finds it rotated. It is reuse (every
-		// session revoked), or, within RefreshReuseGrace once that exists
-		// (#459), a lost race: a 401 that revokes nothing.
-		if _, err := f.svc.RotateRefresh(context.Background(), f.refresh); !errors.Is(err, auth.ErrRefreshReuse) && !errors.Is(err, auth.ErrRotationRaced) {
-			t.Fatalf("the gone client's retry with the old token = %v, want reuse (or a lost race within the grace)", err)
+		// retry with the old token finds it rotated: reuse, which revokes
+		// every session, the one it never received included.
+		if _, err := f.svc.RotateRefresh(context.Background(), f.refresh); !errors.Is(err, auth.ErrRefreshReuse) {
+			t.Fatalf("the gone client's retry with the old token = %v, want reuse", err)
+		}
+		if _, err := f.svc.RotateRefresh(context.Background(), results[0].pair.RefreshToken); err == nil {
+			t.Fatal("the rotation's new session still refreshes after the reuse: the cascade did not revoke it")
+		}
+		var reuse int64
+		if err := f.db.Model(&auth.AuditEvent{}).Where("action = ?", auth.AuditRefreshReuse).Count(&reuse).Error; err != nil || reuse != 1 {
+			t.Fatalf("refresh_reuse events = %d (err %v), want 1", reuse, err)
 		}
 	})
 }
@@ -219,6 +225,59 @@ func TestFault_Concurrency_RotationFailsAfterLeaderGone(t *testing.T) {
 		}
 		insert.Disarm()
 		f.assertUnrotated(t)
+	})
+}
+
+// TestFault_Concurrency_RotationCancelledByClose: closing the Service while a
+// shared rotation is stalled at its insert cancels the rotation (it runs on
+// a context the Service owns, s.detach): the leader and every follower
+// return with context.Canceled well before the rotation's timeout, from one
+// insert, and the transaction rolls back, so the token still rotates on a
+// fresh Service (#462).
+func TestFault_Concurrency_RotationCancelledByClose(t *testing.T) {
+	faulttest.ForEachDB(t, faultDBs, func(t *testing.T, kind database.Driver, dsn string) {
+		release := make(chan struct{})
+		defer close(release)
+		insert := faulttest.Sequence(faulttest.Block(release)) // held until Close cancels it
+		f := newRotationFixture(t, kind, dsn, &faulttest.DBFaults{Statement: insert, Match: insertsRefreshToken})
+		const followers = 2
+		leader, others := rotationCallers(t, f, insert, context.Background(), followers)
+
+		start := time.Now()
+		if err := f.svc.Close(context.Background()); err != nil {
+			t.Fatalf("Close = %v", err)
+		}
+		for _, r := range append(collectRotations(t, leader, 1), collectRotations(t, others, followers)...) {
+			if !errors.Is(r.err, context.Canceled) {
+				t.Fatalf("a caller got %v, want the Service's cancellation", r.err)
+			}
+		}
+		if waited := time.Since(start); waited > 5*time.Second {
+			t.Fatalf("the callers returned %s after Close, want promptly (the rotation's timeout is 10s)", waited)
+		}
+		if n := insert.Calls(); n != 1 {
+			t.Fatalf("%d replacement-token inserts, want 1", n)
+		}
+		insert.Disarm()
+		faulttest.Idle(t, f.db)
+		var tokens []auth.RefreshToken
+		if err := f.db.Where("user_id = ?", f.user.ID).Find(&tokens).Error; err != nil {
+			t.Fatal(err)
+		}
+		if len(tokens) != 1 || tokens[0].RevokedAt != nil {
+			t.Fatalf("after the cancelled rotation: %d tokens (first revoked: %v); want the one original, unrevoked", len(tokens), len(tokens) > 0 && tokens[0].RevokedAt != nil)
+		}
+		cfg := config.DefaultFor(config.EnvironmentTest)
+		cfg.Auth.JWTSecret = testJWTSecret
+		cfg.Auth.BcryptCost = bcrypt.MinCost
+		fresh, err := auth.NewService(f.db.DB, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = fresh.Close(context.Background()) })
+		if next, err := fresh.RotateRefresh(context.Background(), f.refresh); err != nil || next.RefreshToken == "" {
+			t.Fatalf("rotating on a fresh Service = %v: the cancelled rotation did not roll back", err)
+		}
 	})
 }
 

@@ -358,11 +358,10 @@ func (s *Service) rotateRefresh(ctx context.Context, raw string) (TokenPair, Use
 	// mid-rotation no longer fails the followers with that cancellation
 	// (#462). The trade: the rotation commits even though that first
 	// client is gone and never receives the new pair, so its next refresh
-	// with the old token finds it rotated (reuse, which revokes every
-	// session, unless it lands within RefreshReuseGrace once that exists:
-	// a plain 401). And rotateTimeout is a deadline reaching the driver
-	// too: one that expires after COMMIT was sent can still report failure
-	// for a rotation the server applied.
+	// with the old token finds it rotated: reuse, which revokes every
+	// session. And the rotation's own cancellation still reaches the
+	// driver: a rotateTimeout or a Close that lands after COMMIT was sent
+	// can report failure for a rotation the server applied.
 	rctx, cancel := s.detach(ctx, s.sharedRotateTimeout())
 	pair, user, err := s.rotateRefreshOnce(rctx, raw, hash)
 	cancel()
