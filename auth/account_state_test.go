@@ -451,15 +451,18 @@ func TestRegisterNeedsTheDisabledAtColumn(t *testing.T) {
 }
 
 // TestRegisterPasswordErrors holds ErrInvalidCredentials' godoc to the code:
-// Register's password errors are the bare ErrPasswordRequired /
-// ErrPasswordTooLong, not a PasswordPolicyError.
+// Register refuses a password outside the policy with a PasswordPolicyError
+// on "password", and a malformed email with ErrInvalidEmail.
 func TestRegisterPasswordErrors(t *testing.T) {
 	e := newVerificationEnv(t, openSQLite(t))
-	for password, want := range map[string]error{"": auth.ErrPasswordRequired, strings.Repeat("x", 73): auth.ErrPasswordTooLong} {
+	for password, want := range map[string]error{"": auth.ErrPasswordRequired, "short": auth.ErrPasswordTooShort, strings.Repeat("x", 73): auth.ErrPasswordTooLong} {
 		_, err := e.svc.Register(context.Background(), fmt.Sprintf("pw-%d@example.com", time.Now().UnixNano()), password)
 		var policy auth.PasswordPolicyError
-		if !errors.Is(err, want) || errors.As(err, &policy) {
-			t.Fatalf("Register(password of %d bytes) = %v, want %v and no PasswordPolicyError", len(password), err, want)
+		if !errors.As(err, &policy) || policy.Field != "password" || !errors.Is(policy.Err, want) {
+			t.Fatalf("Register(password of %d bytes) = %v, want a PasswordPolicyError on password of %v", len(password), err, want)
 		}
+	}
+	if _, err := e.svc.Register(context.Background(), "not an address", testPassword); !errors.Is(err, auth.ErrInvalidEmail) {
+		t.Fatalf("Register(malformed email) = %v, want ErrInvalidEmail", err)
 	}
 }
