@@ -1168,6 +1168,7 @@ func TestFault_Concurrency_ReuseCascadeDuringRotation(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		ageRotations(t, f.db.DB) // past the grace: A's token coming back is reuse (#459)
 		faults.Arm()
 
 		rotated := make(chan auth.TokenPair, 1)
