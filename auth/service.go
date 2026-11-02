@@ -128,9 +128,10 @@ func (s *Service) now() time.Time {
 // Register creates a user, with an unverified email, and mails them a
 // verification link when a Mailer is configured (a failure to send is
 // logged, not returned: POST /auth/verify-email/resend asks again).
-// Duplicate emails return errEmailTaken; an email that is not a bare address
-// ErrInvalidEmail, and a password the policy refuses a PasswordPolicyError,
-// the rules of POST /auth/register and /auth/login (#461).
+// Duplicate emails return errEmailTaken; an empty email
+// ErrInvalidCredentials; any other email that is not a bare address
+// ErrInvalidEmail, and a password the policy refuses a PasswordPolicyError
+// (CheckNewAccount; #461).
 func (s *Service) Register(ctx context.Context, email, password string) (User, error) {
 	// Every registration counts (RegisterPerAddress), before the hash.
 	if _, err := s.throttle.reserve(ctx, throttleRule{name: "RegisterPerAddress", limit: s.throttle.policy.RegisterPerAddress, subject: requestAddress(ctx)}); err != nil {
@@ -147,9 +148,11 @@ func (s *Service) Register(ctx context.Context, email, password string) (User, e
 
 // CreateSuperuser creates a user with IsSuperuser set, for gombit
 // createsuperuser (M4-6). It shares Register's hasher, uniqueness path and
-// email and password rules (ErrInvalidEmail, PasswordPolicyError), so the
-// account it creates can sign in; duplicate emails return errEmailTaken. The operator who creates it vouches
-// for the address, so its email starts verified, and no message is sent.
+// rules: an empty email is ErrInvalidCredentials, any other one that is not
+// a bare address ErrInvalidEmail, a password the policy refuses a
+// PasswordPolicyError (CheckNewAccount), a duplicate email errEmailTaken.
+// The operator who creates it vouches for the address, so its email starts
+// verified, and no message is sent.
 func (s *Service) CreateSuperuser(ctx context.Context, email, password string) (User, error) {
 	user, err := s.createUser(ctx, email, password, true)
 	if err != nil {
@@ -159,19 +162,30 @@ func (s *Service) CreateSuperuser(ctx context.Context, email, password string) (
 	return user, nil
 }
 
+// CheckNewAccount reports whether Register and CreateSuperuser would accept
+// email and password, without touching the database (gombit createsuperuser
+// checks before it opens one). Two rules, for two reasons (#461):
+//
+//   - the email, normalized, must be a bare address of at most 255
+//     characters (ErrInvalidEmail): what POST /auth/login accepts, so the
+//     account can sign in;
+//   - the password must meet the policy a user's own password meets on
+//     register, change and reset, at least 8 characters and at most 72
+//     bytes (a PasswordPolicyError on "password"). Login itself accepts any
+//     non-empty password; this is the policy, not a sign-in requirement.
+func CheckNewAccount(email, password string) error {
+	if !validEmail(normalizeEmail(email)) {
+		return errInvalidEmail
+	}
+	return checkNewPassword(password, "password")
+}
+
 func (s *Service) createUser(ctx context.Context, email, password string, superuser bool) (User, error) {
 	email = normalizeEmail(email)
 	if email == "" {
 		return User{}, errInvalidCredentials
 	}
-	// The routes' rules, enforced here for every caller (gombit
-	// createsuperuser included): an account whose email the login body
-	// refuses, or whose password is shorter than a user may set, could never
-	// sign in (issue #461).
-	if !validEmail(email) {
-		return User{}, errInvalidEmail
-	}
-	if err := checkNewPassword(password, "password"); err != nil {
+	if err := CheckNewAccount(email, password); err != nil {
 		return User{}, err
 	}
 	hash, err := s.hasher.Hash(password)

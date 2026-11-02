@@ -167,10 +167,15 @@ version.
 
 - `gombit createsuperuser` (and `auth.Service.CreateSuperuser` /
   `Register`) refuses an email that is not a bare address (`admin`,
-  `Root Admin <root@example.com>`, `a b c`) and a password shorter than 8
-  characters, the rules of `POST /auth/login` and `/auth/register`. It used
-  to create an admin that could never sign in, to the API or `/admin/`.
-  The service returns `auth.ErrInvalidEmail` and an `auth.PasswordPolicyError`
+  `Root Admin <root@example.com>`, `a b c`): it created an admin that
+  `POST /auth/login`, and so `/admin/`, could never sign in. It also
+  refuses a password outside the policy a user's own password meets on
+  register, change and reset (at least 8 characters, at most 72 bytes),
+  a deliberate tightening: such an account could sign in, and a seed
+  script that sets a shorter password now fails. The rules are
+  `auth.CheckNewAccount` (`auth.ErrInvalidEmail`, an
+  `auth.PasswordPolicyError`), which the command checks before it opens
+  the database. **Breaking** for a caller relying on short passwords
   ([#461](https://github.com/gombit-dev/gombit/issues/461)).
 - Every list query has a deterministic order, so paging through a list no
   longer shows a row twice or skips one on PostgreSQL and MySQL, which give

@@ -12,6 +12,22 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 ### Manual: action required
 
+- **Breaking.** `gombit createsuperuser`, `auth.Service.CreateSuperuser` and `Register` refuse an email that is not a bare address and a password shorter than 8 characters (or over 72 bytes). (`createsuperuser-login-rules`, api, [#461](https://github.com/gombit-dev/gombit/issues/461))
+
+  Two rules, for two reasons. The email must be what `POST
+  /auth/login` accepts: an account with `admin` could never sign in.
+  The password must meet the policy a user's own password meets on
+  register, change and reset: an account with a shorter one could
+  sign in, so this is a tightening. A seed script or app code that
+  creates an account with `--email admin`, or a password under 8
+  characters, fails after the upgrade: give it a real address and a
+  password of at least 8 characters. `auth.CheckNewAccount` reports
+  both without a database (`auth.ErrInvalidEmail`, an
+  `auth.PasswordPolicyError`). Existing accounts are not touched:
+  one whose email is not an address still cannot sign in (delete
+  it and create it again); one with a short password keeps working
+  until the password is changed.
+
 - **Breaking.** Email verification adds `users.email_verified_at` and `users.verified_email`, and a table, `auth_one_time_tokens`, which registration and `gombit createsuperuser` write: an app migrates before it runs this release. (`email-verification-schema`, schema, [#331](https://github.com/gombit-dev/gombit/issues/331))
 
   - Framework schema: `auth.User` (`users`): altered.
@@ -160,14 +176,6 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   analysis.
 
 ### Informational
-
-- `gombit createsuperuser`, `auth.Service.CreateSuperuser` and `Register` refuse an email that is not a bare address and a password shorter than 8 characters, as the login and registration endpoints do. (`createsuperuser-login-rules`, cli, [#461](https://github.com/gombit-dev/gombit/issues/461))
-
-  The account such a call used to create could never sign in. A
-  script that seeds an admin with a placeholder like `--email admin`
-  or a short password now fails: give it a real address and a
-  password of at least 8 characters. The service returns
-  `auth.ErrInvalidEmail` / an `auth.PasswordPolicyError`.
 
 - Bearer-mode session revocation errors include the `WWW-Authenticate: Bearer realm="api"` challenge when the handler returns 401. (`bearer-handler-401-challenge`, api, [#604](https://github.com/gombit-dev/gombit/issues/604))
 

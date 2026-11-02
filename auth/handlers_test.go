@@ -331,3 +331,31 @@ func assertError(t *testing.T, rec *httptest.ResponseRecorder, status int, code 
 		t.Fatalf("error.code = %q, want %q; body: %s", env.Body.Code, code, rec.Body.String())
 	}
 }
+
+// TestAccountEmailRuleAgreesWithTheRoutes: the service's email rule
+// (auth.CheckNewAccount, which Register and CreateSuperuser apply) and the
+// routes' format:"email" give the same verdict on one corpus. The service
+// rule is a second copy, so a Huma change to the format check fails here
+// instead of reopening #461 (an account the login body refuses).
+func TestAccountEmailRuleAgreesWithTheRoutes(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	app := newAuthApp(t)
+	for i, email := range []string{
+		"admin", "Name <name@example.com>", `"ab"@example.com`, "trailing@example.com.", "a..b@example.com", "spaced out@example.com",
+		"tagged+x@example.com", "UPPER@EXAMPLE.COM", "user@bücher.de",
+	} {
+		body, err := json.Marshal(map[string]string{"email": email, "password": testPassword})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec := postJSON(t, app, "/api/v1/auth/register", string(body))
+		route := rec.Code == http.StatusOK
+		if !route && rec.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("%d: register %q = %d; body: %s", i, email, rec.Code, rec.Body.String())
+		}
+		service := auth.CheckNewAccount(email, testPassword) == nil
+		if route != service {
+			t.Errorf("%q: the route accepts = %v, the service accepts = %v; they must agree", email, route, service)
+		}
+	}
+}

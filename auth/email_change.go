@@ -33,8 +33,9 @@ var (
 // the account's already.
 var ErrEmailUnchanged = errEmailUnchanged
 
-// ErrInvalidEmail is RequestEmailChange's error for a new email that is not
-// an address.
+// ErrInvalidEmail is the error for an email that is not a bare address of at
+// most 255 characters: RequestEmailChange's for a new email, and Register's,
+// CreateSuperuser's and CheckNewAccount's for an account's (#461).
 var ErrInvalidEmail = errInvalidEmail
 
 // ErrEmailChangedMeanwhile is RequestEmailChange's error when another change

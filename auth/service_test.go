@@ -204,13 +204,11 @@ func TestCreateSuperuserOnFreshDB(t *testing.T) {
 	}
 }
 
-// TestCreateSuperuserRefusesDuplicateEmail matches Register's uniqueness
-// path (same errEmailTaken, exported as ErrEmailTaken).
-// TestCreateUserAppliesTheLoginRules: Register and CreateSuperuser refuse an
-// email the login body refuses and a password shorter than a user may set,
-// so no account is created that can never sign in; nothing is stored
-// (issue #461).
-func TestCreateUserAppliesTheLoginRules(t *testing.T) {
+// TestCreateUserAppliesTheAccountRules: Register and CreateSuperuser refuse
+// an email the login body refuses (the account could never sign in) and a
+// password outside the policy a user's own password meets; nothing is stored,
+// and what the rules accept, at each boundary, is created (issue #461).
+func TestCreateUserAppliesTheAccountRules(t *testing.T) {
 	svc := newTestService(t)
 	ctx := context.Background()
 	create := map[string]func(email, password string) (User, error){
@@ -234,6 +232,22 @@ func TestCreateUserAppliesTheLoginRules(t *testing.T) {
 	if err := svc.db.Model(&User{}).Count(&count).Error; err != nil || count != 0 {
 		t.Fatalf("users stored = %d (err %v), want 0", count, err)
 	}
+	// Seven runes is too short whatever the bytes.
+	var policy PasswordPolicyError
+	if _, err := svc.Register(ctx, "short@example.com", "ééééééé"); !errors.As(err, &policy) || !errors.Is(err, ErrPasswordTooShort) {
+		t.Fatalf("Register(7 two-byte runes) = %v, want ErrPasswordTooShort", err)
+	}
+	// Each limit's accepted side: 255 characters of address, 8 runes (16
+	// bytes) and 72 bytes of password.
+	for email, password := range map[string]string{
+		strings.Repeat("a", 243) + "@example.com": "eight888",
+		"runes@example.com":                      "éééééééé",
+		"bytes@example.com":                      strings.Repeat("p", 72),
+	} {
+		if _, err := svc.Register(ctx, email, password); err != nil {
+			t.Errorf("Register(%d-char email, %d-byte password) = %v, want it created", len(email), len(password), err)
+		}
+	}
 	// What the rules accept signs in.
 	if _, err := svc.CreateSuperuser(ctx, "admin@example.com", "eight888"); err != nil {
 		t.Fatalf("CreateSuperuser(valid) = %v", err)
@@ -242,6 +256,9 @@ func TestCreateUserAppliesTheLoginRules(t *testing.T) {
 		t.Fatalf("Authenticate(the new superuser) = %v", err)
 	}
 }
+
+// TestCreateSuperuserRefusesDuplicateEmail matches Register's uniqueness
+// path (same errEmailTaken, exported as ErrEmailTaken).
 
 func TestCreateSuperuserRefusesDuplicateEmail(t *testing.T) {
 	svc := newTestService(t)
