@@ -169,8 +169,9 @@ version.
   another client's request for the same token disconnected. Concurrent
   refreshes of one token share a single rotation, which ran under the first
   request's context: when that client went away, every request waiting on
-  the rotation got its `context canceled`. Those requests now rotate the
-  token again under their own contexts; a database failure is still shared
+  the rotation got its `context canceled`. The shared rotation now runs
+  detached from every caller's cancellation, bounded by its own 10-second
+  timeout, and every caller gets its one result
   ([#462](https://github.com/gombit-dev/gombit/issues/462)).
 - A NOT NULL violation, or any other database error, whose message names a
   column, table or constraint holding `unique` or `duplicate` (`unique_code`,

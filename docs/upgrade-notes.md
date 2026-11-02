@@ -161,7 +161,12 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 ### Informational
 
-- A refresh that joins another request's rotation of the same token no longer fails with that request's `context canceled` (a 500) when its client disconnects: it rotates the token under its own context. (`refresh-follower-not-cancelled-by-leader`, behavior, [#462](https://github.com/gombit-dev/gombit/issues/462))
+- A refresh that joins another request's rotation of the same token no longer fails with that request's `context canceled` (a 500) when its client disconnects: the shared rotation runs detached from every caller's cancellation, bounded by a 10-second timeout. (`refresh-follower-not-cancelled-by-leader`, behavior, [#462](https://github.com/gombit-dev/gombit/issues/462))
+
+  A rotation whose first caller disconnects or passes its request
+  deadline now finishes (or times out) for every caller that joined
+  it, the first included, instead of being cancelled with that
+  caller's request.
 
 - `database.IsUniqueViolation`, `IsForeignKeyViolation` and `IsNotNullViolation` classify a driver error by its code, not by words in its message, so an error naming a `unique_code` column is no longer a 409 conflict. (`constraint-errors-by-driver-code`, behavior, [#456](https://github.com/gombit-dev/gombit/issues/456))
 

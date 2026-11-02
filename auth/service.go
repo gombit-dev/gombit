@@ -34,6 +34,8 @@ type Service struct {
 	dummyHash   string
 	rotateMu    sync.Mutex
 	rotateCalls map[string]*rotateCall
+	// rotateTimeout bounds a shared rotation (zero: defaultRotateTimeout).
+	rotateTimeout time.Duration
 	// onRotateJoin, when set (tests only), runs when a caller joins another
 	// caller's in-flight rotation, just before it waits for the result.
 	onRotateJoin func()
@@ -50,9 +52,6 @@ type rotateCall struct {
 	pair TokenPair
 	user User
 	err  error
-	// ctx is the leader's: a joiner whose own context is still live does
-	// not take a failure the leader's ending context caused (#462).
-	ctx context.Context
 }
 
 // Option configures a Service (NewService) or the routes Mount registers.
@@ -309,10 +308,10 @@ func (s *Service) issueTokens(tx *gorm.DB, user User, now time.Time) (TokenPair,
 // user's remaining tokens; a token revoked by logout or session revocation,
 // and any expired token, is just invalid. Concurrent callers with the same
 // still-valid token share one rotation so a lost race cannot family-revoke
-// the winner's new session. The shared rotation runs under its first
-// caller's context; one that ends (the client went away) fails only that
-// caller: the others, whose contexts are live, rotate the token again under
-// their own (#462). Any other failure is shared.
+// the winner's new session. That rotation runs detached from every caller's
+// cancellation, bounded by its own timeout, and each caller gets its one
+// result: a caller whose client went away cannot fail the others with its
+// cancellation (#462).
 func (s *Service) RotateRefresh(ctx context.Context, raw string) (TokenPair, error) {
 	pair, _, err := s.rotateRefresh(ctx, raw)
 	return pair, err
@@ -330,45 +329,52 @@ func (s *Service) rotateRefresh(ctx context.Context, raw string) (TokenPair, Use
 	}
 	hash := hashRefreshToken(raw)
 
-	for {
-		s.rotateMu.Lock()
-		if s.rotateCalls == nil {
-			s.rotateCalls = make(map[string]*rotateCall)
-		}
-		call, ok := s.rotateCalls[hash]
-		if !ok {
-			break // still holding rotateMu: lead the rotation below
-		}
+	s.rotateMu.Lock()
+	if s.rotateCalls == nil {
+		s.rotateCalls = make(map[string]*rotateCall)
+	}
+	if call, ok := s.rotateCalls[hash]; ok {
 		s.rotateMu.Unlock()
 		if s.onRotateJoin != nil {
 			s.onRotateJoin()
 		}
 		call.wg.Wait()
-		// The rotation ran under the leader's context. If that context
-		// ended (its client went away, its deadline passed) and the
-		// rotation failed, the failure is the leader's, not this caller's:
-		// a cancelled transaction rolled back and the token is still
-		// valid, so rotate it again under this caller's own context
-		// rather than answer a live request with someone else's 500.
-		// A database failure under a live leader context is shared, as
-		// before (#462).
-		if call.err != nil && call.ctx.Err() != nil && ctx.Err() == nil {
-			continue
-		}
 		return call.pair, call.user, call.err
 	}
-	call := &rotateCall{ctx: ctx}
+	call := &rotateCall{}
 	call.wg.Add(1)
 	s.rotateCalls[hash] = call
 	s.rotateMu.Unlock()
 
-	pair, user, err := s.rotateRefreshOnce(ctx, raw, hash)
+	// The rotation is shared: every caller that joins it gets its result,
+	// so it must not end with this caller's request. It runs under the
+	// request's values (the audit trail's request id and address) without
+	// its cancellation, bounded by rotateTimeout instead. A client that
+	// goes away, or a request deadline that passes, mid-rotation then
+	// neither fails the followers with that cancellation nor leaves a
+	// commit applied while its caller is told it failed, which would hand
+	// a retry a rotated token (#462).
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.sharedRotateTimeout())
+	pair, user, err := s.rotateRefreshOnce(rctx, raw, hash)
+	cancel()
 	call.pair, call.user, call.err = pair, user, err
 	s.rotateMu.Lock()
 	delete(s.rotateCalls, hash)
 	s.rotateMu.Unlock()
 	call.wg.Done()
 	return pair, user, err
+}
+
+// defaultRotateTimeout bounds a shared rotation: one short transaction,
+// which may wait behind the user's row lock (another rotation, a session
+// revocation).
+const defaultRotateTimeout = 10 * time.Second
+
+func (s *Service) sharedRotateTimeout() time.Duration {
+	if s.rotateTimeout > 0 {
+		return s.rotateTimeout
+	}
+	return defaultRotateTimeout
 }
 
 // rotateRefreshOnce runs one rotation in a transaction. Lock order: the

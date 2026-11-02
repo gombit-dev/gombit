@@ -512,7 +512,12 @@ releases:
       - id: refresh-follower-not-cancelled-by-leader
         kind: informational
         area: behavior
-        summary: "A refresh that joins another request's rotation of the same token no longer fails with that request's `context canceled` (a 500) when its client disconnects: it rotates the token under its own context."
+        summary: "A refresh that joins another request's rotation of the same token no longer fails with that request's `context canceled` (a 500) when its client disconnects: the shared rotation runs detached from every caller's cancellation, bounded by a 10-second timeout."
+        details: |
+          A rotation whose first caller disconnects or passes its request
+          deadline now finishes (or times out) for every caller that joined
+          it, the first included, instead of being cancelled with that
+          caller's request.
         refs: [462]
 
       - id: constraint-errors-by-driver-code
