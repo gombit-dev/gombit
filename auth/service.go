@@ -50,6 +50,9 @@ type rotateCall struct {
 	pair TokenPair
 	user User
 	err  error
+	// ctx is the leader's: a joiner whose own context is still live does
+	// not take a failure the leader's ending context caused (#462).
+	ctx context.Context
 }
 
 // Option configures a Service (NewService) or the routes Mount registers.
@@ -306,7 +309,10 @@ func (s *Service) issueTokens(tx *gorm.DB, user User, now time.Time) (TokenPair,
 // user's remaining tokens; a token revoked by logout or session revocation,
 // and any expired token, is just invalid. Concurrent callers with the same
 // still-valid token share one rotation so a lost race cannot family-revoke
-// the winner's new session.
+// the winner's new session. The shared rotation runs under its first
+// caller's context; one that ends (the client went away) fails only that
+// caller: the others, whose contexts are live, rotate the token again under
+// their own (#462). Any other failure is shared.
 func (s *Service) RotateRefresh(ctx context.Context, raw string) (TokenPair, error) {
 	pair, _, err := s.rotateRefresh(ctx, raw)
 	return pair, err
@@ -324,19 +330,34 @@ func (s *Service) rotateRefresh(ctx context.Context, raw string) (TokenPair, Use
 	}
 	hash := hashRefreshToken(raw)
 
-	s.rotateMu.Lock()
-	if s.rotateCalls == nil {
-		s.rotateCalls = make(map[string]*rotateCall)
-	}
-	if call, ok := s.rotateCalls[hash]; ok {
+	for {
+		s.rotateMu.Lock()
+		if s.rotateCalls == nil {
+			s.rotateCalls = make(map[string]*rotateCall)
+		}
+		call, ok := s.rotateCalls[hash]
+		if !ok {
+			break // still holding rotateMu: lead the rotation below
+		}
 		s.rotateMu.Unlock()
 		if s.onRotateJoin != nil {
 			s.onRotateJoin()
 		}
 		call.wg.Wait()
+		// The rotation ran under the leader's context. If that context
+		// ended (its client went away, its deadline passed) and the
+		// rotation failed, the failure is the leader's, not this caller's:
+		// a cancelled transaction rolled back and the token is still
+		// valid, so rotate it again under this caller's own context
+		// rather than answer a live request with someone else's 500.
+		// A database failure under a live leader context is shared, as
+		// before (#462).
+		if call.err != nil && call.ctx.Err() != nil && ctx.Err() == nil {
+			continue
+		}
 		return call.pair, call.user, call.err
 	}
-	call := &rotateCall{}
+	call := &rotateCall{ctx: ctx}
 	call.wg.Add(1)
 	s.rotateCalls[hash] = call
 	s.rotateMu.Unlock()

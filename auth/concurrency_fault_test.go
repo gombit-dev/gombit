@@ -87,6 +87,86 @@ func TestFault_Concurrency_RotationLeaderFails(t *testing.T) {
 	})
 }
 
+// TestFault_Concurrency_RotationLeaderCancelled: the leader of a shared
+// rotation is stalled at its replacement token's insert when its client
+// disconnects. Expected outcome: the leader gets its own context's error,
+// and the followers that joined it, whose contexts are live, are not handed
+// that cancellation (a 500 for a healthy request): the cancelled
+// transaction rolled back, so they rotate the token again under their own
+// contexts, once, sharing that rotation's new pair (issue #462). A database
+// failure under a live leader is still shared
+// (TestFault_Concurrency_RotationLeaderFails).
+func TestFault_Concurrency_RotationLeaderCancelled(t *testing.T) {
+	faulttest.ForEachDB(t, faultDBs, func(t *testing.T, kind database.Driver, dsn string) {
+		release := make(chan struct{})
+		defer close(release)
+		insert := faulttest.Sequence(faulttest.Block(release)) // only the leader's insert stalls
+		f := newRotationFixture(t, kind, dsn, &faulttest.DBFaults{Statement: insert, Match: insertsRefreshToken})
+
+		const followers = 3
+		joined := make(chan struct{}, followers*2)
+		auth.SetRotateJoinHook(f.svc, func() { joined <- struct{}{} })
+		leaderCtx, cancelLeader := context.WithCancel(context.Background())
+		defer cancelLeader()
+		leader := make(chan error, 1)
+		go func() {
+			_, err := f.svc.RotateRefresh(leaderCtx, f.refresh)
+			leader <- err
+		}()
+		<-insert.Reached(1) // the leader is inside its transaction, stalled
+		type result struct {
+			pair auth.TokenPair
+			err  error
+		}
+		results := make(chan result, followers)
+		for range followers {
+			go func() {
+				pair, err := f.svc.RotateRefresh(context.Background(), f.refresh)
+				results <- result{pair, err}
+			}()
+		}
+		for i := range followers {
+			select {
+			case <-joined:
+			case <-time.After(5 * time.Second):
+				t.Fatalf("%d of %d followers never joined the stalled leader's rotation", followers-i, followers)
+			}
+		}
+		cancelLeader() // the leader's client goes away
+
+		select {
+		case err := <-leader:
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("leader = %v, want its own context's cancellation", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("the cancelled leader never returned")
+		}
+		var pair auth.TokenPair
+		for i := range followers {
+			select {
+			case r := <-results:
+				if r.err != nil {
+					t.Fatalf("a follower with a live context got %v, want the token rotated", r.err)
+				}
+				if i == 0 {
+					pair = r.pair
+				} else if r.pair.RefreshToken != pair.RefreshToken {
+					t.Fatal("the followers rotated the token more than once")
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatalf("%d of %d followers are wedged behind the cancelled rotation", followers-i, followers)
+			}
+		}
+		if n := insert.Calls(); n != 2 {
+			t.Fatalf("%d replacement-token inserts, want 2: the cancelled leader's, then one shared by the followers", n)
+		}
+		if _, err := f.svc.ParseAccess(context.Background(), pair.AccessToken); err != nil {
+			t.Fatalf("the followers' new session does not authenticate: %v", err)
+		}
+	})
+}
+
 // TestFault_Concurrency_RevocationDuringRotation: a session is rotating (its
 // transaction is pinned at the replacement token's insert) when the user
 // revokes it along with the others. Expected outcome: the revocation

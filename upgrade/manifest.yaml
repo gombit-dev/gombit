@@ -509,6 +509,12 @@ releases:
 
   - version: unreleased
     changes:
+      - id: refresh-follower-not-cancelled-by-leader
+        kind: informational
+        area: behavior
+        summary: "A refresh that joins another request's rotation of the same token no longer fails with that request's `context canceled` (a 500) when its client disconnects: it rotates the token under its own context."
+        refs: [462]
+
       - id: constraint-errors-by-driver-code
         kind: informational
         area: behavior
