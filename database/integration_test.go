@@ -254,6 +254,15 @@ type integrationNotNullWidget struct {
 	Name *string `gorm:"not null"`
 }
 
+// integrationDuplicateCode names both words a text match on "unique" or
+// "duplicate" would take for a duplicate key (issue #456).
+type integrationDuplicateCode struct {
+	ID         uint    `gorm:"primaryKey"`
+	UniqueCode *string `gorm:"not null"`
+}
+
+func (integrationDuplicateCode) TableName() string { return "integration_duplicate_codes" }
+
 func openIntegrationDB(t *testing.T, cfg config.DatabaseConfig) *DB {
 	t.Helper()
 	db, err := Open(cfg)
@@ -277,7 +286,7 @@ func openIntegrationDB(t *testing.T, cfg config.DatabaseConfig) *DB {
 // fabricated error string.
 func testForeignKeyAndNotNullViolations(t *testing.T, db *DB) {
 	t.Helper()
-	if err := db.AutoMigrate(&integrationFKCategory{}, &integrationFKWidget{}, &integrationNotNullWidget{}); err != nil {
+	if err := db.AutoMigrate(&integrationFKCategory{}, &integrationFKWidget{}, &integrationNotNullWidget{}, &integrationDuplicateCode{}); err != nil {
 		t.Fatalf("AutoMigrate() error = %v", err)
 	}
 
@@ -300,6 +309,20 @@ func testForeignKeyAndNotNullViolations(t *testing.T, db *DB) {
 	}
 	mapped = MapPersistError(context.Background(), nnErr, "resource already exists", "persist widget")
 	assertMapped(t, mapped, nnErr, http.StatusUnprocessableEntity, contract.CodeValidationError)
+
+	// The driver's message names the column (unique_code) and, on
+	// PostgreSQL, the table (integration_duplicate_codes): still a NOT NULL
+	// violation, not a duplicate (issue #456).
+	codeErr := db.Create(&integrationDuplicateCode{}).Error
+	if codeErr == nil {
+		t.Fatal("Create() with a nil unique_code error = nil, want a NOT NULL violation")
+	}
+	if IsUniqueViolation(codeErr) || !IsNotNullViolation(codeErr) {
+		t.Fatalf("unique_code NOT NULL error %v: IsUniqueViolation = %v, IsNotNullViolation = %v; want false, true",
+			codeErr, IsUniqueViolation(codeErr), IsNotNullViolation(codeErr))
+	}
+	mapped = MapPersistError(context.Background(), codeErr, "resource already exists", "persist code")
+	assertMapped(t, mapped, codeErr, http.StatusUnprocessableEntity, contract.CodeValidationError)
 
 	// A foreign-key violation on delete means something else still
 	// references the row being deleted — a state conflict, not the

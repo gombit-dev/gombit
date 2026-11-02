@@ -177,6 +177,21 @@ version.
   `auth.PasswordPolicyError`), which the command checks before it opens
   the database. **Breaking** for a caller relying on short passwords
   ([#461](https://github.com/gombit-dev/gombit/issues/461)).
+- A NOT NULL violation, or any other database error, whose message names a
+  column, table or constraint holding `unique` or `duplicate` (`unique_code`,
+  `duplicate_of`) is no longer reported as `409 conflict` "resource already
+  exists": creating the first row of a table without its `unique_code` is
+  the `422` "missing a required value" it is. `database.IsUniqueViolation`,
+  `IsForeignKeyViolation` and `IsNotNullViolation` classify a driver error by
+  its code (PostgreSQL SQLSTATE, MySQL error number, SQLite extended result
+  code) and fall back to the fixed wording of gorm's sentinels and the
+  drivers' messages, never a bare word, only for an error that carries no
+  driver error. MySQL's 1364 (an INSERT omitting a NOT NULL column with no
+  default) is a `422` like 1048, where it was a `500`, and 1761/1762 (an `ON
+  UPDATE CASCADE` that would duplicate a child's key) stay a `409`. Untranslated
+  constraint codes (MySQL 1586, 1216, 1217, SQLite's `ON DELETE RESTRICT`
+  refusal) are no longer logged as query failures
+  ([#456](https://github.com/gombit-dev/gombit/issues/456)).
 - Every list query has a deterministic order, so paging through a list no
   longer shows a row twice or skips one on PostgreSQL and MySQL, which give
   no order without `ORDER BY` and none among rows with equal sort keys. The
