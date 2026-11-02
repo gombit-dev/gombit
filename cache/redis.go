@@ -85,6 +85,25 @@ end
 return value
 `)
 
+// decrementExistingScript takes ARGV[1] off KEYS[1] only if it exists: one
+// atomic step, so a key that expired or was deleted is never recreated
+// (DECRBY alone would make it, at a negative count, with no expiry).
+var decrementExistingScript = redis.NewScript(`
+if redis.call('EXISTS', KEYS[1]) == 0 then
+	return {0, 0}
+end
+return {redis.call('DECRBY', KEYS[1], ARGV[1]), 1}
+`)
+
+// DecrementExisting implements Counter.
+func (r *Redis) DecrementExisting(ctx context.Context, key string, delta int64) (int64, bool, error) {
+	result, err := decrementExistingScript.Run(ctx, r.client, []string{key}, delta).Int64Slice()
+	if err != nil {
+		return 0, false, fmt.Errorf("cache: redis decrement %q: %w", key, err)
+	}
+	return result[0], result[1] == 1, nil
+}
+
 // IncrementTTL implements Counter.
 func (r *Redis) IncrementTTL(ctx context.Context, key string, delta int64, ttl time.Duration) (int64, error) {
 	if err := validateCounterTTL(ttl); err != nil {

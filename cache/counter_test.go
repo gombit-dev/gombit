@@ -185,6 +185,21 @@ func TestRedisIncrementTTL(t *testing.T) {
 	if ttl := client.PTTL(ctx, key+"-plain").Val(); ttl <= 0 {
 		t.Fatalf("PTTL of the plain counter = %s, want an expiry", ttl)
 	}
+	// DecrementExisting: of a counter that exists, keeping its expiry; a
+	// missing one is not created.
+	if got, found, err := c.DecrementExisting(ctx, key, 1); err != nil || !found || got != 3 {
+		t.Fatalf("DecrementExisting() = %d, %v, %v; want 3", got, found, err)
+	}
+	if ttl := client.PTTL(ctx, key).Val(); ttl <= 0 {
+		t.Fatalf("PTTL after DecrementExisting = %s, want the expiry kept", ttl)
+	}
+	missing := key + "-missing"
+	if _, found, err := c.DecrementExisting(ctx, missing, 1); err != nil || found {
+		t.Fatalf("DecrementExisting() of a missing key = found %v, %v", found, err)
+	}
+	if n := client.Exists(ctx, missing).Val(); n != 0 {
+		t.Fatal("DecrementExisting created the missing key")
+	}
 	var wg sync.WaitGroup
 	conc := key + "-concurrent"
 	t.Cleanup(func() { client.Del(context.Background(), conc) })
@@ -198,5 +213,50 @@ func TestRedisIncrementTTL(t *testing.T) {
 	wg.Wait()
 	if got := client.Get(ctx, conc).Val(); got != "32" {
 		t.Fatalf("after 32 concurrent increments = %q, want 32", got)
+	}
+}
+
+// TestDecrementExisting: a decrement only of a counter that exists, keeping
+// its expiry; a missing or expired one is not created (memory, namespaced,
+// Store, noop, and a Cache without a Counter, which writes nothing).
+func TestDecrementExisting(t *testing.T) {
+	ctx := context.Background()
+	mem := NewMemory()
+	now := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	mem.now = func() time.Time { return now }
+	for name, c := range map[string]Cache{"memory": mem, "namespace": Namespace("app", mem), "store": &Store{impl: mem}} {
+		key := "hits-" + name
+		if _, found, err := DecrementExisting(ctx, c, key, 1); err != nil || found {
+			t.Fatalf("%s: a missing counter = found %v, %v", name, found, err)
+		}
+		if found, _ := c.Get(ctx, key, new(int64)); found {
+			t.Fatalf("%s: DecrementExisting created the counter", name)
+		}
+		if _, err := IncrementTTL(ctx, c, key, 3, time.Minute); err != nil {
+			t.Fatal(err)
+		}
+		if got, found, err := DecrementExisting(ctx, c, key, 1); err != nil || !found || got != 2 {
+			t.Fatalf("%s: DecrementExisting() = %d, %v, %v; want 2", name, got, found, err)
+		}
+	}
+	// The expiry is kept: once it passes, the counter is gone, not
+	// decremented into a new one.
+	now = now.Add(time.Minute)
+	if _, found, err := mem.DecrementExisting(ctx, "hits-memory", 1); err != nil || found {
+		t.Fatalf("an expired counter = found %v, %v", found, err)
+	}
+	if _, found, _ := (Noop{}).DecrementExisting(ctx, "x", 1); found {
+		t.Fatal("Noop found a counter")
+	}
+	plain := plainCache{NewMemory()}
+	if _, err := plain.Increment(ctx, "p", 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := DecrementExisting(ctx, plain, "p", 1); err != nil || found {
+		t.Fatalf("a Cache without a Counter = found %v, %v; want nothing done", found, err)
+	}
+	var left int64
+	if _, err := plain.Get(ctx, "p", &left); err != nil || left != 1 {
+		t.Fatalf("a Cache without a Counter's value = %d, %v; want it untouched", left, err)
 	}
 }

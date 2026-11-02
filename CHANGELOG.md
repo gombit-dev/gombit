@@ -29,7 +29,8 @@ version.
   reserve their place atomically (concurrent requests cannot exceed a
   limit) and successes are refunded. The client address respects `GOMBIT_HTTP_TRUSTED_PROXIES`. The
   counts live in the app's cache (Redis shares them between instances) via
-  the new `cache.Counter` / `cache.IncrementTTL` (counters that expire); a
+  the new `cache.Counter` / `cache.IncrementTTL` / `cache.DecrementExisting`
+  (counters that expire, and decrements that never create one); a
   failing cache fails open, with a warning. `auth.ThrottlePolicy` /
   `auth.WithThrottlePolicy` / `auth.WithThrottleStore`, `auth.ErrTooManyAttempts`
   / `*auth.ThrottleError`; `GOMBIT_AUTH_THROTTLE_DISABLED=true` turns them

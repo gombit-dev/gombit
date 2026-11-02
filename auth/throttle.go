@@ -167,10 +167,13 @@ type throttler struct {
 	ownMu     sync.Mutex
 	own       *cache.Memory
 	ownClosed bool
-	// storeBroken is set when store answered a count it cannot have (0
-	// after an increment: it keeps nothing); the counts move to the own
-	// memory cache.
-	storeBroken atomic.Bool
+	// probed is set once a probe of store decided (storeKeepsNothing);
+	// keepsNothing is its answer: the counts go to the own memory
+	// cache instead. A probe that cannot reach the store decides nothing,
+	// and runs again on the next use.
+	probeMu      sync.Mutex
+	probed       atomic.Bool
+	keepsNothing atomic.Bool
 	// warned is when a store failure was last logged (unix seconds).
 	warned atomic.Int64
 	// refusing is, per rule, when a refusal was last logged.
@@ -179,7 +182,7 @@ type throttler struct {
 }
 
 func (t *throttler) cache() cache.Cache {
-	if t.store != nil && !t.storeBroken.Load() {
+	if t.store != nil && !t.storeKeepsNothing() {
 		return t.store
 	}
 	t.ownMu.Lock()
@@ -194,6 +197,43 @@ func (t *throttler) cache() cache.Cache {
 	}
 	return t.own
 }
+
+// storeKeepsNothing probes store once: a counter written to a key of its
+// own, read back, then deleted. A store that answers but keeps nothing (a
+// noop cache, however wrapped) would turn every rule off without a word.
+func (t *throttler) storeKeepsNothing() bool {
+	if t.probed.Load() {
+		return t.keepsNothing.Load()
+	}
+	t.probeMu.Lock()
+	defer t.probeMu.Unlock()
+	if t.probed.Load() {
+		return t.keepsNothing.Load()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), throttleRefundTimeout)
+	defer cancel()
+	key := "auth:throttle:probe:" + strconv.FormatInt(time.Now().UnixNano(), 36) + ":" + strconv.FormatUint(throttleProbeSeq.Add(1), 36)
+	count, err := cache.IncrementTTL(ctx, t.store, key, 1, time.Minute)
+	var stored int64
+	var found bool
+	if err == nil {
+		found, err = t.store.Get(ctx, key, &stored)
+	}
+	if err != nil {
+		t.warn(err) // undecided: probe again next time
+		return false
+	}
+	_ = t.store.Delete(ctx, key)
+	if count != 1 || !found || stored != 1 {
+		t.keepsNothing.Store(true)
+		t.logger().Warn("auth: the throttle's cache keeps no counts (a noop cache?); counting in process memory instead")
+	}
+	t.probed.Store(true)
+	return t.keepsNothing.Load()
+}
+
+// throttleProbeSeq tells apart the probe keys of one process.
+var throttleProbeSeq atomic.Uint64
 
 // close stops the throttler's own memory cache, if it made one.
 func (t *throttler) close() {
@@ -312,10 +352,6 @@ func (t *throttler) read(ctx context.Context, rule throttleRule) (slidingWindow,
 	return w, nil
 }
 
-// errThrottleStoreKeepsNothing is a store whose increment answered a count
-// it cannot have.
-var errThrottleStoreKeepsNothing = errors.New("auth: the throttle's cache keeps no counts (a noop cache?); counting in process memory instead")
-
 // take counts one attempt for rule in the current bucket, with previous
 // (read just before) for the window's estimate. Over the limit, it takes
 // the attempt back and returns the wait.
@@ -326,15 +362,9 @@ func (t *throttler) take(ctx context.Context, rule throttleRule, previous int64)
 	if err != nil {
 		return reservedKey{}, 0, err
 	}
-	if count < 1 {
-		// A store that counts nothing would turn every rule off without a
-		// word: count in the own memory cache from now on.
-		if t.store == nil || !t.storeBroken.CompareAndSwap(false, true) {
-			return reservedKey{}, 0, errThrottleStoreKeepsNothing
-		}
-		t.logger().Warn(errThrottleStoreKeepsNothing.Error())
-		return t.take(ctx, rule, 0)
-	}
+	// This attempt is in the count whatever the bucket held (a refund of a
+	// counter recreated by something else, say): never less than one.
+	count = max(count, 1)
 	w := slidingWindow{limit: rule.limit, previous: previous, elapsed: elapsed}
 	if wait := w.wait(count); wait > 0 {
 		t.refundKey(current)
@@ -414,9 +444,10 @@ func (r *reservation) refundExcept(rule string) {
 func (t *throttler) refundKey(key reservedKey) {
 	ctx, cancel := context.WithTimeout(context.Background(), throttleRefundTimeout)
 	defer cancel()
-	// IncrementTTL, not Increment: should the bucket have expired meanwhile,
-	// the decrement must not leave a counter that never does.
-	if _, err := cache.IncrementTTL(ctx, t.cache(), key.key, -1, key.ttl); err != nil {
+	// Only a bucket that still exists: one cleared (a login's success, a
+	// reset), expired or evicted meanwhile has nothing to give back, and a
+	// decrement that created it would leave a negative count.
+	if _, _, err := cache.DecrementExisting(ctx, t.cache(), key.key, 1); err != nil {
 		t.warn(err)
 	}
 }

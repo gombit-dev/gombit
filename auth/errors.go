@@ -47,14 +47,16 @@ func normalizeEmail(email string) string {
 // (MySQL's default, utf8mb4_0900_ai_ci, ignores zero-width characters and
 // accents, and folds fullwidth letters), and a spelling the database folds
 // is another email to everything else (the throttles count it as one). The
-// unique index holds one row per folded email, so the exact check decides.
-// A user of ID 0 is no account.
+// unique index holds one row per folded email, so the check decides. It
+// compares the stored email normalized, as the Service writes it: a row
+// written another way ("Ada@Example.com", by an import or an app's own
+// code) is still its account. A user of ID 0 is no account.
 func findUserByEmail(db *gorm.DB, email string) (User, error) {
 	var user User
 	if err := db.Where("email = ?", email).Limit(1).Find(&user).Error; err != nil {
 		return User{}, err
 	}
-	if user.Email != email {
+	if normalizeEmail(user.Email) != email {
 		return User{}, nil
 	}
 	return user, nil

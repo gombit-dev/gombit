@@ -137,6 +137,26 @@ func runThrottleService(t *testing.T, db *database.DB) {
 		}
 	})
 
+	t.Run("a row written with another case is still its account", func(t *testing.T) {
+		// Only a database whose collation folds case finds it by the
+		// normalized email (MySQL's default); the others never did.
+		if db.Name() != "mysql" {
+			t.Skip("the lookup is case-sensitive on " + db.Name())
+		}
+		e := newThrottleEnv(t, db, nil)
+		hash, err := bcrypt.GenerateFromPassword([]byte(testPassword), bcrypt.MinCost)
+		if err != nil {
+			t.Fatal(err)
+		}
+		email := fmt.Sprintf("Mixed.Case-%d@Example.com", time.Now().UnixNano())
+		if err := e.db.Create(&auth.User{Email: email, PasswordHash: string(hash)}).Error; err != nil {
+			t.Fatal(err)
+		}
+		if _, err := e.svc.Authenticate(from("203.0.113.60"), strings.ToLower(email), testPassword); err != nil {
+			t.Fatalf("a mixed-case row, signing in with the normalized email = %v", err)
+		}
+	})
+
 	t.Run("an account and an address that is none are throttled alike", func(t *testing.T) {
 		e := newThrottleEnv(t, db, nil)
 		attacker := from("198.51.100.8")
@@ -496,6 +516,9 @@ type keyCounter struct {
 }
 
 func (k *keyCounter) note(key string) {
+	if strings.HasPrefix(key, "auth:throttle:probe:") {
+		return // the Service's one-time check of the store
+	}
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	if k.written == nil {

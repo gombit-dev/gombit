@@ -138,7 +138,7 @@ from, `OneTimeToken.FromEmail`; the old address notified), and AUTH-8
 (#338): abuse protection for the credential endpoints (sliding-window
 throttles per client address, email and user, reserved atomically and
 refunded on success, 429 with `Retry-After`; counted in the app cache
-through `cache.Counter` / `cache.IncrementTTL`; `auth.ThrottlePolicy`,
+through `cache.Counter` (`IncrementTTL`, `DecrementExisting`); `auth.ThrottlePolicy`,
 `GOMBIT_AUTH_THROTTLE_DISABLED`); see `docs/auth.md`.
 Don't assume generated apps are committed in-tree; `gombit new` writes them
 on demand. Check `git log` / `ls` before describing "how the code works."

@@ -29,10 +29,28 @@ type Cache interface {
 // never lose an increment or leave a counter without its expiry. ttl must
 // be positive: a counter that never expires is what Increment is for.
 //
+// DecrementExisting takes delta off key only if the key exists (and has
+// not expired), keeping its expiry: it never creates a counter, so giving
+// back a place in a counter that was cleared or evicted meanwhile writes
+// nothing (a create-on-miss decrement would leave a negative counter).
+// found reports whether the key existed.
+//
 // The built-in drivers (memory, redis, noop) and Namespace implement it;
-// IncrementTTL (the function) falls back for a Cache that does not.
+// IncrementTTL and DecrementExisting (the functions) fall back for a Cache
+// that does not.
 type Counter interface {
 	IncrementTTL(ctx context.Context, key string, delta int64, ttl time.Duration) (int64, error)
+	DecrementExisting(ctx context.Context, key string, delta int64) (value int64, found bool, err error)
+}
+
+// DecrementExisting takes delta off key in c only if it exists, through c's
+// Counter. A Cache without one cannot do it without creating the key on a
+// miss, so nothing is written: found is false.
+func DecrementExisting(ctx context.Context, c Cache, key string, delta int64) (int64, bool, error) {
+	if counter, ok := c.(Counter); ok {
+		return counter.DecrementExisting(ctx, key, delta)
+	}
+	return 0, false, nil
 }
 
 // IncrementTTL increments key in c by delta and gives it ttl when it has no
@@ -214,6 +232,14 @@ func (s *Store) IncrementTTL(ctx context.Context, key string, delta int64, ttl t
 		return 0, errors.New("cache: nil store")
 	}
 	return IncrementTTL(ctx, s.impl, key, delta, ttl)
+}
+
+// DecrementExisting implements Counter.
+func (s *Store) DecrementExisting(ctx context.Context, key string, delta int64) (int64, bool, error) {
+	if s == nil || s.impl == nil {
+		return 0, false, errors.New("cache: nil store")
+	}
+	return DecrementExisting(ctx, s.impl, key, delta)
 }
 
 func encode(value any) ([]byte, error) {

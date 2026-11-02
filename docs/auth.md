@@ -439,12 +439,13 @@ bcrypt, the token's transaction):
   `memory` each process counts alone. With `noop`, or for an
   `auth.NewService` without `auth.WithThrottleStore`, the Service keeps
   them in a memory cache of its own (`Close` stops it). Counters expire on
-  their own (`cache.Counter`); emails and addresses are hashed into the
-  keys, never stored. A cache that fails does not lock anyone out: the
+  their own (`cache.Counter`), and an attempt's refund only takes back from
+  a counter that still exists, so one cleared or evicted meanwhile is never
+  recreated; emails and addresses are hashed into the keys, never stored. A cache that fails does not lock anyone out: the
   attempt goes on unthrottled and a warning is logged (at most once a
   minute). A cache that answers but keeps nothing (a noop one, however
-  wrapped) is noticed on its first count: the Service warns and counts in
-  its own memory instead.
+  wrapped) is found by a probe on first use (a counter written, read back,
+  deleted): the Service warns and counts in its own memory instead.
 - **Configuration.** `auth.WithThrottlePolicy(p)` replaces the limits (start
   from `auth.DefaultThrottlePolicy()`; a zero `Limit` turns a rule off).
   `GOMBIT_AUTH_THROTTLE_DISABLED=true` turns them all off, for an app whose

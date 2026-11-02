@@ -836,7 +836,7 @@ releases:
       - id: cache-counter
         kind: informational
         area: api
-        summary: "`cache.Counter` and `cache.IncrementTTL`: an increment that gives a new counter an expiry, atomically (memory, Redis, noop and namespaced caches implement it; other caches get a fallback)."
+        summary: "`cache.Counter`, `cache.IncrementTTL` and `cache.DecrementExisting`: an increment that gives a new counter an expiry, and a decrement only of a counter that exists, atomically (memory, Redis, noop and namespaced caches implement them; other caches get a fallback, and no decrement)."
         refs: [338]
 
       - id: client-schema-throttle

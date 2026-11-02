@@ -250,7 +250,7 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 - A new app's placeholder `schema.ts` includes the email change operations (and declares the forgot route's 422 and 500 responses); an existing app's generated client gets them from `gombit client generate`. (`client-schema-email-change`, client, [#334](https://github.com/gombit-dev/gombit/issues/334))
 
-- `cache.Counter` and `cache.IncrementTTL`: an increment that gives a new counter an expiry, atomically (memory, Redis, noop and namespaced caches implement it; other caches get a fallback). (`cache-counter`, api, [#338](https://github.com/gombit-dev/gombit/issues/338))
+- `cache.Counter`, `cache.IncrementTTL` and `cache.DecrementExisting`: an increment that gives a new counter an expiry, and a decrement only of a counter that exists, atomically (memory, Redis, noop and namespaced caches implement them; other caches get a fallback, and no decrement). (`cache-counter`, api, [#338](https://github.com/gombit-dev/gombit/issues/338))
 
 - A new app's placeholder `schema.ts` declares the 429 (with `Retry-After`), 422 and 500 responses of the throttled auth operations; an existing app's generated client gets them from `gombit client generate`. (`client-schema-throttle`, client, [#338](https://github.com/gombit-dev/gombit/issues/338))
 
