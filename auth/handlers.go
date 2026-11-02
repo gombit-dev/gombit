@@ -77,7 +77,7 @@ func (s *Service) login(ctx context.Context, input *loginInput) (*tokenOutput, e
 		return nil, mapServiceError(ctx, err)
 	}
 	if err != nil {
-		return nil, contract.WithContext(ctx, contract.Internal("issue tokens"))
+		return nil, contract.WithContext(ctx, contract.Internal("auth request failed"))
 	}
 	return &tokenOutput{Body: contract.Data[TokenPair]{Data: pair}}, nil
 }
@@ -123,6 +123,10 @@ func (s *Service) requireBearer() func(ctx huma.Context, next func(huma.Context)
 		}
 		user, refreshID, err := s.parseAccess(ctx.Context(), raw)
 		if err != nil {
+			if !errors.Is(err, errInvalidAccessToken) {
+				writeAuthChallenge(ctx, contract.WithContext(ctx.Context(), contract.Internal("auth request failed")), "")
+				return
+			}
 			writeAuthError(ctx, contract.WithContext(ctx.Context(), contract.Authentication("invalid access token")))
 			return
 		}
@@ -231,6 +235,8 @@ func mapServiceError(ctx context.Context, err error) error {
 		return contract.WithContext(ctx, contract.Authentication("invalid access token"))
 	case errors.Is(err, errEmailTaken):
 		return contract.WithContext(ctx, contract.Conflict("email already registered"))
+	case errors.Is(err, errInvalidEmail):
+		return invalidField(ctx, "email", "must be an email address")
 	case errors.As(err, &policy):
 		return invalidField(ctx, policy.Field, policy.Err.Error())
 	case errors.Is(err, errPasswordTooLong), errors.Is(err, errPasswordRequired):

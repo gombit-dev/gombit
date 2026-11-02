@@ -58,6 +58,12 @@ works. Production never AutoMigrates: run gombit db migrate first.`,
 			if err != nil {
 				return fmt.Errorf("gombit createsuperuser: %w", err)
 			}
+			// The service's rules, checked before the database is opened
+			// (and, outside production, the auth tables migrated) for input
+			// that would be refused (#461).
+			if err := auth.CheckNewAccount(resolvedEmail, resolvedPassword); err != nil {
+				return superuserCredentialError(resolvedEmail, err)
+			}
 
 			db, err := database.Open(cfg.Database)
 			if err != nil {
@@ -76,6 +82,9 @@ works. Production never AutoMigrates: run gombit db migrate first.`,
 
 			user, err := svc.CreateSuperuser(cmd.Context(), resolvedEmail, resolvedPassword)
 			if err != nil {
+				if errors.Is(err, auth.ErrInvalidEmail) || errors.As(err, new(auth.PasswordPolicyError)) {
+					return superuserCredentialError(resolvedEmail, err)
+				}
 				if errors.Is(err, auth.ErrEmailTaken) {
 					return fmt.Errorf("gombit createsuperuser: a user with email %q already exists", strings.ToLower(strings.TrimSpace(resolvedEmail)))
 				}
@@ -90,6 +99,16 @@ works. Production never AutoMigrates: run gombit db migrate first.`,
 	cmd.Flags().StringVar(&password, "password", "", "superuser account password (prefer the interactive prompt; --password is visible in shell history and process listings)")
 	cmd.Flags().BoolVar(&noInput, "no-input", false, "never prompt; require --email and --password")
 	return cmd
+}
+
+// superuserCredentialError words a refusal of the account's email or
+// password (auth.CheckNewAccount) for the operator.
+func superuserCredentialError(email string, err error) error {
+	var policy auth.PasswordPolicyError
+	if errors.As(err, &policy) {
+		return fmt.Errorf("gombit createsuperuser: %w", policy.Err)
+	}
+	return fmt.Errorf("gombit createsuperuser: %q is not a bare email address of at most 255 characters (such as admin@example.com)", email)
 }
 
 func prepareAuthSchema(env config.Environment, db *database.DB) error {

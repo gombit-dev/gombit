@@ -378,6 +378,37 @@ func assertError(t *testing.T, rec *httptest.ResponseRecorder, status int, code 
 	}
 }
 
+// TestAccountEmailRuleAgreesWithTheRoutes: the service's email rule
+// (auth.CheckNewAccount, which Register and CreateSuperuser apply) and the
+// login body's format:"email" / maxLength give the same verdict on one
+// corpus, both ways. The login route is the one #461 is about, and on an
+// empty database it answers from Huma alone: a 422 is the body refused, a
+// 401 the body accepted and no such account. The service rule is a second
+// copy, so a Huma change to the check fails here, whichever side it moves.
+func TestAccountEmailRuleAgreesWithTheRoutes(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	app := newAuthApp(t)
+	for _, email := range []string{
+		"admin", "Name <name@example.com>", `"ab"@example.com`, "trailing@example.com.", "a..b@example.com", "spaced out@example.com",
+		"tagged+x@example.com", "UPPER@EXAMPLE.COM", "user@bücher.de",
+		strings.Repeat("a", 243) + "@example.com", strings.Repeat("a", 244) + "@example.com", // 255 and 256 characters
+	} {
+		body, err := json.Marshal(map[string]string{"email": email, "password": testPassword})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec := postJSON(t, app, "/api/v1/auth/login", string(body))
+		if rec.Code != http.StatusUnauthorized && rec.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("login %q = %d, want 401 (accepted, no account) or 422 (refused); body: %s", email, rec.Code, rec.Body.String())
+		}
+		route := rec.Code == http.StatusUnauthorized
+		service := auth.CheckNewAccount(email, testPassword) == nil
+		if route != service {
+			t.Errorf("%q: the login body accepts = %v, the service accepts = %v; they must agree", email, route, service)
+		}
+	}
+}
+
 // ageRotations moves every rotation in db past config.DefaultRefreshReuseGrace, so a
 // rotated token presented again is reuse rather than a lost race (#459).
 func ageRotations(t *testing.T, db *gorm.DB) {
