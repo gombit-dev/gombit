@@ -37,7 +37,7 @@ type cookieLogoutOutput struct {
 
 func (s *Service) loginCookie(ctx context.Context, input *cookieLoginInput) (*cookieSessionOutput, error) {
 	user, pair, err := s.Login(ctx, input.Body.Email, input.Body.Password)
-	if errors.Is(err, errInvalidCredentials) {
+	if errors.Is(err, errInvalidCredentials) || errors.Is(err, ErrTooManyAttempts) {
 		return nil, mapServiceError(ctx, err)
 	}
 	if err != nil {

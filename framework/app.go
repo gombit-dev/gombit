@@ -367,11 +367,26 @@ func WithAuthAuditor(a auth.Auditor) Option {
 	}
 }
 
+// noopCache reports whether c keeps nothing: the noop driver, opened or
+// attached.
+func noopCache(c cache.Cache, store *cache.Store) bool {
+	if _, ok := c.(cache.Noop); ok {
+		return true
+	}
+	return store != nil && store.Driver() == cache.DriverNoop
+}
+
 // authOptions configure the framework-owned auth routes' Service.
 func (app *App) authOptions() []auth.Option {
 	opts := []auth.Option{auth.WithLogger(app.logger.Named("auth"))}
 	if app.authAuditor != nil {
 		opts = append(opts, auth.WithAuditor(app.authAuditor))
+	}
+	// The credential throttles count in the app's cache (shared between
+	// instances on Redis), unless it keeps nothing (noop): then the Service
+	// counts in a memory cache of its own rather than not at all.
+	if app.cache != nil && !noopCache(app.cache, app.cacheStore) {
+		opts = append(opts, auth.WithThrottleStore(app.cache))
 	}
 	switch {
 	case app.authMailer != nil:

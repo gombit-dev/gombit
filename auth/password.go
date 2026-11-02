@@ -34,8 +34,7 @@ func (s *Service) RequestPasswordReset(ctx context.Context, email string) error 
 	if email == "" {
 		return nil
 	}
-	var user User
-	err := s.db.WithContext(ctx).Where("email = ?", email).Limit(1).Find(&user).Error
+	user, err := findUserByEmail(s.db.WithContext(ctx), email)
 	if err != nil {
 		return err
 	}
@@ -63,6 +62,16 @@ func (s *Service) RequestPasswordReset(ctx context.Context, email string) error 
 // unless AuthConfig.PasswordResetKeepSessions, so do all of the user's
 // sessions and refresh tokens, in the same transaction.
 func (s *Service) ResetPassword(ctx context.Context, raw, password string) (User, error) {
+	user, err := throttleTokenUse(ctx, s, func() (User, error) { return s.consumeReset(ctx, raw, password) })
+	if err == nil {
+		// The owner recovered the account: whatever filled its
+		// LoginPerAccount (an attack on it, likely) no longer holds them.
+		s.throttle.clear(ctx, accountLoginRule(s.throttle.policy, user.Email))
+	}
+	return user, err
+}
+
+func (s *Service) consumeReset(ctx context.Context, raw, password string) (User, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return User{}, errInvalidOneTimeToken
@@ -165,7 +174,13 @@ func (s *Service) resetTokenMayWork(ctx context.Context, raw string) (bool, erro
 // before the lookup, from request arrivals alone, so it is the same for any
 // address, and does not depend on how long earlier requests' work runs.
 func (s *Service) requestPasswordResetInBackground(ctx context.Context, email string) error {
-	err := s.background.submit(ctx, func(ctx context.Context) {
+	// Throttled by client address only, before the lookup: the answer
+	// stays the same for any email.
+	res, err := s.throttle.reserve(ctx, throttleRule{name: "PasswordResetPerAddress", limit: s.throttle.policy.PasswordResetPerAddress, subject: requestAddress(ctx)})
+	if err != nil {
+		return err
+	}
+	err = s.background.submit(ctx, func(ctx context.Context) {
 		err := s.RequestPasswordReset(ctx, email)
 		var tooSoon resendTooSoonError
 		switch {
@@ -181,6 +196,9 @@ func (s *Service) requestPasswordResetInBackground(ctx context.Context, email st
 		// the answer stays the same for any address.
 		s.logger.Warn("auth: a password reset request was discarded", zap.Error(err))
 		return nil
+	}
+	if err != nil {
+		res.refund() // not admitted: the client is told to come back
 	}
 	return err
 }
@@ -253,26 +271,29 @@ func registerPasswordResetRoutes(api huma.API, svc *Service, prefix string, cook
 		Method:        http.MethodPost,
 		Path:          forgotPath,
 		Summary:       "Mail a password reset link to an account",
-		Description:   "202 with the same body whether or not the email is an account, answered before that is known: the message is sent in the background. 503 (Retry-After) when the server is taking no more reset requests for now, decided from request arrivals alone, also before the lookup. At most one message a minute per account; the link works once, until it expires.",
+		Description:   "202 with the same body whether or not the email is an account, answered before that is known: the message is sent in the background. 503 (Retry-After) when the server is taking no more reset requests for now, decided from request arrivals alone, also before the lookup. 429 (Retry-After) when this client address asked too often, also before the lookup. At most one message a minute per account; the link works once, until it expires.",
 		Tags:          []string{"Auth"},
 		DefaultStatus: http.StatusAccepted,
-		Errors:        []int{http.StatusServiceUnavailable},
+		Errors:        []int{http.StatusTooManyRequests, http.StatusServiceUnavailable},
 	}), svc.forgotPassword)
 	declareRetryAfter(api, forgotPath, http.StatusServiceUnavailable, "Seconds until the server takes a password reset request again")
+	declareRetryAfter(api, forgotPath, http.StatusTooManyRequests, throttleRetryAfterDoc)
 
 	reset := withRequestInfo(huma.Operation{
 		OperationID: "auth-reset-password",
 		Method:      http.MethodPost,
 		Path:        prefix + "/auth/password/reset",
 		Summary:     "Set a new password with the token from a reset message",
-		Description: "Consumes the token: it works once. Revokes every session of the user unless the app keeps them. An unknown, expired, used or superseded token, or one sent to an address the user no longer has, is a 422 on token.",
+		Description: "Consumes the token: it works once. Revokes every session of the user unless the app keeps them. An unknown, expired, used or superseded token, or one sent to an address the user no longer has, is a 422 on token. Too many invalid tokens from one client address is a 429 (Retry-After).",
 		Tags:        []string{"Auth"},
+		Errors:      []int{http.StatusTooManyRequests},
 	})
 	if cookieMode {
 		huma.Register(api, reset, svc.resetPasswordCookie)
-		return
+	} else {
+		huma.Register(api, reset, svc.resetPassword)
 	}
-	huma.Register(api, reset, svc.resetPassword)
+	declareRetryAfter(api, reset.Path, http.StatusTooManyRequests, throttleRetryAfterDoc)
 }
 
 func (s *Service) forgotPassword(ctx context.Context, input *passwordForgotInput) (*passwordForgotOutput, error) {

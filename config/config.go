@@ -68,6 +68,7 @@ const (
 	envPasswordResetURL        = "GOMBIT_AUTH_PASSWORD_RESET_URL"           // #nosec G101 -- environment variable name, not a credential.
 	envPasswordResetKeep       = "GOMBIT_AUTH_PASSWORD_RESET_KEEP_SESSIONS" // #nosec G101 -- environment variable name, not a credential.
 	envRefreshReuseGrace       = "GOMBIT_AUTH_REFRESH_REUSE_GRACE"
+	envAuthThrottleDisabled    = "GOMBIT_AUTH_THROTTLE_DISABLED"
 	envCookieSecure            = "GOMBIT_COOKIE_SECURE"
 	envCookieSameSite          = "GOMBIT_COOKIE_SAMESITE"
 	envSecuritySanitizeInput   = "GOMBIT_SECURITY_SANITIZE_INPUT"
@@ -491,6 +492,11 @@ type AuthConfig struct {
 	// whose zero means their default, zero here is a policy, not "unset":
 	// never default it.
 	RefreshReuseGrace time.Duration
+	// ThrottleDisabled turns off the credential endpoints' abuse protection
+	// (AUTH-8): the login, password reset, one-time token, current-password
+	// and verification throttles. On by default; turn it off only when
+	// something in front of the app (a gateway, a WAF) limits these routes.
+	ThrottleDisabled bool
 }
 
 // Enabled reports whether auth routes should be mounted (JWT secret is set).
@@ -719,6 +725,7 @@ func LoadFromEnv(lookup EnvLookup) (Config, error) {
 	applyString(lookup, envEmailChangeURL, &cfg.Auth.EmailChangeURL)
 	applyBool(lookup, envPasswordResetKeep, "Auth.PasswordResetKeepSessions", &cfg.Auth.PasswordResetKeepSessions, &errs)
 	applyDuration(lookup, envRefreshReuseGrace, "Auth.RefreshReuseGrace", &cfg.Auth.RefreshReuseGrace, &errs)
+	applyBool(lookup, envAuthThrottleDisabled, "Auth.ThrottleDisabled", &cfg.Auth.ThrottleDisabled, &errs)
 	applyBool(lookup, envSecuritySanitizeInput, "Security.SanitizeInput", &cfg.Security.SanitizeInput, &errs)
 	if docsEnabledSet {
 		applyBool(lookup, envDocsEnabled, "API.DocsEnabled", &cfg.API.DocsEnabled, &errs)

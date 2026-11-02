@@ -134,8 +134,12 @@ reset links voided; `auth.Service.ChangePassword`), and AUTH-4 (#334):
 email change (`POST {prefix}/auth/email/change` with the current password,
 a link to the new address, `POST {prefix}/auth/email/change/confirm` making
 it the account's email, verified; tokens bound to the email they were asked
-from, `OneTimeToken.FromEmail`; the old address notified); see
-`docs/auth.md`.
+from, `OneTimeToken.FromEmail`; the old address notified), and AUTH-8
+(#338): abuse protection for the credential endpoints (sliding-window
+throttles per client address, email and user, reserved atomically and
+refunded on success, 429 with `Retry-After`; counted in the app cache
+through `cache.Counter` (`IncrementTTL`, `DecrementExisting`); `auth.ThrottlePolicy`,
+`GOMBIT_AUTH_THROTTLE_DISABLED`); see `docs/auth.md`.
 Don't assume generated apps are committed in-tree; `gombit new` writes them
 on demand. Check `git log` / `ls` before describing "how the code works."
 

@@ -166,6 +166,28 @@ curl -sS -X POST http://127.0.0.1:8080/api/v1/auth/email/change/confirm \
 
 See [`docs/auth.md`](../../docs/auth.md#email-change).
 
+## Abuse protection
+
+The credential endpoints are throttled. Six wrong passwords for one email
+from one address in a row: the sixth is refused before the password is
+checked, and says how long to wait:
+
+```bash
+for i in 1 2 3 4 5 6; do
+  curl -sS -o /dev/null -w '%{http_code} ' -X POST http://127.0.0.1:8080/api/v1/auth/login \
+    -H 'Content-Type: application/json' -d '{"email":"ada@example.com","password":"wrong"}'
+done
+# 401 401 401 401 401 429
+
+curl -sS -i -X POST http://127.0.0.1:8080/api/v1/auth/login \
+  -H 'Content-Type: application/json' -d '{"email":"ada@example.com","password":"wrong"}' | grep -i retry-after
+# Retry-After: 1080
+```
+
+The address may still sign in to other accounts, and the account's owner
+from theirs. See [`docs/auth.md`](../../docs/auth.md#abuse-protection) for
+every rule, and `GOMBIT_HTTP_TRUSTED_PROXIES` behind a proxy.
+
 ## Audit trail
 
 Every step above was recorded in `auth_audit_events`: the registration, the

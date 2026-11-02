@@ -139,10 +139,17 @@ func ParseOrdering(ordering string) (field string, desc bool) {
 //   - empty ordering: order by fallback (the stable default, e.g. "id") when
 //     fallback is non-empty; otherwise no ORDER BY is added.
 //   - ordering field not in allowed: a 422 validation error on "ordering".
+//   - any other field: order by it, then by fallback in the same direction as
+//     the tiebreaker (`views DESC, id DESC`), so rows with equal sort keys keep
+//     one order across LIMIT/OFFSET pages instead of repeating or vanishing
+//     between them (issue #455). One direction lets a single index on
+//     (field, fallback), which an InnoDB secondary index on field already is,
+//     serve both field and -field.
 //
 // allowed and fallback are generator-controlled (a resource's declared sortable
-// columns); ordering is user input, matched by exact string equality so only a
-// declared column can reach the query.
+// columns and its primary-key column); ordering is user input, matched by exact
+// string equality so only a declared column can reach the query. fallback must
+// be a unique column: a non-unique one leaves ties, and so pages, unordered.
 func Ordering(ctx context.Context, q *gorm.DB, ordering string, allowed []string, fallback string) (*gorm.DB, error) {
 	field, desc := ParseOrdering(ordering)
 	if field == "" {
@@ -164,7 +171,11 @@ func Ordering(ctx context.Context, q *gorm.DB, ordering string, allowed []string
 			map[string][]string{"ordering": {"ordering is not allowed for this field"}},
 		))
 	}
-	return q.Order(clause.OrderByColumn{Column: clause.Column{Name: field}, Desc: desc}), nil
+	q = q.Order(clause.OrderByColumn{Column: clause.Column{Name: field}, Desc: desc})
+	if fallback != "" && fallback != field {
+		q = q.Order(clause.OrderByColumn{Column: clause.Column{Name: fallback}, Desc: desc})
+	}
+	return q, nil
 }
 
 // escapeLike escapes the LIKE metacharacters so a search term matches literally
