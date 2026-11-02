@@ -76,6 +76,15 @@ works. Production never AutoMigrates: run gombit db migrate first.`,
 
 			user, err := svc.CreateSuperuser(cmd.Context(), resolvedEmail, resolvedPassword)
 			if err != nil {
+				// The login endpoint's rules: an account it refuses could
+				// never sign in (#461).
+				if errors.Is(err, auth.ErrInvalidEmail) {
+					return fmt.Errorf("gombit createsuperuser: %q is not an email address; use a bare address such as admin@example.com", resolvedEmail)
+				}
+				var policy auth.PasswordPolicyError
+				if errors.As(err, &policy) {
+					return fmt.Errorf("gombit createsuperuser: %w", policy.Err)
+				}
 				if errors.Is(err, auth.ErrEmailTaken) {
 					return fmt.Errorf("gombit createsuperuser: a user with email %q already exists", strings.ToLower(strings.TrimSpace(resolvedEmail)))
 				}

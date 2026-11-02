@@ -228,6 +228,8 @@ func mapServiceError(ctx context.Context, err error) error {
 		return contract.WithContext(ctx, contract.Authentication("invalid access token"))
 	case errors.Is(err, errEmailTaken):
 		return contract.WithContext(ctx, contract.Conflict("email already registered"))
+	case errors.Is(err, errInvalidEmail):
+		return invalidField(ctx, "email", "must be an email address")
 	case errors.As(err, &policy):
 		return invalidField(ctx, policy.Field, policy.Err.Error())
 	case errors.Is(err, errPasswordTooLong), errors.Is(err, errPasswordRequired):

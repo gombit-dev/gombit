@@ -95,6 +95,35 @@ func TestRunCreateSuperuserRefusesDuplicate(t *testing.T) {
 	}
 }
 
+// TestRunCreateSuperuserRefusesAnAccountThatCannotSignIn: an email the login
+// endpoint refuses, or a password shorter than a user may set, is refused
+// with a message that says why, and nothing is created (issue #461).
+func TestRunCreateSuperuserRefusesAnAccountThatCannotSignIn(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "app.db")
+	cfg := testCreateSuperuserConfig(t, dbPath)
+	stubConfig(t, cfg)
+
+	for _, tc := range []struct{ email, password, want string }{
+		{"admin", "correct-horse", "not an email address"},
+		{"Root Admin <root@example.com>", "correct-horse", "not an email address"},
+		{"a b c", "correct-horse", "not an email address"},
+		{"admin@example.com", "x", "at least 8 characters"},
+	} {
+		var stdout bytes.Buffer
+		err := run(context.Background(), []string{"createsuperuser", "--no-input", "--email", tc.email, "--password", tc.password}, &stdout, new(bytes.Buffer))
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("createsuperuser --email %q --password %q = %v, want an error mentioning %q", tc.email, tc.password, err, tc.want)
+		}
+		if strings.Contains(stdout.String(), "Superuser created") {
+			t.Errorf("createsuperuser --email %q printed %q", tc.email, stdout.String())
+		}
+	}
+	// The same email with a valid password is created: nothing was before.
+	if err := run(context.Background(), []string{"createsuperuser", "--no-input", "--email", "admin@example.com", "--password", "correct-horse"}, new(bytes.Buffer), new(bytes.Buffer)); err != nil {
+		t.Fatalf("createsuperuser with valid credentials = %v", err)
+	}
+}
+
 func TestRunCreateSuperuserRequiresJWTSecret(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "app.db")
 	cfg := config.Default()

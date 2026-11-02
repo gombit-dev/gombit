@@ -165,6 +165,13 @@ version.
 
 ### Fixed
 
+- `gombit createsuperuser` (and `auth.Service.CreateSuperuser` /
+  `Register`) refuses an email that is not a bare address (`admin`,
+  `Root Admin <root@example.com>`, `a b c`) and a password shorter than 8
+  characters, the rules of `POST /auth/login` and `/auth/register`. It used
+  to create an admin that could never sign in, to the API or `/admin/`.
+  The service returns `auth.ErrInvalidEmail` and an `auth.PasswordPolicyError`
+  ([#461](https://github.com/gombit-dev/gombit/issues/461)).
 - Every list query has a deterministic order, so paging through a list no
   longer shows a row twice or skips one on PostgreSQL and MySQL, which give
   no order without `ORDER BY` and none among rows with equal sort keys. The

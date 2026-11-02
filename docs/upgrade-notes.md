@@ -161,6 +161,14 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 ### Informational
 
+- `gombit createsuperuser`, `auth.Service.CreateSuperuser` and `Register` refuse an email that is not a bare address and a password shorter than 8 characters, as the login and registration endpoints do. (`createsuperuser-login-rules`, cli, [#461](https://github.com/gombit-dev/gombit/issues/461))
+
+  The account such a call used to create could never sign in. A
+  script that seeds an admin with a placeholder like `--email admin`
+  or a short password now fails: give it a real address and a
+  password of at least 8 characters. The service returns
+  `auth.ErrInvalidEmail` / an `auth.PasswordPolicyError`.
+
 - Bearer-mode session revocation errors include the `WWW-Authenticate: Bearer realm="api"` challenge when the handler returns 401. (`bearer-handler-401-challenge`, api, [#604](https://github.com/gombit-dev/gombit/issues/604))
 
   Cookie-mode 401 responses still omit a Bearer challenge.

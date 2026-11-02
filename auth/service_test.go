@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -205,6 +206,43 @@ func TestCreateSuperuserOnFreshDB(t *testing.T) {
 
 // TestCreateSuperuserRefusesDuplicateEmail matches Register's uniqueness
 // path (same errEmailTaken, exported as ErrEmailTaken).
+// TestCreateUserAppliesTheLoginRules: Register and CreateSuperuser refuse an
+// email the login body refuses and a password shorter than a user may set,
+// so no account is created that can never sign in; nothing is stored
+// (issue #461).
+func TestCreateUserAppliesTheLoginRules(t *testing.T) {
+	svc := newTestService(t)
+	ctx := context.Background()
+	create := map[string]func(email, password string) (User, error){
+		"Register":        func(e, p string) (User, error) { return svc.Register(ctx, e, p) },
+		"CreateSuperuser": func(e, p string) (User, error) { return svc.CreateSuperuser(ctx, e, p) },
+	}
+	for name, fn := range create {
+		for _, email := range []string{"admin", "Root Admin <root@example.com>", "a b c", "admin@", strings.Repeat("a", 250) + "@example.com"} {
+			if _, err := fn(email, "correct-horse"); !errors.Is(err, ErrInvalidEmail) {
+				t.Errorf("%s(%q) = %v, want ErrInvalidEmail", name, email, err)
+			}
+		}
+		for password, reason := range map[string]error{"x": ErrPasswordTooShort, "seven77": ErrPasswordTooShort, strings.Repeat("p", 73): ErrPasswordTooLong} {
+			var policy PasswordPolicyError
+			if _, err := fn("rules-"+name+"@example.com", password); !errors.As(err, &policy) || !errors.Is(err, reason) || policy.Field != "password" {
+				t.Errorf("%s(password of %d chars) = %v, want a PasswordPolicyError %v on password", name, len(password), err, reason)
+			}
+		}
+	}
+	var count int64
+	if err := svc.db.Model(&User{}).Count(&count).Error; err != nil || count != 0 {
+		t.Fatalf("users stored = %d (err %v), want 0", count, err)
+	}
+	// What the rules accept signs in.
+	if _, err := svc.CreateSuperuser(ctx, "admin@example.com", "eight888"); err != nil {
+		t.Fatalf("CreateSuperuser(valid) = %v", err)
+	}
+	if _, err := svc.Authenticate(ctx, "admin@example.com", "eight888"); err != nil {
+		t.Fatalf("Authenticate(the new superuser) = %v", err)
+	}
+}
+
 func TestCreateSuperuserRefusesDuplicateEmail(t *testing.T) {
 	svc := newTestService(t)
 	ctx := context.Background()

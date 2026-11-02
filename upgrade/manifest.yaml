@@ -509,6 +509,18 @@ releases:
 
   - version: unreleased
     changes:
+      - id: createsuperuser-login-rules
+        kind: informational
+        area: cli
+        summary: "`gombit createsuperuser`, `auth.Service.CreateSuperuser` and `Register` refuse an email that is not a bare address and a password shorter than 8 characters, as the login and registration endpoints do."
+        details: |
+          The account such a call used to create could never sign in. A
+          script that seeds an admin with a placeholder like `--email admin`
+          or a short password now fails: give it a real address and a
+          password of at least 8 characters. The service returns
+          `auth.ErrInvalidEmail` / an `auth.PasswordPolicyError`.
+        refs: [461]
+
       - id: bearer-handler-401-challenge
         kind: informational
         area: api
