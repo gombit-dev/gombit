@@ -177,6 +177,18 @@ version.
   `auth.PasswordPolicyError`), which the command checks before it opens
   the database. **Breaking** for a caller relying on short passwords
   ([#461](https://github.com/gombit-dev/gombit/issues/461)).
+- The admin finds a `uuid.UUID`-keyed row by a UUID spelled in upper case:
+  the detail, update and delete paths and the `uuid` filters
+  (`?id=3F2B8C1A-…`) returned 404 or an empty list on SQLite and PostgreSQL,
+  whose `char(36)` uuid columns compare text byte for byte. A value for a
+  `uuid.UUID` field (key, field, belongs_to or many-to-many key) is now read
+  as `uuid.Parse` reads it, braced, `urn:uuid:` and unhyphenated forms
+  included, and used in its canonical lower case, as the generated list
+  handlers already did. A Go `string` field declared `uuid` keeps the
+  spelling sent, as written and as compared, so a PATCH that sends such a key
+  in another spelling than the stored one is now refused as a key change
+  (422), where it was ignored
+  ([#457](https://github.com/gombit-dev/gombit/issues/457)).
 - A NOT NULL violation, or any other database error, whose message names a
   column, table or constraint holding `unique` or `duplicate` (`unique_code`,
   `duplicate_of`) is no longer reported as `409 conflict` "resource already

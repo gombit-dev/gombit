@@ -54,7 +54,7 @@ func findM2M(sch *schema.Schema, fieldName string) (*m2mBinding, bool) {
 			},
 			relatedElem:   fieldSchema.ModelType,
 			relatedPKCol:  pk.DBName,
-			relatedPKType: inferFieldType(pk),
+			relatedPKType: coerceTypeFor(inferFieldType(pk), pk.FieldType),
 		}, true
 	}
 	return nil, false
