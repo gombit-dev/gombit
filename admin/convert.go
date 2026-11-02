@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 
 	"github.com/gombit-dev/gombit/database"
@@ -160,10 +161,28 @@ func coerceValue(raw any, ft FieldType) (any, error) {
 		if err != nil {
 			return nil, err
 		}
+		// A uuid over a Go string keeps the spelling sent, as written and as
+		// compared: the column holds whatever spelling was written, so a
+		// canonical lookup could miss a row stored in upper case.
 		if ft == TypeUUID && !validUUID(s) {
 			return nil, fmt.Errorf("must be a UUID")
 		}
 		return s, nil
+	case typeCanonicalUUID:
+		// A uuid.UUID column always holds the canonical lower case
+		// (uuid.UUID.Value), but SQLite and PostgreSQL compare char(36) text
+		// byte for byte, so a value is compared, and written, in that form:
+		// an upper-case, braced, urn:uuid: or unhyphenated spelling finds
+		// the row (issue #457), as the generated plane's uuid.Parse does.
+		s, err := asString(raw)
+		if err != nil {
+			return nil, err
+		}
+		u, err := uuid.Parse(s)
+		if err != nil {
+			return nil, fmt.Errorf("must be a UUID")
+		}
+		return u.String(), nil
 	case TypeInteger:
 		return asInt64(raw)
 	case TypeFloat:
