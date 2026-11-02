@@ -197,14 +197,14 @@ func renderModelHandler(r modelResource) (string, error) {
 		if !errDeclared {
 			assign = ":="
 		}
-		b.WriteString("\tq, err " + assign + " database.Ordering(ctx, q, input.Ordering, []string{\"" + strings.Join(sortCols, "\", \"") + "\"}, \"id\")\n")
+		b.WriteString("\tq, err " + assign + " database.Ordering(ctx, q, input.Ordering, []string{\"" + strings.Join(sortCols, "\", \"") + "\"}, \"" + pk.Column + "\")\n")
 		b.WriteString("\tif err != nil {\n\t\treturn nil, err\n\t}\n")
 	}
 	b.WriteString("\tvar rows []" + typ + "\n")
 	if len(sortCols) > 0 {
 		b.WriteString("\tif err := q.Offset(contract.PageOffset(page, perPage)).Limit(perPage).Find(&rows).Error; err != nil {\n")
 	} else {
-		b.WriteString("\tif err := q.Order(\"id\").Offset(contract.PageOffset(page, perPage)).Limit(perPage).Find(&rows).Error; err != nil {\n")
+		b.WriteString("\tif err := q.Order(\"" + pk.Column + "\").Offset(contract.PageOffset(page, perPage)).Limit(perPage).Find(&rows).Error; err != nil {\n")
 	}
 	b.WriteString("\t\treturn nil, contract.WithContext(ctx, contract.Internal(\"list " + name.PluralSnake + "\"))\n")
 	b.WriteString("\t}\n")

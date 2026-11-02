@@ -168,6 +168,17 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   integer sends it as a string (`"9007199254740993"`), which is read
   exactly.
 
+- List endpoints end on the primary key: the admin list orders by it by default, and admin and generated lists break `?ordering=` ties with it, in the requested direction (`database.Ordering` appends its `fallback`). (`list-order-primary-key-tiebreaker`, behavior, [#455](https://github.com/gombit-dev/gombit/issues/455))
+
+  Pages of a list without a requested ordering, or with ties in the
+  requested column, had no defined order on PostgreSQL and MySQL, so a
+  row could appear on two pages or on none. A client that relied on
+  the admin list's unordered (on SQLite, insertion) order sees the
+  same rows in primary-key order. Generated list handlers now name
+  the model's primary-key column instead of a literal `id`: `gombit
+  generate` (or `gombit upgrade contract --write`) regenerates them,
+  and a model keyed by another column gets a working list.
+
 - Email verification: registration mails a single-use, expiring link (through `framework.WithAuthMailer`), `POST {prefix}/auth/verify-email` consumes it, `POST {prefix}/auth/verify-email/resend` sends a new one, and `auth.RequireVerifiedEmail` gates an app's own operations. (`email-verification`, api, [#331](https://github.com/gombit-dev/gombit/issues/331))
 
   A production app with no mailer sends no message (registration still

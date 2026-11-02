@@ -554,6 +554,21 @@ releases:
           exactly.
         refs: [448]
 
+      - id: list-order-primary-key-tiebreaker
+        kind: informational
+        area: behavior
+        summary: "List endpoints end on the primary key: the admin list orders by it by default, and admin and generated lists break `?ordering=` ties with it, in the requested direction (`database.Ordering` appends its `fallback`)."
+        details: |
+          Pages of a list without a requested ordering, or with ties in the
+          requested column, had no defined order on PostgreSQL and MySQL, so a
+          row could appear on two pages or on none. A client that relied on
+          the admin list's unordered (on SQLite, insertion) order sees the
+          same rows in primary-key order. Generated list handlers now name
+          the model's primary-key column instead of a literal `id`: `gombit
+          generate` (or `gombit upgrade contract --write`) regenerates them,
+          and a model keyed by another column gets a working list.
+        refs: [455]
+
       - id: email-verification-schema
         kind: manual
         breaking: true

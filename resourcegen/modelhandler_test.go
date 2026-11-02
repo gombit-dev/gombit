@@ -395,6 +395,47 @@ func TestRenderModelHandlerQuerySurface(t *testing.T) {
 	}
 }
 
+// codedModel's primary key column is "code", not "id".
+type codedModel struct {
+	Code uint   `gorm:"primaryKey" json:"code" gombit:"read"`
+	Name string `json:"name" gombit:"read,write,sortable"`
+}
+
+type codedPlainModel struct {
+	Code uint   `gorm:"primaryKey" json:"code" gombit:"read"`
+	Name string `json:"name" gombit:"read,write"`
+}
+
+// TestRenderModelHandlerOrdersByPrimaryKeyColumn: the list's default order and
+// its ?ordering= tiebreaker are the model's primary-key column, which need not
+// be "id"; a literal "id" is a SQL error on such a table (issue #455).
+func TestRenderModelHandlerOrdersByPrimaryKeyColumn(t *testing.T) {
+	for _, tc := range []struct {
+		model any
+		pkg   string
+		want  string
+	}{
+		{&codedModel{}, "codedmodel", `database.Ordering(ctx, q, input.Ordering, []string{"name"}, "code")`},
+		{&codedPlainModel{}, "codedplainmodel", `q.Order("code").Offset(`},
+	} {
+		res, err := buildModelResource(tc.model, tc.pkg)
+		if err != nil {
+			t.Fatalf("buildModelResource(%s): %v", tc.pkg, err)
+		}
+		src, err := renderModelHandler(res)
+		if err != nil {
+			t.Fatalf("renderModelHandler(%s): %v", tc.pkg, err)
+		}
+		assertParses(t, src)
+		if !strings.Contains(src, tc.want) {
+			t.Fatalf("%s handler missing %q in:\n%s", tc.pkg, tc.want, src)
+		}
+		if strings.Contains(src, `Order("id")`) || strings.Contains(src, `}, "id")`) {
+			t.Fatalf("%s handler still orders by an \"id\" column:\n%s", tc.pkg, src)
+		}
+	}
+}
+
 // With no query capabilities declared, the handler is byte-identical to the plain
 // paginated list (PageMeta, no query params) — a no-modifier resource is unchanged.
 func TestRenderModelHandlerNoQuerySurface(t *testing.T) {
