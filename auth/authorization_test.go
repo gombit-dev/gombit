@@ -310,75 +310,111 @@ func runEnsureRaceOutcomes(t *testing.T, db *database.DB) {
 		}
 	})
 
-	// The caller's transaction took its snapshot before the winner
-	// committed. At READ COMMITTED and on MySQL (whose locking re-read sees
-	// the latest committed row) the loser gets the winner's row and its
-	// transaction stays usable; a PostgreSQL REPEATABLE READ snapshot
-	// cannot see the row, so the loser gets the unique violation.
-	for _, level := range []sql.IsolationLevel{sql.LevelReadCommitted, sql.LevelRepeatableRead} {
-		t.Run("snapshot before the winner/"+level.String(), func(t *testing.T) {
+	// The caller's REPEATABLE READ transaction took its snapshot before the
+	// winner committed (at READ COMMITTED its first read would see the row,
+	// and nothing would be lost). On MySQL the locking re-read sees the
+	// latest committed row, so the loser gets the winner's; a PostgreSQL
+	// snapshot cannot see it, so the loser gets the unique violation. Either
+	// way the lost race leaves the transaction usable.
+	t.Run("snapshot before the winner", func(t *testing.T) {
+		multiConn(t)
+		key := "snapshot." + tag
+		tx := db.WithContext(ctx).Begin(&sql.TxOptions{Isolation: sql.LevelRepeatableRead})
+		if tx.Error != nil {
+			t.Fatal(tx.Error)
+		}
+		defer tx.Rollback()
+		var n int64
+		if err := tx.Model(&auth.Permission{}).Count(&n).Error; err != nil {
+			t.Fatal(err)
+		}
+		winner, err := auth.EnsurePermission(ctx, db.DB, key, "Winner")
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := auth.EnsurePermission(ctx, tx, key, "Loser")
+		if db.Name() == "postgres" {
+			if !database.IsUniqueViolation(err) {
+				t.Fatalf("err = %v, want the unique violation", err)
+			}
+		} else if err != nil || got.ID != winner.ID {
+			t.Fatalf("got %d, %v; want the winner's row %d", got.ID, err, winner.ID)
+		}
+		if err := tx.Model(&auth.Permission{}).Count(&n).Error; err != nil {
+			t.Fatalf("transaction unusable after the lost race: %v", err)
+		}
+	})
+
+	// The loser's insert waits on the winner's uncommitted row, the loser
+	// at the default isolation, with and without a transaction of its own.
+	// When the winner commits, the insert fails and the loser reads and
+	// returns the winner's row (#463's case); when the winner rolls back,
+	// the insert succeeds and the loser returns its own row. A loser's
+	// transaction stays usable either way.
+	for i, c := range []struct {
+		name         string
+		commit, inTx bool
+	}{
+		{"the winner commits", true, false},
+		{"the winner commits/loser in a transaction", true, true},
+		{"the winner rolls back", false, false},
+		{"the winner rolls back/loser in a transaction", false, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
 			multiConn(t)
-			key := "snapshot." + strconv.Itoa(int(level)) + "." + tag
-			tx := db.WithContext(ctx).Begin(&sql.TxOptions{Isolation: level})
-			if tx.Error != nil {
-				t.Fatal(tx.Error)
+			key := "ends." + strconv.Itoa(i) + "." + tag
+			winner := db.WithContext(ctx).Begin()
+			if winner.Error != nil {
+				t.Fatal(winner.Error)
 			}
-			defer tx.Rollback()
-			var n int64
-			if err := tx.Model(&auth.Permission{}).Count(&n).Error; err != nil {
-				t.Fatal(err)
-			}
-			winner, err := auth.EnsurePermission(ctx, db.DB, key, "Winner")
+			defer winner.Rollback()
+			won, err := auth.EnsurePermission(ctx, winner, key, "Winner")
 			if err != nil {
 				t.Fatal(err)
 			}
-			got, err := auth.EnsurePermission(ctx, tx, key, "Loser")
-			if db.Name() == "postgres" && level == sql.LevelRepeatableRead {
-				if !database.IsUniqueViolation(err) {
-					t.Fatalf("err = %v, want the unique violation", err)
+			loser := db.WithContext(ctx)
+			if c.inTx {
+				loser = loser.Begin()
+				if loser.Error != nil {
+					t.Fatal(loser.Error)
 				}
-				return
+				defer loser.Rollback()
 			}
-			if err != nil || got.ID != winner.ID {
-				t.Fatalf("got %d, %v; want the winner's row %d", got.ID, err, winner.ID)
+			type result struct {
+				row auth.Permission
+				err error
 			}
-			if err := tx.Model(&auth.Permission{}).Count(&n).Error; err != nil {
-				t.Fatalf("transaction unusable after the lost race: %v", err)
+			done := make(chan result, 1)
+			go func() {
+				row, err := auth.EnsurePermission(ctx, loser, key, "Loser")
+				done <- result{row, err}
+			}()
+			waitForBlockedInsert(t, db, done)
+			end := winner.Rollback
+			if c.commit {
+				end = winner.Commit
+			}
+			if err := end().Error; err != nil {
+				t.Fatal(err)
+			}
+			r := <-done
+			if c.commit && (r.err != nil || r.row.ID != won.ID || r.row.Description != "Winner") {
+				t.Fatalf("loser got %+v, %v; want the winner's row %d", r.row, r.err, won.ID)
+			}
+			if !c.commit && (r.err != nil || r.row.ID == 0 || r.row.Description != "Loser") {
+				t.Fatalf("loser got %+v, %v; want its own row", r.row, r.err)
+			}
+			if c.inTx {
+				var n int64
+				if err := loser.Model(&auth.Permission{}).Count(&n).Error; err != nil {
+					t.Fatalf("transaction unusable after the race: %v", err)
+				}
+				if err := loser.Commit().Error; err != nil {
+					t.Fatal(err)
+				}
 			}
 		})
 	}
-
-	// The winner rolls back while the loser's insert waits on it: the
-	// loser's insert then succeeds and it returns its own row.
-	t.Run("the winner rolls back", func(t *testing.T) {
-		multiConn(t)
-		key := "rollback." + tag
-		winner := db.WithContext(ctx).Begin()
-		if winner.Error != nil {
-			t.Fatal(winner.Error)
-		}
-		defer winner.Rollback()
-		if _, err := auth.EnsurePermission(ctx, winner, key, "Winner"); err != nil {
-			t.Fatal(err)
-		}
-		type result struct {
-			row auth.Permission
-			err error
-		}
-		done := make(chan result, 1)
-		go func() {
-			row, err := auth.EnsurePermission(ctx, db.DB, key, "Loser")
-			done <- result{row, err}
-		}()
-		waitForBlockedInsert(t, db, done)
-		if err := winner.Rollback().Error; err != nil {
-			t.Fatal(err)
-		}
-		r := <-done
-		if r.err != nil || r.row.ID == 0 || r.row.Description != "Loser" {
-			t.Fatalf("loser got %+v, %v; want its own row", r.row, r.err)
-		}
-	})
 }
 
 // waitForBlockedInsert waits until a session of this test's user is running
