@@ -180,6 +180,18 @@ version.
   gets there within the refresh TTL), or whose chain cannot be followed,
   answers 500 and ends nothing; revoke the session instead
   ([#466](https://github.com/gombit-dev/gombit/issues/466)).
+- `gombit createsuperuser` (and `auth.Service.CreateSuperuser` /
+  `Register`) refuses an email that is not a bare address (`admin`,
+  `Root Admin <root@example.com>`, `a b c`): it created an admin that
+  `POST /auth/login`, and so `/admin/`, could never sign in. It also
+  refuses a password outside the policy a user's own password meets on
+  register, change and reset (at least 8 characters, at most 72 bytes),
+  a deliberate tightening: such an account could sign in, and a seed
+  script that sets a shorter password now fails. The rules are
+  `auth.CheckNewAccount` (`auth.ErrInvalidEmail`, an
+  `auth.PasswordPolicyError`), which the command checks before it opens
+  the database. **Breaking** for a caller relying on short passwords
+  ([#461](https://github.com/gombit-dev/gombit/issues/461)).
 - A database failure while a login looks the user up, or while the auth gate
   (Bearer or cookie, every protected route and the admin) loads the access
   token's user or session, is a `500` (`internal`), no longer the `401` of
