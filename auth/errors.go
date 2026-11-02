@@ -17,6 +17,7 @@ var (
 	errInvalidCredentials = errors.New("invalid email or password")
 	errEmailTaken         = errors.New("email already registered")
 	errUserNotFound       = errors.New("user not found")
+	errAccountDisabled    = errors.New("auth: the account is disabled")
 	errRefreshReuse       = errors.New("refresh token reuse detected")
 	// errRotationRaced is a rotation that lost to another rotation of its
 	// token, which gave the token a successor. It lost the compare-and-swap
@@ -39,6 +40,11 @@ var (
 // createsuperuser can detect duplicates with errors.Is without a second
 // uniqueness check.
 var ErrEmailTaken = errEmailTaken
+
+// ErrAccountDisabled is the error of an operation of a disabled account
+// (User.Disabled): a login with the right password, a session start, a
+// message, a password change.
+var ErrAccountDisabled = errAccountDisabled
 
 func normalizeEmail(email string) string {
 	return strings.ToLower(strings.TrimSpace(email))

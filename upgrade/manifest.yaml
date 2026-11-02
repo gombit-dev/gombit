@@ -916,6 +916,52 @@ releases:
         summary: "A new app's placeholder `schema.ts` declares the 429 (with `Retry-After`), 422 and 500 responses of the throttled auth operations; an existing app's generated client gets them from `gombit client generate`."
         refs: [338]
 
+      - id: account-state-schema
+        kind: manual
+        area: schema
+        summary: "Account state adds `users.disabled_at`: an app migrates before it disables an account."
+        details: |
+          `auth.User` gains `DisabledAt` (nil while the account is active).
+          Until the column exists, everything else works (a user row read
+          without it is active), but disabling or enabling an account fails.
+          Generate and apply the migration (`gombit db makemigrations`,
+          `gombit db migrate`); `gombit upgrade --dry-run` lists the steps.
+          Existing users start active.
+        schema:
+          - {model: auth.User, table: users, change: altered}
+        refs: [336]
+
+      - id: account-state-names-reserved
+        kind: manual
+        breaking: true
+        area: api
+        summary: "With auth enabled, an app that registers `POST {prefix}/auth/users/{id}/disable` or `/enable`, the `auth-disable-user` / `auth-enable-user` operations, or the `AuthUserState` schema name fails at startup: the framework registers them."
+        details: |
+          Drop the app's own routes, which the framework's replace, or
+          rename them; the same goes for a type Huma names `AuthUserState`
+          or `DataAuthUserState`.
+        refs: [336]
+
+      - id: account-state
+        kind: informational
+        area: security
+        summary: "Accounts can be disabled: a disabled user cannot sign in, and no credential issued to it works (its sessions are revoked, its links voided, and every check refuses it)."
+        details: |
+          `POST {prefix}/auth/users/{id}/disable` and `/enable` require the
+          `auth.users.manage` permission (`auth.PermissionManageUsers`; a
+          superuser has it), and a superuser to change a superuser; no one
+          disables their own account. `auth.Service.DisableUser` /
+          `EnableUser` are the same for an app's own code. A login with the
+          right password of a disabled account is a 403; a wrong password
+          answers as before.
+        refs: [336]
+
+      - id: client-schema-account-state
+        kind: informational
+        area: client
+        summary: "A new app's placeholder `schema.ts` includes the account state operations; an existing app's generated client gets them from `gombit client generate`."
+        refs: [336]
+
       - id: expired-rotated-refresh-token-no-cascade
         kind: informational
         area: security

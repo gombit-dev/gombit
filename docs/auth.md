@@ -47,6 +47,8 @@ credential endpoints are throttled (429 with `Retry-After`); see
 | `POST` | `/auth/password/change` | Bearer access JWT. Body `{ "current_password", "new_password", "keep_other_sessions"? }`. See [Password change](#password-change). |
 | `POST` | `/auth/email/change` | Bearer access JWT. Body `{ "current_password", "new_email" }`. Mails a confirmation link to the new address. See [Email change](#email-change). |
 | `POST` | `/auth/email/change/confirm` | Public. Body `{ "token" }` from that link; makes the new address the account's email, verified. |
+| `POST` | `/auth/users/{id}/disable` | Bearer access JWT with the `auth.users.manage` permission. Disables the account and revokes its sessions; see [Account state](#account-state). |
+| `POST` | `/auth/users/{id}/enable` | Bearer access JWT with the `auth.users.manage` permission. Lets a disabled account sign in again. |
 
 Passwords are hashed with bcrypt. Access JWTs are HS256, bound to the refresh
 row so logout, session revocation, and reuse of a rotated refresh token 401
@@ -389,6 +391,52 @@ curl -sX POST localhost:8080/api/v1/auth/email/change/confirm \
   `ErrEmailTaken`, `ErrEmailChangedMeanwhile`, `ErrInvalidToken`,
   `ErrUserNotFound`.
 
+## Account state
+
+An account is **active** or **disabled** (`User.DisabledAt`; `User.Disabled()`). A
+disabled user cannot sign in, and nothing issued to it works:
+
+```sh
+curl -sX POST localhost:8080/api/v1/auth/users/42/disable -H "Authorization: Bearer $ADMIN_ACCESS"
+# {"data":{"id":42,"disabled":true}}
+curl -sX POST localhost:8080/api/v1/auth/users/42/enable -H "Authorization: Bearer $ADMIN_ACCESS"
+# {"data":{"id":42,"disabled":false}}
+```
+
+- **Disabling** revokes every session of the user and voids every one-time
+  link (verification, password reset, email change), pending ones too, in
+  one transaction under the user's row lock. Access tokens are bound to
+  their session, so they fail at once (401), and so do refresh tokens and
+  cookie sessions. A login, a refresh or a link racing the disable either
+  finished before it, or is refused after it.
+- **Every path refuses it** afterwards, not only the revoked rows: a login
+  with the right password is a **403** (`authorization`, "account is
+  disabled"), told only to whoever knows the password, since a wrong one is
+  the usual 401; a session start, a refresh, an access token, a one-time
+  link (422 on `token`), a password change, a verification message.
+  `POST /auth/password/forgot` answers as always and mails nothing.
+- **Enabling** lets the user sign in again; the sessions and links revoked
+  when the account was disabled stay revoked.
+- **Who may.** Both routes need the `auth.users.manage` permission
+  (`auth.PermissionManageUsers`; a superuser has every permission). Create
+  it once and grant it to the users or groups that manage accounts:
+
+  ```go
+  perm, err := auth.EnsurePermission(ctx, db, auth.PermissionManageUsers, "Disable and enable accounts")
+  err = auth.GrantPermissionToGroup(ctx, db, &support, &perm)
+  ```
+
+  A superuser's account is changed by a superuser only (403 otherwise), and
+  no one disables their own account (409). An unknown id is a 404. Both
+  are idempotent.
+- **From Go.** `svc.DisableUser(ctx, userID)` / `svc.EnableUser(ctx, userID)`
+  do the same and check no permission: for an app's own code and commands.
+  `auth.ErrAccountDisabled` is the error of a disabled account's login,
+  password change and messages.
+- **Audit.** `auth.user.disabled` and `auth.user.enabled`, with the
+  operator as actor; a disabled account's login with the right password is
+  `auth.login.failed` (`account_disabled`).
+
 ## Abuse protection
 
 The credential endpoints bound how often they may be tried, in both auth
@@ -593,6 +641,7 @@ The framework records every security-sensitive operation in
 | `auth.login.succeeded` / `auth.login.failed` | A sign-in. A failure names the account when the email is one (a wrong password, `details.reason` `wrong_password`), and no account when it is not: the attempted address is not recorded. |
 | `auth.logout` | `POST /auth/logout` ended a session. |
 | `auth.user.registered` / `auth.superuser.created` | `POST /auth/register`; `gombit createsuperuser`. |
+| `auth.user.disabled` / `auth.user.enabled` | `POST /auth/users/{id}/disable` / `/enable` (or `DisableUser` / `EnableUser`): the account's state changed. |
 | `auth.refresh.reuse_detected` | A rotated-away refresh token came back past `RefreshReuseGrace`, or within it once its successor had been rotated again: every session of the user was revoked. |
 | `auth.refresh.reuse_within_grace` | A rotated-away refresh token came back within `RefreshReuseGrace` of its rotation: a 401, nothing revoked. Target type `session` names the successor's session by the id `GET /auth/sessions` showed for it at the time; that id changes when the session next refreshes (in an access TTL at most), so act on it promptly (revoke it, or revoke all); details `successor` is `live` (a sibling tab's session, or a thief's who rotated a stolen token first: the one trace of that) or `ended` (signed out before the request came). |
 | `auth.session.revoked` | `DELETE /auth/sessions…` (`details.scope`: `one`, `others` or `all`). |

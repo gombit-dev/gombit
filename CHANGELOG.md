@@ -12,6 +12,22 @@ version.
 
 ### Added
 
+- [Account state](docs/auth.md#account-state) (AUTH-6), in both auth
+  modes. An account is active or disabled (`User.DisabledAt`). Disabling it
+  (`POST /auth/users/{id}/disable`, or `auth.Service.DisableUser`) revokes
+  every session and voids every one-time link of the user in one
+  transaction, and every path then refuses it: a login with the right
+  password is a 403 (a wrong one is the usual 401), its access and refresh
+  tokens fail at once, and no link, message or password change works.
+  Enabling it (`/enable`, `EnableUser`) lets the user sign in again; what
+  was revoked stays revoked. The routes need the `auth.users.manage`
+  permission (`auth.PermissionManageUsers`; superusers bypass); a
+  superuser's account is a superuser's to change, and no one disables
+  themselves. Audited (`auth.user.disabled` / `enabled`). `users` gains
+  `disabled_at`: migrate before disabling an account (everything else works
+  without it). **Breaking (api):** the framework registers the two routes
+  and the `AuthUserState` schema name.
+
 - [Abuse protection](docs/auth.md#abuse-protection) for the credential
   endpoints (AUTH-8), in both auth modes, on by default. Sliding-window
   throttles count failed logins per email and client address (5 / 15 min),
