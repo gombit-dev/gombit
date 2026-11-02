@@ -786,7 +786,16 @@ so a fresh local DB works before Atlas migrations exist. In production it
 never AutoMigrates: schema changes belong to `gombit db migrate`. If the
 users table is missing, the command fails and tells you to migrate first.
 `CreateSuperuser` shares `Register`'s unique-email path — duplicate emails
-are refused with the same error as `/auth/register`.
+are refused with the same error as `/auth/register` — and its rules
+(`auth.CheckNewAccount`), checked before the database is opened: the email
+must be a bare address of at most 255 characters (`admin@example.com`, not
+`admin` or `Root Admin <root@example.com>`), what `POST /auth/login`
+accepts, so the account can sign in; and the password must meet the policy
+a user's own password meets on register, change and reset (at least 8
+characters, at most 72 bytes). Anything else is refused and nothing is
+created. Accounts created before are not touched: one whose email is not
+an address still cannot sign in (delete it and create it again with this
+command); one with a short password keeps working until it is changed.
 
 ### Flags
 
