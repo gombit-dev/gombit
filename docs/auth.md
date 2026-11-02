@@ -35,7 +35,7 @@ credential endpoints are throttled (429 with `Retry-After`); see
 | `POST` | `/auth/register` | Public. Demo/bootstrap seed path (email + password); never sets `IsSuperuser`. |
 | `POST` | `/auth/login` | Public. Returns `access_token`, `refresh_token`, `token_type`, `expires_in`. |
 | `POST` | `/auth/refresh` | Public. Body `{ "refresh_token" }`. Issues a new pair; the old refresh token is invalid. |
-| `POST` | `/auth/logout` | Public. Body `{ "refresh_token" }`. Revokes that refresh token. Bound access JWTs then fail. |
+| `POST` | `/auth/logout` | Public. Body `{ "refresh_token" }`. Ends that token's session: the token, or, when it has already rotated (a refresh in flight as the user signs out), the session's current token. Bound access JWTs then fail. A token past its expiry, or of a session already ended, ends nothing; logout is idempotent. |
 | `GET` | `/me` | Bearer access JWT. Example protected route for E2E. Missing/invalid Bearer is 401 with `WWW-Authenticate: Bearer realm="api"`. |
 | `GET` | `/auth/sessions` | Bearer access JWT. Lists the user's active sessions; see [Sessions](#sessions). |
 | `DELETE` | `/auth/sessions/{id}` | Bearer access JWT. Revokes one session; 404 if `id` names no active session of the user. |
@@ -545,19 +545,19 @@ the same moment:
   the lock, finds that the id it was given belongs to a token that has since
   been replaced, and revokes nothing: the session is still alive under its new
   id. The client lists again and retries, as the 404 above says. A logout of
-  the same session that lands while the revocation runs also makes it a 404
-  (the session has already ended), so a success always means the revocation
-  ended the session itself.
+  the same session that commits first also makes it a 404 (the session has
+  already ended), so a success always means the revocation ended the session
+  itself; a logout that comes second waits for it and ends nothing more.
 - **A revocation from a session that has ended** answers 401 and revokes
   nothing. The request's own session is checked again once the revocation
   holds the lock, so a session that another request revoked, or that
   expired, while its request waited for the lock cannot go on to revoke
   anything.
-- **Logout** (`POST /auth/logout`, `RevokeRefresh`) is **not** serialized: it
-  does not take the lock and revokes only the refresh token it is given. A
-  logout that races a refresh of the same token can therefore leave the
-  refresh's new session alive. That is a known limitation; to be sure a user
-  is signed out everywhere, revoke all their sessions.
+- **Logout** (`POST /auth/logout`, `RevokeRefresh`) takes the lock too, and
+  follows a token that has rotated to its session's current token. A logout
+  that races a refresh of the same token therefore ends the session either
+  way: if the refresh commits first, the logout revokes the token it issued;
+  if the logout does, the refresh finds its token revoked (401).
 - **Login** checks the password without the lock (bcrypt is slow), then
   starts its session under it, and only if the password hash it checked is
   still the user's (`Service.Login`). Every session start makes that check:

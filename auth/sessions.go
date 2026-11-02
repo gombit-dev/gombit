@@ -170,8 +170,9 @@ func sessionRow(tx *gorm.DB, userID, rid uint, rows []RefreshToken) (uint, error
 // session that refreshed after id was listed has a new id, so the caller
 // lists again rather than having the revoke silently miss. It also returns
 // ErrSessionNotFound when the session's row turns out revoked by the time it
-// is updated (a logout, which does not take the user's lock, ended it
-// first), so a success always means this call ended the session. A user that
+// is updated, so a success always means this call ended the session (every
+// revocation, logout included, takes the user's lock, so one that ended the
+// session first already left it out of the active sessions). A user that
 // does not exist also yields ErrSessionNotFound. It does not look at the
 // caller's own session, which application code (an admin action revoking
 // another user's session, say) does not have; the route checks the

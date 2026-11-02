@@ -320,6 +320,25 @@ func refreshUser(t *testing.T, app *framework.App, refresh string) tokenPair {
 	return envelope.Data
 }
 
+// TestLogoutWithRotatedToken: a logout that carries the refresh token a
+// silent refresh has just rotated ends the session it rotated into (#466).
+func TestLogoutWithRotatedToken(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	app := newAuthApp(t)
+	registerUser(t, app, "rotated-logout@example.com", testPassword)
+	a := loginUser(t, app, "rotated-logout@example.com", testPassword)
+	b := refreshUser(t, app, a.RefreshToken)
+	rec := postJSON(t, app, "/api/v1/auth/logout", `{"refresh_token":"`+a.RefreshToken+`"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("logout with the rotated token = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	if me := getMe(t, app, b.AccessToken); me != http.StatusUnauthorized {
+		t.Fatalf("GET /me with the session the token rotated into = %d, want 401", me)
+	}
+	rec = postJSON(t, app, "/api/v1/auth/refresh", `{"refresh_token":"`+b.RefreshToken+`"}`)
+	assertError(t, rec, http.StatusUnauthorized, "authentication")
+}
+
 func getMe(t *testing.T, app *framework.App, access string) int {
 	t.Helper()
 	rec := httptest.NewRecorder()

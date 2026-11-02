@@ -361,6 +361,20 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   `built`, which describe the main module. A script that parsed the
   old app-version output reads a different string now.
 
+- Logout with a refresh token that has already rotated ends the session it rotated into; it answered 200 and revoked nothing. (`logout-follows-rotated-token`, security, [#466](https://github.com/gombit-dev/gombit/issues/466))
+
+  `POST {prefix}/auth/logout` (both auth modes) and
+  `auth.Service.RevokeRefresh` revoked only the token they were given,
+  and only while it was unrevoked. A token a refresh had rotated (a
+  silent refresh in flight when the user clicked "Log out") matched
+  nothing, so the user believed they were signed out while the
+  session lived on, refreshable, until it expired. The logout now
+  follows the token's successors to the session's current token and
+  revokes that, under the user's lock that rotation takes, so a logout
+  racing a refresh of the same token ends the session either way. A
+  rotated token past its own expiry, or the token of a session already
+  ended, still ends nothing and succeeds. Nothing to change.
+
 ## v0.8.0
 
 ### Manual: action required

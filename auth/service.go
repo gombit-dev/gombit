@@ -481,9 +481,9 @@ func (s *Service) rotateRefreshOnce(ctx context.Context, raw, hash string) (Toke
 			// Lost the compare-and-swap: the token was revoked after the
 			// unlocked read above. Either a rotation of the same token on
 			// another instance won and gave it a successor, or something
-			// revoked it with none: a logout (which takes no user lock), a
-			// session revocation that committed while this rotation waited
-			// for the user's lock, or the reuse cascade. None of them is
+			// revoked it with none: a logout or a session revocation that
+			// committed while this rotation waited for the user's lock, or
+			// the reuse cascade. None of them is
 			// reuse-as-theft; do not revoke anything. The re-read tells them
 			// apart, as for an expired token above. A successor means a
 			// rotation won: errRotationRaced, and refreshCookie leaves the
@@ -562,30 +562,57 @@ func lockRefreshRowTx(tx *gorm.DB, id uint) (RefreshToken, error) {
 	return row, err
 }
 
-// RevokeRefresh invalidates one refresh token. Missing/already-revoked tokens
-// succeed so logout is idempotent.
+// RevokeRefresh ends the session of a refresh token: the token itself, or,
+// when the token has rotated (a refresh in flight as the user signs out, or
+// a client still holding the previous token), the session's current head,
+// however many rotations on (#466). A token unknown, past its own expiry,
+// or of a session already ended revokes nothing and succeeds, so logout is
+// idempotent. It takes the user's lock (lockUserTx) like rotation does, so a
+// logout and a refresh of the same token run one after the other: whichever
+// comes second sees the other's result, and the session ends either way.
 func (s *Service) RevokeRefresh(ctx context.Context, raw string) error {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return errInvalidRefreshToken
 	}
-	now := s.now()
 	hash := hashRefreshToken(raw)
 	var row RefreshToken
-	if err := s.db.WithContext(ctx).Where("token_hash = ? AND revoked_at IS NULL", hash).Limit(1).Find(&row).Error; err != nil {
+	if err := s.db.WithContext(ctx).Where("token_hash = ?", hash).Limit(1).Find(&row).Error; err != nil {
 		return err
 	}
 	if row.ID == 0 {
 		return nil
 	}
-	result := s.db.WithContext(ctx).Model(&RefreshToken{}).
-		Where("id = ? AND revoked_at IS NULL", row.ID).
-		Update("revoked_at", now)
-	if result.Error != nil {
+	var ended bool
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if _, err := lockUserTx(tx, row.UserID); err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil // the user is gone, and its sessions with it
+			}
+			return err
+		}
+		now := s.now()
+		// The token's own expiry, as rotation reads it: past it, a token
+		// refreshes nothing and so ends nothing either.
+		if !row.ExpiresAt.After(now) {
+			return nil
+		}
+		_, head, err := sessionChain(tx, row.UserID, row.ID)
+		if err != nil || head == nil || head.RevokedAt != nil || !head.ExpiresAt.After(now) {
+			return err
+		}
+		result := tx.Model(&RefreshToken{}).
+			Where("id = ? AND revoked_at IS NULL", head.ID).
+			Update("revoked_at", now)
+		ended = result.RowsAffected == 1
 		return result.Error
+	})
+	if err != nil {
+		return err
 	}
-	// RowsAffected: a concurrent logout of the same token records it once.
-	if result.RowsAffected == 1 {
+	// Under the lock a concurrent logout of the same session waits and then
+	// finds it ended: it is recorded once.
+	if ended {
 		s.Audit(ctx, AuditEvent{Action: AuditLogout, ActorUserID: uintPtr(row.UserID), TargetUserID: uintPtr(row.UserID)})
 	}
 	return nil
@@ -636,8 +663,9 @@ func (s *Service) parseAccess(ctx context.Context, token string) (User, uint, er
 // lockUserTx loads the user and locks its row for the rest of tx. Token
 // rotation (its reuse cascade included) and the three session revocations
 // (one, the others, all) take this lock first, so they run one at a time per
-// user. Login (IssueTokens) and logout (RevokeRefresh) do not take it, so
-// they are not serialized with those (docs/auth.md documents it for logout).
+// user, and so does logout (RevokeRefresh), which follows a rotated token to
+// its session's head (#466). Login (IssueTokens) does not take it, so it is
+// not serialized with those (docs/auth.md).
 // Without the lock, on PostgreSQL a revocation that waits on a row a
 // concurrent rotation holds re-checks only that row and never sees the
 // replacement the rotation inserts, so the session survives. SQLite has no

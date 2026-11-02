@@ -165,6 +165,16 @@ version.
 
 ### Fixed
 
+- A logout with a refresh token that has already rotated (a silent refresh
+  in flight as the user signs out, or a client still holding the previous
+  token) ends the session it rotated into, instead of answering `200` and
+  revoking nothing while the session lived on until it expired.
+  `auth.Service.RevokeRefresh` follows the token's successors to the
+  session's current token, and takes the user's lock as rotation does, so a
+  logout that races a refresh of the same token now ends the session either
+  way (a limitation `docs/auth.md` listed). A rotated token past its own
+  expiry ends nothing, as it refreshes nothing
+  ([#466](https://github.com/gombit-dev/gombit/issues/466)).
 - Two tabs refreshing the same refresh token a network round trip apart no
   longer sign the user out of every session. A refresh with a token rotated
   less than `GOMBIT_AUTH_REFRESH_REUSE_GRACE` (`Config.Auth.RefreshReuseGrace`,
