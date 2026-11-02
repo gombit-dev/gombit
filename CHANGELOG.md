@@ -146,8 +146,10 @@ version.
   `uuid.UUID` field (key, field, belongs_to or many-to-many key) is now read
   as `uuid.Parse` reads it, braced, `urn:uuid:` and unhyphenated forms
   included, and used in its canonical lower case, as the generated list
-  handlers already did. A Go `string` field declared `uuid` is unchanged: it
-  keeps the spelling sent
+  handlers already did. A Go `string` field declared `uuid` keeps the
+  spelling sent, as written and as compared, so a PATCH that sends such a key
+  in another spelling than the stored one is now refused as a key change
+  (422), where it was ignored
   ([#457](https://github.com/gombit-dev/gombit/issues/457)).
 - An inbound `X-Request-Id` longer than 128 bytes
   (`contract.MaxRequestIDLength`), or holding a space or a control

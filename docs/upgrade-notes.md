@@ -146,9 +146,14 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
   Braced, `urn:uuid:` and unhyphenated spellings are accepted for such
   a field too, where they were a 422. A Go `string` field declared
-  `Type: admin.TypeUUID` is unchanged: it accepts the hyphenated form
-  only and keeps the spelling sent, written and compared, so rows it
-  holds are found as before.
+  `Type: admin.TypeUUID` keeps the hyphenated form only and the
+  spelling sent, written and compared, so rows it holds are found as
+  before. One difference: a PATCH that sends such a key in a spelling
+  other than the stored one is now refused as a key change (422 `id:
+  cannot be changed`), where it was ignored, since on SQLite and in a
+  PostgreSQL text column that spelling names no row; on MySQL and a
+  native PostgreSQL `uuid` column, send the key as it was read, or
+  leave it out.
 
 - Bearer-mode session revocation errors include the `WWW-Authenticate: Bearer realm="api"` challenge when the handler returns 401. (`bearer-handler-401-challenge`, api, [#604](https://github.com/gombit-dev/gombit/issues/604))
 
