@@ -441,8 +441,12 @@ type AuthConfig struct {
 	// RefreshTokenTTL is the refresh-token lifetime.
 	RefreshTokenTTL time.Duration
 	// BcryptCost is the bcrypt cost for password hashes: zero (meaning
-	// bcrypt.DefaultCost) or bcrypt.MinCost..bcrypt.MaxCost. Tests may set
-	// a lower cost than the default.
+	// bcrypt.DefaultCost, 10) or bcrypt.MinCost..bcrypt.MaxCost
+	// (CheckBcryptCost). Each step doubles the time of every hash and every
+	// compare, so of every login, registration and password reset: about
+	// 70 ms at 10, a minute at 20, and some 40 hours at 31, which bcrypt
+	// accepts but no app can serve. Tests may set a lower cost than the
+	// default.
 	BcryptCost int
 	// Mode selects the mounted auth surface. Empty behaves as AuthModeJWT.
 	Mode AuthMode
@@ -504,6 +508,18 @@ type AuthConfig struct {
 // Enabled reports whether auth routes should be mounted (JWT secret is set).
 func (c AuthConfig) Enabled() bool {
 	return strings.TrimSpace(c.JWTSecret) != ""
+}
+
+// CheckBcryptCost reports whether cost is a bcrypt cost AuthConfig.BcryptCost
+// accepts: nil for 0 (bcrypt.DefaultCost) or bcrypt.MinCost..bcrypt.MaxCost,
+// otherwise an error saying so. bcrypt itself hashes a cost below its range
+// at its default, silently, and fails every hash above it (#465). Validate
+// and auth.NewService both apply it, so the two cannot disagree.
+func CheckBcryptCost(cost int) error {
+	if cost == 0 || (cost >= bcrypt.MinCost && cost <= bcrypt.MaxCost) {
+		return nil
+	}
+	return fmt.Errorf("must be 0 (bcrypt's default) or between %d and %d", bcrypt.MinCost, bcrypt.MaxCost)
 }
 
 // EffectiveMode returns c.Mode, defaulting empty to AuthModeJWT.
@@ -922,13 +938,11 @@ func validateAuthConfig(errs *FieldErrors, env Environment, cfg AuthConfig) {
 			Message: "must be greater than or equal to zero",
 		})
 	}
-	// bcrypt hashes a cost below its range at its default, silently, and
-	// fails every hash above it (#465).
-	if c := cfg.BcryptCost; c != 0 && (c < bcrypt.MinCost || c > bcrypt.MaxCost) {
+	if err := CheckBcryptCost(cfg.BcryptCost); err != nil {
 		*errs = append(*errs, FieldError{
 			Field:   "Auth.BcryptCost",
-			Value:   strconv.Itoa(c),
-			Message: fmt.Sprintf("must be 0 (bcrypt's default) or between %d and %d", bcrypt.MinCost, bcrypt.MaxCost),
+			Value:   strconv.Itoa(cfg.BcryptCost),
+			Message: err.Error(),
 		})
 	}
 	if cfg.EmailVerificationTTL < 0 {

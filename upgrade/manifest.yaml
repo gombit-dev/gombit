@@ -1033,7 +1033,11 @@ releases:
           `createsuperuser` answered `500` while existing users could still
           sign in. Both are refused at startup now, with
           `config: Auth.BcryptCost`. An app that sets `Config.Auth.BcryptCost`
-          in code sets it to 0 or to a value from 4 to 31; for 1 to 3, use 0
-          (or 10), which is the cost its hashes were made at. Hashes already
-          stored keep working at whatever cost they were made at.
+          in code sets it to 0 or to a value from 4 to 31: the cost its stored
+          hashes carry (the `$2a$NN$` prefix, or `bcrypt.Cost` of a stored
+          hash), so the unknown-email timing hash matches them. For 1 to 3
+          that is 0 (or 10), the cost bcrypt made them at; for 32 or more,
+          which made no hashes, the cost the app ran with before, usually 0.
+          Hashes already stored keep working at whatever cost they were made
+          at.
         refs: [465]
