@@ -36,9 +36,13 @@ var (
 // uniqueness check.
 var ErrEmailTaken = errEmailTaken
 
-// ErrInvalidCredentials is the error Authenticate and Login return for an
-// unknown email or a wrong password: a 401. Any other error they return is a
-// server failure (the database's, for one), not a credential problem (#460).
+// ErrInvalidCredentials is the client-side failure of a login: a 401.
+// Authenticate returns it for an unknown email or a wrong password; Login
+// and IssueTokens also for a password changed, or an account deleted,
+// between the password check and the session; Register and CreateSuperuser
+// for an empty email.
+// Any other error they return is a server failure (the database's, for
+// one), not a credential problem, and answers a 500 (#460).
 var ErrInvalidCredentials = errInvalidCredentials
 
 // ErrInvalidAccessToken is the error ParseAccess returns for an access token

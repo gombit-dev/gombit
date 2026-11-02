@@ -145,8 +145,9 @@ version.
   wrong credentials or a dead token, which told users their password was
   wrong, recorded failed logins, read as a dead session, and stayed out of
   5xx alerting. Only a missing row is a `401`, and the session stays valid
-  through the outage (the generated SPAs still drop it on any failed
-  refresh or `/me`, which a later change addresses).
+  through the outage (the SPAs this repo ships still drop it on any failed
+  refresh or `/me`: the scaffold's refresh is #580; its and the admin's
+  `/me` redirect and the admin's refresh are not tracked yet).
   `auth.ErrInvalidCredentials` and `auth.ErrInvalidAccessToken` are
   exported, so an app's own login or gate on `Authenticate` / `ParseAccess`
   can tell them from a server failure

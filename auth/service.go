@@ -211,8 +211,9 @@ func (s *Service) Login(ctx context.Context, email, password string) (User, Toke
 // user: it starts a session, so it records the login as succeeded
 // (Authenticate records the failures). user is a snapshot, as Authenticate
 // returned it or as loaded from the database: its PasswordHash must still
-// be the user's when the session starts, or IssueTokens fails as invalid
-// credentials (ErrInvalidCredentials). So Authenticate followed by
+// be the user's when the session starts, and the user must still exist, or
+// IssueTokens fails as invalid credentials (ErrInvalidCredentials); any
+// other error is a server failure. So Authenticate followed by
 // IssueTokens is as safe as Login: a password reset that commits between
 // the two leaves the old password's snapshot unable to start a session.
 func (s *Service) IssueTokens(ctx context.Context, user User) (TokenPair, error) {
@@ -231,7 +232,7 @@ func (s *Service) startSession(ctx context.Context, user User) (User, TokenPair,
 		var err error
 		locked, err = lockUserTx(tx, user.ID)
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return errUserNotFound
+			return errLoginAccountGone
 		}
 		if err != nil {
 			return err
@@ -246,6 +247,13 @@ func (s *Service) startSession(ctx context.Context, user User) (User, TokenPair,
 		s.Audit(ctx, AuditEvent{Action: AuditLoginFailed, TargetUserID: uintPtr(user.ID), Details: details("reason", "password_changed")})
 		return User{}, TokenPair{}, errInvalidCredentials
 	}
+	if errors.Is(err, errLoginAccountGone) {
+		// Deleted between the password check and the session: to the
+		// client, an account that no longer exists, a 401 like an unknown
+		// email, not a server failure (#460).
+		s.Audit(ctx, AuditEvent{Action: AuditLoginFailed, TargetUserID: uintPtr(user.ID), Details: details("reason", "account_deleted")})
+		return User{}, TokenPair{}, errInvalidCredentials
+	}
 	if err != nil {
 		return User{}, TokenPair{}, err
 	}
@@ -256,6 +264,10 @@ func (s *Service) startSession(ctx context.Context, user User) (User, TokenPair,
 // errLoginPasswordChanged is a login whose verified password was replaced
 // before its session started (Login answers it as invalid credentials).
 var errLoginPasswordChanged = errors.New("auth: the password changed during the login")
+
+// errLoginAccountGone is a login whose user was deleted before its session
+// started (Login and IssueTokens answer it as invalid credentials).
+var errLoginAccountGone = errors.New("auth: the account was deleted during the login")
 
 func (s *Service) issueTokens(tx *gorm.DB, user User, now time.Time) (TokenPair, error) {
 	raw, err := newRefreshToken()

@@ -87,7 +87,6 @@ func RevokeAllSessionsAs(ctx context.Context, s *Service, userID, requester uint
 	return s.revokeAllSessionsAs(ctx, userID, requester)
 }
 
-
 // ContextWithSession returns ctx carrying what the auth middlewares store for
 // a request authenticated as user with the refresh token row refreshID.
 func ContextWithSession(ctx context.Context, user User, refreshID uint) context.Context {
@@ -142,7 +141,6 @@ func SetHasher(s *Service, h Hasher) { s.hasher = h }
 // check and the session. Set it before the service is used.
 func SetLoginAuthenticatedHook(s *Service, fn func()) { s.onLoginAuthenticated = fn }
 
-
 // SetAuditTimeout replaces the bound on one audit write until the test ends.
 func SetAuditTimeout(t interface{ Cleanup(func()) }, d time.Duration) {
 	old := auditTimeout
@@ -178,10 +176,6 @@ func IsClosing(s *Service) bool {
 // SetPasswordChangeVerifiedHook makes fn run in ChangePassword between the
 // current-password check and the transaction.
 func SetPasswordChangeVerifiedHook(s *Service, fn func()) { s.onPasswordChangeVerified = fn }
-
-
-
-
 
 // HasherOf is s's password hasher.
 func HasherOf(s *Service) Hasher { return s.hasher }
