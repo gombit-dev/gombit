@@ -145,7 +145,8 @@ func collectRotations(t *testing.T, ch chan rotationResult, n int) []rotationRes
 // runs detached from every caller's cancellation), so the followers, whose
 // requests are live, are not handed that cancellation as a 500 (issue
 // #462): once the insert goes through, the leader and every follower get
-// the one rotation's pair, from one insert.
+// the one rotation's pair, from one insert. The rotation having committed,
+// the gone client's retry with the old token finds it rotated.
 func TestFault_Concurrency_RotationLeaderCancelled(t *testing.T) {
 	faulttest.ForEachDB(t, faultDBs, func(t *testing.T, kind database.Driver, dsn string) {
 		release := make(chan struct{})
@@ -180,6 +181,14 @@ func TestFault_Concurrency_RotationLeaderCancelled(t *testing.T) {
 		}
 		if _, err := f.svc.ParseAccess(context.Background(), results[0].pair.AccessToken); err != nil {
 			t.Fatalf("the rotation's new session does not authenticate: %v", err)
+		}
+		// The trade of the detach, documented on rotateRefresh: the rotation
+		// committed although the leader's client was gone, so that client's
+		// retry with the old token finds it rotated. It is reuse (every
+		// session revoked), or, within RefreshReuseGrace once that exists
+		// (#459), a lost race: a 401 that revokes nothing.
+		if _, err := f.svc.RotateRefresh(context.Background(), f.refresh); !errors.Is(err, auth.ErrRefreshReuse) && !errors.Is(err, auth.ErrRotationRaced) {
+			t.Fatalf("the gone client's retry with the old token = %v, want reuse (or a lost race within the grace)", err)
 		}
 	})
 }

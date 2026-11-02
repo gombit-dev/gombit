@@ -309,9 +309,13 @@ func (s *Service) issueTokens(tx *gorm.DB, user User, now time.Time) (TokenPair,
 // and any expired token, is just invalid. Concurrent callers with the same
 // still-valid token share one rotation so a lost race cannot family-revoke
 // the winner's new session. That rotation runs detached from every caller's
-// cancellation, bounded by its own timeout, and each caller gets its one
-// result: a caller whose client went away cannot fail the others with its
-// cancellation (#462).
+// cancellation and deadline (s.detach, cancelled only by its own timeout,
+// rotateTimeout, which bounds its transaction, or by Close), and each caller
+// gets its one result: a caller whose client went away cannot fail the
+// others with its cancellation (#462). So RotateRefresh does not return
+// early when ctx is done: every caller, the first included, waits for the
+// shared rotation (its transaction for at most rotateTimeout, then the audit
+// record of a reuse for at most auditTimeout) and gets its result.
 func (s *Service) RotateRefresh(ctx context.Context, raw string) (TokenPair, error) {
 	pair, _, err := s.rotateRefresh(ctx, raw)
 	return pair, err
@@ -349,12 +353,17 @@ func (s *Service) rotateRefresh(ctx context.Context, raw string) (TokenPair, Use
 	// The rotation is shared: every caller that joins it gets its result,
 	// so it must not end with this caller's request. It runs under the
 	// request's values (the audit trail's request id and address) without
-	// its cancellation, bounded by rotateTimeout instead. A client that
-	// goes away, or a request deadline that passes, mid-rotation then
-	// neither fails the followers with that cancellation nor leaves a
-	// commit applied while its caller is told it failed, which would hand
-	// a retry a rotated token (#462).
-	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.sharedRotateTimeout())
+	// its cancellation (s.detach), bounded by rotateTimeout and cancelled
+	// by Close. A client that goes away, or a request deadline that passes,
+	// mid-rotation no longer fails the followers with that cancellation
+	// (#462). The trade: the rotation commits even though that first
+	// client is gone and never receives the new pair, so its next refresh
+	// with the old token finds it rotated (reuse, which revokes every
+	// session, unless it lands within RefreshReuseGrace once that exists:
+	// a plain 401). And rotateTimeout is a deadline reaching the driver
+	// too: one that expires after COMMIT was sent can still report failure
+	// for a rotation the server applied.
+	rctx, cancel := s.detach(ctx, s.sharedRotateTimeout())
 	pair, user, err := s.rotateRefreshOnce(rctx, raw, hash)
 	cancel()
 	call.pair, call.user, call.err = pair, user, err
@@ -365,9 +374,10 @@ func (s *Service) rotateRefresh(ctx context.Context, raw string) (TokenPair, Use
 	return pair, user, err
 }
 
-// defaultRotateTimeout bounds a shared rotation: one short transaction,
-// which may wait behind the user's row lock (another rotation, a session
-// revocation).
+// defaultRotateTimeout bounds a shared rotation's transaction: one short
+// transaction, which may wait behind the user's row lock (another rotation,
+// a session revocation). A reuse's audit record, written after it, has its
+// own auditTimeout.
 const defaultRotateTimeout = 10 * time.Second
 
 func (s *Service) sharedRotateTimeout() time.Duration {

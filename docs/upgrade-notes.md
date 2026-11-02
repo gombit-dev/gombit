@@ -161,12 +161,18 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 ### Informational
 
-- A refresh that joins another request's rotation of the same token no longer fails with that request's `context canceled` (a 500) when its client disconnects: the shared rotation runs detached from every caller's cancellation, bounded by a 10-second timeout. (`refresh-follower-not-cancelled-by-leader`, behavior, [#462](https://github.com/gombit-dev/gombit/issues/462))
+- A refresh that joins another request's rotation of the same token no longer fails with that request's `context canceled` (a 500) when its client disconnects: the shared rotation runs detached from every caller's cancellation and deadline, its transaction bounded by a 10-second timeout. (`refresh-follower-not-cancelled-by-leader`, behavior, [#462](https://github.com/gombit-dev/gombit/issues/462))
 
   A rotation whose first caller disconnects or passes its request
   deadline now finishes (or times out) for every caller that joined
   it, the first included, instead of being cancelled with that
-  caller's request.
+  caller's request. The trade: the rotation commits although that
+  first client is gone and never receives the new pair, so its retry
+  with the old token is reuse (every session revoked) or, within the
+  refresh-reuse grace, a plain 401; and a timeout that expires after
+  COMMIT was sent can still report failure for an applied rotation.
+  A Go caller of `auth.Service.RotateRefresh` waits for the shared
+  rotation instead of returning when its context is done.
 
 - The admin reads a value for a `uuid.UUID` field (a path id, a filter, a belongs_to or many-to-many key, a written value) as `uuid.Parse` does and uses its canonical lower case, so an upper-case UUID finds its row on every driver. (`admin-uuid-case-insensitive`, behavior, [#457](https://github.com/gombit-dev/gombit/issues/457))
 

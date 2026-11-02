@@ -170,8 +170,13 @@ version.
   refreshes of one token share a single rotation, which ran under the first
   request's context: when that client went away, every request waiting on
   the rotation got its `context canceled`. The shared rotation now runs
-  detached from every caller's cancellation, bounded by its own 10-second
-  timeout, and every caller gets its one result
+  detached from every caller's cancellation and deadline (its transaction
+  bounded by its own 10-second timeout, and cancelled when the auth service
+  closes), and every caller gets its one result. The trade: a rotation
+  whose first client has gone still commits, so that client's retry with
+  the old token is treated as reuse (or, within the refresh-reuse grace, a
+  plain 401), and `auth.Service.RotateRefresh` no longer returns early when
+  its context is done
   ([#462](https://github.com/gombit-dev/gombit/issues/462)).
 - The admin finds a `uuid.UUID`-keyed row by a UUID spelled in upper case:
   the detail, update and delete paths and the `uuid` filters
