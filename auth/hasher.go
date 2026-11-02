@@ -47,9 +47,10 @@ func (h bcryptHasher) Compare(hash, password string) error {
 const minPasswordLength = 8
 
 // PasswordPolicyError is a new password the policy refuses (ChangePassword,
-// ResetPassword): Err is the reason (ErrPasswordTooShort,
-// ErrPasswordTooLong, ErrPasswordRequired), Field the request field the
-// password came in ("new_password" for a change, "password" for a reset),
+// ResetPassword, and Register, CreateSuperuser and CheckNewAccount for a new
+// account's): Err is the reason (ErrPasswordTooShort, ErrPasswordTooLong,
+// ErrPasswordRequired), Field the request field the password came in
+// ("new_password" for a change, "password" for a reset or a new account),
 // so the error is reported where the form put it.
 type PasswordPolicyError struct {
 	Field string
@@ -67,7 +68,7 @@ var (
 )
 
 // checkNewPassword is the policy for a password a user sets themselves (a
-// change, a reset): at least minPasswordLength characters, and what the
+// change, a reset, a new account): at least minPasswordLength characters, and what the
 // hasher can take (at most 72 bytes; a multibyte password reaches that in
 // fewer characters). It is enforced here, at the service, whatever the
 // transport validated; field names the request field for errors.
