@@ -123,6 +123,10 @@ func (s *Service) requireBearer() func(ctx huma.Context, next func(huma.Context)
 		}
 		user, refreshID, err := s.parseAccess(ctx.Context(), raw)
 		if err != nil {
+			if !errors.Is(err, errInvalidAccessToken) {
+				writeAuthChallenge(ctx, contract.WithContext(ctx.Context(), contract.Internal("auth request failed")), "")
+				return
+			}
 			writeAuthError(ctx, contract.WithContext(ctx.Context(), contract.Authentication("invalid access token")))
 			return
 		}

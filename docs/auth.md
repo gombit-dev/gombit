@@ -34,7 +34,7 @@ All paths use `config.API.Prefix` (default `/api/v1`). D10 envelopes.
 | `POST` | `/auth/login` | Public. Returns `access_token`, `refresh_token`, `token_type`, `expires_in`. |
 | `POST` | `/auth/refresh` | Public. Body `{ "refresh_token" }`. Issues a new pair; the old refresh token is invalid. |
 | `POST` | `/auth/logout` | Public. Body `{ "refresh_token" }`. Revokes that refresh token. Bound access JWTs then fail. |
-| `GET` | `/me` | Bearer access JWT. Example protected route for E2E. Missing/invalid Bearer is 401 with `WWW-Authenticate: Bearer realm="api"`. |
+| `GET` | `/me` | Bearer access JWT. Example protected route for E2E. Missing/invalid Bearer is 401 with `WWW-Authenticate: Bearer realm="api"`; a database failure while the gate loads the token's user or session is a 500 (`internal`), not a 401, so clients keep the session. |
 | `GET` | `/auth/sessions` | Bearer access JWT. Lists the user's active sessions; see [Sessions](#sessions). |
 | `DELETE` | `/auth/sessions/{id}` | Bearer access JWT. Revokes one session; 404 if `id` names no active session of the user. |
 | `DELETE` | `/auth/sessions?scope=others\|all` | Bearer access JWT. `others` revokes every session except the current one; `all` revokes every session, the current one included. |

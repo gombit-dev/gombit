@@ -139,6 +139,14 @@ version.
 
 ### Fixed
 
+- A database failure while a login looks the user up, or while the auth gate
+  (Bearer or cookie, every protected route and the admin) loads the access
+  token's user or session, is a `500` (`internal`), no longer the `401` of
+  wrong credentials or a dead token. A short database blip signed every
+  client out (both SPAs drop the session on a 401), told users their
+  password was wrong, recorded failed logins, and stayed out of 5xx
+  alerting. Only a missing row is a `401`
+  ([#460](https://github.com/gombit-dev/gombit/issues/460)).
 - An inbound `X-Request-Id` longer than 128 bytes
   (`contract.MaxRequestIDLength`), or holding a space or a control
   character, is replaced by a generated ID instead of being echoed, logged

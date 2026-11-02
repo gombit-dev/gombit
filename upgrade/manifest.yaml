@@ -509,6 +509,16 @@ releases:
 
   - version: unreleased
     changes:
+      - id: auth-database-failure-is-500
+        kind: informational
+        area: api
+        summary: "A database failure during login, or while the auth gate loads the access token's user or session, is a 500 (`internal`), no longer a 401."
+        details: |
+          Only a missing user or session row is a 401. A client that read a
+          401 during an outage as a dead session now gets a 500 and keeps the
+          session; no failed login is audited for it.
+        refs: [460]
+
       - id: bearer-handler-401-challenge
         kind: informational
         area: api

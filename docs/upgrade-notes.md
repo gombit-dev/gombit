@@ -142,6 +142,12 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 ### Informational
 
+- A database failure during login, or while the auth gate loads the access token's user or session, is a 500 (`internal`), no longer a 401. (`auth-database-failure-is-500`, api, [#460](https://github.com/gombit-dev/gombit/issues/460))
+
+  Only a missing user or session row is a 401. A client that read a
+  401 during an outage as a dead session now gets a 500 and keeps the
+  session; no failed login is audited for it.
+
 - Bearer-mode session revocation errors include the `WWW-Authenticate: Bearer realm="api"` challenge when the handler returns 401. (`bearer-handler-401-challenge`, api, [#604](https://github.com/gombit-dev/gombit/issues/604))
 
   Cookie-mode 401 responses still omit a Bearer challenge.

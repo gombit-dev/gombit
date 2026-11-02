@@ -169,6 +169,11 @@ func (s *Service) Authenticate(ctx context.Context, email, password string) (Use
 	email = normalizeEmail(email)
 	var user User
 	err := s.db.WithContext(ctx).Where("email = ?", email).First(&user).Error
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		// The database failed, not the credentials: a 500, so a blip does
+		// not tell the user their password is wrong (issue #460).
+		return User{}, err
+	}
 	if err != nil {
 		s.compareDummy(password)
 		// No target: the attempted address is not recorded.
@@ -512,8 +517,10 @@ func (s *Service) RevokeRefresh(ctx context.Context, raw string) error {
 }
 
 // ParseAccess validates an access JWT, from the Bearer header or the session
-// cookie, and loads its user. It fails when the token's session has ended:
-// its refresh token row was revoked or has expired.
+// cookie, and loads its user. It fails as an invalid access token when the
+// token is invalid or its session has ended (its refresh token row was
+// revoked or has expired), and with the database's own error when loading
+// the user or the session fails (issue #460).
 func (s *Service) ParseAccess(ctx context.Context, token string) (User, error) {
 	user, _, err := s.parseAccess(ctx, token)
 	return user, err
@@ -531,13 +538,22 @@ func (s *Service) parseAccess(ctx context.Context, token string) (User, uint, er
 	if err != nil {
 		return User{}, 0, err
 	}
+	// Only a missing row is a dead token. Any other failure is the
+	// database's: returned as is, a 500 from the gates, so a blip does not
+	// read as a dead session and sign every client out (issue #460).
 	var user User
 	if err := s.db.WithContext(ctx).First(&user, id).Error; err != nil {
-		return User{}, 0, errInvalidAccessToken
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return User{}, 0, errInvalidAccessToken
+		}
+		return User{}, 0, err
 	}
 	var row RefreshToken
 	if err := s.db.WithContext(ctx).Where("id = ?", claims.RefreshID).First(&row).Error; err != nil {
-		return User{}, 0, errInvalidAccessToken
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return User{}, 0, errInvalidAccessToken
+		}
+		return User{}, 0, err
 	}
 	// One definition of an active session, shared with the sessions API: an
 	// unrevoked refresh token row that has not expired. The refresh TTL is
