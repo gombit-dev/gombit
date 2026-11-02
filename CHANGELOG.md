@@ -139,6 +139,16 @@ version.
 
 ### Fixed
 
+- A NOT NULL violation, or any other database error, whose message names a
+  column, table or constraint holding `unique` or `duplicate` (`unique_code`,
+  `duplicate_of`) is no longer reported as `409 conflict` "resource already
+  exists": creating the first row of a table without its `unique_code` is
+  the `422` "missing a required value" it is. `database.IsUniqueViolation`,
+  `IsForeignKeyViolation` and `IsNotNullViolation` classify a driver error by
+  its code (PostgreSQL SQLSTATE, MySQL error number, SQLite extended result
+  code) and fall back to the drivers' fixed wording, never a bare word, only
+  for an error that carries no driver error
+  ([#456](https://github.com/gombit-dev/gombit/issues/456)).
 - An inbound `X-Request-Id` longer than 128 bytes
   (`contract.MaxRequestIDLength`), or holding a space or a control
   character, is replaced by a generated ID instead of being echoed, logged

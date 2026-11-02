@@ -14,8 +14,11 @@ import (
 // IsUniqueViolation reports duplicate-key errors. Open enables
 // gorm.Config.TranslateError, so ErrDuplicatedKey is the primary signal on
 // SQLite, Postgres, and MySQL (all three dialectors translate their unique-
-// violation error code to it). The driver error string stays as a fallback
-// for any dialect that does not implement translation.
+// violation error code to it). An untranslated driver error is classified by
+// its code (driverConstraint), never by its text: a NOT NULL violation on a
+// column named unique_code is not a duplicate (issue #456). The driver's
+// message stays as a fallback, matched by its fixed wording, only for an error
+// that carries no driver error the framework knows.
 func IsUniqueViolation(err error) bool {
 	if err == nil {
 		return false
@@ -23,15 +26,19 @@ func IsUniqueViolation(err error) bool {
 	if errors.Is(err, gorm.ErrDuplicatedKey) {
 		return true
 	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "unique") || strings.Contains(msg, "duplicate")
+	return isConstraint(err, constraintUnique,
+		"unique constraint failed",   // SQLite
+		"violates unique constraint", // PostgreSQL
+		"duplicate entry",            // MySQL
+	)
 }
 
 // IsForeignKeyViolation reports foreign-key constraint violations, such as a
 // belongs_to reference to a row that does not exist. Same primary/fallback
 // shape as IsUniqueViolation: all three supported dialectors translate their
-// foreign-key error code to gorm.ErrForeignKeyViolated, with the driver
-// error string as a fallback.
+// foreign-key error code to gorm.ErrForeignKeyViolated; an untranslated
+// driver error is classified by its code, and only an error without one by
+// the drivers' message.
 func IsForeignKeyViolation(err error) bool {
 	if err == nil {
 		return false
@@ -39,23 +46,115 @@ func IsForeignKeyViolation(err error) bool {
 	if errors.Is(err, gorm.ErrForeignKeyViolated) {
 		return true
 	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "foreign key")
+	return isConstraint(err, constraintForeignKey,
+		"foreign key constraint", // SQLite "FOREIGN KEY constraint failed", PostgreSQL, MySQL
+	)
 }
 
 // IsNotNullViolation reports NOT NULL constraint violations. Unlike unique
 // and foreign-key violations, none of the SQLite/Postgres/MySQL GORM
 // dialectors translate this case to a gorm sentinel error (it is a gap in
-// gorm itself, not something Open configures around), so detection is
-// driver-message-only. The three drivers phrase it differently: SQLite
-// ("NOT NULL constraint failed"), Postgres ("violates not-null
-// constraint"), MySQL ("cannot be null").
+// gorm itself, not something Open configures around), so detection is by
+// the driver's code, with the drivers' messages as the fallback: SQLite ("NOT
+// NULL constraint failed"), Postgres ("violates not-null constraint"), MySQL
+// ("cannot be null").
 func IsNotNullViolation(err error) bool {
 	if err == nil {
 		return false
 	}
+	return isConstraint(err, constraintNotNull,
+		"not null constraint failed",   // SQLite
+		"violates not-null constraint", // PostgreSQL
+		"cannot be null",               // MySQL
+	)
+}
+
+// constraintKind is the constraint a driver error reports violated.
+type constraintKind int
+
+const (
+	constraintOther constraintKind = iota
+	constraintUnique
+	constraintForeignKey
+	constraintNotNull
+)
+
+// SQLite extended result codes (https://www.sqlite.org/rescode.html).
+const (
+	sqliteConstraintForeignKey = 787
+	sqliteConstraintNotNull    = 1299
+	sqliteConstraintPrimaryKey = 1555
+	sqliteConstraintTrigger    = 1811
+	sqliteConstraintUnique     = 2067
+)
+
+// isConstraint reports whether err violates a constraint of kind: by the
+// driver's code when err carries a driver error the framework knows, else by
+// the drivers' fixed wording for that violation (messages, lower case). Only
+// whole phrases are matched, so an identifier the message quotes, such as a
+// column named unique_code, cannot match on its own.
+func isConstraint(err error, kind constraintKind, messages ...string) bool {
+	if got, ok := driverConstraint(err); ok {
+		return got == kind
+	}
 	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "not null") || strings.Contains(msg, "not-null") || strings.Contains(msg, "cannot be null")
+	for _, m := range messages {
+		if strings.Contains(msg, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// driverConstraint classifies err by the driver's own code: PostgreSQL
+// SQLSTATE 23505 / 23503 / 23502, MySQL errors 1062 and 1586 / 1216, 1217,
+// 1451 and 1452 / 1048, SQLite extended codes 2067 and 1555 / 787 (and 1811
+// with SQLite's foreign-key wording) / 1299 (unique / foreign key / NOT NULL). ok is false when err carries none of the
+// three drivers' errors; any other code of theirs is constraintOther.
+func driverConstraint(err error) (kind constraintKind, ok bool) {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		switch pgErr.Code {
+		case "23505":
+			return constraintUnique, true
+		case "23503":
+			return constraintForeignKey, true
+		case "23502":
+			return constraintNotNull, true
+		}
+		return constraintOther, true
+	}
+	var myErr *mysqldriver.MySQLError
+	if errors.As(err, &myErr) {
+		switch myErr.Number {
+		case 1062, 1586:
+			return constraintUnique, true
+		case 1216, 1217, 1451, 1452:
+			return constraintForeignKey, true
+		case 1048:
+			return constraintNotNull, true
+		}
+		return constraintOther, true
+	}
+	if code := sqliteExtendedCode(err); code != 0 {
+		switch code {
+		case sqliteConstraintUnique, sqliteConstraintPrimaryKey:
+			return constraintUnique, true
+		case sqliteConstraintForeignKey:
+			return constraintForeignKey, true
+		case sqliteConstraintTrigger:
+			// An ON DELETE RESTRICT refusal is reported under the trigger
+			// code, with SQLite's fixed foreign-key wording; an app
+			// trigger's RAISE(ABORT, ...) shares the code with its own text.
+			if strings.Contains(strings.ToLower(err.Error()), "foreign key constraint failed") {
+				return constraintForeignKey, true
+			}
+		case sqliteConstraintNotNull:
+			return constraintNotNull, true
+		}
+		return constraintOther, true
+	}
+	return constraintOther, false
 }
 
 // IsDataException reports a value the database refused as data that a

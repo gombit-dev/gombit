@@ -1465,3 +1465,31 @@ func assertCreatedAtPresent(t *testing.T, row map[string]any) {
 		t.Fatalf("created_at is empty/zero: %#v", v)
 	}
 }
+
+type duplicateCode struct {
+	ID         uint    `gorm:"primaryKey" json:"id"`
+	Name       string  `json:"name"`
+	UniqueCode *string `gorm:"not null" json:"unique_code"`
+}
+
+// TestResourceCreateNotNullOnUniqueNamedColumn: the first row of an empty
+// table, missing a NOT NULL column named unique_code, is a 422 "missing a
+// required value", not a 409 conflict with a row that does not exist
+// (issue #456).
+func TestResourceCreateNotNullOnUniqueNamedColumn(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	app := newCookieApp(t)
+	if err := app.DB().AutoMigrate(&duplicateCode{}); err != nil {
+		t.Fatalf("AutoMigrate(duplicateCode): %v", err)
+	}
+	if err := admin.Register(app, duplicateCode{}, admin.Options{Slug: "duplicate-codes", Fields: []admin.Field{
+		{Name: "id", Type: admin.TypeInteger, ReadOnly: true},
+		{Name: "name", Type: admin.TypeString},
+		{Name: "unique_code", Type: admin.TypeString},
+	}}); err != nil {
+		t.Fatalf("admin.Register: %v", err)
+	}
+	jar := loginSuperuser(t, app)
+	rec := doRequest(app, jar, http.MethodPost, "/api/v1/admin/resources/duplicate-codes", `{"name":"first row ever"}`)
+	assertError(t, rec, http.StatusUnprocessableEntity, contract.CodeValidationError)
+}

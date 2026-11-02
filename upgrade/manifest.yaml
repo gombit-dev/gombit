@@ -509,6 +509,19 @@ releases:
 
   - version: unreleased
     changes:
+      - id: constraint-errors-by-driver-code
+        kind: informational
+        area: behavior
+        summary: "`database.IsUniqueViolation`, `IsForeignKeyViolation` and `IsNotNullViolation` classify a driver error by its code, not by words in its message, so an error naming a `unique_code` column is no longer a 409 conflict."
+        details: |
+          A NOT NULL violation on a column named `unique_code` was a `409
+          conflict`; it is the `422` "missing a required value" now. An error
+          that carries no PostgreSQL, MySQL or SQLite driver error is matched
+          by the drivers' fixed wording (`UNIQUE constraint failed`, `violates
+          unique constraint`, `Duplicate entry`), no longer by the bare words
+          `unique` or `duplicate`.
+        refs: [456]
+
       - id: bearer-handler-401-challenge
         kind: informational
         area: api

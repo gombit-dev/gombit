@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"testing"
 
+	mysqldriver "github.com/go-sql-driver/mysql"
 	"github.com/gombit-dev/gombit/contract"
+	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
 )
 
@@ -25,6 +27,17 @@ func TestIsUniqueViolation(t *testing.T) {
 		{name: "record not found", err: gorm.ErrRecordNotFound, want: false},
 		{name: "no such table", err: errors.New("no such table: widgets"), want: false},
 		{name: "generic", err: errors.New("connection refused"), want: false},
+		// A name holding "unique" or "duplicate" in another violation's
+		// message is not a duplicate (issue #456).
+		{name: "sqlite not null on unique_code", err: errors.New("NOT NULL constraint failed: repro_uniq.unique_code"), want: false},
+		{name: "no such table unique_codes", err: errors.New("no such table: unique_codes"), want: false},
+		{name: "postgres 23505", err: &pgconn.PgError{Code: "23505", Message: `duplicate key value violates unique constraint "widgets_sku_key"`}, want: true},
+		{name: "postgres 23502 on unique_code", err: &pgconn.PgError{Code: "23502", Message: `null value in column "unique_code" of relation "duplicate_codes" violates not-null constraint`}, want: false},
+		{name: "postgres 42P01 duplicate_codes", err: &pgconn.PgError{Code: "42P01", Message: `relation "duplicate_codes" does not exist`}, want: false},
+		{name: "mysql 1062", err: &mysqldriver.MySQLError{Number: 1062, Message: "Duplicate entry 'a' for key 'widgets.sku'"}, want: true},
+		{name: "mysql 1586", err: &mysqldriver.MySQLError{Number: 1586, Message: "Duplicate entry 'a' for key 'uniq_sku'"}, want: true},
+		{name: "mysql 1048 on duplicate_of", err: &mysqldriver.MySQLError{Number: 1048, Message: "Column 'duplicate_of' cannot be null"}, want: false},
+		{name: "mysql 1146 unique_codes", err: &mysqldriver.MySQLError{Number: 1146, Message: "Table 'app.unique_codes' doesn't exist"}, want: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -49,6 +62,11 @@ func TestIsForeignKeyViolation(t *testing.T) {
 		{name: "mysql foreign key", err: errors.New("Error 1452 (23000): Cannot add or update a child row: a foreign key constraint fails"), want: true},
 		{name: "unique, not foreign key", err: errors.New("UNIQUE constraint failed: widgets.sku"), want: false},
 		{name: "generic", err: errors.New("connection refused"), want: false},
+		{name: "postgres 23503", err: &pgconn.PgError{Code: "23503", Message: `insert or update on table "widgets" violates foreign key constraint "fk_widgets_category"`}, want: true},
+		{name: "postgres 23502", err: &pgconn.PgError{Code: "23502", Message: `null value in column "category_id" violates not-null constraint`}, want: false},
+		{name: "mysql 1451", err: &mysqldriver.MySQLError{Number: 1451, Message: "Cannot delete or update a parent row: a foreign key constraint fails"}, want: true},
+		{name: "mysql 1452", err: &mysqldriver.MySQLError{Number: 1452, Message: "Cannot add or update a child row: a foreign key constraint fails"}, want: true},
+		{name: "mysql 1048", err: &mysqldriver.MySQLError{Number: 1048, Message: "Column 'foreign_key_id' cannot be null"}, want: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -72,6 +90,10 @@ func TestIsNotNullViolation(t *testing.T) {
 		{name: "unique, not null-related", err: errors.New("UNIQUE constraint failed: widgets.sku"), want: false},
 		{name: "foreign key, not null-related", err: errors.New("FOREIGN KEY constraint failed"), want: false},
 		{name: "generic", err: errors.New("connection refused"), want: false},
+		{name: "postgres 23502", err: &pgconn.PgError{Code: "23502", Message: `null value in column "unique_code" violates not-null constraint`}, want: true},
+		{name: "postgres 23505 on not_null_key", err: &pgconn.PgError{Code: "23505", Message: `duplicate key value violates unique constraint "not null constraint failed"`}, want: false},
+		{name: "mysql 1048", err: &mysqldriver.MySQLError{Number: 1048, Message: "Column 'name' cannot be null"}, want: true},
+		{name: "mysql 1062", err: &mysqldriver.MySQLError{Number: 1062, Message: "Duplicate entry 'cannot be null' for key 'widgets.name'"}, want: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -247,6 +269,32 @@ func TestMapPersistErrorSQLiteNotNullConstraint(t *testing.T) {
 		t.Fatalf("IsNotNullViolation(%v) = false, want true", err)
 	}
 	mapped := MapPersistError(context.Background(), err, "resource already exists", "persist widget")
+	assertMapped(t, mapped, err, http.StatusUnprocessableEntity, contract.CodeValidationError)
+}
+
+// A NOT NULL violation on a column named unique_code, in a table named
+// duplicate_codes, is a 422, not a 409: no other row exists to conflict with
+// (issue #456).
+func TestMapPersistErrorSQLiteNotNullOnUniqueNamedColumn(t *testing.T) {
+	db := openSQLite(t)
+	type duplicateCode struct {
+		ID         uint    `gorm:"primaryKey"`
+		UniqueCode *string `gorm:"not null"`
+	}
+	if err := db.AutoMigrate(&duplicateCode{}); err != nil {
+		t.Fatalf("AutoMigrate() error = %v", err)
+	}
+	err := db.Create(&duplicateCode{}).Error
+	if err == nil {
+		t.Fatal("Create() error = nil, want NOT NULL violation")
+	}
+	if IsUniqueViolation(err) {
+		t.Fatalf("IsUniqueViolation(%v) = true, want false", err)
+	}
+	if !IsNotNullViolation(err) {
+		t.Fatalf("IsNotNullViolation(%v) = false, want true", err)
+	}
+	mapped := MapPersistError(context.Background(), err, "resource already exists", "persist code")
 	assertMapped(t, mapped, err, http.StatusUnprocessableEntity, contract.CodeValidationError)
 }
 

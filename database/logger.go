@@ -11,8 +11,6 @@ import (
 	"sync"
 	"time"
 
-	mysqldriver "github.com/go-sql-driver/mysql"
-	"github.com/jackc/pgx/v5/pgconn"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"gorm.io/gorm"
@@ -160,22 +158,11 @@ func isClientWriteError(err error) bool {
 }
 
 // isNotNullViolationCode reports a NOT NULL violation by the driver's error
-// code: Postgres SQLSTATE 23502, MySQL error 1048, SQLite extended code 1299.
+// code alone (driverConstraint), never by its text.
 func isNotNullViolationCode(err error) bool {
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) {
-		return pgErr.Code == "23502"
-	}
-	var myErr *mysqldriver.MySQLError
-	if errors.As(err, &myErr) {
-		return myErr.Number == 1048
-	}
-	return sqliteExtendedCode(err) == sqliteConstraintNotNull
+	kind, _ := driverConstraint(err)
+	return kind == constraintNotNull
 }
-
-// sqliteConstraintNotNull is SQLITE_CONSTRAINT_NOTNULL
-// (https://www.sqlite.org/rescode.html#constraint_notnull).
-const sqliteConstraintNotNull = 1299
 
 // sqliteExtendedCode reads a SQLite driver error's extended result code the way
 // gorm.io/driver/sqlite's translator does, through the error's exported
