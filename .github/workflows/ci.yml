@@ -355,6 +355,13 @@ jobs:
           GOMBIT_TEST_REDIS_ADDR: 127.0.0.1:6379
         run: go test -race -count=1 ./jobs
 
+      # The cache's Redis driver against the same server: IncrementTTL's
+      # script (the counters behind the auth throttles).
+      - name: Run Redis cache tests
+        env:
+          GOMBIT_TEST_REDIS_ADDR: 127.0.0.1:6379
+        run: go test -race -count=1 ./cache
+
   storage-s3:
     name: Storage (s3)
     needs: test

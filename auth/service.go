@@ -27,7 +27,9 @@ type Service struct {
 	auditor Auditor
 	// background runs the work the routes accept and finish after
 	// answering (background.go); Close drains it.
-	background  *backgroundRunner
+	background *backgroundRunner
+	// throttle counts the credential endpoints' attempts (throttle.go).
+	throttle    *throttler
 	dummyOnce   sync.Once
 	dummyHash   string
 	rotateMu    sync.Mutex
@@ -100,8 +102,18 @@ func NewService(db *gorm.DB, cfg config.Config, opts ...Option) (*Service, error
 	}
 	s.auditor = DBAuditor(db)
 	s.background = newBackgroundRunner()
+	s.throttle = &throttler{
+		policy:   DefaultThrottlePolicy(),
+		disabled: cfg.Auth.ThrottleDisabled,
+		now:      s.now,
+		logger:   func() *zap.Logger { return s.logger },
+	}
 	for _, opt := range opts {
 		opt(s)
+	}
+	if !s.throttle.disabled {
+		// Off the request path: whether the throttles' store keeps counts.
+		s.throttle.startProbe()
 	}
 	return s, nil
 }
@@ -118,6 +130,10 @@ func (s *Service) now() time.Time {
 // logged, not returned: POST /auth/verify-email/resend asks again).
 // Duplicate emails return errEmailTaken.
 func (s *Service) Register(ctx context.Context, email, password string) (User, error) {
+	// Every registration counts (RegisterPerAddress), before the hash.
+	if _, err := s.throttle.reserve(ctx, throttleRule{name: "RegisterPerAddress", limit: s.throttle.policy.RegisterPerAddress, subject: requestAddress(ctx)}); err != nil {
+		return User{}, err
+	}
 	user, err := s.createUser(ctx, email, password, false)
 	if err != nil {
 		return User{}, err
@@ -167,9 +183,16 @@ func (s *Service) createUser(ctx context.Context, email, password string, superu
 // Authenticate verifies email and password.
 func (s *Service) Authenticate(ctx context.Context, email, password string) (User, error) {
 	email = normalizeEmail(email)
-	var user User
-	err := s.db.WithContext(ctx).Where("email = ?", email).First(&user).Error
+	// Throttled before the lookup and bcrypt, by the email as typed: the
+	// same for an account and an address that is none. A success does not
+	// count, and forgets this address's failures for the email.
+	pair, rules := s.loginRules(ctx, email)
+	res, err := s.throttle.reserve(ctx, rules...)
 	if err != nil {
+		return User{}, err
+	}
+	user, err := findUserByEmail(s.db.WithContext(ctx), email)
+	if err != nil || user.ID == 0 {
 		s.compareDummy(password)
 		// No target: the attempted address is not recorded.
 		s.Audit(ctx, AuditEvent{Action: AuditLoginFailed, Details: details("reason", "unknown_account")})
@@ -179,6 +202,9 @@ func (s *Service) Authenticate(ctx context.Context, email, password string) (Use
 		s.Audit(ctx, AuditEvent{Action: AuditLoginFailed, TargetUserID: uintPtr(user.ID), Details: details("reason", "wrong_password")})
 		return User{}, errInvalidCredentials
 	}
+	res.refundExcept(pair.name)
+	s.throttle.clear(ctx, pair)
+	s.throttle.markKnown(ctx, pair)
 	return user, nil
 }
 

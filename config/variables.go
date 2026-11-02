@@ -87,6 +87,7 @@ var variables = []variable{
 	{envPasswordResetTTL, false, func(c Config) string { return duration(c.Auth.PasswordResetTTL) }},
 	{envPasswordResetURL, false, func(c Config) string { return c.Auth.PasswordResetURL }},
 	{envPasswordResetKeep, false, func(c Config) string { return strconv.FormatBool(c.Auth.PasswordResetKeepSessions) }},
+	{envAuthThrottleDisabled, false, func(c Config) string { return strconv.FormatBool(c.Auth.ThrottleDisabled) }},
 	{envSecuritySanitizeInput, false, func(c Config) string { return strconv.FormatBool(c.Security.SanitizeInput) }},
 }
 

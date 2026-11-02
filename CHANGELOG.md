@@ -12,6 +12,32 @@ version.
 
 ### Added
 
+- [Abuse protection](docs/auth.md#abuse-protection) for the credential
+  endpoints (AUTH-8), in both auth modes, on by default. Sliding-window
+  throttles count failed logins per email and client address (5 / 15 min),
+  per address (100 / 15 min, credential stuffing) and per email (100 /
+  hour; an address that signed in to the account before is exempt from
+  the per-email rule, and a password reset empties it), registrations and
+  password reset requests per address, invalid one-time tokens per
+  address, wrong current passwords and verification messages per user;
+  past a limit the endpoint answers 429 with `Retry-After`, before the
+  lookup or bcrypt. Logins are counted by the email as typed, so a 429
+  reveals no account, and only the account's exact email signs in or asks
+  for a reset (a spelling MySQL's collation folds is not the account); no
+  rule bans an address, and IPv6 clients count by their /64. Every rule is
+  read before any is counted (a refused request writes nothing), attempts
+  reserve their place atomically (concurrent requests cannot exceed a
+  limit) and successes are refunded. The client address respects `GOMBIT_HTTP_TRUSTED_PROXIES`. The
+  counts live in the app's cache (Redis shares them between instances) via
+  the new `cache.Counter` / `cache.IncrementTTL` / `cache.DecrementExisting`
+  (counters that expire, and decrements that never create one); a
+  failing cache fails open, with a warning. `auth.ThrottlePolicy` /
+  `auth.WithThrottlePolicy` / `auth.WithThrottleStore`, `auth.ErrTooManyAttempts`
+  / `*auth.ThrottleError`; `GOMBIT_AUTH_THROTTLE_DISABLED=true` turns them
+  off. The throttled operations declare their 429 in OpenAPI and in a new
+  app's placeholder client. Behind a proxy, set `GOMBIT_HTTP_TRUSTED_PROXIES`,
+  or every client counts as the proxy's address.
+
 - [Email change](docs/auth.md#email-change) (AUTH-4), in both auth modes. A
   signed-in user asks for a new address with their current password (`POST
   /auth/email/change`: a 422 on `current_password` for a wrong one, a 409
