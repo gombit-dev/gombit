@@ -23,7 +23,9 @@ version.
   was revoked stays revoked. The routes need the `auth.users.manage`
   permission (`auth.PermissionManageUsers`; superusers bypass); a
   superuser's account is a superuser's to change, and no one disables
-  themselves. `auth.HasPermission` grants a disabled account nothing.
+  themselves. `auth.HasPermission` grants a disabled account nothing and
+  decides on the stored user's row (a stale superuser snapshot, deleted,
+  disabled or demoted since, gets nothing; a nil database is an error).
   Audited (`auth.user.disabled` / `enabled`). **Breaking (schema):**
   `users` gains `disabled_at`, which registration and `gombit
   createsuperuser` write: migrate before running this release.

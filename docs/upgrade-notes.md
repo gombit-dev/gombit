@@ -348,7 +348,12 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   `EnableUser` are the same for an app's own code. A login with the
   right password of a disabled account is a 403; a wrong password
   answers as before. `auth.HasPermission` / `HasPermissions` grant a
-  disabled account nothing, a superuser's included.
+  disabled account nothing, a superuser's included, and decide on
+  the stored user's row, reloaded, not on the `User` passed in: a
+  superuser snapshot whose row was deleted, disabled or demoted
+  since now gets nothing, and a stored superuser with a nil
+  database is an error (`auth: nil database`) rather than every
+  permission.
 
 - A new app's placeholder `schema.ts` includes the account state operations; an existing app's generated client gets them from `gombit client generate`. (`client-schema-account-state`, client, [#336](https://github.com/gombit-dev/gombit/issues/336))
 

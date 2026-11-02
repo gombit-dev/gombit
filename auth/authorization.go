@@ -43,8 +43,26 @@ func HasPermissions(ctx context.Context, db *gorm.DB, user User, keys ...string)
 		return nil, errors.New("auth: nil database")
 	}
 
+	// The bare row first: it decides a disabled account and a superuser
+	// alone, without the associations.
 	var loaded User
-	err := db.WithContext(ctx).
+	err := db.WithContext(ctx).First(&loaded, user.ID).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return grants, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if loaded.Disabled() {
+		return grants, nil
+	}
+	if loaded.IsSuperuser {
+		for key := range grants {
+			grants[key] = true
+		}
+		return grants, nil
+	}
+	err = db.WithContext(ctx).
 		Preload("Permissions").
 		Preload("Groups.Permissions").
 		First(&loaded, user.ID).Error
@@ -54,6 +72,8 @@ func HasPermissions(ctx context.Context, db *gorm.DB, user User, keys ...string)
 	if err != nil {
 		return nil, err
 	}
+	// Reloaded with its grants: decided on this read, should the state have
+	// changed since the first.
 	if loaded.Disabled() {
 		return grants, nil
 	}
