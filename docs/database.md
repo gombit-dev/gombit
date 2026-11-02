@@ -58,9 +58,14 @@ HTTP-only apps can omit `WithDatabase`.
 ## Error mapping
 
 `database.Open` (and `OpenConn`) enable `gorm.Config.TranslateError`, so each
-dialector maps its unique-violation code to `gorm.ErrDuplicatedKey`; the
-driver's error string stays a fallback. Callers should not inspect either
-themselves:
+dialector maps its unique-violation code to `gorm.ErrDuplicatedKey`. An
+untranslated driver error is classified by its code (PostgreSQL SQLSTATE,
+MySQL error number, SQLite extended result code), never by its text, so a NOT
+NULL violation on a column named `unique_code` is not a conflict; only an
+error that carries no PostgreSQL, MySQL or SQLite driver error falls back to
+the fixed wording of gorm's sentinels and the drivers' messages (`duplicated
+key not allowed`, `UNIQUE constraint failed`, `violates unique constraint`,
+`Duplicate entry`). Callers should not inspect either themselves:
 
 ```go
 if err := db.Create(&row).Error; err != nil {
