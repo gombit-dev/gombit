@@ -21,6 +21,76 @@ type Cache interface {
 	Increment(ctx context.Context, key string, delta int64) (int64, error)
 }
 
+// Counter is implemented by caches whose counters can expire: rate limits,
+// attempt counters. IncrementTTL increments key by delta, as Increment does,
+// and gives the key ttl when it has no expiry (it was just created, or
+// written without one); a key that already expires keeps its deadline, so
+// a fixed window is not stretched by every hit. Atomic: concurrent calls
+// never lose an increment or leave a counter without its expiry. ttl must
+// be positive: a counter that never expires is what Increment is for.
+//
+// DecrementExisting takes delta off key only if the key exists (and has
+// not expired), keeping its expiry: it never creates a counter, so giving
+// back a place in a counter that was cleared or evicted meanwhile writes
+// nothing (a create-on-miss decrement would leave a negative counter).
+// found reports whether the key existed.
+//
+// The built-in drivers (memory, redis, noop) and Namespace implement it;
+// IncrementTTL and DecrementExisting (the functions) fall back, not
+// atomically, for a Cache that does not.
+type Counter interface {
+	IncrementTTL(ctx context.Context, key string, delta int64, ttl time.Duration) (int64, error)
+	DecrementExisting(ctx context.Context, key string, delta int64) (value int64, found bool, err error)
+}
+
+// DecrementExisting takes delta off key in c only if it exists, through c's
+// Counter when it has one. For a Cache without one it decrements, then
+// deletes the key when the decrement created it (the result is -delta: no
+// counter was there): not atomic, so between the two another caller's
+// increment of the new key can be lost with it (an undercount, never a
+// negative counter left behind), and a counter that held exactly 0 is
+// deleted rather than left at -delta (the same count, as far as a limit
+// goes). found is false for a key that did not exist.
+func DecrementExisting(ctx context.Context, c Cache, key string, delta int64) (int64, bool, error) {
+	if counter, ok := c.(Counter); ok {
+		return counter.DecrementExisting(ctx, key, delta)
+	}
+	value, err := c.Increment(ctx, key, -delta)
+	if err != nil {
+		return 0, false, err
+	}
+	if value == -delta {
+		if err := c.Delete(ctx, key); err != nil {
+			return 0, false, err
+		}
+		return 0, false, nil
+	}
+	return value, true, nil
+}
+
+// IncrementTTL increments key in c by delta and gives it ttl when it has no
+// expiry, through c's Counter when it has one. For a Cache without one it
+// increments, then sets the counter again with ttl when the increment
+// created it: not atomic, so an increment by another caller between the
+// two can be lost (an undercount at the start of a window, never a counter
+// that lives forever). ttl must be positive.
+func IncrementTTL(ctx context.Context, c Cache, key string, delta int64, ttl time.Duration) (int64, error) {
+	if err := validateCounterTTL(ttl); err != nil {
+		return 0, err
+	}
+	if counter, ok := c.(Counter); ok {
+		return counter.IncrementTTL(ctx, key, delta, ttl)
+	}
+	value, err := c.Increment(ctx, key, delta)
+	if err != nil || value != delta {
+		return value, err
+	}
+	if err := c.Set(ctx, key, value, ttl); err != nil {
+		return 0, err
+	}
+	return value, nil
+}
+
 // Driver names an opened cache driver.
 type Driver string
 
@@ -171,6 +241,22 @@ func (s *Store) Increment(ctx context.Context, key string, delta int64) (int64, 
 	return s.impl.Increment(ctx, key, delta)
 }
 
+// IncrementTTL implements Counter.
+func (s *Store) IncrementTTL(ctx context.Context, key string, delta int64, ttl time.Duration) (int64, error) {
+	if s == nil || s.impl == nil {
+		return 0, errors.New("cache: nil store")
+	}
+	return IncrementTTL(ctx, s.impl, key, delta, ttl)
+}
+
+// DecrementExisting implements Counter.
+func (s *Store) DecrementExisting(ctx context.Context, key string, delta int64) (int64, bool, error) {
+	if s == nil || s.impl == nil {
+		return 0, false, errors.New("cache: nil store")
+	}
+	return DecrementExisting(ctx, s.impl, key, delta)
+}
+
 func encode(value any) ([]byte, error) {
 	payload, err := json.Marshal(value)
 	if err != nil {
@@ -185,6 +271,14 @@ func decode(payload []byte, dst any) error {
 	}
 	if err := json.Unmarshal(payload, dst); err != nil {
 		return fmt.Errorf("cache: unmarshal value: %w", err)
+	}
+	return nil
+}
+
+// validateCounterTTL refuses an IncrementTTL ttl that would not expire.
+func validateCounterTTL(ttl time.Duration) error {
+	if ttl <= 0 {
+		return fmt.Errorf("cache: increment ttl must be positive, got %s", ttl)
 	}
 	return nil
 }

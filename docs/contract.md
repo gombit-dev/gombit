@@ -108,9 +108,13 @@ gombit make resource Article \
 ```
 
 The generated handler applies filters and `?search=` before the `COUNT`, so
-`meta.total` reflects the filtered set; `?ordering=` replaces the fixed `id`
-order (`id` stays the default when `?ordering=` is absent) and is validated
-against the declared sortable set. An undeclared ordering field or an
+`meta.total` reflects the filtered set; the list is ordered by the model's
+primary-key column (`id` for the scaffolded model) when `?ordering=` is
+absent, and by the requested field, then the primary key in the same
+direction as the tiebreaker (`?ordering=-price` is `price DESC, id DESC`),
+when it is present, so pages neither repeat nor skip rows with equal sort
+keys. One direction means one index on `(price, id)` serves both `price` and
+`-price`. `?ordering=` is validated against the declared sortable set. An undeclared ordering field or an
 uncoercible filter value returns a D10 `validation_error` (422). The shared
 primitives live in `database` (`FilterEq`, `Search`, `Ordering` / `ParseOrdering`)
 and are the same behavior — and now the same code — the admin data plane applies.

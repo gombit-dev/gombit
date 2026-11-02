@@ -121,6 +121,25 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   `AuthEmailChangeBody`, `AuthEmailChangeConfirmBody`,
   `AuthEmailChangeRequested` or `DataAuthEmailChangeRequested`.
 
+- The credential endpoints are throttled by default: registrations, logins, password reset requests, one-time tokens, current-password checks and verification messages answer 429 with `Retry-After` past their limits. (`credential-throttles`, security, [#338](https://github.com/gombit-dev/gombit/issues/338))
+
+  Each rule counts one subject in a sliding window (docs/auth.md,
+  "Abuse protection"): failed logins per email and client address
+  (5 / 15 min), per address (100 / 15 min) and per email (100 / hour;
+  an address that signed in to the account before is exempt),
+  registrations and reset requests per address, invalid tokens per
+  address, wrong
+  current passwords and verification messages per user. Behind a
+  proxy or load balancer, list it in `GOMBIT_HTTP_TRUSTED_PROXIES`:
+  otherwise every client counts as the proxy's address. A client
+  should honor `Retry-After`. A login or reset request now needs the
+  account's exact email: on MySQL, a spelling the column's collation
+  folds (a zero-width character, an accent) no longer signs in to
+  the account. The counts live in the app's cache
+  (`GOMBIT_CACHE_DRIVER=redis` shares them between instances).
+  `auth.WithThrottlePolicy` changes the limits;
+  `GOMBIT_AUTH_THROTTLE_DISABLED=true` turns them off.
+
 - **Breaking.** A `.env` value no longer swallows a trailing comment, a byte order mark no longer hides the first key, and a `.env` that cannot be read fails the load. (`dotenv-comments-and-byte-order-mark`, behavior, [#507](https://github.com/gombit-dev/gombit/issues/507))
 
   Check a `.env` you already run with. A `#` with whitespace before it
@@ -178,6 +197,17 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   a `uint` made the list endpoint a 500). A client that sends a large
   integer sends it as a string (`"9007199254740993"`), which is read
   exactly.
+
+- List endpoints end on the primary key: the admin list orders by it by default, and admin and generated lists break `?ordering=` ties with it, in the requested direction (`database.Ordering` appends its `fallback`). (`list-order-primary-key-tiebreaker`, behavior, [#455](https://github.com/gombit-dev/gombit/issues/455))
+
+  Pages of a list without a requested ordering, or with ties in the
+  requested column, had no defined order on PostgreSQL and MySQL, so a
+  row could appear on two pages or on none. A client that relied on
+  the admin list's unordered (on SQLite, insertion) order sees the
+  same rows in primary-key order. Generated list handlers now name
+  the model's primary-key column instead of a literal `id`: `gombit
+  generate` (or `gombit upgrade contract --write`) regenerates them,
+  and a model keyed by another column gets a working list.
 
 - Email verification: registration mails a single-use, expiring link (through `framework.WithAuthMailer`), `POST {prefix}/auth/verify-email` consumes it, `POST {prefix}/auth/verify-email/resend` sends a new one, and `auth.RequireVerifiedEmail` gates an app's own operations. (`email-verification`, api, [#331](https://github.com/gombit-dev/gombit/issues/331))
 
@@ -241,6 +271,10 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   `ConfirmEmailChange` are the same flow for an app's own code.
 
 - A new app's placeholder `schema.ts` includes the email change operations (and declares the forgot route's 422 and 500 responses); an existing app's generated client gets them from `gombit client generate`. (`client-schema-email-change`, client, [#334](https://github.com/gombit-dev/gombit/issues/334))
+
+- `cache.Counter`, `cache.IncrementTTL` and `cache.DecrementExisting`: an increment that gives a new counter an expiry, and a decrement only of a counter that exists, atomically (memory, Redis, noop and namespaced caches implement them; other caches get non-atomic fallbacks: an increment then a set, a decrement then a delete of a key it created). (`cache-counter`, api, [#338](https://github.com/gombit-dev/gombit/issues/338))
+
+- A new app's placeholder `schema.ts` declares the 429 (with `Retry-After`), 422 and 500 responses of the throttled auth operations; an existing app's generated client gets them from `gombit client generate`. (`client-schema-throttle`, client, [#338](https://github.com/gombit-dev/gombit/issues/338))
 
 - An already-rotated refresh token that has expired is a 401 and no longer revokes the user's sessions. (`expired-rotated-refresh-token-no-cascade`, security, [#458](https://github.com/gombit-dev/gombit/issues/458))
 
