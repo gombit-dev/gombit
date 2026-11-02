@@ -259,7 +259,6 @@ func TestCreateUserAppliesTheAccountRules(t *testing.T) {
 
 // TestCreateSuperuserRefusesDuplicateEmail matches Register's uniqueness
 // path (same errEmailTaken, exported as ErrEmailTaken).
-
 func TestCreateSuperuserRefusesDuplicateEmail(t *testing.T) {
 	svc := newTestService(t)
 	ctx := context.Background()

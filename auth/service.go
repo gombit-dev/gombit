@@ -162,9 +162,12 @@ func (s *Service) CreateSuperuser(ctx context.Context, email, password string) (
 	return user, nil
 }
 
-// CheckNewAccount reports whether Register and CreateSuperuser would accept
-// email and password, without touching the database (gombit createsuperuser
-// checks before it opens one). Two rules, for two reasons (#461):
+// CheckNewAccount reports whether email and password meet the account rules
+// Register and CreateSuperuser apply, without touching the database (gombit
+// createsuperuser checks before it opens one); those also refuse a duplicate
+// email and a throttled address. Its verdict matches theirs, but a blank
+// email, which it refuses as ErrInvalidEmail, is ErrInvalidCredentials from
+// them. Two rules, for two reasons (#461):
 //
 //   - the email, normalized, must be a bare address of at most 255
 //     characters (ErrInvalidEmail): what POST /auth/login accepts, so the

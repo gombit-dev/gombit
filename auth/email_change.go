@@ -34,8 +34,9 @@ var (
 var ErrEmailUnchanged = errEmailUnchanged
 
 // ErrInvalidEmail is the error for an email that is not a bare address of at
-// most 255 characters: RequestEmailChange's for a new email, and Register's,
-// CreateSuperuser's and CheckNewAccount's for an account's (#461).
+// most 255 characters: RequestEmailChange's for a new email, CheckNewAccount's
+// for an account's, and Register's and CreateSuperuser's for one that is not
+// blank (a blank email is ErrInvalidCredentials there; #461).
 var ErrInvalidEmail = errInvalidEmail
 
 // ErrEmailChangedMeanwhile is RequestEmailChange's error when another change
