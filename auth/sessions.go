@@ -284,16 +284,16 @@ func lockSessionsError(err error) error {
 }
 
 // maxChainHops bounds how many rows sessionChain reads, one SELECT each,
-// under the user's lock. It is a cost limit, not a guard against bad data
-// (the cycle check already ends every walk) and a product limit: a logout
+// under the user's lock. It is a cost limit and a product limit, not a guard
+// against bad data (the cycle check already ends every walk): a logout
 // walks from any unexpired token of the session, which can be
 // RefreshTokenTTL / (rotation interval) rows behind its head, and the
 // rotation interval is the client's and the deployment's (672 rows with the
 // default TTLs and a refresh every 15 minutes, 1008 with a 10-minute access
 // TTL). A token maxChainHops or more rotations behind its head fails with
 // errChainUnresolved (a 500) and ends nothing; such a session is ended by
-// revoking it (DELETE /auth/sessions). A session id on refresh_tokens would
-// remove the walk. A variable so tests can lower it.
+// revoking it (DELETE /auth/sessions/{id}, or ?scope=all). A session id on
+// refresh_tokens would remove the walk. A variable so tests can lower it.
 var maxChainHops = 1000
 
 // sessionChain follows the chain of the user's refresh token rows from

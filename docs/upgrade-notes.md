@@ -384,8 +384,8 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   follows the token's successors to the session's current token and
   revokes that, under the user's lock that rotation takes, so a logout
   racing a refresh of the same token ends the session either way. Any
-  unexpired token the session has had, up to 1000 rotations behind its
-  current token, ends it. The `auth.logout` audit
+  unexpired token the session has had, fewer than 1000 rotations behind
+  its current token, ends it. The `auth.logout` audit
   event now names the session it ended (`target_type` session) and
   carries `"via":"rotated"` when an old token ended it. A rotated
   token past its own expiry, or the token of a session already ended,
@@ -393,7 +393,8 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   its session's current token (a 10-minute access TTL with the default
   7-day refresh TTL makes 1008 rotations), or one whose chain cannot be
   followed (a successor row gone), answers 500 and ends nothing; revoke
-  the session instead (`DELETE {prefix}/auth/sessions`). Nothing to
+  the session instead (`DELETE {prefix}/auth/sessions/{id}`, or
+  `?scope=all`). Nothing to
   change.
 
 ## v0.8.0
