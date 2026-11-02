@@ -22,9 +22,10 @@ var (
 	// instance joins its concurrent callers of a token to one rotation), or
 	// it found the token expired and already given a successor, or it found
 	// the token rotated within config.AuthConfig.RefreshReuseGrace with its
-	// successor still live (another tab's refresh a round trip late, #459). It is an invalid refresh token, a 401; refreshCookie leaves
-	// the cookies alone for it, because the winning rotation's response sets
-	// the session's new ones in the same browser. A token revoked with no
+	// successor still live (another tab's refresh a round trip late, #459).
+	// It is an invalid refresh token, a 401; refreshCookie leaves the
+	// cookies alone for it, because the winning rotation's response sets the
+	// session's new ones in the same browser. A token revoked with no
 	// successor (logout, a session revocation, the reuse cascade) is a plain
 	// errInvalidRefreshToken, even when the revocation won the
 	// compare-and-swap.

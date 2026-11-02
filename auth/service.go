@@ -339,6 +339,7 @@ func (s *Service) rotateRefreshOnce(ctx context.Context, raw, hash string) (Toke
 	var user User
 	var reuse, withinGrace bool
 	var reuseUser uint
+	var graceSession, graceSuccessor string
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var row RefreshToken
 		if err := tx.Where("token_hash = ?", hash).First(&row).Error; err != nil {
@@ -428,9 +429,11 @@ func (s *Service) rotateRefreshOnce(ctx context.Context, raw, hash string) (Toke
 					// Rotated again: fall through to the cascade.
 				case successor.RevokedAt == nil && successor.ExpiresAt.After(now):
 					withinGrace, reuseUser = true, row.UserID
+					graceSession, graceSuccessor = s.sessionID(successor.ID), "live"
 					return errRotationRaced
 				default:
 					withinGrace, reuseUser = true, row.UserID
+					graceSession, graceSuccessor = s.sessionID(successor.ID), "ended"
 					return errInvalidRefreshToken
 				}
 			}
@@ -487,7 +490,16 @@ func (s *Service) rotateRefreshOnce(ctx context.Context, raw, hash string) (Toke
 		return nil
 	})
 	if withinGrace {
-		s.Audit(ctx, AuditEvent{Action: AuditRefreshReuseWithinGrace, TargetUserID: uintPtr(reuseUser)})
+		// The successor is the session to look at: a sibling tab's, or a
+		// thief's who rotated first. "live" is a session that may be
+		// either; "ended" was signed out before this request came.
+		s.Audit(ctx, AuditEvent{
+			Action:       AuditRefreshReuseWithinGrace,
+			TargetUserID: uintPtr(reuseUser),
+			TargetType:   "session",
+			TargetID:     graceSession,
+			Details:      details("successor", graceSuccessor),
+		})
 	}
 	if err != nil {
 		return TokenPair{}, User{}, err

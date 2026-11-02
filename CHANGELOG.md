@@ -141,11 +141,12 @@ version.
 
 - Two tabs refreshing the same refresh token a network round trip apart no
   longer sign the user out of every session. A refresh with a token rotated
-  less than `config.AuthConfig.RefreshReuseGrace` (30 seconds by default;
-  zero keeps the strict rule) ago, whose successor is still live, is a lost
-  race, not reuse: a plain 401 that issues no tokens, revokes nothing and, in
-  cookie mode, keeps the session cookies the winning tab was just sent; it
-  is audited as `auth.refresh.reuse_within_grace`. The #127 fix covered only
+  less than `GOMBIT_AUTH_REFRESH_REUSE_GRACE` (`Config.Auth.RefreshReuseGrace`,
+  30 seconds by default; `0` keeps the strict rule) ago, whose successor is
+  still live, is a lost race, not reuse: a plain 401 that issues no tokens,
+  revokes nothing and, in cookie mode, keeps the session cookies the winning
+  tab was just sent; it is audited as `auth.refresh.reuse_within_grace`,
+  naming the successor's session. The #127 fix covered only
   refreshes overlapping inside one process. Presenting a rotated token after
   the grace, or one whose successor was rotated again, still revokes all of
   the user's sessions

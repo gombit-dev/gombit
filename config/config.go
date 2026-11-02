@@ -67,6 +67,7 @@ const (
 	envPasswordResetTTL        = "GOMBIT_AUTH_PASSWORD_RESET_TTL"           // #nosec G101 -- environment variable name, not a credential.
 	envPasswordResetURL        = "GOMBIT_AUTH_PASSWORD_RESET_URL"           // #nosec G101 -- environment variable name, not a credential.
 	envPasswordResetKeep       = "GOMBIT_AUTH_PASSWORD_RESET_KEEP_SESSIONS" // #nosec G101 -- environment variable name, not a credential.
+	envRefreshReuseGrace       = "GOMBIT_AUTH_REFRESH_REUSE_GRACE"
 	envCookieSecure            = "GOMBIT_COOKIE_SECURE"
 	envCookieSameSite          = "GOMBIT_COOKIE_SAMESITE"
 	envSecuritySanitizeInput   = "GOMBIT_SECURITY_SANITIZE_INPUT"
@@ -480,11 +481,15 @@ type AuthConfig struct {
 	// RefreshReuseGrace is how long after a rotation the rotated refresh
 	// token, presented again while its successor is still live, is a lost
 	// race (another tab of the same browser sent it a round trip late) and
-	// not reuse: a 401 that issues and revokes nothing (#459). Zero (or less)
-	// is strict: any rotated token presented again before it expires revokes
-	// every session of the user. DefaultFor and Load set
-	// DefaultRefreshReuseGrace; an app that has no clients sharing a refresh
-	// token across tabs can set zero.
+	// not reuse: a 401 that issues and revokes nothing (#459). DefaultFor
+	// and Load set DefaultRefreshReuseGrace (GOMBIT_AUTH_REFRESH_REUSE_GRACE
+	// overrides it); negative is refused.
+	//
+	// Zero is strict, any rotated token presented again before it expires
+	// revoking every session of the user: the opt-out for an app with no
+	// clients sharing a refresh token across tabs. Unlike the TTLs beside it,
+	// whose zero means their default, zero here is a policy, not "unset":
+	// never default it.
 	RefreshReuseGrace time.Duration
 }
 
@@ -713,6 +718,7 @@ func LoadFromEnv(lookup EnvLookup) (Config, error) {
 	applyString(lookup, envPasswordResetURL, &cfg.Auth.PasswordResetURL)
 	applyString(lookup, envEmailChangeURL, &cfg.Auth.EmailChangeURL)
 	applyBool(lookup, envPasswordResetKeep, "Auth.PasswordResetKeepSessions", &cfg.Auth.PasswordResetKeepSessions, &errs)
+	applyDuration(lookup, envRefreshReuseGrace, "Auth.RefreshReuseGrace", &cfg.Auth.RefreshReuseGrace, &errs)
 	applyBool(lookup, envSecuritySanitizeInput, "Security.SanitizeInput", &cfg.Security.SanitizeInput, &errs)
 	if docsEnabledSet {
 		applyBool(lookup, envDocsEnabled, "API.DocsEnabled", &cfg.API.DocsEnabled, &errs)
@@ -943,6 +949,14 @@ func validateAuthConfig(errs *FieldErrors, env Environment, cfg AuthConfig) {
 			Env:     envPasswordResetTTL,
 			Value:   cfg.PasswordResetTTL.String(),
 			Message: "must be greater than or equal to zero",
+		})
+	}
+	if cfg.RefreshReuseGrace < 0 {
+		*errs = append(*errs, FieldError{
+			Field:   "Auth.RefreshReuseGrace",
+			Env:     envRefreshReuseGrace,
+			Value:   cfg.RefreshReuseGrace.String(),
+			Message: "must be greater than or equal to zero (zero is the strict reuse rule)",
 		})
 	}
 	if u := strings.TrimSpace(cfg.PasswordResetURL); u != "" && !strings.Contains(u, PasswordResetURLToken) {

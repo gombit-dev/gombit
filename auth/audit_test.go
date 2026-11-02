@@ -154,6 +154,12 @@ func runAuditTrail(t *testing.T, db *database.DB) {
 		t.Fatalf("verify = %d", rec.Code)
 	}
 	rotated := refreshUser(t, app, pair.Data.RefreshToken)
+	// The successor's session id, as GET /auth/sessions shows it.
+	sessionsRec := httptest.NewRecorder()
+	sessionsReq := httptest.NewRequest(http.MethodGet, "/api/v1/auth/sessions", nil)
+	sessionsReq.Header.Set("Authorization", "Bearer "+rotated.AccessToken)
+	app.Router().ServeHTTP(sessionsRec, sessionsReq)
+	successor, _ := splitCurrent(t, decodeSessions(t, sessionsRec))
 	// The rotated-away token at once, within the grace: a lost race, a 401
 	// that revokes nothing, but recorded.
 	if rec := auditRequest(app, "/api/v1/auth/refresh", "", `{"refresh_token":"`+pair.Data.RefreshToken+`"}`, "req-race"); rec.Code != http.StatusUnauthorized {
@@ -211,8 +217,10 @@ func runAuditTrail(t *testing.T, db *database.DB) {
 	if ok.ActorUserID == nil || *ok.ActorUserID != user.ID || ok.IP == "" {
 		t.Errorf("login = %+v", ok)
 	}
-	if race := byRequest["req-race"]; race.Action != auth.AuditRefreshReuseWithinGrace || race.ActorUserID != nil || race.IP == "" {
-		t.Errorf("within-grace replay = %+v", race)
+	if race := byRequest["req-race"]; race.Action != auth.AuditRefreshReuseWithinGrace || race.ActorUserID != nil || race.IP == "" ||
+		race.TargetUserID == nil || *race.TargetUserID != user.ID || race.TargetType != "session" ||
+		race.TargetID != successor || !strings.Contains(race.Details, `"successor":"live"`) {
+		t.Errorf("within-grace replay = %+v, want user %d and the successor's live session %s", race, user.ID, successor)
 	}
 	revoked := byRequest["req-revoke-all"]
 	if revoked.Action != auth.AuditSessionRevoked || revoked.ActorUserID == nil || *revoked.ActorUserID != user.ID || !strings.Contains(revoked.Details, `"scope":"all"`) {

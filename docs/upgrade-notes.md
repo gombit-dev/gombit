@@ -12,6 +12,23 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 ### Manual: action required
 
+- A refresh with a token rotated less than `GOMBIT_AUTH_REFRESH_REUSE_GRACE` (30 seconds by default) ago, whose successor is still live, is a plain 401, audited as `auth.refresh.reuse_within_grace`, no longer reuse that revokes every session of the user. (`refresh-reuse-grace`, security, [#459](https://github.com/gombit-dev/gombit/issues/459))
+
+  - Configuration: `GOMBIT_AUTH_REFRESH_REUSE_GRACE` is new.
+
+  Two tabs sharing one refresh token no longer sign each other out
+  when their refreshes arrive a round trip apart. The reuse cascade
+  still runs for a rotated token presented after the grace, or whose
+  successor was rotated again, before it expires; within it nothing is
+  issued for the old token. Set `GOMBIT_AUTH_REFRESH_REUSE_GRACE=0`
+  to keep the strict rule (an app with no clients sharing a refresh
+  token across tabs). An audit consumer sees the new
+  `auth.refresh.reuse_within_grace` action, whose target is the
+  successor's session and whose details say whether it was live. The
+  cost: if a thief rotates a stolen token first and the legitimate
+  client's refresh lands within the grace, the client gets a 401 and
+  the thief's session is not revoked; that event names it.
+
 - **Breaking.** Email verification adds `users.email_verified_at` and `users.verified_email`, and a table, `auth_one_time_tokens`, which registration and `gombit createsuperuser` write: an app migrates before it runs this release. (`email-verification-schema`, schema, [#331](https://github.com/gombit-dev/gombit/issues/331))
 
   - Framework schema: `auth.User` (`users`): altered.
@@ -141,20 +158,6 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   analysis.
 
 ### Informational
-
-- A refresh with a token rotated less than `config.AuthConfig.RefreshReuseGrace` (30 seconds by default) ago, whose successor is still live, is a plain 401, audited as `auth.refresh.reuse_within_grace`, no longer reuse that revokes every session of the user. (`refresh-reuse-grace`, security, [#459](https://github.com/gombit-dev/gombit/issues/459))
-
-  Two tabs sharing one refresh token no longer sign each other out
-  when their refreshes arrive a round trip apart. The reuse cascade
-  still runs for a rotated token presented after the grace, or whose
-  successor was rotated again, before it expires; within it nothing is
-  issued for the old token. Set `RefreshReuseGrace` to zero to keep
-  the strict rule (an app with no clients sharing a refresh token
-  across tabs). An audit consumer sees the new
-  `auth.refresh.reuse_within_grace` action. The
-  cost: if a thief rotates a stolen token first and the legitimate
-  client's refresh lands within those 30 seconds, the client gets a
-  401 and the thief's session is not revoked.
 
 - Bearer-mode session revocation errors include the `WWW-Authenticate: Bearer realm="api"` challenge when the handler returns 401. (`bearer-handler-401-challenge`, api, [#604](https://github.com/gombit-dev/gombit/issues/604))
 

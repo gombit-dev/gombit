@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -512,6 +513,27 @@ func runSessionsService(t *testing.T, db *database.DB) {
 			if e.authenticates(pair) {
 				t.Errorf("%s still authenticates after the reuse cascade", name)
 			}
+		}
+	})
+
+	// A within-grace replay whose successor was signed out is audited as
+	// such: the event names the successor's session and says it ended.
+	t.Run("within-grace audit says the successor ended", func(t *testing.T) {
+		e := newEnv(t)
+		ada, pairs := e.user(t, "graceaudit", 1)
+		next := e.rotate(t, pairs[0])
+		if err := e.svc.RevokeRefresh(e.ctx, next.RefreshToken); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := e.svc.RotateRefresh(e.ctx, pairs[0].RefreshToken); !errors.Is(err, auth.ErrInvalidRefreshToken) || errors.Is(err, auth.ErrRotationRaced) {
+			t.Fatalf("RotateRefresh(rotated token, successor logged out) = %v, want a plain ErrInvalidRefreshToken", err)
+		}
+		var ev auth.AuditEvent
+		if err := db.Where("action = ? AND target_user_id = ?", auth.AuditRefreshReuseWithinGrace, ada.ID).First(&ev).Error; err != nil {
+			t.Fatalf("no %s event: %v", auth.AuditRefreshReuseWithinGrace, err)
+		}
+		if ev.TargetType != "session" || ev.TargetID == "" || !strings.Contains(ev.Details, `"successor":"ended"`) {
+			t.Fatalf("event = %+v, want the successor's session, ended", ev)
 		}
 	})
 
