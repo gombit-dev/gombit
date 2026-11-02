@@ -40,6 +40,20 @@ var (
 // uniqueness check.
 var ErrEmailTaken = errEmailTaken
 
+// ErrInvalidCredentials is the client-side failure of a login: a 401.
+// Authenticate returns it for an unknown email or a wrong password; Login
+// and IssueTokens also for a password changed, or an account deleted,
+// between the password check and the session; Register and CreateSuperuser
+// for an empty email.
+// Any other error they return is a server failure (the database's, for
+// one), not a credential problem, and answers a 500 (#460).
+var ErrInvalidCredentials = errInvalidCredentials
+
+// ErrInvalidAccessToken is the error ParseAccess returns for an access token
+// that is malformed, expired, or whose session has ended: a 401. Any other
+// error is a server failure loading the user or the session (#460).
+var ErrInvalidAccessToken = errInvalidAccessToken
+
 func normalizeEmail(email string) string {
 	return strings.ToLower(strings.TrimSpace(email))
 }
