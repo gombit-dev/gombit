@@ -509,6 +509,29 @@ releases:
 
   - version: unreleased
     changes:
+      - id: refresh-reuse-grace
+        kind: manual
+        area: security
+        summary: "A refresh with a token rotated less than `GOMBIT_AUTH_REFRESH_REUSE_GRACE` (30 seconds by default) ago, whose successor is still live, is a plain 401, audited as `auth.refresh.reuse_within_grace`, no longer reuse that revokes every session of the user."
+        details: |
+          Two tabs sharing one refresh token no longer sign each other out
+          when their refreshes arrive a round trip apart. The reuse cascade
+          still runs for a rotated token presented after the grace, or whose
+          successor was rotated again, before it expires; within it nothing is
+          issued for the old token. Set `GOMBIT_AUTH_REFRESH_REUSE_GRACE=0`
+          to keep the strict rule (an app with no clients sharing a refresh
+          token across tabs). An audit consumer sees the new
+          `auth.refresh.reuse_within_grace` action, whose target is the
+          successor's session and whose details say whether it was live. The
+          cost: if a thief rotates a stolen token first and the legitimate
+          client's refresh lands within the grace, the client gets a 401 and
+          the thief's session is not revoked; that event names it, by the
+          session id of the moment (it changes when the session next
+          refreshes, so act on it promptly).
+        config:
+          - {var: GOMBIT_AUTH_REFRESH_REUSE_GRACE, change: added}
+        refs: [459]
+
       - id: admin-uuid-case-insensitive
         kind: informational
         area: behavior
@@ -554,6 +577,7 @@ releases:
         area: api
         summary: "The email-verification resend operation's OpenAPI contract declares its 429 response and integer `Retry-After` header."
         refs: [611]
+
       - id: resource-operation-id-collision
         kind: informational
         area: cli

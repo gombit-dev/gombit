@@ -44,6 +44,16 @@ const (
 	// AuditRefreshReuse: an already-rotated refresh token was presented
 	// again, and every session of the user was revoked.
 	AuditRefreshReuse AuditAction = "auth.refresh.reuse_detected"
+	// AuditRefreshReuseWithinGrace: a rotated refresh token was presented
+	// again within config.AuthConfig.RefreshReuseGrace of its rotation: a
+	// 401, nothing revoked. Usually two tabs refreshing a round trip apart;
+	// also what a thief who rotated a stolen token first leaves when the
+	// legitimate client comes back within the grace, the one trace of it.
+	// TargetType "session" and TargetID name the successor's session by the
+	// id GET /auth/sessions showed for it then, which changes when that
+	// session next refreshes; Details "successor" is "live" (it may be
+	// either) or "ended" (signed out before the request came).
+	AuditRefreshReuseWithinGrace AuditAction = "auth.refresh.reuse_within_grace"
 	// AuditSessionRevoked: sessions were revoked (Details "scope": one,
 	// others or all).
 	AuditSessionRevoked AuditAction = "auth.session.revoked"
