@@ -63,9 +63,9 @@ untranslated driver error is classified by its code (PostgreSQL SQLSTATE,
 MySQL error number, SQLite extended result code), never by its text, so a NOT
 NULL violation on a column named `unique_code` is not a conflict; only an
 error that carries no PostgreSQL, MySQL or SQLite driver error falls back to
-the drivers' fixed wording (`UNIQUE constraint failed`, `violates unique
-constraint`, `Duplicate entry`). Callers should not inspect either
-themselves:
+the fixed wording of gorm's sentinels and the drivers' messages (`duplicated
+key not allowed`, `UNIQUE constraint failed`, `violates unique constraint`,
+`Duplicate entry`). Callers should not inspect either themselves:
 
 ```go
 if err := db.Create(&row).Error; err != nil {

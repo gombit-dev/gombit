@@ -2,7 +2,10 @@ package database
 
 import (
 	"context"
+	"database/sql"
+	"database/sql/driver"
 	"errors"
+	"fmt"
 	"net/http"
 	"testing"
 
@@ -38,6 +41,14 @@ func TestIsUniqueViolation(t *testing.T) {
 		{name: "mysql 1586", err: &mysqldriver.MySQLError{Number: 1586, Message: "Duplicate entry 'a' for key 'uniq_sku'"}, want: true},
 		{name: "mysql 1048 on duplicate_of", err: &mysqldriver.MySQLError{Number: 1048, Message: "Column 'duplicate_of' cannot be null"}, want: false},
 		{name: "mysql 1146 unique_codes", err: &mysqldriver.MySQLError{Number: 1146, Message: "Table 'app.unique_codes' doesn't exist"}, want: false},
+		{name: "mysql 1761 cascade duplicate", err: &mysqldriver.MySQLError{Number: 1761, Message: "Foreign key constraint for table 'parents', record '1' would lead to a duplicate entry in table 'children'"}, want: true},
+		{name: "mysql 1762 cascade duplicate", err: &mysqldriver.MySQLError{Number: 1762, Message: "Foreign key constraint for table 'parents', record '1' would lead to a duplicate entry in a child table"}, want: true},
+		// gorm.AddError flattens a translated sentinel into a later error
+		// with fmt.Errorf("%v; %w"): errors.Is no longer finds it, and no
+		// driver error is left to read a code from.
+		{name: "flattened ErrDuplicatedKey, tx done", err: fmt.Errorf("%v; %w", gorm.ErrDuplicatedKey, sql.ErrTxDone), want: true},
+		{name: "flattened ErrDuplicatedKey, bad conn", err: fmt.Errorf("%v; %w", gorm.ErrDuplicatedKey, driver.ErrBadConn), want: true},
+		{name: "flattened ErrForeignKeyViolated", err: fmt.Errorf("%v; %w", gorm.ErrForeignKeyViolated, sql.ErrTxDone), want: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -67,6 +78,8 @@ func TestIsForeignKeyViolation(t *testing.T) {
 		{name: "mysql 1451", err: &mysqldriver.MySQLError{Number: 1451, Message: "Cannot delete or update a parent row: a foreign key constraint fails"}, want: true},
 		{name: "mysql 1452", err: &mysqldriver.MySQLError{Number: 1452, Message: "Cannot add or update a child row: a foreign key constraint fails"}, want: true},
 		{name: "mysql 1048", err: &mysqldriver.MySQLError{Number: 1048, Message: "Column 'foreign_key_id' cannot be null"}, want: false},
+		{name: "flattened ErrForeignKeyViolated, tx done", err: fmt.Errorf("%v; %w", gorm.ErrForeignKeyViolated, sql.ErrTxDone), want: true},
+		{name: "flattened ErrDuplicatedKey", err: fmt.Errorf("%v; %w", gorm.ErrDuplicatedKey, sql.ErrTxDone), want: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -94,6 +107,7 @@ func TestIsNotNullViolation(t *testing.T) {
 		{name: "postgres 23505 on not_null_key", err: &pgconn.PgError{Code: "23505", Message: `duplicate key value violates unique constraint "not null constraint failed"`}, want: false},
 		{name: "mysql 1048", err: &mysqldriver.MySQLError{Number: 1048, Message: "Column 'name' cannot be null"}, want: true},
 		{name: "mysql 1062", err: &mysqldriver.MySQLError{Number: 1062, Message: "Duplicate entry 'cannot be null' for key 'widgets.name'"}, want: false},
+		{name: "mysql 1364", err: &mysqldriver.MySQLError{Number: 1364, Message: "Field 'unique_code' doesn't have a default value"}, want: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -270,6 +284,55 @@ func TestMapPersistErrorSQLiteNotNullConstraint(t *testing.T) {
 	}
 	mapped := MapPersistError(context.Background(), err, "resource already exists", "persist widget")
 	assertMapped(t, mapped, err, http.StatusUnprocessableEntity, contract.CodeValidationError)
+}
+
+// fakeSQLiteError has the exported fields sqliteExtendedCode reads from a
+// go-sqlite3 Error, so the SQLite code table is pinned without cgo. Through
+// Open, TranslateError turns 2067, 1555 and 787 into gorm sentinels before a
+// classifier sees them, so no real SQLite test reaches those cases.
+type fakeSQLiteError struct {
+	Code         int
+	ExtendedCode int
+	Msg          string `json:"-"`
+}
+
+func (e fakeSQLiteError) Error() string { return e.Msg }
+
+// TestDriverConstraintSQLiteCodes: the extended code decides, whatever the
+// message says; 1811 (SQLITE_CONSTRAINT_TRIGGER) is a foreign-key violation
+// only with the wording SQLite's ON DELETE RESTRICT action raises.
+func TestDriverConstraintSQLiteCodes(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want constraintKind
+	}{
+		{"unique 2067", fakeSQLiteError{19, 2067, "UNIQUE constraint failed: widgets.sku"}, constraintUnique},
+		{"primary key 1555", fakeSQLiteError{19, 1555, "UNIQUE constraint failed: widgets.id"}, constraintUnique},
+		{"foreign key 787", fakeSQLiteError{19, 787, "FOREIGN KEY constraint failed"}, constraintForeignKey},
+		{"not null 1299, unique wording", fakeSQLiteError{19, 1299, "UNIQUE constraint failed: t.unique_code"}, constraintNotNull},
+		{"RESTRICT 1811", fakeSQLiteError{19, 1811, "FOREIGN KEY constraint failed"}, constraintForeignKey},
+		{"app trigger 1811", fakeSQLiteError{19, 1811, "duplicate entry: UNIQUE constraint failed"}, constraintOther},
+		{"check 275", fakeSQLiteError{19, 275, "CHECK constraint failed: unique_code"}, constraintOther},
+		{"wrapped unique 2067", fmt.Errorf("create: %w", fakeSQLiteError{19, 2067, "UNIQUE constraint failed: widgets.sku"}), constraintUnique},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := driverConstraint(tt.err)
+			if !ok || got != tt.want {
+				t.Fatalf("driverConstraint(%v) = %v, %v; want %v, true", tt.err, got, ok, tt.want)
+			}
+			if got, want := IsUniqueViolation(tt.err), tt.want == constraintUnique; got != want {
+				t.Errorf("IsUniqueViolation = %v, want %v", got, want)
+			}
+			if got, want := IsForeignKeyViolation(tt.err), tt.want == constraintForeignKey; got != want {
+				t.Errorf("IsForeignKeyViolation = %v, want %v", got, want)
+			}
+			if got, want := IsNotNullViolation(tt.err), tt.want == constraintNotNull; got != want {
+				t.Errorf("IsNotNullViolation = %v, want %v", got, want)
+			}
+		})
+	}
 }
 
 // A NOT NULL violation on a column named unique_code, in a table named

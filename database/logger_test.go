@@ -238,6 +238,13 @@ func TestLoggerDemotesOnlyStructuredClientErrors(t *testing.T) {
 		"mysql NOT NULL":       &mysqldriver.MySQLError{Number: 1048, Message: "Column 'name' cannot be null"},
 		"sqlite NOT NULL":      sqliteNotNull,
 		"wrapped duplicate":    fmt.Errorf("create user: %w", gorm.ErrDuplicatedKey),
+		// Codes gorm's translators leave untranslated: the mappers answer
+		// them with a 4xx, so the logger must not report them as failures.
+		"mysql 1586 duplicate":   &mysqldriver.MySQLError{Number: 1586, Message: "Duplicate entry 'a' for key 'uniq_sku'"},
+		"mysql 1216 FK":          &mysqldriver.MySQLError{Number: 1216, Message: "Cannot add or update a child row: a foreign key constraint fails"},
+		"mysql 1217 FK":          &mysqldriver.MySQLError{Number: 1217, Message: "Cannot delete or update a parent row: a foreign key constraint fails"},
+		"mysql 1364 NOT NULL":    &mysqldriver.MySQLError{Number: 1364, Message: "Field 'name' doesn't have a default value"},
+		"sqlite RESTRICT delete": fakeSQLiteError{Code: 19, ExtendedCode: sqliteConstraintTrigger, Msg: "FOREIGN KEY constraint failed"},
 	} {
 		if !isClientWriteError(err) {
 			t.Errorf("%s: not demoted", name)
@@ -254,6 +261,7 @@ func TestLoggerDemotesOnlyStructuredClientErrors(t *testing.T) {
 		"postgres ON CONFLICT":     &pgconn.PgError{Code: "42P10", Message: "there is no unique or exclusion constraint matching the ON CONFLICT specification"},
 		"untranslated check":       gorm.ErrCheckConstraintViolated,
 		"untranslated unique text": errors.New("UNIQUE constraint failed: users.email"),
+		"sqlite app trigger":       fakeSQLiteError{Code: 19, ExtendedCode: sqliteConstraintTrigger, Msg: "duplicate entry refused by trigger"},
 		"connection":               errors.New("connection refused"),
 	} {
 		if isClientWriteError(err) {
