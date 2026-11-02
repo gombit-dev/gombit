@@ -173,6 +173,17 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   now exported: an app's own login or gate built on `Authenticate` /
   `ParseAccess` answers 401 only for them.
 
+- `database.IsUniqueViolation`, `IsForeignKeyViolation` and `IsNotNullViolation` classify a driver error by its code, not by words in its message, so an error naming a `unique_code` column is no longer a 409 conflict. (`constraint-errors-by-driver-code`, behavior, [#456](https://github.com/gombit-dev/gombit/issues/456))
+
+  A NOT NULL violation on a column named `unique_code` was a `409
+  conflict`; it is the `422` "missing a required value" now. An error
+  that carries no PostgreSQL, MySQL or SQLite driver error is matched
+  by the fixed wording of gorm's sentinels and the drivers' messages
+  (`duplicated key not allowed`, `UNIQUE constraint failed`,
+  `violates unique constraint`, `Duplicate entry`), no longer by the
+  bare words `unique` or `duplicate`. MySQL 1364 (`Field ... doesn't
+  have a default value`) is a `422` now, where it was a `500`.
+
 - Bearer-mode session revocation errors include the `WWW-Authenticate: Bearer realm="api"` challenge when the handler returns 401. (`bearer-handler-401-challenge`, api, [#604](https://github.com/gombit-dev/gombit/issues/604))
 
   Cookie-mode 401 responses still omit a Bearer challenge.
