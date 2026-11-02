@@ -509,6 +509,23 @@ releases:
 
   - version: unreleased
     changes:
+      - id: admin-uuid-case-insensitive
+        kind: informational
+        area: behavior
+        summary: "The admin reads a value for a `uuid.UUID` field (a path id, a filter, a belongs_to or many-to-many key, a written value) as `uuid.Parse` does and uses its canonical lower case, so an upper-case UUID finds its row on every driver."
+        details: |
+          Braced, `urn:uuid:` and unhyphenated spellings are accepted for such
+          a field too, where they were a 422. A Go `string` field declared
+          `Type: admin.TypeUUID` keeps the hyphenated form only and the
+          spelling sent, written and compared, so rows it holds are found as
+          before. One difference: a PATCH that sends such a key in a spelling
+          other than the stored one is now refused as a key change (422 `id:
+          cannot be changed`), where it was ignored, since on SQLite and in a
+          PostgreSQL text column that spelling names no row; on MySQL and a
+          native PostgreSQL `uuid` column, send the key as it was read, or
+          leave it out.
+        refs: [457]
+
       - id: constraint-errors-by-driver-code
         kind: informational
         area: behavior
