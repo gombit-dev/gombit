@@ -198,3 +198,6 @@ func HasherOf(s *Service) Hasher { return s.hasher }
 func ContextWithAddress(ctx context.Context, ip string) context.Context {
 	return context.WithValue(ctx, requestInfoKey{}, requestInfo{ip: ip})
 }
+
+// ThrottleProbed reports whether the probe of the throttles' store decided.
+func ThrottleProbed(s *Service) bool { return s.throttle.probed.Load() }

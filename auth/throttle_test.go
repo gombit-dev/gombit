@@ -155,6 +155,33 @@ func runThrottleService(t *testing.T, db *database.DB) {
 		if _, err := e.svc.Authenticate(from("203.0.113.60"), strings.ToLower(email), testPassword); err != nil {
 			t.Fatalf("a mixed-case row, signing in with the normalized email = %v", err)
 		}
+		// Its LoginPerAccount, filled, is emptied by a reset: the bucket
+		// the reset clears is the one logins count in.
+		p := auth.DefaultThrottlePolicy()
+		p.LoginPerAccount = auth.ThrottleLimit{Limit: 3, Window: time.Hour}
+		e = newThrottleEnv(t, db, nil, auth.WithThrottlePolicy(p))
+		user := auth.User{Email: email}
+		if err := e.db.Where("email = ?", email).First(&user).Error; err != nil {
+			t.Fatal(err)
+		}
+		for i := range 3 {
+			_, _ = e.svc.Authenticate(from(fmt.Sprintf("198.51.100.%d", 110+i)), strings.ToLower(email), "guess")
+		}
+		_, err = e.svc.Authenticate(from("198.51.100.119"), strings.ToLower(email), testPassword)
+		throttled(t, err, "LoginPerAccount")
+		if err := e.svc.RequestPasswordReset(ctx, strings.ToLower(email)); err != nil {
+			t.Fatal(err)
+		}
+		msg, ok := e.mail.Last(user.Email)
+		if !ok || msg.Kind != auth.MessageResetPassword {
+			t.Fatalf("no reset message for the mixed-case row (last %+v)", msg)
+		}
+		if _, err := e.svc.ResetPassword(ctx, msg.Token, "a-reset-horse"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := e.svc.Authenticate(from("198.51.100.120"), strings.ToLower(email), "a-reset-horse"); err != nil {
+			t.Fatalf("after the reset = %v", err)
+		}
 	})
 
 	t.Run("an account and an address that is none are throttled alike", func(t *testing.T) {
@@ -478,6 +505,12 @@ func runThrottleService(t *testing.T, db *database.DB) {
 
 	t.Run("a cache that keeps nothing still throttles", func(t *testing.T) {
 		e := newThrottleEnv(t, db, nil, auth.WithThrottleStore(cache.Namespace("app", cache.Noop{})))
+		// The probe runs in the background from NewService.
+		for deadline := time.Now().Add(5 * time.Second); !auth.ThrottleProbed(e.svc); time.Sleep(time.Millisecond) {
+			if time.Now().After(deadline) {
+				t.Fatal("the store probe did not decide")
+			}
+		}
 		attacker := from("198.51.100.95")
 		for range 5 {
 			if _, err := e.svc.Authenticate(attacker, "noop-store@example.com", "x"); !errors.Is(err, auth.ErrInvalidCredentials) {

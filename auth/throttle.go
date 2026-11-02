@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -29,9 +30,9 @@ import (
 // login, a valid token) are refunded after. A rule over its limit answers
 // ErrTooManyAttempts with the wait, before any of that work, and the same
 // for an email that has an account and one that has none: the subject is
-// what was typed (normalized), and only the account's exact email is the
-// account (findUserByEmail), so a spelling a database's collation folds is
-// no fresh allowance. Every rule is read before any is counted, so a
+// what was typed (normalized), and only an email that normalizes to the
+// account's stored one is the account (findUserByEmail), so a spelling a
+// database's collation folds is no fresh allowance. Every rule is read before any is counted, so a
 // refused request writes nothing for the subjects it chose.
 //
 // The client address is the request's (gin's ClientIP, so
@@ -43,8 +44,8 @@ import (
 //
 // A cache that fails does not lock users out: the attempt goes on, as if
 // unthrottled, and a warning is logged (at most once a minute). A cache
-// that keeps nothing (an increment answering 0) is replaced by the own
-// memory cache, with a warning.
+// that keeps nothing is found by a background probe (storeKeepsNothing) and
+// replaced by the own memory cache, with a warning.
 
 // ThrottleLimit allows Limit attempts in any Window. A zero Limit or Window
 // turns the rule off.
@@ -171,9 +172,11 @@ type throttler struct {
 	// keepsNothing is its answer: the counts go to the own memory
 	// cache instead. A probe that cannot reach the store decides nothing,
 	// and runs again on the next use.
-	probeMu      sync.Mutex
 	probed       atomic.Bool
 	keepsNothing atomic.Bool
+	probing      atomic.Bool
+	// nextProbe is when a probe may start again after one failed (unix ns).
+	nextProbe atomic.Int64
 	// warned is when a store failure was last logged (unix seconds).
 	warned atomic.Int64
 	// refusing is, per rule, when a refusal was last logged.
@@ -198,21 +201,42 @@ func (t *throttler) cache() cache.Cache {
 	return t.own
 }
 
-// storeKeepsNothing probes store once: a counter written to a key of its
-// own, read back, then deleted. A store that answers but keeps nothing (a
-// noop cache, however wrapped) would turn every rule off without a word.
+// storeKeepsNothing reports whether a probe of store found that it keeps
+// nothing (a noop cache, however wrapped), which would turn every rule off
+// without a word. It never waits: until a probe has decided, the answer is
+// no (the store is used), and a probe that is due starts in the background
+// (probe). A request is never held by it, even when the store hangs.
 func (t *throttler) storeKeepsNothing() bool {
 	if t.probed.Load() {
 		return t.keepsNothing.Load()
 	}
-	t.probeMu.Lock()
-	defer t.probeMu.Unlock()
-	if t.probed.Load() {
-		return t.keepsNothing.Load()
+	t.startProbe()
+	return false
+}
+
+// throttleProbeRetry is how long after a probe that could not reach the
+// store the next one may start.
+const throttleProbeRetry = time.Minute
+
+// startProbe starts a probe of store in the background, unless one is
+// running, has decided, or failed less than throttleProbeRetry ago.
+func (t *throttler) startProbe() {
+	if t.store == nil || t.probed.Load() || time.Now().UnixNano() < t.nextProbe.Load() || !t.probing.CompareAndSwap(false, true) {
+		return
 	}
+	go t.probe()
+}
+
+// probe writes a counter to a key of its own (random, so no other probe
+// shares it), reads it back, and deletes it. A store that cannot be reached
+// decides nothing: the next probe waits throttleProbeRetry.
+func (t *throttler) probe() {
+	defer t.probing.Store(false)
 	ctx, cancel := context.WithTimeout(context.Background(), throttleRefundTimeout)
 	defer cancel()
-	key := "auth:throttle:probe:" + strconv.FormatInt(time.Now().UnixNano(), 36) + ":" + strconv.FormatUint(throttleProbeSeq.Add(1), 36)
+	var nonce [12]byte
+	_, _ = rand.Read(nonce[:])
+	key := "auth:throttle:probe:" + hex.EncodeToString(nonce[:])
 	count, err := cache.IncrementTTL(ctx, t.store, key, 1, time.Minute)
 	var stored int64
 	var found bool
@@ -220,8 +244,9 @@ func (t *throttler) storeKeepsNothing() bool {
 		found, err = t.store.Get(ctx, key, &stored)
 	}
 	if err != nil {
-		t.warn(err) // undecided: probe again next time
-		return false
+		t.nextProbe.Store(time.Now().Add(throttleProbeRetry).UnixNano())
+		t.warn(err)
+		return
 	}
 	_ = t.store.Delete(ctx, key)
 	if count != 1 || !found || stored != 1 {
@@ -229,11 +254,7 @@ func (t *throttler) storeKeepsNothing() bool {
 		t.logger().Warn("auth: the throttle's cache keeps no counts (a noop cache?); counting in process memory instead")
 	}
 	t.probed.Store(true)
-	return t.keepsNothing.Load()
 }
-
-// throttleProbeSeq tells apart the probe keys of one process.
-var throttleProbeSeq atomic.Uint64
 
 // close stops the throttler's own memory cache, if it made one.
 func (t *throttler) close() {
@@ -519,7 +540,13 @@ func (s *Service) loginRules(ctx context.Context, email string) (pair throttleRu
 	return pair, all
 }
 
+// accountLoginRule is LoginPerAccount for email, normalized here so that a
+// caller holding the stored form (which may not be) counts in the same
+// bucket as a login typing it.
 func accountLoginRule(p ThrottlePolicy, email string) throttleRule {
+	if email != "\x00" {
+		email = normalizeEmail(email)
+	}
 	return throttleRule{name: "LoginPerAccount", limit: p.LoginPerAccount, subject: email}
 }
 

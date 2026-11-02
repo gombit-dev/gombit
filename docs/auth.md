@@ -444,8 +444,10 @@ bcrypt, the token's transaction):
   recreated; emails and addresses are hashed into the keys, never stored. A cache that fails does not lock anyone out: the
   attempt goes on unthrottled and a warning is logged (at most once a
   minute). A cache that answers but keeps nothing (a noop one, however
-  wrapped) is found by a probe on first use (a counter written, read back,
-  deleted): the Service warns and counts in its own memory instead.
+  wrapped) is found by a probe the Service runs in the background when it
+  starts (a counter written to a random key, read back, deleted; retried a
+  minute after one that could not reach the store): it then warns and
+  counts in its own memory instead. No request ever waits on the probe.
 - **Configuration.** `auth.WithThrottlePolicy(p)` replaces the limits (start
   from `auth.DefaultThrottlePolicy()`; a zero `Limit` turns a rule off).
   `GOMBIT_AUTH_THROTTLE_DISABLED=true` turns them all off, for an app whose

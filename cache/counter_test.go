@@ -248,15 +248,19 @@ func TestDecrementExisting(t *testing.T) {
 	if _, found, _ := (Noop{}).DecrementExisting(ctx, "x", 1); found {
 		t.Fatal("Noop found a counter")
 	}
+	// A Cache without a Counter: decremented when the key is there, and
+	// nothing left behind when it is not.
 	plain := plainCache{NewMemory()}
-	if _, err := plain.Increment(ctx, "p", 1); err != nil {
+	if _, err := plain.Increment(ctx, "p", 2); err != nil {
 		t.Fatal(err)
 	}
-	if _, found, err := DecrementExisting(ctx, plain, "p", 1); err != nil || found {
-		t.Fatalf("a Cache without a Counter = found %v, %v; want nothing done", found, err)
+	if got, found, err := DecrementExisting(ctx, plain, "p", 1); err != nil || !found || got != 1 {
+		t.Fatalf("a Cache without a Counter = %d, %v, %v; want 1, found", got, found, err)
 	}
-	var left int64
-	if _, err := plain.Get(ctx, "p", &left); err != nil || left != 1 {
-		t.Fatalf("a Cache without a Counter's value = %d, %v; want it untouched", left, err)
+	if _, found, err := DecrementExisting(ctx, plain, "missing", 1); err != nil || found {
+		t.Fatalf("a missing key in a Cache without a Counter = found %v, %v", found, err)
+	}
+	if found, _ := plain.Get(ctx, "missing", new(int64)); found {
+		t.Fatal("the fallback left a counter behind")
 	}
 }

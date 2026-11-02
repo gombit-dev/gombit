@@ -36,21 +36,36 @@ type Cache interface {
 // found reports whether the key existed.
 //
 // The built-in drivers (memory, redis, noop) and Namespace implement it;
-// IncrementTTL and DecrementExisting (the functions) fall back for a Cache
-// that does not.
+// IncrementTTL and DecrementExisting (the functions) fall back, not
+// atomically, for a Cache that does not.
 type Counter interface {
 	IncrementTTL(ctx context.Context, key string, delta int64, ttl time.Duration) (int64, error)
 	DecrementExisting(ctx context.Context, key string, delta int64) (value int64, found bool, err error)
 }
 
 // DecrementExisting takes delta off key in c only if it exists, through c's
-// Counter. A Cache without one cannot do it without creating the key on a
-// miss, so nothing is written: found is false.
+// Counter when it has one. For a Cache without one it decrements, then
+// deletes the key when the decrement created it (the result is -delta: no
+// counter was there): not atomic, so between the two another caller's
+// increment of the new key can be lost with it (an undercount, never a
+// negative counter left behind), and a counter that held exactly 0 is
+// deleted rather than left at -delta (the same count, as far as a limit
+// goes). found is false for a key that did not exist.
 func DecrementExisting(ctx context.Context, c Cache, key string, delta int64) (int64, bool, error) {
 	if counter, ok := c.(Counter); ok {
 		return counter.DecrementExisting(ctx, key, delta)
 	}
-	return 0, false, nil
+	value, err := c.Increment(ctx, key, -delta)
+	if err != nil {
+		return 0, false, err
+	}
+	if value == -delta {
+		if err := c.Delete(ctx, key); err != nil {
+			return 0, false, err
+		}
+		return 0, false, nil
+	}
+	return value, true, nil
 }
 
 // IncrementTTL increments key in c by delta and gives it ttl when it has no

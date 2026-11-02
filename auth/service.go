@@ -111,6 +111,10 @@ func NewService(db *gorm.DB, cfg config.Config, opts ...Option) (*Service, error
 	for _, opt := range opts {
 		opt(s)
 	}
+	if !s.throttle.disabled {
+		// Off the request path: whether the throttles' store keeps counts.
+		s.throttle.startProbe()
+	}
 	return s, nil
 }
 
