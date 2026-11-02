@@ -142,10 +142,14 @@ version.
 - A database failure while a login looks the user up, or while the auth gate
   (Bearer or cookie, every protected route and the admin) loads the access
   token's user or session, is a `500` (`internal`), no longer the `401` of
-  wrong credentials or a dead token. A short database blip signed every
-  client out (both SPAs drop the session on a 401), told users their
-  password was wrong, recorded failed logins, and stayed out of 5xx
-  alerting. Only a missing row is a `401`
+  wrong credentials or a dead token, which told users their password was
+  wrong, recorded failed logins, read as a dead session, and stayed out of
+  5xx alerting. Only a missing row is a `401`, and the session stays valid
+  through the outage (the generated SPAs still drop it on any failed
+  refresh or `/me`, which a later change addresses).
+  `auth.ErrInvalidCredentials` and `auth.ErrInvalidAccessToken` are
+  exported, so an app's own login or gate on `Authenticate` / `ParseAccess`
+  can tell them from a server failure
   ([#460](https://github.com/gombit-dev/gombit/issues/460)).
 - An inbound `X-Request-Id` longer than 128 bytes
   (`contract.MaxRequestIDLength`), or holding a space or a control

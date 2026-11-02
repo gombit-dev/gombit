@@ -164,7 +164,10 @@ func (s *Service) createUser(ctx context.Context, email, password string, superu
 	return user, nil
 }
 
-// Authenticate verifies email and password.
+// Authenticate verifies email and password. It fails with
+// ErrInvalidCredentials for an unknown email or a wrong password; any other
+// error is a server failure (the user lookup's database error), which a
+// caller must not answer as wrong credentials (#460).
 func (s *Service) Authenticate(ctx context.Context, email, password string) (User, error) {
 	email = normalizeEmail(email)
 	var user User
@@ -517,10 +520,10 @@ func (s *Service) RevokeRefresh(ctx context.Context, raw string) error {
 }
 
 // ParseAccess validates an access JWT, from the Bearer header or the session
-// cookie, and loads its user. It fails as an invalid access token when the
-// token is invalid or its session has ended (its refresh token row was
-// revoked or has expired), and with the database's own error when loading
-// the user or the session fails (issue #460).
+// cookie, and loads its user. It fails with ErrInvalidAccessToken when the
+// token is invalid or its session has ended (its refresh token row is gone,
+// revoked or expired); any other error is the database's, loading the user
+// or the session, a server failure a gate must not answer as a 401 (#460).
 func (s *Service) ParseAccess(ctx context.Context, token string) (User, error) {
 	user, _, err := s.parseAccess(ctx, token)
 	return user, err

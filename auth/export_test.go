@@ -31,10 +31,6 @@ func SessionIDOf(ctx context.Context, s *Service, access string) (string, error)
 	return s.sessionID(refreshID), nil
 }
 
-// ErrInvalidAccessToken is the error ParseAccess returns for an access token
-// that is malformed, expired, or whose session has ended.
-var ErrInvalidAccessToken = errInvalidAccessToken
-
 // ErrRefreshReuse is the error RotateRefresh returns for the reuse of an
 // already-rotated refresh token.
 var ErrRefreshReuse = errRefreshReuse
@@ -146,9 +142,6 @@ func SetHasher(s *Service, h Hasher) { s.hasher = h }
 // check and the session. Set it before the service is used.
 func SetLoginAuthenticatedHook(s *Service, fn func()) { s.onLoginAuthenticated = fn }
 
-// ErrInvalidCredentials is the error Authenticate and Login return for a
-// wrong email or password.
-var ErrInvalidCredentials = errInvalidCredentials
 
 // SetAuditTimeout replaces the bound on one audit write until the test ends.
 func SetAuditTimeout(t interface{ Cleanup(func()) }, d time.Duration) {

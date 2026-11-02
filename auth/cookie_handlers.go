@@ -41,7 +41,7 @@ func (s *Service) loginCookie(ctx context.Context, input *cookieLoginInput) (*co
 		return nil, mapServiceError(ctx, err)
 	}
 	if err != nil {
-		return nil, contract.WithContext(ctx, contract.Internal("issue tokens"))
+		return nil, contract.WithContext(ctx, contract.Internal("auth request failed"))
 	}
 	return &cookieSessionOutput{
 		SetCookie: s.sessionCookies(pair),

@@ -121,3 +121,22 @@ func openFaultedAuthDB(t *testing.T, kind database.Driver, dsn string, faults *f
 	dropAuthTables()
 	return db
 }
+
+// TestMissingSessionRowIs401: an access token whose refresh token row is
+// gone (an operator purged old rows) is a dead token, a 401, not the 500 of
+// a database failure: the only not-found the gate maps to 401 besides the
+// user's own row (#460).
+func TestMissingSessionRowIs401(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	app := newAuthApp(t)
+	registerUser(t, app, "purged@example.com", testPassword)
+	pair := loginUser(t, app, "purged@example.com", testPassword)
+	if err := app.DB().Where("id = ?", accessClaimsOf(t, pair.AccessToken).Rid).Delete(&auth.RefreshToken{}).Error; err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/me", nil)
+	req.Header.Set("Authorization", "Bearer "+pair.AccessToken)
+	app.Router().ServeHTTP(rec, req)
+	assertError(t, rec, http.StatusUnauthorized, "authentication")
+}
