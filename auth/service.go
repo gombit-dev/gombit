@@ -128,7 +128,10 @@ func (s *Service) now() time.Time {
 // Register creates a user, with an unverified email, and mails them a
 // verification link when a Mailer is configured (a failure to send is
 // logged, not returned: POST /auth/verify-email/resend asks again).
-// Duplicate emails return errEmailTaken.
+// Duplicate emails return errEmailTaken; an empty email
+// ErrInvalidCredentials; any other email that is not a bare address
+// ErrInvalidEmail, and a password the policy refuses a PasswordPolicyError
+// (CheckNewAccount; #461).
 func (s *Service) Register(ctx context.Context, email, password string) (User, error) {
 	// Every registration counts (RegisterPerAddress), before the hash.
 	if _, err := s.throttle.reserve(ctx, throttleRule{name: "RegisterPerAddress", limit: s.throttle.policy.RegisterPerAddress, subject: requestAddress(ctx)}); err != nil {
@@ -144,9 +147,12 @@ func (s *Service) Register(ctx context.Context, email, password string) (User, e
 }
 
 // CreateSuperuser creates a user with IsSuperuser set, for gombit
-// createsuperuser (M4-6). It shares Register's hasher and uniqueness path;
-// duplicate emails return errEmailTaken. The operator who creates it vouches
-// for the address, so its email starts verified, and no message is sent.
+// createsuperuser (M4-6). It shares Register's hasher, uniqueness path and
+// rules: an empty email is ErrInvalidCredentials, any other one that is not
+// a bare address ErrInvalidEmail, a password the policy refuses a
+// PasswordPolicyError (CheckNewAccount), a duplicate email errEmailTaken.
+// The operator who creates it vouches for the address, so its email starts
+// verified, and no message is sent.
 func (s *Service) CreateSuperuser(ctx context.Context, email, password string) (User, error) {
 	user, err := s.createUser(ctx, email, password, true)
 	if err != nil {
@@ -156,10 +162,34 @@ func (s *Service) CreateSuperuser(ctx context.Context, email, password string) (
 	return user, nil
 }
 
+// CheckNewAccount reports whether email and password meet the account rules
+// Register and CreateSuperuser apply, without touching the database (gombit
+// createsuperuser checks before it opens one); those also refuse a duplicate
+// email and a throttled address. Its verdict matches theirs, but a blank
+// email, which it refuses as ErrInvalidEmail, is ErrInvalidCredentials from
+// them. Two rules, for two reasons (#461):
+//
+//   - the email, normalized, must be a bare address of at most 255
+//     characters (ErrInvalidEmail): what POST /auth/login accepts, so the
+//     account can sign in;
+//   - the password must meet the policy a user's own password meets on
+//     register, change and reset, at least 8 characters and at most 72
+//     bytes (a PasswordPolicyError on "password"). Login itself accepts any
+//     non-empty password; this is the policy, not a sign-in requirement.
+func CheckNewAccount(email, password string) error {
+	if !validEmail(normalizeEmail(email)) {
+		return errInvalidEmail
+	}
+	return checkNewPassword(password, "password")
+}
+
 func (s *Service) createUser(ctx context.Context, email, password string, superuser bool) (User, error) {
 	email = normalizeEmail(email)
 	if email == "" {
 		return User{}, errInvalidCredentials
+	}
+	if err := CheckNewAccount(email, password); err != nil {
+		return User{}, err
 	}
 	hash, err := s.hasher.Hash(password)
 	if err != nil {
@@ -180,7 +210,10 @@ func (s *Service) createUser(ctx context.Context, email, password string, superu
 	return user, nil
 }
 
-// Authenticate verifies email and password.
+// Authenticate verifies email and password. It fails with
+// ErrInvalidCredentials for an unknown email or a wrong password; any other
+// error is a server failure (the user lookup's database error), which a
+// caller must not answer as wrong credentials (#460).
 func (s *Service) Authenticate(ctx context.Context, email, password string) (User, error) {
 	email = normalizeEmail(email)
 	// Throttled before the lookup and bcrypt, by the email as typed: the
@@ -192,7 +225,15 @@ func (s *Service) Authenticate(ctx context.Context, email, password string) (Use
 		return User{}, err
 	}
 	user, err := findUserByEmail(s.db.WithContext(ctx), email)
-	if err != nil || user.ID == 0 {
+	if err != nil {
+		// The database failed, not the credentials: a 500, so a blip does
+		// not tell the user their password is wrong, and the attempt gives
+		// its throttle places back, so an outage spends nobody's login
+		// budget (issue #460).
+		res.refund()
+		return User{}, err
+	}
+	if user.ID == 0 {
 		s.compareDummy(password)
 		// No target: the attempted address is not recorded.
 		s.Audit(ctx, AuditEvent{Action: AuditLoginFailed, Details: details("reason", "unknown_account")})
@@ -229,8 +270,9 @@ func (s *Service) Login(ctx context.Context, email, password string) (User, Toke
 // user: it starts a session, so it records the login as succeeded
 // (Authenticate records the failures). user is a snapshot, as Authenticate
 // returned it or as loaded from the database: its PasswordHash must still
-// be the user's when the session starts, or IssueTokens fails as invalid
-// credentials (ErrInvalidCredentials). So Authenticate followed by
+// be the user's when the session starts, and the user must still exist, or
+// IssueTokens fails as invalid credentials (ErrInvalidCredentials); any
+// other error is a server failure. So Authenticate followed by
 // IssueTokens is as safe as Login: a password reset that commits between
 // the two leaves the old password's snapshot unable to start a session.
 func (s *Service) IssueTokens(ctx context.Context, user User) (TokenPair, error) {
@@ -249,7 +291,7 @@ func (s *Service) startSession(ctx context.Context, user User) (User, TokenPair,
 		var err error
 		locked, err = lockUserTx(tx, user.ID)
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return errUserNotFound
+			return errLoginAccountGone
 		}
 		if err != nil {
 			return err
@@ -264,6 +306,13 @@ func (s *Service) startSession(ctx context.Context, user User) (User, TokenPair,
 		s.Audit(ctx, AuditEvent{Action: AuditLoginFailed, TargetUserID: uintPtr(user.ID), Details: details("reason", "password_changed")})
 		return User{}, TokenPair{}, errInvalidCredentials
 	}
+	if errors.Is(err, errLoginAccountGone) {
+		// Deleted between the password check and the session: to the
+		// client, an account that no longer exists, a 401 like an unknown
+		// email, not a server failure (#460).
+		s.Audit(ctx, AuditEvent{Action: AuditLoginFailed, TargetUserID: uintPtr(user.ID), Details: details("reason", "account_deleted")})
+		return User{}, TokenPair{}, errInvalidCredentials
+	}
 	if err != nil {
 		return User{}, TokenPair{}, err
 	}
@@ -274,6 +323,10 @@ func (s *Service) startSession(ctx context.Context, user User) (User, TokenPair,
 // errLoginPasswordChanged is a login whose verified password was replaced
 // before its session started (Login answers it as invalid credentials).
 var errLoginPasswordChanged = errors.New("auth: the password changed during the login")
+
+// errLoginAccountGone is a login whose user was deleted before its session
+// started (Login and IssueTokens answer it as invalid credentials).
+var errLoginAccountGone = errors.New("auth: the account was deleted during the login")
 
 func (s *Service) issueTokens(tx *gorm.DB, user User, now time.Time) (TokenPair, error) {
 	raw, err := newRefreshToken()
@@ -592,8 +645,10 @@ func (s *Service) RevokeRefresh(ctx context.Context, raw string) error {
 }
 
 // ParseAccess validates an access JWT, from the Bearer header or the session
-// cookie, and loads its user. It fails when the token's session has ended:
-// its refresh token row was revoked or has expired.
+// cookie, and loads its user. It fails with ErrInvalidAccessToken when the
+// token is invalid or its session has ended (its refresh token row is gone,
+// revoked or expired); any other error is the database's, loading the user
+// or the session, a server failure a gate must not answer as a 401 (#460).
 func (s *Service) ParseAccess(ctx context.Context, token string) (User, error) {
 	user, _, err := s.parseAccess(ctx, token)
 	return user, err
@@ -611,13 +666,22 @@ func (s *Service) parseAccess(ctx context.Context, token string) (User, uint, er
 	if err != nil {
 		return User{}, 0, err
 	}
+	// Only a missing row is a dead token. Any other failure is the
+	// database's: returned as is, a 500 from the gates, so a blip does not
+	// read as a dead session and sign every client out (issue #460).
 	var user User
 	if err := s.db.WithContext(ctx).First(&user, id).Error; err != nil {
-		return User{}, 0, errInvalidAccessToken
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return User{}, 0, errInvalidAccessToken
+		}
+		return User{}, 0, err
 	}
 	var row RefreshToken
 	if err := s.db.WithContext(ctx).Where("id = ?", claims.RefreshID).First(&row).Error; err != nil {
-		return User{}, 0, errInvalidAccessToken
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return User{}, 0, errInvalidAccessToken
+		}
+		return User{}, 0, err
 	}
 	// One definition of an active session, shared with the sessions API: an
 	// unrevoked refresh token row that has not expired. The refresh TTL is
