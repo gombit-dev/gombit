@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/humatest"
 	"github.com/gombit-dev/gombit/contract"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type lqItem struct {
@@ -147,6 +149,42 @@ func assertListQueryHelpers(t *testing.T, db *DB) {
 		}
 		if rows[0].ID != 1 {
 			t.Fatalf("fallback first row ID = %d, want 1 (order by id)", rows[0].ID)
+		}
+	})
+
+	// A requested ordering ends on the fallback, so rows with equal sort keys
+	// keep one order across pages (issue #455); ordering by the fallback itself
+	// does not repeat it.
+	t.Run("OrderingTiebreaksOnFallback", func(t *testing.T) {
+		ctx := context.Background()
+		allowed := []string{"author_id", "id"}
+		for ordering, want := range map[string][]clause.OrderByColumn{
+			"":           {{Column: clause.Column{Name: "id"}}},
+			"author_id":  {{Column: clause.Column{Name: "author_id"}}, {Column: clause.Column{Name: "id"}}},
+			"-author_id": {{Column: clause.Column{Name: "author_id"}, Desc: true}, {Column: clause.Column{Name: "id"}}},
+			"-id":        {{Column: clause.Column{Name: "id"}, Desc: true}},
+		} {
+			q, err := Ordering(ctx, db.Model(&lqItem{}), ordering, allowed, "id")
+			if err != nil {
+				t.Fatalf("Ordering(%q) error = %v", ordering, err)
+			}
+			var rows []lqItem
+			stmt := q.Session(&gorm.Session{DryRun: true}).Find(&rows).Statement
+			got, _ := stmt.Clauses["ORDER BY"].Expression.(clause.OrderBy)
+			if !reflect.DeepEqual(got.Columns, want) {
+				t.Errorf("Ordering(%q) ORDER BY = %+v, want %+v", ordering, got.Columns, want)
+			}
+		}
+		q, err := Ordering(ctx, db.Model(&lqItem{}), "-author_id", allowed, "id")
+		if err != nil {
+			t.Fatalf("Ordering error = %v", err)
+		}
+		var rows []lqItem
+		if err := q.Find(&rows).Error; err != nil {
+			t.Fatalf("find: %v", err)
+		}
+		if len(rows) != 3 || rows[0].AuthorID != 2 || rows[1].ID >= rows[2].ID {
+			t.Fatalf("-author_id rows = %+v, want author 2 first, then author 1 by ascending id", rows)
 		}
 	})
 

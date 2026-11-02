@@ -782,10 +782,13 @@ func applyOrdering(q *gorm.DB, m *registered, ordering string) (*gorm.DB, error)
 	// Share the `?ordering=<field>` / `-<field>` spelling with the generated list
 	// handler via database.ParseOrdering; the admin keeps its own field-name
 	// allowlist + column resolution (registry-driven, so names differ from
-	// columns).
+	// columns). Every list ends on the primary key, the default order and the
+	// tiebreaker after a requested one: without it LIMIT/OFFSET pages have no
+	// defined order on PostgreSQL/MySQL and a row can repeat or vanish
+	// between pages (issue #455).
 	name, desc := database.ParseOrdering(ordering)
 	if name == "" {
-		return q, nil
+		return orderByPK(q, m, ""), nil
 	}
 	allowed := false
 	for _, n := range m.meta.Ordering {
@@ -801,7 +804,17 @@ func applyOrdering(q *gorm.DB, m *registered, ordering string) (*gorm.DB, error)
 	if !ok {
 		return nil, errors.New("ordering is not allowed for this field")
 	}
-	return q.Order(clause.OrderByColumn{Column: clause.Column{Name: col}, Desc: desc}), nil
+	q = q.Order(clause.OrderByColumn{Column: clause.Column{Name: col}, Desc: desc})
+	return orderByPK(q, m, col), nil
+}
+
+// orderByPK appends the primary key, ascending, unless the list is already
+// ordered by it (ordered is the column a requested ordering used).
+func orderByPK(q *gorm.DB, m *registered, ordered string) *gorm.DB {
+	if m.pkColumn == "" || m.pkColumn == ordered {
+		return q
+	}
+	return q.Order(clause.OrderByColumn{Column: clause.Column{Name: m.pkColumn}})
 }
 
 // updateRow writes an edit of a loaded row (issue #450). Under the PATCH's

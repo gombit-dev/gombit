@@ -139,6 +139,9 @@ func ParseOrdering(ordering string) (field string, desc bool) {
 //   - empty ordering: order by fallback (the stable default, e.g. "id") when
 //     fallback is non-empty; otherwise no ORDER BY is added.
 //   - ordering field not in allowed: a 422 validation error on "ordering".
+//   - any other field: order by it, then by fallback as the tiebreaker, so
+//     rows with equal sort keys keep one order across LIMIT/OFFSET pages
+//     instead of repeating or vanishing between them (issue #455).
 //
 // allowed and fallback are generator-controlled (a resource's declared sortable
 // columns); ordering is user input, matched by exact string equality so only a
@@ -164,7 +167,11 @@ func Ordering(ctx context.Context, q *gorm.DB, ordering string, allowed []string
 			map[string][]string{"ordering": {"ordering is not allowed for this field"}},
 		))
 	}
-	return q.Order(clause.OrderByColumn{Column: clause.Column{Name: field}, Desc: desc}), nil
+	q = q.Order(clause.OrderByColumn{Column: clause.Column{Name: field}, Desc: desc})
+	if fallback != "" && fallback != field {
+		q = q.Order(clause.OrderByColumn{Column: clause.Column{Name: fallback}})
+	}
+	return q, nil
 }
 
 // escapeLike escapes the LIKE metacharacters so a search term matches literally

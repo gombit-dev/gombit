@@ -419,7 +419,10 @@ List query parameters:
   every supported driver — SQLite's built-in `LOWER()` folds ASCII only, so
   full Unicode case-folding parity with Django's `icontains` is not
   guaranteed for accented/non-Latin search terms)
-- `ordering` (a field from `Options.Ordering`; prefix `-` for DESC)
+- `ordering` (a field from `Options.Ordering`; prefix `-` for DESC). The
+  list is ordered by the primary key when it is absent, and ends on the
+  primary key as the tiebreaker when it is present, so pages neither repeat
+  nor skip a row
 - one query key per `Options.Filter` field
 
 Row JSON is keyed by registered field names, plus implicit `created_at` /

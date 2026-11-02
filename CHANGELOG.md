@@ -139,6 +139,14 @@ version.
 
 ### Fixed
 
+- Every list query has a deterministic order, so paging through a list no
+  longer shows a row twice or skips one on PostgreSQL and MySQL, which give
+  no order without `ORDER BY` and none among rows with equal sort keys. The
+  admin list orders by the primary key by default, where it had no `ORDER
+  BY` at all, and the admin and generated list endpoints both end a
+  requested `?ordering=` on the primary key as the tiebreaker
+  (`database.Ordering` appends its `fallback`)
+  ([#455](https://github.com/gombit-dev/gombit/issues/455)).
 - An inbound `X-Request-Id` longer than 128 bytes
   (`contract.MaxRequestIDLength`), or holding a space or a control
   character, is replaced by a generated ID instead of being echoed, logged
