@@ -588,9 +588,11 @@ func lockRefreshRowTx(tx *gorm.DB, id uint) (RefreshToken, error) {
 // RevokeRefresh ends the session of a refresh token: the token itself, or,
 // when the token has rotated (a refresh in flight as the user signs out, or
 // a client still holding the previous token), the session's current head,
-// however many rotations on (#466): any unexpired token of the session's
-// chain ends it. A walk that cannot reach the head (errChainUnresolved)
-// fails rather than succeed having ended nothing. A token unknown, past its
+// up to maxChainHops (1000) rotations on (#466): any unexpired token of the
+// session's chain within that many rotations of the head ends it. One
+// further behind, or a chain that cannot be followed (errChainUnresolved),
+// fails with a 500 rather than succeed having ended nothing; revoking the
+// session (DELETE /auth/sessions) ends it then. A token unknown, past its
 // own expiry, or of a session already ended revokes nothing and succeeds,
 // alike, so logout is idempotent and its answer says nothing about a token;
 // a token past its expiry is no credential, as for refresh (#458). It takes the user's lock (lockUserTx) like rotation does, so a

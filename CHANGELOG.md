@@ -175,8 +175,10 @@ version.
   way (a limitation `docs/auth.md` listed). The `auth.logout` audit event
   names the session it ended, and records `"via":"rotated"` when an old
   token ended it. A rotated token past its own expiry ends nothing, as it
-  refreshes nothing, and answers 200 like an unknown one; a session whose
-  token chain cannot be followed to its head answers 500 rather than 200
+  refreshes nothing, and answers 200 like an unknown one. A token 1000 or
+  more rotations behind its session's current token (a short access TTL
+  gets there within the refresh TTL), or whose chain cannot be followed,
+  answers 500 and ends nothing; revoke the session instead
   ([#466](https://github.com/gombit-dev/gombit/issues/466)).
 - A database failure while a login looks the user up, or while the auth gate
   (Bearer or cookie, every protected route and the admin) loads the access

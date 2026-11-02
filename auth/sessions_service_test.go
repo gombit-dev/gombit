@@ -563,7 +563,7 @@ func runSessionsService(t *testing.T, db *database.DB) {
 
 	// Logout with a token that has rotated (a refresh in flight when the
 	// user signed out, or a client holding the previous token) ends the
-	// session it rotated into: the head of its chain, however many
+	// session it rotated into: the head of its chain, up to maxChainHops
 	// rotations on. A rotated token past its own expiry ends nothing, as
 	// it refreshes nothing; a session already ended stays a quiet success
 	// (#466).
@@ -624,6 +624,27 @@ func runSessionsService(t *testing.T, db *database.DB) {
 			}
 			if ev.TargetType != "session" || ev.TargetID != session || strings.Contains(ev.Details, "via") {
 				t.Fatalf("logout event = %+v, want the session %s, no via", ev, session)
+			}
+		})
+		// A successor that is gone (replaced_by has no foreign key: a manual
+		// delete, a partial restore) is a chain that cannot be followed: the
+		// logout fails rather than succeed having ended nothing.
+		t.Run("successor gone", func(t *testing.T) {
+			e := newEnv(t)
+			_, pairs := e.user(t, "logoutdangling", 1)
+			id, err := auth.AuthenticatedRow(e.ctx, e.svc, pairs[0].AccessToken)
+			if err != nil {
+				t.Fatal(err)
+			}
+			next := e.rotate(t, pairs[0])
+			if err := db.Model(&auth.RefreshToken{}).Where("id = ?", id).Update("replaced_by", 1<<30).Error; err != nil {
+				t.Fatal(err)
+			}
+			if err := e.svc.RevokeRefresh(e.ctx, pairs[0].RefreshToken); !errors.Is(err, auth.ErrChainUnresolved) {
+				t.Fatalf("RevokeRefresh(token whose successor is gone) = %v, want ErrChainUnresolved", err)
+			}
+			if !e.authenticates(next) {
+				t.Fatal("the failed logout ended the session")
 			}
 		})
 		// A walk reads at most maxChainHops rows: from a token one rotation
