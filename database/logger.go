@@ -11,8 +11,6 @@ import (
 	"sync"
 	"time"
 
-	mysqldriver "github.com/go-sql-driver/mysql"
-	"github.com/jackc/pgx/v5/pgconn"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"gorm.io/gorm"
@@ -141,9 +139,12 @@ func (zapLogger) ParamsFilter(_ context.Context, sql string, _ ...any) (string, 
 }
 
 // isClientWriteError reports whether err is, by a structured signal, one
-// MapPersistError answers with a 4xx: a failed Validate hook, a unique or
-// foreign-key violation (translated to gorm's sentinels from the driver's
-// code by TranslateError), or a NOT NULL violation (the driver's own code).
+// MapPersistError or MapDeleteError answers with a 4xx: a failed Validate
+// hook, a unique or foreign-key violation translated to gorm's sentinels by
+// TranslateError, or a unique, foreign-key or NOT NULL violation by the
+// driver's own code (driverConstraint), which covers the codes gorm's
+// translators leave alone (MySQL 1586, 1216, 1217; SQLite's ON DELETE RESTRICT
+// refusal) and NOT NULL, which none translates.
 //
 // It deliberately never matches error text. The logger applies it to every
 // statement, reads and DDL included, and text such as "no such table:
@@ -156,26 +157,16 @@ func isClientWriteError(err error) bool {
 	return errors.As(err, &ve) ||
 		errors.Is(err, gorm.ErrDuplicatedKey) ||
 		errors.Is(err, gorm.ErrForeignKeyViolated) ||
-		isNotNullViolationCode(err)
+		isConstraintViolationCode(err)
 }
 
-// isNotNullViolationCode reports a NOT NULL violation by the driver's error
-// code: Postgres SQLSTATE 23502, MySQL error 1048, SQLite extended code 1299.
-func isNotNullViolationCode(err error) bool {
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) {
-		return pgErr.Code == "23502"
-	}
-	var myErr *mysqldriver.MySQLError
-	if errors.As(err, &myErr) {
-		return myErr.Number == 1048
-	}
-	return sqliteExtendedCode(err) == sqliteConstraintNotNull
+// isConstraintViolationCode reports a unique, foreign-key or NOT NULL
+// violation by the driver's error code alone (driverConstraint), never by its
+// text.
+func isConstraintViolationCode(err error) bool {
+	kind, ok := driverConstraint(err)
+	return ok && kind != constraintOther
 }
-
-// sqliteConstraintNotNull is SQLITE_CONSTRAINT_NOTNULL
-// (https://www.sqlite.org/rescode.html#constraint_notnull).
-const sqliteConstraintNotNull = 1299
 
 // sqliteExtendedCode reads a SQLite driver error's extended result code the way
 // gorm.io/driver/sqlite's translator does, through the error's exported
