@@ -139,11 +139,15 @@ version.
 
 ### Fixed
 
-- The admin finds a row by a UUID spelled in upper case: the detail, update
-  and delete paths and the `uuid` filters (`?id=3F2B8C1A-…`) returned 404 or
-  an empty list on SQLite and PostgreSQL, whose `char(36)` uuid columns
-  compare text byte for byte. The admin now uses a `uuid` value's canonical
-  lower case, as the generated list handlers already did
+- The admin finds a `uuid.UUID`-keyed row by a UUID spelled in upper case:
+  the detail, update and delete paths and the `uuid` filters
+  (`?id=3F2B8C1A-…`) returned 404 or an empty list on SQLite and PostgreSQL,
+  whose `char(36)` uuid columns compare text byte for byte. A value for a
+  `uuid.UUID` field (key, field, belongs_to or many-to-many key) is now read
+  as `uuid.Parse` reads it, braced, `urn:uuid:` and unhyphenated forms
+  included, and used in its canonical lower case, as the generated list
+  handlers already did. A Go `string` field declared `uuid` is unchanged: it
+  keeps the spelling sent
   ([#457](https://github.com/gombit-dev/gombit/issues/457)).
 - An inbound `X-Request-Id` longer than 128 bytes
   (`contract.MaxRequestIDLength`), or holding a space or a control

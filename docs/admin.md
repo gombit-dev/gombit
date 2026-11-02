@@ -442,10 +442,16 @@ D10 `validation_error` with `fields`. JSON object/array values populate
 `json.RawMessage`, `[]byte`, and nested structs (`json.Unmarshal` /
 `json.Unmarshaler`). UUID strings populate `uuid.UUID`
 (`encoding.TextUnmarshaler` / `sql.Scanner`). `FieldsFrom` infers
-`uuid.UUID` as `uuid`, not `json`. A `uuid` value, written, filtered or named
-in the path, is case-insensitive: the admin uses its canonical lower case, the
-form `uuid.UUID` stores, so `/resources/docs/3F2B8C1A-…` finds the row a
-`char(36)` column holds as `3f2b8c1a-…` on every driver.
+`uuid.UUID` as `uuid`, not `json`. A `uuid` value for a `uuid.UUID` field (a
+key, a field, a belongs_to or many-to-many key), written, filtered or named in
+the path, is read as `uuid.Parse` reads it and used in its canonical lower
+case, the form `uuid.UUID` stores: `/resources/docs/3F2B8C1A-…`,
+`{3f2b8c1a-…}`, `urn:uuid:…` and the unhyphenated form all find the row a
+`char(36)` column holds as `3f2b8c1a-…`, on every driver. A Go `string` field
+declared `Type: admin.TypeUUID` must be the hyphenated 36-character form and
+keeps the spelling sent, written and compared, since its column holds
+whatever spelling was written; on SQLite and PostgreSQL it is found by that
+spelling only.
 
 The application's public CRUD API stays the feature's own typed Huma
 routes. Admin does not replace them.

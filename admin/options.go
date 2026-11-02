@@ -29,6 +29,12 @@ const (
 	TypeImage FieldType = FieldType(field.Image)
 )
 
+// typeCanonicalUUID is the coercion type of a uuid field over a uuid.UUID (a
+// key, a field or a belongs_to key): its column holds the canonical lower
+// case, so a value is parsed and compared in that form. Internal: no field
+// declares it, and the meta API shows such a field as TypeUUID.
+const typeCanonicalUUID FieldType = "uuid.canonical"
+
 // Relation kinds for v1. Defined in package field.
 const (
 	RelBelongsTo  = string(field.RelBelongsTo)

@@ -131,7 +131,7 @@ func registerModel(host Host, model any, opts Options) error {
 			pkColumn = f.Column
 		} else if sf := matchSchemaField(sch, Field{Name: opts.PK}); sf != nil {
 			pkColumn = sf.DBName
-			pkType = inferFieldType(sf)
+			pkType = coerceTypeFor(inferFieldType(sf), sf.FieldType)
 		}
 	}
 	if fieldByName(opts.Fields, pkName) == nil {

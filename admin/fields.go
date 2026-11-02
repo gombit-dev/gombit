@@ -822,17 +822,23 @@ func unchangedRoundedInteger(f *resolvedField, inst any, raw any) bool {
 // type t is coerced as. A relation (belongs_to) value is its key column's: a
 // string key ("US", "007", "123") stays the string sent, byte for byte, where
 // parsing anything numeric-looking as an integer turned "123" into "{"
-// (issue #452); an integer key is an integer, a uuid key a uuid.
+// (issue #452); an integer key is an integer, a uuid key a uuid. A uuid over
+// a uuid.UUID is coerced to its canonical form (typeCanonicalUUID), a uuid
+// over a string as the string sent.
 func coerceTypeFor(ft FieldType, t reflect.Type) FieldType {
-	if ft != TypeRelation {
-		return ft
-	}
 	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
+	isUUID := t == reflect.TypeOf(uuid.UUID{})
+	if ft == TypeUUID && isUUID {
+		return typeCanonicalUUID
+	}
+	if ft != TypeRelation {
+		return ft
+	}
 	switch {
-	case t == reflect.TypeOf(uuid.UUID{}):
-		return TypeUUID
+	case isUUID:
+		return typeCanonicalUUID
 	case t.Kind() == reflect.String:
 		return TypeString
 	case t.Kind() >= reflect.Int && t.Kind() <= reflect.Uint64:
