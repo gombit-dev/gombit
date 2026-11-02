@@ -211,9 +211,12 @@ func (s *Service) createUser(ctx context.Context, email, password string, superu
 }
 
 // Authenticate verifies email and password. It fails with
-// ErrInvalidCredentials for an unknown email or a wrong password; any other
-// error is a server failure (the user lookup's database error), which a
-// caller must not answer as wrong credentials (#460).
+// ErrInvalidCredentials for an unknown email or a wrong password (a 401),
+// ErrAccountDisabled for the right password of a disabled account (a 403),
+// and a *ThrottleError (errors.Is ErrTooManyAttempts, a 429) past a login
+// throttle; any other error is a server failure (the user lookup's
+// database error), which a caller must not answer as wrong credentials
+// (#460).
 func (s *Service) Authenticate(ctx context.Context, email, password string) (User, error) {
 	email = normalizeEmail(email)
 	// Throttled before the lookup and bcrypt, by the email as typed: the
@@ -243,6 +246,12 @@ func (s *Service) Authenticate(ctx context.Context, email, password string) (Use
 		s.Audit(ctx, AuditEvent{Action: AuditLoginFailed, TargetUserID: uintPtr(user.ID), Details: details("reason", "wrong_password")})
 		return User{}, errInvalidCredentials
 	}
+	// Said only to whoever knows the password: before it, a disabled
+	// account answers like any other. It still counts as a failure.
+	if user.Disabled() {
+		s.Audit(ctx, AuditEvent{Action: AuditLoginFailed, TargetUserID: uintPtr(user.ID), Details: details("reason", "account_disabled")})
+		return User{}, errAccountDisabled
+	}
 	res.refundExcept(pair.name)
 	s.throttle.clear(ctx, pair)
 	s.throttle.markKnown(ctx, pair)
@@ -271,10 +280,11 @@ func (s *Service) Login(ctx context.Context, email, password string) (User, Toke
 // (Authenticate records the failures). user is a snapshot, as Authenticate
 // returned it or as loaded from the database: its PasswordHash must still
 // be the user's when the session starts, and the user must still exist, or
-// IssueTokens fails as invalid credentials (ErrInvalidCredentials); any
-// other error is a server failure. So Authenticate followed by
-// IssueTokens is as safe as Login: a password reset that commits between
-// the two leaves the old password's snapshot unable to start a session.
+// IssueTokens fails as invalid credentials (ErrInvalidCredentials); the
+// account must not be disabled (ErrAccountDisabled); any other error is a
+// server failure. So Authenticate followed by IssueTokens is as safe as
+// Login: a password reset or a disable that commits between the two leaves
+// the snapshot unable to start a session.
 func (s *Service) IssueTokens(ctx context.Context, user User) (TokenPair, error) {
 	_, pair, err := s.startSession(ctx, user)
 	return pair, err
@@ -296,6 +306,9 @@ func (s *Service) startSession(ctx context.Context, user User) (User, TokenPair,
 		if err != nil {
 			return err
 		}
+		if locked.Disabled() {
+			return errAccountDisabled
+		}
 		if locked.PasswordHash != user.PasswordHash {
 			return errLoginPasswordChanged
 		}
@@ -312,6 +325,12 @@ func (s *Service) startSession(ctx context.Context, user User) (User, TokenPair,
 		// email, not a server failure (#460).
 		s.Audit(ctx, AuditEvent{Action: AuditLoginFailed, TargetUserID: uintPtr(user.ID), Details: details("reason", "account_deleted")})
 		return User{}, TokenPair{}, errInvalidCredentials
+	}
+	if errors.Is(err, errAccountDisabled) {
+		// Disabled after the password was checked: recorded as Authenticate
+		// records a disabled account's login.
+		s.Audit(ctx, AuditEvent{Action: AuditLoginFailed, TargetUserID: uintPtr(user.ID), Details: details("reason", "account_disabled")})
+		return User{}, TokenPair{}, err
 	}
 	if err != nil {
 		return User{}, TokenPair{}, err
@@ -436,6 +455,12 @@ func (s *Service) rotateRefreshOnce(ctx context.Context, raw, hash string) (Toke
 			// A deadlock, lock timeout or lost connection is a server
 			// failure, not a dead credential: it must not read as a 401.
 			return err
+		}
+		// A disabled account's tokens were revoked when it was disabled:
+		// a dead credential, before any reuse check (its revoked tokens are
+		// no evidence of theft).
+		if user.Disabled() {
+			return errInvalidRefreshToken
 		}
 		now := s.now()
 		// Expiry comes before the reuse check: an expired token is a plain
@@ -675,6 +700,11 @@ func (s *Service) parseAccess(ctx context.Context, token string) (User, uint, er
 			return User{}, 0, errInvalidAccessToken
 		}
 		return User{}, 0, err
+	}
+	// Its sessions were revoked when it was disabled; refused here too, so
+	// no session that outlived that (a race, a restore) authenticates it.
+	if user.Disabled() {
+		return User{}, 0, errInvalidAccessToken
 	}
 	var row RefreshToken
 	if err := s.db.WithContext(ctx).Where("id = ?", claims.RefreshID).First(&row).Error; err != nil {
