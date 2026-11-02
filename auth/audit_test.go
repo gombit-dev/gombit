@@ -154,7 +154,8 @@ func runAuditTrail(t *testing.T, db *database.DB) {
 		t.Fatalf("verify = %d", rec.Code)
 	}
 	rotated := refreshUser(t, app, pair.Data.RefreshToken)
-	// The rotated-away token again: reuse, every session revoked.
+	ageRotations(t, db.DB)
+	// The rotated-away token again, past the grace: reuse, every session revoked.
 	if rec := auditRequest(app, "/api/v1/auth/refresh", "", `{"refresh_token":"`+pair.Data.RefreshToken+`"}`, "req-reuse"); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("reuse = %d", rec.Code)
 	}

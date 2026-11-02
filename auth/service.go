@@ -275,12 +275,22 @@ func (s *Service) issueTokens(tx *gorm.DB, user User, now time.Time) (TokenPair,
 	}, nil
 }
 
+// RefreshReuseGrace is how long after a rotation the rotated refresh token is
+// a lost race rather than reuse: presenting it again within this interval is
+// a plain 401 (no new pair, nothing revoked), so two tabs that send the same
+// token a round trip apart do not sign each other out (issue #459). Past it,
+// reuse before the token expires revokes every session of the user. Within it
+// nothing is issued for the old token. The cost: a thief who rotates a stolen
+// token first is not caught by a legitimate refresh landing within the grace.
+const RefreshReuseGrace = 30 * time.Second
+
 // RotateRefresh validates the current refresh token, revokes it, and issues a
 // new pair. Reuse of an already-rotated token before it expires revokes the
-// user's remaining tokens; a token revoked by logout or session revocation,
-// and any expired token, is just invalid. Concurrent callers with the same
-// still-valid token share one rotation so a lost race cannot family-revoke
-// the winner's new session.
+// user's remaining tokens, unless it comes within RefreshReuseGrace of the
+// rotation, a lost race that is just invalid; a token revoked by logout or
+// session revocation, and any expired token, is just invalid. Concurrent
+// callers with the same still-valid token share one rotation so a lost race
+// cannot family-revoke the winner's new session.
 func (s *Service) RotateRefresh(ctx context.Context, raw string) (TokenPair, error) {
 	pair, _, err := s.rotateRefresh(ctx, raw)
 	return pair, err
@@ -404,7 +414,17 @@ func (s *Service) rotateRefreshOnce(ctx context.Context, raw, hash string) (Toke
 				// theft, so it must not end the user's other sessions.
 				return errInvalidRefreshToken
 			}
-			// Rotated, and presented again before it expired: reuse.
+			// Rotated moments ago: another tab or client of the same browser
+			// sent this token before the winner's response came back, and its
+			// refresh was on the wire for a round trip, not merely overlapping
+			// inside this process (which the single-flight above joins). It is
+			// a lost race, errRotationRaced: a 401 that issues nothing and
+			// revokes nothing, so the winner's new session survives and, in
+			// cookie mode, keeps the cookies it was just sent (issue #459).
+			if row.RevokedAt.After(now.Add(-RefreshReuseGrace)) {
+				return errRotationRaced
+			}
+			// Rotated, and presented again later, before it expired: reuse.
 			if err := revokeAllTx(tx, row.UserID, now); err != nil {
 				return err
 			}

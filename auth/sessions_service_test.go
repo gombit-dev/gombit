@@ -546,8 +546,16 @@ func runSessionsService(t *testing.T, db *database.DB) {
 			}, auth.ErrInvalidRefreshToken, true},
 			{"already-rotated token", func(t *testing.T, e sessionsEnv, _ auth.User, b auth.TokenPair) *auth.TokenPair {
 				next := e.rotate(t, b)
+				ageRotations(t, db.DB)
 				return &next
 			}, auth.ErrRefreshReuse, false},
+			// Within the grace of its rotation a rotated token is a lost race
+			// (another tab sent it a round trip late): a plain 401, nothing
+			// revoked (#459).
+			{"token rotated within the grace", func(t *testing.T, e sessionsEnv, _ auth.User, b auth.TokenPair) *auth.TokenPair {
+				next := e.rotate(t, b)
+				return &next
+			}, auth.ErrRotationRaced, true},
 			// Past its expiry a rotated token is just invalid: no cascade
 			// (#458). It has a successor, so it is errRotationRaced.
 			{"expired already-rotated token", func(t *testing.T, e sessionsEnv, _ auth.User, b auth.TokenPair) *auth.TokenPair {

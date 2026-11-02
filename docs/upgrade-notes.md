@@ -142,6 +142,16 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 ### Informational
 
+- A refresh with a token rotated less than `auth.RefreshReuseGrace` (30 seconds) ago is a plain 401, no longer reuse that revokes every session of the user. (`refresh-reuse-grace`, security, [#459](https://github.com/gombit-dev/gombit/issues/459))
+
+  Two tabs sharing one refresh token no longer sign each other out
+  when their refreshes arrive a round trip apart. The reuse cascade
+  still runs for a rotated token presented after the grace and before
+  it expires; within it nothing is issued for the old token. The
+  cost: if a thief rotates a stolen token first and the legitimate
+  client's refresh lands within those 30 seconds, the client gets a
+  401 and the thief's session is not revoked.
+
 - Bearer-mode session revocation errors include the `WWW-Authenticate: Bearer realm="api"` challenge when the handler returns 401. (`bearer-handler-401-challenge`, api, [#604](https://github.com/gombit-dev/gombit/issues/604))
 
   Cookie-mode 401 responses still omit a Bearer challenge.

@@ -139,6 +139,15 @@ version.
 
 ### Fixed
 
+- Two tabs refreshing the same refresh token a network round trip apart no
+  longer sign the user out of every session. A refresh with a token rotated
+  less than `auth.RefreshReuseGrace` (30 seconds) ago is a lost race, not
+  reuse: a plain 401 that issues no tokens, revokes nothing and, in cookie
+  mode, keeps the session cookies the winning tab was just sent. The #127
+  fix covered only refreshes overlapping inside one process. Presenting a
+  rotated token after the grace and before it expires still revokes all of
+  the user's sessions
+  ([#459](https://github.com/gombit-dev/gombit/issues/459)).
 - An inbound `X-Request-Id` longer than 128 bytes
   (`contract.MaxRequestIDLength`), or holding a space or a control
   character, is replaced by a generated ID instead of being echoed, logged

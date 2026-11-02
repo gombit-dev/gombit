@@ -59,7 +59,15 @@ token revoked by logout or session revocation is just invalid (401): a revoked
 device retrying its refresh must not end the session that revoked it.
 Concurrent refresh of the **current** still-valid token (two tabs, parallel
 `POST /auth/refresh`) shares one rotation and does not family-revoke the
-winner.
+winner. Neither does a refresh with a token rotated less than
+`auth.RefreshReuseGrace` (30 seconds) ago: the second tab's request was on
+the wire when the first tab's rotation committed, a lost race rather than
+theft. It is a plain 401 that issues no tokens and revokes nothing, so the
+winner's new session stays signed in. The cascade runs for a rotated token
+presented after that grace and before it expires. The cost: if a thief
+rotates a stolen token first and the legitimate client's refresh lands
+within those 30 seconds, that client gets the 401 and the thief's session is
+not revoked; past the grace the cascade catches it as before.
 
 ## Email verification
 

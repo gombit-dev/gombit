@@ -509,6 +509,20 @@ releases:
 
   - version: unreleased
     changes:
+      - id: refresh-reuse-grace
+        kind: informational
+        area: security
+        summary: "A refresh with a token rotated less than `auth.RefreshReuseGrace` (30 seconds) ago is a plain 401, no longer reuse that revokes every session of the user."
+        details: |
+          Two tabs sharing one refresh token no longer sign each other out
+          when their refreshes arrive a round trip apart. The reuse cascade
+          still runs for a rotated token presented after the grace and before
+          it expires; within it nothing is issued for the old token. The
+          cost: if a thief rotates a stolen token first and the legitimate
+          client's refresh lands within those 30 seconds, the client gets a
+          401 and the thief's session is not revoked.
+        refs: [459]
+
       - id: bearer-handler-401-challenge
         kind: informational
         area: api

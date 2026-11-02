@@ -18,6 +18,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
 )
 
 const testJWTSecret = "test-jwt-secret-32-bytes-minimum!"
@@ -89,10 +90,29 @@ func TestHandlerTable(t *testing.T) {
 		if me := getMe(t, app, second.AccessToken); me != http.StatusOK {
 			t.Fatalf("GET /me with rotated access status = %d, want 200", me)
 		}
+		ageRotations(t, app.DB())
 		rec := postJSON(t, app, "/api/v1/auth/refresh", `{"refresh_token":"`+first.RefreshToken+`"}`)
 		assertError(t, rec, http.StatusUnauthorized, "authentication")
 		if me := getMe(t, app, second.AccessToken); me != http.StatusUnauthorized {
 			t.Fatalf("GET /me after refresh reuse status = %d, want 401", me)
+		}
+	})
+
+	// Two tabs share one refresh token; tab 2's refresh with it arrives a
+	// round trip after tab 1's rotation committed. Within the grace it is a
+	// lost race, not reuse: a 401 that leaves tab 1's new session alive
+	// (#459).
+	t.Run("two tabs refresh the same token", func(t *testing.T) {
+		registerUser(t, app, "tabs@example.com", testPassword)
+		shared := loginUser(t, app, "tabs@example.com", testPassword)
+		tab1 := refreshUser(t, app, shared.RefreshToken)
+		rec := postJSON(t, app, "/api/v1/auth/refresh", `{"refresh_token":"`+shared.RefreshToken+`"}`)
+		assertError(t, rec, http.StatusUnauthorized, "authentication")
+		if me := getMe(t, app, tab1.AccessToken); me != http.StatusOK {
+			t.Fatalf("GET /me with tab 1's new session = %d, want 200: the lost race revoked it", me)
+		}
+		if next := refreshUser(t, app, tab1.RefreshToken); next.RefreshToken == "" {
+			t.Fatal("tab 1's successor token did not rotate")
 		}
 	})
 }
@@ -329,5 +349,15 @@ func assertError(t *testing.T, rec *httptest.ResponseRecorder, status int, code 
 	}
 	if env.Body.Code != code {
 		t.Fatalf("error.code = %q, want %q; body: %s", env.Body.Code, code, rec.Body.String())
+	}
+}
+
+// ageRotations moves every rotation in db past auth.RefreshReuseGrace, so a
+// rotated token presented again is reuse rather than a lost race (#459).
+func ageRotations(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	if err := db.Model(&auth.RefreshToken{}).Where("replaced_by IS NOT NULL").
+		Update("revoked_at", time.Now().Add(-auth.RefreshReuseGrace-time.Second)).Error; err != nil {
+		t.Fatal(err)
 	}
 }
