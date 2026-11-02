@@ -449,9 +449,10 @@ case, the form `uuid.UUID` stores: `/resources/docs/3F2B8C1A-…`,
 `{3f2b8c1a-…}`, `urn:uuid:…` and the unhyphenated form all find the row a
 `char(36)` column holds as `3f2b8c1a-…`, on every driver. A Go `string` field
 declared `Type: admin.TypeUUID` must be the hyphenated 36-character form and
-keeps the spelling sent, written and compared, since its column holds
-whatever spelling was written; on SQLite and PostgreSQL it is found by that
-spelling only.
+keeps the spelling sent, written and compared: in a text (`char(36)`) column,
+which holds whatever spelling was written, it is found on SQLite and
+PostgreSQL by that spelling only (a native PostgreSQL `uuid` column stores
+and compares any spelling canonically).
 
 The application's public CRUD API stays the feature's own typed Huma
 routes. Admin does not replace them.

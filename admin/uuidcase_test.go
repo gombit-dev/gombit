@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gombit-dev/gombit/admin"
+	"github.com/gombit-dev/gombit/contract"
 	"github.com/gombit-dev/gombit/database"
 	"github.com/gombit-dev/gombit/framework"
 	"github.com/google/uuid"
@@ -133,7 +134,8 @@ func runUUIDCaseAdmin(t *testing.T, db *database.DB) {
 		t.Fatalf("clear notes: %v", err)
 	}
 
-	if rec := doRequest(app, jar, http.MethodPatch, "/api/v1/admin/resources/uuid-docs/"+upper, `{"title":"u","tags":[]}`); rec.Code != http.StatusOK {
+	// The stored key in another spelling is the same key: left as loaded.
+	if rec := doRequest(app, jar, http.MethodPatch, "/api/v1/admin/resources/uuid-docs/"+upper, `{"id":"`+upper+`","title":"u","tags":[]}`); rec.Code != http.StatusOK {
 		t.Fatalf("PATCH %s status = %d; body: %s", upper, rec.Code, rec.Body.String())
 	}
 	if rec := doRequest(app, jar, http.MethodDelete, "/api/v1/admin/resources/uuid-docs/"+upper, ""); rec.Code != http.StatusOK {
@@ -154,9 +156,13 @@ func runUUIDCaseAdmin(t *testing.T, db *database.DB) {
 		t.Errorf("GET string-keyed %s status = %d; body: %s", sUpper, rec.Code, rec.Body.String())
 	}
 	assertListTotal(t, app, jar, "string-uuid-docs?id="+sUpper, 1)
-	if rec := doRequest(app, jar, http.MethodPatch, "/api/v1/admin/resources/string-uuid-docs/"+sUpper, `{"title":"kept"}`); rec.Code != http.StatusOK {
+	if rec := doRequest(app, jar, http.MethodPatch, "/api/v1/admin/resources/string-uuid-docs/"+sUpper, `{"title":"kept","id":"`+sUpper+`"}`); rec.Code != http.StatusOK {
 		t.Errorf("PATCH string-keyed %s status = %d; body: %s", sUpper, rec.Code, rec.Body.String())
 	}
+	// Another spelling of a string key is another key, as its lookups say:
+	// a PATCH sending it is refused, not dropped as unchanged.
+	rec := doRequest(app, jar, http.MethodPatch, "/api/v1/admin/resources/string-uuid-docs/"+sUpper, `{"id":"`+ref+`"}`)
+	assertError(t, rec, http.StatusUnprocessableEntity, contract.CodeValidationError)
 	created := doRequest(app, jar, http.MethodPost, "/api/v1/admin/resources/string-uuid-docs", `{"id":"`+upper+`","title":"new"}`)
 	if created.Code != http.StatusOK {
 		t.Fatalf("create string-keyed status = %d; body: %s", created.Code, created.Body.String())
