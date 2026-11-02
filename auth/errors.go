@@ -51,13 +51,15 @@ var ErrAccountDisabled = errAccountDisabled
 // and IssueTokens also for a password changed, or an account deleted,
 // between the password check and the session; Register and CreateSuperuser
 // for an empty email. Authenticate, Login and IssueTokens also return
-// ErrAccountDisabled for a disabled account (a 403) and a *ThrottleError
+// ErrAccountDisabled for a disabled account (a 403), and Authenticate and
+// Login (not IssueTokens, which checks no password) a *ThrottleError
 // (errors.Is ErrTooManyAttempts, a 429) past a login throttle; any other
 // error they return is a server failure (the database's, for one), not a
 // credential problem, and answers a 500 (#460). Register and
-// CreateSuperuser also return ErrEmailTaken (a 409) and the password
-// policy's errors (PasswordPolicyError, a 422), and Register a
-// *ThrottleError (a 429) past its throttle.
+// CreateSuperuser also return ErrEmailTaken (a 409) and ErrPasswordRequired
+// / ErrPasswordTooLong (a 422; not a PasswordPolicyError: registration has
+// no minimum length), and Register a *ThrottleError (a 429) past its
+// throttle.
 var ErrInvalidCredentials = errInvalidCredentials
 
 // ErrInvalidAccessToken is the error ParseAccess returns for an access token

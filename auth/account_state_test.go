@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -446,5 +447,19 @@ func TestRegisterNeedsTheDisabledAtColumn(t *testing.T) {
 	}
 	if _, err := svc.Register(context.Background(), "unmigrated@example.com", testPassword); err == nil {
 		t.Fatal("Register on a users table without disabled_at succeeded: the manifest's breaking note is wrong")
+	}
+}
+
+// TestRegisterPasswordErrors holds ErrInvalidCredentials' godoc to the code:
+// Register's password errors are the bare ErrPasswordRequired /
+// ErrPasswordTooLong, not a PasswordPolicyError.
+func TestRegisterPasswordErrors(t *testing.T) {
+	e := newVerificationEnv(t, openSQLite(t))
+	for password, want := range map[string]error{"": auth.ErrPasswordRequired, strings.Repeat("x", 73): auth.ErrPasswordTooLong} {
+		_, err := e.svc.Register(context.Background(), fmt.Sprintf("pw-%d@example.com", time.Now().UnixNano()), password)
+		var policy auth.PasswordPolicyError
+		if !errors.Is(err, want) || errors.As(err, &policy) {
+			t.Fatalf("Register(password of %d bytes) = %v, want %v and no PasswordPolicyError", len(password), err, want)
+		}
 	}
 }
