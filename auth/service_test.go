@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -224,6 +225,59 @@ func TestCreateSuperuserOnFreshDB(t *testing.T) {
 	}
 	if !stored.IsSuperuser {
 		t.Fatal("stored user IsSuperuser = false, want true")
+	}
+}
+
+// TestCreateUserAppliesTheAccountRules: Register and CreateSuperuser refuse
+// an email the login body refuses (the account could never sign in) and a
+// password outside the policy a user's own password meets; nothing is stored,
+// and what the rules accept, at each boundary, is created (issue #461).
+func TestCreateUserAppliesTheAccountRules(t *testing.T) {
+	svc := newTestService(t)
+	ctx := context.Background()
+	create := map[string]func(email, password string) (User, error){
+		"Register":        func(e, p string) (User, error) { return svc.Register(ctx, e, p) },
+		"CreateSuperuser": func(e, p string) (User, error) { return svc.CreateSuperuser(ctx, e, p) },
+	}
+	for name, fn := range create {
+		for _, email := range []string{"admin", "Root Admin <root@example.com>", "a b c", "admin@", strings.Repeat("a", 250) + "@example.com"} {
+			if _, err := fn(email, "correct-horse"); !errors.Is(err, ErrInvalidEmail) {
+				t.Errorf("%s(%q) = %v, want ErrInvalidEmail", name, email, err)
+			}
+		}
+		for password, reason := range map[string]error{"x": ErrPasswordTooShort, "seven77": ErrPasswordTooShort, strings.Repeat("p", 73): ErrPasswordTooLong} {
+			var policy PasswordPolicyError
+			if _, err := fn("rules-"+name+"@example.com", password); !errors.As(err, &policy) || !errors.Is(err, reason) || policy.Field != "password" {
+				t.Errorf("%s(password of %d chars) = %v, want a PasswordPolicyError %v on password", name, len(password), err, reason)
+			}
+		}
+	}
+	var count int64
+	if err := svc.db.Model(&User{}).Count(&count).Error; err != nil || count != 0 {
+		t.Fatalf("users stored = %d (err %v), want 0", count, err)
+	}
+	// Seven runes is too short whatever the bytes.
+	var policy PasswordPolicyError
+	if _, err := svc.Register(ctx, "short@example.com", "ééééééé"); !errors.As(err, &policy) || !errors.Is(err, ErrPasswordTooShort) {
+		t.Fatalf("Register(7 two-byte runes) = %v, want ErrPasswordTooShort", err)
+	}
+	// Each limit's accepted side: 255 characters of address, 8 runes (16
+	// bytes) and 72 bytes of password.
+	for email, password := range map[string]string{
+		strings.Repeat("a", 243) + "@example.com": "eight888",
+		"runes@example.com":                      "éééééééé",
+		"bytes@example.com":                      strings.Repeat("p", 72),
+	} {
+		if _, err := svc.Register(ctx, email, password); err != nil {
+			t.Errorf("Register(%d-char email, %d-byte password) = %v, want it created", len(email), len(password), err)
+		}
+	}
+	// What the rules accept signs in.
+	if _, err := svc.CreateSuperuser(ctx, "admin@example.com", "eight888"); err != nil {
+		t.Fatalf("CreateSuperuser(valid) = %v", err)
+	}
+	if _, err := svc.Authenticate(ctx, "admin@example.com", "eight888"); err != nil {
+		t.Fatalf("Authenticate(the new superuser) = %v", err)
 	}
 }
 

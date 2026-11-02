@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -92,6 +93,40 @@ func TestRunCreateSuperuserRefusesDuplicate(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("second run() error = %v, want already-exists message", err)
+	}
+}
+
+// TestRunCreateSuperuserAppliesTheAccountRules: an email the login endpoint
+// refuses (the account could never sign in), or a password outside the policy
+// a user's own password meets, is refused with a message that says why,
+// before the database is opened, and nothing is created (issue #461).
+func TestRunCreateSuperuserAppliesTheAccountRules(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "app.db")
+	cfg := testCreateSuperuserConfig(t, dbPath)
+	stubConfig(t, cfg)
+
+	for _, tc := range []struct{ email, password, want string }{
+		{"admin", "correct-horse", "not a bare email address"},
+		{"Root Admin <root@example.com>", "correct-horse", "not a bare email address"},
+		{"a b c", "correct-horse", "not a bare email address"},
+		{"admin@example.com", "x", "at least 8 characters"},
+		{strings.Repeat("a", 250) + "@example.com", "correct-horse", "at most 255 characters"},
+	} {
+		var stdout bytes.Buffer
+		err := run(context.Background(), []string{"createsuperuser", "--no-input", "--email", tc.email, "--password", tc.password}, &stdout, new(bytes.Buffer))
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("createsuperuser --email %q --password %q = %v, want an error mentioning %q", tc.email, tc.password, err, tc.want)
+		}
+		if strings.Contains(stdout.String(), "Superuser created") {
+			t.Errorf("createsuperuser --email %q printed %q", tc.email, stdout.String())
+		}
+	}
+	if _, err := os.Stat(dbPath); !os.IsNotExist(err) {
+		t.Fatalf("the database file exists after refused input (stat: %v): the rules must be checked before it is opened", err)
+	}
+	// The same email with a valid password is created: nothing was before.
+	if err := run(context.Background(), []string{"createsuperuser", "--no-input", "--email", "admin@example.com", "--password", "correct-horse"}, new(bytes.Buffer), new(bytes.Buffer)); err != nil {
+		t.Fatalf("createsuperuser with valid credentials = %v", err)
 	}
 }
 

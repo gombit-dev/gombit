@@ -499,6 +499,29 @@ func runSessionsService(t *testing.T, db *database.DB) {
 		}
 	})
 
+	// An account deleted between Authenticate and IssueTokens is invalid
+	// credentials, a 401 like an unknown email, not ErrUserNotFound (which
+	// the login handler answered as "invalid access token"), and audited as
+	// a failed login (#460).
+	t.Run("account deleted during the login", func(t *testing.T) {
+		e := newEnv(t)
+		user, _ := e.user(t, "vanished", 0)
+		snapshot, err := e.svc.Authenticate(e.ctx, user.Email, "correct-horse")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Delete(&auth.User{}, user.ID).Error; err != nil {
+			t.Fatal(err)
+		}
+		if _, err := e.svc.IssueTokens(e.ctx, snapshot); !errors.Is(err, auth.ErrInvalidCredentials) {
+			t.Fatalf("IssueTokens(deleted account) = %v, want ErrInvalidCredentials", err)
+		}
+		var ev auth.AuditEvent
+		if err := db.Where("action = ? AND target_user_id = ?", auth.AuditLoginFailed, user.ID).Last(&ev).Error; err != nil || !strings.Contains(ev.Details, `"reason":"account_deleted"`) {
+			t.Fatalf("failed-login event = %+v (err %v), want reason account_deleted", ev, err)
+		}
+	})
+
 	// A zero RefreshReuseGrace is strict, as before #459: a rotated token
 	// presented again at once is reuse.
 	t.Run("zero grace is strict", func(t *testing.T) {

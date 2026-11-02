@@ -12,6 +12,22 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 ### Manual: action required
 
+- **Breaking.** `gombit createsuperuser`, `auth.Service.CreateSuperuser` and `Register` refuse an email that is not a bare address and a password shorter than 8 characters (or over 72 bytes). (`createsuperuser-login-rules`, api, [#461](https://github.com/gombit-dev/gombit/issues/461))
+
+  Two rules, for two reasons. The email must be what `POST
+  /auth/login` accepts: an account with `admin` could never sign in.
+  The password must meet the policy a user's own password meets on
+  register, change and reset: an account with a shorter one could
+  sign in, so this is a tightening. A seed script or app code that
+  creates an account with `--email admin`, or a password under 8
+  characters, fails after the upgrade: give it a real address and a
+  password of at least 8 characters. `auth.CheckNewAccount` reports
+  both without a database (`auth.ErrInvalidEmail`, an
+  `auth.PasswordPolicyError`). Existing accounts are not touched:
+  one whose email is not an address still cannot sign in (delete
+  it and create it again); one with a short password keeps working
+  until the password is changed.
+
 - A refresh with a token rotated less than `GOMBIT_AUTH_REFRESH_REUSE_GRACE` (30 seconds by default) ago, whose successor is still live, is a plain 401, audited as `auth.refresh.reuse_within_grace`, no longer reuse that revokes every session of the user. (`refresh-reuse-grace`, security, [#459](https://github.com/gombit-dev/gombit/issues/459))
 
   - Configuration: `GOMBIT_AUTH_REFRESH_REUSE_GRACE` is new.
@@ -195,6 +211,18 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   at.
 
 ### Informational
+
+- A database failure during login, or while the auth gate loads the access token's user or session, is a 500 (`internal`), no longer a 401. (`auth-database-failure-is-500`, api, [#460](https://github.com/gombit-dev/gombit/issues/460))
+
+  Only a missing user or session row is a 401; the session stays valid
+  through the outage, and no failed login is audited for it. A client
+  signs out only if it treats a 5xx as one, and the SPAs this repo
+  ships still do: the scaffold's failed refresh (#580), and the
+  scaffold's and the admin's `RequireAuth` on a failed `/me` and the
+  admin's failed refresh, which #580 does not cover yet.
+  `auth.ErrInvalidCredentials` and `auth.ErrInvalidAccessToken` are
+  now exported: an app's own login or gate built on `Authenticate` /
+  `ParseAccess` answers 401 only for them.
 
 - The admin reads a value for a `uuid.UUID` field (a path id, a filter, a belongs_to or many-to-many key, a written value) as `uuid.Parse` does and uses its canonical lower case, so an upper-case UUID finds its row on every driver. (`admin-uuid-case-insensitive`, behavior, [#457](https://github.com/gombit-dev/gombit/issues/457))
 
