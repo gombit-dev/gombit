@@ -706,10 +706,11 @@ func blankRaw(raw any) bool {
 	return ok && s == ""
 }
 
-// sameAsStored reports whether raw is the value already on inst. UUID text
-// is compared case-insensitively because the stored form is canonical
-// lowercase. Other types compare the coerced text exactly, so a string
-// primary key keeps its case.
+// sameAsStored reports whether raw is the value already on inst, comparing the
+// coerced text exactly. A uuid over a uuid.UUID is coerced to the canonical
+// lower case it is stored in, so any spelling of the stored key is the same; a
+// uuid over a string, like any string key, keeps its case, as its lookups do
+// (issue #457).
 func sameAsStored(f *resolvedField, inst any, raw any) (bool, error) {
 	if f == nil || f.get == nil {
 		return false, nil
@@ -718,12 +719,7 @@ func sameAsStored(f *resolvedField, inst any, raw any) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	current := fmt.Sprint(f.get(inst))
-	next := fmt.Sprint(coerced)
-	if f.Type == TypeUUID {
-		return strings.EqualFold(current, next), nil
-	}
-	return current == next, nil
+	return fmt.Sprint(f.get(inst)) == fmt.Sprint(coerced), nil
 }
 
 // blankToNull is true when "" cannot be stored in this column and the Go

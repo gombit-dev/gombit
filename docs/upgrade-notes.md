@@ -168,6 +168,19 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   it, the first included, instead of being cancelled with that
   caller's request.
 
+- The admin reads a value for a `uuid.UUID` field (a path id, a filter, a belongs_to or many-to-many key, a written value) as `uuid.Parse` does and uses its canonical lower case, so an upper-case UUID finds its row on every driver. (`admin-uuid-case-insensitive`, behavior, [#457](https://github.com/gombit-dev/gombit/issues/457))
+
+  Braced, `urn:uuid:` and unhyphenated spellings are accepted for such
+  a field too, where they were a 422. A Go `string` field declared
+  `Type: admin.TypeUUID` keeps the hyphenated form only and the
+  spelling sent, written and compared, so rows it holds are found as
+  before. One difference: a PATCH that sends such a key in a spelling
+  other than the stored one is now refused as a key change (422 `id:
+  cannot be changed`), where it was ignored, since on SQLite and in a
+  PostgreSQL text column that spelling names no row; on MySQL and a
+  native PostgreSQL `uuid` column, send the key as it was read, or
+  leave it out.
+
 - `database.IsUniqueViolation`, `IsForeignKeyViolation` and `IsNotNullViolation` classify a driver error by its code, not by words in its message, so an error naming a `unique_code` column is no longer a 409 conflict. (`constraint-errors-by-driver-code`, behavior, [#456](https://github.com/gombit-dev/gombit/issues/456))
 
   A NOT NULL violation on a column named `unique_code` was a `409
