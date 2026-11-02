@@ -178,6 +178,18 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   `config.DotEnvKeys` reports to this tooling's own configuration
   analysis.
 
+- **Breaking.** `Auth.BcryptCost` must be 0 (bcrypt's default) or between 4 and 31: `config.Validate` and `auth.NewService` refuse any other value, so an app configured outside that range no longer starts. (`bcrypt-cost-range-checked`, api, [#465](https://github.com/gombit-dev/gombit/issues/465))
+
+  `config.Validate` refused only a negative cost. A cost of 1 to 3
+  passed and bcrypt silently hashed at its default, 10, and a cost of
+  32 or more passed and then failed every new hash: registration and
+  `createsuperuser` answered `500` while existing users could still
+  sign in. Both are refused at startup now, with
+  `config: Auth.BcryptCost`. An app that sets `Config.Auth.BcryptCost`
+  in code sets it to 0 or to a value from 4 to 31; for 1 to 3, use 0
+  (or 10), which is the cost its hashes were made at. Hashes already
+  stored keep working at whatever cost they were made at.
+
 ### Informational
 
 - The admin reads a value for a `uuid.UUID` field (a path id, a filter, a belongs_to or many-to-many key, a written value) as `uuid.Parse` does and uses its canonical lower case, so an upper-case UUID finds its row on every driver. (`admin-uuid-case-insensitive`, behavior, [#457](https://github.com/gombit-dev/gombit/issues/457))

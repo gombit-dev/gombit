@@ -165,6 +165,14 @@ version.
 
 ### Fixed
 
+- `config.Validate` and `auth.NewService` refuse an `Auth.BcryptCost`
+  outside bcrypt's range: it must be `0` (bcrypt's default) or between 4
+  and 31. A cost of 1 to 3 was accepted and silently hashed at bcrypt's
+  default, 10, and a cost of 32 or more was accepted and then failed every
+  registration and `createsuperuser` with `500` (and left the unknown-email
+  login timing unequalised); now the app does not start until the cost is
+  valid
+  ([#465](https://github.com/gombit-dev/gombit/issues/465)).
 - Two tabs refreshing the same refresh token a network round trip apart no
   longer sign the user out of every session. A refresh with a token rotated
   less than `GOMBIT_AUTH_REFRESH_REUSE_GRACE` (`Config.Auth.RefreshReuseGrace`,

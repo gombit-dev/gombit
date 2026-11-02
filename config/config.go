@@ -12,6 +12,7 @@ import (
 
 	"github.com/gombit-dev/gombit/internal/storagekey"
 	"github.com/gombit-dev/gombit/internal/urlbase"
+	"golang.org/x/crypto/bcrypt"
 )
 
 const (
@@ -439,8 +440,9 @@ type AuthConfig struct {
 	AccessTokenTTL time.Duration
 	// RefreshTokenTTL is the refresh-token lifetime.
 	RefreshTokenTTL time.Duration
-	// BcryptCost is the bcrypt cost for password hashes. Zero means
-	// bcrypt.DefaultCost. Tests may set a lower cost.
+	// BcryptCost is the bcrypt cost for password hashes: zero (meaning
+	// bcrypt.DefaultCost) or bcrypt.MinCost..bcrypt.MaxCost. Tests may set
+	// a lower cost than the default.
 	BcryptCost int
 	// Mode selects the mounted auth surface. Empty behaves as AuthModeJWT.
 	Mode AuthMode
@@ -920,10 +922,13 @@ func validateAuthConfig(errs *FieldErrors, env Environment, cfg AuthConfig) {
 			Message: "must be greater than or equal to zero",
 		})
 	}
-	if cfg.BcryptCost < 0 {
+	// bcrypt hashes a cost below its range at its default, silently, and
+	// fails every hash above it (#465).
+	if c := cfg.BcryptCost; c != 0 && (c < bcrypt.MinCost || c > bcrypt.MaxCost) {
 		*errs = append(*errs, FieldError{
 			Field:   "Auth.BcryptCost",
-			Message: "must be greater than or equal to zero",
+			Value:   strconv.Itoa(c),
+			Message: fmt.Sprintf("must be 0 (bcrypt's default) or between %d and %d", bcrypt.MinCost, bcrypt.MaxCost),
 		})
 	}
 	if cfg.EmailVerificationTTL < 0 {

@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/gombit-dev/gombit/config"
 	"github.com/gombit-dev/gombit/database"
 	"go.uber.org/zap"
+	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -90,6 +92,9 @@ func NewService(db *gorm.DB, cfg config.Config, opts ...Option) (*Service, error
 	}
 	if cfg.Auth.RefreshTokenTTL < cfg.Auth.AccessTokenTTL {
 		return nil, errors.New("auth: the refresh token TTL must be at least the access token TTL")
+	}
+	if c := cfg.Auth.BcryptCost; c != 0 && (c < bcrypt.MinCost || c > bcrypt.MaxCost) {
+		return nil, fmt.Errorf("auth: bcrypt cost %d must be 0 (the default) or between %d and %d", c, bcrypt.MinCost, bcrypt.MaxCost)
 	}
 	s := &Service{
 		db:     db,
