@@ -169,8 +169,12 @@ version.
   "duplicated key not allowed" when several callers ensure the same new
   permission or group at once (replicas booting together, concurrent
   requests): the callers that lose the insert race read the winner's row and
-  return it. A lost race inside the caller's transaction no longer aborts
-  that transaction on PostgreSQL
+  return it, outside a transaction and inside one at READ COMMITTED or on
+  MySQL, and a lost race no longer aborts the caller's transaction on
+  PostgreSQL. Inside a PostgreSQL REPEATABLE READ or SERIALIZABLE
+  transaction the winner's row is not visible, so a lost race still returns
+  the unique violation (or a serialization failure) and the caller retries
+  the transaction
   ([#463](https://github.com/gombit-dev/gombit/issues/463)).
 - The admin finds a `uuid.UUID`-keyed row by a UUID spelled in upper case:
   the detail, update and delete paths and the `uuid` filters

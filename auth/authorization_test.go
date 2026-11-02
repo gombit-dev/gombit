@@ -2,6 +2,7 @@ package auth_test
 
 import (
 	"context"
+	"database/sql"
 	"strconv"
 	"strings"
 	"sync"
@@ -250,11 +251,13 @@ func runConcurrentEnsure(t *testing.T, db *database.DB) {
 			return g.ID, err
 		})
 	})
-	// Each caller inside its own transaction: the loser's failed insert
-	// must not abort it (PostgreSQL), and it must see the winner's row
-	// although its snapshot predates it (MySQL REPEATABLE READ). SQLite's
-	// single writer serializes the transactions, so there is no race to
-	// lose there.
+	// Each caller inside its own transaction (the default isolation:
+	// READ COMMITTED on PostgreSQL, REPEATABLE READ on MySQL): the loser's
+	// failed insert must not abort it (PostgreSQL), and it must see the
+	// winner's row although its snapshot may predate it (MySQL). Whether a
+	// caller loses is left to scheduling here; runEnsureRaceOutcomes forces
+	// each outcome. SQLite's single writer serializes the transactions, so
+	// there is no race to lose there.
 	t.Run("in a transaction", func(t *testing.T) {
 		if db.Name() == "sqlite" {
 			t.Skip("SQLite serializes writing transactions")
@@ -269,4 +272,145 @@ func runConcurrentEnsure(t *testing.T, db *database.DB) {
 			return id, err
 		})
 	})
+}
+
+// TestEnsureRaceOutcomes: the outcomes of a lost Ensure race, each forced
+// in order rather than left to scheduling (#463). runEnsureRaceOutcomes
+// also runs on PostgreSQL and MySQL (integration_test.go).
+func TestEnsureRaceOutcomes(t *testing.T) {
+	runEnsureRaceOutcomes(t, openSQLite(t))
+}
+
+func runEnsureRaceOutcomes(t *testing.T, db *database.DB) {
+	t.Helper()
+	if err := auth.Migrate(db.DB); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	tag := strconv.FormatInt(time.Now().UnixNano(), 36)
+	multiConn := func(t *testing.T) {
+		t.Helper()
+		if db.Name() == "sqlite" {
+			t.Skip("needs a second writer while a transaction is open")
+		}
+	}
+
+	// A unique violation on another constraint than the key's (here the
+	// primary key; on PostgreSQL a sequence behind the table) is reported
+	// as itself: the re-read finds no row for the key, which is no reason
+	// to say "record not found".
+	t.Run("another constraint", func(t *testing.T) {
+		taken, err := auth.EnsurePermission(ctx, db.DB, "taken."+tag, "Taken")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = auth.EnsurePermissionRow(ctx, db.DB, &auth.Permission{ID: taken.ID, Key: "other." + tag})
+		if !database.IsUniqueViolation(err) {
+			t.Fatalf("err = %v, want the primary key's unique violation", err)
+		}
+	})
+
+	// The caller's transaction took its snapshot before the winner
+	// committed. At READ COMMITTED and on MySQL (whose locking re-read sees
+	// the latest committed row) the loser gets the winner's row and its
+	// transaction stays usable; a PostgreSQL REPEATABLE READ snapshot
+	// cannot see the row, so the loser gets the unique violation.
+	for _, level := range []sql.IsolationLevel{sql.LevelReadCommitted, sql.LevelRepeatableRead} {
+		t.Run("snapshot before the winner/"+level.String(), func(t *testing.T) {
+			multiConn(t)
+			key := "snapshot." + strconv.Itoa(int(level)) + "." + tag
+			tx := db.WithContext(ctx).Begin(&sql.TxOptions{Isolation: level})
+			if tx.Error != nil {
+				t.Fatal(tx.Error)
+			}
+			defer tx.Rollback()
+			var n int64
+			if err := tx.Model(&auth.Permission{}).Count(&n).Error; err != nil {
+				t.Fatal(err)
+			}
+			winner, err := auth.EnsurePermission(ctx, db.DB, key, "Winner")
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := auth.EnsurePermission(ctx, tx, key, "Loser")
+			if db.Name() == "postgres" && level == sql.LevelRepeatableRead {
+				if !database.IsUniqueViolation(err) {
+					t.Fatalf("err = %v, want the unique violation", err)
+				}
+				return
+			}
+			if err != nil || got.ID != winner.ID {
+				t.Fatalf("got %d, %v; want the winner's row %d", got.ID, err, winner.ID)
+			}
+			if err := tx.Model(&auth.Permission{}).Count(&n).Error; err != nil {
+				t.Fatalf("transaction unusable after the lost race: %v", err)
+			}
+		})
+	}
+
+	// The winner rolls back while the loser's insert waits on it: the
+	// loser's insert then succeeds and it returns its own row.
+	t.Run("the winner rolls back", func(t *testing.T) {
+		multiConn(t)
+		key := "rollback." + tag
+		winner := db.WithContext(ctx).Begin()
+		if winner.Error != nil {
+			t.Fatal(winner.Error)
+		}
+		defer winner.Rollback()
+		if _, err := auth.EnsurePermission(ctx, winner, key, "Winner"); err != nil {
+			t.Fatal(err)
+		}
+		type result struct {
+			row auth.Permission
+			err error
+		}
+		done := make(chan result, 1)
+		go func() {
+			row, err := auth.EnsurePermission(ctx, db.DB, key, "Loser")
+			done <- result{row, err}
+		}()
+		waitForBlockedInsert(t, db, done)
+		if err := winner.Rollback().Error; err != nil {
+			t.Fatal(err)
+		}
+		r := <-done
+		if r.err != nil || r.row.ID == 0 || r.row.Description != "Loser" {
+			t.Fatalf("loser got %+v, %v; want its own row", r.row, r.err)
+		}
+	})
+}
+
+// waitForBlockedInsert waits until a session of this test's user is running
+// an INSERT into permissions, which, with the winner's insert uncommitted,
+// waits on it. Both servers show a user its own sessions without further
+// privileges. It fails if the loser returns first.
+func waitForBlockedInsert[T any](t *testing.T, db *database.DB, done <-chan T) {
+	t.Helper()
+	query := `SELECT count(*) FROM pg_stat_activity
+		WHERE datname = current_database() AND state = 'active'
+		AND query LIKE 'INSERT INTO "permissions"%'`
+	if db.Name() == "mysql" {
+		query = "SELECT count(*) FROM information_schema.PROCESSLIST " +
+			"WHERE DB = DATABASE() AND INFO LIKE 'INSERT INTO `permissions`%'"
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		select {
+		case r := <-done:
+			t.Fatalf("loser returned %+v before the winner ended", r)
+		default:
+		}
+		var n int64
+		if err := db.Raw(query).Scan(&n).Error; err != nil {
+			t.Fatal(err)
+		}
+		if n > 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the loser's insert never waited on the winner")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }

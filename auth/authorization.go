@@ -75,8 +75,12 @@ func HasPermissions(ctx context.Context, db *gorm.DB, user User, keys ...string)
 
 // EnsurePermission returns the permission for key, creating it when needed.
 // Concurrent first calls for one key (replicas seeding at boot) all get the
-// one row, not a unique violation (#463); inside a caller's transaction a
-// lost race does not abort it.
+// one row, not a unique violation (#463), outside a transaction and inside
+// one at READ COMMITTED or on MySQL; a lost race does not abort the caller's
+// transaction. Inside a PostgreSQL REPEATABLE READ or SERIALIZABLE
+// transaction the winner's row is not visible, so a lost race returns the
+// unique violation (or a serialization failure) and the caller retries the
+// transaction.
 func EnsurePermission(ctx context.Context, db *gorm.DB, key, description string) (Permission, error) {
 	if db == nil {
 		return Permission{}, errors.New("auth: nil database")
@@ -107,9 +111,13 @@ func EnsureGroup(ctx context.Context, db *gorm.DB, name string) (Group, error) {
 // violation (#463). Here the insert runs under insertSafely's savepoint, so
 // losing that race inside a caller's transaction does not abort it, and the
 // loser reads the winner's row instead. That read locks (FOR SHARE; SQLite's
-// dialect drops it): on MySQL (REPEATABLE READ) a plain read inside a
-// transaction sees the snapshot from before the winner committed, and would
-// find nothing.
+// dialect drops it) because on MySQL a locking read sees the latest
+// committed row, where a plain read inside a REPEATABLE READ transaction
+// sees the snapshot from before the winner committed. A PostgreSQL snapshot
+// (REPEATABLE READ, SERIALIZABLE) cannot see it whatever the lock, and the
+// violation may be another constraint's (the primary key, its sequence
+// behind the table): when the re-read finds nothing, the insert's own error
+// is the answer, not "record not found".
 func ensureRow[T any](ctx context.Context, db *gorm.DB, query string, value string, fresh *T) (T, error) {
 	var row T
 	found := db.WithContext(ctx).Where(query, value).Limit(1).Find(&row)
@@ -125,8 +133,12 @@ func ensureRow[T any](ctx context.Context, db *gorm.DB, query string, value stri
 	if !database.IsUniqueViolation(err) {
 		return row, err
 	}
+	insertErr := err
 	err = db.WithContext(ctx).Clauses(clause.Locking{Strength: clause.LockingStrengthShare}).
 		Where(query, value).First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return row, insertErr
+	}
 	return row, err
 }
 

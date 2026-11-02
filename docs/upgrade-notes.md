@@ -351,8 +351,14 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   insert now runs under a savepoint and a unique violation re-reads
   the winner's row (with a shared lock, so a caller inside a MySQL
   REPEATABLE READ transaction sees it); inside a transaction the lost
-  race no longer aborts it on PostgreSQL. Nothing to change; a retry
-  an app wrapped around these calls for this error can go.
+  race no longer aborts it on PostgreSQL. This holds outside a
+  transaction and inside one at READ COMMITTED or on MySQL. A caller
+  inside a PostgreSQL REPEATABLE READ or SERIALIZABLE transaction
+  cannot see the winner's row, so it still gets the unique violation
+  (or a serialization failure) and must retry the whole transaction;
+  keep a retry an app has there. A unique violation on another
+  constraint (the primary key, its sequence behind the table) is
+  returned as itself. Nothing to change.
 
 ## v0.8.0
 
