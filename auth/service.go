@@ -180,7 +180,10 @@ func (s *Service) createUser(ctx context.Context, email, password string, superu
 	return user, nil
 }
 
-// Authenticate verifies email and password.
+// Authenticate verifies email and password. It fails with
+// ErrInvalidCredentials for an unknown email or a wrong password; any other
+// error is a server failure (the user lookup's database error), which a
+// caller must not answer as wrong credentials (#460).
 func (s *Service) Authenticate(ctx context.Context, email, password string) (User, error) {
 	email = normalizeEmail(email)
 	// Throttled before the lookup and bcrypt, by the email as typed: the
@@ -192,7 +195,15 @@ func (s *Service) Authenticate(ctx context.Context, email, password string) (Use
 		return User{}, err
 	}
 	user, err := findUserByEmail(s.db.WithContext(ctx), email)
-	if err != nil || user.ID == 0 {
+	if err != nil {
+		// The database failed, not the credentials: a 500, so a blip does
+		// not tell the user their password is wrong, and the attempt gives
+		// its throttle places back, so an outage spends nobody's login
+		// budget (issue #460).
+		res.refund()
+		return User{}, err
+	}
+	if user.ID == 0 {
 		s.compareDummy(password)
 		// No target: the attempted address is not recorded.
 		s.Audit(ctx, AuditEvent{Action: AuditLoginFailed, Details: details("reason", "unknown_account")})
@@ -235,11 +246,12 @@ func (s *Service) Login(ctx context.Context, email, password string) (User, Toke
 // user: it starts a session, so it records the login as succeeded
 // (Authenticate records the failures). user is a snapshot, as Authenticate
 // returned it or as loaded from the database: its PasswordHash must still
-// be the user's when the session starts, or IssueTokens fails as invalid
-// credentials (ErrInvalidCredentials); and the account must not be
-// disabled (ErrAccountDisabled). So Authenticate followed by IssueTokens is
-// as safe as Login: a password reset or a disable that commits between the
-// two leaves the snapshot unable to start a session.
+// be the user's when the session starts, and the user must still exist, or
+// IssueTokens fails as invalid credentials (ErrInvalidCredentials); the
+// account must not be disabled (ErrAccountDisabled); any other error is a
+// server failure. So Authenticate followed by IssueTokens is as safe as
+// Login: a password reset or a disable that commits between the two leaves
+// the snapshot unable to start a session.
 func (s *Service) IssueTokens(ctx context.Context, user User) (TokenPair, error) {
 	_, pair, err := s.startSession(ctx, user)
 	return pair, err
@@ -256,7 +268,7 @@ func (s *Service) startSession(ctx context.Context, user User) (User, TokenPair,
 		var err error
 		locked, err = lockUserTx(tx, user.ID)
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return errUserNotFound
+			return errLoginAccountGone
 		}
 		if err != nil {
 			return err
@@ -272,6 +284,13 @@ func (s *Service) startSession(ctx context.Context, user User) (User, TokenPair,
 	})
 	if errors.Is(err, errLoginPasswordChanged) {
 		s.Audit(ctx, AuditEvent{Action: AuditLoginFailed, TargetUserID: uintPtr(user.ID), Details: details("reason", "password_changed")})
+		return User{}, TokenPair{}, errInvalidCredentials
+	}
+	if errors.Is(err, errLoginAccountGone) {
+		// Deleted between the password check and the session: to the
+		// client, an account that no longer exists, a 401 like an unknown
+		// email, not a server failure (#460).
+		s.Audit(ctx, AuditEvent{Action: AuditLoginFailed, TargetUserID: uintPtr(user.ID), Details: details("reason", "account_deleted")})
 		return User{}, TokenPair{}, errInvalidCredentials
 	}
 	if errors.Is(err, errAccountDisabled) {
@@ -290,6 +309,10 @@ func (s *Service) startSession(ctx context.Context, user User) (User, TokenPair,
 // errLoginPasswordChanged is a login whose verified password was replaced
 // before its session started (Login answers it as invalid credentials).
 var errLoginPasswordChanged = errors.New("auth: the password changed during the login")
+
+// errLoginAccountGone is a login whose user was deleted before its session
+// started (Login and IssueTokens answer it as invalid credentials).
+var errLoginAccountGone = errors.New("auth: the account was deleted during the login")
 
 func (s *Service) issueTokens(tx *gorm.DB, user User, now time.Time) (TokenPair, error) {
 	raw, err := newRefreshToken()
@@ -614,8 +637,10 @@ func (s *Service) RevokeRefresh(ctx context.Context, raw string) error {
 }
 
 // ParseAccess validates an access JWT, from the Bearer header or the session
-// cookie, and loads its user. It fails when the token's session has ended:
-// its refresh token row was revoked or has expired.
+// cookie, and loads its user. It fails with ErrInvalidAccessToken when the
+// token is invalid or its session has ended (its refresh token row is gone,
+// revoked or expired); any other error is the database's, loading the user
+// or the session, a server failure a gate must not answer as a 401 (#460).
 func (s *Service) ParseAccess(ctx context.Context, token string) (User, error) {
 	user, _, err := s.parseAccess(ctx, token)
 	return user, err
@@ -633,9 +658,15 @@ func (s *Service) parseAccess(ctx context.Context, token string) (User, uint, er
 	if err != nil {
 		return User{}, 0, err
 	}
+	// Only a missing row is a dead token. Any other failure is the
+	// database's: returned as is, a 500 from the gates, so a blip does not
+	// read as a dead session and sign every client out (issue #460).
 	var user User
 	if err := s.db.WithContext(ctx).First(&user, id).Error; err != nil {
-		return User{}, 0, errInvalidAccessToken
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return User{}, 0, errInvalidAccessToken
+		}
+		return User{}, 0, err
 	}
 	// Its sessions were revoked when it was disabled; refused here too, so
 	// no session that outlived that (a race, a restore) authenticates it.
@@ -644,7 +675,10 @@ func (s *Service) parseAccess(ctx context.Context, token string) (User, uint, er
 	}
 	var row RefreshToken
 	if err := s.db.WithContext(ctx).Where("id = ?", claims.RefreshID).First(&row).Error; err != nil {
-		return User{}, 0, errInvalidAccessToken
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return User{}, 0, errInvalidAccessToken
+		}
+		return User{}, 0, err
 	}
 	// One definition of an active session, shared with the sessions API: an
 	// unrevoked refresh token row that has not expired. The refresh TTL is
