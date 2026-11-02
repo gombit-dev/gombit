@@ -136,12 +136,15 @@ func withSession(ctx huma.Context, user User, refreshID uint) huma.Context {
 	return huma.WithValue(huma.WithValue(ctx, userContextKey{}, user), sessionContextKey{}, refreshID)
 }
 
+// bearerToken returns the credentials of an Authorization header in the
+// Bearer scheme. The scheme is case-insensitive (RFC 9110 §11.1): clients,
+// proxies and gateways send `bearer` too (#464).
 func bearerToken(header string) (string, bool) {
-	const prefix = "Bearer "
-	if !strings.HasPrefix(header, prefix) {
+	scheme, token, ok := strings.Cut(header, " ")
+	if !ok || !strings.EqualFold(scheme, "Bearer") {
 		return "", false
 	}
-	token := strings.TrimSpace(strings.TrimPrefix(header, prefix))
+	token = strings.TrimSpace(token)
 	if token == "" {
 		return "", false
 	}

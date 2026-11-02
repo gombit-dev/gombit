@@ -165,6 +165,11 @@ version.
 
 ### Fixed
 
+- A Bearer request whose `Authorization` scheme is not spelled exactly
+  `Bearer` (`bearer <token>`, `BEARER <token>`, as some clients, proxies and
+  gateways send it) is authenticated instead of refused with `401` "missing
+  bearer token": the scheme is case-insensitive, as RFC 9110 defines it
+  ([#464](https://github.com/gombit-dev/gombit/issues/464)).
 - Two tabs refreshing the same refresh token a network round trip apart no
   longer sign the user out of every session. A refresh with a token rotated
   less than `GOMBIT_AUTH_REFRESH_REUSE_GRACE` (`Config.Auth.RefreshReuseGrace`,
