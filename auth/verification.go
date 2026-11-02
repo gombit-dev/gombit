@@ -36,7 +36,11 @@ var ErrAlreadyVerified = errAlreadyVerified
 // until the message was delivered, then supersedes the earlier ones
 // (sendOneTimeToken).
 func (s *Service) SendEmailVerification(ctx context.Context, user User) error {
-	return s.sendOneTimeToken(ctx, user, oneTimeFlow{
+	res, err := s.throttle.reserve(ctx, throttleRule{name: "VerificationPerUser", limit: s.throttle.policy.VerificationPerUser, subject: userSubject(user.ID)})
+	if err != nil {
+		return err
+	}
+	err = s.sendOneTimeToken(ctx, user, oneTimeFlow{
 		purpose: PurposeVerifyEmail,
 		ttl:     s.verificationTTL(),
 		check: func(_ *gorm.DB, u User) error {
@@ -47,6 +51,10 @@ func (s *Service) SendEmailVerification(ctx context.Context, user User) error {
 		},
 		message: s.verificationMessage,
 	})
+	if err != nil {
+		res.refund() // only messages sent count
+	}
+	return err
 }
 
 func (s *Service) verificationTTL() time.Duration {
@@ -72,6 +80,10 @@ func (s *Service) verificationMessage(token OneTimeToken, raw string) Message {
 // unknown, expired, used, superseded, never delivered, or for an address the
 // user no longer has. Concurrent uses of one token: exactly one succeeds.
 func (s *Service) VerifyEmail(ctx context.Context, raw string) (User, error) {
+	return throttleTokenUse(ctx, s, func() (User, error) { return s.consumeVerification(ctx, raw) })
+}
+
+func (s *Service) consumeVerification(ctx context.Context, raw string) (User, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return User{}, errInvalidOneTimeToken
@@ -143,9 +155,11 @@ func registerVerificationRoutes(api huma.API, svc *Service, prefix, security str
 		Method:      http.MethodPost,
 		Path:        prefix + "/auth/verify-email",
 		Summary:     "Verify the user's email address with the token mailed to it",
-		Description: "Consumes the token: it works once. An unknown, expired, used or superseded token, or one sent to an address the user no longer has, is a 422 on token.",
+		Description: "Consumes the token: it works once. An unknown, expired, used or superseded token, or one sent to an address the user no longer has, is a 422 on token. Too many invalid tokens from one client address is a 429 (Retry-After).",
 		Tags:        []string{"Auth"},
+		Errors:      []int{http.StatusTooManyRequests},
 	}), svc.verifyEmail)
+	declareRetryAfter(api, prefix+"/auth/verify-email", http.StatusTooManyRequests, throttleRetryAfterDoc)
 
 	resendPath := prefix + "/auth/verify-email/resend"
 	huma.Register(api, huma.Operation{

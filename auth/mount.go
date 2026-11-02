@@ -54,8 +54,11 @@ func Mount(api huma.API, db *gorm.DB, cfg config.Config, opts ...Option) (*Servi
 		Method:      http.MethodPost,
 		Path:        prefix + "/auth/register",
 		Summary:     "Register a user",
+		Description: "Too many registrations from this client address is a 429 (Retry-After), before the password is hashed.",
 		Tags:        []string{"Auth"},
+		Errors:      []int{http.StatusTooManyRequests},
 	}), svc.register)
+	declareRetryAfter(api, prefix+"/auth/register", http.StatusTooManyRequests, throttleRetryAfterDoc)
 
 	if cfg.Auth.EffectiveMode() == config.AuthModeCookie {
 		mountCookieRoutes(api, svc, prefix)
@@ -73,8 +76,11 @@ func mountBearerRoutes(api huma.API, svc *Service, prefix string) {
 		Method:      http.MethodPost,
 		Path:        prefix + "/auth/login",
 		Summary:     "Log in and issue Bearer tokens",
+		Description: "Too many failed attempts for the email from this client address, from this address, or for the email is a 429 (Retry-After), the same whether or not the email is an account.",
 		Tags:        []string{"Auth"},
+		Errors:      []int{http.StatusTooManyRequests},
 	}), svc.login)
+	declareRetryAfter(api, prefix+"/auth/login", http.StatusTooManyRequests, throttleRetryAfterDoc)
 
 	huma.Register(api, withRequestInfo(huma.Operation{
 		OperationID: "refresh",
@@ -125,8 +131,11 @@ func mountCookieRoutes(api huma.API, svc *Service, prefix string) {
 		Method:      http.MethodPost,
 		Path:        prefix + "/auth/login",
 		Summary:     "Log in and start an HttpOnly cookie session",
+		Description: "Too many failed attempts for the email from this client address, from this address, or for the email is a 429 (Retry-After), the same whether or not the email is an account.",
 		Tags:        []string{"Auth"},
+		Errors:      []int{http.StatusTooManyRequests},
 	}), svc.loginCookie)
+	declareRetryAfter(api, prefix+"/auth/login", http.StatusTooManyRequests, throttleRetryAfterDoc)
 
 	huma.Register(api, withRequestInfo(huma.Operation{
 		OperationID: "refresh",

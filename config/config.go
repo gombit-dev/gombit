@@ -67,6 +67,7 @@ const (
 	envPasswordResetTTL        = "GOMBIT_AUTH_PASSWORD_RESET_TTL"           // #nosec G101 -- environment variable name, not a credential.
 	envPasswordResetURL        = "GOMBIT_AUTH_PASSWORD_RESET_URL"           // #nosec G101 -- environment variable name, not a credential.
 	envPasswordResetKeep       = "GOMBIT_AUTH_PASSWORD_RESET_KEEP_SESSIONS" // #nosec G101 -- environment variable name, not a credential.
+	envAuthThrottleDisabled    = "GOMBIT_AUTH_THROTTLE_DISABLED"
 	envCookieSecure            = "GOMBIT_COOKIE_SECURE"
 	envCookieSameSite          = "GOMBIT_COOKIE_SAMESITE"
 	envSecuritySanitizeInput   = "GOMBIT_SECURITY_SANITIZE_INPUT"
@@ -475,6 +476,11 @@ type AuthConfig struct {
 	// their password. By default (false) a reset revokes every session and
 	// refresh token of the user: whoever knew the old password is signed out.
 	PasswordResetKeepSessions bool
+	// ThrottleDisabled turns off the credential endpoints' abuse protection
+	// (AUTH-8): the login, password reset, one-time token, current-password
+	// and verification throttles. On by default; turn it off only when
+	// something in front of the app (a gateway, a WAF) limits these routes.
+	ThrottleDisabled bool
 }
 
 // Enabled reports whether auth routes should be mounted (JWT secret is set).
@@ -701,6 +707,7 @@ func LoadFromEnv(lookup EnvLookup) (Config, error) {
 	applyString(lookup, envPasswordResetURL, &cfg.Auth.PasswordResetURL)
 	applyString(lookup, envEmailChangeURL, &cfg.Auth.EmailChangeURL)
 	applyBool(lookup, envPasswordResetKeep, "Auth.PasswordResetKeepSessions", &cfg.Auth.PasswordResetKeepSessions, &errs)
+	applyBool(lookup, envAuthThrottleDisabled, "Auth.ThrottleDisabled", &cfg.Auth.ThrottleDisabled, &errs)
 	applyBool(lookup, envSecuritySanitizeInput, "Security.SanitizeInput", &cfg.Security.SanitizeInput, &errs)
 	if docsEnabledSet {
 		applyBool(lookup, envDocsEnabled, "API.DocsEnabled", &cfg.API.DocsEnabled, &errs)

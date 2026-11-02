@@ -1307,6 +1307,29 @@ func TestPasswordResetConfig(t *testing.T) {
 	}
 }
 
+// TestAuthThrottleConfig: the credential throttles are on unless
+// GOMBIT_AUTH_THROTTLE_DISABLED says otherwise, in every environment.
+func TestAuthThrottleConfig(t *testing.T) {
+	for _, env := range []Environment{EnvironmentDevelopment, EnvironmentTest, EnvironmentProduction} {
+		if DefaultFor(env).Auth.ThrottleDisabled {
+			t.Fatalf("%s: the throttles are off by default", env)
+		}
+	}
+	loaded, err := LoadFromEnv(func(k string) (string, bool) {
+		v, ok := map[string]string{envAuthThrottleDisabled: "true"}[k]
+		return v, ok
+	})
+	if err != nil || !loaded.Auth.ThrottleDisabled {
+		t.Fatalf("LoadFromEnv = %+v, %v", loaded.Auth, err)
+	}
+	if _, err := LoadFromEnv(func(k string) (string, bool) {
+		v, ok := map[string]string{envAuthThrottleDisabled: "sometimes"}[k]
+		return v, ok
+	}); err == nil {
+		t.Fatal("a non-boolean GOMBIT_AUTH_THROTTLE_DISABLED loaded")
+	}
+}
+
 // TestEmailChangeURLConfig: the email change link must say where the token
 // goes; from the environment it loads as written.
 func TestEmailChangeURLConfig(t *testing.T) {
