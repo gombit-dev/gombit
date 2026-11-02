@@ -561,6 +561,7 @@ func runSessionsService(t *testing.T, db *database.DB) {
 				for range rotations {
 					head = e.rotate(t, head)
 				}
+				headSession := e.sessionID(t, head)
 				if err := e.svc.RevokeRefresh(e.ctx, pairs[0].RefreshToken); err != nil {
 					t.Fatalf("RevokeRefresh(rotated token) = %v", err)
 				}
@@ -576,8 +577,61 @@ func runSessionsService(t *testing.T, db *database.DB) {
 				if n := logouts(t, ada.ID); n != 1 {
 					t.Fatalf("%s events = %d, want 1", auth.AuditLogout, n)
 				}
+				// The event names the session the logout ended and says a
+				// rotated token ended it.
+				var ev auth.AuditEvent
+				if err := db.Where("action = ? AND target_user_id = ?", auth.AuditLogout, ada.ID).First(&ev).Error; err != nil {
+					t.Fatal(err)
+				}
+				if ev.TargetType != "session" || ev.TargetID != headSession || !strings.Contains(ev.Details, `"via":"rotated"`) {
+					t.Fatalf("logout event = %+v, want the head's session %s, via rotated", ev, headSession)
+				}
 			})
 		}
+		t.Run("unrotated token", func(t *testing.T) {
+			e := newEnv(t)
+			ada, pairs := e.user(t, "logoutplain", 1)
+			session := e.sessionID(t, pairs[0])
+			if err := e.svc.RevokeRefresh(e.ctx, pairs[0].RefreshToken); err != nil {
+				t.Fatal(err)
+			}
+			var ev auth.AuditEvent
+			if err := db.Where("action = ? AND target_user_id = ?", auth.AuditLogout, ada.ID).First(&ev).Error; err != nil {
+				t.Fatal(err)
+			}
+			if ev.TargetType != "session" || ev.TargetID != session || strings.Contains(ev.Details, "via") {
+				t.Fatalf("logout event = %+v, want the session %s, no via", ev, session)
+			}
+		})
+		// A walk reads at most maxChainHops rows: from a token one rotation
+		// short of the bound it reaches the head and ends the session; from
+		// one at the bound it cannot, and the logout fails, ending nothing,
+		// rather than succeed with the session alive.
+		t.Run("chain at the walk's bound", func(t *testing.T) {
+			const bound = 5
+			defer auth.SetMaxChainHops(bound)()
+			for rotations, reaches := range map[int]bool{bound - 1: true, bound: false} {
+				e := newEnv(t)
+				_, pairs := e.user(t, fmt.Sprintf("logoutbound%d", rotations), 1)
+				head := pairs[0]
+				for range rotations {
+					head = e.rotate(t, head)
+				}
+				err := e.svc.RevokeRefresh(e.ctx, pairs[0].RefreshToken)
+				if reaches {
+					if err != nil || e.authenticates(head) {
+						t.Fatalf("%d rotations: RevokeRefresh = %v, head authenticates = %v; want nil, false", rotations, err, e.authenticates(head))
+					}
+					continue
+				}
+				if !errors.Is(err, auth.ErrChainUnresolved) {
+					t.Fatalf("%d rotations: RevokeRefresh = %v, want ErrChainUnresolved", rotations, err)
+				}
+				if !e.authenticates(head) {
+					t.Fatalf("%d rotations: the failed logout ended the session", rotations)
+				}
+			}
+		})
 		t.Run("expired rotated token", func(t *testing.T) {
 			e := newEnv(t)
 			_, pairs := e.user(t, "logoutexpired", 1)

@@ -35,7 +35,7 @@ credential endpoints are throttled (429 with `Retry-After`); see
 | `POST` | `/auth/register` | Public. Demo/bootstrap seed path (email + password); never sets `IsSuperuser`. |
 | `POST` | `/auth/login` | Public. Returns `access_token`, `refresh_token`, `token_type`, `expires_in`. |
 | `POST` | `/auth/refresh` | Public. Body `{ "refresh_token" }`. Issues a new pair; the old refresh token is invalid. |
-| `POST` | `/auth/logout` | Public. Body `{ "refresh_token" }`. Ends that token's session: the token, or, when it has already rotated (a refresh in flight as the user signs out), the session's current token. Bound access JWTs then fail. A token past its expiry, or of a session already ended, ends nothing; logout is idempotent. |
+| `POST` | `/auth/logout` | Public. Body `{ "refresh_token" }`. Ends that token's session: the token, or, when it has already rotated (a refresh in flight as the user signs out), the session's current token. Any unexpired token the session has had ends it, so an old copy is enough. Bound access JWTs then fail. A token unknown, past its expiry, or of a session already ended ends nothing and answers 200 alike, so logout is idempotent and its answer reveals nothing about a token (an expired token is no credential, as for refresh). A session whose chain cannot be followed to its current token answers 500 and is not ended. |
 | `GET` | `/me` | Bearer access JWT. Example protected route for E2E. Missing/invalid Bearer is 401 with `WWW-Authenticate: Bearer realm="api"`. |
 | `GET` | `/auth/sessions` | Bearer access JWT. Lists the user's active sessions; see [Sessions](#sessions). |
 | `DELETE` | `/auth/sessions/{id}` | Bearer access JWT. Revokes one session; 404 if `id` names no active session of the user. |
@@ -557,7 +557,10 @@ the same moment:
   follows a token that has rotated to its session's current token. A logout
   that races a refresh of the same token therefore ends the session either
   way: if the refresh commits first, the logout revokes the token it issued;
-  if the logout does, the refresh finds its token revoked (401).
+  if the logout does, the refresh finds its token revoked (401). The audit
+  event (`auth.logout`) names the session it ended and, when a rotated token
+  ended it, says so (`"via":"rotated"`): that token is an old copy, a sibling
+  tab's or a thief's.
 - **Login** checks the password without the lock (bcrypt is slow), then
   starts its session under it, and only if the password hash it checked is
   still the user's (`Service.Login`). Every session start makes that check:
@@ -591,7 +594,7 @@ The framework records every security-sensitive operation in
 | Action | When |
 | --- | --- |
 | `auth.login.succeeded` / `auth.login.failed` | A sign-in. A failure names the account when the email is one (a wrong password, `details.reason` `wrong_password`), and no account when it is not: the attempted address is not recorded. |
-| `auth.logout` | `POST /auth/logout` ended a session. |
+| `auth.logout` | `POST /auth/logout` ended a session: the target is that session, and `"via":"rotated"` marks one an already rotated token ended. |
 | `auth.user.registered` / `auth.superuser.created` | `POST /auth/register`; `gombit createsuperuser`. |
 | `auth.refresh.reuse_detected` | A rotated-away refresh token came back past `RefreshReuseGrace`, or within it once its successor had been rotated again: every session of the user was revoked. |
 | `auth.refresh.reuse_within_grace` | A rotated-away refresh token came back within `RefreshReuseGrace` of its rotation: a 401, nothing revoked. Target type `session` names the successor's session by the id `GET /auth/sessions` showed for it at the time; that id changes when the session next refreshes (in an access TTL at most), so act on it promptly (revoke it, or revoke all); details `successor` is `live` (a sibling tab's session, or a thief's who rotated a stolen token first: the one trace of that) or `ended` (signed out before the request came). |

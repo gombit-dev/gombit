@@ -371,9 +371,14 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   session lived on, refreshable, until it expired. The logout now
   follows the token's successors to the session's current token and
   revokes that, under the user's lock that rotation takes, so a logout
-  racing a refresh of the same token ends the session either way. A
-  rotated token past its own expiry, or the token of a session already
-  ended, still ends nothing and succeeds. Nothing to change.
+  racing a refresh of the same token ends the session either way. Any
+  unexpired token the session has had ends it. The `auth.logout` audit
+  event now names the session it ended (`target_type` session) and
+  carries `"via":"rotated"` when an old token ended it. A rotated
+  token past its own expiry, or the token of a session already ended,
+  still ends nothing and succeeds; a chain that cannot be followed to
+  its head (corrupt data, or more than 1000 rotations behind) answers
+  500. Nothing to change.
 
 ## v0.8.0
 

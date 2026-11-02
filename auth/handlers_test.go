@@ -337,6 +337,17 @@ func TestLogoutWithRotatedToken(t *testing.T) {
 	}
 	rec = postJSON(t, app, "/api/v1/auth/refresh", `{"refresh_token":"`+b.RefreshToken+`"}`)
 	assertError(t, rec, http.StatusUnauthorized, "authentication")
+
+	// A logout whose walk cannot reach the session's head fails with a 500
+	// rather than answer 200 with the session alive.
+	defer auth.SetMaxChainHops(1)()
+	c := loginUser(t, app, "rotated-logout@example.com", testPassword)
+	d := refreshUser(t, app, c.RefreshToken)
+	rec = postJSON(t, app, "/api/v1/auth/logout", `{"refresh_token":"`+c.RefreshToken+`"}`)
+	assertError(t, rec, http.StatusInternalServerError, "internal")
+	if me := getMe(t, app, d.AccessToken); me != http.StatusOK {
+		t.Fatalf("GET /me after the failed logout = %d, want 200: it ended nothing", me)
+	}
 }
 
 func getMe(t *testing.T, app *framework.App, access string) int {

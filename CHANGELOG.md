@@ -172,8 +172,11 @@ version.
   `auth.Service.RevokeRefresh` follows the token's successors to the
   session's current token, and takes the user's lock as rotation does, so a
   logout that races a refresh of the same token now ends the session either
-  way (a limitation `docs/auth.md` listed). A rotated token past its own
-  expiry ends nothing, as it refreshes nothing
+  way (a limitation `docs/auth.md` listed). The `auth.logout` audit event
+  names the session it ended, and records `"via":"rotated"` when an old
+  token ended it. A rotated token past its own expiry ends nothing, as it
+  refreshes nothing, and answers 200 like an unknown one; a session whose
+  token chain cannot be followed to its head answers 500 rather than 200
   ([#466](https://github.com/gombit-dev/gombit/issues/466)).
 - Two tabs refreshing the same refresh token a network round trip apart no
   longer sign the user out of every session. A refresh with a token rotated
