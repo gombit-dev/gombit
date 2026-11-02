@@ -168,10 +168,10 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   signs out only if it treats a 5xx as one, and the SPAs this repo
   ships still do: the scaffold's failed refresh (#580), and the
   scaffold's and the admin's `RequireAuth` on a failed `/me` and the
-  admin's failed refresh, which #580 does not cover yet. `auth.ErrInvalidCredentials` and
-  `auth.ErrInvalidAccessToken` are now exported: an app's own login
-  or gate built on `Authenticate` / `ParseAccess` answers 401 only
-  for them.
+  admin's failed refresh, which #580 does not cover yet.
+  `auth.ErrInvalidCredentials` and `auth.ErrInvalidAccessToken` are
+  now exported: an app's own login or gate built on `Authenticate` /
+  `ParseAccess` answers 401 only for them.
 
 - Bearer-mode session revocation errors include the `WWW-Authenticate: Bearer realm="api"` challenge when the handler returns 401. (`bearer-handler-401-challenge`, api, [#604](https://github.com/gombit-dev/gombit/issues/604))
 

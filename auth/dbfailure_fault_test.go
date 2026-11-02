@@ -2,6 +2,7 @@ package auth_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,8 +12,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gombit-dev/gombit/auth"
+	"github.com/gombit-dev/gombit/config"
 	"github.com/gombit-dev/gombit/database"
 	"github.com/gombit-dev/gombit/internal/faulttest"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // TestFault_HTTP_AuthDatabaseFailureIs500: the database fails while a login
@@ -45,9 +48,12 @@ func TestFault_HTTP_AuthDatabaseFailureIs500(t *testing.T) {
 				table.Store(tbl)
 				faults.Arm()
 				if tbl == "users" {
-					// More logins than the per-account throttle allows
-					// (5 a window): each lookup failure gives its places
-					// back, so the outage spends no login budget.
+					// More logins than LoginPerAccountAddress allows (5 in
+					// 15 minutes; the other login rules are wider, and
+					// LoginPerAccount is not taken for this known client):
+					// each lookup failure gives its places back.
+					// TestFault_Database_LoginLookupFailureRefundsEveryThrottle
+					// pins every rule.
 					for range 7 {
 						rec := postJSON(t, app, "/api/v1/auth/login", `{"email":"blip@example.com","password":"`+testPassword+`"}`)
 						assertError(t, rec, http.StatusInternalServerError, "internal")
@@ -103,6 +109,49 @@ func TestFault_HTTP_AuthDatabaseFailureIs500(t *testing.T) {
 				t.Fatalf("cookie GET /me once the database is back = %d, want 200: the session must survive", status)
 			}
 		})
+	})
+}
+
+// TestFault_Database_LoginLookupFailureRefundsEveryThrottle: under a policy
+// where all three login rules allow 3 attempts and no client is exempt from
+// LoginPerAccount, logins whose user lookup fails give back every place they
+// took: after five of them, the right password signs in. A refund that missed
+// any one rule would leave it over its limit, and refuse that login (#460).
+func TestFault_Database_LoginLookupFailureRefundsEveryThrottle(t *testing.T) {
+	faulttest.ForEachDB(t, faultDBs, func(t *testing.T, kind database.Driver, dsn string) {
+		faults := &faulttest.DBFaults{Statement: faulttest.FailAlways(faulttest.ErrInjected), Match: selectsUsers}
+		db := openFaultedAuthDB(t, kind, dsn, faults)
+		if err := auth.Migrate(db.DB); err != nil {
+			t.Fatal(err)
+		}
+		cfg := config.DefaultFor(config.EnvironmentTest)
+		cfg.Auth.JWTSecret = testJWTSecret
+		cfg.Auth.BcryptCost = bcrypt.MinCost
+		tight := auth.ThrottleLimit{Limit: 3, Window: time.Hour}
+		svc, err := auth.NewService(db.DB, cfg, auth.WithThrottlePolicy(auth.ThrottlePolicy{
+			LoginPerAccountAddress: tight, LoginPerAddress: tight, LoginPerAccount: tight,
+		}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = svc.Close(context.Background()) })
+		ctx := auth.ContextWithAddress(context.Background(), "198.51.100.20")
+		if _, err := svc.Register(ctx, "refund@example.com", testPassword); err != nil {
+			t.Fatal(err)
+		}
+
+		faults.Arm()
+		for i := range 5 {
+			_, err := svc.Authenticate(ctx, "refund@example.com", testPassword)
+			if err == nil || errors.Is(err, auth.ErrInvalidCredentials) || errors.Is(err, auth.ErrTooManyAttempts) {
+				t.Fatalf("login %d during the failure = %v, want the database's error", i+1, err)
+			}
+		}
+		faults.Disarm()
+		faulttest.Idle(t, db)
+		if _, err := svc.Authenticate(ctx, "refund@example.com", testPassword); err != nil {
+			t.Fatalf("login once the database is back = %v, want success: the failed lookups were counted", err)
+		}
 	})
 }
 
