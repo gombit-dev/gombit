@@ -81,6 +81,7 @@ func TestVariablesReadBackWhatLoadFromEnvSets(t *testing.T) {
 		envEmailChangeURL:   "https://app.example.com/confirm-email?token={token}",
 		envPasswordResetTTL: "30m0s", envPasswordResetURL: "https://app.example.com/reset?token={token}",
 		envPasswordResetKeep:     "true",
+		envAuthThrottleDisabled:  "true",
 		envSecuritySanitizeInput: "true",
 	}
 	base := map[string]string{envEnv: "test", envJWTSecret: strings.Repeat("j", 32)}

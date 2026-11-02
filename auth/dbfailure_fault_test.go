@@ -45,8 +45,13 @@ func TestFault_HTTP_AuthDatabaseFailureIs500(t *testing.T) {
 				table.Store(tbl)
 				faults.Arm()
 				if tbl == "users" {
-					rec := postJSON(t, app, "/api/v1/auth/login", `{"email":"blip@example.com","password":"`+testPassword+`"}`)
-					assertError(t, rec, http.StatusInternalServerError, "internal")
+					// More logins than the per-account throttle allows
+					// (5 a window): each lookup failure gives its places
+					// back, so the outage spends no login budget.
+					for range 7 {
+						rec := postJSON(t, app, "/api/v1/auth/login", `{"email":"blip@example.com","password":"`+testPassword+`"}`)
+						assertError(t, rec, http.StatusInternalServerError, "internal")
+					}
 				}
 				rec := httptest.NewRecorder()
 				req := httptest.NewRequest(http.MethodGet, "/api/v1/me", nil)
@@ -62,6 +67,10 @@ func TestFault_HTTP_AuthDatabaseFailureIs500(t *testing.T) {
 
 			if status := getMe(t, app, pair.AccessToken); status != http.StatusOK {
 				t.Fatalf("GET /me once the database is back = %d, want 200: the session must survive", status)
+			}
+			// Not throttled by the outage's failed lookups.
+			if rec := postJSON(t, app, "/api/v1/auth/login", `{"email":"blip@example.com","password":"`+testPassword+`"}`); rec.Code != http.StatusOK {
+				t.Fatalf("login once the database is back = %d, want 200: the outage counted against the throttle; body: %s", rec.Code, rec.Body.String())
 			}
 			var failed int64
 			if err := db.Model(&auth.AuditEvent{}).Where("action = ?", auth.AuditLoginFailed).Count(&failed).Error; err != nil {

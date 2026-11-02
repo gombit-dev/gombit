@@ -73,7 +73,7 @@ func (s *Service) register(ctx context.Context, input *registerInput) (*register
 
 func (s *Service) login(ctx context.Context, input *loginInput) (*tokenOutput, error) {
 	_, pair, err := s.Login(ctx, input.Body.Email, input.Body.Password)
-	if errors.Is(err, errInvalidCredentials) {
+	if errors.Is(err, errInvalidCredentials) || errors.Is(err, ErrTooManyAttempts) {
 		return nil, mapServiceError(ctx, err)
 	}
 	if err != nil {
@@ -220,6 +220,7 @@ func invalidField(ctx context.Context, field, msg string) error {
 
 func mapServiceError(ctx context.Context, err error) error {
 	var tooSoon resendTooSoonError
+	var throttled *ThrottleError
 	var busy backgroundBusyError
 	var policy PasswordPolicyError
 	switch {
@@ -249,6 +250,9 @@ func mapServiceError(ctx context.Context, err error) error {
 		return invalidField(ctx, "token", "invalid or expired token")
 	case errors.Is(err, errAlreadyVerified):
 		return contract.WithContext(ctx, contract.Conflict("email address is already verified"))
+	case errors.As(err, &throttled):
+		return huma.ErrorWithHeaders(contract.WithContext(ctx, contract.RateLimited("too many attempts; try again later")),
+			http.Header{"Retry-After": []string{strconv.Itoa(throttleRetryAfterSeconds(throttled))}})
 	case errors.As(err, &tooSoon):
 		secs := int(math.Ceil(tooSoon.retryAfter.Seconds()))
 		return huma.ErrorWithHeaders(contract.WithContext(ctx, contract.RateLimited("a verification message was sent less than a minute ago")),

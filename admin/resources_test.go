@@ -24,6 +24,7 @@ import (
 	"github.com/gombit-dev/gombit/types"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type rowEnvelope struct {
@@ -944,6 +945,110 @@ func TestResourceListPaginationSearchOrderFilter(t *testing.T) {
 
 	badOrder := doRequest(app, jar, http.MethodGet, "/api/v1/admin/resources/widgets?ordering=note", "")
 	assertError(t, badOrder, http.StatusUnprocessableEntity, contract.CodeValidationError)
+}
+
+// TestResourceListOrdersByPrimaryKey pages through rows with equal sort keys:
+// every list query ends on the primary key, in the requested direction, so
+// pages neither repeat nor skip a row whatever order the database scans in
+// (issue #455). SQLite's reverse_unordered_selects stands in for a
+// PostgreSQL/MySQL plan that does not return rows in insertion order.
+func TestResourceListOrdersByPrimaryKey(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openSQLite(t)
+	sqlDB, err := db.DB.DB()
+	if err != nil {
+		t.Fatalf("sql.DB: %v", err)
+	}
+	sqlDB.SetMaxOpenConns(1) // the pragma is per connection
+	app := newCookieAppWithDB(t, db)
+	registerWidgets(t, app, func(o *admin.Options) {
+		o.Ordering = append(o.Ordering, "id")
+	})
+	if err := db.AutoMigrate(&keyedGadget{}); err != nil {
+		t.Fatalf("AutoMigrate(keyedGadget): %v", err)
+	}
+	if err := admin.Register(app, keyedGadget{}, admin.Options{
+		Slug:     "gadgets",
+		Ordering: []string{"name", "price"},
+		Actions:  admin.Actions{List: true, Create: true},
+	}); err != nil {
+		t.Fatalf("admin.Register(keyedGadget): %v", err)
+	}
+	jar := loginSuperuser(t, app)
+	for _, name := range []string{"A", "B", "C", "D", "E"} {
+		if res := doRequest(app, jar, http.MethodPost, "/api/v1/admin/resources/widgets", `{"name":"`+name+`","price":5}`); res.Code != http.StatusOK {
+			t.Fatalf("create %s status = %d; body: %s", name, res.Code, res.Body.String())
+		}
+	}
+	if err := db.Exec("PRAGMA reverse_unordered_selects = ON").Error; err != nil {
+		t.Fatalf("pragma: %v", err)
+	}
+
+	for query, want := range map[string]string{
+		"":                 "ABCDE",
+		"&ordering=price":  "ABCDE",
+		"&ordering=-price": "EDCBA",
+		"&ordering=name":   "ABCDE",
+		"&ordering=-id":    "EDCBA",
+	} {
+		var names []string
+		for page := 1; page <= 3; page++ {
+			res := doRequest(app, jar, http.MethodGet, fmt.Sprintf("/api/v1/admin/resources/widgets?page=%d&per_page=2%s", page, query), "")
+			var env listEnvelope
+			if err := json.Unmarshal(res.Body.Bytes(), &env); err != nil || res.Code != http.StatusOK {
+				t.Fatalf("list %q page %d status = %d, err %v; body: %s", query, page, res.Code, err, res.Body.String())
+			}
+			for _, r := range env.Data {
+				names = append(names, r["name"].(string))
+			}
+		}
+		if got := strings.Join(names, ""); got != want {
+			t.Errorf("list %q pages = %s, want %s", query, got, want)
+		}
+	}
+
+	// SQLite's sorter happens to keep ties in rowid order, so pin the
+	// tiebreaker on the statement itself.
+	orderBy := map[string]string{}
+	if err := db.Callback().Query().After("gorm:query").Register("test:order_by", func(tx *gorm.DB) {
+		if c, ok := tx.Statement.Clauses["ORDER BY"].Expression.(clause.OrderBy); ok {
+			var cols []string
+			for _, col := range c.Columns {
+				cols = append(cols, fmt.Sprintf("%s desc=%t", col.Column.Name, col.Desc))
+			}
+			orderBy[tx.Statement.Table] = strings.Join(cols, ",")
+		}
+	}); err != nil {
+		t.Fatalf("register callback: %v", err)
+	}
+	for _, tc := range []struct{ path, table, want string }{
+		{"widgets", "widgets", "id desc=false"},
+		{"widgets?ordering=price", "widgets", "price desc=false,id desc=false"},
+		{"widgets?ordering=-price", "widgets", "price desc=true,id desc=true"},
+		{"widgets?ordering=name", "widgets", "name desc=false,id desc=false"},
+		// Ordering by the primary key itself is not repeated as the tiebreaker.
+		{"widgets?ordering=id", "widgets", "id desc=false"},
+		{"widgets?ordering=-id", "widgets", "id desc=true"},
+		// The tiebreaker is the registry's primary-key column, not "id".
+		{"gadgets", "keyed_gadgets", "code desc=false"},
+		{"gadgets?ordering=-price", "keyed_gadgets", "price desc=true,code desc=true"},
+	} {
+		delete(orderBy, tc.table)
+		res := doRequest(app, jar, http.MethodGet, "/api/v1/admin/resources/"+tc.path, "")
+		if res.Code != http.StatusOK {
+			t.Fatalf("list %s status = %d; body: %s", tc.path, res.Code, res.Body.String())
+		}
+		if got := orderBy[tc.table]; got != tc.want {
+			t.Errorf("list %s ORDER BY = %s, want %s", tc.path, got, tc.want)
+		}
+	}
+}
+
+// keyedGadget is a model whose primary key column is not "id".
+type keyedGadget struct {
+	Code  uint   `gorm:"primaryKey" json:"code"`
+	Name  string `json:"name"`
+	Price int    `json:"price"`
 }
 
 func TestResourceListIncludesImplicitCreatedAt(t *testing.T) {
