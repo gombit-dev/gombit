@@ -41,7 +41,7 @@ func (s *Service) loginCookie(ctx context.Context, input *cookieLoginInput) (*co
 		return nil, mapServiceError(ctx, err)
 	}
 	if err != nil {
-		return nil, contract.WithContext(ctx, contract.Internal("issue tokens"))
+		return nil, contract.WithContext(ctx, contract.Internal("auth request failed"))
 	}
 	return &cookieSessionOutput{
 		SetCookie: s.sessionCookies(pair),
@@ -139,6 +139,11 @@ func (s *Service) requireCookieSession() func(ctx huma.Context, next func(huma.C
 		}
 		user, refreshID, err := s.parseAccess(ctx.Context(), cookie.Value)
 		if err != nil {
+			// A database failure is a 500, not a dead session cookie (#460).
+			if !errors.Is(err, errInvalidAccessToken) {
+				writeCookieAuthError(ctx, contract.WithContext(ctx.Context(), contract.Internal("auth request failed")))
+				return
+			}
 			writeCookieAuthError(ctx, contract.WithContext(ctx.Context(), contract.Authentication("invalid session cookie")))
 			return
 		}
