@@ -21,23 +21,22 @@ func HasPermission(ctx context.Context, db *gorm.DB, user User, key string) (boo
 
 // HasPermissions checks several keys while loading the user's associations
 // once. Missing users and unassigned keys are reported as false, and so is
-// every key of a disabled account (User.Disabled), a superuser's too: as
-// the snapshot says, and as the row reloaded here says.
+// every key of a disabled account (User.Disabled), a superuser's too. For a
+// stored user (an ID), the row is reloaded and decides, the superuser flag
+// and the account state included: a snapshot loaded before the account was
+// disabled or demoted grants nothing it no longer has. A user with no ID
+// (never stored) is judged as given.
 func HasPermissions(ctx context.Context, db *gorm.DB, user User, keys ...string) (map[string]bool, error) {
 	grants := make(map[string]bool, len(keys))
 	for _, key := range keys {
 		grants[key] = false
 	}
-	if user.Disabled() {
-		return grants, nil
-	}
-	if user.IsSuperuser {
-		for key := range grants {
-			grants[key] = true
-		}
-		return grants, nil
-	}
 	if user.ID == 0 {
+		if user.IsSuperuser && !user.Disabled() {
+			for key := range grants {
+				grants[key] = true
+			}
+		}
 		return grants, nil
 	}
 	if db == nil {

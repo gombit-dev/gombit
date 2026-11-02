@@ -251,6 +251,31 @@ func runAccountStateService(t *testing.T, db *database.DB) {
 		if ok, _ := auth.HasPermission(ctx, e.db.DB, super, "anything"); ok {
 			t.Fatal("a disabled superuser has every permission")
 		}
+		// A superuser loaded while active (a job holding it), disabled
+		// since: the row decides, not the snapshot.
+		admin, err := e.svc.CreateSuperuser(ctx, fmt.Sprintf("disable-perms-super-%d@example.com", time.Now().UnixNano()), testPassword)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ok, _ := auth.HasPermission(ctx, e.db.DB, admin, "anything"); !ok {
+			t.Fatal("an active superuser lacks a permission")
+		}
+		if _, err := e.svc.DisableUser(ctx, admin.ID); err != nil {
+			t.Fatal(err)
+		}
+		if ok, _ := auth.HasPermission(ctx, e.db.DB, admin, "anything"); ok {
+			t.Fatal("a superuser snapshot from before the disable has every permission")
+		}
+		// And a demoted one's stale flag grants nothing either.
+		if _, err := e.svc.EnableUser(ctx, admin.ID); err != nil {
+			t.Fatal(err)
+		}
+		if err := e.db.Model(&auth.User{}).Where("id = ?", admin.ID).Update("is_superuser", false).Error; err != nil {
+			t.Fatal(err)
+		}
+		if ok, _ := auth.HasPermission(ctx, e.db.DB, admin, "anything"); ok {
+			t.Fatal("a demoted superuser's snapshot has every permission")
+		}
 	})
 
 	t.Run("an unknown user", func(t *testing.T) {

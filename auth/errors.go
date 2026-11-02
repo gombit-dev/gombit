@@ -50,9 +50,11 @@ var ErrAccountDisabled = errAccountDisabled
 // Authenticate returns it for an unknown email or a wrong password; Login
 // and IssueTokens also for a password changed, or an account deleted,
 // between the password check and the session; Register and CreateSuperuser
-// for an empty email.
-// Any other error they return is a server failure (the database's, for
-// one), not a credential problem, and answers a 500 (#460).
+// for an empty email. Besides it, they return ErrAccountDisabled for a
+// disabled account (a 403) and a *ThrottleError (errors.Is
+// ErrTooManyAttempts, a 429) past a throttle. Any other error they return
+// is a server failure (the database's, for one), not a credential problem,
+// and answers a 500 (#460).
 var ErrInvalidCredentials = errInvalidCredentials
 
 // ErrInvalidAccessToken is the error ParseAccess returns for an access token

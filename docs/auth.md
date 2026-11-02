@@ -433,8 +433,10 @@ curl -sX POST localhost:8080/api/v1/auth/users/42/enable -H "Authorization: Bear
   both succeed. Recover with `gombit createsuperuser` (another address) or
   `svc.EnableUser` from code.
 - **Permissions.** `auth.HasPermission` / `HasPermissions` grant a disabled
-  account nothing, a superuser's included, so app code that authorizes a
-  loaded user (a job, a webhook) does not trust a disabled one.
+  account nothing, a superuser's included, and decide on the user's row,
+  reloaded: app code that authorizes a user it loaded earlier (a job, a
+  webhook) does not trust a snapshot taken before the account was disabled
+  or demoted.
 - **From Go.** `svc.DisableUser(ctx, userID)` / `svc.EnableUser(ctx, userID)`
   do the same and check no permission: for an app's own code and commands.
   `auth.ErrAccountDisabled` is the error of a disabled account's login,
