@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/ast"
 	"go/parser"
 	"go/token"
 	"io"
@@ -212,11 +213,103 @@ func prepare(ctx context.Context, opts Options) (absWorkDir string, models []mig
 		return "", nil, nil, err
 	}
 
-	artifacts, err = loadArtifacts(ctx, opts, absWorkDir, models, nil)
+	artifacts, err = loadModels(ctx, opts, absWorkDir, models)
 	if err != nil {
 		return "", nil, nil, err
 	}
 	return absWorkDir, models, artifacts, nil
+}
+
+// loadModels runs the loader over the resource packages as they are on disk
+// and, when that fails to build, once more with each package's other files
+// stubbed out (isolationOverlay). Generation reflects only the models, but
+// the loader imports their packages whole: once a model loses, renames or
+// retypes a field, the generated files from before no longer compile against
+// it, and neither does a hooks.go using the generated types when those files
+// are deleted, so the regeneration that would fix them could never run
+// (#467). The first attempt keeps every hand-written file a model may need;
+// the retry needs only the files declaring the models. The first attempt's
+// build errors are shown only if the retry fails too: they describe the
+// package as `go build` sees it.
+func loadModels(ctx context.Context, opts Options, absWorkDir string, models []migrations.Model) ([]resourcegen.GeneratedArtifact, error) {
+	var firstErrs bytes.Buffer
+	first := opts
+	first.Stderr = &firstErrs
+	artifacts, err := loadArtifacts(ctx, first, absWorkDir, models, nil)
+	var loaderErr *LoaderError
+	if err == nil || !errors.As(err, &loaderErr) {
+		return artifacts, err
+	}
+	overlay, oerr := isolationOverlay(absWorkDir, models)
+	if oerr != nil || len(overlay) == 0 {
+		_, _ = opts.Stderr.Write(firstErrs.Bytes())
+		return nil, err
+	}
+	retry := opts
+	retry.Stderr = io.Discard
+	artifacts, rerr := loadArtifacts(ctx, retry, absWorkDir, models, overlay)
+	if rerr != nil {
+		_, _ = opts.Stderr.Write(firstErrs.Bytes())
+		return nil, err
+	}
+	return artifacts, nil
+}
+
+// isolationOverlay stubs, in each resource package, every non-test .go file
+// that declares none of the package's models down to its package clause, so
+// the loader compiles the models without the generator-owned files and hooks
+// built on them. A file that does not parse is left as it is, for the
+// compiler to report.
+func isolationOverlay(absWorkDir string, models []migrations.Model) (map[string][]byte, error) {
+	types := map[string]map[string]bool{}
+	for _, m := range models {
+		pkg := path.Base(m.ImportPath)
+		if types[pkg] == nil {
+			types[pkg] = map[string]bool{}
+		}
+		types[pkg][m.TypeName] = true
+	}
+	overlay := map[string][]byte{}
+	for pkg, names := range types {
+		dir := filepath.Join(absWorkDir, "internal", pkg)
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return nil, fmt.Errorf("generate: read internal/%s: %w", pkg, err)
+		}
+		stub := []byte("package " + pkg + "\n")
+		for _, e := range entries {
+			name := e.Name()
+			if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+				continue
+			}
+			file := filepath.Join(dir, name)
+			if !declaresAnyType(file, names) {
+				overlay[file] = stub
+			}
+		}
+	}
+	return overlay, nil
+}
+
+// declaresAnyType reports whether the Go file declares a type named in
+// names; a file that does not parse counts as declaring one, so it is kept.
+func declaresAnyType(file string, names map[string]bool) bool {
+	f, err := parser.ParseFile(token.NewFileSet(), file, nil, parser.SkipObjectResolution)
+	if err != nil {
+		return true
+	}
+	for _, decl := range f.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.TYPE {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			if ts, ok := spec.(*ast.TypeSpec); ok && names[ts.Name.Name] {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // PlanResource runs the Program-Mode phase-2 render for a single pending

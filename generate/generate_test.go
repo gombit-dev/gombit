@@ -227,6 +227,110 @@ func TestApplyOverwritesStaleGeneratorOwned(t *testing.T) {
 	}
 }
 
+// scriptedRunner fails its first run with build errors on stderr and, on the
+// second, records the -overlay it was given (read while the run is live: the
+// overlay is gone afterwards) and answers out, or fails again with retryErr.
+type scriptedRunner struct {
+	out      []byte
+	retryErr error
+	runs     int
+	stubbed  map[string]string // real path -> staged source, from the overlay
+}
+
+func (s *scriptedRunner) Run(_ context.Context, _, _ string, args []string, stdout, stderr io.Writer) error {
+	s.runs++
+	if s.runs == 1 {
+		_, _ = io.WriteString(stderr, "dto.gen.go:31:18: row.Color undefined\n")
+		return errors.New("exit status 1")
+	}
+	for _, a := range args {
+		manifest, ok := strings.CutPrefix(a, "-overlay=")
+		if !ok {
+			continue
+		}
+		var ov struct{ Replace map[string]string }
+		b, err := os.ReadFile(manifest) // #nosec G304 -- the overlay this test's run wrote
+		if err != nil {
+			return err
+		}
+		if err := json.Unmarshal(b, &ov); err != nil {
+			return err
+		}
+		s.stubbed = map[string]string{}
+		for real, backing := range ov.Replace {
+			src, err := os.ReadFile(backing) // #nosec G304 -- backing file of that overlay
+			if err != nil {
+				return err
+			}
+			s.stubbed[real] = string(src)
+		}
+	}
+	if s.retryErr != nil {
+		_, _ = io.WriteString(stderr, "retry errors\n")
+		return s.retryErr
+	}
+	_, err := stdout.Write(s.out)
+	return err
+}
+
+// TestLoaderRetriesWithModelsIsolated: when the resource package does not
+// build as it is on disk (stale generated files after a field was removed),
+// the loader runs once more with every non-test file but the model's stubbed
+// to its package clause, and generation goes on from that render; the first
+// run's build errors are not shown (#467).
+func TestLoaderRetriesWithModelsIsolated(t *testing.T) {
+	dir := newAppLayout(t)
+	book := filepath.Join(dir, "internal", "book")
+	writeFile(t, filepath.Join(book, "book.go"), "package book\n\ntype Book struct{ Title string }\n")
+	writeFile(t, filepath.Join(book, "dto.gen.go"), "package book\n\nvar _ = Book{}.Color\n")
+	writeFile(t, filepath.Join(book, "hooks.go"), "package book\n\ntype bookHooks struct{ body bookCreateBody }\n")
+	writeFile(t, filepath.Join(book, "helpers.go"), "package book\n\nfunc helper() {}\n")
+	writeFile(t, filepath.Join(book, "book_test.go"), "package book\n")
+	runner := &scriptedRunner{out: artifactsJSON(t, bookArtifacts())}
+	var stderr bytes.Buffer
+	err := Generate(context.Background(), Options{WorkDir: dir, Stdout: io.Discard, Stderr: &stderr, runner: runner})
+	if err != nil {
+		t.Fatalf("Generate = %v, want the isolated retry to render", err)
+	}
+	if runner.runs != 2 {
+		t.Fatalf("loader runs = %d, want 2", runner.runs)
+	}
+	for _, name := range []string{"dto.gen.go", "hooks.go", "helpers.go"} {
+		if got, ok := runner.stubbed[filepath.Join(book, name)]; !ok || got != "package book\n" {
+			t.Errorf("%s staged as %q (staged %v), want its package clause only", name, got, ok)
+		}
+	}
+	for _, name := range []string{"book.go", "book_test.go"} {
+		if _, ok := runner.stubbed[filepath.Join(book, name)]; ok {
+			t.Errorf("%s was stubbed; the model's file and test files stay as they are", name)
+		}
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q, want nothing: the first run's errors are moot once the retry renders", stderr.String())
+	}
+	if got := read(t, filepath.Join(book, "dto.gen.go")); got != "package book\n\n// dto v1\n" {
+		t.Fatalf("dto.gen.go = %q, want the retry's render", got)
+	}
+}
+
+// TestLoaderRetryFailureReportsTheFirstRun: when the isolated retry fails
+// too (the model itself does not build), the error is the loader's and the
+// build errors shown are those of the package as it is on disk.
+func TestLoaderRetryFailureReportsTheFirstRun(t *testing.T) {
+	dir := newAppLayout(t)
+	writeFile(t, filepath.Join(dir, "internal", "book", "book.go"), "package book\n\ntype Book struct{ Title string }\n")
+	runner := &scriptedRunner{retryErr: errors.New("exit status 1")}
+	var stderr bytes.Buffer
+	err := Generate(context.Background(), Options{WorkDir: dir, Stdout: io.Discard, Stderr: &stderr, runner: runner})
+	var loaderErr *LoaderError
+	if !errors.As(err, &loaderErr) {
+		t.Fatalf("Generate = %v, want a LoaderError", err)
+	}
+	if got := stderr.String(); got != "dto.gen.go:31:18: row.Color undefined\n" {
+		t.Fatalf("stderr = %q, want the first run's build errors only", got)
+	}
+}
+
 func TestDryRunWritesNothing(t *testing.T) {
 	dir := newAppLayout(t)
 	out, err := runGenerate(t, dir, false, true, &fakeRunner{out: artifactsJSON(t, bookArtifacts())})
@@ -462,6 +566,44 @@ func TestGenerateProgramModeEndToEnd(t *testing.T) {
 	// The refreshed DTO reflects the new column.
 	if got := read(t, filepath.Join(dir, "internal", "book", "dto.gen.go")); !strings.Contains(got, "Subtitle") {
 		t.Fatalf("regenerated dto should include the new Subtitle column:\n%s", got)
+	}
+
+	// (4) Remove Subtitle and rename Title to Name: the committed DTO uses
+	// both, so the package no longer builds as it is. --check must report
+	// drift (ErrStale), not a build failure, and a write must regenerate
+	// (#467).
+	writeFile(t, filepath.Join(dir, "internal", "book", "book.go"),
+		"package book\n\nimport \"gorm.io/gorm\"\n\ntype Book struct {\n\tgorm.Model\n\tName     string `gorm:\"not null\"`\n\tTenantID uint   `gorm:\"not null\" gombit:\"read,server\"`\n}\n")
+	if _, err := runGenerate(t, dir, true, false, execRunner{}); !errors.Is(err, ErrStale) {
+		t.Fatalf("check after removing and renaming fields = %v, want ErrStale", err)
+	}
+	if _, err := runGenerate(t, dir, false, false, execRunner{}); err != nil {
+		t.Fatalf("regenerate after removing and renaming fields: %v", err)
+	}
+	if _, err := runGenerate(t, dir, true, false, execRunner{}); err != nil {
+		t.Fatalf("check after regenerating: %v", err)
+	}
+	if got := read(t, filepath.Join(dir, "internal", "book", "dto.gen.go")); strings.Contains(got, "Subtitle") || !strings.Contains(got, "Name") {
+		t.Fatalf("regenerated dto should have Name and no Subtitle:\n%s", got)
+	}
+	build := exec.Command("go", "build", "./internal/book")
+	build.Dir = dir
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("the regenerated app does not build: %v\n%s", err, out)
+	}
+
+	// (5) Delete the generated files: hooks.go uses their types, so the
+	// package does not build without them; generate must still write them.
+	for _, name := range []string{"dto.gen.go", "handler.gen.go"} {
+		if err := os.Remove(filepath.Join(dir, "internal", "book", name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := runGenerate(t, dir, false, false, execRunner{}); err != nil {
+		t.Fatalf("regenerate after deleting the generated files: %v", err)
+	}
+	if _, err := runGenerate(t, dir, true, false, execRunner{}); err != nil {
+		t.Fatalf("check after regenerating the deleted files: %v", err)
 	}
 }
 
