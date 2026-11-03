@@ -104,6 +104,9 @@ func (s *Service) issueOneTimeToken(ctx context.Context, user User, f oneTimeFlo
 		if err != nil {
 			return err
 		}
+		if locked.Disabled() {
+			return errAccountDisabled
+		}
 		now := s.now()
 		if f.check != nil {
 			if err := f.check(tx, locked); err != nil {
@@ -232,6 +235,11 @@ func (s *Service) consumeOneTimeToken(tx *gorm.DB, raw string, purpose TokenPurp
 	}
 	if err != nil {
 		return OneTimeToken{}, User{}, time.Time{}, err
+	}
+	// A disabled account's links were voided when it was disabled; one in
+	// flight then (a message being sent) works no more than they do.
+	if locked.Disabled() {
+		return OneTimeToken{}, User{}, time.Time{}, errInvalidOneTimeToken
 	}
 	now := s.now()
 	// Expiry on instants, here: SQLite compares times as text.

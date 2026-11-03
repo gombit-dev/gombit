@@ -139,7 +139,11 @@ from, `OneTimeToken.FromEmail`; the old address notified), and AUTH-8
 throttles per client address, email and user, reserved atomically and
 refunded on success, 429 with `Retry-After`; counted in the app cache
 through `cache.Counter` (`IncrementTTL`, `DecrementExisting`); `auth.ThrottlePolicy`,
-`GOMBIT_AUTH_THROTTLE_DISABLED`); see `docs/auth.md`.
+`GOMBIT_AUTH_THROTTLE_DISABLED`), and AUTH-6 (#336): account state
+(`User.DisabledAt`; `POST {prefix}/auth/users/{id}/disable` / `enable`
+behind `auth.PermissionManageUsers`, `Service.DisableUser` / `EnableUser`;
+disabling revokes the sessions and voids the links, and every path refuses
+a disabled account); see `docs/auth.md`.
 Don't assume generated apps are committed in-tree; `gombit new` writes them
 on demand. Check `git log` / `ls` before describing "how the code works."
 

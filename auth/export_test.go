@@ -7,12 +7,16 @@ import (
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
+	"gorm.io/gorm"
 )
 
 // SetRotateJoinHook makes fn run whenever a caller joins another caller's
 // in-flight refresh rotation (before it waits), so a test can pin callers
 // inside the shared rotation. Set it before the service is used.
 func SetRotateJoinHook(s *Service, fn func()) { s.onRotateJoin = fn }
+
+// SetRotateTimeout bounds s's shared rotations (zero restores the default).
+func SetRotateTimeout(s *Service, d time.Duration) { s.rotateTimeout = d }
 
 // ErrInvalidRefreshToken is the error RotateRefresh returns for a refresh
 // token that is unknown, revoked, or expired.
@@ -188,3 +192,9 @@ func ContextWithAddress(ctx context.Context, ip string) context.Context {
 
 // ThrottleProbed reports whether the probe of the throttles' store decided.
 func ThrottleProbed(s *Service) bool { return s.throttle.probed.Load() }
+
+// EnsurePermissionRow is EnsurePermission inserting fresh as given, so a
+// test can make the insert violate a constraint other than the key's.
+func EnsurePermissionRow(ctx context.Context, db *gorm.DB, fresh *Permission) (Permission, error) {
+	return ensureRow(ctx, db, "permission_key = ?", fresh.Key, fresh)
+}

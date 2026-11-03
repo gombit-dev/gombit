@@ -397,24 +397,26 @@ func TestFault_Database_RotationReadsClockAfterUserLock(t *testing.T) {
 	})
 }
 
-// TestFault_Database_RefreshRotationCanceled: a rotation canceled while the
-// replacement insert is in flight leaves the old token as it was.
+// TestFault_Database_RefreshRotationCanceled: a rotation aborted while the
+// replacement insert is in flight leaves the old token as it was. What
+// aborts a rotation is its own timeout: it runs detached from its callers'
+// cancellation, so that a caller who goes away cannot fail the others who
+// joined it (#462).
 func TestFault_Database_RefreshRotationCanceled(t *testing.T) {
 	faulttest.ForEachDB(t, faultDBs, func(t *testing.T, kind database.Driver, dsn string) {
 		release := make(chan struct{})
 		defer close(release)
 		insert := faulttest.Sequence(faulttest.Block(release))
 		f := newRotationFixture(t, kind, dsn, &faulttest.DBFaults{Statement: insert, Match: insertsRefreshToken})
-		ctx, cancel := context.WithCancel(context.Background())
+		auth.SetRotateTimeout(f.svc, 300*time.Millisecond)
 		done := make(chan error, 1)
 		go func() {
-			_, err := f.svc.RotateRefresh(ctx, f.refresh)
+			_, err := f.svc.RotateRefresh(context.Background(), f.refresh)
 			done <- err
 		}()
 		<-insert.Reached(1) // revoked in the transaction, replacement in flight
-		cancel()
-		if err := <-done; !errors.Is(err, context.Canceled) {
-			t.Fatalf("RotateRefresh = %v, want context.Canceled", err)
+		if err := <-done; !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("RotateRefresh = %v, want the rotation's deadline", err)
 		}
 		f.assertUnrotated(t)
 	})

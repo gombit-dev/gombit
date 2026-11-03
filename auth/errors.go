@@ -17,6 +17,7 @@ var (
 	errInvalidCredentials = errors.New("invalid email or password")
 	errEmailTaken         = errors.New("email already registered")
 	errUserNotFound       = errors.New("user not found")
+	errAccountDisabled    = errors.New("auth: the account is disabled")
 	errRefreshReuse       = errors.New("refresh token reuse detected")
 	// errRotationRaced is a rotation that lost to another rotation of its
 	// token, which gave the token a successor. It lost the compare-and-swap
@@ -40,13 +41,24 @@ var (
 // uniqueness check.
 var ErrEmailTaken = errEmailTaken
 
+// ErrAccountDisabled is the error of an operation of a disabled account
+// (User.Disabled): a login with the right password, a session start, a
+// message, a password change.
+var ErrAccountDisabled = errAccountDisabled
+
 // ErrInvalidCredentials is the client-side failure of a login: a 401.
 // Authenticate returns it for an unknown email or a wrong password; Login
 // and IssueTokens also for a password changed, or an account deleted,
 // between the password check and the session; Register and CreateSuperuser
-// for an empty email.
-// Any other error they return is a server failure (the database's, for
-// one), not a credential problem, and answers a 500 (#460).
+// for an empty email. Authenticate, Login and IssueTokens also return
+// ErrAccountDisabled for a disabled account (a 403), and Authenticate and
+// Login (not IssueTokens, which checks no password) a *ThrottleError
+// (errors.Is ErrTooManyAttempts, a 429) past a login throttle; any other
+// error they return is a server failure (the database's, for one), not a
+// credential problem, and answers a 500 (#460). Register and
+// CreateSuperuser also return ErrEmailTaken (a 409) and CheckNewAccount's
+// refusals, ErrInvalidEmail and a PasswordPolicyError on "password" (a
+// 422), and Register a *ThrottleError (a 429) past its throttle.
 var ErrInvalidCredentials = errInvalidCredentials
 
 // ErrInvalidAccessToken is the error ParseAccess returns for an access token

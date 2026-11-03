@@ -28,6 +28,8 @@ var reservedOperationIDs = map[string]struct{}{
 	"auth-change-password": {},
 	// Auth: email change (AUTH-4).
 	"auth-request-email-change": {}, "auth-confirm-email-change": {},
+	// Auth: account state (AUTH-6).
+	"auth-disable-user": {}, "auth-enable-user": {},
 	// Admin data plane (cookie mode).
 	"admin-meta-list": {}, "admin-meta-get": {},
 	"admin-resource-list": {}, "admin-resource-create": {}, "admin-resource-get": {},
