@@ -15,6 +15,9 @@ import (
 // inside the shared rotation. Set it before the service is used.
 func SetRotateJoinHook(s *Service, fn func()) { s.onRotateJoin = fn }
 
+// SetRotateTimeout bounds s's shared rotations (zero restores the default).
+func SetRotateTimeout(s *Service, d time.Duration) { s.rotateTimeout = d }
+
 // ErrInvalidRefreshToken is the error RotateRefresh returns for a refresh
 // token that is unknown, revoked, or expired.
 var ErrInvalidRefreshToken = errInvalidRefreshToken

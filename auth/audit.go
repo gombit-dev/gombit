@@ -41,6 +41,10 @@ const (
 	// AuditSuperuserCreated: a superuser was created (gombit
 	// createsuperuser).
 	AuditSuperuserCreated AuditAction = "auth.superuser.created"
+	// AuditUserDisabled: an account was disabled (its sessions revoked).
+	AuditUserDisabled AuditAction = "auth.user.disabled"
+	// AuditUserEnabled: a disabled account was enabled again.
+	AuditUserEnabled AuditAction = "auth.user.enabled"
 	// AuditRefreshReuse: an already-rotated refresh token was presented
 	// again, and every session of the user was revoked.
 	AuditRefreshReuse AuditAction = "auth.refresh.reuse_detected"

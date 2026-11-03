@@ -38,7 +38,7 @@ func (s *Service) RequestPasswordReset(ctx context.Context, email string) error 
 	if err != nil {
 		return err
 	}
-	if user.ID == 0 {
+	if user.ID == 0 || user.Disabled() {
 		return nil
 	}
 	err = s.sendOneTimeToken(ctx, user, oneTimeFlow{
@@ -184,7 +184,7 @@ func (s *Service) requestPasswordResetInBackground(ctx context.Context, email st
 		err := s.RequestPasswordReset(ctx, email)
 		var tooSoon resendTooSoonError
 		switch {
-		case err == nil, errors.As(err, &tooSoon):
+		case err == nil, errors.As(err, &tooSoon), errors.Is(err, errAccountDisabled):
 		case errors.Is(err, ErrNoMailer):
 			// framework.New warned about it at startup.
 		default:
