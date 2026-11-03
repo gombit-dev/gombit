@@ -185,6 +185,20 @@ version.
 
 ### Fixed
 
+- A refresh no longer fails with `500` "auth request failed" because
+  another client's request for the same token disconnected. Concurrent
+  refreshes of one token share a single rotation, which ran under the first
+  request's context: when that client went away, every request waiting on
+  the rotation got its `context canceled`. The shared rotation now runs
+  detached from every caller's cancellation and deadline (its transaction
+  bounded by its own 10-second timeout, and cancelled when the auth service
+  closes), and every caller gets its one result. The trade: a rotation
+  whose first client has gone still commits, so that client's retry with
+  the old token is a plain `401` within `GOMBIT_AUTH_REFRESH_REUSE_GRACE`
+  while the new session is live, and reuse after it, which revokes every
+  session, and `auth.Service.RotateRefresh` no longer returns early when
+  its context is done
+  ([#462](https://github.com/gombit-dev/gombit/issues/462)).
 - `gombit createsuperuser` (and `auth.Service.CreateSuperuser` /
   `Register`) refuses an email that is not a bare address (`admin`,
   `Root Admin <root@example.com>`, `a b c`): it created an admin that

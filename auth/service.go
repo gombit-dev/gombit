@@ -34,6 +34,8 @@ type Service struct {
 	dummyHash   string
 	rotateMu    sync.Mutex
 	rotateCalls map[string]*rotateCall
+	// rotateTimeout bounds a shared rotation (zero: defaultRotateTimeout).
+	rotateTimeout time.Duration
 	// onRotateJoin, when set (tests only), runs when a caller joins another
 	// caller's in-flight rotation, just before it waits for the result.
 	onRotateJoin func()
@@ -380,7 +382,14 @@ func (s *Service) issueTokens(tx *gorm.DB, user User, now time.Time) (TokenPair,
 // race that is just invalid (and audited); a token revoked by logout or
 // session revocation, and any expired token, is just invalid. Concurrent
 // callers with the same still-valid token share one rotation so a lost race
-// cannot family-revoke the winner's new session.
+// cannot family-revoke the winner's new session. That rotation runs detached
+// from every caller's cancellation and deadline (s.detach, cancelled only by
+// its own timeout, rotateTimeout, which bounds its transaction, or by Close),
+// and each caller gets its one result: a caller whose client went away cannot
+// fail the others with its cancellation (#462). So RotateRefresh does not
+// return early when ctx is done: every caller, the first included, waits for
+// the shared rotation (its transaction for at most rotateTimeout, then the
+// audit record of a reuse for at most auditTimeout) and gets its result.
 func (s *Service) RotateRefresh(ctx context.Context, raw string) (TokenPair, error) {
 	pair, _, err := s.rotateRefresh(ctx, raw)
 	return pair, err
@@ -415,13 +424,42 @@ func (s *Service) rotateRefresh(ctx context.Context, raw string) (TokenPair, Use
 	s.rotateCalls[hash] = call
 	s.rotateMu.Unlock()
 
-	pair, user, err := s.rotateRefreshOnce(ctx, raw, hash)
+	// The rotation is shared: every caller that joins it gets its result,
+	// so it must not end with this caller's request. It runs under the
+	// request's values (the audit trail's request id and address) without
+	// its cancellation (s.detach), bounded by rotateTimeout and cancelled
+	// by Close. A client that goes away, or a request deadline that passes,
+	// mid-rotation no longer fails the followers with that cancellation
+	// (#462). The trade: the rotation commits even though that first
+	// client is gone and never receives the new pair, so its next refresh
+	// with the old token finds it rotated: within RefreshReuseGrace, while
+	// the new session is live, a lost race (errRotationRaced, a 401 that
+	// revokes nothing); later, reuse, which revokes every session. And
+	// the rotation's own cancellation still reaches the driver: a
+	// rotateTimeout or a Close that lands after COMMIT was sent can report
+	// failure for a rotation the server applied.
+	rctx, cancel := s.detach(ctx, s.sharedRotateTimeout())
+	pair, user, err := s.rotateRefreshOnce(rctx, raw, hash)
+	cancel()
 	call.pair, call.user, call.err = pair, user, err
 	s.rotateMu.Lock()
 	delete(s.rotateCalls, hash)
 	s.rotateMu.Unlock()
 	call.wg.Done()
 	return pair, user, err
+}
+
+// defaultRotateTimeout bounds a shared rotation's transaction: one short
+// transaction, which may wait behind the user's row lock (another rotation,
+// a session revocation). A reuse's audit record, written after it, has its
+// own auditTimeout.
+const defaultRotateTimeout = 10 * time.Second
+
+func (s *Service) sharedRotateTimeout() time.Duration {
+	if s.rotateTimeout > 0 {
+		return s.rotateTimeout
+	}
+	return defaultRotateTimeout
 }
 
 // rotateRefreshOnce runs one rotation in a transaction. Lock order: the

@@ -215,6 +215,22 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 ### Informational
 
+- A refresh that joins another request's rotation of the same token no longer fails with that request's `context canceled` (a 500) when its client disconnects: the shared rotation runs detached from every caller's cancellation and deadline, its transaction bounded by a 10-second timeout. (`refresh-follower-not-cancelled-by-leader`, behavior, [#462](https://github.com/gombit-dev/gombit/issues/462))
+
+  A rotation whose first caller disconnects or passes its request
+  deadline now finishes (or times out) for every caller that joined
+  it, the first included, instead of being cancelled with that
+  caller's request. The trade: the rotation commits although that
+  first client is gone and never receives the new pair, so its retry
+  with the old token is a plain 401 within
+  `GOMBIT_AUTH_REFRESH_REUSE_GRACE` while the new session is live,
+  and reuse (every session revoked) after it; and a timeout
+  or an `auth.Service.Close` that lands after COMMIT was sent can
+  still report failure for an applied rotation. After `Close`, a
+  rotation in flight is cancelled and later ones fail at once.
+  A Go caller of `auth.Service.RotateRefresh` waits for the shared
+  rotation instead of returning when its context is done.
+
 - A database failure during login, or while the auth gate loads the access token's user or session, is a 500 (`internal`), no longer a 401. (`auth-database-failure-is-500`, api, [#460](https://github.com/gombit-dev/gombit/issues/460))
 
   Only a missing user or session row is a 401; the session stays valid
