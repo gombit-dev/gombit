@@ -12,6 +12,26 @@ version.
 
 ### Added
 
+- [Account state](docs/auth.md#account-state) (AUTH-6), in both auth
+  modes. An account is active or disabled (`User.DisabledAt`). Disabling it
+  (`POST /auth/users/{id}/disable`, or `auth.Service.DisableUser`) revokes
+  every session and voids every one-time link of the user in one
+  transaction, and every path then refuses it: a login with the right
+  password is a 403 (a wrong one is the usual 401), its access and refresh
+  tokens fail at once, and no link, message or password change works.
+  Enabling it (`/enable`, `EnableUser`) lets the user sign in again; what
+  was revoked stays revoked. The routes need the `auth.users.manage`
+  permission (`auth.PermissionManageUsers`; superusers bypass); a
+  superuser's account is a superuser's to change, and no one disables
+  themselves. `auth.HasPermission` grants a disabled account nothing and
+  decides on the stored user's row (a stale superuser snapshot, deleted,
+  disabled or demoted since, gets nothing; a nil database is an error).
+  Audited (`auth.user.disabled` / `enabled`). **Breaking (schema):**
+  `users` gains `disabled_at`, which registration and `gombit
+  createsuperuser` write: migrate before running this release.
+  **Breaking (api):** the framework registers the two routes and the
+  `AuthUserState` schema name.
+
 - [Abuse protection](docs/auth.md#abuse-protection) for the credential
   endpoints (AUTH-8), in both auth modes, on by default. Sliding-window
   throttles count failed logins per email and client address (5 / 15 min),
@@ -180,6 +200,20 @@ version.
   gets there within the refresh TTL), or whose chain cannot be followed,
   answers 500 and ends nothing; revoke the session instead
   ([#466](https://github.com/gombit-dev/gombit/issues/466)).
+- A refresh no longer fails with `500` "auth request failed" because
+  another client's request for the same token disconnected. Concurrent
+  refreshes of one token share a single rotation, which ran under the first
+  request's context: when that client went away, every request waiting on
+  the rotation got its `context canceled`. The shared rotation now runs
+  detached from every caller's cancellation and deadline (its transaction
+  bounded by its own 10-second timeout, and cancelled when the auth service
+  closes), and every caller gets its one result. The trade: a rotation
+  whose first client has gone still commits, so that client's retry with
+  the old token is a plain `401` within `GOMBIT_AUTH_REFRESH_REUSE_GRACE`
+  while the new session is live, and reuse after it, which revokes every
+  session, and `auth.Service.RotateRefresh` no longer returns early when
+  its context is done
+  ([#462](https://github.com/gombit-dev/gombit/issues/462)).
 - `gombit createsuperuser` (and `auth.Service.CreateSuperuser` /
   `Register`) refuses an email that is not a bare address (`admin`,
   `Root Admin <root@example.com>`, `a b c`): it created an admin that

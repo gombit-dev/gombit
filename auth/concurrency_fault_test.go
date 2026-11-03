@@ -87,6 +87,234 @@ func TestFault_Concurrency_RotationLeaderFails(t *testing.T) {
 	})
 }
 
+// rotationCallers starts the leader of a shared rotation of f.refresh under
+// leaderCtx, waits until it is stalled at its replacement token's insert
+// (insert's first call), then starts followers that join it, and returns
+// the channels their results arrive on.
+func rotationCallers(t *testing.T, f rotationFixture, insert *faulttest.Injector, leaderCtx context.Context, followers int) (leader chan rotationResult, others chan rotationResult) {
+	t.Helper()
+	joined := make(chan struct{}, followers)
+	auth.SetRotateJoinHook(f.svc, func() { joined <- struct{}{} })
+	leader = make(chan rotationResult, 1)
+	others = make(chan rotationResult, followers)
+	go func() {
+		pair, err := f.svc.RotateRefresh(leaderCtx, f.refresh)
+		leader <- rotationResult{pair, err}
+	}()
+	<-insert.Reached(1) // the leader is inside its transaction, stalled
+	for range followers {
+		//nolint:gosec // G118: the followers are other requests, with live contexts of their own, not the leader's.
+		go func() {
+			pair, err := f.svc.RotateRefresh(context.Background(), f.refresh)
+			others <- rotationResult{pair, err}
+		}()
+	}
+	for i := range followers {
+		select {
+		case <-joined:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%d of %d followers never joined the stalled rotation", followers-i, followers)
+		}
+	}
+	return leader, others
+}
+
+type rotationResult struct {
+	pair auth.TokenPair
+	err  error
+}
+
+// collectRotations reads n results, failing t after 5s.
+func collectRotations(t *testing.T, ch chan rotationResult, n int) []rotationResult {
+	t.Helper()
+	out := make([]rotationResult, 0, n)
+	for i := range n {
+		select {
+		case r := <-ch:
+			out = append(out, r)
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%d of %d callers are wedged behind the shared rotation", n-i, n)
+		}
+	}
+	return out
+}
+
+// TestFault_Concurrency_RotationLeaderCancelled: the leader of a shared
+// rotation is stalled at its replacement token's insert when its client
+// disconnects. Expected outcome: the rotation is not cancelled with it (it
+// runs detached from every caller's cancellation), so the followers, whose
+// requests are live, are not handed that cancellation as a 500 (issue
+// #462): once the insert goes through, the leader and every follower get
+// the one rotation's pair, from one insert. The rotation having committed,
+// the gone client's retry with the old token finds it rotated.
+func TestFault_Concurrency_RotationLeaderCancelled(t *testing.T) {
+	faulttest.ForEachDB(t, faultDBs, func(t *testing.T, kind database.Driver, dsn string) {
+		release := make(chan struct{})
+		insert := faulttest.Sequence(faulttest.Block(release))
+		f := newRotationFixture(t, kind, dsn, &faulttest.DBFaults{Statement: insert, Match: insertsRefreshToken})
+		leaderCtx, cancelLeader := context.WithCancel(context.Background())
+		defer cancelLeader()
+		const followers = 3
+		leader, others := rotationCallers(t, f, insert, leaderCtx, followers)
+
+		cancelLeader() // the leader's client goes away mid-rotation
+		select {
+		case r := <-leader:
+			t.Fatalf("the leader returned (%v) on its cancellation: the shared rotation was cancelled with it", r.err)
+		case r := <-others:
+			t.Fatalf("a follower returned (%v) before the shared rotation finished", r.err)
+		case <-time.After(200 * time.Millisecond):
+		}
+		close(release) // the insert goes through
+
+		results := append(collectRotations(t, leader, 1), collectRotations(t, others, followers)...)
+		for _, r := range results {
+			if r.err != nil {
+				t.Fatalf("a caller got %v, want the rotation's pair", r.err)
+			}
+			if r.pair.RefreshToken != results[0].pair.RefreshToken {
+				t.Fatal("the callers got different pairs: the token was rotated more than once")
+			}
+		}
+		if n := insert.Calls(); n != 1 {
+			t.Fatalf("%d replacement-token inserts, want 1", n)
+		}
+		if _, err := f.svc.ParseAccess(context.Background(), results[0].pair.AccessToken); err != nil {
+			t.Fatalf("the rotation's new session does not authenticate: %v", err)
+		}
+		// The trade of the detach, documented on rotateRefresh: the rotation
+		// committed although the leader's client was gone, so that client's
+		// retry with the old token finds it rotated. Within RefreshReuseGrace,
+		// while the new session is live, that is a lost race (#459): a 401
+		// that revokes nothing.
+		if _, err := f.svc.RotateRefresh(context.Background(), f.refresh); !errors.Is(err, auth.ErrRotationRaced) {
+			t.Fatalf("the gone client's prompt retry with the old token = %v, want a lost race", err)
+		}
+		if _, err := f.svc.ParseAccess(context.Background(), results[0].pair.AccessToken); err != nil {
+			t.Fatalf("the lost race revoked the rotation's new session: %v", err)
+		}
+		// Past the grace it is reuse, which revokes every session, the one
+		// the client never received included.
+		ageRotations(t, f.db.DB)
+		if _, err := f.svc.RotateRefresh(context.Background(), f.refresh); !errors.Is(err, auth.ErrRefreshReuse) {
+			t.Fatalf("the gone client's late retry with the old token = %v, want reuse", err)
+		}
+		if _, err := f.svc.RotateRefresh(context.Background(), results[0].pair.RefreshToken); err == nil {
+			t.Fatal("the rotation's new session still refreshes after the reuse: the cascade did not revoke it")
+		}
+		var reuse int64
+		if err := f.db.Model(&auth.AuditEvent{}).Where("action = ?", auth.AuditRefreshReuse).Count(&reuse).Error; err != nil || reuse != 1 {
+			t.Fatalf("refresh_reuse events = %d (err %v), want 1", reuse, err)
+		}
+	})
+}
+
+// TestFault_Concurrency_RotationFailsAfterLeaderGone: the shared rotation
+// fails for a database reason after its leader's context has ended (an HTTP
+// leader's context ends when its handler returns). Expected outcome: every
+// caller still gets that one failure, from one insert, and the token is
+// intact: no caller re-runs the rotation of a token it presents late (#462).
+func TestFault_Concurrency_RotationFailsAfterLeaderGone(t *testing.T) {
+	faulttest.ForEachDB(t, faultDBs, func(t *testing.T, kind database.Driver, dsn string) {
+		release := make(chan struct{})
+		insert := faulttest.SequenceThen(faulttest.Failure(faulttest.ErrInjected), faulttest.BlockThenFail(release, faulttest.ErrInjected))
+		f := newRotationFixture(t, kind, dsn, &faulttest.DBFaults{Statement: insert, Match: insertsRefreshToken})
+		leaderCtx, cancelLeader := context.WithCancel(context.Background())
+		const followers = 3
+		leader, others := rotationCallers(t, f, insert, leaderCtx, followers)
+		cancelLeader()
+		close(release) // the insert fails; the transaction rolls back
+
+		for _, r := range append(collectRotations(t, leader, 1), collectRotations(t, others, followers)...) {
+			if !errors.Is(r.err, faulttest.ErrInjected) {
+				t.Fatalf("a caller got %v, want the shared rotation's failure", r.err)
+			}
+		}
+		if n := insert.Calls(); n != 1 {
+			t.Fatalf("%d replacement-token inserts, want 1: every caller shares the one rotation", n)
+		}
+		insert.Disarm()
+		f.assertUnrotated(t)
+	})
+}
+
+// TestFault_Concurrency_RotationCancelledByClose: closing the Service while a
+// shared rotation is stalled at its insert cancels the rotation (it runs on
+// a context the Service owns, s.detach): the leader and every follower
+// return with context.Canceled well before the rotation's timeout, from one
+// insert, and the transaction rolls back, so the token still rotates on a
+// fresh Service (#462).
+func TestFault_Concurrency_RotationCancelledByClose(t *testing.T) {
+	faulttest.ForEachDB(t, faultDBs, func(t *testing.T, kind database.Driver, dsn string) {
+		release := make(chan struct{})
+		defer close(release)
+		insert := faulttest.Sequence(faulttest.Block(release)) // held until Close cancels it
+		f := newRotationFixture(t, kind, dsn, &faulttest.DBFaults{Statement: insert, Match: insertsRefreshToken})
+		const followers = 2
+		leader, others := rotationCallers(t, f, insert, context.Background(), followers)
+
+		start := time.Now()
+		if err := f.svc.Close(context.Background()); err != nil {
+			t.Fatalf("Close = %v", err)
+		}
+		for _, r := range append(collectRotations(t, leader, 1), collectRotations(t, others, followers)...) {
+			if !errors.Is(r.err, context.Canceled) {
+				t.Fatalf("a caller got %v, want the Service's cancellation", r.err)
+			}
+		}
+		if waited := time.Since(start); waited > 5*time.Second {
+			t.Fatalf("the callers returned %s after Close, want promptly (the rotation's timeout is 10s)", waited)
+		}
+		if n := insert.Calls(); n != 1 {
+			t.Fatalf("%d replacement-token inserts, want 1", n)
+		}
+		insert.Disarm()
+		faulttest.Idle(t, f.db)
+		var tokens []auth.RefreshToken
+		if err := f.db.Where("user_id = ?", f.user.ID).Find(&tokens).Error; err != nil {
+			t.Fatal(err)
+		}
+		if len(tokens) != 1 || tokens[0].RevokedAt != nil {
+			t.Fatalf("after the cancelled rotation: %d tokens (first revoked: %v); want the one original, unrevoked", len(tokens), len(tokens) > 0 && tokens[0].RevokedAt != nil)
+		}
+		cfg := config.DefaultFor(config.EnvironmentTest)
+		cfg.Auth.JWTSecret = testJWTSecret
+		cfg.Auth.BcryptCost = bcrypt.MinCost
+		fresh, err := auth.NewService(f.db.DB, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = fresh.Close(context.Background()) })
+		if next, err := fresh.RotateRefresh(context.Background(), f.refresh); err != nil || next.RefreshToken == "" {
+			t.Fatalf("rotating on a fresh Service = %v: the cancelled rotation did not roll back", err)
+		}
+	})
+}
+
+// TestFault_Concurrency_RotationTimeout: a shared rotation that stalls past
+// its timeout fails every caller with the deadline, and the token is intact:
+// detaching the rotation from the callers' cancellation does not let it run
+// on unbounded (#462).
+func TestFault_Concurrency_RotationTimeout(t *testing.T) {
+	faulttest.ForEachDB(t, faultDBs, func(t *testing.T, kind database.Driver, dsn string) {
+		release := make(chan struct{})
+		defer close(release)
+		insert := faulttest.Sequence(faulttest.Block(release)) // never released in time
+		f := newRotationFixture(t, kind, dsn, &faulttest.DBFaults{Statement: insert, Match: insertsRefreshToken})
+		auth.SetRotateTimeout(f.svc, 300*time.Millisecond)
+		const followers = 2
+		leader, others := rotationCallers(t, f, insert, context.Background(), followers)
+
+		for _, r := range append(collectRotations(t, leader, 1), collectRotations(t, others, followers)...) {
+			if !errors.Is(r.err, context.DeadlineExceeded) {
+				t.Fatalf("a caller got %v, want the rotation's deadline", r.err)
+			}
+		}
+		insert.Disarm()
+		f.assertUnrotated(t)
+	})
+}
+
 // TestFault_Concurrency_RevocationDuringRotation: a session is rotating (its
 // transaction is pinned at the replacement token's insert) when the user
 // revokes it along with the others. Expected outcome: the revocation

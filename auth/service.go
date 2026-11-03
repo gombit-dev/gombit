@@ -34,6 +34,8 @@ type Service struct {
 	dummyHash   string
 	rotateMu    sync.Mutex
 	rotateCalls map[string]*rotateCall
+	// rotateTimeout bounds a shared rotation (zero: defaultRotateTimeout).
+	rotateTimeout time.Duration
 	// onRotateJoin, when set (tests only), runs when a caller joins another
 	// caller's in-flight rotation, just before it waits for the result.
 	onRotateJoin func()
@@ -211,9 +213,12 @@ func (s *Service) createUser(ctx context.Context, email, password string, superu
 }
 
 // Authenticate verifies email and password. It fails with
-// ErrInvalidCredentials for an unknown email or a wrong password; any other
-// error is a server failure (the user lookup's database error), which a
-// caller must not answer as wrong credentials (#460).
+// ErrInvalidCredentials for an unknown email or a wrong password (a 401),
+// ErrAccountDisabled for the right password of a disabled account (a 403),
+// and a *ThrottleError (errors.Is ErrTooManyAttempts, a 429) past a login
+// throttle; any other error is a server failure (the user lookup's
+// database error), which a caller must not answer as wrong credentials
+// (#460).
 func (s *Service) Authenticate(ctx context.Context, email, password string) (User, error) {
 	email = normalizeEmail(email)
 	// Throttled before the lookup and bcrypt, by the email as typed: the
@@ -243,6 +248,12 @@ func (s *Service) Authenticate(ctx context.Context, email, password string) (Use
 		s.Audit(ctx, AuditEvent{Action: AuditLoginFailed, TargetUserID: uintPtr(user.ID), Details: details("reason", "wrong_password")})
 		return User{}, errInvalidCredentials
 	}
+	// Said only to whoever knows the password: before it, a disabled
+	// account answers like any other. It still counts as a failure.
+	if user.Disabled() {
+		s.Audit(ctx, AuditEvent{Action: AuditLoginFailed, TargetUserID: uintPtr(user.ID), Details: details("reason", "account_disabled")})
+		return User{}, errAccountDisabled
+	}
 	res.refundExcept(pair.name)
 	s.throttle.clear(ctx, pair)
 	s.throttle.markKnown(ctx, pair)
@@ -271,10 +282,11 @@ func (s *Service) Login(ctx context.Context, email, password string) (User, Toke
 // (Authenticate records the failures). user is a snapshot, as Authenticate
 // returned it or as loaded from the database: its PasswordHash must still
 // be the user's when the session starts, and the user must still exist, or
-// IssueTokens fails as invalid credentials (ErrInvalidCredentials); any
-// other error is a server failure. So Authenticate followed by
-// IssueTokens is as safe as Login: a password reset that commits between
-// the two leaves the old password's snapshot unable to start a session.
+// IssueTokens fails as invalid credentials (ErrInvalidCredentials); the
+// account must not be disabled (ErrAccountDisabled); any other error is a
+// server failure. So Authenticate followed by IssueTokens is as safe as
+// Login: a password reset or a disable that commits between the two leaves
+// the snapshot unable to start a session.
 func (s *Service) IssueTokens(ctx context.Context, user User) (TokenPair, error) {
 	_, pair, err := s.startSession(ctx, user)
 	return pair, err
@@ -296,6 +308,9 @@ func (s *Service) startSession(ctx context.Context, user User) (User, TokenPair,
 		if err != nil {
 			return err
 		}
+		if locked.Disabled() {
+			return errAccountDisabled
+		}
 		if locked.PasswordHash != user.PasswordHash {
 			return errLoginPasswordChanged
 		}
@@ -312,6 +327,12 @@ func (s *Service) startSession(ctx context.Context, user User) (User, TokenPair,
 		// email, not a server failure (#460).
 		s.Audit(ctx, AuditEvent{Action: AuditLoginFailed, TargetUserID: uintPtr(user.ID), Details: details("reason", "account_deleted")})
 		return User{}, TokenPair{}, errInvalidCredentials
+	}
+	if errors.Is(err, errAccountDisabled) {
+		// Disabled after the password was checked: recorded as Authenticate
+		// records a disabled account's login.
+		s.Audit(ctx, AuditEvent{Action: AuditLoginFailed, TargetUserID: uintPtr(user.ID), Details: details("reason", "account_disabled")})
+		return User{}, TokenPair{}, err
 	}
 	if err != nil {
 		return User{}, TokenPair{}, err
@@ -361,7 +382,14 @@ func (s *Service) issueTokens(tx *gorm.DB, user User, now time.Time) (TokenPair,
 // race that is just invalid (and audited); a token revoked by logout or
 // session revocation, and any expired token, is just invalid. Concurrent
 // callers with the same still-valid token share one rotation so a lost race
-// cannot family-revoke the winner's new session.
+// cannot family-revoke the winner's new session. That rotation runs detached
+// from every caller's cancellation and deadline (s.detach, cancelled only by
+// its own timeout, rotateTimeout, which bounds its transaction, or by Close),
+// and each caller gets its one result: a caller whose client went away cannot
+// fail the others with its cancellation (#462). So RotateRefresh does not
+// return early when ctx is done: every caller, the first included, waits for
+// the shared rotation (its transaction for at most rotateTimeout, then the
+// audit record of a reuse for at most auditTimeout) and gets its result.
 func (s *Service) RotateRefresh(ctx context.Context, raw string) (TokenPair, error) {
 	pair, _, err := s.rotateRefresh(ctx, raw)
 	return pair, err
@@ -396,13 +424,42 @@ func (s *Service) rotateRefresh(ctx context.Context, raw string) (TokenPair, Use
 	s.rotateCalls[hash] = call
 	s.rotateMu.Unlock()
 
-	pair, user, err := s.rotateRefreshOnce(ctx, raw, hash)
+	// The rotation is shared: every caller that joins it gets its result,
+	// so it must not end with this caller's request. It runs under the
+	// request's values (the audit trail's request id and address) without
+	// its cancellation (s.detach), bounded by rotateTimeout and cancelled
+	// by Close. A client that goes away, or a request deadline that passes,
+	// mid-rotation no longer fails the followers with that cancellation
+	// (#462). The trade: the rotation commits even though that first
+	// client is gone and never receives the new pair, so its next refresh
+	// with the old token finds it rotated: within RefreshReuseGrace, while
+	// the new session is live, a lost race (errRotationRaced, a 401 that
+	// revokes nothing); later, reuse, which revokes every session. And
+	// the rotation's own cancellation still reaches the driver: a
+	// rotateTimeout or a Close that lands after COMMIT was sent can report
+	// failure for a rotation the server applied.
+	rctx, cancel := s.detach(ctx, s.sharedRotateTimeout())
+	pair, user, err := s.rotateRefreshOnce(rctx, raw, hash)
+	cancel()
 	call.pair, call.user, call.err = pair, user, err
 	s.rotateMu.Lock()
 	delete(s.rotateCalls, hash)
 	s.rotateMu.Unlock()
 	call.wg.Done()
 	return pair, user, err
+}
+
+// defaultRotateTimeout bounds a shared rotation's transaction: one short
+// transaction, which may wait behind the user's row lock (another rotation,
+// a session revocation). A reuse's audit record, written after it, has its
+// own auditTimeout.
+const defaultRotateTimeout = 10 * time.Second
+
+func (s *Service) sharedRotateTimeout() time.Duration {
+	if s.rotateTimeout > 0 {
+		return s.rotateTimeout
+	}
+	return defaultRotateTimeout
 }
 
 // rotateRefreshOnce runs one rotation in a transaction. Lock order: the
@@ -436,6 +493,12 @@ func (s *Service) rotateRefreshOnce(ctx context.Context, raw, hash string) (Toke
 			// A deadlock, lock timeout or lost connection is a server
 			// failure, not a dead credential: it must not read as a 401.
 			return err
+		}
+		// A disabled account's tokens were revoked when it was disabled:
+		// a dead credential, before any reuse check (its revoked tokens are
+		// no evidence of theft).
+		if user.Disabled() {
+			return errInvalidRefreshToken
 		}
 		now := s.now()
 		// Expiry comes before the reuse check: an expired token is a plain
@@ -730,6 +793,11 @@ func (s *Service) parseAccess(ctx context.Context, token string) (User, uint, er
 			return User{}, 0, errInvalidAccessToken
 		}
 		return User{}, 0, err
+	}
+	// Its sessions were revoked when it was disabled; refused here too, so
+	// no session that outlived that (a race, a restore) authenticates it.
+	if user.Disabled() {
+		return User{}, 0, errInvalidAccessToken
 	}
 	var row RefreshToken
 	if err := s.db.WithContext(ctx).Where("id = ?", claims.RefreshID).First(&row).Error; err != nil {
