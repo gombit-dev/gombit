@@ -190,6 +190,17 @@ version.
   gateways send it) is authenticated instead of refused with `401` "missing
   bearer token": the scheme is case-insensitive, as RFC 9110 defines it
   ([#464](https://github.com/gombit-dev/gombit/issues/464)).
+- `auth.EnsurePermission` and `auth.EnsureGroup` no longer fail with
+  "duplicated key not allowed" when several callers ensure the same new
+  permission or group at once (replicas booting together, concurrent
+  requests): the callers that lose the insert race read the winner's row and
+  return it, outside a transaction and inside one at READ COMMITTED or on
+  MySQL, and a lost race no longer aborts the caller's transaction on
+  PostgreSQL. Inside a PostgreSQL REPEATABLE READ or SERIALIZABLE
+  transaction the winner's row is not visible, so a lost race still returns
+  the unique violation (or a serialization failure) and the caller retries
+  the transaction
+  ([#463](https://github.com/gombit-dev/gombit/issues/463)).
 - A refresh no longer fails with `500` "auth request failed" because
   another client's request for the same token disconnected. Concurrent
   refreshes of one token share a single rotation, which ran under the first

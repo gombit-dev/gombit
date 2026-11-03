@@ -53,6 +53,8 @@ func TestE2EPostgres(t *testing.T) {
 	runAccountStateBearer(t, db)
 	runAccountStateCookie(t, db)
 	runPermissionPersistence(t, db)
+	runConcurrentEnsure(t, db)
+	runEnsureRaceOutcomes(t, db)
 }
 
 func TestE2EMySQL(t *testing.T) {
@@ -90,6 +92,8 @@ func TestE2EMySQL(t *testing.T) {
 	runAccountStateBearer(t, db)
 	runAccountStateCookie(t, db)
 	runPermissionPersistence(t, db)
+	runConcurrentEnsure(t, db)
+	runEnsureRaceOutcomes(t, db)
 }
 
 func openDriver(t *testing.T, driver config.DatabaseDriver, dsn string) *database.DB {
