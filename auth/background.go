@@ -304,8 +304,11 @@ func (s *Service) detach(ctx context.Context, timeout time.Duration) (context.Co
 // shutdown runs once: a Close while another runs waits for it (or for its
 // own ctx), and every Close returns its result, so none reports success
 // before the work is done. After Close, the routes answer background
-// requests with 503. Close also stops the janitor of the throttles' own
-// memory cache, when the Service made one (WithThrottleStore not given).
+// requests with 503, and a refresh-token rotation in flight is cancelled
+// (its transaction rolls back) and every later one fails at once with
+// context.Canceled: a shared rotation runs on a context the Service owns
+// (detach). Close also stops the janitor of the throttles' own memory
+// cache, when the Service made one (WithThrottleStore not given).
 func (s *Service) Close(ctx context.Context) error {
 	err := s.background.close(ctx)
 	s.throttle.close()

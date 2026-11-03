@@ -175,6 +175,25 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   `auth.WithThrottlePolicy` changes the limits;
   `GOMBIT_AUTH_THROTTLE_DISABLED=true` turns them off.
 
+- **Breaking.** Account state adds `users.disabled_at`, which registration and `gombit createsuperuser` write: an app migrates before it runs this release. (`account-state-schema`, schema, [#336](https://github.com/gombit-dev/gombit/issues/336))
+
+  - Framework schema: `auth.User` (`users`): altered.
+
+  `auth.User` gains `DisabledAt` (nil while the account is active).
+  Until the column exists, registering a user and `gombit
+  createsuperuser` fail (the insert names every column of the
+  model), and so do disabling and enabling an account; reading a
+  user works (a row read without the column is active). Generate and
+  apply the migration (`gombit db makemigrations`, `gombit db
+  migrate`) before deploying; `gombit upgrade --dry-run` lists the
+  steps. Existing users start active.
+
+- **Breaking.** With auth enabled, an app that registers `POST {prefix}/auth/users/{id}/disable` or `/enable`, the `auth-disable-user` / `auth-enable-user` operations, or the `AuthUserState` schema name fails at startup: the framework registers them. (`account-state-names-reserved`, api, [#336](https://github.com/gombit-dev/gombit/issues/336))
+
+  Drop the app's own routes, which the framework's replace, or
+  rename them; the same goes for a type Huma names `AuthUserState`
+  or `DataAuthUserState`.
+
 - **Breaking.** A `.env` value no longer swallows a trailing comment, a byte order mark no longer hides the first key, and a `.env` that cannot be read fails the load. (`dotenv-comments-and-byte-order-mark`, behavior, [#507](https://github.com/gombit-dev/gombit/issues/507))
 
   Check a `.env` you already run with. A `#` with whitespace before it
@@ -211,6 +230,22 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   at.
 
 ### Informational
+
+- A refresh that joins another request's rotation of the same token no longer fails with that request's `context canceled` (a 500) when its client disconnects: the shared rotation runs detached from every caller's cancellation and deadline, its transaction bounded by a 10-second timeout. (`refresh-follower-not-cancelled-by-leader`, behavior, [#462](https://github.com/gombit-dev/gombit/issues/462))
+
+  A rotation whose first caller disconnects or passes its request
+  deadline now finishes (or times out) for every caller that joined
+  it, the first included, instead of being cancelled with that
+  caller's request. The trade: the rotation commits although that
+  first client is gone and never receives the new pair, so its retry
+  with the old token is a plain 401 within
+  `GOMBIT_AUTH_REFRESH_REUSE_GRACE` while the new session is live,
+  and reuse (every session revoked) after it; and a timeout
+  or an `auth.Service.Close` that lands after COMMIT was sent can
+  still report failure for an applied rotation. After `Close`, a
+  rotation in flight is cancelled and later ones fail at once.
+  A Go caller of `auth.Service.RotateRefresh` waits for the shared
+  rotation instead of returning when its context is done.
 
 - A database failure during login, or while the auth gate loads the access token's user or session, is a 500 (`internal`), no longer a 401. (`auth-database-failure-is-500`, api, [#460](https://github.com/gombit-dev/gombit/issues/460))
 
@@ -351,6 +386,24 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 - `cache.Counter`, `cache.IncrementTTL` and `cache.DecrementExisting`: an increment that gives a new counter an expiry, and a decrement only of a counter that exists, atomically (memory, Redis, noop and namespaced caches implement them; other caches get non-atomic fallbacks: an increment then a set, a decrement then a delete of a key it created). (`cache-counter`, api, [#338](https://github.com/gombit-dev/gombit/issues/338))
 
 - A new app's placeholder `schema.ts` declares the 429 (with `Retry-After`), 422 and 500 responses of the throttled auth operations; an existing app's generated client gets them from `gombit client generate`. (`client-schema-throttle`, client, [#338](https://github.com/gombit-dev/gombit/issues/338))
+
+- Accounts can be disabled: a disabled user cannot sign in, and no credential issued to it works (its sessions are revoked, its links voided, and every check refuses it). (`account-state`, security, [#336](https://github.com/gombit-dev/gombit/issues/336))
+
+  `POST {prefix}/auth/users/{id}/disable` and `/enable` require the
+  `auth.users.manage` permission (`auth.PermissionManageUsers`; a
+  superuser has it), and a superuser to change a superuser; no one
+  disables their own account. `auth.Service.DisableUser` /
+  `EnableUser` are the same for an app's own code. A login with the
+  right password of a disabled account is a 403; a wrong password
+  answers as before. `auth.HasPermission` / `HasPermissions` grant a
+  disabled account nothing, a superuser's included, and decide on
+  the stored user's row, reloaded, not on the `User` passed in: a
+  superuser snapshot whose row was deleted, disabled or demoted
+  since now gets nothing, and a stored superuser with a nil
+  database is an error (`auth: nil database`) rather than every
+  permission.
+
+- A new app's placeholder `schema.ts` includes the account state operations; an existing app's generated client gets them from `gombit client generate`. (`client-schema-account-state`, client, [#336](https://github.com/gombit-dev/gombit/issues/336))
 
 - An already-rotated refresh token that has expired is a 401 and no longer revokes the user's sessions. (`expired-rotated-refresh-token-no-cascade`, security, [#458](https://github.com/gombit-dev/gombit/issues/458))
 

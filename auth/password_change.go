@@ -107,6 +107,9 @@ func (s *Service) ChangePassword(ctx context.Context, userID uint, current, newP
 		if err != nil {
 			return err
 		}
+		if locked.Disabled() {
+			return errAccountDisabled
+		}
 		if locked.PasswordHash != user.PasswordHash {
 			return errPasswordChanged
 		}
