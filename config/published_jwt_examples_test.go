@@ -3,7 +3,6 @@ package config
 import (
 	"io/fs"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -20,24 +19,25 @@ func TestProductionRejectsAllPublishedExampleJWTSecrets(t *testing.T) {
 		if _, err := os.Stat(root); err != nil {
 			t.Fatalf("published-example root %q unavailable: %v", root, err)
 		}
-		err := filepath.WalkDir(root, func(path string, d fs.DirEntry, readErr error) error {
+		rootFS := os.DirFS(root)
+		err := fs.WalkDir(rootFS, ".", func(path string, d fs.DirEntry, readErr error) error {
 			if readErr != nil {
 				return readErr
 			}
 			if d.IsDir() {
 				switch d.Name() {
 				case "node_modules", ".git", "dist", ".next":
-					return filepath.SkipDir
+					return fs.SkipDir
 				}
 				return nil
 			}
 			name := d.Name()
-			if !(strings.HasSuffix(name, ".md") || strings.HasSuffix(name, ".tmpl") ||
-				strings.HasSuffix(name, ".go") || strings.HasSuffix(name, ".env") ||
-				strings.HasSuffix(name, ".env.example")) {
+			if !strings.HasSuffix(name, ".md") && !strings.HasSuffix(name, ".tmpl") &&
+				!strings.HasSuffix(name, ".go") && !strings.HasSuffix(name, ".env") &&
+				!strings.HasSuffix(name, ".env.example") {
 				return nil
 			}
-			raw, err := os.ReadFile(path)
+			raw, err := fs.ReadFile(rootFS, path)
 			if err != nil {
 				return err
 			}
