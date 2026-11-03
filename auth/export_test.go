@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
+	"gorm.io/gorm"
 )
 
 // SetRotateJoinHook makes fn run whenever a caller joins another caller's
@@ -202,4 +203,10 @@ func SetMaxChainHops(n int) (restore func()) {
 	old := maxChainHops
 	maxChainHops = n
 	return func() { maxChainHops = old }
+}
+
+// EnsurePermissionRow is EnsurePermission inserting fresh as given, so a
+// test can make the insert violate a constraint other than the key's.
+func EnsurePermissionRow(ctx context.Context, db *gorm.DB, fresh *Permission) (Permission, error) {
+	return ensureRow(ctx, db, "permission_key = ?", fresh.Key, fresh)
 }

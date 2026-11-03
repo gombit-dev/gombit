@@ -2,11 +2,16 @@ package auth_test
 
 import (
 	"context"
+	"database/sql"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gombit-dev/gombit/auth"
+	"github.com/gombit-dev/gombit/database"
+	"gorm.io/gorm"
 	"gorm.io/gorm/schema"
 )
 
@@ -188,5 +193,260 @@ func TestPermissionKeyColumnAvoidsMySQLReservedWord(t *testing.T) {
 	}
 	if strings.EqualFold(field.DBName, "key") {
 		t.Fatalf("Permission.Key column %q is a reserved MySQL identifier", field.DBName)
+	}
+}
+
+// TestEnsureConcurrentFirstUse: concurrent first callers of EnsurePermission
+// and EnsureGroup for one key all get the one row and no error (#463).
+// runConcurrentEnsure also runs on PostgreSQL and MySQL (integration_test.go).
+func TestEnsureConcurrentFirstUse(t *testing.T) {
+	runConcurrentEnsure(t, openSQLite(t))
+}
+
+func runConcurrentEnsure(t *testing.T, db *database.DB) {
+	t.Helper()
+	if err := auth.Migrate(db.DB); err != nil {
+		t.Fatal(err)
+	}
+	const callers = 16
+	// race runs callers concurrent ensure calls, released together, and
+	// checks they all got one row with the same id.
+	race := func(t *testing.T, ensure func() (uint, error)) {
+		t.Helper()
+		ids := make([]uint, callers)
+		errs := make([]error, callers)
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for i := range callers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				ids[i], errs[i] = ensure()
+			}()
+		}
+		close(start)
+		wg.Wait()
+		for i := range callers {
+			if errs[i] != nil {
+				t.Fatalf("caller %d: %v, want the row", i, errs[i])
+			}
+			if ids[i] == 0 || ids[i] != ids[0] {
+				t.Fatalf("callers got ids %v, want one row", ids)
+			}
+		}
+	}
+	tag := strconv.FormatInt(time.Now().UnixNano(), 36)
+	ctx := context.Background()
+
+	t.Run("permission", func(t *testing.T) {
+		race(t, func() (uint, error) {
+			p, err := auth.EnsurePermission(ctx, db.DB, "concurrent.permission."+tag, "Concurrent")
+			return p.ID, err
+		})
+	})
+	t.Run("group", func(t *testing.T) {
+		race(t, func() (uint, error) {
+			g, err := auth.EnsureGroup(ctx, db.DB, "concurrent-group-"+tag)
+			return g.ID, err
+		})
+	})
+	// Each caller inside its own transaction (the default isolation:
+	// READ COMMITTED on PostgreSQL, REPEATABLE READ on MySQL): the loser's
+	// failed insert must not abort it (PostgreSQL), and it must see the
+	// winner's row although its snapshot may predate it (MySQL). Whether a
+	// caller loses is left to scheduling here; runEnsureRaceOutcomes forces
+	// each outcome. SQLite's single writer serializes the transactions, so
+	// there is no race to lose there.
+	t.Run("in a transaction", func(t *testing.T) {
+		if db.Name() == "sqlite" {
+			t.Skip("SQLite serializes writing transactions")
+		}
+		race(t, func() (uint, error) {
+			var id uint
+			err := db.Transaction(func(tx *gorm.DB) error {
+				p, err := auth.EnsurePermission(ctx, tx, "concurrent.tx."+tag, "Concurrent in a transaction")
+				id = p.ID
+				return err
+			})
+			return id, err
+		})
+	})
+}
+
+// TestEnsureRaceOutcomes: the outcomes of a lost Ensure race, each forced
+// in order rather than left to scheduling (#463). runEnsureRaceOutcomes
+// also runs on PostgreSQL and MySQL (integration_test.go).
+func TestEnsureRaceOutcomes(t *testing.T) {
+	runEnsureRaceOutcomes(t, openSQLite(t))
+}
+
+func runEnsureRaceOutcomes(t *testing.T, db *database.DB) {
+	t.Helper()
+	if err := auth.Migrate(db.DB); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	tag := strconv.FormatInt(time.Now().UnixNano(), 36)
+	multiConn := func(t *testing.T) {
+		t.Helper()
+		if db.Name() == "sqlite" {
+			t.Skip("needs a second writer while a transaction is open")
+		}
+	}
+
+	// A unique violation on another constraint than the key's (here the
+	// primary key; on PostgreSQL a sequence behind the table) is reported
+	// as itself: the re-read finds no row for the key, which is no reason
+	// to say "record not found".
+	t.Run("another constraint", func(t *testing.T) {
+		taken, err := auth.EnsurePermission(ctx, db.DB, "taken."+tag, "Taken")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = auth.EnsurePermissionRow(ctx, db.DB, &auth.Permission{ID: taken.ID, Key: "other." + tag})
+		if !database.IsUniqueViolation(err) {
+			t.Fatalf("err = %v, want the primary key's unique violation", err)
+		}
+	})
+
+	// The caller's REPEATABLE READ transaction took its snapshot before the
+	// winner committed (at READ COMMITTED its first read would see the row,
+	// and nothing would be lost). On MySQL the locking re-read sees the
+	// latest committed row, so the loser gets the winner's; a PostgreSQL
+	// snapshot cannot see it, so the loser gets the unique violation. Either
+	// way the lost race leaves the transaction usable.
+	t.Run("snapshot before the winner", func(t *testing.T) {
+		multiConn(t)
+		key := "snapshot." + tag
+		tx := db.WithContext(ctx).Begin(&sql.TxOptions{Isolation: sql.LevelRepeatableRead})
+		if tx.Error != nil {
+			t.Fatal(tx.Error)
+		}
+		defer tx.Rollback()
+		var n int64
+		if err := tx.Model(&auth.Permission{}).Count(&n).Error; err != nil {
+			t.Fatal(err)
+		}
+		winner, err := auth.EnsurePermission(ctx, db.DB, key, "Winner")
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := auth.EnsurePermission(ctx, tx, key, "Loser")
+		if db.Name() == "postgres" {
+			if !database.IsUniqueViolation(err) {
+				t.Fatalf("err = %v, want the unique violation", err)
+			}
+		} else if err != nil || got.ID != winner.ID {
+			t.Fatalf("got %d, %v; want the winner's row %d", got.ID, err, winner.ID)
+		}
+		if err := tx.Model(&auth.Permission{}).Count(&n).Error; err != nil {
+			t.Fatalf("transaction unusable after the lost race: %v", err)
+		}
+	})
+
+	// The loser's insert waits on the winner's uncommitted row, the loser
+	// at the default isolation, with and without a transaction of its own.
+	// When the winner commits, the insert fails and the loser reads and
+	// returns the winner's row (#463's case); when the winner rolls back,
+	// the insert succeeds and the loser returns its own row. A loser's
+	// transaction stays usable either way.
+	for i, c := range []struct {
+		name         string
+		commit, inTx bool
+	}{
+		{"the winner commits", true, false},
+		{"the winner commits/loser in a transaction", true, true},
+		{"the winner rolls back", false, false},
+		{"the winner rolls back/loser in a transaction", false, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			multiConn(t)
+			key := "ends." + strconv.Itoa(i) + "." + tag
+			winner := db.WithContext(ctx).Begin()
+			if winner.Error != nil {
+				t.Fatal(winner.Error)
+			}
+			defer winner.Rollback()
+			won, err := auth.EnsurePermission(ctx, winner, key, "Winner")
+			if err != nil {
+				t.Fatal(err)
+			}
+			loser := db.WithContext(ctx)
+			if c.inTx {
+				loser = loser.Begin()
+				if loser.Error != nil {
+					t.Fatal(loser.Error)
+				}
+				defer loser.Rollback()
+			}
+			type result struct {
+				row auth.Permission
+				err error
+			}
+			done := make(chan result, 1)
+			go func() {
+				row, err := auth.EnsurePermission(ctx, loser, key, "Loser")
+				done <- result{row, err}
+			}()
+			waitForBlockedInsert(t, db, done)
+			end := winner.Rollback
+			if c.commit {
+				end = winner.Commit
+			}
+			if err := end().Error; err != nil {
+				t.Fatal(err)
+			}
+			r := <-done
+			if c.commit && (r.err != nil || r.row.ID != won.ID || r.row.Description != "Winner") {
+				t.Fatalf("loser got %+v, %v; want the winner's row %d", r.row, r.err, won.ID)
+			}
+			if !c.commit && (r.err != nil || r.row.ID == 0 || r.row.Description != "Loser") {
+				t.Fatalf("loser got %+v, %v; want its own row", r.row, r.err)
+			}
+			if c.inTx {
+				var n int64
+				if err := loser.Model(&auth.Permission{}).Count(&n).Error; err != nil {
+					t.Fatalf("transaction unusable after the race: %v", err)
+				}
+				if err := loser.Commit().Error; err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+// waitForBlockedInsert waits until a session of this test's user is running
+// an INSERT into permissions, which, with the winner's insert uncommitted,
+// waits on it. Both servers show a user its own sessions without further
+// privileges. It fails if the loser returns first.
+func waitForBlockedInsert[T any](t *testing.T, db *database.DB, done <-chan T) {
+	t.Helper()
+	query := `SELECT count(*) FROM pg_stat_activity
+		WHERE datname = current_database() AND state = 'active'
+		AND query LIKE 'INSERT INTO "permissions"%'`
+	if db.Name() == "mysql" {
+		query = "SELECT count(*) FROM information_schema.PROCESSLIST " +
+			"WHERE DB = DATABASE() AND INFO LIKE 'INSERT INTO `permissions`%'"
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		select {
+		case r := <-done:
+			t.Fatalf("loser returned %+v before the winner ended", r)
+		default:
+		}
+		var n int64
+		if err := db.Raw(query).Scan(&n).Error; err != nil {
+			t.Fatal(err)
+		}
+		if n > 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the loser's insert never waited on the winner")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
