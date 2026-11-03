@@ -11,8 +11,29 @@ import (
 // Catch new copy-pasteable signing keys as they are added to public examples.
 // Source fixtures are scanned, not copied into a hardcoded test-only blacklist.
 func TestProductionRejectsAllPublishedExampleJWTSecrets(t *testing.T) {
-	assignEnv := regexp.MustCompile("(?m)\\bGOMBIT_JWT_SECRET\\s*=\\s*['\\\"]?([A-Za-z0-9_-]{4,})")
+	assignEnvSingle := regexp.MustCompile(`(?m)\bGOMBIT_JWT_SECRET\s*=\s*'([^'\r\n]+)'`)
+	assignEnvDouble := regexp.MustCompile(`(?m)\bGOMBIT_JWT_SECRET\s*=\s*"([^"\r\n]+)"`)
+	assignEnvBare := regexp.MustCompile(`(?m)\bGOMBIT_JWT_SECRET\s*=\s*([^'"\s\\]+)`)
 	assignGo := regexp.MustCompile("(?m)\\bAuth\\.JWTSecret\\s*=\\s*\\\"([^\\\"]+)\\\"")
+	// Synthetic controls guard against matching only a harmless prefix of a
+	// public literal while production accepts its complete signing key.
+	for _, tc := range []struct{ line, want string }{
+		{`GOMBIT_JWT_SECRET='examplexy!012345678901234567890123456789'`, "examplexy!012345678901234567890123456789"},
+		{`GOMBIT_JWT_SECRET="public sample with embedded spaces 123456789!"`, "public sample with embedded spaces 123456789!"},
+		{`GOMBIT_JWT_SECRET=bare-value-012345`, "bare-value-012345"},
+		{`GOMBIT_JWT_SECRET="a public key with apostrophe's and digits 0123456789"`, "a public key with apostrophe's and digits 0123456789"},
+	} {
+		var got string
+		for _, re := range []*regexp.Regexp{assignEnvSingle, assignEnvDouble, assignEnvBare} {
+			if match := re.FindStringSubmatch(tc.line); len(match) > 1 {
+				got = match[1]
+				break
+			}
+		}
+		if got != tc.want {
+			t.Fatalf("published signing key scanner captured %q, want %q", got, tc.want)
+		}
+	}
 	roots := []string{"../docs", "../examples", "../scaffold/templates", "../goldentest/testdata/golden"}
 	occurrences := 0
 	for _, root := range roots {
@@ -42,7 +63,7 @@ func TestProductionRejectsAllPublishedExampleJWTSecrets(t *testing.T) {
 				return err
 			}
 			text := string(raw)
-			for _, re := range []*regexp.Regexp{assignEnv, assignGo} {
+			for _, re := range []*regexp.Regexp{assignEnvSingle, assignEnvDouble, assignEnvBare, assignGo} {
 				for _, match := range re.FindAllStringSubmatch(text, -1) {
 					secret := strings.TrimSpace(match[1])
 					occurrences++
