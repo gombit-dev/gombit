@@ -166,6 +166,23 @@ curl -sS -X POST http://127.0.0.1:8080/api/v1/auth/email/change/confirm \
 
 See [`docs/auth.md`](../../docs/auth.md#email-change).
 
+## Account state
+
+A superuser (or a user granted `auth.users.manage`) disables an account; its
+sessions end at once and it cannot sign in until it is enabled again:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8080/api/v1/auth/users/2/disable -H "Authorization: Bearer $ADMIN_ACCESS"
+# {"data":{"id":2,"disabled":true}}
+curl -sS -X POST http://127.0.0.1:8080/api/v1/auth/login \
+  -H 'Content-Type: application/json' -d '{"email":"grace@example.com","password":"correct-horse"}'
+# 403 {"error":{"code":"authorization","message":"account is disabled",...}}
+curl -sS -X POST http://127.0.0.1:8080/api/v1/auth/users/2/enable -H "Authorization: Bearer $ADMIN_ACCESS"
+# {"data":{"id":2,"disabled":false}}
+```
+
+See [`docs/auth.md`](../../docs/auth.md#account-state).
+
 ## Abuse protection
 
 The credential endpoints are throttled. Six wrong passwords for one email

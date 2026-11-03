@@ -14,6 +14,11 @@ type User struct {
 	Email        string `gorm:"uniqueIndex;size:255;not null"`
 	PasswordHash string `gorm:"not null"`
 	IsSuperuser  bool   `gorm:"not null;default:false"`
+	// DisabledAt is when the account was disabled (Service.DisableUser);
+	// nil while it is active. A disabled user cannot sign in, and no
+	// credential issued to it works: its sessions were revoked, its links
+	// voided, and every check refuses it.
+	DisabledAt *time.Time
 	// EmailVerifiedAt is when the user proved they own VerifiedEmail (POST
 	// /auth/verify-email); nil while no address is verified. A superuser
 	// created by gombit createsuperuser starts verified.
@@ -34,6 +39,9 @@ type User struct {
 func (u User) EmailVerified() bool {
 	return u.EmailVerifiedAt != nil && u.VerifiedEmail != "" && normalizeEmail(u.VerifiedEmail) == normalizeEmail(u.Email)
 }
+
+// Disabled reports whether the account is disabled (DisabledAt).
+func (u User) Disabled() bool { return u.DisabledAt != nil }
 
 // Group collects permissions that can be assigned to users.
 type Group struct {

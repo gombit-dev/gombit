@@ -49,6 +49,9 @@ func TestE2EPostgres(t *testing.T) {
 	runEmailChangeCookie(t, db)
 	runEmailChangeService(t, db)
 	runThrottleService(t, db)
+	runAccountStateService(t, db)
+	runAccountStateBearer(t, db)
+	runAccountStateCookie(t, db)
 	runPermissionPersistence(t, db)
 }
 
@@ -83,6 +86,9 @@ func TestE2EMySQL(t *testing.T) {
 	runEmailChangeCookie(t, db)
 	runEmailChangeService(t, db)
 	runThrottleService(t, db)
+	runAccountStateService(t, db)
+	runAccountStateBearer(t, db)
+	runAccountStateCookie(t, db)
 	runPermissionPersistence(t, db)
 }
 

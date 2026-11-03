@@ -73,7 +73,7 @@ func (s *Service) register(ctx context.Context, input *registerInput) (*register
 
 func (s *Service) login(ctx context.Context, input *loginInput) (*tokenOutput, error) {
 	_, pair, err := s.Login(ctx, input.Body.Email, input.Body.Password)
-	if errors.Is(err, errInvalidCredentials) || errors.Is(err, ErrTooManyAttempts) {
+	if errors.Is(err, errInvalidCredentials) || errors.Is(err, ErrTooManyAttempts) || errors.Is(err, errAccountDisabled) {
 		return nil, mapServiceError(ctx, err)
 	}
 	if err != nil {
@@ -229,6 +229,8 @@ func mapServiceError(ctx context.Context, err error) error {
 	switch {
 	case errors.Is(err, errInvalidCredentials):
 		return contract.WithContext(ctx, contract.Authentication("invalid email or password"))
+	case errors.Is(err, errAccountDisabled):
+		return contract.WithContext(ctx, contract.Authorization("account is disabled"))
 	case errors.Is(err, errInvalidRefreshToken), errors.Is(err, errRefreshReuse):
 		return contract.WithContext(ctx, contract.Authentication("invalid refresh token"))
 	case errors.Is(err, errInvalidAccessToken):

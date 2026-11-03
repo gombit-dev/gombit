@@ -10,7 +10,7 @@ import (
 )
 
 // HasPermission reports whether user has key directly, through a group, or
-// through the Django-style superuser bypass.
+// through the Django-style superuser bypass. A disabled account has none.
 func HasPermission(ctx context.Context, db *gorm.DB, user User, key string) (bool, error) {
 	grants, err := HasPermissions(ctx, db, user, key)
 	if err != nil {
@@ -20,27 +20,49 @@ func HasPermission(ctx context.Context, db *gorm.DB, user User, key string) (boo
 }
 
 // HasPermissions checks several keys while loading the user's associations
-// once. Missing users and unassigned keys are reported as false.
+// once. Missing users and unassigned keys are reported as false, and so is
+// every key of a disabled account (User.Disabled), a superuser's too. For a
+// stored user (an ID), the row is reloaded and decides, the superuser flag
+// and the account state included: a snapshot loaded before the account was
+// disabled or demoted grants nothing it no longer has. A user with no ID
+// (never stored) is judged as given.
 func HasPermissions(ctx context.Context, db *gorm.DB, user User, keys ...string) (map[string]bool, error) {
 	grants := make(map[string]bool, len(keys))
 	for _, key := range keys {
 		grants[key] = false
 	}
-	if user.IsSuperuser {
-		for key := range grants {
-			grants[key] = true
-		}
-		return grants, nil
-	}
 	if user.ID == 0 {
+		if user.IsSuperuser && !user.Disabled() {
+			for key := range grants {
+				grants[key] = true
+			}
+		}
 		return grants, nil
 	}
 	if db == nil {
 		return nil, errors.New("auth: nil database")
 	}
 
+	// The bare row first: it decides a disabled account and a superuser
+	// alone, without the associations.
 	var loaded User
-	err := db.WithContext(ctx).
+	err := db.WithContext(ctx).First(&loaded, user.ID).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return grants, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if loaded.Disabled() {
+		return grants, nil
+	}
+	if loaded.IsSuperuser {
+		for key := range grants {
+			grants[key] = true
+		}
+		return grants, nil
+	}
+	err = db.WithContext(ctx).
 		Preload("Permissions").
 		Preload("Groups.Permissions").
 		First(&loaded, user.ID).Error
@@ -49,6 +71,11 @@ func HasPermissions(ctx context.Context, db *gorm.DB, user User, keys ...string)
 	}
 	if err != nil {
 		return nil, err
+	}
+	// Reloaded with its grants: decided on this read, should the state have
+	// changed since the first.
+	if loaded.Disabled() {
+		return grants, nil
 	}
 	if loaded.IsSuperuser {
 		for key := range grants {
