@@ -9,6 +9,23 @@ import (
 	"github.com/gombit-dev/gombit/config"
 )
 
+func TestCheckInsecureRejectsPublishedExampleJWTKey(t *testing.T) {
+	cfg := config.DefaultFor(config.EnvironmentProduction)
+	cfg.Auth.JWTSecret = "dev-only-example-jwt-secret-not-for-prod"
+	cfg.Database.Driver = config.DatabaseDriverPostgres
+
+	check := checkInsecure(cfg)
+	if check.Status != doctorStatusFail {
+		t.Fatalf("checkInsecure status = %q, want %q", check.Status, doctorStatusFail)
+	}
+	if !strings.Contains(check.Message, "development placeholder") {
+		t.Fatalf("checkInsecure message = %q, want placeholder warning", check.Message)
+	}
+	if strings.Contains(check.Message, cfg.Auth.JWTSecret) {
+		t.Fatal("checkInsecure must never echo public example signing key")
+	}
+}
+
 func TestCheckInsecureFlagsInsecureCookieInProduction(t *testing.T) {
 	// config.Validate already rejects this at config.Load time (see
 	// config_test.go TestValidateRejectsInsecureCookieInProduction), so

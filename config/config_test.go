@@ -702,7 +702,7 @@ func TestValidateAcceptsLongJWTSecretInProduction(t *testing.T) {
 }
 
 func TestValidateRejectsDevelopmentPlaceholderInProduction(t *testing.T) {
-	for _, secret := range []string{DevelopmentJWTPlaceholder, historicalDevelopmentJWTPlaceholder} {
+	for _, secret := range []string{DevelopmentJWTPlaceholder, historicalDevelopmentJWTPlaceholder, "dev-only-example-jwt-secret-not-for-prod"} {
 		t.Run(secret, func(t *testing.T) {
 			cfg := DefaultFor(EnvironmentProduction)
 			cfg.Auth.JWTSecret = secret
@@ -732,6 +732,29 @@ func TestValidateRejectsDevelopmentPlaceholderInProduction(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestLoadFromEnvRejectsPublishedExampleJWTKeyInProduction(t *testing.T) {
+	_, err := LoadFromEnv(mapLookup(map[string]string{
+		envEnv:       string(EnvironmentProduction),
+		envJWTSecret: "dev-only-example-jwt-secret-not-for-prod",
+	}))
+	if err == nil {
+		t.Fatal("LoadFromEnv accepted a published development JWT key in production")
+	}
+	var fields FieldErrors
+	if !errors.As(err, &fields) {
+		t.Fatalf("LoadFromEnv error = %T, want FieldErrors", err)
+	}
+	for _, field := range fields {
+		if field.Field == "Auth.JWTSecret" {
+			if field.Value != "" {
+				t.Fatal("rejected JWT signing key must never appear in FieldErrors")
+			}
+			return
+		}
+	}
+	t.Fatal("LoadFromEnv did not identify the insecure JWT signing key")
 }
 
 func TestLoadFromEnvRejectsShortJWTSecretInProduction(t *testing.T) {

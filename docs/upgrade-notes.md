@@ -12,6 +12,16 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 ### Manual: action required
 
+- **Breaking.** Production refuses the publicly documented example JWT signing secret. (`reject-published-example-jwt-secret`, security, [#504](https://github.com/gombit-dev/gombit/issues/504))
+
+  - Configuration: `GOMBIT_JWT_SECRET`: some values are now refused in production.
+
+  If you copied the example signing secret into a deployed app,
+  rotate to a securely generated private signing secret of at
+  least 32 characters before upgrading. Existing access tokens
+  and signed cookies will become invalid after rotation.
+  The example secret remains valid only for local development.
+
 - **Breaking.** `gombit createsuperuser`, `auth.Service.CreateSuperuser` and `Register` refuse an email that is not a bare address and a password shorter than 8 characters (or over 72 bytes). (`createsuperuser-login-rules`, api, [#461](https://github.com/gombit-dev/gombit/issues/461))
 
   Two rules, for two reasons. The email must be what `POST

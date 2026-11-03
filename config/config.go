@@ -525,7 +525,7 @@ func (c AuthConfig) EffectiveCookieSameSite() CookieSameSite {
 // placeholder that must never be used in production.
 func IsInsecureJWTSecret(secret string) bool {
 	switch strings.TrimSpace(secret) {
-	case DevelopmentJWTPlaceholder, historicalDevelopmentJWTPlaceholder:
+	case DevelopmentJWTPlaceholder, historicalDevelopmentJWTPlaceholder, "dev-only-example-jwt-secret-not-for-prod":
 		return true
 	default:
 		return false

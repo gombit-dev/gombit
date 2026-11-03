@@ -185,6 +185,13 @@ version.
 
 ### Fixed
 
+- **Breaking (security):** production configuration rejects the
+  publicly documented example JWT signing key, even though it clears
+  the 32-character length floor. If a deployment copied that key,
+  rotate to a unique random secret *before* upgrading; existing tokens
+  and signed cookies will no longer verify after rotation
+  ([#504](https://github.com/gombit-dev/gombit/issues/504)).
+
 - A refresh no longer fails with `500` "auth request failed" because
   another client's request for the same token disconnected. Concurrent
   refreshes of one token share a single rotation, which ran under the first
