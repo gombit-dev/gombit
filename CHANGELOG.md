@@ -185,6 +185,11 @@ version.
 
 ### Fixed
 
+- A Bearer request whose `Authorization` scheme is not spelled exactly
+  `Bearer` (`bearer <token>`, `BEARER <token>`, as some clients, proxies and
+  gateways send it) is authenticated instead of refused with `401` "missing
+  bearer token": the scheme is case-insensitive, as RFC 9110 defines it
+  ([#464](https://github.com/gombit-dev/gombit/issues/464)).
 - `auth.EnsurePermission` and `auth.EnsureGroup` no longer fail with
   "duplicated key not allowed" when several callers ensure the same new
   permission or group at once (replicas booting together, concurrent
