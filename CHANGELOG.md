@@ -430,7 +430,9 @@ version.
   no client can send as it is written; Gin's `:` and `{name}` parameters and its
   `*` catch-all, which answer paths the document never lists (a `*` or `\` in
   mid-path panics at registration); a space with the other US-ASCII
-  characters RFC 3986 keeps out of a URI; and bytes that are not valid UTF-8,
+  characters RFC 3986 keeps out of a URI, refused by policy (RFC 3986 excludes
+  non-ASCII too, but that is admitted as an RFC 3987 IRI path character and
+  sent percent-encoded); and bytes that are not valid UTF-8,
   which Gin registers as written while `encoding/json` writes the document with
   `U+FFFD` in their place), or one `Load` would have rewritten,
   such as a `/svc/` set on a `Config.API.Prefix` in code. Every prefix a route

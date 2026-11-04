@@ -15,11 +15,12 @@ import (
 )
 
 // The canonical form of an API prefix (config.API.Prefix, GOMBIT_API_PREFIX):
-// '/' followed by segments of the characters a URI path segment holds,
-// separated by a single '/' and with no trailing '/'. That set is RFC 3986's
-// unreserved characters (letters, digits, - . _ ~) plus its sub-delimiters
-// except Gin's catch-all '*', plus '@', plus any non-ASCII rune of a value that
-// is valid UTF-8.
+// '/' followed by segments of the characters an IRI path segment holds,
+// separated by a single '/' and with no trailing '/'. That set is RFC 3987's
+// ipchar: RFC 3986's unreserved characters (letters, digits, - . _ ~) plus its
+// sub-delimiters except Gin's catch-all '*', plus '@', plus the non-ASCII runes
+// of a value that is valid UTF-8 — a client sends those percent-encoded, and
+// Gin matches the route once they are decoded, so the two still name one path.
 //
 // That form is what the value has to be because generated resources and the
 // tutorial example concatenate prefix + "/widgets" into the routes they register
@@ -40,9 +41,11 @@ import (
 //     client can parse as a URL, and '?' and '#' cut the path short on the way
 //     to the server, so the route the document lists answers 404.
 //   - The rest of what is refused is a policy line rather than a failure
-//     measured here: space and the US-ASCII characters RFC 3986 keeps out of a
-//     URI (" < > [ ] | ^ `) are not path characters, so a prefix held to what a
-//     path segment is defined to hold does not admit them either.
+//     measured here: space and the other US-ASCII characters RFC 3986 keeps out
+//     of a URI (" < > [ ] | ^ `) are refused by policy. RFC 3986 does not admit
+//     non-ASCII either, but this rule takes its accepted set from RFC 3987's
+//     IRI path segment (ipchar) instead, so non-ASCII is admitted and sent
+//     percent-encoded.
 //   - Bytes that are not valid UTF-8 go the other way round: nothing rejects
 //     them on the wire, but encoding/json replaces each with U+FFFD when it
 //     writes the document, so the served key differs from the route Gin
@@ -103,7 +106,7 @@ func apiPrefix(prefix string) (canonical, problem string) {
 			return "", `must not contain a '.' or '..' segment`
 		}
 		if !isPrefixSegment(segment) {
-			return "", "must be '/' followed by segments of URI path characters (letters, digits, - . _ ~ ! $ & ' ( ) + , ; = @, or non-ASCII) separated by a single '/'"
+			return "", "must be '/' followed by segments of IRI path characters (letters, digits, - . _ ~ ! $ & ' ( ) + , ; = @, or non-ASCII) separated by a single '/'"
 		}
 	}
 	return canonical, ""
@@ -116,7 +119,7 @@ func isPrefixSegment(segment string) bool {
 	for _, r := range segment {
 		switch {
 		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
-		case r >= 0xA0: // non-ASCII: percent-encoded in UTF-8 on the way, decoded by Gin on arrival
+		case r >= 0xA0: // non-ASCII: RFC 3987's ipchar admits it as a path segment rune; percent-encoded in UTF-8 on the way, decoded by Gin on arrival
 		case r == '.', r == '_', r == '-', r == '~':
 		case r == '!', r == '$', r == '&', r == '\'', r == '(', r == ')':
 		case r == '+', r == ',', r == ';', r == '=', r == '@':

@@ -221,14 +221,14 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   `/svc//widgets` in the OpenAPI document, so every client generated
   from it asked for a URL that 404s. `Load` normalises a trailing
   slash away, so `GOMBIT_API_PREFIX=/svc/` still starts the app and
-  serves what it always served. That is the only environment value
-  that changes nothing: `main` checked a prefix for no more than a
+  serves what it always served. Trailing slashes are the only thing
+  `Load` rewrites: `main` checked a prefix for no more than a
   leading `/`, so a value the rules below refuse started an app and
   now fails `Load` from the environment — `GOMBIT_API_PREFIX=/api/v 1`
   is one. A prefix set in code is never rewritten, so
   `Config.API.Prefix = "/svc/"` now fails `Validate` with a field error
   naming `API.Prefix`; write it without the trailing slash.
-  What still works is what a URI path segment holds: letters, digits,
+  What still works is what an IRI path segment holds: letters, digits,
   `- . _ ~`, the sub-delimiters `! $ & ' ( ) + , ; =`, `@`, and
   non-ASCII in valid UTF-8 — `/api/v1+beta`, `/@acme/api`, `/api;v=1`
   and `/café` each register, advertise and answer the same path key.
@@ -248,9 +248,10 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   U+FFFD while writing the document, so the advertised key 404s while
   the route answers 200. Space and the other US-ASCII characters RFC
   3986 keeps out of a URI (`" < > [ ] | ^ \``) are refused on purpose,
-  not because anything was measured failing with them: the canonical
-  form stays inside the characters that specification gives a path
-  segment.
+  not because anything was measured failing with them. RFC 3986
+  excludes non-ASCII too, but the accepted set is RFC 3987's IRI path
+  segment (`ipchar`), which admits it; a client sends it percent-encoded
+  and Gin matches the route once it is decoded.
 
 ### Informational
 

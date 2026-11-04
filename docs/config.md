@@ -138,11 +138,14 @@ is then no URL a client can parse, and a query or fragment never reaches the
 path), `{`, `}`, `:` and `*` (Gin's parameter syntax, so the route answers paths
 the document never lists; a `*` or `\` mid-path panics at registration), space and
 the other US-ASCII characters RFC 3986 keeps out of a URI (`" < > [ ] | ^ \``),
-and control characters. Bytes that are not valid UTF-8 are refused too: Gin
+and control characters. Those are refused by policy: RFC 3986 does not admit
+non-ASCII either, but the rule takes its accepted set from RFC 3987's IRI path
+segment (`ipchar`) and admits it percent-encoded. Bytes that are not valid
+UTF-8 are refused too: Gin
 registers the prefix's raw bytes, while the document is written by `encoding/json`,
 which replaces each undecodable byte with `U+FFFD`, so `/api/<ff>/widgets` answers
 while the `/api/<U+FFFD>/widgets` it advertises does not. The accepted form is `/`
-followed by one or more segments of the characters a path segment holds — `A-Z`,
+followed by one or more segments of the characters an IRI path segment holds — `A-Z`,
 `a-z`, `0-9`, `-`, `.`, `_`, `~`, the sub-delimiters `! $ & ' ( ) + , ; =`, `@`, and
 any non-ASCII rune of a value that is valid UTF-8, which a client sends
 percent-encoded and Gin matches once decoded — separated by a single `/`, none of

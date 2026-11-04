@@ -1378,7 +1378,7 @@ func TestRefreshReuseGraceConfig(t *testing.T) {
 
 // The rule of internal/urlbase, spelled the way config reports it.
 const (
-	apiPrefixSegmentRule = `must be '/' followed by segments of URI path characters (letters, digits, - . _ ~ ! $ & ' ( ) + , ; = @, or non-ASCII) separated by a single '/'`
+	apiPrefixSegmentRule = `must be '/' followed by segments of IRI path characters (letters, digits, - . _ ~ ! $ & ' ( ) + , ; = @, or non-ASCII) separated by a single '/'`
 	apiPrefixDotRule     = `must not contain a '.' or '..' segment`
 	apiPrefixUTF8Rule    = `must be valid UTF-8: an undecodable byte reaches the document as U+FFFD`
 )
