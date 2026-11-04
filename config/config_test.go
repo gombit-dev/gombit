@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1373,5 +1374,31 @@ func TestRefreshReuseGraceConfig(t *testing.T) {
 	var fe FieldErrors
 	if err := cfg.Validate(); !errors.As(err, &fe) || !strings.Contains(err.Error(), envRefreshReuseGrace) {
 		t.Fatalf("a negative grace = %v, want a field error naming %s", err, envRefreshReuseGrace)
+	}
+}
+
+// TestValidateBcryptCostRange: a bcrypt cost is 0 (bcrypt's default) or in
+// bcrypt's range, 4..31. Below it bcrypt silently hashes at its default, and
+// above it every new hash fails (#465).
+func TestValidateBcryptCostRange(t *testing.T) {
+	for cost, ok := range map[int]bool{0: true, 4: true, 10: true, 31: true, -1: false, 1: false, 3: false, 32: false, 100: false} {
+		cfg := Default()
+		cfg.Auth.BcryptCost = cost
+		err := cfg.Validate()
+		if ok {
+			if err != nil {
+				t.Errorf("Validate(BcryptCost %d) = %v, want nil", cost, err)
+			}
+			continue
+		}
+		var fieldErrors FieldErrors
+		want := []FieldError{{
+			Field:   "Auth.BcryptCost",
+			Value:   strconv.Itoa(cost),
+			Message: "must be 0 (bcrypt's default) or between 4 and 31",
+		}}
+		if !errors.As(err, &fieldErrors) || !reflect.DeepEqual([]FieldError(fieldErrors), want) {
+			t.Errorf("Validate(BcryptCost %d) = %v, want %#v", cost, err, want)
+		}
 	}
 }

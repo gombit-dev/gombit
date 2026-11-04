@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -92,6 +93,9 @@ func NewService(db *gorm.DB, cfg config.Config, opts ...Option) (*Service, error
 	}
 	if cfg.Auth.RefreshTokenTTL < cfg.Auth.AccessTokenTTL {
 		return nil, errors.New("auth: the refresh token TTL must be at least the access token TTL")
+	}
+	if err := config.CheckBcryptCost(cfg.Auth.BcryptCost); err != nil {
+		return nil, fmt.Errorf("auth: bcrypt cost %d %w", cfg.Auth.BcryptCost, err)
 	}
 	s := &Service{
 		db:     db,
