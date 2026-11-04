@@ -411,6 +411,13 @@ var driverCheckedDSNs = []string{
 	"postgres://h/db? password=s3cr3tvalue",
 	"postgres://h/db?sslmode=disable&password  =s3cr3tvalue",
 	"postgres://app:s3cr3tvalue @h/db",
+	// pgconn's database name runs to the first '?', so a '/' inside a query
+	// value cannot move the parameter list's boundary. The last-'/' rule hid no
+	// parameter at all here and printed the password (#486 review).
+	"postgres:///db?host=/var/run/postgresql&password=s3cr3tvalue",
+	"postgres:///db?host=/cloudsql/project:region:instance&password=s3cr3tvalue",
+	"postgres://h/db?password=s3cr3tvalue&application_name=svc/api",
+	"postgres://h/db?password=s3cr3tvalue/x",
 }
 
 // Redaction is checked against the parsers that build the connection, not
@@ -674,6 +681,14 @@ func TestSanitizeErrorSpellsNoPasswordFromAURITheDriverRefuses(t *testing.T) {
 			dsn:  "postgres://h/db?password=%00Sup3r",
 			text: "login %00Sup3r failed",
 		},
+		{ // #nosec G101 -- fake local test DSN.
+			// pgconn dispatches a URI to its URL parser only, so this walk never
+			// reads the `password` a keyword reading finds after the space — and
+			// the URI is refused anyway (#486 review).
+			name: "a keyword reading inside a URI the parser refuses",
+			dsn:  "postgres://h/db?application_name=svc password=status",
+			text: "connection status=failed",
+		},
 	}
 
 	for _, tt := range tests {
@@ -825,6 +840,40 @@ func TestPgURIRejectedAcceptsWhatTheDriversParse(t *testing.T) {
 			t.Parallel()
 			if pgURIRejected(dsn) {
 				t.Fatalf("pgURIRejected(%q) = true, but the drivers read a password from it", dsn)
+			}
+		})
+	}
+}
+
+// pgURIQuery returns the boundary secretRanges needs, and it is the driver's:
+// pgconn's database name runs to the first '?', so a slash in the userinfo, in
+// the host or in a query value moves nothing. The last-'/' rule is
+// go-sql-driver/mysql's and is never asked about a URI (#486 review).
+func TestPGURIQueryFindsTheParameterListTheWayTheDriverDoes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct{ dsn, query string }{
+		{dsn: "postgres://h/db?password=x", query: "?password=x"},
+		{dsn: "postgres://h:5432/db?password=x", query: "?password=x"},
+		{dsn: "postgres:///db?host=/var/run/postgresql&password=x", query: "?host=/var/run/postgresql&password=x"},
+		{dsn: "postgres://h/db?password=x&application_name=svc/api", query: "?password=x&application_name=svc/api"},
+		{dsn: "postgres://h?password=x", query: "?password=x"},
+		{dsn: "postgresql://app:pa/ss@h/db?password=x", query: "?password=x"},
+		{dsn: "postgres://h/db", query: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.dsn, func(t *testing.T) {
+			t.Parallel()
+			query, rejected := pgURIQuery(tt.dsn)
+			if rejected {
+				t.Fatalf("pgURIQuery(%q) refused a string the driver accepts", tt.dsn)
+			}
+			got := ""
+			if query >= 0 {
+				got = tt.dsn[query:]
+			}
+			if got != tt.query {
+				t.Fatalf("pgURIQuery(%q) query = %q, want %q", tt.dsn, got, tt.query)
 			}
 		})
 	}

@@ -124,7 +124,28 @@ func secretRanges(dsn string) []secretRange {
 		out = append(out, r)
 	}
 	uri := uriRanges(dsn)
-	if query := paramListStart(dsn); query >= 0 {
+	var query int
+	rejected := false
+	if isPostgresScheme(dsn) {
+		// pgconn reads a URI's parameters from the first '?' after the database
+		// name, which runs to that '?' — so a '/' inside a query value cannot
+		// move the boundary. paramListStart's last-'/' rule is
+		// go-sql-driver/mysql's, and applying it to a URI found no parameter list
+		// at all for `?host=/var/run/postgresql&password=…`, printing a password
+		// that main hides (#486 review).
+		query, rejected = pgURIQuery(dsn)
+		if query < 0 && rejected {
+			// The walk stopped before it reached the query, so the parameter
+			// list's boundary is unknown. pgconn stores no setting out of a
+			// string it refuses, so nothing is derived from these ranges either
+			// way; the permissive scan is kept only to hide the bytes an
+			// operator wrote there.
+			query = paramListStart(dsn)
+		}
+	} else {
+		query = paramListStart(dsn)
+	}
+	if query >= 0 {
 		uri = append(uri, paramRanges(dsn, query+1)...)
 	}
 	// pgconn answers with a URI's settings or with none: the first component its
@@ -136,7 +157,7 @@ func secretRanges(dsn string) []secretRange {
 	// (`?password=status` names a port-shaped value) stores its password all the
 	// same, and is spelled as one. Syntactic acceptance is the stable boundary;
 	// semantic validation changes with every pgconn release.
-	if isPostgresScheme(dsn) && pgURIRejected(dsn) {
+	if isPostgresScheme(dsn) && rejected {
 		for i := range uri {
 			uri[i].driver = false
 		}
@@ -144,26 +165,34 @@ func secretRanges(dsn string) []secretRange {
 	return append(out, uri...)
 }
 
-// pgURIRejected reports whether pgconn's parseURLSettings refuses connString
-// outright, mirroring the reject conditions it reaches before it stores any
-// setting. It is mirrored by hand rather than asked of ParseConfig for the same
-// reason mysqlPassword asks ParseDSN and this does not: ParseConfig opens the
-// files a passfile or ssl setting names. TestPgURIRejectedAgreesWithTheDriver
-// pins the mirror to the parser, subtest by subtest, so a rule pgconn changes
-// cannot drift out of it silently. The rules followed here are pgconn's own, in
-// its order — a NUL anywhere; a userinfo, host list, port list or database name
+// pgURIQuery walks connString the way pgconn's parseURLSettings does and returns
+// the index of the '?' that opens the URI's parameter list (-1 when it has none
+// or the walk stopped before reaching it), and whether the parser refuses the
+// string outright, before it stores any setting. The walk is the one place the
+// query's boundary is read: pgconn's database name runs to the first '?', so
+// nothing after it — a '/', an '@', another '?' — can move it, while
+// paramListStart's last-'/' rule is go-sql-driver/mysql's and applies to the net
+// form only.
+//
+// It is mirrored by hand rather than asked of ParseConfig for the same reason
+// mysqlPassword asks ParseDSN and this does not: ParseConfig opens the files a
+// passfile or ssl setting names. TestPgURIRejectedAgreesWithTheDriver pins the
+// mirror to the parser, subtest by subtest, so a rule pgconn changes cannot
+// drift out of it silently. The rules followed here are pgconn's own, in its
+// order — a NUL anywhere; a userinfo, host list, port list or database name
 // whose percent-escapes it cannot decode; a malformed IPv6 host; and a query
 // pair with no '=' or with a second raw one, or a key or value it cannot
 // decode. Anything it accepts is read the way paramRanges and uriRanges already
 // describe.
-func pgURIRejected(connString string) bool {
+func pgURIQuery(connString string) (queryStart int, rejected bool) {
+	queryStart = -1
 	if strings.IndexByte(connString, 0) >= 0 {
-		return true
+		return -1, true
 	}
 	rest, ok := strings.CutPrefix(connString, "postgresql://")
 	if !ok {
 		if rest, ok = strings.CutPrefix(connString, "postgres://"); !ok {
-			return true // pgconn reads no URI under another scheme.
+			return -1, true // pgconn reads no URI under another scheme.
 		}
 	}
 
@@ -173,10 +202,10 @@ func pgURIRejected(connString string) bool {
 		user, password, hasPassword := strings.Cut(rest[:i], ":")
 		rest = rest[i+1:]
 		if user != "" && pgURIDecodeFails(user) {
-			return true
+			return -1, true
 		}
 		if hasPassword && password != "" && pgURIDecodeFails(password) {
-			return true
+			return -1, true
 		}
 	}
 
@@ -186,12 +215,12 @@ func pgURIRejected(connString string) bool {
 		if peekByte(rest) == '[' {
 			end := strings.IndexByte(rest, ']')
 			if end < 0 || end == 1 {
-				return true
+				return -1, true
 			}
 			hosts.WriteString(rest[1:end])
 			rest = rest[end+1:]
 			if c := peekByte(rest); c != 0 && c != ':' && c != '/' && c != '?' && c != ',' {
-				return true
+				return -1, true
 			}
 		} else {
 			i := strings.IndexAny(rest, ":/?,")
@@ -218,10 +247,10 @@ func pgURIRejected(connString string) bool {
 		ports.WriteByte(',')
 	}
 	if hosts.Len() > 0 && pgURIDecodeFails(hosts.String()) {
-		return true
+		return -1, true
 	}
 	if ports.Len() > 0 && pgURIDecodeFails(ports.String()) {
-		return true
+		return -1, true
 	}
 
 	if peekByte(rest) == '/' {
@@ -229,14 +258,16 @@ func pgURIRejected(connString string) bool {
 		rest = ""
 		if i := strings.IndexByte(database, '?'); i >= 0 {
 			rest = database[i:]
+			queryStart = len(connString) - len(rest)
 			database = database[:i]
 		}
 		if database != "" && pgURIDecodeFails(database) {
-			return true
+			return queryStart, true
 		}
 	}
 
 	if peekByte(rest) == '?' {
+		queryStart = len(connString) - len(rest)
 		for params := rest[1:]; params != ""; {
 			pair := params
 			if i := strings.IndexByte(params, '&'); i >= 0 {
@@ -246,14 +277,20 @@ func pgURIRejected(connString string) bool {
 			}
 			key, value, found := strings.Cut(pair, "=")
 			if !found || strings.IndexByte(value, '=') >= 0 {
-				return true
+				return queryStart, true
 			}
 			if pgURIDecodeFails(key) || pgURIDecodeFails(value) {
-				return true
+				return queryStart, true
 			}
 		}
 	}
-	return false
+	return queryStart, false
+}
+
+// pgURIRejected reports whether pgconn's parser refuses connString outright.
+func pgURIRejected(connString string) bool {
+	_, rejected := pgURIQuery(connString)
+	return rejected
 }
 
 // pgURIDecode is pgconn's uriDecode: the bytes a URI component stands for, as
@@ -357,6 +394,11 @@ func driverKeywordRanges(dsn string) []secretRange {
 	var out []secretRange
 	at := 0
 	rejected := false
+	// pgconn dispatches by prefix: a `postgres(ql)://` string goes to
+	// parseURLSettings, and this keyword parser never sees it. A key found here
+	// on a URI is not one the driver reads there, so the range still hides the
+	// bytes an operator wrote but spells no password from them (#486 review).
+	uri := isPostgresScheme(dsn)
 	for at < len(dsn) {
 		for at < len(dsn) && isASCIISpace(dsn[at]) {
 			at++
@@ -379,7 +421,7 @@ func driverKeywordRanges(dsn string) []secretRange {
 		}
 		start, end, closed, ok := keywordValue(dsn, equals+1)
 		if ok && isSecretConnKey(key) {
-			out = append(out, secretRange{start: start, end: end, grammar: keywordGrammar, driver: isDriverConnKey(key)})
+			out = append(out, secretRange{start: start, end: end, grammar: keywordGrammar, driver: isDriverConnKey(key) && !uri})
 		}
 		if !ok {
 			// pgconn stores an empty value for a missing one and the loop
