@@ -18,8 +18,8 @@ require (
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/jinzhu/inflection v1.0.0
 	github.com/mattn/go-sqlite3 v1.14.52
-	github.com/pb33f/libopenapi v0.41.6
-	github.com/pb33f/libopenapi-validator v0.16.1
+	github.com/pb33f/libopenapi v0.41.8
+	github.com/pb33f/libopenapi-validator v0.16.2
 	github.com/redis/go-redis/v9 v9.22.0
 	github.com/shopspring/decimal v1.4.0
 	github.com/spf13/cobra v1.10.2
@@ -29,7 +29,7 @@ require (
 	go.uber.org/zap v1.28.0
 	golang.org/x/crypto v0.58.0
 	golang.org/x/mod v0.42.0
-	golang.org/x/net v0.61.0
+	golang.org/x/net v0.62.0
 	golang.org/x/sys v0.49.0
 	golang.org/x/term v0.47.0
 	golang.org/x/tools v0.52.0
@@ -72,7 +72,7 @@ require (
 	github.com/bahlo/generic-list-go v0.2.0 // indirect
 	github.com/basgys/goxml2json v1.1.1-0.20231018121955-e66ee54ceaad // indirect
 	github.com/bmatcuk/doublestar v1.3.4 // indirect
-	github.com/buger/jsonparser v1.1.2 // indirect
+	github.com/buger/jsonparser v1.6.1 // indirect
 	github.com/bytedance/gopkg v0.1.4 // indirect
 	github.com/bytedance/sonic v1.15.2 // indirect
 	github.com/bytedance/sonic/loader v0.5.1 // indirect
@@ -119,7 +119,7 @@ require (
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.2 // indirect
 	github.com/pb33f/go-yaml v0.1.1 // indirect
-	github.com/pb33f/jsonpath v0.8.4 // indirect
+	github.com/pb33f/jsonpath v0.8.5 // indirect
 	github.com/pb33f/jsonschema/v6 v6.0.3 // indirect
 	github.com/pb33f/ordered-map/v2 v2.3.2 // indirect
 	github.com/pelletier/go-toml/v2 v2.4.3 // indirect
