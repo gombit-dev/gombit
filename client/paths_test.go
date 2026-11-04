@@ -97,12 +97,6 @@ func TestRewriteSpecPathsForTypedClientUsesConfiguredPrefix(t *testing.T) {
 			wantPaths: []string{"/api/v1/auth/login", "/api/v1/auth/refresh", "/api/v1/auth/me"},
 		},
 		{
-			name:      "written without the leading slash",
-			live:      "svc",
-			paths:     []string{"/svc/auth/login"},
-			wantPaths: []string{"/api/v1/auth/login"},
-		},
-		{
 			name:      "written with the trailing slash",
 			live:      "/svc/",
 			paths:     []string{"/svc/auth/login"},
@@ -151,6 +145,56 @@ func TestRewriteSpecPathsForTypedClientRejectsAPrefixWithNoPaths(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error = %q, want it to mention %q", err, want)
 		}
+	}
+}
+
+// A prefix without a leading "/" is refused, the way config refuses
+// GOMBIT_API_PREFIX=svc: repairing the spelling here would be a second prefix
+// rule, and one more lenient than the configuration's (#506).
+func TestRewriteSpecPathsForTypedClientRejectsAnUnrootedPrefix(t *testing.T) {
+	t.Parallel()
+
+	spec := specWithPaths(t, []string{"/svc/widgets"})
+	for _, live := range []string{"svc", "svc/v2"} {
+		_, err := rewriteSpecPathsForTypedClient(spec, live)
+		if err == nil {
+			t.Fatalf("rewriteSpecPathsForTypedClient(live=%q) error = nil, want it refused", live)
+		}
+		for _, want := range []string{live, "must start with /"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("live=%q error = %q, want it to mention %q", live, err, want)
+			}
+		}
+	}
+}
+
+// The rewrite is a JSON round trip that openapi-typescript then reads, so a
+// document with data after its JSON value is refused: unmarshalling used to
+// refuse it, and re-encoding silently drops the tail.
+func TestRewriteSpecPathsForTypedClientRejectsTrailingData(t *testing.T) {
+	t.Parallel()
+
+	spec := append(specWithPaths(t, []string{"/svc/widgets"}), []byte(` garbage`)...)
+	if _, err := rewriteSpecPathsForTypedClient(spec, "/svc"); err == nil {
+		t.Fatal("rewriteSpecPathsForTypedClient() error = nil, want the trailing data refused")
+	} else if !strings.Contains(err.Error(), "trailing data") {
+		t.Fatalf("error = %q, want it to name the trailing data", err)
+	}
+}
+
+// A document that ends with whitespace is not one with trailing data: every
+// file an editor saves ends with a newline, and the check after Decode must
+// only refuse a second JSON value.
+func TestRewriteSpecPathsForTypedClientAcceptsTrailingWhitespace(t *testing.T) {
+	t.Parallel()
+
+	spec := append(specWithPaths(t, []string{"/svc/widgets"}), '\n')
+	got, err := rewriteSpecPathsForTypedClient(spec, "/svc")
+	if err != nil {
+		t.Fatalf("rewriteSpecPathsForTypedClient() error = %v", err)
+	}
+	if keys := pathKeys(t, got); !sameStringSet(keys, []string{"/api/v1/widgets"}) {
+		t.Fatalf("path keys = %v, want [/api/v1/widgets]", keys)
 	}
 }
 

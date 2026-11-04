@@ -51,30 +51,59 @@ func TestClientCheckURLFetchesLiveSpecInsteadOfSampleApp(t *testing.T) {
 // project directory's .env says (#506). Nothing here runs openapi-typescript,
 // so it needs no Node.js.
 func TestLiveAPIPrefixComesFromTheApplicationConfiguration(t *testing.T) {
+	unsetEnv(t, "GOMBIT_API_PREFIX")
 	dir := t.TempDir()
 	// #nosec G304 -- test-controlled path under t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("GOMBIT_API_PREFIX=/svc\n"), 0o600); err != nil {
 		t.Fatalf("write .env: %v", err)
 	}
-	if got := liveAPIPrefix("", dir); got != "/svc" {
-		t.Fatalf(`liveAPIPrefix("") = %q, want /svc from the project's .env`, got)
+	if got, err := liveAPIPrefix("", dir); err != nil || got != "/svc" {
+		t.Fatalf(`liveAPIPrefix("") = (%q, %v), want /svc from the project's .env`, got, err)
 	}
-	if got := liveAPIPrefix("/flag", dir); got != "/flag" {
-		t.Fatalf(`liveAPIPrefix("/flag") = %q, want the flag to win over .env`, got)
+	if got, err := liveAPIPrefix("/flag", dir); err != nil || got != "/flag" {
+		t.Fatalf(`liveAPIPrefix("/flag") = (%q, %v), want the flag to win over .env`, got, err)
 	}
 }
 
-// Configuration that cannot be read is reported as none rather than as
+// Configuration that does not mention the prefix is reported as none, not as
 // D8's default: the generator then infers the prefix from the document, which
-// is what it did before the prefix became an input.
-func TestLiveAPIPrefixIsUnsetWhenTheConfigurationIsInvalid(t *testing.T) {
+// is what it did before the prefix became an input. A defaulted Config would
+// read /api/v1 here and refuse a document under /svc that used to rewrite
+// correctly (#506).
+func TestLiveAPIPrefixIsUnsetWhenTheConfigurationDoesNotSetIt(t *testing.T) {
+	unsetEnv(t, "GOMBIT_API_PREFIX")
+	dir := t.TempDir()
+	if got, err := liveAPIPrefix("", dir); err != nil || got != "" {
+		t.Fatalf("liveAPIPrefix() = (%q, %v), want the empty string for a project that never sets the prefix", got, err)
+	}
+}
+
+// The variable is read wherever configuration is read from: the process
+// environment, or the project's .env when the environment does not set it.
+func TestLiveAPIPrefixReadsTheVariableNotTheDefaultedConfig(t *testing.T) {
+	unsetEnv(t, "GOMBIT_API_PREFIX")
 	dir := t.TempDir()
 	// #nosec G304 -- test-controlled path under t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("GOMBIT_HTTP_REQUEST_TIMEOUT=not-a-duration\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("GOMBIT_API_PREFIX=/svc\n"), 0o600); err != nil {
 		t.Fatalf("write .env: %v", err)
 	}
-	if got := liveAPIPrefix("", dir); got != "" {
-		t.Fatalf("liveAPIPrefix() = %q, want the empty string for unreadable configuration", got)
+	t.Setenv("GOMBIT_API_PREFIX", "/env")
+	if got, err := liveAPIPrefix("", dir); err != nil || got != "/env" {
+		t.Fatalf(`liveAPIPrefix("") = (%q, %v), want /env from the process environment`, got, err)
+	}
+}
+
+// A .env that cannot be read is reported, not skipped: answering from an
+// unreadable file would look exactly like a project that never set the prefix,
+// and the generator would go back to guessing the one #506 stopped guessing.
+func TestLiveAPIPrefixReportsAnUnreadableDotEnv(t *testing.T) {
+	unsetEnv(t, "GOMBIT_API_PREFIX")
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, ".env"), 0o700); err != nil {
+		t.Fatalf("create .env directory: %v", err)
+	}
+	if got, err := liveAPIPrefix("", dir); err == nil {
+		t.Fatalf(`liveAPIPrefix("") = (%q, nil), want the .env read error`, got)
 	}
 }
 
@@ -83,8 +112,10 @@ func TestClientCommandsTakeAnAPIPrefixFlag(t *testing.T) {
 		name string
 		cmd  []string
 	}{
-		{name: "generate", cmd: []string{"client", "generate", "--help"}},
-		{name: "check", cmd: []string{"client", "check", "--help"}},
+		{name: "client generate", cmd: []string{"client", "generate", "--help"}},
+		{name: "client check", cmd: []string{"client", "check", "--help"}},
+		{name: "db check", cmd: []string{"db", "check", "--help"}},
+		{name: "upgrade contract", cmd: []string{"upgrade", "contract", "--help"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -99,6 +130,23 @@ func TestClientCommandsTakeAnAPIPrefixFlag(t *testing.T) {
 			}
 		})
 	}
+}
+
+// unsetEnv removes key from the process environment for the test's duration,
+// restoring whatever the developer's shell had (t.Setenv cannot unset).
+func unsetEnv(t *testing.T, key string) {
+	t.Helper()
+	value, had := os.LookupEnv(key)
+	if err := os.Unsetenv(key); err != nil {
+		t.Fatalf("unset %s: %v", key, err)
+	}
+	t.Cleanup(func() {
+		if had {
+			_ = os.Setenv(key, value)
+			return
+		}
+		_ = os.Unsetenv(key)
+	})
 }
 
 func TestClientCheckDefaultsMatchGenerateNotExamplesClient(t *testing.T) {

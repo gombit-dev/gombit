@@ -418,16 +418,17 @@ version.
 - `gombit client generate` takes the live API prefix it rewrites OpenAPI path
   keys from from the application's configuration (`--api-prefix`, else the
   `GOMBIT_API_PREFIX` of the directory it runs in; `gombit dev` passes the
-  prefix it started with) instead of guessing it as the longest prefix the
-  paths share. The guess was wrong for every app whose routes share a first
-  segment: mounted at `/svc` with only `auth` routes, its paths are also the
-  paths of an app mounted at `/svc/auth`, and the client came out with
-  `/api/v1/login` keys, which `rewriteAPIRequest` sends to `/svc/login` — a
-  route that does not exist. A document that does not live under the configured
-  prefix is now refused rather than rewritten wrongly. The rewrite keeps every
-  number as the document wrote it, so an `int64` bound such as
-  `"maximum": 9223372036854775807` no longer arrives as
-  `9223372036854776000`
+  prefix it started with; `gombit db check` and `gombit upgrade contract` take
+  the same flag) instead of guessing it as the longest prefix the paths share.
+  An application that sets neither still gets the old inference. The guess was
+  wrong for every app whose routes share a first segment: mounted at `/svc`
+  with only `auth` routes, its paths are also the paths of an app mounted at
+  `/svc/auth`, and the client came out with `/api/v1/login` keys, which
+  `rewriteAPIRequest` sends to `/svc/login` — a route that does not exist. A
+  configured document that does not live under the prefix is now refused rather
+  than rewritten wrongly. The rewrite keeps every number as the document wrote
+  it, so an `int64` bound such as `"maximum": 9223372036854775807` no longer
+  arrives as `9223372036854776000`
   ([#506](https://github.com/gombit-dev/gombit/issues/506)).
 
 ### Changed

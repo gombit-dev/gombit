@@ -3,7 +3,9 @@ package client
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"strings"
 )
 
@@ -42,7 +44,10 @@ func rewriteSpecPathsForTypedClient(spec []byte, live string) ([]byte, error) {
 	if allTypedAPIPrefix(keys) {
 		return spec, nil
 	}
-	live = normalizeLivePrefix(live)
+	live, err := liveAPIPrefixForm(live)
+	if err != nil {
+		return nil, err
+	}
 	if live == "" {
 		guessed := inferLiveAPIPrefix(keys)
 		if guessed == TypedAPIPrefix || !anyPathUnderPrefix(guessed, keys) {
@@ -80,22 +85,34 @@ func rewriteSpecPathsForTypedClient(spec []byte, live string) ([]byte, error) {
 // byte-for-byte the input; a float64 is not, and an OpenAPI integer bound
 // above 2^53 (an int64 `maximum`, say) comes back altered:
 // 9223372036854775807 becomes 9223372036854776000 (#506).
+//
+// The decoder reads one JSON value, so the document after it is checked to be
+// empty: json.Unmarshal refused trailing data, and a rewrite silently drops it
+// from what openapi-typescript receives.
 func decodeSpecDocument(spec []byte, doc *map[string]any) error {
 	decoder := json.NewDecoder(bytes.NewReader(spec))
 	decoder.UseNumber()
-	return decoder.Decode(doc)
+	if err := decoder.Decode(doc); err != nil {
+		return err
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return errors.New("trailing data after the JSON document")
+	}
+	return nil
 }
 
-// normalizeLivePrefix turns a configured prefix into the path form the spec's
-// keys are written in: `/svc/v2/`, `/svc/v2` and `svc/v2` all mean `/svc/v2`.
-// An empty result means "not configured" or "mounted at the root", and neither
-// is a prefix any key can start with.
-func normalizeLivePrefix(prefix string) string {
-	prefix = strings.Trim(strings.TrimSpace(prefix), "/")
-	if prefix == "" {
-		return ""
+// liveAPIPrefixForm is the path form a configured prefix is used as:
+// surrounding space and a trailing "/" are not part of it. A prefix without a
+// leading "/" is refused, the way config refuses GOMBIT_API_PREFIX=svc: a
+// prefix names the path an app's routes start with, it is not a spelling to
+// repair. An empty result means "not configured" or "mounted at the root", and
+// neither is a prefix any key can start with.
+func liveAPIPrefixForm(prefix string) (string, error) {
+	prefix = strings.TrimSuffix(strings.TrimSpace(prefix), "/")
+	if prefix != "" && !strings.HasPrefix(prefix, "/") {
+		return "", fmt.Errorf("client: live API prefix %q must start with /", prefix)
 	}
-	return "/" + prefix
+	return prefix, nil
 }
 
 func anyPathUnderPrefix(prefix string, paths []string) bool {

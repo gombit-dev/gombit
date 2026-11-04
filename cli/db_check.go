@@ -103,6 +103,10 @@ inconsistent).`,
 			if err != nil {
 				return err
 			}
+			apiPrefix, err := cmd.Flags().GetString("api-prefix")
+			if err != nil {
+				return err
+			}
 			asJSON, err := cmd.Flags().GetBool("json")
 			if err != nil {
 				return err
@@ -111,7 +115,7 @@ inconsistent).`,
 			if err != nil {
 				return err
 			}
-			report := runCheck(cmd.Context(), checkOptions{dir: opts, database: cfg.Database, noDB: noDB, dbTimeout: dbTimeout, openapiURL: openapiURL})
+			report := runCheck(cmd.Context(), checkOptions{dir: opts, database: cfg.Database, noDB: noDB, dbTimeout: dbTimeout, openapiURL: openapiURL, apiPrefix: apiPrefix})
 			if asJSON {
 				data, err := json.MarshalIndent(report, "", "  ")
 				if err != nil {
@@ -133,6 +137,7 @@ inconsistent).`,
 	cmd.Flags().Bool("no-db", false, "skip the pending-migrations and database-schema layers")
 	cmd.Flags().Duration("db-timeout", 30*time.Second, "how long to wait for the application database (0 waits indefinitely)")
 	cmd.Flags().String("openapi-url", "", "a running app's /openapi.json, to check the committed TypeScript client against it")
+	cmd.Flags().String("api-prefix", "", "live API prefix of the --openapi-url document (default GOMBIT_API_PREFIX of the project directory)")
 	cmd.Flags().Bool("json", false, "print the report as JSON")
 	return cmd
 }
@@ -143,6 +148,7 @@ type checkOptions struct {
 	noDB       bool
 	dbTimeout  time.Duration
 	openapiURL string
+	apiPrefix  string
 }
 
 // runCheck runs the layers in their fixed order.
@@ -450,9 +456,14 @@ func checkClient(ctx context.Context, o checkOptions) checkLayer {
 		return l
 	}
 	var out bytes.Buffer
+	prefix, err := liveAPIPrefix(o.apiPrefix, o.dir.WorkDir)
+	if err != nil {
+		l.Status, l.Detail = layerError, oneLine(err.Error())
+		return l
+	}
 	err = checkClientDrift(ctx, client.DriftOptions{
 		WorkDir: o.dir.WorkDir, SpecPath: client.DefaultSpecPath, OutDir: client.DefaultOutDir,
-		SpecBytes: spec, APIPrefix: liveAPIPrefix("", o.dir.WorkDir), Stdout: &out, Stderr: &out,
+		SpecBytes: spec, APIPrefix: prefix, Stdout: &out, Stderr: &out,
 	})
 	switch {
 	case errors.Is(err, client.ErrDrift):

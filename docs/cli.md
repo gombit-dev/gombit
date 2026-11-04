@@ -661,7 +661,7 @@ gombit db verify [--write] [--json] [--strict]
 gombit db hash
 gombit db lint [--latest N] [--json]
 gombit db repair [--write-manifests]
-gombit db check [--no-db] [--db-timeout 30s] [--openapi-url URL] [--json]
+gombit db check [--no-db] [--db-timeout 30s] [--openapi-url URL] [--api-prefix PREFIX] [--json]
 ```
 
 `gombit db hash` wraps `atlas migrate hash` to recompute the directory checksum
@@ -680,7 +680,9 @@ and CI: it runs the generated-contract, model-registry, migration-directory,
 migration-safety, models ↔ migrations, pending-migration, and database-schema
 checks (plus the TypeScript client with `--openapi-url`), names the layer that
 is inconsistent with its fix, and exits non-zero on any drift. `--no-db` skips
-the database layers. See
+the database layers. The client layer rewrites the running app's path keys from
+its live API prefix — `--api-prefix`, else the project's `GOMBIT_API_PREFIX`,
+else the prefix inferred from the document. See
 [migrations.md § Checking the whole chain](migrations.md#checking-the-whole-chain).
 
 `gombit db plan` classifies the change the models imply against the migration
@@ -989,6 +991,7 @@ See [upgrade.md](upgrade.md#generated-contract-artifacts).
 | `--url` | The running app's OpenAPI document, to check the committed one and generate the client from | — |
 | `--spec` | Committed OpenAPI document, relative to `--dir` | `openapi.json` |
 | `--out` | Generated client directory, relative to `--dir` | `frontend/src/api/generated` |
+| `--api-prefix` | Live API prefix of the `--url` document (else the `GOMBIT_API_PREFIX` of `--dir`) | — |
 | `--write` | Regenerate stale artifacts (generator-owned files only) | off |
 | `--npx` | npx binary that runs openapi-typescript | `npx` |
 | `--json` | Print the report as JSON | off |

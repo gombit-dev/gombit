@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	"github.com/gombit-dev/gombit/client"
-	"github.com/gombit-dev/gombit/dev"
+	"github.com/gombit-dev/gombit/config"
 	"github.com/spf13/cobra"
 )
 
@@ -62,11 +62,15 @@ func newClientGenerateCommand(stdout io.Writer, stderr io.Writer) *cobra.Command
 			if err != nil {
 				return err
 			}
+			prefix, err := liveAPIPrefix(apiPrefix, ".")
+			if err != nil {
+				return err
+			}
 			return client.Generate(cmd.Context(), client.Options{
 				WorkDir:   ".",
 				SpecPath:  spec,
 				OutDir:    out,
-				APIPrefix: liveAPIPrefix(apiPrefix, "."),
+				APIPrefix: prefix,
 				DryRun:    dryRun,
 				Force:     force,
 				NPXBinary: npx,
@@ -84,21 +88,35 @@ func newClientGenerateCommand(stdout io.Writer, stderr io.Writer) *cobra.Command
 	return cmd
 }
 
+// envAPIPrefix is the variable config reads Config.API.Prefix from. The name
+// stays with config; the value grammar does too.
+const envAPIPrefix = "GOMBIT_API_PREFIX"
+
 // liveAPIPrefix is the prefix the client commands treat a document's paths as
-// mounted under: --api-prefix, else the GOMBIT_API_PREFIX configured for the
-// application in dir. The prefix is the app's own configuration and its paths
+// mounted under: --api-prefix, else the GOMBIT_API_PREFIX as the project
+// directory sets it. The prefix is the app's own configuration and its paths
 // cannot settle which of /svc and /svc/auth mounted it, so generation is told
-// rather than left to guess (#506). A directory with unreadable configuration
-// gives "", and the generator falls back to inferring it from the document.
-func liveAPIPrefix(flagValue, dir string) string {
+// rather than left to guess (#506).
+//
+// It reads the variable itself rather than a loaded Config, because
+// config.Default() makes an unset API.Prefix /api/v1: a Config cannot tell an
+// app that configured /api/v1 from one that configured nothing, and letting an
+// unrelated variable that fails to parse turn a configured prefix back into a
+// guess. An unset variable is "", which leaves the generator inferring the
+// prefix from the document, as it did before the prefix became an input. A
+// .env that cannot be read is an error rather than an unset prefix, because
+// answering from half the file could turn a configured prefix back into a
+// guess.
+func liveAPIPrefix(flagValue, dir string) (string, error) {
 	if strings.TrimSpace(flagValue) != "" {
-		return flagValue
+		return flagValue, nil
 	}
-	cfg, err := LoadConfigFromDir(dir)
+	lookup, err := config.LookupFromDir(dir)
 	if err != nil {
-		return ""
+		return "", err
 	}
-	return dev.APIPrefixFromConfig(cfg)
+	value, _ := lookup(envAPIPrefix)
+	return value, nil
 }
 
 func newClientCheckCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
@@ -144,11 +162,15 @@ a separately compiled gombit binary, so pass --url to fetch the live
 			if err != nil {
 				return err
 			}
+			prefix, err := liveAPIPrefix(apiPrefix, ".")
+			if err != nil {
+				return err
+			}
 			opts := client.DriftOptions{
 				WorkDir:   ".",
 				SpecPath:  spec,
 				OutDir:    out,
-				APIPrefix: liveAPIPrefix(apiPrefix, "."),
+				APIPrefix: prefix,
 				Write:     write,
 				NPXBinary: npx,
 				Stdout:    stdout,

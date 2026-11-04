@@ -1169,9 +1169,12 @@ releases:
           tell the two apps apart, so the prefix is an input now —
           `--api-prefix`, else the `GOMBIT_API_PREFIX` of the application the
           command runs in, and the prefix `gombit dev` started with for the
-          client it regenerates. A document with no path under the configured
-          prefix is refused instead of rewritten wrongly. Regenerate with
-          `gombit client generate`, or `gombit upgrade contract --write`.
+          client it regenerates. `gombit db check` and `gombit upgrade
+          contract` take the same flag. An app that sets neither still gets the
+          old inference, so documents it handled correctly keep working. A
+          document with no path under a configured prefix is refused instead
+          of rewritten wrongly. Regenerate with `gombit client generate`, or
+          `gombit upgrade contract --write`.
           Separately, the rewrite stopped re-encoding the document through
           `float64`, which moved an int64 above 2^53 to a neighbouring value:
           `"maximum": 9223372036854775807` reaches the generated types as
