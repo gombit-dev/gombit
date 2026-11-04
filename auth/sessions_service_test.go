@@ -561,6 +561,156 @@ func runSessionsService(t *testing.T, db *database.DB) {
 		}
 	})
 
+	// Logout with a token that has rotated (a refresh in flight when the
+	// user signed out, or a client holding the previous token) ends the
+	// session it rotated into: the head of its chain, up to maxChainHops
+	// rotations on. A rotated token past its own expiry ends nothing, as
+	// it refreshes nothing; a session already ended stays a quiet success
+	// (#466).
+	t.Run("logout with a rotated token", func(t *testing.T) {
+		logouts := func(t *testing.T, userID uint) int64 {
+			t.Helper()
+			var n int64
+			if err := db.Model(&auth.AuditEvent{}).Where("action = ? AND target_user_id = ?", auth.AuditLogout, userID).Count(&n).Error; err != nil {
+				t.Fatal(err)
+			}
+			return n
+		}
+		for _, rotations := range []int{1, 2} {
+			t.Run(fmt.Sprintf("rotated %d times", rotations), func(t *testing.T) {
+				e := newEnv(t)
+				ada, pairs := e.user(t, fmt.Sprintf("logoutchain%d", rotations), 2)
+				head := pairs[0]
+				for range rotations {
+					head = e.rotate(t, head)
+				}
+				headSession := e.sessionID(t, head)
+				if err := e.svc.RevokeRefresh(e.ctx, pairs[0].RefreshToken); err != nil {
+					t.Fatalf("RevokeRefresh(rotated token) = %v", err)
+				}
+				if e.authenticates(head) {
+					t.Fatal("the session the token rotated into still authenticates after the logout")
+				}
+				if _, err := e.svc.RotateRefresh(e.ctx, head.RefreshToken); err == nil {
+					t.Fatal("the session the token rotated into still refreshes after the logout")
+				}
+				if !e.authenticates(pairs[1]) {
+					t.Fatal("the logout ended the user's other session")
+				}
+				if n := logouts(t, ada.ID); n != 1 {
+					t.Fatalf("%s events = %d, want 1", auth.AuditLogout, n)
+				}
+				// The event names the session the logout ended and says a
+				// rotated token ended it.
+				var ev auth.AuditEvent
+				if err := db.Where("action = ? AND target_user_id = ?", auth.AuditLogout, ada.ID).First(&ev).Error; err != nil {
+					t.Fatal(err)
+				}
+				if ev.TargetType != "session" || ev.TargetID != headSession || !strings.Contains(ev.Details, `"via":"rotated"`) {
+					t.Fatalf("logout event = %+v, want the head's session %s, via rotated", ev, headSession)
+				}
+			})
+		}
+		t.Run("unrotated token", func(t *testing.T) {
+			e := newEnv(t)
+			ada, pairs := e.user(t, "logoutplain", 1)
+			session := e.sessionID(t, pairs[0])
+			if err := e.svc.RevokeRefresh(e.ctx, pairs[0].RefreshToken); err != nil {
+				t.Fatal(err)
+			}
+			var ev auth.AuditEvent
+			if err := db.Where("action = ? AND target_user_id = ?", auth.AuditLogout, ada.ID).First(&ev).Error; err != nil {
+				t.Fatal(err)
+			}
+			if ev.TargetType != "session" || ev.TargetID != session || strings.Contains(ev.Details, "via") {
+				t.Fatalf("logout event = %+v, want the session %s, no via", ev, session)
+			}
+		})
+		// A successor that is gone (replaced_by has no foreign key: a manual
+		// delete, a partial restore) is a chain that cannot be followed: the
+		// logout fails rather than succeed having ended nothing.
+		t.Run("successor gone", func(t *testing.T) {
+			e := newEnv(t)
+			_, pairs := e.user(t, "logoutdangling", 1)
+			id, err := auth.AuthenticatedRow(e.ctx, e.svc, pairs[0].AccessToken)
+			if err != nil {
+				t.Fatal(err)
+			}
+			next := e.rotate(t, pairs[0])
+			if err := db.Model(&auth.RefreshToken{}).Where("id = ?", id).Update("replaced_by", 1<<30).Error; err != nil {
+				t.Fatal(err)
+			}
+			if err := e.svc.RevokeRefresh(e.ctx, pairs[0].RefreshToken); !errors.Is(err, auth.ErrChainUnresolved) {
+				t.Fatalf("RevokeRefresh(token whose successor is gone) = %v, want ErrChainUnresolved", err)
+			}
+			if !e.authenticates(next) {
+				t.Fatal("the failed logout ended the session")
+			}
+		})
+		// A walk reads at most maxChainHops rows: from a token one rotation
+		// short of the bound it reaches the head and ends the session; from
+		// one at the bound it cannot, and the logout fails, ending nothing,
+		// rather than succeed with the session alive.
+		t.Run("chain at the walk's bound", func(t *testing.T) {
+			const bound = 5
+			defer auth.SetMaxChainHops(bound)()
+			for rotations, reaches := range map[int]bool{bound - 1: true, bound: false} {
+				e := newEnv(t)
+				_, pairs := e.user(t, fmt.Sprintf("logoutbound%d", rotations), 1)
+				head := pairs[0]
+				for range rotations {
+					head = e.rotate(t, head)
+				}
+				err := e.svc.RevokeRefresh(e.ctx, pairs[0].RefreshToken)
+				if reaches {
+					if err != nil || e.authenticates(head) {
+						t.Fatalf("%d rotations: RevokeRefresh = %v, head authenticates = %v; want nil, false", rotations, err, e.authenticates(head))
+					}
+					continue
+				}
+				if !errors.Is(err, auth.ErrChainUnresolved) {
+					t.Fatalf("%d rotations: RevokeRefresh = %v, want ErrChainUnresolved", rotations, err)
+				}
+				if !e.authenticates(head) {
+					t.Fatalf("%d rotations: the failed logout ended the session", rotations)
+				}
+			}
+		})
+		t.Run("expired rotated token", func(t *testing.T) {
+			e := newEnv(t)
+			_, pairs := e.user(t, "logoutexpired", 1)
+			id, err := auth.AuthenticatedRow(e.ctx, e.svc, pairs[0].AccessToken)
+			if err != nil {
+				t.Fatal(err)
+			}
+			next := e.rotate(t, pairs[0])
+			if err := db.Model(&auth.RefreshToken{}).Where("id = ?", id).
+				Update("expires_at", time.Now().Add(-time.Minute)).Error; err != nil {
+				t.Fatal(err)
+			}
+			if err := e.svc.RevokeRefresh(e.ctx, pairs[0].RefreshToken); err != nil {
+				t.Fatalf("RevokeRefresh(expired rotated token) = %v", err)
+			}
+			if !e.authenticates(next) {
+				t.Fatal("a rotated token past its expiry ended the session it rotated into")
+			}
+		})
+		t.Run("session already ended", func(t *testing.T) {
+			e := newEnv(t)
+			ada, pairs := e.user(t, "logoutended", 1)
+			next := e.rotate(t, pairs[0])
+			if err := e.svc.RevokeRefresh(e.ctx, next.RefreshToken); err != nil {
+				t.Fatal(err)
+			}
+			if err := e.svc.RevokeRefresh(e.ctx, pairs[0].RefreshToken); err != nil {
+				t.Fatalf("RevokeRefresh(token of an ended session) = %v, want nil", err)
+			}
+			if n := logouts(t, ada.ID); n != 1 {
+				t.Fatalf("%s events = %d, want 1: the second logout ended nothing", auth.AuditLogout, n)
+			}
+		})
+	})
+
 	// Only a rotated refresh token counts as reuse, and only until it
 	// expires. One revoked by logout or session revocation is simply invalid,
 	// and so is any token past its expiry.

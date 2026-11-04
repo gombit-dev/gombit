@@ -442,6 +442,30 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   `built`, which describe the main module. A script that parsed the
   old app-version output reads a different string now.
 
+- Logout with a refresh token that has already rotated ends the session it rotated into; it answered 200 and revoked nothing. (`logout-follows-rotated-token`, security, [#466](https://github.com/gombit-dev/gombit/issues/466))
+
+  `POST {prefix}/auth/logout` (both auth modes) and
+  `auth.Service.RevokeRefresh` revoked only the token they were given,
+  and only while it was unrevoked. A token a refresh had rotated (a
+  silent refresh in flight when the user clicked "Log out") matched
+  nothing, so the user believed they were signed out while the
+  session lived on, refreshable, until it expired. The logout now
+  follows the token's successors to the session's current token and
+  revokes that, under the user's lock that rotation takes, so a logout
+  racing a refresh of the same token ends the session either way. Any
+  unexpired token the session has had, fewer than 1000 rotations behind
+  its current token, ends it. The `auth.logout` audit
+  event now names the session it ended (`target_type` session) and
+  carries `"via":"rotated"` when an old token ended it. A rotated
+  token past its own expiry, or the token of a session already ended,
+  still ends nothing and succeeds. A token 1000 or more rotations behind
+  its session's current token (a 10-minute access TTL with the default
+  7-day refresh TTL makes 1008 rotations), or one whose chain cannot be
+  followed (a successor row gone), answers 500 and ends nothing; revoke
+  the session instead (`DELETE {prefix}/auth/sessions/{id}`, or
+  `?scope=all`). Nothing to
+  change.
+
 - `auth.EnsurePermission` and `auth.EnsureGroup` return the one row to every concurrent first caller instead of failing the race's losers with a duplicate-key error. (`ensure-permission-group-concurrent-first-use`, behavior, [#463](https://github.com/gombit-dev/gombit/issues/463))
 
   Each checked for the row and inserted it when missing, so callers
