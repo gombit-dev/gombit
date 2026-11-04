@@ -49,7 +49,8 @@ default; gombit build --embed is the optional single-binary SPA path.`,
 			apiPrefix := "/api/v1"
 			adminURL := ""
 			cfg, cfgErr := LoadConfig()
-			if !cmd.Flags().Changed("http") {
+			httpFromFlag := cmd.Flags().Changed("http")
+			if !httpFromFlag {
 				if cfgErr != nil {
 					return fmt.Errorf("gombit dev: %w", cfgErr)
 				}
@@ -58,6 +59,13 @@ default; gombit build --embed is the optional single-binary SPA path.`,
 			if cfgErr == nil {
 				apiPrefix = dev.APIPrefixFromConfig(cfg)
 				adminURL = dev.AdminURLFromConfig(cfg, httpAddr)
+			}
+			// ValidateFlags labels the address --http, which is wrong for one
+			// read from configuration: name GOMBIT_HTTP_ADDR instead (#513).
+			if !httpFromFlag {
+				if err := dev.HTTPAddrProblem("GOMBIT_HTTP_ADDR", httpAddr); err != nil {
+					return fmt.Errorf("gombit %w", err)
+				}
 			}
 			if err := dev.ValidateFlags(httpAddr, frontendHost, frontendPort, poll, clientOut); err != nil {
 				return fmt.Errorf("gombit %w", err)

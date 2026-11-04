@@ -82,8 +82,9 @@ func TestRunRejectsAnUnlistenableHTTPAddrBeforeStartingAnything(t *testing.T) {
 			t.Fatalf("Run(--http %q) error = %q, want it to name the address it rejected", addr, err)
 		}
 		// Run cannot know whether its Options came from a flag or from config, so
-		// it names neither. `gombit dev` checks the flag itself through
-		// ValidateFlags first, and that error does name --http (#513 review).
+		// it names neither. `gombit dev` labels the address where it was read —
+		// --http when the flag is set, GOMBIT_HTTP_ADDR otherwise — before
+		// calling Run (#513 review).
 		if strings.Contains(err.Error(), "--http") {
 			t.Fatalf("Run(--http %q) error = %q, want no claim about a flag Run did not see", addr, err)
 		}

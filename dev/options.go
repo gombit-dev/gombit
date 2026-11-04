@@ -100,9 +100,10 @@ func (opts *Options) normalize() error {
 	// `--http 8080` means `:8080`, not a bare port the Go API cannot listen on.
 	httpAddr, err := parseListenAddr(opts.HTTPAddr)
 	if err != nil {
-		// normalize cannot tell a flag value from GOMBIT_HTTP_ADDR, so the error
-		// names the address rather than the route it came by. `gombit dev`
-		// checks the flag itself first, and that error does name --http.
+		// The source of this value is not known here: Options carries an
+		// address, not where it came from. `gombit dev` validates an address
+		// read from configuration as GOMBIT_HTTP_ADDR and one the flag sets as
+		// --http before calling Run, so this error is for callers of Run itself.
 		return fmt.Errorf("dev: API address %q is not usable: %w", opts.HTTPAddr, err)
 	}
 	if httpAddr != opts.HTTPAddr {
@@ -137,14 +138,25 @@ func (opts *Options) normalize() error {
 	return nil
 }
 
+// HTTPAddrProblem reports why addr cannot be the address the backend is
+// handed, naming source — where the value came from ("--http" or
+// GOMBIT_HTTP_ADDR) — so the error points at what the user wrote. A bare port
+// is accepted: normalize turns it into ":"+port before the child sees it.
+func HTTPAddrProblem(source, addr string) error {
+	if strings.TrimSpace(addr) == "" {
+		return fmt.Errorf("dev: %s must not be empty", source)
+	}
+	if _, err := parseListenAddr(addr); err != nil {
+		return fmt.Errorf("dev: %s: %w", source, err)
+	}
+	return nil
+}
+
 // ValidateFlags reports user-facing errors for `gombit dev` flag values
 // before defaults are applied.
 func ValidateFlags(httpAddr string, frontendHost string, frontendPort int, poll time.Duration, clientOut string) error {
-	if strings.TrimSpace(httpAddr) == "" {
-		return errors.New("dev: --http must not be empty")
-	}
-	if _, err := parseListenAddr(httpAddr); err != nil {
-		return fmt.Errorf("dev: --http: %w", err)
+	if err := HTTPAddrProblem("--http", httpAddr); err != nil {
+		return err
 	}
 	if strings.TrimSpace(frontendHost) == "" {
 		return errors.New("dev: --frontend-host must not be empty")

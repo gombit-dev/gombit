@@ -253,8 +253,11 @@ for "8080"` — and points at `GOMBIT_HTTP_ADDR` only as the place a value would
 still be read unrewritten: `gombit dev` can only fix the copy it hands the
 child, so `go run ./cmd/server`, `gombit doctor` and a deployed binary use what
 the config holds verbatim. A bare port passed as `--http 8080` needs no change
-at all, and the notice says no file, because dev cannot tell the two routes
-apart.
+at all, and the notice names no file: it reports the rewrite, not where the
+value came from. An address that
+cannot be listened on is refused before anything starts, named by where it was
+read: `--http` when the flag is set, `GOMBIT_HTTP_ADDR` when configuration
+supplied it.
 `--http` and the Vite proxy
 origin are written into the child environment
 (`GOMBIT_HTTP_ADDR`, `GOMBIT_DEV_BACKEND`, `GOMBIT_API_PREFIX`,
