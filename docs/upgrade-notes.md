@@ -442,6 +442,20 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   `built`, which describe the main module. A script that parsed the
   old app-version output reads a different string now.
 
+- `gombit generate` regenerates a resource whose model lost, renamed or retyped a field, or whose `*.gen.go` were deleted, instead of failing with a Go compile error from the stale generated files. (`generate-after-field-removal`, cli, [#467](https://github.com/gombit-dev/gombit/issues/467))
+
+  The loader compiles each resource package, and after a field was
+  removed, renamed or retyped the committed `*.gen.go` (or, once those
+  were deleted, a `hooks.go` using their types) no longer built against
+  the model: `gombit generate`, `--check` and `gombit upgrade contract`
+  failed with a compile error, and `--check` reported no drift. When the
+  package does not build as it is, the loader now runs once more with
+  every non-test file but the model's stubbed, so it reads the current
+  model and regenerates. A model that depends on another hand-written
+  file of its package still needs the package to build. Nothing to
+  change; a `hooks.go` that uses a removed field must be updated by hand
+  after regenerating, as before.
+
 - `auth.EnsurePermission` and `auth.EnsureGroup` return the one row to every concurrent first caller instead of failing the race's losers with a duplicate-key error. (`ensure-permission-group-concurrent-first-use`, behavior, [#463](https://github.com/gombit-dev/gombit/issues/463))
 
   Each checked for the row and inserted it when missing, so callers

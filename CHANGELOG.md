@@ -185,6 +185,16 @@ version.
 
 ### Fixed
 
+- `gombit generate` (and `--check`, and `gombit upgrade contract`)
+  regenerates a resource whose model lost, renamed or retyped a field, or
+  whose `*.gen.go` were deleted. The loader compiles the resource package,
+  and the stale `*.gen.go` (or a `hooks.go` using their types) no longer
+  built against the changed model, so it failed with a Go compile error,
+  `--check` reported that instead of drift, and only hand-editing the
+  generated files got out. When the package does not build as it is, the
+  loader now runs again with every file but the model's set aside, as
+  `make resource --force` does
+  ([#467](https://github.com/gombit-dev/gombit/issues/467)).
 - `auth.EnsurePermission` and `auth.EnsureGroup` no longer fail with
   "duplicated key not allowed" when several callers ensure the same new
   permission or group at once (replicas booting together, concurrent

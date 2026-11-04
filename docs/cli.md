@@ -563,6 +563,15 @@ makemigrations`), so a model change is reflected exactly.
   drift-checked; only the `*.gen.go` are compared by `--check`.
 - It fails closed on a package still using the legacy human-owned `handler.go`
   layout — [migrate it](migration-model-first-resources.md) first.
+- A model that lost, renamed or retyped a field regenerates too, as does a
+  resource whose `*.gen.go` were deleted. The package then no longer builds as
+  it is (the old `*.gen.go`, or a `hooks.go` using the generated types, refer
+  to what is gone), so when it does not, the program runs once more with
+  every file of the package but the model's set aside. A model that needs
+  another hand-written file of its package is read with the package as it is,
+  which must build. `--check` reports such a resource as stale, not as a build
+  failure. A `hooks.go` that uses a removed field is the developer's to update
+  once the `*.gen.go` are regenerated.
 
 `--check` is the drift gate: commit the `*.gen.go`, and a stale copy (model
 changed but not regenerated) fails the check. Regenerate with `gombit generate`.
