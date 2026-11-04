@@ -18,10 +18,20 @@ modified files and reminds you to add `openapi-fetch@0.17.0`. Schema types
 come from `openapi-typescript@7.13.0`.
 
 Path keys in `schema.ts` are normalized to D8 `/api/v1/...` even when the
-spec (and the live Huma API) uses another `GOMBIT_API_PREFIX`. The
-generator rewrites a temporary copy; it does **not** change the OpenAPI
-document on disk. Scaffolded pages call `client.GET("/api/v1/...")`;
-`createAppClient` maps that typed prefix to the live one on the wire.
+spec (and the live Huma API) uses another `GOMBIT_API_PREFIX`. The prefix the
+keys are rewritten from is the application's configuration: `--api-prefix`, or
+without it the `GOMBIT_API_PREFIX` of the directory the command runs in
+(`gombit dev` passes the prefix of the app it started; `gombit db check` and
+`gombit upgrade contract` take the same flag). When neither is set, the prefix
+is inferred from the document's paths, as it was before the prefix became an
+input — that inference is a guess no path list can settle (the routes of an app
+mounted at `/svc` with an `auth` group are also the routes of an app mounted at
+`/svc/auth`), so a document whose paths do not start under a configured prefix
+is refused rather than rewritten wrongly. The generator rewrites a temporary
+copy; it does **not** change the OpenAPI document on disk, and it re-encodes
+every number exactly as the document wrote it, so an `int64` bound survives.
+Scaffolded pages call `client.GET("/api/v1/...")`; `createAppClient` maps that
+typed prefix to the live one on the wire.
 
 `--dry-run` prints the file list without writing and applies the same
 overwrite rule as a real run: a user-owned file (no generated banner) is

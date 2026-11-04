@@ -47,18 +47,33 @@ func loadDotEnv() error {
 // for tooling that inspects a directory other than cwd — e.g. gombit contract
 // app --dir.
 func LoadFromDir(dir string) (Config, error) {
-	fileEnv, err := dotEnvValues(filepath.Join(dir, dotEnvFile))
+	lookup, err := LookupFromDir(dir)
 	if err != nil {
 		return Config{}, err
 	}
-	lookup := func(key string) (string, bool) {
+	return LoadFromEnv(lookup)
+}
+
+// LookupFromDir returns the environment lookup LoadFromDir reads configuration
+// through: the process environment first, then dir/.env. Tooling that needs to
+// tell a variable that is set from one that merely has a default reads it
+// through this lookup rather than a loaded Config, which cannot tell the two
+// apart and would let an unrelated variable that fails to parse change the
+// answer. A .env that exists but cannot be read is an error, as it is for
+// LoadFromDir: answering from half the file could turn a configured variable
+// back into an unset one.
+func LookupFromDir(dir string) (EnvLookup, error) {
+	fileEnv, err := dotEnvValues(filepath.Join(dir, dotEnvFile))
+	if err != nil {
+		return nil, err
+	}
+	return func(key string) (string, bool) {
 		if v, ok := os.LookupEnv(key); ok {
 			return v, true
 		}
 		v, ok := fileEnv[key]
 		return v, ok
-	}
-	return LoadFromEnv(lookup)
+	}, nil
 }
 
 // dotEnvValues parses KEY=VALUE pairs from the .env file at path, first

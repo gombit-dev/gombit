@@ -305,3 +305,36 @@ func TestDotEnvLongLine(t *testing.T) {
 		t.Fatalf("DotEnvKeys = %s", got)
 	}
 }
+
+// LookupFromDir is the lookup LoadFromDir reads through, so a caller that must
+// tell a variable that is set from one that only has a default sees the
+// configuration's own precedence: the process environment, then the project's
+// .env (#506).
+func TestLookupFromDirReadsLikeLoadFromDir(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, dotEnvFile), []byte("GOMBIT_APP_NAME=fromdotenv\n"), 0o600); err != nil {
+		t.Fatalf("write .env: %v", err)
+	}
+	_ = os.Unsetenv(envAppName)
+	t.Cleanup(func() { _ = os.Unsetenv(envAppName) })
+
+	lookup, err := LookupFromDir(dir)
+	if err != nil {
+		t.Fatalf("LookupFromDir(%s): %v", dir, err)
+	}
+	if got, ok := lookup(envAppName); !ok || got != "fromdotenv" {
+		t.Fatalf("LookupFromDir(%s) = (%q, %v), want (fromdotenv, true)", envAppName, got, ok)
+	}
+	if _, ok := lookup("GOMBIT_NOT_A_VARIABLE"); ok {
+		t.Fatal("LookupFromDir found a variable neither source sets")
+	}
+
+	t.Setenv(envAppName, "fromenv")
+	lookup, err = LookupFromDir(dir)
+	if err != nil {
+		t.Fatalf("LookupFromDir(%s): %v", dir, err)
+	}
+	if got, ok := lookup(envAppName); !ok || got != "fromenv" {
+		t.Fatalf("LookupFromDir(%s) = (%q, %v), want the process environment to win", envAppName, got, ok)
+	}
+}

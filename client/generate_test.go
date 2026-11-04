@@ -3,6 +3,7 @@ package client
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -114,6 +115,111 @@ func TestGenerateNormalizesCustomPrefixPathKeys(t *testing.T) {
 	}
 
 	typecheckGenerated(t, workDir, outDir)
+}
+
+// The application's own prefix, not a reading of its paths, is what decides
+// the typed keys (#506). This app's routes all share one first segment, so no
+// path list could have told /svc from /svc/auth.
+func TestGenerateNormalizesConfiguredPrefixPathKeys(t *testing.T) {
+	requireNode(t)
+
+	workDir := t.TempDir()
+	specPath := filepath.Join(workDir, "openapi.json")
+	writeFile(t, specPath, authOnlySpec(t, "/svc"))
+
+	outDir := filepath.Join(workDir, "frontend", "src", "api", "generated")
+	stderr := new(bytes.Buffer)
+	err := Generate(context.Background(), Options{
+		WorkDir:   workDir,
+		SpecPath:  specPath,
+		OutDir:    outDir,
+		APIPrefix: "/svc",
+		Stdout:    ioDiscard{},
+		Stderr:    stderr,
+	})
+	if err != nil {
+		t.Fatalf("Generate() error = %v; stderr=%s", err, stderr.String())
+	}
+
+	schema := readFile(t, filepath.Join(outDir, "schema.ts"))
+	for _, want := range []string{`"/api/v1/auth/login"`, `"/api/v1/auth/me"`} {
+		if !strings.Contains(schema, want) {
+			t.Fatalf("schema.ts missing the typed key %s; head=%s", want, truncate(schema, 400))
+		}
+	}
+	if strings.Contains(schema, "/svc/") {
+		t.Fatalf("schema.ts still has the live prefix: %s", truncate(schema, 400))
+	}
+}
+
+// A configured prefix the document does not use is refused before the
+// generator runs and before anything is written: the alternative is a client
+// whose keys belong to no route of the app (#506).
+func TestGenerateRefusesAConfiguredPrefixTheDocumentDoesNotUse(t *testing.T) {
+	workDir := t.TempDir()
+	specPath := filepath.Join(workDir, "openapi.json")
+	writeFile(t, specPath, authOnlySpec(t, "/svc"))
+	outDir := filepath.Join(workDir, "out")
+
+	err := Generate(context.Background(), Options{
+		WorkDir:   workDir,
+		SpecPath:  specPath,
+		OutDir:    outDir,
+		APIPrefix: "/other",
+		Stdout:    ioDiscard{},
+		Stderr:    ioDiscard{},
+	})
+	if err == nil {
+		t.Fatal("Generate() error = nil, want the configured prefix reported")
+	}
+	if !strings.Contains(err.Error(), `matches no path`) {
+		t.Fatalf("Generate() error = %v, want it to report the prefix matching no path", err)
+	}
+	if _, statErr := os.Stat(outDir); !os.IsNotExist(statErr) {
+		t.Fatalf("Generate() wrote %s for a document it refused: %v", outDir, statErr)
+	}
+}
+
+// authOnlySpec is an OpenAPI document whose operations all sit under one group
+// of one prefix, the shape no path list can resolve (#506). Its int64 maximum is
+// the largest int64, so the spec rewrite the generator runs has a number a
+// float64 round trip could not keep; openapi-typescript emits no bounds at all
+// (`id?: number`), so client/paths_test.go is where that fidelity is asserted.
+func authOnlySpec(t *testing.T, prefix string) string {
+	t.Helper()
+	spec := `{
+  "openapi": "3.1.0",
+  "info": {"title": "auth only", "version": "0.0.0"},
+  "paths": {
+    "` + prefix + `/auth/login": {
+      "post": {"operationId": "login", "responses": {"204": {"description": "no content"}}}
+    },
+    "` + prefix + `/auth/me": {
+      "get": {
+        "operationId": "me",
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {"type": "integer", "format": "int64", "maximum": 9223372036854775807}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}`
+	if !json.Valid([]byte(spec)) {
+		t.Fatalf("authOnlySpec(%q) is not valid JSON: %s", prefix, spec)
+	}
+	return spec
 }
 
 func TestGenerateDryRunDoesNotWrite(t *testing.T) {

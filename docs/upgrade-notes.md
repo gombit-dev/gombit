@@ -213,6 +213,28 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   `config.DotEnvKeys` reports to this tooling's own configuration
   analysis.
 
+- `gombit client generate` rewrites OpenAPI path keys from the application's `GOMBIT_API_PREFIX` rather than a prefix guessed from its paths, so an app whose routes share a first segment gets a client whose keys are its routes; numbers in the document reach `schema.ts` as written. (`client-path-keys-rewritten-from-the-configured-prefix`, client, [#506](https://github.com/gombit-dev/gombit/issues/506))
+
+  The generator read the live prefix off the document, as the longest
+  prefix every path shares, so an app mounted at `/svc` whose routes
+  are all `auth` ones (`/svc/auth/login`, `/svc/auth/me`) was taken for
+  an app mounted at `/svc/auth`: the keys came out `/api/v1/login`,
+  which the scaffold's `rewriteAPIRequest` puts on the wire as
+  `/svc/login`, a route that does not exist. No rule over the paths can
+  tell the two apps apart, so the prefix is an input now —
+  `--api-prefix`, else the `GOMBIT_API_PREFIX` of the application the
+  command runs in, and the prefix `gombit dev` started with for the
+  client it regenerates. `gombit db check` and `gombit upgrade
+  contract` take the same flag. An app that sets neither still gets the
+  old inference, so documents it handled correctly keep working. A
+  document with no path under a configured prefix is refused instead
+  of rewritten wrongly. Regenerate with `gombit client generate`, or
+  `gombit upgrade contract --write`.
+  Separately, the rewrite stopped re-encoding the document through
+  `float64`, which moved an int64 above 2^53 to a neighbouring value:
+  `"maximum": 9223372036854775807` reaches the generated types as
+  written now, as it always did when no rewrite was needed.
+
 ### Informational
 
 - A refresh that joins another request's rotation of the same token no longer fails with that request's `context canceled` (a 500) when its client disconnects: the shared rotation runs detached from every caller's cancellation and deadline, its transaction bounded by a 10-second timeout. (`refresh-follower-not-cancelled-by-leader`, behavior, [#462](https://github.com/gombit-dev/gombit/issues/462))

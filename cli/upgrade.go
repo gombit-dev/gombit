@@ -555,9 +555,17 @@ is always unchecked); --strict fails on it too. A CI gate runs it with
 			out, _ := flags.GetString("out")
 			write, _ := flags.GetBool("write")
 			npx, _ := flags.GetString("npx")
+			apiPrefix, _ := flags.GetString("api-prefix")
 			asJSON, _ := flags.GetBool("json")
 			strict, _ := flags.GetBool("strict")
-			opts := contractcheck.Options{SpecPath: spec, OutDir: out, Write: write, NPXBinary: npx, Stderr: stderr}
+			prefix, err := liveAPIPrefix(apiPrefix, dir)
+			if err != nil {
+				return fmt.Errorf("gombit upgrade contract: %w", err)
+			}
+			opts := contractcheck.Options{
+				SpecPath: spec, OutDir: out, Write: write, NPXBinary: npx, Stderr: stderr,
+				APIPrefix: prefix,
+			}
 			if rawURL != "" {
 				live, err := fetchOpenAPI(cmd.Context(), rawURL)
 				if err != nil {
@@ -593,6 +601,7 @@ is always unchecked); --strict fails on it too. A CI gate runs it with
 	cmd.Flags().String("url", "", "the running app's OpenAPI document (e.g. http://127.0.0.1:8080/openapi.json), to check the committed one and generate the client from")
 	cmd.Flags().String("spec", client.DefaultSpecPath, "committed OpenAPI document, relative to --dir")
 	cmd.Flags().String("out", client.DefaultOutDir, "generated TypeScript client directory, relative to --dir")
+	cmd.Flags().String("api-prefix", "", "live API prefix of the --url document (default GOMBIT_API_PREFIX of --dir)")
 	cmd.Flags().Bool("write", false, "regenerate stale artifacts (generator-owned files only)")
 	cmd.Flags().String("npx", "npx", "npx binary used to run openapi-typescript")
 	cmd.Flags().Bool("json", false, "print the report as JSON")
