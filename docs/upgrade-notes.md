@@ -213,6 +213,46 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   `config.DotEnvKeys` reports to this tooling's own configuration
   analysis.
 
+- **Breaking.** `GOMBIT_API_PREFIX` and `Config.API.Prefix` have one canonical form: `Load` drops a trailing `/` from the environment value, and `Validate` refuses a prefix that is not already canonical — one `Load` would have rewritten, or one whose OpenAPI document its own routes cannot answer. (`api-prefix-canonical-form`, config, [#501](https://github.com/gombit-dev/gombit/issues/501))
+
+  - Configuration: `GOMBIT_API_PREFIX`: some values are now refused.
+
+  A prefix of `/svc/` served `/svc/widgets` but listed
+  `/svc//widgets` in the OpenAPI document, so every client generated
+  from it asked for a URL that 404s. `Load` normalises a trailing
+  slash away, so `GOMBIT_API_PREFIX=/svc/` still starts the app and
+  serves what it always served. Trailing slashes are the only thing
+  `Load` rewrites: `main` checked a prefix for no more than a
+  leading `/`, so a value the rules below refuse started an app and
+  now fails `Load` from the environment — `GOMBIT_API_PREFIX=/api/v 1`
+  is one. A prefix set in code is never rewritten, so
+  `Config.API.Prefix = "/svc/"` now fails `Validate` with a field error
+  naming `API.Prefix`; write it without the trailing slash.
+  What still works is what an IRI path segment holds: letters, digits,
+  `- . _ ~`, the sub-delimiters `! $ & ' ( ) + , ; =`, `@`, and
+  non-ASCII in valid UTF-8 — `/api/v1+beta`, `/@acme/api`, `/api;v=1`
+  and `/café` each register, advertise and answer the same path key.
+  `Validate` refuses each prefix below; for all but the last, the
+  document and the routes measurably disagree. `%`, `?`, `#` and
+  control characters, which make the advertised path one no client
+  can send as it is written; Gin's `:` and `{name}` parameters and
+  its `*` catch-all, whose routes answer paths the document never
+  lists (a `*` or `\` mid-path panics at registration); a `.` or
+  `..` segment, which Gin's `path.Join`
+  collapses, so the app registers the collapsed route — `/api/../v1`
+  plus `/widgets` answers `/v1/widgets` — while the document
+  advertises the uncollapsed path it was given, and that advertised
+  path is the one with no route; an empty segment (`/svc//api`), the
+  double slash being what makes a prefix non-canonical; and bytes that
+  are not valid UTF-8 (`/api/\xff`), which encoding/json replaces with
+  U+FFFD while writing the document, so the advertised key 404s while
+  the route answers 200. Space and the other US-ASCII characters RFC
+  3986 keeps out of a URI (`" < > [ ] | ^ \``) are refused on purpose,
+  not because anything was measured failing with them. RFC 3986
+  excludes non-ASCII too, but the accepted set is RFC 3987's IRI path
+  segment (`ipchar`), which admits it; a client sends it percent-encoded
+  and Gin matches the route once it is decoded.
+
 ### Informational
 
 - A refresh that joins another request's rotation of the same token no longer fails with that request's `context canceled` (a 500) when its client disconnects: the shared rotation runs detached from every caller's cancellation and deadline, its transaction bounded by a 10-second timeout. (`refresh-follower-not-cancelled-by-leader`, behavior, [#462](https://github.com/gombit-dev/gombit/issues/462))
