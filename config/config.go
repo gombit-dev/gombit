@@ -523,7 +523,7 @@ func (c AuthConfig) EffectiveCookieSameSite() CookieSameSite {
 
 const (
 	exampleJWTSecret = "dev-only-example-jwt-secret-not-for-prod"
-	exampleStorageURLSecret = "dev-only-storage-example-url-signing-secret"
+	exampleStorageURLSecret = "dev-only-storage-example-url-signing-secret" // #nosec G101 -- intentionally public example value, explicitly rejected in production
 )
 
 // IsInsecureJWTSecret reports publicly documented example keys and

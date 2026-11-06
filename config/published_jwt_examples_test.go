@@ -108,7 +108,7 @@ func TestProductionRejectsPublishedSigningExamples(t *testing.T) {
 		if err != nil { t.Fatalf("scan %s: %v", root, err) }
 	}
 	for _, p := range []string{"README.md", "SECURITY.md", "CONTRIBUTING.md", "AGENTS.md"} {
-		b, err := os.ReadFile("../" + p)
+		b, err := fs.ReadFile(os.DirFS(".."), p)
 		if errors.Is(err, fs.ErrNotExist) { continue }
 		if err != nil { t.Fatalf("read %s: %v", p, err) }
 		check(p, b)
