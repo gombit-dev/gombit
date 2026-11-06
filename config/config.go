@@ -521,15 +521,26 @@ func (c AuthConfig) EffectiveCookieSameSite() CookieSameSite {
 	return c.CookieSameSite
 }
 
-// IsInsecureJWTSecret reports whether secret is a well-known scaffold
-// placeholder that must never be used in production.
+const (
+	exampleJWTSecret = "dev-only-example-jwt-secret-not-for-prod"
+	exampleStorageURLSecret = "dev-only-storage-example-url-signing-secret"
+)
+
+// IsInsecureJWTSecret reports publicly documented example keys and
+// scaffold placeholders unsuitable for production.
 func IsInsecureJWTSecret(secret string) bool {
 	switch strings.TrimSpace(secret) {
-	case DevelopmentJWTPlaceholder, historicalDevelopmentJWTPlaceholder, "dev-only-example-jwt-secret-not-for-prod":
+	case DevelopmentJWTPlaceholder, historicalDevelopmentJWTPlaceholder, exampleJWTSecret:
 		return true
 	default:
 		return false
 	}
+}
+
+// IsInsecureStorageURLSecret rejects the documented local-storage example
+// HMAC key in production. It is a publicly known value, not a private key.
+func IsInsecureStorageURLSecret(secret string) bool {
+	return strings.TrimSpace(secret) == exampleStorageURLSecret
 }
 
 // EnvLookup reads an environment variable by name.
@@ -838,6 +849,12 @@ func (c Config) Validate() error {
 		validateRedisConfig(&errs, c.Environment, c.Cache.Redis)
 	}
 	validateStorageConfig(&errs, c.Storage)
+	if c.Environment == EnvironmentProduction && IsInsecureStorageURLSecret(c.Storage.URLSecret) {
+		errs = append(errs, FieldError{
+			Field: "Storage.URLSecret", Env: envStorageURLSecret,
+			Message: "must not use a publicly known example signing key in production",
+		})
+	}
 	validateLoggingConfig(&errs, c.Logging)
 	validateAuthConfig(&errs, c.Environment, c.Auth)
 
@@ -980,7 +997,7 @@ func validateAuthConfig(errs *FieldErrors, env Environment, cfg AuthConfig) {
 			*errs = append(*errs, FieldError{
 				Field:   "Auth.JWTSecret",
 				Env:     envJWTSecret,
-				Message: "must not use the generated-app development placeholder in production",
+				Message: "must not use a publicly known example/placeholder key in production",
 			})
 		case len(cfg.JWTSecret) < MinProductionJWTSecretLength:
 			*errs = append(*errs, FieldError{

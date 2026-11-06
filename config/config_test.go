@@ -702,7 +702,7 @@ func TestValidateAcceptsLongJWTSecretInProduction(t *testing.T) {
 }
 
 func TestValidateRejectsDevelopmentPlaceholderInProduction(t *testing.T) {
-	for _, secret := range []string{DevelopmentJWTPlaceholder, historicalDevelopmentJWTPlaceholder, "dev-only-example-jwt-secret-not-for-prod"} {
+	for _, secret := range []string{DevelopmentJWTPlaceholder, historicalDevelopmentJWTPlaceholder, exampleJWTSecret} {
 		t.Run(secret, func(t *testing.T) {
 			cfg := DefaultFor(EnvironmentProduction)
 			cfg.Auth.JWTSecret = secret
@@ -737,7 +737,7 @@ func TestValidateRejectsDevelopmentPlaceholderInProduction(t *testing.T) {
 func TestLoadFromEnvRejectsPublishedExampleJWTKeyInProduction(t *testing.T) {
 	_, err := LoadFromEnv(mapLookup(map[string]string{
 		envEnv:       string(EnvironmentProduction),
-		envJWTSecret: "dev-only-example-jwt-secret-not-for-prod",
+		envJWTSecret: exampleJWTSecret,
 	}))
 	if err == nil {
 		t.Fatal("LoadFromEnv accepted a published development JWT key in production")
@@ -784,6 +784,53 @@ func TestLoadFromEnvRejectsShortJWTSecretInProduction(t *testing.T) {
 	if !found {
 		t.Fatalf("LoadFromEnv() field errors = %#v, want Auth.JWTSecret", []FieldError(fieldErrors))
 	}
+}
+
+
+func TestPublishedStorageSigningSecretIsProductionOnlyRejected(t *testing.T) {
+	for _, tc := range []struct{ name string; env Environment; rejected bool }{
+		{"development", EnvironmentDevelopment, false},
+		{"production", EnvironmentProduction, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := DefaultFor(tc.env)
+			cfg.Auth.JWTSecret = "unique-private-jwt-key-0123456789abcdef"
+			cfg.Storage.URLSecret = exampleStorageURLSecret
+			err := cfg.Validate()
+			if !tc.rejected {
+				if err != nil { t.Fatalf("development example rejected: %v", err) }
+				return
+			}
+			var fieldErrors FieldErrors
+			if !errors.As(err, &fieldErrors) { t.Fatalf("want FieldErrors, got %T", err) }
+			seen := false
+			for _, f := range fieldErrors {
+				if f.Field == "Storage.URLSecret" {
+					seen = true
+					if f.Value != "" { t.Fatal("storage secret leaked in FieldError.Value") }
+				}
+			}
+			if !seen { t.Fatalf("storage signing key not rejected: %v", err) }
+			if strings.Contains(err.Error(), exampleStorageURLSecret) { t.Fatal("storage signing secret leaked in error") }
+		})
+	}
+}
+
+func TestLoadFromEnvRejectsPublishedStorageSigningSecret(t *testing.T) {
+	_, err := LoadFromEnv(mapLookup(map[string]string{
+		envEnv: string(EnvironmentProduction),
+		envJWTSecret: "unique-private-jwt-key-0123456789abcdef",
+		envStorageURLSecret: exampleStorageURLSecret,
+	}))
+	var fields FieldErrors
+	if !errors.As(err, &fields) { t.Fatalf("want FieldErrors, got %T", err) }
+	for _, f := range fields {
+		if f.Field == "Storage.URLSecret" {
+			if f.Value != "" { t.Fatal("storage secret leaked in FieldError") }
+			return
+		}
+	}
+	t.Fatalf("LoadFromEnv did not reject public storage signing secret: %v", err)
 }
 
 func TestAuthEnabled(t *testing.T) {

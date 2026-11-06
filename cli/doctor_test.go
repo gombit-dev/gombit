@@ -18,12 +18,25 @@ func TestCheckInsecureRejectsPublishedExampleJWTKey(t *testing.T) {
 	if check.Status != doctorStatusFail {
 		t.Fatalf("checkInsecure status = %q, want %q", check.Status, doctorStatusFail)
 	}
-	if !strings.Contains(check.Message, "development placeholder") {
-		t.Fatalf("checkInsecure message = %q, want placeholder warning", check.Message)
+	if !strings.Contains(check.Message, "publicly known example") {
+		t.Fatalf("checkInsecure message = %q, want publicly known example warning", check.Message)
 	}
 	if strings.Contains(check.Message, cfg.Auth.JWTSecret) {
 		t.Fatal("checkInsecure must never echo public example signing key")
 	}
+}
+
+
+func TestCheckInsecureRejectsPublishedStorageSigningSecret(t *testing.T) {
+	cfg := config.DefaultFor(config.EnvironmentProduction)
+	cfg.Auth.JWTSecret = "unique-private-jwt-key-0123456789abcdef"
+	cfg.Storage.URLSecret = "dev-only-storage-example-url-signing-secret"
+	cfg.Database.Driver = config.DatabaseDriverPostgres
+	check := checkInsecure(cfg)
+	if check.Status != doctorStatusFail || !strings.Contains(check.Message, "storage URL secret") {
+		t.Fatalf("checkInsecure = %+v, want storage signing warning", check)
+	}
+	if strings.Contains(check.Message, cfg.Storage.URLSecret) { t.Fatal("doctor exposed storage signing secret") }
 }
 
 func TestCheckInsecureFlagsInsecureCookieInProduction(t *testing.T) {

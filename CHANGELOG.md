@@ -185,11 +185,11 @@ version.
 
 ### Fixed
 
-- **Breaking (security):** production configuration rejects the
-  publicly documented example JWT signing key, even though it clears
-  the 32-character length floor. If a deployment copied that key,
-  rotate to a unique random secret *before* upgrading; existing tokens
-  and signed cookies will no longer verify after rotation
+- **Breaking (security):** production rejects publicly documented example
+  JWT and storage URL signing keys, even when they clear length limits.
+  Rotate any copied signing key to a unique private value before upgrading.
+  Rotated JWT keys invalidate existing tokens and signed cookies; rotated
+  storage URL keys invalidate previously signed storage links
   ([#504](https://github.com/gombit-dev/gombit/issues/504)).
 
 - `auth.EnsurePermission` and `auth.EnsureGroup` no longer fail with

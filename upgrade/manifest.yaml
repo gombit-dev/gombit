@@ -513,16 +513,16 @@ releases:
         kind: manual
         breaking: true
         area: security
-        summary: "Production refuses the publicly documented example JWT signing secret."
+        summary: "Production refuses publicly documented JWT and storage URL signing keys."
         details: |
-          If you copied the example signing secret into a deployed app,
-          rotate to a securely generated private signing secret of at
-          least 32 characters before upgrading. Existing access tokens
-          and signed cookies will become invalid after rotation.
-          The example secret remains valid only for local development.
+          If you copied a published JWT or storage URL signing key into a
+          deployed app, rotate it to a unique private key before upgrading.
+          Existing tokens and signed cookies or previously signed storage
+          URLs will no longer validate. Example keys remain development-only.
         refs: [504]
         config:
           - {var: GOMBIT_JWT_SECRET, change: refused, environment: production}
+          - {var: GOMBIT_STORAGE_URL_SECRET, change: refused, environment: production}
 
       - id: refresh-follower-not-cancelled-by-leader
         kind: informational
