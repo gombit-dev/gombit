@@ -4,6 +4,7 @@ package types
 
 import (
 	"flag"
+	"strings"
 	"testing"
 	"time"
 
@@ -67,5 +68,54 @@ func TestDatePostgresRoundTrip(t *testing.T) {
 	}
 	if err := db.Create(&dateRoundTrip{}).Error; err == nil {
 		t.Fatal("zero date inserted")
+	}
+}
+
+// TestDateDriverLocationPostgres: pgx returns a date as UTC midnight whatever
+// the session's time zone, so PostgreSQL was not affected by #478; the round
+// trips keep it that way.
+func TestDateDriverLocationPostgres(t *testing.T) {
+	if *postgresDSN == "" {
+		t.Skip("set -types.postgres-dsn to run the Postgres date round trips")
+	}
+	for _, c := range []struct{ name, timezone string }{
+		{"no timezone", ""},
+		{"timezone west of UTC", "America/New_York"},
+		{"timezone east of UTC", "Asia/Tokyo"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dsn := *postgresDSN
+			if c.timezone != "" {
+				dsn = withPostgresTimezone(dsn, c.timezone)
+			}
+			db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if sqlDB, err := db.DB(); err == nil {
+				t.Cleanup(func() { _ = sqlDB.Close() })
+			}
+			if c.timezone != "" {
+				var tz string
+				if err := db.Raw("SHOW TimeZone").Scan(&tz).Error; err != nil || tz != c.timezone {
+					t.Fatalf("session TimeZone = %q (%v); want %q", tz, err, c.timezone)
+				}
+			}
+			checkDateLocation(t, db, dateLocationDays, "%s::text", func(day string) string { return day })
+		})
+	}
+}
+
+// withPostgresTimezone sets the session time zone on a URL or keyword DSN.
+// The zone name stays unescaped: gorm.io/driver/postgres reads it from the
+// DSN's text.
+func withPostgresTimezone(dsn, zone string) string {
+	switch {
+	case !strings.Contains(dsn, "://"):
+		return dsn + " timezone=" + zone
+	case strings.Contains(dsn, "?"):
+		return dsn + "&timezone=" + zone
+	default:
+		return dsn + "?timezone=" + zone
 	}
 }
