@@ -336,10 +336,13 @@ func checkInsecure(cfg config.Config) doctorCheck {
 	if cfg.Environment == config.EnvironmentProduction && cfg.Auth.JWTSecret != "" {
 		switch {
 		case config.IsInsecureJWTSecret(cfg.Auth.JWTSecret):
-			issues = append(issues, "production JWT secret is the generated-app development placeholder")
+			issues = append(issues, "production JWT secret is a publicly known example or development placeholder")
 		case len(cfg.Auth.JWTSecret) < config.MinProductionJWTSecretLength:
 			issues = append(issues, fmt.Sprintf("production JWT secret is shorter than %d characters", config.MinProductionJWTSecretLength))
 		}
+	}
+	if cfg.Environment == config.EnvironmentProduction && config.IsInsecureStorageURLSecret(cfg.Storage.URLSecret) {
+		issues = append(issues, "production storage URL secret is a publicly known example key")
 	}
 	if cfg.Database.Driver == config.DatabaseDriverSQLite {
 		if err := sqliteDSNWritable(cfg.Database.DSN); err != nil {
