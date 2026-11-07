@@ -14,8 +14,10 @@ import (
 // These assignment shapes cover environment files, shell, YAML, Go fields
 // and raw-string literals. Nonliteral expressions cannot be statically
 // evaluated; any apparent long public signing key still fails the guard.
-const publishedSigningAssignmentPattern = "(?m)\\b(GOMBIT_[A-Z0-9_]*_SECRET|(?:[A-Za-z_][A-Za-z0-9_]*\\.)*(?:JWTSecret|URLSecret)|devURLSecret)\\s*[:=]\\s*(?:'([^'\\r\\n]*)'|\"([^\"\\r\\n]*)\"|`([^`\\r\\n]*)`|([^'\"`\\s\\\\,;}#]+))"
+const publishedSigningAssignmentPattern = "(?m)\\b(GOMBIT_[A-Z0-9_]*_SECRET|(?:[A-Za-z_][A-Za-z0-9_]*\\.)*(?:JWTSecret|URLSecret)|devURLSecret)[\"']?\\s*[:=]\\s*(?:'([^'\\r\\n]*)'|\"([^\"\\r\\n]*)\"|`([^`\\r\\n]*)`|([^'\"`\\s\\\\,;}#]+))"
 var publishedSigningAssignment = regexp.MustCompile(publishedSigningAssignmentPattern)
+
+var publishedKubernetesEnvAssignment = regexp.MustCompile(`(?m)^[ \t]*-[ \t]*name:[ \t]*["']?(GOMBIT_[A-Z0-9_]*_SECRET)["']?[ \t]*\r?\n[ \t]*value:[ \t]*["']?([^"'\r\n#]+)["']?[ \t]*(?:#.*)?$`)
 
 type publishedSigningAssignmentMatch struct { name, secret string }
 
@@ -25,6 +27,11 @@ func publishedSigningAssignments(source string) []publishedSigningAssignmentMatc
 		secret := ""
 		for _, part := range m[2:] { if part != "" { secret = part; break } }
 		if secret != "" { out = append(out, publishedSigningAssignmentMatch{name: m[1], secret: secret}) }
+	}
+	for _, m := range publishedKubernetesEnvAssignment.FindAllStringSubmatch(source, -1) {
+		if secret := strings.TrimSpace(m[2]); secret != "" {
+			out = append(out, publishedSigningAssignmentMatch{name: m[1], secret: secret})
+		}
 	}
 	return out
 }
@@ -42,11 +49,29 @@ func TestPublicSigningAssignmentParserRecognizesCommonCopyPasteSyntax(t *testing
 		{"cfg.Auth.JWTSecret = \"published-go-assignment-value-012345678901\"", "cfg.Auth.JWTSecret", "published-go-assignment-value-012345678901"},
 		{"GOMBIT_STORAGE_URL_SECRET: \"storage-url-signing-key-0123456789012345\"", "GOMBIT_STORAGE_URL_SECRET", "storage-url-signing-key-0123456789012345"},
 		{"const devURLSecret = \"dev-only-storage-example-url-signing-secret\"", "devURLSecret", "dev-only-storage-example-url-signing-secret"},
+		{`{"GOMBIT_JWT_SECRET": "published-json-key-0123456789012345678901234"}`, "GOMBIT_JWT_SECRET", "published-json-key-0123456789012345678901234"},
+		{`'GOMBIT_JWT_SECRET': "published-yaml-key-0123456789012345678901234"`, "GOMBIT_JWT_SECRET", "published-yaml-key-0123456789012345678901234"},
+		{`map[string]string{"GOMBIT_JWT_SECRET": "published-map-key-0123456789012345678901234"}`, "GOMBIT_JWT_SECRET", "published-map-key-0123456789012345678901234"},
+		{"env:\n  - name: GOMBIT_JWT_SECRET\n    value: \"published-kubernetes-key-01234567890123456\"", "GOMBIT_JWT_SECRET", "published-kubernetes-key-01234567890123456"},
 	}
 	for i, tc := range cases {
 		found := publishedSigningAssignments(tc.line)
 		if len(found) != 1 || found[0].name != tc.name || found[0].secret != tc.want {
 			t.Errorf("case %d: found %#v, want %q / %q", i, found, tc.name, tc.want)
+		}
+	}
+}
+
+func TestPublicSigningAssignmentParserIgnoresUnrelatedAndNonliteralInputs(t *testing.T) {
+	cases := []string{
+		`{"UNRELATED_NAME": "unrelated-long-value-0123456789012345"}`,
+		"env:\n  - name: SOME_OTHER_VARIABLE\n    value: \"unrelated-long-value-0123456789012345\"",
+		"env:\n  - name: GOMBIT_JWT_SECRET\n    valueFrom:\n      secretKeyRef: {name: jwt-config, key: signing-key}",
+		"GOMBIT_JWT_SECRET=",
+	}
+	for _, source := range cases {
+		if matches := publishedSigningAssignments(source); len(matches) != 0 {
+			t.Errorf("unexpected public signing assignment in %q: %#v", source, matches)
 		}
 	}
 }
