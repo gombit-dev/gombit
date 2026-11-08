@@ -185,6 +185,13 @@ version.
 
 ### Fixed
 
+- **Breaking (security):** production rejects publicly documented example
+  JWT and storage URL signing keys, even when they clear length limits.
+  Rotate any copied signing key to a unique private value before upgrading.
+  Rotated JWT keys invalidate existing tokens and signed cookies; rotated
+  storage URL keys invalidate previously signed storage links
+  ([#504](https://github.com/gombit-dev/gombit/issues/504)).
+
 - `auth.EnsurePermission` and `auth.EnsureGroup` no longer fail with
   "duplicated key not allowed" when several callers ensure the same new
   permission or group at once (replicas booting together, concurrent

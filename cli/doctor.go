@@ -53,8 +53,8 @@ Checks:
   insecure     existing production/docs and unwritable SQLite path issues
 
 Network checks use a short timeout so CI cannot hang. Appendix C flags a
-production JWT secret shorter than 32 characters or equal to the
-generated-app development placeholder, and a cookie-mode auth without
+production JWT secret shorter than 32 characters or matching a publicly
+known example or development placeholder, and a cookie-mode auth without
 CookieSecure=true (config.Load rejects both; the "config" check below
 fails loud when either is set).`,
 		Args: cobra.NoArgs,
@@ -336,10 +336,13 @@ func checkInsecure(cfg config.Config) doctorCheck {
 	if cfg.Environment == config.EnvironmentProduction && cfg.Auth.JWTSecret != "" {
 		switch {
 		case config.IsInsecureJWTSecret(cfg.Auth.JWTSecret):
-			issues = append(issues, "production JWT secret is the generated-app development placeholder")
+			issues = append(issues, "production JWT secret is a publicly known example or development placeholder")
 		case len(cfg.Auth.JWTSecret) < config.MinProductionJWTSecretLength:
 			issues = append(issues, fmt.Sprintf("production JWT secret is shorter than %d characters", config.MinProductionJWTSecretLength))
 		}
+	}
+	if cfg.Environment == config.EnvironmentProduction && config.IsInsecureStorageURLSecret(cfg.Storage.URLSecret) {
+		issues = append(issues, "production storage URL secret is a publicly known example key")
 	}
 	if cfg.Database.Driver == config.DatabaseDriverSQLite {
 		if err := sqliteDSNWritable(cfg.Database.DSN); err != nil {

@@ -12,6 +12,16 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 ### Manual: action required
 
+- **Breaking.** Production refuses publicly documented JWT and storage URL signing keys. (`reject-published-example-jwt-secret`, security, [#504](https://github.com/gombit-dev/gombit/issues/504))
+
+  - Configuration: `GOMBIT_JWT_SECRET`: some values are now refused in production.
+  - Configuration: `GOMBIT_STORAGE_URL_SECRET`: some values are now refused in production.
+
+  If you copied a published JWT or storage URL signing key into a
+  deployed app, rotate it to a unique private key before upgrading.
+  Existing tokens and signed cookies or previously signed storage
+  URLs will no longer validate. Example keys remain development-only.
+
 - **Breaking.** `gombit createsuperuser`, `auth.Service.CreateSuperuser` and `Register` refuse an email that is not a bare address and a password shorter than 8 characters (or over 72 bytes). (`createsuperuser-login-rules`, api, [#461](https://github.com/gombit-dev/gombit/issues/461))
 
   Two rules, for two reasons. The email must be what `POST
