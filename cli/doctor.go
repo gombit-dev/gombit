@@ -53,8 +53,8 @@ Checks:
   insecure     existing production/docs and unwritable SQLite path issues
 
 Network checks use a short timeout so CI cannot hang. Appendix C flags a
-production JWT secret shorter than 32 characters or equal to the
-generated-app development placeholder, and a cookie-mode auth without
+production JWT secret shorter than 32 characters or matching a publicly
+known example or development placeholder, and a cookie-mode auth without
 CookieSecure=true (config.Load rejects both; the "config" check below
 fails loud when either is set).`,
 		Args: cobra.NoArgs,

@@ -19,6 +19,22 @@ var publishedSigningAssignment = regexp.MustCompile(publishedSigningAssignmentPa
 
 var publishedKubernetesEnvAssignment = regexp.MustCompile(`(?m)^[ \t]*-[ \t]*name:[ \t]*["']?(GOMBIT_[A-Z0-9_]*_SECRET)["']?[ \t]*\r?\n[ \t]*value:[ \t]*["']?([^"'\r\n#]+)["']?[ \t]*(?:#.*)?$`)
 
+// Named constants in published examples can expose signing values without a
+// field assignment. This is a bounded tripwire, not semantic secret detection.
+var publishedNamedSigningLiteral = regexp.MustCompile(`(?m)\b(?:const|var)\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:string\s*)?=\s*(?:"([^"\r\n]*)"|'([^'\r\n]*)'|\x60([^\x60\r\n]*)\x60)`)
+// Also inspect Go const/var (...) blocks; still a bounded syntax tripwire.
+var publishedGroupedSigningBlock = regexp.MustCompile(`(?s)\b(?:const|var)\s*\((.*?)\)`)
+
+func publishedSigningFieldFromIdent(name string) string {
+	n := strings.ToLower(name)
+	if !strings.Contains(n, "key") && !strings.Contains(n, "secret") { return "" }
+	switch {
+	case strings.Contains(n, "jwt"): return "Auth.JWTSecret"
+	case (strings.Contains(n, "storage") || strings.Contains(n, "url")) && (strings.Contains(n, "sign") || strings.Contains(n, "secret")): return "Storage.URLSecret"
+	case strings.Contains(n, "signing"): return "Auth.JWTSecret"
+	default: return ""
+	}
+}
 type publishedSigningAssignmentMatch struct { name, secret string }
 
 func publishedSigningAssignments(source string) []publishedSigningAssignmentMatch {
@@ -31,6 +47,18 @@ func publishedSigningAssignments(source string) []publishedSigningAssignmentMatc
 	for _, m := range publishedKubernetesEnvAssignment.FindAllStringSubmatch(source, -1) {
 		if secret := strings.TrimSpace(m[2]); secret != "" {
 			out = append(out, publishedSigningAssignmentMatch{name: m[1], secret: secret})
+		}
+	}
+	namedSources := source
+	for _, block := range publishedGroupedSigningBlock.FindAllStringSubmatch(source, -1) {
+		for _, line := range strings.Split(block[1], "\n") { namedSources += "\nconst " + strings.TrimSpace(line) }
+	}
+	for _, m := range publishedNamedSigningLiteral.FindAllStringSubmatch(namedSources, -1) {
+		if m[1] == "devURLSecret" { continue } // The existing assignment parser already covers this name.
+		field := publishedSigningFieldFromIdent(m[1])
+		if field == "" { continue }
+		for _, secret := range m[2:] {
+			if secret != "" { out = append(out, publishedSigningAssignmentMatch{name: field, secret: secret}); break }
 		}
 	}
 	return out
@@ -53,6 +81,11 @@ func TestPublicSigningAssignmentParserRecognizesCommonCopyPasteSyntax(t *testing
 		{`'GOMBIT_JWT_SECRET': "published-yaml-key-0123456789012345678901234"`, "GOMBIT_JWT_SECRET", "published-yaml-key-0123456789012345678901234"},
 		{`map[string]string{"GOMBIT_JWT_SECRET": "published-map-key-0123456789012345678901234"}`, "GOMBIT_JWT_SECRET", "published-map-key-0123456789012345678901234"},
 		{"env:\n  - name: GOMBIT_JWT_SECRET\n    value: \"published-kubernetes-key-01234567890123456\"", "GOMBIT_JWT_SECRET", "published-kubernetes-key-01234567890123456"},
+		{"const publicSigningKey = \"ulas-t23-public-signing-example-0123456789abcdef\"", "Auth.JWTSecret", "ulas-t23-public-signing-example-0123456789abcdef"},
+		{"const storageURLSigningKey string = `ulas-t23-published-url-hmac-0123456789abcdef`", "Storage.URLSecret", "ulas-t23-published-url-hmac-0123456789abcdef"},
+		{"var jwtSigningSecret = 'ulas-t23-documented-jwt-secret-0123456789abcdef'", "Auth.JWTSecret", "ulas-t23-documented-jwt-secret-0123456789abcdef"},
+		{"const (\n  publicSigningKey = \"ulas-t24-public-signing-secret-0123456789abcdef\"\n)", "Auth.JWTSecret", "ulas-t24-public-signing-secret-0123456789abcdef"},
+		{"var (\n  storageURLSigningKey string = \"ulas-t24-public-storage-url-signing-secret-0123456789abcdef\"\n)", "Storage.URLSecret", "ulas-t24-public-storage-url-signing-secret-0123456789abcdef"},
 	}
 	for i, tc := range cases {
 		found := publishedSigningAssignments(tc.line)
@@ -68,6 +101,12 @@ func TestPublicSigningAssignmentParserIgnoresUnrelatedAndNonliteralInputs(t *tes
 		"env:\n  - name: SOME_OTHER_VARIABLE\n    value: \"unrelated-long-value-0123456789012345\"",
 		"env:\n  - name: GOMBIT_JWT_SECRET\n    valueFrom:\n      secretKeyRef: {name: jwt-config, key: signing-key}",
 		"GOMBIT_JWT_SECRET=",
+		"const publicVerificationKey = \"unrelated-verification-public-key-0123456789abcdef\"",
+		"const signingKey = fetchSigningKeyFromVault()",
+		"const genericKey = \"012345678901234567890123456789abcdef\"",
+		"const publicURLKey = \"unrelated-public-url-identifier-0123456789abcdef\"",
+		"const (\n  publicVerificationKey = \"unrelated-public-verification-key-0123456789abcdef\"\n)",
+		"var (\n  publicURLKey = \"unrelated-public-url-key-0123456789abcdef\"\n)",
 	}
 	for _, source := range cases {
 		if matches := publishedSigningAssignments(source); len(matches) != 0 {
