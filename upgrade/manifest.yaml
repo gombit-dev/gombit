@@ -1165,6 +1165,19 @@ releases:
           old app-version output reads a different string now.
         refs: [512]
 
+      - id: bearer-scheme-case-insensitive
+        kind: informational
+        area: behavior
+        summary: "The `Authorization` header's `Bearer` scheme is matched case-insensitively: `bearer <token>` and `BEARER <token>` authenticate instead of answering 401."
+        details: |
+          RFC 9110 defines the authentication scheme as case-insensitive, and
+          some HTTP clients, proxies and API gateways send `bearer`. The Bearer
+          gate (`auth.Service.RequireBearer`, `GET {prefix}/me` and the other
+          framework operations behind it) matched the exact prefix `Bearer `,
+          so those requests got `401` "missing bearer token". Only previously
+          refused requests change; nothing to do.
+        refs: [464]
+
       - id: ensure-permission-group-concurrent-first-use
         kind: informational
         area: behavior

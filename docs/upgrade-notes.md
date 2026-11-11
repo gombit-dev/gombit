@@ -510,6 +510,15 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   `built`, which describe the main module. A script that parsed the
   old app-version output reads a different string now.
 
+- The `Authorization` header's `Bearer` scheme is matched case-insensitively: `bearer <token>` and `BEARER <token>` authenticate instead of answering 401. (`bearer-scheme-case-insensitive`, behavior, [#464](https://github.com/gombit-dev/gombit/issues/464))
+
+  RFC 9110 defines the authentication scheme as case-insensitive, and
+  some HTTP clients, proxies and API gateways send `bearer`. The Bearer
+  gate (`auth.Service.RequireBearer`, `GET {prefix}/me` and the other
+  framework operations behind it) matched the exact prefix `Bearer `,
+  so those requests got `401` "missing bearer token". Only previously
+  refused requests change; nothing to do.
+
 - `auth.EnsurePermission` and `auth.EnsureGroup` return the one row to every concurrent first caller instead of failing the race's losers with a duplicate-key error. (`ensure-permission-group-concurrent-first-use`, behavior, [#463](https://github.com/gombit-dev/gombit/issues/463))
 
   Each checked for the row and inserted it when missing, so callers

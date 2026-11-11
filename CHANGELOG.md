@@ -185,6 +185,12 @@ version.
 
 ### Fixed
 
+- A Bearer request whose `Authorization` scheme is not spelled exactly
+  `Bearer` (`bearer <token>`, `BEARER <token>`, as some clients, proxies and
+  gateways send it) is authenticated instead of refused with `401` "missing
+  bearer token": the scheme is case-insensitive, as RFC 9110 defines it
+  ([#464](https://github.com/gombit-dev/gombit/issues/464)).
+
 - `types.Date` keeps its calendar day whatever time zone the database
   driver converts times to, except, with `parseTime=true`, a day a MySQL
   `loc` skipped whole (below). With a location west of UTC, a date was
@@ -211,6 +217,7 @@ version.
   and that day reads back right. Dates already stored a day early stay as
   they are (see the upgrade notes); PostgreSQL was not affected
   ([#478](https://github.com/gombit-dev/gombit/issues/478)).
+
 - `auth.EnsurePermission` and `auth.EnsureGroup` no longer fail with
   "duplicated key not allowed" when several callers ensure the same new
   permission or group at once (replicas booting together, concurrent
