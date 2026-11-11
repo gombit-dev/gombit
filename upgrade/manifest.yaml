@@ -509,6 +509,38 @@ releases:
 
   - version: unreleased
     changes:
+      - id: date-driver-location
+        kind: manual
+        area: behavior
+        summary: "`types.Date` keeps its calendar day whatever the driver's time zone, except, with `parseTime=true`, a day a MySQL `loc` skipped whole; dates a location west of UTC already moved stay moved."
+        details: |
+          Only an app whose DSN sets a location other than UTC is affected:
+          SQLite `_loc` (or `_loc=auto` on such a machine) or MySQL `loc`. The
+          default DSNs set none, and PostgreSQL was not affected. West of UTC,
+          every date written through MySQL was stored a day early; on SQLite a
+          date was stored right but read a day early, so code that wrote back a
+          row it had read (`Save`, or `Updates` of the loaded struct) stored
+          that earlier day; the admin writes only the fields an edit changes.
+          Each later save moved it one more day, so no single `UPDATE` repairs a
+          table: check those columns against another source before correcting
+          them. From this release they read back as stored, which on SQLite is
+          one day later than they read before, with one exception. With
+          `parseTime=true` (as the DSN `gombit new` writes) and a MySQL `loc`
+          that skipped a whole calendar day, such as Pacific/Apia on 2011-12-30,
+          go-sql-driver/mysql returns that day as the same time as the day
+          before, so it reads as the day before, as it did before this release,
+          and saving a row read so stores the day before. It is stored right
+          when written; with `parseTime=false` the driver returns the text, and
+          that day reads back right. With a MySQL `loc` whose offset from UTC on
+          the compared date is not zero, a `types.Date` compared with a column
+          that is not DATE (DATETIME, TIMESTAMP or text) now means the
+          `YYYY-MM-DD` text, midnight, where it meant UTC midnight converted to
+          `loc` (for TIMESTAMP, MySQL reads it in the session's `time_zone`):
+          check such conditions, or pass `d.Time()` to keep the old comparison.
+          A `types.Date` passed to `database/sql` directly, not through GORM, is
+          still sent in MySQL's `loc`: pass `d.String()` instead.
+        refs: [478]
+
       - id: refresh-follower-not-cancelled-by-leader
         kind: informational
         area: behavior
@@ -1167,3 +1199,48 @@ releases:
           constraint (the primary key, its sequence behind the table) is
           returned as itself. Nothing to change.
         refs: [463]
+
+      - id: api-prefix-canonical-form
+        kind: manual
+        breaking: true
+        area: config
+        summary: "`GOMBIT_API_PREFIX` and `Config.API.Prefix` have one canonical form: `Load` drops a trailing `/` from the environment value, and `Validate` refuses a prefix that is not already canonical — one `Load` would have rewritten, or one whose OpenAPI document its own routes cannot answer."
+        details: |
+          A prefix of `/svc/` served `/svc/widgets` but listed
+          `/svc//widgets` in the OpenAPI document, so every client generated
+          from it asked for a URL that 404s. `Load` normalises a trailing
+          slash away, so `GOMBIT_API_PREFIX=/svc/` still starts the app and
+          serves what it always served. Trailing slashes are the only thing
+          `Load` rewrites: `main` checked a prefix for no more than a
+          leading `/`, so a value the rules below refuse started an app and
+          now fails `Load` from the environment — `GOMBIT_API_PREFIX=/api/v 1`
+          is one. A prefix set in code is never rewritten, so
+          `Config.API.Prefix = "/svc/"` now fails `Validate` with a field error
+          naming `API.Prefix`; write it without the trailing slash.
+          What still works is what an IRI path segment holds: letters, digits,
+          `- . _ ~`, the sub-delimiters `! $ & ' ( ) + , ; =`, `@`, and
+          non-ASCII in valid UTF-8 — `/api/v1+beta`, `/@acme/api`, `/api;v=1`
+          and `/café` each register, advertise and answer the same path key.
+          `Validate` refuses each prefix below; for all but the last, the
+          document and the routes measurably disagree. `%`, `?`, `#` and
+          control characters, which make the advertised path one no client
+          can send as it is written; Gin's `:` and `{name}` parameters and
+          its `*` catch-all, whose routes answer paths the document never
+          lists (a `*` or `\` mid-path panics at registration); a `.` or
+          `..` segment, which Gin's `path.Join`
+          collapses, so the app registers the collapsed route — `/api/../v1`
+          plus `/widgets` answers `/v1/widgets` — while the document
+          advertises the uncollapsed path it was given, and that advertised
+          path is the one with no route; an empty segment (`/svc//api`), the
+          double slash being what makes a prefix non-canonical; and bytes that
+          are not valid UTF-8 (`/api/\xff`), which encoding/json replaces with
+          U+FFFD while writing the document, so the advertised key 404s while
+          the route answers 200. Space and the other US-ASCII characters RFC
+          3986 keeps out of a URI (`" < > [ ] | ^ \``) are refused on purpose,
+          not because anything was measured failing with them. RFC 3986
+          excludes non-ASCII too, but the accepted set is RFC 3987's IRI path
+          segment (`ipchar`), which admits it; a client sends it percent-encoded
+          and Gin matches the route once it is decoded.
+        config:
+          - {var: GOMBIT_API_PREFIX, change: refused}
+        refs: [501]
