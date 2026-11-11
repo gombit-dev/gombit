@@ -185,6 +185,32 @@ version.
 
 ### Fixed
 
+- `types.Date` keeps its calendar day whatever time zone the database
+  driver converts times to, except, with `parseTime=true`, a day a MySQL
+  `loc` skipped whole (below). With a location west of UTC, a date was
+  read back (SQLite `_loc`) or already stored (MySQL `loc`) as the day
+  before, and every read-modify-write moved it one more day; with a MySQL
+  `loc` whose offset from UTC on that date is not zero, an equality or
+  `IN` condition comparing a date column with a `types.Date`
+  (`Where("day = ?", d)`) found no row, and a range (`BETWEEN`, `>=`, `<`)
+  was off by a day at its ends. GORM now binds a date as `YYYY-MM-DD` text
+  on MySQL (SQLite and PostgreSQL keep the UTC midnight they have always
+  stored), and `Scan` reads the day the driver meant. On MySQL with a
+  `loc` whose offset from UTC on the compared date is not zero, a
+  `types.Date` compared with a column that is not DATE (DATETIME,
+  TIMESTAMP or text) is now the `YYYY-MM-DD` text, midnight, where it was
+  UTC midnight converted to `loc`; for TIMESTAMP, MySQL reads it in the
+  session's `time_zone`. Pass `d.Time()` to keep the old comparison. The
+  admin's reads and edits of a date field had the same shift and are fixed
+  with it. With `parseTime=true` (as the DSN `gombit new` writes) and a
+  MySQL `loc` that skipped a whole calendar day, such as Pacific/Apia on
+  2011-12-30, go-sql-driver/mysql returns that day as the same time as the
+  day before, so it reads as the day before, as it did before this
+  release, and saving a row read so stores the day before. It is stored
+  right when written; with `parseTime=false` the driver returns the text,
+  and that day reads back right. Dates already stored a day early stay as
+  they are (see the upgrade notes); PostgreSQL was not affected
+  ([#478](https://github.com/gombit-dev/gombit/issues/478)).
 - `auth.EnsurePermission` and `auth.EnsureGroup` no longer fail with
   "duplicated key not allowed" when several callers ensure the same new
   permission or group at once (replicas booting together, concurrent

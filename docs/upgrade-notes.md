@@ -12,6 +12,34 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 ### Manual: action required
 
+- `types.Date` keeps its calendar day whatever the driver's time zone, except, with `parseTime=true`, a day a MySQL `loc` skipped whole; dates a location west of UTC already moved stay moved. (`date-driver-location`, behavior, [#478](https://github.com/gombit-dev/gombit/issues/478))
+
+  Only an app whose DSN sets a location other than UTC is affected:
+  SQLite `_loc` (or `_loc=auto` on such a machine) or MySQL `loc`. The
+  default DSNs set none, and PostgreSQL was not affected. West of UTC,
+  every date written through MySQL was stored a day early; on SQLite a
+  date was stored right but read a day early, so code that wrote back a
+  row it had read (`Save`, or `Updates` of the loaded struct) stored
+  that earlier day; the admin writes only the fields an edit changes.
+  Each later save moved it one more day, so no single `UPDATE` repairs a
+  table: check those columns against another source before correcting
+  them. From this release they read back as stored, which on SQLite is
+  one day later than they read before, with one exception. With
+  `parseTime=true` (as the DSN `gombit new` writes) and a MySQL `loc`
+  that skipped a whole calendar day, such as Pacific/Apia on 2011-12-30,
+  go-sql-driver/mysql returns that day as the same time as the day
+  before, so it reads as the day before, as it did before this release,
+  and saving a row read so stores the day before. It is stored right
+  when written; with `parseTime=false` the driver returns the text, and
+  that day reads back right. With a MySQL `loc` whose offset from UTC on
+  the compared date is not zero, a `types.Date` compared with a column
+  that is not DATE (DATETIME, TIMESTAMP or text) now means the
+  `YYYY-MM-DD` text, midnight, where it meant UTC midnight converted to
+  `loc` (for TIMESTAMP, MySQL reads it in the session's `time_zone`):
+  check such conditions, or pass `d.Time()` to keep the old comparison.
+  A `types.Date` passed to `database/sql` directly, not through GORM, is
+  still sent in MySQL's `loc`: pass `d.String()` instead.
+
 - **Breaking.** `gombit createsuperuser`, `auth.Service.CreateSuperuser` and `Register` refuse an email that is not a bare address and a password shorter than 8 characters (or over 72 bytes). (`createsuperuser-login-rules`, api, [#461](https://github.com/gombit-dev/gombit/issues/461))
 
   Two rules, for two reasons. The email must be what `POST
