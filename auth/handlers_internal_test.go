@@ -44,3 +44,27 @@ func TestWithBearerChallenge(t *testing.T) {
 		})
 	}
 }
+
+// TestBearerToken: the Authorization scheme is case-insensitive (RFC 9110
+// §11.1), so `bearer` and `BEARER` carry a token as `Bearer` does (#464).
+func TestBearerToken(t *testing.T) {
+	for header, want := range map[string]string{
+		"Bearer tok":    "tok",
+		"bearer tok":    "tok",
+		"BEARER tok":    "tok",
+		"bEaReR tok":    "tok",
+		"Bearer   tok ": "tok",
+		"Bearer":        "",
+		"Bearer ":       "",
+		"bearer   ":     "",
+		"Bearertok":     "",
+		"Basic tok":     "",
+		"Bearers tok":   "",
+		"":              "",
+	} {
+		got, ok := bearerToken(header)
+		if got != want || ok != (want != "") {
+			t.Errorf("bearerToken(%q) = %q, %v; want %q, %v", header, got, ok, want, want != "")
+		}
+	}
+}
