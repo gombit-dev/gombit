@@ -258,22 +258,35 @@ func stageOverlay(opts Options, pkg, modelAbsPath string, modelContent []byte) (
 	if bytes.Equal(onDisk, modelContent) || !opts.Force {
 		return nil, nil
 	}
-	overlay := map[string][]byte{modelAbsPath: modelContent}
-	dir := filepath.Dir(modelAbsPath)
+	overlay, err := StubPackage(filepath.Dir(modelAbsPath), pkg, func(path string) bool { return path == modelAbsPath })
+	if err != nil {
+		return nil, err
+	}
+	overlay[modelAbsPath] = modelContent
+	return overlay, nil
+}
+
+// StubPackage is a Go build overlay that sets aside every .go file of the
+// package in dir that keep does not keep, as its package clause alone (an
+// empty file of package pkg): what the resource loader compiles to reflect a
+// model without the files built on it (the generated ones, the hooks using
+// them). keep gets each file's absolute path. make resource --force and
+// gombit generate's retry both isolate a model this way.
+func StubPackage(dir, pkg string, keep func(path string) bool) (map[string][]byte, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("resourcegen: read internal/%s: %w", pkg, err)
 	}
 	stub := []byte("package " + pkg + "\n")
+	overlay := map[string][]byte{}
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") {
 			continue
 		}
 		p := filepath.Join(dir, e.Name())
-		if p == modelAbsPath {
-			continue
+		if !keep(p) {
+			overlay[p] = stub
 		}
-		overlay[p] = stub
 	}
 	return overlay, nil
 }
