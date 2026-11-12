@@ -31,7 +31,18 @@ projections of that kind, not separate lists.
 
 `time` on the command line is a **datetime** (`time.Time`), kept as a
 compatibility alias. `date` is a calendar date (`types.Date`, JSON
-`YYYY-MM-DD`). `datetime` is a timestamp. Every write refuses a `datetime`
+`YYYY-MM-DD`). It keeps its day whatever time zone the driver converts times
+to (SQLite `_loc`, MySQL `loc`, PostgreSQL `timezone`): GORM binds it as
+`YYYY-MM-DD` text on MySQL, and the UTC midnight SQLite has always stored on
+the others. The exception is a day a MySQL `loc` skipped whole, such as
+2011-12-30 in `Pacific/Apia`: with `parseTime=true` (as the DSN `gombit new`
+writes), go-sql-driver/mysql returns it as the same time as the day before,
+so it reads as that day (see `types.Date`'s `Scan`); with `parseTime=false`
+it returns the text, and the day reads back right. Outside GORM
+(`database/sql` directly), go-sql-driver/mysql sends a `types.Date` in its
+`loc`, a day early west of UTC: there, with a `loc` other than UTC, pass
+`d.String()` instead.
+`datetime` is a timestamp. Every write refuses a `datetime`
 outside `1000-01-02T00:00:00Z`..`9999-12-30T23:59:59Z` and a `date` outside
 `1000-01-01`..`9999-12-31` with a 422 on that field, the range all three
 drivers can store and return (see [database.md § Timestamp and date

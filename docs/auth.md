@@ -16,7 +16,7 @@ Generated apps (`gombit new --auth jwt`, the default) wire this through
 
 | Token | Where | Notes |
 | --- | --- | --- |
-| Access JWT | **Memory only** | `Authorization: Bearer`. Never `localStorage` / `sessionStorage`. Lost on refresh, which is intended. |
+| Access JWT | **Memory only** | `Authorization: Bearer <token>` (the scheme in any case, as RFC 9110 has it). Never `localStorage` / `sessionStorage`. Lost on refresh, which is intended. |
 | Refresh token | **Memory only** (JSON body) | Returned once on login/refresh. Rotated on each successful refresh. Not a cookie in v0.1. |
 
 The refresh token stays in the JSON body (not a cookie) so this mode's

@@ -350,6 +350,32 @@ func TestLogoutWithRotatedToken(t *testing.T) {
 	}
 }
 
+// TestBearerSchemeIsCaseInsensitive: a valid access token authenticates
+// whatever the case of its Authorization scheme (RFC 9110 §11.1), as clients,
+// proxies and gateways send `bearer` too (#464).
+func TestBearerSchemeIsCaseInsensitive(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	app := newAuthApp(t)
+	registerUser(t, app, "scheme@example.com", testPassword)
+	pair := loginUser(t, app, "scheme@example.com", testPassword)
+	for _, scheme := range []string{"Bearer", "bearer", "BEARER"} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/me", nil)
+		req.Header.Set("Authorization", scheme+" "+pair.AccessToken)
+		app.Router().ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Errorf("GET /me with scheme %q = %d, want 200; body: %s", scheme, rec.Code, rec.Body.String())
+		}
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/me", nil)
+	req.Header.Set("Authorization", "Basic "+pair.AccessToken)
+	app.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("GET /me with scheme Basic = %d, want 401", rec.Code)
+	}
+}
+
 func getMe(t *testing.T, app *framework.App, access string) int {
 	t.Helper()
 	rec := httptest.NewRecorder()

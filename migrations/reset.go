@@ -102,7 +102,7 @@ func dropSQLiteSchema(db *database.DB) error {
 	if err := db.Raw(`
 SELECT type, name FROM sqlite_master
 WHERE type IN ('table', 'view')
-  AND name NOT LIKE 'sqlite_%'
+  AND name NOT LIKE 'sqlite\_%' ESCAPE '\'
 ORDER BY type DESC, name`).Scan(&objects).Error; err != nil {
 		return fmt.Errorf("migrations: list sqlite objects: %w", err)
 	}

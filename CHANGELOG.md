@@ -200,6 +200,40 @@ version.
   gets there within the refresh TTL), or whose chain cannot be followed,
   answers 500 and ends nothing; revoke the session instead
   ([#466](https://github.com/gombit-dev/gombit/issues/466)).
+
+- A Bearer request whose `Authorization` scheme is not spelled exactly
+  `Bearer` (`bearer <token>`, `BEARER <token>`, as some clients, proxies and
+  gateways send it) is authenticated instead of refused with `401` "missing
+  bearer token": the scheme is case-insensitive, as RFC 9110 defines it
+  ([#464](https://github.com/gombit-dev/gombit/issues/464)).
+
+- `types.Date` keeps its calendar day whatever time zone the database
+  driver converts times to, except, with `parseTime=true`, a day a MySQL
+  `loc` skipped whole (below). With a location west of UTC, a date was
+  read back (SQLite `_loc`) or already stored (MySQL `loc`) as the day
+  before, and every read-modify-write moved it one more day; with a MySQL
+  `loc` whose offset from UTC on that date is not zero, an equality or
+  `IN` condition comparing a date column with a `types.Date`
+  (`Where("day = ?", d)`) found no row, and a range (`BETWEEN`, `>=`, `<`)
+  was off by a day at its ends. GORM now binds a date as `YYYY-MM-DD` text
+  on MySQL (SQLite and PostgreSQL keep the UTC midnight they have always
+  stored), and `Scan` reads the day the driver meant. On MySQL with a
+  `loc` whose offset from UTC on the compared date is not zero, a
+  `types.Date` compared with a column that is not DATE (DATETIME,
+  TIMESTAMP or text) is now the `YYYY-MM-DD` text, midnight, where it was
+  UTC midnight converted to `loc`; for TIMESTAMP, MySQL reads it in the
+  session's `time_zone`. Pass `d.Time()` to keep the old comparison. The
+  admin's reads and edits of a date field had the same shift and are fixed
+  with it. With `parseTime=true` (as the DSN `gombit new` writes) and a
+  MySQL `loc` that skipped a whole calendar day, such as Pacific/Apia on
+  2011-12-30, go-sql-driver/mysql returns that day as the same time as the
+  day before, so it reads as the day before, as it did before this
+  release, and saving a row read so stores the day before. It is stored
+  right when written; with `parseTime=false` the driver returns the text,
+  and that day reads back right. Dates already stored a day early stay as
+  they are (see the upgrade notes); PostgreSQL was not affected
+  ([#478](https://github.com/gombit-dev/gombit/issues/478)).
+
 - `auth.EnsurePermission` and `auth.EnsureGroup` no longer fail with
   "duplicated key not allowed" when several callers ensure the same new
   permission or group at once (replicas booting together, concurrent
@@ -430,6 +464,32 @@ version.
   binary also stops printing `commit` and `built`: those settings are recorded
   for the main module, so they would name the app's repository beside a Gombit
   release ([#512](https://github.com/gombit-dev/gombit/issues/512)).
+- `GOMBIT_API_PREFIX=/svc/` no longer advertises routes that answer 404.
+  `config.Load` now puts the prefix in one canonical form, dropping a trailing
+  `/`: generated resources and the OpenAPI document concatenate it with a route
+  while Gin builds its route with `path.Join`, so a prefix of `/svc/` served
+  `/svc/widgets` but listed `/svc//widgets` in the document, and every client
+  built from that document asked for a URL that 404s. `Validate` applies the
+  same rule to every prefix, however it was set, and rejects one that is not
+  already canonical rather than start an app whose document no route answers:
+  one with no canonical form at all (`api`, `/` alone, an empty segment such as
+  `/svc//api`, a `.` or `..` segment, which Gin collapses into a prefix no route
+  is registered under, or a character the document and the routes cannot agree
+  on — `%`, `?`, `#` or a control character, which make the advertised path one
+  no client can send as it is written; Gin's `:` and `{name}` parameters and its
+  `*` catch-all, which answer paths the document never lists (a `*` or `\` in
+  mid-path panics at registration); a space with the other US-ASCII
+  characters RFC 3986 keeps out of a URI, refused by policy (RFC 3986 excludes
+  non-ASCII too, but that is admitted as an RFC 3987 IRI path character and
+  sent percent-encoded); and bytes that are not valid UTF-8,
+  which Gin registers as written while `encoding/json` writes the document with
+  `U+FFFD` in their place), or one `Load` would have rewritten,
+  such as a `/svc/` set on a `Config.API.Prefix` in code. Every prefix a route
+  could already be built from still starts an app: the sub-delimiters `! $ & '
+  ( ) + , ; =`, `@`, and non-ASCII that decodes as UTF-8, so `/api/v1+beta`,
+  `/@acme/api`, `/api;v=1`
+  and `/café` are accepted
+  ([#501](https://github.com/gombit-dev/gombit/issues/501)).
 
 ### Changed
 

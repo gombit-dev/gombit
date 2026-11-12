@@ -784,6 +784,9 @@ jobs:
           go test -tags integration ./resourcegen \
             -resourcegen.mysql-dsn \
             'gombit:gombit@tcp(127.0.0.1:3306)/gombit?parseTime=true'
+          go test -tags integration ./types \
+            -types.mysql-dsn \
+            'gombit:gombit@tcp(127.0.0.1:3306)/gombit?parseTime=true'
           go test -tags integration ./storage/filefield \
             -filefield.mysql-dsn \
             'gombit:gombit@tcp(127.0.0.1:3306)/gombit?parseTime=true'
