@@ -241,6 +241,22 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   `config.DotEnvKeys` reports to this tooling's own configuration
   analysis.
 
+- **Breaking.** `Auth.BcryptCost` must be 0 (bcrypt's default) or between 4 and 31: `config.Validate` and `auth.NewService` refuse any other value, so an app configured outside that range no longer starts. (`bcrypt-cost-range-checked`, api, [#465](https://github.com/gombit-dev/gombit/issues/465))
+
+  `config.Validate` refused only a negative cost. A cost of 1 to 3
+  passed and bcrypt silently hashed at its default, 10, and a cost of
+  32 or more passed and then failed every new hash: registration and
+  `createsuperuser` answered `500` while existing users could still
+  sign in. Both are refused at startup now, with
+  `config: Auth.BcryptCost`. An app that sets `Config.Auth.BcryptCost`
+  in code sets it to 0 or to a value from 4 to 31: the cost its stored
+  hashes carry (the `$2a$NN$` prefix, or `bcrypt.Cost` of a stored
+  hash), so the unknown-email timing hash matches them. For 1 to 3
+  that is 0 (or 10), the cost bcrypt made them at; for 32 or more,
+  which made no hashes, the cost the app ran with before, usually 0.
+  Hashes already stored keep working at whatever cost they were made
+  at.
+
 - **Breaking.** `GOMBIT_API_PREFIX` and `Config.API.Prefix` have one canonical form: `Load` drops a trailing `/` from the environment value, and `Validate` refuses a prefix that is not already canonical — one `Load` would have rewritten, or one whose OpenAPI document its own routes cannot answer. (`api-prefix-canonical-form`, config, [#501](https://github.com/gombit-dev/gombit/issues/501))
 
   - Configuration: `GOMBIT_API_PREFIX`: some values are now refused.

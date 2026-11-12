@@ -185,6 +185,15 @@ version.
 
 ### Fixed
 
+- `config.Validate` and `auth.NewService` refuse an `Auth.BcryptCost`
+  outside bcrypt's range (`config.CheckBcryptCost`): it must be `0` (bcrypt's default) or between 4
+  and 31. A cost of 1 to 3 was accepted and silently hashed at bcrypt's
+  default, 10, and a cost of 32 or more was accepted and then failed every
+  registration and `createsuperuser` with `500` (and left the unknown-email
+  login timing unequalised); now the app does not start until the cost is
+  valid
+  ([#465](https://github.com/gombit-dev/gombit/issues/465)).
+
 - A Bearer request whose `Authorization` scheme is not spelled exactly
   `Bearer` (`bearer <token>`, `BEARER <token>`, as some clients, proxies and
   gateways send it) is authenticated instead of refused with `401` "missing
