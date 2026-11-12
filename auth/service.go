@@ -597,9 +597,9 @@ func (s *Service) rotateRefreshOnce(ctx context.Context, raw, hash string) (Toke
 			// Lost the compare-and-swap: the token was revoked after the
 			// unlocked read above. Either a rotation of the same token on
 			// another instance won and gave it a successor, or something
-			// revoked it with none: a logout (which takes no user lock), a
-			// session revocation that committed while this rotation waited
-			// for the user's lock, or the reuse cascade. None of them is
+			// revoked it with none: a logout or a session revocation that
+			// committed while this rotation waited for the user's lock, or
+			// the reuse cascade. None of them is
 			// reuse-as-theft; do not revoke anything. The re-read tells them
 			// apart, as for an expired token above. A successor means a
 			// rotation won: errRotationRaced, and refreshCookie leaves the
@@ -678,31 +678,86 @@ func lockRefreshRowTx(tx *gorm.DB, id uint) (RefreshToken, error) {
 	return row, err
 }
 
-// RevokeRefresh invalidates one refresh token. Missing/already-revoked tokens
-// succeed so logout is idempotent.
+// RevokeRefresh ends the session of a refresh token: the token itself, or,
+// when the token has rotated (a refresh in flight as the user signs out, or
+// a client still holding the previous token), the session's current head,
+// fewer than maxChainHops (1000) rotations on (#466): any unexpired token
+// of the session's chain fewer than that many rotations behind the head ends
+// it. One maxChainHops or more behind, or a chain that cannot be followed
+// (errChainUnresolved), fails with a 500 rather than succeed having ended
+// nothing; revoking the session (DELETE /auth/sessions/{id}, or
+// ?scope=all) ends it then. A token unknown, past its
+// own expiry, or of a session already ended revokes nothing and succeeds,
+// alike, so logout is idempotent and its answer says nothing about a token;
+// a token past its expiry is no credential, as for refresh (#458). It takes the user's lock (lockUserTx) like rotation does, so a
+// logout and a refresh of the same token run one after the other: whichever
+// comes second sees the other's result, and the session ends either way.
 func (s *Service) RevokeRefresh(ctx context.Context, raw string) error {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return errInvalidRefreshToken
 	}
-	now := s.now()
 	hash := hashRefreshToken(raw)
+	// This lookup must stay outside the transaction below. sessionChain
+	// walks with plain reads, and on MySQL (REPEATABLE READ) a transaction's
+	// plain reads all see the snapshot its first plain read takes: inside,
+	// this read would take it before the user's lock, and the walk would
+	// miss a rotation that committed during the wait, revoking an already
+	// rotated row and ending nothing. With the lock (a locking read, which
+	// takes no snapshot) first, the walk's first read takes the snapshot
+	// after it.
 	var row RefreshToken
-	if err := s.db.WithContext(ctx).Where("token_hash = ? AND revoked_at IS NULL", hash).Limit(1).Find(&row).Error; err != nil {
+	if err := s.db.WithContext(ctx).Where("token_hash = ?", hash).Limit(1).Find(&row).Error; err != nil {
 		return err
 	}
 	if row.ID == 0 {
 		return nil
 	}
-	result := s.db.WithContext(ctx).Model(&RefreshToken{}).
-		Where("id = ? AND revoked_at IS NULL", row.ID).
-		Update("revoked_at", now)
-	if result.Error != nil {
+	var ended *RefreshToken
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if _, err := lockUserTx(tx, row.UserID); err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil // the user is gone, and its sessions with it
+			}
+			return err
+		}
+		now := s.now()
+		// The token's own expiry, as rotation reads it: past it, a token
+		// refreshes nothing and so ends nothing either.
+		if !row.ExpiresAt.After(now) {
+			return nil
+		}
+		_, head, err := sessionChain(tx, row.UserID, row.ID)
+		if err != nil || head == nil || head.RevokedAt != nil || !head.ExpiresAt.After(now) {
+			return err
+		}
+		result := tx.Model(&RefreshToken{}).
+			Where("id = ? AND revoked_at IS NULL", head.ID).
+			Update("revoked_at", now)
+		if result.RowsAffected == 1 {
+			ended = head
+		}
 		return result.Error
+	})
+	if err != nil {
+		return err
 	}
-	// RowsAffected: a concurrent logout of the same token records it once.
-	if result.RowsAffected == 1 {
-		s.Audit(ctx, AuditEvent{Action: AuditLogout, ActorUserID: uintPtr(row.UserID), TargetUserID: uintPtr(row.UserID)})
+	// Under the lock a concurrent logout of the same session waits and then
+	// finds it ended: it is recorded once. The event names the session it
+	// ended, and says when a rotated token ended it: an old copy of the
+	// session's token, which may be a sibling tab's or a thief's.
+	if ended != nil {
+		event := AuditEvent{
+			Action:       AuditLogout,
+			ActorUserID:  uintPtr(row.UserID),
+			TargetUserID: uintPtr(row.UserID),
+			TargetType:   "session",
+			TargetID:     s.sessionID(ended.ID),
+		}
+		if ended.ID != row.ID {
+			event.Details = details("via", "rotated")
+		}
+		s.Audit(ctx, event)
 	}
 	return nil
 }
@@ -768,8 +823,10 @@ func (s *Service) parseAccess(ctx context.Context, token string) (User, uint, er
 // lockUserTx loads the user and locks its row for the rest of tx. Token
 // rotation (its reuse cascade included) and the three session revocations
 // (one, the others, all) take this lock first, so they run one at a time per
-// user. Login (IssueTokens) and logout (RevokeRefresh) do not take it, so
-// they are not serialized with those (docs/auth.md documents it for logout).
+// user, and so do logout (RevokeRefresh, which follows a rotated token to
+// its session's head, #466) and login's session start (IssueTokens,
+// startSession): every writer of refresh_tokens. Only login's password check
+// (bcrypt, slow) runs before the lock (docs/auth.md).
 // Without the lock, on PostgreSQL a revocation that waits on a row a
 // concurrent rotation holds re-checks only that row and never sees the
 // replacement the rotation inserts, so the session survives. SQLite has no

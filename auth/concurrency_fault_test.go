@@ -353,6 +353,15 @@ func TestFault_Concurrency_RevocationDuringRotation(t *testing.T) {
 				return f.svc.RevokeAllSessions(ctx, f.user.ID)
 			},
 		},
+		{
+			// A logout with the token being rotated: it waits for the
+			// rotation and ends the session the token rotated into (#466).
+			name: "logout",
+			revoke: func(ctx context.Context, f rotationFixture, _ auth.TokenPair) error {
+				return f.svc.RevokeRefresh(ctx, f.refresh)
+			},
+			currentSurvives: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -586,12 +595,13 @@ func TestFault_Concurrency_RevokeOneExpiresWhileWaiting(t *testing.T) {
 
 // TestFault_Concurrency_LogoutDuringRevokeOne: a revocation of one session
 // has found the session's row and is pinned just before its UPDATE (holding
-// the user's lock) when the same session logs out. Logout takes no user lock,
-// so it runs to the end. Expected outcome: once released, the revocation
-// updates nothing and returns ErrSessionNotFound, never a success for a
-// session it did not end; the session stays ended. The 404 must come from
-// the revocation's own update, not from when the database fixed its view of
-// the rows.
+// the user's lock) when the same session logs out. Logout takes the user's
+// lock too (#466). Expected outcome: the logout waits for the revocation,
+// which ends the session and succeeds; the logout then finds the session
+// ended and succeeds without ending anything again, so the trail records the
+// revocation and no logout. Before logout took the lock it ran to the end
+// under the pinned revocation, which then had to report ErrSessionNotFound
+// from its own update; that interleaving can no longer happen.
 //
 // SQLite is skipped like the tests above.
 func TestFault_Concurrency_LogoutDuringRevokeOne(t *testing.T) {
@@ -608,8 +618,7 @@ func TestFault_Concurrency_LogoutDuringRevokeOne(t *testing.T) {
 				close(release)
 			}
 		}()
-		// Statement call 1 is the revocation's UPDATE of the tokens (held),
-		// call 2 the logout's.
+		// Statement call 1 is the revocation's UPDATE of the tokens (held).
 		update := faulttest.Sequence(faulttest.Block(release))
 		faults := &faulttest.DBFaults{Statement: update, Match: updatesRefreshTokens}
 		f := newRotationFixture(t, kind, dsn, faults)
@@ -625,18 +634,28 @@ func TestFault_Concurrency_LogoutDuringRevokeOne(t *testing.T) {
 		go func() { revokeErr <- f.svc.RevokeSession(ctx, f.user.ID, listed[0].ID) }()
 		wait(t, update.Reached(1), "the revocation never reached its update")
 
-		logoutCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		defer cancel()
-		if err := f.svc.RevokeRefresh(logoutCtx, f.refresh); err != nil {
-			t.Fatalf("logout during the revocation = %v; it takes no user lock and must not wait for it", err)
+		logoutErr := make(chan error, 1)
+		go func() { logoutErr <- f.svc.RevokeRefresh(ctx, f.refresh) }()
+		faulttest.AwaitLockWait(t, kind, dsn, "users")
+		select {
+		case err := <-logoutErr:
+			t.Fatalf("the logout returned (%v) while the revocation held the user's lock", err)
+		default:
 		}
-		close(release) // the revocation updates the row the logout revoked
+		close(release) // the revocation ends the session and commits
 
-		if err := waitErr(t, revokeErr, "revocation"); !errors.Is(err, auth.ErrSessionNotFound) {
-			t.Fatalf("RevokeSession of a session logged out under it = %v, want ErrSessionNotFound", err)
+		if err := waitErr(t, revokeErr, "revocation"); err != nil {
+			t.Fatalf("RevokeSession = %v; it held the user's lock first and ends the session", err)
+		}
+		if err := waitErr(t, logoutErr, "logout"); err != nil {
+			t.Fatalf("logout of the session the revocation ended = %v, want nil", err)
 		}
 		if _, err := f.svc.RotateRefresh(ctx, f.refresh); !errors.Is(err, auth.ErrInvalidRefreshToken) {
-			t.Fatalf("RotateRefresh after logout = %v, want an invalid refresh token", err)
+			t.Fatalf("RotateRefresh after the revocation = %v, want an invalid refresh token", err)
+		}
+		var logouts int64
+		if err := f.db.Model(&auth.AuditEvent{}).Where("action = ?", auth.AuditLogout).Count(&logouts).Error; err != nil || logouts != 0 {
+			t.Fatalf("logout events = %d (err %v), want 0: the logout ended nothing", logouts, err)
 		}
 	})
 }
@@ -1949,10 +1968,10 @@ func TestFault_Concurrency_CookieRefreshDuringRevocation(t *testing.T) {
 // TestFault_Concurrency_CookieRefreshDuringLogout: the browser's refresh has
 // read its unexpired token, unrevoked, and is held just before the user-row
 // lock it takes next when another tab of the same browser logs out with the
-// same refresh cookie, and the logout commits. Logout revokes the token with
-// one UPDATE and takes no user lock, so unlike the revocations above it does
-// not make the refresh wait on the server: it lands between the refresh's
-// unlocked read and its compare-and-swap. Expected outcome: the refresh loses
+// same refresh cookie, and the logout commits. Logout takes the user's lock
+// too (#466), but the refresh has not taken it yet: the logout takes it
+// first, revokes the token with one UPDATE and commits, landing between the
+// refresh's unlocked read and its compare-and-swap. Expected outcome: the refresh loses
 // the compare-and-swap and, re-reading the token under the lock, finds it
 // revoked with no successor: a 401 that clears the session cookies exactly as
 // the logout did, the refreshing tab then sends no session cookie, and no
@@ -1976,8 +1995,9 @@ func TestFault_Concurrency_CookieRefreshDuringLogout(t *testing.T) {
 			}
 		}()
 		// Matched statement 1 is the refresh's user lock (held), 2 the
-		// logout's UPDATE of the token, 3 the refresh's compare-and-swap,
-		// which affects no row, and 4 its re-read of the token.
+		// logout's user lock, 3 its UPDATE of the token, 4 the refresh's
+		// compare-and-swap, which affects no row, and 5 its re-read of the
+		// token.
 		stmts := faulttest.Sequence(faulttest.Block(release))
 		faults := &faulttest.DBFaults{Statement: stmts, Match: func(query string) bool {
 			return locksUserOrWritesRefreshTokens(query) || rereadsRefreshToken(query)
@@ -2008,8 +2028,8 @@ func TestFault_Concurrency_CookieRefreshDuringLogout(t *testing.T) {
 		if logout.Code != http.StatusOK {
 			t.Fatalf("logout status = %d; body: %s", logout.Code, logout.Body.String())
 		}
-		if n := stmts.Calls(); n != 2 {
-			t.Fatalf("%d matched statements once the logout returned, want 2: the refresh's held lock and the logout's UPDATE", n)
+		if n := stmts.Calls(); n != 3 {
+			t.Fatalf("%d matched statements once the logout returned, want 3: the refresh's held lock, the logout's lock and its UPDATE", n)
 		}
 		logoutClears := logout.Header().Values("Set-Cookie")
 		slices.Sort(logoutClears)
@@ -2028,8 +2048,8 @@ func TestFault_Concurrency_CookieRefreshDuringLogout(t *testing.T) {
 		if got := rec.Header().Values("Set-Cookie"); !slices.Equal(slices.Sorted(slices.Values(got)), logoutClears) {
 			t.Errorf("the refresh's Set-Cookie = %q, want logout's %q", got, logoutClears)
 		}
-		if n, failed := stmts.Calls(), stmts.Failures(); n != 4 || failed != 0 {
-			t.Fatalf("%d matched statements, %d failed; want 4: the refresh's lock, the logout's UPDATE, the refresh's compare-and-swap and its re-read", n, failed)
+		if n, failed := stmts.Calls(), stmts.Failures(); n != 5 || failed != 0 {
+			t.Fatalf("%d matched statements, %d failed; want 5: the refresh's lock, the logout's lock and UPDATE, the refresh's compare-and-swap and its re-read", n, failed)
 		}
 		faulttest.Idle(t, f.db)
 		var tokens []auth.RefreshToken

@@ -320,6 +320,36 @@ func refreshUser(t *testing.T, app *framework.App, refresh string) tokenPair {
 	return envelope.Data
 }
 
+// TestLogoutWithRotatedToken: a logout that carries the refresh token a
+// silent refresh has just rotated ends the session it rotated into (#466).
+func TestLogoutWithRotatedToken(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	app := newAuthApp(t)
+	registerUser(t, app, "rotated-logout@example.com", testPassword)
+	a := loginUser(t, app, "rotated-logout@example.com", testPassword)
+	b := refreshUser(t, app, a.RefreshToken)
+	rec := postJSON(t, app, "/api/v1/auth/logout", `{"refresh_token":"`+a.RefreshToken+`"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("logout with the rotated token = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	if me := getMe(t, app, b.AccessToken); me != http.StatusUnauthorized {
+		t.Fatalf("GET /me with the session the token rotated into = %d, want 401", me)
+	}
+	rec = postJSON(t, app, "/api/v1/auth/refresh", `{"refresh_token":"`+b.RefreshToken+`"}`)
+	assertError(t, rec, http.StatusUnauthorized, "authentication")
+
+	// A logout whose walk cannot reach the session's head fails with a 500
+	// rather than answer 200 with the session alive.
+	defer auth.SetMaxChainHops(1)()
+	c := loginUser(t, app, "rotated-logout@example.com", testPassword)
+	d := refreshUser(t, app, c.RefreshToken)
+	rec = postJSON(t, app, "/api/v1/auth/logout", `{"refresh_token":"`+c.RefreshToken+`"}`)
+	assertError(t, rec, http.StatusInternalServerError, "internal")
+	if me := getMe(t, app, d.AccessToken); me != http.StatusOK {
+		t.Fatalf("GET /me after the failed logout = %d, want 200: it ended nothing", me)
+	}
+}
+
 // TestBearerSchemeIsCaseInsensitive: a valid access token authenticates
 // whatever the case of its Authorization scheme (RFC 9110 §11.1), as clients,
 // proxies and gateways send `bearer` too (#464).
