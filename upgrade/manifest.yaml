@@ -1168,19 +1168,25 @@ releases:
       - id: generate-after-field-removal
         kind: informational
         area: cli
-        summary: "`gombit generate` regenerates a resource whose model lost, renamed or retyped a field, or whose `*.gen.go` were deleted, instead of failing with a Go compile error from the stale generated files."
+        summary: "`gombit generate` regenerates a resource whose model lost, renamed or retyped a field, whose `*.gen.go` were deleted or conflicted, or whose `*.gen.go` call a framework API an upgrade changed, instead of failing with a Go compile error from the stale generated files."
         details: |
           The loader compiles each resource package, and after a field was
           removed, renamed or retyped the committed `*.gen.go` (or, once those
           were deleted, a `hooks.go` using their types) no longer built against
           the model: `gombit generate`, `--check` and `gombit upgrade contract`
-          failed with a compile error, and `--check` reported no drift. When the
-          package does not build as it is, the loader now runs once more with
-          every non-test file but the model's stubbed, so it reads the current
-          model and regenerates. A model that depends on another hand-written
-          file of its package still needs the package to build. Nothing to
-          change; a `hooks.go` that uses a removed field must be updated by hand
-          after regenerating, as before.
+          failed with a compile error, and `--check` reported no drift. The
+          same held after an upgrade changed a framework API the old
+          `*.gen.go` call: v0.8.0's `database-search-takes-context` note says
+          to run `gombit generate`, which could not run. When the package
+          does not build as it is, the loader now runs once more with the
+          files declaring the model and the hand-written files declaring a
+          name it uses (an enum type of the package) only, the rest stubbed (a
+          file that does not parse, such as a `*.gen.go` with merge-conflict
+          markers, included), and prints a notice that the package did not
+          build. A model needing more than that still needs the package to
+          build. Nothing to change; a `hooks.go` that uses a removed field
+          must be updated by hand after regenerating, as before (run `go
+          build`).
         refs: [467]
 
       - id: bearer-scheme-case-insensitive

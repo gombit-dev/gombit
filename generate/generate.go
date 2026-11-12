@@ -24,6 +24,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path"
@@ -228,9 +229,13 @@ func prepare(ctx context.Context, opts Options) (absWorkDir string, models []mig
 // it, and neither does a hooks.go using the generated types when those files
 // are deleted, so the regeneration that would fix them could never run
 // (#467). The first attempt keeps every hand-written file a model may need;
-// the retry needs only the files declaring the models. The first attempt's
-// build errors are shown only if the retry fails too: they describe the
-// package as `go build` sees it.
+// the retry needs only the files declaring the models (and the hand-written
+// ones they use). The first attempt's build errors are shown only if the
+// retry fails too: they describe the package as `go build` sees it. When the
+// retry is what renders, a notice says the package did not build, since it
+// may still not once the generated files are current. The failure may come
+// from the model's fields or from the framework's API, as when an upgrade
+// changes a function the old *.gen.go call (v0.8.0's database.Search).
 func loadModels(ctx context.Context, opts Options, absWorkDir string, models []migrations.Model) ([]resourcegen.GeneratedArtifact, error) {
 	var firstErrs bytes.Buffer
 	first := opts
@@ -252,14 +257,45 @@ func loadModels(ctx context.Context, opts Options, absWorkDir string, models []m
 		_, _ = opts.Stderr.Write(firstErrs.Bytes())
 		return nil, err
 	}
+	// Generated from the models alone: say so, since the package may still
+	// not build once the *.gen.go are current (a hooks.go using a removed
+	// field, a call to a framework API that changed).
+	_, _ = fmt.Fprintf(opts.Stderr, "generate: %s did not build as it was; read %s from the model files alone. Run go build to see what is left to fix.\n",
+		strings.Join(resourceDirs(models), ", "), pluralize(len(models), "the model", "the models"))
 	return artifacts, nil
 }
 
-// isolationOverlay stubs, in each resource package, every non-test .go file
-// that declares none of the package's models down to its package clause, so
-// the loader compiles the models without the generator-owned files and hooks
-// built on them. A file that does not parse is left as it is, for the
-// compiler to report.
+// resourceDirs are the models' package directories, sorted, each once.
+func resourceDirs(models []migrations.Model) []string {
+	seen := map[string]bool{}
+	var dirs []string
+	for _, m := range models {
+		d := "internal/" + path.Base(m.ImportPath)
+		if !seen[d] {
+			seen[d] = true
+			dirs = append(dirs, d)
+		}
+	}
+	sort.Strings(dirs)
+	return dirs
+}
+
+func pluralize(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
+}
+
+// isolationOverlay stubs, in each resource package, the files the models do
+// not need (resourcegen.StubPackage), so the loader compiles the models
+// without the generator-owned files and the hooks built on them. It keeps the
+// files declaring a model, and the hand-written ones (no generated header)
+// declaring a package-level name a model's file uses: an enum type of its
+// own (`type Status string` in status.go), say. Test files are not compiled
+// by the loader and are left alone. A file that does not parse is stubbed: the
+// first run reported its error, and kept it would only make the retry fail
+// too, as with a generated file left with merge-conflict markers.
 func isolationOverlay(absWorkDir string, models []migrations.Model) (map[string][]byte, error) {
 	types := map[string]map[string]bool{}
 	for _, m := range models {
@@ -272,44 +308,102 @@ func isolationOverlay(absWorkDir string, models []migrations.Model) (map[string]
 	overlay := map[string][]byte{}
 	for pkg, names := range types {
 		dir := filepath.Join(absWorkDir, "internal", pkg)
-		entries, err := os.ReadDir(dir)
+		keep, err := modelFiles(dir, names)
 		if err != nil {
-			return nil, fmt.Errorf("generate: read internal/%s: %w", pkg, err)
+			return nil, err
 		}
-		stub := []byte("package " + pkg + "\n")
-		for _, e := range entries {
-			name := e.Name()
-			if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-				continue
-			}
-			file := filepath.Join(dir, name)
-			if !declaresAnyType(file, names) {
-				overlay[file] = stub
-			}
+		stubs, err := resourcegen.StubPackage(dir, pkg, func(file string) bool {
+			return strings.HasSuffix(file, "_test.go") || keep[file]
+		})
+		if err != nil {
+			return nil, fmt.Errorf("generate: %w", err)
 		}
+		maps.Copy(overlay, stubs)
 	}
 	return overlay, nil
 }
 
-// declaresAnyType reports whether the Go file declares a type named in
-// names; a file that does not parse counts as declaring one, so it is kept.
-func declaresAnyType(file string, names map[string]bool) bool {
-	f, err := parser.ParseFile(token.NewFileSet(), file, nil, parser.SkipObjectResolution)
+// modelFiles are the non-test files of the package in dir the models named
+// in names need: the ones declaring a model, and the hand-written ones
+// declaring a package-level name a model's file uses. Files that do not
+// parse are left out.
+func modelFiles(dir string, names map[string]bool) (map[string]bool, error) {
+	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return true
+		return nil, fmt.Errorf("generate: read %s: %w", dir, err)
 	}
-	for _, decl := range f.Decls {
-		gen, ok := decl.(*ast.GenDecl)
-		if !ok || gen.Tok != token.TYPE {
+	type parsed struct {
+		path     string
+		file     *ast.File
+		declares map[string]bool
+	}
+	var files []parsed
+	used := map[string]bool{}
+	keep := map[string]bool{}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			continue
 		}
-		for _, spec := range gen.Specs {
-			if ts, ok := spec.(*ast.TypeSpec); ok && names[ts.Name.Name] {
+		file := filepath.Join(dir, name)
+		f, err := parser.ParseFile(token.NewFileSet(), file, nil, parser.SkipObjectResolution|parser.ParseComments)
+		if err != nil {
+			continue
+		}
+		p := parsed{path: file, file: f, declares: topLevelNames(f)}
+		files = append(files, p)
+		for n := range p.declares {
+			if names[n] {
+				keep[file] = true
+			}
+		}
+		if keep[file] {
+			ast.Inspect(f, func(n ast.Node) bool {
+				if id, ok := n.(*ast.Ident); ok {
+					used[id.Name] = true
+				}
 				return true
+			})
+		}
+	}
+	for _, p := range files {
+		if keep[p.path] || ast.IsGenerated(p.file) {
+			continue
+		}
+		for n := range p.declares {
+			if used[n] {
+				keep[p.path] = true
+				break
 			}
 		}
 	}
-	return false
+	return keep, nil
+}
+
+// topLevelNames are the package-level names f declares: types, constants,
+// variables and functions (not methods).
+func topLevelNames(f *ast.File) map[string]bool {
+	out := map[string]bool{}
+	for _, decl := range f.Decls {
+		switch d := decl.(type) {
+		case *ast.FuncDecl:
+			if d.Recv == nil {
+				out[d.Name.Name] = true
+			}
+		case *ast.GenDecl:
+			for _, spec := range d.Specs {
+				switch sp := spec.(type) {
+				case *ast.TypeSpec:
+					out[sp.Name.Name] = true
+				case *ast.ValueSpec:
+					for _, n := range sp.Names {
+						out[n.Name] = true
+					}
+				}
+			}
+		}
+	}
+	return out
 }
 
 // PlanResource runs the Program-Mode phase-2 render for a single pending

@@ -186,14 +186,18 @@ version.
 ### Fixed
 
 - `gombit generate` (and `--check`, and `gombit upgrade contract`)
-  regenerates a resource whose model lost, renamed or retyped a field, or
-  whose `*.gen.go` were deleted. The loader compiles the resource package,
-  and the stale `*.gen.go` (or a `hooks.go` using their types) no longer
-  built against the changed model, so it failed with a Go compile error,
-  `--check` reported that instead of drift, and only hand-editing the
-  generated files got out. When the package does not build as it is, the
-  loader now runs again with every file but the model's set aside, as
-  `make resource --force` does
+  regenerates a resource whose model lost, renamed or retyped a field, whose
+  `*.gen.go` were deleted or left with merge-conflict markers, or whose
+  `*.gen.go` call a framework API an upgrade changed (as v0.8.0's
+  `database.Search`, whose upgrade note says to run `gombit generate`, which
+  could not run). The loader compiles the resource package, and the stale
+  `*.gen.go` (or a `hooks.go` using their types) no longer built, so it
+  failed with a Go compile error, `--check` reported that instead of drift,
+  and only hand-editing the generated files got out. When the package does
+  not build as it is, the loader now runs again with the model's files and
+  the hand-written files they use (an enum type of the package) only, the
+  others set aside as `make resource --force` does, and says so: the package
+  may still need fixing by hand once the `*.gen.go` are current
   ([#467](https://github.com/gombit-dev/gombit/issues/467)).
 
 - A Bearer request whose `Authorization` scheme is not spelled exactly
