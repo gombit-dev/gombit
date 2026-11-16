@@ -76,6 +76,7 @@ var variables = []variable{
 	{envLogLevel, false, func(c Config) string { return string(c.Logging.Level) }},
 	{envLogSink, false, func(c Config) string { return string(c.Logging.Sink) }},
 	{envJWTSecret, true, func(c Config) string { return c.Auth.JWTSecret }},
+	{envAuthMFAKey, true, func(c Config) string { return c.Auth.MFAKey }},
 	{envJWTAccessTTL, false, func(c Config) string { return duration(c.Auth.AccessTokenTTL) }},
 	{envJWTRefreshTTL, false, func(c Config) string { return duration(c.Auth.RefreshTokenTTL) }},
 	{envAuthMode, false, func(c Config) string { return string(c.Auth.Mode) }},

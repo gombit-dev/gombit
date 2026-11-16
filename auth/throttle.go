@@ -93,6 +93,12 @@ type ThrottlePolicy struct {
 	// gives (password change, email change): the guessing of a password
 	// from a stolen session.
 	CurrentPasswordPerUser ThrottleLimit
+	// MFAPerUser bounds the wrong multi-factor codes one user's account is
+	// given (login, enrollment confirmation, disable), from any address. It
+	// stays on with AuthConfig.ThrottleDisabled: it is what bounds guessing
+	// the code, which a per-address limit in front of the app does not. A
+	// replayed code (a login submitted twice) counts as a wrong one.
+	MFAPerUser ThrottleLimit
 	// VerificationPerUser bounds the verification messages one user is sent,
 	// on top of the resend wait (one a minute).
 	VerificationPerUser ThrottleLimit
@@ -110,6 +116,7 @@ func DefaultThrottlePolicy() ThrottlePolicy {
 		TokenPerAddress:         ThrottleLimit{Limit: 30, Window: 15 * time.Minute},
 		CurrentPasswordPerUser:  ThrottleLimit{Limit: 5, Window: 15 * time.Minute},
 		VerificationPerUser:     ThrottleLimit{Limit: 10, Window: time.Hour},
+		MFAPerUser:              ThrottleLimit{Limit: 5, Window: 15 * time.Minute},
 	}
 }
 
@@ -154,6 +161,11 @@ type throttleRule struct {
 	name    string
 	limit   ThrottleLimit
 	subject string
+	// essential rules stay on when the throttles are turned off
+	// (AuthConfig.ThrottleDisabled): they are part of a credential's
+	// strength, not abuse protection a gateway can take over (MFAPerUser
+	// bounds the guessing of a six-digit code from any number of addresses).
+	essential bool
 }
 
 // throttler counts attempts. Its zero store means its own memory cache,
@@ -287,14 +299,14 @@ type reservedKey struct {
 // The refusal names the first rule that refused, with its wait.
 func (t *throttler) reserve(ctx context.Context, rules ...throttleRule) (*reservation, error) {
 	res := &reservation{t: t}
-	if t.disabled {
-		return res, nil
-	}
 	var active []throttleRule
 	for _, rule := range rules {
-		if rule.limit.on() && rule.subject != "" {
+		if rule.limit.on() && rule.subject != "" && (!t.disabled || rule.essential) {
 			active = append(active, rule)
 		}
+	}
+	if len(active) == 0 {
+		return res, nil
 	}
 	previous := make([]int64, len(active))
 	for i, rule := range active {

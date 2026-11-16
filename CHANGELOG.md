@@ -12,6 +12,29 @@ version.
 
 ### Added
 
+- [Multi-factor authentication](docs/auth.md#multi-factor-authentication)
+  (AUTH-9), in both auth modes. A user enrolls a TOTP authenticator
+  (`POST /auth/mfa/totp` with the current password, then
+  `/auth/mfa/totp/confirm` with a code; RFC 6238) and gets ten single-use
+  recovery codes; from then on `POST /auth/login` needs `mfa_code` (a 422
+  on `mfa_code` without it, after the right password only). A code works
+  once (no replay, even concurrently); wrong codes are throttled per
+  account (`MFAPerUser`) on top of the login throttles. Recovery codes are
+  replaced with `/auth/mfa/recovery-codes` and MFA is turned off with
+  `/auth/mfa/disable` (both take the password and a code), and reset by an
+  operator with `auth.users.manage` (`POST /auth/users/{id}/mfa/reset`,
+  which also ends the user's sessions). Confirming an enrollment ends the
+  user's other sessions. The admin's and a new app's login pages ask for the
+  code. `MFAPerUser` stays on with `GOMBIT_AUTH_THROTTLE_DISABLED`. Secrets
+  are encrypted and codes hashed under keys from `GOMBIT_AUTH_MFA_KEY` (or
+  the JWT secret). **Breaking (Go API):** `auth.Service.Authenticate` /
+  `Login` refuse an MFA account without a code (`ErrMFARequired`, a new
+  client error); `AuthenticateMFA` / `LoginMFA` take it. Audited
+  (`auth.mfa.*`). **Breaking (schema):** two tables,
+  `auth_totp_factors` and `auth_recovery_codes`, which logins read: migrate
+  before running this release. **Breaking (api):** the framework registers
+  the MFA routes and schema names.
+
 - [Account state](docs/auth.md#account-state) (AUTH-6), in both auth
   modes. An account is active or disabled (`User.DisabledAt`). Disabling it
   (`POST /auth/users/{id}/disable`, or `auth.Service.DisableUser`) revokes
@@ -199,6 +222,22 @@ version.
   others set aside as `make resource --force` does, and says so: the package
   may still need fixing by hand once the `*.gen.go` are current
   ([#467](https://github.com/gombit-dev/gombit/issues/467)).
+
+- A logout with a refresh token that has already rotated (a silent refresh
+  in flight as the user signs out, or a client still holding the previous
+  token) ends the session it rotated into, instead of answering `200` and
+  revoking nothing while the session lived on until it expired.
+  `auth.Service.RevokeRefresh` follows the token's successors to the
+  session's current token, and takes the user's lock as rotation does, so a
+  logout that races a refresh of the same token now ends the session either
+  way (a limitation `docs/auth.md` listed). The `auth.logout` audit event
+  names the session it ended, and records `"via":"rotated"` when an old
+  token ended it. A rotated token past its own expiry ends nothing, as it
+  refreshes nothing, and answers 200 like an unknown one. A token 1000 or
+  more rotations behind its session's current token (a short access TTL
+  gets there within the refresh TTL), or whose chain cannot be followed,
+  answers 500 and ends nothing; revoke the session instead
+  ([#466](https://github.com/gombit-dev/gombit/issues/466)).
 
 - `config.Validate` and `auth.NewService` refuse an `Auth.BcryptCost`
   outside bcrypt's range (`config.CheckBcryptCost`): it must be `0` (bcrypt's default) or between 4

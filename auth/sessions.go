@@ -28,6 +28,15 @@ var errSessionNotFound = errors.New("auth: session not found")
 // that wait, so the request must not act on it; the routes answer 401.
 var errSessionEnded = errors.New("auth: the request's session has ended")
 
+// errChainUnresolved is a walk along a session's chain (sessionChain) that
+// did not reach the session's head: maxChainHops rows read without reaching
+// it, a cycle, which rotation never writes, or a successor that no longer
+// exists (replaced_by has no foreign key: a manual delete or a partial
+// restore). The row it stopped at is no head, so a
+// caller must fail rather than take it for one (a logout would end nothing
+// and answer success, #466).
+var errChainUnresolved = errors.New("auth: the refresh token chain does not reach its session's head")
+
 // ErrSessionNotFound is returned by RevokeSession when the id names no
 // active session of the user, including a session that has refreshed since
 // its id was listed or that a logout ended while the revocation ran, and by
@@ -170,8 +179,9 @@ func sessionRow(tx *gorm.DB, userID, rid uint, rows []RefreshToken) (uint, error
 // session that refreshed after id was listed has a new id, so the caller
 // lists again rather than having the revoke silently miss. It also returns
 // ErrSessionNotFound when the session's row turns out revoked by the time it
-// is updated (a logout, which does not take the user's lock, ended it
-// first), so a success always means this call ended the session. A user that
+// is updated, so a success always means this call ended the session (every
+// revocation, logout included, takes the user's lock, so one that ended the
+// session first already left it out of the active sessions). A user that
 // does not exist also yields ErrSessionNotFound. It does not look at the
 // caller's own session, which application code (an admin action revoking
 // another user's session, say) does not have; the route checks the
@@ -273,19 +283,27 @@ func lockSessionsError(err error) error {
 	return err
 }
 
-// maxChainHops bounds how far sessionChain follows replaced_by. The chain
-// past a request's row only grows by the rotations that happened since the
-// request was authenticated, so the bound is a backstop, not a limit anything
-// reaches.
-const maxChainHops = 1000
+// maxChainHops bounds how many rows sessionChain reads, one SELECT each,
+// under the user's lock. It is a cost limit and a product limit, not a guard
+// against bad data (the cycle check already ends every walk): a logout
+// walks from any unexpired token of the session, which can be
+// RefreshTokenTTL / (rotation interval) rows behind its head, and the
+// rotation interval is the client's and the deployment's (672 rows with the
+// default TTLs and a refresh every 15 minutes, 1008 with a 10-minute access
+// TTL). A token maxChainHops or more rotations behind its head fails with
+// errChainUnresolved (a 500) and ends nothing; such a session is ended by
+// revoking it (DELETE /auth/sessions/{id}, or ?scope=all). A session id on
+// refresh_tokens would remove the walk. A variable so tests can lower it.
+var maxChainHops = 1000
 
 // sessionChain follows the chain of the user's refresh token rows from
 // fromID: fromID, the row that replaced it, the row that replaced that one,
 // and so on to the row nothing has replaced yet. It returns the ids it
-// followed and the last row it read, which is that row, or the last one it
-// could reach; last is nil when fromID names no row of the user. A cycle
-// (which rotation never writes) or an over-long chain stops the walk rather
-// than looping.
+// followed and that row, the head; last is nil when fromID names no row of
+// the user. A missing successor, a cycle (neither of which rotation writes)
+// or maxChainHops rows read without reaching the head stop the walk with
+// errChainUnresolved rather than looping or returning a row that is not the
+// head.
 func sessionChain(tx *gorm.DB, userID, fromID uint) (ids []uint, last *RefreshToken, err error) {
 	seen := map[uint]bool{fromID: true}
 	ids = []uint{fromID}
@@ -294,20 +312,26 @@ func sessionChain(tx *gorm.DB, userID, fromID uint) (ids []uint, last *RefreshTo
 		var row RefreshToken
 		err := tx.Where("id = ? AND user_id = ?", next, userID).First(&row).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			break
+			if last != nil {
+				return nil, nil, errChainUnresolved // last names a successor that is gone
+			}
+			return ids, nil, nil
 		}
 		if err != nil {
 			return nil, nil, err
 		}
 		last = &row
-		if row.ReplacedBy == nil || seen[*row.ReplacedBy] {
-			break
+		if row.ReplacedBy == nil {
+			return ids, last, nil
+		}
+		if seen[*row.ReplacedBy] {
+			return nil, nil, errChainUnresolved
 		}
 		next = *row.ReplacedBy
 		seen[next] = true
 		ids = append(ids, next)
 	}
-	return ids, last, nil
+	return nil, nil, errChainUnresolved
 }
 
 // requesterChain is sessionChain for the request's own session, from the row

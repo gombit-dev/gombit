@@ -36,8 +36,8 @@ type cookieLogoutOutput struct {
 }
 
 func (s *Service) loginCookie(ctx context.Context, input *cookieLoginInput) (*cookieSessionOutput, error) {
-	user, pair, err := s.Login(ctx, input.Body.Email, input.Body.Password)
-	if errors.Is(err, errInvalidCredentials) || errors.Is(err, ErrTooManyAttempts) || errors.Is(err, errAccountDisabled) {
+	user, pair, err := s.LoginMFA(ctx, input.Body.Email, input.Body.Password, input.Body.MFACode)
+	if loginClientError(err) {
 		return nil, mapServiceError(ctx, err)
 	}
 	if err != nil {

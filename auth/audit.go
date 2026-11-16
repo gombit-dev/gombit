@@ -45,6 +45,18 @@ const (
 	AuditUserDisabled AuditAction = "auth.user.disabled"
 	// AuditUserEnabled: a disabled account was enabled again.
 	AuditUserEnabled AuditAction = "auth.user.enabled"
+	// AuditMFAEnabled: a TOTP authenticator was confirmed (MFA on).
+	AuditMFAEnabled AuditAction = "auth.mfa.enabled"
+	// AuditMFADisabled: the user turned their MFA off.
+	AuditMFADisabled AuditAction = "auth.mfa.disabled"
+	// AuditMFAReset: an operator removed a user's MFA.
+	AuditMFAReset AuditAction = "auth.mfa.reset"
+	// AuditMFAFailed: an MFA operation refused a wrong password or code.
+	AuditMFAFailed AuditAction = "auth.mfa.failed"
+	// AuditMFARecoveryCodesRegenerated: the recovery codes were replaced.
+	AuditMFARecoveryCodesRegenerated AuditAction = "auth.mfa.recovery_codes_regenerated"
+	// AuditMFARecoveryCodeUsed: a login (or a disable) used a recovery code.
+	AuditMFARecoveryCodeUsed AuditAction = "auth.mfa.recovery_code_used"
 	// AuditRefreshReuse: an already-rotated refresh token was presented
 	// again, and every session of the user was revoked.
 	AuditRefreshReuse AuditAction = "auth.refresh.reuse_detected"

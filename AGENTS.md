@@ -143,7 +143,11 @@ through `cache.Counter` (`IncrementTTL`, `DecrementExisting`); `auth.ThrottlePol
 (`User.DisabledAt`; `POST {prefix}/auth/users/{id}/disable` / `enable`
 behind `auth.PermissionManageUsers`, `Service.DisableUser` / `EnableUser`;
 disabling revokes the sessions and voids the links, and every path refuses
-a disabled account); see `docs/auth.md`.
+a disabled account), and AUTH-9 (#339): TOTP multi-factor authentication
+(`auth_totp_factors`, encrypted secrets; `auth_recovery_codes`, hashed,
+single-use; `/auth/mfa/*`, the login's `mfa_code` challenge as a 422,
+`AuthenticateMFA` / `LoginMFA`, `MFAPerUser`, `GOMBIT_AUTH_MFA_KEY`, the
+operator reset); see `docs/auth.md`.
 Don't assume generated apps are committed in-tree; `gombit new` writes them
 on demand. Check `git log` / `ls` before describing "how the code works."
 

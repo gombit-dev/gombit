@@ -193,8 +193,30 @@ func ContextWithAddress(ctx context.Context, ip string) context.Context {
 // ThrottleProbed reports whether the probe of the throttles' store decided.
 func ThrottleProbed(s *Service) bool { return s.throttle.probed.Load() }
 
+// ErrChainUnresolved is the error of a walk along a session's chain that did
+// not reach the session's head.
+var ErrChainUnresolved = errChainUnresolved
+
+// SetMaxChainHops lowers how many rows a walk along a session's chain reads
+// before it fails, and returns the function that restores it.
+func SetMaxChainHops(n int) (restore func()) {
+	old := maxChainHops
+	maxChainHops = n
+	return func() { maxChainHops = old }
+}
+
 // EnsurePermissionRow is EnsurePermission inserting fresh as given, so a
 // test can make the insert violate a constraint other than the key's.
 func EnsurePermissionRow(ctx context.Context, db *gorm.DB, fresh *Permission) (Permission, error) {
 	return ensureRow(ctx, db, "permission_key = ?", fresh.Key, fresh)
+}
+
+// TOTPCode is the code of the base32 secret at at, as an authenticator app
+// shows it.
+func TOTPCode(secret string, at time.Time) string {
+	key, err := totpSecretEncoding.DecodeString(secret)
+	if err != nil {
+		panic(err)
+	}
+	return totpCode(key, totpStep(at))
 }
