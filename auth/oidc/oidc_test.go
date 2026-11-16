@@ -96,7 +96,8 @@ func newIssuer(t *testing.T) *issuer {
 		iss.mu.Lock()
 		iss.grants[code] = grant{challenge: q.Get("code_challenge"), nonce: q.Get("nonce"), claims: iss.claims}
 		iss.mu.Unlock()
-		http.Redirect(w, r, q.Get("redirect_uri")+"?"+url.Values{"code": {code}, "state": {q.Get("state")}}.Encode(), http.StatusFound)
+		// The test issuer redirects to the redirect_uri it just checked equals redirectURL.
+		http.Redirect(w, r, redirectURL+"?"+url.Values{"code": {code}, "state": {q.Get("state")}}.Encode(), http.StatusFound)
 	})
 	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<16)

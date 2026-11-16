@@ -415,7 +415,7 @@ func runExternalIdentity(t *testing.T, db *database.DB, mode config.AuthMode) {
 		} {
 			other := &browser{jar: newCookieJar()}
 			if tc.cookie != "" {
-				other.jar.cookies[auth.ExternalStateCookieName] = &http.Cookie{Name: auth.ExternalStateCookieName, Value: tc.cookie}
+				other.jar.cookies[auth.ExternalStateCookieName] = &http.Cookie{Name: auth.ExternalStateCookieName, Value: tc.cookie} //nolint:gosec // G124: a test jar entry; requests carry only name/value.
 			}
 			rec := e.do(other, http.MethodGet, "/api/v1/auth/external/"+tc.provider+"/callback?"+tc.query, "")
 			assertError(t, rec, http.StatusUnprocessableEntity, "validation_error")
@@ -426,7 +426,9 @@ func runExternalIdentity(t *testing.T, db *database.DB, mode config.AuthMode) {
 		// The flow's own browser still completes it, once.
 		loc := e.callback(t, b, "fake", url.Values{"code": {code}, "state": {st}}.Encode())
 		e.session(t, b, loc)
-		rec := e.do(&browser{jar: &cookieJar{cookies: map[string]*http.Cookie{auth.ExternalStateCookieName: {Name: auth.ExternalStateCookieName, Value: sealed}}}},
+		replay := &browser{jar: newCookieJar()}
+		replay.jar.cookies[auth.ExternalStateCookieName] = &http.Cookie{Name: auth.ExternalStateCookieName, Value: sealed} //nolint:gosec // G124: a test jar entry; requests carry only name/value.
+		rec := e.do(replay,
 			http.MethodGet, "/api/v1/auth/external/fake/callback?"+url.Values{"code": {code}, "state": {st}}.Encode(), "")
 		if rec.Code != http.StatusFound || !strings.Contains(rec.Header().Get("Location"), "gombit_error=provider_error") {
 			t.Fatalf("a replayed callback = %d %s", rec.Code, rec.Header().Get("Location"))
