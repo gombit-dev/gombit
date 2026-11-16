@@ -365,11 +365,17 @@ func revokeOtherSessionsTx(tx *gorm.DB, userID, keepID uint, now time.Time) erro
 }
 
 // revokeSessionsButTx ends every active refresh token row of the user but
-// the rows keep (a session's chain, from requesterChain).
+// the rows keep (a session's chain, from requesterChain), and voids the
+// external sign-in codes not yet exchanged (each another session about to
+// start).
 func revokeSessionsButTx(tx *gorm.DB, userID uint, keep []uint, now time.Time) error {
-	return tx.Model(&RefreshToken{}).
+	err := tx.Model(&RefreshToken{}).
 		Where("user_id = ? AND revoked_at IS NULL AND id NOT IN ?", userID, keep).
 		Update("revoked_at", now).Error
+	if err != nil {
+		return err
+	}
+	return voidTokensTx(tx, userID, 0, now, PurposeExternalLogin)
 }
 
 // revokeOtherSessions ends every active session of the user except the one

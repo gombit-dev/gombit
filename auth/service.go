@@ -35,6 +35,18 @@ type Service struct {
 	// mfaKeyWarned is when an undecryptable TOTP secret was last logged
 	// (unix seconds).
 	mfaKeyWarned atomic.Int64
+	// providers are the external identity providers (external.go), by
+	// name; providerNames keeps their registration order, and providerErr
+	// what WithIdentityProviders refused (NewService returns it).
+	providers         map[string]IdentityProvider
+	providerNames     []string
+	providerErr       error
+	externalSignupOff bool
+	// apiPrefix is the routes' prefix (Mount), for the state cookie's path.
+	apiPrefix string
+	// production makes the external flow's cookies Secure whatever
+	// CookieSecure says.
+	production bool
 	// throttle counts the credential endpoints' attempts (throttle.go).
 	throttle    *throttler
 	dummyOnce   sync.Once
@@ -112,6 +124,7 @@ func NewService(db *gorm.DB, cfg config.Config, opts ...Option) (*Service, error
 		mailer: noMailer{},
 		logger: zap.NewNop(),
 	}
+	s.production = cfg.Environment == config.EnvironmentProduction
 	s.auditor = DBAuditor(db)
 	s.mfaIssuer = cfg.AppName
 	if s.mfaIssuer == "" {
@@ -126,6 +139,9 @@ func NewService(db *gorm.DB, cfg config.Config, opts ...Option) (*Service, error
 	}
 	for _, opt := range opts {
 		opt(s)
+	}
+	if s.providerErr != nil {
+		return nil, s.providerErr
 	}
 	if !s.throttle.disabled {
 		// Off the request path: whether the throttles' store keeps counts.
@@ -270,6 +286,13 @@ func (s *Service) AuthenticateMFA(ctx context.Context, email, password, code str
 		s.Audit(ctx, AuditEvent{Action: AuditLoginFailed, Details: details("reason", "unknown_account")})
 		return User{}, errInvalidCredentials
 	}
+	if !user.HasUsablePassword() {
+		// An account made by an external sign-in, with no password yet: no
+		// password is its password. Timed as a wrong one.
+		s.compareDummy(password)
+		s.Audit(ctx, AuditEvent{Action: AuditLoginFailed, TargetUserID: uintPtr(user.ID), Details: details("reason", "no_password")})
+		return User{}, errInvalidCredentials
+	}
 	if err := s.hasher.Compare(user.PasswordHash, password); err != nil {
 		s.Audit(ctx, AuditEvent{Action: AuditLoginFailed, TargetUserID: uintPtr(user.ID), Details: details("reason", "wrong_password")})
 		return User{}, errInvalidCredentials
@@ -350,6 +373,12 @@ func (s *Service) IssueTokens(ctx context.Context, user User) (TokenPair, error)
 // against them, and only if the stored password hash is still the one in
 // user's snapshot.
 func (s *Service) startSession(ctx context.Context, user User) (User, TokenPair, error) {
+	return s.startSessionWith(ctx, user, "")
+}
+
+// startSessionWith is startSession recording det as the successful login's
+// audit details (an external sign-in names its provider).
+func (s *Service) startSessionWith(ctx context.Context, user User, det string) (User, TokenPair, error) {
 	var pair TokenPair
 	var locked User
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -402,7 +431,7 @@ func (s *Service) startSession(ctx context.Context, user User) (User, TokenPair,
 	if err != nil {
 		return User{}, TokenPair{}, err
 	}
-	s.Audit(ctx, AuditEvent{Action: AuditLoginSucceeded, ActorUserID: uintPtr(locked.ID), TargetUserID: uintPtr(locked.ID)})
+	s.Audit(ctx, AuditEvent{Action: AuditLoginSucceeded, ActorUserID: uintPtr(locked.ID), TargetUserID: uintPtr(locked.ID), Details: det})
 	return locked, pair, nil
 }
 
@@ -920,12 +949,17 @@ func lockUserTx(tx *gorm.DB, userID uint) (User, error) {
 	return user, err
 }
 
-// revokeAllTx revokes every active refresh token of the user. tx must hold
-// lockUserTx.
+// revokeAllTx revokes every active refresh token of the user, and voids
+// the external sign-in codes not yet exchanged (each a session about to
+// start). tx must hold lockUserTx.
 func revokeAllTx(tx *gorm.DB, userID uint, now time.Time) error {
-	return tx.Model(&RefreshToken{}).
+	err := tx.Model(&RefreshToken{}).
 		Where("user_id = ? AND revoked_at IS NULL", userID).
 		Update("revoked_at", now).Error
+	if err != nil {
+		return err
+	}
+	return voidTokensTx(tx, userID, 0, now, PurposeExternalLogin)
 }
 
 func (s *Service) compareDummy(password string) {

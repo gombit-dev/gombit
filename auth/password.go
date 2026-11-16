@@ -60,7 +60,8 @@ func (s *Service) RequestPasswordReset(ctx context.Context, email string) error 
 // user no longer has. The user's other reset tokens and their email change
 // links (asked with the old password) stop working, and
 // unless AuthConfig.PasswordResetKeepSessions, so do all of the user's
-// sessions and refresh tokens, in the same transaction.
+// sessions and refresh tokens, and the user's linked external identities
+// are removed, in the same transaction.
 func (s *Service) ResetPassword(ctx context.Context, raw, password string) (User, error) {
 	user, err := throttleTokenUse(ctx, s, func() (User, error) { return s.consumeReset(ctx, raw, password) })
 	if err == nil {
@@ -96,6 +97,7 @@ func (s *Service) consumeReset(ctx context.Context, raw, password string) (User,
 	}
 	revoke := !s.cfg.PasswordResetKeepSessions
 	var user User
+	var unlinked int64
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		token, locked, now, err := s.consumeOneTimeToken(tx, raw, PurposeResetPassword)
 		if err != nil {
@@ -111,6 +113,14 @@ func (s *Service) consumeReset(ctx context.Context, raw, password string) (User,
 			if err := revokeAllTx(tx, locked.ID, now); err != nil {
 				return err
 			}
+			// Linked identities sign in like sessions do: a reset that
+			// ends the sessions (the recovery from a compromise) removes
+			// them too, or an identity an intruder linked would outlive it.
+			removed := tx.Where("user_id = ?", locked.ID).Delete(&IdentityLink{})
+			if removed.Error != nil {
+				return removed.Error
+			}
+			unlinked = removed.RowsAffected
 		}
 		locked.PasswordHash = hash
 		user = locked
@@ -119,7 +129,7 @@ func (s *Service) consumeReset(ctx context.Context, raw, password string) (User,
 	if err != nil {
 		return User{}, err
 	}
-	s.Audit(ctx, AuditEvent{Action: AuditPasswordReset, ActorUserID: uintPtr(user.ID), TargetUserID: uintPtr(user.ID), Details: details("sessions_revoked", strconv.FormatBool(revoke))})
+	s.Audit(ctx, AuditEvent{Action: AuditPasswordReset, ActorUserID: uintPtr(user.ID), TargetUserID: uintPtr(user.ID), Details: details("sessions_revoked", strconv.FormatBool(revoke), "identities_unlinked", strconv.FormatInt(unlinked, 10))})
 	return user, nil
 }
 

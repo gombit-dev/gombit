@@ -2,6 +2,7 @@ package resourcegen_test
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -128,11 +129,27 @@ func newMountedAPI(t *testing.T, mode config.AuthMode) huma.API {
 		framework.WithConfig(cfg),
 		framework.WithDatabase(db),
 		framework.WithLogger(zap.NewNop()),
+		// With a provider, so the external identity routes are mounted too.
+		framework.WithAuthIdentityProviders(stubProvider{}),
 	)
 	if err != nil {
 		t.Fatalf("framework.New: %v", err)
 	}
 	return app.API()
+}
+
+// stubProvider is an identity provider that is never called: it mounts the
+// external identity routes.
+type stubProvider struct{}
+
+func (stubProvider) Name() string { return "stub" }
+
+func (stubProvider) AuthCodeURL(auth.AuthorizationRequest) (string, error) {
+	return "", errors.New("stub")
+}
+
+func (stubProvider) Exchange(context.Context, auth.ExchangeRequest) (auth.ExternalIdentity, error) {
+	return auth.ExternalIdentity{}, errors.New("stub")
 }
 
 // operationIDs lists every operation ID registered on api, sorted so a failure

@@ -147,7 +147,12 @@ a disabled account), and AUTH-9 (#339): TOTP multi-factor authentication
 (`auth_totp_factors`, encrypted secrets; `auth_recovery_codes`, hashed,
 single-use; `/auth/mfa/*`, the login's `mfa_code` challenge as a 422,
 `AuthenticateMFA` / `LoginMFA`, `MFAPerUser`, `GOMBIT_AUTH_MFA_KEY`, the
-operator reset); see `docs/auth.md`.
+operator reset), and AUTH-10 (#340): external identity providers (the
+`auth.IdentityProvider` adapter boundary, `framework.WithAuthIdentityProviders`,
+the optional OIDC adapter `auth/oidc`; framework-owned state/nonce/PKCE in
+an encrypted cookie, `auth_identity_links`, signup only for a verified
+email no account has, explicit linking, `{prefix}/auth/external/*`); see
+`docs/auth.md`.
 Don't assume generated apps are committed in-tree; `gombit new` writes them
 on demand. Check `git log` / `ls` before describing "how the code works."
 

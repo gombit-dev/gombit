@@ -506,7 +506,7 @@ func TestGeneratePassesAllAutoMigrateModels(t *testing.T) {
 	if !hasCollectedModel(got, "github.com/gombit-dev/gombit/auth", "AuditEvent") {
 		t.Fatalf("MakeMigrations models = %#v, want runtime auth.AuditEvent", got)
 	}
-	for _, model := range []string{"TOTPFactor", "RecoveryCode"} {
+	for _, model := range []string{"TOTPFactor", "RecoveryCode", "IdentityLink"} {
 		if !hasCollectedModel(got, "github.com/gombit-dev/gombit/auth", model) {
 			t.Fatalf("MakeMigrations models = %#v, want runtime auth.%s", got, model)
 		}
@@ -520,7 +520,7 @@ func TestGeneratePassesAllAutoMigrateModels(t *testing.T) {
 	if !hasCollectedModel(got, mod+"/internal/book", "Book") {
 		t.Fatalf("MakeMigrations models = %#v, want generated book", got)
 	}
-	if len(got) != 11 {
+	if len(got) != 12 {
 		t.Fatalf("MakeMigrations models = %#v, want all framework models plus product + book", got)
 	}
 }
