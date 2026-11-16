@@ -95,6 +95,7 @@ recognizes:
 | `GOMBIT_AUTH_PASSWORD_RESET_KEEP_SESSIONS` | `Config.Auth.PasswordResetKeepSessions` | `false`: a reset revokes every session of the user |
 | `GOMBIT_AUTH_REFRESH_REUSE_GRACE` | `Config.Auth.RefreshReuseGrace` | `30s`: a rotated refresh token presented again within it, its successor still live, is a 401 that revokes nothing; `0` is strict reuse detection; negative is refused |
 | `GOMBIT_AUTH_THROTTLE_DISABLED` | `Config.Auth.ThrottleDisabled` | `false`: the credential endpoints are throttled ([auth.md](auth.md#abuse-protection)) |
+| `GOMBIT_AUTH_MFA_KEY` | `Config.Auth.MFAKey` | empty: the MFA keys derive from `GOMBIT_JWT_SECRET`; at least 32 characters when set ([auth.md](auth.md#multi-factor-authentication)) |
 | `GOMBIT_SECURITY_SANITIZE_INPUT` | `Config.Security.SanitizeInput` | `false` (opt-in) |
 
 `.env` is read whole, lines of any length, and a file that exists but cannot be

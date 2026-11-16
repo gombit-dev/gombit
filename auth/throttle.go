@@ -93,6 +93,9 @@ type ThrottlePolicy struct {
 	// gives (password change, email change): the guessing of a password
 	// from a stolen session.
 	CurrentPasswordPerUser ThrottleLimit
+	// MFAPerUser bounds the wrong multi-factor codes one user's account is
+	// given (login, enrollment confirmation, disable), from any address.
+	MFAPerUser ThrottleLimit
 	// VerificationPerUser bounds the verification messages one user is sent,
 	// on top of the resend wait (one a minute).
 	VerificationPerUser ThrottleLimit
@@ -110,6 +113,7 @@ func DefaultThrottlePolicy() ThrottlePolicy {
 		TokenPerAddress:         ThrottleLimit{Limit: 30, Window: 15 * time.Minute},
 		CurrentPasswordPerUser:  ThrottleLimit{Limit: 5, Window: 15 * time.Minute},
 		VerificationPerUser:     ThrottleLimit{Limit: 10, Window: time.Hour},
+		MFAPerUser:              ThrottleLimit{Limit: 5, Window: 15 * time.Minute},
 	}
 }
 

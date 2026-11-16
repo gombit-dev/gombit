@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gombit-dev/gombit/config"
@@ -29,6 +30,11 @@ type Service struct {
 	// background runs the work the routes accept and finish after
 	// answering (background.go); Close drains it.
 	background *backgroundRunner
+	// mfaIssuer names the app in an authenticator (AppName).
+	mfaIssuer string
+	// mfaKeyWarned is when an undecryptable TOTP secret was last logged
+	// (unix seconds).
+	mfaKeyWarned atomic.Int64
 	// throttle counts the credential endpoints' attempts (throttle.go).
 	throttle    *throttler
 	dummyOnce   sync.Once
@@ -107,6 +113,10 @@ func NewService(db *gorm.DB, cfg config.Config, opts ...Option) (*Service, error
 		logger: zap.NewNop(),
 	}
 	s.auditor = DBAuditor(db)
+	s.mfaIssuer = cfg.AppName
+	if s.mfaIssuer == "" {
+		s.mfaIssuer = "Gombit"
+	}
 	s.background = newBackgroundRunner()
 	s.throttle = &throttler{
 		policy:   DefaultThrottlePolicy(),
@@ -224,6 +234,16 @@ func (s *Service) createUser(ctx context.Context, email, password string, superu
 // database error), which a caller must not answer as wrong credentials
 // (#460).
 func (s *Service) Authenticate(ctx context.Context, email, password string) (User, error) {
+	return s.AuthenticateMFA(ctx, email, password, "")
+}
+
+// AuthenticateMFA is Authenticate with the second factor of an account with
+// MFA enabled: code is a code from its authenticator or one of its recovery
+// codes. Such an account answers ErrMFARequired for no code (told, like a
+// disabled account, only after the right password) and ErrInvalidMFACode for
+// a wrong one (a failure, throttled by MFAPerUser too). For an account
+// without MFA, code is ignored.
+func (s *Service) AuthenticateMFA(ctx context.Context, email, password, code string) (User, error) {
 	email = normalizeEmail(email)
 	// Throttled before the lookup and bcrypt, by the email as typed: the
 	// same for an account and an address that is none. A success does not
@@ -258,6 +278,22 @@ func (s *Service) Authenticate(ctx context.Context, email, password string) (Use
 		s.Audit(ctx, AuditEvent{Action: AuditLoginFailed, TargetUserID: uintPtr(user.ID), Details: details("reason", "account_disabled")})
 		return User{}, errAccountDisabled
 	}
+	switch err := s.checkMFA(ctx, user, code); {
+	case errors.Is(err, errMFARequired):
+		// The password was right: no failure, but no login either (no
+		// address becomes known, nothing is cleared). The client asks for
+		// the code and logs in again with it.
+		res.refund()
+		return User{}, err
+	case errors.Is(err, errInvalidMFACode):
+		s.Audit(ctx, AuditEvent{Action: AuditLoginFailed, TargetUserID: uintPtr(user.ID), Details: details("reason", "wrong_mfa_code")})
+		return User{}, err
+	case err != nil:
+		// A server failure or the MFAPerUser throttle: not the client's
+		// password's fault.
+		res.refund()
+		return User{}, err
+	}
 	res.refundExcept(pair.name)
 	s.throttle.clear(ctx, pair)
 	s.throttle.markKnown(ctx, pair)
@@ -271,7 +307,13 @@ func (s *Service) Authenticate(ctx context.Context, email, password string) (Use
 // session either finds the session and revokes it, or makes this login fail
 // as invalid credentials. The old password never outlives its change.
 func (s *Service) Login(ctx context.Context, email, password string) (User, TokenPair, error) {
-	user, err := s.Authenticate(ctx, email, password)
+	return s.LoginMFA(ctx, email, password, "")
+}
+
+// LoginMFA is Login with the second factor of an account with MFA enabled
+// (AuthenticateMFA), as POST /auth/login with mfa_code.
+func (s *Service) LoginMFA(ctx context.Context, email, password, code string) (User, TokenPair, error) {
+	user, err := s.AuthenticateMFA(ctx, email, password, code)
 	if err != nil {
 		return User{}, TokenPair{}, err
 	}

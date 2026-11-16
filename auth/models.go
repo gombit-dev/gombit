@@ -123,7 +123,7 @@ func (OneTimeToken) TableName() string { return "auth_one_time_tokens" }
 
 // Models returns GORM models for Atlas / AutoMigrate.
 func Models() []any {
-	return []any{&User{}, &RefreshToken{}, &Group{}, &Permission{}, &OneTimeToken{}, &AuditEvent{}}
+	return []any{&User{}, &RefreshToken{}, &Group{}, &Permission{}, &OneTimeToken{}, &AuditEvent{}, &TOTPFactor{}, &RecoveryCode{}}
 }
 
 // Migrate creates the auth identity, token, group, permission, one-time

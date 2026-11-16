@@ -59,6 +59,7 @@ const (
 	envLogLevel                = "GOMBIT_LOG_LEVEL"
 	envLogSink                 = "GOMBIT_LOG_SINK"
 	envJWTSecret               = "GOMBIT_JWT_SECRET" // #nosec G101 -- environment variable name, not a credential.
+	envAuthMFAKey              = "GOMBIT_AUTH_MFA_KEY"
 	envJWTAccessTTL            = "GOMBIT_JWT_ACCESS_TTL"
 	envJWTRefreshTTL           = "GOMBIT_JWT_REFRESH_TTL"
 	envAuthMode                = "GOMBIT_AUTH_MODE"
@@ -513,7 +514,17 @@ type AuthConfig struct {
 	// and verification throttles. On by default; turn it off only when
 	// something in front of the app (a gateway, a WAF) limits these routes.
 	ThrottleDisabled bool
+	// MFAKey is the key the TOTP secrets of multi-factor authentication
+	// (AUTH-9) are encrypted with and the recovery codes hashed with, at
+	// least MinMFAKeyLength characters. Empty derives them from JWTSecret:
+	// then rotating the JWT secret makes every enrolled authenticator and
+	// recovery code unusable (each user enrolls again). Set it to rotate
+	// the two apart.
+	MFAKey string
 }
+
+// MinMFAKeyLength is the shortest Auth.MFAKey accepted.
+const MinMFAKeyLength = 32
 
 // Enabled reports whether auth routes should be mounted (JWT secret is set).
 func (c AuthConfig) Enabled() bool {
@@ -749,6 +760,7 @@ func LoadFromEnv(lookup EnvLookup) (Config, error) {
 	applyLogLevel(lookup, envLogLevel, &cfg.Logging.Level)
 	applyLogSink(lookup, envLogSink, &cfg.Logging.Sink)
 	applyString(lookup, envJWTSecret, &cfg.Auth.JWTSecret)
+	applyString(lookup, envAuthMFAKey, &cfg.Auth.MFAKey)
 	applyDuration(lookup, envJWTAccessTTL, "Auth.AccessTokenTTL", &cfg.Auth.AccessTokenTTL, &errs)
 	applyDuration(lookup, envJWTRefreshTTL, "Auth.RefreshTokenTTL", &cfg.Auth.RefreshTokenTTL, &errs)
 	applyAuthMode(lookup, envAuthMode, &cfg.Auth.Mode)
@@ -1014,6 +1026,13 @@ func validateAuthConfig(errs *FieldErrors, env Environment, cfg AuthConfig) {
 			Env:     envPasswordResetURL,
 			Value:   u,
 			Message: "must contain " + PasswordResetURLToken + " where the reset token goes",
+		})
+	}
+	if cfg.MFAKey != "" && len(cfg.MFAKey) < MinMFAKeyLength {
+		*errs = append(*errs, FieldError{
+			Field:   "Auth.MFAKey",
+			Env:     envAuthMFAKey,
+			Message: fmt.Sprintf("must be at least %d characters", MinMFAKeyLength),
 		})
 	}
 	if env == EnvironmentProduction && cfg.JWTSecret != "" {

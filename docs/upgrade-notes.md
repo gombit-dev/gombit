@@ -222,6 +222,47 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   rename them; the same goes for a type Huma names `AuthUserState`
   or `DataAuthUserState`.
 
+- **Breaking.** Multi-factor authentication adds two tables, `auth_totp_factors` and `auth_recovery_codes`, which every login of the framework's routes reads: an app migrates before it runs this release. (`mfa-schema`, schema, [#339](https://github.com/gombit-dev/gombit/issues/339))
+
+  - Framework schema: `auth.TOTPFactor` (`auth_totp_factors`): added.
+  - Framework schema: `auth.RecoveryCode` (`auth_recovery_codes`): added.
+
+  The new framework models `auth.TOTPFactor` (a user's TOTP
+  authenticator, its secret encrypted) and `auth.RecoveryCode` (the
+  single-use recovery codes, hashed). A login checks whether the
+  account has MFA, so until the tables exist logins fail. Add
+  `&auth.TOTPFactor{}` and `&auth.RecoveryCode{}` to the app's
+  `AutoMigrate` (`internal/platform/database.go`), then generate and
+  apply the migration (`gombit db makemigrations --model
+  github.com/gombit-dev/gombit/auth.TOTPFactor --model
+  github.com/gombit-dev/gombit/auth.RecoveryCode`, `gombit db
+  migrate`); `gombit upgrade --dry-run` lists the steps.
+
+- **Breaking.** With auth enabled, an app that registers `{prefix}/auth/mfa`, `/auth/mfa/totp`, `/auth/mfa/totp/confirm`, `/auth/mfa/recovery-codes`, `/auth/mfa/disable` or `/auth/users/{id}/mfa/reset`, their `auth-mfa-*` operations, or the `AuthMFAStatus` / `AuthTOTPEnrollBody` / `AuthTOTPEnrollment` / `AuthTOTPConfirmBody` / `AuthRecoveryCodes` / `AuthMFAProofBody` schema names fails at startup: the framework registers them. (`mfa-names-reserved`, api, [#339](https://github.com/gombit-dev/gombit/issues/339))
+
+  Drop the app's own MFA routes, which the framework's replace, or
+  rename them; the same goes for a type Huma names after one of those
+  schemas (or their `Data…` envelopes).
+
+- Multi-factor authentication: a user enrolls a TOTP authenticator (with recovery codes), and from then on a login needs `mfa_code` besides the password; an operator with `auth.users.manage` resets a user's MFA. (`mfa-totp`, security, [#339](https://github.com/gombit-dev/gombit/issues/339))
+
+  - Configuration: `GOMBIT_AUTH_MFA_KEY` is new.
+
+  `POST {prefix}/auth/login` (both modes) takes an optional
+  `mfa_code`: for an account with MFA, a login without it is a 422 on
+  `mfa_code` ("required"), after the right password only, and a wrong
+  one a 422 ("invalid"); the client asks for the code and logs in again
+  with it. `auth.Service.Authenticate` / `Login` refuse such an
+  account without a code (`ErrMFARequired`); `AuthenticateMFA` /
+  `LoginMFA` take it. The TOTP secrets are encrypted and the recovery
+  codes hashed under keys derived from `GOMBIT_AUTH_MFA_KEY`, or from
+  `GOMBIT_JWT_SECRET` when it is unset: then rotating the JWT secret
+  makes every enrolled authenticator unusable (logins of those
+  accounts fail until an operator resets their MFA). Set
+  `GOMBIT_AUTH_MFA_KEY` (at least 32 characters) to rotate them apart;
+  setting it on an app whose users already enrolled has the same
+  effect once.
+
 - **Breaking.** A `.env` value no longer swallows a trailing comment, a byte order mark no longer hides the first key, and a `.env` that cannot be read fails the load. (`dotenv-comments-and-byte-order-mark`, behavior, [#507](https://github.com/gombit-dev/gombit/issues/507))
 
   Check a `.env` you already run with. A `#` with whitespace before it
@@ -472,6 +513,8 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   permission.
 
 - A new app's placeholder `schema.ts` includes the account state operations; an existing app's generated client gets them from `gombit client generate`. (`client-schema-account-state`, client, [#336](https://github.com/gombit-dev/gombit/issues/336))
+
+- A new app's placeholder `schema.ts` includes the MFA operations and the login's `mfa_code`; an existing app's generated client gets them from `gombit client generate`. (`client-schema-mfa`, client, [#339](https://github.com/gombit-dev/gombit/issues/339))
 
 - An already-rotated refresh token that has expired is a 401 and no longer revokes the user's sessions. (`expired-rotated-refresh-token-no-cascade`, security, [#458](https://github.com/gombit-dev/gombit/issues/458))
 
