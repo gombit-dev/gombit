@@ -372,17 +372,13 @@ func (s *Service) BeginTOTPEnrollment(ctx context.Context, userID uint, current 
 // ErrMFAAlreadyEnabled, and ErrSessionEnded when the requesting session
 // ended meanwhile.
 func (s *Service) ConfirmTOTPEnrollment(ctx context.Context, userID uint, code string) ([]string, error) {
-	res, err := s.throttle.reserve(ctx, s.mfaRule(userID))
-	if err != nil {
-		return nil, err
-	}
 	shown, hashes, err := s.newRecoveryCodes()
 	if err != nil {
 		return nil, err
 	}
 	code = normalizeMFACode(code)
 	requester := requestingSession(ctx, userID)
-	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	err = s.mfaAttempt(ctx, userID, func(tx *gorm.DB) error {
 		locked, err := lockUserTx(tx, userID)
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return errUserNotFound
@@ -431,9 +427,7 @@ func (s *Service) ConfirmTOTPEnrollment(ctx context.Context, userID uint, code s
 	})
 	if errors.Is(err, errInvalidMFACode) {
 		s.Audit(ctx, AuditEvent{Action: AuditMFAFailed, TargetUserID: uintPtr(userID), Details: details("reason", "wrong_mfa_code")})
-		return nil, err
 	}
-	res.refund()
 	if err != nil {
 		return nil, err
 	}
@@ -502,41 +496,45 @@ func (s *Service) useMFACodeTx(tx *gorm.DB, userID uint, f TOTPFactor, code stri
 	return true, nil
 }
 
+// mfaGate is what a login saw of an account's second factor.
+type mfaGate uint8
+
+// The zero mfaGate is a snapshot no login checked (loaded by an app).
+const (
+	// mfaGateNoFactor: the login found no factor enabled.
+	mfaGateNoFactor mfaGate = iota + 1
+	// mfaGateVerified: the login's code was accepted.
+	mfaGateVerified
+)
+
 // checkMFA is the second factor of a login of user: nothing when MFA is not
 // enabled, else code must be accepted (ErrMFARequired for none,
-// ErrInvalidMFACode for a wrong one, throttled by MFAPerUser).
-func (s *Service) checkMFA(ctx context.Context, user User, code string) error {
+// ErrInvalidMFACode for a wrong one, throttled by MFAPerUser). It reports
+// what it saw, for the session start to re-check under the lock.
+func (s *Service) checkMFA(ctx context.Context, user User, code string) (mfaGate, error) {
 	f, err := confirmedFactor(s.db.WithContext(ctx), user.ID)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if f.ID == 0 {
-		return nil
+		return mfaGateNoFactor, nil
 	}
 	if strings.TrimSpace(code) == "" {
-		return errMFARequired
-	}
-	res, err := s.throttle.reserve(ctx, s.mfaRule(user.ID))
-	if err != nil {
-		return err
+		return 0, errMFARequired
 	}
 	var recovery bool
-	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	err = s.mfaAttempt(ctx, user.ID, func(tx *gorm.DB) error {
 		var err error
 		recovery, err = s.useMFACodeTx(tx, user.ID, f, code, s.now())
 		return err
 	})
-	if errors.Is(err, errMFASecretUnreadable) {
-		s.warnMFAKey()
-	}
 	if err != nil {
-		return err
+		return 0, err
 	}
-	res.refund()
 	if recovery {
 		s.Audit(ctx, AuditEvent{Action: AuditMFARecoveryCodeUsed, TargetUserID: uintPtr(user.ID)})
 	}
-	return nil
+	return mfaGateVerified, nil
 }
 
 // RegenerateRecoveryCodes replaces userID's recovery codes (the old ones
@@ -570,12 +568,8 @@ func (s *Service) withSecondFactor(ctx context.Context, userID uint, current, co
 	if err != nil {
 		return err
 	}
-	res, err := s.throttle.reserve(ctx, s.mfaRule(user.ID))
-	if err != nil {
-		return err
-	}
 	var recovery bool
-	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	err = s.mfaAttempt(ctx, user.ID, func(tx *gorm.DB) error {
 		if _, err := lockUserTx(tx, user.ID); err != nil {
 			return err
 		}
@@ -593,12 +587,7 @@ func (s *Service) withSecondFactor(ctx context.Context, userID uint, current, co
 	})
 	if errors.Is(err, errInvalidMFACode) {
 		s.Audit(ctx, AuditEvent{Action: AuditMFAFailed, TargetUserID: uintPtr(user.ID), Details: details("reason", "wrong_mfa_code")})
-		return err
 	}
-	if errors.Is(err, errMFASecretUnreadable) {
-		s.warnMFAKey()
-	}
-	res.refund()
 	if err != nil {
 		return err
 	}
@@ -606,6 +595,27 @@ func (s *Service) withSecondFactor(ctx context.Context, userID uint, current, co
 		s.Audit(ctx, AuditEvent{Action: AuditMFARecoveryCodeUsed, TargetUserID: uintPtr(user.ID)})
 	}
 	return nil
+}
+
+// mfaAttempt runs attempt, the use of a multi-factor code, in a transaction
+// as one attempt of userID's MFAPerUser rule: only a wrong code
+// (ErrInvalidMFACode) keeps its place. Anything else gives it back: a
+// success, a refusal that is no guess (nothing enabled, nothing pending),
+// and a server failure, an undecryptable secret (a changed key, logged)
+// included, so a failure of the server is never charged to the user.
+func (s *Service) mfaAttempt(ctx context.Context, userID uint, attempt func(tx *gorm.DB) error) error {
+	res, err := s.throttle.reserve(ctx, s.mfaRule(userID))
+	if err != nil {
+		return err
+	}
+	err = s.db.WithContext(ctx).Transaction(attempt)
+	if errors.Is(err, errMFASecretUnreadable) {
+		s.warnMFAKey()
+	}
+	if !errors.Is(err, errInvalidMFACode) {
+		res.refund()
+	}
+	return err
 }
 
 // warnMFAKey says, at most once a minute, that a TOTP secret could not be

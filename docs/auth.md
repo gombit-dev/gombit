@@ -483,7 +483,9 @@ curl -sX POST localhost:8080/api/v1/auth/login -H 'Content-Type: application/jso
   password alone end when the enrollment is confirmed (the confirming one
   stays; from Go with no session, all end), under the user's lock: refresh
   would otherwise keep a stolen one alive for good, and enrolling is what a
-  user does who fears one was.
+  user does who fears one was. A login in flight that found no factor
+  before the confirmation is refused at its session start (it re-checks
+  under the same lock): `mfa_code` required.
 - **The login challenge.** `POST /auth/login` (both modes) takes an
   optional `mfa_code`. For an account with MFA, a login without it is a
   **422 on `mfa_code`** ("a multi-factor code is required"), said only
@@ -524,8 +526,10 @@ curl -sX POST localhost:8080/api/v1/auth/login -H 'Content-Type: application/jso
   from `GOMBIT_AUTH_MFA_KEY` (at least 32 characters), or from
   `GOMBIT_JWT_SECRET` when it is unset. Rotating that key makes every
   enrolled authenticator and recovery code unusable: those accounts' logins
-  answer 500, with a code from the authenticator or a recovery code alike, (and a warning naming the key change is logged, at most once a
-  minute) until their MFA is reset and they enroll again. Set
+  answer 500, with an authenticator code and a recovery code alike, and a
+  warning naming the key change is logged (at most once a minute), until
+  their MFA is reset and they enroll again. A server error is never charged
+  to `MFAPerUser`: only a wrong code is. Set
   `GOMBIT_AUTH_MFA_KEY` to rotate the JWT secret on its own; setting it on
   an app whose users already enrolled is such a rotation, once.
 - **From Go.** `svc.Authenticate` / `Login` refuse an account with MFA

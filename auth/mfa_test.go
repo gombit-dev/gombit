@@ -276,6 +276,31 @@ func runMFAService(t *testing.T, db *database.DB) {
 		}
 	})
 
+	t.Run("a login in flight across the enrollment gets no session", func(t *testing.T) {
+		e := newVerificationEnv(t, db)
+		user, _ := e.register(t, "mfa-inflight")
+		enrollment, err := e.svc.BeginTOTPEnrollment(ctx, user.ID, testPassword)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The password checked, no factor found; the user confirms before
+		// the session starts.
+		auth.SetLoginAuthenticatedHook(e.svc, func() {
+			auth.SetLoginAuthenticatedHook(e.svc, nil)
+			if _, err := e.svc.ConfirmTOTPEnrollment(ctx, user.ID, auth.TOTPCode(enrollment.Secret, e.clock.now)); err != nil {
+				t.Error(err)
+			}
+		})
+		if _, _, err := e.svc.Login(ctx, user.Email, testPassword); !errors.Is(err, auth.ErrMFARequired) {
+			t.Fatalf("a password-only login across the enrollment = %v, want ErrMFARequired", err)
+		}
+		var sessions int64
+		e.db.Model(&auth.RefreshToken{}).Where("user_id = ? AND revoked_at IS NULL", user.ID).Count(&sessions)
+		if sessions != 0 {
+			t.Fatalf("live sessions = %d, want none", sessions)
+		}
+	})
+
 	t.Run("MFAPerUser holds with the throttles turned off", func(t *testing.T) {
 		e := newThrottleEnv(t, db, func(c *config.AuthConfig) { c.ThrottleDisabled = true })
 		user, _ := e.register(t, "mfa-unthrottled")
@@ -311,10 +336,13 @@ func runMFAService(t *testing.T, db *database.DB) {
 			t.Fatalf("warnings = %v, want one naming the key change", logs.All())
 		}
 		// A recovery code (what the user who lost the device has) is the
-		// same server error, not a wrong code charged to them.
-		_, err = rekeyed.AuthenticateMFA(ctx, user.Email, testPassword, codes[0])
-		if err == nil || errors.Is(err, auth.ErrInvalidMFACode) || errors.Is(err, auth.ErrTooManyAttempts) {
-			t.Fatalf("a recovery code after the key changed = %v, want a server error", err)
+		// same server error, not a wrong code charged to them: past
+		// MFAPerUser's limit, still the server error, never a 429.
+		for i := range auth.DefaultThrottlePolicy().MFAPerUser.Limit + 2 {
+			_, err = rekeyed.AuthenticateMFA(auth.ContextWithAddress(ctx, fmt.Sprintf("198.51.100.%d", 200+i)), user.Email, testPassword, codes[0])
+			if err == nil || errors.Is(err, auth.ErrInvalidMFACode) || errors.Is(err, auth.ErrTooManyAttempts) {
+				t.Fatalf("recovery code attempt %d after the key changed = %v, want a server error", i+1, err)
+			}
 		}
 		// The operator's way out: reset, and the account signs in again.
 		if err := rekeyed.ResetMFA(ctx, user.ID); err != nil {

@@ -19,6 +19,10 @@ type User struct {
 	// credential issued to it works: its sessions were revoked, its links
 	// voided, and every check refuses it.
 	DisabledAt *time.Time
+	// mfaGate is what AuthenticateMFA saw of the second factor, on the
+	// snapshot it returns (never stored): the session start re-checks it
+	// under the user's lock.
+	mfaGate mfaGate
 	// EmailVerifiedAt is when the user proved they own VerifiedEmail (POST
 	// /auth/verify-email); nil while no address is verified. A superuser
 	// created by gombit createsuperuser starts verified.

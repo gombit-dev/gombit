@@ -280,7 +280,8 @@ func (s *Service) AuthenticateMFA(ctx context.Context, email, password, code str
 		s.Audit(ctx, AuditEvent{Action: AuditLoginFailed, TargetUserID: uintPtr(user.ID), Details: details("reason", "account_disabled")})
 		return User{}, errAccountDisabled
 	}
-	switch err := s.checkMFA(ctx, user, code); {
+	gate, err := s.checkMFA(ctx, user, code)
+	switch {
 	case errors.Is(err, errMFARequired):
 		// The password was right: no failure, but no login either (no
 		// address becomes known, nothing is cleared). The client asks for
@@ -299,6 +300,7 @@ func (s *Service) AuthenticateMFA(ctx context.Context, email, password, code str
 	res.refundExcept(pair.name)
 	s.throttle.clear(ctx, pair)
 	s.throttle.markKnown(ctx, pair)
+	user.mfaGate = gate
 	return user, nil
 }
 
@@ -334,7 +336,10 @@ func (s *Service) LoginMFA(ctx context.Context, email, password, code string) (U
 // account must not be disabled (ErrAccountDisabled); any other error is a
 // server failure. So Authenticate followed by IssueTokens is as safe as
 // Login: a password reset or a disable that commits between the two leaves
-// the snapshot unable to start a session.
+// the snapshot unable to start a session, and so does multi-factor
+// authentication enabled after Authenticate found none (ErrMFARequired). A
+// snapshot loaded from the database (no Authenticate) is the caller's to
+// have authenticated, second factor included.
 func (s *Service) IssueTokens(ctx context.Context, user User) (TokenPair, error) {
 	_, pair, err := s.startSession(ctx, user)
 	return pair, err
@@ -361,6 +366,18 @@ func (s *Service) startSession(ctx context.Context, user User) (User, TokenPair,
 		}
 		if locked.PasswordHash != user.PasswordHash {
 			return errLoginPasswordChanged
+		}
+		// A login that found no factor, re-checked under the lock: one
+		// enabled since (its confirmation ends the sessions started on the
+		// password alone, under this lock) is a code this login never gave.
+		if user.mfaGate == mfaGateNoFactor {
+			f, err := confirmedFactor(tx, locked.ID)
+			if err != nil {
+				return err
+			}
+			if f.ID != 0 {
+				return errMFARequired
+			}
 		}
 		pair, err = s.issueTokens(tx, locked, s.now())
 		return err
