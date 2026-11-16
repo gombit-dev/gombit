@@ -631,10 +631,11 @@ callback has the adapter redeem the code, then **redirects (302) to
   (login CSRF), exchanges nothing anywhere else: a 422 on `code`. Ending
   the account's sessions voids the codes not yet exchanged (each a
   session about to start): signing out everywhere or the other sessions,
-  a password reset or change, a disable, enabling MFA. Exchanging it is
-  the moment the session starts, the account's state re-checked: a
-  disabled account's code was voided (422), and an account given MFA
-  since is a 409;
+  a password reset or change, a disable, enabling MFA. So a code whose
+  account was disabled or given MFA since the callback is a 422 on
+  `code`, like a used one. The session starts under the user's lock with
+  the factor re-checked, so the only 409 is the narrow race of MFA
+  enabled between the code's use and that start;
 - **a link** adds `?gombit_linked={provider}`.
 
 A refusal adds `?gombit_error=` with one of these codes:

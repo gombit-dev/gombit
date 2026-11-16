@@ -160,7 +160,7 @@ func registerExternalRoutes(api huma.API, svc *Service, prefix, security string,
 			Method:      http.MethodPost,
 			Path:        base + "/exchange",
 			Summary:     "Trade an external sign-in's code for Bearer tokens",
-			Description: "The code works once, within two minutes of the callback; an unknown, expired or used one is a 422 on code. The code works only from the browser that ran the flow: the callback set it a cookie the exchange needs (send credentials). A code from elsewhere is a 422 on code, and so is one whose account was disabled, or whose sessions were all ended (signed out everywhere, a password reset or change), since the callback: those void it. An account given multi-factor authentication since is a 409. Too many invalid codes from one client address is a 429 (Retry-After).",
+			Description: "The code works once, within two minutes of the callback; an unknown, expired or used one is a 422 on code. The code works only from the browser that ran the flow: the callback set it a cookie the exchange needs (send credentials). A code from elsewhere is a 422 on code, and so is one whose account was disabled, given multi-factor authentication, or had its sessions ended (signed out everywhere, a password reset or change) since the callback: those void it. Only an account given multi-factor authentication in the instant between the code's use and the session's start is a 409. Too many invalid codes from one client address is a 429 (Retry-After).",
 			Tags:        []string{"Auth"},
 			Errors:      []int{http.StatusTooManyRequests},
 		}), svc.exchangeExternal)

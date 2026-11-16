@@ -726,10 +726,12 @@ func boundCode(code, secret string) string { return code + "." + secret }
 
 // exchangeExternalCode trades a Bearer-mode exchange code for the session's
 // tokens: once, within externalCodeTTL, only with the binding the callback
-// gave the flow's browser, and re-checked as the callback checked it (the
-// account enabled, without multi-factor authentication). Ending the user's
-// sessions (a sign-out everywhere, a password reset or change, a disable)
-// voids the codes not yet exchanged.
+// gave the flow's browser. Ending the user's sessions (a sign-out
+// everywhere, a password reset or change, a disable, enabling multi-factor
+// authentication) voids the codes not yet exchanged, so a code whose account
+// changed so since the callback is invalid like a used one. The session
+// start re-checks the factor under the user's lock only as a guard for the
+// race of an enrollment between the consume and that start (errExternalMFA).
 func (s *Service) exchangeExternalCode(ctx context.Context, code string, binding externalBinding) (User, TokenPair, error) {
 	type result struct {
 		user User

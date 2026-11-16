@@ -21,6 +21,7 @@ import (
 
 	"github.com/gombit-dev/gombit/auth"
 	"github.com/gombit-dev/gombit/config"
+	"github.com/gombit-dev/gombit/contract"
 	"github.com/gombit-dev/gombit/database"
 	"github.com/gombit-dev/gombit/framework"
 )
@@ -649,6 +650,49 @@ func runExternalIdentity(t *testing.T, db *database.DB, mode config.AuthMode) {
 		b2 := e.passwordSessionMFA(t, email, auth.TOTPCode(enrollment.Secret, time.Now().Add(30*time.Second)))
 		rec := e.do(b2, http.MethodPost, "/api/v1/auth/external/other/link", `{"current_password":"`+testPassword+`"}`)
 		assertError(t, rec, http.StatusConflict, "conflict")
+	})
+
+	t.Run("enabling multi-factor authentication voids a code not yet exchanged", func(t *testing.T) {
+		if e.cookie {
+			t.Skip("no code in cookie mode")
+		}
+		email := uniqueEmail("ext-mfa-void")
+		e.register(t, email, testPassword)
+		owner := e.passwordSession(t, email)
+		authURL := e.start(t, owner, "fake", "link", `{"current_password":"`+testPassword+`"}`)
+		code, st := e.provider.grant(t, authURL, identity(e.sub("sub-mfa-void"), email))
+		if loc := e.callback(t, owner, "fake", url.Values{"code": {code}, "state": {st}}.Encode()); loc.Query().Get("gombit_linked") != "fake" {
+			t.Fatalf("link landed at %s", loc)
+		}
+		// A sign-in's callback hands out its code; before the exchange, the
+		// owner enables MFA from their password session.
+		b := e.browser(t)
+		pending := e.signIn(t, b, identity(e.sub("sub-mfa-void"), email), "/").Query().Get("gombit_code")
+		if pending == "" {
+			t.Fatal("the sign-in's callback gave no code")
+		}
+		rec := e.do(owner, http.MethodPost, "/api/v1/auth/mfa/totp", `{"current_password":"`+testPassword+`"}`)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("enroll = %d %s", rec.Code, rec.Body.String())
+		}
+		var enrollment dataBody[struct {
+			Secret string `json:"secret"`
+		}]
+		if err := json.Unmarshal(rec.Body.Bytes(), &enrollment); err != nil {
+			t.Fatal(err)
+		}
+		rec = e.do(owner, http.MethodPost, "/api/v1/auth/mfa/totp/confirm", `{"mfa_code":"`+auth.TOTPCode(enrollment.Data.Secret, time.Now())+`"}`)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("confirm = %d %s", rec.Code, rec.Body.String())
+		}
+		// The code was voided with the sessions the enrollment ended: a 422
+		// on code, not the 409 a session start would refuse with.
+		rec = e.do(b, http.MethodPost, "/api/v1/auth/external/exchange", `{"code":"`+pending+`"}`)
+		assertError(t, rec, http.StatusUnprocessableEntity, "validation_error")
+		var refused contract.ErrorEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &refused); err != nil || len(refused.Body.Fields["code"]) == 0 {
+			t.Fatalf("the refusal is not on code: %s", rec.Body.String())
+		}
 	})
 }
 
