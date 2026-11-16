@@ -98,6 +98,15 @@ const (
 	// AuditEmailChanged: the user confirmed the new address; it is now their
 	// email, verified.
 	AuditEmailChanged AuditAction = "auth.email.changed"
+	// AuditIdentityLinked: an external identity was linked to the user
+	// (Details "provider").
+	AuditIdentityLinked AuditAction = "auth.identity.linked"
+	// AuditIdentityLinkFailed: linking an external identity was refused
+	// (Details "provider", "reason"; a wrong current password).
+	AuditIdentityLinkFailed AuditAction = "auth.identity.link_failed"
+	// AuditIdentityUnlinked: the user removed a linked identity (Details
+	// "provider").
+	AuditIdentityUnlinked AuditAction = "auth.identity.unlinked"
 	// AuditGroupMemberAdded: a user was added to a group (Details "group").
 	AuditGroupMemberAdded AuditAction = "auth.group.member_added"
 	// AuditPermissionGranted: a permission was granted to a user or a group

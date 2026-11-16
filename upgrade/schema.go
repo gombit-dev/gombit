@@ -32,6 +32,7 @@ var FrameworkModels = []migrations.Model{
 	{ImportPath: frameworkmod.ModulePath + "/auth", TypeName: "AuditEvent"},
 	{ImportPath: frameworkmod.ModulePath + "/auth", TypeName: "TOTPFactor"},
 	{ImportPath: frameworkmod.ModulePath + "/auth", TypeName: "RecoveryCode"},
+	{ImportPath: frameworkmod.ModulePath + "/auth", TypeName: "IdentityLink"},
 	{ImportPath: frameworkmod.ModulePath + "/storage/claims", TypeName: "Claim"},
 }
 
@@ -47,6 +48,7 @@ var frameworkTables = map[string]string{
 	"auth.AuditEvent":      "auth_audit_events",
 	"auth.TOTPFactor":      "auth_totp_factors",
 	"auth.RecoveryCode":    "auth_recovery_codes",
+	"auth.IdentityLink":    "auth_identity_links",
 	"storage/claims.Claim": "storage_claims",
 }
 

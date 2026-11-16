@@ -18,6 +18,10 @@
     },
     {
       "import_path": "github.com/gombit-dev/gombit/auth",
+      "type_name": "IdentityLink"
+    },
+    {
+      "import_path": "github.com/gombit-dev/gombit/auth",
       "type_name": "OneTimeToken"
     },
     {

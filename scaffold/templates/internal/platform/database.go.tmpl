@@ -33,6 +33,7 @@ func AutoMigrate(db *database.DB) error {
 		&auth.AuditEvent{},
 		&auth.TOTPFactor{},
 		&auth.RecoveryCode{},
+		&auth.IdentityLink{},
 		&claims.Claim{},
 		&product.Product{},
 	)

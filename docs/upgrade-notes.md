@@ -268,6 +268,20 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   setting it on an app whose users already enrolled has the same
   effect once.
 
+- External identity adds the table `auth_identity_links`, which an app that registers an identity provider needs before it serves the external sign-in routes. (`external-identity-schema`, schema, [#340](https://github.com/gombit-dev/gombit/issues/340))
+
+  - Framework schema: `auth.IdentityLink` (`auth_identity_links`): added.
+
+  The new framework model `auth.IdentityLink` maps an identity at an
+  external provider (provider, subject) to a local user. Only the
+  external identity routes read it, and they are mounted only with a
+  provider (`framework.WithAuthIdentityProviders`), so an app without
+  one can leave it for later. Add `&auth.IdentityLink{}` to the app's
+  `AutoMigrate` (`internal/platform/database.go`), then generate and
+  apply the migration (`gombit db makemigrations --model
+  github.com/gombit-dev/gombit/auth.IdentityLink`, `gombit db
+  migrate`); `gombit upgrade --dry-run` lists the steps.
+
 - **Breaking.** A `.env` value no longer swallows a trailing comment, a byte order mark no longer hides the first key, and a `.env` that cannot be read fails the load. (`dotenv-comments-and-byte-order-mark`, behavior, [#507](https://github.com/gombit-dev/gombit/issues/507))
 
   Check a `.env` you already run with. A `#` with whitespace before it
@@ -520,6 +534,33 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 - A new app's placeholder `schema.ts` includes the account state operations; an existing app's generated client gets them from `gombit client generate`. (`client-schema-account-state`, client, [#336](https://github.com/gombit-dev/gombit/issues/336))
 
 - A new app's placeholder `schema.ts` includes the MFA operations and the login's `mfa_code`; an existing app's generated client gets them from `gombit client generate`. (`client-schema-mfa`, client, [#339](https://github.com/gombit-dev/gombit/issues/339))
+
+- External identity providers (OIDC / OAuth2): `framework.WithAuthIdentityProviders` registers adapters behind `auth.IdentityProvider` (an OpenID Connect one ships as the optional `auth/oidc`), and the auth routes mount sign-in, linking and unlinking under `{prefix}/auth/external`. (`external-identity`, security, [#340](https://github.com/gombit-dev/gombit/issues/340))
+
+  Nothing changes for an app that registers no provider. With one,
+  the framework owns the state, nonce and PKCE pair (in an
+  encrypted, single-flow `gombit_external` cookie), the mapping of
+  identities to users, signup and the session: an identity no user
+  linked makes an account only when the provider verified its email
+  and no account has it (an account's owner links it, signed in), and
+  an account with multi-factor authentication signs in with its
+  password only. It then registers `{prefix}/auth/external`,
+  `/auth/external/{provider}/login`, `/link`, `/callback`,
+  `/auth/external/exchange` (Bearer mode), `/auth/external/identities`
+  and `/identities/{id}`, their `auth-external-*` operations, and the
+  `AuthExternalProvider` / `AuthExternalStartBody` /
+  `AuthExternalLinkBody` / `AuthExternalAuthorization` /
+  `AuthExternalExchangeBody` / `AuthIdentityLink` schema names: an app
+  with its own routes or types of those names renames them. An
+  account an external sign-in made has no password
+  (`User.HasUsablePassword`); a password reset gives it one. See
+  docs/auth.md § External identity providers.
+
+- The framework newly requires `github.com/coreos/go-oidc/v3` v3.15.0, `github.com/go-jose/go-jose/v4` v4.1.2 and `golang.org/x/oauth2` v0.30.0 (the optional `auth/oidc` adapter). (`oidc-dependencies`, dependency, [#340](https://github.com/gombit-dev/gombit/issues/340))
+
+  Go's minimal version selection moves an app's build to them with the
+  framework upgrade; an app that does not import `auth/oidc` links
+  none of them into its binary.
 
 - An already-rotated refresh token that has expired is a 401 and no longer revokes the user's sessions. (`expired-rotated-refresh-token-no-cascade`, security, [#458](https://github.com/gombit-dev/gombit/issues/458))
 
