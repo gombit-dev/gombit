@@ -1384,3 +1384,15 @@ releases:
         config:
           - {var: GOMBIT_API_PREFIX, change: refused}
         refs: [501]
+
+      - id: local-storage-windows-file-deleted-not-found
+        kind: informational
+        area: behavior
+        summary: "On Windows, `storage/local` reports an object a concurrent `Delete` is removing as `storage.ErrNotFound` from `Open` and `Stat`, not as an \"Access is denied\" error."
+        details: |
+          An open racing a POSIX-semantics delete of the same file can fail
+          with `ERROR_ACCESS_DENIED` and NTSTATUS `STATUS_FILE_DELETED`; the
+          driver mapped only `STATUS_DELETE_PENDING` to not-found, so a read
+          racing a delete could fail with a permission error. Nothing to
+          change.
+        refs: [639]

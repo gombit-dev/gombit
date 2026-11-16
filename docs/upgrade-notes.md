@@ -645,6 +645,14 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   constraint (the primary key, its sequence behind the table) is
   returned as itself. Nothing to change.
 
+- On Windows, `storage/local` reports an object a concurrent `Delete` is removing as `storage.ErrNotFound` from `Open` and `Stat`, not as an "Access is denied" error. (`local-storage-windows-file-deleted-not-found`, behavior, [#639](https://github.com/gombit-dev/gombit/issues/639))
+
+  An open racing a POSIX-semantics delete of the same file can fail
+  with `ERROR_ACCESS_DENIED` and NTSTATUS `STATUS_FILE_DELETED`; the
+  driver mapped only `STATUS_DELETE_PENDING` to not-found, so a read
+  racing a delete could fail with a permission error. Nothing to
+  change.
+
 ## v0.8.0
 
 ### Manual: action required

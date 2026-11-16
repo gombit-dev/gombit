@@ -208,6 +208,13 @@ version.
 
 ### Fixed
 
+- On Windows, the local storage driver's `Open` and `Stat` of an object
+  that a concurrent `Delete` is removing report `storage.ErrNotFound`
+  instead of an "Access is denied" error. The open could reach the file just
+  as its POSIX-semantics delete completed, which Windows reports as
+  `ERROR_ACCESS_DENIED` with `STATUS_FILE_DELETED`; only
+  `STATUS_DELETE_PENDING` was mapped to not-found
+  ([#639](https://github.com/gombit-dev/gombit/pull/639)).
 - `gombit generate` (and `--check`, and `gombit upgrade contract`)
   regenerates a resource whose model lost, renamed or retyped a field, whose
   `*.gen.go` were deleted or left with merge-conflict markers, or whose
