@@ -10,8 +10,10 @@ This repo has completed M0–M5, **ADMIN-1 through ADMIN-3**, the **REL-1..9**
 release-readiness track, and **BENCH-1** (the benchmark suite). It has typed
 `config.Config`, `framework.App` lifecycle and routing, Huma contract/OpenAPI/
 TypeScript client generation, Atlas-backed migrations, a Cobra `gombit`
-command tree (`new`, `dev`, `build --embed`, `make resource`, `make command`,
-`db`, `openapi`, `client`), and a Vite + React + TypeScript minimal skeleton
+command tree (`new`, `dev`, `worker`, `jobs`, `build --embed`,
+`make resource`, `make command`, `generate`, `db`, `openapi`, `client`,
+`contract`, `routes`, `doctor`, `config`, `createsuperuser`, `upgrade`,
+`version`), and a Vite + React + TypeScript minimal skeleton
 (router, generated client, React Hook Form). Bearer login (M5-2), cookie/CSRF
 (M5-3), the MUI preset (M5-4, `--ui mui`), and optional `gombit build --embed`
 (M5-5) are in. **ADMIN-0 (ADR-013) is accepted**, **ADMIN-1** ships
@@ -31,6 +33,13 @@ workflow — plus the per-PR `benchmark-report-drift` and `benchmark-smoke`
 gates in `ci.yml`. Resources are **model-first** (ADR-016): `make resource`
 scaffolds a user-owned model and `hooks.go`, and `gombit generate` derives the
 generator-owned `dto.gen.go` / `handler.gen.go` (`--check` for drift). The
+**MODEL-0** epic (#275) is complete: one logical field vocabulary
+(`package field`, `docs/fields.md`) shared by `make resource`, `generate`
+and the admin, with `uuid`, `json`, `date`, `datetime`, `float`, `email`,
+`url`, `slug`, `ip`, `time_of_day`, `duration` and labelled enums, field
+constraints (`default=`, `min=` / `max=`, `max_length=`, `regex=`),
+`one_to_one` / nullable / `on_delete` / self-referential relations, and
+`make resource --id uuid`. The
 **SCHEMA** epic (#277) is in: `gombit db plan` classifies a change before a
 migration is written and `makemigrations --allow` acknowledges destructive or
 unsafe steps, `--rename-table` renames tables in place, `db lint` / `db repair`
@@ -64,7 +73,7 @@ with a fenceable `storage.PreparePublish`/`Publish`/`Fence`;
 storage-backed model fields (`file` / `image` kinds, `types.File` /
 `types.Image`, runtime `storage/filefield`; MODEL-8) with their admin
 widgets (upload grants, previews, cleanup after commit; STORAGE-8). The
-**UPGRADE-0** epic (#281) has started: `upgrade` detects an app's upgrade
+**UPGRADE-0** epic (#281) is complete: `upgrade` detects an app's upgrade
 baseline (framework version from `go.mod`, scaffold version from the
 `gombit:` block `gombit new` writes to `gombit.yaml`, scaffold 0 for older
 apps), shown and recorded by `gombit upgrade baseline` (UPGRADE-1), and the
@@ -110,7 +119,10 @@ dependency, a TCP fault proxy, the retry-policy check), `TestFault_*` tests
 run by `make test-faults` (a sharded PR check), and the seeded stochastic
 suite `internal/chaos` (`make test-chaos`, nightly `chaos.yml`, never a PR
 check). See `docs/testing/fault-injection.md`.
-The **AUTH-0** epic (#280) has started with AUTH-5 (#335): session
+The **AUTH-0** epic (#280) has all ten items, AUTH-1..10, on `main` (only
+AUTH-5 released so far, in v0.8.0); its follow-ups AUTH-11..13 (#661 stable
+session ids, #662 session device metadata, #663 a sessions screen in the
+generated frontend) are open. It has AUTH-5 (#335): session
 management in both auth modes (`GET` / `DELETE {prefix}/auth/sessions`,
 `auth.Service.ListSessions` / `RevokeSession` / `RevokeAllSessions`), with
 token rotation and the session revocations serialized per user on a lock of
