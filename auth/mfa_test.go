@@ -234,10 +234,66 @@ func runMFAService(t *testing.T, db *database.DB) {
 		}
 	})
 
+	t.Run("enabling MFA ends the sessions started on the password alone", func(t *testing.T) {
+		e := newVerificationEnv(t, db)
+		user, _ := e.register(t, "mfa-sessions")
+		_, here, err := e.svc.Login(ctx, user.Email, testPassword)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, stolen, err := e.svc.Login(ctx, user.Email, testPassword)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hereRow, err := auth.AuthenticatedRow(ctx, e.svc, here.AccessToken)
+		if err != nil {
+			t.Fatal(err)
+		}
+		enrollment, err := e.svc.BeginTOTPEnrollment(ctx, user.ID, testPassword)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Confirmed from the "here" session: it stays, the other ends.
+		asHere := auth.ContextWithSession(ctx, user, hereRow)
+		if _, err := e.svc.ConfirmTOTPEnrollment(asHere, user.ID, auth.TOTPCode(enrollment.Secret, e.clock.now)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := e.svc.RotateRefresh(ctx, stolen.RefreshToken); !errors.Is(err, auth.ErrInvalidRefreshToken) {
+			t.Fatalf("a session from before the enrollment = %v, want revoked", err)
+		}
+		if _, err := auth.AuthenticatedRow(ctx, e.svc, here.AccessToken); err != nil {
+			t.Fatalf("the confirming session = %v, want it kept", err)
+		}
+		// From Go, with no session: every one ends.
+		other, _ := e.register(t, "mfa-sessions-go")
+		_, pair, err := e.svc.Login(ctx, other.Email, testPassword)
+		if err != nil {
+			t.Fatal(err)
+		}
+		e.enrollMFA(t, other)
+		if _, err := e.svc.RotateRefresh(ctx, pair.RefreshToken); !errors.Is(err, auth.ErrInvalidRefreshToken) {
+			t.Fatalf("a session from before an enrollment confirmed from Go = %v, want revoked", err)
+		}
+	})
+
+	t.Run("MFAPerUser holds with the throttles turned off", func(t *testing.T) {
+		e := newThrottleEnv(t, db, func(c *config.AuthConfig) { c.ThrottleDisabled = true })
+		user, _ := e.register(t, "mfa-unthrottled")
+		secret, _ := e.enrollMFA(t, user)
+		for range 5 {
+			if _, err := e.svc.AuthenticateMFA(ctx, user.Email, testPassword, "000000"); !errors.Is(err, auth.ErrInvalidMFACode) {
+				t.Fatal(err)
+			}
+		}
+		e.clock.now = e.clock.now.Add(30 * time.Second)
+		_, err := e.svc.AuthenticateMFA(ctx, user.Email, testPassword, auth.TOTPCode(secret, e.clock.now))
+		throttled(t, err, "MFAPerUser")
+	})
+
 	t.Run("a changed MFA key: the login fails, and says why", func(t *testing.T) {
 		e := newVerificationEnv(t, db)
 		user, _ := e.register(t, "mfa-rekeyed")
-		secret, _ := e.enrollMFA(t, user)
+		secret, codes := e.enrollMFA(t, user)
 		core, logs := observer.New(zap.WarnLevel)
 		cfg := config.DefaultFor(config.EnvironmentTest)
 		cfg.Auth.JWTSecret = testJWTSecret
@@ -253,6 +309,12 @@ func runMFAService(t *testing.T, db *database.DB) {
 		}
 		if logs.FilterMessageSnippet("cannot be decrypted").Len() != 1 {
 			t.Fatalf("warnings = %v, want one naming the key change", logs.All())
+		}
+		// A recovery code (what the user who lost the device has) is the
+		// same server error, not a wrong code charged to them.
+		_, err = rekeyed.AuthenticateMFA(ctx, user.Email, testPassword, codes[0])
+		if err == nil || errors.Is(err, auth.ErrInvalidMFACode) || errors.Is(err, auth.ErrTooManyAttempts) {
+			t.Fatalf("a recovery code after the key changed = %v, want a server error", err)
 		}
 		// The operator's way out: reset, and the account signs in again.
 		if err := rekeyed.ResetMFA(ctx, user.ID); err != nil {
@@ -298,7 +360,7 @@ func runMFABearer(t *testing.T, db *database.DB) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &enrollment); err != nil || enrollment.Data.Secret == "" || !strings.HasPrefix(enrollment.Data.URI, "otpauth://totp/") {
 		t.Fatalf("enroll body = %s", rec.Body.String())
 	}
-	rec = bearerPost(app, "/api/v1/auth/mfa/totp/confirm", pair.AccessToken, `{"code":"`+auth.TOTPCode(enrollment.Data.Secret, time.Now())+`"}`)
+	rec = bearerPost(app, "/api/v1/auth/mfa/totp/confirm", pair.AccessToken, `{"mfa_code":"`+auth.TOTPCode(enrollment.Data.Secret, time.Now())+`"}`)
 	var codes dataBody[struct {
 		RecoveryCodes []string `json:"recovery_codes"`
 	}]

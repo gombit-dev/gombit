@@ -51,7 +51,7 @@ credential endpoints are throttled (429 with `Retry-After`); see
 | `POST` | `/auth/users/{id}/enable` | Bearer access JWT with the `auth.users.manage` permission. Lets a disabled account sign in again. |
 | `GET` | `/auth/mfa` | Bearer access JWT. The user's multi-factor state; see [Multi-factor authentication](#multi-factor-authentication). |
 | `POST` | `/auth/mfa/totp` | Bearer access JWT. Body `{ "current_password" }`. Begins a TOTP enrollment: the secret and `otpauth://` URI. |
-| `POST` | `/auth/mfa/totp/confirm` | Bearer access JWT. Body `{ "code" }`. Enables MFA; returns the recovery codes, once. |
+| `POST` | `/auth/mfa/totp/confirm` | Bearer access JWT. Body `{ "mfa_code" }`. Enables MFA, ends the user's other sessions; returns the recovery codes, once. |
 | `POST` | `/auth/mfa/recovery-codes` | Bearer access JWT. Body `{ "current_password", "mfa_code" }`. Replaces the recovery codes. |
 | `POST` | `/auth/mfa/disable` | Bearer access JWT. Body `{ "current_password", "mfa_code" }`. Turns MFA off. |
 | `POST` | `/auth/users/{id}/mfa/reset` | Bearer access JWT with the `auth.users.manage` permission. Removes a user's MFA. |
@@ -462,7 +462,7 @@ curl -sX POST localhost:8080/api/v1/auth/mfa/totp -H "Authorization: Bearer $ACC
   -H 'Content-Type: application/json' -d '{"current_password":"correct-horse"}'
 # {"data":{"secret":"JBSWY3DP...","otpauth_uri":"otpauth://totp/Gombit:ada@example.com?..."}}
 curl -sX POST localhost:8080/api/v1/auth/mfa/totp/confirm -H "Authorization: Bearer $ACCESS" \
-  -H 'Content-Type: application/json' -d '{"code":"492039"}'
+  -H 'Content-Type: application/json' -d '{"mfa_code":"492039"}'
 # {"data":{"recovery_codes":["k7mpq-2xhvr", ...]}}
 
 curl -sX POST localhost:8080/api/v1/auth/login -H 'Content-Type: application/json' \
@@ -476,15 +476,23 @@ curl -sX POST localhost:8080/api/v1/auth/login -H 'Content-Type: application/jso
 - **Enrolling** takes the current password and returns the secret (to type
   in) and an `otpauth://` URI (to show as a QR code); nothing changes for
   the login until `POST /auth/mfa/totp/confirm` gets a code from the
-  authenticator. A new enrollment replaces one pending; while MFA is on,
-  enrolling is a 409 (turn it off first).
+  authenticator (`mfa_code`, the field every route of the second factor
+  uses). A new enrollment replaces one pending; while MFA is on, enrolling
+  is a 409 (turn it off first).
+- **Enabling ends the other sessions.** The sessions started on the
+  password alone end when the enrollment is confirmed (the confirming one
+  stays; from Go with no session, all end), under the user's lock: refresh
+  would otherwise keep a stolen one alive for good, and enrolling is what a
+  user does who fears one was.
 - **The login challenge.** `POST /auth/login` (both modes) takes an
   optional `mfa_code`. For an account with MFA, a login without it is a
   **422 on `mfa_code`** ("a multi-factor code is required"), said only
   after the right password, and a wrong code is a 422 ("invalid
   multi-factor code"): the client asks for the code and logs in again with
   the email, the password and the code. Nothing is kept between the two
-  requests. For an account without MFA, `mfa_code` is ignored.
+  requests. For an account without MFA, `mfa_code` is ignored. The
+  framework's login pages (the admin's and a generated app's) show a code
+  field when the 422 asks for it and send the login again with it.
 - **A code works once.** A TOTP code is accepted for its step and the one
   either side (clock drift), and never twice: once a step's code is used,
   no code of that step or an earlier one is accepted again, even from two
@@ -507,13 +515,16 @@ curl -sX POST localhost:8080/api/v1/auth/login -H 'Content-Type: application/jso
 - **Brute force.** Wrong codes are failures of the login throttles (per
   address and email, per address, per email), and of `MFAPerUser`: 5 wrong
   codes per account in 15 minutes, from any address (enrollment
-  confirmations and disables count too).
+  confirmations and disables count too, and so does a replayed code, such
+  as a login submitted twice). `MFAPerUser` stays on with
+  `GOMBIT_AUTH_THROTTLE_DISABLED=true`: it is what bounds guessing a
+  six-digit code, which a gateway's per-address limit does not.
 - **Keys.** The TOTP secret is stored encrypted (AES-256-GCM, bound to the
   user), and the recovery codes as HMAC-SHA256 hashes, under keys derived
   from `GOMBIT_AUTH_MFA_KEY` (at least 32 characters), or from
   `GOMBIT_JWT_SECRET` when it is unset. Rotating that key makes every
   enrolled authenticator and recovery code unusable: those accounts' logins
-  answer 500 (and a warning naming the key change is logged, at most once a
+  answer 500, with a code from the authenticator or a recovery code alike, (and a warning naming the key change is logged, at most once a
   minute) until their MFA is reset and they enroll again. Set
   `GOMBIT_AUTH_MFA_KEY` to rotate the JWT secret on its own; setting it on
   an app whose users already enrolled is such a rotation, once.
@@ -606,7 +617,8 @@ bcrypt, the token's transaction):
 - **Configuration.** `auth.WithThrottlePolicy(p)` replaces the limits (start
   from `auth.DefaultThrottlePolicy()`; a zero `Limit` turns a rule off).
   `GOMBIT_AUTH_THROTTLE_DISABLED=true` turns them all off, for an app whose
-  gateway already limits these routes.
+  gateway already limits these routes, but `MFAPerUser`, which bounds
+  guessing a multi-factor code from any number of addresses.
 - **From Go.** `Register`, `Authenticate` / `Login`, `ResetPassword`, `VerifyEmail`,
   `ConfirmEmailChange`, `ChangePassword`, `RequestEmailChange` and
   `SendEmailVerification` apply the same rules and return a

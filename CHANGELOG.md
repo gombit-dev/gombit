@@ -23,10 +23,13 @@ version.
   replaced with `/auth/mfa/recovery-codes` and MFA is turned off with
   `/auth/mfa/disable` (both take the password and a code), and reset by an
   operator with `auth.users.manage` (`POST /auth/users/{id}/mfa/reset`,
-  which also ends the user's sessions). Secrets are
-  encrypted and codes hashed under keys from `GOMBIT_AUTH_MFA_KEY` (or the
-  JWT secret). `auth.Service.Authenticate` / `Login` refuse an MFA account
-  without a code; `AuthenticateMFA` / `LoginMFA` take it. Audited
+  which also ends the user's sessions). Confirming an enrollment ends the
+  user's other sessions. The admin's and a new app's login pages ask for the
+  code. `MFAPerUser` stays on with `GOMBIT_AUTH_THROTTLE_DISABLED`. Secrets
+  are encrypted and codes hashed under keys from `GOMBIT_AUTH_MFA_KEY` (or
+  the JWT secret). **Breaking (Go API):** `auth.Service.Authenticate` /
+  `Login` refuse an MFA account without a code (`ErrMFARequired`, a new
+  client error); `AuthenticateMFA` / `LoginMFA` take it. Audited
   (`auth.mfa.*`). **Breaking (schema):** two tables,
   `auth_totp_factors` and `auth_recovery_codes`, which logins read: migrate
   before running this release. **Breaking (api):** the framework registers

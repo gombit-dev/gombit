@@ -13,26 +13,33 @@ import {
 } from "@mui/material";
 
 import { useApiClient } from "../api/client";
-import { applyContractErrors } from "../api/formErrors";
+import { applyContractErrors, fieldError } from "../api/formErrors";
 import { unwrap } from "../api/generated/client";
 import { applyTokenPair } from "../auth/session";
 
 type LoginValues = {
   email: string;
   password: string;
+  mfa_code: string;
 };
+
+const mfaPrompt = "Enter the code from your authenticator app, or one of your recovery codes.";
 
 export function LoginPage() {
   const client = useApiClient();
   const navigate = useNavigate();
   const [status, setStatus] = useState("");
+  // An account with multi-factor authentication answers the password with
+  // a 422 on mfa_code: the code field appears, and the login is sent again
+  // with it.
+  const [mfaRequired, setMfaRequired] = useState(false);
   const {
     control,
     handleSubmit,
     setError,
     formState: { isSubmitting },
   } = useForm<LoginValues>({
-    defaultValues: { email: "", password: "" },
+    defaultValues: { email: "", password: "", mfa_code: "" },
   });
 
   async function onLogin(values: LoginValues) {
@@ -40,7 +47,7 @@ export function LoginPage() {
     try {
       const result = await unwrap(
         await client.POST("/api/v1/auth/login", {
-          body: { email: values.email, password: values.password },
+          body: loginBody(values),
         }),
       );
       if (!result) {
@@ -49,10 +56,20 @@ export function LoginPage() {
       applyTokenPair(result.data);
       navigate("/");
     } catch (err: unknown) {
+      if (fieldError(err, "mfa_code") !== undefined && !mfaRequired) {
+        // The password was right: ask for the code (no error yet).
+        setMfaRequired(true);
+        return;
+      }
       if (!applyContractErrors(setError, err)) {
         setStatus(err instanceof Error ? err.message : "login failed");
       }
     }
+  }
+
+  function loginBody(values: LoginValues) {
+    const body = { email: values.email, password: values.password };
+    return mfaRequired ? { ...body, mfa_code: values.mfa_code.trim() } : body;
   }
 
   async function onRegister(values: LoginValues) {
@@ -132,6 +149,25 @@ export function LoginPage() {
               />
             )}
           />
+          {mfaRequired ? (
+            <Controller
+              name="mfa_code"
+              control={control}
+              rules={{ required: "The code is required" }}
+              render={({ field, fieldState }) => (
+                <TextField
+                  {...field}
+                  label="Authentication code"
+                  autoComplete="one-time-code"
+                  autoFocus
+                  fullWidth
+                  error={!!fieldState.error}
+                  helperText={fieldState.error?.message ?? mfaPrompt}
+                  disabled={isSubmitting}
+                />
+              )}
+            />
+          ) : null}
           <Button type="submit" variant="contained" disabled={isSubmitting}>
             {isSubmitting ? <CircularProgress size={24} color="inherit" /> : "Log in"}
           </Button>

@@ -42,7 +42,7 @@ type totpEnrollOutput struct {
 }
 
 type authTOTPConfirmBody struct {
-	Code string `json:"code" minLength:"1" maxLength:"32" example:"123456" doc:"A code from the authenticator just set up"`
+	MFACode string `json:"mfa_code" minLength:"1" maxLength:"32" example:"123456" doc:"A code from the authenticator just set up"`
 }
 
 type totpConfirmInput struct {
@@ -102,7 +102,7 @@ func registerMFARoutes(api huma.API, svc *Service, prefix, security string, gate
 		Method:      http.MethodPost,
 		Path:        confirmPath,
 		Summary:     "Confirm a TOTP enrollment and enable MFA",
-		Description: "A code from the authenticator just set up enables multi-factor authentication: from then on a login needs mfa_code. Returns the recovery codes, shown this once. A wrong code is a 422 on mfa_code; 409 with no enrollment pending.",
+		Description: "A code from the authenticator just set up (mfa_code) enables multi-factor authentication: from then on a login needs mfa_code. Every other session of the user ends (they were started on the password alone); this one stays. Returns the recovery codes, shown this once. A wrong code is a 422 on mfa_code; 409 with no enrollment pending.",
 	}), svc.confirmTOTP)
 	declareRetryAfter(api, confirmPath, http.StatusTooManyRequests, throttleRetryAfterDoc)
 
@@ -164,7 +164,7 @@ func (s *Service) confirmTOTP(ctx context.Context, input *totpConfirmInput) (*re
 	if err != nil {
 		return nil, err
 	}
-	codes, err := s.ConfirmTOTPEnrollment(ctx, user.ID, input.Body.Code)
+	codes, err := s.ConfirmTOTPEnrollment(ctx, user.ID, input.Body.MFACode)
 	if err != nil {
 		return nil, mapServiceError(ctx, err)
 	}

@@ -513,6 +513,8 @@ type AuthConfig struct {
 	// (AUTH-8): the login, password reset, one-time token, current-password
 	// and verification throttles. On by default; turn it off only when
 	// something in front of the app (a gateway, a WAF) limits these routes.
+	// The multi-factor code limit per account (MFAPerUser) stays on: a
+	// per-address limit in front of the app does not bound guessing a code.
 	ThrottleDisabled bool
 	// MFAKey is the key the TOTP secrets of multi-factor authentication
 	// (AUTH-9) are encrypted with and the recovery codes hashed with, at

@@ -477,7 +477,7 @@ export interface components {
       recovery_codes: string[] | null;
     };
     AuthTOTPConfirmBody: {
-      code: string;
+      mfa_code: string;
     };
     AuthTOTPEnrollBody: {
       current_password: string;

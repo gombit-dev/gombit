@@ -30,6 +30,18 @@ export function applyContractErrors<TFieldValues extends FieldValues>(
   return applied;
 }
 
+/**
+ * The D10 field error message for name, or undefined when err has none: a
+ * 422 the page answers itself (the login's mfa_code challenge).
+ */
+export function fieldError(err: unknown, name: string): string | undefined {
+  const messages = d10Fields(err)?.[name];
+  if (messages === undefined) {
+    return undefined;
+  }
+  return messages.filter((item) => item.trim() !== "").join("; ");
+}
+
 function d10Fields(err: unknown): { [key: string]: string[] } | undefined {
   if (err instanceof ContractError) {
     return err.fields;

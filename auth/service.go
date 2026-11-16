@@ -229,10 +229,12 @@ func (s *Service) createUser(ctx context.Context, email, password string, superu
 // Authenticate verifies email and password. It fails with
 // ErrInvalidCredentials for an unknown email or a wrong password (a 401),
 // ErrAccountDisabled for the right password of a disabled account (a 403),
-// and a *ThrottleError (errors.Is ErrTooManyAttempts, a 429) past a login
-// throttle; any other error is a server failure (the user lookup's
-// database error), which a caller must not answer as wrong credentials
-// (#460).
+// ErrMFARequired for the right password of an account with multi-factor
+// authentication (a 422 on mfa_code: AuthenticateMFA takes the code), and a
+// *ThrottleError (errors.Is ErrTooManyAttempts, a 429) past a login
+// throttle or MFAPerUser; any other error is a server failure (the user
+// lookup's database error, an MFA secret the current key cannot open),
+// which a caller must not answer as wrong credentials (#460).
 func (s *Service) Authenticate(ctx context.Context, email, password string) (User, error) {
 	return s.AuthenticateMFA(ctx, email, password, "")
 }

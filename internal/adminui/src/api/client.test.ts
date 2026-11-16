@@ -255,6 +255,26 @@ describe("admin client CSRF cookie handling (#250)", () => {
     expect(loginHits).toBe(2); // stale 403 on the auth endpoint + retry after recovery
   });
 
+  it("sends mfa_code with the login only when given", async () => {
+    const doc = { cookie: "gombit_csrf=good", querySelector: () => null };
+    vi.stubGlobal("document", doc);
+    const bodies: unknown[] = [];
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      if (String(input).includes("/auth/login")) {
+        bodies.push(JSON.parse(String(init?.body)));
+        return jsonResponse(200, { data: { id: 1, email: "a@b.c" } });
+      }
+      return jsonResponse(404, { error: { code: "not_found", message: String(input) } });
+    });
+    const client = createAdminClient();
+    await client.login("a@b.c", "secret");
+    await client.login("a@b.c", "secret", "123456");
+    expect(bodies).toEqual([
+      { email: "a@b.c", password: "secret" },
+      { email: "a@b.c", password: "secret", mfa_code: "123456" },
+    ]);
+  });
+
   it("retries /auth/refresh once when a stale CSRF cookie 403s it", async () => {
     const doc = { cookie: "gombit_csrf=stale", querySelector: () => null };
     vi.stubGlobal("document", doc);

@@ -365,9 +365,12 @@ func (s *Service) BeginTOTPEnrollment(ctx context.Context, userID uint, current 
 
 // ConfirmTOTPEnrollment enables MFA for userID with a code from the
 // authenticator their pending enrollment set up, and returns the account's
-// recovery codes, shown this once (only their hashes are kept). It returns
-// ErrNoPendingEnrollment, ErrInvalidMFACode (throttled by MFAPerUser), and
-// ErrMFAAlreadyEnabled.
+// recovery codes, shown this once (only their hashes are kept). Every other
+// session of the user ends (the one ctx's request carries stays; with none,
+// all end): they were started on the password alone. It returns
+// ErrNoPendingEnrollment, ErrInvalidMFACode (throttled by MFAPerUser),
+// ErrMFAAlreadyEnabled, and ErrSessionEnded when the requesting session
+// ended meanwhile.
 func (s *Service) ConfirmTOTPEnrollment(ctx context.Context, userID uint, code string) ([]string, error) {
 	res, err := s.throttle.reserve(ctx, s.mfaRule(userID))
 	if err != nil {
@@ -378,6 +381,7 @@ func (s *Service) ConfirmTOTPEnrollment(ctx context.Context, userID uint, code s
 		return nil, err
 	}
 	code = normalizeMFACode(code)
+	requester := requestingSession(ctx, userID)
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		locked, err := lockUserTx(tx, userID)
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -407,7 +411,23 @@ func (s *Service) ConfirmTOTPEnrollment(ctx context.Context, userID uint, code s
 		if err := tx.Model(&TOTPFactor{}).Where("id = ?", f.ID).Updates(map[string]any{"confirmed_at": now, "last_step": step}).Error; err != nil {
 			return err
 		}
-		return replaceRecoveryCodesTx(tx, userID, hashes)
+		if err := replaceRecoveryCodesTx(tx, userID, hashes); err != nil {
+			return err
+		}
+		// The sessions started on the password alone end with it, as a
+		// password change ends them: enrolling is what a user does who
+		// fears one was stolen, and refresh would keep it alive for good.
+		// Under the user's lock, which a login's session start takes too,
+		// so none that checked "no factor" before this slips through. The
+		// session that confirms stays.
+		if requester == 0 {
+			return revokeAllTx(tx, userID, now)
+		}
+		keep, err := requesterChain(tx, userID, requester, now)
+		if err != nil {
+			return err
+		}
+		return revokeSessionsButTx(tx, userID, keep, now)
 	})
 	if errors.Is(err, errInvalidMFACode) {
 		s.Audit(ctx, AuditEvent{Action: AuditMFAFailed, TargetUserID: uintPtr(userID), Details: details("reason", "wrong_mfa_code")})
@@ -462,6 +482,13 @@ func (s *Service) useMFACodeTx(tx *gorm.DB, userID uint, f TOTPFactor, code stri
 	}
 	if code == "" {
 		return false, errInvalidMFACode
+	}
+	// The recovery codes are hashed under the same key material as the
+	// secret is sealed with: if the secret no longer opens, the key changed,
+	// and no code can match. Said as that (a 500, logged), not as a wrong
+	// code charged to the user who lost their device.
+	if _, err := s.openTOTPSecret(userID, f.Secret); err != nil {
+		return false, err
 	}
 	used := tx.Model(&RecoveryCode{}).
 		Where("user_id = ? AND code_hash = ? AND used_at IS NULL", userID, s.hashRecoveryCode(code)).
@@ -666,5 +693,5 @@ func deleteMFATx(tx *gorm.DB, userID uint) error {
 }
 
 func (s *Service) mfaRule(userID uint) throttleRule {
-	return throttleRule{name: "MFAPerUser", limit: s.throttle.policy.MFAPerUser, subject: userSubject(userID)}
+	return throttleRule{name: "MFAPerUser", limit: s.throttle.policy.MFAPerUser, subject: userSubject(userID), essential: true}
 }
