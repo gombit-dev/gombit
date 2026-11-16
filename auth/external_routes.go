@@ -31,7 +31,7 @@ type authExternalStartBody struct {
 
 type authExternalLinkBody struct {
 	ReturnTo        string `json:"return_to,omitempty" maxLength:"2048" example:"/settings" doc:"Where the callback redirects the browser: a path on this site (not a URL; no fragment). Default /."`
-	CurrentPassword string `json:"current_password,omitempty" maxLength:"72" doc:"The account's password; required unless the account has none (it was made by an external sign-in)."`
+	CurrentPassword string `json:"current_password" maxLength:"72" doc:"The account's password."`
 }
 
 type authExternalAuthorization struct {
@@ -74,6 +74,13 @@ type authExternalExchangeBody struct {
 
 type externalExchangeInput struct {
 	Body authExternalExchangeBody
+	// CodeCookie is the browser binding the callback set with the code.
+	CodeCookie http.Cookie `cookie:"gombit_external_code"`
+}
+
+type externalExchangeOutput struct {
+	SetCookie http.Cookie `header:"Set-Cookie"`
+	Body      contract.Data[TokenPair]
 }
 
 type authIdentityLink struct {
@@ -122,7 +129,7 @@ func registerExternalRoutes(api huma.API, svc *Service, prefix, security string,
 		Method:      http.MethodPost,
 		Path:        base + "/{provider}/link",
 		Summary:     "Start linking an external identity to the signed-in user",
-		Description: "As /login, but the callback links the identity to this account (refused when another account has it) and signs nobody in. Requires the current password (a wrong one is a 422 on current_password; too many are a 429 with Retry-After) unless the account has none. An account with multi-factor authentication cannot sign in externally, so it links nothing (409).",
+		Description: "As /login, but the callback links the identity to this account (refused when another account has it) and signs nobody in. Requires the current password (a wrong one is a 422 on current_password; too many are a 429 with Retry-After): a link signs in for good, past every session. An account without a password (made by an external sign-in) links nothing until a password reset gives it one (409), and an account with multi-factor authentication cannot sign in externally, so it links nothing either (409).",
 		Tags:        []string{"Auth"},
 		Security:    []map[string][]string{{security: {}}},
 		Middlewares: huma.Middlewares{gate},
@@ -134,7 +141,7 @@ func registerExternalRoutes(api huma.API, svc *Service, prefix, security string,
 	if cookieMode {
 		callbackDoc += "A sign-in sets the session cookies. "
 	} else {
-		callbackDoc += "A sign-in adds gombit_code to return_to's query: trade it for the session's tokens with POST /auth/external/exchange, once, within two minutes. "
+		callbackDoc += "A sign-in adds gombit_code to return_to's query: trade it for the session's tokens with POST /auth/external/exchange, once, within two minutes, from this browser: the callback also sets it the gombit_external_code cookie (HttpOnly, for the exchange's path) that the exchange needs, so the code alone, in another browser, signs nobody in. "
 	}
 	callbackDoc += "A refusal adds gombit_error instead: access_denied, provider_error, invalid_identity, account_exists, email_unverified, signup_disabled, mfa_enabled, account_disabled, identity_linked_elsewhere, session_ended, login_failed or server_error."
 	huma.Register(api, withRequestInfo(huma.Operation{
@@ -153,7 +160,7 @@ func registerExternalRoutes(api huma.API, svc *Service, prefix, security string,
 			Method:      http.MethodPost,
 			Path:        base + "/exchange",
 			Summary:     "Trade an external sign-in's code for Bearer tokens",
-			Description: "The code works once, within two minutes of the callback; an unknown, expired or used one is a 422 on code. An account disabled since the callback is a 403; one given multi-factor authentication since, a 409. Too many invalid codes from one client address is a 429 (Retry-After).",
+			Description: "The code works once, within two minutes of the callback; an unknown, expired or used one is a 422 on code. The code works only from the browser that ran the flow: the callback set it a cookie the exchange needs (send credentials). A code from elsewhere is a 422 on code, and so is one whose account was disabled, or whose sessions were all ended (signed out everywhere, a password reset or change), since the callback: those void it. An account given multi-factor authentication since is a 409. Too many invalid codes from one client address is a 429 (Retry-After).",
 			Tags:        []string{"Auth"},
 			Errors:      []int{http.StatusTooManyRequests},
 		}), svc.exchangeExternal)
@@ -227,17 +234,31 @@ func (s *Service) externalStartOutput(start externalStart) *externalStartOutput 
 }
 
 // externalStateCookie is the flow's state cookie (maxAge < 0 clears it).
-// SameSite=Lax whatever the session cookies' setting: the provider's
-// redirect back is a cross-site navigation, which a Strict cookie misses.
 // Its path is the external routes', so no other request carries it.
 func (s *Service) externalStateCookie(value string, maxAge int) http.Cookie {
-	//nolint:gosec // G124: Secure is cfg.CookieSecure (production Validate requires true); HttpOnly and SameSite are set.
+	return s.externalCookie(ExternalStateCookieName, "/auth/external", value, maxAge)
+}
+
+// externalCodeCookie is a Bearer-mode code's browser binding (maxAge < 0
+// clears it): sent to the exchange only.
+func (s *Service) externalCodeCookie(value string, maxAge int) http.Cookie {
+	return s.externalCookie(ExternalCodeCookieName, "/auth/external/exchange", value, maxAge)
+}
+
+// externalCookie is one of the external flow's cookies, under path (below
+// the API prefix). HttpOnly; SameSite=Lax whatever the session cookies'
+// setting, since the provider's redirect back is a cross-site navigation,
+// which a Strict cookie misses; Secure with GOMBIT_COOKIE_SECURE, and
+// always in production, in either auth mode (the production check of
+// GOMBIT_COOKIE_SECURE covers cookie mode only).
+func (s *Service) externalCookie(name, path, value string, maxAge int) http.Cookie {
+	//nolint:gosec // G124: Secure is CookieSecure, forced on in production (externalCookie's doc); HttpOnly and SameSite are set.
 	return http.Cookie{
-		Name:     ExternalStateCookieName,
+		Name:     name,
 		Value:    value,
-		Path:     s.apiPrefix + "/auth/external",
+		Path:     s.apiPrefix + path,
 		MaxAge:   maxAge,
-		Secure:   s.cfg.CookieSecure,
+		Secure:   s.cfg.CookieSecure || s.production,
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 	}
@@ -281,7 +302,15 @@ func (s *Service) externalCallback(ctx context.Context, input *externalCallbackI
 	case st.Mode == externalModeLink:
 		return redirect("gombit_linked", st.Provider), nil
 	case bearer:
-		return redirect("gombit_code", res.Code), nil
+		// The code reaches the page in its URL; the binding stays in this
+		// browser's cookie, and the exchange needs both.
+		sealed, err := s.sealExternal(externalBindingAAD, res.Binding)
+		if err != nil {
+			return redirect("gombit_error", "server_error"), nil
+		}
+		out := redirect("gombit_code", res.Code)
+		out.SetCookie = append(out.SetCookie, s.externalCodeCookie(sealed, int(externalCodeTTL.Seconds())))
+		return out, nil
 	}
 	out := redirect("", "")
 	out.SetCookie = append(out.SetCookie, s.sessionCookies(res.Pair)...)
@@ -303,15 +332,22 @@ func withQuery(path, name, value string) string {
 	return u.String()
 }
 
-func (s *Service) exchangeExternal(ctx context.Context, input *externalExchangeInput) (*tokenOutput, error) {
-	_, pair, err := s.exchangeExternalCode(ctx, input.Body.Code)
-	if err != nil {
-		if errors.Is(err, errInvalidOneTimeToken) {
-			return nil, invalidField(ctx, "code", "invalid or expired code")
-		}
-		return nil, mapExternalError(ctx, err)
+func (s *Service) exchangeExternal(ctx context.Context, input *externalExchangeInput) (*externalExchangeOutput, error) {
+	// The binding works with one code, once: cleared whatever the outcome.
+	cleared := s.externalCodeCookie("", -1)
+	var binding externalBinding
+	if !s.openExternal(externalBindingAAD, input.CodeCookie.Value, &binding) {
+		binding = externalBinding{}
 	}
-	return &tokenOutput{Body: contract.Data[TokenPair]{Data: pair}}, nil
+	_, pair, err := s.exchangeExternalCode(ctx, input.Body.Code, binding)
+	if err != nil {
+		resp := mapExternalError(ctx, err)
+		if errors.Is(err, errInvalidOneTimeToken) {
+			resp = invalidField(ctx, "code", "invalid or expired code, or not this browser's")
+		}
+		return nil, huma.ErrorWithHeaders(resp, http.Header{"Set-Cookie": []string{cleared.String()}})
+	}
+	return &externalExchangeOutput{SetCookie: cleared, Body: contract.Data[TokenPair]{Data: pair}}, nil
 }
 
 func (s *Service) listExternalIdentities(ctx context.Context, _ *struct{}) (*externalIdentitiesOutput, error) {
@@ -353,6 +389,8 @@ func mapExternalError(ctx context.Context, err error) error {
 		return contract.WithContext(ctx, contract.Conflict("an account with multi-factor authentication signs in with its password, not an external identity"))
 	case errors.Is(err, errIdentityLinkNotFound):
 		return contract.WithContext(ctx, contract.NotFound("identity link not found"))
+	case errors.Is(err, errPasswordRequiredToLink):
+		return contract.WithContext(ctx, contract.Conflict("the account has no password: set one with a password reset, then link the identity with it"))
 	case errors.Is(err, errLastSignInMethod):
 		return contract.WithContext(ctx, contract.Conflict("the account has no password and no other linked identity: it could not sign in again"))
 	}

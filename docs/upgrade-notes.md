@@ -544,7 +544,13 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   linked makes an account only when the provider verified its email
   and no account has it (an account's owner links it, signed in), and
   an account with multi-factor authentication signs in with its
-  password only. It then registers `{prefix}/auth/external`,
+  password only. Linking needs the current password (an account
+  without one links nothing until a reset); in Bearer mode the
+  callback's `gombit_code` exchanges only from the browser that ran
+  the flow (with its `gombit_external_code` cookie: the SPA's
+  `fetch` of `/exchange` sends credentials). A password reset that
+  ends the sessions also removes the user's links. It then registers
+  `{prefix}/auth/external`,
   `/auth/external/{provider}/login`, `/link`, `/callback`,
   `/auth/external/exchange` (Bearer mode), `/auth/external/identities`
   and `/identities/{id}`, their `auth-external-*` operations, and the

@@ -308,14 +308,14 @@ func TestSignInThroughTheFramework(t *testing.T) {
 		t.Fatalf("start = %d %s", rec.Code, rec.Body.String())
 	}
 	code, state := iss.authorize(t, start.Data.URL)
-	rec = serve(httptest.NewRequest(http.MethodGet, "/api/v1/auth/external/test/callback?"+url.Values{"code": {code}, "state": {state}}.Encode(), nil), rec.Result().Cookies())
-	loc, err := url.Parse(rec.Header().Get("Location"))
-	if rec.Code != http.StatusFound || err != nil || loc.Path != "/home" || loc.Query().Get("gombit_code") == "" {
-		t.Fatalf("callback = %d %s", rec.Code, rec.Header().Get("Location"))
+	callback := serve(httptest.NewRequest(http.MethodGet, "/api/v1/auth/external/test/callback?"+url.Values{"code": {code}, "state": {state}}.Encode(), nil), rec.Result().Cookies())
+	loc, err := url.Parse(callback.Header().Get("Location"))
+	if callback.Code != http.StatusFound || err != nil || loc.Path != "/home" || loc.Query().Get("gombit_code") == "" {
+		t.Fatalf("callback = %d %s", callback.Code, callback.Header().Get("Location"))
 	}
 	req = httptest.NewRequest(http.MethodPost, "/api/v1/auth/external/exchange", strings.NewReader(`{"code":"`+loc.Query().Get("gombit_code")+`"}`))
 	req.Header.Set("Content-Type", "application/json")
-	rec = serve(req, nil)
+	rec = serve(req, callback.Result().Cookies())
 	var pair struct {
 		Data struct {
 			Access string `json:"access_token"`

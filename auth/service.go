@@ -44,6 +44,9 @@ type Service struct {
 	externalSignupOff bool
 	// apiPrefix is the routes' prefix (Mount), for the state cookie's path.
 	apiPrefix string
+	// production makes the external flow's cookies Secure whatever
+	// CookieSecure says.
+	production bool
 	// throttle counts the credential endpoints' attempts (throttle.go).
 	throttle    *throttler
 	dummyOnce   sync.Once
@@ -121,6 +124,7 @@ func NewService(db *gorm.DB, cfg config.Config, opts ...Option) (*Service, error
 		mailer: noMailer{},
 		logger: zap.NewNop(),
 	}
+	s.production = cfg.Environment == config.EnvironmentProduction
 	s.auditor = DBAuditor(db)
 	s.mfaIssuer = cfg.AppName
 	if s.mfaIssuer == "" {
@@ -888,12 +892,17 @@ func lockUserTx(tx *gorm.DB, userID uint) (User, error) {
 	return user, err
 }
 
-// revokeAllTx revokes every active refresh token of the user. tx must hold
-// lockUserTx.
+// revokeAllTx revokes every active refresh token of the user, and voids
+// the external sign-in codes not yet exchanged (each a session about to
+// start). tx must hold lockUserTx.
 func revokeAllTx(tx *gorm.DB, userID uint, now time.Time) error {
-	return tx.Model(&RefreshToken{}).
+	err := tx.Model(&RefreshToken{}).
 		Where("user_id = ? AND revoked_at IS NULL", userID).
 		Update("revoked_at", now).Error
+	if err != nil {
+		return err
+	}
+	return voidTokensTx(tx, userID, 0, now, PurposeExternalLogin)
 }
 
 func (s *Service) compareDummy(password string) {

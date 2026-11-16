@@ -111,6 +111,12 @@ func New(ctx context.Context, cfg Config) (*Provider, error) {
 	}, nil
 }
 
+// IssuesIDTokens implements auth.IDTokenProvider: every identity carries
+// the ID token's nonce, which the framework then requires.
+func (p *Provider) IssuesIDTokens() bool { return true }
+
+var _ auth.IDTokenProvider = (*Provider)(nil)
+
 // Name implements auth.IdentityProvider.
 func (p *Provider) Name() string { return p.name }
 

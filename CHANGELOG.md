@@ -26,8 +26,12 @@ version.
   `/link`, `/callback`, Bearer mode's `/exchange`, and `/identities`. An
   unlinked identity makes an account only when the provider verified its
   email and no account has it. An existing account's owner links an
-  identity explicitly, signed in; nothing is linked by email. Accounts with
-  MFA, and disabled ones, do not sign in externally. An account a sign-in
+  identity explicitly, signed in, with the current password; nothing is
+  linked by email. Bearer mode's one-time `gombit_code` exchanges only
+  from the browser that ran the flow (a sealed `gombit_external_code`
+  cookie), and ending the account's sessions voids codes not yet
+  exchanged. A password reset that ends the sessions also removes the
+  links. Accounts with MFA, and disabled ones, do not sign in externally. An account a sign-in
   made has no password (`User.HasUsablePassword`) until a reset gives it
   one. Audited (`auth.identity.*`, external `auth.login.*`).
   **Schema:** the table `auth_identity_links`, read only with a provider.

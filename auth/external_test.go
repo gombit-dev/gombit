@@ -41,7 +41,11 @@ type fakeProvider struct {
 	nonce string
 	// fail, when set, is Exchange's error.
 	fail error
+	// idToken is what IssuesIDTokens declares; dropNonce returns no nonce.
+	idToken, dropNonce bool
 }
+
+func (p *fakeProvider) IssuesIDTokens() bool { return p.idToken }
 
 type fakeGrant struct {
 	state    string
@@ -100,6 +104,9 @@ func (p *fakeProvider) Exchange(_ context.Context, req auth.ExchangeRequest) (au
 	id.Nonce = req.Nonce
 	if p.nonce != "" {
 		id.Nonce = p.nonce
+	}
+	if p.dropNonce {
+		id.Nonce = ""
 	}
 	return id, nil
 }
@@ -384,6 +391,18 @@ func runExternalIdentity(t *testing.T, db *database.DB, mode config.AuthMode) {
 		if loc.Query().Get("gombit_error") != "invalid_identity" {
 			t.Fatalf("no subject landed at %s", loc)
 		}
+		// An adapter that declares ID tokens must return the nonce.
+		e.provider.idToken, e.provider.dropNonce = true, true
+		loc = e.signIn(t, e.browser(t), identity(e.sub("sub-nononce"), uniqueEmail("nononce")), "/")
+		e.provider.dropNonce = false
+		if loc.Query().Get("gombit_error") != "invalid_identity" {
+			t.Fatalf("an ID token provider with no nonce landed at %s", loc)
+		}
+		loc = e.signIn(t, e.browser(t), identity(e.sub("sub-withnonce"), uniqueEmail("withnonce")), "/")
+		e.provider.idToken = false
+		if loc.Query().Has("gombit_error") {
+			t.Fatalf("an ID token provider with the nonce landed at %s", loc)
+		}
 	})
 
 	t.Run("the provider's refusals", func(t *testing.T) {
@@ -399,6 +418,56 @@ func runExternalIdentity(t *testing.T, db *database.DB, mode config.AuthMode) {
 		if loc.Query().Get("gombit_error") != "provider_error" {
 			t.Fatalf("an exchange failure landed at %s", loc)
 		}
+	})
+
+	t.Run("the exchange code is the flow browser's", func(t *testing.T) {
+		if e.cookie {
+			t.Skip("cookie mode sets the session at the callback: no code")
+		}
+		// The attacker runs a sign-in with their own identity and stops at
+		// the code; the victim's page, given it, exchanges nothing.
+		attacker := e.browser(t)
+		loc := e.signIn(t, attacker, identity(e.sub("sub-attacker"), uniqueEmail("attacker")), "/")
+		code := loc.Query().Get("gombit_code")
+		if code == "" || attacker.jar.value(auth.ExternalCodeCookieName) == "" {
+			t.Fatalf("landed at %s with no code binding", loc)
+		}
+		c := attacker.jar.cookies[auth.ExternalCodeCookieName]
+		if !c.HttpOnly || c.Path != "/api/v1/auth/external/exchange" || c.SameSite != http.SameSiteLaxMode || c.MaxAge != 120 {
+			t.Fatalf("code cookie = %+v", c)
+		}
+		victim := e.browser(t)
+		rec := e.do(victim, http.MethodPost, "/api/v1/auth/external/exchange", `{"code":"`+code+`"}`)
+		assertError(t, rec, http.StatusUnprocessableEntity, "validation_error")
+		// A victim mid-flow of their own holds a binding: not this code's.
+		e.signIn(t, victim, identity(e.sub("sub-victim"), uniqueEmail("victim")), "/")
+		rec = e.do(victim, http.MethodPost, "/api/v1/auth/external/exchange", `{"code":"`+code+`"}`)
+		assertError(t, rec, http.StatusUnprocessableEntity, "validation_error")
+		if victim.jar.value(auth.ExternalCodeCookieName) != "" {
+			t.Fatal("a refused exchange kept the binding")
+		}
+		// The attacker's own browser still can.
+		if me := e.session(t, attacker, loc); me.Email == "" {
+			t.Fatal("the flow's browser could not exchange its code")
+		}
+	})
+
+	t.Run("ending the sessions voids a code not yet exchanged", func(t *testing.T) {
+		if e.cookie {
+			t.Skip("no code in cookie mode")
+		}
+		email := uniqueEmail("ext-void")
+		b := e.browser(t)
+		loc := e.signIn(t, b, identity(e.sub("sub-void"), email), "/")
+		code := loc.Query().Get("gombit_code")
+		// Signed out everywhere from another session of the account.
+		other := e.browser(t)
+		e.session(t, other, e.signIn(t, other, identity(e.sub("sub-void"), email), "/"))
+		if rec := e.do(other, http.MethodDelete, "/api/v1/auth/sessions?scope=all", ""); rec.Code != http.StatusOK && rec.Code != http.StatusNoContent {
+			t.Fatalf("sign out everywhere = %d %s", rec.Code, rec.Body.String())
+		}
+		rec := e.do(b, http.MethodPost, "/api/v1/auth/external/exchange", `{"code":"`+code+`"}`)
+		assertError(t, rec, http.StatusUnprocessableEntity, "validation_error")
 	})
 
 	t.Run("the state is checked", func(t *testing.T) {
@@ -437,7 +506,7 @@ func runExternalIdentity(t *testing.T, db *database.DB, mode config.AuthMode) {
 
 	t.Run("return_to is a path on this site", func(t *testing.T) {
 		b := e.browser(t)
-		for _, bad := range []string{"https://evil.example.com/", "//evil.example.com", `/\\evil.example.com`, "evil", "/a#frag"} {
+		for _, bad := range []string{"https://evil.example.com/", "//evil.example.com", `/\\evil.example.com`, "evil", "/a#frag", "/%zz"} {
 			body, _ := json.Marshal(map[string]string{"return_to": bad})
 			rec := e.do(b, http.MethodPost, "/api/v1/auth/external/fake/login", string(body))
 			assertError(t, rec, http.StatusUnprocessableEntity, "validation_error")
@@ -536,11 +605,16 @@ func runExternalIdentity(t *testing.T, db *database.DB, mode config.AuthMode) {
 		}
 		rec = e.do(b, http.MethodDelete, fmt.Sprintf("/api/v1/auth/external/identities/%d", links.Data[0].ID), "")
 		assertError(t, rec, http.StatusConflict, "conflict")
-		// It links another without a password, then may drop the first.
-		authURL := e.start(t, b, "other", "link", "")
-		code, st := e.other.grant(t, authURL, auth.ExternalIdentity{Subject: fmt.Sprintf("other-%d", time.Now().UnixNano())})
-		if loc := e.callback(t, b, "other", url.Values{"code": {code}, "state": {st}}.Encode()); loc.Query().Get("gombit_linked") != "other" {
-			t.Fatalf("second link landed at %s", loc)
+		// Its session alone links nothing: a link would outlive every
+		// session (a stolen token made a credential for good).
+		for _, body := range []string{"", `{"current_password":""}`, `{"current_password":"anything-at-all"}`} {
+			rec := e.do(b, http.MethodPost, "/api/v1/auth/external/other/link", body)
+			assertError(t, rec, http.StatusConflict, "conflict")
+		}
+		// With another link (made elsewhere), the first may go.
+		me := decodeMe(t, e.do(b, http.MethodGet, "/api/v1/me", ""))
+		if err := db.DB.Create(&auth.IdentityLink{UserID: me.ID, Provider: "other", SubjectKey: e.sub("other-key"), Subject: e.sub("other")}).Error; err != nil {
+			t.Fatal(err)
 		}
 		if rec := e.do(b, http.MethodDelete, fmt.Sprintf("/api/v1/auth/external/identities/%d", links.Data[0].ID), ""); rec.Code != http.StatusNoContent {
 			t.Fatalf("unlink with another left = %d %s", rec.Code, rec.Body.String())

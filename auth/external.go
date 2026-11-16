@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -38,10 +39,11 @@ import (
 // puts them in the authorization URL and the token request as its protocol
 // says, and checks nothing of the state (the framework did, before Exchange).
 // An OIDC adapter must verify the ID token (issuer, audience, signature,
-// expiry) and its nonce against ExchangeRequest.Nonce, and return the token's
-// nonce in ExternalIdentity.Nonce: the framework refuses an identity whose
-// nonce is not the request's. A plain OAuth2 adapter (no ID token) leaves
-// Nonce empty, and relies on the state and PKCE.
+// expiry) and its nonce against ExchangeRequest.Nonce, return the token's
+// nonce in ExternalIdentity.Nonce, and declare itself an IDTokenProvider:
+// the framework then refuses an identity whose nonce is missing or not the
+// request's. A plain OAuth2 adapter (no ID token) leaves Nonce empty, and
+// relies on the state and PKCE.
 type IdentityProvider interface {
 	// Name is the provider's stable name, in the routes' paths and the
 	// stored links ("google", "okta"): 1 to 32 lowercase letters, digits,
@@ -51,6 +53,17 @@ type IdentityProvider interface {
 	AuthCodeURL(req AuthorizationRequest) (string, error)
 	// Exchange redeems the authorization code for the user's identity.
 	Exchange(ctx context.Context, req ExchangeRequest) (ExternalIdentity, error)
+}
+
+// IDTokenProvider is implemented by an adapter whose identities come from an
+// OpenID Connect ID token (auth/oidc's). One whose IssuesIDTokens is true
+// declares that each identity carries the token's nonce, and the framework
+// holds it to that: an identity with no nonce, or another flow's, is
+// refused. Without the declaration the framework can only refuse a nonce
+// that is returned and wrong: it cannot tell a plain OAuth2 adapter (no ID
+// token, no nonce) from an OIDC adapter that forgot to check and return it.
+type IDTokenProvider interface {
+	IssuesIDTokens() bool
 }
 
 // AuthorizationRequest is what the authorization URL carries.
@@ -141,6 +154,9 @@ const (
 	// ExternalStateCookieName holds the flow's encrypted state, between the
 	// start of an external sign-in and its callback.
 	ExternalStateCookieName = "gombit_external"
+	// ExternalCodeCookieName holds a Bearer-mode code's browser binding,
+	// between the callback and the exchange.
+	ExternalCodeCookieName = "gombit_external_code"
 )
 
 var providerNamePattern = regexp.MustCompile(`^[a-z0-9_-]{1,32}$`)
@@ -233,6 +249,7 @@ var (
 	errExternalSignupDisabled  = errors.New("auth: the identity is not linked to an account")
 	errExternalMFA             = errors.New("auth: an account with multi-factor authentication signs in with its password")
 	errIdentityLinkedElsewhere = errors.New("auth: the identity is linked to another account")
+	errPasswordRequiredToLink  = errors.New("auth: an account without a password links no identity; a password reset gives it one")
 	errLastSignInMethod        = errors.New("auth: the identity is the account's only way to sign in")
 	errIdentityLinkNotFound    = errors.New("auth: identity link not found")
 	errInvalidReturnTo         = errors.New("auth: return_to must be a path on this site")
@@ -282,11 +299,13 @@ func (s *Service) beginExternal(provider string, st externalState) (externalStar
 }
 
 // beginExternalLink starts linking an identity at provider to the signed-in
-// user userID, whose session is the refresh token row sessionID. An account
-// with a password proves it again (current, throttled as a password change
-// is); one without (made by an external sign-in) does not. An account with
-// multi-factor authentication cannot sign in externally, so it links
-// nothing (errExternalMFA).
+// user userID, whose session is the refresh token row sessionID. A link is
+// a way to sign in that outlives every session, so a session alone does not
+// add one: the account proves its password again (current, throttled as a
+// password change is). An account without a password (made by an external
+// sign-in) links nothing until a password reset gives it one
+// (errPasswordRequiredToLink). An account with multi-factor authentication
+// cannot sign in externally, so it links nothing either (errExternalMFA).
 func (s *Service) beginExternalLink(ctx context.Context, provider string, userID, sessionID uint, current, returnTo string) (externalStart, error) {
 	if s.providers[provider] == nil {
 		return externalStart{}, errUnknownProvider
@@ -298,10 +317,11 @@ func (s *Service) beginExternalLink(ctx context.Context, provider string, userID
 	if user.ID == 0 {
 		return externalStart{}, errUserNotFound
 	}
-	if user.HasUsablePassword() {
-		if _, err := s.checkCurrentPassword(ctx, userID, current, AuditIdentityLinkFailed); err != nil {
-			return externalStart{}, err
-		}
+	if !user.HasUsablePassword() {
+		return externalStart{}, errPasswordRequiredToLink
+	}
+	if _, err := s.checkCurrentPassword(ctx, userID, current, AuditIdentityLinkFailed); err != nil {
+		return externalStart{}, err
 	}
 	f, err := confirmedFactor(s.db.WithContext(ctx), userID)
 	if err != nil {
@@ -328,6 +348,15 @@ func cleanReturnTo(raw string) (string, error) {
 			return "", errInvalidReturnTo
 		}
 	}
+	// Parsed as the callback parses it to add its parameter (withQuery): a
+	// value it cannot parse would lose the code or the error.
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "" || u.Host != "" || u.User != nil || u.Opaque != "" {
+		return "", errInvalidReturnTo
+	}
+	if _, err := url.ParseQuery(u.RawQuery); err != nil {
+		return "", errInvalidReturnTo
+	}
 	return raw, nil
 }
 
@@ -341,10 +370,12 @@ func (s *Service) externalStateKey() []byte {
 	return key
 }
 
-// sealExternalState encrypts st: the cookie keeps the nonce and PKCE
-// verifier from the browser's reach, and nothing in it can be altered.
-func (s *Service) sealExternalState(st externalState) (string, error) {
-	plain, err := json.Marshal(st)
+// sealExternal encrypts v (JSON) for one of the external flow's cookies:
+// the browser can neither read it (the nonce, the PKCE verifier) nor alter
+// it. aad names what it is for, so one cookie's value never opens as
+// another's.
+func (s *Service) sealExternal(aad string, v any) (string, error) {
+	plain, err := json.Marshal(v)
 	if err != nil {
 		return "", err
 	}
@@ -356,30 +387,39 @@ func (s *Service) sealExternalState(st externalState) (string, error) {
 	if _, err := rand.Read(nonce); err != nil {
 		return "", err
 	}
-	return base64.RawURLEncoding.EncodeToString(gcm.Seal(nonce, nonce, plain, []byte("gombit-external-state:"+st.Provider))), nil
+	return base64.RawURLEncoding.EncodeToString(gcm.Seal(nonce, nonce, plain, []byte(aad))), nil
+}
+
+// openExternal opens a value sealExternal sealed for aad into v: false for
+// one that is missing, altered, or sealed for something else.
+func (s *Service) openExternal(aad, sealed string, v any) bool {
+	raw, err := base64.RawURLEncoding.DecodeString(sealed)
+	if err != nil || sealed == "" {
+		return false
+	}
+	gcm, err := newGCM(s.externalStateKey())
+	if err != nil || len(raw) < gcm.NonceSize() {
+		return false
+	}
+	plain, err := gcm.Open(nil, raw[:gcm.NonceSize()], raw[gcm.NonceSize():], []byte(aad))
+	if err != nil {
+		return false
+	}
+	return json.Unmarshal(plain, v) == nil
+}
+
+// sealExternalState seals a flow's state for its cookie, bound to its
+// provider.
+func (s *Service) sealExternalState(st externalState) (string, error) {
+	return s.sealExternal("gombit-external-state:"+st.Provider, st)
 }
 
 // openExternalState opens the state cookie of a callback for provider, with
 // the state it returned: errExternalState for a missing, altered or expired
 // cookie, another provider's, or another state.
 func (s *Service) openExternalState(provider, sealed, state string) (externalState, error) {
-	raw, err := base64.RawURLEncoding.DecodeString(sealed)
-	if err != nil || sealed == "" {
-		return externalState{}, errExternalState
-	}
-	gcm, err := newGCM(s.externalStateKey())
-	if err != nil {
-		return externalState{}, err
-	}
-	if len(raw) < gcm.NonceSize() {
-		return externalState{}, errExternalState
-	}
-	plain, err := gcm.Open(nil, raw[:gcm.NonceSize()], raw[gcm.NonceSize():], []byte("gombit-external-state:"+provider))
-	if err != nil {
-		return externalState{}, errExternalState
-	}
 	var st externalState
-	if err := json.Unmarshal(plain, &st); err != nil {
+	if !s.openExternal("gombit-external-state:"+provider, sealed, &st) {
 		return externalState{}, errExternalState
 	}
 	if st.Provider != provider || !s.now().Before(time.Unix(st.Expires, 0)) || state == "" ||
@@ -389,12 +429,25 @@ func (s *Service) openExternalState(provider, sealed, state string) (externalSta
 	return st, nil
 }
 
+// externalBinding ties a Bearer-mode exchange code to the browser that ran
+// the flow: the callback seals it in that browser's code cookie, and the
+// code's stored hash covers Secret, so the code alone (in a URL, a log, a
+// link an attacker sends) exchanges nothing.
+type externalBinding struct {
+	Secret   string `json:"b"`
+	Provider string `json:"p"`
+}
+
+const externalBindingAAD = "gombit-external-code"
+
 // externalResult is a completed callback: the user, and for a sign-in in
 // cookie mode the session's tokens, in Bearer mode the exchange code.
 type externalResult struct {
 	User User
 	Pair TokenPair
 	Code string
+	// Binding is the Bearer-mode code's browser binding (externalBinding).
+	Binding externalBinding
 }
 
 // completeExternal finishes the flow st with the provider's code: the
@@ -414,7 +467,8 @@ func (s *Service) completeExternal(ctx context.Context, st externalState, code s
 	if err != nil {
 		return externalResult{}, &providerError{provider: st.Provider, err: err}
 	}
-	if err := checkIdentity(identity, st.Nonce); err != nil {
+	idToken, _ := p.(IDTokenProvider)
+	if err := checkIdentity(identity, st.Nonce, idToken != nil && idToken.IssuesIDTokens()); err != nil {
 		s.logger.Warn("auth: identity provider returned an invalid identity", zap.String("provider", st.Provider), zap.Error(err))
 		return externalResult{}, errExternalIdentity
 	}
@@ -445,10 +499,15 @@ func subjectKey(subject string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// checkIdentity holds an adapter's identity to the boundary's rules.
-func checkIdentity(id ExternalIdentity, nonce string) error {
+// checkIdentity holds an adapter's identity to the boundary's rules: a
+// nonce must be the flow's, and is required from an adapter that declares
+// ID tokens (fromIDToken).
+func checkIdentity(id ExternalIdentity, nonce string, fromIDToken bool) error {
 	if id.Subject == "" || len(id.Subject) > 255 {
 		return errors.New("subject is empty or longer than 255 bytes")
+	}
+	if fromIDToken && id.Nonce == "" {
+		return errors.New("an ID token provider returned no nonce")
 	}
 	if id.Nonce != "" && subtle.ConstantTimeCompare([]byte(id.Nonce), []byte(nonce)) != 1 {
 		return errors.New("nonce is not the request's")
@@ -467,6 +526,7 @@ func checkIdentity(id ExternalIdentity, nonce string) error {
 func (s *Service) externalLogin(ctx context.Context, provider string, identity ExternalIdentity, bearer bool) (externalResult, error) {
 	var user User
 	var code string
+	var binding externalBinding
 	created := false
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var link IdentityLink
@@ -514,10 +574,14 @@ func (s *Service) externalLogin(ctx context.Context, provider string, identity E
 			if code, err = newOpaqueToken(); err != nil {
 				return err
 			}
+			if binding.Secret, err = newOpaqueToken(); err != nil {
+				return err
+			}
+			binding.Provider = provider
 			return tx.Create(&OneTimeToken{
 				UserID:    user.ID,
 				Purpose:   PurposeExternalLogin,
-				TokenHash: hashOpaqueToken(code),
+				TokenHash: hashOpaqueToken(boundCode(code, binding.Secret)),
 				Email:     user.Email,
 				FromEmail: user.Email,
 				ExpiresAt: now.Add(externalCodeTTL),
@@ -535,7 +599,7 @@ func (s *Service) externalLogin(ctx context.Context, provider string, identity E
 		s.Audit(ctx, AuditEvent{Action: AuditRegistered, ActorUserID: uintPtr(user.ID), TargetUserID: uintPtr(user.ID), Details: details("provider", provider)})
 	}
 	if bearer {
-		return externalResult{User: user, Code: code}, nil
+		return externalResult{User: user, Code: code, Binding: binding}, nil
 	}
 	// The session starts as a password login's does, re-checked under the
 	// user's lock: a disable, or a factor enabled, since is refused.
@@ -656,18 +720,28 @@ func (s *Service) auditExternalFailure(ctx context.Context, provider string, use
 	s.Audit(ctx, AuditEvent{Action: AuditLoginFailed, TargetUserID: uintPtr(userID), Details: details("method", "external", "provider", provider, "reason", externalErrorCode(err))})
 }
 
+// boundCode is what a Bearer-mode code's stored hash covers: the code and
+// its browser binding's secret.
+func boundCode(code, secret string) string { return code + "." + secret }
+
 // exchangeExternalCode trades a Bearer-mode exchange code for the session's
-// tokens: once, within externalCodeTTL, and re-checked as the callback
-// checked it (the account enabled, without multi-factor authentication).
-func (s *Service) exchangeExternalCode(ctx context.Context, raw string) (User, TokenPair, error) {
+// tokens: once, within externalCodeTTL, only with the binding the callback
+// gave the flow's browser, and re-checked as the callback checked it (the
+// account enabled, without multi-factor authentication). Ending the user's
+// sessions (a sign-out everywhere, a password reset or change, a disable)
+// voids the codes not yet exchanged.
+func (s *Service) exchangeExternalCode(ctx context.Context, code string, binding externalBinding) (User, TokenPair, error) {
 	type result struct {
 		user User
 		pair TokenPair
 	}
 	r, err := throttleTokenUse(ctx, s, func() (result, error) {
+		if code == "" || binding.Secret == "" {
+			return result{}, errInvalidOneTimeToken
+		}
 		var user User
 		err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-			_, locked, _, err := s.consumeOneTimeToken(tx, raw, PurposeExternalLogin)
+			_, locked, _, err := s.consumeOneTimeToken(tx, boundCode(code, binding.Secret), PurposeExternalLogin)
 			user = locked
 			return err
 		})
@@ -675,7 +749,7 @@ func (s *Service) exchangeExternalCode(ctx context.Context, raw string) (User, T
 			return result{}, err
 		}
 		user.mfaGate = mfaGateNoFactor
-		user, pair, err := s.startSessionWith(ctx, user, details("method", "external"))
+		user, pair, err := s.startSessionWith(ctx, user, details("method", "external", "provider", binding.Provider))
 		if errors.Is(err, errMFARequired) {
 			err = errExternalMFA
 		}
