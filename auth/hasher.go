@@ -20,7 +20,7 @@ type bcryptHasher struct {
 }
 
 func newBcryptHasher(cost int) Hasher {
-	if cost <= 0 {
+	if cost == 0 {
 		cost = bcrypt.DefaultCost
 	}
 	return bcryptHasher{cost: cost}
