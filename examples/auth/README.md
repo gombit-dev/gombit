@@ -166,6 +166,27 @@ curl -sS -X POST http://127.0.0.1:8080/api/v1/auth/email/change/confirm \
 
 See [`docs/auth.md`](../../docs/auth.md#email-change).
 
+## Multi-factor authentication
+
+Enroll an authenticator app (scan the `otpauth_uri` as a QR code), confirm it
+with a code, and keep the recovery codes; from then on the login asks for a
+code:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8080/api/v1/auth/mfa/totp -H "Authorization: Bearer $ACCESS" \
+  -H 'Content-Type: application/json' -d '{"current_password":"correct-horse"}'
+curl -sS -X POST http://127.0.0.1:8080/api/v1/auth/mfa/totp/confirm -H "Authorization: Bearer $ACCESS" \
+  -H 'Content-Type: application/json' -d '{"code":"<code from the app>"}'
+
+curl -sS -X POST http://127.0.0.1:8080/api/v1/auth/login -H 'Content-Type: application/json' \
+  -d '{"email":"ada@example.com","password":"correct-horse"}'
+# 422: fields.mfa_code = ["a multi-factor code is required"]
+curl -sS -X POST http://127.0.0.1:8080/api/v1/auth/login -H 'Content-Type: application/json' \
+  -d '{"email":"ada@example.com","password":"correct-horse","mfa_code":"<code from the app>"}'
+```
+
+See [`docs/auth.md`](../../docs/auth.md#multi-factor-authentication).
+
 ## Account state
 
 A superuser (or a user granted `auth.users.manage`) disables an account; its

@@ -12,6 +12,29 @@ version.
 
 ### Added
 
+- [Multi-factor authentication](docs/auth.md#multi-factor-authentication)
+  (AUTH-9), in both auth modes. A user enrolls a TOTP authenticator
+  (`POST /auth/mfa/totp` with the current password, then
+  `/auth/mfa/totp/confirm` with a code; RFC 6238) and gets ten single-use
+  recovery codes; from then on `POST /auth/login` needs `mfa_code` (a 422
+  on `mfa_code` without it, after the right password only). A code works
+  once (no replay, even concurrently); wrong codes are throttled per
+  account (`MFAPerUser`) on top of the login throttles. Recovery codes are
+  replaced with `/auth/mfa/recovery-codes` and MFA is turned off with
+  `/auth/mfa/disable` (both take the password and a code), and reset by an
+  operator with `auth.users.manage` (`POST /auth/users/{id}/mfa/reset`,
+  which also ends the user's sessions). Confirming an enrollment ends the
+  user's other sessions. The admin's and a new app's login pages ask for the
+  code. `MFAPerUser` stays on with `GOMBIT_AUTH_THROTTLE_DISABLED`. Secrets
+  are encrypted and codes hashed under keys from `GOMBIT_AUTH_MFA_KEY` (or
+  the JWT secret). **Breaking (Go API):** `auth.Service.Authenticate` /
+  `Login` refuse an MFA account without a code (`ErrMFARequired`, a new
+  client error); `AuthenticateMFA` / `LoginMFA` take it. Audited
+  (`auth.mfa.*`). **Breaking (schema):** two tables,
+  `auth_totp_factors` and `auth_recovery_codes`, which logins read: migrate
+  before running this release. **Breaking (api):** the framework registers
+  the MFA routes and schema names.
+
 - [Account state](docs/auth.md#account-state) (AUTH-6), in both auth
   modes. An account is active or disabled (`User.DisabledAt`). Disabling it
   (`POST /auth/users/{id}/disable`, or `auth.Service.DisableUser`) revokes

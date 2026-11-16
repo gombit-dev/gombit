@@ -198,3 +198,13 @@ func ThrottleProbed(s *Service) bool { return s.throttle.probed.Load() }
 func EnsurePermissionRow(ctx context.Context, db *gorm.DB, fresh *Permission) (Permission, error) {
 	return ensureRow(ctx, db, "permission_key = ?", fresh.Key, fresh)
 }
+
+// TOTPCode is the code of the base32 secret at at, as an authenticator app
+// shows it.
+func TOTPCode(secret string, at time.Time) string {
+	key, err := totpSecretEncoding.DecodeString(secret)
+	if err != nil {
+		panic(err)
+	}
+	return totpCode(key, totpStep(at))
+}

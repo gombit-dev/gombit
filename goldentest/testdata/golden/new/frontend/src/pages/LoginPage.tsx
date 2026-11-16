@@ -3,26 +3,33 @@ import { useForm } from "react-hook-form";
 import { useNavigate } from "react-router";
 
 import { useApiClient } from "../api/client";
-import { applyContractErrors } from "../api/formErrors";
+import { applyContractErrors, fieldError } from "../api/formErrors";
 import { unwrap } from "../api/generated/client";
 import { applyTokenPair } from "../auth/session";
 
 type LoginValues = {
   email: string;
   password: string;
+  mfa_code: string;
 };
+
+const mfaPrompt = "Enter the code from your authenticator app, or one of your recovery codes.";
 
 export function LoginPage() {
   const client = useApiClient();
   const navigate = useNavigate();
   const [status, setStatus] = useState("");
+  // An account with multi-factor authentication answers the password with
+  // a 422 on mfa_code: the code field appears, and the login is sent again
+  // with it.
+  const [mfaRequired, setMfaRequired] = useState(false);
   const {
     register,
     handleSubmit,
     setError,
     formState: { errors, isSubmitting },
   } = useForm<LoginValues>({
-    defaultValues: { email: "", password: "" },
+    defaultValues: { email: "", password: "", mfa_code: "" },
   });
 
   async function onLogin(values: LoginValues) {
@@ -30,7 +37,7 @@ export function LoginPage() {
     try {
       const result = await unwrap(
         await client.POST("/api/v1/auth/login", {
-          body: { email: values.email, password: values.password },
+          body: loginBody(values),
         }),
       );
       if (!result) {
@@ -39,10 +46,20 @@ export function LoginPage() {
       applyTokenPair(result.data);
       navigate("/");
     } catch (err: unknown) {
+      if (fieldError(err, "mfa_code") !== undefined && !mfaRequired) {
+        // The password was right: ask for the code (no error yet).
+        setMfaRequired(true);
+        return;
+      }
       if (!applyContractErrors(setError, err)) {
         setStatus(err instanceof Error ? err.message : "login failed");
       }
     }
+  }
+
+  function loginBody(values: LoginValues) {
+    const body = { email: values.email, password: values.password };
+    return mfaRequired ? { ...body, mfa_code: values.mfa_code.trim() } : body;
   }
 
   async function onRegister(values: LoginValues) {
@@ -78,6 +95,15 @@ export function LoginPage() {
           <input type="password" autoComplete="current-password" {...register("password", { required: "Password is required" })} />
         </label>
         {errors.password?.message ? <p>{errors.password.message}</p> : null}
+        {mfaRequired ? (
+          <>
+            <label>
+              Authentication code
+              <input autoComplete="one-time-code" autoFocus {...register("mfa_code", { required: "The code is required" })} />
+            </label>
+            <p>{errors.mfa_code?.message ?? mfaPrompt}</p>
+          </>
+        ) : null}
         <button type="submit" disabled={isSubmitting}>
           Log in
         </button>

@@ -19,6 +19,10 @@ type User struct {
 	// credential issued to it works: its sessions were revoked, its links
 	// voided, and every check refuses it.
 	DisabledAt *time.Time
+	// mfaGate is what AuthenticateMFA saw of the second factor, on the
+	// snapshot it returns (never stored): the session start re-checks it
+	// under the user's lock.
+	mfaGate mfaGate
 	// EmailVerifiedAt is when the user proved they own VerifiedEmail (POST
 	// /auth/verify-email); nil while no address is verified. A superuser
 	// created by gombit createsuperuser starts verified.
@@ -123,7 +127,7 @@ func (OneTimeToken) TableName() string { return "auth_one_time_tokens" }
 
 // Models returns GORM models for Atlas / AutoMigrate.
 func Models() []any {
-	return []any{&User{}, &RefreshToken{}, &Group{}, &Permission{}, &OneTimeToken{}, &AuditEvent{}}
+	return []any{&User{}, &RefreshToken{}, &Group{}, &Permission{}, &OneTimeToken{}, &AuditEvent{}, &TOTPFactor{}, &RecoveryCode{}}
 }
 
 // Migrate creates the auth identity, token, group, permission, one-time

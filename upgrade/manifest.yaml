@@ -1060,6 +1060,73 @@ releases:
         summary: "A new app's placeholder `schema.ts` includes the account state operations; an existing app's generated client gets them from `gombit client generate`."
         refs: [336]
 
+      - id: mfa-schema
+        kind: manual
+        breaking: true
+        area: schema
+        summary: "Multi-factor authentication adds two tables, `auth_totp_factors` and `auth_recovery_codes`, which every login of the framework's routes reads: an app migrates before it runs this release."
+        details: |
+          The new framework models `auth.TOTPFactor` (a user's TOTP
+          authenticator, its secret encrypted) and `auth.RecoveryCode` (the
+          single-use recovery codes, hashed). A login checks whether the
+          account has MFA, so until the tables exist logins fail. Add
+          `&auth.TOTPFactor{}` and `&auth.RecoveryCode{}` to the app's
+          `AutoMigrate` (`internal/platform/database.go`), then generate and
+          apply the migration (`gombit db makemigrations --model
+          github.com/gombit-dev/gombit/auth.TOTPFactor --model
+          github.com/gombit-dev/gombit/auth.RecoveryCode`, `gombit db
+          migrate`); `gombit upgrade --dry-run` lists the steps.
+        schema:
+          - {model: auth.TOTPFactor, table: auth_totp_factors, change: added}
+          - {model: auth.RecoveryCode, table: auth_recovery_codes, change: added}
+        refs: [339]
+
+      - id: mfa-names-reserved
+        kind: manual
+        breaking: true
+        area: api
+        summary: "With auth enabled, an app that registers `{prefix}/auth/mfa`, `/auth/mfa/totp`, `/auth/mfa/totp/confirm`, `/auth/mfa/recovery-codes`, `/auth/mfa/disable` or `/auth/users/{id}/mfa/reset`, their `auth-mfa-*` operations, or the `AuthMFAStatus` / `AuthTOTPEnrollBody` / `AuthTOTPEnrollment` / `AuthTOTPConfirmBody` / `AuthRecoveryCodes` / `AuthMFAProofBody` schema names fails at startup: the framework registers them."
+        details: |
+          Drop the app's own MFA routes, which the framework's replace, or
+          rename them; the same goes for a type Huma names after one of those
+          schemas (or their `Data…` envelopes).
+        refs: [339]
+
+      - id: mfa-totp
+        kind: manual
+        breaking: true
+        area: security
+        summary: "Multi-factor authentication: a user enrolls a TOTP authenticator (with recovery codes), and from then on a login needs `mfa_code` besides the password; an operator with `auth.users.manage` resets a user's MFA."
+        details: |
+          `POST {prefix}/auth/login` (both modes) takes an optional
+          `mfa_code`: for an account with MFA, a login without it is a 422 on
+          `mfa_code` ("required"), after the right password only, and a wrong
+          one a 422 ("invalid"); the client asks for the code and logs in again
+          with it (the admin's and a new app's login pages do; an app's own
+          login page needs the same, or MFA users cannot sign in through it).
+          Breaking for Go callers: `auth.Service.Authenticate` / `Login` now
+          answer such an account `ErrMFARequired` (a client error, not a
+          server one), and `ErrTooManyAttempts` can come from `MFAPerUser`;
+          `AuthenticateMFA` / `LoginMFA` take the code. Any user can enroll:
+          the routes are mounted with auth. Confirming an enrollment ends the
+          user's other sessions. The TOTP secrets are encrypted and the recovery
+          codes hashed under keys derived from `GOMBIT_AUTH_MFA_KEY`, or from
+          `GOMBIT_JWT_SECRET` when it is unset: then rotating the JWT secret
+          makes every enrolled authenticator unusable (logins of those
+          accounts fail until an operator resets their MFA). Set
+          `GOMBIT_AUTH_MFA_KEY` (at least 32 characters) to rotate them apart;
+          setting it on an app whose users already enrolled has the same
+          effect once.
+        config:
+          - {var: GOMBIT_AUTH_MFA_KEY, change: added}
+        refs: [339]
+
+      - id: client-schema-mfa
+        kind: informational
+        area: client
+        summary: "A new app's placeholder `schema.ts` includes the MFA operations and the login's `mfa_code`; an existing app's generated client gets them from `gombit client generate`."
+        refs: [339]
+
       - id: expired-rotated-refresh-token-no-cascade
         kind: informational
         area: security
