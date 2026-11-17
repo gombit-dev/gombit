@@ -34,8 +34,9 @@ gombit dev
 
 `gombit dev` prints a service table (Backend, Frontend, OpenAPI, API docs).
 Backend reload uses `air` or `watchexec` when installed; otherwise it falls
-back to `go run ./cmd/server`. The frontend uses `pnpm` when available,
-otherwise `npm`. Node.js is required for Vite HMR. The frontend is a Vite +
+back to `go run ./cmd/server`. The frontend uses `pnpm` only when
+`frontend/pnpm-lock.yaml` exists, otherwise `npm` (`pnpm` only if `npm` is
+absent). Node.js is required for Vite HMR. The frontend is a Vite +
 React + TypeScript skeleton (router, generated client, React Hook Form,
 Bearer login, MUI CRUD preset — see
 [`docs/frontend-mui.md`](https://github.com/gombit-dev/gombit/blob/main/docs/frontend-mui.md)).

@@ -31,9 +31,10 @@ func detectPackageManager(workDir string, lookPath LookPathFunc) (name, path str
 			return "pnpm", path, nil
 		}
 	}
-	// Without a pnpm-lock.yaml this is not a pnpm project. pnpm 10+ refuses
-	// to run unapproved dependency build scripts (esbuild's postinstall), so
-	// prefer npm and use pnpm only when npm is absent.
+	// Without a pnpm-lock.yaml, prefer npm. pnpm 10+ refuses to run a
+	// dependency's build script (esbuild's postinstall) unless the project
+	// approves it, and a pnpm-lock.yaml written by a failed install does not
+	// mean pnpm will work. Use pnpm only when npm is absent.
 	if path, err := lookPath("npm"); err == nil {
 		return "npm", path, nil
 	}

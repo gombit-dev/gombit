@@ -342,6 +342,15 @@ version.
 
 ### Fixed
 
+- A freshly scaffolded app's `gombit dev` and `gombit build --embed` no
+  longer fail with pnpm 11's `ERR_PNPM_IGNORED_BUILDS`, which blocked
+  esbuild's build script. Without a `frontend/pnpm-lock.yaml`, they now run
+  `npm`, and `pnpm` only when `npm` is absent. The scaffold ships
+  `frontend/pnpm-workspace.yaml`, which approves esbuild's build script for
+  pnpm. An existing app that already has a `pnpm-lock.yaml` from the failed
+  install must add that file; see the upgrade notes
+  ([#509](https://github.com/gombit-dev/gombit/issues/509)).
+
 - A logout with a refresh token that has already rotated (a silent refresh
   in flight as the user signs out, or a client still holding the previous
   token) ends the session it rotated into, instead of answering `200` and
