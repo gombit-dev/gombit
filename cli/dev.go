@@ -23,8 +23,8 @@ func newDevCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
 		Long: `Run the Go API and Vite frontend with HMR from an application directory.
 
 Backend reload uses air when it is on PATH, then watchexec, then falls back
-to go run ./cmd/server (with a hint). The frontend uses pnpm when available
-(or when frontend/pnpm-lock.yaml exists), otherwise npm.
+to go run ./cmd/server (with a hint). The frontend uses pnpm when
+frontend/pnpm-lock.yaml exists, otherwise npm (pnpm only if npm is absent).
 
 Vite proxies /api, /openapi.json, /docs, and /admin to the Go origin.
 Prefixes that do not start with /api (for example /svc/v2) get an extra

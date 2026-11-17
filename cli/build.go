@@ -22,8 +22,8 @@ func newBuildCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
 Split deploy is the default (C5). A bare gombit build without --embed is
 refused and does not change production to embed. Pass --embed to:
 
-  1. run the Vite production build in frontend/ (pnpm when available or
-     when frontend/pnpm-lock.yaml exists, otherwise npm)
+  1. run the Vite production build in frontend/ (pnpm when frontend/pnpm-lock.yaml
+     exists, otherwise npm; pnpm only if npm is absent)
   2. collectstatic frontend/dist into internal/web/static
   3. go build ./cmd/server
 
