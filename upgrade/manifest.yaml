@@ -1419,3 +1419,35 @@ releases:
         config:
           - {var: GOMBIT_API_PREFIX, change: refused}
         refs: [501]
+
+      - id: frontend-pnpm-esbuild-approval
+        kind: manual
+        area: scaffold
+        summary: "A scaffolded app approves esbuild's build script for pnpm in `frontend/pnpm-workspace.yaml`; an app scaffolded before has no such file, so `pnpm install` fails there."
+        details: |
+          With pnpm 11 or later, `pnpm install` in `frontend/` fails with
+          `ERR_PNPM_IGNORED_BUILDS` until esbuild's build script is approved.
+          Add this to `frontend/pnpm-workspace.yaml`, creating the file if it
+          is missing:
+
+          ```yaml
+          allowBuilds:
+            esbuild: true
+          ```
+
+          If pnpm already wrote that file with a placeholder
+          (`esbuild: set this to true or false`), change the placeholder to
+          `true`. An app that runs npm needs no change. pnpm 10 reads
+          `onlyBuiltDependencies: [esbuild]` instead of `allowBuilds`. Then run
+          `gombit dev` or `gombit build --embed` again.
+        refs: [509]
+
+      - id: frontend-npm-before-pnpm
+        kind: informational
+        area: behavior
+        summary: "`gombit dev` and `gombit build --embed` run `npm` unless `frontend/pnpm-lock.yaml` exists; `pnpm` runs only when `npm` is absent."
+        details: |
+          An app that has both tools and no `frontend/pnpm-lock.yaml` now runs
+          `npm` where it ran `pnpm`. An app with a `pnpm-lock.yaml` still runs
+          `pnpm`.
+        refs: [509]

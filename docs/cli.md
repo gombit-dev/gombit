@@ -209,7 +209,8 @@ One command starts:
 
 1. The Go API with reload when `air` or `watchexec` is on `PATH`. If neither
    is installed, Gombit runs `go run ./cmd/server` and prints a hint.
-2. The Vite frontend with HMR (`pnpm` when available, otherwise `npm`). Vite
+2. The Vite frontend with HMR (`pnpm` when `frontend/pnpm-lock.yaml` exists,
+   otherwise `npm`; `pnpm` only if `npm` is absent). Vite
    proxies `/api`, `/openapi.json`, `/docs`, and `/admin` to the Go origin.
    Prefixes that do not start with `/api` get an extra proxy entry from the live
    `GOMBIT_API_PREFIX`.
@@ -283,8 +284,9 @@ is an error — it does not silently switch production to a single binary.
 production build:
 
 1. Require `frontend/package.json` (same class of error as `gombit dev`).
-2. Vite production build in `frontend/` (`pnpm` when available or when
-   `frontend/pnpm-lock.yaml` exists, otherwise `npm run build`).
+2. Vite production build in `frontend/` (`pnpm run build` when
+   `frontend/pnpm-lock.yaml` exists, otherwise `npm run build`; `pnpm` only if
+   `npm` is absent).
 3. Copy `frontend/dist` → `internal/web/static` (replace previous assets;
    do not delete `internal/web/embed.go`). Fail if `frontend/dist/index.html`
    is missing after the Vite build.

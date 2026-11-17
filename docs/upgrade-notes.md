@@ -357,6 +357,24 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   segment (`ipchar`), which admits it; a client sends it percent-encoded
   and Gin matches the route once it is decoded.
 
+- A scaffolded app approves esbuild's build script for pnpm in `frontend/pnpm-workspace.yaml`; an app scaffolded before has no such file, so `pnpm install` fails there. (`frontend-pnpm-esbuild-approval`, scaffold, [#509](https://github.com/gombit-dev/gombit/issues/509))
+
+  With pnpm 11 or later, `pnpm install` in `frontend/` fails with
+  `ERR_PNPM_IGNORED_BUILDS` until esbuild's build script is approved.
+  Add this to `frontend/pnpm-workspace.yaml`, creating the file if it
+  is missing:
+
+  ```yaml
+  allowBuilds:
+    esbuild: true
+  ```
+
+  If pnpm already wrote that file with a placeholder
+  (`esbuild: set this to true or false`), change the placeholder to
+  `true`. An app that runs npm needs no change. pnpm 10 reads
+  `onlyBuiltDependencies: [esbuild]` instead of `allowBuilds`. Then run
+  `gombit dev` or `gombit build --embed` again.
+
 ### Informational
 
 - A refresh that joins another request's rotation of the same token no longer fails with that request's `context canceled` (a 500) when its client disconnects: the shared rotation runs detached from every caller's cancellation and deadline, its transaction bounded by a 10-second timeout. (`refresh-follower-not-cancelled-by-leader`, behavior, [#462](https://github.com/gombit-dev/gombit/issues/462))
@@ -671,6 +689,12 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   keep a retry an app has there. A unique violation on another
   constraint (the primary key, its sequence behind the table) is
   returned as itself. Nothing to change.
+
+- `gombit dev` and `gombit build --embed` run `npm` unless `frontend/pnpm-lock.yaml` exists; `pnpm` runs only when `npm` is absent. (`frontend-npm-before-pnpm`, behavior, [#509](https://github.com/gombit-dev/gombit/issues/509))
+
+  An app that has both tools and no `frontend/pnpm-lock.yaml` now runs
+  `npm` where it ran `pnpm`. An app with a `pnpm-lock.yaml` still runs
+  `pnpm`.
 
 ## v0.8.0
 
