@@ -247,7 +247,7 @@ func atlasRevisionsRelation(db *gorm.DB) string {
 }
 
 func isPostgresDialect(db *gorm.DB) bool {
-	return db.Dialector.Name() == string(config.DatabaseDriverPostgres)
+	return db.Name() == string(config.DatabaseDriverPostgres)
 }
 
 // atlasRevisionsExist reports whether Atlas's revision table exists at the
