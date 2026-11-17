@@ -131,6 +131,10 @@ func isValidationFailure(status int) bool {
 }
 
 func codeForHTTPStatus(status int) string {
+	if status == http.StatusRequestEntityTooLarge {
+		// Huma's own 413 must match the framework's body-limit code (#499).
+		return CodePayloadTooLarge
+	}
 	for cat, s := range categoryStatus {
 		if s == status {
 			return CodeFor(cat)

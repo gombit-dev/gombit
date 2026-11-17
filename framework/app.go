@@ -199,7 +199,9 @@ func New(options ...Option) (_ *App, err error) {
 		humaConfig.Formats = contract.JSONFormats(func(requestID string, err error) {
 			logger.Error("http: response could not be encoded", zap.String("request_id", requestID), zap.Error(err))
 		})
-		app.api = humagin.New(app.router, humaConfig)
+		// Huma's 1 MiB per-operation default would undercut the 8 MiB JSON cap
+		// documented for this framework (#499); raise it to the same cap.
+		app.api = contract.WithBodyLimit(humagin.New(app.router, humaConfig), maxRequestBodyBytes)
 	}
 	if app.cache == nil {
 		store, err := cache.Open(app.cfg.Cache)
