@@ -38,6 +38,10 @@ type fileMap map[string][]byte
 
 func assertFrontendInvariants(t *testing.T, files fileMap) {
 	t.Helper()
+	workspace := string(files["frontend/pnpm-workspace.yaml"])
+	if !strings.Contains(workspace, "packages:") || !strings.Contains(workspace, "allowBuilds:") || !strings.Contains(workspace, "esbuild: true") {
+		t.Error("generated frontend/pnpm-workspace.yaml must include the workspace root and approve esbuild's build script for pnpm")
+	}
 	var sawFrontend bool
 	for rel, data := range files {
 		if !strings.HasPrefix(rel, "frontend/") {
