@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/gombit-dev/gombit/internal/frontend"
 )
 
 const (
@@ -61,20 +63,9 @@ func planFrontend(workDir string, lookPath LookPathFunc, host string, port int) 
 
 func detectPackageManager(workDir string, lookPath LookPathFunc) (name, path string, err error) {
 	frontendDir := filepath.Join(workDir, "frontend")
-	if _, statErr := os.Stat(filepath.Join(frontendDir, "pnpm-lock.yaml")); statErr == nil {
-		if path, err := lookPath("pnpm"); err == nil {
-			return "pnpm", path, nil
-		}
+	name, path, err = frontend.DetectPackageManager(frontendDir, lookPath)
+	if err != nil {
+		return "", "", fmt.Errorf("dev: npm and pnpm not found; install Node.js to run the Vite frontend")
 	}
-	// Without a pnpm-lock.yaml, prefer npm. pnpm 10+ refuses to run a
-	// dependency's build script (esbuild's postinstall) unless the project
-	// approves it, and a pnpm-lock.yaml written by a failed install does not
-	// mean pnpm will work. Use pnpm only when npm is absent.
-	if path, err := lookPath("npm"); err == nil {
-		return "npm", path, nil
-	}
-	if path, err := lookPath("pnpm"); err == nil {
-		return "pnpm", path, nil
-	}
-	return "", "", fmt.Errorf("dev: npm and pnpm not found; install Node.js to run the Vite frontend")
+	return name, path, nil
 }
