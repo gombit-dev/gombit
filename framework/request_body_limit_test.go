@@ -382,3 +382,45 @@ func TestRequestBodyLimitIgnoresNonJSON(t *testing.T) {
 		t.Fatalf("status = %d, want 200 (non-JSON body is not size-gated); body: %s", rec.Code, rec.Body.String())
 	}
 }
+
+// TestRequestBodyLimitAllowsTwoMiBJSONOnHumaRoute is the regression guard for
+// #499: Huma's per-operation default (1 MiB) must not undercut the documented
+// 8 MiB JSON cap on Huma-registered routes. A 2 MiB JSON body is within the
+// cap and must reach the Huma handler.
+func TestRequestBodyLimitAllowsTwoMiBJSONOnHumaRoute(t *testing.T) {
+	app := newTestApp(t)
+
+	type createBody struct {
+		X string `json:"x"`
+	}
+	type createInput struct {
+		Body createBody
+	}
+	type createOutput struct {
+		Body contract.Data[createBody]
+	}
+	handlerRan := false
+	prefix := app.Config().API.Prefix
+	huma.Register(app.API(), huma.Operation{
+		OperationID: "create-big-thing",
+		Method:      http.MethodPost,
+		Path:        prefix + "/big-things",
+		Summary:     "Create a big thing",
+	}, func(_ context.Context, input *createInput) (*createOutput, error) {
+		handlerRan = true
+		return &createOutput{Body: contract.Data[createBody]{Data: input.Body}}, nil
+	})
+
+	twoMiB := `{"x":"` + strings.Repeat("a", 2<<20) + `"}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, prefix+"/big-things", strings.NewReader(twoMiB))
+	req.Header.Set("Content-Type", "application/json")
+	app.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for a 2 MiB body under the 8 MiB cap; body: %s", rec.Code, rec.Body.String())
+	}
+	if !handlerRan {
+		t.Fatal("Huma handler did not run for a body under the cap")
+	}
+}
