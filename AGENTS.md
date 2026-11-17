@@ -119,8 +119,8 @@ dependency, a TCP fault proxy, the retry-policy check), `TestFault_*` tests
 run by `make test-faults` (a sharded PR check), and the seeded stochastic
 suite `internal/chaos` (`make test-chaos`, nightly `chaos.yml`, never a PR
 check). See `docs/testing/fault-injection.md`.
-The **AUTH-0** epic (#280) has all ten items, AUTH-1..10, on `main` (only
-AUTH-5 released so far, in v0.8.0); its follow-ups AUTH-11..13 (#661 stable
+The **AUTH-0** epic (#280) has all ten items, AUTH-1..10 (AUTH-5 released
+in v0.8.0, the rest in v0.9.0); its follow-ups AUTH-11..13 (#661 stable
 session ids, #662 session device metadata, #663 a sessions screen in the
 generated frontend) are open. It has AUTH-5 (#335): session
 management in both auth modes (`GET` / `DELETE {prefix}/auth/sessions`,

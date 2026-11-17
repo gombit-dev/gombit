@@ -12,6 +12,36 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 ### Manual: action required
 
+- A scaffolded app approves esbuild's build script for pnpm in `frontend/pnpm-workspace.yaml`; an app scaffolded before has no such file, so `pnpm install` fails there. (`frontend-pnpm-esbuild-approval`, scaffold, [#509](https://github.com/gombit-dev/gombit/issues/509))
+
+  With pnpm 11 or later, `pnpm install` in `frontend/` fails with
+  `ERR_PNPM_IGNORED_BUILDS` until esbuild's build script is approved.
+  Add this to `frontend/pnpm-workspace.yaml`, creating the file if it
+  is missing:
+
+  ```yaml
+  allowBuilds:
+    esbuild: true
+  ```
+
+  If pnpm already wrote that file with a placeholder
+  (`esbuild: set this to true or false`), change the placeholder to
+  `true`. An app that runs npm needs no change. pnpm 10 reads
+  `onlyBuiltDependencies: [esbuild]` instead of `allowBuilds`. Then run
+  `gombit dev` or `gombit build --embed` again.
+
+### Informational
+
+- `gombit dev` and `gombit build --embed` run `npm` unless `frontend/pnpm-lock.yaml` exists; `pnpm` runs only when `npm` is absent. (`frontend-npm-before-pnpm`, behavior, [#509](https://github.com/gombit-dev/gombit/issues/509))
+
+  An app that has both tools and no `frontend/pnpm-lock.yaml` now runs
+  `npm` where it ran `pnpm`. An app with a `pnpm-lock.yaml` still runs
+  `pnpm`.
+
+## v0.9.0
+
+### Manual: action required
+
 - `types.Date` keeps its calendar day whatever the driver's time zone, except, with `parseTime=true`, a day a MySQL `loc` skipped whole; dates a location west of UTC already moved stay moved. (`date-driver-location`, behavior, [#478](https://github.com/gombit-dev/gombit/issues/478))
 
   Only an app whose DSN sets a location other than UTC is affected:
@@ -357,24 +387,6 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   segment (`ipchar`), which admits it; a client sends it percent-encoded
   and Gin matches the route once it is decoded.
 
-- A scaffolded app approves esbuild's build script for pnpm in `frontend/pnpm-workspace.yaml`; an app scaffolded before has no such file, so `pnpm install` fails there. (`frontend-pnpm-esbuild-approval`, scaffold, [#509](https://github.com/gombit-dev/gombit/issues/509))
-
-  With pnpm 11 or later, `pnpm install` in `frontend/` fails with
-  `ERR_PNPM_IGNORED_BUILDS` until esbuild's build script is approved.
-  Add this to `frontend/pnpm-workspace.yaml`, creating the file if it
-  is missing:
-
-  ```yaml
-  allowBuilds:
-    esbuild: true
-  ```
-
-  If pnpm already wrote that file with a placeholder
-  (`esbuild: set this to true or false`), change the placeholder to
-  `true`. An app that runs npm needs no change. pnpm 10 reads
-  `onlyBuiltDependencies: [esbuild]` instead of `allowBuilds`. Then run
-  `gombit dev` or `gombit build --embed` again.
-
 ### Informational
 
 - A refresh that joins another request's rotation of the same token no longer fails with that request's `context canceled` (a 500) when its client disconnects: the shared rotation runs detached from every caller's cancellation and deadline, its transaction bounded by a 10-second timeout. (`refresh-follower-not-cancelled-by-leader`, behavior, [#462](https://github.com/gombit-dev/gombit/issues/462))
@@ -690,11 +702,35 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   constraint (the primary key, its sequence behind the table) is
   returned as itself. Nothing to change.
 
-- `gombit dev` and `gombit build --embed` run `npm` unless `frontend/pnpm-lock.yaml` exists; `pnpm` runs only when `npm` is absent. (`frontend-npm-before-pnpm`, behavior, [#509](https://github.com/gombit-dev/gombit/issues/509))
+- `gombit db reset` on SQLite drops every user table and view, including one whose name starts with `sqlite` but not `sqlite_` (`sqlitex_cache`, `sqlite3_import`); only SQLite's reserved `sqlite_` objects are kept. (`sqlite-reset-drops-sqlite-named-tables`, cli, [#491](https://github.com/gombit-dev/gombit/issues/491))
 
-  An app that has both tools and no `frontend/pnpm-lock.yaml` now runs
-  `npm` where it ran `pnpm`. An app with a `pnpm-lock.yaml` still runs
-  `pnpm`.
+  The filter's `_` was a `LIKE` wildcard, so such tables survived the
+  reset and the re-applied migrations then failed on them.
+
+- `gombit new --module` refuses a module path Go does not accept (`golang.org/x/mod/module.CheckPath`), before writing anything, instead of scaffolding an app that cannot build. (`new-validates-module-path`, cli, [#515](https://github.com/gombit-dev/gombit/issues/515))
+
+- `gombit new` with stdin from `/dev/null` (or another non-terminal character device) is non-interactive: without a project name it fails with the documented error instead of prompting. (`new-dev-null-stdin-non-interactive`, cli, [#516](https://github.com/gombit-dev/gombit/issues/516))
+
+- The framework requires newer drivers: `github.com/mattn/go-sqlite3` v1.14.53, `github.com/redis/go-redis/v9` v9.23.0 and `ariga.io/atlas` v1.3.0 (the migration library, not the `atlas` CLI). (`database-and-cache-driver-updates`, dependency, [#537](https://github.com/gombit-dev/gombit/issues/537), [#644](https://github.com/gombit-dev/gombit/issues/644), [#657](https://github.com/gombit-dev/gombit/issues/657))
+
+  Go's minimal version selection moves an app's build to them with the
+  framework upgrade.
+
+- The framework requires newer AWS SDK for Go v2 modules (the S3 storage driver): `github.com/aws/aws-sdk-go-v2` v1.47.8, `/credentials` v1.20.16, `/service/s3` v1.114.6 and `github.com/aws/smithy-go` v1.28.8. (`aws-sdk-v1-47-8`, dependency, [#625](https://github.com/gombit-dev/gombit/issues/625), [#645](https://github.com/gombit-dev/gombit/issues/645), [#649](https://github.com/gombit-dev/gombit/issues/649), [#658](https://github.com/gombit-dev/gombit/issues/658))
+
+  Go's minimal version selection moves an app's build to them with the
+  framework upgrade.
+
+- The framework requires `github.com/danielgtaylor/huma/v2` v2.40.0, `github.com/pb33f/libopenapi` v0.42.4 and `github.com/pb33f/libopenapi-validator` v0.16.1. (`contract-dependency-updates`, dependency, [#589](https://github.com/gombit-dev/gombit/issues/589), [#607](https://github.com/gombit-dev/gombit/issues/607), [#641](https://github.com/gombit-dev/gombit/issues/641), [#643](https://github.com/gombit-dev/gombit/issues/643), [#655](https://github.com/gombit-dev/gombit/issues/655))
+
+  Go's minimal version selection moves an app's build to them with the
+  framework upgrade. The framework's OpenAPI document and contract
+  checks are unchanged by them (the contract drift gates pass).
+
+- The framework requires OpenTelemetry for Go v1.47.0 (`go.opentelemetry.io/otel`, `/sdk`, `/trace`) and newer `golang.org/x` modules: `crypto` v0.58.0, `mod` v0.42.0, `net` v0.62.0, `sys` v0.50.0, `term` v0.47.0 and `tools` v0.52.0. (`otel-and-golang-x-updates`, dependency, [#572](https://github.com/gombit-dev/gombit/issues/572), [#573](https://github.com/gombit-dev/gombit/issues/573), [#621](https://github.com/gombit-dev/gombit/issues/621), [#622](https://github.com/gombit-dev/gombit/issues/622), [#624](https://github.com/gombit-dev/gombit/issues/624), [#642](https://github.com/gombit-dev/gombit/issues/642), [#656](https://github.com/gombit-dev/gombit/issues/656))
+
+  Go's minimal version selection moves an app's build to them with the
+  framework upgrade.
 
 ## v0.8.0
 
