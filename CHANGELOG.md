@@ -10,6 +10,8 @@ version.
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-11-16
+
 ### Added
 
 - [External identity providers](docs/auth.md#external-identity-providers)
@@ -549,6 +551,21 @@ version.
   and `/café` are accepted
   ([#501](https://github.com/gombit-dev/gombit/issues/501)).
 
+- `gombit db reset` on SQLite drops every user table and view, including one
+  whose name starts with `sqlite` but not `sqlite_` (`sqlitex_cache`,
+  `sqlite3_import`): the filter's `_` was a `LIKE` wildcard, so such tables
+  survived and the re-applied migrations failed on them. Only SQLite's
+  reserved `sqlite_` objects are kept
+  ([#491](https://github.com/gombit-dev/gombit/issues/491)).
+- `gombit new --module` refuses a module path Go does not accept
+  (`golang.org/x/mod/module.CheckPath`) before writing anything, instead of
+  scaffolding an app that cannot build
+  ([#515](https://github.com/gombit-dev/gombit/issues/515)).
+- `gombit new` with stdin from `/dev/null` (or another non-terminal character
+  device) is non-interactive: without a project name it fails with the
+  documented error instead of prompting
+  ([#516](https://github.com/gombit-dev/gombit/issues/516)).
+
 ### Changed
 
 - The framework requires **Go 1.26.9** (`go 1.26.9` in `go.mod`, up from
@@ -558,6 +575,37 @@ version.
   toolchain, and with `GOTOOLCHAIN=local` (or in a build image) Go 1.26.9 or
   later must be installed first. The benchmark Docker images build with Go
   1.26.9 ([#602](https://github.com/gombit-dev/gombit/pull/602)).
+
+- The framework requires newer dependencies; Go's minimal version selection
+  moves an app's build to them with the framework upgrade:
+  `github.com/mattn/go-sqlite3` v1.14.53, `github.com/redis/go-redis/v9`
+  v9.23.0 and `ariga.io/atlas` v1.3.0 (the migration library, not the `atlas`
+  CLI); the AWS SDK for Go v2 (the S3 storage driver) at
+  `github.com/aws/aws-sdk-go-v2` v1.47.8, `/credentials` v1.20.16,
+  `/service/s3` v1.114.6 and `github.com/aws/smithy-go` v1.28.8;
+  `github.com/danielgtaylor/huma/v2` v2.40.0, `github.com/pb33f/libopenapi`
+  v0.42.4 and `github.com/pb33f/libopenapi-validator` v0.16.1; OpenTelemetry
+  for Go v1.47.0; and `golang.org/x/crypto` v0.58.0, `mod` v0.42.0, `net`
+  v0.62.0, `sys` v0.50.0, `term` v0.47.0 and `tools` v0.52.0
+  ([#537](https://github.com/gombit-dev/gombit/pull/537),
+  [#572](https://github.com/gombit-dev/gombit/pull/572),
+  [#573](https://github.com/gombit-dev/gombit/pull/573),
+  [#589](https://github.com/gombit-dev/gombit/pull/589),
+  [#607](https://github.com/gombit-dev/gombit/pull/607),
+  [#621](https://github.com/gombit-dev/gombit/pull/621),
+  [#622](https://github.com/gombit-dev/gombit/pull/622),
+  [#624](https://github.com/gombit-dev/gombit/pull/624),
+  [#625](https://github.com/gombit-dev/gombit/pull/625),
+  [#641](https://github.com/gombit-dev/gombit/pull/641),
+  [#642](https://github.com/gombit-dev/gombit/pull/642),
+  [#643](https://github.com/gombit-dev/gombit/pull/643),
+  [#644](https://github.com/gombit-dev/gombit/pull/644),
+  [#645](https://github.com/gombit-dev/gombit/pull/645),
+  [#649](https://github.com/gombit-dev/gombit/pull/649),
+  [#655](https://github.com/gombit-dev/gombit/pull/655),
+  [#656](https://github.com/gombit-dev/gombit/pull/656),
+  [#657](https://github.com/gombit-dev/gombit/pull/657),
+  [#658](https://github.com/gombit-dev/gombit/pull/658)).
 
 ## [0.8.0] — 2026-10-18
 
@@ -2301,7 +2349,8 @@ First tagged release. Milestones M0–M5 plus ADMIN-1 through ADMIN-3.
   multi-tenancy, i18n — are **not** included. See
   [the build plan](docs/GOMBIT_BUILD_PLAN.md).
 
-[Unreleased]: https://github.com/gombit-dev/gombit/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/gombit-dev/gombit/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/gombit-dev/gombit/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/gombit-dev/gombit/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/gombit-dev/gombit/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/gombit-dev/gombit/compare/v0.6.1...v0.7.0
