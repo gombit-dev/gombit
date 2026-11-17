@@ -31,11 +31,14 @@ func detectPackageManager(workDir string, lookPath LookPathFunc) (name, path str
 			return "pnpm", path, nil
 		}
 	}
-	if path, err := lookPath("pnpm"); err == nil {
-		return "pnpm", path, nil
-	}
+	// Without a pnpm-lock.yaml this is not a pnpm project. pnpm 10+ refuses
+	// to run unapproved dependency build scripts (esbuild's postinstall), so
+	// prefer npm and use pnpm only when npm is absent.
 	if path, err := lookPath("npm"); err == nil {
 		return "npm", path, nil
+	}
+	if path, err := lookPath("pnpm"); err == nil {
+		return "pnpm", path, nil
 	}
 	return "", "", fmt.Errorf("build: npm and pnpm not found; install Node.js to build the Vite frontend")
 }
