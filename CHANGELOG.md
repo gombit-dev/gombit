@@ -10,6 +10,12 @@ version.
 
 ## [Unreleased]
 
+### Fixed
+
+- Huma-registered routes now use the framework's 8MiB default body limit
+  instead of Huma's 1MiB default, and Huma-generated 413 responses use
+  `payload_too_large` ([#499](https://github.com/gombit-dev/gombit/issues/499)).
+
 ## [0.9.0] — 2026-11-16
 
 ### Added

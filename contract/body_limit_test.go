@@ -53,6 +53,31 @@ func TestBodyLimitKeepsOperationOwnLimit(t *testing.T) {
 	}
 }
 
+func TestBodyLimitKeepsUnlimitedAndMultipartLimits(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		max  int64
+	}{
+		{name: "unlimited", max: -1},
+		{name: "multipart without a default", max: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			inner := &recordingAdapter{}
+			adapter := bodyLimitAdapter{Adapter: inner, maxBytes: 8 << 20}
+			op := &huma.Operation{MaxBodyBytes: tc.max}
+			adapter.Handle(op, func(huma.Context) {})
+
+			if got := inner.seen[0].MaxBodyBytes; got != tc.max {
+				t.Fatalf("MaxBodyBytes = %d, want %d", got, tc.max)
+			}
+		})
+	}
+}
+
 func TestWithBodyLimitWrapsAdapter(t *testing.T) {
 	t.Parallel()
 
@@ -66,6 +91,26 @@ func TestWithBodyLimitWrapsAdapter(t *testing.T) {
 	}
 	if adapter.maxBytes != capBytes {
 		t.Fatalf("maxBytes = %d, want %d", adapter.maxBytes, capBytes)
+	}
+}
+
+func TestWithBodyLimitForwardsConfig(t *testing.T) {
+	t.Parallel()
+
+	config := huma.DefaultConfig("test", "1.0.0")
+	config.RejectUnknownQueryParameters = true
+	_, api := humatest.New(t, config)
+	wrapped := WithBodyLimit(api, 8<<20)
+
+	provider, ok := wrapped.(interface{ Config() huma.Config })
+	if !ok {
+		t.Fatalf("wrapped API %T does not expose Huma Config", wrapped)
+	}
+	if got := provider.Config().RejectUnknownQueryParameters; !got {
+		t.Fatal("wrapped API lost RejectUnknownQueryParameters")
+	}
+	if got := huma.NewGroup(wrapped).Config().RejectUnknownQueryParameters; !got {
+		t.Fatal("Huma group did not receive the wrapped API config")
 	}
 }
 

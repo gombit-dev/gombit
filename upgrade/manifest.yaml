@@ -1477,3 +1477,17 @@ releases:
           Go's minimal version selection moves an app's build to them with the
           framework upgrade.
         refs: [572, 573, 621, 622, 624, 642, 656]
+
+  - version: unreleased
+    changes:
+      - id: huma-body-limit-default
+        kind: informational
+        area: behavior
+        summary: "Huma-registered routes use the framework's 8MiB default body limit, and Huma-generated 413 responses use `payload_too_large`."
+        details: |
+          Huma applies its default 1MiB limit to typed operations before the
+          framework adapter sees them, so the framework raises it to 8MiB.
+          An explicitly configured 1MiB limit is indistinguishable from that
+          default and is raised as well; other explicit limits remain. Huma
+          applies this per-operation limit to non-multipart body types.
+        refs: [499]
