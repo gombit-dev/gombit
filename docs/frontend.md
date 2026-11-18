@@ -26,9 +26,11 @@ See also [cli.md](cli.md) (`gombit new`, `gombit dev`, `gombit build --embed`),
 Package manager D6: the scaffolded `package.json` works with npm (CI uses
 Node 22). `gombit dev` uses pnpm only when `frontend/pnpm-lock.yaml` exists,
 otherwise npm, and pnpm only when npm is absent. The scaffold ships
-`frontend/pnpm-workspace.yaml`, which approves esbuild's build script so
-`pnpm install` works in a new app (pnpm 11 and later; pnpm 10 reads
-`onlyBuiltDependencies` instead).
+`frontend/pnpm-workspace.yaml`, which approves esbuild's build script for
+pnpm 11 and later. The `packages: [.]` entry keeps the workspace file valid
+with pnpm 9. pnpm 10.26+ also honors `allowBuilds`; older pnpm 10 may warn
+that it ignored the build script, but esbuild's optional platform package
+still lets the install succeed.
 
 ## Layout
 

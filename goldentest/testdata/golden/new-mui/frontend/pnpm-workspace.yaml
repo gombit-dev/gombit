@@ -1,10 +1,11 @@
-# This workspace root makes the frontend app eligible for the approval below.
+# pnpm 9 requires a packages field; listing . keeps this workspace valid there.
 packages:
   - .
 
-# pnpm 11 and later run a dependency's build script (esbuild's postinstall)
-# only when this file approves it. Without it, `pnpm install` in this
-# directory fails with ERR_PNPM_IGNORED_BUILDS. npm runs the script without
-# approval, and gombit prefers npm when no frontend/pnpm-lock.yaml exists.
+# pnpm 11 requires this approval to run esbuild's postinstall; without it,
+# `pnpm install` fails with ERR_PNPM_IGNORED_BUILDS. pnpm 10.26+ also honors
+# allowBuilds. Older pnpm 10 may warn that the build was ignored, but esbuild's
+# optional platform package still lets the install succeed. npm needs no approval.
+# Gombit prefers npm when no frontend/pnpm-lock.yaml exists.
 allowBuilds:
   esbuild: true
