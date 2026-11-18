@@ -21,7 +21,7 @@ require (
 	github.com/jinzhu/inflection v1.0.0
 	github.com/mattn/go-sqlite3 v1.14.53
 	github.com/pb33f/libopenapi v0.42.4
-	github.com/pb33f/libopenapi-validator v0.16.1
+	github.com/pb33f/libopenapi-validator v0.16.3
 	github.com/redis/go-redis/v9 v9.23.0
 	github.com/shopspring/decimal v1.4.0
 	github.com/spf13/cobra v1.10.2
@@ -75,7 +75,7 @@ require (
 	github.com/bahlo/generic-list-go v0.2.0 // indirect
 	github.com/basgys/goxml2json v1.1.1-0.20231018121955-e66ee54ceaad // indirect
 	github.com/bmatcuk/doublestar v1.3.4 // indirect
-	github.com/buger/jsonparser v1.1.2 // indirect
+	github.com/buger/jsonparser v1.6.1 // indirect
 	github.com/bytedance/gopkg v0.1.4 // indirect
 	github.com/bytedance/sonic v1.15.4 // indirect
 	github.com/bytedance/sonic/loader v0.5.3 // indirect
