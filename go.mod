@@ -5,11 +5,11 @@ go 1.26.9
 require (
 	ariga.io/atlas v1.3.0
 	ariga.io/atlas-provider-gorm v0.6.1
-	github.com/aws/aws-sdk-go-v2 v1.47.8
+	github.com/aws/aws-sdk-go-v2 v1.48.0
 	github.com/aws/aws-sdk-go-v2/config v1.33.6
-	github.com/aws/aws-sdk-go-v2/credentials v1.20.16
+	github.com/aws/aws-sdk-go-v2/credentials v1.21.0
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.6
-	github.com/aws/smithy-go v1.28.8
+	github.com/aws/smithy-go v1.28.9
 	github.com/coreos/go-oidc/v3 v3.15.0
 	github.com/danielgtaylor/huma/v2 v2.40.0
 	github.com/gin-gonic/gin v1.12.0
@@ -60,18 +60,18 @@ require (
 	github.com/apparentlymart/go-textseg/v13 v13.0.0 // indirect
 	github.com/apparentlymart/go-textseg/v15 v15.0.0 // indirect
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.25 // indirect
-	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.20.8 // indirect
-	github.com/aws/aws-sdk-go-v2/internal/configsources v1.5.11 // indirect
-	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.8.11 // indirect
-	github.com/aws/aws-sdk-go-v2/internal/v4a v1.5.11 // indirect
-	github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.13.24 // indirect
+	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.20.9 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/configsources v1.5.12 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.8.12 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/v4a v1.5.12 // indirect
+	github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.13.25 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/checksum v1.11.9 // indirect
-	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.14.11 // indirect
+	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.14.12 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/s3shared v1.20.8 // indirect
-	github.com/aws/aws-sdk-go-v2/service/signin v1.12.4 // indirect
-	github.com/aws/aws-sdk-go-v2/service/sso v1.39.4 // indirect
-	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.44.4 // indirect
-	github.com/aws/aws-sdk-go-v2/service/sts v1.51.9 // indirect
+	github.com/aws/aws-sdk-go-v2/service/signin v1.13.1 // indirect
+	github.com/aws/aws-sdk-go-v2/service/sso v1.39.5 // indirect
+	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.44.5 // indirect
+	github.com/aws/aws-sdk-go-v2/service/sts v1.52.0 // indirect
 	github.com/bahlo/generic-list-go v0.2.0 // indirect
 	github.com/basgys/goxml2json v1.1.1-0.20231018121955-e66ee54ceaad // indirect
 	github.com/bmatcuk/doublestar v1.3.4 // indirect
