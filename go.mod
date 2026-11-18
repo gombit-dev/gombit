@@ -34,7 +34,7 @@ require (
 	golang.org/x/net v0.62.0
 	golang.org/x/oauth2 v0.30.0
 	golang.org/x/sys v0.50.0
-	golang.org/x/term v0.47.0
+	golang.org/x/term v0.48.0
 	golang.org/x/tools v0.52.0
 	gopkg.in/yaml.v3 v3.0.1
 	gorm.io/driver/mysql v1.6.0
