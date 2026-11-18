@@ -10,7 +10,59 @@ version.
 
 ## [Unreleased]
 
+### Fixed
+
+- `gombit generate` (and `--check`, and `gombit upgrade contract`)
+  regenerates a resource whose model lost, renamed or retyped a field, whose
+  `*.gen.go` were deleted or left with merge-conflict markers, or whose
+  `*.gen.go` call a framework API an upgrade changed (as v0.8.0's
+  `database.Search`, whose upgrade note says to run `gombit generate`, which
+  could not run). The loader compiles the resource package, and the stale
+  `*.gen.go` (or a `hooks.go` using their types) no longer built, so it
+  failed with a Go compile error, `--check` reported that instead of drift,
+  and only hand-editing the generated files got out. When the package does
+  not build as it is, the loader now runs again with the model's files and
+  the hand-written files they use (an enum type of the package) only, the
+  others set aside as `make resource --force` does, and says so: the package
+  may still need fixing by hand once the `*.gen.go` are current
+  ([#467](https://github.com/gombit-dev/gombit/issues/467)).
+- On Windows, the local storage driver's `Open` and `Stat` of an object
+  that a concurrent `Delete` is removing report `storage.ErrNotFound`
+  instead of an "Access is denied" error. The open could reach the file just
+  as its POSIX-semantics delete completed, which Windows reports as
+  `ERROR_ACCESS_DENIED` with `STATUS_FILE_DELETED`; only
+  `STATUS_DELETE_PENDING` was mapped to not-found
+  ([#639](https://github.com/gombit-dev/gombit/pull/639)).
+
+## [0.9.0] — 2026-11-16
+
 ### Added
+
+- [External identity providers](docs/auth.md#external-identity-providers)
+  (AUTH-10), in both auth modes: sign in with an OpenID Connect or OAuth2
+  provider through adapters behind `auth.IdentityProvider`, registered with
+  `framework.WithAuthIdentityProviders`. No provider ships in core.
+  `auth/oidc` is an optional adapter for any OIDC provider: discovery,
+  PKCE, ID token verified. The framework owns the rest:
+  - the state, nonce and PKCE verifier, in an encrypted single-flow cookie;
+  - the identity links (`auth_identity_links`);
+  - signup, linking and the session.
+
+  With a provider, `{prefix}/auth/external/*` is mounted: `/login`,
+  `/link`, `/callback`, Bearer mode's `/exchange`, and `/identities`. An
+  unlinked identity makes an account only when the provider verified its
+  email and no account has it. An existing account's owner links an
+  identity explicitly, signed in, with the current password; nothing is
+  linked by email. Bearer mode's one-time `gombit_code` exchanges only
+  from the browser that ran the flow (a sealed `gombit_external_code`
+  cookie), and ending the account's sessions voids codes not yet
+  exchanged. A password reset that ends the sessions also removes the
+  links. Accounts with MFA, and disabled ones, do not sign in externally. An account a sign-in
+  made has no password (`User.HasUsablePassword`) until a reset gives it
+  one. Audited (`auth.identity.*`, external `auth.login.*`).
+  **Schema:** the table `auth_identity_links`, read only with a provider.
+  **Dependencies:** `go-oidc/v3`, `go-jose/v4` and `x/oauth2`, linked only
+  by `auth/oidc`.
 
 - [Multi-factor authentication](docs/auth.md#multi-factor-authentication)
   (AUTH-9), in both auth modes. A user enrolls a TOTP authenticator
@@ -207,28 +259,6 @@ version.
   ([#331](https://github.com/gombit-dev/gombit/issues/331)).
 
 ### Fixed
-
-- On Windows, the local storage driver's `Open` and `Stat` of an object
-  that a concurrent `Delete` is removing report `storage.ErrNotFound`
-  instead of an "Access is denied" error. The open could reach the file just
-  as its POSIX-semantics delete completed, which Windows reports as
-  `ERROR_ACCESS_DENIED` with `STATUS_FILE_DELETED`; only
-  `STATUS_DELETE_PENDING` was mapped to not-found
-  ([#639](https://github.com/gombit-dev/gombit/pull/639)).
-- `gombit generate` (and `--check`, and `gombit upgrade contract`)
-  regenerates a resource whose model lost, renamed or retyped a field, whose
-  `*.gen.go` were deleted or left with merge-conflict markers, or whose
-  `*.gen.go` call a framework API an upgrade changed (as v0.8.0's
-  `database.Search`, whose upgrade note says to run `gombit generate`, which
-  could not run). The loader compiles the resource package, and the stale
-  `*.gen.go` (or a `hooks.go` using their types) no longer built, so it
-  failed with a Go compile error, `--check` reported that instead of drift,
-  and only hand-editing the generated files got out. When the package does
-  not build as it is, the loader now runs again with the model's files and
-  the hand-written files they use (an enum type of the package) only, the
-  others set aside as `make resource --force` does, and says so: the package
-  may still need fixing by hand once the `*.gen.go` are current
-  ([#467](https://github.com/gombit-dev/gombit/issues/467)).
 
 - A logout with a refresh token that has already rotated (a silent refresh
   in flight as the user signs out, or a client still holding the previous
@@ -545,6 +575,21 @@ version.
   and `/café` are accepted
   ([#501](https://github.com/gombit-dev/gombit/issues/501)).
 
+- `gombit db reset` on SQLite drops every user table and view, including one
+  whose name starts with `sqlite` but not `sqlite_` (`sqlitex_cache`,
+  `sqlite3_import`): the filter's `_` was a `LIKE` wildcard, so such tables
+  survived and the re-applied migrations failed on them. Only SQLite's
+  reserved `sqlite_` objects are kept
+  ([#491](https://github.com/gombit-dev/gombit/issues/491)).
+- `gombit new --module` refuses a module path Go does not accept
+  (`golang.org/x/mod/module.CheckPath`) before writing anything, instead of
+  scaffolding an app that cannot build
+  ([#515](https://github.com/gombit-dev/gombit/issues/515)).
+- `gombit new` with stdin from `/dev/null` (or another non-terminal character
+  device) is non-interactive: without a project name it fails with the
+  documented error instead of prompting
+  ([#516](https://github.com/gombit-dev/gombit/issues/516)).
+
 ### Changed
 
 - The framework requires **Go 1.26.9** (`go 1.26.9` in `go.mod`, up from
@@ -554,6 +599,37 @@ version.
   toolchain, and with `GOTOOLCHAIN=local` (or in a build image) Go 1.26.9 or
   later must be installed first. The benchmark Docker images build with Go
   1.26.9 ([#602](https://github.com/gombit-dev/gombit/pull/602)).
+
+- The framework requires newer dependencies; Go's minimal version selection
+  moves an app's build to them with the framework upgrade:
+  `github.com/mattn/go-sqlite3` v1.14.53, `github.com/redis/go-redis/v9`
+  v9.23.0 and `ariga.io/atlas` v1.3.0 (the migration library, not the `atlas`
+  CLI); the AWS SDK for Go v2 (the S3 storage driver) at
+  `github.com/aws/aws-sdk-go-v2` v1.47.8, `/credentials` v1.20.16,
+  `/service/s3` v1.114.6 and `github.com/aws/smithy-go` v1.28.8;
+  `github.com/danielgtaylor/huma/v2` v2.40.0, `github.com/pb33f/libopenapi`
+  v0.42.4 and `github.com/pb33f/libopenapi-validator` v0.16.1; OpenTelemetry
+  for Go v1.47.0; and `golang.org/x/crypto` v0.58.0, `mod` v0.42.0, `net`
+  v0.62.0, `sys` v0.50.0, `term` v0.47.0 and `tools` v0.52.0
+  ([#537](https://github.com/gombit-dev/gombit/pull/537),
+  [#572](https://github.com/gombit-dev/gombit/pull/572),
+  [#573](https://github.com/gombit-dev/gombit/pull/573),
+  [#589](https://github.com/gombit-dev/gombit/pull/589),
+  [#607](https://github.com/gombit-dev/gombit/pull/607),
+  [#621](https://github.com/gombit-dev/gombit/pull/621),
+  [#622](https://github.com/gombit-dev/gombit/pull/622),
+  [#624](https://github.com/gombit-dev/gombit/pull/624),
+  [#625](https://github.com/gombit-dev/gombit/pull/625),
+  [#641](https://github.com/gombit-dev/gombit/pull/641),
+  [#642](https://github.com/gombit-dev/gombit/pull/642),
+  [#643](https://github.com/gombit-dev/gombit/pull/643),
+  [#644](https://github.com/gombit-dev/gombit/pull/644),
+  [#645](https://github.com/gombit-dev/gombit/pull/645),
+  [#649](https://github.com/gombit-dev/gombit/pull/649),
+  [#655](https://github.com/gombit-dev/gombit/pull/655),
+  [#656](https://github.com/gombit-dev/gombit/pull/656),
+  [#657](https://github.com/gombit-dev/gombit/pull/657),
+  [#658](https://github.com/gombit-dev/gombit/pull/658)).
 
 ## [0.8.0] — 2026-10-18
 
@@ -2297,7 +2373,8 @@ First tagged release. Milestones M0–M5 plus ADMIN-1 through ADMIN-3.
   multi-tenancy, i18n — are **not** included. See
   [the build plan](docs/GOMBIT_BUILD_PLAN.md).
 
-[Unreleased]: https://github.com/gombit-dev/gombit/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/gombit-dev/gombit/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/gombit-dev/gombit/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/gombit-dev/gombit/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/gombit-dev/gombit/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/gombit-dev/gombit/compare/v0.6.1...v0.7.0

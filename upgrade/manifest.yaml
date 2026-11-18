@@ -507,7 +507,7 @@ releases:
           framework upgrade.
         refs: [570, 590]
 
-  - version: unreleased
+  - version: v0.9.0
     changes:
       - id: date-driver-location
         kind: manual
@@ -1127,6 +1127,65 @@ releases:
         summary: "A new app's placeholder `schema.ts` includes the MFA operations and the login's `mfa_code`; an existing app's generated client gets them from `gombit client generate`."
         refs: [339]
 
+      - id: external-identity-schema
+        kind: manual
+        area: schema
+        summary: "External identity adds the table `auth_identity_links`, which an app that registers an identity provider needs before it serves the external sign-in routes."
+        details: |
+          The new framework model `auth.IdentityLink` maps an identity at an
+          external provider (provider, subject) to a local user. Only the
+          external identity routes read it, and they are mounted only with a
+          provider (`framework.WithAuthIdentityProviders`), so an app without
+          one can leave it for later. Add `&auth.IdentityLink{}` to the app's
+          `AutoMigrate` (`internal/platform/database.go`), then generate and
+          apply the migration (`gombit db makemigrations --model
+          github.com/gombit-dev/gombit/auth.IdentityLink`, `gombit db
+          migrate`); `gombit upgrade --dry-run` lists the steps.
+        schema:
+          - {model: auth.IdentityLink, table: auth_identity_links, change: added}
+        refs: [340]
+
+      - id: external-identity
+        kind: informational
+        area: security
+        summary: "External identity providers (OIDC / OAuth2): `framework.WithAuthIdentityProviders` registers adapters behind `auth.IdentityProvider` (an OpenID Connect one ships as the optional `auth/oidc`), and the auth routes mount sign-in, linking and unlinking under `{prefix}/auth/external`."
+        details: |
+          Nothing changes for an app that registers no provider. With one,
+          the framework owns the state, nonce and PKCE pair (in an
+          encrypted, single-flow `gombit_external` cookie), the mapping of
+          identities to users, signup and the session: an identity no user
+          linked makes an account only when the provider verified its email
+          and no account has it (an account's owner links it, signed in), and
+          an account with multi-factor authentication signs in with its
+          password only. Linking needs the current password (an account
+          without one links nothing until a reset); in Bearer mode the
+          callback's `gombit_code` exchanges only from the browser that ran
+          the flow (with its `gombit_external_code` cookie: the SPA's
+          `fetch` of `/exchange` sends credentials). A password reset that
+          ends the sessions also removes the user's links. It then registers
+          `{prefix}/auth/external`,
+          `/auth/external/{provider}/login`, `/link`, `/callback`,
+          `/auth/external/exchange` (Bearer mode), `/auth/external/identities`
+          and `/identities/{id}`, their `auth-external-*` operations, and the
+          `AuthExternalProvider` / `AuthExternalStartBody` /
+          `AuthExternalLinkBody` / `AuthExternalAuthorization` /
+          `AuthExternalExchangeBody` / `AuthIdentityLink` schema names: an app
+          with its own routes or types of those names renames them. An
+          account an external sign-in made has no password
+          (`User.HasUsablePassword`); a password reset gives it one. See
+          docs/auth.md § External identity providers.
+        refs: [340]
+
+      - id: oidc-dependencies
+        kind: informational
+        area: dependency
+        summary: "The framework newly requires `github.com/coreos/go-oidc/v3` v3.15.0, `github.com/go-jose/go-jose/v4` v4.1.2 and `golang.org/x/oauth2` v0.30.0 (the optional `auth/oidc` adapter)."
+        details: |
+          Go's minimal version selection moves an app's build to them with the
+          framework upgrade; an app that does not import `auth/oidc` links
+          none of them into its binary.
+        refs: [340]
+
       - id: expired-rotated-refresh-token-no-cascade
         kind: informational
         area: security
@@ -1231,30 +1290,6 @@ releases:
           `built`, which describe the main module. A script that parsed the
           old app-version output reads a different string now.
         refs: [512]
-
-      - id: generate-after-field-removal
-        kind: informational
-        area: cli
-        summary: "`gombit generate` regenerates a resource whose model lost, renamed or retyped a field, whose `*.gen.go` were deleted or conflicted, or whose `*.gen.go` call a framework API an upgrade changed, instead of failing with a Go compile error from the stale generated files."
-        details: |
-          The loader compiles each resource package, and after a field was
-          removed, renamed or retyped the committed `*.gen.go` (or, once those
-          were deleted, a `hooks.go` using their types) no longer built against
-          the model: `gombit generate`, `--check` and `gombit upgrade contract`
-          failed with a compile error, and `--check` reported no drift. The
-          same held after an upgrade changed a framework API the old
-          `*.gen.go` call: v0.8.0's `database-search-takes-context` note says
-          to run `gombit generate`, which could not run. When the package
-          does not build as it is, the loader now runs once more with the
-          files declaring the model and the hand-written files declaring a
-          name it uses (an enum type of the package) only, the rest stubbed (a
-          file that does not parse, such as a `*.gen.go` with merge-conflict
-          markers, included), and prints a notice that the package did not
-          build. A model needing more than that still needs the package to
-          build. Nothing to change; a `hooks.go` that uses a removed field
-          must be updated by hand after regenerating, as before (run `go
-          build`).
-        refs: [467]
 
       - id: logout-follows-rotated-token
         kind: informational
@@ -1384,6 +1419,90 @@ releases:
         config:
           - {var: GOMBIT_API_PREFIX, change: refused}
         refs: [501]
+
+      - id: sqlite-reset-drops-sqlite-named-tables
+        kind: informational
+        area: cli
+        summary: "`gombit db reset` on SQLite drops every user table and view, including one whose name starts with `sqlite` but not `sqlite_` (`sqlitex_cache`, `sqlite3_import`); only SQLite's reserved `sqlite_` objects are kept."
+        details: |
+          The filter's `_` was a `LIKE` wildcard, so such tables survived the
+          reset and the re-applied migrations then failed on them.
+        refs: [491]
+
+      - id: new-validates-module-path
+        kind: informational
+        area: cli
+        summary: "`gombit new --module` refuses a module path Go does not accept (`golang.org/x/mod/module.CheckPath`), before writing anything, instead of scaffolding an app that cannot build."
+        refs: [515]
+
+      - id: new-dev-null-stdin-non-interactive
+        kind: informational
+        area: cli
+        summary: "`gombit new` with stdin from `/dev/null` (or another non-terminal character device) is non-interactive: without a project name it fails with the documented error instead of prompting."
+        refs: [516]
+
+      - id: database-and-cache-driver-updates
+        kind: informational
+        area: dependency
+        summary: "The framework requires newer drivers: `github.com/mattn/go-sqlite3` v1.14.53, `github.com/redis/go-redis/v9` v9.23.0 and `ariga.io/atlas` v1.3.0 (the migration library, not the `atlas` CLI)."
+        details: |
+          Go's minimal version selection moves an app's build to them with the
+          framework upgrade.
+        refs: [537, 644, 657]
+
+      - id: aws-sdk-v1-47-8
+        kind: informational
+        area: dependency
+        summary: "The framework requires newer AWS SDK for Go v2 modules (the S3 storage driver): `github.com/aws/aws-sdk-go-v2` v1.47.8, `/credentials` v1.20.16, `/service/s3` v1.114.6 and `github.com/aws/smithy-go` v1.28.8."
+        details: |
+          Go's minimal version selection moves an app's build to them with the
+          framework upgrade.
+        refs: [625, 645, 649, 658]
+
+      - id: contract-dependency-updates
+        kind: informational
+        area: dependency
+        summary: "The framework requires `github.com/danielgtaylor/huma/v2` v2.40.0, `github.com/pb33f/libopenapi` v0.42.4 and `github.com/pb33f/libopenapi-validator` v0.16.1."
+        details: |
+          Go's minimal version selection moves an app's build to them with the
+          framework upgrade. The framework's OpenAPI document and contract
+          checks are unchanged by them (the contract drift gates pass).
+        refs: [589, 607, 641, 643, 655]
+
+      - id: otel-and-golang-x-updates
+        kind: informational
+        area: dependency
+        summary: "The framework requires OpenTelemetry for Go v1.47.0 (`go.opentelemetry.io/otel`, `/sdk`, `/trace`) and newer `golang.org/x` modules: `crypto` v0.58.0, `mod` v0.42.0, `net` v0.62.0, `sys` v0.50.0, `term` v0.47.0 and `tools` v0.52.0."
+        details: |
+          Go's minimal version selection moves an app's build to them with the
+          framework upgrade.
+        refs: [572, 573, 621, 622, 624, 642, 656]
+
+  - version: unreleased
+    changes:
+      - id: generate-after-field-removal
+        kind: informational
+        area: cli
+        summary: "`gombit generate` regenerates a resource whose model lost, renamed or retyped a field, whose `*.gen.go` were deleted or conflicted, or whose `*.gen.go` call a framework API an upgrade changed, instead of failing with a Go compile error from the stale generated files."
+        details: |
+          The loader compiles each resource package, and after a field was
+          removed, renamed or retyped the committed `*.gen.go` (or, once those
+          were deleted, a `hooks.go` using their types) no longer built against
+          the model: `gombit generate`, `--check` and `gombit upgrade contract`
+          failed with a compile error, and `--check` reported no drift. The
+          same held after an upgrade changed a framework API the old
+          `*.gen.go` call: v0.8.0's `database-search-takes-context` note says
+          to run `gombit generate`, which could not run. When the package
+          does not build as it is, the loader now runs once more with the
+          files declaring the model and the hand-written files declaring a
+          name it uses (an enum type of the package) only, the rest stubbed (a
+          file that does not parse, such as a `*.gen.go` with merge-conflict
+          markers, included), and prints a notice that the package did not
+          build. A model needing more than that still needs the package to
+          build. Nothing to change; a `hooks.go` that uses a removed field
+          must be updated by hand after regenerating, as before (run `go
+          build`).
+        refs: [467]
 
       - id: local-storage-windows-file-deleted-not-found
         kind: informational

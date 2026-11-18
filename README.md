@@ -17,12 +17,14 @@ gombit new tasks --database sqlite --auth cookie --ui mui
 cd tasks && gombit dev
 ```
 
-> **Status: pre-1.0 (v0.6).** The CRUD loop, the admin, and schema-safety
+> **Status: pre-1.0 (v0.9).** The CRUD loop, the admin, and schema-safety
 > tooling are shipped and CI-gated across SQLite, PostgreSQL, and MySQL;
-> background jobs are shipped and CI-gated against Redis; and a fault-injection
-> suite runs on every PR. APIs may still change
-> between minor versions — pin an exact version and read the
-> [changelog](CHANGELOG.md) before upgrading.
+> background jobs are shipped and CI-gated against Redis; object storage and
+> upgrade tooling are shipped; and a fault-injection suite runs on every PR.
+> Before 1.0, breaking changes land only in minor releases, except for security fixes
+> ([compatibility policy](docs/compatibility.md)). Pin an exact version and run
+> `gombit upgrade --dry-run` (or read the [changelog](CHANGELOG.md)) before
+> upgrading.
 
 ## Why Gombit
 
@@ -63,9 +65,9 @@ tested and first-class.
 | **Jobs** | Typed background jobs over sync, in-memory, or Redis queues; a worker with retries, backoff, timeouts, delayed and unique jobs; failed-job tooling (`gombit jobs`); job metrics and OpenTelemetry spans |
 | **Storage** | `app.Storage()` over local files, memory, or S3-compatible stores; streaming uploads with size and content-type policies; public and signed URLs; direct browser uploads; claim-based cleanup that never deletes a file a record holds; `file` / `image` model fields with generated upload operations and admin widgets |
 | **Frontend** | Vite + React + TypeScript, React Hook Form, optional Material UI CRUD preset (`--ui mui`) |
-| **Auth** | Bearer JWT with refresh rotation (token in memory, **never `localStorage`**), or first-class cookie sessions with CSRF (`--auth cookie`) |
+| **Auth** | Bearer JWT with refresh rotation (token in memory, **never `localStorage`**), or first-class cookie sessions with CSRF (`--auth cookie`); session management, email verification, password reset and change, email change, credential throttling, account disable, a security audit trail, TOTP MFA with recovery codes, and external sign-in through an OIDC/OAuth2 adapter |
 | **Admin** | Runtime generic admin at `/admin/` with introspection API, permissions, groups, superuser bypass, and file and image fields (direct uploads, previews) |
-| **CLI** | Cobra tree: `new`, `dev`, `worker`, `jobs`, `build --embed`, `make resource`, `make command`, `generate`, `db`, `openapi`, `client`, `contract`, `routes`, `doctor`, `config`, `createsuperuser`, `version` |
+| **CLI** | Cobra tree: `new`, `dev`, `worker`, `jobs`, `build --embed`, `make resource`, `make command`, `generate`, `db`, `openapi`, `client`, `contract`, `routes`, `doctor`, `config`, `createsuperuser`, `upgrade`, `version` |
 | **Deploy** | `gombit build --embed` — API, SPA, and admin in one binary; a machine-readable app contract (`gombit contract app`) and migration safety manifests for deployment hosts |
 
 ## Quick start
@@ -312,9 +314,16 @@ wider field vocabulary (v0.3) · schema-safety tooling (`db plan`, `lint`,
 `repair`, `check`), table renames, and hard delete (v0.4) · background jobs,
 the worker, and the fault-injection and chaos suites (v0.5–v0.6) · object
 storage, uploads, and `file` / `image` fields in resources and the admin
-(on `main`, unreleased). See the [changelog](CHANGELOG.md) for detail.
+(v0.7) · upgrade tooling (`gombit upgrade`: baseline, dry-run plan,
+dependency apply, deprecation check, the codemod runner, config, contract and
+framework-schema analysis), the compatibility policy, and session management
+(v0.8) · the account-security lifecycle: email verification, password reset
+and change, email change, credential throttling, account state, the audit
+trail, TOTP MFA, and external identity providers (v0.9). See
+the [changelog](CHANGELOG.md) for detail.
 
-**Not here yet:** events, scheduler, mail, gRPC, multi-tenancy, i18n.
+**Not here yet:** events, scheduler, mail (auth sends its messages through an
+`auth.Mailer` you provide), gRPC, multi-tenancy, i18n.
 
 ## Contributing
 

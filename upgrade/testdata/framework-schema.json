@@ -1,6 +1,102 @@
 {
-  "version": "v0.8.0",
+  "version": "v0.9.0",
   "tables": [
+    {
+      "table": "auth_audit_events",
+      "model": "auth.AuditEvent",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uint(64)",
+          "primary_key": true
+        },
+        {
+          "name": "occurred_at",
+          "type": "time",
+          "not_null": true
+        },
+        {
+          "name": "action",
+          "type": "string(64)",
+          "not_null": true
+        },
+        {
+          "name": "actor_user_id",
+          "type": "uint(64)"
+        },
+        {
+          "name": "target_user_id",
+          "type": "uint(64)"
+        },
+        {
+          "name": "target_type",
+          "type": "text"
+        },
+        {
+          "name": "target_id",
+          "type": "text"
+        },
+        {
+          "name": "request_id",
+          "type": "string(128)"
+        },
+        {
+          "name": "ip",
+          "type": "string(64)"
+        },
+        {
+          "name": "user_agent",
+          "type": "string(255)"
+        },
+        {
+          "name": "details",
+          "type": "text"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_auth_audit_events_action",
+          "columns": [
+            {
+              "name": "action"
+            }
+          ]
+        },
+        {
+          "name": "idx_auth_audit_events_actor_user_id",
+          "columns": [
+            {
+              "name": "actor_user_id"
+            }
+          ]
+        },
+        {
+          "name": "idx_auth_audit_events_occurred_at",
+          "columns": [
+            {
+              "name": "occurred_at"
+            }
+          ]
+        },
+        {
+          "name": "idx_auth_audit_events_request_id",
+          "columns": [
+            {
+              "name": "request_id"
+            }
+          ]
+        },
+        {
+          "name": "idx_auth_audit_events_target_user_id",
+          "columns": [
+            {
+              "name": "target_user_id"
+            }
+          ]
+        }
+      ],
+      "constraints": []
+    },
     {
       "table": "auth_group_permissions",
       "model": "auth.Group",
@@ -34,6 +130,257 @@
           "references": "permissions(id)"
         }
       ]
+    },
+    {
+      "table": "auth_identity_links",
+      "model": "auth.IdentityLink",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uint(64)",
+          "primary_key": true
+        },
+        {
+          "name": "user_id",
+          "type": "uint(64)",
+          "not_null": true
+        },
+        {
+          "name": "provider",
+          "type": "string(32)",
+          "not_null": true
+        },
+        {
+          "name": "subject_key",
+          "type": "string(64)",
+          "not_null": true
+        },
+        {
+          "name": "subject",
+          "type": "string(255)",
+          "not_null": true
+        },
+        {
+          "name": "email",
+          "type": "string(255)",
+          "not_null": true
+        },
+        {
+          "name": "last_used_at",
+          "type": "time"
+        },
+        {
+          "name": "created_at",
+          "type": "time"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_auth_identity_links_provider_subject",
+          "class": "UNIQUE",
+          "columns": [
+            {
+              "name": "provider"
+            },
+            {
+              "name": "subject_key"
+            }
+          ]
+        },
+        {
+          "name": "idx_auth_identity_links_user_id",
+          "columns": [
+            {
+              "name": "user_id"
+            }
+          ]
+        }
+      ],
+      "constraints": []
+    },
+    {
+      "table": "auth_one_time_tokens",
+      "model": "auth.OneTimeToken",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uint(64)",
+          "primary_key": true
+        },
+        {
+          "name": "user_id",
+          "type": "uint(64)",
+          "not_null": true
+        },
+        {
+          "name": "purpose",
+          "type": "string(32)",
+          "not_null": true
+        },
+        {
+          "name": "token_hash",
+          "type": "string(64)",
+          "not_null": true
+        },
+        {
+          "name": "email",
+          "type": "string(255)",
+          "not_null": true
+        },
+        {
+          "name": "from_email",
+          "type": "string(255)",
+          "not_null": true
+        },
+        {
+          "name": "expires_at",
+          "type": "time",
+          "not_null": true
+        },
+        {
+          "name": "sent_at",
+          "type": "time"
+        },
+        {
+          "name": "used_at",
+          "type": "time"
+        },
+        {
+          "name": "created_at",
+          "type": "time"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_auth_one_time_tokens_expires_at",
+          "columns": [
+            {
+              "name": "expires_at"
+            }
+          ]
+        },
+        {
+          "name": "idx_auth_one_time_tokens_token_hash",
+          "class": "UNIQUE",
+          "columns": [
+            {
+              "name": "token_hash"
+            }
+          ]
+        },
+        {
+          "name": "idx_auth_one_time_tokens_user_purpose",
+          "columns": [
+            {
+              "name": "user_id"
+            },
+            {
+              "name": "purpose"
+            }
+          ]
+        }
+      ],
+      "constraints": []
+    },
+    {
+      "table": "auth_recovery_codes",
+      "model": "auth.RecoveryCode",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uint(64)",
+          "primary_key": true
+        },
+        {
+          "name": "user_id",
+          "type": "uint(64)",
+          "not_null": true
+        },
+        {
+          "name": "code_hash",
+          "type": "string(64)",
+          "not_null": true
+        },
+        {
+          "name": "used_at",
+          "type": "time"
+        },
+        {
+          "name": "created_at",
+          "type": "time"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_auth_recovery_codes_code_hash",
+          "class": "UNIQUE",
+          "columns": [
+            {
+              "name": "code_hash"
+            }
+          ]
+        },
+        {
+          "name": "idx_auth_recovery_codes_user_id",
+          "columns": [
+            {
+              "name": "user_id"
+            }
+          ]
+        }
+      ],
+      "constraints": []
+    },
+    {
+      "table": "auth_totp_factors",
+      "model": "auth.TOTPFactor",
+      "columns": [
+        {
+          "name": "id",
+          "type": "uint(64)",
+          "primary_key": true
+        },
+        {
+          "name": "user_id",
+          "type": "uint(64)",
+          "not_null": true
+        },
+        {
+          "name": "secret",
+          "type": "string(255)",
+          "not_null": true
+        },
+        {
+          "name": "confirmed_at",
+          "type": "time"
+        },
+        {
+          "name": "last_step",
+          "type": "int(64)",
+          "not_null": true,
+          "default": "0"
+        },
+        {
+          "name": "created_at",
+          "type": "time"
+        },
+        {
+          "name": "updated_at",
+          "type": "time"
+        }
+      ],
+      "indexes": [
+        {
+          "name": "idx_auth_totp_factors_user_id",
+          "class": "UNIQUE",
+          "columns": [
+            {
+              "name": "user_id"
+            }
+          ]
+        }
+      ],
+      "constraints": []
     },
     {
       "table": "auth_user_groups",
@@ -334,6 +681,19 @@
           "type": "bool",
           "not_null": true,
           "default": "false"
+        },
+        {
+          "name": "disabled_at",
+          "type": "time"
+        },
+        {
+          "name": "email_verified_at",
+          "type": "time"
+        },
+        {
+          "name": "verified_email",
+          "type": "string(255)",
+          "not_null": true
         },
         {
           "name": "created_at",

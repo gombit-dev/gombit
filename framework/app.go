@@ -99,6 +99,8 @@ type App struct {
 	rawBodyPaths       []string
 	authMailer         auth.Mailer
 	authAuditor        auth.Auditor
+	authProviders      []auth.IdentityProvider
+	authSignupOff      bool
 
 	mu     sync.RWMutex
 	server *http.Server
@@ -367,6 +369,34 @@ func WithAuthAuditor(a auth.Auditor) Option {
 	}
 }
 
+// WithAuthIdentityProviders registers external identity providers
+// (AUTH-10): adapters behind auth.IdentityProvider, such as auth/oidc's.
+// With at least one, the auth routes mount {prefix}/auth/external/*: sign in
+// with the provider, link an identity to a signed-in account, list and
+// remove links. The framework owns the state, nonce and PKCE pair, the
+// mapping of identities to users, and the session; see docs/auth.md.
+func WithAuthIdentityProviders(providers ...auth.IdentityProvider) Option {
+	return func(app *App) error {
+		for _, p := range providers {
+			if p == nil {
+				return errors.New("framework: nil auth identity provider")
+			}
+		}
+		app.authProviders = append(app.authProviders, providers...)
+		return nil
+	}
+}
+
+// WithoutAuthExternalSignup stops an external sign-in from making accounts:
+// an identity no user linked is refused, and users link identities from
+// their signed-in accounts only (auth.WithoutExternalSignup).
+func WithoutAuthExternalSignup() Option {
+	return func(app *App) error {
+		app.authSignupOff = true
+		return nil
+	}
+}
+
 // noopCache reports whether c keeps nothing: the noop driver, opened or
 // attached.
 func noopCache(c cache.Cache, store *cache.Store) bool {
@@ -381,6 +411,12 @@ func (app *App) authOptions() []auth.Option {
 	opts := []auth.Option{auth.WithLogger(app.logger.Named("auth"))}
 	if app.authAuditor != nil {
 		opts = append(opts, auth.WithAuditor(app.authAuditor))
+	}
+	if len(app.authProviders) > 0 {
+		opts = append(opts, auth.WithIdentityProviders(app.authProviders...))
+	}
+	if app.authSignupOff {
+		opts = append(opts, auth.WithoutExternalSignup())
 	}
 	// The credential throttles count in the app's cache (shared between
 	// instances on Redis), unless it keeps nothing (noop): then the Service

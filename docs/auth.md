@@ -254,8 +254,11 @@ curl -sX POST localhost:8080/api/v1/auth/password/reset \
   checked is still the user's ([Sessions](#sessions)), so it is either
   revoked by the reset or refused. The reset also voids every other reset
   token of the user, a message still being sent included: its link never
-  works. `GOMBIT_AUTH_PASSWORD_RESET_KEEP_SESSIONS=true`
-  keeps them. In cookie mode a reset that revoked the sessions also clears
+  works. A reset that revokes the sessions also removes the user's linked
+  external identities and voids their external sign-in codes not yet
+  exchanged ([External identity providers](#external-identity-providers)).
+  `GOMBIT_AUTH_PASSWORD_RESET_KEEP_SESSIONS=true`
+  keeps them all. In cookie mode a reset that revoked the sessions also clears
   the browser's session cookies.
 - **The link.** `GOMBIT_AUTH_PASSWORD_RESET_URL` is the page the message
   links to, with `{token}` where the token goes
@@ -543,6 +546,189 @@ curl -sX POST localhost:8080/api/v1/auth/login -H 'Content-Type: application/jso
   `auth.mfa.recovery_codes_regenerated`, `auth.mfa.recovery_code_used`,
   `auth.mfa.failed` (a wrong password or code in an MFA operation), and
   `auth.login.failed` with `wrong_mfa_code`. No secret or code is recorded.
+
+## External identity providers
+
+Users can sign in with an account at an external identity provider (Google,
+Microsoft Entra ID, Okta, Auth0, Keycloak, GitHub, ...). Core auth ships no
+provider. A provider is an **adapter** behind `auth.IdentityProvider`, which
+has two jobs: build the provider's authorization URL, and redeem the code the
+provider sends back for an `auth.ExternalIdentity` (a stable subject, an
+email, whether the provider verified it). **The framework does everything
+else**: the state, the nonce and the PKCE pair, the mapping of identities
+to local users, signup, linking, and the session.
+
+The optional `auth/oidc` package is an adapter for any OpenID Connect
+provider. It reads the provider's discovery document, runs the authorization
+code flow with PKCE, and verifies the ID token (signature, issuer, audience,
+expiry, nonce):
+
+```go
+google, err := oidc.New(ctx, oidc.Config{
+	Name:         "google",
+	Issuer:       "https://accounts.google.com",
+	ClientID:     os.Getenv("GOOGLE_CLIENT_ID"),
+	ClientSecret: os.Getenv("GOOGLE_CLIENT_SECRET"),
+	// Registered with the provider as the redirect URI.
+	RedirectURL: "https://app.example.com/api/v1/auth/external/google/callback",
+})
+if err != nil {
+	return err
+}
+app, err := framework.New(framework.WithAuthIdentityProviders(google))
+```
+
+A plain OAuth2 provider (no ID token) needs an adapter of the app's own. It
+puts the request's state and PKCE challenge in the URL, sends the verifier
+with the token request, reads the user from the provider's API, and leaves
+`ExternalIdentity.Nonce` empty. An OIDC adapter must check the ID token's
+nonce against `ExchangeRequest.Nonce`, return it, and declare itself an
+`auth.IDTokenProvider` (`IssuesIDTokens() bool`, as `auth/oidc` does). The
+framework then refuses an identity whose nonce is missing or not the
+flow's. From an adapter that does not declare ID tokens, the framework
+refuses only a nonce that is returned and wrong: it cannot tell a plain
+OAuth2 adapter from an OIDC one that forgot the nonce.
+
+With at least one provider, both auth modes mount these routes. Without
+one, nothing is mounted and the OpenAPI document does not list them.
+
+| Route | |
+| --- | --- |
+| `GET {prefix}/auth/external` | The providers' names, for a login page |
+| `POST {prefix}/auth/external/{provider}/login` | Start a sign-in: `{"return_to":"/home"}` → `{"authorization_url": ...}` |
+| `POST {prefix}/auth/external/{provider}/link` | Signed in: start linking an identity to the account, with `current_password` |
+| `GET {prefix}/auth/external/{provider}/callback` | The redirect URI: the provider sends the browser back here |
+| `POST {prefix}/auth/external/exchange` | Bearer mode: trade the callback's `gombit_code` for tokens |
+| `GET {prefix}/auth/external/identities` | Signed in: the account's linked identities |
+| `DELETE {prefix}/auth/external/identities/{id}` | Signed in: remove one (204) |
+
+**The flow.** The client POSTs `/login` (or `/link`) and navigates the
+browser to the `authorization_url` it gets back. The response also sets
+`gombit_external`, the flow's state cookie:
+- HttpOnly and AES-GCM-encrypted under a key derived from the JWT secret;
+- scoped to `{prefix}/auth/external`;
+- valid for ten minutes;
+- `SameSite=Lax` whatever `GOMBIT_COOKIE_SAMESITE` says, because the
+  provider's redirect back is a cross-site navigation;
+- `Secure` with `GOMBIT_COOKIE_SECURE`, and always in production, in
+  either auth mode.
+
+It holds the state, the nonce, the PKCE verifier and `return_to`; one flow
+at a time per browser. The callback checks the returned state against the
+cookie and clears it. A missing, expired or foreign state is a **422 on
+`state`**: there is no flow to send the browser back to. Otherwise the
+callback has the adapter redeem the code, then **redirects (302) to
+`return_to`**:
+- **cookie mode**: a sign-in sets the session cookies;
+- **Bearer mode**: a sign-in adds `?gombit_code=...`, and sets
+  `gombit_external_code`: an HttpOnly cookie for the exchange's path only,
+  sealed like the state cookie, which binds the code to this browser. The
+  page trades the code with `POST /auth/external/exchange {"code": ...}`
+  (the browser sends the cookie) for the token pair `/auth/login`
+  returns. The code works once, within two minutes, and **only from the
+  browser that ran the flow**. A code in a URL or a log, or one an
+  attacker hands a victim's page to sign it into the attacker's account
+  (login CSRF), exchanges nothing anywhere else: a 422 on `code`. Ending
+  the account's sessions voids the codes not yet exchanged (each a
+  session about to start): signing out everywhere or the other sessions,
+  a password reset or change, a disable, enabling MFA. So a code whose
+  account was disabled or given MFA since the callback is a 422 on
+  `code`, like a used one. The session starts under the user's lock with
+  the factor re-checked, so the only 409 is the narrow race of MFA
+  enabled between the code's use and that start;
+- **a link** adds `?gombit_linked={provider}`.
+
+A refusal adds `?gombit_error=` with one of these codes:
+- `access_denied`: the user declined at the provider;
+- `provider_error`: the provider refused the code or could not be reached
+  (logged);
+- `invalid_identity`: no subject, or a foreign nonce;
+- `account_exists`, `email_unverified`, `signup_disabled`;
+- `mfa_enabled`, `account_disabled`;
+- `identity_linked_elsewhere`, `session_ended`, `login_failed`;
+- `server_error`.
+
+`return_to` must be a path on this site: no scheme or host, no `//`, no
+backslash, no fragment, and a path and query the callback can parse (it
+adds its parameter to them). The default is `/`.
+
+The provider must reach the callback on the browser's origin. If the SPA is
+served from another origin than the API (the Vite dev server), register the
+URL the browser uses (Vite proxies `/api`). In Bearer mode the SPA's
+`fetch` of `/login` and of `/exchange` must carry credentials (the default
+for a same-origin `fetch`; `credentials: "include"` across origins), so
+that the browser keeps the state cookie and sends the code's binding.
+
+**Identities and accounts.** An identity is (provider, subject):
+`auth.IdentityLink` (`auth_identity_links`) maps it to one user, and a user
+may link several. Subjects compare exactly, byte for byte: the link is keyed
+by the subject's SHA-256, so no database collation (MySQL's default ignores
+case and trailing spaces) makes two users' subjects one. On a sign-in:
+
+- **A linked identity** signs its user in. The link's email is refreshed
+  for display, and decides nothing: a provider's email can change hands,
+  its subject cannot.
+- **An identity no user linked makes an account**, its email verified, but
+  only when the provider *verified* the email (`email_unverified`
+  otherwise, and for no email). Otherwise anyone could register at a lax
+  provider with someone else's address and pre-claim the account it would
+  make.
+- **An email that is already an account's is refused**
+  (`account_exists`). The framework never links by email, since that
+  would let any provider vouching for an address take over the account
+  that has it. The account's owner signs in with their password and links
+  the identity from the account (`/link`).
+- `framework.WithoutAuthExternalSignup()` (`auth.WithoutExternalSignup`)
+  makes no accounts. An unlinked identity is `signup_disabled`, and users
+  link identities from their accounts only.
+
+An account an external sign-in made has **no password**: no password signs
+in to it (`User.HasUsablePassword` is false). A password reset gives it
+one. Until then it cannot do what asks for the current password: a
+password or email change, enrolling MFA, linking another identity.
+
+**Linking** takes the current password (throttled, wrong ones audited, as
+a password change). A link signs in for good, past every session, so a
+session alone does not add one: otherwise a stolen access token would
+become a credential that survives every revocation. An account without a
+password links nothing (409) until a password reset gives it one. The
+callback links the identity only while the session that asked is still
+active, the account enabled and without MFA. An identity linked to another
+account is `identity_linked_elsewhere`. **Unlinking** an account's only
+link is a 409 when the account has no password, since nothing could sign
+in to it again.
+
+**A password reset removes the links** when it ends the sessions (the
+default; not with `GOMBIT_AUTH_PASSWORD_RESET_KEEP_SESSIONS`): a reset is
+the recovery from a compromise, and an identity an intruder linked would
+otherwise outlive it. The user links their identities again, with the new
+password. Signing out everywhere ends sessions only: links are listed at
+`/identities` and removed there.
+
+**Refusals that hold at the session too.** A disabled account does not sign
+in (`account_disabled`). Nor does an account with multi-factor
+authentication (`mfa_enabled`), which signs in with its password and code.
+An external sign-in does not prove the second factor, and the framework
+does not take the provider's word for one. Such an account cannot start a
+link either (409). Like a password login, the session starts under the
+user's lock and re-checks both, so a disable or an enrollment that commits
+meanwhile wins.
+
+**From Go.** `svc.IdentityProviders()`, `svc.ListIdentityLinks` and
+`svc.UnlinkIdentity` (`auth.ErrLastSignInMethod`,
+`auth.ErrIdentityLinkNotFound`). The flow itself runs through the routes,
+which own the browser's state.
+
+**Audit.** These events are recorded:
+- `auth.login.succeeded` with `method: external` and the provider (in
+  Bearer mode, at the exchange: the code's binding names it);
+- `auth.login.failed` with the refusal's code as `reason`;
+- `auth.user.registered` with the provider (an account the sign-in made);
+- `auth.identity.linked`, `auth.identity.link_failed` and
+  `auth.identity.unlinked`;
+- `auth.password.reset` with `identities_unlinked`, the links it removed.
+
+No code, token, state or nonce is recorded.
 
 ## Abuse protection
 

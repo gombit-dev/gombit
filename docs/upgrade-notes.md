@@ -10,6 +10,38 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 ## Unreleased
 
+### Informational
+
+- `gombit generate` regenerates a resource whose model lost, renamed or retyped a field, whose `*.gen.go` were deleted or conflicted, or whose `*.gen.go` call a framework API an upgrade changed, instead of failing with a Go compile error from the stale generated files. (`generate-after-field-removal`, cli, [#467](https://github.com/gombit-dev/gombit/issues/467))
+
+  The loader compiles each resource package, and after a field was
+  removed, renamed or retyped the committed `*.gen.go` (or, once those
+  were deleted, a `hooks.go` using their types) no longer built against
+  the model: `gombit generate`, `--check` and `gombit upgrade contract`
+  failed with a compile error, and `--check` reported no drift. The
+  same held after an upgrade changed a framework API the old
+  `*.gen.go` call: v0.8.0's `database-search-takes-context` note says
+  to run `gombit generate`, which could not run. When the package
+  does not build as it is, the loader now runs once more with the
+  files declaring the model and the hand-written files declaring a
+  name it uses (an enum type of the package) only, the rest stubbed (a
+  file that does not parse, such as a `*.gen.go` with merge-conflict
+  markers, included), and prints a notice that the package did not
+  build. A model needing more than that still needs the package to
+  build. Nothing to change; a `hooks.go` that uses a removed field
+  must be updated by hand after regenerating, as before (run `go
+  build`).
+
+- On Windows, `storage/local` reports an object a concurrent `Delete` is removing as `storage.ErrNotFound` from `Open` and `Stat`, not as an "Access is denied" error. (`local-storage-windows-file-deleted-not-found`, behavior, [#639](https://github.com/gombit-dev/gombit/issues/639))
+
+  An open racing a POSIX-semantics delete of the same file can fail
+  with `ERROR_ACCESS_DENIED` and NTSTATUS `STATUS_FILE_DELETED`; the
+  driver mapped only `STATUS_DELETE_PENDING` to not-found, so a read
+  racing a delete could fail with a permission error. Nothing to
+  change.
+
+## v0.9.0
+
 ### Manual: action required
 
 - `types.Date` keeps its calendar day whatever the driver's time zone, except, with `parseTime=true`, a day a MySQL `loc` skipped whole; dates a location west of UTC already moved stay moved. (`date-driver-location`, behavior, [#478](https://github.com/gombit-dev/gombit/issues/478))
@@ -268,6 +300,20 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   setting it on an app whose users already enrolled has the same
   effect once.
 
+- External identity adds the table `auth_identity_links`, which an app that registers an identity provider needs before it serves the external sign-in routes. (`external-identity-schema`, schema, [#340](https://github.com/gombit-dev/gombit/issues/340))
+
+  - Framework schema: `auth.IdentityLink` (`auth_identity_links`): added.
+
+  The new framework model `auth.IdentityLink` maps an identity at an
+  external provider (provider, subject) to a local user. Only the
+  external identity routes read it, and they are mounted only with a
+  provider (`framework.WithAuthIdentityProviders`), so an app without
+  one can leave it for later. Add `&auth.IdentityLink{}` to the app's
+  `AutoMigrate` (`internal/platform/database.go`), then generate and
+  apply the migration (`gombit db makemigrations --model
+  github.com/gombit-dev/gombit/auth.IdentityLink`, `gombit db
+  migrate`); `gombit upgrade --dry-run` lists the steps.
+
 - **Breaking.** A `.env` value no longer swallows a trailing comment, a byte order mark no longer hides the first key, and a `.env` that cannot be read fails the load. (`dotenv-comments-and-byte-order-mark`, behavior, [#507](https://github.com/gombit-dev/gombit/issues/507))
 
   Check a `.env` you already run with. A `#` with whitespace before it
@@ -521,6 +567,39 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 - A new app's placeholder `schema.ts` includes the MFA operations and the login's `mfa_code`; an existing app's generated client gets them from `gombit client generate`. (`client-schema-mfa`, client, [#339](https://github.com/gombit-dev/gombit/issues/339))
 
+- External identity providers (OIDC / OAuth2): `framework.WithAuthIdentityProviders` registers adapters behind `auth.IdentityProvider` (an OpenID Connect one ships as the optional `auth/oidc`), and the auth routes mount sign-in, linking and unlinking under `{prefix}/auth/external`. (`external-identity`, security, [#340](https://github.com/gombit-dev/gombit/issues/340))
+
+  Nothing changes for an app that registers no provider. With one,
+  the framework owns the state, nonce and PKCE pair (in an
+  encrypted, single-flow `gombit_external` cookie), the mapping of
+  identities to users, signup and the session: an identity no user
+  linked makes an account only when the provider verified its email
+  and no account has it (an account's owner links it, signed in), and
+  an account with multi-factor authentication signs in with its
+  password only. Linking needs the current password (an account
+  without one links nothing until a reset); in Bearer mode the
+  callback's `gombit_code` exchanges only from the browser that ran
+  the flow (with its `gombit_external_code` cookie: the SPA's
+  `fetch` of `/exchange` sends credentials). A password reset that
+  ends the sessions also removes the user's links. It then registers
+  `{prefix}/auth/external`,
+  `/auth/external/{provider}/login`, `/link`, `/callback`,
+  `/auth/external/exchange` (Bearer mode), `/auth/external/identities`
+  and `/identities/{id}`, their `auth-external-*` operations, and the
+  `AuthExternalProvider` / `AuthExternalStartBody` /
+  `AuthExternalLinkBody` / `AuthExternalAuthorization` /
+  `AuthExternalExchangeBody` / `AuthIdentityLink` schema names: an app
+  with its own routes or types of those names renames them. An
+  account an external sign-in made has no password
+  (`User.HasUsablePassword`); a password reset gives it one. See
+  docs/auth.md § External identity providers.
+
+- The framework newly requires `github.com/coreos/go-oidc/v3` v3.15.0, `github.com/go-jose/go-jose/v4` v4.1.2 and `golang.org/x/oauth2` v0.30.0 (the optional `auth/oidc` adapter). (`oidc-dependencies`, dependency, [#340](https://github.com/gombit-dev/gombit/issues/340))
+
+  Go's minimal version selection moves an app's build to them with the
+  framework upgrade; an app that does not import `auth/oidc` links
+  none of them into its binary.
+
 - An already-rotated refresh token that has expired is a 401 and no longer revokes the user's sessions. (`expired-rotated-refresh-token-no-cascade`, security, [#458](https://github.com/gombit-dev/gombit/issues/458))
 
 - In cookie mode, a refresh rejected with a 401 clears the `gombit_access` and `gombit_refresh` cookies. (`cookie-refresh-401-clears-session-cookies`, behavior, [#458](https://github.com/gombit-dev/gombit/issues/458))
@@ -574,26 +653,6 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   `built`, which describe the main module. A script that parsed the
   old app-version output reads a different string now.
 
-- `gombit generate` regenerates a resource whose model lost, renamed or retyped a field, whose `*.gen.go` were deleted or conflicted, or whose `*.gen.go` call a framework API an upgrade changed, instead of failing with a Go compile error from the stale generated files. (`generate-after-field-removal`, cli, [#467](https://github.com/gombit-dev/gombit/issues/467))
-
-  The loader compiles each resource package, and after a field was
-  removed, renamed or retyped the committed `*.gen.go` (or, once those
-  were deleted, a `hooks.go` using their types) no longer built against
-  the model: `gombit generate`, `--check` and `gombit upgrade contract`
-  failed with a compile error, and `--check` reported no drift. The
-  same held after an upgrade changed a framework API the old
-  `*.gen.go` call: v0.8.0's `database-search-takes-context` note says
-  to run `gombit generate`, which could not run. When the package
-  does not build as it is, the loader now runs once more with the
-  files declaring the model and the hand-written files declaring a
-  name it uses (an enum type of the package) only, the rest stubbed (a
-  file that does not parse, such as a `*.gen.go` with merge-conflict
-  markers, included), and prints a notice that the package did not
-  build. A model needing more than that still needs the package to
-  build. Nothing to change; a `hooks.go` that uses a removed field
-  must be updated by hand after regenerating, as before (run `go
-  build`).
-
 - Logout with a refresh token that has already rotated ends the session it rotated into; it answered 200 and revoked nothing. (`logout-follows-rotated-token`, security, [#466](https://github.com/gombit-dev/gombit/issues/466))
 
   `POST {prefix}/auth/logout` (both auth modes) and
@@ -645,13 +704,35 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   constraint (the primary key, its sequence behind the table) is
   returned as itself. Nothing to change.
 
-- On Windows, `storage/local` reports an object a concurrent `Delete` is removing as `storage.ErrNotFound` from `Open` and `Stat`, not as an "Access is denied" error. (`local-storage-windows-file-deleted-not-found`, behavior, [#639](https://github.com/gombit-dev/gombit/issues/639))
+- `gombit db reset` on SQLite drops every user table and view, including one whose name starts with `sqlite` but not `sqlite_` (`sqlitex_cache`, `sqlite3_import`); only SQLite's reserved `sqlite_` objects are kept. (`sqlite-reset-drops-sqlite-named-tables`, cli, [#491](https://github.com/gombit-dev/gombit/issues/491))
 
-  An open racing a POSIX-semantics delete of the same file can fail
-  with `ERROR_ACCESS_DENIED` and NTSTATUS `STATUS_FILE_DELETED`; the
-  driver mapped only `STATUS_DELETE_PENDING` to not-found, so a read
-  racing a delete could fail with a permission error. Nothing to
-  change.
+  The filter's `_` was a `LIKE` wildcard, so such tables survived the
+  reset and the re-applied migrations then failed on them.
+
+- `gombit new --module` refuses a module path Go does not accept (`golang.org/x/mod/module.CheckPath`), before writing anything, instead of scaffolding an app that cannot build. (`new-validates-module-path`, cli, [#515](https://github.com/gombit-dev/gombit/issues/515))
+
+- `gombit new` with stdin from `/dev/null` (or another non-terminal character device) is non-interactive: without a project name it fails with the documented error instead of prompting. (`new-dev-null-stdin-non-interactive`, cli, [#516](https://github.com/gombit-dev/gombit/issues/516))
+
+- The framework requires newer drivers: `github.com/mattn/go-sqlite3` v1.14.53, `github.com/redis/go-redis/v9` v9.23.0 and `ariga.io/atlas` v1.3.0 (the migration library, not the `atlas` CLI). (`database-and-cache-driver-updates`, dependency, [#537](https://github.com/gombit-dev/gombit/issues/537), [#644](https://github.com/gombit-dev/gombit/issues/644), [#657](https://github.com/gombit-dev/gombit/issues/657))
+
+  Go's minimal version selection moves an app's build to them with the
+  framework upgrade.
+
+- The framework requires newer AWS SDK for Go v2 modules (the S3 storage driver): `github.com/aws/aws-sdk-go-v2` v1.47.8, `/credentials` v1.20.16, `/service/s3` v1.114.6 and `github.com/aws/smithy-go` v1.28.8. (`aws-sdk-v1-47-8`, dependency, [#625](https://github.com/gombit-dev/gombit/issues/625), [#645](https://github.com/gombit-dev/gombit/issues/645), [#649](https://github.com/gombit-dev/gombit/issues/649), [#658](https://github.com/gombit-dev/gombit/issues/658))
+
+  Go's minimal version selection moves an app's build to them with the
+  framework upgrade.
+
+- The framework requires `github.com/danielgtaylor/huma/v2` v2.40.0, `github.com/pb33f/libopenapi` v0.42.4 and `github.com/pb33f/libopenapi-validator` v0.16.1. (`contract-dependency-updates`, dependency, [#589](https://github.com/gombit-dev/gombit/issues/589), [#607](https://github.com/gombit-dev/gombit/issues/607), [#641](https://github.com/gombit-dev/gombit/issues/641), [#643](https://github.com/gombit-dev/gombit/issues/643), [#655](https://github.com/gombit-dev/gombit/issues/655))
+
+  Go's minimal version selection moves an app's build to them with the
+  framework upgrade. The framework's OpenAPI document and contract
+  checks are unchanged by them (the contract drift gates pass).
+
+- The framework requires OpenTelemetry for Go v1.47.0 (`go.opentelemetry.io/otel`, `/sdk`, `/trace`) and newer `golang.org/x` modules: `crypto` v0.58.0, `mod` v0.42.0, `net` v0.62.0, `sys` v0.50.0, `term` v0.47.0 and `tools` v0.52.0. (`otel-and-golang-x-updates`, dependency, [#572](https://github.com/gombit-dev/gombit/issues/572), [#573](https://github.com/gombit-dev/gombit/issues/573), [#621](https://github.com/gombit-dev/gombit/issues/621), [#622](https://github.com/gombit-dev/gombit/issues/622), [#624](https://github.com/gombit-dev/gombit/issues/624), [#642](https://github.com/gombit-dev/gombit/issues/642), [#656](https://github.com/gombit-dev/gombit/issues/656))
+
+  Go's minimal version selection moves an app's build to them with the
+  framework upgrade.
 
 ## v0.8.0
 
