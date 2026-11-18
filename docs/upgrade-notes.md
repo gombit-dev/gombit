@@ -16,19 +16,24 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
   With pnpm 11 or later, `pnpm install` in `frontend/` fails with
   `ERR_PNPM_IGNORED_BUILDS` until esbuild's build script is approved.
-  Add this to `frontend/pnpm-workspace.yaml`, creating the file if it
-  is missing:
+  If `frontend/pnpm-workspace.yaml` is missing, create it with both
+  the `packages` entry required by pnpm 9 and the esbuild approval:
 
   ```yaml
+  packages:
+    - .
+
   allowBuilds:
     esbuild: true
   ```
 
   If pnpm already wrote that file with a placeholder
   (`esbuild: set this to true or false`), change the placeholder to
-  `true`. An app that runs npm needs no change. pnpm 10 reads
-  `onlyBuiltDependencies: [esbuild]` instead of `allowBuilds`. Then run
-  `gombit dev` or `gombit build --embed` again.
+  `true`. An app that runs npm needs no change. pnpm 10.26 and later
+  also honors `allowBuilds`; older pnpm 10 may warn that the build
+  script was ignored, but esbuild's optional platform package lets
+  the install succeed. Then run `gombit dev` or `gombit build --embed`
+  again.
 
 ### Informational
 

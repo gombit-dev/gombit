@@ -17,8 +17,9 @@ version.
   esbuild's build script. Without a `frontend/pnpm-lock.yaml`, they now run
   `npm`, and `pnpm` only when `npm` is absent. The scaffold ships
   `frontend/pnpm-workspace.yaml`, which approves esbuild's build script for
-  pnpm. An existing app that already has a `pnpm-lock.yaml` from the failed
-  install must add that file; see the upgrade notes
+  pnpm. An existing app whose failed install left a placeholder in
+  `frontend/pnpm-workspace.yaml` must fix that file as described in the
+  upgrade notes
   ([#509](https://github.com/gombit-dev/gombit/issues/509)).
 
 ## [0.9.0] — 2026-11-16
