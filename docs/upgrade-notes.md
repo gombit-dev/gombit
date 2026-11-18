@@ -8,6 +8,18 @@ What each release asks of an application moving to it, newest first. This
 page, the release notes, and the upgrade tooling all come from the same
 compatibility manifest (see [upgrade.md](upgrade.md)).
 
+## Unreleased
+
+### Informational
+
+- Huma-registered routes use the framework's 8MiB default body limit, and Huma-generated 413 responses use `payload_too_large`. (`huma-body-limit-default`, behavior, [#499](https://github.com/gombit-dev/gombit/issues/499))
+
+  Huma applies its default 1MiB limit to typed operations before the
+  framework adapter sees them, so the framework raises it to 8MiB.
+  An explicitly configured 1MiB limit is indistinguishable from that
+  default and is raised as well; other explicit limits remain. Huma
+  applies this per-operation limit to non-multipart body types.
+
 ## v0.10.0
 
 ### Manual: action required

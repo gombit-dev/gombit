@@ -303,10 +303,21 @@ which a column name can hold). Auth registration uses the same helper
 and still returns `conflict` for a taken email. Do not map every `First()`
 error to 404 or every `Create()` error to 500.
 
-Gin middleware may also emit D10 errors that are not §41 categories.
+Gin middleware and Huma may also emit D10 errors that are not §41 categories.
 `contract.PayloadTooLarge` (`error.code` `payload_too_large`, HTTP 413) comes
-from the `request_body_limit` layer, which rejects a JSON POST/PUT/PATCH body
-over 8MiB (see [`docs/router.md`](router.md)). The opt-in XSS sanitizer
+from the `request_body_limit` layer for JSON POST/PUT/PATCH bodies over 8MiB
+(see [`docs/router.md`](router.md)), and from Huma when a typed operation's
+`MaxBodyBytes` is exceeded. In `framework.New`, Huma's default per-operation
+limit is raised from 1MiB to the same 8MiB cap. Huma applies that limit to
+non-multipart typed bodies regardless of content type; the Gin middleware's
+8MiB limit remains JSON-only.
+
+Huma v2.40 normalizes an unset `MaxBodyBytes` and an explicitly configured
+`1 << 20` to the same value before Gombit's adapter can inspect it. Therefore
+an explicit 1MiB limit is raised to 8MiB like the default; other explicit
+values are preserved. Choose a different value to configure a per-operation
+limit (for example, `1<<20 - 1` for just under 1MiB). Multipart operations
+remain unlimited by Huma unless a limit is set explicitly. The opt-in XSS sanitizer
 (`GOMBIT_SECURITY_SANITIZE_INPUT=true`) runs after that layer with the same
 cap, so it never produces its own 413; cookie CSRF uses `Authorization` (403). An unsupported method on a known
 route yields `contract.MethodNotAllowed` (`error.code` `method_not_allowed`,

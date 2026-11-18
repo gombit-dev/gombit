@@ -11,8 +11,9 @@ const humaDefaultBodyBytes int64 = 1024 * 1024
 // to maxBytes. Huma applies its 1 MiB default when an operation is registered;
 // this wrapper rewrites that default at registration time, so every typed
 // operation (generated resources, contract routes, admin, auth) shares the
-// framework's JSON cap. An operation that sets its own MaxBodyBytes to a value
-// other than Huma's 1 MiB default keeps it.
+// framework's cap. Huma applies the same 1 MiB value to an unset limit and an
+// explicitly configured 1 MiB limit before this wrapper sees the operation, so
+// both are raised. Other explicit MaxBodyBytes values are kept.
 func WithBodyLimit(api huma.API, maxBytes int64) huma.API {
 	return bodyLimitAPI{API: api, maxBytes: maxBytes}
 }
@@ -20,6 +21,15 @@ func WithBodyLimit(api huma.API, maxBytes int64) huma.API {
 type bodyLimitAPI struct {
 	huma.API
 	maxBytes int64
+}
+
+// Config forwards Huma's optional configuration provider through the wrapper.
+// Huma uses it for API configuration lookups during request handling.
+func (a bodyLimitAPI) Config() huma.Config {
+	if provider, ok := a.API.(interface{ Config() huma.Config }); ok {
+		return provider.Config()
+	}
+	return huma.Config{}
 }
 
 func (a bodyLimitAPI) Adapter() huma.Adapter {
