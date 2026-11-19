@@ -382,3 +382,179 @@ func TestRequestBodyLimitIgnoresNonJSON(t *testing.T) {
 		t.Fatalf("status = %d, want 200 (non-JSON body is not size-gated); body: %s", rec.Code, rec.Body.String())
 	}
 }
+
+// TestRequestBodyLimitAllowsTwoMiBJSONOnHumaRoute is the regression guard for
+// #499: Huma's per-operation default (1 MiB) must not undercut the documented
+// 8 MiB JSON cap on Huma-registered routes. A 2 MiB JSON body is within the
+// cap and must reach the Huma handler.
+func TestRequestBodyLimitAllowsTwoMiBJSONOnHumaRoute(t *testing.T) {
+	app := newTestApp(t)
+
+	type createBody struct {
+		X string `json:"x"`
+	}
+	type createInput struct {
+		Body createBody
+	}
+	type createOutput struct {
+		Body contract.Data[createBody]
+	}
+	handlerRan := false
+	prefix := app.Config().API.Prefix
+	huma.Register(app.API(), huma.Operation{
+		OperationID: "create-big-thing",
+		Method:      http.MethodPost,
+		Path:        prefix + "/big-things",
+		Summary:     "Create a big thing",
+	}, func(_ context.Context, input *createInput) (*createOutput, error) {
+		handlerRan = true
+		return &createOutput{Body: contract.Data[createBody]{Data: input.Body}}, nil
+	})
+
+	twoMiB := `{"x":"` + strings.Repeat("a", 2<<20) + `"}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, prefix+"/big-things", strings.NewReader(twoMiB))
+	req.Header.Set("Content-Type", "application/json")
+	app.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for a 2 MiB body under the 8 MiB cap; body: %s", rec.Code, rec.Body.String())
+	}
+	if !handlerRan {
+		t.Fatal("Huma handler did not run for a body under the cap")
+	}
+}
+
+// TestRequestBodyLimitRaisesExplicitOneMiBOnHumaRoute documents the Huma v2.40
+// adapter boundary: Huma normalizes both an unset limit and an explicit 1 MiB
+// limit to the same operation value before the framework wrapper sees it.
+func TestRequestBodyLimitRaisesExplicitOneMiBOnHumaRoute(t *testing.T) {
+	app := newTestApp(t)
+
+	type createBody struct {
+		X string `json:"x"`
+	}
+	type createInput struct {
+		Body createBody
+	}
+	type createOutput struct {
+		Body contract.Data[createBody]
+	}
+	handlerRan := false
+	prefix := app.Config().API.Prefix
+	huma.Register(app.API(), huma.Operation{
+		OperationID:  "create-one-mib",
+		Method:       http.MethodPost,
+		Path:         prefix + "/one-mib",
+		MaxBodyBytes: 1 << 20,
+		Summary:      "Create with an explicit one MiB limit",
+	}, func(_ context.Context, input *createInput) (*createOutput, error) {
+		handlerRan = true
+		return &createOutput{Body: contract.Data[createBody]{Data: input.Body}}, nil
+	})
+
+	twoMiB := `{"x":"` + strings.Repeat("a", 2<<20) + `"}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, prefix+"/one-mib", strings.NewReader(twoMiB))
+	req.Header.Set("Content-Type", "application/json")
+	app.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 because Huma's normalized 1 MiB limit is raised to 8 MiB; body: %s", rec.Code, rec.Body.String())
+	}
+	if !handlerRan {
+		t.Fatal("Huma handler did not run for a body under the framework cap")
+	}
+}
+
+func TestRequestBodyLimitMapsHumaOperation413ToPayloadTooLarge(t *testing.T) {
+	app := newTestApp(t)
+
+	type createBody struct {
+		X string `json:"x"`
+	}
+	type createInput struct {
+		Body createBody
+	}
+	type createOutput struct {
+		Body contract.Data[createBody]
+	}
+	handlerRan := false
+	prefix := app.Config().API.Prefix
+	huma.Register(app.API(), huma.Operation{
+		OperationID:  "create-three-mib",
+		Method:       http.MethodPost,
+		Path:         prefix + "/three-mib",
+		MaxBodyBytes: 3 << 20,
+		Summary:      "Create with a three MiB operation limit",
+	}, func(_ context.Context, input *createInput) (*createOutput, error) {
+		handlerRan = true
+		return &createOutput{Body: contract.Data[createBody]{Data: input.Body}}, nil
+	})
+
+	fourMiB := `{"x":"` + strings.Repeat("a", 4<<20) + `"}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, prefix+"/three-mib", strings.NewReader(fourMiB))
+	req.Header.Set("Content-Type", "application/json")
+	app.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413 for the operation's three MiB limit; body: %s", rec.Code, rec.Body.String())
+	}
+	if handlerRan {
+		t.Fatal("Huma handler ran for a body over its operation limit")
+	}
+	var env contract.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode error envelope: %v; body: %s", err, rec.Body.String())
+	}
+	if env.Body.Code != contract.CodePayloadTooLarge {
+		t.Fatalf("code = %q, want %q; body: %s", env.Body.Code, contract.CodePayloadTooLarge, rec.Body.String())
+	}
+}
+
+func TestRequestBodyLimitLeavesHumaMultipartWithoutDefault(t *testing.T) {
+	app := newTestApp(t)
+
+	type uploadInput struct {
+		RawBody huma.MultipartFormFiles[struct {
+			File huma.FormFile `form:"file"`
+		}]
+	}
+	type uploadOutput struct {
+		Body contract.Data[map[string]int]
+	}
+	var gotFileBytes int
+	prefix := app.Config().API.Prefix
+	huma.Register(app.API(), huma.Operation{
+		OperationID: "upload-large-multipart",
+		Method:      http.MethodPost,
+		Path:        prefix + "/large-upload",
+		Summary:     "Accept a multipart body over the JSON cap",
+	}, func(_ context.Context, input *uploadInput) (*uploadOutput, error) {
+		content, err := io.ReadAll(input.RawBody.Data().File)
+		if err != nil {
+			return nil, err
+		}
+		gotFileBytes = len(content)
+		return &uploadOutput{Body: contract.Data[map[string]int]{Data: map[string]int{"bytes": gotFileBytes}}}, nil
+	})
+
+	const boundary = "gombit-body-limit"
+	content := strings.Repeat("x", int(maxRequestBodyBytes)+1)
+	body := "--" + boundary + "\r\n" +
+		"Content-Disposition: form-data; name=\"file\"; filename=\"large.bin\"\r\n" +
+		"Content-Type: application/octet-stream\r\n\r\n" + content + "\r\n" +
+		"--" + boundary + "--\r\n"
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, prefix+"/large-upload", strings.NewReader(body))
+	req.Header.Set("Content-Type", "multipart/form-data; boundary="+boundary)
+	app.Router().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for multipart over the JSON cap; body: %s", rec.Code, rec.Body.String())
+	}
+	if gotFileBytes != len(content) {
+		t.Fatalf("handler read %d file bytes, want %d", gotFileBytes, len(content))
+	}
+}

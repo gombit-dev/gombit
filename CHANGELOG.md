@@ -12,6 +12,10 @@ version.
 
 ### Fixed
 
+- Huma-registered routes now use the framework's 8MiB default body limit
+  instead of Huma's 1MiB default, and Huma-generated 413 responses use
+  `payload_too_large` ([#499](https://github.com/gombit-dev/gombit/issues/499)).
+
 - `gombit generate` (and `--check`, and `gombit upgrade contract`)
   regenerates a resource whose model lost, renamed or retyped a field, whose
   `*.gen.go` were deleted or left with merge-conflict markers, or whose

@@ -12,6 +12,14 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 ### Informational
 
+- Huma-registered routes use the framework's 8MiB default body limit, and Huma-generated 413 responses use `payload_too_large`. (`huma-body-limit-default`, behavior, [#499](https://github.com/gombit-dev/gombit/issues/499))
+
+  Huma applies its default 1MiB limit to typed operations before the
+  framework adapter sees them, so the framework raises it to 8MiB.
+  An explicitly configured 1MiB limit is indistinguishable from that
+  default and is raised as well; other explicit limits remain. Huma
+  applies this per-operation limit to non-multipart body types.
+
 - `gombit generate` regenerates a resource whose model lost, renamed or retyped a field, whose `*.gen.go` were deleted or conflicted, or whose `*.gen.go` call a framework API an upgrade changed, instead of failing with a Go compile error from the stale generated files. (`generate-after-field-removal`, cli, [#467](https://github.com/gombit-dev/gombit/issues/467))
 
   The loader compiles each resource package, and after a field was

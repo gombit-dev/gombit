@@ -193,6 +193,17 @@ Other behavior notes (they describe the opt-in layer):
   connection read deadline are the brakes on a slow or never-ending JSON
   body (#137).
 
+Huma-registered routes also have Huma's per-operation `MaxBodyBytes` limit.
+`framework.New` raises Huma's default from 1MiB to 8MiB so typed routes share
+the framework cap. Huma applies this per-operation limit to non-multipart
+bodies of any content type; the Gin middleware above remains JSON-only. A
+Huma-generated 413 uses the same `payload_too_large` envelope. Because Huma
+normalizes an unset limit and an explicit `1 << 20` to the same value before
+Gombit's adapter sees it, that exact explicit value is raised too. Other
+explicit limits are preserved; use a different value (for example,
+`1<<20 - 1` for just under 1MiB) to configure one. Multipart operations remain
+unlimited by Huma unless a limit is set explicitly.
+
 Canonical design order (draft §13.3) also includes CORS, rate limiting, and
 auth context; those remain deferred. The request body size limit above is the
 fixed 8MiB default cap — a first-class, per-route configurable body-size
