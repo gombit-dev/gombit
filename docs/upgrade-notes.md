@@ -43,6 +43,34 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   `npm` where it ran `pnpm`. An app with a `pnpm-lock.yaml` still runs
   `pnpm`.
 
+- `gombit generate` regenerates a resource whose model lost, renamed or retyped a field, whose `*.gen.go` were deleted or conflicted, or whose `*.gen.go` call a framework API an upgrade changed, instead of failing with a Go compile error from the stale generated files. (`generate-after-field-removal`, cli, [#467](https://github.com/gombit-dev/gombit/issues/467))
+
+  The loader compiles each resource package, and after a field was
+  removed, renamed or retyped the committed `*.gen.go` (or, once those
+  were deleted, a `hooks.go` using their types) no longer built against
+  the model: `gombit generate`, `--check` and `gombit upgrade contract`
+  failed with a compile error, and `--check` reported no drift. The
+  same held after an upgrade changed a framework API the old
+  `*.gen.go` call: v0.8.0's `database-search-takes-context` note says
+  to run `gombit generate`, which could not run. When the package
+  does not build as it is, the loader now runs once more with the
+  files declaring the model and the hand-written files declaring a
+  name it uses (an enum type of the package) only, the rest stubbed (a
+  file that does not parse, such as a `*.gen.go` with merge-conflict
+  markers, included), and prints a notice that the package did not
+  build. A model needing more than that still needs the package to
+  build. Nothing to change; a `hooks.go` that uses a removed field
+  must be updated by hand after regenerating, as before (run `go
+  build`).
+
+- On Windows, `storage/local` reports an object a concurrent `Delete` is removing as `storage.ErrNotFound` from `Open` and `Stat`, not as an "Access is denied" error. (`local-storage-windows-file-deleted-not-found`, behavior, [#639](https://github.com/gombit-dev/gombit/issues/639))
+
+  An open racing a POSIX-semantics delete of the same file can fail
+  with `ERROR_ACCESS_DENIED` and NTSTATUS `STATUS_FILE_DELETED`; the
+  driver mapped only `STATUS_DELETE_PENDING` to not-found, so a read
+  racing a delete could fail with a permission error. Nothing to
+  change.
+
 ## v0.9.0
 
 ### Manual: action required
