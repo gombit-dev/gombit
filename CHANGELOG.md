@@ -10,6 +10,24 @@ version.
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking (schema):** a session's id is stable for its whole life
+  (`refresh_tokens.session_id`, `auth.RefreshToken.SessionID`): drawn at
+  login and carried to every rotation, it is the id `GET
+  {prefix}/auth/sessions` lists, so `DELETE {prefix}/auth/sessions/{id}`
+  with an id listed before a refresh ends the session instead of answering
+  404. Every login and refresh writes the new column: migrate before
+  deploying (`gombit db makemigrations`, `gombit db migrate`). Existing rows
+  need no backfill: a session from before the upgrade keeps its listed id
+  until its next refresh, which gives it its stable id. A logout, and the
+  signing out of other sessions a password change or MFA enrollment does,
+  find the session's current token by that id in one read, so a logout with
+  a token any number of rotations behind ends its session; the
+  1000-rotation limit (a 500) applies only to tokens from before the
+  upgrade. The audit trail's `session` targets name the stable id
+  ([#661](https://github.com/gombit-dev/gombit/issues/661)).
+
 ### Fixed
 
 - `gombit generate` (and `--check`, and `gombit upgrade contract`)

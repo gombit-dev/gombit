@@ -10,7 +10,39 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 ## Unreleased
 
+### Manual: action required
+
+- **Breaking.** Stable session ids add `refresh_tokens.session_id`, which every login and refresh writes: an app migrates before it runs this release. (`session-id-schema`, schema, [#661](https://github.com/gombit-dev/gombit/issues/661))
+
+  - Framework schema: `auth.RefreshToken` (`refresh_tokens`): altered.
+
+  `auth.RefreshToken` gains `SessionID` (indexed). Until the column
+  exists, every login and every token refresh fails (the insert names
+  every column of the model). Generate and apply the migration
+  (`gombit db makemigrations`, `gombit db migrate`) before deploying;
+  `gombit upgrade --dry-run` lists the steps. Existing rows keep a
+  NULL `session_id`: such a session keeps the id it was listed under
+  until its next refresh, which gives it its stable id (its id
+  changes that once), and nothing has to be backfilled.
+
 ### Informational
+
+- A session's id in `GET {prefix}/auth/sessions` stays the same for the session's whole life, so `DELETE {prefix}/auth/sessions/{id}` with an id listed before a refresh ends the session instead of answering 404. (`stable-session-ids`, api, [#661](https://github.com/gombit-dev/gombit/issues/661))
+
+  The id was derived from the session's current refresh token row and
+  changed on every refresh; it is now drawn at login and carried to
+  every rotation (32 lowercase hex characters, as before). A client
+  that listed again after a 404 keeps working. The audit trail's
+  `session` targets (logout, refresh reuse within grace) name the same
+  stable id, so one session's events share it.
+
+- A logout with a token any number of rotations behind its session's current one ends the session; the 1000-rotation limit (a 500) applies only to tokens from before the upgrade. (`logout-follows-session-id`, behavior, [#661](https://github.com/gombit-dev/gombit/issues/661))
+
+  The logout, and the signing out of other sessions that a password
+  change or MFA enrollment does, find the session's current token by
+  its id in one read instead of following the rotation chain one row
+  at a time. Tokens issued before the upgrade are still followed
+  along their chain, which ends with their expiry.
 
 - `gombit generate` regenerates a resource whose model lost, renamed or retyped a field, whose `*.gen.go` were deleted or conflicted, or whose `*.gen.go` call a framework API an upgrade changed, instead of failing with a Go compile error from the stale generated files. (`generate-after-field-removal`, cli, [#467](https://github.com/gombit-dev/gombit/issues/467))
 

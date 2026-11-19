@@ -107,6 +107,18 @@ func (e sessionsEnv) rotate(t *testing.T, pair auth.TokenPair) auth.TokenPair {
 	return next
 }
 
+// opaque is the shape of a session id the API lists.
+var opaque = regexp.MustCompile(`^[0-9a-f]{32}$`)
+
+// preUpgrade makes every refresh token row of the user one written before
+// refresh_tokens had session_id (AUTH-11): the column NULL.
+func preUpgrade(t *testing.T, db *database.DB, userID uint) {
+	t.Helper()
+	if err := db.Model(&auth.RefreshToken{}).Where("user_id = ?", userID).Update("session_id", gorm.Expr("NULL")).Error; err != nil {
+		t.Fatal(err)
+	}
+}
+
 // revokedAt returns when the refresh token row id was revoked, failing t
 // unless it was.
 func revokedAt(t *testing.T, db *database.DB, id uint) time.Time {
@@ -144,7 +156,6 @@ func runSessionsService(t *testing.T, db *database.DB) {
 		if len(sessions) != 2 {
 			t.Fatalf("ListSessions(ada) = %d sessions, want 2 (grace's must not be listed)", len(sessions))
 		}
-		opaque := regexp.MustCompile(`^[0-9a-f]{32}$`)
 		listed := map[string]bool{}
 		for _, s := range sessions {
 			if !opaque.MatchString(s.ID) {
@@ -169,24 +180,59 @@ func runSessionsService(t *testing.T, db *database.DB) {
 		if listed[e.sessionID(t, g[0])] {
 			t.Error("another user's session is listed")
 		}
-		stale := e.sessionID(t, a[0])
-		rotated := e.rotate(t, a[0])
+		// The id is the session's for good: a refresh, any number of them,
+		// leaves it (AUTH-11), and the refreshed session lists first.
+		before := e.sessionID(t, a[0])
+		rotated := e.rotate(t, e.rotate(t, a[0]))
 		sessions, err = e.svc.ListSessions(e.ctx, ada.ID)
 		if err != nil || len(sessions) != 2 {
 			t.Fatalf("after a rotation ListSessions = %d sessions, %v; want 2", len(sessions), err)
 		}
-		if got := e.sessionID(t, rotated); got == stale || sessions[0].ID != got {
-			t.Fatalf("after a rotation the session id is %q (was %q) and the first listed is %q; want a new id, listed first", got, stale, sessions[0].ID)
+		if got := e.sessionID(t, rotated); got != before || sessions[0].ID != got {
+			t.Fatalf("after two rotations the session id is %q (was %q) and the first listed is %q; want the same id, listed first", got, before, sessions[0].ID)
 		}
 	})
 
-	// The id is the session's row id under an HMAC of the JWT secret, in a
-	// domain of its own, so that no other MAC made with that secret (a CSRF
-	// signature, say) can be mistaken for it. The domain is written out here,
-	// not taken from the package, so changing it fails this test too.
-	t.Run("session id derivation", func(t *testing.T) {
+	// The id is the session's SessionID, drawn at login: random, so two
+	// sessions of one user differ, and stored on each of its rows.
+	t.Run("session id is the session's SessionID", func(t *testing.T) {
+		e := newEnv(t)
+		ada, a := e.user(t, "ada", 2)
+		var rows []auth.RefreshToken
+		if err := db.Where("user_id = ?", ada.ID).Order("id").Find(&rows).Error; err != nil || len(rows) != 2 {
+			t.Fatalf("rows = %v, %v; want the two logins'", rows, err)
+		}
+		for i, row := range rows {
+			if got := e.sessionID(t, a[i]); got != row.SessionID || !opaque.MatchString(got) {
+				t.Fatalf("session %d id = %q, want its row's SessionID %q, 32 lowercase hex", i, got, row.SessionID)
+			}
+		}
+		if rows[0].SessionID == rows[1].SessionID {
+			t.Fatalf("two logins share the SessionID %q", rows[0].SessionID)
+		}
+		next := e.rotate(t, a[0])
+		successorID, err := auth.AuthenticatedRow(e.ctx, e.svc, next.AccessToken)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var successor auth.RefreshToken
+		if err := db.First(&successor, successorID).Error; err != nil {
+			t.Fatal(err)
+		}
+		if successor.SessionID != rows[0].SessionID {
+			t.Fatalf("the successor's SessionID = %q, want the rotated row's %q", successor.SessionID, rows[0].SessionID)
+		}
+	})
+
+	// A session whose rows predate session_id is identified as it was then:
+	// its head's row id under an HMAC of the JWT secret, in a domain of its
+	// own, so that no other MAC made with that secret (a CSRF signature, say)
+	// can be mistaken for it. The domain is written out here, not taken from
+	// the package, so changing it fails this test too.
+	t.Run("pre-upgrade session id derivation", func(t *testing.T) {
 		e := newEnv(t)
 		ada, _ := e.user(t, "ada", 1)
+		preUpgrade(t, db, ada.ID)
 		var row auth.RefreshToken
 		if err := db.Where("user_id = ?", ada.ID).First(&row).Error; err != nil {
 			t.Fatal(err)
@@ -258,11 +304,6 @@ func runSessionsService(t *testing.T, db *database.DB) {
 			{"another user's session", func(t *testing.T, e sessionsEnv, _ []auth.TokenPair, g auth.TokenPair) string {
 				return e.sessionID(t, g)
 			}, auth.ErrSessionNotFound, true},
-			{"id listed before the session refreshed", func(t *testing.T, e sessionsEnv, a []auth.TokenPair, _ auth.TokenPair) string {
-				stale := e.sessionID(t, a[1])
-				e.rotate(t, a[1])
-				return stale
-			}, auth.ErrSessionNotFound, true},
 		}
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
@@ -281,6 +322,56 @@ func runSessionsService(t *testing.T, db *database.DB) {
 				}
 			})
 		}
+		// An id listed before the session refreshed still names it, however
+		// many refreshes later (AUTH-11).
+		t.Run("id listed before the session refreshed", func(t *testing.T) {
+			e := newEnv(t)
+			ada, a := e.user(t, "ada", 2)
+			listed := e.sessionID(t, a[1])
+			head := a[1]
+			for range 3 {
+				head = e.rotate(t, head)
+			}
+			if err := e.svc.RevokeSession(e.ctx, ada.ID, listed); err != nil {
+				t.Fatalf("RevokeSession(id listed before three refreshes) = %v", err)
+			}
+			if e.authenticates(head) {
+				t.Fatal("the session still authenticates")
+			}
+			if _, err := e.svc.RotateRefresh(e.ctx, head.RefreshToken); err == nil {
+				t.Fatal("the session still refreshes")
+			}
+			if !e.authenticates(a[0]) {
+				t.Fatal("the revocation ended the user's other session")
+			}
+		})
+		// A session from before session_id keeps the id it was listed under
+		// until its next refresh, which gives it its SessionID: the one time
+		// its id changes. The new id then lasts.
+		t.Run("pre-upgrade session", func(t *testing.T) {
+			e := newEnv(t)
+			ada, a := e.user(t, "ada", 2)
+			preUpgrade(t, db, ada.ID)
+			legacy := e.sessionID(t, a[1])
+			next := e.rotate(t, a[1])
+			stable := e.sessionID(t, next)
+			if stable == legacy || !opaque.MatchString(stable) {
+				t.Fatalf("after its first refresh the session's id = %q (was %q); want its new SessionID", stable, legacy)
+			}
+			if err := e.svc.RevokeSession(e.ctx, ada.ID, legacy); !errors.Is(err, auth.ErrSessionNotFound) {
+				t.Fatalf("RevokeSession(the pre-upgrade id, after the refresh) = %v, want ErrSessionNotFound", err)
+			}
+			head := e.rotate(t, next)
+			if got := e.sessionID(t, head); got != stable {
+				t.Fatalf("after a second refresh the id = %q, want %q", got, stable)
+			}
+			if err := e.svc.RevokeSession(e.ctx, ada.ID, stable); err != nil || e.authenticates(head) {
+				t.Fatalf("RevokeSession(the new id) = %v, session authenticates = %v; want nil, false", err, e.authenticates(head))
+			}
+			if !e.authenticates(a[0]) {
+				t.Fatal("the revocation ended the user's other session")
+			}
+		})
 		t.Run("a user that does not exist", func(t *testing.T) {
 			e := newEnv(t)
 			if err := e.svc.RevokeSession(e.ctx, 987654321, "00000000000000000000000000000000"); !errors.Is(err, auth.ErrSessionNotFound) {
@@ -626,17 +717,87 @@ func runSessionsService(t *testing.T, db *database.DB) {
 				t.Fatalf("logout event = %+v, want the session %s, no via", ev, session)
 			}
 		})
-		// A successor that is gone (replaced_by has no foreign key: a manual
-		// delete, a partial restore) is a chain that cannot be followed: the
-		// logout fails rather than succeed having ended nothing.
-		t.Run("successor gone", func(t *testing.T) {
+		// The session's SessionID finds its head in one read, however many
+		// rotations on: past the bound a walk along replaced_by had (#466),
+		// a logout still ends the session (AUTH-11).
+		t.Run("far behind the head", func(t *testing.T) {
+			const bound = 3
+			defer auth.SetMaxChainHops(bound)()
 			e := newEnv(t)
-			_, pairs := e.user(t, "logoutdangling", 1)
+			_, pairs := e.user(t, "logoutfar", 2)
+			head := pairs[0]
+			for range bound * 3 {
+				head = e.rotate(t, head)
+			}
+			if err := e.svc.RevokeRefresh(e.ctx, pairs[0].RefreshToken); err != nil {
+				t.Fatalf("RevokeRefresh(a token %d rotations behind) = %v", bound*3, err)
+			}
+			if e.authenticates(head) {
+				t.Fatal("the session still authenticates after the logout")
+			}
+			if !e.authenticates(pairs[1]) {
+				t.Fatal("the logout ended the user's other session")
+			}
+		})
+		// The head is the session's unreplaced row: a successor link that is
+		// gone (replaced_by has no foreign key) does not hide it.
+		t.Run("successor link gone", func(t *testing.T) {
+			e := newEnv(t)
+			_, pairs := e.user(t, "logoutdanglingkeyed", 1)
 			id, err := auth.AuthenticatedRow(e.ctx, e.svc, pairs[0].AccessToken)
 			if err != nil {
 				t.Fatal(err)
 			}
 			next := e.rotate(t, pairs[0])
+			if err := db.Model(&auth.RefreshToken{}).Where("id = ?", id).Update("replaced_by", 1<<30).Error; err != nil {
+				t.Fatal(err)
+			}
+			if err := e.svc.RevokeRefresh(e.ctx, pairs[0].RefreshToken); err != nil || e.authenticates(next) {
+				t.Fatalf("RevokeRefresh = %v, session authenticates = %v; want nil, false", err, e.authenticates(next))
+			}
+		})
+		// A session whose rows are all replaced has no head to end (a
+		// restore that lost it): the logout fails rather than succeed
+		// having ended nothing.
+		t.Run("head gone", func(t *testing.T) {
+			e := newEnv(t)
+			ada, pairs := e.user(t, "logoutnohead", 1)
+			e.rotate(t, pairs[0])
+			if err := db.Model(&auth.RefreshToken{}).Where("user_id = ? AND replaced_by IS NULL", ada.ID).Update("replaced_by", 1<<30).Error; err != nil {
+				t.Fatal(err)
+			}
+			if err := e.svc.RevokeRefresh(e.ctx, pairs[0].RefreshToken); !errors.Is(err, auth.ErrChainUnresolved) {
+				t.Fatalf("RevokeRefresh(session with no head) = %v, want ErrChainUnresolved", err)
+			}
+		})
+		// A pre-upgrade token whose session rotated since the upgrade: the
+		// walk from it reaches the rows with a SessionID, then their head.
+		t.Run("pre-upgrade token, rotated since", func(t *testing.T) {
+			e := newEnv(t)
+			ada, pairs := e.user(t, "logoutmixed", 1)
+			old := e.rotate(t, pairs[0])
+			preUpgrade(t, db, ada.ID)
+			head := old
+			for range 3 {
+				head = e.rotate(t, head)
+			}
+			if err := e.svc.RevokeRefresh(e.ctx, pairs[0].RefreshToken); err != nil || e.authenticates(head) {
+				t.Fatalf("RevokeRefresh(pre-upgrade token) = %v, session authenticates = %v; want nil, false", err, e.authenticates(head))
+			}
+		})
+		// Along a pre-upgrade chain, a successor that is gone (replaced_by
+		// has no foreign key: a manual delete, a partial restore) is a chain
+		// that cannot be followed: the logout fails rather than succeed
+		// having ended nothing.
+		t.Run("pre-upgrade successor gone", func(t *testing.T) {
+			e := newEnv(t)
+			ada, pairs := e.user(t, "logoutdangling", 1)
+			id, err := auth.AuthenticatedRow(e.ctx, e.svc, pairs[0].AccessToken)
+			if err != nil {
+				t.Fatal(err)
+			}
+			next := e.rotate(t, pairs[0])
+			preUpgrade(t, db, ada.ID)
 			if err := db.Model(&auth.RefreshToken{}).Where("id = ?", id).Update("replaced_by", 1<<30).Error; err != nil {
 				t.Fatal(err)
 			}
@@ -647,20 +808,22 @@ func runSessionsService(t *testing.T, db *database.DB) {
 				t.Fatal("the failed logout ended the session")
 			}
 		})
-		// A walk reads at most maxChainHops rows: from a token one rotation
-		// short of the bound it reaches the head and ends the session; from
-		// one at the bound it cannot, and the logout fails, ending nothing,
-		// rather than succeed with the session alive.
-		t.Run("chain at the walk's bound", func(t *testing.T) {
+		// A walk along a pre-upgrade chain reads at most maxChainHops rows:
+		// from a token one rotation short of the bound it reaches the head
+		// and ends the session; from one at the bound it cannot, and the
+		// logout fails, ending nothing, rather than succeed with the session
+		// alive.
+		t.Run("pre-upgrade chain at the walk's bound", func(t *testing.T) {
 			const bound = 5
 			defer auth.SetMaxChainHops(bound)()
 			for rotations, reaches := range map[int]bool{bound - 1: true, bound: false} {
 				e := newEnv(t)
-				_, pairs := e.user(t, fmt.Sprintf("logoutbound%d", rotations), 1)
+				ada, pairs := e.user(t, fmt.Sprintf("logoutbound%d", rotations), 1)
 				head := pairs[0]
 				for range rotations {
 					head = e.rotate(t, head)
 				}
+				preUpgrade(t, db, ada.ID)
 				err := e.svc.RevokeRefresh(e.ctx, pairs[0].RefreshToken)
 				if reaches {
 					if err != nil || e.authenticates(head) {

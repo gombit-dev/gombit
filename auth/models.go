@@ -65,7 +65,9 @@ type Permission struct {
 	UpdatedAt   time.Time
 }
 
-// RefreshToken is a hashed, rotating refresh credential.
+// RefreshToken is a hashed, rotating refresh credential. A login writes the
+// first row of a session; each rotation revokes the row and writes its
+// successor (ReplacedBy), with the same SessionID.
 type RefreshToken struct {
 	ID         uint       `gorm:"primaryKey"`
 	UserID     uint       `gorm:"index;not null"`
@@ -73,7 +75,13 @@ type RefreshToken struct {
 	ExpiresAt  time.Time  `gorm:"index;not null"`
 	RevokedAt  *time.Time `gorm:"index"`
 	ReplacedBy *uint
-	CreatedAt  time.Time
+	// SessionID is the session's identifier: random, set by the login and
+	// carried to every rotation's successor, and the id the sessions API
+	// shows (AUTH-11). Rows written before the column existed have none; a
+	// session of such rows is identified by its head's row id
+	// (Service.sessionIDOf), and its next rotation gives it a SessionID.
+	SessionID string `gorm:"size:32;index"`
+	CreatedAt time.Time
 }
 
 // TokenPurpose is what a OneTimeToken is for.
