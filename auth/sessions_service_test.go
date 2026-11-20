@@ -119,6 +119,55 @@ func preUpgrade(t *testing.T, db *database.DB, userID uint) {
 	}
 }
 
+// rotateAsOlderBinary rotates pair as a binary from before session_id
+// would on the migrated schema (an old instance of a rolling deploy, or a
+// rollback that kept the column): the successor's session_id NULL.
+func rotateAsOlderBinary(t *testing.T, e sessionsEnv, db *database.DB, pair auth.TokenPair) auth.TokenPair {
+	t.Helper()
+	next := e.rotate(t, pair)
+	id, err := auth.AuthenticatedRow(e.ctx, e.svc, next.AccessToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&auth.RefreshToken{}).Where("id = ?", id).Update("session_id", gorm.Expr("NULL")).Error; err != nil {
+		t.Fatal(err)
+	}
+	return next
+}
+
+// sessionShapes are the ways a session's chain can have been written, each
+// a function rotating head n times: by this binary throughout; from a login
+// before session_id existed, rotated since; and with a rotation by an older
+// binary after the session got its SessionID (so none of the rows with that
+// SessionID is the head), then by this binary again.
+func sessionShapes(db *database.DB) map[string]func(t *testing.T, e sessionsEnv, userID uint, head auth.TokenPair, n int) auth.TokenPair {
+	return map[string]func(t *testing.T, e sessionsEnv, userID uint, head auth.TokenPair, n int) auth.TokenPair{
+		"this binary": func(t *testing.T, e sessionsEnv, _ uint, head auth.TokenPair, n int) auth.TokenPair {
+			for range n {
+				head = e.rotate(t, head)
+			}
+			return head
+		},
+		"pre-upgrade login": func(t *testing.T, e sessionsEnv, userID uint, head auth.TokenPair, n int) auth.TokenPair {
+			preUpgrade(t, db, userID)
+			for range n {
+				head = e.rotate(t, head)
+			}
+			return head
+		},
+		"older binary rotated it": func(t *testing.T, e sessionsEnv, _ uint, head auth.TokenPair, n int) auth.TokenPair {
+			for i := range n {
+				if i == 0 {
+					head = rotateAsOlderBinary(t, e, db, head)
+				} else {
+					head = e.rotate(t, head)
+				}
+			}
+			return head
+		},
+	}
+}
+
 // revokedAt returns when the refresh token row id was revoked, failing t
 // unless it was.
 func revokedAt(t *testing.T, db *database.DB, id uint) time.Time {
@@ -345,28 +394,39 @@ func runSessionsService(t *testing.T, db *database.DB) {
 				t.Fatal("the revocation ended the user's other session")
 			}
 		})
-		// A session from before session_id keeps the id it was listed under
-		// until its next refresh, which gives it its SessionID: the one time
-		// its id changes. The new id then lasts.
+		// A session from before session_id keeps the id it was listed under:
+		// its first refresh stores that id as its SessionID, and the id
+		// listed before the refreshes still ends it.
 		t.Run("pre-upgrade session", func(t *testing.T) {
 			e := newEnv(t)
 			ada, a := e.user(t, "ada", 2)
 			preUpgrade(t, db, ada.ID)
 			legacy := e.sessionID(t, a[1])
-			next := e.rotate(t, a[1])
-			stable := e.sessionID(t, next)
-			if stable == legacy || !opaque.MatchString(stable) {
-				t.Fatalf("after its first refresh the session's id = %q (was %q); want its new SessionID", stable, legacy)
+			head := e.rotate(t, e.rotate(t, a[1]))
+			if got := e.sessionID(t, head); got != legacy {
+				t.Fatalf("after two refreshes the session's id = %q, want the id it was listed under, %q", got, legacy)
 			}
-			if err := e.svc.RevokeSession(e.ctx, ada.ID, legacy); !errors.Is(err, auth.ErrSessionNotFound) {
-				t.Fatalf("RevokeSession(the pre-upgrade id, after the refresh) = %v, want ErrSessionNotFound", err)
+			if err := e.svc.RevokeSession(e.ctx, ada.ID, legacy); err != nil || e.authenticates(head) {
+				t.Fatalf("RevokeSession(the pre-upgrade id, after the refreshes) = %v, session authenticates = %v; want nil, false", err, e.authenticates(head))
 			}
-			head := e.rotate(t, next)
-			if got := e.sessionID(t, head); got != stable {
-				t.Fatalf("after a second refresh the id = %q, want %q", got, stable)
+			if !e.authenticates(a[0]) {
+				t.Fatal("the revocation ended the user's other session")
 			}
-			if err := e.svc.RevokeSession(e.ctx, ada.ID, stable); err != nil || e.authenticates(head) {
-				t.Fatalf("RevokeSession(the new id) = %v, session authenticates = %v; want nil, false", err, e.authenticates(head))
+		})
+		// A refresh by an older binary writes a row without a SessionID: the
+		// session is listed under that row's HMAC id from then on, which the
+		// next refreshes keep, and that id ends it.
+		t.Run("rotated by an older binary", func(t *testing.T) {
+			e := newEnv(t)
+			ada, a := e.user(t, "ada", 2)
+			old := rotateAsOlderBinary(t, e, db, e.rotate(t, a[1]))
+			listed := e.sessionID(t, old)
+			head := e.rotate(t, e.rotate(t, old))
+			if got := e.sessionID(t, head); got != listed {
+				t.Fatalf("after two refreshes the session's id = %q, want %q", got, listed)
+			}
+			if err := e.svc.RevokeSession(e.ctx, ada.ID, listed); err != nil || e.authenticates(head) {
+				t.Fatalf("RevokeSession = %v, session authenticates = %v; want nil, false", err, e.authenticates(head))
 			}
 			if !e.authenticates(a[0]) {
 				t.Fatal("the revocation ended the user's other session")
@@ -380,51 +440,83 @@ func runSessionsService(t *testing.T, db *database.DB) {
 		})
 	})
 
-	// The session that asks to end the others keeps its whole chain, however
-	// many times it rotated since its access token was checked. A session
-	// that had already ended keeps the instant it ended.
+	// The session that asks to end the others keeps its head, the one row
+	// of it still unrevoked, however many times it rotated since its access
+	// token was checked and however its rows were written. A session that
+	// had already ended keeps the instant it ended.
 	t.Run("revoke others", func(t *testing.T) {
-		for _, rotations := range []int{0, 1, 2, 3} {
-			t.Run(fmt.Sprintf("%d rotations after authentication", rotations), func(t *testing.T) {
+		for shapeName, shape := range sessionShapes(db) {
+			for _, rotations := range []int{0, 1, 2, 3} {
+				t.Run(fmt.Sprintf("%s, %d rotations after authentication", shapeName, rotations), func(t *testing.T) {
+					e := newEnv(t)
+					clock := &stepClock{now: time.Now()}
+					auth.SetClock(e.svc, clock)
+					ada, a := e.user(t, "ada", 3)
+					_, g := e.user(t, "grace", 1)
+					// The request authenticated as a[0] before the rotations.
+					current, err := auth.AuthenticatedRow(e.ctx, e.svc, a[0].AccessToken)
+					if err != nil {
+						t.Fatal(err)
+					}
+					// a[2] logged out before the request.
+					loggedOutRow, err := auth.AuthenticatedRow(e.ctx, e.svc, a[2].AccessToken)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := e.svc.RevokeRefresh(e.ctx, a[2].RefreshToken); err != nil {
+						t.Fatal(err)
+					}
+					loggedOut := revokedAt(t, db, loggedOutRow)
+					head := shape(t, e, ada.ID, a[0], rotations)
+					clock.now = clock.now.Add(30 * time.Second)
+					if err := auth.RevokeOtherSessionsKeeping(e.ctx, e.svc, ada.ID, current); err != nil {
+						t.Fatalf("revoke others: %v", err)
+					}
+					if !e.authenticates(head) {
+						t.Fatal("the current session's head was revoked")
+					}
+					e.rotate(t, head) // and it can still refresh
+					if e.authenticates(a[1]) {
+						t.Fatal("the other session still authenticates")
+					}
+					if !e.authenticates(g[0]) {
+						t.Fatal("another user's session was revoked")
+					}
+					if again := revokedAt(t, db, loggedOutRow); !again.Equal(loggedOut) {
+						t.Fatalf("the session that had logged out at %v now ended at %v; revoking the others must leave it as it was", loggedOut, again)
+					}
+				})
+			}
+		}
+	})
+
+	// A request authenticated as R, whose session has refreshed since, is
+	// the current session in the list, however the session's rows were
+	// written: the listed row is found from R by the session's SessionID or
+	// along its chain.
+	t.Run("current after the requester's session rotated", func(t *testing.T) {
+		for shapeName, shape := range sessionShapes(db) {
+			t.Run(shapeName, func(t *testing.T) {
 				e := newEnv(t)
-				clock := &stepClock{now: time.Now()}
-				auth.SetClock(e.svc, clock)
-				ada, a := e.user(t, "ada", 3)
-				_, g := e.user(t, "grace", 1)
-				// The request authenticated as a[0] before the rotations.
-				current, err := auth.AuthenticatedRow(e.ctx, e.svc, a[0].AccessToken)
+				ada, a := e.user(t, "ada", 2)
+				requester, err := auth.AuthenticatedRow(e.ctx, e.svc, a[0].AccessToken)
 				if err != nil {
 					t.Fatal(err)
 				}
-				// a[2] logged out before the request.
-				loggedOutRow, err := auth.AuthenticatedRow(e.ctx, e.svc, a[2].AccessToken)
-				if err != nil {
-					t.Fatal(err)
+				head := shape(t, e, ada.ID, a[0], 3)
+				ctx := auth.ContextWithSession(e.ctx, ada, requester)
+				sessions, err := e.svc.ListSessions(ctx, ada.ID)
+				if err != nil || len(sessions) != 2 {
+					t.Fatalf("ListSessions = %v, %v; want two sessions", sessions, err)
 				}
-				if err := e.svc.RevokeRefresh(e.ctx, a[2].RefreshToken); err != nil {
-					t.Fatal(err)
+				want := e.sessionID(t, head)
+				for _, s := range sessions {
+					if s.Current != (s.ID == want) {
+						t.Fatalf("session %q current = %v; want only the requester's, %q, current", s.ID, s.Current, want)
+					}
 				}
-				loggedOut := revokedAt(t, db, loggedOutRow)
-				head := a[0]
-				for i := 0; i < rotations; i++ {
-					head = e.rotate(t, head)
-				}
-				clock.now = clock.now.Add(30 * time.Second)
-				if err := auth.RevokeOtherSessionsKeeping(e.ctx, e.svc, ada.ID, current); err != nil {
-					t.Fatalf("revoke others: %v", err)
-				}
-				if !e.authenticates(head) {
-					t.Fatal("the current session's head was revoked")
-				}
-				e.rotate(t, head) // and it can still refresh
-				if e.authenticates(a[1]) {
-					t.Fatal("the other session still authenticates")
-				}
-				if !e.authenticates(g[0]) {
-					t.Fatal("another user's session was revoked")
-				}
-				if again := revokedAt(t, db, loggedOutRow); !again.Equal(loggedOut) {
-					t.Fatalf("the session that had logged out at %v now ended at %v; revoking the others must leave it as it was", loggedOut, again)
+				if ended, err := auth.RevokeSessionAs(e.ctx, e.svc, ada.ID, requester, want); err != nil || !ended {
+					t.Fatalf("revoking the requester's session on behalf of R = %v, %v; want it ended, as its own", ended, err)
 				}
 			})
 		}
@@ -447,12 +539,11 @@ func runSessionsService(t *testing.T, db *database.DB) {
 	})
 
 	// A route that revokes one session reports whether it ended the
-	// request's own: the session's current row, reached along its chain from
-	// the row the request was authenticated as, as ListSessions marks it
-	// current. A request authenticated as R, whose session has refreshed into
+	// request's own: the session's current row, found from the row the
+	// request was authenticated as, as ListSessions marks it current. A request authenticated as R, whose session has refreshed into
 	// H since, ends its own session when it revokes H, and not when it
 	// revokes another.
-	t.Run("revoke one ends the requester's session along its chain", func(t *testing.T) {
+	t.Run("revoke one ends the requester's session after it refreshed", func(t *testing.T) {
 		e := newEnv(t)
 		ada, a := e.user(t, "ada", 2)
 		requester, err := auth.AuthenticatedRow(e.ctx, e.svc, a[0].AccessToken)
@@ -768,6 +859,35 @@ func runSessionsService(t *testing.T, db *database.DB) {
 			}
 			if err := e.svc.RevokeRefresh(e.ctx, pairs[0].RefreshToken); !errors.Is(err, auth.ErrChainUnresolved) {
 				t.Fatalf("RevokeRefresh(session with no head) = %v, want ErrChainUnresolved", err)
+			}
+		})
+		// A successor written by an older binary (no SessionID) leaves none
+		// of the rows with the session's SessionID as its head: from any of
+		// its tokens the walk falls back to replaced_by past the lookup that
+		// misses, and the logout ends the session, also after this binary
+		// rotated the session again.
+		t.Run("successor written by an older binary", func(t *testing.T) {
+			for _, from := range []int{0, 1} {
+				for _, after := range []int{0, 2} {
+					t.Run(fmt.Sprintf("token %d, %d rotations after", from, after), func(t *testing.T) {
+						e := newEnv(t)
+						_, pairs := e.user(t, fmt.Sprintf("logoutolder%d%d", from, after), 2)
+						tokens := []auth.TokenPair{pairs[0], e.rotate(t, pairs[0])}
+						head := rotateAsOlderBinary(t, e, db, tokens[1])
+						for range after {
+							head = e.rotate(t, head)
+						}
+						if err := e.svc.RevokeRefresh(e.ctx, tokens[from].RefreshToken); err != nil {
+							t.Fatalf("RevokeRefresh = %v, want nil", err)
+						}
+						if e.authenticates(head) {
+							t.Fatal("the session still authenticates after the logout")
+						}
+						if !e.authenticates(pairs[1]) {
+							t.Fatal("the logout ended the user's other session")
+						}
+					})
+				}
 			}
 		})
 		// A pre-upgrade token whose session rotated since the upgrade: the

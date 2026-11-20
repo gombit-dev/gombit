@@ -21,9 +21,12 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   every column of the model). Generate and apply the migration
   (`gombit db makemigrations`, `gombit db migrate`) before deploying;
   `gombit upgrade --dry-run` lists the steps. Existing rows keep a
-  NULL `session_id`: such a session keeps the id it was listed under
-  until its next refresh, which gives it its stable id (its id
-  changes that once), and nothing has to be backfilled.
+  NULL `session_id` and nothing has to be backfilled: such a session
+  keeps the id it was listed under, which its next refresh stores.
+  A refresh by an older binary on the migrated schema (a rolling
+  deploy, a rollback that kept the column) writes a NULL
+  `session_id` too; the session is then listed under that row's id,
+  and logout still finds its current token along `replaced_by`.
 
 ### Informational
 
@@ -36,13 +39,14 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   `session` targets (logout, refresh reuse within grace) name the same
   stable id, so one session's events share it.
 
-- A logout with a token any number of rotations behind its session's current one ends the session; the 1000-rotation limit (a 500) applies only to tokens from before the upgrade. (`logout-follows-session-id`, behavior, [#661](https://github.com/gombit-dev/gombit/issues/661))
+- A logout with a token any number of rotations behind its session's current one ends the session; the 1000-rotation limit (a 500) applies only along rows written without a session id. (`logout-follows-session-id`, behavior, [#661](https://github.com/gombit-dev/gombit/issues/661))
 
   The logout, and the signing out of other sessions that a password
   change or MFA enrollment does, find the session's current token by
   its id in one read instead of following the rotation chain one row
-  at a time. Tokens issued before the upgrade are still followed
-  along their chain, which ends with their expiry.
+  at a time. Rows written without the id (before the upgrade, or by
+  an older binary during a rolling deploy) are still followed along
+  the chain, which ends with their expiry.
 
 - `gombit generate` regenerates a resource whose model lost, renamed or retyped a field, whose `*.gen.go` were deleted or conflicted, or whose `*.gen.go` call a framework API an upgrade changed, instead of failing with a Go compile error from the stale generated files. (`generate-after-field-removal`, cli, [#467](https://github.com/gombit-dev/gombit/issues/467))
 

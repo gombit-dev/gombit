@@ -445,9 +445,9 @@ var errLoginAccountGone = errors.New("auth: the account was deleted during the l
 
 // issueTokens writes a refresh token row of session sessionID and signs its
 // access token. A login passes "", and the row starts a new session with a
-// fresh SessionID; a rotation passes the rotated row's, so the session keeps
-// its id (a row from before SessionID existed passes "" too, and its session
-// gets one).
+// fresh SessionID; a rotation passes the id the rotated row is shown under
+// (sessionIDOf), so the session keeps its id, a session from before
+// SessionID existed included: its successor stores the legacy id.
 func (s *Service) issueTokens(tx *gorm.DB, user User, now time.Time, sessionID string) (TokenPair, error) {
 	raw, err := newRefreshToken()
 	if err != nil {
@@ -722,7 +722,7 @@ func (s *Service) rotateRefreshOnce(ctx context.Context, raw, hash string) (Toke
 			return errInvalidRefreshToken
 		}
 
-		issued, err := s.issueTokens(tx, user, now, row.SessionID)
+		issued, err := s.issueTokens(tx, user, now, s.sessionIDOf(row))
 		if err != nil {
 			return err
 		}
@@ -786,10 +786,10 @@ func lockRefreshRowTx(tx *gorm.DB, id uint) (RefreshToken, error) {
 // RevokeRefresh ends the session of a refresh token: the token itself, or,
 // when the token has rotated (a refresh in flight as the user signs out, or
 // a client still holding the previous token), the session's current head
-// (#466), found by the session's SessionID however many rotations on
-// (sessionHead). A token from before SessionID existed is followed along its
-// chain, and one maxChainHops (1000) or more rotations behind its head, or a
-// session whose head cannot be found (errChainUnresolved), fails with a 500
+// (#466), found by the session's SessionID however many rotations on, or
+// along replaced_by where that finds none (sessionHead). A token followed
+// along replaced_by maxChainHops (1000) or more rotations behind its head,
+// or a session whose head cannot be found (errChainUnresolved), fails with a 500
 // rather than succeed having ended nothing; revoking the session (DELETE
 // /auth/sessions/{id}, or ?scope=all) ends it then. A token unknown, past its
 // own expiry, or of a session already ended revokes nothing and succeeds,

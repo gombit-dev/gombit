@@ -77,9 +77,11 @@ type RefreshToken struct {
 	ReplacedBy *uint
 	// SessionID is the session's identifier: random, set by the login and
 	// carried to every rotation's successor, and the id the sessions API
-	// shows (AUTH-11). Rows written before the column existed have none; a
-	// session of such rows is identified by its head's row id
-	// (Service.sessionIDOf), and its next rotation gives it a SessionID.
+	// shows (AUTH-11). Rows written before the column existed, or by a binary
+	// from before it, have none; such a row is identified by an HMAC of its
+	// row id (Service.sessionIDOf), which its next rotation stores as the
+	// successor's SessionID. An index for finding a session's head:
+	// ReplacedBy stays the chain's truth.
 	SessionID string `gorm:"size:32;index"`
 	CreatedAt time.Time
 }

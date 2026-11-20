@@ -20,8 +20,9 @@ import (
 // and revoking a session is revoking its head. Bearer and cookie mode share
 // the table, so both expose the same sessions (AUTH-5, #335). Every row of a
 // session carries its SessionID, which the login draws and rotation copies:
-// the session's id in the API, unchanged by refreshes, and how any row of
-// the session finds its head in one read (sessionHead; AUTH-11, #661).
+// the session's id in the API, unchanged by refreshes, and an index by
+// which any row of the session usually finds its head in one read
+// (sessionHead; AUTH-11, #661).
 
 var errSessionNotFound = errors.New("auth: session not found")
 
@@ -33,11 +34,10 @@ var errSessionNotFound = errors.New("auth: session not found")
 var errSessionEnded = errors.New("auth: the request's session has ended")
 
 // errChainUnresolved is a search for a session's head (sessionHead) that did
-// not find it: a session whose SessionID no unrotated row has, or, along a
-// chain of rows from before SessionID existed, maxChainHops rows read
-// without reaching it, a cycle, which rotation never writes, or a successor
-// that no longer exists (replaced_by has no foreign key: a manual delete or
-// a partial restore). The row it stopped at is no head, so a caller must
+// not find it: along replaced_by, maxChainHops rows read without reaching
+// it, a cycle, which rotation never writes, or a successor that no longer
+// exists (replaced_by has no foreign key: a manual delete or a partial
+// restore). The row it stopped at is no head, so a caller must
 // fail rather than take it for one (a logout would end nothing and answer
 // success, #466).
 var errChainUnresolved = errors.New("auth: the refresh token chain does not reach its session's head")
@@ -80,8 +80,9 @@ func newSessionID() (string, error) {
 // sessionIDOf is the id the API shows for the session row belongs to: its
 // SessionID, the same for every row of the session. A row from before
 // SessionID existed has none, and gets the id the sessions API showed then,
-// derived from its row id (legacySessionID), until its next rotation gives
-// its session a SessionID: the id of such a session changes that once.
+// derived from its row id (legacySessionID). Rotation stores the id a row is
+// shown under as its successor's SessionID, so that session keeps its id
+// too.
 func (s *Service) sessionIDOf(row RefreshToken) string {
 	if row.SessionID != "" {
 		return row.SessionID
@@ -182,10 +183,10 @@ func currentSessionRow(ctx context.Context, tx *gorm.DB, userID uint, rows []Ref
 // refresh token row rid, or 0 when rows do not include it. rid is the row a
 // request's access token names; the session may have refreshed since (the
 // request raced its own refresh), so when rid is not listed, the listed row
-// of the same session is: the one with rid's SessionID, or, from a row that
-// predates SessionID, one further along its chain. rows may be read before a
-// rotation the walk then sees, so the listed row is matched by session, not
-// by being the head now.
+// of the same session is: the first row on the walk to the session's head
+// (walkSession) that is listed or shares its SessionID with a listed row.
+// rows may be read before a rotation the walk then sees, so the listed row
+// is matched by session, not by being the head now.
 func sessionRow(tx *gorm.DB, userID, rid uint, rows []RefreshToken) (uint, error) {
 	listed := make(map[uint]bool, len(rows))
 	bySession := make(map[string]uint, len(rows))
@@ -204,11 +205,11 @@ func sessionRow(tx *gorm.DB, userID, rid uint, rows []RefreshToken) (uint, error
 			found = row.ID
 			return true
 		}
-		if row.SessionID != "" {
-			found = bySession[row.SessionID]
-			return true // the rest of the session has this SessionID too
+		if id, ok := bySession[row.SessionID]; ok {
+			found = id
+			return true
 		}
-		return false
+		return false // a successor may have been written without the SessionID
 	})
 	if err != nil {
 		return 0, err
@@ -326,74 +327,100 @@ func lockSessionsError(err error) error {
 }
 
 // maxChainHops bounds how many rows sessionHead reads, one SELECT each, along
-// a chain of rows from before SessionID existed (a row with a SessionID finds
-// its head in one read). It is a cost limit, not a guard against bad data
-// (the cycle check already ends every walk): a logout walks from any
-// unexpired token of the session, which can be RefreshTokenTTL / (rotation
-// interval) rows behind its head (672 rows with the default TTLs and a
-// refresh every 15 minutes). Such chains end with their tokens' expiry: every
-// rotation since the upgrade has written a SessionID. A token maxChainHops or
-// more rotations behind its head fails with errChainUnresolved (a 500) and
-// ends nothing; such a session is ended by revoking it (DELETE
-// /auth/sessions/{id}, or ?scope=all). A variable so tests can lower it.
+// replaced_by: a chain of rows from before SessionID existed, or, when a
+// SessionID lookup finds no head, the rest of the chain (a row with a
+// SessionID otherwise finds its head in one read). It is a cost limit, not a
+// guard against bad data (the cycle check already ends every walk): a logout
+// walks from any unexpired token of the session, which can be
+// RefreshTokenTTL / (rotation interval) rows behind its head (672 rows with
+// the default TTLs and a refresh every 15 minutes). Such chains end with
+// their tokens' expiry. A token maxChainHops or more rotations behind its
+// head, along a stretch the lookup does not shortcut, fails with
+// errChainUnresolved (a 500) and ends nothing; such a session is ended by
+// revoking it (DELETE /auth/sessions/{id}, or ?scope=all). A variable so
+// tests can lower it.
 var maxChainHops = 1000
 
 // sessionHead returns the head of the session refresh token row fromID
 // belongs to: the row nothing has replaced, which is the session's only row
 // that can be unrevoked; it may itself be revoked or expired, a session that
-// has ended. It returns nil when fromID names no row of the user. A row with a
-// SessionID finds the head in one read: the user's unreplaced row with that
-// SessionID. A row from before SessionID existed is followed along
-// replaced_by to the head, or to the first row with a SessionID (its
-// session's rotations since the upgrade). A session whose head is not found,
-// a missing successor or a cycle (neither of which rotation writes), or
-// maxChainHops rows read without reaching the head stop with
-// errChainUnresolved rather than looping or returning a row that is not the
-// head. tx must hold lockUserTx, or a rotation may move the head as it reads.
+// has ended. It returns nil when fromID names no row of the user. replaced_by
+// is the truth, and SessionID an index into it: from a row with a SessionID
+// the head is usually one read away, the user's unreplaced row with that
+// SessionID (familyHead). It is not always: a binary from before SessionID,
+// still running in a rolling deploy or back after a rollback that left the
+// column, writes a successor without one, so the session's rows with this
+// SessionID are all replaced. Then, and from a row from before SessionID
+// existed, the walk follows replaced_by, taking the lookup again at the next
+// SessionID it meets. A missing successor or a cycle (neither of which
+// rotation writes), or maxChainHops rows read along replaced_by without
+// reaching the head, stop with errChainUnresolved rather than loop or return
+// a row that is not the head. tx must hold lockUserTx, or a rotation may move
+// the head as it reads.
 func sessionHead(tx *gorm.DB, userID, fromID uint) (*RefreshToken, error) {
 	return walkSession(tx, userID, fromID, nil)
 }
 
 // walkSession is sessionHead, stopping early at the first row stop accepts
-// (nil accepts none) and returning that row: stop sees each row read, from
-// fromID's on, before the walk moves past it.
+// (nil accepts none) and returning that row: stop sees each row the walk
+// reaches, from fromID's on, the head included, before the walk moves past
+// it. A SessionID lookup skips the rows between a row and its head, so stop
+// does not see those.
 func walkSession(tx *gorm.DB, userID, fromID uint, stop func(RefreshToken) bool) (*RefreshToken, error) {
+	var row RefreshToken
+	err := tx.Where("id = ? AND user_id = ?", fromID, userID).First(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
 	seen := map[uint]bool{fromID: true}
-	next := fromID
-	for hop := 0; hop < maxChainHops; hop++ {
-		var row RefreshToken
-		err := tx.Where("id = ? AND user_id = ?", next, userID).First(&row).Error
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			if hop > 0 {
-				return nil, errChainUnresolved // the previous row names a successor that is gone
-			}
-			return nil, nil
-		}
-		if err != nil {
-			return nil, err
-		}
+	looked := map[string]bool{} // the SessionIDs already looked up, each read once
+	for hops := 0; ; {
 		if stop != nil && stop(row) {
 			return &row, nil
 		}
 		if row.ReplacedBy == nil {
 			return &row, nil
 		}
-		if row.SessionID != "" {
-			return familyHead(tx, userID, row.SessionID)
+		if row.SessionID != "" && !looked[row.SessionID] {
+			looked[row.SessionID] = true
+			head, err := familyHead(tx, userID, row.SessionID)
+			if err != nil {
+				return nil, err
+			}
+			if head != nil {
+				seen[head.ID] = true
+				row = *head
+				continue
+			}
 		}
-		if seen[*row.ReplacedBy] {
+		next := *row.ReplacedBy
+		if seen[next] {
 			return nil, errChainUnresolved
 		}
-		next = *row.ReplacedBy
+		if hops++; hops >= maxChainHops {
+			return nil, errChainUnresolved
+		}
 		seen[next] = true
+		row = RefreshToken{}
+		err := tx.Where("id = ? AND user_id = ?", next, userID).First(&row).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errChainUnresolved // the previous row names a successor that is gone
+		}
+		if err != nil {
+			return nil, err
+		}
 	}
-	return nil, errChainUnresolved
 }
 
-// familyHead returns the head of the user's session sessionID: its row that
-// nothing has replaced. Rotation sets the replaced row's replaced_by in the
-// transaction that writes its successor, so the session has exactly one; the
-// newest is taken should a restore have left more.
+// familyHead returns the head of the user's session sessionID, its row that
+// nothing has replaced, or nil when it has none. Rotation sets the replaced
+// row's replaced_by in the transaction that writes its successor, which
+// copies the SessionID, so the session has at most one; the newest is taken
+// should a restore have left more. It has none when the successor of its
+// newest row was written without the SessionID (sessionHead).
 func familyHead(tx *gorm.DB, userID uint, sessionID string) (*RefreshToken, error) {
 	var head RefreshToken
 	err := tx.Where("user_id = ? AND session_id = ? AND replaced_by IS NULL", userID, sessionID).
@@ -402,7 +429,7 @@ func familyHead(tx *gorm.DB, userID uint, sessionID string) (*RefreshToken, erro
 		return nil, err
 	}
 	if head.ID == 0 {
-		return nil, errChainUnresolved
+		return nil, nil
 	}
 	return &head, nil
 }
