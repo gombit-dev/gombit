@@ -141,10 +141,16 @@ Ending the current session, or all of them, clears the local session and
 returns to `/login`, in both auth modes (in cookie mode the server also
 clears the cookies). A session that had already ended by the time its
 "Sign out" is pressed (signed out on its own device, or from another tab)
-answers 404: the page says so and lists again. The page is the app's own,
-written once by `gombit new` and never rewritten; `describeDevice` knows a
-few common browsers and systems, and a full User-Agent parser can replace
-it.
+answers 404: the page says so and lists again, and the buttons wait for
+that list, so an older list never brings back a row signed out meanwhile.
+A failed list (any answer but a 401, which signs this browser out) is shown
+and not retried. Each row's "Sign out" is named for assistive technology
+after the session it ends (device, place, last active, "this device"), and
+the status line is a live region. The page is the app's own, written once
+by `gombit new` and never rewritten; `describeDevice` knows a few common
+browsers and systems (including Chrome, Firefox and Edge on iOS, which also
+say Safari), a User-Agent is only a hint (iPadOS sends a Mac one), and a
+full parser can replace it.
 
 ## D10 field errors
 

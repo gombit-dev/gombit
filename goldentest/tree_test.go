@@ -225,10 +225,13 @@ func assertMUIFrontendInvariants(t *testing.T, files fileMap) {
 	}
 }
 
-// assertSessionsPage is AUTH-13's contract (#663): the app routes and links
-// /sessions, and the page lists the sessions, ends one, the others or all,
-// and signs this browser out (clearSession, then /login) when it ends its
-// own; a 404 (the session had already ended) lists again.
+// assertSessionsPage is a smoke check for AUTH-13 (#663): the app routes and
+// links /sessions, and the page exists and calls the sessions routes, with
+// the pieces its behavior is made of (the current-session marker,
+// clearSession then /login, the 404 branch, the device fields, a named
+// button per row). It pins spelling, not behavior: the scaffold has no
+// frontend test runner yet, and when one lands a test driving the 401, 404
+// and current-session paths against a stubbed client should replace it.
 func assertSessionsPage(t *testing.T, files fileMap) {
 	t.Helper()
 	page := string(files["frontend/src/pages/SessionsPage.tsx"])
@@ -248,6 +251,7 @@ func assertSessionsPage(t *testing.T, files fileMap) {
 		"session.user_agent",
 		"session.client_address",
 		"session.location",
+		"aria-label={`Sign out ${sessionName(session)}`}",
 	} {
 		if !strings.Contains(page, want) {
 			t.Errorf("SessionsPage.tsx missing %q", want)
