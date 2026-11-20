@@ -100,6 +100,7 @@ type App struct {
 	authMailer         auth.Mailer
 	authAuditor        auth.Auditor
 	authProviders      []auth.IdentityProvider
+	authLocator        auth.SessionLocator
 	authSignupOff      bool
 
 	mu     sync.RWMutex
@@ -387,6 +388,21 @@ func WithAuthIdentityProviders(providers ...auth.IdentityProvider) Option {
 	}
 }
 
+// WithAuthSessionLocator sets how the framework-owned auth routes name where
+// a session signed in from, shown by GET {prefix}/auth/sessions
+// (auth.WithSessionLocator, AUTH-12): from the client's full address, with
+// the application's own lookup (a local GeoIP database, say). Without one,
+// sessions have no location; the framework does no geolocation.
+func WithAuthSessionLocator(l auth.SessionLocator) Option {
+	return func(app *App) error {
+		if l == nil {
+			return errors.New("framework: nil auth session locator")
+		}
+		app.authLocator = l
+		return nil
+	}
+}
+
 // WithoutAuthExternalSignup stops an external sign-in from making accounts:
 // an identity no user linked is refused, and users link identities from
 // their signed-in accounts only (auth.WithoutExternalSignup).
@@ -417,6 +433,9 @@ func (app *App) authOptions() []auth.Option {
 	}
 	if app.authSignupOff {
 		opts = append(opts, auth.WithoutExternalSignup())
+	}
+	if app.authLocator != nil {
+		opts = append(opts, auth.WithSessionLocator(app.authLocator))
 	}
 	// The credential throttles count in the app's cache (shared between
 	// instances on Redis), unless it keeps nothing (noop): then the Service

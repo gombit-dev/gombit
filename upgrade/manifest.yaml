@@ -1527,6 +1527,41 @@ releases:
           the chain, which ends with their expiry.
         refs: [661]
 
+      - id: session-device-schema
+        kind: manual
+        breaking: true
+        area: schema
+        summary: "Session device metadata adds `refresh_tokens.user_agent`, `client_address` and `location`, which every login and refresh writes: an app migrates before it runs this release."
+        details: |
+          `auth.RefreshToken` gains `UserAgent`, `ClientAddress` and
+          `Location`. Until the columns exist, every login and every token
+          refresh fails (the insert names every column of the model). The
+          same migration as `session-id-schema` adds them: generate and apply
+          it (`gombit db makemigrations`, `gombit db migrate`) before
+          deploying. Existing rows keep NULLs, listed as empty: a session
+          from before the upgrade shows no device, and nothing has to be
+          backfilled.
+        schema:
+          - {model: auth.RefreshToken, table: refresh_tokens, change: altered}
+        refs: [662]
+
+      - id: session-device-metadata
+        kind: informational
+        area: config
+        summary: "`GET {prefix}/auth/sessions` shows the device each session signed in from: `user_agent`, `client_address` (its network by default, `GOMBIT_AUTH_SESSION_CLIENT_ADDRESS`) and `location` (from an app's `SessionLocator`)."
+        details: |
+          `AuthSession` gains three string fields, always present, empty when
+          unknown. They are the sign-in request's and refreshes keep them.
+          The client address is coarsened to an IPv4 /24 or IPv6 /48 unless
+          `GOMBIT_AUTH_SESSION_CLIENT_ADDRESS` is `full` (or `none`, no
+          address); the framework does no geolocation, and
+          `framework.WithAuthSessionLocator` is how an app names locations.
+          Regenerate the TypeScript client (`gombit client generate`) to
+          see the fields.
+        config:
+          - {var: GOMBIT_AUTH_SESSION_CLIENT_ADDRESS, change: added}
+        refs: [662]
+
       - id: generate-after-field-removal
         kind: informational
         area: cli

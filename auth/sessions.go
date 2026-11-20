@@ -62,6 +62,9 @@ type AuthSession struct {
 	LastRefreshedAt time.Time `json:"last_refreshed_at" doc:"When the session last signed in or refreshed its tokens. Precision is roughly the access-token lifetime, not the last request."`
 	ExpiresAt       time.Time `json:"expires_at" doc:"When the session ends unless it refreshes first"`
 	Current         bool      `json:"current" example:"true" doc:"True for the session that made this request"`
+	UserAgent       string    `json:"user_agent" example:"Mozilla/5.0 (X11; Linux x86_64; rv:133.0) Gecko/20100101 Firefox/133.0" doc:"The User-Agent header of the request that signed in, as given, cut to 255 bytes; empty when unknown. Refreshes do not change it."`
+	ClientAddress   string    `json:"client_address" example:"203.0.113.0/24" doc:"The client address the session signed in from: by default only its network (an IPv4 /24 or IPv6 /48), or the full address, or empty, as the server is configured; empty when unknown. Refreshes do not change it."`
+	Location        string    `json:"location" doc:"Where the session signed in from, as the application names it; empty unless the application looks locations up. Refreshes do not change it."`
 }
 
 // sessionIDBytes is the size of a session's random SessionID, hex-encoded
@@ -163,6 +166,9 @@ func (s *Service) ListSessions(ctx context.Context, userID uint) ([]AuthSession,
 			LastRefreshedAt: row.CreatedAt,
 			ExpiresAt:       row.ExpiresAt,
 			Current:         row.ID == current,
+			UserAgent:       row.UserAgent,
+			ClientAddress:   row.ClientAddress,
+			Location:        row.Location,
 		})
 	}
 	return sessions, nil

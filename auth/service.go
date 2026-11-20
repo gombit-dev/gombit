@@ -38,6 +38,8 @@ type Service struct {
 	// providers are the external identity providers (external.go), by
 	// name; providerNames keeps their registration order, and providerErr
 	// what WithIdentityProviders refused (NewService returns it).
+	// locator names a session's location when it starts (session_device.go).
+	locator           SessionLocator
 	providers         map[string]IdentityProvider
 	providerNames     []string
 	providerErr       error
@@ -362,7 +364,10 @@ func (s *Service) LoginMFA(ctx context.Context, email, password, code string) (U
 // the snapshot unable to start a session, and so does multi-factor
 // authentication enabled after Authenticate found none (ErrMFARequired). A
 // snapshot loaded from the database (no Authenticate) is the caller's to
-// have authenticated, second factor included.
+// have authenticated, second factor included. The session records the
+// device of the request ctx came through (CaptureRequestInfo, which the
+// auth routes put first; an application's own login route adds it): none
+// without one.
 func (s *Service) IssueTokens(ctx context.Context, user User) (TokenPair, error) {
 	_, pair, err := s.startSession(ctx, user)
 	return pair, err
@@ -381,6 +386,7 @@ func (s *Service) startSession(ctx context.Context, user User) (User, TokenPair,
 func (s *Service) startSessionWith(ctx context.Context, user User, det string) (User, TokenPair, error) {
 	var pair TokenPair
 	var locked User
+	device := s.deviceFrom(ctx) // before the lock: a SessionLocator may take a moment
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var err error
 		locked, err = lockUserTx(tx, user.ID)
@@ -408,7 +414,7 @@ func (s *Service) startSessionWith(ctx context.Context, user User, det string) (
 				return errMFARequired
 			}
 		}
-		pair, err = s.issueTokens(tx, locked, s.now(), "")
+		pair, err = s.issueTokens(tx, locked, s.now(), "", device)
 		return err
 	})
 	if errors.Is(err, errLoginPasswordChanged) {
@@ -443,12 +449,14 @@ var errLoginPasswordChanged = errors.New("auth: the password changed during the 
 // started (Login and IssueTokens answer it as invalid credentials).
 var errLoginAccountGone = errors.New("auth: the account was deleted during the login")
 
-// issueTokens writes a refresh token row of session sessionID and signs its
-// access token. A login passes "", and the row starts a new session with a
-// fresh SessionID; a rotation passes the id the rotated row is shown under
-// (sessionIDOf), so the session keeps its id, a session from before
-// SessionID existed included: its successor stores the legacy id.
-func (s *Service) issueTokens(tx *gorm.DB, user User, now time.Time, sessionID string) (TokenPair, error) {
+// issueTokens writes a refresh token row of session sessionID, started on
+// device, and signs its access token. A login passes "", and the row starts
+// a new session with a fresh SessionID, and the device of its request; a
+// rotation passes the id the rotated row is shown under (sessionIDOf), so
+// the session keeps its id, a session from before SessionID existed
+// included: its successor stores the legacy id. A rotation passes the
+// rotated row's device too (deviceOf): a session describes its sign-in.
+func (s *Service) issueTokens(tx *gorm.DB, user User, now time.Time, sessionID string, device sessionDevice) (TokenPair, error) {
 	raw, err := newRefreshToken()
 	if err != nil {
 		return TokenPair{}, err
@@ -464,6 +472,10 @@ func (s *Service) issueTokens(tx *gorm.DB, user User, now time.Time, sessionID s
 		ExpiresAt: now.Add(s.cfg.RefreshTokenTTL),
 		SessionID: sessionID,
 		CreatedAt: now,
+
+		UserAgent:     device.userAgent,
+		ClientAddress: device.clientAddress,
+		Location:      device.location,
 	}
 	if err := tx.Create(&row).Error; err != nil {
 		return TokenPair{}, err
@@ -722,7 +734,7 @@ func (s *Service) rotateRefreshOnce(ctx context.Context, raw, hash string) (Toke
 			return errInvalidRefreshToken
 		}
 
-		issued, err := s.issueTokens(tx, user, now, s.sessionIDOf(row))
+		issued, err := s.issueTokens(tx, user, now, s.sessionIDOf(row), deviceOf(row))
 		if err != nil {
 			return err
 		}

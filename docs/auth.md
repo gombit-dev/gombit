@@ -831,7 +831,10 @@ recently refreshed first:
       "id": "3f6c2a9e0b7d41c58e2f6a1d9c4b7e20",
       "last_refreshed_at": "2026-09-28T14:05:00Z",
       "expires_at": "2026-10-05T14:05:00Z",
-      "current": true
+      "current": true,
+      "user_agent": "Mozilla/5.0 (X11; Linux x86_64; rv:133.0) Gecko/20100101 Firefox/133.0",
+      "client_address": "203.0.113.0/24",
+      "location": ""
     }
   ]
 }
@@ -854,6 +857,49 @@ recently refreshed first:
   precision; it is not a per-request "last seen".
 - `current` marks the session that made the request, also when that
   session refreshed while the request ran.
+- `user_agent`, `client_address` and `location` describe the device the
+  session signed in from, for a user to recognize it (AUTH-12). They are
+  the sign-in request's and refreshes do not change them, so a session
+  that signed in on a laptop at home stays "that laptop at home" wherever
+  it refreshes from. Each is empty when unknown: a session started outside
+  a request (`Service.IssueTokens` from application code, with a context
+  that did not come through the auth routes), or one that signed in before
+  the upgrade that added them.
+  - `user_agent` is the `User-Agent` header as the client sent it, cut to
+    255 bytes, with control characters dropped and invalid UTF-8 replaced.
+    The server does not parse it: a client that wants "Firefox on Linux"
+    makes that label from it, with the parser of its choice, and keeps the
+    raw value for anything its parser does not know.
+  - `client_address` is the client address of the sign-in (gin's
+    `ClientIP`, so `GOMBIT_HTTP_TRUSTED_PROXIES` decides whether a
+    proxy's `X-Forwarded-For` counts), only as much of it as
+    `GOMBIT_AUTH_SESSION_CLIENT_ADDRESS` keeps: `coarse` (the default) its
+    network, an IPv4 `/24` or an IPv6 `/48` (`203.0.113.0/24`,
+    `2001:db8:1234::/48`), enough to tell home from an office but not to
+    single out a device; `full` the whole address; `none` nothing. An IPv4
+    address mapped into IPv6 is shown as IPv4.
+  - `location` is empty unless the application names one. The framework
+    does no geolocation. An application that wants it passes a
+    `SessionLocator` (`framework.WithAuthSessionLocator`, or
+    `auth.WithSessionLocator` on a Service it builds): a function from the
+    request's context and the client's full address, whatever
+    `GOMBIT_AUTH_SESSION_CLIENT_ADDRESS` stores, to a short label such as
+    `Lisbon, PT`, or `""` when it does not know. It runs once per sign-in,
+    in the request, before the session is written, so it should be a local
+    lookup (a GeoIP database file), not a network call. Its answer is
+    stored cut to 128 bytes.
+
+What a session stores about its device is exactly those three values, on
+each of its `refresh_tokens` rows (columns `user_agent`, `client_address`,
+`location`; the login writes them, each rotation copies them to the row it
+writes). They live as long as the rows do: nothing prunes revoked and
+expired rows yet, so today they outlive the session; the retention policy
+for `refresh_tokens` (#578) will bound them with the rows. Changing
+`GOMBIT_AUTH_SESSION_CLIENT_ADDRESS` applies to sessions that sign in after
+the change; the rows already written keep what they stored. The security
+audit trail is separate: its events record the request's full client
+address and User-Agent ([Audit trail](#audit-trail)), whatever this setting
+says.
 
 In the OpenAPI document the session schemas are named `AuthSession`,
 `DataListAuthSession`, `AuthRevokeResult`, and `DataAuthRevokeResult`, and
@@ -888,13 +934,12 @@ the same moment:
   the new tokens are revoked too (revoking the others keeps the requesting
   session, including any rotations it made since the request was
   authenticated).
-- **Revoking one** answers 404 when its session rotated first. It waits for
-  the lock, finds that the id it was given belongs to a token that has since
-  been replaced, and revokes nothing: the session is still alive under its new
-  id. The client lists again and retries, as the 404 above says. A logout of
-  the same session that commits first also makes it a 404 (the session has
-  already ended), so a success always means the revocation ended the session
-  itself; a logout that comes second waits for it and ends nothing more.
+- **Revoking one** covers a concurrent rotation too: it waits for the lock,
+  and the session's id, which a rotation keeps, names the token the rotation
+  wrote, so the revocation ends the session (AUTH-11). A logout of the same
+  session that commits first makes it a 404 (the session has already ended),
+  so a success always means the revocation ended the session itself; a
+  logout that comes second waits for it and ends nothing more.
 - **A revocation from a session that has ended** answers 401 and revokes
   nothing. The request's own session is checked again once the revocation
   holds the lock, so a session that another request revoked, or that
