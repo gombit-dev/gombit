@@ -62,12 +62,14 @@ version.
   migration created the tables again (`table auth_one_time_tokens already
   exists` on SQLite). An app created by `gombit new` v0.9.0 needs a one-time
   edit of that migration; the upgrade notes
-  (`scaffold-registers-every-framework-model`) give it.
+  (`scaffold-registers-every-framework-model`) give it
+  ([#675](https://github.com/gombit-dev/gombit/pull/675)).
 - `gombit db check` skips its model-registry layer when
   `internal/platform/database.go` calls no `AutoMigrate` method (as in an
   app whose schema comes from its migrations), instead of failing with "no
   AutoMigrate call"; `gombit db makemigrations --forget-model` no longer
-  fails there either. A file that does not parse is still an error.
+  fails there either. A file that does not parse is still an error
+  ([#675](https://github.com/gombit-dev/gombit/pull/675)).
 
 ## [0.9.0] — 2026-11-16
 

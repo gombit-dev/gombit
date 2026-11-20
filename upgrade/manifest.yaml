@@ -1592,6 +1592,7 @@ releases:
           database that has the tables keeps them and their rows, and one
           that does not gets them. `gombit db check` then reports the schema
           chain consistent.
+        refs: [675]
 
       - id: db-check-without-automigrate
         kind: informational
@@ -1607,3 +1608,4 @@ releases:
           needs the call, and so does `gombit generate` (and `db check`'s
           generated-contract layer) once the app has a model-first resource.
           Nothing to change.
+        refs: [675]

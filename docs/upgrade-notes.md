@@ -28,7 +28,7 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   `session_id` too; the session is then listed under that row's id,
   and logout still finds its current token along `replaced_by`.
 
-- `gombit new` puts every framework model in the bootstrap migration and `models.json`; an app created by `gombit new` v0.9.0 lacks five auth models there, so its next migration fails with `table ... already exists`. (`scaffold-registers-every-framework-model`, scaffold)
+- `gombit new` puts every framework model in the bootstrap migration and `models.json`; an app created by `gombit new` v0.9.0 lacks five auth models there, so its next migration fails with `table ... already exists`. (`scaffold-registers-every-framework-model`, scaffold, [#675](https://github.com/gombit-dev/gombit/issues/675))
 
   `gombit new` v0.9.0 left `auth.OneTimeToken`, `auth.AuditEvent`,
   `auth.TOTPFactor`, `auth.RecoveryCode` and `auth.IdentityLink` out of
@@ -103,7 +103,7 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   racing a delete could fail with a permission error. Nothing to
   change.
 
-- `gombit db check` skips its model-registry layer when `internal/platform/database.go` has no `AutoMigrate` call, instead of failing with "no AutoMigrate call", and `gombit db makemigrations --forget-model` no longer fails there. (`db-check-without-automigrate`, cli)
+- `gombit db check` skips its model-registry layer when `internal/platform/database.go` has no `AutoMigrate` call, instead of failing with "no AutoMigrate call", and `gombit db makemigrations --forget-model` no longer fails there. (`db-check-without-automigrate`, cli, [#675](https://github.com/gombit-dev/gombit/issues/675))
 
   An app whose schema comes from its migrations may keep
   `internal/platform/database.go` to open the database and call no
