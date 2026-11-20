@@ -41,6 +41,33 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   from before the upgrade shows no device, and nothing has to be
   backfilled.
 
+- `gombit new` puts every framework model in the bootstrap migration and `models.json`; an app created by `gombit new` v0.9.0 lacks five auth models there, so its next migration fails with `table ... already exists`. (`scaffold-registers-every-framework-model`, scaffold, [#675](https://github.com/gombit-dev/gombit/issues/675))
+
+  `gombit new` v0.9.0 left `auth.OneTimeToken`, `auth.AuditEvent`,
+  `auth.TOTPFactor`, `auth.RecoveryCode` and `auth.IdentityLink` out of
+  the bootstrap migration and `database/migrations/models.json`, while
+  the `AutoMigrate` it writes creates their tables at startup. `gombit
+  db check` reports them as auto-migrated with no migration, and the
+  next migration generated (by `gombit make resource`, or `gombit db
+  makemigrations --model` for them) creates those tables, so applying
+  it to a database the app has started against fails because they
+  already exist (on SQLite, `table auth_one_time_tokens already
+  exists`). Only apps created by `gombit new` v0.9.0 are
+  affected: an app upgraded to v0.9.0 generated these models'
+  migration, as its upgrade notes ask.
+
+  In an affected app, take the migration that creates those five
+  tables, or generate it with `gombit db makemigrations auth_tables`
+  and a `--model github.com/gombit-dev/gombit/auth.<Name>` for each.
+  Add `IF NOT EXISTS` to each of its statements that creates one of
+  them and, on SQLite and PostgreSQL, to each that creates one of
+  their indexes (MySQL declares them inside `CREATE TABLE`); leave
+  its other statements as they are. Run `gombit db repair` to update
+  `atlas.sum`, then `gombit db migrate` in each environment: a
+  database that has the tables keeps them and their rows, and one
+  that does not gets them. `gombit db check` then reports the schema
+  chain consistent.
+
 ### Informational
 
 - A session's id in `GET {prefix}/auth/sessions` stays the same for the session's whole life, so `DELETE {prefix}/auth/sessions/{id}` with an id listed before a refresh ends the session instead of answering 404. (`stable-session-ids`, api, [#661](https://github.com/gombit-dev/gombit/issues/661))
@@ -101,6 +128,18 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   driver mapped only `STATUS_DELETE_PENDING` to not-found, so a read
   racing a delete could fail with a permission error. Nothing to
   change.
+
+- `gombit db check` skips its model-registry layer when `internal/platform/database.go` has no `AutoMigrate` call, instead of failing with "no AutoMigrate call", and `gombit db makemigrations --forget-model` no longer fails there. (`db-check-without-automigrate`, cli, [#675](https://github.com/gombit-dev/gombit/issues/675))
+
+  An app whose schema comes from its migrations may keep
+  `internal/platform/database.go` to open the database and call no
+  `AutoMigrate` method there. The file then lists no models to hold
+  `models.json` to, so the layer is skipped, as for an app without the
+  file; a model the app migrates some other way (`auth.Migrate`, or a
+  helper in another file) is not seen. `gombit make resource` still
+  needs the call, and so does `gombit generate` (and `db check`'s
+  generated-contract layer) once the app has a model-first resource.
+  Nothing to change.
 
 ## v0.9.0
 
