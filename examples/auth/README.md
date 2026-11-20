@@ -65,7 +65,7 @@ SESSIONS=$(curl -sS http://127.0.0.1:8080/api/v1/auth/sessions -H "Authorization
 echo "$SESSIONS"
 OTHER=$(python3 -c 'import json,sys; print(next(s["id"] for s in json.load(sys.stdin)["data"] if not s["current"]))' <<<"$SESSIONS")
 
-# revoke one (ids change on every refresh: list again before revoking)
+# revoke one (a session keeps its id across refreshes)
 curl -sS -X DELETE "http://127.0.0.1:8080/api/v1/auth/sessions/$OTHER" \
   -H "Authorization: Bearer $ACCESS"
 

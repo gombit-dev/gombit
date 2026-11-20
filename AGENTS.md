@@ -120,9 +120,12 @@ run by `make test-faults` (a sharded PR check), and the seeded stochastic
 suite `internal/chaos` (`make test-chaos`, nightly `chaos.yml`, never a PR
 check). See `docs/testing/fault-injection.md`.
 The **AUTH-0** epic (#280) has all ten items, AUTH-1..10 (AUTH-5 released
-in v0.8.0, the rest in v0.9.0); its follow-ups AUTH-11..13 (#661 stable
-session ids, #662 session device metadata, #663 a sessions screen in the
-generated frontend) are open. It has AUTH-5 (#335): session
+in v0.8.0, the rest in v0.9.0), and AUTH-11 (#661): stable session ids
+(`refresh_tokens.session_id`, drawn at login and kept by every rotation; the
+sessions API's id, and how logout finds a session's current token in one
+read). Its other follow-ups, AUTH-12 and AUTH-13 (#662 session device
+metadata, #663 a sessions screen in the generated frontend), are open. It
+has AUTH-5 (#335): session
 management in both auth modes (`GET` / `DELETE {prefix}/auth/sessions`,
 `auth.Service.ListSessions` / `RevokeSession` / `RevokeAllSessions`), with
 token rotation and the session revocations serialized per user on a lock of

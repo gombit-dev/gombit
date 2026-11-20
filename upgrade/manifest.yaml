@@ -1480,6 +1480,53 @@ releases:
 
   - version: unreleased
     changes:
+      - id: session-id-schema
+        kind: manual
+        breaking: true
+        area: schema
+        summary: "Stable session ids add `refresh_tokens.session_id`, which every login and refresh writes: an app migrates before it runs this release."
+        details: |
+          `auth.RefreshToken` gains `SessionID` (indexed). Until the column
+          exists, every login and every token refresh fails (the insert names
+          every column of the model). Generate and apply the migration
+          (`gombit db makemigrations`, `gombit db migrate`) before deploying;
+          `gombit upgrade --dry-run` lists the steps. Existing rows keep a
+          NULL `session_id` and nothing has to be backfilled: such a session
+          keeps the id it was listed under, which its next refresh stores.
+          A refresh by an older binary on the migrated schema (a rolling
+          deploy, a rollback that kept the column) writes a NULL
+          `session_id` too; the session is then listed under that row's id,
+          and logout still finds its current token along `replaced_by`.
+        schema:
+          - {model: auth.RefreshToken, table: refresh_tokens, change: altered}
+        refs: [661]
+
+      - id: stable-session-ids
+        kind: informational
+        area: api
+        summary: "A session's id in `GET {prefix}/auth/sessions` stays the same for the session's whole life, so `DELETE {prefix}/auth/sessions/{id}` with an id listed before a refresh ends the session instead of answering 404."
+        details: |
+          The id was derived from the session's current refresh token row and
+          changed on every refresh; it is now drawn at login and carried to
+          every rotation (32 lowercase hex characters, as before). A client
+          that listed again after a 404 keeps working. The audit trail's
+          `session` targets (logout, refresh reuse within grace) name the same
+          stable id, so one session's events share it.
+        refs: [661]
+
+      - id: logout-follows-session-id
+        kind: informational
+        area: behavior
+        summary: "A logout with a token any number of rotations behind its session's current one ends the session; the 1000-rotation limit (a 500) applies only along rows written without a session id."
+        details: |
+          The logout, and the signing out of other sessions that a password
+          change or MFA enrollment does, find the session's current token by
+          its id in one read instead of following the rotation chain one row
+          at a time. Rows written without the id (before the upgrade, or by
+          an older binary during a rolling deploy) are still followed along
+          the chain, which ends with their expiry.
+        refs: [661]
+
       - id: generate-after-field-removal
         kind: informational
         area: cli

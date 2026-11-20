@@ -35,7 +35,7 @@ credential endpoints are throttled (429 with `Retry-After`); see
 | `POST` | `/auth/register` | Public. Demo/bootstrap seed path (email + password); never sets `IsSuperuser`. |
 | `POST` | `/auth/login` | Public. Returns `access_token`, `refresh_token`, `token_type`, `expires_in`. |
 | `POST` | `/auth/refresh` | Public. Body `{ "refresh_token" }`. Issues a new pair; the old refresh token is invalid. |
-| `POST` | `/auth/logout` | Public. Body `{ "refresh_token" }`. Ends that token's session: the token, or, when it has already rotated (a refresh in flight as the user signs out), the session's current token. Any unexpired token the session has had, fewer than 1000 rotations behind its current token, ends it, so an old copy is enough. Bound access JWTs then fail. A token unknown, past its expiry, or of a session already ended ends nothing and answers 200 alike, so logout is idempotent and its answer reveals nothing about a token (an expired token is no credential, as for refresh). A token 1000 or more rotations behind (reachable with a short access TTL: a 10-minute one with the default 7-day refresh TTL makes 1008 rotations), or one whose chain cannot be followed, answers 500 and ends nothing, every time; revoke that session instead (`DELETE /auth/sessions/{id}` or `?scope=all`). |
+| `POST` | `/auth/logout` | Public. Body `{ "refresh_token" }`. Ends that token's session: the token, or, when it has already rotated (a refresh in flight as the user signs out), the session's current token. Any unexpired token the session has had ends it, however many rotations behind its current token, so an old copy is enough: the session's id leads to its current token. Bound access JWTs then fail. A token unknown, past its expiry, or of a session already ended ends nothing and answers 200 alike, so logout is idempotent and its answer reveals nothing about a token (an expired token is no credential, as for refresh). A token whose session's current token cannot be found (a restore that lost it) answers 500 and ends nothing, every time, and so does a token 1000 or more rotations behind along rows without a session id (issued before the upgrade that added session ids, or by an older binary during a rolling deploy: followed along the rotation chain instead), or whose chain is broken; revoke that session instead (`DELETE /auth/sessions/{id}` or `?scope=all`). |
 | `GET` | `/me` | Bearer access JWT. Example protected route for E2E. Missing/invalid Bearer is 401 with `WWW-Authenticate: Bearer realm="api"`; a database failure while the gate loads the token's user or session is a 500 (`internal`), not a 401: the session is still valid, and a client that keeps its tokens on a 5xx stays signed in. `auth.ErrInvalidCredentials` / `auth.ErrInvalidAccessToken` are the 401 cases of `Authenticate` / `ParseAccess`; any other error is a server failure. |
 | `GET` | `/auth/sessions` | Bearer access JWT. Lists the user's active sessions; see [Sessions](#sessions). |
 | `DELETE` | `/auth/sessions/{id}` | Bearer access JWT. Revokes one session; 404 if `id` names no active session of the user. |
@@ -80,9 +80,9 @@ successor already rotated again is reuse, and one logged out leaves a plain
 before it expires. The cost: if a thief rotates a stolen token first and the
 legitimate client's refresh lands within the grace, that client gets the 401
 and the thief's session is not revoked; the `auth.refresh.reuse_within_grace`
-event, naming the thief's session by its id of the moment, is the trace it
-leaves (that id changes when the session next refreshes, so act on it
-promptly), and past the grace the cascade catches it as before. An app with no clients sharing a refresh
+event, naming the thief's session by its id (the one `GET /auth/sessions`
+lists, and `DELETE /auth/sessions/{id}` ends), is the trace it leaves, and
+past the grace the cascade catches it as before. An app with no clients sharing a refresh
 token across tabs can set `GOMBIT_AUTH_REFRESH_REUSE_GRACE=0` for the strict
 rule.
 
@@ -837,18 +837,23 @@ recently refreshed first:
 }
 ```
 
-- `id` is opaque (an HMAC of the refresh row id under the JWT secret), so the
-  API never exposes row ids, which are sequential. The access JWT's `rid`
-  claim is still the row id, and the JWT is readable by its holder, so the
-  opaque id hides row ids in the sessions API only, not from a client that
-  decodes its own token. The id **changes every time the
-  session refreshes**: list again right before revoking. Revoking an id that
-  has since refreshed returns 404 rather than silently missing.
+- `id` is the session's for its whole life: drawn at random when it signs in
+  and kept by every refresh (`refresh_tokens.session_id`), so an id listed
+  before a refresh still revokes the session, and the audit trail names one
+  session by one id. It says nothing about the refresh token rows, whose ids
+  are sequential; the access JWT's `rid` claim is still the row id, readable
+  by the token's holder. A session that signed in before the upgrade that
+  added the column keeps the id it was listed under then (an HMAC of its
+  current refresh row id under the JWT secret): its next refresh stores that
+  id. Only a refresh by a binary from before the column (an old instance in
+  a rolling deploy, or a rollback that kept the column) writes a row without
+  an id, and the session is then listed under that row's HMAC id, which it
+  keeps from there on.
 - `last_refreshed_at` is when the session last signed in or refreshed. An
   active client refreshes about once per access-token TTL, so that is its
   precision; it is not a per-request "last seen".
 - `current` marks the session that made the request, also when that
-  session refreshed while the request ran: it is then marked under its new id.
+  session refreshed while the request ran.
 
 In the OpenAPI document the session schemas are named `AuthSession`,
 `DataListAuthSession`, `AuthRevokeResult`, and `DataAuthRevokeResult`, and
@@ -942,7 +947,7 @@ The framework records every security-sensitive operation in
 | `auth.mfa.enabled` / `auth.mfa.disabled` / `auth.mfa.reset` | MFA turned on (an enrollment confirmed), off by the user, or removed by an operator. |
 | `auth.mfa.recovery_codes_regenerated` / `auth.mfa.recovery_code_used` / `auth.mfa.failed` | The recovery codes replaced; one used; an MFA operation refused a wrong password or code. |
 | `auth.refresh.reuse_detected` | A rotated-away refresh token came back past `RefreshReuseGrace`, or within it once its successor had been rotated again: every session of the user was revoked. |
-| `auth.refresh.reuse_within_grace` | A rotated-away refresh token came back within `RefreshReuseGrace` of its rotation: a 401, nothing revoked. Target type `session` names the successor's session by the id `GET /auth/sessions` showed for it at the time; that id changes when the session next refreshes (in an access TTL at most), so act on it promptly (revoke it, or revoke all); details `successor` is `live` (a sibling tab's session, or a thief's who rotated a stolen token first: the one trace of that) or `ended` (signed out before the request came). |
+| `auth.refresh.reuse_within_grace` | A rotated-away refresh token came back within `RefreshReuseGrace` of its rotation: a 401, nothing revoked. Target type `session` names the successor's session by the id `GET /auth/sessions` lists it under, which its refreshes keep, so the id revokes it (or revoke all); details `successor` is `live` (a sibling tab's session, or a thief's who rotated a stolen token first: the one trace of that) or `ended` (signed out before the request came). |
 | `auth.session.revoked` | `DELETE /auth/sessions…` (`details.scope`: `one`, `others` or `all`). |
 | `auth.email.verified` | `POST /auth/verify-email`. |
 | `auth.password.reset_requested` / `auth.password.reset` | A reset message sent to an account; a password set with its token (`details.sessions_revoked`). |

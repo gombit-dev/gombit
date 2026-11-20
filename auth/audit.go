@@ -66,8 +66,8 @@ const (
 	// also what a thief who rotated a stolen token first leaves when the
 	// legitimate client comes back within the grace, the one trace of it.
 	// TargetType "session" and TargetID name the successor's session by the
-	// id GET /auth/sessions showed for it then, which changes when that
-	// session next refreshes; Details "successor" is "live" (it may be
+	// id GET /auth/sessions lists it under, which its refreshes keep
+	// (AUTH-11); Details "successor" is "live" (it may be
 	// either) or "ended" (signed out before the request came).
 	AuditRefreshReuseWithinGrace AuditAction = "auth.refresh.reuse_within_grace"
 	// AuditSessionRevoked: sessions were revoked (Details "scope": one,
