@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/netip"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/gombit-dev/gombit/config"
@@ -18,11 +19,14 @@ import (
 // copies it, so it describes the sign-in, not the latest refresh. Nothing
 // else about the device is stored; the framework does no geolocation.
 
-// The device columns' sizes on refresh_tokens.
+// sessionUserAgentSize and sessionLocationSize are what the text stored in
+// refresh_tokens.user_agent and .location is cut to. The columns' sizes are
+// the RefreshToken tags in models.go; TestSessionDeviceSizesAreTheColumns
+// holds these to them, and the client_address column to the longest
+// address this file writes.
 const (
-	sessionUserAgentSize     = 255
-	sessionClientAddressSize = 64
-	sessionLocationSize      = 128
+	sessionUserAgentSize = 255
+	sessionLocationSize  = 128
 )
 
 // Coarse client addresses keep the network: an IPv4 /24, an IPv6 /48 (a
@@ -98,14 +102,18 @@ func sessionClientAddress(addr netip.Addr, mode config.SessionClientAddress) str
 	return netip.PrefixFrom(addr, bits).Masked().String()
 }
 
-// storableText is s as every supported database stores it in a column of
-// size bytes: valid UTF-8 (MySQL refuses anything else in utf8mb4), without
-// control characters (PostgreSQL refuses NUL, and none belongs in a label),
-// cut at a character boundary.
+// storableText is s as a one-line label every supported database stores in
+// a column of size bytes: valid UTF-8 (MySQL refuses anything else in
+// utf8mb4), invalid bytes replaced by U+FFFD; without control characters
+// (unicode.IsControl: C0, DEL and C1, so no NUL, which PostgreSQL refuses,
+// no NEL line break and no 8-bit CSI escape), line or paragraph separators
+// (U+2028, U+2029), or bidirectional formatting characters (U+202E and the
+// like, which could make a label read as another); trimmed, and cut at a
+// character boundary.
 func storableText(s string, size int) string {
 	s = strings.ToValidUTF8(s, string(utf8.RuneError))
 	s = strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f {
+		if unicode.IsControl(r) || unicode.In(r, unicode.Zl, unicode.Zp, unicode.Bidi_Control) {
 			return -1
 		}
 		return r

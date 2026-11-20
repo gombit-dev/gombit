@@ -121,16 +121,17 @@ func runSessionDevice(t *testing.T, db *database.DB) {
 		}
 	})
 
-	// The User-Agent is kept as given, as far as a text column of every
-	// supported database can keep it: invalid UTF-8 replaced, control
-	// characters (a NUL, which PostgreSQL refuses) dropped, cut at a
-	// character boundary to 255 bytes. The sign-in succeeds either way.
+	// The User-Agent is kept as given, as far as one line of text in a
+	// column of every supported database can keep it: invalid UTF-8
+	// replaced, control characters of every range (a NUL, which PostgreSQL
+	// refuses; a C1 NEL), line separators and bidi overrides dropped, cut at
+	// a character boundary to 255 bytes. The sign-in succeeds either way.
 	t.Run("user agent the database can store", func(t *testing.T) {
 		e := newDeviceEnv(t, db, config.SessionClientAddressCoarse)
-		ua := "a\x00b\xffc\t" + strings.Repeat("é", 200)
+		ua := "a\x00b\xffc\t\u0085\u2028\u202e" + strings.Repeat("é", 200)
 		ada, _ := signInFrom(t, e, "ua", "203.0.113.7", ua)
 		got := onlySession(t, e, ada.ID).UserAgent
-		if !strings.HasPrefix(got, "ab�c") || len(got) > 255 || len(got) < 250 || !utf8.ValidString(got) || strings.ContainsAny(got, "\x00\t") {
+		if !strings.HasPrefix(got, "ab�c") || len(got) > 255 || len(got) < 250 || !utf8.ValidString(got) || strings.ContainsAny(got, "\x00\t\u0085\u2028\u202e") {
 			t.Fatalf("user agent = %q (%d bytes); want the given one without control characters, invalid bytes replaced, cut to 255 bytes on a character", got, len(got))
 		}
 	})
@@ -212,6 +213,39 @@ func sendFrom(app *framework.App, jar *cookieJar, method, path, body, access, re
 	return rec
 }
 
+// deviceView is the device GET /auth/sessions shows for a session.
+type deviceView struct {
+	UserAgent     string `json:"user_agent"`
+	ClientAddress string `json:"client_address"`
+	Location      string `json:"location"`
+}
+
+// currentDevice is the device GET /auth/sessions, answered in rec, shows
+// for the session that asked, failing t unless exactly one is current.
+func currentDevice(t *testing.T, rec *httptest.ResponseRecorder) deviceView {
+	t.Helper()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /auth/sessions = %d: %s", rec.Code, rec.Body.String())
+	}
+	var envelope dataBody[[]struct {
+		deviceView
+		Current bool `json:"current"`
+	}]
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	var found []deviceView
+	for _, s := range envelope.Data {
+		if s.Current {
+			found = append(found, s.deviceView)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("%d current sessions in %s, want 1", len(found), rec.Body.String())
+	}
+	return found[0]
+}
+
 // TestSessionDeviceHTTP: in both auth modes GET /auth/sessions shows the
 // device the session signed in from, its User-Agent and its address's
 // network, also after a refresh from another device.
@@ -224,11 +258,7 @@ func TestSessionDeviceHTTP(t *testing.T) {
 		away     = "[2001:db8::5]:443"
 		sessions = "/api/v1/auth/sessions"
 	)
-	type device struct {
-		UserAgent     string `json:"user_agent"`
-		ClientAddress string `json:"client_address"`
-		Location      string `json:"location"`
-	}
+	type device = deviceView
 	list := func(t *testing.T, rec *httptest.ResponseRecorder) []device {
 		t.Helper()
 		if rec.Code != http.StatusOK {

@@ -866,7 +866,10 @@ recently refreshed first:
   that did not come through the auth routes), or one that signed in before
   the upgrade that added them.
   - `user_agent` is the `User-Agent` header as the client sent it, cut to
-    255 bytes, with control characters dropped and invalid UTF-8 replaced.
+    255 bytes, as one line of valid text: invalid UTF-8 replaced, and
+    control characters (C0, DEL and C1), line and paragraph separators and
+    bidirectional formatting characters dropped. The `location` an
+    application names is stored the same way.
     The server does not parse it: a client that wants "Firefox on Linux"
     makes that label from it, with the parser of its choice, and keeps the
     raw value for anything its parser does not know.
