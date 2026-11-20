@@ -101,6 +101,7 @@ func assertFrontendInvariants(t *testing.T, files fileMap) {
 		t.Error("jwt client.ts must not include cookie CSRF bootstrap")
 	}
 	assertRuntimeAPIPrefix(t, files, "jwt")
+	assertSessionsPage(t, files)
 }
 
 // assertCookieFrontendInvariants is assertFrontendInvariants' counterpart for
@@ -182,6 +183,7 @@ func assertCookieFrontendInvariants(t *testing.T, files fileMap) {
 	}
 	assertNumberInputEmptyIsZero(t, string(files["frontend/src/pages/ProductFormPage.tsx"]))
 	assertRuntimeAPIPrefix(t, files, "cookie")
+	assertSessionsPage(t, files)
 }
 
 func assertMUIFrontendInvariants(t *testing.T, files fileMap) {
@@ -217,6 +219,46 @@ func assertMUIFrontendInvariants(t *testing.T, files fileMap) {
 	}
 	assertNumberInputEmptyIsZero(t, string(files["frontend/src/pages/ProductFormPage.tsx"]))
 	assertRuntimeAPIPrefix(t, files, "jwt")
+	assertSessionsPage(t, files)
+	if sessions := string(files["frontend/src/pages/SessionsPage.tsx"]); !strings.Contains(sessions, "TableContainer") || !strings.Contains(sessions, "Chip") {
+		t.Error("MUI SessionsPage.tsx missing its Table and the current session's Chip")
+	}
+}
+
+// assertSessionsPage is AUTH-13's contract (#663): the app routes and links
+// /sessions, and the page lists the sessions, ends one, the others or all,
+// and signs this browser out (clearSession, then /login) when it ends its
+// own; a 404 (the session had already ended) lists again.
+func assertSessionsPage(t *testing.T, files fileMap) {
+	t.Helper()
+	page := string(files["frontend/src/pages/SessionsPage.tsx"])
+	if page == "" {
+		t.Fatal("missing frontend/src/pages/SessionsPage.tsx")
+	}
+	for _, want := range []string{
+		`client.GET("/api/v1/auth/sessions")`,
+		`client.DELETE("/api/v1/auth/sessions/{id}"`,
+		`client.DELETE("/api/v1/auth/sessions", {`,
+		`revokeAll("others")`,
+		`revokeAll("all")`,
+		"session.current",
+		"clearSession()",
+		`navigate("/login", { replace: true })`,
+		"err.status === 404",
+		"session.user_agent",
+		"session.client_address",
+		"session.location",
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("SessionsPage.tsx missing %q", want)
+		}
+	}
+	if router := string(files["frontend/src/app/router.tsx"]); !strings.Contains(router, `path="sessions" element={<SessionsPage />}`) {
+		t.Error("router.tsx does not route /sessions to SessionsPage")
+	}
+	if layout := string(files["frontend/src/layouts/AppLayout.tsx"]); !strings.Contains(layout, `to="/sessions"`) {
+		t.Error("AppLayout.tsx does not link /sessions")
+	}
 }
 
 // assert401RetryReusesBufferedBody is the #106 contract: 401 retries must

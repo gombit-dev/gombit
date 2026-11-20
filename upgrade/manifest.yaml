@@ -1527,6 +1527,22 @@ releases:
           the chain, which ends with their expiry.
         refs: [661]
 
+      - id: scaffold-sessions-page
+        kind: informational
+        area: scaffold
+        summary: "A new app has a sessions page (`/sessions`, `frontend/src/pages/SessionsPage.tsx`) listing the signed-in user's sessions and signing them out; an app scaffolded before has none."
+        details: |
+          The page is app-owned, so nothing adds it to an existing app. To
+          add it, copy `frontend/src/pages/SessionsPage.tsx` from an app
+          `gombit new` writes with the same `--ui` and `--auth`, add its
+          route (`<Route path="sessions" element={<SessionsPage />} />`
+          beside the others in `src/app/router.tsx`) and a link to
+          `/sessions` in `src/layouts/AppLayout.tsx`. It uses
+          `GET`/`DELETE {prefix}/auth/sessions` and the device fields
+          `user_agent`, `client_address` and `location`, so it needs this
+          release's server and client.
+        refs: [663]
+
       - id: session-device-schema
         kind: manual
         breaking: true
