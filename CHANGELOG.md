@@ -10,6 +10,20 @@ version.
 
 ## [Unreleased]
 
+### Added
+
+- [Session device metadata](docs/auth.md#sessions) (AUTH-12): `GET
+  {prefix}/auth/sessions` shows each session's `user_agent` (the sign-in's
+  `User-Agent`, cut to 255 bytes, not parsed), `client_address` (by default
+  only its network, an IPv4 /24 or IPv6 /48;
+  `GOMBIT_AUTH_SESSION_CLIENT_ADDRESS=full` or `none`) and `location`
+  (empty unless the app names one with a `SessionLocator`,
+  `framework.WithAuthSessionLocator`; the framework does no geolocation),
+  in both auth modes. They are the sign-in's, kept by every refresh, on new
+  `refresh_tokens` columns (`user_agent`, `client_address`, `location`):
+  migrate before deploying, the same migration as the session id's below
+  ([#662](https://github.com/gombit-dev/gombit/issues/662)).
+
 ### Changed
 
 - **Breaking (schema):** a session's id is stable for its whole life

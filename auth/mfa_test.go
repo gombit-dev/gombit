@@ -410,8 +410,14 @@ func runMFABearer(t *testing.T, db *database.DB) {
 	if !strings.Contains(rec.Body.String(), "mfa_code") {
 		t.Fatalf("the challenge does not name mfa_code: %s", rec.Body.String())
 	}
-	if code := login(codes.Data.RecoveryCodes[0]); code != http.StatusOK {
-		t.Fatalf("login with a recovery code = %d", code)
+	// The second step's session records the device of its request (AUTH-12).
+	rec = sendFrom(app, nil, http.MethodPost, "/api/v1/auth/login", `{"email":"`+plain.Email+`","password":"`+testPassword+`","mfa_code":"`+codes.Data.RecoveryCodes[0]+`"}`, "", "203.0.113.7:51000", "mfa-browser/1")
+	var mfaLogin dataBody[tokenPair]
+	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &mfaLogin) != nil {
+		t.Fatalf("login with a recovery code = %d %s", rec.Code, rec.Body.String())
+	}
+	if got, want := currentDevice(t, bearerRequest(app, http.MethodGet, "/api/v1/auth/sessions", mfaLogin.Data.AccessToken)), (deviceView{UserAgent: "mfa-browser/1", ClientAddress: "203.0.113.0/24"}); got != want {
+		t.Fatalf("the MFA login's session device = %+v, want %+v", got, want)
 	}
 	// The reset: permission, superuser rule, not one's own.
 	managerPair := loginUser(t, app, manager.Email, testPassword)
@@ -452,9 +458,12 @@ func runMFACookie(t *testing.T, db *database.DB) {
 	jar := fetchCSRF(t, app)
 	rec := doRequest(app, jar, http.MethodPost, "/api/v1/auth/login", `{"email":"`+plain.Email+`","password":"`+testPassword+`"}`)
 	assertError(t, rec, http.StatusUnprocessableEntity, "validation_error")
-	rec = doRequest(app, jar, http.MethodPost, "/api/v1/auth/login", `{"email":"`+plain.Email+`","password":"`+testPassword+`","mfa_code":"`+auth.TOTPCode(enrollment.Secret, now)+`"}`)
+	rec = sendFrom(app, jar, http.MethodPost, "/api/v1/auth/login", `{"email":"`+plain.Email+`","password":"`+testPassword+`","mfa_code":"`+auth.TOTPCode(enrollment.Secret, now)+`"}`, "", "[2001:db8:1234:5678::1]:443", "mfa-cookie-browser/1")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("cookie login with the code = %d %s", rec.Code, rec.Body.String())
+	}
+	if got, want := currentDevice(t, doRequest(app, jar, http.MethodGet, "/api/v1/auth/sessions", "")), (deviceView{UserAgent: "mfa-cookie-browser/1", ClientAddress: "2001:db8:1234::/48"}); got != want {
+		t.Fatalf("the MFA cookie login's session device = %+v, want %+v", got, want)
 	}
 	if got := decodeMe(t, doRequest(app, jar, http.MethodGet, "/api/v1/me", "")); got.Email != plain.Email {
 		t.Fatalf("/me = %+v", got)

@@ -83,7 +83,16 @@ type RefreshToken struct {
 	// successor's SessionID. An index for finding a session's head:
 	// ReplacedBy stays the chain's truth.
 	SessionID string `gorm:"size:32;index"`
-	CreatedAt time.Time
+	// UserAgent, ClientAddress and Location describe the device that
+	// started the session (AUTH-12): the sign-in request's User-Agent, its
+	// client address as config.AuthConfig.SessionClientAddress keeps it
+	// (its network by default), and what the application's SessionLocator
+	// named. The login sets them and rotation copies them; empty when
+	// unknown, and on rows from before the columns existed.
+	UserAgent     string `gorm:"size:255"`
+	ClientAddress string `gorm:"size:64"`
+	Location      string `gorm:"size:128"`
+	CreatedAt     time.Time
 }
 
 // TokenPurpose is what a OneTimeToken is for.

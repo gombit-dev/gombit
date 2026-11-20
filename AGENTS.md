@@ -123,8 +123,11 @@ The **AUTH-0** epic (#280) has all ten items, AUTH-1..10 (AUTH-5 released
 in v0.8.0, the rest in v0.9.0), and AUTH-11 (#661): stable session ids
 (`refresh_tokens.session_id`, drawn at login and kept by every rotation; the
 sessions API's id, and how logout finds a session's current token in one
-read). Its other follow-ups, AUTH-12 and AUTH-13 (#662 session device
-metadata, #663 a sessions screen in the generated frontend), are open. It
+read), and AUTH-12 (#662): session device metadata (the sign-in's
+User-Agent, client address coarsened to its network by default,
+`GOMBIT_AUTH_SESSION_CLIENT_ADDRESS`, and an app's `SessionLocator`
+location, on `refresh_tokens`, kept by rotation). Its other follow-up,
+AUTH-13 (#663, a sessions screen in the generated frontend), is open. It
 has AUTH-5 (#335): session
 management in both auth modes (`GET` / `DELETE {prefix}/auth/sessions`,
 `auth.Service.ListSessions` / `RevokeSession` / `RevokeAllSessions`), with

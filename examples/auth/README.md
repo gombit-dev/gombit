@@ -60,7 +60,9 @@ curl -sS -X POST http://127.0.0.1:8080/api/v1/auth/login \
   -H 'Content-Type: application/json' \
   -d '{"email":"ada@example.com","password":"correct-horse"}' >/dev/null
 
-# list: the session making the request has "current": true
+# list: the session making the request has "current": true; each shows the
+# device it signed in from (user_agent, client_address as a /24 or /48
+# network by default, location if the app looks it up)
 SESSIONS=$(curl -sS http://127.0.0.1:8080/api/v1/auth/sessions -H "Authorization: Bearer $ACCESS")
 echo "$SESSIONS"
 OTHER=$(python3 -c 'import json,sys; print(next(s["id"] for s in json.load(sys.stdin)["data"] if not s["current"]))' <<<"$SESSIONS")

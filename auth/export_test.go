@@ -224,3 +224,9 @@ func TOTPCode(secret string, at time.Time) string {
 	}
 	return totpCode(key, totpStep(at))
 }
+
+// ContextWithRequestInfo returns ctx carrying what CaptureRequestInfo
+// records for a request from the client address ip with the User-Agent ua.
+func ContextWithRequestInfo(ctx context.Context, ip, ua string) context.Context {
+	return context.WithValue(ctx, requestInfoKey{}, requestInfo{ip: ip, userAgent: ua})
+}

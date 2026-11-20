@@ -28,6 +28,19 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   `session_id` too; the session is then listed under that row's id,
   and logout still finds its current token along `replaced_by`.
 
+- **Breaking.** Session device metadata adds `refresh_tokens.user_agent`, `client_address` and `location`, which every login and refresh writes: an app migrates before it runs this release. (`session-device-schema`, schema, [#662](https://github.com/gombit-dev/gombit/issues/662))
+
+  - Framework schema: `auth.RefreshToken` (`refresh_tokens`): altered.
+
+  `auth.RefreshToken` gains `UserAgent`, `ClientAddress` and
+  `Location`. Until the columns exist, every login and every token
+  refresh fails (the insert names every column of the model). The
+  same migration as `session-id-schema` adds them: generate and apply
+  it (`gombit db makemigrations`, `gombit db migrate`) before
+  deploying. Existing rows keep NULLs, listed as empty: a session
+  from before the upgrade shows no device, and nothing has to be
+  backfilled.
+
 - `gombit new` puts every framework model in the bootstrap migration and `models.json`; an app created by `gombit new` v0.9.0 lacks five auth models there, so its next migration fails with `table ... already exists`. (`scaffold-registers-every-framework-model`, scaffold, [#675](https://github.com/gombit-dev/gombit/issues/675))
 
   `gombit new` v0.9.0 left `auth.OneTimeToken`, `auth.AuditEvent`,
@@ -74,6 +87,19 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   at a time. Rows written without the id (before the upgrade, or by
   an older binary during a rolling deploy) are still followed along
   the chain, which ends with their expiry.
+
+- `GET {prefix}/auth/sessions` shows the device each session signed in from: `user_agent`, `client_address` (its network by default, `GOMBIT_AUTH_SESSION_CLIENT_ADDRESS`) and `location` (from an app's `SessionLocator`). (`session-device-metadata`, config, [#662](https://github.com/gombit-dev/gombit/issues/662))
+
+  - Configuration: `GOMBIT_AUTH_SESSION_CLIENT_ADDRESS` is new.
+
+  `AuthSession` gains three string fields, always present, empty when
+  unknown. They are the sign-in request's and refreshes keep them.
+  The client address is coarsened to an IPv4 /24 or IPv6 /48 unless
+  `GOMBIT_AUTH_SESSION_CLIENT_ADDRESS` is `full` (or `none`, no
+  address); the framework does no geolocation, and
+  `framework.WithAuthSessionLocator` is how an app names locations.
+  Regenerate the TypeScript client (`gombit client generate`) to
+  see the fields.
 
 - `gombit generate` regenerates a resource whose model lost, renamed or retyped a field, whose `*.gen.go` were deleted or conflicted, or whose `*.gen.go` call a framework API an upgrade changed, instead of failing with a Go compile error from the stale generated files. (`generate-after-field-removal`, cli, [#467](https://github.com/gombit-dev/gombit/issues/467))
 
