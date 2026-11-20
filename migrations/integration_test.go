@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,6 +37,184 @@ CREATE TABLE IF NOT EXISTS widgets (
   name TEXT NOT NULL
 );`,
 		"ALTER TABLE widgets DROP COLUMN name;\nDROP TABLE IF EXISTS widgets;")
+}
+
+func TestMigratePostgresKeepsAtlasRevisionsPerSearchPathSchema(t *testing.T) {
+	if *postgresDSN == "" {
+		t.Skip("set -migrations.postgres-dsn to run Postgres migration integration tests")
+	}
+
+	adminCfg := config.DatabaseConfig{Driver: config.DatabaseDriverPostgres, DSN: *postgresDSN}
+	admin, err := database.Open(adminCfg)
+	if err != nil {
+		t.Fatalf("database.Open() admin error = %v", err)
+	}
+	suffix := fmt.Sprintf("%x", time.Now().UnixNano())
+	schemas := []string{"gombit_482_a_" + suffix, "gombit_482_b_" + suffix}
+	defer func() {
+		for _, schema := range schemas {
+			if err := admin.Exec("DROP SCHEMA IF EXISTS " + quotePostgresIdentifier(schema) + " CASCADE").Error; err != nil {
+				t.Errorf("drop schema %s: %v", schema, err)
+			}
+		}
+		_ = admin.Close()
+	}()
+	for _, schema := range schemas {
+		if err := admin.Exec("CREATE SCHEMA " + quotePostgresIdentifier(schema)).Error; err != nil {
+			t.Fatalf("create schema %s: %v", schema, err)
+		}
+	}
+
+	workDir := t.TempDir()
+	migrationDir := filepath.Join(workDir, "database", "migrations")
+	if err := os.MkdirAll(filepath.Join(migrationDir, downSubdir), 0o750); err != nil {
+		t.Fatalf("mkdir migrations: %v", err)
+	}
+	writeFile(t, filepath.Join(migrationDir, "20260101000000_create_widgets.sql"), "CREATE TABLE widgets (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL);")
+	writeFile(t, filepath.Join(migrationDir, downSubdir, "20260101000000_create_widgets.down.sql"), "DROP TABLE widgets;")
+
+	applyForSchema := func(schema string) (ApplyOptions, *sqlApplyRunner, *bytes.Buffer) {
+		t.Helper()
+		dsn, err := postgresDSNWithSearchPath(*postgresDSN, schema)
+		if err != nil {
+			t.Fatalf("set search_path for %s: %v", schema, err)
+		}
+		cfg := config.DatabaseConfig{Driver: config.DatabaseDriverPostgres, DSN: dsn}
+		runner := &sqlApplyRunner{t: t, cfg: cfg}
+		stdout := new(bytes.Buffer)
+		return ApplyOptions{
+			WorkDir:      workDir,
+			MigrationDir: "database/migrations",
+			Database:     cfg,
+			Stdout:       stdout,
+			Stderr:       io.Discard,
+			runner:       runner,
+			now:          func() time.Time { return time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC) },
+		}, runner, stdout
+	}
+
+	first, firstRunner, _ := applyForSchema(schemas[0])
+	if err := Migrate(context.Background(), first); err != nil {
+		t.Fatalf("Migrate(%s): %v", schemas[0], err)
+	}
+	second, secondRunner, _ := applyForSchema(schemas[1])
+	if err := Migrate(context.Background(), second); err != nil {
+		t.Fatalf("Migrate(%s): %v", schemas[1], err)
+	}
+	if err := Migrate(context.Background(), second); err != nil {
+		t.Fatalf("second Migrate(%s): %v", schemas[1], err)
+	}
+	if len(secondRunner.revisionsSchemas) != 1 {
+		t.Fatalf("second Migrate(%s) invoked Atlas again; revisions schemas = %v", schemas[1], secondRunner.revisionsSchemas)
+	}
+
+	for _, tc := range []struct {
+		schema string
+		runner *sqlApplyRunner
+	}{
+		{schema: schemas[0], runner: firstRunner},
+		{schema: schemas[1], runner: secondRunner},
+	} {
+		cfgDSN, err := postgresDSNWithSearchPath(*postgresDSN, tc.schema)
+		if err != nil {
+			t.Fatalf("set search_path for %s: %v", tc.schema, err)
+		}
+		db, err := database.Open(config.DatabaseConfig{Driver: config.DatabaseDriverPostgres, DSN: cfgDSN})
+		if err != nil {
+			t.Fatalf("open %s: %v", tc.schema, err)
+		}
+		if !db.Migrator().HasTable("widgets") {
+			t.Errorf("widgets table missing from %s after migrate", tc.schema)
+		}
+		versions, err := listAtlasVersions(db.DB, tc.schema)
+		_ = db.Close()
+		if err != nil {
+			t.Fatalf("list Atlas versions in %s: %v", tc.schema, err)
+		}
+		if _, ok := versions["20260101000000"]; !ok {
+			t.Errorf("Atlas revisions in %s = %v, want the migration version", tc.schema, versions)
+		}
+		if len(tc.runner.revisionsSchemas) == 0 || tc.runner.revisionsSchemas[0] != tc.schema {
+			t.Errorf("Atlas revisions schemas for %s = %v, want %s", tc.schema, tc.runner.revisionsSchemas, tc.schema)
+		}
+	}
+
+	status, statusRunner, statusOut := applyForSchema(schemas[1])
+	if err := Status(context.Background(), status); err != nil {
+		t.Fatalf("Status(%s): %v", schemas[1], err)
+	}
+	if !strings.Contains(statusOut.String(), "applied") || !strings.Contains(statusOut.String(), "20260101000000") {
+		t.Errorf("Status(%s) = %q, want applied migration", schemas[1], statusOut.String())
+	}
+	if len(statusRunner.revisionsSchemas) != 1 || statusRunner.revisionsSchemas[0] != schemas[1] {
+		t.Errorf("Atlas status revisions schemas = %v, want [%s]", statusRunner.revisionsSchemas, schemas[1])
+	}
+
+	if err := Rollback(context.Background(), second); err != nil {
+		t.Fatalf("Rollback(%s): %v", schemas[1], err)
+	}
+	for _, tc := range []struct {
+		schema       string
+		wantTable    bool
+		wantRevision bool
+	}{{schema: schemas[0], wantTable: true, wantRevision: true}, {schema: schemas[1], wantTable: false, wantRevision: false}} {
+		dsn, err := postgresDSNWithSearchPath(*postgresDSN, tc.schema)
+		if err != nil {
+			t.Fatalf("set search_path for %s: %v", tc.schema, err)
+		}
+		db, err := database.Open(config.DatabaseConfig{Driver: config.DatabaseDriverPostgres, DSN: dsn})
+		if err != nil {
+			t.Fatalf("open %s after rollback: %v", tc.schema, err)
+		}
+		gotTable := db.Migrator().HasTable("widgets")
+		versions, err := listAtlasVersions(db.DB, tc.schema)
+		_ = db.Close()
+		if err != nil {
+			t.Fatalf("list Atlas versions in %s after rollback: %v", tc.schema, err)
+		}
+		_, gotRevision := versions["20260101000000"]
+		if gotTable != tc.wantTable || gotRevision != tc.wantRevision {
+			t.Errorf("after tenant rollback, %s widgets=%v AtlasRevision=%v, want widgets=%v AtlasRevision=%v",
+				tc.schema, gotTable, gotRevision, tc.wantTable, tc.wantRevision)
+		}
+	}
+
+	if err := Migrate(context.Background(), second); err != nil {
+		t.Fatalf("re-Migrate(%s) after rollback: %v", schemas[1], err)
+	}
+	dsn, err := postgresDSNWithSearchPath(*postgresDSN, schemas[1])
+	if err != nil {
+		t.Fatalf("set search_path for %s: %v", schemas[1], err)
+	}
+	db, err := database.Open(config.DatabaseConfig{Driver: config.DatabaseDriverPostgres, DSN: dsn})
+	if err != nil {
+		t.Fatalf("reopen %s after re-migrate: %v", schemas[1], err)
+	}
+	if !db.Migrator().HasTable("widgets") {
+		t.Error("widgets table missing after re-migrate")
+	}
+	versions, err := listAtlasVersions(db.DB, schemas[1])
+	_ = db.Close()
+	if err != nil {
+		t.Fatalf("list Atlas versions in %s after re-migrate: %v", schemas[1], err)
+	}
+	if _, ok := versions["20260101000000"]; !ok {
+		t.Errorf("Atlas revisions in %s after re-migrate = %v, want the migration version", schemas[1], versions)
+	}
+}
+
+func postgresDSNWithSearchPath(dsn, schema string) (string, error) {
+	u, err := url.Parse(dsn)
+	if err != nil {
+		return "", fmt.Errorf("parse postgres URL: %w", err)
+	}
+	if u.Scheme != "postgres" && u.Scheme != "postgresql" {
+		return "", fmt.Errorf("Postgres integration DSN must be a URL, got scheme %q", u.Scheme)
+	}
+	query := u.Query()
+	query.Set("search_path", schema)
+	u.RawQuery = query.Encode()
+	return u.String(), nil
 }
 
 func TestMigrateRollbackStatusMySQL(t *testing.T) {
@@ -214,12 +393,18 @@ func cleanupDriverDB(t *testing.T, cfg config.DatabaseConfig) {
 }
 
 type sqlApplyRunner struct {
-	t   *testing.T
-	cfg config.DatabaseConfig
+	t                *testing.T
+	cfg              config.DatabaseConfig
+	revisionsSchemas []string
 }
 
 func (r *sqlApplyRunner) Run(ctx context.Context, dir string, name string, args []string, stdout io.Writer, stderr io.Writer) error {
 	r.t.Helper()
+	schema := atlasRevisionsSchemaArg(args)
+	r.revisionsSchemas = append(r.revisionsSchemas, schema)
+	if r.cfg.Driver == config.DatabaseDriverPostgres && schema == "" {
+		return fmt.Errorf("postgres Atlas args are missing --revisions-schema: %v", args)
+	}
 	if len(args) < 2 || args[0] != "migrate" {
 		return fmt.Errorf("unexpected atlas args: %v", args)
 	}
@@ -250,13 +435,14 @@ func (r *sqlApplyRunner) apply(workDir string, args []string, stdout io.Writer) 
 	}
 	defer func() { _ = db.Close() }()
 
-	if err := db.Exec(`
-CREATE TABLE IF NOT EXISTS atlas_schema_revisions (
+	relation := atlasRevisionsRelation(db.DB, atlasRevisionsSchemaArg(args))
+	if err := db.Exec(fmt.Sprintf(`
+CREATE TABLE IF NOT EXISTS %s (
   version varchar(255) PRIMARY KEY,
   description text,
   type varchar(255),
   applied_at timestamp NULL
-)`).Error; err != nil {
+  )`, relation)).Error; err != nil {
 		return err
 	}
 
@@ -265,7 +451,7 @@ CREATE TABLE IF NOT EXISTS atlas_schema_revisions (
 		return err
 	}
 	var existing []string
-	if err := db.Table(atlasRevisionsTable).Select("version").Find(&existing).Error; err != nil {
+	if err := db.Raw(fmt.Sprintf("SELECT version FROM %s", relation)).Scan(&existing).Error; err != nil {
 		return err
 	}
 	applied := make(map[string]struct{}, len(existing))
@@ -284,7 +470,7 @@ CREATE TABLE IF NOT EXISTS atlas_schema_revisions (
 			return err
 		}
 		if err := db.Exec(
-			"INSERT INTO atlas_schema_revisions (version, description, type, applied_at) VALUES (?, ?, ?, ?)",
+			fmt.Sprintf("INSERT INTO %s (version, description, type, applied_at) VALUES (?, ?, ?, ?)", relation),
 			file.Version,
 			file.Name,
 			"sql",
@@ -295,6 +481,15 @@ CREATE TABLE IF NOT EXISTS atlas_schema_revisions (
 	}
 	_, _ = io.WriteString(stdout, "fake atlas apply ok\n")
 	return nil
+}
+
+func atlasRevisionsSchemaArg(args []string) string {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "--revisions-schema" {
+			return args[i+1]
+		}
+	}
+	return ""
 }
 
 func TestRenamePreservesDataPostgres(t *testing.T) {

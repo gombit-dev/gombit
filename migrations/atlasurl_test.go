@@ -207,8 +207,8 @@ func TestAtlasURL(t *testing.T) {
 func TestWithAtlasRevisionsSchema(t *testing.T) {
 	base := []string{"migrate", "apply", "--url", "postgres://localhost/db", "--dir", "file://migrations"}
 
-	gotPG := withAtlasRevisionsSchema(config.DatabaseDriverPostgres, append([]string{}, base...))
-	wantPG := append(append([]string{}, base...), "--revisions-schema", "public")
+	gotPG := withAtlasRevisionsSchema(config.DatabaseDriverPostgres, "tenant1", append([]string{}, base...))
+	wantPG := append(append([]string{}, base...), "--revisions-schema", "tenant1")
 	if len(gotPG) != len(wantPG) {
 		t.Fatalf("postgres args = %v, want %v", gotPG, wantPG)
 	}
@@ -219,7 +219,7 @@ func TestWithAtlasRevisionsSchema(t *testing.T) {
 	}
 
 	for _, driver := range []config.DatabaseDriver{config.DatabaseDriverSQLite, config.DatabaseDriverMySQL} {
-		got := withAtlasRevisionsSchema(driver, append([]string{}, base...))
+		got := withAtlasRevisionsSchema(driver, "tenant1", append([]string{}, base...))
 		if len(got) != len(base) {
 			t.Fatalf("%s args = %v, want unchanged %v", driver, got, base)
 		}

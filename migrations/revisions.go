@@ -235,15 +235,36 @@ func deleteRevisions(db *gorm.DB, versions []string) error {
 	return nil
 }
 
-// atlasRevisionsRelation returns the name Atlas's revision table is read and
-// written under. On PostgreSQL, withAtlasRevisionsSchema pins Atlas to the
-// public schema, so the name is qualified; an unqualified name would follow the
-// connection's search_path (for example tenant1) and miss the table.
-func atlasRevisionsRelation(db *gorm.DB) string {
+// atlasRevisionsSchema resolves the schema both Atlas and Gombit use for
+// revision bookkeeping on this database connection. PostgreSQL's current_schema
+// is the first usable schema in search_path, which is also where unqualified
+// framework tables are created.
+func atlasRevisionsSchema(db *gorm.DB) (string, error) {
+	if !isPostgresDialect(db) {
+		return "", nil
+	}
+	var schema string
+	if err := db.Raw("SELECT current_schema()").Scan(&schema).Error; err != nil {
+		return "", fmt.Errorf("migrations: resolve atlas revisions schema: %w", err)
+	}
+	if schema == "" {
+		return "", errors.New("migrations: PostgreSQL connection has no current schema")
+	}
+	return schema, nil
+}
+
+// atlasRevisionsRelation returns the quoted relation Atlas's revision table is
+// read and written under. PostgreSQL uses the schema resolved once from the
+// connection; other drivers keep their unqualified table name.
+func atlasRevisionsRelation(db *gorm.DB, schema string) string {
 	if isPostgresDialect(db) {
-		return "public." + atlasRevisionsTable
+		return quotePostgresIdentifier(schema) + "." + quotePostgresIdentifier(atlasRevisionsTable)
 	}
 	return atlasRevisionsTable
+}
+
+func quotePostgresIdentifier(identifier string) string {
+	return `"` + strings.ReplaceAll(identifier, `"`, `""`) + `"`
 }
 
 func isPostgresDialect(db *gorm.DB) bool {
@@ -252,22 +273,22 @@ func isPostgresDialect(db *gorm.DB) bool {
 
 // atlasRevisionsExist reports whether Atlas's revision table exists at the
 // location atlasRevisionsRelation names.
-func atlasRevisionsExist(db *gorm.DB) (bool, error) {
+func atlasRevisionsExist(db *gorm.DB, schema string) (bool, error) {
 	if !isPostgresDialect(db) {
 		return db.Migrator().HasTable(atlasRevisionsTable), nil
 	}
 	var exists bool
-	if err := db.Raw("SELECT to_regclass(?) IS NOT NULL", atlasRevisionsRelation(db)).Scan(&exists).Error; err != nil {
+	if err := db.Raw("SELECT to_regclass(?) IS NOT NULL", atlasRevisionsRelation(db, schema)).Scan(&exists).Error; err != nil {
 		return false, fmt.Errorf("migrations: check atlas revisions: %w", err)
 	}
 	return exists, nil
 }
 
-func deleteAtlasRevisions(db *gorm.DB, versions []string) error {
+func deleteAtlasRevisions(db *gorm.DB, schema string, versions []string) error {
 	if len(versions) == 0 {
 		return nil
 	}
-	exists, err := atlasRevisionsExist(db)
+	exists, err := atlasRevisionsExist(db, schema)
 	if err != nil {
 		return err
 	}
@@ -275,7 +296,7 @@ func deleteAtlasRevisions(db *gorm.DB, versions []string) error {
 		return nil
 	}
 	if err := db.Exec(
-		fmt.Sprintf("DELETE FROM %s WHERE version IN ?", atlasRevisionsRelation(db)),
+		fmt.Sprintf("DELETE FROM %s WHERE version IN ?", atlasRevisionsRelation(db, schema)),
 		versions,
 	).Error; err != nil {
 		return fmt.Errorf("migrations: delete atlas revisions: %w", err)
@@ -283,12 +304,12 @@ func deleteAtlasRevisions(db *gorm.DB, versions []string) error {
 	return nil
 }
 
-func listAtlasVersions(db *gorm.DB) (map[string]struct{}, error) {
+func listAtlasVersions(db *gorm.DB, schema string) (map[string]struct{}, error) {
 	out := make(map[string]struct{})
 	if db == nil {
 		return out, nil
 	}
-	exists, err := atlasRevisionsExist(db)
+	exists, err := atlasRevisionsExist(db, schema)
 	if err != nil {
 		return nil, err
 	}
@@ -296,7 +317,7 @@ func listAtlasVersions(db *gorm.DB) (map[string]struct{}, error) {
 		return out, nil
 	}
 	var versions []string
-	if err := db.Table(atlasRevisionsRelation(db)).Select("version").Find(&versions).Error; err != nil {
+	if err := db.Raw(fmt.Sprintf("SELECT version FROM %s", atlasRevisionsRelation(db, schema))).Scan(&versions).Error; err != nil {
 		return nil, fmt.Errorf("migrations: list atlas revisions: %w", err)
 	}
 	for _, version := range versions {

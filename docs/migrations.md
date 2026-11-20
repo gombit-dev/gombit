@@ -471,15 +471,37 @@ gombit db rollback [--dir database/migrations] [--atlas-bin atlas]
 1. Ensures the Gombit revision table `framework_migrations` exists.
 2. Runs Atlas Community Edition
    `atlas migrate apply --url ... --dir file://... --allow-dirty`
-   (PostgreSQL also passes `--revisions-schema public` so
-   `atlas_schema_revisions` is a table in `public`, matching Gombit's ledger
-   sync; Atlas's default dedicated revisions schema is not used).
+   (PostgreSQL resolves `current_schema()` from the connection and passes it as
+   `--revisions-schema`, so `atlas_schema_revisions` and `framework_migrations`
+   stay in the same schema selected by `search_path`; Atlas's default dedicated
+   revisions schema is not used).
    `--allow-dirty` is required because Gombit creates `framework_migrations`
    before apply, and real apps already have schema tables.
 3. Records into `framework_migrations` only the pending versions that appear in
-   `atlas_schema_revisions` after apply (`version`, `name`, `batch`,
-   `applied_at`; no checksum; D4). This keeps the Gombit ledger aligned with
-   Atlas when the two previously diverged.
+   the schema-local `atlas_schema_revisions` table after apply (`version`,
+   `name`, `batch`, `applied_at`; no checksum; D4). The schema is resolved once
+   per command and used for both Atlas's flag and Gombit's reads and writes.
+
+PostgreSQL apps that used a non-`public` `search_path` with an earlier Gombit
+release may have a shared Atlas history in `public.atlas_schema_revisions`.
+Before applying a new pending migration after upgrading, copy only the rows
+that each schema's `framework_migrations` says it applied. For each affected
+schema, replace `tenant1` below with the connection's `current_schema()` and
+run:
+
+```sql
+CREATE TABLE IF NOT EXISTS "tenant1".atlas_schema_revisions
+  (LIKE public.atlas_schema_revisions INCLUDING ALL);
+INSERT INTO "tenant1".atlas_schema_revisions
+SELECT atlas.*
+FROM public.atlas_schema_revisions AS atlas
+JOIN "tenant1".framework_migrations AS framework USING (version)
+ON CONFLICT (version) DO NOTHING;
+```
+
+This keeps histories separate: rows that another schema added to the old
+shared ledger are not copied unless that schema's own framework ledger also
+contains the version.
 
 If nothing is pending relative to `framework_migrations`, migrate prints
 `No pending migrations.` and does not invoke Atlas apply.

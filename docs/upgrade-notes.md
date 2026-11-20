@@ -12,6 +12,15 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 ### Manual: action required
 
+- PostgreSQL Atlas migration history now follows the connection's `current_schema()` instead of sharing `public.atlas_schema_revisions` across schemas. (`postgres-atlas-revisions-per-schema`, schema, [#482](https://github.com/gombit-dev/gombit/issues/482))
+
+  If an app used a non-`public` `search_path` with an earlier Gombit
+  release, `public.atlas_schema_revisions` may contain history shared
+  by multiple schemas. Before applying the next pending migration,
+  seed each affected schema's Atlas table from the matching versions
+  in that schema's `framework_migrations` table. The SQL procedure is
+  in [the PostgreSQL migration recovery note](migrations.md#apply).
+
 - `types.Date` keeps its calendar day whatever the driver's time zone, except, with `parseTime=true`, a day a MySQL `loc` skipped whole; dates a location west of UTC already moved stay moved. (`date-driver-location`, behavior, [#478](https://github.com/gombit-dev/gombit/issues/478))
 
   Only an app whose DSN sets a location other than UTC is affected:

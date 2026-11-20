@@ -36,6 +36,11 @@ func Status(ctx context.Context, opts ApplyOptions) error {
 	}
 	defer func() { _ = db.Close() }()
 
+	revisionsSchema, err := atlasRevisionsSchema(db.DB)
+	if err != nil {
+		return err
+	}
+
 	if err := ensureRevisionsTable(db.DB); err != nil {
 		return err
 	}
@@ -87,7 +92,7 @@ func Status(ctx context.Context, opts ApplyOptions) error {
 		"--dir",
 		"file://" + filepath.ToSlash(migrationDir),
 	}
-	args = withAtlasRevisionsSchema(opts.Database.Driver, args)
+	args = withAtlasRevisionsSchema(opts.Database.Driver, revisionsSchema, args)
 	hints := newHintWriter(opts.Stderr)
 	runErr := opts.runner.Run(ctx, absWorkDir, opts.AtlasBinary, args, opts.Stdout, hints)
 	hints.Flush()

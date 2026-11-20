@@ -10,6 +10,15 @@ version.
 
 ## [Unreleased]
 
+### Fixed
+
+- PostgreSQL migration bookkeeping now keeps `atlas_schema_revisions` in the
+  connection's current schema, alongside `framework_migrations`, so schemas in
+  one database no longer share Atlas history. Apps that previously used a
+  non-`public` `search_path` need a one-time per-schema history copy before
+  their next pending migration; see [the migration upgrade note](docs/migrations.md#apply)
+  ([#482](https://github.com/gombit-dev/gombit/issues/482)).
+
 ### Added
 
 - [External identity providers](docs/auth.md#external-identity-providers)

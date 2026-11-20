@@ -44,6 +44,11 @@ func Rollback(ctx context.Context, opts ApplyOptions) error {
 	}
 	defer func() { _ = db.Close() }()
 
+	revisionsSchema, err := atlasRevisionsSchema(db.DB)
+	if err != nil {
+		return err
+	}
+
 	if err := ensureRevisionsTable(db.DB); err != nil {
 		return err
 	}
@@ -122,7 +127,7 @@ func Rollback(ctx context.Context, opts ApplyOptions) error {
 	if err := deleteRevisions(execDB, versions); err != nil {
 		return rollbackFail(tx, useTx, versions, "", err, "delete revisions")
 	}
-	if err := deleteAtlasRevisions(execDB, versions); err != nil {
+	if err := deleteAtlasRevisions(execDB, revisionsSchema, versions); err != nil {
 		return rollbackFail(tx, useTx, versions, "", err, "delete atlas revisions")
 	}
 	if useTx {

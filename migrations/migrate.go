@@ -103,6 +103,11 @@ func Migrate(ctx context.Context, opts ApplyOptions) error {
 	}
 	defer func() { _ = db.Close() }()
 
+	revisionsSchema, err := atlasRevisionsSchema(db.DB)
+	if err != nil {
+		return err
+	}
+
 	if err := ensureRevisionsTable(db.DB); err != nil {
 		return err
 	}
@@ -137,7 +142,7 @@ func Migrate(ctx context.Context, opts ApplyOptions) error {
 		// framework_migrations (and later app tables) make the DB non-empty before Atlas runs.
 		"--allow-dirty",
 	}
-	args = withAtlasRevisionsSchema(opts.Database.Driver, args)
+	args = withAtlasRevisionsSchema(opts.Database.Driver, revisionsSchema, args)
 	hints := newHintWriter(opts.Stderr)
 	err = opts.runner.Run(ctx, absWorkDir, opts.AtlasBinary, args, opts.Stdout, hints)
 	hints.Flush()
@@ -145,7 +150,7 @@ func Migrate(ctx context.Context, opts ApplyOptions) error {
 		return fmt.Errorf("migrations: atlas migrate apply: %w", err)
 	}
 
-	atlasVersions, err := listAtlasVersions(db.DB)
+	atlasVersions, err := listAtlasVersions(db.DB, revisionsSchema)
 	if err != nil {
 		return err
 	}

@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"io"
-	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -14,16 +13,10 @@ import (
 	"gorm.io/gorm"
 )
 
-// TestAtlasRevisionsRelationPostgresIsPublicSchema guards issue #482: on
-// PostgreSQL, Atlas's revision table is pinned to the public schema by
-// withAtlasRevisionsSchema, so Gombit's reads and writes must name public
-// explicitly rather than follow the connection's search_path (for example
-// tenant1), where the unqualified name would not exist.
-//
-// No server is needed: a recording database/sql driver answers the queries, so
-// the statements the existence probe, list and delete paths actually send are
-// the ones asserted.
-func TestAtlasRevisionsRelationPostgresIsPublicSchema(t *testing.T) {
+// TestAtlasRevisionsRelationPostgresUsesCurrentSchema guards issue #482. The
+// same schema resolved from the connection must qualify Gombit's reads/writes
+// and the Atlas CLI flag, rather than being hard-coded to public.
+func TestAtlasRevisionsRelationPostgresUsesCurrentSchema(t *testing.T) {
 	recorder := &queryRecorder{}
 	sqlDB := openRecordingDB(t, recorder)
 	db, err := gorm.Open(postgres.New(postgres.Config{Conn: sqlDB}), &gorm.Config{DisableAutomaticPing: true})
@@ -31,54 +24,72 @@ func TestAtlasRevisionsRelationPostgresIsPublicSchema(t *testing.T) {
 		t.Fatalf("open postgres dialector: %v", err)
 	}
 
-	versions, err := listAtlasVersions(db)
+	schema, err := atlasRevisionsSchema(db)
+	if err != nil {
+		t.Fatalf("atlasRevisionsSchema: %v", err)
+	}
+	if schema != "tenant1" {
+		t.Fatalf("atlasRevisionsSchema() = %q, want tenant1", schema)
+	}
+	versions, err := listAtlasVersions(db, schema)
 	if err != nil {
 		t.Fatalf("listAtlasVersions: %v", err)
 	}
 	if _, ok := versions["20260101000000"]; !ok {
 		t.Fatalf("listAtlasVersions() = %v, want version 20260101000000 read back", versions)
 	}
-	if err := deleteAtlasRevisions(db, []string{"20260101000000"}); err != nil {
+	if err := deleteAtlasRevisions(db, schema, []string{"20260101000000"}); err != nil {
 		t.Fatalf("deleteAtlasRevisions: %v", err)
 	}
 
-	qualified := regexp.MustCompile(`"?public"?\."?atlas_schema_revisions"?`)
-	sawProbe, sawList, sawDelete := false, false, false
+	relation := `"tenant1"."atlas_schema_revisions"`
+	sawSchema, sawProbe, sawList, sawDelete := false, false, false, false
 	for _, q := range recorder.snapshot() {
-		if strings.Contains(q, "to_regclass") {
-			sawProbe = true
+		if strings.Contains(q.query, "current_schema()") {
+			sawSchema = true
 		}
-		if strings.HasPrefix(q, "SELECT") && strings.Contains(q, "version") && strings.Contains(q, "atlas_schema_revisions") && !strings.Contains(q, "to_regclass") {
+		if strings.Contains(q.query, "to_regclass") {
+			sawProbe = true
+			if len(q.args) != 1 || q.args[0].Value != relation {
+				t.Errorf("to_regclass probe args = %v, want [%q]", q.args, relation)
+			}
+		}
+		if strings.HasPrefix(q.query, "SELECT") && strings.Contains(q.query, "version") && strings.Contains(q.query, "atlas_schema_revisions") && !strings.Contains(q.query, "to_regclass") {
 			sawList = true
 		}
-		if strings.HasPrefix(q, "DELETE") {
+		if strings.HasPrefix(q.query, "DELETE") {
 			sawDelete = true
 		}
-		if strings.Contains(q, "atlas_schema_revisions") && !qualified.MatchString(q) {
-			t.Errorf("statement %q names atlas_schema_revisions without the public schema; want public.atlas_schema_revisions", q)
+		if strings.Contains(q.query, "atlas_schema_revisions") && !strings.Contains(q.query, relation) && !(len(q.args) == 1 && q.args[0].Value == relation) {
+			t.Errorf("statement %q does not use the resolved relation %s", q.query, relation)
 		}
 	}
-	if !sawProbe || !sawList || !sawDelete {
-		t.Fatalf("expected probe, list and delete statements; got probe=%v list=%v delete=%v in %q",
-			sawProbe, sawList, sawDelete, recorder.snapshot())
+	if !sawSchema || !sawProbe || !sawList || !sawDelete {
+		t.Fatalf("expected schema resolution, probe, list and delete statements; got schema=%v probe=%v list=%v delete=%v in %v",
+			sawSchema, sawProbe, sawList, sawDelete, recorder.snapshot())
 	}
 }
 
 type queryRecorder struct {
 	mu      sync.Mutex
-	queries []string
+	queries []recordedQuery
 }
 
-func (r *queryRecorder) record(q string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.queries = append(r.queries, strings.TrimSpace(q))
+type recordedQuery struct {
+	query string
+	args  []driver.NamedValue
 }
 
-func (r *queryRecorder) snapshot() []string {
+func (r *queryRecorder) record(q string, args []driver.NamedValue) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return append([]string(nil), r.queries...)
+	r.queries = append(r.queries, recordedQuery{query: strings.TrimSpace(q), args: append([]driver.NamedValue(nil), args...)})
+}
+
+func (r *queryRecorder) snapshot() []recordedQuery {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]recordedQuery(nil), r.queries...)
 }
 
 func openRecordingDB(t *testing.T, recorder *queryRecorder) *sql.DB {
@@ -105,9 +116,11 @@ func (c *recordingConn) Prepare(string) (driver.Stmt, error) {
 func (c *recordingConn) Close() error              { return nil }
 func (c *recordingConn) Begin() (driver.Tx, error) { return nil, driver.ErrSkip }
 
-func (c *recordingConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
-	c.rec.record(query)
+func (c *recordingConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	c.rec.record(query, args)
 	switch {
+	case strings.Contains(query, "current_schema()"):
+		return &staticRows{cols: []string{"current_schema"}, vals: [][]driver.Value{{"tenant1"}}}, nil
 	case strings.Contains(query, "to_regclass"):
 		return &staticRows{cols: []string{"exists"}, vals: [][]driver.Value{{true}}}, nil
 	case strings.Contains(query, "information_schema"):
@@ -118,8 +131,8 @@ func (c *recordingConn) QueryContext(_ context.Context, query string, _ []driver
 	return &staticRows{cols: []string{"x"}}, nil
 }
 
-func (c *recordingConn) ExecContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Result, error) {
-	c.rec.record(query)
+func (c *recordingConn) ExecContext(_ context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	c.rec.record(query, args)
 	return driver.RowsAffected(1), nil
 }
 

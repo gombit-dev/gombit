@@ -509,6 +509,19 @@ releases:
 
   - version: unreleased
     changes:
+      - id: postgres-atlas-revisions-per-schema
+        kind: manual
+        area: schema
+        summary: "PostgreSQL Atlas migration history now follows the connection's `current_schema()` instead of sharing `public.atlas_schema_revisions` across schemas."
+        details: |
+          If an app used a non-`public` `search_path` with an earlier Gombit
+          release, `public.atlas_schema_revisions` may contain history shared
+          by multiple schemas. Before applying the next pending migration,
+          seed each affected schema's Atlas table from the matching versions
+          in that schema's `framework_migrations` table. The SQL procedure is
+          in [the PostgreSQL migration recovery note](migrations.md#apply).
+        refs: [482]
+
       - id: date-driver-location
         kind: manual
         area: behavior
