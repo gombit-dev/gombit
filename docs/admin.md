@@ -50,9 +50,9 @@ _ = auth.GrantPermissionToGroup(ctx, db, &viewers, &permission)
 _ = auth.AddUserToGroup(ctx, db, &user, &viewers)
 ```
 
-Generated applications include `auth.User`, `auth.RefreshToken`,
-`auth.Group`, and `auth.Permission` in their complete `AutoMigrate`/Atlas
-desired-schema list. Production `gombit createsuperuser` still does not run
+Generated applications include every framework model (the auth models,
+`auth.User`, `auth.Group` and `auth.Permission` among them, and
+`claims.Claim`) in their complete `AutoMigrate`/Atlas desired-schema list. Production `gombit createsuperuser` still does not run
 `AutoMigrate`; migrate the application before invoking it.
 
 CSRF on POST/PATCH/DELETE is the existing M5-3 global middleware

@@ -52,6 +52,24 @@ version.
   `ERROR_ACCESS_DENIED` with `STATUS_FILE_DELETED`; only
   `STATUS_DELETE_PENDING` was mapped to not-found
   ([#639](https://github.com/gombit-dev/gombit/pull/639)).
+- `gombit new` puts every framework model in the bootstrap migration and
+  `database/migrations/models.json`, taking them from the framework's own
+  list. v0.9.0 left out the five auth models it added (`auth.OneTimeToken`,
+  `AuditEvent`, `TOTPFactor`, `RecoveryCode`, `IdentityLink`), whose tables
+  the scaffolded `AutoMigrate` creates at startup, outside Atlas's history.
+  A new app then failed `gombit db check`. The tutorial's next step,
+  `gombit make resource` and `gombit db migrate`, failed because that
+  migration created the tables again (`table auth_one_time_tokens already
+  exists` on SQLite). An app created by `gombit new` v0.9.0 needs a one-time
+  edit of that migration; the upgrade notes
+  (`scaffold-registers-every-framework-model`) give it
+  ([#675](https://github.com/gombit-dev/gombit/pull/675)).
+- `gombit db check` skips its model-registry layer when
+  `internal/platform/database.go` calls no `AutoMigrate` method (as in an
+  app whose schema comes from its migrations), instead of failing with "no
+  AutoMigrate call"; `gombit db makemigrations --forget-model` no longer
+  fails there either. A file that does not parse is still an error
+  ([#675](https://github.com/gombit-dev/gombit/pull/675)).
 
 ## [0.9.0] — 2026-11-16
 

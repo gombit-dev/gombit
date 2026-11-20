@@ -256,6 +256,53 @@ func AutoMigrate(db *database.DB) error {
 	}
 }
 
+// TestCheckModelRegistrySkipsWithoutAutoMigrate: an app that applies its
+// schema by migrations alone keeps internal/platform/database.go to open the
+// database and has no AutoMigrate call. models.json is then the only
+// declaration of its models, so the layer has nothing to compare and is
+// skipped, as with no platform file; it used to fail db check with "no
+// AutoMigrate call".
+func TestCheckModelRegistrySkipsWithoutAutoMigrate(t *testing.T) {
+	work := t.TempDir()
+	platform := filepath.Join(work, "internal", "platform", "database.go")
+	if err := os.MkdirAll(filepath.Dir(platform), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(platform, []byte(`package platform
+
+import (
+	"github.com/gombit-dev/gombit/config"
+	"github.com/gombit-dev/gombit/database"
+)
+
+func OpenDatabase(cfg config.DatabaseConfig) (*database.DB, error) {
+	return database.Open(cfg)
+}
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	registry := filepath.Join(work, "database", "migrations")
+	if err := os.MkdirAll(registry, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrations.SaveRegistry(registry, []migrations.Model{{ImportPath: "github.com/gombit-dev/gombit/auth", TypeName: "User"}}); err != nil {
+		t.Fatal(err)
+	}
+	l := checkModelRegistry(checkOptions{dir: migrations.DirOptions{WorkDir: work}})
+	if l.Status != layerSkipped || !strings.Contains(l.Detail, "AutoMigrate") {
+		t.Fatalf("no AutoMigrate call = %+v, want skipped", l)
+	}
+
+	// A file that does not parse is not "no AutoMigrate call": it may well
+	// have one, so the layer reports the error instead of skipping.
+	if err := os.WriteFile(platform, []byte("package platform\n\nfunc AutoMigrate(db *database.DB) error {\n<<<<<<< HEAD\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if l := checkModelRegistry(checkOptions{dir: migrations.DirOptions{WorkDir: work}}); l.Status != layerError {
+		t.Fatalf("unparsable platform file = %+v, want error", l)
+	}
+}
+
 func stubInspectDatabase(t *testing.T, fn func(context.Context, migrations.ApplyOptions) (migrations.DatabaseState, error)) {
 	t.Helper()
 	prev := inspectDatabase

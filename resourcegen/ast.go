@@ -2,6 +2,7 @@ package resourcegen
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/format"
@@ -264,10 +265,16 @@ func insertAutoMigrateArg(file *ast.File, pkgName, typeName string) error {
 		return false
 	})
 	if !found {
-		return fmt.Errorf("resourcegen: no AutoMigrate call in %s", platformDBRel)
+		return fmt.Errorf("resourcegen: %w in %s", errNoAutoMigrate, platformDBRel)
 	}
 	return nil
 }
+
+// errNoAutoMigrate is a platform database.go that calls no AutoMigrate
+// method, as in an app whose schema comes from its migrations. The file then
+// lists no models; a migration the app runs some other way (auth.Migrate, a
+// helper in another file) is not visible in it.
+var errNoAutoMigrate = errors.New("no AutoMigrate call")
 
 // CollectAutoMigrateModels returns every `&pkg.Type{}` argument of AutoMigrate
 // calls in src, resolved to import path + type name via the file's imports.
@@ -320,7 +327,7 @@ func CollectAutoMigrateModels(src []byte) ([]migrations.Model, error) {
 		return nil, resolveErr
 	}
 	if !found {
-		return nil, fmt.Errorf("resourcegen: no AutoMigrate call in %s", platformDBRel)
+		return nil, fmt.Errorf("resourcegen: %w in %s", errNoAutoMigrate, platformDBRel)
 	}
 	return models, nil
 }
