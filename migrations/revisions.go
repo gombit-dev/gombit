@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gombit-dev/gombit/config"
 	"gorm.io/gorm"
 )
 
@@ -234,15 +235,47 @@ func deleteRevisions(db *gorm.DB, versions []string) error {
 	return nil
 }
 
+// atlasRevisionsRelation returns the name Atlas's revision table is read and
+// written under. On PostgreSQL, withAtlasRevisionsSchema pins Atlas to the
+// public schema, so the name is qualified; an unqualified name would follow the
+// connection's search_path (for example tenant1) and miss the table.
+func atlasRevisionsRelation(db *gorm.DB) string {
+	if isPostgresDialect(db) {
+		return "public." + atlasRevisionsTable
+	}
+	return atlasRevisionsTable
+}
+
+func isPostgresDialect(db *gorm.DB) bool {
+	return db.Name() == string(config.DatabaseDriverPostgres)
+}
+
+// atlasRevisionsExist reports whether Atlas's revision table exists at the
+// location atlasRevisionsRelation names.
+func atlasRevisionsExist(db *gorm.DB) (bool, error) {
+	if !isPostgresDialect(db) {
+		return db.Migrator().HasTable(atlasRevisionsTable), nil
+	}
+	var exists bool
+	if err := db.Raw("SELECT to_regclass(?) IS NOT NULL", atlasRevisionsRelation(db)).Scan(&exists).Error; err != nil {
+		return false, fmt.Errorf("migrations: check atlas revisions: %w", err)
+	}
+	return exists, nil
+}
+
 func deleteAtlasRevisions(db *gorm.DB, versions []string) error {
 	if len(versions) == 0 {
 		return nil
 	}
-	if !db.Migrator().HasTable(atlasRevisionsTable) {
+	exists, err := atlasRevisionsExist(db)
+	if err != nil {
+		return err
+	}
+	if !exists {
 		return nil
 	}
 	if err := db.Exec(
-		fmt.Sprintf("DELETE FROM %s WHERE version IN ?", atlasRevisionsTable),
+		fmt.Sprintf("DELETE FROM %s WHERE version IN ?", atlasRevisionsRelation(db)),
 		versions,
 	).Error; err != nil {
 		return fmt.Errorf("migrations: delete atlas revisions: %w", err)
@@ -252,11 +285,18 @@ func deleteAtlasRevisions(db *gorm.DB, versions []string) error {
 
 func listAtlasVersions(db *gorm.DB) (map[string]struct{}, error) {
 	out := make(map[string]struct{})
-	if db == nil || !db.Migrator().HasTable(atlasRevisionsTable) {
+	if db == nil {
+		return out, nil
+	}
+	exists, err := atlasRevisionsExist(db)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
 		return out, nil
 	}
 	var versions []string
-	if err := db.Table(atlasRevisionsTable).Select("version").Find(&versions).Error; err != nil {
+	if err := db.Table(atlasRevisionsRelation(db)).Select("version").Find(&versions).Error; err != nil {
 		return nil, fmt.Errorf("migrations: list atlas revisions: %w", err)
 	}
 	for _, version := range versions {
