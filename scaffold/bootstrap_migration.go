@@ -5,15 +5,22 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"slices"
 
 	"github.com/gombit-dev/gombit/config"
 	"github.com/gombit-dev/gombit/migrations"
+	"github.com/gombit-dev/gombit/upgrade"
 )
 
 // bootstrapModels lists the GORM models internal/platform/database.go.tmpl
 // registers for AutoMigrate: the framework's own auth and storage-claims
 // tables plus the product/ example, in the same order the template writes
-// them.
+// them. The framework's are upgrade.FrameworkModels, which a test holds to
+// every Models() the framework exports, so a model the framework adds is in
+// the bootstrap migration and the registry: a copy of the list kept here
+// missed the five auth models v0.9.0 added, whose tables AutoMigrate then
+// made outside Atlas's history, so the next migration created them again and
+// failed. A test holds the template's AutoMigrate call to this list.
 //
 // AutoMigrate runs at every app startup (app.OnStart), creating these tables
 // directly through GORM. Without a migration on disk for them from the
@@ -28,15 +35,8 @@ import (
 // (chapter 3's own pattern) merges with this registry instead of treating
 // its single model as the entire desired schema.
 func bootstrapModels(module string) []migrations.Model {
-	const authImport = "github.com/gombit-dev/gombit/auth"
-	return []migrations.Model{
-		{ImportPath: authImport, TypeName: "User"},
-		{ImportPath: authImport, TypeName: "RefreshToken"},
-		{ImportPath: authImport, TypeName: "Group"},
-		{ImportPath: authImport, TypeName: "Permission"},
-		{ImportPath: "github.com/gombit-dev/gombit/storage/claims", TypeName: "Claim"},
-		{ImportPath: module + "/internal/product", TypeName: "Product"},
-	}
+	return append(slices.Clone(upgrade.FrameworkModels),
+		migrations.Model{ImportPath: module + "/internal/product", TypeName: "Product"})
 }
 
 // seedBootstrapMigration writes the initial database/migrations/ entry
