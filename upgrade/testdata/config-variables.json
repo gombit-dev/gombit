@@ -1,5 +1,5 @@
 {
-  "version": "v0.9.0",
+  "version": "v0.10.0",
   "variables": [
     {
       "name": "GOMBIT_API_PREFIX",
@@ -77,6 +77,13 @@
       "default": "30s",
       "test_default": "30s",
       "production_default": "30s"
+    },
+    {
+      "name": "GOMBIT_AUTH_SESSION_CLIENT_ADDRESS",
+      "secret": false,
+      "default": "coarse",
+      "test_default": "coarse",
+      "production_default": "coarse"
     },
     {
       "name": "GOMBIT_AUTH_THROTTLE_DISABLED",
