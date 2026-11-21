@@ -8,6 +8,41 @@ What each release asks of an application moving to it, newest first. This
 page, the release notes, and the upgrade tooling all come from the same
 compatibility manifest (see [upgrade.md](upgrade.md)).
 
+## Unreleased
+
+### Manual: action required
+
+- A scaffolded app approves esbuild's build script for pnpm in `frontend/pnpm-workspace.yaml`; an app scaffolded before has no such file, so `pnpm install` fails there. (`frontend-pnpm-esbuild-approval`, scaffold, [#509](https://github.com/gombit-dev/gombit/issues/509))
+
+  With pnpm 11 or later, `pnpm install` in `frontend/` fails with
+  `ERR_PNPM_IGNORED_BUILDS` until esbuild's build script is approved.
+  If `frontend/pnpm-workspace.yaml` is missing, create it with both
+  the `packages` entry required by pnpm 9 and the esbuild approval:
+
+  ```yaml
+  packages:
+    - .
+
+  allowBuilds:
+    esbuild: true
+  ```
+
+  If pnpm already wrote that file with a placeholder
+  (`esbuild: set this to true or false`), change the placeholder to
+  `true`. An app that runs npm needs no change. pnpm 10.26 and later
+  also honors `allowBuilds`; older pnpm 10 may warn that the build
+  script was ignored, but esbuild's optional platform package lets
+  the install succeed. Then run `gombit dev` or `gombit build --embed`
+  again.
+
+### Informational
+
+- `gombit dev` and `gombit build --embed` run `npm` unless `frontend/pnpm-lock.yaml` exists; `pnpm` runs only when `npm` is absent. (`frontend-npm-before-pnpm`, behavior, [#509](https://github.com/gombit-dev/gombit/issues/509))
+
+  An app that has both tools and no `frontend/pnpm-lock.yaml` now runs
+  `npm` where it ran `pnpm`. An app with a `pnpm-lock.yaml` still runs
+  `pnpm`.
+
 ## v0.10.0
 
 ### Manual: action required

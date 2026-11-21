@@ -1,4 +1,5 @@
-# pnpm 9 requires a packages field; listing . keeps this workspace valid there.
+# pnpm 9 refuses a pnpm-workspace.yaml without a packages field; listing . keeps
+# this file valid there.
 packages:
   - .
 
