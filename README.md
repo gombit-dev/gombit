@@ -17,7 +17,7 @@ gombit new tasks --database sqlite --auth cookie --ui mui
 cd tasks && gombit dev
 ```
 
-> **Status: pre-1.0 (v0.9).** The CRUD loop, the admin, and schema-safety
+> **Status: pre-1.0 (v0.10).** The CRUD loop, the admin, and schema-safety
 > tooling are shipped and CI-gated across SQLite, PostgreSQL, and MySQL;
 > background jobs are shipped and CI-gated against Redis; object storage and
 > upgrade tooling are shipped; and a fault-injection suite runs on every PR.
@@ -319,8 +319,9 @@ dependency apply, deprecation check, the codemod runner, config, contract and
 framework-schema analysis), the compatibility policy, and session management
 (v0.8) · the account-security lifecycle: email verification, password reset
 and change, email change, credential throttling, account state, the audit
-trail, TOTP MFA, and external identity providers (v0.9). See
-the [changelog](CHANGELOG.md) for detail.
+trail, TOTP MFA, and external identity providers (v0.9) · stable session
+ids, session device metadata, and a sessions page in the scaffolded
+frontend (v0.10). See the [changelog](CHANGELOG.md) for detail.
 
 **Not here yet:** events, scheduler, mail (auth sends its messages through an
 `auth.Mailer` you provide), gRPC, multi-tenancy, i18n.

@@ -1,5 +1,5 @@
 {
-  "version": "v0.9.0",
+  "version": "v0.10.0",
   "tables": [
     {
       "table": "auth_audit_events",
@@ -559,6 +559,22 @@
           "type": "uint(64)"
         },
         {
+          "name": "session_id",
+          "type": "string(32)"
+        },
+        {
+          "name": "user_agent",
+          "type": "string(255)"
+        },
+        {
+          "name": "client_address",
+          "type": "string(64)"
+        },
+        {
+          "name": "location",
+          "type": "string(128)"
+        },
+        {
           "name": "created_at",
           "type": "time"
         }
@@ -577,6 +593,14 @@
           "columns": [
             {
               "name": "revoked_at"
+            }
+          ]
+        },
+        {
+          "name": "idx_refresh_tokens_session_id",
+          "columns": [
+            {
+              "name": "session_id"
             }
           ]
         },

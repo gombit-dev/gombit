@@ -1478,7 +1478,7 @@ releases:
           framework upgrade.
         refs: [572, 573, 621, 622, 624, 642, 656]
 
-  - version: unreleased
+  - version: v0.10.0
     changes:
       - id: session-id-schema
         kind: manual
@@ -1660,3 +1660,40 @@ releases:
           generated-contract layer) once the app has a model-first resource.
           Nothing to change.
         refs: [675]
+
+      - id: aws-sdk-v1-48-0
+        kind: informational
+        area: dependency
+        summary: "The framework requires newer AWS SDK for Go v2 modules (the S3 storage driver): `github.com/aws/aws-sdk-go-v2` v1.48.0, `/credentials` v1.21.0 and `github.com/aws/smithy-go` v1.28.9."
+        details: |
+          Go's minimal version selection moves an app's build to them with the
+          framework upgrade.
+        refs: [670]
+
+      - id: pgx-v5-13-0
+        kind: informational
+        area: dependency
+        summary: "The framework requires `github.com/jackc/pgx/v5` v5.13.0 (the PostgreSQL driver)."
+        details: |
+          Go's minimal version selection moves an app's build to it with the
+          framework upgrade.
+        refs: [672]
+
+      - id: libopenapi-validator-v0-16-3
+        kind: informational
+        area: dependency
+        summary: "The framework requires `github.com/pb33f/libopenapi-validator` v0.16.3."
+        details: |
+          Go's minimal version selection moves an app's build to it with the
+          framework upgrade. The framework's OpenAPI document and contract
+          checks are unchanged by it (the contract drift gates pass).
+        refs: [671]
+
+      - id: golang-x-mod-term-updates
+        kind: informational
+        area: dependency
+        summary: "The framework requires newer `golang.org/x` modules: `mod` v0.43.0 and `term` v0.48.0."
+        details: |
+          Go's minimal version selection moves an app's build to them with the
+          framework upgrade.
+        refs: [669, 673]
