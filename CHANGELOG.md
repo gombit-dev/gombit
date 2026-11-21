@@ -10,6 +10,8 @@ version.
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-11-21
+
 ### Added
 
 - A [sessions page](docs/frontend.md#sessions-page) in apps `gombit new`
@@ -52,6 +54,19 @@ version.
   follow the chain, and only there the 1000-rotation limit (a 500)
   applies. The audit trail's `session` targets name the stable id
   ([#661](https://github.com/gombit-dev/gombit/issues/661)).
+
+- The framework requires newer dependencies; Go's minimal version selection
+  moves an app's build to them with the framework upgrade: the AWS SDK for
+  Go v2 (the S3 storage driver) at `github.com/aws/aws-sdk-go-v2` v1.48.0,
+  `/credentials` v1.21.0 and `github.com/aws/smithy-go` v1.28.9;
+  `github.com/jackc/pgx/v5` v5.13.0 (the PostgreSQL driver);
+  `github.com/pb33f/libopenapi-validator` v0.16.3; and `golang.org/x/mod`
+  v0.43.0 and `golang.org/x/term` v0.48.0
+  ([#669](https://github.com/gombit-dev/gombit/pull/669),
+  [#670](https://github.com/gombit-dev/gombit/pull/670),
+  [#671](https://github.com/gombit-dev/gombit/pull/671),
+  [#672](https://github.com/gombit-dev/gombit/pull/672),
+  [#673](https://github.com/gombit-dev/gombit/pull/673)).
 
 ### Fixed
 
@@ -2440,7 +2455,8 @@ First tagged release. Milestones M0–M5 plus ADMIN-1 through ADMIN-3.
   multi-tenancy, i18n — are **not** included. See
   [the build plan](docs/GOMBIT_BUILD_PLAN.md).
 
-[Unreleased]: https://github.com/gombit-dev/gombit/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/gombit-dev/gombit/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/gombit-dev/gombit/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/gombit-dev/gombit/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/gombit-dev/gombit/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/gombit-dev/gombit/compare/v0.7.0...v0.7.1

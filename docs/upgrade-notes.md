@@ -8,7 +8,7 @@ What each release asks of an application moving to it, newest first. This
 page, the release notes, and the upgrade tooling all come from the same
 compatibility manifest (see [upgrade.md](upgrade.md)).
 
-## Unreleased
+## v0.10.0
 
 ### Manual: action required
 
@@ -152,6 +152,27 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   needs the call, and so does `gombit generate` (and `db check`'s
   generated-contract layer) once the app has a model-first resource.
   Nothing to change.
+
+- The framework requires newer AWS SDK for Go v2 modules (the S3 storage driver): `github.com/aws/aws-sdk-go-v2` v1.48.0, `/credentials` v1.21.0 and `github.com/aws/smithy-go` v1.28.9. (`aws-sdk-v1-48-0`, dependency, [#670](https://github.com/gombit-dev/gombit/issues/670))
+
+  Go's minimal version selection moves an app's build to them with the
+  framework upgrade.
+
+- The framework requires `github.com/jackc/pgx/v5` v5.13.0 (the PostgreSQL driver). (`pgx-v5-13-0`, dependency, [#672](https://github.com/gombit-dev/gombit/issues/672))
+
+  Go's minimal version selection moves an app's build to it with the
+  framework upgrade.
+
+- The framework requires `github.com/pb33f/libopenapi-validator` v0.16.3. (`libopenapi-validator-v0-16-3`, dependency, [#671](https://github.com/gombit-dev/gombit/issues/671))
+
+  Go's minimal version selection moves an app's build to it with the
+  framework upgrade. The framework's OpenAPI document and contract
+  checks are unchanged by it (the contract drift gates pass).
+
+- The framework requires newer `golang.org/x` modules: `mod` v0.43.0 and `term` v0.48.0. (`golang-x-mod-term-updates`, dependency, [#669](https://github.com/gombit-dev/gombit/issues/669), [#673](https://github.com/gombit-dev/gombit/issues/673))
+
+  Go's minimal version selection moves an app's build to them with the
+  framework upgrade.
 
 ## v0.9.0
 
