@@ -3,6 +3,7 @@ package migrations
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -247,6 +248,64 @@ func TestMigrateRecordsOnlyVersionsPresentInAtlas(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "recording 1 of 2 pending") {
 		t.Fatalf("stderr = %q, want partial-record warning", stderr.String())
+	}
+}
+
+// failingAfterApplyAtlas applies the fake's files, then reports a failure,
+// like atlas migrate apply stopping at a later file.
+type failingAfterApplyAtlas struct {
+	inner *applyFakeAtlas
+}
+
+func (r failingAfterApplyAtlas) Run(ctx context.Context, dir string, name string, args []string, stdout io.Writer, stderr io.Writer) error {
+	if err := r.inner.Run(ctx, dir, name, args, stdout, stderr); err != nil {
+		return err
+	}
+	if len(args) >= 2 && args[1] == "apply" {
+		return errors.New("exit status 1")
+	}
+	return nil
+}
+
+func TestMigrateRecordsAppliedVersionsWhenAtlasFails(t *testing.T) {
+	workDir := t.TempDir()
+	migrationDir := filepath.Join(workDir, "database", "migrations")
+	if err := os.MkdirAll(migrationDir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	writeFile(t, filepath.Join(migrationDir, "20260101000000_create_widgets.sql"),
+		"CREATE TABLE widgets (id INTEGER PRIMARY KEY);")
+	writeFile(t, filepath.Join(migrationDir, "20260102000000_create_gadgets.sql"),
+		"CREATE TABLE gadgets (id INTEGER PRIMARY KEY);")
+
+	dsn := "file:" + filepath.Join(workDir, "app.db") + "?cache=shared&_fk=1"
+	cfg := config.DatabaseConfig{Driver: config.DatabaseDriverSQLite, DSN: dsn}
+	opts := ApplyOptions{
+		WorkDir:      workDir,
+		MigrationDir: migrationDir,
+		Database:     cfg,
+		Stdout:       io.Discard,
+		Stderr:       io.Discard,
+		runner: failingAfterApplyAtlas{inner: &applyFakeAtlas{
+			t:             t,
+			applyVersions: map[string]bool{"20260101000000": true},
+		}},
+	}
+	if err := Migrate(context.Background(), opts); err == nil {
+		t.Fatal("Migrate() error = nil, want atlas failure")
+	}
+
+	db, err := database.Open(cfg)
+	if err != nil {
+		t.Fatalf("database.Open() error = %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	revisions, err := listRevisions(db.DB)
+	if err != nil {
+		t.Fatalf("listRevisions() error = %v", err)
+	}
+	if len(revisions) != 1 || revisions[0].Version != "20260101000000" {
+		t.Fatalf("revisions = %#v, want 20260101000000 recorded after atlas failure", revisions)
 	}
 }
 
