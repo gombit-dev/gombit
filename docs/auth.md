@@ -968,6 +968,9 @@ the same moment:
   change the password, a login that completes after it starts a new
   session: revoking all sessions ends the ones that exist at that moment.
 
+An app `gombit new` scaffolds has a page for these routes, `/sessions`
+([frontend.md](frontend.md#sessions-page)).
+
 The `auth.Service` methods `ListSessions`, `RevokeSession`, and
 `RevokeAllSessions` are exported for application code (for example, an admin
 action that signs a user out everywhere). They do not check the caller's own

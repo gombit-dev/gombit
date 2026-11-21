@@ -88,6 +88,18 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   an older binary during a rolling deploy) are still followed along
   the chain, which ends with their expiry.
 
+- A new app has a sessions page (`/sessions`, `frontend/src/pages/SessionsPage.tsx`) listing the signed-in user's sessions and signing them out; an app scaffolded before has none. (`scaffold-sessions-page`, scaffold, [#663](https://github.com/gombit-dev/gombit/issues/663))
+
+  The page is app-owned, so nothing adds it to an existing app. To
+  add it, copy `frontend/src/pages/SessionsPage.tsx` from an app
+  `gombit new` writes with the same `--ui` and `--auth`, add its
+  route (`<Route path="sessions" element={<SessionsPage />} />`
+  beside the others in `src/app/router.tsx`) and a link to
+  `/sessions` in `src/layouts/AppLayout.tsx`. It uses
+  `GET`/`DELETE {prefix}/auth/sessions` and the device fields
+  `user_agent`, `client_address` and `location`, so it needs this
+  release's server and client.
+
 - `GET {prefix}/auth/sessions` shows the device each session signed in from: `user_agent`, `client_address` (its network by default, `GOMBIT_AUTH_SESSION_CLIENT_ADDRESS`) and `location` (from an app's `SessionLocator`). (`session-device-metadata`, config, [#662](https://github.com/gombit-dev/gombit/issues/662))
 
   - Configuration: `GOMBIT_AUTH_SESSION_CLIENT_ADDRESS` is new.

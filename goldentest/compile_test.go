@@ -15,46 +15,82 @@ import (
 // schemaStub is written only into a temp copy so `tsc --noEmit` can check
 // make-resource list/form pages. Those files import ../api/generated/schema
 // paths that exist after `gombit client generate` / `gombit dev`, not in the
-// resource generator output. It is never committed in testdata/golden.
-const schemaStub = `export type paths = {
+// resource generator output. It is never committed in testdata/golden. The
+// scaffold's own pages typecheck against it too: the sessions page needs
+// delete and components.schemas.AuthSession.
+const schemaStub = `export type components = {
+  schemas: {
+    AuthSession: {
+      client_address: string;
+      current: boolean;
+      expires_at: string;
+      id: string;
+      last_refreshed_at: string;
+      location: string;
+      user_agent: string;
+    };
+  };
+};
+type StubParameters = {
+  query?: never;
+  header?: never;
+  path?: { id?: string };
+  cookie?: never;
+};
+type StubGet<Row> = {
+  parameters?: StubParameters;
+  responses: {
+    200: {
+      headers: { [name: string]: unknown };
+      content: {
+        "application/json": { data?: Array<Row> | null };
+      };
+    };
+  };
+};
+type StubDelete = {
+  parameters: {
+    query?: { scope?: "others" | "all" };
+    header?: never;
+    path?: { id?: string };
+    cookie?: never;
+  };
+  responses: {
+    200: {
+      headers: { [name: string]: unknown };
+      content: {
+        "application/json": { data?: Record<string, unknown> };
+      };
+    };
+  };
+};
+type StubPost = {
+  requestBody: {
+    content: {
+      "application/json": { [key: string]: unknown };
+    };
+  };
+  responses: {
+    200: {
+      headers: { [name: string]: unknown };
+      content: {
+        "application/json": { data?: Record<string, unknown> };
+      };
+    };
+  };
+};
+export type paths = {
+  "/api/v1/auth/sessions": {
+    parameters?: StubParameters;
+    get: StubGet<components["schemas"]["AuthSession"]>;
+    delete: StubDelete;
+    post: StubPost;
+  };
   [path: string]: {
-    parameters?: {
-      query?: never;
-      header?: never;
-      path?: { id?: string };
-      cookie?: never;
-    };
-    get: {
-      parameters?: {
-        query?: never;
-        header?: never;
-        path?: { id?: string };
-        cookie?: never;
-      };
-      responses: {
-        200: {
-          headers: { [name: string]: unknown };
-          content: {
-            "application/json": { data?: Array<{ id?: unknown; name?: unknown; price?: unknown } & Record<string, unknown>> | null };
-          };
-        };
-      };
-    };
-    post: {
-      requestBody: {
-        content: {
-          "application/json": { [key: string]: unknown };
-        };
-      };
-      responses: {
-        200: {
-          headers: { [name: string]: unknown };
-          content: {
-            "application/json": { data?: Record<string, unknown> };
-          };
-        };
-      };
-    };
+    parameters?: StubParameters;
+    get: StubGet<{ id?: unknown; name?: unknown; price?: unknown } & Record<string, unknown>>;
+    delete: StubDelete;
+    post: StubPost;
   };
 };
 `

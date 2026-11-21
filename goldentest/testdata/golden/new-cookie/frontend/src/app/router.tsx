@@ -5,6 +5,7 @@ import { AppLayout } from "../layouts/AppLayout";
 import { LoginPage } from "../pages/LoginPage";
 import { ProductFormPage } from "../pages/ProductFormPage";
 import { ProductListPage } from "../pages/ProductListPage";
+import { SessionsPage } from "../pages/SessionsPage";
 import { generatedResourceRoutes } from "../resources";
 
 export function AppRouter() {
@@ -16,6 +17,7 @@ export function AppRouter() {
           <Route element={<AppLayout />}>
             <Route index element={<ProductListPage />} />
             <Route path="products/new" element={<ProductFormPage />} />
+            <Route path="sessions" element={<SessionsPage />} />
             {generatedResourceRoutes.map((route) => (
               <Route key={String(route.path)} path={route.path} element={route.element} />
             ))}
