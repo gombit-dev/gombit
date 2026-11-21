@@ -160,7 +160,8 @@ func (w *Worker) Run(ctx context.Context) error {
 		if ctx.Err() != nil {
 			<-slots
 			if err == nil {
-				if relErr := w.release(d, time.Now()); relErr != nil {
+				// The job never ran, so Postpone takes back the attempt Reserve counted.
+				if relErr := w.unrunHandBack(d); relErr != nil {
 					w.log.Warn("jobs worker: returning a job reserved during shutdown; it returns when its lease expires",
 						zap.String("job_id", d.Envelope.ID), zap.Error(relErr))
 				}
@@ -518,6 +519,14 @@ func (w *Worker) release(d Delivery, at time.Time) error {
 	ctx, cancel := context.WithTimeout(context.Background(), queueOpTimeout)
 	defer cancel()
 	return w.queue.Release(ctx, d, at)
+}
+
+// unrunHandBack returns a delivery whose handler never started. Postpone, not
+// Release, so the attempt Reserve counted is not burned.
+func (w *Worker) unrunHandBack(d Delivery) error {
+	ctx, cancel := context.WithTimeout(context.Background(), queueOpTimeout)
+	defer cancel()
+	return w.queue.Postpone(ctx, d, time.Now())
 }
 
 // shutdown waits for in-flight jobs up to ShutdownTimeout, then cancels them

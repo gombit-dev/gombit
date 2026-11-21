@@ -511,6 +511,13 @@ func (q *ctxQueue) Release(ctx context.Context, d jobs.Delivery, at time.Time) e
 	return q.MemoryQueue.Release(ctx, d, at)
 }
 
+// Postpone counts as a hand-back too: a stopping worker returns an unrun
+// delivery with Postpone.
+func (q *ctxQueue) Postpone(ctx context.Context, d jobs.Delivery, at time.Time) error {
+	q.released.Add(1)
+	return q.MemoryQueue.Postpone(ctx, d, at)
+}
+
 func TestShutdownCancelsAReserveInFlight(t *testing.T) {
 	q := &ctxQueue{MemoryQueue: jobs.NewMemoryQueue(), reserveBlocks: true}
 	core, logs := observer.New(zap.ErrorLevel)
@@ -554,6 +561,32 @@ func TestADeliveryAfterShutdownIsHandedBack(t *testing.T) {
 	}
 	if d, err := q.MemoryQueue.Reserve(context.Background(), []string{"default"}, time.Minute); err != nil || d.Envelope.ID == "" {
 		t.Fatalf("the job is not back in the queue: %+v, %v", d, err)
+	}
+}
+
+// TestAHandBackAfterShutdownKeepsTheAttempt: the delivery a stopping worker
+// hands back never ran, so the attempt its Reserve counted is taken back; the
+// next worker's delivery is still the first attempt.
+func TestAHandBackAfterShutdownKeepsTheAttempt(t *testing.T) {
+	reg := jobs.NewRegistry()
+	jobs.MustRegister(reg, func(context.Context, blockJob) error { return nil })
+	q := &ctxQueue{MemoryQueue: jobs.NewMemoryQueue(), reserveDelay: 150 * time.Millisecond}
+	dispatchN(t, jobs.NewDispatcher(reg, q.MemoryQueue), 1)
+	w, err := jobs.NewWorker(reg, q, jobs.WorkerOptions{Queues: []string{"default"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stop := startWorker(t, w)
+	time.Sleep(30 * time.Millisecond) // inside the slow Reserve
+	if err := stop(); err != nil {
+		t.Fatal(err)
+	}
+	d, err := q.MemoryQueue.Reserve(context.Background(), []string{"default"}, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Envelope.Attempt != 1 {
+		t.Fatalf("the handler never ran, but the next delivery is attempt %d; want attempt 1", d.Envelope.Attempt)
 	}
 }
 
