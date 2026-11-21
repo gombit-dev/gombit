@@ -59,7 +59,7 @@ Do not emit `{"error":"string"}` or a new wrapper.
 ## Frontend
 
 - Vite + React + TypeScript. Minimal/headless UI is the default; MUI is `--ui mui`.
-- Package manager: detect (prefer `pnpm`, else `npm`); default `npm` when none present.
+- Package manager: `pnpm` only when `frontend/pnpm-lock.yaml` exists, else `npm`; `pnpm` only when `npm` is absent. Scaffolded apps ship `frontend/pnpm-workspace.yaml` approving esbuild.
 - Forms: map D10 `error.fields` into field errors (React Hook Form in the skeleton).
 
 ## Security defaults (draft Appendix C)

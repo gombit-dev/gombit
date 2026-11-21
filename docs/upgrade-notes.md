@@ -12,6 +12,29 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 ### Manual: action required
 
+- A scaffolded app approves esbuild's build script for pnpm in `frontend/pnpm-workspace.yaml`; an app scaffolded before has no such file, so `pnpm install` fails there. (`frontend-pnpm-esbuild-approval`, scaffold, [#509](https://github.com/gombit-dev/gombit/issues/509))
+
+  With pnpm 11 or later, `pnpm install` in `frontend/` fails with
+  `ERR_PNPM_IGNORED_BUILDS` until esbuild's build script is approved.
+  If `frontend/pnpm-workspace.yaml` is missing, create it with both
+  the `packages` entry required by pnpm 9 and the esbuild approval:
+
+  ```yaml
+  packages:
+    - .
+
+  allowBuilds:
+    esbuild: true
+  ```
+
+  If pnpm already wrote that file with a placeholder
+  (`esbuild: set this to true or false`), change the placeholder to
+  `true`. An app that runs npm needs no change. pnpm 10.26 and later
+  also honors `allowBuilds`; older pnpm 10 may warn that the build
+  script was ignored, but esbuild's optional platform package lets
+  the install succeed. Then run `gombit dev` or `gombit build --embed`
+  again.
+
 - **Breaking.** Stable session ids add `refresh_tokens.session_id`, which every login and refresh writes: an app migrates before it runs this release. (`session-id-schema`, schema, [#661](https://github.com/gombit-dev/gombit/issues/661))
 
   - Framework schema: `auth.RefreshToken` (`refresh_tokens`): altered.
@@ -69,6 +92,12 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   chain consistent.
 
 ### Informational
+
+- `gombit dev` and `gombit build --embed` run `npm` unless `frontend/pnpm-lock.yaml` exists; `pnpm` runs only when `npm` is absent. (`frontend-npm-before-pnpm`, behavior, [#509](https://github.com/gombit-dev/gombit/issues/509))
+
+  An app that has both tools and no `frontend/pnpm-lock.yaml` now runs
+  `npm` where it ran `pnpm`. An app with a `pnpm-lock.yaml` still runs
+  `pnpm`.
 
 - A session's id in `GET {prefix}/auth/sessions` stays the same for the session's whole life, so `DELETE {prefix}/auth/sessions/{id}` with an id listed before a refresh ends the session instead of answering 404. (`stable-session-ids`, api, [#661](https://github.com/gombit-dev/gombit/issues/661))
 

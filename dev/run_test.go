@@ -330,7 +330,9 @@ func TestPlanBackendFallsBackToGoRun(t *testing.T) {
 
 func TestDetectPackageManagerPrefersPnpm(t *testing.T) {
 	t.Parallel()
-	name, _, err := detectPackageManager(t.TempDir(), func(file string) (string, error) {
+	workDir := t.TempDir()
+	writeFile(t, filepath.Join(workDir, "frontend", "pnpm-lock.yaml"), "lockfileVersion: 9\n")
+	name, _, err := detectPackageManager(workDir, func(file string) (string, error) {
 		switch file {
 		case "pnpm":
 			return "/usr/bin/pnpm", nil
@@ -361,6 +363,29 @@ func TestDetectPackageManagerRequiresNode(t *testing.T) {
 	}
 }
 
+func TestDetectPackageManagerPrefersNpmWithoutLockfile(t *testing.T) {
+	t.Parallel()
+	name, path, err := detectPackageManager(t.TempDir(), func(file string) (string, error) {
+		switch file {
+		case "pnpm":
+			return "/usr/bin/pnpm", nil
+		case "npm":
+			return "/usr/bin/npm", nil
+		default:
+			return "", errors.New("missing")
+		}
+	})
+	if err != nil {
+		t.Fatalf("detectPackageManager() error = %v", err)
+	}
+	if name != "npm" {
+		t.Fatalf("manager = %q, want npm", name)
+	}
+	if path != "/usr/bin/npm" {
+		t.Fatalf("path = %q, want /usr/bin/npm", path)
+	}
+}
+
 func TestDetectPackageManagerFallsBackToNpm(t *testing.T) {
 	t.Parallel()
 	name, path, err := detectPackageManager(t.TempDir(), func(file string) (string, error) {
@@ -382,7 +407,9 @@ func TestDetectPackageManagerFallsBackToNpm(t *testing.T) {
 
 func TestPlanFrontendUsesHostPortAndPnpm(t *testing.T) {
 	t.Parallel()
-	plan, err := planFrontend(t.TempDir(), func(file string) (string, error) {
+	workDir := t.TempDir()
+	writeFile(t, filepath.Join(workDir, "frontend", "pnpm-lock.yaml"), "lockfileVersion: 9\n")
+	plan, err := planFrontend(workDir, func(file string) (string, error) {
 		if file == "pnpm" {
 			return "/usr/bin/pnpm", nil
 		}

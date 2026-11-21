@@ -55,6 +55,16 @@ version.
 
 ### Fixed
 
+- A freshly scaffolded app's `gombit dev` and `gombit build --embed` no
+  longer fail with pnpm 11's `ERR_PNPM_IGNORED_BUILDS`, which blocked
+  esbuild's build script. Without a `frontend/pnpm-lock.yaml`, they now run
+  `npm`, and `pnpm` only when `npm` is absent. The scaffold ships
+  `frontend/pnpm-workspace.yaml`, which approves esbuild's build script for
+  pnpm. An existing app whose failed install left a placeholder in
+  `frontend/pnpm-workspace.yaml` must fix that file as described in the
+  upgrade notes
+  ([#509](https://github.com/gombit-dev/gombit/issues/509)).
+
 - The OpenAPI description of `DELETE {prefix}/auth/sessions/{id}`
   (`auth-revoke-session`) no longer says a listed id goes stale when its
   session refreshes; it has not since stable session ids

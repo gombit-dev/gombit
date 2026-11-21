@@ -47,6 +47,7 @@ func TestGenerateWritesFeaturePackageLayout(t *testing.T) {
 		"database/seeds/.gitkeep",
 		"config/README.md",
 		"frontend/package.json",
+		"frontend/pnpm-workspace.yaml",
 		"frontend/vite.config.ts",
 		"frontend/index.html",
 		"frontend/src/main.tsx",

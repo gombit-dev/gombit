@@ -24,7 +24,13 @@ See also [cli.md](cli.md) (`gombit new`, `gombit dev`, `gombit build --embed`),
 - React Hook Form with D10 `error.fields` mapping
 
 Package manager D6: the scaffolded `package.json` works with npm (CI uses
-Node 22). `gombit dev` prefers pnpm when it is available.
+Node 22). `gombit dev` uses pnpm only when `frontend/pnpm-lock.yaml` exists,
+otherwise npm, and pnpm only when npm is absent. The scaffold ships
+`frontend/pnpm-workspace.yaml`, which approves esbuild's build script for
+pnpm 11 and later. The `packages: [.]` entry keeps the workspace file valid
+with pnpm 9. pnpm 10.26+ also honors `allowBuilds`; older pnpm 10 may warn
+that it ignored the build script, but esbuild's optional platform package
+still lets the install succeed.
 
 ## Layout
 

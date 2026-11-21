@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/gombit-dev/gombit/internal/frontend"
 )
 
 type frontendPlan struct {
@@ -26,18 +28,11 @@ func planFrontendBuild(workDir string, lookPath LookPathFunc) (frontendPlan, err
 
 func detectPackageManager(workDir string, lookPath LookPathFunc) (name, path string, err error) {
 	frontendDir := filepath.Join(workDir, frontendDirRel)
-	if _, statErr := os.Stat(filepath.Join(frontendDir, "pnpm-lock.yaml")); statErr == nil {
-		if path, err := lookPath("pnpm"); err == nil {
-			return "pnpm", path, nil
-		}
+	name, path, err = frontend.DetectPackageManager(frontendDir, lookPath)
+	if err != nil {
+		return "", "", fmt.Errorf("build: npm and pnpm not found; install Node.js to build the Vite frontend")
 	}
-	if path, err := lookPath("pnpm"); err == nil {
-		return "pnpm", path, nil
-	}
-	if path, err := lookPath("npm"); err == nil {
-		return "npm", path, nil
-	}
-	return "", "", fmt.Errorf("build: npm and pnpm not found; install Node.js to build the Vite frontend")
+	return name, path, nil
 }
 
 func frontendDepsInstalled(frontendDir string) bool {
