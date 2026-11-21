@@ -212,7 +212,8 @@ idempotency key for its side effects.
 
 Every failure `Run` returns is a `*jobs.Error` with a `Kind`, a small fixed set
 that is safe as a log field or metric label. `jobs.Classify(err)` returns it,
-and each kind has a sentinel for `errors.Is`:
+and each kind has a sentinel for `errors.Is`. A worker can also record an
+expired lease when it sets an exhausted delivery aside:
 
 | Kind | Sentinel | Meaning |
 |------|----------|---------|
@@ -223,6 +224,7 @@ and each kind has a sentinel for `errors.Is`:
 | `timeout` | `ErrTimeout` | the attempt ran past the job's `Timeout` |
 | `upgrade` | `ErrUpgrade` | an `UpgradeFrom` step returned an error (the payload is intact; a deploy can fix the step) |
 | `handler` | `ErrHandler` | the handler returned an error, which `errors.Is/As` still reach |
+| `lease_expired` | `ErrLeaseExpired` | a delivery reclaimed after lease expiry exceeded its attempt budget before the handler could run again |
 
 Use `Classify`, not `errors.Is`, to decide a failure's kind: a handler that
 returns another job's failure is `handler`, though `errors.Is` still reaches the

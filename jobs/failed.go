@@ -10,9 +10,9 @@ type Failure struct {
 	// Reason is the worker's decision: ReasonExhausted, ReasonPermanent, or
 	// ReasonUndecodable.
 	Reason string `json:"reason"`
-	// Kind is the classified failure of the last attempt.
+	// Kind classifies the last failure or the expired lease that exhausted retries.
 	Kind Kind `json:"kind"`
-	// Error is the last attempt's error message.
+	// Error describes that failure or lease expiry.
 	Error string `json:"error"`
 	// At is when the worker gave up.
 	At time.Time `json:"at"`

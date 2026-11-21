@@ -254,6 +254,22 @@ func TestACrashedWorkerLosesNoJob(t *testing.T) {
 // TestWorkerStopsCrashRedeliveryPastMaxAttempts: lease-expiry redelivery
 // cannot let a poison job run forever after successive workers die.
 func TestWorkerStopsCrashRedeliveryPastMaxAttempts(t *testing.T) {
+	t.Run("memory", func(t *testing.T) {
+		clock := newFakeClock()
+		q := jobs.NewMemoryQueue(jobs.WithMemoryClock(clock.Now))
+		checkCrashRedeliveryCeiling(t, q, clock)
+	})
+	t.Run("redis", func(t *testing.T) {
+		addr := redisTestAddr(t)
+		clock := newFakeClock()
+		ns := testNamespace()
+		q := jobs.NewRedisQueue(redisClient(t, addr, ns), ns, jobs.WithRedisClock(clock.Now))
+		checkCrashRedeliveryCeiling(t, q, clock)
+	})
+}
+
+func checkCrashRedeliveryCeiling(t *testing.T, q jobs.Queue, clock *fakeClock) {
+	t.Helper()
 	reg := jobs.NewRegistry()
 	var runs atomic.Int32
 	jobs.MustRegister(reg, func(context.Context, blockJob) error {
@@ -261,8 +277,6 @@ func TestWorkerStopsCrashRedeliveryPastMaxAttempts(t *testing.T) {
 		return nil
 	}, jobs.WithOptions(jobs.Options{MaxAttempts: 3}))
 
-	clock := newFakeClock()
-	q := jobs.NewMemoryQueue(jobs.WithMemoryClock(clock.Now))
 	dispatchN(t, jobs.NewDispatcher(reg, q, jobs.WithDispatcherClock(clock.Now)), 1)
 
 	// Three workers reserve the job and disappear without settling it.
@@ -294,18 +308,26 @@ func TestWorkerStopsCrashRedeliveryPastMaxAttempts(t *testing.T) {
 		return len(failed)
 	}
 	eventually(t, "the exhausted crash-redelivered job to be set aside", func() bool {
-		return failedCount() == 1 || runs.Load() != 0
+		return (failedCount() == 1 && logs.FilterMessage("job failed for good").Len() == 1) || runs.Load() != 0
 	})
 	if runs.Load() != 0 {
 		t.Fatalf("handler ran %d times after three crashed deliveries with MaxAttempts 3; want no fourth run", runs.Load())
 	}
-	failed, _ := q.Failed(context.Background(), "default", 0)
-	if f := failed[0]; f.Attempts != 4 || f.Failure.Reason != jobs.ReasonExhausted || f.Failure.Error == "" {
-		t.Fatalf("failed job = %+v, want attempt 4 set aside as attempts exhausted", f)
+	failed, err := q.Failed(context.Background(), "default", 0)
+	if err != nil || len(failed) != 1 {
+		t.Fatalf("failed jobs = %v, error = %v; want one exhausted job", failed, err)
 	}
-	gaveUp := logs.FilterMessage("job failed for good").All()
-	if len(gaveUp) != 1 || gaveUp[0].ContextMap()["attempt"] != int64(4) || gaveUp[0].ContextMap()["max_attempts"] != int64(3) {
-		t.Fatalf("give-up logs = %+v, want attempt 4 past MaxAttempts 3", gaveUp)
+	record := failed[0]
+	if record.Attempts != 4 || record.Failure.Reason != jobs.ReasonExhausted || record.Failure.Error == "" {
+		t.Fatalf("failed job = %+v, want attempt 4 set aside as attempts exhausted", record)
+	}
+	const expiredKind = "lease_expired"
+	if record.Failure.Kind != expiredKind {
+		t.Errorf("failed job kind = %q, want %q", record.Failure.Kind, expiredKind)
+	}
+	fields := logs.FilterMessage("job failed for good").All()[0].ContextMap()
+	if fields["attempt"] != int64(4) || fields["max_attempts"] != int64(3) || fields["kind"] != expiredKind {
+		t.Errorf("give-up fields = %+v, want attempt 4 and kind %q past MaxAttempts 3", fields, expiredKind)
 	}
 }
 

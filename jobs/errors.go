@@ -5,7 +5,7 @@ import (
 	"fmt"
 )
 
-// Kind classifies why running a job failed. It is a small, fixed set, so it
+// Kind classifies job failures. It is a small, fixed set, so it
 // is safe as a log field or metric label.
 type Kind string
 
@@ -27,6 +27,8 @@ const (
 	KindUpgrade Kind = "upgrade"
 	// KindHandler: the handler returned an error.
 	KindHandler Kind = "handler"
+	// KindLeaseExpired: a worker did not settle a delivery before its lease expired.
+	KindLeaseExpired Kind = "lease_expired"
 )
 
 // Sentinels for errors.Is. Each matches every Error of its Kind.
@@ -38,6 +40,7 @@ var (
 	ErrTimeout            = errors.New("jobs: job timed out")
 	ErrUpgrade            = errors.New("jobs: job upgrade step failed")
 	ErrHandler            = errors.New("jobs: job handler failed")
+	ErrLeaseExpired       = errors.New("previous worker did not settle the job before its lease expired")
 )
 
 var kindSentinels = map[Kind]error{
@@ -48,6 +51,7 @@ var kindSentinels = map[Kind]error{
 	KindTimeout:            ErrTimeout,
 	KindUpgrade:            ErrUpgrade,
 	KindHandler:            ErrHandler,
+	KindLeaseExpired:       ErrLeaseExpired,
 }
 
 // Error is a classified job failure. Err is the underlying cause (the
@@ -80,6 +84,8 @@ func (e *Error) Error() string {
 		return fmt.Sprintf("jobs: %s timed out: %v", subject, e.Err)
 	case KindUpgrade:
 		return fmt.Sprintf("jobs: upgrade %s from version %d: %v", subject, e.Version, e.Err)
+	case KindLeaseExpired:
+		return ErrLeaseExpired.Error()
 	default:
 		return fmt.Sprintf("jobs: %s failed: %v", subject, e.Err)
 	}
@@ -93,7 +99,7 @@ func (e *Error) Is(target error) bool {
 	return kindSentinels[e.Kind] == target
 }
 
-// Classify returns the Kind of a failure Registry.Run returned, or "" for
+// Classify returns the Kind of a job failure, or "" for
 // nil. An error that is not a classified *Error is KindHandler.
 //
 // Classify, not errors.Is, is the authority on a failure's kind: a handler

@@ -1660,3 +1660,13 @@ releases:
           generated-contract layer) once the app has a model-first resource.
           Nothing to change.
         refs: [675]
+
+      - id: jobs-expired-lease-failure-kind
+        kind: informational
+        area: behavior
+        summary: "An exhausted delivery reclaimed after lease expiry is recorded as `lease_expired` in failed jobs and worker logs."
+        details: |
+          The retry budget and `attempts exhausted` reason stay the same.
+          Existing failed records keep their stored kind. Alerting rules
+          that filter by kind can add `lease_expired` for new records.
+        refs: [494]
