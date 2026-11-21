@@ -12,6 +12,16 @@ version.
 
 ### Added
 
+- A [sessions page](docs/frontend.md#sessions-page) in apps `gombit new`
+  scaffolds (AUTH-13), in both UI presets and both auth modes:
+  `/sessions`, linked from the layout, lists the signed-in user's sessions
+  with the current one marked and the device each signed in from, signs
+  out one, the others, or all of them, and returns to the login page when
+  it ends this browser's own session. An app scaffolded before has none;
+  copy `frontend/src/pages/SessionsPage.tsx`, its route and its link from
+  a new app to add it
+  ([#663](https://github.com/gombit-dev/gombit/issues/663)).
+
 - [Session device metadata](docs/auth.md#sessions) (AUTH-12): `GET
   {prefix}/auth/sessions` shows each session's `user_agent` (the sign-in's
   `User-Agent`, cut to 255 bytes, not parsed), `client_address` (by default
@@ -54,6 +64,13 @@ version.
   `frontend/pnpm-workspace.yaml` must fix that file as described in the
   upgrade notes
   ([#509](https://github.com/gombit-dev/gombit/issues/509)).
+
+- The OpenAPI description of `DELETE {prefix}/auth/sessions/{id}`
+  (`auth-revoke-session`) no longer says a listed id goes stale when its
+  session refreshes; it has not since stable session ids
+  ([#661](https://github.com/gombit-dev/gombit/issues/661)): a 404 means
+  the session has ended.
+
 - `gombit generate` (and `--check`, and `gombit upgrade contract`)
   regenerates a resource whose model lost, renamed or retyped a field, whose
   `*.gen.go` were deleted or left with merge-conflict markers, or whose

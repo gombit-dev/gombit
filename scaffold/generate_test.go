@@ -67,6 +67,7 @@ func TestGenerateWritesFeaturePackageLayout(t *testing.T) {
 		"frontend/src/pages/LoginPage.tsx",
 		"frontend/src/pages/ProductListPage.tsx",
 		"frontend/src/pages/ProductFormPage.tsx",
+		"frontend/src/pages/SessionsPage.tsx",
 		"frontend/src/vite-env.d.ts",
 		"frontend/tsconfig.json",
 		"frontend/README.md",

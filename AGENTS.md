@@ -126,8 +126,9 @@ sessions API's id, and how logout finds a session's current token in one
 read), and AUTH-12 (#662): session device metadata (the sign-in's
 User-Agent, client address coarsened to its network by default,
 `GOMBIT_AUTH_SESSION_CLIENT_ADDRESS`, and an app's `SessionLocator`
-location, on `refresh_tokens`, kept by rotation). Its other follow-up,
-AUTH-13 (#663, a sessions screen in the generated frontend), is open. It
+location, on `refresh_tokens`, kept by rotation), and AUTH-13 (#663): a
+sessions page in the scaffolded frontend (`/sessions`,
+`pages/SessionsPage.tsx`, both UI presets and auth modes). It
 has AUTH-5 (#335): session
 management in both auth modes (`GET` / `DELETE {prefix}/auth/sessions`,
 `auth.Service.ListSessions` / `RevokeSession` / `RevokeAllSessions`), with
