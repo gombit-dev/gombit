@@ -155,6 +155,9 @@ func newExternalEnv(t *testing.T, db *database.DB, mode config.AuthMode, opts ..
 type browser struct {
 	jar    *cookieJar
 	access string
+	// remote and ua, when set, are its requests' client address and
+	// User-Agent.
+	remote, ua string
 }
 
 func (e externalEnv) browser(t *testing.T) *browser {
@@ -177,6 +180,12 @@ func (e externalEnv) do(b *browser, method, path, body string) *httptest.Respons
 	}
 	if b.access != "" {
 		req.Header.Set("Authorization", "Bearer "+b.access)
+	}
+	if b.remote != "" {
+		req.RemoteAddr = b.remote
+	}
+	if b.ua != "" {
+		req.Header.Set("User-Agent", b.ua)
 	}
 	e.app.Router().ServeHTTP(rec, req)
 	b.jar.update(rec)
@@ -301,13 +310,27 @@ func runExternalIdentity(t *testing.T, db *database.DB, mode config.AuthMode) {
 			t.Fatal("the state cookie is not sealed")
 		}
 		code, st := e.provider.grant(t, authURL, identity(e.sub("sub-signup"), strings.ToUpper(email)))
+		// The callback and the Bearer exchange come from one browser; they
+		// differ here so that the session shows which one started it.
+		b.remote, b.ua = "203.0.113.7:51000", "callback-browser/1"
 		loc := e.callback(t, b, "fake", url.Values{"code": {code}, "state": {st}}.Encode())
 		if loc.Path != "/welcome" || loc.Query().Get("tab") != "1" || loc.Host != "" {
 			t.Fatalf("landed at %s", loc)
 		}
+		b.remote, b.ua = "198.51.100.9:443", "exchange-browser/1"
 		me := e.session(t, b, loc)
 		if me.Email != email || !me.EmailVerified {
 			t.Fatalf("/me = %+v", me)
+		}
+		// The session records the device of the request that started it:
+		// the callback's in cookie mode, the exchange's in Bearer mode
+		// (AUTH-12).
+		want := deviceView{UserAgent: "exchange-browser/1", ClientAddress: "198.51.100.0/24"}
+		if e.cookie {
+			want = deviceView{UserAgent: "callback-browser/1", ClientAddress: "203.0.113.0/24"}
+		}
+		if got := currentDevice(t, e.do(b, http.MethodGet, "/api/v1/auth/sessions", "")); got != want {
+			t.Fatalf("the external sign-in's session device = %+v, want %+v", got, want)
 		}
 		var user auth.User
 		if err := db.DB.Where("email = ?", email).First(&user).Error; err != nil {

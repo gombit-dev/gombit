@@ -35,6 +35,62 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   the install succeed. Then run `gombit dev` or `gombit build --embed`
   again.
 
+- **Breaking.** Stable session ids add `refresh_tokens.session_id`, which every login and refresh writes: an app migrates before it runs this release. (`session-id-schema`, schema, [#661](https://github.com/gombit-dev/gombit/issues/661))
+
+  - Framework schema: `auth.RefreshToken` (`refresh_tokens`): altered.
+
+  `auth.RefreshToken` gains `SessionID` (indexed). Until the column
+  exists, every login and every token refresh fails (the insert names
+  every column of the model). Generate and apply the migration
+  (`gombit db makemigrations`, `gombit db migrate`) before deploying;
+  `gombit upgrade --dry-run` lists the steps. Existing rows keep a
+  NULL `session_id` and nothing has to be backfilled: such a session
+  keeps the id it was listed under, which its next refresh stores.
+  A refresh by an older binary on the migrated schema (a rolling
+  deploy, a rollback that kept the column) writes a NULL
+  `session_id` too; the session is then listed under that row's id,
+  and logout still finds its current token along `replaced_by`.
+
+- **Breaking.** Session device metadata adds `refresh_tokens.user_agent`, `client_address` and `location`, which every login and refresh writes: an app migrates before it runs this release. (`session-device-schema`, schema, [#662](https://github.com/gombit-dev/gombit/issues/662))
+
+  - Framework schema: `auth.RefreshToken` (`refresh_tokens`): altered.
+
+  `auth.RefreshToken` gains `UserAgent`, `ClientAddress` and
+  `Location`. Until the columns exist, every login and every token
+  refresh fails (the insert names every column of the model). The
+  same migration as `session-id-schema` adds them: generate and apply
+  it (`gombit db makemigrations`, `gombit db migrate`) before
+  deploying. Existing rows keep NULLs, listed as empty: a session
+  from before the upgrade shows no device, and nothing has to be
+  backfilled.
+
+- `gombit new` puts every framework model in the bootstrap migration and `models.json`; an app created by `gombit new` v0.9.0 lacks five auth models there, so its next migration fails with `table ... already exists`. (`scaffold-registers-every-framework-model`, scaffold, [#675](https://github.com/gombit-dev/gombit/issues/675))
+
+  `gombit new` v0.9.0 left `auth.OneTimeToken`, `auth.AuditEvent`,
+  `auth.TOTPFactor`, `auth.RecoveryCode` and `auth.IdentityLink` out of
+  the bootstrap migration and `database/migrations/models.json`, while
+  the `AutoMigrate` it writes creates their tables at startup. `gombit
+  db check` reports them as auto-migrated with no migration, and the
+  next migration generated (by `gombit make resource`, or `gombit db
+  makemigrations --model` for them) creates those tables, so applying
+  it to a database the app has started against fails because they
+  already exist (on SQLite, `table auth_one_time_tokens already
+  exists`). Only apps created by `gombit new` v0.9.0 are
+  affected: an app upgraded to v0.9.0 generated these models'
+  migration, as its upgrade notes ask.
+
+  In an affected app, take the migration that creates those five
+  tables, or generate it with `gombit db makemigrations auth_tables`
+  and a `--model github.com/gombit-dev/gombit/auth.<Name>` for each.
+  Add `IF NOT EXISTS` to each of its statements that creates one of
+  them and, on SQLite and PostgreSQL, to each that creates one of
+  their indexes (MySQL declares them inside `CREATE TABLE`); leave
+  its other statements as they are. Run `gombit db repair` to update
+  `atlas.sum`, then `gombit db migrate` in each environment: a
+  database that has the tables keeps them and their rows, and one
+  that does not gets them. `gombit db check` then reports the schema
+  chain consistent.
+
 ### Informational
 
 - `gombit dev` and `gombit build --embed` run `npm` unless `frontend/pnpm-lock.yaml` exists; `pnpm` runs only when `npm` is absent. (`frontend-npm-before-pnpm`, behavior, [#509](https://github.com/gombit-dev/gombit/issues/509))
@@ -42,6 +98,37 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   An app that has both tools and no `frontend/pnpm-lock.yaml` now runs
   `npm` where it ran `pnpm`. An app with a `pnpm-lock.yaml` still runs
   `pnpm`.
+
+- A session's id in `GET {prefix}/auth/sessions` stays the same for the session's whole life, so `DELETE {prefix}/auth/sessions/{id}` with an id listed before a refresh ends the session instead of answering 404. (`stable-session-ids`, api, [#661](https://github.com/gombit-dev/gombit/issues/661))
+
+  The id was derived from the session's current refresh token row and
+  changed on every refresh; it is now drawn at login and carried to
+  every rotation (32 lowercase hex characters, as before). A client
+  that listed again after a 404 keeps working. The audit trail's
+  `session` targets (logout, refresh reuse within grace) name the same
+  stable id, so one session's events share it.
+
+- A logout with a token any number of rotations behind its session's current one ends the session; the 1000-rotation limit (a 500) applies only along rows written without a session id. (`logout-follows-session-id`, behavior, [#661](https://github.com/gombit-dev/gombit/issues/661))
+
+  The logout, and the signing out of other sessions that a password
+  change or MFA enrollment does, find the session's current token by
+  its id in one read instead of following the rotation chain one row
+  at a time. Rows written without the id (before the upgrade, or by
+  an older binary during a rolling deploy) are still followed along
+  the chain, which ends with their expiry.
+
+- `GET {prefix}/auth/sessions` shows the device each session signed in from: `user_agent`, `client_address` (its network by default, `GOMBIT_AUTH_SESSION_CLIENT_ADDRESS`) and `location` (from an app's `SessionLocator`). (`session-device-metadata`, config, [#662](https://github.com/gombit-dev/gombit/issues/662))
+
+  - Configuration: `GOMBIT_AUTH_SESSION_CLIENT_ADDRESS` is new.
+
+  `AuthSession` gains three string fields, always present, empty when
+  unknown. They are the sign-in request's and refreshes keep them.
+  The client address is coarsened to an IPv4 /24 or IPv6 /48 unless
+  `GOMBIT_AUTH_SESSION_CLIENT_ADDRESS` is `full` (or `none`, no
+  address); the framework does no geolocation, and
+  `framework.WithAuthSessionLocator` is how an app names locations.
+  Regenerate the TypeScript client (`gombit client generate`) to
+  see the fields.
 
 - `gombit generate` regenerates a resource whose model lost, renamed or retyped a field, whose `*.gen.go` were deleted or conflicted, or whose `*.gen.go` call a framework API an upgrade changed, instead of failing with a Go compile error from the stale generated files. (`generate-after-field-removal`, cli, [#467](https://github.com/gombit-dev/gombit/issues/467))
 
@@ -70,6 +157,18 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   driver mapped only `STATUS_DELETE_PENDING` to not-found, so a read
   racing a delete could fail with a permission error. Nothing to
   change.
+
+- `gombit db check` skips its model-registry layer when `internal/platform/database.go` has no `AutoMigrate` call, instead of failing with "no AutoMigrate call", and `gombit db makemigrations --forget-model` no longer fails there. (`db-check-without-automigrate`, cli, [#675](https://github.com/gombit-dev/gombit/issues/675))
+
+  An app whose schema comes from its migrations may keep
+  `internal/platform/database.go` to open the database and call no
+  `AutoMigrate` method there. The file then lists no models to hold
+  `models.json` to, so the layer is skipped, as for an app without the
+  file; a model the app migrates some other way (`auth.Migrate`, or a
+  helper in another file) is not seen. `gombit make resource` still
+  needs the call, and so does `gombit generate` (and `db check`'s
+  generated-contract layer) once the app has a model-first resource.
+  Nothing to change.
 
 ## v0.9.0
 

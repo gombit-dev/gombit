@@ -9,11 +9,13 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/gombit-dev/gombit/config"
 	"github.com/gombit-dev/gombit/migrations"
+	"github.com/gombit-dev/gombit/resourcegen"
 	"github.com/gombit-dev/gombit/upgrade"
 )
 
@@ -1273,16 +1275,23 @@ func TestGenerateSeedsBootstrapMigrationForResolvableVersion(t *testing.T) {
 	if got.WorkDir != filepath.Join(workDir, "demo") {
 		t.Errorf("migration workdir = %q, want %q", got.WorkDir, filepath.Join(workDir, "demo"))
 	}
-	wantModels := []migrations.Model{
-		{ImportPath: "github.com/gombit-dev/gombit/auth", TypeName: "User"},
-		{ImportPath: "github.com/gombit-dev/gombit/auth", TypeName: "RefreshToken"},
-		{ImportPath: "github.com/gombit-dev/gombit/auth", TypeName: "Group"},
-		{ImportPath: "github.com/gombit-dev/gombit/auth", TypeName: "Permission"},
-		{ImportPath: "github.com/gombit-dev/gombit/storage/claims", TypeName: "Claim"},
-		{ImportPath: "github.com/example/demo/internal/product", TypeName: "Product"},
+	// The bootstrap migration covers exactly what the scaffolded AutoMigrate
+	// call creates, read back from the file itself: a model AutoMigrate
+	// makes that the migration and the registry lack (the five auth models
+	// v0.9.0 added) is created outside Atlas's history, and the next
+	// migration, which does carry it, fails with "table already exists".
+	platformDB := readFile(t, filepath.Join(workDir, "demo", "internal", "platform", "database.go"))
+	wantModels, err := resourcegen.CollectAutoMigrateModels([]byte(platformDB))
+	if err != nil {
+		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(got.Models, wantModels) {
-		t.Errorf("migration models = %#v, want %#v", got.Models, wantModels)
+		t.Errorf("migration models = %v, want the scaffolded AutoMigrate's %v", got.Models, wantModels)
+	}
+	for _, m := range upgrade.FrameworkModels {
+		if !slices.Contains(got.Models, m) {
+			t.Errorf("migration models = %v, missing the framework model %s.%s", got.Models, m.ImportPath, m.TypeName)
+		}
 	}
 }
 

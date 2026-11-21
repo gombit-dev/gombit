@@ -678,7 +678,7 @@ func (s *Service) linkIdentity(ctx context.Context, st externalState, identity E
 			return errAccountDisabled
 		}
 		now := s.now()
-		if _, err := requesterChain(tx, locked.ID, st.SessionID, now); err != nil {
+		if _, err := requesterSession(tx, locked.ID, st.SessionID, now); err != nil {
 			return err
 		}
 		f, err := confirmedFactor(tx, locked.ID)

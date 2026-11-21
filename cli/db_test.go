@@ -80,6 +80,37 @@ func TestEnsureForgetModelsRetiredSkipsWhenNoPlatformFile(t *testing.T) {
 	}
 }
 
+func TestEnsureForgetModelsRetiredSkipsWithoutAutoMigrate(t *testing.T) {
+	// An app whose schema comes from migrations alone has a platform file
+	// with no AutoMigrate call; nothing re-adds a forgotten model.
+	workDir := t.TempDir()
+	dir := filepath.Join(workDir, "internal", "platform")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	src := "package platform\n\nimport \"github.com/gombit-dev/gombit/database\"\n\nfunc Open() (*database.DB, error) { return nil, nil }\n"
+	if err := os.WriteFile(filepath.Join(dir, "database.go"), []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := ensureForgetModelsRetired(workDir, []migrations.Model{
+		{ImportPath: "github.com/example/app/internal/widget", TypeName: "Widget"},
+	})
+	if err != nil {
+		t.Fatalf("ensureForgetModelsRetired() = %v, want nil when database.go has no AutoMigrate call", err)
+	}
+
+	// One that does not parse may still auto-migrate the model: refuse.
+	broken := "package platform\n\nfunc AutoMigrate(db *database.DB) error {\n<<<<<<< HEAD\n"
+	if err := os.WriteFile(filepath.Join(dir, "database.go"), []byte(broken), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureForgetModelsRetired(workDir, []migrations.Model{
+		{ImportPath: "github.com/example/app/internal/widget", TypeName: "Widget"},
+	}); err == nil {
+		t.Fatal("ensureForgetModelsRetired() = nil for an unparsable database.go, want an error")
+	}
+}
+
 func TestMakeMigrationsRejectsInvalidForgetModel(t *testing.T) {
 	stdout := new(bytes.Buffer)
 	stderr := new(bytes.Buffer)

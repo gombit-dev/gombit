@@ -455,10 +455,13 @@ export interface components {
       ok: boolean;
     };
     AuthSession: {
+      client_address: string;
       current: boolean;
       expires_at: string;
       id: string;
       last_refreshed_at: string;
+      location: string;
+      user_agent: string;
     };
     AuthUserState: {
       disabled: boolean;

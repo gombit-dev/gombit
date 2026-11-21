@@ -10,6 +10,39 @@ version.
 
 ## [Unreleased]
 
+### Added
+
+- [Session device metadata](docs/auth.md#sessions) (AUTH-12): `GET
+  {prefix}/auth/sessions` shows each session's `user_agent` (the sign-in's
+  `User-Agent`, cut to 255 bytes, not parsed), `client_address` (by default
+  only its network, an IPv4 /24 or IPv6 /48;
+  `GOMBIT_AUTH_SESSION_CLIENT_ADDRESS=full` or `none`) and `location`
+  (empty unless the app names one with a `SessionLocator`,
+  `framework.WithAuthSessionLocator`; the framework does no geolocation),
+  in both auth modes. They are the sign-in's, kept by every refresh, on new
+  `refresh_tokens` columns (`user_agent`, `client_address`, `location`):
+  migrate before deploying, the same migration as the session id's below
+  ([#662](https://github.com/gombit-dev/gombit/issues/662)).
+
+### Changed
+
+- **Breaking (schema):** a session's id is stable for its whole life
+  (`refresh_tokens.session_id`, `auth.RefreshToken.SessionID`): drawn at
+  login and carried to every rotation, it is the id `GET
+  {prefix}/auth/sessions` lists, so `DELETE {prefix}/auth/sessions/{id}`
+  with an id listed before a refresh ends the session instead of answering
+  404. Every login and refresh writes the new column: migrate before
+  deploying (`gombit db makemigrations`, `gombit db migrate`). Existing rows
+  need no backfill: a session from before the upgrade keeps its listed id,
+  which its next refresh stores. A logout, and the signing out of other
+  sessions a password change or MFA enrollment does, find the session's
+  current token by that id in one read, so a logout with a token any number
+  of rotations behind ends its session; along rows written without the id
+  (before the upgrade, or by an older binary during a rolling deploy) they
+  follow the chain, and only there the 1000-rotation limit (a 500)
+  applies. The audit trail's `session` targets name the stable id
+  ([#661](https://github.com/gombit-dev/gombit/issues/661)).
+
 ### Fixed
 
 - A freshly scaffolded app's `gombit dev` and `gombit build --embed` no
@@ -42,6 +75,24 @@ version.
   `ERROR_ACCESS_DENIED` with `STATUS_FILE_DELETED`; only
   `STATUS_DELETE_PENDING` was mapped to not-found
   ([#639](https://github.com/gombit-dev/gombit/pull/639)).
+- `gombit new` puts every framework model in the bootstrap migration and
+  `database/migrations/models.json`, taking them from the framework's own
+  list. v0.9.0 left out the five auth models it added (`auth.OneTimeToken`,
+  `AuditEvent`, `TOTPFactor`, `RecoveryCode`, `IdentityLink`), whose tables
+  the scaffolded `AutoMigrate` creates at startup, outside Atlas's history.
+  A new app then failed `gombit db check`. The tutorial's next step,
+  `gombit make resource` and `gombit db migrate`, failed because that
+  migration created the tables again (`table auth_one_time_tokens already
+  exists` on SQLite). An app created by `gombit new` v0.9.0 needs a one-time
+  edit of that migration; the upgrade notes
+  (`scaffold-registers-every-framework-model`) give it
+  ([#675](https://github.com/gombit-dev/gombit/pull/675)).
+- `gombit db check` skips its model-registry layer when
+  `internal/platform/database.go` calls no `AutoMigrate` method (as in an
+  app whose schema comes from its migrations), instead of failing with "no
+  AutoMigrate call"; `gombit db makemigrations --forget-model` no longer
+  fails there either. A file that does not parse is still an error
+  ([#675](https://github.com/gombit-dev/gombit/pull/675)).
 
 ## [0.9.0] — 2026-11-16
 
