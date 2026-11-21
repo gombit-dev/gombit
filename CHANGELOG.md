@@ -55,6 +55,11 @@ version.
 
 ### Fixed
 
+- Report `lease_expired` in failed-job records and worker logs when an
+  expired-lease redelivery exceeds its attempt budget. This identifies why
+  the worker set the delivery aside before running the handler again.
+  ([#494](https://github.com/gombit-dev/gombit/issues/494)).
+
 - The OpenAPI description of `DELETE {prefix}/auth/sessions/{id}`
   (`auth-revoke-session`) no longer says a listed id goes stale when its
   session refreshes; it has not since stable session ids

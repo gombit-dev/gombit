@@ -153,6 +153,12 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   generated-contract layer) once the app has a model-first resource.
   Nothing to change.
 
+- An exhausted delivery reclaimed after lease expiry is recorded as `lease_expired` in failed jobs and worker logs. (`jobs-expired-lease-failure-kind`, behavior, [#494](https://github.com/gombit-dev/gombit/issues/494))
+
+  The retry budget and `attempts exhausted` reason stay the same.
+  Existing failed records keep their stored kind. Alerting rules
+  that filter by kind can add `lease_expired` for new records.
+
 ## v0.9.0
 
 ### Manual: action required
