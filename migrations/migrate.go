@@ -10,6 +10,7 @@ import (
 
 	"github.com/gombit-dev/gombit/config"
 	"github.com/gombit-dev/gombit/database"
+	"gorm.io/gorm"
 )
 
 // ApplyOptions configures migrate, rollback, and status commands.
@@ -139,31 +140,57 @@ func Migrate(ctx context.Context, opts ApplyOptions) error {
 	}
 	args = withAtlasRevisionsSchema(opts.Database.Driver, args)
 	hints := newHintWriter(opts.Stderr)
-	err = opts.runner.Run(ctx, absWorkDir, opts.AtlasBinary, args, opts.Stdout, hints)
+	applyErr := opts.runner.Run(ctx, absWorkDir, opts.AtlasBinary, args, opts.Stdout, hints)
 	hints.Flush()
-	if err != nil {
-		return fmt.Errorf("migrations: atlas migrate apply: %w", err)
+	if applyErr != nil {
+		// Atlas commits each file as it goes, so files before the failing one
+		// are applied. Record them so the ledger matches the schema.
+		applied, _, recErr := recordAtlasApplied(db.DB, pending, opts)
+		if recErr != nil {
+			return errors.Join(fmt.Errorf("migrations: atlas migrate apply: %w", applyErr), recErr)
+		}
+		if len(applied) > 0 {
+			_, _ = fmt.Fprintf(opts.Stderr, "migrations: recorded %d migration(s) applied before the failure\n", len(applied))
+		}
+		return fmt.Errorf("migrations: atlas migrate apply: %w", applyErr)
 	}
 
 	atlasVersions, err := listAtlasVersions(db.DB)
 	if err != nil {
 		return err
 	}
-	applied := pendingPresentInAtlas(pending, atlasVersions)
-	if len(applied) == 0 {
+	if len(pendingPresentInAtlas(pending, atlasVersions)) == 0 {
 		return fmt.Errorf("migrations: atlas migrate apply succeeded but none of the %d pending version(s) appear in %s", len(pending), atlasRevisionsTable)
+	}
+	applied, batch, err := recordAtlasApplied(db.DB, pending, opts)
+	if err != nil {
+		return err
 	}
 	if len(applied) < len(pending) {
 		_, _ = fmt.Fprintf(opts.Stderr, "migrations: warning: recording %d of %d pending version(s) present in %s\n", len(applied), len(pending), atlasRevisionsTable)
 	}
-
-	batch, err := nextBatch(db.DB)
-	if err != nil {
-		return err
-	}
-	if err := insertBatch(db.DB, batch, applied, opts.now().UTC()); err != nil {
-		return err
-	}
 	_, _ = fmt.Fprintf(opts.Stdout, "Applied %d migration(s) in batch %d.\n", len(applied), batch)
 	return nil
+}
+
+// recordAtlasApplied writes one ledger batch for the pending versions that
+// atlas_schema_revisions lists. It returns the recorded files and their batch;
+// no files means nothing was recorded.
+func recordAtlasApplied(db *gorm.DB, pending []MigrationFile, opts ApplyOptions) ([]MigrationFile, int, error) {
+	atlasVersions, err := listAtlasVersions(db)
+	if err != nil {
+		return nil, 0, err
+	}
+	applied := pendingPresentInAtlas(pending, atlasVersions)
+	if len(applied) == 0 {
+		return nil, 0, nil
+	}
+	batch, err := nextBatch(db)
+	if err != nil {
+		return nil, 0, err
+	}
+	if err := insertBatch(db, batch, applied, opts.now().UTC()); err != nil {
+		return nil, 0, err
+	}
+	return applied, batch, nil
 }
