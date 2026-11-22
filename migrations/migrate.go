@@ -77,8 +77,9 @@ func openConfiguredDB(opts ApplyOptions) (*database.DB, error) {
 // Migrate applies pending Atlas migrations and mirrors them into framework_migrations.
 //
 // After atlas migrate apply succeeds, only pending versions that appear in
-// atlas_schema_revisions are recorded. This keeps Gombit's ledger aligned with
-// Atlas when the two previously diverged or when Atlas applies a subset.
+// the connection's schema-local atlas_schema_revisions are recorded. Legacy
+// PostgreSQL history is restored only when framework_migrations identifies the
+// versions applied in that schema; ambiguous shared history fails closed.
 func Migrate(ctx context.Context, opts ApplyOptions) error {
 	if ctx == nil {
 		return errors.New("migrations: nil context")
@@ -126,6 +127,9 @@ func Migrate(ctx context.Context, opts ApplyOptions) error {
 	if len(pending) == 0 {
 		_, _ = fmt.Fprintln(opts.Stdout, "No pending migrations.")
 		return nil
+	}
+	if err := preparePostgresAtlasHistory(db.DB, revisionsSchema, revisions); err != nil {
+		return err
 	}
 
 	absWorkDir, err := filepath.Abs(opts.WorkDir)

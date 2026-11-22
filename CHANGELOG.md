@@ -14,10 +14,10 @@ version.
 
 - PostgreSQL migration bookkeeping now keeps `atlas_schema_revisions` in the
   connection's current schema, alongside `framework_migrations`, so schemas in
-  one database no longer share Atlas history. Apps that previously used a
-  non-`public` `search_path` need a one-time per-schema history copy before
-  their next pending migration; see [the migration upgrade note](docs/migrations.md#apply)
-  ([#482](https://github.com/gombit-dev/gombit/issues/482)).
+  one database no longer share Atlas history. Gombit restores legacy versions
+  that `framework_migrations` attributes to the schema and refuses to rerun
+  migrations when old shared history is ambiguous; see [the migration upgrade
+  note](docs/migrations.md#apply) ([#482](https://github.com/gombit-dev/gombit/issues/482)).
 
 ## [0.10.0] — 2026-11-21
 

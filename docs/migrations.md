@@ -485,24 +485,22 @@ gombit db rollback [--dir database/migrations] [--atlas-bin atlas]
 
 PostgreSQL apps that used a non-`public` `search_path` with an earlier Gombit
 release may have a shared Atlas history in `public.atlas_schema_revisions`.
-Before applying a new pending migration after upgrading, copy only the rows
-that each schema's `framework_migrations` says it applied. For each affected
-schema, replace `tenant1` below with the connection's `current_schema()` and
-run:
+Before applying a pending migration, Gombit restores rows for versions already
+recorded in that schema's `framework_migrations` table. This copies only the
+history that the schema's own framework ledger proves it applied.
 
-```sql
-CREATE TABLE IF NOT EXISTS "tenant1".atlas_schema_revisions
-  (LIKE public.atlas_schema_revisions INCLUDING ALL);
-INSERT INTO "tenant1".atlas_schema_revisions
-SELECT atlas.*
-FROM public.atlas_schema_revisions AS atlas
-JOIN "tenant1".framework_migrations AS framework USING (version)
-ON CONFLICT (version) DO NOTHING;
-```
-
-This keeps histories separate: rows that another schema added to the old
-shared ledger are not copied unless that schema's own framework ledger also
-contains the version.
+The original #482 failure can leave `framework_migrations` empty even though a
+migration changed the schema and wrote its version to the shared public Atlas
+table. Because that table may combine versions from multiple schemas, Gombit
+cannot safely infer which versions belong to this one. When it finds existing
+application tables and unattributable public history, `gombit db migrate`
+stops before invoking Atlas rather than replaying migrations. Back up the
+database, inspect this schema and its migration files/deploy records to
+identify exactly which migrations ran, then repair both this schema's
+`atlas_schema_revisions` and `framework_migrations` entries for those versions.
+Do not copy every row from `public.atlas_schema_revisions`: some may belong to
+another schema. Retry `gombit db migrate` only after the schema-specific history
+is verified.
 
 If nothing is pending relative to `framework_migrations`, migrate prints
 `No pending migrations.` and does not invoke Atlas apply.

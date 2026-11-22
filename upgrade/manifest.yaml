@@ -509,19 +509,6 @@ releases:
 
   - version: v0.9.0
     changes:
-      - id: postgres-atlas-revisions-per-schema
-        kind: manual
-        area: schema
-        summary: "PostgreSQL Atlas migration history now follows the connection's `current_schema()` instead of sharing `public.atlas_schema_revisions` across schemas."
-        details: |
-          If an app used a non-`public` `search_path` with an earlier Gombit
-          release, `public.atlas_schema_revisions` may contain history shared
-          by multiple schemas. Before applying the next pending migration,
-          seed each affected schema's Atlas table from the matching versions
-          in that schema's `framework_migrations` table. The SQL procedure is
-          in [the PostgreSQL migration recovery note](migrations.md#apply).
-        refs: [482]
-
       - id: date-driver-location
         kind: manual
         area: behavior
@@ -1710,3 +1697,19 @@ releases:
           Go's minimal version selection moves an app's build to them with the
           framework upgrade.
         refs: [669, 673]
+
+  - version: unreleased
+    changes:
+      - id: postgres-atlas-revisions-per-schema
+        kind: manual
+        area: schema
+        summary: "PostgreSQL Atlas migration history now follows the connection's `current_schema()` instead of sharing `public.atlas_schema_revisions` across schemas."
+        details: |
+          Affected schemas whose framework_migrations rows identify applied
+          versions are restored automatically from the former shared public
+          Atlas history. If existing application tables and shared public
+          history remain but the applied versions cannot be attributed to this
+          schema, `gombit db migrate` now refuses to rerun migrations; inspect
+          this schema and repair its history as described in
+          [the PostgreSQL migration recovery note](migrations.md#apply).
+        refs: [482]

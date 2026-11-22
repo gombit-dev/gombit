@@ -60,7 +60,7 @@ func TestAtlasRevisionsRelationPostgresUsesCurrentSchema(t *testing.T) {
 		if strings.HasPrefix(q.query, "DELETE") {
 			sawDelete = true
 		}
-		if strings.Contains(q.query, "atlas_schema_revisions") && !strings.Contains(q.query, relation) && !(len(q.args) == 1 && q.args[0].Value == relation) {
+		if strings.Contains(q.query, "atlas_schema_revisions") && !strings.Contains(q.query, relation) && (len(q.args) != 1 || q.args[0].Value != relation) {
 			t.Errorf("statement %q does not use the resolved relation %s", q.query, relation)
 		}
 	}
@@ -70,9 +70,22 @@ func TestAtlasRevisionsRelationPostgresUsesCurrentSchema(t *testing.T) {
 	}
 }
 
+func TestAtlasRevisionsSchemaRejectsNullCurrentSchema(t *testing.T) {
+	recorder := &queryRecorder{nullSchema: true}
+	sqlDB := openRecordingDB(t, recorder)
+	db, err := gorm.Open(postgres.New(postgres.Config{Conn: sqlDB}), &gorm.Config{DisableAutomaticPing: true})
+	if err != nil {
+		t.Fatalf("open postgres dialector: %v", err)
+	}
+	if _, err := atlasRevisionsSchema(db); err == nil || !strings.Contains(err.Error(), "no current schema") {
+		t.Fatalf("atlasRevisionsSchema() error = %v, want clear null-current-schema error", err)
+	}
+}
+
 type queryRecorder struct {
-	mu      sync.Mutex
-	queries []recordedQuery
+	mu         sync.Mutex
+	queries    []recordedQuery
+	nullSchema bool
 }
 
 type recordedQuery struct {
@@ -120,7 +133,11 @@ func (c *recordingConn) QueryContext(_ context.Context, query string, args []dri
 	c.rec.record(query, args)
 	switch {
 	case strings.Contains(query, "current_schema()"):
-		return &staticRows{cols: []string{"current_schema"}, vals: [][]driver.Value{{"tenant1"}}}, nil
+		var schema driver.Value = "tenant1"
+		if c.rec.nullSchema {
+			schema = nil
+		}
+		return &staticRows{cols: []string{"current_schema"}, vals: [][]driver.Value{{schema}}}, nil
 	case strings.Contains(query, "to_regclass"):
 		return &staticRows{cols: []string{"exists"}, vals: [][]driver.Value{{true}}}, nil
 	case strings.Contains(query, "information_schema"):

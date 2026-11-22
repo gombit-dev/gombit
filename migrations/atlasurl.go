@@ -219,7 +219,7 @@ func mysqlAtlasURL(dsn string) (string, error) {
 // MakeMigrations (migrate diff) and migrate hash do not touch the app DB
 // revisions table and must not add this flag.
 func withAtlasRevisionsSchema(driver config.DatabaseDriver, schema string, args []string) []string {
-	if driver != config.DatabaseDriverPostgres {
+	if !isPostgresDriver(string(driver)) {
 		return args
 	}
 	return append(args, "--revisions-schema", schema)

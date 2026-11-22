@@ -1,6 +1,7 @@
 package migrations
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -243,14 +244,14 @@ func atlasRevisionsSchema(db *gorm.DB) (string, error) {
 	if !isPostgresDialect(db) {
 		return "", nil
 	}
-	var schema string
+	var schema sql.NullString
 	if err := db.Raw("SELECT current_schema()").Scan(&schema).Error; err != nil {
 		return "", fmt.Errorf("migrations: resolve atlas revisions schema: %w", err)
 	}
-	if schema == "" {
+	if !schema.Valid || schema.String == "" {
 		return "", errors.New("migrations: PostgreSQL connection has no current schema")
 	}
-	return schema, nil
+	return schema.String, nil
 }
 
 // atlasRevisionsRelation returns the quoted relation Atlas's revision table is
@@ -258,17 +259,17 @@ func atlasRevisionsSchema(db *gorm.DB) (string, error) {
 // connection; other drivers keep their unqualified table name.
 func atlasRevisionsRelation(db *gorm.DB, schema string) string {
 	if isPostgresDialect(db) {
-		return quotePostgresIdentifier(schema) + "." + quotePostgresIdentifier(atlasRevisionsTable)
+		return quoteIdent(schema) + "." + quoteIdent(atlasRevisionsTable)
 	}
 	return atlasRevisionsTable
 }
 
-func quotePostgresIdentifier(identifier string) string {
-	return `"` + strings.ReplaceAll(identifier, `"`, `""`) + `"`
+func isPostgresDialect(db *gorm.DB) bool {
+	return isPostgresDriver(db.Name())
 }
 
-func isPostgresDialect(db *gorm.DB) bool {
-	return db.Name() == string(config.DatabaseDriverPostgres)
+func isPostgresDriver(driver string) bool {
+	return driver == string(config.DatabaseDriverPostgres)
 }
 
 // atlasRevisionsExist reports whether Atlas's revision table exists at the
@@ -324,6 +325,106 @@ func listAtlasVersions(db *gorm.DB, schema string) (map[string]struct{}, error) 
 		out[version] = struct{}{}
 	}
 	return out, nil
+}
+
+// preparePostgresAtlasHistory migrates known per-schema history from the old
+// shared public table when framework_migrations proves which versions were
+// applied in this schema. If existing application tables and a shared public
+// history remain but this schema has no attributable history, it fails closed
+// rather than letting Atlas rerun old migrations against live objects.
+func preparePostgresAtlasHistory(db *gorm.DB, schema string, revisions []Revision) error {
+	if !isPostgresDialect(db) || schema == "" || schema == "public" {
+		return nil
+	}
+
+	localVersions, err := listAtlasVersions(db, schema)
+	if err != nil {
+		return err
+	}
+	var missing []string
+	for _, revision := range revisions {
+		if _, ok := localVersions[revision.Version]; !ok {
+			missing = append(missing, revision.Version)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+
+	publicVersions, err := listAtlasVersions(db, "public")
+	if err != nil {
+		return err
+	}
+	if len(revisions) > 0 {
+		for _, version := range missing {
+			if _, ok := publicVersions[version]; !ok {
+				return fmt.Errorf("migrations: PostgreSQL history for schema %q is incomplete: framework_migrations records version %s, but neither %s nor public.%s does; reconcile this schema's migration history before retrying", schema, version, atlasRevisionsTable, atlasRevisionsTable)
+			}
+		}
+		if err := seedAtlasRevisionsFromPublic(db, schema); err != nil {
+			return err
+		}
+		localVersions, err = listAtlasVersions(db, schema)
+		if err != nil {
+			return err
+		}
+		for _, revision := range revisions {
+			if _, ok := localVersions[revision.Version]; !ok {
+				return fmt.Errorf("migrations: could not restore Atlas history for schema %q version %s from framework_migrations; reconcile this schema's migration history before retrying", schema, revision.Version)
+			}
+		}
+		return nil
+	}
+
+	var unownedPublicVersions []string
+	for version := range publicVersions {
+		if _, ok := localVersions[version]; !ok {
+			unownedPublicVersions = append(unownedPublicVersions, version)
+		}
+	}
+	if len(unownedPublicVersions) == 0 {
+		return nil
+	}
+	var hasApplicationTables bool
+	if err := db.Raw(`
+SELECT EXISTS (
+  SELECT 1
+  FROM pg_catalog.pg_class AS relation
+  JOIN pg_catalog.pg_namespace AS ns ON ns.oid = relation.relnamespace
+  WHERE ns.nspname = ?
+    AND relation.relkind IN ('r', 'p')
+    AND relation.relname NOT IN (?, ?)
+)`, schema, revisionsTable, atlasRevisionsTable).Scan(&hasApplicationTables).Error; err != nil {
+		return fmt.Errorf("migrations: check legacy PostgreSQL history for schema %q: %w", schema, err)
+	}
+	if hasApplicationTables {
+		return fmt.Errorf("migrations: legacy PostgreSQL revision history is ambiguous for schema %q: public.%s has versions this schema cannot attribute, and the schema has existing tables; refusing to reapply migrations. Verify which migrations actually ran in this schema, repair its %s and %s history, then retry", schema, atlasRevisionsTable, atlasRevisionsTable, revisionsTable)
+	}
+	return nil
+}
+
+func seedAtlasRevisionsFromPublic(db *gorm.DB, schema string) error {
+	localRelation := atlasRevisionsRelation(db, schema)
+	publicRelation := atlasRevisionsRelation(db, "public")
+	localExists, err := atlasRevisionsExist(db, schema)
+	if err != nil {
+		return err
+	}
+	if !localExists {
+		if err := db.Exec("CREATE TABLE IF NOT EXISTS " + localRelation + " (LIKE " + publicRelation + " INCLUDING ALL)").Error; err != nil {
+			return fmt.Errorf("migrations: create schema-local Atlas history for %q: %w", schema, err)
+		}
+	}
+	query := fmt.Sprintf(`
+INSERT INTO %s (version, description, type, applied_at)
+SELECT atlas.version, atlas.description, atlas.type, atlas.applied_at
+FROM %s AS atlas
+JOIN %s AS framework USING (version)
+ON CONFLICT (version) DO NOTHING`, localRelation, publicRelation, quoteIdent(revisionsTable))
+	if err := db.Exec(query).Error; err != nil {
+		return fmt.Errorf("migrations: restore schema-local Atlas history for %q from framework_migrations: %w", schema, err)
+	}
+	return nil
 }
 
 func pendingPresentInAtlas(pending []MigrationFile, atlas map[string]struct{}) []MigrationFile {

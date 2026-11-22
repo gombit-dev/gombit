@@ -8,6 +8,20 @@ What each release asks of an application moving to it, newest first. This
 page, the release notes, and the upgrade tooling all come from the same
 compatibility manifest (see [upgrade.md](upgrade.md)).
 
+## Unreleased
+
+### Manual: action required
+
+- PostgreSQL Atlas migration history now follows the connection's `current_schema()` instead of sharing `public.atlas_schema_revisions` across schemas. (`postgres-atlas-revisions-per-schema`, schema, [#482](https://github.com/gombit-dev/gombit/issues/482))
+
+  Affected schemas whose framework_migrations rows identify applied
+  versions are restored automatically from the former shared public
+  Atlas history. If existing application tables and shared public
+  history remain but the applied versions cannot be attributed to this
+  schema, `gombit db migrate` now refuses to rerun migrations; inspect
+  this schema and repair its history as described in
+  [the PostgreSQL migration recovery note](migrations.md#apply).
+
 ## v0.10.0
 
 ### Manual: action required
@@ -177,15 +191,6 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 ## v0.9.0
 
 ### Manual: action required
-
-- PostgreSQL Atlas migration history now follows the connection's `current_schema()` instead of sharing `public.atlas_schema_revisions` across schemas. (`postgres-atlas-revisions-per-schema`, schema, [#482](https://github.com/gombit-dev/gombit/issues/482))
-
-  If an app used a non-`public` `search_path` with an earlier Gombit
-  release, `public.atlas_schema_revisions` may contain history shared
-  by multiple schemas. Before applying the next pending migration,
-  seed each affected schema's Atlas table from the matching versions
-  in that schema's `framework_migrations` table. The SQL procedure is
-  in [the PostgreSQL migration recovery note](migrations.md#apply).
 
 - `types.Date` keeps its calendar day whatever the driver's time zone, except, with `parseTime=true`, a day a MySQL `loc` skipped whole; dates a location west of UTC already moved stay moved. (`date-driver-location`, behavior, [#478](https://github.com/gombit-dev/gombit/issues/478))
 
