@@ -106,6 +106,13 @@ type App struct {
 	mu     sync.RWMutex
 	server *http.Server
 	addr   string
+	// started is set once the start hooks have run (by RunContext or an
+	// embedded RunWorker, whichever came first); stopped once the stop hooks
+	// have run, after which the App cannot serve or run a worker again.
+	// workers counts RunWorker calls in progress on this App (issue #492).
+	started bool
+	stopped bool
+	workers int
 
 	// draining is set when graceful shutdown begins so /readyz reports 503
 	// and a host deregisters the instance before in-flight requests finish
@@ -752,9 +759,12 @@ func RunContext(ctx context.Context, app *App) error {
 		WriteTimeout:      writeTimeout,
 		IdleTimeout:       serverTimeout,
 	}
-	app.setServer(server, listener.Addr().String())
+	if !app.setServer(server, listener.Addr().String()) {
+		_ = listener.Close()
+		return errors.New("framework: app already stopped")
+	}
 
-	if err := app.runStartHooks(ctx); err != nil {
+	if err := app.startHooksOnce(ctx); err != nil {
 		_ = listener.Close()
 		return errors.Join(err, app.runStopHooks())
 	}
@@ -784,11 +794,52 @@ func RunContext(ctx context.Context, app *App) error {
 	}
 }
 
-func (a *App) setServer(server *http.Server, addr string) {
+// setServer records the serving HTTP server. It reports false, recording
+// nothing, when the App's stop hooks have already run.
+func (a *App) setServer(server *http.Server, addr string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.stopped {
+		return false
+	}
 	a.server = server
 	a.addr = addr
+	return true
+}
+
+// startHooksOnce runs the start hooks unless an earlier runner already did, so
+// a worker and the web server sharing an App start it once (issue #492).
+func (a *App) startHooksOnce(ctx context.Context) error {
+	a.mu.Lock()
+	if a.started {
+		a.mu.Unlock()
+		return nil
+	}
+	a.started = true
+	a.mu.Unlock()
+	return a.runStartHooks(ctx)
+}
+
+// enterWorker registers a RunWorker call on this App.
+func (a *App) enterWorker() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.workers++
+}
+
+// leaveWorker deregisters a RunWorker call. The stop hooks run only when no
+// worker is left and no web server is serving: a worker inside a web process
+// must not close the app's shared resources while the server still uses them
+// (issue #492). The server's own RunContext releases them once it stops.
+func (a *App) leaveWorker() error {
+	a.mu.Lock()
+	a.workers--
+	release := a.workers == 0 && a.server == nil && !a.stopped
+	a.mu.Unlock()
+	if !release {
+		return nil
+	}
+	return a.runStopHooks()
 }
 
 func (a *App) snapshotStartHooks() []Hook {
@@ -851,9 +902,10 @@ func (a *App) shutdown() error {
 }
 
 func (a *App) runStopHooks() error {
-	a.mu.RLock()
+	a.mu.Lock()
 	timeout := a.shutdownTimeout
-	a.mu.RUnlock()
+	a.stopped = true
+	a.mu.Unlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()

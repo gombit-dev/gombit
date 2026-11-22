@@ -32,8 +32,15 @@ func RunWorker(ctx context.Context, app *App, opts jobs.WorkerOptions) error {
 	if app == nil {
 		return errors.New("framework: nil app")
 	}
+	// A worker inside a web process (RunContext on the same App) does not own
+	// the app's lifecycle, whichever started first: the start hooks run once
+	// (startHooksOnce), and the stop hooks run when the last worker and the
+	// web server are gone (leaveWorker), not when the worker alone returns
+	// (issue #492). Only a worker that runs the app alone releases it.
+	app.enterWorker()
+	releaseWorker := app.leaveWorker
 	if ctx == nil {
-		return errors.Join(errors.New("framework: nil context"), app.runStopHooks())
+		return errors.Join(errors.New("framework: nil context"), releaseWorker())
 	}
 	dispatcher := app.Jobs()
 	if len(opts.Queues) == 0 {
@@ -52,13 +59,13 @@ func RunWorker(ctx context.Context, app *App, opts jobs.WorkerOptions) error {
 	worker, err := jobs.NewWorker(dispatcher.Registry(), dispatcher.Queue(), opts)
 	if err != nil {
 		// Released as on every other return (issue #435).
-		return errors.Join(err, app.runStopHooks())
+		return errors.Join(err, releaseWorker())
 	}
-	if err := app.runStartHooks(ctx); err != nil {
-		return errors.Join(err, app.runStopHooks())
+	if err := app.startHooksOnce(ctx); err != nil {
+		return errors.Join(err, releaseWorker())
 	}
 	runErr := worker.Run(ctx)
-	return errors.Join(runErr, app.runStopHooks())
+	return errors.Join(runErr, releaseWorker())
 }
 
 // runWorkerCommand is Run's `worker` mode: it parses the worker flags and

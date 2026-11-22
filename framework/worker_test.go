@@ -104,6 +104,107 @@ func TestRunWorkerRunsTheAppsJobs(t *testing.T) {
 	}
 }
 
+func TestRunWorkerInsideTheWebProcessLeavesTheAppLifecycleToTheServer(t *testing.T) {
+	cfg := config.Default()
+	cfg.HTTP.Addr = "127.0.0.1:0"
+	cfg.Jobs.Driver = config.JobsDriverMemory
+	app, err := New(WithConfig(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var starts, stops atomic.Int32
+	app.OnStart(func(context.Context) error { starts.Add(1); return nil })
+	app.OnStop(func(context.Context) error { stops.Add(1); return nil })
+	jobs.MustRegister(app.Jobs().Registry(), func(context.Context, workerJob) error { return nil })
+
+	webCtx, stopWeb := context.WithCancel(context.Background())
+	defer stopWeb()
+	webDone := make(chan error, 1)
+	go func() { webDone <- RunContext(webCtx, app) }()
+	for deadline := time.Now().Add(5 * time.Second); app.Addr() == "" && time.Now().Before(deadline); {
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	workerCtx, stopWorker := context.WithCancel(context.Background())
+	workerDone := make(chan error, 1)
+	go func() {
+		workerDone <- RunWorker(workerCtx, app, jobs.WorkerOptions{PollInterval: 5 * time.Millisecond})
+	}()
+	time.Sleep(50 * time.Millisecond)
+	stopWorker()
+	if err := <-workerDone; err != nil {
+		t.Fatalf("RunWorker() = %v", err)
+	}
+
+	if n := starts.Load(); n != 1 {
+		t.Errorf("start hooks ran %d times, want 1", n)
+	}
+	if n := stops.Load(); n != 0 {
+		t.Errorf("stop hooks ran %d times while the web server is still serving", n)
+	}
+	if _, err := app.Jobs().Dispatch(context.Background(), workerJob{N: 1}); err != nil {
+		t.Errorf("Dispatch from the still-running web process: %v", err)
+	}
+	stopWeb()
+	if err := <-webDone; err != nil {
+		t.Fatalf("RunContext() = %v", err)
+	}
+	if n := stops.Load(); n != 1 {
+		t.Errorf("stop hooks ran %d times after the app stopped, want 1", n)
+	}
+}
+
+func TestRunWorkerStartedBeforeTheWebProcessLeavesTheAppLifecycleToTheServer(t *testing.T) {
+	cfg := config.Default()
+	cfg.HTTP.Addr = "127.0.0.1:0"
+	cfg.Jobs.Driver = config.JobsDriverMemory
+	app, err := New(WithConfig(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var starts, stops atomic.Int32
+	app.OnStart(func(context.Context) error { starts.Add(1); return nil })
+	app.OnStop(func(context.Context) error { stops.Add(1); return nil })
+	jobs.MustRegister(app.Jobs().Registry(), func(context.Context, workerJob) error { return nil })
+
+	workerCtx, stopWorker := context.WithCancel(context.Background())
+	workerDone := make(chan error, 1)
+	go func() {
+		workerDone <- RunWorker(workerCtx, app, jobs.WorkerOptions{PollInterval: 5 * time.Millisecond})
+	}()
+	time.Sleep(50 * time.Millisecond)
+
+	webCtx, stopWeb := context.WithCancel(context.Background())
+	defer stopWeb()
+	webDone := make(chan error, 1)
+	go func() { webDone <- RunContext(webCtx, app) }()
+	for deadline := time.Now().Add(5 * time.Second); app.Addr() == "" && time.Now().Before(deadline); {
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	stopWorker()
+	if err := <-workerDone; err != nil {
+		t.Fatalf("RunWorker() = %v", err)
+	}
+
+	if n := starts.Load(); n != 1 {
+		t.Errorf("start hooks ran %d times, want 1", n)
+	}
+	if n := stops.Load(); n != 0 {
+		t.Errorf("stop hooks ran %d times while the web server is still serving", n)
+	}
+	if _, err := app.Jobs().Dispatch(context.Background(), workerJob{N: 1}); err != nil {
+		t.Errorf("Dispatch from the still-running web process: %v", err)
+	}
+	stopWeb()
+	if err := <-webDone; err != nil {
+		t.Fatalf("RunContext() = %v", err)
+	}
+	if n := stops.Load(); n != 1 {
+		t.Errorf("stop hooks ran %d times after the app stopped, want 1", n)
+	}
+}
+
 func TestWorkerModeRefusesDriversAWorkerCannotConsume(t *testing.T) {
 	for driver, want := range map[config.JobsDriver]string{
 		config.JobsDriverSync:   "no queue to work",
