@@ -124,6 +124,64 @@ CREATE UNIQUE INDEX "idx_users_email" ON "users" ("email");`
 	}
 }
 
+// A "--" inside a string literal is data, not a comment: the statements after
+// it must still be classified, or a destructive DELETE hides behind a literal.
+func TestClassifyDoubleDashInLiteralDoesNotHideStatements(t *testing.T) {
+	sql := "INSERT INTO settings (k, v) VALUES ('separator', '--');\nDELETE FROM users;\n"
+
+	ops := Classify(sql)
+	if len(ops) != 2 {
+		t.Fatalf("Classify() = %d ops, want 2: %+v", len(ops), ops)
+	}
+	if ops[1].Safety != SafetyDataLoss {
+		t.Fatalf("Classify() statement 2 = %+v, want data_loss", ops[1])
+	}
+
+	// MySQL reads "5--1" as arithmetic, not a comment, so the DROP after the
+	// semicolon is a separate statement.
+	ops = Classify("SET @n = 5--1; DROP TABLE users;")
+	if !hasDataLossDrop(ops) {
+		t.Fatalf("Classify() = %+v, want a data_loss drop_table", ops)
+	}
+}
+
+// A "--" glued to a non-space character mid-line is a comment in SQLite and
+// PostgreSQL, so the statement after the line break is separate. It must not
+// be swallowed by a quote opened on the commented-out text.
+func TestClassifyGluedDashDoesNotHideDropAfterApostrophe(t *testing.T) {
+	ops := Classify("SELECT 1 --don't\n; DROP TABLE users;")
+	if !hasDataLossDrop(ops) {
+		t.Fatalf("Classify() = %+v, want a data_loss drop_table", ops)
+	}
+}
+
+// A "--" at the start of a line followed by a non-space is arithmetic in MySQL,
+// not a comment, so the DROP on that line is a statement.
+func TestClassifyLineStartDashIsNotAlwaysComment(t *testing.T) {
+	ops := Classify("SELECT 1\n--1; DROP TABLE users;")
+	if !hasDataLossDrop(ops) {
+		t.Fatalf("Classify() = %+v, want a data_loss drop_table", ops)
+	}
+}
+
+// MySQL's default backslash escape ends the string after \' , so the "--" that
+// follows is outside the quote and the DROP is a statement.
+func TestClassifyBackslashEscapeDoesNotHideDrop(t *testing.T) {
+	ops := Classify("SELECT '\\'; -- ' ; DROP TABLE users;")
+	if !hasDataLossDrop(ops) {
+		t.Fatalf("Classify() = %+v, want a data_loss drop_table", ops)
+	}
+}
+
+func hasDataLossDrop(ops []Operation) bool {
+	for _, op := range ops {
+		if op.Kind == OpDropTable && op.Safety == SafetyDataLoss {
+			return true
+		}
+	}
+	return false
+}
+
 // SQLite often can't drop a column in place; Atlas rewrites it as a table
 // rebuild (new table, copy, drop old, rename). The old-table DROP still
 // classifies as data loss, so the classifier stays safe-by-default even when

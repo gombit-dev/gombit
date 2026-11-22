@@ -171,24 +171,99 @@ func Statements(sql string) []string {
 	return splitStatements(sql)
 }
 
+// sqlScan is one reading of how a dialect spells comments and quoted text.
+// The dialects disagree on two points the splitter cannot resolve without
+// knowing the dialect: whether "--" glued to a following character starts a
+// comment, and whether a backslash escapes a quote inside a string.
+type sqlScan struct {
+	// dashAlways makes "--" a comment anywhere outside a quote (SQLite,
+	// PostgreSQL). Otherwise it needs whitespace or the end of the line after
+	// it (MySQL, where "5--1" is arithmetic).
+	dashAlways bool
+	// backslashEscapes makes "\" escape the next character inside '…' and
+	// "…" (MySQL's default). SQLite and standard PostgreSQL strings do not.
+	backslashEscapes bool
+}
+
+// sqlScans are every reading splitStatements checks. The first is canonical;
+// the rest only add statements that a different dialect could execute.
+var sqlScans = []sqlScan{
+	{dashAlways: true},
+	{dashAlways: true, backslashEscapes: true},
+	{},
+	{backslashEscapes: true},
+}
+
 // splitStatements strips comments and splits SQL into trimmed, non-empty
 // statements on ';'.
+//
+// A "--" or ";" inside a quoted region ('…', "…", `…`) is data, not a comment
+// or a statement break. Because the dialects disagree about "--" and backslash
+// escapes, the SQL is split under every sqlScan and the results are merged: a
+// statement that any dialect would execute is kept, so a destructive statement
+// cannot hide behind a reading that another dialect does not share.
 func splitStatements(sql string) []string {
-	var b strings.Builder
-	for _, line := range strings.Split(sql, "\n") {
-		if i := strings.Index(line, "--"); i >= 0 {
-			line = line[:i]
-		}
-		b.WriteString(line)
-		b.WriteByte('\n')
+	merged := splitWith(sql, sqlScans[0])
+	count := map[string]int{}
+	for _, s := range merged {
+		count[s]++
 	}
+	for _, scan := range sqlScans[1:] {
+		local := map[string]int{}
+		for _, s := range splitWith(sql, scan) {
+			local[s]++
+			if local[s] > count[s] {
+				merged = append(merged, s)
+				count[s]++
+			}
+		}
+	}
+	return merged
+}
+
+// splitWith splits sql on ';' under one sqlScan.
+func splitWith(sql string, scan sqlScan) []string {
 	var out []string
-	for _, stmt := range strings.Split(b.String(), ";") {
-		if s := strings.TrimSpace(stmt); s != "" {
+	var cur strings.Builder
+	flush := func() {
+		if s := strings.TrimSpace(cur.String()); s != "" {
 			out = append(out, s)
 		}
+		cur.Reset()
 	}
+	var quote byte
+	for i := 0; i < len(sql); i++ {
+		c := sql[i]
+		switch {
+		case quote != 0:
+			if scan.backslashEscapes && c == '\\' && quote != '`' && i+1 < len(sql) {
+				// Copy the escaped character so it cannot close the quote.
+				cur.WriteByte(c)
+				i++
+				c = sql[i]
+			} else if c == quote {
+				quote = 0
+			}
+		case c == '\'' || c == '"' || c == '`':
+			quote = c
+		case c == '-' && i+1 < len(sql) && sql[i+1] == '-' &&
+			(scan.dashAlways || i+2 == len(sql) || isSpaceByte(sql[i+2])):
+			for i < len(sql) && sql[i] != '\n' {
+				i++
+			}
+			c = '\n'
+		case c == ';':
+			flush()
+			continue
+		}
+		cur.WriteByte(c)
+	}
+	flush()
 	return out
+}
+
+func isSpaceByte(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\r' || c == '\n'
 }
 
 // ident returns the cleaned first captured identifier of re against s.
