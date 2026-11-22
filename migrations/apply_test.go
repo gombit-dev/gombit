@@ -303,6 +303,60 @@ func TestRollbackMidStatementFailureNamesStatementNumber(t *testing.T) {
 	}
 }
 
+// A down file with its own COMMIT would end Gombit's rollback transaction and
+// make part of the rollback permanent, so it must be rejected before any SQL runs.
+func TestRollbackRejectsTransactionControlInDownFile(t *testing.T) {
+	workDir := t.TempDir()
+	migrationDir := filepath.Join(workDir, "database", "migrations")
+	if err := os.MkdirAll(migrationDir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	writeFile(t, filepath.Join(migrationDir, "20260101000000_create_gadgets.sql"),
+		"CREATE TABLE gadgets (id INTEGER PRIMARY KEY);")
+	writeFile(t, filepath.Join(migrationDir, "downs", "20260101000000_create_gadgets.down.sql"),
+		"BEGIN;\nDROP TABLE gadgets;\nCOMMIT;")
+
+	dsn := "file:" + filepath.Join(workDir, "app.db") + "?cache=shared&_fk=1"
+	cfg := config.DatabaseConfig{Driver: config.DatabaseDriverSQLite, DSN: dsn}
+	opts := ApplyOptions{
+		WorkDir:      workDir,
+		MigrationDir: migrationDir,
+		Database:     cfg,
+		Stdout:       io.Discard,
+		runner:       &applyFakeAtlas{t: t},
+	}
+	if err := Migrate(context.Background(), opts); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	err := Rollback(context.Background(), opts)
+	if err == nil {
+		t.Fatal("Rollback() error = nil, want rejection of transaction control in a down file")
+	}
+	if !strings.Contains(err.Error(), "contains transaction control (BEGIN)") {
+		t.Fatalf("Rollback() error = %q, want it to name the transaction control statement", err)
+	}
+	if strings.Contains(err.Error(), "aborted") {
+		t.Fatalf("Rollback() error = %q, must not claim a transaction abort that did not happen", err)
+	}
+
+	db, err := database.Open(cfg)
+	if err != nil {
+		t.Fatalf("database.Open() error = %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	if !db.Migrator().HasTable("gadgets") {
+		t.Fatal("expected gadgets table to remain: the down file must not run at all")
+	}
+	revisions, err := listRevisions(db.DB)
+	if err != nil {
+		t.Fatalf("listRevisions() error = %v", err)
+	}
+	if len(revisions) != 1 {
+		t.Fatalf("revisions len = %d, want 1 after rejected rollback", len(revisions))
+	}
+}
+
 func TestRollbackMidBatchFailureAbortsTransaction(t *testing.T) {
 	workDir := t.TempDir()
 	migrationDir := filepath.Join(workDir, "database", "migrations")

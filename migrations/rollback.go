@@ -82,6 +82,23 @@ func Rollback(ctx context.Context, opts ApplyOptions) error {
 		return fmt.Errorf("migrations: missing down migration(s) for batch %d: %s", batch, strings.Join(missing, ", "))
 	}
 
+	// Down files run inside Gombit's rollback transaction. A statement that
+	// ends or starts a transaction would commit part of the rollback early, so
+	// reject every down file that contains one before anything runs.
+	for _, file := range downs {
+		// #nosec G304 -- down paths are resolved from the configured migration directory.
+		sqlBytes, err := os.ReadFile(file.DownPath)
+		if err != nil {
+			// The execution loop below reports read failures with its own message.
+			continue
+		}
+		for _, stmt := range splitSQLStatements(strings.TrimSpace(string(sqlBytes))) {
+			if kw := transactionControlKeyword(stmt); kw != "" {
+				return fmt.Errorf("migrations: down migration %s contains transaction control (%s); down files run inside the rollback transaction and must not BEGIN, COMMIT, ROLLBACK, END or START TRANSACTION; nothing was rolled back", filepath.Base(file.DownPath), kw)
+			}
+		}
+	}
+
 	useTx := opts.Database.Driver != config.DatabaseDriverMySQL
 	execDB := db.DB
 	var tx *gorm.DB
@@ -133,6 +150,41 @@ func Rollback(ctx context.Context, opts ApplyOptions) error {
 
 	_, _ = fmt.Fprintf(opts.Stdout, "Rolled back batch %d (%d migration(s)).\n", batch, len(versions))
 	return nil
+}
+
+// transactionControlKeyword returns the transaction-control keyword that opens
+// stmt (BEGIN, COMMIT, ROLLBACK, END, START TRANSACTION), or "" if stmt does not
+// open with one. Leading comments are skipped.
+func transactionControlKeyword(stmt string) string {
+	s := strings.TrimSpace(stmt)
+	for strings.HasPrefix(s, "--") || strings.HasPrefix(s, "/*") {
+		if strings.HasPrefix(s, "--") {
+			i := strings.IndexByte(s, '\n')
+			if i < 0 {
+				return ""
+			}
+			s = strings.TrimSpace(s[i+1:])
+		} else {
+			i := strings.Index(s, "*/")
+			if i < 0 {
+				return ""
+			}
+			s = strings.TrimSpace(s[i+2:])
+		}
+	}
+	words := strings.Fields(s)
+	if len(words) == 0 {
+		return ""
+	}
+	switch first := strings.ToUpper(strings.TrimRight(words[0], ";")); first {
+	case "BEGIN", "COMMIT", "ROLLBACK", "END":
+		return first
+	case "START":
+		if len(words) > 1 && strings.ToUpper(strings.TrimRight(words[1], ";")) == "TRANSACTION" {
+			return "START TRANSACTION"
+		}
+	}
+	return ""
 }
 
 func rollbackFail(tx *gorm.DB, useTx bool, completed []string, path string, err error, op string) error {
