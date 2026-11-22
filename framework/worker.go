@@ -23,11 +23,13 @@ import (
 // One binary deploys as both the web and the worker process.
 const WorkerCommand = "worker"
 
-// RunWorker runs app as a jobs worker until ctx is canceled: the start
-// hooks, a jobs.Worker over App.Jobs(), then the stop hooks. It serves no
-// HTTP. opts.Queues defaults to the dispatcher's default queue and
-// opts.Logger to the app's logger. Like RunContext, every return runs the stop
-// hooks and closes what the app opened, so the App cannot be run again.
+// RunWorker runs app as a jobs worker until ctx is canceled: the start hooks,
+// a jobs.Worker over App.Jobs(), then its worker registration is released. It
+// serves no HTTP. opts.Queues defaults to the dispatcher's default queue and
+// opts.Logger to the app's logger. When it runs alone, its return runs the stop
+// hooks and closes what the app opened. When it shares an App with RunContext
+// or another worker, those hooks wait until the last runner returns (issue
+// #492). An App cannot be run again once shutdown starts.
 func RunWorker(ctx context.Context, app *App, opts jobs.WorkerOptions) error {
 	if app == nil {
 		return errors.New("framework: nil app")
@@ -37,7 +39,9 @@ func RunWorker(ctx context.Context, app *App, opts jobs.WorkerOptions) error {
 	// (startHooksOnce), and the stop hooks run when the last worker and the
 	// web server are gone (leaveWorker), not when the worker alone returns
 	// (issue #492). Only a worker that runs the app alone releases it.
-	app.enterWorker()
+	if !app.enterWorker() {
+		return errors.New("framework: app already stopped")
+	}
 	releaseWorker := app.leaveWorker
 	if ctx == nil {
 		return errors.Join(errors.New("framework: nil context"), releaseWorker())
@@ -78,7 +82,7 @@ func runWorkerCommand(ctx context.Context, app *App, args []string, stderr io.Wr
 		if errors.Is(err, flag.ErrHelp) {
 			err = nil
 		}
-		return errors.Join(err, app.runStopHooks())
+		return errors.Join(err, app.stopIfIdle())
 	}
 	runErr := RunWorker(ctx, app, opts)
 	return errors.Join(runErr, stopMetrics())

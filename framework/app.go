@@ -103,14 +103,17 @@ type App struct {
 	authLocator        auth.SessionLocator
 	authSignupOff      bool
 
-	mu     sync.RWMutex
-	server *http.Server
-	addr   string
-	// started is set once the start hooks have run (by RunContext or an
-	// embedded RunWorker, whichever came first); stopped once the stop hooks
-	// have run, after which the App cannot serve or run a worker again.
-	// workers counts RunWorker calls in progress on this App (issue #492).
-	started bool
+	mu           sync.RWMutex
+	server       *http.Server
+	addr         string
+	serverActive bool // includes startup and shutdown, not only Serve
+	startDone    chan struct{}
+	startErr     error
+	stopOnce     sync.Once
+	stopErr      error
+	// stopped is set atomically with the decision to run stop hooks. Once
+	// stopped, new servers and workers are rejected. workers counts RunWorker
+	// calls in progress on this App (issue #492).
 	stopped bool
 	workers int
 
@@ -723,20 +726,24 @@ func Run(app *App) error {
 	return RunContext(ctx, app)
 }
 
-// RunContext runs app until ctx is canceled or the HTTP server fails. Every
-// return runs the stop hooks and closes what the app opened, so an App runs
-// once: it cannot be run again after RunContext returns (issue #435).
-func RunContext(ctx context.Context, app *App) error {
+// RunContext runs app until ctx is canceled or the HTTP server fails. The App's
+// stop hooks run once its server and all embedded workers have returned, so
+// shared resources stay available to whichever runner is still active.
+func RunContext(ctx context.Context, app *App) (result error) {
 	if app == nil {
 		return errors.New("framework: nil app")
 	}
 	if ctx == nil {
-		return errors.Join(errors.New("framework: nil context"), app.runStopHooks())
+		return errors.Join(errors.New("framework: nil context"), app.stopIfIdle())
 	}
+	if !app.enterServer() {
+		return errors.New("framework: app already stopped or serving")
+	}
+	defer func() { result = errors.Join(result, app.leaveServer()) }()
 
 	listener, err := net.Listen("tcp", app.Config().HTTP.Addr)
 	if err != nil {
-		return errors.Join(fmt.Errorf("framework: listen: %w", err), app.runStopHooks())
+		return fmt.Errorf("framework: listen: %w", err)
 	}
 
 	// The per-handler context deadline (HTTP.RequestTimeout) is opt-in and off by
@@ -766,7 +773,7 @@ func RunContext(ctx context.Context, app *App) error {
 
 	if err := app.startHooksOnce(ctx); err != nil {
 		_ = listener.Close()
-		return errors.Join(err, app.runStopHooks())
+		return err
 	}
 
 	serverErr := make(chan error, 1)
@@ -786,20 +793,19 @@ func RunContext(ctx context.Context, app *App) error {
 		}
 		return err
 	case err := <-serverErr:
-		stopErr := app.runStopHooks()
 		if err != nil {
-			return errors.Join(fmt.Errorf("framework: serve: %w", err), stopErr)
+			return fmt.Errorf("framework: serve: %w", err)
 		}
-		return stopErr
+		return nil
 	}
 }
 
-// setServer records the serving HTTP server. It reports false, recording
-// nothing, when the App's stop hooks have already run.
+// setServer records the HTTP server after enterServer reserved its lifecycle.
+// It reports false without recording anything if shutdown already began.
 func (a *App) setServer(server *http.Server, addr string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.stopped {
+	if a.stopped || !a.serverActive {
 		return false
 	}
 	a.server = server
@@ -807,24 +813,62 @@ func (a *App) setServer(server *http.Server, addr string) bool {
 	return true
 }
 
-// startHooksOnce runs the start hooks unless an earlier runner already did, so
-// a worker and the web server sharing an App start it once (issue #492).
+// startHooksOnce runs the start hooks once. Concurrent runners wait for the
+// first run to finish and receive the same result (issue #492).
 func (a *App) startHooksOnce(ctx context.Context) error {
 	a.mu.Lock()
-	if a.started {
+	if a.stopped {
 		a.mu.Unlock()
-		return nil
+		return errors.New("framework: app already stopped")
 	}
-	a.started = true
+	if done := a.startDone; done != nil {
+		a.mu.Unlock()
+		<-done
+		return a.startErr
+	}
+	done := make(chan struct{})
+	a.startDone = done
 	a.mu.Unlock()
-	return a.runStartHooks(ctx)
+
+	err := a.runStartHooks(ctx)
+	a.mu.Lock()
+	a.startErr = err
+	close(done)
+	a.mu.Unlock()
+	return err
 }
 
-// enterWorker registers a RunWorker call on this App.
-func (a *App) enterWorker() {
+// enterServer reserves the App lifecycle before opening a listener, so a
+// concurrent worker cannot stop the App while RunContext is starting.
+func (a *App) enterServer() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.stopped || a.serverActive {
+		return false
+	}
+	a.serverActive = true
+	return true
+}
+
+// leaveServer releases the server's ownership of the App. If no worker is
+// still using the App, this is the last owner and runs the stop hooks.
+func (a *App) leaveServer() error {
+	a.mu.Lock()
+	a.server = nil
+	a.serverActive = false
+	a.mu.Unlock()
+	return a.stopIfIdle()
+}
+
+// enterWorker registers a RunWorker call unless shutdown has already started.
+func (a *App) enterWorker() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.stopped {
+		return false
+	}
 	a.workers++
+	return true
 }
 
 // leaveWorker deregisters a RunWorker call. The stop hooks run only when no
@@ -834,11 +878,21 @@ func (a *App) enterWorker() {
 func (a *App) leaveWorker() error {
 	a.mu.Lock()
 	a.workers--
-	release := a.workers == 0 && a.server == nil && !a.stopped
 	a.mu.Unlock()
-	if !release {
+	return a.stopIfIdle()
+}
+
+// stopIfIdle claims shutdown under the same lock that protects new owners.
+// This closes the gap where a worker could enter after the last owner checked
+// the count but before stop hooks marked the App stopped.
+func (a *App) stopIfIdle() error {
+	a.mu.Lock()
+	if a.workers != 0 || a.serverActive {
+		a.mu.Unlock()
 		return nil
 	}
+	a.stopped = true
+	a.mu.Unlock()
 	return a.runStopHooks()
 }
 
@@ -885,8 +939,8 @@ func (a *App) shutdown() error {
 	// request that outlives the drain consumes all of its context, and hooks
 	// handed that same context would start with it already expired: any hook
 	// that honors its context (flush a buffer, close a pool) would fail at once,
-	// exactly when shutdown is already going badly. runStopHooks gives them their
-	// own shutdownTimeout, as the worker's shutdown already does.
+	// exactly when shutdown is already going badly. leaveServer runs stop hooks
+	// with their own shutdownTimeout after this server and all workers have left.
 	var drainErr error
 	if server != nil {
 		drainCtx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -898,21 +952,36 @@ func (a *App) shutdown() error {
 		}
 	}
 
-	return errors.Join(drainErr, a.runStopHooks())
+	return drainErr
 }
 
 func (a *App) runStopHooks() error {
 	a.mu.Lock()
-	timeout := a.shutdownTimeout
 	a.stopped = true
 	a.mu.Unlock()
+	a.stopOnce.Do(func() {
+		a.runStopHooksOnce()
+	})
+	return a.stopErr
+}
+
+func (a *App) runStopHooksOnce() {
+	a.mu.RLock()
+	timeout := a.shutdownTimeout
+	startDone := a.startDone
+	a.mu.RUnlock()
+	// Never tear down shared resources while another runner is still executing
+	// the start hooks.
+	if startDone != nil {
+		<-startDone
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	// The auth Service first: its background work (a password reset
 	// message) still uses the database and the mailer the stop hooks close.
 	authErr := a.closeAuthService(ctx)
-	return errors.Join(authErr, a.runStopHooksWithContext(ctx), a.releaseOwned())
+	a.stopErr = errors.Join(authErr, a.runStopHooksWithContext(ctx), a.releaseOwned())
 }
 
 // closeAuthService closes the auth Service the App mounted, at most once.

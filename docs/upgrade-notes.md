@@ -8,6 +8,17 @@ What each release asks of an application moving to it, newest first. This
 page, the release notes, and the upgrade tooling all come from the same
 compatibility manifest (see [upgrade.md](upgrade.md)).
 
+## Unreleased
+
+### Informational
+
+- An embedded `RunWorker` now shares its App lifecycle with `RunContext`; stop hooks wait until the server and every worker return. (`embedded-worker-shares-app-lifecycle`, behavior, [#492](https://github.com/gombit-dev/gombit/issues/492))
+
+  Concurrent runners share one start-hook result, and a worker cannot
+  restart an App after shutdown begins. This fixes the embedded-worker
+  lifecycle race; standalone `RunWorker` still stops the App when its
+  final runner returns.
+
 ## v0.10.0
 
 ### Manual: action required

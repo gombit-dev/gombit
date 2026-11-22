@@ -1697,3 +1697,16 @@ releases:
           Go's minimal version selection moves an app's build to them with the
           framework upgrade.
         refs: [669, 673]
+
+  - version: unreleased
+    changes:
+      - id: embedded-worker-shares-app-lifecycle
+        kind: informational
+        area: behavior
+        summary: "An embedded `RunWorker` now shares its App lifecycle with `RunContext`; stop hooks wait until the server and every worker return."
+        details: |
+          Concurrent runners share one start-hook result, and a worker cannot
+          restart an App after shutdown begins. This fixes the embedded-worker
+          lifecycle race; standalone `RunWorker` still stops the App when its
+          final runner returns.
+        refs: [492]
