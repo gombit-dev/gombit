@@ -338,15 +338,17 @@ func TestLogoutWithRotatedToken(t *testing.T) {
 	rec = postJSON(t, app, "/api/v1/auth/refresh", `{"refresh_token":"`+b.RefreshToken+`"}`)
 	assertError(t, rec, http.StatusUnauthorized, "authentication")
 
-	// A logout whose walk cannot reach the session's head fails with a 500
-	// rather than answer 200 with the session alive.
+	// The session's id finds its head however many rotations on: past the
+	// bound a walk along the chain had, the logout still ends it (AUTH-11).
 	defer auth.SetMaxChainHops(1)()
 	c := loginUser(t, app, "rotated-logout@example.com", testPassword)
-	d := refreshUser(t, app, c.RefreshToken)
+	d := refreshUser(t, app, refreshUser(t, app, c.RefreshToken).RefreshToken)
 	rec = postJSON(t, app, "/api/v1/auth/logout", `{"refresh_token":"`+c.RefreshToken+`"}`)
-	assertError(t, rec, http.StatusInternalServerError, "internal")
-	if me := getMe(t, app, d.AccessToken); me != http.StatusOK {
-		t.Fatalf("GET /me after the failed logout = %d, want 200: it ended nothing", me)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("logout with a token two rotations behind = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	if me := getMe(t, app, d.AccessToken); me != http.StatusUnauthorized {
+		t.Fatalf("GET /me after the logout = %d, want 401", me)
 	}
 }
 

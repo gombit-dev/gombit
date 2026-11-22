@@ -66,8 +66,8 @@ const (
 	// also what a thief who rotated a stolen token first leaves when the
 	// legitimate client comes back within the grace, the one trace of it.
 	// TargetType "session" and TargetID name the successor's session by the
-	// id GET /auth/sessions showed for it then, which changes when that
-	// session next refreshes; Details "successor" is "live" (it may be
+	// id GET /auth/sessions lists it under, which its refreshes keep
+	// (AUTH-11); Details "successor" is "live" (it may be
 	// either) or "ended" (signed out before the request came).
 	AuditRefreshReuseWithinGrace AuditAction = "auth.refresh.reuse_within_grace"
 	// AuditSessionRevoked: sessions were revoked (Details "scope": one,
@@ -209,9 +209,10 @@ type requestInfoKey struct{}
 
 // CaptureRequestInfo is a Huma middleware that stores the request's client
 // address (gin's ClientIP, so GOMBIT_HTTP_TRUSTED_PROXIES is respected) and
-// User-Agent for the audit events the operation records. Mount puts it on
-// every framework auth route; an application puts it on its own operations
-// that record events (RecordAuditEvent).
+// User-Agent for the audit events the operation records, and for the
+// device a session it starts keeps (AUTH-12). Mount puts it on every
+// framework auth route; an application puts it on its own operations that
+// record events (RecordAuditEvent) or start sessions (Service.IssueTokens).
 func CaptureRequestInfo() func(ctx huma.Context, next func(huma.Context)) {
 	return func(ctx huma.Context, next func(huma.Context)) {
 		info := requestInfo{userAgent: ctx.Header("User-Agent"), ip: clientIP(ctx)}

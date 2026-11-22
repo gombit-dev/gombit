@@ -17,7 +17,7 @@ gombit new tasks --database sqlite --auth cookie --ui mui
 cd tasks && gombit dev
 ```
 
-> **Status: pre-1.0 (v0.8).** The CRUD loop, the admin, and schema-safety
+> **Status: pre-1.0 (v0.10).** The CRUD loop, the admin, and schema-safety
 > tooling are shipped and CI-gated across SQLite, PostgreSQL, and MySQL;
 > background jobs are shipped and CI-gated against Redis; object storage and
 > upgrade tooling are shipped; and a fault-injection suite runs on every PR.
@@ -65,7 +65,7 @@ tested and first-class.
 | **Jobs** | Typed background jobs over sync, in-memory, or Redis queues; a worker with retries, backoff, timeouts, delayed and unique jobs; failed-job tooling (`gombit jobs`); job metrics and OpenTelemetry spans |
 | **Storage** | `app.Storage()` over local files, memory, or S3-compatible stores; streaming uploads with size and content-type policies; public and signed URLs; direct browser uploads; claim-based cleanup that never deletes a file a record holds; `file` / `image` model fields with generated upload operations and admin widgets |
 | **Frontend** | Vite + React + TypeScript, React Hook Form, optional Material UI CRUD preset (`--ui mui`) |
-| **Auth** | Bearer JWT with refresh rotation (token in memory, **never `localStorage`**), or first-class cookie sessions with CSRF (`--auth cookie`); session management; on `main` (unreleased): email verification, password reset and change, email change, credential throttling, account disable, a security audit trail, TOTP MFA with recovery codes, and external sign-in through an OIDC/OAuth2 adapter |
+| **Auth** | Bearer JWT with refresh rotation (token in memory, **never `localStorage`**), or first-class cookie sessions with CSRF (`--auth cookie`); session management, email verification, password reset and change, email change, credential throttling, account disable, a security audit trail, TOTP MFA with recovery codes, and external sign-in through an OIDC/OAuth2 adapter |
 | **Admin** | Runtime generic admin at `/admin/` with introspection API, permissions, groups, superuser bypass, and file and image fields (direct uploads, previews) |
 | **CLI** | Cobra tree: `new`, `dev`, `worker`, `jobs`, `build --embed`, `make resource`, `make command`, `generate`, `db`, `openapi`, `client`, `contract`, `routes`, `doctor`, `config`, `createsuperuser`, `upgrade`, `version` |
 | **Deploy** | `gombit build --embed` — API, SPA, and admin in one binary; a machine-readable app contract (`gombit contract app`) and migration safety manifests for deployment hosts |
@@ -319,8 +319,9 @@ dependency apply, deprecation check, the codemod runner, config, contract and
 framework-schema analysis), the compatibility policy, and session management
 (v0.8) · the account-security lifecycle: email verification, password reset
 and change, email change, credential throttling, account state, the audit
-trail, TOTP MFA, and external identity providers (on `main`, unreleased). See
-the [changelog](CHANGELOG.md) for detail.
+trail, TOTP MFA, and external identity providers (v0.9) · stable session
+ids, session device metadata, and a sessions page in the scaffolded
+frontend (v0.10). See the [changelog](CHANGELOG.md) for detail.
 
 **Not here yet:** events, scheduler, mail (auth sends its messages through an
 `auth.Mailer` you provide), gRPC, multi-tenancy, i18n.

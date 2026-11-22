@@ -315,3 +315,54 @@ func countMust(t *testing.T, src []byte, pkg string) int {
 	}
 	return count
 }
+
+// TestAutoMigrateModelsWithoutAutoMigrateCall: a platform database.go with
+// no AutoMigrate call (the schema comes from migrations alone) is reported
+// as not ok, like a missing file, so the AutoMigrate-based checks skip it.
+// make resource still needs the call to register its model, so
+// CollectAutoMigrateModels keeps refusing such a file.
+func TestAutoMigrateModelsWithoutAutoMigrateCall(t *testing.T) {
+	src := "package platform\n\nimport \"github.com/gombit-dev/gombit/database\"\n\nfunc Open() (*database.DB, error) { return nil, nil }\n"
+	workDir := t.TempDir()
+	path := filepath.Join(workDir, filepath.FromSlash(platformDBRel))
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(src), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	models, ok, err := AutoMigrateModels(workDir)
+	if err != nil || ok || models != nil {
+		t.Fatalf("AutoMigrateModels() = %v, %v, %v; want nil, false, nil", models, ok, err)
+	}
+	if _, err := CollectAutoMigrateModels([]byte(src)); err == nil || !strings.Contains(err.Error(), "no AutoMigrate call in internal/platform/database.go") {
+		t.Fatalf("CollectAutoMigrateModels() error = %v, want no AutoMigrate call", err)
+	}
+}
+
+// TestAutoMigrateModelsReportsAnUnreadableFile: only a file with no
+// AutoMigrate call is skipped. One that does not parse, or names a model
+// whose package it does not import, is an error, so db check reports it and
+// makemigrations --forget-model refuses rather than dropping a table the app
+// may still create.
+func TestAutoMigrateModelsReportsAnUnreadableFile(t *testing.T) {
+	for name, src := range map[string]string{
+		"syntax error": "package platform\n\nfunc AutoMigrate(db *database.DB) error {\n<<<<<<< HEAD\n",
+		"unresolved model": "package platform\n\nimport \"github.com/gombit-dev/gombit/database\"\n\n" +
+			"func AutoMigrate(db *database.DB) error { return db.AutoMigrate(&missing.Widget{}) }\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			workDir := t.TempDir()
+			path := filepath.Join(workDir, filepath.FromSlash(platformDBRel))
+			if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(src), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, ok, err := AutoMigrateModels(workDir); err == nil || ok {
+				t.Fatalf("AutoMigrateModels() = ok %v, err %v; want an error", ok, err)
+			}
+		})
+	}
+}

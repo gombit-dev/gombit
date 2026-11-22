@@ -435,12 +435,12 @@ func TestFault_Concurrency_RevocationDuringRotation(t *testing.T) {
 // transaction is pinned at the replacement token's insert, holding the
 // user's lock) when the user revokes S by the id it was listed with before
 // that rotation. Expected outcome: the revocation waits for the user's row,
-// then finds that the id no longer names an active session and returns
-// ErrSessionNotFound (a 404: list again) without revoking anything, and S's
-// new head authenticates and rotates. A revocation that read the sessions
-// before taking the lock would match S's old head, wait, and then update a
-// row the rotation had already revoked: it would report success while S
-// lives on. The rotation is released only once the revocation is really
+// then finds S under the same id, since a session keeps its id across
+// rotations (AUTH-11), and ends it: S's new head neither authenticates nor
+// rotates. A revocation that read the sessions before taking the lock would
+// match S's old head, wait, and then update a row the rotation had already
+// revoked: it would report success while S lives on. The rotation is
+// released only once the revocation is really
 // waiting for the user's row, so that ordering fails the test
 // deterministically rather than racing the rotation's commit.
 //
@@ -491,14 +491,14 @@ func TestFault_Concurrency_RevokeOneDuringRotation(t *testing.T) {
 			t.Fatalf("RotateRefresh = %v; it held the user's lock first and should commit", err)
 		}
 		head := <-rotated
-		if err := waitErr(t, revokeErr, "revocation"); !errors.Is(err, auth.ErrSessionNotFound) {
-			t.Fatalf("RevokeSession(the id S was listed with before it rotated) = %v, want ErrSessionNotFound", err)
+		if err := waitErr(t, revokeErr, "revocation"); err != nil {
+			t.Fatalf("RevokeSession(the id S was listed with before it rotated) = %v, want nil", err)
 		}
-		if _, err := f.svc.ParseAccess(ctx, head.AccessToken); err != nil {
-			t.Fatalf("S's new head does not authenticate (%v); the revocation of its stale id must end nothing", err)
+		if _, err := f.svc.ParseAccess(ctx, head.AccessToken); err == nil {
+			t.Fatal("S's new head still authenticates: the revocation ended a row the rotation had already revoked")
 		}
-		if _, err := f.svc.RotateRefresh(ctx, head.RefreshToken); err != nil {
-			t.Fatalf("S's new head cannot refresh (%v); the revocation of its stale id must end nothing", err)
+		if _, err := f.svc.RotateRefresh(ctx, head.RefreshToken); err == nil {
+			t.Fatal("S's new head can still refresh after the revocation")
 		}
 	})
 }

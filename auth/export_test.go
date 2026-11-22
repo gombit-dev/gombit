@@ -32,7 +32,11 @@ func SessionIDOf(ctx context.Context, s *Service, access string) (string, error)
 	if err != nil {
 		return "", err
 	}
-	return s.sessionID(refreshID), nil
+	var row RefreshToken
+	if err := s.db.WithContext(ctx).First(&row, refreshID).Error; err != nil {
+		return "", err
+	}
+	return s.sessionIDOf(row), nil
 }
 
 // ErrRefreshReuse is the error RotateRefresh returns for the reuse of an
@@ -193,8 +197,8 @@ func ContextWithAddress(ctx context.Context, ip string) context.Context {
 // ThrottleProbed reports whether the probe of the throttles' store decided.
 func ThrottleProbed(s *Service) bool { return s.throttle.probed.Load() }
 
-// ErrChainUnresolved is the error of a walk along a session's chain that did
-// not reach the session's head.
+// ErrChainUnresolved is the error of a search for a session's head that did
+// not find it.
 var ErrChainUnresolved = errChainUnresolved
 
 // SetMaxChainHops lowers how many rows a walk along a session's chain reads
@@ -219,4 +223,10 @@ func TOTPCode(secret string, at time.Time) string {
 		panic(err)
 	}
 	return totpCode(key, totpStep(at))
+}
+
+// ContextWithRequestInfo returns ctx carrying what CaptureRequestInfo
+// records for a request from the client address ip with the User-Agent ua.
+func ContextWithRequestInfo(ctx context.Context, ip, ua string) context.Context {
+	return context.WithValue(ctx, requestInfoKey{}, requestInfo{ip: ip, userAgent: ua})
 }

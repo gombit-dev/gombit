@@ -202,7 +202,10 @@ func parseRenames(values []string) ([]migrations.Rename, error) {
 // migration registry are two declarations of desired state; forgetting a model
 // the app still auto-migrates leaves them contradictory, and the next make
 // resource / app start re-adds it — the DROP never sticks. Apps without that file
-// (a non-scaffolded layout) skip the check (#300).
+// (a non-scaffolded layout, #300), or whose file calls no AutoMigrate method (as
+// when the schema comes from migrations alone), skip the check: there is no list
+// to hold the model to, and one migrated some other way (auth.Migrate, another
+// file) is not seen.
 func ensureForgetModelsRetired(workDir string, forget []migrations.Model) error {
 	if len(forget) == 0 {
 		return nil

@@ -11,9 +11,10 @@ does not define its own migration DSL.
 Migration](#generate-a-migration)) covering every model
 `internal/platform/database.go`'s `AutoMigrate` call registers — the
 framework's own tables (auth's `users`, `permissions`, `groups`,
-`refresh_tokens` and their join tables, and `storage_claims`, which
-[storage](storage.md#cleanup) owns uploaded files through) plus the
-`product/` example — when Atlas
+`refresh_tokens` and their join tables, its one-time tokens, audit events,
+MFA factors and recovery codes, and identity links, the `auth_*` tables, and
+`storage_claims`, which [storage](storage.md#cleanup) owns uploaded files
+through) plus the `product/` example — when Atlas
 is on `PATH` and `go mod tidy` succeeded. For `--database sqlite` (the
 default), `gombit new` also **applies** it immediately, so
 `gombit db status` shows it already applied before you've run `db migrate`
@@ -412,7 +413,7 @@ fixes it:
 | Layer | Checks | Fix |
 |-------|--------|-----|
 | generated contract | the `*.gen.go` match the models (`gombit generate --check`) | `gombit generate` |
-| model registry | the models `AutoMigrate` lists match `models.json` | `makemigrations --model` / `--forget-model` |
+| model registry | the models `AutoMigrate` lists match `models.json` (skipped without an `AutoMigrate` call in `internal/platform/database.go`) | `makemigrations --model` / `--forget-model` |
 | migration directory | `atlas.sum` matches and every migration applies to an empty dev database; no misplaced files | `gombit db repair` |
 | migration safety | every destructive or unsafe change carries a `-- gombit:allow` line ([Linting](#linting-and-repairing-the-migration-directory)) | handle the data, acknowledge it |
 | models ↔ migrations | the models declare nothing the migrations lack ([`gombit db plan`](#planning-a-change)) | `gombit db makemigrations` |

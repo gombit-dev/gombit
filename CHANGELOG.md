@@ -19,6 +19,114 @@ version.
   their next pending migration; see [the migration upgrade note](docs/migrations.md#apply)
   ([#482](https://github.com/gombit-dev/gombit/issues/482)).
 
+## [0.10.0] — 2026-11-21
+
+### Added
+
+- A [sessions page](docs/frontend.md#sessions-page) in apps `gombit new`
+  scaffolds (AUTH-13), in both UI presets and both auth modes:
+  `/sessions`, linked from the layout, lists the signed-in user's sessions
+  with the current one marked and the device each signed in from, signs
+  out one, the others, or all of them, and returns to the login page when
+  it ends this browser's own session. An app scaffolded before has none;
+  copy `frontend/src/pages/SessionsPage.tsx`, its route and its link from
+  a new app to add it
+  ([#663](https://github.com/gombit-dev/gombit/issues/663)).
+
+- [Session device metadata](docs/auth.md#sessions) (AUTH-12): `GET
+  {prefix}/auth/sessions` shows each session's `user_agent` (the sign-in's
+  `User-Agent`, cut to 255 bytes, not parsed), `client_address` (by default
+  only its network, an IPv4 /24 or IPv6 /48;
+  `GOMBIT_AUTH_SESSION_CLIENT_ADDRESS=full` or `none`) and `location`
+  (empty unless the app names one with a `SessionLocator`,
+  `framework.WithAuthSessionLocator`; the framework does no geolocation),
+  in both auth modes. They are the sign-in's, kept by every refresh, on new
+  `refresh_tokens` columns (`user_agent`, `client_address`, `location`):
+  migrate before deploying, the same migration as the session id's below
+  ([#662](https://github.com/gombit-dev/gombit/issues/662)).
+
+### Changed
+
+- **Breaking (schema):** a session's id is stable for its whole life
+  (`refresh_tokens.session_id`, `auth.RefreshToken.SessionID`): drawn at
+  login and carried to every rotation, it is the id `GET
+  {prefix}/auth/sessions` lists, so `DELETE {prefix}/auth/sessions/{id}`
+  with an id listed before a refresh ends the session instead of answering
+  404. Every login and refresh writes the new column: migrate before
+  deploying (`gombit db makemigrations`, `gombit db migrate`). Existing rows
+  need no backfill: a session from before the upgrade keeps its listed id,
+  which its next refresh stores. A logout, and the signing out of other
+  sessions a password change or MFA enrollment does, find the session's
+  current token by that id in one read, so a logout with a token any number
+  of rotations behind ends its session; along rows written without the id
+  (before the upgrade, or by an older binary during a rolling deploy) they
+  follow the chain, and only there the 1000-rotation limit (a 500)
+  applies. The audit trail's `session` targets name the stable id
+  ([#661](https://github.com/gombit-dev/gombit/issues/661)).
+
+- The framework requires newer dependencies; Go's minimal version selection
+  moves an app's build to them with the framework upgrade: the AWS SDK for
+  Go v2 (the S3 storage driver) at `github.com/aws/aws-sdk-go-v2` v1.48.0,
+  `/credentials` v1.21.0 and `github.com/aws/smithy-go` v1.28.9;
+  `github.com/jackc/pgx/v5` v5.13.0 (the PostgreSQL driver);
+  `github.com/pb33f/libopenapi-validator` v0.16.3; and `golang.org/x/mod`
+  v0.43.0 and `golang.org/x/term` v0.48.0
+  ([#669](https://github.com/gombit-dev/gombit/pull/669),
+  [#670](https://github.com/gombit-dev/gombit/pull/670),
+  [#671](https://github.com/gombit-dev/gombit/pull/671),
+  [#672](https://github.com/gombit-dev/gombit/pull/672),
+  [#673](https://github.com/gombit-dev/gombit/pull/673)).
+
+### Fixed
+
+- The OpenAPI description of `DELETE {prefix}/auth/sessions/{id}`
+  (`auth-revoke-session`) no longer says a listed id goes stale when its
+  session refreshes; it has not since stable session ids
+  ([#661](https://github.com/gombit-dev/gombit/issues/661)): a 404 means
+  the session has ended.
+
+- `gombit generate` (and `--check`, and `gombit upgrade contract`)
+  regenerates a resource whose model lost, renamed or retyped a field, whose
+  `*.gen.go` were deleted or left with merge-conflict markers, or whose
+  `*.gen.go` call a framework API an upgrade changed (as v0.8.0's
+  `database.Search`, whose upgrade note says to run `gombit generate`, which
+  could not run). The loader compiles the resource package, and the stale
+  `*.gen.go` (or a `hooks.go` using their types) no longer built, so it
+  failed with a Go compile error, `--check` reported that instead of drift,
+  and only hand-editing the generated files got out. When the package does
+  not build as it is, the loader now runs again with the model's files and
+  the hand-written files they use (an enum type of the package) only, the
+  others set aside as `make resource --force` does, and says so: the package
+  may still need fixing by hand once the `*.gen.go` are current
+  ([#467](https://github.com/gombit-dev/gombit/issues/467)).
+- On Windows, the local storage driver's `Open` and `Stat` of an object
+  that a concurrent `Delete` is removing report `storage.ErrNotFound`
+  instead of an "Access is denied" error. The open could reach the file just
+  as its POSIX-semantics delete completed, which Windows reports as
+  `ERROR_ACCESS_DENIED` with `STATUS_FILE_DELETED`; only
+  `STATUS_DELETE_PENDING` was mapped to not-found
+  ([#639](https://github.com/gombit-dev/gombit/pull/639)).
+- `gombit new` puts every framework model in the bootstrap migration and
+  `database/migrations/models.json`, taking them from the framework's own
+  list. v0.9.0 left out the five auth models it added (`auth.OneTimeToken`,
+  `AuditEvent`, `TOTPFactor`, `RecoveryCode`, `IdentityLink`), whose tables
+  the scaffolded `AutoMigrate` creates at startup, outside Atlas's history.
+  A new app then failed `gombit db check`. The tutorial's next step,
+  `gombit make resource` and `gombit db migrate`, failed because that
+  migration created the tables again (`table auth_one_time_tokens already
+  exists` on SQLite). An app created by `gombit new` v0.9.0 needs a one-time
+  edit of that migration; the upgrade notes
+  (`scaffold-registers-every-framework-model`) give it
+  ([#675](https://github.com/gombit-dev/gombit/pull/675)).
+- `gombit db check` skips its model-registry layer when
+  `internal/platform/database.go` calls no `AutoMigrate` method (as in an
+  app whose schema comes from its migrations), instead of failing with "no
+  AutoMigrate call"; `gombit db makemigrations --forget-model` no longer
+  fails there either. A file that does not parse is still an error
+  ([#675](https://github.com/gombit-dev/gombit/pull/675)).
+
+## [0.9.0] — 2026-11-16
+
 ### Added
 
 - [External identity providers](docs/auth.md#external-identity-providers)
@@ -558,6 +666,21 @@ version.
   and `/café` are accepted
   ([#501](https://github.com/gombit-dev/gombit/issues/501)).
 
+- `gombit db reset` on SQLite drops every user table and view, including one
+  whose name starts with `sqlite` but not `sqlite_` (`sqlitex_cache`,
+  `sqlite3_import`): the filter's `_` was a `LIKE` wildcard, so such tables
+  survived and the re-applied migrations failed on them. Only SQLite's
+  reserved `sqlite_` objects are kept
+  ([#491](https://github.com/gombit-dev/gombit/issues/491)).
+- `gombit new --module` refuses a module path Go does not accept
+  (`golang.org/x/mod/module.CheckPath`) before writing anything, instead of
+  scaffolding an app that cannot build
+  ([#515](https://github.com/gombit-dev/gombit/issues/515)).
+- `gombit new` with stdin from `/dev/null` (or another non-terminal character
+  device) is non-interactive: without a project name it fails with the
+  documented error instead of prompting
+  ([#516](https://github.com/gombit-dev/gombit/issues/516)).
+
 ### Changed
 
 - The framework requires **Go 1.26.9** (`go 1.26.9` in `go.mod`, up from
@@ -567,6 +690,37 @@ version.
   toolchain, and with `GOTOOLCHAIN=local` (or in a build image) Go 1.26.9 or
   later must be installed first. The benchmark Docker images build with Go
   1.26.9 ([#602](https://github.com/gombit-dev/gombit/pull/602)).
+
+- The framework requires newer dependencies; Go's minimal version selection
+  moves an app's build to them with the framework upgrade:
+  `github.com/mattn/go-sqlite3` v1.14.53, `github.com/redis/go-redis/v9`
+  v9.23.0 and `ariga.io/atlas` v1.3.0 (the migration library, not the `atlas`
+  CLI); the AWS SDK for Go v2 (the S3 storage driver) at
+  `github.com/aws/aws-sdk-go-v2` v1.47.8, `/credentials` v1.20.16,
+  `/service/s3` v1.114.6 and `github.com/aws/smithy-go` v1.28.8;
+  `github.com/danielgtaylor/huma/v2` v2.40.0, `github.com/pb33f/libopenapi`
+  v0.42.4 and `github.com/pb33f/libopenapi-validator` v0.16.1; OpenTelemetry
+  for Go v1.47.0; and `golang.org/x/crypto` v0.58.0, `mod` v0.42.0, `net`
+  v0.62.0, `sys` v0.50.0, `term` v0.47.0 and `tools` v0.52.0
+  ([#537](https://github.com/gombit-dev/gombit/pull/537),
+  [#572](https://github.com/gombit-dev/gombit/pull/572),
+  [#573](https://github.com/gombit-dev/gombit/pull/573),
+  [#589](https://github.com/gombit-dev/gombit/pull/589),
+  [#607](https://github.com/gombit-dev/gombit/pull/607),
+  [#621](https://github.com/gombit-dev/gombit/pull/621),
+  [#622](https://github.com/gombit-dev/gombit/pull/622),
+  [#624](https://github.com/gombit-dev/gombit/pull/624),
+  [#625](https://github.com/gombit-dev/gombit/pull/625),
+  [#641](https://github.com/gombit-dev/gombit/pull/641),
+  [#642](https://github.com/gombit-dev/gombit/pull/642),
+  [#643](https://github.com/gombit-dev/gombit/pull/643),
+  [#644](https://github.com/gombit-dev/gombit/pull/644),
+  [#645](https://github.com/gombit-dev/gombit/pull/645),
+  [#649](https://github.com/gombit-dev/gombit/pull/649),
+  [#655](https://github.com/gombit-dev/gombit/pull/655),
+  [#656](https://github.com/gombit-dev/gombit/pull/656),
+  [#657](https://github.com/gombit-dev/gombit/pull/657),
+  [#658](https://github.com/gombit-dev/gombit/pull/658)).
 
 ## [0.8.0] — 2026-10-18
 
@@ -2310,7 +2464,9 @@ First tagged release. Milestones M0–M5 plus ADMIN-1 through ADMIN-3.
   multi-tenancy, i18n — are **not** included. See
   [the build plan](docs/GOMBIT_BUILD_PLAN.md).
 
-[Unreleased]: https://github.com/gombit-dev/gombit/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/gombit-dev/gombit/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/gombit-dev/gombit/compare/v0.9.0...v0.10.0
+[0.9.0]: https://github.com/gombit-dev/gombit/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/gombit-dev/gombit/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/gombit-dev/gombit/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/gombit-dev/gombit/compare/v0.6.1...v0.7.0

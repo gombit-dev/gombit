@@ -70,6 +70,7 @@ const (
 	envPasswordResetURL        = "GOMBIT_AUTH_PASSWORD_RESET_URL"           // #nosec G101 -- environment variable name, not a credential.
 	envPasswordResetKeep       = "GOMBIT_AUTH_PASSWORD_RESET_KEEP_SESSIONS" // #nosec G101 -- environment variable name, not a credential.
 	envRefreshReuseGrace       = "GOMBIT_AUTH_REFRESH_REUSE_GRACE"
+	envSessionClientAddress    = "GOMBIT_AUTH_SESSION_CLIENT_ADDRESS"
 	envAuthThrottleDisabled    = "GOMBIT_AUTH_THROTTLE_DISABLED"
 	envCookieSecure            = "GOMBIT_COOKIE_SECURE"
 	envCookieSameSite          = "GOMBIT_COOKIE_SAMESITE"
@@ -440,6 +441,21 @@ const (
 	CookieSameSiteStrict CookieSameSite = "strict"
 )
 
+// SessionClientAddress is how much of the client's address a session keeps
+// from its sign-in, for the sessions API to show (AUTH-12).
+type SessionClientAddress string
+
+const (
+	// SessionClientAddressCoarse is the default: the address's network, an
+	// IPv4 /24 or an IPv6 /48 (203.0.113.0/24), enough to tell a home from
+	// an office, not to single out a device.
+	SessionClientAddressCoarse SessionClientAddress = "coarse"
+	// SessionClientAddressNone keeps no address.
+	SessionClientAddressNone SessionClientAddress = "none"
+	// SessionClientAddressFull keeps the whole address.
+	SessionClientAddressFull SessionClientAddress = "full"
+)
+
 // AuthConfig contains Bearer JWT (default) and cookie/session (M5-3) auth
 // configuration. Both modes share JWTSecret as the signing/HMAC key.
 type AuthConfig struct {
@@ -509,6 +525,11 @@ type AuthConfig struct {
 	// whose zero means their default, zero here is a policy, not "unset":
 	// never default it.
 	RefreshReuseGrace time.Duration
+	// SessionClientAddress is how much of the client's address a session
+	// stores when it starts, shown by GET /auth/sessions: coarse (the
+	// default, also for empty), none or full
+	// (GOMBIT_AUTH_SESSION_CLIENT_ADDRESS).
+	SessionClientAddress SessionClientAddress
 	// ThrottleDisabled turns off the credential endpoints' abuse protection
 	// (AUTH-8): the login, password reset, one-time token, current-password
 	// and verification throttles. On by default; turn it off only when
@@ -551,6 +572,15 @@ func (c AuthConfig) EffectiveMode() AuthMode {
 		return AuthModeJWT
 	}
 	return c.Mode
+}
+
+// EffectiveSessionClientAddress returns c.SessionClientAddress, defaulting
+// empty to SessionClientAddressCoarse.
+func (c AuthConfig) EffectiveSessionClientAddress() SessionClientAddress {
+	if c.SessionClientAddress == "" {
+		return SessionClientAddressCoarse
+	}
+	return c.SessionClientAddress
 }
 
 // EffectiveCookieSameSite returns c.CookieSameSite, defaulting empty to
@@ -653,6 +683,7 @@ func defaultAuthConfig() AuthConfig {
 		EmailVerificationTTL: DefaultEmailVerificationTTL,
 		PasswordResetTTL:     DefaultPasswordResetTTL,
 		RefreshReuseGrace:    DefaultRefreshReuseGrace,
+		SessionClientAddress: SessionClientAddressCoarse,
 	}
 }
 
@@ -775,6 +806,7 @@ func LoadFromEnv(lookup EnvLookup) (Config, error) {
 	applyString(lookup, envEmailChangeURL, &cfg.Auth.EmailChangeURL)
 	applyBool(lookup, envPasswordResetKeep, "Auth.PasswordResetKeepSessions", &cfg.Auth.PasswordResetKeepSessions, &errs)
 	applyDuration(lookup, envRefreshReuseGrace, "Auth.RefreshReuseGrace", &cfg.Auth.RefreshReuseGrace, &errs)
+	applySessionClientAddress(lookup, envSessionClientAddress, &cfg.Auth.SessionClientAddress)
 	applyBool(lookup, envAuthThrottleDisabled, "Auth.ThrottleDisabled", &cfg.Auth.ThrottleDisabled, &errs)
 	applyBool(lookup, envSecuritySanitizeInput, "Security.SanitizeInput", &cfg.Security.SanitizeInput, &errs)
 	if docsEnabledSet {
@@ -1012,6 +1044,16 @@ func validateAuthConfig(errs *FieldErrors, env Environment, cfg AuthConfig) {
 			Env:     envPasswordResetTTL,
 			Value:   cfg.PasswordResetTTL.String(),
 			Message: "must be greater than or equal to zero",
+		})
+	}
+	switch cfg.EffectiveSessionClientAddress() {
+	case SessionClientAddressCoarse, SessionClientAddressNone, SessionClientAddressFull:
+	default:
+		*errs = append(*errs, FieldError{
+			Field:   "Auth.SessionClientAddress",
+			Env:     envSessionClientAddress,
+			Value:   string(cfg.SessionClientAddress),
+			Message: "must be one of coarse, none, full",
 		})
 	}
 	if cfg.RefreshReuseGrace < 0 {
@@ -1507,6 +1549,12 @@ func applyLogSink(lookup EnvLookup, key string, dest *LogSink) {
 func applyAuthMode(lookup EnvLookup, key string, dest *AuthMode) {
 	if value, ok := lookup(key); ok {
 		*dest = AuthMode(strings.ToLower(strings.TrimSpace(value)))
+	}
+}
+
+func applySessionClientAddress(lookup EnvLookup, key string, dest *SessionClientAddress) {
+	if value, ok := lookup(key); ok {
+		*dest = SessionClientAddress(strings.ToLower(strings.TrimSpace(value)))
 	}
 }
 

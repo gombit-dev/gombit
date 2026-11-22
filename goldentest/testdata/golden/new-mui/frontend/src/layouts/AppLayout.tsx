@@ -40,6 +40,9 @@ export function AppLayout() {
               {resource.title}
             </Button>
           ))}
+          <Button color="inherit" component={Link} to="/sessions">
+            Sessions
+          </Button>
           <Button color="inherit" onClick={() => void onLogout()}>
             Log out
           </Button>

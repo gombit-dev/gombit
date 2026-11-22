@@ -38,6 +38,8 @@ type Service struct {
 	// providers are the external identity providers (external.go), by
 	// name; providerNames keeps their registration order, and providerErr
 	// what WithIdentityProviders refused (NewService returns it).
+	// locator names a session's location when it starts (session_device.go).
+	locator           SessionLocator
 	providers         map[string]IdentityProvider
 	providerNames     []string
 	providerErr       error
@@ -362,7 +364,10 @@ func (s *Service) LoginMFA(ctx context.Context, email, password, code string) (U
 // the snapshot unable to start a session, and so does multi-factor
 // authentication enabled after Authenticate found none (ErrMFARequired). A
 // snapshot loaded from the database (no Authenticate) is the caller's to
-// have authenticated, second factor included.
+// have authenticated, second factor included. The session records the
+// device of the request ctx came through (CaptureRequestInfo, which the
+// auth routes put first; an application's own login route adds it): none
+// without one.
 func (s *Service) IssueTokens(ctx context.Context, user User) (TokenPair, error) {
 	_, pair, err := s.startSession(ctx, user)
 	return pair, err
@@ -381,6 +386,7 @@ func (s *Service) startSession(ctx context.Context, user User) (User, TokenPair,
 func (s *Service) startSessionWith(ctx context.Context, user User, det string) (User, TokenPair, error) {
 	var pair TokenPair
 	var locked User
+	device := s.deviceFrom(ctx) // before the lock: a SessionLocator may take a moment
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var err error
 		locked, err = lockUserTx(tx, user.ID)
@@ -408,7 +414,7 @@ func (s *Service) startSessionWith(ctx context.Context, user User, det string) (
 				return errMFARequired
 			}
 		}
-		pair, err = s.issueTokens(tx, locked, s.now())
+		pair, err = s.issueTokens(tx, locked, s.now(), "", device)
 		return err
 	})
 	if errors.Is(err, errLoginPasswordChanged) {
@@ -443,16 +449,33 @@ var errLoginPasswordChanged = errors.New("auth: the password changed during the 
 // started (Login and IssueTokens answer it as invalid credentials).
 var errLoginAccountGone = errors.New("auth: the account was deleted during the login")
 
-func (s *Service) issueTokens(tx *gorm.DB, user User, now time.Time) (TokenPair, error) {
+// issueTokens writes a refresh token row of session sessionID, started on
+// device, and signs its access token. A login passes "", and the row starts
+// a new session with a fresh SessionID, and the device of its request; a
+// rotation passes the id the rotated row is shown under (sessionIDOf), so
+// the session keeps its id, a session from before SessionID existed
+// included: its successor stores the legacy id. A rotation passes the
+// rotated row's device too (deviceOf): a session describes its sign-in.
+func (s *Service) issueTokens(tx *gorm.DB, user User, now time.Time, sessionID string, device sessionDevice) (TokenPair, error) {
 	raw, err := newRefreshToken()
 	if err != nil {
 		return TokenPair{}, err
+	}
+	if sessionID == "" {
+		if sessionID, err = newSessionID(); err != nil {
+			return TokenPair{}, err
+		}
 	}
 	row := RefreshToken{
 		UserID:    user.ID,
 		TokenHash: hashRefreshToken(raw),
 		ExpiresAt: now.Add(s.cfg.RefreshTokenTTL),
+		SessionID: sessionID,
 		CreatedAt: now,
+
+		UserAgent:     device.userAgent,
+		ClientAddress: device.clientAddress,
+		Location:      device.location,
 	}
 	if err := tx.Create(&row).Error; err != nil {
 		return TokenPair{}, err
@@ -665,11 +688,11 @@ func (s *Service) rotateRefreshOnce(ctx context.Context, raw, hash string) (Toke
 					// Rotated again: fall through to the cascade.
 				case successor.RevokedAt == nil && successor.ExpiresAt.After(now):
 					withinGrace, reuseUser = true, row.UserID
-					graceSession, graceSuccessor = s.sessionID(successor.ID), "live"
+					graceSession, graceSuccessor = s.sessionIDOf(successor), "live"
 					return errRotationRaced
 				default:
 					withinGrace, reuseUser = true, row.UserID
-					graceSession, graceSuccessor = s.sessionID(successor.ID), "ended"
+					graceSession, graceSuccessor = s.sessionIDOf(successor), "ended"
 					return errInvalidRefreshToken
 				}
 			}
@@ -711,7 +734,7 @@ func (s *Service) rotateRefreshOnce(ctx context.Context, raw, hash string) (Toke
 			return errInvalidRefreshToken
 		}
 
-		issued, err := s.issueTokens(tx, user, now)
+		issued, err := s.issueTokens(tx, user, now, s.sessionIDOf(row), deviceOf(row))
 		if err != nil {
 			return err
 		}
@@ -774,13 +797,13 @@ func lockRefreshRowTx(tx *gorm.DB, id uint) (RefreshToken, error) {
 
 // RevokeRefresh ends the session of a refresh token: the token itself, or,
 // when the token has rotated (a refresh in flight as the user signs out, or
-// a client still holding the previous token), the session's current head,
-// fewer than maxChainHops (1000) rotations on (#466): any unexpired token
-// of the session's chain fewer than that many rotations behind the head ends
-// it. One maxChainHops or more behind, or a chain that cannot be followed
-// (errChainUnresolved), fails with a 500 rather than succeed having ended
-// nothing; revoking the session (DELETE /auth/sessions/{id}, or
-// ?scope=all) ends it then. A token unknown, past its
+// a client still holding the previous token), the session's current head
+// (#466), found by the session's SessionID however many rotations on, or
+// along replaced_by where that finds none (sessionHead). A token followed
+// along replaced_by maxChainHops (1000) or more rotations behind its head,
+// or a session whose head cannot be found (errChainUnresolved), fails with a 500
+// rather than succeed having ended nothing; revoking the session (DELETE
+// /auth/sessions/{id}, or ?scope=all) ends it then. A token unknown, past its
 // own expiry, or of a session already ended revokes nothing and succeeds,
 // alike, so logout is idempotent and its answer says nothing about a token;
 // a token past its expiry is no credential, as for refresh (#458). It takes the user's lock (lockUserTx) like rotation does, so a
@@ -792,8 +815,8 @@ func (s *Service) RevokeRefresh(ctx context.Context, raw string) error {
 		return errInvalidRefreshToken
 	}
 	hash := hashRefreshToken(raw)
-	// This lookup must stay outside the transaction below. sessionChain
-	// walks with plain reads, and on MySQL (REPEATABLE READ) a transaction's
+	// This lookup must stay outside the transaction below. sessionHead
+	// reads with plain reads, and on MySQL (REPEATABLE READ) a transaction's
 	// plain reads all see the snapshot its first plain read takes: inside,
 	// this read would take it before the user's lock, and the walk would
 	// miss a rotation that committed during the wait, revoking an already
@@ -821,7 +844,7 @@ func (s *Service) RevokeRefresh(ctx context.Context, raw string) error {
 		if !row.ExpiresAt.After(now) {
 			return nil
 		}
-		_, head, err := sessionChain(tx, row.UserID, row.ID)
+		head, err := sessionHead(tx, row.UserID, row.ID)
 		if err != nil || head == nil || head.RevokedAt != nil || !head.ExpiresAt.After(now) {
 			return err
 		}
@@ -846,7 +869,7 @@ func (s *Service) RevokeRefresh(ctx context.Context, raw string) error {
 			ActorUserID:  uintPtr(row.UserID),
 			TargetUserID: uintPtr(row.UserID),
 			TargetType:   "session",
-			TargetID:     s.sessionID(ended.ID),
+			TargetID:     s.sessionIDOf(*ended),
 		}
 		if ended.ID != row.ID {
 			event.Details = details("via", "rotated")

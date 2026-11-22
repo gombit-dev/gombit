@@ -8,7 +8,173 @@ What each release asks of an application moving to it, newest first. This
 page, the release notes, and the upgrade tooling all come from the same
 compatibility manifest (see [upgrade.md](upgrade.md)).
 
-## Unreleased
+## v0.10.0
+
+### Manual: action required
+
+- **Breaking.** Stable session ids add `refresh_tokens.session_id`, which every login and refresh writes: an app migrates before it runs this release. (`session-id-schema`, schema, [#661](https://github.com/gombit-dev/gombit/issues/661))
+
+  - Framework schema: `auth.RefreshToken` (`refresh_tokens`): altered.
+
+  `auth.RefreshToken` gains `SessionID` (indexed). Until the column
+  exists, every login and every token refresh fails (the insert names
+  every column of the model). Generate and apply the migration
+  (`gombit db makemigrations`, `gombit db migrate`) before deploying;
+  `gombit upgrade --dry-run` lists the steps. Existing rows keep a
+  NULL `session_id` and nothing has to be backfilled: such a session
+  keeps the id it was listed under, which its next refresh stores.
+  A refresh by an older binary on the migrated schema (a rolling
+  deploy, a rollback that kept the column) writes a NULL
+  `session_id` too; the session is then listed under that row's id,
+  and logout still finds its current token along `replaced_by`.
+
+- **Breaking.** Session device metadata adds `refresh_tokens.user_agent`, `client_address` and `location`, which every login and refresh writes: an app migrates before it runs this release. (`session-device-schema`, schema, [#662](https://github.com/gombit-dev/gombit/issues/662))
+
+  - Framework schema: `auth.RefreshToken` (`refresh_tokens`): altered.
+
+  `auth.RefreshToken` gains `UserAgent`, `ClientAddress` and
+  `Location`. Until the columns exist, every login and every token
+  refresh fails (the insert names every column of the model). The
+  same migration as `session-id-schema` adds them: generate and apply
+  it (`gombit db makemigrations`, `gombit db migrate`) before
+  deploying. Existing rows keep NULLs, listed as empty: a session
+  from before the upgrade shows no device, and nothing has to be
+  backfilled.
+
+- `gombit new` puts every framework model in the bootstrap migration and `models.json`; an app created by `gombit new` v0.9.0 lacks five auth models there, so its next migration fails with `table ... already exists`. (`scaffold-registers-every-framework-model`, scaffold, [#675](https://github.com/gombit-dev/gombit/issues/675))
+
+  `gombit new` v0.9.0 left `auth.OneTimeToken`, `auth.AuditEvent`,
+  `auth.TOTPFactor`, `auth.RecoveryCode` and `auth.IdentityLink` out of
+  the bootstrap migration and `database/migrations/models.json`, while
+  the `AutoMigrate` it writes creates their tables at startup. `gombit
+  db check` reports them as auto-migrated with no migration, and the
+  next migration generated (by `gombit make resource`, or `gombit db
+  makemigrations --model` for them) creates those tables, so applying
+  it to a database the app has started against fails because they
+  already exist (on SQLite, `table auth_one_time_tokens already
+  exists`). Only apps created by `gombit new` v0.9.0 are
+  affected: an app upgraded to v0.9.0 generated these models'
+  migration, as its upgrade notes ask.
+
+  In an affected app, take the migration that creates those five
+  tables, or generate it with `gombit db makemigrations auth_tables`
+  and a `--model github.com/gombit-dev/gombit/auth.<Name>` for each.
+  Add `IF NOT EXISTS` to each of its statements that creates one of
+  them and, on SQLite and PostgreSQL, to each that creates one of
+  their indexes (MySQL declares them inside `CREATE TABLE`); leave
+  its other statements as they are. Run `gombit db repair` to update
+  `atlas.sum`, then `gombit db migrate` in each environment: a
+  database that has the tables keeps them and their rows, and one
+  that does not gets them. `gombit db check` then reports the schema
+  chain consistent.
+
+### Informational
+
+- A session's id in `GET {prefix}/auth/sessions` stays the same for the session's whole life, so `DELETE {prefix}/auth/sessions/{id}` with an id listed before a refresh ends the session instead of answering 404. (`stable-session-ids`, api, [#661](https://github.com/gombit-dev/gombit/issues/661))
+
+  The id was derived from the session's current refresh token row and
+  changed on every refresh; it is now drawn at login and carried to
+  every rotation (32 lowercase hex characters, as before). A client
+  that listed again after a 404 keeps working. The audit trail's
+  `session` targets (logout, refresh reuse within grace) name the same
+  stable id, so one session's events share it.
+
+- A logout with a token any number of rotations behind its session's current one ends the session; the 1000-rotation limit (a 500) applies only along rows written without a session id. (`logout-follows-session-id`, behavior, [#661](https://github.com/gombit-dev/gombit/issues/661))
+
+  The logout, and the signing out of other sessions that a password
+  change or MFA enrollment does, find the session's current token by
+  its id in one read instead of following the rotation chain one row
+  at a time. Rows written without the id (before the upgrade, or by
+  an older binary during a rolling deploy) are still followed along
+  the chain, which ends with their expiry.
+
+- A new app has a sessions page (`/sessions`, `frontend/src/pages/SessionsPage.tsx`) listing the signed-in user's sessions and signing them out; an app scaffolded before has none. (`scaffold-sessions-page`, scaffold, [#663](https://github.com/gombit-dev/gombit/issues/663))
+
+  The page is app-owned, so nothing adds it to an existing app. To
+  add it, copy `frontend/src/pages/SessionsPage.tsx` from an app
+  `gombit new` writes with the same `--ui` and `--auth`, add its
+  route (`<Route path="sessions" element={<SessionsPage />} />`
+  beside the others in `src/app/router.tsx`) and a link to
+  `/sessions` in `src/layouts/AppLayout.tsx`. It uses
+  `GET`/`DELETE {prefix}/auth/sessions` and the device fields
+  `user_agent`, `client_address` and `location`, so it needs this
+  release's server and client.
+
+- `GET {prefix}/auth/sessions` shows the device each session signed in from: `user_agent`, `client_address` (its network by default, `GOMBIT_AUTH_SESSION_CLIENT_ADDRESS`) and `location` (from an app's `SessionLocator`). (`session-device-metadata`, config, [#662](https://github.com/gombit-dev/gombit/issues/662))
+
+  - Configuration: `GOMBIT_AUTH_SESSION_CLIENT_ADDRESS` is new.
+
+  `AuthSession` gains three string fields, always present, empty when
+  unknown. They are the sign-in request's and refreshes keep them.
+  The client address is coarsened to an IPv4 /24 or IPv6 /48 unless
+  `GOMBIT_AUTH_SESSION_CLIENT_ADDRESS` is `full` (or `none`, no
+  address); the framework does no geolocation, and
+  `framework.WithAuthSessionLocator` is how an app names locations.
+  Regenerate the TypeScript client (`gombit client generate`) to
+  see the fields.
+
+- `gombit generate` regenerates a resource whose model lost, renamed or retyped a field, whose `*.gen.go` were deleted or conflicted, or whose `*.gen.go` call a framework API an upgrade changed, instead of failing with a Go compile error from the stale generated files. (`generate-after-field-removal`, cli, [#467](https://github.com/gombit-dev/gombit/issues/467))
+
+  The loader compiles each resource package, and after a field was
+  removed, renamed or retyped the committed `*.gen.go` (or, once those
+  were deleted, a `hooks.go` using their types) no longer built against
+  the model: `gombit generate`, `--check` and `gombit upgrade contract`
+  failed with a compile error, and `--check` reported no drift. The
+  same held after an upgrade changed a framework API the old
+  `*.gen.go` call: v0.8.0's `database-search-takes-context` note says
+  to run `gombit generate`, which could not run. When the package
+  does not build as it is, the loader now runs once more with the
+  files declaring the model and the hand-written files declaring a
+  name it uses (an enum type of the package) only, the rest stubbed (a
+  file that does not parse, such as a `*.gen.go` with merge-conflict
+  markers, included), and prints a notice that the package did not
+  build. A model needing more than that still needs the package to
+  build. Nothing to change; a `hooks.go` that uses a removed field
+  must be updated by hand after regenerating, as before (run `go
+  build`).
+
+- On Windows, `storage/local` reports an object a concurrent `Delete` is removing as `storage.ErrNotFound` from `Open` and `Stat`, not as an "Access is denied" error. (`local-storage-windows-file-deleted-not-found`, behavior, [#639](https://github.com/gombit-dev/gombit/issues/639))
+
+  An open racing a POSIX-semantics delete of the same file can fail
+  with `ERROR_ACCESS_DENIED` and NTSTATUS `STATUS_FILE_DELETED`; the
+  driver mapped only `STATUS_DELETE_PENDING` to not-found, so a read
+  racing a delete could fail with a permission error. Nothing to
+  change.
+
+- `gombit db check` skips its model-registry layer when `internal/platform/database.go` has no `AutoMigrate` call, instead of failing with "no AutoMigrate call", and `gombit db makemigrations --forget-model` no longer fails there. (`db-check-without-automigrate`, cli, [#675](https://github.com/gombit-dev/gombit/issues/675))
+
+  An app whose schema comes from its migrations may keep
+  `internal/platform/database.go` to open the database and call no
+  `AutoMigrate` method there. The file then lists no models to hold
+  `models.json` to, so the layer is skipped, as for an app without the
+  file; a model the app migrates some other way (`auth.Migrate`, or a
+  helper in another file) is not seen. `gombit make resource` still
+  needs the call, and so does `gombit generate` (and `db check`'s
+  generated-contract layer) once the app has a model-first resource.
+  Nothing to change.
+
+- The framework requires newer AWS SDK for Go v2 modules (the S3 storage driver): `github.com/aws/aws-sdk-go-v2` v1.48.0, `/credentials` v1.21.0 and `github.com/aws/smithy-go` v1.28.9. (`aws-sdk-v1-48-0`, dependency, [#670](https://github.com/gombit-dev/gombit/issues/670))
+
+  Go's minimal version selection moves an app's build to them with the
+  framework upgrade.
+
+- The framework requires `github.com/jackc/pgx/v5` v5.13.0 (the PostgreSQL driver). (`pgx-v5-13-0`, dependency, [#672](https://github.com/gombit-dev/gombit/issues/672))
+
+  Go's minimal version selection moves an app's build to it with the
+  framework upgrade.
+
+- The framework requires `github.com/pb33f/libopenapi-validator` v0.16.3. (`libopenapi-validator-v0-16-3`, dependency, [#671](https://github.com/gombit-dev/gombit/issues/671))
+
+  Go's minimal version selection moves an app's build to it with the
+  framework upgrade. The framework's OpenAPI document and contract
+  checks are unchanged by it (the contract drift gates pass).
+
+- The framework requires newer `golang.org/x` modules: `mod` v0.43.0 and `term` v0.48.0. (`golang-x-mod-term-updates`, dependency, [#669](https://github.com/gombit-dev/gombit/issues/669), [#673](https://github.com/gombit-dev/gombit/issues/673))
+
+  Go's minimal version selection moves an app's build to them with the
+  framework upgrade.
+
+## v0.9.0
 
 ### Manual: action required
 
@@ -680,6 +846,36 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   keep a retry an app has there. A unique violation on another
   constraint (the primary key, its sequence behind the table) is
   returned as itself. Nothing to change.
+
+- `gombit db reset` on SQLite drops every user table and view, including one whose name starts with `sqlite` but not `sqlite_` (`sqlitex_cache`, `sqlite3_import`); only SQLite's reserved `sqlite_` objects are kept. (`sqlite-reset-drops-sqlite-named-tables`, cli, [#491](https://github.com/gombit-dev/gombit/issues/491))
+
+  The filter's `_` was a `LIKE` wildcard, so such tables survived the
+  reset and the re-applied migrations then failed on them.
+
+- `gombit new --module` refuses a module path Go does not accept (`golang.org/x/mod/module.CheckPath`), before writing anything, instead of scaffolding an app that cannot build. (`new-validates-module-path`, cli, [#515](https://github.com/gombit-dev/gombit/issues/515))
+
+- `gombit new` with stdin from `/dev/null` (or another non-terminal character device) is non-interactive: without a project name it fails with the documented error instead of prompting. (`new-dev-null-stdin-non-interactive`, cli, [#516](https://github.com/gombit-dev/gombit/issues/516))
+
+- The framework requires newer drivers: `github.com/mattn/go-sqlite3` v1.14.53, `github.com/redis/go-redis/v9` v9.23.0 and `ariga.io/atlas` v1.3.0 (the migration library, not the `atlas` CLI). (`database-and-cache-driver-updates`, dependency, [#537](https://github.com/gombit-dev/gombit/issues/537), [#644](https://github.com/gombit-dev/gombit/issues/644), [#657](https://github.com/gombit-dev/gombit/issues/657))
+
+  Go's minimal version selection moves an app's build to them with the
+  framework upgrade.
+
+- The framework requires newer AWS SDK for Go v2 modules (the S3 storage driver): `github.com/aws/aws-sdk-go-v2` v1.47.8, `/credentials` v1.20.16, `/service/s3` v1.114.6 and `github.com/aws/smithy-go` v1.28.8. (`aws-sdk-v1-47-8`, dependency, [#625](https://github.com/gombit-dev/gombit/issues/625), [#645](https://github.com/gombit-dev/gombit/issues/645), [#649](https://github.com/gombit-dev/gombit/issues/649), [#658](https://github.com/gombit-dev/gombit/issues/658))
+
+  Go's minimal version selection moves an app's build to them with the
+  framework upgrade.
+
+- The framework requires `github.com/danielgtaylor/huma/v2` v2.40.0, `github.com/pb33f/libopenapi` v0.42.4 and `github.com/pb33f/libopenapi-validator` v0.16.1. (`contract-dependency-updates`, dependency, [#589](https://github.com/gombit-dev/gombit/issues/589), [#607](https://github.com/gombit-dev/gombit/issues/607), [#641](https://github.com/gombit-dev/gombit/issues/641), [#643](https://github.com/gombit-dev/gombit/issues/643), [#655](https://github.com/gombit-dev/gombit/issues/655))
+
+  Go's minimal version selection moves an app's build to them with the
+  framework upgrade. The framework's OpenAPI document and contract
+  checks are unchanged by them (the contract drift gates pass).
+
+- The framework requires OpenTelemetry for Go v1.47.0 (`go.opentelemetry.io/otel`, `/sdk`, `/trace`) and newer `golang.org/x` modules: `crypto` v0.58.0, `mod` v0.42.0, `net` v0.62.0, `sys` v0.50.0, `term` v0.47.0 and `tools` v0.52.0. (`otel-and-golang-x-updates`, dependency, [#572](https://github.com/gombit-dev/gombit/issues/572), [#573](https://github.com/gombit-dev/gombit/issues/573), [#621](https://github.com/gombit-dev/gombit/issues/621), [#622](https://github.com/gombit-dev/gombit/issues/622), [#624](https://github.com/gombit-dev/gombit/issues/624), [#642](https://github.com/gombit-dev/gombit/issues/642), [#656](https://github.com/gombit-dev/gombit/issues/656))
+
+  Go's minimal version selection moves an app's build to them with the
+  framework upgrade.
 
 ## v0.8.0
 

@@ -419,7 +419,7 @@ func (s *Service) ConfirmTOTPEnrollment(ctx context.Context, userID uint, code s
 		if requester == 0 {
 			return revokeAllTx(tx, userID, now)
 		}
-		keep, err := requesterChain(tx, userID, requester, now)
+		keep, err := requesterSession(tx, userID, requester, now)
 		if err != nil {
 			return err
 		}

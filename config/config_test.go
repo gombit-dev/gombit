@@ -196,6 +196,7 @@ func TestLoadFromEnv(t *testing.T) {
 			EmailVerificationTTL: DefaultEmailVerificationTTL,
 			PasswordResetTTL:     DefaultPasswordResetTTL,
 			RefreshReuseGrace:    DefaultRefreshReuseGrace,
+			SessionClientAddress: SessionClientAddressCoarse,
 		},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -377,6 +378,7 @@ func TestLoadUsesProcessEnvironment(t *testing.T) {
 			EmailVerificationTTL: DefaultEmailVerificationTTL,
 			PasswordResetTTL:     DefaultPasswordResetTTL,
 			RefreshReuseGrace:    DefaultRefreshReuseGrace,
+			SessionClientAddress: SessionClientAddressCoarse,
 		},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -1374,6 +1376,33 @@ func TestRefreshReuseGraceConfig(t *testing.T) {
 	var fe FieldErrors
 	if err := cfg.Validate(); !errors.As(err, &fe) || !strings.Contains(err.Error(), envRefreshReuseGrace) {
 		t.Fatalf("a negative grace = %v, want a field error naming %s", err, envRefreshReuseGrace)
+	}
+}
+
+// TestSessionClientAddressConfig: sessions keep a coarse address by default
+// (also when the field is empty), the environment picks none or full in any
+// case, and anything else is refused (AUTH-12).
+func TestSessionClientAddressConfig(t *testing.T) {
+	if got := DefaultFor(EnvironmentProduction).Auth.SessionClientAddress; got != SessionClientAddressCoarse {
+		t.Fatalf("default = %q, want coarse", got)
+	}
+	if got := (AuthConfig{}).EffectiveSessionClientAddress(); got != SessionClientAddressCoarse {
+		t.Fatalf("empty = %q, want coarse", got)
+	}
+	for raw, want := range map[string]SessionClientAddress{"none": SessionClientAddressNone, " FULL ": SessionClientAddressFull, "coarse": SessionClientAddressCoarse} {
+		loaded, err := LoadFromEnv(func(k string) (string, bool) {
+			v, ok := map[string]string{envSessionClientAddress: raw}[k]
+			return v, ok
+		})
+		if err != nil || loaded.Auth.SessionClientAddress != want {
+			t.Fatalf("%s=%q: %q, err %v; want %q", envSessionClientAddress, raw, loaded.Auth.SessionClientAddress, err, want)
+		}
+	}
+	cfg := DefaultFor(EnvironmentDevelopment)
+	cfg.Auth.SessionClientAddress = "city"
+	var fe FieldErrors
+	if err := cfg.Validate(); !errors.As(err, &fe) || !strings.Contains(err.Error(), envSessionClientAddress) {
+		t.Fatalf("an unknown mode = %v, want a field error naming %s", err, envSessionClientAddress)
 	}
 }
 
