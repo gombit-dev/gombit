@@ -256,7 +256,12 @@ func listAtlasVersions(db *gorm.DB) (map[string]struct{}, error) {
 		return out, nil
 	}
 	var versions []string
-	if err := db.Table(atlasRevisionsTable).Select("version").Find(&versions).Error; err != nil {
+	// Atlas retains a revision row for a partially applied migration when the
+	// dialect cannot roll back its DDL (or the migration opts out of tx mode).
+	// Such a row is not a completed migration and must remain pending here.
+	if err := db.Table(atlasRevisionsTable).
+		Where("applied = total AND COALESCE(error, '') = ''").
+		Select("version").Find(&versions).Error; err != nil {
 		return nil, fmt.Errorf("migrations: list atlas revisions: %w", err)
 	}
 	for _, version := range versions {

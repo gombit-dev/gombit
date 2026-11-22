@@ -1697,3 +1697,17 @@ releases:
           Go's minimal version selection moves an app's build to them with the
           framework upgrade.
         refs: [669, 673]
+
+  - version: unreleased
+    changes:
+      - id: atlas-partial-migrations-remain-pending
+        kind: informational
+        area: behavior
+        summary: "`gombit db migrate` leaves partially applied Atlas revisions pending."
+        details: |
+          Atlas can retain a revision row when a migration stops partway
+          through, such as after MySQL commits DDL outside a transaction.
+          Gombit records only complete Atlas revisions in
+          `framework_migrations`, so a partial migration stays pending and
+          can be retried or repaired instead of being reported as applied.
+        refs: [481]

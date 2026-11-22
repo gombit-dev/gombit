@@ -10,6 +10,11 @@ version.
 
 ## [Unreleased]
 
+### Fixed
+
+- `gombit db migrate` no longer records an Atlas revision as applied when the
+  migration stopped partway through ([#481](https://github.com/gombit-dev/gombit/issues/481)).
+
 ## [0.10.0] — 2026-11-21
 
 ### Added

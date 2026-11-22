@@ -8,6 +8,18 @@ What each release asks of an application moving to it, newest first. This
 page, the release notes, and the upgrade tooling all come from the same
 compatibility manifest (see [upgrade.md](upgrade.md)).
 
+## Unreleased
+
+### Informational
+
+- `gombit db migrate` leaves partially applied Atlas revisions pending. (`atlas-partial-migrations-remain-pending`, behavior, [#481](https://github.com/gombit-dev/gombit/issues/481))
+
+  Atlas can retain a revision row when a migration stops partway
+  through, such as after MySQL commits DDL outside a transaction.
+  Gombit records only complete Atlas revisions in
+  `framework_migrations`, so a partial migration stays pending and
+  can be retried or repaired instead of being reported as applied.
+
 ## v0.10.0
 
 ### Manual: action required

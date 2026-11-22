@@ -215,6 +215,8 @@ func TestMigrateRecordsOnlyVersionsPresentInAtlas(t *testing.T) {
 		"CREATE TABLE widgets (id INTEGER PRIMARY KEY);")
 	writeFile(t, filepath.Join(migrationDir, "20260102000000_create_gadgets.sql"),
 		"CREATE TABLE gadgets (id INTEGER PRIMARY KEY);")
+	writeFile(t, filepath.Join(migrationDir, "20260103000000_create_widgets_extra.sql"),
+		"CREATE TABLE widgets_extra (id INTEGER PRIMARY KEY);")
 
 	dsn := "file:" + filepath.Join(workDir, "app.db") + "?cache=shared&_fk=1"
 	cfg := config.DatabaseConfig{Driver: config.DatabaseDriverSQLite, DSN: dsn}
@@ -226,7 +228,7 @@ func TestMigrateRecordsOnlyVersionsPresentInAtlas(t *testing.T) {
 		Stdout:       io.Discard,
 		Stderr:       stderr,
 		runner: &applyFakeAtlas{
-			t:            t,
+			t:             t,
 			applyVersions: map[string]bool{"20260101000000": true},
 		},
 	}
@@ -287,8 +289,9 @@ func TestMigrateRecordsAppliedVersionsWhenAtlasFails(t *testing.T) {
 		Stdout:       io.Discard,
 		Stderr:       io.Discard,
 		runner: failingAfterApplyAtlas{inner: &applyFakeAtlas{
-			t:             t,
-			applyVersions: map[string]bool{"20260101000000": true},
+			t:              t,
+			applyVersions:  map[string]bool{"20260101000000": true, "20260102000000": true},
+			partialVersion: "20260102000000",
 		}},
 	}
 	if err := Migrate(context.Background(), opts); err == nil {
@@ -305,7 +308,7 @@ func TestMigrateRecordsAppliedVersionsWhenAtlasFails(t *testing.T) {
 		t.Fatalf("listRevisions() error = %v", err)
 	}
 	if len(revisions) != 1 || revisions[0].Version != "20260101000000" {
-		t.Fatalf("revisions = %#v, want 20260101000000 recorded after atlas failure", revisions)
+		t.Fatalf("revisions = %#v, want only completed 20260101000000 recorded after atlas failure", revisions)
 	}
 }
 
@@ -416,9 +419,10 @@ func TestRollbackMidBatchFailureAbortsTransaction(t *testing.T) {
 }
 
 type applyFakeAtlas struct {
-	t             *testing.T
-	applyCalls    [][]string
-	applyVersions map[string]bool
+	t              *testing.T
+	applyCalls     [][]string
+	applyVersions  map[string]bool
+	partialVersion string
 }
 
 func (r *applyFakeAtlas) Run(ctx context.Context, dir string, name string, args []string, stdout io.Writer, stderr io.Writer) error {
@@ -464,7 +468,10 @@ CREATE TABLE IF NOT EXISTS %s (
   version varchar(255) PRIMARY KEY,
   description text,
   type varchar(255),
-  applied_at datetime
+  applied_at datetime,
+  applied integer NOT NULL DEFAULT 0,
+  total integer NOT NULL DEFAULT 0,
+  error text
 )`, atlasRevisionsTable)).Error; err != nil {
 		return err
 	}
@@ -497,13 +504,21 @@ CREATE TABLE IF NOT EXISTS %s (
 			return err
 		}
 		if err := db.Exec(
-			fmt.Sprintf("INSERT INTO %s (version, description, type, applied_at) VALUES (?, ?, ?, ?)", atlasRevisionsTable),
+			fmt.Sprintf("INSERT INTO %s (version, description, type, applied_at, applied, total, error) VALUES (?, ?, ?, ?, ?, ?, ?)", atlasRevisionsTable),
 			file.Version,
 			file.Name,
 			"sql",
 			time.Now().UTC(),
+			1,
+			1,
+			nil,
 		).Error; err != nil {
 			return err
+		}
+		if file.Version == r.partialVersion {
+			if err := db.Exec(fmt.Sprintf("UPDATE %s SET applied = 1, total = 3, error = ? WHERE version = ?", atlasRevisionsTable), "failed statement", file.Version).Error; err != nil {
+				return err
+			}
 		}
 	}
 	_, _ = io.WriteString(stdout, "fake atlas apply ok\n")

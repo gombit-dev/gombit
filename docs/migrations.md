@@ -478,9 +478,10 @@ gombit db rollback [--dir database/migrations] [--atlas-bin atlas]
    `--allow-dirty` is required because Gombit creates `framework_migrations`
    before apply, and real apps already have schema tables.
 3. Records into `framework_migrations` only the pending versions that appear in
-   `atlas_schema_revisions` after apply (`version`, `name`, `batch`,
-   `applied_at`; no checksum; D4). This keeps the Gombit ledger aligned with
-   Atlas when the two previously diverged.
+   `atlas_schema_revisions` after apply with all statements applied and no
+   recorded error (`version`, `name`, `batch`, `applied_at`; no checksum; D4).
+   A partially applied Atlas revision remains pending in Gombit's ledger,
+   including on databases where DDL cannot be rolled back.
 
 If nothing is pending relative to `framework_migrations`, migrate prints
 `No pending migrations.` and does not invoke Atlas apply.

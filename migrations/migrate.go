@@ -155,16 +155,12 @@ func Migrate(ctx context.Context, opts ApplyOptions) error {
 		return fmt.Errorf("migrations: atlas migrate apply: %w", applyErr)
 	}
 
-	atlasVersions, err := listAtlasVersions(db.DB)
-	if err != nil {
-		return err
-	}
-	if len(pendingPresentInAtlas(pending, atlasVersions)) == 0 {
-		return fmt.Errorf("migrations: atlas migrate apply succeeded but none of the %d pending version(s) appear in %s", len(pending), atlasRevisionsTable)
-	}
 	applied, batch, err := recordAtlasApplied(db.DB, pending, opts)
 	if err != nil {
 		return err
+	}
+	if len(applied) == 0 {
+		return fmt.Errorf("migrations: atlas migrate apply succeeded but none of the %d pending version(s) appear in %s", len(pending), atlasRevisionsTable)
 	}
 	if len(applied) < len(pending) {
 		_, _ = fmt.Fprintf(opts.Stderr, "migrations: warning: recording %d of %d pending version(s) present in %s\n", len(applied), len(pending), atlasRevisionsTable)
