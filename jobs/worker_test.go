@@ -483,13 +483,21 @@ func TestNewWorkerValidates(t *testing.T) {
 // stubbornQueue.)
 type ctxQueue struct {
 	*jobs.MemoryQueue
-	reserveBlocks bool          // Reserve waits for ctx
-	reserveDelay  time.Duration // Reserve ignores ctx, then answers
-	extendBlocks  bool          // Extend waits for ctx
-	released      atomic.Int32
+	reserveBlocks  bool          // Reserve waits for ctx
+	reserveDelay   time.Duration // Reserve ignores ctx, then answers
+	extendBlocks   bool          // Extend waits for ctx
+	released       atomic.Int32
+	postponed      atomic.Int32
+	reserveStarted chan struct{}
 }
 
 func (q *ctxQueue) Reserve(ctx context.Context, queues []string, lease time.Duration) (jobs.Delivery, error) {
+	if q.reserveStarted != nil {
+		select {
+		case q.reserveStarted <- struct{}{}:
+		default:
+		}
+	}
 	if q.reserveBlocks {
 		<-ctx.Done()
 		return jobs.Delivery{}, ctx.Err()
@@ -514,7 +522,7 @@ func (q *ctxQueue) Release(ctx context.Context, d jobs.Delivery, at time.Time) e
 // Postpone counts as a hand-back too: a stopping worker returns an unrun
 // delivery with Postpone.
 func (q *ctxQueue) Postpone(ctx context.Context, d jobs.Delivery, at time.Time) error {
-	q.released.Add(1)
+	q.postponed.Add(1)
 	return q.MemoryQueue.Postpone(ctx, d, at)
 }
 
@@ -545,19 +553,23 @@ func TestADeliveryAfterShutdownIsHandedBack(t *testing.T) {
 	reg := jobs.NewRegistry()
 	var ran atomic.Bool
 	jobs.MustRegister(reg, func(context.Context, blockJob) error { ran.Store(true); return nil })
-	q := &ctxQueue{MemoryQueue: jobs.NewMemoryQueue(), reserveDelay: 150 * time.Millisecond}
+	q := &ctxQueue{MemoryQueue: jobs.NewMemoryQueue(), reserveDelay: 150 * time.Millisecond, reserveStarted: make(chan struct{}, 1)}
 	dispatchN(t, jobs.NewDispatcher(reg, q.MemoryQueue), 1)
 	w, err := jobs.NewWorker(reg, q, jobs.WorkerOptions{Queues: []string{"default"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	stop := startWorker(t, w)
-	time.Sleep(30 * time.Millisecond) // inside the slow Reserve
+	select {
+	case <-q.reserveStarted:
+	case <-time.After(time.Second):
+		t.Fatal("worker did not enter Reserve")
+	}
 	if err := stop(); err != nil {
 		t.Fatal(err)
 	}
-	if ran.Load() || q.released.Load() != 1 {
-		t.Fatalf("ran = %v, released %d; want the late delivery handed back unstarted", ran.Load(), q.released.Load())
+	if ran.Load() || q.postponed.Load() != 1 || q.released.Load() != 0 {
+		t.Fatalf("ran = %v, postponed %d, released %d; want the late delivery postponed unstarted", ran.Load(), q.postponed.Load(), q.released.Load())
 	}
 	if d, err := q.MemoryQueue.Reserve(context.Background(), []string{"default"}, time.Minute); err != nil || d.Envelope.ID == "" {
 		t.Fatalf("the job is not back in the queue: %+v, %v", d, err)
@@ -570,20 +582,27 @@ func TestADeliveryAfterShutdownIsHandedBack(t *testing.T) {
 func TestAHandBackAfterShutdownKeepsTheAttempt(t *testing.T) {
 	reg := jobs.NewRegistry()
 	jobs.MustRegister(reg, func(context.Context, blockJob) error { return nil })
-	q := &ctxQueue{MemoryQueue: jobs.NewMemoryQueue(), reserveDelay: 150 * time.Millisecond}
+	q := &ctxQueue{MemoryQueue: jobs.NewMemoryQueue(), reserveDelay: 150 * time.Millisecond, reserveStarted: make(chan struct{}, 1)}
 	dispatchN(t, jobs.NewDispatcher(reg, q.MemoryQueue), 1)
 	w, err := jobs.NewWorker(reg, q, jobs.WorkerOptions{Queues: []string{"default"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	stop := startWorker(t, w)
-	time.Sleep(30 * time.Millisecond) // inside the slow Reserve
+	select {
+	case <-q.reserveStarted:
+	case <-time.After(time.Second):
+		t.Fatal("worker did not enter Reserve")
+	}
 	if err := stop(); err != nil {
 		t.Fatal(err)
 	}
 	d, err := q.MemoryQueue.Reserve(context.Background(), []string{"default"}, time.Minute)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if q.postponed.Load() != 1 || q.released.Load() != 0 {
+		t.Fatalf("postponed %d times and released %d times; want one Postpone and no Release", q.postponed.Load(), q.released.Load())
 	}
 	if d.Envelope.Attempt != 1 {
 		t.Fatalf("the handler never ran, but the next delivery is attempt %d; want attempt 1", d.Envelope.Attempt)

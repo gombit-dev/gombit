@@ -266,13 +266,14 @@ that does not set its own, and fills the fields a job leaves zero.
 The attempt count and the retry time live in the queue. With Redis both
 survive worker restarts: a job that failed under one worker runs its next
 attempt under another, not before its backoff, and `MaxAttempts` counts
-attempts across both. A job interrupted by a worker's shutdown goes back at
-once rather than waiting out its backoff, but its attempt was already
-counted: every deploy that interrupts a job uses one of its attempts, so leave
-headroom in `MaxAttempts` for long jobs. An interrupted attempt is never given
-up on, even the last one, so a job can run again with `Attempt` past
-`MaxAttempts`; a handler should not assume `Attempt == MaxAttempts` is
-certainly its last run.
+attempts across both. If shutdown arrives after a worker reserves a job but
+before its handler starts, the job goes back at once and that attempt is taken
+back; this hand-back does not spend `MaxAttempts`. If the handler has started,
+an interrupted job goes back at once rather than waiting out its backoff, but
+its attempt remains counted, so leave headroom in `MaxAttempts` for long jobs.
+An interrupted running attempt is never given up on, even the last one, so a
+job can run again with `Attempt` past `MaxAttempts`; a handler should not
+assume `Attempt == MaxAttempts` is certainly its last run.
 
 ## Observability
 

@@ -101,8 +101,8 @@ func NewWorker(registry *Registry, queue Queue, opts WorkerOptions) (*Worker, er
 }
 
 // queueOpTimeout is the deadline of every queue call the worker makes
-// (reserve, extend, ack, release). It is a real bound only on a client that
-// enforces context deadlines: MemoryQueue, and a RedisQueue built with
+// (reserve, extend, ack, release, postpone). It is a real bound only on a
+// client that enforces context deadlines: MemoryQueue, and a RedisQueue built with
 // RedisClientOptions (as Open and OpenWithRedis build it); go-redis's default
 // client ignores the caller's context. Ack and release run on their own
 // context, not the worker's, so a job that finishes during shutdown is still
@@ -110,7 +110,7 @@ func NewWorker(registry *Registry, queue Queue, opts WorkerOptions) (*Worker, er
 const queueOpTimeout = QueueCallTimeout
 
 // QueueCallTimeout is the deadline of each queue call the worker makes. A
-// stop can find one reserve on the wire, and the release of what it returns,
+// stop can find one reserve on the wire, and the hand-back of what it returns,
 // before the shutdown timeout even starts: a supervisor's budget counts two.
 const QueueCallTimeout = 4 * time.Second
 

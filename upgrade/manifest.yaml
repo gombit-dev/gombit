@@ -1697,3 +1697,11 @@ releases:
           Go's minimal version selection moves an app's build to them with the
           framework upgrade.
         refs: [669, 673]
+
+  - version: unreleased
+    changes:
+      - id: jobs-shutdown-unstarted-attempt
+        kind: informational
+        area: behavior
+        summary: "A job handed back after shutdown before its handler starts no longer consumes a `MaxAttempts` attempt."
+        refs: [495]

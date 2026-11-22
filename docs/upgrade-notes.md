@@ -8,6 +8,12 @@ What each release asks of an application moving to it, newest first. This
 page, the release notes, and the upgrade tooling all come from the same
 compatibility manifest (see [upgrade.md](upgrade.md)).
 
+## Unreleased
+
+### Informational
+
+- A job handed back after shutdown before its handler starts no longer consumes a `MaxAttempts` attempt. (`jobs-shutdown-unstarted-attempt`, behavior, [#495](https://github.com/gombit-dev/gombit/issues/495))
+
 ## v0.10.0
 
 ### Manual: action required

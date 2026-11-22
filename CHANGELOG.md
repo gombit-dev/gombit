@@ -10,6 +10,12 @@ version.
 
 ## [Unreleased]
 
+### Fixed
+
+- A job reserved as a worker shuts down, but not yet started by its handler,
+  is handed back without consuming a `MaxAttempts` attempt
+  ([#495](https://github.com/gombit-dev/gombit/issues/495)).
+
 ## [0.10.0] — 2026-11-21
 
 ### Added

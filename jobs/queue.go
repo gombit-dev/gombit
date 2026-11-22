@@ -44,9 +44,11 @@ type Queue interface {
 	// Release returns a delivered job to its queue, available at at (a
 	// retry). Its attempt count is kept.
 	Release(ctx context.Context, d Delivery, at time.Time) error
-	// Postpone is Release for a delivery that did not get to run (its effect
-	// is held by another run: ErrInProgress): the attempt Reserve counted is
-	// taken back, so waiting does not spend the job's MaxAttempts.
+	// Postpone returns a delivery whose handler did not start to its queue,
+	// taking back the attempt Reserve counted. The worker uses it when a job's
+	// effect is held by another run (ErrInProgress) and when shutdown arrives
+	// after Reserve leases a job but before its handler starts. Neither wait
+	// spends the job's MaxAttempts.
 	Postpone(ctx context.Context, d Delivery, at time.Time) error
 	// Extend renews a delivery's lease to lease from now, so a job that runs
 	// longer than one lease is not delivered to a second worker. A worker
