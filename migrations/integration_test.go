@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -51,6 +52,134 @@ CREATE TABLE IF NOT EXISTS widgets (
   name VARCHAR(255) NOT NULL
 );`,
 		"ALTER TABLE widgets DROP COLUMN name;\nDROP TABLE IF EXISTS widgets;")
+}
+
+func TestMigrateLeavesPartialAtlasRevisionPendingMySQL(t *testing.T) {
+	if *mysqlDSN == "" {
+		t.Skip("set -migrations.mysql-dsn to run MySQL partial-revision integration test")
+	}
+	atlasBin := os.Getenv("ATLAS_BINARY")
+	if atlasBin == "" {
+		var err error
+		atlasBin, err = exec.LookPath("atlas")
+		if err != nil {
+			t.Skip("Atlas CLI not found; set ATLAS_BINARY to run the MySQL partial-revision integration test")
+		}
+	}
+
+	workDir := t.TempDir()
+	migrationDir := filepath.Join(workDir, "database", "migrations")
+	if err := os.MkdirAll(migrationDir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	firstVersion := time.Now().UTC().Format("20060102150405")
+	partialVersion := time.Now().UTC().Add(time.Second).Format("20060102150405")
+	prefix := "gombit_partial_" + partialVersion
+	firstTable := prefix + "_first"
+	partialTable := prefix + "_partial"
+	afterTable := prefix + "_after"
+	missingTable := prefix + "_missing"
+	firstPath := filepath.Join(migrationDir, firstVersion+"_create_first.sql")
+	partialPath := filepath.Join(migrationDir, partialVersion+"_create_partial.sql")
+	writeFile(t, firstPath, "CREATE TABLE "+firstTable+" (id BIGINT PRIMARY KEY);\n")
+	writeFile(t, partialPath,
+		"CREATE TABLE IF NOT EXISTS "+partialTable+" (id BIGINT PRIMARY KEY);\n"+
+			"INSERT INTO "+missingTable+" (id) VALUES (1);\n"+
+			"CREATE TABLE IF NOT EXISTS "+afterTable+" (id BIGINT PRIMARY KEY);\n")
+	if err := (execRunner{}).Run(context.Background(), workDir, atlasBin, []string{
+		"migrate", "hash", "--dir", "file://" + filepath.ToSlash(migrationDir),
+	}, io.Discard, io.Discard); err != nil {
+		t.Fatalf("atlas migrate hash: %v", err)
+	}
+
+	cfg := config.DatabaseConfig{Driver: config.DatabaseDriverMySQL, DSN: *mysqlDSN}
+	cleanupDriverDB(t, cfg)
+	t.Cleanup(func() { cleanupDriverDB(t, cfg) })
+
+	stdout := new(bytes.Buffer)
+	stderr := new(bytes.Buffer)
+	runner := &countingApplyRunner{inner: execRunner{}}
+	opts := ApplyOptions{
+		WorkDir: workDir, MigrationDir: "database/migrations", AtlasBinary: atlasBin,
+		Database: cfg, Stdout: stdout, Stderr: stderr, runner: runner,
+	}
+	if err := Migrate(context.Background(), opts); err == nil {
+		t.Fatal("first Migrate() error = nil, want Atlas's partial-apply failure")
+	}
+	db, err := database.Open(cfg)
+	if err != nil {
+		t.Fatalf("database.Open() error = %v", err)
+	}
+	var applied, total int
+	var atlasError string
+	if err := db.Table(atlasRevisionsTable).
+		Select("applied, total, error").Where("version = ?", partialVersion).
+		Row().Scan(&applied, &total, &atlasError); err != nil {
+		_ = db.Close()
+		t.Fatalf("read partial Atlas revision: %v", err)
+	}
+	if applied >= total || atlasError == "" {
+		_ = db.Close()
+		t.Fatalf("partial Atlas revision = applied %d / %d, error %q; want incomplete revision with error", applied, total, atlasError)
+	}
+	revisions, err := listRevisions(db.DB)
+	if err != nil {
+		_ = db.Close()
+		t.Fatalf("listRevisions() error = %v", err)
+	}
+	if len(revisions) != 1 || revisions[0].Version != firstVersion {
+		_ = db.Close()
+		t.Fatalf("framework revisions = %#v, want only completed migration %s", revisions, firstVersion)
+	}
+	firstBatch := revisions[0].Batch
+	_ = db.Close()
+
+	status := new(bytes.Buffer)
+	opts.Stdout = status
+	opts.Stderr = io.Discard
+	if err := Status(context.Background(), opts); err != nil {
+		t.Fatalf("Status() after partial apply: %v", err)
+	}
+	if !strings.Contains(status.String(), "pending") || !strings.Contains(status.String(), partialVersion) {
+		t.Fatalf("Status() = %q, want partial version listed as pending", status.String())
+	}
+	if err := Migrate(context.Background(), opts); err == nil {
+		t.Fatal("second Migrate() error = nil, want the partial migration to be retried")
+	}
+	if runner.applyCalls != 2 {
+		t.Fatalf("Atlas apply calls after retry = %d, want 2", runner.applyCalls)
+	}
+
+	writeFile(t, partialPath,
+		"CREATE TABLE IF NOT EXISTS "+partialTable+" (id BIGINT PRIMARY KEY);\n"+
+			"INSERT INTO "+partialTable+" (id) VALUES (1);\n"+
+			"CREATE TABLE IF NOT EXISTS "+afterTable+" (id BIGINT PRIMARY KEY);\n")
+	if err := (execRunner{}).Run(context.Background(), workDir, atlasBin, []string{
+		"migrate", "hash", "--dir", "file://" + filepath.ToSlash(migrationDir),
+	}, io.Discard, io.Discard); err != nil {
+		t.Fatalf("atlas migrate hash after fixing migration: %v", err)
+	}
+	if err := Migrate(context.Background(), opts); err != nil {
+		t.Fatalf("Migrate() after fixing partial migration: %v; stderr=%q", err, stderr.String())
+	}
+	if runner.applyCalls != 3 {
+		t.Fatalf("Atlas apply calls after repair = %d, want 3", runner.applyCalls)
+	}
+	repairedDB, err := database.Open(cfg)
+	if err != nil {
+		t.Fatalf("database.Open() after repair: %v", err)
+	}
+	defer func() { _ = repairedDB.Close() }()
+	revisions, err = listRevisions(repairedDB.DB)
+	if err != nil {
+		t.Fatalf("listRevisions() after repair: %v", err)
+	}
+	if len(revisions) != 2 || revisions[0].Version != firstVersion || revisions[1].Version != partialVersion {
+		t.Fatalf("revisions after repair = %#v, want both completed migrations", revisions)
+	}
+	if revisions[0].Batch != firstBatch || revisions[1].Batch != firstBatch+1 {
+		t.Fatalf("batches after repair = %d and %d, want %d and %d", revisions[0].Batch, revisions[1].Batch, firstBatch, firstBatch+1)
+	}
 }
 
 func TestSeedResetPostgres(t *testing.T) {

@@ -901,11 +901,15 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Install Atlas Community Edition
+        run: bash scripts/ci-install-atlas.sh
+
       - name: Pre-fetch Go modules
         run: bash scripts/ci-prefetch-go-modules.sh
 
       - name: Run MySQL migration integration tests
         env:
+          ATLAS_BINARY: atlas
           GOPROXY: "off"
         run: >-
           go test -tags integration ./migrations

@@ -259,12 +259,14 @@ type failingAfterApplyAtlas struct {
 	inner *applyFakeAtlas
 }
 
+var errFakeAtlasApply = errors.New("fake atlas apply failure")
+
 func (r failingAfterApplyAtlas) Run(ctx context.Context, dir string, name string, args []string, stdout io.Writer, stderr io.Writer) error {
 	if err := r.inner.Run(ctx, dir, name, args, stdout, stderr); err != nil {
 		return err
 	}
 	if len(args) >= 2 && args[1] == "apply" {
-		return errors.New("exit status 1")
+		return errFakeAtlasApply
 	}
 	return nil
 }
@@ -282,20 +284,28 @@ func TestMigrateRecordsAppliedVersionsWhenAtlasFails(t *testing.T) {
 
 	dsn := "file:" + filepath.Join(workDir, "app.db") + "?cache=shared&_fk=1"
 	cfg := config.DatabaseConfig{Driver: config.DatabaseDriverSQLite, DSN: dsn}
+	stderr := new(bytes.Buffer)
 	opts := ApplyOptions{
 		WorkDir:      workDir,
 		MigrationDir: migrationDir,
 		Database:     cfg,
 		Stdout:       io.Discard,
-		Stderr:       io.Discard,
+		Stderr:       stderr,
 		runner: failingAfterApplyAtlas{inner: &applyFakeAtlas{
 			t:              t,
 			applyVersions:  map[string]bool{"20260101000000": true, "20260102000000": true},
 			partialVersion: "20260102000000",
 		}},
 	}
-	if err := Migrate(context.Background(), opts); err == nil {
+	err := Migrate(context.Background(), opts)
+	if err == nil {
 		t.Fatal("Migrate() error = nil, want atlas failure")
+	}
+	if !errors.Is(err, errFakeAtlasApply) {
+		t.Fatalf("Migrate() error = %v, want wrapped Atlas failure", err)
+	}
+	if !strings.Contains(stderr.String(), "recorded 1 migration(s) applied before the failure") {
+		t.Fatalf("stderr = %q, want notice for the fully applied migration", stderr.String())
 	}
 
 	db, err := database.Open(cfg)
