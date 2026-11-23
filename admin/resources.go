@@ -755,12 +755,15 @@ func applyFilters(ctx context.Context, q *gorm.DB, m *registered, values interfa
 		return q, nil
 	}
 	for _, name := range m.meta.Filter {
-		raw := strings.TrimSpace(values.Get(name))
-		if raw == "" {
-			continue
-		}
 		f, ok := m.field(name)
 		if !ok || f.column == "" {
+			continue
+		}
+		raw := values.Get(name)
+		if f.valueType() != TypeString && f.valueType() != TypeText {
+			raw = strings.TrimSpace(raw)
+		}
+		if raw == "" {
 			continue
 		}
 		val, err := coerceFilter(raw, f.valueType())

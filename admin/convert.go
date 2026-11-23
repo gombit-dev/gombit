@@ -243,7 +243,9 @@ func coerceValue(raw any, ft FieldType) (any, error) {
 }
 
 func coerceFilter(raw string, ft FieldType) (any, error) {
-	raw = strings.TrimSpace(raw)
+	if ft != TypeString && ft != TypeText {
+		raw = strings.TrimSpace(raw)
+	}
 	if raw == "" {
 		return nil, nil
 	}
@@ -268,12 +270,14 @@ func coerceText(raw any, ft FieldType) (any, error) {
 }
 
 func coercePathID(id string, ft FieldType) (any, error) {
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return nil, fmt.Errorf("missing id")
-	}
 	if ft == "" {
 		ft = TypeString
+	}
+	if ft != TypeString && ft != TypeText {
+		id = strings.TrimSpace(id)
+	}
+	if id == "" {
+		return nil, fmt.Errorf("missing id")
 	}
 	return coerceText(id, ft)
 }
