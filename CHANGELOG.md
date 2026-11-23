@@ -10,6 +10,16 @@ version.
 
 ## [Unreleased]
 
+### Fixed
+
+- The migration safety manifest (`gombit db verify`) no longer reports
+  `ALTER COLUMN x DROP NOT NULL` or `DROP DEFAULT` as dropping a column
+  named `NOT` or `DEFAULT`: it classifies these as `alter_column` on `x`,
+  and, alone, as `non_destructive` (a constraint relaxation, not data
+  loss), so routine nullability and default changes no longer require
+  confirmation
+  ([#736](https://github.com/gombit-dev/gombit/issues/736)).
+
 ## [0.10.0] — 2026-11-21
 
 ### Added

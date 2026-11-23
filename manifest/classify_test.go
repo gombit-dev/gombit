@@ -55,6 +55,22 @@ func TestClassifySingleStatements(t *testing.T) {
 			`ALTER TABLE "customers" RENAME COLUMN "code" TO "ref";`,
 			Operation{Kind: OpRenameColumn, Resource: "customers", Column: "code", Safety: SafetyNonDestructive},
 		},
+		"drop not null is alter column, not drop column, and not data loss": {
+			`ALTER TABLE "users" ALTER COLUMN "email" DROP NOT NULL;`,
+			Operation{Kind: OpAlterColumn, Resource: "users", Column: "email", Safety: SafetyNonDestructive},
+		},
+		"drop default is alter column, not drop column, and not data loss": {
+			`ALTER TABLE "users" ALTER COLUMN "email" DROP DEFAULT;`,
+			Operation{Kind: OpAlterColumn, Resource: "users", Column: "email", Safety: SafetyNonDestructive},
+		},
+		"mysql drop default is alter column, not drop column, and not data loss": {
+			"ALTER TABLE `users` ALTER COLUMN `email` DROP DEFAULT;",
+			Operation{Kind: OpAlterColumn, Resource: "users", Column: "email", Safety: SafetyNonDestructive},
+		},
+		"quoted column literally named default is still a real drop": {
+			"ALTER TABLE `customers` DROP `default`;",
+			Operation{Kind: OpDropColumn, Resource: "customers", Column: "default", Safety: SafetyDataLoss},
+		},
 		"drop constraint is not row data loss": {
 			`ALTER TABLE "customers" DROP CONSTRAINT "fk_customers_owner";`,
 			Operation{Kind: OpOther, Resource: "customers", Safety: SafetyNonDestructive},

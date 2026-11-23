@@ -60,15 +60,24 @@ var (
 	reRenameColumn = regexp.MustCompile(`(?is)\bRENAME\s+COLUMN\s+(\S+)`)
 	reRenameTo     = regexp.MustCompile(`(?is)\bRENAME\s+(?:TO\s+)?(\S+)`)
 	reAlterColumn  = regexp.MustCompile(`(?is)\b(?:ALTER\s+COLUMN|MODIFY(?:\s+COLUMN)?|CHANGE(?:\s+COLUMN)?)\s+(\S+)`)
+	// reAlterColumnDropConstraint is the ALTER COLUMN x DROP NOT NULL / DROP
+	// DEFAULT sub-clause: a constraint relaxation, not a type or default change,
+	// so it is the one alter_column action that is not data loss.
+	reAlterColumnDropConstraint = regexp.MustCompile(`(?is)\bALTER\s+COLUMN\s+(\S+)\s+DROP\s+(?:NOT\s+NULL|DEFAULT)\b`)
 )
 
 // dropKeywords are the tokens after a bare ALTER … DROP that are NOT a column,
 // so dropping them is a schema change, not row data loss. Anything else after a
 // bare DROP (including PARTITION, which carries data) is treated as a column
-// drop. COLUMN itself is handled by reDropColumn before the bare check.
+// drop. COLUMN itself is handled by reDropColumn before the bare check. NOT and
+// DEFAULT are the ALTER COLUMN / MODIFY / CHANGE sub-clauses DROP NOT NULL and
+// DROP DEFAULT, not a dropped column; droppedColumn only treats them as
+// keywords when the token is bare, never when it is quoted (a real column
+// legitimately named "not" or "default" is always quoted by Atlas).
 var dropKeywords = map[string]bool{
 	"CONSTRAINT": true, "INDEX": true, "KEY": true,
 	"PRIMARY": true, "FOREIGN": true, "UNIQUE": true, "CHECK": true,
+	"NOT": true, "DEFAULT": true,
 }
 
 // Classify parses migration SQL into a closed set of operations. It is a
@@ -127,6 +136,9 @@ func classifyAlter(stmt string) Operation {
 	if col, ok := droppedColumn(body); ok {
 		return Operation{Kind: OpDropColumn, Resource: table, Column: col, Safety: SafetyDataLoss}
 	}
+	if col, ok := relaxedColumn(body); ok {
+		return Operation{Kind: OpAlterColumn, Resource: table, Column: col, Safety: SafetyNonDestructive}
+	}
 	if reAlterColumn.MatchString(body) {
 		return Operation{Kind: OpAlterColumn, Resource: table, Column: ident(reAlterColumn, body), Safety: SafetyDataLoss}
 	}
@@ -150,18 +162,40 @@ func classifyAlter(stmt string) Operation {
 
 // droppedColumn returns the name of a column dropped by the ALTER body, if any.
 // It recognizes DROP COLUMN and a bare DROP <ident> that is not a keyword
-// (CONSTRAINT / INDEX / KEY / …), and scans every DROP in the body.
+// (CONSTRAINT / INDEX / KEY / …), and scans every DROP in the body. A keyword
+// token is only recognized bare (unquoted); a quoted token is always a real
+// identifier, even one that collides with a keyword (DROP "default").
 func droppedColumn(body string) (string, bool) {
 	if m := reDropColumn.FindStringSubmatch(body); m != nil {
 		return clean(m[1]), true
 	}
 	for _, m := range reDropBare.FindAllStringSubmatch(body, -1) {
-		if dropKeywords[strings.ToUpper(clean(m[1]))] {
+		if !isQuoted(m[1]) && dropKeywords[strings.ToUpper(clean(m[1]))] {
 			continue
 		}
 		return clean(m[1]), true
 	}
 	return "", false
+}
+
+// relaxedColumn returns the column of an ALTER COLUMN x DROP NOT NULL / DROP
+// DEFAULT clause, the one alter_column action that is not data loss, but only
+// when every ALTER COLUMN / MODIFY / CHANGE action in the body is one of these
+// clauses — a destructive action elsewhere in the same statement (a type
+// change, another column) still classifies the whole statement as data loss.
+func relaxedColumn(body string) (string, bool) {
+	all := reAlterColumn.FindAllStringSubmatch(body, -1)
+	relaxed := reAlterColumnDropConstraint.FindAllStringSubmatch(body, -1)
+	if len(all) == 0 || len(all) != len(relaxed) {
+		return "", false
+	}
+	return clean(relaxed[0][1]), true
+}
+
+// isQuoted reports whether tok, an identifier token as matched (before
+// clean), is quoted rather than a bare SQL keyword.
+func isQuoted(tok string) bool {
+	return strings.HasPrefix(tok, `"`) || strings.HasPrefix(tok, "`") || strings.HasPrefix(tok, "[")
 }
 
 // Statements splits migration SQL the way Classify reads it: comments

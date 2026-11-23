@@ -22,6 +22,17 @@ ALTER TABLE "users" DROP COLUMN "legacy";`
 	}
 }
 
+// A migration that only drops a NOT NULL or DEFAULT constraint is a
+// constraint relaxation, not data loss, so it should not require
+// confirmation (issue #736).
+func TestGenerateAlterColumnDropNotNullDoesNotRequireConfirmation(t *testing.T) {
+	sql := `ALTER TABLE "users" ALTER COLUMN "email" DROP NOT NULL;`
+	m := Generate(Migration{Version: "1", Name: "relax_email"}, sql)
+	if m.RequiresConfirmation {
+		t.Fatalf("requires_confirmation = true, want false: %+v", m.Operations)
+	}
+}
+
 func TestVerifyNonDestructiveMigration(t *testing.T) {
 	sql := `CREATE TABLE "users" ("id" bigserial NOT NULL, PRIMARY KEY ("id"));`
 	m := Generate(Migration{Version: "1", Name: "create_users"}, sql)
