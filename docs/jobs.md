@@ -178,7 +178,12 @@ handlers must be idempotent.
 
 To run a worker inside another process (tests, a single-process app with the
 memory driver), call `framework.RunWorker(ctx, app, jobs.WorkerOptions{...})`,
-or build one with `jobs.NewWorker(registry, queue, opts)`.
+or build one with `jobs.NewWorker(registry, queue, opts)`. When `RunWorker`
+shares an `App` with `framework.RunContext`, start hooks run once and stop hooks
+wait until both the server and all workers return. `RunContext` returns after
+the HTTP server drains; it does not join embedded worker goroutines. The caller
+must collect each worker's result before the process exits, so workers can
+finish their graceful drain and the App can run its stop hooks.
 
 A stored envelope that no longer decodes cannot run anywhere. `Reserve` still
 hands it out, leased, with the failure on `Delivery.Err` (and a nil error, so

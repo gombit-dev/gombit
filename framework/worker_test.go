@@ -344,10 +344,11 @@ func TestEmbeddedWorkerDoesNotRunBeforeServerStartHooksSucceed(t *testing.T) {
 	go func() {
 		workerDone <- RunWorker(workerCtx, app, jobs.WorkerOptions{PollInterval: time.Millisecond})
 	}()
+	waitForStartWaiters(t, app, 1)
 	select {
 	case <-jobRan:
 		t.Fatal("embedded worker ran a job before the shared start hook succeeded")
-	case <-time.After(100 * time.Millisecond):
+	default:
 	}
 
 	finishStartHook()
@@ -491,11 +492,11 @@ func TestRunWorkerRejectsStoppedApp(t *testing.T) {
 	if err := RunWorker(ctx, app, jobs.WorkerOptions{PollInterval: time.Millisecond}); err != nil {
 		t.Fatalf("first RunWorker() = %v", err)
 	}
-	if err := RunWorker(context.Background(), app, jobs.WorkerOptions{}); err == nil || !strings.Contains(err.Error(), "already stopped") {
-		t.Fatalf("RunWorker() on stopped App = %v, want stopped-app error", err)
+	if err := RunWorker(context.Background(), app, jobs.WorkerOptions{}); !errors.Is(err, ErrAppAlreadyStopped) {
+		t.Fatalf("RunWorker() on stopped App = %v, want ErrAppAlreadyStopped", err)
 	}
-	if err := RunContext(context.Background(), app); err == nil || !strings.Contains(err.Error(), "already stopped") {
-		t.Fatalf("RunContext() on stopped App = %v, want stopped-app error", err)
+	if err := RunContext(context.Background(), app); !errors.Is(err, ErrAppAlreadyStopped) {
+		t.Fatalf("RunContext() on stopped App = %v, want ErrAppAlreadyStopped", err)
 	}
 }
 
@@ -548,6 +549,26 @@ func waitForAppAddr(t *testing.T, app *App) string {
 			t.Fatal("timed out waiting for app listener")
 		default:
 			runtime.Gosched()
+		}
+	}
+}
+
+func waitForStartWaiters(t *testing.T, app *App, want int) {
+	t.Helper()
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	for {
+		app.mu.RLock()
+		waiters := app.startWaiters
+		changed := app.startWaitersChanged
+		app.mu.RUnlock()
+		if waiters >= want {
+			return
+		}
+		select {
+		case <-timer.C:
+			t.Fatalf("start hook waiters = %d, want at least %d", waiters, want)
+		case <-changed:
 		}
 	}
 }

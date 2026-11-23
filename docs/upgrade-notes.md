@@ -17,7 +17,9 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   Concurrent runners share one start-hook result, and a worker cannot
   restart an App after shutdown begins. This fixes the embedded-worker
   lifecycle race; standalone `RunWorker` still stops the App when its
-  final runner returns.
+  final runner returns. `RunContext` returns after the HTTP server
+  drains; its caller must join embedded worker goroutines before the
+  process exits so they can drain and the App can finish cleanup.
 
 ## v0.10.0
 

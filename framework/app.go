@@ -62,6 +62,10 @@ const requestTimeoutWriteGrace = 5 * time.Second
 // Hook is an application lifecycle callback.
 type Hook func(context.Context) error
 
+// ErrAppAlreadyStopped is returned when a runner tries to start an App after
+// its stop hooks have begun.
+var ErrAppAlreadyStopped = errors.New("framework: app already stopped")
+
 // Option configures an App.
 type Option func(*App) error
 
@@ -103,14 +107,16 @@ type App struct {
 	authLocator        auth.SessionLocator
 	authSignupOff      bool
 
-	mu           sync.RWMutex
-	server       *http.Server
-	addr         string
-	serverActive bool // includes startup and shutdown, not only Serve
-	startDone    chan struct{}
-	startErr     error
-	stopOnce     sync.Once
-	stopErr      error
+	mu                  sync.RWMutex
+	server              *http.Server
+	addr                string
+	serverActive        bool // includes startup and shutdown, not only Serve
+	startDone           chan struct{}
+	startErr            error
+	startWaiters        int
+	startWaitersChanged chan struct{}
+	stopOnce            sync.Once
+	stopErr             error
 	// stopped is set atomically with the decision to run stop hooks. Once
 	// stopped, new servers and workers are rejected. workers counts RunWorker
 	// calls in progress on this App (issue #492).
@@ -136,9 +142,10 @@ type namedMiddleware struct {
 // New creates an application using process configuration and the default router.
 func New(options ...Option) (_ *App, err error) {
 	app := &App{
-		cfg:             config.Default(),
-		shutdownTimeout: defaultShutdownTimeout,
-		jobMetrics:      jobs.NewMetrics(),
+		cfg:                 config.Default(),
+		shutdownTimeout:     defaultShutdownTimeout,
+		jobMetrics:          jobs.NewMetrics(),
+		startWaitersChanged: make(chan struct{}),
 	}
 	// A failed New never hands the caller an *App, so nothing else can release
 	// what it opened: the cache (whose in-memory driver runs a janitor
@@ -736,8 +743,8 @@ func RunContext(ctx context.Context, app *App) (result error) {
 	if ctx == nil {
 		return errors.Join(errors.New("framework: nil context"), app.stopIfIdle())
 	}
-	if !app.enterServer() {
-		return errors.New("framework: app already stopped or serving")
+	if err := app.enterServer(); err != nil {
+		return err
 	}
 	defer func() { result = errors.Join(result, app.leaveServer()) }()
 
@@ -768,7 +775,7 @@ func RunContext(ctx context.Context, app *App) (result error) {
 	}
 	if !app.setServer(server, listener.Addr().String()) {
 		_ = listener.Close()
-		return errors.New("framework: app already stopped")
+		return ErrAppAlreadyStopped
 	}
 
 	if err := app.startHooksOnce(ctx); err != nil {
@@ -819,12 +826,19 @@ func (a *App) startHooksOnce(ctx context.Context) error {
 	a.mu.Lock()
 	if a.stopped {
 		a.mu.Unlock()
-		return errors.New("framework: app already stopped")
+		return ErrAppAlreadyStopped
 	}
 	if done := a.startDone; done != nil {
+		a.startWaiters++
+		a.signalStartWaitersChangedLocked()
 		a.mu.Unlock()
 		<-done
-		return a.startErr
+		a.mu.Lock()
+		a.startWaiters--
+		a.signalStartWaitersChangedLocked()
+		err := a.startErr
+		a.mu.Unlock()
+		return err
 	}
 	done := make(chan struct{})
 	a.startDone = done
@@ -838,16 +852,28 @@ func (a *App) startHooksOnce(ctx context.Context) error {
 	return err
 }
 
+// signalStartWaitersChangedLocked wakes lifecycle tests waiting for a waiter
+// to join the shared start-hook run. The caller must hold a.mu.
+func (a *App) signalStartWaitersChangedLocked() {
+	if a.startWaitersChanged != nil {
+		close(a.startWaitersChanged)
+	}
+	a.startWaitersChanged = make(chan struct{})
+}
+
 // enterServer reserves the App lifecycle before opening a listener, so a
 // concurrent worker cannot stop the App while RunContext is starting.
-func (a *App) enterServer() bool {
+func (a *App) enterServer() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.stopped || a.serverActive {
-		return false
+	if a.stopped {
+		return ErrAppAlreadyStopped
+	}
+	if a.serverActive {
+		return errors.New("framework: app already serving")
 	}
 	a.serverActive = true
-	return true
+	return nil
 }
 
 // leaveServer releases the server's ownership of the App. If no worker is

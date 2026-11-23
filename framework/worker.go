@@ -29,7 +29,8 @@ const WorkerCommand = "worker"
 // opts.Logger to the app's logger. When it runs alone, its return runs the stop
 // hooks and closes what the app opened. When it shares an App with RunContext
 // or another worker, those hooks wait until the last runner returns (issue
-// #492). An App cannot be run again once shutdown starts.
+// #492). RunContext does not wait for embedded workers; its caller must join
+// them before the process exits. An App cannot be run again once shutdown starts.
 func RunWorker(ctx context.Context, app *App, opts jobs.WorkerOptions) error {
 	if app == nil {
 		return errors.New("framework: nil app")
@@ -40,7 +41,7 @@ func RunWorker(ctx context.Context, app *App, opts jobs.WorkerOptions) error {
 	// web server are gone (leaveWorker), not when the worker alone returns
 	// (issue #492). Only a worker that runs the app alone releases it.
 	if !app.enterWorker() {
-		return errors.New("framework: app already stopped")
+		return ErrAppAlreadyStopped
 	}
 	releaseWorker := app.leaveWorker
 	if ctx == nil {

@@ -32,15 +32,27 @@ hands them an already-expired one. A full shutdown can therefore take the drain
 delay plus up to twice the shutdown timeout; give the process manager at least
 that before it kills the process.
 
-Every return from `Run`, `RunContext` or `RunWorker` runs the stop hooks once
-and then closes the cache and job dispatcher the app opened: after a clean
-shutdown, and also when they fail before serving (a start hook fails, the
-listener cannot bind, the context is nil, the worker options, flags or driver
-are refused) or when worker mode only prints `-h`. Stop hooks must therefore
-tolerate partial application startup and be safe to call when the resource
-they clean up was never initialized. An `App` runs once: it cannot be run
-again after any of them returns, for whatever reason. A `framework.New` that
-fails closes what it had already opened itself before returning the error.
+Start hooks run once per `App`. Concurrent `RunContext` and `RunWorker` calls
+wait for the same start result; neither the HTTP server nor a worker starts if
+a start hook fails. Stop hooks run once when the last active runner releases
+the `App`, then the framework closes the cache and job dispatcher it opened.
+A standalone runner therefore releases the `App` when it returns, while a
+worker sharing an `App` with the server does not close resources when that
+worker alone returns.
+
+`RunContext` returns after its HTTP server drains; it does not wait for
+embedded worker goroutines to finish. Stop hooks remain deferred until those
+workers return. If the process runs both, the caller must join the worker
+goroutines before the process exits so their graceful drain and the final stop
+hooks can complete. A runner started after shutdown begins returns
+`framework.ErrAppAlreadyStopped`; an `App` cannot be run again after that
+point. The same cleanup applies when a runner fails before serving (for
+example, a start hook fails, the listener cannot bind, the context is nil, or
+worker options, flags or driver are refused) when it is the last active runner,
+including worker mode that only prints `-h`. Stop hooks must tolerate partial
+application startup and be safe to call when the resource they clean up was
+never initialized. A `framework.New` that fails closes what it had already
+opened itself before returning the error.
 
 `RunContext` binds the listener before start hooks run, which lets hooks read
 `App.Addr()` even when the configured HTTP address uses port `0`. The HTTP

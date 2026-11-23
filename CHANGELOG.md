@@ -12,8 +12,10 @@ version.
 
 - An embedded `RunWorker` now shares its `App` lifecycle with `RunContext`:
   start hooks complete before either runner proceeds, and stop hooks wait
-  until the server and every worker have returned. A worker cannot restart an
-  App after its stop hooks begin ([#492](https://github.com/gombit-dev/gombit/issues/492)).
+  until the server and every worker have returned. `RunContext` returns after
+  the HTTP server drains, so its caller must join embedded worker goroutines
+  before the process exits. A worker cannot restart an App after its stop hooks
+  begin ([#492](https://github.com/gombit-dev/gombit/issues/492)).
 
 ## [0.10.0] — 2026-11-21
 
