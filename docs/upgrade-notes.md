@@ -8,6 +8,21 @@ What each release asks of an application moving to it, newest first. This
 page, the release notes, and the upgrade tooling all come from the same
 compatibility manifest (see [upgrade.md](upgrade.md)).
 
+## Unreleased
+
+### Informational
+
+- `gombit db verify` / `db lint` classify `ALTER COLUMN x DROP NOT NULL` / `DROP DEFAULT` as `alter_column` on `x`, and, alone, as `non_destructive`, instead of reporting a dropped column named `NOT` or `DEFAULT` as data loss. (`alter-column-drop-not-null-default-not-data-loss`, behavior, [#736](https://github.com/gombit-dev/gombit/issues/736))
+
+  The bare-`DROP <ident>` check inside an `ALTER TABLE` body ran
+  before the identifier was recognized as part of an `ALTER COLUMN`
+  clause, so `DROP NOT NULL` and `DROP DEFAULT` were read as
+  dropping a column literally named `NOT` or `DEFAULT`, which
+  required confirmation for a routine nullability or default
+  change. Nothing to change: a migration already applied keeps its
+  outcome; only the classification a host reads from `gombit db
+  verify --json` or a written manifest changes.
+
 ## v0.10.0
 
 ### Manual: action required
