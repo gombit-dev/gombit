@@ -146,7 +146,7 @@ func Migrate(ctx context.Context, opts ApplyOptions) error {
 		// framework_migrations (and later app tables) make the DB non-empty before Atlas runs.
 		"--allow-dirty",
 	}
-	args = withAtlasRevisionsSchema(opts.Database.Driver, revisionsSchema, args)
+	args = withAtlasRevisionsSchema(revisionsSchema, args)
 	hints := newHintWriter(opts.Stderr)
 	err = opts.runner.Run(ctx, absWorkDir, opts.AtlasBinary, args, opts.Stdout, hints)
 	hints.Flush()

@@ -218,8 +218,8 @@ func mysqlAtlasURL(dsn string) (string, error) {
 // Migrate (atlas migrate apply) and Status (atlas migrate status).
 // MakeMigrations (migrate diff) and migrate hash do not touch the app DB
 // revisions table and must not add this flag.
-func withAtlasRevisionsSchema(driver config.DatabaseDriver, schema string, args []string) []string {
-	if !isPostgresDriver(string(driver)) {
+func withAtlasRevisionsSchema(schema string, args []string) []string {
+	if schema == "" {
 		return args
 	}
 	return append(args, "--revisions-schema", schema)

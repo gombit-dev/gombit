@@ -92,7 +92,7 @@ func Status(ctx context.Context, opts ApplyOptions) error {
 		"--dir",
 		"file://" + filepath.ToSlash(migrationDir),
 	}
-	args = withAtlasRevisionsSchema(opts.Database.Driver, revisionsSchema, args)
+	args = withAtlasRevisionsSchema(revisionsSchema, args)
 	hints := newHintWriter(opts.Stderr)
 	runErr := opts.runner.Run(ctx, absWorkDir, opts.AtlasBinary, args, opts.Stdout, hints)
 	hints.Flush()
