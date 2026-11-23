@@ -979,6 +979,28 @@ func TestGenerateSourceHasNoLocalStorageOrViteSecrets(t *testing.T) {
 	}
 }
 
+func TestGenerateInteractivePromptsNormalizeAnswers(t *testing.T) {
+	workDir := t.TempDir()
+	stdin := strings.NewReader("demo\nPostgres\nMemory\nCookie\nMUI\n\n")
+	stdout := new(bytes.Buffer)
+	err := Generate(context.Background(), Options{
+		WorkDir: workDir,
+		Stdin:   stdin,
+		Stdout:  stdout,
+		IsTTY:   func() bool { return true },
+	})
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+
+	yaml := readFile(t, filepath.Join(workDir, "demo", "gombit.yaml"))
+	for _, want := range []string{"database: postgres", "cache: memory", "auth: cookie", "ui: mui"} {
+		if !strings.Contains(yaml, want) {
+			t.Fatalf("gombit.yaml missing %q after capitalized prompt answers:\n%s", want, yaml)
+		}
+	}
+}
+
 func TestGenerateInteractivePromptsOnTTY(t *testing.T) {
 	workDir := t.TempDir()
 	stdin := strings.NewReader("demo\nsqlite\nmemory\njwt\nminimal\n\n")
