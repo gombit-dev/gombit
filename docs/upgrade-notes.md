@@ -30,6 +30,36 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   was read: `--http` when the flag is set, `GOMBIT_HTTP_ADDR` when
   configuration supplied it.
 
+- The application contract declares the app's processes (`web`, and the jobs `worker` on the `redis` driver) with the stop timeout each needs, and `redis.required`, within `contract_version` 1. (`app-contract-processes`, api, [#684](https://github.com/gombit-dev/gombit/issues/684))
+
+  `gombit contract app` adds `processes` and `redis` to its output. A
+  host that doesn't read them works as before; one that does finds them
+  absent in a contract from an older gombit. Each process's
+  `stop_timeout_seconds` is `framework.WebKillAfter` or
+  `framework.WorkerKillAfterFor` of the declared shutdown and worker
+  settings. A host that injects configuration projects the contract
+  with the environment it will start the processes with.
+
+- New settings: `GOMBIT_SHUTDOWN_TIMEOUT` and `GOMBIT_SHUTDOWN_DRAIN_DELAY`, and the jobs worker's `GOMBIT_JOBS_WORKER_QUEUES`, `GOMBIT_JOBS_WORKER_CONCURRENCY`, `GOMBIT_JOBS_WORKER_LEASE` and `GOMBIT_JOBS_WORKER_SHUTDOWN_TIMEOUT`, the defaults of its flags. (`shutdown-and-worker-settings`, config, [#684](https://github.com/gombit-dev/gombit/issues/684))
+
+  - Configuration: `GOMBIT_SHUTDOWN_TIMEOUT` is new.
+  - Configuration: `GOMBIT_SHUTDOWN_DRAIN_DELAY` is new.
+  - Configuration: `GOMBIT_JOBS_WORKER_QUEUES` is new.
+  - Configuration: `GOMBIT_JOBS_WORKER_CONCURRENCY` is new.
+  - Configuration: `GOMBIT_JOBS_WORKER_LEASE` is new.
+  - Configuration: `GOMBIT_JOBS_WORKER_SHUTDOWN_TIMEOUT` is new.
+
+  Their defaults are what the code used before (a 10s shutdown
+  timeout, no drain delay, the default queue, concurrency 1, a 5m
+  lease, a 30s worker shutdown timeout), so an app that sets none
+  behaves as it did. `framework.WithShutdownTimeout` and
+  `WithShutdownDrainDelay` still win over the shutdown settings, but a
+  host reading the application contract sees only the settings: move
+  a value a host must wait for into configuration. A worker flag still
+  wins over its setting for that run. `gombit worker` now loads the
+  app's config before it builds, so a config that fails to load stops
+  it there.
+
 ## v0.10.0
 
 ### Manual: action required

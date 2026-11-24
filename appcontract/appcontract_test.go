@@ -1,12 +1,19 @@
 package appcontract
 
-import "testing"
+import (
+	"encoding/json"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+)
 
 func validInputs() Inputs {
 	return Inputs{
 		FrameworkVersion: "v0.5.0",
 		HTTPAddr:         ":8080",
 		DatabaseDriver:   "sqlite",
+		WebStopTimeout:   22 * time.Second,
 	}
 }
 
@@ -73,6 +80,11 @@ func TestProjectRejectsMissingRequiredInputs(t *testing.T) {
 		"no framework version": func(in *Inputs) { in.FrameworkVersion = "" },
 		"no database driver":   func(in *Inputs) { in.DatabaseDriver = "" },
 		"no http addr":         func(in *Inputs) { in.HTTPAddr = "" },
+		"no web stop timeout":  func(in *Inputs) { in.WebStopTimeout = 0 },
+		"no worker stop timeout": func(in *Inputs) {
+			in.Worker = true
+			in.WorkerStopTimeout = 0
+		},
 	}
 	for name, mutate := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -115,5 +127,79 @@ func TestProjectParsesPort(t *testing.T) {
 				t.Errorf("http_port = %d, want %d", got.Runtime.HTTPPort, tc.want)
 			}
 		})
+	}
+}
+
+// An app without a worker declares the web process alone.
+func TestProjectWebProcessOnly(t *testing.T) {
+	got, err := Project(validInputs())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Process{{Name: ProcessWeb, Args: []string{}, HTTP: true, StopTimeoutSeconds: 22}}
+	if !reflect.DeepEqual(got.Processes, want) {
+		t.Errorf("processes = %+v, want %+v", got.Processes, want)
+	}
+	if got.Redis.Required {
+		t.Error("redis.required = true, want false")
+	}
+}
+
+// An app whose jobs need a worker declares it after the web process, with
+// the worker command and its own stop timeout.
+func TestProjectWorkerProcess(t *testing.T) {
+	in := validInputs()
+	in.Worker = true
+	in.WorkerStopTimeout = 58 * time.Second
+	in.RedisRequired = true
+	got, err := Project(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Process{
+		{Name: ProcessWeb, Args: []string{}, HTTP: true, StopTimeoutSeconds: 22},
+		{Name: ProcessWorker, Args: []string{WorkerCommand}, HTTP: false, StopTimeoutSeconds: 58},
+	}
+	if !reflect.DeepEqual(got.Processes, want) {
+		t.Errorf("processes = %+v, want %+v", got.Processes, want)
+	}
+	if !got.Redis.Required {
+		t.Error("redis.required = false, want true")
+	}
+}
+
+// A stop timeout that isn't a whole number of seconds rounds up: a host that
+// waits a second too little cuts the shutdown off.
+func TestProjectRoundsStopTimeoutsUp(t *testing.T) {
+	in := validInputs()
+	in.WebStopTimeout = 20*time.Second + time.Millisecond
+	in.Worker = true
+	in.WorkerStopTimeout = 59*time.Second + 999*time.Millisecond
+	got, err := Project(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if web, worker := got.Processes[0].StopTimeoutSeconds, got.Processes[1].StopTimeoutSeconds; web != 21 || worker != 60 {
+		t.Errorf("stop timeouts = %ds and %ds, want 21s and 60s", web, worker)
+	}
+}
+
+// The JSON a host reads: the web process's args are an empty list, not null.
+func TestContractJSONDeclaresProcessesAndRedis(t *testing.T) {
+	got, err := Project(validInputs())
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`"processes":[{"name":"web","args":[],"http":true,"stop_timeout_seconds":22}]`,
+		`"redis":{"required":false}`,
+	} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("contract JSON %s lacks %s", data, want)
+		}
 	}
 }

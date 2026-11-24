@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/gombit-dev/gombit/config"
 )
 
 // WorkerOptions configures a Worker. Zero values take the defaults noted.
@@ -48,11 +50,12 @@ type Worker struct {
 	metrics  *Metrics
 }
 
-// Defaults for WorkerOptions.
+// Defaults for WorkerOptions. The lease and the shutdown timeout are the
+// jobs worker settings' defaults (config.JobsWorkerConfig).
 const (
-	DefaultLease           = 5 * time.Minute
+	DefaultLease           = config.DefaultJobsWorkerLease
 	DefaultPollInterval    = time.Second
-	DefaultShutdownTimeout = 30 * time.Second
+	DefaultShutdownTimeout = config.DefaultJobsWorkerShutdownTimeout
 )
 
 // ErrNoQueue: the sync driver has no queue for a worker to consume.

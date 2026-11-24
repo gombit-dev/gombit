@@ -1721,3 +1721,41 @@ releases:
           was read: `--http` when the flag is set, `GOMBIT_HTTP_ADDR` when
           configuration supplied it.
         refs: [513]
+
+      - id: app-contract-processes
+        kind: informational
+        area: api
+        summary: "The application contract declares the app's processes (`web`, and the jobs `worker` on the `redis` driver) with the stop timeout each needs, and `redis.required`, within `contract_version` 1."
+        details: |
+          `gombit contract app` adds `processes` and `redis` to its output. A
+          host that doesn't read them works as before; one that does finds them
+          absent in a contract from an older gombit. Each process's
+          `stop_timeout_seconds` is `framework.WebKillAfter` or
+          `framework.WorkerKillAfterFor` of the declared shutdown and worker
+          settings. A host that injects configuration projects the contract
+          with the environment it will start the processes with.
+        refs: [684]
+
+      - id: shutdown-and-worker-settings
+        kind: informational
+        area: config
+        summary: "New settings: `GOMBIT_SHUTDOWN_TIMEOUT` and `GOMBIT_SHUTDOWN_DRAIN_DELAY`, and the jobs worker's `GOMBIT_JOBS_WORKER_QUEUES`, `GOMBIT_JOBS_WORKER_CONCURRENCY`, `GOMBIT_JOBS_WORKER_LEASE` and `GOMBIT_JOBS_WORKER_SHUTDOWN_TIMEOUT`, the defaults of its flags."
+        details: |
+          Their defaults are what the code used before (a 10s shutdown
+          timeout, no drain delay, the default queue, concurrency 1, a 5m
+          lease, a 30s worker shutdown timeout), so an app that sets none
+          behaves as it did. `framework.WithShutdownTimeout` and
+          `WithShutdownDrainDelay` still win over the shutdown settings, but a
+          host reading the application contract sees only the settings: move
+          a value a host must wait for into configuration. A worker flag still
+          wins over its setting for that run. `gombit worker` now loads the
+          app's config before it builds, so a config that fails to load stops
+          it there.
+        config:
+          - {var: GOMBIT_SHUTDOWN_TIMEOUT, change: added}
+          - {var: GOMBIT_SHUTDOWN_DRAIN_DELAY, change: added}
+          - {var: GOMBIT_JOBS_WORKER_QUEUES, change: added}
+          - {var: GOMBIT_JOBS_WORKER_CONCURRENCY, change: added}
+          - {var: GOMBIT_JOBS_WORKER_LEASE, change: added}
+          - {var: GOMBIT_JOBS_WORKER_SHUTDOWN_TIMEOUT, change: added}
+        refs: [684]

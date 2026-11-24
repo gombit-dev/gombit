@@ -50,8 +50,9 @@ Not ready:
 An instance is **ready** when both hold:
 
 1. **Not shutting down.** On graceful shutdown the probe flips to `503`
-   *before* the listener closes. Pair it with `framework.WithShutdownDrainDelay`
-   (set to the host's readiness poll interval) so the server keeps accepting for
+   *before* the listener closes. Pair it with a drain delay,
+   `GOMBIT_SHUTDOWN_DRAIN_DELAY` (set to the host's readiness poll interval;
+   `framework.WithShutdownDrainDelay` in code), so the server keeps accepting for
    that window and a host observes the `503` and deregisters the instance before
    any request is connection-refused. With no delay (the default) the flag still
    sheds in-flight and keep-alive pollers during the shutdown grace period.

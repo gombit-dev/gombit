@@ -111,6 +111,12 @@ func TestLoadFromEnv(t *testing.T) {
 		envJobsDriver:              " redis ",
 		envJobsQueue:               " mail ",
 		envJobsNamespace:           " example-jobs ",
+		envJobsWorkerQueues:        " critical, default ",
+		envJobsWorkerConcurrency:   " 8 ",
+		envJobsWorkerLease:         " 10m ",
+		envJobsWorkerShutdown:      " 45s ",
+		envShutdownTimeout:         " 15s ",
+		envShutdownDrainDelay:      " 3s ",
 		envStorageDriver:           " Memory ",
 		envStorageLocalRoot:        "/var/lib/example/files",
 		envStorageS3Endpoint:       " http://127.0.0.1:9000 ",
@@ -135,6 +141,7 @@ func TestLoadFromEnv(t *testing.T) {
 			TrustedProxies: []string{"10.0.0.1", "10.0.0.0/24"},
 			RequestTimeout: 15 * time.Second,
 		},
+		Shutdown: ShutdownConfig{Timeout: 15 * time.Second, DrainDelay: 3 * time.Second},
 		API: APIConfig{
 			Prefix:      "/api",
 			DocsEnabled: true,
@@ -166,6 +173,12 @@ func TestLoadFromEnv(t *testing.T) {
 			Driver:    JobsDriverRedis,
 			Queue:     "mail",
 			Namespace: "example-jobs",
+			Worker: JobsWorkerConfig{
+				Queues:          []string{"critical", "default"},
+				Concurrency:     8,
+				Lease:           10 * time.Minute,
+				ShutdownTimeout: 45 * time.Second,
+			},
 		},
 		Storage: StorageConfig{
 			Driver:       StorageDriverMemory,
@@ -338,6 +351,7 @@ func TestLoadUsesProcessEnvironment(t *testing.T) {
 			Addr:           ":9090",
 			RequestTimeout: 0,
 		},
+		Shutdown: Default().Shutdown,
 		API: APIConfig{
 			Prefix:      "/api",
 			DocsEnabled: false,
@@ -356,6 +370,7 @@ func TestLoadUsesProcessEnvironment(t *testing.T) {
 			Driver:    JobsDriverSync,
 			Queue:     DefaultJobsQueue,
 			Namespace: "process-example:production",
+			Worker:    Default().Jobs.Worker,
 		},
 		Storage: StorageConfig{
 			Driver:       StorageDriverLocal,

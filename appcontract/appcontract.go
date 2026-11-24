@@ -9,6 +9,17 @@
 // defaults) — never guessed by walking the source tree (build plan §10, 6.2).
 // The contract is versioned by ContractVersion, independent of the framework
 // version, so a host can fail loudly on an unknown shape (DESIGN.md §53, §55).
+//
+// A field can be added within a version; only a breaking change of shape
+// bumps it (ADR-015). A host that does not know an added field ignores it and
+// behaves as before, and a host that reads one finds it absent in a contract
+// from an older gombit. Version 1 gained processes and redis (HOST-4, after
+// v0.10.0).
+//
+// The contract describes the configuration it was projected from: the
+// process environment over the app's .env. A host that injects configuration
+// of its own projects the contract with that environment, the one it will
+// start the processes with.
 package appcontract
 
 import (
@@ -16,11 +27,13 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"time"
 )
 
 // ContractVersion is the schema version of the emitted contract. It is
 // independent of the framework version; bump it only on a breaking shape
-// change, and document the change.
+// change, and document the change. Fields added within it are documented in
+// the package doc.
 const ContractVersion = 1
 
 // FrameworkName is the framework a Gombit application contract describes.
@@ -32,6 +45,18 @@ const (
 	LivenessPath  = "/livez"
 	ReadinessPath = "/readyz"
 )
+
+// Process names (Process.Name).
+const (
+	// ProcessWeb is the HTTP server: the artifact run with no arguments.
+	ProcessWeb = "web"
+	// ProcessWorker is the jobs worker: the artifact run with WorkerCommand.
+	ProcessWorker = "worker"
+)
+
+// WorkerCommand is the artifact's argument that runs the jobs worker
+// (framework.WorkerCommand).
+const WorkerCommand = "worker"
 
 // Documented build defaults (build plan M5-5; build.DefaultOut = "bin/server").
 const (
@@ -49,6 +74,35 @@ type Contract struct {
 	Runtime         Runtime    `json:"runtime"`
 	Database        Database   `json:"database"`
 	Migrations      Migrations `json:"migrations"`
+	// Processes are the processes a host runs from the artifact: ProcessWeb
+	// always, then ProcessWorker when the app's jobs need one.
+	Processes []Process `json:"processes"`
+	Redis     Redis     `json:"redis"`
+}
+
+// Process is one process a host runs from the build artifact.
+type Process struct {
+	// Name is ProcessWeb or ProcessWorker.
+	Name string `json:"name"`
+	// Args are the artifact's arguments: none for the web process,
+	// [WorkerCommand] for the worker. Each process reads the rest of its
+	// settings from the environment the contract was projected from.
+	Args []string `json:"args"`
+	// HTTP is whether the process serves runtime.http_port and the health
+	// probes. Only the web process does.
+	HTTP bool `json:"http"`
+	// StopTimeoutSeconds is how long the process needs, from the stop signal
+	// (SIGTERM or SIGINT) to its exit, rounded up to a whole second. A host
+	// that kills it sooner cuts off its graceful shutdown: a request, a stop
+	// hook, or a job's ack.
+	StopTimeoutSeconds int `json:"stop_timeout_seconds"`
+}
+
+// Redis is the app's Redis dependency. Required is true when the app's cache
+// or its job queue is on the redis driver; the host provides the server
+// (GOMBIT_REDIS_*).
+type Redis struct {
+	Required bool `json:"required"`
 }
 
 // Framework identifies the framework and the version the app builds against.
@@ -106,6 +160,18 @@ type Inputs struct {
 	// BuildCommand / BuildArtifact override the documented defaults when set.
 	BuildCommand  string
 	BuildArtifact string
+	// WebStopTimeout is how long the web process needs to stop
+	// (framework.WebKillAfter). Required.
+	WebStopTimeout time.Duration
+	// Worker is whether the app runs a jobs worker process: its jobs driver
+	// is worked outside the web process (config.JobsDriver.NeedsWorker).
+	Worker bool
+	// WorkerStopTimeout is how long the worker needs to stop
+	// (framework.WorkerKillAfterFor). Required when Worker is set.
+	WorkerStopTimeout time.Duration
+	// RedisRequired is whether the app needs a Redis server
+	// (config.Config.RequiresRedis).
+	RedisRequired bool
 }
 
 // Project builds the application contract from declared inputs, applying the
@@ -120,6 +186,25 @@ func Project(in Inputs) (Contract, error) {
 	port, err := parsePort(in.HTTPAddr)
 	if err != nil {
 		return Contract{}, err
+	}
+	if in.WebStopTimeout <= 0 {
+		return Contract{}, errors.New("appcontract: the web process's stop timeout is required")
+	}
+	processes := []Process{{
+		Name:               ProcessWeb,
+		Args:               []string{},
+		HTTP:               true,
+		StopTimeoutSeconds: wholeSeconds(in.WebStopTimeout),
+	}}
+	if in.Worker {
+		if in.WorkerStopTimeout <= 0 {
+			return Contract{}, errors.New("appcontract: the worker's stop timeout is required")
+		}
+		processes = append(processes, Process{
+			Name:               ProcessWorker,
+			Args:               []string{WorkerCommand},
+			StopTimeoutSeconds: wholeSeconds(in.WorkerStopTimeout),
+		})
 	}
 
 	return Contract{
@@ -146,7 +231,14 @@ func Project(in Inputs) (Contract, error) {
 		Migrations: Migrations{
 			Path: orDefault(in.MigrationsPath, DefaultMigrationsPath),
 		},
+		Processes: processes,
+		Redis:     Redis{Required: in.RedisRequired},
 	}, nil
+}
+
+// wholeSeconds is d in seconds, rounded up.
+func wholeSeconds(d time.Duration) int {
+	return int((d + time.Second - 1) / time.Second)
 }
 
 // parsePort extracts the TCP port from a listen address such as ":8080" or

@@ -8,6 +8,7 @@ import (
 	"os"
 
 	"github.com/gombit-dev/gombit/appcontract"
+	"github.com/gombit-dev/gombit/framework"
 	"github.com/spf13/cobra"
 )
 
@@ -35,10 +36,14 @@ func newContractAppCommand(stdout io.Writer, stderr io.Writer) *cobra.Command {
 		Long: `Emit the machine-readable application contract (ADR-015 / HOST-1).
 
 The contract describes how a deployment host builds, health-checks, and
-migrates this app. Every field is projected from declared configuration
-(config/.env and the framework version in go.mod) — nothing is inferred from
-the source tree. --dir selects the project directory that both the config
-(.env) and go.mod are read from. Writes JSON to stdout, or to --out.`,
+migrates this app, and which processes it runs from the build (the web server,
+and the jobs worker when the jobs driver needs one) with how long each needs to
+stop. Every field is projected from declared configuration (config/.env and
+the framework version in go.mod) — nothing is inferred from the source tree.
+--dir selects the project directory that both the config (.env) and go.mod are
+read from; the process environment wins over .env, as it does at runtime, so a
+host that injects configuration runs this with the environment it will start
+the app with. Writes JSON to stdout, or to --out.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 0 {
@@ -78,12 +83,21 @@ func runContractApp(stdout io.Writer, dir string, out string) error {
 		return fmt.Errorf("gombit contract app: %w", err)
 	}
 
-	contract, err := appcontract.Project(appcontract.Inputs{
+	in := appcontract.Inputs{
 		FrameworkVersion: version,
 		HTTPAddr:         cfg.HTTP.Addr,
 		DatabaseDriver:   string(cfg.Database.Driver),
 		DatabaseRequired: cfg.Database.Required,
-	})
+		WebStopTimeout:   framework.WebKillAfter(cfg),
+		RedisRequired:    cfg.RequiresRedis(),
+	}
+	if cfg.Jobs.Driver.NeedsWorker() {
+		// A host starts the worker with no flags: it runs on the declared
+		// settings, the ones this stop timeout is computed from.
+		in.Worker = true
+		in.WorkerStopTimeout = framework.WorkerKillAfterFor(cfg, nil)
+	}
+	contract, err := appcontract.Project(in)
 	if err != nil {
 		return fmt.Errorf("gombit contract app: %w", err)
 	}

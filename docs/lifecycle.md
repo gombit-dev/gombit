@@ -22,15 +22,21 @@ return framework.Run(app)
 ```
 
 Start hooks run in registration order. Stop hooks run in reverse registration
-order so cleanup unwinds deterministically. The shutdown timeout (default 10
-seconds, `WithShutdownTimeout`) bounds two phases separately. First the HTTP
+order so cleanup unwinds deterministically. The shutdown timeout
+(`GOMBIT_SHUTDOWN_TIMEOUT`, default 10 seconds; `WithShutdownTimeout` in code)
+bounds two phases separately. First the HTTP
 drain: if `http.Server.Shutdown` hits the timeout while handlers are still in
 flight, Gombit calls `server.Close()` so remaining connections are dropped and
 `Run`/`RunContext` can return. Then the stop hooks, which receive a fresh
 context bounded by their own timeout, so a drain that used up its budget never
 hands them an already-expired one. A full shutdown can therefore take the drain
-delay plus up to twice the shutdown timeout; give the process manager at least
-that before it kills the process.
+delay (`GOMBIT_SHUTDOWN_DRAIN_DELAY`; `WithShutdownDrainDelay` in code) plus up
+to twice the shutdown timeout; give the process manager at least that, and a
+moment for the exit, before it kills the process. `framework.WebKillAfter`
+computes it (22s at the defaults), and the [application
+contract](app-contract.md#processes) declares it for a host. A host sees only
+the settings, not a value an `Option` sets in code, so declare in configuration
+what a host must wait for.
 
 Every return from `Run`, `RunContext` or `RunWorker` runs the stop hooks once
 and then closes the cache and job dispatcher the app opened: after a clean

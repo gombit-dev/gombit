@@ -21,6 +21,8 @@ const (
 	envHTTPAddr                = "GOMBIT_HTTP_ADDR"
 	envHTTPTrustedProxies      = "GOMBIT_HTTP_TRUSTED_PROXIES"
 	envHTTPRequestTimeout      = "GOMBIT_HTTP_REQUEST_TIMEOUT"
+	envShutdownTimeout         = "GOMBIT_SHUTDOWN_TIMEOUT"
+	envShutdownDrainDelay      = "GOMBIT_SHUTDOWN_DRAIN_DELAY"
 	envAPIPrefix               = "GOMBIT_API_PREFIX"
 	envDocsEnabled             = "GOMBIT_DOCS_ENABLED"
 	envDatabaseDriver          = "GOMBIT_DATABASE_DRIVER"
@@ -34,6 +36,10 @@ const (
 	envJobsDriver              = "GOMBIT_JOBS_DRIVER"
 	envJobsQueue               = "GOMBIT_JOBS_QUEUE"
 	envJobsNamespace           = "GOMBIT_JOBS_NAMESPACE"
+	envJobsWorkerQueues        = "GOMBIT_JOBS_WORKER_QUEUES"
+	envJobsWorkerConcurrency   = "GOMBIT_JOBS_WORKER_CONCURRENCY"
+	envJobsWorkerLease         = "GOMBIT_JOBS_WORKER_LEASE"
+	envJobsWorkerShutdown      = "GOMBIT_JOBS_WORKER_SHUTDOWN_TIMEOUT"
 	envStorageDriver           = "GOMBIT_STORAGE_DRIVER"
 	envStorageLocalRoot        = "GOMBIT_STORAGE_LOCAL_ROOT"
 	envStorageS3Endpoint       = "GOMBIT_STORAGE_S3_ENDPOINT"
@@ -137,6 +143,7 @@ type Config struct {
 	AppName     string
 	Environment Environment
 	HTTP        HTTPConfig
+	Shutdown    ShutdownConfig
 	API         APIConfig
 	Database    DatabaseConfig
 	Cache       CacheConfig
@@ -180,6 +187,37 @@ type HTTPConfig struct {
 	// GOMBIT_HTTP_REQUEST_TIMEOUT explicitly so new projects keep a per-handler
 	// deadline. A negative value is rejected by Validate.
 	RequestTimeout time.Duration
+}
+
+// ShutdownConfig is how long a stopping app gets to shut down gracefully,
+// in its web process (framework.Run) and its jobs worker. A deployment host
+// reads what the stages add up to from the application contract (HOST-1),
+// and waits that long before it kills a process.
+type ShutdownConfig struct {
+	// Timeout bounds each stage of a shutdown: the HTTP server's drain of
+	// in-flight requests, then the stop hooks (App.OnStop) with the auth
+	// service's close, which share one budget of their own. A worker's stop
+	// hooks get it too. Zero means DefaultShutdownTimeout.
+	// framework.WithShutdownTimeout overrides it in code, where a host
+	// cannot see it.
+	Timeout time.Duration
+	// DrainDelay is how long the web server keeps serving once a shutdown
+	// begins and /readyz answers 503, so a host polling it stops routing
+	// before the listener closes (HOST-2). Zero, the default, closes it at
+	// once. framework.WithShutdownDrainDelay overrides it in code, where a
+	// host cannot see it.
+	DrainDelay time.Duration
+}
+
+// DefaultShutdownTimeout is ShutdownConfig.Timeout's default.
+const DefaultShutdownTimeout = 10 * time.Second
+
+// EffectiveTimeout is Timeout, or DefaultShutdownTimeout when it is zero.
+func (s ShutdownConfig) EffectiveTimeout() time.Duration {
+	if s.Timeout == 0 {
+		return DefaultShutdownTimeout
+	}
+	return s.Timeout
 }
 
 // APIConfig contains public API configuration.
@@ -264,6 +302,14 @@ const (
 	JobsDriverRedis JobsDriver = "redis"
 )
 
+// NeedsWorker reports whether the driver's queue is worked by a separate
+// worker process (`./server worker`): only redis. The sync driver runs a job
+// when it is dispatched, and the memory driver's queue lives inside the
+// dispatching process, where no other process can reach it.
+func (d JobsDriver) NeedsWorker() bool {
+	return d == JobsDriverRedis
+}
+
 // DefaultJobsQueue is the queue a job is dispatched to unless it names one.
 const DefaultJobsQueue = "default"
 
@@ -277,6 +323,63 @@ type JobsConfig struct {
 	// Namespace prefixes every Redis key, so apps and environments sharing a
 	// Redis server do not share queues.
 	Namespace string
+	// Worker is how the app's jobs worker runs: the defaults of its flags.
+	Worker JobsWorkerConfig
+}
+
+// JobsWorkerConfig is the jobs worker's declared settings. Each is the
+// default of a worker flag (framework.ParseWorkerFlagsFor), which overrides
+// it for one run. A deployment host starts the worker with no flags, so
+// these are what it runs with, and the application contract (HOST-1)
+// declares the stop timeout they need. A zero field means gombit's default.
+type JobsWorkerConfig struct {
+	// Queues are the queues the worker consumes, highest priority first
+	// (--queue). Empty means the default queue, Queue.
+	Queues []string
+	// Concurrency is how many jobs it runs at once (--concurrency). Zero
+	// means DefaultJobsWorkerConcurrency.
+	Concurrency int
+	// Lease is how long a reserved job is held, renewed while it runs
+	// (--lease). Zero means DefaultJobsWorkerLease.
+	Lease time.Duration
+	// ShutdownTimeout is how long in-flight jobs get to finish once the
+	// worker is asked to stop (--shutdown-timeout). Zero means
+	// DefaultJobsWorkerShutdownTimeout.
+	ShutdownTimeout time.Duration
+}
+
+// The jobs worker's defaults (jobs.DefaultLease and
+// jobs.DefaultShutdownTimeout are these).
+const (
+	DefaultJobsWorkerConcurrency     = 1
+	DefaultJobsWorkerLease           = 5 * time.Minute
+	DefaultJobsWorkerShutdownTimeout = 30 * time.Second
+)
+
+// EffectiveConcurrency is Concurrency, or DefaultJobsWorkerConcurrency when
+// it is zero.
+func (w JobsWorkerConfig) EffectiveConcurrency() int {
+	if w.Concurrency == 0 {
+		return DefaultJobsWorkerConcurrency
+	}
+	return w.Concurrency
+}
+
+// EffectiveLease is Lease, or DefaultJobsWorkerLease when it is zero.
+func (w JobsWorkerConfig) EffectiveLease() time.Duration {
+	if w.Lease == 0 {
+		return DefaultJobsWorkerLease
+	}
+	return w.Lease
+}
+
+// EffectiveShutdownTimeout is ShutdownTimeout, or
+// DefaultJobsWorkerShutdownTimeout when it is zero.
+func (w JobsWorkerConfig) EffectiveShutdownTimeout() time.Duration {
+	if w.ShutdownTimeout == 0 {
+		return DefaultJobsWorkerShutdownTimeout
+	}
+	return w.ShutdownTimeout
 }
 
 // StorageDriver names a supported object storage driver.
@@ -631,6 +734,7 @@ func DefaultFor(env Environment) Config {
 			// GOMBIT_HTTP_REQUEST_TIMEOUT explicitly to keep today's behavior.
 			RequestTimeout: 0,
 		},
+		Shutdown: ShutdownConfig{Timeout: DefaultShutdownTimeout},
 		API: APIConfig{
 			Prefix:      "/api/v1",
 			DocsEnabled: DefaultDocsEnabled(env),
@@ -654,6 +758,11 @@ func DefaultFor(env Environment) Config {
 			Driver:    JobsDriverSync,
 			Queue:     DefaultJobsQueue,
 			Namespace: DefaultCacheNamespace("Gombit", env),
+			Worker: JobsWorkerConfig{
+				Concurrency:     DefaultJobsWorkerConcurrency,
+				Lease:           DefaultJobsWorkerLease,
+				ShutdownTimeout: DefaultJobsWorkerShutdownTimeout,
+			},
 		},
 		Storage: StorageConfig{
 			Driver:       StorageDriverLocal,
@@ -743,6 +852,8 @@ func LoadFromEnv(lookup EnvLookup) (Config, error) {
 		&cfg.HTTP.RequestTimeout,
 		&errs,
 	)
+	applyDuration(lookup, envShutdownTimeout, "Shutdown.Timeout", &cfg.Shutdown.Timeout, &errs)
+	applyDuration(lookup, envShutdownDrainDelay, "Shutdown.DrainDelay", &cfg.Shutdown.DrainDelay, &errs)
 	applyDatabaseDriver(lookup, envDatabaseDriver, &cfg.Database.Driver)
 	applyBool(lookup, envDatabaseRequired, "Database.Required", &cfg.Database.Required, &errs)
 	applyString(lookup, envDatabaseDSN, &cfg.Database.DSN)
@@ -777,6 +888,10 @@ func LoadFromEnv(lookup EnvLookup) (Config, error) {
 	} else {
 		cfg.Jobs.Namespace = DefaultCacheNamespace(cfg.AppName, cfg.Environment)
 	}
+	applyStringList(lookup, envJobsWorkerQueues, &cfg.Jobs.Worker.Queues)
+	applyInt(lookup, envJobsWorkerConcurrency, "Jobs.Worker.Concurrency", &cfg.Jobs.Worker.Concurrency, &errs)
+	applyDuration(lookup, envJobsWorkerLease, "Jobs.Worker.Lease", &cfg.Jobs.Worker.Lease, &errs)
+	applyDuration(lookup, envJobsWorkerShutdown, "Jobs.Worker.ShutdownTimeout", &cfg.Jobs.Worker.ShutdownTimeout, &errs)
 	applyStorageDriver(lookup, envStorageDriver, &cfg.Storage.Driver)
 	applyString(lookup, envStorageLocalRoot, &cfg.Storage.Local.Root)
 	applyString(lookup, envStorageS3Endpoint, &cfg.Storage.S3.Endpoint)
@@ -871,6 +986,8 @@ func (c Config) Validate() error {
 		})
 	}
 
+	validateShutdownConfig(&errs, c.Shutdown)
+
 	unsafeProxy := false
 	for _, proxy := range c.HTTP.TrustedProxies {
 		if strings.TrimSpace(proxy) == "" {
@@ -933,6 +1050,12 @@ func (c Config) Validate() error {
 	}
 
 	return nil
+}
+
+// RequiresRedis reports whether the app needs a Redis server: its cache or
+// its job queue is on the redis driver.
+func (c Config) RequiresRedis() bool {
+	return c.Cache.Driver == CacheDriverRedis || c.Jobs.Driver == JobsDriverRedis
 }
 
 // ValidateDatabase returns explicit field errors for invalid database settings.
@@ -1403,6 +1526,63 @@ func validateJobsConfig(errs *FieldErrors, cfg JobsConfig) {
 			Env:     envJobsNamespace,
 			Value:   cfg.Namespace,
 			Message: "must not be empty",
+		})
+	}
+	validateJobsWorkerConfig(errs, cfg.Worker)
+}
+
+func validateJobsWorkerConfig(errs *FieldErrors, cfg JobsWorkerConfig) {
+	for _, queue := range cfg.Queues {
+		if !ValidJobName(queue) {
+			*errs = append(*errs, FieldError{
+				Field:   "Jobs.Worker.Queues",
+				Env:     envJobsWorkerQueues,
+				Value:   queue,
+				Message: "must be 1-128 characters of a-z, 0-9, _ . : -, starting with a letter or digit",
+			})
+		}
+	}
+	if cfg.Concurrency < 0 {
+		*errs = append(*errs, FieldError{
+			Field:   "Jobs.Worker.Concurrency",
+			Env:     envJobsWorkerConcurrency,
+			Value:   strconv.Itoa(cfg.Concurrency),
+			Message: "must be greater than or equal to zero",
+		})
+	}
+	if cfg.Lease < 0 {
+		*errs = append(*errs, FieldError{
+			Field:   "Jobs.Worker.Lease",
+			Env:     envJobsWorkerLease,
+			Value:   cfg.Lease.String(),
+			Message: "must be greater than or equal to zero",
+		})
+	}
+	if cfg.ShutdownTimeout < 0 {
+		*errs = append(*errs, FieldError{
+			Field:   "Jobs.Worker.ShutdownTimeout",
+			Env:     envJobsWorkerShutdown,
+			Value:   cfg.ShutdownTimeout.String(),
+			Message: "must be greater than or equal to zero",
+		})
+	}
+}
+
+func validateShutdownConfig(errs *FieldErrors, cfg ShutdownConfig) {
+	if cfg.Timeout < 0 {
+		*errs = append(*errs, FieldError{
+			Field:   "Shutdown.Timeout",
+			Env:     envShutdownTimeout,
+			Value:   cfg.Timeout.String(),
+			Message: "must be greater than or equal to zero",
+		})
+	}
+	if cfg.DrainDelay < 0 {
+		*errs = append(*errs, FieldError{
+			Field:   "Shutdown.DrainDelay",
+			Env:     envShutdownDrainDelay,
+			Value:   cfg.DrainDelay.String(),
+			Message: "must be greater than or equal to zero",
 		})
 	}
 }

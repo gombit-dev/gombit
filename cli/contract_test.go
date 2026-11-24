@@ -5,10 +5,14 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/gombit-dev/gombit/appcontract"
 	"github.com/gombit-dev/gombit/config"
+	"github.com/gombit-dev/gombit/framework"
 )
 
 func stubLoadConfig(t *testing.T, cfg config.Config) {
@@ -147,5 +151,90 @@ func TestRunContractAppMissingGoModFails(t *testing.T) {
 	var out bytes.Buffer
 	if err := runContractApp(&out, t.TempDir(), ""); err == nil {
 		t.Fatal("runContractApp() error = nil, want error for missing go.mod")
+	}
+}
+
+// The processes and the Redis dependency are projected from the declared
+// jobs and cache drivers (HOST-4): a worker only where the jobs driver's
+// queue is worked outside the web process, with the stop timeouts the
+// framework computes from the declared shutdown settings.
+func TestRunContractAppDeclaresProcesses(t *testing.T) {
+	type process struct {
+		Name               string   `json:"name"`
+		Args               []string `json:"args"`
+		HTTP               bool     `json:"http"`
+		StopTimeoutSeconds int      `json:"stop_timeout_seconds"`
+	}
+	web := process{Name: "web", Args: []string{}, HTTP: true, StopTimeoutSeconds: 22}
+	for name, tc := range map[string]struct {
+		jobs      config.JobsDriver
+		cache     config.CacheDriver
+		processes []process
+		redis     bool
+	}{
+		"sync jobs":   {config.JobsDriverSync, config.CacheDriverMemory, []process{web}, false},
+		"memory jobs": {config.JobsDriverMemory, config.CacheDriverMemory, []process{web}, false},
+		"redis cache": {config.JobsDriverSync, config.CacheDriverRedis, []process{web}, true},
+		"redis jobs": {config.JobsDriverRedis, config.CacheDriverMemory, []process{web,
+			{Name: "worker", Args: []string{"worker"}, StopTimeoutSeconds: 58}}, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.Jobs.Driver, cfg.Cache.Driver = tc.jobs, tc.cache
+			stubLoadConfig(t, cfg)
+			dir := writeGoMod(t, "module x\nrequire github.com/gombit-dev/gombit v0.5.0\n")
+			var out bytes.Buffer
+			if err := runContractApp(&out, dir, ""); err != nil {
+				t.Fatal(err)
+			}
+			var got struct {
+				Processes []process `json:"processes"`
+				Redis     struct {
+					Required bool `json:"required"`
+				} `json:"redis"`
+			}
+			if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got.Processes, tc.processes) {
+				t.Errorf("processes = %+v, want %+v", got.Processes, tc.processes)
+			}
+			if got.Redis.Required != tc.redis {
+				t.Errorf("redis.required = %v, want %v", got.Redis.Required, tc.redis)
+			}
+		})
+	}
+}
+
+// The stop timeouts follow the declared shutdown and worker settings, by the
+// framework's own computation.
+func TestRunContractAppStopTimeoutsFollowTheConfig(t *testing.T) {
+	cfg := config.Default()
+	cfg.Jobs.Driver = config.JobsDriverRedis
+	cfg.Shutdown = config.ShutdownConfig{Timeout: 15 * time.Second, DrainDelay: 3 * time.Second}
+	cfg.Jobs.Worker.ShutdownTimeout = 2 * time.Minute
+	stubLoadConfig(t, cfg)
+	dir := writeGoMod(t, "module x\nrequire github.com/gombit-dev/gombit v0.5.0\n")
+	var out bytes.Buffer
+	if err := runContractApp(&out, dir, ""); err != nil {
+		t.Fatal(err)
+	}
+	var got appcontract.Contract
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	// 3s + 2×15s + 2s, and 2m + 18s + 15s.
+	if len(got.Processes) != 2 || got.Processes[0].StopTimeoutSeconds != 35 || got.Processes[1].StopTimeoutSeconds != 153 {
+		t.Fatalf("processes = %+v, want the web process at 35s and the worker at 153s", got.Processes)
+	}
+	if web, worker := framework.WebKillAfter(cfg), framework.WorkerKillAfterFor(cfg, nil); web != 35*time.Second || worker != 153*time.Second {
+		t.Fatalf("framework figures %s and %s, want 35s and 153s", web, worker)
+	}
+}
+
+// The contract's worker argument is the framework's worker command.
+func TestContractWorkerCommandIsTheFrameworks(t *testing.T) {
+	if appcontract.WorkerCommand != framework.WorkerCommand {
+		t.Fatalf("appcontract.WorkerCommand = %q, framework.WorkerCommand = %q", appcontract.WorkerCommand, framework.WorkerCommand)
 	}
 }
