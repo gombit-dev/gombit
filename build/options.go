@@ -4,8 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -40,6 +42,25 @@ type Options struct {
 	Command  CommandFunc
 }
 
+// DefaultOutput is the server binary path when --out is omitted for the
+// target OS: DefaultOut, with .exe appended when building for Windows. go build
+// only appends .exe when -o names a directory, so the extension is added here.
+func DefaultOutput() string {
+	if targetOS() == "windows" {
+		return DefaultOut + ".exe"
+	}
+	return DefaultOut
+}
+
+// targetOS is the GOOS the build compiles for: the GOOS environment variable
+// when set (cross-compiling), otherwise the host OS.
+func targetOS() string {
+	if goos := strings.TrimSpace(os.Getenv("GOOS")); goos != "" {
+		return goos
+	}
+	return runtime.GOOS
+}
+
 func (opts *Options) normalize() error {
 	if opts.Stdout == nil {
 		opts.Stdout = io.Discard
@@ -62,7 +83,7 @@ func (opts *Options) normalize() error {
 	}
 	opts.WorkDir = abs
 	if strings.TrimSpace(opts.Out) == "" {
-		opts.Out = DefaultOut
+		opts.Out = DefaultOutput()
 	}
 	return nil
 }

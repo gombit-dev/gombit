@@ -301,10 +301,17 @@ The compiled binary serves Huma `/api/*`, `/openapi.json`, `/docs`,
 | Flag | Default | Role |
 | --- | --- | --- |
 | `--embed` | off (required to run this command; split deploy stays the default) | Opt in to collectstatic + `go:embed` |
-| `--out` | `bin/server` | Output binary path |
+| `--out` | `bin/server` (`bin/server.exe` when `GOOS=windows`) | Output binary path |
 | `--dry-run` | | Print the plan without writing or compiling |
 
 `frontend/package.json` is required. `--dry-run` writes nothing.
+
+On Windows the default output is `bin\server.exe`, so run it with
+`.\bin\server.exe` (PowerShell) or `bin\server.exe` (cmd.exe). This is a
+behaviour change: scripts or deploy configs that ran the old extensionless
+`bin/server` on Windows must use `bin/server.exe`, or pass `--out bin/server`
+explicitly to keep the old name. Only a `GOOS` set in the environment is
+detected; a `GOOS` set through `go env -w` leaves the default extensionless.
 
 ## `gombit make resource`
 

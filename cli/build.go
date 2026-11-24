@@ -53,7 +53,7 @@ has no index.html, so the runtime does not install SPA fallback.
 		},
 	})
 	cmd.Flags().BoolVar(&embed, "embed", false, "embed the Vite frontend into the server binary (required to run this command; split deploy stays the default)")
-	cmd.Flags().StringVar(&out, "out", build.DefaultOut, "output binary path")
+	cmd.Flags().StringVar(&out, "out", build.DefaultOutput(), "output binary path")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the plan without writing or compiling")
 	return cmd
 }

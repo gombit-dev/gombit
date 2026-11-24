@@ -107,6 +107,37 @@ func TestRunDryRunPrintsPlanWithoutWriting(t *testing.T) {
 	}
 }
 
+func TestRunDefaultOutGetsExeForWindowsTarget(t *testing.T) {
+	t.Setenv("GOOS", "windows")
+	workDir := writeBuildApp(t)
+	writeFile(t, filepath.Join(workDir, "frontend", "node_modules", ".keep"), "")
+	stdout := new(bytes.Buffer)
+	err := Run(context.Background(), Options{
+		WorkDir: workDir,
+		Embed:   true,
+		DryRun:  true,
+		Stdout:  stdout,
+		LookPath: func(file string) (string, error) {
+			switch file {
+			case "go", "npm":
+				return file, nil
+			default:
+				return "", errors.New("not found")
+			}
+		},
+		Command: func(name string, args ...string) *exec.Cmd {
+			t.Fatalf("dry-run must not exec %s %v", name, args)
+			return exec.Command("false")
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run(dry-run) error = %v", err)
+	}
+	if got := stdout.String(); !strings.Contains(got, "bin/server.exe") {
+		t.Fatalf("GOOS=windows default output did not compile to bin/server.exe:\n%s", got)
+	}
+}
+
 func TestRunEmbedCopiesAndCompilesWithStubs(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX sh stubs")
