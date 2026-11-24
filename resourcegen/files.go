@@ -486,11 +486,7 @@ func renderMinimalListTSX(ctx renderContext) string {
 	b.WriteString("        </thead>\n")
 	b.WriteString("        <tbody>\n")
 	b.WriteString("          {rows.map((row, index) => {\n")
-	b.WriteString("            const record = row as { id?: unknown")
-	for _, field := range ctx.Fields {
-		b.WriteString("; " + field.JSONName + "?: unknown")
-	}
-	b.WriteString(" };\n")
+	b.WriteString("            const record: ListRow = row;\n")
 	b.WriteString("            const values: unknown[] = [record.id")
 	for _, field := range ctx.Fields {
 		b.WriteString(", record." + field.JSONName)
@@ -621,7 +617,7 @@ func renderMinimalFormTSX(ctx renderContext) string {
 	jsonNames := jsonFieldNames(ctx.Fields)
 	nilUUIDNames := nilUUIDFieldNames(ctx.Fields)
 	if len(jsonNames) > 0 || len(nilUUIDNames) > 0 || len(formFileFields(ctx.Fields)) > 0 {
-		b.WriteString("    const body: Record<string, unknown> = { ...values };\n")
+		b.WriteString("    const body = { ...values } as Record<keyof CreateBody, unknown>;\n")
 		if len(jsonNames) > 0 {
 			b.WriteString(tsParseJSONFields(jsonNames))
 		}
@@ -710,7 +706,8 @@ func tsStringArray(names []string) string {
 	for _, n := range names {
 		quoted = append(quoted, `"`+n+`"`)
 	}
-	return "[" + strings.Join(quoted, ", ") + "]"
+	// as const keeps each key a literal, so body[key] is checked against CreateBody.
+	return "[" + strings.Join(quoted, ", ") + "] as const"
 }
 
 func tsFormType(field Field) string {
@@ -1052,11 +1049,7 @@ func renderMUIListTSX(ctx renderContext) string {
 	b.WriteString("                </TableRow>\n")
 	b.WriteString("              ) : (\n")
 	b.WriteString("                rows.map((row, index) => {\n")
-	b.WriteString("                  const record = row as { id?: unknown")
-	for _, field := range ctx.Fields {
-		b.WriteString("; " + field.JSONName + "?: unknown")
-	}
-	b.WriteString(" };\n")
+	b.WriteString("                  const record: ListRow = row;\n")
 	b.WriteString("                  const values: unknown[] = [record.id")
 	for _, field := range ctx.Fields {
 		b.WriteString(", record." + field.JSONName)
@@ -1167,7 +1160,7 @@ func renderMUIFormTSX(ctx renderContext) string {
 	b.WriteString("    setStatus(\"\");\n")
 	bodyExpr := "values as CreateBody"
 	if len(timeNames) > 0 || len(timeOfDayNames) > 0 || len(emptyNullNames) > 0 || len(jsonNames) > 0 || len(nilUUIDNames) > 0 || len(formFileFields(ctx.Fields)) > 0 {
-		b.WriteString("    const body: Record<string, unknown> = { ...values };\n")
+		b.WriteString("    const body = { ...values } as Record<keyof CreateBody, unknown>;\n")
 		if len(timeNames) > 0 {
 			// Local datetime-local -> RFC3339 UTC; empty -> null (optional field).
 			b.WriteString("    " + tsStringArray(timeNames) + ".forEach((key) => {\n")
