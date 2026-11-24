@@ -10,18 +10,30 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 ## Unreleased
 
-### Informational
+### Manual: action required
 
-- `gombit db verify` / `db lint` classify `ALTER COLUMN x DROP NOT NULL` / `DROP DEFAULT` as `alter_column` on `x`, and, alone, as `non_destructive`, instead of reporting a dropped column named `NOT` or `DEFAULT` as data loss. (`alter-column-drop-not-null-default-not-data-loss`, behavior, [#736](https://github.com/gombit-dev/gombit/issues/736))
+- **Breaking.** `gombit db verify` reclassifies two kinds of `ALTER TABLE` statement: `ALTER [COLUMN] x DROP NOT NULL` / `DROP DEFAULT`, alone, is now `alter_column`/`non_destructive` instead of a dropped column named `NOT` or `DEFAULT`; a quoted token after a bare `DROP` (`` DROP `key` ``, `DROP "index"`, `DROP "check"`, …) is now a dropped column (`data_loss`) instead of a constraint/index drop. (`alter-column-drop-not-null-default-not-data-loss`, behavior, [#736](https://github.com/gombit-dev/gombit/issues/736))
 
   The bare-`DROP <ident>` check inside an `ALTER TABLE` body ran
-  before the identifier was recognized as part of an `ALTER COLUMN`
+  before the identifier was recognized as part of an `ALTER [COLUMN]`
   clause, so `DROP NOT NULL` and `DROP DEFAULT` were read as
   dropping a column literally named `NOT` or `DEFAULT`, which
   required confirmation for a routine nullability or default
-  change. Nothing to change: a migration already applied keeps its
-  outcome; only the classification a host reads from `gombit db
-  verify --json` or a written manifest changes.
+  change. The same check also read a quoted token that happens to
+  collide with a constraint/index keyword (`` DROP `key` ``, `DROP
+  "index"`, `DROP "check"`) as that keyword rather than as the real,
+  quoted column name it is, so a genuine dropped column passed as
+  `non_destructive`.
+
+  A migration already applied keeps its outcome, but any
+  `<version>_<name>.manifest.json` a previous `gombit db verify
+  --write` wrote for a migration with either clause no longer
+  matches this classification: plain `gombit db verify` and `gombit
+  db repair` now fail on it ("classification mismatch" /
+  "safety manifest(s) no longer match their SQL"). Review the
+  affected migrations, then run `gombit db verify --write` (or
+  `gombit db repair --write-manifests`) to bring their manifests
+  back in sync.
 
 ## v0.10.0
 
