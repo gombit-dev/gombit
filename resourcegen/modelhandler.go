@@ -500,7 +500,9 @@ func (r modelResource) fileHandlers() string {
 	b.WriteString("// resolveFiles describes the row's files in its response (key, filename,\n")
 	b.WriteString("// size, type, download URL).\n")
 	b.WriteString("func (h *Handler) resolveFiles(ctx context.Context, row " + typ + ", item *" + data + ") error {\n")
-	b.WriteString("\tvar err error\n")
+	if r.hasResponseFiles() {
+		b.WriteString("\tvar err error\n")
+	}
 	for _, f := range r.fileFields() {
 		if !f.InResponse {
 			continue

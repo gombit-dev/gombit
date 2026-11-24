@@ -184,7 +184,15 @@ func buildModelResource(model any, pkg string) (modelResource, error) {
 		}
 		seenGoName[r.GoName] = r.Column
 
-		goType, err := tr.render(f.FieldType)
+		// A file field the request omits is described in the response
+		// (*filefield.FileInfo), so its Go type appears in no DTO line. Rendering
+		// it through tr would record a types import nothing uses, so it gets a
+		// scratch renderer instead.
+		renderer := tr
+		if fk := field.KindFromGo(f.FieldType, string(f.DataType)); !r.InRequest && (fk == field.File || fk == field.Image) {
+			renderer = newTypeRenderer(sch.ModelType.PkgPath(), pkg)
+		}
+		goType, err := renderer.render(f.FieldType)
 		if err != nil {
 			return modelResource{}, err
 		}
@@ -721,9 +729,10 @@ func renderModelDTOs(r modelResource) string {
 		imports = append(imports, importSpec{Alias: "huma", Path: "github.com/danielgtaylor/huma/v2"})
 	}
 	if r.hasFiles() {
-		imports = append(imports,
-			importSpec{Alias: "filefield", Path: "github.com/gombit-dev/gombit/storage/filefield"},
-			importSpec{Alias: "upload", Path: "github.com/gombit-dev/gombit/storage/upload"})
+		imports = append(imports, importSpec{Alias: "upload", Path: "github.com/gombit-dev/gombit/storage/upload"})
+	}
+	if r.hasResponseFiles() {
+		imports = append(imports, importSpec{Alias: "filefield", Path: "github.com/gombit-dev/gombit/storage/filefield"})
 	}
 	sort.Slice(imports, func(i, j int) bool { return imports[i].Path < imports[j].Path })
 
@@ -852,6 +861,17 @@ func renderImports(specs []importSpec) string {
 
 // hasFiles reports whether the resource has a storage-backed column.
 func (r modelResource) hasFiles() bool { return len(r.fileFields()) > 0 }
+
+// hasResponseFiles reports whether a response DTO describes a file (its
+// *filefield.FileInfo), the only DTO use of the filefield import.
+func (r modelResource) hasResponseFiles() bool {
+	for _, f := range r.fileFields() {
+		if f.InResponse {
+			return true
+		}
+	}
+	return false
+}
 
 // fileFields are the storage-backed columns in the response or request, in
 // schema order.
