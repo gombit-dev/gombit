@@ -15,6 +15,7 @@ shape with environment-derived `/docs` and cache namespace. Mutating
 - environment: `development`
 - HTTP address: `:8080`
 - HTTP request timeout: `0` (per-handler deadline disabled by default; opt-in via `GOMBIT_HTTP_REQUEST_TIMEOUT`)
+- shutdown: a `10s` timeout per stage, no drain delay
 - API prefix: `/api/v1`
 - interactive API docs: enabled (`/docs`)
 - database driver: `sqlite`
@@ -23,6 +24,7 @@ shape with environment-derived `/docs` and cache namespace. Mutating
 - cache namespace: `gombit:development`
 - Redis address: `127.0.0.1:6379`
 - jobs driver: `sync` (default queue `default`, namespace as for the cache)
+- jobs worker: the default queue, concurrency `1`, a `5m` lease, a `30s` shutdown timeout
 - log level: `info`
 - log sink: `stderr`
 
@@ -44,6 +46,8 @@ recognizes:
 | `GOMBIT_HTTP_ADDR` | `Config.HTTP.Addr` | `:8080` |
 | `GOMBIT_HTTP_TRUSTED_PROXIES` | `Config.HTTP.TrustedProxies` | unset |
 | `GOMBIT_HTTP_REQUEST_TIMEOUT` | `Config.HTTP.RequestTimeout` | `0` (disabled; opt-in) |
+| `GOMBIT_SHUTDOWN_TIMEOUT` | `Config.Shutdown.Timeout` | `10s` (`0`: the default) |
+| `GOMBIT_SHUTDOWN_DRAIN_DELAY` | `Config.Shutdown.DrainDelay` | `0` (none) |
 | `GOMBIT_API_PREFIX` | `Config.API.Prefix` | `/api/v1` |
 | `GOMBIT_DOCS_ENABLED` | `Config.API.DocsEnabled` | `true` (off in production when unset) |
 | `GOMBIT_DATABASE_DRIVER` | `Config.Database.Driver` | `sqlite` |
@@ -57,6 +61,10 @@ recognizes:
 | `GOMBIT_JOBS_DRIVER` | `Config.Jobs.Driver` | `sync` |
 | `GOMBIT_JOBS_QUEUE` | `Config.Jobs.Queue` | `default` |
 | `GOMBIT_JOBS_NAMESPACE` | `Config.Jobs.Namespace` | derived from app/environment |
+| `GOMBIT_JOBS_WORKER_QUEUES` | `Config.Jobs.Worker.Queues` | unset (the default queue) |
+| `GOMBIT_JOBS_WORKER_CONCURRENCY` | `Config.Jobs.Worker.Concurrency` | `1` (`0`: the default) |
+| `GOMBIT_JOBS_WORKER_LEASE` | `Config.Jobs.Worker.Lease` | `5m` (`0`: the default) |
+| `GOMBIT_JOBS_WORKER_SHUTDOWN_TIMEOUT` | `Config.Jobs.Worker.ShutdownTimeout` | `30s` (`0`: the default) |
 | `GOMBIT_STORAGE_DRIVER` | `Config.Storage.Driver` | `local` |
 | `GOMBIT_STORAGE_LOCAL_ROOT` | `Config.Storage.Local.Root` | `storage` |
 | `GOMBIT_STORAGE_S3_BUCKET` | `Config.Storage.S3.Bucket` | empty (required with `s3`) |
@@ -162,6 +170,21 @@ start an app whose document no route answers.
 `GOMBIT_JOBS_DRIVER` accepts `sync`, `memory`, and `redis`; the `redis` driver
 connects with the shared `GOMBIT_REDIS_*` settings, which are then validated
 even when the cache does not use Redis. See [jobs.md](jobs.md#drivers).
+`GOMBIT_SHUTDOWN_TIMEOUT` bounds each stage of a graceful shutdown: the HTTP
+drain of in-flight requests, then the stop hooks, which get a budget of their
+own (a worker's stop hooks too). `GOMBIT_SHUTDOWN_DRAIN_DELAY` keeps the web
+server serving for that long after `/readyz` turns 503, so a host polling it
+stops routing first ([lifecycle.md](lifecycle.md)). `framework.WithShutdownTimeout`
+and `WithShutdownDrainDelay` override them in code, but a deployment host sees
+only the settings: the [application contract](app-contract.md#processes)
+declares the stop timeout they add up to.
+`GOMBIT_JOBS_WORKER_*` are the jobs worker's settings, what it runs with for a
+flag not given; `GOMBIT_JOBS_WORKER_QUEUES` is comma-separated, highest
+priority first ([jobs.md](jobs.md#running-the-worker)). The application
+contract is projected from `.env` and the environment alone, so a field the
+app changes in the `config.Config` it passes to `framework.WithConfig` is
+invisible to a host: declare these, and the jobs and cache drivers, in
+configuration.
 `GOMBIT_STORAGE_DRIVER` accepts `local`, `memory`, and `s3` (which needs a
 bucket; set both S3 keys or neither). The local driver keeps
 files under `GOMBIT_STORAGE_LOCAL_ROOT` (relative to the working directory),
@@ -220,7 +243,9 @@ redacted by `Config.Redacted()`. Production config also rejects
 jobs driver) and trusted proxies that trust everything (above). In every
 environment, validation rejects a negative `GOMBIT_HTTP_REQUEST_TIMEOUT`,
 negative `GOMBIT_DATABASE_MAX_OPEN_CONNS` / `MAX_IDLE_CONNS` /
-`CONN_MAX_LIFETIME`, a max-idle count above a non-zero max-open count, and,
+`CONN_MAX_LIFETIME`, a max-idle count above a non-zero max-open count, a
+negative shutdown or jobs worker setting, an invalid queue name in
+`GOMBIT_JOBS_WORKER_QUEUES`, and,
 when Redis is in use, a non-positive Redis timeout. Remaining Appendix C cases (CORS) land with the
 features that introduce those fields. Do not put JWT material in `VITE_*`.
 See [auth.md](auth.md) (Bearer default) and

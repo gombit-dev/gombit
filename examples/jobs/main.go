@@ -97,7 +97,11 @@ func main() {
 		}
 		stopWorker()
 	}()
-	if err := framework.RunWorker(workerCtx, app, jobs.WorkerOptions{Concurrency: 2, PollInterval: 10 * time.Millisecond}); err != nil {
+	// An option left zero takes the app's declared worker setting
+	// (GOMBIT_JOBS_WORKER_*, read by config.Load): run this with
+	// GOMBIT_JOBS_WORKER_CONCURRENCY=2 to work two jobs at once. A deployed
+	// `./server worker` reads them the same way, with no flags.
+	if err := framework.RunWorker(workerCtx, app, jobs.WorkerOptions{PollInterval: 10 * time.Millisecond}); err != nil {
 		log.Fatal(err)
 	}
 

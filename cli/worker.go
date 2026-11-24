@@ -32,14 +32,21 @@ handlers. In production run the built binary the same way:
 
   ./server worker --queue critical,default --concurrency 8
 
+Each flag overrides one of the app's declared worker settings, the
+GOMBIT_JOBS_WORKER_* variables, for this run. A deployment host starts the
+worker with none, so declare what production needs in configuration.
+
 Flags:
   --queue             queue to consume; repeat or comma-separate for several,
-                      highest priority first (default: GOMBIT_JOBS_QUEUE)
-  --concurrency       jobs to run at once (default 1)
+                      highest priority first (default:
+                      GOMBIT_JOBS_WORKER_QUEUES, else GOMBIT_JOBS_QUEUE)
+  --concurrency       jobs to run at once (default:
+                      GOMBIT_JOBS_WORKER_CONCURRENCY, else 1)
   --lease             how long a reserved job is held; renewed while it runs
-                      (default 5m)
+                      (default: GOMBIT_JOBS_WORKER_LEASE, else 5m)
   --shutdown-timeout  how long in-flight jobs get to finish on SIGINT/SIGTERM
-                      before their context is canceled (default 30s)
+                      before their context is canceled (default:
+                      GOMBIT_JOBS_WORKER_SHUTDOWN_TIMEOUT, else 30s)
   --metrics-addr      serve /metrics (Prometheus job outcomes and queue depth)
                       and /livez on this address, e.g. :9091 (default: off)
 
@@ -62,6 +69,12 @@ lives inside the dispatching process.`,
 			if _, err := os.Stat(filepath.Join("cmd", "server")); err != nil {
 				return errors.New("gombit worker: cmd/server not found; run it from a gombit new application directory, or run your built binary with: ./server worker")
 			}
+			// A flag not given runs on the app's declared setting, so how long
+			// the worker is given to stop follows them.
+			cfg, err := LoadConfigFromDir(".")
+			if err != nil {
+				return fmt.Errorf("gombit worker: %w", err)
+			}
 			// Build, then run the server binary itself: `go run` does not catch
 			// SIGTERM, so it would die at once and leave the worker it started
 			// unsupervised. The process signaled and waited on must be the one
@@ -77,7 +90,7 @@ lives inside the dispatching process.`,
 				Path: bin,
 				Args: append([]string{framework.WorkerCommand}, args...),
 			}
-			err = runWorkerProcess(cmd.Context(), spec, stdout, stderr, framework.WorkerKillAfter(args))
+			err = runWorkerProcess(cmd.Context(), spec, stdout, stderr, framework.WorkerKillAfterFor(cfg, args))
 			if errors.Is(err, context.Canceled) {
 				return nil
 			}

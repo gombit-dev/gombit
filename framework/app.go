@@ -35,7 +35,7 @@ import (
 	"gorm.io/gorm"
 )
 
-const defaultShutdownTimeout = 10 * time.Second
+const defaultShutdownTimeout = config.DefaultShutdownTimeout
 
 // defaultHTTPServerTimeout is the connection-level read/write/idle timeout the
 // http.Server falls back to when the per-handler request timeout is disabled
@@ -92,8 +92,9 @@ type App struct {
 	// authService is the auth Service the App mounted (auth enabled); it is
 	// closed when the App stops.
 	authService        *auth.Service
-	shutdownTimeout    time.Duration
+	shutdownTimeout    time.Duration // the config's Shutdown.Timeout unless WithShutdownTimeout set it
 	shutdownDrainDelay time.Duration
+	drainDelaySet      bool // WithShutdownDrainDelay set it: zero is a delay too
 	embeddedFrontend   fs.FS
 	csrfExemptPaths    []string
 	rawBodyPaths       []string
@@ -126,9 +127,8 @@ type namedMiddleware struct {
 // New creates an application using process configuration and the default router.
 func New(options ...Option) (_ *App, err error) {
 	app := &App{
-		cfg:             config.Default(),
-		shutdownTimeout: defaultShutdownTimeout,
-		jobMetrics:      jobs.NewMetrics(),
+		cfg:        config.Default(),
+		jobMetrics: jobs.NewMetrics(),
 	}
 	// A failed New never hands the caller an *App, so nothing else can release
 	// what it opened: the cache (whose in-memory driver runs a janitor
@@ -163,8 +163,13 @@ func New(options ...Option) (_ *App, err error) {
 	if err := app.cfg.Validate(); err != nil {
 		return nil, err
 	}
-	if app.shutdownTimeout <= 0 {
-		return nil, errors.New("framework: shutdown timeout must be positive")
+	// An Option wins over the config; WebKillAfter and the application
+	// contract see only the config.
+	if app.shutdownTimeout == 0 {
+		app.shutdownTimeout = app.cfg.Shutdown.EffectiveTimeout()
+	}
+	if !app.drainDelaySet {
+		app.shutdownDrainDelay = app.cfg.Shutdown.DrainDelay
 	}
 	configureHTTPMode(app.cfg)
 	if app.logger == nil {
@@ -521,17 +526,28 @@ func WithRouter(router *gin.Engine) Option {
 // during the shutdown grace period, but a host opening a fresh probe connection
 // after shutdown begins sees connection-refused rather than a 503. Set this to
 // a host's readiness poll interval (a few seconds) for a clean drain.
+//
+// It overrides the config's Shutdown.DrainDelay (GOMBIT_SHUTDOWN_DRAIN_DELAY).
+// A deployment host can't see a delay set here: it waits what the application
+// contract declares, which is projected from the config (WebKillAfter). Set
+// the delay in configuration for a host to wait for it.
 func WithShutdownDrainDelay(delay time.Duration) Option {
 	return func(app *App) error {
 		if delay < 0 {
 			return errors.New("framework: shutdown drain delay must not be negative")
 		}
 		app.shutdownDrainDelay = delay
+		app.drainDelaySet = true
 		return nil
 	}
 }
 
-// WithShutdownTimeout sets the bounded shutdown timeout.
+// WithShutdownTimeout sets the bounded shutdown timeout: the budget of the
+// HTTP drain, and separately of the stop hooks. It overrides the config's
+// Shutdown.Timeout (GOMBIT_SHUTDOWN_TIMEOUT). A deployment host can't see a
+// timeout set here: it waits what the application contract declares, which
+// is projected from the config (WebKillAfter, WorkerKillAfterFor). Set the
+// timeout in configuration for a host to wait for it.
 func WithShutdownTimeout(timeout time.Duration) Option {
 	return func(app *App) error {
 		if timeout <= 0 {
@@ -848,6 +864,24 @@ func (a *App) shutdown() error {
 	}
 
 	return errors.Join(drainErr, a.runStopHooks())
+}
+
+// shutdownExitGrace is how much longer than its budgets a process takes to
+// stop: the close of the job queue and the cache the app opened, which
+// follows the stop hooks, the return from Run or RunWorker, and the process's
+// exit. The web process and the worker both run this tail.
+const shutdownExitGrace = 2 * time.Second
+
+// WebKillAfter is how long a process supervisor should wait, after asking the
+// web process of an app configured by cfg to stop (SIGTERM or SIGINT), before
+// it kills it: the drain delay, the shutdown timeout twice (the HTTP drain,
+// then the stop hooks), and 2s for the exit. That is 22s at gombit's
+// defaults. A supervisor that kills it sooner cuts off a request or a stop
+// hook. A timeout or a drain delay set in code (WithShutdownTimeout,
+// WithShutdownDrainDelay) is not in cfg, so it is not counted. The
+// application contract declares this for the web process.
+func WebKillAfter(cfg config.Config) time.Duration {
+	return cfg.Shutdown.DrainDelay + 2*cfg.Shutdown.EffectiveTimeout() + shutdownExitGrace
 }
 
 func (a *App) runStopHooks() error {

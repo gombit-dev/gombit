@@ -10,6 +10,58 @@ version.
 
 ## [Unreleased]
 
+### Added
+
+- [The app's processes](docs/app-contract.md#processes) in the application
+  contract (HOST-4): `gombit contract app` lists `processes`, the `web`
+  process always and the jobs `worker` when the jobs driver is `redis`, each
+  with its arguments and the `stop_timeout_seconds` it needs, and
+  `redis.required` when the cache or the job queue is on `redis`. The fields
+  are added to `contract_version` 1, so a host that doesn't read them works as
+  before. The stop timeouts are `framework.WebKillAfter` and the new
+  `framework.WorkerKillAfterFor`, computed from the settings below. They
+  describe one release's runtime, so `processes` and `redis` are listed only
+  when the projecting `gombit` is the release the app's `go.mod` requires:
+  any other leaves them out, with a note on stderr, and a host projects each
+  app with its own release (`go run ./cmd/gombit contract app`). A host
+  projects the contract with the environment it runs the app with, and
+  nothing the app sets in code is in it
+  ([#684](https://github.com/gombit-dev/gombit/issues/684)).
+
+- Shutdown and jobs worker settings, so a host can see them:
+  `GOMBIT_SHUTDOWN_TIMEOUT` (10s) and `GOMBIT_SHUTDOWN_DRAIN_DELAY` (none),
+  until now set only in code (`framework.WithShutdownTimeout` and
+  `WithShutdownDrainDelay`, which still win over them), and
+  `GOMBIT_JOBS_WORKER_QUEUES`, `GOMBIT_JOBS_WORKER_CONCURRENCY`,
+  `GOMBIT_JOBS_WORKER_LEASE` and `GOMBIT_JOBS_WORKER_SHUTDOWN_TIMEOUT`, what
+  the [worker](docs/jobs.md#running-the-worker) runs with for a flag not
+  given. `framework.RunWorker` takes them for options left zero, and
+  `gombit worker` loads the app's config and waits the stop time they add up
+  to. The defaults are unchanged; a new app's `.env.example` lists the six,
+  commented out ([#684](https://github.com/gombit-dev/gombit/issues/684)).
+
+### Changed
+
+- `framework.ParseWorkerFlags` leaves a flag not given zero, for
+  `framework.RunWorker` to take the app's declared setting
+  (`GOMBIT_JOBS_WORKER_*`), instead of filling in gombit's defaults
+  (`Concurrency` 1, `Lease` 5m, `ShutdownTimeout` 30s), which ran a worker on
+  the defaults whatever the app declared. Passed to `RunWorker` or
+  `jobs.NewWorker`, the zero options run as before at the default settings;
+  code that reads them sees zero. `--help` names each flag's setting and
+  default ([#684](https://github.com/gombit-dev/gombit/issues/684)).
+- A worker is given 2 seconds more to stop, as the web process is, for the
+  close of what the app opened and the exit, and 5 more with
+  `--metrics-addr`: `gombit worker` waits 60s at the defaults instead of 58s
+  (`framework.WorkerKillAfterFor`,
+  [#684](https://github.com/gombit-dev/gombit/issues/684)).
+
+### Deprecated
+
+- `framework.WorkerKillAfter`, which counts gombit's default settings: use
+  `framework.WorkerKillAfterFor` with the app's config
+  ([#684](https://github.com/gombit-dev/gombit/issues/684)).
+
 ### Fixed
 
 - `gombit dev --http` normalises the address it validates, instead of checking

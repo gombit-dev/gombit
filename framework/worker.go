@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -25,9 +26,12 @@ const WorkerCommand = "worker"
 
 // RunWorker runs app as a jobs worker until ctx is canceled: the start
 // hooks, a jobs.Worker over App.Jobs(), then the stop hooks. It serves no
-// HTTP. opts.Queues defaults to the dispatcher's default queue and
-// opts.Logger to the app's logger. Like RunContext, every return runs the stop
-// hooks and closes what the app opened, so the App cannot be run again.
+// HTTP. A zero option takes the app's declared worker setting
+// (config.JobsWorkerConfig: GOMBIT_JOBS_WORKER_*): opts.Queues defaults to
+// its queues, else the dispatcher's default queue, and opts.Concurrency,
+// Lease and ShutdownTimeout to its values. opts.Logger defaults to the app's
+// logger. Like RunContext, every return runs the stop hooks and closes what
+// the app opened, so the App cannot be run again.
 func RunWorker(ctx context.Context, app *App, opts jobs.WorkerOptions) error {
 	if app == nil {
 		return errors.New("framework: nil app")
@@ -36,9 +40,7 @@ func RunWorker(ctx context.Context, app *App, opts jobs.WorkerOptions) error {
 		return errors.Join(errors.New("framework: nil context"), app.runStopHooks())
 	}
 	dispatcher := app.Jobs()
-	if len(opts.Queues) == 0 {
-		opts.Queues = []string{dispatcher.DefaultQueue()}
-	}
+	opts = app.declaredWorkerOptions(opts)
 	if opts.Logger == nil {
 		opts.Logger = app.Logger()
 	}
@@ -59,6 +61,30 @@ func RunWorker(ctx context.Context, app *App, opts jobs.WorkerOptions) error {
 	}
 	runErr := worker.Run(ctx)
 	return errors.Join(runErr, app.runStopHooks())
+}
+
+// declaredWorkerOptions fills opts's zero queues, concurrency, lease and
+// shutdown timeout from the app's declared worker settings. It is the one
+// place a worker's settings default: ParseWorkerFlags leaves a flag not given
+// zero, so `./server worker` and RunWorker resolve it here alike.
+func (a *App) declaredWorkerOptions(opts jobs.WorkerOptions) jobs.WorkerOptions {
+	declared := a.Config().Jobs.Worker
+	if len(opts.Queues) == 0 {
+		opts.Queues = slices.Clone(declared.Queues)
+	}
+	if len(opts.Queues) == 0 {
+		opts.Queues = []string{a.Jobs().DefaultQueue()}
+	}
+	if opts.Concurrency == 0 {
+		opts.Concurrency = declared.EffectiveConcurrency()
+	}
+	if opts.Lease == 0 {
+		opts.Lease = declared.EffectiveLease()
+	}
+	if opts.ShutdownTimeout == 0 {
+		opts.ShutdownTimeout = declared.EffectiveShutdownTimeout()
+	}
+	return opts
 }
 
 // runWorkerCommand is Run's `worker` mode: it parses the worker flags and
@@ -86,26 +112,34 @@ func prepareWorkerCommand(app *App, args []string, stderr io.Writer) (_ jobs.Wor
 	if err != nil {
 		return jobs.WorkerOptions{}, nil, err
 	}
-	opts := flags.WorkerOptions
-	switch app.Config().Jobs.Driver {
-	case config.JobsDriverSync:
-		return opts, nil, fmt.Errorf("framework: worker: GOMBIT_JOBS_DRIVER is sync, which runs every job when it is dispatched; there is no queue to work. Set GOMBIT_JOBS_DRIVER=redis")
-	case config.JobsDriverMemory:
-		return opts, nil, fmt.Errorf("framework: worker: GOMBIT_JOBS_DRIVER is memory, whose queue lives inside the process that dispatches; a separate worker process cannot see it. Set GOMBIT_JOBS_DRIVER=redis")
+	// The options the worker runs with, so the metrics endpoint reports the
+	// queues it consumes.
+	opts := app.declaredWorkerOptions(flags.WorkerOptions)
+	// One predicate decides whether a separate worker can consume the
+	// driver's queue, the one the application contract lists a worker by.
+	if driver := app.Config().Jobs.Driver; !driver.NeedsWorker() {
+		switch driver {
+		case config.JobsDriverSync:
+			return opts, nil, fmt.Errorf("framework: worker: GOMBIT_JOBS_DRIVER is sync, which runs every job when it is dispatched; there is no queue to work. Set GOMBIT_JOBS_DRIVER=redis")
+		case config.JobsDriverMemory:
+			return opts, nil, fmt.Errorf("framework: worker: GOMBIT_JOBS_DRIVER is memory, whose queue lives inside the process that dispatches; a separate worker process cannot see it. Set GOMBIT_JOBS_DRIVER=redis")
+		default:
+			return opts, nil, fmt.Errorf("framework: worker: GOMBIT_JOBS_DRIVER is %s, whose queue no separate worker process consumes. Set GOMBIT_JOBS_DRIVER=redis", driver)
+		}
 	}
 	if flags.MetricsAddr == "" {
 		return opts, func() error { return nil }, nil
 	}
-	queues := opts.Queues
-	if len(queues) == 0 {
-		queues = []string{app.Jobs().DefaultQueue()}
-	}
-	_, stop, err := serveWorkerMetrics(flags.MetricsAddr, app, queues)
+	_, stop, err := serveWorkerMetrics(flags.MetricsAddr, app, opts.Queues)
 	if err != nil {
 		return opts, nil, err
 	}
 	return opts, stop, nil
 }
+
+// workerMetricsShutdownTimeout bounds the stop of a worker's --metrics-addr
+// endpoint, after the worker and its stop hooks.
+const workerMetricsShutdownTimeout = 5 * time.Second
 
 // serveWorkerMetrics serves a worker process's /metrics (its job outcomes,
 // then each queue's depth, read at scrape time) and /livez on addr, until the
@@ -163,7 +197,7 @@ func serveWorkerMetrics(addr string, app *App, queues []string) (bound string, s
 		}
 	}()
 	return listener.Addr().String(), func() error {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), workerMetricsShutdownTimeout)
 		defer cancel()
 		return server.Shutdown(ctx)
 	}, nil
@@ -180,7 +214,11 @@ type WorkerFlags struct {
 
 // ParseWorkerFlags parses the worker flags `gombit worker` and `./server
 // worker` share: --queue (repeatable or comma-separated, in priority order),
-// --concurrency, --lease, --shutdown-timeout, and --metrics-addr.
+// --concurrency, --lease, --shutdown-timeout, and --metrics-addr. A flag not
+// given is left zero, and RunWorker takes the app's declared setting for it
+// (GOMBIT_JOBS_WORKER_*), else gombit's default: a flag overrides its setting
+// for one run. A flag given must be valid: --concurrency at least 1, --lease
+// and --shutdown-timeout positive.
 func ParseWorkerFlags(args []string, output io.Writer) (WorkerFlags, error) {
 	fs := flag.NewFlagSet(WorkerCommand, flag.ContinueOnError)
 	if output == nil {
@@ -188,10 +226,10 @@ func ParseWorkerFlags(args []string, output io.Writer) (WorkerFlags, error) {
 	}
 	fs.SetOutput(output)
 	var queues queueList
-	fs.Var(&queues, "queue", "queue to consume; repeat or comma-separate for several, highest priority first (default: GOMBIT_JOBS_QUEUE)")
-	concurrency := fs.Int("concurrency", 1, "jobs to run at once")
-	lease := fs.Duration("lease", jobs.DefaultLease, "how long a reserved job is held; renewed while it runs")
-	shutdown := fs.Duration("shutdown-timeout", jobs.DefaultShutdownTimeout, "how long in-flight jobs get to finish on shutdown")
+	fs.Var(&queues, "queue", "queue to consume; repeat or comma-separate for several, highest priority first (default: GOMBIT_JOBS_WORKER_QUEUES, else GOMBIT_JOBS_QUEUE)")
+	concurrency := fs.Int("concurrency", 0, "jobs to run at once (default: GOMBIT_JOBS_WORKER_CONCURRENCY, else 1)")
+	lease := fs.Duration("lease", 0, "how long a reserved job is held; renewed while it runs (default: GOMBIT_JOBS_WORKER_LEASE, else 5m)")
+	shutdown := fs.Duration("shutdown-timeout", 0, "how long in-flight jobs get to finish on shutdown (default: GOMBIT_JOBS_WORKER_SHUTDOWN_TIMEOUT, else 30s)")
 	metricsAddr := fs.String("metrics-addr", "", "serve /metrics and /livez on this address (e.g. :9091); off by default")
 	fs.Usage = func() {
 		_, _ = fmt.Fprintf(output, "Usage: %s worker [flags]\n\nRun this app's background-job worker.\n\n", os.Args[0])
@@ -203,10 +241,12 @@ func ParseWorkerFlags(args []string, output io.Writer) (WorkerFlags, error) {
 	if fs.NArg() > 0 {
 		return WorkerFlags{}, fmt.Errorf("framework: worker: unexpected argument %q", fs.Arg(0))
 	}
-	if *concurrency < 1 {
+	given := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
+	if given["concurrency"] && *concurrency < 1 {
 		return WorkerFlags{}, fmt.Errorf("framework: worker: --concurrency must be at least 1, got %d", *concurrency)
 	}
-	if *lease <= 0 || *shutdown <= 0 {
+	if (given["lease"] && *lease <= 0) || (given["shutdown-timeout"] && *shutdown <= 0) {
 		return WorkerFlags{}, errors.New("framework: worker: --lease and --shutdown-timeout must be positive")
 	}
 	return WorkerFlags{
@@ -238,24 +278,49 @@ func (q *queueList) Set(value string) error {
 	return nil
 }
 
-// workerShutdownGrace is how much longer than the worker's own shutdown
-// timeout a supervisor must wait before killing it, the sum of what follows
-// SIGTERM besides that timeout:
+// workerQueueGrace is the part of a worker's stop that is neither its own
+// shutdown timeout nor its stop hooks:
 //
 //   - a reserve already on the wire, and the release of what it returns
 //     (2 × jobs.QueueCallTimeout), before the shutdown timeout starts;
 //   - jobs.ShutdownGrace, for jobs canceled at the timeout to return and be
-//     acknowledged or released;
-//   - the app's stop hooks, which run with the default shutdown timeout.
-const workerShutdownGrace = 2*jobs.QueueCallTimeout + jobs.ShutdownGrace + defaultShutdownTimeout
+//     acknowledged or released.
+const workerQueueGrace = 2*jobs.QueueCallTimeout + jobs.ShutdownGrace
 
-// WorkerKillAfter is how long a process supervisor should wait after asking a
-// worker started with args to stop before killing it: its shutdown timeout
-// plus workerShutdownGrace (28s).
-func WorkerKillAfter(args []string) time.Duration {
-	opts, err := ParseWorkerFlags(args, io.Discard)
-	if err != nil || opts.ShutdownTimeout <= 0 {
-		return jobs.DefaultShutdownTimeout + workerShutdownGrace
+// WorkerKillAfterFor is how long a process supervisor should wait, after
+// asking a worker of an app configured by cfg and started with args to stop,
+// before it kills it:
+//
+//   - the worker's shutdown timeout (its --shutdown-timeout, else cfg's
+//     Jobs.Worker.ShutdownTimeout);
+//   - 18s for the queue calls and the canceled jobs to settle;
+//   - cfg's Shutdown.Timeout for the stop hooks;
+//   - 5s for the --metrics-addr endpoint to stop, when args serve one;
+//   - 2s for the exit, as for the web process (WebKillAfter).
+//
+// That is 60s at gombit's defaults with no flags. A worker killed sooner can
+// lose a job's ack or release, and the job then waits out its lease. Args it
+// can't parse count as none. The application contract declares this for a
+// worker started with no flags.
+func WorkerKillAfterFor(cfg config.Config, args []string) time.Duration {
+	shutdown := cfg.Jobs.Worker.EffectiveShutdownTimeout()
+	var metrics time.Duration
+	if flags, err := ParseWorkerFlags(args, io.Discard); err == nil {
+		if flags.ShutdownTimeout > 0 {
+			shutdown = flags.ShutdownTimeout
+		}
+		if flags.MetricsAddr != "" {
+			metrics = workerMetricsShutdownTimeout
+		}
 	}
-	return opts.ShutdownTimeout + workerShutdownGrace
+	return shutdown + workerQueueGrace + cfg.Shutdown.EffectiveTimeout() + metrics + shutdownExitGrace
+}
+
+// WorkerKillAfter is WorkerKillAfterFor at gombit's default configuration.
+//
+// Deprecated: since v0.11.0, use WorkerKillAfterFor with the app's config:
+// the app's declared worker and shutdown settings change the figure, and
+// WorkerKillAfter counts gombit's defaults instead.
+func WorkerKillAfter(args []string) time.Duration {
+	return WorkerKillAfterFor(config.Default(), args)
 }

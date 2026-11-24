@@ -118,6 +118,69 @@ Shape (provisional; the schema is versioned by `contract_version`):
 - **No new runtime dependency.** This is a build/CLI-time projection. It does
   not add an HTTP route and is not in OpenAPI.
 
+#### Amendment: the app's processes (HOST-4, 2026-11)
+
+Version 1 described one process, the HTTP server. An app on the `redis` jobs
+driver runs a second from the same artifact, `./server worker`, and a host had
+to guess that it exists, how to start it, and how long it needs to stop
+(gombit#684). The contract now declares them:
+
+```json
+"processes": [
+  { "name": "web",    "args": [],         "http": true,  "stop_timeout_seconds": 22 },
+  { "name": "worker", "args": ["worker"], "http": false, "stop_timeout_seconds": 60 }
+],
+"redis": { "required": true }
+```
+
+- **Additive, so `contract_version` stays 1.** A host that predates the fields
+  ignores them (JSON decoding skips unknown fields) and behaves as before; a
+  bump would have made every such host refuse every app, worker or not, for a
+  change that breaks none of them. A host that reads the fields finds them
+  absent in a contract from an older gombit, and falls back to what it did
+  before. Fields may be added within a version; only a breaking change of
+  shape bumps it.
+- **`web` always; `worker` when the declared jobs driver's queue is worked
+  outside the web process** (`config.JobsDriver.NeedsWorker`: `redis`; `sync`
+  and `memory` list `web` alone).
+- **The worker's settings are declared in typed config**, the
+  `GOMBIT_JOBS_WORKER_*` variables, which the worker runs with for a flag not
+  given. Its `args` are just `["worker"]`, so the worker a host starts reads
+  the settings the contract's stop timeout is computed from. There is no
+  `gombit.yaml` loader to declare them in.
+- **Stop timeouts are the framework's own computation:**
+  `framework.WebKillAfter` (drain delay, twice the shutdown timeout, 2s for the
+  exit) and `framework.WorkerKillAfterFor` (the worker's shutdown timeout, 18s
+  for its queue calls, the stop hooks' timeout, 2s for the exit), rounded up
+  to a second. The web shutdown timeout and drain delay became settings too
+  (`GOMBIT_SHUTDOWN_TIMEOUT`, `GOMBIT_SHUTDOWN_DRAIN_DELAY`).
+- **The processes and `redis` are bound to the app's release.** Until HOST-4
+  every field said where things are (a port, probe paths, a driver), which no
+  release changes. The stop timeouts say how long one release's shutdown
+  takes, which settings it reads, and what needs Redis, and the projecting
+  gombit computes them with its own code. So it projects them only when it is
+  the release `framework.version` names, and leaves both out otherwise, as a
+  contract that predates them does. A host runs each app's own release for the
+  projection: `go run ./cmd/gombit contract app` in a scaffolded app, or
+  `go run github.com/gombit-dev/gombit/cmd/gombit@<framework.version> contract app`.
+  Refusing instead would have failed every projection by a mismatched gombit,
+  including the fields that mean the same in every release.
+- **`redis.required`** is true when the cache or the job queue is on `redis`,
+  the way `database.required` declares the datastore. The host provides the
+  server (`GOMBIT_REDIS_*`).
+- **The contract describes the configuration it is projected with.** The
+  process environment wins over `.env`, so a host that injects configuration
+  per environment projects the contract with the environment it will start the
+  processes with. Nothing the app's code sets is seen: an `Option`
+  (`WithShutdownTimeout`, `WithShutdownDrainDelay`) or a `config.Config` field
+  changed before `WithConfig`, the jobs and cache drivers included, still wins
+  at runtime and is invisible to the projection.
+
+Rejected: a self-describing binary (`./server processes`), exact for settings
+made in code but needing the app constructed, and in the scaffold its database
+opened, before it can answer, which leaves a build/CLI-time projection behind;
+listing the worker's flags in `args`, which nothing declared would back.
+
 ### 2. Runtime health convention (HOST-2)
 
 Gombit **already** serves `GET /livez` and `GET /readyz` on raw Gin
@@ -257,4 +320,5 @@ Manifest shape (provisional; per DESIGN.md §30):
 - `framework/app.go` (`/livez`, `/readyz`, `/metrics`), `migrations/revisions.go`
 - Consumer: `gombit-cloud/docs/DESIGN.md` §9, §10, §24, §29–§31, §53, §55, §69,
   §71, §100; L8, L18, L20 (rationale only — not a source of Gombit scope)
-- Issues: HOST-0 (this ADR), HOST-1 (#282), HOST-2 (#283), HOST-3 (#284)
+- Issues: HOST-0 (this ADR), HOST-1 (#282), HOST-2 (#283), HOST-3 (#284),
+  HOST-4 (#684, the amendment to §1)

@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gombit-dev/gombit/config"
 	"github.com/gombit-dev/gombit/dev"
 	"github.com/gombit-dev/gombit/framework"
 )
@@ -90,6 +91,25 @@ func TestWorkerCommandRunsTheAppsWorker(t *testing.T) {
 	}
 	if _, err := run("--concurrency", "0"); err == nil {
 		t.Fatal("worker accepted --concurrency 0")
+	}
+	// The app's declared worker and shutdown settings set how long the
+	// worker is given to stop: a 2m shutdown timeout, 18s for the queue
+	// calls and the canceled jobs, 10s for the stop hooks, 2s for the exit.
+	cfg := config.Default()
+	cfg.Jobs.Worker.ShutdownTimeout = 2 * time.Minute
+	stubLoadConfig(t, cfg)
+	if _, err := run(); err != nil {
+		t.Fatal(err)
+	}
+	if want := 150 * time.Second; gotKill != want {
+		t.Fatalf("kill after %s with a declared 2m worker shutdown timeout, want %s", gotKill, want)
+	}
+	prevLoad := LoadConfigFromDir
+	LoadConfigFromDir = func(string) (config.Config, error) { return config.Config{}, errors.New("bad .env") }
+	_, err := run()
+	LoadConfigFromDir = prevLoad
+	if err == nil || !strings.Contains(err.Error(), "bad .env") {
+		t.Fatalf("worker with a config that fails to load = %v, want that error", err)
 	}
 	out, err := run("--help")
 	if err != nil || !strings.Contains(out, "./server worker") || !strings.Contains(out, "GOMBIT_JOBS_DRIVER=redis") {

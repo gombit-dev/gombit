@@ -655,8 +655,11 @@ gombit worker [--queue default] [--concurrency N] [--lease 5m] [--shutdown-timeo
 
 Runs the app's background-job worker from an application directory: it
 builds `./cmd/server` and runs `server worker` with the same flags, stopping
-it gracefully on Ctrl+C and exiting with its status. In production run the
-built binary: `./server worker`. It needs `GOMBIT_JOBS_DRIVER=redis`. See
+it gracefully on Ctrl+C and exiting with its status. Each flag overrides one
+of the app's declared worker settings (`GOMBIT_JOBS_WORKER_*`), and the time
+it waits for the worker to stop follows them (`framework.WorkerKillAfterFor`).
+In production run the built binary: `./server worker`. It needs
+`GOMBIT_JOBS_DRIVER=redis`. See
 [jobs.md § Running the worker](jobs.md#running-the-worker).
 
 ## `gombit jobs`
@@ -907,8 +910,14 @@ See [openapi.md](openapi.md) and [client.md](client.md).
 ## `gombit contract app`
 
 Emits the machine-readable **application contract** (HOST-1) — how a deployment
-host builds, health-checks, and migrates the app, projected from declared
-config and `go.mod`, never inferred from the source tree. Writes JSON to stdout
+host builds, health-checks, and migrates the app, and the processes it runs
+from the build with how long each needs to stop (HOST-4), projected from
+declared config and `go.mod`, never inferred from the source tree or read from
+the app's code. The process environment wins over `.env`, so a host projects
+it with the environment it will run the app with. The processes and `redis`
+are listed only when this `gombit` is the release `go.mod` requires; any other
+leaves them out with a note on stderr, so project with the app's own release
+(`go run ./cmd/gombit contract app`). Writes JSON to stdout
 or `--out`; `--dir` selects the project directory. Fails loudly when the
 framework version is missing or replaced by a local checkout. See
 [app-contract.md](app-contract.md).

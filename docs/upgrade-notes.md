@@ -30,6 +30,67 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   was read: `--http` when the flag is set, `GOMBIT_HTTP_ADDR` when
   configuration supplied it.
 
+- The application contract declares the app's processes (`web`, and the jobs `worker` on the `redis` driver) with the stop timeout each needs, and `redis.required`, within `contract_version` 1. (`app-contract-processes`, api, [#684](https://github.com/gombit-dev/gombit/issues/684))
+
+  `gombit contract app` adds `processes` and `redis` to its output. A
+  host that doesn't read them works as before; one that does finds them
+  absent in a contract from an older gombit. Each process's
+  `stop_timeout_seconds` is `framework.WebKillAfter` or
+  `framework.WorkerKillAfterFor` of the declared shutdown and worker
+  settings. They describe one release's runtime, so `processes` and
+  `redis` are listed only when the projecting `gombit` is the release
+  the app's `go.mod` requires; any other leaves them out with a note
+  on stderr. Project each app with its own release:
+  `go run ./cmd/gombit contract app`. A host that injects
+  configuration projects the contract with the environment it will
+  start the processes with; nothing the app sets in code is in it.
+
+- New settings: `GOMBIT_SHUTDOWN_TIMEOUT` and `GOMBIT_SHUTDOWN_DRAIN_DELAY`, and the jobs worker's `GOMBIT_JOBS_WORKER_QUEUES`, `GOMBIT_JOBS_WORKER_CONCURRENCY`, `GOMBIT_JOBS_WORKER_LEASE` and `GOMBIT_JOBS_WORKER_SHUTDOWN_TIMEOUT`, the defaults of its flags. (`shutdown-and-worker-settings`, config, [#684](https://github.com/gombit-dev/gombit/issues/684))
+
+  - Configuration: `GOMBIT_SHUTDOWN_TIMEOUT` is new.
+  - Configuration: `GOMBIT_SHUTDOWN_DRAIN_DELAY` is new.
+  - Configuration: `GOMBIT_JOBS_WORKER_QUEUES` is new.
+  - Configuration: `GOMBIT_JOBS_WORKER_CONCURRENCY` is new.
+  - Configuration: `GOMBIT_JOBS_WORKER_LEASE` is new.
+  - Configuration: `GOMBIT_JOBS_WORKER_SHUTDOWN_TIMEOUT` is new.
+
+  Their defaults are what the code used before (a 10s shutdown
+  timeout, no drain delay, the default queue, concurrency 1, a 5m
+  lease, a 30s worker shutdown timeout), so an app that sets none
+  behaves as it did. `framework.WithShutdownTimeout` and
+  `WithShutdownDrainDelay` still win over the shutdown settings, but a
+  host reading the application contract sees only the settings: move
+  a value a host must wait for into configuration. A worker flag still
+  wins over its setting for that run. `gombit worker` now loads the
+  app's config before it builds, so a config that fails to load stops
+  it there.
+
+- `framework.ParseWorkerFlags` leaves a flag not given zero, for `framework.RunWorker` to take the app's declared worker setting, instead of filling in gombit's defaults. (`parse-worker-flags-leaves-zero`, api, [#684](https://github.com/gombit-dev/gombit/issues/684))
+
+  It filled `Concurrency` 1, `Lease` 5m and `ShutdownTimeout` 30s, so
+  a worker started from its result ran on the defaults whatever the
+  app declared in `GOMBIT_JOBS_WORKER_*`. Passed to `RunWorker` or
+  `jobs.NewWorker`, the zero options run as before at the default
+  settings. Code that reads them sees zero for a flag not given: take
+  the declared value from `Config.Jobs.Worker` (its `Effective*`
+  methods apply gombit's defaults).
+
+- A worker is given 2s more to stop, as the web process is, and 5s more with `--metrics-addr`: `gombit worker` waits 60s at the defaults instead of 58s. (`worker-stop-exit-allowance`, behavior, [#684](https://github.com/gombit-dev/gombit/issues/684))
+
+  The worker runs the same tail as the web process after its stop
+  hooks: the close of the job queue and cache the app opened, then the
+  exit, and with `--metrics-addr` the stop of that endpoint (up to
+  5s). `framework.WorkerKillAfterFor` counts them now. A process
+  manager configured from the old figure kills a worker that uses
+  every budget during that tail: raise it by 2s (7s with
+  `--metrics-addr`).
+
+- `framework.WorkerKillAfter` is deprecated: use `framework.WorkerKillAfterFor` with the app's config. (`worker-kill-after-deprecated`, api, [#684](https://github.com/gombit-dev/gombit/issues/684))
+
+  `WorkerKillAfter` counts gombit's default worker and shutdown
+  settings, so it understates the stop time of an app that declares
+  longer ones. It keeps working.
+
 ## v0.10.0
 
 ### Manual: action required
