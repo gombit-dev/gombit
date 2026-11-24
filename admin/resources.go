@@ -670,6 +670,17 @@ func applyWrite(ctx context.Context, m *registered, inst any, body map[string]an
 			}
 			fields[name] = []string{"is set by the server and cannot be stored empty"}
 		}
+		// Every detail, update and delete path names the row by {id}, and the
+		// router matches on the decoded path: an id that contains "/" arrives
+		// as two segments, never reaches those routes, and leaves a row that
+		// can be listed but not opened, edited or deleted (issue #695). The
+		// value is refused at create so such a row cannot exist; a row stored
+		// before this check keeps needing a one-off rename.
+		if m.meta.PK != "" {
+			if _, flagged := fields[m.meta.PK]; !flagged && strings.Contains(m.pkString(inst), "/") {
+				fields[m.meta.PK] = []string{`must not contain "/" because the row is addressed by a single URL path segment`}
+			}
+		}
 	}
 	if len(fields) > 0 {
 		return contract.WithContext(ctx, contract.Validation("The request contains invalid fields.", fields))

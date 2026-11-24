@@ -56,6 +56,11 @@ version.
   (`framework.WorkerKillAfterFor`,
   [#684](https://github.com/gombit-dev/gombit/issues/684)).
 
+- The admin refuses to create a resource whose string primary key contains
+  `/`. Such a row could be created and listed, but never opened, edited or
+  deleted from the admin, because the id is a single path segment
+  ([#695](https://github.com/gombit-dev/gombit/issues/695)).
+
 ### Deprecated
 
 - `framework.WorkerKillAfter`, which counts gombit's default settings: use

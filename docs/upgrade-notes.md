@@ -10,6 +10,26 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 ## Unreleased
 
+### Manual: action required
+
+- The admin refuses to create a resource whose string primary key contains `/`; rows that already carry one need a rename. (`admin-slash-in-string-key`, behavior, [#695](https://github.com/gombit-dev/gombit/issues/695))
+
+  The admin addresses a row by the `{id}` path segment, and the router
+  matches on the decoded path. A key such as `foo/bar` therefore reached
+  the server as two segments, matched no detail, update or delete route,
+  and left a row that could be created and listed but never opened,
+  edited or deleted ([#695](https://github.com/gombit-dev/gombit/issues/695)).
+  `POST /api/v1/admin/resources/{slug}` now answers 422 with a field
+  error on the primary key instead of storing that row; nothing else in
+  the admin or the generated API changes, and apps that never create
+  such keys need no work.
+
+  Rows written outside the admin (app code, seeds, the generated API)
+  can still carry a `/` in a string primary key; they stay
+  unaddressable in the admin until renamed. Rename them before
+  upgrading (for example `UPDATE tags SET code = REPLACE(code, '/', '-')`).
+  A `+` in a key needs no special handling.
+
 ### Informational
 
 - `gombit dev --http` validates the address it hands the backend: a bare port (`8080`) reaches `GOMBIT_HTTP_ADDR` as `:8080`, and a port outside 1–65535 is refused before anything starts. (`dev-http-addr-normalised`, cli, [#513](https://github.com/gombit-dev/gombit/issues/513))
