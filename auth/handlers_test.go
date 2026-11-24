@@ -320,6 +320,64 @@ func refreshUser(t *testing.T, app *framework.App, refresh string) tokenPair {
 	return envelope.Data
 }
 
+// TestLogoutWithRotatedToken: a logout that carries the refresh token a
+// silent refresh has just rotated ends the session it rotated into (#466).
+func TestLogoutWithRotatedToken(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	app := newAuthApp(t)
+	registerUser(t, app, "rotated-logout@example.com", testPassword)
+	a := loginUser(t, app, "rotated-logout@example.com", testPassword)
+	b := refreshUser(t, app, a.RefreshToken)
+	rec := postJSON(t, app, "/api/v1/auth/logout", `{"refresh_token":"`+a.RefreshToken+`"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("logout with the rotated token = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	if me := getMe(t, app, b.AccessToken); me != http.StatusUnauthorized {
+		t.Fatalf("GET /me with the session the token rotated into = %d, want 401", me)
+	}
+	rec = postJSON(t, app, "/api/v1/auth/refresh", `{"refresh_token":"`+b.RefreshToken+`"}`)
+	assertError(t, rec, http.StatusUnauthorized, "authentication")
+
+	// The session's id finds its head however many rotations on: past the
+	// bound a walk along the chain had, the logout still ends it (AUTH-11).
+	defer auth.SetMaxChainHops(1)()
+	c := loginUser(t, app, "rotated-logout@example.com", testPassword)
+	d := refreshUser(t, app, refreshUser(t, app, c.RefreshToken).RefreshToken)
+	rec = postJSON(t, app, "/api/v1/auth/logout", `{"refresh_token":"`+c.RefreshToken+`"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("logout with a token two rotations behind = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	if me := getMe(t, app, d.AccessToken); me != http.StatusUnauthorized {
+		t.Fatalf("GET /me after the logout = %d, want 401", me)
+	}
+}
+
+// TestBearerSchemeIsCaseInsensitive: a valid access token authenticates
+// whatever the case of its Authorization scheme (RFC 9110 §11.1), as clients,
+// proxies and gateways send `bearer` too (#464).
+func TestBearerSchemeIsCaseInsensitive(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	app := newAuthApp(t)
+	registerUser(t, app, "scheme@example.com", testPassword)
+	pair := loginUser(t, app, "scheme@example.com", testPassword)
+	for _, scheme := range []string{"Bearer", "bearer", "BEARER"} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/me", nil)
+		req.Header.Set("Authorization", scheme+" "+pair.AccessToken)
+		app.Router().ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Errorf("GET /me with scheme %q = %d, want 200; body: %s", scheme, rec.Code, rec.Body.String())
+		}
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/me", nil)
+	req.Header.Set("Authorization", "Basic "+pair.AccessToken)
+	app.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("GET /me with scheme Basic = %d, want 401", rec.Code)
+	}
+}
+
 func getMe(t *testing.T, app *framework.App, access string) int {
 	t.Helper()
 	rec := httptest.NewRecorder()

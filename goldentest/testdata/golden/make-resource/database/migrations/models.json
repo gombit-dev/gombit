@@ -18,6 +18,10 @@
     },
     {
       "import_path": "github.com/gombit-dev/gombit/auth",
+      "type_name": "IdentityLink"
+    },
+    {
+      "import_path": "github.com/gombit-dev/gombit/auth",
       "type_name": "OneTimeToken"
     },
     {
@@ -26,7 +30,15 @@
     },
     {
       "import_path": "github.com/gombit-dev/gombit/auth",
+      "type_name": "RecoveryCode"
+    },
+    {
+      "import_path": "github.com/gombit-dev/gombit/auth",
       "type_name": "RefreshToken"
+    },
+    {
+      "import_path": "github.com/gombit-dev/gombit/auth",
+      "type_name": "TOTPFactor"
     },
     {
       "import_path": "github.com/gombit-dev/gombit/auth",

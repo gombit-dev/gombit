@@ -24,8 +24,10 @@ const (
 // exchanges HttpOnly session cookies instead, plus GET /auth/csrf. The two
 // modes are mutually exclusive per app — see docs/auth-cookie.md for the
 // cookie/CSRF threat model. Both modes mount email verification (AUTH-1)
-// and password reset (AUTH-2); opts configure the Service the routes use
-// (WithMailer, WithLogger, WithAuditor).
+// and password reset (AUTH-2), and, with WithIdentityProviders, the
+// external identity routes under /auth/external (AUTH-10); opts configure
+// the Service the routes use (WithMailer, WithLogger, WithAuditor,
+// WithIdentityProviders).
 //
 // Mount returns the Service the routes use, built from cfg (so the routes
 // and the Service share one configuration), and the caller owns it: the
@@ -48,6 +50,7 @@ func Mount(api huma.API, db *gorm.DB, cfg config.Config, opts ...Option) (*Servi
 	if prefix == "" {
 		prefix = "/api/v1"
 	}
+	svc.apiPrefix = prefix
 
 	huma.Register(api, withRequestInfo(huma.Operation{
 		OperationID: "register",
@@ -114,6 +117,8 @@ func mountBearerRoutes(api huma.API, svc *Service, prefix string) {
 	registerPasswordChangeRoutes(api, svc, prefix, bearerSecurityName, svc.requireBearer())
 	registerEmailChangeRoutes(api, svc, prefix, bearerSecurityName, svc.requireBearer())
 	registerAccountStateRoutes(api, svc, prefix, bearerSecurityName, svc.requireBearer())
+	registerMFARoutes(api, svc, prefix, bearerSecurityName, svc.requireBearer())
+	registerExternalRoutes(api, svc, prefix, bearerSecurityName, svc.requireBearer())
 }
 
 func mountCookieRoutes(api huma.API, svc *Service, prefix string) {
@@ -171,6 +176,8 @@ func mountCookieRoutes(api huma.API, svc *Service, prefix string) {
 	registerPasswordChangeRoutes(api, svc, prefix, cookieSecurityName, svc.requireCookieSession())
 	registerEmailChangeRoutes(api, svc, prefix, cookieSecurityName, svc.requireCookieSession())
 	registerAccountStateRoutes(api, svc, prefix, cookieSecurityName, svc.requireCookieSession())
+	registerMFARoutes(api, svc, prefix, cookieSecurityName, svc.requireCookieSession())
+	registerExternalRoutes(api, svc, prefix, cookieSecurityName, svc.requireCookieSession())
 }
 
 // cookieRefreshErrorResponses declares the cookie refresh's error responses.

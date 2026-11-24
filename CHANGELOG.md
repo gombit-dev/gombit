@@ -10,7 +10,179 @@ version.
 
 ## [Unreleased]
 
+### Fixed
+
+- `gombit dev --http` normalises the address it validates, instead of checking
+  one value and passing another to the backend. A bare port (`8080`) now reaches
+  `GOMBIT_HTTP_ADDR` as `:8080`, and a port outside 1–65535 (`:99999`, `:-1`,
+  `:0`) is refused before anything starts. `parseListenAddr` normalised only for
+  its own check and `childEnv` forwarded the raw flag value, so the service
+  table advertised `http://127.0.0.1:8080` while the backend died on
+  `listen tcp: address 8080: missing port in address` and `gombit dev` kept
+  running with only Vite up. The canonical form is what is kept, so `+8080`
+  cannot reach `net/url` as a port it rejects. A rewrite is reported on stderr:
+  dev only fixes the copy it hands the child, so a `.env` value of
+  `GOMBIT_HTTP_ADDR=8080` still fails outside dev
+  ([#513](https://github.com/gombit-dev/gombit/issues/513)).
+
+## [0.10.0] — 2026-11-21
+
 ### Added
+
+- A [sessions page](docs/frontend.md#sessions-page) in apps `gombit new`
+  scaffolds (AUTH-13), in both UI presets and both auth modes:
+  `/sessions`, linked from the layout, lists the signed-in user's sessions
+  with the current one marked and the device each signed in from, signs
+  out one, the others, or all of them, and returns to the login page when
+  it ends this browser's own session. An app scaffolded before has none;
+  copy `frontend/src/pages/SessionsPage.tsx`, its route and its link from
+  a new app to add it
+  ([#663](https://github.com/gombit-dev/gombit/issues/663)).
+
+- [Session device metadata](docs/auth.md#sessions) (AUTH-12): `GET
+  {prefix}/auth/sessions` shows each session's `user_agent` (the sign-in's
+  `User-Agent`, cut to 255 bytes, not parsed), `client_address` (by default
+  only its network, an IPv4 /24 or IPv6 /48;
+  `GOMBIT_AUTH_SESSION_CLIENT_ADDRESS=full` or `none`) and `location`
+  (empty unless the app names one with a `SessionLocator`,
+  `framework.WithAuthSessionLocator`; the framework does no geolocation),
+  in both auth modes. They are the sign-in's, kept by every refresh, on new
+  `refresh_tokens` columns (`user_agent`, `client_address`, `location`):
+  migrate before deploying, the same migration as the session id's below
+  ([#662](https://github.com/gombit-dev/gombit/issues/662)).
+
+### Changed
+
+- **Breaking (schema):** a session's id is stable for its whole life
+  (`refresh_tokens.session_id`, `auth.RefreshToken.SessionID`): drawn at
+  login and carried to every rotation, it is the id `GET
+  {prefix}/auth/sessions` lists, so `DELETE {prefix}/auth/sessions/{id}`
+  with an id listed before a refresh ends the session instead of answering
+  404. Every login and refresh writes the new column: migrate before
+  deploying (`gombit db makemigrations`, `gombit db migrate`). Existing rows
+  need no backfill: a session from before the upgrade keeps its listed id,
+  which its next refresh stores. A logout, and the signing out of other
+  sessions a password change or MFA enrollment does, find the session's
+  current token by that id in one read, so a logout with a token any number
+  of rotations behind ends its session; along rows written without the id
+  (before the upgrade, or by an older binary during a rolling deploy) they
+  follow the chain, and only there the 1000-rotation limit (a 500)
+  applies. The audit trail's `session` targets name the stable id
+  ([#661](https://github.com/gombit-dev/gombit/issues/661)).
+
+- The framework requires newer dependencies; Go's minimal version selection
+  moves an app's build to them with the framework upgrade: the AWS SDK for
+  Go v2 (the S3 storage driver) at `github.com/aws/aws-sdk-go-v2` v1.48.0,
+  `/credentials` v1.21.0 and `github.com/aws/smithy-go` v1.28.9;
+  `github.com/jackc/pgx/v5` v5.13.0 (the PostgreSQL driver);
+  `github.com/pb33f/libopenapi-validator` v0.16.3; and `golang.org/x/mod`
+  v0.43.0 and `golang.org/x/term` v0.48.0
+  ([#669](https://github.com/gombit-dev/gombit/pull/669),
+  [#670](https://github.com/gombit-dev/gombit/pull/670),
+  [#671](https://github.com/gombit-dev/gombit/pull/671),
+  [#672](https://github.com/gombit-dev/gombit/pull/672),
+  [#673](https://github.com/gombit-dev/gombit/pull/673)).
+
+### Fixed
+
+- The OpenAPI description of `DELETE {prefix}/auth/sessions/{id}`
+  (`auth-revoke-session`) no longer says a listed id goes stale when its
+  session refreshes; it has not since stable session ids
+  ([#661](https://github.com/gombit-dev/gombit/issues/661)): a 404 means
+  the session has ended.
+
+- `gombit generate` (and `--check`, and `gombit upgrade contract`)
+  regenerates a resource whose model lost, renamed or retyped a field, whose
+  `*.gen.go` were deleted or left with merge-conflict markers, or whose
+  `*.gen.go` call a framework API an upgrade changed (as v0.8.0's
+  `database.Search`, whose upgrade note says to run `gombit generate`, which
+  could not run). The loader compiles the resource package, and the stale
+  `*.gen.go` (or a `hooks.go` using their types) no longer built, so it
+  failed with a Go compile error, `--check` reported that instead of drift,
+  and only hand-editing the generated files got out. When the package does
+  not build as it is, the loader now runs again with the model's files and
+  the hand-written files they use (an enum type of the package) only, the
+  others set aside as `make resource --force` does, and says so: the package
+  may still need fixing by hand once the `*.gen.go` are current
+  ([#467](https://github.com/gombit-dev/gombit/issues/467)).
+- On Windows, the local storage driver's `Open` and `Stat` of an object
+  that a concurrent `Delete` is removing report `storage.ErrNotFound`
+  instead of an "Access is denied" error. The open could reach the file just
+  as its POSIX-semantics delete completed, which Windows reports as
+  `ERROR_ACCESS_DENIED` with `STATUS_FILE_DELETED`; only
+  `STATUS_DELETE_PENDING` was mapped to not-found
+  ([#639](https://github.com/gombit-dev/gombit/pull/639)).
+- `gombit new` puts every framework model in the bootstrap migration and
+  `database/migrations/models.json`, taking them from the framework's own
+  list. v0.9.0 left out the five auth models it added (`auth.OneTimeToken`,
+  `AuditEvent`, `TOTPFactor`, `RecoveryCode`, `IdentityLink`), whose tables
+  the scaffolded `AutoMigrate` creates at startup, outside Atlas's history.
+  A new app then failed `gombit db check`. The tutorial's next step,
+  `gombit make resource` and `gombit db migrate`, failed because that
+  migration created the tables again (`table auth_one_time_tokens already
+  exists` on SQLite). An app created by `gombit new` v0.9.0 needs a one-time
+  edit of that migration; the upgrade notes
+  (`scaffold-registers-every-framework-model`) give it
+  ([#675](https://github.com/gombit-dev/gombit/pull/675)).
+- `gombit db check` skips its model-registry layer when
+  `internal/platform/database.go` calls no `AutoMigrate` method (as in an
+  app whose schema comes from its migrations), instead of failing with "no
+  AutoMigrate call"; `gombit db makemigrations --forget-model` no longer
+  fails there either. A file that does not parse is still an error
+  ([#675](https://github.com/gombit-dev/gombit/pull/675)).
+
+## [0.9.0] — 2026-11-16
+
+### Added
+
+- [External identity providers](docs/auth.md#external-identity-providers)
+  (AUTH-10), in both auth modes: sign in with an OpenID Connect or OAuth2
+  provider through adapters behind `auth.IdentityProvider`, registered with
+  `framework.WithAuthIdentityProviders`. No provider ships in core.
+  `auth/oidc` is an optional adapter for any OIDC provider: discovery,
+  PKCE, ID token verified. The framework owns the rest:
+  - the state, nonce and PKCE verifier, in an encrypted single-flow cookie;
+  - the identity links (`auth_identity_links`);
+  - signup, linking and the session.
+
+  With a provider, `{prefix}/auth/external/*` is mounted: `/login`,
+  `/link`, `/callback`, Bearer mode's `/exchange`, and `/identities`. An
+  unlinked identity makes an account only when the provider verified its
+  email and no account has it. An existing account's owner links an
+  identity explicitly, signed in, with the current password; nothing is
+  linked by email. Bearer mode's one-time `gombit_code` exchanges only
+  from the browser that ran the flow (a sealed `gombit_external_code`
+  cookie), and ending the account's sessions voids codes not yet
+  exchanged. A password reset that ends the sessions also removes the
+  links. Accounts with MFA, and disabled ones, do not sign in externally. An account a sign-in
+  made has no password (`User.HasUsablePassword`) until a reset gives it
+  one. Audited (`auth.identity.*`, external `auth.login.*`).
+  **Schema:** the table `auth_identity_links`, read only with a provider.
+  **Dependencies:** `go-oidc/v3`, `go-jose/v4` and `x/oauth2`, linked only
+  by `auth/oidc`.
+
+- [Multi-factor authentication](docs/auth.md#multi-factor-authentication)
+  (AUTH-9), in both auth modes. A user enrolls a TOTP authenticator
+  (`POST /auth/mfa/totp` with the current password, then
+  `/auth/mfa/totp/confirm` with a code; RFC 6238) and gets ten single-use
+  recovery codes; from then on `POST /auth/login` needs `mfa_code` (a 422
+  on `mfa_code` without it, after the right password only). A code works
+  once (no replay, even concurrently); wrong codes are throttled per
+  account (`MFAPerUser`) on top of the login throttles. Recovery codes are
+  replaced with `/auth/mfa/recovery-codes` and MFA is turned off with
+  `/auth/mfa/disable` (both take the password and a code), and reset by an
+  operator with `auth.users.manage` (`POST /auth/users/{id}/mfa/reset`,
+  which also ends the user's sessions). Confirming an enrollment ends the
+  user's other sessions. The admin's and a new app's login pages ask for the
+  code. `MFAPerUser` stays on with `GOMBIT_AUTH_THROTTLE_DISABLED`. Secrets
+  are encrypted and codes hashed under keys from `GOMBIT_AUTH_MFA_KEY` (or
+  the JWT secret). **Breaking (Go API):** `auth.Service.Authenticate` /
+  `Login` refuse an MFA account without a code (`ErrMFARequired`, a new
+  client error); `AuthenticateMFA` / `LoginMFA` take it. Audited
+  (`auth.mfa.*`). **Breaking (schema):** two tables,
+  `auth_totp_factors` and `auth_recovery_codes`, which logins read: migrate
+  before running this release. **Breaking (api):** the framework registers
+  the MFA routes and schema names.
 
 - [Account state](docs/auth.md#account-state) (AUTH-6), in both auth
   modes. An account is active or disabled (`User.DisabledAt`). Disabling it
@@ -184,6 +356,64 @@ version.
   ([#331](https://github.com/gombit-dev/gombit/issues/331)).
 
 ### Fixed
+
+- A logout with a refresh token that has already rotated (a silent refresh
+  in flight as the user signs out, or a client still holding the previous
+  token) ends the session it rotated into, instead of answering `200` and
+  revoking nothing while the session lived on until it expired.
+  `auth.Service.RevokeRefresh` follows the token's successors to the
+  session's current token, and takes the user's lock as rotation does, so a
+  logout that races a refresh of the same token now ends the session either
+  way (a limitation `docs/auth.md` listed). The `auth.logout` audit event
+  names the session it ended, and records `"via":"rotated"` when an old
+  token ended it. A rotated token past its own expiry ends nothing, as it
+  refreshes nothing, and answers 200 like an unknown one. A token 1000 or
+  more rotations behind its session's current token (a short access TTL
+  gets there within the refresh TTL), or whose chain cannot be followed,
+  answers 500 and ends nothing; revoke the session instead
+  ([#466](https://github.com/gombit-dev/gombit/issues/466)).
+
+- `config.Validate` and `auth.NewService` refuse an `Auth.BcryptCost`
+  outside bcrypt's range (`config.CheckBcryptCost`): it must be `0` (bcrypt's default) or between 4
+  and 31. A cost of 1 to 3 was accepted and silently hashed at bcrypt's
+  default, 10, and a cost of 32 or more was accepted and then failed every
+  registration and `createsuperuser` with `500` (and left the unknown-email
+  login timing unequalised); now the app does not start until the cost is
+  valid
+  ([#465](https://github.com/gombit-dev/gombit/issues/465)).
+
+- A Bearer request whose `Authorization` scheme is not spelled exactly
+  `Bearer` (`bearer <token>`, `BEARER <token>`, as some clients, proxies and
+  gateways send it) is authenticated instead of refused with `401` "missing
+  bearer token": the scheme is case-insensitive, as RFC 9110 defines it
+  ([#464](https://github.com/gombit-dev/gombit/issues/464)).
+
+- `types.Date` keeps its calendar day whatever time zone the database
+  driver converts times to, except, with `parseTime=true`, a day a MySQL
+  `loc` skipped whole (below). With a location west of UTC, a date was
+  read back (SQLite `_loc`) or already stored (MySQL `loc`) as the day
+  before, and every read-modify-write moved it one more day; with a MySQL
+  `loc` whose offset from UTC on that date is not zero, an equality or
+  `IN` condition comparing a date column with a `types.Date`
+  (`Where("day = ?", d)`) found no row, and a range (`BETWEEN`, `>=`, `<`)
+  was off by a day at its ends. GORM now binds a date as `YYYY-MM-DD` text
+  on MySQL (SQLite and PostgreSQL keep the UTC midnight they have always
+  stored), and `Scan` reads the day the driver meant. On MySQL with a
+  `loc` whose offset from UTC on the compared date is not zero, a
+  `types.Date` compared with a column that is not DATE (DATETIME,
+  TIMESTAMP or text) is now the `YYYY-MM-DD` text, midnight, where it was
+  UTC midnight converted to `loc`; for TIMESTAMP, MySQL reads it in the
+  session's `time_zone`. Pass `d.Time()` to keep the old comparison. The
+  admin's reads and edits of a date field had the same shift and are fixed
+  with it. With `parseTime=true` (as the DSN `gombit new` writes) and a
+  MySQL `loc` that skipped a whole calendar day, such as Pacific/Apia on
+  2011-12-30, go-sql-driver/mysql returns that day as the same time as the
+  day before, so it reads as the day before, as it did before this
+  release, and saving a row read so stores the day before. It is stored
+  right when written; with `parseTime=false` the driver returns the text,
+  and that day reads back right. Dates already stored a day early stay as
+  they are (see the upgrade notes); PostgreSQL was not affected
+  ([#478](https://github.com/gombit-dev/gombit/issues/478)).
 
 - `auth.EnsurePermission` and `auth.EnsureGroup` no longer fail with
   "duplicated key not allowed" when several callers ensure the same new
@@ -442,6 +672,21 @@ version.
   and `/café` are accepted
   ([#501](https://github.com/gombit-dev/gombit/issues/501)).
 
+- `gombit db reset` on SQLite drops every user table and view, including one
+  whose name starts with `sqlite` but not `sqlite_` (`sqlitex_cache`,
+  `sqlite3_import`): the filter's `_` was a `LIKE` wildcard, so such tables
+  survived and the re-applied migrations failed on them. Only SQLite's
+  reserved `sqlite_` objects are kept
+  ([#491](https://github.com/gombit-dev/gombit/issues/491)).
+- `gombit new --module` refuses a module path Go does not accept
+  (`golang.org/x/mod/module.CheckPath`) before writing anything, instead of
+  scaffolding an app that cannot build
+  ([#515](https://github.com/gombit-dev/gombit/issues/515)).
+- `gombit new` with stdin from `/dev/null` (or another non-terminal character
+  device) is non-interactive: without a project name it fails with the
+  documented error instead of prompting
+  ([#516](https://github.com/gombit-dev/gombit/issues/516)).
+
 ### Changed
 
 - The framework requires **Go 1.26.9** (`go 1.26.9` in `go.mod`, up from
@@ -452,20 +697,36 @@ version.
   later must be installed first. The benchmark Docker images build with Go
   1.26.9 ([#602](https://github.com/gombit-dev/gombit/pull/602)).
 
-### Fixed
-
-- `gombit dev --http` normalises the address it validates, instead of checking
-  one value and passing another to the backend. A bare port (`8080`) now reaches
-  `GOMBIT_HTTP_ADDR` as `:8080`, and a port outside 1–65535 (`:99999`, `:-1`,
-  `:0`) is refused before anything starts. `parseListenAddr` normalised only for
-  its own check and `childEnv` forwarded the raw flag value, so the service
-  table advertised `http://127.0.0.1:8080` while the backend died on
-  `listen tcp: address 8080: missing port in address` and `gombit dev` kept
-  running with only Vite up. The canonical form is what is kept, so `+8080`
-  cannot reach `net/url` as a port it rejects. A rewrite is reported on stderr:
-  dev only fixes the copy it hands the child, so a `.env` value of
-  `GOMBIT_HTTP_ADDR=8080` still fails outside dev
-  ([#513](https://github.com/gombit-dev/gombit/issues/513)).
+- The framework requires newer dependencies; Go's minimal version selection
+  moves an app's build to them with the framework upgrade:
+  `github.com/mattn/go-sqlite3` v1.14.53, `github.com/redis/go-redis/v9`
+  v9.23.0 and `ariga.io/atlas` v1.3.0 (the migration library, not the `atlas`
+  CLI); the AWS SDK for Go v2 (the S3 storage driver) at
+  `github.com/aws/aws-sdk-go-v2` v1.47.8, `/credentials` v1.20.16,
+  `/service/s3` v1.114.6 and `github.com/aws/smithy-go` v1.28.8;
+  `github.com/danielgtaylor/huma/v2` v2.40.0, `github.com/pb33f/libopenapi`
+  v0.42.4 and `github.com/pb33f/libopenapi-validator` v0.16.1; OpenTelemetry
+  for Go v1.47.0; and `golang.org/x/crypto` v0.58.0, `mod` v0.42.0, `net`
+  v0.62.0, `sys` v0.50.0, `term` v0.47.0 and `tools` v0.52.0
+  ([#537](https://github.com/gombit-dev/gombit/pull/537),
+  [#572](https://github.com/gombit-dev/gombit/pull/572),
+  [#573](https://github.com/gombit-dev/gombit/pull/573),
+  [#589](https://github.com/gombit-dev/gombit/pull/589),
+  [#607](https://github.com/gombit-dev/gombit/pull/607),
+  [#621](https://github.com/gombit-dev/gombit/pull/621),
+  [#622](https://github.com/gombit-dev/gombit/pull/622),
+  [#624](https://github.com/gombit-dev/gombit/pull/624),
+  [#625](https://github.com/gombit-dev/gombit/pull/625),
+  [#641](https://github.com/gombit-dev/gombit/pull/641),
+  [#642](https://github.com/gombit-dev/gombit/pull/642),
+  [#643](https://github.com/gombit-dev/gombit/pull/643),
+  [#644](https://github.com/gombit-dev/gombit/pull/644),
+  [#645](https://github.com/gombit-dev/gombit/pull/645),
+  [#649](https://github.com/gombit-dev/gombit/pull/649),
+  [#655](https://github.com/gombit-dev/gombit/pull/655),
+  [#656](https://github.com/gombit-dev/gombit/pull/656),
+  [#657](https://github.com/gombit-dev/gombit/pull/657),
+  [#658](https://github.com/gombit-dev/gombit/pull/658)).
 
 ## [0.8.0] — 2026-10-18
 
@@ -930,7 +1191,6 @@ version.
   `framework.New`, `contract.HumaConfigFor` logs the failure through `slog`; a
   writer on which the status cannot be confirmed to change gets the error back
   to Huma as before ([#442](https://github.com/gombit-dev/gombit/issues/442)).
-
 ## [0.7.0] — 2026-10-04
 
 ### Added
@@ -2210,7 +2470,9 @@ First tagged release. Milestones M0–M5 plus ADMIN-1 through ADMIN-3.
   multi-tenancy, i18n — are **not** included. See
   [the build plan](docs/GOMBIT_BUILD_PLAN.md).
 
-[Unreleased]: https://github.com/gombit-dev/gombit/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/gombit-dev/gombit/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/gombit-dev/gombit/compare/v0.9.0...v0.10.0
+[0.9.0]: https://github.com/gombit-dev/gombit/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/gombit-dev/gombit/compare/v0.7.1...v0.8.0
 [0.7.1]: https://github.com/gombit-dev/gombit/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/gombit-dev/gombit/compare/v0.6.1...v0.7.0

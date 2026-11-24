@@ -184,9 +184,11 @@ export function createAdminClient() {
     post: <T, M = unknown>(path: string, body?: unknown) => request<T, M>("POST", path, { body }),
     patch: <T, M = unknown>(path: string, body?: unknown) => request<T, M>("PATCH", path, { body }),
     delete: <T, M = unknown>(path: string) => request<T, M>("DELETE", path),
-    login: (email: string, password: string) =>
+    // mfaCode answers the login's multi-factor challenge (a 422 on
+    // mfa_code for an account with MFA); sent only when given.
+    login: (email: string, password: string, mfaCode?: string) =>
       request<{ id: number; email: string }>("POST", apiPath("/auth/login"), {
-        body: { email, password },
+        body: mfaCode ? { email, password, mfa_code: mfaCode } : { email, password },
       }),
     logout: () => request<{ ok: boolean }>("POST", apiPath("/auth/logout")),
     me: () => request<{ id: number; email: string }>("GET", apiPath("/me")),

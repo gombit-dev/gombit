@@ -34,6 +34,8 @@ export function AppLayout() {
             </span>
           ))}
           {" · "}
+          <Link to="/sessions">Sessions</Link>
+          {" · "}
           <button type="button" onClick={() => void onLogout()}>
             Log out
           </button>

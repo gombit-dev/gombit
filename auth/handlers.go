@@ -21,6 +21,7 @@ type credentialsBody struct {
 type loginBody struct {
 	Email    string `json:"email" minLength:"1" maxLength:"255" format:"email" example:"ada@example.com" doc:"Account email"`
 	Password string `json:"password" minLength:"1" maxLength:"72" example:"correct-horse" doc:"Account password"`
+	MFACode  string `json:"mfa_code,omitempty" maxLength:"32" example:"123456" doc:"For an account with multi-factor authentication: a code from its authenticator, or one of its recovery codes. Without it, such an account's login is a 422 on mfa_code."`
 }
 
 type refreshBody struct {
@@ -72,8 +73,8 @@ func (s *Service) register(ctx context.Context, input *registerInput) (*register
 }
 
 func (s *Service) login(ctx context.Context, input *loginInput) (*tokenOutput, error) {
-	_, pair, err := s.Login(ctx, input.Body.Email, input.Body.Password)
-	if errors.Is(err, errInvalidCredentials) || errors.Is(err, ErrTooManyAttempts) || errors.Is(err, errAccountDisabled) {
+	_, pair, err := s.LoginMFA(ctx, input.Body.Email, input.Body.Password, input.Body.MFACode)
+	if loginClientError(err) {
 		return nil, mapServiceError(ctx, err)
 	}
 	if err != nil {
@@ -140,12 +141,15 @@ func withSession(ctx huma.Context, user User, refreshID uint) huma.Context {
 	return huma.WithValue(huma.WithValue(ctx, userContextKey{}, user), sessionContextKey{}, refreshID)
 }
 
+// bearerToken returns the credentials of an Authorization header in the
+// Bearer scheme. The scheme is case-insensitive (RFC 9110 §11.1): clients,
+// proxies and gateways send `bearer` too (#464).
 func bearerToken(header string) (string, bool) {
-	const prefix = "Bearer "
-	if !strings.HasPrefix(header, prefix) {
+	scheme, token, ok := strings.Cut(header, " ")
+	if !ok || !strings.EqualFold(scheme, "Bearer") {
 		return "", false
 	}
-	token := strings.TrimSpace(strings.TrimPrefix(header, prefix))
+	token = strings.TrimSpace(token)
 	if token == "" {
 		return "", false
 	}
@@ -213,6 +217,17 @@ func declareRetryAfter(api huma.API, path string, status int, description string
 	}
 }
 
+// loginClientError reports whether a login's err is the client's, answered
+// as mapServiceError says, rather than a server failure.
+func loginClientError(err error) bool {
+	for _, target := range []error{errInvalidCredentials, ErrTooManyAttempts, errAccountDisabled, errMFARequired, errInvalidMFACode} {
+		if errors.Is(err, target) {
+			return true
+		}
+	}
+	return false
+}
+
 // invalidField is the D10 validation error for one field's one message.
 func invalidField(ctx context.Context, field, msg string) error {
 	return contract.WithContext(ctx, contract.Validation("The request contains invalid fields.", map[string][]string{field: {msg}}))
@@ -226,6 +241,16 @@ func mapServiceError(ctx context.Context, err error) error {
 	switch {
 	case errors.Is(err, errInvalidCredentials):
 		return contract.WithContext(ctx, contract.Authentication("invalid email or password"))
+	case errors.Is(err, errMFARequired):
+		return invalidField(ctx, "mfa_code", "a multi-factor code is required")
+	case errors.Is(err, errInvalidMFACode):
+		return invalidField(ctx, "mfa_code", "invalid multi-factor code")
+	case errors.Is(err, errMFAAlreadyEnabled):
+		return contract.WithContext(ctx, contract.Conflict("multi-factor authentication is already enabled"))
+	case errors.Is(err, errMFANotEnabled):
+		return contract.WithContext(ctx, contract.Conflict("multi-factor authentication is not enabled"))
+	case errors.Is(err, errNoPendingEnrollment):
+		return contract.WithContext(ctx, contract.Conflict("no multi-factor enrollment is in progress"))
 	case errors.Is(err, errAccountDisabled):
 		return contract.WithContext(ctx, contract.Authorization("account is disabled"))
 	case errors.Is(err, errInvalidRefreshToken), errors.Is(err, errRefreshReuse):

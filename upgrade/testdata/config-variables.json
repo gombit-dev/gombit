@@ -1,5 +1,5 @@
 {
-  "version": "v0.8.0",
+  "version": "v0.10.0",
   "variables": [
     {
       "name": "GOMBIT_API_PREFIX",
@@ -16,11 +16,81 @@
       "production_default": "Gombit"
     },
     {
+      "name": "GOMBIT_AUTH_EMAIL_CHANGE_URL",
+      "secret": false,
+      "default": "",
+      "test_default": "",
+      "production_default": ""
+    },
+    {
+      "name": "GOMBIT_AUTH_EMAIL_VERIFICATION_TTL",
+      "secret": false,
+      "default": "24h0m0s",
+      "test_default": "24h0m0s",
+      "production_default": "24h0m0s"
+    },
+    {
+      "name": "GOMBIT_AUTH_EMAIL_VERIFICATION_URL",
+      "secret": false,
+      "default": "",
+      "test_default": "",
+      "production_default": ""
+    },
+    {
+      "name": "GOMBIT_AUTH_MFA_KEY",
+      "secret": true,
+      "default": "",
+      "test_default": "",
+      "production_default": ""
+    },
+    {
       "name": "GOMBIT_AUTH_MODE",
       "secret": false,
       "default": "jwt",
       "test_default": "jwt",
       "production_default": "jwt"
+    },
+    {
+      "name": "GOMBIT_AUTH_PASSWORD_RESET_KEEP_SESSIONS",
+      "secret": false,
+      "default": "false",
+      "test_default": "false",
+      "production_default": "false"
+    },
+    {
+      "name": "GOMBIT_AUTH_PASSWORD_RESET_TTL",
+      "secret": false,
+      "default": "1h0m0s",
+      "test_default": "1h0m0s",
+      "production_default": "1h0m0s"
+    },
+    {
+      "name": "GOMBIT_AUTH_PASSWORD_RESET_URL",
+      "secret": false,
+      "default": "",
+      "test_default": "",
+      "production_default": ""
+    },
+    {
+      "name": "GOMBIT_AUTH_REFRESH_REUSE_GRACE",
+      "secret": false,
+      "default": "30s",
+      "test_default": "30s",
+      "production_default": "30s"
+    },
+    {
+      "name": "GOMBIT_AUTH_SESSION_CLIENT_ADDRESS",
+      "secret": false,
+      "default": "coarse",
+      "test_default": "coarse",
+      "production_default": "coarse"
+    },
+    {
+      "name": "GOMBIT_AUTH_THROTTLE_DISABLED",
+      "secret": false,
+      "default": "false",
+      "test_default": "false",
+      "production_default": "false"
     },
     {
       "name": "GOMBIT_CACHE_DRIVER",

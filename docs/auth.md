@@ -16,7 +16,7 @@ Generated apps (`gombit new --auth jwt`, the default) wire this through
 
 | Token | Where | Notes |
 | --- | --- | --- |
-| Access JWT | **Memory only** | `Authorization: Bearer`. Never `localStorage` / `sessionStorage`. Lost on refresh, which is intended. |
+| Access JWT | **Memory only** | `Authorization: Bearer <token>` (the scheme in any case, as RFC 9110 has it). Never `localStorage` / `sessionStorage`. Lost on refresh, which is intended. |
 | Refresh token | **Memory only** (JSON body) | Returned once on login/refresh. Rotated on each successful refresh. Not a cookie in v0.1. |
 
 The refresh token stays in the JSON body (not a cookie) so this mode's
@@ -35,7 +35,7 @@ credential endpoints are throttled (429 with `Retry-After`); see
 | `POST` | `/auth/register` | Public. Demo/bootstrap seed path (email + password); never sets `IsSuperuser`. |
 | `POST` | `/auth/login` | Public. Returns `access_token`, `refresh_token`, `token_type`, `expires_in`. |
 | `POST` | `/auth/refresh` | Public. Body `{ "refresh_token" }`. Issues a new pair; the old refresh token is invalid. |
-| `POST` | `/auth/logout` | Public. Body `{ "refresh_token" }`. Revokes that refresh token. Bound access JWTs then fail. |
+| `POST` | `/auth/logout` | Public. Body `{ "refresh_token" }`. Ends that token's session: the token, or, when it has already rotated (a refresh in flight as the user signs out), the session's current token. Any unexpired token the session has had ends it, however many rotations behind its current token, so an old copy is enough: the session's id leads to its current token. Bound access JWTs then fail. A token unknown, past its expiry, or of a session already ended ends nothing and answers 200 alike, so logout is idempotent and its answer reveals nothing about a token (an expired token is no credential, as for refresh). A token whose session's current token cannot be found (a restore that lost it) answers 500 and ends nothing, every time, and so does a token 1000 or more rotations behind along rows without a session id (issued before the upgrade that added session ids, or by an older binary during a rolling deploy: followed along the rotation chain instead), or whose chain is broken; revoke that session instead (`DELETE /auth/sessions/{id}` or `?scope=all`). |
 | `GET` | `/me` | Bearer access JWT. Example protected route for E2E. Missing/invalid Bearer is 401 with `WWW-Authenticate: Bearer realm="api"`; a database failure while the gate loads the token's user or session is a 500 (`internal`), not a 401: the session is still valid, and a client that keeps its tokens on a 5xx stays signed in. `auth.ErrInvalidCredentials` / `auth.ErrInvalidAccessToken` are the 401 cases of `Authenticate` / `ParseAccess`; any other error is a server failure. |
 | `GET` | `/auth/sessions` | Bearer access JWT. Lists the user's active sessions; see [Sessions](#sessions). |
 | `DELETE` | `/auth/sessions/{id}` | Bearer access JWT. Revokes one session; 404 if `id` names no active session of the user. |
@@ -49,6 +49,12 @@ credential endpoints are throttled (429 with `Retry-After`); see
 | `POST` | `/auth/email/change/confirm` | Public. Body `{ "token" }` from that link; makes the new address the account's email, verified. |
 | `POST` | `/auth/users/{id}/disable` | Bearer access JWT with the `auth.users.manage` permission. Disables the account and revokes its sessions; see [Account state](#account-state). |
 | `POST` | `/auth/users/{id}/enable` | Bearer access JWT with the `auth.users.manage` permission. Lets a disabled account sign in again. |
+| `GET` | `/auth/mfa` | Bearer access JWT. The user's multi-factor state; see [Multi-factor authentication](#multi-factor-authentication). |
+| `POST` | `/auth/mfa/totp` | Bearer access JWT. Body `{ "current_password" }`. Begins a TOTP enrollment: the secret and `otpauth://` URI. |
+| `POST` | `/auth/mfa/totp/confirm` | Bearer access JWT. Body `{ "mfa_code" }`. Enables MFA, ends the user's other sessions; returns the recovery codes, once. |
+| `POST` | `/auth/mfa/recovery-codes` | Bearer access JWT. Body `{ "current_password", "mfa_code" }`. Replaces the recovery codes. |
+| `POST` | `/auth/mfa/disable` | Bearer access JWT. Body `{ "current_password", "mfa_code" }`. Turns MFA off. |
+| `POST` | `/auth/users/{id}/mfa/reset` | Bearer access JWT with the `auth.users.manage` permission. Removes a user's MFA. |
 
 Passwords are hashed with bcrypt. Access JWTs are HS256, bound to the refresh
 row so logout, session revocation, and reuse of a rotated refresh token 401
@@ -74,9 +80,9 @@ successor already rotated again is reuse, and one logged out leaves a plain
 before it expires. The cost: if a thief rotates a stolen token first and the
 legitimate client's refresh lands within the grace, that client gets the 401
 and the thief's session is not revoked; the `auth.refresh.reuse_within_grace`
-event, naming the thief's session by its id of the moment, is the trace it
-leaves (that id changes when the session next refreshes, so act on it
-promptly), and past the grace the cascade catches it as before. An app with no clients sharing a refresh
+event, naming the thief's session by its id (the one `GET /auth/sessions`
+lists, and `DELETE /auth/sessions/{id}` ends), is the trace it leaves, and
+past the grace the cascade catches it as before. An app with no clients sharing a refresh
 token across tabs can set `GOMBIT_AUTH_REFRESH_REUSE_GRACE=0` for the strict
 rule.
 
@@ -248,8 +254,11 @@ curl -sX POST localhost:8080/api/v1/auth/password/reset \
   checked is still the user's ([Sessions](#sessions)), so it is either
   revoked by the reset or refused. The reset also voids every other reset
   token of the user, a message still being sent included: its link never
-  works. `GOMBIT_AUTH_PASSWORD_RESET_KEEP_SESSIONS=true`
-  keeps them. In cookie mode a reset that revoked the sessions also clears
+  works. A reset that revokes the sessions also removes the user's linked
+  external identities and voids their external sign-in codes not yet
+  exchanged ([External identity providers](#external-identity-providers)).
+  `GOMBIT_AUTH_PASSWORD_RESET_KEEP_SESSIONS=true`
+  keeps them all. In cookie mode a reset that revoked the sessions also clears
   the browser's session cookies.
 - **The link.** `GOMBIT_AUTH_PASSWORD_RESET_URL` is the page the message
   links to, with `{token}` where the token goes
@@ -445,6 +454,282 @@ curl -sX POST localhost:8080/api/v1/auth/users/42/enable -H "Authorization: Bear
   operator as actor; a disabled account's login with the right password is
   `auth.login.failed` (`account_disabled`).
 
+## Multi-factor authentication
+
+A user may enroll a TOTP authenticator (RFC 6238: any authenticator app;
+SHA-1, 30-second steps, 6 digits). From then on a login needs, besides the
+password, a code from it, or one of the account's recovery codes:
+
+```sh
+curl -sX POST localhost:8080/api/v1/auth/mfa/totp -H "Authorization: Bearer $ACCESS" \
+  -H 'Content-Type: application/json' -d '{"current_password":"correct-horse"}'
+# {"data":{"secret":"JBSWY3DP...","otpauth_uri":"otpauth://totp/Gombit:ada@example.com?..."}}
+curl -sX POST localhost:8080/api/v1/auth/mfa/totp/confirm -H "Authorization: Bearer $ACCESS" \
+  -H 'Content-Type: application/json' -d '{"mfa_code":"492039"}'
+# {"data":{"recovery_codes":["k7mpq-2xhvr", ...]}}
+
+curl -sX POST localhost:8080/api/v1/auth/login -H 'Content-Type: application/json' \
+  -d '{"email":"ada@example.com","password":"correct-horse"}'
+# 422 {"error":{"code":"validation_error","fields":{"mfa_code":["a multi-factor code is required"]},...}}
+curl -sX POST localhost:8080/api/v1/auth/login -H 'Content-Type: application/json' \
+  -d '{"email":"ada@example.com","password":"correct-horse","mfa_code":"118204"}'
+# {"data":{"access_token":"...","refresh_token":"...",...}}
+```
+
+- **Enrolling** takes the current password and returns the secret (to type
+  in) and an `otpauth://` URI (to show as a QR code); nothing changes for
+  the login until `POST /auth/mfa/totp/confirm` gets a code from the
+  authenticator (`mfa_code`, the field every route of the second factor
+  uses). A new enrollment replaces one pending; while MFA is on, enrolling
+  is a 409 (turn it off first).
+- **Enabling ends the other sessions.** The sessions started on the
+  password alone end when the enrollment is confirmed (the confirming one
+  stays; from Go with no session, all end), under the user's lock: refresh
+  would otherwise keep a stolen one alive for good, and enrolling is what a
+  user does who fears one was. A login in flight that found no factor
+  before the confirmation is refused at its session start (it re-checks
+  under the same lock): `mfa_code` required.
+- **The login challenge.** `POST /auth/login` (both modes) takes an
+  optional `mfa_code`. For an account with MFA, a login without it is a
+  **422 on `mfa_code`** ("a multi-factor code is required"), said only
+  after the right password, and a wrong code is a 422 ("invalid
+  multi-factor code"): the client asks for the code and logs in again with
+  the email, the password and the code. Nothing is kept between the two
+  requests. For an account without MFA, `mfa_code` is ignored. The
+  framework's login pages (the admin's and a generated app's) show a code
+  field when the 422 asks for it and send the login again with it.
+- **A code works once.** A TOTP code is accepted for its step and the one
+  either side (clock drift), and never twice: once a step's code is used,
+  no code of that step or an earlier one is accepted again, even from two
+  requests at once. A recovery code works once.
+- **Recovery codes.** Ten, shown once when MFA is enabled (and when
+  replaced with `POST /auth/mfa/recovery-codes`, which takes the current
+  password and a code, since new codes are a second factor: the old ones
+  stop working). Each signs in once in place of an
+  authenticator code, typed with or without the dash, in any case. Using
+  one is audited; `GET /auth/mfa` says how many remain.
+- **Turning it off** (`POST /auth/mfa/disable`) takes the current password
+  *and* a code (authenticator or recovery): a stolen session and password
+  alone do not remove the second factor.
+- **Reset.** `POST /auth/users/{id}/mfa/reset`, with the `auth.users.manage`
+  permission (a superuser's account by a superuser only; an account turns
+  its own off with `/auth/mfa/disable`, 409 here), removes a user's MFA,
+  for one who lost the authenticator and the codes, and ends every session
+  of the user (the lost device may hold one). `svc.ResetMFA` is the same,
+  with no permission check.
+- **Brute force.** Wrong codes are failures of the login throttles (per
+  address and email, per address, per email), and of `MFAPerUser`: 5 wrong
+  codes per account in 15 minutes, from any address (enrollment
+  confirmations and disables count too, and so does a replayed code, such
+  as a login submitted twice). `MFAPerUser` stays on with
+  `GOMBIT_AUTH_THROTTLE_DISABLED=true`: it is what bounds guessing a
+  six-digit code, which a gateway's per-address limit does not.
+- **Keys.** The TOTP secret is stored encrypted (AES-256-GCM, bound to the
+  user), and the recovery codes as HMAC-SHA256 hashes, under keys derived
+  from `GOMBIT_AUTH_MFA_KEY` (at least 32 characters), or from
+  `GOMBIT_JWT_SECRET` when it is unset. Rotating that key makes every
+  enrolled authenticator and recovery code unusable: those accounts' logins
+  answer 500, with an authenticator code and a recovery code alike, and a
+  warning naming the key change is logged (at most once a minute), until
+  their MFA is reset and they enroll again. A server error is never charged
+  to `MFAPerUser`: only a wrong code is. Set
+  `GOMBIT_AUTH_MFA_KEY` to rotate the JWT secret on its own; setting it on
+  an app whose users already enrolled is such a rotation, once.
+- **From Go.** `svc.Authenticate` / `Login` refuse an account with MFA
+  without a code (`auth.ErrMFARequired`): an app's own login cannot skip
+  the second factor by calling them. `AuthenticateMFA` / `LoginMFA` take the
+  code (`auth.ErrInvalidMFACode` for a wrong one). `BeginTOTPEnrollment`,
+  `ConfirmTOTPEnrollment`, `RegenerateRecoveryCodes`, `DisableMFA`,
+  `ResetMFA` and `MFAStatusOf` are the routes' operations. Other sensitive
+  operations (a password or email change) ask for the password, not a code.
+- **Audit.** `auth.mfa.enabled`, `auth.mfa.disabled`, `auth.mfa.reset`,
+  `auth.mfa.recovery_codes_regenerated`, `auth.mfa.recovery_code_used`,
+  `auth.mfa.failed` (a wrong password or code in an MFA operation), and
+  `auth.login.failed` with `wrong_mfa_code`. No secret or code is recorded.
+
+## External identity providers
+
+Users can sign in with an account at an external identity provider (Google,
+Microsoft Entra ID, Okta, Auth0, Keycloak, GitHub, ...). Core auth ships no
+provider. A provider is an **adapter** behind `auth.IdentityProvider`, which
+has two jobs: build the provider's authorization URL, and redeem the code the
+provider sends back for an `auth.ExternalIdentity` (a stable subject, an
+email, whether the provider verified it). **The framework does everything
+else**: the state, the nonce and the PKCE pair, the mapping of identities
+to local users, signup, linking, and the session.
+
+The optional `auth/oidc` package is an adapter for any OpenID Connect
+provider. It reads the provider's discovery document, runs the authorization
+code flow with PKCE, and verifies the ID token (signature, issuer, audience,
+expiry, nonce):
+
+```go
+google, err := oidc.New(ctx, oidc.Config{
+	Name:         "google",
+	Issuer:       "https://accounts.google.com",
+	ClientID:     os.Getenv("GOOGLE_CLIENT_ID"),
+	ClientSecret: os.Getenv("GOOGLE_CLIENT_SECRET"),
+	// Registered with the provider as the redirect URI.
+	RedirectURL: "https://app.example.com/api/v1/auth/external/google/callback",
+})
+if err != nil {
+	return err
+}
+app, err := framework.New(framework.WithAuthIdentityProviders(google))
+```
+
+A plain OAuth2 provider (no ID token) needs an adapter of the app's own. It
+puts the request's state and PKCE challenge in the URL, sends the verifier
+with the token request, reads the user from the provider's API, and leaves
+`ExternalIdentity.Nonce` empty. An OIDC adapter must check the ID token's
+nonce against `ExchangeRequest.Nonce`, return it, and declare itself an
+`auth.IDTokenProvider` (`IssuesIDTokens() bool`, as `auth/oidc` does). The
+framework then refuses an identity whose nonce is missing or not the
+flow's. From an adapter that does not declare ID tokens, the framework
+refuses only a nonce that is returned and wrong: it cannot tell a plain
+OAuth2 adapter from an OIDC one that forgot the nonce.
+
+With at least one provider, both auth modes mount these routes. Without
+one, nothing is mounted and the OpenAPI document does not list them.
+
+| Route | |
+| --- | --- |
+| `GET {prefix}/auth/external` | The providers' names, for a login page |
+| `POST {prefix}/auth/external/{provider}/login` | Start a sign-in: `{"return_to":"/home"}` → `{"authorization_url": ...}` |
+| `POST {prefix}/auth/external/{provider}/link` | Signed in: start linking an identity to the account, with `current_password` |
+| `GET {prefix}/auth/external/{provider}/callback` | The redirect URI: the provider sends the browser back here |
+| `POST {prefix}/auth/external/exchange` | Bearer mode: trade the callback's `gombit_code` for tokens |
+| `GET {prefix}/auth/external/identities` | Signed in: the account's linked identities |
+| `DELETE {prefix}/auth/external/identities/{id}` | Signed in: remove one (204) |
+
+**The flow.** The client POSTs `/login` (or `/link`) and navigates the
+browser to the `authorization_url` it gets back. The response also sets
+`gombit_external`, the flow's state cookie:
+- HttpOnly and AES-GCM-encrypted under a key derived from the JWT secret;
+- scoped to `{prefix}/auth/external`;
+- valid for ten minutes;
+- `SameSite=Lax` whatever `GOMBIT_COOKIE_SAMESITE` says, because the
+  provider's redirect back is a cross-site navigation;
+- `Secure` with `GOMBIT_COOKIE_SECURE`, and always in production, in
+  either auth mode.
+
+It holds the state, the nonce, the PKCE verifier and `return_to`; one flow
+at a time per browser. The callback checks the returned state against the
+cookie and clears it. A missing, expired or foreign state is a **422 on
+`state`**: there is no flow to send the browser back to. Otherwise the
+callback has the adapter redeem the code, then **redirects (302) to
+`return_to`**:
+- **cookie mode**: a sign-in sets the session cookies;
+- **Bearer mode**: a sign-in adds `?gombit_code=...`, and sets
+  `gombit_external_code`: an HttpOnly cookie for the exchange's path only,
+  sealed like the state cookie, which binds the code to this browser. The
+  page trades the code with `POST /auth/external/exchange {"code": ...}`
+  (the browser sends the cookie) for the token pair `/auth/login`
+  returns. The code works once, within two minutes, and **only from the
+  browser that ran the flow**. A code in a URL or a log, or one an
+  attacker hands a victim's page to sign it into the attacker's account
+  (login CSRF), exchanges nothing anywhere else: a 422 on `code`. Ending
+  the account's sessions voids the codes not yet exchanged (each a
+  session about to start): signing out everywhere or the other sessions,
+  a password reset or change, a disable, enabling MFA. So a code whose
+  account was disabled or given MFA since the callback is a 422 on
+  `code`, like a used one. The session starts under the user's lock with
+  the factor re-checked, so the only 409 is the narrow race of MFA
+  enabled between the code's use and that start;
+- **a link** adds `?gombit_linked={provider}`.
+
+A refusal adds `?gombit_error=` with one of these codes:
+- `access_denied`: the user declined at the provider;
+- `provider_error`: the provider refused the code or could not be reached
+  (logged);
+- `invalid_identity`: no subject, or a foreign nonce;
+- `account_exists`, `email_unverified`, `signup_disabled`;
+- `mfa_enabled`, `account_disabled`;
+- `identity_linked_elsewhere`, `session_ended`, `login_failed`;
+- `server_error`.
+
+`return_to` must be a path on this site: no scheme or host, no `//`, no
+backslash, no fragment, and a path and query the callback can parse (it
+adds its parameter to them). The default is `/`.
+
+The provider must reach the callback on the browser's origin. If the SPA is
+served from another origin than the API (the Vite dev server), register the
+URL the browser uses (Vite proxies `/api`). In Bearer mode the SPA's
+`fetch` of `/login` and of `/exchange` must carry credentials (the default
+for a same-origin `fetch`; `credentials: "include"` across origins), so
+that the browser keeps the state cookie and sends the code's binding.
+
+**Identities and accounts.** An identity is (provider, subject):
+`auth.IdentityLink` (`auth_identity_links`) maps it to one user, and a user
+may link several. Subjects compare exactly, byte for byte: the link is keyed
+by the subject's SHA-256, so no database collation (MySQL's default ignores
+case and trailing spaces) makes two users' subjects one. On a sign-in:
+
+- **A linked identity** signs its user in. The link's email is refreshed
+  for display, and decides nothing: a provider's email can change hands,
+  its subject cannot.
+- **An identity no user linked makes an account**, its email verified, but
+  only when the provider *verified* the email (`email_unverified`
+  otherwise, and for no email). Otherwise anyone could register at a lax
+  provider with someone else's address and pre-claim the account it would
+  make.
+- **An email that is already an account's is refused**
+  (`account_exists`). The framework never links by email, since that
+  would let any provider vouching for an address take over the account
+  that has it. The account's owner signs in with their password and links
+  the identity from the account (`/link`).
+- `framework.WithoutAuthExternalSignup()` (`auth.WithoutExternalSignup`)
+  makes no accounts. An unlinked identity is `signup_disabled`, and users
+  link identities from their accounts only.
+
+An account an external sign-in made has **no password**: no password signs
+in to it (`User.HasUsablePassword` is false). A password reset gives it
+one. Until then it cannot do what asks for the current password: a
+password or email change, enrolling MFA, linking another identity.
+
+**Linking** takes the current password (throttled, wrong ones audited, as
+a password change). A link signs in for good, past every session, so a
+session alone does not add one: otherwise a stolen access token would
+become a credential that survives every revocation. An account without a
+password links nothing (409) until a password reset gives it one. The
+callback links the identity only while the session that asked is still
+active, the account enabled and without MFA. An identity linked to another
+account is `identity_linked_elsewhere`. **Unlinking** an account's only
+link is a 409 when the account has no password, since nothing could sign
+in to it again.
+
+**A password reset removes the links** when it ends the sessions (the
+default; not with `GOMBIT_AUTH_PASSWORD_RESET_KEEP_SESSIONS`): a reset is
+the recovery from a compromise, and an identity an intruder linked would
+otherwise outlive it. The user links their identities again, with the new
+password. Signing out everywhere ends sessions only: links are listed at
+`/identities` and removed there.
+
+**Refusals that hold at the session too.** A disabled account does not sign
+in (`account_disabled`). Nor does an account with multi-factor
+authentication (`mfa_enabled`), which signs in with its password and code.
+An external sign-in does not prove the second factor, and the framework
+does not take the provider's word for one. Such an account cannot start a
+link either (409). Like a password login, the session starts under the
+user's lock and re-checks both, so a disable or an enrollment that commits
+meanwhile wins.
+
+**From Go.** `svc.IdentityProviders()`, `svc.ListIdentityLinks` and
+`svc.UnlinkIdentity` (`auth.ErrLastSignInMethod`,
+`auth.ErrIdentityLinkNotFound`). The flow itself runs through the routes,
+which own the browser's state.
+
+**Audit.** These events are recorded:
+- `auth.login.succeeded` with `method: external` and the provider (in
+  Bearer mode, at the exchange: the code's binding names it);
+- `auth.login.failed` with the refusal's code as `reason`;
+- `auth.user.registered` with the provider (an account the sign-in made);
+- `auth.identity.linked`, `auth.identity.link_failed` and
+  `auth.identity.unlinked`;
+- `auth.password.reset` with `identities_unlinked`, the links it removed.
+
+No code, token, state or nonce is recorded.
+
 ## Abuse protection
 
 The credential endpoints bound how often they may be tried, in both auth
@@ -522,7 +807,8 @@ bcrypt, the token's transaction):
 - **Configuration.** `auth.WithThrottlePolicy(p)` replaces the limits (start
   from `auth.DefaultThrottlePolicy()`; a zero `Limit` turns a rule off).
   `GOMBIT_AUTH_THROTTLE_DISABLED=true` turns them all off, for an app whose
-  gateway already limits these routes.
+  gateway already limits these routes, but `MFAPerUser`, which bounds
+  guessing a multi-factor code from any number of addresses.
 - **From Go.** `Register`, `Authenticate` / `Login`, `ResetPassword`, `VerifyEmail`,
   `ConfirmEmailChange`, `ChangePassword`, `RequestEmailChange` and
   `SendEmailVerification` apply the same rules and return a
@@ -545,24 +831,78 @@ recently refreshed first:
       "id": "3f6c2a9e0b7d41c58e2f6a1d9c4b7e20",
       "last_refreshed_at": "2026-09-28T14:05:00Z",
       "expires_at": "2026-10-05T14:05:00Z",
-      "current": true
+      "current": true,
+      "user_agent": "Mozilla/5.0 (X11; Linux x86_64; rv:133.0) Gecko/20100101 Firefox/133.0",
+      "client_address": "203.0.113.0/24",
+      "location": ""
     }
   ]
 }
 ```
 
-- `id` is opaque (an HMAC of the refresh row id under the JWT secret), so the
-  API never exposes row ids, which are sequential. The access JWT's `rid`
-  claim is still the row id, and the JWT is readable by its holder, so the
-  opaque id hides row ids in the sessions API only, not from a client that
-  decodes its own token. The id **changes every time the
-  session refreshes**: list again right before revoking. Revoking an id that
-  has since refreshed returns 404 rather than silently missing.
+- `id` is the session's for its whole life: drawn at random when it signs in
+  and kept by every refresh (`refresh_tokens.session_id`), so an id listed
+  before a refresh still revokes the session, and the audit trail names one
+  session by one id. It says nothing about the refresh token rows, whose ids
+  are sequential; the access JWT's `rid` claim is still the row id, readable
+  by the token's holder. A session that signed in before the upgrade that
+  added the column keeps the id it was listed under then (an HMAC of its
+  current refresh row id under the JWT secret): its next refresh stores that
+  id. Only a refresh by a binary from before the column (an old instance in
+  a rolling deploy, or a rollback that kept the column) writes a row without
+  an id, and the session is then listed under that row's HMAC id, which it
+  keeps from there on.
 - `last_refreshed_at` is when the session last signed in or refreshed. An
   active client refreshes about once per access-token TTL, so that is its
   precision; it is not a per-request "last seen".
 - `current` marks the session that made the request, also when that
-  session refreshed while the request ran: it is then marked under its new id.
+  session refreshed while the request ran.
+- `user_agent`, `client_address` and `location` describe the device the
+  session signed in from, for a user to recognize it (AUTH-12). They are
+  the sign-in request's and refreshes do not change them, so a session
+  that signed in on a laptop at home stays "that laptop at home" wherever
+  it refreshes from. Each is empty when unknown: a session started outside
+  a request (`Service.IssueTokens` from application code, with a context
+  that did not come through the auth routes), or one that signed in before
+  the upgrade that added them.
+  - `user_agent` is the `User-Agent` header as the client sent it, cut to
+    255 bytes, as one line of valid text: invalid UTF-8 replaced, and
+    control characters (C0, DEL and C1), line and paragraph separators and
+    bidirectional formatting characters dropped. The `location` an
+    application names is stored the same way.
+    The server does not parse it: a client that wants "Firefox on Linux"
+    makes that label from it, with the parser of its choice, and keeps the
+    raw value for anything its parser does not know.
+  - `client_address` is the client address of the sign-in (gin's
+    `ClientIP`, so `GOMBIT_HTTP_TRUSTED_PROXIES` decides whether a
+    proxy's `X-Forwarded-For` counts), only as much of it as
+    `GOMBIT_AUTH_SESSION_CLIENT_ADDRESS` keeps: `coarse` (the default) its
+    network, an IPv4 `/24` or an IPv6 `/48` (`203.0.113.0/24`,
+    `2001:db8:1234::/48`), enough to tell home from an office but not to
+    single out a device; `full` the whole address; `none` nothing. An IPv4
+    address mapped into IPv6 is shown as IPv4.
+  - `location` is empty unless the application names one. The framework
+    does no geolocation. An application that wants it passes a
+    `SessionLocator` (`framework.WithAuthSessionLocator`, or
+    `auth.WithSessionLocator` on a Service it builds): a function from the
+    request's context and the client's full address, whatever
+    `GOMBIT_AUTH_SESSION_CLIENT_ADDRESS` stores, to a short label such as
+    `Lisbon, PT`, or `""` when it does not know. It runs once per sign-in,
+    in the request, before the session is written, so it should be a local
+    lookup (a GeoIP database file), not a network call. Its answer is
+    stored cut to 128 bytes.
+
+What a session stores about its device is exactly those three values, on
+each of its `refresh_tokens` rows (columns `user_agent`, `client_address`,
+`location`; the login writes them, each rotation copies them to the row it
+writes). They live as long as the rows do: nothing prunes revoked and
+expired rows yet, so today they outlive the session; the retention policy
+for `refresh_tokens` (#578) will bound them with the rows. Changing
+`GOMBIT_AUTH_SESSION_CLIENT_ADDRESS` applies to sessions that sign in after
+the change; the rows already written keep what they stored. The security
+audit trail is separate: its events record the request's full client
+address and User-Agent ([Audit trail](#audit-trail)), whatever this setting
+says.
 
 In the OpenAPI document the session schemas are named `AuthSession`,
 `DataListAuthSession`, `AuthRevokeResult`, and `DataAuthRevokeResult`, and
@@ -597,23 +937,25 @@ the same moment:
   the new tokens are revoked too (revoking the others keeps the requesting
   session, including any rotations it made since the request was
   authenticated).
-- **Revoking one** answers 404 when its session rotated first. It waits for
-  the lock, finds that the id it was given belongs to a token that has since
-  been replaced, and revokes nothing: the session is still alive under its new
-  id. The client lists again and retries, as the 404 above says. A logout of
-  the same session that lands while the revocation runs also makes it a 404
-  (the session has already ended), so a success always means the revocation
-  ended the session itself.
+- **Revoking one** covers a concurrent rotation too: it waits for the lock,
+  and the session's id, which a rotation keeps, names the token the rotation
+  wrote, so the revocation ends the session (AUTH-11). A logout of the same
+  session that commits first makes it a 404 (the session has already ended),
+  so a success always means the revocation ended the session itself; a
+  logout that comes second waits for it and ends nothing more.
 - **A revocation from a session that has ended** answers 401 and revokes
   nothing. The request's own session is checked again once the revocation
   holds the lock, so a session that another request revoked, or that
   expired, while its request waited for the lock cannot go on to revoke
   anything.
-- **Logout** (`POST /auth/logout`, `RevokeRefresh`) is **not** serialized: it
-  does not take the lock and revokes only the refresh token it is given. A
-  logout that races a refresh of the same token can therefore leave the
-  refresh's new session alive. That is a known limitation; to be sure a user
-  is signed out everywhere, revoke all their sessions.
+- **Logout** (`POST /auth/logout`, `RevokeRefresh`) takes the lock too, and
+  follows a token that has rotated to its session's current token. A logout
+  that races a refresh of the same token therefore ends the session either
+  way: if the refresh commits first, the logout revokes the token it issued;
+  if the logout does, the refresh finds its token revoked (401). The audit
+  event (`auth.logout`) names the session it ended and, when a rotated token
+  ended it, says so (`"via":"rotated"`): that token is an old copy, a sibling
+  tab's or a thief's.
 - **Login** checks the password without the lock (bcrypt is slow), then
   starts its session under it, and only if the password hash it checked is
   still the user's (`Service.Login`). Every session start makes that check:
@@ -625,6 +967,9 @@ the same moment:
   (`RevokeAllSessions`, `DELETE /auth/sessions?scope=all`), which does not
   change the password, a login that completes after it starts a new
   session: revoking all sessions ends the ones that exist at that moment.
+
+An app `gombit new` scaffolds has a page for these routes, `/sessions`
+([frontend.md](frontend.md#sessions-page)).
 
 The `auth.Service` methods `ListSessions`, `RevokeSession`, and
 `RevokeAllSessions` are exported for application code (for example, an admin
@@ -647,11 +992,13 @@ The framework records every security-sensitive operation in
 | Action | When |
 | --- | --- |
 | `auth.login.succeeded` / `auth.login.failed` | A sign-in. A failure names the account when the email is one (a wrong password, `details.reason` `wrong_password`), and no account when it is not: the attempted address is not recorded. |
-| `auth.logout` | `POST /auth/logout` ended a session. |
+| `auth.logout` | `POST /auth/logout` ended a session: the target is that session, and `"via":"rotated"` marks one an already rotated token ended. |
 | `auth.user.registered` / `auth.superuser.created` | `POST /auth/register`; `gombit createsuperuser`. |
 | `auth.user.disabled` / `auth.user.enabled` | `POST /auth/users/{id}/disable` / `/enable` (or `DisableUser` / `EnableUser`): the account's state changed. |
+| `auth.mfa.enabled` / `auth.mfa.disabled` / `auth.mfa.reset` | MFA turned on (an enrollment confirmed), off by the user, or removed by an operator. |
+| `auth.mfa.recovery_codes_regenerated` / `auth.mfa.recovery_code_used` / `auth.mfa.failed` | The recovery codes replaced; one used; an MFA operation refused a wrong password or code. |
 | `auth.refresh.reuse_detected` | A rotated-away refresh token came back past `RefreshReuseGrace`, or within it once its successor had been rotated again: every session of the user was revoked. |
-| `auth.refresh.reuse_within_grace` | A rotated-away refresh token came back within `RefreshReuseGrace` of its rotation: a 401, nothing revoked. Target type `session` names the successor's session by the id `GET /auth/sessions` showed for it at the time; that id changes when the session next refreshes (in an access TTL at most), so act on it promptly (revoke it, or revoke all); details `successor` is `live` (a sibling tab's session, or a thief's who rotated a stolen token first: the one trace of that) or `ended` (signed out before the request came). |
+| `auth.refresh.reuse_within_grace` | A rotated-away refresh token came back within `RefreshReuseGrace` of its rotation: a 401, nothing revoked. Target type `session` names the successor's session by the id `GET /auth/sessions` lists it under, which its refreshes keep, so the id revokes it (or revoke all); details `successor` is `live` (a sibling tab's session, or a thief's who rotated a stolen token first: the one trace of that) or `ended` (signed out before the request came). |
 | `auth.session.revoked` | `DELETE /auth/sessions…` (`details.scope`: `one`, `others` or `all`). |
 | `auth.email.verified` | `POST /auth/verify-email`. |
 | `auth.password.reset_requested` / `auth.password.reset` | A reset message sent to an account; a password set with its token (`details.sessions_revoked`). |
@@ -733,6 +1080,7 @@ harmless.
 | `GOMBIT_AUTH_EMAIL_VERIFICATION_TTL` | `Config.Auth.EmailVerificationTTL` | `24h` |
 | `GOMBIT_AUTH_EMAIL_VERIFICATION_URL` | `Config.Auth.EmailVerificationURL` | empty (the message carries the bare token); must contain `{token}` |
 | `GOMBIT_AUTH_THROTTLE_DISABLED` | `Config.Auth.ThrottleDisabled` | `false` (the credential endpoints are throttled; see [Abuse protection](#abuse-protection)) |
+| `GOMBIT_AUTH_MFA_KEY` | `Config.Auth.MFAKey` | empty (MFA keys derive from `GOMBIT_JWT_SECRET`); at least 32 characters when set ([MFA](#multi-factor-authentication)) |
 
 With auth on, `config.Load` / `Validate` refuse a `GOMBIT_JWT_REFRESH_TTL`
 shorter than `GOMBIT_JWT_ACCESS_TTL` (equal is fine): the refresh token's

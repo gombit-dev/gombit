@@ -60,12 +60,14 @@ curl -sS -X POST http://127.0.0.1:8080/api/v1/auth/login \
   -H 'Content-Type: application/json' \
   -d '{"email":"ada@example.com","password":"correct-horse"}' >/dev/null
 
-# list: the session making the request has "current": true
+# list: the session making the request has "current": true; each shows the
+# device it signed in from (user_agent, client_address as a /24 or /48
+# network by default, location if the app looks it up)
 SESSIONS=$(curl -sS http://127.0.0.1:8080/api/v1/auth/sessions -H "Authorization: Bearer $ACCESS")
 echo "$SESSIONS"
 OTHER=$(python3 -c 'import json,sys; print(next(s["id"] for s in json.load(sys.stdin)["data"] if not s["current"]))' <<<"$SESSIONS")
 
-# revoke one (ids change on every refresh: list again before revoking)
+# revoke one (a session keeps its id across refreshes)
 curl -sS -X DELETE "http://127.0.0.1:8080/api/v1/auth/sessions/$OTHER" \
   -H "Authorization: Bearer $ACCESS"
 
@@ -165,6 +167,52 @@ curl -sS -X POST http://127.0.0.1:8080/api/v1/auth/email/change/confirm \
 ```
 
 See [`docs/auth.md`](../../docs/auth.md#email-change).
+
+## Multi-factor authentication
+
+Enroll an authenticator app (scan the `otpauth_uri` as a QR code), confirm it
+with a code, and keep the recovery codes; from then on the login asks for a
+code:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8080/api/v1/auth/mfa/totp -H "Authorization: Bearer $ACCESS" \
+  -H 'Content-Type: application/json' -d '{"current_password":"correct-horse"}'
+curl -sS -X POST http://127.0.0.1:8080/api/v1/auth/mfa/totp/confirm -H "Authorization: Bearer $ACCESS" \
+  -H 'Content-Type: application/json' -d '{"code":"<code from the app>"}'
+
+curl -sS -X POST http://127.0.0.1:8080/api/v1/auth/login -H 'Content-Type: application/json' \
+  -d '{"email":"ada@example.com","password":"correct-horse"}'
+# 422: fields.mfa_code = ["a multi-factor code is required"]
+curl -sS -X POST http://127.0.0.1:8080/api/v1/auth/login -H 'Content-Type: application/json' \
+  -d '{"email":"ada@example.com","password":"correct-horse","mfa_code":"<code from the app>"}'
+```
+
+See [`docs/auth.md`](../../docs/auth.md#multi-factor-authentication).
+
+## External identity providers
+
+Set `OIDC_ISSUER`, `OIDC_CLIENT_ID` and `OIDC_CLIENT_SECRET` to sign in with
+an OpenID Connect provider (`auth/oidc`), registered there with the redirect
+URI `http://127.0.0.1:8080/api/v1/auth/external/oidc/callback`:
+
+```bash
+OIDC_ISSUER=https://accounts.google.com OIDC_CLIENT_ID=... OIDC_CLIENT_SECRET=... go run ./examples/auth
+
+curl -sS -c jar -X POST http://127.0.0.1:8080/api/v1/auth/external/oidc/login \
+  -H 'Content-Type: application/json' -d '{"return_to":"/"}'
+# {"data":{"authorization_url":"https://accounts.google.com/o/oauth2/v2/auth?..."}}
+```
+
+Open the URL in the browser that holds the `gombit_external` cookie (a curl
+cookie jar can't follow the provider's sign-in). The callback redirects to
+`/?gombit_code=...`. Trade the code for tokens:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8080/api/v1/auth/external/exchange \
+  -H 'Content-Type: application/json' -d '{"code":"<gombit_code>"}'
+```
+
+See [`docs/auth.md`](../../docs/auth.md#external-identity-providers).
 
 ## Account state
 

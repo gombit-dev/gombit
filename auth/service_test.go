@@ -147,6 +147,30 @@ func TestNewServiceRequiresRefreshTTLAtLeastAccessTTL(t *testing.T) {
 	}
 }
 
+// TestNewServiceRequiresBcryptCostInRange: NewService refuses a bcrypt cost
+// config validation refuses, so a config.Config built without Validate
+// cannot hash at a cost other than the one configured, or fail every new
+// hash (#465). Zero is bcrypt's default.
+func TestNewServiceRequiresBcryptCostInRange(t *testing.T) {
+	db, err := database.Open(config.DatabaseConfig{
+		Driver: config.DatabaseDriverSQLite,
+		DSN:    "file:" + filepath.Join(t.TempDir(), "auth.db") + "?cache=shared&_fk=1",
+	})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	cfg := config.DefaultFor(config.EnvironmentTest)
+	cfg.Auth.JWTSecret = "test-jwt-secret-32-bytes-minimum!"
+	for cost, ok := range map[int]bool{0: true, bcrypt.MinCost: true, bcrypt.MaxCost: true, -1: false, 3: false, 32: false} {
+		cfg.Auth.BcryptCost = cost
+		if _, err := NewService(db.DB, cfg); (err == nil) != ok {
+			t.Errorf("NewService(BcryptCost %d) error = %v, want error %v", cost, err, !ok)
+		}
+	}
+}
+
 func newTestService(t *testing.T) *Service {
 	t.Helper()
 	db, err := database.Open(config.DatabaseConfig{

@@ -120,7 +120,7 @@ func (s *Service) ChangePassword(ctx context.Context, userID uint, current, newP
 		// before any credential is written.
 		var keep []uint
 		if requester != 0 {
-			if keep, err = requesterChain(tx, user.ID, requester, now); err != nil {
+			if keep, err = requesterSession(tx, user.ID, requester, now); err != nil {
 				return err
 			}
 		}

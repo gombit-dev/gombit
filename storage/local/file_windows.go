@@ -48,8 +48,10 @@ func createFile(name string, access, mode uint32, op string) (*os.File, error) {
 // delete without POSIX semantics, by the store's fallback or by another
 // program) fails with ERROR_ACCESS_DENIED, which is indistinguishable
 // from a permission failure but for the call's NTSTATUS,
-// STATUS_DELETE_PENDING; that file is gone, so it is reported as not
-// existing.
+// STATUS_DELETE_PENDING. An open racing a POSIX-semantics delete of the
+// same file can also fail with ERROR_ACCESS_DENIED and STATUS_FILE_DELETED
+// (the open reached the file just as its delete completed). Either way that
+// file is gone, so it is reported as not existing.
 func create(name string, access, mode uint32, op string) (windows.Handle, error) {
 	p, err := windows.UTF16PtrFromString(winfile.LongPath(name))
 	if err != nil {
@@ -66,7 +68,7 @@ func create(name string, access, mode uint32, op string) (windows.Handle, error)
 	switch {
 	case err == nil:
 		return h, nil
-	case errors.Is(err, windows.ERROR_ACCESS_DENIED) && status == windows.STATUS_DELETE_PENDING:
+	case errors.Is(err, windows.ERROR_ACCESS_DENIED) && (status == windows.STATUS_DELETE_PENDING || status == windows.STATUS_FILE_DELETED):
 		err = windows.ERROR_FILE_NOT_FOUND
 	case errors.Is(err, windows.ERROR_ACCESS_DENIED):
 		err = fmt.Errorf("%w (%s)", err, status)

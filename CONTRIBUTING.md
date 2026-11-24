@@ -80,6 +80,14 @@ adding scope in a PR.
 5. Conventional commit prefixes (`feat:`, `fix:`, `docs:`, `chore:`) are
    expected in the title; nothing stricter is enforced.
 
+## Pull request policy
+
+- First-time contributors may have only one open PR at a time.
+- PRs that disregard the mandatory template may be closed without review.
+- Contributors must address outstanding review feedback before submitting
+  additional changes.
+- Passing CI is a prerequisite for review, not evidence of correctness.
+
 ## Local checks
 
 The baseline, matching CI's `lint → build → test` path:

@@ -16,8 +16,12 @@ func PlatformDBRel() string { return platformDBRel }
 
 // AutoMigrateModels returns the models registered in the app's AutoMigrate call
 // (internal/platform/database.go under workDir). ok is false when the app has no
-// such file — a non-scaffolded layout — so callers can skip AutoMigrate-based
-// checks instead of failing. It never mutates the tree.
+// such file (a non-scaffolded layout) or the file calls no AutoMigrate method
+// (as in an app whose schema comes from its migrations), so callers can skip
+// AutoMigrate-based checks instead of failing; a model the app migrates some
+// other way is not seen. A file that does not parse, or names a model whose
+// package it does not import, is an error: it may have the call. It never
+// mutates the tree.
 func AutoMigrateModels(workDir string) (models []migrations.Model, ok bool, err error) {
 	path := filepath.Join(workDir, filepath.FromSlash(platformDBRel))
 	// #nosec G304 -- application file under the caller-provided work dir
@@ -29,6 +33,9 @@ func AutoMigrateModels(workDir string) (models []migrations.Model, ok bool, err 
 		return nil, false, fmt.Errorf("resourcegen: read %s: %w", platformDBRel, err)
 	}
 	models, err = CollectAutoMigrateModels(src)
+	if errors.Is(err, errNoAutoMigrate) {
+		return nil, false, nil
+	}
 	if err != nil {
 		return nil, false, err
 	}

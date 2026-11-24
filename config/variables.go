@@ -76,6 +76,7 @@ var variables = []variable{
 	{envLogLevel, false, func(c Config) string { return string(c.Logging.Level) }},
 	{envLogSink, false, func(c Config) string { return string(c.Logging.Sink) }},
 	{envJWTSecret, true, func(c Config) string { return c.Auth.JWTSecret }},
+	{envAuthMFAKey, true, func(c Config) string { return c.Auth.MFAKey }},
 	{envJWTAccessTTL, false, func(c Config) string { return duration(c.Auth.AccessTokenTTL) }},
 	{envJWTRefreshTTL, false, func(c Config) string { return duration(c.Auth.RefreshTokenTTL) }},
 	{envAuthMode, false, func(c Config) string { return string(c.Auth.Mode) }},
@@ -88,6 +89,7 @@ var variables = []variable{
 	{envPasswordResetURL, false, func(c Config) string { return c.Auth.PasswordResetURL }},
 	{envPasswordResetKeep, false, func(c Config) string { return strconv.FormatBool(c.Auth.PasswordResetKeepSessions) }},
 	{envRefreshReuseGrace, false, func(c Config) string { return duration(c.Auth.RefreshReuseGrace) }},
+	{envSessionClientAddress, false, func(c Config) string { return string(c.Auth.EffectiveSessionClientAddress()) }},
 	{envAuthThrottleDisabled, false, func(c Config) string { return strconv.FormatBool(c.Auth.ThrottleDisabled) }},
 	{envSecuritySanitizeInput, false, func(c Config) string { return strconv.FormatBool(c.Security.SanitizeInput) }},
 }

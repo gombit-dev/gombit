@@ -32,7 +32,11 @@ func SessionIDOf(ctx context.Context, s *Service, access string) (string, error)
 	if err != nil {
 		return "", err
 	}
-	return s.sessionID(refreshID), nil
+	var row RefreshToken
+	if err := s.db.WithContext(ctx).First(&row, refreshID).Error; err != nil {
+		return "", err
+	}
+	return s.sessionIDOf(row), nil
 }
 
 // ErrRefreshReuse is the error RotateRefresh returns for the reuse of an
@@ -193,8 +197,36 @@ func ContextWithAddress(ctx context.Context, ip string) context.Context {
 // ThrottleProbed reports whether the probe of the throttles' store decided.
 func ThrottleProbed(s *Service) bool { return s.throttle.probed.Load() }
 
+// ErrChainUnresolved is the error of a search for a session's head that did
+// not find it.
+var ErrChainUnresolved = errChainUnresolved
+
+// SetMaxChainHops lowers how many rows a walk along a session's chain reads
+// before it fails, and returns the function that restores it.
+func SetMaxChainHops(n int) (restore func()) {
+	old := maxChainHops
+	maxChainHops = n
+	return func() { maxChainHops = old }
+}
+
 // EnsurePermissionRow is EnsurePermission inserting fresh as given, so a
 // test can make the insert violate a constraint other than the key's.
 func EnsurePermissionRow(ctx context.Context, db *gorm.DB, fresh *Permission) (Permission, error) {
 	return ensureRow(ctx, db, "permission_key = ?", fresh.Key, fresh)
+}
+
+// TOTPCode is the code of the base32 secret at at, as an authenticator app
+// shows it.
+func TOTPCode(secret string, at time.Time) string {
+	key, err := totpSecretEncoding.DecodeString(secret)
+	if err != nil {
+		panic(err)
+	}
+	return totpCode(key, totpStep(at))
+}
+
+// ContextWithRequestInfo returns ctx carrying what CaptureRequestInfo
+// records for a request from the client address ip with the User-Agent ua.
+func ContextWithRequestInfo(ctx context.Context, ip, ua string) context.Context {
+	return context.WithValue(ctx, requestInfoKey{}, requestInfo{ip: ip, userAgent: ua})
 }

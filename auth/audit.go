@@ -45,6 +45,18 @@ const (
 	AuditUserDisabled AuditAction = "auth.user.disabled"
 	// AuditUserEnabled: a disabled account was enabled again.
 	AuditUserEnabled AuditAction = "auth.user.enabled"
+	// AuditMFAEnabled: a TOTP authenticator was confirmed (MFA on).
+	AuditMFAEnabled AuditAction = "auth.mfa.enabled"
+	// AuditMFADisabled: the user turned their MFA off.
+	AuditMFADisabled AuditAction = "auth.mfa.disabled"
+	// AuditMFAReset: an operator removed a user's MFA.
+	AuditMFAReset AuditAction = "auth.mfa.reset"
+	// AuditMFAFailed: an MFA operation refused a wrong password or code.
+	AuditMFAFailed AuditAction = "auth.mfa.failed"
+	// AuditMFARecoveryCodesRegenerated: the recovery codes were replaced.
+	AuditMFARecoveryCodesRegenerated AuditAction = "auth.mfa.recovery_codes_regenerated"
+	// AuditMFARecoveryCodeUsed: a login (or a disable) used a recovery code.
+	AuditMFARecoveryCodeUsed AuditAction = "auth.mfa.recovery_code_used"
 	// AuditRefreshReuse: an already-rotated refresh token was presented
 	// again, and every session of the user was revoked.
 	AuditRefreshReuse AuditAction = "auth.refresh.reuse_detected"
@@ -54,8 +66,8 @@ const (
 	// also what a thief who rotated a stolen token first leaves when the
 	// legitimate client comes back within the grace, the one trace of it.
 	// TargetType "session" and TargetID name the successor's session by the
-	// id GET /auth/sessions showed for it then, which changes when that
-	// session next refreshes; Details "successor" is "live" (it may be
+	// id GET /auth/sessions lists it under, which its refreshes keep
+	// (AUTH-11); Details "successor" is "live" (it may be
 	// either) or "ended" (signed out before the request came).
 	AuditRefreshReuseWithinGrace AuditAction = "auth.refresh.reuse_within_grace"
 	// AuditSessionRevoked: sessions were revoked (Details "scope": one,
@@ -86,6 +98,15 @@ const (
 	// AuditEmailChanged: the user confirmed the new address; it is now their
 	// email, verified.
 	AuditEmailChanged AuditAction = "auth.email.changed"
+	// AuditIdentityLinked: an external identity was linked to the user
+	// (Details "provider").
+	AuditIdentityLinked AuditAction = "auth.identity.linked"
+	// AuditIdentityLinkFailed: linking an external identity was refused
+	// (Details "provider", "reason"; a wrong current password).
+	AuditIdentityLinkFailed AuditAction = "auth.identity.link_failed"
+	// AuditIdentityUnlinked: the user removed a linked identity (Details
+	// "provider").
+	AuditIdentityUnlinked AuditAction = "auth.identity.unlinked"
 	// AuditGroupMemberAdded: a user was added to a group (Details "group").
 	AuditGroupMemberAdded AuditAction = "auth.group.member_added"
 	// AuditPermissionGranted: a permission was granted to a user or a group
@@ -188,9 +209,10 @@ type requestInfoKey struct{}
 
 // CaptureRequestInfo is a Huma middleware that stores the request's client
 // address (gin's ClientIP, so GOMBIT_HTTP_TRUSTED_PROXIES is respected) and
-// User-Agent for the audit events the operation records. Mount puts it on
-// every framework auth route; an application puts it on its own operations
-// that record events (RecordAuditEvent).
+// User-Agent for the audit events the operation records, and for the
+// device a session it starts keeps (AUTH-12). Mount puts it on every
+// framework auth route; an application puts it on its own operations that
+// record events (RecordAuditEvent) or start sessions (Service.IssueTokens).
 func CaptureRequestInfo() func(ctx huma.Context, next func(huma.Context)) {
 	return func(ctx huma.Context, next func(huma.Context)) {
 		info := requestInfo{userAgent: ctx.Header("User-Agent"), ip: clientIP(ctx)}

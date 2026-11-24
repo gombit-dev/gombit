@@ -12,6 +12,7 @@ import (
 
 	"github.com/gombit-dev/gombit/internal/storagekey"
 	"github.com/gombit-dev/gombit/internal/urlbase"
+	"golang.org/x/crypto/bcrypt"
 )
 
 const (
@@ -58,6 +59,7 @@ const (
 	envLogLevel                = "GOMBIT_LOG_LEVEL"
 	envLogSink                 = "GOMBIT_LOG_SINK"
 	envJWTSecret               = "GOMBIT_JWT_SECRET" // #nosec G101 -- environment variable name, not a credential.
+	envAuthMFAKey              = "GOMBIT_AUTH_MFA_KEY"
 	envJWTAccessTTL            = "GOMBIT_JWT_ACCESS_TTL"
 	envJWTRefreshTTL           = "GOMBIT_JWT_REFRESH_TTL"
 	envAuthMode                = "GOMBIT_AUTH_MODE"
@@ -68,6 +70,7 @@ const (
 	envPasswordResetURL        = "GOMBIT_AUTH_PASSWORD_RESET_URL"           // #nosec G101 -- environment variable name, not a credential.
 	envPasswordResetKeep       = "GOMBIT_AUTH_PASSWORD_RESET_KEEP_SESSIONS" // #nosec G101 -- environment variable name, not a credential.
 	envRefreshReuseGrace       = "GOMBIT_AUTH_REFRESH_REUSE_GRACE"
+	envSessionClientAddress    = "GOMBIT_AUTH_SESSION_CLIENT_ADDRESS"
 	envAuthThrottleDisabled    = "GOMBIT_AUTH_THROTTLE_DISABLED"
 	envCookieSecure            = "GOMBIT_COOKIE_SECURE"
 	envCookieSameSite          = "GOMBIT_COOKIE_SAMESITE"
@@ -438,6 +441,21 @@ const (
 	CookieSameSiteStrict CookieSameSite = "strict"
 )
 
+// SessionClientAddress is how much of the client's address a session keeps
+// from its sign-in, for the sessions API to show (AUTH-12).
+type SessionClientAddress string
+
+const (
+	// SessionClientAddressCoarse is the default: the address's network, an
+	// IPv4 /24 or an IPv6 /48 (203.0.113.0/24), enough to tell a home from
+	// an office, not to single out a device.
+	SessionClientAddressCoarse SessionClientAddress = "coarse"
+	// SessionClientAddressNone keeps no address.
+	SessionClientAddressNone SessionClientAddress = "none"
+	// SessionClientAddressFull keeps the whole address.
+	SessionClientAddressFull SessionClientAddress = "full"
+)
+
 // AuthConfig contains Bearer JWT (default) and cookie/session (M5-3) auth
 // configuration. Both modes share JWTSecret as the signing/HMAC key.
 type AuthConfig struct {
@@ -449,8 +467,13 @@ type AuthConfig struct {
 	AccessTokenTTL time.Duration
 	// RefreshTokenTTL is the refresh-token lifetime.
 	RefreshTokenTTL time.Duration
-	// BcryptCost is the bcrypt cost for password hashes. Zero means
-	// bcrypt.DefaultCost. Tests may set a lower cost.
+	// BcryptCost is the bcrypt cost for password hashes: zero (meaning
+	// bcrypt.DefaultCost, 10) or bcrypt.MinCost..bcrypt.MaxCost
+	// (CheckBcryptCost). Each step doubles the time of every hash and every
+	// compare, so of every login, registration and password reset: about
+	// 70 ms at 10, a minute at 20, and some 40 hours at 31, which bcrypt
+	// accepts but no app can serve. Tests may set a lower cost than the
+	// default.
 	BcryptCost int
 	// Mode selects the mounted auth surface. Empty behaves as AuthModeJWT.
 	Mode AuthMode
@@ -502,16 +525,45 @@ type AuthConfig struct {
 	// whose zero means their default, zero here is a policy, not "unset":
 	// never default it.
 	RefreshReuseGrace time.Duration
+	// SessionClientAddress is how much of the client's address a session
+	// stores when it starts, shown by GET /auth/sessions: coarse (the
+	// default, also for empty), none or full
+	// (GOMBIT_AUTH_SESSION_CLIENT_ADDRESS).
+	SessionClientAddress SessionClientAddress
 	// ThrottleDisabled turns off the credential endpoints' abuse protection
 	// (AUTH-8): the login, password reset, one-time token, current-password
 	// and verification throttles. On by default; turn it off only when
 	// something in front of the app (a gateway, a WAF) limits these routes.
+	// The multi-factor code limit per account (MFAPerUser) stays on: a
+	// per-address limit in front of the app does not bound guessing a code.
 	ThrottleDisabled bool
+	// MFAKey is the key the TOTP secrets of multi-factor authentication
+	// (AUTH-9) are encrypted with and the recovery codes hashed with, at
+	// least MinMFAKeyLength characters. Empty derives them from JWTSecret:
+	// then rotating the JWT secret makes every enrolled authenticator and
+	// recovery code unusable (each user enrolls again). Set it to rotate
+	// the two apart.
+	MFAKey string
 }
+
+// MinMFAKeyLength is the shortest Auth.MFAKey accepted.
+const MinMFAKeyLength = 32
 
 // Enabled reports whether auth routes should be mounted (JWT secret is set).
 func (c AuthConfig) Enabled() bool {
 	return strings.TrimSpace(c.JWTSecret) != ""
+}
+
+// CheckBcryptCost reports whether cost is a bcrypt cost AuthConfig.BcryptCost
+// accepts: nil for 0 (bcrypt.DefaultCost) or bcrypt.MinCost..bcrypt.MaxCost,
+// otherwise an error saying so. bcrypt itself hashes a cost below its range
+// at its default, silently, and fails every hash above it (#465). Validate
+// and auth.NewService both apply it, so the two cannot disagree.
+func CheckBcryptCost(cost int) error {
+	if cost == 0 || (cost >= bcrypt.MinCost && cost <= bcrypt.MaxCost) {
+		return nil
+	}
+	return fmt.Errorf("must be 0 (bcrypt's default) or between %d and %d", bcrypt.MinCost, bcrypt.MaxCost)
 }
 
 // EffectiveMode returns c.Mode, defaulting empty to AuthModeJWT.
@@ -520,6 +572,15 @@ func (c AuthConfig) EffectiveMode() AuthMode {
 		return AuthModeJWT
 	}
 	return c.Mode
+}
+
+// EffectiveSessionClientAddress returns c.SessionClientAddress, defaulting
+// empty to SessionClientAddressCoarse.
+func (c AuthConfig) EffectiveSessionClientAddress() SessionClientAddress {
+	if c.SessionClientAddress == "" {
+		return SessionClientAddressCoarse
+	}
+	return c.SessionClientAddress
 }
 
 // EffectiveCookieSameSite returns c.CookieSameSite, defaulting empty to
@@ -622,6 +683,7 @@ func defaultAuthConfig() AuthConfig {
 		EmailVerificationTTL: DefaultEmailVerificationTTL,
 		PasswordResetTTL:     DefaultPasswordResetTTL,
 		RefreshReuseGrace:    DefaultRefreshReuseGrace,
+		SessionClientAddress: SessionClientAddressCoarse,
 	}
 }
 
@@ -731,6 +793,7 @@ func LoadFromEnv(lookup EnvLookup) (Config, error) {
 	applyLogLevel(lookup, envLogLevel, &cfg.Logging.Level)
 	applyLogSink(lookup, envLogSink, &cfg.Logging.Sink)
 	applyString(lookup, envJWTSecret, &cfg.Auth.JWTSecret)
+	applyString(lookup, envAuthMFAKey, &cfg.Auth.MFAKey)
 	applyDuration(lookup, envJWTAccessTTL, "Auth.AccessTokenTTL", &cfg.Auth.AccessTokenTTL, &errs)
 	applyDuration(lookup, envJWTRefreshTTL, "Auth.RefreshTokenTTL", &cfg.Auth.RefreshTokenTTL, &errs)
 	applyAuthMode(lookup, envAuthMode, &cfg.Auth.Mode)
@@ -743,6 +806,7 @@ func LoadFromEnv(lookup EnvLookup) (Config, error) {
 	applyString(lookup, envEmailChangeURL, &cfg.Auth.EmailChangeURL)
 	applyBool(lookup, envPasswordResetKeep, "Auth.PasswordResetKeepSessions", &cfg.Auth.PasswordResetKeepSessions, &errs)
 	applyDuration(lookup, envRefreshReuseGrace, "Auth.RefreshReuseGrace", &cfg.Auth.RefreshReuseGrace, &errs)
+	applySessionClientAddress(lookup, envSessionClientAddress, &cfg.Auth.SessionClientAddress)
 	applyBool(lookup, envAuthThrottleDisabled, "Auth.ThrottleDisabled", &cfg.Auth.ThrottleDisabled, &errs)
 	applyBool(lookup, envSecuritySanitizeInput, "Security.SanitizeInput", &cfg.Security.SanitizeInput, &errs)
 	if docsEnabledSet {
@@ -943,10 +1007,11 @@ func validateAuthConfig(errs *FieldErrors, env Environment, cfg AuthConfig) {
 			Message: "must be greater than or equal to zero",
 		})
 	}
-	if cfg.BcryptCost < 0 {
+	if err := CheckBcryptCost(cfg.BcryptCost); err != nil {
 		*errs = append(*errs, FieldError{
 			Field:   "Auth.BcryptCost",
-			Message: "must be greater than or equal to zero",
+			Value:   strconv.Itoa(cfg.BcryptCost),
+			Message: err.Error(),
 		})
 	}
 	if cfg.EmailVerificationTTL < 0 {
@@ -981,6 +1046,16 @@ func validateAuthConfig(errs *FieldErrors, env Environment, cfg AuthConfig) {
 			Message: "must be greater than or equal to zero",
 		})
 	}
+	switch cfg.EffectiveSessionClientAddress() {
+	case SessionClientAddressCoarse, SessionClientAddressNone, SessionClientAddressFull:
+	default:
+		*errs = append(*errs, FieldError{
+			Field:   "Auth.SessionClientAddress",
+			Env:     envSessionClientAddress,
+			Value:   string(cfg.SessionClientAddress),
+			Message: "must be one of coarse, none, full",
+		})
+	}
 	if cfg.RefreshReuseGrace < 0 {
 		*errs = append(*errs, FieldError{
 			Field:   "Auth.RefreshReuseGrace",
@@ -995,6 +1070,13 @@ func validateAuthConfig(errs *FieldErrors, env Environment, cfg AuthConfig) {
 			Env:     envPasswordResetURL,
 			Value:   u,
 			Message: "must contain " + PasswordResetURLToken + " where the reset token goes",
+		})
+	}
+	if cfg.MFAKey != "" && len(cfg.MFAKey) < MinMFAKeyLength {
+		*errs = append(*errs, FieldError{
+			Field:   "Auth.MFAKey",
+			Env:     envAuthMFAKey,
+			Message: fmt.Sprintf("must be at least %d characters", MinMFAKeyLength),
 		})
 	}
 	if env == EnvironmentProduction && cfg.JWTSecret != "" {
@@ -1467,6 +1549,12 @@ func applyLogSink(lookup EnvLookup, key string, dest *LogSink) {
 func applyAuthMode(lookup EnvLookup, key string, dest *AuthMode) {
 	if value, ok := lookup(key); ok {
 		*dest = AuthMode(strings.ToLower(strings.TrimSpace(value)))
+	}
+}
+
+func applySessionClientAddress(lookup EnvLookup, key string, dest *SessionClientAddress) {
+	if value, ok := lookup(key); ok {
+		*dest = SessionClientAddress(strings.ToLower(strings.TrimSpace(value)))
 	}
 }
 

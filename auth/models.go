@@ -19,6 +19,10 @@ type User struct {
 	// credential issued to it works: its sessions were revoked, its links
 	// voided, and every check refuses it.
 	DisabledAt *time.Time
+	// mfaGate is what AuthenticateMFA saw of the second factor, on the
+	// snapshot it returns (never stored): the session start re-checks it
+	// under the user's lock.
+	mfaGate mfaGate
 	// EmailVerifiedAt is when the user proved they own VerifiedEmail (POST
 	// /auth/verify-email); nil while no address is verified. A superuser
 	// created by gombit createsuperuser starts verified.
@@ -61,7 +65,9 @@ type Permission struct {
 	UpdatedAt   time.Time
 }
 
-// RefreshToken is a hashed, rotating refresh credential.
+// RefreshToken is a hashed, rotating refresh credential. A login writes the
+// first row of a session; each rotation revokes the row and writes its
+// successor (ReplacedBy), with the same SessionID.
 type RefreshToken struct {
 	ID         uint       `gorm:"primaryKey"`
 	UserID     uint       `gorm:"index;not null"`
@@ -69,7 +75,24 @@ type RefreshToken struct {
 	ExpiresAt  time.Time  `gorm:"index;not null"`
 	RevokedAt  *time.Time `gorm:"index"`
 	ReplacedBy *uint
-	CreatedAt  time.Time
+	// SessionID is the session's identifier: random, set by the login and
+	// carried to every rotation's successor, and the id the sessions API
+	// shows (AUTH-11). Rows written before the column existed, or by a binary
+	// from before it, have none; such a row is identified by an HMAC of its
+	// row id (Service.sessionIDOf), which its next rotation stores as the
+	// successor's SessionID. An index for finding a session's head:
+	// ReplacedBy stays the chain's truth.
+	SessionID string `gorm:"size:32;index"`
+	// UserAgent, ClientAddress and Location describe the device that
+	// started the session (AUTH-12): the sign-in request's User-Agent, its
+	// client address as config.AuthConfig.SessionClientAddress keeps it
+	// (its network by default), and what the application's SessionLocator
+	// named. The login sets them and rotation copies them; empty when
+	// unknown, and on rows from before the columns existed.
+	UserAgent     string `gorm:"size:255"`
+	ClientAddress string `gorm:"size:64"`
+	Location      string `gorm:"size:128"`
+	CreatedAt     time.Time
 }
 
 // TokenPurpose is what a OneTimeToken is for.
@@ -123,7 +146,7 @@ func (OneTimeToken) TableName() string { return "auth_one_time_tokens" }
 
 // Models returns GORM models for Atlas / AutoMigrate.
 func Models() []any {
-	return []any{&User{}, &RefreshToken{}, &Group{}, &Permission{}, &OneTimeToken{}, &AuditEvent{}}
+	return []any{&User{}, &RefreshToken{}, &Group{}, &Permission{}, &OneTimeToken{}, &AuditEvent{}, &TOTPFactor{}, &RecoveryCode{}, &IdentityLink{}}
 }
 
 // Migrate creates the auth identity, token, group, permission, one-time

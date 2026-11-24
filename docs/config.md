@@ -94,7 +94,9 @@ recognizes:
 | `GOMBIT_AUTH_PASSWORD_RESET_URL` | `Config.Auth.PasswordResetURL` | empty; when set, must contain `{token}` |
 | `GOMBIT_AUTH_PASSWORD_RESET_KEEP_SESSIONS` | `Config.Auth.PasswordResetKeepSessions` | `false`: a reset revokes every session of the user |
 | `GOMBIT_AUTH_REFRESH_REUSE_GRACE` | `Config.Auth.RefreshReuseGrace` | `30s`: a rotated refresh token presented again within it, its successor still live, is a 401 that revokes nothing; `0` is strict reuse detection; negative is refused |
-| `GOMBIT_AUTH_THROTTLE_DISABLED` | `Config.Auth.ThrottleDisabled` | `false`: the credential endpoints are throttled ([auth.md](auth.md#abuse-protection)) |
+| `GOMBIT_AUTH_SESSION_CLIENT_ADDRESS` | `Config.Auth.SessionClientAddress` | `coarse`: how much of the sign-in's client address a session keeps and `GET /auth/sessions` shows: `coarse` its network (IPv4 /24, IPv6 /48), `full` all of it, `none` nothing ([sessions](auth.md#sessions)); anything else is refused |
+| `GOMBIT_AUTH_THROTTLE_DISABLED` | `Config.Auth.ThrottleDisabled` | `false`: the credential endpoints are throttled ([auth.md](auth.md#abuse-protection)); `true` keeps `MFAPerUser`, which bounds guessing a multi-factor code |
+| `GOMBIT_AUTH_MFA_KEY` | `Config.Auth.MFAKey` | empty: the MFA keys derive from `GOMBIT_JWT_SECRET`; at least 32 characters when set ([auth.md](auth.md#multi-factor-authentication)) |
 | `GOMBIT_SECURITY_SANITIZE_INPUT` | `Config.Security.SanitizeInput` | `false` (opt-in) |
 
 `.env` is read whole, lines of any length, and a file that exists but cannot be

@@ -33,7 +33,7 @@ frontend/src/
 ├── main.tsx
 ├── app/
 │   ├── providers.tsx   # API client context (ThemeProvider when --ui mui)
-│   └── router.tsx      # /login, RequireAuth, /, /products/new
+│   └── router.tsx      # /login, RequireAuth, /, /products/new, /sessions
 ├── api/
 │   ├── client.ts       # createAppClient + 401 refresh + useApiClient
 │   ├── apiPrefix.ts    # runtime GOMBIT_API_PREFIX (not baked at gombit new)
@@ -48,7 +48,8 @@ frontend/src/
 ├── pages/
 │   ├── LoginPage.tsx
 │   ├── ProductListPage.tsx
-│   └── ProductFormPage.tsx
+│   ├── ProductFormPage.tsx
+│   └── SessionsPage.tsx    # the signed-in user's sessions
 ├── theme.ts            # only with --ui mui
 └── resources.tsx       # rewritten by gombit make resource
 ```
@@ -123,6 +124,33 @@ rather than cloning the consumed `Request`, so POST/PATCH JSON survives
 silent refresh. `RequireAuth` sends anonymous users to `/login`. Logout
 clears memory and revokes the refresh token. Generated source never reads
 `localStorage` or `sessionStorage`. See [auth.md](auth.md).
+
+## Sessions page
+
+`/sessions` (`pages/SessionsPage.tsx`, linked from the layout as
+"Sessions") lists the signed-in user's sessions from `GET
+{prefix}/auth/sessions` ([auth.md](auth.md#sessions)): one row per
+sign-in, the current one marked "this device", each with the device it
+signed in from (a short label made from `user_agent`, such as "Firefox on
+Linux", by `describeDevice`, with the raw value as the cell's tooltip), its
+`location` and `client_address` network, when it last refreshed and when
+it expires. "Sign out" on a row ends that session (`DELETE
+/auth/sessions/{id}`) and removes the row; "Sign out other sessions" and
+"Sign out everywhere" call `DELETE /auth/sessions?scope=others|all`.
+Ending the current session, or all of them, clears the local session and
+returns to `/login`, in both auth modes (in cookie mode the server also
+clears the cookies). A session that had already ended by the time its
+"Sign out" is pressed (signed out on its own device, or from another tab)
+answers 404: the page says so and lists again, and the buttons wait for
+that list, so an older list never brings back a row signed out meanwhile.
+A failed list (any answer but a 401, which signs this browser out) is shown
+and not retried. Each row's "Sign out" is named for assistive technology
+after the session it ends (device, place, last active, "this device"), and
+the status line is a live region. The page is the app's own, written once
+by `gombit new` and never rewritten; `describeDevice` knows a few common
+browsers and systems (including Chrome, Firefox and Edge on iOS, which also
+say Safari), a User-Agent is only a hint (iPadOS sends a Mac one), and a
+full parser can replace it.
 
 ## D10 field errors
 

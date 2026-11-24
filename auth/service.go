@@ -3,8 +3,10 @@ package auth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gombit-dev/gombit/config"
@@ -28,6 +30,25 @@ type Service struct {
 	// background runs the work the routes accept and finish after
 	// answering (background.go); Close drains it.
 	background *backgroundRunner
+	// mfaIssuer names the app in an authenticator (AppName).
+	mfaIssuer string
+	// mfaKeyWarned is when an undecryptable TOTP secret was last logged
+	// (unix seconds).
+	mfaKeyWarned atomic.Int64
+	// providers are the external identity providers (external.go), by
+	// name; providerNames keeps their registration order, and providerErr
+	// what WithIdentityProviders refused (NewService returns it).
+	// locator names a session's location when it starts (session_device.go).
+	locator           SessionLocator
+	providers         map[string]IdentityProvider
+	providerNames     []string
+	providerErr       error
+	externalSignupOff bool
+	// apiPrefix is the routes' prefix (Mount), for the state cookie's path.
+	apiPrefix string
+	// production makes the external flow's cookies Secure whatever
+	// CookieSecure says.
+	production bool
 	// throttle counts the credential endpoints' attempts (throttle.go).
 	throttle    *throttler
 	dummyOnce   sync.Once
@@ -93,6 +114,9 @@ func NewService(db *gorm.DB, cfg config.Config, opts ...Option) (*Service, error
 	if cfg.Auth.RefreshTokenTTL < cfg.Auth.AccessTokenTTL {
 		return nil, errors.New("auth: the refresh token TTL must be at least the access token TTL")
 	}
+	if err := config.CheckBcryptCost(cfg.Auth.BcryptCost); err != nil {
+		return nil, fmt.Errorf("auth: bcrypt cost %d %w", cfg.Auth.BcryptCost, err)
+	}
 	s := &Service{
 		db:     db,
 		cfg:    cfg.Auth,
@@ -102,7 +126,12 @@ func NewService(db *gorm.DB, cfg config.Config, opts ...Option) (*Service, error
 		mailer: noMailer{},
 		logger: zap.NewNop(),
 	}
+	s.production = cfg.Environment == config.EnvironmentProduction
 	s.auditor = DBAuditor(db)
+	s.mfaIssuer = cfg.AppName
+	if s.mfaIssuer == "" {
+		s.mfaIssuer = "Gombit"
+	}
 	s.background = newBackgroundRunner()
 	s.throttle = &throttler{
 		policy:   DefaultThrottlePolicy(),
@@ -112,6 +141,9 @@ func NewService(db *gorm.DB, cfg config.Config, opts ...Option) (*Service, error
 	}
 	for _, opt := range opts {
 		opt(s)
+	}
+	if s.providerErr != nil {
+		return nil, s.providerErr
 	}
 	if !s.throttle.disabled {
 		// Off the request path: whether the throttles' store keeps counts.
@@ -215,11 +247,23 @@ func (s *Service) createUser(ctx context.Context, email, password string, superu
 // Authenticate verifies email and password. It fails with
 // ErrInvalidCredentials for an unknown email or a wrong password (a 401),
 // ErrAccountDisabled for the right password of a disabled account (a 403),
-// and a *ThrottleError (errors.Is ErrTooManyAttempts, a 429) past a login
-// throttle; any other error is a server failure (the user lookup's
-// database error), which a caller must not answer as wrong credentials
-// (#460).
+// ErrMFARequired for the right password of an account with multi-factor
+// authentication (a 422 on mfa_code: AuthenticateMFA takes the code), and a
+// *ThrottleError (errors.Is ErrTooManyAttempts, a 429) past a login
+// throttle or MFAPerUser; any other error is a server failure (the user
+// lookup's database error, an MFA secret the current key cannot open),
+// which a caller must not answer as wrong credentials (#460).
 func (s *Service) Authenticate(ctx context.Context, email, password string) (User, error) {
+	return s.AuthenticateMFA(ctx, email, password, "")
+}
+
+// AuthenticateMFA is Authenticate with the second factor of an account with
+// MFA enabled: code is a code from its authenticator or one of its recovery
+// codes. Such an account answers ErrMFARequired for no code (told, like a
+// disabled account, only after the right password) and ErrInvalidMFACode for
+// a wrong one (a failure, throttled by MFAPerUser too). For an account
+// without MFA, code is ignored.
+func (s *Service) AuthenticateMFA(ctx context.Context, email, password, code string) (User, error) {
 	email = normalizeEmail(email)
 	// Throttled before the lookup and bcrypt, by the email as typed: the
 	// same for an account and an address that is none. A success does not
@@ -244,6 +288,13 @@ func (s *Service) Authenticate(ctx context.Context, email, password string) (Use
 		s.Audit(ctx, AuditEvent{Action: AuditLoginFailed, Details: details("reason", "unknown_account")})
 		return User{}, errInvalidCredentials
 	}
+	if !user.HasUsablePassword() {
+		// An account made by an external sign-in, with no password yet: no
+		// password is its password. Timed as a wrong one.
+		s.compareDummy(password)
+		s.Audit(ctx, AuditEvent{Action: AuditLoginFailed, TargetUserID: uintPtr(user.ID), Details: details("reason", "no_password")})
+		return User{}, errInvalidCredentials
+	}
 	if err := s.hasher.Compare(user.PasswordHash, password); err != nil {
 		s.Audit(ctx, AuditEvent{Action: AuditLoginFailed, TargetUserID: uintPtr(user.ID), Details: details("reason", "wrong_password")})
 		return User{}, errInvalidCredentials
@@ -254,9 +305,27 @@ func (s *Service) Authenticate(ctx context.Context, email, password string) (Use
 		s.Audit(ctx, AuditEvent{Action: AuditLoginFailed, TargetUserID: uintPtr(user.ID), Details: details("reason", "account_disabled")})
 		return User{}, errAccountDisabled
 	}
+	gate, err := s.checkMFA(ctx, user, code)
+	switch {
+	case errors.Is(err, errMFARequired):
+		// The password was right: no failure, but no login either (no
+		// address becomes known, nothing is cleared). The client asks for
+		// the code and logs in again with it.
+		res.refund()
+		return User{}, err
+	case errors.Is(err, errInvalidMFACode):
+		s.Audit(ctx, AuditEvent{Action: AuditLoginFailed, TargetUserID: uintPtr(user.ID), Details: details("reason", "wrong_mfa_code")})
+		return User{}, err
+	case err != nil:
+		// A server failure or the MFAPerUser throttle: not the client's
+		// password's fault.
+		res.refund()
+		return User{}, err
+	}
 	res.refundExcept(pair.name)
 	s.throttle.clear(ctx, pair)
 	s.throttle.markKnown(ctx, pair)
+	user.mfaGate = gate
 	return user, nil
 }
 
@@ -267,7 +336,13 @@ func (s *Service) Authenticate(ctx context.Context, email, password string) (Use
 // session either finds the session and revokes it, or makes this login fail
 // as invalid credentials. The old password never outlives its change.
 func (s *Service) Login(ctx context.Context, email, password string) (User, TokenPair, error) {
-	user, err := s.Authenticate(ctx, email, password)
+	return s.LoginMFA(ctx, email, password, "")
+}
+
+// LoginMFA is Login with the second factor of an account with MFA enabled
+// (AuthenticateMFA), as POST /auth/login with mfa_code.
+func (s *Service) LoginMFA(ctx context.Context, email, password, code string) (User, TokenPair, error) {
+	user, err := s.AuthenticateMFA(ctx, email, password, code)
 	if err != nil {
 		return User{}, TokenPair{}, err
 	}
@@ -286,7 +361,13 @@ func (s *Service) Login(ctx context.Context, email, password string) (User, Toke
 // account must not be disabled (ErrAccountDisabled); any other error is a
 // server failure. So Authenticate followed by IssueTokens is as safe as
 // Login: a password reset or a disable that commits between the two leaves
-// the snapshot unable to start a session.
+// the snapshot unable to start a session, and so does multi-factor
+// authentication enabled after Authenticate found none (ErrMFARequired). A
+// snapshot loaded from the database (no Authenticate) is the caller's to
+// have authenticated, second factor included. The session records the
+// device of the request ctx came through (CaptureRequestInfo, which the
+// auth routes put first; an application's own login route adds it): none
+// without one.
 func (s *Service) IssueTokens(ctx context.Context, user User) (TokenPair, error) {
 	_, pair, err := s.startSession(ctx, user)
 	return pair, err
@@ -297,8 +378,15 @@ func (s *Service) IssueTokens(ctx context.Context, user User) (TokenPair, error)
 // against them, and only if the stored password hash is still the one in
 // user's snapshot.
 func (s *Service) startSession(ctx context.Context, user User) (User, TokenPair, error) {
+	return s.startSessionWith(ctx, user, "")
+}
+
+// startSessionWith is startSession recording det as the successful login's
+// audit details (an external sign-in names its provider).
+func (s *Service) startSessionWith(ctx context.Context, user User, det string) (User, TokenPair, error) {
 	var pair TokenPair
 	var locked User
+	device := s.deviceFrom(ctx) // before the lock: a SessionLocator may take a moment
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var err error
 		locked, err = lockUserTx(tx, user.ID)
@@ -314,7 +402,19 @@ func (s *Service) startSession(ctx context.Context, user User) (User, TokenPair,
 		if locked.PasswordHash != user.PasswordHash {
 			return errLoginPasswordChanged
 		}
-		pair, err = s.issueTokens(tx, locked, s.now())
+		// A login that found no factor, re-checked under the lock: one
+		// enabled since (its confirmation ends the sessions started on the
+		// password alone, under this lock) is a code this login never gave.
+		if user.mfaGate == mfaGateNoFactor {
+			f, err := confirmedFactor(tx, locked.ID)
+			if err != nil {
+				return err
+			}
+			if f.ID != 0 {
+				return errMFARequired
+			}
+		}
+		pair, err = s.issueTokens(tx, locked, s.now(), "", device)
 		return err
 	})
 	if errors.Is(err, errLoginPasswordChanged) {
@@ -337,7 +437,7 @@ func (s *Service) startSession(ctx context.Context, user User) (User, TokenPair,
 	if err != nil {
 		return User{}, TokenPair{}, err
 	}
-	s.Audit(ctx, AuditEvent{Action: AuditLoginSucceeded, ActorUserID: uintPtr(locked.ID), TargetUserID: uintPtr(locked.ID)})
+	s.Audit(ctx, AuditEvent{Action: AuditLoginSucceeded, ActorUserID: uintPtr(locked.ID), TargetUserID: uintPtr(locked.ID), Details: det})
 	return locked, pair, nil
 }
 
@@ -349,16 +449,33 @@ var errLoginPasswordChanged = errors.New("auth: the password changed during the 
 // started (Login and IssueTokens answer it as invalid credentials).
 var errLoginAccountGone = errors.New("auth: the account was deleted during the login")
 
-func (s *Service) issueTokens(tx *gorm.DB, user User, now time.Time) (TokenPair, error) {
+// issueTokens writes a refresh token row of session sessionID, started on
+// device, and signs its access token. A login passes "", and the row starts
+// a new session with a fresh SessionID, and the device of its request; a
+// rotation passes the id the rotated row is shown under (sessionIDOf), so
+// the session keeps its id, a session from before SessionID existed
+// included: its successor stores the legacy id. A rotation passes the
+// rotated row's device too (deviceOf): a session describes its sign-in.
+func (s *Service) issueTokens(tx *gorm.DB, user User, now time.Time, sessionID string, device sessionDevice) (TokenPair, error) {
 	raw, err := newRefreshToken()
 	if err != nil {
 		return TokenPair{}, err
+	}
+	if sessionID == "" {
+		if sessionID, err = newSessionID(); err != nil {
+			return TokenPair{}, err
+		}
 	}
 	row := RefreshToken{
 		UserID:    user.ID,
 		TokenHash: hashRefreshToken(raw),
 		ExpiresAt: now.Add(s.cfg.RefreshTokenTTL),
+		SessionID: sessionID,
 		CreatedAt: now,
+
+		UserAgent:     device.userAgent,
+		ClientAddress: device.clientAddress,
+		Location:      device.location,
 	}
 	if err := tx.Create(&row).Error; err != nil {
 		return TokenPair{}, err
@@ -571,11 +688,11 @@ func (s *Service) rotateRefreshOnce(ctx context.Context, raw, hash string) (Toke
 					// Rotated again: fall through to the cascade.
 				case successor.RevokedAt == nil && successor.ExpiresAt.After(now):
 					withinGrace, reuseUser = true, row.UserID
-					graceSession, graceSuccessor = s.sessionID(successor.ID), "live"
+					graceSession, graceSuccessor = s.sessionIDOf(successor), "live"
 					return errRotationRaced
 				default:
 					withinGrace, reuseUser = true, row.UserID
-					graceSession, graceSuccessor = s.sessionID(successor.ID), "ended"
+					graceSession, graceSuccessor = s.sessionIDOf(successor), "ended"
 					return errInvalidRefreshToken
 				}
 			}
@@ -597,9 +714,9 @@ func (s *Service) rotateRefreshOnce(ctx context.Context, raw, hash string) (Toke
 			// Lost the compare-and-swap: the token was revoked after the
 			// unlocked read above. Either a rotation of the same token on
 			// another instance won and gave it a successor, or something
-			// revoked it with none: a logout (which takes no user lock), a
-			// session revocation that committed while this rotation waited
-			// for the user's lock, or the reuse cascade. None of them is
+			// revoked it with none: a logout or a session revocation that
+			// committed while this rotation waited for the user's lock, or
+			// the reuse cascade. None of them is
 			// reuse-as-theft; do not revoke anything. The re-read tells them
 			// apart, as for an expired token above. A successor means a
 			// rotation won: errRotationRaced, and refreshCookie leaves the
@@ -617,7 +734,7 @@ func (s *Service) rotateRefreshOnce(ctx context.Context, raw, hash string) (Toke
 			return errInvalidRefreshToken
 		}
 
-		issued, err := s.issueTokens(tx, user, now)
+		issued, err := s.issueTokens(tx, user, now, s.sessionIDOf(row), deviceOf(row))
 		if err != nil {
 			return err
 		}
@@ -678,31 +795,86 @@ func lockRefreshRowTx(tx *gorm.DB, id uint) (RefreshToken, error) {
 	return row, err
 }
 
-// RevokeRefresh invalidates one refresh token. Missing/already-revoked tokens
-// succeed so logout is idempotent.
+// RevokeRefresh ends the session of a refresh token: the token itself, or,
+// when the token has rotated (a refresh in flight as the user signs out, or
+// a client still holding the previous token), the session's current head
+// (#466), found by the session's SessionID however many rotations on, or
+// along replaced_by where that finds none (sessionHead). A token followed
+// along replaced_by maxChainHops (1000) or more rotations behind its head,
+// or a session whose head cannot be found (errChainUnresolved), fails with a 500
+// rather than succeed having ended nothing; revoking the session (DELETE
+// /auth/sessions/{id}, or ?scope=all) ends it then. A token unknown, past its
+// own expiry, or of a session already ended revokes nothing and succeeds,
+// alike, so logout is idempotent and its answer says nothing about a token;
+// a token past its expiry is no credential, as for refresh (#458). It takes the user's lock (lockUserTx) like rotation does, so a
+// logout and a refresh of the same token run one after the other: whichever
+// comes second sees the other's result, and the session ends either way.
 func (s *Service) RevokeRefresh(ctx context.Context, raw string) error {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return errInvalidRefreshToken
 	}
-	now := s.now()
 	hash := hashRefreshToken(raw)
+	// This lookup must stay outside the transaction below. sessionHead
+	// reads with plain reads, and on MySQL (REPEATABLE READ) a transaction's
+	// plain reads all see the snapshot its first plain read takes: inside,
+	// this read would take it before the user's lock, and the walk would
+	// miss a rotation that committed during the wait, revoking an already
+	// rotated row and ending nothing. With the lock (a locking read, which
+	// takes no snapshot) first, the walk's first read takes the snapshot
+	// after it.
 	var row RefreshToken
-	if err := s.db.WithContext(ctx).Where("token_hash = ? AND revoked_at IS NULL", hash).Limit(1).Find(&row).Error; err != nil {
+	if err := s.db.WithContext(ctx).Where("token_hash = ?", hash).Limit(1).Find(&row).Error; err != nil {
 		return err
 	}
 	if row.ID == 0 {
 		return nil
 	}
-	result := s.db.WithContext(ctx).Model(&RefreshToken{}).
-		Where("id = ? AND revoked_at IS NULL", row.ID).
-		Update("revoked_at", now)
-	if result.Error != nil {
+	var ended *RefreshToken
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if _, err := lockUserTx(tx, row.UserID); err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil // the user is gone, and its sessions with it
+			}
+			return err
+		}
+		now := s.now()
+		// The token's own expiry, as rotation reads it: past it, a token
+		// refreshes nothing and so ends nothing either.
+		if !row.ExpiresAt.After(now) {
+			return nil
+		}
+		head, err := sessionHead(tx, row.UserID, row.ID)
+		if err != nil || head == nil || head.RevokedAt != nil || !head.ExpiresAt.After(now) {
+			return err
+		}
+		result := tx.Model(&RefreshToken{}).
+			Where("id = ? AND revoked_at IS NULL", head.ID).
+			Update("revoked_at", now)
+		if result.RowsAffected == 1 {
+			ended = head
+		}
 		return result.Error
+	})
+	if err != nil {
+		return err
 	}
-	// RowsAffected: a concurrent logout of the same token records it once.
-	if result.RowsAffected == 1 {
-		s.Audit(ctx, AuditEvent{Action: AuditLogout, ActorUserID: uintPtr(row.UserID), TargetUserID: uintPtr(row.UserID)})
+	// Under the lock a concurrent logout of the same session waits and then
+	// finds it ended: it is recorded once. The event names the session it
+	// ended, and says when a rotated token ended it: an old copy of the
+	// session's token, which may be a sibling tab's or a thief's.
+	if ended != nil {
+		event := AuditEvent{
+			Action:       AuditLogout,
+			ActorUserID:  uintPtr(row.UserID),
+			TargetUserID: uintPtr(row.UserID),
+			TargetType:   "session",
+			TargetID:     s.sessionIDOf(*ended),
+		}
+		if ended.ID != row.ID {
+			event.Details = details("via", "rotated")
+		}
+		s.Audit(ctx, event)
 	}
 	return nil
 }
@@ -768,8 +940,10 @@ func (s *Service) parseAccess(ctx context.Context, token string) (User, uint, er
 // lockUserTx loads the user and locks its row for the rest of tx. Token
 // rotation (its reuse cascade included) and the three session revocations
 // (one, the others, all) take this lock first, so they run one at a time per
-// user. Login (IssueTokens) and logout (RevokeRefresh) do not take it, so
-// they are not serialized with those (docs/auth.md documents it for logout).
+// user, and so do logout (RevokeRefresh, which follows a rotated token to
+// its session's head, #466) and login's session start (IssueTokens,
+// startSession): every writer of refresh_tokens. Only login's password check
+// (bcrypt, slow) runs before the lock (docs/auth.md).
 // Without the lock, on PostgreSQL a revocation that waits on a row a
 // concurrent rotation holds re-checks only that row and never sees the
 // replacement the rotation inserts, so the session survives. SQLite has no
@@ -798,12 +972,17 @@ func lockUserTx(tx *gorm.DB, userID uint) (User, error) {
 	return user, err
 }
 
-// revokeAllTx revokes every active refresh token of the user. tx must hold
-// lockUserTx.
+// revokeAllTx revokes every active refresh token of the user, and voids
+// the external sign-in codes not yet exchanged (each a session about to
+// start). tx must hold lockUserTx.
 func revokeAllTx(tx *gorm.DB, userID uint, now time.Time) error {
-	return tx.Model(&RefreshToken{}).
+	err := tx.Model(&RefreshToken{}).
 		Where("user_id = ? AND revoked_at IS NULL", userID).
 		Update("revoked_at", now).Error
+	if err != nil {
+		return err
+	}
+	return voidTokensTx(tx, userID, 0, now, PurposeExternalLogin)
 }
 
 func (s *Service) compareDummy(password string) {

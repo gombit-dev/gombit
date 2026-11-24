@@ -30,6 +30,13 @@ var reservedOperationIDs = map[string]struct{}{
 	"auth-request-email-change": {}, "auth-confirm-email-change": {},
 	// Auth: account state (AUTH-6).
 	"auth-disable-user": {}, "auth-enable-user": {},
+	// Auth: multi-factor authentication (AUTH-9).
+	"auth-mfa-status": {}, "auth-mfa-totp-enroll": {}, "auth-mfa-totp-confirm": {},
+	"auth-mfa-recovery-codes": {}, "auth-mfa-disable": {}, "auth-mfa-reset": {},
+	// Auth: external identity (AUTH-10), mounted with an identity provider.
+	"auth-external-providers": {}, "auth-external-login": {}, "auth-external-link": {},
+	"auth-external-callback": {}, "auth-external-exchange": {}, "auth-external-identities": {},
+	"auth-external-unlink": {},
 	// Admin data plane (cookie mode).
 	"admin-meta-list": {}, "admin-meta-get": {},
 	"admin-resource-list": {}, "admin-resource-create": {}, "admin-resource-get": {},
