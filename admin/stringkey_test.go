@@ -219,6 +219,7 @@ func runStringKeyWhitespaceAdmin(t *testing.T, db *database.DB) {
 		`{"code":"sku","name":"exact sku"}`,
 		`{"code":" sku","name":"leading space"}`,
 		`{"code":"sku ","name":"trailing space"}`,
+		`{"code":" ","name":"space only"}`,
 	} {
 		res := doRequest(app, jar, http.MethodPost, base, b)
 		if res.Code != http.StatusOK {
@@ -249,13 +250,15 @@ func runStringKeyWhitespaceAdmin(t *testing.T, db *database.DB) {
 		}
 	}
 
-	// Filter (?code=) matches the exact row with leading space and trailing space.
+	// Filter (?code=) matches the exact row with leading space, trailing space,
+	// and whitespace-only (" ").
 	for _, tc := range []struct {
 		query    string
 		wantCode string
 	}{
 		{"?code=%20sku", " sku"},
 		{"?code=sku%20", "sku "},
+		{"?code=%20", " "},
 	} {
 		list := doRequest(app, jar, http.MethodGet, base+tc.query, "")
 		var listed listEnvelope
@@ -280,7 +283,7 @@ func runStringKeyWhitespaceAdmin(t *testing.T, db *database.DB) {
 		t.Fatalf("PATCH /%%20sku failed to update ' sku' row: %+v", updated)
 	}
 
-	// Delete (DELETE) deletes the row with whitespace, leaving "sku" and "sku " intact.
+	// Delete (DELETE) deletes the row with whitespace, leaving "sku", "sku ", and " " intact.
 	res = doRequest(app, jar, http.MethodDelete, base+"/%20sku", "")
 	if res.Code != http.StatusOK {
 		t.Fatalf("DELETE /%%20sku: %d %s", res.Code, res.Body.String())
@@ -289,8 +292,8 @@ func runStringKeyWhitespaceAdmin(t *testing.T, db *database.DB) {
 	if err := db.Find(&remaining).Error; err != nil {
 		t.Fatal(err)
 	}
-	if len(remaining) != 2 {
-		t.Fatalf("expected 2 rows remaining after delete, got %d: %+v", len(remaining), remaining)
+	if len(remaining) != 3 {
+		t.Fatalf("expected 3 rows remaining after delete, got %d: %+v", len(remaining), remaining)
 	}
 	for _, r := range remaining {
 		if r.Code == " sku" {

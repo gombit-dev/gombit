@@ -43,7 +43,9 @@ const (
 // filterable field.
 //
 // For FilterString, an empty raw value ("") is a no-op, while leading,
-// trailing, or whitespace-only values are matched exact byte for byte (issue #694).
+// trailing, or whitespace-only values are bound as sent without trimming
+// (issue #694); equality itself is up to the column's collation (MySQL's
+// default ignores case and accents).
 //
 // A raw value that does not parse as kind, or a string one no text column can
 // hold (a NUL byte, invalid UTF-8: TextProblem), returns a D10 validation error

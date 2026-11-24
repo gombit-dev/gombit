@@ -91,6 +91,22 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   settings, so it understates the stop time of an app that declares
   longer ones. It keeps working.
 
+- Admin string path IDs, admin string filters, and generated list string/enum filters (database.FilterEq) bind leading and trailing whitespace as sent instead of trimming it. (`admin-string-key-whitespace`, behavior, [#694](https://github.com/gombit-dev/gombit/issues/694))
+
+  A string or text primary key preserves leading and trailing
+  whitespace when created, but `coercePathID`, `applyFilters`, and
+  `database.FilterEq` previously trimmed the input before query lookup.
+  Targeting a string key with surrounding whitespace (e.g. `' sku'`)
+  matched the trimmed row (`'sku'`) instead of the intended row.
+  String/text path IDs, admin string filters, and generated list
+  handlers' `database.FilterEq` (`FilterString`, used for string and
+  enum filters) now bind values as sent, preserving whitespace, with
+  only an empty raw value treated as "not supplied" (equality itself is
+  up to the column's collation; MySQL's default ignores case and
+  accents). On upgrade, generated list handlers change without
+  regenerating: `?status=%20` filters for `" "` instead of returning
+  all rows, and `?status=active%20` no longer matches `"active"`.
+
 ## v0.10.0
 
 ### Manual: action required

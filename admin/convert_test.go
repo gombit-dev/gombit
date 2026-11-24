@@ -60,7 +60,7 @@ func TestCoercePathIDPreservesStringWhitespace(t *testing.T) {
 		{"   ", TypeString, "   "},
 		{" 42 ", TypeInteger, int64(42)},
 		{" 550e8400-e29b-41d4-a716-446655440000 ", TypeUUID, "550e8400-e29b-41d4-a716-446655440000"},
-		{" 550E8400-E29B-41D4-A716-446655440000 ", typeCanonicalUUID, "550e8400-e29b-41d4-a716-446655440000"},
+		{"  550E8400-E29B-41D4-A716-446655440000  ", typeCanonicalUUID, "550e8400-e29b-41d4-a716-446655440000"},
 	} {
 		got, err := coercePathID(tc.id, tc.ft)
 		if err != nil {
@@ -96,12 +96,12 @@ func TestCoerceFilterPreservesStringWhitespace(t *testing.T) {
 	}{
 		{" sku", TypeString, " sku"},
 		{"sku ", TypeString, "sku "},
-		{" sku ", TypeText, " sku "},
+		{"   ", TypeString, "   "},
 		{" 42 ", TypeInteger, int64(42)},
 		{"   ", TypeInteger, nil},
 		{"", TypeString, nil},
 		{" 550e8400-e29b-41d4-a716-446655440000 ", TypeUUID, "550e8400-e29b-41d4-a716-446655440000"},
-		{" 550E8400-E29B-41D4-A716-446655440000 ", typeCanonicalUUID, "550e8400-e29b-41d4-a716-446655440000"},
+		{"  550E8400-E29B-41D4-A716-446655440000  ", typeCanonicalUUID, "550e8400-e29b-41d4-a716-446655440000"},
 		{"   ", TypeUUID, nil},
 		{"   ", typeCanonicalUUID, nil},
 	} {
