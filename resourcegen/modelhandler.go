@@ -111,7 +111,7 @@ func renderModelHandler(r modelResource) (string, error) {
 	// re-reading tags here) — same wire semantics as the legacy generated handler.
 	filters := r.filterFields()
 	searchCols := r.searchColumns()
-	sortCols := r.sortColumns()
+	sortFields := r.sortFields()
 	aggFields := r.aggregateFields()
 	// Aggregatable fields return aggregates in meta (contract.ListMeta); without
 	// them the plain contract.PageMeta keeps a no-query-surface resource identical.
@@ -129,11 +129,11 @@ func renderModelHandler(r modelResource) (string, error) {
 	if len(searchCols) > 0 {
 		b.WriteString("\tSearch string `query:\"search\" doc:\"Search term matched across searchable fields\"`\n")
 	}
-	if len(sortCols) > 0 {
-		b.WriteString("\tOrdering string `query:\"ordering\" doc:\"Field to order by; prefix with - for DESC (allowed: " + strings.Join(sortCols, ", ") + ")\"`\n")
+	if len(sortFields) > 0 {
+		b.WriteString("\tOrdering string `query:\"ordering\" doc:\"Field to order by; prefix with - for DESC (allowed: " + strings.Join(wireNamesOf(sortFields), ", ") + ")\"`\n")
 	}
 	if len(aggFields) > 0 {
-		b.WriteString("\tAggregate string `query:\"aggregate\" doc:\"Comma-separated <func>:<field> aggregates over the filtered set, e.g. sum:" + aggFields[0].Column + " (funcs: sum, avg, min, max; fields: " + strings.Join(columnsOf(aggFields), ", ") + ")\"`\n")
+		b.WriteString("\tAggregate string `query:\"aggregate\" doc:\"Comma-separated <func>:<field> aggregates over the filtered set, e.g. sum:" + aggFields[0].jsonName() + " (funcs: sum, avg, min, max; fields: " + strings.Join(wireNamesOf(aggFields), ", ") + ")\"`\n")
 	}
 	for _, f := range filters {
 		b.WriteString("\t" + f.GoName + " string `" + filterQueryTag(f) + "`\n")
@@ -184,7 +184,7 @@ func renderModelHandler(r modelResource) (string, error) {
 	if len(aggFields) > 0 {
 		b.WriteString("\taggs, err := database.ParseAggregates(ctx, input.Aggregate, map[string]database.AggregateColumn{\n")
 		for _, f := range aggFields {
-			b.WriteString("\t\t\"" + f.Column + "\": {Column: \"" + f.Column + "\"},\n")
+			b.WriteString("\t\t\"" + f.jsonName() + "\": {Column: \"" + f.Column + "\"},\n")
 		}
 		b.WriteString("\t})\n")
 		b.WriteString("\tif err != nil {\n\t\treturn nil, err\n\t}\n")
@@ -192,16 +192,16 @@ func renderModelHandler(r modelResource) (string, error) {
 		b.WriteString("\tif err != nil {\n\t\treturn nil, err\n\t}\n")
 		errDeclared = true
 	}
-	if len(sortCols) > 0 {
+	if len(sortFields) > 0 {
 		assign := "="
 		if !errDeclared {
 			assign = ":="
 		}
-		b.WriteString("\tq, err " + assign + " database.Ordering(ctx, q, input.Ordering, []string{\"" + strings.Join(sortCols, "\", \"") + "\"}, \"" + pk.Column + "\")\n")
+		b.WriteString("\tq, err " + assign + " database.OrderingFor(ctx, q, input.Ordering, map[string]string{" + orderingMapEntries(sortFields) + "}, \"" + pk.Column + "\")\n")
 		b.WriteString("\tif err != nil {\n\t\treturn nil, err\n\t}\n")
 	}
 	b.WriteString("\tvar rows []" + typ + "\n")
-	if len(sortCols) > 0 {
+	if len(sortFields) > 0 {
 		b.WriteString("\tif err := q.Offset(contract.PageOffset(page, perPage)).Limit(perPage).Find(&rows).Error; err != nil {\n")
 	} else {
 		b.WriteString("\tif err := q.Order(\"" + pk.Column + "\").Offset(contract.PageOffset(page, perPage)).Limit(perPage).Find(&rows).Error; err != nil {\n")
@@ -329,7 +329,7 @@ func renderModelHandler(r modelResource) (string, error) {
 }
 
 // filterFields / aggregateFields return the resource's filterable / aggregatable
-// columns in schema order (deterministic output). searchColumns / sortColumns
+// columns in schema order (deterministic output). searchColumns / sortFields
 // return the DB column names for the searchable / sortable fields, in schema order.
 func (r modelResource) primaryKey() (modelField, error) {
 	var keys []modelField
@@ -382,22 +382,35 @@ func (r modelResource) searchColumns() []string {
 	return out
 }
 
-func (r modelResource) sortColumns() []string {
-	var out []string
+func (r modelResource) sortFields() []modelField {
+	var out []modelField
 	for _, f := range r.Fields {
 		if f.Sortable {
-			out = append(out, f.Column)
+			out = append(out, f)
 		}
 	}
 	return out
 }
 
-func columnsOf(fs []modelField) []string {
+// wireNamesOf returns the wire names (the DTO's json names) of the fields: the
+// spellings a client sends in ?ordering=, ?aggregate= and the docs. The column
+// is a persistence detail and never appears here.
+func wireNamesOf(fs []modelField) []string {
 	out := make([]string, len(fs))
 	for i, f := range fs {
-		out[i] = f.Column
+		out[i] = f.jsonName()
 	}
 	return out
+}
+
+// orderingMapEntries renders the wire-name -> column entries of the ordering
+// allow-list, in schema order.
+func orderingMapEntries(fs []modelField) string {
+	parts := make([]string, len(fs))
+	for i, f := range fs {
+		parts[i] = "\"" + f.jsonName() + "\": \"" + f.Column + "\""
+	}
+	return strings.Join(parts, ", ")
 }
 
 // filterKindExpr maps the field's Go kind to the database.FilterKind the generated
@@ -424,12 +437,13 @@ func filterKindExpr(f modelField) string {
 }
 
 // filterQueryTag builds the Huma struct tag for a filter query param: the query
-// name (the DB column), a true/false enum for a bool column so Huma rejects bad
+// name (the wire name, the same as the DTO's json name; the column is mapped
+// internally), a true/false enum for a bool column so Huma rejects bad
 // values, and a doc string. A string enum's allowed values live on the model's
 // validate tag and are emitted on the create body; this filter param does not
 // repeat them.
 func filterQueryTag(f modelField) string {
-	tag := `query:"` + f.Column + `"`
+	tag := `query:"` + f.jsonName() + `"`
 	if f.Kind == reflect.Bool {
 		tag += ` enum:"true,false"`
 	}

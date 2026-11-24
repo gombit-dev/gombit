@@ -10,6 +10,19 @@ version.
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking (model-first resources):** the list endpoint's filter, `search`,
+  `ordering` and `aggregate` params now use each field's wire name (its DTO
+  `json` name), not its database column. A field with `gorm:"column:…"` or an
+  `embeddedPrefix` is filtered as `?title=` / `?city=` and ordered as
+  `?ordering=-title`, where it was `?legacy_title=` / `?addr_city=` and
+  `?ordering=-legacy_title`. Clients that send the column name stop filtering
+  and ordering on it (the ordering request is rejected). Update those clients to
+  the wire name; the OpenAPI document and TypeScript client advertise the new
+  names after `gombit generate`
+  ([#732](https://github.com/gombit-dev/gombit/issues/732)).
+
 ### Fixed
 
 - `gombit dev --http` normalises the address it validates, instead of checking

@@ -386,12 +386,84 @@ func TestRenderModelHandlerQuerySurface(t *testing.T) {
 		// run test below cannot tell.
 		"strconv.ParseUint(input.ID, 10, 63)",
 		"database.ParseAggregates(ctx, input.Aggregate,",
-		"database.Ordering(ctx, q, input.Ordering, []string{\"title\", \"genre\"}, \"id\")",
+		"database.OrderingFor(ctx, q, input.Ordering, map[string]string{\"title\": \"title\", \"genre\": \"genre\"}, \"id\")",
 		"Aggregates: aggregates",
 	} {
 		if !strings.Contains(src, want) {
 			t.Fatalf("query handler missing %q in:\n%s", want, src)
 		}
+	}
+}
+
+// renamedColumnModel's wire names differ from its columns: the query surface
+// must speak the DTO's names (issue #732), mapping them to columns internally.
+type renamedColumnModel struct {
+	gorm.Model
+	Title string `gorm:"column:legacy_title" gombit:"read,write,filterable,sortable,searchable"`
+}
+
+// TestRenderModelHandlerQueryUsesWireNames: a filter, ordering, search or
+// aggregate param is named after the wire name, and the column only reaches SQL.
+func TestRenderModelHandlerQueryUsesWireNames(t *testing.T) {
+	res, err := buildModelResource(&renamedColumnModel{}, "renamedcolumnmodel")
+	if err != nil {
+		t.Fatalf("buildModelResource: %v", err)
+	}
+	src, err := renderModelHandler(res)
+	if err != nil {
+		t.Fatalf("renderModelHandler: %v", err)
+	}
+	assertParses(t, src)
+	for _, want := range []string{
+		"`query:\"title\" doc:\"Filter by Title (exact match)\"`",
+		"(allowed: title)",
+		"database.FilterEq(ctx, q, \"legacy_title\", database.FilterString, input.Title)",
+		"database.OrderingFor(ctx, q, input.Ordering, map[string]string{\"title\": \"legacy_title\"}, \"id\")",
+	} {
+		if !strings.Contains(src, want) {
+			t.Fatalf("query handler must use wire name and map to column; missing %q in:\n%s", want, src)
+		}
+	}
+	if strings.Contains(src, "query:\"legacy_title\"") {
+		t.Fatalf("query param must not be named after the column legacy_title:\n%s", src)
+	}
+}
+
+// Address is embedded with a column prefix, so City's column is addr_city while
+// its wire name stays "city".
+type Address struct {
+	City string `gombit:"read,write,filterable,sortable"`
+}
+
+type embeddedPrefixModel struct {
+	gorm.Model
+	Address Address `gorm:"embedded;embeddedPrefix:addr_"`
+}
+
+// TestRenderModelHandlerQueryUsesWireNamesForEmbedded: an embedded field's
+// query param and ordering name are its wire name, mapped to the prefixed column.
+func TestRenderModelHandlerQueryUsesWireNamesForEmbedded(t *testing.T) {
+	res, err := buildModelResource(&embeddedPrefixModel{}, "embeddedprefixmodel")
+	if err != nil {
+		t.Fatalf("buildModelResource: %v", err)
+	}
+	src, err := renderModelHandler(res)
+	if err != nil {
+		t.Fatalf("renderModelHandler: %v", err)
+	}
+	assertParses(t, src)
+	for _, want := range []string{
+		"`query:\"city\" doc:\"Filter by City (exact match)\"`",
+		"(allowed: city)",
+		"database.FilterEq(ctx, q, \"addr_city\", database.FilterString, input.City)",
+		"database.OrderingFor(ctx, q, input.Ordering, map[string]string{\"city\": \"addr_city\"}, \"id\")",
+	} {
+		if !strings.Contains(src, want) {
+			t.Fatalf("query handler must use wire name and map to column; missing %q in:\n%s", want, src)
+		}
+	}
+	if strings.Contains(src, "query:\"addr_city\"") {
+		t.Fatalf("query param must not be named after the column addr_city:\n%s", src)
 	}
 }
 
@@ -415,7 +487,7 @@ func TestRenderModelHandlerOrdersByPrimaryKeyColumn(t *testing.T) {
 		pkg   string
 		want  string
 	}{
-		{&codedModel{}, "codedmodel", `database.Ordering(ctx, q, input.Ordering, []string{"name"}, "code")`},
+		{&codedModel{}, "codedmodel", `database.OrderingFor(ctx, q, input.Ordering, map[string]string{"name": "name"}, "code")`},
 		{&codedPlainModel{}, "codedplainmodel", `q.Order("code").Offset(`},
 	} {
 		res, err := buildModelResource(tc.model, tc.pkg)

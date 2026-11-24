@@ -151,6 +151,17 @@ func ParseOrdering(ordering string) (field string, desc bool) {
 // string equality so only a declared column can reach the query. fallback must
 // be a unique column: a non-unique one leaves ties, and so pages, unordered.
 func Ordering(ctx context.Context, q *gorm.DB, ordering string, allowed []string, fallback string) (*gorm.DB, error) {
+	names := make(map[string]string, len(allowed))
+	for _, a := range allowed {
+		names[a] = a
+	}
+	return OrderingFor(ctx, q, ordering, names, fallback)
+}
+
+// OrderingFor is Ordering for fields whose wire name differs from their column:
+// allowed maps each permitted wire name (the spelling a client sends) to its
+// column, and only the column reaches the SQL.
+func OrderingFor(ctx context.Context, q *gorm.DB, ordering string, allowed map[string]string, fallback string) (*gorm.DB, error) {
 	field, desc := ParseOrdering(ordering)
 	if field == "" {
 		if fallback != "" {
@@ -158,21 +169,15 @@ func Ordering(ctx context.Context, q *gorm.DB, ordering string, allowed []string
 		}
 		return q, nil
 	}
-	permitted := false
-	for _, a := range allowed {
-		if a == field {
-			permitted = true
-			break
-		}
-	}
+	column, permitted := allowed[field]
 	if !permitted {
 		return nil, contract.WithContext(ctx, contract.Validation(
 			"The request contains invalid fields.",
 			map[string][]string{"ordering": {"ordering is not allowed for this field"}},
 		))
 	}
-	q = q.Order(clause.OrderByColumn{Column: clause.Column{Name: field}, Desc: desc})
-	if fallback != "" && fallback != field {
+	q = q.Order(clause.OrderByColumn{Column: clause.Column{Name: column}, Desc: desc})
+	if fallback != "" && fallback != column {
 		q = q.Order(clause.OrderByColumn{Column: clause.Column{Name: fallback}, Desc: desc})
 	}
 	return q, nil
