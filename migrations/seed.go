@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/gombit-dev/gombit/config"
 	"github.com/gombit-dev/gombit/database"
@@ -170,7 +171,50 @@ func splitSQLStatements(sql string) []string {
 		stmts                                             []string
 		current                                           strings.Builder
 		inSingle, inDouble, inLineComment, inBlockComment bool
+		// A CREATE TRIGGER / FUNCTION / PROCEDURE body is a BEGIN ... END
+		// block whose inner ';' must not end the statement.
+		word               strings.Builder
+		wordCount          int
+		isCreate, compound bool
+		blockDepth         int
+		prevWord           string
 	)
+	// flushWord classifies the word just ended by the rune next. Inside a
+	// compound body, END closes the innermost block; END IF / END LOOP /
+	// END WHILE / END REPEAT / END CASE name the block END already closed,
+	// so the word after END is not an opener. IF / LOOP / WHILE / REPEAT
+	// open a block, except IF( / REPEAT( (function calls) and DDL IF NOT EXISTS.
+	flushWord := func(next rune) {
+		if word.Len() == 0 {
+			return
+		}
+		w := word.String()
+		word.Reset()
+		wordCount++
+		last := prevWord
+		prevWord = w
+		switch {
+		case wordCount == 1:
+			isCreate = w == "CREATE"
+		case isCreate && wordCount <= 4 && (w == "TRIGGER" || w == "FUNCTION" || w == "PROCEDURE"):
+			compound = true
+		case !compound:
+		case w == "END":
+			if blockDepth > 0 {
+				blockDepth--
+			}
+		case last == "END":
+		case w == "BEGIN" || w == "CASE":
+			blockDepth++
+		case w == "IF" && next != '(' && !isDDLBefore(last):
+			blockDepth++
+		case (w == "LOOP" || w == "WHILE" || w == "REPEAT") && next != '(':
+			blockDepth++
+		}
+	}
+	resetStatement := func() {
+		wordCount, isCreate, compound, blockDepth, prevWord = 0, false, false, 0, ""
+	}
 
 	runes := []rune(sql)
 	for i := 0; i < len(runes); i++ {
@@ -178,6 +222,13 @@ func splitSQLStatements(sql string) []string {
 		next := rune(0)
 		if i+1 < len(runes) {
 			next = runes[i+1]
+		}
+
+		inCode := !inLineComment && !inBlockComment && !inSingle && !inDouble
+		if inCode && (unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_') {
+			word.WriteRune(unicode.ToUpper(r))
+		} else {
+			flushWord(r)
 		}
 
 		switch {
@@ -231,18 +282,34 @@ func splitSQLStatements(sql string) []string {
 			current.WriteRune(r)
 			inDouble = true
 		case r == ';':
+			if compound && blockDepth > 0 {
+				current.WriteRune(r)
+				continue
+			}
 			if stmt := strings.TrimSpace(current.String()); stmt != "" && !isSQLCommentOnly(stmt) {
 				stmts = append(stmts, stmt)
 			}
 			current.Reset()
+			resetStatement()
 		default:
 			current.WriteRune(r)
 		}
 	}
+	flushWord(0)
 	if stmt := strings.TrimSpace(current.String()); stmt != "" && !isSQLCommentOnly(stmt) {
 		stmts = append(stmts, stmt)
 	}
 	return stmts
+}
+
+// isDDLBefore reports whether the word before IF is a DDL keyword, so that
+// IF EXISTS / IF NOT EXISTS is not taken for a control-flow IF.
+func isDDLBefore(word string) bool {
+	switch word {
+	case "DROP", "TABLE", "VIEW", "INDEX", "DATABASE", "SCHEMA":
+		return true
+	}
+	return false
 }
 
 func isSQLCommentOnly(stmt string) bool {

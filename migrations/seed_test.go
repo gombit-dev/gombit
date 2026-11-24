@@ -165,6 +165,30 @@ func TestSplitSQLStatements(t *testing.T) {
 			sql:  "-- just a comment\n/* also comment */",
 			want: nil,
 		},
+		{
+			name: "trigger body with inner semicolons",
+			sql: "CREATE TRIGGER orders_audit AFTER INSERT ON orders\nBEGIN\n" +
+				"  INSERT INTO audit (order_id) VALUES (NEW.id);\n" +
+				"  UPDATE audit SET order_id = CASE WHEN 1 THEN 2 END;\n" +
+				"END;\nDROP TRIGGER orders_audit;",
+			want: []string{
+				"CREATE TRIGGER orders_audit AFTER INSERT ON orders\nBEGIN\n" +
+					"  INSERT INTO audit (order_id) VALUES (NEW.id);\n" +
+					"  UPDATE audit SET order_id = CASE WHEN 1 THEN 2 END;\n" +
+					"END",
+				"DROP TRIGGER orders_audit",
+			},
+		},
+		{
+			name: "procedure body with IF blocks",
+			sql: "CREATE PROCEDURE p() BEGIN IF x THEN SET y = 1; END IF; " +
+				"UPDATE t SET v = IF(x, 1, 2); END;\nSELECT 1;",
+			want: []string{
+				"CREATE PROCEDURE p() BEGIN IF x THEN SET y = 1; END IF; " +
+					"UPDATE t SET v = IF(x, 1, 2); END",
+				"SELECT 1",
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
