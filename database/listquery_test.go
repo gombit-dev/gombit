@@ -48,8 +48,8 @@ func assertListQueryHelpers(t *testing.T, db *DB) {
 		if len(all) != 3 {
 			t.Fatalf("empty filter returned %d rows, want 3 (no-op)", len(all))
 		}
-		// Coerced uint match.
-		q, err = FilterEq(ctx, db.Model(&lqItem{}), "author_id", FilterUint, "1")
+		// Coerced uint match (surrounding whitespace is trimmed for non-string kinds).
+		q, err = FilterEq(ctx, db.Model(&lqItem{}), "author_id", FilterUint, " 1 ")
 		if err != nil {
 			t.Fatalf("author filter: %v", err)
 		}
@@ -58,7 +58,45 @@ func assertListQueryHelpers(t *testing.T, db *DB) {
 			t.Fatalf("author filter find: %v", err)
 		}
 		if len(byAuthor) != 2 {
-			t.Fatalf("author_id=1 returned %d rows, want 2", len(byAuthor))
+			t.Fatalf("author_id=' 1 ' returned %d rows, want 2", len(byAuthor))
+		}
+		// Empty string filter is a no-op.
+		q, err = FilterEq(ctx, db.Model(&lqItem{}), "title", FilterString, "")
+		if err != nil {
+			t.Fatalf("empty string filter: %v", err)
+		}
+		var emptyStringRows []lqItem
+		if err := q.Find(&emptyStringRows).Error; err != nil {
+			t.Fatalf("empty string filter find: %v", err)
+		}
+		if len(emptyStringRows) != 3 {
+			t.Fatalf("empty string filter returned %d rows, want 3 (no-op)", len(emptyStringRows))
+		}
+		// String filter preserves whitespace byte for byte (issue #694).
+		for _, raw := range []string{" sku", "sku ", " "} {
+			dry, err := FilterEq(ctx, db.Session(&gorm.Session{DryRun: true}).Model(&lqItem{}), "code", FilterString, raw)
+			if err != nil {
+				t.Fatalf("FilterString(%q) error: %v", raw, err)
+			}
+			stmt := dry.Find(&[]lqItem{}).Statement
+			if !reflect.DeepEqual(stmt.Vars, []any{raw}) {
+				t.Fatalf("FilterString(%q) vars = %#v, want %#v", raw, stmt.Vars, []any{raw})
+			}
+		}
+		// In-database exact match: leading/trailing space does not match untrimmed row,
+		// and whitespace-only string is an exact filter rather than a no-op.
+		for _, raw := range []string{"Beta 50% off ", " Beta 50% off", " "} {
+			q, err = FilterEq(ctx, db.Model(&lqItem{}), "title", FilterString, raw)
+			if err != nil {
+				t.Fatalf("FilterEq(%q): %v", raw, err)
+			}
+			var rows []lqItem
+			if err := q.Find(&rows).Error; err != nil {
+				t.Fatalf("find: %v", err)
+			}
+			if len(rows) != 0 {
+				t.Fatalf("FilterEq(%q) returned %d rows, want 0", raw, len(rows))
+			}
 		}
 		// A value that does not parse as the kind is a 422 on the column.
 		_, err = FilterEq(ctx, db.Model(&lqItem{}), "author_id", FilterUint, "not-a-number")

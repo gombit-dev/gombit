@@ -1803,3 +1803,19 @@ releases:
           longer ones. It keeps working.
         refs: [684]
         deprecates: [framework.WorkerKillAfter]
+
+      - id: admin-string-key-whitespace
+        kind: informational
+        area: behavior
+        summary: "Admin string path IDs and string/text filters preserve leading and trailing whitespace instead of trimming it."
+        details: |
+          A string or text primary key preserves leading and trailing
+          whitespace when created, but `coercePathID` and `applyFilters`
+          previously trimmed the input before query lookup. Targeting a string
+          key with surrounding whitespace (e.g. `' sku'`) matched the trimmed row
+          (`'sku'`) instead of the intended row. String path IDs and exact-match
+          string and text filters now compare values byte for byte, preserving
+          whitespace, and generated handlers' `database.FilterEq` shares the same
+          exact-match semantics. Only an empty raw value means "filter not
+          supplied".
+        refs: [694]

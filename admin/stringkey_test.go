@@ -187,7 +187,12 @@ type skTag struct {
 // update, delete and filter operations target " sku" byte for byte rather
 // than trimming it and acting on "sku".
 func TestAdminStringKeyWhitespaceInPathIDAndFilter(t *testing.T) {
-	db := openSQLite(t)
+	runStringKeyWhitespaceAdmin(t, openSQLite(t))
+}
+
+func runStringKeyWhitespaceAdmin(t *testing.T, db *database.DB) {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
 	models := []any{&skTag{}}
 	_ = db.Migrator().DropTable(models...)
 	if err := db.AutoMigrate(models...); err != nil {
@@ -221,28 +226,48 @@ func TestAdminStringKeyWhitespaceInPathIDAndFilter(t *testing.T) {
 		}
 	}
 
-	// Detail (GET) retrieves the exact row matching the encoded string key.
-	res := doRequest(app, jar, http.MethodGet, base+"/%20sku", "")
-	if res.Code != http.StatusOK {
-		t.Fatalf("GET /%%20sku: %d %s", res.Code, res.Body.String())
-	}
-	var getEnv rowEnvelope
-	if err := json.Unmarshal(res.Body.Bytes(), &getEnv); err != nil {
-		t.Fatal(err)
-	}
-	if getEnv.Data["code"] != " sku" || getEnv.Data["name"] != "leading space" {
-		t.Fatalf("GET /%%20sku returned %#v, want code ' sku'", getEnv.Data)
+	// Detail (GET) retrieves the exact row matching the encoded string key
+	// for leading space (" sku") and trailing space ("sku ").
+	for _, tc := range []struct {
+		path     string
+		wantCode string
+		wantName string
+	}{
+		{"/%20sku", " sku", "leading space"},
+		{"/sku%20", "sku ", "trailing space"},
+	} {
+		res := doRequest(app, jar, http.MethodGet, base+tc.path, "")
+		if res.Code != http.StatusOK {
+			t.Fatalf("GET %s: %d %s", tc.path, res.Code, res.Body.String())
+		}
+		var getEnv rowEnvelope
+		if err := json.Unmarshal(res.Body.Bytes(), &getEnv); err != nil {
+			t.Fatal(err)
+		}
+		if getEnv.Data["code"] != tc.wantCode || getEnv.Data["name"] != tc.wantName {
+			t.Fatalf("GET %s returned %#v, want code %q name %q", tc.path, getEnv.Data, tc.wantCode, tc.wantName)
+		}
 	}
 
-	// Filter (?code=) matches the exact row with whitespace.
-	list := doRequest(app, jar, http.MethodGet, base+"?code=%20sku", "")
-	var listed listEnvelope
-	if err := json.Unmarshal(list.Body.Bytes(), &listed); err != nil || len(listed.Data) != 1 || listed.Data[0]["code"] != " sku" {
-		t.Fatalf("GET ?code=%%20sku returned %d %s, want only ' sku'", list.Code, list.Body.String())
+	// Filter (?code=) matches the exact row with leading space and trailing space.
+	for _, tc := range []struct {
+		query    string
+		wantCode string
+	}{
+		{"?code=%20sku", " sku"},
+		{"?code=sku%20", "sku "},
+	} {
+		list := doRequest(app, jar, http.MethodGet, base+tc.query, "")
+		var listed listEnvelope
+		if err := json.Unmarshal(list.Body.Bytes(), &listed); err != nil || len(listed.Data) != 1 || listed.Data[0]["code"] != tc.wantCode {
+			t.Fatalf("GET %s returned %d %s, want only %q", tc.query, list.Code, list.Body.String(), tc.wantCode)
+		}
 	}
 
-	// Update (PATCH) updates the row with whitespace without altering the untrimmed row.
-	res = doRequest(app, jar, http.MethodPatch, base+"/%20sku", `{"name":"updated leading space"}`)
+	// Update (PATCH) sends the key back unchanged along with updated fields.
+	// On main, this was rejected as a 422 because trimmed lookup loaded "sku".
+	// On this head, it must succeed with 200, update " sku" row, and leave "sku" untouched.
+	res := doRequest(app, jar, http.MethodPatch, base+"/%20sku", `{"code":" sku","name":"updated leading space"}`)
 	if res.Code != http.StatusOK {
 		t.Fatalf("PATCH /%%20sku: %d %s", res.Code, res.Body.String())
 	}
@@ -250,8 +275,12 @@ func TestAdminStringKeyWhitespaceInPathIDAndFilter(t *testing.T) {
 	if err := db.Where("code = ?", "sku").First(&unedited).Error; err != nil || unedited.Name != "exact sku" {
 		t.Fatalf("PATCH /%%20sku inadvertently altered 'sku' row: %+v", unedited)
 	}
+	var updated skTag
+	if err := db.Where("code = ?", " sku").First(&updated).Error; err != nil || updated.Name != "updated leading space" {
+		t.Fatalf("PATCH /%%20sku failed to update ' sku' row: %+v", updated)
+	}
 
-	// Delete (DELETE) deletes the row with whitespace, leaving "sku" intact.
+	// Delete (DELETE) deletes the row with whitespace, leaving "sku" and "sku " intact.
 	res = doRequest(app, jar, http.MethodDelete, base+"/%20sku", "")
 	if res.Code != http.StatusOK {
 		t.Fatalf("DELETE /%%20sku: %d %s", res.Code, res.Body.String())

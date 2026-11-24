@@ -76,6 +76,13 @@ version.
   dev only fixes the copy it hands the child, so a `.env` value of
   `GOMBIT_HTTP_ADDR=8080` still fails outside dev
   ([#513](https://github.com/gombit-dev/gombit/issues/513)).
+- Admin string path IDs and string/text filters preserve leading and trailing
+  whitespace instead of trimming it: requests targeting a string key with
+  surrounding whitespace (`/%20sku`, `?code=%20sku`) match the exact row
+  byte for byte rather than matching the trimmed row (`sku`). The generated
+  data plane's `database.FilterEq` shares the same exact-match semantics for
+  `FilterString`, with only an empty value treated as unsupplied
+  ([#694](https://github.com/gombit-dev/gombit/issues/694)).
 
 ## [0.10.0] — 2026-11-21
 

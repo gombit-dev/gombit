@@ -243,7 +243,7 @@ func coerceValue(raw any, ft FieldType) (any, error) {
 }
 
 func coerceFilter(raw string, ft FieldType) (any, error) {
-	if ft != TypeString && ft != TypeText {
+	if !ft.comparesExactly() {
 		raw = strings.TrimSpace(raw)
 	}
 	if raw == "" {
@@ -273,7 +273,7 @@ func coercePathID(id string, ft FieldType) (any, error) {
 	if ft == "" {
 		ft = TypeString
 	}
-	if ft != TypeString && ft != TypeText {
+	if !ft.comparesExactly() {
 		id = strings.TrimSpace(id)
 	}
 	if id == "" {

@@ -59,6 +59,8 @@ func TestCoercePathIDPreservesStringWhitespace(t *testing.T) {
 		{" sku ", TypeText, " sku "},
 		{"   ", TypeString, "   "},
 		{" 42 ", TypeInteger, int64(42)},
+		{" 550e8400-e29b-41d4-a716-446655440000 ", TypeUUID, "550e8400-e29b-41d4-a716-446655440000"},
+		{" 550E8400-E29B-41D4-A716-446655440000 ", typeCanonicalUUID, "550e8400-e29b-41d4-a716-446655440000"},
 	} {
 		got, err := coercePathID(tc.id, tc.ft)
 		if err != nil {
@@ -77,6 +79,8 @@ func TestCoercePathIDPreservesStringWhitespace(t *testing.T) {
 		{"", TypeText},
 		{"", TypeInteger},
 		{"   ", TypeInteger},
+		{"   ", TypeUUID},
+		{"   ", typeCanonicalUUID},
 	} {
 		if _, err := coercePathID(tc.id, tc.ft); err == nil {
 			t.Errorf("coercePathID(%q, %q) expected error for empty id, got nil", tc.id, tc.ft)
@@ -96,6 +100,10 @@ func TestCoerceFilterPreservesStringWhitespace(t *testing.T) {
 		{" 42 ", TypeInteger, int64(42)},
 		{"   ", TypeInteger, nil},
 		{"", TypeString, nil},
+		{" 550e8400-e29b-41d4-a716-446655440000 ", TypeUUID, "550e8400-e29b-41d4-a716-446655440000"},
+		{" 550E8400-E29B-41D4-A716-446655440000 ", typeCanonicalUUID, "550e8400-e29b-41d4-a716-446655440000"},
+		{"   ", TypeUUID, nil},
+		{"   ", typeCanonicalUUID, nil},
 	} {
 		got, err := coerceFilter(tc.raw, tc.ft)
 		if err != nil {

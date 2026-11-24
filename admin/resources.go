@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/gombit-dev/gombit/auth"
 	"github.com/gombit-dev/gombit/contract"
@@ -760,17 +759,14 @@ func applyFilters(ctx context.Context, q *gorm.DB, m *registered, values interfa
 			continue
 		}
 		raw := values.Get(name)
-		if f.valueType() != TypeString && f.valueType() != TypeText {
-			raw = strings.TrimSpace(raw)
-		}
-		if raw == "" {
-			continue
-		}
 		val, err := coerceFilter(raw, f.valueType())
 		if err != nil {
 			return nil, contract.WithContext(ctx, contract.Validation("The request contains invalid fields.", map[string][]string{
 				name: {err.Error()},
 			}))
+		}
+		if val == nil {
+			continue
 		}
 		q = q.Where(clause.Eq{Column: clause.Column{Name: f.column}, Value: val})
 	}
