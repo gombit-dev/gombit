@@ -9,7 +9,7 @@ From the repository root, regenerate the committed spec and client from
 `client.SampleApp()` (same path CI uses):
 
 ```sh
-go run ./cmd/gombit client check --write
+go run ./cmd/gombit client check --write --spec examples/client/openapi.json --out examples/client/frontend/src/api/generated
 ```
 
 `go generate ./client` does the same rewrite. To generate only the TypeScript

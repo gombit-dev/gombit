@@ -67,3 +67,33 @@ func TestClientCheckDefaultsMatchGenerateNotExamplesClient(t *testing.T) {
 		t.Fatalf("client check --help missing --url flag:\n%s", out)
 	}
 }
+
+// TestExamplesClientReadmeRegenerateCommandTargetsExamplesClient guards the
+// README regenerate command: without --spec and --out, `client check --write`
+// rewrites the repository-root openapi.json and creates frontend/ at the root
+// (the generated-app defaults) instead of updating examples/client, as CI does.
+func TestExamplesClientReadmeRegenerateCommandTargetsExamplesClient(t *testing.T) {
+	// #nosec G304 -- fixed repository path
+	readme, err := os.ReadFile(filepath.Join("..", "examples", "client", "README.md"))
+	if err != nil {
+		t.Fatalf("read examples/client/README.md: %v", err)
+	}
+	var line string
+	for _, l := range strings.Split(string(readme), "\n") {
+		if strings.Contains(l, "client check --write") {
+			line = l
+			break
+		}
+	}
+	if line == "" {
+		t.Fatalf("examples/client/README.md has no `client check --write` command")
+	}
+	for _, want := range []string{
+		"--spec examples/client/openapi.json",
+		"--out examples/client/frontend/src/api/generated",
+	} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("README regenerate command %q missing %q", line, want)
+		}
+	}
+}
