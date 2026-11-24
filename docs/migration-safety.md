@@ -42,12 +42,13 @@ It is a statement-level DDL classifier, not a full SQL parser, and it is
 (create table/index/view, add column, insert, grant, …) are `non_destructive`.
 Everything else — `UPDATE`, `TRUNCATE`, any `DELETE` (including MySQL
 multi-table `DELETE t FROM …`), `DROP SCHEMA`/`DROP DATABASE`, every
-`alter_column` that widens, narrows or changes a default (`ALTER COLUMN x TYPE
+`alter_column` that widens, narrows or sets a default (`ALTER COLUMN x TYPE
 …`, `MODIFY`/`CHANGE`), and any statement it cannot parse — classifies as
-`data_loss` so a host reviews it. `ALTER COLUMN x DROP NOT NULL` / `DROP
-DEFAULT` alone is a constraint relaxation, not a loss of existing data, so it
-classifies as `alter_column`/`non_destructive`; combined with any other
-destructive action on the same statement, the statement is still `data_loss`.
+`data_loss` so a host reviews it. Removing a default or a `NOT NULL`
+constraint never touches a stored row, so `ALTER [COLUMN] x DROP NOT NULL` /
+`DROP DEFAULT`, alone, classifies as `alter_column`/`non_destructive`; every
+other action in the same statement must also be one of these two, or the
+whole statement is still `data_loss`.
 It handles the Postgres (`"`), MySQL (`` ` ``) and SQLite quoting Atlas emits;
 where SQLite rewrites a drop-column as a table rebuild, the old-table `DROP`
 still flags data loss, and a multi-action `ALTER` (`ADD a, DROP b`) still

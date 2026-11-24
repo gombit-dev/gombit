@@ -60,20 +60,23 @@ var (
 	reRenameColumn = regexp.MustCompile(`(?is)\bRENAME\s+COLUMN\s+(\S+)`)
 	reRenameTo     = regexp.MustCompile(`(?is)\bRENAME\s+(?:TO\s+)?(\S+)`)
 	reAlterColumn  = regexp.MustCompile(`(?is)\b(?:ALTER\s+COLUMN|MODIFY(?:\s+COLUMN)?|CHANGE(?:\s+COLUMN)?)\s+(\S+)`)
-	// reAlterColumnDropConstraint is the ALTER COLUMN x DROP NOT NULL / DROP
-	// DEFAULT sub-clause: a constraint relaxation, not a type or default change,
-	// so it is the one alter_column action that is not data loss.
-	reAlterColumnDropConstraint = regexp.MustCompile(`(?is)\bALTER\s+COLUMN\s+(\S+)\s+DROP\s+(?:NOT\s+NULL|DEFAULT)\b`)
+	// reRelaxedAction matches a whole ALTER TABLE action (not the whole
+	// statement body) that is exactly ALTER [COLUMN] x DROP NOT NULL / DROP
+	// DEFAULT: a constraint relaxation, not a type or default change, so it is
+	// the one alter_column action that is not data loss. Anchored on both ends
+	// so an action with trailing clauses (a type change, another DROP) never
+	// matches.
+	reRelaxedAction = regexp.MustCompile(`(?is)^ALTER\s+(?:COLUMN\s+)?(\S+)\s+DROP\s+(?:NOT\s+NULL|DEFAULT)$`)
 )
 
 // dropKeywords are the tokens after a bare ALTER … DROP that are NOT a column,
 // so dropping them is a schema change, not row data loss. Anything else after a
 // bare DROP (including PARTITION, which carries data) is treated as a column
 // drop. COLUMN itself is handled by reDropColumn before the bare check. NOT and
-// DEFAULT are the ALTER COLUMN / MODIFY / CHANGE sub-clauses DROP NOT NULL and
-// DROP DEFAULT, not a dropped column; droppedColumn only treats them as
-// keywords when the token is bare, never when it is quoted (a real column
-// legitimately named "not" or "default" is always quoted by Atlas).
+// DEFAULT are the ALTER [COLUMN] sub-clauses DROP NOT NULL and DROP DEFAULT,
+// not a dropped column; droppedColumn only treats them as keywords when the
+// token is bare, never when it is quoted (a real column legitimately named
+// "not" or "default" is always quoted by Atlas).
 var dropKeywords = map[string]bool{
 	"CONSTRAINT": true, "INDEX": true, "KEY": true,
 	"PRIMARY": true, "FOREIGN": true, "UNIQUE": true, "CHECK": true,
@@ -125,19 +128,21 @@ func classifyStatement(stmt string) Operation {
 	}
 }
 
-// classifyAlter classifies an ALTER TABLE statement, scanning the whole body so
-// a destructive action is caught even in a multi-action ALTER
-// (e.g. ADD a, DROP b). Destructive actions win.
+// classifyAlter classifies an ALTER TABLE statement. It splits the body into
+// its top-level, comma-separated actions first (the way a multi-action ALTER
+// such as ADD a, DROP b is actually structured), so neither check below can
+// be fooled by a comma the action separator glues onto a token.
 func classifyAlter(stmt string) Operation {
 	m := reAlterTable.FindStringSubmatch(stmt)
 	table := clean(m[1])
 	body := m[2]
+	actions := splitActions(body)
 
-	if col, ok := droppedColumn(body); ok {
-		return Operation{Kind: OpDropColumn, Resource: table, Column: col, Safety: SafetyDataLoss}
-	}
-	if col, ok := relaxedColumn(body); ok {
+	if col, ok := relaxedColumn(actions); ok {
 		return Operation{Kind: OpAlterColumn, Resource: table, Column: col, Safety: SafetyNonDestructive}
+	}
+	if col, ok := droppedColumn(actions); ok {
+		return Operation{Kind: OpDropColumn, Resource: table, Column: col, Safety: SafetyDataLoss}
 	}
 	if reAlterColumn.MatchString(body) {
 		return Operation{Kind: OpAlterColumn, Resource: table, Column: ident(reAlterColumn, body), Safety: SafetyDataLoss}
@@ -160,16 +165,20 @@ func classifyAlter(stmt string) Operation {
 	return Operation{Kind: OpOther, Resource: table, Safety: SafetyNonDestructive}
 }
 
-// droppedColumn returns the name of a column dropped by the ALTER body, if any.
-// It recognizes DROP COLUMN and a bare DROP <ident> that is not a keyword
-// (CONSTRAINT / INDEX / KEY / …), and scans every DROP in the body. A keyword
-// token is only recognized bare (unquoted); a quoted token is always a real
-// identifier, even one that collides with a keyword (DROP "default").
-func droppedColumn(body string) (string, bool) {
-	if m := reDropColumn.FindStringSubmatch(body); m != nil {
-		return clean(m[1]), true
-	}
-	for _, m := range reDropBare.FindAllStringSubmatch(body, -1) {
+// droppedColumn returns the name of a column dropped by one of the ALTER
+// actions, if any. It recognizes DROP COLUMN and a bare DROP <ident> that is
+// not a keyword (CONSTRAINT / INDEX / KEY / …), and scans every action. A
+// keyword token is only recognized bare (unquoted); a quoted token is always
+// a real identifier, even one that collides with a keyword (DROP "default").
+func droppedColumn(actions []string) (string, bool) {
+	for _, action := range actions {
+		if m := reDropColumn.FindStringSubmatch(action); m != nil {
+			return clean(m[1]), true
+		}
+		m := reDropBare.FindStringSubmatch(action)
+		if m == nil {
+			continue
+		}
 		if !isQuoted(m[1]) && dropKeywords[strings.ToUpper(clean(m[1]))] {
 			continue
 		}
@@ -178,18 +187,28 @@ func droppedColumn(body string) (string, bool) {
 	return "", false
 }
 
-// relaxedColumn returns the column of an ALTER COLUMN x DROP NOT NULL / DROP
-// DEFAULT clause, the one alter_column action that is not data loss, but only
-// when every ALTER COLUMN / MODIFY / CHANGE action in the body is one of these
-// clauses — a destructive action elsewhere in the same statement (a type
-// change, another column) still classifies the whole statement as data loss.
-func relaxedColumn(body string) (string, bool) {
-	all := reAlterColumn.FindAllStringSubmatch(body, -1)
-	relaxed := reAlterColumnDropConstraint.FindAllStringSubmatch(body, -1)
-	if len(all) == 0 || len(all) != len(relaxed) {
+// relaxedColumn returns the column of an ALTER [COLUMN] x DROP NOT NULL /
+// DROP DEFAULT action, the one alter_column action that is not data loss, but
+// only when every action in the statement is one of these — a destructive
+// action elsewhere in the same statement (a type change, another column, a
+// dropped column) still classifies the whole statement as data loss. This is
+// an allow-list: an action this package cannot otherwise recognize as safe
+// never grants the relaxation.
+func relaxedColumn(actions []string) (string, bool) {
+	if len(actions) == 0 {
 		return "", false
 	}
-	return clean(relaxed[0][1]), true
+	var col string
+	for _, action := range actions {
+		m := reRelaxedAction.FindStringSubmatch(action)
+		if m == nil {
+			return "", false
+		}
+		if col == "" {
+			col = clean(m[1])
+		}
+	}
+	return col, true
 }
 
 // isQuoted reports whether tok, an identifier token as matched (before
@@ -221,6 +240,39 @@ func splitStatements(sql string) []string {
 		if s := strings.TrimSpace(stmt); s != "" {
 			out = append(out, s)
 		}
+	}
+	return out
+}
+
+// splitActions splits an ALTER TABLE body into its top-level, comma-separated
+// actions, ignoring commas inside parentheses and quotes. Atlas joins actions
+// with ", " but glues the comma straight onto the previous token when it
+// rewrites a trailing space (e.g. "DROP DEFAULT ," becomes "DROP DEFAULT,");
+// splitting first means neither the keyword nor the relaxation check ever
+// sees that comma as part of a token.
+func splitActions(body string) []string {
+	var out []string
+	depth, start := 0, 0
+	var quote rune
+	for i, r := range body {
+		switch {
+		case quote != 0:
+			if r == quote {
+				quote = 0
+			}
+		case r == '\'' || r == '"' || r == '`':
+			quote = r
+		case r == '(':
+			depth++
+		case r == ')':
+			depth--
+		case r == ',' && depth == 0:
+			out = append(out, strings.TrimSpace(body[start:i]))
+			start = i + 1
+		}
+	}
+	if rest := strings.TrimSpace(body[start:]); rest != "" {
+		out = append(out, rest)
 	}
 	return out
 }
