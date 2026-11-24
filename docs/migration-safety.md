@@ -33,7 +33,8 @@ that lose data:
 | Operation | Safety |
 | --- | --- |
 | `create_table`, `add_column`, `create_index`, `drop_index`, `rename_table`, `rename_column` | `non_destructive` |
-| `drop_column`, `drop_table`, `alter_column`, `DELETE` / `TRUNCATE` (as `other`) | **`data_loss`** |
+| `alter_column`, when it only drops a column's `NOT NULL` or `DEFAULT` | `non_destructive` |
+| `drop_column`, `drop_table`, `alter_column` (otherwise), `DELETE` / `TRUNCATE` (as `other`) | **`data_loss`** |
 
 A migration with any `data_loss` operation sets `requires_confirmation: true`.
 It is a statement-level DDL classifier, not a full SQL parser, and it is
@@ -41,11 +42,17 @@ It is a statement-level DDL classifier, not a full SQL parser, and it is
 (create table/index/view, add column, insert, grant, …) are `non_destructive`.
 Everything else — `UPDATE`, `TRUNCATE`, any `DELETE` (including MySQL
 multi-table `DELETE t FROM …`), `DROP SCHEMA`/`DROP DATABASE`, every
-`alter_column` (widening or narrowing), and any statement it cannot parse — classifies as `data_loss`
-so a host reviews it. It handles the Postgres (`"`), MySQL (`` ` ``) and SQLite
-quoting Atlas emits; where SQLite rewrites a drop-column as a table rebuild, the
-old-table `DROP` still flags data loss, and a multi-action `ALTER`
-(`ADD a, DROP b`) still surfaces the drop.
+`alter_column` that widens, narrows or sets a default (`ALTER COLUMN x TYPE
+…`, `MODIFY`/`CHANGE`), and any statement it cannot parse — classifies as
+`data_loss` so a host reviews it. Removing a default or a `NOT NULL`
+constraint never touches a stored row, so `ALTER [COLUMN] x DROP NOT NULL` /
+`DROP DEFAULT`, alone, classifies as `alter_column`/`non_destructive`; every
+other action in the same statement must also be one of these two, or the
+whole statement is still `data_loss`.
+It handles the Postgres (`"`), MySQL (`` ` ``) and SQLite quoting Atlas emits;
+where SQLite rewrites a drop-column as a table rebuild, the old-table `DROP`
+still flags data loss, and a multi-action `ALTER` (`ADD a, DROP b`) still
+surfaces the drop.
 
 ## The manifest
 

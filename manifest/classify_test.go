@@ -55,6 +55,70 @@ func TestClassifySingleStatements(t *testing.T) {
 			`ALTER TABLE "customers" RENAME COLUMN "code" TO "ref";`,
 			Operation{Kind: OpRenameColumn, Resource: "customers", Column: "code", Safety: SafetyNonDestructive},
 		},
+		"drop not null is alter column, not drop column, and not data loss": {
+			`ALTER TABLE "users" ALTER COLUMN "email" DROP NOT NULL;`,
+			Operation{Kind: OpAlterColumn, Resource: "users", Column: "email", Safety: SafetyNonDestructive},
+		},
+		"drop default is alter column, not drop column, and not data loss": {
+			`ALTER TABLE "users" ALTER COLUMN "email" DROP DEFAULT;`,
+			Operation{Kind: OpAlterColumn, Resource: "users", Column: "email", Safety: SafetyNonDestructive},
+		},
+		"mysql drop default is alter column, not drop column, and not data loss": {
+			"ALTER TABLE `users` ALTER COLUMN `email` DROP DEFAULT;",
+			Operation{Kind: OpAlterColumn, Resource: "users", Column: "email", Safety: SafetyNonDestructive},
+		},
+		"quoted column literally named default is still a real drop": {
+			"ALTER TABLE `customers` DROP `default`;",
+			Operation{Kind: OpDropColumn, Resource: "customers", Column: "default", Safety: SafetyDataLoss},
+		},
+		"quoted column literally named key is still a real drop": {
+			"ALTER TABLE `customers` DROP `key`;",
+			Operation{Kind: OpDropColumn, Resource: "customers", Column: "key", Safety: SafetyDataLoss},
+		},
+		"quoted column literally named index is still a real drop": {
+			`ALTER TABLE "customers" DROP "index";`,
+			Operation{Kind: OpDropColumn, Resource: "customers", Column: "index", Safety: SafetyDataLoss},
+		},
+		"quoted column literally named check is still a real drop": {
+			`ALTER TABLE "customers" DROP "check";`,
+			Operation{Kind: OpDropColumn, Resource: "customers", Column: "check", Safety: SafetyDataLoss},
+		},
+		"column-less alter drop not null is alter column, not data loss": {
+			`ALTER TABLE "users" ALTER "email" DROP NOT NULL;`,
+			Operation{Kind: OpAlterColumn, Resource: "users", Column: "email", Safety: SafetyNonDestructive},
+		},
+		"multi-action drop default comma glued onto token is still a relaxation": {
+			`ALTER TABLE "users" ALTER COLUMN "a" DROP DEFAULT, ALTER COLUMN "b" DROP NOT NULL;`,
+			Operation{Kind: OpAlterColumn, Resource: "users", Column: "a", Safety: SafetyNonDestructive},
+		},
+		"mysql multi-action drop default comma glued onto token is still a relaxation": {
+			"ALTER TABLE `users` ALTER COLUMN `a` DROP DEFAULT, ALTER COLUMN `b` DROP DEFAULT;",
+			Operation{Kind: OpAlterColumn, Resource: "users", Column: "a", Safety: SafetyNonDestructive},
+		},
+		"relaxation combined with a type change is still data loss": {
+			`ALTER TABLE "users" ALTER COLUMN "a" DROP NOT NULL, ALTER "b" TYPE smallint;`,
+			Operation{Kind: OpAlterColumn, Resource: "users", Column: "a", Safety: SafetyDataLoss},
+		},
+		"relaxation combined with set not null on another column is still data loss": {
+			`ALTER TABLE "users" ALTER COLUMN "a" DROP NOT NULL, ALTER "b" SET NOT NULL;`,
+			Operation{Kind: OpAlterColumn, Resource: "users", Column: "a", Safety: SafetyDataLoss},
+		},
+		"relaxation combined with drop column is still data loss": {
+			`ALTER TABLE "users" ALTER COLUMN "a" DROP NOT NULL, DROP COLUMN "b";`,
+			Operation{Kind: OpDropColumn, Resource: "users", Column: "b", Safety: SafetyDataLoss},
+		},
+		"relaxation combined with a bare drop is still data loss": {
+			`ALTER TABLE "users" ALTER COLUMN "a" DROP NOT NULL, DROP "b";`,
+			Operation{Kind: OpDropColumn, Resource: "users", Column: "b", Safety: SafetyDataLoss},
+		},
+		"mysql convert character set combined with relaxation is still data loss": {
+			"ALTER TABLE `users` CONVERT TO CHARACTER SET latin1, ALTER COLUMN `a` DROP DEFAULT;",
+			Operation{Kind: OpAlterColumn, Resource: "users", Column: "a", Safety: SafetyDataLoss},
+		},
+		"two relaxations in one statement with a space before the comma are both non-destructive": {
+			`ALTER TABLE "users" ALTER COLUMN "c" DROP DEFAULT , ALTER COLUMN "d" DROP NOT NULL;`,
+			Operation{Kind: OpAlterColumn, Resource: "users", Column: "c", Safety: SafetyNonDestructive},
+		},
 		"drop constraint is not row data loss": {
 			`ALTER TABLE "customers" DROP CONSTRAINT "fk_customers_owner";`,
 			Operation{Kind: OpOther, Resource: "customers", Safety: SafetyNonDestructive},
