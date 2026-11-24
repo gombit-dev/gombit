@@ -14,6 +14,7 @@ func validInputs() Inputs {
 		HTTPAddr:         ":8080",
 		DatabaseDriver:   "sqlite",
 		WebStopTimeout:   22 * time.Second,
+		ProjectorVersion: "v0.5.0",
 	}
 }
 
@@ -140,8 +141,8 @@ func TestProjectWebProcessOnly(t *testing.T) {
 	if !reflect.DeepEqual(got.Processes, want) {
 		t.Errorf("processes = %+v, want %+v", got.Processes, want)
 	}
-	if got.Redis.Required {
-		t.Error("redis.required = true, want false")
+	if got.Redis == nil || got.Redis.Required {
+		t.Errorf("redis = %+v, want not required", got.Redis)
 	}
 }
 
@@ -163,8 +164,8 @@ func TestProjectWorkerProcess(t *testing.T) {
 	if !reflect.DeepEqual(got.Processes, want) {
 		t.Errorf("processes = %+v, want %+v", got.Processes, want)
 	}
-	if !got.Redis.Required {
-		t.Error("redis.required = false, want true")
+	if got.Redis == nil || !got.Redis.Required {
+		t.Errorf("redis = %+v, want required", got.Redis)
 	}
 }
 
@@ -201,5 +202,39 @@ func TestContractJSONDeclaresProcessesAndRedis(t *testing.T) {
 		if !strings.Contains(string(data), want) {
 			t.Errorf("contract JSON %s lacks %s", data, want)
 		}
+	}
+}
+
+// Projected by a gombit of another release, the contract leaves out the
+// processes and the Redis dependency, which describe a release's runtime,
+// and needs no stop timeouts: it reads as one that predates them.
+func TestProjectLeavesOutTheRuntimeForAnotherRelease(t *testing.T) {
+	in := validInputs()
+	in.ProjectorVersion = "v0.6.0"
+	in.WebStopTimeout = 0
+	in.Worker = true
+	in.RedisRequired = true
+	if in.DescribesRuntime() {
+		t.Fatal("DescribesRuntime() = true for another release")
+	}
+	got, err := Project(in)
+	if err != nil {
+		t.Fatalf("Project() error = %v, want the contract without its runtime", err)
+	}
+	if got.Processes != nil || got.Redis != nil {
+		t.Errorf("processes = %+v, redis = %+v; want both left out", got.Processes, got.Redis)
+	}
+	data, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{`"processes"`, `"redis"`} {
+		if strings.Contains(string(data), field) {
+			t.Errorf("contract JSON %s has %s, want it absent", data, field)
+		}
+	}
+	// What every release projects alike is still there.
+	if got.Database.Driver != "sqlite" || got.Runtime.HTTPPort != 8080 {
+		t.Errorf("contract = %+v, want its other fields", got)
 	}
 }

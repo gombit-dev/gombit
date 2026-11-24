@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -20,6 +21,13 @@ func stubLoadConfig(t *testing.T, cfg config.Config) {
 	prev := LoadConfigFromDir
 	t.Cleanup(func() { LoadConfigFromDir = prev })
 	LoadConfigFromDir = func(string) (config.Config, error) { return cfg, nil }
+}
+
+// stubCLIVersion makes this gombit report release v, as `gombit version`
+// does, for the projection to compare with the app's.
+func stubCLIVersion(t *testing.T, v string) {
+	t.Helper()
+	stubBuild(t, v, "", "", nil)
 }
 
 func writeGoMod(t *testing.T, content string) string {
@@ -58,7 +66,7 @@ func TestRunContractAppEmitsProjectedJSON(t *testing.T) {
 	dir := writeGoMod(t, "module x\nrequire github.com/gombit-dev/gombit v0.5.0\n")
 
 	var out bytes.Buffer
-	if err := runContractApp(&out, dir, ""); err != nil {
+	if err := runContractApp(&out, io.Discard, dir, ""); err != nil {
 		t.Fatalf("runContractApp() error = %v", err)
 	}
 
@@ -95,7 +103,7 @@ func TestRunContractAppRequiredReflectsConfig(t *testing.T) {
 	dir := writeGoMod(t, "module x\nrequire github.com/gombit-dev/gombit v0.5.0\n")
 
 	var out bytes.Buffer
-	if err := runContractApp(&out, dir, ""); err != nil {
+	if err := runContractApp(&out, io.Discard, dir, ""); err != nil {
 		t.Fatalf("runContractApp() error = %v", err)
 	}
 	var got appContractJSON
@@ -113,7 +121,7 @@ func TestRunContractAppWritesFile(t *testing.T) {
 	outPath := filepath.Join(t.TempDir(), "app.json")
 
 	var stdout bytes.Buffer
-	if err := runContractApp(&stdout, dir, outPath); err != nil {
+	if err := runContractApp(&stdout, io.Discard, dir, outPath); err != nil {
 		t.Fatalf("runContractApp() error = %v", err)
 	}
 	if !strings.Contains(stdout.String(), outPath) {
@@ -137,7 +145,7 @@ func TestRunContractAppUnresolvedFrameworkFailsLoudly(t *testing.T) {
 	dir := writeGoMod(t, "module x\nrequire github.com/gombit-dev/gombit v0.5.0\nreplace github.com/gombit-dev/gombit => ../gombit\n")
 
 	var out bytes.Buffer
-	err := runContractApp(&out, dir, "")
+	err := runContractApp(&out, io.Discard, dir, "")
 	if err == nil {
 		t.Fatal("runContractApp() error = nil, want error for replaced framework")
 	}
@@ -149,7 +157,7 @@ func TestRunContractAppUnresolvedFrameworkFailsLoudly(t *testing.T) {
 func TestRunContractAppMissingGoModFails(t *testing.T) {
 	stubLoadConfig(t, config.Default())
 	var out bytes.Buffer
-	if err := runContractApp(&out, t.TempDir(), ""); err == nil {
+	if err := runContractApp(&out, io.Discard, t.TempDir(), ""); err == nil {
 		t.Fatal("runContractApp() error = nil, want error for missing go.mod")
 	}
 }
@@ -176,15 +184,16 @@ func TestRunContractAppDeclaresProcesses(t *testing.T) {
 		"memory jobs": {config.JobsDriverMemory, config.CacheDriverMemory, []process{web}, false},
 		"redis cache": {config.JobsDriverSync, config.CacheDriverRedis, []process{web}, true},
 		"redis jobs": {config.JobsDriverRedis, config.CacheDriverMemory, []process{web,
-			{Name: "worker", Args: []string{"worker"}, StopTimeoutSeconds: 58}}, true},
+			{Name: "worker", Args: []string{"worker"}, StopTimeoutSeconds: 60}}, true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			cfg := config.Default()
 			cfg.Jobs.Driver, cfg.Cache.Driver = tc.jobs, tc.cache
 			stubLoadConfig(t, cfg)
+			stubCLIVersion(t, "v0.5.0")
 			dir := writeGoMod(t, "module x\nrequire github.com/gombit-dev/gombit v0.5.0\n")
 			var out bytes.Buffer
-			if err := runContractApp(&out, dir, ""); err != nil {
+			if err := runContractApp(&out, io.Discard, dir, ""); err != nil {
 				t.Fatal(err)
 			}
 			var got struct {
@@ -214,21 +223,71 @@ func TestRunContractAppStopTimeoutsFollowTheConfig(t *testing.T) {
 	cfg.Shutdown = config.ShutdownConfig{Timeout: 15 * time.Second, DrainDelay: 3 * time.Second}
 	cfg.Jobs.Worker.ShutdownTimeout = 2 * time.Minute
 	stubLoadConfig(t, cfg)
+	stubCLIVersion(t, "v0.5.0")
 	dir := writeGoMod(t, "module x\nrequire github.com/gombit-dev/gombit v0.5.0\n")
 	var out bytes.Buffer
-	if err := runContractApp(&out, dir, ""); err != nil {
+	if err := runContractApp(&out, io.Discard, dir, ""); err != nil {
 		t.Fatal(err)
 	}
 	var got appcontract.Contract
 	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	// 3s + 2×15s + 2s, and 2m + 18s + 15s.
-	if len(got.Processes) != 2 || got.Processes[0].StopTimeoutSeconds != 35 || got.Processes[1].StopTimeoutSeconds != 153 {
-		t.Fatalf("processes = %+v, want the web process at 35s and the worker at 153s", got.Processes)
+	// 3s + 2×15s + 2s, and 2m + 18s + 15s + 2s.
+	if len(got.Processes) != 2 || got.Processes[0].StopTimeoutSeconds != 35 || got.Processes[1].StopTimeoutSeconds != 155 {
+		t.Fatalf("processes = %+v, want the web process at 35s and the worker at 155s", got.Processes)
 	}
-	if web, worker := framework.WebKillAfter(cfg), framework.WorkerKillAfterFor(cfg, nil); web != 35*time.Second || worker != 153*time.Second {
-		t.Fatalf("framework figures %s and %s, want 35s and 153s", web, worker)
+	if web, worker := framework.WebKillAfter(cfg), framework.WorkerKillAfterFor(cfg, nil); web != 35*time.Second || worker != 155*time.Second {
+		t.Fatalf("framework figures %s and %s, want 35s and 155s", web, worker)
+	}
+}
+
+// A gombit of another release than the app's leaves the processes and the
+// Redis dependency out, and says why on stderr: its stop timeouts and the
+// settings behind them are its own release's, not the app's. A CLI built from
+// source ("dev") is no release at all.
+func TestRunContractAppLeavesOutAnotherReleasesRuntime(t *testing.T) {
+	for name, cli := range map[string]string{"newer release": "v0.11.0", "dev build": DevVersion} {
+		t.Run(name, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.Jobs.Driver = config.JobsDriverRedis
+			cfg.Jobs.Worker.ShutdownTimeout = 10 * time.Second
+			stubLoadConfig(t, cfg)
+			stubCLIVersion(t, cli)
+			dir := writeGoMod(t, "module x\nrequire github.com/gombit-dev/gombit v0.10.0\n")
+			var out, stderr bytes.Buffer
+			if err := runContractApp(&out, &stderr, dir, ""); err != nil {
+				t.Fatal(err)
+			}
+			var got map[string]json.RawMessage
+			if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+				t.Fatal(err)
+			}
+			for _, field := range []string{"processes", "redis"} {
+				if raw, ok := got[field]; ok {
+					t.Errorf("%s = %s, want it left out", field, raw)
+				}
+			}
+			if _, ok := got["database"]; !ok {
+				t.Errorf("contract %s lacks the fields every release projects alike", out.String())
+			}
+			note := stderr.String()
+			for _, want := range []string{cli, "v0.10.0", "go run ./cmd/gombit contract app", "github.com/gombit-dev/gombit/cmd/gombit@v0.10.0"} {
+				if !strings.Contains(note, want) {
+					t.Errorf("stderr %q lacks %q", note, want)
+				}
+			}
+		})
+	}
+	// At the app's release, nothing is said.
+	stubLoadConfig(t, config.Default())
+	stubCLIVersion(t, "v0.10.0")
+	var stderr bytes.Buffer
+	if err := runContractApp(io.Discard, &stderr, writeGoMod(t, "module x\nrequire github.com/gombit-dev/gombit v0.10.0\n"), ""); err != nil {
+		t.Fatal(err)
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q at the app's own release, want nothing", stderr.String())
 	}
 }
 

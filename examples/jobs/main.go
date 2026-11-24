@@ -36,11 +36,6 @@ func main() {
 	if cfg.Jobs.Driver == config.JobsDriverSync {
 		cfg.Jobs.Driver = config.JobsDriverMemory // show a real queue
 	}
-	// The worker's declared settings (GOMBIT_JOBS_WORKER_*) are what
-	// RunWorker and `./server worker` run with when nothing overrides them.
-	// A deployment host starts the worker with no flags, so an app declares
-	// what production needs here, in configuration, not in flags.
-	cfg.Jobs.Worker.Concurrency = 2
 	app, err := framework.New(framework.WithConfig(cfg))
 	if err != nil {
 		log.Fatal(err)
@@ -102,13 +97,13 @@ func main() {
 		}
 		stopWorker()
 	}()
+	// An option left zero takes the app's declared worker setting
+	// (GOMBIT_JOBS_WORKER_*, read by config.Load): run this with
+	// GOMBIT_JOBS_WORKER_CONCURRENCY=2 to work two jobs at once. A deployed
+	// `./server worker` reads them the same way, with no flags.
 	if err := framework.RunWorker(workerCtx, app, jobs.WorkerOptions{PollInterval: 10 * time.Millisecond}); err != nil {
 		log.Fatal(err)
 	}
-	// How long a host gives this worker to stop before it kills it: the
-	// worker's stop_timeout_seconds in the application contract
-	// (`gombit contract app`), computed from the same settings.
-	fmt.Printf("worker stop timeout: %s\n", framework.WorkerKillAfterFor(cfg, nil))
 
 	// A job nothing handles fails visibly, with a classified reason.
 	err = dispatcher.Registry().Run(ctx, jobs.Envelope{ID: "unknown", Name: "send_invoice", Version: 1, Payload: json.RawMessage(`{}`)})

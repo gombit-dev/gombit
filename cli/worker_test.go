@@ -94,14 +94,14 @@ func TestWorkerCommandRunsTheAppsWorker(t *testing.T) {
 	}
 	// The app's declared worker and shutdown settings set how long the
 	// worker is given to stop: a 2m shutdown timeout, 18s for the queue
-	// calls and the canceled jobs, 10s for the stop hooks.
+	// calls and the canceled jobs, 10s for the stop hooks, 2s for the exit.
 	cfg := config.Default()
 	cfg.Jobs.Worker.ShutdownTimeout = 2 * time.Minute
 	stubLoadConfig(t, cfg)
 	if _, err := run(); err != nil {
 		t.Fatal(err)
 	}
-	if want := 148 * time.Second; gotKill != want {
+	if want := 150 * time.Second; gotKill != want {
 		t.Fatalf("kill after %s with a declared 2m worker shutdown timeout, want %s", gotKill, want)
 	}
 	prevLoad := LoadConfigFromDir

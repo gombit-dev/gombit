@@ -128,7 +128,7 @@ to guess that it exists, how to start it, and how long it needs to stop
 ```json
 "processes": [
   { "name": "web",    "args": [],         "http": true,  "stop_timeout_seconds": 22 },
-  { "name": "worker", "args": ["worker"], "http": false, "stop_timeout_seconds": 58 }
+  { "name": "worker", "args": ["worker"], "http": false, "stop_timeout_seconds": 60 }
 ],
 "redis": { "required": true }
 ```
@@ -144,25 +144,37 @@ to guess that it exists, how to start it, and how long it needs to stop
   outside the web process** (`config.JobsDriver.NeedsWorker`: `redis`; `sync`
   and `memory` list `web` alone).
 - **The worker's settings are declared in typed config**, the
-  `GOMBIT_JOBS_WORKER_*` variables, which the worker reads as its flags'
-  defaults. Its `args` are just `["worker"]`: the worker and the contract read
-  the same settings, so they can't disagree. There is no `gombit.yaml` loader
-  to declare them in.
+  `GOMBIT_JOBS_WORKER_*` variables, which the worker runs with for a flag not
+  given. Its `args` are just `["worker"]`, so the worker a host starts reads
+  the settings the contract's stop timeout is computed from. There is no
+  `gombit.yaml` loader to declare them in.
 - **Stop timeouts are the framework's own computation:**
   `framework.WebKillAfter` (drain delay, twice the shutdown timeout, 2s for the
   exit) and `framework.WorkerKillAfterFor` (the worker's shutdown timeout, 18s
-  for its queue calls, the stop hooks' timeout), rounded up to a second. The
-  web shutdown timeout and drain delay became settings too
-  (`GOMBIT_SHUTDOWN_TIMEOUT`, `GOMBIT_SHUTDOWN_DRAIN_DELAY`). A value set in
-  code (`WithShutdownTimeout`, `WithShutdownDrainDelay`) still wins at runtime
-  and is invisible to the projection.
+  for its queue calls, the stop hooks' timeout, 2s for the exit), rounded up
+  to a second. The web shutdown timeout and drain delay became settings too
+  (`GOMBIT_SHUTDOWN_TIMEOUT`, `GOMBIT_SHUTDOWN_DRAIN_DELAY`).
+- **The processes and `redis` are bound to the app's release.** Until HOST-4
+  every field said where things are (a port, probe paths, a driver), which no
+  release changes. The stop timeouts say how long one release's shutdown
+  takes, which settings it reads, and what needs Redis, and the projecting
+  gombit computes them with its own code. So it projects them only when it is
+  the release `framework.version` names, and leaves both out otherwise, as a
+  contract that predates them does. A host runs each app's own release for the
+  projection: `go run ./cmd/gombit contract app` in a scaffolded app, or
+  `go run github.com/gombit-dev/gombit/cmd/gombit@<framework.version> contract app`.
+  Refusing instead would have failed every projection by a mismatched gombit,
+  including the fields that mean the same in every release.
 - **`redis.required`** is true when the cache or the job queue is on `redis`,
   the way `database.required` declares the datastore. The host provides the
   server (`GOMBIT_REDIS_*`).
 - **The contract describes the configuration it is projected with.** The
   process environment wins over `.env`, so a host that injects configuration
   per environment projects the contract with the environment it will start the
-  processes with.
+  processes with. Nothing the app's code sets is seen: an `Option`
+  (`WithShutdownTimeout`, `WithShutdownDrainDelay`) or a `config.Config` field
+  changed before `WithConfig`, the jobs and cache drivers included, still wins
+  at runtime and is invisible to the projection.
 
 Rejected: a self-describing binary (`./server processes`), exact for settings
 made in code but needing the app constructed, and in the scaffold its database

@@ -41,12 +41,12 @@ Flags:
                       highest priority first (default:
                       GOMBIT_JOBS_WORKER_QUEUES, else GOMBIT_JOBS_QUEUE)
   --concurrency       jobs to run at once (default:
-                      GOMBIT_JOBS_WORKER_CONCURRENCY, 1)
+                      GOMBIT_JOBS_WORKER_CONCURRENCY, else 1)
   --lease             how long a reserved job is held; renewed while it runs
-                      (default: GOMBIT_JOBS_WORKER_LEASE, 5m)
+                      (default: GOMBIT_JOBS_WORKER_LEASE, else 5m)
   --shutdown-timeout  how long in-flight jobs get to finish on SIGINT/SIGTERM
                       before their context is canceled (default:
-                      GOMBIT_JOBS_WORKER_SHUTDOWN_TIMEOUT, 30s)
+                      GOMBIT_JOBS_WORKER_SHUTDOWN_TIMEOUT, else 30s)
   --metrics-addr      serve /metrics (Prometheus job outcomes and queue depth)
                       and /livez on this address, e.g. :9091 (default: off)
 
@@ -60,19 +60,19 @@ lives inside the dispatching process.`,
 					return cmd.Help()
 				}
 			}
-			if _, err := os.Stat(filepath.Join("cmd", "server")); err != nil {
-				return errors.New("gombit worker: cmd/server not found; run it from a gombit new application directory, or run your built binary with: ./server worker")
-			}
-			// The app's declared worker settings are the flags' defaults,
-			// and how long it is given to stop follows them.
-			cfg, err := LoadConfigFromDir(".")
-			if err != nil {
-				return fmt.Errorf("gombit worker: %w", err)
-			}
-			if _, err := framework.ParseWorkerFlagsFor(cfg, args, stderr); err != nil {
+			if _, err := framework.ParseWorkerFlags(args, stderr); err != nil {
 				if errors.Is(err, flag.ErrHelp) {
 					return nil
 				}
+				return fmt.Errorf("gombit worker: %w", err)
+			}
+			if _, err := os.Stat(filepath.Join("cmd", "server")); err != nil {
+				return errors.New("gombit worker: cmd/server not found; run it from a gombit new application directory, or run your built binary with: ./server worker")
+			}
+			// A flag not given runs on the app's declared setting, so how long
+			// the worker is given to stop follows them.
+			cfg, err := LoadConfigFromDir(".")
+			if err != nil {
 				return fmt.Errorf("gombit worker: %w", err)
 			}
 			// Build, then run the server binary itself: `go run` does not catch

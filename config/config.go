@@ -305,7 +305,9 @@ const (
 // NeedsWorker reports whether the driver's queue is worked by a separate
 // worker process (`./server worker`): only redis. The sync driver runs a job
 // when it is dispatched, and the memory driver's queue lives inside the
-// dispatching process, where no other process can reach it.
+// dispatching process, where no other process can reach it. It is the one
+// answer to the question: worker mode refuses a driver it reports false for,
+// and the application contract lists a worker for one it reports true for.
 func (d JobsDriver) NeedsWorker() bool {
 	return d == JobsDriverRedis
 }
@@ -327,9 +329,9 @@ type JobsConfig struct {
 	Worker JobsWorkerConfig
 }
 
-// JobsWorkerConfig is the jobs worker's declared settings. Each is the
-// default of a worker flag (framework.ParseWorkerFlagsFor), which overrides
-// it for one run. A deployment host starts the worker with no flags, so
+// JobsWorkerConfig is the jobs worker's declared settings. Each is what the
+// worker runs with when its flag (framework.ParseWorkerFlags) is not given,
+// and a flag overrides it for one run. A deployment host starts the worker with no flags, so
 // these are what it runs with, and the application contract (HOST-1)
 // declares the stop timeout they need. A zero field means gombit's default.
 type JobsWorkerConfig struct {

@@ -178,9 +178,13 @@ stops routing first ([lifecycle.md](lifecycle.md)). `framework.WithShutdownTimeo
 and `WithShutdownDrainDelay` override them in code, but a deployment host sees
 only the settings: the [application contract](app-contract.md#processes)
 declares the stop timeout they add up to.
-`GOMBIT_JOBS_WORKER_*` are the jobs worker's settings, the defaults of its
-flags; `GOMBIT_JOBS_WORKER_QUEUES` is comma-separated, highest priority first
-([jobs.md](jobs.md#running-the-worker)).
+`GOMBIT_JOBS_WORKER_*` are the jobs worker's settings, what it runs with for a
+flag not given; `GOMBIT_JOBS_WORKER_QUEUES` is comma-separated, highest
+priority first ([jobs.md](jobs.md#running-the-worker)). The application
+contract is projected from `.env` and the environment alone, so a field the
+app changes in the `config.Config` it passes to `framework.WithConfig` is
+invisible to a host: declare these, and the jobs and cache drivers, in
+configuration.
 `GOMBIT_STORAGE_DRIVER` accepts `local`, `memory`, and `s3` (which needs a
 bucket; set both S3 keys or neither). The local driver keeps
 files under `GOMBIT_STORAGE_LOCAL_ROOT` (relative to the working directory),

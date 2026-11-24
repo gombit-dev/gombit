@@ -35,8 +35,9 @@ to twice the shutdown timeout; give the process manager at least that, and a
 moment for the exit, before it kills the process. `framework.WebKillAfter`
 computes it (22s at the defaults), and the [application
 contract](app-contract.md#processes) declares it for a host. A host sees only
-the settings, not a value an `Option` sets in code, so declare in configuration
-what a host must wait for.
+the settings in `.env` and the environment, not a value set in code, whether
+by an `Option` or in the `config.Config` passed to `WithConfig`, so declare in
+configuration what a host must wait for.
 
 Every return from `Run`, `RunContext` or `RunWorker` runs the stop hooks once
 and then closes the cache and job dispatcher the app opened: after a clean

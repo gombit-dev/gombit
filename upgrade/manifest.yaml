@@ -1732,8 +1732,13 @@ releases:
           absent in a contract from an older gombit. Each process's
           `stop_timeout_seconds` is `framework.WebKillAfter` or
           `framework.WorkerKillAfterFor` of the declared shutdown and worker
-          settings. A host that injects configuration projects the contract
-          with the environment it will start the processes with.
+          settings. They describe one release's runtime, so `processes` and
+          `redis` are listed only when the projecting `gombit` is the release
+          the app's `go.mod` requires; any other leaves them out with a note
+          on stderr. Project each app with its own release:
+          `go run ./cmd/gombit contract app`. A host that injects
+          configuration projects the contract with the environment it will
+          start the processes with; nothing the app sets in code is in it.
         refs: [684]
 
       - id: shutdown-and-worker-settings
@@ -1759,3 +1764,42 @@ releases:
           - {var: GOMBIT_JOBS_WORKER_LEASE, change: added}
           - {var: GOMBIT_JOBS_WORKER_SHUTDOWN_TIMEOUT, change: added}
         refs: [684]
+
+      - id: parse-worker-flags-leaves-zero
+        kind: informational
+        area: api
+        summary: "`framework.ParseWorkerFlags` leaves a flag not given zero, for `framework.RunWorker` to take the app's declared worker setting, instead of filling in gombit's defaults."
+        details: |
+          It filled `Concurrency` 1, `Lease` 5m and `ShutdownTimeout` 30s, so
+          a worker started from its result ran on the defaults whatever the
+          app declared in `GOMBIT_JOBS_WORKER_*`. Passed to `RunWorker` or
+          `jobs.NewWorker`, the zero options run as before at the default
+          settings. Code that reads them sees zero for a flag not given: take
+          the declared value from `Config.Jobs.Worker` (its `Effective*`
+          methods apply gombit's defaults).
+        refs: [684]
+
+      - id: worker-stop-exit-allowance
+        kind: informational
+        area: behavior
+        summary: "A worker is given 2s more to stop, as the web process is, and 5s more with `--metrics-addr`: `gombit worker` waits 60s at the defaults instead of 58s."
+        details: |
+          The worker runs the same tail as the web process after its stop
+          hooks: the close of the job queue and cache the app opened, then the
+          exit, and with `--metrics-addr` the stop of that endpoint (up to
+          5s). `framework.WorkerKillAfterFor` counts them now. A process
+          manager configured from the old figure kills a worker that uses
+          every budget during that tail: raise it by 2s (7s with
+          `--metrics-addr`).
+        refs: [684]
+
+      - id: worker-kill-after-deprecated
+        kind: informational
+        area: api
+        summary: "`framework.WorkerKillAfter` is deprecated: use `framework.WorkerKillAfterFor` with the app's config."
+        details: |
+          `WorkerKillAfter` counts gombit's default worker and shutdown
+          settings, so it understates the stop time of an app that declares
+          longer ones. It keeps working.
+        refs: [684]
+        deprecates: [framework.WorkerKillAfter]

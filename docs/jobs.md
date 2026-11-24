@@ -134,11 +134,16 @@ the flag overrides it for one run:
 | `--shutdown-timeout` | `GOMBIT_JOBS_WORKER_SHUTDOWN_TIMEOUT` | `30s` | how long in-flight jobs get to finish on SIGINT/SIGTERM |
 | `--metrics-addr` | | off | serve `/metrics` and `/livez` on this address, e.g. `:9091` (see [Observability](#observability)) |
 
-Declare what production needs in configuration rather than in flags. A
-deployment host that reads the [application contract](app-contract.md#processes)
-starts the worker as `./server worker`, with no flags, so the settings are what
-it runs with, and the contract's stop timeout for the worker is computed from
-them.
+`framework.RunWorker` resolves the settings the same way for an option left
+zero, and `framework.ParseWorkerFlags` leaves a flag not given zero for it.
+
+Declare what production needs in configuration, in `.env` or the environment,
+rather than in flags or in code. A deployment host that reads the
+[application contract](app-contract.md#processes) starts the worker as
+`./server worker`, with no flags, so the settings are what it runs with, and
+the contract's stop timeout for the worker is computed from them. The
+projection reads no code: a setting `main.go` writes into the `config.Config`
+it passes to `framework.WithConfig` reaches the worker but not the contract.
 
 A worker needs a queue another process can reach, so it refuses to start with
 the `sync` driver (jobs already ran at dispatch) and the `memory` driver (its
@@ -164,13 +169,15 @@ canceled and gets up to 10 more seconds (`jobs.ShutdownGrace`) to return and
 be released, available immediately. Then the app's `OnStop` hooks run.
 
 **Give your process manager a stop timeout of at least the worker's shutdown
-timeout plus 18 seconds plus the app's shutdown timeout** (58s at the defaults;
+timeout plus 20 seconds plus the app's shutdown timeout** (60s at the defaults;
 `terminationGracePeriodSeconds` on Kubernetes, `TimeoutStopSec` on systemd,
-`stop_grace_period` in Compose). That is everything that follows SIGTERM: a
-reserve already on the wire and the release of what it returns (4s each), the
-worker's shutdown timeout, the 10s grace, and the app's stop hooks
-(`GOMBIT_SHUTDOWN_TIMEOUT`, 10s). A manager that kills the worker sooner can
-cut off a release or an ack, and that job waits out its lease instead.
+`stop_grace_period` in Compose), and 5 seconds more with `--metrics-addr`.
+That is everything that follows SIGTERM: a reserve already on the wire and the
+release of what it returns (4s each), the worker's shutdown timeout, the 10s
+grace, the app's stop hooks (`GOMBIT_SHUTDOWN_TIMEOUT`, 10s), the metrics
+endpoint's stop, and 2s for the close of what the app opened and the exit. A
+manager that kills the worker sooner can cut off a release or an ack, and that
+job waits out its lease instead.
 `framework.WorkerKillAfterFor` computes it from the app's config and the
 worker's flags, `gombit worker` waits that long itself, and the
 [application contract](app-contract.md#processes) declares it for a host as

@@ -912,9 +912,12 @@ See [openapi.md](openapi.md) and [client.md](client.md).
 Emits the machine-readable **application contract** (HOST-1) — how a deployment
 host builds, health-checks, and migrates the app, and the processes it runs
 from the build with how long each needs to stop (HOST-4), projected from
-declared config and `go.mod`, never inferred from the source tree. The process
-environment wins over `.env`, so a host projects it with the environment it
-will run the app with. Writes JSON to stdout
+declared config and `go.mod`, never inferred from the source tree or read from
+the app's code. The process environment wins over `.env`, so a host projects
+it with the environment it will run the app with. The processes and `redis`
+are listed only when this `gombit` is the release `go.mod` requires; any other
+leaves them out with a note on stderr, so project with the app's own release
+(`go run ./cmd/gombit contract app`). Writes JSON to stdout
 or `--out`; `--dir` selects the project directory. Fails loudly when the
 framework version is missing or replaced by a local checkout. See
 [app-contract.md](app-contract.md).

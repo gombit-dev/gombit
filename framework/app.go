@@ -866,11 +866,11 @@ func (a *App) shutdown() error {
 	return errors.Join(drainErr, a.runStopHooks())
 }
 
-// webShutdownGrace is how much longer than its drain delay and its two
-// shutdown-timeout budgets a web process takes to stop: the close of the job
-// queue and the cache the app opened, which follows the stop hooks, the
-// return from Run, and the process's exit.
-const webShutdownGrace = 2 * time.Second
+// shutdownExitGrace is how much longer than its budgets a process takes to
+// stop: the close of the job queue and the cache the app opened, which
+// follows the stop hooks, the return from Run or RunWorker, and the process's
+// exit. The web process and the worker both run this tail.
+const shutdownExitGrace = 2 * time.Second
 
 // WebKillAfter is how long a process supervisor should wait, after asking the
 // web process of an app configured by cfg to stop (SIGTERM or SIGINT), before
@@ -881,7 +881,7 @@ const webShutdownGrace = 2 * time.Second
 // WithShutdownDrainDelay) is not in cfg, so it is not counted. The
 // application contract declares this for the web process.
 func WebKillAfter(cfg config.Config) time.Duration {
-	return cfg.Shutdown.DrainDelay + 2*cfg.Shutdown.EffectiveTimeout() + webShutdownGrace
+	return cfg.Shutdown.DrainDelay + 2*cfg.Shutdown.EffectiveTimeout() + shutdownExitGrace
 }
 
 func (a *App) runStopHooks() error {

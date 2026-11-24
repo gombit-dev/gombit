@@ -28,10 +28,6 @@ func TestParseWorkerFlags(t *testing.T) {
 	if strings.Join(opts.Queues, ",") != "critical,mail,default" || opts.Concurrency != 8 || opts.Lease != 2*time.Minute || opts.ShutdownTimeout != 45*time.Second {
 		t.Fatalf("opts = %+v", opts)
 	}
-	defaults, err := ParseWorkerFlags(nil, nil)
-	if err != nil || len(defaults.Queues) != 0 || defaults.Concurrency != 1 || defaults.Lease != jobs.DefaultLease || defaults.ShutdownTimeout != jobs.DefaultShutdownTimeout {
-		t.Fatalf("defaults = %+v, %v", defaults, err)
-	}
 	for _, args := range [][]string{
 		{"--queue", "Bad Queue"},
 		{"--concurrency", "0"},
@@ -49,10 +45,10 @@ func TestParseWorkerFlags(t *testing.T) {
 		t.Fatalf("--help = %v, output %q", err, help.String())
 	}
 	// Everything after SIGTERM: a reserve on the wire and its release, the
-	// shutdown timeout, the grace, and the stop hooks.
-	want := time.Minute + 2*jobs.QueueCallTimeout + jobs.ShutdownGrace + defaultShutdownTimeout
-	if got := WorkerKillAfter([]string{"--shutdown-timeout", "1m"}); got != want {
-		t.Fatalf("WorkerKillAfter = %s, want %s", got, want)
+	// shutdown timeout, the grace, the stop hooks, and the exit.
+	want := time.Minute + 2*jobs.QueueCallTimeout + jobs.ShutdownGrace + defaultShutdownTimeout + shutdownExitGrace
+	if got := WorkerKillAfterFor(config.Default(), []string{"--shutdown-timeout", "1m"}); got != want {
+		t.Fatalf("WorkerKillAfterFor = %s, want %s", got, want)
 	}
 }
 

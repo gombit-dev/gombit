@@ -3,6 +3,7 @@ package framework
 import (
 	"bytes"
 	"context"
+	"io"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -10,6 +11,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/gombit-dev/gombit/config"
 	"github.com/gombit-dev/gombit/jobs"
@@ -33,59 +36,155 @@ func TestWebKillAfter(t *testing.T) {
 
 func TestWorkerKillAfterFor(t *testing.T) {
 	cfg := config.Default()
-	if got := WorkerKillAfterFor(cfg, nil); got != 58*time.Second {
-		t.Errorf("WorkerKillAfterFor(defaults) = %s, want 58s", got)
+	if got := WorkerKillAfterFor(cfg, nil); got != time.Minute {
+		t.Errorf("WorkerKillAfterFor(defaults) = %s, want 60s: the 30s shutdown timeout, 18s for the queue calls and the canceled jobs, 10s for the stop hooks, 2s for the exit", got)
 	}
-	if got := WorkerKillAfter(nil); got != 58*time.Second {
-		t.Errorf("WorkerKillAfter(nil) = %s, want 58s, unchanged", got)
+	if got := WorkerKillAfter(nil); got != time.Minute {
+		t.Errorf("WorkerKillAfter(nil) = %s, want WorkerKillAfterFor's 60s at the defaults", got)
 	}
 	cfg.Jobs.Worker.ShutdownTimeout = time.Minute
 	cfg.Shutdown.Timeout = 15 * time.Second
-	// The worker's 1m, 18s for the queue calls and the canceled jobs, and the
-	// stop hooks' 15s.
-	if got := WorkerKillAfterFor(cfg, nil); got != 93*time.Second {
-		t.Errorf("WorkerKillAfterFor(1m worker, 15s hooks) = %s, want 93s", got)
+	// The worker's 1m, 18s for the queue calls and the canceled jobs, the
+	// stop hooks' 15s, and the exit's 2s.
+	if got := WorkerKillAfterFor(cfg, nil); got != 95*time.Second {
+		t.Errorf("WorkerKillAfterFor(1m worker, 15s hooks) = %s, want 95s", got)
 	}
-	if got := WorkerKillAfterFor(cfg, []string{"--shutdown-timeout", "5s"}); got != 38*time.Second {
-		t.Errorf("WorkerKillAfterFor with --shutdown-timeout 5s = %s, want 38s: the flag wins over the setting", got)
+	if got := WorkerKillAfterFor(cfg, []string{"--shutdown-timeout", "5s"}); got != 40*time.Second {
+		t.Errorf("WorkerKillAfterFor with --shutdown-timeout 5s = %s, want 40s: the flag wins over the setting", got)
 	}
-	if got := WorkerKillAfterFor(cfg, []string{"--nope"}); got != 93*time.Second {
-		t.Errorf("WorkerKillAfterFor with unparsable args = %s, want the declared 93s", got)
+	if got := WorkerKillAfterFor(cfg, []string{"--metrics-addr", ":9091"}); got != 100*time.Second {
+		t.Errorf("WorkerKillAfterFor with --metrics-addr = %s, want 100s: 5s more for the metrics endpoint to stop", got)
+	}
+	if got := WorkerKillAfterFor(cfg, []string{"--nope"}); got != 95*time.Second {
+		t.Errorf("WorkerKillAfterFor with unparsable args = %s, want the declared 95s", got)
 	}
 }
 
-// The declared worker settings are the flags' defaults, and a flag
-// overrides its own.
-func TestParseWorkerFlagsForTakesTheDeclaredSettings(t *testing.T) {
-	cfg := config.Default()
-	cfg.Jobs.Worker = config.JobsWorkerConfig{
-		Queues:          []string{"critical", "default"},
-		Concurrency:     4,
-		Lease:           2 * time.Minute,
-		ShutdownTimeout: 45 * time.Second,
-	}
-	got, err := ParseWorkerFlagsFor(cfg, nil, nil)
+// A flag not given is left zero for RunWorker to resolve against the app's
+// declared settings, so no caller of ParseWorkerFlags gets gombit's defaults
+// in their place; --help names the settings.
+func TestParseWorkerFlagsLeavesTheSettingsToTheApp(t *testing.T) {
+	got, err := ParseWorkerFlags(nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(got.Queues, ",") != "critical,default" || got.Concurrency != 4 || got.Lease != 2*time.Minute || got.ShutdownTimeout != 45*time.Second {
-		t.Fatalf("no flags: %+v, want the declared settings", got.WorkerOptions)
+	if got.Queues != nil || got.Concurrency != 0 || got.Lease != 0 || got.ShutdownTimeout != 0 {
+		t.Fatalf("no flags: %+v, want every option zero", got.WorkerOptions)
 	}
-	got, err = ParseWorkerFlagsFor(cfg, []string{"--queue", "mail", "--concurrency", "8"}, nil)
+	got, err = ParseWorkerFlags([]string{"--queue", "mail", "--concurrency", "8"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(got.Queues, ",") != "mail" || got.Concurrency != 8 || got.Lease != 2*time.Minute || got.ShutdownTimeout != 45*time.Second {
-		t.Fatalf("--queue mail --concurrency 8: %+v, want those two flags over the declared settings", got.WorkerOptions)
+	if strings.Join(got.Queues, ",") != "mail" || got.Concurrency != 8 || got.Lease != 0 || got.ShutdownTimeout != 0 {
+		t.Fatalf("--queue mail --concurrency 8: %+v, want those two and the rest zero", got.WorkerOptions)
 	}
 	var help bytes.Buffer
-	_, _ = ParseWorkerFlagsFor(cfg, []string{"--help"}, &help)
-	if !strings.Contains(help.String(), "(default 4)") || !strings.Contains(help.String(), "GOMBIT_JOBS_WORKER_CONCURRENCY") {
-		t.Errorf("--help shows no declared default and setting:\n%s", help.String())
+	_, _ = ParseWorkerFlags([]string{"--help"}, &help)
+	for _, want := range []string{"GOMBIT_JOBS_WORKER_QUEUES", "GOMBIT_JOBS_WORKER_CONCURRENCY, else 1", "GOMBIT_JOBS_WORKER_LEASE, else 5m", "GOMBIT_JOBS_WORKER_SHUTDOWN_TIMEOUT, else 30s"} {
+		if !strings.Contains(help.String(), want) {
+			t.Errorf("--help lacks %q:\n%s", want, help.String())
+		}
 	}
-	got.Queues[0] = "changed"
-	if cfg.Jobs.Worker.Queues[0] != "critical" {
-		t.Error("ParseWorkerFlagsFor's queues alias the config's")
+	if strings.Contains(help.String(), "(default 0") {
+		t.Errorf("--help shows a zero default:\n%s", help.String())
+	}
+}
+
+// What a host starts, `./server worker` with no flags, and RunWorker with
+// zero options run on the app's declared concurrency, lease and shutdown
+// timeout: the settings the application contract computes the worker's stop
+// timeout from.
+func TestTheWorkerRunsOnTheDeclaredSettings(t *testing.T) {
+	const shutdown = 300 * time.Millisecond
+	declared := config.JobsWorkerConfig{Concurrency: 3, Lease: 2 * time.Minute, ShutdownTimeout: shutdown}
+	memoryJobs := func() config.Config {
+		cfg := config.Default()
+		cfg.Environment = config.EnvironmentTest
+		cfg.Jobs.Driver = config.JobsDriverMemory
+		cfg.Jobs.Worker = declared
+		return cfg
+	}
+	cases := map[string]struct {
+		cfg func() config.Config
+		run func(context.Context, *App) error
+	}{
+		"./server worker": {
+			// A redis-driver config passes worker mode's driver check; the
+			// memory dispatcher attached below keeps the test off Redis.
+			cfg: func() config.Config {
+				cfg := memoryJobs()
+				cfg.Jobs.Driver = config.JobsDriverRedis
+				return cfg
+			},
+			run: func(ctx context.Context, app *App) error { return runWorkerCommand(ctx, app, nil, io.Discard) },
+		},
+		"RunWorker": {
+			cfg: memoryJobs,
+			run: func(ctx context.Context, app *App) error { return RunWorker(ctx, app, jobs.WorkerOptions{}) },
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			cfg := tc.cfg()
+			core, logs := observer.New(zap.InfoLevel)
+			opts := []Option{WithConfig(cfg), WithLogger(zap.New(core))}
+			if cfg.Jobs.Driver == config.JobsDriverRedis {
+				dispatcher, err := jobs.Open(memoryJobs().Jobs, cfg.Cache.Redis, jobs.NewRegistry())
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = dispatcher.Close() })
+				opts = append(opts, WithJobs(dispatcher))
+			}
+			app, err := New(opts...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			entered := make(chan struct{})
+			canceled := make(chan struct{})
+			jobs.MustRegister(app.Jobs().Registry(), func(ctx context.Context, _ workerJob) error {
+				close(entered)
+				<-ctx.Done()
+				close(canceled)
+				return ctx.Err()
+			})
+			if _, err := app.Jobs().Dispatch(context.Background(), workerJob{}); err != nil {
+				t.Fatal(err)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() { done <- tc.run(ctx, app) }()
+			select {
+			case <-entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the worker never ran the job")
+			}
+			started := logs.FilterMessage("jobs worker started").All()
+			if len(started) != 1 {
+				t.Fatalf("logged %d worker starts, want 1", len(started))
+			}
+			fields := started[0].ContextMap()
+			if fields["concurrency"] != int64(3) || fields["lease"] != 2*time.Minute {
+				t.Errorf("the worker started with concurrency %v and lease %v, want the declared 3 and 2m0s", fields["concurrency"], fields["lease"])
+			}
+
+			// The job ignores the stop until its context is canceled, which
+			// the declared shutdown timeout does, not gombit's 30s.
+			begin := time.Now()
+			cancel()
+			select {
+			case <-canceled:
+			case <-time.After(10 * shutdown):
+				t.Fatalf("the in-flight job was not canceled within %s: the worker does not use the declared %s shutdown timeout", 10*shutdown, shutdown)
+			}
+			if took := time.Since(begin); took < shutdown {
+				t.Errorf("the in-flight job was canceled after %s, before the declared %s shutdown timeout", took, shutdown)
+			}
+			if err := <-done; err != nil {
+				t.Fatalf("the worker returned %v", err)
+			}
+		})
 	}
 }
 
@@ -211,7 +310,7 @@ func TestWebKillAfterCoversTheShutdown(t *testing.T) {
 	if floor := delay + 2*timeout; took < floor {
 		t.Errorf("the shutdown took %s, under the %s its budgets add up to: the test no longer uses them all", took, floor)
 	}
-	if limit := WebKillAfter(cfg) - webShutdownGrace; took > limit+slack {
+	if limit := WebKillAfter(cfg) - shutdownExitGrace; took > limit+slack {
 		t.Errorf("the shutdown took %s, past the %s WebKillAfter allows before its exit grace", took, limit)
 	}
 }
