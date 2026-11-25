@@ -23,7 +23,7 @@ require (
 	github.com/pb33f/libopenapi v0.43.2
 	github.com/pb33f/libopenapi-validator v0.16.5
 	github.com/redis/go-redis/v9 v9.23.0
-	github.com/shopspring/decimal v1.4.0
+	github.com/shopspring/decimal v1.6.0
 	github.com/spf13/cobra v1.10.2
 	go.opentelemetry.io/otel v1.47.0
 	go.opentelemetry.io/otel/sdk v1.47.0
