@@ -76,6 +76,16 @@ version.
   dev only fixes the copy it hands the child, so a `.env` value of
   `GOMBIT_HTTP_ADDR=8080` still fails outside dev
   ([#513](https://github.com/gombit-dev/gombit/issues/513)).
+- Admin string/text path IDs, admin string filters, and generated list
+  string/enum filters (`database.FilterEq` for `FilterString`) bind leading,
+  trailing, and whitespace-only values as sent without trimming them: requests
+  targeting a string key with surrounding whitespace (`/%20sku`, `?code=%20sku`)
+  match the intended row rather than the trimmed row (`sku`), and in generated
+  list handlers `?status=%20` filters for `" "` rather than returning all rows
+  while `?status=active%20` no longer matches `"active"`. Only an empty value
+  is treated as unsupplied; equality itself is up to the column's collation
+  (MySQL's default ignores case and accents)
+  ([#694](https://github.com/gombit-dev/gombit/issues/694)).
 
 ## [0.10.0] — 2026-11-21
 

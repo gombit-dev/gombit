@@ -133,11 +133,25 @@ func TestStringKeyAdminPostgres(t *testing.T) {
 	runStringKeyAdmin(t, openAdminDriver(t, config.DatabaseDriverPostgres, *postgresDSN))
 }
 
+func TestStringKeyWhitespaceAdminPostgres(t *testing.T) {
+	if *postgresDSN == "" {
+		t.Skip("set -admin.postgres-dsn to run Postgres admin integration tests")
+	}
+	runStringKeyWhitespaceAdmin(t, openAdminDriver(t, config.DatabaseDriverPostgres, *postgresDSN))
+}
+
 func TestStringKeyAdminMySQL(t *testing.T) {
 	if *mysqlDSN == "" {
 		t.Skip("set -admin.mysql-dsn to run MySQL admin integration tests")
 	}
 	runStringKeyAdmin(t, openAdminDriver(t, config.DatabaseDriverMySQL, *mysqlDSN))
+}
+
+func TestStringKeyWhitespaceAdminMySQL(t *testing.T) {
+	if *mysqlDSN == "" {
+		t.Skip("set -admin.mysql-dsn to run MySQL admin integration tests")
+	}
+	runStringKeyWhitespaceAdmin(t, openAdminDriver(t, config.DatabaseDriverMySQL, *mysqlDSN))
 }
 
 func TestUUIDCaseAdminPostgres(t *testing.T) {

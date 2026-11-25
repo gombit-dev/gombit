@@ -425,7 +425,11 @@ List query parameters:
   present (`?ordering=-created_at` is `created_at DESC, id DESC`, which an
   index on `created_at` serves on MySQL/InnoDB, and one on `(created_at, id)`
   on PostgreSQL), so pages neither repeat nor skip a row
-- one query key per `Options.Filter` field
+- one query key per `Options.Filter` field: a string filter binds the value as
+  sent, whitespace included, without trimming; only an empty value means "not
+  supplied" (equality is up to the column's collation, and MySQL's default
+  ignores case and accents). Non-string filters continue to trim surrounding
+  whitespace
 
 Row JSON is keyed by registered field names, plus implicit `created_at` /
 `updated_at` when the GORM model has them and they were omitted from
@@ -457,7 +461,10 @@ declared `Type: admin.TypeUUID` must be the hyphenated 36-character form and
 keeps the spelling sent, written and compared: in a text (`char(36)`) column,
 which holds whatever spelling was written, it is found on SQLite and
 PostgreSQL by that spelling only (a native PostgreSQL `uuid` column stores
-and compares any spelling canonically).
+and compares any spelling canonically). A string primary key in path `{id}` binds the value as sent, preserving
+leading and trailing whitespace without trimming (`GET/PATCH/DELETE …/%20sku`),
+addressing the exact row. Equality is up to the column's collation (MySQL's
+default collation ignores case and accents).
 
 The application's public CRUD API stays the feature's own typed Huma
 routes. Admin does not replace them.

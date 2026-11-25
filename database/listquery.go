@@ -36,15 +36,25 @@ const (
 // the same contract the admin data plane applies (admin/resources.go), extracted
 // here so both the framework-owned admin and generated apps share one behavior.
 
-// FilterEq adds an exact-match `column = <raw coerced to kind>` predicate. An
-// empty (or whitespace-only) raw value is a no-op — the filter was not supplied
-// — so callers can chain one FilterEq per declared filterable field. A raw value
-// that does not parse as kind, or a string one no text column can hold (a NUL
-// byte, invalid UTF-8: TextProblem), returns a D10 validation error (422)
-// keyed on column. The column name is generator-controlled (a declared
+// FilterEq adds an exact-match `column = <raw coerced to kind>` predicate.
+//
+// For non-string kinds, an empty (or whitespace-only) raw value is a no-op — the
+// filter was not supplied — so callers can chain one FilterEq per declared
+// filterable field.
+//
+// For FilterString, an empty raw value ("") is a no-op, while leading,
+// trailing, or whitespace-only values are bound as sent without trimming
+// (issue #694); equality itself is up to the column's collation (MySQL's
+// default ignores case and accents).
+//
+// A raw value that does not parse as kind, or a string one no text column can
+// hold (a NUL byte, invalid UTF-8: TextProblem), returns a D10 validation error
+// (422) keyed on column. The column name is generator-controlled (a declared
 // field's DB column); only raw is user input.
 func FilterEq(ctx context.Context, q *gorm.DB, column string, kind FilterKind, raw string) (*gorm.DB, error) {
-	raw = strings.TrimSpace(raw)
+	if kind != FilterString {
+		raw = strings.TrimSpace(raw)
+	}
 	if raw == "" {
 		return q, nil
 	}

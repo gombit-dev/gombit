@@ -176,3 +176,128 @@ func runStringKeyAdmin(t *testing.T, db *database.DB) {
 	res = doRequest(app, jar, http.MethodPost, base, `{"name":"d","country_code":7}`)
 	assertError(t, res, http.StatusUnprocessableEntity, contract.CodeValidationError)
 }
+
+type skTag struct {
+	Code string `gorm:"primaryKey;size:40" json:"code"`
+	Name string `json:"name"`
+}
+
+// A string primary key preserves leading and trailing whitespace in path IDs
+// and filters (issue #694): " sku" is distinct from "sku", and detail,
+// update, delete and filter operations target " sku" byte for byte rather
+// than trimming it and acting on "sku".
+func TestAdminStringKeyWhitespaceInPathIDAndFilter(t *testing.T) {
+	runStringKeyWhitespaceAdmin(t, openSQLite(t))
+}
+
+func runStringKeyWhitespaceAdmin(t *testing.T, db *database.DB) {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	models := []any{&skTag{}}
+	_ = db.Migrator().DropTable(models...)
+	if err := db.AutoMigrate(models...); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = db.Migrator().DropTable(models...)
+	})
+	app := newCookieAppWithDB(t, db)
+	if err := admin.Register(app, skTag{}, admin.Options{
+		Slug: "sk-tags",
+		Fields: []admin.Field{
+			{Name: "code", Type: admin.TypeString, Required: true},
+			{Name: "name", Type: admin.TypeString},
+		},
+		Filter: []string{"code"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	jar := loginSuperuser(t, app)
+	const base = "/api/v1/admin/resources/sk-tags"
+
+	for _, b := range []string{
+		`{"code":"sku","name":"exact sku"}`,
+		`{"code":" sku","name":"leading space"}`,
+		`{"code":"sku ","name":"trailing space"}`,
+		`{"code":" ","name":"space only"}`,
+	} {
+		res := doRequest(app, jar, http.MethodPost, base, b)
+		if res.Code != http.StatusOK {
+			t.Fatalf("POST %s: %d %s", b, res.Code, res.Body.String())
+		}
+	}
+
+	// Detail (GET) retrieves the exact row matching the encoded string key
+	// for leading space (" sku") and trailing space ("sku ").
+	for _, tc := range []struct {
+		path     string
+		wantCode string
+		wantName string
+	}{
+		{"/%20sku", " sku", "leading space"},
+		{"/sku%20", "sku ", "trailing space"},
+	} {
+		res := doRequest(app, jar, http.MethodGet, base+tc.path, "")
+		if res.Code != http.StatusOK {
+			t.Fatalf("GET %s: %d %s", tc.path, res.Code, res.Body.String())
+		}
+		var getEnv rowEnvelope
+		if err := json.Unmarshal(res.Body.Bytes(), &getEnv); err != nil {
+			t.Fatal(err)
+		}
+		if getEnv.Data["code"] != tc.wantCode || getEnv.Data["name"] != tc.wantName {
+			t.Fatalf("GET %s returned %#v, want code %q name %q", tc.path, getEnv.Data, tc.wantCode, tc.wantName)
+		}
+	}
+
+	// Filter (?code=) matches the exact row with leading space, trailing space,
+	// and whitespace-only (" ").
+	for _, tc := range []struct {
+		query    string
+		wantCode string
+	}{
+		{"?code=%20sku", " sku"},
+		{"?code=sku%20", "sku "},
+		{"?code=%20", " "},
+	} {
+		list := doRequest(app, jar, http.MethodGet, base+tc.query, "")
+		var listed listEnvelope
+		if err := json.Unmarshal(list.Body.Bytes(), &listed); err != nil || len(listed.Data) != 1 || listed.Data[0]["code"] != tc.wantCode {
+			t.Fatalf("GET %s returned %d %s, want only %q", tc.query, list.Code, list.Body.String(), tc.wantCode)
+		}
+	}
+
+	// Update (PATCH) sends the key back unchanged along with updated fields.
+	// On main, this was rejected as a 422 because trimmed lookup loaded "sku".
+	// On this head, it must succeed with 200, update " sku" row, and leave "sku" untouched.
+	res := doRequest(app, jar, http.MethodPatch, base+"/%20sku", `{"code":" sku","name":"updated leading space"}`)
+	if res.Code != http.StatusOK {
+		t.Fatalf("PATCH /%%20sku: %d %s", res.Code, res.Body.String())
+	}
+	var unedited skTag
+	if err := db.Where("code = ?", "sku").First(&unedited).Error; err != nil || unedited.Name != "exact sku" {
+		t.Fatalf("PATCH /%%20sku inadvertently altered 'sku' row: %+v", unedited)
+	}
+	var updated skTag
+	if err := db.Where("code = ?", " sku").First(&updated).Error; err != nil || updated.Name != "updated leading space" {
+		t.Fatalf("PATCH /%%20sku failed to update ' sku' row: %+v", updated)
+	}
+
+	// Delete (DELETE) deletes the row with whitespace, leaving "sku", "sku ", and " " intact.
+	res = doRequest(app, jar, http.MethodDelete, base+"/%20sku", "")
+	if res.Code != http.StatusOK {
+		t.Fatalf("DELETE /%%20sku: %d %s", res.Code, res.Body.String())
+	}
+	var remaining []skTag
+	if err := db.Find(&remaining).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(remaining) != 3 {
+		t.Fatalf("expected 3 rows remaining after delete, got %d: %+v", len(remaining), remaining)
+	}
+	for _, r := range remaining {
+		if r.Code == " sku" {
+			t.Fatalf("row ' sku' was not deleted: %+v", remaining)
+		}
+	}
+}

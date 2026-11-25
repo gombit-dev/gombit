@@ -1803,3 +1803,23 @@ releases:
           longer ones. It keeps working.
         refs: [684]
         deprecates: [framework.WorkerKillAfter]
+
+      - id: admin-string-key-whitespace
+        kind: informational
+        area: behavior
+        summary: "Admin string path IDs, admin string filters, and generated list string/enum filters (database.FilterEq) bind leading and trailing whitespace as sent instead of trimming it."
+        details: |
+          A string or text primary key preserves leading and trailing
+          whitespace when created, but `coercePathID`, `applyFilters`, and
+          `database.FilterEq` previously trimmed the input before query lookup.
+          Targeting a string key with surrounding whitespace (e.g. `' sku'`)
+          matched the trimmed row (`'sku'`) instead of the intended row.
+          String/text path IDs, admin string filters, and generated list
+          handlers' `database.FilterEq` (`FilterString`, used for string and
+          enum filters) now bind values as sent, preserving whitespace, with
+          only an empty raw value treated as "not supplied" (equality itself is
+          up to the column's collation; MySQL's default ignores case and
+          accents). On upgrade, generated list handlers change without
+          regenerating: `?status=%20` filters for `" "` instead of returning
+          all rows, and `?status=active%20` no longer matches `"active"`.
+        refs: [694]

@@ -35,6 +35,13 @@ const (
 // declares it, and the meta API shows such a field as TypeUUID.
 const typeCanonicalUUID FieldType = "uuid.canonical"
 
+// comparesExactly reports whether values of ft are bound as sent, preserving
+// leading and trailing whitespace without trimming (issue #694). Other types
+// are trimmed before coercion.
+func (ft FieldType) comparesExactly() bool {
+	return ft == TypeString || ft == TypeText
+}
+
 // Relation kinds for v1. Defined in package field.
 const (
 	RelBelongsTo  = string(field.RelBelongsTo)

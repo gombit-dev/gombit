@@ -118,7 +118,10 @@ keys. One direction means one index on `(price, id)` serves both `price` and
 uncoercible filter value returns a D10 `validation_error` (422). The shared
 primitives live in `database` (`FilterEq`, `Search`, `Ordering` / `ParseOrdering`)
 and are the same behavior — and now the same code — the admin data plane applies.
-Filter values are exact-match to start; ranges/operators come later.
+Filter values are exact-match to start; ranges/operators come later. String and
+enum filters bind the value as sent, whitespace included, without trimming
+(only an empty value means "not supplied"); equality is up to the column's
+collation, and MySQL's default ignores case and accents.
 
 ### List query: numeric aggregates
 
