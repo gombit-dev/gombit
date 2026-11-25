@@ -30,29 +30,32 @@ func (opts *Options) resolveInteractive() error {
 	}
 	opts.Name = name
 
+	// Prompt answers are normalized with the same rules as flag values, so a
+	// capitalized answer such as "Postgres" is accepted the same way
+	// `--database Postgres` is.
 	database, err := promptLine(opts.Stdout, in, "Database (sqlite, postgres, mysql)", opts.Database)
 	if err != nil {
 		return err
 	}
-	opts.Database = database
+	opts.Database = strings.ToLower(strings.TrimSpace(database))
 
 	cache, err := promptLine(opts.Stdout, in, "Cache (memory, redis, noop)", opts.Cache)
 	if err != nil {
 		return err
 	}
-	opts.Cache = cache
+	opts.Cache = strings.ToLower(strings.TrimSpace(cache))
 
 	auth, err := promptLine(opts.Stdout, in, "Auth (jwt, cookie)", opts.Auth)
 	if err != nil {
 		return err
 	}
-	opts.Auth = auth
+	opts.Auth = strings.ToLower(strings.TrimSpace(auth))
 
 	ui, err := promptLine(opts.Stdout, in, "UI (minimal, mui)", opts.UI)
 	if err != nil {
 		return err
 	}
-	opts.UI = ui
+	opts.UI = strings.ToLower(strings.TrimSpace(ui))
 
 	if opts.Module == "" {
 		module, err := promptLine(opts.Stdout, in, "Go module path", DefaultModulePrefix+"/"+opts.Name)
