@@ -119,6 +119,26 @@ func TestClassifySingleStatements(t *testing.T) {
 			`ALTER TABLE "users" ALTER COLUMN "c" DROP DEFAULT , ALTER COLUMN "d" DROP NOT NULL;`,
 			Operation{Kind: OpAlterColumn, Resource: "users", Column: "c", Safety: SafetyNonDestructive},
 		},
+		"a comma inside a type modifier's parentheses does not split the action": {
+			`ALTER TABLE "users" ALTER COLUMN "a" TYPE numeric(10,2), ALTER COLUMN "b" DROP NOT NULL;`,
+			Operation{Kind: OpAlterColumn, Resource: "users", Column: "a", Safety: SafetyDataLoss},
+		},
+		"an unterminated quote in the body (an unescaped apostrophe in a block comment) fails closed to data loss": {
+			`ALTER TABLE "users" ADD COLUMN "nick" text /* don't backfill */, DROP CONSTRAINT "c", DROP "legacy";`,
+			Operation{Kind: OpOther, Resource: "users", Safety: SafetyDataLoss},
+		},
+		"mysql a backslash-escaped quote in a default confuses the tracker and fails closed to data loss": {
+			"ALTER TABLE `t` ADD COLUMN `c` varchar(10) NOT NULL DEFAULT 'it\\'s', DROP INDEX `i`, DROP `legacy`;",
+			Operation{Kind: OpOther, Resource: "t", Safety: SafetyDataLoss},
+		},
+		"postgres an escape-string-escaped quote in a default confuses the tracker and fails closed to data loss": {
+			`ALTER TABLE "t" ADD COLUMN "c" text DEFAULT E'it\'s', DROP CONSTRAINT "x", DROP "legacy";`,
+			Operation{Kind: OpOther, Resource: "t", Safety: SafetyDataLoss},
+		},
+		"an unmatched closing parenthesis in a block comment fails closed to data loss": {
+			`ALTER TABLE "t" ADD COLUMN "c" text /* :) */, DROP CONSTRAINT "x", DROP "legacy";`,
+			Operation{Kind: OpOther, Resource: "t", Safety: SafetyDataLoss},
+		},
 		"drop constraint is not row data loss": {
 			`ALTER TABLE "customers" DROP CONSTRAINT "fk_customers_owner";`,
 			Operation{Kind: OpOther, Resource: "customers", Safety: SafetyNonDestructive},
@@ -226,5 +246,40 @@ func TestClassifyAlterDropConstraintIsNotDataLoss(t *testing.T) {
 	ops := Classify(`ALTER TABLE "customers" DROP CONSTRAINT "fk_owner";`)
 	if len(ops) != 1 || ops[0].Safety != SafetyNonDestructive {
 		t.Fatalf("Classify() = %+v, want non_destructive", ops)
+	}
+}
+
+// A comma inside parentheses or a quoted token must not split an ALTER
+// TABLE action. This goes through the public Classify() API, rather than the
+// internal splitter directly, so it keeps compiling against any internal
+// implementation of the classifier.
+func TestClassifyCommaInsideParensOrQuotesDoesNotSplitTheAction(t *testing.T) {
+	tests := map[string]struct {
+		sql  string
+		want Operation
+	}{
+		"comma inside a type's parentheses, combined with a relaxation, is still data loss": {
+			`ALTER TABLE "users" ALTER COLUMN "b" TYPE numeric(10,2), ALTER COLUMN "a" DROP NOT NULL;`,
+			Operation{Kind: OpAlterColumn, Resource: "users", Column: "b", Safety: SafetyDataLoss},
+		},
+		"comma inside a quoted identifier is not an action separator": {
+			`ALTER TABLE "users" ALTER COLUMN "a,b" DROP NOT NULL;`,
+			Operation{Kind: OpAlterColumn, Resource: "users", Column: "a,b", Safety: SafetyNonDestructive},
+		},
+		"comma inside a quoted default literal is not an action separator": {
+			`ALTER TABLE "users" ALTER COLUMN "a" SET DEFAULT 'x, y';`,
+			Operation{Kind: OpAlterColumn, Resource: "users", Column: "a", Safety: SafetyDataLoss},
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			ops := Classify(tc.sql)
+			if len(ops) != 1 {
+				t.Fatalf("Classify() = %d ops, want 1: %+v", len(ops), ops)
+			}
+			if ops[0] != tc.want {
+				t.Fatalf("Classify() = %+v, want %+v", ops[0], tc.want)
+			}
+		})
 	}
 }

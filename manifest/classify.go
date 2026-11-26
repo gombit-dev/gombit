@@ -62,10 +62,10 @@ var (
 	reAlterColumn  = regexp.MustCompile(`(?is)\b(?:ALTER\s+COLUMN|MODIFY(?:\s+COLUMN)?|CHANGE(?:\s+COLUMN)?)\s+(\S+)`)
 	// reRelaxedAction matches a whole ALTER TABLE action (not the whole
 	// statement body) that is exactly ALTER [COLUMN] x DROP NOT NULL / DROP
-	// DEFAULT: a constraint relaxation, not a type or default change, so it is
-	// the one alter_column action that is not data loss. Anchored on both ends
-	// so an action with trailing clauses (a type change, another DROP) never
-	// matches.
+	// DEFAULT: removing a default or a NOT NULL never touches a stored row, so
+	// it is the one alter_column action that is not data loss. Anchored on
+	// both ends so an action with trailing clauses (a type change, another
+	// DROP) never matches.
 	reRelaxedAction = regexp.MustCompile(`(?is)^ALTER\s+(?:COLUMN\s+)?(\S+)\s+DROP\s+(?:NOT\s+NULL|DEFAULT)$`)
 )
 
@@ -136,7 +136,14 @@ func classifyAlter(stmt string) Operation {
 	m := reAlterTable.FindStringSubmatch(stmt)
 	table := clean(m[1])
 	body := m[2]
-	actions := splitActions(body)
+	actions, ok := splitActions(body)
+	if !ok {
+		// Fail-safe: a body this package cannot reliably split into actions
+		// (an unterminated quote, unbalanced parentheses) is reviewed, not
+		// classified from a split that may have silently merged two actions
+		// — and with them, a column drop — into one.
+		return Operation{Kind: OpOther, Resource: table, Safety: SafetyDataLoss}
+	}
 
 	if col, ok := relaxedColumn(actions); ok {
 		return Operation{Kind: OpAlterColumn, Resource: table, Column: col, Safety: SafetyNonDestructive}
@@ -250,7 +257,13 @@ func splitStatements(sql string) []string {
 // rewrites a trailing space (e.g. "DROP DEFAULT ," becomes "DROP DEFAULT,");
 // splitting first means neither the keyword nor the relaxation check ever
 // sees that comma as part of a token.
-func splitActions(body string) []string {
+//
+// It reports ok=false when the body ends inside an unterminated quote, with
+// unbalanced parentheses, or ever closes a parenthesis that was not open —
+// a block comment or a backslash-escaped quote confuses the quote tracking
+// (neither is special-cased), and the caller must then fail closed rather
+// than trust a split that may have silently merged two actions into one.
+func splitActions(body string) (actions []string, ok bool) {
 	var out []string
 	depth, start := 0, 0
 	var quote rune
@@ -266,15 +279,21 @@ func splitActions(body string) []string {
 			depth++
 		case r == ')':
 			depth--
+			if depth < 0 {
+				return nil, false
+			}
 		case r == ',' && depth == 0:
 			out = append(out, strings.TrimSpace(body[start:i]))
 			start = i + 1
 		}
 	}
+	if quote != 0 || depth != 0 {
+		return nil, false
+	}
 	if rest := strings.TrimSpace(body[start:]); rest != "" {
 		out = append(out, rest)
 	}
-	return out
+	return out, true
 }
 
 // ident returns the cleaned first captured identifier of re against s.
