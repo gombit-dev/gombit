@@ -56,9 +56,11 @@ version.
   (`framework.WorkerKillAfterFor`,
   [#684](https://github.com/gombit-dev/gombit/issues/684)).
 
-- The admin refuses to create a resource whose string primary key contains
-  `/`. Such a row could be created and listed, but never opened, edited or
-  deleted from the admin, because the id is a single path segment
+- The admin refuses to create a resource whose string primary key it cannot
+  address: a key containing `/`, or one that is `.` or `..`, answers a 422
+  on the key field instead of storing a row that could be listed but never
+  opened, edited or deleted. The key a field default or a model hook writes
+  is judged too, and a refused create is rolled back
   ([#695](https://github.com/gombit-dev/gombit/issues/695)).
 
 ### Deprecated

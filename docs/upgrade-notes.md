@@ -12,7 +12,7 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
 
 ### Manual: action required
 
-- The admin refuses to create a resource whose string primary key contains `/`; rows that already carry one need a rename. (`admin-slash-in-string-key`, behavior, [#695](https://github.com/gombit-dev/gombit/issues/695))
+- The admin refuses to create a resource whose string primary key contains `/`, or is `.` or `..`; rows that already carry one need a rename. (`admin-slash-in-string-key`, behavior, [#695](https://github.com/gombit-dev/gombit/issues/695))
 
   The admin addresses a row by the `{id}` path segment, and the router
   matches on the decoded path. A key such as `foo/bar` therefore reached
@@ -20,14 +20,23 @@ compatibility manifest (see [upgrade.md](upgrade.md)).
   and left a row that could be created and listed but never opened,
   edited or deleted ([#695](https://github.com/gombit-dev/gombit/issues/695)).
   `POST /api/v1/admin/resources/{slug}` now answers 422 with a field
-  error on the primary key instead of storing that row; nothing else in
-  the admin or the generated API changes, and apps that never create
-  such keys need no work.
+  error on the primary key instead of storing a row it could never
+  address again. The refusal covers `.` and `..` as well: a URL parser
+  removes a dot segment before sending, so the browser cannot name such
+  a row either. It judges the key the INSERT writes, so a key a field
+  default or a model hook supplies is refused too, and the create is
+  rolled back. Nothing else in the admin or the generated API changes,
+  and apps that never create such keys need no work.
 
   Rows written outside the admin (app code, seeds, the generated API)
-  can still carry a `/` in a string primary key; they stay
-  unaddressable in the admin until renamed. Rename them before
-  upgrading (for example `UPDATE tags SET code = REPLACE(code, '/', '-')`).
+  can still carry a `/` in a string primary key; the create-only check
+  does not find them, and they stay unaddressable in the admin exactly
+  as before. That makes this cleanup, not an upgrade step: renaming
+  first, later or never changes nothing for the upgrade itself. List
+  them with `SELECT * FROM tags WHERE code LIKE '%/%'` and rename or
+  delete them outside the admin, together with whatever references
+  them — a belongs_to column or a join table pointing at the old key
+  has to move in the same change, or the references are left dangling.
   A `+` in a key needs no special handling.
 
 ### Informational

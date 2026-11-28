@@ -203,6 +203,17 @@ arbitrary Go types.
   addresses a row by one column, so the other key columns would not be
   part of the URL. Naming one of them in `PK` does not lift the
   restriction. Give an admin-managed model a single-column primary key.
+  A string key must also be a value the admin can address in one path
+  segment: a key containing `/`, or a key that is `.` or `..`, is refused
+  on create with a 422 on the key field. A `/` splits the `{id}` segment,
+  and a URL parser removes a dot segment before the request is sent, so
+  neither value could ever name the row. The rule judges the key the row
+  would be created with, including one from a field default or a model
+  hook: a hook runs inside the create, so its key is checked after the
+  INSERT and the row is rolled back. Rows written outside the admin (app
+  code, a seed, a migration) are not checked — such a row stays
+  unaddressable in the admin until someone renames or deletes it there —
+  and an update cannot change a key.
 - **Empty `Fields`** derives a default from the struct once, inside
   `Register`, via `admin.FieldsFrom(T)`. That helper may use `reflect`
   **only at registration time**. Do not call it from request handlers.
