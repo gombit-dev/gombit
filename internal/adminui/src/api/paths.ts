@@ -1,6 +1,8 @@
 /**
- * Encode a value as one URL path segment so `/` and `..` in a string PK
- * cannot add segments or be normalized by `new URL()`.
+ * Encode a value as one URL path segment so a `/` in a string PK cannot add
+ * segments. Dots are left alone by `encodeURIComponent`: `.` and `..` are dot
+ * segments that a URL parser removes before the request is sent, which is why
+ * the admin refuses such a key rather than trying to encode it.
  */
 export function pathSegment(value: string): string {
   return encodeURIComponent(value);

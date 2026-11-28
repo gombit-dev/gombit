@@ -483,7 +483,21 @@ func persistWithM2M(ctx context.Context, db *gorm.DB, m *registered, inst any, i
 		var perr error
 		switch {
 		case creating:
-			perr = tx.WithContext(ctx).Create(inst).Error
+			if perr = tx.WithContext(ctx).Create(inst).Error; perr == nil {
+				// Judge the key the INSERT wrote, not the one the request
+				// read: a model hook can set the primary key, and a row the
+				// admin cannot address must not be stored (issue #695).
+				// Returning the same validation envelope rolls the insert
+				// back, because a create runs in a transaction (below).
+				if m.meta.PK != "" {
+					if msg := unaddressableKey(m.pkString(inst)); msg != "" {
+						perr = contract.WithContext(ctx, contract.Validation(
+							"The request contains invalid fields.",
+							map[string][]string{m.meta.PK: {msg}},
+						))
+					}
+				}
+			}
 		case len(fence) > 0:
 			perr = updateFenced(ctx, tx, m, inst, omit, fence)
 		default:
@@ -498,9 +512,12 @@ func persistWithM2M(ctx context.Context, db *gorm.DB, m *registered, inst any, i
 		}
 		return syncM2M(ctx, tx, m, inst, ids)
 	}
-	if len(m.m2m) == 0 {
+	if len(m.m2m) == 0 && !creating {
 		return write(db)
 	}
+	// A create always takes a transaction: the key check after Create has to
+	// roll the insert back when a model hook wrote a key the admin cannot
+	// address (issue #695).
 	return db.WithContext(ctx).Transaction(write)
 }
 
@@ -670,11 +687,42 @@ func applyWrite(ctx context.Context, m *registered, inst any, body map[string]an
 			}
 			fields[name] = []string{"is set by the server and cannot be stored empty"}
 		}
+		// A row is addressed by the {id} path segment, and the router matches
+		// on the decoded path, so a key with "/" arrives as two segments and
+		// never reaches the detail, update or delete route: a row that can be
+		// listed but not opened, edited or deleted (issue #695). "." and ".."
+		// are one segment, but a URL parser removes dot segments before the
+		// request is sent, so no client can address them either. This is the
+		// cheap refusal of the value the request or a field default supplies;
+		// persistWithM2M checks the key a model hook writes as well.
+		if m.meta.PK != "" {
+			if _, flagged := fields[m.meta.PK]; !flagged {
+				if msg := unaddressableKey(m.pkString(inst)); msg != "" {
+					fields[m.meta.PK] = []string{msg}
+				}
+			}
+		}
 	}
 	if len(fields) > 0 {
 		return contract.WithContext(ctx, contract.Validation("The request contains invalid fields.", fields))
 	}
 	return nil
+}
+
+// unaddressableKey names why the admin cannot reach a row by this primary key
+// value, or "" when it can. Every detail, update and delete path names the row
+// by the {id} segment and the router matches on the decoded path: a "/" makes
+// two segments and matches none of those routes, while "." and ".." are one
+// segment that a URL parser following WHATWG or RFC 3986 removes before the
+// request is sent (issue #695).
+func unaddressableKey(key string) string {
+	switch {
+	case strings.Contains(key, "/"):
+		return `must not contain "/": the admin addresses the row by a single URL path segment`
+	case key == "." || key == "..":
+		return `must not be "." or "..": a URL parser removes that segment`
+	}
+	return ""
 }
 
 // writtenTextProblem refuses a NUL byte or invalid UTF-8 in a string the

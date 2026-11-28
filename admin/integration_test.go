@@ -140,6 +140,30 @@ func TestStringKeyAdminMySQL(t *testing.T) {
 	runStringKeyAdmin(t, openAdminDriver(t, config.DatabaseDriverMySQL, *mysqlDSN))
 }
 
+// The string-key helpers below take a database so the slash refusal and the
+// "+" round trip run on the same drivers as the rest of the admin suite.
+func TestSlashKeyAdminPostgres(t *testing.T) {
+	if *postgresDSN == "" {
+		t.Skip("set -admin.postgres-dsn to run Postgres admin integration tests")
+	}
+	db := openAdminDriver(t, config.DatabaseDriverPostgres, *postgresDSN)
+	runSlashKeyRefusal(t, db)
+	runDefaultKeyRefusal(t, db)
+	runHookKeyRefusal(t, db)
+	runPlusKeyRoundTrip(t, db)
+}
+
+func TestSlashKeyAdminMySQL(t *testing.T) {
+	if *mysqlDSN == "" {
+		t.Skip("set -admin.mysql-dsn to run MySQL admin integration tests")
+	}
+	db := openAdminDriver(t, config.DatabaseDriverMySQL, *mysqlDSN)
+	runSlashKeyRefusal(t, db)
+	runDefaultKeyRefusal(t, db)
+	runHookKeyRefusal(t, db)
+	runPlusKeyRoundTrip(t, db)
+}
+
 func TestUUIDCaseAdminPostgres(t *testing.T) {
 	if *postgresDSN == "" {
 		t.Skip("set -admin.postgres-dsn to run Postgres admin integration tests")
